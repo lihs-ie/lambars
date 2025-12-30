@@ -1,0 +1,252 @@
+# Future Work - Deferred Features
+# Phase 1 実装時に発見された、将来対応が必要な項目
+
+deferred_features:
+  - id: monad_flatten
+    name: "Monad::flatten メソッド"
+    phase: 1
+    type_class: Monad
+    priority: medium
+    discovered_date: "2025-12-30"
+
+    problem:
+      summary: "flat_map を用いた flatten のデフォルト実装が型システムの制約により困難"
+      details: |
+        flatten は M<M<A>> -> M<A> の変換を行う操作で、Monad の基本的な操作の一つ。
+        flat_map(identity) として実装可能だが、Rust の型システムでは以下の問題がある:
+
+        1. HKT の不在: M<M<A>> という「入れ子のコンテナ型」を汎用的に表現できない
+        2. GAT の制約: TypeConstructor<Inner = Self::WithType<A>> のような自己参照型が困難
+        3. 型推論の限界: flat_map(|x| x) の型推論が複雑になる
+
+      rust_limitation: |
+        trait Monad: Applicative {
+            // これは書けない:
+            // fn flatten<A>(self) -> Self::WithType<A>
+            // where Self: TypeConstructor<Inner = Self::WithType<A>>
+
+            // Self::Inner が Self::WithType<A> であることを表現する方法がない
+        }
+
+    solution:
+      approach: "型ごとの個別実装または拡張トレイト"
+      options:
+        - name: "型固有の flatten 関数"
+          description: |
+            各型に対して個別に flatten 関数を提供:
+            - flatten_option: Option<Option<A>> -> Option<A>
+            - flatten_result: Result<Result<A, E>, E> -> Result<A, E>
+            - flatten_vec: Vec<Vec<A>> -> Vec<A>
+          pros:
+            - 型安全
+            - 実装が単純
+          cons:
+            - 汎用性がない
+            - 関数名が統一されない
+
+        - name: "Flatten トレイトの追加"
+          description: |
+            入れ子型専用のトレイトを定義:
+            trait Flatten<A> {
+                type Output;
+                fn flatten(self) -> Self::Output;
+            }
+          pros:
+            - メソッド名が統一される
+            - 型ごとに実装可能
+          cons:
+            - Monad トレイトとは別の抽象
+            - 型クラス階層から外れる
+
+        - name: "マクロによる生成"
+          description: |
+            flatten! マクロで型を指定して呼び出し:
+            flatten!(option, Some(Some(1))) // => Some(1)
+          pros:
+            - 使用時に型を明示できる
+          cons:
+            - マクロに依存
+            - 合成しにくい
+
+      recommended: "Flatten トレイトの追加"
+      estimated_complexity: medium
+
+    references:
+      - "Haskell: join :: Monad m => m (m a) -> m a"
+      - "Scala: def flatten[B](implicit ev: A <:< M[B]): M[B]"
+      - "https://doc.rust-lang.org/std/iter/trait.Iterator.html#method.flatten"
+
+  - id: monad_filter_map
+    name: "Monad::filter_map メソッド"
+    phase: 1
+    type_class: Monad
+    priority: low
+    discovered_date: "2025-12-30"
+
+    problem:
+      summary: "filter_map の「失敗」セマンティクスが型によって異なり、汎用実装が困難"
+      details: |
+        filter_map は A -> Option<B> の関数を適用し、Some の場合のみ結果を保持する操作。
+        しかし、「フィルタリングによる除外」の意味が型によって異なる:
+
+        - Vec: 要素を除外（サイズが減少）
+        - Option: None になる（値が消失）
+        - Result: Err になる？それとも元の Err を保持？
+
+        この「失敗」の扱いを統一的に定義することが難しい。
+
+      rust_limitation: |
+        // Option の場合
+        Some(x).filter_map(f) = f(x)  // Some(y) or None
+        None.filter_map(f) = None
+
+        // Vec の場合
+        vec![1, 2, 3].filter_map(f) = vec![...] // 0〜3要素
+
+        // Result の場合
+        Ok(x).filter_map(f) = ???
+        // f(x) が None の場合、何を返す？
+        // - Err(???) だとエラー型が不明
+        // - 元の Result をそのまま？意味が違う
+
+    solution:
+      approach: "Iterator との連携または型固有メソッド"
+      options:
+        - name: "Iterator::filter_map との連携"
+          description: |
+            Foldable を通じて Iterator に変換し、標準の filter_map を使用:
+            vec.into_iter().filter_map(f).collect()
+          pros:
+            - 標準ライブラリとの一貫性
+            - 追加実装不要
+          cons:
+            - メソッドチェーンが長くなる
+            - Option/Result には適用しにくい
+
+        - name: "FilterMap トレイト（コレクション専用）"
+          description: |
+            Vec 等のコレクション型専用に FilterMap トレイトを定義。
+            Option/Result には提供しない。
+          pros:
+            - セマンティクスが明確
+            - コレクションの自然な操作
+          cons:
+            - 型クラス階層から外れる
+            - Option/Result との統一性がない
+
+        - name: "実装しない"
+          description: |
+            filter_map は Monad の本質的な操作ではないため、
+            標準の Iterator::filter_map に任せる。
+          pros:
+            - 複雑性を避けられる
+            - 標準との重複を避ける
+          cons:
+            - 一部のユースケースで不便
+
+      recommended: "Iterator との連携を推奨し、独自実装は見送り"
+      estimated_complexity: low
+
+    references:
+      - "Rust std: Iterator::filter_map"
+      - "Haskell: mapMaybe :: (a -> Maybe b) -> [a] -> [b]"
+      - "Scala: collect (PartialFunction)"
+
+  - id: traversable_generic_traverse
+    name: "Traversable::traverse の汎用実装"
+    phase: 1
+    type_class: Traversable
+    priority: medium
+    discovered_date: "2025-12-30"
+
+    problem:
+      summary: "traverse の戻り値型 F<Self::WithType<B>> を汎用的に表現できない"
+      details: |
+        本来の traverse の型シグネチャ:
+        traverse :: (Traversable t, Applicative f) => (a -> f b) -> t a -> f (t b)
+
+        これを Rust で表現するには:
+        fn traverse<F, B, G>(self, f: G) -> F::WithType<Self::WithType<B>>
+        where
+            F: Applicative,
+            G: FnMut(Self::Inner) -> F;
+
+        しかし、F::WithType<Self::WithType<B>> という「Applicative でラップされた
+        Traversable」を汎用的に構築・操作する手段がない。
+
+      rust_limitation: |
+        // F と Self の両方が TypeConstructor だが、
+        // F::WithType<Self::WithType<B>> の構築方法が型レベルで定義できない
+
+        // 例: Option を traverse する場合
+        // Vec<Option<i32>> を Option<Vec<i32>> に変換
+        // - 全て Some なら Some(vec![...])
+        // - 一つでも None なら None
+
+        // これは traverse_option として個別実装している
+
+    solution:
+      approach: "Applicative ごとの traverse メソッド提供"
+      options:
+        - name: "現状維持（traverse_option, traverse_result）"
+          description: |
+            主要な Applicative（Option, Result）に対して個別メソッドを提供。
+            新しい Applicative が追加されたら対応するメソッドを追加。
+          pros:
+            - 型安全
+            - 使用方法が明確
+          cons:
+            - Applicative が増えるとメソッドも増える
+            - 拡張性に欠ける
+
+        - name: "trait object による抽象化"
+          description: |
+            Applicative の操作を trait object で抽象化し、動的ディスパッチで実装。
+          pros:
+            - 汎用的な traverse が可能
+          cons:
+            - 性能オーバーヘッド
+            - 型安全性が低下
+
+        - name: "マクロによるコード生成"
+          description: |
+            traverse! マクロで Applicative 型を指定し、コードを生成。
+          pros:
+            - コンパイル時に解決
+            - 型安全
+          cons:
+            - マクロの複雑化
+            - エラーメッセージが分かりにくくなる可能性
+
+      recommended: "現状維持（主要な Applicative に対する個別メソッド）"
+      estimated_complexity: high
+
+    references:
+      - "Haskell: Data.Traversable"
+      - "Scala: cats.Traverse"
+
+# 将来のフェーズで検討すべき追加項目
+future_considerations:
+  - id: monad_transformers
+    name: "Monad Transformers"
+    description: |
+      OptionT, ResultT, ReaderT などのモナド変換子。
+      効果を合成するための標準的な手法。
+    target_phase: 6
+    complexity: high
+
+  - id: do_notation
+    name: "do 記法相当のマクロ"
+    description: |
+      Haskell の do 記法のように、Monad の操作を
+      手続き的に記述できるマクロの提供。
+    target_phase: 2
+    complexity: medium
+
+  - id: free_monad
+    name: "Free Monad"
+    description: |
+      任意の Functor から Monad を構築する Free Monad の実装。
+      DSL 構築や効果の表現に有用。
+    target_phase: 6
+    complexity: high

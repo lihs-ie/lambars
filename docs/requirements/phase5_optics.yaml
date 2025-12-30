@@ -1,0 +1,1658 @@
+# Phase 5: Optics 要件定義
+#
+# 概要:
+#   深くネストした不変データ構造を型安全に操作するための Optics ライブラリを実装する。
+#   Lens、Prism、Iso、Traversal などの光学系抽象を提供し、不変データの部分的な
+#   読み取り・更新を合成可能な形で実現する。
+#
+# 設計方針:
+#   1. `#![forbid(unsafe_code)]` ポリシーに準拠
+#   2. 所有権とライフタイムを考慮した Rust らしい API 設計
+#   3. Phase 1 の型クラス（Functor, Applicative, Traversable）との統合
+#   4. Phase 4 の永続データ構造との連携
+#   5. derive マクロによるボイラープレート削減
+#
+# 参照:
+#   - Haskell: lens ライブラリ (https://hackage.haskell.org/package/lens)
+#   - Scala: Monocle ライブラリ (https://www.optics.dev/Monocle/)
+#   - CLAUDE.md の「4.2 Optics（Lens 等）の一般的な標準パターン」セクション
+
+version: "1.0.0"
+phase: 5
+name: "Optics"
+description: |
+  Optics は、深くネストした不変データ構造を型安全に操作するための抽象である。
+  関数型プログラミングにおいて、不変データの部分的な読み取りと更新を
+  合成可能かつ型安全に行うための仕組みを提供する。
+
+  このフェーズでは以下の Optics を提供する:
+
+  - Lens<S, A>: 構造体フィールドへの get/set アクセス（critical）
+  - Prism<S, A>: enum バリアントへの部分的アクセス（high）
+  - Iso<S, A>: 型間の同型変換（medium）
+  - Traversal<S, A>: 複数要素への一括アクセス（medium）
+  - derive マクロ: Lens/Prism の自動導出（high）
+
+  Optics は Rust が標準で提供していない「深いネストの不変更新」の問題を解決し、
+  純粋関数型プログラミングのパターンをより実用的にする。
+
+# Optics の理論的背景
+theoretical_background:
+  optics_overview:
+    description: |
+      Optics（光学系）は、データ構造の一部へのアクセスを抽象化した概念である。
+      カメラのレンズのように、データ構造の特定の部分に「焦点を合わせる」ことができる。
+
+      主要な Optics の種類:
+      - Iso: 型間の同型変換（最も強い）
+      - Lens: 構造体フィールドへのアクセス（Product type）
+      - Prism: enum バリアントへのアクセス（Sum type）
+      - Traversal: 複数要素へのアクセス
+
+      Optics の強さの関係（サブタイピング）:
+      ```
+      Iso <: Lens
+      Iso <: Prism
+      Lens <: Traversal
+      Prism <: Traversal
+      ```
+
+      これにより、Iso は Lens としても Prism としても使用でき、
+      Lens と Prism は Traversal として使用できる。
+
+  lens_theory:
+    description: |
+      Lens は「積型（Product type）のフィールドへのアクセス」を抽象化する。
+      構造体 S の中のフィールド A への get/set 操作を提供する。
+
+      数学的定義（van Laarhoven style）:
+        Lens s a = forall f. Functor f => (a -> f a) -> s -> f s
+
+      より直接的な定義（getter/setter style）:
+        Lens<S, A> = (get: S -> A, set: (A, S) -> S)
+
+      Rust では getter/setter style を基本とし、
+      modify は set と get の組み合わせで実装する。
+
+  prism_theory:
+    description: |
+      Prism は「和型（Sum type）のバリアントへのアクセス」を抽象化する。
+      enum S の中の特定のバリアントが持つ値 A への preview/review 操作を提供する。
+
+      数学的定義:
+        Prism<S, A> = (preview: S -> Option<A>, review: A -> S)
+
+      preview は「S が該当バリアントであれば Some(A)、そうでなければ None」
+      review は「A から S を構築する」
+
+  iso_theory:
+    description: |
+      Iso は「型間の同型変換」を抽象化する。
+      型 S と型 A の間に双方向の変換が存在し、往復しても情報が失われない。
+
+      数学的定義:
+        Iso<S, A> = (get: S -> A, reverse_get: A -> S)
+        where:
+          reverse_get(get(s)) == s  (for all s)
+          get(reverse_get(a)) == a  (for all a)
+
+      例: String <-> Vec<char>, (A, B) <-> (B, A)
+
+  traversal_theory:
+    description: |
+      Traversal は「複数要素への一括アクセス」を抽象化する。
+      コレクション S の中の全要素 A への get_all/modify_all 操作を提供する。
+
+      数学的定義（Applicative/Traversable ベース）:
+        Traversal s a = forall f. Applicative f => (a -> f a) -> s -> f s
+
+      Rust では Iterator ベースの実装を基本とし、
+      Phase 1 の Traversable との統合を図る。
+
+# 設計原則
+design_principles:
+  ownership_and_lifetimes:
+    description: |
+      Rust の所有権とライフタイムを考慮した Optics 設計:
+
+      1. **参照ベースの get**:
+         ```rust
+         trait Lens<S, A> {
+             fn get<'a>(&self, source: &'a S) -> &'a A;
+             fn set(&self, source: S, value: A) -> S;
+         }
+         ```
+
+      2. **Clone ベースの get**（代替案）:
+         ```rust
+         trait LensClone<S, A: Clone> {
+             fn get(&self, source: &S) -> A;
+             fn set(&self, source: S, value: A) -> S;
+         }
+         ```
+
+      本実装では参照ベースを基本とし、必要に応じて Clone ベースのユーティリティを提供する。
+
+  composition:
+    description: |
+      Optics の合成は、深いネストへのアクセスを可能にする核心的機能である。
+
+      合成の例:
+      ```rust
+      // Person { address: Address { street: String } }
+      let person_address: Lens<Person, Address> = ...;
+      let address_street: Lens<Address, String> = ...;
+
+      // 合成: Person -> String
+      let person_street = person_address.compose(address_street);
+
+      // 使用
+      let street = person_street.get(&person);
+      let updated = person_street.set(person, "New Street".to_string());
+      ```
+
+      合成規則:
+      - Lens + Lens = Lens
+      - Lens + Prism = Traversal (正確には Optional)
+      - Prism + Prism = Prism
+      - Traversal + Traversal = Traversal
+      - Iso + 任意の Optics = 同じ Optics
+
+  type_class_integration:
+    description: |
+      Phase 1 の型クラスとの統合方針:
+
+      1. **Functor との関係**:
+         Lens の modify は内部的に fmap と同様の操作を行う。
+
+      2. **Traversable との統合**:
+         Traversal は Traversable の traverse と密接に関連する。
+         Vec<A> から Traversal<Vec<A>, A> を自然に導出できる。
+
+      3. **Applicative との統合**:
+         複数の Lens を並列に適用する操作は Applicative に基づく。
+
+  persistent_data_structure_integration:
+    description: |
+      Phase 4 の永続データ構造との統合方針:
+
+      1. **PersistentVector への Lens/Traversal**:
+         - インデックスベースの Lens
+         - 全要素への Traversal
+
+      2. **PersistentHashMap への Lens/Traversal**:
+         - キーベースの Lens（Option を返す）
+         - 値への Traversal
+
+      3. **効率的な更新**:
+         永続データ構造の構造的共有を活かした更新操作
+
+requirements:
+  # ============================================================================
+  # 1. Lens<S, A> - 構造体フィールドへのアクセス
+  # ============================================================================
+  - id: optics_lens
+    name: Lens<S, A>
+    priority: critical
+    description: |
+      構造体のフィールドへの型安全な get/set アクセスを提供する。
+      不変データ構造の部分的な読み取りと更新を可能にする。
+
+      Lens は「必ず存在する」フィールドへのアクセスを表現する。
+      フィールドが存在しない可能性がある場合は Prism または Optional を使用する。
+
+      特徴:
+      - get: 全体から部分を取得（必ず成功）
+      - set: 部分を更新した新しい全体を返す
+      - modify: 部分に関数を適用した新しい全体を返す
+      - 合成可能: 複数の Lens を合成して深いネストにアクセス
+
+    internal_structure:
+      description: |
+        ```rust
+        /// 構造体フィールドへのアクセスを抽象化する Lens
+        ///
+        /// # Type Parameters
+        /// - `S`: ソース型（全体の構造体）
+        /// - `A`: ターゲット型（フィールドの型）
+        pub trait Lens<S, A> {
+            /// ソースからターゲットへの参照を取得する
+            fn get<'a>(&self, source: &'a S) -> &'a A;
+
+            /// ターゲットを新しい値で置き換えた新しいソースを返す
+            fn set(&self, source: S, value: A) -> S;
+
+            /// ターゲットに関数を適用した新しいソースを返す
+            fn modify<F>(&self, source: S, function: F) -> S
+            where
+                F: FnOnce(A) -> A,
+                A: Clone,
+            {
+                let current = self.get(&source).clone();
+                self.set(source, function(current))
+            }
+
+            /// ターゲットへの参照に関数を適用した新しいソースを返す
+            fn modify_ref<F, B>(&self, source: S, function: F) -> S
+            where
+                F: FnOnce(&A) -> A,
+            {
+                let new_value = function(self.get(&source));
+                self.set(source, new_value)
+            }
+
+            /// 別の Lens と合成して深いネストにアクセスする
+            fn compose<B, L>(self, other: L) -> ComposedLens<Self, L>
+            where
+                Self: Sized,
+                L: Lens<A, B>,
+            {
+                ComposedLens::new(self, other)
+            }
+
+            /// Prism と合成して Optional を作成する
+            fn compose_prism<B, P>(self, prism: P) -> LensPrismComposition<Self, P>
+            where
+                Self: Sized,
+                P: Prism<A, B>,
+            {
+                LensPrismComposition::new(self, prism)
+            }
+        }
+
+        /// 合成された Lens
+        pub struct ComposedLens<L1, L2> {
+            first: L1,
+            second: L2,
+        }
+
+        /// 関数ベースの Lens 実装
+        pub struct FunctionLens<S, A, G, St>
+        where
+            G: Fn(&S) -> &A,
+            St: Fn(S, A) -> S,
+        {
+            getter: G,
+            setter: St,
+            _marker: std::marker::PhantomData<(S, A)>,
+        }
+        ```
+
+    api:
+      constructors:
+        - name: new
+          signature: "fn new<G, St>(getter: G, setter: St) -> FunctionLens<S, A, G, St>"
+          description: "getter と setter から Lens を作成"
+          complexity: "O(1)"
+          example: |
+            struct Person { name: String, age: u32 }
+
+            let name_lens = FunctionLens::new(
+                |p: &Person| &p.name,
+                |p: Person, name: String| Person { name, ..p }
+            );
+
+        - name: from_field
+          signature: "fn from_field<F: FieldAccessor<S, A>>() -> FieldLens<S, A, F>"
+          description: "FieldAccessor トレイトから Lens を作成（マクロ用）"
+          complexity: "O(1)"
+
+      operations:
+        - name: get
+          signature: "fn get<'a>(&self, source: &'a S) -> &'a A"
+          description: "ソースからターゲットへの参照を取得"
+          complexity: "O(1)"
+          example: |
+            let person = Person { name: "Alice".to_string(), age: 30 };
+            let name = name_lens.get(&person);
+            assert_eq!(name, "Alice");
+
+        - name: set
+          signature: "fn set(&self, source: S, value: A) -> S"
+          description: "ターゲットを新しい値で置き換えた新しいソースを返す"
+          complexity: "O(1) + A の Clone コスト + S の構築コスト"
+          example: |
+            let person = Person { name: "Alice".to_string(), age: 30 };
+            let updated = name_lens.set(person, "Bob".to_string());
+            assert_eq!(updated.name, "Bob");
+
+        - name: modify
+          signature: "fn modify<F>(&self, source: S, function: F) -> S where F: FnOnce(A) -> A, A: Clone"
+          description: "ターゲットに関数を適用した新しいソースを返す"
+          complexity: "O(1) + function のコスト"
+          example: |
+            let person = Person { name: "alice".to_string(), age: 30 };
+            let updated = name_lens.modify(person, |s| s.to_uppercase());
+            assert_eq!(updated.name, "ALICE");
+
+        - name: modify_ref
+          signature: "fn modify_ref<F>(&self, source: S, function: F) -> S where F: FnOnce(&A) -> A"
+          description: "ターゲットへの参照に関数を適用した新しいソースを返す"
+          complexity: "O(1) + function のコスト"
+
+        - name: compose
+          signature: "fn compose<B, L>(self, other: L) -> ComposedLens<Self, L> where L: Lens<A, B>"
+          description: "別の Lens と合成して深いネストにアクセス"
+          complexity: "O(1)"
+          example: |
+            // Person { address: Address { street: String } }
+            let person_street = person_address.compose(address_street);
+            let street = person_street.get(&person);
+
+        - name: to_traversal
+          signature: "fn to_traversal(self) -> LensAsTraversal<Self>"
+          description: "Lens を Traversal に変換"
+          complexity: "O(1)"
+
+    laws:
+      - name: GetPut Law（取得後設定の法則）
+        description: "get で取得した値をそのまま set しても元と同じ"
+        equation: "lens.set(source, lens.get(&source).clone()) == source"
+        property_test: |
+          proptest! {
+              fn prop_get_put<S: Clone + PartialEq, A: Clone>(
+                  lens: impl Lens<S, A>,
+                  source: S
+              ) {
+                  let value = lens.get(&source).clone();
+                  prop_assert_eq!(lens.set(source.clone(), value), source);
+              }
+          }
+
+      - name: PutGet Law（設定後取得の法則）
+        description: "set で設定した値は get で取得できる"
+        equation: "lens.get(&lens.set(source, value)) == &value"
+        property_test: |
+          proptest! {
+              fn prop_put_get<S, A: PartialEq>(
+                  lens: impl Lens<S, A>,
+                  source: S,
+                  value: A
+              ) {
+                  let updated = lens.set(source, value.clone());
+                  prop_assert_eq!(lens.get(&updated), &value);
+              }
+          }
+
+      - name: PutPut Law（連続設定の法則）
+        description: "連続して set した場合、最後の値が設定される"
+        equation: "lens.set(lens.set(source, value1), value2) == lens.set(source, value2)"
+        property_test: |
+          proptest! {
+              fn prop_put_put<S: PartialEq, A>(
+                  lens: impl Lens<S, A>,
+                  source: S,
+                  value1: A,
+                  value2: A
+              ) {
+                  let left = lens.set(lens.set(source.clone(), value1), value2.clone());
+                  let right = lens.set(source, value2);
+                  prop_assert_eq!(left, right);
+              }
+          }
+
+    tests:
+      - category: "基本操作テスト"
+        cases:
+          - name: "get でフィールドを取得"
+            test: |
+              struct Point { x: i32, y: i32 }
+              let x_lens = lens!(Point, x);
+              let point = Point { x: 10, y: 20 };
+              assert_eq!(*x_lens.get(&point), 10);
+
+          - name: "set でフィールドを更新"
+            test: |
+              let point = Point { x: 10, y: 20 };
+              let updated = x_lens.set(point, 100);
+              assert_eq!(updated.x, 100);
+              assert_eq!(updated.y, 20);  // 他のフィールドは不変
+
+          - name: "modify で関数を適用"
+            test: |
+              let point = Point { x: 10, y: 20 };
+              let doubled = x_lens.modify(point, |x| x * 2);
+              assert_eq!(doubled.x, 20);
+
+      - category: "合成テスト"
+        cases:
+          - name: "Lens の合成で深いネストにアクセス"
+            test: |
+              struct Address { street: String, city: String }
+              struct Person { name: String, address: Address }
+
+              let address_lens = lens!(Person, address);
+              let street_lens = lens!(Address, street);
+              let person_street = address_lens.compose(street_lens);
+
+              let person = Person {
+                  name: "Alice".to_string(),
+                  address: Address {
+                      street: "Main St".to_string(),
+                      city: "Tokyo".to_string(),
+                  },
+              };
+
+              assert_eq!(*person_street.get(&person), "Main St");
+
+              let updated = person_street.set(person, "Oak Ave".to_string());
+              assert_eq!(updated.address.street, "Oak Ave");
+
+      - category: "Lens 法則テスト"
+        cases:
+          - name: "GetPut 法則"
+            test: |
+              let point = Point { x: 10, y: 20 };
+              let value = x_lens.get(&point).clone();
+              let result = x_lens.set(point.clone(), value);
+              assert_eq!(result, point);
+
+          - name: "PutGet 法則"
+            test: |
+              let point = Point { x: 10, y: 20 };
+              let updated = x_lens.set(point, 42);
+              assert_eq!(*x_lens.get(&updated), 42);
+
+          - name: "PutPut 法則"
+            test: |
+              let point = Point { x: 10, y: 20 };
+              let result1 = x_lens.set(x_lens.set(point.clone(), 100), 200);
+              let result2 = x_lens.set(point, 200);
+              assert_eq!(result1, result2);
+
+  # ============================================================================
+  # 2. Prism<S, A> - enum バリアントへのアクセス
+  # ============================================================================
+  - id: optics_prism
+    name: Prism<S, A>
+    priority: high
+    description: |
+      enum のバリアントへの型安全な部分的アクセスを提供する。
+      バリアントが一致する場合のみ値を取得でき、構築は常に可能。
+
+      Prism は「存在するかもしれない」値へのアクセスを表現する。
+      Lens と異なり、preview は Option<A> を返す。
+
+      特徴:
+      - preview: 全体から部分を取得（バリアントが一致しない場合は None）
+      - review: 部分から全体を構築（常に成功）
+      - modify_option: バリアントが一致する場合のみ関数を適用
+      - 合成可能: 複数の Prism を合成
+
+    internal_structure:
+      description: |
+        ```rust
+        /// enum バリアントへのアクセスを抽象化する Prism
+        ///
+        /// # Type Parameters
+        /// - `S`: ソース型（enum 全体）
+        /// - `A`: ターゲット型（バリアント内の値の型）
+        pub trait Prism<S, A> {
+            /// ソースからターゲットを取得しようと試みる
+            /// バリアントが一致しない場合は None を返す
+            fn preview(&self, source: &S) -> Option<&A>;
+
+            /// ターゲットからソースを構築する
+            fn review(&self, value: A) -> S;
+
+            /// preview の所有権版
+            fn preview_owned(&self, source: S) -> Option<A>;
+
+            /// バリアントが一致する場合のみ関数を適用
+            fn modify_option<F>(&self, source: S, function: F) -> Option<S>
+            where
+                F: FnOnce(A) -> A,
+            {
+                self.preview_owned(source.clone())
+                    .map(|a| self.review(function(a)))
+            }
+
+            /// バリアントが一致する場合は関数を適用、そうでなければ元の値を返す
+            fn modify_or_identity<F>(&self, source: S, function: F) -> S
+            where
+                F: FnOnce(A) -> A,
+                S: Clone,
+            {
+                self.modify_option(source.clone(), function)
+                    .unwrap_or(source)
+            }
+
+            /// 別の Prism と合成
+            fn compose<B, P>(self, other: P) -> ComposedPrism<Self, P>
+            where
+                Self: Sized,
+                P: Prism<A, B>,
+            {
+                ComposedPrism::new(self, other)
+            }
+
+            /// Traversal に変換
+            fn to_traversal(self) -> PrismAsTraversal<Self>
+            where
+                Self: Sized,
+            {
+                PrismAsTraversal::new(self)
+            }
+        }
+
+        /// 合成された Prism
+        pub struct ComposedPrism<P1, P2> {
+            first: P1,
+            second: P2,
+        }
+
+        /// 関数ベースの Prism 実装
+        pub struct FunctionPrism<S, A, Pr, Re>
+        where
+            Pr: Fn(&S) -> Option<&A>,
+            Re: Fn(A) -> S,
+        {
+            preview_function: Pr,
+            review_function: Re,
+            _marker: std::marker::PhantomData<(S, A)>,
+        }
+        ```
+
+    api:
+      constructors:
+        - name: new
+          signature: "fn new<Pr, Re>(preview: Pr, review: Re) -> FunctionPrism<S, A, Pr, Re>"
+          description: "preview と review 関数から Prism を作成"
+          complexity: "O(1)"
+          example: |
+            enum Shape {
+                Circle(f64),        // 半径
+                Rectangle(f64, f64), // 幅, 高さ
+            }
+
+            let circle_prism = FunctionPrism::new(
+                |s: &Shape| match s {
+                    Shape::Circle(r) => Some(r),
+                    _ => None,
+                },
+                |r: f64| Shape::Circle(r)
+            );
+
+      operations:
+        - name: preview
+          signature: "fn preview(&self, source: &S) -> Option<&A>"
+          description: "ソースからターゲットへの参照を取得しようと試みる"
+          complexity: "O(1)"
+          example: |
+            let circle = Shape::Circle(5.0);
+            assert_eq!(circle_prism.preview(&circle), Some(&5.0));
+
+            let rect = Shape::Rectangle(3.0, 4.0);
+            assert_eq!(circle_prism.preview(&rect), None);
+
+        - name: review
+          signature: "fn review(&self, value: A) -> S"
+          description: "ターゲットからソースを構築"
+          complexity: "O(1) + S の構築コスト"
+          example: |
+            let circle = circle_prism.review(10.0);
+            assert!(matches!(circle, Shape::Circle(10.0)));
+
+        - name: preview_owned
+          signature: "fn preview_owned(&self, source: S) -> Option<A>"
+          description: "ソースからターゲットを取り出す（所有権版）"
+          complexity: "O(1)"
+
+        - name: modify_option
+          signature: "fn modify_option<F>(&self, source: S, function: F) -> Option<S>"
+          description: "バリアントが一致する場合のみ関数を適用"
+          complexity: "O(1) + function のコスト"
+          example: |
+            let circle = Shape::Circle(5.0);
+            let doubled = circle_prism.modify_option(circle, |r| r * 2.0);
+            assert!(matches!(doubled, Some(Shape::Circle(10.0))));
+
+            let rect = Shape::Rectangle(3.0, 4.0);
+            let result = circle_prism.modify_option(rect, |r| r * 2.0);
+            assert!(result.is_none());
+
+        - name: modify_or_identity
+          signature: "fn modify_or_identity<F>(&self, source: S, function: F) -> S"
+          description: "バリアントが一致すれば関数を適用、そうでなければ元の値"
+          complexity: "O(1) + function のコスト"
+
+        - name: compose
+          signature: "fn compose<B, P>(self, other: P) -> ComposedPrism<Self, P>"
+          description: "別の Prism と合成"
+          complexity: "O(1)"
+
+    laws:
+      - name: PreviewReview Law（取得・構築の法則）
+        description: "review で構築した値は preview で取得できる"
+        equation: "prism.preview(&prism.review(value)) == Some(&value)"
+        property_test: |
+          proptest! {
+              fn prop_preview_review<S, A: PartialEq>(
+                  prism: impl Prism<S, A>,
+                  value: A
+              ) {
+                  let source = prism.review(value.clone());
+                  prop_assert_eq!(prism.preview(&source), Some(&value));
+              }
+          }
+
+      - name: ReviewPreview Law（構築・取得の法則）
+        description: "preview で取得できた値を review すると元と同じ（該当バリアントの場合）"
+        equation: "prism.preview(source).map(|a| prism.review(a.clone())) == Some(source) if preview succeeds"
+        property_test: |
+          proptest! {
+              fn prop_review_preview<S: Clone + PartialEq, A: Clone>(
+                  prism: impl Prism<S, A>,
+                  source: S
+              ) {
+                  if let Some(value) = prism.preview(&source) {
+                      let reconstructed = prism.review(value.clone());
+                      prop_assert_eq!(reconstructed, source);
+                  }
+              }
+          }
+
+    tests:
+      - category: "基本操作テスト"
+        cases:
+          - name: "preview で該当バリアントの値を取得"
+            test: |
+              enum Result<T, E> { Ok(T), Err(E) }
+              let ok_prism = prism!(Result<i32, String>, Ok);
+
+              let ok_value: Result<i32, String> = Result::Ok(42);
+              assert_eq!(ok_prism.preview(&ok_value), Some(&42));
+
+              let err_value: Result<i32, String> = Result::Err("error".to_string());
+              assert_eq!(ok_prism.preview(&err_value), None);
+
+          - name: "review でバリアントを構築"
+            test: |
+              let constructed = ok_prism.review(100);
+              assert!(matches!(constructed, Result::Ok(100)));
+
+          - name: "modify_option で該当バリアントのみ変更"
+            test: |
+              let ok_value = Result::Ok(10);
+              let doubled = ok_prism.modify_option(ok_value, |x| x * 2);
+              assert!(matches!(doubled, Some(Result::Ok(20))));
+
+      - category: "合成テスト"
+        cases:
+          - name: "Prism の合成"
+            test: |
+              enum Outer { Inner(Inner) }
+              enum Inner { Value(i32) }
+
+              let outer_inner = prism!(Outer, Inner);
+              let inner_value = prism!(Inner, Value);
+              let outer_value = outer_inner.compose(inner_value);
+
+              let data = Outer::Inner(Inner::Value(42));
+              assert_eq!(outer_value.preview(&data), Some(&42));
+
+  # ============================================================================
+  # 3. Iso<S, A> - 型間の同型変換
+  # ============================================================================
+  - id: optics_iso
+    name: Iso<S, A>
+    priority: medium
+    description: |
+      型間の同型変換（情報を失わない双方向変換）を抽象化する。
+      S から A への変換と、A から S への変換が互いに逆操作となる。
+
+      Iso は最も強い Optics であり、Lens としても Prism としても使用できる。
+
+      特徴:
+      - get: S から A への変換
+      - reverse_get: A から S への変換
+      - 往復しても情報が失われない
+      - Lens と Prism の両方として振る舞える
+
+    internal_structure:
+      description: |
+        ```rust
+        /// 型間の同型変換を抽象化する Iso
+        ///
+        /// # Type Parameters
+        /// - `S`: ソース型
+        /// - `A`: ターゲット型
+        pub trait Iso<S, A> {
+            /// S から A への変換
+            fn get(&self, source: S) -> A;
+
+            /// A から S への変換
+            fn reverse_get(&self, value: A) -> S;
+
+            /// 参照ベースの get（可能な場合）
+            fn get_ref<'a>(&self, source: &'a S) -> A
+            where
+                Self: IsoRef<S, A>;
+
+            /// 逆方向の Iso を取得
+            fn reverse(self) -> ReversedIso<Self>
+            where
+                Self: Sized,
+            {
+                ReversedIso::new(self)
+            }
+
+            /// Lens として使用
+            fn to_lens(self) -> IsoAsLens<Self>
+            where
+                Self: Sized,
+            {
+                IsoAsLens::new(self)
+            }
+
+            /// Prism として使用
+            fn to_prism(self) -> IsoAsPrism<Self>
+            where
+                Self: Sized,
+            {
+                IsoAsPrism::new(self)
+            }
+
+            /// 別の Iso と合成
+            fn compose<B, I>(self, other: I) -> ComposedIso<Self, I>
+            where
+                Self: Sized,
+                I: Iso<A, B>,
+            {
+                ComposedIso::new(self, other)
+            }
+        }
+
+        /// 逆方向の Iso
+        pub struct ReversedIso<I> {
+            inner: I,
+        }
+
+        /// 関数ベースの Iso 実装
+        pub struct FunctionIso<S, A, G, Rg>
+        where
+            G: Fn(S) -> A,
+            Rg: Fn(A) -> S,
+        {
+            get_function: G,
+            reverse_get_function: Rg,
+            _marker: std::marker::PhantomData<(S, A)>,
+        }
+        ```
+
+    api:
+      constructors:
+        - name: new
+          signature: "fn new<G, Rg>(get: G, reverse_get: Rg) -> FunctionIso<S, A, G, Rg>"
+          description: "get と reverse_get 関数から Iso を作成"
+          complexity: "O(1)"
+          example: |
+            // String <-> Vec<char>
+            let string_chars_iso = FunctionIso::new(
+                |s: String| s.chars().collect::<Vec<_>>(),
+                |chars: Vec<char>| chars.into_iter().collect::<String>()
+            );
+
+        - name: identity
+          signature: "fn identity() -> IdentityIso<S>"
+          description: "恒等 Iso を作成（S <-> S）"
+          complexity: "O(1)"
+
+      operations:
+        - name: get
+          signature: "fn get(&self, source: S) -> A"
+          description: "S から A への変換"
+          complexity: "変換関数に依存"
+          example: |
+            let chars = string_chars_iso.get("hello".to_string());
+            assert_eq!(chars, vec!['h', 'e', 'l', 'l', 'o']);
+
+        - name: reverse_get
+          signature: "fn reverse_get(&self, value: A) -> S"
+          description: "A から S への変換"
+          complexity: "変換関数に依存"
+          example: |
+            let string = string_chars_iso.reverse_get(vec!['h', 'i']);
+            assert_eq!(string, "hi");
+
+        - name: reverse
+          signature: "fn reverse(self) -> ReversedIso<Self>"
+          description: "逆方向の Iso を取得"
+          complexity: "O(1)"
+          example: |
+            let chars_string_iso = string_chars_iso.reverse();
+            let string = chars_string_iso.get(vec!['h', 'i']);
+            assert_eq!(string, "hi");
+
+        - name: modify
+          signature: "fn modify<F>(&self, source: S, function: F) -> S where F: FnOnce(A) -> A"
+          description: "A に変換してから関数を適用し、S に戻す"
+          complexity: "O(get) + O(function) + O(reverse_get)"
+
+        - name: compose
+          signature: "fn compose<B, I>(self, other: I) -> ComposedIso<Self, I>"
+          description: "別の Iso と合成"
+          complexity: "O(1)"
+
+    laws:
+      - name: GetReverseGet Law（往復の法則 1）
+        description: "get してから reverse_get すると元に戻る"
+        equation: "iso.reverse_get(iso.get(source)) == source"
+        property_test: |
+          proptest! {
+              fn prop_get_reverse_get<S: Clone + PartialEq, A>(
+                  iso: impl Iso<S, A>,
+                  source: S
+              ) {
+                  let intermediate = iso.get(source.clone());
+                  let roundtrip = iso.reverse_get(intermediate);
+                  prop_assert_eq!(roundtrip, source);
+              }
+          }
+
+      - name: ReverseGetGet Law（往復の法則 2）
+        description: "reverse_get してから get すると元に戻る"
+        equation: "iso.get(iso.reverse_get(value)) == value"
+        property_test: |
+          proptest! {
+              fn prop_reverse_get_get<S, A: Clone + PartialEq>(
+                  iso: impl Iso<S, A>,
+                  value: A
+              ) {
+                  let intermediate = iso.reverse_get(value.clone());
+                  let roundtrip = iso.get(intermediate);
+                  prop_assert_eq!(roundtrip, value);
+              }
+          }
+
+    tests:
+      - category: "基本操作テスト"
+        cases:
+          - name: "get と reverse_get の往復"
+            test: |
+              let original = "hello".to_string();
+              let chars = string_chars_iso.get(original.clone());
+              let back = string_chars_iso.reverse_get(chars);
+              assert_eq!(back, original);
+
+          - name: "reverse で逆方向の Iso を取得"
+            test: |
+              let reversed = string_chars_iso.reverse();
+              let string = reversed.get(vec!['a', 'b', 'c']);
+              assert_eq!(string, "abc");
+
+      - category: "標準的な Iso の例"
+        cases:
+          - name: "タプルの swap: (A, B) <-> (B, A)"
+            test: |
+              let swap_iso = iso_swap::<i32, String>();
+              let tuple = (42, "hello".to_string());
+              let swapped = swap_iso.get(tuple.clone());
+              assert_eq!(swapped, ("hello".to_string(), 42));
+              let back = swap_iso.reverse_get(swapped);
+              assert_eq!(back, tuple);
+
+          - name: "newtype: Wrapper<A> <-> A"
+            test: |
+              struct UserId(i64);
+              let user_id_iso = newtype_iso::<UserId, i64>();
+              let id = user_id_iso.get(UserId(123));
+              assert_eq!(id, 123);
+
+  # ============================================================================
+  # 4. Traversal<S, A> - 複数要素へのアクセス
+  # ============================================================================
+  - id: optics_traversal
+    name: Traversal<S, A>
+    priority: medium
+    description: |
+      コレクションや構造体内の複数要素への一括アクセスを提供する。
+      Lens や Prism を一般化し、0 個以上の要素にアクセスできる。
+
+      Traversal は Phase 1 の Traversable と密接に関連し、
+      traverse 操作と同様の抽象を Optics の世界で提供する。
+
+      特徴:
+      - get_all: 全ての対象要素を取得
+      - modify_all: 全ての対象要素に関数を適用
+      - fold: 対象要素を畳み込み
+      - Functor との統合
+
+    internal_structure:
+      description: |
+        ```rust
+        /// 複数要素へのアクセスを抽象化する Traversal
+        ///
+        /// # Type Parameters
+        /// - `S`: ソース型（コレクションまたは構造体）
+        /// - `A`: ターゲット型（要素の型）
+        pub trait Traversal<S, A> {
+            /// 全てのターゲット要素への参照をイテレータとして取得
+            fn get_all<'a>(&self, source: &'a S) -> Box<dyn Iterator<Item = &'a A> + 'a>;
+
+            /// 全てのターゲット要素を所有権で取得
+            fn get_all_owned(&self, source: S) -> Vec<A>;
+
+            /// 全てのターゲット要素に関数を適用
+            fn modify_all<F>(&self, source: S, function: F) -> S
+            where
+                F: FnMut(A) -> A;
+
+            /// 全てのターゲット要素を同じ値で置き換え
+            fn set_all(&self, source: S, value: A) -> S
+            where
+                A: Clone,
+            {
+                self.modify_all(source, |_| value.clone())
+            }
+
+            /// ターゲット要素を畳み込み
+            fn fold<B, F>(&self, source: &S, init: B, function: F) -> B
+            where
+                F: FnMut(B, &A) -> B,
+            {
+                self.get_all(source).fold(init, function)
+            }
+
+            /// ターゲット要素の数を取得
+            fn length(&self, source: &S) -> usize {
+                self.get_all(source).count()
+            }
+
+            /// 全てのターゲット要素が条件を満たすか
+            fn for_all<P>(&self, source: &S, predicate: P) -> bool
+            where
+                P: FnMut(&A) -> bool,
+            {
+                self.get_all(source).all(predicate)
+            }
+
+            /// いずれかのターゲット要素が条件を満たすか
+            fn exists<P>(&self, source: &S, predicate: P) -> bool
+            where
+                P: FnMut(&A) -> bool,
+            {
+                self.get_all(source).any(predicate)
+            }
+
+            /// 最初のターゲット要素を取得
+            fn head_option<'a>(&self, source: &'a S) -> Option<&'a A> {
+                self.get_all(source).next()
+            }
+
+            /// 別の Traversal と合成
+            fn compose<B, T>(self, other: T) -> ComposedTraversal<Self, T>
+            where
+                Self: Sized,
+                T: Traversal<A, B>,
+            {
+                ComposedTraversal::new(self, other)
+            }
+        }
+
+        /// 合成された Traversal
+        pub struct ComposedTraversal<T1, T2> {
+            first: T1,
+            second: T2,
+        }
+
+        /// Vec 用の全要素 Traversal
+        pub struct VecTraversal<A> {
+            _marker: std::marker::PhantomData<A>,
+        }
+
+        /// Option 用の Traversal（0 または 1 要素）
+        pub struct OptionTraversal<A> {
+            _marker: std::marker::PhantomData<A>,
+        }
+        ```
+
+    api:
+      constructors:
+        - name: each
+          signature: "fn each<A>() -> VecTraversal<A>"
+          description: "Vec の全要素への Traversal を作成"
+          complexity: "O(1)"
+          example: |
+            let each_int: VecTraversal<i32> = Traversal::each();
+            let numbers = vec![1, 2, 3, 4, 5];
+            let doubled = each_int.modify_all(numbers, |x| x * 2);
+            assert_eq!(doubled, vec![2, 4, 6, 8, 10]);
+
+        - name: from_traversable
+          signature: "fn from_traversable<T: Traversable>() -> TraversableTraversal<T>"
+          description: "Traversable から Traversal を作成（Phase 1 との統合）"
+          complexity: "O(1)"
+
+      operations:
+        - name: get_all
+          signature: "fn get_all<'a>(&self, source: &'a S) -> impl Iterator<Item = &'a A>"
+          description: "全てのターゲット要素への参照をイテレータで取得"
+          complexity: "O(1) でイテレータを作成、O(n) で消費"
+          example: |
+            let numbers = vec![1, 2, 3];
+            let sum: i32 = each_int.get_all(&numbers).sum();
+            assert_eq!(sum, 6);
+
+        - name: modify_all
+          signature: "fn modify_all<F>(&self, source: S, function: F) -> S"
+          description: "全てのターゲット要素に関数を適用"
+          complexity: "O(n) where n = 要素数"
+          example: |
+            let numbers = vec![1, 2, 3];
+            let squared = each_int.modify_all(numbers, |x| x * x);
+            assert_eq!(squared, vec![1, 4, 9]);
+
+        - name: set_all
+          signature: "fn set_all(&self, source: S, value: A) -> S"
+          description: "全てのターゲット要素を同じ値で置き換え"
+          complexity: "O(n)"
+
+        - name: fold
+          signature: "fn fold<B, F>(&self, source: &S, init: B, function: F) -> B"
+          description: "ターゲット要素を畳み込み"
+          complexity: "O(n)"
+
+        - name: compose
+          signature: "fn compose<B, T>(self, other: T) -> ComposedTraversal<Self, T>"
+          description: "別の Traversal と合成"
+          complexity: "O(1)"
+          example: |
+            // Vec<Vec<i32>> の全要素にアクセス
+            let nested: VecTraversal<Vec<i32>> = Traversal::each();
+            let inner: VecTraversal<i32> = Traversal::each();
+            let all_ints = nested.compose(inner);
+
+            let data = vec![vec![1, 2], vec![3, 4, 5]];
+            let flattened: Vec<i32> = all_ints.get_all_owned(data.clone());
+            assert_eq!(flattened, vec![1, 2, 3, 4, 5]);
+
+    laws:
+      - name: Modify Identity Law（恒等関数の法則）
+        description: "恒等関数で modify しても変わらない"
+        equation: "traversal.modify_all(source, |x| x) == source"
+        property_test: |
+          proptest! {
+              fn prop_modify_identity<S: Clone + PartialEq, A: Clone>(
+                  traversal: impl Traversal<S, A>,
+                  source: S
+              ) {
+                  let modified = traversal.modify_all(source.clone(), |x| x);
+                  prop_assert_eq!(modified, source);
+              }
+          }
+
+      - name: Modify Composition Law（合成の法則）
+        description: "modify の連続適用は関数合成と同じ"
+        equation: "traversal.modify_all(traversal.modify_all(source, f), g) == traversal.modify_all(source, |x| g(f(x)))"
+        property_test: |
+          proptest! {
+              fn prop_modify_composition<S: Clone + PartialEq, A: Clone>(
+                  traversal: impl Traversal<S, A>,
+                  source: S,
+                  f: impl Fn(A) -> A + Clone,
+                  g: impl Fn(A) -> A + Clone
+              ) {
+                  let left = traversal.modify_all(
+                      traversal.modify_all(source.clone(), f.clone()),
+                      g.clone()
+                  );
+                  let right = traversal.modify_all(source, |x| g(f(x)));
+                  prop_assert_eq!(left, right);
+              }
+          }
+
+    tests:
+      - category: "基本操作テスト"
+        cases:
+          - name: "Vec の全要素を取得"
+            test: |
+              let numbers = vec![1, 2, 3, 4, 5];
+              let sum: i32 = each_int.get_all(&numbers).sum();
+              assert_eq!(sum, 15);
+
+          - name: "Vec の全要素を変換"
+            test: |
+              let numbers = vec![1, 2, 3];
+              let doubled = each_int.modify_all(numbers, |x| x * 2);
+              assert_eq!(doubled, vec![2, 4, 6]);
+
+          - name: "Option の要素にアクセス"
+            test: |
+              let option_traversal: OptionTraversal<i32> = Traversal::option();
+
+              let some_value = Some(42);
+              let all: Vec<&i32> = option_traversal.get_all(&some_value).collect();
+              assert_eq!(all, vec![&42]);
+
+              let none_value: Option<i32> = None;
+              let all: Vec<&i32> = option_traversal.get_all(&none_value).collect();
+              assert!(all.is_empty());
+
+      - category: "合成テスト"
+        cases:
+          - name: "Lens と Traversal の合成"
+            test: |
+              struct Container { items: Vec<i32> }
+              let items_lens = lens!(Container, items);
+              let each_item = Traversal::each::<i32>();
+
+              // Container -> Vec<i32> -> i32
+              let all_items = items_lens.to_traversal().compose(each_item);
+
+              let container = Container { items: vec![1, 2, 3] };
+              let sum: i32 = all_items.get_all(&container).sum();
+              assert_eq!(sum, 6);
+
+  # ============================================================================
+  # 5. Optional<S, A> - Lens と Prism の中間的な Optics
+  # ============================================================================
+  - id: optics_optional
+    name: Optional<S, A>
+    priority: medium
+    description: |
+      Lens と Prism の中間的な Optics。0 個または 1 個の要素にアクセスする。
+      Lens + Prism の合成結果として自然に発生する。
+
+      Optional は「存在するかもしれない」フィールドへのアクセスを表現する。
+      Lens のように必ず存在するわけではないが、Prism のように構築する機能は持たない。
+
+      特徴:
+      - get_option: 全体から部分を取得しようと試みる（0 または 1 個）
+      - set: 部分が存在する場合に更新した新しい全体を返す
+      - modify_option: 部分が存在する場合に関数を適用
+      - Lens + Prism の合成結果
+
+    internal_structure:
+      description: |
+        ```rust
+        /// 0 個または 1 個の要素へのアクセスを抽象化する Optional
+        ///
+        /// # Type Parameters
+        /// - `S`: ソース型
+        /// - `A`: ターゲット型
+        pub trait Optional<S, A> {
+            /// ソースからターゲットへの参照を取得しようと試みる
+            fn get_option<'a>(&self, source: &'a S) -> Option<&'a A>;
+
+            /// ターゲットを新しい値で置き換えた新しいソースを返す
+            /// ターゲットが存在しない場合は元のソースをそのまま返す
+            fn set(&self, source: S, value: A) -> S;
+
+            /// ターゲットが存在する場合のみ関数を適用
+            fn modify_option<F>(&self, source: S, function: F) -> Option<S>
+            where
+                F: FnOnce(A) -> A,
+                A: Clone,
+            {
+                self.get_option(&source).map(|a| {
+                    let new_value = function(a.clone());
+                    self.set(source, new_value)
+                })
+            }
+
+            /// ターゲットが存在すれば関数を適用、そうでなければ元の値
+            fn modify_or_identity<F>(&self, source: S, function: F) -> S
+            where
+                F: FnOnce(A) -> A,
+                A: Clone,
+                S: Clone,
+            {
+                self.modify_option(source.clone(), function).unwrap_or(source)
+            }
+
+            /// ターゲットが存在するか確認
+            fn is_present(&self, source: &S) -> bool {
+                self.get_option(source).is_some()
+            }
+
+            /// 別の Optional と合成
+            fn compose<B, O>(self, other: O) -> ComposedOptional<Self, O>
+            where
+                Self: Sized,
+                O: Optional<A, B>,
+            {
+                ComposedOptional::new(self, other)
+            }
+        }
+
+        /// 合成された Optional
+        pub struct ComposedOptional<O1, O2> {
+            first: O1,
+            second: O2,
+        }
+
+        /// Lens + Prism の合成結果
+        pub struct LensPrismComposition<L, P> {
+            lens: L,
+            prism: P,
+        }
+        ```
+
+    api:
+      operations:
+        - name: get_option
+          signature: "fn get_option<'a>(&self, source: &'a S) -> Option<&'a A>"
+          description: "ソースからターゲットへの参照を取得しようと試みる"
+          complexity: "O(1)"
+          example: |
+            // Person { address: Option<Address> } の場合
+            let street_optional = address_lens.compose_prism(some_prism);
+            let person = Person { address: Some(Address { street: "Main St".to_string() }) };
+            assert_eq!(street_optional.get_option(&person), Some(&"Main St".to_string()));
+
+        - name: set
+          signature: "fn set(&self, source: S, value: A) -> S"
+          description: "ターゲットが存在する場合に更新した新しいソースを返す"
+          complexity: "O(1)"
+
+        - name: modify_option
+          signature: "fn modify_option<F>(&self, source: S, function: F) -> Option<S>"
+          description: "ターゲットが存在する場合のみ関数を適用"
+          complexity: "O(1) + function のコスト"
+
+    laws:
+      - name: GetOptionSet Law（取得後設定の法則）
+        description: "get_option で取得した値をそのまま set しても元と同じ（Some の場合）"
+        equation: |
+          if optional.get_option(&source).is_some() {
+              optional.set(source.clone(), optional.get_option(&source).unwrap().clone()) == source
+          }
+
+      - name: SetGetOption Law（設定後取得の法則）
+        description: "set で設定した値は get_option で取得できる（元々存在していた場合）"
+        equation: |
+          if optional.get_option(&source).is_some() {
+              optional.get_option(&optional.set(source, value)) == Some(&value)
+          }
+
+    tests:
+      - category: "基本操作テスト"
+        cases:
+          - name: "Lens + Prism の合成で Optional を作成"
+            test: |
+              struct Container { maybe_value: Option<i32> }
+              let container_lens = lens!(Container, maybe_value);
+              let some_prism = prism!(Option<i32>, Some);
+              let value_optional = container_lens.compose_prism(some_prism);
+
+              let some_container = Container { maybe_value: Some(42) };
+              assert_eq!(value_optional.get_option(&some_container), Some(&42));
+
+              let none_container = Container { maybe_value: None };
+              assert_eq!(value_optional.get_option(&none_container), None);
+
+          - name: "PersistentVector のインデックスアクセス"
+            test: |
+              let vector: PersistentVector<i32> = (0..10).collect();
+              let at_5 = PersistentVectorIndexOptional::new(5);
+              let at_100 = PersistentVectorIndexOptional::new(100);
+
+              assert_eq!(at_5.get_option(&vector), Some(&5));
+              assert_eq!(at_100.get_option(&vector), None);  // 範囲外
+
+  # ============================================================================
+  # 6. Optics 自動導出マクロ
+  # ============================================================================
+  - id: optics_derive_macro
+    name: Optics 自動導出マクロ
+    priority: high
+    description: |
+      derive マクロと関数マクロを使用して Lens と Prism を自動生成する。
+      ボイラープレートコードを削減し、型安全性を維持する。
+
+      提供するマクロ:
+      - lens!: 構造体フィールドへの Lens を作成
+      - prism!: enum バリアントへの Prism を作成
+      - iso!: 型間の Iso を作成
+      - #[derive(Lenses)]: 構造体の全フィールドに対する Lens を自動生成
+      - #[derive(Prisms)]: enum の全バリアントに対する Prism を自動生成
+
+    internal_structure:
+      description: |
+        ```rust
+        /// 構造体フィールドへの Lens を作成するマクロ
+        ///
+        /// # Usage
+        /// ```rust
+        /// struct Person { name: String, age: u32 }
+        ///
+        /// let name_lens = lens!(Person, name);
+        /// let age_lens = lens!(Person, age);
+        /// ```
+        #[macro_export]
+        macro_rules! lens {
+            ($struct:ty, $field:ident) => {
+                $crate::optics::FunctionLens::new(
+                    |source: &$struct| &source.$field,
+                    |source: $struct, value| {
+                        $struct {
+                            $field: value,
+                            ..source
+                        }
+                    }
+                )
+            };
+        }
+
+        /// enum バリアントへの Prism を作成するマクロ
+        ///
+        /// # Usage
+        /// ```rust
+        /// enum Shape { Circle(f64), Rectangle(f64, f64) }
+        ///
+        /// let circle_prism = prism!(Shape, Circle);
+        /// ```
+        #[macro_export]
+        macro_rules! prism {
+            ($enum:ty, $variant:ident) => {
+                $crate::optics::FunctionPrism::new(
+                    |source: &$enum| match source {
+                        <$enum>::$variant(ref value) => Some(value),
+                        _ => None,
+                    },
+                    |value| <$enum>::$variant(value)
+                )
+            };
+            // 複数フィールドバリアント用
+            ($enum:ty, $variant:ident, tuple) => {
+                // タプルバリアント用の実装
+            };
+        }
+
+        /// Iso を作成するマクロ
+        ///
+        /// # Usage
+        /// ```rust
+        /// let string_chars = iso!(
+        ///     |s: String| s.chars().collect::<Vec<_>>(),
+        ///     |chars: Vec<char>| chars.into_iter().collect::<String>()
+        /// );
+        /// ```
+        #[macro_export]
+        macro_rules! iso {
+            ($get:expr, $reverse_get:expr) => {
+                $crate::optics::FunctionIso::new($get, $reverse_get)
+            };
+        }
+        ```
+
+    api:
+      macros:
+        - name: lens!
+          signature: "lens!($struct:ty, $field:ident)"
+          description: "構造体フィールドへの Lens を作成"
+          example: |
+            struct Person { name: String, age: u32 }
+
+            let name_lens = lens!(Person, name);
+            let person = Person { name: "Alice".to_string(), age: 30 };
+
+            assert_eq!(*name_lens.get(&person), "Alice");
+            let updated = name_lens.set(person, "Bob".to_string());
+            assert_eq!(updated.name, "Bob");
+
+        - name: prism!
+          signature: "prism!($enum:ty, $variant:ident)"
+          description: "enum バリアントへの Prism を作成"
+          example: |
+            enum Result<T, E> { Ok(T), Err(E) }
+
+            let ok_prism = prism!(Result<i32, String>, Ok);
+            let ok_value = Result::Ok(42);
+
+            assert_eq!(ok_prism.preview(&ok_value), Some(&42));
+            let constructed = ok_prism.review(100);
+            assert!(matches!(constructed, Result::Ok(100)));
+
+        - name: iso!
+          signature: "iso!($get:expr, $reverse_get:expr)"
+          description: "get と reverse_get 関数から Iso を作成"
+          example: |
+            let swap_iso = iso!(
+                |(a, b): (i32, String)| (b, a),
+                |(b, a): (String, i32)| (a, b)
+            );
+
+            let tuple = (42, "hello".to_string());
+            let swapped = swap_iso.get(tuple);
+            assert_eq!(swapped, ("hello".to_string(), 42));
+
+        - name: "#[derive(Lenses)]"
+          signature: "#[derive(Lenses)]"
+          description: "構造体の全フィールドに対する Lens を自動生成"
+          example: |
+            #[derive(Lenses)]
+            struct Person {
+                name: String,
+                age: u32,
+            }
+
+            // 以下が自動生成される:
+            // impl Person {
+            //     fn name_lens() -> impl Lens<Person, String> { ... }
+            //     fn age_lens() -> impl Lens<Person, u32> { ... }
+            // }
+
+            let name_lens = Person::name_lens();
+            let person = Person { name: "Alice".to_string(), age: 30 };
+            assert_eq!(*name_lens.get(&person), "Alice");
+
+        - name: "#[derive(Prisms)]"
+          signature: "#[derive(Prisms)]"
+          description: "enum の全バリアントに対する Prism を自動生成"
+          example: |
+            #[derive(Prisms)]
+            enum Shape {
+                Circle(f64),
+                Rectangle { width: f64, height: f64 },
+            }
+
+            // 以下が自動生成される:
+            // impl Shape {
+            //     fn circle_prism() -> impl Prism<Shape, f64> { ... }
+            //     fn rectangle_prism() -> impl Prism<Shape, (f64, f64)> { ... }
+            // }
+
+            let circle_prism = Shape::circle_prism();
+            let circle = Shape::Circle(5.0);
+            assert_eq!(circle_prism.preview(&circle), Some(&5.0));
+
+    tests:
+      - category: "lens! マクロテスト"
+        cases:
+          - name: "単純なフィールドへの Lens"
+            test: |
+              struct Point { x: i32, y: i32 }
+              let x_lens = lens!(Point, x);
+              let y_lens = lens!(Point, y);
+
+              let point = Point { x: 10, y: 20 };
+              assert_eq!(*x_lens.get(&point), 10);
+              assert_eq!(*y_lens.get(&point), 20);
+
+          - name: "ネストした構造体への Lens 合成"
+            test: |
+              struct Inner { value: i32 }
+              struct Outer { inner: Inner }
+
+              let inner_lens = lens!(Outer, inner);
+              let value_lens = lens!(Inner, value);
+              let outer_value = inner_lens.compose(value_lens);
+
+              let data = Outer { inner: Inner { value: 42 } };
+              assert_eq!(*outer_value.get(&data), 42);
+
+      - category: "prism! マクロテスト"
+        cases:
+          - name: "単一値バリアントへの Prism"
+            test: |
+              enum Option<T> { Some(T), None }
+              let some_prism = prism!(Option<i32>, Some);
+
+              let some_value = Option::Some(42);
+              assert_eq!(some_prism.preview(&some_value), Some(&42));
+
+              let none_value: Option<i32> = Option::None;
+              assert_eq!(some_prism.preview(&none_value), None);
+
+      - category: "derive マクロテスト"
+        cases:
+          - name: "#[derive(Lenses)] で全フィールドの Lens を生成"
+            test: |
+              #[derive(Lenses, Clone, PartialEq, Debug)]
+              struct Config {
+                  host: String,
+                  port: u16,
+                  debug: bool,
+              }
+
+              let host_lens = Config::host_lens();
+              let config = Config {
+                  host: "localhost".to_string(),
+                  port: 8080,
+                  debug: true,
+              };
+
+              assert_eq!(*host_lens.get(&config), "localhost");
+              let updated = host_lens.set(config, "0.0.0.0".to_string());
+              assert_eq!(updated.host, "0.0.0.0");
+
+# 実装順序と依存関係
+implementation_order:
+  - phase: "5.1"
+    name: "Lens トレイトと基本実装"
+    description: |
+      Lens トレイトの定義、FunctionLens の実装、lens! マクロの実装。
+      基本的な合成機能も含む。
+    duration_estimate: "3-4 days"
+    dependencies: []
+    deliverables:
+      - src/optics/lens.rs
+      - src/optics/lens_macro.rs
+      - tests/lens_tests.rs
+      - tests/lens_laws.rs
+
+  - phase: "5.2"
+    name: "Prism トレイトと基本実装"
+    description: |
+      Prism トレイトの定義、FunctionPrism の実装、prism! マクロの実装。
+      Lens と Prism の合成（Optional）も含む。
+    duration_estimate: "3-4 days"
+    dependencies:
+      - "5.1"
+    deliverables:
+      - src/optics/prism.rs
+      - src/optics/prism_macro.rs
+      - src/optics/optional.rs
+      - tests/prism_tests.rs
+      - tests/prism_laws.rs
+
+  - phase: "5.3"
+    name: "Iso トレイトと基本実装"
+    description: |
+      Iso トレイトの定義、FunctionIso の実装、iso! マクロの実装。
+      Iso から Lens/Prism への変換も含む。
+    duration_estimate: "2-3 days"
+    dependencies:
+      - "5.1"
+      - "5.2"
+    deliverables:
+      - src/optics/iso.rs
+      - src/optics/iso_macro.rs
+      - tests/iso_tests.rs
+      - tests/iso_laws.rs
+
+  - phase: "5.4"
+    name: "Traversal トレイトと基本実装"
+    description: |
+      Traversal トレイトの定義、Vec/Option/Result への実装。
+      Phase 1 の Traversable との統合。
+    duration_estimate: "3-4 days"
+    dependencies:
+      - "5.1"
+      - "5.2"
+    deliverables:
+      - src/optics/traversal.rs
+      - tests/traversal_tests.rs
+      - tests/traversal_laws.rs
+
+  - phase: "5.5"
+    name: "derive マクロの実装"
+    description: |
+      #[derive(Lenses)] と #[derive(Prisms)] の proc-macro 実装。
+      functional-rusty-derive クレートの作成。
+    duration_estimate: "4-5 days"
+    dependencies:
+      - "5.1"
+      - "5.2"
+    deliverables:
+      - functional-rusty-derive/src/lib.rs
+      - functional-rusty-derive/src/lenses.rs
+      - functional-rusty-derive/src/prisms.rs
+      - tests/derive_tests.rs
+
+  - phase: "5.6"
+    name: "永続データ構造との統合"
+    description: |
+      Phase 4 の PersistentVector, PersistentHashMap, PersistentTreeMap への
+      Optional/Traversal 実装。
+      PersistentVector のインデックスアクセスは Optional として実装（範囲外の場合は None）。
+    duration_estimate: "2-3 days"
+    dependencies:
+      - "5.1"
+      - "5.4"
+    deliverables:
+      - src/optics/persistent_optics.rs
+      - tests/persistent_optics_tests.rs
+
+# テスト戦略
+testing_strategy:
+  unit_tests:
+    description: "各 Optics の基本操作を検証"
+    coverage_target: "100%"
+    categories:
+      - "基本操作（get, set, modify, preview, review）"
+      - "合成（compose）"
+      - "型変換（to_lens, to_prism, to_traversal）"
+      - "マクロ生成コード"
+
+  property_tests:
+    description: "Optics の法則をプロパティベーステストで検証"
+    framework: "proptest"
+    properties:
+      - "Lens 法則（GetPut, PutGet, PutPut）"
+      - "Prism 法則（PreviewReview, ReviewPreview）"
+      - "Iso 法則（GetReverseGet, ReverseGetGet）"
+      - "Traversal 法則（Modify Identity, Modify Composition）"
+      - "合成の法則（Composition Laws）"
+
+  integration_tests:
+    description: "Phase 1, Phase 4 との統合を検証"
+    scenarios:
+      - "Functor/Traversable との連携"
+      - "永続データ構造への Optics 適用"
+      - "深くネストした構造への合成 Optics"
+      - "複合的なデータ変換パイプライン"
+
+# 将来の拡張
+future_extensions:
+  - name: "Getter / Setter"
+    description: |
+      get のみ、または set のみを持つ Optics。
+      より細かい粒度の抽象を提供。
+
+  - name: "At / Index"
+    description: |
+      HashMap や Vec の特定キー/インデックスへのアクセス。
+      永続データ構造との深い統合。
+
+  - name: "Each / Filtered"
+    description: |
+      条件に基づいた Traversal のフィルタリング。
+      より表現力の高いクエリ。
+
+  - name: "Async Optics"
+    description: |
+      非同期コンテキストでの Optics 操作。
+      async/await との統合。

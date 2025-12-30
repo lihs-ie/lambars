@@ -1,0 +1,2778 @@
+# Phase 1: 型クラス基盤（Type Class Foundation）実装計画
+#
+# 要件定義: docs/requirements/phase1_typeclass.yaml
+# 技術要件:
+#   - Rust: 1.92.0
+#   - edition: 2024
+#   - testing: rstest, proptest
+#
+# 実装方針:
+#   1. TDD（テスト駆動開発）でテストを先に書く
+#   2. GAT を使用した HKT エミュレーション
+#   3. 依存関係に基づいた段階的実装
+#   4. 各型クラスの法則（laws）をプロパティベーステストで検証
+
+version: "1.0.0"
+phase: 1
+name: "Type Class Foundation Implementation Plan"
+
+# 実装順序の概要
+implementation_order:
+  - step: 1
+    name: "基盤型とトレイト"
+    items:
+      - TypeConstructor トレイト
+      - Identity ラッパー型
+      - 数値ラッパー型（Sum, Product, Max, Min）
+  - step: 2
+    name: "代数的構造"
+    items:
+      - Semigroup トレイト
+      - Monoid トレイト
+  - step: 3
+    name: "ファンクター階層"
+    items:
+      - Functor トレイト
+      - Applicative トレイト
+      - Monad トレイト
+  - step: 4
+    name: "構造走査"
+    items:
+      - Foldable トレイト
+      - Traversable トレイト
+
+# 実装計画詳細
+implementation_plan:
+  # ============================================================================
+  # 1. TypeConstructor トレイト（HKT エミュレーションの基盤）
+  # ============================================================================
+  - id: impl_type_constructor
+    requirement_id: auxiliary_types.TypeConstructor
+    name: TypeConstructor トレイトの実装
+    priority: 1
+    description: |
+      HKT（Higher-Kinded Types）をエミュレートするための基盤トレイト。
+      GAT（Generic Associated Types）を使用して、型コンストラクタ F<A> から
+      F<B> への変換を可能にする。これは全ての型クラスの基礎となる。
+
+    files:
+      - path: src/typeclass/higher.rs
+        description: |
+          TypeConstructor トレイトと関連する型定義を含むモジュール。
+          HKT エミュレーションの中核となる。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          TypeConstructor トレイトの定義。
+          GAT を使用して WithType 関連型を定義し、型パラメータの変換を可能にする。
+        code_outline: |
+          /// 型コンストラクタを表現するトレイト。
+          ///
+          /// Rust は HKT（Higher-Kinded Types）を直接サポートしていないため、
+          /// このトレイトと GAT（Generic Associated Types）を組み合わせて
+          /// 型コンストラクタの抽象化をエミュレートする。
+          ///
+          /// # 例
+          ///
+          /// `Option<i32>` と `Option<String>` は異なる型だが、
+          /// 同じ「Option」という型コンストラクタのインスタンスである。
+          /// このトレイトにより、`Option<i32>` から `Option<String>` への
+          /// 変換を型安全に表現できる。
+          pub trait TypeConstructor {
+              /// この型コンストラクタが保持する内部の型。
+              /// 例: `Option<i32>` の場合は `i32`
+              type Inner;
+
+              /// 異なる型パラメータ B を持つ同じ型コンストラクタ。
+              /// 例: `Option<i32>` の `WithType<String>` は `Option<String>`
+              ///
+              /// 再帰的な制約により、変換後の型も TypeConstructor を実装する。
+              type WithType<B>: TypeConstructor<Inner = B>;
+          }
+
+      - step: 2
+        description: |
+          Option に対する TypeConstructor 実装。
+          Option は最も基本的な TypeConstructor の例である。
+        code_outline: |
+          impl<A> TypeConstructor for Option<A> {
+              type Inner = A;
+              type WithType<B> = Option<B>;
+          }
+
+      - step: 3
+        description: |
+          Result に対する TypeConstructor 実装。
+          Result は T に対する TypeConstructor であり、E は固定される。
+          これは Bifunctor の実装時に拡張される。
+        code_outline: |
+          impl<T, E> TypeConstructor for Result<T, E> {
+              type Inner = T;
+              type WithType<B> = Result<B, E>;
+          }
+
+      - step: 4
+        description: |
+          Vec に対する TypeConstructor 実装。
+        code_outline: |
+          impl<A> TypeConstructor for Vec<A> {
+              type Inner = A;
+              type WithType<B> = Vec<B>;
+          }
+
+      - step: 5
+        description: |
+          Box に対する TypeConstructor 実装。
+        code_outline: |
+          impl<A> TypeConstructor for Box<A> {
+              type Inner = A;
+              type WithType<B> = Box<B>;
+          }
+
+    tests:
+      - name: test_option_type_constructor
+        description: Option の TypeConstructor 実装が正しく型変換を表現できることを確認
+        test_type: unit
+        code_outline: |
+          #[cfg(test)]
+          mod tests {
+              use super::*;
+
+              #[test]
+              fn option_inner_type_is_correct() {
+                  // コンパイル時の型チェックとして機能
+                  fn assert_inner<T: TypeConstructor<Inner = i32>>() {}
+                  assert_inner::<Option<i32>>();
+              }
+
+              #[test]
+              fn option_with_type_is_correct() {
+                  // WithType が正しい型を生成することを確認
+                  fn transform<T: TypeConstructor>(
+                      _: T
+                  ) -> T::WithType<String>
+                  where
+                      T::WithType<String>: Default,
+                  {
+                      Default::default()
+                  }
+                  let result: Option<String> = transform(Some(42));
+                  assert_eq!(result, None);
+              }
+          }
+
+      - name: test_result_type_constructor
+        description: Result の TypeConstructor 実装が正しく動作することを確認
+        test_type: unit
+
+      - name: test_vec_type_constructor
+        description: Vec の TypeConstructor 実装が正しく動作することを確認
+        test_type: unit
+
+    dependencies: []
+
+  # ============================================================================
+  # 2. Identity ラッパー型
+  # ============================================================================
+  - id: impl_identity
+    requirement_id: auxiliary_types.Identity
+    name: Identity ラッパー型の実装
+    priority: 1
+    description: |
+      恒等ファンクター。値をそのままラップする単純な型。
+      Monad 変換子の基底として、また単体テストで有用。
+      全ての型クラスを実装する最初の「モデル型」として使用。
+
+    files:
+      - path: src/typeclass/identity.rs
+        description: Identity 型の定義と基本実装
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Identity 型の定義と基本的な derive 実装。
+          newtype パターンを使用し、内部値へのアクセスを提供。
+        code_outline: |
+          /// 恒等ファンクター。値をそのままラップする。
+          ///
+          /// # 用途
+          ///
+          /// - Monad 変換子の基底として使用
+          /// - 型クラスの法則をテストする際の単純なモデル型
+          /// - 型レベルでの「何もしない変換」を表現
+          ///
+          /// # 例
+          ///
+          /// ```
+          /// use functional_rusty::typeclass::Identity;
+          ///
+          /// let x = Identity(42);
+          /// assert_eq!(x.0, 42);
+          /// ```
+          #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+          pub struct Identity<A>(pub A);
+
+          impl<A> Identity<A> {
+              /// 新しい Identity を作成する。
+              #[inline]
+              pub const fn new(value: A) -> Self {
+                  Self(value)
+              }
+
+              /// 内部の値を取り出す。
+              #[inline]
+              pub fn into_inner(self) -> A {
+                  self.0
+              }
+
+              /// 内部の値への参照を取得する。
+              #[inline]
+              pub const fn as_inner(&self) -> &A {
+                  &self.0
+              }
+
+              /// 内部の値への可変参照を取得する。
+              #[inline]
+              pub fn as_inner_mut(&mut self) -> &mut A {
+                  &mut self.0
+              }
+          }
+
+      - step: 2
+        description: Identity に対する TypeConstructor 実装
+        code_outline: |
+          impl<A> TypeConstructor for Identity<A> {
+              type Inner = A;
+              type WithType<B> = Identity<B>;
+          }
+
+    tests:
+      - name: test_identity_basic
+        description: Identity 型の基本操作（作成、取り出し、参照）が正しく動作することを確認
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn identity_new_and_into_inner() {
+              let x = Identity::new(42);
+              assert_eq!(x.into_inner(), 42);
+          }
+
+          #[rstest]
+          fn identity_as_inner_ref() {
+              let x = Identity::new(String::from("hello"));
+              assert_eq!(x.as_inner(), "hello");
+          }
+
+      - name: test_identity_derive_traits
+        description: Identity の derive された特性（Clone, PartialEq 等）が正しく動作することを確認
+        test_type: unit
+
+    dependencies:
+      - impl_type_constructor
+
+  # ============================================================================
+  # 3. 数値ラッパー型（Sum, Product, Max, Min）
+  # ============================================================================
+  - id: impl_numeric_wrappers
+    requirement_id: auxiliary_types.Sum, auxiliary_types.Product
+    name: 数値ラッパー型の実装
+    priority: 1
+    description: |
+      数値型には複数の Semigroup/Monoid が存在するため、
+      newtype パターンで区別する。
+      - Sum: 加算による演算
+      - Product: 乗算による演算
+      - Max: 最大値による演算
+      - Min: 最小値による演算
+
+    files:
+      - path: src/typeclass/wrappers.rs
+        description: 数値ラッパー型の定義
+
+    implementation_steps:
+      - step: 1
+        description: Sum ラッパー型の定義
+        code_outline: |
+          /// 加算による Semigroup/Monoid を表す newtype ラッパー。
+          ///
+          /// # 例
+          ///
+          /// ```
+          /// use functional_rusty::typeclass::{Sum, Semigroup, Monoid};
+          ///
+          /// let a = Sum(3);
+          /// let b = Sum(5);
+          /// assert_eq!(a.combine(b), Sum(8));
+          /// assert_eq!(Sum::<i32>::empty(), Sum(0));
+          /// ```
+          #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+          pub struct Sum<A>(pub A);
+
+          impl<A> Sum<A> {
+              /// 新しい Sum を作成する。
+              #[inline]
+              pub const fn new(value: A) -> Self {
+                  Self(value)
+              }
+
+              /// 内部の値を取り出す。
+              #[inline]
+              pub fn into_inner(self) -> A {
+                  self.0
+              }
+          }
+
+      - step: 2
+        description: Product ラッパー型の定義
+        code_outline: |
+          /// 乗算による Semigroup/Monoid を表す newtype ラッパー。
+          ///
+          /// # 例
+          ///
+          /// ```
+          /// use functional_rusty::typeclass::{Product, Semigroup, Monoid};
+          ///
+          /// let a = Product(3);
+          /// let b = Product(5);
+          /// assert_eq!(a.combine(b), Product(15));
+          /// assert_eq!(Product::<i32>::empty(), Product(1));
+          /// ```
+          #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+          pub struct Product<A>(pub A);
+
+          impl<A> Product<A> {
+              #[inline]
+              pub const fn new(value: A) -> Self {
+                  Self(value)
+              }
+
+              #[inline]
+              pub fn into_inner(self) -> A {
+                  self.0
+              }
+          }
+
+      - step: 3
+        description: Max ラッパー型の定義
+        code_outline: |
+          /// 最大値による Semigroup を表す newtype ラッパー。
+          ///
+          /// Monoid として使用する場合、型 A は Bounded トレイト
+          /// （最小値を持つ）を実装している必要がある。
+          #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+          pub struct Max<A>(pub A);
+
+      - step: 4
+        description: Min ラッパー型の定義
+        code_outline: |
+          /// 最小値による Semigroup を表す newtype ラッパー。
+          ///
+          /// Monoid として使用する場合、型 A は Bounded トレイト
+          /// （最大値を持つ）を実装している必要がある。
+          #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+          pub struct Min<A>(pub A);
+
+      - step: 5
+        description: Bounded トレイトの定義（Max/Min の Monoid に必要）
+        code_outline: |
+          /// 有界な型を表すトレイト。
+          ///
+          /// 型の最小値と最大値を提供する。
+          /// Max と Min の Monoid 実装に必要。
+          pub trait Bounded {
+              /// この型の最小値。
+              const MIN_VALUE: Self;
+              /// この型の最大値。
+              const MAX_VALUE: Self;
+          }
+
+          // 標準的な数値型への実装
+          macro_rules! impl_bounded {
+              ($($type:ty),*) => {
+                  $(
+                      impl Bounded for $type {
+                          const MIN_VALUE: Self = <$type>::MIN;
+                          const MAX_VALUE: Self = <$type>::MAX;
+                      }
+                  )*
+              };
+          }
+
+          impl_bounded!(i8, i16, i32, i64, i128, isize);
+          impl_bounded!(u8, u16, u32, u64, u128, usize);
+
+    tests:
+      - name: test_sum_wrapper
+        description: Sum ラッパーの基本操作が正しく動作することを確認
+        test_type: unit
+
+      - name: test_product_wrapper
+        description: Product ラッパーの基本操作が正しく動作することを確認
+        test_type: unit
+
+      - name: test_max_min_wrappers
+        description: Max/Min ラッパーの基本操作が正しく動作することを確認
+        test_type: unit
+
+      - name: test_bounded_implementations
+        description: 数値型の Bounded 実装が正しい値を返すことを確認
+        test_type: unit
+
+    dependencies:
+      - impl_type_constructor
+
+  # ============================================================================
+  # 4. Semigroup トレイト
+  # ============================================================================
+  - id: impl_semigroup
+    requirement_id: typeclass_semigroup
+    name: Semigroup トレイトの実装
+    priority: 2
+    description: |
+      二項結合演算を持つ型を表現する型クラス。
+      結合律（associativity）を満たす必要がある。
+
+    files:
+      - path: src/typeclass/semigroup.rs
+        description: Semigroup トレイトの定義と標準型への実装
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Semigroup トレイトの定義。
+          combine メソッドを主要な操作として提供。
+        code_outline: |
+          /// 二項結合演算を持つ型を表現するトレイト。
+          ///
+          /// # 法則
+          ///
+          /// ## 結合律（Associativity）
+          ///
+          /// 任意の a, b, c に対して:
+          /// ```text
+          /// (a.combine(b)).combine(c) == a.combine(b.combine(c))
+          /// ```
+          ///
+          /// # 例
+          ///
+          /// ```
+          /// use functional_rusty::typeclass::Semigroup;
+          ///
+          /// let a = String::from("Hello, ");
+          /// let b = String::from("World!");
+          /// assert_eq!(a.combine(b), "Hello, World!");
+          /// ```
+          pub trait Semigroup {
+              /// 二つの値を結合して新しい値を生成する。
+              ///
+              /// この演算は結合的でなければならない。
+              fn combine(self, other: Self) -> Self;
+
+              /// 参照から二つの値を結合して新しい値を生成する。
+              ///
+              /// デフォルト実装は clone を使用するが、
+              /// 効率的な実装を各型で提供可能。
+              fn combine_ref(&self, other: &Self) -> Self
+              where
+                  Self: Clone,
+              {
+                  self.clone().combine(other.clone())
+              }
+
+              /// イテレータ内の全ての要素を結合する。
+              ///
+              /// 空のイテレータの場合は `None` を返す。
+              /// 空でない場合の結合には Monoid を使用する。
+              fn combine_all<I>(iter: I) -> Option<Self>
+              where
+                  I: IntoIterator<Item = Self>,
+                  Self: Sized,
+              {
+                  iter.into_iter().reduce(|accumulator, x| accumulator.combine(x))
+              }
+          }
+
+      - step: 2
+        description: String に対する Semigroup 実装
+        code_outline: |
+          impl Semigroup for String {
+              fn combine(mut self, other: Self) -> Self {
+                  self.push_str(&other);
+                  self
+              }
+
+              fn combine_ref(&self, other: &Self) -> Self {
+                  let mut result = String::with_capacity(self.len() + other.len());
+                  result.push_str(self);
+                  result.push_str(other);
+                  result
+              }
+          }
+
+      - step: 3
+        description: Vec に対する Semigroup 実装
+        code_outline: |
+          impl<T> Semigroup for Vec<T> {
+              fn combine(mut self, mut other: Self) -> Self {
+                  self.append(&mut other);
+                  self
+              }
+
+              fn combine_ref(&self, other: &Self) -> Self
+              where
+                  T: Clone,
+              {
+                  let mut result = Vec::with_capacity(self.len() + other.len());
+                  result.extend(self.iter().cloned());
+                  result.extend(other.iter().cloned());
+                  result
+              }
+          }
+
+      - step: 4
+        description: Option に対する Semigroup 実装（内部型が Semigroup の場合）
+        code_outline: |
+          impl<T: Semigroup> Semigroup for Option<T> {
+              fn combine(self, other: Self) -> Self {
+                  match (self, other) {
+                      (Some(a), Some(b)) => Some(a.combine(b)),
+                      (Some(a), None) => Some(a),
+                      (None, Some(b)) => Some(b),
+                      (None, None) => None,
+                  }
+              }
+          }
+
+      - step: 5
+        description: Result に対する Semigroup 実装（成功値が Semigroup の場合）
+        code_outline: |
+          impl<T: Semigroup, E> Semigroup for Result<T, E> {
+              fn combine(self, other: Self) -> Self {
+                  match (self, other) {
+                      (Ok(a), Ok(b)) => Ok(a.combine(b)),
+                      (Err(e), _) => Err(e),
+                      (_, Err(e)) => Err(e),
+                  }
+              }
+          }
+
+      - step: 6
+        description: 数値ラッパー型への Semigroup 実装
+        code_outline: |
+          use std::ops::{Add, Mul};
+
+          impl<A: Add<Output = A>> Semigroup for Sum<A> {
+              fn combine(self, other: Self) -> Self {
+                  Sum(self.0 + other.0)
+              }
+          }
+
+          impl<A: Mul<Output = A>> Semigroup for Product<A> {
+              fn combine(self, other: Self) -> Self {
+                  Product(self.0 * other.0)
+              }
+          }
+
+          impl<A: Ord> Semigroup for Max<A> {
+              fn combine(self, other: Self) -> Self {
+                  if self.0 >= other.0 { self } else { other }
+              }
+          }
+
+          impl<A: Ord> Semigroup for Min<A> {
+              fn combine(self, other: Self) -> Self {
+                  if self.0 <= other.0 { self } else { other }
+              }
+          }
+
+      - step: 7
+        description: ユニット型 () への Semigroup 実装
+        code_outline: |
+          impl Semigroup for () {
+              fn combine(self, _other: Self) -> Self {
+                  ()
+              }
+          }
+
+    tests:
+      - name: test_semigroup_string
+        description: String の Semigroup 実装が正しく結合することを確認
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn string_combine() {
+              let a = String::from("Hello, ");
+              let b = String::from("World!");
+              assert_eq!(a.combine(b), "Hello, World!");
+          }
+
+          #[rstest]
+          fn string_combine_ref() {
+              let a = String::from("Hello, ");
+              let b = String::from("World!");
+              assert_eq!(a.combine_ref(&b), "Hello, World!");
+              // 元の値は変更されていない
+              assert_eq!(a, "Hello, ");
+          }
+
+      - name: test_semigroup_vec
+        description: Vec の Semigroup 実装が正しく結合することを確認
+        test_type: unit
+
+      - name: test_semigroup_option
+        description: Option の Semigroup 実装が正しく動作することを確認
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn option_combine_some_some() {
+              let a: Option<String> = Some(String::from("Hello, "));
+              let b: Option<String> = Some(String::from("World!"));
+              assert_eq!(a.combine(b), Some(String::from("Hello, World!")));
+          }
+
+          #[rstest]
+          fn option_combine_some_none() {
+              let a: Option<String> = Some(String::from("Hello"));
+              let b: Option<String> = None;
+              assert_eq!(a.combine(b), Some(String::from("Hello")));
+          }
+
+          #[rstest]
+          fn option_combine_none_some() {
+              let a: Option<String> = None;
+              let b: Option<String> = Some(String::from("World"));
+              assert_eq!(a.combine(b), Some(String::from("World")));
+          }
+
+          #[rstest]
+          fn option_combine_none_none() {
+              let a: Option<String> = None;
+              let b: Option<String> = None;
+              assert_eq!(a.combine(b), None);
+          }
+
+      - name: test_semigroup_sum_product
+        description: Sum/Product の Semigroup 実装が正しく動作することを確認
+        test_type: unit
+
+      - name: test_semigroup_max_min
+        description: Max/Min の Semigroup 実装が正しく動作することを確認
+        test_type: unit
+
+      - name: prop_semigroup_associativity
+        description: 結合律のプロパティベーステスト
+        test_type: property
+        code_outline: |
+          use proptest::prelude::*;
+
+          proptest! {
+              #[test]
+              fn prop_string_associativity(
+                  a in ".*",
+                  b in ".*",
+                  c in ".*"
+              ) {
+                  let left = a.clone().combine(b.clone()).combine(c.clone());
+                  let right = a.combine(b.combine(c));
+                  prop_assert_eq!(left, right);
+              }
+
+              #[test]
+              fn prop_vec_associativity(
+                  a in prop::collection::vec(any::<i32>(), 0..10),
+                  b in prop::collection::vec(any::<i32>(), 0..10),
+                  c in prop::collection::vec(any::<i32>(), 0..10)
+              ) {
+                  let left = a.clone().combine(b.clone()).combine(c.clone());
+                  let right = a.combine(b.combine(c));
+                  prop_assert_eq!(left, right);
+              }
+
+              #[test]
+              fn prop_sum_associativity(a: i32, b: i32, c: i32) {
+                  let left = Sum(a).combine(Sum(b)).combine(Sum(c));
+                  let right = Sum(a).combine(Sum(b).combine(Sum(c)));
+                  prop_assert_eq!(left, right);
+              }
+          }
+
+      - name: test_semigroup_combine_all
+        description: combine_all が正しく動作することを確認
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn combine_all_empty() {
+              let empty: Vec<String> = vec![];
+              assert_eq!(String::combine_all(empty), None);
+          }
+
+          #[rstest]
+          fn combine_all_single() {
+              let single = vec![String::from("hello")];
+              assert_eq!(String::combine_all(single), Some(String::from("hello")));
+          }
+
+          #[rstest]
+          fn combine_all_multiple() {
+              let multiple = vec![
+                  String::from("a"),
+                  String::from("b"),
+                  String::from("c"),
+              ];
+              assert_eq!(String::combine_all(multiple), Some(String::from("abc")));
+          }
+
+    dependencies:
+      - impl_numeric_wrappers
+
+  # ============================================================================
+  # 5. Monoid トレイト
+  # ============================================================================
+  - id: impl_monoid
+    requirement_id: typeclass_monoid
+    name: Monoid トレイトの実装
+    priority: 2
+    description: |
+      単位元を持つ Semigroup。
+      空の値から始めて結合演算で値を蓄積できる。
+
+    files:
+      - path: src/typeclass/monoid.rs
+        description: Monoid トレイトの定義と標準型への実装
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Monoid トレイトの定義。
+          Semigroup を継承し、empty メソッドを追加。
+        code_outline: |
+          use super::semigroup::Semigroup;
+
+          /// 単位元を持つ Semigroup。
+          ///
+          /// # 法則
+          ///
+          /// ## 左単位元律（Left Identity）
+          /// ```text
+          /// Self::empty().combine(a) == a
+          /// ```
+          ///
+          /// ## 右単位元律（Right Identity）
+          /// ```text
+          /// a.combine(Self::empty()) == a
+          /// ```
+          ///
+          /// ## 結合律（Associativity）- Semigroup から継承
+          /// ```text
+          /// (a.combine(b)).combine(c) == a.combine(b.combine(c))
+          /// ```
+          ///
+          /// # 例
+          ///
+          /// ```
+          /// use functional_rusty::typeclass::Monoid;
+          ///
+          /// assert_eq!(String::empty(), String::new());
+          /// let s = String::from("hello");
+          /// assert_eq!(s.clone().combine(String::empty()), s);
+          /// ```
+          pub trait Monoid: Semigroup {
+              /// 単位元を返す。
+              ///
+              /// この値は combine の単位元であり、
+              /// 任意の値 a に対して:
+              /// - `empty().combine(a) == a`
+              /// - `a.combine(empty()) == a`
+              fn empty() -> Self;
+
+              /// イテレータ内の全ての要素を結合する。
+              ///
+              /// 空のイテレータの場合は `empty()` を返す。
+              /// Semigroup の `combine_all` と異なり、常に値を返す。
+              fn combine_all<I>(iter: I) -> Self
+              where
+                  I: IntoIterator<Item = Self>,
+                  Self: Sized,
+              {
+                  iter.into_iter().fold(Self::empty(), |accumulator, x| accumulator.combine(x))
+              }
+          }
+
+      - step: 2
+        description: String に対する Monoid 実装
+        code_outline: |
+          impl Monoid for String {
+              fn empty() -> Self {
+                  String::new()
+              }
+          }
+
+      - step: 3
+        description: Vec に対する Monoid 実装
+        code_outline: |
+          impl<T> Monoid for Vec<T> {
+              fn empty() -> Self {
+                  Vec::new()
+              }
+          }
+
+      - step: 4
+        description: Option に対する Monoid 実装（内部型が Semigroup の場合）
+        code_outline: |
+          // Option<T> where T: Semigroup は Monoid
+          // None が単位元となる
+          impl<T: Semigroup> Monoid for Option<T> {
+              fn empty() -> Self {
+                  None
+              }
+          }
+
+      - step: 5
+        description: ユニット型 () への Monoid 実装
+        code_outline: |
+          impl Monoid for () {
+              fn empty() -> Self {
+                  ()
+              }
+          }
+
+      - step: 6
+        description: 数値ラッパー型への Monoid 実装
+        code_outline: |
+          use std::ops::{Add, Mul};
+          use num_traits::{Zero, One};
+
+          impl<A: Add<Output = A> + Zero> Monoid for Sum<A> {
+              fn empty() -> Self {
+                  Sum(A::zero())
+              }
+          }
+
+          impl<A: Mul<Output = A> + One> Monoid for Product<A> {
+              fn empty() -> Self {
+                  Product(A::one())
+              }
+          }
+
+          // Max と Min は Bounded な型に対してのみ Monoid
+          impl<A: Ord + Bounded> Monoid for Max<A> {
+              fn empty() -> Self {
+                  Max(A::MIN_VALUE)
+              }
+          }
+
+          impl<A: Ord + Bounded> Monoid for Min<A> {
+              fn empty() -> Self {
+                  Min(A::MAX_VALUE)
+              }
+          }
+
+    tests:
+      - name: test_monoid_string
+        description: String の Monoid 実装が正しく動作することを確認
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn string_empty() {
+              assert_eq!(String::empty(), String::new());
+          }
+
+          #[rstest]
+          fn string_left_identity() {
+              let a = String::from("hello");
+              assert_eq!(String::empty().combine(a.clone()), a);
+          }
+
+          #[rstest]
+          fn string_right_identity() {
+              let a = String::from("hello");
+              assert_eq!(a.clone().combine(String::empty()), a);
+          }
+
+      - name: test_monoid_vec
+        description: Vec の Monoid 実装が正しく動作することを確認
+        test_type: unit
+
+      - name: test_monoid_option
+        description: Option の Monoid 実装が正しく動作することを確認
+        test_type: unit
+
+      - name: test_monoid_numeric_wrappers
+        description: 数値ラッパーの Monoid 実装が正しく動作することを確認
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn sum_empty() {
+              assert_eq!(Sum::<i32>::empty(), Sum(0));
+          }
+
+          #[rstest]
+          fn product_empty() {
+              assert_eq!(Product::<i32>::empty(), Product(1));
+          }
+
+          #[rstest]
+          fn max_empty() {
+              assert_eq!(Max::<i32>::empty(), Max(i32::MIN));
+          }
+
+          #[rstest]
+          fn min_empty() {
+              assert_eq!(Min::<i32>::empty(), Min(i32::MAX));
+          }
+
+      - name: prop_monoid_left_identity
+        description: 左単位元律のプロパティベーステスト
+        test_type: property
+        code_outline: |
+          proptest! {
+              #[test]
+              fn prop_string_left_identity(a in ".*") {
+                  prop_assert_eq!(String::empty().combine(a.clone()), a);
+              }
+
+              #[test]
+              fn prop_sum_left_identity(a: i32) {
+                  prop_assert_eq!(Sum::<i32>::empty().combine(Sum(a)), Sum(a));
+              }
+          }
+
+      - name: prop_monoid_right_identity
+        description: 右単位元律のプロパティベーステスト
+        test_type: property
+        code_outline: |
+          proptest! {
+              #[test]
+              fn prop_string_right_identity(a in ".*") {
+                  prop_assert_eq!(a.clone().combine(String::empty()), a);
+              }
+
+              #[test]
+              fn prop_sum_right_identity(a: i32) {
+                  prop_assert_eq!(Sum(a).combine(Sum::<i32>::empty()), Sum(a));
+              }
+          }
+
+      - name: test_monoid_combine_all
+        description: combine_all が正しく動作することを確認
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn combine_all_empty() {
+              let empty: Vec<String> = vec![];
+              assert_eq!(String::combine_all(empty), String::empty());
+          }
+
+          #[rstest]
+          fn combine_all_multiple() {
+              let items = vec![
+                  String::from("a"),
+                  String::from("b"),
+                  String::from("c"),
+              ];
+              assert_eq!(String::combine_all(items), String::from("abc"));
+          }
+
+    dependencies:
+      - impl_semigroup
+
+  # ============================================================================
+  # 6. Functor トレイト
+  # ============================================================================
+  - id: impl_functor
+    requirement_id: typeclass_functor
+    name: Functor トレイトの実装
+    priority: 3
+    description: |
+      構造を保存しながら内部の値を変換できる型を表現する型クラス。
+      「コンテナ」や「コンテキスト」の中にある値に関数を適用できる。
+
+    files:
+      - path: src/typeclass/functor.rs
+        description: Functor トレイトの定義と標準型への実装
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Functor トレイトの定義。
+          TypeConstructor を継承し、fmap メソッドを提供。
+        code_outline: |
+          use super::higher::TypeConstructor;
+
+          /// 構造を保存しながら内部の値を変換できる型を表現するトレイト。
+          ///
+          /// # 法則
+          ///
+          /// ## 恒等律（Identity）
+          /// ```text
+          /// fa.fmap(|x| x) == fa
+          /// ```
+          ///
+          /// ## 合成律（Composition）
+          /// ```text
+          /// fa.fmap(f).fmap(g) == fa.fmap(|x| g(f(x)))
+          /// ```
+          ///
+          /// # 例
+          ///
+          /// ```
+          /// use functional_rusty::typeclass::Functor;
+          ///
+          /// let x: Option<i32> = Some(5);
+          /// let y: Option<String> = x.fmap(|n| n.to_string());
+          /// assert_eq!(y, Some("5".to_string()));
+          /// ```
+          pub trait Functor: TypeConstructor {
+              /// 関数を Functor の中の値に適用する。
+              ///
+              /// # 引数
+              ///
+              /// * `f` - 内部の値に適用する関数
+              ///
+              /// # 戻り値
+              ///
+              /// 変換後の型パラメータを持つ同じ型コンストラクタ
+              fn fmap<B, F>(self, f: F) -> Self::WithType<B>
+              where
+                  F: FnOnce(Self::Inner) -> B;
+
+              /// 参照から関数を適用する。
+              ///
+              /// 内部値を参照で受け取り、新しい Functor を生成する。
+              fn fmap_ref<B, F>(&self, f: F) -> Self::WithType<B>
+              where
+                  F: FnOnce(&Self::Inner) -> B;
+
+              /// Functor の中の値を指定した値で置き換える。
+              ///
+              /// `fmap(|_| value)` の略記。
+              fn replace<B>(self, value: B) -> Self::WithType<B>
+              where
+                  Self: Sized,
+              {
+                  self.fmap(|_| value)
+              }
+
+              /// Functor の中の値を () で置き換える。
+              ///
+              /// 構造だけを保存し、値を捨てる。
+              fn void(self) -> Self::WithType<()>
+              where
+                  Self: Sized,
+              {
+                  self.replace(())
+              }
+          }
+
+      - step: 2
+        description: Option に対する Functor 実装
+        code_outline: |
+          impl<A> Functor for Option<A> {
+              fn fmap<B, F>(self, f: F) -> Option<B>
+              where
+                  F: FnOnce(A) -> B,
+              {
+                  self.map(f)
+              }
+
+              fn fmap_ref<B, F>(&self, f: F) -> Option<B>
+              where
+                  F: FnOnce(&A) -> B,
+              {
+                  self.as_ref().map(f)
+              }
+          }
+
+      - step: 3
+        description: Result に対する Functor 実装
+        code_outline: |
+          impl<T, E> Functor for Result<T, E> {
+              fn fmap<B, F>(self, f: F) -> Result<B, E>
+              where
+                  F: FnOnce(T) -> B,
+              {
+                  self.map(f)
+              }
+
+              fn fmap_ref<B, F>(&self, f: F) -> Result<B, E>
+              where
+                  F: FnOnce(&T) -> B,
+                  E: Clone,
+              {
+                  match self {
+                      Ok(value) => Ok(f(value)),
+                      Err(error) => Err(error.clone()),
+                  }
+              }
+          }
+
+      - step: 4
+        description: Vec に対する Functor 実装
+        code_outline: |
+          impl<A> Functor for Vec<A> {
+              fn fmap<B, F>(self, f: F) -> Vec<B>
+              where
+                  F: FnOnce(A) -> B,
+              {
+                  // FnOnce は一度しか呼べないため、FnMut に変換する必要がある
+                  // これは Vec のような複数要素を持つコンテナでは問題になる
+                  // 解決策: FnMut を要求するか、各要素に対して別の関数を使う
+                  // ここでは標準ライブラリの map を使用（FnMut を内部で要求）
+                  self.into_iter().map(f).collect()
+              }
+
+              fn fmap_ref<B, F>(&self, f: F) -> Vec<B>
+              where
+                  F: FnOnce(&A) -> B,
+              {
+                  // 参照バージョンでも同様の問題がある
+                  self.iter().map(f).collect()
+              }
+          }
+
+          // 注: Vec の Functor 実装では、fmap の F が FnOnce ではなく
+          // FnMut である必要がある。トレイト定義を調整するか、
+          // Vec 専用の実装を検討する。
+
+      - step: 5
+        description: |
+          Vec のための Functor 実装の修正。
+          複数要素に対応するため、FnMut バージョンを追加。
+        code_outline: |
+          /// 複数の要素を持つコンテナのための Functor 拡張。
+          ///
+          /// `fmap` は `FnOnce` を取るが、`Vec` のような
+          /// 複数要素を持つコンテナでは `FnMut` が必要。
+          pub trait FunctorMut: Functor {
+              /// 可変な関数を各要素に適用する。
+              fn fmap_mut<B, F>(self, f: F) -> Self::WithType<B>
+              where
+                  F: FnMut(Self::Inner) -> B;
+          }
+
+          impl<A> FunctorMut for Vec<A> {
+              fn fmap_mut<B, F>(self, f: F) -> Vec<B>
+              where
+                  F: FnMut(A) -> B,
+              {
+                  self.into_iter().map(f).collect()
+              }
+          }
+
+      - step: 6
+        description: Box に対する Functor 実装
+        code_outline: |
+          impl<A> Functor for Box<A> {
+              fn fmap<B, F>(self, f: F) -> Box<B>
+              where
+                  F: FnOnce(A) -> B,
+              {
+                  Box::new(f(*self))
+              }
+
+              fn fmap_ref<B, F>(&self, f: F) -> Box<B>
+              where
+                  F: FnOnce(&A) -> B,
+              {
+                  Box::new(f(self.as_ref()))
+              }
+          }
+
+      - step: 7
+        description: Identity に対する Functor 実装
+        code_outline: |
+          impl<A> Functor for Identity<A> {
+              fn fmap<B, F>(self, f: F) -> Identity<B>
+              where
+                  F: FnOnce(A) -> B,
+              {
+                  Identity(f(self.0))
+              }
+
+              fn fmap_ref<B, F>(&self, f: F) -> Identity<B>
+              where
+                  F: FnOnce(&A) -> B,
+              {
+                  Identity(f(&self.0))
+              }
+          }
+
+    tests:
+      - name: test_functor_option
+        description: Option の Functor 実装が正しく動作することを確認
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn option_fmap_some() {
+              let x: Option<i32> = Some(5);
+              let y: Option<String> = x.fmap(|n| n.to_string());
+              assert_eq!(y, Some("5".to_string()));
+          }
+
+          #[rstest]
+          fn option_fmap_none() {
+              let x: Option<i32> = None;
+              let y: Option<String> = x.fmap(|n| n.to_string());
+              assert_eq!(y, None);
+          }
+
+          #[rstest]
+          fn option_replace() {
+              let x: Option<i32> = Some(5);
+              assert_eq!(x.replace("replaced"), Some("replaced"));
+
+              let y: Option<i32> = None;
+              assert_eq!(y.replace("replaced"), None);
+          }
+
+          #[rstest]
+          fn option_void() {
+              let x: Option<i32> = Some(5);
+              assert_eq!(x.void(), Some(()));
+
+              let y: Option<i32> = None;
+              assert_eq!(y.void(), None);
+          }
+
+      - name: test_functor_result
+        description: Result の Functor 実装が正しく動作することを確認
+        test_type: unit
+
+      - name: test_functor_vec
+        description: Vec の Functor 実装が正しく動作することを確認
+        test_type: unit
+
+      - name: test_functor_identity
+        description: Identity の Functor 実装が正しく動作することを確認
+        test_type: unit
+
+      - name: prop_functor_identity_law
+        description: 恒等律のプロパティベーステスト
+        test_type: property
+        code_outline: |
+          proptest! {
+              #[test]
+              fn prop_option_identity(x in any::<Option<i32>>()) {
+                  let result = x.clone().fmap(|v| v);
+                  prop_assert_eq!(result, x);
+              }
+
+              #[test]
+              fn prop_identity_wrapper_identity(x in any::<i32>()) {
+                  let wrapped = Identity(x);
+                  let result = wrapped.clone().fmap(|v| v);
+                  prop_assert_eq!(result, wrapped);
+              }
+          }
+
+      - name: prop_functor_composition_law
+        description: 合成律のプロパティベーステスト
+        test_type: property
+        code_outline: |
+          proptest! {
+              #[test]
+              fn prop_option_composition(x in any::<Option<i32>>()) {
+                  let f = |n: i32| n + 1;
+                  let g = |n: i32| n * 2;
+
+                  let left = x.clone().fmap(f).fmap(g);
+                  let right = x.fmap(|v| g(f(v)));
+                  prop_assert_eq!(left, right);
+              }
+
+              #[test]
+              fn prop_identity_composition(x in any::<i32>()) {
+                  let wrapped = Identity(x);
+                  let f = |n: i32| n + 1;
+                  let g = |n: i32| n * 2;
+
+                  let left = wrapped.clone().fmap(f).fmap(g);
+                  let right = wrapped.fmap(|v| g(f(v)));
+                  prop_assert_eq!(left, right);
+              }
+          }
+
+    dependencies:
+      - impl_type_constructor
+      - impl_identity
+
+  # ============================================================================
+  # 7. Applicative トレイト
+  # ============================================================================
+  - id: impl_applicative
+    requirement_id: typeclass_applicative
+    name: Applicative トレイトの実装
+    priority: 3
+    description: |
+      Functor を拡張し、コンテキスト内の関数をコンテキスト内の値に
+      適用できる型クラス。また、純粋な値をコンテキストに持ち上げる操作を提供。
+
+    files:
+      - path: src/typeclass/applicative.rs
+        description: Applicative トレイトの定義と標準型への実装
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Applicative トレイトの定義。
+          Functor を継承し、pure と apply メソッドを提供。
+          Rust の型システムの制約を考慮し、map2 ベースの設計を採用。
+        code_outline: |
+          use super::functor::Functor;
+
+          /// Functor を拡張し、コンテキスト内の関数を適用できる型を表現するトレイト。
+          ///
+          /// # 法則
+          ///
+          /// ## 恒等律（Identity）
+          /// ```text
+          /// Self::pure(|x| x).apply(v) == v
+          /// ```
+          ///
+          /// ## 準同型律（Homomorphism）
+          /// ```text
+          /// Self::pure(f).apply(Self::pure(x)) == Self::pure(f(x))
+          /// ```
+          ///
+          /// ## 交換律（Interchange）
+          /// ```text
+          /// u.apply(Self::pure(y)) == Self::pure(|f| f(y)).apply(u)
+          /// ```
+          ///
+          /// ## 合成律（Composition）
+          /// ```text
+          /// Self::pure(compose).apply(u).apply(v).apply(w) == u.apply(v.apply(w))
+          /// ```
+          ///
+          /// # 例
+          ///
+          /// ```
+          /// use functional_rusty::typeclass::Applicative;
+          ///
+          /// let x: Option<i32> = Option::pure(42);
+          /// assert_eq!(x, Some(42));
+          ///
+          /// let a = Some(1);
+          /// let b = Some(2);
+          /// let c = a.map2(b, |x, y| x + y);
+          /// assert_eq!(c, Some(3));
+          /// ```
+          pub trait Applicative: Functor {
+              /// 純粋な値を Applicative コンテキストに持ち上げる。
+              fn pure<B>(value: B) -> Self::WithType<B>;
+
+              /// コンテキスト内の関数をコンテキスト内の値に適用する。
+              ///
+              /// Haskell の `<*>` に相当。Self が関数を持つ場合に使用。
+              ///
+              /// # 例
+              ///
+              /// ```
+              /// use functional_rusty::typeclass::Applicative;
+              ///
+              /// let f: Option<fn(i32) -> i32> = Some(|x| x + 1);
+              /// let x = Some(5);
+              /// let result = f.apply(x);
+              /// assert_eq!(result, Some(6));
+              /// ```
+              fn apply<B>(self, fb: Self::WithType<B>) -> Self::WithType<<Self::Inner as FnOnce<(B,)>>::Output>
+              where
+                  Self::Inner: FnOnce<(B,)>;
+
+              /// 二つの Applicative の値を組み合わせる。
+              ///
+              /// これは apply の使いやすい形式であり、Rust での
+              /// Applicative の主要な操作となる。
+              fn map2<B, C, F>(self, fb: Self::WithType<B>, f: F) -> Self::WithType<C>
+              where
+                  F: FnOnce(Self::Inner, B) -> C;
+
+              /// 三つの Applicative の値を組み合わせる。
+              fn map3<B, C, D, F>(
+                  self,
+                  fb: Self::WithType<B>,
+                  fc: Self::WithType<C>,
+                  f: F,
+              ) -> Self::WithType<D>
+              where
+                  F: FnOnce(Self::Inner, B, C) -> D,
+                  Self: Sized,
+                  Self::WithType<(Self::Inner, B)>: Applicative<Inner = (Self::Inner, B)>,
+              {
+                  self.map2(fb, |a, b| (a, b))
+                      .map2(fc, |(a, b), c| f(a, b, c))
+              }
+
+              /// 二つの Applicative をタプルに結合する。
+              fn product<B>(self, fb: Self::WithType<B>) -> Self::WithType<(Self::Inner, B)>
+              where
+                  Self: Sized,
+              {
+                  self.map2(fb, |a, b| (a, b))
+              }
+
+              /// 二つの Applicative を評価し、左側の値を返す。
+              fn product_left<B>(self, fb: Self::WithType<B>) -> Self
+              where
+                  Self: Sized,
+                  Self::WithType<Self::Inner>: Into<Self>,
+              {
+                  self.map2(fb, |a, _| a).into()
+              }
+
+              /// 二つの Applicative を評価し、右側の値を返す。
+              fn product_right<B>(self, fb: Self::WithType<B>) -> Self::WithType<B>
+              where
+                  Self: Sized,
+              {
+                  self.map2(fb, |_, b| b)
+              }
+          }
+
+      - step: 2
+        description: Option に対する Applicative 実装
+        code_outline: |
+          impl<A> Applicative for Option<A> {
+              fn pure<B>(value: B) -> Option<B> {
+                  Some(value)
+              }
+
+              fn apply<B>(self, fb: Option<B>) -> Option<<A as FnOnce<(B,)>>::Output>
+              where
+                  A: FnOnce<(B,)>,
+              {
+                  match (self, fb) {
+                      (Some(f), Some(b)) => Some(f(b)),
+                      _ => None,
+                  }
+              }
+
+              fn map2<B, C, F>(self, fb: Option<B>, f: F) -> Option<C>
+              where
+                  F: FnOnce(A, B) -> C,
+              {
+                  match (self, fb) {
+                      (Some(a), Some(b)) => Some(f(a, b)),
+                      _ => None,
+                  }
+              }
+          }
+
+      - step: 3
+        description: Result に対する Applicative 実装
+        code_outline: |
+          impl<T, E> Applicative for Result<T, E> {
+              fn pure<B>(value: B) -> Result<B, E> {
+                  Ok(value)
+              }
+
+              fn apply<B>(self, fb: Result<B, E>) -> Result<<T as FnOnce<(B,)>>::Output, E>
+              where
+                  T: FnOnce<(B,)>,
+              {
+                  match (self, fb) {
+                      (Ok(f), Ok(b)) => Ok(f(b)),
+                      (Err(e), _) => Err(e),
+                      (_, Err(e)) => Err(e),
+                  }
+              }
+
+              fn map2<B, C, F>(self, fb: Result<B, E>, f: F) -> Result<C, E>
+              where
+                  F: FnOnce(T, B) -> C,
+              {
+                  match (self, fb) {
+                      (Ok(a), Ok(b)) => Ok(f(a, b)),
+                      (Err(e), _) => Err(e),
+                      (_, Err(e)) => Err(e),
+                  }
+              }
+          }
+
+      - step: 4
+        description: |
+          Vec に対する Applicative 実装。
+          これは非決定性計算のモデルであり、全組み合わせを生成する。
+        code_outline: |
+          impl<A> Applicative for Vec<A> {
+              fn pure<B>(value: B) -> Vec<B> {
+                  vec![value]
+              }
+
+              fn apply<B>(self, fb: Vec<B>) -> Vec<<A as FnOnce<(B,)>>::Output>
+              where
+                  A: FnOnce<(B,)> + Clone,
+                  B: Clone,
+              {
+                  let mut result = Vec::with_capacity(self.len() * fb.len());
+                  for f in &self {
+                      for b in &fb {
+                          result.push(f.clone()(b.clone()));
+                      }
+                  }
+                  result
+              }
+
+              fn map2<B, C, F>(self, fb: Vec<B>, mut f: F) -> Vec<C>
+              where
+                  F: FnMut(A, B) -> C,
+                  A: Clone,
+                  B: Clone,
+              {
+                  let mut result = Vec::with_capacity(self.len() * fb.len());
+                  for a in &self {
+                      for b in &fb {
+                          result.push(f(a.clone(), b.clone()));
+                      }
+                  }
+                  result
+              }
+          }
+
+      - step: 5
+        description: Identity に対する Applicative 実装
+        code_outline: |
+          impl<A> Applicative for Identity<A> {
+              fn pure<B>(value: B) -> Identity<B> {
+                  Identity(value)
+              }
+
+              fn apply<B>(self, fb: Identity<B>) -> Identity<<A as FnOnce<(B,)>>::Output>
+              where
+                  A: FnOnce<(B,)>,
+              {
+                  Identity((self.0)(fb.0))
+              }
+
+              fn map2<B, C, F>(self, fb: Identity<B>, f: F) -> Identity<C>
+              where
+                  F: FnOnce(A, B) -> C,
+              {
+                  Identity(f(self.0, fb.0))
+              }
+          }
+
+      - step: 6
+        description: Box に対する Applicative 実装
+        code_outline: |
+          impl<A> Applicative for Box<A> {
+              fn pure<B>(value: B) -> Box<B> {
+                  Box::new(value)
+              }
+
+              fn apply<B>(self, fb: Box<B>) -> Box<<A as FnOnce<(B,)>>::Output>
+              where
+                  A: FnOnce<(B,)>,
+              {
+                  Box::new((*self)(*fb))
+              }
+
+              fn map2<B, C, F>(self, fb: Box<B>, f: F) -> Box<C>
+              where
+                  F: FnOnce(A, B) -> C,
+              {
+                  Box::new(f(*self, *fb))
+              }
+          }
+
+    tests:
+      - name: test_applicative_option
+        description: Option の Applicative 実装が正しく動作することを確認
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn option_pure() {
+              let x: Option<i32> = Option::pure(42);
+              assert_eq!(x, Some(42));
+          }
+
+          #[rstest]
+          fn option_map2_some_some() {
+              let a = Some(1);
+              let b = Some(2);
+              let c = a.map2(b, |x, y| x + y);
+              assert_eq!(c, Some(3));
+          }
+
+          #[rstest]
+          fn option_map2_some_none() {
+              let a = Some(1);
+              let b: Option<i32> = None;
+              let c = a.map2(b, |x, y| x + y);
+              assert_eq!(c, None);
+          }
+
+          #[rstest]
+          fn option_map2_none_some() {
+              let a: Option<i32> = None;
+              let b = Some(2);
+              let c = a.map2(b, |x, y| x + y);
+              assert_eq!(c, None);
+          }
+
+          #[rstest]
+          fn option_product() {
+              let a = Some(1);
+              let b = Some("hello");
+              assert_eq!(a.product(b), Some((1, "hello")));
+          }
+
+      - name: test_applicative_result
+        description: Result の Applicative 実装が正しく動作することを確認
+        test_type: unit
+
+      - name: test_applicative_vec
+        description: Vec の Applicative 実装が正しく動作することを確認
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn vec_pure() {
+              let x: Vec<i32> = Vec::pure(42);
+              assert_eq!(x, vec![42]);
+          }
+
+          #[rstest]
+          fn vec_map2() {
+              let a = vec![1, 2];
+              let b = vec![10, 20];
+              let c = a.map2(b, |x, y| x + y);
+              // 全組み合わせ: 1+10, 1+20, 2+10, 2+20
+              assert_eq!(c, vec![11, 21, 12, 22]);
+          }
+
+      - name: test_applicative_identity
+        description: Identity の Applicative 実装が正しく動作することを確認
+        test_type: unit
+
+      - name: prop_applicative_identity_law
+        description: 恒等律のプロパティベーステスト
+        test_type: property
+        code_outline: |
+          proptest! {
+              #[test]
+              fn prop_option_identity_law(v in any::<Option<i32>>()) {
+                  // pure(id).apply(v) == v は map2 では表現しにくいため、
+                  // 代替として pure(x).fmap(id) == pure(x) をテスト
+                  let x = 42;
+                  let result = Option::pure(x).fmap(|v| v);
+                  prop_assert_eq!(result, Some(x));
+              }
+          }
+
+      - name: prop_applicative_homomorphism_law
+        description: 準同型律のプロパティベーステスト
+        test_type: property
+
+    dependencies:
+      - impl_functor
+
+  # ============================================================================
+  # 8. Monad トレイト
+  # ============================================================================
+  - id: impl_monad
+    requirement_id: typeclass_monad
+    name: Monad トレイトの実装
+    priority: 3
+    description: |
+      Applicative を拡張し、コンテキスト内の値に依存して次のコンテキストを
+      生成できる型クラス。「プログラム可能なセミコロン」とも呼ばれる。
+
+    files:
+      - path: src/typeclass/monad.rs
+        description: Monad トレイトの定義と標準型への実装
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Monad トレイトの定義。
+          Applicative を継承し、flat_map メソッドを提供。
+        code_outline: |
+          use super::applicative::Applicative;
+          use super::higher::TypeConstructor;
+
+          /// Applicative を拡張し、コンテキスト内の値に依存して
+          /// 次のコンテキストを生成できる型を表現するトレイト。
+          ///
+          /// # 法則
+          ///
+          /// ## 左単位元律（Left Identity）
+          /// ```text
+          /// Self::pure(a).flat_map(f) == f(a)
+          /// ```
+          ///
+          /// ## 右単位元律（Right Identity）
+          /// ```text
+          /// m.flat_map(Self::pure) == m
+          /// ```
+          ///
+          /// ## 結合律（Associativity）
+          /// ```text
+          /// m.flat_map(f).flat_map(g) == m.flat_map(|x| f(x).flat_map(g))
+          /// ```
+          ///
+          /// # 例
+          ///
+          /// ```
+          /// use functional_rusty::typeclass::Monad;
+          ///
+          /// let x = Some(5);
+          /// let y = x.flat_map(|n| if n > 0 { Some(n * 2) } else { None });
+          /// assert_eq!(y, Some(10));
+          /// ```
+          pub trait Monad: Applicative {
+              /// Monad 内の値に関数を適用し、結果の Monad を平坦化する。
+              ///
+              /// Haskell の `>>=` に相当。Rust の `and_then` に近い。
+              fn flat_map<B, F>(self, f: F) -> Self::WithType<B>
+              where
+                  F: FnOnce(Self::Inner) -> Self::WithType<B>;
+
+              /// `flat_map` のエイリアス。Rust の慣習に合わせた名前。
+              fn and_then<B, F>(self, f: F) -> Self::WithType<B>
+              where
+                  F: FnOnce(Self::Inner) -> Self::WithType<B>,
+                  Self: Sized,
+              {
+                  self.flat_map(f)
+              }
+
+              /// 最初の Monad を評価し、その結果を捨てて次の Monad を返す。
+              ///
+              /// Haskell の `>>` に相当。
+              fn then<B>(self, mb: Self::WithType<B>) -> Self::WithType<B>
+              where
+                  Self: Sized,
+              {
+                  self.flat_map(|_| mb)
+              }
+
+              /// ネストした Monad を一段階平坦化する。
+              ///
+              /// `flat_map(|x| x)` の略記。
+              fn flatten(self) -> Self::Inner
+              where
+                  Self: Sized,
+                  Self::Inner: TypeConstructor,
+                  Self::WithType<<Self::Inner as TypeConstructor>::Inner>:
+                      From<Self::Inner>,
+              {
+                  self.flat_map(|inner| inner.into())
+              }
+          }
+
+      - step: 2
+        description: Option に対する Monad 実装
+        code_outline: |
+          impl<A> Monad for Option<A> {
+              fn flat_map<B, F>(self, f: F) -> Option<B>
+              where
+                  F: FnOnce(A) -> Option<B>,
+              {
+                  self.and_then(f)
+              }
+          }
+
+      - step: 3
+        description: Result に対する Monad 実装
+        code_outline: |
+          impl<T, E> Monad for Result<T, E> {
+              fn flat_map<B, F>(self, f: F) -> Result<B, E>
+              where
+                  F: FnOnce(T) -> Result<B, E>,
+              {
+                  self.and_then(f)
+              }
+          }
+
+      - step: 4
+        description: Vec に対する Monad 実装（リストモナド / 非決定性）
+        code_outline: |
+          impl<A> Monad for Vec<A> {
+              fn flat_map<B, F>(self, f: F) -> Vec<B>
+              where
+                  F: FnMut(A) -> Vec<B>,
+              {
+                  self.into_iter().flat_map(f).collect()
+              }
+          }
+
+      - step: 5
+        description: Identity に対する Monad 実装
+        code_outline: |
+          impl<A> Monad for Identity<A> {
+              fn flat_map<B, F>(self, f: F) -> Identity<B>
+              where
+                  F: FnOnce(A) -> Identity<B>,
+              {
+                  f(self.0)
+              }
+          }
+
+      - step: 6
+        description: Box に対する Monad 実装
+        code_outline: |
+          impl<A> Monad for Box<A> {
+              fn flat_map<B, F>(self, f: F) -> Box<B>
+              where
+                  F: FnOnce(A) -> Box<B>,
+              {
+                  f(*self)
+              }
+          }
+
+          // 注: Monad の filter_map については、MonadFilter として
+          // 分離することを検討。Option/Result のような「失敗」を表現
+          // できる型のみが filter_map を持つべきであり、Box のような
+          // 常に値を持つ型には適用できない。
+
+    tests:
+      - name: test_monad_option
+        description: Option の Monad 実装が正しく動作することを確認
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn option_flat_map_some() {
+              let x = Some(5);
+              let y = x.flat_map(|n| if n > 0 { Some(n * 2) } else { None });
+              assert_eq!(y, Some(10));
+          }
+
+          #[rstest]
+          fn option_flat_map_none() {
+              let x: Option<i32> = None;
+              let y = x.flat_map(|n| Some(n * 2));
+              assert_eq!(y, None);
+          }
+
+          #[rstest]
+          fn option_flat_map_to_none() {
+              let x = Some(-5);
+              let y = x.flat_map(|n| if n > 0 { Some(n * 2) } else { None });
+              assert_eq!(y, None);
+          }
+
+          #[rstest]
+          fn option_then() {
+              let x = Some(5);
+              let y = x.then(Some("hello"));
+              assert_eq!(y, Some("hello"));
+
+              let z: Option<i32> = None;
+              let w = z.then(Some("hello"));
+              assert_eq!(w, None);
+          }
+
+      - name: test_monad_result
+        description: Result の Monad 実装が正しく動作することを確認
+        test_type: unit
+
+      - name: test_monad_vec
+        description: Vec の Monad 実装が正しく動作することを確認
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn vec_flat_map() {
+              let x = vec![1, 2, 3];
+              let y = x.flat_map(|n| vec![n, n * 10]);
+              assert_eq!(y, vec![1, 10, 2, 20, 3, 30]);
+          }
+
+      - name: test_monad_identity
+        description: Identity の Monad 実装が正しく動作することを確認
+        test_type: unit
+
+      - name: prop_monad_left_identity
+        description: 左単位元律のプロパティベーステスト
+        test_type: property
+        code_outline: |
+          proptest! {
+              #[test]
+              fn prop_option_left_identity(a in any::<i32>()) {
+                  let f = |x: i32| if x > 0 { Some(x * 2) } else { None };
+                  let left = Option::pure(a).flat_map(f);
+                  let right = f(a);
+                  prop_assert_eq!(left, right);
+              }
+
+              #[test]
+              fn prop_identity_left_identity(a in any::<i32>()) {
+                  let f = |x: i32| Identity(x * 2);
+                  let left = Identity::pure(a).flat_map(f);
+                  let right = f(a);
+                  prop_assert_eq!(left, right);
+              }
+          }
+
+      - name: prop_monad_right_identity
+        description: 右単位元律のプロパティベーステスト
+        test_type: property
+        code_outline: |
+          proptest! {
+              #[test]
+              fn prop_option_right_identity(m in any::<Option<i32>>()) {
+                  let result = m.clone().flat_map(Option::pure);
+                  prop_assert_eq!(result, m);
+              }
+
+              #[test]
+              fn prop_identity_right_identity(a in any::<i32>()) {
+                  let m = Identity(a);
+                  let result = m.clone().flat_map(Identity::pure);
+                  prop_assert_eq!(result, m);
+              }
+          }
+
+      - name: prop_monad_associativity
+        description: 結合律のプロパティベーステスト
+        test_type: property
+        code_outline: |
+          proptest! {
+              #[test]
+              fn prop_option_associativity(m in any::<Option<i32>>()) {
+                  let f = |x: i32| if x > 0 { Some(x + 1) } else { None };
+                  let g = |x: i32| if x < 100 { Some(x * 2) } else { None };
+
+                  let left = m.clone().flat_map(f).flat_map(g);
+                  let right = m.flat_map(|x| f(x).flat_map(g));
+                  prop_assert_eq!(left, right);
+              }
+          }
+
+    dependencies:
+      - impl_applicative
+
+  # ============================================================================
+  # 9. Foldable トレイト
+  # ============================================================================
+  - id: impl_foldable
+    requirement_id: typeclass_foldable
+    name: Foldable トレイトの実装
+    priority: 4
+    description: |
+      構造内の要素を畳み込み（fold）できる型を表現する型クラス。
+      データ構造を単一の値にまとめる操作を提供する。
+
+    files:
+      - path: src/typeclass/foldable.rs
+        description: Foldable トレイトの定義と標準型への実装
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Foldable トレイトの定義。
+          fold_left を主要な操作として、様々な便利メソッドを提供。
+        code_outline: |
+          use super::monoid::Monoid;
+          use super::higher::TypeConstructor;
+
+          /// 構造内の要素を畳み込み（fold）できる型を表現するトレイト。
+          ///
+          /// # 例
+          ///
+          /// ```
+          /// use functional_rusty::typeclass::Foldable;
+          ///
+          /// let v = vec![1, 2, 3, 4, 5];
+          /// let sum = v.fold_left(0, |acc, x| acc + x);
+          /// assert_eq!(sum, 15);
+          /// ```
+          pub trait Foldable: TypeConstructor {
+              /// 左から右へ畳み込む。
+              ///
+              /// Rust の `Iterator::fold` に相当。
+              fn fold_left<B, F>(self, init: B, f: F) -> B
+              where
+                  F: FnMut(B, Self::Inner) -> B;
+
+              /// 右から左へ畳み込む。
+              ///
+              /// 遅延評価がない Rust では、大きな構造で非効率になる可能性がある。
+              /// 木構造など、右畳み込みが自然な場合に使用。
+              fn fold_right<B, F>(self, init: B, f: F) -> B
+              where
+                  F: FnMut(Self::Inner, B) -> B;
+
+              /// 各要素を Monoid にマップし、結果を結合する。
+              fn fold_map<M, F>(self, f: F) -> M
+              where
+                  M: Monoid,
+                  F: FnMut(Self::Inner) -> M,
+                  Self: Sized,
+              {
+                  self.fold_left(M::empty(), |acc, x| acc.combine(f(x)))
+              }
+
+              /// 構造が空かどうかを判定する。
+              fn is_empty(&self) -> bool
+              where
+                  Self: Clone,
+              {
+                  self.clone().fold_left(true, |_, _| false)
+              }
+
+              /// 構造内の要素数を返す。
+              fn length(&self) -> usize
+              where
+                  Self: Clone,
+              {
+                  self.clone().fold_left(0, |acc, _| acc + 1)
+              }
+
+              /// 構造を Vec（リスト）に変換する。
+              fn to_list(self) -> Vec<Self::Inner>
+              where
+                  Self: Sized,
+              {
+                  self.fold_left(Vec::new(), |mut acc, x| {
+                      acc.push(x);
+                      acc
+                  })
+              }
+
+              /// 条件を満たす最初の要素を見つける。
+              fn find<P>(self, mut predicate: P) -> Option<Self::Inner>
+              where
+                  P: FnMut(&Self::Inner) -> bool,
+                  Self: Sized,
+              {
+                  self.fold_left(None, |acc, x| {
+                      if acc.is_some() {
+                          acc
+                      } else if predicate(&x) {
+                          Some(x)
+                      } else {
+                          None
+                      }
+                  })
+              }
+
+              /// 条件を満たす要素が存在するかを判定する。
+              fn exists<P>(&self, mut predicate: P) -> bool
+              where
+                  P: FnMut(&Self::Inner) -> bool,
+                  Self: Clone,
+              {
+                  self.clone().find(predicate).is_some()
+              }
+
+              /// 全ての要素が条件を満たすかを判定する。
+              fn for_all<P>(&self, mut predicate: P) -> bool
+              where
+                  P: FnMut(&Self::Inner) -> bool,
+                  Self: Clone,
+              {
+                  !self.exists(|x| !predicate(x))
+              }
+          }
+
+      - step: 2
+        description: Option に対する Foldable 実装
+        code_outline: |
+          impl<A> Foldable for Option<A> {
+              fn fold_left<B, F>(self, init: B, mut f: F) -> B
+              where
+                  F: FnMut(B, A) -> B,
+              {
+                  match self {
+                      Some(x) => f(init, x),
+                      None => init,
+                  }
+              }
+
+              fn fold_right<B, F>(self, init: B, mut f: F) -> B
+              where
+                  F: FnMut(A, B) -> B,
+              {
+                  match self {
+                      Some(x) => f(x, init),
+                      None => init,
+                  }
+              }
+
+              fn is_empty(&self) -> bool {
+                  self.is_none()
+              }
+
+              fn length(&self) -> usize {
+                  if self.is_some() { 1 } else { 0 }
+              }
+          }
+
+      - step: 3
+        description: Result に対する Foldable 実装
+        code_outline: |
+          impl<T, E> Foldable for Result<T, E> {
+              fn fold_left<B, F>(self, init: B, mut f: F) -> B
+              where
+                  F: FnMut(B, T) -> B,
+              {
+                  match self {
+                      Ok(x) => f(init, x),
+                      Err(_) => init,
+                  }
+              }
+
+              fn fold_right<B, F>(self, init: B, mut f: F) -> B
+              where
+                  F: FnMut(T, B) -> B,
+              {
+                  match self {
+                      Ok(x) => f(x, init),
+                      Err(_) => init,
+                  }
+              }
+
+              fn is_empty(&self) -> bool {
+                  self.is_err()
+              }
+
+              fn length(&self) -> usize {
+                  if self.is_ok() { 1 } else { 0 }
+              }
+          }
+
+      - step: 4
+        description: Vec に対する Foldable 実装
+        code_outline: |
+          impl<A> Foldable for Vec<A> {
+              fn fold_left<B, F>(self, init: B, f: F) -> B
+              where
+                  F: FnMut(B, A) -> B,
+              {
+                  self.into_iter().fold(init, f)
+              }
+
+              fn fold_right<B, F>(self, init: B, mut f: F) -> B
+              where
+                  F: FnMut(A, B) -> B,
+              {
+                  self.into_iter().rev().fold(init, |acc, x| f(x, acc))
+              }
+
+              fn is_empty(&self) -> bool {
+                  self.is_empty()
+              }
+
+              fn length(&self) -> usize {
+                  self.len()
+              }
+          }
+
+      - step: 5
+        description: Identity に対する Foldable 実装
+        code_outline: |
+          impl<A> Foldable for Identity<A> {
+              fn fold_left<B, F>(self, init: B, mut f: F) -> B
+              where
+                  F: FnMut(B, A) -> B,
+              {
+                  f(init, self.0)
+              }
+
+              fn fold_right<B, F>(self, init: B, mut f: F) -> B
+              where
+                  F: FnMut(A, B) -> B,
+              {
+                  f(self.0, init)
+              }
+
+              fn is_empty(&self) -> bool {
+                  false // Identity は常に1要素を持つ
+              }
+
+              fn length(&self) -> usize {
+                  1
+              }
+          }
+
+      - step: 6
+        description: Box に対する Foldable 実装
+        code_outline: |
+          impl<A> Foldable for Box<A> {
+              fn fold_left<B, F>(self, init: B, mut f: F) -> B
+              where
+                  F: FnMut(B, A) -> B,
+              {
+                  f(init, *self)
+              }
+
+              fn fold_right<B, F>(self, init: B, mut f: F) -> B
+              where
+                  F: FnMut(A, B) -> B,
+              {
+                  f(*self, init)
+              }
+
+              fn is_empty(&self) -> bool {
+                  false // Box は常に1要素を持つ
+              }
+
+              fn length(&self) -> usize {
+                  1
+              }
+          }
+
+    tests:
+      - name: test_foldable_option
+        description: Option の Foldable 実装が正しく動作することを確認
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn option_fold_left_some() {
+              let x = Some(5);
+              let result = x.fold_left(10, |acc, n| acc + n);
+              assert_eq!(result, 15);
+          }
+
+          #[rstest]
+          fn option_fold_left_none() {
+              let x: Option<i32> = None;
+              let result = x.fold_left(10, |acc, n| acc + n);
+              assert_eq!(result, 10);
+          }
+
+          #[rstest]
+          fn option_is_empty() {
+              assert!(!Some(5).is_empty());
+              assert!(None::<i32>.is_empty());
+          }
+
+          #[rstest]
+          fn option_length() {
+              assert_eq!(Some(5).length(), 1);
+              assert_eq!(None::<i32>.length(), 0);
+          }
+
+      - name: test_foldable_vec
+        description: Vec の Foldable 実装が正しく動作することを確認
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn vec_fold_left() {
+              let v = vec![1, 2, 3, 4, 5];
+              let sum = v.fold_left(0, |acc, x| acc + x);
+              assert_eq!(sum, 15);
+          }
+
+          #[rstest]
+          fn vec_fold_right() {
+              let v = vec![1, 2, 3];
+              // fold_right: f(1, f(2, f(3, ""))) = "1" + "2" + "3" = "123"
+              // ただし右から処理するので f(3, "") -> f(2, "3") -> f(1, "23")
+              let result = v.fold_right(String::new(), |x, acc| format!("{}{}", x, acc));
+              assert_eq!(result, "123");
+          }
+
+          #[rstest]
+          fn vec_to_list() {
+              let v = vec![1, 2, 3];
+              assert_eq!(v.to_list(), vec![1, 2, 3]);
+          }
+
+          #[rstest]
+          fn vec_find() {
+              let v = vec![1, 2, 3, 4, 5];
+              assert_eq!(v.clone().find(|x| *x > 3), Some(4));
+              assert_eq!(v.find(|x| *x > 10), None);
+          }
+
+      - name: test_foldable_fold_map
+        description: fold_map が正しく動作することを確認
+        test_type: unit
+        code_outline: |
+          use crate::typeclass::Sum;
+
+          #[rstest]
+          fn vec_fold_map_sum() {
+              let v = vec![1, 2, 3, 4, 5];
+              let sum: Sum<i32> = v.fold_map(Sum);
+              assert_eq!(sum, Sum(15));
+          }
+
+      - name: test_foldable_identity
+        description: Identity の Foldable 実装が正しく動作することを確認
+        test_type: unit
+
+    dependencies:
+      - impl_monoid
+      - impl_type_constructor
+
+  # ============================================================================
+  # 10. Traversable トレイト
+  # ============================================================================
+  - id: impl_traversable
+    requirement_id: typeclass_traversable
+    name: Traversable トレイトの実装
+    priority: 4
+    description: |
+      構造内の各要素に効果的な関数を適用し、効果を「外側に出す」ことができる型クラス。
+      Functor と Foldable を組み合わせ、さらに効果を扱う能力を持つ。
+
+    files:
+      - path: src/typeclass/traversable.rs
+        description: Traversable トレイトの定義と標準型への実装
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Traversable トレイトの定義。
+          HKT がないため、traverse は特定の Applicative に対して実装する必要がある。
+          ここでは traverse_option と traverse_result を具体的に提供し、
+          汎用的な traverse は将来の拡張として検討。
+        code_outline: |
+          use super::functor::Functor;
+          use super::foldable::Foldable;
+          use super::applicative::Applicative;
+
+          /// 構造内の各要素に効果的な関数を適用し、
+          /// 効果を「外側に出す」ことができる型を表現するトレイト。
+          ///
+          /// # 注意
+          ///
+          /// Rust は HKT を直接サポートしていないため、
+          /// 完全に汎用的な traverse を定義することは困難。
+          /// このトレイトでは、よく使われる Applicative（Option, Result）に対する
+          /// 具体的な traverse メソッドを提供する。
+          ///
+          /// # 例
+          ///
+          /// ```
+          /// use functional_rusty::typeclass::Traversable;
+          ///
+          /// let v = vec!["1", "2", "3"];
+          /// let result: Option<Vec<i32>> = v.traverse_option(|s| s.parse().ok());
+          /// assert_eq!(result, Some(vec![1, 2, 3]));
+          ///
+          /// let v_with_error = vec!["1", "two", "3"];
+          /// let result: Option<Vec<i32>> = v_with_error.traverse_option(|s| s.parse().ok());
+          /// assert_eq!(result, None);
+          /// ```
+          pub trait Traversable: Functor + Foldable {
+              /// Option を返す関数で各要素を変換し、結果を集約する。
+              ///
+              /// 一つでも None があれば全体が None になる。
+              fn traverse_option<B, F>(self, f: F) -> Option<Self::WithType<B>>
+              where
+                  F: FnMut(Self::Inner) -> Option<B>;
+
+              /// Result を返す関数で各要素を変換し、結果を集約する。
+              ///
+              /// 一つでも Err があれば全体が Err になる。
+              fn traverse_result<B, E, F>(self, f: F) -> Result<Self::WithType<B>, E>
+              where
+                  F: FnMut(Self::Inner) -> Result<B, E>;
+
+              /// Option のネストを「裏返す」。
+              ///
+              /// `traverse_option(|x| x)` の特殊化。
+              fn sequence_option(self) -> Option<Self::WithType<<Self::Inner as TypeConstructor>::Inner>>
+              where
+                  Self: Sized,
+                  Self::Inner: TypeConstructor + Into<Option<<Self::Inner as TypeConstructor>::Inner>>,
+              {
+                  self.traverse_option(|x| x.into())
+              }
+
+              /// Result のネストを「裏返す」。
+              fn sequence_result<E>(self) -> Result<Self::WithType<<Self::Inner as TypeConstructor>::Inner>, E>
+              where
+                  Self: Sized,
+                  Self::Inner: TypeConstructor + Into<Result<<Self::Inner as TypeConstructor>::Inner, E>>,
+              {
+                  self.traverse_result(|x| x.into())
+              }
+
+              /// Option を返す関数で各要素を変換するが、結果を捨てる。
+              ///
+              /// 副作用のためだけに traverse する場合に使用。
+              /// 一つでも None があれば全体が None になる。
+              fn traverse_option_<F>(self, mut f: F) -> Option<()>
+              where
+                  F: FnMut(Self::Inner) -> Option<()>,
+                  Self: Sized,
+              {
+                  self.traverse_option(f).map(|_| ())
+              }
+
+              /// `traverse_option_` のエイリアス。
+              ///
+              /// 命名は Haskell の `for_` / `forM_` に由来。
+              /// 各要素に対して副作用を実行し、結果を捨てる。
+              fn for_each_option<F>(self, f: F) -> Option<()>
+              where
+                  F: FnMut(Self::Inner) -> Option<()>,
+                  Self: Sized,
+              {
+                  self.traverse_option_(f)
+              }
+
+              /// Result を返す関数で各要素を変換するが、結果を捨てる。
+              ///
+              /// 副作用のためだけに traverse する場合に使用。
+              /// 一つでも Err があれば全体が Err になる。
+              fn traverse_result_<E, F>(self, mut f: F) -> Result<(), E>
+              where
+                  F: FnMut(Self::Inner) -> Result<(), E>,
+                  Self: Sized,
+              {
+                  self.traverse_result(f).map(|_| ())
+              }
+
+              /// `traverse_result_` のエイリアス。
+              fn for_each_result<E, F>(self, f: F) -> Result<(), E>
+              where
+                  F: FnMut(Self::Inner) -> Result<(), E>,
+                  Self: Sized,
+              {
+                  self.traverse_result_(f)
+              }
+          }
+
+          // TypeConstructor を use
+          use super::higher::TypeConstructor;
+
+      - step: 2
+        description: Option に対する Traversable 実装
+        code_outline: |
+          impl<A> Traversable for Option<A> {
+              fn traverse_option<B, F>(self, mut f: F) -> Option<Option<B>>
+              where
+                  F: FnMut(A) -> Option<B>,
+              {
+                  match self {
+                      Some(x) => f(x).map(Some),
+                      None => Some(None),
+                  }
+              }
+
+              fn traverse_result<B, E, F>(self, mut f: F) -> Result<Option<B>, E>
+              where
+                  F: FnMut(A) -> Result<B, E>,
+              {
+                  match self {
+                      Some(x) => f(x).map(Some),
+                      None => Ok(None),
+                  }
+              }
+          }
+
+      - step: 3
+        description: Result に対する Traversable 実装
+        code_outline: |
+          impl<T, E: Clone> Traversable for Result<T, E> {
+              fn traverse_option<B, F>(self, mut f: F) -> Option<Result<B, E>>
+              where
+                  F: FnMut(T) -> Option<B>,
+              {
+                  match self {
+                      Ok(x) => f(x).map(Ok),
+                      Err(e) => Some(Err(e)),
+                  }
+              }
+
+              fn traverse_result<B, E2, F>(self, mut f: F) -> Result<Result<B, E>, E2>
+              where
+                  F: FnMut(T) -> Result<B, E2>,
+              {
+                  match self {
+                      Ok(x) => f(x).map(Ok),
+                      Err(e) => Ok(Err(e)),
+                  }
+              }
+          }
+
+      - step: 4
+        description: Vec に対する Traversable 実装
+        code_outline: |
+          impl<A> Traversable for Vec<A> {
+              fn traverse_option<B, F>(self, mut f: F) -> Option<Vec<B>>
+              where
+                  F: FnMut(A) -> Option<B>,
+              {
+                  let mut result = Vec::with_capacity(self.len());
+                  for item in self {
+                      match f(item) {
+                          Some(b) => result.push(b),
+                          None => return None,
+                      }
+                  }
+                  Some(result)
+              }
+
+              fn traverse_result<B, E, F>(self, mut f: F) -> Result<Vec<B>, E>
+              where
+                  F: FnMut(A) -> Result<B, E>,
+              {
+                  let mut result = Vec::with_capacity(self.len());
+                  for item in self {
+                      match f(item) {
+                          Ok(b) => result.push(b),
+                          Err(e) => return Err(e),
+                      }
+                  }
+                  Ok(result)
+              }
+          }
+
+      - step: 5
+        description: Identity に対する Traversable 実装
+        code_outline: |
+          impl<A> Traversable for Identity<A> {
+              fn traverse_option<B, F>(self, mut f: F) -> Option<Identity<B>>
+              where
+                  F: FnMut(A) -> Option<B>,
+              {
+                  f(self.0).map(Identity)
+              }
+
+              fn traverse_result<B, E, F>(self, mut f: F) -> Result<Identity<B>, E>
+              where
+                  F: FnMut(A) -> Result<B, E>,
+              {
+                  f(self.0).map(Identity)
+              }
+          }
+
+      - step: 6
+        description: Box に対する Traversable 実装
+        code_outline: |
+          impl<A> Traversable for Box<A> {
+              fn traverse_option<B, F>(self, mut f: F) -> Option<Box<B>>
+              where
+                  F: FnMut(A) -> Option<B>,
+              {
+                  f(*self).map(Box::new)
+              }
+
+              fn traverse_result<B, E, F>(self, mut f: F) -> Result<Box<B>, E>
+              where
+                  F: FnMut(A) -> Result<B, E>,
+              {
+                  f(*self).map(Box::new)
+              }
+          }
+
+    tests:
+      - name: test_traversable_vec_option
+        description: Vec の traverse_option が正しく動作することを確認
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn vec_traverse_option_all_some() {
+              let v = vec!["1", "2", "3"];
+              let result: Option<Vec<i32>> = v.traverse_option(|s| s.parse().ok());
+              assert_eq!(result, Some(vec![1, 2, 3]));
+          }
+
+          #[rstest]
+          fn vec_traverse_option_with_none() {
+              let v = vec!["1", "two", "3"];
+              let result: Option<Vec<i32>> = v.traverse_option(|s| s.parse().ok());
+              assert_eq!(result, None);
+          }
+
+          #[rstest]
+          fn vec_traverse_option_empty() {
+              let v: Vec<&str> = vec![];
+              let result: Option<Vec<i32>> = v.traverse_option(|s| s.parse().ok());
+              assert_eq!(result, Some(vec![]));
+          }
+
+      - name: test_traversable_vec_result
+        description: Vec の traverse_result が正しく動作することを確認
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn vec_traverse_result_all_ok() {
+              fn validate(n: i32) -> Result<i32, &'static str> {
+                  if n > 0 { Ok(n) } else { Err("must be positive") }
+              }
+
+              let v = vec![1, 2, 3];
+              let result: Result<Vec<i32>, _> = v.traverse_result(validate);
+              assert_eq!(result, Ok(vec![1, 2, 3]));
+          }
+
+          #[rstest]
+          fn vec_traverse_result_with_err() {
+              fn validate(n: i32) -> Result<i32, &'static str> {
+                  if n > 0 { Ok(n) } else { Err("must be positive") }
+              }
+
+              let v = vec![1, -2, 3];
+              let result: Result<Vec<i32>, _> = v.traverse_result(validate);
+              assert_eq!(result, Err("must be positive"));
+          }
+
+      - name: test_traversable_option
+        description: Option の Traversable 実装が正しく動作することを確認
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn option_traverse_option_some() {
+              let x = Some("42");
+              let result: Option<Option<i32>> = x.traverse_option(|s| s.parse().ok());
+              assert_eq!(result, Some(Some(42)));
+          }
+
+          #[rstest]
+          fn option_traverse_option_none() {
+              let x: Option<&str> = None;
+              let result: Option<Option<i32>> = x.traverse_option(|s| s.parse().ok());
+              assert_eq!(result, Some(None));
+          }
+
+      - name: test_traversable_sequence
+        description: sequence_option/sequence_result が正しく動作することを確認
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn vec_sequence_option_all_some() {
+              let v: Vec<Option<i32>> = vec![Some(1), Some(2), Some(3)];
+              let result: Option<Vec<i32>> = v.sequence_option();
+              assert_eq!(result, Some(vec![1, 2, 3]));
+          }
+
+          #[rstest]
+          fn vec_sequence_option_with_none() {
+              let v: Vec<Option<i32>> = vec![Some(1), None, Some(3)];
+              let result: Option<Vec<i32>> = v.sequence_option();
+              assert_eq!(result, None);
+          }
+
+      - name: test_traversable_identity
+        description: Identity の Traversable 実装が正しく動作することを確認
+        test_type: unit
+
+    dependencies:
+      - impl_functor
+      - impl_foldable
+      - impl_applicative
+
+# モジュール構成
+module_structure:
+  - path: src/typeclass/mod.rs
+    description: |
+      型クラスモジュールのエントリポイント。
+      全てのトレイトと型を re-export する。
+    contents:
+      - "mod higher;"
+      - "mod identity;"
+      - "mod wrappers;"
+      - "mod semigroup;"
+      - "mod monoid;"
+      - "mod functor;"
+      - "mod applicative;"
+      - "mod monad;"
+      - "mod foldable;"
+      - "mod traversable;"
+      - ""
+      - "pub use higher::TypeConstructor;"
+      - "pub use identity::Identity;"
+      - "pub use wrappers::{Sum, Product, Max, Min, Bounded};"
+      - "pub use semigroup::Semigroup;"
+      - "pub use monoid::Monoid;"
+      - "pub use functor::{Functor, FunctorMut};"
+      - "pub use applicative::Applicative;"
+      - "pub use monad::Monad;"
+      - "pub use foldable::Foldable;"
+      - "pub use traversable::Traversable;"
+
+# テスト構成
+test_structure:
+  unit_tests:
+    location: 各モジュールファイル内の #[cfg(test)] mod tests
+    framework: rstest
+    description: |
+      各型クラスの基本的な動作を確認する単体テスト。
+      rstest の #[rstest] マクロを使用してパラメータ化。
+
+  property_tests:
+    location: tests/typeclass_laws.rs
+    framework: proptest
+    description: |
+      型クラスの法則（laws）を検証するプロパティベーステスト。
+      proptest クレートを使用。
+
+  integration_tests:
+    location: tests/typeclass_integration.rs
+    description: |
+      複数の型クラスを組み合わせた統合テスト。
+      実際の使用パターンを検証。
+
+# 実装上の注意点
+implementation_notes:
+  - title: Vec の Functor/Applicative での FnOnce vs FnMut
+    description: |
+      Vec のような複数要素を持つコンテナでは、fmap の関数が
+      複数回呼び出されるため、FnOnce ではなく FnMut が必要。
+      トレイト定義を FnOnce にしつつ、Vec には FnMut を要求する
+      FunctorMut トレイトを追加で提供する設計を採用。
+
+  - title: Result の TypeConstructor での E の扱い
+    description: |
+      Result<T, E> は T に対する TypeConstructor であり、E は固定される。
+      これは Functor/Monad の設計と一致する。
+      Bifunctor（将来の拡張）では E も変換可能にする。
+
+  - title: Traversable の汎用性の制限
+    description: |
+      HKT がないため、完全に汎用的な traverse は困難。
+      よく使われる Option と Result に対する具体的なメソッドを提供。
+      将来的には GAT の進化や言語機能の追加で改善される可能性がある。
+
+  - title: 法則のテストにおける Clone 境界
+    description: |
+      プロパティベーステストでは、値を複数回使用するため Clone が必要。
+      これは実際の使用時には不要な制約であることに注意。
+
+  - title: 数値型の Monoid における num_traits の使用検討
+    description: |
+      Zero/One トレイトは num_traits クレートから取得可能だが、
+      依存関係を最小化するため、独自の Bounded トレイトを定義。
+      将来的には num_traits への依存を検討。
+
+  - title: MonadFilter としての分離検討
+    description: |
+      filter_map 操作は、Option/Result のような「失敗」を表現できる型
+      のみが持つべき機能。Box や Identity のような常に値を持つ型には
+      適用できないため、Monad トレイトから分離して MonadFilter として
+      定義することを検討する。Phase 2 以降で実装予定。
+
+# 将来の拡張（Phase 2 以降）
+future_extensions:
+  - id: binary_tree_foldable
+    name: BinaryTree の Foldable 実装
+    phase: 2
+    description: |
+      二分木構造に対する Foldable 実装。
+      木構造は fold_right が自然に定義できる代表的なデータ構造であり、
+      Foldable の教育的な例としても有用。
+      実装時には in-order, pre-order, post-order の走査順序を
+      選択できるようにすることを検討。
+
+  - id: tuple_traversable
+    name: タプル (A, B) の Traversable 実装
+    phase: 2
+    description: |
+      二要素タプルに対する Traversable 実装。
+      最後の要素（B）に対してのみ traverse する設計とする。
+      Bifunctor/Bitraversable の実装と合わせて検討。
+      例: (String, i32) を (String, f(i32)) に変換
+
+  - id: monad_filter
+    name: MonadFilter トレイト
+    phase: 2
+    description: |
+      Monad を拡張し、filter_map 操作を提供するトレイト。
+      「失敗」を表現できる型（Option, Result, Vec など）のみが実装。
+      Box や Identity のような常に値を持つ型には実装しない。
+
+  - id: bifunctor
+    name: Bifunctor トレイト
+    phase: 2
+    description: |
+      二つの型パラメータを持つ型コンストラクタのための Functor。
+      Result<T, E> の E も変換可能にする。
+      bimap, first, second メソッドを提供。

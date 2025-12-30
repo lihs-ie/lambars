@@ -1,0 +1,1115 @@
+# Phase 1: 型クラス基盤（Type Class Foundation）要件定義
+#
+# 概要:
+#   Rust で HKT（Higher-Kinded Types）相当の抽象を実現するための型クラス（トレイト）を定義する。
+#   Rust は HKT を直接サポートしていないため、GAT（Generic Associated Types）を使用して
+#   型コンストラクタの抽象化をエミュレートする。
+#
+# 設計方針:
+#   1. GAT を使用した HKT エミュレーション
+#   2. 各型クラスの法則（laws）を明確に定義
+#   3. 所有権とライフタイムを考慮した設計
+#   4. Option, Result, Vec, Iterator など標準型への実装を考慮
+#
+# 参照:
+#   - CLAUDE.md の「3.2 高階型（Higher-Kinded Types, HKT）の欠如」セクション
+#   - references/rust/library/core/src/option.rs
+#   - references/rust/library/core/src/result.rs
+#   - references/rust/library/core/src/iter/traits/iterator.rs
+
+version: "1.0.0"
+phase: 1
+name: "Type Class Foundation"
+description: |
+  Rust に関数型プログラミングの型クラス階層を導入する。
+  HKT が存在しない Rust では、GAT（Generic Associated Types）を活用して
+  型コンストラクタ F<_> の抽象化をエミュレートする。
+
+# HKT エミュレーション戦略
+hkt_emulation_strategy:
+  description: |
+    Rust で HKT をエミュレートするために、以下の戦略を採用する:
+
+    1. TypeConstructor トレイト:
+       型コンストラクタを表現するためのマーカートレイト。
+       GAT を使用して、異なる型パラメータを持つ同じコンストラクタを表現する。
+
+    2. Higher トレイト:
+       型 F<A> から F<B> への変換を可能にするトレイト。
+       これにより Functor の fmap の型シグネチャを表現できる。
+
+    3. 具体例:
+       Option<A> と Option<B> は同じ「Option」という型コンストラクタの異なるインスタンス。
+       Higher トレイトを使って Option<A> -> (A -> B) -> Option<B> を表現する。
+
+  approach: |
+    ```rust
+    /// 型コンストラクタを表現するトレイト
+    /// F<A> という型から、同じ F だが異なる型パラメータ B を持つ F<B> を構築可能にする
+    pub trait TypeConstructor {
+        /// 元の型パラメータ
+        type Inner;
+
+        /// 異なる型パラメータを持つ同じコンストラクタ
+        type WithType<B>: TypeConstructor<Inner = B>;
+    }
+    ```
+
+requirements:
+  # ======================================================================
+  # 1. Semigroup トレイト
+  # ======================================================================
+  - id: typeclass_semigroup
+    name: Semigroup トレイト
+    description: |
+      二項結合演算を持つ型を表現する型クラス。
+      結合演算は結合律（associativity）を満たす必要がある。
+
+      数学的背景:
+        半群（Semigroup）は、集合 S と結合的な二項演算 * を持つ代数構造 (S, *)。
+        任意の a, b, c in S に対して (a * b) * c = a * (b * c) が成り立つ。
+
+      Rust での設計考慮事項:
+        - 所有権: combine は所有権を取る版と参照を取る版の両方を提供
+        - Clone: 参照版は Clone 境界を必要とする場合がある
+        - 可換性: 可換な Semigroup は別途 CommutativeSemigroup として定義可能
+
+    laws:
+      - name: Associativity（結合律）
+        description: |
+          結合演算は結合的でなければならない。
+          どの順序で演算を適用しても結果は同じ。
+        equation: "(a.combine(b)).combine(c) == a.combine(b.combine(c))"
+        property_test: |
+          fn prop_associativity<S: Semigroup + PartialEq + Clone>(a: S, b: S, c: S) -> bool {
+              a.clone().combine(b.clone()).combine(c.clone())
+                  == a.combine(b.combine(c))
+          }
+
+    methods:
+      - name: combine
+        signature: "fn combine(self, other: Self) -> Self"
+        description: |
+          二つの値を結合して新しい値を生成する。
+          所有権を取るバージョン。
+        examples:
+          - description: "String の結合"
+            code: |
+              let a = String::from("Hello, ");
+              let b = String::from("World!");
+              assert_eq!(a.combine(b), "Hello, World!");
+          - description: "Vec の結合"
+            code: |
+              let a = vec![1, 2, 3];
+              let b = vec![4, 5, 6];
+              assert_eq!(a.combine(b), vec![1, 2, 3, 4, 5, 6]);
+
+      - name: combine_ref
+        signature: "fn combine_ref(&self, other: &Self) -> Self where Self: Clone"
+        description: |
+          参照から二つの値を結合して新しい値を生成する。
+          Clone 境界が必要。デフォルト実装を提供。
+        default_implementation: |
+          fn combine_ref(&self, other: &Self) -> Self
+          where
+              Self: Clone
+          {
+              self.clone().combine(other.clone())
+          }
+
+      - name: combine_all
+        signature: "fn combine_all<I>(iter: I) -> Option<Self> where I: IntoIterator<Item = Self>, Self: Sized"
+        description: |
+          イテレータ内の全ての要素を結合する。
+          空のイテレータの場合は None を返す。
+        default_implementation: |
+          fn combine_all<I>(iter: I) -> Option<Self>
+          where
+              I: IntoIterator<Item = Self>,
+              Self: Sized,
+          {
+              iter.into_iter().reduce(|acc, x| acc.combine(x))
+          }
+
+    implementations:
+      - type: String
+        description: |
+          文字列の連結による Semigroup 実装。
+          "a".combine("b") == "ab"
+
+      - type: "Vec<T>"
+        description: |
+          ベクタの連結による Semigroup 実装。
+          [1, 2].combine([3, 4]) == [1, 2, 3, 4]
+
+      - type: "Option<T> where T: Semigroup"
+        description: |
+          Option の Semigroup 実装。
+          Some(a).combine(Some(b)) == Some(a.combine(b))
+          Some(a).combine(None) == Some(a)
+          None.combine(Some(b)) == Some(b)
+          None.combine(None) == None
+
+      - type: "Result<T, E> where T: Semigroup"
+        description: |
+          Result の Semigroup 実装（成功値のみ結合）。
+          Ok(a).combine(Ok(b)) == Ok(a.combine(b))
+          Ok(a).combine(Err(e)) == Err(e)
+          Err(e).combine(Ok(b)) == Err(e)
+
+      - type: "Numeric types (i32, i64, u32, u64, f32, f64, etc.)"
+        description: |
+          数値型には複数の Semigroup が考えられる（加算、乗算、最大、最小）。
+          newtype パターンで区別する:
+          - Sum<T>: 加算による Semigroup
+          - Product<T>: 乗算による Semigroup
+          - Max<T>: 最大値による Semigroup
+          - Min<T>: 最小値による Semigroup
+
+    dependencies: []
+
+  # ======================================================================
+  # 2. Monoid トレイト
+  # ======================================================================
+  - id: typeclass_monoid
+    name: Monoid トレイト
+    description: |
+      単位元を持つ Semigroup。
+      空の値から始めて結合演算で値を蓄積できる。
+
+      数学的背景:
+        モノイド（Monoid）は、半群 (S, *) に単位元 e を加えた代数構造 (S, *, e)。
+        任意の a in S に対して e * a = a * e = a が成り立つ。
+
+      Rust での設計考慮事項:
+        - Default トレイトとの関係: Rust の Default は Monoid の empty に相当することが多い
+        - ただし Default と Monoid は概念的に異なる（Default は「デフォルト値」、Monoid は「単位元」）
+
+    laws:
+      - name: Left Identity（左単位元律）
+        description: |
+          単位元は左から結合しても元の値を変えない。
+        equation: "Self::empty().combine(a) == a"
+        property_test: |
+          fn prop_left_identity<M: Monoid + PartialEq + Clone>(a: M) -> bool {
+              M::empty().combine(a.clone()) == a
+          }
+
+      - name: Right Identity（右単位元律）
+        description: |
+          単位元は右から結合しても元の値を変えない。
+        equation: "a.combine(Self::empty()) == a"
+        property_test: |
+          fn prop_right_identity<M: Monoid + PartialEq + Clone>(a: M) -> bool {
+              a.clone().combine(M::empty()) == a
+          }
+
+      - name: Associativity（結合律）
+        description: |
+          Semigroup から継承。結合演算は結合的。
+        equation: "(a.combine(b)).combine(c) == a.combine(b.combine(c))"
+
+    methods:
+      - name: empty
+        signature: "fn empty() -> Self"
+        description: |
+          単位元を返す。
+          結合演算の単位元であり、任意の値と結合しても値を変えない。
+        examples:
+          - description: "String の空文字列"
+            code: |
+              assert_eq!(String::empty(), String::new());
+              assert_eq!("hello".to_string().combine(String::empty()), "hello");
+          - description: "Vec の空ベクタ"
+            code: |
+              assert_eq!(Vec::<i32>::empty(), vec![]);
+              assert_eq!(vec![1, 2, 3].combine(Vec::empty()), vec![1, 2, 3]);
+
+      - name: combine_all
+        signature: "fn combine_all<I>(iter: I) -> Self where I: IntoIterator<Item = Self>, Self: Sized"
+        description: |
+          イテレータ内の全ての要素を結合する。
+          空のイテレータの場合は empty() を返す。
+          Semigroup の combine_all と異なり、常に値を返す。
+        default_implementation: |
+          fn combine_all<I>(iter: I) -> Self
+          where
+              I: IntoIterator<Item = Self>,
+              Self: Sized,
+          {
+              iter.into_iter().fold(Self::empty(), |acc, x| acc.combine(x))
+          }
+
+    implementations:
+      - type: String
+        description: |
+          empty() は空文字列 ""。
+          String::empty() == String::new()
+
+      - type: "Vec<T>"
+        description: |
+          empty() は空ベクタ vec![]。
+          Vec::empty() == Vec::new()
+
+      - type: "Option<T> where T: Semigroup"
+        description: |
+          empty() は None。
+          Option での Monoid は、内部の T が Semigroup であればよい
+          （Monoid である必要はない。None が単位元を担うため）。
+
+      - type: "()"
+        description: |
+          ユニット型の Monoid。
+          empty() は ()、combine は常に () を返す。
+
+      - type: "Sum<T>, Product<T>, Max<T>, Min<T>"
+        description: |
+          数値型のラッパー。
+          - Sum<T>: empty() は Sum(0)
+          - Product<T>: empty() は Product(1)
+          - Max<T>: empty() は Max(T::MIN) （T: Bounded）
+          - Min<T>: empty() は Min(T::MAX) （T: Bounded）
+
+    dependencies:
+      - typeclass_semigroup
+
+  # ======================================================================
+  # 3. Functor トレイト
+  # ======================================================================
+  - id: typeclass_functor
+    name: Functor トレイト
+    description: |
+      構造を保存しながら内部の値を変換できる型を表現する型クラス。
+      「コンテナ」や「コンテキスト」の中にある値に関数を適用できる。
+
+      数学的背景:
+        圏論における関手（Functor）は、圏から圏への構造を保存する写像。
+        プログラミングでは、型コンストラクタ F と、任意の関数 f: A -> B を
+        F[A] -> F[B] に持ち上げる操作 fmap を持つ。
+
+      Rust での設計考慮事項:
+        - HKT がないため、GAT を使用して型コンストラクタをエミュレート
+        - TypeConstructor トレイトを前提とする
+        - 所有権: fmap は self を消費するバージョンと参照バージョンを提供
+        - クロージャ: FnOnce を使用して所有権を取る関数を許可
+
+    laws:
+      - name: Identity（恒等律）
+        description: |
+          恒等関数を fmap しても値は変わらない。
+        equation: "fa.fmap(|x| x) == fa"
+        property_test: |
+          fn prop_identity<F: Functor + PartialEq + Clone>(fa: F) -> bool
+          where
+              F::Inner: Clone,
+              F::WithType<F::Inner>: PartialEq,
+          {
+              fa.clone().fmap(|x| x) == fa
+          }
+
+      - name: Composition（合成律）
+        description: |
+          二つの関数を合成してから fmap するのと、
+          fmap を二回適用するのは同じ結果になる。
+        equation: "fa.fmap(f).fmap(g) == fa.fmap(|x| g(f(x)))"
+        property_test: |
+          fn prop_composition<F, A, B, C>(fa: F, f: impl Fn(A) -> B, g: impl Fn(B) -> C) -> bool
+          where
+              F: Functor<Inner = A>,
+              F::WithType<C>: PartialEq,
+          {
+              fa.clone().fmap(&f).fmap(&g) == fa.fmap(|x| g(f(x)))
+          }
+
+    methods:
+      - name: fmap
+        signature: "fn fmap<B, F>(self, f: F) -> Self::WithType<B> where F: FnOnce(Self::Inner) -> B"
+        description: |
+          関数を Functor の中の値に適用する。
+          所有権を取るバージョン。
+        examples:
+          - description: "Option の fmap"
+            code: |
+              let x: Option<i32> = Some(5);
+              let y: Option<String> = x.fmap(|n| n.to_string());
+              assert_eq!(y, Some("5".to_string()));
+          - description: "Result の fmap"
+            code: |
+              let x: Result<i32, &str> = Ok(5);
+              let y: Result<String, &str> = x.fmap(|n| n.to_string());
+              assert_eq!(y, Ok("5".to_string()));
+
+      - name: fmap_ref
+        signature: "fn fmap_ref<B, F>(&self, f: F) -> Self::WithType<B> where F: FnOnce(&Self::Inner) -> B, Self: Clone"
+        description: |
+          参照から関数を適用する。内部値を参照で受け取る。
+        default_implementation: |
+          fn fmap_ref<B, F>(&self, f: F) -> Self::WithType<B>
+          where
+              F: FnOnce(&Self::Inner) -> B,
+              Self: Clone,
+          {
+              // デフォルト実装は clone を使用
+              // 各型で効率的な実装を提供可能
+          }
+
+      - name: replace
+        signature: "fn replace<B>(self, value: B) -> Self::WithType<B>"
+        description: |
+          Functor の中の値を指定した値で置き換える。
+          fmap(|_| value) の略記。
+        default_implementation: |
+          fn replace<B>(self, value: B) -> Self::WithType<B> {
+              self.fmap(|_| value)
+          }
+
+      - name: void
+        signature: "fn void(self) -> Self::WithType<()>"
+        description: |
+          Functor の中の値を () で置き換える。
+          構造だけを保存し、値を捨てる。
+        default_implementation: |
+          fn void(self) -> Self::WithType<()> {
+              self.replace(())
+          }
+
+    implementations:
+      - type: "Option<T>"
+        description: |
+          Option は Functor。
+          Some(x).fmap(f) == Some(f(x))
+          None.fmap(f) == None
+
+      - type: "Result<T, E>"
+        description: |
+          Result は T に対する Functor。
+          Ok(x).fmap(f) == Ok(f(x))
+          Err(e).fmap(f) == Err(e)
+
+          注意: E は固定。Result<T, E> は T を変換するが E は保持される。
+
+      - type: "Vec<T>"
+        description: |
+          Vec は Functor。
+          vec![a, b, c].fmap(f) == vec![f(a), f(b), f(c)]
+
+          Rust の Vec::iter().map().collect() に相当。
+
+      - type: "Box<T>"
+        description: |
+          Box は Functor。
+          Box::new(x).fmap(f) == Box::new(f(x))
+
+      - type: "Identity<T>"
+        description: |
+          恒等 Functor。値をそのままラップする。
+          Identity(x).fmap(f) == Identity(f(x))
+
+          モナド変換子の基底として使用。
+
+    dependencies: []
+
+  # ======================================================================
+  # 4. Applicative トレイト
+  # ======================================================================
+  - id: typeclass_applicative
+    name: Applicative トレイト
+    description: |
+      Functor を拡張し、コンテキスト内の関数をコンテキスト内の値に適用できる型クラス。
+      また、純粋な値をコンテキストに持ち上げる操作を提供する。
+
+      数学的背景:
+        Applicative Functor は、関手に追加の構造を与える。
+        - pure: A -> F[A] （値をコンテキストに持ち上げる）
+        - apply: F[A -> B] -> F[A] -> F[B] （コンテキスト内の関数を適用）
+
+      Rust での設計考慮事項:
+        - pure は関連関数として実装
+        - apply は self が関数を持つ場合と、引数として関数を受け取る場合の両方を考慮
+        - 複数の値を組み合わせる map2, map3 などの便利メソッドを提供
+
+    laws:
+      - name: Identity（恒等律）
+        description: |
+          pure(id) を apply しても値は変わらない。
+        equation: "Self::pure(|x| x).apply(v) == v"
+        property_test: |
+          fn prop_identity<F>(v: F) -> bool
+          where
+              F: Applicative + PartialEq + Clone,
+          {
+              F::pure(|x| x).apply(v.clone()) == v
+          }
+
+      - name: Homomorphism（準同型律）
+        description: |
+          pure した関数を pure した値に apply するのは、
+          関数を値に適用して pure するのと同じ。
+        equation: "Self::pure(f).apply(Self::pure(x)) == Self::pure(f(x))"
+        property_test: |
+          fn prop_homomorphism<F, A, B>(f: impl Fn(A) -> B, x: A) -> bool
+          where
+              F: Applicative,
+              F::WithType<B>: PartialEq,
+              A: Clone,
+              B: Clone,
+          {
+              F::pure(f.clone()).apply(F::pure(x.clone())) == F::pure(f(x))
+          }
+
+      - name: Interchange（交換律）
+        description: |
+          関数が入った Applicative に純粋な値を apply するのと、
+          純粋な値に関数が入った Applicative を apply するのは交換可能（適切な変換の下で）。
+        equation: "u.apply(Self::pure(y)) == Self::pure(|f| f(y)).apply(u)"
+        property_test: |
+          fn prop_interchange<F, A, B>(u: F::WithType<fn(A) -> B>, y: A) -> bool
+          where
+              F: Applicative,
+              F::WithType<B>: PartialEq,
+              A: Clone,
+          {
+              u.clone().apply(F::pure(y.clone()))
+                  == F::pure(|f: fn(A) -> B| f(y.clone())).apply(u)
+          }
+
+      - name: Composition（合成律）
+        description: |
+          関数の合成と apply の順序は交換可能。
+        equation: "Self::pure(compose).apply(u).apply(v).apply(w) == u.apply(v.apply(w))"
+
+    methods:
+      - name: pure
+        signature: "fn pure(value: A) -> Self::WithType<A>"
+        description: |
+          純粋な値を Applicative コンテキストに持ち上げる。
+          関連関数として実装。
+        examples:
+          - description: "Option の pure"
+            code: |
+              let x: Option<i32> = Option::pure(42);
+              assert_eq!(x, Some(42));
+          - description: "Result の pure"
+            code: |
+              let x: Result<i32, String> = Result::pure(42);
+              assert_eq!(x, Ok(42));
+
+      - name: apply
+        signature: "fn apply<B>(self, fb: Self::WithType<B>) -> Self::WithType<B::Output> where Self::Inner: FnOnce(B) -> B::Output"
+        description: |
+          コンテキスト内の関数をコンテキスト内の値に適用する。
+          self は関数を持つ Applicative。
+
+          注意: Rust では関数の型が複雑になるため、
+          map2 スタイルの方が使いやすいことが多い。
+
+      - name: apply_to
+        signature: "fn apply_to<B, F>(self, ff: Self::WithType<F>) -> Self::WithType<B> where F: FnOnce(Self::Inner) -> B"
+        description: |
+          self が値を持ち、引数として関数を持つ Applicative を受け取るバージョン。
+          apply の引数順序を入れ替えたもの。
+
+      - name: map2
+        signature: "fn map2<B, C, F>(self, fb: Self::WithType<B>, f: F) -> Self::WithType<C> where F: FnOnce(Self::Inner, B) -> C"
+        description: |
+          二つの Applicative の値を組み合わせる。
+          apply より使いやすい形式。
+        examples:
+          - description: "Option の map2"
+            code: |
+              let a = Some(1);
+              let b = Some(2);
+              let c = a.map2(b, |x, y| x + y);
+              assert_eq!(c, Some(3));
+
+      - name: map3
+        signature: "fn map3<B, C, D, F>(self, fb: Self::WithType<B>, fc: Self::WithType<C>, f: F) -> Self::WithType<D> where F: FnOnce(Self::Inner, B, C) -> D"
+        description: |
+          三つの Applicative の値を組み合わせる。
+
+      - name: product
+        signature: "fn product<B>(self, fb: Self::WithType<B>) -> Self::WithType<(Self::Inner, B)>"
+        description: |
+          二つの Applicative をタプルに結合する。
+          map2(fb, |a, b| (a, b)) の略記。
+        default_implementation: |
+          fn product<B>(self, fb: Self::WithType<B>) -> Self::WithType<(Self::Inner, B)> {
+              self.map2(fb, |a, b| (a, b))
+          }
+
+      - name: product_left
+        signature: "fn product_left<B>(self, fb: Self::WithType<B>) -> Self where Self: Sized"
+        description: |
+          二つの Applicative を評価し、左側の値を返す。
+          map2(fb, |a, _| a) の略記。
+        default_implementation: |
+          fn product_left<B>(self, fb: Self::WithType<B>) -> Self {
+              self.map2(fb, |a, _| a)
+          }
+
+      - name: product_right
+        signature: "fn product_right<B>(self, fb: Self::WithType<B>) -> Self::WithType<B>"
+        description: |
+          二つの Applicative を評価し、右側の値を返す。
+          map2(fb, |_, b| b) の略記。
+        default_implementation: |
+          fn product_right<B>(self, fb: Self::WithType<B>) -> Self::WithType<B> {
+              self.map2(fb, |_, b| b)
+          }
+
+    implementations:
+      - type: "Option<T>"
+        description: |
+          Option は Applicative。
+          pure(x) == Some(x)
+          Some(f).apply(Some(x)) == Some(f(x))
+          None.apply(_) == None
+          _.apply(None) == None
+
+      - type: "Result<T, E>"
+        description: |
+          Result は Applicative。
+          pure(x) == Ok(x)
+          Ok(f).apply(Ok(x)) == Ok(f(x))
+          Err(e).apply(_) == Err(e)
+          Ok(f).apply(Err(e)) == Err(e)
+
+      - type: "Vec<T>"
+        description: |
+          Vec は Applicative（全組み合わせ）。
+          pure(x) == vec![x]
+          vec![f, g].apply(vec![a, b]) == vec![f(a), f(b), g(a), g(b)]
+
+          これは非決定性計算のモデル。
+
+      - type: "Identity<T>"
+        description: |
+          恒等 Applicative。
+          pure(x) == Identity(x)
+          Identity(f).apply(Identity(x)) == Identity(f(x))
+
+    dependencies:
+      - typeclass_functor
+
+  # ======================================================================
+  # 5. Monad トレイト
+  # ======================================================================
+  - id: typeclass_monad
+    name: Monad トレイト
+    description: |
+      Applicative を拡張し、コンテキスト内の値に依存して次のコンテキストを
+      生成できる型クラス。「プログラム可能なセミコロン」とも呼ばれる。
+
+      数学的背景:
+        モナドは、関手に二つの自然変換を加えた構造:
+        - unit (return/pure): A -> M[A]
+        - join (flatten): M[M[A]] -> M[A]
+        または等価な形式:
+        - bind (>>=): M[A] -> (A -> M[B]) -> M[B]
+
+      Rust での設計考慮事項:
+        - flat_map（Haskell の >>=）を主要なメソッドとして提供
+        - flatten は flat_map から導出可能
+        - and_then との名前の整合性を考慮
+        - ? 演算子との統合可能性を意識
+
+    laws:
+      - name: Left Identity（左単位元律）
+        description: |
+          pure した値を flat_map するのは、関数を直接適用するのと同じ。
+        equation: "Self::pure(a).flat_map(f) == f(a)"
+        property_test: |
+          fn prop_left_identity<M, A, B>(a: A, f: impl Fn(A) -> M::WithType<B>) -> bool
+          where
+              M: Monad,
+              M::WithType<B>: PartialEq,
+              A: Clone,
+          {
+              M::pure(a.clone()).flat_map(f.clone()) == f(a)
+          }
+
+      - name: Right Identity（右単位元律）
+        description: |
+          Monad を pure で flat_map するのは、元の Monad と同じ。
+        equation: "m.flat_map(Self::pure) == m"
+        property_test: |
+          fn prop_right_identity<M>(m: M) -> bool
+          where
+              M: Monad + PartialEq + Clone,
+          {
+              m.clone().flat_map(M::pure) == m
+          }
+
+      - name: Associativity（結合律）
+        description: |
+          flat_map の連鎖は結合的。
+        equation: "m.flat_map(f).flat_map(g) == m.flat_map(|x| f(x).flat_map(g))"
+        property_test: |
+          fn prop_associativity<M, A, B, C>(
+              m: M,
+              f: impl Fn(A) -> M::WithType<B>,
+              g: impl Fn(B) -> M::WithType<C>,
+          ) -> bool
+          where
+              M: Monad<Inner = A>,
+              M::WithType<C>: PartialEq,
+          {
+              m.clone().flat_map(&f).flat_map(&g)
+                  == m.flat_map(|x| f(x).flat_map(&g))
+          }
+
+    methods:
+      - name: flat_map
+        signature: "fn flat_map<B, F>(self, f: F) -> Self::WithType<B> where F: FnOnce(Self::Inner) -> Self::WithType<B>"
+        description: |
+          Monad 内の値に関数を適用し、結果の Monad を平坦化する。
+          Haskell の >>= に相当。Rust の and_then に近い。
+        examples:
+          - description: "Option の flat_map"
+            code: |
+              let x = Some(5);
+              let y = x.flat_map(|n| if n > 0 { Some(n * 2) } else { None });
+              assert_eq!(y, Some(10));
+          - description: "Result の flat_map"
+            code: |
+              fn parse_positive(s: &str) -> Result<i32, &'static str> {
+                  s.parse::<i32>()
+                      .map_err(|_| "parse error")
+                      .flat_map(|n| if n > 0 { Ok(n) } else { Err("not positive") })
+              }
+
+      - name: and_then
+        signature: "fn and_then<B, F>(self, f: F) -> Self::WithType<B> where F: FnOnce(Self::Inner) -> Self::WithType<B>"
+        description: |
+          flat_map のエイリアス。Rust の慣習に合わせた名前。
+        default_implementation: |
+          fn and_then<B, F>(self, f: F) -> Self::WithType<B>
+          where
+              F: FnOnce(Self::Inner) -> Self::WithType<B>,
+          {
+              self.flat_map(f)
+          }
+
+      - name: then
+        signature: "fn then<B>(self, mb: Self::WithType<B>) -> Self::WithType<B>"
+        description: |
+          最初の Monad を評価し、その結果を捨てて次の Monad を返す。
+          Haskell の >> に相当。
+        default_implementation: |
+          fn then<B>(self, mb: Self::WithType<B>) -> Self::WithType<B> {
+              self.flat_map(|_| mb)
+          }
+
+      # NOTE: flatten と filter_map は将来の拡張として docs/future_work.yaml に記載
+      # - flatten: Rust の型システム制約により汎用実装が困難
+      # - filter_map: 「失敗」セマンティクスが型によって異なるため汎用化が困難
+
+    implementations:
+      - type: "Option<T>"
+        description: |
+          Option は Monad。
+          Some(x).flat_map(f) == f(x)
+          None.flat_map(f) == None
+
+      - type: "Result<T, E>"
+        description: |
+          Result は Monad。
+          Ok(x).flat_map(f) == f(x)
+          Err(e).flat_map(f) == Err(e)
+
+      - type: "Vec<T>"
+        description: |
+          Vec は Monad（リストモナド / 非決定性）。
+          vec![a, b].flat_map(f) == [f(a), f(b)].flatten()
+
+          Rust の flat_map/flatten に相当。
+
+      - type: "Identity<T>"
+        description: |
+          恒等 Monad。
+          Identity(x).flat_map(f) == f(x)
+
+    dependencies:
+      - typeclass_applicative
+
+  # ======================================================================
+  # 6. Foldable トレイト
+  # ======================================================================
+  - id: typeclass_foldable
+    name: Foldable トレイト
+    description: |
+      構造内の要素を畳み込み（fold）できる型を表現する型クラス。
+      データ構造を単一の値にまとめる操作を提供する。
+
+      数学的背景:
+        Foldable は、データ構造の「要素を列挙できる」という性質を抽象化する。
+        リスト、木、Option など、要素を持つデータ構造に適用可能。
+
+      Rust での設計考慮事項:
+        - Iterator との関係: Rust の Iterator は Foldable に近い
+        - ただし Foldable は Iterator よりも一般的（木構造なども対象）
+        - fold_right（右畳み込み）は遅延評価がないと効率が悪い場合がある
+        - Rust では fold_left を主体とし、fold_right は慎重に使用
+
+    laws:
+      - name: Consistency with toList
+        description: |
+          fold_left は toList してから fold_left するのと一貫性がある。
+        equation: "fa.fold_left(init, f) == fa.to_list().fold_left(init, f)"
+        note: |
+          これは「法則」というより「意図された振る舞い」。
+          要素の順序が定義されている場合に有効。
+
+    methods:
+      - name: fold_left
+        signature: "fn fold_left<B, F>(self, init: B, f: F) -> B where F: FnMut(B, Self::Inner) -> B"
+        description: |
+          左から右へ畳み込む。
+          Rust の Iterator::fold に相当。
+        examples:
+          - description: "Option の fold_left"
+            code: |
+              let x = Some(5);
+              let sum = x.fold_left(10, |acc, n| acc + n);
+              assert_eq!(sum, 15);
+          - description: "Vec の fold_left"
+            code: |
+              let v = vec![1, 2, 3];
+              let sum = v.fold_left(0, |acc, n| acc + n);
+              assert_eq!(sum, 6);
+
+      - name: fold_right
+        signature: "fn fold_right<B, F>(self, init: B, f: F) -> B where F: FnMut(Self::Inner, B) -> B"
+        description: |
+          右から左へ畳み込む。
+          遅延評価がない Rust では、大きな構造で非効率になる可能性がある。
+          木構造など、右畳み込みが自然な場合に使用。
+        note: |
+          Rust では多くの場合 fold_left で十分。
+          fold_right は特定のアルゴリズム（差分リストなど）で必要。
+
+      - name: fold_map
+        signature: "fn fold_map<M, F>(self, f: F) -> M where M: Monoid, F: FnMut(Self::Inner) -> M"
+        description: |
+          各要素を Monoid にマップし、結果を結合する。
+          fold_left(M::empty(), |acc, x| acc.combine(f(x))) と等価だが、
+          より宣言的で、並列化の余地がある。
+        examples:
+          - description: "Vec から Sum への fold_map"
+            code: |
+              let v = vec![1, 2, 3, 4, 5];
+              let sum: Sum<i32> = v.fold_map(Sum);
+              assert_eq!(sum, Sum(15));
+
+      - name: is_empty
+        signature: "fn is_empty(&self) -> bool"
+        description: |
+          構造が空かどうかを判定する。
+        default_implementation: |
+          fn is_empty(&self) -> bool {
+              self.length() == 0
+          }
+
+      - name: length
+        signature: "fn length(&self) -> usize"
+        description: |
+          構造内の要素数を返す。
+        default_implementation: |
+          fn length(&self) -> usize {
+              self.fold_left(0, |acc, _| acc + 1)
+          }
+
+      - name: to_list
+        signature: "fn to_list(self) -> Vec<Self::Inner>"
+        description: |
+          構造を Vec（リスト）に変換する。
+        default_implementation: |
+          fn to_list(self) -> Vec<Self::Inner> {
+              self.fold_left(Vec::new(), |mut acc, x| {
+                  acc.push(x);
+                  acc
+              })
+          }
+
+      - name: find
+        signature: "fn find<P>(self, predicate: P) -> Option<Self::Inner> where P: FnMut(&Self::Inner) -> bool"
+        description: |
+          条件を満たす最初の要素を見つける。
+
+      - name: exists
+        signature: "fn exists<P>(&self, predicate: P) -> bool where P: FnMut(&Self::Inner) -> bool"
+        description: |
+          条件を満たす要素が存在するかを判定する。
+        default_implementation: |
+          fn exists<P>(&self, mut predicate: P) -> bool
+          where
+              P: FnMut(&Self::Inner) -> bool,
+          {
+              self.find(predicate).is_some()
+          }
+
+      - name: for_all
+        signature: "fn for_all<P>(&self, predicate: P) -> bool where P: FnMut(&Self::Inner) -> bool"
+        description: |
+          全ての要素が条件を満たすかを判定する。
+        default_implementation: |
+          fn for_all<P>(&self, mut predicate: P) -> bool
+          where
+              P: FnMut(&Self::Inner) -> bool,
+          {
+              !self.exists(|x| !predicate(x))
+          }
+
+    implementations:
+      - type: "Option<T>"
+        description: |
+          Option は Foldable（0 か 1 要素）。
+          Some(x).fold_left(init, f) == f(init, x)
+          None.fold_left(init, f) == init
+
+      - type: "Result<T, E>"
+        description: |
+          Result は Foldable（成功値のみ）。
+          Ok(x).fold_left(init, f) == f(init, x)
+          Err(_).fold_left(init, f) == init
+
+      - type: "Vec<T>"
+        description: |
+          Vec は Foldable。
+          Rust の Iterator::fold をそのまま使用。
+
+      - type: "BinaryTree<T>"
+        description: |
+          二分木は Foldable（中順、前順、後順の選択肢あり）。
+          デフォルトは中順走査。
+
+    dependencies:
+      - typeclass_monoid
+
+  # ======================================================================
+  # 7. Traversable トレイト
+  # ======================================================================
+  - id: typeclass_traversable
+    name: Traversable トレイト
+    description: |
+      構造内の各要素に効果的な関数を適用し、効果を「外側に出す」ことができる型クラス。
+      Functor と Foldable を組み合わせ、さらに効果を扱う能力を持つ。
+
+      数学的背景:
+        Traversable は、各要素に Applicative な関数を適用し、
+        結果の Applicative を構造の「外側」に持ち上げる操作を提供する。
+        例: List[Option[A]] から Option[List[A]] への変換。
+
+      Rust での設計考慮事項:
+        - HKT がないため、トレイトの設計が複雑になる
+        - 具体的な Applicative ごとに traverse を実装する必要があるかもしれない
+        - sequence（traverse(id) の特殊化）を別途提供
+
+    laws:
+      - name: Naturality（自然性）
+        description: |
+          traverse は自然変換と可換。
+        equation: "t(fa.traverse(f)) == fa.traverse(t . f)"
+        note: |
+          t が Applicative 間の自然変換（Applicative 準同型）である場合。
+
+      - name: Identity（恒等律）
+        description: |
+          恒等 Applicative で traverse すると、構造は変わらない。
+        equation: "fa.traverse(Identity) == Identity(fa)"
+
+      - name: Composition（合成律）
+        description: |
+          Applicative の合成と traverse は可換。
+        equation: "fa.traverse(Compose . fmap(g) . f) == Compose(fmap(traverse(g))(fa.traverse(f)))"
+
+    methods:
+      - name: traverse
+        signature: |
+          fn traverse<G, B, F>(self, f: F) -> G::WithType<Self::WithType<B>>
+          where
+              G: Applicative,
+              F: FnMut(Self::Inner) -> G::WithType<B>
+        description: |
+          各要素に Applicative な関数を適用し、結果を集約する。
+
+          例: Vec<A> と (A -> Option<B>) から Option<Vec<B>> を生成。
+          一つでも None があれば全体が None になる。
+        examples:
+          - description: "Vec を Option で traverse"
+            code: |
+              fn parse(s: &str) -> Option<i32> {
+                  s.parse().ok()
+              }
+
+              let strings = vec!["1", "2", "3"];
+              let result: Option<Vec<i32>> = strings.traverse(parse);
+              assert_eq!(result, Some(vec![1, 2, 3]));
+
+              let strings_with_error = vec!["1", "two", "3"];
+              let result: Option<Vec<i32>> = strings_with_error.traverse(parse);
+              assert_eq!(result, None);
+          - description: "Vec を Result で traverse"
+            code: |
+              fn validate(n: i32) -> Result<i32, &'static str> {
+                  if n > 0 { Ok(n) } else { Err("must be positive") }
+              }
+
+              let nums = vec![1, 2, 3];
+              let result: Result<Vec<i32>, _> = nums.traverse(validate);
+              assert_eq!(result, Ok(vec![1, 2, 3]));
+
+      - name: sequence
+        signature: |
+          fn sequence<G>(self) -> G::WithType<Self::WithType<G::Inner>>
+          where
+              G: Applicative,
+              Self::Inner: TypeConstructor<WithType<G::Inner> = G>
+        description: |
+          ネストした構造を「裏返す」。
+          traverse(id) の特殊化。
+
+          例: Vec<Option<A>> から Option<Vec<A>> を生成。
+        examples:
+          - description: "Vec<Option<T>> の sequence"
+            code: |
+              let v: Vec<Option<i32>> = vec![Some(1), Some(2), Some(3)];
+              let result: Option<Vec<i32>> = v.sequence();
+              assert_eq!(result, Some(vec![1, 2, 3]));
+
+              let v_with_none: Vec<Option<i32>> = vec![Some(1), None, Some(3)];
+              let result: Option<Vec<i32>> = v_with_none.sequence();
+              assert_eq!(result, None);
+
+      - name: traverse_
+        signature: |
+          fn traverse_<G, F>(self, f: F) -> G::WithType<()>
+          where
+              G: Applicative,
+              F: FnMut(Self::Inner) -> G::WithType<()>
+        description: |
+          traverse と同様だが、結果を捨てて () を返す。
+          副作用のためだけに traverse する場合に使用。
+          traverse(...).void() より効率的な実装が可能。
+
+      - name: for_each
+        signature: |
+          fn for_each<G, F>(self, f: F) -> G::WithType<()>
+          where
+              G: Applicative,
+              F: FnMut(Self::Inner) -> G::WithType<()>
+        description: |
+          traverse_ のエイリアス。より命令的な名前。
+
+    implementations:
+      - type: "Option<T>"
+        description: |
+          Option は Traversable。
+          Some(x).traverse(f) == f(x).fmap(Some)
+          None.traverse(f) == pure(None)
+
+      - type: "Result<T, E>"
+        description: |
+          Result は Traversable（成功値に対して）。
+          Ok(x).traverse(f) == f(x).fmap(Ok)
+          Err(e).traverse(f) == pure(Err(e))
+
+      - type: "Vec<T>"
+        description: |
+          Vec は Traversable。
+          要素を順番に traverse し、結果を Vec に集める。
+
+          vec![a, b, c].traverse(f) ==
+            f(a).map2(f(b).map2(f(c), |b, c| vec![b, c]), |a, bc| {
+                let mut v = vec![a];
+                v.extend(bc);
+                v
+            })
+
+      - type: "(A, B) - タプル"
+        description: |
+          タプルは第二要素に対して Traversable。
+          (a, b).traverse(f) == f(b).fmap(|b2| (a, b2))
+
+    dependencies:
+      - typeclass_functor
+      - typeclass_foldable
+      - typeclass_applicative
+
+# 補助的な型とトレイト
+auxiliary_types:
+  - name: TypeConstructor
+    description: |
+      HKT をエミュレートするための基本トレイト。
+      型コンストラクタ F<A> から F<B> への変換を可能にする。
+    definition: |
+      pub trait TypeConstructor {
+          /// この型コンストラクタが保持する内部の型
+          type Inner;
+
+          /// 異なる型パラメータを持つ同じコンストラクタ
+          type WithType<B>: TypeConstructor<Inner = B>;
+      }
+
+  - name: Identity
+    description: |
+      恒等ファンクター。値をそのままラップする。
+      Monad 変換子の基底として、また単体テストで使用。
+    definition: |
+      #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+      pub struct Identity<A>(pub A);
+
+  - name: Sum
+    description: |
+      加算による Monoid を表す newtype ラッパー。
+    definition: |
+      #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+      pub struct Sum<A>(pub A);
+
+  - name: Product
+    description: |
+      乗算による Monoid を表す newtype ラッパー。
+    definition: |
+      #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+      pub struct Product<A>(pub A);
+
+# テスト戦略
+testing_strategy:
+  property_based_testing:
+    description: |
+      各型クラスの法則をプロパティベーステストで検証する。
+      quickcheck や proptest クレートを使用。
+    examples:
+      - "Functor の恒等律と合成律"
+      - "Monad の左単位元律、右単位元律、結合律"
+      - "Monoid の左右単位元律と結合律"
+
+  unit_tests:
+    description: |
+      各実装の具体的な動作を単体テストで確認する。
+    examples:
+      - "Option::fmap の動作確認"
+      - "Vec::traverse の動作確認"
+      - "Result::flat_map のエラー伝播確認"
+
+# 将来の拡張
+future_extensions:
+  - name: Bifunctor
+    description: |
+      二つの型パラメータを持つ Functor。
+      Result<T, E> は T と E 両方に対して map できる。
+
+  - name: Contravariant
+    description: |
+      反変ファンクター。入力の型に対して contramap を持つ。
+      Predicate<A>: contramap(f: B -> A) -> Predicate<B>
+
+  - name: Alternative
+    description: |
+      「選択」を表す Applicative の拡張。
+      empty と orElse (|) を持つ。
+
+  - name: MonadError
+    description: |
+      エラー処理を統一的に扱う Monad の拡張。
+      raise と handle を持つ。

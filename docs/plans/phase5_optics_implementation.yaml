@@ -1,0 +1,1846 @@
+# Phase 5: Optics - 実装計画
+#
+# このファイルは docs/requirements/phase5_optics.yaml の要件定義に基づき、
+# TDD アプローチによる実装計画を定義する。
+#
+# 設計方針:
+#   1. `#![forbid(unsafe_code)]` ポリシーに準拠（unsafe 禁止）
+#   2. 所有権とライフタイムを考慮した Rust らしい API 設計
+#   3. Phase 1 の型クラス（Functor, Traversable）との統合
+#   4. Phase 4 の永続データ構造との連携
+#   5. rstest によるパラメータ化テスト
+#   6. proptest による法則・不変条件の検証
+#   7. テストカバレッジ 100% を目標
+#   8. 略語を使用しない命名規則
+
+version: "1.0.0"
+phase: 5
+name: "Optics Implementation Plan"
+created_at: "2025-12-31"
+last_updated: "2025-12-31"
+
+# =============================================================================
+# ファイル構成
+# =============================================================================
+file_structure:
+  source_files:
+    - path: "src/optics/mod.rs"
+      description: "Optics モジュールのエントリポイント。全ての型とトレイトを公開"
+      status: "exists"
+      modifications_needed: true
+
+    - path: "src/optics/lens.rs"
+      description: "Lens トレイトと基本実装（FunctionLens, ComposedLens）"
+      status: "to_create"
+
+    - path: "src/optics/prism.rs"
+      description: "Prism トレイトと基本実装（FunctionPrism, ComposedPrism）"
+      status: "to_create"
+
+    - path: "src/optics/iso.rs"
+      description: "Iso トレイトと基本実装（FunctionIso, ReversedIso）"
+      status: "to_create"
+
+    - path: "src/optics/traversal.rs"
+      description: "Traversal トレイトと基本実装（VecTraversal, OptionTraversal）"
+      status: "to_create"
+
+    - path: "src/optics/optional.rs"
+      description: "Optional トレイト（Lens + Prism の合成結果）"
+      status: "to_create"
+
+    - path: "src/optics/lens_macro.rs"
+      description: "lens! マクロの定義"
+      status: "to_create"
+
+    - path: "src/optics/prism_macro.rs"
+      description: "prism! マクロの定義"
+      status: "to_create"
+
+    - path: "src/optics/iso_macro.rs"
+      description: "iso! マクロの定義"
+      status: "to_create"
+
+    - path: "src/optics/persistent_optics.rs"
+      description: "Phase 4 永続データ構造への Lens/Traversal 実装"
+      status: "to_create"
+
+    - path: "src/optics/standard_optics.rs"
+      description: "よく使う Iso（swap, identity, newtype）の提供"
+      status: "to_create"
+
+  derive_macro_crate:
+    - path: "functional-rusty-derive/Cargo.toml"
+      description: "derive マクロ用クレートの設定"
+      status: "to_create"
+
+    - path: "functional-rusty-derive/src/lib.rs"
+      description: "derive マクロのエントリポイント"
+      status: "to_create"
+
+    - path: "functional-rusty-derive/src/lenses.rs"
+      description: "#[derive(Lenses)] の実装"
+      status: "to_create"
+
+    - path: "functional-rusty-derive/src/prisms.rs"
+      description: "#[derive(Prisms)] の実装"
+      status: "to_create"
+
+  test_files:
+    - path: "tests/lens_tests.rs"
+      description: "Lens の単体テスト"
+      status: "to_create"
+
+    - path: "tests/lens_laws.rs"
+      description: "Lens の法則テスト（proptest）"
+      status: "to_create"
+
+    - path: "tests/prism_tests.rs"
+      description: "Prism の単体テスト"
+      status: "to_create"
+
+    - path: "tests/prism_laws.rs"
+      description: "Prism の法則テスト（proptest）"
+      status: "to_create"
+
+    - path: "tests/iso_tests.rs"
+      description: "Iso の単体テスト"
+      status: "to_create"
+
+    - path: "tests/iso_laws.rs"
+      description: "Iso の法則テスト（proptest）"
+      status: "to_create"
+
+    - path: "tests/traversal_tests.rs"
+      description: "Traversal の単体テスト"
+      status: "to_create"
+
+    - path: "tests/traversal_laws.rs"
+      description: "Traversal の法則テスト（proptest）"
+      status: "to_create"
+
+    - path: "tests/optics_macro_tests.rs"
+      description: "lens!, prism!, iso! マクロのテスト"
+      status: "to_create"
+
+    - path: "tests/derive_tests.rs"
+      description: "#[derive(Lenses)], #[derive(Prisms)] のテスト"
+      status: "to_create"
+
+    - path: "tests/persistent_optics_tests.rs"
+      description: "永続データ構造との統合テスト"
+      status: "to_create"
+
+    - path: "tests/optics_integration.rs"
+      description: "Optics 全体の統合テスト"
+      status: "to_create"
+
+# =============================================================================
+# 実装順序と依存関係
+# =============================================================================
+implementation_order:
+  - phase: "5.1"
+    name: "Lens トレイトと基本実装"
+    description: |
+      Lens トレイトの定義、FunctionLens の実装、ComposedLens の実装、
+      lens! マクロの実装。Optics の基盤となる最も重要なコンポーネント。
+    estimated_duration: "3-4 days"
+    dependencies: []
+    priority: "critical"
+
+  - phase: "5.2"
+    name: "Prism トレイトと基本実装"
+    description: |
+      Prism トレイトの定義、FunctionPrism の実装、ComposedPrism の実装、
+      prism! マクロの実装。Lens と Prism の合成（Optional）も含む。
+    estimated_duration: "3-4 days"
+    dependencies:
+      - "5.1"
+    priority: "high"
+
+  - phase: "5.3"
+    name: "Iso トレイトと基本実装"
+    description: |
+      Iso トレイトの定義、FunctionIso の実装、ReversedIso の実装、
+      iso! マクロの実装。標準的な Iso（swap, identity, newtype）の提供。
+      Iso から Lens/Prism への変換も含む。
+    estimated_duration: "2-3 days"
+    dependencies:
+      - "5.1"
+      - "5.2"
+    priority: "medium"
+
+  - phase: "5.4"
+    name: "Traversal トレイトと基本実装"
+    description: |
+      Traversal トレイトの定義、VecTraversal, OptionTraversal の実装。
+      Lens/Prism から Traversal への変換。
+      Phase 1 の Traversable トレイトとの統合。
+    estimated_duration: "3-4 days"
+    dependencies:
+      - "5.1"
+      - "5.2"
+    priority: "medium"
+
+  - phase: "5.5"
+    name: "derive マクロの実装"
+    description: |
+      functional-rusty-derive クレートの作成。
+      #[derive(Lenses)] と #[derive(Prisms)] の proc-macro 実装。
+    estimated_duration: "4-5 days"
+    dependencies:
+      - "5.1"
+      - "5.2"
+    priority: "high"
+
+  - phase: "5.6"
+    name: "永続データ構造との統合"
+    description: |
+      Phase 4 の PersistentList, PersistentVector, PersistentHashMap,
+      PersistentTreeMap への Lens/Traversal 実装。
+    estimated_duration: "2-3 days"
+    dependencies:
+      - "5.1"
+      - "5.4"
+    priority: "medium"
+
+# =============================================================================
+# Phase 5.1: Lens トレイトと基本実装
+# =============================================================================
+lens_implementation:
+  name: "Lens<S, A>"
+  description: |
+    構造体フィールドへの型安全な get/set アクセスを提供する。
+    不変データ構造の部分的な読み取りと更新を可能にする核心的なコンポーネント。
+
+  internal_structure:
+    trait_definition: |
+      ```rust
+      /// 構造体フィールドへのアクセスを抽象化する Lens
+      ///
+      /// # Type Parameters
+      /// - `S`: ソース型（全体の構造体）
+      /// - `A`: ターゲット型（フィールドの型）
+      ///
+      /// # Laws
+      /// 1. GetPut Law: lens.set(source, lens.get(&source).clone()) == source
+      /// 2. PutGet Law: lens.get(&lens.set(source, value)) == &value
+      /// 3. PutPut Law: lens.set(lens.set(source, v1), v2) == lens.set(source, v2)
+      pub trait Lens<S, A> {
+          /// ソースからターゲットへの参照を取得する
+          fn get<'a>(&self, source: &'a S) -> &'a A;
+
+          /// ターゲットを新しい値で置き換えた新しいソースを返す
+          fn set(&self, source: S, value: A) -> S;
+
+          /// ターゲットに関数を適用した新しいソースを返す
+          fn modify<F>(&self, source: S, function: F) -> S
+          where
+              F: FnOnce(A) -> A,
+              A: Clone,
+          {
+              let current = self.get(&source).clone();
+              self.set(source, function(current))
+          }
+
+          /// ターゲットへの参照に関数を適用した新しいソースを返す
+          fn modify_ref<F>(&self, source: S, function: F) -> S
+          where
+              F: FnOnce(&A) -> A,
+          {
+              let new_value = function(self.get(&source));
+              self.set(source, new_value)
+          }
+
+          /// 別の Lens と合成して深いネストにアクセスする
+          fn compose<B, L>(self, other: L) -> ComposedLens<Self, L>
+          where
+              Self: Sized,
+              L: Lens<A, B>,
+          {
+              ComposedLens::new(self, other)
+          }
+
+          /// Traversal に変換する
+          fn to_traversal(self) -> LensAsTraversal<Self>
+          where
+              Self: Sized,
+          {
+              LensAsTraversal::new(self)
+          }
+      }
+      ```
+
+    function_lens_definition: |
+      ```rust
+      /// 関数ベースの Lens 実装
+      ///
+      /// getter と setter 関数から Lens を構築する。
+      /// lens! マクロの内部実装として使用される。
+      pub struct FunctionLens<S, A, G, St>
+      where
+          G: Fn(&S) -> &A,
+          St: Fn(S, A) -> S,
+      {
+          getter: G,
+          setter: St,
+          _marker: std::marker::PhantomData<(S, A)>,
+      }
+
+      impl<S, A, G, St> FunctionLens<S, A, G, St>
+      where
+          G: Fn(&S) -> &A,
+          St: Fn(S, A) -> S,
+      {
+          pub fn new(getter: G, setter: St) -> Self {
+              FunctionLens {
+                  getter,
+                  setter,
+                  _marker: std::marker::PhantomData,
+              }
+          }
+      }
+
+      impl<S, A, G, St> Lens<S, A> for FunctionLens<S, A, G, St>
+      where
+          G: Fn(&S) -> &A,
+          St: Fn(S, A) -> S,
+      {
+          fn get<'a>(&self, source: &'a S) -> &'a A {
+              (self.getter)(source)
+          }
+
+          fn set(&self, source: S, value: A) -> S {
+              (self.setter)(source, value)
+          }
+      }
+      ```
+
+    composed_lens_definition: |
+      ```rust
+      /// 合成された Lens
+      ///
+      /// 2つの Lens を合成して深いネストにアクセスする。
+      pub struct ComposedLens<L1, L2> {
+          first: L1,
+          second: L2,
+      }
+
+      impl<L1, L2> ComposedLens<L1, L2> {
+          pub fn new(first: L1, second: L2) -> Self {
+              ComposedLens { first, second }
+          }
+      }
+
+      impl<S, A, B, L1, L2> Lens<S, B> for ComposedLens<L1, L2>
+      where
+          L1: Lens<S, A>,
+          L2: Lens<A, B>,
+          A: Clone,
+      {
+          fn get<'a>(&self, source: &'a S) -> &'a B {
+              let intermediate = self.first.get(source);
+              self.second.get(intermediate)
+          }
+
+          fn set(&self, source: S, value: B) -> S {
+              let intermediate = self.first.get(&source).clone();
+              let new_intermediate = self.second.set(intermediate, value);
+              self.first.set(source, new_intermediate)
+          }
+      }
+      ```
+
+  tdd_cycles:
+    # --------------------------------------------------------------------------
+    # Cycle 1: Lens トレイトの定義
+    # --------------------------------------------------------------------------
+    - cycle_number: 1
+      name: "Lens トレイトの定義"
+      red_phase:
+        tests:
+          - name: "test_lens_trait_exists"
+            code: |
+              #[test]
+              fn test_lens_trait_exists() {
+                  // Lens トレイトが存在し、基本的なメソッドを持つことを確認
+                  fn assert_lens<L: Lens<Point, i32>>(_lens: L) {}
+
+                  #[derive(Clone, PartialEq, Debug)]
+                  struct Point { x: i32, y: i32 }
+
+                  // この時点ではコンパイルエラーになる
+              }
+      green_phase:
+        implementation: |
+          // Lens トレイトを定義
+          pub trait Lens<S, A> {
+              fn get<'a>(&self, source: &'a S) -> &'a A;
+              fn set(&self, source: S, value: A) -> S;
+          }
+      refactor_phase:
+        changes:
+          - "ドキュメントコメントの追加"
+          - "法則のドキュメント化"
+
+    # --------------------------------------------------------------------------
+    # Cycle 2: FunctionLens の実装
+    # --------------------------------------------------------------------------
+    - cycle_number: 2
+      name: "FunctionLens の基本実装"
+      red_phase:
+        tests:
+          - name: "test_function_lens_get"
+            code: |
+              #[test]
+              fn test_function_lens_get() {
+                  #[derive(Clone, PartialEq, Debug)]
+                  struct Point { x: i32, y: i32 }
+
+                  let x_lens = FunctionLens::new(
+                      |point: &Point| &point.x,
+                      |point: Point, x: i32| Point { x, ..point }
+                  );
+
+                  let point = Point { x: 10, y: 20 };
+                  assert_eq!(*x_lens.get(&point), 10);
+              }
+          - name: "test_function_lens_set"
+            code: |
+              #[test]
+              fn test_function_lens_set() {
+                  let point = Point { x: 10, y: 20 };
+                  let updated = x_lens.set(point, 100);
+                  assert_eq!(updated.x, 100);
+                  assert_eq!(updated.y, 20);  // 他のフィールドは不変
+              }
+          - name: "test_function_lens_does_not_modify_original"
+            code: |
+              #[test]
+              fn test_function_lens_does_not_modify_original() {
+                  let point = Point { x: 10, y: 20 };
+                  let _updated = x_lens.set(point.clone(), 100);
+                  // point は変更されていない
+                  assert_eq!(point.x, 10);
+              }
+      green_phase:
+        implementation: |
+          pub struct FunctionLens<S, A, G, St>
+          where
+              G: Fn(&S) -> &A,
+              St: Fn(S, A) -> S,
+          {
+              getter: G,
+              setter: St,
+              _marker: std::marker::PhantomData<(S, A)>,
+          }
+
+          impl<S, A, G, St> FunctionLens<S, A, G, St>
+          where
+              G: Fn(&S) -> &A,
+              St: Fn(S, A) -> S,
+          {
+              pub fn new(getter: G, setter: St) -> Self {
+                  FunctionLens {
+                      getter,
+                      setter,
+                      _marker: std::marker::PhantomData,
+                  }
+              }
+          }
+
+          impl<S, A, G, St> Lens<S, A> for FunctionLens<S, A, G, St>
+          where
+              G: Fn(&S) -> &A,
+              St: Fn(S, A) -> S,
+          {
+              fn get<'a>(&self, source: &'a S) -> &'a A {
+                  (self.getter)(source)
+              }
+
+              fn set(&self, source: S, value: A) -> S {
+                  (self.setter)(source, value)
+              }
+          }
+
+    # --------------------------------------------------------------------------
+    # Cycle 3: modify メソッドの実装
+    # --------------------------------------------------------------------------
+    - cycle_number: 3
+      name: "modify メソッドの実装"
+      red_phase:
+        tests:
+          - name: "test_lens_modify"
+            code: |
+              #[test]
+              fn test_lens_modify() {
+                  #[derive(Clone, PartialEq, Debug)]
+                  struct Point { x: i32, y: i32 }
+
+                  let x_lens = FunctionLens::new(
+                      |point: &Point| &point.x,
+                      |point: Point, x: i32| Point { x, ..point }
+                  );
+
+                  let point = Point { x: 10, y: 20 };
+                  let doubled = x_lens.modify(point, |x| x * 2);
+                  assert_eq!(doubled.x, 20);
+                  assert_eq!(doubled.y, 20);
+              }
+          - name: "test_lens_modify_ref"
+            code: |
+              #[test]
+              fn test_lens_modify_ref() {
+                  #[derive(Clone, PartialEq, Debug)]
+                  struct Person { name: String }
+
+                  let name_lens = FunctionLens::new(
+                      |person: &Person| &person.name,
+                      |person: Person, name: String| Person { name, ..person }
+                  );
+
+                  let person = Person { name: "alice".to_string() };
+                  let upper = name_lens.modify_ref(person, |name| name.to_uppercase());
+                  assert_eq!(upper.name, "ALICE");
+              }
+      green_phase:
+        implementation: |
+          // Lens トレイトに modify メソッドを追加
+          fn modify<F>(&self, source: S, function: F) -> S
+          where
+              F: FnOnce(A) -> A,
+              A: Clone,
+          {
+              let current = self.get(&source).clone();
+              self.set(source, function(current))
+          }
+
+          fn modify_ref<F>(&self, source: S, function: F) -> S
+          where
+              F: FnOnce(&A) -> A,
+          {
+              let new_value = function(self.get(&source));
+              self.set(source, new_value)
+          }
+
+    # --------------------------------------------------------------------------
+    # Cycle 4: ComposedLens の実装
+    # --------------------------------------------------------------------------
+    - cycle_number: 4
+      name: "ComposedLens の実装（Lens の合成）"
+      red_phase:
+        tests:
+          - name: "test_lens_compose_get"
+            code: |
+              #[test]
+              fn test_lens_compose_get() {
+                  #[derive(Clone, PartialEq, Debug)]
+                  struct Address { street: String, city: String }
+
+                  #[derive(Clone, PartialEq, Debug)]
+                  struct Person { name: String, address: Address }
+
+                  let address_lens = FunctionLens::new(
+                      |person: &Person| &person.address,
+                      |person: Person, address: Address| Person { address, ..person }
+                  );
+
+                  let street_lens = FunctionLens::new(
+                      |address: &Address| &address.street,
+                      |address: Address, street: String| Address { street, ..address }
+                  );
+
+                  let person_street = address_lens.compose(street_lens);
+
+                  let person = Person {
+                      name: "Alice".to_string(),
+                      address: Address {
+                          street: "Main St".to_string(),
+                          city: "Tokyo".to_string(),
+                      },
+                  };
+
+                  assert_eq!(*person_street.get(&person), "Main St");
+              }
+          - name: "test_lens_compose_set"
+            code: |
+              #[test]
+              fn test_lens_compose_set() {
+                  // 上記と同じ構造体定義...
+                  let person_street = address_lens.compose(street_lens);
+
+                  let person = Person {
+                      name: "Alice".to_string(),
+                      address: Address {
+                          street: "Main St".to_string(),
+                          city: "Tokyo".to_string(),
+                      },
+                  };
+
+                  let updated = person_street.set(person, "Oak Ave".to_string());
+                  assert_eq!(updated.address.street, "Oak Ave");
+                  assert_eq!(updated.address.city, "Tokyo");  // 他のフィールドは不変
+                  assert_eq!(updated.name, "Alice");
+              }
+          - name: "test_lens_compose_modify"
+            code: |
+              #[test]
+              fn test_lens_compose_modify() {
+                  let person_street = address_lens.compose(street_lens);
+
+                  let person = Person {
+                      name: "Alice".to_string(),
+                      address: Address {
+                          street: "main st".to_string(),
+                          city: "Tokyo".to_string(),
+                      },
+                  };
+
+                  let upper = person_street.modify(person, |street| street.to_uppercase());
+                  assert_eq!(upper.address.street, "MAIN ST");
+              }
+      green_phase:
+        implementation: |
+          pub struct ComposedLens<L1, L2> {
+              first: L1,
+              second: L2,
+          }
+
+          impl<L1, L2> ComposedLens<L1, L2> {
+              pub fn new(first: L1, second: L2) -> Self {
+                  ComposedLens { first, second }
+              }
+          }
+
+          impl<S, A, B, L1, L2> Lens<S, B> for ComposedLens<L1, L2>
+          where
+              L1: Lens<S, A>,
+              L2: Lens<A, B>,
+              A: Clone,
+          {
+              fn get<'a>(&self, source: &'a S) -> &'a B {
+                  let intermediate = self.first.get(source);
+                  self.second.get(intermediate)
+              }
+
+              fn set(&self, source: S, value: B) -> S {
+                  let intermediate = self.first.get(&source).clone();
+                  let new_intermediate = self.second.set(intermediate, value);
+                  self.first.set(source, new_intermediate)
+              }
+          }
+
+          // Lens トレイトに compose メソッドを追加
+          fn compose<B, L>(self, other: L) -> ComposedLens<Self, L>
+          where
+              Self: Sized,
+              L: Lens<A, B>,
+          {
+              ComposedLens::new(self, other)
+          }
+
+    # --------------------------------------------------------------------------
+    # Cycle 5: lens! マクロの実装
+    # --------------------------------------------------------------------------
+    - cycle_number: 5
+      name: "lens! マクロの実装"
+      red_phase:
+        tests:
+          - name: "test_lens_macro_simple"
+            code: |
+              #[test]
+              fn test_lens_macro_simple() {
+                  #[derive(Clone, PartialEq, Debug)]
+                  struct Point { x: i32, y: i32 }
+
+                  let x_lens = lens!(Point, x);
+                  let y_lens = lens!(Point, y);
+
+                  let point = Point { x: 10, y: 20 };
+                  assert_eq!(*x_lens.get(&point), 10);
+                  assert_eq!(*y_lens.get(&point), 20);
+              }
+          - name: "test_lens_macro_set"
+            code: |
+              #[test]
+              fn test_lens_macro_set() {
+                  #[derive(Clone, PartialEq, Debug)]
+                  struct Point { x: i32, y: i32 }
+
+                  let x_lens = lens!(Point, x);
+                  let point = Point { x: 10, y: 20 };
+                  let updated = x_lens.set(point, 100);
+                  assert_eq!(updated, Point { x: 100, y: 20 });
+              }
+          - name: "test_lens_macro_nested_composition"
+            code: |
+              #[test]
+              fn test_lens_macro_nested_composition() {
+                  #[derive(Clone, PartialEq, Debug)]
+                  struct Inner { value: i32 }
+
+                  #[derive(Clone, PartialEq, Debug)]
+                  struct Outer { inner: Inner }
+
+                  let inner_lens = lens!(Outer, inner);
+                  let value_lens = lens!(Inner, value);
+                  let outer_value = inner_lens.compose(value_lens);
+
+                  let data = Outer { inner: Inner { value: 42 } };
+                  assert_eq!(*outer_value.get(&data), 42);
+
+                  let updated = outer_value.set(data, 100);
+                  assert_eq!(updated.inner.value, 100);
+              }
+      green_phase:
+        implementation: |
+          /// 構造体フィールドへの Lens を作成するマクロ
+          ///
+          /// # Usage
+          /// ```rust
+          /// struct Person { name: String, age: u32 }
+          ///
+          /// let name_lens = lens!(Person, name);
+          /// let age_lens = lens!(Person, age);
+          /// ```
+          #[macro_export]
+          macro_rules! lens {
+              ($struct_type:ty, $field:ident) => {
+                  $crate::optics::FunctionLens::new(
+                      |source: &$struct_type| &source.$field,
+                      |source: $struct_type, value| {
+                          $struct_type {
+                              $field: value,
+                              ..source
+                          }
+                      }
+                  )
+              };
+          }
+
+    # --------------------------------------------------------------------------
+    # Cycle 6: Lens 法則のプロパティテスト
+    # --------------------------------------------------------------------------
+    - cycle_number: 6
+      name: "Lens 法則のプロパティテスト"
+      red_phase:
+        tests:
+          - name: "prop_lens_get_put_law"
+            code: |
+              proptest! {
+                  #[test]
+                  fn prop_lens_get_put_law(x: i32, y: i32) {
+                      #[derive(Clone, PartialEq, Debug)]
+                      struct Point { x: i32, y: i32 }
+
+                      let x_lens = lens!(Point, x);
+                      let point = Point { x, y };
+                      let value = x_lens.get(&point).clone();
+                      let result = x_lens.set(point.clone(), value);
+                      prop_assert_eq!(result, point);
+                  }
+              }
+          - name: "prop_lens_put_get_law"
+            code: |
+              proptest! {
+                  #[test]
+                  fn prop_lens_put_get_law(x: i32, y: i32, new_value: i32) {
+                      let x_lens = lens!(Point, x);
+                      let point = Point { x, y };
+                      let updated = x_lens.set(point, new_value);
+                      prop_assert_eq!(*x_lens.get(&updated), new_value);
+                  }
+              }
+          - name: "prop_lens_put_put_law"
+            code: |
+              proptest! {
+                  #[test]
+                  fn prop_lens_put_put_law(x: i32, y: i32, value1: i32, value2: i32) {
+                      let x_lens = lens!(Point, x);
+                      let point = Point { x, y };
+                      let left = x_lens.set(x_lens.set(point.clone(), value1), value2);
+                      let right = x_lens.set(point, value2);
+                      prop_assert_eq!(left, right);
+                  }
+              }
+      green_phase:
+        implementation: |
+          // 法則はトレイトの設計で既に満たされている
+          // テストは src/optics/lens.rs のテストモジュールに追加
+      refactor_phase:
+        changes:
+          - "法則テストを tests/lens_laws.rs に移動"
+          - "より複雑な構造体でのテストを追加"
+
+    # --------------------------------------------------------------------------
+    # Cycle 7: Clone, Debug トレイトの実装
+    # --------------------------------------------------------------------------
+    - cycle_number: 7
+      name: "FunctionLens の Clone, Debug 実装"
+      red_phase:
+        tests:
+          - name: "test_function_lens_clone"
+            code: |
+              #[test]
+              fn test_function_lens_clone() {
+                  let x_lens = lens!(Point, x);
+                  let x_lens_clone = x_lens.clone();
+
+                  let point = Point { x: 10, y: 20 };
+                  assert_eq!(*x_lens.get(&point), *x_lens_clone.get(&point));
+              }
+      green_phase:
+        implementation: |
+          impl<S, A, G, St> Clone for FunctionLens<S, A, G, St>
+          where
+              G: Fn(&S) -> &A + Clone,
+              St: Fn(S, A) -> S + Clone,
+          {
+              fn clone(&self) -> Self {
+                  FunctionLens {
+                      getter: self.getter.clone(),
+                      setter: self.setter.clone(),
+                      _marker: std::marker::PhantomData,
+                  }
+              }
+          }
+
+  property_based_tests:
+    - name: "GetPut Law"
+      description: "get で取得した値をそのまま set しても元と同じ"
+      code: |
+        proptest! {
+            #[test]
+            fn prop_get_put_law(x: i32, y: i32) {
+                let point = Point { x, y };
+                let x_lens = lens!(Point, x);
+                let value = x_lens.get(&point).clone();
+                prop_assert_eq!(x_lens.set(point.clone(), value), point);
+            }
+        }
+
+    - name: "PutGet Law"
+      description: "set で設定した値は get で取得できる"
+      code: |
+        proptest! {
+            #[test]
+            fn prop_put_get_law(x: i32, y: i32, new_value: i32) {
+                let point = Point { x, y };
+                let x_lens = lens!(Point, x);
+                let updated = x_lens.set(point, new_value);
+                prop_assert_eq!(*x_lens.get(&updated), new_value);
+            }
+        }
+
+    - name: "PutPut Law"
+      description: "連続して set した場合、最後の値が設定される"
+      code: |
+        proptest! {
+            #[test]
+            fn prop_put_put_law(x: i32, y: i32, value1: i32, value2: i32) {
+                let point = Point { x, y };
+                let x_lens = lens!(Point, x);
+                let left = x_lens.set(x_lens.set(point.clone(), value1), value2);
+                let right = x_lens.set(point, value2);
+                prop_assert_eq!(left, right);
+            }
+        }
+
+    - name: "Composition Law"
+      description: "合成された Lens も法則を満たす"
+      code: |
+        proptest! {
+            #[test]
+            fn prop_composed_lens_laws(
+                street in "[a-z]{1,10}",
+                city in "[a-z]{1,10}",
+                name in "[a-z]{1,10}",
+                new_street in "[a-z]{1,10}"
+            ) {
+                let person = Person {
+                    name: name.clone(),
+                    address: Address {
+                        street: street.clone(),
+                        city: city.clone(),
+                    },
+                };
+
+                let address_lens = lens!(Person, address);
+                let street_lens = lens!(Address, street);
+                let person_street = address_lens.compose(street_lens);
+
+                // GetPut Law
+                let value = person_street.get(&person).clone();
+                prop_assert_eq!(
+                    person_street.set(person.clone(), value.clone()),
+                    person.clone()
+                );
+
+                // PutGet Law
+                let updated = person_street.set(person.clone(), new_street.clone());
+                prop_assert_eq!(*person_street.get(&updated), new_street);
+            }
+        }
+
+# =============================================================================
+# Phase 5.2: Prism トレイトと基本実装
+# =============================================================================
+prism_implementation:
+  name: "Prism<S, A>"
+  description: |
+    enum バリアントへの型安全な部分的アクセスを提供する。
+    Lens とは異なり、preview は Option<&A> を返す（バリアントが一致しない場合は None）。
+
+  internal_structure:
+    trait_definition: |
+      ```rust
+      /// enum バリアントへのアクセスを抽象化する Prism
+      ///
+      /// # Type Parameters
+      /// - `S`: ソース型（enum 全体）
+      /// - `A`: ターゲット型（バリアント内の値の型）
+      ///
+      /// # Laws
+      /// 1. PreviewReview Law: prism.preview(&prism.review(value)) == Some(&value)
+      /// 2. ReviewPreview Law: if prism.preview(source).is_some() then
+      ///                       prism.review(prism.preview(source).unwrap().clone()) == source
+      pub trait Prism<S, A> {
+          /// ソースからターゲットを取得しようと試みる
+          fn preview<'a>(&self, source: &'a S) -> Option<&'a A>;
+
+          /// ターゲットからソースを構築する
+          fn review(&self, value: A) -> S;
+
+          /// preview の所有権版
+          fn preview_owned(&self, source: S) -> Option<A>
+          where
+              A: Clone,
+          {
+              self.preview(&source).cloned()
+          }
+
+          /// バリアントが一致する場合のみ関数を適用
+          fn modify_option<F>(&self, source: S, function: F) -> Option<S>
+          where
+              F: FnOnce(A) -> A,
+              A: Clone,
+          {
+              self.preview(&source).map(|value| {
+                  self.review(function(value.clone()))
+              })
+          }
+
+          /// バリアントが一致すれば関数を適用、そうでなければ元の値
+          fn modify_or_identity<F>(&self, source: S, function: F) -> S
+          where
+              F: FnOnce(A) -> A,
+              S: Clone,
+              A: Clone,
+          {
+              self.modify_option(source.clone(), function)
+                  .unwrap_or(source)
+          }
+
+          /// 別の Prism と合成
+          fn compose<B, P>(self, other: P) -> ComposedPrism<Self, P>
+          where
+              Self: Sized,
+              P: Prism<A, B>,
+          {
+              ComposedPrism::new(self, other)
+          }
+
+          /// Traversal に変換
+          fn to_traversal(self) -> PrismAsTraversal<Self>
+          where
+              Self: Sized,
+          {
+              PrismAsTraversal::new(self)
+          }
+      }
+      ```
+
+  tdd_cycles:
+    - cycle_number: 1
+      name: "Prism トレイトの定義"
+      red_phase:
+        tests:
+          - name: "test_prism_trait_exists"
+            code: |
+              #[test]
+              fn test_prism_trait_exists() {
+                  fn assert_prism<P: Prism<Shape, f64>>(_prism: P) {}
+
+                  enum Shape {
+                      Circle(f64),
+                      Rectangle(f64, f64),
+                  }
+              }
+
+    - cycle_number: 2
+      name: "FunctionPrism の基本実装"
+      red_phase:
+        tests:
+          - name: "test_function_prism_preview_match"
+            code: |
+              #[test]
+              fn test_function_prism_preview_match() {
+                  enum Shape {
+                      Circle(f64),
+                      Rectangle(f64, f64),
+                  }
+
+                  let circle_prism = FunctionPrism::new(
+                      |shape: &Shape| match shape {
+                          Shape::Circle(radius) => Some(radius),
+                          _ => None,
+                      },
+                      |radius: f64| Shape::Circle(radius)
+                  );
+
+                  let circle = Shape::Circle(5.0);
+                  assert_eq!(circle_prism.preview(&circle), Some(&5.0));
+              }
+          - name: "test_function_prism_preview_no_match"
+            code: |
+              #[test]
+              fn test_function_prism_preview_no_match() {
+                  let rect = Shape::Rectangle(3.0, 4.0);
+                  assert_eq!(circle_prism.preview(&rect), None);
+              }
+          - name: "test_function_prism_review"
+            code: |
+              #[test]
+              fn test_function_prism_review() {
+                  let constructed = circle_prism.review(10.0);
+                  assert!(matches!(constructed, Shape::Circle(r) if (r - 10.0).abs() < 1e-10));
+              }
+
+    - cycle_number: 3
+      name: "modify_option と modify_or_identity の実装"
+      red_phase:
+        tests:
+          - name: "test_prism_modify_option_match"
+            code: |
+              #[test]
+              fn test_prism_modify_option_match() {
+                  let circle = Shape::Circle(5.0);
+                  let doubled = circle_prism.modify_option(circle, |radius| radius * 2.0);
+                  assert!(matches!(doubled, Some(Shape::Circle(r)) if (r - 10.0).abs() < 1e-10));
+              }
+          - name: "test_prism_modify_option_no_match"
+            code: |
+              #[test]
+              fn test_prism_modify_option_no_match() {
+                  let rect = Shape::Rectangle(3.0, 4.0);
+                  let result = circle_prism.modify_option(rect, |radius| radius * 2.0);
+                  assert!(result.is_none());
+              }
+          - name: "test_prism_modify_or_identity"
+            code: |
+              #[test]
+              fn test_prism_modify_or_identity() {
+                  let circle = Shape::Circle(5.0);
+                  let doubled = circle_prism.modify_or_identity(circle, |r| r * 2.0);
+                  assert!(matches!(doubled, Shape::Circle(r) if (r - 10.0).abs() < 1e-10));
+
+                  let rect = Shape::Rectangle(3.0, 4.0);
+                  let unchanged = circle_prism.modify_or_identity(rect.clone(), |r| r * 2.0);
+                  assert!(matches!(unchanged, Shape::Rectangle(w, h) if (w - 3.0).abs() < 1e-10 && (h - 4.0).abs() < 1e-10));
+              }
+
+    - cycle_number: 4
+      name: "ComposedPrism の実装"
+      red_phase:
+        tests:
+          - name: "test_prism_compose"
+            code: |
+              #[test]
+              fn test_prism_compose() {
+                  enum Outer { Inner(Inner) }
+                  enum Inner { Value(i32) }
+
+                  let outer_inner_prism = FunctionPrism::new(
+                      |outer: &Outer| match outer {
+                          Outer::Inner(inner) => Some(inner),
+                      },
+                      |inner: Inner| Outer::Inner(inner)
+                  );
+
+                  let inner_value_prism = FunctionPrism::new(
+                      |inner: &Inner| match inner {
+                          Inner::Value(value) => Some(value),
+                      },
+                      |value: i32| Inner::Value(value)
+                  );
+
+                  let outer_value = outer_inner_prism.compose(inner_value_prism);
+
+                  let data = Outer::Inner(Inner::Value(42));
+                  assert_eq!(outer_value.preview(&data), Some(&42));
+
+                  let constructed = outer_value.review(100);
+                  assert!(matches!(constructed, Outer::Inner(Inner::Value(100))));
+              }
+
+    - cycle_number: 5
+      name: "prism! マクロの実装"
+      red_phase:
+        tests:
+          - name: "test_prism_macro_single_value_variant"
+            code: |
+              #[test]
+              fn test_prism_macro_single_value_variant() {
+                  #[derive(Clone, PartialEq, Debug)]
+                  enum MyOption<T> { Some(T), None }
+
+                  let some_prism = prism!(MyOption<i32>, Some);
+
+                  let some_value = MyOption::Some(42);
+                  assert_eq!(some_prism.preview(&some_value), Some(&42));
+
+                  let none_value: MyOption<i32> = MyOption::None;
+                  assert_eq!(some_prism.preview(&none_value), None);
+
+                  let constructed = some_prism.review(100);
+                  assert_eq!(constructed, MyOption::Some(100));
+              }
+
+  property_based_tests:
+    - name: "PreviewReview Law"
+      description: "review で構築した値は preview で取得できる"
+      code: |
+        proptest! {
+            #[test]
+            fn prop_preview_review_law(radius in 0.0f64..1000.0) {
+                let circle_prism = prism!(Shape, Circle);
+                let source = circle_prism.review(radius);
+                let previewed = circle_prism.preview(&source);
+                prop_assert_eq!(previewed, Some(&radius));
+            }
+        }
+
+    - name: "ReviewPreview Law"
+      description: "preview で取得できた値を review すると元と同じ（該当バリアントの場合）"
+      code: |
+        proptest! {
+            #[test]
+            fn prop_review_preview_law(radius in 0.0f64..1000.0) {
+                let circle_prism = prism!(Shape, Circle);
+                let source = Shape::Circle(radius);
+                if let Some(value) = circle_prism.preview(&source) {
+                    let reconstructed = circle_prism.review(*value);
+                    // Shape の比較（浮動小数点なので許容誤差で比較）
+                    match (&reconstructed, &source) {
+                        (Shape::Circle(r1), Shape::Circle(r2)) => {
+                            prop_assert!((r1 - r2).abs() < 1e-10);
+                        }
+                        _ => prop_assert!(false),
+                    }
+                }
+            }
+        }
+
+# =============================================================================
+# Phase 5.3: Iso トレイトと基本実装
+# =============================================================================
+iso_implementation:
+  name: "Iso<S, A>"
+  description: |
+    型間の同型変換（情報を失わない双方向変換）を抽象化する。
+    Iso は最も強い Optics であり、Lens としても Prism としても使用できる。
+
+  tdd_cycles:
+    - cycle_number: 1
+      name: "Iso トレイトの定義"
+      red_phase:
+        tests:
+          - name: "test_iso_trait_exists"
+            code: |
+              #[test]
+              fn test_iso_trait_exists() {
+                  fn assert_iso<I: Iso<String, Vec<char>>>(_iso: I) {}
+              }
+
+    - cycle_number: 2
+      name: "FunctionIso の基本実装"
+      red_phase:
+        tests:
+          - name: "test_function_iso_get_and_reverse_get"
+            code: |
+              #[test]
+              fn test_function_iso_get_and_reverse_get() {
+                  let string_chars_iso = FunctionIso::new(
+                      |s: String| s.chars().collect::<Vec<_>>(),
+                      |chars: Vec<char>| chars.into_iter().collect::<String>()
+                  );
+
+                  let original = "hello".to_string();
+                  let chars = string_chars_iso.get(original.clone());
+                  assert_eq!(chars, vec!['h', 'e', 'l', 'l', 'o']);
+
+                  let back = string_chars_iso.reverse_get(chars);
+                  assert_eq!(back, original);
+              }
+
+    - cycle_number: 3
+      name: "ReversedIso の実装"
+      red_phase:
+        tests:
+          - name: "test_iso_reverse"
+            code: |
+              #[test]
+              fn test_iso_reverse() {
+                  let string_chars_iso = FunctionIso::new(
+                      |s: String| s.chars().collect::<Vec<_>>(),
+                      |chars: Vec<char>| chars.into_iter().collect::<String>()
+                  );
+
+                  let chars_string_iso = string_chars_iso.reverse();
+                  let chars = vec!['h', 'i'];
+                  let string = chars_string_iso.get(chars);
+                  assert_eq!(string, "hi");
+              }
+
+    - cycle_number: 4
+      name: "標準的な Iso（swap, identity）の実装"
+      red_phase:
+        tests:
+          - name: "test_iso_swap"
+            code: |
+              #[test]
+              fn test_iso_swap() {
+                  let swap_iso = iso_swap::<i32, String>();
+                  let tuple = (42, "hello".to_string());
+                  let swapped = swap_iso.get(tuple.clone());
+                  assert_eq!(swapped, ("hello".to_string(), 42));
+                  let back = swap_iso.reverse_get(swapped);
+                  assert_eq!(back, tuple);
+              }
+          - name: "test_iso_identity"
+            code: |
+              #[test]
+              fn test_iso_identity() {
+                  let identity_iso = iso_identity::<i32>();
+                  let value = 42;
+                  assert_eq!(identity_iso.get(value), 42);
+                  assert_eq!(identity_iso.reverse_get(42), 42);
+              }
+
+    - cycle_number: 5
+      name: "Iso から Lens/Prism への変換"
+      red_phase:
+        tests:
+          - name: "test_iso_to_lens"
+            code: |
+              #[test]
+              fn test_iso_to_lens() {
+                  let string_chars_iso = FunctionIso::new(
+                      |s: String| s.chars().collect::<Vec<_>>(),
+                      |chars: Vec<char>| chars.into_iter().collect::<String>()
+                  );
+
+                  // Iso を Lens として使用
+                  let as_lens = string_chars_iso.to_lens_like();
+                  // Note: 参照ベースの Lens とは異なるインターフェース
+              }
+
+    - cycle_number: 6
+      name: "iso! マクロの実装"
+      red_phase:
+        tests:
+          - name: "test_iso_macro"
+            code: |
+              #[test]
+              fn test_iso_macro() {
+                  let swap = iso!(
+                      |(a, b): (i32, String)| (b, a),
+                      |(b, a): (String, i32)| (a, b)
+                  );
+
+                  let tuple = (42, "hello".to_string());
+                  let swapped = swap.get(tuple.clone());
+                  assert_eq!(swapped, ("hello".to_string(), 42));
+              }
+
+  property_based_tests:
+    - name: "GetReverseGet Law（往復の法則 1）"
+      description: "get してから reverse_get すると元に戻る"
+      code: |
+        proptest! {
+            #[test]
+            fn prop_get_reverse_get_law(source in ".*") {
+                let string_chars_iso = FunctionIso::new(
+                    |s: String| s.chars().collect::<Vec<_>>(),
+                    |chars: Vec<char>| chars.into_iter().collect::<String>()
+                );
+
+                let intermediate = string_chars_iso.get(source.clone());
+                let roundtrip = string_chars_iso.reverse_get(intermediate);
+                prop_assert_eq!(roundtrip, source);
+            }
+        }
+
+    - name: "ReverseGetGet Law（往復の法則 2）"
+      description: "reverse_get してから get すると元に戻る"
+      code: |
+        proptest! {
+            #[test]
+            fn prop_reverse_get_get_law(chars in prop::collection::vec(any::<char>(), 0..20)) {
+                let string_chars_iso = FunctionIso::new(
+                    |s: String| s.chars().collect::<Vec<_>>(),
+                    |chars: Vec<char>| chars.into_iter().collect::<String>()
+                );
+
+                let intermediate = string_chars_iso.reverse_get(chars.clone());
+                let roundtrip = string_chars_iso.get(intermediate);
+                prop_assert_eq!(roundtrip, chars);
+            }
+        }
+
+# =============================================================================
+# Phase 5.4: Traversal トレイトと基本実装
+# =============================================================================
+traversal_implementation:
+  name: "Traversal<S, A>"
+  description: |
+    コレクションや構造体内の複数要素への一括アクセスを提供する。
+    Lens や Prism を一般化し、0 個以上の要素にアクセスできる。
+
+  tdd_cycles:
+    - cycle_number: 1
+      name: "Traversal トレイトの定義"
+      red_phase:
+        tests:
+          - name: "test_traversal_trait_exists"
+            code: |
+              #[test]
+              fn test_traversal_trait_exists() {
+                  fn assert_traversal<T: Traversal<Vec<i32>, i32>>(_traversal: T) {}
+              }
+
+    - cycle_number: 2
+      name: "VecTraversal の実装"
+      red_phase:
+        tests:
+          - name: "test_vec_traversal_get_all"
+            code: |
+              #[test]
+              fn test_vec_traversal_get_all() {
+                  let each: VecTraversal<i32> = VecTraversal::new();
+                  let numbers = vec![1, 2, 3, 4, 5];
+                  let sum: i32 = each.get_all(&numbers).sum();
+                  assert_eq!(sum, 15);
+              }
+          - name: "test_vec_traversal_modify_all"
+            code: |
+              #[test]
+              fn test_vec_traversal_modify_all() {
+                  let each: VecTraversal<i32> = VecTraversal::new();
+                  let numbers = vec![1, 2, 3];
+                  let doubled = each.modify_all(numbers, |x| x * 2);
+                  assert_eq!(doubled, vec![2, 4, 6]);
+              }
+          - name: "test_vec_traversal_set_all"
+            code: |
+              #[test]
+              fn test_vec_traversal_set_all() {
+                  let each: VecTraversal<i32> = VecTraversal::new();
+                  let numbers = vec![1, 2, 3];
+                  let all_zeros = each.set_all(numbers, 0);
+                  assert_eq!(all_zeros, vec![0, 0, 0]);
+              }
+
+    - cycle_number: 3
+      name: "OptionTraversal の実装"
+      red_phase:
+        tests:
+          - name: "test_option_traversal_get_all_some"
+            code: |
+              #[test]
+              fn test_option_traversal_get_all_some() {
+                  let option_traversal: OptionTraversal<i32> = OptionTraversal::new();
+                  let some_value = Some(42);
+                  let all: Vec<&i32> = option_traversal.get_all(&some_value).collect();
+                  assert_eq!(all, vec![&42]);
+              }
+          - name: "test_option_traversal_get_all_none"
+            code: |
+              #[test]
+              fn test_option_traversal_get_all_none() {
+                  let option_traversal: OptionTraversal<i32> = OptionTraversal::new();
+                  let none_value: Option<i32> = None;
+                  let all: Vec<&i32> = option_traversal.get_all(&none_value).collect();
+                  assert!(all.is_empty());
+              }
+
+    - cycle_number: 4
+      name: "Traversal の合成"
+      red_phase:
+        tests:
+          - name: "test_traversal_compose"
+            code: |
+              #[test]
+              fn test_traversal_compose() {
+                  let outer: VecTraversal<Vec<i32>> = VecTraversal::new();
+                  let inner: VecTraversal<i32> = VecTraversal::new();
+                  let all_ints = outer.compose(inner);
+
+                  let data = vec![vec![1, 2], vec![3, 4, 5]];
+                  let sum: i32 = all_ints.get_all(&data).map(|x| **x).sum();
+                  assert_eq!(sum, 15);
+              }
+
+    - cycle_number: 5
+      name: "Lens から Traversal への変換"
+      red_phase:
+        tests:
+          - name: "test_lens_to_traversal"
+            code: |
+              #[test]
+              fn test_lens_to_traversal() {
+                  #[derive(Clone, PartialEq, Debug)]
+                  struct Container { items: Vec<i32> }
+
+                  let items_lens = lens!(Container, items);
+                  let each_item: VecTraversal<i32> = VecTraversal::new();
+
+                  // Lens を Traversal に変換して合成
+                  let all_items = items_lens.to_traversal().compose(each_item);
+
+                  let container = Container { items: vec![1, 2, 3] };
+                  let sum: i32 = all_items.get_all(&container).map(|x| **x).sum();
+                  assert_eq!(sum, 6);
+              }
+
+    - cycle_number: 6
+      name: "fold, length, for_all, exists の実装"
+      red_phase:
+        tests:
+          - name: "test_traversal_fold"
+            code: |
+              #[test]
+              fn test_traversal_fold() {
+                  let each: VecTraversal<i32> = VecTraversal::new();
+                  let numbers = vec![1, 2, 3, 4, 5];
+                  let sum = each.fold(&numbers, 0, |accumulator, element| accumulator + element);
+                  assert_eq!(sum, 15);
+              }
+          - name: "test_traversal_length"
+            code: |
+              #[test]
+              fn test_traversal_length() {
+                  let each: VecTraversal<i32> = VecTraversal::new();
+                  let numbers = vec![1, 2, 3, 4, 5];
+                  assert_eq!(each.length(&numbers), 5);
+              }
+          - name: "test_traversal_for_all"
+            code: |
+              #[test]
+              fn test_traversal_for_all() {
+                  let each: VecTraversal<i32> = VecTraversal::new();
+                  let positive = vec![1, 2, 3, 4, 5];
+                  assert!(each.for_all(&positive, |x| *x > 0));
+
+                  let mixed = vec![1, -2, 3];
+                  assert!(!each.for_all(&mixed, |x| *x > 0));
+              }
+          - name: "test_traversal_exists"
+            code: |
+              #[test]
+              fn test_traversal_exists() {
+                  let each: VecTraversal<i32> = VecTraversal::new();
+                  let numbers = vec![1, 2, 3, 4, 5];
+                  assert!(each.exists(&numbers, |x| *x == 3));
+                  assert!(!each.exists(&numbers, |x| *x == 10));
+              }
+
+  property_based_tests:
+    - name: "Modify Identity Law"
+      description: "恒等関数で modify しても変わらない"
+      code: |
+        proptest! {
+            #[test]
+            fn prop_modify_identity_law(elements in prop::collection::vec(any::<i32>(), 0..20)) {
+                let each: VecTraversal<i32> = VecTraversal::new();
+                let modified = each.modify_all(elements.clone(), |x| x);
+                prop_assert_eq!(modified, elements);
+            }
+        }
+
+    - name: "Modify Composition Law"
+      description: "modify の連続適用は関数合成と同じ"
+      code: |
+        proptest! {
+            #[test]
+            fn prop_modify_composition_law(elements in prop::collection::vec(any::<i32>(), 0..20)) {
+                let each: VecTraversal<i32> = VecTraversal::new();
+                let function1 = |x: i32| x.saturating_add(1);
+                let function2 = |x: i32| x.saturating_mul(2);
+
+                let left = each.modify_all(
+                    each.modify_all(elements.clone(), function1),
+                    function2
+                );
+                let right = each.modify_all(elements, |x| function2(function1(x)));
+
+                prop_assert_eq!(left, right);
+            }
+        }
+
+# =============================================================================
+# Phase 5.5: derive マクロの実装
+# =============================================================================
+derive_macro_implementation:
+  name: "derive マクロ"
+  description: |
+    #[derive(Lenses)] と #[derive(Prisms)] の proc-macro 実装。
+    functional-rusty-derive クレートとして別クレートで提供する。
+
+  cargo_toml: |
+    [package]
+    name = "functional-rusty-derive"
+    version = "0.1.0"
+    edition = "2024"
+    description = "Derive macros for functional-rusty"
+    license = "MIT OR Apache-2.0"
+
+    [lib]
+    proc-macro = true
+
+    [dependencies]
+    proc-macro2 = "1"
+    quote = "1"
+    syn = { version = "2", features = ["full", "parsing"] }
+
+  tdd_cycles:
+    - cycle_number: 1
+      name: "#[derive(Lenses)] の基本実装"
+      red_phase:
+        tests:
+          - name: "test_derive_lenses_generates_methods"
+            code: |
+              #[test]
+              fn test_derive_lenses_generates_methods() {
+                  #[derive(Lenses, Clone, PartialEq, Debug)]
+                  struct Person {
+                      name: String,
+                      age: u32,
+                  }
+
+                  // derive により以下のメソッドが生成される
+                  let name_lens = Person::name_lens();
+                  let age_lens = Person::age_lens();
+
+                  let person = Person {
+                      name: "Alice".to_string(),
+                      age: 30,
+                  };
+
+                  assert_eq!(*name_lens.get(&person), "Alice");
+                  assert_eq!(*age_lens.get(&person), 30);
+
+                  let updated = name_lens.set(person.clone(), "Bob".to_string());
+                  assert_eq!(updated.name, "Bob");
+              }
+          - name: "test_derive_lenses_with_multiple_fields"
+            code: |
+              #[test]
+              fn test_derive_lenses_with_multiple_fields() {
+                  #[derive(Lenses, Clone, PartialEq, Debug)]
+                  struct Config {
+                      host: String,
+                      port: u16,
+                      debug: bool,
+                      max_connections: usize,
+                  }
+
+                  let host_lens = Config::host_lens();
+                  let port_lens = Config::port_lens();
+                  let debug_lens = Config::debug_lens();
+                  let max_connections_lens = Config::max_connections_lens();
+
+                  let config = Config {
+                      host: "localhost".to_string(),
+                      port: 8080,
+                      debug: true,
+                      max_connections: 100,
+                  };
+
+                  assert_eq!(*host_lens.get(&config), "localhost");
+                  assert_eq!(*port_lens.get(&config), 8080);
+                  assert_eq!(*debug_lens.get(&config), true);
+                  assert_eq!(*max_connections_lens.get(&config), 100);
+              }
+
+    - cycle_number: 2
+      name: "#[derive(Prisms)] の基本実装"
+      red_phase:
+        tests:
+          - name: "test_derive_prisms_generates_methods"
+            code: |
+              #[test]
+              fn test_derive_prisms_generates_methods() {
+                  #[derive(Prisms, Clone, PartialEq, Debug)]
+                  enum Shape {
+                      Circle(f64),
+                      Rectangle { width: f64, height: f64 },
+                      Triangle(f64, f64, f64),
+                  }
+
+                  let circle_prism = Shape::circle_prism();
+                  let rectangle_prism = Shape::rectangle_prism();
+
+                  let circle = Shape::Circle(5.0);
+                  assert_eq!(circle_prism.preview(&circle), Some(&5.0));
+
+                  let rect = Shape::Rectangle { width: 3.0, height: 4.0 };
+                  assert!(circle_prism.preview(&rect).is_none());
+              }
+
+    - cycle_number: 3
+      name: "ジェネリクス対応"
+      red_phase:
+        tests:
+          - name: "test_derive_lenses_with_generics"
+            code: |
+              #[test]
+              fn test_derive_lenses_with_generics() {
+                  #[derive(Lenses, Clone, PartialEq, Debug)]
+                  struct Wrapper<T> {
+                      value: T,
+                      label: String,
+                  }
+
+                  let value_lens = Wrapper::<i32>::value_lens();
+                  let label_lens = Wrapper::<i32>::label_lens();
+
+                  let wrapper = Wrapper { value: 42, label: "test".to_string() };
+                  assert_eq!(*value_lens.get(&wrapper), 42);
+                  assert_eq!(*label_lens.get(&wrapper), "test");
+              }
+
+# =============================================================================
+# Phase 5.6: 永続データ構造との統合
+# =============================================================================
+persistent_integration:
+  name: "永続データ構造との統合"
+  description: |
+    Phase 4 の PersistentList, PersistentVector, PersistentHashMap, PersistentTreeMap への
+    Lens/Traversal 実装。
+
+  tdd_cycles:
+    - cycle_number: 1
+      name: "PersistentList への Traversal 実装"
+      red_phase:
+        tests:
+          - name: "test_persistent_list_traversal"
+            code: |
+              #[test]
+              fn test_persistent_list_traversal() {
+                  use functional_rusty::persistent::PersistentList;
+
+                  let list: PersistentList<i32> = (1..=5).collect();
+                  let each: PersistentListTraversal<i32> = PersistentListTraversal::new();
+
+                  let sum: i32 = each.get_all(&list).sum();
+                  assert_eq!(sum, 15);
+
+                  let doubled = each.modify_all(list, |x| x * 2);
+                  let doubled_sum: i32 = doubled.into_iter().sum();
+                  assert_eq!(doubled_sum, 30);
+              }
+
+    - cycle_number: 2
+      name: "PersistentVector への Lens/Traversal 実装"
+      red_phase:
+        tests:
+          - name: "test_persistent_vector_index_lens"
+            code: |
+              #[test]
+              fn test_persistent_vector_index_lens() {
+                  use functional_rusty::persistent::PersistentVector;
+
+                  let vector: PersistentVector<i32> = (0..10).collect();
+
+                  // インデックスベースの Lens（Option を返す）
+                  let at_5 = PersistentVectorIndexLens::new(5);
+
+                  assert_eq!(at_5.preview(&vector), Some(&5));
+
+                  let updated = at_5.set(vector, 100);
+                  assert_eq!(updated.get(5), Some(&100));
+              }
+          - name: "test_persistent_vector_traversal"
+            code: |
+              #[test]
+              fn test_persistent_vector_traversal() {
+                  let vector: PersistentVector<i32> = (1..=5).collect();
+                  let each: PersistentVectorTraversal<i32> = PersistentVectorTraversal::new();
+
+                  let sum: i32 = each.get_all(&vector).sum();
+                  assert_eq!(sum, 15);
+              }
+
+    - cycle_number: 3
+      name: "PersistentHashMap への Lens 実装"
+      red_phase:
+        tests:
+          - name: "test_persistent_hashmap_key_lens"
+            code: |
+              #[test]
+              fn test_persistent_hashmap_key_lens() {
+                  use functional_rusty::persistent::PersistentHashMap;
+
+                  let map: PersistentHashMap<String, i32> = [
+                      ("a".to_string(), 1),
+                      ("b".to_string(), 2),
+                      ("c".to_string(), 3),
+                  ].into_iter().collect();
+
+                  // キーベースの Lens（Option を返す Prism として実装）
+                  let at_b = PersistentHashMapKeyLens::new("b".to_string());
+
+                  assert_eq!(at_b.preview(&map), Some(&2));
+
+                  let updated = at_b.set(map, 200);
+                  assert_eq!(updated.get(&"b".to_string()), Some(&200));
+              }
+
+    - cycle_number: 4
+      name: "PersistentTreeMap への Lens/Traversal 実装"
+      red_phase:
+        tests:
+          - name: "test_persistent_treemap_key_lens"
+            code: |
+              #[test]
+              fn test_persistent_treemap_key_lens() {
+                  use functional_rusty::persistent::PersistentTreeMap;
+
+                  let map: PersistentTreeMap<i32, String> = [
+                      (1, "one".to_string()),
+                      (2, "two".to_string()),
+                      (3, "three".to_string()),
+                  ].into_iter().collect();
+
+                  let at_2 = PersistentTreeMapKeyLens::new(2);
+
+                  assert_eq!(at_2.preview(&map), Some(&"two".to_string()));
+              }
+
+# =============================================================================
+# テスト戦略
+# =============================================================================
+testing_strategy:
+  unit_tests:
+    description: "各 Optics の基本操作を検証"
+    coverage_target: "100%"
+    categories:
+      - category: "Lens 基本操作"
+        tests:
+          - "get でフィールドを取得"
+          - "set でフィールドを更新"
+          - "modify で関数を適用"
+          - "modify_ref で参照から関数を適用"
+          - "compose で Lens を合成"
+
+      - category: "Prism 基本操作"
+        tests:
+          - "preview で該当バリアントの値を取得"
+          - "preview で非該当バリアントは None"
+          - "review でバリアントを構築"
+          - "modify_option で該当バリアントのみ変更"
+          - "modify_or_identity で非該当は元の値"
+          - "compose で Prism を合成"
+
+      - category: "Iso 基本操作"
+        tests:
+          - "get と reverse_get の往復"
+          - "reverse で逆方向の Iso"
+          - "compose で Iso を合成"
+
+      - category: "Traversal 基本操作"
+        tests:
+          - "get_all で全要素を取得"
+          - "modify_all で全要素を変換"
+          - "set_all で全要素を同じ値に"
+          - "fold で畳み込み"
+          - "length で要素数"
+          - "for_all と exists"
+          - "compose で Traversal を合成"
+
+      - category: "マクロ"
+        tests:
+          - "lens! で Lens を生成"
+          - "prism! で Prism を生成"
+          - "iso! で Iso を生成"
+
+      - category: "derive マクロ"
+        tests:
+          - "#[derive(Lenses)] で全フィールドの Lens を生成"
+          - "#[derive(Prisms)] で全バリアントの Prism を生成"
+          - "ジェネリクス型への対応"
+
+  property_based_tests:
+    description: "Optics の法則をプロパティベーステストで検証"
+    framework: "proptest"
+    properties:
+      - "Lens 法則（GetPut, PutGet, PutPut）"
+      - "Prism 法則（PreviewReview, ReviewPreview）"
+      - "Iso 法則（GetReverseGet, ReverseGetGet）"
+      - "Traversal 法則（Modify Identity, Modify Composition）"
+      - "合成の法則（合成後も各法則を満たす）"
+
+  integration_tests:
+    description: "Phase 1, Phase 4 との統合を検証"
+    scenarios:
+      - "Functor/Traversable との連携"
+      - "永続データ構造への Optics 適用"
+      - "深くネストした構造への合成 Optics"
+      - "複合的なデータ変換パイプライン"
+
+# =============================================================================
+# 将来の拡張
+# =============================================================================
+future_extensions:
+  - name: "Affine / Optional"
+    description: |
+      Lens と Prism の中間的な Optics。
+      0 個または 1 個の要素にアクセスする。
+      Lens + Prism の合成結果の型として有用。
+
+  - name: "Getter / Setter"
+    description: |
+      get のみ、または set のみを持つ Optics。
+      より細かい粒度の抽象を提供。
+
+  - name: "At / Index トレイト"
+    description: |
+      HashMap や Vec の特定キー/インデックスへのアクセス。
+      永続データ構造との深い統合。
+
+  - name: "Each / Filtered"
+    description: |
+      条件に基づいた Traversal のフィルタリング。
+      より表現力の高いクエリ。
+
+  - name: "Async Optics"
+    description: |
+      非同期コンテキストでの Optics 操作。
+      async/await との統合。
+
+# =============================================================================
+# 完了基準
+# =============================================================================
+completion_criteria:
+  - "すべての Optics（Lens, Prism, Iso, Traversal）が要件定義通りに実装されている"
+  - "すべてのテストが成功している"
+  - "テストカバレッジが 100% である"
+  - "Lens 法則、Prism 法則、Iso 法則、Traversal 法則がプロパティテストで検証されている"
+  - "lens!, prism!, iso! マクロが正しく動作している"
+  - "#[derive(Lenses)], #[derive(Prisms)] が正しく動作している"
+  - "Phase 4 の永続データ構造との統合テストが成功している"
+  - "clippy の警告がない"
+  - "ドキュメントコメントが完備している"
+  - "#![forbid(unsafe_code)] ポリシーに準拠している"
+  - "略語を使用していない（URL, UUID, ULID 等を除く）"

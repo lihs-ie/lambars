@@ -1,0 +1,1239 @@
+# Phase 2: 関数合成ユーティリティ 実装計画
+# Function Composition Implementation Plan
+#
+# 要件定義: docs/requirements/phase2_compose.yaml
+# 作成日: 2025-12-30
+# 対象: Rust 1.92.0, edition 2024
+
+version: "1.0.0"
+phase: 2
+name: "Function Composition Implementation"
+based_on: "docs/requirements/phase2_compose.yaml"
+
+# =============================================================================
+# ファイル構成
+# =============================================================================
+file_structure:
+  source_files:
+    - path: src/compose/mod.rs
+      description: |
+        モジュール統合とエクスポート。
+        各サブモジュールの re-export を行う。
+      exports:
+        - identity
+        - constant
+        - flip
+        - compose!
+        - pipe!
+        - partial!
+        - curry2!
+        - curry3!
+        - curry4!
+        - curry5!
+        - curry6!
+
+    - path: src/compose/utils.rs
+      description: |
+        補助関数（コンビネータ）の実装。
+        他のマクロのテストで使用するため、最初に実装する。
+      functions:
+        - name: identity
+          signature: "pub fn identity<T>(value: T) -> T"
+          description: 恒等関数。受け取った値をそのまま返す。
+
+        - name: constant
+          signature: "pub fn constant<T: Clone, U>(value: T) -> impl Fn(U) -> T"
+          description: 常に同じ値を返す関数を生成する（K コンビネータ）。
+
+        - name: flip
+          signature: "pub fn flip<A, B, C, F>(f: F) -> impl Fn(B, A) -> C where F: Fn(A, B) -> C"
+          description: 2引数関数の引数の順序を入れ替える。
+
+    - path: src/compose/compose_macro.rs
+      description: |
+        compose! マクロの実装。
+        関数を右から左へ合成する。
+      macros:
+        - name: compose!
+          patterns:
+            - pattern: "($f:expr)"
+              expansion: "$f"
+              description: 単一関数は恒等的な合成
+
+            - pattern: "($f:expr, $g:expr)"
+              expansion: "move |x| $f($g(x))"
+              description: 二つの関数の合成
+
+            - pattern: "($f:expr, $($rest:expr),+)"
+              expansion: "compose!($f, compose!($($rest),+))"
+              description: 三つ以上の関数は再帰的に合成
+
+    - path: src/compose/pipe_macro.rs
+      description: |
+        pipe! マクロの実装。
+        データを左から右へパイプラインで流す。
+      macros:
+        - name: pipe!
+          patterns:
+            - pattern: "($x:expr)"
+              expansion: "$x"
+              description: 値のみの場合はそのまま返す
+
+            - pattern: "($x:expr, $f:expr)"
+              expansion: "$f($x)"
+              description: 単一関数の適用
+
+            - pattern: "($x:expr, $f:expr, $($rest:expr),+)"
+              expansion: "pipe!($f($x), $($rest),+)"
+              description: 複数関数は左から順に適用
+
+    - path: src/compose/partial_macro.rs
+      description: |
+        partial! マクロの実装。
+        部分適用でプレースホルダー位置の引数を残す。
+        最大6引数までサポート。
+      macros:
+        - name: partial!
+          description: |
+            プレースホルダー `_` を使用して、どの引数を残すかを指定。
+            全てのパターンを個別に定義する必要がある。
+          max_arguments: 6
+          note: |
+            Rust の macro_rules! では _ をリテラルとしてマッチできないため、
+            ident マッチャーを使用し、 `_` 以外の識別子は値として扱う設計とする。
+            または、専用のプレースホルダートークン（__ など）を使用する。
+
+    - path: src/compose/curry_macro.rs
+      description: |
+        curry! マクロファミリーの実装。
+        curry2! から curry6! まで、引数の数ごとに個別のマクロを提供。
+      macros:
+        - name: curry2!
+          expansion: "|a| { let f = $f.clone(); move |b| f(a, b) }"
+
+        - name: curry3!
+          expansion: "|a| { let f = $f.clone(); move |b| { let f = f.clone(); move |c| f(a, b, c) } }"
+
+        - name: curry4!
+          expansion: "同様のパターンで4引数"
+
+        - name: curry5!
+          expansion: "同様のパターンで5引数"
+
+        - name: curry6!
+          expansion: "同様のパターンで6引数"
+
+  test_files:
+    - path: tests/compose_tests.rs
+      description: compose! マクロの単体テスト
+      test_categories:
+        - 基本動作（1-6関数の合成）
+        - 型変換を伴う合成
+        - クロージャとの組み合わせ
+        - 参照を扱う関数の合成
+
+    - path: tests/pipe_tests.rs
+      description: pipe! マクロの単体テスト
+      test_categories:
+        - 基本動作（値のみ、1-6関数のパイプ）
+        - 所有権を消費する関数のパイプライン
+        - 参照を扱う関数のパイプライン
+
+    - path: tests/partial_tests.rs
+      description: partial! マクロの単体テスト
+      test_categories:
+        - 2引数関数の各パターン
+        - 3引数関数の各パターン
+        - 4-6引数関数の代表的パターン
+        - 全引数固定（thunk 生成）
+        - 全プレースホルダー（恒等的部分適用）
+
+    - path: tests/curry_tests.rs
+      description: curry! マクロの単体テスト
+      test_categories:
+        - curry2! から curry6! の基本動作
+        - 段階的な部分適用
+        - compose との組み合わせ
+
+    - path: tests/compose_laws.rs
+      description: プロパティベーステスト（proptest 使用）
+      test_categories:
+        - compose の結合律
+        - compose の左右恒等律
+        - pipe と compose の等価性
+        - flip の二重適用が恒等
+        - constant の定数性
+
+    - path: tests/compose_integration.rs
+      description: 統合テスト
+      test_categories:
+        - 各マクロの組み合わせ
+        - Phase 1 の型クラス（Functor, Monad）との組み合わせ
+
+# =============================================================================
+# 実装順序（TDD アプローチ）
+# =============================================================================
+implementation_order:
+  - step: 1
+    name: 補助関数の実装
+    description: |
+      identity, constant, flip を実装する。
+      これらは他のマクロのテストで使用するため、最初に実装する。
+    files:
+      - src/compose/utils.rs
+      - src/compose/mod.rs (utils のエクスポート追加)
+    tdd_cycle:
+      red:
+        - tests/compose_tests.rs に identity のテストを追加
+        - tests/compose_tests.rs に constant のテストを追加
+        - tests/compose_tests.rs に flip のテストを追加
+      green:
+        - src/compose/utils.rs に identity を実装
+        - src/compose/utils.rs に constant を実装
+        - src/compose/utils.rs に flip を実装
+      refactor:
+        - ドキュメントコメントの追加
+        - 不要な型注釈の削除
+
+    substeps:
+      - id: 1.1
+        name: identity 関数
+        tests:
+          - name: test_identity_returns_same_value
+            code: |
+              #[test]
+              fn test_identity_returns_same_value() {
+                  assert_eq!(identity(42), 42);
+                  assert_eq!(identity("hello"), "hello");
+                  assert_eq!(identity(vec![1, 2, 3]), vec![1, 2, 3]);
+              }
+          - name: test_identity_with_custom_type
+            code: |
+              #[derive(Debug, Clone, PartialEq)]
+              struct Point { x: i32, y: i32 }
+
+              #[test]
+              fn test_identity_with_custom_type() {
+                  let point = Point { x: 1, y: 2 };
+                  assert_eq!(identity(point.clone()), point);
+              }
+        implementation:
+          file: src/compose/utils.rs
+          code: |
+            /// Returns the value unchanged.
+            ///
+            /// The identity function is the unit element of function composition:
+            /// - `compose!(identity, f)` is equivalent to `f`
+            /// - `compose!(f, identity)` is equivalent to `f`
+            ///
+            /// # Examples
+            ///
+            /// ```
+            /// use functional_rusty::compose::identity;
+            ///
+            /// assert_eq!(identity(42), 42);
+            /// assert_eq!(identity("hello"), "hello");
+            /// ```
+            #[inline]
+            pub fn identity<T>(value: T) -> T {
+                value
+            }
+
+      - id: 1.2
+        name: constant 関数
+        tests:
+          - name: test_constant_always_returns_same_value
+            code: |
+              #[test]
+              fn test_constant_always_returns_same_value() {
+                  let always_five = constant(5);
+                  assert_eq!(always_five(100), 5);
+                  assert_eq!(always_five("ignored"), 5);
+                  assert_eq!(always_five(()), 5);
+              }
+          - name: test_constant_with_different_types
+            code: |
+              #[test]
+              fn test_constant_with_different_types() {
+                  let always_hello = constant(String::from("hello"));
+                  assert_eq!(always_hello(42), "hello");
+                  assert_eq!(always_hello(vec![1, 2, 3]), "hello");
+              }
+          - name: test_constant_with_map
+            code: |
+              #[test]
+              fn test_constant_with_map() {
+                  let values: Vec<i32> = vec![1, 2, 3].into_iter().map(constant(0)).collect();
+                  assert_eq!(values, vec![0, 0, 0]);
+              }
+        implementation:
+          file: src/compose/utils.rs
+          code: |
+            /// Creates a function that always returns the given value.
+            ///
+            /// Also known as the K combinator in combinatory logic.
+            ///
+            /// # Type Parameters
+            ///
+            /// * `T` - The type of the constant value (must implement `Clone`)
+            /// * `U` - The input type of the returned function (ignored)
+            ///
+            /// # Examples
+            ///
+            /// ```
+            /// use functional_rusty::compose::constant;
+            ///
+            /// let always_five = constant(5);
+            /// assert_eq!(always_five(100), 5);
+            /// assert_eq!(always_five("ignored"), 5);
+            /// ```
+            #[inline]
+            pub fn constant<T: Clone, U>(value: T) -> impl Fn(U) -> T {
+                move |_| value.clone()
+            }
+
+      - id: 1.3
+        name: flip 関数
+        tests:
+          - name: test_flip_swaps_arguments
+            code: |
+              #[test]
+              fn test_flip_swaps_arguments() {
+                  fn divide(a: f64, b: f64) -> f64 { a / b }
+
+                  let flipped_divide = flip(divide);
+
+                  assert_eq!(divide(10.0, 2.0), 5.0);
+                  assert_eq!(flipped_divide(10.0, 2.0), 0.2);
+              }
+          - name: test_flip_double_flip_is_identity
+            code: |
+              #[test]
+              fn test_flip_double_flip_is_identity() {
+                  fn subtract(a: i32, b: i32) -> i32 { a - b }
+
+                  let flipped_once = flip(subtract);
+                  let flipped_twice = flip(flipped_once);
+
+                  assert_eq!(subtract(10, 3), flipped_twice(10, 3));
+              }
+          - name: test_flip_with_different_types
+            code: |
+              #[test]
+              fn test_flip_with_different_types() {
+                  fn repeat(count: usize, s: &str) -> String {
+                      s.repeat(count)
+                  }
+
+                  let flipped_repeat = flip(repeat);
+
+                  assert_eq!(repeat(3, "ab"), "ababab");
+                  assert_eq!(flipped_repeat("ab", 3), "ababab");
+              }
+        implementation:
+          file: src/compose/utils.rs
+          code: |
+            /// Swaps the arguments of a binary function.
+            ///
+            /// # Laws
+            ///
+            /// - Double flip identity: `flip(flip(f)) == f`
+            /// - Flip definition: `flip(f)(a, b) == f(b, a)`
+            ///
+            /// # Examples
+            ///
+            /// ```
+            /// use functional_rusty::compose::flip;
+            ///
+            /// fn divide(a: f64, b: f64) -> f64 { a / b }
+            ///
+            /// let flipped_divide = flip(divide);
+            /// assert_eq!(divide(10.0, 2.0), 5.0);
+            /// assert_eq!(flipped_divide(10.0, 2.0), 0.2);
+            /// ```
+            #[inline]
+            pub fn flip<A, B, C, F>(f: F) -> impl Fn(B, A) -> C
+            where
+                F: Fn(A, B) -> C,
+            {
+                move |b, a| f(a, b)
+            }
+
+  - step: 2
+    name: compose! マクロの実装
+    description: |
+      関数を右から左へ合成する compose! マクロを実装する。
+      再帰的なマクロパターンを使用して可変長引数に対応する。
+    files:
+      - src/compose/compose_macro.rs
+      - src/compose/mod.rs (compose! のエクスポート追加)
+      - tests/compose_tests.rs
+    tdd_cycle:
+      red:
+        - 単一関数の compose テスト
+        - 2関数の compose テスト
+        - 3-6関数の compose テスト
+        - 即時適用のテスト
+      green:
+        - compose! マクロの実装
+      refactor:
+        - マクロのドキュメント追加
+        - エラーメッセージの改善
+
+    substeps:
+      - id: 2.1
+        name: 単一関数の compose
+        tests:
+          - name: test_compose_single_function
+            code: |
+              #[test]
+              fn test_compose_single_function() {
+                  fn double(x: i32) -> i32 { x * 2 }
+                  let composed = compose!(double);
+                  assert_eq!(composed(5), 10);
+              }
+        implementation:
+          file: src/compose/compose_macro.rs
+          code: |
+            /// Composes functions from right to left.
+            ///
+            /// `compose!(f, g, h)(x)` is equivalent to `f(g(h(x)))`.
+            ///
+            /// # Laws
+            ///
+            /// - **Associativity**: `compose!(f, compose!(g, h)) == compose!(compose!(f, g), h)`
+            /// - **Left Identity**: `compose!(identity, f) == f`
+            /// - **Right Identity**: `compose!(f, identity) == f`
+            ///
+            /// # Examples
+            ///
+            /// ```
+            /// use functional_rusty::compose;
+            ///
+            /// fn add_one(x: i32) -> i32 { x + 1 }
+            /// fn double(x: i32) -> i32 { x * 2 }
+            ///
+            /// let composed = compose!(add_one, double);
+            /// assert_eq!(composed(5), 11); // add_one(double(5)) = add_one(10) = 11
+            /// ```
+            #[macro_export]
+            macro_rules! compose {
+                // Single function: identity composition
+                ($f:expr) => {
+                    $f
+                };
+                // ... (continued in next substep)
+            }
+
+      - id: 2.2
+        name: 2関数の compose
+        tests:
+          - name: test_compose_two_functions
+            code: |
+              #[test]
+              fn test_compose_two_functions() {
+                  fn add_one(x: i32) -> i32 { x + 1 }
+                  fn double(x: i32) -> i32 { x * 2 }
+
+                  let composed = compose!(add_one, double);
+                  // compose!(f, g)(x) = f(g(x)) = add_one(double(5)) = add_one(10) = 11
+                  assert_eq!(composed(5), 11);
+              }
+          - name: test_compose_two_functions_with_type_conversion
+            code: |
+              #[test]
+              fn test_compose_two_functions_with_type_conversion() {
+                  fn to_string(x: i32) -> String { x.to_string() }
+                  fn get_length(s: String) -> usize { s.len() }
+
+                  let composed = compose!(get_length, to_string);
+                  assert_eq!(composed(12345), 5);
+              }
+        implementation:
+          note: compose! マクロに2関数パターンを追加
+          code: |
+            // Two functions: basic composition
+            ($f:expr, $g:expr) => {{
+                let f = $f;
+                let g = $g;
+                move |x| f(g(x))
+            }};
+
+      - id: 2.3
+        name: 3関数以上の compose
+        tests:
+          - name: test_compose_three_functions
+            code: |
+              #[test]
+              fn test_compose_three_functions() {
+                  fn add_one(x: i32) -> i32 { x + 1 }
+                  fn double(x: i32) -> i32 { x * 2 }
+                  fn square(x: i32) -> i32 { x * x }
+
+                  let composed = compose!(add_one, double, square);
+                  // compose!(f, g, h)(x) = f(g(h(x))) = add_one(double(square(3)))
+                  // = add_one(double(9)) = add_one(18) = 19
+                  assert_eq!(composed(3), 19);
+              }
+          - name: test_compose_many_functions
+            code: |
+              #[test]
+              fn test_compose_many_functions() {
+                  let add_one = |x: i32| x + 1;
+                  let double = |x: i32| x * 2;
+                  let square = |x: i32| x * x;
+                  let negate = |x: i32| -x;
+
+                  let composed = compose!(negate, add_one, double, square);
+                  // negate(add_one(double(square(2)))) = negate(add_one(double(4)))
+                  // = negate(add_one(8)) = negate(9) = -9
+                  assert_eq!(composed(2), -9);
+              }
+        implementation:
+          note: compose! マクロに可変長パターンを追加
+          code: |
+            // Three or more functions: recursive composition
+            ($f:expr, $($rest:expr),+ $(,)?) => {{
+                let f = $f;
+                let composed_rest = $crate::compose!($($rest),+);
+                move |x| f(composed_rest(x))
+            }};
+
+      - id: 2.4
+        name: compose の即時適用
+        tests:
+          - name: test_compose_immediate_application
+            code: |
+              #[test]
+              fn test_compose_immediate_application() {
+                  fn add_one(x: i32) -> i32 { x + 1 }
+                  fn double(x: i32) -> i32 { x * 2 }
+
+                  let result = compose!(add_one, double)(5);
+                  assert_eq!(result, 11);
+              }
+
+  - step: 3
+    name: compose! の法則テスト
+    description: |
+      proptest を使用して compose! の数学的法則を検証する。
+    files:
+      - tests/compose_laws.rs
+    tests:
+      - name: 結合律 (Associativity)
+        code: |
+          proptest! {
+              #[test]
+              fn prop_compose_associativity(x in any::<i32>()) {
+                  let f = |n: i32| n.wrapping_add(1);
+                  let g = |n: i32| n.wrapping_mul(2);
+                  let h = |n: i32| n.wrapping_sub(3);
+
+                  let left = compose!(f, compose!(g, h));
+                  let right = compose!(compose!(f, g), h);
+
+                  prop_assert_eq!(left(x), right(x));
+              }
+          }
+
+      - name: 左恒等律 (Left Identity)
+        code: |
+          proptest! {
+              #[test]
+              fn prop_compose_left_identity(x in any::<i32>()) {
+                  let f = |n: i32| n.wrapping_mul(3);
+
+                  let composed = compose!(identity, f);
+
+                  prop_assert_eq!(composed(x), f(x));
+              }
+          }
+
+      - name: 右恒等律 (Right Identity)
+        code: |
+          proptest! {
+              #[test]
+              fn prop_compose_right_identity(x in any::<i32>()) {
+                  let f = |n: i32| n.wrapping_mul(3);
+
+                  let composed = compose!(f, identity);
+
+                  prop_assert_eq!(composed(x), f(x));
+              }
+          }
+
+  - step: 4
+    name: pipe! マクロの実装
+    description: |
+      データを左から右へパイプラインで流す pipe! マクロを実装する。
+    files:
+      - src/compose/pipe_macro.rs
+      - src/compose/mod.rs (pipe! のエクスポート追加)
+      - tests/pipe_tests.rs
+    tdd_cycle:
+      red:
+        - 値のみの pipe テスト
+        - 単一関数の pipe テスト
+        - 複数関数の pipe テスト
+        - 所有権を消費する関数のパイプライン
+      green:
+        - pipe! マクロの実装
+      refactor:
+        - マクロのドキュメント追加
+
+    substeps:
+      - id: 4.1
+        name: 基本的な pipe
+        tests:
+          - name: test_pipe_value_only
+            code: |
+              #[test]
+              fn test_pipe_value_only() {
+                  let result = pipe!(42);
+                  assert_eq!(result, 42);
+              }
+          - name: test_pipe_single_function
+            code: |
+              #[test]
+              fn test_pipe_single_function() {
+                  fn double(x: i32) -> i32 { x * 2 }
+                  let result = pipe!(5, double);
+                  assert_eq!(result, 10);
+              }
+          - name: test_pipe_multiple_functions
+            code: |
+              #[test]
+              fn test_pipe_multiple_functions() {
+                  fn add_one(x: i32) -> i32 { x + 1 }
+                  fn double(x: i32) -> i32 { x * 2 }
+                  fn square(x: i32) -> i32 { x * x }
+
+                  // pipe!(x, f, g, h) = h(g(f(x)))
+                  let result = pipe!(3, square, double, add_one);
+                  // square(3) = 9, double(9) = 18, add_one(18) = 19
+                  assert_eq!(result, 19);
+              }
+        implementation:
+          file: src/compose/pipe_macro.rs
+          code: |
+            /// Pipes a value through a series of functions from left to right.
+            ///
+            /// `pipe!(x, f, g, h)` is equivalent to `h(g(f(x)))`.
+            ///
+            /// # Relationship with compose!
+            ///
+            /// `pipe!(x, f, g, h)` is equivalent to `compose!(h, g, f)(x)`.
+            ///
+            /// # Examples
+            ///
+            /// ```
+            /// use functional_rusty::pipe;
+            ///
+            /// fn add_one(x: i32) -> i32 { x + 1 }
+            /// fn double(x: i32) -> i32 { x * 2 }
+            ///
+            /// let result = pipe!(5, double, add_one);
+            /// assert_eq!(result, 11); // add_one(double(5)) = add_one(10) = 11
+            /// ```
+            #[macro_export]
+            macro_rules! pipe {
+                // Value only: return as is
+                ($x:expr) => {
+                    $x
+                };
+                // Single function: apply it
+                ($x:expr, $f:expr) => {
+                    $f($x)
+                };
+                // Multiple functions: apply left to right
+                ($x:expr, $f:expr, $($rest:expr),+ $(,)?) => {
+                    $crate::pipe!($f($x), $($rest),+)
+                };
+            }
+
+      - id: 4.2
+        name: 所有権を消費する関数のパイプライン
+        tests:
+          - name: test_pipe_consuming_functions
+            code: |
+              #[test]
+              fn test_pipe_consuming_functions() {
+                  fn consume_and_double(v: Vec<i32>) -> Vec<i32> {
+                      v.into_iter().map(|x| x * 2).collect()
+                  }
+
+                  fn consume_and_filter(v: Vec<i32>) -> Vec<i32> {
+                      v.into_iter().filter(|x| *x > 5).collect()
+                  }
+
+                  let result = pipe!(
+                      vec![1, 2, 3, 4, 5],
+                      consume_and_double,
+                      consume_and_filter
+                  );
+                  assert_eq!(result, vec![6, 8, 10]);
+              }
+
+      - id: 4.3
+        name: pipe と compose の等価性テスト
+        tests:
+          - name: prop_pipe_compose_equivalence
+            code: |
+              proptest! {
+                  #[test]
+                  fn prop_pipe_compose_equivalence(x in any::<i32>()) {
+                      let f = |n: i32| n.wrapping_add(1);
+                      let g = |n: i32| n.wrapping_mul(2);
+                      let h = |n: i32| n.wrapping_sub(3);
+
+                      let pipe_result = pipe!(x, f, g, h);
+                      let compose_result = compose!(h, g, f)(x);
+
+                      prop_assert_eq!(pipe_result, compose_result);
+                  }
+              }
+
+  - step: 5
+    name: partial! マクロの実装
+    description: |
+      部分適用マクロを実装する。プレースホルダーの扱いが複雑なため、
+      段階的に2引数から6引数まで拡張する。
+    files:
+      - src/compose/partial_macro.rs
+      - src/compose/mod.rs (partial! のエクスポート追加)
+      - tests/partial_tests.rs
+    tdd_cycle:
+      red:
+        - 2引数関数の部分適用テスト
+        - 3引数関数の部分適用テスト
+        - 4-6引数関数の代表的パターンのテスト
+      green:
+        - partial! マクロの実装（各パターンを個別定義）
+      refactor:
+        - パターンの整理
+        - ドキュメントの追加
+
+    substeps:
+      - id: 5.1
+        name: 2引数関数の部分適用
+        tests:
+          - name: test_partial_first_argument_fixed
+            code: |
+              use functional_rusty::compose::__;
+
+              #[test]
+              fn test_partial_first_argument_fixed() {
+                  fn add(a: i32, b: i32) -> i32 { a + b }
+
+                  let add_five = partial!(add, 5, __);
+                  assert_eq!(add_five(3), 8);
+                  assert_eq!(add_five(10), 15);
+              }
+          - name: test_partial_second_argument_fixed
+            code: |
+              use functional_rusty::compose::__;
+
+              #[test]
+              fn test_partial_second_argument_fixed() {
+                  fn divide(a: f64, b: f64) -> f64 { a / b }
+
+                  let half = partial!(divide, __, 2.0);
+                  assert_eq!(half(10.0), 5.0);
+                  assert_eq!(half(7.0), 3.5);
+              }
+          - name: test_partial_all_arguments_fixed
+            code: |
+              #[test]
+              fn test_partial_all_arguments_fixed() {
+                  fn add(a: i32, b: i32) -> i32 { a + b }
+
+                  let thunk = partial!(add, 3, 5);
+                  assert_eq!(thunk(), 8);
+              }
+          - name: test_partial_no_arguments_fixed
+            code: |
+              use functional_rusty::compose::__;
+
+              #[test]
+              fn test_partial_no_arguments_fixed() {
+                  fn add(a: i32, b: i32) -> i32 { a + b }
+
+                  let same_as_add = partial!(add, __, __);
+                  assert_eq!(same_as_add(3, 5), 8);
+              }
+        implementation:
+          file: src/compose/partial_macro.rs
+          note: |
+            Rust の macro_rules! では `_` をリテラルとしてマッチできないため、
+            専用のマーカー定数 `__` を使用する。このマーカーは ZST（ゼロサイズ型）の
+            Placeholder 構造体のインスタンスとして定義され、マクロ内で path としてマッチする。
+          code: |
+            // src/compose/utils.rs に追加
+            /// Placeholder marker for partial application.
+            /// Used to indicate which arguments should remain free.
+            #[derive(Clone, Copy)]
+            pub struct Placeholder;
+
+            /// The placeholder constant for partial application.
+            /// Use this with the `partial!` macro to indicate free arguments.
+            pub const __: Placeholder = Placeholder;
+
+            // src/compose/partial_macro.rs
+            /// Partially applies arguments to a function.
+            ///
+            /// Use `__` (double underscore) as a placeholder for arguments that should remain free.
+            ///
+            /// # Supported Patterns (2 arguments)
+            ///
+            /// - `partial!(f, a, __)` -> `|b| f(a, b)`
+            /// - `partial!(f, __, b)` -> `|a| f(a, b)`
+            /// - `partial!(f, a, b)` -> `|| f(a, b)` (thunk)
+            /// - `partial!(f, __, __)` -> `|a, b| f(a, b)` (identity)
+            ///
+            /// # Examples
+            ///
+            /// ```
+            /// use functional_rusty::{partial, compose::__};
+            ///
+            /// fn add(a: i32, b: i32) -> i32 { a + b }
+            ///
+            /// let add_five = partial!(add, 5, __);
+            /// assert_eq!(add_five(3), 8);
+            /// ```
+            #[macro_export]
+            macro_rules! partial {
+                // 2引数: (f, value, __) -> |b| f(value, b)
+                ($f:expr, $a:expr, $crate::compose::__) => {{
+                    let f = $f;
+                    let a = $a;
+                    move |b| f(a.clone(), b)
+                }};
+                // 2引数: (f, __, value) -> |a| f(a, value)
+                ($f:expr, $crate::compose::__, $b:expr) => {{
+                    let f = $f;
+                    let b = $b;
+                    move |a| f(a, b.clone())
+                }};
+                // ... (continued for more patterns)
+            }
+
+      - id: 5.2
+        name: 3引数関数の部分適用
+        tests:
+          - name: test_partial_three_args_first_fixed
+            code: |
+              use functional_rusty::compose::__;
+
+              #[test]
+              fn test_partial_three_args_first_fixed() {
+                  fn add_three(a: i32, b: i32, c: i32) -> i32 { a + b + c }
+
+                  let partial_add = partial!(add_three, 10, __, __);
+                  assert_eq!(partial_add(2, 3), 15);
+              }
+          - name: test_partial_three_args_middle_fixed
+            code: |
+              use functional_rusty::compose::__;
+
+              #[test]
+              fn test_partial_three_args_middle_fixed() {
+                  fn add_three(a: i32, b: i32, c: i32) -> i32 { a + b + c }
+
+                  let partial_add = partial!(add_three, __, 100, __);
+                  assert_eq!(partial_add(1, 2), 103);
+              }
+          - name: test_partial_three_args_last_fixed
+            code: |
+              use functional_rusty::compose::__;
+
+              #[test]
+              fn test_partial_three_args_last_fixed() {
+                  fn add_three(a: i32, b: i32, c: i32) -> i32 { a + b + c }
+
+                  let partial_add = partial!(add_three, __, __, 1000);
+                  assert_eq!(partial_add(1, 2), 1003);
+              }
+          - name: test_partial_three_args_two_fixed
+            code: |
+              use functional_rusty::compose::__;
+
+              #[test]
+              fn test_partial_three_args_two_fixed() {
+                  fn format_greeting(greeting: &str, name: &str, punctuation: &str) -> String {
+                      format!("{}, {}{}", greeting, name, punctuation)
+                  }
+
+                  let hello_with_exclamation = partial!(format_greeting, "Hello", __, "!");
+                  assert_eq!(hello_with_exclamation("Alice"), "Hello, Alice!");
+              }
+        implementation:
+          note: 3引数の全パターン（7パターン: 3C1 + 3C2 + 1 + 1）を追加
+
+      - id: 5.3
+        name: 4-6引数関数の部分適用
+        tests:
+          - name: test_partial_four_args_representative
+            code: |
+              use functional_rusty::compose::__;
+
+              #[test]
+              fn test_partial_four_args_representative() {
+                  fn sum4(a: i32, b: i32, c: i32, d: i32) -> i32 { a + b + c + d }
+
+                  let partial_sum = partial!(sum4, 1, __, 3, __);
+                  assert_eq!(partial_sum(2, 4), 10);
+              }
+        implementation:
+          note: |
+            4-6引数については、全パターンを網羅すると膨大になるため、
+            代表的なパターンのみ実装し、必要に応じて拡張する方針とする。
+
+  - step: 6
+    name: curry! マクロファミリーの実装
+    description: |
+      curry2! から curry6! までのカリー化マクロを実装する。
+    files:
+      - src/compose/curry_macro.rs
+      - src/compose/mod.rs (curry! のエクスポート追加)
+      - tests/curry_tests.rs
+    tdd_cycle:
+      red:
+        - curry2! の基本動作テスト
+        - curry3! から curry6! の基本動作テスト
+        - 段階的部分適用のテスト
+      green:
+        - 各 curry マクロの実装
+      refactor:
+        - ドキュメントの追加
+
+    substeps:
+      - id: 6.1
+        name: curry2! の実装
+        tests:
+          - name: test_curry2_basic
+            code: |
+              #[test]
+              fn test_curry2_basic() {
+                  fn add(a: i32, b: i32) -> i32 { a + b }
+
+                  let curried_add = curry2!(add);
+                  assert_eq!(curried_add(3)(4), 7);
+              }
+          - name: test_curry2_partial_application
+            code: |
+              #[test]
+              fn test_curry2_partial_application() {
+                  fn add(a: i32, b: i32) -> i32 { a + b }
+
+                  let curried_add = curry2!(add);
+                  let add_five = curried_add(5);
+
+                  assert_eq!(add_five(3), 8);
+                  assert_eq!(add_five(10), 15);
+              }
+        implementation:
+          file: src/compose/curry_macro.rs
+          code: |
+            /// Curries a 2-argument function.
+            ///
+            /// Transforms `fn(A, B) -> C` into `fn(A) -> fn(B) -> C`.
+            ///
+            /// # Examples
+            ///
+            /// ```
+            /// use functional_rusty::curry2;
+            ///
+            /// fn add(a: i32, b: i32) -> i32 { a + b }
+            ///
+            /// let curried_add = curry2!(add);
+            /// let add_five = curried_add(5);
+            ///
+            /// assert_eq!(add_five(3), 8);
+            /// assert_eq!(curried_add(3)(4), 7);
+            /// ```
+            #[macro_export]
+            macro_rules! curry2 {
+                ($f:expr) => {{
+                    let f = $f;
+                    move |a| {
+                        let f = f.clone();
+                        move |b| f(a.clone(), b)
+                    }
+                }};
+            }
+
+      - id: 6.2
+        name: curry3! - curry6! の実装
+        tests:
+          - name: test_curry3
+            code: |
+              #[test]
+              fn test_curry3() {
+                  fn volume(w: f64, h: f64, d: f64) -> f64 { w * h * d }
+
+                  let curried_volume = curry3!(volume);
+                  let with_width = curried_volume(2.0);
+                  let with_width_height = with_width(3.0);
+                  let result = with_width_height(4.0);
+
+                  assert_eq!(result, 24.0);
+              }
+          - name: test_curry4_to_curry6
+            code: |
+              #[test]
+              fn test_curry4_to_curry6() {
+                  let sum4 = |a: i32, b: i32, c: i32, d: i32| a + b + c + d;
+                  let sum5 = |a: i32, b: i32, c: i32, d: i32, e: i32| a + b + c + d + e;
+                  let sum6 = |a: i32, b: i32, c: i32, d: i32, e: i32, f: i32| a + b + c + d + e + f;
+
+                  assert_eq!(curry4!(sum4)(1)(2)(3)(4), 10);
+                  assert_eq!(curry5!(sum5)(1)(2)(3)(4)(5), 15);
+                  assert_eq!(curry6!(sum6)(1)(2)(3)(4)(5)(6), 21);
+              }
+        implementation:
+          note: curry3! から curry6! を同様のパターンで実装
+
+      - id: 6.3
+        name: curry と compose の組み合わせテスト
+        tests:
+          - name: test_curry_with_compose
+            code: |
+              #[test]
+              fn test_curry_with_compose() {
+                  fn multiply(a: i32, b: i32) -> i32 { a * b }
+
+                  let double = curry2!(multiply)(2);
+                  let triple = curry2!(multiply)(3);
+
+                  let six_times = compose!(triple, double);
+                  assert_eq!(six_times(5), 30);
+              }
+
+  - step: 7
+    name: 補足の法則テストとプロパティベーステスト
+    description: |
+      残りのプロパティベーステストを追加する。
+    files:
+      - tests/compose_laws.rs
+    tests:
+      - name: flip の二重適用が恒等
+        code: |
+          proptest! {
+              #[test]
+              fn prop_flip_double_is_identity(a in any::<i32>(), b in any::<i32>()) {
+                  fn subtract(x: i32, y: i32) -> i32 { x.wrapping_sub(y) }
+
+                  let flipped_once = flip(subtract);
+                  let flipped_twice = flip(flipped_once);
+
+                  prop_assert_eq!(subtract(a, b), flipped_twice(a, b));
+              }
+          }
+
+      - name: constant の定数性
+        code: |
+          proptest! {
+              #[test]
+              fn prop_constant_always_returns_same(
+                  constant_value in any::<i32>(),
+                  input1 in any::<i32>(),
+                  input2 in any::<String>()
+              ) {
+                  let always = constant(constant_value);
+
+                  prop_assert_eq!(always(input1), constant_value);
+                  prop_assert_eq!(always(input2), constant_value);
+              }
+          }
+
+      - name: pipe の恒等律
+        code: |
+          proptest! {
+              #[test]
+              fn prop_pipe_identity(x in any::<i32>()) {
+                  prop_assert_eq!(pipe!(x, identity), x);
+              }
+          }
+
+  - step: 8
+    name: 統合テスト
+    description: |
+      各マクロの組み合わせと Phase 1 の型クラスとの統合テストを追加する。
+    files:
+      - tests/compose_integration.rs
+    tests:
+      - name: compose と partial の組み合わせ
+        code: |
+          use functional_rusty::compose::__;
+
+          #[test]
+          fn test_compose_with_partial() {
+              fn multiply(a: i32, b: i32) -> i32 { a * b }
+              fn add(a: i32, b: i32) -> i32 { a + b }
+
+              let double = partial!(multiply, 2, __);
+              let add_ten = partial!(add, 10, __);
+
+              let double_then_add_ten = compose!(add_ten, double);
+              assert_eq!(double_then_add_ten(5), 20);
+          }
+
+      - name: Functor との組み合わせ
+        code: |
+          #[test]
+          fn test_compose_with_functor() {
+              use functional_rusty::typeclass::Functor;
+
+              fn add_one(x: i32) -> i32 { x + 1 }
+              fn double(x: i32) -> i32 { x * 2 }
+
+              let composed = compose!(add_one, double);
+
+              let option_result = Some(5).fmap(composed);
+              assert_eq!(option_result, Some(11));
+          }
+
+      - name: pipe と Monad の組み合わせ
+        code: |
+          #[test]
+          fn test_pipe_with_monad() {
+              use functional_rusty::typeclass::Monad;
+
+              let result = pipe!(
+                  Some(5),
+                  |opt: Option<i32>| opt.flat_map(|x| Some(x * 2)),
+                  |opt: Option<i32>| opt.flat_map(|x| Some(x + 1))
+              );
+              assert_eq!(result, Some(11));
+          }
+
+  - step: 9
+    name: ドキュメントと最終調整
+    description: |
+      ドキュメントコメントの完成、README の更新、最終的なテスト確認を行う。
+    tasks:
+      - src/compose/mod.rs のモジュールドキュメント完成
+      - 各マクロの使用例を追加
+      - cargo doc --no-deps でドキュメント生成確認
+      - cargo test --all-features で全テスト通過確認
+      - cargo clippy --all-features で警告なし確認
+
+# =============================================================================
+# 品質基準
+# =============================================================================
+quality_criteria:
+  test_coverage:
+    target: "100%"
+    measurement: "cargo tarpaulin --features compose"
+
+  code_style:
+    - no_abbreviations: |
+        変数名・関数名・マクロ名に略語を使用しない。
+        許可される略語: URL, UUID, ULID のみ。
+    - no_clippy_warnings: |
+        cargo clippy --all-features -- -D warnings が警告なしで通過すること。
+    - documentation: |
+        全ての公開 API にドキュメントコメントを付与すること。
+        各マクロには使用例を含めること。
+
+  testing:
+    - unit_tests: 全てのマクロと関数に対する単体テスト
+    - property_tests: 数学的法則に対するプロパティベーステスト
+    - integration_tests: マクロ間および Phase 1 との組み合わせテスト
+
+  performance:
+    - zero_cost_abstraction: |
+        マクロ展開後のコードがインライン化可能であること。
+        不必要なヒープ割り当てがないこと。
+    - minimal_cloning: |
+        Clone の呼び出しを最小限に抑えること。
+
+# =============================================================================
+# マクロ設計の詳細
+# =============================================================================
+macro_design:
+  compose:
+    approach: declarative_macro
+    key_patterns:
+      - single_function: 恒等的な合成
+      - two_functions: 基本的な合成
+      - recursive: 3つ以上の関数は再帰的に処理
+    type_inference_notes: |
+      展開されたクロージャの入力型は呼び出し時に推論される。
+      関数の型が明確であれば、追加の型注釈は不要。
+
+  pipe:
+    approach: declarative_macro
+    key_patterns:
+      - value_only: 値をそのまま返す
+      - single_function: 関数を適用
+      - recursive: 左から順に適用
+    ownership_notes: |
+      pipe! は FnOnce で十分なため、所有権を消費する関数も使用可能。
+
+  partial:
+    approach: declarative_macro
+    key_patterns:
+      - pattern_per_placeholder: 各プレースホルダーパターンを個別に定義
+    placeholder_handling: |
+      Rust の macro_rules! では `_` をリテラルとしてマッチできない。
+      以下のアプローチを採用:
+      1. `_` を識別子としてマッチし、内部で処理
+      2. 各パターンを個別のマクロアームとして定義
+    clone_requirement: |
+      固定する値は Clone を実装している必要がある。
+      これは生成された関数が複数回呼び出される可能性があるため。
+
+  curry:
+    approach: declarative_macro
+    variants:
+      - curry2: 2引数
+      - curry3: 3引数
+      - curry4: 4引数
+      - curry5: 5引数
+      - curry6: 6引数
+    clone_requirement: |
+      元の関数と中間で保持される引数は Clone を実装している必要がある。
+      これは各段階の関数が複数回呼び出される可能性があるため。
+
+# =============================================================================
+# エラーメッセージの品質
+# =============================================================================
+error_messages:
+  type_mismatch:
+    goal: |
+      型の不一致時に、どの関数の入出力が合わないかを明確にする。
+    approach: |
+      マクロ展開後のコードが、標準的な関数呼び出しの形になるようにし、
+      Rust コンパイラの型エラーメッセージを活用する。
+
+  argument_count:
+    goal: |
+      引数の数が不正な場合に、期待される引数の数を示す。
+    approach: |
+      マクロパターンで引数の数をチェックし、
+      不正な場合は compile_error! で明確なメッセージを出力する。
+
+# =============================================================================
+# 将来の拡張への考慮
+# =============================================================================
+future_considerations:
+  async_compose:
+    description: |
+      async 関数を compose するための async_compose! マクロ。
+      現在の設計を拡張する形で実装可能。
+    approach: |
+      compose! と同様の構造で、展開結果が async ブロックになる。
+
+  automatic_currying:
+    description: |
+      #[curry] attribute macro で関数を自動的にカリー化。
+    approach: |
+      proc-macro を使用して関数定義を変換。
+      現在の curry2! - curry6! は、この拡張の基盤となる。
+
+  variadic_curry:
+    description: |
+      任意の引数数に対応する curry! マクロ。
+    approach: |
+      proc-macro を使用して引数の数を検出し、適切なコードを生成。

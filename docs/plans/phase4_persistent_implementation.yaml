@@ -1,0 +1,1894 @@
+# Phase 4: 永続データ構造 - 実装計画
+#
+# このファイルは docs/requirements/phase4_persistent.yaml の要件定義に基づき、
+# TDD アプローチによる実装計画を定義する。
+#
+# 設計方針:
+#   1. `#![forbid(unsafe_code)]` ポリシーに準拠（unsafe 禁止）
+#   2. Rc を用いた構造的共有を基本とする
+#   3. rstest によるパラメータ化テスト
+#   4. proptest による法則・不変条件の検証
+#   5. テストカバレッジ 100% を目標
+#   6. 略語を使用しない命名規則
+
+version: "1.1.0"
+phase: 4
+name: "Persistent Data Structures Implementation Plan"
+created_at: "2025-12-31"
+last_updated: "2025-12-31"
+review_notes: |
+  v1.1.0 (2025-12-31):
+  - PersistentVector に push_front, pop_front の TDD サイクルを追加
+  - PersistentList の property_based_tests に Uncons-Cons Law, Append Identity Law, Append Associativity Law を追加
+  - PersistentHashMap に Borrow パターンの使用を明示
+  - PersistentTreeMap に RangeBounds と Borrow パターンの使用を明示
+
+# =============================================================================
+# ファイル構成
+# =============================================================================
+file_structure:
+  source_files:
+    - path: "src/persistent/mod.rs"
+      description: "永続データ構造モジュールのエントリポイント。全ての型とトレイトを公開"
+      status: "exists"
+      modifications_needed: true
+
+    - path: "src/persistent/list.rs"
+      description: "PersistentList<T> - 不変の単方向リスト（cons リスト）"
+      status: "to_create"
+
+    - path: "src/persistent/vector.rs"
+      description: "PersistentVector<T> - 不変の動的配列（HAMT ベース）"
+      status: "to_create"
+
+    - path: "src/persistent/hashmap.rs"
+      description: "PersistentHashMap<K, V> - 不変のハッシュマップ（CHAMP ベース）"
+      status: "to_create"
+
+    - path: "src/persistent/hashset.rs"
+      description: "PersistentHashSet<T> - 不変のハッシュセット"
+      status: "to_create"
+
+    - path: "src/persistent/treemap.rs"
+      description: "PersistentTreeMap<K, V> - 不変の順序付きマップ（赤黒木ベース）"
+      status: "to_create"
+
+    - path: "src/persistent/internal/mod.rs"
+      description: "内部実装モジュール（公開しないヘルパー型・関数）"
+      status: "to_create"
+
+    - path: "src/persistent/internal/hamt.rs"
+      description: "HAMT（Hash Array Mapped Trie）の内部実装"
+      status: "to_create"
+
+    - path: "src/persistent/internal/champ.rs"
+      description: "CHAMP（Compressed Hash-Array Mapped Prefix-tree）の内部実装"
+      status: "to_create"
+
+    - path: "src/persistent/internal/red_black_tree.rs"
+      description: "赤黒木の内部実装"
+      status: "to_create"
+
+  test_files:
+    - path: "tests/persistent_list_tests.rs"
+      description: "PersistentList の単体テスト"
+      status: "to_create"
+
+    - path: "tests/persistent_list_laws.rs"
+      description: "PersistentList の法則テスト（proptest）"
+      status: "to_create"
+
+    - path: "tests/persistent_vector_tests.rs"
+      description: "PersistentVector の単体テスト"
+      status: "to_create"
+
+    - path: "tests/persistent_vector_laws.rs"
+      description: "PersistentVector の法則テスト（proptest）"
+      status: "to_create"
+
+    - path: "tests/persistent_hashmap_tests.rs"
+      description: "PersistentHashMap の単体テスト"
+      status: "to_create"
+
+    - path: "tests/persistent_hashmap_laws.rs"
+      description: "PersistentHashMap の法則テスト（proptest）"
+      status: "to_create"
+
+    - path: "tests/persistent_hashset_tests.rs"
+      description: "PersistentHashSet の単体テスト"
+      status: "to_create"
+
+    - path: "tests/persistent_hashset_laws.rs"
+      description: "PersistentHashSet の法則テスト（proptest）"
+      status: "to_create"
+
+    - path: "tests/persistent_treemap_tests.rs"
+      description: "PersistentTreeMap の単体テスト"
+      status: "to_create"
+
+    - path: "tests/persistent_treemap_laws.rs"
+      description: "PersistentTreeMap の法則テスト（proptest）"
+      status: "to_create"
+
+    - path: "tests/persistent_integration.rs"
+      description: "型クラスとの統合テスト"
+      status: "to_create"
+
+# =============================================================================
+# 実装順序と依存関係
+# =============================================================================
+implementation_order:
+  - phase: "4.1"
+    name: "PersistentList<T>"
+    description: |
+      最もシンプルな永続データ構造。構造的共有の基本パターンを確立する。
+      後続のデータ構造の基盤となるため最初に実装。
+    estimated_duration: "3-4 days"
+    dependencies: []
+    priority: "high"
+
+  - phase: "4.2"
+    name: "PersistentVector<T>"
+    description: |
+      HAMT ベースの実装。内部構造が複雑だが、ランダムアクセスと
+      末尾操作の効率性が高い。PersistentList の次に実装。
+    estimated_duration: "5-7 days"
+    dependencies:
+      - "4.1"
+    priority: "critical"
+
+  - phase: "4.3"
+    name: "PersistentHashMap<K, V>"
+    description: |
+      CHAMP ベースの実装。ハッシュ衝突の処理が重要。
+      PersistentVector で得た HAMT の知見を活用。
+    estimated_duration: "5-7 days"
+    dependencies:
+      - "4.2"
+    priority: "critical"
+
+  - phase: "4.4"
+    name: "PersistentHashSet<T>"
+    description: |
+      PersistentHashMap<T, ()> のラッパー。集合演算を追加。
+      PersistentHashMap の実装が前提条件。
+    estimated_duration: "2-3 days"
+    dependencies:
+      - "4.3"
+    priority: "high"
+
+  - phase: "4.5"
+    name: "PersistentTreeMap<K, V>"
+    description: |
+      赤黒木の永続版。バランシング操作が複雑だが、
+      順序付きマップ・範囲クエリをサポート。
+    estimated_duration: "5-7 days"
+    dependencies:
+      - "4.1"
+    priority: "medium"
+
+# =============================================================================
+# Phase 4.1: PersistentList<T> 実装計画
+# =============================================================================
+persistent_list:
+  name: "PersistentList<T>"
+  description: |
+    不変の単方向リスト（cons リスト）。Lisp/Scheme の基本データ構造を
+    Rust で再現する。構造的共有により、tail 操作は O(1) でメモリ効率が良い。
+
+  internal_structure:
+    node_definition: |
+      ```rust
+      use std::rc::Rc;
+
+      /// PersistentList のノード構造
+      struct Node<T> {
+          element: T,
+          next: Option<Rc<Node<T>>>,
+      }
+
+      /// 不変の単方向リスト
+      #[derive(Clone)]
+      pub struct PersistentList<T> {
+          head: Option<Rc<Node<T>>>,
+          length: usize,
+      }
+      ```
+    notes:
+      - "Rc を使用して構造的共有を実現"
+      - "length をキャッシュして O(1) で長さを取得"
+      - "空リストは head: None で表現"
+
+  tdd_cycles:
+    # --------------------------------------------------------------------------
+    # Cycle 1: 基本構造と new()
+    # --------------------------------------------------------------------------
+    - cycle_number: 1
+      name: "空リストの作成"
+      red_phase:
+        tests:
+          - name: "test_new_creates_empty_list"
+            code: |
+              #[test]
+              fn test_new_creates_empty_list() {
+                  let list: PersistentList<i32> = PersistentList::new();
+                  assert!(list.is_empty());
+                  assert_eq!(list.len(), 0);
+              }
+          - name: "test_new_head_returns_none"
+            code: |
+              #[test]
+              fn test_new_head_returns_none() {
+                  let list: PersistentList<i32> = PersistentList::new();
+                  assert_eq!(list.head(), None);
+              }
+      green_phase:
+        implementation: |
+          impl<T> PersistentList<T> {
+              pub fn new() -> Self {
+                  PersistentList {
+                      head: None,
+                      length: 0,
+                  }
+              }
+
+              pub fn is_empty(&self) -> bool {
+                  self.head.is_none()
+              }
+
+              pub fn len(&self) -> usize {
+                  self.length
+              }
+
+              pub fn head(&self) -> Option<&T> {
+                  self.head.as_ref().map(|node| &node.element)
+              }
+          }
+      refactor_phase:
+        changes:
+          - "インライン化の検討"
+          - "ドキュメントコメントの追加"
+
+    # --------------------------------------------------------------------------
+    # Cycle 2: cons（先頭への要素追加）
+    # --------------------------------------------------------------------------
+    - cycle_number: 2
+      name: "cons による要素追加"
+      red_phase:
+        tests:
+          - name: "test_cons_adds_element_to_front"
+            code: |
+              #[test]
+              fn test_cons_adds_element_to_front() {
+                  let list = PersistentList::new().cons(1);
+                  assert_eq!(list.head(), Some(&1));
+                  assert_eq!(list.len(), 1);
+              }
+          - name: "test_cons_chain_builds_list_in_reverse_order"
+            code: |
+              #[test]
+              fn test_cons_chain_builds_list_in_reverse_order() {
+                  let list = PersistentList::new().cons(3).cons(2).cons(1);
+                  assert_eq!(list.head(), Some(&1));
+                  assert_eq!(list.len(), 3);
+              }
+          - name: "test_cons_does_not_modify_original"
+            code: |
+              #[test]
+              fn test_cons_does_not_modify_original() {
+                  let list1 = PersistentList::new().cons(1);
+                  let list2 = list1.cons(2);
+                  // list1 は変更されない
+                  assert_eq!(list1.len(), 1);
+                  assert_eq!(list1.head(), Some(&1));
+                  // list2 は新しい要素を持つ
+                  assert_eq!(list2.len(), 2);
+                  assert_eq!(list2.head(), Some(&2));
+              }
+      green_phase:
+        implementation: |
+          impl<T> PersistentList<T> {
+              pub fn cons(&self, element: T) -> Self {
+                  PersistentList {
+                      head: Some(Rc::new(Node {
+                          element,
+                          next: self.head.clone(),
+                      })),
+                      length: self.length + 1,
+                  }
+              }
+          }
+      refactor_phase:
+        changes:
+          - "Clone の自動導出確認"
+
+    # --------------------------------------------------------------------------
+    # Cycle 3: tail（先頭を除いたリスト）
+    # --------------------------------------------------------------------------
+    - cycle_number: 3
+      name: "tail による分解"
+      red_phase:
+        tests:
+          - name: "test_tail_of_non_empty_list"
+            code: |
+              #[test]
+              fn test_tail_of_non_empty_list() {
+                  let list = PersistentList::new().cons(3).cons(2).cons(1);
+                  let tail = list.tail();
+                  assert_eq!(tail.head(), Some(&2));
+                  assert_eq!(tail.len(), 2);
+              }
+          - name: "test_tail_of_single_element_list"
+            code: |
+              #[test]
+              fn test_tail_of_single_element_list() {
+                  let list = PersistentList::new().cons(1);
+                  let tail = list.tail();
+                  assert!(tail.is_empty());
+              }
+          - name: "test_tail_of_empty_list"
+            code: |
+              #[test]
+              fn test_tail_of_empty_list() {
+                  let list: PersistentList<i32> = PersistentList::new();
+                  let tail = list.tail();
+                  assert!(tail.is_empty());
+              }
+          - name: "test_tail_shares_structure"
+            code: |
+              #[test]
+              fn test_tail_shares_structure() {
+                  let list = PersistentList::new().cons(3).cons(2).cons(1);
+                  let tail = list.tail();
+                  // Rc::ptr_eq で構造的共有を検証
+                  // （内部実装に依存するため実装時に詳細化）
+              }
+      green_phase:
+        implementation: |
+          impl<T> PersistentList<T> {
+              pub fn tail(&self) -> Self {
+                  match &self.head {
+                      Some(node) => PersistentList {
+                          head: node.next.clone(),
+                          length: self.length.saturating_sub(1),
+                      },
+                      None => PersistentList::new(),
+                  }
+              }
+          }
+      refactor_phase:
+        changes:
+          - "saturating_sub の使用確認"
+
+    # --------------------------------------------------------------------------
+    # Cycle 4: singleton
+    # --------------------------------------------------------------------------
+    - cycle_number: 4
+      name: "singleton による単一要素リスト作成"
+      red_phase:
+        tests:
+          - name: "test_singleton_creates_single_element_list"
+            code: |
+              #[test]
+              fn test_singleton_creates_single_element_list() {
+                  let list = PersistentList::singleton(42);
+                  assert_eq!(list.head(), Some(&42));
+                  assert_eq!(list.len(), 1);
+              }
+      green_phase:
+        implementation: |
+          impl<T> PersistentList<T> {
+              pub fn singleton(element: T) -> Self {
+                  PersistentList::new().cons(element)
+              }
+          }
+
+    # --------------------------------------------------------------------------
+    # Cycle 5: uncons
+    # --------------------------------------------------------------------------
+    - cycle_number: 5
+      name: "uncons による先頭と残りの分解"
+      red_phase:
+        tests:
+          - name: "test_uncons_non_empty"
+            code: |
+              #[test]
+              fn test_uncons_non_empty() {
+                  let list = PersistentList::new().cons(3).cons(2).cons(1);
+                  let (head, tail) = list.uncons().unwrap();
+                  assert_eq!(*head, 1);
+                  assert_eq!(tail.head(), Some(&2));
+              }
+          - name: "test_uncons_empty"
+            code: |
+              #[test]
+              fn test_uncons_empty() {
+                  let list: PersistentList<i32> = PersistentList::new();
+                  assert!(list.uncons().is_none());
+              }
+      green_phase:
+        implementation: |
+          impl<T> PersistentList<T> {
+              pub fn uncons(&self) -> Option<(&T, Self)> {
+                  self.head.as_ref().map(|node| {
+                      let tail = PersistentList {
+                          head: node.next.clone(),
+                          length: self.length.saturating_sub(1),
+                      };
+                      (&node.element, tail)
+                  })
+              }
+          }
+
+    # --------------------------------------------------------------------------
+    # Cycle 6: get（インデックスアクセス）
+    # --------------------------------------------------------------------------
+    - cycle_number: 6
+      name: "get によるインデックスアクセス"
+      red_phase:
+        tests:
+          - name: "test_get_valid_index"
+            code: |
+              #[test]
+              fn test_get_valid_index() {
+                  let list = PersistentList::new().cons(3).cons(2).cons(1);
+                  assert_eq!(list.get(0), Some(&1));
+                  assert_eq!(list.get(1), Some(&2));
+                  assert_eq!(list.get(2), Some(&3));
+              }
+          - name: "test_get_invalid_index"
+            code: |
+              #[test]
+              fn test_get_invalid_index() {
+                  let list = PersistentList::new().cons(1);
+                  assert_eq!(list.get(1), None);
+                  assert_eq!(list.get(10), None);
+              }
+          - name: "test_get_empty_list"
+            code: |
+              #[test]
+              fn test_get_empty_list() {
+                  let list: PersistentList<i32> = PersistentList::new();
+                  assert_eq!(list.get(0), None);
+              }
+      green_phase:
+        implementation: |
+          impl<T> PersistentList<T> {
+              pub fn get(&self, index: usize) -> Option<&T> {
+                  let mut current = &self.head;
+                  let mut remaining = index;
+
+                  while let Some(node) = current {
+                      if remaining == 0 {
+                          return Some(&node.element);
+                      }
+                      remaining -= 1;
+                      current = &node.next;
+                  }
+                  None
+              }
+          }
+
+    # --------------------------------------------------------------------------
+    # Cycle 7: iter（イテレータ）
+    # --------------------------------------------------------------------------
+    - cycle_number: 7
+      name: "iter によるイテレーション"
+      red_phase:
+        tests:
+          - name: "test_iter_collects_all_elements"
+            code: |
+              #[test]
+              fn test_iter_collects_all_elements() {
+                  let list = PersistentList::new().cons(3).cons(2).cons(1);
+                  let collected: Vec<&i32> = list.iter().collect();
+                  assert_eq!(collected, vec![&1, &2, &3]);
+              }
+          - name: "test_iter_empty_list"
+            code: |
+              #[test]
+              fn test_iter_empty_list() {
+                  let list: PersistentList<i32> = PersistentList::new();
+                  let collected: Vec<&i32> = list.iter().collect();
+                  assert!(collected.is_empty());
+              }
+          - name: "test_iter_sum"
+            code: |
+              #[test]
+              fn test_iter_sum() {
+                  let list = PersistentList::new().cons(3).cons(2).cons(1);
+                  let sum: i32 = list.iter().copied().sum();
+                  assert_eq!(sum, 6);
+              }
+      green_phase:
+        implementation: |
+          // イテレータ構造体
+          pub struct PersistentListIterator<'a, T> {
+              current: Option<&'a Rc<Node<T>>>,
+          }
+
+          impl<'a, T> Iterator for PersistentListIterator<'a, T> {
+              type Item = &'a T;
+
+              fn next(&mut self) -> Option<Self::Item> {
+                  self.current.map(|node| {
+                      self.current = node.next.as_ref();
+                      &node.element
+                  })
+              }
+          }
+
+          impl<T> PersistentList<T> {
+              pub fn iter(&self) -> PersistentListIterator<'_, T> {
+                  PersistentListIterator {
+                      current: self.head.as_ref(),
+                  }
+              }
+          }
+
+    # --------------------------------------------------------------------------
+    # Cycle 8: append（連結）
+    # --------------------------------------------------------------------------
+    - cycle_number: 8
+      name: "append によるリスト連結"
+      red_phase:
+        tests:
+          - name: "test_append_two_lists"
+            code: |
+              #[test]
+              fn test_append_two_lists() {
+                  let list1 = PersistentList::new().cons(2).cons(1);
+                  let list2 = PersistentList::new().cons(4).cons(3);
+                  let combined = list1.append(&list2);
+                  let collected: Vec<&i32> = combined.iter().collect();
+                  assert_eq!(collected, vec![&1, &2, &3, &4]);
+              }
+          - name: "test_append_with_empty"
+            code: |
+              #[test]
+              fn test_append_with_empty() {
+                  let list = PersistentList::new().cons(2).cons(1);
+                  let empty: PersistentList<i32> = PersistentList::new();
+
+                  // list.append(&empty) == list
+                  let result1 = list.append(&empty);
+                  let collected1: Vec<&i32> = result1.iter().collect();
+                  assert_eq!(collected1, vec![&1, &2]);
+
+                  // empty.append(&list) == list
+                  let result2 = empty.append(&list);
+                  let collected2: Vec<&i32> = result2.iter().collect();
+                  assert_eq!(collected2, vec![&1, &2]);
+              }
+      green_phase:
+        implementation: |
+          impl<T: Clone> PersistentList<T> {
+              pub fn append(&self, other: &Self) -> Self {
+                  // 自分が空なら other をそのまま返す
+                  if self.is_empty() {
+                      return other.clone();
+                  }
+
+                  // 逆順にしてから other に cons していき、再度逆順にする
+                  // または再帰的に構築
+                  let mut result = other.clone();
+                  for element in self.iter().rev().cloned() {
+                      result = result.cons(element);
+                  }
+                  // これだと逆順になるので、self を reverse してから処理
+                  // 実際には self.reverse().iter() を使う
+                  self.reverse().fold_into(other.clone())
+              }
+          }
+        notes:
+          - "append の実装は reverse と組み合わせて効率化"
+          - "O(n) where n = self.len()"
+
+    # --------------------------------------------------------------------------
+    # Cycle 9: reverse（逆順）
+    # --------------------------------------------------------------------------
+    - cycle_number: 9
+      name: "reverse による逆順リスト"
+      red_phase:
+        tests:
+          - name: "test_reverse"
+            code: |
+              #[test]
+              fn test_reverse() {
+                  let list = PersistentList::new().cons(3).cons(2).cons(1);
+                  let reversed = list.reverse();
+                  let collected: Vec<&i32> = reversed.iter().collect();
+                  assert_eq!(collected, vec![&3, &2, &1]);
+              }
+          - name: "test_reverse_empty"
+            code: |
+              #[test]
+              fn test_reverse_empty() {
+                  let list: PersistentList<i32> = PersistentList::new();
+                  let reversed = list.reverse();
+                  assert!(reversed.is_empty());
+              }
+          - name: "test_reverse_involution"
+            code: |
+              #[test]
+              fn test_reverse_involution() {
+                  let list = PersistentList::new().cons(3).cons(2).cons(1);
+                  let reversed_twice = list.reverse().reverse();
+                  // 元のリストと同じ順序
+                  let original: Vec<&i32> = list.iter().collect();
+                  let result: Vec<&i32> = reversed_twice.iter().collect();
+                  assert_eq!(original, result);
+              }
+      green_phase:
+        implementation: |
+          impl<T: Clone> PersistentList<T> {
+              pub fn reverse(&self) -> Self {
+                  let mut result = PersistentList::new();
+                  for element in self.iter() {
+                      result = result.cons(element.clone());
+                  }
+                  result
+              }
+          }
+
+    # --------------------------------------------------------------------------
+    # Cycle 10: FromIterator
+    # --------------------------------------------------------------------------
+    - cycle_number: 10
+      name: "FromIterator トレイト実装"
+      red_phase:
+        tests:
+          - name: "test_from_iter"
+            code: |
+              #[test]
+              fn test_from_iter() {
+                  let list: PersistentList<i32> = (1..=5).collect();
+                  assert_eq!(list.len(), 5);
+                  assert_eq!(list.head(), Some(&1));
+              }
+          - name: "test_from_array"
+            code: |
+              #[test]
+              fn test_from_array() {
+                  let list: PersistentList<i32> = [1, 2, 3].into_iter().collect();
+                  let collected: Vec<&i32> = list.iter().collect();
+                  assert_eq!(collected, vec![&1, &2, &3]);
+              }
+      green_phase:
+        implementation: |
+          impl<T: Clone> FromIterator<T> for PersistentList<T> {
+              fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+                  // イテレータの要素を逆順に cons していくと逆順になるので、
+                  // 一度 collect して reverse するか、別の方法を使う
+                  let elements: Vec<T> = iter.into_iter().collect();
+                  let mut list = PersistentList::new();
+                  for element in elements.into_iter().rev() {
+                      list = list.cons(element);
+                  }
+                  list
+              }
+          }
+
+    # --------------------------------------------------------------------------
+    # Cycle 11: IntoIterator
+    # --------------------------------------------------------------------------
+    - cycle_number: 11
+      name: "IntoIterator トレイト実装"
+      red_phase:
+        tests:
+          - name: "test_into_iter"
+            code: |
+              #[test]
+              fn test_into_iter() {
+                  let list: PersistentList<i32> = (1..=3).collect();
+                  let collected: Vec<i32> = list.into_iter().collect();
+                  assert_eq!(collected, vec![1, 2, 3]);
+              }
+      green_phase:
+        implementation: |
+          // 所有権を持つイテレータ
+          pub struct PersistentListIntoIterator<T> {
+              list: PersistentList<T>,
+          }
+
+          impl<T: Clone> Iterator for PersistentListIntoIterator<T> {
+              type Item = T;
+
+              fn next(&mut self) -> Option<Self::Item> {
+                  if let Some((head, tail)) = self.list.uncons() {
+                      let element = head.clone();
+                      self.list = tail;
+                      Some(element)
+                  } else {
+                      None
+                  }
+              }
+          }
+
+          impl<T: Clone> IntoIterator for PersistentList<T> {
+              type Item = T;
+              type IntoIter = PersistentListIntoIterator<T>;
+
+              fn into_iter(self) -> Self::IntoIter {
+                  PersistentListIntoIterator { list: self }
+              }
+          }
+
+    # --------------------------------------------------------------------------
+    # Cycle 12: PartialEq, Eq, Debug
+    # --------------------------------------------------------------------------
+    - cycle_number: 12
+      name: "標準トレイトの実装"
+      red_phase:
+        tests:
+          - name: "test_partial_eq"
+            code: |
+              #[test]
+              fn test_partial_eq() {
+                  let list1: PersistentList<i32> = (1..=3).collect();
+                  let list2: PersistentList<i32> = (1..=3).collect();
+                  let list3: PersistentList<i32> = (1..=4).collect();
+
+                  assert_eq!(list1, list2);
+                  assert_ne!(list1, list3);
+              }
+          - name: "test_debug"
+            code: |
+              #[test]
+              fn test_debug() {
+                  let list: PersistentList<i32> = (1..=3).collect();
+                  let debug_str = format!("{:?}", list);
+                  assert!(debug_str.contains("1"));
+                  assert!(debug_str.contains("2"));
+                  assert!(debug_str.contains("3"));
+              }
+      green_phase:
+        implementation: |
+          impl<T: PartialEq> PartialEq for PersistentList<T> {
+              fn eq(&self, other: &Self) -> bool {
+                  if self.length != other.length {
+                      return false;
+                  }
+                  self.iter().zip(other.iter()).all(|(a, b)| a == b)
+              }
+          }
+
+          impl<T: Eq> Eq for PersistentList<T> {}
+
+          impl<T: std::fmt::Debug> std::fmt::Debug for PersistentList<T> {
+              fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                  formatter
+                      .debug_list()
+                      .entries(self.iter())
+                      .finish()
+              }
+          }
+
+    # --------------------------------------------------------------------------
+    # Cycle 13: TypeConstructor 実装
+    # --------------------------------------------------------------------------
+    - cycle_number: 13
+      name: "TypeConstructor トレイト実装"
+      red_phase:
+        tests:
+          - name: "test_type_constructor"
+            code: |
+              #[test]
+              fn test_type_constructor() {
+                  fn assert_type_constructor<T: TypeConstructor<Inner = i32>>() {}
+                  assert_type_constructor::<PersistentList<i32>>();
+              }
+      green_phase:
+        implementation: |
+          impl<T> TypeConstructor for PersistentList<T> {
+              type Inner = T;
+              type WithType<B> = PersistentList<B>;
+          }
+
+    # --------------------------------------------------------------------------
+    # Cycle 14: Functor, FunctorMut 実装
+    # --------------------------------------------------------------------------
+    - cycle_number: 14
+      name: "Functor/FunctorMut トレイト実装"
+      red_phase:
+        tests:
+          - name: "test_fmap_mut"
+            code: |
+              #[test]
+              fn test_fmap_mut() {
+                  let list: PersistentList<i32> = (1..=3).collect();
+                  let doubled: PersistentList<i32> = list.fmap_mut(|x| x * 2);
+                  let collected: Vec<&i32> = doubled.iter().collect();
+                  assert_eq!(collected, vec![&2, &4, &6]);
+              }
+          - name: "test_functor_identity_law"
+            code: |
+              #[test]
+              fn test_functor_identity_law() {
+                  let list: PersistentList<i32> = (1..=3).collect();
+                  let mapped = list.clone().fmap_mut(|x| x);
+                  assert_eq!(list, mapped);
+              }
+          - name: "test_functor_composition_law"
+            code: |
+              #[test]
+              fn test_functor_composition_law() {
+                  let list: PersistentList<i32> = (1..=3).collect();
+                  let function1 = |x: i32| x + 1;
+                  let function2 = |x: i32| x * 2;
+
+                  let left = list.clone().fmap_mut(function1).fmap_mut(function2);
+                  let right = list.fmap_mut(|x| function2(function1(x)));
+
+                  assert_eq!(left, right);
+              }
+      green_phase:
+        implementation: |
+          impl<T: Clone> Functor for PersistentList<T> {
+              fn fmap<B, F>(self, function: F) -> PersistentList<B>
+              where
+                  F: FnOnce(T) -> B,
+              {
+                  // FnOnce のため単一要素用
+                  if let Some(head) = self.head() {
+                      PersistentList::singleton(function(head.clone()))
+                  } else {
+                      PersistentList::new()
+                  }
+              }
+
+              fn fmap_ref<B, F>(&self, function: F) -> PersistentList<B>
+              where
+                  F: FnOnce(&T) -> B,
+              {
+                  if let Some(head) = self.head() {
+                      PersistentList::singleton(function(head))
+                  } else {
+                      PersistentList::new()
+                  }
+              }
+          }
+
+          impl<T: Clone> FunctorMut for PersistentList<T> {
+              fn fmap_mut<B, F>(self, mut function: F) -> PersistentList<B>
+              where
+                  F: FnMut(T) -> B,
+              {
+                  self.into_iter().map(|element| function(element)).collect()
+              }
+
+              fn fmap_ref_mut<B, F>(&self, mut function: F) -> PersistentList<B>
+              where
+                  F: FnMut(&T) -> B,
+              {
+                  self.iter().map(|element| function(element)).collect()
+              }
+          }
+
+    # --------------------------------------------------------------------------
+    # Cycle 15: Foldable 実装
+    # --------------------------------------------------------------------------
+    - cycle_number: 15
+      name: "Foldable トレイト実装"
+      red_phase:
+        tests:
+          - name: "test_fold_left"
+            code: |
+              #[test]
+              fn test_fold_left() {
+                  let list: PersistentList<i32> = (1..=5).collect();
+                  let sum = list.fold_left(0, |accumulator, element| accumulator + element);
+                  assert_eq!(sum, 15);
+              }
+          - name: "test_fold_right"
+            code: |
+              #[test]
+              fn test_fold_right() {
+                  let list: PersistentList<i32> = (1..=3).collect();
+                  let result = list.fold_right(String::new(), |element, accumulator| {
+                      format!("{}{}", element, accumulator)
+                  });
+                  assert_eq!(result, "123");
+              }
+          - name: "test_fold_map"
+            code: |
+              #[test]
+              fn test_fold_map() {
+                  use crate::typeclass::Sum;
+                  let list: PersistentList<i32> = (1..=5).collect();
+                  let sum: Sum<i32> = list.fold_map(Sum);
+                  assert_eq!(sum.0, 15);
+              }
+      green_phase:
+        implementation: |
+          impl<T: Clone> Foldable for PersistentList<T> {
+              fn fold_left<B, F>(self, init: B, function: F) -> B
+              where
+                  F: FnMut(B, T) -> B,
+              {
+                  self.into_iter().fold(init, function)
+              }
+
+              fn fold_right<B, F>(self, init: B, mut function: F) -> B
+              where
+                  F: FnMut(T, B) -> B,
+              {
+                  // reverse して fold_left
+                  self.reverse()
+                      .into_iter()
+                      .fold(init, |accumulator, element| function(element, accumulator))
+              }
+          }
+
+    # --------------------------------------------------------------------------
+    # Cycle 16: Monad 実装
+    # --------------------------------------------------------------------------
+    - cycle_number: 16
+      name: "Monad トレイト実装"
+      red_phase:
+        tests:
+          - name: "test_flat_map"
+            code: |
+              #[test]
+              fn test_flat_map() {
+                  let list: PersistentList<i32> = (1..=3).collect();
+                  let result: PersistentList<i32> = list.flat_map_mut(|x| {
+                      PersistentList::new().cons(x * 2).cons(x)
+                  });
+                  // [1, 2, 2, 4, 3, 6]
+                  let collected: Vec<i32> = result.into_iter().collect();
+                  assert_eq!(collected, vec![1, 2, 2, 4, 3, 6]);
+              }
+      green_phase:
+        implementation: |
+          impl<T: Clone> Monad for PersistentList<T> {
+              fn flat_map<B, F>(self, function: F) -> PersistentList<B>
+              where
+                  F: FnOnce(T) -> PersistentList<B>,
+              {
+                  // FnOnce のため単一要素用
+                  if let Some(head) = self.head() {
+                      function(head.clone())
+                  } else {
+                      PersistentList::new()
+                  }
+              }
+          }
+
+          // MonadVec 相当の実装
+          impl<T: Clone> PersistentList<T> {
+              pub fn flat_map_mut<B: Clone, F>(self, mut function: F) -> PersistentList<B>
+              where
+                  F: FnMut(T) -> PersistentList<B>,
+              {
+                  let mut result = PersistentList::new();
+                  for element in self.into_iter() {
+                      let mapped = function(element);
+                      result = result.append(&mapped);
+                  }
+                  result
+              }
+          }
+
+  property_based_tests:
+    - name: "Cons-Head Law"
+      description: "cons した要素は head で取得できる"
+      code: |
+        proptest! {
+            #[test]
+            fn prop_cons_head_law(elements in prop::collection::vec(any::<i32>(), 0..20), new_element: i32) {
+                let list: PersistentList<i32> = elements.into_iter().collect();
+                let with_element = list.cons(new_element);
+                prop_assert_eq!(with_element.head(), Some(&new_element));
+            }
+        }
+
+    - name: "Cons-Tail Law"
+      description: "cons したリストの tail は元のリスト"
+      code: |
+        proptest! {
+            #[test]
+            fn prop_cons_tail_law(elements in prop::collection::vec(any::<i32>(), 0..20), new_element: i32) {
+                let list: PersistentList<i32> = elements.into_iter().collect();
+                let with_element = list.clone().cons(new_element);
+                let tail = with_element.tail();
+                prop_assert_eq!(list, tail);
+            }
+        }
+
+    - name: "Length Law"
+      description: "cons は長さを 1 増やす"
+      code: |
+        proptest! {
+            #[test]
+            fn prop_length_law(elements in prop::collection::vec(any::<i32>(), 0..20), new_element: i32) {
+                let list: PersistentList<i32> = elements.into_iter().collect();
+                let original_length = list.len();
+                let with_element = list.cons(new_element);
+                prop_assert_eq!(with_element.len(), original_length + 1);
+            }
+        }
+
+    - name: "Reverse Involution Law"
+      description: "reverse を 2 回適用すると元に戻る"
+      code: |
+        proptest! {
+            #[test]
+            fn prop_reverse_involution(elements in prop::collection::vec(any::<i32>(), 0..20)) {
+                let list: PersistentList<i32> = elements.into_iter().collect();
+                let reversed_twice = list.clone().reverse().reverse();
+                prop_assert_eq!(list, reversed_twice);
+            }
+        }
+
+    - name: "Functor Identity Law"
+      description: "fmap(id) == id"
+      code: |
+        proptest! {
+            #[test]
+            fn prop_functor_identity(elements in prop::collection::vec(any::<i32>(), 0..20)) {
+                let list: PersistentList<i32> = elements.into_iter().collect();
+                let mapped = list.clone().fmap_mut(|x| x);
+                prop_assert_eq!(list, mapped);
+            }
+        }
+
+    - name: "Functor Composition Law"
+      description: "fmap(f).fmap(g) == fmap(g . f)"
+      code: |
+        proptest! {
+            #[test]
+            fn prop_functor_composition(elements in prop::collection::vec(any::<i32>(), 0..20)) {
+                let list: PersistentList<i32> = elements.into_iter().collect();
+                let function1 = |x: i32| x.saturating_add(1);
+                let function2 = |x: i32| x.saturating_mul(2);
+
+                let left = list.clone().fmap_mut(function1).fmap_mut(function2);
+                let right = list.fmap_mut(|x| function2(function1(x)));
+
+                prop_assert_eq!(left, right);
+            }
+        }
+
+    - name: "Uncons-Cons Law"
+      description: "uncons と cons は逆操作（非空リストの場合）"
+      code: |
+        proptest! {
+            #[test]
+            fn prop_uncons_cons_law(elements in prop::collection::vec(any::<i32>(), 1..20)) {
+                let list: PersistentList<i32> = elements.into_iter().collect();
+                if let Some((head, tail)) = list.uncons() {
+                    let reconstructed = tail.cons(head.clone());
+                    prop_assert_eq!(list, reconstructed);
+                }
+            }
+        }
+
+    - name: "Append Identity Law"
+      description: "空リストとの連結は恒等操作"
+      code: |
+        proptest! {
+            #[test]
+            fn prop_append_identity_law(elements in prop::collection::vec(any::<i32>(), 0..20)) {
+                let list: PersistentList<i32> = elements.into_iter().collect();
+                let empty: PersistentList<i32> = PersistentList::new();
+
+                // list.append(&empty) == list
+                let result1 = list.clone().append(&empty);
+                prop_assert_eq!(list.clone(), result1);
+
+                // empty.append(&list) == list
+                let result2 = empty.append(&list);
+                prop_assert_eq!(list, result2);
+            }
+        }
+
+    - name: "Append Associativity Law"
+      description: "(a.append(b)).append(c) == a.append(b.append(c))"
+      code: |
+        proptest! {
+            #[test]
+            fn prop_append_associativity(
+                elements_a in prop::collection::vec(any::<i32>(), 0..10),
+                elements_b in prop::collection::vec(any::<i32>(), 0..10),
+                elements_c in prop::collection::vec(any::<i32>(), 0..10)
+            ) {
+                let list_a: PersistentList<i32> = elements_a.into_iter().collect();
+                let list_b: PersistentList<i32> = elements_b.into_iter().collect();
+                let list_c: PersistentList<i32> = elements_c.into_iter().collect();
+
+                let left = list_a.clone().append(&list_b).append(&list_c);
+                let right = list_a.append(&list_b.append(&list_c));
+
+                prop_assert_eq!(left, right);
+            }
+        }
+
+# =============================================================================
+# Phase 4.2: PersistentVector<T> 実装計画
+# =============================================================================
+persistent_vector:
+  name: "PersistentVector<T>"
+  description: |
+    不変の動的配列。HAMT（Hash Array Mapped Trie）ベースで実装する。
+    Clojure の PersistentVector や Scala の Vector を参考にする。
+
+  internal_structure:
+    constants: |
+      ```rust
+      /// 分岐係数（2^5 = 32）
+      const BRANCHING_FACTOR: usize = 32;
+      /// 1 レベルあたりのビット数
+      const BITS_PER_LEVEL: usize = 5;
+      /// ビットマスク
+      const MASK: usize = BRANCHING_FACTOR - 1;
+      ```
+
+    node_definition: |
+      ```rust
+      use std::rc::Rc;
+
+      /// HAMT のノード
+      enum Node<T> {
+          /// 分岐ノード: 子ノードへの参照を持つ
+          Branch(Rc<[Option<Rc<Node<T>>>; BRANCHING_FACTOR]>),
+          /// 葉ノード: 実際の要素を持つ
+          Leaf(Rc<[T]>),
+      }
+
+      /// 永続ベクター
+      #[derive(Clone)]
+      pub struct PersistentVector<T> {
+          /// 要素数
+          length: usize,
+          /// 木の深さに基づくシフト量 ((depth - 1) * BITS_PER_LEVEL)
+          shift: usize,
+          /// ルートノード
+          root: Rc<Node<T>>,
+          /// 末尾バッファ（最大 32 要素）
+          tail: Rc<[T]>,
+      }
+      ```
+
+    notes:
+      - "tail バッファにより末尾への追加を高速化"
+      - "パスコピーにより更新時のコピーを最小化"
+      - "32 分岐のトライにより O(log32 N) のアクセス"
+
+  tdd_cycles:
+    # --------------------------------------------------------------------------
+    # Cycle 1: 基本構造と new()
+    # --------------------------------------------------------------------------
+    - cycle_number: 1
+      name: "空ベクターの作成"
+      red_phase:
+        tests:
+          - name: "test_new_creates_empty_vector"
+            code: |
+              #[test]
+              fn test_new_creates_empty_vector() {
+                  let vector: PersistentVector<i32> = PersistentVector::new();
+                  assert!(vector.is_empty());
+                  assert_eq!(vector.len(), 0);
+              }
+          - name: "test_get_on_empty_returns_none"
+            code: |
+              #[test]
+              fn test_get_on_empty_returns_none() {
+                  let vector: PersistentVector<i32> = PersistentVector::new();
+                  assert_eq!(vector.get(0), None);
+              }
+      green_phase:
+        implementation: |
+          impl<T> PersistentVector<T> {
+              pub fn new() -> Self {
+                  PersistentVector {
+                      length: 0,
+                      shift: BITS_PER_LEVEL,
+                      root: Rc::new(Node::Branch(Rc::new([const { None }; BRANCHING_FACTOR]))),
+                      tail: Rc::new([]),
+                  }
+              }
+
+              pub fn is_empty(&self) -> bool {
+                  self.length == 0
+              }
+
+              pub fn len(&self) -> usize {
+                  self.length
+              }
+
+              pub fn get(&self, index: usize) -> Option<&T> {
+                  if index >= self.length {
+                      return None;
+                  }
+                  self.get_internal(index)
+              }
+          }
+
+    # --------------------------------------------------------------------------
+    # Cycle 2: push_back（末尾追加）
+    # --------------------------------------------------------------------------
+    - cycle_number: 2
+      name: "push_back による末尾追加"
+      red_phase:
+        tests:
+          - name: "test_push_back_single"
+            code: |
+              #[test]
+              fn test_push_back_single() {
+                  let vector = PersistentVector::new().push_back(42);
+                  assert_eq!(vector.len(), 1);
+                  assert_eq!(vector.get(0), Some(&42));
+              }
+          - name: "test_push_back_multiple"
+            code: |
+              #[test]
+              fn test_push_back_multiple() {
+                  let vector = PersistentVector::new()
+                      .push_back(1)
+                      .push_back(2)
+                      .push_back(3);
+                  assert_eq!(vector.len(), 3);
+                  assert_eq!(vector.get(0), Some(&1));
+                  assert_eq!(vector.get(1), Some(&2));
+                  assert_eq!(vector.get(2), Some(&3));
+              }
+          - name: "test_push_back_does_not_modify_original"
+            code: |
+              #[test]
+              fn test_push_back_does_not_modify_original() {
+                  let vector1 = PersistentVector::new().push_back(1);
+                  let vector2 = vector1.push_back(2);
+
+                  assert_eq!(vector1.len(), 1);
+                  assert_eq!(vector2.len(), 2);
+              }
+      green_phase:
+        implementation: |
+          impl<T: Clone> PersistentVector<T> {
+              pub fn push_back(&self, element: T) -> Self {
+                  // tail に空きがある場合は tail に追加
+                  if self.tail.len() < BRANCHING_FACTOR {
+                      return self.push_back_tail(element);
+                  }
+                  // tail が満杯の場合は root に統合してから追加
+                  self.push_back_full_tail(element)
+              }
+          }
+
+    # --------------------------------------------------------------------------
+    # Cycle 3: get（ランダムアクセス）
+    # --------------------------------------------------------------------------
+    - cycle_number: 3
+      name: "get による高速ランダムアクセス"
+      red_phase:
+        tests:
+          - name: "test_get_within_tail"
+            code: |
+              #[test]
+              fn test_get_within_tail() {
+                  let vector: PersistentVector<i32> = (0..20).collect();
+                  for index in 0..20 {
+                      assert_eq!(vector.get(index), Some(&(index as i32)));
+                  }
+              }
+          - name: "test_get_beyond_tail"
+            code: |
+              #[test]
+              fn test_get_beyond_tail() {
+                  // 32 以上の要素で root ノードを使用
+                  let vector: PersistentVector<i32> = (0..100).collect();
+                  for index in 0..100 {
+                      assert_eq!(vector.get(index), Some(&(index as i32)));
+                  }
+              }
+          - name: "test_get_out_of_bounds"
+            code: |
+              #[test]
+              fn test_get_out_of_bounds() {
+                  let vector: PersistentVector<i32> = (0..10).collect();
+                  assert_eq!(vector.get(10), None);
+                  assert_eq!(vector.get(100), None);
+              }
+      green_phase:
+        implementation: |
+          impl<T> PersistentVector<T> {
+              fn get_internal(&self, index: usize) -> Option<&T> {
+                  let tail_offset = self.tail_offset();
+
+                  if index >= tail_offset {
+                      // tail 内の要素
+                      self.tail.get(index - tail_offset)
+                  } else {
+                      // root 内の要素
+                      self.get_from_root(index)
+                  }
+              }
+
+              fn tail_offset(&self) -> usize {
+                  if self.length < BRANCHING_FACTOR {
+                      0
+                  } else {
+                      ((self.length - 1) >> BITS_PER_LEVEL) << BITS_PER_LEVEL
+                  }
+              }
+
+              fn get_from_root(&self, index: usize) -> Option<&T> {
+                  let mut node = &self.root;
+                  let mut level = self.shift;
+
+                  while level > 0 {
+                      if let Node::Branch(children) = node.as_ref() {
+                          let child_index = (index >> level) & MASK;
+                          if let Some(child) = &children[child_index] {
+                              node = child;
+                              level -= BITS_PER_LEVEL;
+                          } else {
+                              return None;
+                          }
+                      } else {
+                          break;
+                      }
+                  }
+
+                  if let Node::Leaf(elements) = node.as_ref() {
+                      elements.get(index & MASK)
+                  } else {
+                      None
+                  }
+              }
+          }
+
+    # --------------------------------------------------------------------------
+    # Cycle 4-16: 残りの機能（省略形式）
+    # --------------------------------------------------------------------------
+    - cycle_number: 4
+      name: "update による要素更新"
+      description: "指定インデックスの要素を更新した新しいベクターを返す"
+
+    - cycle_number: 5
+      name: "pop_back による末尾削除"
+      description: "末尾要素と残りのベクターを返す"
+
+    - cycle_number: 6
+      name: "push_front による先頭追加"
+      description: "先頭に要素を追加した新しいベクターを返す。計算量 O(log32 N)"
+
+    - cycle_number: 7
+      name: "pop_front による先頭削除"
+      description: "先頭要素と残りのベクターを返す。計算量 O(log32 N)"
+
+    - cycle_number: 8
+      name: "first/last メソッド"
+      description: "先頭/末尾要素への参照を返す"
+
+    - cycle_number: 9
+      name: "iter イテレータ"
+      description: "要素を順に返すイテレータ"
+
+    - cycle_number: 10
+      name: "FromIterator トレイト"
+      description: "イテレータからベクターを構築"
+
+    - cycle_number: 11
+      name: "IntoIterator トレイト"
+      description: "ベクターを消費するイテレータ"
+
+    - cycle_number: 12
+      name: "append による連結"
+      description: "2つのベクターを連結"
+
+    - cycle_number: 13
+      name: "slice によるスライス"
+      description: "指定範囲のスライスを返す"
+
+    - cycle_number: 14
+      name: "PartialEq/Eq/Debug トレイト"
+      description: "標準トレイトの実装"
+
+    - cycle_number: 15
+      name: "TypeConstructor トレイト"
+      description: "HKT エミュレーション"
+
+    - cycle_number: 16
+      name: "Functor/FunctorMut トレイト"
+      description: "fmap による要素変換"
+
+    - cycle_number: 17
+      name: "Foldable トレイト"
+      description: "畳み込み操作"
+
+    - cycle_number: 18
+      name: "大量要素のパフォーマンステスト"
+      description: "10万要素での操作が1秒以内"
+
+  property_based_tests:
+    - name: "Get-Update Law"
+      description: "update した要素は get で取得できる"
+
+    - name: "Get-Update-Other Law"
+      description: "update は他のインデックスに影響しない"
+
+    - name: "Push-Pop Law"
+      description: "push_back と pop_back は逆操作"
+
+    - name: "Length Law"
+      description: "push_back は長さを 1 増やす"
+
+    - name: "Functor Laws"
+      description: "恒等律と合成律"
+
+# =============================================================================
+# Phase 4.3: PersistentHashMap<K, V> 実装計画
+# =============================================================================
+persistent_hashmap:
+  name: "PersistentHashMap<K, V>"
+  description: |
+    不変のハッシュマップ。CHAMP（Compressed Hash-Array Mapped Prefix-tree）
+    をベースに実装する。
+
+  api_notes:
+    borrow_pattern: |
+      get, remove, contains_key メソッドでは Borrow パターンを使用する:
+
+      ```rust
+      pub fn get<Q: ?Sized>(&self, key: &Q) -> Option<&V>
+      where
+          K: Borrow<Q>,
+          Q: Hash + Eq,
+      ```
+
+      これにより、HashMap<String, V> に対して &str で検索可能になる。
+
+  internal_structure:
+    node_definition: |
+      ```rust
+      use std::rc::Rc;
+      use std::hash::Hash;
+
+      /// CHAMP のノード
+      enum Node<K, V> {
+          /// 空ノード
+          Empty,
+          /// ビットマップノード
+          Bitmap {
+              /// データの存在を示すビットマップ
+              data_map: u32,
+              /// サブノードの存在を示すビットマップ
+              node_map: u32,
+              /// データとサブノードを格納する配列
+              content: Rc<[Entry<K, V>]>,
+          },
+          /// ハッシュ衝突ノード
+          Collision {
+              hash: u64,
+              entries: Rc<[(K, V)]>,
+          },
+      }
+
+      /// エントリ（データまたはサブノード）
+      enum Entry<K, V> {
+          Data(K, V),
+          Node(Rc<Node<K, V>>),
+      }
+
+      /// 永続ハッシュマップ
+      #[derive(Clone)]
+      pub struct PersistentHashMap<K, V> {
+          root: Rc<Node<K, V>>,
+          length: usize,
+      }
+      ```
+
+  tdd_cycles:
+    - cycle_number: 1
+      name: "空マップの作成"
+
+    - cycle_number: 2
+      name: "insert と get の基本操作"
+
+    - cycle_number: 3
+      name: "insert による上書き"
+
+    - cycle_number: 4
+      name: "remove による削除"
+
+    - cycle_number: 5
+      name: "contains_key による存在確認"
+
+    - cycle_number: 6
+      name: "ハッシュ衝突の処理"
+
+    - cycle_number: 7
+      name: "update による値の更新"
+
+    - cycle_number: 8
+      name: "merge による2つのマップの統合"
+
+    - cycle_number: 9
+      name: "keys/values/iter イテレータ"
+
+    - cycle_number: 10
+      name: "FromIterator トレイト"
+
+    - cycle_number: 11
+      name: "PartialEq/Eq/Debug トレイト"
+
+    - cycle_number: 12
+      name: "Foldable トレイト（値に対して）"
+
+  property_based_tests:
+    - name: "Get-Insert Law"
+      description: "insert したキー・値は get で取得できる"
+
+    - name: "Get-Insert-Other Law"
+      description: "insert は他のキーに影響しない"
+
+    - name: "Remove-Insert Law"
+      description: "insert 後に remove すると元に戻る"
+
+    - name: "Length Law"
+      description: "新しいキーの insert は長さを 1 増やす"
+
+# =============================================================================
+# Phase 4.4: PersistentHashSet<T> 実装計画
+# =============================================================================
+persistent_hashset:
+  name: "PersistentHashSet<T>"
+  description: |
+    不変のハッシュセット。PersistentHashMap<T, ()> のラッパーとして実装。
+
+  internal_structure:
+    definition: |
+      ```rust
+      #[derive(Clone)]
+      pub struct PersistentHashSet<T> {
+          inner: PersistentHashMap<T, ()>,
+      }
+      ```
+
+  tdd_cycles:
+    - cycle_number: 1
+      name: "空セットの作成"
+
+    - cycle_number: 2
+      name: "insert と contains の基本操作"
+
+    - cycle_number: 3
+      name: "remove による削除"
+
+    - cycle_number: 4
+      name: "union（和集合）"
+
+    - cycle_number: 5
+      name: "intersection（積集合）"
+
+    - cycle_number: 6
+      name: "difference（差集合）"
+
+    - cycle_number: 7
+      name: "symmetric_difference（対称差）"
+
+    - cycle_number: 8
+      name: "is_subset/is_superset/is_disjoint"
+
+    - cycle_number: 9
+      name: "iter イテレータ"
+
+    - cycle_number: 10
+      name: "FromIterator トレイト"
+
+    - cycle_number: 11
+      name: "PartialEq/Eq/Debug トレイト"
+
+    - cycle_number: 12
+      name: "Foldable トレイト"
+
+  property_based_tests:
+    - name: "Insert-Contains Law"
+      description: "insert した要素は contains で true を返す"
+
+    - name: "Remove-Contains Law"
+      description: "remove した要素は contains で false を返す"
+
+    - name: "Union Identity Law"
+      description: "空集合との和は恒等操作"
+
+    - name: "Intersection Identity Law"
+      description: "自身との積は恒等操作"
+
+    - name: "Difference Self Law"
+      description: "自身との差は空集合"
+
+# =============================================================================
+# Phase 4.5: PersistentTreeMap<K, V> 実装計画
+# =============================================================================
+persistent_treemap:
+  name: "PersistentTreeMap<K, V>"
+  description: |
+    不変の順序付きマップ。赤黒木をベースに実装する。
+
+  api_notes:
+    range_method: |
+      range メソッドでは RangeBounds トレイトを使用する:
+
+      ```rust
+      use std::ops::RangeBounds;
+
+      pub fn range<R>(&self, range: R) -> impl Iterator<Item = (&K, &V)>
+      where
+          R: RangeBounds<K>,
+      ```
+
+      これにより、以下のような柔軟な範囲指定が可能:
+      - map.range(2..5)       // 2 <= key < 5
+      - map.range(2..=5)      // 2 <= key <= 5
+      - map.range(..5)        // key < 5
+      - map.range(2..)        // key >= 2
+      - map.range(..)         // 全要素
+
+    borrow_pattern: |
+      get, remove メソッドでは Borrow パターンを使用する:
+
+      ```rust
+      pub fn get<Q: ?Sized>(&self, key: &Q) -> Option<&V>
+      where
+          K: Borrow<Q>,
+          Q: Ord,
+      ```
+
+  internal_structure:
+    node_definition: |
+      ```rust
+      use std::rc::Rc;
+
+      /// ノードの色
+      #[derive(Clone, Copy, PartialEq)]
+      enum Color {
+          Red,
+          Black,
+      }
+
+      /// 赤黒木のノード
+      struct Node<K, V> {
+          key: K,
+          value: V,
+          color: Color,
+          left: Option<Rc<Node<K, V>>>,
+          right: Option<Rc<Node<K, V>>>,
+      }
+
+      /// 永続順序付きマップ
+      #[derive(Clone)]
+      pub struct PersistentTreeMap<K, V> {
+          root: Option<Rc<Node<K, V>>>,
+          length: usize,
+      }
+      ```
+
+  tdd_cycles:
+    - cycle_number: 1
+      name: "空マップの作成"
+
+    - cycle_number: 2
+      name: "insert と get の基本操作"
+
+    - cycle_number: 3
+      name: "赤黒木の不変条件の検証"
+
+    - cycle_number: 4
+      name: "insert 後のバランシング"
+
+    - cycle_number: 5
+      name: "remove による削除"
+
+    - cycle_number: 6
+      name: "remove 後のバランシング"
+
+    - cycle_number: 7
+      name: "min_entry/max_entry"
+
+    - cycle_number: 8
+      name: "range による範囲クエリ"
+
+    - cycle_number: 9
+      name: "split による分割"
+
+    - cycle_number: 10
+      name: "iter イテレータ（キー順）"
+
+    - cycle_number: 11
+      name: "FromIterator トレイト"
+
+    - cycle_number: 12
+      name: "PartialEq/Eq/Debug トレイト"
+
+    - cycle_number: 13
+      name: "Foldable トレイト"
+
+  property_based_tests:
+    - name: "Red-Black Tree Invariants"
+      description: "赤黒木の5つの不変条件を検証"
+
+    - name: "Ordering Law"
+      description: "iter は常にキーの昇順で返す"
+
+    - name: "Min-Max Law"
+      description: "min_entry は最小キー、max_entry は最大キー"
+
+    - name: "Range Law"
+      description: "range は指定範囲内のすべてのエントリを返す"
+
+# =============================================================================
+# 型クラスとの統合方針
+# =============================================================================
+type_class_integration:
+  overview: |
+    永続データ構造は Phase 1 で実装した型クラスと統合する。
+    以下のトレイトを実装することで、統一的な API を提供する。
+
+  implementations:
+    - data_structure: "PersistentList<T>"
+      traits:
+        - trait: "TypeConstructor"
+          notes: "Inner = T, WithType<B> = PersistentList<B>"
+        - trait: "Functor"
+          notes: "FnOnce のため単一要素用"
+        - trait: "FunctorMut"
+          notes: "複数要素に対して fmap_mut を提供"
+        - trait: "Foldable"
+          notes: "fold_left, fold_right を実装"
+        - trait: "Monad"
+          notes: "flat_map を実装"
+
+    - data_structure: "PersistentVector<T>"
+      traits:
+        - trait: "TypeConstructor"
+          notes: "Inner = T, WithType<B> = PersistentVector<B>"
+        - trait: "Functor"
+          notes: "FnOnce のため単一要素用"
+        - trait: "FunctorMut"
+          notes: "複数要素に対して fmap_mut を提供"
+        - trait: "Foldable"
+          notes: "fold_left, fold_right を実装"
+
+    - data_structure: "PersistentHashMap<K, V>"
+      traits:
+        - trait: "Foldable"
+          notes: "値に対して Foldable として振る舞う"
+
+    - data_structure: "PersistentHashSet<T>"
+      traits:
+        - trait: "Foldable"
+          notes: "要素に対して Foldable として振る舞う"
+
+    - data_structure: "PersistentTreeMap<K, V>"
+      traits:
+        - trait: "Foldable"
+          notes: "値に対して Foldable として振る舞う（キー順）"
+
+  notes:
+    - |
+      PersistentHashMap と PersistentTreeMap は Functor としても実装可能だが、
+      キーの整合性を保つ必要があるため、値の変換のみをサポートする。
+    - |
+      Monad は PersistentList のみに実装。Vector や Map/Set は flat_map の
+      意味論が明確でないため、あえて実装しない。
+
+# =============================================================================
+# テスト戦略
+# =============================================================================
+testing_strategy:
+  unit_tests:
+    description: "各操作の正確性を検証"
+    coverage_target: "100%"
+    categories:
+      - category: "基本操作"
+        tests:
+          - "作成（new, singleton, from_iter）"
+          - "取得（get, head, tail, first, last）"
+          - "追加（cons, push_back, push_front, insert）"
+          - "削除（pop_back, pop_front, remove）"
+          - "更新（update）"
+
+      - category: "エッジケース"
+        tests:
+          - "空の構造"
+          - "単一要素"
+          - "大量要素（10,000以上）"
+          - "境界値（32の倍数など）"
+
+      - category: "永続性"
+        tests:
+          - "操作後も元のデータが変更されない"
+          - "構造的共有の検証"
+
+  property_based_tests:
+    description: "ランダムな入力で不変条件を検証"
+    framework: "proptest"
+    properties:
+      - "データ構造固有の法則（Cons-Head, Get-Update など）"
+      - "型クラス法則（Functor, Foldable, Monad）"
+      - "永続性（操作後も元が変更されない）"
+      - "構造的共有の正確性"
+
+  performance_tests:
+    description: "計算量が期待通りであることを検証"
+    benchmarks:
+      - name: "PersistentList"
+        tests:
+          - "cons: O(1)"
+          - "head/tail: O(1)"
+          - "get: O(n)"
+          - "append: O(n)"
+
+      - name: "PersistentVector"
+        tests:
+          - "get: O(log32 N)"
+          - "push_back: amortized O(1)"
+          - "update: O(log32 N)"
+
+      - name: "PersistentHashMap"
+        tests:
+          - "get: O(log32 N)"
+          - "insert: O(log32 N)"
+          - "remove: O(log32 N)"
+
+      - name: "PersistentTreeMap"
+        tests:
+          - "get: O(log N)"
+          - "insert: O(log N)"
+          - "remove: O(log N)"
+
+  integration_tests:
+    description: "型クラスとの統合を検証"
+    scenarios:
+      - "Functor による要素変換のチェーン"
+      - "Foldable による集約操作"
+      - "Monad による計算の合成（PersistentList）"
+      - "異なるデータ構造間の相互変換"
+
+# =============================================================================
+# 将来の拡張
+# =============================================================================
+future_extensions:
+  - name: "スレッドセーフ版"
+    description: |
+      Arc を使用したスレッドセーフ版の提供:
+      - ConcurrentPersistentList
+      - ConcurrentPersistentVector
+      - ConcurrentPersistentHashMap
+      - ConcurrentPersistentHashSet
+      - ConcurrentPersistentTreeMap
+
+  - name: "Transient（一時的可変版）"
+    description: |
+      バッチ更新のための一時的可変版:
+      - 更新中は可変として扱い、最後に永続版に変換
+      - Clojure の transient! / persistent! に相当
+
+  - name: "Index トレイト実装"
+    description: |
+      `vector[index]` 形式のアクセスをサポート:
+      - PersistentVector に Index<usize> を実装
+
+  - name: "PersistentTreeSet"
+    description: |
+      PersistentTreeMap<T, ()> のラッパー:
+      - 順序付きセット
+      - 範囲クエリのサポート
+
+# =============================================================================
+# 完了基準
+# =============================================================================
+completion_criteria:
+  - "すべてのデータ構造が要件定義通りに実装されている"
+  - "すべてのテストが成功している"
+  - "テストカバレッジが 100% である"
+  - "clippy の警告がない"
+  - "ドキュメントコメントが完備している"
+  - "型クラスとの統合テストが成功している"
+  - "パフォーマンステストが期待通りの計算量を示している"
+  - "#![forbid(unsafe_code)] ポリシーに準拠している"
+  - "略語を使用していない（URL, UUID, ULID 等を除く）"

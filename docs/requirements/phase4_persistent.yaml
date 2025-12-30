@@ -1,0 +1,1376 @@
+# Phase 4: 永続データ構造（Persistent Data Structures）要件定義
+#
+# 概要:
+#   不変更新を効率的に行える永続データ構造を実装する。
+#   構造的共有（Structural Sharing）により、更新時のコピーコストを最小化する。
+#
+# 設計方針:
+#   1. `#![forbid(unsafe_code)]` ポリシーに準拠
+#   2. Rc/Arc を用いた構造的共有を基本とする
+#   3. Phase 1 の型クラス（TypeConstructor, Functor, Foldable, Monad）との統合
+#   4. 標準ライブラリの API 設計を参考にしつつ、関数型スタイルに適した API を提供
+#
+# 参照:
+#   - CLAUDE.md の「3.8 不変の世界を標準で支える仕組み」セクション
+#   - CLAUDE.md の「4.1 永続データ構造・不変コレクションの標準」セクション
+#   - references/scala3/library/src/scala/collection/immutable/Vector.scala
+#   - references/scala3/library/src/scala/collection/immutable/HashMap.scala
+#   - references/scala3/library/src/scala/collection/immutable/HashSet.scala
+#   - references/scala3/library/src/scala/collection/immutable/List.scala
+#   - references/scala3/library/src/scala/collection/immutable/RedBlackTree.scala
+#   - Clojure PersistentVector, PersistentHashMap
+#   - "Ideal Hash Trees" (Bagwell 2001)
+#   - "Optimizing Hash-Array Mapped Tries for Fast and Lean Immutable Collections" (Steindorfer 2015)
+
+version: "1.0.0"
+phase: 4
+name: "Persistent Data Structures"
+description: |
+  永続データ構造（Persistent Data Structures）は、更新操作が元のデータを変更せず、
+  新しいバージョンを返す不変データ構造である。構造的共有により、更新時に
+  変更されない部分を共有することで、メモリ効率と時間効率を両立する。
+
+  このフェーズでは以下の永続データ構造を提供する:
+
+  - PersistentList<T>: 不変の単方向リスト（cons リスト）
+  - PersistentVector<T>: 不変の動的配列（HAMT ベース）
+  - PersistentHashMap<K, V>: 不変のハッシュマップ（CHAMP ベース）
+  - PersistentHashSet<T>: 不変のハッシュセット
+  - PersistentTreeMap<K, V>: 不変の順序付きマップ（赤黒木ベース）
+
+  これらは Rust が標準で提供していない「不変コレクション」の問題を解決し、
+  純粋関数型プログラミングのパターンを可能にする。
+
+# 永続データ構造の理論的背景
+theoretical_background:
+  persistent_data_structures:
+    description: |
+      永続データ構造は、Chris Okasaki の「Purely Functional Data Structures」(1998)
+      で体系化された概念である。
+
+      永続性の種類:
+      - Partial Persistence: 古いバージョンへの読み取りアクセス
+      - Full Persistence: 古いバージョンへの読み取り・更新アクセス
+      - Confluent Persistence: 異なるバージョンのマージ
+
+      本実装では Full Persistence を目指す。
+
+      キー概念:
+      - 構造的共有（Structural Sharing）: 変更されない部分を複数バージョンで共有
+      - Path Copying: 変更されるパスのみをコピー
+      - Fat Node: ノードに複数バージョンの情報を格納（本実装では使用しない）
+
+  structural_sharing:
+    description: |
+      構造的共有は、永続データ構造の効率性の核心である。
+
+      例: 単方向リスト [1, 2, 3] に 0 を先頭に追加
+      - 元のリスト: node(1) -> node(2) -> node(3) -> nil
+      - 新しいリスト: node(0) -> node(1) -> node(2) -> node(3) -> nil
+      - 共有: node(1), node(2), node(3) は両方のリストで共有される
+
+      Rust での実装:
+      - Rc<T> または Arc<T> を使用してノードを共有
+      - Clone はポインタのコピーのみ（O(1)）
+      - 参照カウントによる自動解放
+
+  hash_array_mapped_trie:
+    description: |
+      HAMT (Hash Array Mapped Trie) は、Phil Bagwell が提案した
+      効率的なハッシュテーブル実装である。
+
+      基本構造:
+      - ハッシュ値を 5 ビットずつ分割（32 分岐）
+      - 各レベルで 5 ビットを使用してインデックスを決定
+      - 最大 7 レベル（32^7 > 2^32）
+
+      計算量:
+      - 検索: O(log32 N) = O(log N)
+      - 挿入: O(log32 N) = O(log N)
+      - 削除: O(log32 N) = O(log N)
+
+      参考文献:
+      - "Ideal Hash Trees" (Bagwell 2001)
+
+  compressed_hash_array_mapped_prefix_tree:
+    description: |
+      CHAMP (Compressed Hash-Array Mapped Prefix-tree) は、
+      Michael Steindorfer が提案した HAMT の改良版である。
+
+      改良点:
+      - データとノードを同じ配列に格納
+      - ビットマップを使用してスパース配列を圧縮
+      - キャッシュ効率の向上
+      - メモリ使用量の削減
+
+      Scala 2.13+ の HashMap/HashSet で採用されている。
+
+      参考文献:
+      - "Optimizing Hash-Array Mapped Tries for Fast and Lean Immutable Collections"
+        (Steindorfer, Vinju 2015)
+        https://michael.steindorfer.name/publications/oopsla15.pdf
+
+  red_black_tree:
+    description: |
+      赤黒木は、平衡二分探索木の一種で、以下の性質を満たす:
+
+      1. すべてのノードは赤か黒
+      2. ルートは黒
+      3. すべての葉（NIL）は黒
+      4. 赤ノードの子は黒
+      5. 任意のノードから子孫の葉への全パスで黒ノード数は同じ
+
+      計算量:
+      - 検索: O(log N)
+      - 挿入: O(log N)
+      - 削除: O(log N)
+
+      永続版の実装:
+      - パスコピーによる更新
+      - バランシング操作も永続的に実行
+
+# 共通設計原則
+design_principles:
+  structural_sharing_with_rc:
+    description: |
+      Rc<T> を使用した構造的共有の実装パターン:
+
+      ```rust
+      use std::rc::Rc;
+
+      // ノードの定義
+      enum Node<T> {
+          Empty,
+          Leaf(T),
+          Branch {
+              children: Rc<[Option<Rc<Node<T>>>; 32]>,
+          },
+      }
+
+      impl<T: Clone> Node<T> {
+          // パスコピーによる更新
+          fn update(&self, index: usize, value: T) -> Node<T> {
+              match self {
+                  Node::Branch { children } => {
+                      let mut new_children = children.as_ref().clone();
+                      // 必要な子ノードのみを更新
+                      new_children[index] = Some(Rc::new(/* ... */));
+                      Node::Branch {
+                          children: Rc::new(new_children),
+                      }
+                  }
+                  // ...
+              }
+          }
+      }
+      ```
+
+  type_class_integration:
+    description: |
+      Phase 1 の型クラスとの統合方針:
+
+      - TypeConstructor: 型コンストラクタとして実装
+      - Functor: fmap による要素の変換
+      - FunctorMut: 複数要素を持つ構造で FnMut を使用
+      - Foldable: fold_left, fold_right による畳み込み
+      - Monad: flat_map（該当する構造のみ）
+
+      注意: PersistentHashMap や PersistentTreeMap は Functor だが、
+      Monad ではない（キーの整合性を保つ必要があるため）。
+
+  api_design:
+    description: |
+      API 設計の方針:
+
+      1. メソッドチェーン可能な設計
+         ```rust
+         let map = PersistentHashMap::new()
+             .insert("key1", "value1")
+             .insert("key2", "value2")
+             .remove("key1");
+         ```
+
+      2. イテレータとの互換性
+         ```rust
+         let collected: PersistentVector<i32> =
+             (0..100).collect();
+         ```
+
+      3. From/Into トレイトの実装
+         ```rust
+         let vector: PersistentVector<i32> = vec![1, 2, 3].into();
+         let list: PersistentList<i32> = [1, 2, 3].into();
+         ```
+
+      4. 標準ライブラリの命名規則に準拠
+         - get, insert, remove, contains
+         - len, is_empty
+         - iter, keys, values
+
+requirements:
+  # ============================================================================
+  # 1. PersistentList<T> - 不変の単方向リスト
+  # ============================================================================
+  - id: persistent_list
+    name: PersistentList<T>
+    priority: high
+    description: |
+      不変の単方向リスト（cons リスト）。Lisp/Scheme の基本データ構造を
+      Rust で再現する。最もシンプルな永続データ構造であり、
+      構造的共有の基本を学ぶのに適している。
+
+      特徴:
+      - 先頭への追加（cons）: O(1)
+      - 先頭の取得（head）: O(1)
+      - 末尾の取得（tail）: O(1)
+      - 長さの取得: O(n) または O(1)（キャッシュする場合）
+      - インデックスアクセス: O(n)
+      - 末尾への追加: O(n)
+
+      構造的共有:
+      - tail は常に共有される
+      - cons は新しいノードを1つ作成するだけ
+
+    internal_structure:
+      description: |
+        ```rust
+        use std::rc::Rc;
+
+        #[derive(Clone)]
+        pub struct PersistentList<T> {
+            head: Option<Rc<Node<T>>>,
+            length: usize,
+        }
+
+        struct Node<T> {
+            element: T,
+            next: Option<Rc<Node<T>>>,
+        }
+        ```
+
+        空リストは head: None で表現。
+        非空リストは head: Some(Rc<Node<T>>) で表現。
+
+    api:
+      constructors:
+        - name: new
+          signature: "fn new() -> Self"
+          description: "空のリストを作成"
+          complexity: "O(1)"
+          example: |
+            let empty: PersistentList<i32> = PersistentList::new();
+            assert!(empty.is_empty());
+
+        - name: singleton
+          signature: "fn singleton(element: T) -> Self"
+          description: "単一要素のリストを作成"
+          complexity: "O(1)"
+          example: |
+            let single = PersistentList::singleton(42);
+            assert_eq!(single.head(), Some(&42));
+
+        - name: from_iter
+          signature: "fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self"
+          description: "イテレータからリストを作成"
+          complexity: "O(n)"
+          example: |
+            let list: PersistentList<i32> = (1..=5).collect();
+            assert_eq!(list.len(), 5);
+
+      operations:
+        - name: cons
+          signature: "fn cons(&self, element: T) -> Self"
+          description: "先頭に要素を追加した新しいリストを返す"
+          complexity: "O(1)"
+          example: |
+            let list = PersistentList::new().cons(3).cons(2).cons(1);
+            // list: [1, 2, 3]
+            assert_eq!(list.head(), Some(&1));
+
+        - name: head
+          signature: "fn head(&self) -> Option<&T>"
+          description: "先頭要素への参照を返す"
+          complexity: "O(1)"
+          example: |
+            let list = PersistentList::from_iter([1, 2, 3]);
+            assert_eq!(list.head(), Some(&1));
+
+        - name: tail
+          signature: "fn tail(&self) -> Self"
+          description: "先頭を除いたリストを返す（空リストの場合は空リスト）"
+          complexity: "O(1)"
+          example: |
+            let list = PersistentList::from_iter([1, 2, 3]);
+            let rest = list.tail();
+            assert_eq!(rest.head(), Some(&2));
+
+        - name: uncons
+          signature: "fn uncons(&self) -> Option<(&T, Self)>"
+          description: "先頭要素と残りのリストをタプルで返す"
+          complexity: "O(1)"
+          example: |
+            let list = PersistentList::from_iter([1, 2, 3]);
+            if let Some((head, tail)) = list.uncons() {
+                assert_eq!(*head, 1);
+                assert_eq!(tail.head(), Some(&2));
+            }
+
+        - name: append
+          signature: "fn append(&self, other: &Self) -> Self"
+          description: "2つのリストを連結した新しいリストを返す"
+          complexity: "O(n) where n = self.len()"
+          example: |
+            let list1 = PersistentList::from_iter([1, 2]);
+            let list2 = PersistentList::from_iter([3, 4]);
+            let combined = list1.append(&list2);
+            // combined: [1, 2, 3, 4]
+
+        - name: reverse
+          signature: "fn reverse(&self) -> Self"
+          description: "逆順のリストを返す"
+          complexity: "O(n)"
+          example: |
+            let list = PersistentList::from_iter([1, 2, 3]);
+            let reversed = list.reverse();
+            // reversed: [3, 2, 1]
+
+        - name: get
+          signature: "fn get(&self, index: usize) -> Option<&T>"
+          description: "指定インデックスの要素への参照を返す"
+          complexity: "O(n)"
+          example: |
+            let list = PersistentList::from_iter([1, 2, 3]);
+            assert_eq!(list.get(1), Some(&2));
+            assert_eq!(list.get(10), None);
+
+        - name: len
+          signature: "fn len(&self) -> usize"
+          description: "リストの長さを返す"
+          complexity: "O(1)"
+          example: |
+            let list = PersistentList::from_iter([1, 2, 3]);
+            assert_eq!(list.len(), 3);
+
+        - name: is_empty
+          signature: "fn is_empty(&self) -> bool"
+          description: "リストが空かどうかを返す"
+          complexity: "O(1)"
+          example: |
+            let empty: PersistentList<i32> = PersistentList::new();
+            assert!(empty.is_empty());
+
+        - name: iter
+          signature: "fn iter(&self) -> impl Iterator<Item = &T>"
+          description: "要素を順に返すイテレータ"
+          complexity: "O(1) to create, O(n) to consume"
+          example: |
+            let list = PersistentList::from_iter([1, 2, 3]);
+            let sum: i32 = list.iter().sum();
+            assert_eq!(sum, 6);
+
+    laws:
+      - name: Cons-Head Law
+        description: "cons した要素は head で取得できる"
+        equation: "list.cons(x).head() == Some(&x)"
+
+      - name: Cons-Tail Law
+        description: "cons したリストの tail は元のリスト"
+        equation: "list.cons(x).tail() == list"
+
+      - name: Uncons-Cons Law
+        description: "uncons と cons は逆操作"
+        equation: "list.uncons().map(|(h, t)| t.cons(h.clone())) == Some(list)"
+
+      - name: Length Law
+        description: "cons は長さを1増やす"
+        equation: "list.cons(x).len() == list.len() + 1"
+
+      - name: Append Identity Law
+        description: "空リストとの連結は恒等操作"
+        equation: |
+          list.append(&PersistentList::new()) == list
+          PersistentList::new().append(&list) == list
+
+      - name: Reverse Involution Law
+        description: "reverse を2回適用すると元に戻る"
+        equation: "list.reverse().reverse() == list"
+
+    type_class_implementations:
+      - trait: TypeConstructor
+        implementation: |
+          impl<T> TypeConstructor for PersistentList<T> {
+              type Inner = T;
+              type WithType<U> = PersistentList<U>;
+          }
+
+      - trait: Functor
+        implementation: |
+          impl<T> Functor for PersistentList<T> {
+              fn fmap<B, F>(self, function: F) -> PersistentList<B>
+              where
+                  F: FnOnce(T) -> B,
+              {
+                  // FnOnce のため単一要素用
+                  // 実際には FunctorMut::fmap_mut を使用
+              }
+          }
+
+      - trait: FunctorMut
+        implementation: |
+          impl<T> FunctorMut for PersistentList<T> {
+              fn fmap_mut<B, F>(self, function: F) -> PersistentList<B>
+              where
+                  F: FnMut(T) -> B,
+              {
+                  self.iter().cloned().map(function).collect()
+              }
+          }
+
+      - trait: Foldable
+        implementation: |
+          impl<T> Foldable for PersistentList<T> {
+              fn fold_left<B, F>(self, init: B, function: F) -> B
+              where
+                  F: FnMut(B, T) -> B,
+              {
+                  self.into_iter().fold(init, function)
+              }
+
+              fn fold_right<B, F>(self, init: B, mut function: F) -> B
+              where
+                  F: FnMut(T, B) -> B,
+              {
+                  // reverse して fold するか、再帰で実装
+                  self.reverse().into_iter().fold(init, |acc, x| function(x, acc))
+              }
+          }
+
+      - trait: Monad
+        implementation: |
+          impl<T> Monad for PersistentList<T> {
+              fn flat_map<B, F>(self, function: F) -> PersistentList<B>
+              where
+                  F: FnMut(T) -> PersistentList<B>,
+              {
+                  // 各要素に function を適用し、結果を連結
+              }
+          }
+
+    tests:
+      - category: "基本操作テスト"
+        cases:
+          - name: "空リストの作成"
+            test: |
+              let empty: PersistentList<i32> = PersistentList::new();
+              assert!(empty.is_empty());
+              assert_eq!(empty.len(), 0);
+              assert_eq!(empty.head(), None);
+
+          - name: "cons による要素追加"
+            test: |
+              let list = PersistentList::new().cons(3).cons(2).cons(1);
+              assert_eq!(list.len(), 3);
+              assert_eq!(list.head(), Some(&1));
+
+          - name: "tail による分解"
+            test: |
+              let list = PersistentList::from_iter([1, 2, 3]);
+              let tail1 = list.tail();
+              let tail2 = tail1.tail();
+              assert_eq!(tail1.head(), Some(&2));
+              assert_eq!(tail2.head(), Some(&3));
+
+          - name: "構造的共有の検証"
+            test: |
+              let list1 = PersistentList::from_iter([1, 2, 3]);
+              let list2 = list1.cons(0);
+              // list1 と list2 の [1, 2, 3] 部分は共有される
+              // Rc::ptr_eq で検証可能
+
+      - category: "Functor 法則テスト"
+        cases:
+          - name: "恒等律"
+            test: |
+              let list = PersistentList::from_iter([1, 2, 3]);
+              let mapped = list.clone().fmap_mut(|x| x);
+              assert_eq!(list, mapped);
+
+          - name: "合成律"
+            test: |
+              let list = PersistentList::from_iter([1, 2, 3]);
+              let f = |x: i32| x + 1;
+              let g = |x: i32| x * 2;
+              let left = list.clone().fmap_mut(f).fmap_mut(g);
+              let right = list.fmap_mut(|x| g(f(x)));
+              assert_eq!(left, right);
+
+      - category: "プロパティベーステスト"
+        cases:
+          - name: "cons-tail は恒等操作"
+            property: |
+              proptest! {
+                  fn prop_cons_tail_identity(list: PersistentList<i32>, element: i32) {
+                      let with_element = list.clone().cons(element);
+                      let without = with_element.tail();
+                      prop_assert_eq!(without, list);
+                  }
+              }
+
+          - name: "reverse は involution"
+            property: |
+              proptest! {
+                  fn prop_reverse_involution(list: PersistentList<i32>) {
+                      let reversed_twice = list.clone().reverse().reverse();
+                      prop_assert_eq!(reversed_twice, list);
+                  }
+              }
+
+  # ============================================================================
+  # 2. PersistentVector<T> - 不変の動的配列
+  # ============================================================================
+  - id: persistent_vector
+    name: PersistentVector<T>
+    priority: critical
+    description: |
+      不変の動的配列。Clojure の PersistentVector や Scala の Vector を参考に、
+      HAMT（Hash Array Mapped Trie）ベースで実装する。
+
+      特徴:
+      - ランダムアクセス: O(log32 N)（実質 O(1) に近い）
+      - 先頭/末尾への追加: O(log32 N)（攤化 O(1)）
+      - 更新: O(log32 N)
+      - スライス: O(log32 N)
+
+      内部構造:
+      - 32 分岐のトライ構造（Radix Balanced Tree）
+      - 各レベルで 5 ビット（0-31）を使用
+      - 最大 7 レベルで約 10 億要素を格納可能
+
+    internal_structure:
+      description: |
+        ```rust
+        use std::rc::Rc;
+
+        const BRANCHING_FACTOR: usize = 32;
+        const BITS_PER_LEVEL: usize = 5;
+        const MASK: usize = BRANCHING_FACTOR - 1;
+
+        #[derive(Clone)]
+        pub struct PersistentVector<T> {
+            length: usize,
+            shift: usize,  // (depth - 1) * BITS_PER_LEVEL
+            root: Rc<Node<T>>,
+            tail: Rc<[T]>,  // 末尾の最大 32 要素
+        }
+
+        enum Node<T> {
+            Branch(Rc<[Option<Rc<Node<T>>>; BRANCHING_FACTOR]>),
+            Leaf(Rc<[T]>),
+        }
+        ```
+
+        Tail の最適化:
+        - 末尾 32 要素は別途保持（tail）
+        - 末尾への追加は tail に直接追加（O(1)）
+        - tail が満杯になったら root に統合
+
+    api:
+      constructors:
+        - name: new
+          signature: "fn new() -> Self"
+          description: "空のベクターを作成"
+          complexity: "O(1)"
+
+        - name: from_iter
+          signature: "fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self"
+          description: "イテレータからベクターを作成"
+          complexity: "O(n)"
+
+      operations:
+        - name: get
+          signature: "fn get(&self, index: usize) -> Option<&T>"
+          description: "指定インデックスの要素への参照を返す"
+          complexity: "O(log32 N)"
+          example: |
+            let vector = PersistentVector::from_iter(0..100);
+            assert_eq!(vector.get(50), Some(&50));
+
+        - name: push_back
+          signature: "fn push_back(&self, element: T) -> Self"
+          description: "末尾に要素を追加した新しいベクターを返す"
+          complexity: "O(log32 N) amortized O(1)"
+          example: |
+            let vector = PersistentVector::from_iter([1, 2, 3]);
+            let extended = vector.push_back(4);
+            assert_eq!(extended.get(3), Some(&4));
+
+        - name: push_front
+          signature: "fn push_front(&self, element: T) -> Self"
+          description: "先頭に要素を追加した新しいベクターを返す"
+          complexity: "O(log32 N)"
+
+        - name: pop_back
+          signature: "fn pop_back(&self) -> Option<(T, Self)>"
+          description: "末尾要素と残りのベクターを返す"
+          complexity: "O(log32 N)"
+
+        - name: pop_front
+          signature: "fn pop_front(&self) -> Option<(T, Self)>"
+          description: "先頭要素と残りのベクターを返す"
+          complexity: "O(log32 N)"
+
+        - name: update
+          signature: "fn update(&self, index: usize, element: T) -> Option<Self>"
+          description: "指定インデックスの要素を更新した新しいベクターを返す"
+          complexity: "O(log32 N)"
+          example: |
+            let vector = PersistentVector::from_iter([1, 2, 3]);
+            let updated = vector.update(1, 10).unwrap();
+            assert_eq!(updated.get(1), Some(&10));
+            // 元のベクターは変更されない
+            assert_eq!(vector.get(1), Some(&2));
+
+        - name: slice
+          signature: "fn slice(&self, start: usize, end: usize) -> Self"
+          description: "指定範囲のスライスを新しいベクターとして返す"
+          complexity: "O(log32 N)"
+
+        - name: append
+          signature: "fn append(&self, other: &Self) -> Self"
+          description: "2つのベクターを連結した新しいベクターを返す"
+          complexity: "O(log32 N)"
+
+        - name: len
+          signature: "fn len(&self) -> usize"
+          description: "ベクターの長さを返す"
+          complexity: "O(1)"
+
+        - name: is_empty
+          signature: "fn is_empty(&self) -> bool"
+          description: "ベクターが空かどうかを返す"
+          complexity: "O(1)"
+
+        - name: first
+          signature: "fn first(&self) -> Option<&T>"
+          description: "先頭要素への参照を返す"
+          complexity: "O(log32 N)"
+
+        - name: last
+          signature: "fn last(&self) -> Option<&T>"
+          description: "末尾要素への参照を返す"
+          complexity: "O(1)"
+
+        - name: iter
+          signature: "fn iter(&self) -> impl Iterator<Item = &T>"
+          description: "要素を順に返すイテレータ"
+          complexity: "O(1) to create, O(n) to consume"
+
+    laws:
+      - name: Get-Update Law
+        description: "update した要素は get で取得できる"
+        equation: "vector.update(i, x).get(i) == Some(&x)"
+
+      - name: Get-Update-Other Law
+        description: "update は他のインデックスに影響しない"
+        equation: "i != j => vector.update(i, x).get(j) == vector.get(j)"
+
+      - name: Push-Pop Law
+        description: "push_back と pop_back は逆操作"
+        equation: "vector.push_back(x).pop_back() == Some((x, vector))"
+
+      - name: Length Law
+        description: "push_back は長さを1増やす"
+        equation: "vector.push_back(x).len() == vector.len() + 1"
+
+      - name: Append Identity Law
+        description: "空ベクターとの連結は恒等操作"
+        equation: |
+          vector.append(&PersistentVector::new()) == vector
+          PersistentVector::new().append(&vector) == vector
+
+    type_class_implementations:
+      - trait: TypeConstructor
+        implementation: |
+          impl<T> TypeConstructor for PersistentVector<T> {
+              type Inner = T;
+              type WithType<U> = PersistentVector<U>;
+          }
+
+      - trait: FunctorMut
+        implementation: |
+          impl<T> FunctorMut for PersistentVector<T> {
+              fn fmap_mut<B, F>(self, function: F) -> PersistentVector<B>
+              where
+                  F: FnMut(T) -> B,
+              {
+                  self.into_iter().map(function).collect()
+              }
+          }
+
+      - trait: Foldable
+        implementation: |
+          impl<T> Foldable for PersistentVector<T> {
+              fn fold_left<B, F>(self, init: B, function: F) -> B
+              where
+                  F: FnMut(B, T) -> B,
+              {
+                  self.into_iter().fold(init, function)
+              }
+          }
+
+    tests:
+      - category: "基本操作テスト"
+        cases:
+          - name: "空ベクターの作成"
+            test: |
+              let empty: PersistentVector<i32> = PersistentVector::new();
+              assert!(empty.is_empty());
+              assert_eq!(empty.len(), 0);
+
+          - name: "push_back による要素追加"
+            test: |
+              let vector = PersistentVector::new()
+                  .push_back(1)
+                  .push_back(2)
+                  .push_back(3);
+              assert_eq!(vector.len(), 3);
+              assert_eq!(vector.get(0), Some(&1));
+              assert_eq!(vector.get(2), Some(&3));
+
+          - name: "大量要素のランダムアクセス"
+            test: |
+              let vector: PersistentVector<i32> = (0..10000).collect();
+              for i in 0..10000 {
+                  assert_eq!(vector.get(i), Some(&(i as i32)));
+              }
+
+          - name: "update による更新"
+            test: |
+              let original = PersistentVector::from_iter([1, 2, 3, 4, 5]);
+              let updated = original.update(2, 100).unwrap();
+
+              // 元のベクターは変更されない
+              assert_eq!(original.get(2), Some(&3));
+              // 新しいベクターは更新されている
+              assert_eq!(updated.get(2), Some(&100));
+
+      - category: "性能テスト"
+        cases:
+          - name: "10万要素の追加"
+            test: |
+              let start = std::time::Instant::now();
+              let mut vector = PersistentVector::new();
+              for i in 0..100_000 {
+                  vector = vector.push_back(i);
+              }
+              let duration = start.elapsed();
+              assert!(duration.as_millis() < 1000, "Should complete in under 1 second");
+
+          - name: "構造的共有による効率性"
+            test: |
+              let original: PersistentVector<i32> = (0..1000).collect();
+              let versions: Vec<_> = (0..1000)
+                  .map(|i| original.update(i, i * 2).unwrap())
+                  .collect();
+              // 1000 個のバージョンが存在しても、大部分は共有される
+
+  # ============================================================================
+  # 3. PersistentHashMap<K, V> - 不変のハッシュマップ
+  # ============================================================================
+  - id: persistent_hashmap
+    name: PersistentHashMap<K, V>
+    priority: critical
+    description: |
+      不変のハッシュマップ。Scala 2.13+ で採用された CHAMP (Compressed Hash-Array
+      Mapped Prefix-tree) をベースに実装する。
+
+      特徴:
+      - 検索: O(log32 N)（実質 O(1) に近い）
+      - 挿入: O(log32 N)
+      - 削除: O(log32 N)
+      - メモリ効率が良い（ビットマップによる圧縮）
+
+    internal_structure:
+      description: |
+        ```rust
+        use std::rc::Rc;
+        use std::hash::Hash;
+
+        const HASH_BITS: usize = 32;
+        const BITS_PER_LEVEL: usize = 5;
+        const BRANCHING_FACTOR: usize = 32;
+
+        #[derive(Clone)]
+        pub struct PersistentHashMap<K, V> {
+            root: Rc<Node<K, V>>,
+            length: usize,
+        }
+
+        enum Node<K, V> {
+            Empty,
+            Bitmap {
+                // データとサブノードの存在を示すビットマップ
+                data_map: u32,
+                node_map: u32,
+                // データ（キー・値ペア）とサブノードを格納
+                content: Rc<[Entry<K, V>]>,
+            },
+            Collision {
+                // 同じハッシュ値を持つキー・値ペアのリスト
+                hash: u64,
+                entries: Rc<[(K, V)]>,
+            },
+        }
+
+        enum Entry<K, V> {
+            Data(K, V),
+            Node(Rc<Node<K, V>>),
+        }
+        ```
+
+        CHAMP の特徴:
+        - data_map: 各ビット位置にデータがあるかを示す
+        - node_map: 各ビット位置にサブノードがあるかを示す
+        - content 配列はスパースで、必要な分だけ確保
+
+    api:
+      constructors:
+        - name: new
+          signature: "fn new() -> Self"
+          description: "空のマップを作成"
+          complexity: "O(1)"
+
+        - name: from_iter
+          signature: "fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self"
+          description: "イテレータからマップを作成"
+          complexity: "O(n)"
+
+      operations:
+        - name: get
+          signature: "fn get<Q: ?Sized>(&self, key: &Q) -> Option<&V> where K: Borrow<Q>, Q: Hash + Eq"
+          description: "キーに対応する値への参照を返す"
+          complexity: "O(log32 N)"
+          example: |
+            let map = PersistentHashMap::new()
+                .insert("key", "value");
+            assert_eq!(map.get("key"), Some(&"value"));
+
+        - name: insert
+          signature: "fn insert(&self, key: K, value: V) -> Self"
+          description: "キー・値ペアを追加した新しいマップを返す"
+          complexity: "O(log32 N)"
+          example: |
+            let map1 = PersistentHashMap::new().insert("a", 1);
+            let map2 = map1.insert("b", 2);
+            assert_eq!(map1.get("b"), None);  // 元は変更されない
+            assert_eq!(map2.get("b"), Some(&2));
+
+        - name: remove
+          signature: "fn remove<Q: ?Sized>(&self, key: &Q) -> Self where K: Borrow<Q>, Q: Hash + Eq"
+          description: "キーを削除した新しいマップを返す"
+          complexity: "O(log32 N)"
+
+        - name: contains_key
+          signature: "fn contains_key<Q: ?Sized>(&self, key: &Q) -> bool where K: Borrow<Q>, Q: Hash + Eq"
+          description: "キーが存在するかを返す"
+          complexity: "O(log32 N)"
+
+        - name: update
+          signature: "fn update<F>(&self, key: K, updater: F) -> Self where F: FnOnce(Option<&V>) -> Option<V>"
+          description: "キーに対応する値を更新関数で更新した新しいマップを返す"
+          complexity: "O(log32 N)"
+          example: |
+            let map = PersistentHashMap::new().insert("count", 0);
+            let updated = map.update("count", |opt| opt.map(|n| n + 1));
+            assert_eq!(updated.get("count"), Some(&1));
+
+        - name: merge
+          signature: "fn merge(&self, other: &Self) -> Self"
+          description: "2つのマップをマージした新しいマップを返す（キー重複時は other を優先）"
+          complexity: "O(n + m)"
+
+        - name: len
+          signature: "fn len(&self) -> usize"
+          description: "マップのエントリ数を返す"
+          complexity: "O(1)"
+
+        - name: is_empty
+          signature: "fn is_empty(&self) -> bool"
+          description: "マップが空かどうかを返す"
+          complexity: "O(1)"
+
+        - name: keys
+          signature: "fn keys(&self) -> impl Iterator<Item = &K>"
+          description: "キーのイテレータを返す"
+          complexity: "O(1) to create, O(n) to consume"
+
+        - name: values
+          signature: "fn values(&self) -> impl Iterator<Item = &V>"
+          description: "値のイテレータを返す"
+          complexity: "O(1) to create, O(n) to consume"
+
+        - name: iter
+          signature: "fn iter(&self) -> impl Iterator<Item = (&K, &V)>"
+          description: "キー・値ペアのイテレータを返す"
+          complexity: "O(1) to create, O(n) to consume"
+
+    laws:
+      - name: Get-Insert Law
+        description: "insert したキー・値は get で取得できる"
+        equation: "map.insert(k, v).get(&k) == Some(&v)"
+
+      - name: Get-Insert-Other Law
+        description: "insert は他のキーに影響しない"
+        equation: "k1 != k2 => map.insert(k1, v).get(&k2) == map.get(&k2)"
+
+      - name: Remove-Insert Law
+        description: "insert 後に remove すると元に戻る（キーが存在しなかった場合）"
+        equation: "!map.contains_key(&k) => map.insert(k, v).remove(&k) == map"
+
+      - name: Length Law
+        description: "新しいキーの insert は長さを1増やす"
+        equation: "!map.contains_key(&k) => map.insert(k, v).len() == map.len() + 1"
+
+    type_class_implementations:
+      - trait: Foldable
+        note: "Map は値に対して Foldable"
+        implementation: |
+          // PersistentHashMap は値に対して Foldable として振る舞う
+          // Functor も実装可能だが、キーは変更できない
+
+    tests:
+      - category: "基本操作テスト"
+        cases:
+          - name: "空マップの作成"
+            test: |
+              let empty: PersistentHashMap<String, i32> = PersistentHashMap::new();
+              assert!(empty.is_empty());
+              assert_eq!(empty.len(), 0);
+
+          - name: "insert と get"
+            test: |
+              let map = PersistentHashMap::new()
+                  .insert("one", 1)
+                  .insert("two", 2)
+                  .insert("three", 3);
+              assert_eq!(map.get("one"), Some(&1));
+              assert_eq!(map.get("two"), Some(&2));
+              assert_eq!(map.get("three"), Some(&3));
+              assert_eq!(map.get("four"), None);
+
+          - name: "insert による上書き"
+            test: |
+              let map1 = PersistentHashMap::new().insert("key", 1);
+              let map2 = map1.insert("key", 2);
+              assert_eq!(map1.get("key"), Some(&1));  // 元は変更されない
+              assert_eq!(map2.get("key"), Some(&2));
+
+          - name: "remove"
+            test: |
+              let map = PersistentHashMap::new()
+                  .insert("a", 1)
+                  .insert("b", 2);
+              let removed = map.remove("a");
+              assert_eq!(removed.get("a"), None);
+              assert_eq!(removed.get("b"), Some(&2));
+
+      - category: "ハッシュ衝突テスト"
+        cases:
+          - name: "同一ハッシュ値のキー"
+            test: |
+              // ハッシュ衝突を起こすキーを使用
+              // Collision ノードが正しく動作することを検証
+
+  # ============================================================================
+  # 4. PersistentHashSet<T> - 不変のハッシュセット
+  # ============================================================================
+  - id: persistent_hashset
+    name: PersistentHashSet<T>
+    priority: high
+    description: |
+      不変のハッシュセット。PersistentHashMap<T, ()> のラッパーとして実装する。
+
+      特徴:
+      - 存在確認: O(log32 N)
+      - 追加: O(log32 N)
+      - 削除: O(log32 N)
+      - 集合演算（和・積・差）をサポート
+
+    internal_structure:
+      description: |
+        ```rust
+        #[derive(Clone)]
+        pub struct PersistentHashSet<T> {
+            inner: PersistentHashMap<T, ()>,
+        }
+        ```
+
+        PersistentHashMap を内部で使用し、値を () とすることで
+        セットとして機能させる。
+
+    api:
+      constructors:
+        - name: new
+          signature: "fn new() -> Self"
+          description: "空のセットを作成"
+          complexity: "O(1)"
+
+        - name: from_iter
+          signature: "fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self"
+          description: "イテレータからセットを作成"
+          complexity: "O(n)"
+
+      operations:
+        - name: insert
+          signature: "fn insert(&self, element: T) -> Self"
+          description: "要素を追加した新しいセットを返す"
+          complexity: "O(log32 N)"
+
+        - name: remove
+          signature: "fn remove<Q: ?Sized>(&self, element: &Q) -> Self where T: Borrow<Q>, Q: Hash + Eq"
+          description: "要素を削除した新しいセットを返す"
+          complexity: "O(log32 N)"
+
+        - name: contains
+          signature: "fn contains<Q: ?Sized>(&self, element: &Q) -> bool where T: Borrow<Q>, Q: Hash + Eq"
+          description: "要素が存在するかを返す"
+          complexity: "O(log32 N)"
+
+        - name: union
+          signature: "fn union(&self, other: &Self) -> Self"
+          description: "和集合を返す"
+          complexity: "O(n + m)"
+
+        - name: intersection
+          signature: "fn intersection(&self, other: &Self) -> Self"
+          description: "積集合を返す"
+          complexity: "O(min(n, m) * log32(max(n, m)))"
+
+        - name: difference
+          signature: "fn difference(&self, other: &Self) -> Self"
+          description: "差集合を返す（self - other）"
+          complexity: "O(n * log32 m)"
+
+        - name: symmetric_difference
+          signature: "fn symmetric_difference(&self, other: &Self) -> Self"
+          description: "対称差を返す"
+          complexity: "O(n + m)"
+
+        - name: is_subset
+          signature: "fn is_subset(&self, other: &Self) -> bool"
+          description: "self が other の部分集合かを返す"
+          complexity: "O(n * log32 m)"
+
+        - name: is_superset
+          signature: "fn is_superset(&self, other: &Self) -> bool"
+          description: "self が other の上位集合かを返す"
+          complexity: "O(m * log32 n)"
+
+        - name: is_disjoint
+          signature: "fn is_disjoint(&self, other: &Self) -> bool"
+          description: "self と other が互いに素かを返す"
+          complexity: "O(min(n, m) * log32(max(n, m)))"
+
+        - name: len
+          signature: "fn len(&self) -> usize"
+          description: "セットの要素数を返す"
+          complexity: "O(1)"
+
+        - name: is_empty
+          signature: "fn is_empty(&self) -> bool"
+          description: "セットが空かどうかを返す"
+          complexity: "O(1)"
+
+        - name: iter
+          signature: "fn iter(&self) -> impl Iterator<Item = &T>"
+          description: "要素のイテレータを返す"
+          complexity: "O(1) to create, O(n) to consume"
+
+    laws:
+      - name: Insert-Contains Law
+        description: "insert した要素は contains で true を返す"
+        equation: "set.insert(x).contains(&x) == true"
+
+      - name: Remove-Contains Law
+        description: "remove した要素は contains で false を返す"
+        equation: "set.remove(&x).contains(&x) == false"
+
+      - name: Union Identity Law
+        description: "空集合との和は恒等操作"
+        equation: "set.union(&PersistentHashSet::new()) == set"
+
+      - name: Intersection Identity Law
+        description: "自身との積は恒等操作"
+        equation: "set.intersection(&set) == set"
+
+      - name: Difference Self Law
+        description: "自身との差は空集合"
+        equation: "set.difference(&set).is_empty() == true"
+
+    type_class_implementations:
+      - trait: Foldable
+        implementation: |
+          impl<T> Foldable for PersistentHashSet<T> {
+              fn fold_left<B, F>(self, init: B, function: F) -> B
+              where
+                  F: FnMut(B, T) -> B,
+              {
+                  self.into_iter().fold(init, function)
+              }
+          }
+
+  # ============================================================================
+  # 5. PersistentTreeMap<K, V> - 不変の順序付きマップ
+  # ============================================================================
+  - id: persistent_treemap
+    name: PersistentTreeMap<K, V>
+    priority: medium
+    description: |
+      不変の順序付きマップ。赤黒木（Red-Black Tree）をベースに実装する。
+      キーの順序に従ってソートされた状態を維持する。
+
+      特徴:
+      - 検索: O(log N)
+      - 挿入: O(log N)
+      - 削除: O(log N)
+      - 範囲クエリ: O(log N + k) where k = 結果数
+      - 最小・最大: O(log N)
+
+    internal_structure:
+      description: |
+        ```rust
+        use std::rc::Rc;
+        use std::cmp::Ord;
+
+        #[derive(Clone)]
+        pub struct PersistentTreeMap<K, V> {
+            root: Option<Rc<Node<K, V>>>,
+            length: usize,
+        }
+
+        #[derive(Clone)]
+        struct Node<K, V> {
+            key: K,
+            value: V,
+            color: Color,
+            left: Option<Rc<Node<K, V>>>,
+            right: Option<Rc<Node<K, V>>>,
+        }
+
+        #[derive(Clone, Copy, PartialEq)]
+        enum Color {
+            Red,
+            Black,
+        }
+        ```
+
+        赤黒木の不変実装:
+        - パスコピーによる更新
+        - バランシング操作も新しいノードを生成
+        - 元の木は完全に保持される
+
+    api:
+      constructors:
+        - name: new
+          signature: "fn new() -> Self where K: Ord"
+          description: "空のマップを作成"
+          complexity: "O(1)"
+
+        - name: from_iter
+          signature: "fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self where K: Ord"
+          description: "イテレータからマップを作成"
+          complexity: "O(n log n)"
+
+      operations:
+        - name: get
+          signature: "fn get<Q: ?Sized>(&self, key: &Q) -> Option<&V> where K: Borrow<Q>, Q: Ord"
+          description: "キーに対応する値への参照を返す"
+          complexity: "O(log N)"
+
+        - name: insert
+          signature: "fn insert(&self, key: K, value: V) -> Self where K: Ord"
+          description: "キー・値ペアを追加した新しいマップを返す"
+          complexity: "O(log N)"
+
+        - name: remove
+          signature: "fn remove<Q: ?Sized>(&self, key: &Q) -> Self where K: Borrow<Q>, Q: Ord"
+          description: "キーを削除した新しいマップを返す"
+          complexity: "O(log N)"
+
+        - name: min_entry
+          signature: "fn min_entry(&self) -> Option<(&K, &V)>"
+          description: "最小キーのエントリを返す"
+          complexity: "O(log N)"
+
+        - name: max_entry
+          signature: "fn max_entry(&self) -> Option<(&K, &V)>"
+          description: "最大キーのエントリを返す"
+          complexity: "O(log N)"
+
+        - name: range
+          signature: "fn range<R>(&self, range: R) -> impl Iterator<Item = (&K, &V)> where R: RangeBounds<K>"
+          description: "指定範囲のエントリを順に返すイテレータ"
+          complexity: "O(log N + k) where k = number of results"
+          example: |
+            let map = PersistentTreeMap::from_iter([
+                (1, "one"),
+                (2, "two"),
+                (3, "three"),
+                (4, "four"),
+                (5, "five"),
+            ]);
+            let in_range: Vec<_> = map.range(2..=4).collect();
+            // [(2, "two"), (3, "three"), (4, "four")]
+
+        - name: split
+          signature: "fn split<Q: ?Sized>(&self, key: &Q) -> (Self, Option<V>, Self) where K: Borrow<Q>, Q: Ord"
+          description: "キーで分割し、(smaller, value_at_key, larger) を返す"
+          complexity: "O(log N)"
+
+        - name: len
+          signature: "fn len(&self) -> usize"
+          description: "マップのエントリ数を返す"
+          complexity: "O(1)"
+
+        - name: is_empty
+          signature: "fn is_empty(&self) -> bool"
+          description: "マップが空かどうかを返す"
+          complexity: "O(1)"
+
+        - name: iter
+          signature: "fn iter(&self) -> impl Iterator<Item = (&K, &V)>"
+          description: "キー順でエントリを返すイテレータ"
+          complexity: "O(1) to create, O(n) to consume"
+
+    laws:
+      - name: Ordering Law
+        description: "iter は常にキーの昇順で返す"
+        equation: "map.iter().is_sorted_by_key(|(k, _)| k)"
+
+      - name: Min-Max Law
+        description: "min_entry は最小キー、max_entry は最大キー"
+        equation: |
+          map.min_entry() == map.iter().next()
+          map.max_entry() == map.iter().last()
+
+      - name: Range Law
+        description: "range は指定範囲内のすべてのエントリを返す"
+        equation: "map.range(a..b).all(|(k, _)| a <= k && k < b)"
+
+    tests:
+      - category: "赤黒木の性質テスト"
+        cases:
+          - name: "赤黒木の不変条件"
+            test: |
+              // 1. すべてのノードは赤か黒
+              // 2. ルートは黒
+              // 3. すべての葉（NIL）は黒
+              // 4. 赤ノードの子は黒
+              // 5. 任意のノードから葉への全パスで黒ノード数は同じ
+
+          - name: "バランスの維持"
+            test: |
+              // ランダムな順序で要素を追加しても
+              // 木の高さは O(log N) に保たれる
+
+# 実装順序と依存関係
+implementation_order:
+  - phase: "4.1"
+    name: "PersistentList"
+    description: "最もシンプルな構造。構造的共有の基本を確立"
+    duration_estimate: "3-4 days"
+    dependencies: []
+
+  - phase: "4.2"
+    name: "PersistentVector"
+    description: "HAMT ベースの実装。複雑だが汎用性が高い"
+    duration_estimate: "5-7 days"
+    dependencies:
+      - "4.1"
+
+  - phase: "4.3"
+    name: "PersistentHashMap"
+    description: "CHAMP ベースの実装。ハッシュ衝突の処理が重要"
+    duration_estimate: "5-7 days"
+    dependencies:
+      - "4.2"
+
+  - phase: "4.4"
+    name: "PersistentHashSet"
+    description: "PersistentHashMap のラッパー。集合演算を追加"
+    duration_estimate: "2-3 days"
+    dependencies:
+      - "4.3"
+
+  - phase: "4.5"
+    name: "PersistentTreeMap"
+    description: "赤黒木の永続版。バランシングが複雑"
+    duration_estimate: "5-7 days"
+    dependencies:
+      - "4.1"
+
+# テスト戦略
+testing_strategy:
+  unit_tests:
+    description: "各操作の正確性を検証"
+    coverage_target: "100%"
+    categories:
+      - "基本操作（作成、取得、追加、削除）"
+      - "エッジケース（空、単一要素、大量要素）"
+      - "型クラス法則"
+
+  property_tests:
+    description: "ランダムな入力で不変条件を検証"
+    framework: "proptest"
+    properties:
+      - "構造的共有の正確性"
+      - "永続性（元のデータが変更されない）"
+      - "型クラス法則"
+      - "データ構造固有の不変条件"
+
+  performance_tests:
+    description: "計算量が期待通りであることを検証"
+    benchmarks:
+      - "大量要素での各操作の時間計測"
+      - "メモリ使用量の計測"
+      - "構造的共有によるメモリ節約の検証"
+
+  integration_tests:
+    description: "Phase 1 の型クラスとの統合を検証"
+    scenarios:
+      - "Functor/Foldable による操作チェーン"
+      - "Monad による計算の合成"
+      - "他のデータ構造との相互変換"
+
+# 将来の拡張
+future_extensions:
+  - name: "スレッドセーフ版"
+    description: |
+      Arc を使用したスレッドセーフ版の提供:
+      - ConcurrentPersistentVector
+      - ConcurrentPersistentHashMap
+      など
+
+  - name: "Transient（一時的可変版）"
+    description: |
+      バッチ更新のための一時的可変版:
+      - 更新中は可変として扱い、最後に永続版に変換
+      - Clojure の transient! / persistent! に相当
+
+  - name: "Persistent Queue / Deque"
+    description: |
+      両端キューの永続版:
+      - Finger Tree ベースの実装
+      - O(1) の先頭/末尾操作
+
+  - name: "Persistent TreeSet"
+    description: |
+      PersistentTreeMap<T, ()> のラッパー:
+      - 順序付きセット
+      - 範囲クエリのサポート
+
+  - name: "Lens/Prism との統合"
+    description: |
+      Phase 5 の Optics との統合:
+      - 深いネストへの効率的なアクセス
+      - 不変更新の簡略化

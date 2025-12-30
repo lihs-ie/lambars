@@ -1,0 +1,1337 @@
+# Phase 3: 制御構造（Control Structures）要件定義
+#
+# 概要:
+#   関数型プログラミングを支援する制御構造を提供する。
+#   遅延評価、スタック安全な再帰、継続、Free モナドなどを実装する。
+#
+# 設計方針:
+#   1. `#![forbid(unsafe_code)]` ポリシーに準拠（RefCell ベースの実装）
+#   2. 各構造のモナド法則を明確に定義
+#   3. Phase 1 の型クラス（Functor, Applicative, Monad）との統合
+#   4. スタック安全性の保証をテストで検証
+#
+# 参照:
+#   - CLAUDE.md の「3.4 遅延評価が既定ではない」セクション
+#   - CLAUDE.md の「3.6 末尾呼び出し最適化（TCO）の保証がない」セクション
+#   - references/scala3/library/src/scala/util/control/TailCalls.scala
+#   - references/rust/library/core/src/cell/lazy.rs
+
+version: "1.0.0"
+phase: 3
+name: "Control Structures"
+description: |
+  関数型プログラミングにおいて、制御構造は計算の「いつ」「どのように」を
+  抽象化する重要な要素である。このフェーズでは以下の構造を提供する:
+
+  - Lazy<T>: 遅延評価とメモ化
+  - Trampoline<A>: スタック安全な再帰（TCO の代替）
+  - Continuation<R, A>: 継続渡しスタイル（CPS）の抽象化
+
+  これらは Rust が標準で提供していない「遅延評価」と「スタック安全な再帰」
+  の問題を解決し、純粋関数型プログラミングのパターンを可能にする。
+
+  注意: Free モナドは Rust の型システム制約により汎用実装が困難なため、
+  Phase 3 のスコープ外とし、将来の拡張として検討する。
+
+# 遅延評価の数学的背景
+theoretical_background:
+  lazy_evaluation:
+    description: |
+      遅延評価（lazy evaluation）は、式の値が実際に必要になるまで
+      計算を延期する評価戦略である。
+
+      利点:
+      - 不要な計算の回避
+      - 無限データ構造の表現
+      - 循環参照の解決
+      - 計算の合成性向上
+
+      Haskell などの純粋関数型言語では言語の既定が遅延評価だが、
+      Rust は正格評価（strict evaluation）が既定である。
+      Lazy<T> 型により、明示的に遅延評価を導入できる。
+
+  trampolining:
+    description: |
+      トランポリン（trampolining）は、深い再帰呼び出しをヒープ上のデータ構造に
+      変換することで、スタックオーバーフローを回避する技法である。
+
+      参考文献:
+      - "Stackless Scala with Free Monads" (Bjarnason)
+        https://blog.higher-order.com/assets/trampolines.pdf
+
+      基本的なアイデア:
+      - 再帰呼び出しを「次の計算」を表すデータとして返す
+      - ループで「次の計算」を繰り返し実行
+      - 最終結果が得られるまで繰り返す
+
+      これにより、末尾再帰最適化（TCO）がない Rust でも
+      任意の深さの再帰を安全に実行できる。
+
+  continuation_passing_style:
+    description: |
+      継続渡しスタイル（Continuation-Passing Style, CPS）は、
+      関数が結果を直接返すのではなく、「次に何をするか」を表す
+      関数（継続）に結果を渡すプログラミングスタイルである。
+
+      CPS の利点:
+      - 制御フローの明示化
+      - 非ローカルな制御（例外、早期リターン）の実現
+      - 最適化の機会増加
+
+      Continuation<R, A> モナドは CPS を抽象化し、
+      継続を第一級の値として扱えるようにする。
+
+  free_monad:
+    description: |
+      Free モナドは、任意の Functor F から自由に Monad を構築する方法である。
+
+      Free F A の構造:
+      - Pure(a): 純粋な値
+      - Suspend(F<Free F A>): 次の計算を Functor でラップ
+
+      Free モナドの用途:
+      - DSL（ドメイン固有言語）の構築
+      - 効果の表現とインタープリタの分離
+      - テスト可能な副作用の記述
+
+      インタープリタパターン:
+      - DSL の構文を Free モナドで表現
+      - 異なるインタープリタで異なる解釈を提供
+      - 実行時とテスト時で異なる振る舞いを実現
+
+      注意: Rust の型システム制約（特に HKT の欠如）により、
+      汎用的な Free<F, A> の完全実装は困難。Phase 3 のスコープ外とする。
+
+requirements:
+  # ============================================================================
+  # 1. Lazy<T> - 遅延評価とメモ化
+  # ============================================================================
+  - id: control_lazy
+    name: Lazy<T>
+    priority: critical
+    description: |
+      遅延評価を実現する型。値は force() が呼ばれるまで計算されず、
+      一度計算された値はメモ化（キャッシュ）される。
+
+      内部実装:
+      - RefCell を使用した内部可変性（unsafe 回避）
+      - State enum で未初期化/初期化済み/毒状態を管理
+      - 初期化関数のパニック時は毒状態に遷移
+
+      スレッドセーフ性:
+      - Lazy<T> は !Sync（スレッド間で共有不可）
+      - スレッドセーフ版は将来的に LazyLock として提供可能
+
+    internal_structure:
+      description: |
+        Lazy の内部状態を表す enum:
+
+        ```rust
+        enum LazyState<T, F> {
+            /// 未初期化（初期化関数を保持）
+            Uninit(F),
+            /// 初期化済み（値を保持）
+            Init(T),
+            /// 毒状態（初期化関数がパニックした）
+            Poisoned,
+        }
+
+        pub struct Lazy<T, F = fn() -> T> {
+            state: RefCell<LazyState<T, F>>,
+        }
+        ```
+
+    laws:
+      - name: Idempotence（冪等律）
+        description: |
+          force を複数回呼び出しても、結果は同じである。
+          最初の force で計算され、以降はキャッシュされた値が返される。
+        equation: "lazy.force() == lazy.force()"
+        property_test: |
+          fn prop_idempotence<T: Clone + PartialEq>(value: T) -> bool {
+              let lazy = Lazy::new({
+                  let v = value.clone();
+                  move || v.clone()
+              });
+              let first = lazy.force().clone();
+              let second = lazy.force().clone();
+              first == second
+          }
+
+      - name: Laziness（遅延性）
+        description: |
+          Lazy の作成時点では初期化関数は実行されない。
+          force() が呼ばれて初めて実行される。
+        equation: "Lazy::new(f) does not call f until force()"
+        property_test: |
+          fn prop_laziness() -> bool {
+              use std::cell::Cell;
+              let called = Cell::new(false);
+              let lazy = Lazy::new(|| {
+                  called.set(true);
+                  42
+              });
+              // 作成直後は呼ばれていない
+              assert!(!called.get());
+              // force() で呼ばれる
+              lazy.force();
+              called.get()
+          }
+
+      - name: Memoization（メモ化）
+        description: |
+          初期化関数は最大1回のみ実行される。
+          2回目以降の force() ではキャッシュされた値が返される。
+        equation: "initialization function is called at most once"
+        property_test: |
+          fn prop_memoization() -> bool {
+              use std::cell::Cell;
+              let call_count = Cell::new(0);
+              let lazy = Lazy::new(|| {
+                  call_count.set(call_count.get() + 1);
+                  42
+              });
+              lazy.force();
+              lazy.force();
+              lazy.force();
+              call_count.get() == 1
+          }
+
+      - name: Functor Identity Law（Functor 恒等律）
+        description: |
+          恒等関数で map しても値は変わらない。
+        equation: "lazy.map(|x| x).force() == lazy.force()"
+        property_test: |
+          fn prop_functor_identity<T: Clone + PartialEq>(value: T) -> bool {
+              let lazy = Lazy::new({
+                  let v = value.clone();
+                  move || v.clone()
+              });
+              let mapped = lazy.map(|x| x);
+              lazy.force().clone() == mapped.force().clone()
+          }
+
+      - name: Functor Composition Law（Functor 合成律）
+        description: |
+          map の連鎖は関数の合成と等価である。
+        equation: "lazy.map(f).map(g).force() == lazy.map(|x| g(f(x))).force()"
+        property_test: |
+          fn prop_functor_composition<A, B, C>(
+              value: A,
+              f: impl Fn(A) -> B + Clone,
+              g: impl Fn(B) -> C + Clone,
+          ) -> bool
+          where
+              A: Clone,
+              C: PartialEq,
+          {
+              let lazy1 = Lazy::new({
+                  let v = value.clone();
+                  move || v.clone()
+              });
+              let lazy2 = Lazy::new({
+                  let v = value.clone();
+                  move || v.clone()
+              });
+              let result1 = lazy1.map(f.clone()).map(g.clone()).force().clone();
+              let result2 = lazy2.map(|x| g(f(x))).force().clone();
+              result1 == result2
+          }
+
+      - name: Monad Left Identity（Monad 左単位元律）
+        description: |
+          pure した値を flat_map するのは、関数を直接適用するのと同じ。
+        equation: "Lazy::pure(a).flat_map(f).force() == f(a).force()"
+        property_test: |
+          fn prop_monad_left_identity<A, B>(
+              a: A,
+              f: impl Fn(A) -> Lazy<B> + Clone,
+          ) -> bool
+          where
+              A: Clone,
+              B: PartialEq + Clone,
+          {
+              let left = Lazy::pure(a.clone()).flat_map(f.clone());
+              let right = f(a);
+              left.force().clone() == right.force().clone()
+          }
+
+      - name: Monad Right Identity（Monad 右単位元律）
+        description: |
+          Lazy を pure で flat_map するのは、元の Lazy と同じ。
+        equation: "lazy.flat_map(Lazy::pure).force() == lazy.force()"
+        property_test: |
+          fn prop_monad_right_identity<A: Clone + PartialEq>(lazy: Lazy<A>) -> bool {
+              let original = lazy.force().clone();
+              let mapped = lazy.flat_map(Lazy::pure);
+              original == mapped.force().clone()
+          }
+
+      - name: Monad Associativity（Monad 結合律）
+        description: |
+          flat_map の連鎖は結合的である。
+        equation: "lazy.flat_map(f).flat_map(g) == lazy.flat_map(|x| f(x).flat_map(g))"
+        property_test: |
+          fn prop_monad_associativity<A, B, C>(
+              lazy: Lazy<A>,
+              f: impl Fn(A) -> Lazy<B> + Clone,
+              g: impl Fn(B) -> Lazy<C> + Clone,
+          ) -> bool
+          where
+              A: Clone,
+              B: Clone,
+              C: PartialEq + Clone,
+          {
+              let left = lazy.clone().flat_map(f.clone()).flat_map(g.clone());
+              let right = lazy.flat_map(|x| f(x).flat_map(g.clone()));
+              left.force().clone() == right.force().clone()
+          }
+
+    methods:
+      - name: new
+        signature: "pub fn new(initializer: F) -> Self where F: FnOnce() -> T"
+        description: |
+          新しい遅延値を作成する。
+          初期化関数は force() が呼ばれるまで実行されない。
+        examples:
+          - description: "基本的な使用例"
+            code: |
+              let lazy = Lazy::new(|| {
+                  println!("Initializing...");
+                  expensive_computation()
+              });
+              // この時点では "Initializing..." は出力されない
+
+              let value = lazy.force(); // ここで初めて出力される
+
+      - name: new_with_value
+        signature: "pub fn new_with_value(value: T) -> Self"
+        description: |
+          既に計算済みの値で Lazy を作成する。
+          force() を呼んでも追加の計算は行われない。
+        examples:
+          - description: "即時値での初期化"
+            code: |
+              let lazy = Lazy::new_with_value(42);
+              assert_eq!(*lazy.force(), 42);
+
+      - name: force
+        signature: "pub fn force(&self) -> &T"
+        description: |
+          値を強制的に評価し、参照を返す。
+          未初期化の場合は初期化関数を実行し、結果をキャッシュする。
+          既に初期化済みの場合はキャッシュされた値の参照を返す。
+
+          パニック:
+          - 初期化関数がパニックした場合、セルは毒状態になり、
+            以降の force() 呼び出しはすべてパニックする
+        examples:
+          - description: "遅延値の評価"
+            code: |
+              let lazy = Lazy::new(|| 1 + 2 + 3);
+              assert_eq!(*lazy.force(), 6);
+              // 2回目以降はキャッシュから取得
+              assert_eq!(*lazy.force(), 6);
+
+      - name: force_mut
+        signature: "pub fn force_mut(&mut self) -> &mut T"
+        description: |
+          値を強制的に評価し、可変参照を返す。
+          排他的な借用が必要なため、&mut self を取る。
+        examples:
+          - description: "遅延値の変更"
+            code: |
+              let mut lazy = Lazy::new(|| vec![1, 2, 3]);
+              lazy.force_mut().push(4);
+              assert_eq!(lazy.force(), &vec![1, 2, 3, 4]);
+
+      - name: get
+        signature: "pub fn get(&self) -> Option<&T>"
+        description: |
+          初期化済みの場合は Some(&value) を返し、
+          未初期化または毒状態の場合は None を返す。
+          この操作は値を評価しない。
+        examples:
+          - description: "初期化状態の確認"
+            code: |
+              let lazy = Lazy::new(|| 42);
+              assert!(lazy.get().is_none()); // 未初期化
+              lazy.force();
+              assert_eq!(lazy.get(), Some(&42)); // 初期化済み
+
+      - name: get_mut
+        signature: "pub fn get_mut(&mut self) -> Option<&mut T>"
+        description: |
+          初期化済みの場合は Some(&mut value) を返し、
+          未初期化または毒状態の場合は None を返す。
+          この操作は値を評価しない。
+
+      - name: is_initialized
+        signature: "pub fn is_initialized(&self) -> bool"
+        description: |
+          値が初期化済みかどうかを返す。
+          毒状態の場合も false を返す。
+
+      - name: is_poisoned
+        signature: "pub fn is_poisoned(&self) -> bool"
+        description: |
+          セルが毒状態かどうかを返す。
+          毒状態は、初期化関数がパニックした場合に発生する。
+
+      - name: into_inner
+        signature: "pub fn into_inner(self) -> Result<T, F>"
+        description: |
+          Lazy を消費し、内部の値または初期化関数を返す。
+          - 初期化済み: Ok(value)
+          - 未初期化: Err(initializer)
+          - 毒状態: パニック
+
+      - name: map
+        signature: "pub fn map<U, G>(self, f: G) -> Lazy<U, impl FnOnce() -> U> where G: FnOnce(T) -> U"
+        description: |
+          遅延値に関数を適用する。
+          結果は新しい Lazy であり、元の値も結果も評価されない。
+          force() が呼ばれた時に、元の値の評価と関数の適用が行われる。
+        examples:
+          - description: "遅延値の変換"
+            code: |
+              let lazy_int = Lazy::new(|| 42);
+              let lazy_string = lazy_int.map(|n| n.to_string());
+              // この時点では何も計算されていない
+              assert_eq!(lazy_string.force(), "42");
+
+      - name: flat_map
+        signature: "pub fn flat_map<U, G>(self, f: G) -> Lazy<U, impl FnOnce() -> U> where G: FnOnce(T) -> Lazy<U>"
+        description: |
+          遅延値に Lazy を返す関数を適用し、結果を平坦化する。
+          連鎖的な遅延計算を表現できる。
+        examples:
+          - description: "遅延計算の連鎖"
+            code: |
+              let lazy_x = Lazy::new(|| 10);
+              let lazy_result = lazy_x.flat_map(|x| Lazy::new(move || x * 2));
+              assert_eq!(*lazy_result.force(), 20);
+
+      - name: pure
+        signature: "pub fn pure(value: T) -> Lazy<T, fn() -> T>"
+        description: |
+          純粋な値を Lazy コンテキストに持ち上げる。
+          new_with_value と同様だが、型シグネチャが異なる。
+
+      - name: zip
+        signature: "pub fn zip<U>(self, other: Lazy<U>) -> Lazy<(T, U)>"
+        description: |
+          二つの遅延値を組み合わせてタプルを返す Lazy を作成する。
+          両方の値は force() 時に評価される。
+        examples:
+          - description: "遅延値の組み合わせ"
+            code: |
+              let lazy_a = Lazy::new(|| 1);
+              let lazy_b = Lazy::new(|| "hello");
+              let lazy_pair = lazy_a.zip(lazy_b);
+              assert_eq!(*lazy_pair.force(), (1, "hello"));
+
+      - name: zip_with
+        signature: "pub fn zip_with<U, V, G>(self, other: Lazy<U>, f: G) -> Lazy<V> where G: FnOnce(T, U) -> V"
+        description: |
+          二つの遅延値を関数で組み合わせる。
+          map2 と同等の操作。
+        examples:
+          - description: "遅延値の結合"
+            code: |
+              let lazy_a = Lazy::new(|| 10);
+              let lazy_b = Lazy::new(|| 20);
+              let lazy_sum = lazy_a.zip_with(lazy_b, |a, b| a + b);
+              assert_eq!(*lazy_sum.force(), 30);
+
+    trait_implementations:
+      - trait: TypeConstructor
+        description: |
+          Lazy<T>（F をデフォルト型として隠蔽した形）に対して TypeConstructor を実装する。
+          型パラメータ T が Inner となる。
+
+          注意: Lazy<T, F> は追加の型パラメータ F を持つため、
+          TypeConstructor の実装は Lazy<T>（F = fn() -> T）に対してのみ行う。
+          これにより Functor/Applicative/Monad トレイトとの統合が可能になる。
+
+      - trait: Functor
+        description: |
+          Lazy は Functor を実装する。
+          map メソッドにより関数を遅延的に適用できる。
+
+      - trait: Applicative
+        description: |
+          Lazy は Applicative を実装する。
+          pure で値を持ち上げ、map2/zip_with で複数の遅延値を組み合わせる。
+
+      - trait: Monad
+        description: |
+          Lazy は Monad を実装する。
+          flat_map で遅延計算を連鎖できる。
+
+      - trait: Default
+        description: |
+          T: Default の場合、Lazy<T> も Default を実装する。
+          Lazy::new(T::default) と同等。
+
+      - trait: Debug
+        description: |
+          Debug を実装する。
+          初期化済みの場合は値を、未初期化の場合は "<uninit>" を表示。
+
+      - trait: Clone
+        description: |
+          T: Clone, F: Clone の場合、Lazy も Clone を実装する。
+          初期化済みの場合は値をクローンし、未初期化の場合は初期化関数をクローンする。
+
+    api_design_notes:
+      deref_not_implemented: |
+        Deref トレイトは実装しない。
+
+        理由: RefCell ベースの実装では force() が Ref<'_, T> を返すため、
+        これを &T に変換することはできない。Ref は借用のライフタイムを
+        追跡するための型であり、単純な参照に変換すると借用チェッカーの
+        保証が失われる。
+
+        代替手段:
+        - force() メソッドを使用して Ref<'_, T> を取得
+        - get() メソッドで Option<Ref<'_, T>> を取得（評価せずに）
+        - into_inner() で所有権を取得
+
+        ユーザーは明示的に force() を呼び出す必要がある。
+        これは遅延評価の「いつ評価されるか」を明確にする利点もある。
+
+    thread_safety:
+      description: |
+        Lazy<T> の Send/Sync 境界:
+        - Send: T: Send かつ F: Send の場合に Send
+        - Sync: Lazy<T> は !Sync（RefCell を使用しているため）
+
+        スレッドセーフ版が必要な場合:
+        - std::sync::LazyLock（Rust 1.80+）を使用
+        - または将来的に functional_rusty::control::LazyLock として提供
+
+    dependencies:
+      - typeclass_functor
+      - typeclass_applicative
+      - typeclass_monad
+
+  # ============================================================================
+  # 2. Trampoline<A> - スタック安全な再帰
+  # ============================================================================
+  - id: control_trampoline
+    name: Trampoline<A>
+    priority: critical
+    description: |
+      スタック安全な再帰を実現するデータ構造。
+      深い再帰呼び出しをヒープ上のデータ構造に変換し、
+      スタックオーバーフローを防ぐ。
+
+      Rust は末尾呼び出し最適化（TCO）を保証しないため、
+      深い再帰は容易にスタックオーバーフローを引き起こす。
+      Trampoline はこの問題を解決する。
+
+      実装は Scala の TailCalls を参考にしている。
+      https://github.com/scala/scala/blob/v2.13.x/src/library/scala/util/control/TailCalls.scala
+
+    internal_structure:
+      description: |
+        Trampoline の内部構造:
+
+        ```rust
+        pub enum Trampoline<A> {
+            /// 計算の最終結果
+            Done(A),
+            /// 次の計算（遅延）
+            Suspend(Box<dyn FnOnce() -> Trampoline<A>>),
+            /// flat_map の継続（効率的な結合律実装）
+            FlatMap {
+                current: Box<Trampoline<A>>,
+                continuation: Box<dyn FnOnce(A) -> Trampoline<A>>,
+            },
+        }
+        ```
+
+        FlatMap バリアントの追加理由:
+        - 単純な Suspend のみの実装では flat_map が右結合になる
+        - 右結合の flat_map は深いネストを作り、スタックを消費する
+        - FlatMap バリアントで結合を遅延させ、run() 時に左結合で評価
+
+    laws:
+      - name: Stack Safety（スタック安全性）
+        description: |
+          任意の深さの再帰でもスタックオーバーフローしない。
+          これは法則というより、設計上の要件である。
+        equation: "Trampoline recursion does not cause stack overflow"
+        property_test: |
+          fn prop_stack_safety() -> bool {
+              // 100,000 回の再帰でもスタックオーバーフローしないことを確認
+              fn count_down(n: u64) -> Trampoline<u64> {
+                  if n == 0 {
+                      Trampoline::done(0)
+                  } else {
+                      Trampoline::suspend(move || count_down(n - 1))
+                  }
+              }
+
+              let result = count_down(100_000).run();
+              result == 0
+          }
+
+      - name: Monad Left Identity（Monad 左単位元律）
+        description: |
+          done した値を flat_map するのは、関数を直接適用するのと同じ。
+        equation: "Trampoline::done(a).flat_map(f).run() == f(a).run()"
+        property_test: |
+          fn prop_monad_left_identity<A, B>(
+              a: A,
+              f: impl Fn(A) -> Trampoline<B>,
+          ) -> bool
+          where
+              A: Clone,
+              B: PartialEq,
+          {
+              let left = Trampoline::done(a.clone()).flat_map(&f).run();
+              let right = f(a).run();
+              left == right
+          }
+
+      - name: Monad Right Identity（Monad 右単位元律）
+        description: |
+          Trampoline を done で flat_map するのは、元の Trampoline と同じ。
+        equation: "trampoline.flat_map(Trampoline::done).run() == trampoline.run()"
+        property_test: |
+          fn prop_monad_right_identity<A: Clone + PartialEq>(
+              trampoline: Trampoline<A>,
+          ) -> bool {
+              let original = trampoline.clone().run();
+              let mapped = trampoline.flat_map(Trampoline::done).run();
+              original == mapped
+          }
+
+      - name: Monad Associativity（Monad 結合律）
+        description: |
+          flat_map の連鎖は結合的である。
+        equation: "trampoline.flat_map(f).flat_map(g).run() == trampoline.flat_map(|x| f(x).flat_map(g)).run()"
+        property_test: |
+          fn prop_monad_associativity<A, B, C>(
+              trampoline: Trampoline<A>,
+              f: impl Fn(A) -> Trampoline<B> + Clone,
+              g: impl Fn(B) -> Trampoline<C> + Clone,
+          ) -> bool
+          where
+              A: Clone,
+              B: Clone,
+              C: PartialEq,
+          {
+              let left = trampoline.clone().flat_map(f.clone()).flat_map(g.clone()).run();
+              let right = trampoline.flat_map(|x| f(x).flat_map(g.clone())).run();
+              left == right
+          }
+
+      - name: Functor Identity Law（Functor 恒等律）
+        description: |
+          恒等関数で map しても値は変わらない。
+        equation: "trampoline.map(|x| x).run() == trampoline.run()"
+        property_test: |
+          fn prop_functor_identity<A: Clone + PartialEq>(
+              trampoline: Trampoline<A>,
+          ) -> bool {
+              let original = trampoline.clone().run();
+              let mapped = trampoline.map(|x| x).run();
+              original == mapped
+          }
+
+      - name: Functor Composition Law（Functor 合成律）
+        description: |
+          map の連鎖は関数の合成と等価である。
+        equation: "trampoline.map(f).map(g).run() == trampoline.map(|x| g(f(x))).run()"
+        property_test: |
+          fn prop_functor_composition<A, B, C>(
+              trampoline: Trampoline<A>,
+              f: impl Fn(A) -> B + Clone,
+              g: impl Fn(B) -> C + Clone,
+          ) -> bool
+          where
+              A: Clone,
+              C: PartialEq,
+          {
+              let result1 = trampoline.clone().map(f.clone()).map(g.clone()).run();
+              let result2 = trampoline.map(|x| g(f(x))).run();
+              result1 == result2
+          }
+
+    methods:
+      - name: done
+        signature: "pub fn done(value: A) -> Self"
+        description: |
+          計算の最終結果を表す Trampoline を作成する。
+          これ以上の計算は行われない。
+        examples:
+          - description: "最終結果の作成"
+            code: |
+              let trampoline = Trampoline::done(42);
+              assert_eq!(trampoline.run(), 42);
+
+      - name: suspend
+        signature: "pub fn suspend<F>(thunk: F) -> Self where F: FnOnce() -> Trampoline<A> + 'static"
+        description: |
+          遅延された計算を表す Trampoline を作成する。
+          thunk は run() が呼ばれた時に評価される。
+
+          注意: thunk は 'static ライフタイムを持つ必要がある。
+          これは Box<dyn FnOnce() -> ...> に格納するためである。
+        examples:
+          - description: "遅延計算の作成"
+            code: |
+              let trampoline = Trampoline::suspend(|| {
+                  println!("Computing...");
+                  Trampoline::done(42)
+              });
+              // この時点では "Computing..." は出力されない
+              let result = trampoline.run(); // ここで出力される
+              assert_eq!(result, 42);
+
+      - name: run
+        signature: "pub fn run(self) -> A"
+        description: |
+          Trampoline を実行し、最終結果を返す。
+          内部的にはループで処理され、スタックは一定に保たれる。
+
+          計算量:
+          - 時間: O(n)、n は suspend/flat_map のチェーンの長さ
+          - 空間: O(1) スタック、O(n) ヒープ（継続を保持）
+        examples:
+          - description: "基本的な実行"
+            code: |
+              fn factorial(n: u64) -> Trampoline<u64> {
+                  factorial_helper(n, 1)
+              }
+
+              fn factorial_helper(n: u64, accumulator: u64) -> Trampoline<u64> {
+                  if n <= 1 {
+                      Trampoline::done(accumulator)
+                  } else {
+                      Trampoline::suspend(move || {
+                          factorial_helper(n - 1, n * accumulator)
+                      })
+                  }
+              }
+
+              // 通常の再帰では stackoverflow するような深さでも実行可能
+              let result = factorial(10000).run();
+
+      - name: resume
+        signature: "pub fn resume(self) -> Either<Box<dyn FnOnce() -> Trampoline<A>>, A>"
+        description: |
+          計算を一歩進め、次の状態を返す。
+          - Left: 次の計算（thunk）
+          - Right: 最終結果
+
+          これは run() の内部で使用される低レベル操作だが、
+          外部から計算を段階的に進めたい場合にも使用できる。
+        examples:
+          - description: "段階的な実行"
+            code: |
+              let trampoline = Trampoline::suspend(|| Trampoline::done(42));
+
+              match trampoline.resume() {
+                  Either::Left(next) => {
+                      let result = next().run();
+                      assert_eq!(result, 42);
+                  }
+                  Either::Right(value) => {
+                      panic!("Expected Left, got Right");
+                  }
+              }
+
+      - name: map
+        signature: "pub fn map<B, F>(self, f: F) -> Trampoline<B> where F: FnOnce(A) -> B + 'static, A: 'static"
+        description: |
+          Trampoline の結果に関数を適用する。
+          flat_map を使って実装される。
+        examples:
+          - description: "結果の変換"
+            code: |
+              let trampoline = Trampoline::done(42);
+              let mapped = trampoline.map(|n| n.to_string());
+              assert_eq!(mapped.run(), "42");
+
+      - name: flat_map
+        signature: "pub fn flat_map<B, F>(self, f: F) -> Trampoline<B> where F: FnOnce(A) -> Trampoline<B> + 'static, A: 'static"
+        description: |
+          Trampoline の結果に Trampoline を返す関数を適用し、結果を平坦化する。
+          連鎖的な再帰計算を表現できる。
+
+          内部実装:
+          - FlatMap バリアントを使用して継続を遅延
+          - run() 時に効率的に評価
+        examples:
+          - description: "計算の連鎖"
+            code: |
+              let trampoline = Trampoline::done(10)
+                  .flat_map(|x| Trampoline::done(x * 2))
+                  .flat_map(|x| Trampoline::done(x + 1));
+              assert_eq!(trampoline.run(), 21);
+
+      - name: and_then
+        signature: "pub fn and_then<B, F>(self, f: F) -> Trampoline<B> where F: FnOnce(A) -> Trampoline<B> + 'static, A: 'static"
+        description: |
+          flat_map のエイリアス。Rust の慣習に合わせた名前。
+
+      - name: then
+        signature: "pub fn then<B>(self, next: Trampoline<B>) -> Trampoline<B> where A: 'static, B: 'static"
+        description: |
+          最初の Trampoline を実行し、その結果を捨てて次の Trampoline を返す。
+        examples:
+          - description: "計算の連続実行"
+            code: |
+              let first = Trampoline::done(1);
+              let second = Trampoline::done(2);
+              let result = first.then(second);
+              assert_eq!(result.run(), 2);
+
+      - name: pure
+        signature: "pub fn pure(value: A) -> Self"
+        description: |
+          done のエイリアス。Applicative の pure に対応。
+
+    usage_patterns:
+      - name: "相互再帰（Mutual Recursion）"
+        description: |
+          is_even と is_odd のような相互再帰をスタック安全に実装する。
+        example: |
+          fn is_even(n: u64) -> Trampoline<bool> {
+              if n == 0 {
+                  Trampoline::done(true)
+              } else {
+                  Trampoline::suspend(move || is_odd(n - 1))
+              }
+          }
+
+          fn is_odd(n: u64) -> Trampoline<bool> {
+              if n == 0 {
+                  Trampoline::done(false)
+              } else {
+                  Trampoline::suspend(move || is_even(n - 1))
+              }
+          }
+
+          // 100,000 でもスタックオーバーフローしない
+          assert!(is_even(100_000).run());
+
+      - name: "フィボナッチ（非末尾再帰の変換）"
+        description: |
+          非末尾再帰のアルゴリズムを Trampoline で表現する。
+        example: |
+          fn fibonacci(n: u64) -> Trampoline<u64> {
+              if n < 2 {
+                  Trampoline::done(n)
+              } else {
+                  Trampoline::suspend(move || fibonacci(n - 1))
+                      .flat_map(move |x| {
+                          Trampoline::suspend(move || fibonacci(n - 2))
+                              .map(move |y| x + y)
+                      })
+              }
+          }
+
+          // 注意: これは指数時間だが、スタックは安全
+          assert_eq!(fibonacci(10).run(), 55);
+
+      - name: "木の走査"
+        description: |
+          深い木構造の走査をスタック安全に行う。
+        example: |
+          enum Tree<T> {
+              Leaf(T),
+              Node(Box<Tree<T>>, Box<Tree<T>>),
+          }
+
+          fn sum_tree(tree: Tree<i32>) -> Trampoline<i32> {
+              match tree {
+                  Tree::Leaf(value) => Trampoline::done(value),
+                  Tree::Node(left, right) => {
+                      Trampoline::suspend(move || sum_tree(*left))
+                          .flat_map(move |left_sum| {
+                              Trampoline::suspend(move || sum_tree(*right))
+                                  .map(move |right_sum| left_sum + right_sum)
+                          })
+                  }
+              }
+          }
+
+    trait_implementations:
+      - trait: Individual Methods
+        description: |
+          Trampoline<A> は TypeConstructor トレイトの実装を見送り、
+          個別メソッド（map, flat_map, pure）のみを提供する。
+
+          理由:
+          - Trampoline<A> は 'static ライフタイム制約を持つ
+          - WithType<B> の定義において、B: 'static が必要になる
+          - これは TypeConstructor の汎用性を損なう
+
+          代わりに、Trampoline は独自の map, flat_map, pure メソッドを提供し、
+          モナド法則を満たすことで実質的にモナドとして機能する。
+
+      - trait: Debug (条件付き)
+        description: |
+          A: Debug の場合、Trampoline<A> も Debug を実装する。
+          Done の場合は値を表示し、Suspend/FlatMap の場合は "<suspended>" を表示。
+
+    type_erasure_pattern:
+      description: |
+        FlatMap バリアントでは異なる型間の継続を扱う必要があるため、
+        型消去パターンを使用する。
+
+        TrampolineContinuation トレイト:
+        ```rust
+        /// 内部的な継続を表すトレイト（型消去用）
+        trait TrampolineContinuation<A> {
+            fn step(self: Box<Self>) -> Trampoline<A>;
+        }
+        ```
+
+        FlatMapInternal バリアント:
+        ```rust
+        pub enum Trampoline<A> {
+            Done(A),
+            Suspend(Box<dyn FnOnce() -> Trampoline<A> + 'static>),
+            FlatMapInternal(Box<dyn TrampolineContinuation<A>>),
+        }
+        ```
+
+        これにより、flat_map(f) で f: FnOnce(A) -> Trampoline<B> のような
+        異なる型間の継続を表現できる。
+
+    dependencies:
+      - description: |
+          Phase 1 の型クラストレイト（Functor, Applicative, Monad）は
+          Trampoline には直接実装しない。
+          代わりに、同等のメソッド（map, flat_map, pure）を個別に提供する。
+
+  # ============================================================================
+  # 3. Continuation<R, A> - 継続モナド
+  # ============================================================================
+  - id: control_continuation
+    name: Continuation<R, A>
+    priority: medium
+    description: |
+      継続渡しスタイル（CPS）を抽象化するモナド。
+      「次に何をするか」を表す関数（継続）を操作できる。
+
+      継続モナドは、非ローカルな制御フロー（例外、早期リターン、
+      バックトラッキングなど）を純粋関数型で表現できる。
+
+      型パラメータ:
+      - R: 最終的な戻り値の型（全体の計算の結果型）
+      - A: 現在の計算が生成する値の型
+
+    internal_structure:
+      description: |
+        Continuation の内部構造:
+
+        ```rust
+        /// 継続モナド
+        /// run_continuation は (A -> R) -> R の形式
+        pub struct Continuation<R, A> {
+            run_continuation: Box<dyn FnOnce(Box<dyn FnOnce(A) -> R>) -> R>,
+        }
+        ```
+
+        または、より Rust らしく:
+
+        ```rust
+        pub struct Continuation<R, A, F>
+        where
+            F: FnOnce(Box<dyn FnOnce(A) -> R>) -> R,
+        {
+            run_continuation: F,
+            _phantom: PhantomData<(R, A)>,
+        }
+        ```
+
+    laws:
+      - name: Monad Left Identity（Monad 左単位元律）
+        description: |
+          pure した値を flat_map するのは、関数を直接適用するのと同じ。
+        equation: "Continuation::pure(a).flat_map(f).run(k) == f(a).run(k)"
+        property_test: |
+          fn prop_monad_left_identity<A, B, R>(
+              a: A,
+              f: impl Fn(A) -> Continuation<R, B>,
+              k: impl FnOnce(B) -> R,
+          ) -> bool
+          where
+              A: Clone,
+              R: PartialEq,
+          {
+              let left = Continuation::pure(a.clone()).flat_map(&f);
+              let right = f(a);
+              left.run(k.clone()) == right.run(k)
+          }
+
+      - name: Monad Right Identity（Monad 右単位元律）
+        description: |
+          Continuation を pure で flat_map するのは、元の Continuation と同じ。
+        equation: "cont.flat_map(Continuation::pure).run(k) == cont.run(k)"
+        property_test: |
+          fn prop_monad_right_identity<A, R>(
+              cont: Continuation<R, A>,
+              k: impl FnOnce(A) -> R,
+          ) -> bool
+          where
+              R: PartialEq,
+          {
+              let original = cont.clone().run(k.clone());
+              let mapped = cont.flat_map(Continuation::pure).run(k);
+              original == mapped
+          }
+
+      - name: Monad Associativity（Monad 結合律）
+        description: |
+          flat_map の連鎖は結合的である。
+        equation: "cont.flat_map(f).flat_map(g).run(k) == cont.flat_map(|x| f(x).flat_map(g)).run(k)"
+        property_test: |
+          fn prop_monad_associativity<A, B, C, R>(
+              cont: Continuation<R, A>,
+              f: impl Fn(A) -> Continuation<R, B> + Clone,
+              g: impl Fn(B) -> Continuation<R, C> + Clone,
+              k: impl FnOnce(C) -> R,
+          ) -> bool
+          where
+              R: PartialEq,
+          {
+              let left = cont.clone().flat_map(f.clone()).flat_map(g.clone());
+              let right = cont.flat_map(|x| f(x).flat_map(g.clone()));
+              left.run(k.clone()) == right.run(k)
+          }
+
+    methods:
+      - name: new
+        signature: "pub fn new<F>(run: F) -> Self where F: FnOnce(Box<dyn FnOnce(A) -> R>) -> R + 'static"
+        description: |
+          継続関数から Continuation を作成する。
+          run は (A -> R) -> R の形式の関数。
+        examples:
+          - description: "基本的な継続の作成"
+            code: |
+              let cont: Continuation<i32, i32> = Continuation::new(|k| {
+                  let value = 42;
+                  k(value) // 継続 k に値を渡す
+              });
+              let result = cont.run(|x| x * 2);
+              assert_eq!(result, 84);
+
+      - name: pure
+        signature: "pub fn pure(value: A) -> Self where A: 'static"
+        description: |
+          純粋な値を Continuation コンテキストに持ち上げる。
+          pure(a).run(k) == k(a)
+        examples:
+          - description: "値を継続に持ち上げる"
+            code: |
+              let cont = Continuation::pure(42);
+              let result = cont.run(|x| x.to_string());
+              assert_eq!(result, "42");
+
+      - name: run
+        signature: "pub fn run<K>(self, continuation: K) -> R where K: FnOnce(A) -> R"
+        description: |
+          継続を渡して計算を実行する。
+          最終的な結果 R を返す。
+        examples:
+          - description: "継続の実行"
+            code: |
+              let cont = Continuation::pure(10);
+              let result = cont.run(|x| x + 5);
+              assert_eq!(result, 15);
+
+      - name: map
+        signature: "pub fn map<B, F>(self, f: F) -> Continuation<R, B> where F: FnOnce(A) -> B + 'static, A: 'static"
+        description: |
+          計算の結果に関数を適用する。
+          cont.map(f).run(k) == cont.run(|a| k(f(a)))
+        examples:
+          - description: "結果の変換"
+            code: |
+              let cont = Continuation::pure(42);
+              let mapped = cont.map(|x| x.to_string());
+              let result = mapped.run(|s| format!("Value: {}", s));
+              assert_eq!(result, "Value: 42");
+
+      - name: flat_map
+        signature: "pub fn flat_map<B, F>(self, f: F) -> Continuation<R, B> where F: FnOnce(A) -> Continuation<R, B> + 'static, A: 'static"
+        description: |
+          計算の結果に Continuation を返す関数を適用し、結果を平坦化する。
+          cont.flat_map(f).run(k) == cont.run(|a| f(a).run(k))
+        examples:
+          - description: "継続の連鎖"
+            code: |
+              let cont = Continuation::pure(10)
+                  .flat_map(|x| Continuation::pure(x * 2))
+                  .flat_map(|x| Continuation::pure(x + 1));
+              let result = cont.run(|x| x);
+              assert_eq!(result, 21);
+
+      - name: call_with_current_continuation_once
+        signature: "pub fn call_with_current_continuation_once<F>(f: F) -> Self where F: FnOnce(Box<dyn FnOnce(A) -> Continuation<R, A>>) -> Continuation<R, A> + 'static"
+        description: |
+          現在の継続を捕捉する（call/cc の一度きり版）。
+          f には「現在の継続」を表す FnOnce 関数が渡される。
+          この継続は一度だけ呼び出すことができる。
+
+          注意: Rust の所有権システムの制約により、継続を複数回呼び出す
+          完全な call/cc は実装が困難。この関数は継続を一度だけ使用する
+          ユースケース（早期リターン、例外処理など）をサポートする。
+
+          これは非ローカルな制御フロー（早期リターン、例外など）を
+          実現するための機構。
+        examples:
+          - description: "call/cc による早期リターン"
+            code: |
+              // 条件を満たしたら即座にその値を返す
+              let cont = Continuation::call_with_current_continuation_once(|exit| {
+                  Continuation::pure(1)
+                      .flat_map(move |x| {
+                          if x > 10 {
+                              exit(x) // 即座にリターン
+                          } else {
+                              Continuation::pure(x + 5)
+                          }
+                      })
+              });
+              let result = cont.run(|x| x);
+              // x = 1 なので条件を満たさず、x + 5 = 6 が返る
+              assert_eq!(result, 6);
+
+      # NOTE: shift と reset は将来の拡張として future_extensions セクションに記載。
+      # 限定継続（delimited continuation）は実装の複雑さが高いため、
+      # Phase 3 のスコープ外とする。
+
+    usage_patterns:
+      - name: "早期リターン"
+        description: |
+          計算の途中で条件に応じて即座に結果を返す。
+        example: |
+          fn find_first_negative(numbers: &[i32]) -> Option<i32> {
+              Continuation::call_with_current_continuation(|exit| {
+                  for &n in numbers {
+                      if n < 0 {
+                          return exit(Some(n));
+                      }
+                  }
+                  Continuation::pure(None)
+              }).run(|x| x)
+          }
+
+      - name: "例外処理の模倣"
+        description: |
+          try-catch のような例外処理を純粋関数型で表現する。
+        example: |
+          type Result<T> = std::result::Result<T, String>;
+
+          fn safe_divide(a: i32, b: i32) -> Continuation<Result<i32>, i32> {
+              Continuation::call_with_current_continuation(|throw| {
+                  if b == 0 {
+                      throw(Err("Division by zero".to_string()))
+                  } else {
+                      Continuation::pure(a / b)
+                  }
+              })
+          }
+
+    trait_implementations:
+      - trait: TypeConstructor
+        description: |
+          Continuation<R, A> は A に対する TypeConstructor を実装する。
+          R は固定。
+
+      - trait: Functor
+        description: |
+          Continuation は Functor を実装する。
+
+      - trait: Applicative
+        description: |
+          Continuation は Applicative を実装する。
+
+      - trait: Monad
+        description: |
+          Continuation は Monad を実装する。
+
+    dependencies:
+      - typeclass_functor
+      - typeclass_applicative
+      - typeclass_monad
+
+  # ============================================================================
+  # 4. Free<F, A> - Free モナド（スコープ外）
+  # ============================================================================
+  # Free モナドは Rust の型システム制約により Phase 3 のスコープ外とする。
+  # 詳細は future_extensions セクションを参照。
+
+# テスト戦略
+testing_strategy:
+  property_based_testing:
+    description: |
+      各構造のモナド法則・関手法則をプロパティベーステストで検証する。
+      proptest クレートを使用。
+    test_cases:
+      - "Lazy の冪等律・遅延性・メモ化"
+      - "Lazy の Functor 法則（恒等律、合成律）"
+      - "Lazy の Monad 法則（左単位元律、右単位元律、結合律）"
+      - "Trampoline のスタック安全性"
+      - "Trampoline の Monad 法則"
+      - "Continuation の Monad 法則"
+
+  unit_tests:
+    description: |
+      各構造の基本的な動作を単体テストで確認。
+    test_cases:
+      - "Lazy の基本的な遅延評価"
+      - "Lazy の毒状態への遷移"
+      - "Trampoline の基本的な再帰"
+      - "Trampoline の相互再帰"
+      - "Trampoline の深い再帰（スタック安全性確認）"
+      - "Continuation の call_with_current_continuation_once"
+      - "Either の基本操作"
+
+  stack_safety_tests:
+    description: |
+      スタック安全性を検証する特別なテスト。
+    test_cases:
+      - "Trampoline で 100,000 回の再帰"
+      - "Trampoline で 1,000,000 回の相互再帰"
+
+  integration_tests:
+    description: |
+      Phase 1 の型クラス、Phase 2 の合成ユーティリティとの統合をテスト。
+    test_cases:
+      - "Lazy と compose! の組み合わせ"
+      - "Trampoline と pipe! の組み合わせ"
+      - "Lazy と Trampoline の組み合わせ"
+
+# 実装上の考慮事項
+implementation_notes:
+  lazy_implementation:
+    description: |
+      Lazy の実装における考慮事項:
+
+      1. RefCell vs UnsafeCell:
+         - RefCell を使用して #![forbid(unsafe_code)] を維持
+         - 性能よりも安全性を優先
+
+      2. 毒状態の扱い:
+         - 初期化関数のパニック時に毒状態に遷移
+         - 毒状態からは回復不能（std::sync::LazyLock と同様）
+
+      3. Clone の実装:
+         - 初期化済み: 値をクローン
+         - 未初期化: 初期化関数をクローン（F: Clone が必要）
+
+  trampoline_implementation:
+    description: |
+      Trampoline の実装における考慮事項:
+
+      1. FlatMap バリアントの必要性:
+         - 単純な実装では flat_map が右結合になる
+         - 右結合は中間データ構造を生成し、非効率
+         - FlatMap バリアントで結合を遅延させ、run() 時に左結合で評価
+
+      2. 'static ライフタイム:
+         - Box<dyn FnOnce() -> ...> に格納するため必要
+         - ローカル変数への参照を持つクロージャは使用不可
+
+      3. run() の実装:
+         - while ループで処理
+         - 各ステップで Done, Suspend, FlatMap を処理
+         - FlatMap は結合律を利用して最適化
+
+  continuation_implementation:
+    description: |
+      Continuation の実装における考慮事項:
+
+      1. 型パラメータの順序:
+         - Continuation<R, A> で R が最終結果、A が現在の値
+         - これは Haskell の Cont r a と同じ順序
+
+      2. call/cc の実装:
+         - 継続を第一級の値として扱う
+         - 継続を呼び出すと現在の計算が置き換わる
+
+      3. shift/reset の実装:
+         - 限定継続を実現
+         - 継続の範囲を制限する
+
+  either_implementation:
+    description: |
+      Either の実装における考慮事項:
+
+      1. シンプルな設計:
+         - Left と Right の2つのバリアントを持つ enum
+         - Trampoline の resume メソッドの戻り値として使用
+
+      2. 提供するメソッド:
+         - is_left, is_right: バリアント判定
+         - left, right: 値の抽出（Option を返す）
+         - map_left, map_right: 片方のバリアントへの関数適用
+
+      3. トレイト実装:
+         - Debug, Clone, PartialEq, Eq を derive
+
+# 将来の拡張
+future_extensions:
+  - name: LazyLock
+    description: |
+      スレッドセーフ版の Lazy。
+      std::sync::LazyLock と同様の機能を提供。
+    target_phase: future
+    complexity: medium
+
+  - name: IO モナド
+    description: |
+      I/O 操作を純粋に表現する IO モナド。
+      Lazy と組み合わせて遅延 I/O を実現。
+    target_phase: 6
+    complexity: high
+
+  - name: モナド変換子
+    description: |
+      TrampolineT, ContinuationT などのモナド変換子。
+      他のモナドと組み合わせて使用。
+    target_phase: 6
+    complexity: high
+
+  - name: Free モナド
+    description: |
+      任意の Functor F から Monad を構築する Free モナド。
+      DSL の構築とインタープリタパターンを可能にする。
+
+      Phase 3 のスコープ外とした理由:
+      - Rust の型システム制約（特に HKT の欠如）により汎用実装が困難
+      - F::WithType<Free<F, A>> の表現が複雑
+      - Functor トレイトの制約と GAT の組み合わせが難しい
+      - fold_map の型シグネチャが複雑
+
+      将来的な対策案:
+      1. 特定の DSL 用に特殊化された Free を提供
+      2. 存在型（Box<dyn Trait>）による型消去
+      3. マクロによるボイラープレート削減
+      4. Rust の型システムの進化（HKT サポート等）を待つ
+    target_phase: future
+    complexity: very_high
+
+  - name: Freer モナド
+    description: |
+      Free モナドの最適化版。
+      Functor の代わりに型レベルのリストを使用。
+    target_phase: future
+    complexity: very_high
+
+  - name: 限定継続（shift/reset）
+    description: |
+      Continuation モナドの限定継続サポート。
+      継続の範囲を区切る機能を提供。
+    target_phase: future
+    complexity: high

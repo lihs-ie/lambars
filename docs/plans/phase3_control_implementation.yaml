@@ -1,0 +1,1338 @@
+# Phase 3: 制御構造（Control Structures）実装計画
+# Control Structures Implementation Plan
+#
+# 要件定義: docs/requirements/phase3_control.yaml
+# 作成日: 2025-12-30
+# 対象: Rust 1.92.0, edition 2024
+# ポリシー: #![forbid(unsafe_code)]
+
+version: "1.0.0"
+phase: 3
+name: "Control Structures Implementation"
+based_on: "docs/requirements/phase3_control.yaml"
+
+# =============================================================================
+# 概要
+# =============================================================================
+overview:
+  description: |
+    Phase 3 では関数型プログラミングにおける制御構造を実装する。
+    これらの構造は Rust が標準で提供していない「遅延評価」と
+    「スタック安全な再帰」の問題を解決する。
+
+  goals:
+    - Lazy<T>: 遅延評価とメモ化を提供
+    - Trampoline<A>: スタック安全な再帰（TCO の代替）を実現
+    - Continuation<R, A>: 継続渡しスタイル（CPS）の抽象化
+
+  scope_exclusions:
+    - Free<F, A>: |
+        Rust の型システム制約（特に HKT の欠如）により汎用実装が困難なため、
+        Phase 3 のスコープ外とする。将来の拡張として検討。
+
+  constraints:
+    - "#![forbid(unsafe_code)]" ポリシーに準拠
+    - RefCell ベースの内部可変性（UnsafeCell は使用不可）
+    - rstest によるユニットテスト
+    - proptest による法則検証
+    - テストカバレッジ 100%
+    - 略語を使用しないこと
+
+# =============================================================================
+# ファイル構成
+# =============================================================================
+file_structure:
+  source_files:
+    - path: src/control/mod.rs
+      description: |
+        モジュール統合とエクスポート。
+        各サブモジュールの re-export を行う。
+      exports:
+        - Lazy
+        - LazyState
+        - Trampoline
+        - Either
+        - Continuation
+
+    - path: src/control/either.rs
+      description: |
+        Either<L, R> 型の実装。
+        Trampoline の resume メソッドの戻り値として使用。
+      types:
+        - name: Either<L, R>
+          description: Left または Right のいずれかを表す型
+
+    - path: src/control/lazy.rs
+      description: |
+        遅延評価を実現する Lazy<T> 型の実装。
+        RefCell を使用した内部可変性でメモ化を実現。
+      types:
+        - name: LazyState<T, F>
+          description: Lazy の内部状態（Uninit/Init/Poisoned）
+        - name: Lazy<T, F>
+          description: 遅延評価とメモ化を提供する型
+      api_notes:
+        - force() は Ref<'_, T> を返す（&T ではない）
+        - Deref トレイトは実装しない（RefCell の制約による）
+
+    - path: src/control/trampoline.rs
+      description: |
+        スタック安全な再帰を実現する Trampoline<A> 型の実装。
+        Scala の TailCalls を参考に設計。
+      types:
+        - name: Trampoline<A>
+          description: スタック安全な再帰のためのデータ構造
+        - name: TrampolineContinuation<A> (trait)
+          description: FlatMap バリアントの型消去用トレイト
+      design_notes:
+        - TypeConstructor トレイトは実装しない（'static 制約の問題）
+        - 個別メソッド（map, flat_map, pure）のみ提供
+
+    - path: src/control/continuation.rs
+      description: |
+        継続渡しスタイルを抽象化する Continuation<R, A> モナドの実装。
+      types:
+        - name: Continuation<R, A>
+          description: CPS を抽象化するモナド
+      api_notes:
+        - call_with_current_continuation_once を提供（FnOnce ベース）
+        - 完全な call/cc は Rust の所有権システムの制約で困難
+
+  test_files:
+    - path: tests/either_tests.rs
+      description: Either<L, R> の単体テスト
+      test_categories:
+        - is_left, is_right
+        - left, right 抽出
+        - map_left, map_right
+
+    - path: tests/lazy_tests.rs
+      description: Lazy<T> の単体テスト
+      test_categories:
+        - 基本的な遅延評価
+        - メモ化の検証
+        - 毒状態への遷移
+        - map と flat_map
+        - force() による Ref 取得
+
+    - path: tests/lazy_laws.rs
+      description: Lazy<T> の法則テスト（proptest）
+      test_categories:
+        - 冪等律（Idempotence）
+        - 遅延性（Laziness）
+        - メモ化（Memoization）
+        - Functor 恒等律・合成律
+        - Monad 左単位元律・右単位元律・結合律
+
+    - path: tests/trampoline_tests.rs
+      description: Trampoline<A> の単体テスト
+      test_categories:
+        - 基本的な再帰
+        - 相互再帰（mutual recursion）
+        - スタック安全性の検証（深い再帰）
+        - map と flat_map
+        - resume による段階的実行
+
+    - path: tests/trampoline_laws.rs
+      description: Trampoline<A> の法則テスト（proptest）
+      test_categories:
+        - スタック安全性
+        - Functor 恒等律・合成律
+        - Monad 左単位元律・右単位元律・結合律
+
+    - path: tests/continuation_tests.rs
+      description: Continuation<R, A> の単体テスト
+      test_categories:
+        - 基本的な継続
+        - call_with_current_continuation_once による早期リターン
+        - map と flat_map
+
+    - path: tests/continuation_laws.rs
+      description: Continuation<R, A> の法則テスト（proptest）
+      test_categories:
+        - Monad 左単位元律・右単位元律・結合律
+
+    - path: tests/control_integration.rs
+      description: 統合テスト
+      test_categories:
+        - Lazy と Trampoline の組み合わせ
+        - Phase 1 の型クラスとの統合
+        - Phase 2 の compose/pipe との組み合わせ
+
+# =============================================================================
+# 実装順序（TDD アプローチ）
+# =============================================================================
+implementation_order:
+  - step: 1
+    name: Either 型の実装
+    items:
+      - tests/either_tests.rs を先に作成（Red）
+      - src/control/either.rs を実装（Green）
+      - リファクタリング
+
+  - step: 2
+    name: Lazy<T> の実装（critical）
+    items:
+      - tests/lazy_tests.rs を先に作成（Red）
+      - src/control/lazy.rs を実装（Green）
+      - tests/lazy_laws.rs で法則検証
+      - リファクタリング
+    notes:
+      - Deref トレイトは実装しない
+      - force() は Ref<'_, T> を返す
+      - TypeConstructor は Lazy<T>（F = fn() -> T）に対してのみ実装
+
+  - step: 3
+    name: Trampoline<A> の実装（critical）
+    items:
+      - tests/trampoline_tests.rs を先に作成（Red）
+      - src/control/trampoline.rs を実装（Green）
+      - tests/trampoline_laws.rs で法則検証
+      - スタック安全性テスト（100,000 回の再帰）
+    notes:
+      - TypeConstructor トレイトは実装しない
+      - TrampolineContinuation トレイトによる型消去パターンを使用
+      - FlatMapInternal バリアントで異なる型間の継続を扱う
+
+  - step: 4
+    name: Continuation<R, A> の実装（medium）
+    items:
+      - tests/continuation_tests.rs を先に作成（Red）
+      - src/control/continuation.rs を実装（Green）
+      - tests/continuation_laws.rs で法則検証
+    notes:
+      - call_with_current_continuation_once を実装（FnOnce ベース）
+      - 完全な call/cc は将来の拡張
+
+  - step: 5
+    name: 統合とドキュメント
+    items:
+      - src/control/mod.rs の更新
+      - tests/control_integration.rs を作成
+      - ドキュメントコメントの完成
+      - cargo doc --no-deps でドキュメント確認
+
+# =============================================================================
+# 実装詳細計画
+# =============================================================================
+implementation_plan:
+  # ===========================================================================
+  # 1. Either<L, R> - ユーティリティ型
+  # ===========================================================================
+  - id: impl_either
+    requirement_id: utility
+    name: Either<L, R> ユーティリティ型
+    priority: 1
+    description: |
+      Trampoline の resume メソッドで使用する Either 型。
+      Left と Right の2つのバリアントを持つ。
+    files:
+      - path: src/control/either.rs
+        description: Either 型の実装
+    implementation_steps:
+      - step: 1
+        description: Either enum の定義
+        code_outline: |
+          /// 2つの可能性のうちの1つを表す型。
+          ///
+          /// Trampoline の resume メソッドの戻り値として使用される。
+          #[derive(Debug, Clone, PartialEq, Eq)]
+          pub enum Either<L, R> {
+              /// 左の値
+              Left(L),
+              /// 右の値
+              Right(R),
+          }
+
+      - step: 2
+        description: Either のメソッド実装
+        code_outline: |
+          impl<L, R> Either<L, R> {
+              /// Left かどうかを判定する
+              pub fn is_left(&self) -> bool { ... }
+
+              /// Right かどうかを判定する
+              pub fn is_right(&self) -> bool { ... }
+
+              /// Left の値を取り出す
+              pub fn left(self) -> Option<L> { ... }
+
+              /// Right の値を取り出す
+              pub fn right(self) -> Option<R> { ... }
+
+              /// Left に関数を適用する
+              pub fn map_left<T, F>(self, function: F) -> Either<T, R>
+              where
+                  F: FnOnce(L) -> T { ... }
+
+              /// Right に関数を適用する
+              pub fn map_right<T, F>(self, function: F) -> Either<L, T>
+              where
+                  F: FnOnce(R) -> T { ... }
+          }
+    test_cases:
+      - name: test_either_left_is_left
+      - name: test_either_right_is_right
+      - name: test_either_left_extraction
+      - name: test_either_right_extraction
+      - name: test_either_map_left
+      - name: test_either_map_right
+    estimated_effort: 1h
+
+  # ===========================================================================
+  # 2. Lazy<T, F> - 遅延評価とメモ化
+  # ===========================================================================
+  - id: impl_lazy
+    requirement_id: control_lazy
+    name: Lazy<T, F> 遅延評価型
+    priority: 2
+    description: |
+      遅延評価を実現する型。値は force() が呼ばれるまで計算されず、
+      一度計算された値はメモ化（キャッシュ）される。
+      RefCell を使用した内部可変性で実装する。
+    files:
+      - path: src/control/lazy.rs
+        description: Lazy 型の実装
+    implementation_steps:
+      - step: 1
+        description: LazyState enum の定義
+        code_outline: |
+          use std::cell::RefCell;
+
+          /// Lazy の内部状態を表す enum
+          enum LazyState<T, F> {
+              /// 未初期化（初期化関数を保持）
+              Uninit(F),
+              /// 初期化済み（値を保持）
+              Init(T),
+              /// 毒状態（初期化関数がパニックした）
+              Poisoned,
+          }
+
+      - step: 2
+        description: Lazy 構造体の定義
+        code_outline: |
+          /// 遅延評価を実現する型。
+          ///
+          /// # 例
+          ///
+          /// ```
+          /// use functional_rusty::control::Lazy;
+          ///
+          /// let lazy = Lazy::new(|| {
+          ///     println!("Computing...");
+          ///     42
+          /// });
+          /// // この時点では "Computing..." は出力されない
+          ///
+          /// let value = lazy.force(); // ここで初めて出力される
+          /// assert_eq!(*value, 42);
+          /// ```
+          pub struct Lazy<T, F = fn() -> T> {
+              state: RefCell<LazyState<T, F>>,
+          }
+
+      - step: 3
+        description: Lazy::new と Lazy::new_with_value の実装
+        code_outline: |
+          impl<T, F: FnOnce() -> T> Lazy<T, F> {
+              /// 新しい遅延値を作成する。
+              pub fn new(initializer: F) -> Self {
+                  Lazy {
+                      state: RefCell::new(LazyState::Uninit(initializer)),
+                  }
+              }
+          }
+
+          impl<T> Lazy<T, fn() -> T> {
+              /// 既に計算済みの値で Lazy を作成する。
+              pub fn new_with_value(value: T) -> Self {
+                  Lazy {
+                      state: RefCell::new(LazyState::Init(value)),
+                  }
+              }
+          }
+
+      - step: 4
+        description: Lazy::force の実装（RefCell ベース、借用の競合を防ぐ）
+        code_outline: |
+          impl<T, F: FnOnce() -> T> Lazy<T, F> {
+              /// 値を強制的に評価し、参照を返す。
+              ///
+              /// # パニック
+              ///
+              /// 初期化関数がパニックした場合、セルは毒状態になり、
+              /// 以降の force() 呼び出しはすべてパニックする。
+              ///
+              /// # 実装上の注意
+              ///
+              /// 借用の競合を防ぐため、以下の手順で実装している:
+              /// 1. 短い借用で状態をチェック（初期化が必要かどうかを判定）
+              /// 2. 借用を解放してから初期化を実行
+              /// 3. 初期化後に再度借用して参照を返す
+              pub fn force(&self) -> std::cell::Ref<'_, T> {
+                  // 借用を短く保ち、初期化の必要性のみを判定
+                  let needs_initialization = {
+                      let state = self.state.borrow();
+                      match &*state {
+                          LazyState::Init(_) => false,
+                          LazyState::Poisoned => panic!("Lazy instance has been poisoned"),
+                          LazyState::Uninit(_) => true,
+                      }
+                  };
+                  // 借用はここで解放される
+
+                  // 初期化が必要な場合は実行
+                  if needs_initialization {
+                      self.initialize();
+                  }
+
+                  // 初期化後に参照を取得して返す
+                  std::cell::Ref::map(self.state.borrow(), |state| {
+                      match state {
+                          LazyState::Init(value) => value,
+                          _ => panic!("Lazy should be initialized at this point"),
+                      }
+                  })
+              }
+
+              /// 初期化を実行する内部メソッド。
+              ///
+              /// 毒状態を経由することで、初期化関数がパニックした場合に
+              /// 適切にエラー状態を保持する。
+              fn initialize(&self) {
+                  let mut state = self.state.borrow_mut();
+
+                  // 二重初期化チェック（競合を防ぐ）
+                  match &*state {
+                      LazyState::Init(_) => return,
+                      LazyState::Poisoned => panic!("Lazy instance has been poisoned"),
+                      LazyState::Uninit(_) => {}
+                  }
+
+                  // 初期化関数を取り出し、毒状態に遷移
+                  // パニックが発生しても毒状態が維持される
+                  let LazyState::Uninit(initializer) = std::mem::replace(
+                      &mut *state,
+                      LazyState::Poisoned
+                  ) else {
+                      unreachable!()
+                  };
+
+                  // 初期化関数を実行（ここでパニックすると毒状態のまま）
+                  let value = initializer();
+
+                  // 成功したら Init 状態に遷移
+                  *state = LazyState::Init(value);
+              }
+          }
+
+      - step: 5
+        description: get, is_initialized, is_poisoned の実装
+        code_outline: |
+          impl<T, F> Lazy<T, F> {
+              /// 初期化済みの場合は Some(&value) を返す。
+              pub fn get(&self) -> Option<std::cell::Ref<'_, T>> { ... }
+
+              /// 値が初期化済みかどうかを返す。
+              pub fn is_initialized(&self) -> bool { ... }
+
+              /// セルが毒状態かどうかを返す。
+              pub fn is_poisoned(&self) -> bool { ... }
+          }
+
+      - step: 6
+        description: map と flat_map の実装
+        code_outline: |
+          impl<T, F: FnOnce() -> T> Lazy<T, F> {
+              /// 遅延値に関数を適用する。
+              pub fn map<U, G>(self, function: G) -> Lazy<U, impl FnOnce() -> U>
+              where
+                  G: FnOnce(T) -> U,
+              {
+                  Lazy::new(move || {
+                      let value = match self.state.into_inner() {
+                          LazyState::Init(v) => v,
+                          LazyState::Uninit(f) => f(),
+                          LazyState::Poisoned => panic!("Lazy instance has been poisoned"),
+                      };
+                      function(value)
+                  })
+              }
+
+              /// 遅延値に Lazy を返す関数を適用し、結果を平坦化する。
+              pub fn flat_map<U, FU, G>(self, function: G) -> Lazy<U, impl FnOnce() -> U>
+              where
+                  FU: FnOnce() -> U,
+                  G: FnOnce(T) -> Lazy<U, FU>,
+              {
+                  Lazy::new(move || {
+                      let value = match self.state.into_inner() {
+                          LazyState::Init(v) => v,
+                          LazyState::Uninit(f) => f(),
+                          LazyState::Poisoned => panic!("Lazy instance has been poisoned"),
+                      };
+                      let lazy_result = function(value);
+                      match lazy_result.state.into_inner() {
+                          LazyState::Init(v) => v,
+                          LazyState::Uninit(f) => f(),
+                          LazyState::Poisoned => panic!("Lazy instance has been poisoned"),
+                      }
+                  })
+              }
+          }
+
+      - step: 7
+        description: pure, zip, zip_with の実装
+        code_outline: |
+          impl<T> Lazy<T, fn() -> T> {
+              /// 純粋な値を Lazy コンテキストに持ち上げる。
+              pub fn pure(value: T) -> Self
+              where
+                  T: Clone,
+              {
+                  Lazy::new_with_value(value)
+              }
+          }
+
+          impl<T, F: FnOnce() -> T> Lazy<T, F> {
+              /// 二つの遅延値を組み合わせてタプルを返す。
+              pub fn zip<U, FU>(self, other: Lazy<U, FU>) -> Lazy<(T, U), impl FnOnce() -> (T, U)>
+              where
+                  FU: FnOnce() -> U,
+              { ... }
+
+              /// 二つの遅延値を関数で組み合わせる。
+              pub fn zip_with<U, V, FU, G>(
+                  self,
+                  other: Lazy<U, FU>,
+                  function: G,
+              ) -> Lazy<V, impl FnOnce() -> V>
+              where
+                  FU: FnOnce() -> U,
+                  G: FnOnce(T, U) -> V,
+              { ... }
+          }
+
+      - step: 8
+        description: Default の実装（Deref は実装しない）
+        code_outline: |
+          // Deref トレイトは実装しない
+          //
+          // 理由: RefCell ベースの実装では force() が Ref<'_, T> を返すため、
+          // これを &T に変換することはできない。Ref は借用のライフタイムを
+          // 追跡するための型であり、単純な参照に変換すると借用チェッカーの
+          // 保証が失われる。
+          //
+          // ユーザーは明示的に force() を呼び出す必要がある。
+          // これは遅延評価の「いつ評価されるか」を明確にする利点もある。
+
+          impl<T: Default> Default for Lazy<T> {
+              fn default() -> Self {
+                  Lazy::new(T::default)
+              }
+          }
+
+      - step: 9
+        description: Debug と Clone の実装
+        code_outline: |
+          impl<T: fmt::Debug, F> fmt::Debug for Lazy<T, F> {
+              fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                  let state = self.state.borrow();
+                  match &*state {
+                      LazyState::Init(value) => {
+                          f.debug_tuple("Lazy").field(value).finish()
+                      }
+                      LazyState::Uninit(_) => {
+                          f.debug_tuple("Lazy").field(&"<uninit>").finish()
+                      }
+                      LazyState::Poisoned => {
+                          f.debug_tuple("Lazy").field(&"<poisoned>").finish()
+                      }
+                  }
+              }
+          }
+
+    test_cases:
+      - name: test_lazy_defers_computation
+        description: 作成時点では計算されないことを確認
+      - name: test_lazy_force_computes_value
+        description: force で計算され Ref を返すことを確認
+      - name: test_lazy_memoization
+        description: 2回目の force でキャッシュが使われることを確認
+      - name: test_lazy_new_with_value
+        description: 既に計算済みの値で作成
+      - name: test_lazy_get_before_force
+        description: force 前の get は None
+      - name: test_lazy_get_after_force
+        description: force 後の get は Some
+      - name: test_lazy_is_initialized
+        description: is_initialized の動作確認
+      - name: test_lazy_poisoned_on_panic
+        description: パニック時に毒状態になることを確認
+      - name: test_lazy_map
+        description: map による変換
+      - name: test_lazy_flat_map
+        description: flat_map による連鎖
+      - name: test_lazy_zip
+        description: zip による結合
+      - name: test_lazy_zip_with
+        description: zip_with による結合と変換
+
+    type_constructor_notes: |
+      TypeConstructor トレイトの実装について:
+
+      Lazy<T, F> は追加の型パラメータ F を持つため、
+      TypeConstructor の実装は Lazy<T>（F = fn() -> T）に対してのみ行う。
+
+      ```rust
+      impl<T: 'static> TypeConstructor for Lazy<T> {
+          type Inner = T;
+          type WithType<U: 'static> = Lazy<U>;
+      }
+      ```
+
+      これにより、Functor/Applicative/Monad トレイトとの統合が可能になる。
+      ただし、カスタムクロージャを持つ Lazy<T, F> には適用されない点に注意。
+
+    law_tests:
+      - name: prop_lazy_idempotence
+        description: force を複数回呼んでも同じ結果
+      - name: prop_lazy_laziness
+        description: 作成時点では初期化関数が呼ばれない
+      - name: prop_lazy_memoization
+        description: 初期化関数は最大1回のみ実行
+      - name: prop_lazy_functor_identity
+        description: lazy.map(|x| x).force() == lazy.force()
+      - name: prop_lazy_functor_composition
+        description: lazy.map(f).map(g) == lazy.map(|x| g(f(x)))
+      - name: prop_lazy_monad_left_identity
+        description: Lazy::pure(a).flat_map(f) == f(a)
+      - name: prop_lazy_monad_right_identity
+        description: lazy.flat_map(Lazy::pure) == lazy
+      - name: prop_lazy_monad_associativity
+        description: lazy.flat_map(f).flat_map(g) == lazy.flat_map(|x| f(x).flat_map(g))
+
+    estimated_effort: 6h
+
+  # ===========================================================================
+  # 3. Trampoline<A> - スタック安全な再帰
+  # ===========================================================================
+  - id: impl_trampoline
+    requirement_id: control_trampoline
+    name: Trampoline<A> スタック安全な再帰
+    priority: 3
+    description: |
+      スタック安全な再帰を実現するデータ構造。
+      深い再帰呼び出しをヒープ上のデータ構造に変換し、
+      スタックオーバーフローを防ぐ。
+      Scala の TailCalls を参考に設計。
+    files:
+      - path: src/control/trampoline.rs
+        description: Trampoline 型の実装
+    implementation_steps:
+      - step: 1
+        description: Trampoline enum と TrampolineContinuation トレイトの定義
+        code_outline: |
+          /// 内部的な継続を表すトレイト（型消去用）
+          ///
+          /// FlatMap バリアントでは異なる型間の継続を扱う必要があるため、
+          /// このトレイトを使用して型を消去する。
+          ///
+          /// 例: flat_map(f) で f: FnOnce(A) -> Trampoline<B> の場合、
+          /// A と B が異なる型であっても、step() で Trampoline<B> を返せる。
+          trait TrampolineContinuation<A> {
+              fn step(self: Box<Self>) -> Trampoline<A>;
+          }
+
+          /// スタック安全な再帰を実現するデータ構造。
+          ///
+          /// 深い再帰呼び出しをヒープ上のデータ構造に変換し、
+          /// スタックオーバーフローを防ぐ。
+          ///
+          /// # 型パラメータ
+          ///
+          /// - `A`: 計算の最終結果の型（'static 制約あり）
+          ///
+          /// # 注意
+          ///
+          /// TypeConstructor トレイトは実装しない。理由:
+          /// - Trampoline<A> は 'static ライフタイム制約を持つ
+          /// - WithType<B> の定義において、B: 'static が必要になる
+          /// - これは TypeConstructor の汎用性を損なう
+          ///
+          /// 代わりに、独自の map, flat_map, pure メソッドを提供し、
+          /// モナド法則を満たすことで実質的にモナドとして機能する。
+          ///
+          /// # 例
+          ///
+          /// ```
+          /// use functional_rusty::control::Trampoline;
+          ///
+          /// fn factorial(n: u64) -> Trampoline<u64> {
+          ///     factorial_helper(n, 1)
+          /// }
+          ///
+          /// fn factorial_helper(n: u64, accumulator: u64) -> Trampoline<u64> {
+          ///     if n <= 1 {
+          ///         Trampoline::done(accumulator)
+          ///     } else {
+          ///         Trampoline::suspend(move || {
+          ///             factorial_helper(n - 1, n * accumulator)
+          ///         })
+          ///     }
+          /// }
+          ///
+          /// let result = factorial(10000).run();
+          /// ```
+          pub enum Trampoline<A> {
+              /// 計算の最終結果
+              Done(A),
+              /// 次の計算（遅延）
+              Suspend(Box<dyn FnOnce() -> Trampoline<A> + 'static>),
+              /// flat_map の継続（型消去により異なる型間の継続を扱う）
+              FlatMapInternal(Box<dyn TrampolineContinuation<A>>),
+          }
+
+      - step: 2
+        description: done と suspend コンストラクタの実装
+        code_outline: |
+          impl<A> Trampoline<A> {
+              /// 計算の最終結果を表す Trampoline を作成する。
+              pub fn done(value: A) -> Self {
+                  Trampoline::Done(value)
+              }
+
+              /// 遅延された計算を表す Trampoline を作成する。
+              pub fn suspend<F>(thunk: F) -> Self
+              where
+                  F: FnOnce() -> Trampoline<A> + 'static,
+              {
+                  Trampoline::Suspend(Box::new(thunk))
+              }
+
+              /// done のエイリアス。Applicative の pure に対応。
+              pub fn pure(value: A) -> Self {
+                  Self::done(value)
+              }
+          }
+
+      - step: 3
+        description: run メソッドの実装（while ループ）
+        code_outline: |
+          impl<A> Trampoline<A> {
+              /// Trampoline を実行し、最終結果を返す。
+              ///
+              /// 内部的にはループで処理され、スタックは一定に保たれる。
+              pub fn run(self) -> A {
+                  let mut current = self;
+
+                  loop {
+                      match current {
+                          Trampoline::Done(value) => return value,
+                          Trampoline::Suspend(thunk) => {
+                              current = thunk();
+                          }
+                          Trampoline::FlatMapInternal(continuation) => {
+                              current = continuation.step();
+                          }
+                      }
+                  }
+              }
+          }
+
+      - step: 4
+        description: resume メソッドの実装（ループベースでスタック安全）
+        code_outline: |
+          use super::either::Either;
+
+          impl<A: 'static> Trampoline<A> {
+              /// 計算を一歩進め、次の状態を返す。
+              ///
+              /// 内部的にはループで処理され、スタックは一定に保たれる。
+              /// FlatMapInternal が連続する場合でもスタックオーバーフローしない。
+              pub fn resume(self) -> Either<Box<dyn FnOnce() -> Trampoline<A>>, A> {
+                  let mut current = self;
+                  loop {
+                      match current {
+                          Trampoline::Done(value) => return Either::Right(value),
+                          Trampoline::Suspend(thunk) => return Either::Left(thunk),
+                          Trampoline::FlatMapInternal(continuation) => {
+                              // FlatMap を展開してループで継続
+                              current = continuation.step();
+                          }
+                      }
+                  }
+              }
+          }
+
+      - step: 5
+        description: map と flat_map の実装
+        code_outline: |
+          impl<A: 'static> Trampoline<A> {
+              /// Trampoline の結果に関数を適用する。
+              pub fn map<B, F>(self, function: F) -> Trampoline<B>
+              where
+                  F: FnOnce(A) -> B + 'static,
+                  B: 'static,
+              {
+                  self.flat_map(move |a| Trampoline::done(function(a)))
+              }
+
+              /// Trampoline の結果に Trampoline を返す関数を適用し、結果を平坦化する。
+              pub fn flat_map<B, F>(self, function: F) -> Trampoline<B>
+              where
+                  F: FnOnce(A) -> Trampoline<B> + 'static,
+                  B: 'static,
+              {
+                  // FlatMap バリアントを使用して継続を遅延
+                  Trampoline::FlatMapInternal(Box::new(FlatMapContinuation {
+                      trampoline: self,
+                      function,
+                      _marker: std::marker::PhantomData,
+                  }))
+              }
+
+              /// flat_map のエイリアス。
+              pub fn and_then<B, F>(self, function: F) -> Trampoline<B>
+              where
+                  F: FnOnce(A) -> Trampoline<B> + 'static,
+                  B: 'static,
+              {
+                  self.flat_map(function)
+              }
+
+              /// 最初の Trampoline を実行し、結果を捨てて次の Trampoline を返す。
+              pub fn then<B: 'static>(self, next: Trampoline<B>) -> Trampoline<B> {
+                  self.flat_map(move |_| next)
+              }
+          }
+
+          // 内部的な継続の実装
+          struct FlatMapContinuation<A, B, F>
+          where
+              F: FnOnce(A) -> Trampoline<B>,
+          {
+              trampoline: Trampoline<A>,
+              function: F,
+              _marker: std::marker::PhantomData<B>,
+          }
+
+          impl<A: 'static, B: 'static, F> TrampolineContinuation<B> for FlatMapContinuation<A, B, F>
+          where
+              F: FnOnce(A) -> Trampoline<B> + 'static,
+          {
+              fn step(self: Box<Self>) -> Trampoline<B> {
+                  match self.trampoline {
+                      Trampoline::Done(a) => (self.function)(a),
+                      Trampoline::Suspend(thunk) => {
+                          let f = self.function;
+                          Trampoline::suspend(move || thunk().flat_map(f))
+                      }
+                      Trampoline::FlatMapInternal(inner) => {
+                          // 結合律を利用して最適化
+                          let f = self.function;
+                          inner.step().flat_map(f)
+                      }
+                  }
+              }
+          }
+
+      - step: 6
+        description: 型消去パターンの実装（FlatMapContinuation）
+        code_outline: |
+          /// flat_map の継続を表す構造体
+          ///
+          /// 型パラメータ:
+          /// - `A`: 入力の型（flat_map の引数の型）
+          /// - `B`: 出力の型（flat_map の結果の型）
+          /// - `F`: 継続関数の型
+          struct FlatMapContinuation<A, B, F>
+          where
+              F: FnOnce(A) -> Trampoline<B>,
+          {
+              trampoline: Trampoline<A>,
+              function: F,
+          }
+
+          impl<A: 'static, B: 'static, F> TrampolineContinuation<B> for FlatMapContinuation<A, B, F>
+          where
+              F: FnOnce(A) -> Trampoline<B> + 'static,
+          {
+              fn step(self: Box<Self>) -> Trampoline<B> {
+                  match self.trampoline {
+                      Trampoline::Done(a) => (self.function)(a),
+                      Trampoline::Suspend(thunk) => {
+                          let f = self.function;
+                          Trampoline::suspend(move || thunk().flat_map(f))
+                      }
+                      Trampoline::FlatMapInternal(inner) => {
+                          // 結合律を利用して最適化
+                          let f = self.function;
+                          inner.step().flat_map(f)
+                      }
+                  }
+              }
+          }
+
+          // Note: TypeConstructor トレイトは実装しない
+          //
+          // 理由:
+          // - Trampoline<A> は 'static ライフタイム制約を持つ
+          // - WithType<B> の定義において、B: 'static が必要になる
+          // - これは TypeConstructor の汎用性を損なう
+          //
+          // 代わりに、独自の map, flat_map, pure メソッドを提供し、
+          // モナド法則を満たすことで実質的にモナドとして機能する。
+
+    test_cases:
+      - name: test_trampoline_done_returns_value
+        description: done で作成した値が返ることを確認
+      - name: test_trampoline_suspend_delays_computation
+        description: suspend が計算を遅延することを確認
+      - name: test_trampoline_simple_recursion
+        description: 単純な再帰が動作することを確認
+      - name: test_trampoline_factorial
+        description: 階乗の計算（深い再帰）
+      - name: test_trampoline_mutual_recursion_is_even_is_odd
+        description: 相互再帰（is_even, is_odd）
+      - name: test_trampoline_stack_safety_100000
+        description: 100,000 回の再帰でスタックオーバーフローしない
+      - name: test_trampoline_map
+        description: map による変換
+      - name: test_trampoline_flat_map
+        description: flat_map による連鎖
+      - name: test_trampoline_resume
+        description: resume の動作確認
+      - name: test_trampoline_tree_traversal
+        description: 木構造の走査
+
+    law_tests:
+      - name: prop_trampoline_stack_safety
+        description: 任意の深さの再帰でもスタックオーバーフローしない
+      - name: prop_trampoline_functor_identity
+        description: trampoline.map(|x| x).run() == trampoline.run()
+      - name: prop_trampoline_functor_composition
+        description: trampoline.map(f).map(g).run() == trampoline.map(|x| g(f(x))).run()
+      - name: prop_trampoline_monad_left_identity
+        description: Trampoline::done(a).flat_map(f).run() == f(a).run()
+      - name: prop_trampoline_monad_right_identity
+        description: trampoline.flat_map(Trampoline::done).run() == trampoline.run()
+      - name: prop_trampoline_monad_associativity
+        description: |
+          trampoline.flat_map(f).flat_map(g).run() ==
+          trampoline.flat_map(|x| f(x).flat_map(g)).run()
+
+    estimated_effort: 8h
+
+  # ===========================================================================
+  # 4. Continuation<R, A> - 継続モナド
+  # ===========================================================================
+  - id: impl_continuation
+    requirement_id: control_continuation
+    name: Continuation<R, A> 継続モナド
+    priority: 4
+    description: |
+      継続渡しスタイル（CPS）を抽象化するモナド。
+      「次に何をするか」を表す関数（継続）を操作できる。
+    files:
+      - path: src/control/continuation.rs
+        description: Continuation 型の実装
+    implementation_steps:
+      - step: 1
+        description: Continuation 構造体の定義
+        code_outline: |
+          use std::marker::PhantomData;
+
+          /// 継続モナド。
+          ///
+          /// 継続渡しスタイル（CPS）を抽象化する。
+          /// run_continuation は (A -> R) -> R の形式。
+          ///
+          /// # 型パラメータ
+          ///
+          /// * `R` - 最終的な戻り値の型（全体の計算の結果型）
+          /// * `A` - 現在の計算が生成する値の型
+          ///
+          /// # 例
+          ///
+          /// ```
+          /// use functional_rusty::control::Continuation;
+          ///
+          /// let cont: Continuation<i32, i32> = Continuation::pure(42);
+          /// let result = cont.run(|x| x * 2);
+          /// assert_eq!(result, 84);
+          /// ```
+          pub struct Continuation<R, A, F = Box<dyn FnOnce(Box<dyn FnOnce(A) -> R>) -> R>>
+          where
+              F: FnOnce(Box<dyn FnOnce(A) -> R>) -> R,
+          {
+              run_continuation: F,
+              _marker: PhantomData<(R, A)>,
+          }
+
+          // より単純な実装:
+          pub struct Continuation<R, A> {
+              run_continuation: Box<dyn FnOnce(Box<dyn FnOnce(A) -> R>) -> R>,
+          }
+
+      - step: 2
+        description: new と pure の実装
+        code_outline: |
+          impl<R: 'static, A: 'static> Continuation<R, A> {
+              /// 継続関数から Continuation を作成する。
+              pub fn new<F>(run: F) -> Self
+              where
+                  F: FnOnce(Box<dyn FnOnce(A) -> R>) -> R + 'static,
+              {
+                  Continuation {
+                      run_continuation: Box::new(run),
+                  }
+              }
+
+              /// 純粋な値を Continuation コンテキストに持ち上げる。
+              pub fn pure(value: A) -> Self {
+                  Continuation::new(move |continuation| continuation(value))
+              }
+          }
+
+      - step: 3
+        description: run の実装
+        code_outline: |
+          impl<R, A> Continuation<R, A> {
+              /// 継続を渡して計算を実行する。
+              pub fn run<K>(self, continuation: K) -> R
+              where
+                  K: FnOnce(A) -> R + 'static,
+              {
+                  (self.run_continuation)(Box::new(continuation))
+              }
+          }
+
+      - step: 4
+        description: map と flat_map の実装
+        code_outline: |
+          impl<R: 'static, A: 'static> Continuation<R, A> {
+              /// 計算の結果に関数を適用する。
+              pub fn map<B: 'static, F>(self, function: F) -> Continuation<R, B>
+              where
+                  F: FnOnce(A) -> B + 'static,
+              {
+                  Continuation::new(move |continuation| {
+                      self.run(move |a| continuation(function(a)))
+                  })
+              }
+
+              /// 計算の結果に Continuation を返す関数を適用し、結果を平坦化する。
+              pub fn flat_map<B: 'static, F>(self, function: F) -> Continuation<R, B>
+              where
+                  F: FnOnce(A) -> Continuation<R, B> + 'static,
+              {
+                  Continuation::new(move |continuation| {
+                      self.run(move |a| function(a).run(continuation))
+                  })
+              }
+
+              /// flat_map のエイリアス。
+              pub fn and_then<B: 'static, F>(self, function: F) -> Continuation<R, B>
+              where
+                  F: FnOnce(A) -> Continuation<R, B> + 'static,
+              {
+                  self.flat_map(function)
+              }
+          }
+
+      - step: 5
+        description: call_with_current_continuation_once の実装（FnOnce ベース、所有権安全）
+        code_outline: |
+          use std::cell::RefCell;
+          use std::rc::Rc;
+
+          impl<R: 'static, A: 'static> Continuation<R, A> {
+              /// 現在の継続を捕捉する（call/cc の一度きり版）。
+              ///
+              /// f には「現在の継続」を表す FnOnce 関数が渡される。
+              /// この継続は一度だけ呼び出すことができる。
+              ///
+              /// # 注意
+              ///
+              /// Rust の所有権システムの制約により、継続を複数回呼び出す
+              /// 完全な call/cc は実装が困難。この関数は継続を一度だけ使用する
+              /// ユースケース（早期リターン、例外処理など）をサポートする。
+              ///
+              /// # 実装上の注意
+              ///
+              /// outer_continuation は FnOnce であるため、複数の場所から
+              /// 使用することができない。Rc<RefCell<Option<...>>> でラップし、
+              /// 最初に使用する場所で take() することで所有権の問題を解決する。
+              ///
+              /// # 例
+              ///
+              /// ```
+              /// use functional_rusty::control::Continuation;
+              ///
+              /// // 条件を満たしたら即座にその値を返す
+              /// let cont = Continuation::call_with_current_continuation_once(|exit| {
+              ///     Continuation::pure(1)
+              ///         .flat_map(move |x| {
+              ///             if x > 10 {
+              ///                 exit(x) // 即座にリターン
+              ///             } else {
+              ///                 Continuation::pure(x + 5)
+              ///             }
+              ///         })
+              /// });
+              /// let result = cont.run(|x| x);
+              /// // x = 1 なので条件を満たさず、x + 5 = 6 が返る
+              /// assert_eq!(result, 6);
+              /// ```
+              pub fn call_with_current_continuation_once<F>(f: F) -> Self
+              where
+                  F: FnOnce(Box<dyn FnOnce(A) -> Continuation<R, A>>) -> Continuation<R, A> + 'static,
+              {
+                  Continuation::new(move |outer_continuation: Box<dyn FnOnce(A) -> R>| {
+                      // outer_continuation を Rc<RefCell<Option<...>>> でラップして共有可能にする
+                      // これにより exit と通常の実行パスの両方から使用できるようになる
+                      let continuation_holder: Rc<RefCell<Option<Box<dyn FnOnce(A) -> R>>>> =
+                          Rc::new(RefCell::new(Some(outer_continuation)));
+
+                      // exit 用のクローン
+                      let holder_for_exit = continuation_holder.clone();
+
+                      // exit 関数を作成: 呼び出されると現在の計算を中断して値を返す
+                      let exit: Box<dyn FnOnce(A) -> Continuation<R, A>> = Box::new(move |a: A| {
+                          // exit が呼ばれたら、外側の継続を take して使用する
+                          // Continuation を返すが、この Continuation は外側の継続を直接呼び出す
+                          Continuation::new(move |_unused: Box<dyn FnOnce(A) -> R>| {
+                              // holder から継続を取り出して使用
+                              let continuation = holder_for_exit
+                                  .borrow_mut()
+                                  .take()
+                                  .expect("continuation already consumed");
+                              continuation(a)
+                          })
+                      });
+
+                      // f を実行し、内部の Continuation を取得
+                      let inner_continuation = f(exit);
+
+                      // 内部の継続を実行
+                      // continuation_holder から継続を取り出して使用する
+                      inner_continuation.run(move |a| {
+                          match continuation_holder.borrow_mut().take() {
+                              Some(k) => k(a),
+                              None => panic!("continuation was consumed by exit"),
+                          }
+                      })
+                  })
+              }
+          }
+
+          // Note:
+          // この実装では exit が呼ばれた場合と通常の実行パスで
+          // 継続の消費が排他的に行われる。exit が呼ばれると継続は
+          // exit 内で消費され、通常パスでは panic する。
+          // これは call/cc の一度きり版として期待される動作である。
+
+      - step: 6
+        description: shift と reset の実装（将来的な拡張）
+        code_outline: |
+          // 限定継続の実装は複雑なため、将来的な拡張として検討
+          // 基本的な call/cc が動作してから実装
+
+    test_cases:
+      - name: test_continuation_pure_and_run
+        description: pure と run の基本動作
+      - name: test_continuation_map
+        description: map による変換
+      - name: test_continuation_flat_map
+        description: flat_map による連鎖
+      - name: test_continuation_call_cc_once_basic
+        description: call_with_current_continuation_once の基本動作
+      - name: test_continuation_early_return
+        description: call_with_current_continuation_once による早期リターン
+
+    law_tests:
+      - name: prop_continuation_monad_left_identity
+        description: Continuation::pure(a).flat_map(f).run(k) == f(a).run(k)
+      - name: prop_continuation_monad_right_identity
+        description: cont.flat_map(Continuation::pure).run(k) == cont.run(k)
+      - name: prop_continuation_monad_associativity
+        description: |
+          cont.flat_map(f).flat_map(g).run(k) ==
+          cont.flat_map(|x| f(x).flat_map(g)).run(k)
+
+    estimated_effort: 6h
+
+  # ===========================================================================
+  # 5. Free<F, A> - Free モナド（スコープ外）
+  # ===========================================================================
+  # Free モナドは Rust の型システム制約により Phase 3 のスコープ外とする。
+  # 詳細は future_extensions セクションを参照。
+
+# =============================================================================
+# 品質基準
+# =============================================================================
+quality_criteria:
+  test_coverage:
+    target: "100%"
+    measurement: "cargo tarpaulin --features control"
+
+  code_style:
+    - no_abbreviations: |
+        変数名・関数名に略語を使用しない。
+        許可される略語: URL, UUID, ULID のみ。
+    - no_unsafe: |
+        #![forbid(unsafe_code)] に準拠。
+        UnsafeCell ではなく RefCell を使用。
+    - no_clippy_warnings: |
+        cargo clippy --all-features -- -D warnings が警告なしで通過すること。
+    - documentation: |
+        全ての公開 API にドキュメントコメントを付与すること。
+        各型・メソッドには使用例を含めること。
+
+  testing:
+    - unit_tests: 全ての型とメソッドに対する単体テスト
+    - property_tests: 数学的法則に対するプロパティベーステスト
+    - stack_safety_tests: スタック安全性を検証するテスト
+    - integration_tests: Phase 1, 2 との組み合わせテスト
+
+  performance:
+    - stack_constant: |
+        Trampoline の run() はスタックサイズが一定であること。
+    - lazy_memoization: |
+        Lazy の force() は初期化関数を最大1回のみ呼び出すこと。
+
+# =============================================================================
+# 依存関係
+# =============================================================================
+dependencies:
+  internal:
+    - typeclass_higher: TypeConstructor トレイト
+    - typeclass_functor: Functor トレイト
+    - typeclass_applicative: Applicative トレイト
+    - typeclass_monad: Monad トレイト
+
+  external:
+    - std::cell::RefCell: Lazy の内部可変性
+    - std::marker::PhantomData: 型パラメータのマーキング
+
+# =============================================================================
+# 設計上の考慮事項
+# =============================================================================
+design_notes:
+  lazy_refcell_approach:
+    description: |
+      Lazy は #![forbid(unsafe_code)] ポリシーに従い、RefCell を使用する。
+      これにより std::cell::LazyCell と比較してパフォーマンスが低下する可能性があるが、
+      安全性を優先する。
+
+      RefCell の使用に伴う考慮事項:
+      1. force() は Ref<'_, T> を返す（&T ではなく）
+      2. Deref の実装が複雑になる（または実装しない）
+      3. BorrowError のハンドリングが必要
+
+    alternatives:
+      - use_oncecell: |
+          once_cell クレートを使用する選択肢もあるが、
+          外部依存を増やさないため RefCell を選択。
+      - use_option_replace: |
+          Option<T> と std::mem::replace を組み合わせる方法もあるが、
+          毒状態の表現が難しい。
+
+  trampoline_flatmap_variant:
+    description: |
+      Trampoline に FlatMap バリアントを追加する理由:
+
+      単純な実装（Done と Suspend のみ）では flat_map が右結合になる:
+      ```
+      a.flat_map(f).flat_map(g)
+      -> Suspend(|| a.run().flat_map(f)).flat_map(g)
+      -> Suspend(|| Suspend(|| a.run().flat_map(f)).run().flat_map(g))
+      ```
+
+      これは深いネストを作り、run() 時にスタックを消費する。
+
+      FlatMap バリアントを使用すると、結合を遅延させて run() 時に左結合で評価できる:
+      ```
+      a.flat_map(f).flat_map(g)
+      -> FlatMap { current: a, continuation: |x| f(x).flat_map(g) }
+      ```
+
+      run() での処理:
+      1. current を一歩進める
+      2. Done になったら continuation を適用
+      3. 繰り返し
+
+      これによりスタック使用量が O(1) に保たれる。
+
+  continuation_complexity:
+    description: |
+      Continuation モナドの call/cc の完全な実装は複雑である。
+
+      課題:
+      1. 継続の再利用（複数回呼び出し）
+      2. 型消去と 'static 制約
+      3. クロージャのクローン
+
+      初期実装では基本的な機能のみを提供し、
+      call/cc は簡易版または将来的な拡張とする。
+
+  free_type_constraints:
+    description: |
+      Free<F, A> の完全な実装は Rust の型システムの制約により困難。
+
+      課題:
+      1. F::WithType<Free<F, A>> の表現
+      2. Functor トレイトの制約と GAT の組み合わせ
+      3. fold_map の型シグネチャ
+
+      対策:
+      1. 特定の DSL 用に特殊化された Free を提供
+      2. 存在型（Box<dyn Trait>）による型消去
+      3. マクロによるボイラープレート削減
+
+# =============================================================================
+# 将来の拡張
+# =============================================================================
+future_extensions:
+  - name: LazyLock
+    description: スレッドセーフ版の Lazy
+    complexity: medium
+    notes: std::sync::LazyLock と同様の機能を提供
+
+  - name: TrampolineT
+    description: Trampoline モナド変換子
+    complexity: high
+    notes: 他のモナドと組み合わせて使用
+
+  - name: ContT
+    description: Continuation モナド変換子
+    complexity: high
+
+  - name: shift_reset
+    description: 限定継続（delimited continuation）
+    complexity: high
+
+  - name: Free モナド
+    description: |
+      任意の Functor F から Monad を構築する Free モナド。
+      DSL の構築とインタープリタパターンを可能にする。
+
+      Phase 3 のスコープ外とした理由:
+      - Rust の型システム制約（特に HKT の欠如）により汎用実装が困難
+      - F::WithType<Free<F, A>> の表現が複雑
+      - Functor トレイトの制約と GAT の組み合わせが難しい
+      - fold_map の型シグネチャが複雑
+
+      将来的な対策案:
+      1. 特定の DSL 用に特殊化された Free を提供
+      2. 存在型（Box<dyn Trait>）による型消去
+      3. マクロによるボイラープレート削減
+      4. Rust の型システムの進化（HKT サポート等）を待つ
+    complexity: very_high
+
+  - name: Freer
+    description: Freer モナド（Free の最適化版）
+    complexity: very_high
+    notes: Functor の代わりに型レベルリストを使用

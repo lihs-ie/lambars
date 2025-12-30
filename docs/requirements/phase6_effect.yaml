@@ -1,0 +1,2028 @@
+# Phase 6: Effect System 要件定義
+#
+# 概要:
+#   副作用を型レベルで追跡・制御するための Effect システムを実装する。
+#   MTL (Monad Transformer Library) スタイルの型クラスと、
+#   基本 Monad および Monad Transformer を組み合わせたハイブリッドアプローチを採用する。
+#
+# 設計方針:
+#   1. `#![forbid(unsafe_code)]` ポリシーに準拠
+#   2. Phase 1 の型クラス基盤（Functor, Applicative, Monad）との統合
+#   3. Phase 3 の制御構造（Lazy, Trampoline, Continuation）との連携
+#   4. Haskell の mtl ライブラリとの対応関係を意識
+#   5. 参照透過性の維持と副作用の遅延
+#
+# 参照:
+#   - Haskell: mtl ライブラリ (https://hackage.haskell.org/package/mtl)
+#   - Haskell: transformers ライブラリ (https://hackage.haskell.org/package/transformers)
+#   - Scala: cats-mtl ライブラリ (https://typelevel.org/cats-mtl/)
+#   - CLAUDE.md の「3.1 純粋性の強制・副作用追跡」「3.5 代数的効果とハンドラ」セクション
+
+version: "1.0.0"
+phase: 6
+name: "Effect System"
+description: |
+  Effect System は、副作用を型レベルで追跡・制御するための抽象である。
+  関数型プログラミングにおいて、純粋なコードと副作用を伴うコードを
+  型システムによって明確に分離し、合成可能な形で管理する。
+
+  このフェーズでは以下を提供する:
+
+  - MTL スタイル型クラス: MonadReader, MonadState, MonadWriter, MonadError（critical）
+  - 基本 Monad: Reader, State, Writer（high）
+  - Monad Transformer: ReaderT, StateT, WriterT, ExceptT（critical）
+  - IO 型: 副作用の遅延と参照透過性の維持（high）
+  - eff! マクロ: do 記法相当の手続き的記述（medium）
+
+  Effect System は Rust が標準で提供していない「副作用の型レベル追跡」の問題を解決し、
+  純粋関数型プログラミングのパターンをより実用的にする。
+
+# Effect System の理論的背景
+theoretical_background:
+  effect_overview:
+    description: |
+      Effect System は、プログラムが持つ副作用（状態の変更、I/O、例外など）を
+      型システムで追跡・制御する仕組みである。
+
+      主要なアプローチ:
+      - Monad Transformer: 効果を Monad のスタックとして表現（本実装で採用）
+      - MTL スタイル: 効果を型クラスとして抽象化し、具体的な Monad から独立（本実装で採用）
+      - Algebraic Effects: 効果をハンドラで解釈（将来の拡張として検討）
+
+      本実装では MTL + Monad Transformer のハイブリッドアプローチを採用:
+      ```
+      MonadReader<R>   -- 環境からの読み取り能力を表す型クラス
+      MonadState<S>    -- 状態の読み書き能力を表す型クラス
+      MonadWriter<W>   -- ログ出力能力を表す型クラス
+      MonadError<E>    -- エラーハンドリング能力を表す型クラス
+
+      ReaderT<R, M, A> -- Reader 効果を M に追加する Transformer
+      StateT<S, M, A>  -- State 効果を M に追加する Transformer
+      WriterT<W, M, A> -- Writer 効果を M に追加する Transformer
+      ExceptT<E, M, A> -- Error 効果を M に追加する Transformer
+      ```
+
+  monad_transformer_theory:
+    description: |
+      Monad Transformer は、複数の Monad 効果を「スタック」として合成する技法である。
+
+      基本構造:
+      ```
+      ReaderT<R, StateT<S, Identity, A>, A>
+      ↑              ↑        ↑
+      外側の効果    内側の効果  基底 Monad
+      ```
+
+      Transformer の「リフト」操作:
+      - lift: 内側の Monad の計算を外側に持ち上げる
+      - M<A> -> T<M, A>
+
+      Monad 法則の保存:
+      Transformer を適用しても、結果の型は Monad 法則を満たす必要がある。
+
+  mtl_style_theory:
+    description: |
+      MTL (Monad Transformer Library) スタイルは、効果を型クラスとして抽象化する。
+
+      利点:
+      - 具体的な Monad スタックから独立したコードが書ける
+      - lift の連鎖が不要になる
+      - テスト時に効果の実装を差し替えやすい
+
+      例:
+      ```rust
+      // MonadReader を使う関数は、具体的な Monad を知らなくてよい
+      fn get_config_value<M: MonadReader<Config>>(key: &str) -> M<String> {
+          M::ask().map(|config| config.get(key))
+      }
+
+      // 実際の Monad スタックに依存しない
+      // ReaderT<Config, Identity, A> でも
+      // ReaderT<Config, StateT<S, Identity, A>, A> でも動作
+      ```
+
+  referential_transparency:
+    description: |
+      参照透過性（Referential Transparency）とは、式をその評価結果で置き換えても
+      プログラムの意味が変わらない性質である。
+
+      IO 型の役割:
+      ```rust
+      // 参照透過でない（副作用が即座に発生）
+      fn read_file() -> String {
+          std::fs::read_to_string("file.txt").unwrap()
+      }
+
+      // 参照透過（副作用は IO の実行時まで遅延される）
+      fn read_file() -> IO<String> {
+          IO::new(|| std::fs::read_to_string("file.txt").unwrap())
+      }
+      ```
+
+      IO 型を使用することで:
+      - 副作用のある関数と純粋な関数を型で区別できる
+      - 副作用の実行タイミングを制御できる
+      - テスト時にモックを注入しやすい
+
+# 設計原則
+design_principles:
+  mtl_transformer_hybrid:
+    description: |
+      MTL スタイルと Monad Transformer のハイブリッドアプローチを採用:
+
+      1. **型クラス（MTL スタイル）**:
+         ```rust
+         trait MonadReader<R>: Monad {
+             fn ask() -> Self;
+             fn local<F>(reader: F, computation: Self) -> Self
+             where
+                 F: FnOnce(R) -> R;
+         }
+         ```
+
+      2. **基本 Monad**:
+         ```rust
+         struct Reader<R, A> {
+             run_reader: Box<dyn FnOnce(R) -> A>,
+         }
+         ```
+
+      3. **Monad Transformer**:
+         ```rust
+         struct ReaderT<R, M, A>
+         where
+             M: Monad,
+         {
+             run_reader_t: Box<dyn FnOnce(R) -> M::WithType<A>>,
+         }
+         ```
+
+      4. **型クラスの自動実装**:
+         - ReaderT<R, M, A> は MonadReader<R> を実装
+         - StateT<S, M, A> は MonadState<S> を実装
+         - 内側の M の型クラス実装も自動的に「通過」させる
+
+  rust_ownership_considerations:
+    description: |
+      Rust の所有権システムと Effect System の統合:
+
+      1. **クロージャの所有権**:
+         - FnOnce: 一度だけ実行される計算（基本）
+         - Fn: 何度でも実行される純粋な計算
+         - Rc/Arc + FnMut: 状態を持つ計算の共有
+
+      2. **ライフタイムの管理**:
+         - 'static 境界を基本とし、柔軟性とのトレードオフを考慮
+         - 短いライフタイムが必要な場合は専用のコンストラクタを提供
+
+      3. **Clone と Copy の扱い**:
+         - 状態型 S には Clone を要求
+         - Writer の出力型 W には Clone と Monoid を要求
+
+  phase_integration:
+    description: |
+      既存フェーズとの統合方針:
+
+      1. **Phase 1 型クラスとの関係**:
+         - TypeConstructor: Effect 型は TypeConstructor を実装
+         - Functor/Applicative/Monad: Effect 型は Monad を実装
+         - Monoid: Writer の出力型に Monoid を要求
+
+      2. **Phase 3 制御構造との関係**:
+         - Identity: Monad Transformer の基底として使用
+         - Lazy: IO の遅延評価に使用可能
+         - Trampoline: スタック安全な再帰的な Effect 処理に使用可能
+
+      3. **Phase 4 永続データ構造との連携**:
+         - PersistentVector/PersistentHashMap を State の状態型として使用可能
+
+requirements:
+  # ============================================================================
+  # 1. MTL スタイル型クラス
+  # ============================================================================
+  - id: effect_monad_reader_trait
+    name: MonadReader<R> トレイト
+    priority: critical
+    description: |
+      環境からの読み取り能力を表す型クラス。
+      Reader モナドの本質的な操作（ask, local）を抽象化する。
+
+      Haskell の MonadReader に相当:
+      ```haskell
+      class Monad m => MonadReader r m | m -> r where
+          ask :: m r
+          local :: (r -> r) -> m a -> m a
+      ```
+
+    internal_structure:
+      description: |
+        ```rust
+        /// 環境からの読み取り能力を表す型クラス
+        ///
+        /// # Type Parameters
+        /// - `R`: 環境の型（読み取り専用）
+        pub trait MonadReader<R>: Monad {
+            /// 環境全体を取得する
+            fn ask() -> Self;
+
+            /// 環境を変換して計算を実行する
+            fn local<F>(modifier: F, computation: Self) -> Self
+            where
+                F: FnOnce(R) -> R;
+
+            /// 環境から特定の値を射影して取得する
+            fn asks<B, F>(projection: F) -> Self::WithType<B>
+            where
+                F: FnOnce(R) -> B,
+            {
+                Self::ask().map(projection)
+            }
+
+            /// 環境を参照として取得する（Clone 不要版）
+            fn ask_ref<F, B>(projection: F) -> Self::WithType<B>
+            where
+                F: FnOnce(&R) -> B;
+        }
+        ```
+
+    api:
+      operations:
+        - name: ask
+          signature: "fn ask() -> Self"
+          description: "環境全体を取得"
+          complexity: "O(1)"
+          example: |
+            fn get_database_url<M: MonadReader<Config>>() -> M::WithType<String>
+            where
+                M::Inner: Clone,
+            {
+                M::ask().map(|config| config.database_url.clone())
+            }
+
+        - name: local
+          signature: "fn local<F>(modifier: F, computation: Self) -> Self"
+          description: "環境を一時的に変更して計算を実行"
+          complexity: "O(1) + computation のコスト"
+          example: |
+            fn with_timeout<M: MonadReader<Config>, A>(
+                timeout: Duration,
+                computation: M::WithType<A>
+            ) -> M::WithType<A> {
+                M::local(
+                    |config| Config { timeout, ..config },
+                    computation
+                )
+            }
+
+        - name: asks
+          signature: "fn asks<B, F>(projection: F) -> Self::WithType<B>"
+          description: "環境から特定の値を射影して取得"
+          complexity: "O(1) + projection のコスト"
+
+    laws:
+      - name: Ask Local Identity Law（local の恒等法則）
+        description: "identity 関数で local しても変わらない"
+        equation: "M::local(|r| r, m) == m"
+        property_test: |
+          proptest! {
+              fn prop_local_identity<R: Clone + PartialEq, A: PartialEq>(
+                  environment: R,
+                  monad: impl MonadReader<R>
+              ) {
+                  let left = MonadReader::local(|r| r, monad.clone());
+                  let right = monad;
+                  // 同じ環境で実行すると同じ結果
+              }
+          }
+
+      - name: Ask Local Composition Law（local の合成法則）
+        description: "local の連続適用は関数合成と同じ"
+        equation: "M::local(f, M::local(g, m)) == M::local(|r| g(f(r)), m)"
+
+      - name: Ask Retrieval Law（ask の取得法則）
+        description: "ask で取得した値は環境と一致"
+        equation: "M::ask().run(r) == r"
+
+    tests:
+      - category: "基本操作テスト"
+        cases:
+          - name: "ask で環境を取得"
+            test: |
+              let reader: Reader<i32, i32> = MonadReader::ask();
+              assert_eq!(reader.run(42), 42);
+
+          - name: "asks で環境の一部を取得"
+            test: |
+              struct Config { port: u16 }
+              let reader: Reader<Config, u16> = MonadReader::asks(|c| c.port);
+              assert_eq!(reader.run(Config { port: 8080 }), 8080);
+
+          - name: "local で環境を一時変更"
+            test: |
+              let reader = MonadReader::ask().map(|x: i32| x * 2);
+              let modified = MonadReader::local(|x| x + 10, reader);
+              assert_eq!(modified.run(5), 30); // (5 + 10) * 2
+
+  # ============================================================================
+  # 2. MonadState<S> トレイト
+  # ============================================================================
+  - id: effect_monad_state_trait
+    name: MonadState<S> トレイト
+    priority: critical
+    description: |
+      状態の読み書き能力を表す型クラス。
+      State モナドの本質的な操作（get, put, modify）を抽象化する。
+
+      Haskell の MonadState に相当:
+      ```haskell
+      class Monad m => MonadState s m | m -> s where
+          get :: m s
+          put :: s -> m ()
+          state :: (s -> (a, s)) -> m a
+      ```
+
+    internal_structure:
+      description: |
+        ```rust
+        /// 状態の読み書き能力を表す型クラス
+        ///
+        /// # Type Parameters
+        /// - `S`: 状態の型
+        pub trait MonadState<S>: Monad {
+            /// 現在の状態を取得する
+            fn get() -> Self::WithType<S>;
+
+            /// 状態を新しい値で置き換える
+            fn put(state: S) -> Self::WithType<()>;
+
+            /// 状態を変換し、値を返す（状態遷移関数）
+            fn state<A, F>(transition: F) -> Self::WithType<A>
+            where
+                F: FnOnce(S) -> (A, S);
+
+            /// 状態を変換する（値は返さない）
+            fn modify<F>(modifier: F) -> Self::WithType<()>
+            where
+                F: FnOnce(S) -> S,
+            {
+                Self::state(|s| ((), modifier(s)))
+            }
+
+            /// 状態から値を取得する（状態は変更しない）
+            fn gets<A, F>(projection: F) -> Self::WithType<A>
+            where
+                F: FnOnce(&S) -> A;
+
+            /// 状態の一部を更新する（残りは保持）
+            fn modify_part<F, P>(part_lens: impl Lens<S, P>, modifier: F) -> Self::WithType<()>
+            where
+                F: FnOnce(P) -> P,
+                S: Clone,
+            {
+                Self::modify(|s| part_lens.modify(s, modifier))
+            }
+        }
+        ```
+
+    api:
+      operations:
+        - name: get
+          signature: "fn get() -> Self::WithType<S>"
+          description: "現在の状態を取得"
+          complexity: "O(1)"
+          example: |
+            fn current_count<M: MonadState<Counter>>() -> M::WithType<i32> {
+                M::get().map(|counter| counter.value)
+            }
+
+        - name: put
+          signature: "fn put(state: S) -> Self::WithType<()>"
+          description: "状態を完全に置き換える"
+          complexity: "O(1)"
+          example: |
+            fn reset_counter<M: MonadState<Counter>>() -> M::WithType<()> {
+                M::put(Counter { value: 0 })
+            }
+
+        - name: modify
+          signature: "fn modify<F>(modifier: F) -> Self::WithType<()>"
+          description: "状態を変換する"
+          complexity: "O(1) + modifier のコスト"
+          example: |
+            fn increment<M: MonadState<Counter>>() -> M::WithType<()> {
+                M::modify(|counter| Counter { value: counter.value + 1 })
+            }
+
+        - name: state
+          signature: "fn state<A, F>(transition: F) -> Self::WithType<A>"
+          description: "状態遷移関数を実行し、値と新しい状態を取得"
+          complexity: "O(1) + transition のコスト"
+
+        - name: gets
+          signature: "fn gets<A, F>(projection: F) -> Self::WithType<A>"
+          description: "状態から値を射影して取得"
+          complexity: "O(1) + projection のコスト"
+
+    laws:
+      - name: Get Put Law（取得後設定の法則）
+        description: "get した値を put しても状態は変わらない"
+        equation: "M::get().flat_map(|s| M::put(s)) == M::pure(())"
+        property_test: |
+          proptest! {
+              fn prop_get_put<S: Clone + PartialEq>(initial_state: S) {
+                  let computation = MonadState::get()
+                      .flat_map(|s| MonadState::put(s));
+                  let (_, final_state) = computation.run(initial_state.clone());
+                  prop_assert_eq!(final_state, initial_state);
+              }
+          }
+
+      - name: Put Get Law（設定後取得の法則）
+        description: "put した値は get で取得できる"
+        equation: "M::put(s).then(M::get()) == M::put(s).map(|_| s)"
+        property_test: |
+          proptest! {
+              fn prop_put_get<S: Clone + PartialEq>(new_state: S) {
+                  let computation = MonadState::put(new_state.clone())
+                      .then(MonadState::get());
+                  let (result, _) = computation.run(Default::default());
+                  prop_assert_eq!(result, new_state);
+              }
+          }
+
+      - name: Put Put Law（連続設定の法則）
+        description: "連続して put した場合、最後の値が設定される"
+        equation: "M::put(s1).then(M::put(s2)) == M::put(s2)"
+
+      - name: Modify Composition Law（modify の合成法則）
+        description: "modify の連続適用は関数合成と同じ"
+        equation: "M::modify(f).then(M::modify(g)) == M::modify(|s| g(f(s)))"
+
+    tests:
+      - category: "基本操作テスト"
+        cases:
+          - name: "get で状態を取得"
+            test: |
+              let state: State<i32, i32> = MonadState::get();
+              let (result, final_state) = state.run(42);
+              assert_eq!(result, 42);
+              assert_eq!(final_state, 42);
+
+          - name: "put で状態を設定"
+            test: |
+              let state: State<i32, ()> = MonadState::put(100);
+              let (_, final_state) = state.run(42);
+              assert_eq!(final_state, 100);
+
+          - name: "modify で状態を変換"
+            test: |
+              let state: State<i32, ()> = MonadState::modify(|x| x * 2);
+              let (_, final_state) = state.run(21);
+              assert_eq!(final_state, 42);
+
+          - name: "state で値と状態を同時に取得・設定"
+            test: |
+              let state: State<i32, String> = MonadState::state(|s| {
+                  (format!("old: {}", s), s + 1)
+              });
+              let (result, final_state) = state.run(41);
+              assert_eq!(result, "old: 41");
+              assert_eq!(final_state, 42);
+
+  # ============================================================================
+  # 3. MonadWriter<W> トレイト
+  # ============================================================================
+  - id: effect_monad_writer_trait
+    name: MonadWriter<W> トレイト
+    priority: high
+    description: |
+      ログ出力能力を表す型クラス。
+      Writer モナドの本質的な操作（tell, listen, pass）を抽象化する。
+
+      Haskell の MonadWriter に相当:
+      ```haskell
+      class (Monoid w, Monad m) => MonadWriter w m | m -> w where
+          tell :: w -> m ()
+          listen :: m a -> m (a, w)
+          pass :: m (a, w -> w) -> m a
+      ```
+
+    internal_structure:
+      description: |
+        ```rust
+        use crate::typeclass::Monoid;
+
+        /// ログ出力能力を表す型クラス
+        ///
+        /// # Type Parameters
+        /// - `W`: 出力の型（Monoid である必要がある）
+        pub trait MonadWriter<W>: Monad
+        where
+            W: Monoid,
+        {
+            /// 出力を追加する
+            fn tell(output: W) -> Self::WithType<()>;
+
+            /// 計算を実行し、その出力も取得する
+            fn listen<A>(computation: Self::WithType<A>) -> Self::WithType<(A, W)>;
+
+            /// 計算を実行し、出力を変換する
+            fn pass<A, F>(computation: Self::WithType<(A, F)>) -> Self::WithType<A>
+            where
+                F: FnOnce(W) -> W;
+
+            /// 計算を実行し、出力を無視する
+            fn censor<A, F>(modifier: F, computation: Self::WithType<A>) -> Self::WithType<A>
+            where
+                F: FnOnce(W) -> W + Clone,
+            {
+                Self::pass(computation.map(|a| (a, modifier)))
+            }
+
+            /// listen の結果から出力のみを取得
+            fn listens<A, B, F>(projection: F, computation: Self::WithType<A>) -> Self::WithType<(A, B)>
+            where
+                F: FnOnce(&W) -> B,
+            {
+                Self::listen(computation).map(|(a, w)| (a, projection(&w)))
+            }
+        }
+        ```
+
+    api:
+      operations:
+        - name: tell
+          signature: "fn tell(output: W) -> Self::WithType<()>"
+          description: "出力を追加"
+          complexity: "O(1)"
+          example: |
+            fn log_message<M: MonadWriter<Vec<String>>>(message: &str) -> M::WithType<()> {
+                M::tell(vec![message.to_string()])
+            }
+
+        - name: listen
+          signature: "fn listen<A>(computation: Self::WithType<A>) -> Self::WithType<(A, W)>"
+          description: "計算を実行し、その出力も取得"
+          complexity: "O(1) + computation のコスト"
+          example: |
+            fn with_logged_output<M, A>(computation: M::WithType<A>) -> M::WithType<(A, Vec<String>)>
+            where
+                M: MonadWriter<Vec<String>>,
+            {
+                M::listen(computation)
+            }
+
+        - name: pass
+          signature: "fn pass<A, F>(computation: Self::WithType<(A, F)>) -> Self::WithType<A>"
+          description: "計算を実行し、出力を変換"
+          complexity: "O(1) + computation のコスト + F のコスト"
+
+        - name: censor
+          signature: "fn censor<A, F>(modifier: F, computation: Self::WithType<A>) -> Self::WithType<A>"
+          description: "計算の出力を変換"
+          complexity: "O(1) + computation のコスト + modifier のコスト"
+
+    laws:
+      - name: Tell Monoid Law（tell の Monoid 法則）
+        description: "tell の連続は Monoid の combine と同じ"
+        equation: "M::tell(w1).then(M::tell(w2)) == M::tell(w1.combine(w2))"
+        property_test: |
+          proptest! {
+              fn prop_tell_monoid<W: Monoid + Clone + PartialEq>(w1: W, w2: W) {
+                  let left = MonadWriter::tell(w1.clone())
+                      .then(MonadWriter::tell(w2.clone()));
+                  let right = MonadWriter::tell(w1.combine(w2));
+                  // 同じ出力を生成する
+              }
+          }
+
+      - name: Listen Tell Law（listen と tell の法則）
+        description: "tell した値は listen で取得できる"
+        equation: "M::listen(M::tell(w)) == M::tell(w).map(|_| ((), w))"
+
+    tests:
+      - category: "基本操作テスト"
+        cases:
+          - name: "tell でログを出力"
+            test: |
+              let writer: Writer<Vec<String>, ()> = MonadWriter::tell(vec!["log".to_string()]);
+              let (_, output) = writer.run();
+              assert_eq!(output, vec!["log"]);
+
+          - name: "複数の tell は連結される"
+            test: |
+              let writer = MonadWriter::tell(vec!["first".to_string()])
+                  .then(MonadWriter::tell(vec!["second".to_string()]));
+              let (_, output) = writer.run();
+              assert_eq!(output, vec!["first", "second"]);
+
+          - name: "listen で出力を取得"
+            test: |
+              let inner = MonadWriter::tell(vec!["log".to_string()]).map(|_| 42);
+              let outer = MonadWriter::listen(inner);
+              let ((result, log), _) = outer.run();
+              assert_eq!(result, 42);
+              assert_eq!(log, vec!["log"]);
+
+  # ============================================================================
+  # 4. MonadError<E> トレイト
+  # ============================================================================
+  - id: effect_monad_error_trait
+    name: MonadError<E> トレイト
+    priority: high
+    description: |
+      エラーハンドリング能力を表す型クラス。
+      例外的な制御フロー（throw, catch）を抽象化する。
+
+      Haskell の MonadError に相当:
+      ```haskell
+      class Monad m => MonadError e m | m -> e where
+          throwError :: e -> m a
+          catchError :: m a -> (e -> m a) -> m a
+      ```
+
+    internal_structure:
+      description: |
+        ```rust
+        /// エラーハンドリング能力を表す型クラス
+        ///
+        /// # Type Parameters
+        /// - `E`: エラーの型
+        pub trait MonadError<E>: Monad {
+            /// エラーを発生させる
+            fn throw_error<A>(error: E) -> Self::WithType<A>;
+
+            /// エラーをキャッチしてリカバリする
+            fn catch_error<A, F>(computation: Self::WithType<A>, handler: F) -> Self::WithType<A>
+            where
+                F: FnOnce(E) -> Self::WithType<A>;
+
+            /// Result を MonadError に変換
+            fn from_result<A>(result: Result<A, E>) -> Self::WithType<A> {
+                match result {
+                    Ok(value) => Self::pure(value),
+                    Err(error) => Self::throw_error(error),
+                }
+            }
+
+            /// MonadError を Result に変換
+            fn to_result<A>(computation: Self::WithType<A>) -> Self::WithType<Result<A, E>>;
+
+            /// エラーを変換する
+            fn map_error<A, F, E2>(computation: Self::WithType<A>, mapper: F) -> Self::WithType<A>
+            where
+                F: FnOnce(E) -> E2,
+                Self: MonadError<E2>;
+
+            /// エラーの場合にデフォルト値を返す
+            fn or_else<A>(
+                computation: Self::WithType<A>,
+                default: Self::WithType<A>
+            ) -> Self::WithType<A> {
+                Self::catch_error(computation, |_| default)
+            }
+        }
+        ```
+
+    api:
+      operations:
+        - name: throw_error
+          signature: "fn throw_error<A>(error: E) -> Self::WithType<A>"
+          description: "エラーを発生させる"
+          complexity: "O(1)"
+          example: |
+            fn validate_positive<M: MonadError<ValidationError>>(n: i32) -> M::WithType<i32> {
+                if n > 0 {
+                    M::pure(n)
+                } else {
+                    M::throw_error(ValidationError::NonPositive)
+                }
+            }
+
+        - name: catch_error
+          signature: "fn catch_error<A, F>(computation: Self::WithType<A>, handler: F) -> Self::WithType<A>"
+          description: "エラーをキャッチしてリカバリ"
+          complexity: "O(1) + computation のコスト + handler のコスト（エラー時のみ）"
+          example: |
+            fn safe_divide<M: MonadError<DivisionError>>(a: i32, b: i32) -> M::WithType<i32> {
+                let computation = if b == 0 {
+                    M::throw_error(DivisionError::DivisionByZero)
+                } else {
+                    M::pure(a / b)
+                };
+
+                M::catch_error(computation, |_| M::pure(0)) // エラー時は 0 を返す
+            }
+
+        - name: from_result
+          signature: "fn from_result<A>(result: Result<A, E>) -> Self::WithType<A>"
+          description: "Result を MonadError に変換"
+          complexity: "O(1)"
+
+        - name: to_result
+          signature: "fn to_result<A>(computation: Self::WithType<A>) -> Self::WithType<Result<A, E>>"
+          description: "MonadError を Result に変換"
+          complexity: "O(1) + computation のコスト"
+
+    laws:
+      - name: Throw Catch Law（throw と catch の法則）
+        description: "throw したエラーは catch できる"
+        equation: "M::catch_error(M::throw_error(e), handler) == handler(e)"
+        property_test: |
+          proptest! {
+              fn prop_throw_catch<E: Clone + PartialEq, A: PartialEq>(error: E) {
+                  let handler = |e: E| MonadError::pure(e);
+                  let left = MonadError::catch_error(
+                      MonadError::throw_error(error.clone()),
+                      handler
+                  );
+                  let right = handler(error);
+                  // 同じ結果を返す
+              }
+          }
+
+      - name: Catch Pure Law（純粋な値は catch しない）
+        description: "純粋な値に catch_error を適用しても変わらない"
+        equation: "M::catch_error(M::pure(a), handler) == M::pure(a)"
+
+      - name: Throw Short-Circuit Law（throw は短絡する）
+        description: "throw 後の計算は実行されない"
+        equation: "M::throw_error(e).flat_map(f) == M::throw_error(e)"
+
+    tests:
+      - category: "基本操作テスト"
+        cases:
+          - name: "throw_error でエラーを発生"
+            test: |
+              let computation: ExceptT<String, Identity, i32> =
+                  MonadError::throw_error("error".to_string());
+              let result = computation.run();
+              assert_eq!(result, Identity::new(Err("error".to_string())));
+
+          - name: "catch_error でエラーをリカバリ"
+            test: |
+              let computation: ExceptT<String, Identity, i32> =
+                  MonadError::throw_error("error".to_string());
+              let recovered = MonadError::catch_error(computation, |_| {
+                  MonadError::pure(42)
+              });
+              let result = recovered.run();
+              assert_eq!(result, Identity::new(Ok(42)));
+
+          - name: "成功した計算は catch_error の影響を受けない"
+            test: |
+              let computation: ExceptT<String, Identity, i32> = MonadError::pure(42);
+              let recovered = MonadError::catch_error(computation, |_| {
+                  MonadError::pure(0)
+              });
+              let result = recovered.run();
+              assert_eq!(result, Identity::new(Ok(42)));
+
+  # ============================================================================
+  # 5. Reader<R, A> - 基本 Reader Monad
+  # ============================================================================
+  - id: effect_reader
+    name: Reader<R, A>
+    priority: high
+    description: |
+      環境を読み取る計算を表す基本 Monad。
+      ReaderT<R, Identity, A> の特殊化（エイリアス）としても表現可能。
+
+      Haskell の Reader に相当:
+      ```haskell
+      newtype Reader r a = Reader { runReader :: r -> a }
+      ```
+
+    internal_structure:
+      description: |
+        ```rust
+        /// 環境を読み取る計算を表す Monad
+        ///
+        /// # Type Parameters
+        /// - `R`: 環境の型
+        /// - `A`: 計算結果の型
+        pub struct Reader<R, A> {
+            run_reader: Box<dyn FnOnce(R) -> A>,
+        }
+
+        impl<R: 'static, A: 'static> Reader<R, A> {
+            /// Reader を作成
+            pub fn new<F>(function: F) -> Self
+            where
+                F: FnOnce(R) -> A + 'static,
+            {
+                Self {
+                    run_reader: Box::new(function),
+                }
+            }
+
+            /// 環境を与えて計算を実行
+            pub fn run(self, environment: R) -> A {
+                (self.run_reader)(environment)
+            }
+        }
+
+        // TypeConstructor, Functor, Applicative, Monad, MonadReader を実装
+        ```
+
+    api:
+      constructors:
+        - name: new
+          signature: "fn new<F>(function: F) -> Self"
+          description: "関数から Reader を作成"
+          complexity: "O(1)"
+          example: |
+            let reader: Reader<Config, String> = Reader::new(|config| config.database_url.clone());
+
+        - name: pure
+          signature: "fn pure(value: A) -> Self"
+          description: "値を Reader に持ち上げる"
+          complexity: "O(1)"
+          example: |
+            let reader: Reader<Config, i32> = Reader::pure(42);
+            assert_eq!(reader.run(Config::default()), 42);
+
+      operations:
+        - name: run
+          signature: "fn run(self, environment: R) -> A"
+          description: "環境を与えて計算を実行"
+          complexity: "O(1) + 内部計算のコスト"
+          example: |
+            let reader = Reader::ask().map(|config: Config| config.port);
+            let port = reader.run(Config { port: 8080, .. });
+            assert_eq!(port, 8080);
+
+        - name: map
+          signature: "fn map<B, F>(self, function: F) -> Reader<R, B>"
+          description: "結果に関数を適用"
+          complexity: "O(1)"
+
+        - name: flat_map
+          signature: "fn flat_map<B, F>(self, function: F) -> Reader<R, B>"
+          description: "Reader を返す関数を連鎖"
+          complexity: "O(1)"
+
+    laws:
+      note: "Reader は Monad なので、Monad 法則を満たす"
+
+    tests:
+      - category: "基本操作テスト"
+        cases:
+          - name: "Reader で環境を使用"
+            test: |
+              struct Config { multiplier: i32 }
+              let reader = Reader::new(|config: Config| config.multiplier * 2);
+              assert_eq!(reader.run(Config { multiplier: 21 }), 42);
+
+          - name: "Reader の合成"
+            test: |
+              let reader = Reader::ask()
+                  .flat_map(|config: Config| {
+                      Reader::ask().map(move |c| config.a + c.b)
+                  });
+
+  # ============================================================================
+  # 6. State<S, A> - 基本 State Monad
+  # ============================================================================
+  - id: effect_state
+    name: State<S, A>
+    priority: high
+    description: |
+      状態を扱う計算を表す基本 Monad。
+      StateT<S, Identity, A> の特殊化（エイリアス）としても表現可能。
+
+      Haskell の State に相当:
+      ```haskell
+      newtype State s a = State { runState :: s -> (a, s) }
+      ```
+
+    internal_structure:
+      description: |
+        ```rust
+        /// 状態を扱う計算を表す Monad
+        ///
+        /// # Type Parameters
+        /// - `S`: 状態の型
+        /// - `A`: 計算結果の型
+        pub struct State<S, A> {
+            run_state: Box<dyn FnOnce(S) -> (A, S)>,
+        }
+
+        impl<S: 'static, A: 'static> State<S, A> {
+            /// State を作成
+            pub fn new<F>(transition: F) -> Self
+            where
+                F: FnOnce(S) -> (A, S) + 'static,
+            {
+                Self {
+                    run_state: Box::new(transition),
+                }
+            }
+
+            /// 初期状態を与えて計算を実行
+            pub fn run(self, initial_state: S) -> (A, S) {
+                (self.run_state)(initial_state)
+            }
+
+            /// 結果のみを取得
+            pub fn eval(self, initial_state: S) -> A {
+                self.run(initial_state).0
+            }
+
+            /// 最終状態のみを取得
+            pub fn exec(self, initial_state: S) -> S {
+                self.run(initial_state).1
+            }
+        }
+
+        // TypeConstructor, Functor, Applicative, Monad, MonadState を実装
+        ```
+
+    api:
+      constructors:
+        - name: new
+          signature: "fn new<F>(transition: F) -> Self"
+          description: "状態遷移関数から State を作成"
+          complexity: "O(1)"
+
+        - name: pure
+          signature: "fn pure(value: A) -> Self"
+          description: "値を State に持ち上げる（状態は変更しない）"
+          complexity: "O(1)"
+
+      operations:
+        - name: run
+          signature: "fn run(self, initial_state: S) -> (A, S)"
+          description: "初期状態を与えて計算を実行"
+          complexity: "O(1) + 内部計算のコスト"
+
+        - name: eval
+          signature: "fn eval(self, initial_state: S) -> A"
+          description: "計算を実行し、結果のみを取得"
+          complexity: "O(1) + 内部計算のコスト"
+
+        - name: exec
+          signature: "fn exec(self, initial_state: S) -> S"
+          description: "計算を実行し、最終状態のみを取得"
+          complexity: "O(1) + 内部計算のコスト"
+
+    tests:
+      - category: "基本操作テスト"
+        cases:
+          - name: "State でカウンター"
+            test: |
+              let increment: State<i32, ()> = MonadState::modify(|x| x + 1);
+              let computation = increment.then(increment).then(MonadState::get());
+              let (result, final_state) = computation.run(0);
+              assert_eq!(result, 2);
+              assert_eq!(final_state, 2);
+
+          - name: "State でスタック操作"
+            test: |
+              type Stack<T> = Vec<T>;
+
+              fn push<T: Clone + 'static>(value: T) -> State<Stack<T>, ()> {
+                  MonadState::modify(move |mut stack: Stack<T>| {
+                      stack.push(value);
+                      stack
+                  })
+              }
+
+              fn pop<T: Clone + 'static>() -> State<Stack<T>, Option<T>> {
+                  MonadState::state(|mut stack: Stack<T>| {
+                      let value = stack.pop();
+                      (value, stack)
+                  })
+              }
+
+              let computation = push(1)
+                  .then(push(2))
+                  .then(pop())
+                  .flat_map(|popped| push(3).map(move |_| popped));
+
+              let (result, final_stack) = computation.run(vec![]);
+              assert_eq!(result, Some(2));
+              assert_eq!(final_stack, vec![1, 3]);
+
+  # ============================================================================
+  # 7. Writer<W, A> - 基本 Writer Monad
+  # ============================================================================
+  - id: effect_writer
+    name: Writer<W, A>
+    priority: medium
+    description: |
+      ログ出力を伴う計算を表す基本 Monad。
+      WriterT<W, Identity, A> の特殊化（エイリアス）としても表現可能。
+
+      Haskell の Writer に相当:
+      ```haskell
+      newtype Writer w a = Writer { runWriter :: (a, w) }
+      ```
+
+    internal_structure:
+      description: |
+        ```rust
+        use crate::typeclass::Monoid;
+
+        /// ログ出力を伴う計算を表す Monad
+        ///
+        /// # Type Parameters
+        /// - `W`: 出力の型（Monoid である必要がある）
+        /// - `A`: 計算結果の型
+        pub struct Writer<W, A>
+        where
+            W: Monoid,
+        {
+            run_writer: (A, W),
+        }
+
+        impl<W: Monoid, A> Writer<W, A> {
+            /// Writer を作成
+            pub fn new(value: A, output: W) -> Self {
+                Self {
+                    run_writer: (value, output),
+                }
+            }
+
+            /// 計算を実行し、結果と出力を取得
+            pub fn run(self) -> (A, W) {
+                self.run_writer
+            }
+
+            /// 結果のみを取得
+            pub fn eval(self) -> A {
+                self.run().0
+            }
+
+            /// 出力のみを取得
+            pub fn exec(self) -> W {
+                self.run().1
+            }
+        }
+
+        // TypeConstructor, Functor, Applicative, Monad, MonadWriter を実装
+        ```
+
+    api:
+      constructors:
+        - name: new
+          signature: "fn new(value: A, output: W) -> Self"
+          description: "値と出力から Writer を作成"
+          complexity: "O(1)"
+
+        - name: pure
+          signature: "fn pure(value: A) -> Self"
+          description: "値を Writer に持ち上げる（出力は empty）"
+          complexity: "O(1)"
+
+      operations:
+        - name: run
+          signature: "fn run(self) -> (A, W)"
+          description: "計算を実行し、結果と出力を取得"
+          complexity: "O(1)"
+
+        - name: eval
+          signature: "fn eval(self) -> A"
+          description: "結果のみを取得"
+          complexity: "O(1)"
+
+        - name: exec
+          signature: "fn exec(self) -> W"
+          description: "出力のみを取得"
+          complexity: "O(1)"
+
+    tests:
+      - category: "基本操作テスト"
+        cases:
+          - name: "Writer でログ出力"
+            test: |
+              let computation = MonadWriter::tell(vec!["step 1".to_string()])
+                  .then(MonadWriter::tell(vec!["step 2".to_string()]))
+                  .map(|_| 42);
+              let (result, log) = computation.run();
+              assert_eq!(result, 42);
+              assert_eq!(log, vec!["step 1", "step 2"]);
+
+  # ============================================================================
+  # 8. ReaderT<R, M, A> - Reader Monad Transformer
+  # ============================================================================
+  - id: effect_reader_transformer
+    name: ReaderT<R, M, A>
+    priority: critical
+    description: |
+      Reader 効果を他の Monad に追加する Transformer。
+      任意の Monad M に環境読み取り能力を追加する。
+
+      Haskell の ReaderT に相当:
+      ```haskell
+      newtype ReaderT r m a = ReaderT { runReaderT :: r -> m a }
+      ```
+
+    internal_structure:
+      description: |
+        ```rust
+        /// Reader 効果を追加する Monad Transformer
+        ///
+        /// # Type Parameters
+        /// - `R`: 環境の型
+        /// - `M`: 基底 Monad
+        /// - `A`: 計算結果の型
+        pub struct ReaderT<R, M, A>
+        where
+            M: Monad,
+        {
+            run_reader_t: Box<dyn FnOnce(R) -> M::WithType<A>>,
+        }
+
+        impl<R: 'static, M: Monad + 'static, A: 'static> ReaderT<R, M, A> {
+            /// ReaderT を作成
+            pub fn new<F>(function: F) -> Self
+            where
+                F: FnOnce(R) -> M::WithType<A> + 'static,
+            {
+                Self {
+                    run_reader_t: Box::new(function),
+                }
+            }
+
+            /// 環境を与えて計算を実行
+            pub fn run(self, environment: R) -> M::WithType<A> {
+                (self.run_reader_t)(environment)
+            }
+
+            /// 内側の Monad を持ち上げる
+            pub fn lift(inner: M::WithType<A>) -> Self {
+                Self::new(move |_| inner)
+            }
+        }
+
+        // TypeConstructor, Functor, Applicative, Monad, MonadReader を実装
+        // M が MonadState<S> なら ReaderT も MonadState<S> を実装
+        // M が MonadWriter<W> なら ReaderT も MonadWriter<W> を実装
+        // M が MonadError<E> なら ReaderT も MonadError<E> を実装
+        ```
+
+    api:
+      constructors:
+        - name: new
+          signature: "fn new<F>(function: F) -> Self"
+          description: "関数から ReaderT を作成"
+          complexity: "O(1)"
+
+        - name: lift
+          signature: "fn lift(inner: M::WithType<A>) -> Self"
+          description: "内側の Monad を持ち上げる"
+          complexity: "O(1)"
+
+        - name: pure
+          signature: "fn pure(value: A) -> Self"
+          description: "値を ReaderT に持ち上げる"
+          complexity: "O(1)"
+
+      operations:
+        - name: run
+          signature: "fn run(self, environment: R) -> M::WithType<A>"
+          description: "環境を与えて計算を実行"
+          complexity: "O(1) + 内部計算のコスト"
+
+    laws:
+      note: "ReaderT は Monad Transformer なので、Monad 法則と lift 法則を満たす"
+
+      - name: Lift Pure Law（lift と pure の法則）
+        description: "pure を lift しても同じ"
+        equation: "ReaderT::lift(M::pure(a)) == ReaderT::pure(a)"
+
+      - name: Lift Composition Law（lift の合成法則）
+        description: "lift は flat_map と分配する"
+        equation: "ReaderT::lift(m.flat_map(f)) == ReaderT::lift(m).flat_map(|a| ReaderT::lift(f(a)))"
+
+    tests:
+      - category: "基本操作テスト"
+        cases:
+          - name: "ReaderT で Reader と State を組み合わせ"
+            test: |
+              type AppM<A> = ReaderT<Config, State<AppState, A>, A>;
+
+              fn get_config_value<A>(extractor: impl Fn(&Config) -> A) -> AppM<A> {
+                  MonadReader::asks(extractor)
+              }
+
+              fn update_counter() -> AppM<()> {
+                  ReaderT::lift(MonadState::modify(|s: AppState| AppState {
+                      counter: s.counter + 1,
+                      ..s
+                  }))
+              }
+
+  # ============================================================================
+  # 9. StateT<S, M, A> - State Monad Transformer
+  # ============================================================================
+  - id: effect_state_transformer
+    name: StateT<S, M, A>
+    priority: critical
+    description: |
+      State 効果を他の Monad に追加する Transformer。
+      任意の Monad M に状態操作能力を追加する。
+
+      Haskell の StateT に相当:
+      ```haskell
+      newtype StateT s m a = StateT { runStateT :: s -> m (a, s) }
+      ```
+
+    internal_structure:
+      description: |
+        ```rust
+        /// State 効果を追加する Monad Transformer
+        ///
+        /// # Type Parameters
+        /// - `S`: 状態の型
+        /// - `M`: 基底 Monad
+        /// - `A`: 計算結果の型
+        pub struct StateT<S, M, A>
+        where
+            M: Monad,
+        {
+            run_state_t: Box<dyn FnOnce(S) -> M::WithType<(A, S)>>,
+        }
+
+        impl<S: 'static, M: Monad + 'static, A: 'static> StateT<S, M, A> {
+            /// StateT を作成
+            pub fn new<F>(transition: F) -> Self
+            where
+                F: FnOnce(S) -> M::WithType<(A, S)> + 'static,
+            {
+                Self {
+                    run_state_t: Box::new(transition),
+                }
+            }
+
+            /// 初期状態を与えて計算を実行
+            pub fn run(self, initial_state: S) -> M::WithType<(A, S)> {
+                (self.run_state_t)(initial_state)
+            }
+
+            /// 内側の Monad を持ち上げる
+            pub fn lift(inner: M::WithType<A>) -> Self
+            where
+                S: Clone,
+            {
+                Self::new(move |s| inner.map(|a| (a, s)))
+            }
+        }
+
+        // TypeConstructor, Functor, Applicative, Monad, MonadState を実装
+        // M が MonadReader<R> なら StateT も MonadReader<R> を実装
+        // M が MonadWriter<W> なら StateT も MonadWriter<W> を実装
+        // M が MonadError<E> なら StateT も MonadError<E> を実装
+        ```
+
+    api:
+      constructors:
+        - name: new
+          signature: "fn new<F>(transition: F) -> Self"
+          description: "状態遷移関数から StateT を作成"
+          complexity: "O(1)"
+
+        - name: lift
+          signature: "fn lift(inner: M::WithType<A>) -> Self"
+          description: "内側の Monad を持ち上げる"
+          complexity: "O(1)"
+
+      operations:
+        - name: run
+          signature: "fn run(self, initial_state: S) -> M::WithType<(A, S)>"
+          description: "初期状態を与えて計算を実行"
+          complexity: "O(1) + 内部計算のコスト"
+
+    tests:
+      - category: "基本操作テスト"
+        cases:
+          - name: "StateT で State と Option を組み合わせ"
+            test: |
+              type MaybeStateM<S, A> = StateT<S, Option<A>, A>;
+
+              fn safe_pop<T: Clone + 'static>() -> MaybeStateM<Vec<T>, T> {
+                  StateT::new(|mut stack: Vec<T>| {
+                      stack.pop().map(|value| (value, stack))
+                  })
+              }
+
+  # ============================================================================
+  # 10. WriterT<W, M, A> - Writer Monad Transformer
+  # ============================================================================
+  - id: effect_writer_transformer
+    name: WriterT<W, M, A>
+    priority: medium
+    description: |
+      Writer 効果を他の Monad に追加する Transformer。
+      任意の Monad M にログ出力能力を追加する。
+
+      Haskell の WriterT に相当:
+      ```haskell
+      newtype WriterT w m a = WriterT { runWriterT :: m (a, w) }
+      ```
+
+    internal_structure:
+      description: |
+        ```rust
+        use crate::typeclass::Monoid;
+
+        /// Writer 効果を追加する Monad Transformer
+        ///
+        /// # Type Parameters
+        /// - `W`: 出力の型（Monoid である必要がある）
+        /// - `M`: 基底 Monad
+        /// - `A`: 計算結果の型
+        pub struct WriterT<W, M, A>
+        where
+            W: Monoid,
+            M: Monad,
+        {
+            run_writer_t: M::WithType<(A, W)>,
+        }
+
+        impl<W: Monoid + 'static, M: Monad + 'static, A: 'static> WriterT<W, M, A> {
+            /// WriterT を作成
+            pub fn new(inner: M::WithType<(A, W)>) -> Self {
+                Self { run_writer_t: inner }
+            }
+
+            /// 計算を実行
+            pub fn run(self) -> M::WithType<(A, W)> {
+                self.run_writer_t
+            }
+
+            /// 内側の Monad を持ち上げる
+            pub fn lift(inner: M::WithType<A>) -> Self {
+                Self::new(inner.map(|a| (a, W::empty())))
+            }
+        }
+
+        // TypeConstructor, Functor, Applicative, Monad, MonadWriter を実装
+        ```
+
+    api:
+      constructors:
+        - name: new
+          signature: "fn new(inner: M::WithType<(A, W)>) -> Self"
+          description: "内側の Monad から WriterT を作成"
+          complexity: "O(1)"
+
+        - name: lift
+          signature: "fn lift(inner: M::WithType<A>) -> Self"
+          description: "内側の Monad を持ち上げる（出力は empty）"
+          complexity: "O(1)"
+
+      operations:
+        - name: run
+          signature: "fn run(self) -> M::WithType<(A, W)>"
+          description: "計算を実行"
+          complexity: "O(1)"
+
+  # ============================================================================
+  # 11. ExceptT<E, M, A> - Except Monad Transformer
+  # ============================================================================
+  - id: effect_except_transformer
+    name: ExceptT<E, M, A>
+    priority: high
+    description: |
+      例外/エラー効果を他の Monad に追加する Transformer。
+      任意の Monad M にエラーハンドリング能力を追加する。
+
+      Haskell の ExceptT に相当:
+      ```haskell
+      newtype ExceptT e m a = ExceptT { runExceptT :: m (Either e a) }
+      ```
+
+    internal_structure:
+      description: |
+        ```rust
+        /// 例外/エラー効果を追加する Monad Transformer
+        ///
+        /// # Type Parameters
+        /// - `E`: エラーの型
+        /// - `M`: 基底 Monad
+        /// - `A`: 計算結果の型
+        pub struct ExceptT<E, M, A>
+        where
+            M: Monad,
+        {
+            run_except_t: M::WithType<Result<A, E>>,
+        }
+
+        impl<E: 'static, M: Monad + 'static, A: 'static> ExceptT<E, M, A> {
+            /// ExceptT を作成
+            pub fn new(inner: M::WithType<Result<A, E>>) -> Self {
+                Self { run_except_t: inner }
+            }
+
+            /// 計算を実行
+            pub fn run(self) -> M::WithType<Result<A, E>> {
+                self.run_except_t
+            }
+
+            /// 内側の Monad を持ち上げる
+            pub fn lift(inner: M::WithType<A>) -> Self {
+                Self::new(inner.map(Ok))
+            }
+
+            /// エラーを持ち上げる
+            pub fn throw(error: E) -> Self {
+                Self::new(M::pure(Err(error)))
+            }
+        }
+
+        // TypeConstructor, Functor, Applicative, Monad, MonadError を実装
+        ```
+
+    api:
+      constructors:
+        - name: new
+          signature: "fn new(inner: M::WithType<Result<A, E>>) -> Self"
+          description: "内側の Monad から ExceptT を作成"
+          complexity: "O(1)"
+
+        - name: lift
+          signature: "fn lift(inner: M::WithType<A>) -> Self"
+          description: "内側の Monad を持ち上げる"
+          complexity: "O(1)"
+
+        - name: throw
+          signature: "fn throw(error: E) -> Self"
+          description: "エラーを持ち上げる"
+          complexity: "O(1)"
+
+      operations:
+        - name: run
+          signature: "fn run(self) -> M::WithType<Result<A, E>>"
+          description: "計算を実行"
+          complexity: "O(1)"
+
+    tests:
+      - category: "基本操作テスト"
+        cases:
+          - name: "ExceptT で State とエラーを組み合わせ"
+            test: |
+              type StatefulResult<S, E, A> = ExceptT<E, State<S, Result<A, E>>, A>;
+
+              fn validate_and_update(value: i32) -> StatefulResult<i32, String, i32> {
+                  if value > 0 {
+                      ExceptT::lift(MonadState::modify(|s| s + value).map(|_| value))
+                  } else {
+                      MonadError::throw_error("value must be positive".to_string())
+                  }
+              }
+
+  # ============================================================================
+  # 12. IO<A> - IO Monad
+  # ============================================================================
+  - id: effect_io
+    name: IO<A>
+    priority: high
+    description: |
+      入出力の副作用を表す Monad。
+      副作用を遅延させ、参照透過性を維持する。
+
+      Haskell の IO に相当:
+      ```haskell
+      newtype IO a = IO { runIO :: RealWorld -> (a, RealWorld) }
+      ```
+
+      Rust では実際の RealWorld トークンは使用せず、
+      クロージャのラッピングによって遅延を実現する。
+
+    internal_structure:
+      description: |
+        ```rust
+        /// 入出力の副作用を表す Monad
+        ///
+        /// # Type Parameters
+        /// - `A`: 計算結果の型
+        ///
+        /// # 設計方針
+        ///
+        /// IO は副作用を「記述」するが、「実行」はしない。
+        /// 実行は run_unsafe メソッドでのみ行われ、
+        /// このメソッドはプログラムの「エッジ」（main 関数など）でのみ呼ばれるべき。
+        pub struct IO<A> {
+            /// 副作用を実行するクロージャ
+            run_io: Box<dyn FnOnce() -> A>,
+        }
+
+        impl<A: 'static> IO<A> {
+            /// IO アクションを作成
+            pub fn new<F>(action: F) -> Self
+            where
+                F: FnOnce() -> A + 'static,
+            {
+                Self {
+                    run_io: Box::new(action),
+                }
+            }
+
+            /// 純粋な値を IO に持ち上げる
+            pub fn pure(value: A) -> Self {
+                Self::new(move || value)
+            }
+
+            /// IO アクションを実行する
+            ///
+            /// # Safety
+            ///
+            /// このメソッドは副作用を実際に実行する。
+            /// プログラムのエッジ（main 関数など）でのみ使用すべき。
+            pub fn run_unsafe(self) -> A {
+                (self.run_io)()
+            }
+
+            /// ファイルを読み取る IO アクションを作成
+            pub fn read_file(path: impl AsRef<std::path::Path> + 'static) -> IO<std::io::Result<String>> {
+                IO::new(move || std::fs::read_to_string(path))
+            }
+
+            /// ファイルに書き込む IO アクションを作成
+            pub fn write_file(
+                path: impl AsRef<std::path::Path> + 'static,
+                contents: impl AsRef<[u8]> + 'static,
+            ) -> IO<std::io::Result<()>> {
+                IO::new(move || std::fs::write(path, contents))
+            }
+
+            /// 標準出力に出力する IO アクションを作成
+            pub fn print_line(message: impl std::fmt::Display + 'static) -> IO<()> {
+                IO::new(move || println!("{}", message))
+            }
+
+            /// 標準入力から1行読み取る IO アクションを作成
+            pub fn read_line() -> IO<std::io::Result<String>> {
+                IO::new(|| {
+                    let mut buffer = String::new();
+                    std::io::stdin().read_line(&mut buffer).map(|_| buffer)
+                })
+            }
+        }
+
+        // TypeConstructor, Functor, Applicative, Monad を実装
+        ```
+
+    api:
+      constructors:
+        - name: new
+          signature: "fn new<F>(action: F) -> Self"
+          description: "クロージャから IO を作成"
+          complexity: "O(1)"
+
+        - name: pure
+          signature: "fn pure(value: A) -> Self"
+          description: "純粋な値を IO に持ち上げる"
+          complexity: "O(1)"
+
+        - name: read_file
+          signature: "fn read_file(path: impl AsRef<Path>) -> IO<Result<String>>"
+          description: "ファイル読み取りの IO アクションを作成"
+          complexity: "O(1)（アクション作成のみ）"
+
+        - name: write_file
+          signature: "fn write_file(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> IO<Result<()>>"
+          description: "ファイル書き込みの IO アクションを作成"
+          complexity: "O(1)（アクション作成のみ）"
+
+        - name: print_line
+          signature: "fn print_line(message: impl Display) -> IO<()>"
+          description: "標準出力への出力 IO アクションを作成"
+          complexity: "O(1)（アクション作成のみ）"
+
+        - name: read_line
+          signature: "fn read_line() -> IO<Result<String>>"
+          description: "標準入力からの読み取り IO アクションを作成"
+          complexity: "O(1)（アクション作成のみ）"
+
+      operations:
+        - name: run_unsafe
+          signature: "fn run_unsafe(self) -> A"
+          description: "IO アクションを実行（プログラムのエッジでのみ使用）"
+          complexity: "アクションに依存"
+
+        - name: map
+          signature: "fn map<B, F>(self, function: F) -> IO<B>"
+          description: "結果に関数を適用"
+          complexity: "O(1)"
+
+        - name: flat_map
+          signature: "fn flat_map<B, F>(self, function: F) -> IO<B>"
+          description: "IO を返す関数を連鎖"
+          complexity: "O(1)"
+
+    laws:
+      note: "IO は Monad なので、Monad 法則を満たす"
+
+    tests:
+      - category: "基本操作テスト"
+        cases:
+          - name: "IO で副作用を記述"
+            test: |
+              let io = IO::pure(42)
+                  .flat_map(|x| IO::pure(x * 2))
+                  .map(|x| x + 1);
+
+              // まだ何も実行されていない
+              let result = io.run_unsafe();
+              assert_eq!(result, 85);
+
+          - name: "IO の合成"
+            test: |
+              let program = IO::print_line("Hello")
+                  .then(IO::print_line("World"))
+                  .map(|_| "Done");
+
+              // run_unsafe を呼ぶまで出力されない
+
+  # ============================================================================
+  # 13. eff! マクロ - do 記法相当
+  # ============================================================================
+  - id: effect_eff_macro
+    name: eff! マクロ
+    priority: medium
+    description: |
+      Haskell の do 記法に相当するマクロ。
+      Monad の連鎖を手続き的に記述できる。
+
+      ```rust
+      // do 記法風の記述
+      let result = eff! {
+          x <- Some(5);
+          y <- Some(10);
+          return x + y
+      };
+      assert_eq!(result, Some(15));
+
+      // flat_map チェーンと等価
+      let result = Some(5).flat_map(|x| {
+          Some(10).flat_map(|y| {
+              Some(x + y)
+          })
+      });
+      ```
+
+    internal_structure:
+      description: |
+        ```rust
+        /// do 記法相当のマクロ
+        ///
+        /// # Syntax
+        ///
+        /// ```text
+        /// eff! {
+        ///     pattern <- expression;   // flat_map
+        ///     expression;              // then（結果を無視）
+        ///     let pattern = expression; // 純粋な束縛
+        ///     return expression        // 最後の式
+        /// }
+        /// ```
+        ///
+        /// # Examples
+        ///
+        /// ```rust
+        /// use functional_rusty::eff;
+        ///
+        /// let result = eff! {
+        ///     x <- Some(5);
+        ///     y <- Some(10);
+        ///     let z = x + y;
+        ///     return z * 2
+        /// };
+        /// assert_eq!(result, Some(30));
+        /// ```
+        #[macro_export]
+        macro_rules! eff {
+            // 最後の式: return expr
+            (return $result:expr) => {
+                $crate::typeclass::Applicative::pure($result)
+            };
+
+            // 最後の式: expr（return なし）
+            ($result:expr) => {
+                $result
+            };
+
+            // flat_map: pattern <- expr; rest
+            ($pattern:pat = $monad:expr ; $($rest:tt)+) => {
+                $crate::typeclass::Monad::flat_map($monad, move |$pattern| {
+                    eff!($($rest)+)
+                })
+            };
+
+            // then: expr; rest（結果を無視）
+            ($monad:expr ; $($rest:tt)+) => {
+                $crate::typeclass::Monad::then($monad, eff!($($rest)+))
+            };
+
+            // let 束縛: let pattern = expr; rest
+            (let $pattern:pat = $expr:expr ; $($rest:tt)+) => {
+                {
+                    let $pattern = $expr;
+                    eff!($($rest)+)
+                }
+            };
+        }
+        ```
+
+    api:
+      syntax:
+        - name: "pattern <- expression"
+          description: "flat_map による束縛"
+          example: |
+            x <- Some(5)  // x: i32
+
+        - name: "expression"
+          description: "then による連鎖（結果を無視）"
+          example: |
+            MonadWriter::tell(vec!["log"]);  // 結果 () を無視
+
+        - name: "let pattern = expression"
+          description: "純粋な束縛（Monad ではない）"
+          example: |
+            let sum = x + y;
+
+        - name: "return expression"
+          description: "最後の式を pure でラップ"
+          example: |
+            return sum * 2
+
+    tests:
+      - category: "基本的な eff! マクロテスト"
+        cases:
+          - name: "Option での eff!"
+            test: |
+              let result = eff! {
+                  x <- Some(5);
+                  y <- Some(10);
+                  return x + y
+              };
+              assert_eq!(result, Some(15));
+
+          - name: "失敗時の短絡"
+            test: |
+              let result: Option<i32> = eff! {
+                  x <- Some(5);
+                  y <- None::<i32>;
+                  return x + y
+              };
+              assert_eq!(result, None);
+
+          - name: "let 束縛"
+            test: |
+              let result = eff! {
+                  x <- Some(5);
+                  let doubled = x * 2;
+                  y <- Some(10);
+                  return doubled + y
+              };
+              assert_eq!(result, Some(20));
+
+          - name: "State での eff!"
+            test: |
+              let computation = eff! {
+                  current <- MonadState::get();
+                  MonadState::put(current + 1);
+                  new_state <- MonadState::get();
+                  return new_state
+              };
+              let (result, final_state) = computation.run(0);
+              assert_eq!(result, 1);
+              assert_eq!(final_state, 1);
+
+          - name: "ReaderT + StateT での eff!"
+            test: |
+              type AppM<A> = ReaderT<Config, State<AppState, A>, A>;
+
+              let computation: AppM<String> = eff! {
+                  config <- MonadReader::ask();
+                  current <- AppM::lift(MonadState::get());
+                  AppM::lift(MonadState::put(AppState {
+                      counter: current.counter + 1,
+                  }));
+                  return format!("Config: {}, Counter: {}", config.name, current.counter + 1)
+              };
+
+# 実装順序と依存関係
+implementation_order:
+  - phase: "6.1"
+    name: "MTL スタイル型クラス"
+    description: |
+      MonadReader, MonadState, MonadWriter, MonadError の型クラスを定義。
+      これらは後続の基本 Monad と Transformer の基盤となる。
+    duration_estimate: "3-4 days"
+    dependencies: []
+    deliverables:
+      - src/effect/monad_reader.rs
+      - src/effect/monad_state.rs
+      - src/effect/monad_writer.rs
+      - src/effect/monad_error.rs
+      - tests/mtl_trait_tests.rs
+
+  - phase: "6.2"
+    name: "基本 Monad (Reader, State, Writer)"
+    description: |
+      Reader, State, Writer の基本 Monad を実装。
+      Identity をベースとした単純な実装。
+    duration_estimate: "4-5 days"
+    dependencies:
+      - "6.1"
+    deliverables:
+      - src/effect/reader.rs
+      - src/effect/state.rs
+      - src/effect/writer.rs
+      - tests/reader_tests.rs
+      - tests/state_tests.rs
+      - tests/writer_tests.rs
+      - tests/reader_laws.rs
+      - tests/state_laws.rs
+      - tests/writer_laws.rs
+
+  - phase: "6.3"
+    name: "Monad Transformer (ReaderT, StateT, WriterT, ExceptT)"
+    description: |
+      ReaderT, StateT, WriterT, ExceptT の Transformer を実装。
+      MTL 型クラスの自動 passthrough も実装。
+    duration_estimate: "5-7 days"
+    dependencies:
+      - "6.1"
+      - "6.2"
+    deliverables:
+      - src/effect/reader_t.rs
+      - src/effect/state_t.rs
+      - src/effect/writer_t.rs
+      - src/effect/except_t.rs
+      - tests/reader_t_tests.rs
+      - tests/state_t_tests.rs
+      - tests/writer_t_tests.rs
+      - tests/except_t_tests.rs
+      - tests/transformer_laws.rs
+
+  - phase: "6.4"
+    name: "IO Monad"
+    description: |
+      IO 型を実装。副作用の遅延と参照透過性の維持。
+      基本的な I/O 操作のラッパーも提供。
+    duration_estimate: "3-4 days"
+    dependencies:
+      - "6.1"
+    deliverables:
+      - src/effect/io.rs
+      - tests/io_tests.rs
+
+  - phase: "6.5"
+    name: "eff! マクロ"
+    description: |
+      do 記法相当の eff! マクロを実装。
+      flat_map チェーンを手続き的に記述可能にする。
+    duration_estimate: "2-3 days"
+    dependencies:
+      - "6.2"
+    deliverables:
+      - src/effect/eff_macro.rs
+      - tests/eff_macro_tests.rs
+
+  - phase: "6.6"
+    name: "統合テストと文書化"
+    description: |
+      全 Effect の統合テスト、ドキュメント、サンプルコードの整備。
+      Phase 1-5 との統合も検証。
+    duration_estimate: "2-3 days"
+    dependencies:
+      - "6.1"
+      - "6.2"
+      - "6.3"
+      - "6.4"
+      - "6.5"
+    deliverables:
+      - tests/effect_integration_tests.rs
+      - examples/effect_example.rs
+
+# テスト戦略
+testing_strategy:
+  unit_tests:
+    description: "各 Effect の基本操作を検証"
+    coverage_target: "100%"
+    categories:
+      - "基本操作（run, map, flat_map）"
+      - "MTL 型クラスメソッド（ask, get, put, tell, throw, catch）"
+      - "Transformer の lift 操作"
+      - "型クラスの passthrough"
+      - "マクロ生成コード"
+
+  property_tests:
+    description: "Monad 法則と MTL 法則をプロパティベーステストで検証"
+    framework: "proptest"
+    properties:
+      - "Monad 法則（Left Identity, Right Identity, Associativity）"
+      - "MonadReader 法則（Ask Local Identity, Ask Local Composition）"
+      - "MonadState 法則（Get Put, Put Get, Put Put）"
+      - "MonadWriter 法則（Tell Monoid, Listen Tell）"
+      - "MonadError 法則（Throw Catch, Catch Pure）"
+      - "Transformer lift 法則"
+
+  integration_tests:
+    description: "Phase 1-5 との統合、実用的なシナリオを検証"
+    scenarios:
+      - "Monad スタック（ReaderT + StateT + IO）"
+      - "永続データ構造を State として使用"
+      - "Optics との連携（State + Lens）"
+      - "eff! マクロと複合効果"
+      - "エラーハンドリングとリカバリ"
+
+# 将来の拡張
+future_extensions:
+  - name: "Algebraic Effects"
+    description: |
+      代数的効果とハンドラによる、より柔軟な効果システム。
+      Monad Transformer の欠点（合成順序の固定）を解決。
+    priority: medium
+    complexity: high
+    references:
+      - "Koka language"
+      - "Effekt language"
+      - "frunk-effects (Rust)"
+
+  - name: "Async Effect Integration"
+    description: |
+      async/await と Effect System の統合。
+      IO<A> と Future<A> の関係性の整理。
+    priority: high
+    complexity: medium
+
+  - name: "Effect Inference"
+    description: |
+      効果の自動推論（可能な範囲で）。
+      型注釈の削減とユーザビリティ向上。
+    priority: low
+    complexity: high
+
+  - name: "ContT (Continuation Transformer)"
+    description: |
+      継続効果を追加する Transformer。
+      Phase 3 の Continuation との統合。
+    priority: medium
+    complexity: medium
+
+  - name: "SelectT (Selection Transformer)"
+    description: |
+      非決定的選択を扱う Transformer。
+      バックトラッキングの実装に有用。
+    priority: low
+    complexity: medium
+
+# Haskell mtl との対応表
+haskell_correspondence:
+  type_classes:
+    - haskell: "MonadReader r m"
+      rust: "MonadReader<R>"
+      notes: "functional dependency を型パラメータで表現"
+
+    - haskell: "MonadState s m"
+      rust: "MonadState<S>"
+      notes: "同上"
+
+    - haskell: "MonadWriter w m"
+      rust: "MonadWriter<W>"
+      notes: "W: Monoid 制約を追加"
+
+    - haskell: "MonadError e m"
+      rust: "MonadError<E>"
+      notes: "同上"
+
+  base_monads:
+    - haskell: "Reader r a = r -> a"
+      rust: "Reader<R, A>"
+      notes: "Box<dyn FnOnce(R) -> A> で実装"
+
+    - haskell: "State s a = s -> (a, s)"
+      rust: "State<S, A>"
+      notes: "Box<dyn FnOnce(S) -> (A, S)> で実装"
+
+    - haskell: "Writer w a = (a, w)"
+      rust: "Writer<W, A>"
+      notes: "単純なタプル構造"
+
+  transformers:
+    - haskell: "ReaderT r m a = r -> m a"
+      rust: "ReaderT<R, M, A>"
+      notes: "Box<dyn FnOnce(R) -> M::WithType<A>> で実装"
+
+    - haskell: "StateT s m a = s -> m (a, s)"
+      rust: "StateT<S, M, A>"
+      notes: "Box<dyn FnOnce(S) -> M::WithType<(A, S)>> で実装"
+
+    - haskell: "WriterT w m a = m (a, w)"
+      rust: "WriterT<W, M, A>"
+      notes: "M::WithType<(A, W)> で実装"
+
+    - haskell: "ExceptT e m a = m (Either e a)"
+      rust: "ExceptT<E, M, A>"
+      notes: "M::WithType<Result<A, E>> で実装"
+
+  special_types:
+    - haskell: "IO a"
+      rust: "IO<A>"
+      notes: "Box<dyn FnOnce() -> A> で遅延を実現"

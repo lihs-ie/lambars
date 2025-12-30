@@ -1,0 +1,350 @@
+# Future Work - Deferred Features
+# Phase 3 実装時に発見された、将来対応が必要な項目
+
+deferred_features:
+  - id: free_monad
+    name: "Free モナド"
+    phase: 3
+    type_class: Free
+    priority: medium
+    discovered_date: "2025-12-30"
+
+    problem:
+      summary: "Rust の型システム制約により汎用 Free<F, A> の実装が困難"
+      details: |
+        Free モナドは任意の Functor F から Monad を構築する手法であり、
+        DSL（ドメイン固有言語）の構築やインタープリタパターンの実装に有用。
+
+        本来の定義:
+        - Pure(a): 純粋な値
+        - Suspend(F<Free<F, A>>): 次の計算を Functor でラップ
+
+        Rust では以下の問題がある:
+
+        1. HKT の不在: F<Free<F, A>> という「Functor で自己参照型をラップ」する表現が困難
+        2. GAT の制約: F::WithType<Free<F, A>> の構築時に循環参照が発生
+        3. 型消去の必要性: Box<dyn ...> を使うと Functor の具体型が失われる
+
+      rust_limitation: |
+        // 理想的な定義（Rust では書けない）
+        pub enum Free<F: Functor, A> {
+            Pure(A),
+            Suspend(F::WithType<Free<F, A>>),  // F<Free<F, A>> に相当
+        }
+
+        // GAT を使った試み（コンパイルエラー）
+        impl<F: TypeConstructor, A> Free<F, A> {
+            pub fn suspend(fa: F::WithType<Free<F, A>>) -> Self {
+                // F::WithType<Free<F, A>> の構築方法が不明
+                // Free<F, A> 自体が F の型パラメータに現れるため循環
+            }
+        }
+
+    solution:
+      approach: "具象 Free または DSL 固有の実装"
+      options:
+        - name: "具象 Free の実装"
+          description: |
+            特定の DSL 用に具象化された Free を提供:
+            - FreeConsole: Console DSL 用
+            - FreeKVStore: Key-Value Store DSL 用
+
+            各 DSL が独自の命令セットを enum で定義し、
+            それに対応する Free 構造を提供する。
+          pros:
+            - 型安全
+            - 使用方法が明確
+            - 実装が比較的単純
+          cons:
+            - 汎用性がない
+            - DSL ごとにボイラープレートが必要
+
+        - name: "define_free_dsl! マクロ"
+          description: |
+            マクロで DSL の命令セットから Free 構造を自動生成:
+
+            define_free_dsl! {
+                ConsoleDsl {
+                    PrintLine(String) -> (),
+                    ReadLine() -> String,
+                }
+            }
+          pros:
+            - ボイラープレートを削減
+            - 使用者は命令セットのみ定義
+          cons:
+            - マクロの複雑化
+            - デバッグが困難
+
+        - name: "Freer モナド"
+          description: |
+            Freer モナド（operational monad）を使用:
+            Functor の制約を外し、より単純な構造で実装。
+
+            pub enum Freer<Instruction, A> {
+                Pure(A),
+                Impure(Instruction, Box<dyn FnOnce(...) -> Freer<Instruction, A>>),
+            }
+          pros:
+            - Functor 制約が不要
+            - より柔軟な DSL 定義
+          cons:
+            - 型消去が必要
+            - パフォーマンスオーバーヘッド
+
+      recommended: "具象 Free の実装 + define_free_dsl! マクロ"
+      estimated_complexity: high
+      target_phase: 7
+
+    references:
+      - "Haskell: Control.Monad.Free"
+      - "Scala: cats.free.Free"
+      - "Stackless Scala with Free Monads (Bjarnason)"
+      - "Freer Monads, More Extensible Effects (Kiselyov & Ishii)"
+
+  - id: delimited_continuation
+    name: "限定継続（shift/reset）"
+    phase: 3
+    type_class: Continuation
+    priority: low
+    discovered_date: "2025-12-30"
+
+    problem:
+      summary: "限定継続の実装は複雑で、Rust の所有権システムとの相性が悪い"
+      details: |
+        shift/reset は限定継続（delimited continuation）を実現する操作:
+        - reset: 継続の範囲を区切る
+        - shift: 最も近い reset までの継続を捕捉する
+
+        Scheme/Racket や Haskell の ContT で利用可能だが、
+        Rust では以下の問題がある:
+
+        1. 継続の複数回呼び出し: Fn トレイトが必要だが、所有権の問題
+        2. reset のスコープ管理: 実行時にスタックを管理する必要
+        3. 型の表現: shift の戻り値型と reset の戻り値型の関係が複雑
+
+      rust_limitation: |
+        // shift の型シグネチャ（理想）
+        fn shift<F>(f: F) -> Self
+        where
+            F: FnOnce(Box<dyn Fn(A) -> R>) -> R
+            //       ^^^^ 複数回呼び出し可能な継続
+
+        // Rust では Fn を Box<dyn Fn> にするためのクローン制約が必要
+        // また、継続を複数回呼び出すケースでの所有権管理が困難
+
+    solution:
+      approach: "FnOnce ベースの一度きり版または実装見送り"
+      options:
+        - name: "shift_once / reset_once（FnOnce ベース）"
+          description: |
+            継続を一度だけ呼び出せる限定版を提供:
+            - shift_once: FnOnce ベースの shift
+            - reset_once: 対応する reset
+
+            用途は限られるが、単純なケースには対応可能。
+          pros:
+            - 所有権の問題を回避
+            - 実装が比較的単純
+          cons:
+            - 継続の複数回呼び出しが不可
+            - 本来の shift/reset の柔軟性がない
+
+        - name: "Arc + Mutex による共有"
+          description: |
+            継続を Arc<Mutex<...>> でラップして複数回呼び出し可能に:
+
+            fn shift<F>(f: F) -> Self
+            where
+                F: FnOnce(Arc<dyn Fn(A) -> Continuation<R, A>>) -> Continuation<R, A>
+          pros:
+            - 複数回呼び出しが可能
+          cons:
+            - ランタイムオーバーヘッド
+            - デッドロックのリスク
+            - 使用感が悪い
+
+        - name: "実装見送り"
+          description: |
+            限定継続は Rust の設計思想と合わないため、実装を見送る。
+            必要な場合は call_with_current_continuation_once で代替。
+          pros:
+            - 複雑性を避けられる
+          cons:
+            - 一部のユースケースに対応不可
+
+      recommended: "実装見送り（call_with_current_continuation_once で代替）"
+      estimated_complexity: high
+      target_phase: null  # 実装予定なし
+
+    references:
+      - "Scheme: call-with-current-continuation"
+      - "Racket: call-with-composable-continuation"
+      - "Haskell: Control.Monad.Trans.Cont (shiftT, resetT)"
+
+  - id: continuation_typeclass_traits
+    name: "Continuation の TypeConstructor/Functor/Monad トレイト実装"
+    phase: 3
+    type_class: Continuation
+    priority: low
+    discovered_date: "2025-12-30"
+
+    problem:
+      summary: "Continuation<R, A> の 'static 制約により Phase 1 のトレイト実装が困難"
+      details: |
+        Continuation<R, A> は内部に Box<dyn FnOnce(...)> を持つため、
+        'static ライフタイム制約が必要。
+
+        Phase 1 の TypeConstructor トレイトは 'static を前提としていないため、
+        WithType<B> の定義時に追加の制約が必要になる。
+
+      rust_limitation: |
+        // TypeConstructor の定義
+        trait TypeConstructor {
+            type Inner;
+            type WithType<B>: TypeConstructor<Inner = B>;
+        }
+
+        // Continuation での実装試み
+        impl<R: 'static, A: 'static> TypeConstructor for Continuation<R, A> {
+            type Inner = A;
+            type WithType<B: 'static> = Continuation<R, B>;
+            // ^^^^ B: 'static の制約を追加する必要があるが、
+            // TypeConstructor の定義には含まれていない
+        }
+
+    solution:
+      approach: "個別メソッドのみ提供"
+      options:
+        - name: "現状維持（個別メソッド）"
+          description: |
+            map, flat_map, pure などを個別メソッドとして提供し、
+            TypeConstructor/Functor/Monad トレイトは実装しない。
+
+            これは Trampoline と同じアプローチ。
+          pros:
+            - 使用上は同等の機能を提供
+            - 'static 制約の問題を回避
+          cons:
+            - 汎用的な関数（Functor を受け取る関数など）で使用不可
+
+        - name: "StaticTypeConstructor トレイトの追加"
+          description: |
+            'static 制約付きの TypeConstructor を別トレイトとして定義:
+
+            trait StaticTypeConstructor {
+                type Inner: 'static;
+                type WithType<B: 'static>: StaticTypeConstructor<Inner = B>;
+            }
+          pros:
+            - 'static 型専用の抽象化が可能
+          cons:
+            - トレイト階層が複雑化
+            - 両方のトレイトを使い分ける必要
+
+      recommended: "現状維持（個別メソッドのみ提供）"
+      estimated_complexity: medium
+      target_phase: null  # 実装予定なし
+
+    references:
+      - "Phase 1 TypeConstructor 実装: src/typeclass/higher.rs"
+      - "Trampoline の同様のアプローチ: src/control/trampoline.rs"
+
+  - id: lazy_clone_trait
+    name: "Lazy<T, F> の Clone トレイト実装"
+    phase: 3
+    type_class: Lazy
+    priority: low
+    discovered_date: "2025-12-30"
+
+    problem:
+      summary: "Lazy<T, F> の Clone 実装は F: Clone が必要だが、FnOnce は Clone を実装しない"
+      details: |
+        Lazy<T, F> を Clone 可能にするには:
+        - T: Clone（評価済みの値をクローン）
+        - F: Clone（未評価の初期化関数をクローン）
+
+        しかし、一般的なクロージャは Clone を実装しない。
+        特に、環境をキャプチャするクロージャは Clone できないことが多い。
+
+      rust_limitation: |
+        // Clone を実装するには
+        impl<T: Clone, F: FnOnce() -> T + Clone> Clone for Lazy<T, F> {
+            fn clone(&self) -> Self {
+                // 評価済みなら値をクローン、未評価なら初期化関数をクローン
+            }
+        }
+
+        // しかし、一般的なクロージャ || { ... } は Clone を実装しない
+        let f = || expensive_computation();
+        // f は Clone ではない
+
+    solution:
+      approach: "条件付き Clone または Rc ベースの共有"
+      options:
+        - name: "条件付き Clone（T: Clone, F: Clone）"
+          description: |
+            T と F の両方が Clone の場合のみ Clone を実装:
+
+            impl<T: Clone, F: FnOnce() -> T + Clone> Clone for Lazy<T, F>
+          pros:
+            - 型安全
+            - Clone 可能な場合のみ使用可能
+          cons:
+            - 多くのケースで Clone 不可
+            - fn() -> T 型のみ Clone 可能
+
+        - name: "Rc<Lazy<T, F>> パターン"
+          description: |
+            Lazy を直接 Clone する代わりに、Rc でラップして共有:
+
+            let lazy: Rc<Lazy<T, F>> = Rc::new(Lazy::new(|| ...));
+            let lazy_clone = Rc::clone(&lazy);
+          pros:
+            - 任意の Lazy を共有可能
+            - メモ化された値を共有
+          cons:
+            - Rc のオーバーヘッド
+            - API が変わる
+
+        - name: "実装見送り"
+          description: |
+            Lazy の Clone は実装せず、必要な場合は Rc を使用するよう案内。
+          pros:
+            - 複雑性を避けられる
+          cons:
+            - 一部のユースケースで不便
+
+      recommended: "条件付き Clone（fn() -> T 型用）"
+      estimated_complexity: low
+      target_phase: 4  # 永続データ構造フェーズで検討
+
+    references:
+      - "Rust std: std::cell::LazyCell（Clone 未実装）"
+      - "once_cell crate: Lazy<T>（Clone 未実装）"
+
+# 将来のフェーズで検討すべき追加項目
+future_considerations:
+  - id: lazy_sync
+    name: "スレッドセーフな Lazy（LazyLock 相当）"
+    description: |
+      現在の Lazy<T, F> は RefCell ベースでスレッドセーフではない。
+      マルチスレッド環境で使用するには、OnceLock ベースの実装が必要。
+    target_phase: 4
+    complexity: medium
+
+  - id: trampoline_async
+    name: "非同期 Trampoline"
+    description: |
+      async/await と組み合わせた非同期 Trampoline の実装。
+      スタック安全な非同期再帰を実現。
+    target_phase: 6
+    complexity: high
+
+  - id: continuation_monad_transformer
+    name: "ContinuationT（継続モナド変換子）"
+    description: |
+      ContT 相当のモナド変換子。
+      他のモナドと継続を合成可能にする。
+    target_phase: 6
+    complexity: high
