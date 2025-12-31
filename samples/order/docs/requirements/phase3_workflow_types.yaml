@@ -1,0 +1,1980 @@
+# Phase 3: ワークフロー型定義 要件定義
+# Domain Modeling Made Functional の F# パターンを Rust に適用
+# functional-rusty ライブラリを使用した型安全なドメインモデリング
+
+id: phase3_workflow_types
+name: ワークフロー型定義
+version: "1.0.0"
+created_at: "2025-12-31"
+
+# 概要
+overview:
+  description: |
+    PlaceOrder ワークフローに必要な入力型、出力型、内部型、エラー型を定義する。
+    注文処理の各フェーズ（未検証 -> 検証済み -> 価格付き -> 配送情報付き）を
+    型によって明確に表現し、「Make Illegal States Unrepresentable」の原則に従う。
+
+    型による状態遷移を明確にすることで、コンパイル時に不正な状態遷移を検出できる。
+    例えば、価格計算前に配送情報を追加するような不正な操作を型レベルで防止する。
+
+  design_principles:
+    - name: 型による状態遷移の表現
+      description: |
+        ワークフローの各フェーズを異なる型で表現する:
+        - UnvalidatedOrder: 外部から受け取った未検証の注文
+        - ValidatedOrder: バリデーション済みの注文
+        - PricedOrder: 価格計算済みの注文
+        - PricedOrderWithShippingMethod: 配送情報付きの注文
+
+        これにより、型システムによって正しい順序でのみ処理が進むことを保証する。
+
+    - name: Make Illegal States Unrepresentable
+      description: |
+        不正な状態を型レベルで表現不可能にする。
+        例えば、ValidatedOrderLine は必ず有効な ProductCode と OrderQuantity を持つ。
+        未検証の状態でこれらの型を持つことは不可能。
+
+    - name: 公開型と内部型の分離
+      description: |
+        公開型（Public Types）: ワークフローの入力と出力として外部に公開する型
+        内部型（Internal Types）: ワークフロー内部でのみ使用する中間状態の型
+
+        これにより、内部実装の詳細を隠蔽しつつ、明確なインターフェースを提供する。
+
+    - name: 代数的データ型による網羅的なケース分析
+      description: |
+        enum を使用して、全ての可能な状態やエラーを網羅的に表現する。
+        パターンマッチにより、全てのケースを処理することを強制する。
+
+  state_transition_diagram: |
+    ワークフローの状態遷移図:
+
+    [外部入力]
+         |
+         v
+    +-------------------+
+    | UnvalidatedOrder  |  <- 入力型（公開）
+    +-------------------+
+         |
+         | validateOrder
+         v
+    +-------------------+
+    | ValidatedOrder    |  <- 内部型
+    +-------------------+
+         |
+         | priceOrder
+         v
+    +-------------------+
+    | PricedOrder       |  <- 内部型
+    +-------------------+
+         |
+         | addShippingInfo
+         v
+    +-------------------------------+
+    | PricedOrderWithShippingMethod |  <- 内部型
+    +-------------------------------+
+         |
+         | createEvents
+         v
+    +-------------------+
+    | PlaceOrderEvent[] |  <- 出力型（公開）
+    +-------------------+
+
+  error_handling:
+    description: |
+      ワークフロー全体のエラーは PlaceOrderError で表現する。
+      各フェーズ固有のエラーを包含する直和型として定義する。
+
+      Phase 1 で定義した ValidationError との名前衝突を避けるため、
+      ワークフロー固有のバリデーションエラーは WorkflowValidationError として定義する。
+    error_types:
+      - WorkflowValidationError: 入力値の検証エラー
+      - PricingError: 価格計算時のエラー
+      - RemoteServiceError: 外部サービス呼び出しエラー
+
+# ========================================
+# 要件定義: 公開型（入力）
+# ========================================
+requirements:
+  # ========================================
+  # 入力型: UnvalidatedCustomerInfo
+  # ========================================
+  - id: REQ-021
+    name: UnvalidatedCustomerInfo
+    priority: critical
+    category: public_input_type
+    description: |
+      外部から受け取った未検証の顧客情報を表す型。
+      全てのフィールドは String 型で、バリデーション前の生データを保持する。
+
+    fields:
+      - name: first_name
+        type: String
+        required: true
+        description: 名（バリデーション前）
+
+      - name: last_name
+        type: String
+        required: true
+        description: 姓（バリデーション前）
+
+      - name: email_address
+        type: String
+        required: true
+        description: メールアドレス（バリデーション前）
+
+      - name: vip_status
+        type: String
+        required: true
+        description: VIP ステータス文字列（"Normal", "VIP" 等）
+
+    methods:
+      - name: new
+        signature: "fn new(first_name: String, last_name: String, email_address: String, vip_status: String) -> Self"
+        description: 新しい UnvalidatedCustomerInfo を生成する。バリデーションは行わない。
+
+    f_sharp_reference: |
+      type UnvalidatedCustomerInfo = {
+          FirstName : string
+          LastName : string
+          EmailAddress : string
+          VipStatus : string
+      }
+
+    functional_rusty_usage:
+      - "バリデーション後に CustomerInfo（Phase 2）に変換"
+      - "Result::and_then による Monad 的なバリデーションチェーン"
+
+    traits_to_derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+
+  # ========================================
+  # 入力型: UnvalidatedAddress
+  # ========================================
+  - id: REQ-022
+    name: UnvalidatedAddress
+    priority: critical
+    category: public_input_type
+    description: |
+      外部から受け取った未検証の住所を表す型。
+      全てのフィールドは String 型で、バリデーション前の生データを保持する。
+
+    fields:
+      - name: address_line1
+        type: String
+        required: true
+        description: 住所行1（バリデーション前）
+
+      - name: address_line2
+        type: String
+        required: true
+        description: 住所行2（空文字列の場合もあり）
+
+      - name: address_line3
+        type: String
+        required: true
+        description: 住所行3（空文字列の場合もあり）
+
+      - name: address_line4
+        type: String
+        required: true
+        description: 住所行4（空文字列の場合もあり）
+
+      - name: city
+        type: String
+        required: true
+        description: 市（バリデーション前）
+
+      - name: zip_code
+        type: String
+        required: true
+        description: 郵便番号（バリデーション前）
+
+      - name: state
+        type: String
+        required: true
+        description: 州コード（バリデーション前）
+
+      - name: country
+        type: String
+        required: true
+        description: 国名（バリデーション前）
+
+    methods:
+      - name: new
+        signature: |
+          fn new(
+              address_line1: String,
+              address_line2: String,
+              address_line3: String,
+              address_line4: String,
+              city: String,
+              zip_code: String,
+              state: String,
+              country: String
+          ) -> Self
+        description: 新しい UnvalidatedAddress を生成する。バリデーションは行わない。
+
+    f_sharp_reference: |
+      type UnvalidatedAddress = {
+          AddressLine1 : string
+          AddressLine2 : string
+          AddressLine3 : string
+          AddressLine4 : string
+          City : string
+          ZipCode : string
+          State: string
+          Country: string
+      }
+
+    functional_rusty_usage:
+      - "バリデーション後に Address（Phase 2）に変換"
+      - "外部住所検証サービスへの入力として使用"
+
+    traits_to_derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+
+  # ========================================
+  # 入力型: UnvalidatedOrderLine
+  # ========================================
+  - id: REQ-023
+    name: UnvalidatedOrderLine
+    priority: critical
+    category: public_input_type
+    description: |
+      外部から受け取った未検証の注文明細を表す型。
+      注文明細ID、製品コード、数量を文字列/数値で保持する。
+
+    fields:
+      - name: order_line_id
+        type: String
+        required: true
+        description: 注文明細ID（バリデーション前）
+
+      - name: product_code
+        type: String
+        required: true
+        description: 製品コード（バリデーション前、"W1234" や "G123" 形式）
+
+      - name: quantity
+        type: "rust_decimal::Decimal"
+        required: true
+        description: 数量（バリデーション前、個数または重量）
+
+    methods:
+      - name: new
+        signature: "fn new(order_line_id: String, product_code: String, quantity: Decimal) -> Self"
+        description: 新しい UnvalidatedOrderLine を生成する。バリデーションは行わない。
+
+    f_sharp_reference: |
+      type UnvalidatedOrderLine = {
+          OrderLineId : string
+          ProductCode : string
+          Quantity : decimal
+      }
+
+    functional_rusty_usage:
+      - "バリデーション後に ValidatedOrderLine に変換"
+      - "ProductCode によって数量の解釈（個数/重量）が変わる"
+
+    traits_to_derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+
+  # ========================================
+  # 入力型: UnvalidatedOrder
+  # ========================================
+  - id: REQ-024
+    name: UnvalidatedOrder
+    priority: critical
+    category: public_input_type
+    description: |
+      外部から受け取った未検証の注文を表す型。
+      PlaceOrder ワークフローの入力として使用される。
+      全ての未検証コンポーネントを含む。
+
+    fields:
+      - name: order_id
+        type: String
+        required: true
+        description: 注文ID（バリデーション前）
+
+      - name: customer_info
+        type: UnvalidatedCustomerInfo
+        required: true
+        description: 顧客情報（未検証）
+
+      - name: shipping_address
+        type: UnvalidatedAddress
+        required: true
+        description: 配送先住所（未検証）
+
+      - name: billing_address
+        type: UnvalidatedAddress
+        required: true
+        description: 請求先住所（未検証）
+
+      - name: lines
+        type: "Vec<UnvalidatedOrderLine>"
+        required: true
+        description: 注文明細リスト（未検証）
+
+      - name: promotion_code
+        type: String
+        required: true
+        description: プロモーションコード（空文字列の場合もあり）
+
+    methods:
+      - name: new
+        signature: |
+          fn new(
+              order_id: String,
+              customer_info: UnvalidatedCustomerInfo,
+              shipping_address: UnvalidatedAddress,
+              billing_address: UnvalidatedAddress,
+              lines: Vec<UnvalidatedOrderLine>,
+              promotion_code: String
+          ) -> Self
+        description: 新しい UnvalidatedOrder を生成する。バリデーションは行わない。
+
+    f_sharp_reference: |
+      type UnvalidatedOrder = {
+          OrderId : string
+          CustomerInfo : UnvalidatedCustomerInfo
+          ShippingAddress : UnvalidatedAddress
+          BillingAddress : UnvalidatedAddress
+          Lines : UnvalidatedOrderLine list
+          PromotionCode : string
+      }
+
+    functional_rusty_usage:
+      - "validateOrder 関数の入力型"
+      - "バリデーション後に ValidatedOrder に変換"
+
+    traits_to_derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+
+  # ========================================
+  # 出力型: OrderAcknowledgmentSent
+  # ========================================
+  - id: REQ-025
+    name: OrderAcknowledgmentSent
+    priority: critical
+    category: public_output_type
+    description: |
+      注文確認メールが送信されたことを表すイベント型。
+      注文IDとメール送信先アドレスを保持する。
+
+    fields:
+      - name: order_id
+        type: OrderId
+        required: true
+        description: 確認メールが送信された注文のID
+
+      - name: email_address
+        type: EmailAddress
+        required: true
+        description: 確認メールの送信先アドレス
+
+    methods:
+      - name: new
+        signature: "fn new(order_id: OrderId, email_address: EmailAddress) -> Self"
+        description: 新しい OrderAcknowledgmentSent を生成する。
+
+      - name: order_id
+        signature: "fn order_id(&self) -> &OrderId"
+        description: 注文IDへの参照を返す。
+
+      - name: email_address
+        signature: "fn email_address(&self) -> &EmailAddress"
+        description: メールアドレスへの参照を返す。
+
+    f_sharp_reference: |
+      type OrderAcknowledgmentSent = {
+          OrderId : OrderId
+          EmailAddress : EmailAddress
+      }
+
+    functional_rusty_usage:
+      - "PlaceOrderEvent の一部として出力"
+      - "Phase 1 の型（OrderId, EmailAddress）を使用"
+
+    traits_to_derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+
+  # ========================================
+  # 出力型: ShippableOrderLine
+  # ========================================
+  - id: REQ-026
+    name: ShippableOrderLine
+    priority: critical
+    category: public_output_type
+    description: |
+      配送対象の注文明細を表す型。
+      製品コードと数量のみを保持し、配送システムへの入力として使用される。
+
+    fields:
+      - name: product_code
+        type: ProductCode
+        required: true
+        description: 配送対象の製品コード
+
+      - name: quantity
+        type: OrderQuantity
+        required: true
+        description: 配送数量
+
+    methods:
+      - name: new
+        signature: "fn new(product_code: ProductCode, quantity: OrderQuantity) -> Self"
+        description: 新しい ShippableOrderLine を生成する。
+
+      - name: product_code
+        signature: "fn product_code(&self) -> &ProductCode"
+        description: 製品コードへの参照を返す。
+
+      - name: quantity
+        signature: "fn quantity(&self) -> &OrderQuantity"
+        description: 数量への参照を返す。
+
+    f_sharp_reference: |
+      type ShippableOrderLine = {
+          ProductCode : ProductCode
+          Quantity : OrderQuantity
+      }
+
+    functional_rusty_usage:
+      - "Phase 1 の型（ProductCode, OrderQuantity）を使用"
+      - "ShippableOrderPlaced の一部として使用"
+
+    traits_to_derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+
+  # ========================================
+  # 出力型: ShippableOrderPlaced
+  # ========================================
+  - id: REQ-027
+    name: ShippableOrderPlaced
+    priority: critical
+    category: public_output_type
+    description: |
+      配送可能な注文が確定したことを表すイベント型。
+      配送に必要な情報（注文ID、配送先住所、明細、PDF）を保持する。
+
+    fields:
+      - name: order_id
+        type: OrderId
+        required: true
+        description: 配送対象の注文ID
+
+      - name: shipping_address
+        type: Address
+        required: true
+        description: 配送先住所（Phase 2 の Address 型）
+
+      - name: shipment_lines
+        type: "Vec<ShippableOrderLine>"
+        required: true
+        description: 配送対象の明細リスト
+
+      - name: pdf
+        type: PdfAttachment
+        required: true
+        description: 配送ラベル等の PDF 添付ファイル
+
+    methods:
+      - name: new
+        signature: |
+          fn new(
+              order_id: OrderId,
+              shipping_address: Address,
+              shipment_lines: Vec<ShippableOrderLine>,
+              pdf: PdfAttachment
+          ) -> Self
+        description: 新しい ShippableOrderPlaced を生成する。
+
+      - name: order_id
+        signature: "fn order_id(&self) -> &OrderId"
+        description: 注文IDへの参照を返す。
+
+      - name: shipping_address
+        signature: "fn shipping_address(&self) -> &Address"
+        description: 配送先住所への参照を返す。
+
+      - name: shipment_lines
+        signature: "fn shipment_lines(&self) -> &[ShippableOrderLine]"
+        description: 配送明細リストへの参照を返す。
+
+      - name: pdf
+        signature: "fn pdf(&self) -> &PdfAttachment"
+        description: PDF 添付ファイルへの参照を返す。
+
+    f_sharp_reference: |
+      type ShippableOrderPlaced = {
+          OrderId : OrderId
+          ShippingAddress : Address
+          ShipmentLines : ShippableOrderLine list
+          Pdf : PdfAttachment
+      }
+
+    functional_rusty_usage:
+      - "PlaceOrderEvent の一部として出力"
+      - "Phase 1 の型（OrderId, PdfAttachment）と Phase 2 の型（Address）を使用"
+
+    traits_to_derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+
+  # ========================================
+  # 出力型: BillableOrderPlaced
+  # ========================================
+  - id: REQ-028
+    name: BillableOrderPlaced
+    priority: critical
+    category: public_output_type
+    description: |
+      請求可能な注文が確定したことを表すイベント型。
+      請求に必要な情報（注文ID、請求先住所、請求金額）を保持する。
+
+    fields:
+      - name: order_id
+        type: OrderId
+        required: true
+        description: 請求対象の注文ID
+
+      - name: billing_address
+        type: Address
+        required: true
+        description: 請求先住所（Phase 2 の Address 型）
+
+      - name: amount_to_bill
+        type: BillingAmount
+        required: true
+        description: 請求金額
+
+    methods:
+      - name: new
+        signature: "fn new(order_id: OrderId, billing_address: Address, amount_to_bill: BillingAmount) -> Self"
+        description: 新しい BillableOrderPlaced を生成する。
+
+      - name: order_id
+        signature: "fn order_id(&self) -> &OrderId"
+        description: 注文IDへの参照を返す。
+
+      - name: billing_address
+        signature: "fn billing_address(&self) -> &Address"
+        description: 請求先住所への参照を返す。
+
+      - name: amount_to_bill
+        signature: "fn amount_to_bill(&self) -> &BillingAmount"
+        description: 請求金額への参照を返す。
+
+    f_sharp_reference: |
+      type BillableOrderPlaced = {
+          OrderId : OrderId
+          BillingAddress: Address
+          AmountToBill : BillingAmount
+      }
+
+    functional_rusty_usage:
+      - "PlaceOrderEvent の一部として出力"
+      - "Phase 1 の型（OrderId, BillingAmount）と Phase 2 の型（Address）を使用"
+
+    traits_to_derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+
+  # ========================================
+  # 出力型: PlaceOrderEvent
+  # ========================================
+  - id: REQ-029
+    name: PlaceOrderEvent
+    priority: critical
+    category: public_output_type
+    description: |
+      PlaceOrder ワークフローの出力イベントを表す直和型。
+      配送イベント、請求イベント、確認メール送信イベントのいずれかを保持する。
+      ワークフロー完了時に複数のイベントが Vec<PlaceOrderEvent> として返される。
+
+    variants:
+      - name: ShippableOrderPlaced
+        inner_type: ShippableOrderPlaced
+        description: 配送可能な注文が確定したイベント
+
+      - name: BillableOrderPlaced
+        inner_type: BillableOrderPlaced
+        description: 請求可能な注文が確定したイベント
+
+      - name: AcknowledgmentSent
+        inner_type: OrderAcknowledgmentSent
+        description: 確認メールが送信されたイベント
+
+    methods:
+      - name: is_shippable
+        signature: "fn is_shippable(&self) -> bool"
+        description: ShippableOrderPlaced バリアントかどうかを返す。
+
+      - name: is_billable
+        signature: "fn is_billable(&self) -> bool"
+        description: BillableOrderPlaced バリアントかどうかを返す。
+
+      - name: is_acknowledgment
+        signature: "fn is_acknowledgment(&self) -> bool"
+        description: AcknowledgmentSent バリアントかどうかを返す。
+
+    f_sharp_reference: |
+      type PlaceOrderEvent =
+          | ShippableOrderPlaced of ShippableOrderPlaced
+          | BillableOrderPlaced of BillableOrderPlaced
+          | AcknowledgmentSent of OrderAcknowledgmentSent
+
+    functional_rusty_usage:
+      - "Rust の enum によるパターンマッチ"
+      - "Vec<PlaceOrderEvent> としてワークフローから返される"
+
+    traits_to_derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+
+  # ========================================
+  # エラー型: WorkflowValidationError
+  # ========================================
+  - id: REQ-030
+    name: WorkflowValidationError
+    priority: critical
+    category: error_type
+    description: |
+      ワークフロー固有のバリデーションエラーを表す型。
+      Phase 1 の ValidationError との名前衝突を避けるため、
+      ワークフローモジュール内で別名として定義する。
+
+      内部的には simple_types::ValidationError を再利用する。
+
+    type_alias: "simple_types::ValidationError"
+
+    notes: |
+      ワークフローモジュールでは以下のように型エイリアスを定義する:
+      pub type WorkflowValidationError = crate::simple_types::ValidationError;
+
+      これにより、ワークフローコード内で明確に区別できる。
+
+    f_sharp_reference: |
+      type ValidationError = ValidationError of string
+
+    functional_rusty_usage:
+      - "PlaceOrderError の一部として使用"
+      - "Phase 1 の ValidationError を再利用"
+
+  # ========================================
+  # エラー型: PricingError
+  # ========================================
+  - id: REQ-031
+    name: PricingError
+    priority: critical
+    category: error_type
+    description: |
+      価格計算時のエラーを表す型。
+      製品の価格が見つからない、プロモーションコードが無効、
+      価格計算結果が範囲外などのエラーを表現する。
+
+    fields:
+      - name: message
+        type: String
+        required: true
+        description: エラーメッセージ
+
+    methods:
+      - name: new
+        signature: "fn new(message: &str) -> Self"
+        description: 新しい PricingError を生成する。
+
+      - name: message
+        signature: "fn message(&self) -> &str"
+        description: エラーメッセージへの参照を返す。
+
+    f_sharp_reference: |
+      type PricingError = PricingError of string
+
+    functional_rusty_usage:
+      - "PlaceOrderError の一部として使用"
+      - "価格計算関数のエラー型として使用"
+
+    traits_to_derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+
+    traits_to_implement:
+      - "std::fmt::Display"
+      - "std::error::Error"
+
+  # ========================================
+  # エラー型: ServiceInfo
+  # ========================================
+  - id: REQ-032
+    name: ServiceInfo
+    priority: high
+    category: error_type
+    description: |
+      外部サービスの情報を表す型。
+      RemoteServiceError 内でエラーが発生したサービスを特定するために使用する。
+
+    fields:
+      - name: name
+        type: String
+        required: true
+        description: サービス名
+
+      - name: endpoint
+        type: String
+        required: true
+        description: サービスのエンドポイント URL
+
+    methods:
+      - name: new
+        signature: "fn new(name: String, endpoint: String) -> Self"
+        description: 新しい ServiceInfo を生成する。
+
+      - name: name
+        signature: "fn name(&self) -> &str"
+        description: サービス名への参照を返す。
+
+      - name: endpoint
+        signature: "fn endpoint(&self) -> &str"
+        description: エンドポイントへの参照を返す。
+
+    f_sharp_reference: |
+      type ServiceInfo = {
+          Name : string
+          Endpoint: System.Uri
+      }
+
+    notes: |
+      F# では System.Uri を使用しているが、
+      Rust では単純な String として実装する。
+      必要に応じて url クレートの Url 型を使用することも検討できる。
+
+    traits_to_derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+
+  # ========================================
+  # エラー型: RemoteServiceError
+  # ========================================
+  - id: REQ-033
+    name: RemoteServiceError
+    priority: high
+    category: error_type
+    description: |
+      外部サービス呼び出し時のエラーを表す型。
+      どのサービスでどのようなエラーが発生したかを保持する。
+
+    fields:
+      - name: service
+        type: ServiceInfo
+        required: true
+        description: エラーが発生したサービスの情報
+
+      - name: exception_message
+        type: String
+        required: true
+        description: エラーメッセージ（元の例外のメッセージ）
+
+    methods:
+      - name: new
+        signature: "fn new(service: ServiceInfo, exception_message: String) -> Self"
+        description: 新しい RemoteServiceError を生成する。
+
+      - name: service
+        signature: "fn service(&self) -> &ServiceInfo"
+        description: サービス情報への参照を返す。
+
+      - name: exception_message
+        signature: "fn exception_message(&self) -> &str"
+        description: エラーメッセージへの参照を返す。
+
+    f_sharp_reference: |
+      type RemoteServiceError = {
+          Service : ServiceInfo
+          Exception : System.Exception
+      }
+
+    notes: |
+      F# では System.Exception を保持しているが、
+      Rust では例外がないため、エラーメッセージを String として保持する。
+      必要に応じて Box<dyn std::error::Error> を使用することも検討できる。
+
+    traits_to_derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+
+    traits_to_implement:
+      - "std::fmt::Display"
+      - "std::error::Error"
+
+  # ========================================
+  # エラー型: PlaceOrderError
+  # ========================================
+  - id: REQ-034
+    name: PlaceOrderError
+    priority: critical
+    category: error_type
+    description: |
+      PlaceOrder ワークフロー全体のエラーを表す直和型。
+      バリデーションエラー、価格計算エラー、外部サービスエラーのいずれかを保持する。
+
+    variants:
+      - name: Validation
+        inner_type: WorkflowValidationError
+        description: 入力値の検証エラー
+
+      - name: Pricing
+        inner_type: PricingError
+        description: 価格計算時のエラー
+
+      - name: RemoteService
+        inner_type: RemoteServiceError
+        description: 外部サービス呼び出しエラー
+
+    methods:
+      - name: validation
+        signature: "fn validation(error: WorkflowValidationError) -> Self"
+        description: バリデーションエラーから PlaceOrderError を生成する。
+
+      - name: pricing
+        signature: "fn pricing(error: PricingError) -> Self"
+        description: 価格計算エラーから PlaceOrderError を生成する。
+
+      - name: remote_service
+        signature: "fn remote_service(error: RemoteServiceError) -> Self"
+        description: 外部サービスエラーから PlaceOrderError を生成する。
+
+      - name: is_validation
+        signature: "fn is_validation(&self) -> bool"
+        description: Validation バリアントかどうかを返す。
+
+      - name: is_pricing
+        signature: "fn is_pricing(&self) -> bool"
+        description: Pricing バリアントかどうかを返す。
+
+      - name: is_remote_service
+        signature: "fn is_remote_service(&self) -> bool"
+        description: RemoteService バリアントかどうかを返す。
+
+    f_sharp_reference: |
+      type PlaceOrderError =
+          | Validation of ValidationError
+          | Pricing of PricingError
+          | RemoteService of RemoteServiceError
+
+    functional_rusty_usage:
+      - "Rust の enum によるパターンマッチ"
+      - "Result<Vec<PlaceOrderEvent>, PlaceOrderError> としてワークフローから返される"
+      - "From トレイトによる自動変換（? 演算子での使用）"
+
+    traits_to_derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+
+    traits_to_implement:
+      - "std::fmt::Display"
+      - "std::error::Error"
+      - "From<WorkflowValidationError>"
+      - "From<PricingError>"
+      - "From<RemoteServiceError>"
+
+  # ========================================
+  # 内部型: AddressValidationError
+  # ========================================
+  - id: REQ-035
+    name: AddressValidationError
+    priority: high
+    category: internal_type
+    description: |
+      住所検証サービスからのエラーを表す列挙型。
+      形式エラーまたは住所が見つからないエラーのいずれか。
+
+    variants:
+      - name: InvalidFormat
+        description: 住所の形式が無効
+
+      - name: AddressNotFound
+        description: 住所が見つからない
+
+    methods:
+      - name: is_invalid_format
+        signature: "fn is_invalid_format(&self) -> bool"
+        description: InvalidFormat バリアントかどうかを返す。
+
+      - name: is_address_not_found
+        signature: "fn is_address_not_found(&self) -> bool"
+        description: AddressNotFound バリアントかどうかを返す。
+
+    f_sharp_reference: |
+      type AddressValidationError =
+          | InvalidFormat
+          | AddressNotFound
+
+    functional_rusty_usage:
+      - "外部住所検証サービスの結果を表現"
+      - "Rust の enum によるパターンマッチ"
+
+    traits_to_derive:
+      - Clone
+      - Copy
+      - Debug
+      - PartialEq
+      - Eq
+
+    traits_to_implement:
+      - "std::fmt::Display"
+      - "std::error::Error"
+
+  # ========================================
+  # 内部型: CheckedAddress
+  # ========================================
+  - id: REQ-036
+    name: CheckedAddress
+    priority: high
+    category: internal_type
+    description: |
+      外部サービスで検証済みの住所を表す newtype。
+      UnvalidatedAddress をラップし、住所が検証済みであることを型レベルで保証する。
+
+    inner_type: UnvalidatedAddress
+
+    methods:
+      - name: new
+        signature: "fn new(address: UnvalidatedAddress) -> Self"
+        description: 検証済み住所として CheckedAddress を生成する。
+
+      - name: value
+        signature: "fn value(&self) -> &UnvalidatedAddress"
+        description: 内部の UnvalidatedAddress への参照を返す。
+
+      - name: into_inner
+        signature: "fn into_inner(self) -> UnvalidatedAddress"
+        description: 内部の UnvalidatedAddress を消費して返す。
+
+    f_sharp_reference: |
+      type CheckedAddress = CheckedAddress of UnvalidatedAddress
+
+    notes: |
+      CheckedAddress は単なるマーカー型で、バリデーションロジックは含まない。
+      外部サービスが住所を検証した後にのみ生成される。
+
+    functional_rusty_usage:
+      - "Newtype パターンによる状態の型安全な表現"
+      - "未検証住所と検証済み住所を型レベルで区別"
+
+    traits_to_derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+
+  # ========================================
+  # 内部型: PricingMethod
+  # ========================================
+  - id: REQ-037
+    name: PricingMethod
+    priority: critical
+    category: internal_type
+    description: |
+      価格計算方法を表す列挙型。
+      標準価格またはプロモーション価格のいずれか。
+
+    variants:
+      - name: Standard
+        description: 標準価格を適用
+
+      - name: Promotion
+        inner_type: PromotionCode
+        description: プロモーション価格を適用（プロモーションコードを保持）
+
+    methods:
+      - name: is_standard
+        signature: "fn is_standard(&self) -> bool"
+        description: Standard バリアントかどうかを返す。
+
+      - name: is_promotion
+        signature: "fn is_promotion(&self) -> bool"
+        description: Promotion バリアントかどうかを返す。
+
+      - name: promotion_code
+        signature: "fn promotion_code(&self) -> Option<&PromotionCode>"
+        description: プロモーションコードを返す（Standard の場合は None）。
+
+    f_sharp_reference: |
+      type PricingMethod =
+          | Standard
+          | Promotion of PromotionCode
+
+    functional_rusty_usage:
+      - "Phase 1 の PromotionCode 型を使用"
+      - "Rust の enum によるパターンマッチ"
+
+    traits_to_derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+
+  # ========================================
+  # 内部型: ValidatedOrderLine
+  # ========================================
+  - id: REQ-038
+    name: ValidatedOrderLine
+    priority: critical
+    category: internal_type
+    description: |
+      バリデーション済みの注文明細を表す型。
+      全てのフィールドが検証済みの型（Phase 1 で定義）を使用する。
+
+    fields:
+      - name: order_line_id
+        type: OrderLineId
+        required: true
+        description: 注文明細ID（検証済み）
+
+      - name: product_code
+        type: ProductCode
+        required: true
+        description: 製品コード（検証済み）
+
+      - name: quantity
+        type: OrderQuantity
+        required: true
+        description: 数量（検証済み）
+
+    methods:
+      - name: new
+        signature: "fn new(order_line_id: OrderLineId, product_code: ProductCode, quantity: OrderQuantity) -> Self"
+        description: 新しい ValidatedOrderLine を生成する。
+
+      - name: order_line_id
+        signature: "fn order_line_id(&self) -> &OrderLineId"
+        description: 注文明細IDへの参照を返す。
+
+      - name: product_code
+        signature: "fn product_code(&self) -> &ProductCode"
+        description: 製品コードへの参照を返す。
+
+      - name: quantity
+        signature: "fn quantity(&self) -> &OrderQuantity"
+        description: 数量への参照を返す。
+
+    f_sharp_reference: |
+      type ValidatedOrderLine = {
+          OrderLineId : OrderLineId
+          ProductCode : ProductCode
+          Quantity : OrderQuantity
+      }
+
+    functional_rusty_usage:
+      - "Phase 1 の型（OrderLineId, ProductCode, OrderQuantity）を使用"
+      - "ValidatedOrder の一部として使用"
+
+    traits_to_derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+      - Lenses  # functional-rusty-derive
+
+  # ========================================
+  # 内部型: ValidatedOrder
+  # ========================================
+  - id: REQ-039
+    name: ValidatedOrder
+    priority: critical
+    category: internal_type
+    description: |
+      バリデーション済みの注文を表す型。
+      全てのフィールドが検証済みの型を使用する。
+      UnvalidatedOrder からの変換後の状態を表す。
+
+    fields:
+      - name: order_id
+        type: OrderId
+        required: true
+        description: 注文ID（検証済み）
+
+      - name: customer_info
+        type: CustomerInfo
+        required: true
+        description: 顧客情報（検証済み、Phase 2 の型）
+
+      - name: shipping_address
+        type: Address
+        required: true
+        description: 配送先住所（検証済み、Phase 2 の型）
+
+      - name: billing_address
+        type: Address
+        required: true
+        description: 請求先住所（検証済み、Phase 2 の型）
+
+      - name: lines
+        type: "Vec<ValidatedOrderLine>"
+        required: true
+        description: 注文明細リスト（検証済み）
+
+      - name: pricing_method
+        type: PricingMethod
+        required: true
+        description: 価格計算方法（プロモーションコードから決定）
+
+    methods:
+      - name: new
+        signature: |
+          fn new(
+              order_id: OrderId,
+              customer_info: CustomerInfo,
+              shipping_address: Address,
+              billing_address: Address,
+              lines: Vec<ValidatedOrderLine>,
+              pricing_method: PricingMethod
+          ) -> Self
+        description: 新しい ValidatedOrder を生成する。
+
+      - name: order_id
+        signature: "fn order_id(&self) -> &OrderId"
+        description: 注文IDへの参照を返す。
+
+      - name: customer_info
+        signature: "fn customer_info(&self) -> &CustomerInfo"
+        description: 顧客情報への参照を返す。
+
+      - name: shipping_address
+        signature: "fn shipping_address(&self) -> &Address"
+        description: 配送先住所への参照を返す。
+
+      - name: billing_address
+        signature: "fn billing_address(&self) -> &Address"
+        description: 請求先住所への参照を返す。
+
+      - name: lines
+        signature: "fn lines(&self) -> &[ValidatedOrderLine]"
+        description: 注文明細リストへの参照を返す。
+
+      - name: pricing_method
+        signature: "fn pricing_method(&self) -> &PricingMethod"
+        description: 価格計算方法への参照を返す。
+
+    f_sharp_reference: |
+      type ValidatedOrder = {
+          OrderId : OrderId
+          CustomerInfo : CustomerInfo
+          ShippingAddress : Address
+          BillingAddress : Address
+          Lines : ValidatedOrderLine list
+          PricingMethod : PricingMethod
+      }
+
+    functional_rusty_usage:
+      - "Phase 1 の型（OrderId）と Phase 2 の型（CustomerInfo, Address）を使用"
+      - "validateOrder 関数の出力型"
+      - "priceOrder 関数の入力型"
+      - "#[derive(Lenses)] による不変更新サポート"
+
+    traits_to_derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+      - Lenses  # functional-rusty-derive
+
+  # ========================================
+  # 内部型: PricedOrderProductLine
+  # ========================================
+  - id: REQ-040
+    name: PricedOrderProductLine
+    priority: critical
+    category: internal_type
+    description: |
+      価格が付与された製品注文明細を表す型。
+      ValidatedOrderLine に価格情報を追加したもの。
+
+    fields:
+      - name: order_line_id
+        type: OrderLineId
+        required: true
+        description: 注文明細ID
+
+      - name: product_code
+        type: ProductCode
+        required: true
+        description: 製品コード
+
+      - name: quantity
+        type: OrderQuantity
+        required: true
+        description: 数量
+
+      - name: line_price
+        type: Price
+        required: true
+        description: 明細の合計価格（単価 x 数量）
+
+    methods:
+      - name: new
+        signature: "fn new(order_line_id: OrderLineId, product_code: ProductCode, quantity: OrderQuantity, line_price: Price) -> Self"
+        description: 新しい PricedOrderProductLine を生成する。
+
+      - name: order_line_id
+        signature: "fn order_line_id(&self) -> &OrderLineId"
+        description: 注文明細IDへの参照を返す。
+
+      - name: product_code
+        signature: "fn product_code(&self) -> &ProductCode"
+        description: 製品コードへの参照を返す。
+
+      - name: quantity
+        signature: "fn quantity(&self) -> &OrderQuantity"
+        description: 数量への参照を返す。
+
+      - name: line_price
+        signature: "fn line_price(&self) -> &Price"
+        description: 明細価格への参照を返す。
+
+    f_sharp_reference: |
+      type PricedOrderProductLine = {
+          OrderLineId : OrderLineId
+          ProductCode : ProductCode
+          Quantity : OrderQuantity
+          LinePrice : Price
+      }
+
+    functional_rusty_usage:
+      - "Phase 1 の型（OrderLineId, ProductCode, OrderQuantity, Price）を使用"
+      - "PricedOrderLine の ProductLine バリアントで使用"
+
+    traits_to_derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+
+  # ========================================
+  # 内部型: PricedOrderLine
+  # ========================================
+  - id: REQ-041
+    name: PricedOrderLine
+    priority: critical
+    category: internal_type
+    description: |
+      価格付き注文明細を表す直和型。
+      製品明細またはコメント明細のいずれかを保持する。
+
+    variants:
+      - name: ProductLine
+        inner_type: PricedOrderProductLine
+        description: 製品の明細（価格付き）
+
+      - name: CommentLine
+        inner_type: String
+        description: コメント行（ギフトメッセージなど）
+
+    methods:
+      - name: is_product_line
+        signature: "fn is_product_line(&self) -> bool"
+        description: ProductLine バリアントかどうかを返す。
+
+      - name: is_comment_line
+        signature: "fn is_comment_line(&self) -> bool"
+        description: CommentLine バリアントかどうかを返す。
+
+      - name: line_price
+        signature: "fn line_price(&self) -> Option<&Price>"
+        description: |
+          明細の価格を返す。
+          ProductLine の場合は Some(&Price)、CommentLine の場合は None。
+
+    f_sharp_reference: |
+      type PricedOrderLine =
+          | ProductLine of PricedOrderProductLine
+          | CommentLine of string
+
+    functional_rusty_usage:
+      - "Rust の enum によるパターンマッチ"
+      - "PricedOrder の一部として使用"
+
+    traits_to_derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+
+  # ========================================
+  # 内部型: PricedOrder
+  # ========================================
+  - id: REQ-042
+    name: PricedOrder
+    priority: critical
+    category: internal_type
+    description: |
+      価格計算済みの注文を表す型。
+      ValidatedOrder に価格情報を追加したもの。
+      請求金額と価格付き明細リストを持つ。
+
+    fields:
+      - name: order_id
+        type: OrderId
+        required: true
+        description: 注文ID
+
+      - name: customer_info
+        type: CustomerInfo
+        required: true
+        description: 顧客情報
+
+      - name: shipping_address
+        type: Address
+        required: true
+        description: 配送先住所
+
+      - name: billing_address
+        type: Address
+        required: true
+        description: 請求先住所
+
+      - name: amount_to_bill
+        type: BillingAmount
+        required: true
+        description: 請求合計金額
+
+      - name: lines
+        type: "Vec<PricedOrderLine>"
+        required: true
+        description: 価格付き注文明細リスト
+
+      - name: pricing_method
+        type: PricingMethod
+        required: true
+        description: 使用された価格計算方法
+
+    methods:
+      - name: new
+        signature: |
+          fn new(
+              order_id: OrderId,
+              customer_info: CustomerInfo,
+              shipping_address: Address,
+              billing_address: Address,
+              amount_to_bill: BillingAmount,
+              lines: Vec<PricedOrderLine>,
+              pricing_method: PricingMethod
+          ) -> Self
+        description: 新しい PricedOrder を生成する。
+
+      - name: order_id
+        signature: "fn order_id(&self) -> &OrderId"
+        description: 注文IDへの参照を返す。
+
+      - name: customer_info
+        signature: "fn customer_info(&self) -> &CustomerInfo"
+        description: 顧客情報への参照を返す。
+
+      - name: shipping_address
+        signature: "fn shipping_address(&self) -> &Address"
+        description: 配送先住所への参照を返す。
+
+      - name: billing_address
+        signature: "fn billing_address(&self) -> &Address"
+        description: 請求先住所への参照を返す。
+
+      - name: amount_to_bill
+        signature: "fn amount_to_bill(&self) -> &BillingAmount"
+        description: 請求金額への参照を返す。
+
+      - name: lines
+        signature: "fn lines(&self) -> &[PricedOrderLine]"
+        description: 価格付き明細リストへの参照を返す。
+
+      - name: pricing_method
+        signature: "fn pricing_method(&self) -> &PricingMethod"
+        description: 価格計算方法への参照を返す。
+
+    f_sharp_reference: |
+      type PricedOrder = {
+          OrderId : OrderId
+          CustomerInfo : CustomerInfo
+          ShippingAddress : Address
+          BillingAddress : Address
+          AmountToBill : BillingAmount
+          Lines : PricedOrderLine list
+          PricingMethod : PricingMethod
+      }
+
+    functional_rusty_usage:
+      - "Phase 1 の型（OrderId, BillingAmount）と Phase 2 の型（CustomerInfo, Address）を使用"
+      - "priceOrder 関数の出力型"
+      - "addShippingInfo 関数の入力型"
+      - "#[derive(Lenses)] による不変更新サポート"
+
+    traits_to_derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+      - Lenses  # functional-rusty-derive
+
+  # ========================================
+  # 内部型: ShippingMethod
+  # ========================================
+  - id: REQ-043
+    name: ShippingMethod
+    priority: high
+    category: internal_type
+    description: |
+      配送方法を表す列挙型。
+      郵便または各種宅配サービスのいずれか。
+
+    variants:
+      - name: PostalService
+        description: 郵便サービス
+
+      - name: Fedex24
+        description: FedEx 24時間配送
+
+      - name: Fedex48
+        description: FedEx 48時間配送
+
+      - name: Ups48
+        description: UPS 48時間配送
+
+    methods:
+      - name: is_postal_service
+        signature: "fn is_postal_service(&self) -> bool"
+        description: PostalService バリアントかどうかを返す。
+
+      - name: is_fedex24
+        signature: "fn is_fedex24(&self) -> bool"
+        description: Fedex24 バリアントかどうかを返す。
+
+      - name: is_fedex48
+        signature: "fn is_fedex48(&self) -> bool"
+        description: Fedex48 バリアントかどうかを返す。
+
+      - name: is_ups48
+        signature: "fn is_ups48(&self) -> bool"
+        description: Ups48 バリアントかどうかを返す。
+
+    f_sharp_reference: |
+      type ShippingMethod =
+          | PostalService
+          | Fedex24
+          | Fedex48
+          | Ups48
+
+    functional_rusty_usage:
+      - "Rust の enum によるパターンマッチ"
+      - "ShippingInfo の一部として使用"
+
+    traits_to_derive:
+      - Clone
+      - Copy
+      - Debug
+      - PartialEq
+      - Eq
+
+  # ========================================
+  # 内部型: ShippingInfo
+  # ========================================
+  - id: REQ-044
+    name: ShippingInfo
+    priority: high
+    category: internal_type
+    description: |
+      配送情報を表す型。
+      配送方法と配送コストを保持する。
+
+    fields:
+      - name: shipping_method
+        type: ShippingMethod
+        required: true
+        description: 選択された配送方法
+
+      - name: shipping_cost
+        type: Price
+        required: true
+        description: 配送コスト
+
+    methods:
+      - name: new
+        signature: "fn new(shipping_method: ShippingMethod, shipping_cost: Price) -> Self"
+        description: 新しい ShippingInfo を生成する。
+
+      - name: shipping_method
+        signature: "fn shipping_method(&self) -> ShippingMethod"
+        description: 配送方法を返す（Copy なのでコピー）。
+
+      - name: shipping_cost
+        signature: "fn shipping_cost(&self) -> &Price"
+        description: 配送コストへの参照を返す。
+
+    f_sharp_reference: |
+      type ShippingInfo = {
+          ShippingMethod : ShippingMethod
+          ShippingCost : Price
+      }
+
+    functional_rusty_usage:
+      - "Phase 1 の Price 型を使用"
+      - "PricedOrderWithShippingMethod の一部として使用"
+
+    traits_to_derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+
+  # ========================================
+  # 内部型: PricedOrderWithShippingMethod
+  # ========================================
+  - id: REQ-045
+    name: PricedOrderWithShippingMethod
+    priority: high
+    category: internal_type
+    description: |
+      配送情報が追加された価格計算済み注文を表す型。
+      PricedOrder に配送情報を追加したもの。
+
+    fields:
+      - name: shipping_info
+        type: ShippingInfo
+        required: true
+        description: 配送情報
+
+      - name: priced_order
+        type: PricedOrder
+        required: true
+        description: 価格計算済みの注文
+
+    methods:
+      - name: new
+        signature: "fn new(shipping_info: ShippingInfo, priced_order: PricedOrder) -> Self"
+        description: 新しい PricedOrderWithShippingMethod を生成する。
+
+      - name: shipping_info
+        signature: "fn shipping_info(&self) -> &ShippingInfo"
+        description: 配送情報への参照を返す。
+
+      - name: priced_order
+        signature: "fn priced_order(&self) -> &PricedOrder"
+        description: 価格計算済み注文への参照を返す。
+
+    f_sharp_reference: |
+      type PricedOrderWithShippingMethod = {
+          ShippingInfo : ShippingInfo
+          PricedOrder : PricedOrder
+      }
+
+    functional_rusty_usage:
+      - "createEvents 関数の入力型"
+      - "#[derive(Lenses)] による不変更新サポート"
+
+    traits_to_derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+      - Lenses  # functional-rusty-derive
+
+  # ========================================
+  # 内部型: HtmlString
+  # ========================================
+  - id: REQ-046
+    name: HtmlString
+    priority: medium
+    category: internal_type
+    description: |
+      HTML 文字列を表す newtype。
+      通常の文字列と HTML を型レベルで区別する。
+
+    inner_type: String
+
+    methods:
+      - name: new
+        signature: "fn new(html: String) -> Self"
+        description: HTML 文字列から HtmlString を生成する。
+
+      - name: value
+        signature: "fn value(&self) -> &str"
+        description: 内部の HTML 文字列への参照を返す。
+
+      - name: into_inner
+        signature: "fn into_inner(self) -> String"
+        description: 内部の String を消費して返す。
+
+    f_sharp_reference: |
+      type HtmlString = HtmlString of string
+
+    functional_rusty_usage:
+      - "Newtype パターンによる型安全性の確保"
+      - "OrderAcknowledgment の一部として使用"
+
+    traits_to_derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+
+  # ========================================
+  # 内部型: OrderAcknowledgment
+  # ========================================
+  - id: REQ-047
+    name: OrderAcknowledgment
+    priority: medium
+    category: internal_type
+    description: |
+      注文確認メールの内容を表す型。
+      送信先アドレスと HTML 本文を保持する。
+
+    fields:
+      - name: email_address
+        type: EmailAddress
+        required: true
+        description: 送信先メールアドレス
+
+      - name: letter
+        type: HtmlString
+        required: true
+        description: メール本文（HTML 形式）
+
+    methods:
+      - name: new
+        signature: "fn new(email_address: EmailAddress, letter: HtmlString) -> Self"
+        description: 新しい OrderAcknowledgment を生成する。
+
+      - name: email_address
+        signature: "fn email_address(&self) -> &EmailAddress"
+        description: メールアドレスへの参照を返す。
+
+      - name: letter
+        signature: "fn letter(&self) -> &HtmlString"
+        description: メール本文への参照を返す。
+
+    f_sharp_reference: |
+      type OrderAcknowledgment = {
+          EmailAddress : EmailAddress
+          Letter : HtmlString
+      }
+
+    functional_rusty_usage:
+      - "Phase 1 の EmailAddress 型を使用"
+      - "sendOrderAcknowledgment 関数の入力型"
+
+    traits_to_derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+
+  # ========================================
+  # 内部型: SendResult
+  # ========================================
+  - id: REQ-048
+    name: SendResult
+    priority: medium
+    category: internal_type
+    description: |
+      メール送信の結果を表す列挙型。
+      送信成功または送信失敗のいずれか。
+
+    variants:
+      - name: Sent
+        description: 送信成功
+
+      - name: NotSent
+        description: 送信失敗（エラーではなく、送信しない判断をした場合も含む）
+
+    methods:
+      - name: is_sent
+        signature: "fn is_sent(&self) -> bool"
+        description: Sent バリアントかどうかを返す。
+
+      - name: is_not_sent
+        signature: "fn is_not_sent(&self) -> bool"
+        description: NotSent バリアントかどうかを返す。
+
+    f_sharp_reference: |
+      type SendResult = Sent | NotSent
+
+    functional_rusty_usage:
+      - "sendOrderAcknowledgment 関数の戻り値型"
+      - "Rust の enum によるパターンマッチ"
+
+    traits_to_derive:
+      - Clone
+      - Copy
+      - Debug
+      - PartialEq
+      - Eq
+
+# ========================================
+# 依存関係
+# ========================================
+dependencies:
+  phase_1_types:
+    description: "Phase 1 で定義した基本型"
+    types:
+      - OrderId
+      - OrderLineId
+      - ProductCode
+      - OrderQuantity
+      - Price
+      - BillingAmount
+      - EmailAddress
+      - PromotionCode
+      - PdfAttachment
+      - ValidationError
+
+  phase_2_types:
+    description: "Phase 2 で定義した複合型"
+    types:
+      - PersonalName
+      - CustomerInfo
+      - Address
+
+  crates:
+    - name: rust_decimal
+      version: "1.36"
+      description: 数量フィールドに使用
+
+    - name: functional-rusty
+      version: "*"  # ワークスペース内の同バージョン
+      features:
+        - optics
+        - derive
+      description: "#[derive(Lenses)] マクロを使用"
+
+    - name: functional-rusty-derive
+      version: "*"  # ワークスペース内の同バージョン
+      description: "#[derive(Lenses)] マクロを提供"
+
+    - name: thiserror
+      version: "2.0"
+      description: エラー型の定義
+
+  functional_rusty:
+    - module: optics
+      traits:
+        - Lens
+      description: 内部型の不変更新に使用
+
+    - module: derive
+      macros:
+        - Lenses
+      description: 構造体に対する Lens の自動導出に使用
+
+# ========================================
+# テスト要件
+# ========================================
+testing:
+  strategy: TDD
+  framework: rstest
+
+  test_categories:
+    - name: 型生成テスト
+      description: |
+        各型が正しく生成できることを確認する。
+        コンストラクタ（new）が期待通りに動作することを検証。
+
+    - name: Getter テスト
+      description: |
+        各 getter メソッドが正しい値を返すことを確認する。
+
+    - name: バリアント判定テスト
+      description: |
+        enum 型の is_* メソッドが正しく動作することを確認する。
+
+    - name: パターンマッチテスト
+      description: |
+        enum 型のパターンマッチが正しく動作することを確認する。
+
+    - name: Clone/Eq テスト
+      description: |
+        Clone と PartialEq の導出が正しく動作することを確認する。
+
+    - name: Display テスト
+      description: |
+        エラー型の Display 実装が期待通りの文字列を返すことを確認する。
+
+    - name: From トレイトテスト
+      description: |
+        PlaceOrderError への自動変換が正しく動作することを確認する。
+
+    - name: Lens テスト
+      description: |
+        #[derive(Lenses)] で生成された Lens が正しく動作することを確認する。
+
+  coverage_requirement: "100%"
+
+  specific_tests:
+    input_types:
+      - test_unvalidated_customer_info_new
+      - test_unvalidated_address_new
+      - test_unvalidated_order_line_new
+      - test_unvalidated_order_new
+
+    output_types:
+      - test_order_acknowledgment_sent_new
+      - test_order_acknowledgment_sent_getters
+      - test_shippable_order_line_new
+      - test_shippable_order_line_getters
+      - test_shippable_order_placed_new
+      - test_shippable_order_placed_getters
+      - test_billable_order_placed_new
+      - test_billable_order_placed_getters
+      - test_place_order_event_variants
+      - test_place_order_event_is_methods
+
+    error_types:
+      - test_pricing_error_new
+      - test_pricing_error_display
+      - test_service_info_new
+      - test_service_info_getters
+      - test_remote_service_error_new
+      - test_remote_service_error_display
+      - test_place_order_error_variants
+      - test_place_order_error_from_validation
+      - test_place_order_error_from_pricing
+      - test_place_order_error_from_remote_service
+
+    internal_types:
+      - test_address_validation_error_variants
+      - test_checked_address_new
+      - test_pricing_method_variants
+      - test_validated_order_line_new
+      - test_validated_order_new
+      - test_priced_order_product_line_new
+      - test_priced_order_line_variants
+      - test_priced_order_new
+      - test_shipping_method_variants
+      - test_shipping_info_new
+      - test_priced_order_with_shipping_method_new
+      - test_html_string_new
+      - test_order_acknowledgment_new
+      - test_send_result_variants
+
+# ========================================
+# 実装上の注意事項
+# ========================================
+implementation_notes:
+  - note: |
+      公開型（入力・出力）は src/workflow/public_types.rs に定義する。
+      内部型は src/workflow/internal_types.rs に定義する。
+      エラー型は src/workflow/error_types.rs に定義する。
+
+  - note: |
+      WorkflowValidationError は simple_types::ValidationError の型エイリアスとして定義する:
+      pub type WorkflowValidationError = crate::simple_types::ValidationError;
+
+  - note: |
+      PlaceOrderError の From 実装により、? 演算子で自動変換が可能になる:
+      impl From<WorkflowValidationError> for PlaceOrderError { ... }
+      impl From<PricingError> for PlaceOrderError { ... }
+      impl From<RemoteServiceError> for PlaceOrderError { ... }
+
+  - note: |
+      #[derive(Lenses)] を使用する型は以下:
+      - ValidatedOrderLine
+      - ValidatedOrder
+      - PricedOrder
+      - PricedOrderWithShippingMethod
+
+  - note: |
+      未検証型（Unvalidated*）は全てのフィールドが String または数値型であり、
+      バリデーションロジックを含まない。これは意図的な設計。
+
+  - note: |
+      エラーメッセージは英語で統一する。
+
+  - note: |
+      全ての型は #![forbid(unsafe_code)] ポリシーを遵守する。
+
+# ========================================
+# ファイル構成
+# ========================================
+file_structure:
+  - path: src/workflow/mod.rs
+    description: |
+      workflow モジュールのルートファイル。
+      public_types, internal_types, error_types を再エクスポートする。
+
+  - path: src/workflow/public_types.rs
+    description: |
+      公開型（入力・出力）の定義。
+      - UnvalidatedCustomerInfo
+      - UnvalidatedAddress
+      - UnvalidatedOrderLine
+      - UnvalidatedOrder
+      - OrderAcknowledgmentSent
+      - ShippableOrderLine
+      - ShippableOrderPlaced
+      - BillableOrderPlaced
+      - PlaceOrderEvent
+
+  - path: src/workflow/internal_types.rs
+    description: |
+      内部型の定義。
+      - CheckedAddress
+      - AddressValidationError
+      - PricingMethod
+      - ValidatedOrderLine
+      - ValidatedOrder
+      - PricedOrderProductLine
+      - PricedOrderLine
+      - PricedOrder
+      - ShippingMethod
+      - ShippingInfo
+      - PricedOrderWithShippingMethod
+      - HtmlString
+      - OrderAcknowledgment
+      - SendResult
+
+  - path: src/workflow/error_types.rs
+    description: |
+      エラー型の定義。
+      - WorkflowValidationError (型エイリアス)
+      - PricingError
+      - ServiceInfo
+      - RemoteServiceError
+      - PlaceOrderError
+
+  - path: tests/workflow_types_tests.rs
+    description: |
+      ワークフロー型のユニットテスト。
+      rstest を使用したパラメータ化テストを含む。

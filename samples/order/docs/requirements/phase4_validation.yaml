@@ -1,0 +1,1152 @@
+# Phase 4: バリデーション実装 要件定義
+# Domain Modeling Made Functional の F# パターンを Rust に適用
+# functional-rusty ライブラリを使用した関数型バリデーション
+
+id: phase4_validation
+name: バリデーション実装
+version: "1.0.0"
+created_at: "2025-12-31"
+
+# 概要
+overview:
+  description: |
+    未検証注文 (UnvalidatedOrder) から検証済み注文 (ValidatedOrder) への変換ロジックを実装する。
+    F# の result computation expression に相当するパターンを Rust の Result と ? 演算子で実現する。
+
+    バリデーションは純粋関数として実装し、外部サービス呼び出し（住所検証、商品コード存在チェック）は
+    依存関数として注入することで、テスト容易性と参照透過性を確保する。
+
+  design_principles:
+    - name: 参照透過性
+      description: |
+        純粋なバリデーション関数（外部サービス呼び出しを除く）は参照透過であること。
+        同じ入力に対して常に同じ出力を返す。
+
+        例: to_customer_info は UnvalidatedCustomerInfo を受け取り、
+        常に同じ CustomerInfo または ValidationError を返す。
+
+    - name: 不変性
+      description: |
+        入力データを変更せず、常に新しい値を生成する。
+        全てのバリデーション関数は入力の参照を取り、変換結果を返す。
+
+    - name: 合成可能性
+      description: |
+        小さなバリデーション関数から大きなバリデーション関数を組み立てる。
+        to_customer_info, to_address, to_order_line を組み合わせて validate_order を構成する。
+
+    - name: 早期リターン
+      description: |
+        Result の ? 演算子を使用して、エラー時に即座にリターンする。
+        これにより、ネストの深いエラーハンドリングを避ける。
+
+    - name: 依存性注入
+      description: |
+        外部サービス（住所検証、商品コード存在チェック）への依存を関数引数として注入する。
+        これにより、テスト時にモックを使用できる。
+
+  f_sharp_patterns:
+    result_computation_expression: |
+      F# では result computation expression を使用:
+
+      ```fsharp
+      let toCustomerInfo (unvalidatedCustomerInfo: UnvalidatedCustomerInfo) =
+          result {
+              let! firstName =
+                  unvalidatedCustomerInfo.FirstName
+                  |> String50.create "FirstName"
+                  |> Result.mapError ValidationError
+              // ...
+          }
+      ```
+
+      Rust では Result と ? 演算子で同様のパターンを実現:
+
+      ```rust
+      fn to_customer_info(
+          unvalidated: &UnvalidatedCustomerInfo,
+      ) -> Result<CustomerInfo, ValidationError> {
+          let first_name = String50::create("FirstName", unvalidated.first_name())?;
+          // ...
+      }
+      ```
+
+    dependency_injection: |
+      F# では関数型を引数として受け取る:
+
+      ```fsharp
+      let validateOrder : ValidateOrder =
+          fun checkProductCodeExists checkAddressExists unvalidatedOrder ->
+              asyncResult {
+                  // ...
+              }
+      ```
+
+      Rust ではジェネリクスまたはクロージャで同様のパターンを実現:
+
+      ```rust
+      fn validate_order<CheckProduct, CheckAddress>(
+          check_product_code_exists: &CheckProduct,
+          check_address_exists: &CheckAddress,
+          unvalidated_order: &UnvalidatedOrder,
+      ) -> Result<ValidatedOrder, PlaceOrderError>
+      where
+          CheckProduct: Fn(&ProductCode) -> bool,
+          CheckAddress: Fn(&UnvalidatedAddress) -> Result<CheckedAddress, AddressValidationError>,
+      ```
+
+  data_flow_diagram: |
+    バリデーションのデータフロー:
+
+    UnvalidatedOrder
+         |
+         +-- order_id: String --> to_order_id --> OrderId
+         |
+         +-- customer_info: UnvalidatedCustomerInfo
+         |        |
+         |        +-- first_name --> String50
+         |        +-- last_name --> String50
+         |        +-- email_address --> EmailAddress
+         |        +-- vip_status --> VipStatus
+         |        |
+         |        +--> to_customer_info --> CustomerInfo
+         |
+         +-- shipping_address: UnvalidatedAddress
+         |        |
+         |        +--> check_address_exists --> CheckedAddress
+         |        +--> to_address --> Address
+         |
+         +-- billing_address: UnvalidatedAddress
+         |        |
+         |        +--> check_address_exists --> CheckedAddress
+         |        +--> to_address --> Address
+         |
+         +-- lines: Vec<UnvalidatedOrderLine>
+         |        |
+         |        +--> to_validated_order_line (for each) --> Vec<ValidatedOrderLine>
+         |                  |
+         |                  +-- order_line_id --> OrderLineId
+         |                  +-- product_code --> ProductCode (+ check_product_code_exists)
+         |                  +-- quantity --> OrderQuantity
+         |
+         +-- promotion_code: String --> create_pricing_method --> PricingMethod
+         |
+         +--> validate_order --> ValidatedOrder
+
+# ========================================
+# 依存関数型の定義
+# ========================================
+dependency_types:
+  - id: DEP-001
+    name: CheckProductCodeExists
+    priority: critical
+    description: |
+      商品コードがシステムに存在するかを確認する関数型。
+      外部サービス（商品カタログ、在庫システム等）との連携を抽象化する。
+
+      同期呼び出しとして設計する。非同期が必要な場合は Phase 6 以降で対応。
+
+    f_sharp_reference: |
+      type CheckProductCodeExists =
+          ProductCode -> bool
+
+    rust_signature: |
+      Fn(&ProductCode) -> bool
+
+    usage_example: |
+      ```rust
+      fn check_product_code_exists_impl(product_code: &ProductCode) -> bool {
+          // 実際の実装では外部サービスを呼び出す
+          // テスト時はモックを使用
+          true
+      }
+      ```
+
+    test_mock_example: |
+      ```rust
+      let mock_check_product = |_: &ProductCode| true;  // 常に存在する
+      let mock_check_product_empty = |_: &ProductCode| false;  // 常に存在しない
+      let mock_check_product_specific = |code: &ProductCode| {
+          code.value() == "W1234" || code.value() == "G123"
+      };
+      ```
+
+  - id: DEP-002
+    name: CheckAddressExists
+    priority: critical
+    description: |
+      住所の存在・有効性を外部サービスで検証する関数型。
+      住所検証サービス（郵便番号DB、住所正規化サービス等）との連携を抽象化する。
+
+      Phase 4 では同期呼び出しとして設計する。
+      非同期対応（async/await）は Phase 6 の Effect System で対応予定。
+
+    f_sharp_reference: |
+      type CheckAddressExists =
+          UnvalidatedAddress -> AsyncResult<CheckedAddress, AddressValidationError>
+
+    rust_signature: |
+      Fn(&UnvalidatedAddress) -> Result<CheckedAddress, AddressValidationError>
+
+    usage_example: |
+      ```rust
+      fn check_address_exists_impl(
+          address: &UnvalidatedAddress,
+      ) -> Result<CheckedAddress, AddressValidationError> {
+          // 実際の実装では外部サービスを呼び出す
+          // テスト時はモックを使用
+          Ok(CheckedAddress::new(address.clone()))
+      }
+      ```
+
+    error_handling: |
+      AddressValidationError の各バリアントに対応:
+      - InvalidFormat: 住所の形式が不正
+      - AddressNotFound: 住所が見つからない
+
+      これらのエラーは PlaceOrderError::Validation に変換される。
+
+    test_mock_example: |
+      ```rust
+      // 常に成功
+      let mock_check_address_ok = |addr: &UnvalidatedAddress| {
+          Ok(CheckedAddress::new(addr.clone()))
+      };
+
+      // 常に失敗（住所が見つからない）
+      let mock_check_address_not_found = |_: &UnvalidatedAddress| {
+          Err(AddressValidationError::AddressNotFound)
+      };
+
+      // 形式エラー
+      let mock_check_address_invalid = |_: &UnvalidatedAddress| {
+          Err(AddressValidationError::InvalidFormat)
+      };
+      ```
+
+# ========================================
+# 要件定義: バリデーション関数
+# ========================================
+requirements:
+  # ========================================
+  # 基本バリデーション関数
+  # ========================================
+  - id: REQ-049
+    name: to_order_id
+    priority: critical
+    category: validation_function
+    description: |
+      未検証の注文ID文字列を OrderId 型に変換する。
+      OrderId::create を呼び出し、エラーを ValidationError として返す。
+
+    signature: |
+      fn to_order_id(order_id: &str) -> Result<OrderId, ValidationError>
+
+    implementation_notes: |
+      - OrderId::create を直接呼び出す薄いラッパー
+      - フィールド名は "OrderId" を使用
+
+    f_sharp_reference: |
+      let toOrderId orderId =
+          orderId
+          |> OrderId.create "OrderId"
+          |> Result.mapError ValidationError
+
+    test_cases:
+      - name: 有効な注文ID
+        input: "order-001"
+        expected: Ok(OrderId)
+
+      - name: 空文字列
+        input: ""
+        expected: Err(ValidationError)
+        error_message: "Must not be empty"
+
+      - name: 50文字超過
+        input: '"a".repeat(51)'
+        expected: Err(ValidationError)
+        error_message: "Must not be more than 50 chars"
+
+  - id: REQ-050
+    name: to_order_line_id
+    priority: critical
+    category: validation_function
+    description: |
+      未検証の注文明細ID文字列を OrderLineId 型に変換する。
+
+    signature: |
+      fn to_order_line_id(order_line_id: &str) -> Result<OrderLineId, ValidationError>
+
+    implementation_notes: |
+      - OrderLineId::create を直接呼び出す
+      - フィールド名は "OrderLineId" を使用
+
+    test_cases:
+      - name: 有効な注文明細ID
+        input: "line-001"
+        expected: Ok(OrderLineId)
+
+      - name: 空文字列
+        input: ""
+        expected: Err(ValidationError)
+
+  - id: REQ-051
+    name: to_customer_info
+    priority: critical
+    category: validation_function
+    description: |
+      UnvalidatedCustomerInfo を CustomerInfo に変換する。
+      各フィールドのバリデーションを順次実行し、最初のエラーで失敗する。
+
+    signature: |
+      fn to_customer_info(
+          unvalidated: &UnvalidatedCustomerInfo,
+      ) -> Result<CustomerInfo, ValidationError>
+
+    implementation_steps:
+      - step: 1
+        description: first_name を String50 に変換
+        field_name: "FirstName"
+
+      - step: 2
+        description: last_name を String50 に変換
+        field_name: "LastName"
+
+      - step: 3
+        description: email_address を EmailAddress に変換
+        field_name: "EmailAddress"
+
+      - step: 4
+        description: vip_status を VipStatus に変換
+        field_name: "VipStatus"
+
+      - step: 5
+        description: PersonalName と CustomerInfo を組み立てる
+
+    f_sharp_reference: |
+      let toCustomerInfo (unvalidatedCustomerInfo: UnvalidatedCustomerInfo) =
+          result {
+              let! firstName =
+                  unvalidatedCustomerInfo.FirstName
+                  |> String50.create "FirstName"
+                  |> Result.mapError ValidationError
+              let! lastName =
+                  unvalidatedCustomerInfo.LastName
+                  |> String50.create "LastName"
+                  |> Result.mapError ValidationError
+              let! emailAddress =
+                  unvalidatedCustomerInfo.EmailAddress
+                  |> EmailAddress.create "EmailAddress"
+                  |> Result.mapError ValidationError
+              let! vipStatus =
+                  unvalidatedCustomerInfo.VipStatus
+                  |> VipStatus.create "vipStatus"
+                  |> Result.mapError ValidationError
+
+              let customerInfo = {
+                  Name = {FirstName=firstName; LastName=lastName}
+                  EmailAddress = emailAddress
+                  VipStatus = vipStatus
+                  }
+              return customerInfo
+          }
+
+    test_cases:
+      - name: 全フィールド有効
+        input:
+          first_name: "John"
+          last_name: "Doe"
+          email_address: "john@example.com"
+          vip_status: "Normal"
+        expected: Ok(CustomerInfo)
+
+      - name: first_name が空
+        input:
+          first_name: ""
+          last_name: "Doe"
+          email_address: "john@example.com"
+          vip_status: "Normal"
+        expected: Err(ValidationError)
+        error_field: "FirstName"
+
+      - name: email_address が無効
+        input:
+          first_name: "John"
+          last_name: "Doe"
+          email_address: "invalid-email"
+          vip_status: "Normal"
+        expected: Err(ValidationError)
+        error_field: "EmailAddress"
+
+      - name: vip_status が無効
+        input:
+          first_name: "John"
+          last_name: "Doe"
+          email_address: "john@example.com"
+          vip_status: "Premium"
+        expected: Err(ValidationError)
+        error_field: "VipStatus"
+
+  - id: REQ-052
+    name: to_address
+    priority: critical
+    category: validation_function
+    description: |
+      CheckedAddress を Address に変換する。
+      CheckedAddress は既に外部サービスで検証済みなので、
+      内部データの形式変換のみを行う。
+
+    signature: |
+      fn to_address(checked_address: &CheckedAddress) -> Result<Address, ValidationError>
+
+    implementation_notes: |
+      - CheckedAddress の内部 UnvalidatedAddress から各フィールドを取得
+      - Address::create を使用して変換
+      - 形式変換時のエラーは ValidationError として返す
+
+    f_sharp_reference: |
+      let toAddress (CheckedAddress unvalidatedAddress) =
+          result {
+              let! addressLine1 =
+                  unvalidatedAddress.AddressLine1
+                  |> String50.create "AddressLine1"
+                  |> Result.mapError ValidationError
+              // ... 他のフィールドも同様
+              return address
+          }
+
+    test_cases:
+      - name: 全フィールド有効
+        input:
+          address_line1: "123 Main St"
+          address_line2: "Apt 4"
+          city: "New York"
+          zip_code: "10001"
+          state: "NY"
+          country: "USA"
+        expected: Ok(Address)
+
+      - name: address_line1 が空
+        input:
+          address_line1: ""
+          city: "New York"
+        expected: Err(ValidationError)
+        error_field: "AddressLine1"
+
+      - name: zip_code が無効
+        input:
+          address_line1: "123 Main St"
+          zip_code: "1234"
+        expected: Err(ValidationError)
+        error_field: "ZipCode"
+
+  - id: REQ-053
+    name: to_checked_address
+    priority: critical
+    category: validation_function
+    description: |
+      UnvalidatedAddress を外部サービスで検証し、CheckedAddress に変換する。
+      検証関数は依存性として注入される。
+
+      AddressValidationError を ValidationError に変換する。
+
+    signature: |
+      fn to_checked_address<CheckAddress>(
+          check_address_exists: &CheckAddress,
+          address: &UnvalidatedAddress,
+      ) -> Result<CheckedAddress, ValidationError>
+      where
+          CheckAddress: Fn(&UnvalidatedAddress) -> Result<CheckedAddress, AddressValidationError>
+
+    error_mapping: |
+      AddressValidationError を ValidationError に変換:
+      - AddressNotFound -> ValidationError::new("Address", "Address not found")
+      - InvalidFormat -> ValidationError::new("Address", "Address has bad format")
+
+    f_sharp_reference: |
+      let toCheckedAddress (checkAddress:CheckAddressExists) address =
+          address
+          |> checkAddress
+          |> AsyncResult.mapError (fun addrError ->
+              match addrError with
+              | AddressNotFound -> ValidationError "Address not found"
+              | InvalidFormat -> ValidationError "Address has bad format"
+              )
+
+    test_cases:
+      - name: 外部サービスで検証成功
+        mock: check_address returns Ok(CheckedAddress)
+        expected: Ok(CheckedAddress)
+
+      - name: 住所が見つからない
+        mock: check_address returns Err(AddressNotFound)
+        expected: Err(ValidationError)
+        error_message: "Address not found"
+
+      - name: 形式が無効
+        mock: check_address returns Err(InvalidFormat)
+        expected: Err(ValidationError)
+        error_message: "Address has bad format"
+
+  - id: REQ-054
+    name: to_product_code
+    priority: critical
+    category: validation_function
+    description: |
+      未検証の商品コード文字列を ProductCode に変換し、
+      存在チェックを行う。
+
+      1. まず ProductCode::create で形式を検証
+      2. 次に check_product_code_exists で存在を確認
+      3. 存在しない場合はエラーを返す
+
+    signature: |
+      fn to_product_code<CheckProduct>(
+          check_product_code_exists: &CheckProduct,
+          product_code: &str,
+      ) -> Result<ProductCode, ValidationError>
+      where
+          CheckProduct: Fn(&ProductCode) -> bool
+
+    implementation_steps:
+      - step: 1
+        description: ProductCode::create で形式を検証
+        error_case: 形式が無効な場合は ValidationError
+
+      - step: 2
+        description: check_product_code_exists で存在を確認
+        error_case: 存在しない場合は ValidationError("ProductCode", "Invalid: {code}")
+
+    f_sharp_reference: |
+      let toProductCode (checkProductCodeExists:CheckProductCodeExists) productCode =
+          let checkProduct productCode  =
+              if checkProductCodeExists productCode then
+                  Ok productCode
+              else
+                  let msg = sprintf "Invalid: %A" productCode
+                  Error (ValidationError msg)
+
+          productCode
+          |> ProductCode.create "ProductCode"
+          |> Result.mapError ValidationError
+          |> Result.bind checkProduct
+
+    test_cases:
+      - name: 有効な Widget コードで存在する
+        input: "W1234"
+        mock: check_product returns true
+        expected: Ok(ProductCode::Widget)
+
+      - name: 有効な Gizmo コードで存在する
+        input: "G123"
+        mock: check_product returns true
+        expected: Ok(ProductCode::Gizmo)
+
+      - name: 形式が無効
+        input: "X999"
+        expected: Err(ValidationError)
+        error_message: "Format not recognized"
+
+      - name: 形式は有効だが存在しない
+        input: "W9999"
+        mock: check_product returns false
+        expected: Err(ValidationError)
+        error_message: "Invalid: W9999"
+
+  - id: REQ-055
+    name: to_order_quantity
+    priority: critical
+    category: validation_function
+    description: |
+      未検証の数量（Decimal）を OrderQuantity に変換する。
+      ProductCode によって UnitQuantity（Widget）または KilogramQuantity（Gizmo）を選択する。
+
+    signature: |
+      fn to_order_quantity(
+          product_code: &ProductCode,
+          quantity: Decimal,
+      ) -> Result<OrderQuantity, ValidationError>
+
+    implementation_notes: |
+      - OrderQuantity::create を直接呼び出す
+      - ProductCode により適切な数量型が自動選択される
+
+    f_sharp_reference: |
+      let toOrderQuantity productCode quantity =
+          OrderQuantity.create "Quantity" productCode quantity
+          |> Result.mapError ValidationError
+
+    test_cases:
+      - name: Widget で有効な整数数量
+        product_code: Widget("W1234")
+        quantity: 10
+        expected: Ok(OrderQuantity::Unit(UnitQuantity(10)))
+
+      - name: Widget で無効な数量（範囲外）
+        product_code: Widget("W1234")
+        quantity: 0
+        expected: Err(ValidationError)
+
+      - name: Gizmo で有効な小数数量
+        product_code: Gizmo("G123")
+        quantity: 5.5
+        expected: Ok(OrderQuantity::Kilogram(KilogramQuantity(5.5)))
+
+      - name: Gizmo で無効な数量（範囲外）
+        product_code: Gizmo("G123")
+        quantity: 0.01
+        expected: Err(ValidationError)
+
+  - id: REQ-056
+    name: to_validated_order_line
+    priority: critical
+    category: validation_function
+    description: |
+      UnvalidatedOrderLine を ValidatedOrderLine に変換する。
+      商品コードの存在チェックを含む。
+
+    signature: |
+      fn to_validated_order_line<CheckProduct>(
+          check_product_code_exists: &CheckProduct,
+          unvalidated: &UnvalidatedOrderLine,
+      ) -> Result<ValidatedOrderLine, ValidationError>
+      where
+          CheckProduct: Fn(&ProductCode) -> bool
+
+    implementation_steps:
+      - step: 1
+        description: to_order_line_id で注文明細IDを検証
+
+      - step: 2
+        description: to_product_code で商品コードを検証（存在チェック含む）
+
+      - step: 3
+        description: to_order_quantity で数量を検証
+
+      - step: 4
+        description: ValidatedOrderLine を組み立てる
+
+    f_sharp_reference: |
+      let toValidatedOrderLine checkProductExists (unvalidatedOrderLine:UnvalidatedOrderLine) =
+          result {
+              let! orderLineId =
+                  unvalidatedOrderLine.OrderLineId
+                  |> toOrderLineId
+              let! productCode =
+                  unvalidatedOrderLine.ProductCode
+                  |> toProductCode checkProductExists
+              let! quantity =
+                  unvalidatedOrderLine.Quantity
+                  |> toOrderQuantity productCode
+              let validatedOrderLine : ValidatedOrderLine = {
+                  OrderLineId = orderLineId
+                  ProductCode = productCode
+                  Quantity = quantity
+                  }
+              return validatedOrderLine
+          }
+
+    test_cases:
+      - name: 全フィールド有効（Widget）
+        input:
+          order_line_id: "line-001"
+          product_code: "W1234"
+          quantity: 10
+        mock: check_product returns true
+        expected: Ok(ValidatedOrderLine)
+
+      - name: 全フィールド有効（Gizmo）
+        input:
+          order_line_id: "line-002"
+          product_code: "G123"
+          quantity: 5.5
+        mock: check_product returns true
+        expected: Ok(ValidatedOrderLine)
+
+      - name: 注文明細IDが空
+        input:
+          order_line_id: ""
+          product_code: "W1234"
+          quantity: 10
+        expected: Err(ValidationError)
+        error_field: "OrderLineId"
+
+      - name: 商品コードが存在しない
+        input:
+          order_line_id: "line-001"
+          product_code: "W9999"
+          quantity: 10
+        mock: check_product returns false
+        expected: Err(ValidationError)
+        error_field: "ProductCode"
+
+  - id: REQ-057
+    name: create_pricing_method
+    priority: high
+    category: validation_function
+    description: |
+      プロモーションコード文字列から PricingMethod を生成する。
+      空文字列の場合は Standard、それ以外は Promotion を返す。
+
+      この関数はバリデーションエラーを返さない（Result ではなく値を直接返す）。
+
+    signature: |
+      fn create_pricing_method(promotion_code: &str) -> PricingMethod
+
+    implementation_notes: |
+      - 空文字列 -> PricingMethod::Standard
+      - それ以外 -> PricingMethod::Promotion(PromotionCode::new(code))
+      - プロモーションコードの有効性チェックは Phase 5（価格計算）で行う
+
+    f_sharp_reference: |
+      let createPricingMethod promotionCode =
+          match promotionCode with
+          | "" -> Standard
+          | _ -> Promotion (PromotionCode promotionCode)
+
+    test_cases:
+      - name: 空文字列
+        input: ""
+        expected: PricingMethod::Standard
+
+      - name: 有効なプロモーションコード
+        input: "SUMMER2024"
+        expected: PricingMethod::Promotion(PromotionCode("SUMMER2024"))
+
+      - name: 任意の文字列
+        input: "ANY_CODE"
+        expected: PricingMethod::Promotion(PromotionCode("ANY_CODE"))
+
+  # ========================================
+  # メインバリデーション関数
+  # ========================================
+  - id: REQ-058
+    name: validate_order
+    priority: critical
+    category: validation_function
+    description: |
+      UnvalidatedOrder を ValidatedOrder に変換するメイン関数。
+      全てのサブバリデーションを統合し、依存関数を注入する。
+
+      Phase 4 では同期版として実装する。
+      非同期版（async/await）は Phase 6 で対応予定。
+
+    signature: |
+      fn validate_order<CheckProduct, CheckAddress>(
+          check_product_code_exists: &CheckProduct,
+          check_address_exists: &CheckAddress,
+          unvalidated_order: &UnvalidatedOrder,
+      ) -> Result<ValidatedOrder, PlaceOrderError>
+      where
+          CheckProduct: Fn(&ProductCode) -> bool,
+          CheckAddress: Fn(&UnvalidatedAddress) -> Result<CheckedAddress, AddressValidationError>
+
+    implementation_steps:
+      - step: 1
+        description: to_order_id で注文IDを検証
+        error_type: PlaceOrderError::Validation
+
+      - step: 2
+        description: to_customer_info で顧客情報を検証
+        error_type: PlaceOrderError::Validation
+
+      - step: 3
+        description: to_checked_address で配送先住所を外部検証
+        error_type: PlaceOrderError::Validation
+
+      - step: 4
+        description: to_address で配送先住所を変換
+        error_type: PlaceOrderError::Validation
+
+      - step: 5
+        description: to_checked_address で請求先住所を外部検証
+        error_type: PlaceOrderError::Validation
+
+      - step: 6
+        description: to_address で請求先住所を変換
+        error_type: PlaceOrderError::Validation
+
+      - step: 7
+        description: 各注文明細に to_validated_order_line を適用
+        error_type: PlaceOrderError::Validation
+        notes: |
+          Vec<UnvalidatedOrderLine> を Vec<ValidatedOrderLine> に変換
+          1つでもエラーがあれば全体がエラー
+
+      - step: 8
+        description: create_pricing_method でプロモーションコードを処理
+        notes: 常に成功（Result ではない）
+
+      - step: 9
+        description: ValidatedOrder を組み立てる
+
+    f_sharp_reference: |
+      let validateOrder : ValidateOrder =
+          fun checkProductCodeExists checkAddressExists unvalidatedOrder ->
+              asyncResult {
+                  let! orderId =
+                      unvalidatedOrder.OrderId
+                      |> toOrderId
+                      |> AsyncResult.ofResult
+                  let! customerInfo =
+                      unvalidatedOrder.CustomerInfo
+                      |> toCustomerInfo
+                      |> AsyncResult.ofResult
+                  let! checkedShippingAddress =
+                      unvalidatedOrder.ShippingAddress
+                      |> toCheckedAddress checkAddressExists
+                  let! shippingAddress =
+                      checkedShippingAddress
+                      |> toAddress
+                      |> AsyncResult.ofResult
+                  let! checkedBillingAddress =
+                      unvalidatedOrder.BillingAddress
+                      |> toCheckedAddress checkAddressExists
+                  let! billingAddress  =
+                      checkedBillingAddress
+                      |> toAddress
+                      |> AsyncResult.ofResult
+                  let! lines =
+                      unvalidatedOrder.Lines
+                      |> List.map (toValidatedOrderLine checkProductCodeExists)
+                      |> Result.sequence
+                      |> AsyncResult.ofResult
+                  let pricingMethod =
+                      unvalidatedOrder.PromotionCode
+                      |> createPricingMethod
+
+                  let validatedOrder : ValidatedOrder = {
+                      OrderId  = orderId
+                      CustomerInfo = customerInfo
+                      ShippingAddress = shippingAddress
+                      BillingAddress = billingAddress
+                      Lines = lines
+                      PricingMethod = pricingMethod
+                  }
+                  return validatedOrder
+              }
+
+    error_handling: |
+      ValidationError は PlaceOrderError::Validation に変換される。
+      From<ValidationError> for PlaceOrderError が実装済みなので、? 演算子で自動変換。
+
+      AddressValidationError は to_checked_address 内で ValidationError に変換され、
+      その後 PlaceOrderError::Validation に変換される。
+
+    test_cases:
+      - name: 全て有効な注文
+        input:
+          order_id: "order-001"
+          customer_info: { first_name: "John", last_name: "Doe", ... }
+          shipping_address: { ... }
+          billing_address: { ... }
+          lines: [{ order_line_id: "line-001", product_code: "W1234", quantity: 10 }]
+          promotion_code: ""
+        mocks:
+          check_product: returns true
+          check_address: returns Ok(CheckedAddress)
+        expected: Ok(ValidatedOrder)
+
+      - name: 注文IDが無効
+        input:
+          order_id: ""
+        expected: Err(PlaceOrderError::Validation)
+
+      - name: 顧客情報が無効
+        input:
+          customer_info: { first_name: "", ... }
+        expected: Err(PlaceOrderError::Validation)
+
+      - name: 配送先住所が見つからない
+        mocks:
+          check_address: returns Err(AddressNotFound)
+        expected: Err(PlaceOrderError::Validation)
+
+      - name: 注文明細が無効（商品コードが存在しない）
+        mocks:
+          check_product: returns false
+        expected: Err(PlaceOrderError::Validation)
+
+      - name: プロモーションコード付き
+        input:
+          promotion_code: "SUMMER2024"
+        expected: Ok(ValidatedOrder with PricingMethod::Promotion)
+
+# ========================================
+# 実装構成
+# ========================================
+implementation:
+  file_structure:
+    main_file: src/workflow/validation.rs
+    test_file: tests/validation_tests.rs
+
+  module_organization: |
+    validation.rs の構成:
+
+    ```rust
+    //! バリデーションロジック
+    //!
+    //! UnvalidatedOrder から ValidatedOrder への変換を行う。
+
+    use crate::compound_types::{Address, CustomerInfo, PersonalName};
+    use crate::simple_types::{
+        EmailAddress, OrderId, OrderLineId, OrderQuantity, ProductCode,
+        PromotionCode, String50, ValidationError, VipStatus,
+    };
+    use crate::workflow::{
+        AddressValidationError, CheckedAddress, PlaceOrderError, PricingMethod,
+        UnvalidatedAddress, UnvalidatedCustomerInfo, UnvalidatedOrder,
+        UnvalidatedOrderLine, ValidatedOrder, ValidatedOrderLine,
+    };
+
+    // 依存関数型（ドキュメント用のコメント）
+    // CheckProductCodeExists: Fn(&ProductCode) -> bool
+    // CheckAddressExists: Fn(&UnvalidatedAddress) -> Result<CheckedAddress, AddressValidationError>
+
+    // 基本バリデーション関数
+    pub fn to_order_id(order_id: &str) -> Result<OrderId, ValidationError> { ... }
+    pub fn to_order_line_id(order_line_id: &str) -> Result<OrderLineId, ValidationError> { ... }
+    pub fn to_customer_info(unvalidated: &UnvalidatedCustomerInfo) -> Result<CustomerInfo, ValidationError> { ... }
+    pub fn to_address(checked_address: &CheckedAddress) -> Result<Address, ValidationError> { ... }
+
+    // 依存関数を受け取るバリデーション関数
+    pub fn to_checked_address<F>(...) -> Result<CheckedAddress, ValidationError> { ... }
+    pub fn to_product_code<F>(...) -> Result<ProductCode, ValidationError> { ... }
+    pub fn to_validated_order_line<F>(...) -> Result<ValidatedOrderLine, ValidationError> { ... }
+
+    // ユーティリティ関数
+    pub fn to_order_quantity(...) -> Result<OrderQuantity, ValidationError> { ... }
+    pub fn create_pricing_method(promotion_code: &str) -> PricingMethod { ... }
+
+    // メインバリデーション関数
+    pub fn validate_order<CheckProduct, CheckAddress>(...) -> Result<ValidatedOrder, PlaceOrderError> { ... }
+    ```
+
+  error_propagation: |
+    エラー伝播のパターン:
+
+    1. 基本バリデーション関数: Result<T, ValidationError>
+    2. to_checked_address: AddressValidationError -> ValidationError への変換
+    3. validate_order: ValidationError -> PlaceOrderError::Validation への変換
+
+    From トレイトにより ? 演算子で自動変換:
+    ```rust
+    let order_id = to_order_id(unvalidated_order.order_id())?;
+    // ValidationError -> PlaceOrderError::Validation に自動変換
+    ```
+
+  testing_strategy:
+    unit_tests:
+      - 各バリデーション関数の正常系テスト
+      - 各バリデーション関数の異常系テスト（全エラーケース）
+      - 依存関数のモック使用
+
+    integration_tests:
+      - validate_order の正常系テスト
+      - validate_order の異常系テスト（各ステップでのエラー）
+      - モック依存関数の組み合わせテスト
+
+    property_based_tests:
+      - 有効な入力は必ず成功する（モック依存関数が成功を返す場合）
+      - 無効な入力は必ず失敗する
+      - エラーメッセージに適切なフィールド名が含まれる
+
+# ========================================
+# 関数型プログラミング原則の適用
+# ========================================
+functional_principles:
+  purity:
+    description: |
+      外部サービス呼び出しを除き、全てのバリデーション関数は純粋関数。
+
+    pure_functions:
+      - to_order_id
+      - to_order_line_id
+      - to_customer_info
+      - to_address
+      - to_order_quantity
+      - create_pricing_method
+
+    impure_functions:
+      - to_checked_address (外部サービス呼び出しを含む)
+      - to_product_code (外部サービス呼び出しを含む)
+      - validate_order (上記を使用)
+
+    notes: |
+      「不純」な関数も、依存関数を注入することで「副作用の境界」を明確にしている。
+      テスト時は純粋なモック関数を注入することで、テスト容易性を確保。
+
+  composability:
+    description: |
+      小さなバリデーション関数を組み合わせて大きなバリデーション関数を構築。
+
+    composition_pattern: |
+      to_customer_info =
+        String50::create("FirstName", ...) ?
+        + String50::create("LastName", ...) ?
+        + EmailAddress::create(...) ?
+        + VipStatus::create(...) ?
+        + PersonalName 組み立て
+        + CustomerInfo 組み立て
+
+      validate_order =
+        to_order_id ?
+        + to_customer_info ?
+        + to_checked_address + to_address (shipping) ?
+        + to_checked_address + to_address (billing) ?
+        + lines.map(to_validated_order_line).collect() ?
+        + create_pricing_method
+        + ValidatedOrder 組み立て
+
+  higher_order_functions:
+    description: |
+      依存関数を引数として受け取る高階関数パターン。
+
+    examples:
+      - to_checked_address: CheckAddress 関数を受け取る
+      - to_product_code: CheckProduct 関数を受け取る
+      - validate_order: 複数の依存関数を受け取る
+
+  early_return:
+    description: |
+      ? 演算子による早期リターンパターンで、
+      エラー時のネスト深度を最小化。
+
+    benefit: |
+      ```rust
+      // 良い例: 早期リターン
+      fn to_customer_info(...) -> Result<CustomerInfo, ValidationError> {
+          let first_name = String50::create("FirstName", ...)?;
+          let last_name = String50::create("LastName", ...)?;
+          let email = EmailAddress::create(...)?;
+          let vip_status = VipStatus::create(...)?;
+
+          Ok(CustomerInfo::create_from_parts(...))
+      }
+
+      // 悪い例: ネストした match
+      fn to_customer_info_nested(...) -> Result<CustomerInfo, ValidationError> {
+          match String50::create("FirstName", ...) {
+              Ok(first_name) => {
+                  match String50::create("LastName", ...) {
+                      Ok(last_name) => {
+                          // さらにネスト...
+                      }
+                      Err(e) => Err(e)
+                  }
+              }
+              Err(e) => Err(e)
+          }
+      }
+      ```
+
+# ========================================
+# 将来の拡張
+# ========================================
+future_extensions:
+  async_support:
+    phase: 6
+    description: |
+      Phase 6 で async/await を使用した非同期バリデーションを実装予定。
+
+      ```rust
+      async fn validate_order_async<CheckProduct, CheckAddress>(
+          check_product_code_exists: &CheckProduct,
+          check_address_exists: &CheckAddress,
+          unvalidated_order: &UnvalidatedOrder,
+      ) -> Result<ValidatedOrder, PlaceOrderError>
+      where
+          CheckAddress: Fn(&UnvalidatedAddress) -> impl Future<Output = Result<CheckedAddress, AddressValidationError>>,
+      ```
+
+  parallel_validation:
+    phase: future
+    description: |
+      並列バリデーション（配送先と請求先住所を並列でチェック）の検討。
+
+      ```rust
+      let (checked_shipping, checked_billing) = tokio::join!(
+          check_address_exists(&unvalidated_order.shipping_address()),
+          check_address_exists(&unvalidated_order.billing_address()),
+      );
+      ```
+
+  accumulating_errors:
+    phase: future
+    description: |
+      最初のエラーで停止するのではなく、全てのエラーを収集するモード。
+
+      ```rust
+      fn validate_order_all_errors(...) -> Result<ValidatedOrder, Vec<ValidationError>>
+      ```
+
+      functional-rusty の Validated 型を使用予定。
+
+# ========================================
+# テスト要件
+# ========================================
+test_requirements:
+  coverage_target: 100%
+
+  test_categories:
+    - name: 基本バリデーション関数の単体テスト
+      functions:
+        - to_order_id
+        - to_order_line_id
+        - to_customer_info
+        - to_address
+        - to_order_quantity
+        - create_pricing_method
+      test_cases_per_function: "正常系 + 全エラーケース"
+
+    - name: 依存関数を受け取る関数のテスト
+      functions:
+        - to_checked_address
+        - to_product_code
+        - to_validated_order_line
+      mock_patterns:
+        - 常に成功するモック
+        - 常に失敗するモック
+        - 条件付きモック
+
+    - name: メインバリデーション関数のテスト
+      functions:
+        - validate_order
+      scenarios:
+        - 全て成功
+        - 各ステップでの失敗
+        - プロモーションコード有無
+
+    - name: エラー伝播のテスト
+      description: |
+        ValidationError -> PlaceOrderError::Validation の変換が
+        正しく行われることを確認
+
+  mock_helper_functions:
+    description: |
+      テスト用のヘルパー関数を提供:
+
+      ```rust
+      #[cfg(test)]
+      mod test_helpers {
+          /// 常に成功する商品コード存在チェック
+          pub fn always_exists_product() -> impl Fn(&ProductCode) -> bool {
+              |_| true
+          }
+
+          /// 常に失敗する商品コード存在チェック
+          pub fn never_exists_product() -> impl Fn(&ProductCode) -> bool {
+              |_| false
+          }
+
+          /// 常に成功する住所チェック
+          pub fn always_valid_address() -> impl Fn(&UnvalidatedAddress) -> Result<CheckedAddress, AddressValidationError> {
+              |addr| Ok(CheckedAddress::new(addr.clone()))
+          }
+
+          /// 常に失敗する住所チェック（住所が見つからない）
+          pub fn address_not_found() -> impl Fn(&UnvalidatedAddress) -> Result<CheckedAddress, AddressValidationError> {
+              |_| Err(AddressValidationError::AddressNotFound)
+          }
+      }
+      ```

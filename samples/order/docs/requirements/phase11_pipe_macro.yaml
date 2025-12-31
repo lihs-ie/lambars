@@ -1,0 +1,812 @@
+# Phase 11: pipe! マクロによるデータフロー変換 要件定義
+# Order Taking Sample Application
+# functional-rusty の pipe! マクロを使用したデータ変換パイプラインの実装
+
+version: "1.0.0"
+created_at: "2026-01-01"
+phase_id: phase_11
+phase_name: pipe! マクロによるデータフロー変換
+phase_name_en: Data Flow Transformation with pipe! Macro
+
+# =============================================================================
+# 概要
+# =============================================================================
+
+overview:
+  description: |
+    F# の パイプ演算子 (|>) に相当する functional-rusty の pipe! マクロを
+    Order Taking サンプルアプリケーションに適用する。
+
+    F# コードでは |> を多用してデータ変換を連鎖させている。
+    これを Rust の pipe! マクロで表現することで、関数型プログラミングスタイルを実現する。
+
+    ただし、pipe! マクロは純粋関数にのみ適用可能であり、
+    Result/Option を返す関数チェーンには ? 演算子や and_then が適切である。
+
+  goals:
+    - F# の |> パターンを pipe! マクロで Rust に移植
+    - 純粋関数のデータ変換パイプラインを構築
+    - コードの可読性と関数型スタイルの向上
+
+  scope_limitations:
+    - pipe! は純粋関数の連鎖にのみ適用
+    - Result/Option 返却関数は ? 演算子や and_then を継続使用
+    - 既存の動作を維持しつつ、適切な箇所のみリファクタリング
+
+  fsharp_pipe_patterns:
+    - pattern: "value creation with lift"
+      example: "Price.unsafeCreate 5M |> Some"
+      description: 値を生成して即座にラッパー型に変換
+
+    - pattern: "domain to dto conversion chain"
+      example: "domainObj |> ShippableOrderPlacedDto.fromDomain |> box"
+      description: ドメイン型から DTO への変換チェーン
+
+    - pattern: "value extraction"
+      example: "address.Country |> String50.value"
+      description: ラッパー型から値を抽出
+
+    - pattern: "list transformation"
+      example: "events |> List.map PlaceOrderEventDto.fromDomain |> List.toArray"
+      description: リストの変換とフォーマット変更
+
+    - pattern: "event creation pipeline"
+      example: "pricedOrder |> createShippingEvent |> PlaceOrderEvent.ShippableOrderPlaced |> List.singleton"
+      description: ドメインイベントの生成パイプライン
+
+# =============================================================================
+# F# パイプ演算子使用箇所の分類
+# =============================================================================
+
+fsharp_pipe_usage_analysis:
+
+  # 純粋変換（pipe! 適用可能）
+  pure_transformation:
+    description: |
+      副作用がなく、Result/Option を返さない純粋な変換関数の連鎖。
+      pipe! マクロの適用対象。
+
+    examples:
+      - file: PlaceOrder.Implementation.fs
+        line: 371-373
+        fsharp: |
+          {
+              ProductCode = line.ProductCode
+              Quantity = line.Quantity
+          } |> Some
+        pattern: "struct creation then wrap in Option"
+
+      - file: PlaceOrder.Implementation.fs
+        line: 382-387
+        fsharp: |
+          ShipmentLines = placedOrder.Lines |> List.choose makeShipmentLine
+          ...
+          Name = sprintf "Order%s.pdf" (placedOrder.OrderId |> OrderId.value)
+        pattern: "value extraction and list transformation"
+
+      - file: PlaceOrder.Implementation.fs
+        line: 411-422
+        fsharp: |
+          acknowledgmentEventOpt
+          |> Option.map PlaceOrderEvent.AcknowledgmentSent
+          |> listOfOption
+          ...
+          pricedOrder
+          |> createShippingEvent
+          |> PlaceOrderEvent.ShippableOrderPlaced
+          |> List.singleton
+          ...
+          pricedOrder
+          |> createBillingEvent
+          |> Option.map PlaceOrderEvent.BillableOrderPlaced
+          |> listOfOption
+        pattern: "event creation pipeline"
+
+      - file: PlaceOrder.Dto.fs
+        line: 256-259
+        fsharp: |
+          CustomerInfo = dto.CustomerInfo |> CustomerInfoDto.toUnvalidatedCustomerInfo
+          ShippingAddress = dto.ShippingAddress |> AddressDto.toUnvalidatedAddress
+          BillingAddress = dto.BillingAddress |> AddressDto.toUnvalidatedAddress
+          Lines = dto.Lines |> List.map OrderLineDto.toUnvalidatedOrderLine
+        pattern: "dto to unvalidated conversion"
+
+      - file: PlaceOrder.Dto.fs
+        line: 88-91
+        fsharp: |
+          FirstName = domainObj.Name.FirstName |> String50.value
+          LastName = domainObj.Name.LastName |> String50.value
+          EmailAddress = domainObj.EmailAddress |> EmailAddress.value
+          VipStatus = domainObj.VipStatus |> VipStatus.value
+        pattern: "domain to dto field extraction"
+
+      - file: PlaceOrder.Api.fs
+        line: 107-108
+        fsharp: |
+          events
+          |> List.map PlaceOrderEventDto.fromDomain
+          |> List.toArray
+        pattern: "events to dto array"
+
+      - file: PlaceOrder.Api.fs
+        line: 137
+        fsharp: |
+          let unvalidatedOrder = orderForm |> OrderFormDto.toUnvalidatedOrder
+        pattern: "dto conversion"
+
+      - file: Common.SimpleTypes.fs
+        line: 371
+        fsharp: |
+          let total = prices |> List.map Price.value |> List.sum
+        pattern: "list map and aggregate"
+
+  # Result/Option 変換（pipe! 不適切）
+  result_option_transformation:
+    description: |
+      Result や Option を返す関数の連鎖。
+      Rust では ? 演算子、and_then、map_err が適切。
+      pipe! マクロは適用しない。
+
+    examples:
+      - file: PlaceOrder.Implementation.fs
+        line: 31-32
+        fsharp: |
+          unvalidatedCustomerInfo.FirstName
+          |> String50.create "FirstName"
+          |> Result.mapError ValidationError
+        pattern: "validation with error mapping"
+
+      - file: PlaceOrder.Implementation.fs
+        line: 136-138
+        fsharp: |
+          productCode
+          |> ProductCode.create "ProductCode"
+          |> Result.mapError ValidationError
+          |> Result.bind checkProduct
+        pattern: "validation with bind"
+
+      - file: PlaceOrder.Implementation.fs
+        line: 192-193
+        fsharp: |
+          unvalidatedOrder.Lines
+          |> List.map (toValidatedOrderLine checkProductCodeExists)
+          |> Result.sequence
+        pattern: "list map with result sequence"
+
+  # Async/AsyncResult 変換（pipe! 不適切）
+  async_transformation:
+    description: |
+      非同期処理や AsyncResult の連鎖。
+      Rust では async/await や専用のエフェクトシステムが適切。
+
+    examples:
+      - file: PlaceOrder.Implementation.fs
+        line: 103-105
+        fsharp: |
+          address
+          |> checkAddress
+          |> AsyncResult.mapError (...)
+        pattern: "async address validation"
+
+      - file: PlaceOrder.Api.fs
+        line: 153-154
+        fsharp: |
+          asyncResult
+          |> Async.map (workflowResultToHttpReponse)
+        pattern: "async response mapping"
+
+# =============================================================================
+# 要件一覧
+# =============================================================================
+
+requirements:
+
+  # ---------------------------------------------------------------------------
+  # REQ-110: DTO 変換パイプライン
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-110
+    name: OrderFormDto::to_unvalidated_order での pipe! 使用
+    category: dto_transformation
+    priority: high
+    description: |
+      F# の toUnvalidatedOrder 関数で使用されているパイプラインパターンを
+      pipe! マクロで Rust に移植する。
+
+      ただし、現在の実装は iter().map().collect() パターンを使用しており、
+      メソッドチェーンとして十分に可読である。
+      pipe! マクロの追加により可読性が向上する箇所のみ適用する。
+
+    location: src/dto/input.rs
+
+    references:
+      fsharp: |
+        // PlaceOrder.Dto.fs:253-261
+        let toUnvalidatedOrder (dto:OrderFormDto) :UnvalidatedOrder =
+            {
+            OrderId = dto.OrderId
+            CustomerInfo = dto.CustomerInfo |> CustomerInfoDto.toUnvalidatedCustomerInfo
+            ShippingAddress = dto.ShippingAddress |> AddressDto.toUnvalidatedAddress
+            BillingAddress = dto.BillingAddress |> AddressDto.toUnvalidatedAddress
+            Lines = dto.Lines |> List.map OrderLineDto.toUnvalidatedOrderLine
+            PromotionCode = dto.PromotionCode
+            }
+
+      rust_current: |
+        // src/dto/input.rs:416-434
+        pub fn to_unvalidated_order(&self) -> UnvalidatedOrder {
+            let customer_info = self.customer_info.to_unvalidated_customer_info();
+            let shipping_address = self.shipping_address.to_unvalidated_address();
+            let billing_address = self.billing_address.to_unvalidated_address();
+            let lines: Vec<UnvalidatedOrderLine> = self
+                .lines
+                .iter()
+                .map(OrderFormLineDto::to_unvalidated_order_line)
+                .collect();
+
+            UnvalidatedOrder::new(
+                self.order_id.clone(),
+                customer_info,
+                shipping_address,
+                billing_address,
+                lines,
+                self.promotion_code.clone(),
+            )
+        }
+
+      rust_target: |
+        // pipe! を使用した代替実装（lines の変換部分）
+        use functional_rusty::pipe;
+
+        pub fn to_unvalidated_order(&self) -> UnvalidatedOrder {
+            let lines: Vec<UnvalidatedOrderLine> = self
+                .lines
+                .iter()
+                .map(OrderFormLineDto::to_unvalidated_order_line)
+                .collect();
+
+            UnvalidatedOrder::new(
+                self.order_id.clone(),
+                pipe!(&self.customer_info, CustomerInfoDto::to_unvalidated_customer_info),
+                pipe!(&self.shipping_address, AddressDto::to_unvalidated_address),
+                pipe!(&self.billing_address, AddressDto::to_unvalidated_address),
+                lines,
+                self.promotion_code.clone(),
+            )
+        }
+        // 注: メソッド呼び出しを関数呼び出しに変換するため、pipe! の利点は限定的
+
+    design_decision: |
+      現在の実装はメソッドチェーン形式で十分に可読であり、
+      pipe! への変換は可読性を低下させる可能性がある。
+
+      Rust ではメソッド呼び出し（self.method()）が自然であり、
+      F# のパイプ（value |> function）を無理に再現する必要はない。
+
+      このため、REQ-110 は「適用しない」判断とし、
+      既存のメソッドチェーンを維持する。
+
+    acceptance_criteria:
+      - 既存の動作が維持されること
+      - テストが全てパスすること
+
+    implementation_status: not_recommended
+    rationale: |
+      Rust のメソッドチェーンは F# のパイプ演算子と同等の可読性を提供しており、
+      pipe! への変換は冗長になる。メソッドが存在する場合はメソッドチェーンを優先する。
+
+  # ---------------------------------------------------------------------------
+  # REQ-111: イベント作成パイプライン
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-111
+    name: create_events での pipe! 使用
+    category: event_creation
+    priority: high
+    description: |
+      F# の createEvents 関数で使用されているイベント作成パイプラインを
+      pipe! マクロで Rust に移植する。
+
+      これは純粋関数の連鎖であり、pipe! マクロの適用に適している。
+
+    location: src/workflow/place_order.rs
+
+    references:
+      fsharp: |
+        // PlaceOrder.Implementation.fs:407-423
+        let createEvents : CreateEvents =
+            fun pricedOrder acknowledgmentEventOpt ->
+                let acknowledgmentEvents =
+                    acknowledgmentEventOpt
+                    |> Option.map PlaceOrderEvent.AcknowledgmentSent
+                    |> listOfOption
+                let shippingEvents =
+                    pricedOrder
+                    |> createShippingEvent
+                    |> PlaceOrderEvent.ShippableOrderPlaced
+                    |> List.singleton
+                let billingEvents =
+                    pricedOrder
+                    |> createBillingEvent
+                    |> Option.map PlaceOrderEvent.BillableOrderPlaced
+                    |> listOfOption
+
+                [
+                yield! acknowledgmentEvents
+                yield! shippingEvents
+                yield! billingEvents
+                ]
+
+      rust_current: |
+        // 現在の実装（推定）
+        pub fn create_events(
+            priced_order: &PricedOrder,
+            acknowledgment_event: Option<OrderAcknowledgmentSent>,
+        ) -> Vec<PlaceOrderEvent> {
+            let mut events = Vec::new();
+
+            if let Some(ack) = acknowledgment_event {
+                events.push(PlaceOrderEvent::AcknowledgmentSent(ack));
+            }
+
+            events.push(PlaceOrderEvent::ShippableOrderPlaced(
+                create_shipping_event(priced_order)
+            ));
+
+            if let Some(billing) = create_billing_event(priced_order) {
+                events.push(PlaceOrderEvent::BillableOrderPlaced(billing));
+            }
+
+            events
+        }
+
+      rust_target: |
+        use functional_rusty::pipe;
+
+        pub fn create_events(
+            priced_order: &PricedOrder,
+            acknowledgment_event: Option<OrderAcknowledgmentSent>,
+        ) -> Vec<PlaceOrderEvent> {
+            // pipe! を使用したイベント作成パイプライン
+            let acknowledgment_events: Vec<PlaceOrderEvent> = acknowledgment_event
+                .map(PlaceOrderEvent::AcknowledgmentSent)
+                .into_iter()
+                .collect();
+
+            // shipping event は必ず1つ
+            let shipping_events = vec![
+                pipe!(
+                    priced_order,
+                    create_shipping_event,
+                    PlaceOrderEvent::ShippableOrderPlaced
+                )
+            ];
+
+            // billing event は条件付き
+            let billing_events: Vec<PlaceOrderEvent> = pipe!(
+                priced_order,
+                create_billing_event
+            )
+            .map(PlaceOrderEvent::BillableOrderPlaced)
+            .into_iter()
+            .collect();
+
+            // イベントを結合
+            [acknowledgment_events, shipping_events, billing_events].concat()
+        }
+
+    acceptance_criteria:
+      - pipe! マクロを使用してイベント作成パイプラインを表現していること
+      - shipping_events の作成に pipe!(priced_order, create_shipping_event, wrapper) パターンを使用
+      - 既存のテストが全てパスすること
+      - 生成されるイベントの順序と内容が変わらないこと
+
+  # ---------------------------------------------------------------------------
+  # REQ-112: 配送イベント作成パイプライン
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-112
+    name: create_shipping_event での pipe! 使用
+    category: event_creation
+    priority: medium
+    description: |
+      F# の createShippingEvent 関数内で使用されているパイプラインを
+      pipe! マクロで Rust に移植する。
+
+    location: src/workflow/events.rs
+
+    references:
+      fsharp: |
+        // PlaceOrder.Implementation.fs:378-388
+        let createShippingEvent (placedOrder:PricedOrder) : ShippableOrderPlaced =
+            {
+            OrderId = placedOrder.OrderId
+            ShippingAddress = placedOrder.ShippingAddress
+            ShipmentLines = placedOrder.Lines |> List.choose makeShipmentLine
+            Pdf =
+                {
+                Name = sprintf "Order%s.pdf" (placedOrder.OrderId |> OrderId.value)
+                Bytes = [||]
+                }
+            }
+
+      rust_target: |
+        use functional_rusty::pipe;
+
+        pub fn create_shipping_event(priced_order: &PricedOrder) -> ShippableOrderPlaced {
+            let shipment_lines: Vec<ShippableOrderLine> = priced_order
+                .lines()
+                .iter()
+                .filter_map(make_shipment_line)
+                .collect();
+
+            // OrderId から値を取得して PDF 名を生成するパイプライン
+            let pdf_name = pipe!(
+                priced_order.order_id(),
+                |id| format!("Order{}.pdf", id.value())
+            );
+
+            ShippableOrderPlaced::new(
+                priced_order.order_id().clone(),
+                priced_order.shipping_address().clone(),
+                shipment_lines,
+                PdfAttachment::new(pdf_name, Vec::new()),
+            )
+        }
+        // 注: クロージャを使用した pipe! パターン
+
+    acceptance_criteria:
+      - PDF 名の生成に pipe! マクロを使用していること
+      - 既存のテストが全てパスすること
+
+  # ---------------------------------------------------------------------------
+  # REQ-113: 請求イベント作成パイプライン
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-113
+    name: create_billing_event での pipe! 使用
+    category: event_creation
+    priority: medium
+    description: |
+      F# の createBillingEvent 関数内で使用されているパイプラインを
+      pipe! マクロで Rust に移植する。
+
+    location: src/workflow/events.rs
+
+    references:
+      fsharp: |
+        // PlaceOrder.Implementation.fs:390-399
+        let createBillingEvent (placedOrder:PricedOrder) : BillableOrderPlaced option =
+            let billingAmount = placedOrder.AmountToBill |> BillingAmount.value
+            if billingAmount > 0M then
+                {
+                OrderId = placedOrder.OrderId
+                BillingAddress = placedOrder.BillingAddress
+                AmountToBill = placedOrder.AmountToBill
+                } |> Some
+            else
+                None
+
+      rust_target: |
+        use functional_rusty::pipe;
+
+        pub fn create_billing_event(priced_order: &PricedOrder) -> Option<BillableOrderPlaced> {
+            // BillingAmount から値を取得するパイプライン
+            let billing_amount = pipe!(
+                priced_order.amount_to_bill(),
+                |amount| amount.value()
+            );
+
+            if billing_amount > Decimal::ZERO {
+                Some(BillableOrderPlaced::new(
+                    priced_order.order_id().clone(),
+                    priced_order.billing_address().clone(),
+                    *priced_order.amount_to_bill(),
+                ))
+            } else {
+                None
+            }
+        }
+
+    acceptance_criteria:
+      - billing_amount の取得に pipe! マクロを使用していること
+      - 既存のテストが全てパスすること
+
+  # ---------------------------------------------------------------------------
+  # REQ-114: DTO から Domain への変換パイプライン（出力）
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-114
+    name: PlaceOrderEventDto::from_domain_list での pipe! 使用
+    category: dto_transformation
+    priority: medium
+    description: |
+      F# の workflowResultToHttpReponse 関数内で使用されている
+      イベントリストの DTO 変換パイプラインを pipe! マクロで表現する。
+
+    location: src/dto/output.rs
+
+    references:
+      fsharp: |
+        // PlaceOrder.Api.fs:105-108
+        let dtos =
+            events
+            |> List.map PlaceOrderEventDto.fromDomain
+            |> List.toArray
+
+      rust_current: |
+        // src/dto/output.rs:243-245
+        pub fn from_domain_list(events: &[PlaceOrderEvent]) -> Vec<Self> {
+            events.iter().map(Self::from_domain).collect()
+        }
+
+      rust_target: |
+        use functional_rusty::pipe;
+
+        // 代替案1: pipe! を使用
+        pub fn from_domain_list(events: &[PlaceOrderEvent]) -> Vec<Self> {
+            pipe!(
+                events.iter(),
+                |iter| iter.map(Self::from_domain),
+                |mapped| mapped.collect()
+            )
+        }
+
+        // 代替案2: 現在の実装を維持（推奨）
+        // iter().map().collect() パターンは Rust で自然であり、
+        // pipe! への変換は可読性を低下させる可能性がある
+
+    design_decision: |
+      iter().map().collect() パターンは Rust のイディオムとして定着しており、
+      pipe! への変換は冗長になる。
+
+      pipe! マクロは関数呼び出しの連鎖に最適であり、
+      メソッドチェーンには適さない。
+
+    acceptance_criteria:
+      - 既存の動作が維持されること
+      - テストが全てパスすること
+
+    implementation_status: not_recommended
+    rationale: |
+      Rust の iter().map().collect() パターンは十分に可読であり、
+      pipe! への変換は不要。
+
+  # ---------------------------------------------------------------------------
+  # REQ-115: 価格合計計算パイプライン
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-115
+    name: BillingAmount::sum_prices 呼び出しでの pipe! 使用
+    category: pricing
+    priority: low
+    description: |
+      F# の価格合計計算で使用されているパイプラインを検討する。
+
+    location: src/simple_types/price_types.rs
+
+    references:
+      fsharp: |
+        // Common.SimpleTypes.fs:371
+        let total = prices |> List.map Price.value |> List.sum
+
+      rust_current: |
+        // 現在の実装（推定）
+        pub fn sum_prices(prices: &[Price]) -> Result<BillingAmount, ValidationError> {
+            let total: Decimal = prices.iter().map(|p| p.value()).sum();
+            BillingAmount::create(total)
+        }
+
+    design_decision: |
+      iter().map().sum() パターンは Rust で自然であり、
+      pipe! への変換は不要。
+
+    acceptance_criteria:
+      - 既存の動作が維持されること
+
+    implementation_status: not_recommended
+
+  # ---------------------------------------------------------------------------
+  # REQ-116: 値抽出ヘルパー関数
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-116
+    name: 純粋な値抽出パイプライン用ヘルパー関数
+    category: helper_functions
+    priority: medium
+    description: |
+      F# で頻繁に使用される `value |> TypeName.value` パターンを
+      Rust で表現するためのヘルパー関数を提供する。
+
+      ただし、Rust ではメソッド呼び出し（`.value()`）が自然であるため、
+      ヘルパー関数の必要性は低い。
+
+    references:
+      fsharp: |
+        // 頻出パターン
+        placedOrder.OrderId |> OrderId.value
+        domainObj.Name.FirstName |> String50.value
+        address.Country |> String50.value
+
+      rust_current: |
+        // Rust では直接メソッド呼び出し
+        priced_order.order_id().value()
+        customer_info.name().first_name().value()
+        address.country().value()
+
+    design_decision: |
+      Rust ではメソッドチェーン（`.method1().method2()`）が自然であり、
+      F# のパイプ演算子パターンを再現する必要はない。
+
+      pipe! マクロは、関数呼び出しの連鎖（関数型スタイル）に最適であり、
+      メソッドチェーンの代替ではない。
+
+    acceptance_criteria:
+      - 既存のメソッドチェーンを維持
+
+    implementation_status: not_recommended
+
+  # ---------------------------------------------------------------------------
+  # REQ-117: 統合テスト
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-117
+    name: pipe! マクロ統合テスト
+    category: integration_test
+    priority: high
+    description: |
+      pipe! マクロを使用した箇所の統合テストを実装する。
+      主に REQ-111, REQ-112, REQ-113 で変更した箇所を対象とする。
+
+    test_file: tests/phase11_pipe_macro_tests.rs
+
+    test_cases:
+      - name: test_create_events_with_pipe_macro
+        description: |
+          pipe! マクロを使用した create_events 関数のテスト。
+          生成されるイベントの順序と内容が正しいことを検証。
+
+      - name: test_create_shipping_event_with_pipe_macro
+        description: |
+          pipe! マクロを使用した create_shipping_event 関数のテスト。
+          PDF 名が正しく生成されることを検証。
+
+      - name: test_create_billing_event_with_pipe_macro
+        description: |
+          pipe! マクロを使用した create_billing_event 関数のテスト。
+          請求金額が 0 以下の場合は None が返されることを検証。
+
+      - name: test_pipe_macro_composition
+        description: |
+          pipe! マクロの合成が正しく動作することを検証。
+          複数の純粋関数を連鎖させたパイプラインのテスト。
+
+    acceptance_criteria:
+      - 全てのテストケースが実装されていること
+      - テストが全てパスすること
+      - pipe! マクロの動作が期待通りであること
+
+# =============================================================================
+# 設計上の考慮事項
+# =============================================================================
+
+design_considerations:
+
+  pipe_macro_applicability:
+    - title: pipe! マクロの適用範囲
+      description: |
+        pipe! マクロは純粋関数の連鎖に最適である。
+        以下の場合に適用を検討する:
+
+        1. 複数の純粋関数を連鎖させる場合
+           pipe!(value, f, g, h) = h(g(f(value)))
+
+        2. 関数呼び出しスタイルで書きたい場合
+           関数を第一級市民として扱う場面
+
+        3. 中間変数を省略したい場合
+           データフローを明確に表現
+
+    - title: pipe! マクロを適用しない場合
+      description: |
+        以下の場合は pipe! マクロを適用しない:
+
+        1. Result/Option を返す関数の連鎖
+           -> ? 演算子、and_then、map を使用
+
+        2. メソッドチェーンが自然な場合
+           -> obj.method1().method2() の形式を維持
+
+        3. iter().map().collect() パターン
+           -> Rust のイディオムとして定着
+
+        4. 単一の関数呼び出し
+           -> pipe! のオーバーヘッドが不要
+
+  rust_vs_fsharp:
+    - title: Rust と F# のスタイルの違い
+      description: |
+        F# では |> 演算子が言語に組み込まれており、
+        全ての関数呼び出しをパイプスタイルで書くことが自然である。
+
+        Rust ではメソッドチェーンが主流であり、
+        pipe! マクロは補助的なツールとして位置付ける。
+
+        無理に F# のスタイルを再現するのではなく、
+        Rust に自然なスタイルを優先する。
+
+  recommended_approach:
+    - title: 推奨アプローチ
+      description: |
+        1. メソッドが存在する場合はメソッドチェーンを使用
+        2. 純粋関数の連鎖には pipe! マクロを検討
+        3. Result/Option には専用のコンビネータを使用
+        4. 可読性を最優先に判断
+
+# =============================================================================
+# ファイル構成
+# =============================================================================
+
+artifacts:
+  source_files:
+    - path: src/workflow/place_order.rs
+      description: create_events 関数の pipe! マクロ適用
+      requirements:
+        - REQ-111
+
+    - path: src/workflow/events.rs
+      description: イベント作成関数の pipe! マクロ適用
+      requirements:
+        - REQ-112
+        - REQ-113
+
+  test_files:
+    - path: tests/phase11_pipe_macro_tests.rs
+      description: pipe! マクロ統合テスト
+      requirements:
+        - REQ-117
+
+# =============================================================================
+# 依存関係
+# =============================================================================
+
+dependencies:
+  internal:
+    - functional_rusty::pipe!
+
+  dev_dependencies:
+    - rstest (for parameterized tests)
+
+# =============================================================================
+# 実装の優先度と判断
+# =============================================================================
+
+implementation_summary:
+  recommended:
+    - REQ-111: create_events での pipe! 使用（適用推奨）
+    - REQ-112: create_shipping_event での pipe! 使用（条件付き推奨）
+    - REQ-113: create_billing_event での pipe! 使用（条件付き推奨）
+    - REQ-117: 統合テスト（必須）
+
+  not_recommended:
+    - REQ-110: DTO 変換（メソッドチェーンで十分）
+    - REQ-114: イベントリスト変換（iter/map/collect で十分）
+    - REQ-115: 価格合計計算（iter/map/sum で十分）
+    - REQ-116: 値抽出ヘルパー（メソッドチェーンで十分）
+
+  overall_conclusion: |
+    F# の |> 演算子は言語の中核であり、あらゆる場面で使用される。
+    一方、Rust ではメソッドチェーンが主流であり、
+    pipe! マクロは特定の場面でのみ有効である。
+
+    このフェーズでは、pipe! マクロの適用箇所を慎重に選定し、
+    可読性の向上に寄与する箇所にのみ適用する。
+
+    主な適用対象:
+    - 複数の純粋関数を連鎖させるイベント作成パイプライン（REQ-111）
+    - 関数呼び出しスタイルが自然な箇所（REQ-112, REQ-113）
+
+    適用しない箇所:
+    - メソッドチェーンが自然な DTO 変換
+    - iter/map/collect パターン
+    - 単一の関数呼び出し

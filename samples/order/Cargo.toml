@@ -1,0 +1,40 @@
+[package]
+name = "order-taking-sample"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92.0"
+description = "Order taking sample application using functional-rusty"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+functional-rusty = { path = "../..", features = ["full"] }
+functional-rusty-derive = { path = "../../functional-rusty-derive" }
+rust_decimal = { version = "1.36", features = ["serde-with-str"] }
+regex = "1"
+thiserror = "2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+base64 = "0.22"
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tower-http = { version = "0.6", features = ["trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+rstest = "0.24"
+proptest = "1.5"
+
+[[bin]]
+name = "order-taking-server"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"

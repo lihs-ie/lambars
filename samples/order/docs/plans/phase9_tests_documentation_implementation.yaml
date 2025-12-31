@@ -1,0 +1,1254 @@
+# Phase 9: テスト・ドキュメント 実装計画
+# Order Taking Sample Application
+# 補完テスト、proptest 法則検証、使用例ドキュメント
+
+version: "1.0.0"
+created_at: "2026-01-01"
+phase_id: phase_9
+phase_name: テスト・ドキュメント
+phase_name_en: Tests and Documentation
+
+# =============================================================================
+# 概要
+# =============================================================================
+
+overview:
+  description: |
+    Phase 1-8 で実装された機能に対する補完テスト、proptest による法則検証、
+    および使用例ドキュメントを実装する。
+    既存の src 内テスト（#[cfg(test)]）と tests/ 内テストとの重複を避け、
+    補完関係を維持する設計とする。
+
+  implementation_approach:
+    - TDD に基づき、テストを先に記述してから実装を確認
+    - proptest では Arbitrary トレイトを適切に実装またはストラテジーを定義
+    - ドキュメントはコード例を含む実践的な内容とする
+
+  quality_checks:
+    - cargo test --package order-taking-sample
+    - cargo clippy --package order-taking-sample -- -D warnings
+    - cargo llvm-cov --package order-taking-sample (カバレッジ確認)
+
+# =============================================================================
+# 実装ステップ
+# =============================================================================
+
+implementation_steps:
+
+  # ---------------------------------------------------------------------------
+  # STEP 1: simple_types 補完テスト (REQ-091)
+  # ---------------------------------------------------------------------------
+
+  - step_id: step_1
+    requirement_id: REQ-091
+    name: simple_types 補完テスト
+    artifact: tests/simple_types_tests.rs
+    estimated_effort: medium
+    priority: high
+
+    tdd_phases:
+      red:
+        description: |
+          simple_types モジュールの境界値テスト、エラーメッセージ検証、
+          Hash/Eq 法則テストを tests/simple_types_tests.rs に記述する。
+          既存の src 内テストと重複しないよう、パラメータ化や追加ケースに焦点を当てる。
+
+        test_cases:
+          - name: test_string50_boundary_1_char
+            description: String50 の最小境界（1文字）の検証
+            assertion: String50::create("field", "a").is_ok()
+
+          - name: test_string50_boundary_49_chars
+            description: String50 の49文字の検証
+            assertion: String50::create("field", &"a".repeat(49)).is_ok()
+
+          - name: test_string50_boundary_51_chars
+            description: String50 の超過境界（51文字）の検証
+            assertion: String50::create("field", &"a".repeat(51)).is_err()
+
+          - name: test_email_address_multiple_at
+            description: 複数の @ を含むメールアドレス
+            assertion: EmailAddress::create("email", "a@b@c.com").is_ok() (現仕様では許可)
+
+          - name: test_email_address_unicode
+            description: Unicode 文字を含むメールアドレス
+            assertion: 仕様に基づき検証
+
+          - name: test_zip_code_all_zeros
+            description: ZipCode "00000" の境界ケース
+            assertion: ZipCode::create("zip", "00000").is_ok()
+
+          - name: test_zip_code_all_nines
+            description: ZipCode "99999" の境界ケース
+            assertion: ZipCode::create("zip", "99999").is_ok()
+
+          - name: test_price_boundary_zero
+            description: Price 0.00 の境界ケース
+            assertion: Price::create(Decimal::ZERO).is_ok()
+
+          - name: test_price_boundary_one_cent
+            description: Price 0.01 の境界ケース
+            assertion: Price::create(Decimal::new(1, 2)).is_ok()
+
+          - name: test_price_boundary_max
+            description: Price 1000.00 の境界ケース
+            assertion: Price::create(Decimal::from(1000)).is_ok()
+
+          - name: test_price_boundary_exceed
+            description: Price 1000.01 の超過ケース
+            assertion: Price::create(Decimal::new(100001, 2)).is_err()
+
+          - name: test_billing_amount_boundary_values
+            description: BillingAmount の境界値テスト (0.00, 0.01, 9999.99, 10000.00, 10000.01)
+            assertion: 各ケースの ok/err を検証
+
+          - name: test_unit_quantity_boundary_values
+            description: UnitQuantity の境界値テスト (0, 1, 500, 1000, 1001)
+            assertion: 各ケースの ok/err を検証
+
+          - name: test_kilogram_quantity_boundary_values
+            description: KilogramQuantity の境界値テスト (0.04, 0.05, 50.00, 100.00, 100.01)
+            assertion: 各ケースの ok/err を検証
+
+          - name: test_validation_error_messages_descriptive
+            description: エラーメッセージの内容検証
+            assertion: |
+              error.field_name と error.message が適切な内容であることを検証
+
+          - name: test_order_id_hash_eq_consistency
+            description: OrderId の Hash/Eq 一貫性
+            assertion: |
+              a == b => hash(a) == hash(b)
+              HashMap への挿入と取得が一貫すること
+
+          - name: test_product_code_hash_eq_consistency
+            description: ProductCode の Hash/Eq 一貫性
+            assertion: |
+              a == b => hash(a) == hash(b)
+              HashMap への挿入と取得が一貫すること
+
+      green:
+        description: |
+          既存の実装が全てのテストをパスすることを確認する。
+          simple_types の実装は既に完了しているため、テスト追加のみで対応。
+        implementation_notes:
+          - 境界値テストは rstest の #[case] マクロでパラメータ化
+          - Hash/Eq 一貫性テストには std::collections::HashMap を使用
+
+      refactor:
+        description: |
+          テストコードの可読性向上。ヘルパー関数の共通化。
+        tasks:
+          - テストモジュールの整理（mod boundary_tests, mod error_message_tests 等）
+          - 共通のアサーションヘルパー関数の抽出
+
+  # ---------------------------------------------------------------------------
+  # STEP 2: compound_types 補完テスト (REQ-092)
+  # ---------------------------------------------------------------------------
+
+  - step_id: step_2
+    requirement_id: REQ-092
+    name: compound_types 補完テスト
+    artifact: tests/compound_types_tests.rs
+    estimated_effort: medium
+    priority: high
+
+    tdd_phases:
+      red:
+        description: |
+          PersonalName, CustomerInfo, Address の Lens 操作テストと
+          Clone/Eq テストを tests/compound_types_tests.rs に記述する。
+
+        test_cases:
+          - name: test_personal_name_lens_composition
+            description: |
+              PersonalName の first_name_lens と last_name_lens の合成操作。
+              modify を使用した更新のテスト。
+            assertion: |
+              lens.get() と lens.set() が正しく動作すること
+
+          - name: test_customer_info_nested_lens_composition
+            description: |
+              CustomerInfo から PersonalName を経由して first_name に
+              アクセスする Lens 合成のテスト。
+            assertion: |
+              compose! マクロまたは then メソッドで Lens を合成し、
+              深いフィールドへのアクセスが可能なこと
+
+          - name: test_address_lens_with_optional_field
+            description: |
+              Address の Option<String50> フィールド（address_line2 等）に
+              対する Lens 操作。Optional Optics の使用。
+            assertion: |
+              Some と None の両方のケースで正しく動作すること
+
+          - name: test_personal_name_clone_preserves_equality
+            description: Clone 後も Eq が成立すること
+            assertion: original == original.clone()
+
+          - name: test_customer_info_clone_preserves_equality
+            description: Clone 後も Eq が成立すること
+            assertion: original == original.clone()
+
+          - name: test_address_clone_preserves_equality
+            description: Clone 後も Eq が成立すること
+            assertion: original == original.clone()
+
+          - name: test_personal_name_ne_for_different_values
+            description: 異なる値で PartialEq::ne が成立すること
+            assertion: name1 != name2 when values differ
+
+      green:
+        description: |
+          既存の実装がテストをパスすることを確認。
+          Lens 合成が動作しない場合は functional-rusty の使用方法を確認。
+        implementation_notes:
+          - functional_rusty::optics::Lens trait のインポート
+          - compose! マクロまたは then メソッドによる Lens 合成
+          - Optional optics については functional_rusty::optics::Optional を使用
+
+      refactor:
+        description: |
+          テストコードの整理とヘルパー関数の抽出。
+        tasks:
+          - create_test_personal_name() 等のファクトリ関数作成
+          - Lens テストの共通パターン抽出
+
+  # ---------------------------------------------------------------------------
+  # STEP 3: validation 補完テスト (REQ-093)
+  # ---------------------------------------------------------------------------
+
+  - step_id: step_3
+    requirement_id: REQ-093
+    name: validation 補完テスト
+    artifact: tests/validation_tests.rs
+    estimated_effort: medium
+    priority: high
+
+    tdd_phases:
+      red:
+        description: |
+          validation モジュールのエッジケースと依存関数モックのテストを
+          tests/validation_tests.rs に記述する。
+
+        test_cases:
+          - name: test_validate_order_with_100_lines
+            description: |
+              100件の注文明細を持つ注文のバリデーション。
+              パフォーマンスと正確性を検証。
+            assertion: |
+              result.is_ok() && priced_order.lines().len() == 100
+
+          - name: test_validate_order_mixed_widget_and_gizmo
+            description: |
+              Widget（UnitQuantity）と Gizmo（KilogramQuantity）が
+              混在する注文のバリデーション。
+            assertion: |
+              各明細が正しい Quantity 型で生成されること
+
+          - name: test_validate_order_all_error_paths
+            description: |
+              全てのバリデーションエラーパスを網羅的にテスト。
+              - OrderId 空
+              - CustomerInfo の各フィールドエラー
+              - Address の各フィールドエラー
+              - OrderLine の各フィールドエラー
+              - ProductCode 不存在
+              - Address 不存在
+            assertion: 各エラーパスで適切な ValidationError が返されること
+
+          - name: test_validation_with_product_exists_mock
+            description: |
+              カスタムの check_product_code_exists 関数を注入したテスト。
+              特定の ProductCode のみ許可するモック。
+            assertion: |
+              許可された ProductCode は Ok、それ以外は Err
+
+          - name: test_validation_with_address_exists_mock
+            description: |
+              カスタムの check_address_exists 関数を注入したテスト。
+              特定条件（例: 特定の ZipCode）でエラーを返すモック。
+            assertion: |
+              条件に応じて Ok または Err が返されること
+
+      green:
+        description: |
+          validate_order 関数に依存関数を注入し、テストが通ることを確認。
+        implementation_notes:
+          - validate_order は高階関数として設計されているため、テスト用モックを注入可能
+          - 100件テストではループでテストデータを生成
+
+      refactor:
+        description: |
+          テストデータ生成のヘルパー関数を共通化。
+        tasks:
+          - create_unvalidated_order_line() ファクトリ関数
+          - create_check_product_mock() モックファクトリ関数
+
+  # ---------------------------------------------------------------------------
+  # STEP 4: pricing 補完テスト (REQ-094)
+  # ---------------------------------------------------------------------------
+
+  - step_id: step_4
+    requirement_id: REQ-094
+    name: pricing 補完テスト
+    artifact: tests/pricing_tests.rs
+    estimated_effort: medium
+    priority: high
+
+    tdd_phases:
+      red:
+        description: |
+          pricing モジュールの Lazy キャッシュ動作と価格計算精度のテストを
+          tests/pricing_tests.rs に記述する。
+
+        test_cases:
+          - name: test_lazy_price_caching_single_initialization
+            description: |
+              get_pricing_function で返される関数が、
+              Lazy によって標準価格取得関数を1回のみ初期化することを検証。
+            assertion: |
+              複数回 get_product_price を呼び出しても、
+              get_standard_prices は1回のみ呼ばれる
+
+          - name: test_promotion_price_fallback_to_standard
+            description: |
+              プロモーション対象外の商品でプロモーション価格計算を行った場合、
+              標準価格にフォールバックすることを検証。
+            assertion: |
+              promotion_price_fn が None を返す場合、
+              standard_price が使用されること
+
+          - name: test_decimal_precision_multiplication
+            description: |
+              Decimal の乗算精度を検証。
+              例: 3.33 * 3 = 9.99（端数処理なし）
+            assertion: |
+              期待通りの計算結果が得られること
+
+          - name: test_decimal_precision_with_small_values
+            description: |
+              小さな値での精度検証。
+              例: 0.01 * 1 = 0.01
+            assertion: |
+              精度が維持されること
+
+          - name: test_billing_amount_sum_many_prices
+            description: |
+              多数の価格を合計した際の精度を検証。
+              10件 x 99.99 = 999.90
+            assertion: |
+              累積誤差なく正確に合計されること
+
+          - name: test_billing_amount_sum_edge_case_rounding
+            description: |
+              端数が発生する可能性のあるケースでの精度検証。
+            assertion: |
+              rust_decimal の精度仕様に従った結果となること
+
+      green:
+        description: |
+          既存の pricing 実装がテストをパスすることを確認。
+          Lazy のキャッシュ動作は std::cell::Cell でカウンターを使用して検証。
+        implementation_notes:
+          - Lazy のキャッシュテストでは Rc<Cell<u32>> でカウンター管理
+          - 既存の src/workflow/pricing.rs のテストと重複しないよう注意
+
+      refactor:
+        description: |
+          価格計算のテストヘルパーを整理。
+        tasks:
+          - create_test_pricing_function() ファクトリ
+
+  # ---------------------------------------------------------------------------
+  # STEP 5: workflow 補完テスト (REQ-095)
+  # ---------------------------------------------------------------------------
+
+  - step_id: step_5
+    requirement_id: REQ-095
+    name: workflow 補完テスト
+    artifact: tests/workflow_tests.rs
+    estimated_effort: medium
+    priority: high
+
+    tdd_phases:
+      red:
+        description: |
+          workflow モジュールの IO モナド、エラー伝播、状態遷移のテストを
+          tests/workflow_tests.rs に記述する。
+
+        test_cases:
+          - name: test_io_monad_lazy_evaluation
+            description: |
+              IO モナドが run_unsafe() まで副作用を発生させないことを検証。
+              副作用検出用のカウンターを使用。
+            assertion: |
+              IO 作成時点ではカウンターが 0 のまま、
+              run_unsafe() 後にカウンターが増加
+
+          - name: test_io_monad_map_composition
+            description: |
+              IO::map による合成が正しく動作することを検証。
+            assertion: |
+              io.map(f).map(g) == io.map(|x| g(f(x)))
+
+          - name: test_io_monad_flat_map_composition
+            description: |
+              IO::flat_map による合成が正しく動作することを検証。
+            assertion: |
+              適切なモナド則に従った動作
+
+          - name: test_error_propagation_from_validation_step
+            description: |
+              バリデーションエラーが PlaceOrderError::Validation に
+              正しく変換されることを検証。
+            assertion: |
+              result.is_err() && matches!(result, Err(PlaceOrderError::Validation(_)))
+
+          - name: test_error_propagation_from_pricing_step
+            description: |
+              価格計算エラーが PlaceOrderError::Pricing に
+              正しく変換されることを検証。
+            assertion: |
+              result.is_err() && matches!(result, Err(PlaceOrderError::Pricing(_)))
+
+          - name: test_state_transition_unvalidated_to_validated
+            description: |
+              UnvalidatedOrder から ValidatedOrder への状態遷移。
+              validate_order 関数の成功パス。
+            assertion: |
+              全てのフィールドが正しくマッピングされること
+
+          - name: test_state_transition_validated_to_priced
+            description: |
+              ValidatedOrder から PricedOrder への状態遷移。
+              price_order 関数の成功パス。
+            assertion: |
+              amount_to_bill が正しく計算されること
+
+          - name: test_state_transition_priced_to_shipping
+            description: |
+              PricedOrder から PricedOrderWithShippingMethod への状態遷移。
+              add_shipping_info 関数の成功パス。
+            assertion: |
+              ShippingMethod と ShippingCost が正しく設定されること
+
+      green:
+        description: |
+          既存の workflow 実装がテストをパスすることを確認。
+          IO モナドの遅延評価テストでは Rc<Cell<u32>> でカウンター管理。
+        implementation_notes:
+          - IO モナドの遅延評価検証には副作用検出パターンを使用
+          - 状態遷移テストは各ステップを個別にテスト
+
+      refactor:
+        description: |
+          ワークフローテストのヘルパーを整理。
+        tasks:
+          - create_test_dependencies() ファクトリ
+
+  # ---------------------------------------------------------------------------
+  # STEP 6: Smart Constructor 法則 proptest (REQ-096)
+  # ---------------------------------------------------------------------------
+
+  - step_id: step_6
+    requirement_id: REQ-096
+    name: Smart Constructor 法則 proptest
+    artifact: tests/simple_types_laws.rs
+    estimated_effort: high
+    priority: high
+
+    tdd_phases:
+      red:
+        description: |
+          proptest を使用して Smart Constructor パターンで生成された型の
+          不変条件を検証するプロパティテストを記述する。
+
+        test_cases:
+          - name: prop_string50_invariant
+            description: |
+              String50::create で生成された値は常に 1-50 文字であることを検証。
+            property: |
+              forall s: String (1..=100 chars).
+                String50::create("field", &s).ok().map(|v| 1 <= v.value().len() && v.value().len() <= 50)
+            strategy: |
+              proptest::string::string_regex("[a-zA-Z0-9 ]{1,100}").unwrap()
+
+          - name: prop_price_invariant
+            description: |
+              Price::create で生成された値は常に 0.00-1000.00 の範囲であることを検証。
+            property: |
+              forall d: Decimal (-1000..=2000).
+                Price::create(d).ok().map(|v| v.value() >= Decimal::ZERO && v.value() <= Decimal::from(1000))
+            strategy: |
+              -1000i64..=2000i64 -> Decimal::from(x) / 100
+
+          - name: prop_product_code_format_invariant
+            description: |
+              ProductCode は常に Widget (W + 4桁) または Gizmo (G + 3桁) の形式。
+            property: |
+              forall code: String.
+                ProductCode::create("field", &code).ok().map(|v| valid_format(v.value()))
+            strategy: |
+              prop_oneof![
+                "W[0-9]{4}".prop_map(String::from),
+                "G[0-9]{3}".prop_map(String::from),
+                "[A-Z][0-9]{1,5}".prop_map(String::from)  // 無効なパターン
+              ]
+
+          - name: prop_unit_quantity_invariant
+            description: |
+              UnitQuantity は常に 1-1000 の整数であることを検証。
+            property: |
+              forall n: i32 (-100..=1500).
+                UnitQuantity::create(n).ok().map(|v| v.value() >= 1 && v.value() <= 1000)
+            strategy: |
+              -100i32..=1500i32
+
+          - name: prop_kilogram_quantity_invariant
+            description: |
+              KilogramQuantity は常に 0.05-100.00 の範囲であることを検証。
+            property: |
+              forall d: Decimal (0.00..=150.00).
+                KilogramQuantity::create(d).ok().map(|v| v.value() >= min && v.value() <= max)
+            strategy: |
+              0i64..=15000i64 -> Decimal::new(x, 2)
+
+      green:
+        description: |
+          proptest マクロを使用してプロパティテストを実装。
+          各テストは 256 ケース（デフォルト）以上を生成。
+        implementation_notes:
+          - proptest = "1.5" を dev-dependencies に使用（既に設定済み）
+          - proptest! マクロでプロパティを記述
+          - カスタムストラテジーは prop_map, prop_filter を使用
+
+      refactor:
+        description: |
+          ストラテジーの共通化とモジュール整理。
+        tasks:
+          - 共通ストラテジーを mod strategies に抽出
+          - 生成パラメータの調整（PROPTEST_CASES 環境変数）
+
+  # ---------------------------------------------------------------------------
+  # STEP 7: Result/Option Monad 法則 proptest (REQ-097)
+  # ---------------------------------------------------------------------------
+
+  - step_id: step_7
+    requirement_id: REQ-097
+    name: Result/Option Monad 法則 proptest
+    artifact: tests/monad_laws.rs
+    estimated_effort: medium
+    priority: medium
+
+    tdd_phases:
+      red:
+        description: |
+          Result と Option の Monad 法則を proptest で検証する。
+          functional-rusty ライブラリの使用例としての価値も含む。
+
+        test_cases:
+          - name: prop_result_left_identity
+            description: |
+              Result の Left Identity 法則。
+              Ok(a).and_then(f) == f(a)
+            property: |
+              forall a: i32, f: Fn(i32) -> Result<i32, String>.
+                Ok::<i32, String>(a).and_then(&f) == f(a)
+            strategy: |
+              a: any::<i32>()
+              f: |x| Ok(x * 2) or |x| Err(format!("error: {}", x))
+
+          - name: prop_result_right_identity
+            description: |
+              Result の Right Identity 法則。
+              m.and_then(Ok) == m
+            property: |
+              forall m: Result<i32, String>.
+                m.clone().and_then(Ok) == m
+            strategy: |
+              prop_oneof![Ok(any::<i32>()), Err(any::<String>())]
+
+          - name: prop_result_associativity
+            description: |
+              Result の Associativity 法則。
+              m.and_then(f).and_then(g) == m.and_then(|x| f(x).and_then(g))
+            property: |
+              m.and_then(f).and_then(g) == m.and_then(|x| f(x).and_then(g))
+            strategy: |
+              m: Result, f: |x| Ok(x + 1), g: |x| Ok(x * 2)
+
+          - name: prop_option_left_identity
+            description: Option の Left Identity 法則
+            property: Some(a).and_then(f) == f(a)
+
+          - name: prop_option_right_identity
+            description: Option の Right Identity 法則
+            property: m.and_then(Some) == m
+
+          - name: prop_option_associativity
+            description: Option の Associativity 法則
+            property: m.and_then(f).and_then(g) == m.and_then(|x| f(x).and_then(g))
+
+      green:
+        description: |
+          proptest マクロで法則検証を実装。
+          関数は具体的な実装を使用（ランダム生成は複雑なため）。
+        implementation_notes:
+          - 関数 f, g はテスト内で固定的に定義
+          - Result/Option の生成には prop_oneof! を使用
+
+      refactor:
+        description: |
+          法則検証の共通パターンを抽出。
+        tasks:
+          - assert_left_identity, assert_right_identity 等のマクロ作成検討
+
+  # ---------------------------------------------------------------------------
+  # STEP 8: DTO 往復変換 proptest (REQ-098)
+  # ---------------------------------------------------------------------------
+
+  - step_id: step_8
+    requirement_id: REQ-098
+    name: DTO 往復変換 proptest
+    artifact: tests/dto_roundtrip_laws.rs
+    estimated_effort: high
+    priority: medium
+
+    dependencies:
+      - step_6  # Arbitrary 実装パターンを参照
+
+    tdd_phases:
+      red:
+        description: |
+          DTO と Domain 型間の往復変換が情報を失わないことを proptest で検証する。
+
+        test_cases:
+          - name: prop_address_dto_roundtrip
+            description: |
+              Address -> AddressDto -> JSON -> AddressDto -> Address の往復で
+              元の値と等しいことを検証。
+            property: |
+              forall addr: Address (valid).
+                let dto = AddressDto::from_address(&addr);
+                let json = serde_json::to_string(&dto).unwrap();
+                let dto2: AddressDto = serde_json::from_str(&json).unwrap();
+                dto == dto2
+            strategy: |
+              有効な Address を生成するカスタムストラテジー
+
+          - name: prop_customer_info_dto_roundtrip
+            description: |
+              CustomerInfo の DTO 往復変換を検証。
+            notes: |
+              VipStatus は "Normal" と "VIP" のみ有効なため、
+              生成時に制限が必要。
+
+          - name: prop_order_form_dto_json_roundtrip
+            description: |
+              OrderFormDto の JSON シリアライズ/デシリアライズ往復を検証。
+            property: |
+              forall dto: OrderFormDto.
+                let json = serde_json::to_string(&dto).unwrap();
+                let deserialized: OrderFormDto = serde_json::from_str(&json).unwrap();
+                deserialized == dto
+
+          - name: prop_priced_order_line_dto_roundtrip
+            description: |
+              PricedOrderLineDto の JSON 往復変換を検証。
+              ProductLine と CommentLine の両方をカバー。
+
+          - name: prop_place_order_event_dto_roundtrip
+            description: |
+              PlaceOrderEventDto の JSON 往復変換を検証。
+              3種類のイベント（Shippable, Billable, Acknowledgment）をカバー。
+
+      green:
+        description: |
+          有効なドメイン型を生成するカスタムストラテジーを実装。
+          Address 等の複合型は、各フィールドの制約を満たすストラテジーを合成。
+        implementation_notes:
+          - arb_string50: "[a-zA-Z0-9 ]{1,50}" パターンで生成
+          - arb_email_address: "[a-z]+@[a-z]+\\.[a-z]{2,}" パターンで生成
+          - arb_zip_code: "[0-9]{5}" パターンで生成
+          - arb_us_state_code: prop_oneof! で全州コードから選択
+
+        arbitrary_implementations:
+          - name: arb_address
+            description: 有効な Address を生成するストラテジー
+            implementation: |
+              (arb_string50(), arb_string50_option(), ..., arb_zip_code(), arb_us_state_code())
+                .prop_map(|(line1, line2, ..., zip, state)| {
+                  Address::create(...).unwrap()
+                })
+
+          - name: arb_customer_info
+            description: 有効な CustomerInfo を生成するストラテジー
+
+          - name: arb_order_form_dto
+            description: 有効な OrderFormDto を生成するストラテジー
+
+      refactor:
+        description: |
+          ストラテジーをモジュールに整理し再利用可能にする。
+        tasks:
+          - mod test_strategies を作成
+          - 共通の Arbitrary 実装パターンを文書化
+
+  # ---------------------------------------------------------------------------
+  # STEP 9: エンドツーエンド統合テスト (REQ-099)
+  # ---------------------------------------------------------------------------
+
+  - step_id: step_9
+    requirement_id: REQ-099
+    name: エンドツーエンド統合テスト
+    artifact: tests/integration_tests.rs
+    estimated_effort: high
+    priority: high
+
+    dependencies:
+      - step_1 through step_8 (補完テスト完了後)
+
+    tdd_phases:
+      red:
+        description: |
+          PlaceOrder ワークフロー全体のエンドツーエンドテストを
+          tests/integration_tests.rs に追加する。
+          既存の api_integration_tests.rs を補完する形で設計。
+
+        test_scenarios:
+          - name: test_complete_order_flow_widget_only
+            description: |
+              Widget のみを含む注文の完全フロー。
+              JSON 入力から JSON 出力までの全体フローを検証。
+            scenario_steps:
+              - JSON 入力の構築（Widget 製品のみ）
+              - place_order_api の呼び出し
+              - レスポンスの検証（200 OK, 3イベント）
+              - ShippableOrderPlaced イベントの詳細検証
+              - BillableOrderPlaced イベントの詳細検証
+              - AcknowledgmentSent イベントの詳細検証
+
+          - name: test_complete_order_flow_gizmo_only
+            description: |
+              Gizmo のみを含む注文の完全フロー。
+            scenario_steps:
+              - JSON 入力の構築（Gizmo 製品のみ、小数数量）
+              - 全体フローの検証
+
+          - name: test_complete_order_flow_mixed_products
+            description: |
+              Widget と Gizmo が混在する注文の完全フロー。
+            scenario_steps:
+              - 複数の製品タイプを含む注文
+              - 各製品タイプの数量形式が正しいことを検証
+
+          - name: test_complete_order_flow_vip_customer
+            description: |
+              VIP 顧客の注文フロー。
+              無料配送が適用されることを検証。
+            assertions:
+              - ShippingCost が 0 であること
+              - 請求金額に配送料が含まれないこと
+
+          - name: test_complete_order_flow_with_promotion
+            description: |
+              プロモーションコード適用時の注文フロー。
+            assertions:
+              - CommentLine が注文明細に含まれること
+              - プロモーション価格が適用されること（モック依存）
+
+          - name: test_complete_order_flow_validation_failure
+            description: |
+              バリデーション失敗時のエラーフロー。
+            assertions:
+              - HTTP 400 レスポンス
+              - エラー JSON の構造検証
+
+          - name: test_complete_order_flow_zero_billing
+            description: |
+              請求金額が 0 の場合のフロー。
+            notes: |
+              現在の実装では amount_to_bill == 0 の場合も
+              BillableOrderPlaced が生成される可能性がある。
+              仕様確認が必要。
+            assertions:
+              - BillableOrderPlaced イベントの有無を仕様に基づき検証
+
+          - name: test_complete_order_flow_acknowledgment_failure
+            description: |
+              確認メール送信失敗時のフロー。
+            notes: |
+              モック依存関数で send_acknowledgment を失敗させる。
+              ワークフロー自体は成功し、AcknowledgmentSent イベントが
+              生成されないことを検証。
+
+          - name: test_complete_order_flow_international_shipping
+            description: |
+              国際配送（US 以外）の注文フロー。
+            assertions:
+              - 配送コストが $20 であること
+              - 請求金額に配送料が含まれること
+
+      green:
+        description: |
+          各シナリオのテストを実装。
+          既存の api_integration_tests.rs のパターンを参考にする。
+        implementation_notes:
+          - JSON 入力は r#"..."# リテラルで構築
+          - place_order_api を呼び出し IO を run_unsafe で実行
+          - serde_json::from_str でレスポンスをパース
+
+      refactor:
+        description: |
+          テストデータとアサーションの共通化。
+        tasks:
+          - mod test_data に JSON テンプレートを配置
+          - assert_event_count, assert_has_shippable 等のヘルパーマクロ
+
+  # ---------------------------------------------------------------------------
+  # STEP 10: 使用例ドキュメント (REQ-100)
+  # ---------------------------------------------------------------------------
+
+  - step_id: step_10
+    requirement_id: REQ-100
+    name: 使用例ドキュメント
+    artifact: docs/usage.md
+    estimated_effort: high
+    priority: medium
+
+    dependencies:
+      - step_1 through step_9 (全テスト完了後)
+
+    implementation_phases:
+      draft:
+        description: |
+          ドキュメントの構造と各セクションの内容を下書きする。
+
+        sections:
+          - title: クイックスタート
+            content: |
+              ## クイックスタート
+
+              ### プロジェクトのセットアップ
+
+              ```toml
+              [dependencies]
+              order-taking-sample = { path = "samples/order" }
+              functional-rusty = { version = "x.y.z", features = ["full"] }
+              ```
+
+              ### 最小限のサンプルコード
+
+              ```rust
+              use order_taking_sample::api::{place_order_api, HttpRequest};
+
+              fn main() {
+                  let json = r#"{ ... }"#;
+                  let request = HttpRequest::new(json.to_string());
+                  let io_response = place_order_api(&request);
+                  let response = io_response.run_unsafe();
+                  println!("Status: {}", response.status_code());
+              }
+              ```
+
+          - title: 制約付き型の使用
+            content: |
+              ## 制約付き型の使用
+
+              ### Smart Constructor パターン
+
+              ```rust
+              use order_taking_sample::simple_types::String50;
+
+              // 有効な値
+              let name = String50::create("CustomerName", "John Doe")?;
+
+              // 無効な値はコンパイル時ではなく実行時にエラー
+              let empty = String50::create("CustomerName", "");
+              assert!(empty.is_err());
+              ```
+
+              ### 「Make Illegal States Unrepresentable」の実践
+
+              ...
+
+          - title: ワークフローの実装
+            content: |
+              ## ワークフローの実装
+
+              ### 状態遷移の型による表現
+
+              ```
+              UnvalidatedOrder -> ValidatedOrder -> PricedOrder -> PlaceOrderEvent[]
+              ```
+
+              ### 依存性注入パターン
+
+              ```rust
+              // 高階関数による依存性注入
+              pub fn validate_order<CheckProduct, CheckAddress>(
+                  check_product_code_exists: &CheckProduct,
+                  check_address_exists: &CheckAddress,
+                  order: UnvalidatedOrder,
+              ) -> Result<ValidatedOrder, ValidationError>
+              ```
+
+          - title: functional-rusty の活用
+            content: |
+              ## functional-rusty の活用
+
+              ### IO モナドによる副作用の分離
+
+              ```rust
+              use functional_rusty::effect::IO;
+
+              // 副作用は IO に閉じ込められる
+              let io: IO<Response> = place_order_api(&request);
+
+              // run_unsafe() まで副作用は発生しない
+              let response = io.run_unsafe();
+              ```
+
+              ### Lazy 型による遅延評価
+
+              ```rust
+              use functional_rusty::control::Lazy;
+
+              let lazy_prices = Lazy::new(|| fetch_prices_from_database());
+              // この時点では fetch_prices_from_database は呼ばれない
+
+              let price = lazy_prices.force(); // ここで初めて呼ばれる
+              ```
+
+              ### Lens による不変データ構造の更新
+
+              ```rust
+              use functional_rusty::optics::Lens;
+
+              let updated = PersonalName::first_name_lens().set(name, new_first_name);
+              ```
+
+          - title: テストの書き方
+            content: |
+              ## テストの書き方
+
+              ### モック関数の注入
+
+              ### proptest による法則検証
+
+              ### 統合テストのパターン
+
+          - title: エラーハンドリング
+            content: |
+              ## エラーハンドリング
+
+              ### Result と ? 演算子
+
+              ### エラー型の設計（thiserror の活用）
+
+      review:
+        description: |
+          コード例の動作確認と文書の校正。
+        tasks:
+          - 全てのコード例が cargo test --doc でテスト可能であること
+          - 文章の校正と誤字脱字のチェック
+
+      finalize:
+        description: |
+          最終版の作成とリポジトリへのコミット。
+
+  # ---------------------------------------------------------------------------
+  # STEP 11: アーキテクチャドキュメント (REQ-101)
+  # ---------------------------------------------------------------------------
+
+  - step_id: step_11
+    requirement_id: REQ-101
+    name: アーキテクチャドキュメント
+    artifact: docs/architecture.md
+    estimated_effort: high
+    priority: medium
+
+    dependencies:
+      - step_10  # usage.md 完了後
+
+    implementation_phases:
+      draft:
+        description: |
+          アーキテクチャドキュメントの構造と各セクションの内容を下書きする。
+
+        sections:
+          - title: 設計原則
+            content: |
+              ## 設計原則
+
+              ### 関数型ドメインモデリングの原則
+
+              1. **Make Illegal States Unrepresentable**
+                 - 型システムを使用して不正な状態を表現不可能にする
+                 - Smart Constructor パターンで制約を強制
+
+              2. **純粋関数と副作用の分離**
+                 - ビジネスロジックは純粋関数として実装
+                 - 副作用は IO モナドに閉じ込める
+
+              3. **参照透過性の維持**
+                 - 同じ入力に対して常に同じ出力
+                 - テスト容易性の向上
+
+          - title: モジュール構成
+            content: |
+              ## モジュール構成
+
+              ```
+              src/
+              ├── simple_types/    # 制約付き基本型
+              │   ├── string_types.rs
+              │   ├── identifier_types.rs
+              │   ├── product_types.rs
+              │   ├── quantity_types.rs
+              │   ├── price_types.rs
+              │   └── misc_types.rs
+              ├── compound_types/  # 複合型
+              │   ├── personal_name.rs
+              │   ├── customer_info.rs
+              │   └── address.rs
+              ├── workflow/        # ワークフロー型と関数
+              │   ├── validation.rs
+              │   ├── pricing.rs
+              │   ├── shipping.rs
+              │   ├── events.rs
+              │   └── place_order.rs
+              ├── dto/             # データ転送オブジェクト
+              │   ├── input.rs
+              │   ├── output.rs
+              │   └── error.rs
+              └── api/             # API 層
+                  ├── types.rs
+                  ├── dependencies.rs
+                  └── place_order_api.rs
+              ```
+
+          - title: 型による状態遷移
+            content: |
+              ## 型による状態遷移
+
+              ### 状態遷移図
+
+              ```
+              OrderFormDto (外部入力)
+                   ↓ JSON デシリアライズ
+              UnvalidatedOrder
+                   ↓ validate_order
+              ValidatedOrder
+                   ↓ price_order
+              PricedOrder
+                   ↓ add_shipping_info
+              PricedOrderWithShippingMethod
+                   ↓ create_events
+              Vec<PlaceOrderEvent>
+                   ↓ DTO 変換 + JSON シリアライズ
+              HttpResponse (外部出力)
+              ```
+
+          - title: 依存性注入パターン
+            content: |
+              ## 依存性注入パターン
+
+              ### 高階関数による依存性注入
+
+              F# では partial application が自然に使えるが、
+              Rust では明示的な関数引数として依存関係を渡す。
+
+              ```rust
+              // 依存関数を受け取るワークフロー
+              pub fn place_order<CheckProduct, CheckAddress, GetPricing, ...>(
+                  check_product: &CheckProduct,
+                  check_address: &CheckAddress,
+                  get_pricing: &GetPricing,
+                  // ...
+              ) -> impl Fn(UnvalidatedOrder) -> Result<...>
+              ```
+
+          - title: functional-rusty との統合
+            content: |
+              ## functional-rusty との統合
+
+              ### IO モナドの使用箇所
+
+              - `place_order_api`: API エントリーポイント
+              - 確認メール送信: `send_order_acknowledgment`
+              - 依存関数のラップ
+
+              ### Lazy 型の使用箇所
+
+              - `get_pricing_function`: 標準価格取得関数のキャッシュ
+
+              ### Lens の使用箇所
+
+              - `PersonalName`, `CustomerInfo`, `Address` のフィールド更新
+
+          - title: F# 版との比較
+            content: |
+              ## F# 版との比較
+
+              ### 型システムの違い
+
+              | F# | Rust | 備考 |
+              |---|---|---|
+              | Discriminated Union | enum | 同等 |
+              | Record | struct | 同等 |
+              | Result<'T, 'E> | Result<T, E> | 同等 |
+              | Computation Expression | ? 演算子 / eff! マクロ | 部分的 |
+              | Type Provider | なし | マクロで代替可能 |
+
+              ### Result Computation Expression vs ? 演算子
+
+              F#:
+              ```fsharp
+              result {
+                  let! validated = validateOrder order
+                  let! priced = priceOrder validated
+                  return priced
+              }
+              ```
+
+              Rust:
+              ```rust
+              fn process_order(order: UnvalidatedOrder) -> Result<PricedOrder, Error> {
+                  let validated = validate_order(order)?;
+                  let priced = price_order(validated)?;
+                  Ok(priced)
+              }
+              ```
+
+      review:
+        description: |
+          技術的正確性の確認と図表の追加。
+        tasks:
+          - 状態遷移図を Mermaid 記法で追加
+          - モジュール依存関係図を追加
+
+      finalize:
+        description: |
+          最終版の作成とリポジトリへのコミット。
+
+# =============================================================================
+# 品質チェック手順
+# =============================================================================
+
+quality_checks:
+  before_each_step:
+    - command: cargo fmt --package order-taking-sample -- --check
+      description: フォーマットチェック
+
+  after_each_step:
+    - command: cargo test --package order-taking-sample
+      description: 全テスト実行
+
+    - command: cargo clippy --package order-taking-sample -- -D warnings
+      description: Lint チェック
+
+  after_all_tests:
+    - command: |
+        cargo llvm-cov --package order-taking-sample --html
+      description: カバレッジレポート生成
+
+    - command: cargo doc --package order-taking-sample --no-deps
+      description: ドキュメント生成
+
+# =============================================================================
+# 依存関係グラフ
+# =============================================================================
+
+dependency_graph:
+  step_1: []  # simple_types 補完テスト
+  step_2: []  # compound_types 補完テスト
+  step_3: []  # validation 補完テスト
+  step_4: []  # pricing 補完テスト
+  step_5: []  # workflow 補完テスト
+  step_6: [step_1]  # Smart Constructor proptest (simple_types テスト参照)
+  step_7: []  # Monad 法則 proptest (独立)
+  step_8: [step_6]  # DTO roundtrip proptest (Arbitrary パターン参照)
+  step_9: [step_1, step_2, step_3, step_4, step_5]  # 統合テスト
+  step_10: [step_9]  # usage.md
+  step_11: [step_10]  # architecture.md
+
+# =============================================================================
+# リスクと対策
+# =============================================================================
+
+risks:
+  - risk_id: risk_1
+    description: proptest の Arbitrary 実装が複雑になる可能性
+    impact: medium
+    mitigation: |
+      - 有効な値のみを生成するカスタムストラテジーを作成
+      - prop_filter_map を使用して無効な値を除外
+      - 生成範囲を適切に制限
+
+  - risk_id: risk_2
+    description: 既存テストとの重複
+    impact: low
+    mitigation: |
+      - 既存のテストを事前にリストアップ
+      - 補完テストは境界値、法則検証、統合シナリオに焦点
+      - テストモジュール名で区別
+
+  - risk_id: risk_3
+    description: ドキュメントのコード例が古くなる可能性
+    impact: medium
+    mitigation: |
+      - cargo test --doc でコード例をテスト
+      - CI/CD にドキュメントテストを組み込み
+
+# =============================================================================
+# 成果物一覧
+# =============================================================================
+
+artifacts:
+  test_files:
+    - path: tests/simple_types_tests.rs
+      requirement: REQ-091
+      step: step_1
+
+    - path: tests/compound_types_tests.rs
+      requirement: REQ-092
+      step: step_2
+
+    - path: tests/validation_tests.rs
+      requirement: REQ-093
+      step: step_3
+
+    - path: tests/pricing_tests.rs
+      requirement: REQ-094
+      step: step_4
+
+    - path: tests/workflow_tests.rs
+      requirement: REQ-095
+      step: step_5
+
+    - path: tests/simple_types_laws.rs
+      requirement: REQ-096
+      step: step_6
+
+    - path: tests/monad_laws.rs
+      requirement: REQ-097
+      step: step_7
+
+    - path: tests/dto_roundtrip_laws.rs
+      requirement: REQ-098
+      step: step_8
+
+    - path: tests/integration_tests.rs
+      requirement: REQ-099
+      step: step_9
+
+  documentation_files:
+    - path: docs/usage.md
+      requirement: REQ-100
+      step: step_10
+
+    - path: docs/architecture.md
+      requirement: REQ-101
+      step: step_11

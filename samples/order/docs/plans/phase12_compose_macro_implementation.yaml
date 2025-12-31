@@ -1,0 +1,1020 @@
+# Phase 12: compose! マクロ実装計画
+# Order Taking Sample Application
+# functional-rusty の compose! マクロを使用した再利用可能な合成関数の定義
+
+version: "1.0.0"
+created_at: "2026-01-01"
+phase_id: phase_12
+
+# =============================================================================
+# 概要
+# =============================================================================
+
+overview:
+  description: |
+    Haskell の関数合成演算子 (.) に相当する functional-rusty の compose! マクロを
+    Order Taking サンプルアプリケーションの適切な箇所に適用する。
+
+    対象要件:
+    - REQ-120: 配送イベント作成の compose! による関数合成
+    - REQ-121: 配送処理パイプラインの compose! による関数合成
+    - REQ-122: 高階関数への compose! 合成関数の適用（ドキュメントのみ）
+    - REQ-123: compose! と pipe! の使い分けガイドライン
+    - REQ-124: compose! マクロの法則検証テスト
+    - REQ-125: 統合テスト
+
+    compose! マクロの特徴:
+    - 右から左への関数合成（数学的合成）
+    - 再利用可能な合成関数を生成
+    - pipe! マクロとの補完的な関係
+
+  approach: |
+    TDD アプローチに従い、以下の順序で実装を行う:
+    1. テストファイルの作成（RED フェーズ）
+    2. 実装の変更（GREEN フェーズ）
+    3. ガイドライン文書化（REFACTOR フェーズ）
+
+  current_implementation_analysis:
+    events_rs:
+      file: src/workflow/events.rs
+      description: |
+        Phase 11 で pipe! マクロを適用済み。
+        create_events 内の配送イベント作成パイプラインを compose! マクロで
+        再利用可能な合成関数として定義可能。
+
+        現在のコード（lines 286-291）:
+        ```rust
+        let shipping_events = vec![pipe!(
+            priced_order,
+            create_shipping_event,
+            PlaceOrderEvent::ShippableOrderPlaced
+        )];
+        ```
+
+        compose! を使用した場合:
+        ```rust
+        let to_shipping_event = compose!(
+            PlaceOrderEvent::ShippableOrderPlaced,
+            create_shipping_event
+        );
+        let shipping_events = vec![to_shipping_event(priced_order)];
+        ```
+
+    place_order_rs:
+      file: src/workflow/place_order.rs
+      description: |
+        配送処理パイプライン（add_shipping_info_to_order + free_vip_shipping）を
+        compose! マクロで合成可能。
+
+        現在のコード（lines 147-150）:
+        ```rust
+        let priced_order_with_shipping = free_vip_shipping(add_shipping_info_to_order(
+            calculate_shipping_cost,
+            &priced_order,
+        ));
+        ```
+
+        compose! を使用した場合:
+        ```rust
+        let add_shipping = |order: &PricedOrder| {
+            add_shipping_info_to_order(calculate_shipping_cost, order)
+        };
+        let process_shipping = compose!(free_vip_shipping, add_shipping);
+        let priced_order_with_shipping = process_shipping(&priced_order);
+        ```
+
+  compose_macro_specification:
+    syntax:
+      - "compose!(f) - f をそのまま返す（恒等合成）"
+      - "compose!(f, g) - |x| f(g(x)) を返す"
+      - "compose!(f, g, h) - |x| f(g(h(x))) を返す"
+    laws:
+      - name: 結合法則
+        formula: "compose!(f, compose!(g, h)) == compose!(compose!(f, g), h)"
+      - name: 左恒等元
+        formula: "compose!(identity, f) == f"
+      - name: 右恒等元
+        formula: "compose!(f, identity) == f"
+
+# =============================================================================
+# 実装ステップ
+# =============================================================================
+
+implementation_steps:
+
+  # ---------------------------------------------------------------------------
+  # Step 1: テストファイルの作成（TDD: RED フェーズ）
+  # ---------------------------------------------------------------------------
+
+  - step: 1
+    title: compose! マクロ統合テストファイルの作成
+    requirements:
+      - REQ-124
+      - REQ-125
+    description: |
+      compose! マクロを使用した関数のテストを作成する。
+      法則検証テスト（結合法則、恒等元）とドメイン関数の合成テストを含む。
+
+    files:
+      - path: /Users/lihs/workspace/functional-rusty/samples/order/tests/phase12_compose_macro_tests.rs
+        action: create
+        changes:
+          - description: テストファイルの作成
+            content: |
+              //! Phase 12: compose! マクロ統合テスト
+              //!
+              //! compose! マクロを使用した関数の動作を検証する。
+              //! - 法則検証（結合法則、恒等元）
+              //! - ドメイン関数の合成テスト
+              //! - 部分適用との組み合わせテスト
+
+              use functional_rusty::{compose, identity};
+              use order_taking_sample::compound_types::{Address, CustomerInfo};
+              use order_taking_sample::simple_types::{
+                  BillingAmount, EmailAddress, OrderId, OrderLineId, OrderQuantity, Price, ProductCode,
+              };
+              use order_taking_sample::workflow::{
+                  add_shipping_info_to_order, calculate_shipping_cost, create_events,
+                  create_shipping_event, free_vip_shipping, OrderAcknowledgmentSent, PlaceOrderEvent,
+                  PricedOrder, PricedOrderLine, PricedOrderProductLine, PricedOrderWithShippingMethod,
+                  PricingMethod, ShippingInfo, ShippingMethod,
+              };
+              use rstest::rstest;
+              use rust_decimal::Decimal;
+
+              // =============================================================================
+              // テストヘルパー
+              // =============================================================================
+
+              fn create_test_priced_order(
+                  order_id: &str,
+                  amount_to_bill: Decimal,
+                  lines: Vec<PricedOrderLine>,
+                  vip_status: &str,
+              ) -> PricedOrder {
+                  let order_id = OrderId::create("OrderId", order_id).unwrap();
+                  let customer_info =
+                      CustomerInfo::create("John", "Doe", "john@example.com", vip_status).unwrap();
+                  let address =
+                      Address::create("123 Main St", "", "", "", "New York", "10001", "NY", "US").unwrap();
+                  let amount = BillingAmount::create(amount_to_bill).unwrap();
+
+                  PricedOrder::new(
+                      order_id,
+                      customer_info,
+                      address.clone(),
+                      address,
+                      amount,
+                      lines,
+                      PricingMethod::Standard,
+                  )
+              }
+
+              fn create_test_product_line(
+                  line_id: &str,
+                  product_code: &str,
+                  price: Decimal,
+              ) -> PricedOrderLine {
+                  let order_line_id = OrderLineId::create("OrderLineId", line_id).unwrap();
+                  let product_code = ProductCode::create("ProductCode", product_code).unwrap();
+                  let quantity =
+                      OrderQuantity::create("Quantity", &product_code, Decimal::from(5)).unwrap();
+                  let line_price = Price::create(price).unwrap();
+
+                  PricedOrderLine::ProductLine(PricedOrderProductLine::new(
+                      order_line_id,
+                      product_code,
+                      quantity,
+                      line_price,
+                  ))
+              }
+
+              // =============================================================================
+              // compose! マクロ法則検証テスト（REQ-124）
+              // =============================================================================
+
+              #[rstest]
+              fn test_compose_associativity() {
+                  // 結合法則: compose!(f, compose!(g, h)) == compose!(compose!(f, g), h)
+                  fn f(x: i32) -> i32 {
+                      x + 1
+                  }
+                  fn g(x: i32) -> i32 {
+                      x * 2
+                  }
+                  fn h(x: i32) -> i32 {
+                      x - 3
+                  }
+
+                  let left = compose!(f, compose!(g, h));
+                  let right = compose!(compose!(f, g), h);
+
+                  // 複数の入力値でテスト
+                  for x in [0, 1, 5, 10, 100] {
+                      assert_eq!(
+                          left(x),
+                          right(x),
+                          "Associativity failed for x = {}",
+                          x
+                      );
+                  }
+              }
+
+              #[rstest]
+              fn test_compose_left_identity() {
+                  // 左恒等元: compose!(identity, f) == f
+                  fn f(x: i32) -> i32 {
+                      x * 2
+                  }
+
+                  let composed = compose!(identity, f);
+
+                  for x in [0, 1, 5, 10, 100] {
+                      assert_eq!(composed(x), f(x), "Left identity failed for x = {}", x);
+                  }
+              }
+
+              #[rstest]
+              fn test_compose_right_identity() {
+                  // 右恒等元: compose!(f, identity) == f
+                  fn f(x: i32) -> i32 {
+                      x * 2
+                  }
+
+                  let composed = compose!(f, identity);
+
+                  for x in [0, 1, 5, 10, 100] {
+                      assert_eq!(composed(x), f(x), "Right identity failed for x = {}", x);
+                  }
+              }
+
+              // =============================================================================
+              // ドメイン関数の合成テスト（REQ-124, REQ-125）
+              // =============================================================================
+
+              #[rstest]
+              fn test_compose_shipping_event_creation() {
+                  // compose! を使用した配送イベント作成関数の合成
+                  let to_shipping_event = compose!(
+                      PlaceOrderEvent::ShippableOrderPlaced,
+                      create_shipping_event
+                  );
+
+                  let priced_order =
+                      create_test_priced_order("order-compose-001", Decimal::from(100), vec![], "Normal");
+
+                  let event = to_shipping_event(&priced_order);
+
+                  // ShippableOrderPlaced イベントであることを確認
+                  assert!(event.is_shippable());
+
+                  // イベントの内容を確認
+                  if let PlaceOrderEvent::ShippableOrderPlaced(shipping_event) = event {
+                      assert_eq!(shipping_event.order_id().value(), "order-compose-001");
+                      assert_eq!(shipping_event.pdf().name(), "Orderorder-compose-001.pdf");
+                  } else {
+                      panic!("Expected ShippableOrderPlaced event");
+                  }
+              }
+
+              #[rstest]
+              fn test_compose_pipeline_with_partial_application_normal_customer() {
+                  // 部分適用と compose! の組み合わせテスト（通常顧客）
+                  let priced_order =
+                      create_test_priced_order("order-normal", Decimal::from(100), vec![], "Normal");
+
+                  // add_shipping_info_to_order を部分適用
+                  let add_shipping = |order: &PricedOrder| {
+                      add_shipping_info_to_order(&calculate_shipping_cost, order)
+                  };
+
+                  // free_vip_shipping と add_shipping を合成
+                  let process_shipping = compose!(free_vip_shipping, add_shipping);
+
+                  let result = process_shipping(&priced_order);
+
+                  // 通常顧客は配送料が発生する（NY は遠方州なので $10）
+                  assert_eq!(
+                      result.shipping_info().shipping_cost().value(),
+                      Decimal::from(10)
+                  );
+              }
+
+              #[rstest]
+              fn test_compose_pipeline_with_partial_application_vip_customer() {
+                  // 部分適用と compose! の組み合わせテスト（VIP 顧客）
+                  let priced_order =
+                      create_test_priced_order("order-vip", Decimal::from(100), vec![], "VIP");
+
+                  // add_shipping_info_to_order を部分適用
+                  let add_shipping = |order: &PricedOrder| {
+                      add_shipping_info_to_order(&calculate_shipping_cost, order)
+                  };
+
+                  // free_vip_shipping と add_shipping を合成
+                  let process_shipping = compose!(free_vip_shipping, add_shipping);
+
+                  let result = process_shipping(&priced_order);
+
+                  // VIP 顧客は配送料無料
+                  assert_eq!(
+                      result.shipping_info().shipping_cost().value(),
+                      Decimal::ZERO
+                  );
+                  assert!(result.shipping_info().shipping_method().is_fedex24());
+              }
+
+              // =============================================================================
+              // create_events 統合テスト（REQ-125）
+              // =============================================================================
+
+              #[rstest]
+              fn test_create_events_with_compose_macro_generates_correct_order() {
+                  // compose! マクロを使用した実装が正しいイベント順序を生成することを確認
+                  let priced_order =
+                      create_test_priced_order("order-001", Decimal::from(1000), vec![], "Normal");
+                  let order_id = OrderId::create("OrderId", "order-001").unwrap();
+                  let email = EmailAddress::create("EmailAddress", "test@example.com").unwrap();
+                  let acknowledgment = OrderAcknowledgmentSent::new(order_id, email);
+
+                  let events = create_events(&priced_order, Some(acknowledgment));
+
+                  // イベント順序の検証: Acknowledgment -> Shippable -> Billable
+                  assert_eq!(events.len(), 3);
+                  assert!(events[0].is_acknowledgment());
+                  assert!(events[1].is_shippable());
+                  assert!(events[2].is_billable());
+              }
+
+              #[rstest]
+              fn test_create_events_shipping_event_content_with_compose() {
+                  // compose! マクロで生成された ShippableOrderPlaced の内容を検証
+                  let lines = vec![
+                      create_test_product_line("line-001", "W1234", Decimal::from(100)),
+                      create_test_product_line("line-002", "G5678", Decimal::from(200)),
+                  ];
+                  let priced_order =
+                      create_test_priced_order("order-compose-test", Decimal::from(300), lines, "Normal");
+
+                  let events = create_events(&priced_order, None);
+
+                  assert_eq!(events.len(), 2);
+
+                  // ShippableOrderPlaced イベントの内容を検証
+                  if let PlaceOrderEvent::ShippableOrderPlaced(shipping_event) = &events[0] {
+                      assert_eq!(shipping_event.order_id().value(), "order-compose-test");
+                      assert_eq!(shipping_event.shipment_lines().len(), 2);
+                      assert_eq!(
+                          shipping_event.pdf().name(),
+                          "Orderorder-compose-test.pdf"
+                      );
+                  } else {
+                      panic!("Expected ShippableOrderPlaced event at index 0");
+                  }
+              }
+
+              // =============================================================================
+              // 配送処理パイプライン統合テスト（REQ-125）
+              // =============================================================================
+
+              #[rstest]
+              fn test_shipping_pipeline_preserves_order_data() {
+                  // compose! で合成した配送処理パイプラインが注文データを保持することを確認
+                  let lines = vec![create_test_product_line("line-001", "W1234", Decimal::from(500))];
+                  let priced_order = create_test_priced_order(
+                      "order-preserve-data",
+                      Decimal::from(500),
+                      lines,
+                      "Normal",
+                  );
+
+                  let add_shipping = |order: &PricedOrder| {
+                      add_shipping_info_to_order(&calculate_shipping_cost, order)
+                  };
+                  let process_shipping = compose!(free_vip_shipping, add_shipping);
+
+                  let result = process_shipping(&priced_order);
+
+                  // 元の注文データが保持されていることを確認
+                  assert_eq!(
+                      result.priced_order().order_id().value(),
+                      "order-preserve-data"
+                  );
+                  assert_eq!(
+                      result.priced_order().amount_to_bill().value(),
+                      Decimal::from(500)
+                  );
+                  assert_eq!(result.priced_order().lines().len(), 1);
+              }
+
+              #[rstest]
+              fn test_shipping_pipeline_with_international_address() {
+                  // 国際配送のテスト
+                  let order_id = OrderId::create("OrderId", "order-intl").unwrap();
+                  let customer_info =
+                      CustomerInfo::create("John", "Doe", "john@example.com", "Normal").unwrap();
+                  // 国際配送テスト用に有効な州コードを使用し、国を変更
+                  let address =
+                      Address::create("123 Main St", "", "", "", "Tokyo", "10000", "NY", "Japan").unwrap();
+                  let amount = BillingAmount::create(Decimal::from(100)).unwrap();
+
+                  let priced_order = PricedOrder::new(
+                      order_id,
+                      customer_info,
+                      address.clone(),
+                      address,
+                      amount,
+                      vec![],
+                      PricingMethod::Standard,
+                  );
+
+                  let add_shipping = |order: &PricedOrder| {
+                      add_shipping_info_to_order(&calculate_shipping_cost, order)
+                  };
+                  let process_shipping = compose!(free_vip_shipping, add_shipping);
+
+                  let result = process_shipping(&priced_order);
+
+                  // 国際配送は $20
+                  assert_eq!(
+                      result.shipping_info().shipping_cost().value(),
+                      Decimal::from(20)
+                  );
+              }
+
+              // =============================================================================
+              // compose! vs pipe! 比較テスト
+              // =============================================================================
+
+              #[rstest]
+              fn test_compose_produces_reusable_function() {
+                  // compose! で生成した関数が再利用可能であることを確認
+                  let to_shipping_event = compose!(
+                      PlaceOrderEvent::ShippableOrderPlaced,
+                      create_shipping_event
+                  );
+
+                  // 複数の注文に対して同じ合成関数を適用
+                  let order1 =
+                      create_test_priced_order("order-reuse-1", Decimal::from(100), vec![], "Normal");
+                  let order2 =
+                      create_test_priced_order("order-reuse-2", Decimal::from(200), vec![], "Normal");
+
+                  let event1 = to_shipping_event(&order1);
+                  let event2 = to_shipping_event(&order2);
+
+                  // 両方とも ShippableOrderPlaced イベント
+                  assert!(event1.is_shippable());
+                  assert!(event2.is_shippable());
+
+                  // それぞれ正しい order_id を持つ
+                  if let PlaceOrderEvent::ShippableOrderPlaced(e1) = &event1 {
+                      assert_eq!(e1.order_id().value(), "order-reuse-1");
+                  }
+                  if let PlaceOrderEvent::ShippableOrderPlaced(e2) = &event2 {
+                      assert_eq!(e2.order_id().value(), "order-reuse-2");
+                  }
+              }
+
+    acceptance_criteria:
+      - テストファイルが作成されていること
+      - 法則検証テスト（結合法則、左恒等元、右恒等元）が含まれていること
+      - ドメイン関数の合成テストが含まれていること
+      - 部分適用との組み合わせテストが含まれていること
+      - 統合テストが含まれていること
+
+  # ---------------------------------------------------------------------------
+  # Step 2: events.rs への compose! マクロ適用（REQ-120）
+  # ---------------------------------------------------------------------------
+
+  - step: 2
+    title: create_events 関数への compose! マクロ適用
+    requirements:
+      - REQ-120
+    description: |
+      create_events 関数内で、配送イベント作成パイプラインを
+      compose! マクロで再利用可能な合成関数として定義する。
+
+      Phase 11 で pipe! マクロを適用した箇所を compose! マクロに置き換える。
+
+    files:
+      - path: /Users/lihs/workspace/functional-rusty/samples/order/src/workflow/events.rs
+        action: modify
+        changes:
+          - description: compose マクロのインポート追加
+            location: imports section (line 47)
+            before: |
+              use functional_rusty::pipe;
+            after: |
+              use functional_rusty::{compose, pipe};
+
+          - description: create_events 関数の compose! マクロ適用
+            location: create_events function (lines 276-301)
+            before: |
+              #[must_use]
+              pub fn create_events(
+                  priced_order: &PricedOrder,
+                  acknowledgment_event: Option<OrderAcknowledgmentSent>,
+              ) -> Vec<PlaceOrderEvent> {
+                  // 確認メール送信イベント（存在する場合）
+                  let acknowledgment_events: Vec<PlaceOrderEvent> = acknowledgment_event
+                      .map(PlaceOrderEvent::AcknowledgmentSent)
+                      .into_iter()
+                      .collect();
+
+                  // 配送イベント（常に生成）: pipe! マクロで関数合成
+                  let shipping_events = vec![pipe!(
+                      priced_order,
+                      create_shipping_event,
+                      PlaceOrderEvent::ShippableOrderPlaced
+                  )];
+
+                  // 請求イベント（請求金額が正の場合のみ）
+                  let billing_events: Vec<PlaceOrderEvent> = pipe!(priced_order, create_billing_event)
+                      .map(PlaceOrderEvent::BillableOrderPlaced)
+                      .into_iter()
+                      .collect();
+
+                  // イベントを結合
+                  [acknowledgment_events, shipping_events, billing_events].concat()
+              }
+            after: |
+              #[must_use]
+              pub fn create_events(
+                  priced_order: &PricedOrder,
+                  acknowledgment_event: Option<OrderAcknowledgmentSent>,
+              ) -> Vec<PlaceOrderEvent> {
+                  // 配送イベント作成の合成関数
+                  // compose! は右から左への合成: ShippableOrderPlaced(create_shipping_event(order))
+                  let to_shipping_event = compose!(
+                      PlaceOrderEvent::ShippableOrderPlaced,
+                      create_shipping_event
+                  );
+
+                  // 確認メール送信イベント（存在する場合）
+                  let acknowledgment_events: Vec<PlaceOrderEvent> = acknowledgment_event
+                      .map(PlaceOrderEvent::AcknowledgmentSent)
+                      .into_iter()
+                      .collect();
+
+                  // 配送イベント（常に生成）: 合成関数を適用
+                  let shipping_events = vec![to_shipping_event(priced_order)];
+
+                  // 請求イベント（請求金額が正の場合のみ）
+                  let billing_events: Vec<PlaceOrderEvent> = pipe!(priced_order, create_billing_event)
+                      .map(PlaceOrderEvent::BillableOrderPlaced)
+                      .into_iter()
+                      .collect();
+
+                  // イベントを結合
+                  [acknowledgment_events, shipping_events, billing_events].concat()
+              }
+
+    acceptance_criteria:
+      - compose! マクロを使用して to_shipping_event 関数を定義していること
+      - create_shipping_event と PlaceOrderEvent::ShippableOrderPlaced が正しく合成されていること
+      - 既存のテストが全てパスすること
+      - 生成されるイベントの内容が変わらないこと
+
+  # ---------------------------------------------------------------------------
+  # Step 3: place_order.rs への compose! マクロ適用（REQ-121）
+  # ---------------------------------------------------------------------------
+
+  - step: 3
+    title: place_order 関数への compose! マクロ適用
+    requirements:
+      - REQ-121
+    description: |
+      place_order 関数内で、配送処理パイプラインを
+      compose! マクロで合成関数として定義する。
+
+      add_shipping_info_to_order を部分適用してから
+      free_vip_shipping と合成する。
+
+    files:
+      - path: /Users/lihs/workspace/functional-rusty/samples/order/src/workflow/place_order.rs
+        action: modify
+        changes:
+          - description: compose マクロのインポート追加
+            location: imports section (line 23)
+            before: |
+              use functional_rusty::effect::IO;
+            after: |
+              use functional_rusty::compose;
+              use functional_rusty::effect::IO;
+
+          - description: 配送処理パイプラインの compose! マクロ適用
+            location: place_order function (lines 146-150)
+            before: |
+                  // Step 3-4: 配送情報追加 + VIP 割引
+                  let priced_order_with_shipping = free_vip_shipping(add_shipping_info_to_order(
+                      calculate_shipping_cost,
+                      &priced_order,
+                  ));
+            after: |
+                  // Step 3-4: 配送処理パイプラインを合成関数として定義
+                  // add_shipping_info_to_order を部分適用
+                  let add_shipping = |order: &PricedOrder| {
+                      add_shipping_info_to_order(calculate_shipping_cost, order)
+                  };
+
+                  // free_vip_shipping と add_shipping を合成
+                  // compose! は右から左: free_vip_shipping(add_shipping(order))
+                  let process_shipping = compose!(free_vip_shipping, add_shipping);
+
+                  // 合成関数を適用
+                  let priced_order_with_shipping = process_shipping(&priced_order);
+
+    acceptance_criteria:
+      - add_shipping を部分適用で定義していること
+      - compose! マクロを使用して process_shipping 関数を定義していること
+      - free_vip_shipping と add_shipping が正しく合成されていること
+      - 既存のテストが全てパスすること
+      - VIP 顧客の配送料無料化が正しく動作すること
+
+  # ---------------------------------------------------------------------------
+  # Step 4: ガイドラインの追加（REQ-123）
+  # ---------------------------------------------------------------------------
+
+  - step: 4
+    title: compose! と pipe! の使い分けガイドラインをモジュールドキュメントに追加
+    requirements:
+      - REQ-123
+    description: |
+      workflow/mod.rs に compose! と pipe! の使い分けガイドラインを追加する。
+
+    files:
+      - path: /Users/lihs/workspace/functional-rusty/samples/order/src/workflow/mod.rs
+        action: modify
+        changes:
+          - description: ガイドラインのモジュールドキュメント追加
+            location: module documentation (lines 1-22)
+            before: |
+              //! ワークフロー型定義モジュール
+              //!
+              //! `PlaceOrder` ワークフローで使用する型を定義する。
+              //! 型による状態遷移を表現し、不正な状態を型レベルで防ぐ。
+              //!
+              //! # 状態遷移図
+              //!
+              //! ```text
+              //! UnvalidatedOrder -> ValidatedOrder -> PricedOrder -> PricedOrderWithShippingMethod -> PlaceOrderEvent[]
+              //! ```
+              //!
+              //! # モジュール構成
+              //!
+              //! - [`error_types`] - エラー型（バリデーション、価格計算、リモートサービス）
+              //! - [`unvalidated_types`] - 未検証の入力型
+              //! - [`validated_types`] - 検証済み型
+              //! - [`priced_types`] - 価格付き型
+              //! - [`shipping_types`] - 配送関連型
+              //! - [`acknowledgment_types`] - 確認メール関連型
+              //! - [`output_types`] - 出力イベント型
+              //! - [`events`] - イベント生成関数
+              //! - [`place_order`] - ワークフロー統合関数
+            after: |
+              //! ワークフロー型定義モジュール
+              //!
+              //! `PlaceOrder` ワークフローで使用する型を定義する。
+              //! 型による状態遷移を表現し、不正な状態を型レベルで防ぐ。
+              //!
+              //! # 状態遷移図
+              //!
+              //! ```text
+              //! UnvalidatedOrder -> ValidatedOrder -> PricedOrder -> PricedOrderWithShippingMethod -> PlaceOrderEvent[]
+              //! ```
+              //!
+              //! # 関数合成マクロの使い分け
+              //!
+              //! functional-rusty は2つの関数合成マクロを提供する。
+              //!
+              //! ## pipe! マクロ
+              //!
+              //! 値を即座に変換する場合に使用（データフロースタイル）。
+              //!
+              //! ```ignore
+              //! // 左から右へ値が流れる
+              //! let result = pipe!(value, f, g, h); // h(g(f(value)))
+              //! ```
+              //!
+              //! **適用場面**:
+              //! - 一度きりの変換チェーン
+              //! - 中間変数を省略したい場合
+              //! - データの流れを左から右で表現したい場合
+              //!
+              //! ## compose! マクロ
+              //!
+              //! 再利用可能な合成関数を生成する場合に使用（関数合成スタイル）。
+              //!
+              //! ```ignore
+              //! // 右から左への関数合成（数学的合成）
+              //! let composed = compose!(h, g, f);
+              //! let result = composed(value); // h(g(f(value)))
+              //! ```
+              //!
+              //! **適用場面**:
+              //! - 合成関数を複数箇所で再利用する場合
+              //! - 合成関数に名前を付けて意図を明確化したい場合
+              //! - 高階関数（map, filter_map 等）に関数を渡す場合
+              //! - Point-free スタイルを適用したい場合
+              //!
+              //! ## 使い分けの判断基準
+              //!
+              //! | 状況 | 推奨マクロ |
+              //! |------|-----------|
+              //! | 一度きりの変換 | pipe! |
+              //! | 複数箇所で再利用 | compose! |
+              //! | 合成関数に名前を付けたい | compose! |
+              //! | map/filter_map に渡す | compose!（複数関数の場合） |
+              //! | データフローを明示したい | pipe! |
+              //!
+              //! ## 例: イベント作成での使い分け
+              //!
+              //! ```ignore
+              //! // compose! で再利用可能な合成関数を定義
+              //! let to_shipping_event = compose!(
+              //!     PlaceOrderEvent::ShippableOrderPlaced,
+              //!     create_shipping_event
+              //! );
+              //!
+              //! // 合成関数を適用
+              //! let shipping_events = vec![to_shipping_event(priced_order)];
+              //!
+              //! // pipe! で一度きりの変換（compose! を使わない場合）
+              //! let shipping_events = vec![pipe!(
+              //!     priced_order,
+              //!     create_shipping_event,
+              //!     PlaceOrderEvent::ShippableOrderPlaced
+              //! )];
+              //! ```
+              //!
+              //! # モジュール構成
+              //!
+              //! - [`error_types`] - エラー型（バリデーション、価格計算、リモートサービス）
+              //! - [`unvalidated_types`] - 未検証の入力型
+              //! - [`validated_types`] - 検証済み型
+              //! - [`priced_types`] - 価格付き型
+              //! - [`shipping_types`] - 配送関連型
+              //! - [`acknowledgment_types`] - 確認メール関連型
+              //! - [`output_types`] - 出力イベント型
+              //! - [`events`] - イベント生成関数
+              //! - [`place_order`] - ワークフロー統合関数
+
+    acceptance_criteria:
+      - ガイドラインがモジュールドキュメントに記載されていること
+      - compose! と pipe! の違いが明確に説明されていること
+      - 判断基準の表が含まれていること
+      - 具体的なコード例が含まれていること
+
+  # ---------------------------------------------------------------------------
+  # Step 5: 高階関数パターンの文書化（REQ-122）
+  # ---------------------------------------------------------------------------
+
+  - step: 5
+    title: 高階関数への compose! 合成関数渡しパターンの文書化
+    requirements:
+      - REQ-122
+    description: |
+      現在の実装では単一関数を filter_map に渡しているため
+      compose! マクロの適用は不要。
+      将来的な拡張パターンをコメントとして文書化する。
+
+    files:
+      - path: /Users/lihs/workspace/functional-rusty/samples/order/src/workflow/events.rs
+        action: modify
+        changes:
+          - description: 高階関数への合成関数渡しパターンをコメントで文書化
+            location: create_shipping_event function (around lines 153-169)
+            before: |
+              #[must_use]
+              pub fn create_shipping_event(priced_order: &PricedOrder) -> ShippableOrderPlaced {
+                  let shipment_lines: Vec<ShippableOrderLine> = priced_order
+                      .lines()
+                      .iter()
+                      .filter_map(make_shipment_line)
+                      .collect();
+            after: |
+              #[must_use]
+              pub fn create_shipping_event(priced_order: &PricedOrder) -> ShippableOrderPlaced {
+                  // 現在は make_shipment_line を直接渡している（単一関数のため compose! 不要）
+                  // 追加の変換が必要になった場合:
+                  //   let transform = compose!(additional_transform, make_shipment_line);
+                  //   priced_order.lines().iter().filter_map(transform).collect()
+                  let shipment_lines: Vec<ShippableOrderLine> = priced_order
+                      .lines()
+                      .iter()
+                      .filter_map(make_shipment_line)
+                      .collect();
+
+    acceptance_criteria:
+      - 現在の実装は変更しないこと（単一関数のため compose! 不要）
+      - 将来的な拡張パターンがコメントで文書化されていること
+
+# =============================================================================
+# テスト計画
+# =============================================================================
+
+test_plan:
+
+  - step: 1
+    title: 法則検証テスト（REQ-124）
+    test_file: /Users/lihs/workspace/functional-rusty/samples/order/tests/phase12_compose_macro_tests.rs
+    test_cases:
+      - name: test_compose_associativity
+        description: |
+          結合法則の検証:
+          compose!(f, compose!(g, h)) == compose!(compose!(f, g), h)
+
+      - name: test_compose_left_identity
+        description: |
+          左恒等元の検証:
+          compose!(identity, f) == f
+
+      - name: test_compose_right_identity
+        description: |
+          右恒等元の検証:
+          compose!(f, identity) == f
+
+  - step: 2
+    title: ドメイン関数の合成テスト（REQ-124, REQ-125）
+    test_file: /Users/lihs/workspace/functional-rusty/samples/order/tests/phase12_compose_macro_tests.rs
+    test_cases:
+      - name: test_compose_shipping_event_creation
+        description: |
+          配送イベント作成関数の合成テスト:
+          compose!(PlaceOrderEvent::ShippableOrderPlaced, create_shipping_event)
+
+      - name: test_compose_pipeline_with_partial_application_normal_customer
+        description: |
+          部分適用と compose! の組み合わせテスト（通常顧客）
+
+      - name: test_compose_pipeline_with_partial_application_vip_customer
+        description: |
+          部分適用と compose! の組み合わせテスト（VIP 顧客）
+
+  - step: 3
+    title: 統合テスト（REQ-125）
+    test_file: /Users/lihs/workspace/functional-rusty/samples/order/tests/phase12_compose_macro_tests.rs
+    test_cases:
+      - name: test_create_events_with_compose_macro_generates_correct_order
+        description: |
+          create_events が正しいイベント順序を生成することを検証
+
+      - name: test_create_events_shipping_event_content_with_compose
+        description: |
+          compose! で生成された ShippableOrderPlaced の内容を検証
+
+      - name: test_shipping_pipeline_preserves_order_data
+        description: |
+          配送処理パイプラインが注文データを保持することを検証
+
+      - name: test_shipping_pipeline_with_international_address
+        description: |
+          国際配送の場合のテスト
+
+      - name: test_compose_produces_reusable_function
+        description: |
+          compose! で生成した関数が再利用可能であることを検証
+
+  - step: 4
+    title: 既存テストの回帰テスト
+    test_files:
+      - /Users/lihs/workspace/functional-rusty/samples/order/tests/phase11_pipe_macro_tests.rs
+      - /Users/lihs/workspace/functional-rusty/samples/order/tests/events_tests.rs
+      - /Users/lihs/workspace/functional-rusty/samples/order/tests/place_order_tests.rs
+      - /Users/lihs/workspace/functional-rusty/samples/order/tests/workflow_tests.rs
+    description: |
+      compose! マクロ適用後も既存のテストが全てパスすることを確認。
+
+# =============================================================================
+# 品質チェック
+# =============================================================================
+
+quality_checks:
+  - command: cargo fmt --all -- --check
+    description: コードフォーマットの確認
+
+  - command: cargo clippy --all-targets --all-features -- -D warnings
+    description: Clippy による静的解析
+
+  - command: cargo test --package order-taking-sample
+    description: 全テストの実行
+
+  - command: cargo test --package order-taking-sample --test phase12_compose_macro_tests
+    description: Phase 12 固有テストの実行
+
+  - command: cargo test --package order-taking-sample events
+    description: イベント関連テストの実行
+
+# =============================================================================
+# 設計判断の記録
+# =============================================================================
+
+design_decisions:
+
+  - id: DD-001
+    title: compose! と pipe! の使い分け
+    decision: |
+      - REQ-120（events.rs）: pipe! から compose! に変更
+        -> 再利用可能な to_shipping_event 関数として定義
+      - REQ-121（place_order.rs）: ネストした関数呼び出しから compose! に変更
+        -> 配送処理パイプラインを process_shipping として明示化
+      - REQ-113（billing_events）: pipe! を維持
+        -> 一度きりの変換であり、compose! への変更は不要
+    rationale: |
+      compose! マクロは「再利用可能な合成関数」を生成する場合に適している。
+      一方、pipe! マクロは「その場限りの変換チェーン」に適している。
+
+      events.rs の配送イベント作成は、意図を名前（to_shipping_event）で
+      明確化することでコードの可読性が向上する。
+
+      place_order.rs の配送処理パイプラインは、ネストした関数呼び出しより
+      process_shipping という名前付き合成関数の方が意図が明確になる。
+
+  - id: DD-002
+    title: 部分適用パターン
+    decision: |
+      add_shipping_info_to_order は高階関数（依存性注入パターン）のため、
+      クロージャで部分適用してから compose! で合成する。
+    rationale: |
+      ```rust
+      let add_shipping = |order: &PricedOrder| {
+          add_shipping_info_to_order(calculate_shipping_cost, order)
+      };
+      let process_shipping = compose!(free_vip_shipping, add_shipping);
+      ```
+
+      このパターンにより:
+      1. 依存性注入された関数を合成に組み込める
+      2. 合成関数が単一引数の関数として扱える
+      3. 将来的に calculate_shipping_cost を差し替え可能
+
+  - id: DD-003
+    title: 高階関数への渡しパターン
+    decision: |
+      現在の filter_map(make_shipment_line) は変更せず、
+      将来的な拡張パターンをコメントで文書化する。
+    rationale: |
+      単一関数を渡す場合は compose! を使用する必要がない。
+      追加の変換が必要になった場合にのみ compose! を適用する。
+
+      文書化により、チームメンバーが拡張時のパターンを理解できる。
+
+# =============================================================================
+# 依存関係
+# =============================================================================
+
+dependencies:
+  internal:
+    - name: functional_rusty::compose
+      usage: compose! マクロのインポート
+      import: "use functional_rusty::compose;"
+
+    - name: functional_rusty::identity
+      usage: 法則検証テストで使用
+      import: "use functional_rusty::identity;"
+
+  existing_tests:
+    - tests/phase11_pipe_macro_tests.rs
+    - tests/events_tests.rs
+    - tests/place_order_tests.rs
+    - tests/workflow_tests.rs
+
+# =============================================================================
+# 実装順序のまとめ
+# =============================================================================
+
+implementation_order:
+  1: テストファイルの作成（tests/phase12_compose_macro_tests.rs）
+  2: events.rs への compose! マクロ適用（REQ-120）
+  3: place_order.rs への compose! マクロ適用（REQ-121）
+  4: mod.rs へのガイドライン追加（REQ-123）
+  5: events.rs への高階関数パターンコメント追加（REQ-122）
+  6: 既存テストの実行と確認
+  7: 新規テストの実行と確認
+  8: 品質チェックの実行
+
+# =============================================================================
+# 成果物一覧
+# =============================================================================
+
+artifacts:
+  modified_files:
+    - path: /Users/lihs/workspace/functional-rusty/samples/order/src/workflow/events.rs
+      changes:
+        - compose! マクロのインポート追加
+        - create_events 関数の compose! マクロ適用
+        - create_shipping_event への高階関数パターンコメント追加
+
+    - path: /Users/lihs/workspace/functional-rusty/samples/order/src/workflow/place_order.rs
+      changes:
+        - compose! マクロのインポート追加
+        - 配送処理パイプラインの compose! マクロ適用
+
+    - path: /Users/lihs/workspace/functional-rusty/samples/order/src/workflow/mod.rs
+      changes:
+        - compose! と pipe! の使い分けガイドライン追加
+
+  new_files:
+    - path: /Users/lihs/workspace/functional-rusty/samples/order/tests/phase12_compose_macro_tests.rs
+      description: Phase 12 統合テスト（法則検証、ドメイン関数合成、統合テスト）

@@ -1,0 +1,948 @@
+# Order Taking Sample Application Roadmap
+# functional-rusty を使用した注文処理サンプルアプリケーション
+# 参照: Domain Modeling Made Functional (F#)
+
+version: "1.0.0"
+last_updated: "2026-01-01"  # Phase 13 added
+
+project:
+  name: order-taking-sample
+  description: |
+    F# の「Domain Modeling Made Functional」を参考に、
+    functional-rusty ライブラリを使用して Rust で
+    関数型ドメインモデリングを実現するサンプルアプリケーション。
+
+    ワークフロー: PlaceOrder（注文配置）
+    - 未検証注文を受け取る
+    - バリデーション
+    - 価格計算
+    - 配送情報追加
+    - 確認メール送信
+    - イベント生成
+
+  goals:
+    - functional-rusty の実用的な使用例を示す
+    - ドメイン駆動設計（DDD）と関数型プログラミングの統合
+    - 型安全なバリデーションと制約付き型の実装
+    - Effect System（eff! マクロ）の実践的使用
+    - Optics を使った不変データ構造の更新
+    - 永続データ構造の活用
+    - pipe! マクロによるデータフロースタイルの関数合成
+    - compose! マクロによる再利用可能な関数合成
+    - Docker + axum によるデプロイ可能なサーバー構成
+
+  dependencies:
+    - functional-rusty (local path)
+    - serde (for JSON serialization)
+    - thiserror (for error types)
+
+phases:
+  - id: phase_1
+    name: 基本型定義
+    name_en: Simple Types
+    status: completed
+    completed_at: "2025-12-31"
+    description: |
+      制約付きの基本型（String50, EmailAddress, OrderId 等）を定義する。
+      バリデーションロジックを含む newtype パターンの実装。
+    dependencies: []
+    notes: |
+      F# 参照コードの Common.SimpleTypes.fs に相当。
+      Smart Constructor パターンにより「Make Illegal States Unrepresentable」を実現。
+      全 17 要件（REQ-001〜REQ-017）を実装完了。
+      Clippy pedantic/nursery リント準拠、テストカバレッジ 100%。
+    deliverables:
+      - id: constrained_types
+        name: 制約付き型モジュール
+        description: |
+          - String50: 50文字以下の文字列
+          - EmailAddress: メールアドレス形式
+          - VipStatus: Normal/Vip
+          - ZipCode: 5桁の郵便番号
+          - UsStateCode: 米国州コード
+          - OrderId: 注文ID
+          - OrderLineId: 注文明細ID
+          - WidgetCode: W + 4桁
+          - GizmoCode: G + 3桁
+          - ProductCode: Widget または Gizmo
+          - UnitQuantity: 1-1000の整数
+          - KilogramQuantity: 0.05-100.00の小数
+          - OrderQuantity: Unit または Kilogram
+          - Price: 0.0-1000.00の小数
+          - BillingAmount: 0.0-10000.00の小数
+          - PromotionCode: プロモーションコード
+          - PdfAttachment: PDF添付ファイル
+        status: completed
+        priority: critical
+        artifacts:
+          - src/simple_types/mod.rs
+          - src/simple_types/error.rs
+          - src/simple_types/constrained_type.rs
+          - src/simple_types/string_types.rs
+          - src/simple_types/identifier_types.rs
+          - src/simple_types/product_types.rs
+          - src/simple_types/quantity_types.rs
+          - src/simple_types/price_types.rs
+          - src/simple_types/misc_types.rs
+        test_coverage:
+          unit_tests: 240
+          doc_tests: 21
+          total: 261
+
+  - id: phase_2
+    name: 複合型定義
+    name_en: Compound Types
+    status: completed
+    completed_at: "2025-12-31"
+    description: |
+      顧客情報、住所などの複合型を定義する。
+      Optics（Lens）を使った不変更新のサポート。
+    dependencies:
+      - phase_1
+    notes: |
+      F# 参照コードの Common.CompoundTypes.fs に相当。
+      functional-rusty-derive の #[derive(Lenses)] を活用。
+      Lens 合成による深いネストへの不変更新をサポート。
+      全 3 要件（REQ-018〜REQ-020）を実装完了。
+    deliverables:
+      - id: compound_types
+        name: 複合型モジュール
+        description: |
+          - PersonalName: 名前（first_name, last_name）
+          - CustomerInfo: 顧客情報（name, email_address, vip_status）
+          - Address: 住所（address_line1-4, city, zip_code, state, country）
+        status: completed
+        priority: critical
+        artifacts:
+          - src/compound_types/mod.rs
+          - src/compound_types/personal_name.rs
+          - src/compound_types/customer_info.rs
+          - src/compound_types/address.rs
+        test_coverage:
+          unit_tests: 57
+          doc_tests: 10
+          total: 67
+
+  - id: phase_3
+    name: ワークフロー型定義
+    name_en: Workflow Types
+    status: completed
+    completed_at: "2025-12-31"
+    description: |
+      PlaceOrder ワークフローに必要な入力/出力/エラー型を定義する。
+    dependencies:
+      - phase_2
+    notes: |
+      F# 参照コードの PlaceOrder.PublicTypes.fs, PlaceOrder.InternalTypes.fs に相当。
+      型による状態遷移を表現：UnvalidatedOrder → ValidatedOrder → PricedOrder → PricedOrderWithShippingMethod → PlaceOrderEvent[]
+      「Make Illegal States Unrepresentable」原則を適用。
+      functional-rusty-derive の #[derive(Lenses)] を活用。
+      thiserror による Error/Display 自動導出。
+      From トレイトによるエラー型変換（? 演算子対応）。
+      全 28 要件（REQ-021〜REQ-048）を実装完了。
+      Clippy pedantic/nursery リント準拠、テストカバレッジ 100%。
+    deliverables:
+      - id: workflow_types
+        name: ワークフロー型モジュール
+        description: |
+          公開型（入力）:
+          - UnvalidatedCustomerInfo: 未検証の顧客情報
+          - UnvalidatedAddress: 未検証の住所
+          - UnvalidatedOrderLine: 未検証の注文明細
+          - UnvalidatedOrder: 未検証の注文
+
+          公開型（出力）:
+          - OrderAcknowledgmentSent: 確認メール送信イベント
+          - ShippableOrderLine: 配送可能な注文明細
+          - ShippableOrderPlaced: 配送イベント
+          - BillableOrderPlaced: 請求イベント
+          - PlaceOrderEvent: 出力イベント（enum）
+
+          エラー型:
+          - WorkflowValidationError: バリデーションエラー（型エイリアス）
+          - PricingError: 価格計算エラー
+          - ServiceInfo: 外部サービス情報
+          - RemoteServiceError: 外部サービスエラー
+          - PlaceOrderError: ワークフローエラー（enum）
+
+          内部型:
+          - AddressValidationError: 住所検証エラー（enum）
+          - CheckedAddress: 検証済み住所（newtype）
+          - PricingMethod: 価格計算方式（Standard/Promotion）
+          - ValidatedOrderLine: 検証済み注文明細（Lenses）
+          - ValidatedOrder: 検証済み注文（Lenses）
+          - PricedOrderProductLine: 価格付き商品明細
+          - PricedOrderLine: 価格付き注文明細（enum）
+          - PricedOrder: 価格付き注文（Lenses）
+          - ShippingMethod: 配送方法（enum）
+          - ShippingInfo: 配送情報
+          - PricedOrderWithShippingMethod: 配送情報付き価格付き注文（Lenses）
+          - HtmlString: HTML文字列（newtype）
+          - OrderAcknowledgment: 確認メール内容
+          - SendResult: 送信結果（enum）
+        status: completed
+        priority: critical
+        artifacts:
+          - src/workflow/mod.rs
+          - src/workflow/error_types.rs
+          - src/workflow/unvalidated_types.rs
+          - src/workflow/validated_types.rs
+          - src/workflow/priced_types.rs
+          - src/workflow/shipping_types.rs
+          - src/workflow/acknowledgment_types.rs
+          - src/workflow/output_types.rs
+        test_coverage:
+          unit_tests: 160
+          doc_tests: 78
+          total: 238
+
+  - id: phase_4
+    name: バリデーション実装
+    name_en: Validation Implementation
+    status: completed
+    completed_at: "2025-12-31"
+    description: |
+      未検証注文から検証済み注文への変換ロジックを実装する。
+      Result と ? 演算子による早期リターンパターン。
+    dependencies:
+      - phase_3
+    notes: |
+      F# 参照コードの PlaceOrder.Implementation.fs のバリデーション部分に相当。
+      F# の result computation expression を Rust の Result + ? 演算子で再現。
+      依存性注入パターンにより外部サービス（住所検証、商品コード存在チェック）を関数引数として受け取る。
+      高階関数パターンによりテスト容易性と参照透過性を確保。
+      全 10 要件（REQ-049〜REQ-058）を実装完了。
+      Clippy pedantic/nursery リント準拠、テストカバレッジ 100%。
+    deliverables:
+      - id: validation_logic
+        name: バリデーションロジック
+        description: |
+          基本バリデーション関数:
+          - to_order_id: 注文ID文字列を OrderId に変換
+          - to_order_line_id: 注文明細ID文字列を OrderLineId に変換
+          - to_customer_info: UnvalidatedCustomerInfo を CustomerInfo に変換
+          - to_address: CheckedAddress を Address に変換
+          - to_order_quantity: 数量を OrderQuantity に変換
+          - create_pricing_method: プロモーションコードから PricingMethod を生成
+
+          依存関数を受け取る高階関数:
+          - to_checked_address: 外部サービスによる住所検証（CheckAddress を注入）
+          - to_product_code: 商品コード検証と存在チェック（CheckProduct を注入）
+          - to_validated_order_line: 注文明細のバリデーション（CheckProduct を注入）
+          - validate_order: メインバリデーション関数（CheckProduct, CheckAddress を注入）
+
+          依存関数型:
+          - CheckProductCodeExists: Fn(&ProductCode) -> bool
+          - CheckAddressExists: Fn(&UnvalidatedAddress) -> Result<CheckedAddress, AddressValidationError>
+        status: completed
+        priority: critical
+        artifacts:
+          - src/workflow/validation.rs
+        test_coverage:
+          unit_tests: 48
+          doc_tests: 13
+          total: 61
+
+  - id: phase_5
+    name: 価格計算実装
+    name_en: Pricing Implementation
+    status: completed
+    completed_at: "2025-12-31"
+    description: |
+      検証済み注文から価格付き注文への変換ロジックを実装する。
+      プロモーション価格のサポート。
+    dependencies:
+      - phase_4
+    notes: |
+      F# 参照コードの PlaceOrder.Implementation.fs の価格計算部分に相当。
+      F# の result computation expression を Rust の Result + ? 演算子で再現。
+      functional-rusty の Lazy 型を使用した標準価格取得関数のキャッシュ機構を実装。
+      依存性注入パターンにより価格取得関数を関数引数として受け取る。
+      高階関数パターンによりテスト容易性と参照透過性を確保。
+      全 5 要件（REQ-059〜REQ-063）を実装完了。
+      Clippy pedantic/nursery リント準拠、テストカバレッジ 96%。
+    deliverables:
+      - id: pricing_logic
+        name: 価格計算ロジック
+        description: |
+          価格計算関数:
+          - get_line_price: PricedOrderLine から価格を取得
+          - to_priced_order_line: ValidatedOrderLine に価格を付与
+          - add_comment_line: プロモーション適用時にコメント行を追加
+          - get_pricing_function: 価格取得関数のファクトリ（Lazy キャッシュ付き）
+          - price_order: ValidatedOrder から PricedOrder への変換
+
+          依存関数型:
+          - GetProductPrice: Fn(&ProductCode) -> Price
+          - TryGetProductPrice: Fn(&ProductCode) -> Option<Price>
+          - GetStandardPrices: Fn() -> Box<GetProductPrice>
+          - GetPromotionPrices: Fn(&PromotionCode) -> Box<TryGetProductPrice>
+          - GetPricingFunction: Fn(&PricingMethod) -> Rc<GetProductPrice>
+        status: completed
+        priority: critical
+        artifacts:
+          - src/workflow/pricing.rs
+        test_coverage:
+          unit_tests: 20
+          doc_tests: 5
+          total: 25
+
+  - id: phase_6
+    name: 配送・確認処理実装
+    name_en: Shipping and Acknowledgment
+    status: completed
+    completed_at: "2025-12-31"
+    description: |
+      配送コスト計算、VIP配送、確認メール送信を実装する。
+      F# の Async パターンを functional-rusty の IO モナドで実現。
+    dependencies:
+      - phase_5
+    notes: |
+      F# 参照コードの PlaceOrder.Implementation.fs の配送・確認処理部分に相当。
+      F# のアクティブパターンを Rust の enum + match で再現。
+      F# の Async を functional-rusty の IO モナドで再現。
+      functional-rusty の Lens を使用した不変更新パターンを適用。
+      依存性注入パターンにより外部サービス（メール送信）を関数引数として受け取る。
+      全 6 要件（REQ-064〜REQ-069）を実装完了。
+      Clippy pedantic/nursery リント準拠、テストカバレッジ 99%。
+    deliverables:
+      - id: shipping_logic
+        name: 配送ロジック
+        description: |
+          配送地域の分類:
+          - ShippingRegion: 配送地域 enum（UsLocalState/UsRemoteState/International）
+          - classify_shipping_region: 住所から配送地域を分類
+
+          配送コスト計算:
+          - calculate_shipping_cost: 地域に応じた配送コスト計算（$5/$10/$20）
+          - add_shipping_info_to_order: 配送情報付き注文の生成
+          - free_vip_shipping: VIP 顧客への無料配送適用（Lens 使用）
+
+          依存関数型:
+          - CalculateShippingCost: Fn(&PricedOrder) -> Price
+          - AddShippingInfoToOrder: Fn(&CalculateCost, &PricedOrder) -> PricedOrderWithShippingMethod
+          - FreeVipShipping: Fn(PricedOrderWithShippingMethod) -> PricedOrderWithShippingMethod
+        status: completed
+        priority: high
+        artifacts:
+          - src/workflow/shipping.rs
+        test_coverage:
+          unit_tests: 30
+          doc_tests: 5
+          total: 35
+
+      - id: acknowledgment_logic
+        name: 確認メール送信ロジック
+        description: |
+          確認メール送信（IO モナド対応）:
+          - acknowledge_order: 確認メール生成・送信（IO<Option<OrderAcknowledgmentSent>> を返す）
+
+          依存関数型:
+          - CreateOrderAcknowledgmentLetter: Fn(&PricedOrderWithShippingMethod) -> HtmlString
+          - SendOrderAcknowledgment: Fn(&OrderAcknowledgment) -> IO<SendResult>
+          - AcknowledgeOrder: Fn(&CreateLetter, &SendAck, &Order) -> IO<Option<OrderAcknowledgmentSent>>
+        status: completed
+        priority: high
+        artifacts:
+          - src/workflow/shipping.rs (acknowledge_order 関数を含む)
+        test_coverage:
+          unit_tests: 5
+          doc_tests: 2
+          total: 7
+
+  - id: phase_7
+    name: イベント生成・ワークフロー統合
+    name_en: Events and Workflow Integration
+    status: completed
+    completed_at: "2026-01-01"
+    description: |
+      出力イベントの生成と、全ステップを統合したワークフローを実装する。
+    dependencies:
+      - phase_6
+    notes: |
+      F# 参照コードの PlaceOrder.Implementation.fs のイベント生成・ワークフロー統合部分に相当。
+      F# の List.choose を Rust の filter_map で再現。
+      F# の asyncResult computation expression を Rust の IO<Result<T, E>> で再現。
+      依存性注入パターンにより全ての外部依存を関数引数として受け取る。
+      functional-rusty の IO モナドによる副作用の遅延実行。
+      全 5 要件（REQ-070〜REQ-074）を実装完了。
+      Clippy pedantic/nursery リント準拠、テストカバレッジ 99%。
+    deliverables:
+      - id: event_creation
+        name: イベント生成ロジック
+        description: |
+          配送明細変換:
+          - make_shipment_line: PricedOrderLine から ShippableOrderLine への変換
+
+          イベント生成:
+          - create_shipping_event: 配送イベント生成（ShippableOrderPlaced）
+          - create_billing_event: 請求イベント生成（Option<BillableOrderPlaced>）
+          - create_events: 全イベント統合（Vec<PlaceOrderEvent>）
+
+          イベント順序:
+          1. AcknowledgmentSent（存在する場合）
+          2. ShippableOrderPlaced（常に生成）
+          3. BillableOrderPlaced（請求金額 > 0 の場合）
+        status: completed
+        priority: high
+        artifacts:
+          - src/workflow/events.rs
+        test_coverage:
+          unit_tests: 27
+          integration_tests: 5
+          total: 32
+
+      - id: workflow_integration
+        name: ワークフロー統合
+        description: |
+          place_order: 全ステップを統合したメインワークフロー
+
+          処理フロー:
+          1. validate_order - 未検証注文を検証
+          2. price_order - 価格計算
+          3. add_shipping_info_to_order - 配送情報追加
+          4. free_vip_shipping - VIP 無料配送適用
+          5. acknowledge_order - 確認メール送信（IO モナド）
+          6. create_events - イベント生成
+
+          戻り値: IO<Result<Vec<PlaceOrderEvent>, PlaceOrderError>>
+
+          依存関数型:
+          - CheckProductCodeExists: 製品存在確認
+          - CheckAddressExists: 住所検証
+          - GetPricingFunction: 価格取得関数のファクトリ
+          - CalculateShippingCost: 配送コスト計算
+          - CreateOrderAcknowledgmentLetter: 確認メール生成
+          - SendOrderAcknowledgment: 確認メール送信（IO を返す）
+        status: completed
+        priority: critical
+        artifacts:
+          - src/workflow/place_order.rs
+        test_coverage:
+          unit_tests: 5
+          integration_tests: 9
+          total: 14
+
+  - id: phase_8
+    name: DTO・API層
+    name_en: DTO and API Layer
+    status: completed
+    completed_at: "2026-01-01"
+    description: |
+      JSON シリアライズ用 DTO と API エンドポイントを実装する。
+    dependencies:
+      - phase_7
+    notes: |
+      F# 参照コードの PlaceOrder.Dto.fs, PlaceOrder.Api.fs に相当。
+      serde + serde_json を使用した JSON シリアライズ/デシリアライズ。
+      隣接タグ形式（tag/content）による型安全な enum シリアライズ。
+      Decimal は serde-with-str で文字列表現（精度保持）。
+      IO モナドによる副作用の分離（place_order_api は IO<HttpResponse> を返す）。
+      依存性注入パターンによりダミー関数を使用したテスト実行が可能。
+      全 16 要件（REQ-075〜REQ-090）を実装完了。
+      Clippy pedantic/nursery リント準拠、テストカバレッジ 97%。
+    deliverables:
+      - id: dto_types
+        name: DTO 型定義
+        description: |
+          入力 DTO:
+          - CustomerInfoDto: 顧客情報の入力 DTO
+          - AddressDto: 住所の入出力 DTO
+          - OrderFormLineDto: 注文明細行の入力 DTO
+          - OrderFormDto: 注文フォーム全体の入力 DTO
+
+          出力 DTO:
+          - ShippableOrderLineDto: 配送対象明細の出力 DTO
+          - ShippableOrderPlacedDto: 配送イベントの出力 DTO
+          - BillableOrderPlacedDto: 請求イベントの出力 DTO
+          - OrderAcknowledgmentSentDto: 確認メール送信イベントの出力 DTO
+          - PricedOrderLineDto: 価格付き明細の出力 DTO（enum 形式）
+          - PlaceOrderEventDto: イベント統合 DTO（隣接タグ形式）
+          - PlaceOrderErrorDto: エラー DTO（内部タグ形式）
+
+          変換関数:
+          - to_unvalidated_*: DTO から Domain への変換（純粋関数）
+          - from_domain: Domain から DTO への変換（純粋関数）
+        status: completed
+        priority: high
+        artifacts:
+          - src/dto/mod.rs
+          - src/dto/input.rs
+          - src/dto/output.rs
+          - src/dto/error.rs
+        test_coverage:
+          unit_tests: 67
+          doc_tests: 0
+          total: 67
+
+      - id: api_layer
+        name: API 層
+        description: |
+          API 型:
+          - HttpRequest: HTTP リクエスト型
+          - HttpResponse: HTTP レスポンス型
+
+          ダミー依存関数:
+          - check_product_exists: 製品存在確認（常に true）
+          - check_address_exists: 住所検証（常に成功）
+          - get_pricing_function: 価格取得関数（PricingMethod 対応）
+          - calculate_shipping_cost: 配送コスト計算
+          - create_acknowledgment_letter: 確認メール生成
+          - send_acknowledgment: 確認メール送信（IO を返す）
+
+          API エンドポイント:
+          - place_order_api: HTTP リクエスト処理（IO<HttpResponse> を返す）
+            1. JSON デシリアライズ
+            2. DTO から Domain への変換
+            3. ワークフロー実行
+            4. 結果を DTO に変換
+            5. JSON シリアライズ
+        status: completed
+        priority: medium
+        artifacts:
+          - src/api/mod.rs
+          - src/api/types.rs
+          - src/api/dependencies.rs
+          - src/api/place_order_api.rs
+        test_coverage:
+          unit_tests: 59
+          integration_tests: 12
+          total: 71
+
+  - id: phase_9
+    name: テスト・ドキュメント
+    name_en: Tests and Documentation
+    status: completed
+    completed_at: "2026-01-01"
+    description: |
+      単体テスト、統合テスト、使用例ドキュメントを作成する。
+    dependencies:
+      - phase_8
+    notes: |
+      既存の src 内テストを補完する形で外部テストファイルを作成。
+      proptest による Smart Constructor 法則、Monad 法則、DTO 往復変換の検証を実装。
+      functional-rusty ライブラリの使用例として価値あるドキュメントを作成。
+      全 11 要件（REQ-091〜REQ-101）を実装完了。
+      Clippy pedantic/nursery リント準拠、テストカバレッジ 98.89%。
+    deliverables:
+      - id: unit_tests
+        name: 補完単体テスト
+        description: |
+          各モジュールの補完単体テスト
+          - 境界値テスト、エラーメッセージ検証
+          - Hash/Eq 一貫性テスト
+          - Lens 操作テスト
+          - IO モナド遅延実行テスト
+          - Lazy キャッシュ動作テスト
+        status: completed
+        priority: high
+        artifacts:
+          - tests/simple_types_tests.rs
+          - tests/compound_types_tests.rs
+          - tests/validation_tests.rs
+          - tests/pricing_tests.rs
+          - tests/workflow_tests.rs
+        test_coverage:
+          unit_tests: 176
+          doc_tests: 0
+          total: 176
+
+      - id: property_tests
+        name: proptest 法則検証
+        description: |
+          proptest による法則検証
+          - Smart Constructor 不変条件
+          - Result/Option Monad 法則（Left Identity, Right Identity, Associativity）
+          - DTO 往復変換（情報損失なし検証）
+        status: completed
+        priority: high
+        artifacts:
+          - tests/simple_types_laws.rs
+          - tests/monad_laws.rs
+          - tests/dto_roundtrip_laws.rs
+        test_coverage:
+          proptest_cases: 63
+          total: 63
+
+      - id: integration_tests
+        name: 統合テスト
+        description: |
+          エンドツーエンドのワークフローテスト
+          - Widget/Gizmo/混合注文フロー
+          - VIP 顧客フロー（無料配送）
+          - プロモーションコードフロー
+          - バリデーション失敗フロー
+        status: completed
+        priority: high
+        artifacts:
+          - tests/integration_tests.rs
+        test_coverage:
+          integration_tests: 37
+          total: 37
+
+      - id: documentation
+        name: ドキュメント
+        description: |
+          使用例とベストプラクティスのドキュメント
+          - usage.md: クイックスタート、制約付き型、ワークフロー実装、functional-rusty 活用
+          - architecture.md: 設計原則、モジュール構成、状態遷移、F# 版との比較
+        status: completed
+        priority: medium
+        artifacts:
+          - docs/usage.md
+          - docs/architecture.md
+
+  - id: phase_10
+    name: Effect System・永続データ構造の実践的使用
+    name_en: Effect System and Persistent Data Structures
+    status: completed
+    completed_at: "2026-01-01"
+    description: |
+      roadmap goals の未達成項目を解消する。
+      eff! マクロの実践的使用と永続データ構造の活用を実装。
+    dependencies:
+      - phase_9
+    notes: |
+      goals の達成状況を調査し、未達成/部分的な項目を特定:
+      - Effect System（eff! マクロ）: 部分的 → 完了
+      - 永続データ構造の活用: 未達成 → 完了
+
+      eff! マクロを使用したログ付き確認メール送信機能を追加。
+      PersistentHashMap を使用した価格カタログを実装。
+      全 8 要件（REQ-102〜REQ-109）を実装完了。
+      Clippy pedantic/nursery リント準拠。
+    deliverables:
+      - id: effect_system_usage
+        name: eff! マクロの実践的使用
+        description: |
+          eff! マクロを使用した IO 操作のチェーン
+          - acknowledge_order_with_logging: ログ付き確認メール送信
+          - 複数の IO 操作を do 記法スタイルで合成
+        status: completed
+        priority: high
+        artifacts:
+          - src/workflow/shipping.rs (acknowledge_order_with_logging 追加)
+          - tests/shipping_eff_macro_tests.rs
+        test_coverage:
+          unit_tests: 8
+          total: 8
+
+      - id: persistent_data_structure_usage
+        name: 永続データ構造の活用
+        description: |
+          PersistentHashMap を使用した価格カタログ
+          - PricingCatalog: 不変の価格カタログ型
+          - create_catalog_pricing_function: カタログベースの価格取得関数
+          - 構造的共有による効率的な不変更新
+        status: completed
+        priority: high
+        artifacts:
+          - src/workflow/pricing_catalog.rs
+          - tests/pricing_catalog_tests.rs
+          - tests/pricing_catalog_laws.rs
+          - tests/phase10_integration_tests.rs
+        test_coverage:
+          unit_tests: 34
+          proptest: 11
+          integration_tests: 7
+          total: 52
+
+  - id: phase_11
+    name: pipe! マクロによるデータフロー変換
+    name_en: Pipe Macro for Data Flow Transformation
+    status: completed
+    completed_at: "2026-01-01"
+    description: |
+      F# の |> パイプ演算子を使用している処理を
+      functional-rusty の pipe! マクロで置き換える。
+      データフロースタイルの関数合成を実現。
+    dependencies:
+      - phase_10
+    notes: |
+      F# 参照コードを調査し、pipe! マクロの適用箇所を選定。
+      Rust ではメソッドチェーンが主流のため、効果的な箇所のみに適用。
+
+      適用箇所:
+      - create_events 関数: 複数の純粋関数を連鎖させるイベント作成パイプライン
+        - pipe!(priced_order, create_shipping_event, PlaceOrderEvent::ShippableOrderPlaced)
+        - pipe!(priced_order, create_billing_event)
+
+      適用しなかった箇所（設計判断）:
+      - DTO 変換: メソッドチェーンで十分な可読性
+      - 値取得: Rust のメソッドチェーン（.value()）が自然
+      - 単一関数呼び出し: pipe! のオーバーヘッドが不要
+
+      全 8 要件（REQ-110〜REQ-117）を検討し、4 要件を適用推奨、4 要件を非推奨と判断。
+      REQ-111（create_events）と REQ-117（統合テスト）を実装。
+      Clippy pedantic/nursery リント準拠、テストカバレッジ 100%。
+    deliverables:
+      - id: pipe_event_creation
+        name: イベント作成パイプラインの pipe! マクロ適用
+        description: |
+          create_events 関数で pipe! マクロを使用
+          - 命令型（mutable Vec + push）から宣言型（immutable Vec + concat）へ変更
+          - shipping_events の作成に pipe!(priced_order, create_shipping_event, wrapper) パターン
+          - billing_events の作成に pipe!(priced_order, create_billing_event) パターン
+        status: completed
+        priority: high
+        artifacts:
+          - src/workflow/events.rs
+        test_coverage:
+          regions: 68/68 (100%)
+          functions: 4/4 (100%)
+          lines: 48/48 (100%)
+
+      - id: pipe_integration_tests
+        name: pipe! マクロ統合テスト
+        description: |
+          pipe! マクロを使用した関数の動作を検証
+          - create_events のイベント順序・内容テスト（3 テスト）
+          - create_shipping_event の PDF 名生成テスト（3 テスト）
+          - create_billing_event の条件付き生成テスト（3 テスト）
+          - pipe! 合成とデータ整合性テスト（2 テスト）
+        status: completed
+        priority: high
+        artifacts:
+          - tests/phase11_pipe_macro_tests.rs
+        test_coverage:
+          test_cases: 11
+          total: 11
+
+      - id: pipe_dto_conversion
+        name: DTO 変換の pipe! マクロ適用
+        description: |
+          設計判断により適用しない。
+          Rust のメソッドチェーンが十分に可読であるため。
+        status: not_applicable
+        priority: low
+        design_decision: |
+          Rust では self.method() 形式が自然であり、
+          F# のパイプ（value |> function）を無理に再現する必要はない。
+
+      - id: pipe_value_extraction
+        name: 値取得の pipe! マクロ適用
+        description: |
+          設計判断により適用しない。
+          priced_order.amount_to_bill().value() のようなメソッドチェーンが
+          pipe! より簡潔で可読性が高い。
+        status: not_applicable
+        priority: low
+        design_decision: |
+          単一の値取得やメソッドチェーン 2 つ程度には pipe! は過剰。
+
+  - id: phase_12
+    name: compose! マクロによる関数合成
+    name_en: Function Composition with compose! Macro
+    status: completed
+    completed_at: "2026-01-01"
+    description: |
+      F# の関数合成パターンを functional-rusty の compose! マクロで表現する。
+      再利用可能な合成関数を事前定義し、高階関数パターンを実現。
+    dependencies:
+      - phase_11
+    notes: |
+      F# 参照コードを調査し、compose! マクロの適用箇所を選定。
+      pipe! との使い分けを明確にし、ガイドラインを文書化。
+
+      適用箇所:
+      - events.rs: to_shipping_event = compose!(wrapper, create_shipping_event)
+      - place_order.rs: process_shipping = compose!(free_vip_shipping, add_shipping)
+
+      compose! vs pipe! の使い分け:
+      - compose!: 再利用可能な関数を事前定義（名前を付けて意図を明確化）
+      - pipe!: データを即座に変換（一度きりの変換チェーン）
+
+      法則検証テスト:
+      - 結合法則: compose!(f, compose!(g, h)) == compose!(compose!(f, g), h)
+      - 左恒等元: compose!(identity, f) == f
+      - 右恒等元: compose!(f, identity) == f
+
+      全 6 要件（REQ-120〜REQ-125）を実装完了。
+      Clippy pedantic/nursery リント準拠、テストカバレッジ 100%。
+    deliverables:
+      - id: compose_event_creators
+        name: イベント作成関数の compose! 合成
+        description: |
+          配送イベント作成を compose! マクロで合成関数として定義
+          - to_shipping_event: compose!(PlaceOrderEvent::ShippableOrderPlaced, create_shipping_event)
+          create_events 関数内で使用
+        status: completed
+        priority: high
+        artifacts:
+          - src/workflow/events.rs
+        test_coverage:
+          regions: 135/135 (100%)
+          functions: 6/6 (100%)
+          lines: 80/80 (100%)
+
+      - id: compose_shipping_processor
+        name: 配送処理パイプラインの compose! 合成
+        description: |
+          配送処理を compose! マクロで合成
+          - add_shipping: クロージャで calculate_shipping_cost を部分適用
+          - process_shipping: compose!(free_vip_shipping, add_shipping)
+          place_order 関数内で使用
+        status: completed
+        priority: medium
+        artifacts:
+          - src/workflow/place_order.rs
+        test_coverage:
+          regions: 122/122 (100%)
+          functions: 21/21 (100%)
+          lines: 105/105 (100%)
+
+      - id: compose_guidelines
+        name: compose! と pipe! の使い分けガイドライン
+        description: |
+          mod.rs にガイドラインを追加
+          - 使い分けの判断基準表
+          - 具体的なコード例
+          - イベント作成での使い分け説明
+        status: completed
+        priority: high
+        artifacts:
+          - src/workflow/mod.rs
+
+      - id: compose_integration_tests
+        name: compose! マクロ統合テスト
+        description: |
+          compose! マクロを使用した関数の動作を検証
+          - 法則検証テスト（結合法則、左右恒等元）
+          - ドメイン関数の合成テスト
+          - 部分適用との組み合わせテスト
+          - 統合テスト（create_events、配送処理）
+          - 再利用性テスト
+        status: completed
+        priority: high
+        artifacts:
+          - tests/phase12_compose_macro_tests.rs
+        test_coverage:
+          test_cases: 11
+          total: 11
+
+  - id: phase_13
+    name: Docker + axum サーバー実装
+    name_en: Docker + axum Server Implementation
+    status: completed
+    completed_at: "2026-01-01"
+    description: |
+      order-taking サンプルを Docker 環境で動作する axum サーバーとして構成する。
+      既存の IO モナドパターンを維持しつつ、axum の async/await 環境と統合する。
+    dependencies:
+      - phase_12
+    notes: |
+      axum で POST /place-order エンドポイントを実装。
+      IO モナドパターンを維持し、axum ハンドラを「世界の端」として run_unsafe() を呼び出す。
+      マルチステージビルドによる Docker イメージの最小化（Alpine ベース）。
+      既存の place_order_api 関数をそのまま利用し、変更を最小化。
+      全 9 要件（REQ-126〜REQ-134）を実装完了。
+      Clippy pedantic/nursery リント準拠、テストカバレッジ 100%。
+    deliverables:
+      - id: axum_dependencies
+        name: Cargo.toml 更新
+        description: |
+          axum, tokio, tower-http, tracing 依存を追加。
+          バイナリターゲット（order-taking-server）を定義。
+        status: completed
+        priority: critical
+        artifacts:
+          - Cargo.toml
+
+      - id: axum_handler
+        name: axum ハンドラ実装
+        description: |
+          axum 用のハンドラ関数を実装。
+          - place_order_handler: リクエストを受け取り place_order_api を呼び出す
+          - IO モナドの run_unsafe() を「世界の端」で呼び出す
+        status: completed
+        priority: critical
+        artifacts:
+          - src/api/axum_handler.rs
+        test_coverage:
+          unit_tests: 3
+          integration_tests: 7
+          total: 10
+
+      - id: main_entrypoint
+        name: main.rs 実装
+        description: |
+          axum サーバーのエントリポイント。
+          - tracing_subscriber 初期化
+          - Router に /place-order POST エンドポイントを登録
+          - 0.0.0.0:8080 でリッスン
+        status: completed
+        priority: critical
+        artifacts:
+          - src/main.rs
+
+      - id: docker_files
+        name: Docker 構成ファイル
+        description: |
+          マルチステージビルドで Docker イメージを作成。
+          - Dockerfile: rust:1.83-alpine → alpine:3.20
+          - docker-compose.yml: 開発環境用
+          - .dockerignore: ビルド除外設定
+        status: completed
+        priority: critical
+        artifacts:
+          - Dockerfile
+          - docker-compose.yml
+          - .dockerignore
+
+      - id: axum_integration_tests
+        name: axum 統合テスト
+        description: |
+          axum ハンドラの動作を検証。
+          - 成功ケース（Widget/Gizmo 注文）
+          - JSON パースエラー
+          - バリデーションエラー
+        status: completed
+        priority: high
+        artifacts:
+          - tests/axum_handler_tests.rs
+        test_coverage:
+          test_cases: 7
+          total: 7
+
+# ステータス定義
+status_definitions:
+  not_started: 未着手
+  in_progress: 進行中
+  completed: 完了
+  blocked: ブロック中
+
+# 優先度定義
+priority_definitions:
+  critical: 必須 - ワークフロー実行に必要
+  high: 高 - 重要な機能
+  medium: 中 - あると便利な機能
+  low: 低 - 将来的に実装を検討
+
+# functional-rusty 機能の使用箇所
+functional_rusty_usage:
+  typeclass:
+    - Functor: Result/Option の map
+    - Monad: Result/Option の flat_map
+    - Semigroup: 文字列結合、リスト結合
+    - Monoid: 空リスト、空文字列の単位元
+    - Foldable: リストの畳み込み
+    - Traversable: Result<Vec<T>> への変換
+
+  compose:
+    - pipe!: データ変換パイプライン（create_events でのイベント作成パイプライン）
+    - compose!: 関数合成（events.rs の to_shipping_event、place_order.rs の process_shipping）
+
+  control:
+    - Either: 二値の選択
+    - Lazy: 遅延評価（価格キャッシュ等）
+
+  persistent:
+    - PersistentHashMap: 価格カタログ（PricingCatalog）
+
+  optics:
+    - Lens: 構造体フィールドへのアクセス
+    - "#[derive(Lenses)]": 自動 Lens 生成
+
+  effect:
+    - IO: 副作用の遅延実行
+    - eff!: do 記法風の IO チェーン（acknowledge_order_with_logging）

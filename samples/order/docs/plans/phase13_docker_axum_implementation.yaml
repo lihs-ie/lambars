@@ -1,0 +1,256 @@
+# Phase 13: Docker + axum サーバー実装 - 実装計画
+# TDD アプローチで実装を進める
+
+version: "1.0.0"
+created_at: "2026-01-01"
+phase: 13
+requirements_reference: docs/requirements/phase13_docker_axum.yaml
+
+implementation_steps:
+  - step: 1
+    name: Cargo.toml 更新
+    requirements: [REQ-126]
+    description: |
+      axum, tokio, tower-http, tracing 依存を追加し、
+      バイナリターゲットを定義する。
+    files:
+      - path: Cargo.toml
+        action: modify
+        changes:
+          - axum = "0.8" を dependencies に追加
+          - tokio = { version = "1", features = ["rt-multi-thread", "macros"] } を追加
+          - tower-http = { version = "0.6", features = ["trace"] } を追加
+          - tracing = "0.1" を追加
+          - tracing-subscriber = { version = "0.3", features = ["env-filter"] } を追加
+          - "[[bin]]" セクションを追加
+    validation:
+      - cargo check --package order-taking-sample
+
+  - step: 2
+    name: axum_handler.rs 実装
+    requirements: [REQ-127]
+    description: |
+      axum 用のハンドラ関数を実装する。
+      place_order_handler は既存の place_order_api を呼び出し、
+      IO モナドを実行して結果を返す。
+    files:
+      - path: src/api/axum_handler.rs
+        action: create
+        content_overview: |
+          - place_order_handler: async fn(String) -> impl IntoResponse
+          - HttpRequest 構築 → place_order_api 呼び出し → run_unsafe → axum レスポンス
+    validation:
+      - cargo check --package order-taking-sample
+
+  - step: 3
+    name: api/mod.rs 更新
+    requirements: [REQ-129]
+    description: |
+      axum_handler モジュールを api モジュールに追加する。
+    files:
+      - path: src/api/mod.rs
+        action: modify
+        changes:
+          - pub mod axum_handler を追加
+    validation:
+      - cargo check --package order-taking-sample
+
+  - step: 4
+    name: main.rs 実装
+    requirements: [REQ-128]
+    description: |
+      axum サーバーのエントリポイントを実装する。
+    files:
+      - path: src/main.rs
+        action: create
+        content_overview: |
+          - #[tokio::main] async fn main()
+          - tracing_subscriber 初期化
+          - Router::new().route("/place-order", post(place_order_handler))
+          - axum::serve(listener, app).await
+    validation:
+      - cargo build --package order-taking-sample --bin order-taking-server
+
+  - step: 5
+    name: axum ハンドラテスト作成
+    requirements: [REQ-133]
+    description: |
+      axum ハンドラの単体テストを作成する。
+    files:
+      - path: tests/axum_handler_tests.rs
+        action: create
+        content_overview: |
+          - test_place_order_handler_success: 有効な注文で 200 を返す
+          - test_place_order_handler_validation_error: 無効な注文で 400 を返す
+          - test_place_order_handler_json_parse_error: 不正な JSON で 400 を返す
+    validation:
+      - cargo test --package order-taking-sample axum_handler
+
+  - step: 6
+    name: Docker 関連ファイル作成
+    requirements: [REQ-130, REQ-131, REQ-132]
+    description: |
+      Dockerfile, docker-compose.yml, .dockerignore を作成する。
+    files:
+      - path: Dockerfile
+        action: create
+        content_overview: |
+          - FROM rust:1.83-alpine AS builder
+          - FROM alpine:3.20 AS runtime
+          - マルチステージビルド
+      - path: docker-compose.yml
+        action: create
+        content_overview: |
+          - order-taking サービス定義
+          - ポート 8080 マッピング
+      - path: .dockerignore
+        action: create
+        content_overview: |
+          - target/, .git/, tests/, docs/ 除外
+    validation:
+      - docker build -t order-taking:test -f samples/order/Dockerfile . (from functional-rusty root)
+
+  - step: 7
+    name: 品質チェック
+    requirements: [REQ-126, REQ-127, REQ-128, REQ-129, REQ-130, REQ-131, REQ-132, REQ-133]
+    description: |
+      全ての品質チェックを実行する。
+    validation:
+      - cargo fmt --package order-taking-sample -- --check
+      - cargo clippy --package order-taking-sample -- -D warnings
+      - cargo test --package order-taking-sample
+
+  - step: 8
+    name: roadmap.yaml 更新
+    requirements: [REQ-134]
+    description: |
+      Phase 13 を roadmap.yaml に追加する。
+    files:
+      - path: docs/roadmap.yaml
+        action: modify
+        changes:
+          - Phase 13 エントリを追加
+          - 全 deliverables を記載
+
+code_templates:
+  axum_handler_rs: |
+    //! axum ハンドラ
+    //!
+    //! axum フレームワーク用のハンドラ関数を提供する。
+    //! IO モナドの run_unsafe() を「世界の端」で呼び出す。
+
+    use axum::{http::StatusCode, response::IntoResponse};
+
+    use crate::api::{place_order_api, HttpRequest};
+
+    /// POST /place-order ハンドラ
+    ///
+    /// JSON リクエストを受け取り、place_order_api を呼び出し、
+    /// IO モナドを実行してレスポンスを返す。
+    ///
+    /// # Arguments
+    ///
+    /// * `body` - リクエストボディ（JSON 文字列）
+    ///
+    /// # Returns
+    ///
+    /// axum のレスポンス型
+    pub async fn place_order_handler(body: String) -> impl IntoResponse {
+        // HttpRequest を構築
+        let request = HttpRequest::new(body);
+
+        // IO モナドを取得
+        let io_response = place_order_api(&request);
+
+        // IO を実行（世界の端）
+        let response = io_response.run_unsafe();
+
+        // axum レスポンスに変換
+        (
+            StatusCode::from_u16(response.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            response.body().to_string(),
+        )
+    }
+
+  main_rs: |
+    //! order-taking-server
+    //!
+    //! axum を使用した注文処理 HTTP サーバー。
+
+    use axum::{routing::post, Router};
+    use std::net::SocketAddr;
+    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+    use order_taking_sample::api::axum_handler::place_order_handler;
+
+    #[tokio::main]
+    async fn main() {
+        // トレーシング初期化
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "order_taking_server=info,tower_http=debug".into()),
+            )
+            .with(tracing_subscriber::fmt::layer())
+            .init();
+
+        // ルーター構築
+        let app = Router::new().route("/place-order", post(place_order_handler));
+
+        // サーバー起動
+        let address = SocketAddr::from(([0, 0, 0, 0], 8080));
+        tracing::info!("Starting server on {}", address);
+
+        let listener = tokio::net::TcpListener::bind(address).await.unwrap();
+        axum::serve(listener, app).await.unwrap();
+    }
+
+  dockerfile: |
+    # ============================================================================
+    # Stage 1: Builder
+    # ============================================================================
+    FROM rust:1.83-alpine AS builder
+
+    # ビルド依存のインストール
+    RUN apk add --no-cache musl-dev
+
+    # ワークスペース構造を再現
+    WORKDIR /workspace
+
+    # functional-rusty 本体をコピー
+    COPY Cargo.toml Cargo.lock ./
+    COPY src ./src
+    COPY functional-rusty-derive ./functional-rusty-derive
+
+    # サンプルプロジェクトをコピー
+    COPY samples/order ./samples/order
+
+    # リリースビルド
+    WORKDIR /workspace/samples/order
+    RUN cargo build --release --bin order-taking-server
+
+    # ============================================================================
+    # Stage 2: Runtime
+    # ============================================================================
+    FROM alpine:3.20 AS runtime
+
+    # セキュリティ: 非 root ユーザー作成
+    RUN addgroup -S app && adduser -S app -G app
+
+    # バイナリをコピー
+    COPY --from=builder /workspace/samples/order/target/release/order-taking-server /usr/local/bin/
+
+    # ユーザー切り替え
+    USER app
+
+    # ポート公開
+    EXPOSE 8080
+
+    # エントリポイント
+    ENTRYPOINT ["order-taking-server"]
+
+quality_checks:
+  - cargo fmt --package order-taking-sample -- --check
+  - cargo clippy --package order-taking-sample -- -D warnings
+  - cargo test --package order-taking-sample

@@ -1,0 +1,181 @@
+# Phase 13: Docker + axum サーバー実装 - 要件定義
+# order-taking サンプルを Docker 環境で動作する axum サーバーとして構成
+
+version: "1.0.0"
+created_at: "2026-01-01"
+phase: 13
+
+overview:
+  name: Docker + axum サーバー実装
+  name_en: Docker + axum Server Implementation
+  description: |
+    order-taking サンプルプロジェクトを axum Web フレームワークと Docker を使用して
+    デプロイ可能な形式にする。既存の IO モナドパターンを維持しつつ、
+    axum の async/await 環境と統合する。
+  goals:
+    - axum で POST /place-order エンドポイントを実装
+    - IO モナドパターンを維持（axum ハンドラで run_unsafe 呼び出し）
+    - マルチステージビルドによる Docker イメージの最小化
+    - 既存コードへの変更を最小限に抑える
+  constraints:
+    - エンドポイントは POST /place-order のみ（最小構成）
+    - ポート 8080 で公開
+    - 既存の place_order_api 関数をそのまま利用
+
+requirements:
+  - id: REQ-126
+    name: Cargo.toml 更新
+    description: |
+      axum, tokio, tower-http, tracing 依存を追加し、
+      バイナリターゲット（order-taking-server）を定義する。
+    priority: critical
+    acceptance_criteria:
+      - axum = "0.8" が dependencies に追加されている
+      - tokio = { version = "1", features = ["rt-multi-thread", "macros"] } が追加されている
+      - tower-http = { version = "0.6", features = ["trace"] } が追加されている
+      - tracing = "0.1" が追加されている
+      - tracing-subscriber = { version = "0.3", features = ["env-filter"] } が追加されている
+      - [[bin]] セクションで order-taking-server が定義されている
+    artifacts:
+      - Cargo.toml
+
+  - id: REQ-127
+    name: axum ハンドラ実装
+    description: |
+      axum 用のハンドラ関数を実装する。
+      既存の place_order_api 関数を呼び出し、IO モナドを実行する。
+    priority: critical
+    acceptance_criteria:
+      - place_order_handler 関数が async fn として定義されている
+      - リクエストボディ（String）を受け取り HttpRequest に変換している
+      - place_order_api を呼び出して IO<HttpResponse> を取得している
+      - run_unsafe() で IO を実行している
+      - axum の IntoResponse を返している
+      - ステータスコードとボディが正しく変換されている
+    artifacts:
+      - src/api/axum_handler.rs
+
+  - id: REQ-128
+    name: main.rs 実装
+    description: |
+      axum サーバーのエントリポイントを実装する。
+      ルーティング、トレーシング初期化、サーバー起動を行う。
+    priority: critical
+    acceptance_criteria:
+      - #[tokio::main] マクロで async main が定義されている
+      - tracing_subscriber が初期化されている
+      - Router に /place-order POST エンドポイントが登録されている
+      - 0.0.0.0:8080 でリッスンしている
+      - axum::serve でサーバーが起動している
+    artifacts:
+      - src/main.rs
+
+  - id: REQ-129
+    name: api/mod.rs 更新
+    description: |
+      axum_handler モジュールを api モジュールに追加する。
+    priority: high
+    acceptance_criteria:
+      - pub mod axum_handler が追加されている
+      - 既存のエクスポートが維持されている
+    artifacts:
+      - src/api/mod.rs
+
+  - id: REQ-130
+    name: Dockerfile 作成
+    description: |
+      マルチステージビルドで Docker イメージを作成する。
+      ビルドステージと実行ステージを分離し、イメージサイズを最小化する。
+    priority: critical
+    acceptance_criteria:
+      - rust:1.83-alpine をビルダーとして使用している
+      - alpine:3.20 を実行環境として使用している
+      - 非 root ユーザー（app）で実行している
+      - EXPOSE 8080 が設定されている
+      - ENTRYPOINT で order-taking-server を起動している
+    artifacts:
+      - Dockerfile
+
+  - id: REQ-131
+    name: docker-compose.yml 作成
+    description: |
+      開発環境用の Docker Compose 設定を作成する。
+    priority: high
+    acceptance_criteria:
+      - order-taking サービスが定義されている
+      - ビルドコンテキストが functional-rusty ルートに設定されている
+      - ポート 8080:8080 がマッピングされている
+      - RUST_LOG 環境変数が設定されている
+    artifacts:
+      - docker-compose.yml
+
+  - id: REQ-132
+    name: .dockerignore 作成
+    description: |
+      Docker ビルド時に除外するファイル/ディレクトリを設定する。
+    priority: medium
+    acceptance_criteria:
+      - target/ が除外されている
+      - .git/ が除外されている
+      - tests/ が除外されている
+      - docs/ が除外されている
+      - Cargo.lock は含まれている
+    artifacts:
+      - .dockerignore
+
+  - id: REQ-133
+    name: axum ハンドラテスト
+    description: |
+      axum ハンドラの単体テストを作成する。
+      成功・失敗ケースを検証する。
+    priority: high
+    acceptance_criteria:
+      - place_order_handler の成功ケーステストが存在する
+      - place_order_handler のバリデーションエラーケーステストが存在する
+      - place_order_handler の JSON パースエラーケーステストが存在する
+      - 全テストが通過する
+    artifacts:
+      - tests/axum_handler_tests.rs
+
+  - id: REQ-134
+    name: ドキュメント更新
+    description: |
+      roadmap.yaml を更新し、Phase 13 を追加する。
+    priority: medium
+    acceptance_criteria:
+      - Phase 13 エントリが roadmap.yaml に追加されている
+      - 全 deliverables が記載されている
+      - status が completed になっている
+    artifacts:
+      - docs/roadmap.yaml
+
+design_decisions:
+  - id: DD-13-01
+    decision: IO モナドを維持し axum ハンドラで run_unsafe を呼び出す
+    rationale: |
+      既存のワークフローは IO<HttpResponse> を返す設計になっている。
+      axum ハンドラを「世界の端」として扱い、ここで run_unsafe() を呼び出すことで
+      関数型パターンを維持しつつ axum と統合できる。
+    alternatives_considered:
+      - async に全面移行: 既存コードへの影響が大きい
+      - tokio::task::spawn_blocking: 現時点では CPU バウンドのため不要
+
+  - id: DD-13-02
+    decision: 既存の place_order_api をそのまま利用する
+    rationale: |
+      place_order_api は既にテスト済みで動作が保証されている。
+      axum ハンドラは薄いラッパーとして実装し、ロジックは再利用する。
+
+  - id: DD-13-03
+    decision: マルチステージビルドで Alpine ベースのイメージを使用
+    rationale: |
+      ビルド環境と実行環境を分離することで、最終イメージサイズを最小化する。
+      Alpine + musl で静的リンクされたバイナリを生成し、依存関係を最小化する。
+
+references:
+  - name: axum documentation
+    url: https://docs.rs/axum/latest/axum/
+  - name: tokio documentation
+    url: https://docs.rs/tokio/latest/tokio/
+  - name: Docker multi-stage builds
+    url: https://docs.docker.com/develop/develop-images/multistage-build/

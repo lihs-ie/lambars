@@ -49,9 +49,6 @@ effect = ["typeclass", "control"]
 unsafe_code = "forbid"
 
 [lints.clippy]
-all = { level = "warn", priority = -1 }
-pedantic = { level = "warn", priority = -1 }
-nursery = { level = "warn", priority = -1 }
 
 # Allow certain patterns that are common in functional programming
 module_name_repetitions = "allow"

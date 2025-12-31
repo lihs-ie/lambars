@@ -1,0 +1,1154 @@
+# Phase 6: 配送コスト計算と確認メール送信 要件定義
+# Domain Modeling Made Functional の F# パターンを Rust に適用
+# functional-rusty ライブラリを使用した配送と確認メール処理
+
+id: phase6_shipping_acknowledgment
+name: 配送コスト計算と確認メール送信
+version: "1.0.0"
+created_at: "2025-12-31"
+
+# 概要
+overview:
+  description: |
+    価格計算済み注文 (PricedOrder) に配送情報を追加し、
+    確認メールを送信するワークフローを実装する。
+
+    このフェーズでは以下の3つの主要な機能を実装する:
+    1. 配送コスト計算: 配送先住所に基づいて配送コストを決定
+    2. 配送情報追加: PricedOrder に配送情報を追加して PricedOrderWithShippingMethod を生成
+    3. VIP無料配送: VIP顧客には無料配送（Fedex24）を適用
+    4. 確認メール送信: 注文確認メールを生成・送信し、結果をイベントとして返す
+
+    全ての処理は純粋関数として実装し、副作用（メール送信）は
+    依存関数として注入することでテスト容易性を確保する。
+
+  design_principles:
+    - name: 参照透過性
+      description: |
+        配送コスト計算と配送情報追加は完全に純粋。
+        同じ PricedOrder と配送先住所に対して、常に同じ結果を返す。
+        メール送信の副作用は依存関数として分離し、テスト時にモック可能。
+
+    - name: 不変性
+      description: |
+        入力データ（PricedOrder）を変更せず、常に新しい値
+        （PricedOrderWithShippingMethod）を生成する。
+        Lens を活用した不変更新パターンを使用。
+
+    - name: 合成可能性
+      description: |
+        小さな関数から大きな関数を組み立てる。
+        calculate_shipping_cost, add_shipping_info_to_order, free_vip_shipping を
+        組み合わせて配送処理全体を構成する。
+        acknowledge_order は確認メール生成と送信を合成。
+
+    - name: 依存性注入
+      description: |
+        メール送信サービスへの依存を関数引数として注入する。
+        - CreateOrderAcknowledgmentLetter: 確認メール本文生成
+        - SendOrderAcknowledgment: メール送信
+        これにより、テスト時にモックを使用できる。
+
+    - name: パターンマッチによる地域分類
+      description: |
+        F# のアクティブパターン相当を Rust の enum と match で実現。
+        配送先住所を UsLocalState, UsRemoteState, International に分類し、
+        それぞれに対応する配送コストを決定する。
+
+  f_sharp_patterns:
+    shipping_cost_calculation: |
+      F# ではアクティブパターンで地域を分類:
+
+      ```fsharp
+      let (|UsLocalState|UsRemoteState|International|) (address:Address) =
+          if address.Country |> String50.value = "US" then
+              match address.State |> UsStateCode.value  with
+              | "CA" | "OR" | "AZ" | "NV" -> UsLocalState
+              | _ -> UsRemoteState
+          else
+              International
+
+      let calculateShippingCost : CalculateShippingCost =
+          fun pricedOrder ->
+              match pricedOrder.ShippingAddress with
+                  | UsLocalState -> 5.0M
+                  | UsRemoteState -> 10.0M
+                  | International -> 20.0M
+              |> Price.unsafeCreate
+      ```
+
+      Rust では enum と関数で同様のパターンを実現:
+
+      ```rust
+      enum ShippingRegion {
+          UsLocalState,
+          UsRemoteState,
+          International,
+      }
+
+      fn classify_shipping_region(address: &Address) -> ShippingRegion {
+          if address.country().value() == "US" || address.country().value() == "USA" {
+              match address.state().value() {
+                  "CA" | "OR" | "AZ" | "NV" => ShippingRegion::UsLocalState,
+                  _ => ShippingRegion::UsRemoteState,
+              }
+          } else {
+              ShippingRegion::International
+          }
+      }
+      ```
+
+    vip_free_shipping: |
+      F# では VIP ステータスに応じて配送情報を更新:
+
+      ```fsharp
+      let freeVipShipping : FreeVipShipping =
+          fun order ->
+              let updatedShippingInfo =
+                  match order.PricedOrder.CustomerInfo.VipStatus with
+                  | Normal -> order.ShippingInfo
+                  | Vip ->
+                      {order.ShippingInfo with
+                          ShippingCost = Price.unsafeCreate 0.0M
+                          ShippingMethod = Fedex24 }
+              {order with ShippingInfo = updatedShippingInfo }
+      ```
+
+      Rust では Lens を使用した不変更新:
+
+      ```rust
+      fn free_vip_shipping(order: PricedOrderWithShippingMethod) -> PricedOrderWithShippingMethod {
+          match order.priced_order().customer_info().vip_status() {
+              VipStatus::Normal => order,
+              VipStatus::Vip => {
+                  let free_shipping = ShippingInfo::new(
+                      ShippingMethod::Fedex24,
+                      Price::unsafe_create(Decimal::ZERO),
+                  );
+                  PricedOrderWithShippingMethod::shipping_info_lens()
+                      .set(order, free_shipping)
+              }
+          }
+      }
+      ```
+
+    acknowledgment_pattern: |
+      F# ではメール送信結果に応じてイベントを生成:
+
+      ```fsharp
+      let acknowledgeOrder : AcknowledgeOrder =
+          fun createAcknowledgmentLetter sendAcknowledgment pricedOrderWithShipping ->
+              let pricedOrder = pricedOrderWithShipping.PricedOrder
+              let letter = createAcknowledgmentLetter pricedOrderWithShipping
+              let acknowledgment = {
+                  EmailAddress = pricedOrder.CustomerInfo.EmailAddress
+                  Letter = letter
+                  }
+              match sendAcknowledgment acknowledgment with
+              | Sent ->
+                  let event = {
+                      OrderId = pricedOrder.OrderId
+                      EmailAddress = pricedOrder.CustomerInfo.EmailAddress
+                      }
+                  Some event
+              | NotSent -> None
+      ```
+
+      Rust でも同様のパターン:
+
+      ```rust
+      fn acknowledge_order<CreateLetter, SendAcknowledgment>(
+          create_acknowledgment_letter: &CreateLetter,
+          send_acknowledgment: &SendAcknowledgment,
+          priced_order_with_shipping: &PricedOrderWithShippingMethod,
+      ) -> Option<OrderAcknowledgmentSent>
+      where
+          CreateLetter: Fn(&PricedOrderWithShippingMethod) -> HtmlString,
+          SendAcknowledgment: Fn(&OrderAcknowledgment) -> SendResult,
+      ```
+
+  data_flow_diagram: |
+    配送と確認メールのデータフロー:
+
+    PricedOrder
+         |
+         +-- shipping_address: Address
+         |        |
+         |        +--> classify_shipping_region --> ShippingRegion
+         |        |
+         |        +--> calculate_shipping_cost --> Price
+         |                 |
+         |                 +--> ShippingInfo (method: Fedex24, cost: Price)
+         |
+         +--> add_shipping_info_to_order --> PricedOrderWithShippingMethod
+         |
+         +-- customer_info.vip_status: VipStatus
+         |        |
+         |        +--> free_vip_shipping (VIP: cost=0, method=Fedex24)
+         |
+         +--> PricedOrderWithShippingMethod (updated if VIP)
+         |
+         +--> create_acknowledgment_letter --> HtmlString
+         |
+         +--> OrderAcknowledgment { email_address, letter }
+         |
+         +--> send_acknowledgment --> SendResult
+         |        |
+         |        +--> Sent: Some(OrderAcknowledgmentSent)
+         |        |
+         |        +--> NotSent: None
+
+# ========================================
+# 依存関数型の定義
+# ========================================
+dependency_types:
+  - id: DEP-008
+    name: CalculateShippingCost
+    priority: critical
+    description: |
+      価格計算済み注文から配送コストを計算する関数型。
+      配送先住所に基づいて配送コストを決定する。
+
+    f_sharp_reference: |
+      type CalculateShippingCost = PricedOrder -> Price
+
+    rust_signature: |
+      Fn(&PricedOrder) -> Price
+
+    usage_example: |
+      ```rust
+      fn calculate_shipping_cost_impl(priced_order: &PricedOrder) -> Price {
+          let region = classify_shipping_region(priced_order.shipping_address());
+          match region {
+              ShippingRegion::UsLocalState => Price::unsafe_create(Decimal::from(5)),
+              ShippingRegion::UsRemoteState => Price::unsafe_create(Decimal::from(10)),
+              ShippingRegion::International => Price::unsafe_create(Decimal::from(20)),
+          }
+      }
+      ```
+
+  - id: DEP-009
+    name: AddShippingInfoToOrder
+    priority: critical
+    description: |
+      価格計算済み注文に配送情報を追加する関数型。
+      配送コスト計算関数を受け取り、配送情報付き注文を生成する。
+
+    f_sharp_reference: |
+      type AddShippingInfoToOrder =
+          CalculateShippingCost -> PricedOrder -> PricedOrderWithShippingMethod
+
+    rust_signature: |
+      Fn(&dyn Fn(&PricedOrder) -> Price, &PricedOrder) -> PricedOrderWithShippingMethod
+
+    usage_example: |
+      ```rust
+      fn add_shipping_info_to_order_impl<CalculateCost>(
+          calculate_shipping_cost: &CalculateCost,
+          priced_order: &PricedOrder,
+      ) -> PricedOrderWithShippingMethod
+      where
+          CalculateCost: Fn(&PricedOrder) -> Price,
+      {
+          let shipping_cost = calculate_shipping_cost(priced_order);
+          let shipping_info = ShippingInfo::new(ShippingMethod::Fedex24, shipping_cost);
+          PricedOrderWithShippingMethod::new(shipping_info, priced_order.clone())
+      }
+      ```
+
+  - id: DEP-010
+    name: FreeVipShipping
+    priority: high
+    description: |
+      VIP顧客に無料配送を適用する関数型。
+      VIP ステータスの場合、配送コストを 0 にし、配送方法を Fedex24 に設定する。
+
+    f_sharp_reference: |
+      type FreeVipShipping =
+          PricedOrderWithShippingMethod -> PricedOrderWithShippingMethod
+
+    rust_signature: |
+      Fn(PricedOrderWithShippingMethod) -> PricedOrderWithShippingMethod
+
+    usage_example: |
+      ```rust
+      fn free_vip_shipping_impl(
+          order: PricedOrderWithShippingMethod,
+      ) -> PricedOrderWithShippingMethod {
+          match order.priced_order().customer_info().vip_status() {
+              VipStatus::Normal => order,
+              VipStatus::Vip => {
+                  let free_shipping = ShippingInfo::new(
+                      ShippingMethod::Fedex24,
+                      Price::unsafe_create(Decimal::ZERO),
+                  );
+                  // Lens を使用した不変更新
+                  PricedOrderWithShippingMethod::shipping_info_lens()
+                      .set(order, free_shipping)
+              }
+          }
+      }
+      ```
+
+  - id: DEP-011
+    name: CreateOrderAcknowledgmentLetter
+    priority: critical
+    description: |
+      注文確認メールの本文（HTML）を生成する関数型。
+      配送情報付き注文から HTML 形式のメール本文を生成する。
+
+    f_sharp_reference: |
+      type CreateOrderAcknowledgmentLetter =
+          PricedOrderWithShippingMethod -> HtmlString
+
+    rust_signature: |
+      Fn(&PricedOrderWithShippingMethod) -> HtmlString
+
+    usage_example: |
+      ```rust
+      fn create_acknowledgment_letter_impl(
+          order: &PricedOrderWithShippingMethod,
+      ) -> HtmlString {
+          let priced_order = order.priced_order();
+          let html = format!(
+              "<html><body>\
+               <h1>Order Confirmation</h1>\
+               <p>Order ID: {}</p>\
+               <p>Customer: {} {}</p>\
+               <p>Total: ${}</p>\
+               <p>Shipping Cost: ${}</p>\
+               <p>Shipping Method: {:?}</p>\
+               </body></html>",
+              priced_order.order_id().value(),
+              priced_order.customer_info().name().first_name().value(),
+              priced_order.customer_info().name().last_name().value(),
+              priced_order.amount_to_bill().value(),
+              order.shipping_info().shipping_cost().value(),
+              order.shipping_info().shipping_method(),
+          );
+          HtmlString::new(html)
+      }
+      ```
+
+  - id: DEP-012
+    name: SendOrderAcknowledgment
+    priority: critical
+    description: |
+      注文確認メールを送信する関数型。
+      メール送信の副作用を IO モナドでラップし、テスト時にモック可能にする。
+      F# の Async に相当する処理を functional-rusty の IO モナドで実現する。
+
+    f_sharp_reference: |
+      type SendOrderAcknowledgment =
+          OrderAcknowledgment -> Async<SendResult>
+
+      // 実際には AsyncResult を使用することもある
+
+    rust_signature: |
+      Fn(&OrderAcknowledgment) -> IO<SendResult>
+
+    usage_example: |
+      ```rust
+      use functional_rusty::effect::IO;
+
+      fn send_acknowledgment_impl(
+          acknowledgment: &OrderAcknowledgment,
+      ) -> IO<SendResult> {
+          let email = acknowledgment.email_address().value().to_string();
+          IO::new(move || {
+              // 実際の実装ではメール送信サービスを呼び出す
+              println!("Sending email to: {}", email);
+              SendResult::Sent
+          })
+      }
+      ```
+
+    notes: |
+      この関数は副作用（メール送信）を持つため、IO モナドでラップする。
+      IO::run_unsafe() を呼び出すまで実際のメール送信は実行されない。
+      テスト時は IO::pure(SendResult::Sent) や IO::pure(SendResult::NotSent) を返すモックを使用。
+
+  - id: DEP-013
+    name: AcknowledgeOrder
+    priority: critical
+    description: |
+      注文確認プロセス全体を実行する関数型。
+      確認メール生成、送信を行い、結果を IO モナドでラップしたイベントとして返す。
+      F# の AsyncResult に相当する処理を functional-rusty の IO モナドで実現する。
+
+    f_sharp_reference: |
+      type AcknowledgeOrder =
+          CreateOrderAcknowledgmentLetter
+            -> SendOrderAcknowledgment
+            -> PricedOrderWithShippingMethod
+            -> Async<OrderAcknowledgmentSent option>
+
+    rust_signature: |
+      fn acknowledge_order<CreateLetter, SendAcknowledgment>(
+          create_acknowledgment_letter: &CreateLetter,
+          send_acknowledgment: &SendAcknowledgment,
+          priced_order_with_shipping: &PricedOrderWithShippingMethod,
+      ) -> IO<Option<OrderAcknowledgmentSent>>
+      where
+          CreateLetter: Fn(&PricedOrderWithShippingMethod) -> HtmlString,
+          SendAcknowledgment: Fn(&OrderAcknowledgment) -> IO<SendResult>,
+
+# ========================================
+# 要件定義: 配送コスト計算と確認メール送信関数
+# ========================================
+requirements:
+  # ========================================
+  # 配送地域の分類
+  # ========================================
+  - id: REQ-064
+    name: ShippingRegion 列挙型
+    priority: critical
+    category: shipping
+    description: |
+      配送先の地域を表す列挙型。
+      配送コスト計算のために配送先住所を分類する。
+
+      - UsLocalState: 米国西海岸（CA, OR, AZ, NV）
+      - UsRemoteState: 米国その他の州
+      - International: 米国外
+
+    definition: |
+      ```rust
+      #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+      pub enum ShippingRegion {
+          /// 米国西海岸（CA, OR, AZ, NV）
+          UsLocalState,
+
+          /// 米国その他の州
+          UsRemoteState,
+
+          /// 米国外（国際配送）
+          International,
+      }
+      ```
+
+    test_cases:
+      - name: UsLocalState バリアント
+        expected: is_us_local_state() == true
+
+      - name: UsRemoteState バリアント
+        expected: is_us_remote_state() == true
+
+      - name: International バリアント
+        expected: is_international() == true
+
+  # ========================================
+  # 配送地域の分類関数
+  # ========================================
+  - id: REQ-065
+    name: classify_shipping_region
+    priority: critical
+    category: shipping
+    description: |
+      住所から配送地域を分類する関数。
+      F# のアクティブパターンに相当する処理を実装。
+
+      国が "US" または "USA" の場合:
+      - 州が CA, OR, AZ, NV のいずれか -> UsLocalState
+      - それ以外の米国の州 -> UsRemoteState
+
+      国が "US" / "USA" 以外の場合:
+      - International
+
+    signature: |
+      fn classify_shipping_region(address: &Address) -> ShippingRegion
+
+    implementation_notes: |
+      - address.country().value() で国名を取得
+      - "US" と "USA" の両方を米国として認識
+      - address.state().value() で州コードを取得
+      - 大文字小文字を区別する（UsStateCode は既に大文字に正規化済み）
+
+    f_sharp_reference: |
+      let (|UsLocalState|UsRemoteState|International|) (address:Address) =
+          if address.Country |> String50.value = "US" then
+              match address.State |> UsStateCode.value  with
+              | "CA" | "OR" | "AZ" | "NV" -> UsLocalState
+              | _ -> UsRemoteState
+          else
+              International
+
+    test_cases:
+      - name: カリフォルニア州は UsLocalState
+        input:
+          country: "US"
+          state: "CA"
+        expected: ShippingRegion::UsLocalState
+
+      - name: オレゴン州は UsLocalState
+        input:
+          country: "US"
+          state: "OR"
+        expected: ShippingRegion::UsLocalState
+
+      - name: アリゾナ州は UsLocalState
+        input:
+          country: "USA"
+          state: "AZ"
+        expected: ShippingRegion::UsLocalState
+
+      - name: ネバダ州は UsLocalState
+        input:
+          country: "US"
+          state: "NV"
+        expected: ShippingRegion::UsLocalState
+
+      - name: ニューヨーク州は UsRemoteState
+        input:
+          country: "US"
+          state: "NY"
+        expected: ShippingRegion::UsRemoteState
+
+      - name: テキサス州は UsRemoteState
+        input:
+          country: "USA"
+          state: "TX"
+        expected: ShippingRegion::UsRemoteState
+
+      - name: カナダは International
+        input:
+          country: "Canada"
+          state: "ON"  # オンタリオ（UsStateCode は US 州のみ有効だが、テストのため）
+        expected: ShippingRegion::International
+        notes: 国際配送の場合、state の値は無視される
+
+      - name: 日本は International
+        input:
+          country: "Japan"
+          state: "TK"  # 無効な州コード
+        expected: ShippingRegion::International
+
+  # ========================================
+  # 配送コスト計算
+  # ========================================
+  - id: REQ-066
+    name: calculate_shipping_cost
+    priority: critical
+    category: shipping
+    description: |
+      価格計算済み注文から配送コストを計算する関数。
+      配送先住所の地域に基づいて配送コストを決定する。
+
+      - UsLocalState: $5
+      - UsRemoteState: $10
+      - International: $20
+
+    signature: |
+      fn calculate_shipping_cost(priced_order: &PricedOrder) -> Price
+
+    implementation_notes: |
+      - priced_order.shipping_address() で配送先住所を取得
+      - classify_shipping_region で地域を分類
+      - Price::unsafe_create で価格を生成（範囲内であることが保証されている）
+      - Decimal::from(5), Decimal::from(10), Decimal::from(20) を使用
+
+    f_sharp_reference: |
+      let calculateShippingCost : CalculateShippingCost =
+          fun pricedOrder ->
+              match pricedOrder.ShippingAddress with
+                  | UsLocalState -> 5.0M
+                  | UsRemoteState -> 10.0M
+                  | International -> 20.0M
+              |> Price.unsafeCreate
+
+    test_cases:
+      - name: 米国西海岸は $5
+        input:
+          shipping_address:
+            country: "US"
+            state: "CA"
+        expected: Price(5.00)
+
+      - name: 米国その他の州は $10
+        input:
+          shipping_address:
+            country: "US"
+            state: "NY"
+        expected: Price(10.00)
+
+      - name: 国際配送は $20
+        input:
+          shipping_address:
+            country: "Japan"
+            state: "TK"
+        expected: Price(20.00)
+
+  # ========================================
+  # 配送情報追加
+  # ========================================
+  - id: REQ-067
+    name: add_shipping_info_to_order
+    priority: critical
+    category: shipping
+    description: |
+      価格計算済み注文に配送情報を追加する関数。
+      配送コスト計算関数を受け取り、配送情報付き注文を生成する。
+
+      デフォルトの配送方法は Fedex24 を使用する。
+
+    signature: |
+      fn add_shipping_info_to_order<CalculateCost>(
+          calculate_shipping_cost: &CalculateCost,
+          priced_order: &PricedOrder,
+      ) -> PricedOrderWithShippingMethod
+      where
+          CalculateCost: Fn(&PricedOrder) -> Price,
+
+    implementation_notes: |
+      - calculate_shipping_cost(priced_order) で配送コストを計算
+      - ShippingInfo::new(ShippingMethod::Fedex24, shipping_cost) で配送情報を生成
+      - PricedOrderWithShippingMethod::new(shipping_info, priced_order.clone()) で結果を生成
+      - priced_order は clone して新しい値を生成（不変性の維持）
+
+    f_sharp_reference: |
+      let addShippingInfoToOrder : AddShippingInfoToOrder  =
+          fun calculateShippingCost pricedOrder ->
+              let shippingInfo = {
+                  ShippingMethod = Fedex24
+                  ShippingCost = calculateShippingCost pricedOrder
+                  }
+              {
+              PricedOrder = pricedOrder
+              ShippingInfo = shippingInfo
+              }
+
+    test_cases:
+      - name: 配送情報が正しく追加される
+        input:
+          priced_order: { order_id: "order-001", ... }
+          mock_shipping_cost: 10.00
+        expected:
+          shipping_method: Fedex24
+          shipping_cost: 10.00
+          priced_order: (元の注文と同じ)
+
+      - name: 配送コスト $5 の場合
+        input:
+          mock_shipping_cost: 5.00
+        expected:
+          shipping_cost: 5.00
+
+      - name: 配送コスト $20 の場合
+        input:
+          mock_shipping_cost: 20.00
+        expected:
+          shipping_cost: 20.00
+
+  # ========================================
+  # VIP無料配送
+  # ========================================
+  - id: REQ-068
+    name: free_vip_shipping
+    priority: high
+    category: shipping
+    description: |
+      VIP顧客に無料配送を適用する関数。
+
+      VipStatus::Normal の場合:
+      - 配送情報をそのまま維持
+
+      VipStatus::Vip の場合:
+      - 配送コストを $0 に設定
+      - 配送方法を Fedex24 に設定
+
+    signature: |
+      fn free_vip_shipping(
+          order: PricedOrderWithShippingMethod,
+      ) -> PricedOrderWithShippingMethod
+
+    implementation_notes: |
+      - order.priced_order().customer_info().vip_status() で VIP ステータスを取得
+      - VipStatus::Normal の場合は order をそのまま返す
+      - VipStatus::Vip の場合:
+        - Price::unsafe_create(Decimal::ZERO) で無料配送コストを生成
+        - ShippingInfo::new(ShippingMethod::Fedex24, ...) で配送情報を生成
+        - PricedOrderWithShippingMethod::shipping_info_lens().set(...) で不変更新
+      - 所有権: order は所有権を取得し、更新後の値を返す
+
+    f_sharp_reference: |
+      let freeVipShipping : FreeVipShipping =
+          fun order ->
+              let updatedShippingInfo =
+                  match order.PricedOrder.CustomerInfo.VipStatus with
+                  | Normal -> order.ShippingInfo
+                  | Vip ->
+                      {order.ShippingInfo with
+                          ShippingCost = Price.unsafeCreate 0.0M
+                          ShippingMethod = Fedex24 }
+              {order with ShippingInfo = updatedShippingInfo }
+
+    test_cases:
+      - name: 通常顧客は配送コスト維持
+        input:
+          vip_status: Normal
+          shipping_cost: 10.00
+          shipping_method: Fedex24
+        expected:
+          shipping_cost: 10.00
+          shipping_method: Fedex24
+
+      - name: VIP顧客は無料配送
+        input:
+          vip_status: Vip
+          shipping_cost: 10.00
+          shipping_method: PostalService
+        expected:
+          shipping_cost: 0.00
+          shipping_method: Fedex24
+
+      - name: VIP顧客で元々 $20 配送の場合も無料
+        input:
+          vip_status: Vip
+          shipping_cost: 20.00
+          shipping_method: Ups48
+        expected:
+          shipping_cost: 0.00
+          shipping_method: Fedex24
+
+  # ========================================
+  # 確認メール送信
+  # ========================================
+  - id: REQ-069
+    name: acknowledge_order
+    priority: critical
+    category: acknowledgment
+    description: |
+      注文確認メールを生成・送信する関数。
+      メール送信結果に応じて OrderAcknowledgmentSent イベントを返す。
+      F# の Async に相当する処理を functional-rusty の IO モナドで実現する。
+
+      1. create_acknowledgment_letter で HTML メール本文を生成（純粋関数）
+      2. OrderAcknowledgment を構築（メールアドレス + 本文）
+      3. send_acknowledgment でメールを送信（IO モナドを返す）
+      4. IO モナド内で SendResult を評価
+      5. 送信成功時: Some(OrderAcknowledgmentSent) を返す
+      6. 送信失敗時: None を返す
+      7. 結果全体を IO モナドでラップして返す
+
+    signature: |
+      fn acknowledge_order<CreateLetter, SendAcknowledgment>(
+          create_acknowledgment_letter: &CreateLetter,
+          send_acknowledgment: &SendAcknowledgment,
+          priced_order_with_shipping: &PricedOrderWithShippingMethod,
+      ) -> IO<Option<OrderAcknowledgmentSent>>
+      where
+          CreateLetter: Fn(&PricedOrderWithShippingMethod) -> HtmlString,
+          SendAcknowledgment: Fn(&OrderAcknowledgment) -> IO<SendResult>,
+
+    implementation_notes: |
+      - priced_order_with_shipping.priced_order() で価格計算済み注文を取得
+      - create_acknowledgment_letter(priced_order_with_shipping) で本文生成（純粋）
+      - OrderAcknowledgment::new(email_address.clone(), letter) で構築
+      - send_acknowledgment(&acknowledgment) で IO<SendResult> を取得
+      - IO::flat_map を使用して SendResult を評価し、結果を IO でラップ
+      - SendResult::Sent の場合: IO::pure(Some(OrderAcknowledgmentSent))
+      - SendResult::NotSent の場合: IO::pure(None)
+      - または IO::fmap を使用して SendResult -> Option<OrderAcknowledgmentSent> の変換
+
+    f_sharp_reference: |
+      // F# では Async を使用
+      let acknowledgeOrder : AcknowledgeOrder =
+          fun createAcknowledgmentLetter sendAcknowledgment pricedOrderWithShipping ->
+              async {
+                  let pricedOrder = pricedOrderWithShipping.PricedOrder
+                  let letter = createAcknowledgmentLetter pricedOrderWithShipping
+                  let acknowledgment = {
+                      EmailAddress = pricedOrder.CustomerInfo.EmailAddress
+                      Letter = letter
+                      }
+                  let! sendResult = sendAcknowledgment acknowledgment
+                  match sendResult with
+                  | Sent ->
+                      let event = {
+                          OrderId = pricedOrder.OrderId
+                          EmailAddress = pricedOrder.CustomerInfo.EmailAddress
+                          }
+                      return Some event
+                  | NotSent -> return None
+              }
+
+    rust_implementation_example: |
+      ```rust
+      use functional_rusty::effect::IO;
+
+      pub fn acknowledge_order<CreateLetter, SendAcknowledgment>(
+          create_acknowledgment_letter: &CreateLetter,
+          send_acknowledgment: &SendAcknowledgment,
+          priced_order_with_shipping: &PricedOrderWithShippingMethod,
+      ) -> IO<Option<OrderAcknowledgmentSent>>
+      where
+          CreateLetter: Fn(&PricedOrderWithShippingMethod) -> HtmlString,
+          SendAcknowledgment: Fn(&OrderAcknowledgment) -> IO<SendResult>,
+      {
+          let priced_order = priced_order_with_shipping.priced_order();
+          let letter = create_acknowledgment_letter(priced_order_with_shipping);
+          let acknowledgment = OrderAcknowledgment::new(
+              priced_order.customer_info().email_address().clone(),
+              letter,
+          );
+
+          let order_id = priced_order.order_id().clone();
+          let email_address = priced_order.customer_info().email_address().clone();
+
+          send_acknowledgment(&acknowledgment).fmap(move |send_result| {
+              match send_result {
+                  SendResult::Sent => Some(OrderAcknowledgmentSent::new(order_id, email_address)),
+                  SendResult::NotSent => None,
+              }
+          })
+      }
+      ```
+
+    test_cases:
+      - name: メール送信成功時はイベントを返す（IO モナド）
+        input:
+          order_id: "order-001"
+          email_address: "john@example.com"
+          mock_send_result: IO::pure(SendResult::Sent)
+        expected: IO containing Some(OrderAcknowledgmentSent)
+        expected_order_id: "order-001"
+        expected_email_address: "john@example.com"
+        notes: |
+          result.run_unsafe() で Option<OrderAcknowledgmentSent> を取得
+
+      - name: メール送信失敗時は None を返す（IO モナド）
+        input:
+          order_id: "order-002"
+          email_address: "jane@example.com"
+          mock_send_result: IO::pure(SendResult::NotSent)
+        expected: IO containing None
+        notes: |
+          result.run_unsafe() で None を取得
+
+      - name: 確認メール本文が正しく生成される
+        input:
+          order_id: "order-003"
+          customer_name: "Bob Smith"
+          amount_to_bill: 500.00
+          shipping_cost: 10.00
+        expected_letter_contains:
+          - "order-003"
+          - "Bob"
+          - "Smith"
+          - "500"
+          - "10"
+
+      - name: IO モナドの遅延実行を検証
+        description: |
+          send_acknowledgment が呼び出されるまで副作用は実行されない
+        test_code: |
+          ```rust
+          let executed = Arc::new(AtomicBool::new(false));
+          let executed_clone = executed.clone();
+
+          let mock_send = |_: &OrderAcknowledgment| {
+              let flag = executed_clone.clone();
+              IO::new(move || {
+                  flag.store(true, Ordering::SeqCst);
+                  SendResult::Sent
+              })
+          };
+
+          let io_result = acknowledge_order(&create_letter, &mock_send, &order);
+
+          // IO が生成されただけでは実行されない
+          assert!(!executed.load(Ordering::SeqCst));
+
+          // run_unsafe() で実行される
+          let result = io_result.run_unsafe();
+          assert!(executed.load(Ordering::SeqCst));
+          assert!(result.is_some());
+          ```
+
+# ========================================
+# 実装構成
+# ========================================
+implementation:
+  file_structure:
+    main_file: src/workflow/shipping.rs
+    test_file: tests/shipping_tests.rs
+
+  module_organization: |
+    shipping.rs の構成:
+
+    ```rust
+    //! 配送コスト計算と確認メール送信
+    //!
+    //! PricedOrder に配送情報を追加し、確認メールを送信するワークフロー。
+    //! F# のアクティブパターンに相当する処理を enum と match で実現する。
+
+    use crate::compound_types::Address;
+    use crate::simple_types::{Price, VipStatus};
+    use crate::workflow::{
+        HtmlString, OrderAcknowledgment, OrderAcknowledgmentSent,
+        PricedOrder, PricedOrderWithShippingMethod, SendResult,
+        ShippingInfo, ShippingMethod,
+    };
+    use functional_rusty::optics::Lens;
+    use rust_decimal::Decimal;
+
+    // 配送地域の分類
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum ShippingRegion {
+        UsLocalState,
+        UsRemoteState,
+        International,
+    }
+
+    // 配送地域を分類
+    pub fn classify_shipping_region(address: &Address) -> ShippingRegion { ... }
+
+    // 配送コスト計算
+    pub fn calculate_shipping_cost(priced_order: &PricedOrder) -> Price { ... }
+
+    // 配送情報追加
+    pub fn add_shipping_info_to_order<CalculateCost>(...) -> PricedOrderWithShippingMethod { ... }
+
+    // VIP無料配送
+    pub fn free_vip_shipping(order: PricedOrderWithShippingMethod) -> PricedOrderWithShippingMethod { ... }
+
+    // 確認メール送信（IO モナドを返す）
+    pub fn acknowledge_order<CreateLetter, SendAcknowledgment>(...) -> IO<Option<OrderAcknowledgmentSent>> { ... }
+    ```
+
+  testing_strategy:
+    unit_tests:
+      - ShippingRegion の各バリアントのテスト
+      - classify_shipping_region の各地域パターンのテスト
+      - calculate_shipping_cost の各配送コストのテスト
+      - add_shipping_info_to_order のテスト
+      - free_vip_shipping の VIP/Normal 両ケースのテスト
+      - acknowledge_order の Sent/NotSent 両ケースのテスト
+
+    integration_tests:
+      - PricedOrder から PricedOrderWithShippingMethod への変換全体
+      - VIP顧客の配送フロー全体
+      - 確認メール送信フロー全体
+
+    property_based_tests:
+      - 任意の PricedOrder に対して配送コストは 5, 10, 20 のいずれか
+      - VIP顧客の配送コストは常に 0
+      - VIP顧客の配送方法は常に Fedex24
+
+# ========================================
+# 関数型プログラミング原則の適用
+# ========================================
+functional_principles:
+  purity:
+    description: |
+      配送コスト計算と配送情報追加は完全に純粋。
+      確認メール送信は副作用だが、関数引数として注入することで分離。
+
+    pure_functions:
+      - classify_shipping_region
+      - calculate_shipping_cost
+      - add_shipping_info_to_order
+      - free_vip_shipping
+      - acknowledge_order (内部は純粋、副作用は注入された関数に委譲)
+
+    notes: |
+      send_acknowledgment 関数は副作用を持つが、依存関数として注入されるため、
+      テスト時は純粋なモック関数に置き換え可能。
+
+  composability:
+    description: |
+      小さな配送関数を組み合わせて配送処理全体を構築。
+
+    composition_pattern: |
+      配送処理全体 =
+        priced_order
+        |> add_shipping_info_to_order(calculate_shipping_cost)
+        |> free_vip_shipping
+        |> acknowledge_order(create_letter, send_acknowledgment)
+
+  higher_order_functions:
+    description: |
+      配送コスト計算と確認メール関連の関数を引数として受け取る高階関数パターン。
+
+    examples:
+      - add_shipping_info_to_order: CalculateCost 関数を受け取る
+      - acknowledge_order: CreateLetter と SendAcknowledgment 関数を受け取る
+
+  lens_usage:
+    description: |
+      functional-rusty の Lens を使用した不変更新。
+      PricedOrderWithShippingMethod の配送情報を VIP 無料配送で更新する際に使用。
+
+    usage_example: |
+      ```rust
+      PricedOrderWithShippingMethod::shipping_info_lens().set(order, new_shipping_info)
+      ```
+
+  pattern_matching:
+    description: |
+      F# のアクティブパターンに相当する処理を Rust の enum と match で実現。
+
+    examples:
+      - ShippingRegion による地域分類
+      - VipStatus による VIP 判定
+      - SendResult によるメール送信結果処理
+
+# ========================================
+# 既存実装との関連
+# ========================================
+existing_implementations:
+  phase_5_pricing:
+    description: |
+      Phase 5 で実装された price_order 関数が生成する PricedOrder を入力として使用する。
+
+    location: src/workflow/pricing.rs
+    function: price_order
+
+  shipping_types:
+    description: |
+      配送関連の型は既に実装済み:
+      - ShippingMethod: 配送方法 enum
+      - ShippingInfo: 配送情報（方法 + コスト）
+      - PricedOrderWithShippingMethod: 配送情報付き注文（Lenses 付き）
+
+    location: src/workflow/shipping_types.rs
+    types:
+      - ShippingMethod
+      - ShippingInfo
+      - PricedOrderWithShippingMethod
+
+  acknowledgment_types:
+    description: |
+      確認メール関連の型は既に実装済み:
+      - HtmlString: HTML 本文用 newtype
+      - OrderAcknowledgment: 確認メール（メールアドレス + 本文）
+      - SendResult: 送信結果 enum
+
+    location: src/workflow/acknowledgment_types.rs
+    types:
+      - HtmlString
+      - OrderAcknowledgment
+      - SendResult
+
+  output_types:
+    description: |
+      出力イベント型は既に実装済み:
+      - OrderAcknowledgmentSent: 確認メール送信イベント
+
+    location: src/workflow/output_types.rs
+    types:
+      - OrderAcknowledgmentSent
+
+  compound_types:
+    description: |
+      Address と CustomerInfo は既に実装済み。
+      VipStatus は CustomerInfo から取得可能。
+
+    locations:
+      - src/compound_types/address.rs
+      - src/compound_types/customer_info.rs
+
+# ========================================
+# functional-rusty ライブラリの使用
+# ========================================
+functional_rusty_usage:
+  lens_trait:
+    description: |
+      PricedOrderWithShippingMethod::shipping_info_lens() を使用して
+      配送情報を不変更新する。
+
+    import: |
+      use functional_rusty::optics::Lens;
+
+    usage: |
+      ```rust
+      // VIP 無料配送で配送情報を更新
+      let updated = PricedOrderWithShippingMethod::shipping_info_lens()
+          .set(order, new_shipping_info);
+      ```
+
+# ========================================
+# テスト要件
+# ========================================
+test_requirements:
+  coverage_target: 100%
+
+  test_categories:
+    - name: 配送地域分類のテスト
+      functions:
+        - classify_shipping_region
+      scenarios:
+        - 米国西海岸各州（CA, OR, AZ, NV）
+        - 米国その他の州
+        - 国際配送（カナダ、日本、等）
+        - US と USA の両方を認識
+
+    - name: 配送コスト計算のテスト
+      functions:
+        - calculate_shipping_cost
+      scenarios:
+        - 各地域に対応するコスト（$5, $10, $20）
+
+    - name: 配送情報追加のテスト
+      functions:
+        - add_shipping_info_to_order
+      scenarios:
+        - 配送コスト計算関数のモック注入
+        - 配送方法が Fedex24 であること
+        - 元の PricedOrder が保持されること
+
+    - name: VIP無料配送のテスト
+      functions:
+        - free_vip_shipping
+      scenarios:
+        - 通常顧客（変更なし）
+        - VIP顧客（コスト $0, 方法 Fedex24）
+
+    - name: 確認メール送信のテスト
+      functions:
+        - acknowledge_order
+      scenarios:
+        - 送信成功（Some イベント）
+        - 送信失敗（None）
+        - 確認メール本文の生成
+
+  mock_helper_functions:
+    description: |
+      テスト用のヘルパー関数を提供:
+
+      ```rust
+      #[cfg(test)]
+      mod test_helpers {
+          use super::*;
+
+          /// 固定配送コストを返すモック
+          pub fn fixed_shipping_cost(cost: Decimal) -> impl Fn(&PricedOrder) -> Price {
+              move |_| Price::unsafe_create(cost)
+          }
+
+          /// 常に IO::pure(Sent) を返すモック
+          pub fn always_send() -> impl Fn(&OrderAcknowledgment) -> IO<SendResult> {
+              |_| IO::pure(SendResult::Sent)
+          }
+
+          /// 常に IO::pure(NotSent) を返すモック
+          pub fn never_send() -> impl Fn(&OrderAcknowledgment) -> IO<SendResult> {
+              |_| IO::pure(SendResult::NotSent)
+          }
+
+          /// シンプルな確認メール生成モック
+          pub fn simple_letter() -> impl Fn(&PricedOrderWithShippingMethod) -> HtmlString {
+              |order| {
+                  let order_id = order.priced_order().order_id().value();
+                  HtmlString::new(format!("<p>Order {} confirmed</p>", order_id))
+              }
+          }
+
+          /// テスト用 PricedOrder 生成
+          pub fn create_test_priced_order(
+              vip_status: &str,
+              country: &str,
+              state: &str,
+          ) -> PricedOrder { ... }
+      }
+      ```

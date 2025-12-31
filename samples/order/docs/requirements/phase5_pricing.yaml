@@ -1,0 +1,1085 @@
+# Phase 5: 価格計算実装 要件定義
+# Domain Modeling Made Functional の F# パターンを Rust に適用
+# functional-rusty ライブラリを使用した関数型価格計算
+
+id: phase5_pricing
+name: 価格計算実装
+version: "1.0.0"
+created_at: "2025-12-31"
+
+# 概要
+overview:
+  description: |
+    検証済み注文 (ValidatedOrder) から価格付き注文 (PricedOrder) への変換ロジックを実装する。
+    F# の result computation expression に相当するパターンを Rust の Result と ? 演算子で実現する。
+
+    価格計算は純粋関数として実装し、外部サービス呼び出し（価格取得）は
+    依存関数として注入することで、テスト容易性と参照透過性を確保する。
+
+    プロモーション価格と標準価格の両方をサポートし、
+    functional-rusty の Lazy 型を使用して価格テーブルのキャッシュを実現する。
+
+  design_principles:
+    - name: 参照透過性
+      description: |
+        全ての価格計算関数は参照透過であること。
+        同じ ValidatedOrder と価格取得関数の組み合わせに対して、
+        常に同じ PricedOrder または PricingError を返す。
+
+    - name: 不変性
+      description: |
+        入力データ（ValidatedOrder）を変更せず、常に新しい値（PricedOrder）を生成する。
+        全ての価格計算関数は入力の参照を取り、変換結果を返す。
+
+    - name: 合成可能性
+      description: |
+        小さな価格計算関数から大きな価格計算関数を組み立てる。
+        get_pricing_function, to_priced_order_line, add_comment_line, get_line_price を
+        組み合わせて price_order を構成する。
+
+    - name: 依存性注入
+      description: |
+        価格取得サービス（標準価格、プロモーション価格）への依存を関数引数として注入する。
+        これにより、テスト時にモックを使用できる。
+
+    - name: 遅延評価
+      description: |
+        functional-rusty の Lazy 型を使用して、価格テーブルのキャッシュを実現する。
+        標準価格とプロモーション価格は最初のアクセス時にのみ取得され、
+        以降はキャッシュされた値を使用する。
+
+  f_sharp_patterns:
+    pricing_function_factory: |
+      F# では価格取得関数のファクトリを使用:
+
+      ```fsharp
+      let getPricingFunction
+        (standardPrices:GetStandardPrices)
+        (promoPrices:GetPromotionPrices)
+        : GetPricingFunction =
+
+        let getStandardPrice : GetProductPrice =
+            let getStandardPrices = standardPrices()
+            getStandardPrices
+
+        let getPromotionPrice promotionCode : GetProductPrice =
+            let getPromotionPrice = promoPrices promotionCode
+            fun productCode ->
+                match getPromotionPrice productCode with
+                | Some price -> price
+                | None -> getStandardPrice productCode
+
+        fun pricingMethod ->
+            match pricingMethod with
+            | Standard -> getStandardPrice
+            | Promotion promotionCode -> getPromotionPrice promotionCode
+      ```
+
+      Rust ではクロージャと Lazy を組み合わせて同様のパターンを実現:
+
+      ```rust
+      fn get_pricing_function<StandardPrices, PromotionPrices>(
+          get_standard_prices: StandardPrices,
+          get_promotion_prices: PromotionPrices,
+      ) -> impl Fn(&PricingMethod) -> Box<dyn Fn(&ProductCode) -> Price>
+      where
+          StandardPrices: Fn() -> Box<dyn Fn(&ProductCode) -> Price>,
+          PromotionPrices: Fn(&PromotionCode) -> Box<dyn Fn(&ProductCode) -> Option<Price>>,
+      ```
+
+    comment_line_pattern: |
+      F# ではプロモーション適用時にコメント行を追加:
+
+      ```fsharp
+      let addCommentLine pricingMethod lines =
+          match pricingMethod with
+          | Standard -> lines
+          | Promotion (PromotionCode promoCode) ->
+              let commentLine =
+                  sprintf "Applied promotion %s" promoCode
+                  |> CommentLine
+              List.append lines [commentLine]
+      ```
+
+      Rust でも同様のパターンを実現:
+
+      ```rust
+      fn add_comment_line(
+          pricing_method: &PricingMethod,
+          lines: Vec<PricedOrderLine>,
+      ) -> Vec<PricedOrderLine>
+      ```
+
+  data_flow_diagram: |
+    価格計算のデータフロー:
+
+    ValidatedOrder
+         |
+         +-- pricing_method: PricingMethod
+         |        |
+         |        +--> get_pricing_function --> GetProductPrice
+         |
+         +-- lines: Vec<ValidatedOrderLine>
+         |        |
+         |        +--> to_priced_order_line (for each, using GetProductPrice)
+         |        |        |
+         |        |        +-- quantity.value() * get_product_price(product_code)
+         |        |        |
+         |        |        +--> Price::multiply --> line_price
+         |        |        |
+         |        |        +--> PricedOrderProductLine
+         |        |
+         |        +--> add_comment_line (if Promotion)
+         |        |
+         |        +--> Vec<PricedOrderLine>
+         |
+         +-- lines.map(get_line_price).sum() --> BillingAmount
+         |
+         +--> price_order --> PricedOrder
+
+# ========================================
+# 依存関数型の定義
+# ========================================
+dependency_types:
+  - id: DEP-003
+    name: GetProductPrice
+    priority: critical
+    description: |
+      商品コードから価格を取得する関数型。
+      標準価格またはプロモーション価格の取得に使用する。
+
+    f_sharp_reference: |
+      type GetProductPrice =
+          ProductCode -> Price
+
+    rust_signature: |
+      Fn(&ProductCode) -> Price
+
+    usage_example: |
+      ```rust
+      fn get_product_price_impl(product_code: &ProductCode) -> Price {
+          // 実際の実装では価格テーブルを参照
+          Price::create(Decimal::from(100)).unwrap()
+      }
+      ```
+
+  - id: DEP-004
+    name: TryGetProductPrice
+    priority: critical
+    description: |
+      商品コードから価格を試みて取得する関数型。
+      プロモーション価格の取得に使用し、該当商品がプロモーション対象外の場合は None を返す。
+
+    f_sharp_reference: |
+      type TryGetProductPrice =
+          ProductCode -> Price option
+
+    rust_signature: |
+      Fn(&ProductCode) -> Option<Price>
+
+    usage_example: |
+      ```rust
+      fn try_get_promotion_price_impl(product_code: &ProductCode) -> Option<Price> {
+          // プロモーション対象商品の場合のみ Some を返す
+          match product_code {
+              ProductCode::Widget(code) if code.value().starts_with("W123") => {
+                  Some(Price::create(Decimal::from(80)).unwrap())
+              }
+              _ => None,
+          }
+      }
+      ```
+
+  - id: DEP-005
+    name: GetStandardPrices
+    priority: critical
+    description: |
+      標準価格テーブルを取得する関数型。
+      引数なしで呼び出され、GetProductPrice 関数を返す。
+
+      この関数は「外部サービスへのアクセス」を抽象化し、
+      結果は Lazy によってキャッシュされることを想定している。
+
+    f_sharp_reference: |
+      type GetStandardPrices =
+          unit -> GetProductPrice
+
+    rust_signature: |
+      Fn() -> Box<dyn Fn(&ProductCode) -> Price>
+
+    usage_example: |
+      ```rust
+      fn get_standard_prices_impl() -> Box<dyn Fn(&ProductCode) -> Price> {
+          // 価格テーブルを読み込み（外部サービス呼び出し等）
+          let price_table: HashMap<String, Decimal> = load_price_table();
+
+          Box::new(move |product_code: &ProductCode| {
+              let code = product_code.value();
+              let price_value = price_table.get(&code).copied()
+                  .unwrap_or(Decimal::from(100));
+              Price::create(price_value).unwrap()
+          })
+      }
+      ```
+
+    lazy_caching_note: |
+      functional-rusty の Lazy 型を使用してキャッシュを実現:
+
+      ```rust
+      let cached_standard_prices = Lazy::new(|| get_standard_prices());
+
+      // 最初の呼び出しで価格テーブルを取得
+      let get_price = cached_standard_prices.force();
+      let price = get_price(&product_code);
+
+      // 2回目以降はキャッシュされた関数を使用
+      let price2 = cached_standard_prices.force()(&another_product_code);
+      ```
+
+  - id: DEP-006
+    name: GetPromotionPrices
+    priority: critical
+    description: |
+      プロモーションコードに対応するプロモーション価格テーブルを取得する関数型。
+      プロモーションコードを引数に取り、TryGetProductPrice 関数を返す。
+
+      プロモーション対象外の商品は None を返す TryGetProductPrice を返す。
+
+    f_sharp_reference: |
+      type GetPromotionPrices =
+          PromotionCode -> TryGetProductPrice
+
+    rust_signature: |
+      Fn(&PromotionCode) -> Box<dyn Fn(&ProductCode) -> Option<Price>>
+
+    usage_example: |
+      ```rust
+      fn get_promotion_prices_impl(
+          promotion_code: &PromotionCode,
+      ) -> Box<dyn Fn(&ProductCode) -> Option<Price>> {
+          // プロモーションコードに対応する価格テーブルを取得
+          let promo_price_table: HashMap<String, Decimal> = load_promo_price_table(promotion_code);
+
+          Box::new(move |product_code: &ProductCode| {
+              let code = product_code.value();
+              promo_price_table.get(&code).map(|&price_value| {
+                  Price::create(price_value).unwrap()
+              })
+          })
+      }
+      ```
+
+  - id: DEP-007
+    name: GetPricingFunction
+    priority: critical
+    description: |
+      価格計算方法（PricingMethod）から適切な価格取得関数（GetProductPrice）を返す関数型。
+      get_pricing_function の戻り値の型。
+
+    f_sharp_reference: |
+      type GetPricingFunction = PricingMethod -> GetProductPrice
+
+    rust_signature: |
+      Fn(&PricingMethod) -> Box<dyn Fn(&ProductCode) -> Price>
+
+    notes: |
+      Standard の場合: 標準価格を返す関数
+      Promotion の場合: プロモーション価格を優先し、対象外なら標準価格にフォールバックする関数
+
+# ========================================
+# 要件定義: 価格計算関数
+# ========================================
+requirements:
+  # ========================================
+  # 価格取得関数のファクトリ
+  # ========================================
+  - id: REQ-059
+    name: get_pricing_function
+    priority: critical
+    category: pricing_function
+    description: |
+      標準価格取得関数とプロモーション価格取得関数を受け取り、
+      PricingMethod に応じた価格取得関数を返すファクトリ関数。
+
+      Standard の場合:
+      - 標準価格を返す関数を返す
+
+      Promotion の場合:
+      - プロモーション価格を優先
+      - プロモーション対象外の商品は標準価格にフォールバック
+
+    signature: |
+      fn get_pricing_function<GetStandardPricesFn, GetPromotionPricesFn>(
+          get_standard_prices: GetStandardPricesFn,
+          get_promotion_prices: GetPromotionPricesFn,
+      ) -> impl Fn(&PricingMethod) -> Rc<dyn Fn(&ProductCode) -> Price>
+      where
+          GetStandardPricesFn: Fn() -> Box<dyn Fn(&ProductCode) -> Price> + 'static,
+          GetPromotionPricesFn: Fn(&PromotionCode) -> Box<dyn Fn(&ProductCode) -> Option<Price>> + 'static,
+
+    implementation_notes: |
+      - 標準価格は functional-rusty の Lazy 型を使用してキャッシュ（最初のアクセス時に取得）
+      - プロモーション価格はプロモーションコードごとにキャッシュ可能
+      - 返される関数は Rc<dyn Fn> として返す（キャッシュ共有のため）
+      - Rc は !Send, !Sync なので、シングルスレッド環境でのみ使用
+
+    f_sharp_reference: |
+      let getPricingFunction
+        (standardPrices:GetStandardPrices)
+        (promoPrices:GetPromotionPrices)
+        : GetPricingFunction =
+
+        let getStandardPrice : GetProductPrice =
+            let getStandardPrices = standardPrices()
+            getStandardPrices
+
+        let getPromotionPrice promotionCode : GetProductPrice =
+            let getPromotionPrice = promoPrices promotionCode
+            fun productCode ->
+                match getPromotionPrice productCode with
+                | Some price -> price
+                | None -> getStandardPrice productCode
+
+        fun pricingMethod ->
+            match pricingMethod with
+            | Standard -> getStandardPrice
+            | Promotion promotionCode -> getPromotionPrice promotionCode
+
+    test_cases:
+      - name: 標準価格を取得
+        pricing_method: Standard
+        product_code: "W1234"
+        mock_standard_price: 100.00
+        expected: Price(100.00)
+
+      - name: プロモーション価格を取得（対象商品）
+        pricing_method: Promotion("SUMMER2024")
+        product_code: "W1234"
+        mock_promo_price: Some(80.00)
+        expected: Price(80.00)
+
+      - name: プロモーション価格を取得（対象外商品はフォールバック）
+        pricing_method: Promotion("SUMMER2024")
+        product_code: "G123"
+        mock_promo_price: None
+        mock_standard_price: 150.00
+        expected: Price(150.00)
+
+  # ========================================
+  # 注文明細の価格計算
+  # ========================================
+  - id: REQ-060
+    name: to_priced_order_line
+    priority: critical
+    category: pricing_function
+    description: |
+      ValidatedOrderLine に価格を付与し、PricedOrderLine を生成する。
+
+      1. 数量を取得（OrderQuantity::value）
+      2. 商品コードから価格を取得（GetProductPrice）
+      3. 数量と単価を乗算して明細価格を計算（Price::multiply）
+      4. PricedOrderProductLine を生成
+      5. PricedOrderLine::ProductLine でラップ
+
+    signature: |
+      fn to_priced_order_line<GetProductPriceFn>(
+          get_product_price: &GetProductPriceFn,
+          validated_order_line: &ValidatedOrderLine,
+      ) -> Result<PricedOrderLine, PricingError>
+      where
+          GetProductPriceFn: Fn(&ProductCode) -> Price,
+
+    implementation_notes: |
+      - OrderQuantity::value() で Decimal を取得
+      - Price::multiply で乗算（範囲外の場合は PricingError）
+      - Result を返すのは Price::multiply が失敗する可能性があるため
+
+    f_sharp_reference: |
+      let toPricedOrderLine (getProductPrice:GetProductPrice) (validatedOrderLine:ValidatedOrderLine) =
+          result {
+              let qty = validatedOrderLine.Quantity |> OrderQuantity.value
+              let price = validatedOrderLine.ProductCode |> getProductPrice
+              let! linePrice =
+                  Price.multiply qty price
+                  |> Result.mapError PricingError
+              let pricedLine : PricedOrderProductLine = {
+                  OrderLineId = validatedOrderLine.OrderLineId
+                  ProductCode = validatedOrderLine.ProductCode
+                  Quantity = validatedOrderLine.Quantity
+                  LinePrice = linePrice
+                  }
+              return (ProductLine pricedLine)
+          }
+
+    test_cases:
+      - name: Widget の価格計算
+        input:
+          order_line_id: "line-001"
+          product_code: Widget("W1234")
+          quantity: UnitQuantity(10)
+        mock_price: 50.00
+        expected: Ok(PricedOrderLine::ProductLine)
+        expected_line_price: 500.00
+
+      - name: Gizmo の価格計算
+        input:
+          order_line_id: "line-002"
+          product_code: Gizmo("G123")
+          quantity: KilogramQuantity(5.5)
+        mock_price: 20.00
+        expected: Ok(PricedOrderLine::ProductLine)
+        expected_line_price: 110.00
+
+      - name: 価格オーバーフロー（境界値超過）
+        input:
+          quantity: UnitQuantity(11)
+        mock_price: 100.00
+        expected: Err(PricingError)
+        error_message: "Price multiplication overflow"
+        notes: "11 * 100 = 1100 > 1000 (Price の上限)"
+
+      - name: 価格計算の境界値（上限ちょうど）
+        input:
+          quantity: UnitQuantity(10)
+        mock_price: 100.00
+        expected: Ok(PricedOrderLine::ProductLine)
+        expected_line_price: 1000.00
+        notes: "10 * 100 = 1000 (Price の上限ちょうど)"
+
+  # ========================================
+  # コメント行の追加
+  # ========================================
+  - id: REQ-061
+    name: add_comment_line
+    priority: high
+    category: pricing_function
+    description: |
+      PricingMethod が Promotion の場合、価格付き注文明細リストの末尾に
+      プロモーション適用を示すコメント行を追加する。
+
+      Standard の場合は何も追加しない。
+
+    signature: |
+      fn add_comment_line(
+          pricing_method: &PricingMethod,
+          lines: Vec<PricedOrderLine>,
+      ) -> Vec<PricedOrderLine>
+
+    implementation_notes: |
+      - PricingMethod::Standard の場合: lines をそのまま返す
+      - PricingMethod::Promotion の場合:
+        - "Applied promotion {promo_code}" のコメント行を追加
+        - PricedOrderLine::CommentLine を使用
+
+    f_sharp_reference: |
+      let addCommentLine pricingMethod lines =
+          match pricingMethod with
+          | Standard -> lines
+          | Promotion (PromotionCode promoCode) ->
+              let commentLine =
+                  sprintf "Applied promotion %s" promoCode
+                  |> CommentLine
+              List.append lines [commentLine]
+
+    test_cases:
+      - name: Standard の場合はコメントなし
+        pricing_method: Standard
+        input_lines: [ProductLine(...)]
+        expected_lines_count: 1
+
+      - name: Promotion の場合はコメント追加
+        pricing_method: Promotion("SUMMER2024")
+        input_lines: [ProductLine(...)]
+        expected_lines_count: 2
+        expected_last_line: CommentLine("Applied promotion SUMMER2024")
+
+      - name: 空の明細リストでも動作
+        pricing_method: Promotion("SALE")
+        input_lines: []
+        expected_lines_count: 1
+        expected_last_line: CommentLine("Applied promotion SALE")
+
+  # ========================================
+  # 明細価格の取得
+  # ========================================
+  - id: REQ-062
+    name: get_line_price
+    priority: high
+    category: pricing_function
+    description: |
+      PricedOrderLine から価格を取得するヘルパー関数。
+
+      ProductLine の場合は明細価格を返し、
+      CommentLine の場合は 0 を返す。
+
+    signature: |
+      fn get_line_price(line: &PricedOrderLine) -> Price
+
+    implementation_notes: |
+      - PricedOrderLine::ProductLine の場合: line_price を返す
+      - PricedOrderLine::CommentLine の場合: Price::unsafe_create(Decimal::ZERO) を返す
+      - コメント行の価格は常に 0 なので、unsafe_create は安全
+
+    f_sharp_reference: |
+      let getLinePrice line =
+          match line with
+          | ProductLine line -> line.LinePrice
+          | CommentLine _ -> Price.unsafeCreate 0M
+
+    test_cases:
+      - name: ProductLine から価格取得
+        input: ProductLine({ line_price: 500.00, ... })
+        expected: Price(500.00)
+
+      - name: CommentLine は 0
+        input: CommentLine("...")
+        expected: Price(0.00)
+
+  # ========================================
+  # メイン価格計算関数
+  # ========================================
+  - id: REQ-063
+    name: price_order
+    priority: critical
+    category: pricing_function
+    description: |
+      ValidatedOrder を PricedOrder に変換するメイン関数。
+      全ての価格計算ロジックを統合し、価格取得関数を注入する。
+
+    signature: |
+      fn price_order<GetPricingFn>(
+          get_pricing_function: &GetPricingFn,
+          validated_order: &ValidatedOrder,
+      ) -> Result<PricedOrder, PlaceOrderError>
+      where
+          GetPricingFn: Fn(&PricingMethod) -> Rc<dyn Fn(&ProductCode) -> Price>,
+
+    implementation_steps:
+      - step: 1
+        description: validated_order.pricing_method から価格取得関数を取得
+        code: |
+          let get_product_price = get_pricing_function(validated_order.pricing_method());
+
+      - step: 2
+        description: 各注文明細に価格を付与
+        code: |
+          let priced_lines_result: Result<Vec<PricedOrderLine>, PricingError> = validated_order
+              .lines()
+              .iter()
+              .map(|line| to_priced_order_line(&*get_product_price, line))
+              .collect();
+        error_type: PlaceOrderError::Pricing
+
+      - step: 3
+        description: コメント行を追加
+        code: |
+          let lines_with_comment = add_comment_line(
+              validated_order.pricing_method(),
+              priced_lines,
+          );
+
+      - step: 4
+        description: 請求金額を計算
+        code: |
+          let line_prices: Vec<Price> = lines_with_comment
+              .iter()
+              .map(get_line_price)
+              .collect();
+          let amount_to_bill = BillingAmount::sum_prices(&line_prices)?;
+        error_type: PlaceOrderError::Pricing
+
+      - step: 5
+        description: PricedOrder を組み立てる
+
+    f_sharp_reference: |
+      let priceOrder : PriceOrder =
+          fun getPricingFunction validatedOrder ->
+              let getProductPrice = getPricingFunction validatedOrder.PricingMethod
+              result {
+                  let! lines =
+                      validatedOrder.Lines
+                      |> List.map (toPricedOrderLine getProductPrice)
+                      |> Result.sequence
+                      |> Result.map (fun lines ->
+                          lines |> addCommentLine validatedOrder.PricingMethod
+                          )
+
+                  let! amountToBill =
+                      lines
+                      |> List.map getLinePrice
+                      |> BillingAmount.sumPrices
+                      |> Result.mapError PricingError
+                  let pricedOrder : PricedOrder = {
+                      OrderId  = validatedOrder.OrderId
+                      CustomerInfo = validatedOrder.CustomerInfo
+                      ShippingAddress = validatedOrder.ShippingAddress
+                      BillingAddress = validatedOrder.BillingAddress
+                      Lines = lines
+                      AmountToBill = amountToBill
+                      PricingMethod = validatedOrder.PricingMethod
+                  }
+                  return pricedOrder
+              }
+
+    error_handling: |
+      PricingError は PlaceOrderError::Pricing に変換される。
+      From<PricingError> for PlaceOrderError が実装済みなので、? 演算子で自動変換。
+
+      エラーが発生する可能性のある箇所:
+      1. Price::multiply で価格オーバーフロー（1000 を超える場合）
+      2. BillingAmount::sum_prices で合計金額オーバーフロー（10000 を超える場合）
+
+    test_cases:
+      - name: 単一明細の価格計算
+        input:
+          order_id: "order-001"
+          lines: [{ product_code: "W1234", quantity: 10 }]
+          pricing_method: Standard
+        mock_price: 50.00
+        expected: Ok(PricedOrder)
+        expected_amount_to_bill: 500.00
+
+      - name: 複数明細の価格計算
+        input:
+          lines: [
+            { product_code: "W1234", quantity: 10 },
+            { product_code: "G123", quantity: 5.0 }
+          ]
+          pricing_method: Standard
+        mock_prices:
+          W1234: 50.00
+          G123: 20.00
+        expected: Ok(PricedOrder)
+        expected_amount_to_bill: 600.00  # 500 + 100
+
+      - name: プロモーション価格適用
+        input:
+          lines: [{ product_code: "W1234", quantity: 10 }]
+          pricing_method: Promotion("SUMMER2024")
+        mock_promo_price: 40.00
+        expected: Ok(PricedOrder)
+        expected_amount_to_bill: 400.00
+        expected_comment_line: "Applied promotion SUMMER2024"
+
+      - name: 価格計算エラー（オーバーフロー）
+        input:
+          lines: [{ product_code: "W1234", quantity: 1000 }]
+        mock_price: 1000.00
+        expected: Err(PlaceOrderError::Pricing)
+
+      - name: 請求金額エラー（合計オーバーフロー）
+        input:
+          lines: [
+            { product_code: "W1234", quantity: 100 },
+            { product_code: "W1234", quantity: 100 }
+          ] # 10個の1000円明細
+        mock_price: 100.00
+        # 100 * 100 = 10000 が2つで 20000 -> オーバーフロー
+        expected: Err(PlaceOrderError::Pricing)
+
+      - name: 空の明細リスト
+        input:
+          lines: []
+          pricing_method: Standard
+        expected: Ok(PricedOrder)
+        expected_amount_to_bill: 0.00
+        expected_lines_count: 0
+
+# ========================================
+# 実装構成
+# ========================================
+implementation:
+  file_structure:
+    main_file: src/workflow/pricing.rs
+    test_file: tests/pricing_tests.rs
+
+  module_organization: |
+    pricing.rs の構成:
+
+    ```rust
+    //! 価格計算ロジック
+    //!
+    //! ValidatedOrder から PricedOrder への変換を行う。
+    //! F# の result computation expression に相当するパターンを
+    //! Rust の Result と ? 演算子で実現する。
+
+    use crate::simple_types::{BillingAmount, Price, ProductCode, PromotionCode};
+    use crate::workflow::{
+        PlaceOrderError, PricedOrder, PricedOrderLine, PricedOrderProductLine,
+        PricingError, PricingMethod, ValidatedOrder, ValidatedOrderLine,
+    };
+    use rust_decimal::Decimal;
+
+    // 依存関数型（ドキュメント用のコメント）
+    // GetProductPrice: Fn(&ProductCode) -> Price
+    // TryGetProductPrice: Fn(&ProductCode) -> Option<Price>
+    // GetStandardPrices: Fn() -> Box<dyn Fn(&ProductCode) -> Price>
+    // GetPromotionPrices: Fn(&PromotionCode) -> Box<dyn Fn(&ProductCode) -> Option<Price>>
+    // GetPricingFunction: Fn(&PricingMethod) -> Box<dyn Fn(&ProductCode) -> Price>
+
+    // 価格取得関数のファクトリ
+    pub fn get_pricing_function<StandardPrices, PromotionPrices>(...) -> impl Fn(&PricingMethod) -> ... { ... }
+
+    // 注文明細の価格計算
+    pub fn to_priced_order_line<GetProductPriceFn>(...) -> Result<PricedOrderLine, PricingError> { ... }
+
+    // コメント行の追加
+    pub fn add_comment_line(...) -> Vec<PricedOrderLine> { ... }
+
+    // 明細価格の取得
+    pub fn get_line_price(line: &PricedOrderLine) -> Price { ... }
+
+    // メイン価格計算関数
+    pub fn price_order<GetPricingFn>(...) -> Result<PricedOrder, PlaceOrderError> { ... }
+    ```
+
+  error_propagation: |
+    エラー伝播のパターン:
+
+    1. to_priced_order_line: Result<PricedOrderLine, PricingError>
+    2. price_order: PricingError -> PlaceOrderError::Pricing への変換
+
+    From トレイトにより ? 演算子で自動変換:
+    ```rust
+    let priced_lines: Vec<PricedOrderLine> = validated_order
+        .lines()
+        .iter()
+        .map(|line| to_priced_order_line(&*get_product_price, line))
+        .collect::<Result<Vec<_>, PricingError>>()?;
+    ```
+
+  lazy_caching_design: |
+    functional-rusty の Lazy 型を使用した価格キャッシュの設計:
+
+    ```rust
+    use functional_rusty::control::Lazy;
+    use std::rc::Rc;
+
+    // 標準価格のキャッシュ
+    let cached_standard_prices: Lazy<Box<dyn Fn(&ProductCode) -> Price>> =
+        Lazy::new(|| get_standard_prices());
+
+    // 使用例
+    let get_product_price = cached_standard_prices.force();
+    let price = get_product_price(&product_code);
+    ```
+
+    注意事項:
+    - Lazy は !Send, !Sync なので、シングルスレッド環境でのみ使用
+    - マルチスレッド環境では std::sync::LazyLock を使用するか、
+      関数外でキャッシュを管理する
+
+  testing_strategy:
+    unit_tests:
+      - 各価格計算関数の正常系テスト
+      - 各価格計算関数の異常系テスト（全エラーケース）
+      - 依存関数のモック使用
+
+    integration_tests:
+      - price_order の正常系テスト
+      - price_order の異常系テスト（各ステップでのエラー）
+      - プロモーション価格と標準価格のフォールバック
+
+    property_based_tests:
+      - 価格計算の合計が明細価格の総和と一致する
+      - プロモーション適用時はコメント行が追加される
+      - 空の明細リストは請求金額 0 になる
+
+# ========================================
+# 関数型プログラミング原則の適用
+# ========================================
+functional_principles:
+  purity:
+    description: |
+      全ての価格計算関数は純粋関数。
+      依存関数（価格取得）も純粋な関数として注入される。
+
+    pure_functions:
+      - get_pricing_function
+      - to_priced_order_line
+      - add_comment_line
+      - get_line_price
+      - price_order
+
+    notes: |
+      価格取得関数は外部から注入されるが、
+      注入される関数自体は参照透過であることを想定。
+      テスト時は純粋なモック関数を注入。
+
+  composability:
+    description: |
+      小さな価格計算関数を組み合わせて大きな価格計算関数を構築。
+
+    composition_pattern: |
+      price_order =
+        get_pricing_function(pricing_method) ?
+        + lines.map(to_priced_order_line).collect() ?
+        + add_comment_line
+        + lines.map(get_line_price).sum() ?
+        + BillingAmount::sum_prices ?
+        + PricedOrder 組み立て
+
+  higher_order_functions:
+    description: |
+      価格取得関数を引数として受け取る高階関数パターン。
+      関数を返す関数（ファクトリ）パターンも使用。
+
+    examples:
+      - get_pricing_function: GetStandardPrices と GetPromotionPrices を受け取り、GetPricingFunction を返す
+      - to_priced_order_line: GetProductPrice 関数を受け取る
+      - price_order: GetPricingFunction を受け取る
+
+  lazy_evaluation:
+    description: |
+      functional-rusty の Lazy 型を使用して価格テーブルのキャッシュを実現。
+
+    benefits:
+      - 価格テーブルは最初のアクセス時にのみ取得される
+      - 以降のアクセスはキャッシュされた値を使用
+      - 不要な外部サービス呼び出しを回避
+
+    usage_example: |
+      ```rust
+      use functional_rusty::control::Lazy;
+
+      let cached_prices = Lazy::new(|| {
+          // 重い外部サービス呼び出し
+          fetch_price_table_from_database()
+      });
+
+      // 最初の呼び出しで取得
+      let price1 = cached_prices.force().get(&product_code_1);
+
+      // 2回目以降はキャッシュを使用
+      let price2 = cached_prices.force().get(&product_code_2);
+      ```
+
+# ========================================
+# 将来の拡張
+# ========================================
+future_extensions:
+  async_support:
+    phase: 6
+    description: |
+      Phase 6 で async/await を使用した非同期価格計算を実装予定。
+
+      ```rust
+      async fn price_order_async<GetPricingFn>(
+          get_pricing_function: &GetPricingFn,
+          validated_order: &ValidatedOrder,
+      ) -> Result<PricedOrder, PlaceOrderError>
+      where
+          GetPricingFn: Fn(&PricingMethod) -> impl Future<Output = Box<dyn Fn(&ProductCode) -> Price>>,
+      ```
+
+  discount_strategies:
+    phase: future
+    description: |
+      複数の割引戦略（数量割引、バンドル割引など）のサポート。
+
+      ```rust
+      enum DiscountStrategy {
+          None,
+          Percentage(Decimal),
+          FixedAmount(Price),
+          BundleDiscount { products: Vec<ProductCode>, discount: Decimal },
+      }
+      ```
+
+  price_validation:
+    phase: future
+    description: |
+      価格の妥当性検証（異常に低い/高い価格の検出）。
+
+      ```rust
+      fn validate_price(price: Price, expected_range: (Decimal, Decimal)) -> Result<Price, PricingError>
+      ```
+
+# ========================================
+# テスト要件
+# ========================================
+test_requirements:
+  coverage_target: 100%
+
+  test_categories:
+    - name: 価格取得関数ファクトリのテスト
+      functions:
+        - get_pricing_function
+      scenarios:
+        - Standard 価格の取得
+        - Promotion 価格の取得（対象商品）
+        - Promotion 価格の取得（対象外商品のフォールバック）
+
+    - name: 注文明細価格計算のテスト
+      functions:
+        - to_priced_order_line
+      scenarios:
+        - Widget の価格計算
+        - Gizmo の価格計算
+        - 価格オーバーフロー
+
+    - name: コメント行追加のテスト
+      functions:
+        - add_comment_line
+      scenarios:
+        - Standard（コメントなし）
+        - Promotion（コメント追加）
+        - 空の明細リスト
+
+    - name: 明細価格取得のテスト
+      functions:
+        - get_line_price
+      scenarios:
+        - ProductLine
+        - CommentLine
+
+    - name: メイン価格計算関数のテスト
+      functions:
+        - price_order
+      scenarios:
+        - 単一明細
+        - 複数明細
+        - プロモーション適用
+        - 価格計算エラー
+        - 請求金額エラー
+        - 空の明細リスト
+
+  mock_helper_functions:
+    description: |
+      テスト用のヘルパー関数を提供:
+
+      ```rust
+      #[cfg(test)]
+      mod test_helpers {
+          use super::*;
+          use std::collections::HashMap;
+
+          /// 固定価格を返すモック
+          pub fn fixed_price(price: Decimal) -> impl Fn(&ProductCode) -> Price {
+              move |_| Price::create(price).unwrap()
+          }
+
+          /// 商品コードごとの価格マップからモック生成
+          pub fn price_map(prices: HashMap<String, Decimal>) -> impl Fn(&ProductCode) -> Price {
+              move |code| {
+                  let value = prices.get(&code.value().to_string())
+                      .copied()
+                      .unwrap_or(Decimal::from(100));
+                  Price::create(value).unwrap()
+              }
+          }
+
+          /// 常に None を返すプロモーション価格モック
+          pub fn no_promo_price() -> impl Fn(&ProductCode) -> Option<Price> {
+              |_| None
+          }
+
+          /// 指定商品のみプロモーション価格を返すモック
+          pub fn promo_for_codes(
+              codes: Vec<String>,
+              price: Decimal,
+          ) -> impl Fn(&ProductCode) -> Option<Price> {
+              move |code| {
+                  if codes.contains(&code.value().to_string()) {
+                      Some(Price::create(price).unwrap())
+                  } else {
+                      None
+                  }
+              }
+          }
+
+          /// 標準価格関数のモック
+          pub fn mock_standard_prices(
+              default_price: Decimal,
+          ) -> impl Fn() -> Box<dyn Fn(&ProductCode) -> Price> {
+              move || Box::new(fixed_price(default_price))
+          }
+
+          /// プロモーション価格関数のモック
+          pub fn mock_promotion_prices(
+              promo_price: Option<Decimal>,
+          ) -> impl Fn(&PromotionCode) -> Box<dyn Fn(&ProductCode) -> Option<Price>> {
+              move |_| {
+                  let price = promo_price;
+                  Box::new(move |_| price.map(|p| Price::create(p).unwrap()))
+              }
+          }
+      }
+      ```
+
+# ========================================
+# 既存実装との関連
+# ========================================
+existing_implementations:
+  phase_4_validation:
+    description: |
+      Phase 4 で実装された create_pricing_method 関数は、
+      プロモーションコード文字列から PricingMethod を生成する。
+
+      Phase 5 では ValidatedOrder.pricing_method を使用するため、
+      create_pricing_method を直接呼び出すことはない。
+
+    location: src/workflow/validation.rs
+    function: create_pricing_method
+
+  price_types:
+    description: |
+      Phase 1 で実装された Price 型と BillingAmount 型を使用する。
+
+      - Price::multiply: 数量と単価の乗算（範囲チェック付き）
+      - BillingAmount::sum_prices: 価格リストの合計（範囲チェック付き）
+
+    location: src/simple_types/price_types.rs
+    types:
+      - Price
+      - BillingAmount
+
+  priced_types:
+    description: |
+      Phase 3 で実装された価格付き型を使用する。
+
+      - PricedOrderProductLine: 価格付き製品注文明細
+      - PricedOrderLine: 価格付き注文明細（ProductLine | CommentLine）
+      - PricedOrder: 価格計算済み注文
+
+    location: src/workflow/priced_types.rs
+    types:
+      - PricedOrderProductLine
+      - PricedOrderLine
+      - PricedOrder
+
+  error_types:
+    description: |
+      Phase 3 で実装されたエラー型を使用する。
+
+      - PricingError: 価格計算時のエラー
+      - PlaceOrderError: ワークフローエラー（Pricing バリアント）
+
+    location: src/workflow/error_types.rs
+    types:
+      - PricingError
+      - PlaceOrderError
+
+# ========================================
+# functional-rusty ライブラリの使用
+# ========================================
+functional_rusty_usage:
+  lazy_type:
+    description: |
+      価格テーブルのキャッシュに Lazy 型を使用。
+
+    import: |
+      use functional_rusty::control::Lazy;
+
+    usage: |
+      ```rust
+      let cached_standard_prices = Lazy::new(|| get_standard_prices());
+      let get_product_price = cached_standard_prices.force();
+      ```
+
+  foldable_trait:
+    description: |
+      BillingAmount::sum_prices で Foldable を使用（既に実装済み）。
+
+    note: |
+      Phase 1 の price_types.rs で fold_left を使用して実装済み。

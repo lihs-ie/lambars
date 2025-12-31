@@ -1,0 +1,728 @@
+# Phase 2: 複合型定義 要件定義
+# Domain Modeling Made Functional の F# パターンを Rust に適用
+# functional-rusty ライブラリを使用した型安全なドメインモデリング
+
+id: phase2_compound_types
+name: 複合型定義
+version: "1.0.0"
+created_at: "2025-12-31"
+
+# 概要
+overview:
+  description: |
+    注文ドメインで使用する複合型（Compound Types）を定義する。
+    Phase 1 で定義した基本型を組み合わせて、より高レベルなドメインエンティティを表現する。
+
+    F# のレコード型パターンを Rust の構造体で実現し、
+    functional-rusty の Optics（Lens）を活用して不変データの更新を効率的に行う。
+    「Make Illegal States Unrepresentable」の原則に従い、型レベルで不正な状態を防ぐ。
+
+  design_principles:
+    - name: Smart Constructor パターン
+      description: |
+        構造体のフィールドを private にし、バリデーション付きの create 関数のみを公開する。
+        全てのフィールドが有効な値を持つことを保証する。
+
+    - name: 不変性（Immutability）
+      description: |
+        構造体のフィールドは直接変更できない。
+        フィールドの更新には Lens を使用して新しいインスタンスを生成する。
+
+    - name: Lens による不変更新
+      description: |
+        functional-rusty の #[derive(Lenses)] マクロを使用して、
+        各フィールドへの Lens を自動生成する。
+        深くネストしたフィールドも Lens 合成で型安全に更新できる。
+
+    - name: 合成可能なバリデーション
+      description: |
+        各フィールドのバリデーションを独立して行い、
+        Result の Monad 的な操作（and_then, map）で合成する。
+        複数のエラーがある場合は最初のエラーを返す（fail-fast）。
+
+  error_handling:
+    description: |
+      バリデーションエラーは Phase 1 で定義した ValidationError 型を使用する。
+      複数フィールドのバリデーションでは、最初に失敗したフィールドのエラーを返す。
+    error_type: "ValidationError (Phase 1 で定義済み)"
+
+# 要件定義
+requirements:
+  # ========================================
+  # PersonalName
+  # ========================================
+  - id: REQ-018
+    name: PersonalName
+    priority: critical
+    category: compound_type
+    description: |
+      個人名を表す複合型。
+      姓（LastName）と名（FirstName）の2つのフィールドを持つ。
+      どちらも必須フィールドで、String50 型として制約される。
+
+    fields:
+      - name: first_name
+        type: String50
+        required: true
+        description: 名（ファーストネーム）
+
+      - name: last_name
+        type: String50
+        required: true
+        description: 姓（ラストネーム）
+
+    validation_rules:
+      - first_name は空でない50文字以下の文字列であること（String50 のバリデーション）
+      - last_name は空でない50文字以下の文字列であること（String50 のバリデーション）
+
+    methods:
+      - name: create
+        signature: "fn create(first_name: &str, last_name: &str) -> Result<PersonalName, ValidationError>"
+        description: |
+          姓と名の文字列から PersonalName を生成する。
+          内部で String50::create を呼び出してバリデーションを行う。
+
+      - name: first_name
+        signature: "fn first_name(&self) -> &String50"
+        description: 名への参照を返す。
+
+      - name: last_name
+        signature: "fn last_name(&self) -> &String50"
+        description: 姓への参照を返す。
+
+      - name: first_name_lens
+        signature: "fn first_name_lens() -> impl Lens<Self, String50>"
+        description: |
+          first_name フィールドへの Lens を返す。
+          #[derive(Lenses)] により自動生成される。
+
+      - name: last_name_lens
+        signature: "fn last_name_lens() -> impl Lens<Self, String50>"
+        description: |
+          last_name フィールドへの Lens を返す。
+          #[derive(Lenses)] により自動生成される。
+
+    f_sharp_reference: |
+      type PersonalName = {
+          FirstName : String50
+          LastName : String50
+      }
+
+    functional_rusty_usage:
+      - "#[derive(Lenses)] による Lens の自動導出"
+      - "Result::and_then による Monad 的なエラーハンドリング"
+      - "Lens::set, Lens::modify による不変更新"
+
+    traits_to_derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+      - Hash
+      - Lenses  # functional-rusty-derive
+
+    examples:
+      valid:
+        - first_name: "John"
+          last_name: "Doe"
+        - first_name: "a".repeat(50)
+          last_name: "b".repeat(50)
+      invalid:
+        - first_name: ""
+          last_name: "Doe"
+          error: "FirstName: Must not be empty"
+        - first_name: "John"
+          last_name: ""
+          error: "LastName: Must not be empty"
+        - first_name: "a".repeat(51)
+          last_name: "Doe"
+          error: "FirstName: Must not be more than 50 chars"
+
+  # ========================================
+  # CustomerInfo
+  # ========================================
+  - id: REQ-019
+    name: CustomerInfo
+    priority: critical
+    category: compound_type
+    description: |
+      顧客情報を表す複合型。
+      個人名、メールアドレス、VIP ステータスの3つのフィールドを持つ。
+      全て必須フィールドである。
+      PersonalName を含むネスト構造により、Lens 合成の良い例となる。
+
+    fields:
+      - name: name
+        type: PersonalName
+        required: true
+        description: 顧客の個人名
+
+      - name: email_address
+        type: EmailAddress
+        required: true
+        description: 顧客のメールアドレス
+
+      - name: vip_status
+        type: VipStatus
+        required: true
+        description: 顧客の VIP ステータス
+
+    validation_rules:
+      - name は有効な PersonalName であること
+      - email_address は有効なメールアドレス形式であること（EmailAddress のバリデーション）
+      - vip_status は "Normal" または "VIP" のいずれかであること（VipStatus のバリデーション）
+
+    methods:
+      - name: create
+        signature: "fn create(first_name: &str, last_name: &str, email: &str, vip_status: &str) -> Result<CustomerInfo, ValidationError>"
+        description: |
+          個人名（姓・名）、メールアドレス、VIP ステータスから CustomerInfo を生成する。
+          内部で各型の create 関数を呼び出してバリデーションを行う。
+
+      - name: create_from_parts
+        signature: "fn create_from_parts(name: PersonalName, email_address: EmailAddress, vip_status: VipStatus) -> Self"
+        description: |
+          既にバリデーション済みの構成要素から CustomerInfo を生成する。
+          バリデーションは不要（既に各型でバリデーション済み）。
+
+      - name: name
+        signature: "fn name(&self) -> &PersonalName"
+        description: 個人名への参照を返す。
+
+      - name: email_address
+        signature: "fn email_address(&self) -> &EmailAddress"
+        description: メールアドレスへの参照を返す。
+
+      - name: vip_status
+        signature: "fn vip_status(&self) -> VipStatus"
+        description: VIP ステータスを返す（Copy 型なのでコピー）。
+
+      - name: name_lens
+        signature: "fn name_lens() -> impl Lens<Self, PersonalName>"
+        description: |
+          name フィールドへの Lens を返す。
+          #[derive(Lenses)] により自動生成される。
+
+      - name: email_address_lens
+        signature: "fn email_address_lens() -> impl Lens<Self, EmailAddress>"
+        description: |
+          email_address フィールドへの Lens を返す。
+          #[derive(Lenses)] により自動生成される。
+
+      - name: vip_status_lens
+        signature: "fn vip_status_lens() -> impl Lens<Self, VipStatus>"
+        description: |
+          vip_status フィールドへの Lens を返す。
+          #[derive(Lenses)] により自動生成される。
+
+    f_sharp_reference: |
+      type CustomerInfo = {
+          Name : PersonalName
+          EmailAddress : EmailAddress
+          VipStatus : VipStatus
+      }
+
+    functional_rusty_usage:
+      - "#[derive(Lenses)] による Lens の自動導出"
+      - "Result::and_then による Monad 的なエラーハンドリング"
+      - "Lens 合成による深いネストへのアクセス（例: customer_info.name.first_name）"
+      - "CustomerInfo::name_lens().compose(PersonalName::first_name_lens()) でネストした Lens を合成"
+
+    traits_to_derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+      - Lenses  # functional-rusty-derive
+
+    examples:
+      valid:
+        - first_name: "John"
+          last_name: "Doe"
+          email: "john.doe@example.com"
+          vip_status: "Normal"
+        - first_name: "Jane"
+          last_name: "Smith"
+          email: "jane@test.org"
+          vip_status: "VIP"
+      invalid:
+        - first_name: ""
+          last_name: "Doe"
+          email: "john@example.com"
+          vip_status: "Normal"
+          error: "FirstName: Must not be empty"
+        - first_name: "John"
+          last_name: "Doe"
+          email: "invalid-email"
+          vip_status: "Normal"
+          error: "EmailAddress: must match the pattern"
+        - first_name: "John"
+          last_name: "Doe"
+          email: "john@example.com"
+          vip_status: "Premium"
+          error: "VipStatus: Must be one of 'Normal', 'VIP'"
+
+    lens_composition_example: |
+      // 深いネストへのアクセス例
+      let customer = CustomerInfo::create("John", "Doe", "john@example.com", "Normal")?;
+
+      // 姓を取得（Lens 合成）
+      let name_lens = CustomerInfo::name_lens();
+      let first_name_lens = PersonalName::first_name_lens();
+      let customer_first_name = name_lens.compose(first_name_lens);
+
+      let first_name = customer_first_name.get(&customer);
+      assert_eq!(first_name.value(), "John");
+
+      // 姓を更新（不変更新）
+      let new_first_name = String50::create("FirstName", "Jonathan")?;
+      let updated = customer_first_name.set(customer, new_first_name);
+      assert_eq!(updated.name().first_name().value(), "Jonathan");
+
+  # ========================================
+  # Address
+  # ========================================
+  - id: REQ-020
+    name: Address
+    priority: critical
+    category: compound_type
+    description: |
+      住所を表す複合型。
+      米国の住所形式を想定し、複数の住所行（一部はオプショナル）、
+      市、郵便番号、州、国を持つ。
+      Option<String50> を使用してオプショナルフィールドを表現する。
+
+    fields:
+      - name: address_line1
+        type: String50
+        required: true
+        description: 住所行1（通常は番地と通り名）
+
+      - name: address_line2
+        type: "Option<String50>"
+        required: false
+        description: 住所行2（アパート番号など、オプショナル）
+
+      - name: address_line3
+        type: "Option<String50>"
+        required: false
+        description: 住所行3（追加情報、オプショナル）
+
+      - name: address_line4
+        type: "Option<String50>"
+        required: false
+        description: 住所行4（追加情報、オプショナル）
+
+      - name: city
+        type: String50
+        required: true
+        description: 市（シティ）
+
+      - name: zip_code
+        type: ZipCode
+        required: true
+        description: 郵便番号（5桁の ZIP コード）
+
+      - name: state
+        type: UsStateCode
+        required: true
+        description: 州コード（2文字）
+
+      - name: country
+        type: String50
+        required: true
+        description: 国名
+
+    validation_rules:
+      - address_line1 は空でない50文字以下の文字列であること
+      - address_line2 〜 address_line4 は空文字列の場合 None、それ以外は50文字以下であること
+      - city は空でない50文字以下の文字列であること
+      - zip_code は5桁の数字であること
+      - state は有効な米国州コードであること
+      - country は空でない50文字以下の文字列であること
+
+    methods:
+      - name: create
+        signature: |
+          fn create(
+              address_line1: &str,
+              address_line2: &str,
+              address_line3: &str,
+              address_line4: &str,
+              city: &str,
+              zip_code: &str,
+              state: &str,
+              country: &str,
+          ) -> Result<Address, ValidationError>
+        description: |
+          文字列から Address を生成する。
+          address_line2 〜 address_line4 は空文字列の場合 None になる。
+          内部で各型の create 関数を呼び出してバリデーションを行う。
+
+      - name: create_from_parts
+        signature: |
+          fn create_from_parts(
+              address_line1: String50,
+              address_line2: Option<String50>,
+              address_line3: Option<String50>,
+              address_line4: Option<String50>,
+              city: String50,
+              zip_code: ZipCode,
+              state: UsStateCode,
+              country: String50,
+          ) -> Self
+        description: |
+          既にバリデーション済みの構成要素から Address を生成する。
+          バリデーションは不要（既に各型でバリデーション済み）。
+
+      - name: address_line1
+        signature: "fn address_line1(&self) -> &String50"
+        description: 住所行1への参照を返す。
+
+      - name: address_line2
+        signature: "fn address_line2(&self) -> Option<&String50>"
+        description: 住所行2への参照を返す（オプショナル）。
+
+      - name: address_line3
+        signature: "fn address_line3(&self) -> Option<&String50>"
+        description: 住所行3への参照を返す（オプショナル）。
+
+      - name: address_line4
+        signature: "fn address_line4(&self) -> Option<&String50>"
+        description: 住所行4への参照を返す（オプショナル）。
+
+      - name: city
+        signature: "fn city(&self) -> &String50"
+        description: 市への参照を返す。
+
+      - name: zip_code
+        signature: "fn zip_code(&self) -> &ZipCode"
+        description: 郵便番号への参照を返す。
+
+      - name: state
+        signature: "fn state(&self) -> &UsStateCode"
+        description: 州コードへの参照を返す。
+
+      - name: country
+        signature: "fn country(&self) -> &String50"
+        description: 国名への参照を返す。
+
+      - name: address_line1_lens
+        signature: "fn address_line1_lens() -> impl Lens<Self, String50>"
+        description: address_line1 フィールドへの Lens を返す。
+
+      - name: address_line2_lens
+        signature: "fn address_line2_lens() -> impl Lens<Self, Option<String50>>"
+        description: address_line2 フィールドへの Lens を返す。
+
+      - name: address_line3_lens
+        signature: "fn address_line3_lens() -> impl Lens<Self, Option<String50>>"
+        description: address_line3 フィールドへの Lens を返す。
+
+      - name: address_line4_lens
+        signature: "fn address_line4_lens() -> impl Lens<Self, Option<String50>>"
+        description: address_line4 フィールドへの Lens を返す。
+
+      - name: city_lens
+        signature: "fn city_lens() -> impl Lens<Self, String50>"
+        description: city フィールドへの Lens を返す。
+
+      - name: zip_code_lens
+        signature: "fn zip_code_lens() -> impl Lens<Self, ZipCode>"
+        description: zip_code フィールドへの Lens を返す。
+
+      - name: state_lens
+        signature: "fn state_lens() -> impl Lens<Self, UsStateCode>"
+        description: state フィールドへの Lens を返す。
+
+      - name: country_lens
+        signature: "fn country_lens() -> impl Lens<Self, String50>"
+        description: country フィールドへの Lens を返す。
+
+    f_sharp_reference: |
+      type Address = {
+          AddressLine1 : String50
+          AddressLine2 : String50 option
+          AddressLine3 : String50 option
+          AddressLine4 : String50 option
+          City : String50
+          ZipCode : ZipCode
+          State: UsStateCode
+          Country: String50
+      }
+
+    functional_rusty_usage:
+      - "#[derive(Lenses)] による Lens の自動導出"
+      - "Result::and_then による Monad 的なエラーハンドリング"
+      - "String50::create_option によるオプショナルフィールドの処理"
+      - "Lens による各フィールドへの不変更新"
+
+    traits_to_derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+      - Hash
+      - Lenses  # functional-rusty-derive
+
+    examples:
+      valid:
+        - address_line1: "123 Main St"
+          address_line2: "Apt 4B"
+          address_line3: ""
+          address_line4: ""
+          city: "New York"
+          zip_code: "10001"
+          state: "NY"
+          country: "USA"
+          description: "オプショナルフィールドが一部入力されたケース"
+        - address_line1: "456 Oak Ave"
+          address_line2: ""
+          address_line3: ""
+          address_line4: ""
+          city: "Los Angeles"
+          zip_code: "90001"
+          state: "CA"
+          country: "United States of America"
+          description: "オプショナルフィールドが全て空のケース"
+        - address_line1: "789 Pine Rd"
+          address_line2: "Suite 100"
+          address_line3: "Building A"
+          address_line4: "Floor 5"
+          city: "Chicago"
+          zip_code: "60601"
+          state: "IL"
+          country: "USA"
+          description: "全てのフィールドが入力されたケース"
+      invalid:
+        - address_line1: ""
+          city: "New York"
+          zip_code: "10001"
+          state: "NY"
+          country: "USA"
+          error: "AddressLine1: Must not be empty"
+        - address_line1: "123 Main St"
+          city: "New York"
+          zip_code: "1234"
+          state: "NY"
+          country: "USA"
+          error: "ZipCode: must match the pattern"
+        - address_line1: "123 Main St"
+          city: "New York"
+          zip_code: "10001"
+          state: "XX"
+          country: "USA"
+          error: "State: must match the pattern"
+
+# ========================================
+# 依存関係
+# ========================================
+dependencies:
+  phase_1_types:
+    - String50
+    - EmailAddress
+    - ZipCode
+    - UsStateCode
+    - VipStatus
+    - ValidationError
+
+  crates:
+    - name: functional-rusty
+      version: "*"  # ワークスペース内の同バージョン
+      features:
+        - optics
+        - derive
+      description: |
+        Lens トレイトと #[derive(Lenses)] マクロを使用するため
+
+    - name: functional-rusty-derive
+      version: "*"  # ワークスペース内の同バージョン
+      description: |
+        #[derive(Lenses)] マクロを提供する手続きマクロクレート
+
+  functional_rusty:
+    - module: optics
+      traits:
+        - Lens
+        - FunctionLens
+        - ComposedLens
+      description: |
+        構造体フィールドへの型安全なアクセスと不変更新に使用
+
+    - module: derive
+      macros:
+        - Lenses
+      description: |
+        構造体に対する Lens の自動導出に使用
+
+# ========================================
+# テスト要件
+# ========================================
+testing:
+  strategy: TDD
+  framework: rstest
+
+  test_categories:
+    - name: バリデーション成功テスト
+      description: |
+        有効な値で型が正しく生成されることを確認する。
+        各フィールドの境界値（最大長など）も含める。
+
+    - name: バリデーション失敗テスト
+      description: |
+        無効な値で適切なエラーが返されることを確認する。
+        各フィールドのエラーケースを網羅する。
+
+    - name: Getter テスト
+      description: |
+        各 getter メソッドが正しい値を返すことを確認する。
+
+    - name: Lens 基本操作テスト
+      description: |
+        各フィールドの Lens で get/set/modify が正しく動作することを確認する。
+
+    - name: Lens 法則テスト
+      description: |
+        proptest を使用して Lens の三法則を検証する。
+        - GetPut Law: lens.set(source, lens.get(&source).clone()) == source
+        - PutGet Law: lens.get(&lens.set(source, value)) == &value
+        - PutPut Law: lens.set(lens.set(source, v1), v2) == lens.set(source, v2)
+
+    - name: Lens 合成テスト
+      description: |
+        複数の Lens を合成して深いネストにアクセスできることを確認する。
+        例: CustomerInfo -> PersonalName -> String50
+
+    - name: 境界値テスト
+      description: |
+        各フィールドの最小値、最大値、境界周辺の値のテスト。
+        例: String50 の 1文字、50文字、51文字
+
+    - name: Clone/Eq テスト
+      description: |
+        Clone と PartialEq の導出が正しく動作することを確認する。
+
+  coverage_requirement: "100%"
+
+  specific_tests:
+    personal_name:
+      - test_personal_name_create_valid
+      - test_personal_name_create_first_name_empty
+      - test_personal_name_create_last_name_empty
+      - test_personal_name_create_first_name_too_long
+      - test_personal_name_create_last_name_too_long
+      - test_personal_name_getters
+      - test_personal_name_first_name_lens_get
+      - test_personal_name_first_name_lens_set
+      - test_personal_name_last_name_lens_get
+      - test_personal_name_last_name_lens_set
+      - test_personal_name_lens_laws  # proptest
+
+    customer_info:
+      - test_customer_info_create_valid
+      - test_customer_info_create_invalid_name
+      - test_customer_info_create_invalid_email
+      - test_customer_info_create_invalid_vip_status
+      - test_customer_info_create_from_parts
+      - test_customer_info_getters
+      - test_customer_info_name_lens
+      - test_customer_info_email_lens
+      - test_customer_info_vip_status_lens
+      - test_customer_info_composed_lens_first_name
+      - test_customer_info_composed_lens_last_name
+      - test_customer_info_lens_laws  # proptest
+
+    address:
+      - test_address_create_valid_all_fields
+      - test_address_create_valid_required_only
+      - test_address_create_valid_partial_optional
+      - test_address_create_invalid_address_line1_empty
+      - test_address_create_invalid_city_empty
+      - test_address_create_invalid_zip_code
+      - test_address_create_invalid_state
+      - test_address_create_invalid_country_empty
+      - test_address_create_from_parts
+      - test_address_getters
+      - test_address_optional_getters
+      - test_address_address_line1_lens
+      - test_address_address_line2_lens
+      - test_address_city_lens
+      - test_address_zip_code_lens
+      - test_address_state_lens
+      - test_address_country_lens
+      - test_address_lens_laws  # proptest
+
+# ========================================
+# 実装上の注意事項
+# ========================================
+implementation_notes:
+  - note: |
+      フィールドは全て private とし、getter メソッドを通じてのみアクセス可能にする。
+      これにより不変性を保証する。
+
+  - note: |
+      #[derive(Lenses)] を使用するため、functional-rusty-derive を依存関係に追加する。
+      Cargo.toml の dev-dependencies ではなく dependencies に追加すること。
+
+  - note: |
+      Lens の自動導出により、各フィールドに対して `{field_name}_lens()`
+      という名前のメソッドが生成される。
+
+  - note: |
+      Option<String50> 型のフィールドに対する Lens は、
+      Option<String50> 全体を get/set する。
+      Option の中の String50 だけを更新したい場合は、
+      Optional optic（Lens と Prism の合成）を使用する。
+
+  - note: |
+      create 関数では、Result の and_then を使用して
+      バリデーションをチェーンする。
+      例:
+      ```rust
+      String50::create("FirstName", first_name)
+          .and_then(|fn_| String50::create("LastName", last_name)
+              .map(|ln| (fn_, ln)))
+          .map(|(fn_, ln)| PersonalName { first_name: fn_, last_name: ln })
+      ```
+
+  - note: |
+      テストでは proptest を使用して Lens 法則を検証する。
+      任意の有効な値を生成する Arbitrary 実装が必要。
+
+  - note: |
+      エラーメッセージは英語で統一し、フィールド名を含める。
+      フィールド名は PascalCase で記述する（例: "FirstName", "AddressLine1"）。
+
+# ========================================
+# ファイル構成
+# ========================================
+file_structure:
+  - path: src/compound_types/mod.rs
+    description: |
+      compound_types モジュールのルートファイル。
+      PersonalName, CustomerInfo, Address を再エクスポートする。
+
+  - path: src/compound_types/personal_name.rs
+    description: |
+      PersonalName 構造体の定義と実装。
+      #[derive(Lenses)] を使用。
+
+  - path: src/compound_types/customer_info.rs
+    description: |
+      CustomerInfo 構造体の定義と実装。
+      #[derive(Lenses)] を使用。
+
+  - path: src/compound_types/address.rs
+    description: |
+      Address 構造体の定義と実装。
+      #[derive(Lenses)] を使用。
+
+  - path: tests/compound_types_tests.rs
+    description: |
+      複合型のユニットテストと統合テスト。
+      rstest を使用したパラメータ化テストを含む。
+
+  - path: tests/compound_types_lens_laws.rs
+    description: |
+      Lens 法則のプロパティベーステスト。
+      proptest を使用。

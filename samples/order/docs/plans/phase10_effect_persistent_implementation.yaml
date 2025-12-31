@@ -1,0 +1,1384 @@
+# Phase 10: Effect System と永続データ構造の実践的使用 実装計画
+# 要件定義: docs/requirements/phase10_effect_persistent.yaml
+
+id: phase10_effect_persistent_implementation
+name: Effect System と永続データ構造の実践的使用 実装計画
+version: "1.0.0"
+created_at: "2026-01-01"
+
+# 実装概要
+overview:
+  description: |
+    Phase 10 では functional-rusty ライブラリの Effect System（eff! マクロ）と
+    永続データ構造（PersistentHashMap）を Order Taking サンプルアプリケーションで
+    実践的に活用する。
+
+    1. eff! マクロによる do 記法スタイルの IO 操作チェーン
+       - 既存の acknowledge_order 関数を拡張し、ログ出力機能を追加
+       - fmap/flat_map を eff! マクロで書き換え、宣言的なスタイルを実現
+
+    2. PersistentHashMap を使用した不変価格カタログの実装
+       - 商品コードから価格へのマッピングを管理
+       - 構造的共有による効率的な不変更新
+
+  data_flow: |
+    PricingCatalog
+      -> create_catalog_pricing_function(catalog, default_price) -> Fn(&ProductCode) -> Price
+      -> price_order(get_product_price, validated_order) -> PricedOrder
+
+    PricedOrderWithShippingMethod
+      -> acknowledge_order_with_logging(create_letter, send_ack, log_action, order)
+      -> IO<Option<OrderAcknowledgmentSent>>
+
+  total_new_items: 8
+  categories:
+    - eff! マクロ使用関数: 1 (REQ-102)
+    - eff! マクロテスト: 1 (REQ-103)
+    - PricingCatalog 型: 1 (REQ-104)
+    - 価格取得関数生成: 1 (REQ-105)
+    - PricingCatalog テスト: 1 (REQ-106)
+    - PricingCatalog proptest: 1 (REQ-107)
+    - モジュール統合: 1 (REQ-108)
+    - 統合テスト: 1 (REQ-109)
+
+# 実装順序
+implementation_order:
+  # ===========================================================================
+  # Step 1: PricingCatalog 型の実装（TDD）
+  # ===========================================================================
+  - step: 1
+    description: PricingCatalog 型のテスト作成（Red Phase）
+    file: tests/pricing_catalog_tests.rs
+    requirement_id: REQ-106
+    tdd_phase: red
+    dependencies: []
+    tests:
+      - test_pricing_catalog_new_is_empty
+      - test_pricing_catalog_singleton
+      - test_pricing_catalog_set_price
+      - test_pricing_catalog_get_price_existing
+      - test_pricing_catalog_get_price_not_found
+    notes: |
+      テストを先に書いてコンパイルエラーを確認する。
+      PricingCatalog 型がまだ存在しないためコンパイルエラーになる。
+
+  - step: 2
+    description: PricingCatalog 型の基本実装（Green Phase）
+    file: src/workflow/pricing_catalog.rs
+    requirement_id: REQ-104
+    tdd_phase: green
+    dependencies:
+      - step 1
+    types:
+      - PricingCatalog
+    methods:
+      - new
+      - singleton
+      - set_price
+      - get_price
+      - len
+      - is_empty
+    notes: |
+      テストを通すための最小限の実装を行う。
+      PersistentHashMap<String, Price> を内部で使用。
+      ProductCode は value() で String に変換してキーとして使用。
+
+  - step: 3
+    description: PricingCatalog 追加メソッドのテスト作成（Red Phase）
+    file: tests/pricing_catalog_tests.rs
+    requirement_id: REQ-106
+    tdd_phase: red
+    dependencies:
+      - step 2
+    tests:
+      - test_pricing_catalog_remove_price
+      - test_pricing_catalog_contains
+      - test_pricing_catalog_from_entries
+      - test_pricing_catalog_iter
+    notes: |
+      remove_price, contains, from_entries, iter のテストを追加。
+
+  - step: 4
+    description: PricingCatalog 追加メソッドの実装（Green Phase）
+    file: src/workflow/pricing_catalog.rs
+    requirement_id: REQ-104
+    tdd_phase: green
+    dependencies:
+      - step 3
+    methods:
+      - remove_price
+      - contains
+      - from_entries
+      - iter
+    notes: |
+      追加のテストを通すための実装。
+
+  - step: 5
+    description: PricingCatalog マージ操作のテスト作成（Red Phase）
+    file: tests/pricing_catalog_tests.rs
+    requirement_id: REQ-106
+    tdd_phase: red
+    dependencies:
+      - step 4
+    tests:
+      - test_pricing_catalog_merge_disjoint
+      - test_pricing_catalog_merge_overlapping
+      - test_pricing_catalog_merge_empty
+    notes: |
+      merge 操作のテスト。重複キーの場合は other が優先される。
+
+  - step: 6
+    description: PricingCatalog マージ操作の実装（Green Phase）
+    file: src/workflow/pricing_catalog.rs
+    requirement_id: REQ-104
+    tdd_phase: green
+    dependencies:
+      - step 5
+    methods:
+      - merge
+    notes: |
+      PersistentHashMap の merge メソッドを利用。
+
+  - step: 7
+    description: PricingCatalog 不変性テストの作成（Red Phase）
+    file: tests/pricing_catalog_tests.rs
+    requirement_id: REQ-106
+    tdd_phase: red
+    dependencies:
+      - step 6
+    tests:
+      - test_pricing_catalog_immutability_set_price
+      - test_pricing_catalog_immutability_remove_price
+      - test_pricing_catalog_immutability_merge
+    notes: |
+      set_price, remove_price, merge 後も元のカタログが変更されていないことを検証。
+      永続データ構造の核心的な性質をテスト。
+
+  - step: 8
+    description: PricingCatalog 不変性の確認（Green Phase - 既存実装で通るはず）
+    file: src/workflow/pricing_catalog.rs
+    requirement_id: REQ-104
+    tdd_phase: green
+    dependencies:
+      - step 7
+    notes: |
+      PersistentHashMap を使用しているため、不変性テストは既に通るはず。
+      リファクタリングの必要があれば実施。
+
+  # ===========================================================================
+  # Step 9-11: create_catalog_pricing_function の実装（TDD）
+  # ===========================================================================
+  - step: 9
+    description: create_catalog_pricing_function のテスト作成（Red Phase）
+    file: tests/pricing_catalog_tests.rs
+    requirement_id: REQ-106
+    tdd_phase: red
+    dependencies:
+      - step 8
+    tests:
+      - test_create_catalog_pricing_function_found
+      - test_create_catalog_pricing_function_not_found
+      - test_create_catalog_pricing_function_clone
+    notes: |
+      カタログにある商品はカタログの価格を返す。
+      カタログにない商品はデフォルト価格を返す。
+      返される関数が Clone 可能であることを検証。
+
+  - step: 10
+    description: create_catalog_pricing_function の実装（Green Phase）
+    file: src/workflow/pricing_catalog.rs
+    requirement_id: REQ-105
+    tdd_phase: green
+    dependencies:
+      - step 9
+    functions:
+      - create_catalog_pricing_function
+    notes: |
+      Rc<PricingCatalog> を使用してカタログをクロージャ間で共有。
+      Clone 可能な Fn を返す。
+
+  - step: 11
+    description: PricingCatalog のリファクタリング（Refactor Phase）
+    file: src/workflow/pricing_catalog.rs
+    requirement_id: REQ-104
+    tdd_phase: refactor
+    dependencies:
+      - step 10
+    notes: |
+      ドキュメンテーションの追加。
+      コードの整理とクリップ準拠の確認。
+
+  # ===========================================================================
+  # Step 12-13: PricingCatalog proptest 法則検証
+  # ===========================================================================
+  - step: 12
+    description: PricingCatalog proptest 法則検証のテスト作成
+    file: tests/pricing_catalog_laws.rs
+    requirement_id: REQ-107
+    tdd_phase: red
+    dependencies:
+      - step 11
+    properties:
+      - set_get_roundtrip
+      - set_idempotent
+      - remove_after_set
+      - merge_associativity
+      - merge_identity
+    notes: |
+      proptest を使用した法則検証。
+      ProductCode と Price の Arbitrary 実装が必要。
+
+  - step: 13
+    description: proptest テストの実行確認（Green Phase）
+    file: tests/pricing_catalog_laws.rs
+    requirement_id: REQ-107
+    tdd_phase: green
+    dependencies:
+      - step 12
+    notes: |
+      proptest が正常に動作することを確認。
+      必要に応じて実装の修正。
+
+  # ===========================================================================
+  # Step 14-16: acknowledge_order_with_logging の実装（TDD）
+  # ===========================================================================
+  - step: 14
+    description: acknowledge_order_with_logging のテスト作成（Red Phase）
+    file: tests/shipping_eff_macro_tests.rs
+    requirement_id: REQ-103
+    tdd_phase: red
+    dependencies:
+      - step 13
+    tests:
+      - test_acknowledge_order_with_logging_sent
+      - test_acknowledge_order_with_logging_not_sent
+      - test_acknowledge_order_with_logging_deferred_execution
+      - test_acknowledge_order_with_logging_log_order
+    notes: |
+      eff! マクロを使用した関数のテスト。
+      RefCell<Vec<String>> でログ順序を検証。
+      AtomicBool で遅延実行を検証。
+
+  - step: 15
+    description: acknowledge_order_with_logging の実装（Green Phase）
+    file: src/workflow/shipping.rs
+    requirement_id: REQ-102
+    tdd_phase: green
+    dependencies:
+      - step 14
+    functions:
+      - acknowledge_order_with_logging
+    notes: |
+      eff! マクロを使用して IO 操作をチェーン。
+      構文: pattern <= io_action; / _ <= io_action; / let pattern = expr;
+      終端は IO::pure(...) で返す。
+
+  - step: 16
+    description: acknowledge_order_with_logging のリファクタリング（Refactor Phase）
+    file: src/workflow/shipping.rs
+    requirement_id: REQ-102
+    tdd_phase: refactor
+    dependencies:
+      - step 15
+    notes: |
+      ドキュメンテーションの追加。
+      コードの整理。
+
+  # ===========================================================================
+  # Step 17-18: モジュール統合
+  # ===========================================================================
+  - step: 17
+    description: workflow モジュール統合
+    file: src/workflow/mod.rs
+    requirement_id: REQ-108
+    tdd_phase: integration
+    dependencies:
+      - step 16
+    changes:
+      - "pub mod pricing_catalog; を追加"
+      - "pub use pricing_catalog::{PricingCatalog, create_catalog_pricing_function}; を追加"
+      - "pub use shipping::acknowledge_order_with_logging; を追加"
+    notes: |
+      既存の mod.rs に新しいモジュールとエクスポートを追加。
+
+  - step: 18
+    description: 統合テストの作成
+    file: tests/phase10_integration_tests.rs
+    requirement_id: REQ-109
+    tdd_phase: integration
+    dependencies:
+      - step 17
+    tests:
+      - test_price_order_with_pricing_catalog
+      - test_acknowledge_order_with_logging_integration
+      - test_pricing_catalog_workflow_integration
+    notes: |
+      Phase 10 で追加した機能を使用した統合テスト。
+      完全なワークフローを検証。
+
+  # ===========================================================================
+  # Step 19: 品質チェック
+  # ===========================================================================
+  - step: 19
+    description: 品質チェック実行
+    tdd_phase: verification
+    dependencies:
+      - step 18
+    commands:
+      - "cargo check"
+      - "cargo clippy -- -D warnings"
+      - "cargo test"
+      - "cargo llvm-cov --html"
+    notes: |
+      全てのチェックが通ることを確認。
+      カバレッジ 100% を目標とする。
+
+# ファイル詳細
+files:
+  # ===========================================
+  # pricing_catalog.rs の詳細
+  # ===========================================
+  - path: src/workflow/pricing_catalog.rs
+    module_documentation: |
+      //! 不変の価格カタログ
+      //!
+      //! PersistentHashMap を使用した不変の価格カタログを提供する。
+      //! 商品コードから価格へのマッピングを管理し、不変更新をサポートする。
+      //!
+      //! # 設計原則
+      //!
+      //! - 不変性: 全ての更新操作は新しいカタログを返し、元のカタログは変更されない
+      //! - 構造的共有: PersistentHashMap により効率的な不変更新を実現
+      //! - 型安全性: ProductCode をキーとして使用し、型の誤用を防ぐ
+      //!
+      //! # 使用例
+      //!
+      //! ```
+      //! use order_taking_sample::workflow::PricingCatalog;
+      //! use order_taking_sample::simple_types::{ProductCode, Price};
+      //! use rust_decimal::Decimal;
+      //!
+      //! let catalog = PricingCatalog::new();
+      //! let widget_code = ProductCode::create("field", "W1234").unwrap();
+      //! let price = Price::create(Decimal::from(100)).unwrap();
+      //!
+      //! let updated_catalog = catalog.set_price(&widget_code, price);
+      //!
+      //! // 元のカタログは空のまま
+      //! assert!(catalog.is_empty());
+      //!
+      //! // 新しいカタログには価格が設定されている
+      //! assert_eq!(updated_catalog.len(), 1);
+      //! ```
+
+    imports: |
+      use functional_rusty::persistent::PersistentHashMap;
+      use crate::simple_types::{Price, ProductCode};
+      use std::rc::Rc;
+
+    types:
+      # -----------------------------------------
+      # PricingCatalog (REQ-104)
+      # -----------------------------------------
+      - name: PricingCatalog
+        requirement_id: REQ-104
+        definition: |
+          /// 不変の価格カタログ
+          ///
+          /// PersistentHashMap を使用して商品コードから価格へのマッピングを管理する。
+          /// 全ての更新操作は新しいカタログを返し、元のカタログは変更されない。
+          ///
+          /// # 構造的共有
+          ///
+          /// 内部で使用される PersistentHashMap は HAMT（Hash Array Mapped Trie）ベースで、
+          /// 更新時に変更されない部分は共有される。これにより、効率的な不変更新が可能。
+          ///
+          /// # 時間計算量
+          ///
+          /// | 操作 | 計算量 |
+          /// |------|--------|
+          /// | get_price | O(log32 N) |
+          /// | set_price | O(log32 N) |
+          /// | remove_price | O(log32 N) |
+          /// | merge | O(N + M) |
+          ///
+          #[derive(Clone, Debug)]
+          pub struct PricingCatalog {
+              prices: PersistentHashMap<String, Price>,
+          }
+
+          impl Default for PricingCatalog {
+              fn default() -> Self {
+                  Self::new()
+              }
+          }
+
+          impl PricingCatalog {
+              /// 空の価格カタログを作成する
+              ///
+              /// # Examples
+              ///
+              /// ```
+              /// use order_taking_sample::workflow::PricingCatalog;
+              ///
+              /// let catalog = PricingCatalog::new();
+              /// assert!(catalog.is_empty());
+              /// ```
+              #[must_use]
+              pub fn new() -> Self {
+                  Self {
+                      prices: PersistentHashMap::new(),
+                  }
+              }
+
+              /// 単一のエントリを持つ価格カタログを作成する
+              ///
+              /// # Arguments
+              ///
+              /// * `product_code` - 商品コード
+              /// * `price` - 価格
+              ///
+              /// # Examples
+              ///
+              /// ```
+              /// use order_taking_sample::workflow::PricingCatalog;
+              /// use order_taking_sample::simple_types::{ProductCode, Price};
+              /// use rust_decimal::Decimal;
+              ///
+              /// let code = ProductCode::create("field", "W1234").unwrap();
+              /// let price = Price::create(Decimal::from(100)).unwrap();
+              /// let catalog = PricingCatalog::singleton(&code, price);
+              ///
+              /// assert_eq!(catalog.len(), 1);
+              /// ```
+              #[must_use]
+              pub fn singleton(product_code: &ProductCode, price: Price) -> Self {
+                  Self::new().set_price(product_code, price)
+              }
+
+              /// エントリのイテレータから価格カタログを作成する
+              ///
+              /// # Arguments
+              ///
+              /// * `entries` - (ProductCode, Price) のイテレータ
+              ///
+              /// # Examples
+              ///
+              /// ```
+              /// use order_taking_sample::workflow::PricingCatalog;
+              /// use order_taking_sample::simple_types::{ProductCode, Price};
+              /// use rust_decimal::Decimal;
+              ///
+              /// let entries = vec![
+              ///     (ProductCode::create("field", "W1234").unwrap(), Price::create(Decimal::from(100)).unwrap()),
+              ///     (ProductCode::create("field", "G123").unwrap(), Price::create(Decimal::from(50)).unwrap()),
+              /// ];
+              /// let catalog = PricingCatalog::from_entries(entries);
+              ///
+              /// assert_eq!(catalog.len(), 2);
+              /// ```
+              pub fn from_entries(entries: impl IntoIterator<Item = (ProductCode, Price)>) -> Self {
+                  entries.into_iter().fold(Self::new(), |catalog, (code, price)| {
+                      catalog.set_price(&code, price)
+                  })
+              }
+
+              /// 指定した商品コードの価格を設定した新しいカタログを返す
+              ///
+              /// 元のカタログは変更されない（不変更新）。
+              ///
+              /// # Arguments
+              ///
+              /// * `product_code` - 商品コード
+              /// * `price` - 価格
+              ///
+              /// # Examples
+              ///
+              /// ```
+              /// use order_taking_sample::workflow::PricingCatalog;
+              /// use order_taking_sample::simple_types::{ProductCode, Price};
+              /// use rust_decimal::Decimal;
+              ///
+              /// let catalog = PricingCatalog::new();
+              /// let code = ProductCode::create("field", "W1234").unwrap();
+              /// let price = Price::create(Decimal::from(100)).unwrap();
+              ///
+              /// let new_catalog = catalog.set_price(&code, price);
+              ///
+              /// assert!(catalog.is_empty()); // 元は変更されない
+              /// assert_eq!(new_catalog.len(), 1);
+              /// ```
+              #[must_use]
+              pub fn set_price(&self, product_code: &ProductCode, price: Price) -> Self {
+                  Self {
+                      prices: self.prices.insert(product_code.value().to_string(), price),
+                  }
+              }
+
+              /// 指定した商品コードの価格を取得する
+              ///
+              /// # Arguments
+              ///
+              /// * `product_code` - 商品コード
+              ///
+              /// # Returns
+              ///
+              /// 価格が存在する場合は `Some(&Price)`、存在しない場合は `None`
+              #[must_use]
+              pub fn get_price(&self, product_code: &ProductCode) -> Option<&Price> {
+                  self.prices.get(product_code.value())
+              }
+
+              /// 指定した商品コードのエントリを削除した新しいカタログを返す
+              ///
+              /// 元のカタログは変更されない（不変更新）。
+              ///
+              /// # Arguments
+              ///
+              /// * `product_code` - 商品コード
+              #[must_use]
+              pub fn remove_price(&self, product_code: &ProductCode) -> Self {
+                  Self {
+                      prices: self.prices.remove(product_code.value()),
+                  }
+              }
+
+              /// 指定した商品コードが存在するかを返す
+              ///
+              /// # Arguments
+              ///
+              /// * `product_code` - 商品コード
+              #[must_use]
+              pub fn contains(&self, product_code: &ProductCode) -> bool {
+                  self.prices.contains_key(product_code.value())
+              }
+
+              /// 2つのカタログをマージした新しいカタログを返す
+              ///
+              /// キーが重複する場合は other の値が優先される。
+              /// 元のカタログは両方とも変更されない。
+              ///
+              /// # Arguments
+              ///
+              /// * `other` - マージするカタログ
+              #[must_use]
+              pub fn merge(&self, other: &Self) -> Self {
+                  Self {
+                      prices: self.prices.merge(&other.prices),
+                  }
+              }
+
+              /// カタログ内のエントリ数を返す
+              #[must_use]
+              pub fn len(&self) -> usize {
+                  self.prices.len()
+              }
+
+              /// カタログが空かどうかを返す
+              #[must_use]
+              pub fn is_empty(&self) -> bool {
+                  self.prices.is_empty()
+              }
+
+              /// カタログ内の全エントリのイテレータを返す
+              pub fn iter(&self) -> impl Iterator<Item = (&String, &Price)> {
+                  self.prices.iter()
+              }
+          }
+
+    functions:
+      # -----------------------------------------
+      # create_catalog_pricing_function (REQ-105)
+      # -----------------------------------------
+      - name: create_catalog_pricing_function
+        requirement_id: REQ-105
+        signature: |
+          pub fn create_catalog_pricing_function(
+              catalog: PricingCatalog,
+              default_price: Price,
+          ) -> impl Fn(&ProductCode) -> Price + Clone
+        implementation: |
+          /// PricingCatalog から価格取得関数を生成する
+          ///
+          /// カタログに存在しない商品コードにはデフォルト価格を適用する。
+          ///
+          /// # Arguments
+          ///
+          /// * `catalog` - 価格カタログ
+          /// * `default_price` - カタログにない商品のデフォルト価格
+          ///
+          /// # Returns
+          ///
+          /// Clone 可能な価格取得関数
+          ///
+          /// # Examples
+          ///
+          /// ```
+          /// use order_taking_sample::workflow::{PricingCatalog, create_catalog_pricing_function};
+          /// use order_taking_sample::simple_types::{ProductCode, Price};
+          /// use rust_decimal::Decimal;
+          ///
+          /// let widget_code = ProductCode::create("field", "W1234").unwrap();
+          /// let widget_price = Price::create(Decimal::from(100)).unwrap();
+          /// let catalog = PricingCatalog::singleton(&widget_code, widget_price);
+          ///
+          /// let default_price = Price::create(Decimal::from(10)).unwrap();
+          /// let get_price = create_catalog_pricing_function(catalog, default_price);
+          ///
+          /// // カタログにある商品
+          /// assert_eq!(get_price(&widget_code).value(), Decimal::from(100));
+          ///
+          /// // カタログにない商品はデフォルト価格
+          /// let unknown_code = ProductCode::create("field", "W9999").unwrap();
+          /// assert_eq!(get_price(&unknown_code).value(), Decimal::from(10));
+          /// ```
+          pub fn create_catalog_pricing_function(
+              catalog: PricingCatalog,
+              default_price: Price,
+          ) -> impl Fn(&ProductCode) -> Price + Clone {
+              let catalog = Rc::new(catalog);
+              move |product_code: &ProductCode| {
+                  catalog
+                      .get_price(product_code)
+                      .copied()
+                      .unwrap_or(default_price)
+              }
+          }
+        notes: |
+          Rc<PricingCatalog> を使用してカタログをクロージャ間で共有。
+          Price は Copy トレイトを実装しているため .copied() が使用可能。
+
+  # ===========================================
+  # shipping.rs への追加
+  # ===========================================
+  - path: src/workflow/shipping.rs
+    changes:
+      - type: add_import
+        content: |
+          use functional_rusty::eff;
+
+      - type: add_function
+        name: acknowledge_order_with_logging
+        requirement_id: REQ-102
+        implementation: |
+          /// 注文確認メールを送信する（ログ出力付き）
+          ///
+          /// eff! マクロを使用して複数の IO 操作（ログ出力、メール送信）を
+          /// do 記法スタイルでチェーンする。
+          ///
+          /// # 処理フロー
+          ///
+          /// 1. "Creating acknowledgment letter" をログ出力
+          /// 2. 確認メール本文を生成（純粋）
+          /// 3. "Sending acknowledgment email" をログ出力
+          /// 4. メール送信を実行
+          /// 5. "Acknowledgment process completed" をログ出力
+          /// 6. 送信結果に基づいて `OrderAcknowledgmentSent` イベントを生成
+          ///
+          /// # eff! マクロの構文
+          ///
+          /// - `_ <= io_action;` - IO を実行して結果を無視
+          /// - `pattern <= io_action;` - IO から値を取り出して束縛
+          /// - `let pattern = expr;` - 純粋な値の束縛
+          /// - `IO::pure(...)` - 最終的な IO を返す
+          ///
+          /// # Type Parameters
+          ///
+          /// * `CreateLetter` - 確認メール本文を生成する関数型
+          /// * `SendAcknowledgment` - メールを送信する関数型（IO モナドを返す）
+          /// * `LogAction` - ログを出力する関数型（IO モナドを返す）
+          ///
+          /// # Arguments
+          ///
+          /// * `create_letter` - 確認メール本文生成関数
+          /// * `send_acknowledgment` - メール送信関数
+          /// * `log_action` - ログ出力関数
+          /// * `order` - 配送情報付き注文
+          ///
+          /// # Returns
+          ///
+          /// `IO<Option<OrderAcknowledgmentSent>>` - 遅延実行される結果
+          ///
+          /// # Examples
+          ///
+          /// ```
+          /// use order_taking_sample::workflow::{
+          ///     acknowledge_order_with_logging, PricedOrder, PricedOrderWithShippingMethod,
+          ///     PricingMethod, ShippingInfo, ShippingMethod, HtmlString,
+          ///     OrderAcknowledgment, SendResult,
+          /// };
+          /// use order_taking_sample::compound_types::{CustomerInfo, Address};
+          /// use order_taking_sample::simple_types::{OrderId, BillingAmount, Price};
+          /// use functional_rusty::effect::IO;
+          /// use rust_decimal::Decimal;
+          ///
+          /// let log_action = |message: &str| {
+          ///     let message = message.to_string();
+          ///     IO::new(move || println!("[LOG] {}", message))
+          /// };
+          ///
+          /// let create_letter = |_: &PricedOrderWithShippingMethod| {
+          ///     HtmlString::new("<p>Order confirmed</p>".to_string())
+          /// };
+          ///
+          /// let send_acknowledgment = |_: &OrderAcknowledgment| {
+          ///     IO::pure(SendResult::Sent)
+          /// };
+          ///
+          /// // テストデータ作成は省略
+          /// // let io_result = acknowledge_order_with_logging(
+          /// //     &create_letter, &send_acknowledgment, &log_action, &order
+          /// // );
+          /// // let result = io_result.run_unsafe();
+          /// ```
+          pub fn acknowledge_order_with_logging<CreateLetter, SendAcknowledgment, LogAction>(
+              create_letter: &CreateLetter,
+              send_acknowledgment: &SendAcknowledgment,
+              log_action: &LogAction,
+              order: &PricedOrderWithShippingMethod,
+          ) -> IO<Option<OrderAcknowledgmentSent>>
+          where
+              CreateLetter: Fn(&PricedOrderWithShippingMethod) -> HtmlString,
+              SendAcknowledgment: Fn(&OrderAcknowledgment) -> IO<SendResult>,
+              LogAction: Fn(&str) -> IO<()>,
+          {
+              // 事前に必要な値をクロージャ用にクローン
+              let email_address = order.priced_order().customer_info().email_address().clone();
+              let order_id = order.priced_order().order_id().clone();
+
+              // eff! マクロで IO 操作をチェーン
+              let log_creating = log_action("Creating acknowledgment letter");
+              let letter = create_letter(order);
+              let acknowledgment = OrderAcknowledgment::new(email_address.clone(), letter);
+              let log_sending = log_action("Sending acknowledgment email");
+              let send_io = send_acknowledgment(&acknowledgment);
+              let log_completed = log_action("Acknowledgment process completed");
+
+              eff! {
+                  _ <= log_creating;
+                  _ <= log_sending;
+                  result <= send_io;
+                  _ <= log_completed;
+                  IO::pure(match result {
+                      SendResult::Sent => Some(OrderAcknowledgmentSent::new(order_id, email_address)),
+                      SendResult::NotSent => None,
+                  })
+              }
+          }
+
+  # ===========================================
+  # mod.rs の変更
+  # ===========================================
+  - path: src/workflow/mod.rs
+    changes:
+      - type: add_module
+        content: |
+          pub mod pricing_catalog;
+      - type: add_reexport
+        content: |
+          pub use pricing_catalog::{PricingCatalog, create_catalog_pricing_function};
+          pub use shipping::acknowledge_order_with_logging;
+
+# テスト計画
+testing:
+  # ===========================================
+  # pricing_catalog_tests.rs
+  # ===========================================
+  pricing_catalog_tests:
+    file: tests/pricing_catalog_tests.rs
+    framework: rstest
+    coverage_target: "100%"
+
+    helper_functions:
+      - name: create_test_product_code
+        signature: "fn(code: &str) -> ProductCode"
+        implementation: |
+          fn create_test_product_code(code: &str) -> ProductCode {
+              ProductCode::create("field", code).unwrap()
+          }
+
+      - name: create_test_price
+        signature: "fn(value: u32) -> Price"
+        implementation: |
+          fn create_test_price(value: u32) -> Price {
+              Price::create(Decimal::from(value)).unwrap()
+          }
+
+    test_categories:
+      - category: basic_operation_tests
+        description: 基本操作テスト
+        tests:
+          - name: test_pricing_catalog_new_is_empty
+            description: 新規作成されたカタログが空であることを検証
+            implementation: |
+              #[rstest]
+              fn test_pricing_catalog_new_is_empty() {
+                  let catalog = PricingCatalog::new();
+                  assert!(catalog.is_empty());
+                  assert_eq!(catalog.len(), 0);
+              }
+
+          - name: test_pricing_catalog_singleton
+            description: singleton で作成したカタログが1エントリを持つことを検証
+            implementation: |
+              #[rstest]
+              fn test_pricing_catalog_singleton() {
+                  let code = create_test_product_code("W1234");
+                  let price = create_test_price(100);
+                  let catalog = PricingCatalog::singleton(&code, price);
+
+                  assert_eq!(catalog.len(), 1);
+                  assert!(catalog.contains(&code));
+              }
+
+          - name: test_pricing_catalog_set_price
+            description: set_price が新しいカタログを返し、元を変更しないことを検証
+            implementation: |
+              #[rstest]
+              fn test_pricing_catalog_set_price() {
+                  let catalog = PricingCatalog::new();
+                  let code = create_test_product_code("W1234");
+                  let price = create_test_price(100);
+
+                  let new_catalog = catalog.set_price(&code, price);
+
+                  assert!(catalog.is_empty()); // 元は変更されない
+                  assert_eq!(new_catalog.len(), 1);
+                  assert_eq!(new_catalog.get_price(&code), Some(&price));
+              }
+
+          - name: test_pricing_catalog_get_price_existing
+            description: 存在する商品コードの価格を取得できることを検証
+            implementation: |
+              #[rstest]
+              fn test_pricing_catalog_get_price_existing() {
+                  let code = create_test_product_code("W1234");
+                  let price = create_test_price(100);
+                  let catalog = PricingCatalog::singleton(&code, price);
+
+                  let retrieved = catalog.get_price(&code);
+                  assert_eq!(retrieved, Some(&price));
+              }
+
+          - name: test_pricing_catalog_get_price_not_found
+            description: 存在しない商品コードで None が返ることを検証
+            implementation: |
+              #[rstest]
+              fn test_pricing_catalog_get_price_not_found() {
+                  let catalog = PricingCatalog::new();
+                  let code = create_test_product_code("W1234");
+
+                  assert_eq!(catalog.get_price(&code), None);
+              }
+
+          - name: test_pricing_catalog_remove_price
+            description: remove_price が新しいカタログを返すことを検証
+            implementation: |
+              #[rstest]
+              fn test_pricing_catalog_remove_price() {
+                  let code = create_test_product_code("W1234");
+                  let price = create_test_price(100);
+                  let catalog = PricingCatalog::singleton(&code, price);
+
+                  let new_catalog = catalog.remove_price(&code);
+
+                  assert_eq!(catalog.len(), 1); // 元は変更されない
+                  assert!(new_catalog.is_empty());
+              }
+
+          - name: test_pricing_catalog_contains
+            description: contains が正しく動作することを検証
+            implementation: |
+              #[rstest]
+              fn test_pricing_catalog_contains() {
+                  let code = create_test_product_code("W1234");
+                  let other_code = create_test_product_code("G123");
+                  let price = create_test_price(100);
+                  let catalog = PricingCatalog::singleton(&code, price);
+
+                  assert!(catalog.contains(&code));
+                  assert!(!catalog.contains(&other_code));
+              }
+
+      - category: merge_operation_tests
+        description: マージ操作テスト
+        tests:
+          - name: test_pricing_catalog_merge_disjoint
+            description: 重複のないカタログのマージを検証
+
+          - name: test_pricing_catalog_merge_overlapping
+            description: 重複があるカタログのマージで other が優先されることを検証
+
+          - name: test_pricing_catalog_merge_empty
+            description: 空のカタログとのマージを検証
+
+      - category: iterator_tests
+        description: イテレータテスト
+        tests:
+          - name: test_pricing_catalog_iter
+            description: iter が全エントリを返すことを検証
+
+          - name: test_pricing_catalog_from_entries
+            description: from_entries でカタログを作成できることを検証
+
+      - category: immutability_tests
+        description: 不変性テスト
+        tests:
+          - name: test_pricing_catalog_immutability_set_price
+            description: set_price 後も元のカタログが変更されていないことを検証
+
+          - name: test_pricing_catalog_immutability_remove_price
+            description: remove_price 後も元のカタログが変更されていないことを検証
+
+          - name: test_pricing_catalog_immutability_merge
+            description: merge 後も両方のカタログが変更されていないことを検証
+
+      - category: pricing_function_tests
+        description: 価格取得関数テスト
+        tests:
+          - name: test_create_catalog_pricing_function_found
+            description: カタログにある商品の価格が返されることを検証
+
+          - name: test_create_catalog_pricing_function_not_found
+            description: カタログにない商品でデフォルト価格が返されることを検証
+
+          - name: test_create_catalog_pricing_function_clone
+            description: 返された関数が Clone 可能であることを検証
+
+  # ===========================================
+  # pricing_catalog_laws.rs
+  # ===========================================
+  pricing_catalog_laws:
+    file: tests/pricing_catalog_laws.rs
+    framework: proptest
+    coverage_target: "100%"
+
+    strategies:
+      - name: arb_product_code
+        description: ProductCode の Arbitrary 生成
+        implementation: |
+          fn arb_product_code() -> impl Strategy<Value = ProductCode> {
+              prop_oneof![
+                  (1000u32..10000u32).prop_map(|n| {
+                      ProductCode::create("field", &format!("W{}", n)).unwrap()
+                  }),
+                  (100u32..1000u32).prop_map(|n| {
+                      ProductCode::create("field", &format!("G{}", n)).unwrap()
+                  }),
+              ]
+          }
+
+      - name: arb_price
+        description: Price の Arbitrary 生成
+        implementation: |
+          fn arb_price() -> impl Strategy<Value = Price> {
+              (0u32..1000u32).prop_map(|n| {
+                  Price::create(Decimal::from(n)).unwrap()
+              })
+          }
+
+      - name: arb_pricing_catalog
+        description: PricingCatalog の Arbitrary 生成
+        implementation: |
+          fn arb_pricing_catalog() -> impl Strategy<Value = PricingCatalog> {
+              prop::collection::vec((arb_product_code(), arb_price()), 0..10)
+                  .prop_map(|entries| PricingCatalog::from_entries(entries))
+          }
+
+    properties:
+      - name: set_get_roundtrip
+        description: set_price した価格を get_price で取得できることを検証
+        implementation: |
+          proptest! {
+              #[test]
+              fn test_set_get_roundtrip(
+                  code in arb_product_code(),
+                  price in arb_price()
+              ) {
+                  let catalog = PricingCatalog::new().set_price(&code, price);
+                  prop_assert_eq!(catalog.get_price(&code), Some(&price));
+              }
+          }
+
+      - name: set_idempotent
+        description: 同じ商品コードに同じ価格を設定しても結果が同じことを検証
+        implementation: |
+          proptest! {
+              #[test]
+              fn test_set_idempotent(
+                  code in arb_product_code(),
+                  price in arb_price()
+              ) {
+                  let catalog1 = PricingCatalog::new().set_price(&code, price);
+                  let catalog2 = catalog1.set_price(&code, price);
+
+                  prop_assert_eq!(catalog1.get_price(&code), catalog2.get_price(&code));
+              }
+          }
+
+      - name: remove_after_set
+        description: set_price した後に remove_price すると None になることを検証
+        implementation: |
+          proptest! {
+              #[test]
+              fn test_remove_after_set(
+                  code in arb_product_code(),
+                  price in arb_price()
+              ) {
+                  let catalog = PricingCatalog::new()
+                      .set_price(&code, price)
+                      .remove_price(&code);
+
+                  prop_assert!(catalog.get_price(&code).is_none());
+              }
+          }
+
+      - name: merge_identity
+        description: 空のカタログとのマージは恒等写像であることを検証
+        implementation: |
+          proptest! {
+              #[test]
+              fn test_merge_identity(catalog in arb_pricing_catalog()) {
+                  let empty = PricingCatalog::new();
+                  let merged = catalog.merge(&empty);
+
+                  prop_assert_eq!(merged.len(), catalog.len());
+
+                  for (key, value) in catalog.iter() {
+                      let code = ProductCode::create("field", key).unwrap();
+                      prop_assert_eq!(merged.get_price(&code), Some(value));
+                  }
+              }
+          }
+
+  # ===========================================
+  # shipping_eff_macro_tests.rs
+  # ===========================================
+  shipping_eff_macro_tests:
+    file: tests/shipping_eff_macro_tests.rs
+    framework: rstest
+    coverage_target: "100%"
+
+    test_categories:
+      - category: eff_macro_tests
+        description: eff! マクロ使用のテスト
+        tests:
+          - name: test_acknowledge_order_with_logging_sent
+            description: |
+              送信成功時のテスト。
+              ログ出力が正しい順序で行われ、OrderAcknowledgmentSent が返されることを検証。
+            implementation: |
+              #[rstest]
+              fn test_acknowledge_order_with_logging_sent() {
+                  let order = create_test_order_with_shipping();
+                  let log_messages: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+
+                  let log_messages_clone = log_messages.clone();
+                  let log_action = move |message: &str| {
+                      let messages = log_messages_clone.clone();
+                      let message = message.to_string();
+                      IO::new(move || {
+                          messages.borrow_mut().push(message);
+                      })
+                  };
+
+                  let create_letter = |_: &PricedOrderWithShippingMethod| {
+                      HtmlString::new("<p>Test</p>".to_string())
+                  };
+
+                  let send_acknowledgment = |_: &OrderAcknowledgment| {
+                      IO::pure(SendResult::Sent)
+                  };
+
+                  let io_result = acknowledge_order_with_logging(
+                      &create_letter,
+                      &send_acknowledgment,
+                      &log_action,
+                      &order,
+                  );
+
+                  let result = io_result.run_unsafe();
+
+                  assert!(result.is_some());
+                  let event = result.unwrap();
+                  assert_eq!(event.order_id().value(), "order-001");
+
+                  // ログ順序を検証
+                  let messages = log_messages.borrow();
+                  assert_eq!(messages.len(), 3);
+                  assert_eq!(messages[0], "Creating acknowledgment letter");
+                  assert_eq!(messages[1], "Sending acknowledgment email");
+                  assert_eq!(messages[2], "Acknowledgment process completed");
+              }
+
+          - name: test_acknowledge_order_with_logging_not_sent
+            description: |
+              送信失敗時のテスト。
+              ログ出力は行われるが、None が返されることを検証。
+
+          - name: test_acknowledge_order_with_logging_deferred_execution
+            description: |
+              遅延実行のテスト。
+              run_unsafe() が呼ばれるまでログ出力や送信が実行されないことを検証。
+            implementation: |
+              #[rstest]
+              fn test_acknowledge_order_with_logging_deferred_execution() {
+                  let order = create_test_order_with_shipping();
+                  let executed = Arc::new(AtomicBool::new(false));
+                  let executed_clone = executed.clone();
+
+                  let log_action = move |_: &str| {
+                      let flag = executed_clone.clone();
+                      IO::new(move || {
+                          flag.store(true, Ordering::SeqCst);
+                      })
+                  };
+
+                  let create_letter = |_: &PricedOrderWithShippingMethod| {
+                      HtmlString::new("<p>Test</p>".to_string())
+                  };
+
+                  let send_acknowledgment = |_: &OrderAcknowledgment| {
+                      IO::pure(SendResult::Sent)
+                  };
+
+                  let io_result = acknowledge_order_with_logging(
+                      &create_letter,
+                      &send_acknowledgment,
+                      &log_action,
+                      &order,
+                  );
+
+                  // IO が生成されただけでは実行されない
+                  assert!(!executed.load(Ordering::SeqCst));
+
+                  // run_unsafe() で実行される
+                  let _ = io_result.run_unsafe();
+                  assert!(executed.load(Ordering::SeqCst));
+              }
+
+          - name: test_acknowledge_order_with_logging_log_order
+            description: |
+              ログ出力順序のテスト。
+              ログメッセージが期待される順序で記録されることを検証。
+
+  # ===========================================
+  # phase10_integration_tests.rs
+  # ===========================================
+  phase10_integration_tests:
+    file: tests/phase10_integration_tests.rs
+    framework: rstest
+    coverage_target: "100%"
+
+    test_scenarios:
+      - name: test_price_order_with_pricing_catalog
+        description: |
+          PricingCatalog を使用した price_order の統合テスト。
+          カタログから価格を取得して注文に価格を設定。
+
+      - name: test_acknowledge_order_with_logging_integration
+        description: |
+          acknowledge_order_with_logging を使用した統合テスト。
+          ログ出力とメール送信の両方が正しく動作することを検証。
+
+      - name: test_pricing_catalog_workflow_integration
+        description: |
+          PricingCatalog を使用した完全なワークフローの統合テスト。
+          1. カタログ作成
+          2. 価格取得関数生成
+          3. 注文バリデーション
+          4. 価格計算
+          5. 配送情報追加
+          6. 確認メール送信（eff! マクロ使用）
+          7. イベント生成
+
+# Clippy 準拠
+clippy_compliance:
+  lints:
+    - pedantic
+    - nursery
+
+  requirements:
+    - "#[must_use] on all public functions returning values"
+    - "Doc comments with # Arguments, # Returns, # Examples sections"
+    - "No abbreviations in names"
+    - "Implement Default for PricingCatalog"
+
+# 関数型プログラミング原則の適用
+functional_principles:
+  purity:
+    description: |
+      PricingCatalog の全ての操作は参照透過。
+      acknowledge_order_with_logging は副作用を IO モナドでラップ。
+
+    pure_types:
+      - PricingCatalog
+
+    deferred_effects:
+      - acknowledge_order_with_logging
+
+  immutability:
+    description: |
+      PersistentHashMap を使用した構造的共有により、
+      効率的な不変更新を実現。
+
+    examples:
+      - "set_price: 新しいカタログを返し、元は変更されない"
+      - "remove_price: 新しいカタログを返し、元は変更されない"
+      - "merge: 新しいカタログを返し、両方とも変更されない"
+
+  composability:
+    description: |
+      eff! マクロにより複数の IO 操作を宣言的にチェーン可能。
+      価格カタログは merge 操作で合成可能。
+
+  effect_tracking:
+    description: |
+      eff! マクロと IO モナドにより、副作用が明示的に型で表現される。
+      run_unsafe() が呼ばれるまで副作用は発生しない。
+
+# eff! マクロの仕様確認
+eff_macro_specification:
+  syntax:
+    bind_operator: "<="
+    bind_with_pattern: "pattern <= io_action;"
+    bind_ignore_result: "_ <= io_action;"
+    pure_let: "let pattern = expr;"
+    terminal: "IO::pure(...) or io_expression"
+
+  expansion:
+    description: |
+      pattern <= expression; rest は以下に展開される:
+      expression.flat_map(move |pattern| { rest })
+
+  examples:
+    - description: 基本的な IO チェーン
+      code: |
+        eff! {
+            x <= IO::pure(5);
+            y <= IO::pure(10);
+            IO::pure(x + y)
+        }
+      expands_to: |
+        IO::pure(5).flat_map(move |x| {
+            IO::pure(10).flat_map(move |y| {
+                IO::pure(x + y)
+            })
+        })
+
+    - description: 副作用の無視
+      code: |
+        eff! {
+            _ <= log_action("message");
+            result <= send_email();
+            IO::pure(result)
+        }
+      expands_to: |
+        log_action("message").flat_map(move |_| {
+            send_email().flat_map(move |result| {
+                IO::pure(result)
+            })
+        })
+
+# 実装チェックリスト
+checklist:
+  - id: 1
+    item: tests/pricing_catalog_tests.rs 基本操作テストを作成
+    status: pending
+
+  - id: 2
+    item: src/workflow/pricing_catalog.rs PricingCatalog 型を実装
+    status: pending
+
+  - id: 3
+    item: tests/pricing_catalog_tests.rs マージ操作テストを作成
+    status: pending
+
+  - id: 4
+    item: src/workflow/pricing_catalog.rs merge メソッドを実装
+    status: pending
+
+  - id: 5
+    item: tests/pricing_catalog_tests.rs 不変性テストを作成
+    status: pending
+
+  - id: 6
+    item: tests/pricing_catalog_tests.rs 価格取得関数テストを作成
+    status: pending
+
+  - id: 7
+    item: src/workflow/pricing_catalog.rs create_catalog_pricing_function を実装
+    status: pending
+
+  - id: 8
+    item: tests/pricing_catalog_laws.rs proptest 法則検証を作成
+    status: pending
+
+  - id: 9
+    item: tests/shipping_eff_macro_tests.rs テストを作成
+    status: pending
+
+  - id: 10
+    item: src/workflow/shipping.rs acknowledge_order_with_logging を実装
+    status: pending
+
+  - id: 11
+    item: src/workflow/mod.rs モジュール統合
+    status: pending
+
+  - id: 12
+    item: tests/phase10_integration_tests.rs 統合テストを作成
+    status: pending
+
+  - id: 13
+    item: cargo check が成功
+    status: pending
+
+  - id: 14
+    item: cargo clippy が警告なし
+    status: pending
+
+  - id: 15
+    item: cargo test が全て成功
+    status: pending
+
+  - id: 16
+    item: cargo llvm-cov でカバレッジ 100%
+    status: pending
+
+# 依存関係
+dependencies:
+  internal:
+    - functional_rusty::effect::IO
+    - functional_rusty::eff!
+    - functional_rusty::persistent::PersistentHashMap
+    - crate::simple_types::{ProductCode, Price}
+    - crate::workflow::{PricedOrderWithShippingMethod, OrderAcknowledgmentSent}
+    - crate::workflow::{HtmlString, OrderAcknowledgment, SendResult}
+
+  external:
+    - rust_decimal
+
+  dev_dependencies:
+    - rstest
+    - proptest
+
+# 将来の拡張
+future_extensions:
+  catalog_versioning:
+    phase: future
+    description: |
+      カタログのバージョン管理。
+      履歴の保持と特定バージョンへのロールバック。
+
+  catalog_diff:
+    phase: future
+    description: |
+      2つのカタログ間の差分計算。
+      追加・削除・変更されたエントリの検出。
+
+  async_effects:
+    phase: future
+    description: |
+      async/await を使用した非同期 IO 操作。
+      eff! マクロの非同期版。

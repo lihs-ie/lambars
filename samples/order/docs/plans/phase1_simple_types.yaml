@@ -1,0 +1,2213 @@
+# Phase 1: 基本型定義 実装計画
+# Domain Modeling Made Functional の F# パターンを Rust に適用
+# functional-rusty ライブラリを使用した型安全なドメインモデリング
+
+id: phase1_simple_types_plan
+name: 基本型定義実装計画
+version: "1.0.0"
+created_at: "2025-12-31"
+requirements_reference: phase1_simple_types.yaml
+
+# ========================================
+# ファイル構成
+# ========================================
+file_structure:
+  base_path: samples/order/src
+  files:
+    - path: lib.rs
+      description: ライブラリルート、モジュール公開
+
+    - path: simple_types/mod.rs
+      description: simple_types モジュールルート、全型の再エクスポート
+
+    - path: simple_types/error.rs
+      description: ValidationError 型の定義
+
+    - path: simple_types/constrained_type.rs
+      description: 制約付き型生成のヘルパー関数群
+
+    - path: simple_types/string_types.rs
+      description: String50, EmailAddress, ZipCode, UsStateCode
+
+    - path: simple_types/identifier_types.rs
+      description: OrderId, OrderLineId
+
+    - path: simple_types/product_types.rs
+      description: WidgetCode, GizmoCode, ProductCode
+
+    - path: simple_types/quantity_types.rs
+      description: UnitQuantity, KilogramQuantity, OrderQuantity
+
+    - path: simple_types/price_types.rs
+      description: Price, BillingAmount
+
+    - path: simple_types/misc_types.rs
+      description: VipStatus, PromotionCode, PdfAttachment
+
+# ========================================
+# 依存関係設定
+# ========================================
+cargo_toml:
+  package:
+    name: order-taking
+    version: "0.1.0"
+    edition: "2024"
+    description: "Order taking sample application using functional-rusty"
+
+  dependencies:
+    - name: functional-rusty
+      path: "../.."
+      description: functional-rusty ライブラリ（ローカルパス）
+
+    - name: rust_decimal
+      version: "1.36"
+      description: 正確な小数演算のため
+
+    - name: regex
+      version: "1.11"
+      description: 正規表現バリデーションのため
+
+    - name: thiserror
+      version: "2.0"
+      description: エラー型定義のため
+
+    - name: once_cell
+      version: "1.20"
+      description: 正規表現のコンパイル結果キャッシュのため
+
+  dev_dependencies:
+    - name: rstest
+      version: "0.24"
+      description: パラメータ化テストのため
+
+    - name: proptest
+      version: "1.5"
+      description: プロパティベーステストのため
+
+# ========================================
+# 実装計画
+# ========================================
+implementation:
+  # ----------------------------------------
+  # IMPL-001: ValidationError
+  # ----------------------------------------
+  - id: IMPL-001
+    requirement_id: UTIL-001
+    name: ValidationError 型
+    file_path: src/simple_types/error.rs
+    priority: critical
+    order: 1
+    description: |
+      バリデーションエラーを表す構造体。
+      全ての制約付き型で共通して使用する。
+
+    implementation_steps:
+      - step: 1
+        description: ValidationError 構造体の定義
+        code_outline: |
+          use thiserror::Error;
+
+          /// バリデーションエラーを表す構造体
+          #[derive(Clone, Debug, PartialEq, Eq, Error)]
+          #[error("{field_name}: {message}")]
+          pub struct ValidationError {
+              /// エラーが発生したフィールド名
+              pub field_name: String,
+              /// エラーメッセージ
+              pub message: String,
+          }
+
+      - step: 2
+        description: ValidationError のコンストラクタ実装
+        code_outline: |
+          impl ValidationError {
+              /// 新しい ValidationError を生成する
+              pub fn new(field_name: &str, message: &str) -> Self {
+                  Self {
+                      field_name: field_name.to_string(),
+                      message: message.to_string(),
+                  }
+              }
+          }
+
+    test_cases:
+      - name: test_validation_error_new
+        description: ValidationError が正しく生成されることを確認
+        test_type: unit
+
+      - name: test_validation_error_display
+        description: Display トレイトが正しくフォーマットすることを確認
+        test_type: unit
+
+      - name: test_validation_error_error_trait
+        description: std::error::Error トレイトが実装されていることを確認
+        test_type: unit
+
+    estimated_lines: 30
+
+  # ----------------------------------------
+  # IMPL-002: ConstrainedType モジュール
+  # ----------------------------------------
+  - id: IMPL-002
+    requirement_id: UTIL-002
+    name: ConstrainedType ヘルパー関数群
+    file_path: src/simple_types/constrained_type.rs
+    priority: critical
+    order: 2
+    description: |
+      制約付き型を生成するためのヘルパー関数群。
+      F# の ConstrainedType モジュールに相当する。
+      各関数はジェネリックで、任意の newtype に対して使用可能。
+
+    dependencies:
+      - IMPL-001
+
+    implementation_steps:
+      - step: 1
+        description: create_string 関数の実装
+        code_outline: |
+          use super::error::ValidationError;
+
+          /// 最大長制約付きの文字列型を生成する
+          ///
+          /// # Arguments
+          /// * `field_name` - エラーメッセージに使用するフィールド名
+          /// * `constructor` - 文字列を受け取り型 T を生成するコンストラクタ
+          /// * `max_length` - 最大文字数
+          /// * `value` - 入力文字列
+          ///
+          /// # Returns
+          /// * `Ok(T)` - バリデーション成功時
+          /// * `Err(ValidationError)` - 空文字列または最大長超過時
+          pub fn create_string<T, F>(
+              field_name: &str,
+              constructor: F,
+              max_length: usize,
+              value: &str,
+          ) -> Result<T, ValidationError>
+          where
+              F: FnOnce(String) -> T,
+          {
+              if value.is_empty() {
+                  Err(ValidationError::new(
+                      field_name,
+                      "Must not be empty",
+                  ))
+              } else if value.len() > max_length {
+                  Err(ValidationError::new(
+                      field_name,
+                      &format!("Must not be more than {} chars", max_length),
+                  ))
+              } else {
+                  Ok(constructor(value.to_string()))
+              }
+          }
+
+      - step: 2
+        description: create_string_option 関数の実装
+        code_outline: |
+          /// 空文字列の場合は None を返す最大長制約付きの文字列型を生成する
+          ///
+          /// # Arguments
+          /// * `field_name` - エラーメッセージに使用するフィールド名
+          /// * `constructor` - 文字列を受け取り型 T を生成するコンストラクタ
+          /// * `max_length` - 最大文字数
+          /// * `value` - 入力文字列
+          ///
+          /// # Returns
+          /// * `Ok(None)` - 空文字列の場合
+          /// * `Ok(Some(T))` - バリデーション成功時
+          /// * `Err(ValidationError)` - 最大長超過時
+          pub fn create_string_option<T, F>(
+              field_name: &str,
+              constructor: F,
+              max_length: usize,
+              value: &str,
+          ) -> Result<Option<T>, ValidationError>
+          where
+              F: FnOnce(String) -> T,
+          {
+              if value.is_empty() {
+                  Ok(None)
+              } else if value.len() > max_length {
+                  Err(ValidationError::new(
+                      field_name,
+                      &format!("Must not be more than {} chars", max_length),
+                  ))
+              } else {
+                  Ok(Some(constructor(value.to_string())))
+              }
+          }
+
+      - step: 3
+        description: create_integer 関数の実装
+        code_outline: |
+          /// 範囲制約付きの整数型を生成する
+          ///
+          /// # Arguments
+          /// * `field_name` - エラーメッセージに使用するフィールド名
+          /// * `constructor` - 整数を受け取り型 T を生成するコンストラクタ
+          /// * `min_value` - 最小値
+          /// * `max_value` - 最大値
+          /// * `value` - 入力整数
+          ///
+          /// # Returns
+          /// * `Ok(T)` - バリデーション成功時
+          /// * `Err(ValidationError)` - 範囲外の場合
+          pub fn create_integer<T, F>(
+              field_name: &str,
+              constructor: F,
+              min_value: u32,
+              max_value: u32,
+              value: u32,
+          ) -> Result<T, ValidationError>
+          where
+              F: FnOnce(u32) -> T,
+          {
+              if value < min_value {
+                  Err(ValidationError::new(
+                      field_name,
+                      &format!("Must not be less than {}", min_value),
+                  ))
+              } else if value > max_value {
+                  Err(ValidationError::new(
+                      field_name,
+                      &format!("Must not be greater than {}", max_value),
+                  ))
+              } else {
+                  Ok(constructor(value))
+              }
+          }
+
+      - step: 4
+        description: create_decimal 関数の実装
+        code_outline: |
+          use rust_decimal::Decimal;
+
+          /// 範囲制約付きの小数型を生成する
+          ///
+          /// # Arguments
+          /// * `field_name` - エラーメッセージに使用するフィールド名
+          /// * `constructor` - 小数を受け取り型 T を生成するコンストラクタ
+          /// * `min_value` - 最小値
+          /// * `max_value` - 最大値
+          /// * `value` - 入力小数
+          ///
+          /// # Returns
+          /// * `Ok(T)` - バリデーション成功時
+          /// * `Err(ValidationError)` - 範囲外の場合
+          pub fn create_decimal<T, F>(
+              field_name: &str,
+              constructor: F,
+              min_value: Decimal,
+              max_value: Decimal,
+              value: Decimal,
+          ) -> Result<T, ValidationError>
+          where
+              F: FnOnce(Decimal) -> T,
+          {
+              if value < min_value {
+                  Err(ValidationError::new(
+                      field_name,
+                      &format!("Must not be less than {}", min_value),
+                  ))
+              } else if value > max_value {
+                  Err(ValidationError::new(
+                      field_name,
+                      &format!("Must not be greater than {}", max_value),
+                  ))
+              } else {
+                  Ok(constructor(value))
+              }
+          }
+
+      - step: 5
+        description: create_like 関数の実装（正規表現パターンマッチ）
+        code_outline: |
+          use regex::Regex;
+
+          /// 正規表現パターンに一致する文字列型を生成する
+          ///
+          /// # Arguments
+          /// * `field_name` - エラーメッセージに使用するフィールド名
+          /// * `constructor` - 文字列を受け取り型 T を生成するコンストラクタ
+          /// * `pattern` - 正規表現パターン
+          /// * `value` - 入力文字列
+          ///
+          /// # Returns
+          /// * `Ok(T)` - バリデーション成功時
+          /// * `Err(ValidationError)` - 空文字列またはパターン不一致時
+          ///
+          /// # Note
+          /// 正規表現パターンはアンカー（^$）がない場合、部分一致となる。
+          /// 完全一致が必要な場合は、呼び出し側でアンカーを含めること。
+          pub fn create_like<T, F>(
+              field_name: &str,
+              constructor: F,
+              pattern: &Regex,
+              value: &str,
+          ) -> Result<T, ValidationError>
+          where
+              F: FnOnce(String) -> T,
+          {
+              if value.is_empty() {
+                  Err(ValidationError::new(
+                      field_name,
+                      "Must not be empty",
+                  ))
+              } else if pattern.is_match(value) {
+                  Ok(constructor(value.to_string()))
+              } else {
+                  Err(ValidationError::new(
+                      field_name,
+                      &format!("'{}' must match the pattern '{}'", value, pattern.as_str()),
+                  ))
+              }
+          }
+
+    test_cases:
+      - name: test_create_string_valid
+        description: 有効な文字列で正しく型が生成されることを確認
+        test_type: unit
+
+      - name: test_create_string_empty
+        description: 空文字列でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_create_string_too_long
+        description: 最大長超過でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_create_string_boundary
+        description: 境界値（max_length ちょうど）で成功することを確認
+        test_type: unit
+
+      - name: test_create_string_option_empty
+        description: 空文字列で None が返されることを確認
+        test_type: unit
+
+      - name: test_create_string_option_valid
+        description: 有効な文字列で Some が返されることを確認
+        test_type: unit
+
+      - name: test_create_integer_valid
+        description: 有効な整数で正しく型が生成されることを確認
+        test_type: unit
+
+      - name: test_create_integer_below_min
+        description: 最小値未満でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_create_integer_above_max
+        description: 最大値超過でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_create_integer_boundary_min
+        description: 境界値（min_value）で成功することを確認
+        test_type: unit
+
+      - name: test_create_integer_boundary_max
+        description: 境界値（max_value）で成功することを確認
+        test_type: unit
+
+      - name: test_create_decimal_valid
+        description: 有効な小数で正しく型が生成されることを確認
+        test_type: unit
+
+      - name: test_create_decimal_below_min
+        description: 最小値未満でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_create_decimal_above_max
+        description: 最大値超過でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_create_like_valid
+        description: パターンに一致する文字列で正しく型が生成されることを確認
+        test_type: unit
+
+      - name: test_create_like_empty
+        description: 空文字列でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_create_like_no_match
+        description: パターン不一致でエラーが返されることを確認
+        test_type: unit
+
+    estimated_lines: 150
+
+  # ----------------------------------------
+  # IMPL-003: String50
+  # ----------------------------------------
+  - id: IMPL-003
+    requirement_id: REQ-001
+    name: String50 型
+    file_path: src/simple_types/string_types.rs
+    priority: critical
+    order: 3
+    description: |
+      50文字以下に制約された文字列型。
+      名前、住所の一部など、短い文字列フィールドに使用する。
+
+    dependencies:
+      - IMPL-001
+      - IMPL-002
+
+    implementation_steps:
+      - step: 1
+        description: String50 構造体の定義
+        code_outline: |
+          use super::constrained_type;
+          use super::error::ValidationError;
+
+          /// 50文字以下に制約された文字列型
+          ///
+          /// 名前、住所の一部など、短い文字列フィールドに使用する。
+          /// 空文字列は許可しない。
+          #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+          pub struct String50(String);
+
+          /// String50 の最大文字数
+          const STRING50_MAX_LENGTH: usize = 50;
+
+      - step: 2
+        description: String50 のメソッド実装
+        code_outline: |
+          impl String50 {
+              /// 文字列から String50 を生成する
+              ///
+              /// # Arguments
+              /// * `field_name` - エラーメッセージに使用するフィールド名
+              /// * `value` - 入力文字列
+              ///
+              /// # Returns
+              /// * `Ok(String50)` - バリデーション成功時
+              /// * `Err(ValidationError)` - 空文字列または50文字超過時
+              pub fn create(field_name: &str, value: &str) -> Result<Self, ValidationError> {
+                  constrained_type::create_string(field_name, String50, STRING50_MAX_LENGTH, value)
+              }
+
+              /// 空文字列の場合は None を返し、それ以外はバリデーションを行う
+              ///
+              /// オプショナルなフィールドに使用する。
+              ///
+              /// # Arguments
+              /// * `field_name` - エラーメッセージに使用するフィールド名
+              /// * `value` - 入力文字列
+              ///
+              /// # Returns
+              /// * `Ok(None)` - 空文字列の場合
+              /// * `Ok(Some(String50))` - バリデーション成功時
+              /// * `Err(ValidationError)` - 50文字超過時
+              pub fn create_option(
+                  field_name: &str,
+                  value: &str,
+              ) -> Result<Option<Self>, ValidationError> {
+                  constrained_type::create_string_option(
+                      field_name,
+                      String50,
+                      STRING50_MAX_LENGTH,
+                      value,
+                  )
+              }
+
+              /// 内部の文字列値への参照を返す
+              pub fn value(&self) -> &str {
+                  &self.0
+              }
+          }
+
+    test_cases:
+      - name: test_string50_create_valid
+        description: 50文字以下の文字列で正しく生成されることを確認
+        test_type: unit
+
+      - name: test_string50_create_empty
+        description: 空文字列でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_string50_create_too_long
+        description: 51文字以上でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_string50_create_exactly_50_chars
+        description: ちょうど50文字で成功することを確認
+        test_type: unit
+
+      - name: test_string50_create_option_empty
+        description: 空文字列で None が返されることを確認
+        test_type: unit
+
+      - name: test_string50_create_option_valid
+        description: 有効な文字列で Some が返されることを確認
+        test_type: unit
+
+      - name: test_string50_value
+        description: value() が内部値を正しく返すことを確認
+        test_type: unit
+
+      - name: proptest_string50_roundtrip
+        description: 任意の有効な文字列で create -> value がラウンドトリップすることを確認
+        test_type: property
+
+    estimated_lines: 60
+
+  # ----------------------------------------
+  # IMPL-004: EmailAddress
+  # ----------------------------------------
+  - id: IMPL-004
+    requirement_id: REQ-002
+    name: EmailAddress 型
+    file_path: src/simple_types/string_types.rs
+    priority: critical
+    order: 4
+    description: |
+      メールアドレス形式に制約された文字列型。
+      最低限、@ を含む文字列であることを検証する。
+
+    dependencies:
+      - IMPL-001
+      - IMPL-002
+
+    implementation_steps:
+      - step: 1
+        description: EmailAddress 構造体の定義
+        code_outline: |
+          use once_cell::sync::Lazy;
+          use regex::Regex;
+
+          /// メールアドレス形式に制約された文字列型
+          ///
+          /// 最低限、@ を含む文字列であることを検証する。
+          #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+          pub struct EmailAddress(String);
+
+          /// メールアドレスの正規表現パターン
+          /// .+@.+ : 何か@何か の形式
+          static EMAIL_PATTERN: Lazy<Regex> = Lazy::new(|| {
+              Regex::new(r"^.+@.+$").expect("Invalid email regex pattern")
+          });
+
+      - step: 2
+        description: EmailAddress のメソッド実装
+        code_outline: |
+          impl EmailAddress {
+              /// メールアドレス形式の文字列から EmailAddress を生成する
+              ///
+              /// # Arguments
+              /// * `field_name` - エラーメッセージに使用するフィールド名
+              /// * `value` - 入力文字列
+              ///
+              /// # Returns
+              /// * `Ok(EmailAddress)` - バリデーション成功時
+              /// * `Err(ValidationError)` - 空文字列または @ を含まない場合
+              pub fn create(field_name: &str, value: &str) -> Result<Self, ValidationError> {
+                  constrained_type::create_like(field_name, EmailAddress, &EMAIL_PATTERN, value)
+              }
+
+              /// 内部のメールアドレス文字列への参照を返す
+              pub fn value(&self) -> &str {
+                  &self.0
+              }
+          }
+
+    test_cases:
+      - name: test_email_address_create_valid
+        description: 有効なメールアドレスで正しく生成されることを確認
+        test_type: unit
+
+      - name: test_email_address_create_empty
+        description: 空文字列でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_email_address_create_no_at
+        description: @ を含まない文字列でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_email_address_create_at_only
+        description: @ のみの文字列でエラーが返されることを確認（.+ パターン）
+        test_type: unit
+
+      - name: test_email_address_value
+        description: value() が内部値を正しく返すことを確認
+        test_type: unit
+
+    estimated_lines: 40
+
+  # ----------------------------------------
+  # IMPL-005: ZipCode
+  # ----------------------------------------
+  - id: IMPL-005
+    requirement_id: REQ-003
+    name: ZipCode 型
+    file_path: src/simple_types/string_types.rs
+    priority: high
+    order: 5
+    description: |
+      5桁の郵便番号を表す型。
+      米国の ZIP コード形式を想定する。
+
+    dependencies:
+      - IMPL-001
+      - IMPL-002
+
+    implementation_steps:
+      - step: 1
+        description: ZipCode 構造体の定義と実装
+        code_outline: |
+          /// 5桁の郵便番号を表す型
+          ///
+          /// 米国の ZIP コード形式を想定する。
+          #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+          pub struct ZipCode(String);
+
+          /// ZipCode の正規表現パターン（5桁の数字）
+          static ZIP_CODE_PATTERN: Lazy<Regex> = Lazy::new(|| {
+              Regex::new(r"^\d{5}$").expect("Invalid zip code regex pattern")
+          });
+
+          impl ZipCode {
+              /// 5桁の数字文字列から ZipCode を生成する
+              ///
+              /// # Arguments
+              /// * `field_name` - エラーメッセージに使用するフィールド名
+              /// * `value` - 入力文字列
+              ///
+              /// # Returns
+              /// * `Ok(ZipCode)` - バリデーション成功時
+              /// * `Err(ValidationError)` - 5桁の数字でない場合
+              pub fn create(field_name: &str, value: &str) -> Result<Self, ValidationError> {
+                  constrained_type::create_like(field_name, ZipCode, &ZIP_CODE_PATTERN, value)
+              }
+
+              /// 内部の郵便番号文字列への参照を返す
+              pub fn value(&self) -> &str {
+                  &self.0
+              }
+          }
+
+    test_cases:
+      - name: test_zip_code_create_valid
+        description: 5桁の数字で正しく生成されることを確認
+        test_type: unit
+
+      - name: test_zip_code_create_empty
+        description: 空文字列でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_zip_code_create_4_digits
+        description: 4桁の数字でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_zip_code_create_6_digits
+        description: 6桁の数字でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_zip_code_create_with_letters
+        description: 文字を含む場合にエラーが返されることを確認
+        test_type: unit
+
+      - name: test_zip_code_value
+        description: value() が内部値を正しく返すことを確認
+        test_type: unit
+
+    estimated_lines: 35
+
+  # ----------------------------------------
+  # IMPL-006: UsStateCode
+  # ----------------------------------------
+  - id: IMPL-006
+    requirement_id: REQ-004
+    name: UsStateCode 型
+    file_path: src/simple_types/string_types.rs
+    priority: high
+    order: 6
+    description: |
+      米国の2文字の州コードを表す型。
+      有効な州コードのみを受け入れる。
+
+    dependencies:
+      - IMPL-001
+      - IMPL-002
+
+    implementation_steps:
+      - step: 1
+        description: UsStateCode 構造体の定義と実装
+        code_outline: |
+          /// 米国の2文字の州コードを表す型
+          ///
+          /// 有効な州コードのみを受け入れる。
+          #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+          pub struct UsStateCode(String);
+
+          /// UsStateCode の正規表現パターン（有効な米国州コード）
+          /// AL, AK, AZ, AR, CA, CO, CT, DE, DC, FL, GA, HI, ID, IL, IN, IA, KS, KY, LA,
+          /// MA, MD, ME, MI, MN, MO, MS, MT, NC, ND, NE, NH, NJ, NM, NV, NY, OH, OK, OR,
+          /// PA, RI, SC, SD, TN, TX, UT, VA, VT, WA, WI, WV, WY
+          static US_STATE_CODE_PATTERN: Lazy<Regex> = Lazy::new(|| {
+              Regex::new(
+                  r"^(A[KLRZ]|C[AOT]|D[CE]|FL|GA|HI|I[ADLN]|K[SY]|LA|M[ADEINOST]|N[CDEHJMVY]|O[HKR]|P[AR]|RI|S[CD]|T[NX]|UT|V[AIT]|W[AIVY])$"
+              ).expect("Invalid US state code regex pattern")
+          });
+
+          impl UsStateCode {
+              /// 2文字の州コードから UsStateCode を生成する
+              ///
+              /// # Arguments
+              /// * `field_name` - エラーメッセージに使用するフィールド名
+              /// * `value` - 入力文字列
+              ///
+              /// # Returns
+              /// * `Ok(UsStateCode)` - バリデーション成功時
+              /// * `Err(ValidationError)` - 無効な州コードの場合
+              pub fn create(field_name: &str, value: &str) -> Result<Self, ValidationError> {
+                  constrained_type::create_like(field_name, UsStateCode, &US_STATE_CODE_PATTERN, value)
+              }
+
+              /// 内部の州コード文字列への参照を返す
+              pub fn value(&self) -> &str {
+                  &self.0
+              }
+          }
+
+    test_cases:
+      - name: test_us_state_code_create_valid_ca
+        description: 有効な州コード CA で正しく生成されることを確認
+        test_type: unit
+
+      - name: test_us_state_code_create_valid_ny
+        description: 有効な州コード NY で正しく生成されることを確認
+        test_type: unit
+
+      - name: test_us_state_code_create_all_valid_codes
+        description: 全ての有効な州コードで正しく生成されることを確認
+        test_type: unit
+
+      - name: test_us_state_code_create_empty
+        description: 空文字列でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_us_state_code_create_invalid_xx
+        description: 無効な州コード XX でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_us_state_code_create_lowercase
+        description: 小文字の州コードでエラーが返されることを確認（大文字のみ有効）
+        test_type: unit
+
+      - name: test_us_state_code_value
+        description: value() が内部値を正しく返すことを確認
+        test_type: unit
+
+    estimated_lines: 40
+
+  # ----------------------------------------
+  # IMPL-007: OrderId
+  # ----------------------------------------
+  - id: IMPL-007
+    requirement_id: REQ-005
+    name: OrderId 型
+    file_path: src/simple_types/identifier_types.rs
+    priority: critical
+    order: 7
+    description: |
+      注文を一意に識別する ID 型。
+      空でない50文字以下の文字列。
+
+    dependencies:
+      - IMPL-001
+      - IMPL-002
+
+    implementation_steps:
+      - step: 1
+        description: OrderId 構造体の定義と実装
+        code_outline: |
+          use super::constrained_type;
+          use super::error::ValidationError;
+
+          /// 注文を一意に識別する ID 型
+          ///
+          /// 空でない50文字以下の文字列。
+          #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+          pub struct OrderId(String);
+
+          /// OrderId の最大文字数
+          const ORDER_ID_MAX_LENGTH: usize = 50;
+
+          impl OrderId {
+              /// 文字列から OrderId を生成する
+              ///
+              /// # Arguments
+              /// * `field_name` - エラーメッセージに使用するフィールド名
+              /// * `value` - 入力文字列
+              ///
+              /// # Returns
+              /// * `Ok(OrderId)` - バリデーション成功時
+              /// * `Err(ValidationError)` - 空文字列または50文字超過時
+              pub fn create(field_name: &str, value: &str) -> Result<Self, ValidationError> {
+                  constrained_type::create_string(field_name, OrderId, ORDER_ID_MAX_LENGTH, value)
+              }
+
+              /// 内部の ID 文字列への参照を返す
+              pub fn value(&self) -> &str {
+                  &self.0
+              }
+          }
+
+    test_cases:
+      - name: test_order_id_create_valid
+        description: 有効な文字列で正しく生成されることを確認
+        test_type: unit
+
+      - name: test_order_id_create_empty
+        description: 空文字列でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_order_id_create_too_long
+        description: 51文字以上でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_order_id_hash
+        description: Hash トレイトが正しく動作することを確認（HashMap のキーとして使用可能）
+        test_type: unit
+
+      - name: test_order_id_value
+        description: value() が内部値を正しく返すことを確認
+        test_type: unit
+
+    estimated_lines: 40
+
+  # ----------------------------------------
+  # IMPL-008: OrderLineId
+  # ----------------------------------------
+  - id: IMPL-008
+    requirement_id: REQ-006
+    name: OrderLineId 型
+    file_path: src/simple_types/identifier_types.rs
+    priority: critical
+    order: 8
+    description: |
+      注文明細を一意に識別する ID 型。
+      空でない50文字以下の文字列。
+
+    dependencies:
+      - IMPL-001
+      - IMPL-002
+
+    implementation_steps:
+      - step: 1
+        description: OrderLineId 構造体の定義と実装
+        code_outline: |
+          /// 注文明細を一意に識別する ID 型
+          ///
+          /// 空でない50文字以下の文字列。
+          #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+          pub struct OrderLineId(String);
+
+          /// OrderLineId の最大文字数
+          const ORDER_LINE_ID_MAX_LENGTH: usize = 50;
+
+          impl OrderLineId {
+              /// 文字列から OrderLineId を生成する
+              ///
+              /// # Arguments
+              /// * `field_name` - エラーメッセージに使用するフィールド名
+              /// * `value` - 入力文字列
+              ///
+              /// # Returns
+              /// * `Ok(OrderLineId)` - バリデーション成功時
+              /// * `Err(ValidationError)` - 空文字列または50文字超過時
+              pub fn create(field_name: &str, value: &str) -> Result<Self, ValidationError> {
+                  constrained_type::create_string(field_name, OrderLineId, ORDER_LINE_ID_MAX_LENGTH, value)
+              }
+
+              /// 内部の ID 文字列への参照を返す
+              pub fn value(&self) -> &str {
+                  &self.0
+              }
+          }
+
+    test_cases:
+      - name: test_order_line_id_create_valid
+        description: 有効な文字列で正しく生成されることを確認
+        test_type: unit
+
+      - name: test_order_line_id_create_empty
+        description: 空文字列でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_order_line_id_create_too_long
+        description: 51文字以上でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_order_line_id_hash
+        description: Hash トレイトが正しく動作することを確認
+        test_type: unit
+
+      - name: test_order_line_id_value
+        description: value() が内部値を正しく返すことを確認
+        test_type: unit
+
+    estimated_lines: 35
+
+  # ----------------------------------------
+  # IMPL-009: WidgetCode
+  # ----------------------------------------
+  - id: IMPL-009
+    requirement_id: REQ-007
+    name: WidgetCode 型
+    file_path: src/simple_types/product_types.rs
+    priority: critical
+    order: 9
+    description: |
+      Widget 製品のコードを表す型。
+      "W" で始まり、続いて4桁の数字（W\d{4} パターン）。
+
+    dependencies:
+      - IMPL-001
+      - IMPL-002
+
+    implementation_steps:
+      - step: 1
+        description: WidgetCode 構造体の定義と実装
+        code_outline: |
+          use once_cell::sync::Lazy;
+          use regex::Regex;
+          use super::constrained_type;
+          use super::error::ValidationError;
+
+          /// Widget 製品のコードを表す型
+          ///
+          /// "W" で始まり、続いて4桁の数字（W\d{4} パターン）。
+          /// 例: W1234, W0001, W9999
+          #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+          pub struct WidgetCode(String);
+
+          /// WidgetCode の正規表現パターン
+          static WIDGET_CODE_PATTERN: Lazy<Regex> = Lazy::new(|| {
+              Regex::new(r"^W\d{4}$").expect("Invalid widget code regex pattern")
+          });
+
+          impl WidgetCode {
+              /// W + 4桁の形式の文字列から WidgetCode を生成する
+              ///
+              /// # Arguments
+              /// * `field_name` - エラーメッセージに使用するフィールド名
+              /// * `value` - 入力文字列
+              ///
+              /// # Returns
+              /// * `Ok(WidgetCode)` - バリデーション成功時
+              /// * `Err(ValidationError)` - パターン不一致時
+              pub fn create(field_name: &str, value: &str) -> Result<Self, ValidationError> {
+                  constrained_type::create_like(field_name, WidgetCode, &WIDGET_CODE_PATTERN, value)
+              }
+
+              /// 内部のコード文字列への参照を返す
+              pub fn value(&self) -> &str {
+                  &self.0
+              }
+          }
+
+    test_cases:
+      - name: test_widget_code_create_valid
+        description: 有効な WidgetCode（W1234）で正しく生成されることを確認
+        test_type: unit
+
+      - name: test_widget_code_create_empty
+        description: 空文字列でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_widget_code_create_3_digits
+        description: 3桁の数字（W123）でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_widget_code_create_5_digits
+        description: 5桁の数字（W12345）でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_widget_code_create_wrong_prefix
+        description: G で始まる場合（G1234）にエラーが返されることを確認
+        test_type: unit
+
+      - name: test_widget_code_value
+        description: value() が内部値を正しく返すことを確認
+        test_type: unit
+
+    estimated_lines: 40
+
+  # ----------------------------------------
+  # IMPL-010: GizmoCode
+  # ----------------------------------------
+  - id: IMPL-010
+    requirement_id: REQ-008
+    name: GizmoCode 型
+    file_path: src/simple_types/product_types.rs
+    priority: critical
+    order: 10
+    description: |
+      Gizmo 製品のコードを表す型。
+      "G" で始まり、続いて3桁の数字（G\d{3} パターン）。
+
+    dependencies:
+      - IMPL-001
+      - IMPL-002
+
+    implementation_steps:
+      - step: 1
+        description: GizmoCode 構造体の定義と実装
+        code_outline: |
+          /// Gizmo 製品のコードを表す型
+          ///
+          /// "G" で始まり、続いて3桁の数字（G\d{3} パターン）。
+          /// 例: G123, G001, G999
+          #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+          pub struct GizmoCode(String);
+
+          /// GizmoCode の正規表現パターン
+          static GIZMO_CODE_PATTERN: Lazy<Regex> = Lazy::new(|| {
+              Regex::new(r"^G\d{3}$").expect("Invalid gizmo code regex pattern")
+          });
+
+          impl GizmoCode {
+              /// G + 3桁の形式の文字列から GizmoCode を生成する
+              ///
+              /// # Arguments
+              /// * `field_name` - エラーメッセージに使用するフィールド名
+              /// * `value` - 入力文字列
+              ///
+              /// # Returns
+              /// * `Ok(GizmoCode)` - バリデーション成功時
+              /// * `Err(ValidationError)` - パターン不一致時
+              pub fn create(field_name: &str, value: &str) -> Result<Self, ValidationError> {
+                  constrained_type::create_like(field_name, GizmoCode, &GIZMO_CODE_PATTERN, value)
+              }
+
+              /// 内部のコード文字列への参照を返す
+              pub fn value(&self) -> &str {
+                  &self.0
+              }
+          }
+
+    test_cases:
+      - name: test_gizmo_code_create_valid
+        description: 有効な GizmoCode（G123）で正しく生成されることを確認
+        test_type: unit
+
+      - name: test_gizmo_code_create_empty
+        description: 空文字列でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_gizmo_code_create_2_digits
+        description: 2桁の数字（G12）でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_gizmo_code_create_4_digits
+        description: 4桁の数字（G1234）でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_gizmo_code_create_wrong_prefix
+        description: W で始まる場合（W123）にエラーが返されることを確認
+        test_type: unit
+
+      - name: test_gizmo_code_value
+        description: value() が内部値を正しく返すことを確認
+        test_type: unit
+
+    estimated_lines: 35
+
+  # ----------------------------------------
+  # IMPL-011: ProductCode
+  # ----------------------------------------
+  - id: IMPL-011
+    requirement_id: REQ-009
+    name: ProductCode 型
+    file_path: src/simple_types/product_types.rs
+    priority: critical
+    order: 11
+    description: |
+      製品コードを表す直和型。
+      Widget コードまたは Gizmo コードのいずれかを保持する。
+
+    dependencies:
+      - IMPL-009
+      - IMPL-010
+
+    implementation_steps:
+      - step: 1
+        description: ProductCode 列挙型の定義
+        code_outline: |
+          /// 製品コードを表す直和型
+          ///
+          /// Widget コードまたは Gizmo コードのいずれかを保持する。
+          #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+          pub enum ProductCode {
+              /// Widget 製品のコード
+              Widget(WidgetCode),
+              /// Gizmo 製品のコード
+              Gizmo(GizmoCode),
+          }
+
+      - step: 2
+        description: ProductCode のメソッド実装
+        code_outline: |
+          impl ProductCode {
+              /// 文字列から ProductCode を生成する
+              ///
+              /// 先頭文字で Widget か Gizmo かを判定する。
+              /// - "W" で始まる場合: WidgetCode として解釈
+              /// - "G" で始まる場合: GizmoCode として解釈
+              /// - それ以外: エラー
+              ///
+              /// # Arguments
+              /// * `field_name` - エラーメッセージに使用するフィールド名
+              /// * `code` - 入力文字列
+              ///
+              /// # Returns
+              /// * `Ok(ProductCode)` - バリデーション成功時
+              /// * `Err(ValidationError)` - パターン不一致時
+              pub fn create(field_name: &str, code: &str) -> Result<Self, ValidationError> {
+                  if code.is_empty() {
+                      return Err(ValidationError::new(field_name, "Must not be empty"));
+                  }
+
+                  if code.starts_with('W') {
+                      WidgetCode::create(field_name, code).map(ProductCode::Widget)
+                  } else if code.starts_with('G') {
+                      GizmoCode::create(field_name, code).map(ProductCode::Gizmo)
+                  } else {
+                      Err(ValidationError::new(
+                          field_name,
+                          &format!("Format not recognized '{}'", code),
+                      ))
+                  }
+              }
+
+              /// 内部のコード文字列への参照を返す
+              pub fn value(&self) -> &str {
+                  match self {
+                      ProductCode::Widget(widget_code) => widget_code.value(),
+                      ProductCode::Gizmo(gizmo_code) => gizmo_code.value(),
+                  }
+              }
+          }
+
+    test_cases:
+      - name: test_product_code_create_widget
+        description: W で始まる有効なコードで Widget バリアントが生成されることを確認
+        test_type: unit
+
+      - name: test_product_code_create_gizmo
+        description: G で始まる有効なコードで Gizmo バリアントが生成されることを確認
+        test_type: unit
+
+      - name: test_product_code_create_empty
+        description: 空文字列でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_product_code_create_unknown_prefix
+        description: W でも G でもない先頭文字でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_product_code_create_invalid_widget
+        description: W で始まるが形式が不正な場合にエラーが返されることを確認
+        test_type: unit
+
+      - name: test_product_code_create_invalid_gizmo
+        description: G で始まるが形式が不正な場合にエラーが返されることを確認
+        test_type: unit
+
+      - name: test_product_code_value_widget
+        description: Widget バリアントの value() が正しい値を返すことを確認
+        test_type: unit
+
+      - name: test_product_code_value_gizmo
+        description: Gizmo バリアントの value() が正しい値を返すことを確認
+        test_type: unit
+
+      - name: test_product_code_pattern_match
+        description: パターンマッチで Widget/Gizmo を正しく判別できることを確認
+        test_type: unit
+
+    estimated_lines: 50
+
+  # ----------------------------------------
+  # IMPL-012: UnitQuantity
+  # ----------------------------------------
+  - id: IMPL-012
+    requirement_id: REQ-010
+    name: UnitQuantity 型
+    file_path: src/simple_types/quantity_types.rs
+    priority: critical
+    order: 12
+    description: |
+      個数を表す整数型。
+      1から1000の範囲に制約される。
+      Widget 製品の数量に使用する。
+
+    dependencies:
+      - IMPL-001
+      - IMPL-002
+
+    implementation_steps:
+      - step: 1
+        description: UnitQuantity 構造体の定義と実装
+        code_outline: |
+          use super::constrained_type;
+          use super::error::ValidationError;
+
+          /// 個数を表す整数型
+          ///
+          /// 1から1000の範囲に制約される。
+          /// Widget 製品の数量に使用する。
+          #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+          pub struct UnitQuantity(u32);
+
+          /// UnitQuantity の最小値
+          const UNIT_QUANTITY_MIN: u32 = 1;
+          /// UnitQuantity の最大値
+          const UNIT_QUANTITY_MAX: u32 = 1000;
+
+          impl UnitQuantity {
+              /// 整数から UnitQuantity を生成する
+              ///
+              /// # Arguments
+              /// * `field_name` - エラーメッセージに使用するフィールド名
+              /// * `value` - 入力整数
+              ///
+              /// # Returns
+              /// * `Ok(UnitQuantity)` - バリデーション成功時
+              /// * `Err(ValidationError)` - 範囲外の場合
+              pub fn create(field_name: &str, value: u32) -> Result<Self, ValidationError> {
+                  constrained_type::create_integer(
+                      field_name,
+                      UnitQuantity,
+                      UNIT_QUANTITY_MIN,
+                      UNIT_QUANTITY_MAX,
+                      value,
+                  )
+              }
+
+              /// 内部の整数値を返す
+              pub fn value(&self) -> u32 {
+                  self.0
+              }
+          }
+
+    test_cases:
+      - name: test_unit_quantity_create_valid
+        description: 有効な値（500）で正しく生成されることを確認
+        test_type: unit
+
+      - name: test_unit_quantity_create_min
+        description: 最小値（1）で正しく生成されることを確認
+        test_type: unit
+
+      - name: test_unit_quantity_create_max
+        description: 最大値（1000）で正しく生成されることを確認
+        test_type: unit
+
+      - name: test_unit_quantity_create_below_min
+        description: 最小値未満（0）でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_unit_quantity_create_above_max
+        description: 最大値超過（1001）でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_unit_quantity_value
+        description: value() が内部値を正しく返すことを確認
+        test_type: unit
+
+      - name: test_unit_quantity_copy
+        description: Copy トレイトが実装されていることを確認
+        test_type: unit
+
+    estimated_lines: 45
+
+  # ----------------------------------------
+  # IMPL-013: KilogramQuantity
+  # ----------------------------------------
+  - id: IMPL-013
+    requirement_id: REQ-011
+    name: KilogramQuantity 型
+    file_path: src/simple_types/quantity_types.rs
+    priority: critical
+    order: 13
+    description: |
+      重量（キログラム）を表す小数型。
+      0.05から100.00の範囲に制約される。
+      Gizmo 製品の数量に使用する。
+
+    dependencies:
+      - IMPL-001
+      - IMPL-002
+
+    implementation_steps:
+      - step: 1
+        description: KilogramQuantity 構造体の定義と実装
+        code_outline: |
+          use rust_decimal::Decimal;
+          use std::str::FromStr;
+
+          /// 重量（キログラム）を表す小数型
+          ///
+          /// 0.05から100.00の範囲に制約される。
+          /// Gizmo 製品の数量に使用する。
+          #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+          pub struct KilogramQuantity(Decimal);
+
+          impl KilogramQuantity {
+              /// KilogramQuantity の最小値を取得する
+              fn min_value() -> Decimal {
+                  Decimal::from_str("0.05").expect("Valid decimal literal")
+              }
+
+              /// KilogramQuantity の最大値を取得する
+              fn max_value() -> Decimal {
+                  Decimal::from_str("100.00").expect("Valid decimal literal")
+              }
+
+              /// 小数から KilogramQuantity を生成する
+              ///
+              /// # Arguments
+              /// * `field_name` - エラーメッセージに使用するフィールド名
+              /// * `value` - 入力小数
+              ///
+              /// # Returns
+              /// * `Ok(KilogramQuantity)` - バリデーション成功時
+              /// * `Err(ValidationError)` - 範囲外の場合
+              pub fn create(field_name: &str, value: Decimal) -> Result<Self, ValidationError> {
+                  constrained_type::create_decimal(
+                      field_name,
+                      KilogramQuantity,
+                      Self::min_value(),
+                      Self::max_value(),
+                      value,
+                  )
+              }
+
+              /// 内部の小数値を返す
+              pub fn value(&self) -> Decimal {
+                  self.0
+              }
+          }
+
+    test_cases:
+      - name: test_kilogram_quantity_create_valid
+        description: 有効な値（50.0）で正しく生成されることを確認
+        test_type: unit
+
+      - name: test_kilogram_quantity_create_min
+        description: 最小値（0.05）で正しく生成されることを確認
+        test_type: unit
+
+      - name: test_kilogram_quantity_create_max
+        description: 最大値（100.00）で正しく生成されることを確認
+        test_type: unit
+
+      - name: test_kilogram_quantity_create_below_min
+        description: 最小値未満（0.04）でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_kilogram_quantity_create_above_max
+        description: 最大値超過（100.01）でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_kilogram_quantity_value
+        description: value() が内部値を正しく返すことを確認
+        test_type: unit
+
+    estimated_lines: 50
+
+  # ----------------------------------------
+  # IMPL-014: OrderQuantity
+  # ----------------------------------------
+  - id: IMPL-014
+    requirement_id: REQ-012
+    name: OrderQuantity 型
+    file_path: src/simple_types/quantity_types.rs
+    priority: critical
+    order: 14
+    description: |
+      注文数量を表す直和型。
+      個数（Unit）または重量（Kilogram）のいずれかを保持する。
+
+    dependencies:
+      - IMPL-011
+      - IMPL-012
+      - IMPL-013
+
+    implementation_steps:
+      - step: 1
+        description: OrderQuantity 列挙型の定義
+        code_outline: |
+          use super::product_types::ProductCode;
+
+          /// 注文数量を表す直和型
+          ///
+          /// 個数（Unit）または重量（Kilogram）のいずれかを保持する。
+          /// 製品コードによってどちらを使用するかが決まる。
+          #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+          pub enum OrderQuantity {
+              /// Widget 製品の個数
+              Unit(UnitQuantity),
+              /// Gizmo 製品の重量
+              Kilogram(KilogramQuantity),
+          }
+
+      - step: 2
+        description: OrderQuantity のメソッド実装
+        code_outline: |
+          impl OrderQuantity {
+              /// 製品コードと数量から OrderQuantity を生成する
+              ///
+              /// Widget なら UnitQuantity、Gizmo なら KilogramQuantity として解釈する。
+              ///
+              /// # Arguments
+              /// * `field_name` - エラーメッセージに使用するフィールド名
+              /// * `product_code` - 製品コード
+              /// * `quantity` - 数量（Decimal）
+              ///
+              /// # Returns
+              /// * `Ok(OrderQuantity)` - バリデーション成功時
+              /// * `Err(ValidationError)` - 数量が範囲外の場合
+              pub fn create(
+                  field_name: &str,
+                  product_code: &ProductCode,
+                  quantity: Decimal,
+              ) -> Result<Self, ValidationError> {
+                  match product_code {
+                      ProductCode::Widget(widget_code) => {
+                          // Decimal を u32 に変換（小数部は切り捨て）
+                          let int_quantity = quantity
+                              .to_u32()
+                              .ok_or_else(|| ValidationError::new(
+                                  field_name,
+                                  &format!(
+                                      "Quantity '{}' must be a valid integer for Widget product '{}'. \
+                                       Widget products require a whole number quantity between 1 and 1000.",
+                                      quantity,
+                                      widget_code.value()
+                                  ),
+                              ))?;
+                          UnitQuantity::create(field_name, int_quantity)
+                              .map(OrderQuantity::Unit)
+                      }
+                      ProductCode::Gizmo(_) => {
+                          KilogramQuantity::create(field_name, quantity)
+                              .map(OrderQuantity::Kilogram)
+                      }
+                  }
+              }
+
+              /// 数量を Decimal として返す
+              pub fn value(&self) -> Decimal {
+                  match self {
+                      OrderQuantity::Unit(unit_quantity) => {
+                          Decimal::from(unit_quantity.value())
+                      }
+                      OrderQuantity::Kilogram(kilogram_quantity) => {
+                          kilogram_quantity.value()
+                      }
+                  }
+              }
+          }
+
+    test_cases:
+      - name: test_order_quantity_create_unit
+        description: Widget 製品コードで Unit バリアントが生成されることを確認
+        test_type: unit
+
+      - name: test_order_quantity_create_kilogram
+        description: Gizmo 製品コードで Kilogram バリアントが生成されることを確認
+        test_type: unit
+
+      - name: test_order_quantity_create_unit_invalid
+        description: Widget 製品で範囲外の数量の場合にエラーが返されることを確認
+        test_type: unit
+
+      - name: test_order_quantity_create_kilogram_invalid
+        description: Gizmo 製品で範囲外の数量の場合にエラーが返されることを確認
+        test_type: unit
+
+      - name: test_order_quantity_value_unit
+        description: Unit バリアントの value() が正しい Decimal を返すことを確認
+        test_type: unit
+
+      - name: test_order_quantity_value_kilogram
+        description: Kilogram バリアントの value() が正しい Decimal を返すことを確認
+        test_type: unit
+
+    estimated_lines: 60
+
+  # ----------------------------------------
+  # IMPL-015: Price
+  # ----------------------------------------
+  - id: IMPL-015
+    requirement_id: REQ-013
+    name: Price 型
+    file_path: src/simple_types/price_types.rs
+    priority: critical
+    order: 15
+    description: |
+      単価を表す小数型。
+      0.0から1000.00の範囲に制約される。
+
+    dependencies:
+      - IMPL-001
+      - IMPL-002
+
+    implementation_steps:
+      - step: 1
+        description: Price 構造体の定義と実装
+        code_outline: |
+          use rust_decimal::Decimal;
+          use std::str::FromStr;
+          use super::constrained_type;
+          use super::error::ValidationError;
+
+          /// 単価を表す小数型
+          ///
+          /// 0.0から1000.00の範囲に制約される。
+          #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+          pub struct Price(Decimal);
+
+          impl Price {
+              /// Price のフィールド名
+              const FIELD_NAME: &'static str = "Price";
+
+              /// Price の最小値を取得する
+              fn min_value() -> Decimal {
+                  Decimal::from_str("0.0").expect("Valid decimal literal")
+              }
+
+              /// Price の最大値を取得する
+              fn max_value() -> Decimal {
+                  Decimal::from_str("1000.00").expect("Valid decimal literal")
+              }
+
+              /// 小数から Price を生成する
+              ///
+              /// # Arguments
+              /// * `value` - 入力小数
+              ///
+              /// # Returns
+              /// * `Ok(Price)` - バリデーション成功時
+              /// * `Err(ValidationError)` - 範囲外の場合
+              pub fn create(value: Decimal) -> Result<Self, ValidationError> {
+                  constrained_type::create_decimal(
+                      Self::FIELD_NAME,
+                      Price,
+                      Self::min_value(),
+                      Self::max_value(),
+                      value,
+                  )
+              }
+
+              /// バリデーションなしで Price を生成する
+              ///
+              /// 値が有効であることが確実な場合のみ使用する。
+              ///
+              /// # Panics
+              /// 範囲外の場合は panic する。
+              pub fn unsafe_create(value: Decimal) -> Self {
+                  Self::create(value).unwrap_or_else(|error| {
+                      panic!("Not expecting Price to be out of bounds: {}", error)
+                  })
+              }
+
+              /// 数量を掛けて新しい Price を生成する
+              ///
+              /// # Arguments
+              /// * `quantity` - 数量
+              ///
+              /// # Returns
+              /// * `Ok(Price)` - 新しい価格が範囲内の場合
+              /// * `Err(ValidationError)` - 新しい価格が範囲外の場合
+              pub fn multiply(&self, quantity: Decimal) -> Result<Price, ValidationError> {
+                  Self::create(quantity * self.0)
+              }
+
+              /// 内部の小数値を返す
+              pub fn value(&self) -> Decimal {
+                  self.0
+              }
+          }
+
+    test_cases:
+      - name: test_price_create_valid
+        description: 有効な値（500.0）で正しく生成されることを確認
+        test_type: unit
+
+      - name: test_price_create_min
+        description: 最小値（0.0）で正しく生成されることを確認
+        test_type: unit
+
+      - name: test_price_create_max
+        description: 最大値（1000.0）で正しく生成されることを確認
+        test_type: unit
+
+      - name: test_price_create_below_min
+        description: 最小値未満（-0.01）でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_price_create_above_max
+        description: 最大値超過（1000.01）でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_price_unsafe_create_valid
+        description: 有効な値で unsafe_create が正しく生成することを確認
+        test_type: unit
+
+      - name: test_price_unsafe_create_panic
+        description: 範囲外の値で unsafe_create が panic することを確認
+        test_type: unit
+
+      - name: test_price_multiply_valid
+        description: 乗算結果が範囲内の場合に正しく動作することを確認
+        test_type: unit
+
+      - name: test_price_multiply_overflow
+        description: 乗算結果が範囲外の場合にエラーが返されることを確認
+        test_type: unit
+
+      - name: test_price_value
+        description: value() が内部値を正しく返すことを確認
+        test_type: unit
+
+    estimated_lines: 70
+
+  # ----------------------------------------
+  # IMPL-016: BillingAmount
+  # ----------------------------------------
+  - id: IMPL-016
+    requirement_id: REQ-014
+    name: BillingAmount 型
+    file_path: src/simple_types/price_types.rs
+    priority: critical
+    order: 16
+    description: |
+      請求金額を表す小数型。
+      0.0から10000.00の範囲に制約される。
+
+    dependencies:
+      - IMPL-001
+      - IMPL-002
+      - IMPL-015
+
+    implementation_steps:
+      - step: 1
+        description: BillingAmount 構造体の定義と実装
+        code_outline: |
+          use functional_rusty::typeclass::Foldable;
+
+          /// 請求金額を表す小数型
+          ///
+          /// 0.0から10000.00の範囲に制約される。
+          /// 複数の Price の合計として使用される。
+          #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+          pub struct BillingAmount(Decimal);
+
+          impl BillingAmount {
+              /// BillingAmount のフィールド名
+              const FIELD_NAME: &'static str = "BillingAmount";
+
+              /// BillingAmount の最小値を取得する
+              fn min_value() -> Decimal {
+                  Decimal::from_str("0.0").expect("Valid decimal literal")
+              }
+
+              /// BillingAmount の最大値を取得する
+              fn max_value() -> Decimal {
+                  Decimal::from_str("10000.00").expect("Valid decimal literal")
+              }
+
+              /// 小数から BillingAmount を生成する
+              ///
+              /// # Arguments
+              /// * `value` - 入力小数
+              ///
+              /// # Returns
+              /// * `Ok(BillingAmount)` - バリデーション成功時
+              /// * `Err(ValidationError)` - 範囲外の場合
+              pub fn create(value: Decimal) -> Result<Self, ValidationError> {
+                  constrained_type::create_decimal(
+                      Self::FIELD_NAME,
+                      BillingAmount,
+                      Self::min_value(),
+                      Self::max_value(),
+                      value,
+                  )
+              }
+
+              /// Price のスライスを合計して BillingAmount を生成する
+              ///
+              /// functional-rusty の Foldable トレイトを使用して畳み込みを行う。
+              ///
+              /// # Arguments
+              /// * `prices` - Price のスライス
+              ///
+              /// # Returns
+              /// * `Ok(BillingAmount)` - 合計が範囲内の場合
+              /// * `Err(ValidationError)` - 合計が範囲外の場合
+              pub fn sum_prices(prices: &[Price]) -> Result<Self, ValidationError> {
+                  let total = prices.to_vec().fold_left(Decimal::ZERO, |accumulator, price| {
+                      accumulator + price.value()
+                  });
+                  Self::create(total)
+              }
+
+              /// 内部の小数値を返す
+              pub fn value(&self) -> Decimal {
+                  self.0
+              }
+          }
+
+    test_cases:
+      - name: test_billing_amount_create_valid
+        description: 有効な値（5000.0）で正しく生成されることを確認
+        test_type: unit
+
+      - name: test_billing_amount_create_min
+        description: 最小値（0.0）で正しく生成されることを確認
+        test_type: unit
+
+      - name: test_billing_amount_create_max
+        description: 最大値（10000.0）で正しく生成されることを確認
+        test_type: unit
+
+      - name: test_billing_amount_create_below_min
+        description: 最小値未満でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_billing_amount_create_above_max
+        description: 最大値超過でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_billing_amount_sum_prices_empty
+        description: 空のスライスで 0.0 が生成されることを確認
+        test_type: unit
+
+      - name: test_billing_amount_sum_prices_valid
+        description: 複数の Price の合計が正しく計算されることを確認
+        test_type: unit
+
+      - name: test_billing_amount_sum_prices_overflow
+        description: 合計が範囲外の場合にエラーが返されることを確認
+        test_type: unit
+
+      - name: test_billing_amount_value
+        description: value() が内部値を正しく返すことを確認
+        test_type: unit
+
+    estimated_lines: 55
+
+  # ----------------------------------------
+  # IMPL-017: VipStatus
+  # ----------------------------------------
+  - id: IMPL-017
+    requirement_id: REQ-015
+    name: VipStatus 型
+    file_path: src/simple_types/misc_types.rs
+    priority: high
+    order: 17
+    description: |
+      顧客の VIP ステータスを表す列挙型。
+      Normal（通常）または Vip（VIP 顧客）のいずれか。
+
+    dependencies:
+      - IMPL-001
+
+    implementation_steps:
+      - step: 1
+        description: VipStatus 列挙型の定義と実装
+        code_outline: |
+          use super::error::ValidationError;
+
+          /// 顧客の VIP ステータスを表す列挙型
+          ///
+          /// Normal（通常）または Vip（VIP 顧客）のいずれか。
+          #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+          pub enum VipStatus {
+              /// 通常の顧客
+              Normal,
+              /// VIP 顧客
+              Vip,
+          }
+
+          impl VipStatus {
+              /// 文字列から VipStatus を生成する
+              ///
+              /// "normal", "Normal", "vip", "VIP" を受け入れる。
+              ///
+              /// # Arguments
+              /// * `field_name` - エラーメッセージに使用するフィールド名
+              /// * `value` - 入力文字列
+              ///
+              /// # Returns
+              /// * `Ok(VipStatus)` - バリデーション成功時
+              /// * `Err(ValidationError)` - 無効な値の場合
+              pub fn create(field_name: &str, value: &str) -> Result<Self, ValidationError> {
+                  match value {
+                      "normal" | "Normal" => Ok(VipStatus::Normal),
+                      "vip" | "VIP" => Ok(VipStatus::Vip),
+                      _ => Err(ValidationError::new(
+                          field_name,
+                          "Must be one of 'Normal', 'VIP'",
+                      )),
+                  }
+              }
+
+              /// VipStatus を文字列として返す
+              pub fn value(&self) -> &'static str {
+                  match self {
+                      VipStatus::Normal => "Normal",
+                      VipStatus::Vip => "VIP",
+                  }
+              }
+          }
+
+    test_cases:
+      - name: test_vip_status_create_normal_lowercase
+        description: "normal" で Normal が生成されることを確認
+        test_type: unit
+
+      - name: test_vip_status_create_normal_capitalized
+        description: "Normal" で Normal が生成されることを確認
+        test_type: unit
+
+      - name: test_vip_status_create_vip_lowercase
+        description: "vip" で Vip が生成されることを確認
+        test_type: unit
+
+      - name: test_vip_status_create_vip_uppercase
+        description: "VIP" で Vip が生成されることを確認
+        test_type: unit
+
+      - name: test_vip_status_create_invalid
+        description: 無効な文字列でエラーが返されることを確認
+        test_type: unit
+
+      - name: test_vip_status_value_normal
+        description: Normal の value() が "Normal" を返すことを確認
+        test_type: unit
+
+      - name: test_vip_status_value_vip
+        description: Vip の value() が "VIP" を返すことを確認
+        test_type: unit
+
+    estimated_lines: 45
+
+  # ----------------------------------------
+  # IMPL-018: PromotionCode
+  # ----------------------------------------
+  - id: IMPL-018
+    requirement_id: REQ-016
+    name: PromotionCode 型
+    file_path: src/simple_types/misc_types.rs
+    priority: medium
+    order: 18
+    description: |
+      プロモーションコードを表す型。
+      特にバリデーションなしの単純なラッパー型。
+
+    dependencies: []
+
+    implementation_steps:
+      - step: 1
+        description: PromotionCode 構造体の定義と実装
+        code_outline: |
+          /// プロモーションコードを表す型
+          ///
+          /// 特にバリデーションなしの単純なラッパー型。
+          #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+          pub struct PromotionCode(String);
+
+          impl PromotionCode {
+              /// 文字列から PromotionCode を生成する
+              ///
+              /// バリデーションなしで直接生成する。
+              pub fn new(value: String) -> Self {
+                  PromotionCode(value)
+              }
+
+              /// 内部のプロモーションコード文字列への参照を返す
+              pub fn value(&self) -> &str {
+                  &self.0
+              }
+          }
+
+    test_cases:
+      - name: test_promotion_code_new
+        description: new() で正しく生成されることを確認
+        test_type: unit
+
+      - name: test_promotion_code_new_empty
+        description: 空文字列でも生成できることを確認（バリデーションなし）
+        test_type: unit
+
+      - name: test_promotion_code_value
+        description: value() が内部値を正しく返すことを確認
+        test_type: unit
+
+    estimated_lines: 25
+
+  # ----------------------------------------
+  # IMPL-019: PdfAttachment
+  # ----------------------------------------
+  - id: IMPL-019
+    requirement_id: REQ-017
+    name: PdfAttachment 型
+    file_path: src/simple_types/misc_types.rs
+    priority: medium
+    order: 19
+    description: |
+      PDF 添付ファイルを表す構造体。
+      ファイル名とバイトデータを保持する。
+
+    dependencies: []
+
+    implementation_steps:
+      - step: 1
+        description: PdfAttachment 構造体の定義と実装
+        code_outline: |
+          /// PDF 添付ファイルを表す構造体
+          ///
+          /// ファイル名とバイトデータを保持する。
+          #[derive(Clone, Debug, PartialEq, Eq)]
+          pub struct PdfAttachment {
+              /// ファイル名
+              name: String,
+              /// PDF のバイトデータ
+              bytes: Vec<u8>,
+          }
+
+          impl PdfAttachment {
+              /// ファイル名とバイトデータから PdfAttachment を生成する
+              pub fn new(name: String, bytes: Vec<u8>) -> Self {
+                  PdfAttachment { name, bytes }
+              }
+
+              /// ファイル名への参照を返す
+              pub fn name(&self) -> &str {
+                  &self.name
+              }
+
+              /// バイトデータへの参照を返す
+              pub fn bytes(&self) -> &[u8] {
+                  &self.bytes
+              }
+          }
+
+    test_cases:
+      - name: test_pdf_attachment_new
+        description: new() で正しく生成されることを確認
+        test_type: unit
+
+      - name: test_pdf_attachment_name
+        description: name() がファイル名を正しく返すことを確認
+        test_type: unit
+
+      - name: test_pdf_attachment_bytes
+        description: bytes() がバイトデータを正しく返すことを確認
+        test_type: unit
+
+    estimated_lines: 30
+
+  # ----------------------------------------
+  # IMPL-020: モジュール公開設定
+  # ----------------------------------------
+  - id: IMPL-020
+    requirement_id: null
+    name: モジュール構成
+    file_path: src/simple_types/mod.rs
+    priority: critical
+    order: 20
+    description: |
+      simple_types モジュールの構成と再エクスポート。
+      全ての型を公開する。
+
+    dependencies:
+      - IMPL-001
+      - IMPL-002
+      - IMPL-003
+      - IMPL-004
+      - IMPL-005
+      - IMPL-006
+      - IMPL-007
+      - IMPL-008
+      - IMPL-009
+      - IMPL-010
+      - IMPL-011
+      - IMPL-012
+      - IMPL-013
+      - IMPL-014
+      - IMPL-015
+      - IMPL-016
+      - IMPL-017
+      - IMPL-018
+      - IMPL-019
+
+    implementation_steps:
+      - step: 1
+        description: サブモジュールの定義
+        code_outline: |
+          //! 注文ドメインで使用する基本型（Simple Types）
+          //!
+          //! F# の Single Case Discriminated Union パターンを Rust の newtype パターンで実現し、
+          //! 不正な状態を型レベルで防ぐ「Make Illegal States Unrepresentable」の原則に従う。
+
+          mod constrained_type;
+          mod error;
+          mod identifier_types;
+          mod misc_types;
+          mod price_types;
+          mod product_types;
+          mod quantity_types;
+          mod string_types;
+
+      - step: 2
+        description: 型の再エクスポート
+        code_outline: |
+          // エラー型
+          pub use error::ValidationError;
+
+          // 文字列型
+          pub use string_types::{EmailAddress, String50, UsStateCode, ZipCode};
+
+          // ID 型
+          pub use identifier_types::{OrderId, OrderLineId};
+
+          // 製品コード型
+          pub use product_types::{GizmoCode, ProductCode, WidgetCode};
+
+          // 数量型
+          pub use quantity_types::{KilogramQuantity, OrderQuantity, UnitQuantity};
+
+          // 金額型
+          pub use price_types::{BillingAmount, Price};
+
+          // その他の型
+          pub use misc_types::{PdfAttachment, PromotionCode, VipStatus};
+
+    test_cases: []
+    estimated_lines: 35
+
+  # ----------------------------------------
+  # IMPL-021: ライブラリルート
+  # ----------------------------------------
+  - id: IMPL-021
+    requirement_id: null
+    name: ライブラリルート
+    file_path: src/lib.rs
+    priority: critical
+    order: 21
+    description: |
+      ライブラリのルートモジュール。
+      simple_types モジュールを公開する。
+
+    dependencies:
+      - IMPL-020
+
+    implementation_steps:
+      - step: 1
+        description: ライブラリルートの定義
+        code_outline: |
+          //! # Order Taking Sample Application
+          //!
+          //! functional-rusty を使用した注文処理サンプルアプリケーション。
+          //!
+          //! ## 概要
+          //!
+          //! F# の「Domain Modeling Made Functional」を参考に、
+          //! Rust で関数型ドメインモデリングを実現するサンプルです。
+          //!
+          //! ## モジュール構成
+          //!
+          //! - `simple_types`: 制約付き基本型（String50, EmailAddress, OrderId 等）
+
+          #![forbid(unsafe_code)]
+
+          pub mod simple_types;
+
+    test_cases: []
+    estimated_lines: 20
+
+# ========================================
+# テストファイル構成
+# ========================================
+test_files:
+  - path: tests/simple_types_tests.rs
+    description: simple_types モジュールの統合テスト
+    test_coverage:
+      - 各型のバリデーション成功・失敗
+      - 境界値テスト
+      - パターンマッチテスト
+    estimated_lines: 300
+
+  - path: tests/simple_types_property_tests.rs
+    description: proptest を使用したプロパティベーステスト
+    test_coverage:
+      - ラウンドトリップ特性（create -> value）
+      - 不変量（型の制約が常に満たされる）
+    estimated_lines: 150
+
+# ========================================
+# functional-rusty との統合
+# ========================================
+functional_rusty_integration:
+  - feature: Result の Functor/Monad 操作
+    description: |
+      Result<T, ValidationError> に対する map, and_then 操作を使用。
+      functional-rusty の Functor/Monad トレイトの実装を活用。
+    usage_locations:
+      - ProductCode::create（WidgetCode/GizmoCode のマッピング）
+      - OrderQuantity::create（製品タイプによる分岐）
+
+  - feature: Foldable による畳み込み
+    description: |
+      BillingAmount::sum_prices で Price のリストを畳み込む。
+      functional-rusty の Foldable トレイトの fold_left メソッドを使用して
+      Price の Vec を Decimal の合計値に畳み込む。
+    usage_locations:
+      - BillingAmount::sum_prices（Vec<Price>.fold_left を使用）
+
+# ========================================
+# 実装時の注意事項
+# ========================================
+implementation_notes:
+  - note: |
+      Newtype パターンを使用し、内部フィールドは private にする。
+      外部から直接フィールドにアクセスさせない。
+
+  - note: |
+      Clone, Debug, PartialEq, Eq は全ての型に derive する。
+      Hash は ID 型など、HashMap のキーとして使用する可能性のある型に derive する。
+
+  - note: |
+      数値型（UnitQuantity, KilogramQuantity, Price, BillingAmount）には Copy も derive する。
+
+  - note: |
+      エラーメッセージは英語で統一し、フィールド名を含める。
+      例: "OrderId: Must not be empty"
+
+  - note: |
+      Decimal 型には rust_decimal クレートを使用する。
+      浮動小数点数（f64）は精度の問題があるため使用しない。
+
+  - note: |
+      正規表現パターンは once_cell::sync::Lazy を使用して一度だけコンパイルしてキャッシュする。
+
+  - note: |
+      テストは rstest を使用してパラメータ化テストを実装する。
+
+  - note: |
+      プロパティベーステストは proptest を使用する。
+
+# ========================================
+# 推定総行数
+# ========================================
+estimated_total_lines:
+  source_code: 750
+  test_code: 450
+  total: 1200

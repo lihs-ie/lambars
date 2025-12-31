@@ -1,0 +1,1118 @@
+# Phase 8: DTO・API層 要件定義
+# Order Taking Sample Application
+# 参照: F# OrderTakingEvolved/PlaceOrder.Dto.fs, PlaceOrder.Api.fs
+
+version: "1.0.0"
+created_at: "2026-01-01"
+phase_id: phase_8
+phase_name: DTO・API層
+phase_name_en: DTO and API Layer
+
+# =============================================================================
+# 概要
+# =============================================================================
+
+overview:
+  description: |
+    JSON シリアライズ用の DTO (Data Transfer Object) と API エンドポイントを実装する。
+    ドメイン型と外部インターフェース（JSON）間の変換を担当し、
+    ワークフローを HTTP API として公開する。
+
+  design_principles:
+    - DTO はシリアライズ/デシリアライズ専用（バリデーションロジックは含めない）
+    - Domain 型への変換は明示的関数（to_unvalidated_*, from_domain）で実装
+    - 依存性注入パターンの継続（place_order 関数への引数注入）
+    - serde + serde_json を使用した JSON シリアライゼーション
+    - F# の Async を Rust の IO モナドで同期的に実装
+
+  functional_programming_aspects:
+    - 純粋な変換関数（DTO <-> Domain）
+    - 参照透過性を維持した設計
+    - Result 型によるエラー処理
+    - ダミー依存関数による関数型依存性注入パターンの実践
+
+  dependencies:
+    rust_crates:
+      - serde: "^1.0"
+      - serde_json: "^1.0"
+    project_modules:
+      - simple_types
+      - compound_types
+      - workflow
+
+# =============================================================================
+# 要件一覧
+# =============================================================================
+
+requirements:
+
+  # ---------------------------------------------------------------------------
+  # 入力 DTO 型定義
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-075
+    name: CustomerInfoDto
+    category: input_dto
+    priority: critical
+    description: |
+      顧客情報の入力 DTO。JSON からデシリアライズされ、
+      UnvalidatedCustomerInfo に変換される。
+
+    type_definition:
+      name: CustomerInfoDto
+      derive:
+        - Clone
+        - Debug
+        - PartialEq
+        - Eq
+        - Serialize
+        - Deserialize
+      fields:
+        - name: first_name
+          type: String
+          json_name: first_name
+          description: 名
+        - name: last_name
+          type: String
+          json_name: last_name
+          description: 姓
+        - name: email_address
+          type: String
+          json_name: email_address
+          description: メールアドレス
+        - name: vip_status
+          type: String
+          json_name: vip_status
+          description: VIP ステータス文字列（"Normal", "VIP"）
+
+    methods:
+      - name: to_unvalidated_customer_info
+        signature: "fn to_unvalidated_customer_info(&self) -> UnvalidatedCustomerInfo"
+        description: |
+          DTO から UnvalidatedCustomerInfo への変換。
+          常に成功する（バリデーションは後続ステップで行う）。
+        returns: UnvalidatedCustomerInfo
+
+    test_cases:
+      - name: test_deserialize_customer_info_dto
+        description: JSON から CustomerInfoDto へのデシリアライズ
+      - name: test_to_unvalidated_customer_info
+        description: CustomerInfoDto から UnvalidatedCustomerInfo への変換
+      - name: test_serialize_customer_info_dto
+        description: CustomerInfoDto から JSON へのシリアライズ
+
+  - id: REQ-076
+    name: AddressDto
+    category: input_dto
+    priority: critical
+    description: |
+      住所の入力/出力 DTO。JSON との相互変換に使用される。
+
+    type_definition:
+      name: AddressDto
+      derive:
+        - Clone
+        - Debug
+        - PartialEq
+        - Eq
+        - Serialize
+        - Deserialize
+      fields:
+        - name: address_line1
+          type: String
+          json_name: address_line1
+          description: 住所行1
+        - name: address_line2
+          type: String
+          json_name: address_line2
+          description: 住所行2（空文字列の場合もあり）
+        - name: address_line3
+          type: String
+          json_name: address_line3
+          description: 住所行3（空文字列の場合もあり）
+        - name: address_line4
+          type: String
+          json_name: address_line4
+          description: 住所行4（空文字列の場合もあり）
+        - name: city
+          type: String
+          json_name: city
+          description: 市
+        - name: zip_code
+          type: String
+          json_name: zip_code
+          description: 郵便番号
+        - name: state
+          type: String
+          json_name: state
+          description: 州コード
+        - name: country
+          type: String
+          json_name: country
+          description: 国名
+
+    methods:
+      - name: to_unvalidated_address
+        signature: "fn to_unvalidated_address(&self) -> UnvalidatedAddress"
+        description: |
+          DTO から UnvalidatedAddress への変換。
+          常に成功する（バリデーションは後続ステップで行う）。
+        returns: UnvalidatedAddress
+
+      - name: from_address
+        signature: "fn from_address(address: &Address) -> AddressDto"
+        description: |
+          Domain の Address から DTO への変換。
+          出力時に使用する。Option<String50> は空文字列として出力。
+        returns: AddressDto
+
+    test_cases:
+      - name: test_deserialize_address_dto
+        description: JSON から AddressDto へのデシリアライズ
+      - name: test_to_unvalidated_address
+        description: AddressDto から UnvalidatedAddress への変換
+      - name: test_from_address
+        description: Address から AddressDto への変換
+      - name: test_from_address_with_optional_lines
+        description: Option フィールドを含む Address から AddressDto への変換
+
+  - id: REQ-077
+    name: OrderFormLineDto
+    category: input_dto
+    priority: critical
+    description: |
+      注文明細行の入力 DTO。
+
+    type_definition:
+      name: OrderFormLineDto
+      derive:
+        - Clone
+        - Debug
+        - PartialEq
+        - Serialize
+        - Deserialize
+      fields:
+        - name: order_line_id
+          type: String
+          json_name: order_line_id
+          description: 注文明細ID
+        - name: product_code
+          type: String
+          json_name: product_code
+          description: 製品コード
+        - name: quantity
+          type: Decimal
+          json_name: quantity
+          description: 数量
+          serde_note: |
+            rust_decimal::Decimal を使用。
+            serde_with または rust_decimal の serde feature を使用。
+
+    methods:
+      - name: to_unvalidated_order_line
+        signature: "fn to_unvalidated_order_line(&self) -> UnvalidatedOrderLine"
+        description: |
+          DTO から UnvalidatedOrderLine への変換。
+        returns: UnvalidatedOrderLine
+
+    test_cases:
+      - name: test_deserialize_order_form_line_dto
+        description: JSON から OrderFormLineDto へのデシリアライズ
+      - name: test_to_unvalidated_order_line
+        description: OrderFormLineDto から UnvalidatedOrderLine への変換
+      - name: test_quantity_decimal_handling
+        description: Decimal の JSON 表現と変換
+
+  - id: REQ-078
+    name: OrderFormDto
+    category: input_dto
+    priority: critical
+    description: |
+      注文フォーム全体の入力 DTO。
+      PlaceOrder ワークフローの入力として使用される。
+
+    type_definition:
+      name: OrderFormDto
+      derive:
+        - Clone
+        - Debug
+        - PartialEq
+        - Serialize
+        - Deserialize
+      fields:
+        - name: order_id
+          type: String
+          json_name: order_id
+          description: 注文ID
+        - name: customer_info
+          type: CustomerInfoDto
+          json_name: customer_info
+          description: 顧客情報
+        - name: shipping_address
+          type: AddressDto
+          json_name: shipping_address
+          description: 配送先住所
+        - name: billing_address
+          type: AddressDto
+          json_name: billing_address
+          description: 請求先住所
+        - name: lines
+          type: Vec<OrderFormLineDto>
+          json_name: lines
+          description: 注文明細リスト
+        - name: promotion_code
+          type: String
+          json_name: promotion_code
+          description: プロモーションコード（空文字列の場合もあり）
+
+    methods:
+      - name: to_unvalidated_order
+        signature: "fn to_unvalidated_order(&self) -> UnvalidatedOrder"
+        description: |
+          DTO から UnvalidatedOrder への変換。
+          ネストした DTO も再帰的に変換する。
+        returns: UnvalidatedOrder
+
+    test_cases:
+      - name: test_deserialize_order_form_dto
+        description: JSON から OrderFormDto へのデシリアライズ
+      - name: test_to_unvalidated_order
+        description: OrderFormDto から UnvalidatedOrder への変換
+      - name: test_nested_dto_conversion
+        description: ネストした DTO の変換
+
+  # ---------------------------------------------------------------------------
+  # 出力 DTO 型定義
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-079
+    name: PricedOrderLineDto
+    category: output_dto
+    priority: high
+    description: |
+      価格付き注文明細の出力 DTO。
+      ProductLine と CommentLine の両方を表現可能。
+
+    type_definition:
+      name: PricedOrderLineDto
+      derive:
+        - Clone
+        - Debug
+        - PartialEq
+        - Serialize
+        - Deserialize
+      fields:
+        - name: order_line_id
+          type: Option<String>
+          json_name: order_line_id
+          description: 注文明細ID（CommentLine の場合は None）
+          serde_note: "#[serde(skip_serializing_if = \"Option::is_none\")]"
+        - name: product_code
+          type: Option<String>
+          json_name: product_code
+          description: 製品コード（CommentLine の場合は None）
+          serde_note: "#[serde(skip_serializing_if = \"Option::is_none\")]"
+        - name: quantity
+          type: Decimal
+          json_name: quantity
+          description: 数量（CommentLine の場合は 0）
+        - name: line_price
+          type: Decimal
+          json_name: line_price
+          description: 明細価格（CommentLine の場合は 0）
+        - name: comment
+          type: String
+          json_name: comment
+          description: コメント（ProductLine の場合は空文字列）
+
+    methods:
+      - name: from_domain
+        signature: "fn from_domain(priced_line: &PricedOrderLine) -> PricedOrderLineDto"
+        description: |
+          Domain の PricedOrderLine から DTO への変換。
+          ProductLine と CommentLine でフィールドの設定が異なる。
+        returns: PricedOrderLineDto
+        implementation_notes: |
+          match priced_line {
+              PricedOrderLine::ProductLine(line) => {
+                  order_line_id: Some(line.order_line_id().value().to_string()),
+                  product_code: Some(line.product_code().value().to_string()),
+                  quantity: line.quantity().value(),
+                  line_price: line.line_price().value(),
+                  comment: String::new(),
+              },
+              PricedOrderLine::CommentLine(comment) => {
+                  order_line_id: None,
+                  product_code: None,
+                  quantity: Decimal::ZERO,
+                  line_price: Decimal::ZERO,
+                  comment: comment.clone(),
+              }
+          }
+
+    test_cases:
+      - name: test_from_domain_product_line
+        description: ProductLine から DTO への変換
+      - name: test_from_domain_comment_line
+        description: CommentLine から DTO への変換
+      - name: test_serialize_priced_order_line_dto
+        description: DTO から JSON へのシリアライズ
+
+  - id: REQ-080
+    name: ShippableOrderLineDto
+    category: output_dto
+    priority: high
+    description: |
+      配送対象の注文明細の出力 DTO。
+
+    type_definition:
+      name: ShippableOrderLineDto
+      derive:
+        - Clone
+        - Debug
+        - PartialEq
+        - Serialize
+        - Deserialize
+      fields:
+        - name: product_code
+          type: String
+          json_name: product_code
+          description: 製品コード
+        - name: quantity
+          type: Decimal
+          json_name: quantity
+          description: 数量
+
+    methods:
+      - name: from_domain
+        signature: "fn from_domain(line: &ShippableOrderLine) -> ShippableOrderLineDto"
+        description: |
+          Domain の ShippableOrderLine から DTO への変換。
+        returns: ShippableOrderLineDto
+
+    test_cases:
+      - name: test_from_domain_shippable_order_line
+        description: ShippableOrderLine から DTO への変換
+
+  - id: REQ-081
+    name: ShippableOrderPlacedDto
+    category: output_dto
+    priority: high
+    description: |
+      配送可能注文確定イベントの出力 DTO。
+
+    type_definition:
+      name: ShippableOrderPlacedDto
+      derive:
+        - Clone
+        - Debug
+        - PartialEq
+        - Serialize
+        - Deserialize
+      fields:
+        - name: order_id
+          type: String
+          json_name: order_id
+          description: 注文ID
+        - name: shipping_address
+          type: AddressDto
+          json_name: shipping_address
+          description: 配送先住所
+        - name: shipment_lines
+          type: Vec<ShippableOrderLineDto>
+          json_name: shipment_lines
+          description: 配送対象の注文明細リスト
+        - name: pdf
+          type: PdfAttachmentDto
+          json_name: pdf
+          description: PDF 添付ファイル
+
+    methods:
+      - name: from_domain
+        signature: "fn from_domain(event: &ShippableOrderPlaced) -> ShippableOrderPlacedDto"
+        description: |
+          Domain の ShippableOrderPlaced から DTO への変換。
+        returns: ShippableOrderPlacedDto
+
+    test_cases:
+      - name: test_from_domain_shippable_order_placed
+        description: ShippableOrderPlaced から DTO への変換
+      - name: test_serialize_shippable_order_placed_dto
+        description: DTO から JSON へのシリアライズ
+
+  - id: REQ-082
+    name: PdfAttachmentDto
+    category: output_dto
+    priority: medium
+    description: |
+      PDF 添付ファイルの出力 DTO。
+      バイナリデータは Base64 エンコードされる。
+
+    type_definition:
+      name: PdfAttachmentDto
+      derive:
+        - Clone
+        - Debug
+        - PartialEq
+        - Serialize
+        - Deserialize
+      fields:
+        - name: name
+          type: String
+          json_name: name
+          description: ファイル名
+        - name: bytes
+          type: String
+          json_name: bytes
+          description: Base64 エンコードされた PDF データ
+          serde_note: |
+            バイナリデータを Base64 文字列として保存。
+            base64 クレートまたは serde_with の base64 サポートを使用。
+
+    methods:
+      - name: from_domain
+        signature: "fn from_domain(pdf: &PdfAttachment) -> PdfAttachmentDto"
+        description: |
+          Domain の PdfAttachment から DTO への変換。
+          bytes を Base64 エンコードする。
+        returns: PdfAttachmentDto
+
+    test_cases:
+      - name: test_from_domain_pdf_attachment
+        description: PdfAttachment から DTO への変換
+      - name: test_base64_encoding
+        description: バイナリデータの Base64 エンコード
+
+  - id: REQ-083
+    name: BillableOrderPlacedDto
+    category: output_dto
+    priority: high
+    description: |
+      請求可能注文確定イベントの出力 DTO。
+
+    type_definition:
+      name: BillableOrderPlacedDto
+      derive:
+        - Clone
+        - Debug
+        - PartialEq
+        - Serialize
+        - Deserialize
+      fields:
+        - name: order_id
+          type: String
+          json_name: order_id
+          description: 注文ID
+        - name: billing_address
+          type: AddressDto
+          json_name: billing_address
+          description: 請求先住所
+        - name: amount_to_bill
+          type: Decimal
+          json_name: amount_to_bill
+          description: 請求金額
+
+    methods:
+      - name: from_domain
+        signature: "fn from_domain(event: &BillableOrderPlaced) -> BillableOrderPlacedDto"
+        description: |
+          Domain の BillableOrderPlaced から DTO への変換。
+        returns: BillableOrderPlacedDto
+
+    test_cases:
+      - name: test_from_domain_billable_order_placed
+        description: BillableOrderPlaced から DTO への変換
+      - name: test_serialize_billable_order_placed_dto
+        description: DTO から JSON へのシリアライズ
+
+  - id: REQ-084
+    name: OrderAcknowledgmentSentDto
+    category: output_dto
+    priority: high
+    description: |
+      注文確認メール送信イベントの出力 DTO。
+
+    type_definition:
+      name: OrderAcknowledgmentSentDto
+      derive:
+        - Clone
+        - Debug
+        - PartialEq
+        - Eq
+        - Serialize
+        - Deserialize
+      fields:
+        - name: order_id
+          type: String
+          json_name: order_id
+          description: 注文ID
+        - name: email_address
+          type: String
+          json_name: email_address
+          description: 送信先メールアドレス
+
+    methods:
+      - name: from_domain
+        signature: "fn from_domain(event: &OrderAcknowledgmentSent) -> OrderAcknowledgmentSentDto"
+        description: |
+          Domain の OrderAcknowledgmentSent から DTO への変換。
+        returns: OrderAcknowledgmentSentDto
+
+    test_cases:
+      - name: test_from_domain_order_acknowledgment_sent
+        description: OrderAcknowledgmentSent から DTO への変換
+      - name: test_serialize_order_acknowledgment_sent_dto
+        description: DTO から JSON へのシリアライズ
+
+  - id: REQ-085
+    name: PlaceOrderEventDto
+    category: output_dto
+    priority: high
+    description: |
+      PlaceOrder ワークフローの出力イベント DTO。
+      イベント種別をタグとして含む JSON オブジェクトとして表現する。
+
+    type_definition:
+      name: PlaceOrderEventDto
+      derive:
+        - Clone
+        - Debug
+        - PartialEq
+        - Serialize
+        - Deserialize
+      structure: |
+        // serde の隣接タグ形式を使用
+        #[serde(tag = "type", content = "data")]
+        pub enum PlaceOrderEventDto {
+            #[serde(rename = "ShippableOrderPlaced")]
+            ShippableOrderPlaced(ShippableOrderPlacedDto),
+
+            #[serde(rename = "BillableOrderPlaced")]
+            BillableOrderPlaced(BillableOrderPlacedDto),
+
+            #[serde(rename = "OrderAcknowledgmentSent")]
+            AcknowledgmentSent(OrderAcknowledgmentSentDto),
+        }
+
+    methods:
+      - name: from_domain
+        signature: "fn from_domain(event: &PlaceOrderEvent) -> PlaceOrderEventDto"
+        description: |
+          Domain の PlaceOrderEvent から DTO への変換。
+          各バリアントを対応する DTO に変換してラップする。
+        returns: PlaceOrderEventDto
+
+    json_format:
+      example: |
+        {
+          "type": "ShippableOrderPlaced",
+          "data": {
+            "order_id": "order-001",
+            "shipping_address": { ... },
+            "shipment_lines": [ ... ],
+            "pdf": { ... }
+          }
+        }
+      notes: |
+        F# 版では IDictionary<string, obj> を使用しているが、
+        Rust では serde の隣接タグ形式（tag/content）を使用する方が型安全。
+
+    test_cases:
+      - name: test_from_domain_shippable_event
+        description: ShippableOrderPlaced イベントから DTO への変換
+      - name: test_from_domain_billable_event
+        description: BillableOrderPlaced イベントから DTO への変換
+      - name: test_from_domain_acknowledgment_event
+        description: AcknowledgmentSent イベントから DTO への変換
+      - name: test_serialize_place_order_event_dto
+        description: DTO から JSON へのシリアライズ（各バリアント）
+
+  - id: REQ-086
+    name: PlaceOrderErrorDto
+    category: output_dto
+    priority: high
+    description: |
+      PlaceOrder ワークフローのエラー DTO。
+      エラーコードとメッセージを含む。
+
+    type_definition:
+      name: PlaceOrderErrorDto
+      derive:
+        - Clone
+        - Debug
+        - PartialEq
+        - Eq
+        - Serialize
+        - Deserialize
+      fields:
+        - name: code
+          type: String
+          json_name: code
+          description: エラーコード（ValidationError, PricingError, RemoteServiceError）
+        - name: message
+          type: String
+          json_name: message
+          description: エラーメッセージ
+
+    methods:
+      - name: from_domain
+        signature: "fn from_domain(error: &PlaceOrderError) -> PlaceOrderErrorDto"
+        description: |
+          Domain の PlaceOrderError から DTO への変換。
+          各バリアントに対応するエラーコードを設定する。
+        returns: PlaceOrderErrorDto
+        implementation_notes: |
+          match error {
+              PlaceOrderError::Validation(e) => {
+                  code: "ValidationError".to_string(),
+                  message: e.to_string(),
+              },
+              PlaceOrderError::Pricing(e) => {
+                  code: "PricingError".to_string(),
+                  message: e.message().to_string(),
+              },
+              PlaceOrderError::RemoteService(e) => {
+                  code: "RemoteServiceError".to_string(),
+                  message: format!("{}: {}", e.service().name(), e.exception_message()),
+              }
+          }
+
+    test_cases:
+      - name: test_from_domain_validation_error
+        description: ValidationError から DTO への変換
+      - name: test_from_domain_pricing_error
+        description: PricingError から DTO への変換
+      - name: test_from_domain_remote_service_error
+        description: RemoteServiceError から DTO への変換
+      - name: test_serialize_place_order_error_dto
+        description: DTO から JSON へのシリアライズ
+
+  # ---------------------------------------------------------------------------
+  # API 層
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-087
+    name: HttpRequest 型
+    category: api
+    priority: high
+    description: |
+      簡易 HTTP リクエスト型。
+
+    type_definition:
+      name: HttpRequest
+      derive:
+        - Clone
+        - Debug
+        - PartialEq
+        - Eq
+      fields:
+        - name: action
+          type: String
+          description: HTTP メソッド（GET, POST, etc.）
+        - name: uri
+          type: String
+          description: リクエスト URI
+        - name: body
+          type: String
+          description: リクエストボディ（JSON 文字列）
+
+    methods:
+      - name: new
+        signature: "fn new(action: String, uri: String, body: String) -> HttpRequest"
+        description: 新しい HttpRequest を生成する
+        returns: HttpRequest
+
+    test_cases:
+      - name: test_http_request_new
+        description: HttpRequest の生成
+
+  - id: REQ-088
+    name: HttpResponse 型
+    category: api
+    priority: high
+    description: |
+      簡易 HTTP レスポンス型。
+
+    type_definition:
+      name: HttpResponse
+      derive:
+        - Clone
+        - Debug
+        - PartialEq
+        - Eq
+      fields:
+        - name: status_code
+          type: u16
+          description: HTTP ステータスコード
+        - name: body
+          type: String
+          description: レスポンスボディ（JSON 文字列）
+
+    methods:
+      - name: ok
+        signature: "fn ok(body: String) -> HttpResponse"
+        description: ステータスコード 200 の成功レスポンスを生成
+        returns: HttpResponse
+
+      - name: bad_request
+        signature: "fn bad_request(body: String) -> HttpResponse"
+        description: ステータスコード 400 のエラーレスポンスを生成
+        returns: HttpResponse
+
+      - name: internal_server_error
+        signature: "fn internal_server_error(body: String) -> HttpResponse"
+        description: ステータスコード 500 のエラーレスポンスを生成
+        returns: HttpResponse
+
+    test_cases:
+      - name: test_http_response_ok
+        description: 成功レスポンスの生成
+      - name: test_http_response_bad_request
+        description: エラーレスポンスの生成
+
+  - id: REQ-089
+    name: place_order_api 関数
+    category: api
+    priority: critical
+    description: |
+      PlaceOrder ワークフローを HTTP API として公開する関数。
+      HTTP リクエストを受け取り、ワークフローを実行し、HTTP レスポンスを返す。
+
+    function_definition:
+      name: place_order_api
+      signature: |
+        pub fn place_order_api(request: &HttpRequest) -> IO<HttpResponse>
+      description: |
+        1. リクエストボディの JSON を OrderFormDto にデシリアライズ
+        2. OrderFormDto を UnvalidatedOrder に変換
+        3. place_order ワークフローを実行（ダミー依存関数を注入）
+        4. 結果を DTO に変換
+        5. DTO を JSON にシリアライズしてレスポンスを生成
+
+      processing_flow:
+        - step: 1
+          action: JSON デシリアライズ
+          input: request.body (JSON string)
+          output: OrderFormDto
+          error_handling: |
+            デシリアライズ失敗時は 400 Bad Request を返す
+
+        - step: 2
+          action: DTO から Domain への変換
+          input: OrderFormDto
+          output: UnvalidatedOrder
+          note: 常に成功
+
+        - step: 3
+          action: ワークフロー実行
+          input: UnvalidatedOrder
+          output: Result<Vec<PlaceOrderEvent>, PlaceOrderError>
+          dependencies:
+            - check_product_exists
+            - check_address_exists
+            - get_pricing_function
+            - calculate_shipping_cost
+            - create_acknowledgment_letter
+            - send_acknowledgment
+
+        - step: 4
+          action: 結果を DTO に変換
+          success_path: |
+            events.iter().map(PlaceOrderEventDto::from_domain).collect()
+          error_path: |
+            PlaceOrderErrorDto::from_domain(&error)
+
+        - step: 5
+          action: HTTP レスポンス生成
+          success_response:
+            status_code: 200
+            body: JSON array of PlaceOrderEventDto
+          error_response:
+            status_code: 400
+            body: JSON of PlaceOrderErrorDto
+
+    test_cases:
+      - name: test_place_order_api_success
+        description: 正常系のリクエスト処理
+      - name: test_place_order_api_validation_error
+        description: バリデーションエラー時のレスポンス
+      - name: test_place_order_api_invalid_json
+        description: 不正な JSON のリクエスト
+      - name: test_place_order_api_empty_order
+        description: 空の注文リスト
+
+  # ---------------------------------------------------------------------------
+  # ダミー依存関数
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-090
+    name: ダミー依存関数
+    category: api
+    priority: high
+    description: |
+      API 層で使用するダミーの依存関数群。
+      実際の外部サービス呼び出しをシミュレートする。
+
+    functions:
+      - name: check_product_exists
+        signature: "fn check_product_exists(product_code: &ProductCode) -> bool"
+        description: |
+          製品が存在するかどうかを返すダミー関数。
+          常に true を返す。
+        implementation: |
+          |_: &ProductCode| true
+
+      - name: check_address_exists
+        signature: "fn check_address_exists(address: &UnvalidatedAddress) -> Result<CheckedAddress, AddressValidationError>"
+        description: |
+          住所の存在確認を行うダミー関数。
+          常に成功し、CheckedAddress を返す。
+        implementation: |
+          |addr: &UnvalidatedAddress| Ok(CheckedAddress::new(addr.clone()))
+
+      - name: get_pricing_function
+        signature: "fn get_pricing_function(pricing_method: &PricingMethod) -> Rc<dyn Fn(&ProductCode) -> Price>"
+        description: |
+          価格取得関数を返すダミー関数。
+          PricingMethod に応じて標準価格またはプロモーション価格を返す関数を生成する。
+          - Standard: 全製品に対して固定価格（$10.00）を返す
+          - Promotion(code): プロモーションコードに応じた価格を返す
+            - "HALF" + "ONSALE" 製品: $5.00
+            - "QUARTER" + "ONSALE" 製品: $2.50
+            - その他: 標準価格 $10.00
+        implementation: |
+          |pricing_method: &PricingMethod| {
+              match pricing_method {
+                  PricingMethod::Standard => Rc::new(|_: &ProductCode| {
+                      Price::unsafe_create(Decimal::from(10))
+                  }),
+                  PricingMethod::Promotion(code) => {
+                      let code_value = code.value().to_string();
+                      Rc::new(move |product_code: &ProductCode| {
+                          match code_value.as_str() {
+                              "HALF" if product_code.value() == "ONSALE" => {
+                                  Price::unsafe_create(Decimal::from(5))
+                              }
+                              "QUARTER" if product_code.value() == "ONSALE" => {
+                                  Price::unsafe_create(Decimal::new(25, 1))
+                              }
+                              _ => Price::unsafe_create(Decimal::from(10)),
+                          }
+                      })
+                  }
+              }
+          }
+        design_note: |
+          F# 版では get_standard_prices と get_promotion_prices を別々に定義しているが、
+          Rust 版では PricingMethod enum を活用した統合設計を採用。
+          これにより place_order ワークフローとの統合がシンプルになる。
+
+      - name: calculate_shipping_cost
+        signature: "fn calculate_shipping_cost(order: &PricedOrder) -> Price"
+        description: |
+          配送コストを計算する関数。
+          既存の PricingModule の calculate_shipping_cost を使用する。
+        implementation: |
+          workflow::shipping::calculate_shipping_cost(order)
+
+      - name: create_acknowledgment_letter
+        signature: "fn create_acknowledgment_letter(order: &PricedOrderWithShippingMethod) -> HtmlString"
+        description: |
+          確認メールの HTML を生成するダミー関数。
+        implementation: |
+          |_: &PricedOrderWithShippingMethod| HtmlString::new("<p>Thank you for your order!</p>".to_string())
+
+      - name: send_acknowledgment
+        signature: "fn send_acknowledgment(ack: &OrderAcknowledgment) -> IO<SendResult>"
+        description: |
+          確認メールを送信するダミー関数。
+          常に Sent を返す。
+        implementation: |
+          |_: &OrderAcknowledgment| IO::pure(SendResult::Sent)
+
+    test_cases:
+      - name: test_check_product_exists
+        description: ダミー製品存在確認関数
+      - name: test_check_address_exists
+        description: ダミー住所検証関数
+      - name: test_get_pricing_function_standard
+        description: 標準価格関数の取得と価格計算
+      - name: test_get_pricing_function_promotion_half
+        description: HALF プロモーション価格関数の取得と価格計算
+      - name: test_get_pricing_function_promotion_quarter
+        description: QUARTER プロモーション価格関数の取得と価格計算
+      - name: test_get_pricing_function_promotion_unknown
+        description: 未知のプロモーションコードでは標準価格を返す
+      - name: test_calculate_shipping_cost
+        description: 配送コスト計算関数
+      - name: test_create_acknowledgment_letter
+        description: ダミー確認メール生成関数
+      - name: test_send_acknowledgment
+        description: ダミー確認メール送信関数
+
+# =============================================================================
+# ファイル構成
+# =============================================================================
+
+artifacts:
+  source_files:
+    - path: src/dto/mod.rs
+      description: DTO モジュールのエントリポイント
+      exports:
+        - input (module)
+        - output (module)
+        - error (module)
+
+    - path: src/dto/input.rs
+      description: 入力 DTO 型定義
+      types:
+        - CustomerInfoDto
+        - AddressDto
+        - OrderFormLineDto
+        - OrderFormDto
+
+    - path: src/dto/output.rs
+      description: 出力 DTO 型定義
+      types:
+        - PricedOrderLineDto
+        - ShippableOrderLineDto
+        - ShippableOrderPlacedDto
+        - PdfAttachmentDto
+        - BillableOrderPlacedDto
+        - OrderAcknowledgmentSentDto
+        - PlaceOrderEventDto
+
+    - path: src/dto/error.rs
+      description: エラー DTO 型定義
+      types:
+        - PlaceOrderErrorDto
+
+    - path: src/api/mod.rs
+      description: API モジュールのエントリポイント
+      exports:
+        - types (module)
+        - place_order_api (function)
+        - dependencies (module)
+
+    - path: src/api/types.rs
+      description: API 型定義
+      types:
+        - HttpRequest
+        - HttpResponse
+
+    - path: src/api/place_order_api.rs
+      description: PlaceOrder API 実装
+      functions:
+        - place_order_api
+
+    - path: src/api/dependencies.rs
+      description: ダミー依存関数
+      functions:
+        - check_product_exists
+        - check_address_exists
+        - get_pricing_function
+        - calculate_shipping_cost
+        - create_acknowledgment_letter
+        - send_acknowledgment
+
+  test_files:
+    - path: tests/dto_tests.rs
+      description: DTO 型のユニットテスト
+
+    - path: tests/api_tests.rs
+      description: API 層のユニットテスト
+
+    - path: tests/api_integration_tests.rs
+      description: API 層の統合テスト
+
+# =============================================================================
+# 依存クレート
+# =============================================================================
+
+dependencies:
+  required:
+    - name: serde
+      version: "^1.0"
+      features:
+        - derive
+      description: JSON シリアライズ/デシリアライズ
+
+    - name: serde_json
+      version: "^1.0"
+      description: JSON パーサー
+
+  optional:
+    - name: base64
+      version: "^0.22"
+      description: PDF バイナリデータの Base64 エンコード
+      note: PdfAttachmentDto で使用
+
+# =============================================================================
+# 設計上の考慮事項
+# =============================================================================
+
+design_considerations:
+  functional_programming:
+    - title: 純粋な変換関数
+      description: |
+        to_unvalidated_* と from_domain 関数は純粋関数として実装する。
+        副作用を持たず、同じ入力に対して常に同じ出力を返す。
+
+    - title: 参照透過性
+      description: |
+        DTO 変換関数は参照透過性を維持する。
+        外部状態に依存せず、テストが容易。
+
+    - title: IO モナドによる副作用の分離
+      description: |
+        place_order_api は IO<HttpResponse> を返し、
+        副作用（ワークフロー実行）を遅延させる。
+
+  error_handling:
+    - title: JSON デシリアライズエラー
+      description: |
+        serde_json::from_str のエラーは 400 Bad Request として処理。
+        エラーメッセージはクライアントに返す。
+
+    - title: ワークフローエラー
+      description: |
+        PlaceOrderError は PlaceOrderErrorDto に変換し、
+        400 ステータスコードで返す。
+
+  serialization:
+    - title: Decimal の JSON 表現
+      description: |
+        rust_decimal::Decimal は文字列または数値として表現可能。
+        互換性のため文字列表現を推奨。
+
+    - title: Option フィールド
+      description: |
+        #[serde(skip_serializing_if = "Option::is_none")] を使用して
+        None の場合はフィールド自体を省略する。
+
+    - title: Enum のタグ形式
+      description: |
+        PlaceOrderEventDto は隣接タグ形式（tag/content）を使用。
+        これにより型安全かつ JSON フレンドリーな表現が可能。
+
+# =============================================================================
+# テストカバレッジ要件
+# =============================================================================
+
+test_requirements:
+  unit_tests:
+    coverage_target: 100%
+    categories:
+      - DTO シリアライズ/デシリアライズ
+      - DTO <-> Domain 変換
+      - API リクエスト/レスポンス処理
+
+  integration_tests:
+    categories:
+      - エンドツーエンドの API テスト
+      - 正常系/異常系のシナリオテスト
+
+  property_tests:
+    description: |
+      proptest を使用した法則検証は任意。
+      主に DTO <-> Domain 変換の往復テストに使用可能。

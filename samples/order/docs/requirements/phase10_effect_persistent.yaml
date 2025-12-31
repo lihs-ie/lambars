@@ -1,0 +1,728 @@
+# Phase 10: Effect System と永続データ構造の実践的使用 要件定義
+# Order Taking Sample Application
+# eff! マクロによる do 記法スタイルと PersistentHashMap による価格カタログ
+
+version: "1.0.0"
+created_at: "2026-01-01"
+phase_id: phase_10
+phase_name: Effect System と永続データ構造の実践的使用
+phase_name_en: Effect System and Persistent Data Structures Practical Usage
+
+# =============================================================================
+# 概要
+# =============================================================================
+
+overview:
+  description: |
+    functional-rusty ライブラリの Effect System（eff! マクロ）と
+    永続データ構造（PersistentHashMap）を Order Taking サンプルアプリケーションで
+    実践的に活用する。
+
+    1. eff! マクロによる do 記法スタイルの IO 操作チェーン
+    2. PersistentHashMap を使用した不変価格カタログの実装
+
+  goals:
+    - functional-rusty の eff! マクロを実践的に活用
+    - PersistentHashMap を使用した関数型スタイルの価格カタログ実装
+    - 不変データ構造による参照透過性の確保
+    - 構造的共有による効率的なカタログ更新
+
+  functional_programming_principles:
+    - purity: |
+        PricingCatalog は不変データ構造として設計。
+        更新操作は常に新しいカタログを返し、元のカタログは変更されない。
+    - referential_transparency: |
+        eff! マクロで記述された IO 操作は、run_unsafe() が呼ばれるまで
+        副作用を発生させない。同じ入力に対して常に同じ IO アクションを返す。
+    - immutability: |
+        PersistentHashMap は構造的共有により効率的な不変更新を提供。
+        全ての価格更新操作は新しいマップを生成。
+    - composability: |
+        eff! マクロにより複数の IO 操作を宣言的にチェーン可能。
+        価格カタログは merge 操作で合成可能。
+
+# =============================================================================
+# 要件一覧
+# =============================================================================
+
+requirements:
+
+  # ---------------------------------------------------------------------------
+  # eff! マクロの実践的使用
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-102
+    name: acknowledge_order_with_logging 関数
+    category: effect_system
+    priority: high
+    description: |
+      eff! マクロを使用して、複数の IO 操作（ログ出力、メール送信）を
+      do 記法スタイルでチェーンする関数を実装する。
+
+    location: src/workflow/shipping.rs
+
+    function_signature: |
+      pub fn acknowledge_order_with_logging<CreateLetter, SendAcknowledgment, LogAction>(
+          create_letter: &CreateLetter,
+          send_acknowledgment: &SendAcknowledgment,
+          log_action: &LogAction,
+          order: &PricedOrderWithShippingMethod,
+      ) -> IO<Option<OrderAcknowledgmentSent>>
+      where
+          CreateLetter: Fn(&PricedOrderWithShippingMethod) -> HtmlString,
+          SendAcknowledgment: Fn(&OrderAcknowledgment) -> IO<SendResult>,
+          LogAction: Fn(&str) -> IO<()>,
+
+    implementation_details:
+      eff_macro_usage: |
+        eff! マクロを使用して以下の操作をチェーン:
+        1. _ <= log_action("Creating acknowledgment letter");
+        2. let letter = create_letter(order);
+        3. _ <= log_action("Sending acknowledgment email");
+        4. result <= send_acknowledgment(&acknowledgment);
+        5. _ <= log_action("Acknowledgment process completed");
+        6. IO::pure(...)
+
+      bind_operator: |
+        eff! マクロでは <= を bind 演算子として使用。
+        _ <= io_action; は副作用のみを実行し結果を無視。
+        pattern <= io_action; は結果を pattern に束縛。
+
+      let_binding: |
+        let pattern = expression; は純粋な値の束縛。
+        IO 操作ではなく通常の値を束縛する場合に使用。
+
+    design_rationale: |
+      既存の acknowledge_order 関数は fmap/flat_map を明示的に使用している。
+      eff! マクロを使用することで、より宣言的で可読性の高いコードに変換し、
+      Haskell の do 記法や Scala の for-comprehension に近いスタイルを実現する。
+
+      また、ログ出力という追加の IO 操作を加えることで、
+      複数の IO 操作を合成する実践的なユースケースを示す。
+
+    example_usage: |
+      let log_action = |message: &str| {
+          let message = message.to_string();
+          IO::new(move || println!("[LOG] {}", message))
+      };
+
+      let create_letter = |_: &PricedOrderWithShippingMethod| {
+          HtmlString::new("<p>Order confirmed</p>".to_string())
+      };
+
+      let send_acknowledgment = |_: &OrderAcknowledgment| {
+          IO::pure(SendResult::Sent)
+      };
+
+      let io_result = acknowledge_order_with_logging(
+          &create_letter,
+          &send_acknowledgment,
+          &log_action,
+          &order,
+      );
+
+      // run_unsafe() が呼ばれるまで副作用は発生しない
+      let result = io_result.run_unsafe();
+
+    acceptance_criteria:
+      - eff! マクロを使用して IO 操作をチェーンしていること
+      - ログ出力を行う LogAction 関数を注入できること
+      - 既存の acknowledge_order と同等の結果を返すこと
+      - run_unsafe() が呼ばれるまで副作用が発生しないこと
+      - テストでモック関数を注入して動作を検証できること
+
+  - id: REQ-103
+    name: acknowledge_order_with_logging テスト
+    category: unit_test
+    priority: high
+    description: |
+      acknowledge_order_with_logging 関数のテストを実装する。
+      eff! マクロの動作と IO 操作のチェーンを検証する。
+
+    test_file: tests/shipping_eff_macro_tests.rs
+
+    test_cases:
+      - name: test_acknowledge_order_with_logging_sent
+        description: |
+          送信成功時のテスト。
+          ログ出力が正しい順序で行われ、OrderAcknowledgmentSent が返されることを検証。
+
+      - name: test_acknowledge_order_with_logging_not_sent
+        description: |
+          送信失敗時のテスト。
+          ログ出力は行われるが、None が返されることを検証。
+
+      - name: test_acknowledge_order_with_logging_deferred_execution
+        description: |
+          遅延実行のテスト。
+          run_unsafe() が呼ばれるまでログ出力や送信が実行されないことを検証。
+
+      - name: test_acknowledge_order_with_logging_log_order
+        description: |
+          ログ出力順序のテスト。
+          ログメッセージが期待される順序で記録されることを検証。
+
+    test_implementation_pattern: |
+      // ログ記録用の RefCell を使用
+      use std::cell::RefCell;
+      use std::rc::Rc;
+
+      let log_messages: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+      let log_messages_clone = log_messages.clone();
+
+      let log_action = move |message: &str| {
+          let messages = log_messages_clone.clone();
+          let message = message.to_string();
+          IO::new(move || {
+              messages.borrow_mut().push(message);
+          })
+      };
+
+      // IO を実行
+      let _ = io_result.run_unsafe();
+
+      // ログメッセージを検証
+      let messages = log_messages.borrow();
+      assert_eq!(messages[0], "Creating acknowledgment letter");
+
+  # ---------------------------------------------------------------------------
+  # 永続データ構造の活用
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-104
+    name: PricingCatalog 型
+    category: persistent_data_structure
+    priority: high
+    description: |
+      PersistentHashMap を内部で使用した不変の価格カタログ型を実装する。
+      商品コードから価格へのマッピングを管理し、不変更新をサポートする。
+
+    location: src/workflow/pricing_catalog.rs
+
+    type_definition: |
+      use functional_rusty::persistent::PersistentHashMap;
+
+      /// 不変の価格カタログ
+      ///
+      /// PersistentHashMap を使用して商品コードから価格へのマッピングを管理する。
+      /// 全ての更新操作は新しいカタログを返し、元のカタログは変更されない。
+      ///
+      /// # 構造的共有
+      ///
+      /// 内部で使用される PersistentHashMap は HAMT（Hash Array Mapped Trie）ベースで、
+      /// 更新時に変更されない部分は共有される。これにより、効率的な不変更新が可能。
+      ///
+      /// # 時間計算量
+      ///
+      /// | 操作 | 計算量 |
+      /// |------|--------|
+      /// | get_price | O(log32 N) |
+      /// | set_price | O(log32 N) |
+      /// | remove_price | O(log32 N) |
+      /// | merge | O(N + M) |
+      ///
+      #[derive(Clone, Debug)]
+      pub struct PricingCatalog {
+          prices: PersistentHashMap<String, Price>,
+      }
+
+    methods:
+      - name: new
+        signature: "pub fn new() -> Self"
+        description: 空の価格カタログを作成する
+
+      - name: singleton
+        signature: "pub fn singleton(product_code: &ProductCode, price: Price) -> Self"
+        description: 単一のエントリを持つ価格カタログを作成する
+
+      - name: from_entries
+        signature: "pub fn from_entries(entries: impl IntoIterator<Item = (ProductCode, Price)>) -> Self"
+        description: エントリのイテレータから価格カタログを作成する
+
+      - name: set_price
+        signature: "pub fn set_price(&self, product_code: &ProductCode, price: Price) -> Self"
+        description: |
+          指定した商品コードの価格を設定した新しいカタログを返す。
+          元のカタログは変更されない（不変更新）。
+
+      - name: get_price
+        signature: "pub fn get_price(&self, product_code: &ProductCode) -> Option<&Price>"
+        description: 指定した商品コードの価格を取得する
+
+      - name: remove_price
+        signature: "pub fn remove_price(&self, product_code: &ProductCode) -> Self"
+        description: |
+          指定した商品コードのエントリを削除した新しいカタログを返す。
+          元のカタログは変更されない（不変更新）。
+
+      - name: contains
+        signature: "pub fn contains(&self, product_code: &ProductCode) -> bool"
+        description: 指定した商品コードが存在するかを返す
+
+      - name: merge
+        signature: "pub fn merge(&self, other: &Self) -> Self"
+        description: |
+          2つのカタログをマージした新しいカタログを返す。
+          キーが重複する場合は other の値が優先される。
+          元のカタログは両方とも変更されない。
+
+      - name: len
+        signature: "pub fn len(&self) -> usize"
+        description: カタログ内のエントリ数を返す
+
+      - name: is_empty
+        signature: "pub fn is_empty(&self) -> bool"
+        description: カタログが空かどうかを返す
+
+      - name: iter
+        signature: "pub fn iter(&self) -> impl Iterator<Item = (&String, &Price)>"
+        description: カタログ内の全エントリのイテレータを返す
+
+    design_rationale: |
+      PersistentHashMap を直接使用する代わりにラッパー型を作成する理由:
+
+      1. 型安全性: ProductCode を String に変換してキーとして使用することで、
+         誤った型のキーを使用することを防ぐ。
+
+      2. ドメイン固有の操作: merge などのドメインに適した操作を提供。
+
+      3. 内部実装の隠蔽: PersistentHashMap の実装詳細を隠蔽し、
+         将来的な実装変更を容易にする。
+
+      4. ドキュメンテーション: 価格カタログとしての使用方法を明確にドキュメント化。
+
+    example_usage: |
+      use order_taking_sample::simple_types::{ProductCode, Price};
+      use order_taking_sample::workflow::PricingCatalog;
+
+      // 空のカタログを作成
+      let catalog = PricingCatalog::new();
+
+      // 価格を追加（元のカタログは変更されない）
+      let widget_code = ProductCode::create("field", "W1234").unwrap();
+      let price = Price::create(rust_decimal::Decimal::from(100)).unwrap();
+      let catalog_v2 = catalog.set_price(&widget_code, price);
+
+      // 元のカタログは空のまま
+      assert!(catalog.is_empty());
+
+      // 新しいカタログには価格が設定されている
+      assert!(catalog_v2.get_price(&widget_code).is_some());
+
+      // カタログのマージ
+      let gizmo_code = ProductCode::create("field", "G123").unwrap();
+      let gizmo_price = Price::create(rust_decimal::Decimal::from(50)).unwrap();
+      let catalog_v3 = PricingCatalog::singleton(&gizmo_code, gizmo_price);
+
+      let merged = catalog_v2.merge(&catalog_v3);
+      assert_eq!(merged.len(), 2);
+
+    acceptance_criteria:
+      - PersistentHashMap を内部で使用していること
+      - 全ての更新操作が新しいカタログを返し、元のカタログを変更しないこと
+      - ProductCode をキーとして使用できること
+      - merge 操作が正しく動作すること
+      - Default トレイトを実装していること
+
+  - id: REQ-105
+    name: create_catalog_pricing_function 関数
+    category: persistent_data_structure
+    priority: high
+    description: |
+      PricingCatalog から価格取得関数を生成するファクトリ関数を実装する。
+      カタログに存在しない商品コードにはデフォルト価格を適用する。
+
+    location: src/workflow/pricing_catalog.rs
+
+    function_signature: |
+      pub fn create_catalog_pricing_function(
+          catalog: PricingCatalog,
+          default_price: Price,
+      ) -> impl Fn(&ProductCode) -> Price + Clone
+
+    implementation_details:
+      closure_design: |
+        Rc<PricingCatalog> を使用してカタログをクロージャ間で共有。
+        これにより Clone 可能な Fn を返すことができる。
+
+      fallback_logic: |
+        1. カタログから価格を検索
+        2. 見つかった場合はその価格を返す
+        3. 見つからない場合はデフォルト価格を返す
+
+    design_rationale: |
+      この関数は既存の GetProductPrice 型エイリアスと互換性がある。
+      PricingCatalog を使用することで、価格データの不変性を保ちながら、
+      テスト時には異なるカタログを注入できる。
+
+      Clone 可能な Fn を返すことで、複数の場所で同じ価格取得関数を使用可能。
+
+    example_usage: |
+      let catalog = PricingCatalog::new()
+          .set_price(&widget_code, widget_price)
+          .set_price(&gizmo_code, gizmo_price);
+
+      let default_price = Price::create(Decimal::from(10)).unwrap();
+      let get_price = create_catalog_pricing_function(catalog, default_price);
+
+      // カタログにある商品
+      assert_eq!(get_price(&widget_code).value(), widget_price.value());
+
+      // カタログにない商品はデフォルト価格
+      let unknown_code = ProductCode::create("field", "W9999").unwrap();
+      assert_eq!(get_price(&unknown_code).value(), default_price.value());
+
+    acceptance_criteria:
+      - PricingCatalog と default_price を受け取ること
+      - カタログにある商品はカタログの価格を返すこと
+      - カタログにない商品はデフォルト価格を返すこと
+      - 返される関数が Clone 可能であること
+      - GetProductPrice 型として使用できること
+
+  - id: REQ-106
+    name: PricingCatalog テスト
+    category: unit_test
+    priority: high
+    description: |
+      PricingCatalog 型と create_catalog_pricing_function 関数のテストを実装する。
+
+    test_file: tests/pricing_catalog_tests.rs
+
+    test_categories:
+      - category: 基本操作テスト
+        tests:
+          - name: test_pricing_catalog_new_is_empty
+            description: 新規作成されたカタログが空であることを検証
+
+          - name: test_pricing_catalog_singleton
+            description: singleton で作成したカタログが1エントリを持つことを検証
+
+          - name: test_pricing_catalog_set_price
+            description: set_price が新しいカタログを返し、元を変更しないことを検証
+
+          - name: test_pricing_catalog_get_price_existing
+            description: 存在する商品コードの価格を取得できることを検証
+
+          - name: test_pricing_catalog_get_price_not_found
+            description: 存在しない商品コードで None が返ることを検証
+
+          - name: test_pricing_catalog_remove_price
+            description: remove_price が新しいカタログを返すことを検証
+
+          - name: test_pricing_catalog_contains
+            description: contains が正しく動作することを検証
+
+      - category: マージ操作テスト
+        tests:
+          - name: test_pricing_catalog_merge_disjoint
+            description: 重複のないカタログのマージを検証
+
+          - name: test_pricing_catalog_merge_overlapping
+            description: 重複があるカタログのマージで other が優先されることを検証
+
+          - name: test_pricing_catalog_merge_empty
+            description: 空のカタログとのマージを検証
+
+      - category: イテレータテスト
+        tests:
+          - name: test_pricing_catalog_iter
+            description: iter が全エントリを返すことを検証
+
+          - name: test_pricing_catalog_from_entries
+            description: from_entries でカタログを作成できることを検証
+
+      - category: 不変性テスト
+        tests:
+          - name: test_pricing_catalog_immutability_set_price
+            description: set_price 後も元のカタログが変更されていないことを検証
+
+          - name: test_pricing_catalog_immutability_remove_price
+            description: remove_price 後も元のカタログが変更されていないことを検証
+
+          - name: test_pricing_catalog_immutability_merge
+            description: merge 後も両方のカタログが変更されていないことを検証
+
+      - category: 価格取得関数テスト
+        tests:
+          - name: test_create_catalog_pricing_function_found
+            description: カタログにある商品の価格が返されることを検証
+
+          - name: test_create_catalog_pricing_function_not_found
+            description: カタログにない商品でデフォルト価格が返されることを検証
+
+          - name: test_create_catalog_pricing_function_clone
+            description: 返された関数が Clone 可能であることを検証
+
+  - id: REQ-107
+    name: PricingCatalog proptest 法則検証
+    category: property_test
+    priority: medium
+    description: |
+      PricingCatalog の不変条件と法則を proptest で検証する。
+
+    test_file: tests/pricing_catalog_laws.rs
+
+    properties:
+      - name: set_get_roundtrip
+        description: |
+          set_price した価格を get_price で取得できることを検証。
+        property: |
+          forall code: ProductCode, price: Price.
+            let catalog = PricingCatalog::new().set_price(&code, price);
+            catalog.get_price(&code) == Some(&price)
+
+      - name: set_idempotent
+        description: |
+          同じ商品コードに同じ価格を設定しても結果が同じことを検証。
+        property: |
+          forall code: ProductCode, price: Price.
+            let c1 = PricingCatalog::new().set_price(&code, price);
+            let c2 = c1.set_price(&code, price);
+            c1.get_price(&code) == c2.get_price(&code)
+
+      - name: remove_after_set
+        description: |
+          set_price した後に remove_price すると None になることを検証。
+        property: |
+          forall code: ProductCode, price: Price.
+            let catalog = PricingCatalog::new()
+                .set_price(&code, price)
+                .remove_price(&code);
+            catalog.get_price(&code) == None
+
+      - name: merge_associativity
+        description: |
+          merge の結合法則を検証。(a.merge(b)).merge(c) == a.merge(b.merge(c))
+        property: |
+          forall a: PricingCatalog, b: PricingCatalog, c: PricingCatalog.
+            let left = a.merge(&b).merge(&c);
+            let right = a.merge(&b.merge(&c));
+            // 全てのキーと値が等しいことを検証
+
+      - name: merge_identity
+        description: |
+          空のカタログとのマージは恒等写像であることを検証。
+        property: |
+          forall catalog: PricingCatalog.
+            let empty = PricingCatalog::new();
+            let merged = catalog.merge(&empty);
+            // catalog と merged が等しいことを検証
+
+  - id: REQ-108
+    name: workflow モジュール統合
+    category: integration
+    priority: high
+    description: |
+      Phase 10 で追加した機能を workflow モジュールにエクスポートする。
+
+    location: src/workflow/mod.rs
+
+    exports:
+      - module: pricing_catalog
+        public_items:
+          - PricingCatalog
+          - create_catalog_pricing_function
+
+    changes:
+      - file: src/workflow/mod.rs
+        action: add_module
+        content: |
+          pub mod pricing_catalog;
+          pub use pricing_catalog::{PricingCatalog, create_catalog_pricing_function};
+
+    acceptance_criteria:
+      - PricingCatalog が workflow モジュールからエクスポートされていること
+      - create_catalog_pricing_function が workflow モジュールからエクスポートされていること
+      - 既存の API と互換性があること
+
+  - id: REQ-109
+    name: 統合テスト
+    category: integration_test
+    priority: high
+    description: |
+      Phase 10 で追加した機能を使用した統合テストを実装する。
+
+    test_file: tests/phase10_integration_tests.rs
+
+    test_scenarios:
+      - name: test_price_order_with_pricing_catalog
+        description: |
+          PricingCatalog を使用した price_order の統合テスト。
+          カタログから価格を取得して注文に価格を設定。
+
+      - name: test_acknowledge_order_with_logging_integration
+        description: |
+          acknowledge_order_with_logging を使用した統合テスト。
+          ログ出力とメール送信の両方が正しく動作することを検証。
+
+      - name: test_pricing_catalog_workflow_integration
+        description: |
+          PricingCatalog を使用した完全なワークフローの統合テスト。
+          1. カタログ作成
+          2. 価格取得関数生成
+          3. 注文バリデーション
+          4. 価格計算
+          5. 配送情報追加
+          6. 確認メール送信（eff! マクロ使用）
+          7. イベント生成
+
+# =============================================================================
+# ファイル構成
+# =============================================================================
+
+artifacts:
+  source_files:
+    - path: src/workflow/pricing_catalog.rs
+      description: PricingCatalog 型と create_catalog_pricing_function 関数
+      requirements:
+        - REQ-104
+        - REQ-105
+
+    - path: src/workflow/shipping.rs
+      description: acknowledge_order_with_logging 関数を追加
+      requirements:
+        - REQ-102
+
+    - path: src/workflow/mod.rs
+      description: モジュールエクスポートの追加
+      requirements:
+        - REQ-108
+
+  test_files:
+    - path: tests/shipping_eff_macro_tests.rs
+      description: eff! マクロ使用のテスト
+      requirements:
+        - REQ-103
+
+    - path: tests/pricing_catalog_tests.rs
+      description: PricingCatalog のテスト
+      requirements:
+        - REQ-106
+
+    - path: tests/pricing_catalog_laws.rs
+      description: PricingCatalog の proptest 法則検証
+      requirements:
+        - REQ-107
+
+    - path: tests/phase10_integration_tests.rs
+      description: Phase 10 統合テスト
+      requirements:
+        - REQ-109
+
+# =============================================================================
+# 依存関係
+# =============================================================================
+
+dependencies:
+  internal:
+    - functional_rusty::effect::IO
+    - functional_rusty::eff!
+    - functional_rusty::persistent::PersistentHashMap
+    - crate::simple_types::{ProductCode, Price}
+    - crate::workflow::{PricedOrderWithShippingMethod, OrderAcknowledgmentSent}
+
+  external:
+    - rust_decimal (for Price values)
+
+  dev_dependencies:
+    - rstest (for parameterized tests)
+    - proptest (for property-based tests)
+
+# =============================================================================
+# 設計上の考慮事項
+# =============================================================================
+
+design_considerations:
+  eff_macro_usage:
+    - title: eff! マクロの構文
+      description: |
+        eff! マクロは Haskell の do 記法に相当する構文糖衣を提供する。
+        Rust のマクロ制約により <- の代わりに <= を bind 演算子として使用。
+
+        構文:
+        - pattern <= io_action; - IO から値を取り出して束縛
+        - _ <= io_action; - IO を実行して結果を無視
+        - let pattern = expr; - 純粋な値の束縛
+        - io_action - 最終的な IO を返す
+
+    - title: flat_map との比較
+      description: |
+        既存の acknowledge_order は fmap と明示的なパターンマッチを使用。
+        eff! マクロを使用することで、より宣言的なスタイルに変換できる。
+
+        Before:
+        send_result_io.fmap(move |send_result| match send_result {
+            SendResult::Sent => Some(...),
+            SendResult::NotSent => None,
+        })
+
+        After:
+        eff! {
+            result <= send_result_io;
+            IO::pure(match result {
+                SendResult::Sent => Some(...),
+                SendResult::NotSent => None,
+            })
+        }
+
+  persistent_data_structure:
+    - title: PersistentHashMap の選択理由
+      description: |
+        PersistentHashMap（HAMT ベース）を選択した理由:
+        1. O(log32 N) の検索・更新性能（実質的に O(1)）
+        2. 構造的共有による効率的なメモリ使用
+        3. 不変更新のセマンティクス
+        4. Borrow パターンによる柔軟なキー検索
+
+    - title: ProductCode をキーとして使用
+      description: |
+        ProductCode は内部的に String として格納される（Widget/Gizmo のコード）。
+        PersistentHashMap<String, Price> として実装し、
+        キー変換は PricingCatalog の内部で行う。
+
+  functional_programming:
+    - title: 参照透過性の維持
+      description: |
+        PricingCatalog の全ての操作は参照透過。
+        set_price や remove_price は新しいカタログを返し、
+        元のカタログは変更されない。
+
+        これにより:
+        - 並行性への安全性（データ競合なし）
+        - テストの容易性（状態の追跡が不要）
+        - デバッグの容易性（履歴を保持可能）
+
+    - title: 副作用の分離
+      description: |
+        eff! マクロと IO モナドにより、副作用が明示的に型で表現される。
+        run_unsafe() が呼ばれるまで副作用は発生せず、
+        純粋なコードとして推論・テストが可能。
+
+# =============================================================================
+# テストカバレッジ要件
+# =============================================================================
+
+test_requirements:
+  unit_tests:
+    coverage_target: 100%
+    test_types:
+      - 基本操作テスト
+      - マージ操作テスト
+      - イテレータテスト
+      - 不変性テスト
+      - 価格取得関数テスト
+      - eff! マクロテスト
+
+  property_tests:
+    framework: proptest
+    coverage:
+      - set/get 往復変換
+      - 冪等性
+      - マージの結合法則
+      - マージの単位元
+
+  integration_tests:
+    coverage:
+      - ワークフロー統合
+      - eff! マクロを使用した確認メール送信
+      - PricingCatalog を使用した価格計算

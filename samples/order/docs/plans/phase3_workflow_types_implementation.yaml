@@ -1,0 +1,528 @@
+# Phase 3: ワークフロー型定義 実装計画
+# 要件定義: docs/requirements/phase3_workflow_types.yaml
+
+id: phase3_workflow_types_implementation
+name: ワークフロー型定義 実装計画
+version: "1.0.0"
+created_at: "2025-12-31"
+
+# 実装概要
+overview:
+  description: |
+    Phase 3 では PlaceOrder ワークフローに必要な型を実装する。
+    公開型（入力・出力）、内部型（中間状態）、エラー型を定義し、
+    型による状態遷移を表現する。
+
+  state_transition: |
+    UnvalidatedOrder -> ValidatedOrder -> PricedOrder -> PricedOrderWithShippingMethod -> PlaceOrderEvent[]
+
+  total_types: 28
+  categories:
+    - 公開型（入力）: 4 types (REQ-021〜024)
+    - 公開型（出力）: 5 types (REQ-025〜029)
+    - エラー型: 5 types (REQ-030〜034)
+    - 内部型: 14 types (REQ-035〜048)
+
+# 実装順序
+implementation_order:
+  - step: 1
+    file: src/workflow/mod.rs
+    description: モジュールルート（サブモジュール宣言）
+    dependencies: []
+
+  - step: 2
+    file: src/workflow/error_types.rs
+    description: エラー型（他の型から参照される）
+    types:
+      - WorkflowValidationError (型エイリアス)
+      - PricingError
+      - ServiceInfo
+      - RemoteServiceError
+      - PlaceOrderError
+    dependencies: []
+
+  - step: 3
+    file: src/workflow/unvalidated_types.rs
+    description: 未検証の入力型
+    types:
+      - UnvalidatedCustomerInfo
+      - UnvalidatedAddress
+      - UnvalidatedOrderLine
+      - UnvalidatedOrder
+    dependencies: []
+
+  - step: 4
+    file: src/workflow/validated_types.rs
+    description: 検証済み型とバリデーション関連型
+    types:
+      - AddressValidationError
+      - CheckedAddress
+      - PricingMethod
+      - ValidatedOrderLine
+      - ValidatedOrder
+    dependencies:
+      - Phase 1: OrderId, OrderLineId, ProductCode, OrderQuantity, PromotionCode
+      - Phase 2: CustomerInfo, Address
+
+  - step: 5
+    file: src/workflow/priced_types.rs
+    description: 価格付き型
+    types:
+      - PricedOrderProductLine
+      - PricedOrderLine
+      - PricedOrder
+    dependencies:
+      - Phase 1: OrderId, OrderLineId, ProductCode, OrderQuantity, Price, BillingAmount
+      - Phase 2: CustomerInfo, Address
+      - workflow: PricingMethod
+
+  - step: 6
+    file: src/workflow/shipping_types.rs
+    description: 配送関連型
+    types:
+      - ShippingMethod
+      - ShippingInfo
+      - PricedOrderWithShippingMethod
+    dependencies:
+      - Phase 1: Price
+      - workflow: PricedOrder
+
+  - step: 7
+    file: src/workflow/acknowledgment_types.rs
+    description: 確認メール関連型
+    types:
+      - HtmlString
+      - OrderAcknowledgment
+      - SendResult
+    dependencies:
+      - Phase 1: EmailAddress
+
+  - step: 8
+    file: src/workflow/output_types.rs
+    description: 出力イベント型
+    types:
+      - OrderAcknowledgmentSent
+      - ShippableOrderLine
+      - ShippableOrderPlaced
+      - BillableOrderPlaced
+      - PlaceOrderEvent
+    dependencies:
+      - Phase 1: OrderId, EmailAddress, ProductCode, OrderQuantity, BillingAmount, PdfAttachment
+      - Phase 2: Address
+
+  - step: 9
+    file: src/lib.rs
+    description: workflow モジュールの追加
+    dependencies: [step 1-8]
+
+# ファイル詳細
+files:
+  # ===========================================
+  # mod.rs
+  # ===========================================
+  - path: src/workflow/mod.rs
+    content_skeleton: |
+      //! ワークフロー型定義モジュール
+      //!
+      //! PlaceOrder ワークフローで使用する型を定義する。
+      //! 型による状態遷移を表現し、不正な状態を防ぐ。
+
+      pub mod error_types;
+      pub mod unvalidated_types;
+      pub mod validated_types;
+      pub mod priced_types;
+      pub mod shipping_types;
+      pub mod acknowledgment_types;
+      pub mod output_types;
+
+      // 再エクスポート
+      pub use error_types::*;
+      pub use unvalidated_types::*;
+      pub use validated_types::*;
+      pub use priced_types::*;
+      pub use shipping_types::*;
+      pub use acknowledgment_types::*;
+      pub use output_types::*;
+
+  # ===========================================
+  # error_types.rs
+  # ===========================================
+  - path: src/workflow/error_types.rs
+    types:
+      - name: WorkflowValidationError
+        kind: type_alias
+        target: crate::simple_types::ValidationError
+
+      - name: PricingError
+        kind: struct
+        fields:
+          - message: String
+        traits: [Clone, Debug, PartialEq, Eq, Display, Error]
+
+      - name: ServiceInfo
+        kind: struct
+        fields:
+          - name: String
+          - endpoint: String
+        traits: [Clone, Debug, PartialEq, Eq]
+
+      - name: RemoteServiceError
+        kind: struct
+        fields:
+          - service: ServiceInfo
+          - exception_message: String
+        traits: [Clone, Debug, PartialEq, Eq, Display, Error]
+
+      - name: PlaceOrderError
+        kind: enum
+        variants:
+          - Validation(WorkflowValidationError)
+          - Pricing(PricingError)
+          - RemoteService(RemoteServiceError)
+        traits: [Clone, Debug, PartialEq, Eq, Display, Error]
+        from_impls:
+          - WorkflowValidationError
+          - PricingError
+          - RemoteServiceError
+
+  # ===========================================
+  # unvalidated_types.rs
+  # ===========================================
+  - path: src/workflow/unvalidated_types.rs
+    types:
+      - name: UnvalidatedCustomerInfo
+        kind: struct
+        fields:
+          - first_name: String
+          - last_name: String
+          - email_address: String
+          - vip_status: String
+        traits: [Clone, Debug, PartialEq, Eq]
+
+      - name: UnvalidatedAddress
+        kind: struct
+        fields:
+          - address_line1: String
+          - address_line2: String
+          - address_line3: String
+          - address_line4: String
+          - city: String
+          - zip_code: String
+          - state: String
+          - country: String
+        traits: [Clone, Debug, PartialEq, Eq]
+
+      - name: UnvalidatedOrderLine
+        kind: struct
+        fields:
+          - order_line_id: String
+          - product_code: String
+          - quantity: Decimal
+        traits: [Clone, Debug, PartialEq, Eq]
+
+      - name: UnvalidatedOrder
+        kind: struct
+        fields:
+          - order_id: String
+          - customer_info: UnvalidatedCustomerInfo
+          - shipping_address: UnvalidatedAddress
+          - billing_address: UnvalidatedAddress
+          - lines: Vec<UnvalidatedOrderLine>
+          - promotion_code: String
+        traits: [Clone, Debug, PartialEq, Eq]
+
+  # ===========================================
+  # validated_types.rs
+  # ===========================================
+  - path: src/workflow/validated_types.rs
+    types:
+      - name: AddressValidationError
+        kind: enum
+        variants:
+          - InvalidFormat
+          - AddressNotFound
+        traits: [Clone, Copy, Debug, PartialEq, Eq, Display, Error]
+
+      - name: CheckedAddress
+        kind: newtype
+        inner: UnvalidatedAddress
+        traits: [Clone, Debug, PartialEq, Eq]
+
+      - name: PricingMethod
+        kind: enum
+        variants:
+          - Standard
+          - Promotion(PromotionCode)
+        traits: [Clone, Debug, PartialEq, Eq]
+
+      - name: ValidatedOrderLine
+        kind: struct
+        fields:
+          - order_line_id: OrderLineId
+          - product_code: ProductCode
+          - quantity: OrderQuantity
+        traits: [Clone, Debug, PartialEq, Eq, Lenses]
+
+      - name: ValidatedOrder
+        kind: struct
+        fields:
+          - order_id: OrderId
+          - customer_info: CustomerInfo
+          - shipping_address: Address
+          - billing_address: Address
+          - lines: Vec<ValidatedOrderLine>
+          - pricing_method: PricingMethod
+        traits: [Clone, Debug, PartialEq, Eq, Lenses]
+
+  # ===========================================
+  # priced_types.rs
+  # ===========================================
+  - path: src/workflow/priced_types.rs
+    types:
+      - name: PricedOrderProductLine
+        kind: struct
+        fields:
+          - order_line_id: OrderLineId
+          - product_code: ProductCode
+          - quantity: OrderQuantity
+          - line_price: Price
+        traits: [Clone, Debug, PartialEq, Eq]
+
+      - name: PricedOrderLine
+        kind: enum
+        variants:
+          - ProductLine(PricedOrderProductLine)
+          - CommentLine(String)
+        traits: [Clone, Debug, PartialEq, Eq]
+
+      - name: PricedOrder
+        kind: struct
+        fields:
+          - order_id: OrderId
+          - customer_info: CustomerInfo
+          - shipping_address: Address
+          - billing_address: Address
+          - amount_to_bill: BillingAmount
+          - lines: Vec<PricedOrderLine>
+          - pricing_method: PricingMethod
+        traits: [Clone, Debug, PartialEq, Eq, Lenses]
+
+  # ===========================================
+  # shipping_types.rs
+  # ===========================================
+  - path: src/workflow/shipping_types.rs
+    types:
+      - name: ShippingMethod
+        kind: enum
+        variants:
+          - PostalService
+          - Fedex24
+          - Fedex48
+          - Ups48
+        traits: [Clone, Copy, Debug, PartialEq, Eq]
+
+      - name: ShippingInfo
+        kind: struct
+        fields:
+          - shipping_method: ShippingMethod
+          - shipping_cost: Price
+        traits: [Clone, Debug, PartialEq, Eq]
+
+      - name: PricedOrderWithShippingMethod
+        kind: struct
+        fields:
+          - shipping_info: ShippingInfo
+          - priced_order: PricedOrder
+        traits: [Clone, Debug, PartialEq, Eq, Lenses]
+
+  # ===========================================
+  # acknowledgment_types.rs
+  # ===========================================
+  - path: src/workflow/acknowledgment_types.rs
+    types:
+      - name: HtmlString
+        kind: newtype
+        inner: String
+        traits: [Clone, Debug, PartialEq, Eq]
+
+      - name: OrderAcknowledgment
+        kind: struct
+        fields:
+          - email_address: EmailAddress
+          - letter: HtmlString
+        traits: [Clone, Debug, PartialEq, Eq]
+
+      - name: SendResult
+        kind: enum
+        variants:
+          - Sent
+          - NotSent
+        traits: [Clone, Copy, Debug, PartialEq, Eq]
+
+  # ===========================================
+  # output_types.rs
+  # ===========================================
+  - path: src/workflow/output_types.rs
+    types:
+      - name: OrderAcknowledgmentSent
+        kind: struct
+        fields:
+          - order_id: OrderId
+          - email_address: EmailAddress
+        traits: [Clone, Debug, PartialEq, Eq]
+
+      - name: ShippableOrderLine
+        kind: struct
+        fields:
+          - product_code: ProductCode
+          - quantity: OrderQuantity
+        traits: [Clone, Debug, PartialEq, Eq]
+
+      - name: ShippableOrderPlaced
+        kind: struct
+        fields:
+          - order_id: OrderId
+          - shipping_address: Address
+          - shipment_lines: Vec<ShippableOrderLine>
+          - pdf: PdfAttachment
+        traits: [Clone, Debug, PartialEq, Eq]
+
+      - name: BillableOrderPlaced
+        kind: struct
+        fields:
+          - order_id: OrderId
+          - billing_address: Address
+          - amount_to_bill: BillingAmount
+        traits: [Clone, Debug, PartialEq, Eq]
+
+      - name: PlaceOrderEvent
+        kind: enum
+        variants:
+          - ShippableOrderPlaced(ShippableOrderPlaced)
+          - BillableOrderPlaced(BillableOrderPlaced)
+          - AcknowledgmentSent(OrderAcknowledgmentSent)
+        traits: [Clone, Debug, PartialEq, Eq]
+
+# テスト計画
+testing:
+  test_file: tests/workflow_types_tests.rs
+  framework: rstest
+  coverage_target: "100%"
+
+  test_categories:
+    - category: error_types
+      tests:
+        - test_pricing_error_new_and_message
+        - test_pricing_error_display
+        - test_service_info_new_and_getters
+        - test_remote_service_error_new_and_display
+        - test_place_order_error_from_validation
+        - test_place_order_error_from_pricing
+        - test_place_order_error_from_remote_service
+        - test_place_order_error_display
+
+    - category: unvalidated_types
+      tests:
+        - test_unvalidated_customer_info_new
+        - test_unvalidated_address_new
+        - test_unvalidated_order_line_new
+        - test_unvalidated_order_new
+
+    - category: validated_types
+      tests:
+        - test_address_validation_error_variants
+        - test_checked_address_new_and_value
+        - test_pricing_method_variants
+        - test_validated_order_line_new_and_getters
+        - test_validated_order_new_and_getters
+
+    - category: priced_types
+      tests:
+        - test_priced_order_product_line_new
+        - test_priced_order_line_variants
+        - test_priced_order_new_and_getters
+
+    - category: shipping_types
+      tests:
+        - test_shipping_method_variants
+        - test_shipping_info_new_and_getters
+        - test_priced_order_with_shipping_method_new
+
+    - category: acknowledgment_types
+      tests:
+        - test_html_string_new_and_value
+        - test_order_acknowledgment_new
+        - test_send_result_variants
+
+    - category: output_types
+      tests:
+        - test_order_acknowledgment_sent_new
+        - test_shippable_order_line_new
+        - test_shippable_order_placed_new
+        - test_billable_order_placed_new
+        - test_place_order_event_variants
+
+# Clippy 準拠
+clippy_compliance:
+  lints:
+    - pedantic
+    - nursery
+
+  allowed:
+    - too_many_arguments  # UnvalidatedAddress, ValidatedOrder, PricedOrder の new メソッド
+    - struct_field_names  # shipping_address, billing_address
+
+  requirements:
+    - "#[must_use] on all getters"
+    - "Doc comments with # Examples and # Errors sections"
+    - "No abbreviations in names"
+
+# 実装チェックリスト
+checklist:
+  - id: 1
+    item: src/workflow/mod.rs を作成
+    status: pending
+
+  - id: 2
+    item: src/workflow/error_types.rs を実装
+    status: pending
+
+  - id: 3
+    item: src/workflow/unvalidated_types.rs を実装
+    status: pending
+
+  - id: 4
+    item: src/workflow/validated_types.rs を実装
+    status: pending
+
+  - id: 5
+    item: src/workflow/priced_types.rs を実装
+    status: pending
+
+  - id: 6
+    item: src/workflow/shipping_types.rs を実装
+    status: pending
+
+  - id: 7
+    item: src/workflow/acknowledgment_types.rs を実装
+    status: pending
+
+  - id: 8
+    item: src/workflow/output_types.rs を実装
+    status: pending
+
+  - id: 9
+    item: src/lib.rs に workflow モジュールを追加
+    status: pending
+
+  - id: 10
+    item: cargo check が成功
+    status: pending
+
+  - id: 11
+    item: cargo clippy が警告なし
+    status: pending
+
+  - id: 12
+    item: cargo test が全て成功
+    status: pending

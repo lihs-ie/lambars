@@ -1,0 +1,765 @@
+# Phase 9: テスト・ドキュメント 要件定義
+# Order Taking Sample Application
+# 補完テスト、proptest 法則検証、使用例ドキュメント
+
+version: "1.0.0"
+created_at: "2026-01-01"
+phase_id: phase_9
+phase_name: テスト・ドキュメント
+phase_name_en: Tests and Documentation
+
+# =============================================================================
+# 概要
+# =============================================================================
+
+overview:
+  description: |
+    Phase 1-8 で実装された機能に対する補完テスト、proptest による法則検証、
+    および使用例ドキュメントを作成する。既存のテストを削除・置き換えるのではなく、
+    不足しているテストを追加する形で設計する。
+
+  goals:
+    - 既存のモジュール単体テスト（src 内の #[cfg(test)]）と外部テスト（tests/）の統合
+    - proptest による型クラス法則（Functor, Monad 等）の検証
+    - functional-rusty ライブラリの使用例としての価値があるドキュメント
+    - ベストプラクティスとアーキテクチャ設計の文書化
+
+  existing_tests:
+    source_internal:
+      - src/simple_types/string_types.rs: 57 tests
+      - src/simple_types/identifier_types.rs: 21 tests
+      - src/simple_types/product_types.rs: 48 tests
+      - src/simple_types/quantity_types.rs: 52 tests
+      - src/simple_types/price_types.rs: 42 tests
+      - src/simple_types/misc_types.rs: 20 tests
+      - src/workflow/validation.rs: 48 tests
+      - src/workflow/pricing.rs: 20 tests
+
+    external_test_files:
+      - tests/shipping_tests.rs: 配送関連テスト
+      - tests/place_order_tests.rs: ワークフロー統合テスト
+      - tests/events_tests.rs: イベント生成テスト
+      - tests/dto_input_tests.rs: 入力 DTO テスト
+      - tests/dto_output_tests.rs: 出力 DTO テスト
+      - tests/dto_error_tests.rs: エラー DTO テスト
+      - tests/api_types_tests.rs: API 型テスト
+      - tests/api_dependencies_tests.rs: ダミー依存関数テスト
+      - tests/api_place_order_tests.rs: API place_order テスト
+      - tests/api_integration_tests.rs: API 統合テスト
+
+  functional_programming_aspects:
+    - proptest による型クラス法則の検証（参照透過性の確認）
+    - Smart Constructor パターンの不変条件検証
+    - Result/Option の Monad 法則検証
+    - 純粋関数の等価性検証
+
+# =============================================================================
+# 要件一覧
+# =============================================================================
+
+requirements:
+
+  # ---------------------------------------------------------------------------
+  # 補完単体テスト
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-091
+    name: simple_types 補完テスト
+    category: unit_test
+    priority: high
+    description: |
+      simple_types モジュールの外部テストファイル。
+      src 内のテストを補完する形で、境界値テスト、エラーメッセージ検証、
+      および proptest による法則検証を追加する。
+
+    test_file: tests/simple_types_tests.rs
+
+    test_categories:
+      - category: 境界値テスト
+        tests:
+          - name: test_string50_boundary_values
+            description: |
+              String50 の境界値テスト。
+              1文字（最小）、49文字、50文字（最大）、51文字（超過）をテスト。
+
+          - name: test_email_address_edge_cases
+            description: |
+              EmailAddress の特殊ケーステスト。
+              複数の@、Unicode 文字、極端に長いドメイン等をテスト。
+
+          - name: test_zip_code_all_patterns
+            description: |
+              ZipCode の全パターンテスト。
+              00000, 99999, 中間値、境界値をテスト。
+
+          - name: test_us_state_code_all_states
+            description: |
+              UsStateCode の全50州 + DC のテスト。
+              既存テストを補完する形でパラメータ化テストを追加。
+
+          - name: test_price_boundary_values
+            description: |
+              Price の境界値テスト。
+              0.00, 0.01, 999.99, 1000.00, 1000.01（超過）をテスト。
+
+          - name: test_billing_amount_boundary_values
+            description: |
+              BillingAmount の境界値テスト。
+              0.00, 0.01, 9999.99, 10000.00, 10000.01（超過）をテスト。
+
+          - name: test_unit_quantity_boundary_values
+            description: |
+              UnitQuantity の境界値テスト。
+              0（無効）, 1, 500, 1000, 1001（超過）をテスト。
+
+          - name: test_kilogram_quantity_boundary_values
+            description: |
+              KilogramQuantity の境界値テスト。
+              0.04（無効）, 0.05, 50.00, 100.00, 100.01（超過）をテスト。
+
+      - category: エラーメッセージ検証
+        tests:
+          - name: test_validation_error_messages_are_descriptive
+            description: |
+              各型の ValidationError メッセージが適切かを検証。
+              field_name と message の内容を確認。
+
+      - category: Hash/Eq 法則
+        tests:
+          - name: test_order_id_hash_eq_consistency
+            description: |
+              OrderId の Hash と Eq の一貫性を検証。
+              a == b => hash(a) == hash(b)
+
+          - name: test_product_code_hash_eq_consistency
+            description: |
+              ProductCode の Hash と Eq の一貫性を検証。
+
+  - id: REQ-092
+    name: compound_types 補完テスト
+    category: unit_test
+    priority: high
+    description: |
+      compound_types モジュールの外部テストファイル。
+      PersonalName, CustomerInfo, Address の追加テストを実施。
+
+    test_file: tests/compound_types_tests.rs
+
+    test_categories:
+      - category: Lens 操作テスト
+        tests:
+          - name: test_personal_name_lens_operations
+            description: |
+              PersonalName の Lens 操作テスト。
+              functional-rusty-derive の #[derive(Lenses)] で生成された Lens を使用。
+
+          - name: test_customer_info_lens_operations
+            description: |
+              CustomerInfo の Lens 操作テスト。
+              ネストした Lens の合成も検証。
+
+          - name: test_address_lens_operations
+            description: |
+              Address の Lens 操作テスト。
+              Option フィールドへの Lens 操作も検証。
+
+      - category: Clone/Eq テスト
+        tests:
+          - name: test_personal_name_clone_eq
+            description: Clone と Eq の一貫性を検証
+
+          - name: test_customer_info_clone_eq
+            description: Clone と Eq の一貫性を検証
+
+          - name: test_address_clone_eq
+            description: Clone と Eq の一貫性を検証
+
+  - id: REQ-093
+    name: validation 補完テスト
+    category: unit_test
+    priority: high
+    description: |
+      validation モジュールの外部テストファイル。
+      src/workflow/validation.rs の内部テストを補完する。
+
+    test_file: tests/validation_tests.rs
+
+    test_categories:
+      - category: エッジケーステスト
+        tests:
+          - name: test_validate_order_with_many_lines
+            description: |
+              多数の注文明細（100件以上）を持つ注文のバリデーション。
+              パフォーマンスと正確性を検証。
+
+          - name: test_validate_order_with_mixed_product_codes
+            description: |
+              Widget と Gizmo が混在する注文のバリデーション。
+
+          - name: test_validate_order_all_error_paths
+            description: |
+              全てのエラーパスを網羅的にテスト。
+              各バリデーションステップのエラーを個別に検証。
+
+      - category: 依存関数モックテスト
+        tests:
+          - name: test_validation_with_custom_product_checker
+            description: |
+              カスタムの check_product_code_exists 関数を使用したテスト。
+              特定の商品コードのみを許可するモック。
+
+          - name: test_validation_with_custom_address_checker
+            description: |
+              カスタムの check_address_exists 関数を使用したテスト。
+              特定の条件でエラーを返すモック。
+
+  - id: REQ-094
+    name: pricing 補完テスト
+    category: unit_test
+    priority: high
+    description: |
+      pricing モジュールの外部テストファイル。
+      src/workflow/pricing.rs の内部テストを補完する。
+
+    test_file: tests/pricing_tests.rs
+
+    test_categories:
+      - category: Lazy キャッシュテスト
+        tests:
+          - name: test_lazy_price_caching_behavior
+            description: |
+              functional-rusty の Lazy 型を使用した価格キャッシュの動作を検証。
+              複数回呼び出し時に初期化が1回のみであることを確認。
+
+          - name: test_promotion_price_fallback_to_standard
+            description: |
+              プロモーション価格が設定されていない商品で
+              標準価格にフォールバックすることを検証。
+
+      - category: 価格計算精度テスト
+        tests:
+          - name: test_decimal_precision_in_price_calculation
+            description: |
+              Decimal の精度を検証。
+              端数処理が正しく行われることを確認。
+
+          - name: test_billing_amount_sum_accuracy
+            description: |
+              複数の価格を合計した際の精度を検証。
+
+  - id: REQ-095
+    name: workflow 補完テスト
+    category: unit_test
+    priority: high
+    description: |
+      workflow モジュール全体のテストファイル。
+      place_order ワークフローの追加テストを実施。
+
+    test_file: tests/workflow_tests.rs
+
+    test_categories:
+      - category: IO モナドテスト
+        tests:
+          - name: test_io_monad_lazy_evaluation
+            description: |
+              IO モナドの遅延評価を検証。
+              run_unsafe() が呼ばれるまで副作用が発生しないことを確認。
+
+          - name: test_io_monad_composition
+            description: |
+              IO モナドの合成（flat_map, map）が正しく動作することを検証。
+
+      - category: エラー伝播テスト
+        tests:
+          - name: test_error_propagation_from_validation
+            description: |
+              バリデーションエラーが正しく PlaceOrderError::Validation に変換されることを検証。
+
+          - name: test_error_propagation_from_pricing
+            description: |
+              価格計算エラーが正しく PlaceOrderError::Pricing に変換されることを検証。
+
+      - category: 状態遷移テスト
+        tests:
+          - name: test_state_transition_unvalidated_to_validated
+            description: |
+              UnvalidatedOrder から ValidatedOrder への状態遷移を検証。
+
+          - name: test_state_transition_validated_to_priced
+            description: |
+              ValidatedOrder から PricedOrder への状態遷移を検証。
+
+          - name: test_state_transition_priced_to_shipping
+            description: |
+              PricedOrder から PricedOrderWithShippingMethod への状態遷移を検証。
+
+  # ---------------------------------------------------------------------------
+  # proptest 法則検証
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-096
+    name: Smart Constructor 法則 proptest
+    category: property_test
+    priority: high
+    description: |
+      Smart Constructor パターンで生成された型の不変条件を
+      proptest で検証する。
+
+    test_file: tests/simple_types_laws.rs
+
+    properties:
+      - name: string50_invariant
+        description: |
+          String50::create で生成された値は常に 1-50 文字であることを検証。
+        property: |
+          forall s: String.
+            String50::create("field", &s).is_ok() ==>
+              1 <= String50::value().len() <= 50
+
+      - name: price_invariant
+        description: |
+          Price::create で生成された値は常に 0.00-1000.00 の範囲であることを検証。
+        property: |
+          forall d: Decimal.
+            Price::create(d).is_ok() ==>
+              Decimal::ZERO <= Price::value() <= Decimal::from(1000)
+
+      - name: product_code_format_invariant
+        description: |
+          ProductCode は常に Widget (W + 4桁) または Gizmo (G + 3桁) の形式であることを検証。
+        property: |
+          forall code: String.
+            ProductCode::create("field", &code).is_ok() ==>
+              (code.starts_with("W") && code.len() == 5) ||
+              (code.starts_with("G") && code.len() == 4)
+
+      - name: unit_quantity_invariant
+        description: |
+          UnitQuantity は常に 1-1000 の整数であることを検証。
+        property: |
+          forall n: i32.
+            UnitQuantity::create(n).is_ok() ==>
+              1 <= UnitQuantity::value() <= 1000
+
+      - name: kilogram_quantity_invariant
+        description: |
+          KilogramQuantity は常に 0.05-100.00 の範囲であることを検証。
+        property: |
+          forall d: Decimal.
+            KilogramQuantity::create(d).is_ok() ==>
+              Decimal::new(5, 2) <= KilogramQuantity::value() <= Decimal::from(100)
+
+  - id: REQ-097
+    name: Result/Option Monad 法則 proptest
+    category: property_test
+    priority: medium
+    description: |
+      Result と Option の Monad 法則を proptest で検証する。
+      functional-rusty ライブラリの使用例として価値がある。
+
+    test_file: tests/monad_laws.rs
+
+    properties:
+      - name: result_left_identity
+        description: |
+          Result の Left Identity 法則。
+          pure(a).flat_map(f) == f(a)
+        property: |
+          forall a: i32, f: Fn(i32) -> Result<i32, String>.
+            Ok(a).and_then(&f) == f(a)
+
+      - name: result_right_identity
+        description: |
+          Result の Right Identity 法則。
+          m.flat_map(pure) == m
+        property: |
+          forall m: Result<i32, String>.
+            m.and_then(Ok) == m
+
+      - name: result_associativity
+        description: |
+          Result の Associativity 法則。
+          m.flat_map(f).flat_map(g) == m.flat_map(|x| f(x).flat_map(g))
+        property: |
+          forall m: Result<i32, String>,
+                 f: Fn(i32) -> Result<i32, String>,
+                 g: Fn(i32) -> Result<i32, String>.
+            m.and_then(&f).and_then(&g) == m.and_then(|x| f(x).and_then(&g))
+
+      - name: option_left_identity
+        description: Option の Left Identity 法則
+        property: |
+          forall a: i32, f: Fn(i32) -> Option<i32>.
+            Some(a).and_then(&f) == f(a)
+
+      - name: option_right_identity
+        description: Option の Right Identity 法則
+        property: |
+          forall m: Option<i32>.
+            m.and_then(Some) == m
+
+      - name: option_associativity
+        description: Option の Associativity 法則
+        property: |
+          forall m: Option<i32>,
+                 f: Fn(i32) -> Option<i32>,
+                 g: Fn(i32) -> Option<i32>.
+            m.and_then(&f).and_then(&g) == m.and_then(|x| f(x).and_then(&g))
+
+  - id: REQ-098
+    name: DTO 往復変換 proptest
+    category: property_test
+    priority: medium
+    description: |
+      DTO と Domain 型間の往復変換が情報を失わないことを検証する。
+
+    test_file: tests/dto_roundtrip_laws.rs
+
+    properties:
+      - name: address_roundtrip
+        description: |
+          Address -> AddressDto -> UnvalidatedAddress -> Address の往復で
+          元の値と等しいことを検証。
+        property: |
+          forall addr: Address.
+            let dto = AddressDto::from_address(&addr);
+            let unvalidated = dto.to_unvalidated_address();
+            // CheckedAddress を経由して Address に戻す
+            to_address(&CheckedAddress::new(unvalidated)) == Ok(addr)
+
+      - name: customer_info_roundtrip
+        description: |
+          CustomerInfo の DTO 往復変換を検証。
+        notes: |
+          CustomerInfoDto -> UnvalidatedCustomerInfo -> CustomerInfo の往復。
+          ただし VipStatus の文字列表現に依存するため、
+          "Normal" と "VIP" のケースを個別にテスト。
+
+      - name: json_serialization_roundtrip
+        description: |
+          DTO の JSON シリアライズ/デシリアライズ往復を検証。
+        property: |
+          forall dto: OrderFormDto.
+            let json = serde_json::to_string(&dto).unwrap();
+            let deserialized: OrderFormDto = serde_json::from_str(&json).unwrap();
+            deserialized == dto
+
+  # ---------------------------------------------------------------------------
+  # 統合テスト
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-099
+    name: エンドツーエンド統合テスト
+    category: integration_test
+    priority: high
+    description: |
+      PlaceOrder ワークフロー全体のエンドツーエンドテスト。
+      既存の api_integration_tests.rs を補完する。
+
+    test_file: tests/integration_tests.rs
+
+    test_scenarios:
+      - name: complete_order_flow_widget_only
+        description: |
+          Widget のみを含む注文の完全フロー。
+          JSON 入力 -> DTO 変換 -> バリデーション -> 価格計算 ->
+          配送計算 -> 確認メール -> イベント生成 -> JSON 出力
+
+      - name: complete_order_flow_gizmo_only
+        description: |
+          Gizmo のみを含む注文の完全フロー。
+
+      - name: complete_order_flow_mixed_products
+        description: |
+          Widget と Gizmo が混在する注文の完全フロー。
+
+      - name: complete_order_flow_vip_customer
+        description: |
+          VIP 顧客の注文フロー（無料配送が適用される）。
+
+      - name: complete_order_flow_with_promotion
+        description: |
+          プロモーションコード適用時の注文フロー。
+          コメント行が追加されることを検証。
+
+      - name: complete_order_flow_validation_failure
+        description: |
+          バリデーション失敗時のエラーフロー。
+          適切なエラーレスポンスが返されることを検証。
+
+      - name: complete_order_flow_zero_billing
+        description: |
+          請求金額が 0 の場合のフロー。
+          BillableOrderPlaced イベントが生成されないことを検証。
+
+      - name: complete_order_flow_acknowledgment_failure
+        description: |
+          確認メール送信失敗時のフロー。
+          AcknowledgmentSent イベントが生成されないが、
+          ワークフロー自体は成功することを検証。
+
+      - name: complete_order_flow_international_shipping
+        description: |
+          国際配送（US 以外）の注文フロー。
+          配送コストが $20 であることを検証。
+
+  # ---------------------------------------------------------------------------
+  # ドキュメント
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-100
+    name: 使用例ドキュメント
+    category: documentation
+    priority: medium
+    description: |
+      functional-rusty ライブラリの使用例として価値のある
+      Order Taking サンプルの使用例ドキュメント。
+
+    artifact: docs/usage.md
+
+    sections:
+      - title: クイックスタート
+        content: |
+          - プロジェクトのセットアップ方法
+          - 依存関係の追加方法
+          - 最小限のサンプルコード
+
+      - title: 制約付き型の使用
+        content: |
+          - Smart Constructor パターンの解説
+          - String50, EmailAddress, Price 等の使用例
+          - バリデーションエラーのハンドリング
+          - 「Make Illegal States Unrepresentable」の実践
+
+      - title: ワークフローの実装
+        content: |
+          - 状態遷移の型による表現
+          - UnvalidatedOrder -> ValidatedOrder -> PricedOrder の流れ
+          - 依存性注入パターンの適用
+          - 高階関数による合成
+
+      - title: functional-rusty の活用
+        content: |
+          - IO モナドによる副作用の分離
+          - Lazy 型による遅延評価
+          - Lens による不変データ構造の更新
+          - Result の合成（? 演算子との組み合わせ）
+
+      - title: テストの書き方
+        content: |
+          - モック関数の注入
+          - proptest による法則検証
+          - 統合テストのパターン
+
+      - title: エラーハンドリング
+        content: |
+          - Result と ? 演算子
+          - エラー型の設計（thiserror の活用）
+          - エラーの伝播と変換
+
+  - id: REQ-101
+    name: アーキテクチャドキュメント
+    category: documentation
+    priority: medium
+    description: |
+      Order Taking サンプルのアーキテクチャ設計ドキュメント。
+      関数型ドメインモデリングのベストプラクティスを含む。
+
+    artifact: docs/architecture.md
+
+    sections:
+      - title: 設計原則
+        content: |
+          - 関数型ドメインモデリングの原則
+          - 「Make Illegal States Unrepresentable」
+          - 純粋関数と副作用の分離
+          - 参照透過性の維持
+
+      - title: モジュール構成
+        content: |
+          - simple_types: 制約付き基本型
+          - compound_types: 複合型
+          - workflow: ワークフロー型と関数
+          - dto: データ転送オブジェクト
+          - api: API 層
+
+      - title: 型による状態遷移
+        content: |
+          - UnvalidatedOrder -> ValidatedOrder -> PricedOrder ->
+            PricedOrderWithShippingMethod -> PlaceOrderEvent[] の流れ
+          - 各状態の不変条件
+          - 状態遷移の純粋関数
+
+      - title: 依存性注入パターン
+        content: |
+          - 高階関数による依存性注入
+          - テスト容易性の向上
+          - F# の依存性注入パターンとの比較
+
+      - title: functional-rusty との統合
+        content: |
+          - IO モナドの使用箇所と理由
+          - Lazy 型の使用箇所と理由
+          - Lens の使用箇所と理由
+          - 将来的な拡張の可能性
+
+      - title: F# 版との比較
+        content: |
+          - Rust での表現方法の違い
+          - 型システムの違いへの対応
+          - Result computation expression と ? 演算子
+
+# =============================================================================
+# ファイル構成
+# =============================================================================
+
+artifacts:
+  test_files:
+    - path: tests/simple_types_tests.rs
+      description: simple_types モジュールの補完テスト
+      requirements:
+        - REQ-091
+
+    - path: tests/compound_types_tests.rs
+      description: compound_types モジュールの補完テスト
+      requirements:
+        - REQ-092
+
+    - path: tests/validation_tests.rs
+      description: validation モジュールの補完テスト
+      requirements:
+        - REQ-093
+
+    - path: tests/pricing_tests.rs
+      description: pricing モジュールの補完テスト
+      requirements:
+        - REQ-094
+
+    - path: tests/workflow_tests.rs
+      description: workflow モジュール全体のテスト
+      requirements:
+        - REQ-095
+
+    - path: tests/simple_types_laws.rs
+      description: Smart Constructor 法則の proptest
+      requirements:
+        - REQ-096
+
+    - path: tests/monad_laws.rs
+      description: Result/Option Monad 法則の proptest
+      requirements:
+        - REQ-097
+
+    - path: tests/dto_roundtrip_laws.rs
+      description: DTO 往復変換の proptest
+      requirements:
+        - REQ-098
+
+    - path: tests/integration_tests.rs
+      description: エンドツーエンド統合テスト
+      requirements:
+        - REQ-099
+
+  documentation_files:
+    - path: docs/usage.md
+      description: 使用例ドキュメント
+      requirements:
+        - REQ-100
+
+    - path: docs/architecture.md
+      description: アーキテクチャドキュメント
+      requirements:
+        - REQ-101
+
+# =============================================================================
+# テストカバレッジ要件
+# =============================================================================
+
+test_requirements:
+  unit_tests:
+    coverage_target: 100%
+    existing_coverage:
+      simple_types: 240 tests (in src)
+      compound_types: 57 tests (in src)
+      workflow_types: 160 tests (in src)
+      validation: 48 tests (in src)
+      pricing: 20 tests (in src)
+    additional_coverage:
+      - 境界値テスト
+      - エラーメッセージ検証
+      - Lens 操作テスト
+
+  property_tests:
+    framework: proptest
+    coverage:
+      - Smart Constructor 不変条件
+      - Monad 法則
+      - DTO 往復変換
+
+  integration_tests:
+    coverage:
+      - エンドツーエンドシナリオ
+      - エラーハンドリング
+      - VIP/プロモーション特殊ケース
+
+# =============================================================================
+# 依存関係
+# =============================================================================
+
+dependencies:
+  dev_dependencies:
+    - name: rstest
+      version: "0.24"
+      description: パラメータ化テスト
+
+    - name: proptest
+      version: "1.5"
+      description: プロパティベーステスト
+
+  existing_dependencies:
+    - functional-rusty
+    - functional-rusty-derive
+    - rust_decimal
+    - serde
+    - serde_json
+    - thiserror
+    - regex
+    - base64
+
+# =============================================================================
+# 設計上の考慮事項
+# =============================================================================
+
+design_considerations:
+  test_organization:
+    - title: 既存テストとの共存
+      description: |
+        src 内の #[cfg(test)] テストは基本的な機能テストを担当。
+        tests/ 内のテストは境界値、法則検証、統合テストを担当。
+        重複を避け、補完関係を維持する。
+
+    - title: proptest の活用
+      description: |
+        proptest は型クラス法則の検証に特化して使用。
+        生成される値の範囲を適切に制限し、テスト実行時間を管理。
+
+    - title: テストの独立性
+      description: |
+        各テストは独立して実行可能であること。
+        共有状態を持たない純粋なテスト設計。
+
+  documentation_quality:
+    - title: コード例の充実
+      description: |
+        全てのセクションに実行可能なコード例を含める。
+        コード例は cargo test --doc でテスト可能であること。
+
+    - title: 関数型プログラミングの解説
+      description: |
+        Rust における関数型プログラミングの実践方法を解説。
+        functional-rusty ライブラリの価値を示す。
+
+    - title: F# 版との対応
+      description: |
+        「Domain Modeling Made Functional」との対応を明確にし、
+        学習者が両方を参照できるようにする。

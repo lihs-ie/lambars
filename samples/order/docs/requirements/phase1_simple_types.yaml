@@ -1,0 +1,881 @@
+# Phase 1: 基本型定義 要件定義
+# Domain Modeling Made Functional の F# パターンを Rust に適用
+# functional-rusty ライブラリを使用した型安全なドメインモデリング
+
+id: phase1_simple_types
+name: 基本型定義
+version: "1.0.0"
+created_at: "2025-12-31"
+
+# 概要
+overview:
+  description: |
+    注文ドメインで使用する基本型（Simple Types）を定義する。
+    F# の Single Case Discriminated Union パターンを Rust の newtype パターンで実現し、
+    不正な状態を型レベルで防ぐ「Make Illegal States Unrepresentable」の原則に従う。
+
+  design_principles:
+    - name: Newtype パターン
+      description: |
+        プリミティブ型をラップした型を定義し、型安全性を確保する。
+        pub struct TypeName(InnerType) の形式で定義する。
+
+    - name: Smart Constructor パターン
+      description: |
+        コンストラクタを private にし、バリデーション付きの create 関数のみを公開する。
+        Result<T, ValidationError> を返すことで、不正な値の生成を防ぐ。
+
+    - name: 値の取得
+      description: |
+        内部値へのアクセスは value() メソッドを通じて行う。
+        直接フィールドにアクセスさせない。
+
+  error_handling:
+    description: |
+      バリデーションエラーは ValidationError 型で統一的に扱う。
+      フィールド名とエラーメッセージを含む構造体として定義する。
+    error_type: |
+      pub struct ValidationError {
+          pub field_name: String,
+          pub message: String,
+      }
+
+# 要件定義
+requirements:
+  # ========================================
+  # 文字列制約型
+  # ========================================
+  - id: REQ-001
+    name: String50
+    priority: critical
+    category: constrained_string
+    description: |
+      50文字以下に制約された文字列型。
+      名前、住所の一部など、短い文字列フィールドに使用する。
+      空文字列は許可しない。
+
+    validation_rules:
+      - 空文字列でないこと
+      - 50文字以下であること
+
+    methods:
+      - name: create
+        signature: "fn create(field_name: &str, value: &str) -> Result<String50, ValidationError>"
+        description: |
+          文字列から String50 を生成する。
+          バリデーションに失敗した場合は ValidationError を返す。
+
+      - name: create_option
+        signature: "fn create_option(field_name: &str, value: &str) -> Result<Option<String50>, ValidationError>"
+        description: |
+          空文字列の場合は None を返し、それ以外はバリデーションを行う。
+          オプショナルなフィールドに使用する。
+
+      - name: value
+        signature: "fn value(&self) -> &str"
+        description: 内部の文字列値への参照を返す。
+
+    f_sharp_reference: |
+      type String50 = private String50 of string
+
+      module String50 =
+          let create fieldName str =
+              ConstrainedType.createString fieldName String50 50 str
+          let value (String50 str) = str
+
+    functional_rusty_usage:
+      - "Result<T, E> による Monad 的なエラーハンドリング"
+      - "map, and_then による Result のチェーン"
+
+  - id: REQ-002
+    name: EmailAddress
+    priority: critical
+    category: constrained_string
+    description: |
+      メールアドレス形式に制約された文字列型。
+      最低限、@ を含む文字列であることを検証する。
+
+    validation_rules:
+      - 空文字列でないこと
+      - "@" を含むこと（.+@.+ パターン）
+
+    methods:
+      - name: create
+        signature: "fn create(field_name: &str, value: &str) -> Result<EmailAddress, ValidationError>"
+        description: メールアドレス形式の文字列から EmailAddress を生成する。
+
+      - name: value
+        signature: "fn value(&self) -> &str"
+        description: 内部のメールアドレス文字列への参照を返す。
+
+    f_sharp_reference: |
+      type EmailAddress = private EmailAddress of string
+
+      module EmailAddress =
+          let create fieldName str =
+              let pattern = ".+@.+"
+              ConstrainedType.createLike fieldName EmailAddress pattern str
+
+    functional_rusty_usage:
+      - "Result<T, E> による Monad 的なエラーハンドリング"
+      - "正規表現バリデーション（regex クレート使用）"
+
+  - id: REQ-003
+    name: ZipCode
+    priority: high
+    category: constrained_string
+    description: |
+      5桁の郵便番号を表す型。
+      米国の ZIP コード形式を想定する。
+
+    validation_rules:
+      - 空文字列でないこと
+      - 5桁の数字であること（\d{5} パターン）
+
+    methods:
+      - name: create
+        signature: "fn create(field_name: &str, value: &str) -> Result<ZipCode, ValidationError>"
+        description: 5桁の数字文字列から ZipCode を生成する。
+
+      - name: value
+        signature: "fn value(&self) -> &str"
+        description: 内部の郵便番号文字列への参照を返す。
+
+    f_sharp_reference: |
+      type ZipCode = private ZipCode of string
+
+      module ZipCode =
+          let create fieldName str =
+              let pattern = "\d{5}"
+              ConstrainedType.createLike fieldName ZipCode pattern str
+
+    functional_rusty_usage:
+      - "Result<T, E> による Monad 的なエラーハンドリング"
+
+  - id: REQ-004
+    name: UsStateCode
+    priority: high
+    category: constrained_string
+    description: |
+      米国の2文字の州コードを表す型。
+      有効な州コードのみを受け入れる。
+
+    validation_rules:
+      - 空文字列でないこと
+      - 有効な米国州コード（2文字）であること
+      - 正規表現パターンでバリデーション
+
+    valid_codes: |
+      AL, AK, AZ, AR, CA, CO, CT, DE, DC, FL, GA, HI, ID, IL, IN, IA, KS, KY, LA,
+      MA, MD, ME, MI, MN, MO, MS, MT, NC, ND, NE, NH, NJ, NM, NV, NY, OH, OK, OR,
+      PA, RI, SC, SD, TN, TX, UT, VA, VT, WA, WI, WV, WY
+
+    methods:
+      - name: create
+        signature: "fn create(field_name: &str, value: &str) -> Result<UsStateCode, ValidationError>"
+        description: 2文字の州コードから UsStateCode を生成する。
+
+      - name: value
+        signature: "fn value(&self) -> &str"
+        description: 内部の州コード文字列への参照を返す。
+
+    f_sharp_reference: |
+      type UsStateCode = private UsStateCode of string
+
+      module UsStateCode =
+          let create fieldName str =
+              let pattern = "^(A[KLRZ]|C[AOT]|D[CE]|FL|GA|HI|...)$"
+              ConstrainedType.createLike fieldName UsStateCode pattern str
+
+    functional_rusty_usage:
+      - "Result<T, E> による Monad 的なエラーハンドリング"
+
+  # ========================================
+  # ID 型
+  # ========================================
+  - id: REQ-005
+    name: OrderId
+    priority: critical
+    category: identifier
+    description: |
+      注文を一意に識別する ID 型。
+      空でない50文字以下の文字列。
+
+    validation_rules:
+      - 空文字列でないこと
+      - 50文字以下であること
+
+    methods:
+      - name: create
+        signature: "fn create(field_name: &str, value: &str) -> Result<OrderId, ValidationError>"
+        description: 文字列から OrderId を生成する。
+
+      - name: value
+        signature: "fn value(&self) -> &str"
+        description: 内部の ID 文字列への参照を返す。
+
+    f_sharp_reference: |
+      type OrderId = private OrderId of string
+
+      module OrderId =
+          let create fieldName str =
+              ConstrainedType.createString fieldName OrderId 50 str
+
+    functional_rusty_usage:
+      - "Result<T, E> による Monad 的なエラーハンドリング"
+
+    traits_to_derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+      - Hash
+
+  - id: REQ-006
+    name: OrderLineId
+    priority: critical
+    category: identifier
+    description: |
+      注文明細を一意に識別する ID 型。
+      空でない50文字以下の文字列。
+
+    validation_rules:
+      - 空文字列でないこと
+      - 50文字以下であること
+
+    methods:
+      - name: create
+        signature: "fn create(field_name: &str, value: &str) -> Result<OrderLineId, ValidationError>"
+        description: 文字列から OrderLineId を生成する。
+
+      - name: value
+        signature: "fn value(&self) -> &str"
+        description: 内部の ID 文字列への参照を返す。
+
+    f_sharp_reference: |
+      type OrderLineId = private OrderLineId of string
+
+      module OrderLineId =
+          let create fieldName str =
+              ConstrainedType.createString fieldName OrderLineId 50 str
+
+    functional_rusty_usage:
+      - "Result<T, E> による Monad 的なエラーハンドリング"
+
+    traits_to_derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+      - Hash
+
+  # ========================================
+  # 製品コード型
+  # ========================================
+  - id: REQ-007
+    name: WidgetCode
+    priority: critical
+    category: product_code
+    description: |
+      Widget 製品のコードを表す型。
+      "W" で始まり、続いて4桁の数字（W\d{4} パターン）。
+
+    validation_rules:
+      - 空文字列でないこと
+      - "W" で始まり4桁の数字が続くこと（W\d{4}）
+
+    examples:
+      valid:
+        - "W1234"
+        - "W0001"
+        - "W9999"
+      invalid:
+        - "W123"    # 3桁
+        - "G1234"   # 先頭が G
+        - "W12345"  # 5桁
+
+    methods:
+      - name: create
+        signature: "fn create(field_name: &str, value: &str) -> Result<WidgetCode, ValidationError>"
+        description: W + 4桁の形式の文字列から WidgetCode を生成する。
+
+      - name: value
+        signature: "fn value(&self) -> &str"
+        description: 内部のコード文字列への参照を返す。
+
+    f_sharp_reference: |
+      type WidgetCode = private WidgetCode of string
+
+      module WidgetCode =
+          let create fieldName code =
+              let pattern = "W\d{4}"
+              ConstrainedType.createLike fieldName WidgetCode pattern code
+
+    functional_rusty_usage:
+      - "Result<T, E> による Monad 的なエラーハンドリング"
+
+  - id: REQ-008
+    name: GizmoCode
+    priority: critical
+    category: product_code
+    description: |
+      Gizmo 製品のコードを表す型。
+      "G" で始まり、続いて3桁の数字（G\d{3} パターン）。
+
+    validation_rules:
+      - 空文字列でないこと
+      - "G" で始まり3桁の数字が続くこと（G\d{3}）
+
+    examples:
+      valid:
+        - "G123"
+        - "G001"
+        - "G999"
+      invalid:
+        - "G12"     # 2桁
+        - "W123"    # 先頭が W
+        - "G1234"   # 4桁
+
+    methods:
+      - name: create
+        signature: "fn create(field_name: &str, value: &str) -> Result<GizmoCode, ValidationError>"
+        description: G + 3桁の形式の文字列から GizmoCode を生成する。
+
+      - name: value
+        signature: "fn value(&self) -> &str"
+        description: 内部のコード文字列への参照を返す。
+
+    f_sharp_reference: |
+      type GizmoCode = private GizmoCode of string
+
+      module GizmoCode =
+          let create fieldName code =
+              let pattern = "G\d{3}"
+              ConstrainedType.createLike fieldName GizmoCode pattern code
+
+    functional_rusty_usage:
+      - "Result<T, E> による Monad 的なエラーハンドリング"
+
+  - id: REQ-009
+    name: ProductCode
+    priority: critical
+    category: sum_type
+    description: |
+      製品コードを表す直和型。
+      Widget コードまたは Gizmo コードのいずれかを保持する。
+
+    variants:
+      - name: Widget
+        inner_type: WidgetCode
+        description: Widget 製品のコード
+
+      - name: Gizmo
+        inner_type: GizmoCode
+        description: Gizmo 製品のコード
+
+    methods:
+      - name: create
+        signature: "fn create(field_name: &str, code: &str) -> Result<ProductCode, ValidationError>"
+        description: |
+          文字列から ProductCode を生成する。
+          先頭文字で Widget か Gizmo かを判定する。
+
+      - name: value
+        signature: "fn value(&self) -> &str"
+        description: 内部のコード文字列への参照を返す。
+
+    f_sharp_reference: |
+      type ProductCode =
+          | Widget of WidgetCode
+          | Gizmo of GizmoCode
+
+      module ProductCode =
+          let create fieldName code =
+              if code.StartsWith("W") then
+                  WidgetCode.create fieldName code |> Result.map Widget
+              else if code.StartsWith("G") then
+                  GizmoCode.create fieldName code |> Result.map Gizmo
+              else
+                  Error (sprintf "%s: Format not recognized '%s'" fieldName code)
+
+    functional_rusty_usage:
+      - "Rust の enum によるパターンマッチ"
+      - "Result::map による Functor 的な変換"
+
+  # ========================================
+  # 数量型
+  # ========================================
+  - id: REQ-010
+    name: UnitQuantity
+    priority: critical
+    category: constrained_number
+    description: |
+      個数を表す整数型。
+      1から1000の範囲に制約される。
+      Widget 製品の数量に使用する。
+
+    validation_rules:
+      - 1以上であること
+      - 1000以下であること
+
+    inner_type: u32
+    min_value: 1
+    max_value: 1000
+
+    methods:
+      - name: create
+        signature: "fn create(field_name: &str, value: u32) -> Result<UnitQuantity, ValidationError>"
+        description: 整数から UnitQuantity を生成する。
+
+      - name: value
+        signature: "fn value(&self) -> u32"
+        description: 内部の整数値を返す。
+
+    f_sharp_reference: |
+      type UnitQuantity = private UnitQuantity of int
+
+      module UnitQuantity =
+          let create fieldName v =
+              ConstrainedType.createInt fieldName UnitQuantity 1 1000 v
+
+    functional_rusty_usage:
+      - "Result<T, E> による Monad 的なエラーハンドリング"
+
+  - id: REQ-011
+    name: KilogramQuantity
+    priority: critical
+    category: constrained_number
+    description: |
+      重量（キログラム）を表す小数型。
+      0.05から100.00の範囲に制約される。
+      Gizmo 製品の数量に使用する。
+
+    validation_rules:
+      - 0.05以上であること
+      - 100.00以下であること
+
+    inner_type: "rust_decimal::Decimal"
+    min_value: 0.05
+    max_value: 100.00
+
+    methods:
+      - name: create
+        signature: "fn create(field_name: &str, value: Decimal) -> Result<KilogramQuantity, ValidationError>"
+        description: 小数から KilogramQuantity を生成する。
+
+      - name: value
+        signature: "fn value(&self) -> Decimal"
+        description: 内部の小数値を返す。
+
+    f_sharp_reference: |
+      type KilogramQuantity = private KilogramQuantity of decimal
+
+      module KilogramQuantity =
+          let create fieldName v =
+              ConstrainedType.createDecimal fieldName KilogramQuantity 0.5M 100M v
+
+    functional_rusty_usage:
+      - "Result<T, E> による Monad 的なエラーハンドリング"
+      - "rust_decimal クレートによる正確な小数演算"
+
+    notes: |
+      F# のコードでは 0.5M と記載されているが、コメントには 0.05 と記載されている。
+      ドメイン的には 0.05 が正しいと推測される。
+
+  - id: REQ-012
+    name: OrderQuantity
+    priority: critical
+    category: sum_type
+    description: |
+      注文数量を表す直和型。
+      個数（Unit）または重量（Kilogram）のいずれかを保持する。
+      製品コードによってどちらを使用するかが決まる。
+
+    variants:
+      - name: Unit
+        inner_type: UnitQuantity
+        description: Widget 製品の個数
+
+      - name: Kilogram
+        inner_type: KilogramQuantity
+        description: Gizmo 製品の重量
+
+    methods:
+      - name: create
+        signature: "fn create(field_name: &str, product_code: &ProductCode, quantity: Decimal) -> Result<OrderQuantity, ValidationError>"
+        description: |
+          製品コードと数量から OrderQuantity を生成する。
+          Widget なら UnitQuantity、Gizmo なら KilogramQuantity として解釈する。
+
+      - name: value
+        signature: "fn value(&self) -> Decimal"
+        description: 数量を Decimal として返す。
+
+    f_sharp_reference: |
+      type OrderQuantity =
+          | Unit of UnitQuantity
+          | Kilogram of KilogramQuantity
+
+      module OrderQuantity =
+          let create fieldName productCode quantity =
+              match productCode with
+              | Widget _ ->
+                  UnitQuantity.create fieldName (int quantity)
+                  |> Result.map OrderQuantity.Unit
+              | Gizmo _ ->
+                  KilogramQuantity.create fieldName quantity
+                  |> Result.map OrderQuantity.Kilogram
+
+    functional_rusty_usage:
+      - "Rust の enum によるパターンマッチ"
+      - "Result::map による Functor 的な変換"
+
+  # ========================================
+  # 金額型
+  # ========================================
+  - id: REQ-013
+    name: Price
+    priority: critical
+    category: constrained_number
+    description: |
+      単価を表す小数型。
+      0.0から1000.00の範囲に制約される。
+
+    validation_rules:
+      - 0.0以上であること
+      - 1000.00以下であること
+
+    inner_type: "rust_decimal::Decimal"
+    min_value: 0.0
+    max_value: 1000.00
+
+    methods:
+      - name: create
+        signature: "fn create(value: Decimal) -> Result<Price, ValidationError>"
+        description: 小数から Price を生成する。フィールド名は "Price" 固定。
+
+      - name: unsafe_create
+        signature: "fn unsafe_create(value: Decimal) -> Price"
+        description: |
+          バリデーションなしで Price を生成する。
+          値が有効であることが確実な場合のみ使用する。
+          範囲外の場合は panic する。
+
+      - name: multiply
+        signature: "fn multiply(&self, quantity: Decimal) -> Result<Price, ValidationError>"
+        description: 数量を掛けて新しい Price を生成する。
+
+      - name: value
+        signature: "fn value(&self) -> Decimal"
+        description: 内部の小数値を返す。
+
+    f_sharp_reference: |
+      type Price = private Price of decimal
+
+      module Price =
+          let create v =
+              ConstrainedType.createDecimal "Price" Price 0.0M 1000M v
+
+          let unsafeCreate v =
+              create v |> function
+                  | Ok price -> price
+                  | Error err -> failwithf "Not expecting Price to be out of bounds: %s" err
+
+          let multiply qty (Price p) = create (qty * p)
+
+    functional_rusty_usage:
+      - "Result<T, E> による Monad 的なエラーハンドリング"
+      - "rust_decimal クレートによる正確な小数演算"
+
+  - id: REQ-014
+    name: BillingAmount
+    priority: critical
+    category: constrained_number
+    description: |
+      請求金額を表す小数型。
+      0.0から10000.00の範囲に制約される。
+      複数の Price の合計として使用される。
+
+    validation_rules:
+      - 0.0以上であること
+      - 10000.00以下であること
+
+    inner_type: "rust_decimal::Decimal"
+    min_value: 0.0
+    max_value: 10000.00
+
+    methods:
+      - name: create
+        signature: "fn create(value: Decimal) -> Result<BillingAmount, ValidationError>"
+        description: 小数から BillingAmount を生成する。
+
+      - name: sum_prices
+        signature: "fn sum_prices(prices: &[Price]) -> Result<BillingAmount, ValidationError>"
+        description: Price のリストを合計して BillingAmount を生成する。
+
+      - name: value
+        signature: "fn value(&self) -> Decimal"
+        description: 内部の小数値を返す。
+
+    f_sharp_reference: |
+      type BillingAmount = private BillingAmount of decimal
+
+      module BillingAmount =
+          let create v =
+              ConstrainedType.createDecimal "BillingAmount" BillingAmount 0.0M 10000M v
+
+          let sumPrices prices =
+              let total = prices |> List.map Price.value |> List.sum
+              create total
+
+    functional_rusty_usage:
+      - "Result<T, E> による Monad 的なエラーハンドリング"
+      - "Foldable トレイトによる畳み込み操作"
+      - "rust_decimal クレートによる正確な小数演算"
+
+  # ========================================
+  # 列挙型
+  # ========================================
+  - id: REQ-015
+    name: VipStatus
+    priority: high
+    category: enum
+    description: |
+      顧客の VIP ステータスを表す列挙型。
+      Normal（通常）または Vip（VIP 顧客）のいずれか。
+
+    variants:
+      - name: Normal
+        description: 通常の顧客
+
+      - name: Vip
+        description: VIP 顧客
+
+    methods:
+      - name: create
+        signature: "fn create(field_name: &str, value: &str) -> Result<VipStatus, ValidationError>"
+        description: |
+          文字列から VipStatus を生成する。
+          "normal", "Normal", "vip", "VIP" を受け入れる。
+
+      - name: value
+        signature: "fn value(&self) -> &'static str"
+        description: VipStatus を文字列として返す（"Normal" または "VIP"）。
+
+    f_sharp_reference: |
+      type VipStatus =
+          | Normal
+          | Vip
+
+      module VipStatus =
+          let value status =
+              match status with
+              | Normal -> "Normal"
+              | Vip -> "VIP"
+
+          let create fieldName str =
+              match str with
+              | "normal" | "Normal" -> Ok Normal
+              | "vip" | "VIP" -> Ok Vip
+              | _ -> Error (sprintf "%s: Must be one of 'Normal', 'VIP'" fieldName)
+
+    functional_rusty_usage:
+      - "Rust の enum によるパターンマッチ"
+
+  # ========================================
+  # その他の型
+  # ========================================
+  - id: REQ-016
+    name: PromotionCode
+    priority: medium
+    category: simple_wrapper
+    description: |
+      プロモーションコードを表す型。
+      特にバリデーションなしの単純なラッパー型。
+
+    validation_rules: []
+
+    methods:
+      - name: new
+        signature: "fn new(value: String) -> PromotionCode"
+        description: 文字列から PromotionCode を生成する。
+
+      - name: value
+        signature: "fn value(&self) -> &str"
+        description: 内部のプロモーションコード文字列への参照を返す。
+
+    f_sharp_reference: |
+      type PromotionCode = PromotionCode of string
+
+    functional_rusty_usage:
+      - "Newtype パターンによる型安全性の確保"
+
+    notes: |
+      F# のコードでは private 修飾子がないため、
+      バリデーションなしで直接生成可能。
+
+  - id: REQ-017
+    name: PdfAttachment
+    priority: medium
+    category: product_type
+    description: |
+      PDF 添付ファイルを表す構造体。
+      ファイル名とバイトデータを保持する。
+
+    fields:
+      - name: name
+        type: String
+        description: ファイル名
+
+      - name: bytes
+        type: "Vec<u8>"
+        description: PDF のバイトデータ
+
+    methods:
+      - name: new
+        signature: "fn new(name: String, bytes: Vec<u8>) -> PdfAttachment"
+        description: ファイル名とバイトデータから PdfAttachment を生成する。
+
+    f_sharp_reference: |
+      type PdfAttachment = {
+          Name : string
+          Bytes: byte[]
+      }
+
+    functional_rusty_usage:
+      - "Rust の構造体による積型（Product Type）の表現"
+
+    traits_to_derive:
+      - Clone
+      - Debug
+
+# ========================================
+# 共通ユーティリティ
+# ========================================
+utilities:
+  - id: UTIL-001
+    name: ValidationError
+    description: |
+      バリデーションエラーを表す構造体。
+      フィールド名とエラーメッセージを保持する。
+
+    definition: |
+      #[derive(Clone, Debug, PartialEq, Eq)]
+      pub struct ValidationError {
+          pub field_name: String,
+          pub message: String,
+      }
+
+    methods:
+      - name: new
+        signature: "fn new(field_name: &str, message: &str) -> ValidationError"
+        description: フィールド名とメッセージから ValidationError を生成する。
+
+    traits:
+      - "std::fmt::Display"
+      - "std::error::Error"
+
+  - id: UTIL-002
+    name: ConstrainedType モジュール
+    description: |
+      制約付き型を生成するためのヘルパー関数群。
+      F# の ConstrainedType モジュールに相当する。
+
+    functions:
+      - name: create_string
+        signature: "fn create_string<T, F>(field_name: &str, constructor: F, max_length: usize, value: &str) -> Result<T, ValidationError> where F: FnOnce(String) -> T"
+        description: 最大長制約付きの文字列型を生成する。
+
+      - name: create_string_option
+        signature: "fn create_string_option<T, F>(field_name: &str, constructor: F, max_length: usize, value: &str) -> Result<Option<T>, ValidationError> where F: FnOnce(String) -> T"
+        description: 空文字列の場合は None を返す最大長制約付きの文字列型を生成する。
+
+      - name: create_integer
+        signature: "fn create_integer<T, F>(field_name: &str, constructor: F, min_value: u32, max_value: u32, value: u32) -> Result<T, ValidationError> where F: FnOnce(u32) -> T"
+        description: 範囲制約付きの整数型を生成する。
+
+      - name: create_decimal
+        signature: "fn create_decimal<T, F>(field_name: &str, constructor: F, min_value: Decimal, max_value: Decimal, value: Decimal) -> Result<T, ValidationError> where F: FnOnce(Decimal) -> T"
+        description: 範囲制約付きの小数型を生成する。
+
+      - name: create_like
+        signature: "fn create_like<T, F>(field_name: &str, constructor: F, pattern: &str, value: &str) -> Result<T, ValidationError> where F: FnOnce(String) -> T"
+        description: 正規表現パターンに一致する文字列型を生成する。
+
+# ========================================
+# 依存関係
+# ========================================
+dependencies:
+  crates:
+    - name: rust_decimal
+      version: "1.36"
+      description: 正確な小数演算のため
+
+    - name: regex
+      version: "1.11"
+      description: 正規表現バリデーションのため
+
+    - name: thiserror
+      version: "2.0"
+      description: エラー型の定義のため
+
+  functional_rusty:
+    - module: typeclass
+      traits:
+        - Functor
+        - Monad
+      description: Result の Functor/Monad 操作に使用
+
+    - module: foldable
+      traits:
+        - Foldable
+      description: Price リストの畳み込みに使用
+
+# ========================================
+# テスト要件
+# ========================================
+testing:
+  strategy: TDD
+  framework: rstest
+
+  test_categories:
+    - name: バリデーション成功テスト
+      description: 有効な値で型が正しく生成されることを確認
+
+    - name: バリデーション失敗テスト
+      description: 無効な値で適切なエラーが返されることを確認
+
+    - name: 境界値テスト
+      description: 最小値、最大値、境界周辺の値のテスト
+
+    - name: パターンマッチテスト
+      description: 直和型のパターンマッチが正しく動作することを確認
+
+    - name: プロパティベーステスト
+      description: proptest を使用したランダム値テスト
+
+  coverage_requirement: "100%"
+
+# ========================================
+# 実装上の注意事項
+# ========================================
+implementation_notes:
+  - note: |
+      Newtype パターンを使用し、内部フィールドは private にする。
+      pub struct TypeName(InnerType); の形式で、外部から直接フィールドにアクセスさせない。
+
+  - note: |
+      Clone, Debug, PartialEq, Eq は全ての型に derive する。
+      Hash は ID 型など、HashMap のキーとして使用する可能性のある型に derive する。
+
+  - note: |
+      エラーメッセージは英語で統一し、フィールド名を含める。
+      例: "OrderId: Must not be empty"
+
+  - note: |
+      Decimal 型には rust_decimal クレートを使用する。
+      浮動小数点数（f64）は精度の問題があるため使用しない。
+
+  - note: |
+      正規表現パターンは一度コンパイルしてキャッシュすることを検討する。
+      lazy_static または once_cell を使用する。

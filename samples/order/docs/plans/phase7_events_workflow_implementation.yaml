@@ -1,0 +1,1375 @@
+# Phase 7: イベント生成とワークフロー統合 実装計画
+# 要件定義: docs/requirements/phase7_events_workflow.yaml
+
+id: phase7_events_workflow_implementation
+name: イベント生成とワークフロー統合 実装計画
+version: "1.0.0"
+created_at: "2026-01-01"
+
+# 実装概要
+overview:
+  description: |
+    Phase 7 では PricedOrder からイベントを生成し、PlaceOrder ワークフロー全体を統合する。
+    F# の Domain Modeling Made Functional パターンを Rust に適用し、
+    functional-rusty ライブラリを使用したイベント駆動ワークフローを実現する。
+
+    このフェーズでは以下の主要な機能を実装する:
+    1. 配送明細変換: PricedOrderLine から ShippableOrderLine への変換
+    2. 配送イベント生成: PricedOrder から ShippableOrderPlaced を生成
+    3. 請求イベント生成: 請求金額が正の場合のみ BillableOrderPlaced を生成
+    4. イベント統合: 全イベントを Vec<PlaceOrderEvent> として集約
+    5. ワークフロー統合: place_order 関数で全処理を統合
+
+    全ての処理は純粋関数として実装し、副作用（メール送信）は
+    IO モナドで遅延実行することでテスト容易性を確保する。
+
+  data_flow: |
+    PlaceOrder ワークフローのデータフロー:
+
+    UnvalidatedOrder
+         |
+         +-- validate_order --> ValidatedOrder
+         |        |
+         |        +-- validation error --> PlaceOrderError::Validation
+         |
+         +-- price_order --> PricedOrder
+         |        |
+         |        +-- pricing error --> PlaceOrderError::Pricing
+         |
+         +-- add_shipping_info_to_order --> PricedOrderWithShippingMethod
+         |
+         +-- free_vip_shipping --> PricedOrderWithShippingMethod (VIP割引適用後)
+         |
+         +-- acknowledge_order --> IO<Option<OrderAcknowledgmentSent>>
+         |
+         +-- create_events --> Vec<PlaceOrderEvent>
+                  |
+                  +-- AcknowledgmentSent (Option から)
+                  +-- ShippableOrderPlaced (常に生成)
+                  +-- BillableOrderPlaced (請求金額 > 0 の場合)
+
+  total_functions: 5
+  categories:
+    - 配送明細変換関数: 1 (REQ-070)
+    - 配送イベント生成関数: 1 (REQ-071)
+    - 請求イベント生成関数: 1 (REQ-072)
+    - イベント統合関数: 1 (REQ-073)
+    - ワークフロー統合関数: 1 (REQ-074)
+
+# 実装順序
+implementation_order:
+  - step: 1
+    description: events モジュールの追加（mod.rs への変更）
+    file: src/workflow/mod.rs
+    changes:
+      - "pub mod events; を追加"
+      - "pub use events::*; を追加（必要な関数のみ）"
+    dependencies: []
+
+  - step: 2
+    description: place_order モジュールの追加（mod.rs への変更）
+    file: src/workflow/mod.rs
+    changes:
+      - "pub mod place_order; を追加"
+      - "pub use place_order::place_order; を追加"
+    dependencies:
+      - step 1
+
+  - step: 3
+    description: 配送明細変換関数の実装
+    file: src/workflow/events.rs
+    functions:
+      - make_shipment_line (REQ-070)
+    dependencies: []
+    notes: |
+      PricedOrderLine から ShippableOrderLine への変換関数。
+      ProductLine の場合は製品コードと数量を抽出して ShippableOrderLine を生成。
+      CommentLine の場合は None を返す（配送対象外）。
+
+  - step: 4
+    description: 配送イベント生成関数の実装
+    file: src/workflow/events.rs
+    functions:
+      - create_shipping_event (REQ-071)
+    dependencies:
+      - step 3
+    notes: |
+      PricedOrder から ShippableOrderPlaced イベントを生成する関数。
+      filter_map(make_shipment_line) で ProductLine のみを変換。
+      PDF ファイル名は "Order{order_id}.pdf" 形式。
+
+  - step: 5
+    description: 請求イベント生成関数の実装
+    file: src/workflow/events.rs
+    functions:
+      - create_billing_event (REQ-072)
+    dependencies: []
+    notes: |
+      PricedOrder から BillableOrderPlaced イベントを条件付きで生成。
+      請求金額が正の場合のみイベントを生成し、0 以下の場合は None を返す。
+
+  - step: 6
+    description: イベント統合関数の実装
+    file: src/workflow/events.rs
+    functions:
+      - create_events (REQ-073)
+    dependencies:
+      - step 4
+      - step 5
+    notes: |
+      PricedOrder と確認メール送信イベント（Option）から、
+      全ての PlaceOrderEvent を統合したリストを生成する関数。
+      イベント順序: AcknowledgmentSent -> ShippableOrderPlaced -> BillableOrderPlaced
+
+  - step: 7
+    description: ワークフロー統合関数の実装
+    file: src/workflow/place_order.rs
+    functions:
+      - place_order (REQ-074)
+    dependencies:
+      - step 6
+    notes: |
+      PlaceOrder ワークフロー全体を統合する関数。
+      validate_order -> price_order -> add_shipping_info_to_order ->
+      free_vip_shipping -> acknowledge_order -> create_events
+      戻り値は IO<Result<Vec<PlaceOrderEvent>, PlaceOrderError>>
+
+  - step: 8
+    description: events テストの実装
+    file: tests/events_tests.rs
+    dependencies:
+      - step 6
+    notes: |
+      make_shipment_line, create_shipping_event, create_billing_event, create_events の
+      ユニットテスト。rstest を使用したパラメータ化テスト。
+
+  - step: 9
+    description: place_order テストの実装
+    file: tests/place_order_tests.rs
+    dependencies:
+      - step 7
+    notes: |
+      place_order ワークフローの統合テスト。
+      全ての依存関数をモックして実行。
+      IO の遅延実行検証を含む。
+
+# ファイル詳細
+files:
+  # ===========================================
+  # mod.rs の変更
+  # ===========================================
+  - path: src/workflow/mod.rs
+    changes:
+      - type: add_module
+        content: |
+          pub mod events;
+          pub mod place_order;
+      - type: add_reexport
+        content: |
+          pub use events::{
+              make_shipment_line, create_shipping_event, create_billing_event, create_events,
+          };
+          pub use place_order::place_order;
+
+  # ===========================================
+  # events.rs の詳細
+  # ===========================================
+  - path: src/workflow/events.rs
+    module_documentation: |
+      //! イベント生成
+      //!
+      //! Phase 7 の実装。PricedOrder から PlaceOrderEvent を生成する。
+      //!
+      //! # 設計原則
+      //!
+      //! - 純粋関数: 全てのイベント生成関数は参照透過
+      //! - 不変性: 入力データを変更せず、常に新しいイベントを生成
+      //! - 合成可能性: 小さな関数から大きな関数を組み立てる
+      //! - パターンマッチ: PricedOrderLine の ProductLine/CommentLine 分岐
+      //!
+      //! # 機能一覧
+      //!
+      //! - [`make_shipment_line`] - PricedOrderLine から ShippableOrderLine への変換
+      //! - [`create_shipping_event`] - 配送イベントの生成
+      //! - [`create_billing_event`] - 請求イベントの生成（条件付き）
+      //! - [`create_events`] - 全イベントの統合
+      //!
+      //! # 使用例
+      //!
+      //! ```
+      //! use order_taking_sample::workflow::{
+      //!     create_events, PricedOrder, OrderAcknowledgmentSent,
+      //! };
+      //! // let events = create_events(&priced_order, Some(ack_event));
+      //! ```
+
+    imports: |
+      use rust_decimal::Decimal;
+
+      use crate::simple_types::PdfAttachment;
+      use crate::workflow::output_types::{
+          BillableOrderPlaced, OrderAcknowledgmentSent, PlaceOrderEvent,
+          ShippableOrderLine, ShippableOrderPlaced,
+      };
+      use crate::workflow::priced_types::{PricedOrder, PricedOrderLine};
+
+    functions:
+      # -----------------------------------------
+      # make_shipment_line (REQ-070)
+      # -----------------------------------------
+      - name: make_shipment_line
+        requirement_id: REQ-070
+        signature: |
+          pub fn make_shipment_line(line: &PricedOrderLine) -> Option<ShippableOrderLine>
+        implementation: |
+          /// PricedOrderLine から ShippableOrderLine への変換関数
+          ///
+          /// ProductLine の場合は製品コードと数量を抽出して ShippableOrderLine を生成。
+          /// CommentLine の場合は None を返す（配送対象外）。
+          ///
+          /// # Arguments
+          ///
+          /// * `line` - 価格付き注文明細
+          ///
+          /// # Returns
+          ///
+          /// * `Some(ShippableOrderLine)` - ProductLine の場合
+          /// * `None` - CommentLine の場合
+          ///
+          /// # Examples
+          ///
+          /// ```
+          /// use order_taking_sample::workflow::{
+          ///     make_shipment_line, PricedOrderLine, PricedOrderProductLine,
+          /// };
+          /// use order_taking_sample::simple_types::{OrderLineId, ProductCode, OrderQuantity, Price};
+          /// use rust_decimal::Decimal;
+          ///
+          /// // ProductLine の場合
+          /// let product_code = ProductCode::create("ProductCode", "W1234").unwrap();
+          /// let product_line = PricedOrderProductLine::new(
+          ///     OrderLineId::create("OrderLineId", "line-001").unwrap(),
+          ///     product_code.clone(),
+          ///     OrderQuantity::create("Quantity", &product_code, Decimal::from(5)).unwrap(),
+          ///     Price::create(Decimal::from(500)).unwrap(),
+          /// );
+          /// let line = PricedOrderLine::ProductLine(product_line);
+          /// let result = make_shipment_line(&line);
+          /// assert!(result.is_some());
+          ///
+          /// // CommentLine の場合
+          /// let comment_line = PricedOrderLine::CommentLine("Gift message".to_string());
+          /// let result = make_shipment_line(&comment_line);
+          /// assert!(result.is_none());
+          /// ```
+          #[must_use]
+          pub fn make_shipment_line(line: &PricedOrderLine) -> Option<ShippableOrderLine> {
+              match line {
+                  PricedOrderLine::ProductLine(product_line) => {
+                      Some(ShippableOrderLine::new(
+                          product_line.product_code().clone(),
+                          *product_line.quantity(),
+                      ))
+                  }
+                  PricedOrderLine::CommentLine(_) => None,
+              }
+          }
+        notes: |
+          F# の makeShipmentLine に対応。
+          filter_map のパラメータとして使用される。
+
+      # -----------------------------------------
+      # create_shipping_event (REQ-071)
+      # -----------------------------------------
+      - name: create_shipping_event
+        requirement_id: REQ-071
+        signature: |
+          pub fn create_shipping_event(priced_order: &PricedOrder) -> ShippableOrderPlaced
+        implementation: |
+          /// PricedOrder から ShippableOrderPlaced イベントを生成する
+          ///
+          /// 配送対象の明細（ProductLine のみ）を抽出し、
+          /// 注文ID、配送先住所、明細リスト、PDF を含むイベントを生成する。
+          ///
+          /// # Arguments
+          ///
+          /// * `priced_order` - 価格計算済み注文
+          ///
+          /// # Returns
+          ///
+          /// 配送可能注文確定イベント
+          ///
+          /// # Examples
+          ///
+          /// ```
+          /// use order_taking_sample::workflow::{
+          ///     create_shipping_event, PricedOrder, PricingMethod,
+          /// };
+          /// use order_taking_sample::simple_types::{OrderId, BillingAmount};
+          /// use order_taking_sample::compound_types::{CustomerInfo, Address};
+          /// use rust_decimal::Decimal;
+          ///
+          /// let order_id = OrderId::create("OrderId", "order-001").unwrap();
+          /// let customer_info = CustomerInfo::create("John", "Doe", "john@example.com", "Normal").unwrap();
+          /// let address = Address::create(
+          ///     "123 Main St", "", "", "", "New York", "10001", "NY", "US"
+          /// ).unwrap();
+          /// let amount_to_bill = BillingAmount::create(Decimal::from(100)).unwrap();
+          ///
+          /// let priced_order = PricedOrder::new(
+          ///     order_id, customer_info, address.clone(), address, amount_to_bill, vec![], PricingMethod::Standard,
+          /// );
+          ///
+          /// let event = create_shipping_event(&priced_order);
+          /// assert_eq!(event.pdf().name(), "Orderorder-001.pdf");
+          /// ```
+          #[must_use]
+          pub fn create_shipping_event(priced_order: &PricedOrder) -> ShippableOrderPlaced {
+              let shipment_lines: Vec<ShippableOrderLine> = priced_order
+                  .lines()
+                  .iter()
+                  .filter_map(make_shipment_line)
+                  .collect();
+
+              let pdf_name = format!("Order{}.pdf", priced_order.order_id().value());
+              let pdf = PdfAttachment::new(pdf_name, vec![]);
+
+              ShippableOrderPlaced::new(
+                  priced_order.order_id().clone(),
+                  priced_order.shipping_address().clone(),
+                  shipment_lines,
+                  pdf,
+              )
+          }
+        notes: |
+          F# の createShippingEvent に対応。
+          PDF の bytes は空（実際の PDF 生成は外部サービスに委譲）。
+          shipment_lines が空でもイベントは生成される（F# と同じ動作）。
+
+      # -----------------------------------------
+      # create_billing_event (REQ-072)
+      # -----------------------------------------
+      - name: create_billing_event
+        requirement_id: REQ-072
+        signature: |
+          pub fn create_billing_event(priced_order: &PricedOrder) -> Option<BillableOrderPlaced>
+        implementation: |
+          /// PricedOrder から BillableOrderPlaced イベントを条件付きで生成する
+          ///
+          /// 請求金額が正の場合のみイベントを生成し、0 以下の場合は None を返す。
+          ///
+          /// # Arguments
+          ///
+          /// * `priced_order` - 価格計算済み注文
+          ///
+          /// # Returns
+          ///
+          /// * `Some(BillableOrderPlaced)` - 請求金額が正の場合
+          /// * `None` - 請求金額が 0 以下の場合
+          ///
+          /// # Examples
+          ///
+          /// ```
+          /// use order_taking_sample::workflow::{
+          ///     create_billing_event, PricedOrder, PricingMethod,
+          /// };
+          /// use order_taking_sample::simple_types::{OrderId, BillingAmount};
+          /// use order_taking_sample::compound_types::{CustomerInfo, Address};
+          /// use rust_decimal::Decimal;
+          ///
+          /// // 請求金額が正の場合
+          /// let order_id = OrderId::create("OrderId", "order-001").unwrap();
+          /// let customer_info = CustomerInfo::create("John", "Doe", "john@example.com", "Normal").unwrap();
+          /// let address = Address::create(
+          ///     "123 Main St", "", "", "", "New York", "10001", "NY", "US"
+          /// ).unwrap();
+          /// let amount_to_bill = BillingAmount::create(Decimal::from(100)).unwrap();
+          ///
+          /// let priced_order = PricedOrder::new(
+          ///     order_id, customer_info, address.clone(), address, amount_to_bill, vec![], PricingMethod::Standard,
+          /// );
+          ///
+          /// let event = create_billing_event(&priced_order);
+          /// assert!(event.is_some());
+          /// ```
+          #[must_use]
+          pub fn create_billing_event(priced_order: &PricedOrder) -> Option<BillableOrderPlaced> {
+              let billing_amount = priced_order.amount_to_bill().value();
+              if billing_amount > Decimal::ZERO {
+                  Some(BillableOrderPlaced::new(
+                      priced_order.order_id().clone(),
+                      priced_order.billing_address().clone(),
+                      priced_order.amount_to_bill().clone(),
+                  ))
+              } else {
+                  None
+              }
+          }
+        notes: |
+          F# の createBillingEvent に対応。
+          プロモーションで全額割引の場合など、請求金額が 0 の場合は
+          BillableOrderPlaced は生成されない。
+
+      # -----------------------------------------
+      # create_events (REQ-073)
+      # -----------------------------------------
+      - name: create_events
+        requirement_id: REQ-073
+        signature: |
+          pub fn create_events(
+              priced_order: &PricedOrder,
+              acknowledgment_event: Option<OrderAcknowledgmentSent>,
+          ) -> Vec<PlaceOrderEvent>
+        implementation: |
+          /// PricedOrder と確認メール送信イベントから全イベントを統合する
+          ///
+          /// イベントの順序:
+          /// 1. AcknowledgmentSent（存在する場合）
+          /// 2. ShippableOrderPlaced（常に生成）
+          /// 3. BillableOrderPlaced（請求金額が正の場合）
+          ///
+          /// # Arguments
+          ///
+          /// * `priced_order` - 価格計算済み注文
+          /// * `acknowledgment_event` - 確認メール送信イベント（Option）
+          ///
+          /// # Returns
+          ///
+          /// 全ての PlaceOrderEvent を含む Vec
+          ///
+          /// # Examples
+          ///
+          /// ```
+          /// use order_taking_sample::workflow::{
+          ///     create_events, PricedOrder, PricingMethod, OrderAcknowledgmentSent,
+          /// };
+          /// use order_taking_sample::simple_types::{OrderId, BillingAmount, EmailAddress};
+          /// use order_taking_sample::compound_types::{CustomerInfo, Address};
+          /// use rust_decimal::Decimal;
+          ///
+          /// let order_id = OrderId::create("OrderId", "order-001").unwrap();
+          /// let customer_info = CustomerInfo::create("John", "Doe", "john@example.com", "Normal").unwrap();
+          /// let address = Address::create(
+          ///     "123 Main St", "", "", "", "New York", "10001", "NY", "US"
+          /// ).unwrap();
+          /// let amount_to_bill = BillingAmount::create(Decimal::from(100)).unwrap();
+          ///
+          /// let priced_order = PricedOrder::new(
+          ///     order_id.clone(), customer_info, address.clone(), address, amount_to_bill, vec![], PricingMethod::Standard,
+          /// );
+          ///
+          /// // 確認メールあり、請求ありの場合: 3イベント
+          /// let email = EmailAddress::create("EmailAddress", "john@example.com").unwrap();
+          /// let ack_event = OrderAcknowledgmentSent::new(order_id.clone(), email);
+          /// let events = create_events(&priced_order, Some(ack_event));
+          /// assert_eq!(events.len(), 3);
+          /// ```
+          #[must_use]
+          pub fn create_events(
+              priced_order: &PricedOrder,
+              acknowledgment_event: Option<OrderAcknowledgmentSent>,
+          ) -> Vec<PlaceOrderEvent> {
+              let mut events = Vec::new();
+
+              // 確認メール送信イベント（存在する場合）
+              if let Some(acknowledgment) = acknowledgment_event {
+                  events.push(PlaceOrderEvent::AcknowledgmentSent(acknowledgment));
+              }
+
+              // 配送イベント（常に生成）
+              let shipping_event = create_shipping_event(priced_order);
+              events.push(PlaceOrderEvent::ShippableOrderPlaced(shipping_event));
+
+              // 請求イベント（請求金額が正の場合のみ）
+              if let Some(billing_event) = create_billing_event(priced_order) {
+                  events.push(PlaceOrderEvent::BillableOrderPlaced(billing_event));
+              }
+
+              events
+          }
+        notes: |
+          F# の createEvents に対応。
+          イベントの順序は F# と同じ:
+          1. AcknowledgmentSent
+          2. ShippableOrderPlaced
+          3. BillableOrderPlaced
+          最小ケースでは ShippableOrderPlaced のみ（1イベント）。
+
+  # ===========================================
+  # place_order.rs の詳細
+  # ===========================================
+  - path: src/workflow/place_order.rs
+    module_documentation: |
+      //! PlaceOrder ワークフロー
+      //!
+      //! Phase 7 の実装。ワークフロー全体を統合する。
+      //!
+      //! # 設計原則
+      //!
+      //! - 依存性注入: 全ての外部依存を関数引数として受け取る
+      //! - エラーハンドリング: Result と IO モナドによる関数型エラー処理
+      //! - 合成可能性: 各フェーズの関数を順次合成
+      //!
+      //! # 機能一覧
+      //!
+      //! - [`place_order`] - PlaceOrder ワークフローの実行
+      //!
+      //! # 使用例
+      //!
+      //! ```ignore
+      //! use order_taking_sample::workflow::place_order;
+      //! // let io_result = place_order(&check_product, &check_address, &get_price, ...);
+      //! // let result = io_result.run_unsafe();
+      //! ```
+
+    imports: |
+      use functional_rusty::effect::IO;
+      use std::rc::Rc;
+
+      use crate::simple_types::{Price, ProductCode};
+      use crate::workflow::acknowledgment_types::{HtmlString, OrderAcknowledgment, SendResult};
+      use crate::workflow::error_types::PlaceOrderError;
+      use crate::workflow::events::create_events;
+      use crate::workflow::output_types::PlaceOrderEvent;
+      use crate::workflow::pricing::price_order;
+      use crate::workflow::shipping::{
+          acknowledge_order, add_shipping_info_to_order, free_vip_shipping,
+      };
+      use crate::workflow::shipping_types::PricedOrderWithShippingMethod;
+      use crate::workflow::unvalidated_types::UnvalidatedOrder;
+      use crate::workflow::validated_types::{AddressValidationError, CheckedAddress, PricingMethod};
+      use crate::workflow::validation::validate_order;
+      use crate::workflow::UnvalidatedAddress;
+
+    functions:
+      # -----------------------------------------
+      # place_order (REQ-074)
+      # -----------------------------------------
+      - name: place_order
+        requirement_id: REQ-074
+        signature: |
+          pub fn place_order<
+              CheckProduct,
+              CheckAddress,
+              GetPricingFn,
+              CalculateShipping,
+              CreateLetter,
+              SendAcknowledgment,
+          >(
+              check_product_exists: &CheckProduct,
+              check_address_exists: &CheckAddress,
+              get_pricing_function: &GetPricingFn,
+              calculate_shipping_cost: &CalculateShipping,
+              create_acknowledgment_letter: &CreateLetter,
+              send_acknowledgment: &SendAcknowledgment,
+              unvalidated_order: UnvalidatedOrder,
+          ) -> IO<Result<Vec<PlaceOrderEvent>, PlaceOrderError>>
+          where
+              CheckProduct: Fn(&ProductCode) -> bool,
+              CheckAddress: Fn(&UnvalidatedAddress) -> Result<CheckedAddress, AddressValidationError>,
+              GetPricingFn: Fn(&PricingMethod) -> Rc<dyn Fn(&ProductCode) -> Price>,
+              CalculateShipping: Fn(&crate::workflow::PricedOrder) -> Price,
+              CreateLetter: Fn(&PricedOrderWithShippingMethod) -> HtmlString,
+              SendAcknowledgment: Fn(&OrderAcknowledgment) -> IO<SendResult>,
+        implementation: |
+          /// PlaceOrder ワークフロー全体を統合する関数
+          ///
+          /// 未検証注文を受け取り、全ての処理を順次実行して
+          /// イベントリストまたはエラーを返す。
+          ///
+          /// # 処理フロー
+          ///
+          /// 1. validate_order: 未検証注文を検証（エラー: Validation）
+          /// 2. price_order: 価格計算（エラー: Pricing）
+          /// 3. add_shipping_info_to_order: 配送情報追加
+          /// 4. free_vip_shipping: VIP 無料配送適用
+          /// 5. acknowledge_order: 確認メール送信（IO モナド）
+          /// 6. create_events: イベント生成
+          ///
+          /// # Type Parameters
+          ///
+          /// * `CheckProduct` - 製品存在確認関数型
+          /// * `CheckAddress` - 住所検証関数型
+          /// * `GetPricingFn` - 価格取得関数を返す関数型
+          /// * `CalculateShipping` - 配送コスト計算関数型
+          /// * `CreateLetter` - 確認メール生成関数型
+          /// * `SendAcknowledgment` - 確認メール送信関数型（IO を返す）
+          ///
+          /// # Arguments
+          ///
+          /// * `check_product_exists` - 製品存在確認関数
+          /// * `check_address_exists` - 住所検証関数
+          /// * `get_pricing_function` - 価格取得関数を返す関数
+          /// * `calculate_shipping_cost` - 配送コスト計算関数
+          /// * `create_acknowledgment_letter` - 確認メール生成関数
+          /// * `send_acknowledgment` - 確認メール送信関数
+          /// * `unvalidated_order` - 未検証注文
+          ///
+          /// # Returns
+          ///
+          /// `IO<Result<Vec<PlaceOrderEvent>, PlaceOrderError>>`
+          /// - 成功時: `Ok(Vec<PlaceOrderEvent>)`（1〜3イベント）
+          /// - 失敗時: `Err(PlaceOrderError)`（Validation または Pricing）
+          ///
+          /// # Examples
+          ///
+          /// ```ignore
+          /// use order_taking_sample::workflow::place_order;
+          /// use functional_rusty::effect::IO;
+          ///
+          /// let io_result = place_order(
+          ///     &check_product,
+          ///     &check_address,
+          ///     &get_pricing_fn,
+          ///     &calculate_shipping,
+          ///     &create_letter,
+          ///     &send_ack,
+          ///     unvalidated_order,
+          /// );
+          ///
+          /// // IO モナドを実行
+          /// let result = io_result.run_unsafe();
+          /// match result {
+          ///     Ok(events) => println!("Events: {:?}", events),
+          ///     Err(error) => println!("Error: {:?}", error),
+          /// }
+          /// ```
+          pub fn place_order<
+              CheckProduct,
+              CheckAddress,
+              GetPricingFn,
+              CalculateShipping,
+              CreateLetter,
+              SendAcknowledgment,
+          >(
+              check_product_exists: &CheckProduct,
+              check_address_exists: &CheckAddress,
+              get_pricing_function: &GetPricingFn,
+              calculate_shipping_cost: &CalculateShipping,
+              create_acknowledgment_letter: &CreateLetter,
+              send_acknowledgment: &SendAcknowledgment,
+              unvalidated_order: UnvalidatedOrder,
+          ) -> IO<Result<Vec<PlaceOrderEvent>, PlaceOrderError>>
+          where
+              CheckProduct: Fn(&ProductCode) -> bool,
+              CheckAddress: Fn(&UnvalidatedAddress) -> Result<CheckedAddress, AddressValidationError>,
+              GetPricingFn: Fn(&PricingMethod) -> Rc<dyn Fn(&ProductCode) -> Price>,
+              CalculateShipping: Fn(&crate::workflow::PricedOrder) -> Price,
+              CreateLetter: Fn(&PricedOrderWithShippingMethod) -> HtmlString,
+              SendAcknowledgment: Fn(&OrderAcknowledgment) -> IO<SendResult>,
+          {
+              // Step 1: バリデーション
+              let validated_order = match validate_order(
+                  check_product_exists,
+                  check_address_exists,
+                  &unvalidated_order,
+              ) {
+                  Ok(order) => order,
+                  Err(error) => return IO::pure(Err(error)),
+              };
+
+              // Step 2: 価格計算
+              let priced_order = match price_order(get_pricing_function, &validated_order) {
+                  Ok(order) => order,
+                  Err(error) => return IO::pure(Err(error)),
+              };
+
+              // Step 3-4: 配送情報追加 + VIP 割引
+              let priced_order_with_shipping = free_vip_shipping(
+                  add_shipping_info_to_order(calculate_shipping_cost, &priced_order)
+              );
+
+              // Step 5: 確認メール送信（IO モナド）
+              let acknowledgment_io = acknowledge_order(
+                  create_acknowledgment_letter,
+                  send_acknowledgment,
+                  &priced_order_with_shipping,
+              );
+
+              // Step 6: イベント生成（IO 内で実行）
+              acknowledgment_io.fmap(move |acknowledgment_option| {
+                  Ok(create_events(&priced_order, acknowledgment_option))
+              })
+          }
+        notes: |
+          F# の placeOrder に対応。
+          F# の asyncResult を Rust の IO<Result<T, E>> で表現。
+          メール送信失敗（SendResult::NotSent）はエラーではなく、
+          AcknowledgmentSent イベントが生成されないだけ。
+          IO::run_unsafe() を呼び出すまで副作用は実行されない。
+
+# テスト計画
+testing:
+  test_files:
+    - tests/events_tests.rs
+    - tests/place_order_tests.rs
+  framework: rstest
+  coverage_target: "100%"
+
+  mock_helpers:
+    description: |
+      テスト用のモックヘルパー関数を提供する。
+
+    functions:
+      - name: create_test_priced_order
+        signature: "fn(order_id: &str, amount_to_bill: Decimal, lines: Vec<PricedOrderLine>) -> PricedOrder"
+        description: "テスト用 PricedOrder 生成"
+        implementation: |
+          fn create_test_priced_order(
+              order_id: &str,
+              amount_to_bill: Decimal,
+              lines: Vec<PricedOrderLine>,
+          ) -> PricedOrder {
+              let order_id = OrderId::create("OrderId", order_id).unwrap();
+              let customer_info = CustomerInfo::create("John", "Doe", "john@example.com", "Normal").unwrap();
+              let address = Address::create(
+                  "123 Main St", "", "", "", "New York", "10001", "NY", "US"
+              ).unwrap();
+              let amount = BillingAmount::create(amount_to_bill).unwrap();
+
+              PricedOrder::new(
+                  order_id,
+                  customer_info,
+                  address.clone(),
+                  address,
+                  amount,
+                  lines,
+                  PricingMethod::Standard,
+              )
+          }
+
+      - name: create_test_product_line
+        signature: "fn(line_id: &str, product_code_str: &str, quantity: i32, price: Decimal) -> PricedOrderLine"
+        description: "テスト用 ProductLine 生成"
+        implementation: |
+          fn create_test_product_line(
+              line_id: &str,
+              product_code_str: &str,
+              quantity: i32,
+              price: Decimal,
+          ) -> PricedOrderLine {
+              let order_line_id = OrderLineId::create("OrderLineId", line_id).unwrap();
+              let product_code = ProductCode::create("ProductCode", product_code_str).unwrap();
+              let qty = OrderQuantity::create("Quantity", &product_code, Decimal::from(quantity)).unwrap();
+              let line_price = Price::create(price).unwrap();
+
+              PricedOrderLine::ProductLine(PricedOrderProductLine::new(
+                  order_line_id,
+                  product_code,
+                  qty,
+                  line_price,
+              ))
+          }
+
+      - name: always_exists_product
+        signature: "fn() -> impl Fn(&ProductCode) -> bool"
+        description: "常に true を返す製品存在確認モック"
+        implementation: |
+          fn always_exists_product() -> impl Fn(&ProductCode) -> bool {
+              |_| true
+          }
+
+      - name: always_valid_address
+        signature: "fn() -> impl Fn(&UnvalidatedAddress) -> Result<CheckedAddress, AddressValidationError>"
+        description: "常に Ok を返す住所検証モック"
+        implementation: |
+          fn always_valid_address() -> impl Fn(&UnvalidatedAddress) -> Result<CheckedAddress, AddressValidationError> {
+              |addr| Ok(CheckedAddress::new(addr.clone()))
+          }
+
+      - name: fixed_price
+        signature: "fn(price: Decimal) -> impl Fn(&ProductCode) -> Price"
+        description: "固定価格を返す価格取得モック"
+        implementation: |
+          fn fixed_price(price: Decimal) -> impl Fn(&ProductCode) -> Price {
+              move |_| Price::unsafe_create(price)
+          }
+
+      - name: always_send
+        signature: "fn() -> impl Fn(&OrderAcknowledgment) -> IO<SendResult>"
+        description: "常に IO::pure(Sent) を返すモック"
+        implementation: |
+          fn always_send() -> impl Fn(&OrderAcknowledgment) -> IO<SendResult> {
+              |_| IO::pure(SendResult::Sent)
+          }
+
+      - name: never_send
+        signature: "fn() -> impl Fn(&OrderAcknowledgment) -> IO<SendResult>"
+        description: "常に IO::pure(NotSent) を返すモック"
+        implementation: |
+          fn never_send() -> impl Fn(&OrderAcknowledgment) -> IO<SendResult> {
+              |_| IO::pure(SendResult::NotSent)
+          }
+
+  test_categories:
+    # ===========================================
+    # make_shipment_line のテスト
+    # ===========================================
+    - category: make_shipment_line_tests
+      description: make_shipment_line 関数のテスト
+      tests:
+        - name: test_product_line_to_shipment_line
+          description: ProductLine から ShippableOrderLine への変換
+          input:
+            line: ProductLine { product_code: "W1234", quantity: 5 }
+          expected: Some(ShippableOrderLine { product_code: "W1234", quantity: 5 })
+
+        - name: test_comment_line_returns_none
+          description: CommentLine は None を返す
+          input:
+            line: CommentLine("Gift message")
+          expected: None
+
+        - name: test_gizmo_product_line
+          description: GlueLine 製品も正しく変換
+          input:
+            line: ProductLine { product_code: "G123", quantity: 2.5 }
+          expected: Some(ShippableOrderLine { product_code: "G123", quantity: 2.5 })
+
+    # ===========================================
+    # create_shipping_event のテスト
+    # ===========================================
+    - category: create_shipping_event_tests
+      description: create_shipping_event 関数のテスト
+      tests:
+        - name: test_single_product_line
+          description: 単一 ProductLine の注文
+          input:
+            order_id: "order-001"
+            lines: [ProductLine { product_code: "W1234", quantity: 5 }]
+          expected:
+            order_id: "order-001"
+            shipment_lines_count: 1
+            pdf_name: "Orderorder-001.pdf"
+
+        - name: test_multiple_product_lines
+          description: 複数 ProductLine の注文
+          input:
+            order_id: "order-002"
+            lines:
+              - ProductLine { product_code: "W1234", quantity: 5 }
+              - ProductLine { product_code: "G123", quantity: 2.5 }
+          expected:
+            shipment_lines_count: 2
+
+        - name: test_mixed_lines
+          description: ProductLine と CommentLine の混在
+          input:
+            order_id: "order-003"
+            lines:
+              - ProductLine { product_code: "W1234", quantity: 5 }
+              - CommentLine("Gift message")
+              - ProductLine { product_code: "G123", quantity: 2.5 }
+          expected:
+            shipment_lines_count: 2
+          notes: CommentLine は除外される
+
+        - name: test_comment_only
+          description: CommentLine のみの注文
+          input:
+            order_id: "order-004"
+            lines: [CommentLine("Special instructions")]
+          expected:
+            shipment_lines_count: 0
+          notes: 空の shipment_lines でも ShippableOrderPlaced は生成される
+
+        - name: test_pdf_name_format
+          description: PDF ファイル名のフォーマット確認
+          input:
+            order_id: "test-order-123"
+          expected:
+            pdf_name: "Ordertest-order-123.pdf"
+
+    # ===========================================
+    # create_billing_event のテスト
+    # ===========================================
+    - category: create_billing_event_tests
+      description: create_billing_event 関数のテスト
+      tests:
+        - name: test_positive_amount
+          description: 請求金額が正の場合
+          input:
+            order_id: "order-001"
+            amount_to_bill: 1000.00
+          expected: Some(BillableOrderPlaced { order_id: "order-001", amount_to_bill: 1000.00 })
+
+        - name: test_zero_amount
+          description: 請求金額がゼロの場合
+          input:
+            order_id: "order-002"
+            amount_to_bill: 0.00
+          expected: None
+          notes: プロモーションで全額割引の場合など
+
+        - name: test_small_positive_amount
+          description: 小さな正の金額の場合
+          input:
+            order_id: "order-003"
+            amount_to_bill: 0.01
+          expected: Some(BillableOrderPlaced { order_id: "order-003", amount_to_bill: 0.01 })
+
+    # ===========================================
+    # create_events のテスト
+    # ===========================================
+    - category: create_events_tests
+      description: create_events 関数のテスト
+      tests:
+        - name: test_all_events
+          description: 全イベントが生成される場合（確認メール + 配送 + 請求）
+          input:
+            priced_order: { order_id: "order-001", amount_to_bill: 1000.00 }
+            acknowledgment_event: Some(OrderAcknowledgmentSent)
+          expected:
+            events_count: 3
+            contains_acknowledgment: true
+            contains_shippable: true
+            contains_billable: true
+
+        - name: test_no_acknowledgment
+          description: 確認メールなし、請求ありの場合
+          input:
+            priced_order: { order_id: "order-002", amount_to_bill: 500.00 }
+            acknowledgment_event: None
+          expected:
+            events_count: 2
+            contains_acknowledgment: false
+            contains_shippable: true
+            contains_billable: true
+
+        - name: test_no_billing
+          description: 確認メールあり、請求なしの場合
+          input:
+            priced_order: { order_id: "order-003", amount_to_bill: 0.00 }
+            acknowledgment_event: Some(OrderAcknowledgmentSent)
+          expected:
+            events_count: 2
+            contains_acknowledgment: true
+            contains_shippable: true
+            contains_billable: false
+
+        - name: test_minimal_events
+          description: 確認メールなし、請求なしの場合（最小ケース）
+          input:
+            priced_order: { order_id: "order-004", amount_to_bill: 0.00 }
+            acknowledgment_event: None
+          expected:
+            events_count: 1
+            contains_acknowledgment: false
+            contains_shippable: true
+            contains_billable: false
+          notes: 最小ケース - ShippableOrderPlaced のみ
+
+        - name: test_event_order
+          description: イベントの順序確認
+          notes: |
+            イベントの順序:
+            1. AcknowledgmentSent（存在する場合）
+            2. ShippableOrderPlaced
+            3. BillableOrderPlaced（存在する場合）
+
+    # ===========================================
+    # place_order のテスト
+    # ===========================================
+    - category: place_order_tests
+      description: place_order 関数のテスト
+      tests:
+        - name: test_success_full_flow
+          description: 正常系 - 全処理が成功
+          input:
+            unvalidated_order: { order_id: "order-001", ... }
+            mock_check_product: returns true
+            mock_check_address: returns Ok
+            mock_get_price: returns Price(100)
+            mock_send: returns IO::pure(SendResult::Sent)
+          expected: IO containing Ok(Vec with 3 events)
+
+        - name: test_validation_error
+          description: バリデーションエラー
+          input:
+            unvalidated_order: { order_id: "", ... }
+            mock_check_product: returns false
+          expected: IO containing Err(PlaceOrderError::Validation(...))
+
+        - name: test_pricing_error
+          description: 価格計算エラー
+          input:
+            unvalidated_order: { ... }
+            mock_check_product: returns true
+            mock_check_address: returns Ok
+            mock_get_price: returns Price causing overflow
+          expected: IO containing Err(PlaceOrderError::Pricing(...))
+
+        - name: test_mail_not_sent
+          description: メール送信失敗でもワークフロー成功
+          input:
+            unvalidated_order: { ... }
+            mock_send: returns IO::pure(SendResult::NotSent)
+          expected: IO containing Ok(Vec with 2 events)
+          notes: |
+            メール送信失敗はエラーではなく、
+            AcknowledgmentSent イベントが生成されないだけ
+
+        - name: test_vip_free_shipping
+          description: VIP 顧客の配送料無料
+          input:
+            unvalidated_order: { customer.vip_status: "VIP", ... }
+          expected: |
+            shipping_info.shipping_cost == 0
+            shipping_info.shipping_method == Fedex24
+
+        - name: test_io_deferred_execution
+          description: IO の遅延実行を検証
+          notes: |
+            IO が生成されただけでは副作用（メール送信）は実行されない
+          test_code: |
+            let executed = Arc::new(AtomicBool::new(false));
+            let executed_clone = executed.clone();
+
+            let mock_send = move |_: &OrderAcknowledgment| {
+                let flag = executed_clone.clone();
+                IO::new(move || {
+                    flag.store(true, Ordering::SeqCst);
+                    SendResult::Sent
+                })
+            };
+
+            let io_result = place_order(..., &mock_send, ...);
+
+            // IO が生成されただけでは実行されない
+            assert!(!executed.load(Ordering::SeqCst));
+
+            // run_unsafe() で実行される
+            let result = io_result.run_unsafe();
+            assert!(executed.load(Ordering::SeqCst));
+
+# Clippy 準拠
+clippy_compliance:
+  lints:
+    - pedantic
+    - nursery
+
+  requirements:
+    - "#[must_use] on make_shipment_line, create_shipping_event, create_billing_event, create_events"
+    - "Doc comments with # Arguments, # Returns, # Examples sections"
+    - "No abbreviations in names (e.g., acknowledgment_event not ack_event)"
+    - "Explicit type annotations where needed for clarity"
+
+  notes: |
+    - match による網羅的なパターンマッチを使用
+    - Clone ではなく借用を優先（&PricedOrder, &PricedOrderLine）
+    - Iterator::filter_map でコードの簡潔さを維持
+
+# 実装チェックリスト
+checklist:
+  - id: 1
+    item: src/workflow/mod.rs に events と place_order モジュールを追加
+    status: pending
+
+  - id: 2
+    item: src/workflow/events.rs を作成
+    status: pending
+
+  - id: 3
+    item: make_shipment_line を実装
+    status: pending
+
+  - id: 4
+    item: create_shipping_event を実装
+    status: pending
+
+  - id: 5
+    item: create_billing_event を実装
+    status: pending
+
+  - id: 6
+    item: create_events を実装
+    status: pending
+
+  - id: 7
+    item: src/workflow/place_order.rs を作成
+    status: pending
+
+  - id: 8
+    item: place_order を実装
+    status: pending
+
+  - id: 9
+    item: tests/events_tests.rs を作成
+    status: pending
+
+  - id: 10
+    item: tests/place_order_tests.rs を作成
+    status: pending
+
+  - id: 11
+    item: cargo check が成功
+    status: pending
+
+  - id: 12
+    item: cargo clippy が警告なし
+    status: pending
+
+  - id: 13
+    item: cargo test が全て成功
+    status: pending
+
+  - id: 14
+    item: cargo tarpaulin でカバレッジ 100%
+    status: pending
+
+# 関数型プログラミング原則の適用
+functional_principles:
+  purity:
+    description: |
+      イベント生成関数は完全に純粋。
+      同じ入力に対して常に同じ出力を返す。
+      副作用（メール送信）は IO モナドで隔離される。
+
+    pure_functions:
+      - make_shipment_line
+      - create_shipping_event
+      - create_billing_event
+      - create_events
+
+    io_wrapped_functions:
+      - acknowledge_order (returns IO<Option<OrderAcknowledgmentSent>>)
+      - place_order (returns IO<Result<Vec<PlaceOrderEvent>, PlaceOrderError>>)
+
+    notes: |
+      place_order は純粋な計算部分と IO モナドでラップされた副作用部分を
+      明確に分離している。IO::fmap により、副作用の実行を遅延しつつ
+      純粋な変換を合成できる。
+
+  immutability:
+    description: |
+      入力データを変更せず、常に新しいイベントを生成。
+      Vec<PlaceOrderEvent> は新規生成され、元のデータは保持される。
+
+    examples:
+      - "make_shipment_line: &PricedOrderLine から新しい ShippableOrderLine を生成"
+      - "create_events: Vec::new() で新しいベクタを生成"
+      - "create_shipping_event: priced_order から新しい ShippableOrderPlaced を生成"
+
+  composability:
+    description: |
+      小さなイベント生成関数を組み合わせて全体を構築。
+
+    composition_pattern: |
+      イベント生成 =
+        priced_order
+        |> create_shipping_event --> ShippableOrderPlaced
+        |> create_billing_event --> Option<BillableOrderPlaced>
+        + acknowledgment_event --> Option<OrderAcknowledgmentSent>
+        |> create_events --> Vec<PlaceOrderEvent>
+
+      ワークフロー全体 =
+        unvalidated_order
+        |> validate_order --> Result<ValidatedOrder, ValidationError>
+        |> price_order --> Result<PricedOrder, PricingError>
+        |> add_shipping_info_to_order --> PricedOrderWithShippingMethod
+        |> free_vip_shipping --> PricedOrderWithShippingMethod
+        |> acknowledge_order --> IO<Option<OrderAcknowledgmentSent>>
+        |> create_events --> IO<Result<Vec<PlaceOrderEvent>, PlaceOrderError>>
+
+  higher_order_functions:
+    description: |
+      Iterator::filter_map による変換と Option::map による条件付き処理。
+
+    examples:
+      - "make_shipment_line: filter_map のパラメータとして使用"
+      - "create_billing_event: Option を返す関数として条件付きイベント生成"
+      - "place_order: 6つの依存関数を引数として受け取る高階関数"
+
+  pattern_matching:
+    description: |
+      代数的データ型に対する網羅的なパターンマッチ。
+
+    examples:
+      - "PricedOrderLine::ProductLine / CommentLine の分岐"
+      - "if let Some(ack) による確認メールイベントの条件付き追加"
+      - "match による PlaceOrderError への変換"
+
+  error_handling:
+    description: |
+      Result と Option を活用した関数型エラーハンドリング。
+
+    patterns:
+      - "validate_order: Result<ValidatedOrder, PlaceOrderError>"
+      - "price_order: Result<PricedOrder, PlaceOrderError>"
+      - "create_billing_event: Option<BillableOrderPlaced>"
+      - "place_order: IO<Result<Vec<PlaceOrderEvent>, PlaceOrderError>>"
+
+    notes: |
+      バリデーションエラーと価格計算エラーは早期リターンで処理。
+      メール送信失敗はエラーではなく Option で表現。
+
+  io_monad_usage:
+    description: |
+      functional-rusty の IO モナドを使用した副作用の遅延実行。
+
+    benefits:
+      - 副作用（メール送信）の実行タイミングを制御できる
+      - テスト時に IO::pure でモックを注入できる
+      - run_unsafe() まで副作用は実行されない
+
+    usage: |
+      ```rust
+      // acknowledge_order は IO<Option<OrderAcknowledgmentSent>> を返す
+      let acknowledgment_io = acknowledge_order(...);
+
+      // IO::fmap で純粋な変換を合成
+      acknowledgment_io.fmap(|ack_option| {
+          Ok(create_events(&priced_order, ack_option))
+      })
+      ```
+
+# 既存実装との関連
+existing_implementations:
+  phase_6_shipping:
+    description: |
+      Phase 6 で実装された配送関連の関数を使用する。
+
+    location: src/workflow/shipping.rs
+    functions:
+      - calculate_shipping_cost
+      - add_shipping_info_to_order
+      - free_vip_shipping
+      - acknowledge_order
+
+  phase_5_pricing:
+    description: |
+      Phase 5 で実装された価格計算関数を使用する。
+
+    location: src/workflow/pricing.rs
+    functions:
+      - price_order
+
+  phase_4_validation:
+    description: |
+      Phase 4 で実装されたバリデーション関数を使用する。
+
+    location: src/workflow/validation.rs
+    functions:
+      - validate_order
+
+  output_types:
+    description: |
+      Phase 3 で定義された出力イベント型を使用する。
+
+    location: src/workflow/output_types.rs
+    types:
+      - OrderAcknowledgmentSent
+      - ShippableOrderLine
+      - ShippableOrderPlaced
+      - BillableOrderPlaced
+      - PlaceOrderEvent
+
+  error_types:
+    description: |
+      Phase 3 で定義されたエラー型を使用する。
+
+    location: src/workflow/error_types.rs
+    types:
+      - PlaceOrderError
+      - WorkflowValidationError
+      - PricingError
+
+# functional-rusty ライブラリの使用
+functional_rusty_usage:
+  io_monad:
+    description: |
+      副作用（メール送信）の遅延実行に IO モナドを使用。
+
+    import: |
+      use functional_rusty::effect::IO;
+
+    methods:
+      - pure: 純粋な値を IO でラップ
+      - fmap: IO 内の値を変換
+      - flat_map: IO をチェーン
+      - run_unsafe: 副作用を実行
+
+    usage: |
+      ```rust
+      // 確認メール送信（IO を返す）
+      let acknowledgment_io = acknowledge_order(...);
+
+      // IO::fmap で変換を合成
+      let events_io = acknowledgment_io.fmap(|ack| {
+          Ok(create_events(&priced_order, ack))
+      });
+
+      // 最終的に run_unsafe() で実行
+      let result = events_io.run_unsafe();
+      ```
+
+# TDD 手順
+tdd_procedure:
+  step_1_make_shipment_line:
+    description: |
+      1. make_shipment_line のテストを先に書く
+      2. ProductLine と CommentLine の両ケースのテスト
+      3. テストが失敗することを確認
+      4. make_shipment_line を実装
+      5. テストが成功することを確認
+
+  step_2_create_shipping_event:
+    description: |
+      1. create_shipping_event のテストを先に書く
+      2. 各種明細パターンのテスト
+      3. PDF ファイル名のテスト
+      4. テストが失敗することを確認
+      5. create_shipping_event を実装
+      6. テストが成功することを確認
+
+  step_3_create_billing_event:
+    description: |
+      1. create_billing_event のテストを先に書く
+      2. 正の金額、ゼロの金額のテスト
+      3. テストが失敗することを確認
+      4. create_billing_event を実装
+      5. テストが成功することを確認
+
+  step_4_create_events:
+    description: |
+      1. create_events のテストを先に書く
+      2. 全組み合わせのテスト
+      3. イベント順序のテスト
+      4. テストが失敗することを確認
+      5. create_events を実装
+      6. テストが成功することを確認
+
+  step_5_place_order:
+    description: |
+      1. place_order のテストを先に書く
+      2. 正常系、各種エラーケースのテスト
+      3. IO 遅延実行のテスト
+      4. テストが失敗することを確認
+      5. place_order を実装
+      6. テストが成功することを確認
+
+# 将来の拡張
+future_extensions:
+  event_sourcing:
+    phase: future
+    description: |
+      イベントソーシングパターンの完全な実装。
+      イベントからの状態再構築。
+
+  async_workflow:
+    phase: future
+    description: |
+      非同期ワークフローへの拡張。
+      async/await との統合。
+
+  event_handlers:
+    phase: future
+    description: |
+      イベントハンドラーの登録と実行機構。
+      イベント駆動アーキテクチャの強化。
+
+  saga_pattern:
+    phase: future
+    description: |
+      分散トランザクションのための Saga パターン実装。
+      補償トランザクションのサポート。

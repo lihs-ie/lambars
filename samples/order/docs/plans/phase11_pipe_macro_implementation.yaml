@@ -1,0 +1,689 @@
+# Phase 11: pipe! マクロ実装計画
+# Order Taking Sample Application
+# functional-rusty の pipe! マクロを使用したデータ変換パイプラインの実装
+
+version: "1.0.0"
+created_at: "2026-01-01"
+phase_id: phase_11
+
+# =============================================================================
+# 概要
+# =============================================================================
+
+overview:
+  description: |
+    F# の パイプ演算子 (|>) に相当する functional-rusty の pipe! マクロを
+    Order Taking サンプルアプリケーションの適切な箇所に適用する。
+
+    対象要件:
+    - REQ-111: create_events での pipe! 使用
+    - REQ-112: create_shipping_event での pipe! 使用
+    - REQ-113: create_billing_event での pipe! 使用
+    - REQ-117: 統合テスト
+
+  approach: |
+    TDD アプローチに従い、以下の順序で実装を行う:
+    1. テストファイルの作成（RED フェーズ）
+    2. 実装の変更（GREEN フェーズ）
+    3. リファクタリング（REFACTOR フェーズ）
+
+  current_implementation_analysis:
+    create_events:
+      file: src/workflow/events.rs
+      lines: 275-296
+      pattern: |
+        命令型スタイル（mutable Vec + push パターン）で実装されている。
+        F# の関数型スタイル（List.singleton + List.concat）とは異なる。
+        pipe! マクロを使用してより宣言的なスタイルに変更可能。
+
+    create_shipping_event:
+      file: src/workflow/events.rs
+      lines: 153-169
+      pattern: |
+        PDF名生成: format!("Order{}.pdf", priced_order.order_id().value())
+        この部分は pipe! を使用可能だが、効果は限定的。
+
+    create_billing_event:
+      file: src/workflow/events.rs
+      lines: 214-225
+      pattern: |
+        billing_amount の取得: priced_order.amount_to_bill().value()
+        この部分は pipe! を使用可能だが、効果は限定的。
+
+# =============================================================================
+# 実装ステップ
+# =============================================================================
+
+implementation_steps:
+
+  # ---------------------------------------------------------------------------
+  # Step 1: テストファイルの作成（TDD: RED フェーズ）
+  # ---------------------------------------------------------------------------
+
+  - step: 1
+    title: pipe! マクロ統合テストファイルの作成
+    requirements:
+      - REQ-117
+    description: |
+      pipe! マクロを使用した関数のテストを作成する。
+      既存のテスト（events_tests.rs）と重複しないように、
+      pipe! マクロ固有の動作を検証するテストに焦点を当てる。
+
+    files:
+      - path: /Users/lihs/workspace/functional-rusty/samples/order/tests/phase11_pipe_macro_tests.rs
+        action: create
+        content: |
+          //! Phase 11: pipe! マクロ統合テスト
+          //!
+          //! pipe! マクロを使用した関数の動作を検証する。
+          //! 既存のテストは events_tests.rs にあるため、
+          //! ここでは pipe! マクロ固有のパターンを検証する。
+
+          use order_taking_sample::compound_types::{Address, CustomerInfo};
+          use order_taking_sample::simple_types::{
+              BillingAmount, EmailAddress, OrderId, OrderLineId, OrderQuantity, Price, ProductCode,
+          };
+          use order_taking_sample::workflow::{
+              create_billing_event, create_events, create_shipping_event, OrderAcknowledgmentSent,
+              PricedOrder, PricedOrderLine, PricedOrderProductLine, PricingMethod,
+          };
+          use rstest::rstest;
+          use rust_decimal::Decimal;
+
+          // =============================================================================
+          // テストヘルパー
+          // =============================================================================
+
+          fn create_test_priced_order(
+              order_id: &str,
+              amount_to_bill: Decimal,
+              lines: Vec<PricedOrderLine>,
+          ) -> PricedOrder {
+              let order_id = OrderId::create("OrderId", order_id).unwrap();
+              let customer_info =
+                  CustomerInfo::create("John", "Doe", "john@example.com", "Normal").unwrap();
+              let address =
+                  Address::create("123 Main St", "", "", "", "New York", "10001", "NY", "US").unwrap();
+              let amount = BillingAmount::create(amount_to_bill).unwrap();
+
+              PricedOrder::new(
+                  order_id,
+                  customer_info,
+                  address.clone(),
+                  address,
+                  amount,
+                  lines,
+                  PricingMethod::Standard,
+              )
+          }
+
+          fn create_test_product_line(line_id: &str, product_code: &str, price: Decimal) -> PricedOrderLine {
+              let order_line_id = OrderLineId::create("OrderLineId", line_id).unwrap();
+              let product_code = ProductCode::create("ProductCode", product_code).unwrap();
+              let quantity =
+                  OrderQuantity::create("Quantity", &product_code, Decimal::from(5)).unwrap();
+              let line_price = Price::create(price).unwrap();
+
+              PricedOrderLine::ProductLine(PricedOrderProductLine::new(
+                  order_line_id,
+                  product_code,
+                  quantity,
+                  line_price,
+              ))
+          }
+
+          // =============================================================================
+          // create_events のテスト（REQ-111）
+          // =============================================================================
+
+          #[rstest]
+          fn test_create_events_with_pipe_macro_generates_correct_order() {
+              // pipe! マクロを使用した実装が正しいイベント順序を生成することを確認
+              let priced_order = create_test_priced_order("order-001", Decimal::from(1000), vec![]);
+              let order_id = OrderId::create("OrderId", "order-001").unwrap();
+              let email = EmailAddress::create("EmailAddress", "test@example.com").unwrap();
+              let acknowledgment = OrderAcknowledgmentSent::new(order_id, email);
+
+              let events = create_events(&priced_order, Some(acknowledgment));
+
+              // イベント順序の検証: Acknowledgment -> Shippable -> Billable
+              assert_eq!(events.len(), 3);
+              assert!(events[0].is_acknowledgment());
+              assert!(events[1].is_shippable());
+              assert!(events[2].is_billable());
+          }
+
+          #[rstest]
+          fn test_create_events_with_pipe_macro_handles_none_acknowledgment() {
+              // acknowledgment が None の場合のテスト
+              let priced_order = create_test_priced_order("order-002", Decimal::from(500), vec![]);
+
+              let events = create_events(&priced_order, None);
+
+              // Acknowledgment なし: Shippable -> Billable
+              assert_eq!(events.len(), 2);
+              assert!(events[0].is_shippable());
+              assert!(events[1].is_billable());
+          }
+
+          #[rstest]
+          fn test_create_events_with_pipe_macro_handles_zero_billing() {
+              // 請求金額が 0 の場合のテスト
+              let priced_order = create_test_priced_order("order-003", Decimal::ZERO, vec![]);
+              let order_id = OrderId::create("OrderId", "order-003").unwrap();
+              let email = EmailAddress::create("EmailAddress", "test@example.com").unwrap();
+              let acknowledgment = OrderAcknowledgmentSent::new(order_id, email);
+
+              let events = create_events(&priced_order, Some(acknowledgment));
+
+              // Billable なし: Acknowledgment -> Shippable
+              assert_eq!(events.len(), 2);
+              assert!(events[0].is_acknowledgment());
+              assert!(events[1].is_shippable());
+          }
+
+          // =============================================================================
+          // create_shipping_event のテスト（REQ-112）
+          // =============================================================================
+
+          #[rstest]
+          fn test_create_shipping_event_with_pipe_macro_generates_pdf_name() {
+              // pipe! マクロを使用した PDF 名生成の検証
+              let priced_order = create_test_priced_order("order-001", Decimal::from(100), vec![]);
+
+              let event = create_shipping_event(&priced_order);
+
+              // PDF 名が正しく生成されていることを確認
+              assert_eq!(event.pdf().name(), "Orderorder-001.pdf");
+          }
+
+          #[rstest]
+          fn test_create_shipping_event_with_pipe_macro_includes_order_id() {
+              // pipe! マクロを使用したイベント生成で order_id が正しく設定されることを確認
+              let priced_order = create_test_priced_order("order-xyz", Decimal::from(100), vec![]);
+
+              let event = create_shipping_event(&priced_order);
+
+              assert_eq!(event.order_id().value(), "order-xyz");
+          }
+
+          #[rstest]
+          fn test_create_shipping_event_with_pipe_macro_filters_comment_lines() {
+              // pipe! マクロを使用した実装が CommentLine を正しくフィルタすることを確認
+              let lines = vec![
+                  create_test_product_line("line-001", "W1234", Decimal::from(100)),
+                  PricedOrderLine::CommentLine("Gift wrapping".to_string()),
+                  create_test_product_line("line-002", "G5678", Decimal::from(200)),
+              ];
+              let priced_order = create_test_priced_order("order-001", Decimal::from(300), lines);
+
+              let event = create_shipping_event(&priced_order);
+
+              // CommentLine はフィルタされ、ProductLine のみが含まれる
+              assert_eq!(event.shipment_lines().len(), 2);
+          }
+
+          // =============================================================================
+          // create_billing_event のテスト（REQ-113）
+          // =============================================================================
+
+          #[rstest]
+          fn test_create_billing_event_with_pipe_macro_returns_some_for_positive_amount() {
+              // pipe! マクロを使用した実装が正の金額で Some を返すことを確認
+              let priced_order = create_test_priced_order("order-001", Decimal::from(1000), vec![]);
+
+              let result = create_billing_event(&priced_order);
+
+              assert!(result.is_some());
+              let event = result.unwrap();
+              assert_eq!(event.amount_to_bill().value(), Decimal::from(1000));
+          }
+
+          #[rstest]
+          fn test_create_billing_event_with_pipe_macro_returns_none_for_zero_amount() {
+              // pipe! マクロを使用した実装が 0 金額で None を返すことを確認
+              let priced_order = create_test_priced_order("order-002", Decimal::ZERO, vec![]);
+
+              let result = create_billing_event(&priced_order);
+
+              assert!(result.is_none());
+          }
+
+          #[rstest]
+          fn test_create_billing_event_with_pipe_macro_includes_correct_order_id() {
+              // pipe! マクロを使用した実装が正しい order_id を含むことを確認
+              let priced_order = create_test_priced_order("order-billing", Decimal::from(500), vec![]);
+
+              let result = create_billing_event(&priced_order);
+
+              assert!(result.is_some());
+              let event = result.unwrap();
+              assert_eq!(event.order_id().value(), "order-billing");
+          }
+
+          // =============================================================================
+          // pipe! マクロ合成テスト（REQ-117）
+          // =============================================================================
+
+          #[rstest]
+          fn test_pipe_macro_composition_in_event_pipeline() {
+              // pipe! マクロによる関数合成が正しく動作することを検証
+              // shipping_event -> PlaceOrderEvent::ShippableOrderPlaced の変換
+              let lines = vec![
+                  create_test_product_line("line-001", "W1234", Decimal::from(100)),
+              ];
+              let priced_order = create_test_priced_order("order-composite", Decimal::from(100), lines);
+
+              let events = create_events(&priced_order, None);
+
+              // Shippable イベントが正しく生成されていることを確認
+              assert!(events.len() >= 1);
+              let shippable_event = &events[0];
+              assert!(shippable_event.is_shippable());
+
+              // ShippableOrderPlaced の内容を検証
+              if let order_taking_sample::workflow::PlaceOrderEvent::ShippableOrderPlaced(event) =
+                  shippable_event
+              {
+                  assert_eq!(event.order_id().value(), "order-composite");
+                  assert_eq!(event.shipment_lines().len(), 1);
+              } else {
+                  panic!("Expected ShippableOrderPlaced event");
+              }
+          }
+
+          #[rstest]
+          fn test_pipe_macro_preserves_data_integrity() {
+              // pipe! マクロを使用してもデータの整合性が保たれることを確認
+              let order_id_str = "order-integrity-test";
+              let billing_amount = Decimal::new(12345, 2); // 123.45
+              let lines = vec![
+                  create_test_product_line("line-001", "W1234", Decimal::from(100)),
+              ];
+              let priced_order = create_test_priced_order(order_id_str, billing_amount, lines);
+              let email = EmailAddress::create("EmailAddress", "integrity@example.com").unwrap();
+              let acknowledgment = OrderAcknowledgmentSent::new(
+                  OrderId::create("OrderId", order_id_str).unwrap(),
+                  email,
+              );
+
+              let events = create_events(&priced_order, Some(acknowledgment));
+
+              // 全イベントのデータ整合性を検証
+              assert_eq!(events.len(), 3);
+
+              // Acknowledgment イベント
+              if let order_taking_sample::workflow::PlaceOrderEvent::AcknowledgmentSent(ack) = &events[0]
+              {
+                  assert_eq!(ack.order_id().value(), order_id_str);
+              }
+
+              // Shippable イベント
+              if let order_taking_sample::workflow::PlaceOrderEvent::ShippableOrderPlaced(ship) =
+                  &events[1]
+              {
+                  assert_eq!(ship.order_id().value(), order_id_str);
+                  assert_eq!(ship.pdf().name(), format!("Order{}.pdf", order_id_str));
+              }
+
+              // Billable イベント
+              if let order_taking_sample::workflow::PlaceOrderEvent::BillableOrderPlaced(bill) = &events[2]
+              {
+                  assert_eq!(bill.order_id().value(), order_id_str);
+                  assert_eq!(bill.amount_to_bill().value(), billing_amount);
+              }
+          }
+
+    acceptance_criteria:
+      - テストファイルが作成されていること
+      - テストが現在の実装でパスすること（既存動作の確認）
+
+  # ---------------------------------------------------------------------------
+  # Step 2: create_events への pipe! マクロ適用（REQ-111）
+  # ---------------------------------------------------------------------------
+
+  - step: 2
+    title: create_events 関数への pipe! マクロ適用
+    requirements:
+      - REQ-111
+    description: |
+      F# の createEvents 関数のパイプラインパターンを pipe! マクロで表現する。
+      命令型の mutable Vec + push パターンから、宣言的な concat パターンに変更。
+
+    files:
+      - path: /Users/lihs/workspace/functional-rusty/samples/order/src/workflow/events.rs
+        action: modify
+        changes:
+          - description: functional_rusty::pipe のインポート追加
+            location: imports section (line 47)
+            before: |
+              use rust_decimal::Decimal;
+            after: |
+              use functional_rusty::pipe;
+              use rust_decimal::Decimal;
+
+          - description: create_events 関数の pipe! マクロ適用
+            location: create_events function (lines 275-296)
+            before: |
+              #[must_use]
+              pub fn create_events(
+                  priced_order: &PricedOrder,
+                  acknowledgment_event: Option<OrderAcknowledgmentSent>,
+              ) -> Vec<PlaceOrderEvent> {
+                  let mut events = Vec::new();
+
+                  // 確認メール送信イベント（存在する場合）
+                  if let Some(acknowledgment) = acknowledgment_event {
+                      events.push(PlaceOrderEvent::AcknowledgmentSent(acknowledgment));
+                  }
+
+                  // 配送イベント（常に生成）
+                  let shipping_event = create_shipping_event(priced_order);
+                  events.push(PlaceOrderEvent::ShippableOrderPlaced(shipping_event));
+
+                  // 請求イベント（請求金額が正の場合のみ）
+                  if let Some(billing_event) = create_billing_event(priced_order) {
+                      events.push(PlaceOrderEvent::BillableOrderPlaced(billing_event));
+                  }
+
+                  events
+              }
+            after: |
+              #[must_use]
+              pub fn create_events(
+                  priced_order: &PricedOrder,
+                  acknowledgment_event: Option<OrderAcknowledgmentSent>,
+              ) -> Vec<PlaceOrderEvent> {
+                  // 確認メール送信イベント（存在する場合）
+                  let acknowledgment_events: Vec<PlaceOrderEvent> = acknowledgment_event
+                      .map(PlaceOrderEvent::AcknowledgmentSent)
+                      .into_iter()
+                      .collect();
+
+                  // 配送イベント（常に生成）: pipe! マクロで関数合成
+                  let shipping_events = vec![pipe!(
+                      priced_order,
+                      create_shipping_event,
+                      PlaceOrderEvent::ShippableOrderPlaced
+                  )];
+
+                  // 請求イベント（請求金額が正の場合のみ）
+                  let billing_events: Vec<PlaceOrderEvent> = pipe!(priced_order, create_billing_event)
+                      .map(PlaceOrderEvent::BillableOrderPlaced)
+                      .into_iter()
+                      .collect();
+
+                  // イベントを結合
+                  [acknowledgment_events, shipping_events, billing_events].concat()
+              }
+
+    acceptance_criteria:
+      - pipe! マクロを使用してイベント作成パイプラインを表現していること
+      - shipping_events の作成に pipe!(priced_order, create_shipping_event, wrapper) パターンを使用
+      - 既存のテストが全てパスすること
+      - 生成されるイベントの順序と内容が変わらないこと
+
+  # ---------------------------------------------------------------------------
+  # Step 3: create_shipping_event への pipe! マクロ適用（REQ-112）
+  # ---------------------------------------------------------------------------
+
+  - step: 3
+    title: create_shipping_event 関数への pipe! マクロ適用
+    requirements:
+      - REQ-112
+    description: |
+      F# の createShippingEvent 関数で使用されている PDF 名生成パイプラインを
+      pipe! マクロで表現する。
+
+      ただし、現在の実装は format! マクロを使用しており、
+      pipe! マクロへの変換は可読性の観点から効果が限定的。
+
+      設計判断: 現在の実装を維持し、pipe! マクロは適用しない。
+
+    files:
+      - path: /Users/lihs/workspace/functional-rusty/samples/order/src/workflow/events.rs
+        action: no_change
+        rationale: |
+          現在の実装:
+            let pdf_name = format!("Order{}.pdf", priced_order.order_id().value());
+
+          pipe! マクロを使用した場合:
+            let pdf_name = pipe!(
+                priced_order.order_id(),
+                |id| format!("Order{}.pdf", id.value())
+            );
+
+          pipe! マクロを使用しても可読性が向上しないため、
+          現在の実装を維持する。
+
+          F# との対応:
+            F#: sprintf "Order%s.pdf" (placedOrder.OrderId |> OrderId.value)
+            Rust: format!("Order{}.pdf", priced_order.order_id().value())
+
+          Rust ではメソッドチェーン + format! マクロが自然な表現である。
+
+    acceptance_criteria:
+      - 既存の動作が維持されること
+      - PDF 名が正しく生成されること
+      - テストが全てパスすること
+
+  # ---------------------------------------------------------------------------
+  # Step 4: create_billing_event への pipe! マクロ適用（REQ-113）
+  # ---------------------------------------------------------------------------
+
+  - step: 4
+    title: create_billing_event 関数への pipe! マクロ適用
+    requirements:
+      - REQ-113
+    description: |
+      F# の createBillingEvent 関数で使用されている billing_amount 取得を
+      pipe! マクロで表現する。
+
+      ただし、現在の実装はメソッドチェーンを使用しており、
+      pipe! マクロへの変換は可読性の観点から効果が限定的。
+
+      設計判断: 現在の実装を維持し、pipe! マクロは適用しない。
+
+    files:
+      - path: /Users/lihs/workspace/functional-rusty/samples/order/src/workflow/events.rs
+        action: no_change
+        rationale: |
+          現在の実装:
+            let billing_amount = priced_order.amount_to_bill().value();
+
+          pipe! マクロを使用した場合:
+            let billing_amount = pipe!(
+                priced_order.amount_to_bill(),
+                |amount| amount.value()
+            );
+
+          pipe! マクロを使用しても可読性が向上しないため、
+          現在の実装を維持する。
+
+          F# との対応:
+            F#: let billingAmount = placedOrder.AmountToBill |> BillingAmount.value
+            Rust: let billing_amount = priced_order.amount_to_bill().value();
+
+          Rust ではメソッドチェーンが自然な表現である。
+
+    acceptance_criteria:
+      - 既存の動作が維持されること
+      - 請求金額が正しく取得されること
+      - テストが全てパスすること
+
+# =============================================================================
+# テスト計画
+# =============================================================================
+
+test_plan:
+
+  - step: 1
+    title: 新規テストファイルのテスト
+    test_file: /Users/lihs/workspace/functional-rusty/samples/order/tests/phase11_pipe_macro_tests.rs
+    test_cases:
+      - name: test_create_events_with_pipe_macro_generates_correct_order
+        description: |
+          pipe! マクロを使用した create_events がイベントを正しい順序で生成することを検証。
+          期待される順序: AcknowledgmentSent -> ShippableOrderPlaced -> BillableOrderPlaced
+
+      - name: test_create_events_with_pipe_macro_handles_none_acknowledgment
+        description: |
+          acknowledgment が None の場合、AcknowledgmentSent イベントが生成されないことを検証。
+
+      - name: test_create_events_with_pipe_macro_handles_zero_billing
+        description: |
+          請求金額が 0 の場合、BillableOrderPlaced イベントが生成されないことを検証。
+
+      - name: test_create_shipping_event_with_pipe_macro_generates_pdf_name
+        description: |
+          PDF 名が "Order{order_id}.pdf" 形式で正しく生成されることを検証。
+
+      - name: test_create_shipping_event_with_pipe_macro_includes_order_id
+        description: |
+          ShippableOrderPlaced イベントに正しい order_id が含まれることを検証。
+
+      - name: test_create_shipping_event_with_pipe_macro_filters_comment_lines
+        description: |
+          CommentLine がフィルタされ、ProductLine のみが shipment_lines に含まれることを検証。
+
+      - name: test_create_billing_event_with_pipe_macro_returns_some_for_positive_amount
+        description: |
+          正の請求金額の場合に Some(BillableOrderPlaced) が返されることを検証。
+
+      - name: test_create_billing_event_with_pipe_macro_returns_none_for_zero_amount
+        description: |
+          請求金額が 0 の場合に None が返されることを検証。
+
+      - name: test_create_billing_event_with_pipe_macro_includes_correct_order_id
+        description: |
+          BillableOrderPlaced イベントに正しい order_id が含まれることを検証。
+
+      - name: test_pipe_macro_composition_in_event_pipeline
+        description: |
+          pipe! マクロによる関数合成が正しく動作し、
+          イベントパイプライン全体が正しく構成されることを検証。
+
+      - name: test_pipe_macro_preserves_data_integrity
+        description: |
+          pipe! マクロを使用してもデータの整合性が保たれることを検証。
+          全イベントの order_id、billing_amount、pdf_name が正しいことを確認。
+
+  - step: 2
+    title: 既存テストの回帰テスト
+    test_files:
+      - /Users/lihs/workspace/functional-rusty/samples/order/tests/events_tests.rs
+      - /Users/lihs/workspace/functional-rusty/samples/order/tests/place_order_tests.rs
+      - /Users/lihs/workspace/functional-rusty/samples/order/tests/workflow_tests.rs
+    description: |
+      pipe! マクロ適用後も既存のテストが全てパスすることを確認。
+
+# =============================================================================
+# 品質チェック
+# =============================================================================
+
+quality_checks:
+  - command: cargo fmt --all -- --check
+    description: コードフォーマットの確認
+
+  - command: cargo clippy --all-targets --all-features -- -D warnings
+    description: Clippy による静的解析
+
+  - command: cargo test --package order-taking-sample
+    description: 全テストの実行
+
+  - command: cargo test --package order-taking-sample --test phase11_pipe_macro_tests
+    description: Phase 11 固有テストの実行
+
+  - command: cargo test --package order-taking-sample events
+    description: イベント関連テストの実行
+
+# =============================================================================
+# 設計判断の記録
+# =============================================================================
+
+design_decisions:
+
+  - id: DD-001
+    title: pipe! マクロの適用範囲
+    decision: |
+      REQ-111（create_events）のみに pipe! マクロを適用する。
+      REQ-112（create_shipping_event）と REQ-113（create_billing_event）は
+      現在の実装を維持する。
+    rationale: |
+      create_events 関数は複数の純粋関数を連鎖させるパターンであり、
+      pipe! マクロの適用に適している。
+
+      一方、create_shipping_event と create_billing_event は
+      単一の値取得（メソッドチェーン）であり、
+      pipe! マクロを使用しても可読性が向上しない。
+
+      Rust のメソッドチェーン（.method()）は F# のパイプ演算子（|>）と
+      同等の可読性を提供しており、無理に pipe! マクロを適用する必要はない。
+
+  - id: DD-002
+    title: 命令型から宣言型への変更
+    decision: |
+      create_events 関数を mutable Vec + push パターンから
+      immutable Vec + concat パターンに変更する。
+    rationale: |
+      F# の実装スタイル（List.singleton + yield!）に近づけることで、
+      関数型プログラミングの原則（不変性）をより明確に表現できる。
+
+      また、pipe! マクロを使用することで、
+      データの変換フローがより明確になる。
+
+  - id: DD-003
+    title: テストの設計
+    decision: |
+      新規テストファイル（phase11_pipe_macro_tests.rs）を作成し、
+      pipe! マクロ固有の動作を検証する。
+      既存テスト（events_tests.rs）との重複を避ける。
+    rationale: |
+      既存テストは既に動作を検証しているため、
+      Phase 11 のテストは pipe! マクロによる実装変更後も
+      同じ動作が維持されることを確認することに焦点を当てる。
+
+# =============================================================================
+# 依存関係
+# =============================================================================
+
+dependencies:
+  internal:
+    - name: functional_rusty::pipe
+      usage: pipe! マクロのインポート
+      import: "use functional_rusty::pipe;"
+
+  existing_tests:
+    - tests/events_tests.rs
+    - tests/place_order_tests.rs
+    - tests/workflow_tests.rs
+
+# =============================================================================
+# 実装順序のまとめ
+# =============================================================================
+
+implementation_order:
+  1: テストファイルの作成（tests/phase11_pipe_macro_tests.rs）
+  2: events.rs への pipe! マクロ適用（create_events のみ）
+  3: 既存テストの実行と確認
+  4: 新規テストの実行と確認
+  5: 品質チェックの実行
+
+# =============================================================================
+# 成果物一覧
+# =============================================================================
+
+artifacts:
+  modified_files:
+    - path: /Users/lihs/workspace/functional-rusty/samples/order/src/workflow/events.rs
+      changes:
+        - pipe! マクロのインポート追加
+        - create_events 関数の書き換え
+
+  new_files:
+    - path: /Users/lihs/workspace/functional-rusty/samples/order/tests/phase11_pipe_macro_tests.rs
+      description: Phase 11 統合テスト
+
+  unchanged_files:
+    - path: /Users/lihs/workspace/functional-rusty/samples/order/src/workflow/place_order.rs
+      reason: create_events を呼び出すのみで、変更不要

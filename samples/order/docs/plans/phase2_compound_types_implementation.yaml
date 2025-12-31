@@ -1,0 +1,1472 @@
+# Phase 2: 複合型定義 実装計画
+# Domain Modeling Made Functional の F# パターンを Rust に適用
+# functional-rusty ライブラリの Lens を活用した不変データ操作
+
+id: phase2_compound_types_implementation
+name: 複合型定義 実装計画
+version: "1.0.0"
+created_at: "2025-12-31"
+requirements_reference: docs/requirements/phase2_compound_types.yaml
+
+# =============================================================================
+# 概要
+# =============================================================================
+overview:
+  description: |
+    Phase 1 で定義した基本型（String50, EmailAddress, ZipCode, UsStateCode, VipStatus）を
+    組み合わせて、より高レベルなドメインエンティティ（PersonalName, CustomerInfo, Address）を実装する。
+
+    functional-rusty の #[derive(Lenses)] マクロを使用して、各フィールドへの Lens を自動生成し、
+    不変データ構造の型安全な更新を実現する。
+
+  key_features:
+    - Smart Constructor パターンによるバリデーション付きインスタンス生成
+    - "#[derive(Lenses)] による Lens の自動導出"
+    - Lens 合成による深いネストへのアクセス
+    - Result::and_then による Monad 的なエラーハンドリング
+    - proptest による Lens 法則の検証
+
+  design_decisions:
+    - decision: フィールドは全て private
+      reason: 不変性を保証し、バリデーション済みの値のみを保持することを保証する
+
+    - decision: create メソッドで文字列からバリデーション付き生成
+      reason: 外部からの入力をドメイン型に変換する際にバリデーションを強制する
+
+    - decision: create_from_parts メソッドでバリデーション済み型から直接生成
+      reason: 既にバリデーション済みの構成要素を組み合わせる場合にオーバーヘッドを避ける
+
+    - decision: getter メソッドは参照を返す
+      reason: 不要なコピーを避け、所有権を移動させない
+
+# =============================================================================
+# 実装順序
+# =============================================================================
+implementation_order:
+  - step: 1
+    file: src/compound_types/mod.rs
+    description: |
+      compound_types モジュールのルートファイルを作成する。
+      PersonalName, CustomerInfo, Address の再エクスポートを定義する。
+    reason: モジュール構造を先に確立し、各サブモジュールの実装を進める基盤を作る。
+    dependencies: []
+
+  - step: 2
+    file: src/compound_types/personal_name.rs
+    description: |
+      PersonalName 構造体を実装する。
+      最もシンプルな複合型であり、他の複合型の基盤となる。
+    reason: |
+      CustomerInfo が PersonalName に依存するため、先に実装する必要がある。
+      また、Lens の基本的な使い方を確立する良い例となる。
+    dependencies:
+      - simple_types::String50
+      - simple_types::ValidationError
+
+  - step: 3
+    file: src/compound_types/address.rs
+    description: |
+      Address 構造体を実装する。
+      オプショナルフィールド（Option<String50>）を含む複合型。
+    reason: |
+      PersonalName や CustomerInfo とは独立して実装できる。
+      Option<T> 型フィールドの Lens 処理を学ぶ良い例となる。
+    dependencies:
+      - simple_types::String50
+      - simple_types::ZipCode
+      - simple_types::UsStateCode
+      - simple_types::ValidationError
+
+  - step: 4
+    file: src/compound_types/customer_info.rs
+    description: |
+      CustomerInfo 構造体を実装する。
+      PersonalName をネストして含み、Lens 合成の例を示す。
+    reason: |
+      PersonalName が完成している必要がある。
+      Lens 合成のパターンを確立する重要な例となる。
+    dependencies:
+      - compound_types::PersonalName
+      - simple_types::EmailAddress
+      - simple_types::VipStatus
+      - simple_types::ValidationError
+
+  - step: 5
+    file: src/lib.rs
+    description: |
+      lib.rs を更新して compound_types モジュールを追加する。
+    reason: モジュールを公開して外部からアクセス可能にする。
+    dependencies:
+      - compound_types::mod
+
+  - step: 6
+    file: tests/compound_types_tests.rs
+    description: |
+      複合型のユニットテストを実装する。
+      バリデーション、getter、Lens 基本操作のテストを含む。
+    reason: TDD のレッドフェーズを先に実装し、その後で実装を進める。
+    dependencies:
+      - compound_types の全実装
+
+  - step: 7
+    file: tests/compound_types_lens_laws.rs
+    description: |
+      proptest を使用した Lens 法則のプロパティベーステストを実装する。
+    reason: Lens が正しく法則を満たすことを網羅的に検証する。
+    dependencies:
+      - compound_types の全実装
+
+# =============================================================================
+# 各ファイルの実装詳細
+# =============================================================================
+file_implementations:
+  # ---------------------------------------------------------------------------
+  # mod.rs
+  # ---------------------------------------------------------------------------
+  - file: src/compound_types/mod.rs
+    description: compound_types モジュールのルートファイル
+    items:
+      - module_docs: モジュールレベルのドキュメント
+      - re_exports: PersonalName, CustomerInfo, Address の再エクスポート
+
+    skeleton: |
+      //! 注文ドメインで使用する複合型（Compound Types）
+      //!
+      //! Phase 1 で定義した基本型を組み合わせて、より高レベルなドメインエンティティを表現する。
+      //! functional-rusty の Optics（Lens）を活用して不変データの更新を効率的に行う。
+      //!
+      //! # 型一覧
+      //!
+      //! - [`PersonalName`]: 個人名（姓・名）
+      //! - [`CustomerInfo`]: 顧客情報（個人名、メール、VIP ステータス）
+      //! - [`Address`]: 住所
+      //!
+      //! # Lens の使用例
+      //!
+      //! ```
+      //! use order_taking_sample::compound_types::{PersonalName, CustomerInfo};
+      //! use order_taking_sample::simple_types::String50;
+      //! use functional_rusty::optics::Lens;
+      //!
+      //! // CustomerInfo から first_name を取得（Lens 合成）
+      //! let customer = CustomerInfo::create("John", "Doe", "john@example.com", "Normal").unwrap();
+      //!
+      //! let name_lens = CustomerInfo::name_lens();
+      //! let first_name_lens = PersonalName::first_name_lens();
+      //! let customer_first_name = name_lens.compose(first_name_lens);
+      //!
+      //! let first_name = customer_first_name.get(&customer);
+      //! assert_eq!(first_name.value(), "John");
+      //! ```
+
+      mod address;
+      mod customer_info;
+      mod personal_name;
+
+      pub use address::Address;
+      pub use customer_info::CustomerInfo;
+      pub use personal_name::PersonalName;
+
+  # ---------------------------------------------------------------------------
+  # personal_name.rs
+  # ---------------------------------------------------------------------------
+  - file: src/compound_types/personal_name.rs
+    description: PersonalName 構造体の定義と実装
+    items:
+      - struct: PersonalName
+        fields:
+          - name: first_name
+            type: String50
+            visibility: private
+          - name: last_name
+            type: String50
+            visibility: private
+        derive:
+          - Clone
+          - Debug
+          - PartialEq
+          - Eq
+          - Hash
+          - Lenses
+
+      - method: create
+        signature: "fn create(first_name: &str, last_name: &str) -> Result<PersonalName, ValidationError>"
+
+      - method: first_name
+        signature: "fn first_name(&self) -> &String50"
+
+      - method: last_name
+        signature: "fn last_name(&self) -> &String50"
+
+      - auto_generated_lenses:
+          - first_name_lens
+          - last_name_lens
+
+    skeleton: |
+      //! 個人名を表す複合型
+
+      use functional_rusty::Lenses;
+
+      use crate::simple_types::{String50, ValidationError};
+
+      /// 個人名を表す複合型
+      ///
+      /// 姓（LastName）と名（FirstName）の2つのフィールドを持つ。
+      /// どちらも必須フィールドで、String50 型として制約される。
+      ///
+      /// # Examples
+      ///
+      /// ```
+      /// use order_taking_sample::compound_types::PersonalName;
+      ///
+      /// let name = PersonalName::create("John", "Doe").unwrap();
+      /// assert_eq!(name.first_name().value(), "John");
+      /// assert_eq!(name.last_name().value(), "Doe");
+      /// ```
+      ///
+      /// # Lens の使用
+      ///
+      /// ```
+      /// use order_taking_sample::compound_types::PersonalName;
+      /// use order_taking_sample::simple_types::String50;
+      /// use functional_rusty::optics::Lens;
+      ///
+      /// let name = PersonalName::create("John", "Doe").unwrap();
+      ///
+      /// // first_name を更新（不変更新）
+      /// let new_first_name = String50::create("FirstName", "Jonathan").unwrap();
+      /// let updated = PersonalName::first_name_lens().set(name, new_first_name);
+      /// assert_eq!(updated.first_name().value(), "Jonathan");
+      /// ```
+      #[derive(Clone, Debug, PartialEq, Eq, Hash, Lenses)]
+      pub struct PersonalName {
+          first_name: String50,
+          last_name: String50,
+      }
+
+      impl PersonalName {
+          /// 姓と名の文字列から PersonalName を生成する
+          ///
+          /// # Arguments
+          ///
+          /// * `first_name` - 名（ファーストネーム）の文字列
+          /// * `last_name` - 姓（ラストネーム）の文字列
+          ///
+          /// # Returns
+          ///
+          /// * `Ok(PersonalName)` - バリデーション成功時
+          /// * `Err(ValidationError)` - いずれかのフィールドが無効な場合
+          ///
+          /// # Errors
+          ///
+          /// 名または姓が空文字列または50文字を超える場合に `ValidationError` を返す。
+          ///
+          /// # Examples
+          ///
+          /// ```
+          /// use order_taking_sample::compound_types::PersonalName;
+          ///
+          /// let name = PersonalName::create("John", "Doe").unwrap();
+          /// assert_eq!(name.first_name().value(), "John");
+          ///
+          /// // 空の名前はエラー
+          /// assert!(PersonalName::create("", "Doe").is_err());
+          /// ```
+          pub fn create(first_name: &str, last_name: &str) -> Result<Self, ValidationError> {
+              let first_name_validated = String50::create("FirstName", first_name)?;
+              let last_name_validated = String50::create("LastName", last_name)?;
+
+              Ok(Self {
+                  first_name: first_name_validated,
+                  last_name: last_name_validated,
+              })
+          }
+
+          /// 名への参照を返す
+          ///
+          /// # Returns
+          ///
+          /// String50 型の名への参照
+          #[must_use]
+          pub fn first_name(&self) -> &String50 {
+              &self.first_name
+          }
+
+          /// 姓への参照を返す
+          ///
+          /// # Returns
+          ///
+          /// String50 型の姓への参照
+          #[must_use]
+          pub fn last_name(&self) -> &String50 {
+              &self.last_name
+          }
+      }
+
+      #[cfg(test)]
+      mod tests {
+          use super::*;
+          use rstest::rstest;
+
+          #[rstest]
+          fn test_personal_name_create_valid() {
+              let result = PersonalName::create("John", "Doe");
+
+              assert!(result.is_ok());
+              let name = result.unwrap();
+              assert_eq!(name.first_name().value(), "John");
+              assert_eq!(name.last_name().value(), "Doe");
+          }
+
+          #[rstest]
+          fn test_personal_name_create_first_name_empty() {
+              let result = PersonalName::create("", "Doe");
+
+              assert!(result.is_err());
+              let error = result.unwrap_err();
+              assert_eq!(error.field_name, "FirstName");
+              assert_eq!(error.message, "Must not be empty");
+          }
+
+          #[rstest]
+          fn test_personal_name_create_last_name_empty() {
+              let result = PersonalName::create("John", "");
+
+              assert!(result.is_err());
+              let error = result.unwrap_err();
+              assert_eq!(error.field_name, "LastName");
+              assert_eq!(error.message, "Must not be empty");
+          }
+
+          #[rstest]
+          fn test_personal_name_create_first_name_too_long() {
+              let long_name = "a".repeat(51);
+              let result = PersonalName::create(&long_name, "Doe");
+
+              assert!(result.is_err());
+              let error = result.unwrap_err();
+              assert_eq!(error.field_name, "FirstName");
+              assert_eq!(error.message, "Must not be more than 50 chars");
+          }
+
+          #[rstest]
+          fn test_personal_name_create_last_name_too_long() {
+              let long_name = "a".repeat(51);
+              let result = PersonalName::create("John", &long_name);
+
+              assert!(result.is_err());
+              let error = result.unwrap_err();
+              assert_eq!(error.field_name, "LastName");
+              assert_eq!(error.message, "Must not be more than 50 chars");
+          }
+
+          #[rstest]
+          fn test_personal_name_create_boundary_50_chars() {
+              let max_name = "a".repeat(50);
+              let result = PersonalName::create(&max_name, &max_name);
+
+              assert!(result.is_ok());
+          }
+      }
+
+  # ---------------------------------------------------------------------------
+  # address.rs
+  # ---------------------------------------------------------------------------
+  - file: src/compound_types/address.rs
+    description: Address 構造体の定義と実装
+    items:
+      - struct: Address
+        fields:
+          - name: address_line1
+            type: String50
+            visibility: private
+          - name: address_line2
+            type: "Option<String50>"
+            visibility: private
+          - name: address_line3
+            type: "Option<String50>"
+            visibility: private
+          - name: address_line4
+            type: "Option<String50>"
+            visibility: private
+          - name: city
+            type: String50
+            visibility: private
+          - name: zip_code
+            type: ZipCode
+            visibility: private
+          - name: state
+            type: UsStateCode
+            visibility: private
+          - name: country
+            type: String50
+            visibility: private
+        derive:
+          - Clone
+          - Debug
+          - PartialEq
+          - Eq
+          - Hash
+          - Lenses
+
+      - method: create
+        signature: |
+          fn create(
+              address_line1: &str,
+              address_line2: &str,
+              address_line3: &str,
+              address_line4: &str,
+              city: &str,
+              zip_code: &str,
+              state: &str,
+              country: &str,
+          ) -> Result<Address, ValidationError>
+
+      - method: create_from_parts
+        signature: |
+          fn create_from_parts(
+              address_line1: String50,
+              address_line2: Option<String50>,
+              address_line3: Option<String50>,
+              address_line4: Option<String50>,
+              city: String50,
+              zip_code: ZipCode,
+              state: UsStateCode,
+              country: String50,
+          ) -> Self
+
+      - getters:
+          - address_line1
+          - address_line2
+          - address_line3
+          - address_line4
+          - city
+          - zip_code
+          - state
+          - country
+
+      - auto_generated_lenses:
+          - address_line1_lens
+          - address_line2_lens
+          - address_line3_lens
+          - address_line4_lens
+          - city_lens
+          - zip_code_lens
+          - state_lens
+          - country_lens
+
+    skeleton: |
+      //! 住所を表す複合型
+
+      use functional_rusty::Lenses;
+
+      use crate::simple_types::{String50, UsStateCode, ValidationError, ZipCode};
+
+      /// 住所を表す複合型
+      ///
+      /// 米国の住所形式を想定し、複数の住所行（一部はオプショナル）、
+      /// 市、郵便番号、州、国を持つ。
+      ///
+      /// # Examples
+      ///
+      /// ```
+      /// use order_taking_sample::compound_types::Address;
+      ///
+      /// let address = Address::create(
+      ///     "123 Main St",
+      ///     "Apt 4B",
+      ///     "",
+      ///     "",
+      ///     "New York",
+      ///     "10001",
+      ///     "NY",
+      ///     "USA",
+      /// ).unwrap();
+      ///
+      /// assert_eq!(address.address_line1().value(), "123 Main St");
+      /// assert_eq!(address.address_line2().map(|s| s.value()), Some("Apt 4B"));
+      /// assert!(address.address_line3().is_none());
+      /// ```
+      #[derive(Clone, Debug, PartialEq, Eq, Hash, Lenses)]
+      pub struct Address {
+          address_line1: String50,
+          address_line2: Option<String50>,
+          address_line3: Option<String50>,
+          address_line4: Option<String50>,
+          city: String50,
+          zip_code: ZipCode,
+          state: UsStateCode,
+          country: String50,
+      }
+
+      impl Address {
+          /// 文字列から Address を生成する
+          ///
+          /// address_line2 から address_line4 は空文字列の場合 None になる。
+          ///
+          /// # Arguments
+          ///
+          /// * `address_line1` - 住所行1（必須）
+          /// * `address_line2` - 住所行2（空文字列で None）
+          /// * `address_line3` - 住所行3（空文字列で None）
+          /// * `address_line4` - 住所行4（空文字列で None）
+          /// * `city` - 市（必須）
+          /// * `zip_code` - 郵便番号（5桁、必須）
+          /// * `state` - 州コード（2文字、必須）
+          /// * `country` - 国名（必須）
+          ///
+          /// # Returns
+          ///
+          /// * `Ok(Address)` - バリデーション成功時
+          /// * `Err(ValidationError)` - いずれかのフィールドが無効な場合
+          ///
+          /// # Errors
+          ///
+          /// 必須フィールドが無効な場合、またはオプショナルフィールドが50文字を超える場合に
+          /// `ValidationError` を返す。
+          #[allow(clippy::too_many_arguments)]
+          pub fn create(
+              address_line1: &str,
+              address_line2: &str,
+              address_line3: &str,
+              address_line4: &str,
+              city: &str,
+              zip_code: &str,
+              state: &str,
+              country: &str,
+          ) -> Result<Self, ValidationError> {
+              let address_line1_validated = String50::create("AddressLine1", address_line1)?;
+              let address_line2_validated = String50::create_option("AddressLine2", address_line2)?;
+              let address_line3_validated = String50::create_option("AddressLine3", address_line3)?;
+              let address_line4_validated = String50::create_option("AddressLine4", address_line4)?;
+              let city_validated = String50::create("City", city)?;
+              let zip_code_validated = ZipCode::create("ZipCode", zip_code)?;
+              let state_validated = UsStateCode::create("State", state)?;
+              let country_validated = String50::create("Country", country)?;
+
+              Ok(Self {
+                  address_line1: address_line1_validated,
+                  address_line2: address_line2_validated,
+                  address_line3: address_line3_validated,
+                  address_line4: address_line4_validated,
+                  city: city_validated,
+                  zip_code: zip_code_validated,
+                  state: state_validated,
+                  country: country_validated,
+              })
+          }
+
+          /// 既にバリデーション済みの構成要素から Address を生成する
+          ///
+          /// バリデーションは不要（既に各型でバリデーション済み）。
+          #[allow(clippy::too_many_arguments)]
+          #[must_use]
+          pub const fn create_from_parts(
+              address_line1: String50,
+              address_line2: Option<String50>,
+              address_line3: Option<String50>,
+              address_line4: Option<String50>,
+              city: String50,
+              zip_code: ZipCode,
+              state: UsStateCode,
+              country: String50,
+          ) -> Self {
+              Self {
+                  address_line1,
+                  address_line2,
+                  address_line3,
+                  address_line4,
+                  city,
+                  zip_code,
+                  state,
+                  country,
+              }
+          }
+
+          /// 住所行1への参照を返す
+          #[must_use]
+          pub fn address_line1(&self) -> &String50 {
+              &self.address_line1
+          }
+
+          /// 住所行2への参照を返す（オプショナル）
+          #[must_use]
+          pub fn address_line2(&self) -> Option<&String50> {
+              self.address_line2.as_ref()
+          }
+
+          /// 住所行3への参照を返す（オプショナル）
+          #[must_use]
+          pub fn address_line3(&self) -> Option<&String50> {
+              self.address_line3.as_ref()
+          }
+
+          /// 住所行4への参照を返す（オプショナル）
+          #[must_use]
+          pub fn address_line4(&self) -> Option<&String50> {
+              self.address_line4.as_ref()
+          }
+
+          /// 市への参照を返す
+          #[must_use]
+          pub fn city(&self) -> &String50 {
+              &self.city
+          }
+
+          /// 郵便番号への参照を返す
+          #[must_use]
+          pub fn zip_code(&self) -> &ZipCode {
+              &self.zip_code
+          }
+
+          /// 州コードへの参照を返す
+          #[must_use]
+          pub fn state(&self) -> &UsStateCode {
+              &self.state
+          }
+
+          /// 国名への参照を返す
+          #[must_use]
+          pub fn country(&self) -> &String50 {
+              &self.country
+          }
+      }
+
+      #[cfg(test)]
+      mod tests {
+          use super::*;
+          use rstest::rstest;
+
+          #[rstest]
+          fn test_address_create_valid_all_fields() {
+              let result = Address::create(
+                  "123 Main St",
+                  "Apt 4B",
+                  "Building A",
+                  "Floor 5",
+                  "New York",
+                  "10001",
+                  "NY",
+                  "USA",
+              );
+
+              assert!(result.is_ok());
+              let address = result.unwrap();
+              assert_eq!(address.address_line1().value(), "123 Main St");
+              assert_eq!(address.address_line2().map(|s| s.value()), Some("Apt 4B"));
+              assert_eq!(address.address_line3().map(|s| s.value()), Some("Building A"));
+              assert_eq!(address.address_line4().map(|s| s.value()), Some("Floor 5"));
+              assert_eq!(address.city().value(), "New York");
+              assert_eq!(address.zip_code().value(), "10001");
+              assert_eq!(address.state().value(), "NY");
+              assert_eq!(address.country().value(), "USA");
+          }
+
+          #[rstest]
+          fn test_address_create_valid_required_only() {
+              let result = Address::create(
+                  "456 Oak Ave",
+                  "",
+                  "",
+                  "",
+                  "Los Angeles",
+                  "90001",
+                  "CA",
+                  "USA",
+              );
+
+              assert!(result.is_ok());
+              let address = result.unwrap();
+              assert!(address.address_line2().is_none());
+              assert!(address.address_line3().is_none());
+              assert!(address.address_line4().is_none());
+          }
+
+          #[rstest]
+          fn test_address_create_invalid_address_line1_empty() {
+              let result = Address::create("", "", "", "", "New York", "10001", "NY", "USA");
+
+              assert!(result.is_err());
+              let error = result.unwrap_err();
+              assert_eq!(error.field_name, "AddressLine1");
+          }
+
+          #[rstest]
+          fn test_address_create_invalid_zip_code() {
+              let result = Address::create(
+                  "123 Main St",
+                  "",
+                  "",
+                  "",
+                  "New York",
+                  "1234", // 4桁
+                  "NY",
+                  "USA",
+              );
+
+              assert!(result.is_err());
+              let error = result.unwrap_err();
+              assert_eq!(error.field_name, "ZipCode");
+          }
+
+          #[rstest]
+          fn test_address_create_invalid_state() {
+              let result = Address::create(
+                  "123 Main St",
+                  "",
+                  "",
+                  "",
+                  "New York",
+                  "10001",
+                  "XX", // 無効な州コード
+                  "USA",
+              );
+
+              assert!(result.is_err());
+              let error = result.unwrap_err();
+              assert_eq!(error.field_name, "State");
+          }
+      }
+
+  # ---------------------------------------------------------------------------
+  # customer_info.rs
+  # ---------------------------------------------------------------------------
+  - file: src/compound_types/customer_info.rs
+    description: CustomerInfo 構造体の定義と実装
+    items:
+      - struct: CustomerInfo
+        fields:
+          - name: name
+            type: PersonalName
+            visibility: private
+          - name: email_address
+            type: EmailAddress
+            visibility: private
+          - name: vip_status
+            type: VipStatus
+            visibility: private
+        derive:
+          - Clone
+          - Debug
+          - PartialEq
+          - Eq
+          - Lenses
+
+      - method: create
+        signature: "fn create(first_name: &str, last_name: &str, email: &str, vip_status: &str) -> Result<CustomerInfo, ValidationError>"
+
+      - method: create_from_parts
+        signature: "fn create_from_parts(name: PersonalName, email_address: EmailAddress, vip_status: VipStatus) -> Self"
+
+      - getters:
+          - name
+          - email_address
+          - vip_status
+
+      - auto_generated_lenses:
+          - name_lens
+          - email_address_lens
+          - vip_status_lens
+
+    lens_composition_example: |
+      // 深いネストへのアクセス例
+      use functional_rusty::optics::Lens;
+
+      let customer = CustomerInfo::create("John", "Doe", "john@example.com", "Normal")?;
+
+      // 姓を取得（Lens 合成）
+      let name_lens = CustomerInfo::name_lens();
+      let first_name_lens = PersonalName::first_name_lens();
+      let customer_first_name = name_lens.compose(first_name_lens);
+
+      let first_name = customer_first_name.get(&customer);
+      assert_eq!(first_name.value(), "John");
+
+      // 姓を更新（不変更新）
+      let new_first_name = String50::create("FirstName", "Jonathan")?;
+      let updated = customer_first_name.set(customer, new_first_name);
+      assert_eq!(updated.name().first_name().value(), "Jonathan");
+
+    skeleton: |
+      //! 顧客情報を表す複合型
+
+      use functional_rusty::Lenses;
+
+      use super::PersonalName;
+      use crate::simple_types::{EmailAddress, ValidationError, VipStatus};
+
+      /// 顧客情報を表す複合型
+      ///
+      /// 個人名、メールアドレス、VIP ステータスの3つのフィールドを持つ。
+      /// PersonalName を含むネスト構造により、Lens 合成の良い例となる。
+      ///
+      /// # Examples
+      ///
+      /// ```
+      /// use order_taking_sample::compound_types::CustomerInfo;
+      ///
+      /// let customer = CustomerInfo::create("John", "Doe", "john@example.com", "Normal").unwrap();
+      /// assert_eq!(customer.name().first_name().value(), "John");
+      /// assert_eq!(customer.email_address().value(), "john@example.com");
+      /// ```
+      ///
+      /// # Lens 合成の使用
+      ///
+      /// ```
+      /// use order_taking_sample::compound_types::{CustomerInfo, PersonalName};
+      /// use order_taking_sample::simple_types::String50;
+      /// use functional_rusty::optics::Lens;
+      ///
+      /// let customer = CustomerInfo::create("John", "Doe", "john@example.com", "Normal").unwrap();
+      ///
+      /// // Lens 合成で深いネストにアクセス
+      /// let name_lens = CustomerInfo::name_lens();
+      /// let first_name_lens = PersonalName::first_name_lens();
+      /// let customer_first_name = name_lens.compose(first_name_lens);
+      ///
+      /// let first_name = customer_first_name.get(&customer);
+      /// assert_eq!(first_name.value(), "John");
+      ///
+      /// // first_name を更新（不変更新）
+      /// let new_first_name = String50::create("FirstName", "Jonathan").unwrap();
+      /// let updated = customer_first_name.set(customer, new_first_name);
+      /// assert_eq!(updated.name().first_name().value(), "Jonathan");
+      /// ```
+      #[derive(Clone, Debug, PartialEq, Eq, Lenses)]
+      pub struct CustomerInfo {
+          name: PersonalName,
+          email_address: EmailAddress,
+          vip_status: VipStatus,
+      }
+
+      impl CustomerInfo {
+          /// 個人名（姓・名）、メールアドレス、VIP ステータスから CustomerInfo を生成する
+          ///
+          /// # Arguments
+          ///
+          /// * `first_name` - 名（ファーストネーム）
+          /// * `last_name` - 姓（ラストネーム）
+          /// * `email` - メールアドレス
+          /// * `vip_status` - VIP ステータス（"Normal" または "VIP"）
+          ///
+          /// # Returns
+          ///
+          /// * `Ok(CustomerInfo)` - バリデーション成功時
+          /// * `Err(ValidationError)` - いずれかのフィールドが無効な場合
+          ///
+          /// # Errors
+          ///
+          /// いずれかのフィールドが無効な場合に `ValidationError` を返す。
+          pub fn create(
+              first_name: &str,
+              last_name: &str,
+              email: &str,
+              vip_status: &str,
+          ) -> Result<Self, ValidationError> {
+              let name = PersonalName::create(first_name, last_name)?;
+              let email_address = EmailAddress::create("EmailAddress", email)?;
+              let vip_status = VipStatus::create("VipStatus", vip_status)?;
+
+              Ok(Self {
+                  name,
+                  email_address,
+                  vip_status,
+              })
+          }
+
+          /// 既にバリデーション済みの構成要素から CustomerInfo を生成する
+          ///
+          /// バリデーションは不要（既に各型でバリデーション済み）。
+          #[must_use]
+          pub const fn create_from_parts(
+              name: PersonalName,
+              email_address: EmailAddress,
+              vip_status: VipStatus,
+          ) -> Self {
+              Self {
+                  name,
+                  email_address,
+                  vip_status,
+              }
+          }
+
+          /// 個人名への参照を返す
+          #[must_use]
+          pub fn name(&self) -> &PersonalName {
+              &self.name
+          }
+
+          /// メールアドレスへの参照を返す
+          #[must_use]
+          pub fn email_address(&self) -> &EmailAddress {
+              &self.email_address
+          }
+
+          /// VIP ステータスを返す（Copy 型なのでコピー）
+          #[must_use]
+          pub const fn vip_status(&self) -> VipStatus {
+              self.vip_status
+          }
+      }
+
+      #[cfg(test)]
+      mod tests {
+          use super::*;
+          use rstest::rstest;
+
+          #[rstest]
+          fn test_customer_info_create_valid() {
+              let result = CustomerInfo::create("John", "Doe", "john@example.com", "Normal");
+
+              assert!(result.is_ok());
+              let customer = result.unwrap();
+              assert_eq!(customer.name().first_name().value(), "John");
+              assert_eq!(customer.name().last_name().value(), "Doe");
+              assert_eq!(customer.email_address().value(), "john@example.com");
+              assert!(matches!(customer.vip_status(), VipStatus::Normal));
+          }
+
+          #[rstest]
+          fn test_customer_info_create_vip() {
+              let result = CustomerInfo::create("Jane", "Smith", "jane@test.org", "VIP");
+
+              assert!(result.is_ok());
+              let customer = result.unwrap();
+              assert!(matches!(customer.vip_status(), VipStatus::Vip));
+          }
+
+          #[rstest]
+          fn test_customer_info_create_invalid_name() {
+              let result = CustomerInfo::create("", "Doe", "john@example.com", "Normal");
+
+              assert!(result.is_err());
+              let error = result.unwrap_err();
+              assert_eq!(error.field_name, "FirstName");
+          }
+
+          #[rstest]
+          fn test_customer_info_create_invalid_email() {
+              let result = CustomerInfo::create("John", "Doe", "invalid-email", "Normal");
+
+              assert!(result.is_err());
+              let error = result.unwrap_err();
+              assert_eq!(error.field_name, "EmailAddress");
+          }
+
+          #[rstest]
+          fn test_customer_info_create_invalid_vip_status() {
+              let result = CustomerInfo::create("John", "Doe", "john@example.com", "Premium");
+
+              assert!(result.is_err());
+              let error = result.unwrap_err();
+              assert_eq!(error.field_name, "VipStatus");
+          }
+
+          #[rstest]
+          fn test_customer_info_create_from_parts() {
+              let name = PersonalName::create("John", "Doe").unwrap();
+              let email = EmailAddress::create("EmailAddress", "john@example.com").unwrap();
+              let status = VipStatus::create("VipStatus", "VIP").unwrap();
+
+              let customer = CustomerInfo::create_from_parts(name, email, status);
+
+              assert_eq!(customer.name().first_name().value(), "John");
+              assert!(matches!(customer.vip_status(), VipStatus::Vip));
+          }
+      }
+
+# =============================================================================
+# functional-rusty の使用方法
+# =============================================================================
+functional_rusty_usage:
+  derive_macro:
+    description: "#[derive(Lenses)] マクロの使い方"
+    code: |
+      use functional_rusty::Lenses;
+
+      #[derive(Clone, Debug, PartialEq, Eq, Lenses)]
+      pub struct PersonalName {
+          first_name: String50,
+          last_name: String50,
+      }
+
+      // 以下のメソッドが自動生成される:
+      // - PersonalName::first_name_lens() -> impl Lens<PersonalName, String50> + Clone
+      // - PersonalName::last_name_lens() -> impl Lens<PersonalName, String50> + Clone
+
+  lens_basic_operations:
+    description: Lens の基本操作（get, set, modify）
+    code: |
+      use functional_rusty::optics::Lens;
+
+      let name = PersonalName::create("John", "Doe").unwrap();
+      let first_name_lens = PersonalName::first_name_lens();
+
+      // get: フィールドへの参照を取得
+      let first_name: &String50 = first_name_lens.get(&name);
+      assert_eq!(first_name.value(), "John");
+
+      // set: 新しい値でフィールドを更新（新しいインスタンスを返す）
+      let new_first_name = String50::create("FirstName", "Jonathan").unwrap();
+      let updated: PersonalName = first_name_lens.set(name, new_first_name);
+      assert_eq!(updated.first_name().value(), "Jonathan");
+
+      // modify: 関数を適用してフィールドを更新
+      // （String50 は内部値を直接変更できないため、この例は概念的）
+
+  lens_composition:
+    description: Lens の合成による深いネストへのアクセス
+    code: |
+      use functional_rusty::optics::Lens;
+
+      let customer = CustomerInfo::create("John", "Doe", "john@example.com", "Normal").unwrap();
+
+      // Lens を合成して深いネストにアクセス
+      let name_lens = CustomerInfo::name_lens();
+      let first_name_lens = PersonalName::first_name_lens();
+      let customer_first_name = name_lens.compose(first_name_lens);
+
+      // 合成した Lens で get
+      let first_name = customer_first_name.get(&customer);
+      assert_eq!(first_name.value(), "John");
+
+      // 合成した Lens で set
+      let new_first_name = String50::create("FirstName", "Jane").unwrap();
+      let updated = customer_first_name.set(customer, new_first_name);
+      assert_eq!(updated.name().first_name().value(), "Jane");
+
+      // 他のフィールドは変更されない
+      assert_eq!(updated.email_address().value(), "john@example.com");
+
+  required_imports:
+    description: 必要な import 文
+    code: |
+      // functional-rusty からの import
+      use functional_rusty::Lenses;                    // derive マクロ
+      use functional_rusty::optics::Lens;              // Lens トレイト
+
+      // Phase 1 の型
+      use crate::simple_types::{
+          String50,
+          EmailAddress,
+          ZipCode,
+          UsStateCode,
+          VipStatus,
+          ValidationError,
+      };
+
+# =============================================================================
+# テスト計画
+# =============================================================================
+testing:
+  strategy: TDD
+  framework: rstest
+
+  test_files:
+    - file: tests/compound_types_tests.rs
+      description: 複合型のユニットテストと統合テスト
+      test_categories:
+        - name: PersonalName テスト
+          tests:
+            - test_personal_name_create_valid
+            - test_personal_name_create_first_name_empty
+            - test_personal_name_create_last_name_empty
+            - test_personal_name_create_first_name_too_long
+            - test_personal_name_create_last_name_too_long
+            - test_personal_name_create_boundary_50_chars
+            - test_personal_name_getters
+            - test_personal_name_first_name_lens_get
+            - test_personal_name_first_name_lens_set
+            - test_personal_name_last_name_lens_get
+            - test_personal_name_last_name_lens_set
+            - test_personal_name_clone
+            - test_personal_name_eq
+
+        - name: CustomerInfo テスト
+          tests:
+            - test_customer_info_create_valid
+            - test_customer_info_create_vip
+            - test_customer_info_create_invalid_name
+            - test_customer_info_create_invalid_email
+            - test_customer_info_create_invalid_vip_status
+            - test_customer_info_create_from_parts
+            - test_customer_info_getters
+            - test_customer_info_name_lens_get
+            - test_customer_info_name_lens_set
+            - test_customer_info_email_lens_get
+            - test_customer_info_email_lens_set
+            - test_customer_info_vip_status_lens_get
+            - test_customer_info_vip_status_lens_set
+            - test_customer_info_composed_lens_first_name
+            - test_customer_info_composed_lens_last_name
+
+        - name: Address テスト
+          tests:
+            - test_address_create_valid_all_fields
+            - test_address_create_valid_required_only
+            - test_address_create_valid_partial_optional
+            - test_address_create_invalid_address_line1_empty
+            - test_address_create_invalid_city_empty
+            - test_address_create_invalid_zip_code
+            - test_address_create_invalid_state
+            - test_address_create_invalid_country_empty
+            - test_address_create_from_parts
+            - test_address_getters
+            - test_address_optional_getters
+            - test_address_address_line1_lens
+            - test_address_address_line2_lens
+            - test_address_city_lens
+            - test_address_zip_code_lens
+            - test_address_state_lens
+            - test_address_country_lens
+
+    - file: tests/compound_types_lens_laws.rs
+      description: Lens 法則のプロパティベーステスト
+      framework: proptest
+      test_categories:
+        - name: PersonalName Lens 法則
+          tests:
+            - prop_personal_name_first_name_get_put_law
+            - prop_personal_name_first_name_put_get_law
+            - prop_personal_name_first_name_put_put_law
+            - prop_personal_name_last_name_get_put_law
+            - prop_personal_name_last_name_put_get_law
+            - prop_personal_name_last_name_put_put_law
+
+        - name: CustomerInfo Lens 法則
+          tests:
+            - prop_customer_info_name_get_put_law
+            - prop_customer_info_name_put_get_law
+            - prop_customer_info_name_put_put_law
+            - prop_customer_info_email_get_put_law
+            - prop_customer_info_email_put_get_law
+            - prop_customer_info_email_put_put_law
+            - prop_customer_info_vip_status_get_put_law
+            - prop_customer_info_vip_status_put_get_law
+            - prop_customer_info_vip_status_put_put_law
+
+        - name: Address Lens 法則
+          tests:
+            - prop_address_address_line1_get_put_law
+            - prop_address_address_line1_put_get_law
+            - prop_address_address_line1_put_put_law
+            - prop_address_city_get_put_law
+            - prop_address_city_put_get_law
+            - prop_address_city_put_put_law
+            - prop_address_zip_code_get_put_law
+            - prop_address_zip_code_put_get_law
+            - prop_address_zip_code_put_put_law
+
+        - name: Lens 合成の法則
+          tests:
+            - prop_composed_customer_first_name_get_put_law
+            - prop_composed_customer_first_name_put_get_law
+            - prop_composed_customer_first_name_put_put_law
+
+  lens_laws_test_skeleton: |
+    //! Lens 法則のプロパティベーステスト
+    //!
+    //! 全ての Lens が以下の法則を満たすことを検証する:
+    //! - GetPut Law: lens.set(source, lens.get(&source).clone()) == source
+    //! - PutGet Law: lens.get(&lens.set(source, value)) == &value
+    //! - PutPut Law: lens.set(lens.set(source, v1), v2) == lens.set(source, v2)
+
+    use functional_rusty::optics::Lens;
+    use order_taking_sample::compound_types::{Address, CustomerInfo, PersonalName};
+    use order_taking_sample::simple_types::{
+        EmailAddress, String50, UsStateCode, VipStatus, ZipCode,
+    };
+    use proptest::prelude::*;
+
+    // =============================================================================
+    // Arbitrary 実装のためのストラテジ
+    // =============================================================================
+
+    /// 有効な String50 を生成するストラテジ
+    fn arb_string50() -> impl Strategy<Value = String50> {
+        "[a-zA-Z0-9 ]{1,50}".prop_map(|s| String50::create("Test", &s).unwrap())
+    }
+
+    /// 有効な EmailAddress を生成するストラテジ
+    fn arb_email_address() -> impl Strategy<Value = EmailAddress> {
+        "[a-z]{1,10}@[a-z]{1,10}\\.[a-z]{2,3}"
+            .prop_map(|s| EmailAddress::create("Test", &s).unwrap())
+    }
+
+    /// 有効な VipStatus を生成するストラテジ
+    fn arb_vip_status() -> impl Strategy<Value = VipStatus> {
+        prop_oneof![
+            Just(VipStatus::Normal),
+            Just(VipStatus::Vip),
+        ]
+    }
+
+    /// 有効な ZipCode を生成するストラテジ
+    fn arb_zip_code() -> impl Strategy<Value = ZipCode> {
+        "[0-9]{5}".prop_map(|s| ZipCode::create("Test", &s).unwrap())
+    }
+
+    /// 有効な UsStateCode を生成するストラテジ
+    fn arb_us_state_code() -> impl Strategy<Value = UsStateCode> {
+        prop_oneof![
+            Just(UsStateCode::create("Test", "CA").unwrap()),
+            Just(UsStateCode::create("Test", "NY").unwrap()),
+            Just(UsStateCode::create("Test", "TX").unwrap()),
+        ]
+    }
+
+    /// 有効な PersonalName を生成するストラテジ
+    fn arb_personal_name() -> impl Strategy<Value = PersonalName> {
+        (arb_string50(), arb_string50()).prop_map(|(first, last)| {
+            PersonalName::create(first.value(), last.value()).unwrap()
+        })
+    }
+
+    /// 有効な CustomerInfo を生成するストラテジ
+    fn arb_customer_info() -> impl Strategy<Value = CustomerInfo> {
+        (arb_personal_name(), arb_email_address(), arb_vip_status()).prop_map(
+            |(name, email, status)| {
+                CustomerInfo::create_from_parts(name, email, status)
+            },
+        )
+    }
+
+    // =============================================================================
+    // PersonalName Lens 法則
+    // =============================================================================
+
+    proptest! {
+        /// GetPut Law for PersonalName.first_name
+        #[test]
+        fn prop_personal_name_first_name_get_put_law(
+            name in arb_personal_name()
+        ) {
+            let lens = PersonalName::first_name_lens();
+            let value = lens.get(&name).clone();
+            let result = lens.set(name.clone(), value);
+            prop_assert_eq!(result, name);
+        }
+
+        /// PutGet Law for PersonalName.first_name
+        #[test]
+        fn prop_personal_name_first_name_put_get_law(
+            name in arb_personal_name(),
+            new_first_name in arb_string50()
+        ) {
+            let lens = PersonalName::first_name_lens();
+            let updated = lens.set(name, new_first_name.clone());
+            prop_assert_eq!(lens.get(&updated), &new_first_name);
+        }
+
+        /// PutPut Law for PersonalName.first_name
+        #[test]
+        fn prop_personal_name_first_name_put_put_law(
+            name in arb_personal_name(),
+            first1 in arb_string50(),
+            first2 in arb_string50()
+        ) {
+            let lens = PersonalName::first_name_lens();
+            let left = lens.set(lens.set(name.clone(), first1), first2.clone());
+            let right = lens.set(name, first2);
+            prop_assert_eq!(left, right);
+        }
+    }
+
+    // =============================================================================
+    // CustomerInfo Lens 合成の法則
+    // =============================================================================
+
+    proptest! {
+        /// GetPut Law for composed lens (CustomerInfo.name.first_name)
+        #[test]
+        fn prop_composed_customer_first_name_get_put_law(
+            customer in arb_customer_info()
+        ) {
+            let name_lens = CustomerInfo::name_lens();
+            let first_name_lens = PersonalName::first_name_lens();
+            let composed = name_lens.compose(first_name_lens);
+
+            let value = composed.get(&customer).clone();
+            let result = composed.set(customer.clone(), value);
+            prop_assert_eq!(result, customer);
+        }
+
+        /// PutGet Law for composed lens (CustomerInfo.name.first_name)
+        #[test]
+        fn prop_composed_customer_first_name_put_get_law(
+            customer in arb_customer_info(),
+            new_first_name in arb_string50()
+        ) {
+            let name_lens = CustomerInfo::name_lens();
+            let first_name_lens = PersonalName::first_name_lens();
+            let composed = name_lens.compose(first_name_lens);
+
+            let updated = composed.set(customer, new_first_name.clone());
+            prop_assert_eq!(composed.get(&updated), &new_first_name);
+        }
+
+        /// PutPut Law for composed lens (CustomerInfo.name.first_name)
+        #[test]
+        fn prop_composed_customer_first_name_put_put_law(
+            customer in arb_customer_info(),
+            first1 in arb_string50(),
+            first2 in arb_string50()
+        ) {
+            let name_lens = CustomerInfo::name_lens();
+            let first_name_lens = PersonalName::first_name_lens();
+            let composed = name_lens.compose(first_name_lens);
+
+            let left = composed.set(composed.set(customer.clone(), first1), first2.clone());
+            let right = composed.set(customer, first2);
+            prop_assert_eq!(left, right);
+        }
+    }
+
+  coverage_requirement: "100%"
+
+# =============================================================================
+# Clippy 準拠
+# =============================================================================
+clippy_compliance:
+  lints:
+    - lint: pedantic
+      status: enabled
+      notes: 厳格なスタイルチェック
+
+    - lint: nursery
+      status: enabled
+      notes: 実験的なリント
+
+    - lint: module_name_repetitions
+      status: allowed
+      reason: モジュール名と型名の重複を許可（例: compound_types::PersonalName）
+
+    - lint: must_use_candidate
+      status: allowed
+      reason: 全ての pure function に #[must_use] を付けることは過剰
+
+    - lint: too_many_arguments
+      status: allowed_with_attribute
+      reason: Address::create は8引数あるが、ドメインモデルとして必要
+      solution: "#[allow(clippy::too_many_arguments)] を関数に付与"
+
+  documentation_requirements:
+    - 全ての public 構造体にドキュメントコメント
+    - 全ての public メソッドにドキュメントコメント
+    - Examples セクションを含める
+    - Errors セクションで返しうるエラーを説明
+    - Arguments セクションで引数を説明
+    - Returns セクションで戻り値を説明
+
+# =============================================================================
+# 依存関係の更新
+# =============================================================================
+dependency_updates:
+  cargo_toml:
+    description: |
+      functional-rusty の依存関係を確認する。
+      features = ["full"] が指定されていれば、optics と derive が含まれる。
+    current_config: |
+      [dependencies]
+      functional-rusty = { path = "../..", features = ["full"] }
+
+  lib_rs:
+    description: |
+      lib.rs に compound_types モジュールを追加する。
+    changes: |
+      // Before:
+      pub mod simple_types;
+
+      // After:
+      pub mod compound_types;
+      pub mod simple_types;
+
+# =============================================================================
+# 実装チェックリスト
+# =============================================================================
+implementation_checklist:
+  - id: 1
+    task: src/compound_types/mod.rs を作成
+    status: pending
+    acceptance_criteria:
+      - モジュールドキュメントが存在する
+      - PersonalName, CustomerInfo, Address が再エクスポートされている
+
+  - id: 2
+    task: src/compound_types/personal_name.rs を作成
+    status: pending
+    acceptance_criteria:
+      - PersonalName 構造体が定義されている
+      - "#[derive(Lenses)] が適用されている"
+      - create メソッドがバリデーションを行う
+      - first_name, last_name getter が存在する
+      - first_name_lens, last_name_lens が自動生成される
+      - インラインテストが通過する
+
+  - id: 3
+    task: src/compound_types/address.rs を作成
+    status: pending
+    acceptance_criteria:
+      - Address 構造体が定義されている
+      - "#[derive(Lenses)] が適用されている"
+      - create メソッドがバリデーションを行う
+      - create_from_parts メソッドが存在する
+      - 全ての getter が存在する
+      - 全ての Lens が自動生成される
+      - インラインテストが通過する
+
+  - id: 4
+    task: src/compound_types/customer_info.rs を作成
+    status: pending
+    acceptance_criteria:
+      - CustomerInfo 構造体が定義されている
+      - "#[derive(Lenses)] が適用されている"
+      - create メソッドがバリデーションを行う
+      - create_from_parts メソッドが存在する
+      - 全ての getter が存在する
+      - 全ての Lens が自動生成される
+      - Lens 合成のドキュメント例がある
+      - インラインテストが通過する
+
+  - id: 5
+    task: src/lib.rs を更新
+    status: pending
+    acceptance_criteria:
+      - compound_types モジュールが追加されている
+
+  - id: 6
+    task: tests/compound_types_tests.rs を作成
+    status: pending
+    acceptance_criteria:
+      - 全てのバリデーションテストが存在する
+      - 全ての getter テストが存在する
+      - 全ての Lens 操作テストが存在する
+      - 全てのテストが通過する
+
+  - id: 7
+    task: tests/compound_types_lens_laws.rs を作成
+    status: pending
+    acceptance_criteria:
+      - proptest を使用している
+      - 全ての Lens に対して GetPut, PutGet, PutPut 法則テストがある
+      - Lens 合成に対しても法則テストがある
+      - 全てのテストが通過する
+
+  - id: 8
+    task: cargo clippy --all-features -- -D warnings を通過
+    status: pending
+    acceptance_criteria:
+      - Clippy の警告がない
+
+  - id: 9
+    task: cargo test を通過
+    status: pending
+    acceptance_criteria:
+      - 全てのテストが通過する
+
+  - id: 10
+    task: cargo doc --no-deps を通過
+    status: pending
+    acceptance_criteria:
+      - ドキュメントが正しく生成される
+      - 警告がない

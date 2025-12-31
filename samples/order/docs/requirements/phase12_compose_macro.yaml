@@ -1,0 +1,776 @@
+# Phase 12: compose! マクロによる関数合成 要件定義
+# Order Taking Sample Application
+# functional-rusty の compose! マクロを使用した再利用可能な合成関数の定義
+
+version: "1.0.0"
+created_at: "2026-01-01"
+phase_id: phase_12
+phase_name: compose! マクロによる関数合成
+phase_name_en: Function Composition with compose! Macro
+
+# =============================================================================
+# 概要
+# =============================================================================
+
+overview:
+  description: |
+    Haskell の関数合成演算子 (.) に相当する functional-rusty の compose! マクロを
+    Order Taking サンプルアプリケーションに適用する。
+
+    compose! マクロは右から左への関数合成（数学的合成）を実現する:
+      compose!(h, g, f)(x) = h(g(f(x)))
+
+    pipe! マクロとの違い:
+    - pipe!: 値を即座に変換（データフロー: 左から右）
+      pipe!(x, f, g, h) = h(g(f(x)))
+    - compose!: 再利用可能な合成関数を生成（関数合成: 右から左）
+      let composed = compose!(h, g, f);
+      composed(x) = h(g(f(x)))
+
+    Phase 11 で pipe! マクロを適用した箇所を分析し、
+    再利用可能な合成関数として定義した方が適切な箇所を特定する。
+
+  goals:
+    - 再利用可能な合成関数を compose! マクロで定義
+    - 高階関数（map, filter_map 等）への関数渡しパターンを改善
+    - 関数合成の法則（結合法則、恒等元）を活用したコード構造化
+    - Point-free スタイルの適用箇所を特定
+
+  scope_limitations:
+    - compose! は純粋関数の合成にのみ適用
+    - クロージャによる環境キャプチャが必要な場合は部分適用との組み合わせを検討
+    - 既存の動作を維持しつつ、適切な箇所のみリファクタリング
+
+  compose_macro_specification:
+    syntax:
+      - "compose!(f) - f をそのまま返す（恒等合成）"
+      - "compose!(f, g) - |x| f(g(x)) を返す"
+      - "compose!(f, g, h) - |x| f(g(h(x))) を返す"
+      - "compose!(f, g, h, ...) - 任意個数の関数を合成"
+
+    laws:
+      - name: 結合法則
+        description: "compose!(f, compose!(g, h)) == compose!(compose!(f, g), h)"
+      - name: 左恒等元
+        description: "compose!(identity, f) == f"
+      - name: 右恒等元
+        description: "compose!(f, identity) == f"
+
+    type_requirements: |
+      全ての関数は Fn トレイトを実装する必要がある。
+      各関数の出力型は、次の関数（左隣）の入力型と一致する必要がある。
+
+# =============================================================================
+# compose! マクロ適用箇所の分析
+# =============================================================================
+
+compose_applicability_analysis:
+
+  # 高優先度: 再利用可能な関数として明確に定義できる箇所
+  high_priority:
+    description: |
+      compose! マクロを適用することで、再利用可能な合成関数として
+      明確に定義でき、コードの可読性・保守性が向上する箇所。
+
+    candidates:
+      - id: shipping_event_creator
+        location: src/workflow/events.rs
+        description: |
+          配送イベント作成関数の合成。
+          PricedOrder から ShippableOrderPlaced イベントを経て
+          PlaceOrderEvent へ変換するパイプラインを関数として定義。
+        current_code: |
+          pipe!(
+              priced_order,
+              create_shipping_event,
+              PlaceOrderEvent::ShippableOrderPlaced
+          )
+        compose_potential: |
+          // 再利用可能な合成関数として定義
+          let to_shipping_event = compose!(
+              PlaceOrderEvent::ShippableOrderPlaced,
+              create_shipping_event
+          );
+          to_shipping_event(priced_order)
+        benefit: |
+          - to_shipping_event を他の場所でも再利用可能
+          - 関数の意図が名前で明確化
+          - テストで関数単体を検証可能
+
+      - id: shipping_pipeline
+        location: src/workflow/place_order.rs
+        description: |
+          配送情報追加と VIP 割引の合成。
+          PricedOrder から PricedOrderWithShippingMethod への
+          変換パイプラインを関数として定義。
+        current_code: |
+          let priced_order_with_shipping = free_vip_shipping(
+              add_shipping_info_to_order(calculate_shipping_cost, &priced_order)
+          );
+        compose_potential: |
+          // 配送処理パイプラインを合成関数として定義
+          // 注: add_shipping_info_to_order は高階関数のため部分適用が必要
+          let add_shipping = |order: &PricedOrder| {
+              add_shipping_info_to_order(calculate_shipping_cost, order)
+          };
+          let shipping_pipeline = compose!(free_vip_shipping, add_shipping);
+          let priced_order_with_shipping = shipping_pipeline(&priced_order);
+        benefit: |
+          - 配送処理の流れを関数として明示
+          - 配送処理のテストが容易化
+          - 将来的な拡張（中間処理の追加）が容易
+
+  # 中優先度: 高階関数への渡しパターン
+  medium_priority:
+    description: |
+      map, filter_map 等の高階関数に合成関数を渡すパターン。
+      Point-free スタイルを適用することで可読性が向上する可能性がある。
+
+    candidates:
+      - id: make_shipment_line_mapper
+        location: src/workflow/events.rs
+        description: |
+          make_shipment_line を filter_map に渡すパターン。
+          現在は関数参照を直接渡しているが、追加の変換が必要な場合に
+          compose! で合成できる。
+        current_code: |
+          priced_order
+              .lines()
+              .iter()
+              .filter_map(make_shipment_line)
+              .collect()
+        compose_potential: |
+          // 現状では単一関数なので compose! は不要
+          // 追加の変換が必要な場合:
+          // let transform = compose!(additional_transform, make_shipment_line);
+          // priced_order.lines().iter().filter_map(transform).collect()
+        benefit: |
+          - 変換処理の拡張が容易
+          - 変換ロジックの再利用が可能
+
+      - id: event_dto_converter
+        location: src/dto/output.rs
+        description: |
+          イベントリストを DTO に変換するパターン。
+          from_domain と追加の変換を合成できる。
+        current_code: |
+          events.iter().map(Self::from_domain).collect()
+        compose_potential: |
+          // 追加の後処理が必要な場合:
+          // let converter = compose!(post_process, Self::from_domain);
+          // events.iter().map(converter).collect()
+        benefit: |
+          - 変換処理の拡張が容易
+          - 変換ロジックのテストが容易
+
+  # 低優先度: 適用しても効果が限定的な箇所
+  low_priority:
+    description: |
+      compose! マクロを適用可能だが、
+      現状のコードで十分に可読であり、
+      変更による改善効果が限定的な箇所。
+
+    candidates:
+      - id: billing_event_creation
+        location: src/workflow/events.rs
+        description: |
+          請求イベント作成は Option を返すため、
+          compose! との相性が限定的。
+        current_code: |
+          pipe!(priced_order, create_billing_event)
+              .map(PlaceOrderEvent::BillableOrderPlaced)
+        compose_potential: |
+          // Option::map 内での合成は複雑になる
+          // 現状のコードの方が可読性が高い
+        benefit: |
+          改善効果は限定的
+
+# =============================================================================
+# 要件一覧
+# =============================================================================
+
+requirements:
+
+  # ---------------------------------------------------------------------------
+  # REQ-120: 配送イベント作成関数の合成
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-120
+    name: 配送イベント作成の compose! による関数合成
+    category: event_creation
+    priority: high
+    description: |
+      create_shipping_event と PlaceOrderEvent::ShippableOrderPlaced を
+      compose! マクロで合成し、再利用可能な関数として定義する。
+
+      この合成関数を create_events 関数内で使用することで、
+      イベント作成のパイプラインを明確化する。
+
+    location: src/workflow/events.rs
+
+    references:
+      current_rust: |
+        // src/workflow/events.rs:287-291 (Phase 11 で pipe! 適用済み)
+        let shipping_events = vec![pipe!(
+            priced_order,
+            create_shipping_event,
+            PlaceOrderEvent::ShippableOrderPlaced
+        )];
+
+      target_rust: |
+        use functional_rusty::compose;
+
+        // create_events 関数内で合成関数を定義
+        pub fn create_events(
+            priced_order: &PricedOrder,
+            acknowledgment_event: Option<OrderAcknowledgmentSent>,
+        ) -> Vec<PlaceOrderEvent> {
+            // 配送イベント作成の合成関数
+            // compose! は右から左への合成: ShippableOrderPlaced(create_shipping_event(order))
+            let to_shipping_event = compose!(
+                PlaceOrderEvent::ShippableOrderPlaced,
+                create_shipping_event
+            );
+
+            // 確認メール送信イベント（存在する場合）
+            let acknowledgment_events: Vec<PlaceOrderEvent> = acknowledgment_event
+                .map(PlaceOrderEvent::AcknowledgmentSent)
+                .into_iter()
+                .collect();
+
+            // 配送イベント（常に生成）: 合成関数を適用
+            let shipping_events = vec![to_shipping_event(priced_order)];
+
+            // 請求イベント（請求金額が正の場合のみ）
+            let billing_events: Vec<PlaceOrderEvent> = create_billing_event(priced_order)
+                .map(PlaceOrderEvent::BillableOrderPlaced)
+                .into_iter()
+                .collect();
+
+            // イベントを結合
+            [acknowledgment_events, shipping_events, billing_events].concat()
+        }
+
+    design_rationale: |
+      compose! マクロを使用することで:
+      1. 合成関数に名前（to_shipping_event）を付けて意図を明確化
+      2. 同じ合成パターンを他の場所で再利用可能
+      3. 関数合成の概念を明示的にコードで表現
+
+      pipe! との比較:
+      - pipe!: 値を即座に変換（その場限りの使用）
+      - compose!: 再利用可能な関数を生成
+
+    acceptance_criteria:
+      - compose! マクロを使用して to_shipping_event 関数を定義していること
+      - create_shipping_event と PlaceOrderEvent::ShippableOrderPlaced が正しく合成されていること
+      - 既存のテストが全てパスすること
+      - 生成されるイベントの内容が変わらないこと
+
+  # ---------------------------------------------------------------------------
+  # REQ-121: 配送処理パイプラインの合成
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-121
+    name: 配送処理パイプラインの compose! による関数合成
+    category: workflow
+    priority: high
+    description: |
+      add_shipping_info_to_order（部分適用）と free_vip_shipping を
+      compose! マクロで合成し、配送処理パイプラインを関数として定義する。
+
+      注: add_shipping_info_to_order は calculate_shipping_cost を引数に取るため、
+      部分適用（クロージャ）を使用してから compose! で合成する。
+
+    location: src/workflow/place_order.rs
+
+    references:
+      current_rust: |
+        // src/workflow/place_order.rs:147-150
+        let priced_order_with_shipping = free_vip_shipping(add_shipping_info_to_order(
+            calculate_shipping_cost,
+            &priced_order,
+        ));
+
+      target_rust: |
+        use functional_rusty::compose;
+
+        pub fn place_order<...>(...) -> IO<Result<Vec<PlaceOrderEvent>, PlaceOrderError>>
+        where ...
+        {
+            // ... validation and pricing steps ...
+
+            // 配送処理パイプラインを合成関数として定義
+            // add_shipping_info_to_order を部分適用
+            let add_shipping = |order: &PricedOrder| {
+                add_shipping_info_to_order(calculate_shipping_cost, order)
+            };
+
+            // free_vip_shipping と add_shipping を合成
+            // compose! は右から左: free_vip_shipping(add_shipping(order))
+            let process_shipping = compose!(free_vip_shipping, add_shipping);
+
+            // 合成関数を適用
+            let priced_order_with_shipping = process_shipping(&priced_order);
+
+            // ... acknowledgment and event creation steps ...
+        }
+
+    design_rationale: |
+      配送処理パイプラインを合成関数として定義することで:
+      1. 配送処理の流れが process_shipping という名前で明確化
+      2. 将来的な拡張（中間処理の追加）が容易
+      3. パイプラインのテストが容易化
+
+      部分適用との組み合わせ:
+      - add_shipping_info_to_order は高階関数（依存性注入パターン）
+      - クロージャで部分適用してから compose! で合成
+
+    acceptance_criteria:
+      - add_shipping を部分適用で定義していること
+      - compose! マクロを使用して process_shipping 関数を定義していること
+      - free_vip_shipping と add_shipping が正しく合成されていること
+      - 既存のテストが全てパスすること
+      - VIP 顧客の配送料無料化が正しく動作すること
+
+  # ---------------------------------------------------------------------------
+  # REQ-122: 高階関数への合成関数渡し
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-122
+    name: 高階関数への compose! 合成関数の適用
+    category: higher_order_function
+    priority: medium
+    description: |
+      map, filter_map 等の高階関数に compose! で生成した合成関数を渡すパターンを
+      適用可能な箇所に実装する。
+
+      現在の実装では単一関数を渡しているため適用不要だが、
+      将来的な拡張（追加の変換処理）に備えたパターンを文書化する。
+
+    location: src/workflow/events.rs
+
+    references:
+      current_rust: |
+        // src/workflow/events.rs:155-159
+        let shipment_lines: Vec<ShippableOrderLine> = priced_order
+            .lines()
+            .iter()
+            .filter_map(make_shipment_line)
+            .collect();
+
+      target_rust_example: |
+        use functional_rusty::compose;
+
+        // 現在の実装（単一関数）- 変更不要
+        let shipment_lines: Vec<ShippableOrderLine> = priced_order
+            .lines()
+            .iter()
+            .filter_map(make_shipment_line)
+            .collect();
+
+        // 追加の変換が必要になった場合の例:
+        // fn validate_shipment_line(line: ShippableOrderLine) -> Option<ValidatedShipmentLine> { ... }
+        //
+        // let transform = compose!(
+        //     |opt| opt.and_then(validate_shipment_line),
+        //     make_shipment_line
+        // );
+        // let validated_lines: Vec<ValidatedShipmentLine> = priced_order
+        //     .lines()
+        //     .iter()
+        //     .filter_map(transform)
+        //     .collect();
+
+    design_rationale: |
+      高階関数への合成関数渡しは Point-free スタイルの典型的なパターン。
+      現在の実装では単一関数を渡しているため compose! は不要だが、
+      将来的な拡張に備えてパターンを文書化する。
+
+      適用判断基準:
+      - 単一関数の場合: そのまま関数参照を渡す（compose! 不要）
+      - 複数関数の連鎖が必要な場合: compose! で合成して渡す
+
+    acceptance_criteria:
+      - 現在の実装は変更しない（単一関数のため compose! 不要）
+      - ドキュメントに将来的な拡張パターンを記載
+      - 高階関数への合成関数渡しパターンが理解できるコメントを追加
+
+    implementation_status: documentation_only
+    rationale: |
+      現在の実装では単一関数を filter_map に渡しており、
+      compose! を適用する必要がない。
+      将来的な拡張に備えてパターンを文書化するのみとする。
+
+  # ---------------------------------------------------------------------------
+  # REQ-123: compose! マクロと pipe! マクロの使い分けガイドライン
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-123
+    name: compose! と pipe! の使い分けガイドライン
+    category: documentation
+    priority: high
+    description: |
+      compose! マクロと pipe! マクロの使い分けガイドラインを
+      コードコメントとして文書化する。
+
+    location: src/workflow/mod.rs
+
+    references:
+      guideline_content: |
+        //! # 関数合成マクロの使い分け
+        //!
+        //! functional-rusty は2つの関数合成マクロを提供する:
+        //!
+        //! ## pipe! マクロ
+        //!
+        //! 値を即座に変換する場合に使用（データフロースタイル）。
+        //!
+        //! ```
+        //! // 左から右へ値が流れる
+        //! let result = pipe!(value, f, g, h); // h(g(f(value)))
+        //! ```
+        //!
+        //! **適用場面**:
+        //! - 一度きりの変換チェーン
+        //! - 中間変数を省略したい場合
+        //! - データの流れを左から右で表現したい場合
+        //!
+        //! ## compose! マクロ
+        //!
+        //! 再利用可能な合成関数を生成する場合に使用（関数合成スタイル）。
+        //!
+        //! ```
+        //! // 右から左への関数合成（数学的合成）
+        //! let composed = compose!(h, g, f);
+        //! let result = composed(value); // h(g(f(value)))
+        //! ```
+        //!
+        //! **適用場面**:
+        //! - 合成関数を複数箇所で再利用する場合
+        //! - 合成関数に名前を付けて意図を明確化したい場合
+        //! - 高階関数（map, filter_map 等）に関数を渡す場合
+        //! - Point-free スタイルを適用したい場合
+        //!
+        //! ## 使い分けの判断基準
+        //!
+        //! | 状況 | 推奨マクロ |
+        //! |------|-----------|
+        //! | 一度きりの変換 | pipe! |
+        //! | 複数箇所で再利用 | compose! |
+        //! | 合成関数に名前を付けたい | compose! |
+        //! | map/filter_map に渡す | compose!（複数関数の場合） |
+        //! | データフローを明示したい | pipe! |
+        //!
+        //! ## 例: イベント作成での使い分け
+        //!
+        //! ```
+        //! // compose! で再利用可能な合成関数を定義
+        //! let to_shipping_event = compose!(
+        //!     PlaceOrderEvent::ShippableOrderPlaced,
+        //!     create_shipping_event
+        //! );
+        //!
+        //! // 合成関数を適用
+        //! let shipping_events = vec![to_shipping_event(priced_order)];
+        //!
+        //! // pipe! で一度きりの変換（compose! を使わない場合）
+        //! let shipping_events = vec![pipe!(
+        //!     priced_order,
+        //!     create_shipping_event,
+        //!     PlaceOrderEvent::ShippableOrderPlaced
+        //! )];
+        //! ```
+
+    acceptance_criteria:
+      - ガイドラインがモジュールドキュメントに記載されていること
+      - compose! と pipe! の違いが明確に説明されていること
+      - 判断基準の表が含まれていること
+      - 具体的なコード例が含まれていること
+
+  # ---------------------------------------------------------------------------
+  # REQ-124: compose! マクロの法則検証テスト
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-124
+    name: compose! マクロの法則検証テスト
+    category: testing
+    priority: medium
+    description: |
+      compose! マクロが関数合成の法則（結合法則、恒等元）を
+      満たすことを検証するテストを実装する。
+
+    test_file: tests/phase12_compose_macro_tests.rs
+
+    test_cases:
+      - name: test_compose_associativity
+        description: |
+          結合法則の検証:
+          compose!(f, compose!(g, h)) == compose!(compose!(f, g), h)
+        code: |
+          use functional_rusty::compose;
+
+          fn f(x: i32) -> i32 { x + 1 }
+          fn g(x: i32) -> i32 { x * 2 }
+          fn h(x: i32) -> i32 { x - 3 }
+
+          let left = compose!(f, compose!(g, h));
+          let right = compose!(compose!(f, g), h);
+
+          assert_eq!(left(10), right(10));
+
+      - name: test_compose_left_identity
+        description: |
+          左恒等元の検証:
+          compose!(identity, f) == f
+        code: |
+          use functional_rusty::{compose, identity};
+
+          fn f(x: i32) -> i32 { x * 2 }
+
+          let composed = compose!(identity, f);
+          assert_eq!(composed(5), f(5));
+
+      - name: test_compose_right_identity
+        description: |
+          右恒等元の検証:
+          compose!(f, identity) == f
+        code: |
+          use functional_rusty::{compose, identity};
+
+          fn f(x: i32) -> i32 { x * 2 }
+
+          let composed = compose!(f, identity);
+          assert_eq!(composed(5), f(5));
+
+      - name: test_compose_with_domain_functions
+        description: |
+          ドメイン関数の合成テスト:
+          create_shipping_event と PlaceOrderEvent::ShippableOrderPlaced の合成
+        code: |
+          use functional_rusty::compose;
+          use order_taking_sample::workflow::{
+              create_shipping_event, PlaceOrderEvent, PricedOrder, PricingMethod,
+          };
+          // ... テストデータ作成 ...
+
+          let to_shipping_event = compose!(
+              PlaceOrderEvent::ShippableOrderPlaced,
+              create_shipping_event
+          );
+
+          let event = to_shipping_event(&priced_order);
+          assert!(event.is_shippable());
+
+      - name: test_compose_pipeline_with_partial_application
+        description: |
+          部分適用と compose! の組み合わせテスト
+        code: |
+          use functional_rusty::compose;
+          use order_taking_sample::workflow::{
+              add_shipping_info_to_order, free_vip_shipping, calculate_shipping_cost,
+              PricedOrder, PricingMethod,
+          };
+          // ... テストデータ作成 ...
+
+          let add_shipping = |order: &PricedOrder| {
+              add_shipping_info_to_order(&calculate_shipping_cost, order)
+          };
+          let process_shipping = compose!(free_vip_shipping, add_shipping);
+
+          let result = process_shipping(&priced_order);
+          // VIP の場合は配送料無料
+          assert_eq!(result.shipping_info().shipping_cost().value(), Decimal::ZERO);
+
+    acceptance_criteria:
+      - 結合法則のテストが実装されていること
+      - 左恒等元のテストが実装されていること
+      - 右恒等元のテストが実装されていること
+      - ドメイン関数の合成テストが実装されていること
+      - 部分適用との組み合わせテストが実装されていること
+      - 全てのテストがパスすること
+
+  # ---------------------------------------------------------------------------
+  # REQ-125: 統合テスト
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-125
+    name: compose! マクロ統合テスト
+    category: integration_test
+    priority: high
+    description: |
+      compose! マクロを使用した箇所の統合テストを実装する。
+      主に REQ-120, REQ-121 で変更した箇所を対象とする。
+
+    test_file: tests/phase12_compose_macro_tests.rs
+
+    test_cases:
+      - name: test_create_events_with_compose_macro
+        description: |
+          compose! マクロを使用した create_events 関数のテスト。
+          生成されるイベントの順序と内容が正しいことを検証。
+
+      - name: test_shipping_pipeline_with_compose_macro
+        description: |
+          compose! マクロを使用した配送処理パイプラインのテスト。
+          VIP 顧客と通常顧客で正しく動作することを検証。
+
+      - name: test_place_order_workflow_with_compose_macro
+        description: |
+          compose! マクロを適用した place_order ワークフロー全体のテスト。
+          全てのステップが正しく連携していることを検証。
+
+    acceptance_criteria:
+      - 全てのテストケースが実装されていること
+      - テストが全てパスすること
+      - compose! マクロの動作が期待通りであること
+
+# =============================================================================
+# 設計上の考慮事項
+# =============================================================================
+
+design_considerations:
+
+  compose_vs_pipe:
+    - title: compose! と pipe! の使い分け
+      description: |
+        compose! マクロと pipe! マクロは補完的な関係にある。
+
+        compose! を選択する場合:
+        1. 合成関数を複数箇所で再利用する
+        2. 合成関数に名前を付けて意図を明確化する
+        3. 高階関数（map, filter_map）に関数を渡す
+        4. Point-free スタイルを適用する
+
+        pipe! を選択する場合:
+        1. 一度きりの変換チェーン
+        2. 中間変数を省略したい
+        3. データの流れを左から右で表現したい
+
+  partial_application_pattern:
+    - title: 部分適用との組み合わせ
+      description: |
+        高階関数（依存性注入パターン）を compose! で合成する場合、
+        まず部分適用（クロージャ）で引数を固定してから合成する。
+
+        ```rust
+        // add_shipping_info_to_order は (calculate_fn, order) を取る
+        let add_shipping = |order: &PricedOrder| {
+            add_shipping_info_to_order(calculate_shipping_cost, order)
+        };
+
+        // 部分適用した関数を compose! で合成
+        let process_shipping = compose!(free_vip_shipping, add_shipping);
+        ```
+
+        このパターンにより:
+        - 依存性注入された関数を合成に組み込める
+        - 合成関数が単一引数の関数として扱える
+
+  ownership_and_borrowing:
+    - title: 所有権と借用の考慮
+      description: |
+        compose! マクロで生成される合成関数は move クロージャを使用するため、
+        環境をキャプチャする場合は所有権に注意が必要。
+
+        ```rust
+        // OK: 関数参照はコピー可能
+        let composed = compose!(PlaceOrderEvent::ShippableOrderPlaced, create_shipping_event);
+
+        // 注意: クロージャが環境をキャプチャする場合
+        let multiplier = 2;
+        let double = move |x: i32| x * multiplier; // move でキャプチャ
+        let composed = compose!(add_one, double);
+        ```
+
+  when_not_to_use_compose:
+    - title: compose! を使わない場合
+      description: |
+        以下の場合は compose! マクロを使用しない:
+
+        1. 単一関数の呼び出し
+           -> 関数を直接呼び出す
+
+        2. Result/Option を返す関数の連鎖
+           -> and_then, map, ? 演算子を使用
+
+        3. メソッドチェーンが自然な場合
+           -> obj.method1().method2() の形式を維持
+
+        4. 一度きりの変換で再利用しない場合
+           -> pipe! マクロを使用
+
+# =============================================================================
+# ファイル構成
+# =============================================================================
+
+artifacts:
+  source_files:
+    - path: src/workflow/events.rs
+      description: イベント作成関数の compose! マクロ適用
+      requirements:
+        - REQ-120
+
+    - path: src/workflow/place_order.rs
+      description: 配送処理パイプラインの compose! マクロ適用
+      requirements:
+        - REQ-121
+
+    - path: src/workflow/mod.rs
+      description: 使い分けガイドラインの追加
+      requirements:
+        - REQ-123
+
+  test_files:
+    - path: tests/phase12_compose_macro_tests.rs
+      description: compose! マクロテスト
+      requirements:
+        - REQ-124
+        - REQ-125
+
+# =============================================================================
+# 依存関係
+# =============================================================================
+
+dependencies:
+  internal:
+    - functional_rusty::compose!
+    - functional_rusty::identity
+
+  dev_dependencies:
+    - rstest
+
+# =============================================================================
+# 実装の優先度と判断
+# =============================================================================
+
+implementation_summary:
+  recommended:
+    - REQ-120: 配送イベント作成の compose! 適用（高優先度）
+    - REQ-121: 配送処理パイプラインの compose! 適用（高優先度）
+    - REQ-123: 使い分けガイドラインの文書化（高優先度）
+    - REQ-124: 法則検証テスト（中優先度）
+    - REQ-125: 統合テスト（高優先度）
+
+  documentation_only:
+    - REQ-122: 高階関数への合成関数渡し（現状変更不要、パターン文書化のみ）
+
+  overall_conclusion: |
+    Phase 12 では compose! マクロを使用して再利用可能な合成関数を定義する。
+
+    主な適用対象:
+    1. 配送イベント作成関数の合成（REQ-120）
+       - to_shipping_event という名前付き合成関数を定義
+       - 意図の明確化と将来の再利用性向上
+
+    2. 配送処理パイプラインの合成（REQ-121）
+       - 部分適用と compose! を組み合わせて
+       - process_shipping という配送処理全体を表す関数を定義
+
+    3. ガイドラインの文書化（REQ-123）
+       - compose! と pipe! の使い分け基準を明確化
+       - チームでの一貫した使用を促進
+
+    Phase 11 で pipe! マクロを適用した箇所のうち、
+    再利用可能な関数として定義した方が適切な箇所を compose! に置き換える。
+    ただし、一度きりの変換については pipe! のままとする。
