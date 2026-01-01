@@ -421,7 +421,7 @@ mod tests {
     }
 
     #[rstest]
-    #[allow(clippy::redundant_closure)]
+    #[allow(clippy::redundant_closure, clippy::bind_instead_of_map)]
     fn option_and_then_alias() {
         let x = Some(5);
         let flat_map_result = x.flat_map(|n| Some(n * 2));
@@ -496,7 +496,7 @@ mod tests {
     }
 
     #[rstest]
-    #[allow(clippy::redundant_closure)]
+    #[allow(clippy::redundant_closure, clippy::bind_instead_of_map)]
     fn result_and_then_alias() {
         let x: Result<i32, &str> = Ok(5);
         let flat_map_result = x.flat_map(|n| Ok(n * 2));
