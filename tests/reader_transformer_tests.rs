@@ -1,3 +1,4 @@
+#![cfg(feature = "effect")]
 //! Tests for ReaderT (Reader Transformer).
 //!
 //! ReaderT adds environment reading capability to any monad.

@@ -277,7 +277,7 @@ where
     /// let reader: ReaderT<i32, Option<i32>> = ReaderT::ask_option();
     /// assert_eq!(reader.run(42), Some(42));
     /// ```
-    #[must_use] 
+    #[must_use]
     pub fn ask_option() -> Self
     where
         R: Clone,
@@ -460,7 +460,7 @@ where
     /// let reader: ReaderT<i32, Result<i32, String>> = ReaderT::ask_result();
     /// assert_eq!(reader.run(42), Ok(42));
     /// ```
-    #[must_use] 
+    #[must_use]
     pub fn ask_result() -> Self
     where
         R: Clone,
@@ -485,10 +485,7 @@ where
     /// let modified = ReaderT::local_result(|environment| environment + 10, reader);
     /// assert_eq!(modified.run(5), Ok(30));
     /// ```
-    pub fn local_result<F>(
-        modifier: F,
-        computation: Self,
-    ) -> Self
+    pub fn local_result<F>(modifier: F, computation: Self) -> Self
     where
         F: Fn(R) -> R + 'static,
     {
@@ -641,7 +638,7 @@ where
     /// let io = reader.run(42);
     /// assert_eq!(io.run_unsafe(), 42);
     /// ```
-    #[must_use] 
+    #[must_use]
     pub fn ask_io() -> Self
     where
         R: Clone,
@@ -805,7 +802,7 @@ where
     ///     assert_eq!(async_io.run_async().await, 42);
     /// }
     /// ```
-    #[must_use] 
+    #[must_use]
     pub fn ask_async_io() -> Self
     where
         R: Clone + Send,
@@ -834,10 +831,7 @@ where
     ///     assert_eq!(async_io.run_async().await, 30);
     /// }
     /// ```
-    pub fn local_async_io<F>(
-        modifier: F,
-        computation: Self,
-    ) -> Self
+    pub fn local_async_io<F>(modifier: F, computation: Self) -> Self
     where
         F: Fn(R) -> R + 'static,
     {
@@ -881,14 +875,14 @@ mod tests {
 
     #[test]
     fn reader_transformer_fmap_option() {
-        let reader: ReaderT<i32, Option<i32>> = ReaderT::new(|environment| Some(environment));
+        let reader: ReaderT<i32, Option<i32>> = ReaderT::new(Some);
         let mapped = reader.fmap_option(|value| value * 2);
         assert_eq!(mapped.run(21), Some(42));
     }
 
     #[test]
     fn reader_transformer_flat_map_option() {
-        let reader: ReaderT<i32, Option<i32>> = ReaderT::new(|environment| Some(environment));
+        let reader: ReaderT<i32, Option<i32>> = ReaderT::new(Some);
         let chained = reader
             .flat_map_option(|value| ReaderT::new(move |environment| Some(value + environment)));
         assert_eq!(chained.run(10), Some(20));

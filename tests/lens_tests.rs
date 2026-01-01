@@ -1,3 +1,4 @@
+#![cfg(feature = "optics")]
 //! Unit tests for Lens optics.
 //!
 //! This module contains comprehensive tests for the Lens trait and its implementations:

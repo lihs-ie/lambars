@@ -1,3 +1,4 @@
+#![cfg(feature = "optics")]
 //! Property-based tests for Traversal laws.
 //!
 //! Traversal Laws:
@@ -15,9 +16,7 @@
 #![forbid(unsafe_code)]
 
 use lambars::lens;
-use lambars::optics::{
-    Lens, OptionTraversal, Prism, ResultTraversal, Traversal, VecTraversal,
-};
+use lambars::optics::{Lens, OptionTraversal, Prism, ResultTraversal, Traversal, VecTraversal};
 use lambars::prism;
 use proptest::prelude::*;
 
@@ -116,7 +115,7 @@ proptest! {
     fn prop_option_traversal_modify_identity_law_some(value in any::<i32>()) {
         let traversal: OptionTraversal<i32> = OptionTraversal::new();
         let source = Some(value);
-        let modified = traversal.modify_all(source.clone(), |x| x);
+        let modified = traversal.modify_all(source, |x| x);
         prop_assert_eq!(modified, source);
     }
 
@@ -129,7 +128,7 @@ proptest! {
         let function2 = |x: i32| x.saturating_mul(3);
 
         let left = traversal.modify_all(
-            traversal.modify_all(source.clone(), function1),
+            traversal.modify_all(source, function1),
             function2
         );
         let right = traversal.modify_all(source, |x| function2(function1(x)));
@@ -150,7 +149,7 @@ proptest! {
 fn test_option_traversal_modify_identity_law_none() {
     let traversal: OptionTraversal<i32> = OptionTraversal::new();
     let source: Option<i32> = None;
-    let modified = traversal.modify_all(source.clone(), |x| x);
+    let modified = traversal.modify_all(source, |x| x);
     assert_eq!(modified, source);
 }
 
@@ -162,7 +161,7 @@ fn test_option_traversal_modify_composition_law_none() {
     let function1 = |x: i32| x.saturating_add(5);
     let function2 = |x: i32| x.saturating_mul(3);
 
-    let left = traversal.modify_all(traversal.modify_all(source.clone(), function1), function2);
+    let left = traversal.modify_all(traversal.modify_all(source, function1), function2);
     let right = traversal.modify_all(source, |x| function2(function1(x)));
 
     assert_eq!(left, right);

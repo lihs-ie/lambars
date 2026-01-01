@@ -253,10 +253,7 @@ impl<T: Clone + 'static> Traversal<PersistentVector<T>, T> for PersistentVectorT
     where
         F: FnMut(T) -> T,
     {
-        source
-            .into_iter()
-            .map(function)
-            .collect()
+        source.into_iter().map(function).collect()
     }
 }
 
@@ -719,7 +716,7 @@ mod tests {
         #[test]
         fn test_clone() {
             let optional = index_optional::<i32>(2);
-            let cloned = optional.clone();
+            let cloned = optional;
             let vector: PersistentVector<i32> = (0..=5).collect();
             assert_eq!(cloned.get_option(&vector), Some(&2));
         }
@@ -745,7 +742,7 @@ mod tests {
         #[test]
         fn test_clone() {
             let traversal = persistent_vector_traversal::<i32>();
-            let cloned = traversal.clone();
+            let cloned = traversal;
             let vector: PersistentVector<i32> = (1..=3).collect();
             assert_eq!(cloned.length(&vector), 3);
         }
@@ -765,7 +762,7 @@ mod tests {
         #[test]
         fn test_clone() {
             let optional = key_optional_hashmap::<String, i32>("key".to_string());
-            let cloned = optional.clone();
+            let cloned = optional;
             let map = PersistentHashMap::new().insert("key".to_string(), 100);
             assert_eq!(cloned.get_option(&map), Some(&100));
         }
@@ -807,7 +804,7 @@ mod tests {
         #[test]
         fn test_clone() {
             let optional = key_optional_treemap::<i32, String>(5);
-            let cloned = optional.clone();
+            let cloned = optional;
             let map = PersistentTreeMap::new().insert(5, "five".to_string());
             assert_eq!(cloned.get_option(&map), Some(&"five".to_string()));
         }

@@ -94,6 +94,6 @@ mod tests {
     #[test]
     fn library_compiles() {
         // Basic smoke test to ensure the library compiles
-        assert!(true);
+        // This test just needs to successfully compile and run
     }
 }

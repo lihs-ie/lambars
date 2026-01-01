@@ -1,11 +1,10 @@
+#![cfg(feature = "control")]
 //! Property-based tests for Continuation<R, A> laws.
 //!
 //! This module verifies that Continuation implementations satisfy:
 //!
 //! - **Functor Laws**: identity and composition
 //! - **Monad Laws**: left identity, right identity, associativity
-
-#![cfg(feature = "control")]
 
 use lambars::control::Continuation;
 use proptest::prelude::*;

@@ -1,3 +1,4 @@
+#![cfg(feature = "persistent")]
 //! Property-based tests for PersistentVector laws.
 //!
 //! This module verifies the algebraic laws and invariants of PersistentVector
@@ -21,7 +22,7 @@ proptest! {
         let length = vector.len();
 
         // Pick a random valid index
-        let index = (elements[0].abs() as usize) % length;
+        let index = (elements[0].unsigned_abs() as usize) % length;
         let new_value = 99999;
 
         if let Some(updated) = vector.update(index, new_value) {
@@ -38,20 +39,20 @@ proptest! {
         let length = vector.len();
 
         // Pick two different indices
-        let update_index = (elements[0].abs() as usize) % length;
-        let check_index = ((elements[1].abs() as usize) % (length - 1) + update_index + 1) % length;
+        let update_index = (elements[0].unsigned_abs() as usize) % length;
+        let check_index = ((elements[1].unsigned_abs() as usize) % (length - 1) + update_index + 1) % length;
         let new_value = 99999;
 
-        if update_index != check_index {
-            if let Some(updated) = vector.update(update_index, new_value) {
-                prop_assert_eq!(
-                    updated.get(check_index),
-                    vector.get(check_index),
-                    "Update at {} should not affect index {}",
-                    update_index,
-                    check_index
-                );
-            }
+        if update_index != check_index
+            && let Some(updated) = vector.update(update_index, new_value)
+        {
+            prop_assert_eq!(
+                updated.get(check_index),
+                vector.get(check_index),
+                "Update at {} should not affect index {}",
+                update_index,
+                check_index
+            );
         }
     }
 
@@ -310,7 +311,7 @@ proptest! {
         elements in prop::collection::vec(any::<i32>(), 1..50)
     ) {
         let original: PersistentVector<i32> = elements.iter().copied().collect();
-        let index = (elements[0].abs() as usize) % original.len();
+        let index = (elements[0].unsigned_abs() as usize) % original.len();
         let _updated = original.update(index, 99999);
 
         // Original should be unchanged

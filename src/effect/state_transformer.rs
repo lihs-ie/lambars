@@ -308,7 +308,7 @@ where
     /// let state: StateT<i32, Option<(i32, i32)>> = StateT::get_option();
     /// assert_eq!(state.run(42), Some((42, 42)));
     /// ```
-    #[must_use] 
+    #[must_use]
     pub fn get_option() -> Self
     where
         S: Clone,
@@ -436,7 +436,7 @@ where
     }
 
     /// Returns the current state as the result.
-    #[must_use] 
+    #[must_use]
     pub fn get_result() -> Self
     where
         S: Clone,
@@ -529,7 +529,7 @@ where
     }
 
     /// Returns the current state as the result.
-    #[must_use] 
+    #[must_use]
     pub fn get_io() -> Self
     where
         S: Clone,
@@ -705,7 +705,7 @@ where
     ///     assert_eq!(state.run(42).run_async().await, (42, 42));
     /// }
     /// ```
-    #[must_use] 
+    #[must_use]
     pub fn get_async_io() -> Self
     where
         S: Clone,

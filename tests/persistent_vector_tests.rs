@@ -1,3 +1,4 @@
+#![cfg(feature = "persistent")]
 //! Unit tests for PersistentVector.
 //!
 //! This module contains comprehensive tests for the PersistentVector implementation,

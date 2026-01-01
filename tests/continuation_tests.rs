@@ -1,3 +1,4 @@
+#![cfg(feature = "control")]
 //! Unit tests for Continuation<R, A> type.
 //!
 //! Tests cover:
@@ -6,8 +7,6 @@
 //! - call_with_current_continuation_once (call/cc)
 //! - Early return patterns
 //! - Complex compositions
-
-#![cfg(feature = "control")]
 
 use lambars::control::Continuation;
 use rstest::rstest;

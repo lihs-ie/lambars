@@ -1,3 +1,4 @@
+#![cfg(feature = "effect")]
 //! Property-based tests for State Monad laws.
 //!
 //! Tests the following laws using proptest:
@@ -84,7 +85,7 @@ proptest! {
     fn prop_state_monad_right_identity(initial_state in -1000i32..1000i32) {
         let state: State<i32, i32> = State::new(|s: i32| (s.wrapping_mul(2), s.wrapping_add(1)));
         let right_identity: State<i32, i32> = State::new(|s: i32| (s.wrapping_mul(2), s.wrapping_add(1)))
-            .flat_map(|x| State::pure(x));
+            .flat_map(State::pure);
 
         let (result1, final1) = state.run(initial_state);
         let (result2, final2) = right_identity.run(initial_state);
@@ -122,7 +123,7 @@ proptest! {
     /// Get Put Law: get().flat_map(|s| put(s)) is equivalent to pure(()) in terms of state
     #[test]
     fn prop_state_get_put_law(initial_state in -1000i32..1000i32) {
-        let get_put: State<i32, ()> = State::get().flat_map(|s| State::put(s));
+        let get_put: State<i32, ()> = State::get().flat_map(State::put);
         let noop: State<i32, ()> = State::pure(());
 
         let (_, final1) = get_put.run(initial_state);
@@ -297,7 +298,7 @@ mod unit_tests {
 
     #[rstest]
     fn state_get_put_is_noop_for_state() {
-        let get_put: State<i32, ()> = State::get().flat_map(|s| State::put(s));
+        let get_put: State<i32, ()> = State::get().flat_map(State::put);
 
         for initial_state in [-100, -1, 0, 1, 100] {
             let (_, final_state) = get_put.run(initial_state);

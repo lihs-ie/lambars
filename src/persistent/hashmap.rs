@@ -284,12 +284,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     }
 
     /// Recursive helper for get.
-    fn get_from_node<'a, Q>(
-        node: &'a Node<K, V>,
-        key: &Q,
-        hash: u64,
-        depth: usize,
-    ) -> Option<&'a V>
+    fn get_from_node<'a, Q>(node: &'a Node<K, V>, key: &Q, hash: u64, depth: usize) -> Option<&'a V>
     where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
@@ -438,7 +433,15 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
             Node::Collision {
                 hash: collision_hash,
                 entries,
-            } => Self::insert_into_collision_node(node, *collision_hash, entries, key, value, hash, depth),
+            } => Self::insert_into_collision_node(
+                node,
+                *collision_hash,
+                entries,
+                key,
+                value,
+                hash,
+                depth,
+            ),
         }
     }
 
@@ -806,7 +809,9 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
         match &children[position] {
             Child::Entry { key: child_key, .. } => {
                 if child_key.borrow() == key {
-                    Some(Self::remove_entry_from_bitmap(bitmap, children, position, bit))
+                    Some(Self::remove_entry_from_bitmap(
+                        bitmap, children, position, bit,
+                    ))
                 } else {
                     None
                 }
@@ -1126,8 +1131,8 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
             (Some(_), Some(value)) => {
                 // Update existing key
                 let hash = compute_hash(key);
-                let actual_key = Self::find_key(&self.root, key, hash, 0)
-                    .unwrap_or_else(|| key.to_owned());
+                let actual_key =
+                    Self::find_key(&self.root, key, hash, 0).unwrap_or_else(|| key.to_owned());
                 self.insert(actual_key, value)
             }
             (Some(_), None) => {
@@ -1197,7 +1202,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     ///     println!("{}: {}", key, value);
     /// }
     /// ```
-    #[must_use] 
+    #[must_use]
     pub fn iter(&self) -> PersistentHashMapIterator<'_, K, V> {
         let mut entries = Vec::new();
         Self::collect_entries(&self.root, &mut entries);

@@ -1,3 +1,4 @@
+#![cfg(feature = "persistent")]
 //! Property-based tests for PersistentHashSet laws.
 //!
 //! These tests verify that PersistentHashSet satisfies the mathematical

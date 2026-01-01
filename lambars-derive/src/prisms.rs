@@ -6,7 +6,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use syn::{parse_macro_input, Data, DeriveInput, Fields, Generics, Ident, Variant};
+use syn::{Data, DeriveInput, Fields, Generics, Ident, Variant, parse_macro_input};
 
 /// Main implementation of the Prisms derive macro.
 pub fn derive_prisms_impl(input: TokenStream) -> TokenStream {
@@ -16,16 +16,16 @@ pub fn derive_prisms_impl(input: TokenStream) -> TokenStream {
     let generics = &input.generics;
 
     let expanded = match &input.data {
-        Data::Enum(data_enum) => {
-            generate_enum_prisms(name, generics, &data_enum.variants.iter().collect::<Vec<_>>())
-        }
-        Data::Struct(_) => {
-            syn::Error::new_spanned(
-                &input.ident,
-                "Prisms can only be derived for enums, not structs. Use #[derive(Lenses)] for structs.",
-            )
-            .to_compile_error()
-        }
+        Data::Enum(data_enum) => generate_enum_prisms(
+            name,
+            generics,
+            &data_enum.variants.iter().collect::<Vec<_>>(),
+        ),
+        Data::Struct(_) => syn::Error::new_spanned(
+            &input.ident,
+            "Prisms can only be derived for enums, not structs. Use #[derive(Lenses)] for structs.",
+        )
+        .to_compile_error(),
         Data::Union(_) => {
             syn::Error::new_spanned(&input.ident, "Prisms cannot be derived for unions.")
                 .to_compile_error()
@@ -294,7 +294,8 @@ fn to_snake_case(input: &str) -> String {
                 // Insert underscore if:
                 // 1. Previous char is lowercase (e.g., "keyPress" -> "key_press")
                 // 2. Previous char is uppercase and next char is lowercase (e.g., "XMLParser" -> "xml_parser")
-                if previous_char.is_lowercase() || (previous_char.is_uppercase() && next_is_lowercase)
+                if previous_char.is_lowercase()
+                    || (previous_char.is_uppercase() && next_is_lowercase)
                 {
                     result.push('_');
                 }

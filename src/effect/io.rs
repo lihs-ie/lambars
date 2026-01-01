@@ -148,7 +148,7 @@ impl<A: 'static> IO<A> {
     /// let result = io.run_unsafe();
     /// assert_eq!(result, 42);
     /// ```
-    #[must_use] 
+    #[must_use]
     pub fn run_unsafe(self) -> A {
         (self.run_io)()
     }
@@ -245,7 +245,7 @@ impl<A: 'static> IO<A> {
     /// let io = IO::pure(10).then(IO::pure(20));
     /// assert_eq!(io.run_unsafe(), 20);
     /// ```
-    #[must_use] 
+    #[must_use]
     pub fn then<B>(self, next: IO<B>) -> IO<B>
     where
         B: 'static,
@@ -295,7 +295,7 @@ impl<A: 'static> IO<A> {
     /// let io = io1.product(io2);
     /// assert_eq!(io.run_unsafe(), (10, "hello".to_string()));
     /// ```
-    #[must_use] 
+    #[must_use]
     pub fn product<B>(self, other: IO<B>) -> IO<(A, B)>
     where
         B: 'static,
@@ -348,7 +348,7 @@ impl IO<()> {
     /// let io = IO::delay(Duration::from_millis(100));
     /// io.run_unsafe(); // Waits for 100ms
     /// ```
-    #[must_use] 
+    #[must_use]
     pub fn delay(duration: Duration) -> Self {
         Self::new(move || {
             std::thread::sleep(duration);
@@ -370,7 +370,7 @@ impl IO<std::io::Result<String>> {
     /// let line = io.run_unsafe().expect("Failed to read line");
     /// println!("You entered: {}", line);
     /// ```
-    #[must_use] 
+    #[must_use]
     pub fn read_line() -> Self {
         Self::new(|| {
             let mut buffer = String::new();
@@ -457,7 +457,7 @@ impl<A: Send + 'static> IO<A> {
     ///     assert_eq!(result, 42);
     /// }
     /// ```
-    #[must_use] 
+    #[must_use]
     pub fn to_async(self) -> super::AsyncIO<A> {
         // Execute the IO action immediately and wrap the result.
         // This is necessary because IO is not Send (it contains

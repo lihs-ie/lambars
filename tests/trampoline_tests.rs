@@ -1,3 +1,4 @@
+#![cfg(feature = "control")]
 //! Unit tests for Trampoline<A> type.
 //!
 //! Tests cover:
@@ -8,8 +9,6 @@
 //! - map and flat_map operations
 //! - resume for step-by-step evaluation
 //! - Tree traversal patterns
-
-#![cfg(feature = "control")]
 
 use lambars::control::{Either, Trampoline};
 use rstest::rstest;

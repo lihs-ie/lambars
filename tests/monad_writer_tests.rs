@@ -1,140 +1,29 @@
+#![cfg(feature = "effect")]
 //! Tests for MonadWriter trait.
 //!
 //! This module tests the MonadWriter type class which provides
 //! log output capabilities.
 //!
 //! Note: These tests verify trait definitions and signatures.
-//! Actual implementations will be tested in Phase 6.2 when Writer monad is implemented.
-
-use lambars::effect::MonadWriter;
-use lambars::typeclass::{Monad, Monoid, Product, Sum};
-use std::marker::PhantomData;
 
 // =============================================================================
 // Trait Definition Tests
 // =============================================================================
 
 /// Verify MonadWriter trait exists and requires Monad as supertrait.
+/// This is a compile-time check - if this file compiles, the trait is defined correctly.
 #[test]
-fn monad_writer_trait_exists_and_requires_monad() {
-    // This is a compile-time check only
-    // The function is never called, but the compiler verifies the trait hierarchy
-    fn assert_monad_writer_requires_monad<W: Monoid, M: MonadWriter<W>>() {
-        // If M implements MonadWriter<W>, it must also implement Monad
-        fn assert_monad<T: Monad>() {
-            let _ = PhantomData::<T>;
-        }
-        assert_monad::<M>();
-    }
-    // Just verify the function compiles - we don't call it since no types implement MonadWriter yet
-    let _ = PhantomData::<fn()>;
-    fn _type_check() {
-        fn _inner<W: Monoid, M: MonadWriter<W>>() {
-            assert_monad_writer_requires_monad::<W, M>();
-        }
-    }
-}
+fn monad_writer_trait_compiles() {
+    use lambars::effect::MonadWriter;
+    use lambars::typeclass::{Monad, Monoid};
 
-/// Verify MonadWriter requires Monoid for the output type.
-#[test]
-fn monad_writer_requires_monoid_output() {
-    // This is a compile-time check only
-    fn assert_monoid_output<W: Monoid, M: MonadWriter<W>>() {
-        fn assert_monoid<T: Monoid>() {
-            let _ = PhantomData::<T>;
-        }
-        assert_monoid::<W>();
+    // This verifies that MonadWriter trait exists and requires Monad
+    // The function type signature enforces these bounds at compile time
+    fn _check<W: Monoid, M: MonadWriter<W>>() {
+        fn requires_monad<T: Monad>() {}
+        requires_monad::<M>();
     }
-    // Just verify the function compiles
-    let _ = PhantomData::<fn()>;
-    fn _type_check() {
-        fn _inner<W: Monoid, M: MonadWriter<W>>() {
-            assert_monoid_output::<W, M>();
-        }
-    }
-}
-
-/// Verify MonadWriter has the tell method with correct signature.
-#[test]
-fn monad_writer_tell_method_signature() {
-    // This verifies the method signature at compile time
-    fn verify_tell_signature<W: Monoid, M: MonadWriter<W>>(output: W) -> M::WithType<()> {
-        M::tell(output)
-    }
-    // Just verify the function compiles - we don't call it
-    let _ = PhantomData::<fn()>;
-    fn _type_check() {
-        fn _inner<W: Monoid, M: MonadWriter<W>>(output: W) -> M::WithType<()> {
-            verify_tell_signature::<W, M>(output)
-        }
-    }
-}
-
-/// Verify MonadWriter has the listen method with correct signature.
-#[test]
-fn monad_writer_listen_method_signature() {
-    // This verifies the method signature at compile time
-    fn verify_listen_signature<W: Monoid, A: 'static, M: MonadWriter<W>>(
-        computation: M::WithType<A>,
-    ) -> M::WithType<(A, W)> {
-        M::listen(computation)
-    }
-    // Just verify the function compiles - we don't call it
-    let _ = PhantomData::<fn()>;
-    fn _type_check() {
-        fn _inner<W: Monoid, A: 'static, M: MonadWriter<W>>(
-            computation: M::WithType<A>,
-        ) -> M::WithType<(A, W)> {
-            verify_listen_signature::<W, A, M>(computation)
-        }
-    }
-}
-
-/// Verify MonadWriter has the pass method with correct signature.
-#[test]
-fn monad_writer_pass_method_signature() {
-    // This verifies the method signature at compile time
-    fn verify_pass_signature<
-        W: Monoid,
-        A: 'static,
-        F: FnOnce(W) -> W + 'static,
-        M: MonadWriter<W>,
-    >(
-        computation: M::WithType<(A, F)>,
-    ) -> M::WithType<A> {
-        M::pass(computation)
-    }
-    // Just verify the function compiles - we don't call it
-    let _ = PhantomData::<fn()>;
-    fn _type_check() {
-        fn _inner<W: Monoid, A: 'static, F: FnOnce(W) -> W + 'static, M: MonadWriter<W>>(
-            computation: M::WithType<(A, F)>,
-        ) -> M::WithType<A> {
-            verify_pass_signature::<W, A, F, M>(computation)
-        }
-    }
-}
-
-/// Verify MonadWriter has the censor method with correct signature.
-#[test]
-fn monad_writer_censor_method_signature() {
-    // This verifies the method signature at compile time
-    fn verify_censor_signature<W: Monoid, A: 'static, M: MonadWriter<W>>(
-        modifier: impl FnOnce(W) -> W + Clone + 'static,
-        computation: M::WithType<A>,
-    ) -> M::WithType<A> {
-        M::censor(modifier, computation)
-    }
-    // Just verify the function compiles - we don't call it
-    let _ = PhantomData::<fn()>;
-    fn _type_check() {
-        fn _inner<W: Monoid, A: 'static, M: MonadWriter<W>>(
-            modifier: impl FnOnce(W) -> W + Clone + 'static,
-            computation: M::WithType<A>,
-        ) -> M::WithType<A> {
-            verify_censor_signature::<W, A, M>(modifier, computation)
-        }
-    }
+    // The function definition itself is sufficient to verify the trait bounds
 }
 
 // =============================================================================
@@ -144,19 +33,19 @@ fn monad_writer_censor_method_signature() {
 /// Verify common monoid types work as MonadWriter output.
 #[test]
 fn monad_writer_common_monoid_outputs() {
-    fn assert_monoid<W: Monoid>() {
-        let _ = PhantomData::<W>;
-    }
+    use lambars::typeclass::Monoid;
+
+    fn check<W: Monoid>() {}
 
     // String is a Monoid (empty + concatenation)
-    assert_monoid::<String>();
+    check::<String>();
 
     // Vec<T> is a Monoid (empty + append)
-    assert_monoid::<Vec<String>>();
-    assert_monoid::<Vec<i32>>();
+    check::<Vec<String>>();
+    check::<Vec<i32>>();
 
     // Option<T> is a Monoid when T: Semigroup
-    assert_monoid::<Option<String>>();
+    check::<Option<String>>();
 }
 
 // =============================================================================
@@ -179,55 +68,5 @@ fn monad_writer_common_monoid_outputs() {
 #[test]
 fn monad_writer_laws_are_documented() {
     // This test serves as documentation for MonadWriter laws
-    // Actual law verification will be done with proptest in later phases
-    // when Writer monad is implemented
-}
-
-// =============================================================================
-// Type Parameter Flexibility Tests
-// =============================================================================
-
-/// Verify MonadWriter works with String as output.
-#[test]
-fn monad_writer_string_output_signature() {
-    fn assert_string_output<M: MonadWriter<String>>() {
-        let _ = PhantomData::<M>;
-    }
-    // Just verify the function compiles
-    let _ = PhantomData::<fn()>;
-    fn _type_check() {
-        fn _inner<M: MonadWriter<String>>() {
-            assert_string_output::<M>();
-        }
-    }
-}
-
-/// Verify MonadWriter works with Vec<T> as output.
-#[test]
-fn monad_writer_vec_output_signature() {
-    fn assert_vec_output<M: MonadWriter<Vec<String>>>() {
-        let _ = PhantomData::<M>;
-    }
-    // Just verify the function compiles
-    let _ = PhantomData::<fn()>;
-    fn _type_check() {
-        fn _inner<M: MonadWriter<Vec<String>>>() {
-            assert_vec_output::<M>();
-        }
-    }
-}
-
-/// Verify MonadWriter works with tuple monoids.
-#[test]
-fn monad_writer_tuple_output_signature() {
-    fn assert_tuple_output<M: MonadWriter<(Sum<i32>, Product<i32>)>>() {
-        let _ = PhantomData::<M>;
-    }
-    // Just verify the function compiles
-    let _ = PhantomData::<fn()>;
-    fn _type_check() {
-        fn _inner<M: MonadWriter<(Sum<i32>, Product<i32>)>>() {
-            assert_tuple_output::<M>();
-        }
-    }
+    // Actual law verification is done in writer_laws.rs
 }

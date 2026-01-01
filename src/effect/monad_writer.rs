@@ -249,56 +249,23 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn monad_writer_trait_is_defined() {
-        // Just verify the trait exists and can be referenced
-        // The function is not called, but the compiler verifies the trait bounds
-        fn assert_trait_exists<M: MonadWriter<Vec<String>>>() {
-            let _ = PhantomData::<M>;
-        }
-        // Verify the function compiles - we don't call it since no types implement MonadWriter yet
-        let _ = PhantomData::<fn()>;
-        fn _type_check() {
-            fn _inner<M: MonadWriter<Vec<String>>>() {
-                assert_trait_exists::<M>();
-            }
-        }
-    }
+    fn monad_writer_trait_compiles() {
+        // Just verify the trait module compiles and is accessible
+        // The trait requires Monad as a supertrait and W: Monoid
+        use super::MonadWriter;
 
-    #[test]
-    fn monad_writer_requires_monad() {
-        // MonadWriter should require Monad as a supertrait
-        // This is verified by the trait definition itself
-        fn assert_monad<M: Monad>() {
-            let _ = PhantomData::<M>;
-        }
-        fn assert_monad_writer<M: MonadWriter<Vec<String>>>() {
-            // If M implements MonadWriter, it must also implement Monad
-            assert_monad::<M>();
-        }
-        // Verify the function compiles - we don't call it
-        let _ = PhantomData::<fn()>;
-        fn _type_check() {
-            fn _inner<M: MonadWriter<Vec<String>>>() {
-                assert_monad_writer::<M>();
-            }
-        }
+        // This function signature proves the trait is properly defined
+        fn _requires_monad_writer<W: Monoid, M: MonadWriter<W>>() {}
+
+        // The test passes if this file compiles
     }
 
     #[test]
     fn monad_writer_requires_monoid_for_output() {
         // The output type W must be a Monoid
-        fn assert_monoid<W: Monoid>() {
+        fn check_monoid<W: Monoid>() {
             let _ = PhantomData::<W>;
         }
-        fn assert_monad_writer<W: Monoid, M: MonadWriter<W>>() {
-            assert_monoid::<W>();
-        }
-        // Verify the function compiles - we don't call it
-        let _ = PhantomData::<fn()>;
-        fn _type_check() {
-            fn _inner<W: Monoid, M: MonadWriter<W>>() {
-                assert_monad_writer::<W, M>();
-            }
-        }
+        check_monoid::<Vec<String>>();
     }
 }

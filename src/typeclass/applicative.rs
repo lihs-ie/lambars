@@ -1062,10 +1062,7 @@ mod tests {
         let c = Some(3);
 
         // ((a, b), c) style
-        let left = a
-            .clone()
-            .map2(b.clone(), |x, y| (x, y))
-            .map2(c.clone(), |(x, y), z| x + y + z);
+        let left = a.map2(b, |x, y| (x, y)).map2(c, |(x, y), z| x + y + z);
 
         // Direct map3
         let right = a.map3(b, c, |x, y, z| x + y + z);
@@ -1080,10 +1077,7 @@ mod tests {
         let b: Result<i32, ()> = Ok(2);
         let c: Result<i32, ()> = Ok(3);
 
-        let left = a
-            .clone()
-            .map2(b.clone(), |x, y| (x, y))
-            .map2(c.clone(), |(x, y), z| x + y + z);
+        let left = a.map2(b, |x, y| (x, y)).map2(c, |(x, y), z| x + y + z);
         let right = a.map3(b, c, |x, y, z| x + y + z);
 
         assert_eq!(left, right);
@@ -1098,7 +1092,7 @@ mod tests {
     fn option_map2_with_different_types() {
         let a = Some(42);
         let b = Some("hello");
-        let result = a.map2(b, |n, s| format!("{}: {}", n, s));
+        let result = a.map2(b, |n, s| format!("{n}: {s}"));
         assert_eq!(result, Some("42: hello".to_string()));
     }
 

@@ -1,3 +1,4 @@
+#![cfg(feature = "optics")]
 //! Unit tests for Optional optics.
 //!
 //! Optional is a Lens + Prism composition result.

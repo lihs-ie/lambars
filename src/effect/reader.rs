@@ -305,7 +305,7 @@ where
     /// let sequenced = reader1.then(reader2);
     /// assert_eq!(sequenced.run(42), "result");
     /// ```
-    #[must_use] 
+    #[must_use]
     pub fn then<B>(self, next: Reader<R, B>) -> Reader<R, B>
     where
         B: 'static,
@@ -408,7 +408,7 @@ where
     /// let product = reader1.product(reader2);
     /// assert_eq!(product.run(42), (42, "hello"));
     /// ```
-    #[must_use] 
+    #[must_use]
     pub fn product<B>(self, other: Reader<R, B>) -> Reader<R, (A, B)>
     where
         B: 'static,
@@ -433,7 +433,7 @@ where
     /// let result = function_reader.apply(value_reader);
     /// assert_eq!(result.run(41), 42);
     /// ```
-    #[must_use] 
+    #[must_use]
     pub fn apply<B, Output>(self, other: Reader<R, B>) -> Reader<R, Output>
     where
         A: Fn(B) -> Output + 'static,
@@ -465,7 +465,7 @@ where
     /// let reader: Reader<i32, i32> = Reader::ask();
     /// assert_eq!(reader.run(42), 42);
     /// ```
-    #[must_use] 
+    #[must_use]
     pub fn ask() -> Self {
         Self::new(|environment| environment)
     }

@@ -1,3 +1,4 @@
+#![cfg(feature = "typeclass")]
 //! Integration tests for lambars library.
 //!
 //! These tests verify the public API of the library works correctly
@@ -10,7 +11,7 @@ use rstest::rstest;
 fn library_is_accessible() {
     // This test ensures the library compiles and is accessible
     // More specific tests will be added as features are implemented
-    assert!(true);
+    // The test passes by successfully compiling
 }
 
 /// Parameterized test example using rstest.

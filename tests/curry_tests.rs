@@ -310,7 +310,7 @@ mod edge_cases {
         }
 
         let curried = curry2!(print_sum);
-        let _ = curried(5)(3);
+        curried(5)(3);
         // Should compile and run without errors
     }
 }

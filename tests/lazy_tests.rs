@@ -1,3 +1,4 @@
+#![cfg(feature = "control")]
 //! Unit tests for Lazy<T, F> type.
 //!
 //! Tests cover:
@@ -6,8 +7,6 @@
 //! - Poisoned state handling
 //! - map and flat_map operations
 //! - zip and zip_with operations
-
-#![cfg(feature = "control")]
 
 use lambars::control::{Lazy, LazyPoisonedError};
 use rstest::rstest;

@@ -1,3 +1,4 @@
+#![cfg(feature = "persistent")]
 //! Unit tests for PersistentHashSet.
 //!
 //! These tests follow the TDD approach, testing all API methods

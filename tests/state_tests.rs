@@ -1,3 +1,4 @@
+#![cfg(feature = "effect")]
 //! Unit tests for State Monad.
 //!
 //! Tests basic functionality of the State monad including:
@@ -283,6 +284,7 @@ fn state_gets_projects_from_state() {
     #[derive(Clone)]
     struct Config {
         port: u16,
+        #[allow(dead_code)]
         host: String,
     }
 

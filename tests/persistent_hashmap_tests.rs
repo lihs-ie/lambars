@@ -1,3 +1,4 @@
+#![cfg(feature = "persistent")]
 //! Unit tests for PersistentHashMap.
 //!
 //! This module contains comprehensive unit tests for the PersistentHashMap
@@ -606,11 +607,13 @@ impl Hash for ControlledHash {
 /// A hash key type that allows complete control over the final computed hash value.
 /// This is used for testing specific code paths that depend on hash bit patterns.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 struct DirectHashKey {
     identifier: i32,
     hash_value: u64,
 }
 
+#[allow(dead_code)]
 impl DirectHashKey {
     fn new(identifier: i32, hash_value: u64) -> Self {
         DirectHashKey {
@@ -621,10 +624,12 @@ impl DirectHashKey {
 }
 
 /// Custom hasher that captures a single u64 value.
+#[allow(dead_code)]
 struct DirectHasher {
     value: u64,
 }
 
+#[allow(dead_code)]
 impl DirectHasher {
     fn new() -> Self {
         DirectHasher { value: 0 }

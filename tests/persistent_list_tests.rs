@@ -1,3 +1,4 @@
+#![cfg(feature = "persistent")]
 //! Unit tests for PersistentList.
 //!
 //! These tests verify the correctness of the PersistentList implementation.

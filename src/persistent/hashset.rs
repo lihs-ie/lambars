@@ -554,7 +554,7 @@ impl<T: Clone + Hash + Eq> PersistentHashSet<T> {
     ///     println!("{}", element);
     /// }
     /// ```
-    #[must_use] 
+    #[must_use]
     pub fn iter(&self) -> PersistentHashSetIterator<'_, T> {
         PersistentHashSetIterator {
             inner: self.inner.keys().collect::<Vec<_>>().into_iter(),
@@ -704,8 +704,7 @@ impl<T: Clone + Hash + Eq> Foldable for PersistentHashSet<T> {
     where
         F: FnMut(B, T) -> B,
     {
-        self.into_iter()
-            .fold(init, function)
+        self.into_iter().fold(init, function)
     }
 
     fn fold_right<B, F>(self, init: B, mut function: F) -> B

@@ -1,3 +1,4 @@
+#![cfg(feature = "persistent")]
 //! Unit tests for PersistentTreeMap.
 //!
 //! This test file follows TDD methodology - tests are written first,

@@ -369,7 +369,7 @@ where
     }
 
     /// Lifts an IO into `WriterT` with empty output.
-    #[must_use] 
+    #[must_use]
     pub fn lift_io(inner: IO<A>) -> Self {
         Self::new(inner.fmap(|value| (value, W::empty())))
     }

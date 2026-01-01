@@ -704,8 +704,7 @@ where
     where
         F: FnMut(A) -> A,
     {
-        self.prism
-            .modify_or_identity(source, function)
+        self.prism.modify_or_identity(source, function)
     }
 }
 

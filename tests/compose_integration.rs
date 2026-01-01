@@ -1,3 +1,4 @@
+#![cfg(feature = "compose")]
 //! Integration tests for compose module.
 //!
 //! These tests verify that all composition utilities work together correctly
@@ -9,7 +10,6 @@
 //! - `curry2!` through `curry6!` macros
 //! - `identity`, `constant`, `flip` helper functions
 
-#![cfg(feature = "compose")]
 #![allow(unused_imports)]
 
 use lambars::compose::{constant, flip, identity};
@@ -335,7 +335,7 @@ fn test_curried_function_reuse_many_times() {
     let add_five = curry2!(add)(5);
 
     // Should be able to reuse the curried function many times
-    let sum: i32 = (0..1000).map(|x| add_five(x)).sum();
+    let sum: i32 = (0..1000).map(&add_five).sum();
 
     // Sum of (i + 5) for i = 0..1000 = sum(0..1000) + 5*1000
     // = (999 * 1000 / 2) + 5000 = 499500 + 5000 = 504500

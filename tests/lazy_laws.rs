@@ -1,3 +1,4 @@
+#![cfg(feature = "control")]
 //! Property-based tests for Lazy<T, F> laws.
 //!
 //! This module verifies that Lazy implementations satisfy:
@@ -7,8 +8,6 @@
 //! - **Memoization**: computation runs at most once
 //! - **Functor Laws**: identity and composition
 //! - **Monad Laws**: left identity, right identity, associativity
-
-#![cfg(feature = "control")]
 
 use lambars::control::Lazy;
 use proptest::prelude::*;
@@ -149,7 +148,7 @@ proptest! {
     #[test]
     fn prop_lazy_monad_right_identity(value in any::<i32>()) {
         let lazy = Lazy::new(move || value);
-        let flat_mapped = Lazy::new(move || value).flat_map(|x| Lazy::new_with_value(x));
+        let flat_mapped = Lazy::new(move || value).flat_map(Lazy::new_with_value);
 
         prop_assert_eq!(*lazy.force(), *flat_mapped.force());
     }

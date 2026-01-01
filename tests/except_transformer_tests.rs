@@ -1,3 +1,4 @@
+#![cfg(feature = "effect")]
 //! Tests for ExceptT (Except Transformer).
 //!
 //! ExceptT adds error handling capability to any monad.

@@ -295,10 +295,12 @@ impl<T> PersistentVector<T> {
             Node::Leaf(elements) => elements.get(index & MASK),
             Node::Branch(children) => {
                 let child_index = index & MASK;
-                children[child_index].as_ref().and_then(|child| match child.as_ref() {
-                    Node::Leaf(elements) => elements.first(),
-                    Node::Branch(_) => None,
-                })
+                children[child_index]
+                    .as_ref()
+                    .and_then(|child| match child.as_ref() {
+                        Node::Leaf(elements) => elements.first(),
+                        Node::Branch(_) => None,
+                    })
             }
         }
     }
@@ -366,7 +368,7 @@ impl<T> PersistentVector<T> {
     /// let collected: Vec<&i32> = vector.iter().collect();
     /// assert_eq!(collected, vec![&1, &2, &3, &4, &5]);
     /// ```
-    #[must_use] 
+    #[must_use]
     pub const fn iter(&self) -> PersistentVectorIterator<'_, T> {
         PersistentVectorIterator {
             vector: self,
@@ -445,7 +447,8 @@ impl<T: Clone> PersistentVector<T> {
             }
         } else {
             // Push tail into existing root
-            let new_root = Self::push_tail_into_node(&self.root, self.shift, tail_offset, tail_leaf);
+            let new_root =
+                Self::push_tail_into_node(&self.root, self.shift, tail_offset, tail_leaf);
 
             Self {
                 length: self.length + 1,
@@ -615,9 +618,10 @@ impl<T: Clone> PersistentVector<T> {
                     // Count non-None children
                     let non_none_count = children.iter().filter(|c| c.is_some()).count();
                     if non_none_count == 1
-                        && let Some(only_child) = &children[0] {
-                            return (only_child.clone(), self.shift - BITS_PER_LEVEL);
-                        }
+                        && let Some(only_child) = &children[0]
+                    {
+                        return (only_child.clone(), self.shift - BITS_PER_LEVEL);
+                    }
                 }
                 (new_root, self.shift)
             }
@@ -788,12 +792,7 @@ impl<T: Clone> PersistentVector<T> {
     }
 
     /// Updates an element in the root tree.
-    fn update_in_root(
-        node: &Rc<Node<T>>,
-        level: usize,
-        index: usize,
-        element: T,
-    ) -> Node<T> {
+    fn update_in_root(node: &Rc<Node<T>>, level: usize, index: usize, element: T) -> Node<T> {
         match node.as_ref() {
             Node::Branch(children) => {
                 let subindex = (index >> level) & MASK;
@@ -1198,8 +1197,7 @@ impl<T: Clone> Foldable for PersistentVector<T> {
     where
         F: FnMut(B, T) -> B,
     {
-        self.into_iter()
-            .fold(init, function)
+        self.into_iter().fold(init, function)
     }
 
     fn fold_right<B, F>(self, init: B, mut function: F) -> B
@@ -1282,8 +1280,10 @@ mod tests {
     fn test_large_vector() {
         let vector: PersistentVector<i32> = (0..1000).collect();
         assert_eq!(vector.len(), 1000);
-        for index in 0..1000 {
-            assert_eq!(vector.get(index), Some(&(index as i32)));
+        for index in 0..1000_usize {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let expected = index as i32;
+            assert_eq!(vector.get(index), Some(&expected));
         }
     }
 

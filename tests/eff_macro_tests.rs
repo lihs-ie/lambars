@@ -1,3 +1,4 @@
+#![cfg(feature = "effect")]
 //! Tests for the eff! macro (do-notation style syntax for monads).
 //!
 //! The eff! macro provides a convenient syntax for chaining monadic operations,
@@ -457,7 +458,7 @@ mod complex_tests {
         }
 
         fn validate_range(n: i32) -> Result<i32, String> {
-            if n >= 0 && n <= 100 {
+            if (0..=100).contains(&n) {
                 Ok(n)
             } else {
                 Err("out of range".to_string())

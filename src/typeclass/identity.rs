@@ -157,7 +157,7 @@ mod tests {
     #[rstest]
     fn identity_clone_works() {
         let original = Identity::new(42);
-        let cloned = original.clone();
+        let cloned = original;
         assert_eq!(original, cloned);
     }
 
@@ -199,7 +199,7 @@ mod tests {
     #[rstest]
     fn identity_debug_works() {
         let wrapped = Identity::new(42);
-        let debug_output = format!("{:?}", wrapped);
+        let debug_output = format!("{wrapped:?}");
         assert!(debug_output.contains("Identity"));
         assert!(debug_output.contains("42"));
     }

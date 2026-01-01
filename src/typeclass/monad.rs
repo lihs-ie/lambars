@@ -421,9 +421,10 @@ mod tests {
     }
 
     #[rstest]
+    #[allow(clippy::redundant_closure, clippy::bind_instead_of_map)]
     fn option_and_then_alias() {
         let x = Some(5);
-        let flat_map_result = x.clone().flat_map(|n| Some(n * 2));
+        let flat_map_result = x.flat_map(|n| Some(n * 2));
         let and_then_result = x.and_then(|n| Some(n * 2));
         assert_eq!(flat_map_result, and_then_result);
     }
@@ -495,9 +496,10 @@ mod tests {
     }
 
     #[rstest]
+    #[allow(clippy::redundant_closure, clippy::bind_instead_of_map)]
     fn result_and_then_alias() {
         let x: Result<i32, &str> = Ok(5);
-        let flat_map_result = x.clone().flat_map(|n| Ok(n * 2));
+        let flat_map_result = x.flat_map(|n| Ok(n * 2));
         let and_then_result = x.and_then(|n| Ok(n * 2));
         assert_eq!(flat_map_result, and_then_result);
     }
@@ -744,42 +746,42 @@ mod tests {
     #[rstest]
     fn option_right_identity_law_some() {
         let monad = Some(42);
-        let result = monad.clone().flat_map(|x| <Option<()>>::pure(x));
+        let result = monad.flat_map(<Option<()>>::pure);
         assert_eq!(result, monad);
     }
 
     #[rstest]
     fn option_right_identity_law_none() {
         let monad: Option<i32> = None;
-        let result = monad.clone().flat_map(|x| <Option<()>>::pure(x));
+        let result = monad.flat_map(<Option<()>>::pure);
         assert_eq!(result, monad);
     }
 
     #[rstest]
     fn result_right_identity_law_ok() {
         let monad: Result<i32, &str> = Ok(42);
-        let result = monad.clone().flat_map(|x| <Result<(), &str>>::pure(x));
+        let result = monad.flat_map(<Result<(), &str>>::pure);
         assert_eq!(result, monad);
     }
 
     #[rstest]
     fn result_right_identity_law_err() {
         let monad: Result<i32, &str> = Err("error");
-        let result = monad.clone().flat_map(|x| <Result<(), &str>>::pure(x));
+        let result = monad.flat_map(<Result<(), &str>>::pure);
         assert_eq!(result, monad);
     }
 
     #[rstest]
     fn box_right_identity_law() {
         let monad = Box::new(42);
-        let result = Box::new(42).flat_map(|x| <Box<()>>::pure(x));
+        let result = Box::new(42).flat_map(<Box<()>>::pure);
         assert_eq!(result, monad);
     }
 
     #[rstest]
     fn identity_right_identity_law() {
         let monad = Identity::new(42);
-        let result = monad.clone().flat_map(|x| <Identity<()>>::pure(x));
+        let result = monad.flat_map(<Identity<()>>::pure);
         assert_eq!(result, monad);
     }
 
@@ -791,7 +793,7 @@ mod tests {
         let function1 = |n: i32| Some(n + 1);
         let function2 = |n: i32| Some(n * 2);
 
-        let left = monad.clone().flat_map(function1).flat_map(function2);
+        let left = monad.flat_map(function1).flat_map(function2);
         let right = monad.flat_map(|x| function1(x).flat_map(function2));
 
         assert_eq!(left, right);
@@ -804,7 +806,7 @@ mod tests {
         let function1 = |n: i32| if n > 0 { Some(n - 10) } else { None };
         let function2 = |n: i32| if n > 0 { Some(n * 2) } else { None };
 
-        let left = monad.clone().flat_map(function1).flat_map(function2);
+        let left = monad.flat_map(function1).flat_map(function2);
         let right = monad.flat_map(|x| function1(x).flat_map(function2));
 
         assert_eq!(left, right);
@@ -817,7 +819,7 @@ mod tests {
         let function1 = |n: i32| -> Result<i32, &str> { Ok(n + 1) };
         let function2 = |n: i32| -> Result<i32, &str> { Ok(n * 2) };
 
-        let left = monad.clone().flat_map(function1).flat_map(function2);
+        let left = monad.flat_map(function1).flat_map(function2);
         let right = monad.flat_map(|x| function1(x).flat_map(function2));
 
         assert_eq!(left, right);
@@ -843,7 +845,7 @@ mod tests {
         let function1 = |n: i32| Identity::new(n + 1);
         let function2 = |n: i32| Identity::new(n * 2);
 
-        let left = monad.clone().flat_map(function1).flat_map(function2);
+        let left = monad.flat_map(function1).flat_map(function2);
         let right = monad.flat_map(|x| function1(x).flat_map(function2));
 
         assert_eq!(left, right);
@@ -873,7 +875,7 @@ mod tests {
         use crate::typeclass::ApplicativeVec;
 
         let monad = vec![1, 2, 3];
-        let result = monad.clone().flat_map(|x| Vec::<i32>::pure(x));
+        let result = monad.clone().flat_map(Vec::<i32>::pure);
         assert_eq!(result, monad);
     }
 
@@ -907,7 +909,7 @@ mod tests {
         }
 
         fn double(n: i32) -> Option<i32> {
-            Some(n * 2)
+            n.checked_mul(2)
         }
 
         // Successful chain
@@ -939,16 +941,16 @@ mod tests {
             if n < 0 {
                 Err("negative number")
             } else {
-                Ok((n as f64).sqrt())
+                Ok(f64::from(n).sqrt())
             }
         }
 
         // Successful chain
-        let result: Result<f64, &str> = divide(100, 4).flat_map(|n| safe_sqrt(n));
+        let result: Result<f64, &str> = divide(100, 4).flat_map(safe_sqrt);
         assert_eq!(result, Ok(5.0));
 
         // Failure in division
-        let result: Result<f64, &str> = divide(100, 0).flat_map(|n| safe_sqrt(n));
+        let result: Result<f64, &str> = divide(100, 0).flat_map(safe_sqrt);
         assert_eq!(result, Err("division by zero"));
     }
 
@@ -1038,7 +1040,7 @@ mod property_tests {
 
         #[test]
         fn prop_option_right_identity(monad in any::<Option<i32>>()) {
-            let result = monad.clone().flat_map(|x| <Option<()>>::pure(x));
+            let result = monad.flat_map(<Option<()>>::pure);
             prop_assert_eq!(result, monad);
         }
 
@@ -1046,20 +1048,20 @@ mod property_tests {
         fn prop_result_right_identity(
             monad in prop::result::maybe_ok(any::<i32>(), any::<String>())
         ) {
-            let result = monad.clone().flat_map(|x| <Result<(), String>>::pure(x));
+            let result = monad.clone().flat_map(<Result<(), String>>::pure);
             prop_assert_eq!(result, monad);
         }
 
         #[test]
         fn prop_identity_right_identity(value in any::<i32>()) {
             let monad = Identity::new(value);
-            let result = monad.clone().flat_map(|x| <Identity<()>>::pure(x));
+            let result = monad.flat_map(<Identity<()>>::pure);
             prop_assert_eq!(result, monad);
         }
 
         #[test]
         fn prop_vec_right_identity(monad in prop::collection::vec(any::<i32>(), 0..10)) {
-            let result = monad.clone().flat_map(|x| Vec::<i32>::pure(x));
+            let result = monad.clone().flat_map(Vec::<i32>::pure);
             prop_assert_eq!(result, monad);
         }
 
@@ -1071,7 +1073,7 @@ mod property_tests {
             let function1 = |n: i32| Some(n.wrapping_add(1));
             let function2 = |n: i32| Some(n.wrapping_mul(2));
 
-            let left = monad.clone().flat_map(function1).flat_map(function2);
+            let left = monad.flat_map(function1).flat_map(function2);
             let right = monad.flat_map(|x| function1(x).flat_map(function2));
 
             prop_assert_eq!(left, right);
@@ -1083,7 +1085,7 @@ mod property_tests {
             let function1 = |n: i32| -> Result<i32, ()> { Ok(n.wrapping_add(1)) };
             let function2 = |n: i32| -> Result<i32, ()> { Ok(n.wrapping_mul(2)) };
 
-            let left = monad.clone().flat_map(function1).flat_map(function2);
+            let left = monad.flat_map(function1).flat_map(function2);
             let right = monad.flat_map(|x| function1(x).flat_map(function2));
 
             prop_assert_eq!(left, right);
@@ -1095,7 +1097,7 @@ mod property_tests {
             let function1 = |n: i32| Identity::new(n.wrapping_add(1));
             let function2 = |n: i32| Identity::new(n.wrapping_mul(2));
 
-            let left = monad.clone().flat_map(function1).flat_map(function2);
+            let left = monad.flat_map(function1).flat_map(function2);
             let right = monad.flat_map(|x| function1(x).flat_map(function2));
 
             prop_assert_eq!(left, right);

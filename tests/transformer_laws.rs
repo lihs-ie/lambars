@@ -1,3 +1,4 @@
+#![cfg(feature = "effect")]
 //! Tests for Monad Transformer Laws.
 //!
 //! This module tests that all monad transformers satisfy the fundamental laws:
@@ -41,7 +42,7 @@ mod reader_transformer_laws {
         // m >>= pure === m
         let m: ReaderT<i32, Option<i32>> = ReaderT::new(|environment: i32| Some(environment * 2));
 
-        let left = m.clone().flat_map_option(|x| ReaderT::pure_option(x));
+        let left = m.clone().flat_map_option(ReaderT::pure_option);
         let right = m;
 
         let environment = 10;
@@ -86,7 +87,7 @@ mod reader_transformer_laws {
         let m: ReaderT<i32, Result<i32, String>> =
             ReaderT::new(|environment: i32| Ok(environment * 2));
 
-        let left = m.clone().flat_map_result(|x| ReaderT::pure_result(x));
+        let left = m.clone().flat_map_result(ReaderT::pure_result);
         let right = m;
 
         let environment = 10;
@@ -139,7 +140,7 @@ mod state_transformer_laws {
         let m: StateT<i32, Option<(i32, i32)>> =
             StateT::new(|state: i32| Some((state * 2, state + 1)));
 
-        let left = m.clone().flat_map_option(|x| StateT::pure_option(x));
+        let left = m.clone().flat_map_option(StateT::pure_option);
         let right = m;
 
         let initial_state = 10;
@@ -184,7 +185,7 @@ mod state_transformer_laws {
         let m: StateT<i32, Result<(i32, i32), String>> =
             StateT::new(|state: i32| Ok((state * 2, state + 1)));
 
-        let left = m.clone().flat_map_result(|x| StateT::pure_result(x));
+        let left = m.clone().flat_map_result(StateT::pure_result);
         let right = m;
 
         let initial_state = 10;
@@ -238,7 +239,7 @@ mod writer_transformer_laws {
         let m: WriterT<Vec<String>, Option<(i32, Vec<String>)>> =
             WriterT::new(Some((42, vec!["log".to_string()])));
 
-        let left = m.clone().flat_map_option(|x| WriterT::pure_option(x));
+        let left = m.clone().flat_map_option(WriterT::pure_option);
         let right = m;
 
         assert_eq!(left.run(), right.run());
@@ -262,39 +263,41 @@ mod writer_transformer_laws {
         assert_eq!(left.run(), right.run());
     }
 
+    type WriterTResultString<A> = WriterT<Vec<String>, Result<(A, Vec<String>), String>>;
+
     #[rstest]
+    #[allow(clippy::type_complexity)]
     fn left_identity_result() {
         let value = 5;
-        let f = |x: i32| -> WriterT<Vec<String>, Result<(i32, Vec<String>), String>> {
+        let f = |x: i32| -> WriterTResultString<i32> {
             WriterT::new(Ok((x * 2, vec!["doubled".to_string()])))
         };
 
-        let left: WriterT<Vec<String>, Result<(i32, Vec<String>), String>> =
-            WriterT::pure_result(value).flat_map_result(f);
+        let left: WriterTResultString<i32> = WriterT::pure_result(value).flat_map_result(f);
         let right = f(value);
 
         assert_eq!(left.run(), right.run());
     }
 
     #[rstest]
+    #[allow(clippy::type_complexity)]
     fn right_identity_result() {
-        let m: WriterT<Vec<String>, Result<(i32, Vec<String>), String>> =
-            WriterT::new(Ok((42, vec!["log".to_string()])));
+        let m: WriterTResultString<i32> = WriterT::new(Ok((42, vec!["log".to_string()])));
 
-        let left = m.clone().flat_map_result(|x| WriterT::pure_result(x));
+        let left = m.clone().flat_map_result(WriterT::pure_result);
         let right = m;
 
         assert_eq!(left.run(), right.run());
     }
 
     #[rstest]
+    #[allow(clippy::type_complexity)]
     fn associativity_result() {
-        let m: WriterT<Vec<String>, Result<(i32, Vec<String>), String>> =
-            WriterT::new(Ok((10, vec!["start".to_string()])));
-        let f = |x: i32| -> WriterT<Vec<String>, Result<(i32, Vec<String>), String>> {
+        let m: WriterTResultString<i32> = WriterT::new(Ok((10, vec!["start".to_string()])));
+        let f = |x: i32| -> WriterTResultString<i32> {
             WriterT::new(Ok((x + 5, vec!["added".to_string()])))
         };
-        let g = |x: i32| -> WriterT<Vec<String>, Result<(i32, Vec<String>), String>> {
+        let g = |x: i32| -> WriterTResultString<i32> {
             WriterT::new(Ok((x * 2, vec!["doubled".to_string()])))
         };
 
@@ -365,7 +368,7 @@ mod except_transformer_laws {
         // m >>= pure === m
         let m: ExceptT<String, Option<Result<i32, String>>> = ExceptT::new(Some(Ok(42)));
 
-        let left = m.clone().flat_map_option(|x| ExceptT::pure_option(x));
+        let left = m.clone().flat_map_option(ExceptT::pure_option);
         let right = m;
 
         assert_eq!(left.run(), right.run());
@@ -406,7 +409,7 @@ mod except_transformer_laws {
     fn right_identity_result() {
         let m: ExceptT<String, Result<Result<i32, String>, String>> = ExceptT::new(Ok(Ok(42)));
 
-        let left = m.clone().flat_map_result(|x| ExceptT::pure_result(x));
+        let left = m.clone().flat_map_result(ExceptT::pure_result);
         let right = m;
 
         assert_eq!(left.run(), right.run());

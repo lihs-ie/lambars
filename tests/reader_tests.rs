@@ -1,3 +1,4 @@
+#![cfg(feature = "effect")]
 //! Unit tests for Reader Monad.
 //!
 //! Tests basic functionality of the Reader monad including:
@@ -182,6 +183,7 @@ fn reader_asks_projects_from_environment() {
     #[derive(Clone)]
     struct Config {
         port: u16,
+        #[allow(dead_code)]
         host: String,
     }
 

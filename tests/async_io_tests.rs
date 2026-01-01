@@ -1,3 +1,4 @@
+#![cfg(feature = "async")]
 //! Unit tests for AsyncIO monad.
 //!
 //! This module tests the AsyncIO type that represents deferred asynchronous
@@ -12,8 +13,8 @@
 
 use lambars::effect::AsyncIO;
 use rstest::rstest;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 // =============================================================================
@@ -138,7 +139,6 @@ async fn test_async_io_side_effect_not_executed_on_creation() {
         let cnt = counter_clone.clone();
         async move {
             cnt.fetch_add(1, Ordering::SeqCst);
-            ()
         }
     });
 
