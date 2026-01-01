@@ -404,20 +404,20 @@ impl<T, E> Foldable for Result<T, E> {
 }
 
 // =============================================================================
-// Vec<A> Implementation
+// Vec<T> Implementation
 // =============================================================================
 
-impl<A> Foldable for Vec<A> {
+impl<T> Foldable for Vec<T> {
     fn fold_left<B, F>(self, init: B, function: F) -> B
     where
-        F: FnMut(B, A) -> B,
+        F: FnMut(B, T) -> B,
     {
         self.into_iter().fold(init, function)
     }
 
     fn fold_right<B, F>(self, init: B, mut function: F) -> B
     where
-        F: FnMut(A, B) -> B,
+        F: FnMut(T, B) -> B,
     {
         self.into_iter()
             .rev()
@@ -438,26 +438,26 @@ impl<A> Foldable for Vec<A> {
 
     /// Optimized implementation for Vec - returns self.
     #[inline]
-    fn to_list(self) -> Vec<A> {
+    fn to_list(self) -> Self {
         self
     }
 }
 
 // =============================================================================
-// Box<A> Implementation
+// Box<T> Implementation
 // =============================================================================
 
-impl<A> Foldable for Box<A> {
+impl<T> Foldable for Box<T> {
     fn fold_left<B, F>(self, init: B, mut function: F) -> B
     where
-        F: FnMut(B, A) -> B,
+        F: FnMut(B, T) -> B,
     {
         function(init, *self)
     }
 
     fn fold_right<B, F>(self, init: B, mut function: F) -> B
     where
-        F: FnMut(A, B) -> B,
+        F: FnMut(T, B) -> B,
     {
         function(*self, init)
     }

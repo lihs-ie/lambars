@@ -54,5 +54,5 @@ mod trampoline;
 
 pub use continuation::Continuation;
 pub use either::Either;
-pub use lazy::{Lazy, LazyState};
+pub use lazy::{Lazy, LazyPoisonedError, LazyState};
 pub use trampoline::Trampoline;

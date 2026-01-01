@@ -330,13 +330,13 @@ pub trait MonadVec: Sized {
         Self::VecInner: IntoIterator<Item = B>;
 }
 
-impl<A> MonadVec for Vec<A> {
-    type VecInner = A;
+impl<T> MonadVec for Vec<T> {
+    type VecInner = T;
 
     #[inline]
     fn flat_map<B, F>(self, function: F) -> Vec<B>
     where
-        F: FnMut(A) -> Vec<B>,
+        F: FnMut(T) -> Vec<B>,
     {
         self.into_iter().flat_map(function).collect()
     }
@@ -355,21 +355,21 @@ impl<A> MonadVec for Vec<A> {
 
     fn flatten<B>(self) -> Vec<B>
     where
-        A: IntoIterator<Item = B>,
+        T: IntoIterator<Item = B>,
     {
-        self.into_iter().flat_map(IntoIterator::into_iter).collect()
+        self.into_iter().flatten().collect()
     }
 }
 
 // =============================================================================
-// Box<A> Implementation
+// Box<T> Implementation
 // =============================================================================
 
-impl<A> Monad for Box<A> {
+impl<T> Monad for Box<T> {
     #[inline]
     fn flat_map<B, F>(self, function: F) -> Box<B>
     where
-        F: FnOnce(A) -> Box<B>,
+        F: FnOnce(T) -> Box<B>,
     {
         function(*self)
     }

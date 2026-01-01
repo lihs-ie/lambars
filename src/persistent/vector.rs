@@ -6,13 +6,13 @@
 //! # Overview
 //!
 //! `PersistentVector` is a 32-way branching trie (Radix Balanced Tree) inspired by
-//! Clojure's PersistentVector and Scala's Vector. It provides:
+//! Clojure's `PersistentVector` and Scala's Vector. It provides:
 //!
 //! - O(log32 N) random access (effectively O(1) for practical sizes)
-//! - O(log32 N) push_back (amortized O(1) with tail optimization)
+//! - O(log32 N) `push_back` (amortized O(1) with tail optimization)
 //! - O(log32 N) update
-//! - O(N) push_front and pop_front (requires rebuilding)
-//! - O(1) len and is_empty
+//! - O(N) `push_front` and `pop_front` (requires rebuilding)
+//! - O(1) len and `is_empty`
 //!
 //! All operations return new vectors without modifying the original,
 //! and structural sharing ensures memory efficiency.
@@ -70,7 +70,7 @@ const MASK: usize = BRANCHING_FACTOR - 1;
 #[derive(Clone)]
 enum Node<T> {
     /// Branch node containing child nodes
-    Branch(Rc<[Option<Rc<Node<T>>>; BRANCHING_FACTOR]>),
+    Branch(Rc<[Option<Rc<Self>>; BRANCHING_FACTOR]>),
     /// Leaf node containing actual elements
     Leaf(Rc<[T]>),
 }
@@ -78,14 +78,14 @@ enum Node<T> {
 impl<T> Node<T> {
     /// Creates an empty branch node.
     fn empty_branch() -> Self {
-        Node::Branch(Rc::new(std::array::from_fn(|_| None)))
+        Self::Branch(Rc::new(std::array::from_fn(|_| None)))
     }
 }
 
 impl<T: Clone> Node<T> {
     /// Creates a leaf node with the given elements.
     fn leaf_from_slice(elements: &[T]) -> Self {
-        Node::Leaf(Rc::from(elements))
+        Self::Leaf(Rc::from(elements))
     }
 }
 
@@ -126,7 +126,7 @@ impl<T: Clone> Node<T> {
 pub struct PersistentVector<T> {
     /// Total number of elements
     length: usize,
-    /// Shift amount for index calculation: (depth - 1) * BITS_PER_LEVEL
+    /// Shift amount for index calculation: (depth - 1) * `BITS_PER_LEVEL`
     shift: usize,
     /// Root node of the trie
     root: Rc<Node<T>>,
@@ -148,7 +148,7 @@ impl<T> PersistentVector<T> {
     #[inline]
     #[must_use]
     pub fn new() -> Self {
-        PersistentVector {
+        Self {
             length: 0,
             shift: BITS_PER_LEVEL,
             root: Rc::new(Node::empty_branch()),
@@ -174,7 +174,7 @@ impl<T> PersistentVector<T> {
     #[inline]
     #[must_use]
     pub fn singleton(element: T) -> Self {
-        PersistentVector {
+        Self {
             length: 1,
             shift: BITS_PER_LEVEL,
             root: Rc::new(Node::empty_branch()),
@@ -198,7 +198,7 @@ impl<T> PersistentVector<T> {
     /// ```
     #[inline]
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.length
     }
 
@@ -217,13 +217,13 @@ impl<T> PersistentVector<T> {
     /// ```
     #[inline]
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.length == 0
     }
 
     /// Returns the starting index of the tail buffer.
     #[inline]
-    fn tail_offset(&self) -> usize {
+    const fn tail_offset(&self) -> usize {
         if self.length < BRANCHING_FACTOR {
             0
         } else {
@@ -295,13 +295,10 @@ impl<T> PersistentVector<T> {
             Node::Leaf(elements) => elements.get(index & MASK),
             Node::Branch(children) => {
                 let child_index = index & MASK;
-                match &children[child_index] {
-                    Some(child) => match child.as_ref() {
-                        Node::Leaf(elements) => elements.first(),
-                        _ => None,
-                    },
-                    None => None,
-                }
+                children[child_index].as_ref().and_then(|child| match child.as_ref() {
+                    Node::Leaf(elements) => elements.first(),
+                    Node::Branch(_) => None,
+                })
             }
         }
     }
@@ -369,7 +366,8 @@ impl<T> PersistentVector<T> {
     /// let collected: Vec<&i32> = vector.iter().collect();
     /// assert_eq!(collected, vec![&1, &2, &3, &4, &5]);
     /// ```
-    pub fn iter(&self) -> PersistentVectorIterator<'_, T> {
+    #[must_use] 
+    pub const fn iter(&self) -> PersistentVectorIterator<'_, T> {
         PersistentVectorIterator {
             vector: self,
             current_index: 0,
@@ -410,7 +408,7 @@ impl<T: Clone> PersistentVector<T> {
             let mut new_tail = self.tail.to_vec();
             new_tail.push(element);
 
-            PersistentVector {
+            Self {
                 length: self.length + 1,
                 shift: self.shift,
                 root: self.root.clone(),
@@ -437,9 +435,9 @@ impl<T: Clone> PersistentVector<T> {
             let mut new_root_children: [Option<Rc<Node<T>>>; BRANCHING_FACTOR] =
                 std::array::from_fn(|_| None);
             new_root_children[0] = Some(self.root.clone());
-            new_root_children[1] = Some(Rc::new(self.new_path(self.shift, tail_leaf)));
+            new_root_children[1] = Some(Rc::new(Self::new_path(self.shift, tail_leaf)));
 
-            PersistentVector {
+            Self {
                 length: self.length + 1,
                 shift: self.shift + BITS_PER_LEVEL,
                 root: Rc::new(Node::Branch(Rc::new(new_root_children))),
@@ -447,9 +445,9 @@ impl<T: Clone> PersistentVector<T> {
             }
         } else {
             // Push tail into existing root
-            let new_root = self.push_tail_into_node(&self.root, self.shift, tail_offset, tail_leaf);
+            let new_root = Self::push_tail_into_node(&self.root, self.shift, tail_offset, tail_leaf);
 
-            PersistentVector {
+            Self {
                 length: self.length + 1,
                 shift: self.shift,
                 root: Rc::new(new_root),
@@ -459,20 +457,19 @@ impl<T: Clone> PersistentVector<T> {
     }
 
     /// Creates a new path from root to the leaf.
-    fn new_path(&self, level: usize, node: Node<T>) -> Node<T> {
+    fn new_path(level: usize, node: Node<T>) -> Node<T> {
         if level == 0 {
             node
         } else {
             let mut children: [Option<Rc<Node<T>>>; BRANCHING_FACTOR] =
                 std::array::from_fn(|_| None);
-            children[0] = Some(Rc::new(self.new_path(level - BITS_PER_LEVEL, node)));
+            children[0] = Some(Rc::new(Self::new_path(level - BITS_PER_LEVEL, node)));
             Node::Branch(Rc::new(children))
         }
     }
 
     /// Pushes a tail leaf into the tree at the given level.
     fn push_tail_into_node(
-        &self,
         node: &Rc<Node<T>>,
         level: usize,
         tail_offset: usize,
@@ -490,13 +487,13 @@ impl<T: Clone> PersistentVector<T> {
                 } else {
                     // Recurse down
                     let child = match &children[subindex] {
-                        Some(c) => self.push_tail_into_node(
+                        Some(c) => Self::push_tail_into_node(
                             c,
                             level - BITS_PER_LEVEL,
                             tail_offset,
                             tail_node,
                         ),
-                        None => self.new_path(level - BITS_PER_LEVEL, tail_node),
+                        None => Self::new_path(level - BITS_PER_LEVEL, tail_node),
                     };
                     new_children[subindex] = Some(Rc::new(child));
                 }
@@ -530,6 +527,11 @@ impl<T: Clone> PersistentVector<T> {
     /// assert_eq!(element, 5);
     /// assert_eq!(remaining.len(), 4);
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic. The internal `unwrap()` calls are safe
+    /// because the code structure guarantees the values exist at those points.
     #[must_use]
     pub fn pop_back(&self) -> Option<(Self, T)> {
         if self.is_empty() {
@@ -537,7 +539,7 @@ impl<T: Clone> PersistentVector<T> {
         }
 
         if self.length == 1 {
-            return Some((PersistentVector::new(), self.tail[0].clone()));
+            return Some((Self::new(), self.tail[0].clone()));
         }
 
         if self.tail.len() > 1 {
@@ -545,7 +547,7 @@ impl<T: Clone> PersistentVector<T> {
             let element = self.tail.last().unwrap().clone();
             let new_tail: Vec<T> = self.tail[..self.tail.len() - 1].to_vec();
 
-            let new_vector = PersistentVector {
+            let new_vector = Self {
                 length: self.length - 1,
                 shift: self.shift,
                 root: self.root.clone(),
@@ -564,7 +566,7 @@ impl<T: Clone> PersistentVector<T> {
             // Remove the last leaf from the root
             let (new_root, new_shift) = self.pop_tail_from_root();
 
-            let new_vector = PersistentVector {
+            let new_vector = Self {
                 length: self.length - 1,
                 shift: new_shift,
                 root: new_root,
@@ -597,14 +599,14 @@ impl<T: Clone> PersistentVector<T> {
 
         match node.as_ref() {
             Node::Leaf(elements) => elements.clone(),
-            _ => Rc::from([].as_slice()),
+            Node::Branch(_) => Rc::from([].as_slice()),
         }
     }
 
     /// Removes the tail from the root.
     fn pop_tail_from_root(&self) -> (Rc<Node<T>>, usize) {
         let tail_offset = self.length - 2; // Last valid index after pop
-        let (new_root, _) = self.do_pop_tail(&self.root, self.shift, tail_offset);
+        let (new_root, _) = Self::do_pop_tail(&self.root, self.shift, tail_offset);
 
         // Check if we should reduce tree depth
         match new_root.as_ref() {
@@ -612,20 +614,19 @@ impl<T: Clone> PersistentVector<T> {
                 if self.shift > BITS_PER_LEVEL {
                     // Count non-None children
                     let non_none_count = children.iter().filter(|c| c.is_some()).count();
-                    if non_none_count == 1 {
-                        if let Some(only_child) = &children[0] {
+                    if non_none_count == 1
+                        && let Some(only_child) = &children[0] {
                             return (only_child.clone(), self.shift - BITS_PER_LEVEL);
                         }
-                    }
                 }
                 (new_root, self.shift)
             }
-            _ => (new_root, self.shift),
+            Node::Leaf(_) => (new_root, self.shift),
         }
     }
 
     /// Recursively pops the tail from the tree.
-    fn do_pop_tail(&self, node: &Rc<Node<T>>, level: usize, offset: usize) -> (Rc<Node<T>>, bool) {
+    fn do_pop_tail(node: &Rc<Node<T>>, level: usize, offset: usize) -> (Rc<Node<T>>, bool) {
         let subindex = (offset >> level) & MASK;
 
         match node.as_ref() {
@@ -639,7 +640,7 @@ impl<T: Clone> PersistentVector<T> {
                     (Rc::new(Node::Branch(Rc::new(new_children))), all_none)
                 } else if let Some(child) = &children[subindex] {
                     let (new_child, is_empty) =
-                        self.do_pop_tail(child, level - BITS_PER_LEVEL, offset);
+                        Self::do_pop_tail(child, level - BITS_PER_LEVEL, offset);
                     let mut new_children = children.as_ref().clone();
 
                     if is_empty {
@@ -687,7 +688,7 @@ impl<T: Clone> PersistentVector<T> {
         // This is O(N) but maintains the correct structure
         let mut elements: Vec<T> = Vec::with_capacity(self.length + 1);
         elements.push(element);
-        for item in self.iter() {
+        for item in self {
             elements.push(item.clone());
         }
         elements.into_iter().collect()
@@ -723,7 +724,7 @@ impl<T: Clone> PersistentVector<T> {
         let first = self.get(0)?.clone();
 
         // Rebuild without the first element
-        let new_vector: PersistentVector<T> = self.iter().skip(1).cloned().collect();
+        let new_vector: Self = self.iter().skip(1).cloned().collect();
 
         Some((new_vector, first))
     }
@@ -767,7 +768,7 @@ impl<T: Clone> PersistentVector<T> {
             let mut new_tail = self.tail.to_vec();
             new_tail[tail_index] = element;
 
-            Some(PersistentVector {
+            Some(Self {
                 length: self.length,
                 shift: self.shift,
                 root: self.root.clone(),
@@ -775,9 +776,9 @@ impl<T: Clone> PersistentVector<T> {
             })
         } else {
             // Element is in the root
-            let new_root = self.update_in_root(&self.root, self.shift, index, element);
+            let new_root = Self::update_in_root(&self.root, self.shift, index, element);
 
-            Some(PersistentVector {
+            Some(Self {
                 length: self.length,
                 shift: self.shift,
                 root: Rc::new(new_root),
@@ -788,7 +789,6 @@ impl<T: Clone> PersistentVector<T> {
 
     /// Updates an element in the root tree.
     fn update_in_root(
-        &self,
         node: &Rc<Node<T>>,
         level: usize,
         index: usize,
@@ -801,7 +801,7 @@ impl<T: Clone> PersistentVector<T> {
 
                 if level > 0 {
                     if let Some(child) = &children[subindex] {
-                        new_children[subindex] = Some(Rc::new(self.update_in_root(
+                        new_children[subindex] = Some(Rc::new(Self::update_in_root(
                             child,
                             level - BITS_PER_LEVEL,
                             index,
@@ -810,7 +810,7 @@ impl<T: Clone> PersistentVector<T> {
                     }
                 } else if let Some(child) = &children[subindex] {
                     new_children[subindex] =
-                        Some(Rc::new(self.update_in_root(child, 0, index, element)));
+                        Some(Rc::new(Self::update_in_root(child, 0, index, element)));
                 }
 
                 Node::Branch(Rc::new(new_children))
@@ -860,7 +860,7 @@ impl<T: Clone> PersistentVector<T> {
         }
 
         let mut result = self.clone();
-        for element in other.iter() {
+        for element in other {
             result = result.push_back(element.clone());
         }
         result
@@ -899,7 +899,7 @@ impl<T: Clone> PersistentVector<T> {
     pub fn slice(&self, start: usize, end: usize) -> Self {
         // Handle invalid range cases
         if start >= self.length || start >= end {
-            return PersistentVector::new();
+            return Self::new();
         }
 
         // Clamp end to the vector's length
@@ -987,13 +987,13 @@ impl<T: Clone> ExactSizeIterator for PersistentVectorIntoIterator<T> {
 impl<T> Default for PersistentVector<T> {
     #[inline]
     fn default() -> Self {
-        PersistentVector::new()
+        Self::new()
     }
 }
 
 impl<T: Clone> FromIterator<T> for PersistentVector<T> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        let mut vector = PersistentVector::new();
+        let mut vector = Self::new();
         for element in iter {
             vector = vector.push_back(element);
         }
@@ -1056,42 +1056,38 @@ impl<T: Clone> Functor for PersistentVector<T> {
         F: FnOnce(T) -> B,
     {
         // FnOnce can only be called once, so this only works for single-element vectors
-        if let Some(first) = self.get(0) {
+        self.get(0).map_or_else(PersistentVector::new, |first| {
             PersistentVector::singleton(function(first.clone()))
-        } else {
-            PersistentVector::new()
-        }
+        })
     }
 
     fn fmap_ref<B, F>(&self, function: F) -> PersistentVector<B>
     where
         F: FnOnce(&T) -> B,
     {
-        if let Some(first) = self.get(0) {
+        self.get(0).map_or_else(PersistentVector::new, |first| {
             PersistentVector::singleton(function(first))
-        } else {
-            PersistentVector::new()
-        }
+        })
     }
 }
 
 impl<T: Clone> FunctorMut for PersistentVector<T> {
-    fn fmap_mut<B, F>(self, mut function: F) -> PersistentVector<B>
+    fn fmap_mut<B, F>(self, function: F) -> PersistentVector<B>
     where
         F: FnMut(T) -> B,
     {
-        build_persistent_vector_from_iter(self.into_iter().map(|element| function(element)))
+        build_persistent_vector_from_iter(self.into_iter().map(function))
     }
 
-    fn fmap_ref_mut<B, F>(&self, mut function: F) -> PersistentVector<B>
+    fn fmap_ref_mut<B, F>(&self, function: F) -> PersistentVector<B>
     where
         F: FnMut(&T) -> B,
     {
-        build_persistent_vector_from_iter(self.iter().map(|element| function(element)))
+        build_persistent_vector_from_iter(self.iter().map(function))
     }
 }
 
-/// Helper function to build a PersistentVector from an iterator without requiring Clone.
+/// Helper function to build a `PersistentVector` from an iterator without requiring Clone.
 fn build_persistent_vector_from_iter<T, I>(iter: I) -> PersistentVector<T>
 where
     I: Iterator<Item = T>,
@@ -1100,7 +1096,7 @@ where
     build_persistent_vector_from_vec(elements)
 }
 
-/// Helper function to build a PersistentVector from a Vec without requiring Clone.
+/// Helper function to build a `PersistentVector` from a Vec without requiring Clone.
 fn build_persistent_vector_from_vec<T>(elements: Vec<T>) -> PersistentVector<T> {
     if elements.is_empty() {
         return PersistentVector::new();
@@ -1198,12 +1194,12 @@ fn build_root_from_elements<T>(elements: Vec<T>) -> (Rc<Node<T>>, usize) {
 }
 
 impl<T: Clone> Foldable for PersistentVector<T> {
-    fn fold_left<B, F>(self, init: B, mut function: F) -> B
+    fn fold_left<B, F>(self, init: B, function: F) -> B
     where
         F: FnMut(B, T) -> B,
     {
         self.into_iter()
-            .fold(init, |accumulator, element| function(accumulator, element))
+            .fold(init, function)
     }
 
     fn fold_right<B, F>(self, init: B, mut function: F) -> B
@@ -1243,7 +1239,7 @@ impl<T: Clone> Semigroup for PersistentVector<T> {
 
 impl<T: Clone> Monoid for PersistentVector<T> {
     fn empty() -> Self {
-        PersistentVector::new()
+        Self::new()
     }
 }
 

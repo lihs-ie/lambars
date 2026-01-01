@@ -1,4 +1,4 @@
-//! MonadState type class - stateful computation capability.
+//! `MonadState` type class - stateful computation capability.
 //!
 //! This module provides the `MonadState` trait which abstracts
 //! the ability to read and modify state. This is the core
@@ -167,7 +167,7 @@ pub trait MonadState<S>: Monad {
     /// # Arguments
     ///
     /// * `transition` - A function that takes the current state and
-    ///   returns a tuple of (result, new_state)
+    ///   returns a tuple of (result, `new_state`)
     ///
     /// # Returns
     ///

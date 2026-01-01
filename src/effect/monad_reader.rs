@@ -1,4 +1,4 @@
-//! MonadReader type class - environment reading capability.
+//! `MonadReader` type class - environment reading capability.
 //!
 //! This module provides the `MonadReader` trait which abstracts
 //! the ability to read from an environment. This is the core
@@ -99,7 +99,7 @@ use crate::typeclass::Monad;
 pub trait MonadReader<R>: Monad {
     /// Retrieves the entire environment.
     ///
-    /// This is the fundamental operation of MonadReader. It returns
+    /// This is the fundamental operation of `MonadReader`. It returns
     /// a computation that, when run with an environment, produces
     /// that environment as its result.
     ///

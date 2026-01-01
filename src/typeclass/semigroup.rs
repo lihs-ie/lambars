@@ -71,6 +71,7 @@ pub trait Semigroup {
     /// let result = String::from("Hello, ").combine(String::from("World!"));
     /// assert_eq!(result, "Hello, World!");
     /// ```
+    #[must_use]
     fn combine(self, other: Self) -> Self;
 
     /// Combines two values by reference, returning a new value.
@@ -90,6 +91,7 @@ pub trait Semigroup {
     /// assert_eq!(a, "Hello, ");
     /// assert_eq!(result, "Hello, World!");
     /// ```
+    #[must_use]
     fn combine_ref(&self, other: &Self) -> Self
     where
         Self: Clone,
@@ -115,6 +117,7 @@ pub trait Semigroup {
     /// let s = String::from("ab");
     /// assert_eq!(s.combine_n(3), "ababab");
     /// ```
+    #[must_use]
     fn combine_n(self, count: usize) -> Self
     where
         Self: Clone,
@@ -175,7 +178,7 @@ impl Semigroup for String {
     }
 
     fn combine_ref(&self, other: &Self) -> Self {
-        let mut result = String::with_capacity(self.len() + other.len());
+        let mut result = Self::with_capacity(self.len() + other.len());
         result.push_str(self);
         result.push_str(other);
         result
@@ -193,7 +196,7 @@ impl<T: Clone> Semigroup for Vec<T> {
     }
 
     fn combine_ref(&self, other: &Self) -> Self {
-        let mut result = Vec::with_capacity(self.len() + other.len());
+        let mut result = Self::with_capacity(self.len() + other.len());
         result.extend(self.iter().cloned());
         result.extend(other.iter().cloned());
         result

@@ -50,6 +50,15 @@ use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::rc::Rc;
 
+/// A boxed continuation function that takes a value and produces a result.
+type ContinuationFunction<A, R> = Box<dyn FnOnce(A) -> R>;
+
+/// A boxed CPS function that takes a continuation and produces a result.
+type CpsFunction<A, R> = Box<dyn FnOnce(ContinuationFunction<A, R>) -> R>;
+
+/// A shared, mutable holder for a continuation function.
+type ContinuationHolder<A, R> = Rc<RefCell<Option<ContinuationFunction<A, R>>>>;
+
 /// A continuation monad representing computations in CPS.
 ///
 /// `Continuation<R, A>` encapsulates a computation that:
@@ -87,7 +96,7 @@ use std::rc::Rc;
 /// ```
 pub struct Continuation<R, A> {
     /// The continuation function: given a continuation `(A -> R)`, produces `R`.
-    run_continuation: Box<dyn FnOnce(Box<dyn FnOnce(A) -> R>) -> R>,
+    run_continuation: CpsFunction<A, R>,
     /// Phantom data for the type parameters.
     _marker: PhantomData<(R, A)>,
 }
@@ -249,6 +258,7 @@ impl<R: 'static, A: 'static> Continuation<R, A> {
     /// assert_eq!(result.run(|x| x), 42);
     /// ```
     #[inline]
+    #[must_use] 
     pub fn then<B: 'static>(self, next: Continuation<R, B>) -> Continuation<R, B> {
         self.flat_map(move |_| next)
     }
@@ -298,22 +308,27 @@ impl<R: 'static, A: 'static> Continuation<R, A> {
     /// let result = cont.run(|x| x);
     /// assert_eq!(result, 2000); // 20 > 10, so exit(20 * 100) = 2000
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if the captured continuation is called more than once, or if
+    /// the continuation is consumed by exit and normal execution path is reached.
     pub fn call_with_current_continuation_once<F>(function: F) -> Self
     where
-        F: FnOnce(Box<dyn FnOnce(A) -> Continuation<R, A>>) -> Continuation<R, A> + 'static,
+        F: FnOnce(Box<dyn FnOnce(A) -> Self>) -> Self + 'static,
     {
-        Continuation::new(move |outer_continuation: Box<dyn FnOnce(A) -> R>| {
+        Self::new(move |outer_continuation: Box<dyn FnOnce(A) -> R>| {
             // We need to share the outer continuation between the exit path and normal path
             // Since FnOnce can only be called once, we wrap it in Rc<RefCell<Option<...>>>
-            let continuation_holder: Rc<RefCell<Option<Box<dyn FnOnce(A) -> R>>>> =
+            let continuation_holder: ContinuationHolder<A, R> =
                 Rc::new(RefCell::new(Some(outer_continuation)));
 
             // Create a clone for the exit function
             let holder_for_exit = continuation_holder.clone();
 
             // The exit function: when called, it uses the outer continuation directly
-            let exit: Box<dyn FnOnce(A) -> Continuation<R, A>> = Box::new(move |a: A| {
-                Continuation::new(move |_unused: Box<dyn FnOnce(A) -> R>| {
+            let exit: Box<dyn FnOnce(A) -> Self> = Box::new(move |a: A| {
+                Self::new(move |_unused: Box<dyn FnOnce(A) -> R>| {
                     // Take the continuation from the holder
                     let continuation = holder_for_exit
                         .borrow_mut()
@@ -328,15 +343,13 @@ impl<R: 'static, A: 'static> Continuation<R, A> {
 
             // Run the inner continuation
             inner.run(move |a| {
-                match continuation_holder.borrow_mut().take() {
-                    Some(continuation) => continuation(a),
-                    None => {
-                        // Exit was called, this path shouldn't be reached normally
-                        // But if we get here, we need to return something of type R
-                        // This is a design limitation of the one-shot call/cc
-                        panic!("continuation was consumed by exit")
-                    }
-                }
+                continuation_holder.borrow_mut().take().map_or_else(
+                    // Exit was called, this path shouldn't be reached normally
+                    // But if we get here, we need to return something of type R
+                    // This is a design limitation of the one-shot call/cc
+                    || panic!("continuation was consumed by exit"),
+                    |continuation| continuation(a),
+                )
             })
         })
     }

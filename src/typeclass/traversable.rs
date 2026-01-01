@@ -154,6 +154,10 @@ pub trait Traversable: Functor + Foldable {
     ///
     /// `Result<Self::WithType<B>, E>` - `Ok` if all elements succeed, `Err` otherwise
     ///
+    /// # Errors
+    ///
+    /// Returns the first `Err` encountered when applying `function` to elements.
+    ///
     /// # Examples
     ///
     /// ```rust
@@ -223,6 +227,10 @@ pub trait Traversable: Functor + Foldable {
     /// let result: Result<Vec<i32>, _> = values.sequence_result();
     /// assert_eq!(result, Err("error"));
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns the first `Err` value found in the structure.
     fn sequence_result<E>(
         self,
     ) -> Result<Self::WithType<<Self::Inner as TypeConstructor>::Inner>, E>
@@ -312,6 +320,10 @@ pub trait Traversable: Functor + Foldable {
     ///
     /// `Result<(), E>` - `Ok(())` if all effects succeed, `Err(e)` otherwise
     ///
+    /// # Errors
+    ///
+    /// Returns the first `Err` encountered when applying `function` to elements.
+    ///
     /// # Examples
     ///
     /// ```rust
@@ -343,6 +355,10 @@ pub trait Traversable: Functor + Foldable {
 
     /// Alias for `traverse_result_`.
     ///
+    /// # Errors
+    ///
+    /// Returns the first `Err` encountered when applying `function` to elements.
+    ///
     /// # Examples
     ///
     /// ```rust
@@ -372,20 +388,14 @@ impl<A> Traversable for Option<A> {
     where
         F: FnMut(A) -> Option<B>,
     {
-        match self {
-            Some(element) => function(element).map(Some),
-            None => Some(None),
-        }
+        self.map_or_else(|| Some(None), |element| function(element).map(Some))
     }
 
     fn traverse_result<B, E, F>(self, mut function: F) -> Result<Option<B>, E>
     where
         F: FnMut(A) -> Result<B, E>,
     {
-        match self {
-            Some(element) => function(element).map(Some),
-            None => Ok(None),
-        }
+        self.map_or_else(|| Ok(None), |element| function(element).map(Some))
     }
 }
 
@@ -416,13 +426,13 @@ impl<T, E: Clone> Traversable for Result<T, E> {
 }
 
 // =============================================================================
-// Vec<A> Implementation
+// Vec<T> Implementation
 // =============================================================================
 
-impl<A> Traversable for Vec<A> {
+impl<T> Traversable for Vec<T> {
     fn traverse_option<B, F>(self, mut function: F) -> Option<Vec<B>>
     where
-        F: FnMut(A) -> Option<B>,
+        F: FnMut(T) -> Option<B>,
     {
         let mut result = Vec::with_capacity(self.len());
         for element in self {
@@ -436,7 +446,7 @@ impl<A> Traversable for Vec<A> {
 
     fn traverse_result<B, E, F>(self, mut function: F) -> Result<Vec<B>, E>
     where
-        F: FnMut(A) -> Result<B, E>,
+        F: FnMut(T) -> Result<B, E>,
     {
         let mut result = Vec::with_capacity(self.len());
         for element in self {
@@ -450,20 +460,20 @@ impl<A> Traversable for Vec<A> {
 }
 
 // =============================================================================
-// Box<A> Implementation
+// Box<T> Implementation
 // =============================================================================
 
-impl<A> Traversable for Box<A> {
+impl<T> Traversable for Box<T> {
     fn traverse_option<B, F>(self, mut function: F) -> Option<Box<B>>
     where
-        F: FnMut(A) -> Option<B>,
+        F: FnMut(T) -> Option<B>,
     {
         function(*self).map(Box::new)
     }
 
     fn traverse_result<B, E, F>(self, mut function: F) -> Result<Box<B>, E>
     where
-        F: FnMut(A) -> Result<B, E>,
+        F: FnMut(T) -> Result<B, E>,
     {
         function(*self).map(Box::new)
     }

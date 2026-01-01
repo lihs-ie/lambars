@@ -1,6 +1,6 @@
-//! StateT - State Monad Transformer.
+//! `StateT` - State Monad Transformer.
 //!
-//! StateT adds state manipulation capability to any monad.
+//! `StateT` adds state manipulation capability to any monad.
 //! It transforms a monad M into a monad that can read and write state S.
 //!
 //! # Overview
@@ -72,7 +72,7 @@ where
     S: 'static,
 {
     /// The wrapped state transition function.
-    /// Uses Rc to allow cloning of the StateT for flat_map.
+    /// Uses Rc to allow cloning of the `StateT` for `flat_map`.
     run_function: Rc<dyn Fn(S) -> M>,
 }
 
@@ -81,12 +81,12 @@ where
     S: 'static,
     M: 'static,
 {
-    /// Creates a new StateT from a state transition function.
+    /// Creates a new `StateT` from a state transition function.
     ///
     /// # Arguments
     ///
     /// * `transition` - A function that takes the current state and returns
-    ///   a wrapped tuple of (result, new_state)
+    ///   a wrapped tuple of (result, `new_state`)
     ///
     /// # Examples
     ///
@@ -100,12 +100,12 @@ where
     where
         F: Fn(S) -> M + 'static,
     {
-        StateT {
+        Self {
             run_function: Rc::new(transition),
         }
     }
 
-    /// Runs the StateT computation with the given initial state.
+    /// Runs the `StateT` computation with the given initial state.
     ///
     /// # Arguments
     ///
@@ -137,7 +137,7 @@ where
     S: 'static,
 {
     fn clone(&self) -> Self {
-        StateT {
+        Self {
             run_function: self.run_function.clone(),
         }
     }
@@ -152,7 +152,7 @@ where
     S: 'static,
     A: 'static,
 {
-    /// Runs the StateT and returns only the result value.
+    /// Runs the `StateT` and returns only the result value.
     ///
     /// # Arguments
     ///
@@ -174,7 +174,7 @@ where
         self.run(initial_state).map(|(value, _)| value)
     }
 
-    /// Runs the StateT and returns only the final state.
+    /// Runs the `StateT` and returns only the final state.
     ///
     /// # Arguments
     ///
@@ -196,7 +196,7 @@ where
         self.run(initial_state).map(|(_, state)| state)
     }
 
-    /// Creates a StateT that returns a constant value without modifying the state.
+    /// Creates a `StateT` that returns a constant value without modifying the state.
     ///
     /// # Arguments
     ///
@@ -214,10 +214,10 @@ where
     where
         A: Clone,
     {
-        StateT::new(move |state| Some((value.clone(), state)))
+        Self::new(move |state| Some((value.clone(), state)))
     }
 
-    /// Lifts an Option into StateT.
+    /// Lifts an Option into `StateT`.
     ///
     /// # Arguments
     ///
@@ -236,7 +236,7 @@ where
     where
         A: Clone,
     {
-        StateT::new(move |state| inner.clone().map(|value| (value, state)))
+        Self::new(move |state| inner.clone().map(|value| (value, state)))
     }
 
     /// Maps a function over the value inside the Option.
@@ -265,11 +265,11 @@ where
         })
     }
 
-    /// Chains StateT computations with Option.
+    /// Chains `StateT` computations with Option.
     ///
     /// # Arguments
     ///
-    /// * `function` - A function that takes the value and returns a new StateT
+    /// * `function` - A function that takes the value and returns a new `StateT`
     ///
     /// # Examples
     ///
@@ -308,12 +308,13 @@ where
     /// let state: StateT<i32, Option<(i32, i32)>> = StateT::get_option();
     /// assert_eq!(state.run(42), Some((42, 42)));
     /// ```
+    #[must_use] 
     pub fn get_option() -> Self
     where
         S: Clone,
         A: From<S>,
     {
-        StateT::new(|state: S| Some((A::from(state.clone()), state)))
+        Self::new(|state: S| Some((A::from(state.clone()), state)))
     }
 
     /// Replaces the current state with a new value.
@@ -371,31 +372,39 @@ where
     A: 'static,
     E: 'static,
 {
-    /// Runs the StateT and returns only the result value.
+    /// Runs the `StateT` and returns only the result value.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the inner computation fails.
     pub fn eval(&self, initial_state: S) -> Result<A, E> {
         self.run(initial_state).map(|(value, _)| value)
     }
 
-    /// Runs the StateT and returns only the final state.
+    /// Runs the `StateT` and returns only the final state.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the inner computation fails.
     pub fn exec(&self, initial_state: S) -> Result<S, E> {
         self.run(initial_state).map(|(_, state)| state)
     }
 
-    /// Creates a StateT that returns a constant value without modifying the state.
+    /// Creates a `StateT` that returns a constant value without modifying the state.
     pub fn pure_result(value: A) -> Self
     where
         A: Clone,
     {
-        StateT::new(move |state| Ok((value.clone(), state)))
+        Self::new(move |state| Ok((value.clone(), state)))
     }
 
-    /// Lifts a Result into StateT.
+    /// Lifts a Result into `StateT`.
     pub fn lift_result(inner: Result<A, E>) -> Self
     where
         A: Clone,
         E: Clone,
     {
-        StateT::new(move |state| inner.clone().map(|value| (value, state)))
+        Self::new(move |state| inner.clone().map(|value| (value, state)))
     }
 
     /// Maps a function over the value inside the Result.
@@ -410,7 +419,7 @@ where
         })
     }
 
-    /// Chains StateT computations with Result.
+    /// Chains `StateT` computations with Result.
     pub fn flat_map_result<B, F>(self, function: F) -> StateT<S, Result<(B, S), E>>
     where
         F: Fn(A) -> StateT<S, Result<(B, S), E>> + 'static,
@@ -427,12 +436,13 @@ where
     }
 
     /// Returns the current state as the result.
+    #[must_use] 
     pub fn get_result() -> Self
     where
         S: Clone,
         A: From<S>,
     {
-        StateT::new(|state: S| Ok((A::from(state.clone()), state)))
+        Self::new(|state: S| Ok((A::from(state.clone()), state)))
     }
 
     /// Replaces the current state with a new value.
@@ -461,18 +471,23 @@ where
     S: 'static,
     A: 'static,
 {
-    /// Creates a StateT that returns a constant value without modifying the state.
+    /// Creates a `StateT` that returns a constant value without modifying the state.
     pub fn pure_io(value: A) -> Self
     where
         A: Clone,
     {
-        StateT::new(move |state| IO::pure((value.clone(), state)))
+        Self::new(move |state| IO::pure((value.clone(), state)))
     }
 
-    /// Lifts an IO into StateT.
+    /// Lifts an IO into `StateT`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the resulting `StateT` is run more than once.
+    #[must_use]
     pub fn lift_io(inner: IO<A>) -> Self {
         let inner_rc = Rc::new(std::cell::RefCell::new(Some(inner)));
-        StateT::new(move |state| {
+        Self::new(move |state| {
             let io = inner_rc.borrow_mut().take().unwrap_or_else(|| {
                 panic!("StateT::lift_io: IO already consumed. Use the StateT only once.")
             });
@@ -495,7 +510,7 @@ where
         })
     }
 
-    /// Chains StateT computations with IO.
+    /// Chains `StateT` computations with IO.
     pub fn flat_map_io<B, F>(self, function: F) -> StateT<S, IO<(B, S)>>
     where
         F: Fn(A) -> StateT<S, IO<(B, S)>> + 'static,
@@ -514,12 +529,13 @@ where
     }
 
     /// Returns the current state as the result.
+    #[must_use] 
     pub fn get_io() -> Self
     where
         S: Clone,
         A: From<S>,
     {
-        StateT::new(|state: S| IO::pure((A::from(state.clone()), state)))
+        Self::new(|state: S| IO::pure((A::from(state.clone()), state)))
     }
 
     /// Replaces the current state with a new value.
@@ -552,7 +568,7 @@ where
     S: Send + 'static,
     A: Send + 'static,
 {
-    /// Runs the StateT and returns only the result value.
+    /// Runs the `StateT` and returns only the result value.
     ///
     /// # Arguments
     ///
@@ -573,7 +589,7 @@ where
         self.run(initial_state).fmap(|(value, _)| value)
     }
 
-    /// Runs the StateT and returns only the final state.
+    /// Runs the `StateT` and returns only the final state.
     ///
     /// # Arguments
     ///
@@ -594,7 +610,7 @@ where
         self.run(initial_state).fmap(|(_, state)| state)
     }
 
-    /// Creates a StateT that returns a constant value without modifying the state.
+    /// Creates a `StateT` that returns a constant value without modifying the state.
     ///
     /// # Examples
     ///
@@ -611,10 +627,10 @@ where
     where
         A: Clone,
     {
-        StateT::new(move |state| AsyncIO::pure((value.clone(), state)))
+        Self::new(move |state| AsyncIO::pure((value.clone(), state)))
     }
 
-    /// Maps a function over the value inside the AsyncIO.
+    /// Maps a function over the value inside the `AsyncIO`.
     ///
     /// # Examples
     ///
@@ -642,7 +658,7 @@ where
         })
     }
 
-    /// Chains StateT computations with AsyncIO.
+    /// Chains `StateT` computations with `AsyncIO`.
     ///
     /// # Examples
     ///
@@ -689,12 +705,13 @@ where
     ///     assert_eq!(state.run(42).run_async().await, (42, 42));
     /// }
     /// ```
+    #[must_use] 
     pub fn get_async_io() -> Self
     where
         S: Clone,
         A: From<S>,
     {
-        StateT::new(|state: S| AsyncIO::pure((A::from(state.clone()), state)))
+        Self::new(|state: S| AsyncIO::pure((A::from(state.clone()), state)))
     }
 
     /// Replaces the current state with a new value.

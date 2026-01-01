@@ -12,7 +12,7 @@
 //! - O(log32 N) get (effectively O(1) for practical sizes)
 //! - O(log32 N) insert
 //! - O(log32 N) remove
-//! - O(1) len and is_empty
+//! - O(1) len and `is_empty`
 //!
 //! All operations return new maps without modifying the original,
 //! and structural sharing ensures memory efficiency.
@@ -75,7 +75,7 @@ const MAX_DEPTH: usize = 13;
 // Hash computation
 // =============================================================================
 
-/// Computes the hash of a key using DefaultHasher.
+/// Computes the hash of a key using `DefaultHasher`.
 fn compute_hash<K: Hash + ?Sized>(key: &K) -> u64 {
     let mut hasher = DefaultHasher::new();
     key.hash(&mut hasher);
@@ -84,7 +84,7 @@ fn compute_hash<K: Hash + ?Sized>(key: &K) -> u64 {
 
 /// Extracts the index at a given depth from a hash.
 #[inline]
-fn hash_index(hash: u64, depth: usize) -> usize {
+const fn hash_index(hash: u64, depth: usize) -> usize {
     ((hash >> (depth * BITS_PER_LEVEL)) & MASK) as usize
 }
 
@@ -121,8 +121,8 @@ enum Child<K, V> {
 
 impl<K, V> Node<K, V> {
     /// Creates an empty node.
-    fn empty() -> Self {
-        Node::Empty
+    const fn empty() -> Self {
+        Self::Empty
     }
 }
 
@@ -177,7 +177,7 @@ impl<K, V> PersistentHashMap<K, V> {
     #[inline]
     #[must_use]
     pub fn new() -> Self {
-        PersistentHashMap {
+        Self {
             root: Rc::new(Node::empty()),
             length: 0,
         }
@@ -201,7 +201,7 @@ impl<K, V> PersistentHashMap<K, V> {
     /// ```
     #[inline]
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.length
     }
 
@@ -220,7 +220,7 @@ impl<K, V> PersistentHashMap<K, V> {
     /// ```
     #[inline]
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.length == 0
     }
 }
@@ -245,7 +245,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     #[inline]
     #[must_use]
     pub fn singleton(key: K, value: V) -> Self {
-        PersistentHashMap::new().insert(key, value)
+        Self::new().insert(key, value)
     }
 
     /// Returns a reference to the value corresponding to the key.
@@ -280,12 +280,11 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
         Q: Hash + Eq + ?Sized,
     {
         let hash = compute_hash(key);
-        self.get_from_node(&self.root, key, hash, 0)
+        Self::get_from_node(&self.root, key, hash, 0)
     }
 
     /// Recursive helper for get.
     fn get_from_node<'a, Q>(
-        &'a self,
         node: &'a Node<K, V>,
         key: &Q,
         hash: u64,
@@ -329,7 +328,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
                                 None
                             }
                         }
-                        Child::Node(subnode) => self.get_from_node(subnode, key, hash, depth + 1),
+                        Child::Node(subnode) => Self::get_from_node(subnode, key, hash, depth + 1),
                     }
                 }
             }
@@ -401,18 +400,17 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     #[must_use]
     pub fn insert(&self, key: K, value: V) -> Self {
         let hash = compute_hash(&key);
-        let (new_root, added) = self.insert_into_node(&self.root, key, value, hash, 0);
+        let (new_root, added) = Self::insert_into_node(&self.root, key, value, hash, 0);
 
-        PersistentHashMap {
+        Self {
             root: Rc::new(new_root),
             length: if added { self.length + 1 } else { self.length },
         }
     }
 
     /// Recursive helper for insert.
-    /// Returns (new_node, was_added) where was_added is true if a new entry was added.
+    /// Returns (`new_node`, `was_added`) where `was_added` is true if a new entry was added.
     fn insert_into_node(
-        &self,
         node: &Node<K, V>,
         key: K,
         value: V,
@@ -420,236 +418,283 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
         depth: usize,
     ) -> (Node<K, V>, bool) {
         match node {
-            Node::Empty => {
-                // Create a new entry node
-                (Node::Entry { hash, key, value }, true)
-            }
+            Node::Empty => (Node::Entry { hash, key, value }, true),
             Node::Entry {
                 hash: existing_hash,
                 key: existing_key,
                 value: existing_value,
-            } => {
-                if *existing_hash == hash && *existing_key == key {
-                    // Same key, replace value
-                    (Node::Entry { hash, key, value }, false)
-                } else if *existing_hash == hash {
-                    // Hash collision - create collision node
-                    let entries = Rc::from(vec![
-                        (existing_key.clone(), existing_value.clone()),
-                        (key, value),
-                    ]);
-                    (Node::Collision { hash, entries }, true)
-                } else {
-                    // Different hash - need to create a bitmap node
-                    let existing_index = hash_index(*existing_hash, depth);
-                    let new_index = hash_index(hash, depth);
-
-                    if existing_index == new_index {
-                        // Same index at this level - recurse
-                        let sub_entry = Node::Entry {
-                            hash: *existing_hash,
-                            key: existing_key.clone(),
-                            value: existing_value.clone(),
-                        };
-                        let (subnode, added) =
-                            self.insert_into_node(&sub_entry, key, value, hash, depth + 1);
-
-                        let bitmap = 1u32 << existing_index;
-                        let children = Rc::from(vec![Child::Node(Rc::new(subnode))]);
-
-                        (Node::Bitmap { bitmap, children }, added)
-                    } else {
-                        // Different indices - create bitmap with two children
-                        let bitmap = (1u32 << existing_index) | (1u32 << new_index);
-
-                        let children: Vec<Child<K, V>> = if existing_index < new_index {
-                            vec![
-                                Child::Entry {
-                                    key: existing_key.clone(),
-                                    value: existing_value.clone(),
-                                },
-                                Child::Entry { key, value },
-                            ]
-                        } else {
-                            vec![
-                                Child::Entry { key, value },
-                                Child::Entry {
-                                    key: existing_key.clone(),
-                                    value: existing_value.clone(),
-                                },
-                            ]
-                        };
-
-                        (
-                            Node::Bitmap {
-                                bitmap,
-                                children: Rc::from(children),
-                            },
-                            true,
-                        )
-                    }
-                }
-            }
+            } => Self::insert_into_entry_node(
+                *existing_hash,
+                existing_key,
+                existing_value,
+                key,
+                value,
+                hash,
+                depth,
+            ),
             Node::Bitmap { bitmap, children } => {
-                let index = hash_index(hash, depth);
-                let bit = 1u32 << index;
-                let position = (bitmap & (bit - 1)).count_ones() as usize;
-
-                if bitmap & bit == 0 {
-                    // Slot is empty - add new entry
-                    let mut new_children = children.to_vec();
-                    new_children.insert(position, Child::Entry { key, value });
-
-                    (
-                        Node::Bitmap {
-                            bitmap: bitmap | bit,
-                            children: Rc::from(new_children),
-                        },
-                        true,
-                    )
-                } else {
-                    // Slot is occupied
-                    let mut new_children = children.to_vec();
-
-                    match &children[position] {
-                        Child::Entry {
-                            key: child_key,
-                            value: child_value,
-                        } => {
-                            let child_hash = compute_hash(child_key);
-                            if *child_key == key {
-                                // Same key - replace
-                                new_children[position] = Child::Entry { key, value };
-                                (
-                                    Node::Bitmap {
-                                        bitmap: *bitmap,
-                                        children: Rc::from(new_children),
-                                    },
-                                    false,
-                                )
-                            } else if child_hash == hash {
-                                // Hash collision
-                                let collision = Node::Collision {
-                                    hash,
-                                    entries: Rc::from(vec![
-                                        (child_key.clone(), child_value.clone()),
-                                        (key, value),
-                                    ]),
-                                };
-                                new_children[position] = Child::Node(Rc::new(collision));
-                                (
-                                    Node::Bitmap {
-                                        bitmap: *bitmap,
-                                        children: Rc::from(new_children),
-                                    },
-                                    true,
-                                )
-                            } else {
-                                // Need to create subnode
-                                let child_entry = Node::Entry {
-                                    hash: child_hash,
-                                    key: child_key.clone(),
-                                    value: child_value.clone(),
-                                };
-                                let (subnode, added) = self.insert_into_node(
-                                    &child_entry,
-                                    key,
-                                    value,
-                                    hash,
-                                    depth + 1,
-                                );
-                                new_children[position] = Child::Node(Rc::new(subnode));
-
-                                (
-                                    Node::Bitmap {
-                                        bitmap: *bitmap,
-                                        children: Rc::from(new_children),
-                                    },
-                                    added,
-                                )
-                            }
-                        }
-                        Child::Node(subnode) => {
-                            let (new_subnode, added) =
-                                self.insert_into_node(subnode, key, value, hash, depth + 1);
-                            new_children[position] = Child::Node(Rc::new(new_subnode));
-
-                            (
-                                Node::Bitmap {
-                                    bitmap: *bitmap,
-                                    children: Rc::from(new_children),
-                                },
-                                added,
-                            )
-                        }
-                    }
-                }
+                Self::insert_into_bitmap_node(*bitmap, children, key, value, hash, depth)
             }
             Node::Collision {
                 hash: collision_hash,
                 entries,
+            } => Self::insert_into_collision_node(node, *collision_hash, entries, key, value, hash, depth),
+        }
+    }
+
+    /// Helper for inserting into an Entry node.
+    fn insert_into_entry_node(
+        existing_hash: u64,
+        existing_key: &K,
+        existing_value: &V,
+        key: K,
+        value: V,
+        hash: u64,
+        depth: usize,
+    ) -> (Node<K, V>, bool) {
+        if existing_hash == hash && *existing_key == key {
+            // Same key, replace value
+            (Node::Entry { hash, key, value }, false)
+        } else if existing_hash == hash {
+            // Hash collision - create collision node
+            let entries = Rc::from(vec![
+                (existing_key.clone(), existing_value.clone()),
+                (key, value),
+            ]);
+            (Node::Collision { hash, entries }, true)
+        } else {
+            // Different hash - need to create a bitmap node
+            Self::create_bitmap_from_two_entries(
+                existing_hash,
+                existing_key,
+                existing_value,
+                key,
+                value,
+                hash,
+                depth,
+            )
+        }
+    }
+
+    /// Creates a bitmap node from two entries with different hashes.
+    fn create_bitmap_from_two_entries(
+        existing_hash: u64,
+        existing_key: &K,
+        existing_value: &V,
+        key: K,
+        value: V,
+        hash: u64,
+        depth: usize,
+    ) -> (Node<K, V>, bool) {
+        let existing_index = hash_index(existing_hash, depth);
+        let new_index = hash_index(hash, depth);
+
+        if existing_index == new_index {
+            // Same index at this level - recurse
+            let sub_entry = Node::Entry {
+                hash: existing_hash,
+                key: existing_key.clone(),
+                value: existing_value.clone(),
+            };
+            let (subnode, added) = Self::insert_into_node(&sub_entry, key, value, hash, depth + 1);
+            let bitmap = 1u32 << existing_index;
+            let children = Rc::from(vec![Child::Node(Rc::new(subnode))]);
+            (Node::Bitmap { bitmap, children }, added)
+        } else {
+            // Different indices - create bitmap with two children
+            let bitmap = (1u32 << existing_index) | (1u32 << new_index);
+            let children: Vec<Child<K, V>> = if existing_index < new_index {
+                vec![
+                    Child::Entry {
+                        key: existing_key.clone(),
+                        value: existing_value.clone(),
+                    },
+                    Child::Entry { key, value },
+                ]
+            } else {
+                vec![
+                    Child::Entry { key, value },
+                    Child::Entry {
+                        key: existing_key.clone(),
+                        value: existing_value.clone(),
+                    },
+                ]
+            };
+            (
+                Node::Bitmap {
+                    bitmap,
+                    children: Rc::from(children),
+                },
+                true,
+            )
+        }
+    }
+
+    /// Helper for inserting into a Bitmap node.
+    fn insert_into_bitmap_node(
+        bitmap: u32,
+        children: &Rc<[Child<K, V>]>,
+        key: K,
+        value: V,
+        hash: u64,
+        depth: usize,
+    ) -> (Node<K, V>, bool) {
+        let index = hash_index(hash, depth);
+        let bit = 1u32 << index;
+        let position = (bitmap & (bit - 1)).count_ones() as usize;
+
+        if bitmap & bit == 0 {
+            // Slot is empty - add new entry
+            let mut new_children = children.to_vec();
+            new_children.insert(position, Child::Entry { key, value });
+            (
+                Node::Bitmap {
+                    bitmap: bitmap | bit,
+                    children: Rc::from(new_children),
+                },
+                true,
+            )
+        } else {
+            // Slot is occupied
+            Self::insert_into_occupied_slot(bitmap, children, position, key, value, hash, depth)
+        }
+    }
+
+    /// Helper for inserting into an occupied slot in a Bitmap node.
+    fn insert_into_occupied_slot(
+        bitmap: u32,
+        children: &Rc<[Child<K, V>]>,
+        position: usize,
+        key: K,
+        value: V,
+        hash: u64,
+        depth: usize,
+    ) -> (Node<K, V>, bool) {
+        let mut new_children = children.to_vec();
+
+        let (new_child, added) = match &children[position] {
+            Child::Entry {
+                key: child_key,
+                value: child_value,
             } => {
-                if hash == *collision_hash {
-                    // Same hash - update or add to collision node
-                    let mut new_entries = entries.to_vec();
-                    let mut found = false;
-
-                    for entry in new_entries.iter_mut() {
-                        if entry.0 == key {
-                            entry.1 = value.clone();
-                            found = true;
-                            break;
-                        }
-                    }
-
-                    if !found {
-                        new_entries.push((key, value));
-                    }
-
-                    (
-                        Node::Collision {
-                            hash: *collision_hash,
-                            entries: Rc::from(new_entries),
-                        },
-                        !found,
-                    )
+                let child_hash = compute_hash(child_key);
+                if *child_key == key {
+                    (Child::Entry { key, value }, false)
+                } else if child_hash == hash {
+                    let collision = Node::Collision {
+                        hash,
+                        entries: Rc::from(vec![
+                            (child_key.clone(), child_value.clone()),
+                            (key, value),
+                        ]),
+                    };
+                    (Child::Node(Rc::new(collision)), true)
                 } else {
-                    // Different hash - need to convert to bitmap node
-                    // This is a complex case, handle by creating a bitmap node
-                    let collision_index = hash_index(*collision_hash, depth);
-                    let new_index = hash_index(hash, depth);
-
-                    if collision_index == new_index {
-                        // Same index - recurse with collision as subnode
-                        let (subnode, added) =
-                            self.insert_into_node(node, key, value, hash, depth + 1);
-                        let bitmap = 1u32 << collision_index;
-                        let children = Rc::from(vec![Child::Node(Rc::new(subnode))]);
-                        (Node::Bitmap { bitmap, children }, added)
-                    } else {
-                        let bitmap = (1u32 << collision_index) | (1u32 << new_index);
-                        let children: Vec<Child<K, V>> = if collision_index < new_index {
-                            vec![
-                                Child::Node(Rc::new(node.clone())),
-                                Child::Entry { key, value },
-                            ]
-                        } else {
-                            vec![
-                                Child::Entry { key, value },
-                                Child::Node(Rc::new(node.clone())),
-                            ]
-                        };
-
-                        (
-                            Node::Bitmap {
-                                bitmap,
-                                children: Rc::from(children),
-                            },
-                            true,
-                        )
-                    }
+                    let child_entry = Node::Entry {
+                        hash: child_hash,
+                        key: child_key.clone(),
+                        value: child_value.clone(),
+                    };
+                    let (subnode, added) =
+                        Self::insert_into_node(&child_entry, key, value, hash, depth + 1);
+                    (Child::Node(Rc::new(subnode)), added)
                 }
             }
+            Child::Node(subnode) => {
+                let (new_subnode, added) =
+                    Self::insert_into_node(subnode, key, value, hash, depth + 1);
+                (Child::Node(Rc::new(new_subnode)), added)
+            }
+        };
+
+        new_children[position] = new_child;
+        (
+            Node::Bitmap {
+                bitmap,
+                children: Rc::from(new_children),
+            },
+            added,
+        )
+    }
+
+    /// Helper for inserting into a Collision node.
+    fn insert_into_collision_node(
+        node: &Node<K, V>,
+        collision_hash: u64,
+        entries: &Rc<[(K, V)]>,
+        key: K,
+        value: V,
+        hash: u64,
+        depth: usize,
+    ) -> (Node<K, V>, bool) {
+        if hash == collision_hash {
+            // Same hash - update or add to collision node
+            let mut new_entries = entries.to_vec();
+            let mut found = false;
+
+            for entry in &mut new_entries {
+                if entry.0 == key {
+                    entry.1 = value.clone();
+                    found = true;
+                    break;
+                }
+            }
+
+            if !found {
+                new_entries.push((key, value));
+            }
+
+            (
+                Node::Collision {
+                    hash: collision_hash,
+                    entries: Rc::from(new_entries),
+                },
+                !found,
+            )
+        } else {
+            // Different hash - convert to bitmap node
+            Self::convert_collision_to_bitmap(node, collision_hash, key, value, hash, depth)
+        }
+    }
+
+    /// Converts a Collision node to a Bitmap node when a new hash is encountered.
+    fn convert_collision_to_bitmap(
+        node: &Node<K, V>,
+        collision_hash: u64,
+        key: K,
+        value: V,
+        hash: u64,
+        depth: usize,
+    ) -> (Node<K, V>, bool) {
+        let collision_index = hash_index(collision_hash, depth);
+        let new_index = hash_index(hash, depth);
+
+        if collision_index == new_index {
+            // Same index - recurse with collision as subnode
+            let (subnode, added) = Self::insert_into_node(node, key, value, hash, depth + 1);
+            let bitmap = 1u32 << collision_index;
+            let children = Rc::from(vec![Child::Node(Rc::new(subnode))]);
+            (Node::Bitmap { bitmap, children }, added)
+        } else {
+            let bitmap = (1u32 << collision_index) | (1u32 << new_index);
+            let children: Vec<Child<K, V>> = if collision_index < new_index {
+                vec![
+                    Child::Node(Rc::new(node.clone())),
+                    Child::Entry { key, value },
+                ]
+            } else {
+                vec![
+                    Child::Entry { key, value },
+                    Child::Node(Rc::new(node.clone())),
+                ]
+            };
+            (
+                Node::Bitmap {
+                    bitmap,
+                    children: Rc::from(children),
+                },
+                true,
+            )
         }
     }
 
@@ -687,10 +732,10 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
         Q: Hash + Eq + ?Sized,
     {
         let hash = compute_hash(key);
-        match self.remove_from_node(&self.root, key, hash, 0) {
+        match Self::remove_from_node(&self.root, key, hash, 0) {
             Some((new_root, removed)) => {
                 if removed {
-                    PersistentHashMap {
+                    Self {
                         root: Rc::new(new_root),
                         length: self.length.saturating_sub(1),
                     }
@@ -703,9 +748,8 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     }
 
     /// Recursive helper for remove.
-    /// Returns Some((new_node, was_removed)) or None if no change needed.
+    /// Returns `Some((new_node`, `was_removed`)) or None if no change needed.
     fn remove_from_node<Q>(
-        &self,
         node: &Node<K, V>,
         key: &Q,
         hash: u64,
@@ -729,195 +773,208 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
                 }
             }
             Node::Bitmap { bitmap, children } => {
-                let index = hash_index(hash, depth);
-                let bit = 1u32 << index;
-
-                if bitmap & bit == 0 {
-                    // Key not in this subtree
-                    None
-                } else {
-                    let position = (bitmap & (bit - 1)).count_ones() as usize;
-
-                    match &children[position] {
-                        Child::Entry { key: child_key, .. } => {
-                            if child_key.borrow() == key {
-                                // Found the entry to remove
-                                let new_bitmap = bitmap & !bit;
-
-                                if new_bitmap == 0 {
-                                    // No children left
-                                    Some((Node::Empty, true))
-                                } else {
-                                    let mut new_children = children.to_vec();
-                                    new_children.remove(position);
-
-                                    // If only one child left and it's an entry, we might want to simplify
-                                    if new_children.len() == 1 {
-                                        if let Child::Entry { key, value } = &new_children[0] {
-                                            // Can simplify to single entry
-                                            let entry_hash = compute_hash(key);
-                                            return Some((
-                                                Node::Entry {
-                                                    hash: entry_hash,
-                                                    key: key.clone(),
-                                                    value: value.clone(),
-                                                },
-                                                true,
-                                            ));
-                                        }
-                                    }
-
-                                    Some((
-                                        Node::Bitmap {
-                                            bitmap: new_bitmap,
-                                            children: Rc::from(new_children),
-                                        },
-                                        true,
-                                    ))
-                                }
-                            } else {
-                                None
-                            }
-                        }
-                        Child::Node(subnode) => {
-                            if let Some((new_subnode, removed)) =
-                                self.remove_from_node(subnode, key, hash, depth + 1)
-                            {
-                                if !removed {
-                                    return None;
-                                }
-
-                                let mut new_children = children.to_vec();
-
-                                match &new_subnode {
-                                    Node::Empty => {
-                                        // Subnode became empty, remove it
-                                        let new_bitmap = bitmap & !bit;
-
-                                        if new_bitmap == 0 {
-                                            return Some((Node::Empty, true));
-                                        }
-
-                                        new_children.remove(position);
-
-                                        // Simplify if only one child left
-                                        if new_children.len() == 1 {
-                                            if let Child::Entry { key, value } = &new_children[0] {
-                                                let entry_hash = compute_hash(key);
-                                                return Some((
-                                                    Node::Entry {
-                                                        hash: entry_hash,
-                                                        key: key.clone(),
-                                                        value: value.clone(),
-                                                    },
-                                                    true,
-                                                ));
-                                            }
-                                        }
-
-                                        Some((
-                                            Node::Bitmap {
-                                                bitmap: new_bitmap,
-                                                children: Rc::from(new_children),
-                                            },
-                                            true,
-                                        ))
-                                    }
-                                    Node::Entry {
-                                        hash: entry_hash,
-                                        key: entry_key,
-                                        value: entry_value,
-                                    } => {
-                                        // Subnode collapsed to single entry
-                                        new_children[position] = Child::Entry {
-                                            key: entry_key.clone(),
-                                            value: entry_value.clone(),
-                                        };
-
-                                        // Check if we can simplify further
-                                        if new_children.len() == 1 {
-                                            return Some((
-                                                Node::Entry {
-                                                    hash: *entry_hash,
-                                                    key: entry_key.clone(),
-                                                    value: entry_value.clone(),
-                                                },
-                                                true,
-                                            ));
-                                        }
-
-                                        Some((
-                                            Node::Bitmap {
-                                                bitmap: *bitmap,
-                                                children: Rc::from(new_children),
-                                            },
-                                            true,
-                                        ))
-                                    }
-                                    _ => {
-                                        new_children[position] = Child::Node(Rc::new(new_subnode));
-                                        Some((
-                                            Node::Bitmap {
-                                                bitmap: *bitmap,
-                                                children: Rc::from(new_children),
-                                            },
-                                            true,
-                                        ))
-                                    }
-                                }
-                            } else {
-                                None
-                            }
-                        }
-                    }
-                }
+                Self::remove_from_bitmap_node(*bitmap, children, key, hash, depth)
             }
             Node::Collision {
                 hash: collision_hash,
                 entries,
-            } => {
-                if hash != *collision_hash {
-                    return None;
-                }
+            } => Self::remove_from_collision_node(*collision_hash, entries, key, hash),
+        }
+    }
 
-                let mut new_entries = entries.to_vec();
-                let mut found_index = None;
+    /// Helper for removing from a Bitmap node.
+    fn remove_from_bitmap_node<Q>(
+        bitmap: u32,
+        children: &Rc<[Child<K, V>]>,
+        key: &Q,
+        hash: u64,
+        depth: usize,
+    ) -> Option<(Node<K, V>, bool)>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        let index = hash_index(hash, depth);
+        let bit = 1u32 << index;
 
-                for (index, (entry_key, _)) in new_entries.iter().enumerate() {
-                    if entry_key.borrow() == key {
-                        found_index = Some(index);
-                        break;
-                    }
-                }
+        if bitmap & bit == 0 {
+            return None;
+        }
 
-                if let Some(index) = found_index {
-                    new_entries.remove(index);
+        let position = (bitmap & (bit - 1)).count_ones() as usize;
 
-                    if new_entries.is_empty() {
-                        Some((Node::Empty, true))
-                    } else if new_entries.len() == 1 {
-                        let (remaining_key, remaining_value) = new_entries.remove(0);
-                        Some((
-                            Node::Entry {
-                                hash: *collision_hash,
-                                key: remaining_key,
-                                value: remaining_value,
-                            },
-                            true,
-                        ))
-                    } else {
-                        Some((
-                            Node::Collision {
-                                hash: *collision_hash,
-                                entries: Rc::from(new_entries),
-                            },
-                            true,
-                        ))
-                    }
+        match &children[position] {
+            Child::Entry { key: child_key, .. } => {
+                if child_key.borrow() == key {
+                    Some(Self::remove_entry_from_bitmap(bitmap, children, position, bit))
                 } else {
                     None
                 }
             }
+            Child::Node(subnode) => {
+                Self::remove_from_subnode(bitmap, children, position, subnode, key, hash, depth)
+            }
+        }
+    }
+
+    /// Helper for removing an entry from a Bitmap node.
+    fn remove_entry_from_bitmap(
+        bitmap: u32,
+        children: &Rc<[Child<K, V>]>,
+        position: usize,
+        bit: u32,
+    ) -> (Node<K, V>, bool) {
+        let new_bitmap = bitmap & !bit;
+
+        if new_bitmap == 0 {
+            return (Node::Empty, true);
+        }
+
+        let mut new_children = children.to_vec();
+        new_children.remove(position);
+
+        Self::simplify_bitmap_if_possible(new_bitmap, new_children)
+    }
+
+    /// Helper for removing from a subnode within a Bitmap node.
+    fn remove_from_subnode<Q>(
+        bitmap: u32,
+        children: &Rc<[Child<K, V>]>,
+        position: usize,
+        subnode: &Rc<Node<K, V>>,
+        key: &Q,
+        hash: u64,
+        depth: usize,
+    ) -> Option<(Node<K, V>, bool)>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        let (new_subnode, removed) = Self::remove_from_node(subnode, key, hash, depth + 1)?;
+
+        if !removed {
+            return None;
+        }
+
+        let mut new_children = children.to_vec();
+
+        match &new_subnode {
+            Node::Empty => {
+                let new_bitmap = bitmap & !(1u32 << hash_index(hash, depth));
+                if new_bitmap == 0 {
+                    return Some((Node::Empty, true));
+                }
+                new_children.remove(position);
+                Some(Self::simplify_bitmap_if_possible(new_bitmap, new_children))
+            }
+            Node::Entry {
+                hash: entry_hash,
+                key: entry_key,
+                value: entry_value,
+            } => {
+                new_children[position] = Child::Entry {
+                    key: entry_key.clone(),
+                    value: entry_value.clone(),
+                };
+                if new_children.len() == 1 {
+                    Some((
+                        Node::Entry {
+                            hash: *entry_hash,
+                            key: entry_key.clone(),
+                            value: entry_value.clone(),
+                        },
+                        true,
+                    ))
+                } else {
+                    Some((
+                        Node::Bitmap {
+                            bitmap,
+                            children: Rc::from(new_children),
+                        },
+                        true,
+                    ))
+                }
+            }
+            _ => {
+                new_children[position] = Child::Node(Rc::new(new_subnode));
+                Some((
+                    Node::Bitmap {
+                        bitmap,
+                        children: Rc::from(new_children),
+                    },
+                    true,
+                ))
+            }
+        }
+    }
+
+    /// Simplifies a Bitmap node to an Entry if it has only one child entry.
+    fn simplify_bitmap_if_possible(bitmap: u32, children: Vec<Child<K, V>>) -> (Node<K, V>, bool) {
+        if children.len() == 1
+            && let Child::Entry { key, value } = &children[0]
+        {
+            let entry_hash = compute_hash(key);
+            (
+                Node::Entry {
+                    hash: entry_hash,
+                    key: key.clone(),
+                    value: value.clone(),
+                },
+                true,
+            )
+        } else {
+            (
+                Node::Bitmap {
+                    bitmap,
+                    children: Rc::from(children),
+                },
+                true,
+            )
+        }
+    }
+
+    /// Helper for removing from a Collision node.
+    fn remove_from_collision_node<Q>(
+        collision_hash: u64,
+        entries: &Rc<[(K, V)]>,
+        key: &Q,
+        hash: u64,
+    ) -> Option<(Node<K, V>, bool)>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        if hash != collision_hash {
+            return None;
+        }
+
+        let mut new_entries = entries.to_vec();
+        let found_index = new_entries
+            .iter()
+            .position(|(entry_key, _)| entry_key.borrow() == key)?;
+
+        new_entries.remove(found_index);
+
+        if new_entries.is_empty() {
+            Some((Node::Empty, true))
+        } else if new_entries.len() == 1 {
+            let (remaining_key, remaining_value) = new_entries.remove(0);
+            Some((
+                Node::Entry {
+                    hash: collision_hash,
+                    key: remaining_key,
+                    value: remaining_value,
+                },
+                true,
+            ))
+        } else {
+            Some((
+                Node::Collision {
+                    hash: collision_hash,
+                    entries: Rc::from(new_entries),
+                },
+                true,
+            ))
         }
     }
 
@@ -958,13 +1015,13 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
         // This requires K to be obtainable from Q, which is complex
         // For now, we'll use a workaround by iterating to find the actual key
         let hash = compute_hash(key);
-        let actual_key = self.find_key(&self.root, key, hash, 0)?;
+        let actual_key = Self::find_key(&self.root, key, hash, 0)?;
 
         Some(self.insert(actual_key, new_value))
     }
 
     /// Finds and clones the key matching the given query key.
-    fn find_key<Q>(&self, node: &Node<K, V>, key: &Q, hash: u64, depth: usize) -> Option<K>
+    fn find_key<Q>(node: &Node<K, V>, key: &Q, hash: u64, depth: usize) -> Option<K>
     where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
@@ -998,7 +1055,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
                                 None
                             }
                         }
-                        Child::Node(subnode) => self.find_key(subnode, key, hash, depth + 1),
+                        Child::Node(subnode) => Self::find_key(subnode, key, hash, depth + 1),
                     }
                 }
             }
@@ -1023,7 +1080,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     ///
     /// * `key` - The key to update
     /// * `updater` - A function that receives the current value (or None) and returns
-    ///               the new value (or None to remove)
+    ///   the new value (or None to remove)
     ///
     /// # Complexity
     ///
@@ -1069,8 +1126,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
             (Some(_), Some(value)) => {
                 // Update existing key
                 let hash = compute_hash(key);
-                let actual_key = self
-                    .find_key(&self.root, key, hash, 0)
+                let actual_key = Self::find_key(&self.root, key, hash, 0)
                     .unwrap_or_else(|| key.to_owned());
                 self.insert(actual_key, value)
             }
@@ -1120,7 +1176,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     #[must_use]
     pub fn merge(&self, other: &Self) -> Self {
         let mut result = self.clone();
-        for (key, value) in other.iter() {
+        for (key, value) in other {
             result = result.insert(key.clone(), value.clone());
         }
         result
@@ -1141,9 +1197,10 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     ///     println!("{}: {}", key, value);
     /// }
     /// ```
+    #[must_use] 
     pub fn iter(&self) -> PersistentHashMapIterator<'_, K, V> {
         let mut entries = Vec::new();
-        self.collect_entries(&self.root, &mut entries);
+        Self::collect_entries(&self.root, &mut entries);
         PersistentHashMapIterator {
             entries,
             current_index: 0,
@@ -1151,7 +1208,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     }
 
     /// Collects all entries from a node into a vector.
-    fn collect_entries<'a>(&'a self, node: &'a Node<K, V>, entries: &mut Vec<(&'a K, &'a V)>) {
+    fn collect_entries<'a>(node: &'a Node<K, V>, entries: &mut Vec<(&'a K, &'a V)>) {
         match node {
             Node::Empty => {}
             Node::Entry { key, value, .. } => {
@@ -1164,7 +1221,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
                             entries.push((key, value));
                         }
                         Child::Node(subnode) => {
-                            self.collect_entries(subnode, entries);
+                            Self::collect_entries(subnode, entries);
                         }
                     }
                 }
@@ -1291,13 +1348,13 @@ impl<K: Clone, V: Clone> ExactSizeIterator for PersistentHashMapIntoIterator<K, 
 impl<K, V> Default for PersistentHashMap<K, V> {
     #[inline]
     fn default() -> Self {
-        PersistentHashMap::new()
+        Self::new()
     }
 }
 
 impl<K: Clone + Hash + Eq, V: Clone> FromIterator<(K, V)> for PersistentHashMap<K, V> {
     fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
-        let mut map = PersistentHashMap::new();
+        let mut map = Self::new();
         for (key, value) in iter {
             map = map.insert(key, value);
         }
@@ -1337,9 +1394,9 @@ impl<K: Clone + Hash + Eq, V: Clone + PartialEq> PartialEq for PersistentHashMap
             return false;
         }
 
-        for (key, value) in self.iter() {
+        for (key, value) in self {
             match other.get(key) {
-                Some(other_value) if other_value == value => continue,
+                Some(other_value) if other_value == value => {}
                 _ => return false,
             }
         }
@@ -1362,9 +1419,9 @@ impl<K: Clone + Hash + Eq + fmt::Debug, V: Clone + fmt::Debug> fmt::Debug
 // Type Class Implementations
 // =============================================================================
 
-/// Wrapper to make PersistentHashMap implement TypeConstructor for values.
+/// Wrapper to make `PersistentHashMap` implement `TypeConstructor` for values.
 ///
-/// Since PersistentHashMap has two type parameters (K, V), we treat it as
+/// Since `PersistentHashMap` has two type parameters (K, V), we treat it as
 /// a container of V values with K being fixed.
 impl<K, V> TypeConstructor for PersistentHashMap<K, V> {
     type Inner = V;
@@ -1384,10 +1441,8 @@ impl<K: Clone + Hash + Eq, V: Clone> Foldable for PersistentHashMap<K, V> {
     where
         F: FnMut(V, B) -> B,
     {
-        let entries: Vec<_> = self.into_iter().collect();
-        entries
-            .into_iter()
-            .rev()
+        // For unordered collections, fold_right is semantically equivalent to fold_left
+        self.into_iter()
             .fold(init, |accumulator, (_, value)| function(value, accumulator))
     }
 

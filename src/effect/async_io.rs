@@ -1,4 +1,4 @@
-//! AsyncIO Monad - Deferred asynchronous side effect handling.
+//! `AsyncIO` Monad - Deferred asynchronous side effect handling.
 //!
 //! The `AsyncIO` type represents an asynchronous computation that may perform
 //! side effects. Side effects are not executed until `run_async` is called,
@@ -6,7 +6,7 @@
 //!
 //! # Design Philosophy
 //!
-//! AsyncIO "describes" async side effects but doesn't "execute" them. Execution
+//! `AsyncIO` "describes" async side effects but doesn't "execute" them. Execution
 //! happens only via `run_async().await`, which should be called at the program's
 //! "edge" (e.g., in async handlers or the main function).
 //!
@@ -105,7 +105,7 @@ pub struct AsyncIO<A> {
 // =============================================================================
 
 impl<A: 'static> AsyncIO<A> {
-    /// Creates a new AsyncIO action from an async closure.
+    /// Creates a new `AsyncIO` action from an async closure.
     ///
     /// The closure will not be executed until `run_async` is called.
     ///
@@ -138,7 +138,7 @@ impl<A: 'static> AsyncIO<A> {
         }
     }
 
-    /// Creates an AsyncIO from an existing Future.
+    /// Creates an `AsyncIO` from an existing Future.
     ///
     /// The Future should not have been polled yet.
     ///
@@ -165,9 +165,9 @@ impl<A: 'static> AsyncIO<A> {
 }
 
 impl<A: Send + 'static> AsyncIO<A> {
-    /// Wraps a pure value in an AsyncIO action.
+    /// Wraps a pure value in an `AsyncIO` action.
     ///
-    /// This creates an AsyncIO action that returns the given value without
+    /// This creates an `AsyncIO` action that returns the given value without
     /// performing any side effects.
     ///
     /// # Arguments
@@ -194,9 +194,9 @@ impl<A: Send + 'static> AsyncIO<A> {
 // =============================================================================
 
 impl<A: 'static> AsyncIO<A> {
-    /// Executes the AsyncIO action and returns the result.
+    /// Executes the `AsyncIO` action and returns the result.
     ///
-    /// This is the only way to extract a value from an AsyncIO action.
+    /// This is the only way to extract a value from an `AsyncIO` action.
     /// It should be called at the program's "edge" (e.g., in async handlers
     /// or the main function).
     ///
@@ -221,7 +221,7 @@ impl<A: 'static> AsyncIO<A> {
         (self.run_async_io)().await
     }
 
-    /// Converts the AsyncIO into a Future.
+    /// Converts the `AsyncIO` into a Future.
     ///
     /// This is useful when you need to pass the computation to functions
     /// that expect a Future, such as `tokio::spawn`.
@@ -235,12 +235,10 @@ impl<A: 'static> AsyncIO<A> {
     /// let future = async_io.into_future();
     /// tokio::spawn(future);
     /// ```
-    pub fn into_future(self) -> impl Future<Output = A> + Send
+    pub async fn into_future(self) -> A
     where
         A: Send,
-    {
-        async move { self.run_async().await }
-    }
+    { self.run_async().await }
 }
 
 // =============================================================================
@@ -248,7 +246,7 @@ impl<A: 'static> AsyncIO<A> {
 // =============================================================================
 
 impl<A: 'static> AsyncIO<A> {
-    /// Transforms the result of an AsyncIO action using a function.
+    /// Transforms the result of an `AsyncIO` action using a function.
     ///
     /// This is the `fmap` operation from Functor.
     ///
@@ -286,11 +284,11 @@ impl<A: 'static> AsyncIO<A> {
 // =============================================================================
 
 impl<A: 'static> AsyncIO<A> {
-    /// Applies an AsyncIO-wrapped function to this AsyncIO value.
+    /// Applies an AsyncIO-wrapped function to this `AsyncIO` value.
     ///
     /// # Arguments
     ///
-    /// * `function_async_io` - An AsyncIO containing a function.
+    /// * `function_async_io` - An `AsyncIO` containing a function.
     ///
     /// # Type Parameters
     ///
@@ -307,6 +305,7 @@ impl<A: 'static> AsyncIO<A> {
     /// let result = value_io.apply(function_io).run_async().await;
     /// assert_eq!(result, 42);
     /// ```
+    #[must_use] 
     pub fn apply<B, F>(self, function_async_io: AsyncIO<F>) -> AsyncIO<B>
     where
         F: FnOnce(A) -> B + Send + 'static,
@@ -319,19 +318,19 @@ impl<A: 'static> AsyncIO<A> {
         })
     }
 
-    /// Combines two AsyncIO actions using a function.
+    /// Combines two `AsyncIO` actions using a function.
     ///
     /// Both computations are executed sequentially, and their results
     /// are combined using the provided function.
     ///
     /// # Arguments
     ///
-    /// * `other` - The second AsyncIO action.
+    /// * `other` - The second `AsyncIO` action.
     /// * `function` - A function to combine the results.
     ///
     /// # Type Parameters
     ///
-    /// * `B` - The type of the second AsyncIO's value.
+    /// * `B` - The type of the second `AsyncIO`'s value.
     /// * `C` - The return type of the combining function.
     /// * `F` - The type of the combining function.
     ///
@@ -361,15 +360,15 @@ impl<A: 'static> AsyncIO<A> {
 }
 
 impl<A: Send + 'static> AsyncIO<A> {
-    /// Combines two AsyncIO actions into a tuple.
+    /// Combines two `AsyncIO` actions into a tuple.
     ///
     /// # Arguments
     ///
-    /// * `other` - The second AsyncIO action.
+    /// * `other` - The second `AsyncIO` action.
     ///
     /// # Type Parameters
     ///
-    /// * `B` - The type of the second AsyncIO's value.
+    /// * `B` - The type of the second `AsyncIO`'s value.
     ///
     /// # Examples
     ///
@@ -381,6 +380,7 @@ impl<A: Send + 'static> AsyncIO<A> {
     /// let result = io1.product(io2).run_async().await;
     /// assert_eq!(result, (10, 20));
     /// ```
+    #[must_use] 
     pub fn product<B>(self, other: AsyncIO<B>) -> AsyncIO<(A, B)>
     where
         B: Send + 'static,
@@ -394,18 +394,18 @@ impl<A: Send + 'static> AsyncIO<A> {
 // =============================================================================
 
 impl<A: 'static> AsyncIO<A> {
-    /// Chains AsyncIO actions, passing the result of the first to a function
+    /// Chains `AsyncIO` actions, passing the result of the first to a function
     /// that produces the second.
     ///
     /// This is the `bind` operation from Monad.
     ///
     /// # Arguments
     ///
-    /// * `function` - A function that takes the result and returns a new AsyncIO action.
+    /// * `function` - A function that takes the result and returns a new `AsyncIO` action.
     ///
     /// # Type Parameters
     ///
-    /// * `B` - The type of the second AsyncIO's value.
+    /// * `B` - The type of the second `AsyncIO`'s value.
     /// * `F` - The type of the function.
     ///
     /// # Examples
@@ -448,17 +448,17 @@ impl<A: 'static> AsyncIO<A> {
         self.flat_map(function)
     }
 
-    /// Sequences two AsyncIO actions, discarding the result of the first.
+    /// Sequences two `AsyncIO` actions, discarding the result of the first.
     ///
     /// The first action is still executed for its side effects.
     ///
     /// # Arguments
     ///
-    /// * `next` - The AsyncIO action to execute after this one.
+    /// * `next` - The `AsyncIO` action to execute after this one.
     ///
     /// # Type Parameters
     ///
-    /// * `B` - The type of the second AsyncIO's value.
+    /// * `B` - The type of the second `AsyncIO`'s value.
     ///
     /// # Examples
     ///
@@ -468,6 +468,7 @@ impl<A: 'static> AsyncIO<A> {
     /// let async_io = AsyncIO::pure(10).then(AsyncIO::pure(20));
     /// assert_eq!(async_io.run_async().await, 20);
     /// ```
+    #[must_use] 
     pub fn then<B>(self, next: AsyncIO<B>) -> AsyncIO<B>
     where
         B: 'static,
@@ -481,7 +482,7 @@ impl<A: 'static> AsyncIO<A> {
 // =============================================================================
 
 impl AsyncIO<()> {
-    /// Creates an AsyncIO action that waits for a specified duration.
+    /// Creates an `AsyncIO` action that waits for a specified duration.
     ///
     /// The delay does not occur until `run_async` is called.
     ///
@@ -498,8 +499,9 @@ impl AsyncIO<()> {
     /// let async_io = AsyncIO::delay_async(Duration::from_millis(100));
     /// async_io.run_async().await; // Waits for 100ms
     /// ```
+    #[must_use] 
     pub fn delay_async(duration: Duration) -> Self {
-        AsyncIO::new(move || async move {
+        Self::new(move || async move {
             tokio::time::sleep(duration).await;
         })
     }
@@ -525,32 +527,30 @@ impl<A: 'static> AsyncIO<A> {
     ///     .timeout(Duration::from_millis(100));
     /// assert_eq!(slow.run_async().await, None);
     /// ```
+    #[must_use] 
     pub fn timeout(self, duration: Duration) -> AsyncIO<Option<A>>
     where
         A: Send,
     {
         AsyncIO::new(move || async move {
-            match tokio::time::timeout(duration, self.run_async()).await {
-                Ok(value) => Some(value),
-                Err(_) => None,
-            }
+            (tokio::time::timeout(duration, self.run_async()).await).ok()
         })
     }
 }
 
 impl<A: Send + 'static> AsyncIO<A> {
-    /// Races two AsyncIO actions, returning whichever completes first.
+    /// Races two `AsyncIO` actions, returning whichever completes first.
     ///
     /// The result is wrapped in `Either`: `Left` if the first completes first,
     /// `Right` if the second completes first.
     ///
     /// # Arguments
     ///
-    /// * `other` - The second AsyncIO action to race against.
+    /// * `other` - The second `AsyncIO` action to race against.
     ///
     /// # Type Parameters
     ///
-    /// * `B` - The type of the second AsyncIO's value.
+    /// * `B` - The type of the second `AsyncIO`'s value.
     ///
     /// # Note
     ///
@@ -570,6 +570,7 @@ impl<A: Send + 'static> AsyncIO<A> {
     /// let result = slow.race(fast).run_async().await;
     /// assert!(matches!(result, Either::Right("fast")));
     /// ```
+    #[must_use] 
     pub fn race<B>(self, other: AsyncIO<B>) -> AsyncIO<Either<A, B>>
     where
         B: Send + 'static,
@@ -582,9 +583,9 @@ impl<A: Send + 'static> AsyncIO<A> {
         })
     }
 
-    /// Catches panics in an AsyncIO action and converts them to a Result.
+    /// Catches panics in an `AsyncIO` action and converts them to a Result.
     ///
-    /// If the AsyncIO action panics, the handler is called with the panic info
+    /// If the `AsyncIO` action panics, the handler is called with the panic info
     /// and should return an error value.
     ///
     /// # Arguments
@@ -632,7 +633,7 @@ impl<A: Send + 'static> AsyncIO<A> {
 // =============================================================================
 
 impl<A: Send + 'static> AsyncIO<A> {
-    /// Converts an AsyncIO to a synchronous IO.
+    /// Converts an `AsyncIO` to a synchronous IO.
     ///
     /// This creates a new tokio runtime to execute the async computation
     /// synchronously.
@@ -655,6 +656,11 @@ impl<A: Send + 'static> AsyncIO<A> {
     ///     assert_eq!(result, 42);
     /// }
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if creating the tokio runtime fails.
+    #[must_use]
     pub fn to_sync(self) -> super::IO<A> {
         super::IO::new(move || {
             let runtime =

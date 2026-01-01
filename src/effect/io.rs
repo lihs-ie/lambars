@@ -148,6 +148,7 @@ impl<A: 'static> IO<A> {
     /// let result = io.run_unsafe();
     /// assert_eq!(result, 42);
     /// ```
+    #[must_use] 
     pub fn run_unsafe(self) -> A {
         (self.run_io)()
     }
@@ -244,6 +245,7 @@ impl<A: 'static> IO<A> {
     /// let io = IO::pure(10).then(IO::pure(20));
     /// assert_eq!(io.run_unsafe(), 20);
     /// ```
+    #[must_use] 
     pub fn then<B>(self, next: IO<B>) -> IO<B>
     where
         B: 'static,
@@ -293,6 +295,7 @@ impl<A: 'static> IO<A> {
     /// let io = io1.product(io2);
     /// assert_eq!(io.run_unsafe(), (10, "hello".to_string()));
     /// ```
+    #[must_use] 
     pub fn product<B>(self, other: IO<B>) -> IO<(A, B)>
     where
         B: 'static,
@@ -323,7 +326,7 @@ impl IO<()> {
     /// io.run_unsafe(); // Prints "Hello, World!"
     /// ```
     pub fn print_line<S: std::fmt::Display + 'static>(message: S) -> Self {
-        IO::new(move || {
+        Self::new(move || {
             println!("{message}");
         })
     }
@@ -345,8 +348,9 @@ impl IO<()> {
     /// let io = IO::delay(Duration::from_millis(100));
     /// io.run_unsafe(); // Waits for 100ms
     /// ```
+    #[must_use] 
     pub fn delay(duration: Duration) -> Self {
-        IO::new(move || {
+        Self::new(move || {
             std::thread::sleep(duration);
         })
     }
@@ -366,8 +370,9 @@ impl IO<std::io::Result<String>> {
     /// let line = io.run_unsafe().expect("Failed to read line");
     /// println!("You entered: {}", line);
     /// ```
+    #[must_use] 
     pub fn read_line() -> Self {
-        IO::new(|| {
+        Self::new(|| {
             let mut buffer = String::new();
             std::io::stdin().read_line(&mut buffer)?;
             Ok(buffer)
@@ -403,22 +408,20 @@ impl<A: 'static> IO<A> {
     /// let with_catch = IO::catch(successful, |_| 0);
     /// assert_eq!(with_catch.run_unsafe(), 42);
     /// ```
-    pub fn catch<F>(io: IO<A>, handler: F) -> IO<A>
+    pub fn catch<F>(io: Self, handler: F) -> Self
     where
         F: FnOnce(String) -> A + 'static,
     {
-        IO::new(move || {
+        Self::new(move || {
             let result = catch_unwind(AssertUnwindSafe(|| io.run_unsafe()));
             match result {
                 Ok(value) => value,
                 Err(panic_info) => {
-                    let message = if let Some(string) = panic_info.downcast_ref::<&str>() {
-                        (*string).to_string()
-                    } else if let Some(string) = panic_info.downcast_ref::<String>() {
-                        string.clone()
-                    } else {
-                        "Unknown panic".to_string()
-                    };
+                    let message = panic_info
+                        .downcast_ref::<&str>()
+                        .map(|s| (*s).to_string())
+                        .or_else(|| panic_info.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "Unknown panic".to_string());
                     handler(message)
                 }
             }
@@ -432,7 +435,7 @@ impl<A: 'static> IO<A> {
 
 #[cfg(feature = "async")]
 impl<A: Send + 'static> IO<A> {
-    /// Converts a synchronous IO to an AsyncIO.
+    /// Converts a synchronous IO to an `AsyncIO`.
     ///
     /// **Important**: The IO action is executed immediately when `to_async`
     /// is called (not when `run_async` is called). This is because `IO`
@@ -454,6 +457,7 @@ impl<A: Send + 'static> IO<A> {
     ///     assert_eq!(result, 42);
     /// }
     /// ```
+    #[must_use] 
     pub fn to_async(self) -> super::AsyncIO<A> {
         // Execute the IO action immediately and wrap the result.
         // This is necessary because IO is not Send (it contains

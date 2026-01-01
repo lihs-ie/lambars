@@ -17,7 +17,7 @@
 //!
 //! # Examples
 //!
-//! ## PersistentList
+//! ## `PersistentList`
 //!
 //! ```rust
 //! use lambars::persistent::PersistentList;
@@ -31,7 +31,7 @@
 //! assert_eq!(extended.len(), 4); // New list
 //! ```
 //!
-//! ## PersistentVector
+//! ## `PersistentVector`
 //!
 //! ```rust
 //! use lambars::persistent::PersistentVector;
@@ -45,7 +45,7 @@
 //! assert_eq!(updated.get(50), Some(&999));   // New version
 //! ```
 //!
-//! ## PersistentHashMap
+//! ## `PersistentHashMap`
 //!
 //! ```rust
 //! use lambars::persistent::PersistentHashMap;
@@ -61,7 +61,7 @@
 //! assert_eq!(updated.get("one"), Some(&100)); // New version
 //! ```
 //!
-//! ## PersistentHashSet
+//! ## `PersistentHashSet`
 //!
 //! ```rust
 //! use lambars::persistent::PersistentHashSet;
@@ -86,7 +86,7 @@
 //! assert_eq!(intersection.len(), 2); // {2, 3}
 //! ```
 //!
-//! ## PersistentTreeMap
+//! ## `PersistentTreeMap`
 //!
 //! ```rust
 //! use lambars::persistent::PersistentTreeMap;

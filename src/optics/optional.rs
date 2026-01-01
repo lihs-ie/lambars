@@ -7,13 +7,13 @@
 //!
 //! Every Optional must satisfy two laws (when the element is present):
 //!
-//! 1. **GetOptionSet Law**: Getting and setting back yields the original.
+//! 1. **`GetOptionSet` Law**: Getting and setting back yields the original.
 //!    ```text
 //!    if optional.get_option(&source).is_some() then
 //!        optional.set(source.clone(), optional.get_option(&source).unwrap().clone()) == source
 //!    ```
 //!
-//! 2. **SetGetOption Law**: Setting then getting yields the set value.
+//! 2. **`SetGetOption` Law**: Setting then getting yields the set value.
 //!    ```text
 //!    if optional.get_option(&source).is_some() then
 //!        optional.get_option(&optional.set(source, value)) == Some(&value)
@@ -56,8 +56,8 @@ use super::prism::Prism;
 ///
 /// # Laws
 ///
-/// 1. **GetOptionSet Law**: If present, getting and setting back yields the original.
-/// 2. **SetGetOption Law**: If present, setting then getting yields the set value.
+/// 1. **`GetOptionSet` Law**: If present, getting and setting back yields the original.
+/// 2. **`SetGetOption` Law**: If present, setting then getting yields the set value.
 pub trait Optional<S, A> {
     /// Attempts to get a reference to the focused element.
     ///

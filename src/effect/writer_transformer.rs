@@ -1,6 +1,6 @@
-//! WriterT - Writer Monad Transformer.
+//! `WriterT` - Writer Monad Transformer.
 //!
-//! WriterT adds output accumulation capability to any monad.
+//! `WriterT` adds output accumulation capability to any monad.
 //! It transforms a monad M into a monad that can accumulate output W.
 //!
 //! # Overview
@@ -34,6 +34,11 @@
 use crate::typeclass::Monoid;
 
 use super::IO;
+
+/// The result of `listen`: a tuple of `(value, inner_log)` paired with the outer log.
+/// The inner type `(A, W)` represents the original computation's result,
+/// and the outer `W` represents the accumulated log observed by `listen`.
+type ListenedValue<A, W> = ((A, W), W);
 
 /// A monad transformer that adds output accumulation capability.
 ///
@@ -75,7 +80,7 @@ impl<W, M> WriterT<W, M>
 where
     W: Monoid + 'static,
 {
-    /// Creates a new WriterT from an inner monad.
+    /// Creates a new `WriterT` from an inner monad.
     ///
     /// # Arguments
     ///
@@ -90,14 +95,14 @@ where
     ///     WriterT::new(Some((42, vec!["log".to_string()])));
     /// assert_eq!(writer.run(), Some((42, vec!["log".to_string()])));
     /// ```
-    pub fn new(inner: M) -> Self {
-        WriterT {
+    pub const fn new(inner: M) -> Self {
+        Self {
             inner,
             _marker: std::marker::PhantomData,
         }
     }
 
-    /// Runs the WriterT computation, returning the inner monad.
+    /// Runs the `WriterT` computation, returning the inner monad.
     ///
     /// # Returns
     ///
@@ -127,7 +132,7 @@ where
     M: Clone,
 {
     fn clone(&self) -> Self {
-        WriterT {
+        Self {
             inner: self.inner.clone(),
             _marker: std::marker::PhantomData,
         }
@@ -143,7 +148,7 @@ where
     W: Monoid + Clone + 'static,
     A: 'static,
 {
-    /// Creates a WriterT that returns a constant value with empty output.
+    /// Creates a `WriterT` that returns a constant value with empty output.
     ///
     /// # Arguments
     ///
@@ -160,10 +165,10 @@ where
     /// assert_eq!(writer.run(), Some((42, Vec::<String>::empty())));
     /// ```
     pub fn pure_option(value: A) -> Self {
-        WriterT::new(Some((value, W::empty())))
+        Self::new(Some((value, W::empty())))
     }
 
-    /// Lifts an Option into WriterT with empty output.
+    /// Lifts an Option into `WriterT` with empty output.
     ///
     /// # Arguments
     ///
@@ -181,10 +186,10 @@ where
     /// assert_eq!(writer.run(), Some((42, Vec::<String>::empty())));
     /// ```
     pub fn lift_option(inner: Option<A>) -> Self {
-        WriterT::new(inner.map(|value| (value, W::empty())))
+        Self::new(inner.map(|value| (value, W::empty())))
     }
 
-    /// Creates a WriterT that appends output without producing a meaningful result.
+    /// Creates a `WriterT` that appends output without producing a meaningful result.
     ///
     /// # Arguments
     ///
@@ -199,7 +204,7 @@ where
     ///     WriterT::<Vec<String>, Option<((), Vec<String>)>>::tell_option(vec!["message".to_string()]);
     /// assert_eq!(writer.run(), Some(((), vec!["message".to_string()])));
     /// ```
-    pub fn tell_option(output: W) -> WriterT<W, Option<((), W)>> {
+    pub const fn tell_option(output: W) -> WriterT<W, Option<((), W)>> {
         WriterT::new(Some(((), output)))
     }
 
@@ -227,11 +232,11 @@ where
         WriterT::new(self.inner.map(|(value, output)| (function(value), output)))
     }
 
-    /// Chains WriterT computations with Option.
+    /// Chains `WriterT` computations with Option.
     ///
     /// # Arguments
     ///
-    /// * `function` - A function that takes the value and returns a new WriterT
+    /// * `function` - A function that takes the value and returns a new `WriterT`
     ///
     /// # Examples
     ///
@@ -280,7 +285,7 @@ where
     /// let listened = WriterT::listen_option(writer);
     /// assert_eq!(listened.run(), Some(((42, vec!["log".to_string()]), vec!["log".to_string()])));
     /// ```
-    pub fn listen_option(computation: Self) -> WriterT<W, Option<((A, W), W)>> {
+    pub fn listen_option(computation: Self) -> WriterT<W, Option<ListenedValue<A, W>>> {
         match computation.inner {
             Some((value, output)) => WriterT::new(Some(((value, output.clone()), output))),
             None => WriterT::new(None),
@@ -298,18 +303,18 @@ where
     A: 'static,
     E: 'static,
 {
-    /// Creates a WriterT that returns a constant value with empty output.
+    /// Creates a `WriterT` that returns a constant value with empty output.
     pub fn pure_result(value: A) -> Self {
-        WriterT::new(Ok((value, W::empty())))
+        Self::new(Ok((value, W::empty())))
     }
 
-    /// Lifts a Result into WriterT with empty output.
+    /// Lifts a Result into `WriterT` with empty output.
     pub fn lift_result(inner: Result<A, E>) -> Self {
-        WriterT::new(inner.map(|value| (value, W::empty())))
+        Self::new(inner.map(|value| (value, W::empty())))
     }
 
-    /// Creates a WriterT that appends output without producing a meaningful result.
-    pub fn tell_result(output: W) -> WriterT<W, Result<((), W), E>> {
+    /// Creates a `WriterT` that appends output without producing a meaningful result.
+    pub const fn tell_result(output: W) -> WriterT<W, Result<((), W), E>> {
         WriterT::new(Ok(((), output)))
     }
 
@@ -322,7 +327,7 @@ where
         WriterT::new(self.inner.map(|(value, output)| (function(value), output)))
     }
 
-    /// Chains WriterT computations with Result.
+    /// Chains `WriterT` computations with Result.
     pub fn flat_map_result<B, F>(self, function: F) -> WriterT<W, Result<(B, W), E>>
     where
         F: FnOnce(A) -> WriterT<W, Result<(B, W), E>>,
@@ -341,7 +346,7 @@ where
     }
 
     /// Executes a computation and also returns its output.
-    pub fn listen_result(computation: Self) -> WriterT<W, Result<((A, W), W), E>> {
+    pub fn listen_result(computation: Self) -> WriterT<W, Result<ListenedValue<A, W>, E>> {
         match computation.inner {
             Ok((value, output)) => WriterT::new(Ok(((value, output.clone()), output))),
             Err(error) => WriterT::new(Err(error)),
@@ -358,17 +363,18 @@ where
     W: Monoid + Clone + 'static,
     A: 'static,
 {
-    /// Creates a WriterT that returns a constant value with empty output.
+    /// Creates a `WriterT` that returns a constant value with empty output.
     pub fn pure_io(value: A) -> Self {
-        WriterT::new(IO::pure((value, W::empty())))
+        Self::new(IO::pure((value, W::empty())))
     }
 
-    /// Lifts an IO into WriterT with empty output.
+    /// Lifts an IO into `WriterT` with empty output.
+    #[must_use] 
     pub fn lift_io(inner: IO<A>) -> Self {
-        WriterT::new(inner.fmap(|value| (value, W::empty())))
+        Self::new(inner.fmap(|value| (value, W::empty())))
     }
 
-    /// Creates a WriterT that appends output without producing a meaningful result.
+    /// Creates a `WriterT` that appends output without producing a meaningful result.
     pub fn tell_io(output: W) -> WriterT<W, IO<((), W)>> {
         WriterT::new(IO::pure(((), output)))
     }
@@ -385,7 +391,7 @@ where
         )
     }
 
-    /// Chains WriterT computations with IO.
+    /// Chains `WriterT` computations with IO.
     pub fn flat_map_io<B, F>(self, function: F) -> WriterT<W, IO<(B, W)>>
     where
         F: FnOnce(A) -> WriterT<W, IO<(B, W)>> + 'static,
@@ -399,7 +405,8 @@ where
     }
 
     /// Executes a computation and also returns its output.
-    pub fn listen_io(computation: Self) -> WriterT<W, IO<((A, W), W)>> {
+    #[must_use]
+    pub fn listen_io(computation: Self) -> WriterT<W, IO<ListenedValue<A, W>>> {
         WriterT::new(
             computation
                 .inner

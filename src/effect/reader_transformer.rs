@@ -1,6 +1,6 @@
-//! ReaderT - Reader Monad Transformer.
+//! `ReaderT` - Reader Monad Transformer.
 //!
-//! ReaderT adds environment reading capability to any monad.
+//! `ReaderT` adds environment reading capability to any monad.
 //! It transforms a monad M into a monad that has access to an environment R.
 //!
 //! # Overview
@@ -83,7 +83,7 @@ where
     R: 'static,
 {
     /// The wrapped function from environment to inner monad.
-    /// Uses Rc to allow cloning of the ReaderT for flat_map.
+    /// Uses Rc to allow cloning of the `ReaderT` for `flat_map`.
     run_function: Rc<dyn Fn(R) -> M>,
 }
 
@@ -92,7 +92,7 @@ where
     R: 'static,
     M: 'static,
 {
-    /// Creates a new ReaderT from a function.
+    /// Creates a new `ReaderT` from a function.
     ///
     /// # Arguments
     ///
@@ -110,12 +110,12 @@ where
     where
         F: Fn(R) -> M + 'static,
     {
-        ReaderT {
+        Self {
             run_function: Rc::new(function),
         }
     }
 
-    /// Runs the ReaderT computation with the given environment.
+    /// Runs the `ReaderT` computation with the given environment.
     ///
     /// # Arguments
     ///
@@ -149,7 +149,7 @@ where
     R: 'static,
 {
     fn clone(&self) -> Self {
-        ReaderT {
+        Self {
             run_function: self.run_function.clone(),
         }
     }
@@ -164,9 +164,9 @@ where
     R: 'static,
     A: 'static,
 {
-    /// Creates a ReaderT that returns a constant value wrapped in Some.
+    /// Creates a `ReaderT` that returns a constant value wrapped in Some.
     ///
-    /// This is the pure/return operation for ReaderT with Option.
+    /// This is the pure/return operation for `ReaderT` with Option.
     ///
     /// # Arguments
     ///
@@ -184,12 +184,12 @@ where
     where
         A: Clone,
     {
-        ReaderT::new(move |_| Some(value.clone()))
+        Self::new(move |_| Some(value.clone()))
     }
 
-    /// Lifts an Option into ReaderT.
+    /// Lifts an Option into `ReaderT`.
     ///
-    /// The resulting ReaderT ignores the environment and returns the inner Option.
+    /// The resulting `ReaderT` ignores the environment and returns the inner Option.
     ///
     /// # Arguments
     ///
@@ -208,7 +208,7 @@ where
     where
         A: Clone,
     {
-        ReaderT::new(move |_| inner.clone())
+        Self::new(move |_| inner.clone())
     }
 
     /// Maps a function over the value inside the Option.
@@ -232,14 +232,14 @@ where
         B: 'static,
     {
         let original = self.run_function;
-        ReaderT::new(move |environment| (original)(environment).map(|value| function(value)))
+        ReaderT::new(move |environment| (original)(environment).map(&function))
     }
 
-    /// Chains ReaderT computations with Option.
+    /// Chains `ReaderT` computations with Option.
     ///
     /// # Arguments
     ///
-    /// * `function` - A function that takes the value and returns a new ReaderT
+    /// * `function` - A function that takes the value and returns a new `ReaderT`
     ///
     /// # Examples
     ///
@@ -259,15 +259,12 @@ where
         R: Clone,
     {
         let original = self.run_function;
-        ReaderT::new(
-            move |environment: R| match (original)(environment.clone()) {
-                Some(value) => {
-                    let next = function(value);
-                    next.run(environment)
-                }
-                None => None,
-            },
-        )
+        ReaderT::new(move |environment: R| {
+            (original)(environment.clone()).and_then(|value| {
+                let next = function(value);
+                next.run(environment)
+            })
+        })
     }
 
     /// Returns the environment wrapped in Some.
@@ -280,12 +277,13 @@ where
     /// let reader: ReaderT<i32, Option<i32>> = ReaderT::ask_option();
     /// assert_eq!(reader.run(42), Some(42));
     /// ```
+    #[must_use] 
     pub fn ask_option() -> Self
     where
         R: Clone,
         A: From<R>,
     {
-        ReaderT::new(|environment: R| Some(A::from(environment)))
+        Self::new(|environment: R| Some(A::from(environment)))
     }
 
     /// Runs a computation with a modified environment.
@@ -304,12 +302,12 @@ where
     /// let modified = ReaderT::local_option(|environment| environment + 10, reader);
     /// assert_eq!(modified.run(5), Some(30)); // (5 + 10) * 2
     /// ```
-    pub fn local_option<F>(modifier: F, computation: ReaderT<R, Option<A>>) -> ReaderT<R, Option<A>>
+    pub fn local_option<F>(modifier: F, computation: Self) -> Self
     where
         F: Fn(R) -> R + 'static,
     {
         let computation_function = computation.run_function;
-        ReaderT::new(move |environment| {
+        Self::new(move |environment| {
             let modified_environment = modifier(environment);
             (computation_function)(modified_environment)
         })
@@ -323,7 +321,7 @@ where
 {
     /// Returns the environment wrapped in Some.
     ///
-    /// This is the ask operation for MonadReader.
+    /// This is the ask operation for `MonadReader`.
     ///
     /// # Examples
     ///
@@ -335,7 +333,7 @@ where
     /// ```
     #[allow(dead_code)]
     fn ask_option_same_type() -> Self {
-        ReaderT::new(|environment: R| Some(environment))
+        Self::new(|environment: R| Some(environment))
     }
 }
 
@@ -349,7 +347,7 @@ where
     A: 'static,
     E: 'static,
 {
-    /// Creates a ReaderT that returns a constant value wrapped in Ok.
+    /// Creates a `ReaderT` that returns a constant value wrapped in Ok.
     ///
     /// # Arguments
     ///
@@ -367,10 +365,10 @@ where
     where
         A: Clone,
     {
-        ReaderT::new(move |_| Ok(value.clone()))
+        Self::new(move |_| Ok(value.clone()))
     }
 
-    /// Lifts a Result into ReaderT.
+    /// Lifts a Result into `ReaderT`.
     ///
     /// # Arguments
     ///
@@ -390,7 +388,7 @@ where
         A: Clone,
         E: Clone,
     {
-        ReaderT::new(move |_| inner.clone())
+        Self::new(move |_| inner.clone())
     }
 
     /// Maps a function over the value inside the Result.
@@ -414,14 +412,14 @@ where
         B: 'static,
     {
         let original = self.run_function;
-        ReaderT::new(move |environment| (original)(environment).map(|value| function(value)))
+        ReaderT::new(move |environment| (original)(environment).map(&function))
     }
 
-    /// Chains ReaderT computations with Result.
+    /// Chains `ReaderT` computations with Result.
     ///
     /// # Arguments
     ///
-    /// * `function` - A function that takes the value and returns a new ReaderT
+    /// * `function` - A function that takes the value and returns a new `ReaderT`
     ///
     /// # Examples
     ///
@@ -462,12 +460,13 @@ where
     /// let reader: ReaderT<i32, Result<i32, String>> = ReaderT::ask_result();
     /// assert_eq!(reader.run(42), Ok(42));
     /// ```
+    #[must_use] 
     pub fn ask_result() -> Self
     where
         R: Clone,
         A: From<R>,
     {
-        ReaderT::new(|environment: R| Ok(A::from(environment)))
+        Self::new(|environment: R| Ok(A::from(environment)))
     }
 
     /// Runs a computation with a modified environment.
@@ -488,13 +487,13 @@ where
     /// ```
     pub fn local_result<F>(
         modifier: F,
-        computation: ReaderT<R, Result<A, E>>,
-    ) -> ReaderT<R, Result<A, E>>
+        computation: Self,
+    ) -> Self
     where
         F: Fn(R) -> R + 'static,
     {
         let computation_function = computation.run_function;
-        ReaderT::new(move |environment| {
+        Self::new(move |environment| {
             let modified_environment = modifier(environment);
             (computation_function)(modified_environment)
         })
@@ -510,7 +509,7 @@ where
     R: 'static,
     A: 'static,
 {
-    /// Creates a ReaderT that returns a constant value wrapped in IO::pure.
+    /// Creates a `ReaderT` that returns a constant value wrapped in `IO::pure`.
     ///
     /// # Arguments
     ///
@@ -529,10 +528,10 @@ where
     where
         A: Clone,
     {
-        ReaderT::new(move |_| IO::pure(value.clone()))
+        Self::new(move |_| IO::pure(value.clone()))
     }
 
-    /// Lifts an IO into ReaderT.
+    /// Lifts an IO into `ReaderT`.
     ///
     /// # Arguments
     ///
@@ -548,10 +547,15 @@ where
     /// let io = reader.run("ignored".to_string());
     /// assert_eq!(io.run_unsafe(), 42);
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if the resulting `ReaderT` is run more than once.
+    #[must_use]
     pub fn lift_io(inner: IO<A>) -> Self {
         // IO is not Clone, so we wrap in Rc
         let inner_rc = Rc::new(std::cell::RefCell::new(Some(inner)));
-        ReaderT::new(move |_| {
+        Self::new(move |_| {
             // Take the IO from the RefCell (can only be called once)
             inner_rc.borrow_mut().take().unwrap_or_else(|| {
                 panic!("ReaderT::lift_io: IO already consumed. Use the ReaderT only once.")
@@ -589,11 +593,11 @@ where
         })
     }
 
-    /// Chains ReaderT computations with IO.
+    /// Chains `ReaderT` computations with IO.
     ///
     /// # Arguments
     ///
-    /// * `function` - A function that takes the value and returns a new ReaderT
+    /// * `function` - A function that takes the value and returns a new `ReaderT`
     ///
     /// # Examples
     ///
@@ -626,7 +630,7 @@ where
         })
     }
 
-    /// Returns the environment wrapped in IO::pure.
+    /// Returns the environment wrapped in `IO::pure`.
     ///
     /// # Examples
     ///
@@ -637,12 +641,13 @@ where
     /// let io = reader.run(42);
     /// assert_eq!(io.run_unsafe(), 42);
     /// ```
+    #[must_use] 
     pub fn ask_io() -> Self
     where
         R: Clone,
         A: From<R>,
     {
-        ReaderT::new(|environment: R| IO::pure(A::from(environment)))
+        Self::new(|environment: R| IO::pure(A::from(environment)))
     }
 
     /// Runs a computation with a modified environment.
@@ -663,12 +668,12 @@ where
     /// assert_eq!(io.run_unsafe(), 30);
     /// ```
     #[allow(dead_code)]
-    pub fn local_io<F>(modifier: F, computation: ReaderT<R, IO<A>>) -> ReaderT<R, IO<A>>
+    pub fn local_io<F>(modifier: F, computation: Self) -> Self
     where
         F: Fn(R) -> R + 'static,
     {
         let computation_function = computation.run_function;
-        ReaderT::new(move |environment| {
+        Self::new(move |environment| {
             let modified_environment = modifier(environment);
             (computation_function)(modified_environment)
         })
@@ -688,7 +693,7 @@ where
     R: 'static,
     A: Send + 'static,
 {
-    /// Creates a ReaderT that returns a constant value wrapped in AsyncIO::pure.
+    /// Creates a `ReaderT` that returns a constant value wrapped in `AsyncIO::pure`.
     ///
     /// # Arguments
     ///
@@ -710,10 +715,10 @@ where
     where
         A: Clone,
     {
-        ReaderT::new(move |_| AsyncIO::pure(value.clone()))
+        Self::new(move |_| AsyncIO::pure(value.clone()))
     }
 
-    /// Maps a function over the value inside the AsyncIO.
+    /// Maps a function over the value inside the `AsyncIO`.
     ///
     /// # Arguments
     ///
@@ -746,11 +751,11 @@ where
         })
     }
 
-    /// Chains ReaderT computations with AsyncIO.
+    /// Chains `ReaderT` computations with `AsyncIO`.
     ///
     /// # Arguments
     ///
-    /// * `function` - A function that takes the value and returns a new ReaderT
+    /// * `function` - A function that takes the value and returns a new `ReaderT`
     ///
     /// # Examples
     ///
@@ -786,7 +791,7 @@ where
         })
     }
 
-    /// Returns the environment wrapped in AsyncIO::pure.
+    /// Returns the environment wrapped in `AsyncIO::pure`.
     ///
     /// # Examples
     ///
@@ -800,12 +805,13 @@ where
     ///     assert_eq!(async_io.run_async().await, 42);
     /// }
     /// ```
+    #[must_use] 
     pub fn ask_async_io() -> Self
     where
         R: Clone + Send,
         A: From<R>,
     {
-        ReaderT::new(|environment: R| AsyncIO::pure(A::from(environment)))
+        Self::new(|environment: R| AsyncIO::pure(A::from(environment)))
     }
 
     /// Runs a computation with a modified environment.
@@ -830,13 +836,13 @@ where
     /// ```
     pub fn local_async_io<F>(
         modifier: F,
-        computation: ReaderT<R, AsyncIO<A>>,
-    ) -> ReaderT<R, AsyncIO<A>>
+        computation: Self,
+    ) -> Self
     where
         F: Fn(R) -> R + 'static,
     {
         let computation_function = computation.run_function;
-        ReaderT::new(move |environment| {
+        Self::new(move |environment| {
             let modified_environment = modifier(environment);
             (computation_function)(modified_environment)
         })

@@ -1,4 +1,4 @@
-//! Do-notation macro for AsyncIO monad.
+//! Do-notation macro for `AsyncIO` monad.
 //!
 //! This module provides the `eff_async!` macro, which allows for Haskell-style
 //! do-notation when working with `AsyncIO` values.
@@ -63,9 +63,9 @@
 ///
 /// # Syntax
 ///
-/// - `pattern <= async_io_expr;` - Bind: executes the AsyncIO and binds the result
+/// - `pattern <= async_io_expr;` - Bind: executes the `AsyncIO` and binds the result
 /// - `let pattern = expr;` - Pure let: regular Rust let binding
-/// - `async_io_expr` - Final expression: must return an AsyncIO
+/// - `async_io_expr` - Final expression: must return an `AsyncIO`
 ///
 /// # Note
 ///

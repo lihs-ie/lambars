@@ -13,7 +13,7 @@
 //! - O(log N) remove
 //! - O(log N) min/max
 //! - O(log N + k) range queries where k is the number of results
-//! - O(1) len and is_empty
+//! - O(1) len and `is_empty`
 //!
 //! All operations return new maps without modifying the original,
 //! and structural sharing ensures memory efficiency.
@@ -78,14 +78,14 @@ struct Node<K, V> {
     key: K,
     value: V,
     color: Color,
-    left: Option<Rc<Node<K, V>>>,
-    right: Option<Rc<Node<K, V>>>,
+    left: Option<Rc<Self>>,
+    right: Option<Rc<Self>>,
 }
 
 impl<K, V> Node<K, V> {
     /// Creates a new red node with no children.
-    fn new_red(key: K, value: V) -> Self {
-        Node {
+    const fn new_red(key: K, value: V) -> Self {
+        Self {
             key,
             value,
             color: Color::Red,
@@ -100,7 +100,7 @@ impl<K, V> Node<K, V> {
         K: Clone,
         V: Clone,
     {
-        Node {
+        Self {
             key: self.key.clone(),
             value: self.value.clone(),
             color,
@@ -110,12 +110,12 @@ impl<K, V> Node<K, V> {
     }
 
     /// Creates a copy of this node with new children.
-    fn with_children(&self, left: Option<Rc<Node<K, V>>>, right: Option<Rc<Node<K, V>>>) -> Self
+    fn with_children(&self, left: Option<Rc<Self>>, right: Option<Rc<Self>>) -> Self
     where
         K: Clone,
         V: Clone,
     {
-        Node {
+        Self {
             key: self.key.clone(),
             value: self.value.clone(),
             color: self.color,
@@ -131,8 +131,8 @@ impl<K, V> Node<K, V> {
 }
 
 /// Helper function to check if an optional node is red.
-fn is_red<K, V>(node: &Option<Rc<Node<K, V>>>) -> bool {
-    node.as_ref().map_or(false, |node| node.is_red())
+fn is_red<K, V>(node: Option<&Rc<Node<K, V>>>) -> bool {
+    node.is_some_and(|node| node.is_red())
 }
 
 // =============================================================================
@@ -199,8 +199,8 @@ impl<K, V> PersistentTreeMap<K, V> {
     /// ```
     #[inline]
     #[must_use]
-    pub fn new() -> Self {
-        PersistentTreeMap {
+    pub const fn new() -> Self {
+        Self {
             root: None,
             length: 0,
         }
@@ -224,7 +224,7 @@ impl<K, V> PersistentTreeMap<K, V> {
     /// ```
     #[inline]
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.length
     }
 
@@ -243,7 +243,7 @@ impl<K, V> PersistentTreeMap<K, V> {
     /// ```
     #[inline]
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.length == 0
     }
 }
@@ -268,7 +268,7 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
     #[inline]
     #[must_use]
     pub fn singleton(key: K, value: V) -> Self {
-        PersistentTreeMap::new().insert(key, value)
+        Self::new().insert(key, value)
     }
 
     /// Returns a reference to the value corresponding to the key.
@@ -302,23 +302,22 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        self.get_from_node(&self.root, key)
+        Self::get_from_node(self.root.as_ref(), key)
     }
 
     /// Recursive helper for get.
-    fn get_from_node<'a, Q>(&'a self, node: &'a Option<Rc<Node<K, V>>>, key: &Q) -> Option<&'a V>
+    fn get_from_node<'a, Q>(node: Option<&'a Rc<Node<K, V>>>, key: &Q) -> Option<&'a V>
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        match node {
-            None => None,
-            Some(node_ref) => match key.cmp(node_ref.key.borrow()) {
-                Ordering::Less => self.get_from_node(&node_ref.left, key),
-                Ordering::Greater => self.get_from_node(&node_ref.right, key),
+        node.and_then(|node_ref| {
+            match key.cmp(node_ref.key.borrow()) {
+                Ordering::Less => Self::get_from_node(node_ref.left.as_ref(), key),
+                Ordering::Greater => Self::get_from_node(node_ref.right.as_ref(), key),
                 Ordering::Equal => Some(&node_ref.value),
-            },
-        }
+            }
+        })
     }
 
     /// Returns `true` if the map contains a value for the specified key.
@@ -377,31 +376,30 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
     /// ```
     #[must_use]
     pub fn insert(&self, key: K, value: V) -> Self {
-        let (new_root, added) = self.insert_into_node(&self.root, key, value);
+        let (new_root, added) = Self::insert_into_node(self.root.as_ref(), key, value);
 
         // Make root black
-        let black_root = match new_root {
-            None => None,
-            Some(node_ref) => {
+        let black_root = new_root.map_or_else(
+            || None,
+            |node_ref| {
                 if node_ref.is_red() {
                     Some(Rc::new(node_ref.with_color(Color::Black)))
                 } else {
                     Some(node_ref)
                 }
-            }
-        };
+            },
+        );
 
-        PersistentTreeMap {
+        Self {
             root: black_root,
             length: if added { self.length + 1 } else { self.length },
         }
     }
 
     /// Recursive helper for insert.
-    /// Returns (new_node, was_added) where was_added is true if a new entry was added.
+    /// Returns (`new_node`, `was_added`) where `was_added` is true if a new entry was added.
     fn insert_into_node(
-        &self,
-        node: &Option<Rc<Node<K, V>>>,
+        node: Option<&Rc<Node<K, V>>>,
         key: K,
         value: V,
     ) -> (Option<Rc<Node<K, V>>>, bool) {
@@ -413,14 +411,16 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
             Some(node_ref) => {
                 match key.cmp(&node_ref.key) {
                     Ordering::Less => {
-                        let (new_left, added) = self.insert_into_node(&node_ref.left, key, value);
+                        let (new_left, added) =
+                            Self::insert_into_node(node_ref.left.as_ref(), key, value);
                         let new_node = node_ref.with_children(new_left, node_ref.right.clone());
-                        (Some(Rc::new(self.balance(new_node))), added)
+                        (Some(Rc::new(Self::balance(new_node))), added)
                     }
                     Ordering::Greater => {
-                        let (new_right, added) = self.insert_into_node(&node_ref.right, key, value);
+                        let (new_right, added) =
+                            Self::insert_into_node(node_ref.right.as_ref(), key, value);
                         let new_node = node_ref.with_children(node_ref.left.clone(), new_right);
-                        (Some(Rc::new(self.balance(new_node))), added)
+                        (Some(Rc::new(Self::balance(new_node))), added)
                     }
                     Ordering::Equal => {
                         // Key exists, update value
@@ -440,54 +440,46 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
 
     /// Balances the tree after insertion.
     /// Handles the four cases of red-red violation.
-    fn balance(&self, node: Node<K, V>) -> Node<K, V> {
+    fn balance(node: Node<K, V>) -> Node<K, V> {
         // Case 1: Left-Left (left child is red, left-left grandchild is red)
-        if is_red(&node.left) {
-            if let Some(left) = &node.left {
-                if is_red(&left.left) {
-                    return self.rotate_right_and_recolor(node);
+        if is_red(node.left.as_ref())
+            && let Some(left) = &node.left
+                && is_red(left.left.as_ref()) {
+                    return Self::rotate_right_and_recolor(node);
                 }
-            }
-        }
 
         // Case 2: Left-Right (left child is red, left-right grandchild is red)
-        if is_red(&node.left) {
-            if let Some(left) = &node.left {
-                if is_red(&left.right) {
+        if is_red(node.left.as_ref())
+            && let Some(left) = &node.left
+                && is_red(left.right.as_ref()) {
                     // First rotate left on the left child, then rotate right on node
-                    let new_left = self.rotate_left((**left).clone());
+                    let new_left = Self::rotate_left((**left).clone());
                     let new_node = node.with_children(Some(Rc::new(new_left)), node.right.clone());
-                    return self.rotate_right_and_recolor(new_node);
+                    return Self::rotate_right_and_recolor(new_node);
                 }
-            }
-        }
 
         // Case 3: Right-Right (right child is red, right-right grandchild is red)
-        if is_red(&node.right) {
-            if let Some(right) = &node.right {
-                if is_red(&right.right) {
-                    return self.rotate_left_and_recolor(node);
+        if is_red(node.right.as_ref())
+            && let Some(right) = &node.right
+                && is_red(right.right.as_ref()) {
+                    return Self::rotate_left_and_recolor(node);
                 }
-            }
-        }
 
         // Case 4: Right-Left (right child is red, right-left grandchild is red)
-        if is_red(&node.right) {
-            if let Some(right) = &node.right {
-                if is_red(&right.left) {
+        if is_red(node.right.as_ref())
+            && let Some(right) = &node.right
+                && is_red(right.left.as_ref()) {
                     // First rotate right on the right child, then rotate left on node
-                    let new_right = self.rotate_right((**right).clone());
+                    let new_right = Self::rotate_right((**right).clone());
                     let new_node = node.with_children(node.left.clone(), Some(Rc::new(new_right)));
-                    return self.rotate_left_and_recolor(new_node);
+                    return Self::rotate_left_and_recolor(new_node);
                 }
-            }
-        }
 
         node
     }
 
     /// Rotates the tree to the right around the given node.
-    fn rotate_right(&self, node: Node<K, V>) -> Node<K, V> {
+    fn rotate_right(node: Node<K, V>) -> Node<K, V> {
         if let Some(left) = node.left {
             let new_node = Node {
                 key: node.key,
@@ -509,7 +501,7 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
     }
 
     /// Rotates the tree to the left around the given node.
-    fn rotate_left(&self, node: Node<K, V>) -> Node<K, V> {
+    fn rotate_left(node: Node<K, V>) -> Node<K, V> {
         if let Some(right) = node.right {
             let new_node = Node {
                 key: node.key,
@@ -531,7 +523,7 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
     }
 
     /// Rotates right and recolors for balancing.
-    fn rotate_right_and_recolor(&self, node: Node<K, V>) -> Node<K, V> {
+    fn rotate_right_and_recolor(node: Node<K, V>) -> Node<K, V> {
         if let Some(left) = &node.left {
             // New root (the old left child)
             let new_right = Node {
@@ -561,7 +553,7 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
     }
 
     /// Rotates left and recolors for balancing.
-    fn rotate_left_and_recolor(&self, node: Node<K, V>) -> Node<K, V> {
+    fn rotate_left_and_recolor(node: Node<K, V>) -> Node<K, V> {
         if let Some(right) = &node.right {
             // New root (the old right child)
             let new_left = Node {
@@ -627,7 +619,7 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
             return self.clone();
         }
 
-        let new_root = self.remove_from_node(&self.root, key);
+        let new_root = Self::remove_from_node(self.root.as_ref(), key);
 
         // Make root black if it exists
         let black_root = new_root.map(|node| {
@@ -638,69 +630,66 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
             }
         });
 
-        PersistentTreeMap {
+        Self {
             root: black_root,
             length: self.length.saturating_sub(1),
         }
     }
 
     /// Recursive helper for remove.
-    fn remove_from_node<Q>(&self, node: &Option<Rc<Node<K, V>>>, key: &Q) -> Option<Rc<Node<K, V>>>
+    fn remove_from_node<Q>(node: Option<&Rc<Node<K, V>>>, key: &Q) -> Option<Rc<Node<K, V>>>
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        match node {
-            None => None,
-            Some(node_ref) => {
-                match key.cmp(node_ref.key.borrow()) {
-                    Ordering::Less => {
-                        let new_left = self.remove_from_node(&node_ref.left, key);
-                        let new_node = node_ref.with_children(new_left, node_ref.right.clone());
-                        Some(Rc::new(self.balance_after_delete(new_node)))
-                    }
-                    Ordering::Greater => {
-                        let new_right = self.remove_from_node(&node_ref.right, key);
-                        let new_node = node_ref.with_children(node_ref.left.clone(), new_right);
-                        Some(Rc::new(self.balance_after_delete(new_node)))
-                    }
-                    Ordering::Equal => {
-                        // Found the node to remove
-                        match (&node_ref.left, &node_ref.right) {
-                            (None, None) => None,
-                            (Some(left), None) => Some(left.clone()),
-                            (None, Some(right)) => Some(right.clone()),
-                            (Some(_), Some(right)) => {
-                                // Find the minimum in the right subtree
-                                let (successor_key, successor_value) = self.find_min_entry(right);
-                                let new_right =
-                                    self.remove_from_node(&node_ref.right, successor_key.borrow());
-                                let new_node = Node {
-                                    key: successor_key,
-                                    value: successor_value,
-                                    color: node_ref.color,
-                                    left: node_ref.left.clone(),
-                                    right: new_right,
-                                };
-                                Some(Rc::new(self.balance_after_delete(new_node)))
-                            }
+        node.and_then(|node_ref| {
+            match key.cmp(node_ref.key.borrow()) {
+                Ordering::Less => {
+                    let new_left = Self::remove_from_node(node_ref.left.as_ref(), key);
+                    let new_node = node_ref.with_children(new_left, node_ref.right.clone());
+                    Some(Rc::new(Self::balance_after_delete(new_node)))
+                }
+                Ordering::Greater => {
+                    let new_right = Self::remove_from_node(node_ref.right.as_ref(), key);
+                    let new_node = node_ref.with_children(node_ref.left.clone(), new_right);
+                    Some(Rc::new(Self::balance_after_delete(new_node)))
+                }
+                Ordering::Equal => {
+                    // Found the node to remove
+                    match (&node_ref.left, &node_ref.right) {
+                        (None, None) => None,
+                        (Some(left), None) => Some(left.clone()),
+                        (None, Some(right)) => Some(right.clone()),
+                        (Some(_), Some(right)) => {
+                            // Find the minimum in the right subtree
+                            let (successor_key, successor_value) = Self::find_min_entry(right);
+                            let new_right =
+                                Self::remove_from_node(node_ref.right.as_ref(), successor_key.borrow());
+                            let new_node = Node {
+                                key: successor_key,
+                                value: successor_value,
+                                color: node_ref.color,
+                                left: node_ref.left.clone(),
+                                right: new_right,
+                            };
+                            Some(Rc::new(Self::balance_after_delete(new_node)))
                         }
                     }
                 }
             }
-        }
+        })
     }
 
     /// Finds the minimum key-value pair in a subtree.
-    fn find_min_entry(&self, node: &Rc<Node<K, V>>) -> (K, V) {
-        match &node.left {
-            None => (node.key.clone(), node.value.clone()),
-            Some(left) => self.find_min_entry(left),
-        }
+    fn find_min_entry(node: &Rc<Node<K, V>>) -> (K, V) {
+        node.left.as_ref().map_or_else(
+            || (node.key.clone(), node.value.clone()),
+            |left| Self::find_min_entry(left),
+        )
     }
 
     /// Balances the tree after deletion (simplified version).
-    fn balance_after_delete(&self, node: Node<K, V>) -> Node<K, V> {
+    const fn balance_after_delete(node: Node<K, V>) -> Node<K, V> {
         // For a full implementation, we would need to handle double-black cases
         // This simplified version just returns the node and relies on the
         // tree still being relatively balanced
@@ -727,26 +716,17 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
     /// ```
     #[must_use]
     pub fn min(&self) -> Option<(&K, &V)> {
-        self.min_from_node(&self.root)
+        Self::min_from_node(self.root.as_ref())
     }
 
     /// Recursive helper for min.
-    fn min_from_node<'a>(&'a self, node: &'a Option<Rc<Node<K, V>>>) -> Option<(&'a K, &'a V)> {
-        match node {
-            None => None,
-            Some(node_ref) => match &node_ref.left {
-                None => Some((&node_ref.key, &node_ref.value)),
-                Some(left) => self.min_from_node_rc(left),
-            },
-        }
-    }
-
-    /// Helper for min with Rc reference.
-    fn min_from_node_rc<'a>(&'a self, node: &'a Rc<Node<K, V>>) -> Option<(&'a K, &'a V)> {
-        match &node.left {
-            None => Some((&node.key, &node.value)),
-            Some(left) => self.min_from_node_rc(left),
-        }
+    fn min_from_node(node: Option<&Rc<Node<K, V>>>) -> Option<(&K, &V)> {
+        node.and_then(|node_ref| {
+            node_ref
+                .left
+                .as_ref()
+                .map_or_else(|| Some((&node_ref.key, &node_ref.value)), |left| Self::min_from_node(Some(left)))
+        })
     }
 
     /// Returns the entry with the maximum key.
@@ -769,26 +749,17 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
     /// ```
     #[must_use]
     pub fn max(&self) -> Option<(&K, &V)> {
-        self.max_from_node(&self.root)
+        Self::max_from_node(self.root.as_ref())
     }
 
     /// Recursive helper for max.
-    fn max_from_node<'a>(&'a self, node: &'a Option<Rc<Node<K, V>>>) -> Option<(&'a K, &'a V)> {
-        match node {
-            None => None,
-            Some(node_ref) => match &node_ref.right {
-                None => Some((&node_ref.key, &node_ref.value)),
-                Some(right) => self.max_from_node_rc(right),
-            },
-        }
-    }
-
-    /// Helper for max with Rc reference.
-    fn max_from_node_rc<'a>(&'a self, node: &'a Rc<Node<K, V>>) -> Option<(&'a K, &'a V)> {
-        match &node.right {
-            None => Some((&node.key, &node.value)),
-            Some(right) => self.max_from_node_rc(right),
-        }
+    fn max_from_node(node: Option<&Rc<Node<K, V>>>) -> Option<(&K, &V)> {
+        node.and_then(|node_ref| {
+            node_ref
+                .right
+                .as_ref()
+                .map_or_else(|| Some((&node_ref.key, &node_ref.value)), |right| Self::max_from_node(Some(right)))
+        })
     }
 
     /// Returns an iterator over entries in sorted key order.
@@ -807,9 +778,10 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
     ///     println!("{}: {}", key, value);
     /// }
     /// ```
+    #[must_use]
     pub fn iter(&self) -> PersistentTreeMapIterator<'_, K, V> {
         let mut entries = Vec::with_capacity(self.length);
-        self.collect_entries_in_order(&self.root, &mut entries);
+        Self::collect_entries_in_order(self.root.as_ref(), &mut entries);
         PersistentTreeMapIterator {
             entries,
             current_index: 0,
@@ -818,14 +790,13 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
 
     /// Collects all entries in sorted order (in-order traversal).
     fn collect_entries_in_order<'a>(
-        &'a self,
-        node: &'a Option<Rc<Node<K, V>>>,
+        node: Option<&'a Rc<Node<K, V>>>,
         entries: &mut Vec<(&'a K, &'a V)>,
     ) {
         if let Some(node_ref) = node {
-            self.collect_entries_in_order(&node_ref.left, entries);
+            Self::collect_entries_in_order(node_ref.left.as_ref(), entries);
             entries.push((&node_ref.key, &node_ref.value));
-            self.collect_entries_in_order(&node_ref.right, entries);
+            Self::collect_entries_in_order(node_ref.right.as_ref(), entries);
         }
     }
 
@@ -905,7 +876,7 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
         // Collect all entries and filter by range
         let mut entries = Vec::new();
 
-        for (key, value) in self.iter() {
+        for (key, value) in self {
             let key_borrowed: &Q = key.borrow();
 
             let in_start = match range.start_bound() {
@@ -1036,13 +1007,13 @@ impl<K: Clone, V: Clone> ExactSizeIterator for PersistentTreeMapIntoIterator<K, 
 impl<K, V> Default for PersistentTreeMap<K, V> {
     #[inline]
     fn default() -> Self {
-        PersistentTreeMap::new()
+        Self::new()
     }
 }
 
 impl<K: Clone + Ord, V: Clone> FromIterator<(K, V)> for PersistentTreeMap<K, V> {
     fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
-        let mut map = PersistentTreeMap::new();
+        let mut map = Self::new();
         for (key, value) in iter {
             map = map.insert(key, value);
         }
@@ -1086,9 +1057,9 @@ impl<K: Clone + Ord, V: Clone + PartialEq> PartialEq for PersistentTreeMap<K, V>
         }
 
         // Compare all entries
-        for (key, value) in self.iter() {
+        for (key, value) in self {
             match other.get(key) {
-                Some(other_value) if other_value == value => continue,
+                Some(other_value) if other_value == value => {}
                 _ => return false,
             }
         }
@@ -1109,9 +1080,9 @@ impl<K: Clone + Ord + fmt::Debug, V: Clone + fmt::Debug> fmt::Debug for Persiste
 // Type Class Implementations
 // =============================================================================
 
-/// Wrapper to make PersistentTreeMap implement TypeConstructor for values.
+/// Wrapper to make `PersistentTreeMap` implement `TypeConstructor` for values.
 ///
-/// Since PersistentTreeMap has two type parameters (K, V), we treat it as
+/// Since `PersistentTreeMap` has two type parameters (K, V), we treat it as
 /// a container of V values with K being fixed.
 impl<K, V> TypeConstructor for PersistentTreeMap<K, V> {
     type Inner = V;
@@ -1131,11 +1102,13 @@ impl<K: Clone + Ord, V: Clone> Foldable for PersistentTreeMap<K, V> {
     where
         F: FnMut(V, B) -> B,
     {
-        let entries: Vec<_> = self.into_iter().collect();
-        entries
+        // For ordered collections, fold_right needs to process elements in reverse order.
+        // We collect values into a Vec and reverse it for proper right-to-left folding.
+        let mut values: Vec<V> = self.into_iter().map(|(_, v)| v).collect();
+        values.reverse();
+        values
             .into_iter()
-            .rev()
-            .fold(init, |accumulator, (_, value)| function(value, accumulator))
+            .fold(init, |accumulator, value| function(value, accumulator))
     }
 
     #[inline]

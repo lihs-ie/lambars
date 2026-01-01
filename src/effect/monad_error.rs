@@ -1,4 +1,4 @@
-//! MonadError type class - error handling capability.
+//! `MonadError` type class - error handling capability.
 //!
 //! This module provides the `MonadError` trait which abstracts
 //! the ability to throw and catch errors within a monadic context.
@@ -257,10 +257,7 @@ impl<T, E: Clone> MonadError<E> for Result<T, E> {
     where
         A: 'static,
     {
-        match computation {
-            Ok(value) => Ok(value),
-            Err(_) => default,
-        }
+        computation.or(default)
     }
 }
 

@@ -1,6 +1,6 @@
-//! ExceptT - Except Monad Transformer.
+//! `ExceptT` - Except Monad Transformer.
 //!
-//! ExceptT adds error handling capability to any monad.
+//! `ExceptT` adds error handling capability to any monad.
 //! It transforms a monad M into a monad that can fail with error type E.
 //!
 //! # Overview
@@ -77,7 +77,7 @@ impl<E, M> ExceptT<E, M>
 where
     E: 'static,
 {
-    /// Creates a new ExceptT from an inner monad.
+    /// Creates a new `ExceptT` from an inner monad.
     ///
     /// # Arguments
     ///
@@ -92,14 +92,14 @@ where
     ///     ExceptT::new(Some(Ok(42)));
     /// assert_eq!(except.run(), Some(Ok(42)));
     /// ```
-    pub fn new(inner: M) -> Self {
-        ExceptT {
+    pub const fn new(inner: M) -> Self {
+        Self {
             inner,
             _marker: std::marker::PhantomData,
         }
     }
 
-    /// Runs the ExceptT computation, returning the inner monad.
+    /// Runs the `ExceptT` computation, returning the inner monad.
     ///
     /// # Returns
     ///
@@ -129,7 +129,7 @@ where
     M: Clone,
 {
     fn clone(&self) -> Self {
-        ExceptT {
+        Self {
             inner: self.inner.clone(),
             _marker: std::marker::PhantomData,
         }
@@ -145,7 +145,7 @@ where
     E: Clone + 'static,
     A: 'static,
 {
-    /// Creates an ExceptT that returns a constant value.
+    /// Creates an `ExceptT` that returns a constant value.
     ///
     /// # Arguments
     ///
@@ -160,11 +160,11 @@ where
     ///     ExceptT::pure_option(42);
     /// assert_eq!(except.run(), Some(Ok(42)));
     /// ```
-    pub fn pure_option(value: A) -> Self {
-        ExceptT::new(Some(Ok(value)))
+    pub const fn pure_option(value: A) -> Self {
+        Self::new(Some(Ok(value)))
     }
 
-    /// Creates an ExceptT that throws an error.
+    /// Creates an `ExceptT` that throws an error.
     ///
     /// # Arguments
     ///
@@ -179,11 +179,11 @@ where
     ///     ExceptT::<String, Option<Result<i32, String>>>::throw_option("error".to_string());
     /// assert_eq!(except.run(), Some(Err("error".to_string())));
     /// ```
-    pub fn throw_option(error: E) -> Self {
-        ExceptT::new(Some(Err(error)))
+    pub const fn throw_option(error: E) -> Self {
+        Self::new(Some(Err(error)))
     }
 
-    /// Lifts an Option into ExceptT.
+    /// Lifts an Option into `ExceptT`.
     ///
     /// # Arguments
     ///
@@ -200,10 +200,10 @@ where
     /// assert_eq!(except.run(), Some(Ok(42)));
     /// ```
     pub fn lift_option(inner: Option<A>) -> Self {
-        ExceptT::new(inner.map(Ok))
+        Self::new(inner.map(Ok))
     }
 
-    /// Maps a function over the value inside the ExceptT.
+    /// Maps a function over the value inside the `ExceptT`.
     ///
     /// # Arguments
     ///
@@ -227,11 +227,11 @@ where
         ExceptT::new(self.inner.map(|result| result.map(function)))
     }
 
-    /// Chains ExceptT computations with Option.
+    /// Chains `ExceptT` computations with Option.
     ///
     /// # Arguments
     ///
-    /// * `function` - A function that takes the value and returns a new ExceptT
+    /// * `function` - A function that takes the value and returns a new `ExceptT`
     ///
     /// # Examples
     ///
@@ -262,7 +262,7 @@ where
     /// # Arguments
     ///
     /// * `computation` - The computation that may fail
-    /// * `handler` - A function that handles the error and returns a new ExceptT
+    /// * `handler` - A function that handles the error and returns a new `ExceptT`
     ///
     /// # Examples
     ///
@@ -276,14 +276,14 @@ where
     /// });
     /// assert_eq!(recovered.run(), Some(Ok(5)));
     /// ```
-    pub fn catch_option<F>(computation: Self, handler: F) -> ExceptT<E, Option<Result<A, E>>>
+    pub fn catch_option<F>(computation: Self, handler: F) -> Self
     where
-        F: FnOnce(E) -> ExceptT<E, Option<Result<A, E>>>,
+        F: FnOnce(E) -> Self,
     {
         match computation.inner {
-            Some(Ok(value)) => ExceptT::new(Some(Ok(value))),
+            Some(Ok(value)) => Self::new(Some(Ok(value))),
             Some(Err(error)) => handler(error),
-            None => ExceptT::new(None),
+            None => Self::new(None),
         }
     }
 }
@@ -298,22 +298,22 @@ where
     A: 'static,
     E2: 'static,
 {
-    /// Creates an ExceptT that returns a constant value.
-    pub fn pure_result(value: A) -> Self {
-        ExceptT::new(Ok(Ok(value)))
+    /// Creates an `ExceptT` that returns a constant value.
+    pub const fn pure_result(value: A) -> Self {
+        Self::new(Ok(Ok(value)))
     }
 
-    /// Creates an ExceptT that throws an error.
-    pub fn throw_result(error: E) -> Self {
-        ExceptT::new(Ok(Err(error)))
+    /// Creates an `ExceptT` that throws an error.
+    pub const fn throw_result(error: E) -> Self {
+        Self::new(Ok(Err(error)))
     }
 
-    /// Lifts a Result into ExceptT.
+    /// Lifts a Result into `ExceptT`.
     pub fn lift_result(inner: Result<A, E2>) -> Self {
-        ExceptT::new(inner.map(Ok))
+        Self::new(inner.map(Ok))
     }
 
-    /// Maps a function over the value inside the ExceptT.
+    /// Maps a function over the value inside the `ExceptT`.
     pub fn fmap_result<B, F>(self, function: F) -> ExceptT<E, Result<Result<B, E>, E2>>
     where
         F: FnOnce(A) -> B,
@@ -322,7 +322,7 @@ where
         ExceptT::new(self.inner.map(|result| result.map(function)))
     }
 
-    /// Chains ExceptT computations with Result.
+    /// Chains `ExceptT` computations with Result.
     pub fn flat_map_result<B, F>(self, function: F) -> ExceptT<E, Result<Result<B, E>, E2>>
     where
         F: FnOnce(A) -> ExceptT<E, Result<Result<B, E>, E2>>,
@@ -336,14 +336,14 @@ where
     }
 
     /// Catches an error and potentially recovers.
-    pub fn catch_result<F>(computation: Self, handler: F) -> ExceptT<E, Result<Result<A, E>, E2>>
+    pub fn catch_result<F>(computation: Self, handler: F) -> Self
     where
-        F: FnOnce(E) -> ExceptT<E, Result<Result<A, E>, E2>>,
+        F: FnOnce(E) -> Self,
     {
         match computation.inner {
-            Ok(Ok(value)) => ExceptT::new(Ok(Ok(value))),
+            Ok(Ok(value)) => Self::new(Ok(Ok(value))),
             Ok(Err(error)) => handler(error),
-            Err(outer_error) => ExceptT::new(Err(outer_error)),
+            Err(outer_error) => Self::new(Err(outer_error)),
         }
     }
 }
@@ -357,22 +357,22 @@ where
     E: Clone + 'static,
     A: 'static,
 {
-    /// Creates an ExceptT that returns a constant value.
+    /// Creates an `ExceptT` that returns a constant value.
     pub fn pure_io(value: A) -> Self {
-        ExceptT::new(IO::pure(Ok(value)))
+        Self::new(IO::pure(Ok(value)))
     }
 
-    /// Creates an ExceptT that throws an error.
+    /// Creates an `ExceptT` that throws an error.
     pub fn throw_io(error: E) -> Self {
-        ExceptT::new(IO::pure(Err(error)))
+        Self::new(IO::pure(Err(error)))
     }
 
-    /// Lifts an IO into ExceptT.
+    /// Lifts an IO into `ExceptT`.
     pub fn lift_io(inner: IO<A>) -> Self {
-        ExceptT::new(inner.fmap(Ok))
+        Self::new(inner.fmap(Ok))
     }
 
-    /// Maps a function over the value inside the ExceptT.
+    /// Maps a function over the value inside the `ExceptT`.
     pub fn fmap_io<B, F>(self, function: F) -> ExceptT<E, IO<Result<B, E>>>
     where
         F: FnOnce(A) -> B + 'static,
@@ -381,7 +381,7 @@ where
         ExceptT::new(self.inner.fmap(move |result| result.map(function)))
     }
 
-    /// Chains ExceptT computations with IO.
+    /// Chains `ExceptT` computations with IO.
     pub fn flat_map_io<B, F>(self, function: F) -> ExceptT<E, IO<Result<B, E>>>
     where
         F: FnOnce(A) -> ExceptT<E, IO<Result<B, E>>> + 'static,
@@ -394,11 +394,11 @@ where
     }
 
     /// Catches an error and potentially recovers.
-    pub fn catch_io<F>(computation: Self, handler: F) -> ExceptT<E, IO<Result<A, E>>>
+    pub fn catch_io<F>(computation: Self, handler: F) -> Self
     where
-        F: FnOnce(E) -> ExceptT<E, IO<Result<A, E>>> + 'static,
+        F: FnOnce(E) -> Self + 'static,
     {
-        ExceptT::new(computation.inner.flat_map(move |result| match result {
+        Self::new(computation.inner.flat_map(move |result| match result {
             Ok(value) => IO::pure(Ok(value)),
             Err(error) => handler(error).inner,
         }))

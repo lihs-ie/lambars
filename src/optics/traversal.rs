@@ -13,7 +13,7 @@
 //!    traversal.modify_all(source, |x| x) == source
 //!    ```
 //!
-//! 2. **Modify Composition Law**: Consecutive modify_all calls equal a single composed call.
+//! 2. **Modify Composition Law**: Consecutive `modify_all` calls equal a single composed call.
 //!    ```text
 //!    traversal.modify_all(traversal.modify_all(source, f), g) == traversal.modify_all(source, |x| g(f(x)))
 //!    ```
@@ -198,11 +198,11 @@ pub trait Traversal<S, A> {
     /// let mixed = vec![1, -2, 3];
     /// assert!(!traversal.for_all(&mixed, |x| *x > 0));
     /// ```
-    fn for_all<P>(&self, source: &S, mut predicate: P) -> bool
+    fn for_all<P>(&self, source: &S, predicate: P) -> bool
     where
         P: FnMut(&A) -> bool,
     {
-        self.get_all(source).all(|element| predicate(element))
+        self.get_all(source).all(predicate)
     }
 
     /// Tests if any focused element satisfies a predicate.
@@ -228,11 +228,11 @@ pub trait Traversal<S, A> {
     /// assert!(traversal.exists(&numbers, |x| *x == 3));
     /// assert!(!traversal.exists(&numbers, |x| *x == 10));
     /// ```
-    fn exists<P>(&self, source: &S, mut predicate: P) -> bool
+    fn exists<P>(&self, source: &S, predicate: P) -> bool
     where
         P: FnMut(&A) -> bool,
     {
-        self.get_all(source).any(|element| predicate(element))
+        self.get_all(source).any(predicate)
     }
 
     /// Returns a reference to the first focused element, if any.
@@ -442,11 +442,11 @@ impl<A: 'static> Traversal<Option<A>, A> for OptionTraversal<A> {
         source.into_iter().collect()
     }
 
-    fn modify_all<F>(&self, source: Option<A>, mut function: F) -> Option<A>
+    fn modify_all<F>(&self, source: Option<A>, function: F) -> Option<A>
     where
         F: FnMut(A) -> A,
     {
-        source.map(|value| function(value))
+        source.map(function)
     }
 }
 
@@ -521,11 +521,11 @@ impl<A: 'static, E: 'static> Traversal<Result<A, E>, A> for ResultTraversal<A, E
         source.into_iter().collect()
     }
 
-    fn modify_all<F>(&self, source: Result<A, E>, mut function: F) -> Result<A, E>
+    fn modify_all<F>(&self, source: Result<A, E>, function: F) -> Result<A, E>
     where
         F: FnMut(A) -> A,
     {
-        source.map(|value| function(value))
+        source.map(function)
     }
 }
 
@@ -667,11 +667,11 @@ where
         vec![self.lens.get(&source).clone()]
     }
 
-    fn modify_all<F>(&self, source: S, mut function: F) -> S
+    fn modify_all<F>(&self, source: S, function: F) -> S
     where
         F: FnMut(A) -> A,
     {
-        self.lens.modify(source, |value| function(value))
+        self.lens.modify(source, function)
     }
 
     fn length(&self, _source: &S) -> usize {
@@ -700,12 +700,12 @@ where
         self.prism.preview(&source).cloned().into_iter().collect()
     }
 
-    fn modify_all<F>(&self, source: S, mut function: F) -> S
+    fn modify_all<F>(&self, source: S, function: F) -> S
     where
         F: FnMut(A) -> A,
     {
         self.prism
-            .modify_or_identity(source, |value| function(value))
+            .modify_or_identity(source, function)
     }
 }
 

@@ -8,12 +8,12 @@
 //!
 //! Every Iso must satisfy two laws:
 //!
-//! 1. **GetReverseGet Law**: Converting forward then backward yields the original.
+//! 1. **`GetReverseGet` Law**: Converting forward then backward yields the original.
 //!    ```text
 //!    iso.reverse_get(iso.get(source)) == source
 //!    ```
 //!
-//! 2. **ReverseGetGet Law**: Converting backward then forward yields the original.
+//! 2. **`ReverseGetGet` Law**: Converting backward then forward yields the original.
 //!    ```text
 //!    iso.get(iso.reverse_get(value)) == value
 //!    ```
@@ -54,8 +54,8 @@ use super::{Lens, Prism};
 ///
 /// # Laws
 ///
-/// 1. **GetReverseGet Law**: `iso.reverse_get(iso.get(source)) == source`
-/// 2. **ReverseGetGet Law**: `iso.get(iso.reverse_get(value)) == value`
+/// 1. **`GetReverseGet` Law**: `iso.reverse_get(iso.get(source)) == source`
+/// 2. **`ReverseGetGet` Law**: `iso.get(iso.reverse_get(value)) == value`
 pub trait Iso<S, A> {
     /// Converts from the source type to the target type.
     ///
@@ -216,7 +216,7 @@ pub trait Iso<S, A> {
     }
 }
 
-/// An Iso implemented using get and reverse_get functions.
+/// An Iso implemented using get and `reverse_get` functions.
 ///
 /// This is the most common way to create an Iso. The `iso!` macro
 /// generates a `FunctionIso` internally.
@@ -226,7 +226,7 @@ pub trait Iso<S, A> {
 /// - `S`: The source type
 /// - `A`: The target type
 /// - `G`: The get function type
-/// - `Rg`: The reverse_get function type
+/// - `Rg`: The `reverse_get` function type
 ///
 /// # Example
 ///
@@ -257,7 +257,7 @@ where
     G: Fn(S) -> A,
     Rg: Fn(A) -> S,
 {
-    /// Creates a new `FunctionIso` from get and reverse_get functions.
+    /// Creates a new `FunctionIso` from get and `reverse_get` functions.
     ///
     /// # Arguments
     ///
@@ -658,7 +658,7 @@ impl<I: std::fmt::Debug, S, A> std::fmt::Debug for IsoAsPrism<I, S, A> {
     }
 }
 
-/// Creates an Iso from get and reverse_get functions.
+/// Creates an Iso from get and `reverse_get` functions.
 ///
 /// # Syntax
 ///

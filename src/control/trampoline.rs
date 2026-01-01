@@ -96,7 +96,7 @@ impl<A> ContinuationBox<A> {
 /// # Type Parameters
 ///
 /// * `A` - The type of the final result. Must be `'static` due to the
-///         internal use of boxed closures.
+///   internal use of boxed closures.
 ///
 /// # Design
 ///
@@ -140,7 +140,7 @@ pub enum Trampoline<A> {
     /// The computation is suspended and needs another step.
     ///
     /// The boxed function returns the next state of the trampoline.
-    Suspend(Box<dyn FnOnce() -> Trampoline<A> + 'static>),
+    Suspend(Box<dyn FnOnce() -> Self + 'static>),
     /// Internal state for `flat_map` composition.
     ///
     /// Uses type erasure via `TrampolineContinuation` to handle
@@ -167,7 +167,7 @@ impl<A> Trampoline<A> {
     /// assert_eq!(trampoline.run(), 42);
     /// ```
     #[inline]
-    pub fn done(value: A) -> Self {
+    pub const fn done(value: A) -> Self {
         Self::Done(value)
     }
 
@@ -190,7 +190,7 @@ impl<A> Trampoline<A> {
     #[inline]
     pub fn suspend<F>(thunk: F) -> Self
     where
-        F: FnOnce() -> Trampoline<A> + 'static,
+        F: FnOnce() -> Self + 'static,
     {
         Self::Suspend(Box::new(thunk))
     }
@@ -208,7 +208,7 @@ impl<A> Trampoline<A> {
     /// assert_eq!(trampoline.run(), 42);
     /// ```
     #[inline]
-    pub fn pure(value: A) -> Self {
+    pub const fn pure(value: A) -> Self {
         Self::done(value)
     }
 }
@@ -279,7 +279,7 @@ impl<A: 'static> Trampoline<A> {
     ///     }
     /// }
     /// ```
-    pub fn resume(self) -> Either<Box<dyn FnOnce() -> Trampoline<A> + 'static>, A> {
+    pub fn resume(self) -> Either<Box<dyn FnOnce() -> Self + 'static>, A> {
         let mut current = self;
 
         loop {
@@ -389,7 +389,7 @@ impl<A: 'static> Trampoline<A> {
     }
 }
 
-/// Internal structure for flat_map continuation.
+/// Internal structure for `flat_map` continuation.
 ///
 /// This struct captures the current trampoline state and the continuation
 /// function to apply when the current state reaches `Done`.

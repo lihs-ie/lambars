@@ -35,7 +35,7 @@
 //! - Right Identity: `m.flat_map(Writer::pure) == m`
 //! - Associativity: `m.flat_map(f).flat_map(g) == m.flat_map(|x| f(x).flat_map(g))`
 //!
-//! ## MonadWriter Laws
+//! ## `MonadWriter` Laws
 //!
 //! - Tell Monoid Law: `tell(w1).then(tell(w2)) == tell(w1.combine(w2))`
 //! - Listen Tell Law: `listen(tell(w))` captures the output correctly
@@ -136,8 +136,8 @@ where
     /// assert_eq!(result, 42);
     /// assert_eq!(output, vec!["initial"]);
     /// ```
-    pub fn new(result: A, output: W) -> Self {
-        Writer { result, output }
+    pub const fn new(result: A, output: W) -> Self {
+        Self { result, output }
     }
 
     /// Runs the Writer computation, returning the result and output.
@@ -228,7 +228,7 @@ where
     /// assert!(output.is_empty());
     /// ```
     pub fn pure(value: A) -> Self {
-        Writer {
+        Self {
             result: value,
             output: W::empty(),
         }
@@ -432,7 +432,7 @@ where
 {
     /// Creates a Writer that appends output without producing a meaningful result.
     ///
-    /// This is the fundamental "tell" operation of MonadWriter.
+    /// This is the fundamental "tell" operation of `MonadWriter`.
     ///
     /// # Arguments
     ///
@@ -449,8 +449,8 @@ where
     /// assert_eq!(result, ());
     /// assert_eq!(output, vec!["log message"]);
     /// ```
-    pub fn tell(output: W) -> Self {
-        Writer { result: (), output }
+    pub const fn tell(output: W) -> Self {
+        Self { result: (), output }
     }
 }
 
@@ -480,7 +480,7 @@ where
     /// assert_eq!(captured, vec!["log"]);
     /// assert_eq!(output, vec!["log"]);
     /// ```
-    pub fn listen(computation: Writer<W, A>) -> Writer<W, (A, W)> {
+    pub fn listen(computation: Self) -> Writer<W, (A, W)> {
         Writer {
             result: (computation.result, computation.output.clone()),
             output: computation.output,
@@ -494,7 +494,7 @@ where
     ///
     /// # Arguments
     ///
-    /// * `computation` - A computation that produces (result, output_modifier)
+    /// * `computation` - A computation that produces (result, `output_modifier`)
     ///
     /// # Examples
     ///
@@ -513,12 +513,12 @@ where
     /// assert_eq!(result, 42);
     /// assert_eq!(output, vec!["HELLO"]);
     /// ```
-    pub fn pass<F>(computation: Writer<W, (A, F)>) -> Writer<W, A>
+    pub fn pass<F>(computation: Writer<W, (A, F)>) -> Self
     where
         F: FnOnce(W) -> W,
     {
         let (result, modifier) = computation.result;
-        Writer {
+        Self {
             result,
             output: modifier(computation.output),
         }
@@ -549,11 +549,11 @@ where
     /// assert_eq!(result, 42);
     /// assert_eq!(output, vec!["HELLO"]);
     /// ```
-    pub fn censor<F>(modifier: F, computation: Writer<W, A>) -> Writer<W, A>
+    pub fn censor<F>(modifier: F, computation: Self) -> Self
     where
         F: FnOnce(W) -> W,
     {
-        Writer {
+        Self {
             result: computation.result,
             output: modifier(computation.output),
         }
@@ -570,7 +570,7 @@ where
     A: Clone + 'static,
 {
     fn clone(&self) -> Self {
-        Writer {
+        Self {
             result: self.result.clone(),
             output: self.output.clone(),
         }

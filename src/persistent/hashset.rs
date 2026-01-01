@@ -12,7 +12,7 @@
 //! - O(log32 N) contains (effectively O(1) for practical sizes)
 //! - O(log32 N) insert
 //! - O(log32 N) remove
-//! - O(1) len and is_empty
+//! - O(1) len and `is_empty`
 //!
 //! All operations return new sets without modifying the original,
 //! and structural sharing ensures memory efficiency.
@@ -117,7 +117,7 @@ impl<T> PersistentHashSet<T> {
     #[inline]
     #[must_use]
     pub fn new() -> Self {
-        PersistentHashSet {
+        Self {
             inner: PersistentHashMap::new(),
         }
     }
@@ -138,7 +138,7 @@ impl<T> PersistentHashSet<T> {
     /// ```
     #[inline]
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.inner.len()
     }
 
@@ -157,7 +157,7 @@ impl<T> PersistentHashSet<T> {
     /// ```
     #[inline]
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
 }
@@ -181,7 +181,7 @@ impl<T: Clone + Hash + Eq> PersistentHashSet<T> {
     #[inline]
     #[must_use]
     pub fn singleton(element: T) -> Self {
-        PersistentHashSet::new().insert(element)
+        Self::new().insert(element)
     }
 
     /// Returns `true` if the set contains the specified element.
@@ -247,7 +247,7 @@ impl<T: Clone + Hash + Eq> PersistentHashSet<T> {
     /// ```
     #[must_use]
     pub fn insert(&self, element: T) -> Self {
-        PersistentHashSet {
+        Self {
             inner: self.inner.insert(element, ()),
         }
     }
@@ -283,7 +283,7 @@ impl<T: Clone + Hash + Eq> PersistentHashSet<T> {
         T: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        PersistentHashSet {
+        Self {
             inner: self.inner.remove(element),
         }
     }
@@ -317,7 +317,7 @@ impl<T: Clone + Hash + Eq> PersistentHashSet<T> {
     /// ```
     #[must_use]
     pub fn union(&self, other: &Self) -> Self {
-        PersistentHashSet {
+        Self {
             inner: self.inner.merge(&other.inner),
         }
     }
@@ -357,8 +357,8 @@ impl<T: Clone + Hash + Eq> PersistentHashSet<T> {
             (other, self)
         };
 
-        let mut result = PersistentHashSet::new();
-        for element in smaller.iter() {
+        let mut result = Self::new();
+        for element in smaller {
             if larger.contains(element) {
                 result = result.insert(element.clone());
             }
@@ -376,7 +376,7 @@ impl<T: Clone + Hash + Eq> PersistentHashSet<T> {
     ///
     /// # Complexity
     ///
-    /// O(n * log32 m) where n = self.len() and m = other.len()
+    /// O(n * log32 m) where n = `self.len()` and m = `other.len()`
     ///
     /// # Examples
     ///
@@ -393,8 +393,8 @@ impl<T: Clone + Hash + Eq> PersistentHashSet<T> {
     /// ```
     #[must_use]
     pub fn difference(&self, other: &Self) -> Self {
-        let mut result = PersistentHashSet::new();
-        for element in self.iter() {
+        let mut result = Self::new();
+        for element in self {
             if !other.contains(element) {
                 result = result.insert(element.clone());
             }
@@ -447,7 +447,7 @@ impl<T: Clone + Hash + Eq> PersistentHashSet<T> {
     ///
     /// # Complexity
     ///
-    /// O(n * log32 m) where n = self.len() and m = other.len()
+    /// O(n * log32 m) where n = `self.len()` and m = `other.len()`
     ///
     /// # Examples
     ///
@@ -466,7 +466,7 @@ impl<T: Clone + Hash + Eq> PersistentHashSet<T> {
             return false;
         }
 
-        for element in self.iter() {
+        for element in self {
             if !other.contains(element) {
                 return false;
             }
@@ -484,7 +484,7 @@ impl<T: Clone + Hash + Eq> PersistentHashSet<T> {
     ///
     /// # Complexity
     ///
-    /// O(m * log32 n) where n = self.len() and m = other.len()
+    /// O(m * log32 n) where n = `self.len()` and m = `other.len()`
     ///
     /// # Examples
     ///
@@ -533,7 +533,7 @@ impl<T: Clone + Hash + Eq> PersistentHashSet<T> {
             (other, self)
         };
 
-        for element in smaller.iter() {
+        for element in smaller {
             if larger.contains(element) {
                 return false;
             }
@@ -554,6 +554,7 @@ impl<T: Clone + Hash + Eq> PersistentHashSet<T> {
     ///     println!("{}", element);
     /// }
     /// ```
+    #[must_use] 
     pub fn iter(&self) -> PersistentHashSetIterator<'_, T> {
         PersistentHashSetIterator {
             inner: self.inner.keys().collect::<Vec<_>>().into_iter(),
@@ -588,12 +589,19 @@ impl<T> ExactSizeIterator for PersistentHashSetIterator<'_, T> {
     }
 }
 
+/// Type alias for the mapped iterator used in `PersistentHashSetIntoIterator`.
+type HashSetIntoIteratorInner<T> =
+    std::iter::Map<super::hashmap::PersistentHashMapIntoIterator<T, ()>, fn((T, ())) -> T>;
+
 /// An owning iterator over the elements of a [`PersistentHashSet`].
-pub struct PersistentHashSetIntoIterator<T> {
-    inner: std::vec::IntoIter<T>,
+pub struct PersistentHashSetIntoIterator<T>
+where
+    T: Clone + Hash + Eq,
+{
+    inner: HashSetIntoIteratorInner<T>,
 }
 
-impl<T> Iterator for PersistentHashSetIntoIterator<T> {
+impl<T: Clone + Hash + Eq> Iterator for PersistentHashSetIntoIterator<T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -605,7 +613,7 @@ impl<T> Iterator for PersistentHashSetIntoIterator<T> {
     }
 }
 
-impl<T> ExactSizeIterator for PersistentHashSetIntoIterator<T> {
+impl<T: Clone + Hash + Eq> ExactSizeIterator for PersistentHashSetIntoIterator<T> {
     fn len(&self) -> usize {
         self.inner.len()
     }
@@ -618,13 +626,13 @@ impl<T> ExactSizeIterator for PersistentHashSetIntoIterator<T> {
 impl<T> Default for PersistentHashSet<T> {
     #[inline]
     fn default() -> Self {
-        PersistentHashSet::new()
+        Self::new()
     }
 }
 
 impl<T: Clone + Hash + Eq> FromIterator<T> for PersistentHashSet<T> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        let mut set = PersistentHashSet::new();
+        let mut set = Self::new();
         for element in iter {
             set = set.insert(element);
         }
@@ -637,9 +645,11 @@ impl<T: Clone + Hash + Eq> IntoIterator for PersistentHashSet<T> {
     type IntoIter = PersistentHashSetIntoIterator<T>;
 
     fn into_iter(self) -> Self::IntoIter {
-        let elements: Vec<T> = self.inner.into_iter().map(|(key, _)| key).collect();
+        fn extract_key<T>((key, ()): (T, ())) -> T {
+            key
+        }
         PersistentHashSetIntoIterator {
-            inner: elements.into_iter(),
+            inner: self.inner.into_iter().map(extract_key),
         }
     }
 }
@@ -662,7 +672,7 @@ impl<T: Clone + Hash + Eq> PartialEq for PersistentHashSet<T> {
             return false;
         }
 
-        for element in self.iter() {
+        for element in self {
             if !other.contains(element) {
                 return false;
             }
@@ -690,22 +700,21 @@ impl<T> TypeConstructor for PersistentHashSet<T> {
 }
 
 impl<T: Clone + Hash + Eq> Foldable for PersistentHashSet<T> {
-    fn fold_left<B, F>(self, init: B, mut function: F) -> B
+    fn fold_left<B, F>(self, init: B, function: F) -> B
     where
         F: FnMut(B, T) -> B,
     {
         self.into_iter()
-            .fold(init, |accumulator, element| function(accumulator, element))
+            .fold(init, function)
     }
 
     fn fold_right<B, F>(self, init: B, mut function: F) -> B
     where
         F: FnMut(T, B) -> B,
     {
-        let elements: Vec<_> = self.into_iter().collect();
-        elements
-            .into_iter()
-            .rev()
+        // For unordered collections (hash-based), fold_right is semantically
+        // equivalent to fold_left since there is no defined order.
+        self.into_iter()
             .fold(init, |accumulator, element| function(element, accumulator))
     }
 

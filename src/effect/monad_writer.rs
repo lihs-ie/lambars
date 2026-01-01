@@ -1,4 +1,4 @@
-//! MonadWriter type class - log output capability.
+//! `MonadWriter` type class - log output capability.
 //!
 //! This module provides the `MonadWriter` trait which abstracts
 //! the ability to accumulate output alongside a computation.
@@ -179,7 +179,7 @@ where
     ///
     /// # Arguments
     ///
-    /// * `computation` - A computation that produces (result, output_modifier)
+    /// * `computation` - A computation that produces (result, `output_modifier`)
     ///
     /// # Returns
     ///

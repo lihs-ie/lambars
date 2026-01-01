@@ -8,12 +8,12 @@
 //!
 //! Every Prism must satisfy two laws:
 //!
-//! 1. **PreviewReview Law**: Reviewing then previewing yields the original value.
+//! 1. **`PreviewReview` Law**: Reviewing then previewing yields the original value.
 //!    ```text
 //!    prism.preview(&prism.review(value)) == Some(&value)
 //!    ```
 //!
-//! 2. **ReviewPreview Law**: If preview succeeds, reviewing the result yields the original.
+//! 2. **`ReviewPreview` Law**: If preview succeeds, reviewing the result yields the original.
 //!    ```text
 //!    if prism.preview(source).is_some() then
 //!        prism.review(prism.preview(source).unwrap().clone()) == source
@@ -55,8 +55,8 @@ use std::marker::PhantomData;
 ///
 /// # Laws
 ///
-/// 1. **PreviewReview Law**: `prism.preview(&prism.review(value)) == Some(&value)`
-/// 2. **ReviewPreview Law**: If preview succeeds, `prism.review(prism.preview(&source).unwrap().clone()) == source`
+/// 1. **`PreviewReview` Law**: `prism.preview(&prism.review(value)) == Some(&value)`
+/// 2. **`ReviewPreview` Law**: If preview succeeds, `prism.review(prism.preview(&source).unwrap().clone()) == source`
 pub trait Prism<S, A> {
     /// Attempts to extract the value from the source.
     ///
@@ -264,7 +264,7 @@ pub trait Prism<S, A> {
     }
 }
 
-/// A prism implemented using preview, review, and preview_owned functions.
+/// A prism implemented using preview, review, and `preview_owned` functions.
 ///
 /// This is the most common way to create a prism. The `prism!` macro
 /// generates a `FunctionPrism` internally.
@@ -275,7 +275,7 @@ pub trait Prism<S, A> {
 /// - `A`: The target type
 /// - `Pr`: The preview function type
 /// - `Re`: The review function type
-/// - `PrOwned`: The preview_owned function type
+/// - `PrOwned`: The `preview_owned` function type
 ///
 /// # Example
 ///
@@ -321,7 +321,7 @@ where
     Re: Fn(A) -> S,
     PrOwned: Fn(S) -> Option<A>,
 {
-    /// Creates a new `FunctionPrism` from preview, review, and preview_owned functions.
+    /// Creates a new `FunctionPrism` from preview, review, and `preview_owned` functions.
     ///
     /// # Arguments
     ///
@@ -592,9 +592,9 @@ where
         F: FnMut(A) -> A,
         S: Clone,
     {
-        let mut function = function;
+        let function = function;
         self.prism
-            .modify_or_identity(source, |value| function(value))
+            .modify_or_identity(source, function)
     }
 }
 

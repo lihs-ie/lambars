@@ -43,7 +43,7 @@
 /// assert_eq!(composed(5), double(5));
 /// ```
 #[inline]
-pub fn identity<T>(value: T) -> T {
+pub const fn identity<T>(value: T) -> T {
     value
 }
 

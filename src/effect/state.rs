@@ -35,7 +35,7 @@
 //! - Right Identity: `m.flat_map(State::pure) == m`
 //! - Associativity: `m.flat_map(f).flat_map(g) == m.flat_map(|x| f(x).flat_map(g))`
 //!
-//! ## MonadState Laws
+//! ## `MonadState` Laws
 //!
 //! - Get Put Law: `get().flat_map(|s| put(s)) == pure(())`
 //! - Put Get Law: `put(s).then(get())` returns `s`
@@ -112,7 +112,7 @@ where
     A: 'static,
 {
     /// The wrapped state transition function.
-    /// Uses Rc to allow cloning of the State for flat_map.
+    /// Uses Rc to allow cloning of the State for `flat_map`.
     run_function: Rc<dyn Fn(S) -> (A, S)>,
 }
 
@@ -126,7 +126,7 @@ where
     /// # Arguments
     ///
     /// * `function` - A function that takes the current state and returns
-    ///   a tuple of (result, new_state)
+    ///   a tuple of (result, `new_state`)
     ///
     /// # Examples
     ///
@@ -142,33 +142,33 @@ where
     where
         F: Fn(S) -> (A, S) + 'static,
     {
-        State {
+        Self {
             run_function: Rc::new(function),
         }
     }
 
     /// Creates a new State from a state transition function.
     ///
-    /// This is an alias for `new` that matches the Haskell naming convention.
+    /// This is an alias for `new` that is more descriptive for state transitions.
     ///
     /// # Arguments
     ///
     /// * `transition` - A function that takes the current state and returns
-    ///   a tuple of (result, new_state)
+    ///   a tuple of (result, `new_state`)
     ///
     /// # Examples
     ///
     /// ```rust
     /// use lambars::effect::State;
     ///
-    /// let computation: State<i32, String> = State::state(|s: i32| {
+    /// let computation: State<i32, String> = State::from_transition(|s: i32| {
     ///     (format!("was: {}", s), s + 1)
     /// });
     /// let (result, final_state) = computation.run(10);
     /// assert_eq!(result, "was: 10");
     /// assert_eq!(final_state, 11);
     /// ```
-    pub fn state<F>(transition: F) -> Self
+    pub fn from_transition<F>(transition: F) -> Self
     where
         F: Fn(S) -> (A, S) + 'static,
     {
@@ -185,7 +185,7 @@ where
     ///
     /// # Returns
     ///
-    /// A tuple of (result, final_state).
+    /// A tuple of (result, `final_state`).
     ///
     /// # Examples
     ///
@@ -269,7 +269,7 @@ where
     where
         A: Clone,
     {
-        State::new(move |state| (value.clone(), state))
+        Self::new(move |state| (value.clone(), state))
     }
 
     /// Maps a function over the result of this State.
@@ -383,6 +383,7 @@ where
     /// assert_eq!(result, "result");
     /// assert_eq!(final_state, 52);
     /// ```
+    #[must_use] 
     pub fn then<B>(self, next: State<S, B>) -> State<S, B>
     where
         B: 'static,
@@ -446,6 +447,7 @@ where
     /// assert_eq!(second, "hello");
     /// assert_eq!(final_state, 43);
     /// ```
+    #[must_use] 
     pub fn product<B>(self, other: State<S, B>) -> State<S, (A, B)>
     where
         B: 'static,
@@ -458,13 +460,13 @@ where
 // MonadState Operations (as inherent methods)
 // =============================================================================
 
-impl<S> State<S, S>
+impl<St> State<St, St>
 where
-    S: Clone + 'static,
+    St: Clone + 'static,
 {
     /// Creates a State that returns the current state without modifying it.
     ///
-    /// This is the fundamental "get" operation of MonadState.
+    /// This is the fundamental "get" operation of `MonadState`.
     ///
     /// # Examples
     ///
@@ -476,8 +478,9 @@ where
     /// assert_eq!(result, 42);
     /// assert_eq!(final_state, 42);
     /// ```
+    #[must_use] 
     pub fn get() -> Self {
-        State::new(|state: S| (state.clone(), state))
+        Self::new(|state: St| (state.clone(), state))
     }
 }
 
@@ -487,7 +490,7 @@ where
 {
     /// Creates a State that replaces the current state with a new value.
     ///
-    /// This is the fundamental "put" operation of MonadState.
+    /// This is the fundamental "put" operation of `MonadState`.
     ///
     /// # Arguments
     ///
@@ -506,7 +509,7 @@ where
     where
         S: Clone,
     {
-        State::new(move |_| ((), new_state.clone()))
+        Self::new(move |_| ((), new_state.clone()))
     }
 
     /// Creates a State that modifies the current state using a function.
@@ -528,7 +531,7 @@ where
     where
         F: Fn(S) -> S + 'static,
     {
-        State::new(move |state| ((), modifier(state)))
+        Self::new(move |state| ((), modifier(state)))
     }
 }
 
@@ -562,7 +565,7 @@ where
     where
         F: Fn(&S) -> A + 'static,
     {
-        State::new(move |state| {
+        Self::new(move |state| {
             let result = projection(&state);
             (result, state)
         })
@@ -579,7 +582,7 @@ where
     A: 'static,
 {
     fn clone(&self) -> Self {
-        State {
+        Self {
             run_function: self.run_function.clone(),
         }
     }

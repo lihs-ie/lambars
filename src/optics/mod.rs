@@ -140,17 +140,17 @@
 //!
 //! Every Lens must satisfy three laws:
 //!
-//! 1. **GetPut Law**: Getting and setting back yields the original.
+//! 1. **`GetPut` Law**: Getting and setting back yields the original.
 //!    ```text
 //!    lens.set(source, lens.get(&source).clone()) == source
 //!    ```
 //!
-//! 2. **PutGet Law**: Setting then getting yields the set value.
+//! 2. **`PutGet` Law**: Setting then getting yields the set value.
 //!    ```text
 //!    lens.get(&lens.set(source, value)) == &value
 //!    ```
 //!
-//! 3. **PutPut Law**: Two consecutive sets is equivalent to the last set.
+//! 3. **`PutPut` Law**: Two consecutive sets is equivalent to the last set.
 //!    ```text
 //!    lens.set(lens.set(source, v1), v2) == lens.set(source, v2)
 //!    ```
@@ -159,12 +159,12 @@
 //!
 //! Every Prism must satisfy two laws:
 //!
-//! 1. **PreviewReview Law**: Reviewing then previewing yields the original value.
+//! 1. **`PreviewReview` Law**: Reviewing then previewing yields the original value.
 //!    ```text
 //!    prism.preview(&prism.review(value)) == Some(&value)
 //!    ```
 //!
-//! 2. **ReviewPreview Law**: If preview succeeds, reviewing the result yields the original.
+//! 2. **`ReviewPreview` Law**: If preview succeeds, reviewing the result yields the original.
 //!    ```text
 //!    if prism.preview(source).is_some() then
 //!        prism.review(prism.preview(source).unwrap().clone()) == source
@@ -174,13 +174,13 @@
 //!
 //! Every Optional must satisfy two laws (when the element is present):
 //!
-//! 1. **GetOptionSet Law**: Getting and setting back yields the original.
+//! 1. **`GetOptionSet` Law**: Getting and setting back yields the original.
 //!    ```text
 //!    if optional.get_option(&source).is_some() then
 //!        optional.set(source.clone(), optional.get_option(&source).unwrap().clone()) == source
 //!    ```
 //!
-//! 2. **SetGetOption Law**: Setting then getting yields the set value.
+//! 2. **`SetGetOption` Law**: Setting then getting yields the set value.
 //!    ```text
 //!    if optional.get_option(&source).is_some() then
 //!        optional.get_option(&optional.set(source, value)) == Some(&value)
@@ -190,12 +190,12 @@
 //!
 //! Every Iso must satisfy two laws:
 //!
-//! 1. **GetReverseGet Law**: Converting forward then backward yields the original.
+//! 1. **`GetReverseGet` Law**: Converting forward then backward yields the original.
 //!    ```text
 //!    iso.reverse_get(iso.get(source)) == source
 //!    ```
 //!
-//! 2. **ReverseGetGet Law**: Converting backward then forward yields the original.
+//! 2. **`ReverseGetGet` Law**: Converting backward then forward yields the original.
 //!    ```text
 //!    iso.get(iso.reverse_get(value)) == value
 //!    ```

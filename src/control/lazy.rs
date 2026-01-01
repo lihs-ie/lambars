@@ -46,6 +46,22 @@ pub enum LazyState<T, F> {
     Poisoned,
 }
 
+/// Error returned when attempting to access a poisoned `Lazy` value.
+///
+/// A `Lazy` value becomes poisoned when its initialization function panics.
+/// After poisoning, the value cannot be accessed and any attempt to do so
+/// will return this error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LazyPoisonedError;
+
+impl fmt::Display for LazyPoisonedError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "Lazy value is poisoned")
+    }
+}
+
+impl std::error::Error for LazyPoisonedError {}
+
 /// A lazily evaluated value with memoization.
 ///
 /// `Lazy<T, F>` defers computation until the value is first accessed via `force()`.
@@ -125,7 +141,7 @@ impl<T, F: FnOnce() -> T> Lazy<T, F> {
     /// // Nothing printed yet
     /// ```
     #[inline]
-    pub fn new(initializer: F) -> Self {
+    pub const fn new(initializer: F) -> Self {
         Self {
             state: RefCell::new(LazyState::Uninit(initializer)),
         }
@@ -441,11 +457,15 @@ impl<T, F: FnOnce() -> T> Lazy<T, F> {
     /// let lazy = Lazy::new_with_value(42);
     /// assert_eq!(lazy.into_inner(), Ok(42));
     /// ```
-    pub fn into_inner(self) -> Result<T, ()> {
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(LazyPoisonedError)` if the `Lazy` instance has been poisoned.
+    pub fn into_inner(self) -> Result<T, LazyPoisonedError> {
         match self.state.into_inner() {
             LazyState::Init(value) => Ok(value),
             LazyState::Uninit(initializer) => Ok(initializer()),
-            LazyState::Poisoned => Err(()),
+            LazyState::Poisoned => Err(LazyPoisonedError),
         }
     }
 }
@@ -474,6 +494,10 @@ impl<T, F: FnOnce() -> T> Lazy<T, F> {
     ///
     /// assert_eq!(*doubled.force(), 42);
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics when forced if the `Lazy` instance has been poisoned.
     pub fn map<U, G>(self, function: G) -> Lazy<U, impl FnOnce() -> U>
     where
         G: FnOnce(T) -> U,
@@ -506,6 +530,10 @@ impl<T, F: FnOnce() -> T> Lazy<T, F> {
     ///
     /// assert_eq!(*result.force(), 42);
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics when forced if the `Lazy` instance has been poisoned.
     pub fn flat_map<U, FunctionResult, G>(self, function: G) -> Lazy<U, impl FnOnce() -> U>
     where
         FunctionResult: FnOnce() -> U,
@@ -543,6 +571,10 @@ impl<T, F: FnOnce() -> T> Lazy<T, F> {
     ///
     /// assert_eq!(*combined.force(), (1, "hello"));
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics when forced if either `Lazy` instance has been poisoned.
     pub fn zip<U, OtherFunction>(
         self,
         other: Lazy<U, OtherFunction>,
@@ -583,6 +615,10 @@ impl<T, F: FnOnce() -> T> Lazy<T, F> {
     ///
     /// assert_eq!(*sum.force(), 42);
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics when forced if either `Lazy` instance has been poisoned.
     pub fn zip_with<U, V, OtherFunction, CombineFunction>(
         self,
         other: Lazy<U, OtherFunction>,
@@ -624,7 +660,7 @@ impl<T: Default> Default for Lazy<T> {
     /// assert_eq!(*lazy.force(), 0);
     /// ```
     fn default() -> Self {
-        Lazy::new(T::default)
+        Self::new(T::default)
     }
 }
 

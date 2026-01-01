@@ -38,6 +38,8 @@
 #![warn(clippy::all)]
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
+// Note: Disabling redundant_closure_for_method_calls due to clippy 0.1.92 panic bug
+#![allow(clippy::redundant_closure_for_method_calls)]
 
 /// Prelude module for convenient imports.
 ///

@@ -309,23 +309,23 @@ fn state_gets_with_transformation() {
 // =============================================================================
 
 #[rstest]
-fn state_state_function_basic() {
-    let computation: State<i32, String> = State::state(|s: i32| (format!("was: {}", s), s + 1));
+fn state_new_function_basic() {
+    let computation: State<i32, String> = State::new(|s: i32| (format!("was: {}", s), s + 1));
     let (result, final_state) = computation.run(10);
     assert_eq!(result, "was: 10");
     assert_eq!(final_state, 11);
 }
 
 #[rstest]
-fn state_state_function_is_equivalent_to_new() {
+fn state_new_and_from_transition_are_equivalent() {
     let via_new: State<i32, i32> = State::new(|s: i32| (s * 2, s + 1));
-    let via_state: State<i32, i32> = State::state(|s: i32| (s * 2, s + 1));
+    let via_from_transition: State<i32, i32> = State::from_transition(|s: i32| (s * 2, s + 1));
 
     let (new_result, new_final) = via_new.run(10);
-    let (state_result, state_final) = via_state.run(10);
+    let (transition_result, transition_final) = via_from_transition.run(10);
 
-    assert_eq!(new_result, state_result);
-    assert_eq!(new_final, state_final);
+    assert_eq!(new_result, transition_result);
+    assert_eq!(new_final, transition_final);
 }
 
 // =============================================================================
@@ -370,7 +370,7 @@ fn state_stack_pattern() {
     }
 
     fn pop() -> State<Vec<i32>, Option<i32>> {
-        State::state(|mut stack: Vec<i32>| {
+        State::new(|mut stack: Vec<i32>| {
             let value = stack.pop();
             (value, stack)
         })

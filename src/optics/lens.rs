@@ -7,17 +7,17 @@
 //!
 //! Every Lens must satisfy three laws:
 //!
-//! 1. **GetPut Law**: Getting and setting back yields the original.
+//! 1. **`GetPut` Law**: Getting and setting back yields the original.
 //!    ```text
 //!    lens.set(source, lens.get(&source).clone()) == source
 //!    ```
 //!
-//! 2. **PutGet Law**: Setting then getting yields the set value.
+//! 2. **`PutGet` Law**: Setting then getting yields the set value.
 //!    ```text
 //!    lens.get(&lens.set(source, value)) == &value
 //!    ```
 //!
-//! 3. **PutPut Law**: Two consecutive sets is equivalent to the last set.
+//! 3. **`PutPut` Law**: Two consecutive sets is equivalent to the last set.
 //!    ```text
 //!    lens.set(lens.set(source, v1), v2) == lens.set(source, v2)
 //!    ```
@@ -52,9 +52,9 @@ use std::marker::PhantomData;
 ///
 /// # Laws
 ///
-/// 1. **GetPut Law**: `lens.set(source, lens.get(&source).clone()) == source`
-/// 2. **PutGet Law**: `lens.get(&lens.set(source, value)) == &value`
-/// 3. **PutPut Law**: `lens.set(lens.set(source, v1), v2) == lens.set(source, v2)`
+/// 1. **`GetPut` Law**: `lens.set(source, lens.get(&source).clone()) == source`
+/// 2. **`PutGet` Law**: `lens.get(&lens.set(source, value)) == &value`
+/// 3. **`PutPut` Law**: `lens.set(lens.set(source, v1), v2) == lens.set(source, v2)`
 pub trait Lens<S, A> {
     /// Gets a reference to the focused field.
     ///
@@ -502,8 +502,8 @@ where
         F: FnMut(A) -> A,
         A: Clone,
     {
-        let mut function = function;
-        self.lens.modify(source, |value| function(value))
+        let function = function;
+        self.lens.modify(source, function)
     }
 }
 

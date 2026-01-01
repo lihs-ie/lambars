@@ -64,7 +64,7 @@ struct Node<T> {
     /// The element stored in this node.
     element: T,
     /// Reference to the next node (if any).
-    next: Option<Rc<Node<T>>>,
+    next: Option<Rc<Self>>,
 }
 
 /// A persistent (immutable) singly-linked list.
@@ -114,8 +114,8 @@ impl<T> PersistentList<T> {
     /// ```
     #[inline]
     #[must_use]
-    pub fn new() -> Self {
-        PersistentList {
+    pub const fn new() -> Self {
+        Self {
             head: None,
             length: 0,
         }
@@ -139,7 +139,7 @@ impl<T> PersistentList<T> {
     #[inline]
     #[must_use]
     pub fn singleton(element: T) -> Self {
-        PersistentList::new().cons(element)
+        Self::new().cons(element)
     }
 
     /// Prepends an element to the front of the list.
@@ -171,7 +171,7 @@ impl<T> PersistentList<T> {
     #[inline]
     #[must_use]
     pub fn cons(&self, element: T) -> Self {
-        PersistentList {
+        Self {
             head: Some(Rc::new(Node {
                 element,
                 next: self.head.clone(),
@@ -224,13 +224,10 @@ impl<T> PersistentList<T> {
     #[inline]
     #[must_use]
     pub fn tail(&self) -> Self {
-        match &self.head {
-            Some(node) => PersistentList {
-                head: node.next.clone(),
-                length: self.length.saturating_sub(1),
-            },
-            None => PersistentList::new(),
-        }
+        self.head.as_ref().map_or_else(Self::new, |node| Self {
+            head: node.next.clone(),
+            length: self.length.saturating_sub(1),
+        })
     }
 
     /// Decomposes the list into its head and tail.
@@ -256,7 +253,7 @@ impl<T> PersistentList<T> {
     #[must_use]
     pub fn uncons(&self) -> Option<(&T, Self)> {
         self.head.as_ref().map(|node| {
-            let tail = PersistentList {
+            let tail = Self {
                 head: node.next.clone(),
                 length: self.length.saturating_sub(1),
             };
@@ -317,7 +314,7 @@ impl<T> PersistentList<T> {
     /// ```
     #[inline]
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.length
     }
 
@@ -336,7 +333,7 @@ impl<T> PersistentList<T> {
     /// ```
     #[inline]
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.head.is_none()
     }
 
@@ -354,7 +351,8 @@ impl<T> PersistentList<T> {
     /// assert_eq!(collected, vec![&1, &2, &3]);
     /// ```
     #[inline]
-    pub fn iter(&self) -> PersistentListIterator<'_, T> {
+    #[must_use] 
+    pub const fn iter(&self) -> PersistentListIterator<'_, T> {
         PersistentListIterator {
             current: self.head.as_ref(),
         }
@@ -373,7 +371,7 @@ impl<T: Clone> PersistentList<T> {
     ///
     /// # Complexity
     ///
-    /// O(n) where n = self.len()
+    /// O(n) where n = `self.len()`
     ///
     /// # Examples
     ///
@@ -398,7 +396,7 @@ impl<T: Clone> PersistentList<T> {
 
         // Reverse self, then prepend each element to other
         let mut result = other.clone();
-        for element in self.reverse().iter() {
+        for element in &self.reverse() {
             result = result.cons(element.clone());
         }
         result
@@ -423,8 +421,8 @@ impl<T: Clone> PersistentList<T> {
     /// ```
     #[must_use]
     pub fn reverse(&self) -> Self {
-        let mut result = PersistentList::new();
-        for element in self.iter() {
+        let mut result = Self::new();
+        for element in self {
             result = result.cons(element.clone());
         }
         result
@@ -461,7 +459,7 @@ impl<T: Clone> PersistentList<T> {
         F: FnMut(T) -> PersistentList<B>,
     {
         let mut result = PersistentList::new();
-        for element in self.into_iter() {
+        for element in self {
             let mapped = function(element);
             result = result.append(&mapped);
         }
@@ -531,14 +529,14 @@ impl<T: Clone> ExactSizeIterator for PersistentListIntoIterator<T> {
 impl<T> Default for PersistentList<T> {
     #[inline]
     fn default() -> Self {
-        PersistentList::new()
+        Self::new()
     }
 }
 
 impl<T: Clone> FromIterator<T> for PersistentList<T> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
         let elements: Vec<T> = iter.into_iter().collect();
-        let mut list = PersistentList::new();
+        let mut list = Self::new();
         for element in elements.into_iter().rev() {
             list = list.cons(element);
         }
@@ -598,22 +596,16 @@ impl<T: Clone> Functor for PersistentList<T> {
         F: FnOnce(T) -> B,
     {
         // FnOnce can only be called once, so this only works for single-element lists
-        if let Some(head) = self.head() {
-            PersistentList::singleton(function(head.clone()))
-        } else {
-            PersistentList::new()
-        }
+        self.head()
+            .map_or_else(PersistentList::new, |head| PersistentList::singleton(function(head.clone())))
     }
 
     fn fmap_ref<B, F>(&self, function: F) -> PersistentList<B>
     where
         F: FnOnce(&T) -> B,
     {
-        if let Some(head) = self.head() {
-            PersistentList::singleton(function(head))
-        } else {
-            PersistentList::new()
-        }
+        self.head()
+            .map_or_else(PersistentList::new, |head| PersistentList::singleton(function(head)))
     }
 }
 
@@ -741,11 +733,8 @@ impl<T: Clone> Monad for PersistentList<T> {
         F: FnOnce(T) -> PersistentList<B>,
     {
         // FnOnce can only be called once, so this only works for single-element lists
-        if let Some(head) = self.head() {
-            function(head.clone())
-        } else {
-            PersistentList::new()
-        }
+        self.head()
+            .map_or_else(PersistentList::new, |head| function(head.clone()))
     }
 }
 
@@ -757,7 +746,7 @@ impl<T: Clone> Semigroup for PersistentList<T> {
 
 impl<T: Clone> Monoid for PersistentList<T> {
     fn empty() -> Self {
-        PersistentList::new()
+        Self::new()
     }
 }
 

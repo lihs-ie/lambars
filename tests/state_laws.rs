@@ -245,14 +245,14 @@ proptest! {
         prop_assert_eq!(final_state, initial_state.wrapping_mul(2));
     }
 
-    /// state function should work like new
+    /// new and from_transition should be equivalent
     #[test]
-    fn prop_state_function_equals_new(initial_state in -1000i32..1000i32) {
+    fn prop_new_equals_from_transition(initial_state in -1000i32..1000i32) {
         let via_new: State<i32, i32> = State::new(|s: i32| (s.wrapping_mul(2), s.wrapping_add(1)));
-        let via_state_fn: State<i32, i32> = State::state(|s: i32| (s.wrapping_mul(2), s.wrapping_add(1)));
+        let via_from_transition: State<i32, i32> = State::from_transition(|s: i32| (s.wrapping_mul(2), s.wrapping_add(1)));
 
         let (result1, final1) = via_new.run(initial_state);
-        let (result2, final2) = via_state_fn.run(initial_state);
+        let (result2, final2) = via_from_transition.run(initial_state);
 
         prop_assert_eq!(result1, result2);
         prop_assert_eq!(final1, final2);

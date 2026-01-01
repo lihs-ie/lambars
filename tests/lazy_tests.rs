@@ -9,7 +9,7 @@
 
 #![cfg(feature = "control")]
 
-use lambars::control::Lazy;
+use lambars::control::{Lazy, LazyPoisonedError};
 use rstest::rstest;
 use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -640,8 +640,8 @@ fn lazy_into_inner_poisoned_returns_err() {
         let _ = lazy.force();
     }));
 
-    // into_inner should return Err(()) for poisoned
-    assert_eq!(lazy.into_inner(), Err(()));
+    // into_inner should return Err(LazyPoisonedError) for poisoned
+    assert_eq!(lazy.into_inner(), Err(LazyPoisonedError));
 }
 
 #[rstest]

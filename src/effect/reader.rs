@@ -36,7 +36,7 @@
 //! - Right Identity: `m.flat_map(Reader::pure) == m`
 //! - Associativity: `m.flat_map(f).flat_map(g) == m.flat_map(|x| f(x).flat_map(g))`
 //!
-//! ## MonadReader Laws
+//! ## `MonadReader` Laws
 //!
 //! - Ask Local Identity: `Reader::local(|r| r, m) == m`
 //! - Ask Local Composition: `Reader::local(f, Reader::local(g, m)) == Reader::local(|r| g(f(r)), m)`
@@ -123,7 +123,7 @@ where
     A: 'static,
 {
     /// The wrapped function from environment to result.
-    /// Uses Rc to allow cloning of the Reader for flat_map.
+    /// Uses Rc to allow cloning of the Reader for `flat_map`.
     run_function: Rc<dyn Fn(R) -> A>,
 }
 
@@ -150,7 +150,7 @@ where
     where
         F: Fn(R) -> A + 'static,
     {
-        Reader {
+        Self {
             run_function: Rc::new(function),
         }
     }
@@ -202,7 +202,7 @@ where
     where
         A: Clone,
     {
-        Reader::new(move |_| value.clone())
+        Self::new(move |_| value.clone())
     }
 
     /// Maps a function over the result of this Reader.
@@ -305,6 +305,7 @@ where
     /// let sequenced = reader1.then(reader2);
     /// assert_eq!(sequenced.run(42), "result");
     /// ```
+    #[must_use] 
     pub fn then<B>(self, next: Reader<R, B>) -> Reader<R, B>
     where
         B: 'static,
@@ -407,6 +408,7 @@ where
     /// let product = reader1.product(reader2);
     /// assert_eq!(product.run(42), (42, "hello"));
     /// ```
+    #[must_use] 
     pub fn product<B>(self, other: Reader<R, B>) -> Reader<R, (A, B)>
     where
         B: 'static,
@@ -431,6 +433,7 @@ where
     /// let result = function_reader.apply(value_reader);
     /// assert_eq!(result.run(41), 42);
     /// ```
+    #[must_use] 
     pub fn apply<B, Output>(self, other: Reader<R, B>) -> Reader<R, Output>
     where
         A: Fn(B) -> Output + 'static,
@@ -446,13 +449,13 @@ where
 // MonadReader Operations (as inherent methods)
 // =============================================================================
 
-impl<R> Reader<R, R>
+impl<Env> Reader<Env, Env>
 where
-    R: Clone + 'static,
+    Env: Clone + 'static,
 {
     /// Creates a Reader that returns the entire environment.
     ///
-    /// This is the fundamental operation of MonadReader.
+    /// This is the fundamental operation of `MonadReader`.
     ///
     /// # Examples
     ///
@@ -462,8 +465,9 @@ where
     /// let reader: Reader<i32, i32> = Reader::ask();
     /// assert_eq!(reader.run(42), 42);
     /// ```
+    #[must_use] 
     pub fn ask() -> Self {
-        Reader::new(|environment| environment)
+        Self::new(|environment| environment)
     }
 }
 
@@ -496,7 +500,7 @@ where
     where
         F: Fn(R) -> A + 'static,
     {
-        Reader::new(projection)
+        Self::new(projection)
     }
 
     /// Runs a computation with a modified environment.
@@ -518,12 +522,12 @@ where
     /// let local_reader = Reader::local(|environment| environment + 10, reader);
     /// assert_eq!(local_reader.run(5), 30); // (5 + 10) * 2
     /// ```
-    pub fn local<F>(modifier: F, computation: Reader<R, A>) -> Reader<R, A>
+    pub fn local<F>(modifier: F, computation: Self) -> Self
     where
         F: Fn(R) -> R + 'static,
     {
         let computation_function = computation.run_function;
-        Reader::new(move |environment| {
+        Self::new(move |environment| {
             let modified_environment = modifier(environment);
             (computation_function)(modified_environment)
         })
@@ -540,7 +544,7 @@ where
     A: 'static,
 {
     fn clone(&self) -> Self {
-        Reader {
+        Self {
             run_function: self.run_function.clone(),
         }
     }

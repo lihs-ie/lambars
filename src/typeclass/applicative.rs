@@ -410,8 +410,7 @@ impl<T, E: Clone> Applicative for Result<T, E> {
     {
         match (self, other) {
             (Ok(a), Ok(b)) => Ok(function(a, b)),
-            (Err(error), _) => Err(error),
-            (_, Err(error)) => Err(error),
+            (Err(error), _) | (_, Err(error)) => Err(error),
         }
     }
 
@@ -427,9 +426,7 @@ impl<T, E: Clone> Applicative for Result<T, E> {
     {
         match (self, second, third) {
             (Ok(a), Ok(b), Ok(c)) => Ok(function(a, b, c)),
-            (Err(error), _, _) => Err(error),
-            (_, Err(error), _) => Err(error),
-            (_, _, Err(error)) => Err(error),
+            (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => Err(error),
         }
     }
 
@@ -440,8 +437,7 @@ impl<T, E: Clone> Applicative for Result<T, E> {
     {
         match (self, other) {
             (Ok(function), Ok(b)) => Ok(function(b)),
-            (Err(error), _) => Err(error),
-            (_, Err(error)) => Err(error),
+            (Err(error), _) | (_, Err(error)) => Err(error),
         }
     }
 }
@@ -492,14 +488,14 @@ pub trait ApplicativeVec: Sized {
         Self::VecInner: FnMut(B) -> Output + Clone;
 }
 
-impl<A> ApplicativeVec for Vec<A> {
-    type VecInner = A;
+impl<T> ApplicativeVec for Vec<T> {
+    type VecInner = T;
 
     #[inline]
     fn map2<B: Clone, C, F>(self, other: Vec<B>, mut function: F) -> Vec<C>
     where
-        A: Clone,
-        F: FnMut(A, B) -> C,
+        T: Clone,
+        F: FnMut(T, B) -> C,
     {
         let capacity = self.len().saturating_mul(other.len());
         let mut result = Vec::with_capacity(capacity);
@@ -519,8 +515,8 @@ impl<A> ApplicativeVec for Vec<A> {
         mut function: F,
     ) -> Vec<D>
     where
-        A: Clone,
-        F: FnMut(A, B, C) -> D,
+        T: Clone,
+        F: FnMut(T, B, C) -> D,
     {
         let capacity = self
             .len()
@@ -538,9 +534,9 @@ impl<A> ApplicativeVec for Vec<A> {
     }
 
     #[inline]
-    fn product<B: Clone>(self, other: Vec<B>) -> Vec<(A, B)>
+    fn product<B: Clone>(self, other: Vec<B>) -> Vec<(T, B)>
     where
-        A: Clone,
+        T: Clone,
     {
         self.map2(other, |a, b| (a, b))
     }
@@ -548,7 +544,7 @@ impl<A> ApplicativeVec for Vec<A> {
     #[inline]
     fn apply<B: Clone, Output>(self, other: Vec<B>) -> Vec<Output>
     where
-        A: FnMut(B) -> Output + Clone,
+        T: FnMut(B) -> Output + Clone,
     {
         let capacity = self.len().saturating_mul(other.len());
         let mut result = Vec::with_capacity(capacity);
@@ -562,10 +558,10 @@ impl<A> ApplicativeVec for Vec<A> {
 }
 
 // =============================================================================
-// Box<A> Implementation
+// Box<T> Implementation
 // =============================================================================
 
-impl<A> Applicative for Box<A> {
+impl<T> Applicative for Box<T> {
     #[inline]
     fn pure<B>(value: B) -> Box<B> {
         Box::new(value)
@@ -574,7 +570,7 @@ impl<A> Applicative for Box<A> {
     #[inline]
     fn map2<B, C, F>(self, other: Box<B>, function: F) -> Box<C>
     where
-        F: FnOnce(A, B) -> C,
+        F: FnOnce(T, B) -> C,
     {
         Box::new(function(*self, *other))
     }
@@ -582,7 +578,7 @@ impl<A> Applicative for Box<A> {
     #[inline]
     fn map3<B, C, D, F>(self, second: Box<B>, third: Box<C>, function: F) -> Box<D>
     where
-        F: FnOnce(A, B, C) -> D,
+        F: FnOnce(T, B, C) -> D,
     {
         Box::new(function(*self, *second, *third))
     }
@@ -590,7 +586,7 @@ impl<A> Applicative for Box<A> {
     #[inline]
     fn apply<B, Output>(self, other: Box<B>) -> Box<Output>
     where
-        A: FnOnce(B) -> Output,
+        T: FnOnce(B) -> Output,
     {
         Box::new((*self)(*other))
     }

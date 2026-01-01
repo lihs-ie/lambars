@@ -1,8 +1,8 @@
 //! Optics integration for persistent data structures.
 //!
 //! This module provides Optional and Traversal implementations for
-//! the persistent data structures: PersistentVector, PersistentHashMap,
-//! and PersistentTreeMap.
+//! the persistent data structures: `PersistentVector`, `PersistentHashMap`,
+//! and `PersistentTreeMap`.
 //!
 //! # Overview
 //!
@@ -15,7 +15,7 @@
 //!
 //! # Examples
 //!
-//! ## PersistentVector with Optional
+//! ## `PersistentVector` with Optional
 //!
 //! ```
 //! use lambars::persistent::PersistentVector;
@@ -30,7 +30,7 @@
 //! assert_eq!(updated.get(2), Some(&100));
 //! ```
 //!
-//! ## PersistentVector with Traversal
+//! ## `PersistentVector` with Traversal
 //!
 //! ```
 //! use lambars::persistent::PersistentVector;
@@ -43,7 +43,7 @@
 //! // [2, 4, 6, 8, 10]
 //! ```
 //!
-//! ## PersistentHashMap with Optional
+//! ## `PersistentHashMap` with Optional
 //!
 //! ```
 //! use lambars::persistent::PersistentHashMap;
@@ -68,7 +68,7 @@ use crate::persistent::{PersistentHashMap, PersistentTreeMap, PersistentVector};
 // PersistentVector Optional
 // =============================================================================
 
-/// An Optional that focuses on an element at a specific index in a PersistentVector.
+/// An Optional that focuses on an element at a specific index in a `PersistentVector`.
 ///
 /// This Optional returns `Some` if the index is within bounds, `None` otherwise.
 ///
@@ -99,7 +99,7 @@ pub struct PersistentVectorIndexOptional<T> {
 }
 
 impl<T> PersistentVectorIndexOptional<T> {
-    /// Creates a new PersistentVectorIndexOptional for the given index.
+    /// Creates a new `PersistentVectorIndexOptional` for the given index.
     ///
     /// # Arguments
     ///
@@ -107,7 +107,7 @@ impl<T> PersistentVectorIndexOptional<T> {
     ///
     /// # Returns
     ///
-    /// A new PersistentVectorIndexOptional
+    /// A new `PersistentVectorIndexOptional`
     #[must_use]
     pub const fn new(index: usize) -> Self {
         Self {
@@ -117,9 +117,9 @@ impl<T> PersistentVectorIndexOptional<T> {
     }
 }
 
-/// Creates a PersistentVectorIndexOptional for the given index.
+/// Creates a `PersistentVectorIndexOptional` for the given index.
 ///
-/// This is a convenience function for creating a PersistentVectorIndexOptional.
+/// This is a convenience function for creating a `PersistentVectorIndexOptional`.
 ///
 /// # Type Parameters
 ///
@@ -131,7 +131,7 @@ impl<T> PersistentVectorIndexOptional<T> {
 ///
 /// # Returns
 ///
-/// A new PersistentVectorIndexOptional
+/// A new `PersistentVectorIndexOptional`
 ///
 /// # Example
 ///
@@ -155,10 +155,9 @@ impl<T: Clone> Optional<PersistentVector<T>, T> for PersistentVectorIndexOptiona
     }
 
     fn set(&self, source: PersistentVector<T>, value: T) -> PersistentVector<T> {
-        match source.update(self.index, value) {
-            Some(updated) => updated,
-            None => source, // Index out of bounds, return unchanged
-        }
+        source
+            .update(self.index, value)
+            .map_or(source, |updated| updated)
     }
 }
 
@@ -166,7 +165,7 @@ impl<T: Clone> Optional<PersistentVector<T>, T> for PersistentVectorIndexOptiona
 // PersistentVector Traversal
 // =============================================================================
 
-/// A Traversal that focuses on all elements of a PersistentVector.
+/// A Traversal that focuses on all elements of a `PersistentVector`.
 ///
 /// # Type Parameters
 ///
@@ -193,11 +192,11 @@ pub struct PersistentVectorTraversal<T> {
 }
 
 impl<T> PersistentVectorTraversal<T> {
-    /// Creates a new PersistentVectorTraversal.
+    /// Creates a new `PersistentVectorTraversal`.
     ///
     /// # Returns
     ///
-    /// A new PersistentVectorTraversal
+    /// A new `PersistentVectorTraversal`
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -212,9 +211,9 @@ impl<T> Default for PersistentVectorTraversal<T> {
     }
 }
 
-/// Creates a PersistentVectorTraversal.
+/// Creates a `PersistentVectorTraversal`.
 ///
-/// This is a convenience function for creating a PersistentVectorTraversal.
+/// This is a convenience function for creating a `PersistentVectorTraversal`.
 ///
 /// # Type Parameters
 ///
@@ -222,7 +221,7 @@ impl<T> Default for PersistentVectorTraversal<T> {
 ///
 /// # Returns
 ///
-/// A new PersistentVectorTraversal
+/// A new `PersistentVectorTraversal`
 ///
 /// # Example
 ///
@@ -250,13 +249,13 @@ impl<T: Clone + 'static> Traversal<PersistentVector<T>, T> for PersistentVectorT
         source.into_iter().collect()
     }
 
-    fn modify_all<F>(&self, source: PersistentVector<T>, mut function: F) -> PersistentVector<T>
+    fn modify_all<F>(&self, source: PersistentVector<T>, function: F) -> PersistentVector<T>
     where
         F: FnMut(T) -> T,
     {
         source
             .into_iter()
-            .map(|element| function(element))
+            .map(function)
             .collect()
     }
 }
@@ -265,7 +264,7 @@ impl<T: Clone + 'static> Traversal<PersistentVector<T>, T> for PersistentVectorT
 // PersistentHashMap Optional
 // =============================================================================
 
-/// An Optional that focuses on a value for a specific key in a PersistentHashMap.
+/// An Optional that focuses on a value for a specific key in a `PersistentHashMap`.
 ///
 /// This Optional returns `Some` if the key exists, `None` otherwise.
 /// The `set` operation will insert or update the key-value pair.
@@ -297,7 +296,7 @@ pub struct PersistentHashMapKeyOptional<K, V> {
 }
 
 impl<K, V> PersistentHashMapKeyOptional<K, V> {
-    /// Creates a new PersistentHashMapKeyOptional for the given key.
+    /// Creates a new `PersistentHashMapKeyOptional` for the given key.
     ///
     /// # Arguments
     ///
@@ -305,7 +304,7 @@ impl<K, V> PersistentHashMapKeyOptional<K, V> {
     ///
     /// # Returns
     ///
-    /// A new PersistentHashMapKeyOptional
+    /// A new `PersistentHashMapKeyOptional`
     #[must_use]
     pub const fn new(key: K) -> Self {
         Self {
@@ -315,9 +314,9 @@ impl<K, V> PersistentHashMapKeyOptional<K, V> {
     }
 }
 
-/// Creates a PersistentHashMapKeyOptional for the given key.
+/// Creates a `PersistentHashMapKeyOptional` for the given key.
 ///
-/// This is a convenience function for creating a PersistentHashMapKeyOptional.
+/// This is a convenience function for creating a `PersistentHashMapKeyOptional`.
 ///
 /// # Type Parameters
 ///
@@ -330,7 +329,7 @@ impl<K, V> PersistentHashMapKeyOptional<K, V> {
 ///
 /// # Returns
 ///
-/// A new PersistentHashMapKeyOptional
+/// A new `PersistentHashMapKeyOptional`
 ///
 /// # Example
 ///
@@ -365,7 +364,7 @@ impl<K: Clone + Hash + Eq, V: Clone> Optional<PersistentHashMap<K, V>, V>
 // PersistentHashMap Traversal
 // =============================================================================
 
-/// A Traversal that focuses on all values of a PersistentHashMap.
+/// A Traversal that focuses on all values of a `PersistentHashMap`.
 ///
 /// Note that the iteration order is not guaranteed.
 ///
@@ -394,11 +393,11 @@ pub struct PersistentHashMapTraversal<K, V> {
 }
 
 impl<K, V> PersistentHashMapTraversal<K, V> {
-    /// Creates a new PersistentHashMapTraversal.
+    /// Creates a new `PersistentHashMapTraversal`.
     ///
     /// # Returns
     ///
-    /// A new PersistentHashMapTraversal
+    /// A new `PersistentHashMapTraversal`
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -413,9 +412,9 @@ impl<K, V> Default for PersistentHashMapTraversal<K, V> {
     }
 }
 
-/// Creates a PersistentHashMapTraversal.
+/// Creates a `PersistentHashMapTraversal`.
 ///
-/// This is a convenience function for creating a PersistentHashMapTraversal.
+/// This is a convenience function for creating a `PersistentHashMapTraversal`.
 ///
 /// # Type Parameters
 ///
@@ -424,7 +423,7 @@ impl<K, V> Default for PersistentHashMapTraversal<K, V> {
 ///
 /// # Returns
 ///
-/// A new PersistentHashMapTraversal
+/// A new `PersistentHashMapTraversal`
 ///
 /// # Example
 ///
@@ -467,7 +466,7 @@ impl<K: Clone + Hash + Eq + 'static, V: Clone + 'static> Traversal<PersistentHas
         F: FnMut(V) -> V,
     {
         let mut result = PersistentHashMap::new();
-        for (key, value) in source.into_iter() {
+        for (key, value) in source {
             result = result.insert(key, function(value));
         }
         result
@@ -478,7 +477,7 @@ impl<K: Clone + Hash + Eq + 'static, V: Clone + 'static> Traversal<PersistentHas
 // PersistentTreeMap Optional
 // =============================================================================
 
-/// An Optional that focuses on a value for a specific key in a PersistentTreeMap.
+/// An Optional that focuses on a value for a specific key in a `PersistentTreeMap`.
 ///
 /// This Optional returns `Some` if the key exists, `None` otherwise.
 /// The `set` operation will insert or update the key-value pair.
@@ -511,7 +510,7 @@ pub struct PersistentTreeMapKeyOptional<K, V> {
 }
 
 impl<K, V> PersistentTreeMapKeyOptional<K, V> {
-    /// Creates a new PersistentTreeMapKeyOptional for the given key.
+    /// Creates a new `PersistentTreeMapKeyOptional` for the given key.
     ///
     /// # Arguments
     ///
@@ -519,7 +518,7 @@ impl<K, V> PersistentTreeMapKeyOptional<K, V> {
     ///
     /// # Returns
     ///
-    /// A new PersistentTreeMapKeyOptional
+    /// A new `PersistentTreeMapKeyOptional`
     #[must_use]
     pub const fn new(key: K) -> Self {
         Self {
@@ -529,9 +528,9 @@ impl<K, V> PersistentTreeMapKeyOptional<K, V> {
     }
 }
 
-/// Creates a PersistentTreeMapKeyOptional for the given key.
+/// Creates a `PersistentTreeMapKeyOptional` for the given key.
 ///
-/// This is a convenience function for creating a PersistentTreeMapKeyOptional.
+/// This is a convenience function for creating a `PersistentTreeMapKeyOptional`.
 ///
 /// # Type Parameters
 ///
@@ -544,7 +543,7 @@ impl<K, V> PersistentTreeMapKeyOptional<K, V> {
 ///
 /// # Returns
 ///
-/// A new PersistentTreeMapKeyOptional
+/// A new `PersistentTreeMapKeyOptional`
 ///
 /// # Example
 ///
@@ -579,7 +578,7 @@ impl<K: Clone + Ord, V: Clone> Optional<PersistentTreeMap<K, V>, V>
 // PersistentTreeMap Traversal
 // =============================================================================
 
-/// A Traversal that focuses on all values of a PersistentTreeMap.
+/// A Traversal that focuses on all values of a `PersistentTreeMap`.
 ///
 /// The values are yielded in key order (ascending).
 ///
@@ -610,11 +609,11 @@ pub struct PersistentTreeMapTraversal<K, V> {
 }
 
 impl<K, V> PersistentTreeMapTraversal<K, V> {
-    /// Creates a new PersistentTreeMapTraversal.
+    /// Creates a new `PersistentTreeMapTraversal`.
     ///
     /// # Returns
     ///
-    /// A new PersistentTreeMapTraversal
+    /// A new `PersistentTreeMapTraversal`
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -629,9 +628,9 @@ impl<K, V> Default for PersistentTreeMapTraversal<K, V> {
     }
 }
 
-/// Creates a PersistentTreeMapTraversal.
+/// Creates a `PersistentTreeMapTraversal`.
 ///
-/// This is a convenience function for creating a PersistentTreeMapTraversal.
+/// This is a convenience function for creating a `PersistentTreeMapTraversal`.
 ///
 /// # Type Parameters
 ///
@@ -640,7 +639,7 @@ impl<K, V> Default for PersistentTreeMapTraversal<K, V> {
 ///
 /// # Returns
 ///
-/// A new PersistentTreeMapTraversal
+/// A new `PersistentTreeMapTraversal`
 ///
 /// # Example
 ///
@@ -684,7 +683,7 @@ impl<K: Clone + Ord + 'static, V: Clone + 'static> Traversal<PersistentTreeMap<K
         F: FnMut(V) -> V,
     {
         let mut result = PersistentTreeMap::new();
-        for (key, value) in source.into_iter() {
+        for (key, value) in source {
             result = result.insert(key, function(value));
         }
         result
