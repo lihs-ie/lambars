@@ -22,33 +22,16 @@ lambars-derive = { path = "lambars-derive" }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "sync", "macros"] }
 
 [features]
-default = ["typeclass"]
+default = ["typeclass", "compose", "control", "persistent", "optics", "derive", "effect"]
 
-# Enable all features
 full = ["typeclass", "compose", "control", "persistent", "optics", "derive", "effect", "async"]
-
-# Phase 1: Type class foundation
 typeclass = []
-
-# Phase 2: Function composition utilities
 compose = ["typeclass"]
-
-# Phase 3: Control structures (Lazy, Trampoline, etc.)
 control = ["typeclass"]
-
-# Phase 4: Persistent data structures
 persistent = ["typeclass", "control"]
-
-# Phase 5: Optics (Lens, Prism, etc.)
 optics = ["typeclass", "persistent"]
-
-# Phase 5.5: Derive macros for Optics
 derive = ["optics", "dep:lambars-derive"]
-
-# Phase 6: Effect system
 effect = ["typeclass", "control"]
-
-# Phase 7: Async effect system
 async = ["effect", "dep:tokio", "dep:futures"]
 
 [lints.rust]
