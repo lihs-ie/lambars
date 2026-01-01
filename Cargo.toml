@@ -20,6 +20,7 @@ rstest = "^0.24"
 proptest = "1.5"
 lambars-derive = { path = "lambars-derive" }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "sync", "macros"] }
+criterion = { version = "0.5", features = ["html_reports"] }
 
 [features]
 default = ["typeclass", "compose", "control", "persistent", "optics", "derive", "effect", "async"]
@@ -42,3 +43,27 @@ unsafe_code = "forbid"
 # Allow certain patterns that are common in functional programming
 module_name_repetitions = "allow"
 must_use_candidate = "allow"
+
+[[bench]]
+name = "persistent_vector_bench"
+harness = false
+
+[[bench]]
+name = "persistent_hashmap_bench"
+harness = false
+
+[[bench]]
+name = "persistent_treemap_bench"
+harness = false
+
+[[bench]]
+name = "persistent_list_bench"
+harness = false
+
+[[bench]]
+name = "control_bench"
+harness = false
+
+[[bench]]
+name = "effect_bench"
+harness = false
