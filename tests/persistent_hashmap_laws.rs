@@ -1,3 +1,4 @@
+#![cfg(feature = "persistent")]
 //! Property-based tests for PersistentHashMap.
 //!
 //! This module verifies that PersistentHashMap satisfies various laws
@@ -398,14 +399,14 @@ proptest! {
         let map: PersistentHashMap<String, i32> = entries.clone().into_iter().collect();
 
         // Pick an existing key
-        if let Some((existing_key, _)) = entries.first() {
-            if let Some(original_value) = map.get(existing_key) {
-                let expected = original_value.saturating_add(increment);
-                let updated = map.update(existing_key, |v| v.saturating_add(increment));
+        if let Some((existing_key, _)) = entries.first()
+            && let Some(original_value) = map.get(existing_key)
+        {
+            let expected = original_value.saturating_add(increment);
+            let updated = map.update(existing_key, |v| v.saturating_add(increment));
 
-                if let Some(updated_map) = updated {
-                    prop_assert_eq!(updated_map.get(existing_key), Some(&expected));
-                }
+            if let Some(updated_map) = updated {
+                prop_assert_eq!(updated_map.get(existing_key), Some(&expected));
             }
         }
     }

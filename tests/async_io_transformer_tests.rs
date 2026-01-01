@@ -1,3 +1,4 @@
+#![cfg(feature = "async")]
 //! Tests for AsyncIO with Monad Transformers (ReaderT, StateT).
 //!
 //! This module tests the integration of AsyncIO with the monad transformer types.
@@ -34,8 +35,7 @@ async fn test_reader_transformer_new_with_async_io() {
 #[tokio::test]
 async fn test_reader_transformer_fmap_async_io() {
     // fmap_async_io で値を変換
-    let reader: ReaderT<i32, AsyncIO<i32>> =
-        ReaderT::new(|environment| AsyncIO::pure(environment));
+    let reader: ReaderT<i32, AsyncIO<i32>> = ReaderT::new(AsyncIO::pure);
     let mapped = reader.fmap_async_io(|value| value * 2);
     let async_io = mapped.run(21);
     let result = async_io.run_async().await;
@@ -46,8 +46,7 @@ async fn test_reader_transformer_fmap_async_io() {
 #[tokio::test]
 async fn test_reader_transformer_flat_map_async_io() {
     // flat_map_async_io でチェーン
-    let reader: ReaderT<i32, AsyncIO<i32>> =
-        ReaderT::new(|environment| AsyncIO::pure(environment));
+    let reader: ReaderT<i32, AsyncIO<i32>> = ReaderT::new(AsyncIO::pure);
     let chained = reader.flat_map_async_io(|value| {
         ReaderT::new(move |environment| AsyncIO::pure(value + environment))
     });
@@ -84,9 +83,7 @@ async fn test_reader_transformer_chain_multiple() {
     // 複数のチェーン
     let reader: ReaderT<i32, AsyncIO<i32>> = ReaderT::ask_async_io();
     let chained = reader
-        .flat_map_async_io(|env1| {
-            ReaderT::new(move |env2| AsyncIO::pure(env1 + env2))
-        })
+        .flat_map_async_io(|env1| ReaderT::new(move |env2| AsyncIO::pure(env1 + env2)))
         .fmap_async_io(|sum| sum * 2);
     let async_io = chained.run(10);
     let result = async_io.run_async().await;

@@ -1,3 +1,4 @@
+#![cfg(feature = "async")]
 //! Property-based tests for AsyncIO Monad laws.
 //!
 //! This module verifies that the AsyncIO type satisfies the Monad laws:
@@ -214,12 +215,8 @@ fn test_async_io_pure_is_referentially_transparent() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let value = 42;
 
-    let result1 = runtime.block_on(async {
-        AsyncIO::pure(value).run_async().await
-    });
-    let result2 = runtime.block_on(async {
-        AsyncIO::pure(value).run_async().await
-    });
+    let result1 = runtime.block_on(async { AsyncIO::pure(value).run_async().await });
+    let result2 = runtime.block_on(async { AsyncIO::pure(value).run_async().await });
 
     assert_eq!(result1, result2);
 }

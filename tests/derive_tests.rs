@@ -1,3 +1,4 @@
+#![cfg(feature = "derive")]
 //! Tests for derive macros (Lenses and Prisms).
 //!
 //! This module tests the automatically generated optics from derive macros:
@@ -93,6 +94,7 @@ enum MyOption<T> {
 
 /// Enum for composition testing
 #[derive(Clone, PartialEq, Debug, Prisms)]
+#[allow(dead_code)]
 enum Outer {
     Inner(Inner),
     Empty,
@@ -100,6 +102,7 @@ enum Outer {
 
 /// Inner enum
 #[derive(Clone, PartialEq, Debug, Prisms)]
+#[allow(dead_code)]
 enum Inner {
     Value(i32),
     Nothing,
@@ -566,7 +569,7 @@ fn test_derived_lens_getput_law() {
     let point = Point { x: 10, y: 20 };
     let x_lens = Point::x_lens();
 
-    let value = x_lens.get(&point).clone();
+    let value = *x_lens.get(&point);
     let result = x_lens.set(point.clone(), value);
 
     assert_eq!(result, point);

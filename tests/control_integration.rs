@@ -1,9 +1,8 @@
+#![cfg(feature = "control")]
 //! Integration tests for the control module.
 //!
 //! These tests verify that the control structures work correctly
 //! together and integrate with Phase 1 (typeclass) and Phase 2 (compose).
-
-#![cfg(feature = "control")]
 
 use lambars::control::{Continuation, Either, Lazy, Trampoline};
 use rstest::rstest;
@@ -87,6 +86,7 @@ fn either_with_trampoline_resume() {
 }
 
 #[rstest]
+#[allow(clippy::type_complexity)]
 fn either_fold_with_lazy() {
     let left: Either<Lazy<i32, fn() -> i32>, i32> = Either::Left(Lazy::new_with_value(42));
     let right: Either<Lazy<i32, fn() -> i32>, i32> = Either::Right(100);

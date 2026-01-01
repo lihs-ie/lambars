@@ -1,3 +1,4 @@
+#![cfg(feature = "optics")]
 //! Unit tests for Prism optics.
 //!
 //! Tests cover:

@@ -1,3 +1,4 @@
+#![cfg(feature = "compose")]
 //! Property-based tests for function composition laws.
 //!
 //! This module verifies that composition utilities satisfy the required laws:
@@ -20,7 +21,6 @@
 //! Using proptest, we generate random inputs to thoroughly verify these laws
 //! across a wide range of values.
 
-#![cfg(feature = "compose")]
 #![allow(unused_imports)]
 
 use lambars::compose::constant;

@@ -303,6 +303,7 @@ mod tests {
     #[rstest]
     fn result_catch_error_recovers() {
         let failing: Result<i32, String> = Err("error".to_string());
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         let recovered = <Result<i32, String>>::catch_error(failing, |e| Ok(e.len() as i32));
         assert_eq!(recovered, Ok(5));
     }
@@ -349,6 +350,7 @@ mod tests {
     #[rstest]
     fn result_throw_catch_law() {
         let error = "test".to_string();
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         let handler = |e: String| Ok::<i32, String>(e.len() as i32);
 
         let left: Result<i32, String> = <Result<i32, String>>::catch_error(
@@ -376,7 +378,7 @@ mod tests {
         let error = "error".to_string();
 
         let thrown: Result<i32, String> = <Result<i32, String>>::throw_error(error.clone());
-        let left: Result<String, String> = thrown.flat_map(|n| Ok(format!("got: {}", n)));
+        let left: Result<String, String> = thrown.flat_map(|n| Ok(format!("got: {n}")));
         let right: Result<String, String> = <Result<String, String>>::throw_error(error);
 
         assert_eq!(left, right);

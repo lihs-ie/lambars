@@ -1,3 +1,4 @@
+#![cfg(feature = "optics")]
 //! Property-based tests for Prism laws.
 //!
 //! This module tests that Prism implementations satisfy the fundamental laws:

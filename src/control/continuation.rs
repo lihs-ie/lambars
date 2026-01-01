@@ -258,7 +258,7 @@ impl<R: 'static, A: 'static> Continuation<R, A> {
     /// assert_eq!(result.run(|x| x), 42);
     /// ```
     #[inline]
-    #[must_use] 
+    #[must_use]
     pub fn then<B: 'static>(self, next: Continuation<R, B>) -> Continuation<R, B> {
         self.flat_map(move |_| next)
     }

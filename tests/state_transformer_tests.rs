@@ -1,3 +1,4 @@
+#![cfg(feature = "effect")]
 //! Tests for StateT (State Transformer).
 //!
 //! StateT adds state manipulation capability to any monad.

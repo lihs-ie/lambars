@@ -1,3 +1,4 @@
+#![cfg(feature = "control")]
 //! Property-based tests for Trampoline<A> laws.
 //!
 //! This module verifies that Trampoline implementations satisfy:
@@ -5,8 +6,6 @@
 //! - **Stack Safety**: Deep recursion does not overflow the stack
 //! - **Functor Laws**: identity and composition
 //! - **Monad Laws**: left identity, right identity, associativity
-
-#![cfg(feature = "control")]
 
 use lambars::control::Trampoline;
 use proptest::prelude::*;

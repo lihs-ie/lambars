@@ -44,7 +44,7 @@
 //!
 //! # Do-Notation with eff! Macro
 //!
-//! The [`eff!`] macro provides a convenient syntax for chaining monadic
+//! The `eff!` macro provides a convenient syntax for chaining monadic
 //! operations, similar to Haskell's do-notation:
 //!
 //! ```rust

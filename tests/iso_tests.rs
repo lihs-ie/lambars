@@ -1,3 +1,4 @@
+#![cfg(feature = "optics")]
 //! Unit tests for Iso optics.
 //!
 //! Tests the Iso trait and related implementations.

@@ -1,3 +1,4 @@
+#![cfg(feature = "optics")]
 //! Tests for persistent data structure optics integration.
 //!
 //! This module tests the integration between Optics (Optional, Traversal)

@@ -1,3 +1,4 @@
+#![cfg(feature = "effect")]
 //! Unit tests for the IO monad.
 //!
 //! This module tests the IO type's basic functionality and ensures
@@ -274,8 +275,9 @@ mod convenience_constructors {
             "delay should not execute on creation"
         );
 
-        // run_unsafe で待機
-        io.run_unsafe();
+        // run_unsafe で待機 (戻り値は () なので無視)
+        #[allow(clippy::let_unit_value)]
+        let () = io.run_unsafe();
         assert!(
             start.elapsed() >= Duration::from_millis(100),
             "delay should wait on run_unsafe"
@@ -343,7 +345,7 @@ mod composite_operations {
             })
         });
 
-        io.run_unsafe();
+        let _ = io.run_unsafe();
         assert_eq!(*order.lock().unwrap(), vec![1, 2, 3]);
     }
 }

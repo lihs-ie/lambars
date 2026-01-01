@@ -737,7 +737,7 @@ mod tests {
         // fold_right processes from right to left, but applies function with element first
         // f(1, f(2, f(3, ""))) = f(1, f(2, "3")) = f(1, "23") = "123"
         let result = values.fold_right(String::new(), |element, accumulator| {
-            format!("{}{}", element, accumulator)
+            format!("{element}{accumulator}")
         });
         assert_eq!(result, "123");
     }
@@ -1032,9 +1032,7 @@ mod tests {
     fn option_fold_left_equals_fold_right_for_addition() {
         let value = Some(42);
 
-        let left = value
-            .clone()
-            .fold_left(0, |accumulator, element| accumulator + element);
+        let left = value.fold_left(0, |accumulator, element| accumulator + element);
         let right = value.fold_right(0, |element, accumulator| element + accumulator);
 
         assert_eq!(left, right);
@@ -1083,7 +1081,7 @@ mod property_tests {
 
         #[test]
         fn prop_option_length(value in prop::option::of(any::<i32>())) {
-            let expected = if value.is_some() { 1 } else { 0 };
+            let expected = usize::from(value.is_some());
             prop_assert_eq!(value.length(), expected);
         }
 

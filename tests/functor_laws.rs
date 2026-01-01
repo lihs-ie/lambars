@@ -1,3 +1,4 @@
+#![cfg(feature = "typeclass")]
 //! Property-based tests for Functor laws.
 //!
 //! This module verifies that all Functor implementations satisfy the required laws:
@@ -19,7 +20,7 @@ proptest! {
     /// Identity Law for Option<i32>: fmap with identity function returns the original value
     #[test]
     fn prop_option_identity_law(value in any::<Option<i32>>()) {
-        let result = value.clone().fmap(|x| x);
+        let result = value.fmap(|x| x);
         prop_assert_eq!(result, value);
     }
 
@@ -29,7 +30,7 @@ proptest! {
         let function1 = |n: i32| n.wrapping_add(1);
         let function2 = |n: i32| n.wrapping_mul(2);
 
-        let left = value.clone().fmap(function1).fmap(function2);
+        let left = value.fmap(function1).fmap(function2);
         let right = value.fmap(|x| function2(function1(x)));
 
         prop_assert_eq!(left, right);
@@ -159,7 +160,7 @@ proptest! {
     #[test]
     fn prop_identity_wrapper_identity_law(value in any::<i32>()) {
         let wrapped = Identity::new(value);
-        let result = wrapped.clone().fmap(|x| x);
+        let result = wrapped.fmap(|x| x);
         prop_assert_eq!(result, wrapped);
     }
 
@@ -207,7 +208,7 @@ proptest! {
         original in any::<Option<i32>>(),
         replacement in any::<String>()
     ) {
-        let left = original.clone().replace(replacement.clone());
+        let left = original.replace(replacement.clone());
         let right = original.fmap(|_| replacement);
         prop_assert_eq!(left, right);
     }
@@ -215,7 +216,7 @@ proptest! {
     /// Test that void is equivalent to replace(())
     #[test]
     fn prop_option_void_is_replace_unit(value in any::<Option<i32>>()) {
-        let left = value.clone().void();
+        let left = value.void();
         let right = value.replace(());
         prop_assert_eq!(left, right);
     }

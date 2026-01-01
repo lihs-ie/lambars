@@ -528,7 +528,7 @@ mod tests {
     #[rstest]
     fn sum_clone_works() {
         let original = Sum::new(42);
-        let cloned = original.clone();
+        let cloned = original;
         assert_eq!(original, cloned);
     }
 
@@ -590,7 +590,7 @@ mod tests {
     #[rstest]
     fn product_clone_works() {
         let original = Product::new(42);
-        let cloned = original.clone();
+        let cloned = original;
         assert_eq!(original, cloned);
     }
 
@@ -646,7 +646,7 @@ mod tests {
     #[rstest]
     fn max_clone_works() {
         let original = Max::new(42);
-        let cloned = original.clone();
+        let cloned = original;
         assert_eq!(original, cloned);
     }
 
@@ -702,7 +702,7 @@ mod tests {
     #[rstest]
     fn min_clone_works() {
         let original = Min::new(42);
-        let cloned = original.clone();
+        let cloned = original;
         assert_eq!(original, cloned);
     }
 
@@ -822,8 +822,9 @@ mod tests {
 
     #[rstest]
     fn bounded_bool_values() {
-        assert_eq!(bool::MIN_VALUE, false);
-        assert_eq!(bool::MAX_VALUE, true);
+        // Use const assertion in a const block to verify constant values at compile-time
+        const { assert!(!bool::MIN_VALUE) };
+        const { assert!(bool::MAX_VALUE) };
     }
 
     // =========================================================================
@@ -881,7 +882,7 @@ mod tests {
     #[rstest]
     fn sum_debug_output() {
         let sum = Sum::new(42);
-        let debug = format!("{:?}", sum);
+        let debug = format!("{sum:?}");
         assert!(debug.contains("Sum"));
         assert!(debug.contains("42"));
     }
@@ -889,7 +890,7 @@ mod tests {
     #[rstest]
     fn product_debug_output() {
         let product = Product::new(42);
-        let debug = format!("{:?}", product);
+        let debug = format!("{product:?}");
         assert!(debug.contains("Product"));
         assert!(debug.contains("42"));
     }
@@ -897,7 +898,7 @@ mod tests {
     #[rstest]
     fn max_debug_output() {
         let max = Max::new(42);
-        let debug = format!("{:?}", max);
+        let debug = format!("{max:?}");
         assert!(debug.contains("Max"));
         assert!(debug.contains("42"));
     }
@@ -905,7 +906,7 @@ mod tests {
     #[rstest]
     fn min_debug_output() {
         let min = Min::new(42);
-        let debug = format!("{:?}", min);
+        let debug = format!("{min:?}");
         assert!(debug.contains("Min"));
         assert!(debug.contains("42"));
     }

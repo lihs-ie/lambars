@@ -126,7 +126,7 @@ mod tests {
         assert_inner::<Option<String>>();
     }
 
-    /// Verifies that Option's WithType produces the correct type.
+    /// Verifies that Option's `WithType` produces the correct type.
     #[test]
     fn option_with_type_produces_correct_type() {
         fn transform<T: TypeConstructor>(_value: T) -> T::WithType<String>
@@ -147,7 +147,7 @@ mod tests {
         assert_inner::<Result<i32, String>>();
     }
 
-    /// Verifies that Result's WithType preserves the error type.
+    /// Verifies that Result's `WithType` preserves the error type.
     #[test]
     fn result_with_type_preserves_error_type() {
         // This test verifies the type-level transformation works correctly
@@ -170,7 +170,7 @@ mod tests {
         assert_inner::<Vec<i32>>();
     }
 
-    /// Verifies that Vec's WithType produces the correct type.
+    /// Verifies that Vec's `WithType` produces the correct type.
     #[test]
     fn vec_with_type_produces_correct_type() {
         fn transform<T: TypeConstructor>(_value: T) -> T::WithType<char>
@@ -191,7 +191,7 @@ mod tests {
         assert_inner::<Box<f64>>();
     }
 
-    /// Verifies that Box's WithType produces the correct type.
+    /// Verifies that Box's `WithType` produces the correct type.
     #[test]
     fn box_with_type_produces_correct_type() {
         fn transform<T: TypeConstructor, B: Default>(_value: T) -> T::WithType<B>
@@ -209,15 +209,15 @@ mod tests {
     // Property-based tests using rstest
     // =========================================================================
 
-    /// Tests that WithType<Inner> is equivalent to the original type for Option.
+    /// Tests that `WithType`<Inner> is equivalent to the original type for Option.
     #[rstest]
     #[case(Some(42))]
     #[case(None)]
     fn option_with_type_inner_roundtrip(#[case] original: Option<i32>) {
-        fn roundtrip<T: TypeConstructor>(value: T) -> T::WithType<T::Inner>
+        fn roundtrip<T>(value: T) -> T::WithType<T::Inner>
         where
+            T: TypeConstructor + Into<T::WithType<T::Inner>>,
             T::Inner: Clone,
-            T: Into<T::WithType<T::Inner>>,
         {
             value.into()
         }
@@ -232,14 +232,15 @@ mod tests {
     fn nested_type_constructor_works() {
         // Option<Vec<i32>> should be a TypeConstructor
         fn assert_type_constructor<T: TypeConstructor>() {}
+        fn assert_inner<T: TypeConstructor<Inner = Vec<i32>>>() {}
+
         assert_type_constructor::<Option<Vec<i32>>>();
 
         // The Inner type should be Vec<i32>
-        fn assert_inner<T: TypeConstructor<Inner = Vec<i32>>>() {}
         assert_inner::<Option<Vec<i32>>>();
     }
 
-    /// Tests chaining WithType transformations.
+    /// Tests chaining `WithType` transformations.
     #[test]
     fn chained_with_type_transformations() {
         type Step1 = <Option<i32> as TypeConstructor>::WithType<String>;

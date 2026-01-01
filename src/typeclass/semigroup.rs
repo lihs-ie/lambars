@@ -810,7 +810,7 @@ mod property_tests {
             let second_opt = second.map(Sum::new);
             let third_opt = third.map(Sum::new);
 
-            let left = first_opt.clone().combine(second_opt.clone()).combine(third_opt.clone());
+            let left = first_opt.combine(second_opt).combine(third_opt);
             let right = first_opt.combine(second_opt.combine(third_opt));
             prop_assert_eq!(left, right);
         }

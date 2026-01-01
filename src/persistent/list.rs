@@ -351,7 +351,7 @@ impl<T> PersistentList<T> {
     /// assert_eq!(collected, vec![&1, &2, &3]);
     /// ```
     #[inline]
-    #[must_use] 
+    #[must_use]
     pub const fn iter(&self) -> PersistentListIterator<'_, T> {
         PersistentListIterator {
             current: self.head.as_ref(),
@@ -596,16 +596,18 @@ impl<T: Clone> Functor for PersistentList<T> {
         F: FnOnce(T) -> B,
     {
         // FnOnce can only be called once, so this only works for single-element lists
-        self.head()
-            .map_or_else(PersistentList::new, |head| PersistentList::singleton(function(head.clone())))
+        self.head().map_or_else(PersistentList::new, |head| {
+            PersistentList::singleton(function(head.clone()))
+        })
     }
 
     fn fmap_ref<B, F>(&self, function: F) -> PersistentList<B>
     where
         F: FnOnce(&T) -> B,
     {
-        self.head()
-            .map_or_else(PersistentList::new, |head| PersistentList::singleton(function(head)))
+        self.head().map_or_else(PersistentList::new, |head| {
+            PersistentList::singleton(function(head))
+        })
     }
 }
 
@@ -855,10 +857,10 @@ mod tests {
     #[rstest]
     fn test_debug() {
         let list: PersistentList<i32> = (1..=3).collect();
-        let debug = format!("{:?}", list);
-        assert!(debug.contains("1"));
-        assert!(debug.contains("2"));
-        assert!(debug.contains("3"));
+        let debug = format!("{list:?}");
+        assert!(debug.contains('1'));
+        assert!(debug.contains('2'));
+        assert!(debug.contains('3'));
     }
 
     #[rstest]

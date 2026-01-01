@@ -245,46 +245,19 @@ pub trait MonadState<S>: Monad {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::marker::PhantomData;
-
     // =========================================================================
     // Trait Definition Tests
     // =========================================================================
 
     #[test]
-    fn monad_state_trait_is_defined() {
-        // Just verify the trait exists and can be referenced
-        // The function is not called, but the compiler verifies the trait bounds
-        fn assert_trait_exists<M: MonadState<i32>>() {
-            let _ = PhantomData::<M>;
-        }
-        // Verify the function compiles - we don't call it since no types implement MonadState yet
-        let _ = PhantomData::<fn()>;
-        fn _type_check() {
-            fn _inner<M: MonadState<i32>>() {
-                assert_trait_exists::<M>();
-            }
-        }
-    }
+    fn monad_state_trait_compiles() {
+        // Just verify the trait module compiles and is accessible
+        // The trait requires Monad as a supertrait
+        use super::MonadState;
 
-    #[test]
-    fn monad_state_requires_monad() {
-        // MonadState should require Monad as a supertrait
-        // This is verified by the trait definition itself
-        fn assert_monad<M: Monad>() {
-            let _ = PhantomData::<M>;
-        }
-        fn assert_monad_state<M: MonadState<i32>>() {
-            // If M implements MonadState, it must also implement Monad
-            assert_monad::<M>();
-        }
-        // Verify the function compiles - we don't call it
-        let _ = PhantomData::<fn()>;
-        fn _type_check() {
-            fn _inner<M: MonadState<i32>>() {
-                assert_monad_state::<M>();
-            }
-        }
+        // This function signature proves the trait is properly defined
+        fn _requires_monad_state<S, M: MonadState<S>>() {}
+
+        // The test passes if this file compiles
     }
 }

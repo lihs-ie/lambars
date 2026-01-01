@@ -1,3 +1,4 @@
+#![cfg(feature = "compose")]
 //! Unit tests for the partial! macro.
 //!
 //! Tests for partial function application with placeholder support.
@@ -5,7 +6,6 @@
 //! Note: The `__` placeholder is a literal token in the macro pattern.
 //! Do NOT import `lambars::compose::__` as it will shadow the literal.
 
-#![cfg(feature = "compose")]
 #![allow(unused_imports)]
 
 use lambars::partial;

@@ -1,3 +1,4 @@
+#![cfg(feature = "effect")]
 //! Tests for MonadError trait.
 //!
 //! This module tests the MonadError type class which provides
@@ -241,6 +242,7 @@ fn monad_error_works_with_unit_error() {
 fn monad_error_works_with_complex_error() {
     // MonadError should work with complex error types
     #[derive(Debug, Clone)]
+    #[allow(dead_code)]
     struct ValidationError {
         field: String,
         message: String,
@@ -254,6 +256,7 @@ fn monad_error_works_with_complex_error() {
 #[test]
 fn monad_error_works_with_nested_result_errors() {
     // MonadError should work with nested error types
+    #[allow(dead_code)]
     type NestedError = Result<String, std::io::Error>;
 
     fn assert_monad_error_nested<M: MonadError<String>>() {}
@@ -284,15 +287,15 @@ fn result_error_handling_chain() {
     }
 
     // Successful chain
-    let result = divide(100, 4).flat_map(|n| safe_sqrt(n));
+    let result = divide(100, 4).flat_map(safe_sqrt);
     assert_eq!(result, Ok(5.0));
 
     // Error in first step
-    let result = divide(100, 0).flat_map(|n| safe_sqrt(n));
+    let result = divide(100, 0).flat_map(safe_sqrt);
     assert_eq!(result, Err("division by zero".to_string()));
 
     // Error in second step
-    let result = divide(-16, 2).flat_map(|n| safe_sqrt(n));
+    let result = divide(-16, 2).flat_map(safe_sqrt);
     assert_eq!(result, Err("negative number".to_string()));
 }
 

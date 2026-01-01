@@ -1,3 +1,4 @@
+#![cfg(feature = "effect")]
 //! Unit tests for Writer Monad.
 //!
 //! Tests basic functionality of the Writer monad including:
@@ -233,6 +234,7 @@ fn writer_listen_with_chained_writers() {
 // =============================================================================
 
 #[rstest]
+#[allow(clippy::type_complexity)]
 fn writer_pass_transforms_output() {
     let writer: Writer<Vec<String>, (i32, fn(Vec<String>) -> Vec<String>)> = Writer::new(
         (
@@ -249,6 +251,7 @@ fn writer_pass_transforms_output() {
 }
 
 #[rstest]
+#[allow(clippy::type_complexity)]
 fn writer_pass_with_identity() {
     let writer: Writer<Vec<String>, (i32, fn(Vec<String>) -> Vec<String>)> = Writer::new(
         (
@@ -323,19 +326,10 @@ fn writer_logging_pattern() {
 
 #[rstest]
 fn writer_metrics_accumulation() {
-    #[derive(Clone, Debug, PartialEq)]
+    #[derive(Clone, Debug, PartialEq, Default)]
     struct Metrics {
         operation_count: i32,
         total_time_ms: i32,
-    }
-
-    impl Default for Metrics {
-        fn default() -> Self {
-            Metrics {
-                operation_count: 0,
-                total_time_ms: 0,
-            }
-        }
     }
 
     impl lambars::typeclass::Semigroup for Metrics {

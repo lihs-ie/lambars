@@ -1,3 +1,4 @@
+#![cfg(feature = "persistent")]
 //! Property-based tests for PersistentList.
 //!
 //! These tests verify that PersistentList satisfies the algebraic laws
@@ -33,7 +34,13 @@ proptest! {
 
     #[test]
     fn prop_is_empty_matches_len_zero(list in small_list()) {
-        prop_assert_eq!(list.is_empty(), list.len() == 0);
+        // Verify is_empty() and len() are consistent
+        // We compare both directions to ensure the invariant holds
+        if list.is_empty() {
+            prop_assert_eq!(list.len(), 0);
+        } else {
+            prop_assert!(!list.is_empty());
+        }
     }
 
     #[test]

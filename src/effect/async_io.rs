@@ -238,7 +238,9 @@ impl<A: 'static> AsyncIO<A> {
     pub async fn into_future(self) -> A
     where
         A: Send,
-    { self.run_async().await }
+    {
+        self.run_async().await
+    }
 }
 
 // =============================================================================
@@ -305,7 +307,7 @@ impl<A: 'static> AsyncIO<A> {
     /// let result = value_io.apply(function_io).run_async().await;
     /// assert_eq!(result, 42);
     /// ```
-    #[must_use] 
+    #[must_use]
     pub fn apply<B, F>(self, function_async_io: AsyncIO<F>) -> AsyncIO<B>
     where
         F: FnOnce(A) -> B + Send + 'static,
@@ -380,7 +382,7 @@ impl<A: Send + 'static> AsyncIO<A> {
     /// let result = io1.product(io2).run_async().await;
     /// assert_eq!(result, (10, 20));
     /// ```
-    #[must_use] 
+    #[must_use]
     pub fn product<B>(self, other: AsyncIO<B>) -> AsyncIO<(A, B)>
     where
         B: Send + 'static,
@@ -468,7 +470,7 @@ impl<A: 'static> AsyncIO<A> {
     /// let async_io = AsyncIO::pure(10).then(AsyncIO::pure(20));
     /// assert_eq!(async_io.run_async().await, 20);
     /// ```
-    #[must_use] 
+    #[must_use]
     pub fn then<B>(self, next: AsyncIO<B>) -> AsyncIO<B>
     where
         B: 'static,
@@ -499,7 +501,7 @@ impl AsyncIO<()> {
     /// let async_io = AsyncIO::delay_async(Duration::from_millis(100));
     /// async_io.run_async().await; // Waits for 100ms
     /// ```
-    #[must_use] 
+    #[must_use]
     pub fn delay_async(duration: Duration) -> Self {
         Self::new(move || async move {
             tokio::time::sleep(duration).await;
@@ -527,7 +529,7 @@ impl<A: 'static> AsyncIO<A> {
     ///     .timeout(Duration::from_millis(100));
     /// assert_eq!(slow.run_async().await, None);
     /// ```
-    #[must_use] 
+    #[must_use]
     pub fn timeout(self, duration: Duration) -> AsyncIO<Option<A>>
     where
         A: Send,
@@ -570,7 +572,7 @@ impl<A: Send + 'static> AsyncIO<A> {
     /// let result = slow.race(fast).run_async().await;
     /// assert!(matches!(result, Either::Right("fast")));
     /// ```
-    #[must_use] 
+    #[must_use]
     pub fn race<B>(self, other: AsyncIO<B>) -> AsyncIO<Either<A, B>>
     where
         B: Send + 'static,

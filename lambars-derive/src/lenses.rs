@@ -6,7 +6,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use syn::{parse_macro_input, Data, DeriveInput, Fields, Generics, Ident};
+use syn::{Data, DeriveInput, Fields, Generics, Ident, parse_macro_input};
 
 /// Main implementation of the Lenses derive macro.
 pub fn derive_lenses_impl(input: TokenStream) -> TokenStream {
@@ -17,13 +17,11 @@ pub fn derive_lenses_impl(input: TokenStream) -> TokenStream {
 
     let expanded = match &input.data {
         Data::Struct(data_struct) => generate_struct_lenses(name, generics, &data_struct.fields),
-        Data::Enum(_) => {
-            syn::Error::new_spanned(
-                &input.ident,
-                "Lenses can only be derived for structs, not enums. Use #[derive(Prisms)] for enums.",
-            )
-            .to_compile_error()
-        }
+        Data::Enum(_) => syn::Error::new_spanned(
+            &input.ident,
+            "Lenses can only be derived for structs, not enums. Use #[derive(Prisms)] for enums.",
+        )
+        .to_compile_error(),
         Data::Union(_) => {
             syn::Error::new_spanned(&input.ident, "Lenses cannot be derived for unions.")
                 .to_compile_error()

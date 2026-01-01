@@ -1,3 +1,4 @@
+#![cfg(feature = "optics")]
 //! Property-based tests for Lens laws.
 //!
 //! This module verifies that all Lens implementations satisfy the required laws:
@@ -50,7 +51,7 @@ proptest! {
     fn prop_point_x_get_put_law(x in any::<i32>(), y in any::<i32>()) {
         let x_lens = lambars::lens!(Point, x);
         let point = Point { x, y };
-        let value = x_lens.get(&point).clone();
+        let value = *x_lens.get(&point);
         let result = x_lens.set(point.clone(), value);
         prop_assert_eq!(result, point);
     }
@@ -84,7 +85,7 @@ proptest! {
     fn prop_point_y_get_put_law(x in any::<i32>(), y in any::<i32>()) {
         let y_lens = lambars::lens!(Point, y);
         let point = Point { x, y };
-        let value = y_lens.get(&point).clone();
+        let value = *y_lens.get(&point);
         let result = y_lens.set(point.clone(), value);
         prop_assert_eq!(result, point);
     }
@@ -158,7 +159,7 @@ proptest! {
     fn prop_person_age_get_put_law(name in ".*", age in any::<u32>()) {
         let age_lens = lambars::lens!(Person, age);
         let person = Person { name, age };
-        let value = age_lens.get(&person).clone();
+        let value = *age_lens.get(&person);
         let result = age_lens.set(person.clone(), value);
         prop_assert_eq!(result, person);
     }
@@ -312,7 +313,7 @@ proptest! {
         );
 
         let point = Point { x, y };
-        let value = x_lens.get(&point).clone();
+        let value = *x_lens.get(&point);
         let result = x_lens.set(point.clone(), value);
         prop_assert_eq!(result, point);
     }
@@ -385,7 +386,7 @@ proptest! {
             },
         };
 
-        let got_value = deep_lens.get(&data).clone();
+        let got_value = *deep_lens.get(&data);
         let result = deep_lens.set(data.clone(), got_value);
         prop_assert_eq!(result, data);
     }

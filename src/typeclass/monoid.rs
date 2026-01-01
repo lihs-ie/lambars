@@ -433,12 +433,14 @@ mod tests {
 
     #[rstest]
     fn unit_left_identity() {
-        assert_eq!(<()>::empty().combine(()), ());
+        let empty: () = <()>::empty();
+        assert_eq!(empty.combine(()), ());
     }
 
     #[rstest]
     fn unit_right_identity() {
-        assert_eq!(().combine(<()>::empty()), ());
+        let empty: () = <()>::empty();
+        assert_eq!(().combine(empty), ());
     }
 
     // =========================================================================
@@ -797,13 +799,13 @@ mod property_tests {
         #[test]
         fn prop_option_left_identity(value in prop::option::of(any::<i32>())) {
             let opt_value = value.map(Sum::new);
-            prop_assert_eq!(Option::<Sum<i32>>::empty().combine(opt_value.clone()), opt_value);
+            prop_assert_eq!(Option::<Sum<i32>>::empty().combine(opt_value), opt_value);
         }
 
         #[test]
         fn prop_option_right_identity(value in prop::option::of(any::<i32>())) {
             let opt_value = value.map(Sum::new);
-            prop_assert_eq!(opt_value.clone().combine(Option::empty()), opt_value);
+            prop_assert_eq!(opt_value.combine(Option::empty()), opt_value);
         }
 
         #[test]

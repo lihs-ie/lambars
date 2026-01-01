@@ -643,10 +643,10 @@ mod tests {
     #[rstest]
     fn option_identity_law() {
         let some_value: Option<i32> = Some(42);
-        assert_eq!(some_value.clone().fmap(|x| x), some_value);
+        assert_eq!(some_value.fmap(|x| x), some_value);
 
         let none_value: Option<i32> = None;
-        assert_eq!(none_value.clone().fmap(|x| x), none_value);
+        assert_eq!(none_value.fmap(|x| x), none_value);
     }
 
     /// Composition law: fa.fmap(f).fmap(g) == fa.fmap(|x| g(f(x)))
@@ -656,7 +656,7 @@ mod tests {
         let function1 = |n: i32| n + 1;
         let function2 = |n: i32| n * 2;
 
-        let left = some_value.clone().fmap(function1).fmap(function2);
+        let left = some_value.fmap(function1).fmap(function2);
         let right = some_value.fmap(|x| function2(function1(x)));
 
         assert_eq!(left, right);
@@ -666,10 +666,10 @@ mod tests {
     #[rstest]
     fn result_identity_law() {
         let ok_value: Result<i32, &str> = Ok(42);
-        assert_eq!(ok_value.clone().fmap(|x| x), ok_value);
+        assert_eq!(ok_value.fmap(|x| x), ok_value);
 
         let err_value: Result<i32, &str> = Err("error");
-        assert_eq!(err_value.clone().fmap(|x| x), err_value);
+        assert_eq!(err_value.fmap(|x| x), err_value);
     }
 
     #[rstest]
@@ -678,7 +678,7 @@ mod tests {
         let function1 = |n: i32| n + 1;
         let function2 = |n: i32| n * 2;
 
-        let left = ok_value.clone().fmap(function1).fmap(function2);
+        let left = ok_value.fmap(function1).fmap(function2);
         let right = ok_value.fmap(|x| function2(function1(x)));
 
         assert_eq!(left, right);
@@ -706,7 +706,7 @@ mod tests {
     #[rstest]
     fn identity_wrapper_identity_law() {
         let wrapped = Identity::new(42);
-        assert_eq!(wrapped.clone().fmap(|x| x), wrapped);
+        assert_eq!(wrapped.fmap(|x| x), wrapped);
     }
 
     #[rstest]
@@ -715,13 +715,13 @@ mod tests {
         let function1 = |n: i32| n + 1;
         let function2 = |n: i32| n * 2;
 
-        let left = wrapped.clone().fmap(function1).fmap(function2);
+        let left = wrapped.fmap(function1).fmap(function2);
         let right = wrapped.fmap(|x| function2(function1(x)));
 
         assert_eq!(left, right);
     }
 
-    /// For Vec, we test the laws using FunctorMut::fmap_mut
+    /// For Vec, we test the laws using `FunctorMut::fmap_mut`
     #[rstest]
     fn vec_identity_law_with_fmap_mut() {
         let vec_value = vec![1, 2, 3];

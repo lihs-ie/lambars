@@ -1,3 +1,4 @@
+#![cfg(feature = "optics")]
 //! Property-based tests for Iso laws.
 //!
 //! Tests that Iso implementations satisfy the mathematical laws.
@@ -261,7 +262,7 @@ proptest! {
         let as_lens = wrapper_iso.to_lens();
 
         let source = Wrapper(value);
-        let gotten = as_lens.get(&source).clone();
+        let gotten = *as_lens.get(&source);
         let result = as_lens.set(source.clone(), gotten);
         prop_assert_eq!(result, source);
     }
@@ -336,7 +337,7 @@ proptest! {
 
         let source = Wrapper(value);
         if let Some(previewed_value) = as_prism.preview(&source) {
-            let reconstructed = as_prism.review(previewed_value.clone());
+            let reconstructed = as_prism.review(*previewed_value);
             prop_assert_eq!(reconstructed, source);
         }
     }

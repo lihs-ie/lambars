@@ -593,8 +593,7 @@ where
         S: Clone,
     {
         let function = function;
-        self.prism
-            .modify_or_identity(source, function)
+        self.prism.modify_or_identity(source, function)
     }
 }
 
@@ -720,12 +719,12 @@ mod tests {
         let circle_prism = FunctionPrism::new(
             |shape: &Shape| match shape {
                 Shape::Circle(radius) => Some(radius),
-                _ => None,
+                Shape::Rectangle(..) => None,
             },
             |radius: f64| Shape::Circle(radius),
             |shape: Shape| match shape {
                 Shape::Circle(radius) => Some(radius),
-                _ => None,
+                Shape::Rectangle(..) => None,
             },
         );
 
@@ -738,12 +737,12 @@ mod tests {
         let circle_prism = FunctionPrism::new(
             |shape: &Shape| match shape {
                 Shape::Circle(radius) => Some(radius),
-                _ => None,
+                Shape::Rectangle(..) => None,
             },
             |radius: f64| Shape::Circle(radius),
             |shape: Shape| match shape {
                 Shape::Circle(radius) => Some(radius),
-                _ => None,
+                Shape::Rectangle(..) => None,
             },
         );
 
@@ -756,12 +755,12 @@ mod tests {
         let circle_prism = FunctionPrism::new(
             |shape: &Shape| match shape {
                 Shape::Circle(radius) => Some(radius),
-                _ => None,
+                Shape::Rectangle(..) => None,
             },
             |radius: f64| Shape::Circle(radius),
             |shape: Shape| match shape {
                 Shape::Circle(radius) => Some(radius),
-                _ => None,
+                Shape::Rectangle(..) => None,
             },
         );
 
@@ -794,7 +793,6 @@ mod tests {
         assert_eq!(all, vec![&5.0]);
 
         let rect = Shape::Rectangle(3.0, 4.0);
-        let all: Vec<&f64> = traversal.get_all(&rect).collect();
-        assert!(all.is_empty());
+        assert!(traversal.get_all(&rect).next().is_none());
     }
 }

@@ -1,3 +1,4 @@
+#![cfg(feature = "effect")]
 //! Property-based tests for Reader Monad laws.
 //!
 //! Tests the following laws using proptest:
@@ -71,7 +72,7 @@ proptest! {
     fn prop_reader_monad_right_identity(environment in -1000i32..1000i32) {
         let reader: Reader<i32, i32> = Reader::new(|environment| environment);
         let right_identity: Reader<i32, i32> = Reader::new(|environment: i32| environment)
-            .flat_map(|x| Reader::pure(x));
+            .flat_map(Reader::pure);
 
         prop_assert_eq!(reader.run(environment), right_identity.run(environment));
     }

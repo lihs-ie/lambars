@@ -1,3 +1,4 @@
+#![cfg(feature = "effect")]
 //! Property-based tests for Writer Monad laws.
 //!
 //! Tests the following laws using proptest:
@@ -87,7 +88,7 @@ proptest! {
         let logs = vec!["log".to_string()];
         let writer: Writer<Vec<String>, i32> = Writer::new(value, logs.clone());
         let right_identity: Writer<Vec<String>, i32> = Writer::new(value, logs.clone())
-            .flat_map(|x| Writer::pure(x));
+            .flat_map(Writer::pure);
 
         let (result1, output1) = writer.run();
         let (result2, output2) = right_identity.run();

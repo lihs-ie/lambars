@@ -383,7 +383,7 @@ where
     /// assert_eq!(result, "result");
     /// assert_eq!(final_state, 52);
     /// ```
-    #[must_use] 
+    #[must_use]
     pub fn then<B>(self, next: State<S, B>) -> State<S, B>
     where
         B: 'static,
@@ -447,7 +447,7 @@ where
     /// assert_eq!(second, "hello");
     /// assert_eq!(final_state, 43);
     /// ```
-    #[must_use] 
+    #[must_use]
     pub fn product<B>(self, other: State<S, B>) -> State<S, (A, B)>
     where
         B: 'static,
@@ -478,7 +478,7 @@ where
     /// assert_eq!(result, 42);
     /// assert_eq!(final_state, 42);
     /// ```
-    #[must_use] 
+    #[must_use]
     pub fn get() -> Self {
         Self::new(|state: St| (state.clone(), state))
     }
@@ -620,14 +620,14 @@ mod tests {
     #[rstest]
     fn state_put_replaces_state() {
         let state: State<i32, ()> = State::put(100);
-        let (_, final_state) = state.run(42);
+        let ((), final_state) = state.run(42);
         assert_eq!(final_state, 100);
     }
 
     #[rstest]
     fn state_modify_transforms_state() {
         let state: State<i32, ()> = State::modify(|x| x * 2);
-        let (_, final_state) = state.run(21);
+        let ((), final_state) = state.run(21);
         assert_eq!(final_state, 42);
     }
 

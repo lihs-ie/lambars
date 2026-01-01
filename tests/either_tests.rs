@@ -1,3 +1,4 @@
+#![cfg(feature = "control")]
 //! Unit tests for Either<L, R> type.
 //!
 //! Either represents a value that can be one of two types:
@@ -8,8 +9,6 @@
 //! - Error handling (Left for errors, Right for success)
 //! - Branching computations
 //! - As the resume type for Trampoline
-
-#![cfg(feature = "control")]
 
 use lambars::control::Either;
 use rstest::rstest;

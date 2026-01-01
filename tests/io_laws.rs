@@ -1,3 +1,4 @@
+#![cfg(feature = "effect")]
 //! Property-based tests for IO Monad laws.
 //!
 //! This module verifies that the IO type satisfies the Monad laws:

@@ -1,3 +1,4 @@
+#![cfg(feature = "persistent")]
 //! Property-based tests for PersistentTreeMap.
 //!
 //! These tests verify that PersistentTreeMap satisfies the expected laws
@@ -141,11 +142,11 @@ proptest! {
     ) {
         let map: PersistentTreeMap<i32, i32> = entries.clone().into_iter().collect();
 
-        if let Some((key, _)) = entries.first() {
-            if map.contains_key(key) {
-                let removed = map.remove(key);
-                prop_assert_eq!(removed.len(), map.len() - 1);
-            }
+        if let Some((key, _)) = entries.first()
+            && map.contains_key(key)
+        {
+            let removed = map.remove(key);
+            prop_assert_eq!(removed.len(), map.len() - 1);
         }
     }
 

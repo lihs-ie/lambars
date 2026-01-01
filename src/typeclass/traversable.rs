@@ -1068,7 +1068,7 @@ mod property_tests {
         #[test]
         fn prop_vec_traverse_result_identity(values in prop::collection::vec(any::<i32>(), 0..20)) {
             // traverse with Ok should be equivalent to fmap with Identity
-            let traversed: Result<Vec<i32>, ()> = values.clone().traverse_result(|element| Ok::<_, ()>(element));
+            let traversed: Result<Vec<i32>, ()> = values.clone().traverse_result(Ok::<_, ()>);
             prop_assert_eq!(traversed, Ok(values));
         }
 
@@ -1136,12 +1136,9 @@ mod property_tests {
 
         #[test]
         fn prop_identity_traverse_same_as_function(value: i32) {
-            fn transform(number: i32) -> Option<String> {
-                Some(number.to_string())
-            }
-
             let wrapped = Identity::new(value);
-            let traversed: Option<Identity<String>> = wrapped.traverse_option(transform);
+            let traversed: Option<Identity<String>> =
+                wrapped.traverse_option(|number| Some(number.to_string()));
 
             prop_assert_eq!(traversed, Some(Identity::new(value.to_string())));
         }

@@ -1,13 +1,14 @@
+#![cfg(feature = "async")]
 //! Tests for the eff_async! macro.
 //!
 //! This module tests the eff_async! macro which provides do-notation syntax
 //! for AsyncIO monad operations.
 
-use lambars::effect::AsyncIO;
 use lambars::eff_async;
+use lambars::effect::AsyncIO;
 use rstest::rstest;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 // =============================================================================
 // Basic Bind Operations

@@ -735,7 +735,8 @@ mod tests {
 
     #[test]
     fn test_iso_compose() {
-        let iso1 = FunctionIso::new(|x: i32| x as i64, |x: i64| x as i32);
+        #[allow(clippy::cast_possible_truncation)]
+        let iso1 = FunctionIso::new(|x: i32| i64::from(x), |x: i64| x as i32);
 
         let iso2 = FunctionIso::new(
             |x: i64| x.to_string(),
@@ -774,7 +775,7 @@ mod tests {
         ));
 
         let tuple = (42, "hello".to_string());
-        let swapped = swap.get(tuple.clone());
+        let swapped = swap.get(tuple);
         assert_eq!(swapped, ("hello".to_string(), 42));
     }
 }

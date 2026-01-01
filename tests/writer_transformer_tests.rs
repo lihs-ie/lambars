@@ -1,3 +1,4 @@
+#![cfg(feature = "effect")]
 //! Tests for WriterT (Writer Transformer).
 //!
 //! WriterT adds output accumulation capability to any monad.
@@ -5,6 +6,13 @@
 use lambars::effect::{IO, WriterT};
 use lambars::typeclass::Monoid;
 use rstest::rstest;
+
+/// Type alias for WriterT with Result and Vec<String> as the log type.
+type WriterTResult<A> = WriterT<Vec<String>, Result<(A, Vec<String>), String>>;
+
+/// Type alias for WriterT with Option and Vec<String> as the log type.
+#[allow(dead_code)]
+type WriterTOption<A> = WriterT<Vec<String>, Option<(A, Vec<String>)>>;
 
 // =============================================================================
 // Basic Structure Tests
@@ -20,8 +28,7 @@ fn writer_transformer_new_and_run_with_option() {
 
 #[rstest]
 fn writer_transformer_new_and_run_with_result() {
-    let writer_transformer: WriterT<Vec<String>, Result<(i32, Vec<String>), String>> =
-        WriterT::new(Ok((42, vec!["log".to_string()])));
+    let writer_transformer: WriterTResult<i32> = WriterT::new(Ok((42, vec!["log".to_string()])));
     let result = writer_transformer.run();
     assert_eq!(result, Ok((42, vec!["log".to_string()])));
 }
@@ -48,8 +55,7 @@ fn writer_transformer_pure_with_option() {
 
 #[rstest]
 fn writer_transformer_pure_with_result() {
-    let writer_transformer: WriterT<Vec<String>, Result<(i32, Vec<String>), String>> =
-        WriterT::pure_result(42);
+    let writer_transformer: WriterTResult<i32> = WriterT::pure_result(42);
     let result = writer_transformer.run();
     assert_eq!(result, Ok((42, Vec::<String>::empty())));
 }
@@ -79,8 +85,7 @@ fn writer_transformer_lift_option_none() {
 #[rstest]
 fn writer_transformer_lift_result() {
     let inner: Result<i32, String> = Ok(42);
-    let writer_transformer: WriterT<Vec<String>, Result<(i32, Vec<String>), String>> =
-        WriterT::lift_result(inner);
+    let writer_transformer: WriterTResult<i32> = WriterT::lift_result(inner);
     let result = writer_transformer.run();
     assert_eq!(result, Ok((42, Vec::<String>::empty())));
 }
@@ -88,8 +93,7 @@ fn writer_transformer_lift_result() {
 #[rstest]
 fn writer_transformer_lift_result_error() {
     let inner: Result<i32, String> = Err("error".to_string());
-    let writer_transformer: WriterT<Vec<String>, Result<(i32, Vec<String>), String>> =
-        WriterT::lift_result(inner);
+    let writer_transformer: WriterTResult<i32> = WriterT::lift_result(inner);
     let result = writer_transformer.run();
     assert_eq!(result, Err("error".to_string()));
 }
@@ -108,10 +112,8 @@ fn writer_transformer_tell_option() {
 
 #[rstest]
 fn writer_transformer_tell_result() {
-    let writer_transformer: WriterT<Vec<String>, Result<((), Vec<String>), String>> =
-        WriterT::<Vec<String>, Result<((), Vec<String>), String>>::tell_result(vec![
-            "message".to_string(),
-        ]);
+    let writer_transformer: WriterTResult<()> =
+        WriterTResult::<()>::tell_result(vec!["message".to_string()]);
     let result = writer_transformer.run();
     assert_eq!(result, Ok(((), vec!["message".to_string()])));
 }
@@ -140,8 +142,7 @@ fn writer_transformer_fmap_option_none() {
 
 #[rstest]
 fn writer_transformer_fmap_result_ok() {
-    let writer_transformer: WriterT<Vec<String>, Result<(i32, Vec<String>), String>> =
-        WriterT::new(Ok((21, vec!["log".to_string()])));
+    let writer_transformer: WriterTResult<i32> = WriterT::new(Ok((21, vec!["log".to_string()])));
     let mapped = writer_transformer.fmap_result(|value| value * 2);
     let result = mapped.run();
     assert_eq!(result, Ok((42, vec!["log".to_string()])));
@@ -149,7 +150,7 @@ fn writer_transformer_fmap_result_ok() {
 
 #[rstest]
 fn writer_transformer_fmap_result_error() {
-    let writer_transformer: WriterT<Vec<String>, Result<(i32, Vec<String>), String>> =
+    let writer_transformer: WriterTResult<i32> =
         WriterT::new(Err::<(i32, Vec<String>), String>("error".to_string()));
     let mapped = writer_transformer.fmap_result(|value| value * 2);
     let result = mapped.run();
@@ -201,6 +202,7 @@ fn writer_transformer_flat_map_option_none_short_circuits() {
 }
 
 #[rstest]
+#[allow(clippy::type_complexity)]
 fn writer_transformer_flat_map_result_ok_to_ok() {
     let writer_transformer: WriterT<Vec<String>, Result<(i32, Vec<String>), String>> =
         WriterT::new(Ok((10, vec!["first".to_string()])));
@@ -216,6 +218,7 @@ fn writer_transformer_flat_map_result_ok_to_ok() {
 }
 
 #[rstest]
+#[allow(clippy::type_complexity)]
 fn writer_transformer_flat_map_result_ok_to_error() {
     let writer_transformer: WriterT<Vec<String>, Result<(i32, Vec<String>), String>> =
         WriterT::new(Ok((10, vec!["first".to_string()])));
@@ -229,6 +232,7 @@ fn writer_transformer_flat_map_result_ok_to_error() {
 }
 
 #[rstest]
+#[allow(clippy::type_complexity)]
 fn writer_transformer_flat_map_result_error_short_circuits() {
     let writer_transformer: WriterT<Vec<String>, Result<(i32, Vec<String>), String>> =
         WriterT::new(Err::<(i32, Vec<String>), String>("error".to_string()));
