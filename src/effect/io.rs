@@ -426,6 +426,44 @@ impl<A: 'static> IO<A> {
     }
 }
 
+// =============================================================================
+// Conversion to AsyncIO (requires async feature)
+// =============================================================================
+
+#[cfg(feature = "async")]
+impl<A: Send + 'static> IO<A> {
+    /// Converts a synchronous IO to an AsyncIO.
+    ///
+    /// **Important**: The IO action is executed immediately when `to_async`
+    /// is called (not when `run_async` is called). This is because `IO`
+    /// is not `Send` and cannot be moved to an async context.
+    ///
+    /// If you need deferred execution in an async context, consider using
+    /// `AsyncIO::new` directly with your computation.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use functional_rusty::effect::{IO, AsyncIO};
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let io = IO::pure(42);
+    ///     let async_io = io.to_async();
+    ///     let result = async_io.run_async().await;
+    ///     assert_eq!(result, 42);
+    /// }
+    /// ```
+    pub fn to_async(self) -> super::AsyncIO<A> {
+        // Execute the IO action immediately and wrap the result.
+        // This is necessary because IO is not Send (it contains
+        // Box<dyn FnOnce() -> A> without Send bound) and cannot
+        // be moved to an async context.
+        let result = self.run_unsafe();
+        super::AsyncIO::pure(result)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

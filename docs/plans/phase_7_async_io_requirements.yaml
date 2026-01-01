@@ -1,0 +1,966 @@
+# Phase 7: AsyncIO Monad Requirements Definition
+# 非同期効果システム - AsyncIO モナドの要件定義
+# ISSUE-001（axum ハンドラの async 必須問題）を解決するための Phase
+
+version: "1.0.0"
+created_at: "2026-01-01"
+phase_id: phase_7
+phase_name: 非同期効果システム
+phase_name_en: Async Effect System
+
+# =============================================================================
+# 背景と動機
+# =============================================================================
+
+background:
+  issue_reference: ISSUE-001
+  issue_title: axum ハンドラが async 必須だが await を使用していない
+
+  problem_summary: |
+    axum のハンドラは async fn である必要があるが、現在の IO モナドは同期的であり、
+    run_unsafe() を呼び出すと blocking 操作となる。これにより:
+
+    1. clippy::unused_async 警告が発生し #[allow] で抑制が必要
+    2. tokio ランタイムのスレッドをブロックする可能性
+    3. 将来的に実際の async I/O（DB、外部 API）を追加した場合に問題が顕在化
+
+  current_workaround: |
+    現在は tokio::task::spawn_blocking を使用して回避しているが、
+    これは関数型プログラミングの純粋性を維持する観点からは最適ではない。
+    副作用の明示的な分離という FP の原則に沿った解決策が必要。
+
+  design_decision:
+    approach: 分離型（IO と AsyncIO を別の型として実装）
+    rationale:
+      - ゼロコスト抽象: 同期処理時はオーバーヘッドなし
+      - 後方互換性: 既存の IO を使用したコードは修正不要
+      - 型による意図の明示: 関数型プログラミングの原則に合致
+      - nested runtime 問題回避: 統合型の run_sync は async 内で使用不可
+      - Send 境界の柔軟性: 同期 IO は Rc/RefCell が使える
+
+# =============================================================================
+# 概要
+# =============================================================================
+
+overview:
+  description: |
+    AsyncIO モナドは、非同期の副作用を表現する Monad である。
+    既存の IO モナドと同様に、run_async() が呼ばれるまで副作用は実行されず、
+    参照透過性を維持する。
+
+    axum 等の async フレームワークとシームレスに統合し、
+    関数型プログラミングのパターンを非同期コードに適用可能にする。
+
+  goals:
+    - 非同期副作用の遅延実行と参照透過性の維持
+    - Functor/Applicative/Monad 則の満足
+    - IO ↔ AsyncIO の相互変換
+    - axum ハンドラでの自然な使用
+    - eff_async! マクロによる do 記法サポート
+
+  non_goals:
+    - 既存 IO モナドの変更または廃止
+    - async runtime の実装（tokio 等の既存ランタイムを使用）
+    - cancel-safe な操作の保証（Future の標準的な制約に従う）
+
+  functional_programming_principles:
+    purity: |
+      AsyncIO<A> は「非同期の副作用を持つ計算の記述」を値として持つ。
+      run_async() が呼ばれるまで副作用は発生せず、純粋な値として扱える。
+
+    referential_transparency: |
+      同じ AsyncIO 値は同じ非同期計算を記述する。
+      計算の実行は run_async() の呼び出しによってのみ発生する。
+
+    composability: |
+      fmap, flat_map, map2 等のメソッドにより、
+      複数の AsyncIO を合成して新しい AsyncIO を作成できる。
+      合成自体は純粋な操作である。
+
+    effect_isolation: |
+      AsyncIO 型により、非同期副作用を持つ計算が型レベルで明示される。
+      純粋なコードと副作用を持つコードが型で区別可能。
+
+# =============================================================================
+# 要件一覧
+# =============================================================================
+
+requirements:
+
+  # ---------------------------------------------------------------------------
+  # 型定義
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-701
+    name: AsyncIO 型定義
+    category: type_definition
+    priority: critical
+    description: |
+      非同期の副作用を表現する AsyncIO 型を定義する。
+      Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = A> + Send>> + Send> で実装。
+
+    location: src/effect/async_io.rs
+
+    type_definition: |
+      use std::future::Future;
+      use std::pin::Pin;
+
+      /// A monad representing deferred asynchronous side effects.
+      ///
+      /// `AsyncIO<A>` wraps an asynchronous computation that produces a value of type `A`
+      /// and may perform side effects. The computation is not executed until `run_async`
+      /// is called.
+      ///
+      /// # Type Parameters
+      ///
+      /// - `A`: The type of the value produced by the async IO action.
+      ///
+      /// # Monad Laws
+      ///
+      /// `AsyncIO` satisfies the monad laws:
+      ///
+      /// 1. **Left Identity**: `AsyncIO::pure(a).flat_map(f) == f(a)`
+      /// 2. **Right Identity**: `m.flat_map(AsyncIO::pure) == m`
+      /// 3. **Associativity**: `m.flat_map(f).flat_map(g) == m.flat_map(|x| f(x).flat_map(g))`
+      ///
+      /// # Examples
+      ///
+      /// ```rust
+      /// use functional_rusty::effect::AsyncIO;
+      ///
+      /// #[tokio::main]
+      /// async fn main() {
+      ///     let async_io = AsyncIO::pure(42);
+      ///     let result = async_io.run_async().await;
+      ///     assert_eq!(result, 42);
+      /// }
+      /// ```
+      pub struct AsyncIO<A> {
+          /// The wrapped async computation that produces a value of type `A`.
+          run_async_io: Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = A> + Send>> + Send>,
+      }
+
+    design_notes:
+      - Box<dyn FnOnce() ...> により一度だけ実行可能
+      - Pin<Box<dyn Future ...>> により Future を安全に保持
+      - + Send 境界により tokio のマルチスレッドランタイムで使用可能
+      - 内部の Future も Send であることを要求（async runtime の標準的な要件）
+
+    acceptance_criteria:
+      - AsyncIO<A> が定義されていること
+      - A が Send である必要がないこと（型パラメータに Send 境界なし）
+      - 内部の Future が Send であること
+      - FnOnce により一度だけ実行可能であること
+
+  # ---------------------------------------------------------------------------
+  # コンストラクタ
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-702
+    name: AsyncIO コンストラクタ
+    category: constructor
+    priority: critical
+    description: |
+      AsyncIO を作成するためのコンストラクタメソッドを実装する。
+
+    location: src/effect/async_io.rs
+
+    methods:
+      - name: new
+        signature: |
+          pub fn new<F, Fut>(action: F) -> Self
+          where
+              F: FnOnce() -> Fut + Send + 'static,
+              Fut: Future<Output = A> + Send + 'static,
+        description: |
+          非同期クロージャから新しい AsyncIO を作成する。
+          クロージャは run_async() が呼ばれるまで実行されない。
+        example: |
+          let async_io = AsyncIO::new(|| async {
+              tokio::time::sleep(Duration::from_millis(100)).await;
+              42
+          });
+
+      - name: pure
+        signature: "pub fn pure(value: A) -> Self where A: Send + 'static"
+        description: |
+          純粋な値を AsyncIO でラップする。
+          副作用なしで即座に値を返す非同期計算を作成。
+        example: |
+          let async_io = AsyncIO::pure(42);
+          // run_async().await は即座に 42 を返す
+
+      - name: from_future
+        signature: |
+          pub fn from_future<Fut>(future: Fut) -> Self
+          where
+              Fut: Future<Output = A> + Send + 'static,
+        description: |
+          既存の Future から AsyncIO を作成する。
+          Future はまだ実行されていない状態である必要がある。
+        example: |
+          let future = async { fetch_data().await };
+          let async_io = AsyncIO::from_future(future);
+
+    acceptance_criteria:
+      - new メソッドが非同期クロージャを受け取れること
+      - pure メソッドが純粋な値をラップできること
+      - from_future メソッドが既存の Future をラップできること
+      - 全てのコンストラクタで遅延評価が維持されること
+
+  # ---------------------------------------------------------------------------
+  # 実行メソッド
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-703
+    name: AsyncIO 実行メソッド
+    category: execution
+    priority: critical
+    description: |
+      AsyncIO を実行して結果を取得するメソッドを実装する。
+
+    location: src/effect/async_io.rs
+
+    methods:
+      - name: run_async
+        signature: "pub async fn run_async(self) -> A"
+        description: |
+          AsyncIO を非同期に実行し、結果を返す。
+          この時点で初めて副作用が発生する。
+          async fn として定義され、.await で使用される。
+        example: |
+          let result = async_io.run_async().await;
+        design_notes:
+          - この実装は impl Future<Output = A> ではなく async fn を使用
+          - 理由: async fn は .await と自然に統合でき、使いやすい
+
+      - name: into_future
+        signature: "pub fn into_future(self) -> impl Future<Output = A> + Send"
+        description: |
+          AsyncIO を Future に変換する。
+          tokio::spawn 等で使用する場合に便利。
+        example: |
+          let future = async_io.into_future();
+          tokio::spawn(future);
+
+    acceptance_criteria:
+      - run_async が async fn として定義されていること
+      - run_async が .await 可能であること
+      - into_future が Send な Future を返すこと
+      - 実行時に副作用が発生すること
+
+  # ---------------------------------------------------------------------------
+  # Functor 実装
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-704
+    name: AsyncIO Functor (fmap)
+    category: typeclass
+    priority: critical
+    description: |
+      AsyncIO に Functor 則を満たす fmap を実装する。
+
+    location: src/effect/async_io.rs
+
+    method:
+      name: fmap
+      signature: |
+        pub fn fmap<B, F>(self, function: F) -> AsyncIO<B>
+        where
+            F: FnOnce(A) -> B + Send + 'static,
+            B: 'static,
+      description: |
+        AsyncIO 内の値に関数を適用して変換する。
+        計算自体は遅延されたまま、変換が合成される。
+      example: |
+        let async_io = AsyncIO::pure(21).fmap(|x| x * 2);
+        let result = async_io.run_async().await;
+        assert_eq!(result, 42);
+
+    functor_laws:
+      identity:
+        description: "fmap(id) == id"
+        property: |
+          forall async_io: AsyncIO<A>.
+            async_io.fmap(|x| x).run_async().await == async_io.run_async().await
+        verification: proptest
+
+      composition:
+        description: "fmap(f . g) == fmap(f) . fmap(g)"
+        property: |
+          forall async_io: AsyncIO<A>, f: A -> B, g: B -> C.
+            async_io.fmap(|x| g(f(x))).run_async().await
+            ==
+            async_io.fmap(f).fmap(g).run_async().await
+        verification: proptest
+
+    acceptance_criteria:
+      - fmap が関数を適用した新しい AsyncIO を返すこと
+      - fmap が遅延評価を維持すること
+      - Functor 恒等則を満たすこと
+      - Functor 合成則を満たすこと
+
+  # ---------------------------------------------------------------------------
+  # Applicative 実装
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-705
+    name: AsyncIO Applicative
+    category: typeclass
+    priority: critical
+    description: |
+      AsyncIO に Applicative 則を満たす pure, apply, map2 を実装する。
+
+    location: src/effect/async_io.rs
+
+    methods:
+      - name: apply
+        signature: |
+          pub fn apply<B, F>(self, function_async_io: AsyncIO<F>) -> AsyncIO<B>
+          where
+              F: FnOnce(A) -> B + Send + 'static,
+              B: 'static,
+        description: |
+          AsyncIO でラップされた関数を AsyncIO でラップされた値に適用する。
+        note: |
+          Rust では関数を AsyncIO に入れるケースは稀なため、
+          map2 の方がより実用的。
+
+      - name: map2
+        signature: |
+          pub fn map2<B, C, F>(self, other: AsyncIO<B>, function: F) -> AsyncIO<C>
+          where
+              F: FnOnce(A, B) -> C + Send + 'static,
+              B: Send + 'static,
+              C: 'static,
+        description: |
+          2つの AsyncIO を関数で結合する。
+          両方の計算を順次実行し、結果を結合する。
+        example: |
+          let io1 = AsyncIO::pure(10);
+          let io2 = AsyncIO::pure(20);
+          let combined = io1.map2(io2, |a, b| a + b);
+          assert_eq!(combined.run_async().await, 30);
+
+      - name: product
+        signature: |
+          pub fn product<B>(self, other: AsyncIO<B>) -> AsyncIO<(A, B)>
+          where
+              B: Send + 'static,
+        description: |
+          2つの AsyncIO をタプルに結合する。
+        example: |
+          let io = AsyncIO::pure(1).product(AsyncIO::pure("hello"));
+          assert_eq!(io.run_async().await, (1, "hello"));
+
+    applicative_laws:
+      identity:
+        description: "pure(id) <*> v == v"
+        property: |
+          forall v: AsyncIO<A>.
+            AsyncIO::pure(|x| x).apply(v) == v
+
+      homomorphism:
+        description: "pure(f) <*> pure(x) == pure(f(x))"
+        property: |
+          forall f: A -> B, x: A.
+            AsyncIO::pure(f).apply(AsyncIO::pure(x))
+            ==
+            AsyncIO::pure(f(x))
+
+      interchange:
+        description: "u <*> pure(y) == pure($ y) <*> u"
+        property: |
+          forall u: AsyncIO<A -> B>, y: A.
+            u.apply(AsyncIO::pure(y))
+            ==
+            AsyncIO::pure(move |f: fn(A) -> B| f(y)).apply(u)
+
+      composition:
+        description: "pure(.) <*> u <*> v <*> w == u <*> (v <*> w)"
+        property: "Applicative composition law"
+
+    acceptance_criteria:
+      - apply が関数適用を行うこと
+      - map2 が2つの AsyncIO を結合すること
+      - product がタプルを返すこと
+      - 全ての Applicative 則を満たすこと
+
+  # ---------------------------------------------------------------------------
+  # Monad 実装
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-706
+    name: AsyncIO Monad
+    category: typeclass
+    priority: critical
+    description: |
+      AsyncIO に Monad 則を満たす flat_map を実装する。
+
+    location: src/effect/async_io.rs
+
+    methods:
+      - name: flat_map
+        signature: |
+          pub fn flat_map<B, F>(self, function: F) -> AsyncIO<B>
+          where
+              F: FnOnce(A) -> AsyncIO<B> + Send + 'static,
+              B: 'static,
+        description: |
+          AsyncIO 内の値を使用して新しい AsyncIO を生成し、それを平坦化する。
+          モナドの bind 操作。
+        example: |
+          let async_io = AsyncIO::pure(10)
+              .flat_map(|x| AsyncIO::pure(x * 2));
+          assert_eq!(async_io.run_async().await, 20);
+
+      - name: and_then
+        signature: |
+          pub fn and_then<B, F>(self, function: F) -> AsyncIO<B>
+          where
+              F: FnOnce(A) -> AsyncIO<B> + Send + 'static,
+              B: 'static,
+        description: |
+          flat_map のエイリアス。Rust の慣習に従った命名。
+
+      - name: then
+        signature: |
+          pub fn then<B>(self, next: AsyncIO<B>) -> AsyncIO<B>
+          where
+              B: 'static,
+        description: |
+          最初の AsyncIO を実行し、結果を無視して次の AsyncIO を実行する。
+          副作用のためだけに最初の計算を実行する場合に使用。
+        example: |
+          let io = AsyncIO::new(|| async { println!("first"); })
+              .then(AsyncIO::pure(42));
+          assert_eq!(io.run_async().await, 42);
+
+    monad_laws:
+      left_identity:
+        description: "pure(a).flat_map(f) == f(a)"
+        property: |
+          forall a: A, f: A -> AsyncIO<B>.
+            AsyncIO::pure(a).flat_map(f).run_async().await
+            ==
+            f(a).run_async().await
+        verification: proptest
+
+      right_identity:
+        description: "m.flat_map(pure) == m"
+        property: |
+          forall m: AsyncIO<A>.
+            m.flat_map(AsyncIO::pure).run_async().await
+            ==
+            m.run_async().await
+        verification: proptest
+
+      associativity:
+        description: "m.flat_map(f).flat_map(g) == m.flat_map(|x| f(x).flat_map(g))"
+        property: |
+          forall m: AsyncIO<A>, f: A -> AsyncIO<B>, g: B -> AsyncIO<C>.
+            m.flat_map(f).flat_map(g).run_async().await
+            ==
+            m.flat_map(|x| f(x).flat_map(g)).run_async().await
+        verification: proptest
+
+    acceptance_criteria:
+      - flat_map が計算をチェーンすること
+      - flat_map が遅延評価を維持すること
+      - and_then が flat_map のエイリアスであること
+      - then が最初の結果を無視すること
+      - 全ての Monad 則を満たすこと
+
+  # ---------------------------------------------------------------------------
+  # IO ↔ AsyncIO 変換
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-707
+    name: IO と AsyncIO の相互変換
+    category: conversion
+    priority: critical
+    description: |
+      IO と AsyncIO の相互変換メソッドを実装する。
+      既存の同期コードと非同期コードの統合を可能にする。
+
+    methods:
+      - name: IO::to_async
+        location: src/effect/io.rs
+        signature: "pub fn to_async(self) -> AsyncIO<A>"
+        description: |
+          同期の IO を非同期の AsyncIO に変換する。
+          内部的に tokio::task::spawn_blocking を使用して
+          blocking 操作を非同期コンテキストで安全に実行。
+        example: |
+          let io = IO::new(|| heavy_computation());
+          let async_io = io.to_async();
+          let result = async_io.run_async().await;
+        implementation_note: |
+          tokio::task::spawn_blocking を使用し、
+          blocking スレッドプールで同期 IO を実行する。
+          これにより tokio ランタイムをブロックしない。
+
+      - name: AsyncIO::to_sync
+        location: src/effect/async_io.rs
+        signature: "pub fn to_sync(self) -> IO<A> where A: Send + 'static"
+        description: |
+          非同期の AsyncIO を同期の IO に変換する。
+          内部的に tokio::runtime::Runtime を使用してブロッキング実行。
+        example: |
+          let async_io = AsyncIO::pure(42);
+          let io = async_io.to_sync();
+          let result = io.run_unsafe();
+        warning: |
+          この操作は async コンテキスト内で使用すると
+          nested runtime エラーを引き起こす可能性がある。
+          同期コンテキストでのみ使用すること。
+        implementation_note: |
+          新しい tokio::runtime::Runtime を作成し、
+          block_on で Future を実行する。
+          既存の runtime 内では使用不可。
+
+    design_rationale: |
+      IO と AsyncIO を別の型として維持することで、
+      変換が必要な場所が型レベルで明確になる。
+      これにより、開発者は同期/非同期の境界を意識的に扱うことになり、
+      パフォーマンス問題を早期に発見できる。
+
+    acceptance_criteria:
+      - IO::to_async が AsyncIO を返すこと
+      - IO::to_async が tokio ランタイムをブロックしないこと
+      - AsyncIO::to_sync が IO を返すこと
+      - AsyncIO::to_sync が同期コンテキストで動作すること
+      - 変換後も値が保持されること
+
+  # ---------------------------------------------------------------------------
+  # 非同期ユーティリティ
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-708
+    name: AsyncIO ユーティリティメソッド
+    category: utility
+    priority: high
+    description: |
+      非同期操作のためのユーティリティメソッドを実装する。
+
+    location: src/effect/async_io.rs
+
+    methods:
+      - name: delay_async
+        signature: "pub fn delay_async(duration: Duration) -> AsyncIO<()>"
+        description: |
+          指定した時間だけ待機する AsyncIO を作成する。
+          tokio::time::sleep を使用。
+        example: |
+          let io = AsyncIO::delay_async(Duration::from_millis(100));
+          io.run_async().await; // 100ms 待機
+
+      - name: race
+        signature: |
+          pub fn race<B>(self, other: AsyncIO<B>) -> AsyncIO<Either<A, B>>
+          where
+              A: Send + 'static,
+              B: Send + 'static,
+        description: |
+          2つの AsyncIO を同時に実行し、最初に完了した方の結果を返す。
+          tokio::select! を使用。
+        example: |
+          let io1 = AsyncIO::delay_async(Duration::from_millis(100))
+              .fmap(|_| "slow");
+          let io2 = AsyncIO::pure("fast");
+          let result = io1.race(io2).run_async().await;
+          assert!(matches!(result, Either::Right("fast")));
+
+      - name: timeout
+        signature: |
+          pub fn timeout(self, duration: Duration) -> AsyncIO<Option<A>>
+        description: |
+          指定した時間内に完了しなければ None を返す。
+          tokio::time::timeout を使用。
+        example: |
+          let io = AsyncIO::delay_async(Duration::from_secs(10))
+              .timeout(Duration::from_millis(100));
+          assert_eq!(io.run_async().await, None);
+
+      - name: catch_async
+        signature: |
+          pub fn catch_async<E, F>(self, handler: F) -> AsyncIO<Result<A, E>>
+          where
+              A: Send + 'static,
+              F: FnOnce(Box<dyn std::any::Any + Send>) -> E + Send + 'static,
+              E: Send + 'static,
+        description: |
+          パニックをキャッチして Result に変換する。
+          std::panic::catch_unwind の async 版。
+          A: Send + 'static 制約は AssertUnwindSafe で Future をラップするため必要。
+
+    acceptance_criteria:
+      - delay_async が指定時間待機すること
+      - race が最初に完了した方を返すこと
+      - timeout が時間切れで None を返すこと
+      - catch_async がパニックをキャッチすること
+
+  # ---------------------------------------------------------------------------
+  # eff_async! マクロ
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-709
+    name: eff_async! マクロ
+    category: macro
+    priority: medium
+    description: |
+      AsyncIO 用の do 記法マクロを実装する。
+      eff! マクロと同様の構文で非同期操作をチェーンする。
+
+    location: src/effect/eff_async_macro.rs
+
+    syntax:
+      description: |
+        eff_async! マクロは eff! マクロと同様の構文を使用する。
+        <= を bind 演算子として使用（Rust で <- はマッチ不可のため）。
+
+      grammar: |
+        eff_async! {
+            pattern <= async_io_expression;  // bind
+            let pattern = expression;         // pure let
+            ...
+            async_io_expression              // 最終的な AsyncIO を返す
+        }
+
+      example: |
+        let result = eff_async! {
+            data <= fetch_data_async();
+            let processed = process(data);
+            validated <= validate_async(processed);
+            AsyncIO::pure(validated)
+        };
+
+        let value = result.run_async().await;
+
+    implementation_note: |
+      マクロ展開は flat_map のチェーンになる:
+
+      eff_async! {
+          x <= io1;
+          y <= io2;
+          AsyncIO::pure(x + y)
+      }
+
+      展開後:
+      io1.flat_map(move |x| {
+          io2.flat_map(move |y| {
+              AsyncIO::pure(x + y)
+          })
+      })
+
+    acceptance_criteria:
+      - <= による bind が動作すること
+      - let による純粋な束縛が動作すること
+      - 最終的な AsyncIO が返されること
+      - ネストした eff_async! が動作すること
+      - パターンマッチが動作すること
+
+  # ---------------------------------------------------------------------------
+  # Transformer サポート
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-710
+    name: Monad Transformer async サポート
+    category: transformer
+    priority: high
+    description: |
+      既存の Monad Transformer に AsyncIO サポートを追加する。
+
+    transformers:
+      - name: ReaderT
+        location: src/effect/reader_transformer.rs
+        methods:
+          - name: run_async_io
+            signature: |
+              pub fn run_async_io(self, env: R) -> AsyncIO<A>
+              where
+                  Inner = AsyncIO<A>
+            description: |
+              ReaderT<R, AsyncIO<A>> を環境を適用して AsyncIO<A> に変換する。
+
+      - name: StateT
+        location: src/effect/state_transformer.rs
+        methods:
+          - name: run_async_io
+            signature: |
+              pub fn run_async_io(self, initial_state: S) -> AsyncIO<(A, S)>
+              where
+                  Inner = AsyncIO<(A, S)>
+            description: |
+              StateT<S, AsyncIO<(A, S)>> を初期状態を適用して AsyncIO<(A, S)> に変換する。
+
+    design_note: |
+      Rust の HKT 不在により、汎用的な lift 関数は実装困難。
+      そのため、具体的な Monad（AsyncIO）ごとにメソッドを提供する。
+      これは既存の _option, _result, _io メソッドと同じアプローチ。
+
+    acceptance_criteria:
+      - ReaderT が AsyncIO をサポートすること
+      - StateT が AsyncIO をサポートすること
+      - 既存の Transformer メソッドと一貫性があること
+
+# =============================================================================
+# テスト要件
+# =============================================================================
+
+test_requirements:
+  unit_tests:
+    location: tests/async_io_tests.rs
+    categories:
+      - name: 基本操作テスト
+        tests:
+          - test_async_io_pure_and_run
+          - test_async_io_new_and_run
+          - test_async_io_from_future
+
+      - name: 遅延評価テスト
+        tests:
+          - test_async_io_is_lazy
+          - test_async_io_fmap_is_lazy
+          - test_async_io_flat_map_is_lazy
+
+      - name: Functor テスト
+        tests:
+          - test_async_io_fmap_basic
+          - test_async_io_fmap_chain
+          - test_async_io_fmap_type_change
+
+      - name: Applicative テスト
+        tests:
+          - test_async_io_map2
+          - test_async_io_product
+
+      - name: Monad テスト
+        tests:
+          - test_async_io_flat_map_basic
+          - test_async_io_flat_map_chain
+          - test_async_io_and_then
+          - test_async_io_then
+
+      - name: 変換テスト
+        tests:
+          - test_io_to_async
+          - test_async_io_to_sync
+          - test_roundtrip_io_to_async_to_sync
+
+      - name: ユーティリティテスト
+        tests:
+          - test_delay_async
+          - test_race
+          - test_timeout
+          - test_catch_async
+
+  law_tests:
+    location: tests/async_io_laws.rs
+    framework: proptest
+    laws:
+      - functor_identity_law
+      - functor_composition_law
+      - applicative_identity_law
+      - applicative_homomorphism_law
+      - applicative_interchange_law
+      - applicative_composition_law
+      - monad_left_identity_law
+      - monad_right_identity_law
+      - monad_associativity_law
+
+  integration_tests:
+    location: tests/async_io_integration_tests.rs
+    scenarios:
+      - name: axum ハンドラ統合
+        description: |
+          AsyncIO を使用した axum ハンドラのテスト。
+          clippy::unused_async 警告が発生しないことを確認。
+
+      - name: eff_async! マクロ統合
+        description: |
+          eff_async! マクロを使用した複数の非同期操作のチェーン。
+
+      - name: IO と AsyncIO の混合使用
+        description: |
+          同期 IO と非同期 AsyncIO を混合して使用するワークフロー。
+
+# =============================================================================
+# ファイル構成
+# =============================================================================
+
+artifacts:
+  source_files:
+    - path: src/effect/async_io.rs
+      description: AsyncIO 型とそのメソッドの実装
+      requirements:
+        - REQ-701
+        - REQ-702
+        - REQ-703
+        - REQ-704
+        - REQ-705
+        - REQ-706
+        - REQ-708
+
+    - path: src/effect/io.rs
+      description: IO::to_async メソッドの追加
+      requirements:
+        - REQ-707
+
+    - path: src/effect/eff_async_macro.rs
+      description: eff_async! マクロの実装
+      requirements:
+        - REQ-709
+
+    - path: src/effect/reader_transformer.rs
+      description: ReaderT の AsyncIO サポート追加
+      requirements:
+        - REQ-710
+
+    - path: src/effect/state_transformer.rs
+      description: StateT の AsyncIO サポート追加
+      requirements:
+        - REQ-710
+
+    - path: src/effect/mod.rs
+      description: モジュールエクスポートの追加
+      exports:
+        - AsyncIO
+        - eff_async! (マクロ)
+
+  test_files:
+    - path: tests/async_io_tests.rs
+      description: AsyncIO のユニットテスト
+
+    - path: tests/async_io_laws.rs
+      description: AsyncIO の法則検証テスト
+
+    - path: tests/async_io_integration_tests.rs
+      description: AsyncIO の統合テスト
+
+    - path: tests/eff_async_macro_tests.rs
+      description: eff_async! マクロのテスト
+
+# =============================================================================
+# 依存関係
+# =============================================================================
+
+dependencies:
+  internal:
+    - functional_rusty::effect::IO
+    - functional_rusty::control::Either
+    - functional_rusty::eff!
+
+  external:
+    - tokio: "1.0"
+      features:
+        - rt
+        - rt-multi-thread
+        - time
+        - sync
+      reason: |
+        非同期ランタイムとして tokio を使用。
+        spawn_blocking, timeout, select! 等の機能を活用。
+
+    - futures: "0.3"
+      reason: |
+        Future 関連のユーティリティ。
+        Pin, Future トレイト等。
+
+  dev_dependencies:
+    - rstest: "0.18"
+      reason: パラメータ化テスト
+
+    - proptest: "1.0"
+      reason: プロパティベーステスト
+
+    - tokio_test: "0.4"
+      reason: 非同期テストユーティリティ
+
+# =============================================================================
+# 成功基準
+# =============================================================================
+
+success_criteria:
+  functional:
+    - AsyncIO が Functor 則を満たすこと
+    - AsyncIO が Applicative 則を満たすこと
+    - AsyncIO が Monad 則を満たすこと
+    - IO ↔ AsyncIO 変換が正しく動作すること
+    - eff_async! マクロが正しく展開されること
+
+  performance:
+    - pure な AsyncIO は即座に解決すること
+    - 変換のオーバーヘッドが最小限であること
+
+  compatibility:
+    - 既存の IO コードに変更が不要であること
+    - axum ハンドラで自然に使用できること
+    - clippy::unused_async 警告が発生しないこと
+
+  code_quality:
+    - 全てのテストが通過すること
+    - テストカバレッジが 100% であること
+    - clippy 警告がないこと（#![deny(warnings)]）
+    - #![forbid(unsafe_code)] を維持すること
+
+# =============================================================================
+# 将来の拡張
+# =============================================================================
+
+future_extensions:
+  - id: parallel_async_io
+    name: 並列実行サポート
+    description: |
+      複数の AsyncIO を並列に実行する traverse_async, sequence_async。
+      tokio::join! を使用。
+    priority: medium
+
+  - id: retry_async_io
+    name: リトライサポート
+    description: |
+      失敗時に指定回数リトライする retry_async。
+      exponential backoff 等のストラテジーをサポート。
+    priority: low
+
+  - id: resource_async_io
+    name: リソース管理サポート
+    description: |
+      acquire/release パターンの bracket_async。
+      例外時にもリソースが解放されることを保証。
+    priority: medium
+
+  - id: stream_integration
+    name: Stream 統合
+    description: |
+      AsyncIO と tokio::stream::Stream の統合。
+      反復的な非同期操作のサポート。
+    priority: low
+
+# =============================================================================
+# 参照
+# =============================================================================
+
+references:
+  - name: "Haskell: Control.Concurrent.Async"
+    url: "https://hackage.haskell.org/package/async"
+    description: |
+      Haskell の非同期プログラミングライブラリ。
+      race, concurrently 等のパターン。
+
+  - name: "Scala: cats-effect IO"
+    url: "https://typelevel.org/cats-effect/docs/concepts"
+    description: |
+      Scala の純粋関数型効果システム。
+      IO モナドの非同期対応。
+
+  - name: "Tokio documentation"
+    url: "https://tokio.rs/tokio/tutorial"
+    description: |
+      Rust の非同期ランタイム tokio のドキュメント。
+      spawn_blocking, timeout, select! 等。
+
+  - name: "Issue 001: axum handler async problem"
+    url: "samples/order/docs/issues/issue_001_async_handler_clippy.yaml"
+    description: |
+      この Phase の発端となった問題の詳細。

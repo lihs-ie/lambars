@@ -675,6 +675,174 @@ where
     }
 }
 
+// =============================================================================
+// AsyncIO-specific Methods (requires async feature)
+// =============================================================================
+
+#[cfg(feature = "async")]
+use super::AsyncIO;
+
+#[cfg(feature = "async")]
+impl<R, A> ReaderT<R, AsyncIO<A>>
+where
+    R: 'static,
+    A: Send + 'static,
+{
+    /// Creates a ReaderT that returns a constant value wrapped in AsyncIO::pure.
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - The value to wrap
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use functional_rusty::effect::{ReaderT, AsyncIO};
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let reader: ReaderT<i32, AsyncIO<i32>> = ReaderT::pure_async_io(42);
+    ///     let async_io = reader.run(999);
+    ///     assert_eq!(async_io.run_async().await, 42);
+    /// }
+    /// ```
+    pub fn pure_async_io(value: A) -> Self
+    where
+        A: Clone,
+    {
+        ReaderT::new(move |_| AsyncIO::pure(value.clone()))
+    }
+
+    /// Maps a function over the value inside the AsyncIO.
+    ///
+    /// # Arguments
+    ///
+    /// * `function` - The function to apply to the value
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use functional_rusty::effect::{ReaderT, AsyncIO};
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let reader: ReaderT<i32, AsyncIO<i32>> = ReaderT::new(|environment| AsyncIO::pure(environment));
+    ///     let mapped = reader.fmap_async_io(|value| value * 2);
+    ///     let async_io = mapped.run(21);
+    ///     assert_eq!(async_io.run_async().await, 42);
+    /// }
+    /// ```
+    pub fn fmap_async_io<B, F>(self, function: F) -> ReaderT<R, AsyncIO<B>>
+    where
+        F: Fn(A) -> B + Send + Sync + 'static,
+        B: Send + 'static,
+    {
+        let original = self.run_function;
+        let function_rc = std::sync::Arc::new(function);
+        ReaderT::new(move |environment| {
+            let async_io = (original)(environment);
+            let function_clone = function_rc.clone();
+            async_io.fmap(move |value| function_clone(value))
+        })
+    }
+
+    /// Chains ReaderT computations with AsyncIO.
+    ///
+    /// # Arguments
+    ///
+    /// * `function` - A function that takes the value and returns a new ReaderT
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use functional_rusty::effect::{ReaderT, AsyncIO};
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let reader: ReaderT<i32, AsyncIO<i32>> = ReaderT::new(|environment| AsyncIO::pure(environment));
+    ///     let chained = reader.flat_map_async_io(|value| {
+    ///         ReaderT::new(move |environment| AsyncIO::pure(value + environment))
+    ///     });
+    ///     let async_io = chained.run(10);
+    ///     assert_eq!(async_io.run_async().await, 20);
+    /// }
+    /// ```
+    pub fn flat_map_async_io<B, F>(self, function: F) -> ReaderT<R, AsyncIO<B>>
+    where
+        F: Fn(A) -> ReaderT<R, AsyncIO<B>> + Send + Sync + 'static,
+        B: Send + 'static,
+        R: Clone + Send,
+    {
+        let original = self.run_function;
+        let function_arc = std::sync::Arc::new(function);
+        ReaderT::new(move |environment: R| {
+            let environment_clone = environment.clone();
+            let async_io = (original)(environment);
+            let function_clone = function_arc.clone();
+            async_io.flat_map(move |value| {
+                let next = function_clone(value);
+                next.run(environment_clone)
+            })
+        })
+    }
+
+    /// Returns the environment wrapped in AsyncIO::pure.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use functional_rusty::effect::{ReaderT, AsyncIO};
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let reader: ReaderT<i32, AsyncIO<i32>> = ReaderT::ask_async_io();
+    ///     let async_io = reader.run(42);
+    ///     assert_eq!(async_io.run_async().await, 42);
+    /// }
+    /// ```
+    pub fn ask_async_io() -> Self
+    where
+        R: Clone + Send,
+        A: From<R>,
+    {
+        ReaderT::new(|environment: R| AsyncIO::pure(A::from(environment)))
+    }
+
+    /// Runs a computation with a modified environment.
+    ///
+    /// # Arguments
+    ///
+    /// * `modifier` - A function that transforms the environment
+    /// * `computation` - The computation to run with the modified environment
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use functional_rusty::effect::{ReaderT, AsyncIO};
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let reader: ReaderT<i32, AsyncIO<i32>> = ReaderT::new(|environment| AsyncIO::pure(environment * 2));
+    ///     let modified = ReaderT::local_async_io(|environment| environment + 10, reader);
+    ///     let async_io = modified.run(5);
+    ///     assert_eq!(async_io.run_async().await, 30);
+    /// }
+    /// ```
+    pub fn local_async_io<F>(
+        modifier: F,
+        computation: ReaderT<R, AsyncIO<A>>,
+    ) -> ReaderT<R, AsyncIO<A>>
+    where
+        F: Fn(R) -> R + 'static,
+    {
+        let computation_function = computation.run_function;
+        ReaderT::new(move |environment| {
+            let modified_environment = modifier(environment);
+            (computation_function)(modified_environment)
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

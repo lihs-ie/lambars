@@ -1,0 +1,1402 @@
+# Phase 7: AsyncIO Monad Implementation Plan
+# 非同期効果システム - AsyncIO モナドの実装計画
+# rust-implementation-reviewer が要件定義 (phase_7_async_io_requirements.yaml) に基づいて作成
+
+version: "1.0.0"
+created_at: "2026-01-01"
+phase_id: phase_7
+requirements_reference: docs/phase_7_async_io_requirements.yaml
+
+# =============================================================================
+# 実装方針
+# =============================================================================
+
+implementation_approach:
+  methodology: TDD (Test-Driven Development)
+  test_first: true
+  coverage_target: 100%
+
+  principles:
+    - テストを先に書き、レッドからグリーンへ
+    - 各要件を小さな単位に分割して段階的に実装
+    - 既存の IO モナドの実装パターンを踏襲
+    - Rust の型システム制約を考慮した現実的な設計
+    - "#![forbid(unsafe_code)] ポリシーを維持"
+
+  coding_conventions:
+    - 変数名・関数名は略語を使用しない（URL, UUID, ULID 等の共通認識のあるもの以外）
+    - 既存の命名パターンを踏襲（run_async, fmap, flat_map, etc.）
+    - ドキュメントコメントは英語で記載
+    - テストは日本語コメントで説明
+
+# =============================================================================
+# ファイル構成
+# =============================================================================
+
+file_structure:
+  source_files:
+    - path: src/effect/async_io.rs
+      description: AsyncIO 型とそのメソッドの実装
+      requirements:
+        - REQ-701
+        - REQ-702
+        - REQ-703
+        - REQ-704
+        - REQ-705
+        - REQ-706
+        - REQ-707 (AsyncIO::to_sync)
+        - REQ-708
+      estimated_lines: 400-500
+
+    - path: src/effect/io.rs
+      description: IO::to_async メソッドの追加
+      requirements:
+        - REQ-707 (IO::to_async)
+      modification_type: append
+      estimated_lines_added: 40-60
+
+    - path: src/effect/eff_async_macro.rs
+      description: eff_async! マクロの実装
+      requirements:
+        - REQ-709
+      estimated_lines: 80-100
+
+    - path: src/effect/reader_transformer.rs
+      description: ReaderT の AsyncIO サポート追加
+      requirements:
+        - REQ-710
+      modification_type: append
+      estimated_lines_added: 80-100
+
+    - path: src/effect/state_transformer.rs
+      description: StateT の AsyncIO サポート追加
+      requirements:
+        - REQ-710
+      modification_type: append
+      estimated_lines_added: 80-100
+
+    - path: src/effect/mod.rs
+      description: モジュールエクスポートの追加
+      modification_type: append
+      estimated_lines_added: 10-15
+
+  test_files:
+    - path: tests/async_io_tests.rs
+      description: AsyncIO のユニットテスト
+      estimated_lines: 350-400
+
+    - path: tests/async_io_laws.rs
+      description: AsyncIO の Monad/Functor 法則検証テスト（proptest 使用）
+      estimated_lines: 150-200
+
+    - path: tests/eff_async_macro_tests.rs
+      description: eff_async! マクロのテスト
+      estimated_lines: 100-120
+
+    - path: tests/async_io_integration_tests.rs
+      description: 統合テスト（Transformer 含む）
+      estimated_lines: 150-200
+
+  cargo_toml_changes:
+    - type: add_dependency
+      section: dependencies
+      name: tokio
+      version: "1"
+      features:
+        - rt
+        - rt-multi-thread
+        - time
+        - sync
+      optional: true
+      reason: 非同期ランタイムとして tokio を使用
+
+    - type: add_dev_dependency
+      section: dev-dependencies
+      name: tokio
+      version: "1"
+      features:
+        - rt
+        - rt-multi-thread
+        - time
+        - sync
+        - macros
+      reason: テストでの非同期ランタイム
+
+    - type: modify_feature
+      section: features
+      name: async
+      value: '["effect", "dep:tokio"]'
+      reason: Phase 7 の async 機能フラグ
+
+    - type: modify_feature
+      section: features
+      name: full
+      add_feature: async
+      reason: full フラグに async を追加
+
+# =============================================================================
+# 実装順序（TDD サイクル）
+# =============================================================================
+
+implementation_order:
+
+  # ---------------------------------------------------------------------------
+  # Step 1: 基盤整備
+  # ---------------------------------------------------------------------------
+  - step: 1
+    name: Cargo.toml 依存関係追加
+    description: tokio 依存関係と feature フラグの追加
+    files:
+      - Cargo.toml
+    tasks:
+      - id: 1.1
+        description: tokio を optional dependency として追加
+        test_required: false
+
+      - id: 1.2
+        description: dev-dependencies に tokio（macros 含む）を追加
+        test_required: false
+
+      - id: 1.3
+        description: "async" feature フラグを追加
+        test_required: false
+
+      - id: 1.4
+        description: cargo check で依存関係確認
+        test_required: false
+
+  # ---------------------------------------------------------------------------
+  # Step 2: REQ-701 AsyncIO 型定義
+  # ---------------------------------------------------------------------------
+  - step: 2
+    name: AsyncIO 型定義
+    requirement: REQ-701
+    description: AsyncIO 構造体の定義
+    files:
+      - src/effect/async_io.rs
+      - src/effect/mod.rs
+      - tests/async_io_tests.rs
+
+    tasks:
+      - id: 2.1
+        description: |
+          テスト作成: AsyncIO 型が存在することを確認する基本テスト
+        test_first: true
+        test_cases:
+          - test_async_io_type_exists
+
+      - id: 2.2
+        description: |
+          AsyncIO 構造体の定義
+          Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = A> + Send>> + Send>
+        implementation: |
+          use std::future::Future;
+          use std::pin::Pin;
+
+          pub struct AsyncIO<A> {
+              run_async_io: Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = A> + Send>> + Send>,
+          }
+
+      - id: 2.3
+        description: mod.rs にエクスポート追加
+        implementation: |
+          #[cfg(feature = "async")]
+          mod async_io;
+
+          #[cfg(feature = "async")]
+          pub use async_io::AsyncIO;
+
+  # ---------------------------------------------------------------------------
+  # Step 3: REQ-702 コンストラクタ (new, pure)
+  # ---------------------------------------------------------------------------
+  - step: 3
+    name: AsyncIO コンストラクタ
+    requirement: REQ-702
+    description: new, pure, from_future コンストラクタの実装
+    files:
+      - src/effect/async_io.rs
+      - tests/async_io_tests.rs
+
+    tasks:
+      - id: 3.1
+        description: |
+          テスト作成: AsyncIO::pure の基本動作
+        test_first: true
+        test_cases:
+          - test_async_io_pure_creates_value
+          - test_async_io_pure_with_string
+          - test_async_io_pure_with_struct
+
+      - id: 3.2
+        description: |
+          AsyncIO::pure の実装
+        implementation: |
+          impl<A: Send + 'static> AsyncIO<A> {
+              pub fn pure(value: A) -> Self {
+                  Self {
+                      run_async_io: Box::new(move || Box::pin(async move { value })),
+                  }
+              }
+          }
+
+      - id: 3.3
+        description: |
+          テスト作成: AsyncIO::new の基本動作
+        test_first: true
+        test_cases:
+          - test_async_io_new_with_async_closure
+          - test_async_io_new_with_delay
+
+      - id: 3.4
+        description: |
+          AsyncIO::new の実装
+        implementation: |
+          impl<A: 'static> AsyncIO<A> {
+              pub fn new<F, Fut>(action: F) -> Self
+              where
+                  F: FnOnce() -> Fut + Send + 'static,
+                  Fut: Future<Output = A> + Send + 'static,
+              {
+                  Self {
+                      run_async_io: Box::new(move || Box::pin(action())),
+                  }
+              }
+          }
+
+      - id: 3.5
+        description: |
+          テスト作成: AsyncIO::from_future の基本動作
+        test_first: true
+        test_cases:
+          - test_async_io_from_future_basic
+
+      - id: 3.6
+        description: |
+          AsyncIO::from_future の実装
+        implementation: |
+          impl<A: 'static> AsyncIO<A> {
+              pub fn from_future<Fut>(future: Fut) -> Self
+              where
+                  Fut: Future<Output = A> + Send + 'static,
+              {
+                  Self {
+                      run_async_io: Box::new(move || Box::pin(future)),
+                  }
+              }
+          }
+
+  # ---------------------------------------------------------------------------
+  # Step 4: REQ-703 実行メソッド (run_async, into_future)
+  # ---------------------------------------------------------------------------
+  - step: 4
+    name: AsyncIO 実行メソッド
+    requirement: REQ-703
+    description: run_async, into_future の実装
+    files:
+      - src/effect/async_io.rs
+      - tests/async_io_tests.rs
+
+    tasks:
+      - id: 4.1
+        description: |
+          テスト作成: run_async の基本動作
+        test_first: true
+        test_cases:
+          - test_async_io_run_async_pure
+          - test_async_io_run_async_new
+          - test_async_io_run_async_returns_correct_value
+
+      - id: 4.2
+        description: |
+          AsyncIO::run_async の実装
+        implementation: |
+          impl<A: 'static> AsyncIO<A> {
+              pub async fn run_async(self) -> A {
+                  (self.run_async_io)().await
+              }
+          }
+
+      - id: 4.3
+        description: |
+          テスト作成: into_future の動作
+        test_first: true
+        test_cases:
+          - test_async_io_into_future_is_send
+          - test_async_io_into_future_can_be_spawned
+
+      - id: 4.4
+        description: |
+          AsyncIO::into_future の実装
+        implementation: |
+          impl<A: 'static> AsyncIO<A> {
+              pub fn into_future(self) -> impl Future<Output = A> + Send {
+                  async move { self.run_async().await }
+              }
+          }
+
+  # ---------------------------------------------------------------------------
+  # Step 5: 遅延評価テスト
+  # ---------------------------------------------------------------------------
+  - step: 5
+    name: 遅延評価検証
+    requirement: REQ-701, REQ-702, REQ-703
+    description: AsyncIO が遅延評価を維持することを検証
+    files:
+      - tests/async_io_tests.rs
+
+    tasks:
+      - id: 5.1
+        description: |
+          テスト作成: new は遅延評価
+        test_first: true
+        test_cases:
+          - test_async_io_new_is_lazy
+          - test_async_io_side_effect_not_executed_on_creation
+
+      - id: 5.2
+        description: |
+          テスト作成: fmap は遅延評価（後で実装するが、テスト構造は先に設計）
+        test_first: true
+        test_cases:
+          - test_async_io_fmap_is_lazy
+          - test_async_io_flat_map_is_lazy
+
+  # ---------------------------------------------------------------------------
+  # Step 6: REQ-704 Functor (fmap)
+  # ---------------------------------------------------------------------------
+  - step: 6
+    name: AsyncIO Functor
+    requirement: REQ-704
+    description: fmap の実装
+    files:
+      - src/effect/async_io.rs
+      - tests/async_io_tests.rs
+      - tests/async_io_laws.rs
+
+    tasks:
+      - id: 6.1
+        description: |
+          テスト作成: fmap の基本動作
+        test_first: true
+        test_cases:
+          - test_async_io_fmap_basic
+          - test_async_io_fmap_chain
+          - test_async_io_fmap_type_change
+
+      - id: 6.2
+        description: |
+          AsyncIO::fmap の実装
+        implementation: |
+          impl<A: 'static> AsyncIO<A> {
+              pub fn fmap<B, F>(self, function: F) -> AsyncIO<B>
+              where
+                  F: FnOnce(A) -> B + Send + 'static,
+                  B: 'static,
+              {
+                  AsyncIO::new(move || async move {
+                      let value = self.run_async().await;
+                      function(value)
+                  })
+              }
+          }
+
+      - id: 6.3
+        description: |
+          テスト作成: Functor 法則（proptest）
+        test_first: true
+        test_cases:
+          - prop_async_io_functor_identity
+          - prop_async_io_functor_composition
+
+  # ---------------------------------------------------------------------------
+  # Step 7: REQ-705 Applicative (apply, map2, product)
+  # ---------------------------------------------------------------------------
+  - step: 7
+    name: AsyncIO Applicative
+    requirement: REQ-705
+    description: apply, map2, product の実装
+    files:
+      - src/effect/async_io.rs
+      - tests/async_io_tests.rs
+      - tests/async_io_laws.rs
+
+    tasks:
+      - id: 7.1
+        description: |
+          テスト作成: map2 の基本動作
+        test_first: true
+        test_cases:
+          - test_async_io_map2_basic
+          - test_async_io_map2_with_different_types
+
+      - id: 7.2
+        description: |
+          AsyncIO::map2 の実装
+        implementation: |
+          impl<A: 'static> AsyncIO<A> {
+              pub fn map2<B, C, F>(self, other: AsyncIO<B>, function: F) -> AsyncIO<C>
+              where
+                  F: FnOnce(A, B) -> C + Send + 'static,
+                  B: Send + 'static,
+                  C: 'static,
+              {
+                  AsyncIO::new(move || async move {
+                      let value_a = self.run_async().await;
+                      let value_b = other.run_async().await;
+                      function(value_a, value_b)
+                  })
+              }
+          }
+
+      - id: 7.3
+        description: |
+          テスト作成: product の基本動作
+        test_first: true
+        test_cases:
+          - test_async_io_product_basic
+          - test_async_io_product_tuple_type
+
+      - id: 7.4
+        description: |
+          AsyncIO::product の実装
+        implementation: |
+          impl<A: Send + 'static> AsyncIO<A> {
+              pub fn product<B>(self, other: AsyncIO<B>) -> AsyncIO<(A, B)>
+              where
+                  B: Send + 'static,
+              {
+                  self.map2(other, |a, b| (a, b))
+              }
+          }
+
+      - id: 7.5
+        description: |
+          テスト作成: apply の基本動作（使用頻度は低いが法則検証に必要）
+        test_first: true
+        test_cases:
+          - test_async_io_apply_basic
+
+      - id: 7.6
+        description: |
+          AsyncIO::apply の実装
+        implementation: |
+          impl<A: 'static> AsyncIO<A> {
+              pub fn apply<B, F>(self, function_async_io: AsyncIO<F>) -> AsyncIO<B>
+              where
+                  F: FnOnce(A) -> B + Send + 'static,
+                  B: 'static,
+              {
+                  AsyncIO::new(move || async move {
+                      let function = function_async_io.run_async().await;
+                      let value = self.run_async().await;
+                      function(value)
+                  })
+              }
+          }
+
+      - id: 7.7
+        description: |
+          テスト作成: Applicative 法則（proptest）
+        test_first: true
+        test_cases:
+          - prop_async_io_applicative_identity
+          - prop_async_io_applicative_homomorphism
+          - prop_async_io_applicative_interchange
+          - prop_async_io_applicative_composition
+
+  # ---------------------------------------------------------------------------
+  # Step 8: REQ-706 Monad (flat_map, and_then, then)
+  # ---------------------------------------------------------------------------
+  - step: 8
+    name: AsyncIO Monad
+    requirement: REQ-706
+    description: flat_map, and_then, then の実装
+    files:
+      - src/effect/async_io.rs
+      - tests/async_io_tests.rs
+      - tests/async_io_laws.rs
+
+    tasks:
+      - id: 8.1
+        description: |
+          テスト作成: flat_map の基本動作
+        test_first: true
+        test_cases:
+          - test_async_io_flat_map_basic
+          - test_async_io_flat_map_chain
+          - test_async_io_flat_map_with_effect
+
+      - id: 8.2
+        description: |
+          AsyncIO::flat_map の実装
+        implementation: |
+          impl<A: 'static> AsyncIO<A> {
+              pub fn flat_map<B, F>(self, function: F) -> AsyncIO<B>
+              where
+                  F: FnOnce(A) -> AsyncIO<B> + Send + 'static,
+                  B: 'static,
+              {
+                  AsyncIO::new(move || async move {
+                      let value_a = self.run_async().await;
+                      let async_io_b = function(value_a);
+                      async_io_b.run_async().await
+                  })
+              }
+          }
+
+      - id: 8.3
+        description: |
+          テスト作成: and_then（flat_map のエイリアス）
+        test_first: true
+        test_cases:
+          - test_async_io_and_then_is_flat_map_alias
+
+      - id: 8.4
+        description: |
+          AsyncIO::and_then の実装
+        implementation: |
+          impl<A: 'static> AsyncIO<A> {
+              pub fn and_then<B, F>(self, function: F) -> AsyncIO<B>
+              where
+                  F: FnOnce(A) -> AsyncIO<B> + Send + 'static,
+                  B: 'static,
+              {
+                  self.flat_map(function)
+              }
+          }
+
+      - id: 8.5
+        description: |
+          テスト作成: then（最初の結果を無視）
+        test_first: true
+        test_cases:
+          - test_async_io_then_discards_first
+          - test_async_io_then_executes_first_for_side_effect
+
+      - id: 8.6
+        description: |
+          AsyncIO::then の実装
+        implementation: |
+          impl<A: 'static> AsyncIO<A> {
+              pub fn then<B>(self, next: AsyncIO<B>) -> AsyncIO<B>
+              where
+                  B: 'static,
+              {
+                  self.flat_map(move |_| next)
+              }
+          }
+
+      - id: 8.7
+        description: |
+          テスト作成: Monad 法則（proptest）
+        test_first: true
+        test_cases:
+          - prop_async_io_monad_left_identity
+          - prop_async_io_monad_right_identity
+          - prop_async_io_monad_associativity
+
+  # ---------------------------------------------------------------------------
+  # Step 9: REQ-707 IO <-> AsyncIO 変換
+  # ---------------------------------------------------------------------------
+  - step: 9
+    name: IO と AsyncIO の相互変換
+    requirement: REQ-707
+    description: IO::to_async と AsyncIO::to_sync の実装
+    files:
+      - src/effect/io.rs
+      - src/effect/async_io.rs
+      - tests/async_io_tests.rs
+
+    tasks:
+      - id: 9.1
+        description: |
+          テスト作成: IO::to_async の基本動作
+        test_first: true
+        test_cases:
+          - test_io_to_async_basic
+          - test_io_to_async_preserves_value
+          - test_io_to_async_does_not_block_runtime
+
+      - id: 9.2
+        description: |
+          IO::to_async の実装
+          注意: tokio::task::spawn_blocking を使用
+        implementation: |
+          #[cfg(feature = "async")]
+          impl<A: Send + 'static> IO<A> {
+              pub fn to_async(self) -> crate::effect::AsyncIO<A> {
+                  crate::effect::AsyncIO::new(move || async move {
+                      tokio::task::spawn_blocking(move || self.run_unsafe())
+                          .await
+                          .expect("spawn_blocking task panicked")
+                  })
+              }
+          }
+
+      - id: 9.3
+        description: |
+          テスト作成: AsyncIO::to_sync の基本動作
+        test_first: true
+        test_cases:
+          - test_async_io_to_sync_basic
+          - test_async_io_to_sync_preserves_value
+
+      - id: 9.4
+        description: |
+          AsyncIO::to_sync の実装
+          注意: 新しい tokio runtime を作成して block_on
+        implementation: |
+          impl<A: Send + 'static> AsyncIO<A> {
+              pub fn to_sync(self) -> crate::effect::IO<A> {
+                  crate::effect::IO::new(move || {
+                      let runtime = tokio::runtime::Runtime::new()
+                          .expect("Failed to create tokio runtime");
+                      runtime.block_on(self.run_async())
+                  })
+              }
+          }
+
+      - id: 9.5
+        description: |
+          テスト作成: ラウンドトリップ変換
+        test_first: true
+        test_cases:
+          - test_io_to_async_to_sync_roundtrip
+          - test_async_io_to_sync_to_async_roundtrip
+
+  # ---------------------------------------------------------------------------
+  # Step 10: REQ-708 ユーティリティメソッド
+  # ---------------------------------------------------------------------------
+  - step: 10
+    name: AsyncIO ユーティリティ
+    requirement: REQ-708
+    description: delay_async, race, timeout, catch_async の実装
+    files:
+      - src/effect/async_io.rs
+      - tests/async_io_tests.rs
+
+    tasks:
+      - id: 10.1
+        description: |
+          テスト作成: delay_async の動作
+        test_first: true
+        test_cases:
+          - test_async_io_delay_async_waits
+          - test_async_io_delay_async_is_lazy
+
+      - id: 10.2
+        description: |
+          AsyncIO::delay_async の実装
+        implementation: |
+          use std::time::Duration;
+
+          impl AsyncIO<()> {
+              pub fn delay_async(duration: Duration) -> Self {
+                  AsyncIO::new(move || async move {
+                      tokio::time::sleep(duration).await;
+                  })
+              }
+          }
+
+      - id: 10.3
+        description: |
+          テスト作成: timeout の動作
+        test_first: true
+        test_cases:
+          - test_async_io_timeout_completes_in_time
+          - test_async_io_timeout_returns_none_on_timeout
+
+      - id: 10.4
+        description: |
+          AsyncIO::timeout の実装
+        implementation: |
+          impl<A: 'static> AsyncIO<A> {
+              pub fn timeout(self, duration: Duration) -> AsyncIO<Option<A>> {
+                  AsyncIO::new(move || async move {
+                      match tokio::time::timeout(duration, self.run_async()).await {
+                          Ok(value) => Some(value),
+                          Err(_) => None,
+                      }
+                  })
+              }
+          }
+
+      - id: 10.5
+        description: |
+          テスト作成: race の動作
+        test_first: true
+        test_cases:
+          - test_async_io_race_returns_first_completed
+          - test_async_io_race_with_immediate_value
+
+      - id: 10.6
+        description: |
+          AsyncIO::race の実装
+          Either 型を使用
+        implementation: |
+          use crate::control::Either;
+
+          impl<A: Send + 'static> AsyncIO<A> {
+              pub fn race<B>(self, other: AsyncIO<B>) -> AsyncIO<Either<A, B>>
+              where
+                  B: Send + 'static,
+              {
+                  AsyncIO::new(move || async move {
+                      tokio::select! {
+                          value_a = self.run_async() => Either::Left(value_a),
+                          value_b = other.run_async() => Either::Right(value_b),
+                      }
+                  })
+              }
+          }
+
+      - id: 10.7
+        description: |
+          テスト作成: catch_async の動作
+        test_first: true
+        test_cases:
+          - test_async_io_catch_async_on_success
+          - test_async_io_catch_async_recovers_panic
+
+      - id: 10.8
+        description: |
+          AsyncIO::catch_async の実装
+          注意: A: Send + 'static 制約が必要（AssertUnwindSafe のため）
+        implementation: |
+          use std::panic::AssertUnwindSafe;
+          use futures::FutureExt;
+
+          impl<A: Send + 'static> AsyncIO<A> {
+              pub fn catch_async<E, F>(self, handler: F) -> AsyncIO<Result<A, E>>
+              where
+                  A: Send + 'static,
+                  F: FnOnce(Box<dyn std::any::Any + Send>) -> E + Send + 'static,
+                  E: Send + 'static,
+              {
+                  AsyncIO::new(move || async move {
+                      let result = AssertUnwindSafe(self.run_async())
+                          .catch_unwind()
+                          .await;
+                      match result {
+                          Ok(value) => Ok(value),
+                          Err(panic_info) => Err(handler(panic_info)),
+                      }
+                  })
+              }
+          }
+
+  # ---------------------------------------------------------------------------
+  # Step 11: REQ-709 eff_async! マクロ
+  # ---------------------------------------------------------------------------
+  - step: 11
+    name: eff_async! マクロ
+    requirement: REQ-709
+    description: AsyncIO 用 do 記法マクロの実装
+    files:
+      - src/effect/eff_async_macro.rs
+      - src/effect/mod.rs
+      - tests/eff_async_macro_tests.rs
+
+    tasks:
+      - id: 11.1
+        description: |
+          テスト作成: 基本的な bind 操作
+        test_first: true
+        test_cases:
+          - test_eff_async_single_bind
+          - test_eff_async_multiple_binds
+          - test_eff_async_with_let
+
+      - id: 11.2
+        description: |
+          eff_async! マクロの実装
+          eff! マクロと同じ構文を使用
+        implementation: |
+          #[macro_export]
+          macro_rules! eff_async {
+              // Terminal case: single expression
+              ($result:expr) => {
+                  $result
+              };
+
+              // Bind with identifier pattern
+              ($pattern:ident <= $monad:expr ; $($rest:tt)+) => {
+                  $monad.flat_map(move |$pattern| {
+                      $crate::eff_async!($($rest)+)
+                  })
+              };
+
+              // Bind with tuple pattern
+              (($($pattern:tt)*) <= $monad:expr ; $($rest:tt)+) => {
+                  $monad.flat_map(move |($($pattern)*)| {
+                      $crate::eff_async!($($rest)+)
+                  })
+              };
+
+              // Bind with wildcard pattern
+              (_ <= $monad:expr ; $($rest:tt)+) => {
+                  $monad.flat_map(move |_| {
+                      $crate::eff_async!($($rest)+)
+                  })
+              };
+
+              // Pure let binding with identifier
+              (let $pattern:ident = $expr:expr ; $($rest:tt)+) => {
+                  {
+                      let $pattern = $expr;
+                      $crate::eff_async!($($rest)+)
+                  }
+              };
+
+              // Pure let binding with tuple pattern
+              (let ($($pattern:tt)*) = $expr:expr ; $($rest:tt)+) => {
+                  {
+                      let ($($pattern)*) = $expr;
+                      $crate::eff_async!($($rest)+)
+                  }
+              };
+          }
+
+      - id: 11.3
+        description: |
+          mod.rs にマクロモジュール追加
+        implementation: |
+          #[cfg(feature = "async")]
+          mod eff_async_macro;
+
+      - id: 11.4
+        description: |
+          テスト作成: 複雑なパターン
+        test_first: true
+        test_cases:
+          - test_eff_async_wildcard_pattern
+          - test_eff_async_tuple_pattern
+          - test_eff_async_nested
+
+  # ---------------------------------------------------------------------------
+  # Step 12: REQ-710 Transformer AsyncIO サポート
+  # ---------------------------------------------------------------------------
+  - step: 12
+    name: Monad Transformer AsyncIO サポート
+    requirement: REQ-710
+    description: ReaderT, StateT の AsyncIO サポート
+    files:
+      - src/effect/reader_transformer.rs
+      - src/effect/state_transformer.rs
+      - tests/async_io_integration_tests.rs
+
+    tasks:
+      - id: 12.1
+        description: |
+          テスト作成: ReaderT with AsyncIO
+        test_first: true
+        test_cases:
+          - test_reader_transformer_pure_async_io
+          - test_reader_transformer_lift_async_io
+          - test_reader_transformer_fmap_async_io
+          - test_reader_transformer_flat_map_async_io
+
+      - id: 12.2
+        description: |
+          ReaderT の AsyncIO サポート実装
+        implementation: |
+          #[cfg(feature = "async")]
+          impl<R, A> ReaderT<R, crate::effect::AsyncIO<A>>
+          where
+              R: 'static,
+              A: 'static,
+          {
+              pub fn pure_async_io(value: A) -> Self
+              where
+                  A: Clone + Send,
+              {
+                  ReaderT::new(move |_| crate::effect::AsyncIO::pure(value.clone()))
+              }
+
+              pub fn lift_async_io(inner: crate::effect::AsyncIO<A>) -> Self {
+                  // Similar pattern to lift_io
+                  let inner_rc = Rc::new(std::cell::RefCell::new(Some(inner)));
+                  ReaderT::new(move |_| {
+                      inner_rc.borrow_mut().take().unwrap_or_else(|| {
+                          panic!("ReaderT::lift_async_io: AsyncIO already consumed.")
+                      })
+                  })
+              }
+
+              pub fn fmap_async_io<B, F>(self, function: F) -> ReaderT<R, crate::effect::AsyncIO<B>>
+              where
+                  F: Fn(A) -> B + Send + 'static,
+                  B: 'static,
+              {
+                  // Implementation similar to fmap_io
+              }
+
+              pub fn flat_map_async_io<B, F>(self, function: F) -> ReaderT<R, crate::effect::AsyncIO<B>>
+              where
+                  F: Fn(A) -> ReaderT<R, crate::effect::AsyncIO<B>> + 'static,
+                  B: 'static,
+                  R: Clone,
+              {
+                  // Implementation similar to flat_map_io
+              }
+
+              pub fn ask_async_io() -> Self
+              where
+                  R: Clone + Send,
+                  A: From<R>,
+              {
+                  ReaderT::new(|environment: R| crate::effect::AsyncIO::pure(A::from(environment)))
+              }
+          }
+
+      - id: 12.3
+        description: |
+          テスト作成: StateT with AsyncIO
+        test_first: true
+        test_cases:
+          - test_state_transformer_pure_async_io
+          - test_state_transformer_lift_async_io
+          - test_state_transformer_fmap_async_io
+          - test_state_transformer_flat_map_async_io
+          - test_state_transformer_get_async_io
+          - test_state_transformer_put_async_io
+
+      - id: 12.4
+        description: |
+          StateT の AsyncIO サポート実装
+        implementation: |
+          #[cfg(feature = "async")]
+          impl<S, A> StateT<S, crate::effect::AsyncIO<(A, S)>>
+          where
+              S: 'static,
+              A: 'static,
+          {
+              pub fn pure_async_io(value: A) -> Self
+              where
+                  A: Clone + Send,
+                  S: Send,
+              {
+                  StateT::new(move |state| crate::effect::AsyncIO::pure((value.clone(), state)))
+              }
+
+              // ... similar methods as IO
+          }
+
+      - id: 12.5
+        description: |
+          テスト作成: ReaderT::run_async_io の動作
+        test_first: true
+        test_cases:
+          - test_reader_transformer_run_async_io
+          - test_reader_transformer_run_async_io_with_env
+
+      - id: 12.6
+        description: |
+          ReaderT::run_async_io の実装
+          REQ-710 で定義された run_async_io メソッドを実装
+        implementation: |
+          #[cfg(feature = "async")]
+          impl<R, A> ReaderT<R, crate::effect::AsyncIO<A>>
+          where
+              R: 'static,
+              A: 'static,
+          {
+              /// Runs the ReaderT by providing the environment and returning the AsyncIO.
+              ///
+              /// This is the primary way to execute a `ReaderT<R, AsyncIO<A>>` computation.
+              ///
+              /// # Arguments
+              ///
+              /// * `environment` - The environment value to run the computation with.
+              ///
+              /// # Returns
+              ///
+              /// The inner `AsyncIO<A>` that can then be executed with `.run_async().await`.
+              pub fn run_async_io(self, environment: R) -> crate::effect::AsyncIO<A> {
+                  self.run(environment)
+              }
+          }
+
+      - id: 12.7
+        description: |
+          テスト作成: StateT::run_async_io の動作
+        test_first: true
+        test_cases:
+          - test_state_transformer_run_async_io
+          - test_state_transformer_run_async_io_with_state
+
+      - id: 12.8
+        description: |
+          StateT::run_async_io の実装
+          REQ-710 で定義された run_async_io メソッドを実装
+        implementation: |
+          #[cfg(feature = "async")]
+          impl<S, A> StateT<S, crate::effect::AsyncIO<(A, S)>>
+          where
+              S: 'static,
+              A: 'static,
+          {
+              /// Runs the StateT by providing the initial state and returning the AsyncIO.
+              ///
+              /// This is the primary way to execute a `StateT<S, AsyncIO<(A, S)>>` computation.
+              ///
+              /// # Arguments
+              ///
+              /// * `initial_state` - The initial state to run the computation with.
+              ///
+              /// # Returns
+              ///
+              /// The inner `AsyncIO<(A, S)>` that can then be executed with `.run_async().await`.
+              pub fn run_async_io(self, initial_state: S) -> crate::effect::AsyncIO<(A, S)> {
+                  self.run(initial_state)
+              }
+          }
+
+  # ---------------------------------------------------------------------------
+  # Step 13: 統合テスト
+  # ---------------------------------------------------------------------------
+  - step: 13
+    name: 統合テスト
+    description: 全体の統合テストと実用的なシナリオのテスト
+    files:
+      - tests/async_io_integration_tests.rs
+
+    tasks:
+      - id: 13.1
+        description: |
+          テスト作成: 複数の AsyncIO を組み合わせた複雑なワークフロー
+        test_cases:
+          - test_complex_async_io_workflow
+          - test_async_io_with_eff_async_macro
+
+      - id: 13.2
+        description: |
+          テスト作成: IO と AsyncIO の混合使用
+        test_cases:
+          - test_io_and_async_io_interop
+          - test_sync_to_async_workflow
+
+      - id: 13.3
+        description: |
+          テスト作成: Transformer との統合
+        test_cases:
+          - test_reader_transformer_async_io_workflow
+          - test_state_transformer_async_io_workflow
+
+      - id: 13.4
+        description: |
+          テスト作成: 副作用の実行順序
+        test_cases:
+          - test_async_io_side_effect_order
+          - test_async_io_concurrent_execution
+
+# =============================================================================
+# 依存関係グラフ
+# =============================================================================
+
+dependency_graph:
+  requirements:
+    REQ-701:
+      depends_on: []
+      description: AsyncIO 型定義（基盤）
+
+    REQ-702:
+      depends_on:
+        - REQ-701
+      description: コンストラクタは型定義に依存
+
+    REQ-703:
+      depends_on:
+        - REQ-701
+        - REQ-702
+      description: 実行メソッドはコンストラクタに依存
+
+    REQ-704:
+      depends_on:
+        - REQ-701
+        - REQ-702
+        - REQ-703
+      description: fmap は実行メソッドを内部で使用
+
+    REQ-705:
+      depends_on:
+        - REQ-704
+      description: Applicative は Functor を継承
+
+    REQ-706:
+      depends_on:
+        - REQ-705
+      description: Monad は Applicative を継承
+
+    REQ-707:
+      depends_on:
+        - REQ-703
+        - REQ-706
+      description: 変換は実行メソッドと Monad 操作を使用
+
+    REQ-708:
+      depends_on:
+        - REQ-706
+      description: ユーティリティは Monad 操作を使用
+
+    REQ-709:
+      depends_on:
+        - REQ-706
+      description: マクロは flat_map に展開される
+
+    REQ-710:
+      depends_on:
+        - REQ-706
+      description: Transformer は AsyncIO の Monad 操作を使用
+
+  steps:
+    step_1: []
+    step_2:
+      - step_1
+    step_3:
+      - step_2
+    step_4:
+      - step_3
+    step_5:
+      - step_4
+    step_6:
+      - step_4
+    step_7:
+      - step_6
+    step_8:
+      - step_7
+    step_9:
+      - step_8
+    step_10:
+      - step_8
+    step_11:
+      - step_8
+    step_12:
+      - step_8
+    step_13:
+      - step_9
+      - step_10
+      - step_11
+      - step_12
+
+# =============================================================================
+# テストカバレッジ要件
+# =============================================================================
+
+test_coverage:
+  target: 100%
+
+  unit_tests:
+    async_io_tests.rs:
+      modules:
+        basic_operations:
+          - test_async_io_pure_and_run
+          - test_async_io_new_and_run
+          - test_async_io_from_future
+          - test_async_io_pure_with_string
+          - test_async_io_pure_with_struct
+
+        lazy_evaluation:
+          - test_async_io_new_is_lazy
+          - test_async_io_fmap_is_lazy
+          - test_async_io_flat_map_is_lazy
+          - test_async_io_side_effect_not_executed_on_creation
+
+        functor:
+          - test_async_io_fmap_basic
+          - test_async_io_fmap_chain
+          - test_async_io_fmap_type_change
+          - test_async_io_fmap_identity
+
+        applicative:
+          - test_async_io_map2_basic
+          - test_async_io_map2_with_different_types
+          - test_async_io_product_basic
+          - test_async_io_product_tuple_type
+          - test_async_io_apply_basic
+
+        monad:
+          - test_async_io_flat_map_basic
+          - test_async_io_flat_map_chain
+          - test_async_io_and_then_is_flat_map_alias
+          - test_async_io_then_discards_first
+          - test_async_io_then_executes_first_for_side_effect
+
+        conversion:
+          - test_io_to_async_basic
+          - test_io_to_async_preserves_value
+          - test_async_io_to_sync_basic
+          - test_async_io_to_sync_preserves_value
+          - test_io_to_async_to_sync_roundtrip
+
+        utilities:
+          - test_async_io_delay_async_waits
+          - test_async_io_delay_async_is_lazy
+          - test_async_io_timeout_completes_in_time
+          - test_async_io_timeout_returns_none_on_timeout
+          - test_async_io_race_returns_first_completed
+          - test_async_io_catch_async_on_success
+          - test_async_io_catch_async_recovers_panic
+
+  law_tests:
+    async_io_laws.rs:
+      functor_laws:
+        - prop_async_io_functor_identity
+        - prop_async_io_functor_composition
+
+      applicative_laws:
+        - prop_async_io_applicative_identity
+        - prop_async_io_applicative_homomorphism
+        - prop_async_io_applicative_interchange
+        - prop_async_io_applicative_composition
+
+      monad_laws:
+        - prop_async_io_monad_left_identity
+        - prop_async_io_monad_right_identity
+        - prop_async_io_monad_associativity
+
+  macro_tests:
+    eff_async_macro_tests.rs:
+      - test_eff_async_single_bind
+      - test_eff_async_multiple_binds
+      - test_eff_async_with_let
+      - test_eff_async_wildcard_pattern
+      - test_eff_async_tuple_pattern
+      - test_eff_async_nested
+
+# =============================================================================
+# リスクと対策
+# =============================================================================
+
+risks_and_mitigations:
+
+  - id: RISK-001
+    name: tokio runtime 依存
+    severity: medium
+    description: |
+      AsyncIO は tokio runtime に依存する。
+      async-std など他のランタイムを使用したいユーザーには対応できない。
+    mitigation: |
+      - tokio を optional dependency として feature フラグで制御
+      - 将来的に runtime-agnostic な実装を検討（Phase 8 以降）
+      - ドキュメントで tokio への依存を明記
+
+  - id: RISK-002
+    name: nested runtime エラー
+    severity: high
+    description: |
+      AsyncIO::to_sync を async コンテキスト内で呼び出すと
+      nested runtime エラーが発生する。
+    mitigation: |
+      - ドキュメントで警告を明記
+      - "WARNING: This method cannot be used within an async context"
+      - 可能であれば panic ではなく Result を返す設計を検討
+    decision: |
+      当面はドキュメント警告で対応。
+      to_sync の戻り値を IO<A> として維持し、
+      呼び出し側で同期コンテキストかどうかを判断させる。
+
+  - id: RISK-003
+    name: Send 境界の制約
+    severity: medium
+    description: |
+      AsyncIO 内部の Future は Send である必要があり、
+      Rc, RefCell などの非 Send 型を内部で使用できない。
+    mitigation: |
+      - これは tokio のマルチスレッドランタイムの標準的な要件
+      - ドキュメントで説明
+      - 同期 IO は Rc/RefCell を使用可能なので、使い分けを促す
+
+  - id: RISK-004
+    name: proptest での非同期テスト
+    severity: low
+    description: |
+      proptest は同期テストを前提としており、
+      非同期テストには追加の工夫が必要。
+    mitigation: |
+      - tokio::runtime::Runtime::new().block_on() でテストをラップ
+      - proptest-tokio クレートの使用は検討するが必須ではない
+      - 法則テストは小さな入力で高速に実行できるので問題は小さい
+
+  - id: RISK-005
+    name: catch_async でのパニックキャッチ
+    severity: low
+    description: |
+      非同期コンテキストでのパニックキャッチは
+      std::panic::catch_unwind とは異なる動作をする可能性がある。
+    mitigation: |
+      - futures::FutureExt::catch_unwind を使用
+      - テストでパニックケースを網羅
+      - ドキュメントで動作を明記
+
+  - id: RISK-006
+    name: race での Cancel Safety
+    severity: medium
+    description: |
+      tokio::select! を使用した race では、
+      負けた側の Future がキャンセルされる。
+      キャンセル時の状態が不定になる可能性がある。
+    mitigation: |
+      - これは Future/async の標準的な動作
+      - ドキュメントで説明
+      - cancel-safe でない操作には警告を追加
+
+# =============================================================================
+# 成功基準
+# =============================================================================
+
+success_criteria:
+
+  functional:
+    - 全ての要件（REQ-701 から REQ-710）が実装されていること
+    - Functor 則を満たすこと（proptest で検証）
+    - Applicative 則を満たすこと（proptest で検証）
+    - Monad 則を満たすこと（proptest で検証）
+    - IO <-> AsyncIO 変換が正しく動作すること
+    - eff_async! マクロが正しく展開されること
+
+  code_quality:
+    - テストカバレッジ 100%
+    - "#![forbid(unsafe_code)] を維持"
+    - clippy 警告なし（#![deny(warnings)]）
+    - 全てのパブリック API にドキュメントコメント
+    - 略語を使用しない命名規則の遵守
+
+  performance:
+    - pure な AsyncIO は即座に解決すること
+    - 変換のオーバーヘッドが最小限であること
+    - 不必要な Box の使用を避けること
+
+  compatibility:
+    - 既存の IO コードに変更が不要であること（feature flag で分離）
+    - Rust 1.92.0 以上で動作すること
+    - tokio 1.x 系と互換性があること
+
+# =============================================================================
+# 実装スケジュール目安
+# =============================================================================
+
+estimated_timeline:
+  unit: hours
+
+  steps:
+    step_1_cargo_setup: 0.5
+    step_2_type_definition: 1
+    step_3_constructors: 2
+    step_4_execution: 1.5
+    step_5_lazy_tests: 1
+    step_6_functor: 2
+    step_7_applicative: 2
+    step_8_monad: 2
+    step_9_conversion: 3
+    step_10_utilities: 3
+    step_11_macro: 2
+    step_12_transformers: 4
+    step_13_integration: 2
+
+  total_estimated_hours: 26
+
+  notes: |
+    - TDD サイクル（テスト作成 -> 実装 -> リファクタリング）の時間を含む
+    - レビューとフィードバック対応の時間は別途必要
+    - 予期せぬ問題への対応バッファとして +30% を見込む

@@ -1,7 +1,7 @@
 //! axum ハンドラ
 //!
 //! axum フレームワーク用のハンドラ関数を提供する。
-//! IO モナドの `run_unsafe()` を「世界の端」で呼び出す。
+//! IO モナドを `AsyncIO` に変換し、`run_async()` を「世界の端」で呼び出す。
 
 use axum::{http::StatusCode, response::IntoResponse};
 
@@ -10,7 +10,7 @@ use crate::api::{HttpRequest, place_order_api};
 /// POST /place-order ハンドラ
 ///
 /// JSON リクエストを受け取り、`place_order_api` を呼び出し、
-/// IO モナドを実行してレスポンスを返す。
+/// IO モナドを `AsyncIO` に変換して非同期実行し、レスポンスを返す。
 ///
 /// # Arguments
 ///
@@ -28,7 +28,6 @@ use crate::api::{HttpRequest, place_order_api};
 ///
 /// let app = Router::new().route("/place-order", post(place_order_handler));
 /// ```
-#[allow(clippy::unused_async)] // axum ハンドラは async が必須
 pub async fn place_order_handler(body: String) -> impl IntoResponse {
     // HttpRequest を構築
     let request = HttpRequest::new(body);
@@ -36,8 +35,8 @@ pub async fn place_order_handler(body: String) -> impl IntoResponse {
     // IO モナドを取得
     let io_response = place_order_api(&request);
 
-    // IO を実行（世界の端）
-    let response = io_response.run_unsafe();
+    // IO を AsyncIO に変換して非同期実行（世界の端）
+    let response = io_response.to_async().run_async().await;
 
     // axum レスポンスに変換
     (

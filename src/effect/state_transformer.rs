@@ -539,6 +539,211 @@ where
     }
 }
 
+// =============================================================================
+// AsyncIO-specific Methods (requires async feature)
+// =============================================================================
+
+#[cfg(feature = "async")]
+use super::AsyncIO;
+
+#[cfg(feature = "async")]
+impl<S, A> StateT<S, AsyncIO<(A, S)>>
+where
+    S: Send + 'static,
+    A: Send + 'static,
+{
+    /// Runs the StateT and returns only the result value.
+    ///
+    /// # Arguments
+    ///
+    /// * `initial_state` - The initial state to run the computation with
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use functional_rusty::effect::{StateT, AsyncIO};
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let state: StateT<i32, AsyncIO<(i32, i32)>> = StateT::new(|s| AsyncIO::pure((s * 2, s + 1)));
+    ///     assert_eq!(state.eval_async(10).run_async().await, 20);
+    /// }
+    /// ```
+    pub fn eval_async(&self, initial_state: S) -> AsyncIO<A> {
+        self.run(initial_state).fmap(|(value, _)| value)
+    }
+
+    /// Runs the StateT and returns only the final state.
+    ///
+    /// # Arguments
+    ///
+    /// * `initial_state` - The initial state to run the computation with
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use functional_rusty::effect::{StateT, AsyncIO};
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let state: StateT<i32, AsyncIO<(i32, i32)>> = StateT::new(|s| AsyncIO::pure((s * 2, s + 1)));
+    ///     assert_eq!(state.exec_async(10).run_async().await, 11);
+    /// }
+    /// ```
+    pub fn exec_async(&self, initial_state: S) -> AsyncIO<S> {
+        self.run(initial_state).fmap(|(_, state)| state)
+    }
+
+    /// Creates a StateT that returns a constant value without modifying the state.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use functional_rusty::effect::{StateT, AsyncIO};
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let state: StateT<i32, AsyncIO<(String, i32)>> = StateT::pure_async_io("hello".to_string());
+    ///     assert_eq!(state.run(42).run_async().await, ("hello".to_string(), 42));
+    /// }
+    /// ```
+    pub fn pure_async_io(value: A) -> Self
+    where
+        A: Clone,
+    {
+        StateT::new(move |state| AsyncIO::pure((value.clone(), state)))
+    }
+
+    /// Maps a function over the value inside the AsyncIO.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use functional_rusty::effect::{StateT, AsyncIO};
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let state: StateT<i32, AsyncIO<(i32, i32)>> = StateT::new(|s| AsyncIO::pure((s, s + 1)));
+    ///     let mapped = state.fmap_async_io(|v| v * 2);
+    ///     assert_eq!(mapped.run(10).run_async().await, (20, 11));
+    /// }
+    /// ```
+    pub fn fmap_async_io<B, F>(self, function: F) -> StateT<S, AsyncIO<(B, S)>>
+    where
+        F: Fn(A) -> B + Send + Sync + 'static,
+        B: Send + 'static,
+    {
+        let original = self.run_function;
+        let function_rc = std::sync::Arc::new(function);
+        StateT::new(move |state| {
+            let async_io = (original)(state);
+            let function_clone = function_rc.clone();
+            async_io.fmap(move |(value, new_state)| (function_clone(value), new_state))
+        })
+    }
+
+    /// Chains StateT computations with AsyncIO.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use functional_rusty::effect::{StateT, AsyncIO};
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let state: StateT<i32, AsyncIO<(i32, i32)>> = StateT::new(|s| AsyncIO::pure((s, s + 1)));
+    ///     let chained = state.flat_map_async_io(|v| {
+    ///         StateT::new(move |s| AsyncIO::pure((v + s, s * 2)))
+    ///     });
+    ///     // Initial state 10: first (10, 11), then (10 + 11, 22) = (21, 22)
+    ///     assert_eq!(chained.run(10).run_async().await, (21, 22));
+    /// }
+    /// ```
+    pub fn flat_map_async_io<B, F>(self, function: F) -> StateT<S, AsyncIO<(B, S)>>
+    where
+        F: Fn(A) -> StateT<S, AsyncIO<(B, S)>> + Send + Sync + 'static,
+        B: Send + 'static,
+    {
+        let original = self.run_function;
+        let function_arc = std::sync::Arc::new(function);
+        StateT::new(move |state| {
+            let async_io = (original)(state);
+            let function_clone = function_arc.clone();
+            async_io.flat_map(move |(value, intermediate_state)| {
+                let next = function_clone(value);
+                next.run(intermediate_state)
+            })
+        })
+    }
+
+    /// Returns the current state as the result.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use functional_rusty::effect::{StateT, AsyncIO};
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let state: StateT<i32, AsyncIO<(i32, i32)>> = StateT::get_async_io();
+    ///     assert_eq!(state.run(42).run_async().await, (42, 42));
+    /// }
+    /// ```
+    pub fn get_async_io() -> Self
+    where
+        S: Clone,
+        A: From<S>,
+    {
+        StateT::new(|state: S| AsyncIO::pure((A::from(state.clone()), state)))
+    }
+
+    /// Replaces the current state with a new value.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use functional_rusty::effect::{StateT, AsyncIO};
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let state: StateT<i32, AsyncIO<((), i32)>> =
+    ///         StateT::<i32, AsyncIO<((), i32)>>::put_async_io(100);
+    ///     assert_eq!(state.run(42).run_async().await, ((), 100));
+    /// }
+    /// ```
+    pub fn put_async_io(new_state: S) -> StateT<S, AsyncIO<((), S)>>
+    where
+        S: Clone,
+    {
+        StateT::new(move |_| AsyncIO::pure(((), new_state.clone())))
+    }
+
+    /// Modifies the current state using a function.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use functional_rusty::effect::{StateT, AsyncIO};
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let state: StateT<i32, AsyncIO<((), i32)>> =
+    ///         StateT::<i32, AsyncIO<((), i32)>>::modify_async_io(|s| s * 2);
+    ///     assert_eq!(state.run(21).run_async().await, ((), 42));
+    /// }
+    /// ```
+    pub fn modify_async_io<F>(modifier: F) -> StateT<S, AsyncIO<((), S)>>
+    where
+        F: Fn(S) -> S + Send + 'static,
+    {
+        let modifier_arc = std::sync::Arc::new(modifier);
+        StateT::new(move |state| {
+            let modifier_clone = modifier_arc.clone();
+            AsyncIO::pure(((), modifier_clone(state)))
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

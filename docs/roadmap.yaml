@@ -1,8 +1,8 @@
 # Functional-Rusty プロジェクト ロードマップ
 # Rust で関数型プログラミングを実現するためのライブラリ開発計画
 
-version: "1.0.0"
-last_updated: "2025-12-31"
+version: "1.1.0"
+last_updated: "2026-01-01"
 
 # プロジェクト概要
 project:
@@ -818,6 +818,103 @@ phases:
         priority: high
         artifacts:
           - tests/transformer_laws.rs
+
+  - id: phase_7
+    name: 非同期効果システム
+    name_en: Async Effect System
+    status: completed
+    started_at: "2026-01-01"
+    completed_at: "2026-01-01"
+    description: |
+      axum 等の async フレームワークとの統合を実現するため、
+      AsyncIO モナドを追加する。分離型アプローチ（IO と AsyncIO を別の型として実装）を採用。
+      既存の IO を壊さず、非同期対応を段階的に導入可能。
+    dependencies:
+      - phase_6
+    notes: |
+      ISSUE-001（axum ハンドラの async 必須問題）を解決するための Phase。
+      分離型を採用した理由:
+      - Rust のゼロコスト抽象の原則に適合（同期処理時はオーバーヘッドなし）
+      - 後方互換性の完全な維持（既存コードは修正不要）
+      - 型による意図の明示（関数型プログラミングの原則に合致）
+      - nested runtime 問題の回避（統合型の run_sync は async 内で使用不可）
+      - Send 境界の柔軟性（同期 IO は Rc/RefCell が使える）
+    deliverables:
+      - id: async_io_monad
+        name: AsyncIO モナド
+        description: |
+          非同期の副作用を表現する Monad。
+          Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = A> + Send>> + Send> で実装。
+          run_async() で非同期実行。
+          Functor, Applicative, Monad を実装。
+        status: completed
+        priority: critical
+        artifacts:
+          - src/effect/async_io.rs
+          - tests/async_io_tests.rs
+          - tests/async_io_laws.rs
+
+      - id: io_to_async_conversion
+        name: IO ↔ AsyncIO 変換
+        description: |
+          IO::to_async() で同期 IO を非同期 IO に変換。
+          AsyncIO::to_sync() で非同期 IO を同期 IO に変換（ブロッキング）。
+        status: completed
+        priority: critical
+        artifacts:
+          - src/effect/io.rs (追加)
+
+      - id: async_io_operations
+        name: AsyncIO 操作ユーティリティ
+        description: |
+          非同期操作のユーティリティ関数。
+          delay_async, timeout, race 等を提供。
+        status: completed
+        priority: medium
+        artifacts:
+          - src/effect/async_io.rs (async_io.rs に統合)
+
+      - id: eff_async_macro
+        name: eff_async! マクロ
+        description: |
+          AsyncIO 用の do 記法マクロ。
+          async { } ブロック内で使用可能。
+          pattern <= async_io; の構文をサポート。
+        status: completed
+        priority: medium
+        artifacts:
+          - src/effect/eff_async_macro.rs
+          - tests/eff_async_macro_tests.rs
+        example: |
+          let result = eff_async! {
+              data <= fetch_data_async();
+              processed <= process_async(data);
+              AsyncIO::pure(processed)
+          };
+
+      - id: transformer_async_support
+        name: Transformer async サポート
+        description: |
+          ReaderT, StateT に _async_io メソッドを追加。
+          AsyncIO を内部 Monad として使用可能に。
+        status: completed
+        priority: high
+        artifacts:
+          - src/effect/reader_transformer.rs (追加)
+          - src/effect/state_transformer.rs (追加)
+          - tests/async_io_transformer_tests.rs
+
+      - id: order_taking_async_integration
+        name: order-taking サンプル統合
+        description: |
+          order-taking サンプルを AsyncIO 対応に更新。
+          #[allow(clippy::unused_async)] を削除可能に。
+        status: completed
+        priority: high
+        artifacts:
+          - samples/order/src/api/axum_handler.rs (修正)
+        references:
+          - samples/order/docs/issues/issue_001_async_handler_clippy.yaml
 
 # ステータス定義
 status_definitions:

@@ -515,7 +515,7 @@ requirements:
 
       - step: 2
         description: check_product_code_exists で存在を確認
-        error_case: 存在しない場合は ValidationError("ProductCode", "Invalid: {code}")
+        error_case: '存在しない場合は ValidationError("ProductCode", "Invalid: {code}")'
 
     f_sharp_reference: |
       let toProductCode (checkProductCodeExists:CheckProductCodeExists) productCode =
@@ -840,7 +840,8 @@ requirements:
           customer_info: { first_name: "John", last_name: "Doe", ... }
           shipping_address: { ... }
           billing_address: { ... }
-          lines: [{ order_line_id: "line-001", product_code: "W1234", quantity: 10 }]
+          lines:
+            [{ order_line_id: "line-001", product_code: "W1234", quantity: 10 }]
           promotion_code: ""
         mocks:
           check_product: returns true
