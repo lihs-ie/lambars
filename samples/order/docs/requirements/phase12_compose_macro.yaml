@@ -1,6 +1,6 @@
 # Phase 12: compose! マクロによる関数合成 要件定義
 # Order Taking Sample Application
-# functional-rusty の compose! マクロを使用した再利用可能な合成関数の定義
+# lambars の compose! マクロを使用した再利用可能な合成関数の定義
 
 version: "1.0.0"
 created_at: "2026-01-01"
@@ -14,7 +14,7 @@ phase_name_en: Function Composition with compose! Macro
 
 overview:
   description: |
-    Haskell の関数合成演算子 (.) に相当する functional-rusty の compose! マクロを
+    Haskell の関数合成演算子 (.) に相当する lambars の compose! マクロを
     Order Taking サンプルアプリケーションに適用する。
 
     compose! マクロは右から左への関数合成（数学的合成）を実現する:
@@ -218,7 +218,7 @@ requirements:
         )];
 
       target_rust: |
-        use functional_rusty::compose;
+        use lambars::compose;
 
         // create_events 関数内で合成関数を定義
         pub fn create_events(
@@ -293,7 +293,7 @@ requirements:
         ));
 
       target_rust: |
-        use functional_rusty::compose;
+        use lambars::compose;
 
         pub fn place_order<...>(...) -> IO<Result<Vec<PlaceOrderEvent>, PlaceOrderError>>
         where ...
@@ -360,7 +360,7 @@ requirements:
             .collect();
 
       target_rust_example: |
-        use functional_rusty::compose;
+        use lambars::compose;
 
         // 現在の実装（単一関数）- 変更不要
         let shipment_lines: Vec<ShippableOrderLine> = priced_order
@@ -420,7 +420,7 @@ requirements:
       guideline_content: |
         //! # 関数合成マクロの使い分け
         //!
-        //! functional-rusty は2つの関数合成マクロを提供する:
+        //! lambars は2つの関数合成マクロを提供する:
         //!
         //! ## pipe! マクロ
         //!
@@ -508,7 +508,7 @@ requirements:
           結合法則の検証:
           compose!(f, compose!(g, h)) == compose!(compose!(f, g), h)
         code: |
-          use functional_rusty::compose;
+          use lambars::compose;
 
           fn f(x: i32) -> i32 { x + 1 }
           fn g(x: i32) -> i32 { x * 2 }
@@ -524,7 +524,7 @@ requirements:
           左恒等元の検証:
           compose!(identity, f) == f
         code: |
-          use functional_rusty::{compose, identity};
+          use lambars::{compose, identity};
 
           fn f(x: i32) -> i32 { x * 2 }
 
@@ -536,7 +536,7 @@ requirements:
           右恒等元の検証:
           compose!(f, identity) == f
         code: |
-          use functional_rusty::{compose, identity};
+          use lambars::{compose, identity};
 
           fn f(x: i32) -> i32 { x * 2 }
 
@@ -548,7 +548,7 @@ requirements:
           ドメイン関数の合成テスト:
           create_shipping_event と PlaceOrderEvent::ShippableOrderPlaced の合成
         code: |
-          use functional_rusty::compose;
+          use lambars::compose;
           use order_taking_sample::workflow::{
               create_shipping_event, PlaceOrderEvent, PricedOrder, PricingMethod,
           };
@@ -566,7 +566,7 @@ requirements:
         description: |
           部分適用と compose! の組み合わせテスト
         code: |
-          use functional_rusty::compose;
+          use lambars::compose;
           use order_taking_sample::workflow::{
               add_shipping_info_to_order, free_vip_shipping, calculate_shipping_cost,
               PricedOrder, PricingMethod,
@@ -734,8 +734,8 @@ artifacts:
 
 dependencies:
   internal:
-    - functional_rusty::compose!
-    - functional_rusty::identity
+    - lambars::compose!
+    - lambars::identity
 
   dev_dependencies:
     - rstest

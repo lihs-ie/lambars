@@ -13,7 +13,7 @@
 //! # Examples
 //!
 //! ```rust
-//! use functional_rusty::effect::IO;
+//! use lambars::effect::IO;
 //!
 //! // Create a pure IO action
 //! let io = IO::pure(42);
@@ -29,7 +29,7 @@
 //! # Side Effect Deferral
 //!
 //! ```rust
-//! use functional_rusty::effect::IO;
+//! use lambars::effect::IO;
 //! use std::sync::atomic::{AtomicBool, Ordering};
 //! use std::sync::Arc;
 //!
@@ -87,7 +87,7 @@ impl<A: 'static> IO<A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::IO;
+    /// use lambars::effect::IO;
     ///
     /// let io = IO::new(|| {
     ///     println!("Side effect!");
@@ -119,7 +119,7 @@ impl<A: 'static> IO<A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::IO;
+    /// use lambars::effect::IO;
     ///
     /// let io = IO::pure(42);
     /// assert_eq!(io.run_unsafe(), 42);
@@ -142,7 +142,7 @@ impl<A: 'static> IO<A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::IO;
+    /// use lambars::effect::IO;
     ///
     /// let io = IO::pure(42);
     /// let result = io.run_unsafe();
@@ -163,7 +163,7 @@ impl<A: 'static> IO<A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::IO;
+    /// use lambars::effect::IO;
     ///
     /// let io = IO::pure(21).fmap(|x| x * 2);
     /// assert_eq!(io.run_unsafe(), 42);
@@ -191,7 +191,7 @@ impl<A: 'static> IO<A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::IO;
+    /// use lambars::effect::IO;
     ///
     /// let io = IO::pure(10).flat_map(|x| IO::pure(x * 2));
     /// assert_eq!(io.run_unsafe(), 20);
@@ -215,7 +215,7 @@ impl<A: 'static> IO<A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::IO;
+    /// use lambars::effect::IO;
     ///
     /// let io = IO::pure(10).and_then(|x| IO::pure(x + 5));
     /// assert_eq!(io.run_unsafe(), 15);
@@ -239,7 +239,7 @@ impl<A: 'static> IO<A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::IO;
+    /// use lambars::effect::IO;
     ///
     /// let io = IO::pure(10).then(IO::pure(20));
     /// assert_eq!(io.run_unsafe(), 20);
@@ -261,7 +261,7 @@ impl<A: 'static> IO<A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::IO;
+    /// use lambars::effect::IO;
     ///
     /// let io1 = IO::pure(10);
     /// let io2 = IO::pure(20);
@@ -286,7 +286,7 @@ impl<A: 'static> IO<A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::IO;
+    /// use lambars::effect::IO;
     ///
     /// let io1 = IO::pure(10);
     /// let io2 = IO::pure("hello".to_string());
@@ -317,7 +317,7 @@ impl IO<()> {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use functional_rusty::effect::IO;
+    /// use lambars::effect::IO;
     ///
     /// let io = IO::print_line("Hello, World!");
     /// io.run_unsafe(); // Prints "Hello, World!"
@@ -339,7 +339,7 @@ impl IO<()> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::IO;
+    /// use lambars::effect::IO;
     /// use std::time::Duration;
     ///
     /// let io = IO::delay(Duration::from_millis(100));
@@ -360,7 +360,7 @@ impl IO<std::io::Result<String>> {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use functional_rusty::effect::IO;
+    /// use lambars::effect::IO;
     ///
     /// let io = IO::read_line();
     /// let line = io.run_unsafe().expect("Failed to read line");
@@ -389,7 +389,7 @@ impl<A: 'static> IO<A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::IO;
+    /// use lambars::effect::IO;
     ///
     /// let panicking = IO::new(|| panic!("oops"));
     /// let recovered = IO::catch(panicking, |_| "recovered".to_string());
@@ -397,7 +397,7 @@ impl<A: 'static> IO<A> {
     /// ```
     ///
     /// ```rust
-    /// use functional_rusty::effect::IO;
+    /// use lambars::effect::IO;
     ///
     /// let successful = IO::pure(42);
     /// let with_catch = IO::catch(successful, |_| 0);
@@ -444,7 +444,7 @@ impl<A: Send + 'static> IO<A> {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::{IO, AsyncIO};
+    /// use lambars::effect::{IO, AsyncIO};
     ///
     /// #[tokio::main]
     /// async fn main() {

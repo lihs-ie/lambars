@@ -251,14 +251,14 @@ mod tests {
 }
 ```
 
-## functional-rusty Integration
+## lambars Integration
 
 ### IO Monad Usage
 
 The `IO` monad wraps side effects, making them explicit in the type signature:
 
 ```rust
-use functional_rusty::effect::IO;
+use lambars::effect::IO;
 
 // The API returns an IO action, not the actual response
 pub fn place_order_api(request: &HttpRequest) -> IO<HttpResponse> {
@@ -286,7 +286,7 @@ let response = io_response.run_unsafe(); // NOW side effects happen
 The `Lazy` type provides memoized deferred evaluation:
 
 ```rust
-use functional_rusty::control::Lazy;
+use lambars::control::Lazy;
 
 // In pricing, we may not need all prices
 struct PricingMethod {
@@ -308,7 +308,7 @@ let widget_price = pricing.get_widget_price.force();
 Lenses enable immutable updates of nested structures:
 
 ```rust
-use functional_rusty::optics::Lens;
+use lambars::optics::Lens;
 
 // PersonalName has generated lenses
 let first_name_lens = PersonalName::first_name_lens();
@@ -329,7 +329,7 @@ let customer_first_name_lens = customer_name_lens.compose(first_name_lens);
 
 ### Future Extensions
 
-Potential additions from functional-rusty:
+Potential additions from lambars:
 
 - **State Monad**: Thread state through computations
 - **Reader Monad**: Inject configuration/dependencies
@@ -448,4 +448,4 @@ This architecture demonstrates that functional domain modeling is not only possi
 2. **Pure functions transform data** - Business logic is testable
 3. **Effects are explicit** - Side effects are marked and isolated
 4. **Dependencies are injected** - Functions are composable and testable
-5. **functional-rusty enables FP patterns** - IO, Lazy, and Lens bring functional power
+5. **lambars enables FP patterns** - IO, Lazy, and Lens bring functional power

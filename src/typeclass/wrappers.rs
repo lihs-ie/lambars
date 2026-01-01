@@ -28,7 +28,7 @@
 /// # Examples
 ///
 /// ```rust
-/// use functional_rusty::typeclass::Sum;
+/// use lambars::typeclass::Sum;
 ///
 /// let a = Sum::new(3);
 /// let b = Sum::new(5);
@@ -42,7 +42,7 @@
 /// Once `Semigroup` and `Monoid` are implemented, you can use:
 ///
 /// ```ignore
-/// use functional_rusty::typeclass::{Sum, Semigroup, Monoid};
+/// use lambars::typeclass::{Sum, Semigroup, Monoid};
 ///
 /// let a = Sum(3);
 /// let b = Sum(5);
@@ -58,7 +58,7 @@ impl<A> Sum<A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Sum;
+    /// use lambars::typeclass::Sum;
     ///
     /// let sum = Sum::new(42);
     /// assert_eq!(sum.into_inner(), 42);
@@ -73,7 +73,7 @@ impl<A> Sum<A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Sum;
+    /// use lambars::typeclass::Sum;
     ///
     /// let sum = Sum::new(42);
     /// assert_eq!(sum.into_inner(), 42);
@@ -114,7 +114,7 @@ impl<A> From<A> for Sum<A> {
 /// # Examples
 ///
 /// ```rust
-/// use functional_rusty::typeclass::Product;
+/// use lambars::typeclass::Product;
 ///
 /// let a = Product::new(3);
 /// let b = Product::new(5);
@@ -128,7 +128,7 @@ impl<A> From<A> for Sum<A> {
 /// Once `Semigroup` and `Monoid` are implemented, you can use:
 ///
 /// ```ignore
-/// use functional_rusty::typeclass::{Product, Semigroup, Monoid};
+/// use lambars::typeclass::{Product, Semigroup, Monoid};
 ///
 /// let a = Product(3);
 /// let b = Product(5);
@@ -144,7 +144,7 @@ impl<A> Product<A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Product;
+    /// use lambars::typeclass::Product;
     ///
     /// let product = Product::new(42);
     /// assert_eq!(product.into_inner(), 42);
@@ -159,7 +159,7 @@ impl<A> Product<A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Product;
+    /// use lambars::typeclass::Product;
     ///
     /// let product = Product::new(42);
     /// assert_eq!(product.into_inner(), 42);
@@ -205,7 +205,7 @@ impl<A> From<A> for Product<A> {
 /// # Examples
 ///
 /// ```rust
-/// use functional_rusty::typeclass::Max;
+/// use lambars::typeclass::Max;
 ///
 /// let a = Max::new(3);
 /// let b = Max::new(5);
@@ -220,7 +220,7 @@ impl<A> From<A> for Product<A> {
 /// Once `Semigroup` and `Monoid` are implemented, you can use:
 ///
 /// ```ignore
-/// use functional_rusty::typeclass::{Max, Semigroup, Monoid};
+/// use lambars::typeclass::{Max, Semigroup, Monoid};
 ///
 /// let a = Max(3);
 /// let b = Max(5);
@@ -236,7 +236,7 @@ impl<A> Max<A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Max;
+    /// use lambars::typeclass::Max;
     ///
     /// let max = Max::new(42);
     /// assert_eq!(max.into_inner(), 42);
@@ -251,7 +251,7 @@ impl<A> Max<A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Max;
+    /// use lambars::typeclass::Max;
     ///
     /// let max = Max::new(42);
     /// assert_eq!(max.into_inner(), 42);
@@ -293,7 +293,7 @@ impl<A> From<A> for Max<A> {
 /// # Examples
 ///
 /// ```rust
-/// use functional_rusty::typeclass::Min;
+/// use lambars::typeclass::Min;
 ///
 /// let a = Min::new(3);
 /// let b = Min::new(5);
@@ -308,7 +308,7 @@ impl<A> From<A> for Max<A> {
 /// Once `Semigroup` and `Monoid` are implemented, you can use:
 ///
 /// ```ignore
-/// use functional_rusty::typeclass::{Min, Semigroup, Monoid};
+/// use lambars::typeclass::{Min, Semigroup, Monoid};
 ///
 /// let a = Min(3);
 /// let b = Min(5);
@@ -324,7 +324,7 @@ impl<A> Min<A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Min;
+    /// use lambars::typeclass::Min;
     ///
     /// let min = Min::new(42);
     /// assert_eq!(min.into_inner(), 42);
@@ -339,7 +339,7 @@ impl<A> Min<A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Min;
+    /// use lambars::typeclass::Min;
     ///
     /// let min = Min::new(42);
     /// assert_eq!(min.into_inner(), 42);
@@ -385,7 +385,7 @@ impl<A> From<A> for Min<A> {
 /// For custom types, implement `Bounded` by providing the extreme values:
 ///
 /// ```rust
-/// use functional_rusty::typeclass::Bounded;
+/// use lambars::typeclass::Bounded;
 ///
 /// #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 /// struct Score(u8);

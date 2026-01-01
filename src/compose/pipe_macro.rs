@@ -36,7 +36,7 @@
 /// ## Basic pipeline
 ///
 /// ```
-/// use functional_rusty::pipe;
+/// use lambars::pipe;
 ///
 /// fn add_one(x: i32) -> i32 { x + 1 }
 /// fn double(x: i32) -> i32 { x * 2 }
@@ -49,7 +49,7 @@
 /// ## Multi-step pipeline
 ///
 /// ```
-/// use functional_rusty::pipe;
+/// use lambars::pipe;
 ///
 /// fn square(x: i32) -> i32 { x * x }
 /// fn double(x: i32) -> i32 { x * 2 }
@@ -63,7 +63,7 @@
 /// ## Type conversion through pipeline
 ///
 /// ```
-/// use functional_rusty::pipe;
+/// use lambars::pipe;
 ///
 /// fn to_string(x: i32) -> String { x.to_string() }
 /// fn get_length(s: String) -> usize { s.len() }
@@ -75,7 +75,7 @@
 /// ## With consuming closures
 ///
 /// ```
-/// use functional_rusty::pipe;
+/// use lambars::pipe;
 ///
 /// fn consume_and_double(v: Vec<i32>) -> Vec<i32> {
 ///     v.into_iter().map(|x| x * 2).collect()
@@ -96,7 +96,7 @@
 /// ## String processing pipeline
 ///
 /// ```
-/// use functional_rusty::pipe;
+/// use lambars::pipe;
 ///
 /// fn to_uppercase(s: &str) -> String { s.to_uppercase() }
 /// fn add_exclamation(s: String) -> String { format!("{}!", s) }
@@ -108,7 +108,7 @@
 /// ## Equivalence with compose
 ///
 /// ```
-/// use functional_rusty::{compose, pipe};
+/// use lambars::{compose, pipe};
 ///
 /// fn f(x: i32) -> i32 { x + 1 }
 /// fn g(x: i32) -> i32 { x * 2 }

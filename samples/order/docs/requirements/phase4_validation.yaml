@@ -1,6 +1,6 @@
 # Phase 4: バリデーション実装 要件定義
 # Domain Modeling Made Functional の F# パターンを Rust に適用
-# functional-rusty ライブラリを使用した関数型バリデーション
+# lambars ライブラリを使用した関数型バリデーション
 
 id: phase4_validation
 name: バリデーション実装
@@ -1081,7 +1081,7 @@ future_extensions:
       fn validate_order_all_errors(...) -> Result<ValidatedOrder, Vec<ValidationError>>
       ```
 
-      functional-rusty の Validated 型を使用予定。
+      lambars の Validated 型を使用予定。
 
 # ========================================
 # テスト要件

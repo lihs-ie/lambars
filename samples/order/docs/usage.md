@@ -1,6 +1,6 @@
 # Order Taking Sample - Usage Guide
 
-This document provides a comprehensive guide to using the Order Taking Sample application, demonstrating functional programming patterns in Rust with the `functional-rusty` library.
+This document provides a comprehensive guide to using the Order Taking Sample application, demonstrating functional programming patterns in Rust with the `lambars` library.
 
 ## Quick Start
 
@@ -15,7 +15,7 @@ Add the following dependencies to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-functional-rusty = "0.1"
+lambars = "0.1"
 rust_decimal = "1.33"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -207,7 +207,7 @@ where
 ```rust
 use order_taking_sample::workflow::pricing::price_order;
 use order_taking_sample::workflow::{PricingMethod, ValidatedOrder};
-use functional_rusty::control::Lazy;
+use lambars::control::Lazy;
 
 // Pricing function uses Lazy for deferred price calculation
 let get_product_price = |code: &ProductCode| -> Price {
@@ -246,12 +246,12 @@ let io_result = place_order(dependencies, unvalidated_order);
 let events = io_result.run_unsafe()?;
 ```
 
-## functional-rusty Integration
+## lambars Integration
 
 ### IO Monad for Side Effects
 
 ```rust
-use functional_rusty::effect::IO;
+use lambars::effect::IO;
 
 // Create an IO action (no side effects yet)
 let io_print = IO::new(|| {
@@ -273,7 +273,7 @@ let result = io_composed.run_unsafe(); // Prints both messages, returns 42
 ### Lazy for Deferred Evaluation
 
 ```rust
-use functional_rusty::control::Lazy;
+use lambars::control::Lazy;
 
 // Create a lazy value (computation is deferred)
 let expensive_computation = Lazy::new(|| {
@@ -293,7 +293,7 @@ let value2 = expensive_computation.force(); // No print, returns 42
 ```rust
 use order_taking_sample::compound_types::PersonalName;
 use order_taking_sample::simple_types::String50;
-use functional_rusty::optics::Lens;
+use lambars::optics::Lens;
 
 // Create a lens for the first_name field
 let first_name_lens = PersonalName::first_name_lens();

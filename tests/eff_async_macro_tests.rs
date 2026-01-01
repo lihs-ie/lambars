@@ -3,8 +3,8 @@
 //! This module tests the eff_async! macro which provides do-notation syntax
 //! for AsyncIO monad operations.
 
-use functional_rusty::effect::AsyncIO;
-use functional_rusty::eff_async;
+use lambars::effect::AsyncIO;
+use lambars::eff_async;
 use rstest::rstest;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

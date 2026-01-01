@@ -47,7 +47,7 @@
 //! Basic usage:
 //!
 //! ```rust
-//! use functional_rusty::effect::State;
+//! use lambars::effect::State;
 //!
 //! // Create a state that doubles the result and increments the state
 //! let state: State<i32, i32> = State::new(|s: i32| (s * 2, s + 1));
@@ -59,7 +59,7 @@
 //! Counter pattern:
 //!
 //! ```rust
-//! use functional_rusty::effect::State;
+//! use lambars::effect::State;
 //!
 //! fn increment() -> State<i32, ()> {
 //!     State::modify(|count| count + 1)
@@ -95,7 +95,7 @@ use std::rc::Rc;
 /// # Examples
 ///
 /// ```rust
-/// use functional_rusty::effect::State;
+/// use lambars::effect::State;
 ///
 /// let computation: State<i32, i32> = State::get()
 ///     .flat_map(|current| {
@@ -131,7 +131,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::State;
+    /// use lambars::effect::State;
     ///
     /// let state: State<i32, i32> = State::new(|s: i32| (s * 2, s + 1));
     /// let (result, final_state) = state.run(10);
@@ -159,7 +159,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::State;
+    /// use lambars::effect::State;
     ///
     /// let computation: State<i32, String> = State::state(|s: i32| {
     ///     (format!("was: {}", s), s + 1)
@@ -190,7 +190,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::State;
+    /// use lambars::effect::State;
     ///
     /// let state: State<i32, i32> = State::new(|s: i32| (s + 1, s * 2));
     /// let (result, final_state) = state.run(10);
@@ -214,7 +214,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::State;
+    /// use lambars::effect::State;
     ///
     /// let state: State<i32, i32> = State::new(|s: i32| (s * 2, s + 1));
     /// assert_eq!(state.eval(10), 20);
@@ -237,7 +237,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::State;
+    /// use lambars::effect::State;
     ///
     /// let state: State<i32, i32> = State::new(|s: i32| (s * 2, s + 1));
     /// assert_eq!(state.exec(10), 11);
@@ -258,7 +258,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::State;
+    /// use lambars::effect::State;
     ///
     /// let state: State<i32, &str> = State::pure("constant");
     /// let (result, final_state) = state.run(42);
@@ -283,7 +283,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::State;
+    /// use lambars::effect::State;
     ///
     /// let state: State<i32, i32> = State::new(|s: i32| (s, s));
     /// let mapped = state.fmap(|value| value * 2);
@@ -314,7 +314,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::State;
+    /// use lambars::effect::State;
     ///
     /// let state: State<i32, i32> = State::new(|s: i32| (s, s + 1));
     /// let chained = state.flat_map(|value| {
@@ -347,7 +347,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::State;
+    /// use lambars::effect::State;
     ///
     /// let state: State<i32, i32> = State::new(|s: i32| (s, s + 1));
     /// let chained = state.and_then(|value| {
@@ -374,7 +374,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::State;
+    /// use lambars::effect::State;
     ///
     /// let state1: State<i32, i32> = State::new(|s: i32| (s, s + 10));
     /// let state2: State<i32, &str> = State::pure("result");
@@ -402,7 +402,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::State;
+    /// use lambars::effect::State;
     ///
     /// let state1: State<i32, i32> = State::new(|s: i32| (s, s + 1));
     /// let state2: State<i32, i32> = State::new(|s: i32| (s * 2, s + 1));
@@ -436,7 +436,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::State;
+    /// use lambars::effect::State;
     ///
     /// let state1: State<i32, i32> = State::new(|s: i32| (s, s + 1));
     /// let state2: State<i32, &str> = State::pure("hello");
@@ -469,7 +469,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::State;
+    /// use lambars::effect::State;
     ///
     /// let state: State<i32, i32> = State::get();
     /// let (result, final_state) = state.run(42);
@@ -496,7 +496,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::State;
+    /// use lambars::effect::State;
     ///
     /// let state: State<i32, ()> = State::put(100);
     /// let (_, final_state) = state.run(42);
@@ -518,7 +518,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::State;
+    /// use lambars::effect::State;
     ///
     /// let state: State<i32, ()> = State::modify(|x| x * 2);
     /// let (_, final_state) = state.run(21);
@@ -548,7 +548,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::State;
+    /// use lambars::effect::State;
     ///
     /// #[derive(Clone)]
     /// struct Config { port: u16 }

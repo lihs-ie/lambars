@@ -10,7 +10,7 @@
 
 #![cfg(feature = "control")]
 
-use functional_rusty::control::Lazy;
+use lambars::control::Lazy;
 use proptest::prelude::*;
 
 // =============================================================================

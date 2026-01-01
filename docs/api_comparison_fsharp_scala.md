@@ -1,6 +1,6 @@
-# functional-rusty / F# / Scala API 対応表
+# lambars / F# / Scala API 対応表
 
-このドキュメントは functional-rusty の API と、F# および Scala の対応する機能を比較したものです。
+このドキュメントは lambars の API と、F# および Scala の対応する機能を比較したものです。
 
 ---
 
@@ -8,14 +8,14 @@
 
 ### TypeConstructor（HKT エミュレーション）
 
-| functional-rusty        | F#                       | Scala                                             |
+| lambars                 | F#                       | Scala                                             |
 | ----------------------- | ------------------------ | ------------------------------------------------- |
 | `TypeConstructor` trait | 該当なし（言語機能なし） | `Kind[F[_], A]`（kind-projector）/ Scala 3 の HKT |
 | `WithType<B>` (GAT)     | 該当なし                 | `F[B]`                                            |
 
 ### Functor
 
-| functional-rusty       | F#                       | Scala (Cats)     |
+| lambars                | F#                       | Scala (Cats)     |
 | ---------------------- | ------------------------ | ---------------- |
 | `Functor::fmap`        | `Option.map`, `List.map` | `Functor[F].map` |
 | `FunctorMut::fmap_mut` | 該当なし                 | 該当なし         |
@@ -30,7 +30,7 @@
 
 ### Applicative
 
-| functional-rusty       | F#                    | Scala (Cats)             |
+| lambars                | F#                    | Scala (Cats)             |
 | ---------------------- | --------------------- | ------------------------ |
 | `Applicative::pure`    | `Some`, `Ok`          | `Applicative[F].pure`    |
 | `Applicative::apply`   | 該当なし（CE で代替） | `Applicative[F].ap`      |
@@ -40,7 +40,7 @@
 
 ### Monad
 
-| functional-rusty         | F#                           | Scala (Cats)                 |
+| lambars                  | F#                           | Scala (Cats)                 |
 | ------------------------ | ---------------------------- | ---------------------------- |
 | `Monad::flat_map`        | `Option.bind`, `Result.bind` | `Monad[F].flatMap`           |
 | `Monad::and_then`        | `Option.bind`                | `flatMap`                    |
@@ -49,7 +49,7 @@
 
 ### Foldable
 
-| functional-rusty       | F#                      | Scala (Cats)                   |
+| lambars                | F#                      | Scala (Cats)                   |
 | ---------------------- | ----------------------- | ------------------------------ |
 | `Foldable::fold_left`  | `List.fold`, `Seq.fold` | `Foldable[F].foldLeft`         |
 | `Foldable::fold_right` | `List.foldBack`         | `Foldable[F].foldRight` (Eval) |
@@ -63,7 +63,7 @@
 
 ### Traversable
 
-| functional-rusty               | F#                                  | Scala (Cats)           |
+| lambars                        | F#                                  | Scala (Cats)           |
 | ------------------------------ | ----------------------------------- | ---------------------- |
 | `Traversable::traverse_option` | `List.traverseOptionM` (FSharpPlus) | `Traverse[F].traverse` |
 | `Traversable::traverse_result` | `List.traverseResultM` (FSharpPlus) | `Traverse[F].traverse` |
@@ -74,7 +74,7 @@
 
 ### Semigroup
 
-| functional-rusty       | F#                       | Scala (Cats)            |
+| lambars                | F#                       | Scala (Cats)            |
 | ---------------------- | ------------------------ | ----------------------- |
 | `Semigroup::combine`   | 該当なし（演算子で代替） | `Semigroup[A].combine`  |
 | `Semigroup::combine_n` | 該当なし                 | `Semigroup[A].combineN` |
@@ -89,7 +89,7 @@
 
 ### Monoid
 
-| functional-rusty         | F#       | Scala (Cats)           |
+| lambars                  | F#       | Scala (Cats)           |
 | ------------------------ | -------- | ---------------------- |
 | `Monoid::empty`          | 該当なし | `Monoid[A].empty`      |
 | `Monoid::combine_all`    | 該当なし | `Monoid[A].combineAll` |
@@ -101,25 +101,25 @@
 
 ### 関数合成
 
-| functional-rusty    | F#                                 | Scala                                          |
+| lambars             | F#                                 | Scala                                          |
 | ------------------- | ---------------------------------- | ---------------------------------------------- |
 | `compose!(f, g, h)` | `f >> g >> h` または `h << g << f` | `f compose g compose h`                        |
 | `pipe!(x, f, g, h)` | `x \|> f \|> g \|> h`              | `x.pipe(f).pipe(g).pipe(h)` または拡張メソッド |
 
 ### 部分適用・カリー化
 
-| functional-rusty             | F#                               | Scala       |
+| lambars                      | F#                               | Scala       |
 | ---------------------------- | -------------------------------- | ----------- |
 | `partial!(f, a, __)`         | 言語機能（デフォルトでカリー化） | `f(a, _)`   |
 | `curry2!(f)` 〜 `curry6!(f)` | 言語機能（自動カリー化）         | `f.curried` |
 
 ### ユーティリティ関数
 
-| functional-rusty | F#                  | Scala                              |
-| ---------------- | ------------------- | ---------------------------------- |
-| `identity`       | `id`                | `identity`                         |
-| `constant(x)`    | `fun _ -> x`        | `const(x)` または `_ => x`         |
-| `flip(f)`        | `flip` (FSharpPlus) | `Function.untupled(_.swap).tupled` |
+| lambars       | F#                  | Scala                              |
+| ------------- | ------------------- | ---------------------------------- |
+| `identity`    | `id`                | `identity`                         |
+| `constant(x)` | `fun _ -> x`        | `const(x)` または `_ => x`         |
+| `flip(f)`     | `flip` (FSharpPlus) | `Function.untupled(_.swap).tupled` |
 
 ---
 
@@ -127,7 +127,7 @@
 
 ### Either
 
-| functional-rusty      | F#                         | Scala                |
+| lambars               | F#                         | Scala                |
 | --------------------- | -------------------------- | -------------------- |
 | `Either<L, R>`        | `Choice<'a, 'b>`           | `Either[L, R]`       |
 | `Either::Left(l)`     | `Choice1Of2 l`             | `Left(l)`            |
@@ -139,18 +139,18 @@
 
 ### Lazy（遅延評価）
 
-| functional-rusty          | F#                    | Scala                                      |
+| lambars                   | F#                    | Scala                                      |
 | ------------------------- | --------------------- | ------------------------------------------ |
 | `Lazy::new(\|\| expr)`    | `lazy expr`           | `lazy { expr }` または `Eval.later` (Cats) |
 | `lazy_val.force()`        | `Lazy.force lazy_val` | `lazyVal` (暗黙評価) または `eval.value`   |
 | `lazy_val.is_evaluated()` | `Lazy.isValueCreated` | 該当なし                                   |
 | `Lazy::evaluated(x)`      | 該当なし              | `Eval.now(x)`                              |
 
-**注:** functional-rusty の `Lazy` は `RefCell` ベースの内部可変性でメモ化を実現（unsafe 不使用）。
+**注:** lambars の `Lazy` は `RefCell` ベースの内部可変性でメモ化を実現（unsafe 不使用）。
 
 ### Trampoline（スタック安全再帰）
 
-| functional-rusty              | F#       | Scala (Cats)            |
+| lambars                       | F#       | Scala (Cats)            |
 | ----------------------------- | -------- | ----------------------- |
 | `Trampoline::done(x)`         | 該当なし | `Trampoline.done(x)`    |
 | `Trampoline::suspend(\|\| t)` | 該当なし | `Trampoline.defer(t)`   |
@@ -162,7 +162,7 @@
 
 ### Continuation（継続モナド）
 
-| functional-rusty                      | F#                          | Scala (Cats)   |
+| lambars                               | F#                          | Scala (Cats)   |
 | ------------------------------------- | --------------------------- | -------------- |
 | `Continuation::new(f)`                | `cont { ... }` (FSharpPlus) | `Cont[R, A]`   |
 | `Continuation::pure(x)`               | `cont { return x }`         | `Cont.pure(x)` |
@@ -176,7 +176,7 @@
 
 ### PersistentList
 
-| functional-rusty                | F#             | Scala           |
+| lambars                         | F#             | Scala           |
 | ------------------------------- | -------------- | --------------- |
 | `PersistentList::empty()`       | `[]`           | `List.empty`    |
 | `PersistentList::cons(x, list)` | `x :: list`    | `x :: list`     |
@@ -189,7 +189,7 @@
 
 ### PersistentVector
 
-| functional-rusty            | F#                       | Scala                      |
+| lambars                     | F#                       | Scala                      |
 | --------------------------- | ------------------------ | -------------------------- | --------------------- | -------------- |
 | `PersistentVector::empty()` | `[                       |                            | ]`または`Array.empty` | `Vector.empty` |
 | `PersistentVector::new()`   | `[                       |                            | ]`                    | `Vector()`     |
@@ -208,11 +208,11 @@
 | `vector.slice(start, end)`  | `arr.[start..end]`       | `vector.slice(start, end)` |
 | `vector.iter()`             | `Array.toSeq`            | `vector.iterator`          |
 
-**注:** functional-rusty の `PersistentVector` は Radix Balanced Tree（32 分岐トライ）+ tail 最適化で実装。Scala の `Vector` と同等のアルゴリズム。
+**注:** lambars の `PersistentVector` は Radix Balanced Tree（32 分岐トライ）+ tail 最適化で実装。Scala の `Vector` と同等のアルゴリズム。
 
 ### PersistentHashMap
 
-| functional-rusty              | F#                                | Scala                       |
+| lambars                       | F#                                | Scala                       |
 | ----------------------------- | --------------------------------- | --------------------------- |
 | `PersistentHashMap::empty()`  | `Map.empty`                       | `HashMap.empty`             |
 | `PersistentHashMap::new()`    | `Map.empty`                       | `HashMap()`                 |
@@ -228,11 +228,11 @@
 | `map.merge(other)`            | 該当なし                          | `map ++ other`              |
 | `map.get_or_else(k, default)` | `Map.findOrDefault k default map` | `map.getOrElse(k, default)` |
 
-**注:** functional-rusty の `PersistentHashMap` は HAMT（Hash Array Mapped Trie）で実装。
+**注:** lambars の `PersistentHashMap` は HAMT（Hash Array Mapped Trie）で実装。
 
 ### PersistentHashSet
 
-| functional-rusty                  | F#                         | Scala                             |
+| lambars                           | F#                         | Scala                             |
 | --------------------------------- | -------------------------- | --------------------------------- |
 | `PersistentHashSet::empty()`      | `Set.empty`                | `HashSet.empty`                   |
 | `set.insert(x)`                   | `Set.add x set`            | `set + x`                         |
@@ -250,7 +250,7 @@
 
 ### PersistentTreeMap
 
-| functional-rusty             | F#                            | Scala                    |
+| lambars                      | F#                            | Scala                    |
 | ---------------------------- | ----------------------------- | ------------------------ |
 | `PersistentTreeMap::empty()` | `Map.empty`                   | `TreeMap.empty`          |
 | `map.insert(k, v)`           | `Map.add k v map`             | `map + (k -> v)`         |
@@ -262,7 +262,7 @@
 | `map.floor_key(k)`           | 該当なし                      | `map.to(k).lastOption`   |
 | `map.ceiling_key(k)`         | 該当なし                      | `map.from(k).headOption` |
 
-**注:** functional-rusty の `PersistentTreeMap` は永続赤黒木で実装。F# の `Map` も内部的には赤黒木だが、一部のメソッドが異なる。
+**注:** lambars の `PersistentTreeMap` は永続赤黒木で実装。F# の `Map` も内部的には赤黒木だが、一部のメソッドが異なる。
 
 ---
 
@@ -270,7 +270,7 @@
 
 ### Lens
 
-| functional-rusty      | F#                          | Scala (Monocle)          |
+| lambars               | F#                          | Scala (Monocle)          |
 | --------------------- | --------------------------- | ------------------------ |
 | `Lens` trait          | `Lens` (FSharpPlus)         | `Lens[S, A]`             |
 | `lens!(Type, field)`  | `Lens.create getter setter` | `GenLens[S](_.field)`    |
@@ -282,7 +282,7 @@
 
 ### Prism
 
-| functional-rusty            | F#                                  | Scala (Monocle)                      |
+| lambars                     | F#                                  | Scala (Monocle)                      |
 | --------------------------- | ----------------------------------- | ------------------------------------ |
 | `Prism` trait               | `Prism` (FSharpPlus)                | `Prism[S, A]`                        |
 | `prism!(Type, Variant)`     | `Prism.create getOption reverseGet` | `Prism[S, A](getOption)(reverseGet)` |
@@ -295,7 +295,7 @@
 
 ### Iso
 
-| functional-rusty                     | F#                          | Scala (Monocle)              |
+| lambars                              | F#                          | Scala (Monocle)              |
 | ------------------------------------ | --------------------------- | ---------------------------- |
 | `Iso` trait                          | `Iso` (FSharpPlus)          | `Iso[S, A]`                  |
 | `FunctionIso::new(get, reverse_get)` | `Iso.create get reverseGet` | `Iso[S, A](get)(reverseGet)` |
@@ -308,7 +308,7 @@
 
 ### Optional
 
-| functional-rusty               | F#                         | Scala (Monocle)          |
+| lambars                        | F#                         | Scala (Monocle)          |
 | ------------------------------ | -------------------------- | ------------------------ |
 | `Optional` trait               | `Optional` (FSharpPlus)    | `Optional[S, A]`         |
 | `optional.get_option(&s)`      | `Optional.getOption opt s` | `optional.getOption(s)`  |
@@ -319,7 +319,7 @@
 
 ### Traversal
 
-| functional-rusty              | F#                        | Scala (Monocle)            |
+| lambars                       | F#                        | Scala (Monocle)            |
 | ----------------------------- | ------------------------- | -------------------------- |
 | `Traversal` trait             | `Traversal` (FSharpPlus)  | `Traversal[S, A]`          |
 | `VecTraversal::new()`         | 該当なし                  | `Traversal.fromTraverse`   |
@@ -337,7 +337,7 @@
 
 ### MTL 型クラス
 
-| functional-rusty | F#                       | Scala (Cats MTL)    |
+| lambars          | F#                       | Scala (Cats MTL)    |
 | ---------------- | ------------------------ | ------------------- |
 | `MonadReader<R>` | `Reader` CE (FSharpPlus) | `MonadReader[F, R]` |
 | `MonadState<S>`  | `State` CE (FSharpPlus)  | `MonadState[F, S]`  |
@@ -346,33 +346,33 @@
 
 #### MonadReader
 
-| functional-rusty | F# (FSharpPlus)    | Scala (Cats MTL)                |
-| ---------------- | ------------------ | ------------------------------- |
-| `ask()`          | `Reader.ask`       | `MonadReader[F, R].ask`         |
-| `asks(f)`        | `Reader.asks f`    | `MonadReader[F, R].reader(f)`   |
-| `local(f, m)`    | `Reader.local f m` | `MonadReader[F, R].local(f)(m)` |
+| lambars       | F# (FSharpPlus)    | Scala (Cats MTL)                |
+| ------------- | ------------------ | ------------------------------- |
+| `ask()`       | `Reader.ask`       | `MonadReader[F, R].ask`         |
+| `asks(f)`     | `Reader.asks f`    | `MonadReader[F, R].reader(f)`   |
+| `local(f, m)` | `Reader.local f m` | `MonadReader[F, R].local(f)(m)` |
 
 #### MonadState
 
-| functional-rusty | F# (FSharpPlus)  | Scala (Cats MTL)              |
-| ---------------- | ---------------- | ----------------------------- |
-| `get()`          | `State.get`      | `MonadState[F, S].get`        |
-| `put(s)`         | `State.put s`    | `MonadState[F, S].set(s)`     |
-| `modify(f)`      | `State.modify f` | `MonadState[F, S].modify(f)`  |
-| `gets(f)`        | `State.gets f`   | `MonadState[F, S].inspect(f)` |
+| lambars     | F# (FSharpPlus)  | Scala (Cats MTL)              |
+| ----------- | ---------------- | ----------------------------- |
+| `get()`     | `State.get`      | `MonadState[F, S].get`        |
+| `put(s)`    | `State.put s`    | `MonadState[F, S].set(s)`     |
+| `modify(f)` | `State.modify f` | `MonadState[F, S].modify(f)`  |
+| `gets(f)`   | `State.gets f`   | `MonadState[F, S].inspect(f)` |
 
 #### MonadWriter
 
-| functional-rusty | F# (FSharpPlus)     | Scala (Cats MTL)                 |
-| ---------------- | ------------------- | -------------------------------- |
-| `tell(w)`        | `Writer.tell w`     | `MonadWriter[F, W].tell(w)`      |
-| `listen(m)`      | `Writer.listen m`   | `MonadWriter[F, W].listen(m)`    |
-| `pass(m)`        | `Writer.pass m`     | `MonadWriter[F, W].pass(m)`      |
-| `writer(a, w)`   | `Writer.create a w` | `MonadWriter[F, W].writer(a, w)` |
+| lambars        | F# (FSharpPlus)     | Scala (Cats MTL)                 |
+| -------------- | ------------------- | -------------------------------- |
+| `tell(w)`      | `Writer.tell w`     | `MonadWriter[F, W].tell(w)`      |
+| `listen(m)`    | `Writer.listen m`   | `MonadWriter[F, W].listen(m)`    |
+| `pass(m)`      | `Writer.pass m`     | `MonadWriter[F, W].pass(m)`      |
+| `writer(a, w)` | `Writer.create a w` | `MonadWriter[F, W].writer(a, w)` |
 
 #### MonadError
 
-| functional-rusty     | F#           | Scala (Cats)                         |
+| lambars              | F#           | Scala (Cats)                         |
 | -------------------- | ------------ | ------------------------------------ |
 | `raise_error(e)`     | `Error e`    | `MonadError[F, E].raiseError(e)`     |
 | `handle_error(m, f)` | `try...with` | `MonadError[F, E].handleError(m)(f)` |
@@ -380,16 +380,16 @@
 
 ### ベースモナド
 
-| functional-rusty | F# (FSharpPlus)  | Scala (Cats)                                     |
-| ---------------- | ---------------- | ------------------------------------------------ |
-| `Reader<R, A>`   | `Reader<'r, 'a>` | `Reader[R, A]` (= `Kleisli[Id, R, A]`)           |
-| `State<S, A>`    | `State<'s, 'a>`  | `State[S, A]` (= `IndexedStateT[Eval, S, S, A]`) |
-| `Writer<W, A>`   | `Writer<'w, 'a>` | `Writer[W, A]` (= `WriterT[Id, W, A]`)           |
-| `IO<A>`          | `IO<'a>` (FsIO)  | `IO[A]` (Cats Effect)                            |
+| lambars        | F# (FSharpPlus)  | Scala (Cats)                                     |
+| -------------- | ---------------- | ------------------------------------------------ |
+| `Reader<R, A>` | `Reader<'r, 'a>` | `Reader[R, A]` (= `Kleisli[Id, R, A]`)           |
+| `State<S, A>`  | `State<'s, 'a>`  | `State[S, A]` (= `IndexedStateT[Eval, S, S, A]`) |
+| `Writer<W, A>` | `Writer<'w, 'a>` | `Writer[W, A]` (= `WriterT[Id, W, A]`)           |
+| `IO<A>`        | `IO<'a>` (FsIO)  | `IO[A]` (Cats Effect)                            |
 
 #### Reader
 
-| functional-rusty     | F# (FSharpPlus)       | Scala               |
+| lambars              | F# (FSharpPlus)       | Scala               |
 | -------------------- | --------------------- | ------------------- |
 | `Reader::new(f)`     | `Reader f`            | `Reader(f)`         |
 | `Reader::pure(a)`    | `Reader.Return a`     | `Reader.pure(a)`    |
@@ -399,7 +399,7 @@
 
 #### State
 
-| functional-rusty | F# (FSharpPlus)      | Scala                 |
+| lambars          | F# (FSharpPlus)      | Scala                 |
 | ---------------- | -------------------- | --------------------- |
 | `State::new(f)`  | `State f`            | `State(f)`            |
 | `State::pure(a)` | `State.Return a`     | `State.pure(a)`       |
@@ -409,7 +409,7 @@
 
 #### Writer
 
-| functional-rusty    | F# (FSharpPlus)       | Scala             |
+| lambars             | F# (FSharpPlus)       | Scala             |
 | ------------------- | --------------------- | ----------------- |
 | `Writer::new(a, w)` | `Writer (a, w)`       | `Writer(w, a)`    |
 | `Writer::pure(a)`   | `Writer.Return a`     | `Writer.value(a)` |
@@ -419,7 +419,7 @@
 
 #### IO
 
-| functional-rusty                 | F#                           | Scala (Cats Effect)                           |
+| lambars                          | F#                           | Scala (Cats Effect)                           |
 | -------------------------------- | ---------------------------- | --------------------------------------------- |
 | `IO::new(f)`                     | `IO.create f`                | `IO.delay(f)`                                 |
 | `IO::pure(a)`                    | `IO.Return a`                | `IO.pure(a)`                                  |
@@ -433,7 +433,7 @@
 
 ### Monad Transformer
 
-| functional-rusty   | F# (FSharpPlus)       | Scala (Cats)       |
+| lambars            | F# (FSharpPlus)       | Scala (Cats)       |
 | ------------------ | --------------------- | ------------------ |
 | `ReaderT<R, M, A>` | `ReaderT<'r, 'm, 'a>` | `Kleisli[M, R, A]` |
 | `StateT<S, M, A>`  | `StateT<'s, 'm, 'a>`  | `StateT[M, S, A]`  |
@@ -442,7 +442,7 @@
 
 #### ReaderT
 
-| functional-rusty   | F# (FSharpPlus)    | Scala              |
+| lambars            | F# (FSharpPlus)    | Scala              |
 | ------------------ | ------------------ | ------------------ |
 | `ReaderT::new(f)`  | `ReaderT f`        | `Kleisli(f)`       |
 | `ReaderT::pure(a)` | `ReaderT.Return a` | `Kleisli.pure(a)`  |
@@ -451,7 +451,7 @@
 
 #### StateT
 
-| functional-rusty  | F# (FSharpPlus)   | Scala             |
+| lambars           | F# (FSharpPlus)   | Scala             |
 | ----------------- | ----------------- | ----------------- |
 | `StateT::new(f)`  | `StateT f`        | `StateT(f)`       |
 | `StateT::pure(a)` | `StateT.Return a` | `StateT.pure(a)`  |
@@ -460,7 +460,7 @@
 
 #### WriterT
 
-| functional-rusty   | F# (FSharpPlus)    | Scala              |
+| lambars            | F# (FSharpPlus)    | Scala              |
 | ------------------ | ------------------ | ------------------ |
 | `WriterT::new(m)`  | `WriterT m`        | `WriterT(m)`       |
 | `WriterT::pure(a)` | `WriterT.Return a` | `WriterT.value(a)` |
@@ -469,7 +469,7 @@
 
 #### ExceptT
 
-| functional-rusty           | F# (FSharpPlus)      | Scala                    |
+| lambars                    | F# (FSharpPlus)      | Scala                    |
 | -------------------------- | -------------------- | ------------------------ |
 | `ExceptT::new(m)`          | `ResultT m`          | `EitherT(m)`             |
 | `ExceptT::pure(a)`         | `ResultT.Return a`   | `EitherT.pure(a)`        |
@@ -480,12 +480,12 @@
 
 ### do 記法 / Computation Expression
 
-| functional-rusty | F#                                 | Scala               |
-| ---------------- | ---------------------------------- | ------------------- |
-| `eff! { ... }`   | `monad { ... }` / `result { ... }` | `for { ... } yield` |
+| lambars        | F#                                 | Scala               |
+| -------------- | ---------------------------------- | ------------------- |
+| `eff! { ... }` | `monad { ... }` / `result { ... }` | `for { ... } yield` |
 
 ```rust
-// functional-rusty
+// lambars
 let result = eff! {
     x <= get_value();
     y <= compute(x);
@@ -522,12 +522,12 @@ val result = for {
 
 ### 主な違い
 
-1. **HKT**: F# は HKT をサポートしていないため、型クラスの抽象化が限定的。Scala 3 は完全な HKT サポート。functional-rusty は GAT でエミュレーション。
+1. **HKT**: F# は HKT をサポートしていないため、型クラスの抽象化が限定的。Scala 3 は完全な HKT サポート。lambars は GAT でエミュレーション。
 
-2. **カリー化**: F# は言語レベルで自動カリー化。Scala は `.curried` メソッドで変換。functional-rusty はマクロで対応。
+2. **カリー化**: F# は言語レベルで自動カリー化。Scala は `.curried` メソッドで変換。lambars はマクロで対応。
 
 3. **TCO**: F# は言語レベルで末尾再帰最適化をサポート。Scala は `@tailrec` アノテーション。Rust は TCO 保証なしのため Trampoline が必要。
 
-4. **Effect System**: Scala (Cats Effect) が最も充実。F# は Computation Expression で対応。functional-rusty は MTL スタイルを採用。
+4. **Effect System**: Scala (Cats Effect) が最も充実。F# は Computation Expression で対応。lambars は MTL スタイルを採用。
 
-5. **Optics**: Scala (Monocle) が最も充実。functional-rusty は derive マクロでボイラープレートを削減。
+5. **Optics**: Scala (Monocle) が最も充実。lambars は derive マクロでボイラープレートを削減。

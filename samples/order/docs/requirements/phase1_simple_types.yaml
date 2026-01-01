@@ -1,6 +1,6 @@
 # Phase 1: 基本型定義 要件定義
 # Domain Modeling Made Functional の F# パターンを Rust に適用
-# functional-rusty ライブラリを使用した型安全なドメインモデリング
+# lambars ライブラリを使用した型安全なドメインモデリング
 
 id: phase1_simple_types
 name: 基本型定義
@@ -83,7 +83,7 @@ requirements:
               ConstrainedType.createString fieldName String50 50 str
           let value (String50 str) = str
 
-    functional_rusty_usage:
+    lambars_usage:
       - "Result<T, E> による Monad 的なエラーハンドリング"
       - "map, and_then による Result のチェーン"
 
@@ -116,7 +116,7 @@ requirements:
               let pattern = ".+@.+"
               ConstrainedType.createLike fieldName EmailAddress pattern str
 
-    functional_rusty_usage:
+    lambars_usage:
       - "Result<T, E> による Monad 的なエラーハンドリング"
       - "正規表現バリデーション（regex クレート使用）"
 
@@ -149,7 +149,7 @@ requirements:
               let pattern = "\d{5}"
               ConstrainedType.createLike fieldName ZipCode pattern str
 
-    functional_rusty_usage:
+    lambars_usage:
       - "Result<T, E> による Monad 的なエラーハンドリング"
 
   - id: REQ-004
@@ -187,7 +187,7 @@ requirements:
               let pattern = "^(A[KLRZ]|C[AOT]|D[CE]|FL|GA|HI|...)$"
               ConstrainedType.createLike fieldName UsStateCode pattern str
 
-    functional_rusty_usage:
+    lambars_usage:
       - "Result<T, E> による Monad 的なエラーハンドリング"
 
   # ========================================
@@ -221,7 +221,7 @@ requirements:
           let create fieldName str =
               ConstrainedType.createString fieldName OrderId 50 str
 
-    functional_rusty_usage:
+    lambars_usage:
       - "Result<T, E> による Monad 的なエラーハンドリング"
 
     traits_to_derive:
@@ -259,7 +259,7 @@ requirements:
           let create fieldName str =
               ConstrainedType.createString fieldName OrderLineId 50 str
 
-    functional_rusty_usage:
+    lambars_usage:
       - "Result<T, E> による Monad 的なエラーハンドリング"
 
     traits_to_derive:
@@ -311,7 +311,7 @@ requirements:
               let pattern = "W\d{4}"
               ConstrainedType.createLike fieldName WidgetCode pattern code
 
-    functional_rusty_usage:
+    lambars_usage:
       - "Result<T, E> による Monad 的なエラーハンドリング"
 
   - id: REQ-008
@@ -353,7 +353,7 @@ requirements:
               let pattern = "G\d{3}"
               ConstrainedType.createLike fieldName GizmoCode pattern code
 
-    functional_rusty_usage:
+    lambars_usage:
       - "Result<T, E> による Monad 的なエラーハンドリング"
 
   - id: REQ-009
@@ -398,7 +398,7 @@ requirements:
               else
                   Error (sprintf "%s: Format not recognized '%s'" fieldName code)
 
-    functional_rusty_usage:
+    lambars_usage:
       - "Rust の enum によるパターンマッチ"
       - "Result::map による Functor 的な変換"
 
@@ -438,7 +438,7 @@ requirements:
           let create fieldName v =
               ConstrainedType.createInt fieldName UnitQuantity 1 1000 v
 
-    functional_rusty_usage:
+    lambars_usage:
       - "Result<T, E> による Monad 的なエラーハンドリング"
 
   - id: REQ-011
@@ -474,7 +474,7 @@ requirements:
           let create fieldName v =
               ConstrainedType.createDecimal fieldName KilogramQuantity 0.5M 100M v
 
-    functional_rusty_usage:
+    lambars_usage:
       - "Result<T, E> による Monad 的なエラーハンドリング"
       - "rust_decimal クレートによる正確な小数演算"
 
@@ -526,7 +526,7 @@ requirements:
                   KilogramQuantity.create fieldName quantity
                   |> Result.map OrderQuantity.Kilogram
 
-    functional_rusty_usage:
+    lambars_usage:
       - "Rust の enum によるパターンマッチ"
       - "Result::map による Functor 的な変換"
 
@@ -583,7 +583,7 @@ requirements:
 
           let multiply qty (Price p) = create (qty * p)
 
-    functional_rusty_usage:
+    lambars_usage:
       - "Result<T, E> による Monad 的なエラーハンドリング"
       - "rust_decimal クレートによる正確な小数演算"
 
@@ -628,7 +628,7 @@ requirements:
               let total = prices |> List.map Price.value |> List.sum
               create total
 
-    functional_rusty_usage:
+    lambars_usage:
       - "Result<T, E> による Monad 的なエラーハンドリング"
       - "Foldable トレイトによる畳み込み操作"
       - "rust_decimal クレートによる正確な小数演算"
@@ -679,7 +679,7 @@ requirements:
               | "vip" | "VIP" -> Ok Vip
               | _ -> Error (sprintf "%s: Must be one of 'Normal', 'VIP'" fieldName)
 
-    functional_rusty_usage:
+    lambars_usage:
       - "Rust の enum によるパターンマッチ"
 
   # ========================================
@@ -707,7 +707,7 @@ requirements:
     f_sharp_reference: |
       type PromotionCode = PromotionCode of string
 
-    functional_rusty_usage:
+    lambars_usage:
       - "Newtype パターンによる型安全性の確保"
 
     notes: |
@@ -742,7 +742,7 @@ requirements:
           Bytes: byte[]
       }
 
-    functional_rusty_usage:
+    lambars_usage:
       - "Rust の構造体による積型（Product Type）の表現"
 
     traits_to_derive:
@@ -819,7 +819,7 @@ dependencies:
       version: "2.0"
       description: エラー型の定義のため
 
-  functional_rusty:
+  lambars:
     - module: typeclass
       traits:
         - Functor

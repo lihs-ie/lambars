@@ -2,8 +2,8 @@
 //!
 //! Tests that Iso implementations satisfy the mathematical laws.
 
-use functional_rusty::iso;
-use functional_rusty::optics::{FunctionIso, Iso, Lens, Prism};
+use lambars::iso;
+use lambars::optics::{FunctionIso, Iso, Lens, Prism};
 use proptest::prelude::*;
 
 // =============================================================================
@@ -48,7 +48,7 @@ proptest! {
 
     #[test]
     fn prop_identity_get_reverse_get_law(value: i32) {
-        use functional_rusty::optics::iso_identity;
+        use lambars::optics::iso_identity;
 
         let identity_iso = iso_identity::<i32>();
         let roundtrip = identity_iso.reverse_get(identity_iso.get(value));
@@ -57,7 +57,7 @@ proptest! {
 
     #[test]
     fn prop_identity_reverse_get_get_law(value: i32) {
-        use functional_rusty::optics::iso_identity;
+        use lambars::optics::iso_identity;
 
         let identity_iso = iso_identity::<i32>();
         let roundtrip = identity_iso.get(identity_iso.reverse_get(value));
@@ -70,7 +70,7 @@ proptest! {
 
     #[test]
     fn prop_swap_get_reverse_get_law(first: i32, second in ".*") {
-        use functional_rusty::optics::iso_swap;
+        use lambars::optics::iso_swap;
 
         let swap_iso = iso_swap::<i32, String>();
         let source = (first, second);
@@ -81,7 +81,7 @@ proptest! {
 
     #[test]
     fn prop_swap_reverse_get_get_law(first in ".*", second: i32) {
-        use functional_rusty::optics::iso_swap;
+        use lambars::optics::iso_swap;
 
         let swap_iso = iso_swap::<i32, String>();
         let value = (first, second);

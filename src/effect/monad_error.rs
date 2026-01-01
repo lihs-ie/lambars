@@ -34,8 +34,8 @@
 //! # Examples
 //!
 //! ```rust
-//! use functional_rusty::effect::MonadError;
-//! use functional_rusty::typeclass::Monad;
+//! use lambars::effect::MonadError;
+//! use lambars::typeclass::Monad;
 //!
 //! // Result implements MonadError
 //! let result: Result<i32, String> = <Result<i32, String>>::throw_error("error".to_string());
@@ -86,8 +86,8 @@ use crate::typeclass::Monad;
 /// # Examples
 ///
 /// ```rust
-/// use functional_rusty::effect::MonadError;
-/// use functional_rusty::typeclass::Monad;
+/// use lambars::effect::MonadError;
+/// use lambars::typeclass::Monad;
 ///
 /// fn safe_divide<M: MonadError<String>>(a: i32, b: i32) -> M::WithType<i32>
 /// where
@@ -118,7 +118,7 @@ pub trait MonadError<E>: Monad {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::MonadError;
+    /// use lambars::effect::MonadError;
     ///
     /// let error: Result<i32, String> = <Result<i32, String>>::throw_error("oops".to_string());
     /// assert_eq!(error, Err("oops".to_string()));
@@ -146,7 +146,7 @@ pub trait MonadError<E>: Monad {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::MonadError;
+    /// use lambars::effect::MonadError;
     ///
     /// let failing: Result<i32, String> = Err("error".to_string());
     /// let recovered = <Result<i32, String>>::catch_error(failing, |e| Ok(e.len() as i32));
@@ -174,7 +174,7 @@ pub trait MonadError<E>: Monad {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::MonadError;
+    /// use lambars::effect::MonadError;
     ///
     /// let ok: Result<i32, String> = <Result<i32, String>>::from_result(Ok(42));
     /// assert_eq!(ok, Ok(42));
@@ -208,7 +208,7 @@ pub trait MonadError<E>: Monad {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::MonadError;
+    /// use lambars::effect::MonadError;
     ///
     /// let failing: Result<i32, String> = Err("error".to_string());
     /// let with_default = <Result<i32, String>>::recover_with(failing, Ok(0));

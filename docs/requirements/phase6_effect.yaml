@@ -1683,7 +1683,7 @@ requirements:
         /// # Examples
         ///
         /// ```rust
-        /// use functional_rusty::eff;
+        /// use lambars::eff;
         ///
         /// let result = eff! {
         ///     x <- Some(5);

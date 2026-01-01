@@ -21,7 +21,7 @@ use super::{FunctionIso, Iso};
 /// # Example
 ///
 /// ```
-/// use functional_rusty::optics::{Iso, iso_identity};
+/// use lambars::optics::{Iso, iso_identity};
 ///
 /// let identity_iso = iso_identity::<i32>();
 ///
@@ -49,7 +49,7 @@ pub fn iso_identity<T>() -> impl Iso<T, T> + Clone {
 /// # Example
 ///
 /// ```
-/// use functional_rusty::optics::{Iso, iso_swap};
+/// use lambars::optics::{Iso, iso_swap};
 ///
 /// let swap_iso = iso_swap::<i32, String>();
 ///

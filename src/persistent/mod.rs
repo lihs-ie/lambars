@@ -20,7 +20,7 @@
 //! ## PersistentList
 //!
 //! ```rust
-//! use functional_rusty::persistent::PersistentList;
+//! use lambars::persistent::PersistentList;
 //!
 //! let list = PersistentList::new().cons(3).cons(2).cons(1);
 //! assert_eq!(list.head(), Some(&1));
@@ -34,7 +34,7 @@
 //! ## PersistentVector
 //!
 //! ```rust
-//! use functional_rusty::persistent::PersistentVector;
+//! use lambars::persistent::PersistentVector;
 //!
 //! let vector: PersistentVector<i32> = (0..100).collect();
 //! assert_eq!(vector.get(50), Some(&50));
@@ -48,7 +48,7 @@
 //! ## PersistentHashMap
 //!
 //! ```rust
-//! use functional_rusty::persistent::PersistentHashMap;
+//! use lambars::persistent::PersistentHashMap;
 //!
 //! let map = PersistentHashMap::new()
 //!     .insert("one".to_string(), 1)
@@ -64,7 +64,7 @@
 //! ## PersistentHashSet
 //!
 //! ```rust
-//! use functional_rusty::persistent::PersistentHashSet;
+//! use lambars::persistent::PersistentHashSet;
 //!
 //! let set = PersistentHashSet::new()
 //!     .insert(1)
@@ -89,7 +89,7 @@
 //! ## PersistentTreeMap
 //!
 //! ```rust
-//! use functional_rusty::persistent::PersistentTreeMap;
+//! use lambars::persistent::PersistentTreeMap;
 //!
 //! let map = PersistentTreeMap::new()
 //!     .insert(3, "three")

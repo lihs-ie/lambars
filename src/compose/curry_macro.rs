@@ -31,7 +31,7 @@
 /// ## Basic currying
 ///
 /// ```
-/// use functional_rusty::curry2;
+/// use lambars::curry2;
 ///
 /// fn add(first: i32, second: i32) -> i32 { first + second }
 ///
@@ -42,7 +42,7 @@
 /// ## Partial application
 ///
 /// ```
-/// use functional_rusty::curry2;
+/// use lambars::curry2;
 ///
 /// fn multiply(first: i32, second: i32) -> i32 { first * second }
 ///
@@ -57,7 +57,7 @@
 /// ## With closures
 ///
 /// ```
-/// use functional_rusty::curry2;
+/// use lambars::curry2;
 ///
 /// let add_closure = |first: i32, second: i32| first + second;
 /// let curried = curry2!(add_closure);
@@ -96,7 +96,7 @@ macro_rules! curry2 {
 /// ## Basic currying
 ///
 /// ```
-/// use functional_rusty::curry3;
+/// use lambars::curry3;
 ///
 /// fn add_three(first: i32, second: i32, third: i32) -> i32 {
 ///     first + second + third
@@ -109,7 +109,7 @@ macro_rules! curry2 {
 /// ## Step-by-step application
 ///
 /// ```
-/// use functional_rusty::curry3;
+/// use lambars::curry3;
 ///
 /// fn volume(width: f64, height: f64, depth: f64) -> f64 {
 ///     width * height * depth
@@ -158,7 +158,7 @@ macro_rules! curry3 {
 /// # Examples
 ///
 /// ```
-/// use functional_rusty::curry4;
+/// use lambars::curry4;
 ///
 /// fn sum_four(a: i32, b: i32, c: i32, d: i32) -> i32 {
 ///     a + b + c + d
@@ -210,7 +210,7 @@ macro_rules! curry4 {
 /// # Examples
 ///
 /// ```
-/// use functional_rusty::curry5;
+/// use lambars::curry5;
 ///
 /// fn sum_five(a: i32, b: i32, c: i32, d: i32, e: i32) -> i32 {
 ///     a + b + c + d + e
@@ -270,7 +270,7 @@ macro_rules! curry5 {
 /// # Examples
 ///
 /// ```
-/// use functional_rusty::curry6;
+/// use lambars::curry6;
 ///
 /// fn sum_six(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32) -> i32 {
 ///     a + b + c + d + e + f

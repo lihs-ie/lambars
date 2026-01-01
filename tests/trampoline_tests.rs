@@ -11,7 +11,7 @@
 
 #![cfg(feature = "control")]
 
-use functional_rusty::control::{Either, Trampoline};
+use lambars::control::{Either, Trampoline};
 use rstest::rstest;
 
 // =============================================================================

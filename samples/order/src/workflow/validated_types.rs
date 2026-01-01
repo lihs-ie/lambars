@@ -14,7 +14,7 @@
 use crate::compound_types::{Address, CustomerInfo};
 use crate::simple_types::{OrderId, OrderLineId, OrderQuantity, ProductCode, PromotionCode};
 use crate::workflow::unvalidated_types::UnvalidatedAddress;
-use functional_rusty_derive::Lenses;
+use lambars_derive::Lenses;
 use thiserror::Error;
 
 // =============================================================================

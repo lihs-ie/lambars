@@ -8,7 +8,7 @@
 
 #![cfg(feature = "control")]
 
-use functional_rusty::control::Trampoline;
+use lambars::control::Trampoline;
 use proptest::prelude::*;
 
 // =============================================================================
@@ -352,7 +352,7 @@ proptest! {
     /// resume on done returns Right
     #[test]
     fn prop_trampoline_resume_done_is_right(value in any::<i32>()) {
-        use functional_rusty::control::Either;
+        use lambars::control::Either;
 
         let trampoline = Trampoline::done(value);
         let resumed = trampoline.resume();
@@ -368,7 +368,7 @@ proptest! {
     /// resume on suspend returns Left
     #[test]
     fn prop_trampoline_resume_suspend_is_left(value in any::<i32>()) {
-        use functional_rusty::control::Either;
+        use lambars::control::Either;
 
         let trampoline = Trampoline::suspend(move || Trampoline::done(value));
         let resumed = trampoline.resume();

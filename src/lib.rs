@@ -1,4 +1,4 @@
-//! # functional-rusty
+//! # lambars
 //!
 //! A functional programming library for Rust providing type classes,
 //! persistent data structures, and effect systems.
@@ -28,7 +28,7 @@
 //! ## Example
 //!
 //! ```rust
-//! use functional_rusty::prelude::*;
+//! use lambars::prelude::*;
 //!
 //! // Example usage will be added as features are implemented
 //! ```
@@ -46,7 +46,7 @@
 /// # Usage
 ///
 /// ```rust
-/// use functional_rusty::prelude::*;
+/// use lambars::prelude::*;
 /// ```
 pub mod prelude {
 

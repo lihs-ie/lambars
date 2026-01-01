@@ -22,7 +22,7 @@
 //! With Option:
 //!
 //! ```rust
-//! use functional_rusty::effect::WriterT;
+//! use lambars::effect::WriterT;
 //!
 //! let writer: WriterT<Vec<String>, Option<(i32, Vec<String>)>> =
 //!     WriterT::new(Some((42, vec!["log".to_string()])));
@@ -49,7 +49,7 @@ use super::IO;
 /// # Examples
 ///
 /// ```rust
-/// use functional_rusty::effect::WriterT;
+/// use lambars::effect::WriterT;
 ///
 /// fn log(msg: &str) -> WriterT<Vec<String>, Option<((), Vec<String>)>> {
 ///     WriterT::<Vec<String>, Option<((), Vec<String>)>>::tell_option(vec![msg.to_string()])
@@ -84,7 +84,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::WriterT;
+    /// use lambars::effect::WriterT;
     ///
     /// let writer: WriterT<Vec<String>, Option<(i32, Vec<String>)>> =
     ///     WriterT::new(Some((42, vec!["log".to_string()])));
@@ -106,7 +106,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::WriterT;
+    /// use lambars::effect::WriterT;
     ///
     /// let writer: WriterT<Vec<String>, Option<(i32, Vec<String>)>> =
     ///     WriterT::new(Some((42, vec!["log".to_string()])));
@@ -152,8 +152,8 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::WriterT;
-    /// use functional_rusty::typeclass::Monoid;
+    /// use lambars::effect::WriterT;
+    /// use lambars::typeclass::Monoid;
     ///
     /// let writer: WriterT<Vec<String>, Option<(i32, Vec<String>)>> =
     ///     WriterT::pure_option(42);
@@ -172,8 +172,8 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::WriterT;
-    /// use functional_rusty::typeclass::Monoid;
+    /// use lambars::effect::WriterT;
+    /// use lambars::typeclass::Monoid;
     ///
     /// let inner: Option<i32> = Some(42);
     /// let writer: WriterT<Vec<String>, Option<(i32, Vec<String>)>> =
@@ -193,7 +193,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::WriterT;
+    /// use lambars::effect::WriterT;
     ///
     /// let writer: WriterT<Vec<String>, Option<((), Vec<String>)>> =
     ///     WriterT::<Vec<String>, Option<((), Vec<String>)>>::tell_option(vec!["message".to_string()]);
@@ -212,7 +212,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::WriterT;
+    /// use lambars::effect::WriterT;
     ///
     /// let writer: WriterT<Vec<String>, Option<(i32, Vec<String>)>> =
     ///     WriterT::new(Some((21, vec!["log".to_string()])));
@@ -236,7 +236,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::WriterT;
+    /// use lambars::effect::WriterT;
     ///
     /// let writer: WriterT<Vec<String>, Option<(i32, Vec<String>)>> =
     ///     WriterT::new(Some((10, vec!["first".to_string()])));
@@ -273,7 +273,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::WriterT;
+    /// use lambars::effect::WriterT;
     ///
     /// let writer: WriterT<Vec<String>, Option<(i32, Vec<String>)>> =
     ///     WriterT::new(Some((42, vec!["log".to_string()])));

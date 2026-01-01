@@ -10,9 +10,9 @@
 
 #![forbid(unsafe_code)]
 
-use functional_rusty::lens;
-use functional_rusty::optics::{Lens, Prism, Traversal};
-use functional_rusty::prism;
+use lambars::lens;
+use lambars::optics::{Lens, Prism, Traversal};
+use lambars::prism;
 use rstest::rstest;
 
 // =============================================================================
@@ -43,7 +43,7 @@ enum MyResult<T, E> {
 
 mod vec_traversal_tests {
     use super::*;
-    use functional_rusty::optics::VecTraversal;
+    use lambars::optics::VecTraversal;
 
     #[test]
     fn test_vec_traversal_get_all_non_empty() {
@@ -182,7 +182,7 @@ mod vec_traversal_tests {
 
 mod option_traversal_tests {
     use super::*;
-    use functional_rusty::optics::OptionTraversal;
+    use lambars::optics::OptionTraversal;
 
     #[test]
     fn test_option_traversal_get_all_some() {
@@ -280,7 +280,7 @@ mod option_traversal_tests {
 
 mod result_traversal_tests {
     use super::*;
-    use functional_rusty::optics::ResultTraversal;
+    use lambars::optics::ResultTraversal;
 
     #[test]
     fn test_result_traversal_get_all_ok() {
@@ -371,7 +371,7 @@ mod result_traversal_tests {
 
 mod composed_traversal_tests {
     use super::*;
-    use functional_rusty::optics::VecTraversal;
+    use lambars::optics::VecTraversal;
 
     #[test]
     fn test_composed_traversal_nested_vec() {
@@ -413,7 +413,7 @@ mod composed_traversal_tests {
 
     #[test]
     fn test_composed_traversal_vec_option() {
-        use functional_rusty::optics::OptionTraversal;
+        use lambars::optics::OptionTraversal;
 
         let vec_traversal: VecTraversal<Option<i32>> = VecTraversal::new();
         let option_traversal: OptionTraversal<i32> = OptionTraversal::new();
@@ -446,7 +446,7 @@ mod composed_traversal_tests {
 
 mod lens_as_traversal_tests {
     use super::*;
-    use functional_rusty::optics::VecTraversal;
+    use lambars::optics::VecTraversal;
 
     #[test]
     fn test_lens_to_traversal_basic() {
@@ -561,7 +561,7 @@ mod prism_as_traversal_tests {
 mod traversal_trait_tests {
     #[allow(unused_imports)]
     use super::*;
-    use functional_rusty::optics::{OptionTraversal, ResultTraversal, Traversal, VecTraversal};
+    use lambars::optics::{OptionTraversal, ResultTraversal, Traversal, VecTraversal};
 
     fn assert_traversal<S, A, T: Traversal<S, A>>(_traversal: &T) {}
 
@@ -589,7 +589,7 @@ mod traversal_trait_tests {
 // =============================================================================
 
 mod trait_implementation_tests {
-    use functional_rusty::optics::{OptionTraversal, ResultTraversal, Traversal, VecTraversal};
+    use lambars::optics::{OptionTraversal, ResultTraversal, Traversal, VecTraversal};
 
     #[test]
     fn test_vec_traversal_debug() {
@@ -661,7 +661,7 @@ mod trait_implementation_tests {
 // =============================================================================
 
 mod composed_traversal_advanced_tests {
-    use functional_rusty::optics::{Traversal, VecTraversal};
+    use lambars::optics::{Traversal, VecTraversal};
 
     #[test]
     fn test_composed_traversal_get_all_owned() {
@@ -713,7 +713,7 @@ mod composed_traversal_advanced_tests {
 
 mod lens_as_traversal_advanced_tests {
     use super::*;
-    use functional_rusty::optics::Traversal;
+    use lambars::optics::Traversal;
 
     #[test]
     fn test_lens_as_traversal_get_all_owned() {
@@ -769,7 +769,7 @@ mod lens_as_traversal_advanced_tests {
 
 mod prism_as_traversal_advanced_tests {
     use super::*;
-    use functional_rusty::optics::Traversal;
+    use lambars::optics::Traversal;
 
     #[test]
     fn test_prism_as_traversal_get_all_owned_matching() {

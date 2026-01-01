@@ -9,7 +9,7 @@
 
 #![cfg(feature = "control")]
 
-use functional_rusty::control::Lazy;
+use lambars::control::Lazy;
 use rstest::rstest;
 use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind};

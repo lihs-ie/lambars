@@ -21,7 +21,7 @@ use super::TypeConstructor;
 /// # Examples
 ///
 /// ```rust
-/// use functional_rusty::typeclass::Identity;
+/// use lambars::typeclass::Identity;
 ///
 /// let wrapped = Identity::new(42);
 /// assert_eq!(wrapped.into_inner(), 42);
@@ -39,7 +39,7 @@ impl<A> Identity<A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Identity;
+    /// use lambars::typeclass::Identity;
     ///
     /// let x = Identity::new(42);
     /// assert_eq!(x.into_inner(), 42);
@@ -54,7 +54,7 @@ impl<A> Identity<A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Identity;
+    /// use lambars::typeclass::Identity;
     ///
     /// let x = Identity::new(String::from("hello"));
     /// let inner: String = x.into_inner();
@@ -70,7 +70,7 @@ impl<A> Identity<A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Identity;
+    /// use lambars::typeclass::Identity;
     ///
     /// let x = Identity::new(String::from("hello"));
     /// assert_eq!(x.as_inner(), "hello");
@@ -85,7 +85,7 @@ impl<A> Identity<A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Identity;
+    /// use lambars::typeclass::Identity;
     ///
     /// let mut x = Identity::new(42);
     /// *x.as_inner_mut() = 100;

@@ -29,8 +29,8 @@
 //! assert!(region.is_us_local_state());
 //! ```
 
-use functional_rusty::effect::IO;
-use functional_rusty::optics::Lens;
+use lambars::effect::IO;
+use lambars::optics::Lens;
 
 use crate::compound_types::Address;
 use crate::simple_types::{Price, VipStatus};
@@ -452,7 +452,7 @@ pub fn free_vip_shipping(order: PricedOrderWithShippingMethod) -> PricedOrderWit
 /// };
 /// use order_taking_sample::compound_types::{CustomerInfo, Address};
 /// use order_taking_sample::simple_types::{OrderId, BillingAmount, Price};
-/// use functional_rusty::effect::IO;
+/// use lambars::effect::IO;
 /// use rust_decimal::Decimal;
 ///
 /// // 注文を作成
@@ -569,7 +569,7 @@ where
 /// };
 /// use order_taking_sample::compound_types::{CustomerInfo, Address};
 /// use order_taking_sample::simple_types::{OrderId, BillingAmount, Price};
-/// use functional_rusty::effect::IO;
+/// use lambars::effect::IO;
 /// use rust_decimal::Decimal;
 ///
 /// let log_action = |message: &str| {
@@ -615,7 +615,7 @@ where
     let log_completed = log_action("Acknowledgment process completed");
 
     // eff! マクロで IO 操作をチェーン
-    functional_rusty::eff! {
+    lambars::eff! {
         _ <= log_creating;
         _ <= log_sending;
         result <= send_io;

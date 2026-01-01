@@ -14,11 +14,11 @@
 
 #![forbid(unsafe_code)]
 
-use functional_rusty::lens;
-use functional_rusty::optics::{
+use lambars::lens;
+use lambars::optics::{
     Lens, OptionTraversal, Prism, ResultTraversal, Traversal, VecTraversal,
 };
-use functional_rusty::prism;
+use lambars::prism;
 use proptest::prelude::*;
 
 // =============================================================================

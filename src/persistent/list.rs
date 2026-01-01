@@ -19,7 +19,7 @@
 //! # Examples
 //!
 //! ```rust
-//! use functional_rusty::persistent::PersistentList;
+//! use lambars::persistent::PersistentList;
 //!
 //! // Build a list using cons
 //! let list = PersistentList::new().cons(3).cons(2).cons(1);
@@ -88,7 +88,7 @@ struct Node<T> {
 /// # Examples
 ///
 /// ```rust
-/// use functional_rusty::persistent::PersistentList;
+/// use lambars::persistent::PersistentList;
 ///
 /// let list = PersistentList::singleton(42);
 /// assert_eq!(list.head(), Some(&42));
@@ -107,7 +107,7 @@ impl<T> PersistentList<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentList;
+    /// use lambars::persistent::PersistentList;
     ///
     /// let list: PersistentList<i32> = PersistentList::new();
     /// assert!(list.is_empty());
@@ -130,7 +130,7 @@ impl<T> PersistentList<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentList;
+    /// use lambars::persistent::PersistentList;
     ///
     /// let list = PersistentList::singleton(42);
     /// assert_eq!(list.head(), Some(&42));
@@ -162,7 +162,7 @@ impl<T> PersistentList<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentList;
+    /// use lambars::persistent::PersistentList;
     ///
     /// let list = PersistentList::new().cons(3).cons(2).cons(1);
     /// assert_eq!(list.head(), Some(&1));
@@ -187,7 +187,7 @@ impl<T> PersistentList<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentList;
+    /// use lambars::persistent::PersistentList;
     ///
     /// let list = PersistentList::new().cons(2).cons(1);
     /// assert_eq!(list.head(), Some(&1));
@@ -214,7 +214,7 @@ impl<T> PersistentList<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentList;
+    /// use lambars::persistent::PersistentList;
     ///
     /// let list = PersistentList::new().cons(3).cons(2).cons(1);
     /// let tail = list.tail();
@@ -244,7 +244,7 @@ impl<T> PersistentList<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentList;
+    /// use lambars::persistent::PersistentList;
     ///
     /// let list = PersistentList::new().cons(2).cons(1);
     /// if let Some((head, tail)) = list.uncons() {
@@ -279,7 +279,7 @@ impl<T> PersistentList<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentList;
+    /// use lambars::persistent::PersistentList;
     ///
     /// let list = PersistentList::new().cons(3).cons(2).cons(1);
     /// assert_eq!(list.get(0), Some(&1));
@@ -310,7 +310,7 @@ impl<T> PersistentList<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentList;
+    /// use lambars::persistent::PersistentList;
     ///
     /// let list = PersistentList::new().cons(3).cons(2).cons(1);
     /// assert_eq!(list.len(), 3);
@@ -326,7 +326,7 @@ impl<T> PersistentList<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentList;
+    /// use lambars::persistent::PersistentList;
     ///
     /// let empty: PersistentList<i32> = PersistentList::new();
     /// assert!(empty.is_empty());
@@ -347,7 +347,7 @@ impl<T> PersistentList<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentList;
+    /// use lambars::persistent::PersistentList;
     ///
     /// let list = PersistentList::new().cons(3).cons(2).cons(1);
     /// let collected: Vec<&i32> = list.iter().collect();
@@ -378,7 +378,7 @@ impl<T: Clone> PersistentList<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentList;
+    /// use lambars::persistent::PersistentList;
     ///
     /// let list1 = PersistentList::new().cons(2).cons(1);
     /// let list2 = PersistentList::new().cons(4).cons(3);
@@ -413,7 +413,7 @@ impl<T: Clone> PersistentList<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentList;
+    /// use lambars::persistent::PersistentList;
     ///
     /// let list = PersistentList::new().cons(3).cons(2).cons(1);
     /// let reversed = list.reverse();
@@ -445,7 +445,7 @@ impl<T: Clone> PersistentList<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentList;
+    /// use lambars::persistent::PersistentList;
     ///
     /// let list: PersistentList<i32> = (1..=3).collect();
     /// let result = list.flat_map_mut(|element| {

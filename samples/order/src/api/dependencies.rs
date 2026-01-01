@@ -5,7 +5,7 @@
 
 use std::rc::Rc;
 
-use functional_rusty::effect::IO;
+use lambars::effect::IO;
 use rust_decimal::Decimal;
 
 use crate::simple_types::{Price, ProductCode};

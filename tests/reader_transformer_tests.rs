@@ -2,7 +2,7 @@
 //!
 //! ReaderT adds environment reading capability to any monad.
 
-use functional_rusty::effect::{IO, ReaderT};
+use lambars::effect::{IO, ReaderT};
 use rstest::rstest;
 
 // =============================================================================

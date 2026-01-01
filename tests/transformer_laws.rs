@@ -10,8 +10,8 @@
 //! - **Lift Pure**: `lift(pure(a)) === pure(a)`
 //! - **Lift Bind**: `lift(m >>= f) === lift(m) >>= (|x| lift(f(x)))`
 
-use functional_rusty::effect::{ExceptT, ReaderT, StateT, WriterT};
-use functional_rusty::typeclass::Monoid;
+use lambars::effect::{ExceptT, ReaderT, StateT, WriterT};
+use lambars::typeclass::Monoid;
 use rstest::rstest;
 
 // =============================================================================

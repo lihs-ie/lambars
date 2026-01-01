@@ -1,6 +1,6 @@
 # Phase 3: ワークフロー型定義 要件定義
 # Domain Modeling Made Functional の F# パターンを Rust に適用
-# functional-rusty ライブラリを使用した型安全なドメインモデリング
+# lambars ライブラリを使用した型安全なドメインモデリング
 
 id: phase3_workflow_types
 name: ワークフロー型定義
@@ -141,7 +141,7 @@ requirements:
           VipStatus : string
       }
 
-    functional_rusty_usage:
+    lambars_usage:
       - "バリデーション後に CustomerInfo（Phase 2）に変換"
       - "Result::and_then による Monad 的なバリデーションチェーン"
 
@@ -230,7 +230,7 @@ requirements:
           Country: string
       }
 
-    functional_rusty_usage:
+    lambars_usage:
       - "バリデーション後に Address（Phase 2）に変換"
       - "外部住所検証サービスへの入力として使用"
 
@@ -279,7 +279,7 @@ requirements:
           Quantity : decimal
       }
 
-    functional_rusty_usage:
+    lambars_usage:
       - "バリデーション後に ValidatedOrderLine に変換"
       - "ProductCode によって数量の解釈（個数/重量）が変わる"
 
@@ -355,7 +355,7 @@ requirements:
           PromotionCode : string
       }
 
-    functional_rusty_usage:
+    lambars_usage:
       - "validateOrder 関数の入力型"
       - "バリデーション後に ValidatedOrder に変換"
 
@@ -406,7 +406,7 @@ requirements:
           EmailAddress : EmailAddress
       }
 
-    functional_rusty_usage:
+    lambars_usage:
       - "PlaceOrderEvent の一部として出力"
       - "Phase 1 の型（OrderId, EmailAddress）を使用"
 
@@ -457,7 +457,7 @@ requirements:
           Quantity : OrderQuantity
       }
 
-    functional_rusty_usage:
+    lambars_usage:
       - "Phase 1 の型（ProductCode, OrderQuantity）を使用"
       - "ShippableOrderPlaced の一部として使用"
 
@@ -534,7 +534,7 @@ requirements:
           Pdf : PdfAttachment
       }
 
-    functional_rusty_usage:
+    lambars_usage:
       - "PlaceOrderEvent の一部として出力"
       - "Phase 1 の型（OrderId, PdfAttachment）と Phase 2 の型（Address）を使用"
 
@@ -595,7 +595,7 @@ requirements:
           AmountToBill : BillingAmount
       }
 
-    functional_rusty_usage:
+    lambars_usage:
       - "PlaceOrderEvent の一部として出力"
       - "Phase 1 の型（OrderId, BillingAmount）と Phase 2 の型（Address）を使用"
 
@@ -649,7 +649,7 @@ requirements:
           | BillableOrderPlaced of BillableOrderPlaced
           | AcknowledgmentSent of OrderAcknowledgmentSent
 
-    functional_rusty_usage:
+    lambars_usage:
       - "Rust の enum によるパターンマッチ"
       - "Vec<PlaceOrderEvent> としてワークフローから返される"
 
@@ -684,7 +684,7 @@ requirements:
     f_sharp_reference: |
       type ValidationError = ValidationError of string
 
-    functional_rusty_usage:
+    lambars_usage:
       - "PlaceOrderError の一部として使用"
       - "Phase 1 の ValidationError を再利用"
 
@@ -718,7 +718,7 @@ requirements:
     f_sharp_reference: |
       type PricingError = PricingError of string
 
-    functional_rusty_usage:
+    lambars_usage:
       - "PlaceOrderError の一部として使用"
       - "価格計算関数のエラー型として使用"
 
@@ -895,7 +895,7 @@ requirements:
           | Pricing of PricingError
           | RemoteService of RemoteServiceError
 
-    functional_rusty_usage:
+    lambars_usage:
       - "Rust の enum によるパターンマッチ"
       - "Result<Vec<PlaceOrderEvent>, PlaceOrderError> としてワークフローから返される"
       - "From トレイトによる自動変換（? 演算子での使用）"
@@ -945,7 +945,7 @@ requirements:
           | InvalidFormat
           | AddressNotFound
 
-    functional_rusty_usage:
+    lambars_usage:
       - "外部住所検証サービスの結果を表現"
       - "Rust の enum によるパターンマッチ"
 
@@ -993,7 +993,7 @@ requirements:
       CheckedAddress は単なるマーカー型で、バリデーションロジックは含まない。
       外部サービスが住所を検証した後にのみ生成される。
 
-    functional_rusty_usage:
+    lambars_usage:
       - "Newtype パターンによる状態の型安全な表現"
       - "未検証住所と検証済み住所を型レベルで区別"
 
@@ -1040,7 +1040,7 @@ requirements:
           | Standard
           | Promotion of PromotionCode
 
-    functional_rusty_usage:
+    lambars_usage:
       - "Phase 1 の PromotionCode 型を使用"
       - "Rust の enum によるパターンマッチ"
 
@@ -1101,7 +1101,7 @@ requirements:
           Quantity : OrderQuantity
       }
 
-    functional_rusty_usage:
+    lambars_usage:
       - "Phase 1 の型（OrderLineId, ProductCode, OrderQuantity）を使用"
       - "ValidatedOrder の一部として使用"
 
@@ -1110,7 +1110,7 @@ requirements:
       - Debug
       - PartialEq
       - Eq
-      - Lenses  # functional-rusty-derive
+      - Lenses  # lambars-derive
 
   # ========================================
   # 内部型: ValidatedOrder
@@ -1202,7 +1202,7 @@ requirements:
           PricingMethod : PricingMethod
       }
 
-    functional_rusty_usage:
+    lambars_usage:
       - "Phase 1 の型（OrderId）と Phase 2 の型（CustomerInfo, Address）を使用"
       - "validateOrder 関数の出力型"
       - "priceOrder 関数の入力型"
@@ -1213,7 +1213,7 @@ requirements:
       - Debug
       - PartialEq
       - Eq
-      - Lenses  # functional-rusty-derive
+      - Lenses  # lambars-derive
 
   # ========================================
   # 内部型: PricedOrderProductLine
@@ -1276,7 +1276,7 @@ requirements:
           LinePrice : Price
       }
 
-    functional_rusty_usage:
+    lambars_usage:
       - "Phase 1 の型（OrderLineId, ProductCode, OrderQuantity, Price）を使用"
       - "PricedOrderLine の ProductLine バリアントで使用"
 
@@ -1326,7 +1326,7 @@ requirements:
           | ProductLine of PricedOrderProductLine
           | CommentLine of string
 
-    functional_rusty_usage:
+    lambars_usage:
       - "Rust の enum によるパターンマッチ"
       - "PricedOrder の一部として使用"
 
@@ -1437,7 +1437,7 @@ requirements:
           PricingMethod : PricingMethod
       }
 
-    functional_rusty_usage:
+    lambars_usage:
       - "Phase 1 の型（OrderId, BillingAmount）と Phase 2 の型（CustomerInfo, Address）を使用"
       - "priceOrder 関数の出力型"
       - "addShippingInfo 関数の入力型"
@@ -1448,7 +1448,7 @@ requirements:
       - Debug
       - PartialEq
       - Eq
-      - Lenses  # functional-rusty-derive
+      - Lenses  # lambars-derive
 
   # ========================================
   # 内部型: ShippingMethod
@@ -1498,7 +1498,7 @@ requirements:
           | Fedex48
           | Ups48
 
-    functional_rusty_usage:
+    lambars_usage:
       - "Rust の enum によるパターンマッチ"
       - "ShippingInfo の一部として使用"
 
@@ -1550,7 +1550,7 @@ requirements:
           ShippingCost : Price
       }
 
-    functional_rusty_usage:
+    lambars_usage:
       - "Phase 1 の Price 型を使用"
       - "PricedOrderWithShippingMethod の一部として使用"
 
@@ -1601,7 +1601,7 @@ requirements:
           PricedOrder : PricedOrder
       }
 
-    functional_rusty_usage:
+    lambars_usage:
       - "createEvents 関数の入力型"
       - "#[derive(Lenses)] による不変更新サポート"
 
@@ -1610,7 +1610,7 @@ requirements:
       - Debug
       - PartialEq
       - Eq
-      - Lenses  # functional-rusty-derive
+      - Lenses  # lambars-derive
 
   # ========================================
   # 内部型: HtmlString
@@ -1641,7 +1641,7 @@ requirements:
     f_sharp_reference: |
       type HtmlString = HtmlString of string
 
-    functional_rusty_usage:
+    lambars_usage:
       - "Newtype パターンによる型安全性の確保"
       - "OrderAcknowledgment の一部として使用"
 
@@ -1692,7 +1692,7 @@ requirements:
           Letter : HtmlString
       }
 
-    functional_rusty_usage:
+    lambars_usage:
       - "Phase 1 の EmailAddress 型を使用"
       - "sendOrderAcknowledgment 関数の入力型"
 
@@ -1732,7 +1732,7 @@ requirements:
     f_sharp_reference: |
       type SendResult = Sent | NotSent
 
-    functional_rusty_usage:
+    lambars_usage:
       - "sendOrderAcknowledgment 関数の戻り値型"
       - "Rust の enum によるパターンマッチ"
 
@@ -1773,14 +1773,14 @@ dependencies:
       version: "1.36"
       description: 数量フィールドに使用
 
-    - name: functional-rusty
+    - name: lambars
       version: "*"  # ワークスペース内の同バージョン
       features:
         - optics
         - derive
       description: "#[derive(Lenses)] マクロを使用"
 
-    - name: functional-rusty-derive
+    - name: lambars-derive
       version: "*"  # ワークスペース内の同バージョン
       description: "#[derive(Lenses)] マクロを提供"
 
@@ -1788,7 +1788,7 @@ dependencies:
       version: "2.0"
       description: エラー型の定義
 
-  functional_rusty:
+  lambars:
     - module: optics
       traits:
         - Lens

@@ -1,7 +1,7 @@
 //! 注文ドメインで使用する複合型（Compound Types）
 //!
 //! Phase 1 で定義した基本型を組み合わせて、より高レベルなドメインエンティティを表現する。
-//! functional-rusty の Optics（Lens）を活用して不変データの更新を効率的に行う。
+//! lambars の Optics（Lens）を活用して不変データの更新を効率的に行う。
 //!
 //! # 型一覧
 //!
@@ -14,7 +14,7 @@
 //! ```
 //! use order_taking_sample::compound_types::{PersonalName, CustomerInfo};
 //! use order_taking_sample::simple_types::String50;
-//! use functional_rusty::optics::Lens;
+//! use lambars::optics::Lens;
 //!
 //! // CustomerInfo から first_name を取得（Lens 合成）
 //! let customer = CustomerInfo::create("John", "Doe", "john@example.com", "Normal").unwrap();

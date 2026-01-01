@@ -44,7 +44,7 @@
 //! assert_eq!(events.len(), 3);
 //! ```
 
-use functional_rusty::{compose, pipe};
+use lambars::{compose, pipe};
 use rust_decimal::Decimal;
 
 use crate::simple_types::PdfAttachment;

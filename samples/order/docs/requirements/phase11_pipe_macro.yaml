@@ -1,6 +1,6 @@
 # Phase 11: pipe! マクロによるデータフロー変換 要件定義
 # Order Taking Sample Application
-# functional-rusty の pipe! マクロを使用したデータ変換パイプラインの実装
+# lambars の pipe! マクロを使用したデータ変換パイプラインの実装
 
 version: "1.0.0"
 created_at: "2026-01-01"
@@ -14,7 +14,7 @@ phase_name_en: Data Flow Transformation with pipe! Macro
 
 overview:
   description: |
-    F# の パイプ演算子 (|>) に相当する functional-rusty の pipe! マクロを
+    F# の パイプ演算子 (|>) に相当する lambars の pipe! マクロを
     Order Taking サンプルアプリケーションに適用する。
 
     F# コードでは |> を多用してデータ変換を連鎖させている。
@@ -256,7 +256,7 @@ requirements:
 
       rust_target: |
         // pipe! を使用した代替実装（lines の変換部分）
-        use functional_rusty::pipe;
+        use lambars::pipe;
 
         pub fn to_unvalidated_order(&self) -> UnvalidatedOrder {
             let lines: Vec<UnvalidatedOrderLine> = self
@@ -361,7 +361,7 @@ requirements:
         }
 
       rust_target: |
-        use functional_rusty::pipe;
+        use lambars::pipe;
 
         pub fn create_events(
             priced_order: &PricedOrder,
@@ -431,7 +431,7 @@ requirements:
             }
 
       rust_target: |
-        use functional_rusty::pipe;
+        use lambars::pipe;
 
         pub fn create_shipping_event(priced_order: &PricedOrder) -> ShippableOrderPlaced {
             let shipment_lines: Vec<ShippableOrderLine> = priced_order
@@ -488,7 +488,7 @@ requirements:
                 None
 
       rust_target: |
-        use functional_rusty::pipe;
+        use lambars::pipe;
 
         pub fn create_billing_event(priced_order: &PricedOrder) -> Option<BillableOrderPlaced> {
             // BillingAmount から値を取得するパイプライン
@@ -541,7 +541,7 @@ requirements:
         }
 
       rust_target: |
-        use functional_rusty::pipe;
+        use lambars::pipe;
 
         // 代替案1: pipe! を使用
         pub fn from_domain_list(events: &[PlaceOrderEvent]) -> Vec<Self> {
@@ -772,7 +772,7 @@ artifacts:
 
 dependencies:
   internal:
-    - functional_rusty::pipe!
+    - lambars::pipe!
 
   dev_dependencies:
     - rstest (for parameterized tests)

@@ -3,8 +3,8 @@
 //! These tests verify the correctness of the PersistentList implementation.
 //! They follow the TDD approach and cover all basic operations.
 
-use functional_rusty::persistent::PersistentList;
-use functional_rusty::typeclass::{
+use lambars::persistent::PersistentList;
+use lambars::typeclass::{
     Applicative, Foldable, Functor, FunctorMut, Monad, Monoid, Semigroup, Sum, TypeConstructor,
 };
 use rstest::rstest;

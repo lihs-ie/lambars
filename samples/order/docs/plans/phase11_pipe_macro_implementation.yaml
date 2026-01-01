@@ -1,6 +1,6 @@
 # Phase 11: pipe! マクロ実装計画
 # Order Taking Sample Application
-# functional-rusty の pipe! マクロを使用したデータ変換パイプラインの実装
+# lambars の pipe! マクロを使用したデータ変換パイプラインの実装
 
 version: "1.0.0"
 created_at: "2026-01-01"
@@ -12,7 +12,7 @@ phase_id: phase_11
 
 overview:
   description: |
-    F# の パイプ演算子 (|>) に相当する functional-rusty の pipe! マクロを
+    F# の パイプ演算子 (|>) に相当する lambars の pipe! マクロを
     Order Taking サンプルアプリケーションの適切な箇所に適用する。
 
     対象要件:
@@ -70,7 +70,7 @@ implementation_steps:
       pipe! マクロ固有の動作を検証するテストに焦点を当てる。
 
     files:
-      - path: /Users/lihs/workspace/functional-rusty/samples/order/tests/phase11_pipe_macro_tests.rs
+      - path: /Users/lihs/workspace/lambars/samples/order/tests/phase11_pipe_macro_tests.rs
         action: create
         content: |
           //! Phase 11: pipe! マクロ統合テスト
@@ -351,15 +351,15 @@ implementation_steps:
       命令型の mutable Vec + push パターンから、宣言的な concat パターンに変更。
 
     files:
-      - path: /Users/lihs/workspace/functional-rusty/samples/order/src/workflow/events.rs
+      - path: /Users/lihs/workspace/lambars/samples/order/src/workflow/events.rs
         action: modify
         changes:
-          - description: functional_rusty::pipe のインポート追加
+          - description: lambars::pipe のインポート追加
             location: imports section (line 47)
             before: |
               use rust_decimal::Decimal;
             after: |
-              use functional_rusty::pipe;
+              use lambars::pipe;
               use rust_decimal::Decimal;
 
           - description: create_events 関数の pipe! マクロ適用
@@ -441,7 +441,7 @@ implementation_steps:
       設計判断: 現在の実装を維持し、pipe! マクロは適用しない。
 
     files:
-      - path: /Users/lihs/workspace/functional-rusty/samples/order/src/workflow/events.rs
+      - path: /Users/lihs/workspace/lambars/samples/order/src/workflow/events.rs
         action: no_change
         rationale: |
           現在の実装:
@@ -485,7 +485,7 @@ implementation_steps:
       設計判断: 現在の実装を維持し、pipe! マクロは適用しない。
 
     files:
-      - path: /Users/lihs/workspace/functional-rusty/samples/order/src/workflow/events.rs
+      - path: /Users/lihs/workspace/lambars/samples/order/src/workflow/events.rs
         action: no_change
         rationale: |
           現在の実装:
@@ -519,7 +519,7 @@ test_plan:
 
   - step: 1
     title: 新規テストファイルのテスト
-    test_file: /Users/lihs/workspace/functional-rusty/samples/order/tests/phase11_pipe_macro_tests.rs
+    test_file: /Users/lihs/workspace/lambars/samples/order/tests/phase11_pipe_macro_tests.rs
     test_cases:
       - name: test_create_events_with_pipe_macro_generates_correct_order
         description: |
@@ -571,9 +571,9 @@ test_plan:
   - step: 2
     title: 既存テストの回帰テスト
     test_files:
-      - /Users/lihs/workspace/functional-rusty/samples/order/tests/events_tests.rs
-      - /Users/lihs/workspace/functional-rusty/samples/order/tests/place_order_tests.rs
-      - /Users/lihs/workspace/functional-rusty/samples/order/tests/workflow_tests.rs
+      - /Users/lihs/workspace/lambars/samples/order/tests/events_tests.rs
+      - /Users/lihs/workspace/lambars/samples/order/tests/place_order_tests.rs
+      - /Users/lihs/workspace/lambars/samples/order/tests/workflow_tests.rs
     description: |
       pipe! マクロ適用後も既存のテストが全てパスすることを確認。
 
@@ -649,9 +649,9 @@ design_decisions:
 
 dependencies:
   internal:
-    - name: functional_rusty::pipe
+    - name: lambars::pipe
       usage: pipe! マクロのインポート
-      import: "use functional_rusty::pipe;"
+      import: "use lambars::pipe;"
 
   existing_tests:
     - tests/events_tests.rs
@@ -675,15 +675,15 @@ implementation_order:
 
 artifacts:
   modified_files:
-    - path: /Users/lihs/workspace/functional-rusty/samples/order/src/workflow/events.rs
+    - path: /Users/lihs/workspace/lambars/samples/order/src/workflow/events.rs
       changes:
         - pipe! マクロのインポート追加
         - create_events 関数の書き換え
 
   new_files:
-    - path: /Users/lihs/workspace/functional-rusty/samples/order/tests/phase11_pipe_macro_tests.rs
+    - path: /Users/lihs/workspace/lambars/samples/order/tests/phase11_pipe_macro_tests.rs
       description: Phase 11 統合テスト
 
   unchanged_files:
-    - path: /Users/lihs/workspace/functional-rusty/samples/order/src/workflow/place_order.rs
+    - path: /Users/lihs/workspace/lambars/samples/order/src/workflow/place_order.rs
       reason: create_events を呼び出すのみで、変更不要

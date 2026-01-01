@@ -1425,4 +1425,4 @@ future_extensions:
     phase: future
     description: |
       最初のエラーで停止するのではなく、全てのエラーを収集するモード。
-      functional-rusty の Validated 型を使用予定。
+      lambars の Validated 型を使用予定。

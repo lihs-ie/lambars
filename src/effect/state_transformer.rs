@@ -21,7 +21,7 @@
 //! With Option:
 //!
 //! ```rust
-//! use functional_rusty::effect::StateT;
+//! use lambars::effect::StateT;
 //!
 //! let state: StateT<i32, Option<(i32, i32)>> = StateT::new(|s| Some((s * 2, s + 1)));
 //! assert_eq!(state.run(10), Some((20, 11)));
@@ -30,7 +30,7 @@
 //! With Result:
 //!
 //! ```rust
-//! use functional_rusty::effect::StateT;
+//! use lambars::effect::StateT;
 //!
 //! let state: StateT<i32, Result<(i32, i32), String>> = StateT::new(|s| Ok((s * 2, s + 1)));
 //! assert_eq!(state.run(10), Ok((20, 11)));
@@ -55,7 +55,7 @@ use super::IO;
 /// # Examples
 ///
 /// ```rust
-/// use functional_rusty::effect::StateT;
+/// use lambars::effect::StateT;
 ///
 /// fn increment() -> StateT<i32, Option<((), i32)>> {
 ///     StateT::<i32, Option<((), i32)>>::modify_option(|count| count + 1)
@@ -91,7 +91,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::StateT;
+    /// use lambars::effect::StateT;
     ///
     /// let state: StateT<i32, Option<(i32, i32)>> = StateT::new(|s| Some((s * 2, s + 1)));
     /// assert_eq!(state.run(10), Some((20, 11)));
@@ -118,7 +118,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::StateT;
+    /// use lambars::effect::StateT;
     ///
     /// let state: StateT<i32, Option<(i32, i32)>> = StateT::new(|s| Some((s + 1, s * 2)));
     /// assert_eq!(state.run(10), Some((11, 20)));
@@ -165,7 +165,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::StateT;
+    /// use lambars::effect::StateT;
     ///
     /// let state: StateT<i32, Option<(i32, i32)>> = StateT::new(|s| Some((s * 2, s + 1)));
     /// assert_eq!(state.eval(10), Some(20));
@@ -187,7 +187,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::StateT;
+    /// use lambars::effect::StateT;
     ///
     /// let state: StateT<i32, Option<(i32, i32)>> = StateT::new(|s| Some((s * 2, s + 1)));
     /// assert_eq!(state.exec(10), Some(11));
@@ -205,7 +205,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::StateT;
+    /// use lambars::effect::StateT;
     ///
     /// let state: StateT<i32, Option<(String, i32)>> = StateT::pure_option("hello".to_string());
     /// assert_eq!(state.run(42), Some(("hello".to_string(), 42)));
@@ -226,7 +226,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::StateT;
+    /// use lambars::effect::StateT;
     ///
     /// let inner: Option<String> = Some("hello".to_string());
     /// let state: StateT<i32, Option<(String, i32)>> = StateT::lift_option(inner);
@@ -248,7 +248,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::StateT;
+    /// use lambars::effect::StateT;
     ///
     /// let state: StateT<i32, Option<(i32, i32)>> = StateT::new(|s| Some((s, s + 1)));
     /// let mapped = state.fmap_option(|v| v * 2);
@@ -274,7 +274,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::StateT;
+    /// use lambars::effect::StateT;
     ///
     /// let state: StateT<i32, Option<(i32, i32)>> = StateT::new(|s| Some((s, s + 1)));
     /// let chained = state.flat_map_option(|v| {
@@ -303,7 +303,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::StateT;
+    /// use lambars::effect::StateT;
     ///
     /// let state: StateT<i32, Option<(i32, i32)>> = StateT::get_option();
     /// assert_eq!(state.run(42), Some((42, 42)));
@@ -325,7 +325,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::StateT;
+    /// use lambars::effect::StateT;
     ///
     /// let state: StateT<i32, Option<((), i32)>> =
     ///     StateT::<i32, Option<((), i32)>>::put_option(100);
@@ -347,7 +347,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::StateT;
+    /// use lambars::effect::StateT;
     ///
     /// let state: StateT<i32, Option<((), i32)>> =
     ///     StateT::<i32, Option<((), i32)>>::modify_option(|s| s * 2);
@@ -561,7 +561,7 @@ where
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::{StateT, AsyncIO};
+    /// use lambars::effect::{StateT, AsyncIO};
     ///
     /// #[tokio::main]
     /// async fn main() {
@@ -582,7 +582,7 @@ where
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::{StateT, AsyncIO};
+    /// use lambars::effect::{StateT, AsyncIO};
     ///
     /// #[tokio::main]
     /// async fn main() {
@@ -599,7 +599,7 @@ where
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::{StateT, AsyncIO};
+    /// use lambars::effect::{StateT, AsyncIO};
     ///
     /// #[tokio::main]
     /// async fn main() {
@@ -619,7 +619,7 @@ where
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::{StateT, AsyncIO};
+    /// use lambars::effect::{StateT, AsyncIO};
     ///
     /// #[tokio::main]
     /// async fn main() {
@@ -647,7 +647,7 @@ where
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::{StateT, AsyncIO};
+    /// use lambars::effect::{StateT, AsyncIO};
     ///
     /// #[tokio::main]
     /// async fn main() {
@@ -681,7 +681,7 @@ where
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::{StateT, AsyncIO};
+    /// use lambars::effect::{StateT, AsyncIO};
     ///
     /// #[tokio::main]
     /// async fn main() {
@@ -702,7 +702,7 @@ where
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::{StateT, AsyncIO};
+    /// use lambars::effect::{StateT, AsyncIO};
     ///
     /// #[tokio::main]
     /// async fn main() {
@@ -723,7 +723,7 @@ where
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::{StateT, AsyncIO};
+    /// use lambars::effect::{StateT, AsyncIO};
     ///
     /// #[tokio::main]
     /// async fn main() {

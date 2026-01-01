@@ -47,7 +47,7 @@
 //! Basic usage:
 //!
 //! ```rust
-//! use functional_rusty::effect::Writer;
+//! use lambars::effect::Writer;
 //!
 //! let writer: Writer<Vec<String>, i32> =
 //!     Writer::new(42, vec!["computation completed".to_string()]);
@@ -59,7 +59,7 @@
 //! Logging pattern:
 //!
 //! ```rust
-//! use functional_rusty::effect::Writer;
+//! use lambars::effect::Writer;
 //!
 //! fn log(message: &str) -> Writer<Vec<String>, ()> {
 //!     Writer::tell(vec![message.to_string()])
@@ -92,7 +92,7 @@ use crate::typeclass::Monoid;
 /// # Examples
 ///
 /// ```rust
-/// use functional_rusty::effect::Writer;
+/// use lambars::effect::Writer;
 ///
 /// let computation: Writer<Vec<String>, i32> = Writer::tell(vec!["log".to_string()])
 ///     .then(Writer::pure(42));
@@ -128,7 +128,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::Writer;
+    /// use lambars::effect::Writer;
     ///
     /// let writer: Writer<Vec<String>, i32> =
     ///     Writer::new(42, vec!["initial".to_string()]);
@@ -149,7 +149,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::Writer;
+    /// use lambars::effect::Writer;
     ///
     /// let writer: Writer<Vec<String>, i32> =
     ///     Writer::new(42, vec!["log".to_string()]);
@@ -174,7 +174,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::Writer;
+    /// use lambars::effect::Writer;
     ///
     /// let writer: Writer<Vec<String>, i32> =
     ///     Writer::new(42, vec!["log".to_string()]);
@@ -196,7 +196,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::Writer;
+    /// use lambars::effect::Writer;
     ///
     /// let writer: Writer<Vec<String>, i32> =
     ///     Writer::new(42, vec!["log".to_string()]);
@@ -220,7 +220,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::Writer;
+    /// use lambars::effect::Writer;
     ///
     /// let writer: Writer<Vec<String>, i32> = Writer::pure(42);
     /// let (result, output) = writer.run();
@@ -245,7 +245,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::Writer;
+    /// use lambars::effect::Writer;
     ///
     /// let writer: Writer<Vec<String>, i32> =
     ///     Writer::new(21, vec!["log".to_string()]);
@@ -277,7 +277,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::Writer;
+    /// use lambars::effect::Writer;
     ///
     /// let writer: Writer<Vec<String>, i32> =
     ///     Writer::new(10, vec!["first".to_string()]);
@@ -309,7 +309,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::Writer;
+    /// use lambars::effect::Writer;
     ///
     /// let writer: Writer<Vec<String>, i32> =
     ///     Writer::new(10, vec!["first".to_string()]);
@@ -337,7 +337,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::Writer;
+    /// use lambars::effect::Writer;
     ///
     /// let writer1: Writer<Vec<String>, i32> =
     ///     Writer::new(42, vec!["first".to_string()]);
@@ -370,7 +370,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::Writer;
+    /// use lambars::effect::Writer;
     ///
     /// let writer1: Writer<Vec<String>, i32> =
     ///     Writer::new(10, vec!["first".to_string()]);
@@ -402,7 +402,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::Writer;
+    /// use lambars::effect::Writer;
     ///
     /// let writer1: Writer<Vec<String>, i32> =
     ///     Writer::new(42, vec!["first".to_string()]);
@@ -441,7 +441,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::Writer;
+    /// use lambars::effect::Writer;
     ///
     /// let writer: Writer<Vec<String>, ()> =
     ///     Writer::tell(vec!["log message".to_string()]);
@@ -470,7 +470,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::Writer;
+    /// use lambars::effect::Writer;
     ///
     /// let writer: Writer<Vec<String>, i32> =
     ///     Writer::new(42, vec!["log".to_string()]);
@@ -499,7 +499,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::Writer;
+    /// use lambars::effect::Writer;
     ///
     /// let writer: Writer<Vec<String>, (i32, fn(Vec<String>) -> Vec<String>)> =
     ///     Writer::new(
@@ -537,7 +537,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::Writer;
+    /// use lambars::effect::Writer;
     ///
     /// let writer: Writer<Vec<String>, i32> =
     ///     Writer::new(42, vec!["hello".to_string()]);

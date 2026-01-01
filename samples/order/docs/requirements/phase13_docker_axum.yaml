@@ -103,7 +103,7 @@ requirements:
     priority: high
     acceptance_criteria:
       - order-taking サービスが定義されている
-      - ビルドコンテキストが functional-rusty ルートに設定されている
+      - ビルドコンテキストが lambars ルートに設定されている
       - ポート 8080:8080 がマッピングされている
       - RUST_LOG 環境変数が設定されている
     artifacts:

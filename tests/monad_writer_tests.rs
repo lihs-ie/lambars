@@ -6,8 +6,8 @@
 //! Note: These tests verify trait definitions and signatures.
 //! Actual implementations will be tested in Phase 6.2 when Writer monad is implemented.
 
-use functional_rusty::effect::MonadWriter;
-use functional_rusty::typeclass::{Monad, Monoid, Product, Sum};
+use lambars::effect::MonadWriter;
+use lambars::typeclass::{Monad, Monoid, Product, Sum};
 use std::marker::PhantomData;
 
 // =============================================================================

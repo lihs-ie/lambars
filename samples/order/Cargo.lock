@@ -238,24 +238,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "functional-rusty"
-version = "0.1.0"
-dependencies = [
- "functional-rusty-derive",
- "futures",
- "tokio",
-]
-
-[[package]]
-name = "functional-rusty-derive"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.112",
-]
-
-[[package]]
 name = "funty"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -509,6 +491,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "lambars"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "lambars-derive",
+ "tokio",
+]
+
+[[package]]
+name = "lambars-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.112",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -600,8 +600,8 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "base64",
- "functional-rusty",
- "functional-rusty-derive",
+ "lambars",
+ "lambars-derive",
  "proptest",
  "regex",
  "rstest",

@@ -47,7 +47,7 @@
 //! Basic usage:
 //!
 //! ```rust
-//! use functional_rusty::effect::Reader;
+//! use lambars::effect::Reader;
 //!
 //! // Create a reader that doubles the environment
 //! let reader: Reader<i32, i32> = Reader::new(|environment| environment * 2);
@@ -62,7 +62,7 @@
 //! Dependency injection pattern:
 //!
 //! ```rust
-//! use functional_rusty::effect::Reader;
+//! use lambars::effect::Reader;
 //!
 //! #[derive(Clone)]
 //! struct Config {
@@ -110,7 +110,7 @@ use std::rc::Rc;
 /// # Examples
 ///
 /// ```rust
-/// use functional_rusty::effect::Reader;
+/// use lambars::effect::Reader;
 ///
 /// let computation: Reader<i32, i32> = Reader::ask()
 ///     .flat_map(|environment| Reader::pure(environment * 2));
@@ -141,7 +141,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::Reader;
+    /// use lambars::effect::Reader;
     ///
     /// let reader: Reader<i32, i32> = Reader::new(|environment| environment * 2);
     /// assert_eq!(reader.run(21), 42);
@@ -170,7 +170,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::Reader;
+    /// use lambars::effect::Reader;
     ///
     /// let reader: Reader<i32, i32> = Reader::new(|environment| environment + 1);
     /// assert_eq!(reader.run(41), 42);
@@ -192,7 +192,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::Reader;
+    /// use lambars::effect::Reader;
     ///
     /// let reader: Reader<i32, &str> = Reader::pure("constant");
     /// assert_eq!(reader.run(0), "constant");
@@ -216,7 +216,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::Reader;
+    /// use lambars::effect::Reader;
     ///
     /// let reader: Reader<i32, i32> = Reader::new(|environment| environment);
     /// let mapped = reader.fmap(|value| value * 2);
@@ -245,7 +245,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::Reader;
+    /// use lambars::effect::Reader;
     ///
     /// let reader: Reader<i32, i32> = Reader::new(|environment| environment);
     /// let chained = reader.flat_map(|value| Reader::new(move |environment| value + environment));
@@ -274,7 +274,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::Reader;
+    /// use lambars::effect::Reader;
     ///
     /// let reader: Reader<i32, i32> = Reader::new(|environment| environment);
     /// let chained = reader.and_then(|value| Reader::new(move |environment| value + environment));
@@ -298,7 +298,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::Reader;
+    /// use lambars::effect::Reader;
     ///
     /// let reader1: Reader<i32, i32> = Reader::new(|environment| environment);
     /// let reader2: Reader<i32, &str> = Reader::pure("result");
@@ -325,7 +325,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::Reader;
+    /// use lambars::effect::Reader;
     ///
     /// let reader1: Reader<i32, i32> = Reader::new(|environment| environment);
     /// let reader2: Reader<i32, i32> = Reader::new(|environment| environment * 2);
@@ -359,7 +359,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::Reader;
+    /// use lambars::effect::Reader;
     ///
     /// let reader1: Reader<i32, i32> = Reader::new(|environment| environment);
     /// let reader2: Reader<i32, i32> = Reader::new(|environment| environment * 2);
@@ -400,7 +400,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::Reader;
+    /// use lambars::effect::Reader;
     ///
     /// let reader1: Reader<i32, i32> = Reader::new(|environment| environment);
     /// let reader2: Reader<i32, &str> = Reader::pure("hello");
@@ -424,7 +424,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::Reader;
+    /// use lambars::effect::Reader;
     ///
     /// let function_reader: Reader<i32, fn(i32) -> i32> = Reader::pure(|x| x + 1);
     /// let value_reader: Reader<i32, i32> = Reader::new(|environment| environment);
@@ -457,7 +457,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::Reader;
+    /// use lambars::effect::Reader;
     ///
     /// let reader: Reader<i32, i32> = Reader::ask();
     /// assert_eq!(reader.run(42), 42);
@@ -483,7 +483,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::Reader;
+    /// use lambars::effect::Reader;
     ///
     /// #[derive(Clone)]
     /// struct Config { port: u16 }
@@ -512,7 +512,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::Reader;
+    /// use lambars::effect::Reader;
     ///
     /// let reader: Reader<i32, i32> = Reader::new(|environment| environment * 2);
     /// let local_reader = Reader::local(|environment| environment + 10, reader);

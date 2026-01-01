@@ -6,7 +6,7 @@
 //! # Examples
 //!
 //! ```rust
-//! use functional_rusty::control::Lazy;
+//! use lambars::control::Lazy;
 //!
 //! let lazy = Lazy::new(|| {
 //!     println!("Computing...");
@@ -67,7 +67,7 @@ pub enum LazyState<T, F> {
 /// ## Basic Usage
 ///
 /// ```rust
-/// use functional_rusty::control::Lazy;
+/// use lambars::control::Lazy;
 ///
 /// let lazy = Lazy::new(|| expensive_computation());
 ///
@@ -83,7 +83,7 @@ pub enum LazyState<T, F> {
 /// ## Memoization
 ///
 /// ```rust
-/// use functional_rusty::control::Lazy;
+/// use lambars::control::Lazy;
 /// use std::cell::Cell;
 ///
 /// let call_count = Cell::new(0);
@@ -116,7 +116,7 @@ impl<T, F: FnOnce() -> T> Lazy<T, F> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Lazy;
+    /// use lambars::control::Lazy;
     ///
     /// let lazy = Lazy::new(|| {
     ///     println!("Initializing...");
@@ -151,7 +151,7 @@ impl<T, F: FnOnce() -> T> Lazy<T, F> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Lazy;
+    /// use lambars::control::Lazy;
     ///
     /// let lazy = Lazy::new(|| 42);
     /// let value = lazy.force();
@@ -202,7 +202,7 @@ impl<T, F: FnOnce() -> T> Lazy<T, F> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Lazy;
+    /// use lambars::control::Lazy;
     ///
     /// let mut lazy = Lazy::new(|| vec![1, 2, 3]);
     /// lazy.force_mut().push(4);
@@ -275,7 +275,7 @@ impl<T> Lazy<T, fn() -> T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Lazy;
+    /// use lambars::control::Lazy;
     ///
     /// let lazy = Lazy::new_with_value(42);
     /// assert!(lazy.is_initialized());
@@ -295,7 +295,7 @@ impl<T> Lazy<T, fn() -> T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Lazy;
+    /// use lambars::control::Lazy;
     ///
     /// let lazy = Lazy::pure(42);
     /// assert_eq!(*lazy.force(), 42);
@@ -319,7 +319,7 @@ impl<T, F> Lazy<T, F> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Lazy;
+    /// use lambars::control::Lazy;
     ///
     /// let lazy = Lazy::new(|| 42);
     ///
@@ -356,7 +356,7 @@ impl<T, F> Lazy<T, F> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Lazy;
+    /// use lambars::control::Lazy;
     ///
     /// let mut lazy = Lazy::new(|| 42);
     /// assert!(lazy.get_mut().is_none());
@@ -384,7 +384,7 @@ impl<T, F> Lazy<T, F> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Lazy;
+    /// use lambars::control::Lazy;
     ///
     /// let lazy = Lazy::new(|| 42);
     /// assert!(!lazy.is_initialized());
@@ -404,7 +404,7 @@ impl<T, F> Lazy<T, F> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Lazy;
+    /// use lambars::control::Lazy;
     /// use std::panic::catch_unwind;
     ///
     /// let lazy = Lazy::new(|| panic!("initialization failed"));
@@ -429,14 +429,14 @@ impl<T, F: FnOnce() -> T> Lazy<T, F> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Lazy;
+    /// use lambars::control::Lazy;
     ///
     /// let lazy = Lazy::new(|| 42);
     /// assert_eq!(lazy.into_inner(), Ok(42));
     /// ```
     ///
     /// ```rust
-    /// use functional_rusty::control::Lazy;
+    /// use lambars::control::Lazy;
     ///
     /// let lazy = Lazy::new_with_value(42);
     /// assert_eq!(lazy.into_inner(), Ok(42));
@@ -467,7 +467,7 @@ impl<T, F: FnOnce() -> T> Lazy<T, F> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Lazy;
+    /// use lambars::control::Lazy;
     ///
     /// let lazy = Lazy::new(|| 21);
     /// let doubled = lazy.map(|x| x * 2);
@@ -499,7 +499,7 @@ impl<T, F: FnOnce() -> T> Lazy<T, F> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Lazy;
+    /// use lambars::control::Lazy;
     ///
     /// let lazy = Lazy::new(|| 21);
     /// let result = lazy.flat_map(|x| Lazy::new(move || x * 2));
@@ -535,7 +535,7 @@ impl<T, F: FnOnce() -> T> Lazy<T, F> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Lazy;
+    /// use lambars::control::Lazy;
     ///
     /// let lazy1 = Lazy::new(|| 1);
     /// let lazy2 = Lazy::new(|| "hello");
@@ -575,7 +575,7 @@ impl<T, F: FnOnce() -> T> Lazy<T, F> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Lazy;
+    /// use lambars::control::Lazy;
     ///
     /// let lazy1 = Lazy::new(|| 20);
     /// let lazy2 = Lazy::new(|| 22);
@@ -618,7 +618,7 @@ impl<T: Default> Default for Lazy<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Lazy;
+    /// use lambars::control::Lazy;
     ///
     /// let lazy: Lazy<i32> = Lazy::default();
     /// assert_eq!(*lazy.force(), 0);

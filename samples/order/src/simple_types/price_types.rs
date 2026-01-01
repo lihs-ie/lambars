@@ -2,7 +2,7 @@
 //!
 //! `Price`, `BillingAmount` を定義する。
 
-use functional_rusty::typeclass::Foldable;
+use lambars::typeclass::Foldable;
 use rust_decimal::Decimal;
 use std::str::FromStr;
 
@@ -176,7 +176,7 @@ impl BillingAmount {
 
     /// `Price` のスライスを合計して `BillingAmount` を生成する
     ///
-    /// functional-rusty の `Foldable` トレイトを使用して畳み込みを行う。
+    /// lambars の `Foldable` トレイトを使用して畳み込みを行う。
     ///
     /// # Arguments
     ///

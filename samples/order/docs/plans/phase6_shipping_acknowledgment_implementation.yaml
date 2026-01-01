@@ -98,7 +98,7 @@ implementation_order:
       - step 5
     notes: |
       VIP ステータスに応じて配送コストを 0 に設定する関数。
-      functional-rusty の Lens を使用した不変更新。
+      lambars の Lens を使用した不変更新。
       VipStatus::Vip の場合は配送コスト $0、配送方法 Fedex24。
 
   - step: 7
@@ -185,8 +185,8 @@ files:
           PricedOrder, PricedOrderWithShippingMethod, SendResult,
           ShippingInfo, ShippingMethod,
       };
-      use functional_rusty::effect::IO;
-      use functional_rusty::optics::Lens;
+      use lambars::effect::IO;
+      use lambars::optics::Lens;
       use rust_decimal::Decimal;
 
     types:
@@ -473,7 +473,7 @@ files:
           /// `VipStatus::Vip` の場合は配送コストを $0 に設定し、
           /// 配送方法を `Fedex24` に設定する。
           ///
-          /// functional-rusty の Lens を使用した不変更新パターンを採用。
+          /// lambars の Lens を使用した不変更新パターンを採用。
           ///
           /// # Arguments
           ///
@@ -538,7 +538,7 @@ files:
           }
         notes: |
           Price::unsafe_create(Decimal::ZERO) は 0 が必ず有効な価格なので安全。
-          functional-rusty の Lens を使用した不変更新。
+          lambars の Lens を使用した不変更新。
           F# の freeVipShipping に対応。
 
       # -----------------------------------------
@@ -558,7 +558,7 @@ files:
         implementation: |
           /// 注文確認メールを生成・送信する
           ///
-          /// F# の Async に相当する処理を functional-rusty の IO モナドで実現。
+          /// F# の Async に相当する処理を lambars の IO モナドで実現。
           ///
           /// 1. `create_acknowledgment_letter` で HTML メール本文を生成（純粋）
           /// 2. `OrderAcknowledgment` を構築（メールアドレス + 本文）
@@ -592,7 +592,7 @@ files:
           /// };
           /// use order_taking_sample::simple_types::{OrderId, BillingAmount, Price};
           /// use order_taking_sample::compound_types::{CustomerInfo, Address};
-          /// use functional_rusty::effect::IO;
+          /// use lambars::effect::IO;
           /// use rust_decimal::Decimal;
           ///
           /// // 依存関数のモック（IO モナドを返す）
@@ -661,7 +661,7 @@ files:
         notes: |
           send_acknowledgment は IO モナドを返すため、副作用は遅延実行される。
           IO::run_unsafe() を呼び出すまで実際のメール送信は行われない。
-          F# の Async パターンに対応し、functional-rusty の IO モナドで実現。
+          F# の Async パターンに対応し、lambars の IO モナドで実現。
           テスト時は IO::pure(SendResult::Sent) や IO::pure(SendResult::NotSent) を返すモックを使用。
 
 # テスト計画
@@ -1055,7 +1055,7 @@ functional_principles:
 
   lens_usage:
     description: |
-      functional-rusty の Lens を使用した不変更新。
+      lambars の Lens を使用した不変更新。
       PricedOrderWithShippingMethod の配送情報を VIP 無料配送で更新する際に使用。
 
     usage_example: |
@@ -1109,8 +1109,8 @@ existing_implementations:
       - src/compound_types/address.rs
       - src/compound_types/customer_info.rs
 
-# functional-rusty ライブラリの使用
-functional_rusty_usage:
+# lambars ライブラリの使用
+lambars_usage:
   lens_trait:
     description: |
       PricedOrderWithShippingMethod は Lenses derive マクロにより
@@ -1118,7 +1118,7 @@ functional_rusty_usage:
       free_vip_shipping で配送情報を不変更新する際に使用。
 
     import: |
-      use functional_rusty::optics::Lens;
+      use lambars::optics::Lens;
 
     usage: |
       ```rust
@@ -1134,7 +1134,7 @@ functional_rusty_usage:
       run_unsafe() を呼び出すまで副作用は実行されない。
 
     import: |
-      use functional_rusty::effect::IO;
+      use lambars::effect::IO;
 
     usage: |
       ```rust

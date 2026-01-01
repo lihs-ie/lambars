@@ -1,6 +1,6 @@
 //! 住所を表す複合型
 
-use functional_rusty_derive::Lenses;
+use lambars_derive::Lenses;
 
 use crate::simple_types::{String50, UsStateCode, ValidationError, ZipCode};
 
@@ -255,7 +255,7 @@ impl Address {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use functional_rusty::optics::Lens;
+    use lambars::optics::Lens;
     use rstest::rstest;
 
     // =========================================================================

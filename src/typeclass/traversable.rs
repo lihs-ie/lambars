@@ -28,7 +28,7 @@
 //! # Examples
 //!
 //! ```rust
-//! use functional_rusty::typeclass::Traversable;
+//! use lambars::typeclass::Traversable;
 //!
 //! // Parse a vector of strings into integers
 //! let strings = vec!["1", "2", "3"];
@@ -93,7 +93,7 @@ use super::identity::Identity;
 /// # Examples
 ///
 /// ```rust
-/// use functional_rusty::typeclass::Traversable;
+/// use lambars::typeclass::Traversable;
 ///
 /// // Validate all elements in a vector
 /// fn validate_positive(number: i32) -> Result<i32, &'static str> {
@@ -124,7 +124,7 @@ pub trait Traversable: Functor + Foldable {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Traversable;
+    /// use lambars::typeclass::Traversable;
     ///
     /// // All succeed
     /// let values = vec!["1", "2", "3"];
@@ -157,7 +157,7 @@ pub trait Traversable: Functor + Foldable {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Traversable;
+    /// use lambars::typeclass::Traversable;
     ///
     /// fn parse_positive(s: &str) -> Result<i32, &'static str> {
     ///     s.parse::<i32>()
@@ -182,7 +182,7 @@ pub trait Traversable: Functor + Foldable {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Traversable;
+    /// use lambars::typeclass::Traversable;
     ///
     /// // All Some values
     /// let values: Vec<Option<i32>> = vec![Some(1), Some(2), Some(3)];
@@ -211,7 +211,7 @@ pub trait Traversable: Functor + Foldable {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Traversable;
+    /// use lambars::typeclass::Traversable;
     ///
     /// // All Ok values
     /// let values: Vec<Result<i32, &str>> = vec![Ok(1), Ok(2), Ok(3)];
@@ -249,7 +249,7 @@ pub trait Traversable: Functor + Foldable {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Traversable;
+    /// use lambars::typeclass::Traversable;
     /// use std::cell::RefCell;
     ///
     /// let log = RefCell::new(Vec::new());
@@ -283,7 +283,7 @@ pub trait Traversable: Functor + Foldable {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Traversable;
+    /// use lambars::typeclass::Traversable;
     ///
     /// let values = vec![1, 2, 3];
     /// let result = values.for_each_option(|element| {
@@ -315,7 +315,7 @@ pub trait Traversable: Functor + Foldable {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Traversable;
+    /// use lambars::typeclass::Traversable;
     /// use std::cell::RefCell;
     ///
     /// let log = RefCell::new(Vec::new());
@@ -346,7 +346,7 @@ pub trait Traversable: Functor + Foldable {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Traversable;
+    /// use lambars::typeclass::Traversable;
     ///
     /// let values = vec![1, 2, 3];
     /// let result: Result<(), &str> = values.for_each_result(|element| {

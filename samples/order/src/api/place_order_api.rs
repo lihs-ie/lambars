@@ -3,7 +3,7 @@
 //! `PlaceOrder` ワークフローの HTTP API エンドポイント。
 //! 後続のステップで実装する。
 
-use functional_rusty::effect::IO;
+use lambars::effect::IO;
 
 use crate::api::HttpRequest;
 use crate::api::types::HttpResponse;

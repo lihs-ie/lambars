@@ -22,8 +22,8 @@
 //! Basic usage:
 //!
 //! ```rust,ignore
-//! use functional_rusty::effect::AsyncIO;
-//! use functional_rusty::eff_async;
+//! use lambars::effect::AsyncIO;
+//! use lambars::eff_async;
 //!
 //! #[tokio::main]
 //! async fn main() {
@@ -40,8 +40,8 @@
 //! With async operations:
 //!
 //! ```rust,ignore
-//! use functional_rusty::effect::AsyncIO;
-//! use functional_rusty::eff_async;
+//! use lambars::effect::AsyncIO;
+//! use lambars::eff_async;
 //! use std::time::Duration;
 //!
 //! #[tokio::main]
@@ -75,8 +75,8 @@
 /// # Examples
 ///
 /// ```rust,ignore
-/// use functional_rusty::effect::AsyncIO;
-/// use functional_rusty::eff_async;
+/// use lambars::effect::AsyncIO;
+/// use lambars::eff_async;
 ///
 /// #[tokio::main]
 /// async fn main() {

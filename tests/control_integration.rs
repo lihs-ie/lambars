@@ -5,7 +5,7 @@
 
 #![cfg(feature = "control")]
 
-use functional_rusty::control::{Continuation, Either, Lazy, Trampoline};
+use lambars::control::{Continuation, Either, Lazy, Trampoline};
 use rstest::rstest;
 use std::cell::Cell;
 

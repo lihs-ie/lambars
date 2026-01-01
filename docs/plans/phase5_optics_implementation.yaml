@@ -70,19 +70,19 @@ file_structure:
       status: "to_create"
 
   derive_macro_crate:
-    - path: "functional-rusty-derive/Cargo.toml"
+    - path: "lambars-derive/Cargo.toml"
       description: "derive マクロ用クレートの設定"
       status: "to_create"
 
-    - path: "functional-rusty-derive/src/lib.rs"
+    - path: "lambars-derive/src/lib.rs"
       description: "derive マクロのエントリポイント"
       status: "to_create"
 
-    - path: "functional-rusty-derive/src/lenses.rs"
+    - path: "lambars-derive/src/lenses.rs"
       description: "#[derive(Lenses)] の実装"
       status: "to_create"
 
-    - path: "functional-rusty-derive/src/prisms.rs"
+    - path: "lambars-derive/src/prisms.rs"
       description: "#[derive(Prisms)] の実装"
       status: "to_create"
 
@@ -185,7 +185,7 @@ implementation_order:
   - phase: "5.5"
     name: "derive マクロの実装"
     description: |
-      functional-rusty-derive クレートの作成。
+      lambars-derive クレートの作成。
       #[derive(Lenses)] と #[derive(Prisms)] の proc-macro 実装。
     estimated_duration: "4-5 days"
     dependencies:
@@ -1495,14 +1495,14 @@ derive_macro_implementation:
   name: "derive マクロ"
   description: |
     #[derive(Lenses)] と #[derive(Prisms)] の proc-macro 実装。
-    functional-rusty-derive クレートとして別クレートで提供する。
+    lambars-derive クレートとして別クレートで提供する。
 
   cargo_toml: |
     [package]
-    name = "functional-rusty-derive"
+    name = "lambars-derive"
     version = "0.1.0"
     edition = "2024"
-    description = "Derive macros for functional-rusty"
+    description = "Derive macros for lambars"
     license = "MIT OR Apache-2.0"
 
     [lib]
@@ -1638,7 +1638,7 @@ persistent_integration:
             code: |
               #[test]
               fn test_persistent_list_traversal() {
-                  use functional_rusty::persistent::PersistentList;
+                  use lambars::persistent::PersistentList;
 
                   let list: PersistentList<i32> = (1..=5).collect();
                   let each: PersistentListTraversal<i32> = PersistentListTraversal::new();
@@ -1659,7 +1659,7 @@ persistent_integration:
             code: |
               #[test]
               fn test_persistent_vector_index_lens() {
-                  use functional_rusty::persistent::PersistentVector;
+                  use lambars::persistent::PersistentVector;
 
                   let vector: PersistentVector<i32> = (0..10).collect();
 
@@ -1690,7 +1690,7 @@ persistent_integration:
             code: |
               #[test]
               fn test_persistent_hashmap_key_lens() {
-                  use functional_rusty::persistent::PersistentHashMap;
+                  use lambars::persistent::PersistentHashMap;
 
                   let map: PersistentHashMap<String, i32> = [
                       ("a".to_string(), 1),
@@ -1715,7 +1715,7 @@ persistent_integration:
             code: |
               #[test]
               fn test_persistent_treemap_key_lens() {
-                  use functional_rusty::persistent::PersistentTreeMap;
+                  use lambars::persistent::PersistentTreeMap;
 
                   let map: PersistentTreeMap<i32, String> = [
                       (1, "one".to_string()),

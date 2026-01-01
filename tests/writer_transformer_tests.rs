@@ -2,8 +2,8 @@
 //!
 //! WriterT adds output accumulation capability to any monad.
 
-use functional_rusty::effect::{IO, WriterT};
-use functional_rusty::typeclass::Monoid;
+use lambars::effect::{IO, WriterT};
+use lambars::typeclass::Monoid;
 use rstest::rstest;
 
 // =============================================================================
@@ -388,7 +388,7 @@ fn writer_transformer_logging_example() {
 
 #[rstest]
 fn writer_transformer_accumulate_sum_example() {
-    use functional_rusty::typeclass::Sum;
+    use lambars::typeclass::Sum;
 
     fn add_to_sum(value: i32) -> WriterT<Sum<i32>, Option<((), Sum<i32>)>> {
         WriterT::<Sum<i32>, Option<((), Sum<i32>)>>::tell_option(Sum(value))

@@ -21,7 +21,7 @@
 //! With Option:
 //!
 //! ```rust
-//! use functional_rusty::effect::ExceptT;
+//! use lambars::effect::ExceptT;
 //!
 //! let except: ExceptT<String, Option<Result<i32, String>>> =
 //!     ExceptT::new(Some(Ok(42)));
@@ -45,7 +45,7 @@ use super::IO;
 /// # Examples
 ///
 /// ```rust
-/// use functional_rusty::effect::ExceptT;
+/// use lambars::effect::ExceptT;
 ///
 /// fn validate_positive(value: i32) -> ExceptT<String, Option<Result<i32, String>>> {
 ///     if value > 0 {
@@ -86,7 +86,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::ExceptT;
+    /// use lambars::effect::ExceptT;
     ///
     /// let except: ExceptT<String, Option<Result<i32, String>>> =
     ///     ExceptT::new(Some(Ok(42)));
@@ -108,7 +108,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::ExceptT;
+    /// use lambars::effect::ExceptT;
     ///
     /// let except: ExceptT<String, Option<Result<i32, String>>> =
     ///     ExceptT::new(Some(Ok(42)));
@@ -154,7 +154,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::ExceptT;
+    /// use lambars::effect::ExceptT;
     ///
     /// let except: ExceptT<String, Option<Result<i32, String>>> =
     ///     ExceptT::pure_option(42);
@@ -173,7 +173,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::ExceptT;
+    /// use lambars::effect::ExceptT;
     ///
     /// let except: ExceptT<String, Option<Result<i32, String>>> =
     ///     ExceptT::<String, Option<Result<i32, String>>>::throw_option("error".to_string());
@@ -192,7 +192,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::ExceptT;
+    /// use lambars::effect::ExceptT;
     ///
     /// let inner: Option<i32> = Some(42);
     /// let except: ExceptT<String, Option<Result<i32, String>>> =
@@ -212,7 +212,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::ExceptT;
+    /// use lambars::effect::ExceptT;
     ///
     /// let except: ExceptT<String, Option<Result<i32, String>>> =
     ///     ExceptT::new(Some(Ok(21)));
@@ -236,7 +236,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::ExceptT;
+    /// use lambars::effect::ExceptT;
     ///
     /// let except: ExceptT<String, Option<Result<i32, String>>> =
     ///     ExceptT::new(Some(Ok(10)));
@@ -267,7 +267,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::ExceptT;
+    /// use lambars::effect::ExceptT;
     ///
     /// let failing: ExceptT<String, Option<Result<i32, String>>> =
     ///     ExceptT::new(Some(Err("error".to_string())));

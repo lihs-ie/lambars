@@ -22,8 +22,8 @@
 //! # Examples
 //!
 //! ```
-//! use functional_rusty::optics::{Lens, LensComposeExtension, Prism, Optional};
-//! use functional_rusty::{lens, prism};
+//! use lambars::optics::{Lens, LensComposeExtension, Prism, Optional};
+//! use lambars::{lens, prism};
 //!
 //! #[derive(Clone, PartialEq, Debug)]
 //! enum MyOption<T> { Some(T), None }
@@ -163,8 +163,8 @@ pub trait Optional<S, A> {
 /// # Example
 ///
 /// ```
-/// use functional_rusty::optics::{Lens, LensComposeExtension, Prism, Optional};
-/// use functional_rusty::{lens, prism};
+/// use lambars::optics::{Lens, LensComposeExtension, Prism, Optional};
+/// use lambars::{lens, prism};
 ///
 /// #[derive(Clone, PartialEq, Debug)]
 /// enum MyOption<T> { Some(T), None }
@@ -347,8 +347,8 @@ pub trait LensComposeExtension<S, A>: Lens<S, A> {
     /// # Example
     ///
     /// ```
-    /// use functional_rusty::optics::{Lens, LensComposeExtension, Prism, Optional};
-    /// use functional_rusty::{lens, prism};
+    /// use lambars::optics::{Lens, LensComposeExtension, Prism, Optional};
+    /// use lambars::{lens, prism};
     ///
     /// #[derive(Clone, PartialEq, Debug)]
     /// enum MyOption<T> { Some(T), None }

@@ -1,6 +1,6 @@
 //! 個人名を表す複合型
 
-use functional_rusty_derive::Lenses;
+use lambars_derive::Lenses;
 
 use crate::simple_types::{String50, ValidationError};
 
@@ -24,7 +24,7 @@ use crate::simple_types::{String50, ValidationError};
 /// ```
 /// use order_taking_sample::compound_types::PersonalName;
 /// use order_taking_sample::simple_types::String50;
-/// use functional_rusty::optics::Lens;
+/// use lambars::optics::Lens;
 ///
 /// let name = PersonalName::create("John", "Doe").unwrap();
 ///
@@ -134,7 +134,7 @@ impl PersonalName {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use functional_rusty::optics::Lens;
+    use lambars::optics::Lens;
     use rstest::rstest;
 
     // =========================================================================

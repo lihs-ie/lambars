@@ -31,7 +31,7 @@
 //! referential transparency in pure code.
 //!
 //! ```rust
-//! use functional_rusty::effect::IO;
+//! use lambars::effect::IO;
 //!
 //! // Create and chain IO actions
 //! let io = IO::pure(10)
@@ -48,8 +48,8 @@
 //! operations, similar to Haskell's do-notation:
 //!
 //! ```rust
-//! use functional_rusty::eff;
-//! use functional_rusty::typeclass::Monad;
+//! use lambars::eff;
+//! use lambars::typeclass::Monad;
 //!
 //! let result = eff! {
 //!     x <= Some(5);
@@ -63,8 +63,8 @@
 //! # Examples
 //!
 //! ```rust
-//! use functional_rusty::effect::MonadError;
-//! use functional_rusty::typeclass::Monad;
+//! use lambars::effect::MonadError;
+//! use lambars::typeclass::Monad;
 //!
 //! // Using MonadError with Result
 //! let computation: Result<i32, String> = Ok(42);

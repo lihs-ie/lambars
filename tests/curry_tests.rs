@@ -5,14 +5,14 @@
 #![cfg(feature = "compose")]
 #![allow(unused_imports)]
 
-use functional_rusty::{curry2, curry3, curry4, curry5, curry6};
+use lambars::{curry2, curry3, curry4, curry5, curry6};
 
 // =============================================================================
 // curry2! tests (2-argument functions)
 // =============================================================================
 
 mod curry2_tests {
-    use functional_rusty::curry2;
+    use lambars::curry2;
 
     fn add(first: i32, second: i32) -> i32 {
         first + second
@@ -87,7 +87,7 @@ mod curry2_tests {
 // =============================================================================
 
 mod curry3_tests {
-    use functional_rusty::curry3;
+    use lambars::curry3;
 
     fn add_three(first: i32, second: i32, third: i32) -> i32 {
         first + second + third
@@ -139,7 +139,7 @@ mod curry3_tests {
 // =============================================================================
 
 mod curry4_tests {
-    use functional_rusty::curry4;
+    use lambars::curry4;
 
     fn sum_four(a: i32, b: i32, c: i32, d: i32) -> i32 {
         a + b + c + d
@@ -178,7 +178,7 @@ mod curry4_tests {
 // =============================================================================
 
 mod curry5_tests {
-    use functional_rusty::curry5;
+    use lambars::curry5;
 
     fn sum_five(a: i32, b: i32, c: i32, d: i32, e: i32) -> i32 {
         a + b + c + d + e
@@ -208,7 +208,7 @@ mod curry5_tests {
 // =============================================================================
 
 mod curry6_tests {
-    use functional_rusty::curry6;
+    use lambars::curry6;
 
     fn sum_six(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32) -> i32 {
         a + b + c + d + e + f
@@ -239,7 +239,7 @@ mod curry6_tests {
 // =============================================================================
 
 mod integration {
-    use functional_rusty::{compose, curry2, pipe};
+    use lambars::{compose, curry2, pipe};
 
     fn multiply(first: i32, second: i32) -> i32 {
         first * second
@@ -287,7 +287,7 @@ mod integration {
 // =============================================================================
 
 mod edge_cases {
-    use functional_rusty::curry2;
+    use lambars::curry2;
 
     #[test]
     fn test_curry_with_clone_type() {

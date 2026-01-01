@@ -35,7 +35,7 @@
 //! # Examples
 //!
 //! ```rust,ignore
-//! use functional_rusty::effect::MonadReader;
+//! use lambars::effect::MonadReader;
 //!
 //! // Reader implementation will provide concrete examples
 //! ```
@@ -82,7 +82,7 @@ use crate::typeclass::Monad;
 /// # Examples
 ///
 /// ```rust,ignore
-/// use functional_rusty::effect::MonadReader;
+/// use lambars::effect::MonadReader;
 ///
 /// struct Config {
 ///     port: u16,
@@ -110,7 +110,7 @@ pub trait MonadReader<R>: Monad {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::{MonadReader, Reader};
+    /// use lambars::effect::{MonadReader, Reader};
     ///
     /// let reader: Reader<i32, i32> = Reader::ask();
     /// assert_eq!(reader.run(42), 42);
@@ -136,7 +136,7 @@ pub trait MonadReader<R>: Monad {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::{MonadReader, Reader};
+    /// use lambars::effect::{MonadReader, Reader};
     ///
     /// let reader = Reader::ask().map(|x: i32| x * 2);
     /// let modified = Reader::local(|x| x + 10, reader);
@@ -168,7 +168,7 @@ pub trait MonadReader<R>: Monad {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::{MonadReader, Reader};
+    /// use lambars::effect::{MonadReader, Reader};
     ///
     /// struct Config { port: u16, host: String }
     ///

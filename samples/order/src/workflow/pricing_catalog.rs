@@ -30,7 +30,7 @@
 //! ```
 
 use crate::simple_types::{Price, ProductCode};
-use functional_rusty::persistent::PersistentHashMap;
+use lambars::persistent::PersistentHashMap;
 use std::rc::Rc;
 
 // =============================================================================

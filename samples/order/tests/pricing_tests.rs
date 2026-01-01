@@ -1,6 +1,6 @@
 //! pricing モジュールの補完テスト
 //!
-//! functional-rusty の Lazy 型によるキャッシュ動作、
+//! lambars の Lazy 型によるキャッシュ動作、
 //! 小数精度テスト、エッジケースのテストを行う。
 
 use order_taking_sample::compound_types::{Address, CustomerInfo};

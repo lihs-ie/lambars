@@ -12,9 +12,9 @@
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::let_unit_value)]
 
-use functional_rusty::eff;
-use functional_rusty::effect::{Reader, State, Writer};
-use functional_rusty::typeclass::Monad;
+use lambars::eff;
+use lambars::effect::{Reader, State, Writer};
+use lambars::typeclass::Monad;
 
 // =============================================================================
 // Option Tests

@@ -229,7 +229,7 @@ implementation_order:
             /// # Examples
             ///
             /// ```
-            /// use functional_rusty::compose::identity;
+            /// use lambars::compose::identity;
             ///
             /// assert_eq!(identity(42), 42);
             /// assert_eq!(identity("hello"), "hello");
@@ -281,7 +281,7 @@ implementation_order:
             /// # Examples
             ///
             /// ```
-            /// use functional_rusty::compose::constant;
+            /// use lambars::compose::constant;
             ///
             /// let always_five = constant(5);
             /// assert_eq!(always_five(100), 5);
@@ -343,7 +343,7 @@ implementation_order:
             /// # Examples
             ///
             /// ```
-            /// use functional_rusty::compose::flip;
+            /// use lambars::compose::flip;
             ///
             /// fn divide(a: f64, b: f64) -> f64 { a / b }
             ///
@@ -408,7 +408,7 @@ implementation_order:
             /// # Examples
             ///
             /// ```
-            /// use functional_rusty::compose;
+            /// use lambars::compose;
             ///
             /// fn add_one(x: i32) -> i32 { x + 1 }
             /// fn double(x: i32) -> i32 { x * 2 }
@@ -627,7 +627,7 @@ implementation_order:
             /// # Examples
             ///
             /// ```
-            /// use functional_rusty::pipe;
+            /// use lambars::pipe;
             ///
             /// fn add_one(x: i32) -> i32 { x + 1 }
             /// fn double(x: i32) -> i32 { x * 2 }
@@ -719,7 +719,7 @@ implementation_order:
         tests:
           - name: test_partial_first_argument_fixed
             code: |
-              use functional_rusty::compose::__;
+              use lambars::compose::__;
 
               #[test]
               fn test_partial_first_argument_fixed() {
@@ -731,7 +731,7 @@ implementation_order:
               }
           - name: test_partial_second_argument_fixed
             code: |
-              use functional_rusty::compose::__;
+              use lambars::compose::__;
 
               #[test]
               fn test_partial_second_argument_fixed() {
@@ -752,7 +752,7 @@ implementation_order:
               }
           - name: test_partial_no_arguments_fixed
             code: |
-              use functional_rusty::compose::__;
+              use lambars::compose::__;
 
               #[test]
               fn test_partial_no_arguments_fixed() {
@@ -793,7 +793,7 @@ implementation_order:
             /// # Examples
             ///
             /// ```
-            /// use functional_rusty::{partial, compose::__};
+            /// use lambars::{partial, compose::__};
             ///
             /// fn add(a: i32, b: i32) -> i32 { a + b }
             ///
@@ -822,7 +822,7 @@ implementation_order:
         tests:
           - name: test_partial_three_args_first_fixed
             code: |
-              use functional_rusty::compose::__;
+              use lambars::compose::__;
 
               #[test]
               fn test_partial_three_args_first_fixed() {
@@ -833,7 +833,7 @@ implementation_order:
               }
           - name: test_partial_three_args_middle_fixed
             code: |
-              use functional_rusty::compose::__;
+              use lambars::compose::__;
 
               #[test]
               fn test_partial_three_args_middle_fixed() {
@@ -844,7 +844,7 @@ implementation_order:
               }
           - name: test_partial_three_args_last_fixed
             code: |
-              use functional_rusty::compose::__;
+              use lambars::compose::__;
 
               #[test]
               fn test_partial_three_args_last_fixed() {
@@ -855,7 +855,7 @@ implementation_order:
               }
           - name: test_partial_three_args_two_fixed
             code: |
-              use functional_rusty::compose::__;
+              use lambars::compose::__;
 
               #[test]
               fn test_partial_three_args_two_fixed() {
@@ -874,7 +874,7 @@ implementation_order:
         tests:
           - name: test_partial_four_args_representative
             code: |
-              use functional_rusty::compose::__;
+              use lambars::compose::__;
 
               #[test]
               fn test_partial_four_args_representative() {
@@ -941,7 +941,7 @@ implementation_order:
             /// # Examples
             ///
             /// ```
-            /// use functional_rusty::curry2;
+            /// use lambars::curry2;
             ///
             /// fn add(a: i32, b: i32) -> i32 { a + b }
             ///
@@ -1064,7 +1064,7 @@ implementation_order:
     tests:
       - name: compose と partial の組み合わせ
         code: |
-          use functional_rusty::compose::__;
+          use lambars::compose::__;
 
           #[test]
           fn test_compose_with_partial() {
@@ -1082,7 +1082,7 @@ implementation_order:
         code: |
           #[test]
           fn test_compose_with_functor() {
-              use functional_rusty::typeclass::Functor;
+              use lambars::typeclass::Functor;
 
               fn add_one(x: i32) -> i32 { x + 1 }
               fn double(x: i32) -> i32 { x * 2 }
@@ -1097,7 +1097,7 @@ implementation_order:
         code: |
           #[test]
           fn test_pipe_with_monad() {
-              use functional_rusty::typeclass::Monad;
+              use lambars::typeclass::Monad;
 
               let result = pipe!(
                   Some(5),

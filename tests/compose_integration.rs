@@ -12,8 +12,8 @@
 #![cfg(feature = "compose")]
 #![allow(unused_imports)]
 
-use functional_rusty::compose::{constant, flip, identity};
-use functional_rusty::{compose, curry2, curry3, curry4, partial, pipe};
+use lambars::compose::{constant, flip, identity};
+use lambars::{compose, curry2, curry3, curry4, partial, pipe};
 
 // =============================================================================
 // Complex Pipeline Scenarios

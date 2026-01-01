@@ -1,6 +1,6 @@
 # Phase 5: 価格計算実装 要件定義
 # Domain Modeling Made Functional の F# パターンを Rust に適用
-# functional-rusty ライブラリを使用した関数型価格計算
+# lambars ライブラリを使用した関数型価格計算
 
 id: phase5_pricing
 name: 価格計算実装
@@ -17,7 +17,7 @@ overview:
     依存関数として注入することで、テスト容易性と参照透過性を確保する。
 
     プロモーション価格と標準価格の両方をサポートし、
-    functional-rusty の Lazy 型を使用して価格テーブルのキャッシュを実現する。
+    lambars の Lazy 型を使用して価格テーブルのキャッシュを実現する。
 
   design_principles:
     - name: 参照透過性
@@ -44,7 +44,7 @@ overview:
 
     - name: 遅延評価
       description: |
-        functional-rusty の Lazy 型を使用して、価格テーブルのキャッシュを実現する。
+        lambars の Lazy 型を使用して、価格テーブルのキャッシュを実現する。
         標準価格とプロモーション価格は最初のアクセス時にのみ取得され、
         以降はキャッシュされた値を使用する。
 
@@ -223,7 +223,7 @@ dependency_types:
       ```
 
     lazy_caching_note: |
-      functional-rusty の Lazy 型を使用してキャッシュを実現:
+      lambars の Lazy 型を使用してキャッシュを実現:
 
       ```rust
       let cached_standard_prices = Lazy::new(|| get_standard_prices());
@@ -318,7 +318,7 @@ requirements:
           GetPromotionPricesFn: Fn(&PromotionCode) -> Box<dyn Fn(&ProductCode) -> Option<Price>> + 'static,
 
     implementation_notes: |
-      - 標準価格は functional-rusty の Lazy 型を使用してキャッシュ（最初のアクセス時に取得）
+      - 標準価格は lambars の Lazy 型を使用してキャッシュ（最初のアクセス時に取得）
       - プロモーション価格はプロモーションコードごとにキャッシュ可能
       - 返される関数は Rc<dyn Fn> として返す（キャッシュ共有のため）
       - Rc は !Send, !Sync なので、シングルスレッド環境でのみ使用
@@ -749,10 +749,10 @@ implementation:
     ```
 
   lazy_caching_design: |
-    functional-rusty の Lazy 型を使用した価格キャッシュの設計:
+    lambars の Lazy 型を使用した価格キャッシュの設計:
 
     ```rust
-    use functional_rusty::control::Lazy;
+    use lambars::control::Lazy;
     use std::rc::Rc;
 
     // 標準価格のキャッシュ
@@ -831,7 +831,7 @@ functional_principles:
 
   lazy_evaluation:
     description: |
-      functional-rusty の Lazy 型を使用して価格テーブルのキャッシュを実現。
+      lambars の Lazy 型を使用して価格テーブルのキャッシュを実現。
 
     benefits:
       - 価格テーブルは最初のアクセス時にのみ取得される
@@ -840,7 +840,7 @@ functional_principles:
 
     usage_example: |
       ```rust
-      use functional_rusty::control::Lazy;
+      use lambars::control::Lazy;
 
       let cached_prices = Lazy::new(|| {
           // 重い外部サービス呼び出し
@@ -1061,15 +1061,15 @@ existing_implementations:
       - PlaceOrderError
 
 # ========================================
-# functional-rusty ライブラリの使用
+# lambars ライブラリの使用
 # ========================================
-functional_rusty_usage:
+lambars_usage:
   lazy_type:
     description: |
       価格テーブルのキャッシュに Lazy 型を使用。
 
     import: |
-      use functional_rusty::control::Lazy;
+      use lambars::control::Lazy;
 
     usage: |
       ```rust

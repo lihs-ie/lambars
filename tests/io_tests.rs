@@ -3,7 +3,7 @@
 //! This module tests the IO type's basic functionality and ensures
 //! that side effects are properly deferred until `run_unsafe` is called.
 
-use functional_rusty::effect::IO;
+use lambars::effect::IO;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 

@@ -1,4 +1,4 @@
-//! Derive macros for functional-rusty optics.
+//! Derive macros for lambars optics.
 //!
 //! This crate provides procedural macros for automatically generating
 //! optics (Lens and Prism) implementations for Rust types.
@@ -11,8 +11,8 @@
 //! # Example: Lenses
 //!
 //! ```rust,ignore
-//! use functional_rusty_derive::Lenses;
-//! use functional_rusty::optics::Lens;
+//! use lambars_derive::Lenses;
+//! use lambars::optics::Lens;
 //!
 //! #[derive(Clone, Lenses)]
 //! struct Point {
@@ -32,8 +32,8 @@
 //! # Example: Prisms
 //!
 //! ```rust,ignore
-//! use functional_rusty_derive::Prisms;
-//! use functional_rusty::optics::Prism;
+//! use lambars_derive::Prisms;
+//! use lambars::optics::Prism;
 //!
 //! #[derive(Clone, Prisms)]
 //! enum Shape {
@@ -85,8 +85,8 @@ use proc_macro::TokenStream;
 /// # Example
 ///
 /// ```rust,ignore
-/// use functional_rusty_derive::Lenses;
-/// use functional_rusty::optics::Lens;
+/// use lambars_derive::Lenses;
+/// use lambars::optics::Lens;
 ///
 /// #[derive(Clone, Debug, PartialEq, Lenses)]
 /// struct Person {
@@ -159,8 +159,8 @@ pub fn derive_lenses(input: TokenStream) -> TokenStream {
 /// # Example
 ///
 /// ```rust,ignore
-/// use functional_rusty_derive::Prisms;
-/// use functional_rusty::optics::Prism;
+/// use lambars_derive::Prisms;
+/// use lambars::optics::Prism;
 ///
 /// #[derive(Clone, Debug, PartialEq, Prisms)]
 /// enum Shape {

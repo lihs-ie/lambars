@@ -135,7 +135,7 @@ file_structure:
         dependencies:
           - crate::simple_types
           - crate::workflow
-          - functional_rusty::effect::IO
+          - lambars::effect::IO
         functions:
           - check_product_exists
           - check_address_exists
@@ -151,7 +151,7 @@ file_structure:
           - crate::api::types
           - crate::api::dependencies
           - crate::workflow::place_order
-          - functional_rusty::effect::IO
+          - lambars::effect::IO
         functions:
           - place_order_api
 
@@ -213,8 +213,8 @@ implementation_steps:
 
         implementation: |
           [dependencies]
-          functional-rusty = { path = "../..", features = ["full"] }
-          functional-rusty-derive = { path = "../../functional-rusty-derive" }
+          lambars = { path = "../..", features = ["full"] }
+          lambars-derive = { path = "../../lambars-derive" }
           rust_decimal = { version = "1.36", features = ["serde-with-str"] }
           regex = "1"
           thiserror = "2"
@@ -1052,7 +1052,7 @@ implementation_steps:
           //! 実際の外部サービス呼び出しをシミュレートする。
 
           use std::rc::Rc;
-          use functional_rusty::effect::IO;
+          use lambars::effect::IO;
           use rust_decimal::Decimal;
 
           use crate::simple_types::{Price, ProductCode, PromotionCode};
@@ -1165,7 +1165,7 @@ implementation_steps:
           //!
           //! HTTP リクエストを受け取り、PlaceOrder ワークフローを実行する
 
-          use functional_rusty::effect::IO;
+          use lambars::effect::IO;
           use crate::api::dependencies::{
               calculate_shipping_cost, check_address_exists, check_product_exists,
               create_acknowledgment_letter, get_pricing_function, send_acknowledgment,

@@ -17,7 +17,7 @@
 //! - Put Put Law: put(s1).then(put(s2)) == put(s2)
 //! - Modify Composition: modify(f).then(modify(g)) == modify(|s| g(f(s)))
 
-use functional_rusty::effect::State;
+use lambars::effect::State;
 use proptest::prelude::*;
 
 // =============================================================================

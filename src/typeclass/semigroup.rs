@@ -18,7 +18,7 @@
 //! # Examples
 //!
 //! ```rust
-//! use functional_rusty::typeclass::Semigroup;
+//! use lambars::typeclass::Semigroup;
 //!
 //! // String concatenation
 //! let hello = String::from("Hello, ");
@@ -52,7 +52,7 @@ use super::wrappers::{Max, Min, Product, Sum};
 /// # Examples
 ///
 /// ```rust
-/// use functional_rusty::typeclass::Semigroup;
+/// use lambars::typeclass::Semigroup;
 ///
 /// let a = String::from("foo");
 /// let b = String::from("bar");
@@ -66,7 +66,7 @@ pub trait Semigroup {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Semigroup;
+    /// use lambars::typeclass::Semigroup;
     ///
     /// let result = String::from("Hello, ").combine(String::from("World!"));
     /// assert_eq!(result, "Hello, World!");
@@ -81,7 +81,7 @@ pub trait Semigroup {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Semigroup;
+    /// use lambars::typeclass::Semigroup;
     ///
     /// let a = String::from("Hello, ");
     /// let b = String::from("World!");
@@ -110,7 +110,7 @@ pub trait Semigroup {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Semigroup;
+    /// use lambars::typeclass::Semigroup;
     ///
     /// let s = String::from("ab");
     /// assert_eq!(s.combine_n(3), "ababab");
@@ -141,7 +141,7 @@ pub trait Semigroup {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Semigroup;
+    /// use lambars::typeclass::Semigroup;
     ///
     /// let strings = vec![
     ///     String::from("a"),

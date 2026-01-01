@@ -3,7 +3,7 @@
 //! PlaceOrder ワークフローの状態遷移テスト、IO モナドの動作テスト、
 //! エラーハンドリングとイベント生成のテストを行う。
 
-use functional_rusty::effect::IO;
+use lambars::effect::IO;
 use order_taking_sample::simple_types::{Price, ProductCode, VipStatus};
 use order_taking_sample::workflow::{
     AddressValidationError, CheckedAddress, HtmlString, OrderAcknowledgment, PlaceOrderError,

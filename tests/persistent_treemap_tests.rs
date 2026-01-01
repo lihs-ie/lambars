@@ -3,8 +3,8 @@
 //! This test file follows TDD methodology - tests are written first,
 //! then implementation is added to make them pass.
 
-use functional_rusty::persistent::PersistentTreeMap;
-use functional_rusty::typeclass::Foldable;
+use lambars::persistent::PersistentTreeMap;
+use lambars::typeclass::Foldable;
 use rstest::rstest;
 use std::ops::Bound;
 

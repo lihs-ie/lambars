@@ -28,7 +28,7 @@
 //! # Examples
 //!
 //! ```rust
-//! use functional_rusty::typeclass::Foldable;
+//! use lambars::typeclass::Foldable;
 //!
 //! // Folding a Vec
 //! let numbers = vec![1, 2, 3, 4, 5];
@@ -74,7 +74,7 @@ use super::monoid::Monoid;
 /// # Examples
 ///
 /// ```rust
-/// use functional_rusty::typeclass::{Foldable, Sum};
+/// use lambars::typeclass::{Foldable, Sum};
 ///
 /// let values = vec![1, 2, 3, 4, 5];
 ///
@@ -100,7 +100,7 @@ pub trait Foldable: TypeConstructor {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Foldable;
+    /// use lambars::typeclass::Foldable;
     ///
     /// let values = vec![1, 2, 3];
     /// let sum = values.fold_left(0, |accumulator, element| accumulator + element);
@@ -125,7 +125,7 @@ pub trait Foldable: TypeConstructor {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Foldable;
+    /// use lambars::typeclass::Foldable;
     ///
     /// let values = vec![1, 2, 3];
     /// // Builds "123" by folding from the right: f(1, f(2, f(3, "")))
@@ -150,7 +150,7 @@ pub trait Foldable: TypeConstructor {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::{Foldable, Sum, Product};
+    /// use lambars::typeclass::{Foldable, Sum, Product};
     ///
     /// let values = vec![1, 2, 3, 4];
     ///
@@ -178,7 +178,7 @@ pub trait Foldable: TypeConstructor {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Foldable;
+    /// use lambars::typeclass::Foldable;
     ///
     /// assert!(!Some(5).is_empty());
     /// assert!(None::<i32>.is_empty());
@@ -198,7 +198,7 @@ pub trait Foldable: TypeConstructor {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Foldable;
+    /// use lambars::typeclass::Foldable;
     ///
     /// assert_eq!(Some(5).length(), 1);
     /// assert_eq!(None::<i32>.length(), 0);
@@ -220,7 +220,7 @@ pub trait Foldable: TypeConstructor {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Foldable;
+    /// use lambars::typeclass::Foldable;
     ///
     /// let option_value = Some(42);
     /// assert_eq!(option_value.to_list(), vec![42]);
@@ -249,7 +249,7 @@ pub trait Foldable: TypeConstructor {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Foldable;
+    /// use lambars::typeclass::Foldable;
     ///
     /// let values = vec![1, 2, 3, 4, 5];
     /// assert_eq!(values.clone().find(|element| *element > 3), Some(4));
@@ -282,7 +282,7 @@ pub trait Foldable: TypeConstructor {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Foldable;
+    /// use lambars::typeclass::Foldable;
     ///
     /// let values = vec![1, 2, 3, 4, 5];
     /// assert!(values.exists(|element| *element > 3));
@@ -308,7 +308,7 @@ pub trait Foldable: TypeConstructor {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Foldable;
+    /// use lambars::typeclass::Foldable;
     ///
     /// let values = vec![2, 4, 6, 8];
     /// assert!(values.for_all(|element| *element % 2 == 0));

@@ -61,7 +61,7 @@ analysis:
         - 真の async 対応になる
         - 将来的に async I/O を直接扱える
       cons:
-        - functional-rusty ライブラリ本体の大幅な変更が必要
+        - lambars ライブラリ本体の大幅な変更が必要
         - 既存のテストへの影響が大きい
         - Phase 13 のスコープを大きく超える
       complexity: high

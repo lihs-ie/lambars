@@ -1,6 +1,6 @@
 # Phase 6: 配送コスト計算と確認メール送信 要件定義
 # Domain Modeling Made Functional の F# パターンを Rust に適用
-# functional-rusty ライブラリを使用した配送と確認メール処理
+# lambars ライブラリを使用した配送と確認メール処理
 
 id: phase6_shipping_acknowledgment
 name: 配送コスト計算と確認メール送信
@@ -336,7 +336,7 @@ dependency_types:
     description: |
       注文確認メールを送信する関数型。
       メール送信の副作用を IO モナドでラップし、テスト時にモック可能にする。
-      F# の Async に相当する処理を functional-rusty の IO モナドで実現する。
+      F# の Async に相当する処理を lambars の IO モナドで実現する。
 
     f_sharp_reference: |
       type SendOrderAcknowledgment =
@@ -349,7 +349,7 @@ dependency_types:
 
     usage_example: |
       ```rust
-      use functional_rusty::effect::IO;
+      use lambars::effect::IO;
 
       fn send_acknowledgment_impl(
           acknowledgment: &OrderAcknowledgment,
@@ -374,7 +374,7 @@ dependency_types:
     description: |
       注文確認プロセス全体を実行する関数型。
       確認メール生成、送信を行い、結果を IO モナドでラップしたイベントとして返す。
-      F# の AsyncResult に相当する処理を functional-rusty の IO モナドで実現する。
+      F# の AsyncResult に相当する処理を lambars の IO モナドで実現する。
 
     f_sharp_reference: |
       type AcknowledgeOrder =
@@ -720,7 +720,7 @@ requirements:
     description: |
       注文確認メールを生成・送信する関数。
       メール送信結果に応じて OrderAcknowledgmentSent イベントを返す。
-      F# の Async に相当する処理を functional-rusty の IO モナドで実現する。
+      F# の Async に相当する処理を lambars の IO モナドで実現する。
 
       1. create_acknowledgment_letter で HTML メール本文を生成（純粋関数）
       2. OrderAcknowledgment を構築（メールアドレス + 本文）
@@ -774,7 +774,7 @@ requirements:
 
     rust_implementation_example: |
       ```rust
-      use functional_rusty::effect::IO;
+      use lambars::effect::IO;
 
       pub fn acknowledge_order<CreateLetter, SendAcknowledgment>(
           create_acknowledgment_letter: &CreateLetter,
@@ -889,7 +889,7 @@ implementation:
         PricedOrder, PricedOrderWithShippingMethod, SendResult,
         ShippingInfo, ShippingMethod,
     };
-    use functional_rusty::optics::Lens;
+    use lambars::optics::Lens;
     use rust_decimal::Decimal;
 
     // 配送地域の分類
@@ -976,7 +976,7 @@ functional_principles:
 
   lens_usage:
     description: |
-      functional-rusty の Lens を使用した不変更新。
+      lambars の Lens を使用した不変更新。
       PricedOrderWithShippingMethod の配送情報を VIP 無料配送で更新する際に使用。
 
     usage_example: |
@@ -1049,16 +1049,16 @@ existing_implementations:
       - src/compound_types/customer_info.rs
 
 # ========================================
-# functional-rusty ライブラリの使用
+# lambars ライブラリの使用
 # ========================================
-functional_rusty_usage:
+lambars_usage:
   lens_trait:
     description: |
       PricedOrderWithShippingMethod::shipping_info_lens() を使用して
       配送情報を不変更新する。
 
     import: |
-      use functional_rusty::optics::Lens;
+      use lambars::optics::Lens;
 
     usage: |
       ```rust

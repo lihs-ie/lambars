@@ -5,8 +5,8 @@
 //! - ドメイン関数の合成テスト
 //! - 部分適用との組み合わせテスト
 
-use functional_rusty::compose;
-use functional_rusty::compose::identity;
+use lambars::compose;
+use lambars::compose::identity;
 use order_taking_sample::compound_types::{Address, CustomerInfo};
 use order_taking_sample::simple_types::{
     BillingAmount, EmailAddress, OrderId, OrderLineId, OrderQuantity, Price, ProductCode,

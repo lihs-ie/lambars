@@ -2,7 +2,7 @@
 //!
 //! This module tests the integration of AsyncIO with the monad transformer types.
 
-use functional_rusty::effect::{AsyncIO, ReaderT, StateT};
+use lambars::effect::{AsyncIO, ReaderT, StateT};
 use rstest::rstest;
 
 // =============================================================================

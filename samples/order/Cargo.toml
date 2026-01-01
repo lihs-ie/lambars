@@ -3,12 +3,12 @@ name = "order-taking-sample"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.92.0"
-description = "Order taking sample application using functional-rusty"
+description = "Order taking sample application using lambars"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-functional-rusty = { path = "../..", features = ["full"] }
-functional-rusty-derive = { path = "../../functional-rusty-derive" }
+lambars = { path = "../..", features = ["full"] }
+lambars-derive = { path = "../../lambars-derive" }
 rust_decimal = { version = "1.36", features = ["serde-with-str"] }
 regex = "1"
 thiserror = "2"

@@ -2,7 +2,7 @@
 //!
 //! StateT adds state manipulation capability to any monad.
 
-use functional_rusty::effect::{IO, StateT};
+use lambars::effect::{IO, StateT};
 use rstest::rstest;
 
 // =============================================================================

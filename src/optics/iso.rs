@@ -21,8 +21,8 @@
 //! # Examples
 //!
 //! ```
-//! use functional_rusty::optics::{Iso, FunctionIso};
-//! use functional_rusty::iso;
+//! use lambars::optics::{Iso, FunctionIso};
+//! use lambars::iso;
 //!
 //! // String <-> Vec<char> conversion
 //! let string_chars_iso = FunctionIso::new(
@@ -91,7 +91,7 @@ pub trait Iso<S, A> {
     /// # Example
     ///
     /// ```
-    /// use functional_rusty::optics::{Iso, FunctionIso};
+    /// use lambars::optics::{Iso, FunctionIso};
     ///
     /// let string_chars_iso = FunctionIso::new(
     ///     |s: String| s.chars().collect::<Vec<_>>(),
@@ -127,7 +127,7 @@ pub trait Iso<S, A> {
     /// # Example
     ///
     /// ```
-    /// use functional_rusty::optics::{Iso, FunctionIso};
+    /// use lambars::optics::{Iso, FunctionIso};
     ///
     /// let string_chars_iso = FunctionIso::new(
     ///     |s: String| s.chars().collect::<Vec<_>>(),
@@ -167,7 +167,7 @@ pub trait Iso<S, A> {
     /// # Example
     ///
     /// ```
-    /// use functional_rusty::optics::{Iso, FunctionIso};
+    /// use lambars::optics::{Iso, FunctionIso};
     ///
     /// let iso1 = FunctionIso::new(|x: i32| x as i64, |x: i64| x as i32);
     /// let iso2 = FunctionIso::new(|x: i64| x.to_string(), |s: String| s.parse::<i64>().unwrap());
@@ -231,7 +231,7 @@ pub trait Iso<S, A> {
 /// # Example
 ///
 /// ```
-/// use functional_rusty::optics::{Iso, FunctionIso};
+/// use lambars::optics::{Iso, FunctionIso};
 ///
 /// // String <-> Vec<char> conversion
 /// let string_chars_iso = FunctionIso::new(
@@ -271,7 +271,7 @@ where
     /// # Example
     ///
     /// ```
-    /// use functional_rusty::optics::{Iso, FunctionIso};
+    /// use lambars::optics::{Iso, FunctionIso};
     ///
     /// let string_chars_iso = FunctionIso::new(
     ///     |s: String| s.chars().collect::<Vec<_>>(),
@@ -337,7 +337,7 @@ where
 /// # Example
 ///
 /// ```
-/// use functional_rusty::optics::{Iso, FunctionIso};
+/// use lambars::optics::{Iso, FunctionIso};
 ///
 /// let string_chars_iso = FunctionIso::new(
 ///     |s: String| s.chars().collect::<Vec<_>>(),
@@ -411,7 +411,7 @@ impl<I: std::fmt::Debug> std::fmt::Debug for ReversedIso<I> {
 /// # Example
 ///
 /// ```
-/// use functional_rusty::optics::{Iso, FunctionIso};
+/// use lambars::optics::{Iso, FunctionIso};
 ///
 /// let iso1 = FunctionIso::new(|x: i32| x as i64, |x: i64| x as i32);
 /// let iso2 = FunctionIso::new(|x: i64| x.to_string(), |s: String| s.parse::<i64>().unwrap());
@@ -669,8 +669,8 @@ impl<I: std::fmt::Debug, S, A> std::fmt::Debug for IsoAsPrism<I, S, A> {
 /// # Example
 ///
 /// ```
-/// use functional_rusty::optics::Iso;
-/// use functional_rusty::iso;
+/// use lambars::optics::Iso;
+/// use lambars::iso;
 ///
 /// let swap = iso!(
 ///     |(a, b): (i32, String)| (b, a),

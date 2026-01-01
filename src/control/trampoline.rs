@@ -15,7 +15,7 @@
 //! ## Factorial
 //!
 //! ```rust
-//! use functional_rusty::control::Trampoline;
+//! use lambars::control::Trampoline;
 //!
 //! fn factorial(n: u64) -> Trampoline<u64> {
 //!     factorial_helper(n, 1)
@@ -36,7 +36,7 @@
 //! ## Mutual Recursion
 //!
 //! ```rust
-//! use functional_rusty::control::Trampoline;
+//! use lambars::control::Trampoline;
 //!
 //! fn is_even(n: u64) -> Trampoline<bool> {
 //!     if n == 0 {
@@ -124,7 +124,7 @@ impl<A> ContinuationBox<A> {
 /// # Examples
 ///
 /// ```rust
-/// use functional_rusty::control::Trampoline;
+/// use lambars::control::Trampoline;
 ///
 /// // Simple computation
 /// let result = Trampoline::done(42).run();
@@ -161,7 +161,7 @@ impl<A> Trampoline<A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Trampoline;
+    /// use lambars::control::Trampoline;
     ///
     /// let trampoline = Trampoline::done(42);
     /// assert_eq!(trampoline.run(), 42);
@@ -182,7 +182,7 @@ impl<A> Trampoline<A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Trampoline;
+    /// use lambars::control::Trampoline;
     ///
     /// let trampoline = Trampoline::suspend(|| Trampoline::done(42));
     /// assert_eq!(trampoline.run(), 42);
@@ -202,7 +202,7 @@ impl<A> Trampoline<A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Trampoline;
+    /// use lambars::control::Trampoline;
     ///
     /// let trampoline = Trampoline::pure(42);
     /// assert_eq!(trampoline.run(), 42);
@@ -222,7 +222,7 @@ impl<A: 'static> Trampoline<A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Trampoline;
+    /// use lambars::control::Trampoline;
     ///
     /// fn count_down(n: u64) -> Trampoline<u64> {
     ///     if n == 0 {
@@ -263,7 +263,7 @@ impl<A: 'static> Trampoline<A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::{Trampoline, Either};
+    /// use lambars::control::{Trampoline, Either};
     ///
     /// let trampoline = Trampoline::suspend(|| Trampoline::done(42));
     ///
@@ -305,7 +305,7 @@ impl<A: 'static> Trampoline<A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Trampoline;
+    /// use lambars::control::Trampoline;
     ///
     /// let trampoline = Trampoline::done(21);
     /// let doubled = trampoline.map(|x| x * 2);
@@ -330,7 +330,7 @@ impl<A: 'static> Trampoline<A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Trampoline;
+    /// use lambars::control::Trampoline;
     ///
     /// let trampoline = Trampoline::done(21);
     /// let result = trampoline.flat_map(|x| Trampoline::done(x * 2));
@@ -352,7 +352,7 @@ impl<A: 'static> Trampoline<A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Trampoline;
+    /// use lambars::control::Trampoline;
     ///
     /// let trampoline = Trampoline::done(21);
     /// let result = trampoline.and_then(|x| Trampoline::done(x * 2));
@@ -376,7 +376,7 @@ impl<A: 'static> Trampoline<A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Trampoline;
+    /// use lambars::control::Trampoline;
     ///
     /// let first = Trampoline::done("ignored");
     /// let second = Trampoline::done(42);

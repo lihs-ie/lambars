@@ -21,7 +21,7 @@
 //! # Examples
 //!
 //! ```
-//! use functional_rusty::optics::{Traversal, VecTraversal};
+//! use lambars::optics::{Traversal, VecTraversal};
 //!
 //! let traversal: VecTraversal<i32> = VecTraversal::new();
 //! let numbers = vec![1, 2, 3, 4, 5];
@@ -105,7 +105,7 @@ pub trait Traversal<S, A> {
     /// # Example
     ///
     /// ```
-    /// use functional_rusty::optics::{Traversal, VecTraversal};
+    /// use lambars::optics::{Traversal, VecTraversal};
     ///
     /// let traversal: VecTraversal<i32> = VecTraversal::new();
     /// let numbers = vec![1, 2, 3, 4, 5];
@@ -134,7 +134,7 @@ pub trait Traversal<S, A> {
     /// # Example
     ///
     /// ```
-    /// use functional_rusty::optics::{Traversal, VecTraversal};
+    /// use lambars::optics::{Traversal, VecTraversal};
     ///
     /// let traversal: VecTraversal<i32> = VecTraversal::new();
     /// let numbers = vec![1, 2, 3, 4, 5];
@@ -163,7 +163,7 @@ pub trait Traversal<S, A> {
     /// # Example
     ///
     /// ```
-    /// use functional_rusty::optics::{Traversal, VecTraversal};
+    /// use lambars::optics::{Traversal, VecTraversal};
     ///
     /// let traversal: VecTraversal<i32> = VecTraversal::new();
     /// assert_eq!(traversal.length(&vec![1, 2, 3, 4, 5]), 5);
@@ -189,7 +189,7 @@ pub trait Traversal<S, A> {
     /// # Example
     ///
     /// ```
-    /// use functional_rusty::optics::{Traversal, VecTraversal};
+    /// use lambars::optics::{Traversal, VecTraversal};
     ///
     /// let traversal: VecTraversal<i32> = VecTraversal::new();
     /// let positive = vec![1, 2, 3, 4, 5];
@@ -221,7 +221,7 @@ pub trait Traversal<S, A> {
     /// # Example
     ///
     /// ```
-    /// use functional_rusty::optics::{Traversal, VecTraversal};
+    /// use lambars::optics::{Traversal, VecTraversal};
     ///
     /// let traversal: VecTraversal<i32> = VecTraversal::new();
     /// let numbers = vec![1, 2, 3, 4, 5];
@@ -248,7 +248,7 @@ pub trait Traversal<S, A> {
     /// # Example
     ///
     /// ```
-    /// use functional_rusty::optics::{Traversal, VecTraversal};
+    /// use lambars::optics::{Traversal, VecTraversal};
     ///
     /// let traversal: VecTraversal<i32> = VecTraversal::new();
     /// let numbers = vec![1, 2, 3];
@@ -279,7 +279,7 @@ pub trait Traversal<S, A> {
     /// # Example
     ///
     /// ```
-    /// use functional_rusty::optics::{Traversal, VecTraversal};
+    /// use lambars::optics::{Traversal, VecTraversal};
     ///
     /// let outer: VecTraversal<Vec<i32>> = VecTraversal::new();
     /// let inner: VecTraversal<i32> = VecTraversal::new();
@@ -311,7 +311,7 @@ pub trait Traversal<S, A> {
 /// # Example
 ///
 /// ```
-/// use functional_rusty::optics::{Traversal, VecTraversal};
+/// use lambars::optics::{Traversal, VecTraversal};
 ///
 /// let traversal: VecTraversal<i32> = VecTraversal::new();
 /// let numbers = vec![1, 2, 3, 4, 5];
@@ -385,7 +385,7 @@ impl<A: 'static> Traversal<Vec<A>, A> for VecTraversal<A> {
 /// # Example
 ///
 /// ```
-/// use functional_rusty::optics::{Traversal, OptionTraversal};
+/// use lambars::optics::{Traversal, OptionTraversal};
 ///
 /// let traversal: OptionTraversal<i32> = OptionTraversal::new();
 ///
@@ -464,7 +464,7 @@ impl<A: 'static> Traversal<Option<A>, A> for OptionTraversal<A> {
 /// # Example
 ///
 /// ```
-/// use functional_rusty::optics::{Traversal, ResultTraversal};
+/// use lambars::optics::{Traversal, ResultTraversal};
 ///
 /// let traversal: ResultTraversal<i32, String> = ResultTraversal::new();
 ///
@@ -548,7 +548,7 @@ impl<A: 'static, E: 'static> Traversal<Result<A, E>, A> for ResultTraversal<A, E
 /// # Example
 ///
 /// ```
-/// use functional_rusty::optics::{Traversal, VecTraversal};
+/// use lambars::optics::{Traversal, VecTraversal};
 ///
 /// let outer: VecTraversal<Vec<i32>> = VecTraversal::new();
 /// let inner: VecTraversal<i32> = VecTraversal::new();

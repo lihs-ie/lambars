@@ -25,8 +25,8 @@
 //! ## Option
 //!
 //! ```rust
-//! use functional_rusty::eff;
-//! use functional_rusty::typeclass::Monad;
+//! use lambars::eff;
+//! use lambars::typeclass::Monad;
 //!
 //! let result = eff! {
 //!     x <= Some(5);
@@ -40,8 +40,8 @@
 //! ## State
 //!
 //! ```rust
-//! use functional_rusty::eff;
-//! use functional_rusty::effect::State;
+//! use lambars::eff;
+//! use lambars::effect::State;
 //!
 //! let computation: State<i32, i32> = eff! {
 //!     current <= State::get();
@@ -58,8 +58,8 @@
 //! ## Reader
 //!
 //! ```rust
-//! use functional_rusty::eff;
-//! use functional_rusty::effect::Reader;
+//! use lambars::eff;
+//! use lambars::effect::Reader;
 //!
 //! let computation: Reader<i32, i32> = eff! {
 //!     environment <= Reader::ask();
@@ -100,8 +100,8 @@
 /// # Examples
 ///
 /// ```rust
-/// use functional_rusty::eff;
-/// use functional_rusty::typeclass::Monad;
+/// use lambars::eff;
+/// use lambars::typeclass::Monad;
 ///
 /// // Option example
 /// let result = eff! {

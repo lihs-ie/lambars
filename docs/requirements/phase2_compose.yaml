@@ -334,7 +334,7 @@ requirements:
 
       - description: Option を通したパイプライン
         code: |
-          use functional_rusty::prelude::*;
+          use lambars::prelude::*;
 
           fn parse_int(s: &str) -> Option<i32> {
               s.parse().ok()
@@ -386,7 +386,7 @@ requirements:
       最大6引数までの関数に対応する。
 
       NOTE: Rust の macro_rules! では `_` をリテラルとしてマッチできないため、
-      専用のマーカー定数 `__` を使用する。これは `functional_rusty::compose::__` として
+      専用のマーカー定数 `__` を使用する。これは `lambars::compose::__` として
       エクスポートされる。
 
     syntax:
@@ -444,7 +444,7 @@ requirements:
     examples:
       - description: 基本的な部分適用（最初の引数を固定）
         code: |
-          use functional_rusty::compose::__;
+          use lambars::compose::__;
           fn add(a: i32, b: i32) -> i32 { a + b }
 
           let add_five = partial!(add, 5, __);
@@ -453,7 +453,7 @@ requirements:
 
       - description: 2番目の引数を固定
         code: |
-          use functional_rusty::compose::__;
+          use lambars::compose::__;
           fn divide(a: f64, b: f64) -> f64 { a / b }
 
           let half = partial!(divide, __, 2.0);
@@ -462,7 +462,7 @@ requirements:
 
       - description: 3引数関数の部分適用
         code: |
-          use functional_rusty::compose::__;
+          use lambars::compose::__;
           fn format_greeting(greeting: &str, name: &str, punctuation: &str) -> String {
               format!("{}, {}{}", greeting, name, punctuation)
           }
@@ -473,7 +473,7 @@ requirements:
 
       - description: compose との組み合わせ
         code: |
-          use functional_rusty::compose::__;
+          use lambars::compose::__;
           fn multiply(a: i32, b: i32) -> i32 { a * b }
           fn add(a: i32, b: i32) -> i32 { a + b }
 
@@ -494,7 +494,7 @@ requirements:
 
       - description: プレースホルダーのみ（恒等的な部分適用）
         code: |
-          use functional_rusty::compose::__;
+          use lambars::compose::__;
           fn add(a: i32, b: i32) -> i32 { a + b }
 
           // 全てプレースホルダーの場合、元の関数と同等

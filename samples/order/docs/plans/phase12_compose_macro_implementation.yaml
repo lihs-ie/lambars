@@ -1,6 +1,6 @@
 # Phase 12: compose! マクロ実装計画
 # Order Taking Sample Application
-# functional-rusty の compose! マクロを使用した再利用可能な合成関数の定義
+# lambars の compose! マクロを使用した再利用可能な合成関数の定義
 
 version: "1.0.0"
 created_at: "2026-01-01"
@@ -12,7 +12,7 @@ phase_id: phase_12
 
 overview:
   description: |
-    Haskell の関数合成演算子 (.) に相当する functional-rusty の compose! マクロを
+    Haskell の関数合成演算子 (.) に相当する lambars の compose! マクロを
     Order Taking サンプルアプリケーションの適切な箇所に適用する。
 
     対象要件:
@@ -116,7 +116,7 @@ implementation_steps:
       法則検証テスト（結合法則、恒等元）とドメイン関数の合成テストを含む。
 
     files:
-      - path: /Users/lihs/workspace/functional-rusty/samples/order/tests/phase12_compose_macro_tests.rs
+      - path: /Users/lihs/workspace/lambars/samples/order/tests/phase12_compose_macro_tests.rs
         action: create
         changes:
           - description: テストファイルの作成
@@ -128,7 +128,7 @@ implementation_steps:
               //! - ドメイン関数の合成テスト
               //! - 部分適用との組み合わせテスト
 
-              use functional_rusty::{compose, identity};
+              use lambars::{compose, identity};
               use order_taking_sample::compound_types::{Address, CustomerInfo};
               use order_taking_sample::simple_types::{
                   BillingAmount, EmailAddress, OrderId, OrderLineId, OrderQuantity, Price, ProductCode,
@@ -498,15 +498,15 @@ implementation_steps:
       Phase 11 で pipe! マクロを適用した箇所を compose! マクロに置き換える。
 
     files:
-      - path: /Users/lihs/workspace/functional-rusty/samples/order/src/workflow/events.rs
+      - path: /Users/lihs/workspace/lambars/samples/order/src/workflow/events.rs
         action: modify
         changes:
           - description: compose マクロのインポート追加
             location: imports section (line 47)
             before: |
-              use functional_rusty::pipe;
+              use lambars::pipe;
             after: |
-              use functional_rusty::{compose, pipe};
+              use lambars::{compose, pipe};
 
           - description: create_events 関数の compose! マクロ適用
             location: create_events function (lines 276-301)
@@ -592,16 +592,16 @@ implementation_steps:
       free_vip_shipping と合成する。
 
     files:
-      - path: /Users/lihs/workspace/functional-rusty/samples/order/src/workflow/place_order.rs
+      - path: /Users/lihs/workspace/lambars/samples/order/src/workflow/place_order.rs
         action: modify
         changes:
           - description: compose マクロのインポート追加
             location: imports section (line 23)
             before: |
-              use functional_rusty::effect::IO;
+              use lambars::effect::IO;
             after: |
-              use functional_rusty::compose;
-              use functional_rusty::effect::IO;
+              use lambars::compose;
+              use lambars::effect::IO;
 
           - description: 配送処理パイプラインの compose! マクロ適用
             location: place_order function (lines 146-150)
@@ -644,7 +644,7 @@ implementation_steps:
       workflow/mod.rs に compose! と pipe! の使い分けガイドラインを追加する。
 
     files:
-      - path: /Users/lihs/workspace/functional-rusty/samples/order/src/workflow/mod.rs
+      - path: /Users/lihs/workspace/lambars/samples/order/src/workflow/mod.rs
         action: modify
         changes:
           - description: ガイドラインのモジュールドキュメント追加
@@ -686,7 +686,7 @@ implementation_steps:
               //!
               //! # 関数合成マクロの使い分け
               //!
-              //! functional-rusty は2つの関数合成マクロを提供する。
+              //! lambars は2つの関数合成マクロを提供する。
               //!
               //! ## pipe! マクロ
               //!
@@ -780,7 +780,7 @@ implementation_steps:
       将来的な拡張パターンをコメントとして文書化する。
 
     files:
-      - path: /Users/lihs/workspace/functional-rusty/samples/order/src/workflow/events.rs
+      - path: /Users/lihs/workspace/lambars/samples/order/src/workflow/events.rs
         action: modify
         changes:
           - description: 高階関数への合成関数渡しパターンをコメントで文書化
@@ -818,7 +818,7 @@ test_plan:
 
   - step: 1
     title: 法則検証テスト（REQ-124）
-    test_file: /Users/lihs/workspace/functional-rusty/samples/order/tests/phase12_compose_macro_tests.rs
+    test_file: /Users/lihs/workspace/lambars/samples/order/tests/phase12_compose_macro_tests.rs
     test_cases:
       - name: test_compose_associativity
         description: |
@@ -837,7 +837,7 @@ test_plan:
 
   - step: 2
     title: ドメイン関数の合成テスト（REQ-124, REQ-125）
-    test_file: /Users/lihs/workspace/functional-rusty/samples/order/tests/phase12_compose_macro_tests.rs
+    test_file: /Users/lihs/workspace/lambars/samples/order/tests/phase12_compose_macro_tests.rs
     test_cases:
       - name: test_compose_shipping_event_creation
         description: |
@@ -854,7 +854,7 @@ test_plan:
 
   - step: 3
     title: 統合テスト（REQ-125）
-    test_file: /Users/lihs/workspace/functional-rusty/samples/order/tests/phase12_compose_macro_tests.rs
+    test_file: /Users/lihs/workspace/lambars/samples/order/tests/phase12_compose_macro_tests.rs
     test_cases:
       - name: test_create_events_with_compose_macro_generates_correct_order
         description: |
@@ -879,10 +879,10 @@ test_plan:
   - step: 4
     title: 既存テストの回帰テスト
     test_files:
-      - /Users/lihs/workspace/functional-rusty/samples/order/tests/phase11_pipe_macro_tests.rs
-      - /Users/lihs/workspace/functional-rusty/samples/order/tests/events_tests.rs
-      - /Users/lihs/workspace/functional-rusty/samples/order/tests/place_order_tests.rs
-      - /Users/lihs/workspace/functional-rusty/samples/order/tests/workflow_tests.rs
+      - /Users/lihs/workspace/lambars/samples/order/tests/phase11_pipe_macro_tests.rs
+      - /Users/lihs/workspace/lambars/samples/order/tests/events_tests.rs
+      - /Users/lihs/workspace/lambars/samples/order/tests/place_order_tests.rs
+      - /Users/lihs/workspace/lambars/samples/order/tests/workflow_tests.rs
     description: |
       compose! マクロ適用後も既存のテストが全てパスすることを確認。
 
@@ -966,13 +966,13 @@ design_decisions:
 
 dependencies:
   internal:
-    - name: functional_rusty::compose
+    - name: lambars::compose
       usage: compose! マクロのインポート
-      import: "use functional_rusty::compose;"
+      import: "use lambars::compose;"
 
-    - name: functional_rusty::identity
+    - name: lambars::identity
       usage: 法則検証テストで使用
-      import: "use functional_rusty::identity;"
+      import: "use lambars::identity;"
 
   existing_tests:
     - tests/phase11_pipe_macro_tests.rs
@@ -1000,21 +1000,21 @@ implementation_order:
 
 artifacts:
   modified_files:
-    - path: /Users/lihs/workspace/functional-rusty/samples/order/src/workflow/events.rs
+    - path: /Users/lihs/workspace/lambars/samples/order/src/workflow/events.rs
       changes:
         - compose! マクロのインポート追加
         - create_events 関数の compose! マクロ適用
         - create_shipping_event への高階関数パターンコメント追加
 
-    - path: /Users/lihs/workspace/functional-rusty/samples/order/src/workflow/place_order.rs
+    - path: /Users/lihs/workspace/lambars/samples/order/src/workflow/place_order.rs
       changes:
         - compose! マクロのインポート追加
         - 配送処理パイプラインの compose! マクロ適用
 
-    - path: /Users/lihs/workspace/functional-rusty/samples/order/src/workflow/mod.rs
+    - path: /Users/lihs/workspace/lambars/samples/order/src/workflow/mod.rs
       changes:
         - compose! と pipe! の使い分けガイドライン追加
 
   new_files:
-    - path: /Users/lihs/workspace/functional-rusty/samples/order/tests/phase12_compose_macro_tests.rs
+    - path: /Users/lihs/workspace/lambars/samples/order/tests/phase12_compose_macro_tests.rs
       description: Phase 12 統合テスト（法則検証、ドメイン関数合成、統合テスト）

@@ -20,8 +20,8 @@
 //! // let result = io_result.run_unsafe();
 //! ```
 
-use functional_rusty::compose;
-use functional_rusty::effect::IO;
+use lambars::compose;
+use lambars::effect::IO;
 use std::rc::Rc;
 
 use crate::simple_types::{Price, ProductCode};
@@ -85,7 +85,7 @@ use crate::workflow::validation::validate_order;
 ///
 /// ```ignore
 /// use order_taking_sample::workflow::place_order;
-/// use functional_rusty::effect::IO;
+/// use lambars::effect::IO;
 ///
 /// let io_result = place_order(
 ///     &check_product,

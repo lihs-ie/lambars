@@ -1,6 +1,6 @@
 //! Result/Option Monad 法則の proptest による検証
 //!
-//! このテストファイルは functional-rusty ライブラリの使用例として
+//! このテストファイルは lambars ライブラリの使用例として
 //! Result と Option の Monad 法則を proptest で検証する。
 //!
 //! Monad 法則:

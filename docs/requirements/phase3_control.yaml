@@ -509,7 +509,7 @@ requirements:
 
         スレッドセーフ版が必要な場合:
         - std::sync::LazyLock（Rust 1.80+）を使用
-        - または将来的に functional_rusty::control::LazyLock として提供
+        - または将来的に lambars::control::LazyLock として提供
 
     dependencies:
       - typeclass_functor

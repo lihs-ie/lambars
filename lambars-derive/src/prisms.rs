@@ -114,8 +114,8 @@ fn generate_unit_variant_prism(
         /// For unit variants, the target type is `()`.
         #[inline]
         #[must_use]
-        pub fn #method_name() -> impl ::functional_rusty::optics::Prism<Self, ()> + Clone {
-            ::functional_rusty::optics::FunctionPrism::new(
+        pub fn #method_name() -> impl ::lambars::optics::Prism<Self, ()> + Clone {
+            ::lambars::optics::FunctionPrism::new(
                 |source: &Self| match source {
                     Self::#variant_name => Some(&()),
                     #[allow(unreachable_patterns)]
@@ -145,8 +145,8 @@ fn generate_single_field_tuple_prism(
         /// This prism provides preview/review access to the variant's value.
         #[inline]
         #[must_use]
-        pub fn #method_name() -> impl ::functional_rusty::optics::Prism<Self, #field_type> + Clone {
-            ::functional_rusty::optics::FunctionPrism::new(
+        pub fn #method_name() -> impl ::lambars::optics::Prism<Self, #field_type> + Clone {
+            ::lambars::optics::FunctionPrism::new(
                 |source: &Self| match source {
                     Self::#variant_name(value) => Some(value),
                     #[allow(unreachable_patterns)]
@@ -196,8 +196,8 @@ fn generate_multi_field_tuple_prism(
         /// This prism provides review and preview_owned access to the variant's values as a tuple.
         #[inline]
         #[must_use]
-        pub fn #method_name() -> impl ::functional_rusty::optics::Prism<Self, #tuple_type> + Clone {
-            ::functional_rusty::optics::FunctionPrism::new(
+        pub fn #method_name() -> impl ::lambars::optics::Prism<Self, #tuple_type> + Clone {
+            ::lambars::optics::FunctionPrism::new(
                 // preview always returns None for multi-field variants
                 // because we cannot return a reference to a tuple that doesn't exist in memory
                 |_source: &Self| -> Option<&#tuple_type> {
@@ -258,8 +258,8 @@ fn generate_struct_variant_prism(
         /// This prism provides review and preview_owned access to the variant's fields as a tuple.
         #[inline]
         #[must_use]
-        pub fn #method_name() -> impl ::functional_rusty::optics::Prism<Self, #tuple_type> + Clone {
-            ::functional_rusty::optics::FunctionPrism::new(
+        pub fn #method_name() -> impl ::lambars::optics::Prism<Self, #tuple_type> + Clone {
+            ::lambars::optics::FunctionPrism::new(
                 // preview always returns None for struct variants
                 // because we cannot return a reference to a tuple that doesn't exist in memory
                 |_source: &Self| -> Option<&#tuple_type> {

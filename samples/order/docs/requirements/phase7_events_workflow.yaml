@@ -1,6 +1,6 @@
 # Phase 7: イベント生成とワークフロー統合 要件定義
 # Domain Modeling Made Functional の F# パターンを Rust に適用
-# functional-rusty ライブラリを使用したイベント駆動ワークフロー
+# lambars ライブラリを使用したイベント駆動ワークフロー
 
 id: phase7_events_workflow
 name: イベント生成とワークフロー統合
@@ -902,7 +902,7 @@ implementation:
     //!
     //! - [`place_order`] - PlaceOrder ワークフローの実行
 
-    use functional_rusty::effect::IO;
+    use lambars::effect::IO;
 
     use crate::workflow::error_types::PlaceOrderError;
     use crate::workflow::events::create_events;
@@ -1017,7 +1017,7 @@ functional_principles:
 
   io_monad_usage:
     description: |
-      functional-rusty の IO モナドを使用した副作用の遅延実行。
+      lambars の IO モナドを使用した副作用の遅延実行。
 
     benefits:
       - 副作用（メール送信）の実行タイミングを制御できる
@@ -1089,15 +1089,15 @@ existing_implementations:
       - PricingError
 
 # ========================================
-# functional-rusty ライブラリの使用
+# lambars ライブラリの使用
 # ========================================
-functional_rusty_usage:
+lambars_usage:
   io_monad:
     description: |
       副作用（メール送信）の遅延実行に IO モナドを使用。
 
     import: |
-      use functional_rusty::effect::IO;
+      use lambars::effect::IO;
 
     methods:
       - pure: 純粋な値を IO でラップ

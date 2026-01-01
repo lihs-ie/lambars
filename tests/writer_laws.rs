@@ -16,8 +16,8 @@
 //! - Listen Tell Law: listen(tell(w)) captures the output correctly
 //! - Pass Identity Law: pass(m.map(|a| (a, |w| w))) == m
 
-use functional_rusty::effect::Writer;
-use functional_rusty::typeclass::Semigroup;
+use lambars::effect::Writer;
+use lambars::typeclass::Semigroup;
 use proptest::prelude::*;
 
 // =============================================================================

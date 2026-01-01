@@ -25,8 +25,8 @@
 //! # Example with Lens
 //!
 //! ```
-//! use functional_rusty::optics::{Lens, FunctionLens};
-//! use functional_rusty::lens;
+//! use lambars::optics::{Lens, FunctionLens};
+//! use lambars::lens;
 //!
 //! #[derive(Clone, PartialEq, Debug)]
 //! struct Address { street: String, city: String }
@@ -61,8 +61,8 @@
 //! # Example with Prism
 //!
 //! ```
-//! use functional_rusty::optics::{Prism, FunctionPrism};
-//! use functional_rusty::prism;
+//! use lambars::optics::{Prism, FunctionPrism};
+//! use lambars::prism;
 //!
 //! #[derive(Clone, PartialEq, Debug)]
 //! enum Shape {
@@ -85,8 +85,8 @@
 //! # Example with Optional (Lens + Prism)
 //!
 //! ```
-//! use functional_rusty::optics::{Lens, LensComposeExtension, Prism, Optional};
-//! use functional_rusty::{lens, prism};
+//! use lambars::optics::{Lens, LensComposeExtension, Prism, Optional};
+//! use lambars::{lens, prism};
 //!
 //! #[derive(Clone, PartialEq, Debug)]
 //! enum MyOption<T> { Some(T), None }
@@ -108,8 +108,8 @@
 //! # Example with Iso
 //!
 //! ```
-//! use functional_rusty::optics::{Iso, FunctionIso};
-//! use functional_rusty::iso;
+//! use lambars::optics::{Iso, FunctionIso};
+//! use lambars::iso;
 //!
 //! // String <-> Vec<char> isomorphism
 //! let string_chars_iso = FunctionIso::new(

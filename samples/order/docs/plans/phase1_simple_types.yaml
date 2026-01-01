@@ -1,6 +1,6 @@
 # Phase 1: 基本型定義 実装計画
 # Domain Modeling Made Functional の F# パターンを Rust に適用
-# functional-rusty ライブラリを使用した型安全なドメインモデリング
+# lambars ライブラリを使用した型安全なドメインモデリング
 
 id: phase1_simple_types_plan
 name: 基本型定義実装計画
@@ -52,12 +52,12 @@ cargo_toml:
     name: order-taking
     version: "0.1.0"
     edition: "2024"
-    description: "Order taking sample application using functional-rusty"
+    description: "Order taking sample application using lambars"
 
   dependencies:
-    - name: functional-rusty
+    - name: lambars
       path: "../.."
-      description: functional-rusty ライブラリ（ローカルパス）
+      description: lambars ライブラリ（ローカルパス）
 
     - name: rust_decimal
       version: "1.36"
@@ -1699,7 +1699,7 @@ implementation:
       - step: 1
         description: BillingAmount 構造体の定義と実装
         code_outline: |
-          use functional_rusty::typeclass::Foldable;
+          use lambars::typeclass::Foldable;
 
           /// 請求金額を表す小数型
           ///
@@ -1742,7 +1742,7 @@ implementation:
 
               /// Price のスライスを合計して BillingAmount を生成する
               ///
-              /// functional-rusty の Foldable トレイトを使用して畳み込みを行う。
+              /// lambars の Foldable トレイトを使用して畳み込みを行う。
               ///
               /// # Arguments
               /// * `prices` - Price のスライス
@@ -2115,7 +2115,7 @@ implementation:
         code_outline: |
           //! # Order Taking Sample Application
           //!
-          //! functional-rusty を使用した注文処理サンプルアプリケーション。
+          //! lambars を使用した注文処理サンプルアプリケーション。
           //!
           //! ## 概要
           //!
@@ -2153,13 +2153,13 @@ test_files:
     estimated_lines: 150
 
 # ========================================
-# functional-rusty との統合
+# lambars との統合
 # ========================================
-functional_rusty_integration:
+lambars_integration:
   - feature: Result の Functor/Monad 操作
     description: |
       Result<T, ValidationError> に対する map, and_then 操作を使用。
-      functional-rusty の Functor/Monad トレイトの実装を活用。
+      lambars の Functor/Monad トレイトの実装を活用。
     usage_locations:
       - ProductCode::create（WidgetCode/GizmoCode のマッピング）
       - OrderQuantity::create（製品タイプによる分岐）
@@ -2167,7 +2167,7 @@ functional_rusty_integration:
   - feature: Foldable による畳み込み
     description: |
       BillingAmount::sum_prices で Price のリストを畳み込む。
-      functional-rusty の Foldable トレイトの fold_left メソッドを使用して
+      lambars の Foldable トレイトの fold_left メソッドを使用して
       Price の Vec を Decimal の合計値に畳み込む。
     usage_locations:
       - BillingAmount::sum_prices（Vec<Price>.fold_left を使用）

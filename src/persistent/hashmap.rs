@@ -20,7 +20,7 @@
 //! # Examples
 //!
 //! ```rust
-//! use functional_rusty::persistent::PersistentHashMap;
+//! use lambars::persistent::PersistentHashMap;
 //!
 //! let map = PersistentHashMap::new()
 //!     .insert("one".to_string(), 1)
@@ -150,7 +150,7 @@ impl<K, V> Node<K, V> {
 /// # Examples
 ///
 /// ```rust
-/// use functional_rusty::persistent::PersistentHashMap;
+/// use lambars::persistent::PersistentHashMap;
 ///
 /// let map = PersistentHashMap::singleton("key".to_string(), 42);
 /// assert_eq!(map.get("key"), Some(&42));
@@ -169,7 +169,7 @@ impl<K, V> PersistentHashMap<K, V> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentHashMap;
+    /// use lambars::persistent::PersistentHashMap;
     ///
     /// let map: PersistentHashMap<String, i32> = PersistentHashMap::new();
     /// assert!(map.is_empty());
@@ -192,7 +192,7 @@ impl<K, V> PersistentHashMap<K, V> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentHashMap;
+    /// use lambars::persistent::PersistentHashMap;
     ///
     /// let map = PersistentHashMap::new()
     ///     .insert("a".to_string(), 1)
@@ -210,7 +210,7 @@ impl<K, V> PersistentHashMap<K, V> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentHashMap;
+    /// use lambars::persistent::PersistentHashMap;
     ///
     /// let empty: PersistentHashMap<String, i32> = PersistentHashMap::new();
     /// assert!(empty.is_empty());
@@ -236,7 +236,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentHashMap;
+    /// use lambars::persistent::PersistentHashMap;
     ///
     /// let map = PersistentHashMap::singleton("key".to_string(), 42);
     /// assert_eq!(map.len(), 1);
@@ -264,7 +264,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentHashMap;
+    /// use lambars::persistent::PersistentHashMap;
     ///
     /// let map = PersistentHashMap::new()
     ///     .insert("hello".to_string(), 42);
@@ -357,7 +357,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentHashMap;
+    /// use lambars::persistent::PersistentHashMap;
     ///
     /// let map = PersistentHashMap::new()
     ///     .insert("key".to_string(), 42);
@@ -390,7 +390,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentHashMap;
+    /// use lambars::persistent::PersistentHashMap;
     ///
     /// let map1 = PersistentHashMap::new().insert("key".to_string(), 1);
     /// let map2 = map1.insert("key".to_string(), 2);
@@ -669,7 +669,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentHashMap;
+    /// use lambars::persistent::PersistentHashMap;
     ///
     /// let map = PersistentHashMap::new()
     ///     .insert("a".to_string(), 1)
@@ -937,7 +937,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentHashMap;
+    /// use lambars::persistent::PersistentHashMap;
     ///
     /// let map = PersistentHashMap::new().insert("count".to_string(), 10);
     /// let updated = map.update("count", |value| value + 1);
@@ -1032,7 +1032,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentHashMap;
+    /// use lambars::persistent::PersistentHashMap;
     ///
     /// let map = PersistentHashMap::new().insert("count".to_string(), 10);
     ///
@@ -1102,7 +1102,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentHashMap;
+    /// use lambars::persistent::PersistentHashMap;
     ///
     /// let map1 = PersistentHashMap::new()
     ///     .insert("a".to_string(), 1)
@@ -1131,7 +1131,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentHashMap;
+    /// use lambars::persistent::PersistentHashMap;
     ///
     /// let map = PersistentHashMap::new()
     ///     .insert("a".to_string(), 1)
@@ -1185,7 +1185,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentHashMap;
+    /// use lambars::persistent::PersistentHashMap;
     ///
     /// let map = PersistentHashMap::new()
     ///     .insert("a".to_string(), 1)
@@ -1204,7 +1204,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentHashMap;
+    /// use lambars::persistent::PersistentHashMap;
     ///
     /// let map = PersistentHashMap::new()
     ///     .insert("a".to_string(), 1)

@@ -3,8 +3,8 @@
 //! This module tests the MonadError type class which provides
 //! error handling capabilities.
 
-use functional_rusty::effect::MonadError;
-use functional_rusty::typeclass::Monad;
+use lambars::effect::MonadError;
+use lambars::typeclass::Monad;
 use rstest::rstest;
 
 // =============================================================================
@@ -202,7 +202,7 @@ fn result_throw_catch_law() {
 
 #[rstest]
 fn result_catch_pure_law() {
-    use functional_rusty::typeclass::Applicative;
+    use lambars::typeclass::Applicative;
 
     let value = 42;
     let handler = |_: String| Ok::<i32, String>(0);

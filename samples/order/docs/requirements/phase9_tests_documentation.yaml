@@ -21,7 +21,7 @@ overview:
   goals:
     - 既存のモジュール単体テスト（src 内の #[cfg(test)]）と外部テスト（tests/）の統合
     - proptest による型クラス法則（Functor, Monad 等）の検証
-    - functional-rusty ライブラリの使用例としての価値があるドキュメント
+    - lambars ライブラリの使用例としての価値があるドキュメント
     - ベストプラクティスとアーキテクチャ設計の文書化
 
   existing_tests:
@@ -151,7 +151,7 @@ requirements:
           - name: test_personal_name_lens_operations
             description: |
               PersonalName の Lens 操作テスト。
-              functional-rusty-derive の #[derive(Lenses)] で生成された Lens を使用。
+              lambars-derive の #[derive(Lenses)] で生成された Lens を使用。
 
           - name: test_customer_info_lens_operations
             description: |
@@ -228,7 +228,7 @@ requirements:
         tests:
           - name: test_lazy_price_caching_behavior
             description: |
-              functional-rusty の Lazy 型を使用した価格キャッシュの動作を検証。
+              lambars の Lazy 型を使用した価格キャッシュの動作を検証。
               複数回呼び出し時に初期化が1回のみであることを確認。
 
           - name: test_promotion_price_fallback_to_standard
@@ -355,7 +355,7 @@ requirements:
     priority: medium
     description: |
       Result と Option の Monad 法則を proptest で検証する。
-      functional-rusty ライブラリの使用例として価値がある。
+      lambars ライブラリの使用例として価値がある。
 
     test_file: tests/monad_laws.rs
 
@@ -512,7 +512,7 @@ requirements:
     category: documentation
     priority: medium
     description: |
-      functional-rusty ライブラリの使用例として価値のある
+      lambars ライブラリの使用例として価値のある
       Order Taking サンプルの使用例ドキュメント。
 
     artifact: docs/usage.md
@@ -538,7 +538,7 @@ requirements:
           - 依存性注入パターンの適用
           - 高階関数による合成
 
-      - title: functional-rusty の活用
+      - title: lambars の活用
         content: |
           - IO モナドによる副作用の分離
           - Lazy 型による遅延評価
@@ -596,7 +596,7 @@ requirements:
           - テスト容易性の向上
           - F# の依存性注入パターンとの比較
 
-      - title: functional-rusty との統合
+      - title: lambars との統合
         content: |
           - IO モナドの使用箇所と理由
           - Lazy 型の使用箇所と理由
@@ -717,8 +717,8 @@ dependencies:
       description: プロパティベーステスト
 
   existing_dependencies:
-    - functional-rusty
-    - functional-rusty-derive
+    - lambars
+    - lambars-derive
     - rust_decimal
     - serde
     - serde_json
@@ -757,7 +757,7 @@ design_considerations:
     - title: 関数型プログラミングの解説
       description: |
         Rust における関数型プログラミングの実践方法を解説。
-        functional-rusty ライブラリの価値を示す。
+        lambars ライブラリの価値を示す。
 
     - title: F# 版との対応
       description: |

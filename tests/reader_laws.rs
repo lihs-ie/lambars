@@ -16,7 +16,7 @@
 //! - Ask Local Composition: local(f, local(g, m)) == local(|r| g(f(r)), m)
 //! - Ask Retrieval: ask().run(r) == r
 
-use functional_rusty::effect::Reader;
+use lambars::effect::Reader;
 use proptest::prelude::*;
 
 // =============================================================================

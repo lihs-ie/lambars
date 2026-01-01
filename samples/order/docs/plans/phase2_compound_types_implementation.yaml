@@ -1,6 +1,6 @@
 # Phase 2: 複合型定義 実装計画
 # Domain Modeling Made Functional の F# パターンを Rust に適用
-# functional-rusty ライブラリの Lens を活用した不変データ操作
+# lambars ライブラリの Lens を活用した不変データ操作
 
 id: phase2_compound_types_implementation
 name: 複合型定義 実装計画
@@ -16,7 +16,7 @@ overview:
     Phase 1 で定義した基本型（String50, EmailAddress, ZipCode, UsStateCode, VipStatus）を
     組み合わせて、より高レベルなドメインエンティティ（PersonalName, CustomerInfo, Address）を実装する。
 
-    functional-rusty の #[derive(Lenses)] マクロを使用して、各フィールドへの Lens を自動生成し、
+    lambars の #[derive(Lenses)] マクロを使用して、各フィールドへの Lens を自動生成し、
     不変データ構造の型安全な更新を実現する。
 
   key_features:
@@ -133,7 +133,7 @@ file_implementations:
       //! 注文ドメインで使用する複合型（Compound Types）
       //!
       //! Phase 1 で定義した基本型を組み合わせて、より高レベルなドメインエンティティを表現する。
-      //! functional-rusty の Optics（Lens）を活用して不変データの更新を効率的に行う。
+      //! lambars の Optics（Lens）を活用して不変データの更新を効率的に行う。
       //!
       //! # 型一覧
       //!
@@ -146,7 +146,7 @@ file_implementations:
       //! ```
       //! use order_taking_sample::compound_types::{PersonalName, CustomerInfo};
       //! use order_taking_sample::simple_types::String50;
-      //! use functional_rusty::optics::Lens;
+      //! use lambars::optics::Lens;
       //!
       //! // CustomerInfo から first_name を取得（Lens 合成）
       //! let customer = CustomerInfo::create("John", "Doe", "john@example.com", "Normal").unwrap();
@@ -205,7 +205,7 @@ file_implementations:
     skeleton: |
       //! 個人名を表す複合型
 
-      use functional_rusty::Lenses;
+      use lambars::Lenses;
 
       use crate::simple_types::{String50, ValidationError};
 
@@ -229,7 +229,7 @@ file_implementations:
       /// ```
       /// use order_taking_sample::compound_types::PersonalName;
       /// use order_taking_sample::simple_types::String50;
-      /// use functional_rusty::optics::Lens;
+      /// use lambars::optics::Lens;
       ///
       /// let name = PersonalName::create("John", "Doe").unwrap();
       ///
@@ -458,7 +458,7 @@ file_implementations:
     skeleton: |
       //! 住所を表す複合型
 
-      use functional_rusty::Lenses;
+      use lambars::Lenses;
 
       use crate::simple_types::{String50, UsStateCode, ValidationError, ZipCode};
 
@@ -770,7 +770,7 @@ file_implementations:
 
     lens_composition_example: |
       // 深いネストへのアクセス例
-      use functional_rusty::optics::Lens;
+      use lambars::optics::Lens;
 
       let customer = CustomerInfo::create("John", "Doe", "john@example.com", "Normal")?;
 
@@ -790,7 +790,7 @@ file_implementations:
     skeleton: |
       //! 顧客情報を表す複合型
 
-      use functional_rusty::Lenses;
+      use lambars::Lenses;
 
       use super::PersonalName;
       use crate::simple_types::{EmailAddress, ValidationError, VipStatus};
@@ -815,7 +815,7 @@ file_implementations:
       /// ```
       /// use order_taking_sample::compound_types::{CustomerInfo, PersonalName};
       /// use order_taking_sample::simple_types::String50;
-      /// use functional_rusty::optics::Lens;
+      /// use lambars::optics::Lens;
       ///
       /// let customer = CustomerInfo::create("John", "Doe", "john@example.com", "Normal").unwrap();
       ///
@@ -976,13 +976,13 @@ file_implementations:
       }
 
 # =============================================================================
-# functional-rusty の使用方法
+# lambars の使用方法
 # =============================================================================
-functional_rusty_usage:
+lambars_usage:
   derive_macro:
     description: "#[derive(Lenses)] マクロの使い方"
     code: |
-      use functional_rusty::Lenses;
+      use lambars::Lenses;
 
       #[derive(Clone, Debug, PartialEq, Eq, Lenses)]
       pub struct PersonalName {
@@ -997,7 +997,7 @@ functional_rusty_usage:
   lens_basic_operations:
     description: Lens の基本操作（get, set, modify）
     code: |
-      use functional_rusty::optics::Lens;
+      use lambars::optics::Lens;
 
       let name = PersonalName::create("John", "Doe").unwrap();
       let first_name_lens = PersonalName::first_name_lens();
@@ -1017,7 +1017,7 @@ functional_rusty_usage:
   lens_composition:
     description: Lens の合成による深いネストへのアクセス
     code: |
-      use functional_rusty::optics::Lens;
+      use lambars::optics::Lens;
 
       let customer = CustomerInfo::create("John", "Doe", "john@example.com", "Normal").unwrap();
 
@@ -1041,9 +1041,9 @@ functional_rusty_usage:
   required_imports:
     description: 必要な import 文
     code: |
-      // functional-rusty からの import
-      use functional_rusty::Lenses;                    // derive マクロ
-      use functional_rusty::optics::Lens;              // Lens トレイト
+      // lambars からの import
+      use lambars::Lenses;                    // derive マクロ
+      use lambars::optics::Lens;              // Lens トレイト
 
       // Phase 1 の型
       use crate::simple_types::{
@@ -1171,7 +1171,7 @@ testing:
     //! - PutGet Law: lens.get(&lens.set(source, value)) == &value
     //! - PutPut Law: lens.set(lens.set(source, v1), v2) == lens.set(source, v2)
 
-    use functional_rusty::optics::Lens;
+    use lambars::optics::Lens;
     use order_taking_sample::compound_types::{Address, CustomerInfo, PersonalName};
     use order_taking_sample::simple_types::{
         EmailAddress, String50, UsStateCode, VipStatus, ZipCode,
@@ -1364,11 +1364,11 @@ clippy_compliance:
 dependency_updates:
   cargo_toml:
     description: |
-      functional-rusty の依存関係を確認する。
+      lambars の依存関係を確認する。
       features = ["full"] が指定されていれば、optics と derive が含まれる。
     current_config: |
       [dependencies]
-      functional-rusty = { path = "../..", features = ["full"] }
+      lambars = { path = "../..", features = ["full"] }
 
   lib_rs:
     description: |

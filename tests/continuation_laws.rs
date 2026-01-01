@@ -7,7 +7,7 @@
 
 #![cfg(feature = "control")]
 
-use functional_rusty::control::Continuation;
+use lambars::control::Continuation;
 use proptest::prelude::*;
 
 // =============================================================================

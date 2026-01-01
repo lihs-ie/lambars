@@ -12,7 +12,7 @@
 use crate::compound_types::{Address, CustomerInfo};
 use crate::simple_types::{BillingAmount, OrderId, OrderLineId, OrderQuantity, Price, ProductCode};
 use crate::workflow::validated_types::PricingMethod;
-use functional_rusty_derive::Lenses;
+use lambars_derive::Lenses;
 
 // =============================================================================
 // PricedOrderProductLine

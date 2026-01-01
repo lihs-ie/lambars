@@ -3,8 +3,8 @@
 //! This module verifies the algebraic laws and invariants of PersistentVector
 //! using proptest.
 
-use functional_rusty::persistent::PersistentVector;
-use functional_rusty::typeclass::{Foldable, FunctorMut};
+use lambars::persistent::PersistentVector;
+use lambars::typeclass::{Foldable, FunctorMut};
 use proptest::prelude::*;
 
 // =============================================================================

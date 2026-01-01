@@ -26,7 +26,7 @@
 //! # Examples
 //!
 //! ```rust
-//! use functional_rusty::persistent::PersistentVector;
+//! use lambars::persistent::PersistentVector;
 //!
 //! let vector = PersistentVector::new()
 //!     .push_back(1)
@@ -116,7 +116,7 @@ impl<T: Clone> Node<T> {
 /// # Examples
 ///
 /// ```rust
-/// use functional_rusty::persistent::PersistentVector;
+/// use lambars::persistent::PersistentVector;
 ///
 /// let vector: PersistentVector<i32> = (0..100).collect();
 /// assert_eq!(vector.len(), 100);
@@ -140,7 +140,7 @@ impl<T> PersistentVector<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentVector;
+    /// use lambars::persistent::PersistentVector;
     ///
     /// let vector: PersistentVector<i32> = PersistentVector::new();
     /// assert!(vector.is_empty());
@@ -165,7 +165,7 @@ impl<T> PersistentVector<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentVector;
+    /// use lambars::persistent::PersistentVector;
     ///
     /// let vector = PersistentVector::singleton(42);
     /// assert_eq!(vector.len(), 1);
@@ -191,7 +191,7 @@ impl<T> PersistentVector<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentVector;
+    /// use lambars::persistent::PersistentVector;
     ///
     /// let vector: PersistentVector<i32> = (1..=5).collect();
     /// assert_eq!(vector.len(), 5);
@@ -207,7 +207,7 @@ impl<T> PersistentVector<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentVector;
+    /// use lambars::persistent::PersistentVector;
     ///
     /// let empty: PersistentVector<i32> = PersistentVector::new();
     /// assert!(empty.is_empty());
@@ -246,7 +246,7 @@ impl<T> PersistentVector<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentVector;
+    /// use lambars::persistent::PersistentVector;
     ///
     /// let vector: PersistentVector<i32> = (1..=5).collect();
     /// assert_eq!(vector.get(0), Some(&1));
@@ -313,7 +313,7 @@ impl<T> PersistentVector<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentVector;
+    /// use lambars::persistent::PersistentVector;
     ///
     /// let vector: PersistentVector<i32> = (1..=5).collect();
     /// assert_eq!(vector.first(), Some(&1));
@@ -338,7 +338,7 @@ impl<T> PersistentVector<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentVector;
+    /// use lambars::persistent::PersistentVector;
     ///
     /// let vector: PersistentVector<i32> = (1..=5).collect();
     /// assert_eq!(vector.last(), Some(&5));
@@ -363,7 +363,7 @@ impl<T> PersistentVector<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentVector;
+    /// use lambars::persistent::PersistentVector;
     ///
     /// let vector: PersistentVector<i32> = (1..=5).collect();
     /// let collected: Vec<&i32> = vector.iter().collect();
@@ -393,7 +393,7 @@ impl<T: Clone> PersistentVector<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentVector;
+    /// use lambars::persistent::PersistentVector;
     ///
     /// let vector = PersistentVector::new()
     ///     .push_back(1)
@@ -522,7 +522,7 @@ impl<T: Clone> PersistentVector<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentVector;
+    /// use lambars::persistent::PersistentVector;
     ///
     /// let vector: PersistentVector<i32> = (1..=5).collect();
     /// let (remaining, element) = vector.pop_back().unwrap();
@@ -673,7 +673,7 @@ impl<T: Clone> PersistentVector<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentVector;
+    /// use lambars::persistent::PersistentVector;
     ///
     /// let vector: PersistentVector<i32> = (1..=3).collect();
     /// let with_zero = vector.push_front(0);
@@ -705,7 +705,7 @@ impl<T: Clone> PersistentVector<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentVector;
+    /// use lambars::persistent::PersistentVector;
     ///
     /// let vector: PersistentVector<i32> = (1..=5).collect();
     /// let (remaining, element) = vector.pop_front().unwrap();
@@ -745,7 +745,7 @@ impl<T: Clone> PersistentVector<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentVector;
+    /// use lambars::persistent::PersistentVector;
     ///
     /// let vector: PersistentVector<i32> = (1..=5).collect();
     /// let updated = vector.update(2, 100).unwrap();
@@ -842,7 +842,7 @@ impl<T: Clone> PersistentVector<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentVector;
+    /// use lambars::persistent::PersistentVector;
     ///
     /// let vector1: PersistentVector<i32> = (1..=3).collect();
     /// let vector2: PersistentVector<i32> = (4..=6).collect();
@@ -885,7 +885,7 @@ impl<T: Clone> PersistentVector<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentVector;
+    /// use lambars::persistent::PersistentVector;
     ///
     /// let vector: PersistentVector<i32> = (0..10).collect();
     /// let sliced = vector.slice(2, 5);

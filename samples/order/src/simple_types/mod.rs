@@ -41,9 +41,9 @@
 //! assert_eq!(total.value(), Decimal::from_str("300.00").unwrap());
 //! ```
 //!
-//! # functional-rusty との統合
+//! # lambars との統合
 //!
-//! このモジュールは functional-rusty ライブラリの機能を活用している:
+//! このモジュールは lambars ライブラリの機能を活用している:
 //!
 //! - `Result<T, ValidationError>` による Monad 的なエラーハンドリング
 //! - `Foldable` トレイトを使用した `BillingAmount::sum_prices` の畳み込み操作

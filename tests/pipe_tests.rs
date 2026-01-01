@@ -4,7 +4,7 @@
 
 #![cfg(feature = "compose")]
 
-use functional_rusty::pipe;
+use lambars::pipe;
 
 // =============================================================================
 // Basic pipe! tests
@@ -198,7 +198,7 @@ fn test_pipe_with_references() {
 
 #[test]
 fn test_pipe_with_identity() {
-    use functional_rusty::compose::identity;
+    use lambars::compose::identity;
 
     let result = pipe!(42, identity);
     assert_eq!(result, 42);
@@ -206,7 +206,7 @@ fn test_pipe_with_identity() {
 
 #[test]
 fn test_pipe_with_constant() {
-    use functional_rusty::compose::constant;
+    use lambars::compose::constant;
 
     let result = pipe!(42, constant(100));
     assert_eq!(result, 100);
@@ -217,7 +217,7 @@ fn test_pipe_with_constant() {
 // =============================================================================
 
 mod compose_equivalence {
-    use functional_rusty::{compose, pipe};
+    use lambars::{compose, pipe};
 
     #[test]
     fn test_pipe_compose_equivalence_two_functions() {

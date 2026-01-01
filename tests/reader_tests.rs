@@ -6,7 +6,7 @@
 //! - Monad operations (flat_map, pure)
 //! - Reader-specific operations (ask, asks, local)
 
-use functional_rusty::effect::Reader;
+use lambars::effect::Reader;
 use rstest::rstest;
 
 // =============================================================================

@@ -1,6 +1,6 @@
 //! 顧客情報を表す複合型
 
-use functional_rusty_derive::Lenses;
+use lambars_derive::Lenses;
 
 use super::PersonalName;
 use crate::simple_types::{EmailAddress, ValidationError, VipStatus};
@@ -25,7 +25,7 @@ use crate::simple_types::{EmailAddress, ValidationError, VipStatus};
 /// ```
 /// use order_taking_sample::compound_types::{CustomerInfo, PersonalName};
 /// use order_taking_sample::simple_types::String50;
-/// use functional_rusty::optics::Lens;
+/// use lambars::optics::Lens;
 ///
 /// let customer = CustomerInfo::create("John", "Doe", "john@example.com", "Normal").unwrap();
 ///
@@ -172,7 +172,7 @@ impl CustomerInfo {
 mod tests {
     use super::*;
     use crate::simple_types::String50;
-    use functional_rusty::optics::Lens;
+    use lambars::optics::Lens;
     use rstest::rstest;
 
     // =========================================================================

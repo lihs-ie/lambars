@@ -3,8 +3,8 @@
 //! These tests verify that PersistentTreeMap satisfies the expected laws
 //! and invariants using proptest.
 
-use functional_rusty::persistent::PersistentTreeMap;
-use functional_rusty::typeclass::Foldable;
+use lambars::persistent::PersistentTreeMap;
+use lambars::typeclass::Foldable;
 use proptest::prelude::*;
 
 // =============================================================================

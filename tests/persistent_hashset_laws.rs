@@ -3,8 +3,8 @@
 //! These tests verify that PersistentHashSet satisfies the mathematical
 //! properties expected of a set data structure.
 
-use functional_rusty::persistent::PersistentHashSet;
-use functional_rusty::typeclass::Foldable;
+use lambars::persistent::PersistentHashSet;
+use lambars::typeclass::Foldable;
 use proptest::prelude::*;
 
 // =============================================================================

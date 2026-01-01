@@ -2,8 +2,8 @@
 //!
 //! Tests the Iso trait and related implementations.
 
-use functional_rusty::iso;
-use functional_rusty::optics::{FunctionIso, Iso, Lens, Prism};
+use lambars::iso;
+use lambars::optics::{FunctionIso, Iso, Lens, Prism};
 use rstest::rstest;
 
 // =============================================================================
@@ -350,7 +350,7 @@ fn test_iso_macro_with_closures() {
 
 #[test]
 fn test_iso_identity() {
-    use functional_rusty::optics::iso_identity;
+    use lambars::optics::iso_identity;
 
     let identity_iso = iso_identity::<i32>();
 
@@ -364,7 +364,7 @@ fn test_iso_identity() {
 
 #[test]
 fn test_iso_identity_with_string() {
-    use functional_rusty::optics::iso_identity;
+    use lambars::optics::iso_identity;
 
     let identity_iso = iso_identity::<String>();
 
@@ -374,7 +374,7 @@ fn test_iso_identity_with_string() {
 
 #[test]
 fn test_iso_swap() {
-    use functional_rusty::optics::iso_swap;
+    use lambars::optics::iso_swap;
 
     let swap_iso = iso_swap::<i32, String>();
 
@@ -388,7 +388,7 @@ fn test_iso_swap() {
 
 #[test]
 fn test_iso_swap_double_is_identity() {
-    use functional_rusty::optics::iso_swap;
+    use lambars::optics::iso_swap;
 
     let swap_iso = iso_swap::<i32, String>();
     let swap_back = iso_swap::<String, i32>();
@@ -497,7 +497,7 @@ fn test_iso_with_unicode() {
 #[case(i32::MAX)]
 #[case(i32::MIN)]
 fn test_iso_identity_various_integers(#[case] value: i32) {
-    use functional_rusty::optics::iso_identity;
+    use lambars::optics::iso_identity;
 
     let identity_iso = iso_identity::<i32>();
 
@@ -510,7 +510,7 @@ fn test_iso_identity_various_integers(#[case] value: i32) {
 #[case((0, String::new()))]
 #[case((-42, "test".to_string()))]
 fn test_iso_swap_various_tuples(#[case] tuple: (i32, String)) {
-    use functional_rusty::optics::iso_swap;
+    use lambars::optics::iso_swap;
 
     let swap_iso = iso_swap::<i32, String>();
 

@@ -126,7 +126,7 @@ requirements:
       /// # Examples
       ///
       /// ```rust
-      /// use functional_rusty::effect::AsyncIO;
+      /// use lambars::effect::AsyncIO;
       ///
       /// #[tokio::main]
       /// async fn main() {
@@ -847,9 +847,9 @@ artifacts:
 
 dependencies:
   internal:
-    - functional_rusty::effect::IO
-    - functional_rusty::control::Either
-    - functional_rusty::eff!
+    - lambars::effect::IO
+    - lambars::control::Either
+    - lambars::eff!
 
   external:
     - tokio: "1.0"

@@ -6,8 +6,8 @@
 //! - Prism composition
 //! - prism! macro
 
-use functional_rusty::optics::{FunctionPrism, Prism};
-use functional_rusty::prism;
+use lambars::optics::{FunctionPrism, Prism};
+use lambars::prism;
 use rstest::rstest;
 
 // =============================================================================
@@ -537,7 +537,7 @@ fn test_circle_prism_review_parameterized(#[case] radius: f64) {
 
 mod prism_as_traversal_additional_tests {
     use super::*;
-    use functional_rusty::optics::Traversal;
+    use lambars::optics::Traversal;
 
     #[test]
     fn test_prism_as_traversal_length_matching() {

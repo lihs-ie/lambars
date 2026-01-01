@@ -2,7 +2,7 @@
 //!
 //! ExceptT adds error handling capability to any monad.
 
-use functional_rusty::effect::{ExceptT, IO};
+use lambars::effect::{ExceptT, IO};
 use rstest::rstest;
 
 // =============================================================================

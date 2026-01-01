@@ -3,8 +3,8 @@
 //! This module contains comprehensive tests for the PersistentVector implementation,
 //! organized by TDD cycles.
 
-use functional_rusty::persistent::PersistentVector;
-use functional_rusty::typeclass::{Foldable, FunctorMut, TypeConstructor};
+use lambars::persistent::PersistentVector;
+use lambars::typeclass::{Foldable, FunctorMut, TypeConstructor};
 use rstest::rstest;
 
 // =============================================================================
@@ -819,7 +819,7 @@ fn test_pop_front_repeatedly() {
 
 #[rstest]
 fn test_fold_map() {
-    use functional_rusty::typeclass::Sum;
+    use lambars::typeclass::Sum;
 
     let vector: PersistentVector<i32> = (1..=5).collect();
     let result: Sum<i32> = vector.fold_map(Sum::new);
@@ -828,7 +828,7 @@ fn test_fold_map() {
 
 #[rstest]
 fn test_fold_map_empty() {
-    use functional_rusty::typeclass::Sum;
+    use lambars::typeclass::Sum;
 
     let vector: PersistentVector<i32> = PersistentVector::new();
     let result: Sum<i32> = vector.fold_map(Sum::new);
@@ -1164,7 +1164,7 @@ fn test_update_at_leaf_boundary() {
 // Coverage Tests: Functor fmap (FnOnce version)
 // =============================================================================
 
-use functional_rusty::typeclass::Functor;
+use lambars::typeclass::Functor;
 
 #[rstest]
 fn test_fmap_on_empty_vector() {
@@ -1434,7 +1434,7 @@ fn test_into_iter_fully_exhausted() {
 // Coverage Tests: Semigroup and Monoid
 // =============================================================================
 
-use functional_rusty::typeclass::{Monoid, Semigroup};
+use lambars::typeclass::{Monoid, Semigroup};
 
 #[rstest]
 fn test_semigroup_combine_empty_with_non_empty() {

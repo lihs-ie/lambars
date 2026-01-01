@@ -1,24 +1,24 @@
 [package]
-name = "functional-rusty"
+name = "lambars"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.92.0"
-authors = ["functional-rusty contributors"]
+authors = ["lambars contributors"]
 description = "A functional programming library for Rust providing type classes, persistent data structures, and effect systems"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/functional-rusty/functional-rusty"
+repository = "https://github.com/lambars/lambars"
 keywords = ["functional", "monad", "functor", "persistent", "immutable"]
 categories = ["data-structures", "rust-patterns"]
 
 [dependencies]
-functional-rusty-derive = { path = "functional-rusty-derive", optional = true }
+lambars-derive = { path = "lambars-derive", optional = true }
 tokio = { version = "^1.0", features = ["rt", "rt-multi-thread", "time", "sync", "macros"], optional = true }
 futures = { version = "^0.3", optional = true }
 
 [dev-dependencies]
 rstest = "^0.24"
 proptest = "1.5"
-functional-rusty-derive = { path = "functional-rusty-derive" }
+lambars-derive = { path = "lambars-derive" }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "sync", "macros"] }
 
 [features]
@@ -43,7 +43,7 @@ persistent = ["typeclass", "control"]
 optics = ["typeclass", "persistent"]
 
 # Phase 5.5: Derive macros for Optics
-derive = ["optics", "dep:functional-rusty-derive"]
+derive = ["optics", "dep:lambars-derive"]
 
 # Phase 6: Effect system
 effect = ["typeclass", "control"]

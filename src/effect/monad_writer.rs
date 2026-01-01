@@ -43,7 +43,7 @@
 //! # Examples
 //!
 //! ```rust,ignore
-//! use functional_rusty::effect::MonadWriter;
+//! use lambars::effect::MonadWriter;
 //!
 //! // Writer implementation will provide concrete examples
 //! ```
@@ -101,7 +101,7 @@ use crate::typeclass::{Monad, Monoid};
 /// # Examples
 ///
 /// ```rust,ignore
-/// use functional_rusty::effect::{MonadWriter, Writer};
+/// use lambars::effect::{MonadWriter, Writer};
 ///
 /// let writer = Writer::tell(vec!["step 1".to_string()])
 ///     .flat_map(|_| Writer::tell(vec!["step 2".to_string()]))
@@ -132,7 +132,7 @@ where
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::{MonadWriter, Writer};
+    /// use lambars::effect::{MonadWriter, Writer};
     ///
     /// let writer: Writer<Vec<String>, ()> =
     ///     Writer::tell(vec!["log message".to_string()]);
@@ -159,7 +159,7 @@ where
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::{MonadWriter, Writer};
+    /// use lambars::effect::{MonadWriter, Writer};
     ///
     /// let writer = Writer::tell(vec!["log".to_string()]).map(|_| 42);
     /// let listened = Writer::listen(writer);
@@ -188,7 +188,7 @@ where
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::{MonadWriter, Writer};
+    /// use lambars::effect::{MonadWriter, Writer};
     ///
     /// let computation = Writer::new(
     ///     (42, |output: Vec<String>| output.into_iter().map(|s| s.to_uppercase()).collect()),
@@ -222,7 +222,7 @@ where
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::{MonadWriter, Writer};
+    /// use lambars::effect::{MonadWriter, Writer};
     ///
     /// let writer = Writer::tell(vec!["hello".to_string()]).map(|_| 42);
     /// let censored = Writer::censor(

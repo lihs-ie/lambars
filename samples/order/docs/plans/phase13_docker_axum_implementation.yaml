@@ -108,7 +108,7 @@ implementation_steps:
         content_overview: |
           - target/, .git/, tests/, docs/ 除外
     validation:
-      - docker build -t order-taking:test -f samples/order/Dockerfile . (from functional-rusty root)
+      - docker build -t order-taking:test -f samples/order/Dockerfile . (from lambars root)
 
   - step: 7
     name: 品質チェック
@@ -218,10 +218,10 @@ code_templates:
     # ワークスペース構造を再現
     WORKDIR /workspace
 
-    # functional-rusty 本体をコピー
+    # lambars 本体をコピー
     COPY Cargo.toml Cargo.lock ./
     COPY src ./src
-    COPY functional-rusty-derive ./functional-rusty-derive
+    COPY lambars-derive ./lambars-derive
 
     # サンプルプロジェクトをコピー
     COPY samples/order ./samples/order

@@ -2,7 +2,7 @@
 //!
 //! Phase 7 の place_order 関数に対するユニットテストと統合テスト。
 
-use functional_rusty::effect::IO;
+use lambars::effect::IO;
 use order_taking_sample::simple_types::{Price, ProductCode};
 use order_taking_sample::workflow::{
     AddressValidationError, CheckedAddress, HtmlString, OrderAcknowledgment, PricedOrder,

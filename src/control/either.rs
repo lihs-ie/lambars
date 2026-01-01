@@ -11,7 +11,7 @@
 //! # Examples
 //!
 //! ```rust
-//! use functional_rusty::control::Either;
+//! use lambars::control::Either;
 //!
 //! // Creating Either values
 //! let left: Either<i32, String> = Either::Left(42);
@@ -49,7 +49,7 @@ use std::hash::Hash;
 /// # Examples
 ///
 /// ```rust
-/// use functional_rusty::control::Either;
+/// use lambars::control::Either;
 ///
 /// let success: Either<String, i32> = Either::Right(42);
 /// let failure: Either<String, i32> = Either::Left("error".to_string());
@@ -76,7 +76,7 @@ impl<L, R> Either<L, R> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Either;
+    /// use lambars::control::Either;
     ///
     /// let left: Either<i32, String> = Either::Left(42);
     /// assert!(left.is_left());
@@ -94,7 +94,7 @@ impl<L, R> Either<L, R> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Either;
+    /// use lambars::control::Either;
     ///
     /// let right: Either<i32, String> = Either::Right("hello".to_string());
     /// assert!(right.is_right());
@@ -118,7 +118,7 @@ impl<L, R> Either<L, R> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Either;
+    /// use lambars::control::Either;
     ///
     /// let left: Either<i32, String> = Either::Left(42);
     /// assert_eq!(left.left(), Some(42));
@@ -141,7 +141,7 @@ impl<L, R> Either<L, R> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Either;
+    /// use lambars::control::Either;
     ///
     /// let right: Either<i32, String> = Either::Right("hello".to_string());
     /// assert_eq!(right.right(), Some("hello".to_string()));
@@ -166,7 +166,7 @@ impl<L, R> Either<L, R> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Either;
+    /// use lambars::control::Either;
     ///
     /// let left: Either<i32, String> = Either::Left(42);
     /// assert_eq!(left.left_ref(), Some(&42));
@@ -187,7 +187,7 @@ impl<L, R> Either<L, R> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Either;
+    /// use lambars::control::Either;
     ///
     /// let right: Either<i32, String> = Either::Right("hello".to_string());
     /// assert_eq!(right.right_ref(), Some(&"hello".to_string()));
@@ -215,7 +215,7 @@ impl<L, R> Either<L, R> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Either;
+    /// use lambars::control::Either;
     ///
     /// let left: Either<i32, String> = Either::Left(42);
     /// let result = left.map_left(|x| x * 2);
@@ -244,7 +244,7 @@ impl<L, R> Either<L, R> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Either;
+    /// use lambars::control::Either;
     ///
     /// let right: Either<i32, String> = Either::Right("hello".to_string());
     /// let result = right.map_right(|s| s.len());
@@ -270,7 +270,7 @@ impl<L, R> Either<L, R> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Either;
+    /// use lambars::control::Either;
     ///
     /// let left: Either<i32, String> = Either::Left(42);
     /// let result = left.bimap(|x| x * 2, |s: String| s.len());
@@ -303,7 +303,7 @@ impl<L, R> Either<L, R> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Either;
+    /// use lambars::control::Either;
     ///
     /// let left: Either<i32, String> = Either::Left(42);
     /// let result = left.fold(|x| x.to_string(), |s| s);
@@ -336,7 +336,7 @@ impl<L, R> Either<L, R> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Either;
+    /// use lambars::control::Either;
     ///
     /// let left: Either<i32, String> = Either::Left(42);
     /// assert_eq!(left.swap(), Either::Right(42));
@@ -365,7 +365,7 @@ impl<L, R> Either<L, R> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Either;
+    /// use lambars::control::Either;
     ///
     /// let left: Either<i32, String> = Either::Left(42);
     /// assert_eq!(left.unwrap_left(), 42);
@@ -387,7 +387,7 @@ impl<L, R> Either<L, R> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Either;
+    /// use lambars::control::Either;
     ///
     /// let right: Either<i32, String> = Either::Right("hello".to_string());
     /// assert_eq!(right.unwrap_right(), "hello".to_string());
@@ -411,7 +411,7 @@ impl<L, R> Either<L, R> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Either;
+    /// use lambars::control::Either;
     ///
     /// let left: Either<i32, String> = Either::Left(42);
     /// assert_eq!(left.into_options(), (Some(42), None));
@@ -438,7 +438,7 @@ impl<L: Default, R> Either<L, R> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Either;
+    /// use lambars::control::Either;
     ///
     /// let left: Either<i32, String> = Either::Left(42);
     /// assert_eq!(left.left_or_default(), 42);
@@ -461,7 +461,7 @@ impl<L, R: Default> Either<L, R> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Either;
+    /// use lambars::control::Either;
     ///
     /// let right: Either<i32, String> = Either::Right("hello".to_string());
     /// assert_eq!(right.right_or_default(), "hello".to_string());
@@ -503,7 +503,7 @@ impl<L, R> From<Result<R, L>> for Either<L, R> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Either;
+    /// use lambars::control::Either;
     ///
     /// let ok: Result<i32, String> = Ok(42);
     /// let either: Either<String, i32> = ok.into();
@@ -530,7 +530,7 @@ impl<L, R> From<Either<L, R>> for Result<R, L> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Either;
+    /// use lambars::control::Either;
     ///
     /// let right: Either<String, i32> = Either::Right(42);
     /// let result: Result<i32, String> = right.into();

@@ -33,7 +33,7 @@
 //! # Examples
 //!
 //! ```rust
-//! use functional_rusty::typeclass::{Semigroup, Monoid};
+//! use lambars::typeclass::{Semigroup, Monoid};
 //!
 //! // String monoid with empty string as identity
 //! assert_eq!(String::empty(), "");
@@ -74,7 +74,7 @@ use super::wrappers::{Bounded, Max, Min, Product, Sum};
 /// # Examples
 ///
 /// ```rust
-/// use functional_rusty::typeclass::{Semigroup, Monoid};
+/// use lambars::typeclass::{Semigroup, Monoid};
 ///
 /// // Combining with empty yields the original value
 /// let s = String::from("hello");
@@ -91,7 +91,7 @@ pub trait Monoid: Semigroup {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Monoid;
+    /// use lambars::typeclass::Monoid;
     ///
     /// assert_eq!(String::empty(), "");
     /// assert!(Vec::<i32>::empty().is_empty());
@@ -106,7 +106,7 @@ pub trait Monoid: Semigroup {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::{Semigroup, Monoid};
+    /// use lambars::typeclass::{Semigroup, Monoid};
     ///
     /// let strings = vec![
     ///     String::from("a"),
@@ -136,7 +136,7 @@ pub trait Monoid: Semigroup {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Monoid;
+    /// use lambars::typeclass::Monoid;
     ///
     /// assert!(String::empty().is_empty_value());
     /// assert!(!String::from("hello").is_empty_value());

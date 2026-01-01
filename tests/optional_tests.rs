@@ -3,8 +3,8 @@
 //! Optional is a Lens + Prism composition result.
 //! It represents an optic that may or may not be able to access a value.
 
-use functional_rusty::optics::{FunctionPrism, Lens, LensComposeExtension, Optional};
-use functional_rusty::{lens, prism};
+use lambars::optics::{FunctionPrism, Lens, LensComposeExtension, Optional};
+use lambars::{lens, prism};
 use rstest::rstest;
 
 // =============================================================================

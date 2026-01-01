@@ -5,8 +5,8 @@
 //! 1. **PreviewReview Law**: `prism.preview(&prism.review(value)) == Some(&value)`
 //! 2. **ReviewPreview Law**: If preview succeeds, then `prism.review(prism.preview(&source).unwrap().clone()) == source`
 
-use functional_rusty::optics::Prism;
-use functional_rusty::prism;
+use lambars::optics::Prism;
+use lambars::prism;
 use proptest::prelude::*;
 
 // =============================================================================
@@ -172,7 +172,7 @@ proptest! {
         #[derive(Clone, PartialEq, Debug)]
         enum Inner { Value(i32), Nothing }
 
-        use functional_rusty::optics::FunctionPrism;
+        use lambars::optics::FunctionPrism;
 
         let outer_inner_prism = FunctionPrism::new(
             |outer: &Outer| match outer {

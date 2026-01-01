@@ -4,7 +4,7 @@
 # マルチステージビルドで最小のイメージサイズを実現
 #
 # 使用方法:
-#   # functional-rusty ルートディレクトリから実行
+#   # lambars ルートディレクトリから実行
 #   docker build -t order-taking:latest -f samples/order/Dockerfile .
 #   docker run -p 8080:8080 order-taking:latest
 #
@@ -24,9 +24,9 @@ WORKDIR /workspace
 # Cargo.toml と Cargo.lock をコピー（依存関係キャッシュ用）
 COPY Cargo.toml Cargo.lock ./
 
-# functional-rusty 本体をコピー
+# lambars 本体をコピー
 COPY src ./src
-COPY functional-rusty-derive ./functional-rusty-derive
+COPY lambars-derive ./lambars-derive
 
 # サンプルプロジェクトをコピー
 COPY samples/order ./samples/order

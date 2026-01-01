@@ -179,7 +179,7 @@ files:
           PlaceOrderError, PricedOrder, PricedOrderLine, PricedOrderProductLine,
           PricingError, PricingMethod, ValidatedOrder, ValidatedOrderLine,
       };
-      use functional_rusty::control::Lazy;
+      use lambars::control::Lazy;
       use rust_decimal::Decimal;
       use std::rc::Rc;
 
@@ -465,7 +465,7 @@ files:
               GetStandardPricesFn: Fn() -> Box<dyn Fn(&ProductCode) -> Price> + 'static,
               GetPromotionPricesFn: Fn(&PromotionCode) -> Box<dyn Fn(&ProductCode) -> Option<Price>> + 'static,
           {
-              // functional-rusty の Lazy 型を使用して標準価格取得関数をキャッシュ
+              // lambars の Lazy 型を使用して標準価格取得関数をキャッシュ
               let cached_standard_prices: Rc<Lazy<Box<dyn Fn(&ProductCode) -> Price>>> =
                   Rc::new(Lazy::new(get_standard_prices));
 
@@ -497,7 +497,7 @@ files:
               }
           }
         notes: |
-          functional-rusty の Lazy 型を使用して標準価格取得関数をキャッシュ。
+          lambars の Lazy 型を使用して標準価格取得関数をキャッシュ。
           最初の force() 呼び出しで get_standard_prices() が評価され、以降はキャッシュされた値を使用。
           プロモーション価格が None の場合は標準価格にフォールバック。
           F# の getPricingFunction に対応。
@@ -1085,18 +1085,18 @@ functional_principles:
 
   lazy_evaluation:
     description: |
-      functional-rusty の Lazy 型を使用して標準価格取得関数を遅延初期化。
+      lambars の Lazy 型を使用して標準価格取得関数を遅延初期化。
       最初の force() 呼び出し時に評価され、以降はキャッシュされた値を使用する。
 
     benefits:
       - 価格テーブルは必要になるまで取得されない
       - 以降のアクセスはキャッシュされた値を使用
       - 不要な外部サービス呼び出しを回避
-      - functional-rusty ライブラリの活用による一貫した遅延評価パターン
+      - lambars ライブラリの活用による一貫した遅延評価パターン
 
     usage: |
       ```rust
-      use functional_rusty::control::Lazy;
+      use lambars::control::Lazy;
 
       let cached_standard_prices: Rc<Lazy<Box<dyn Fn(&ProductCode) -> Price>>> =
           Rc::new(Lazy::new(get_standard_prices));

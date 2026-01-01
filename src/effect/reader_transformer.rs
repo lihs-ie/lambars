@@ -22,7 +22,7 @@
 //! With Option:
 //!
 //! ```rust
-//! use functional_rusty::effect::ReaderT;
+//! use lambars::effect::ReaderT;
 //!
 //! let reader: ReaderT<i32, Option<i32>> = ReaderT::new(|environment| Some(environment * 2));
 //! assert_eq!(reader.run(21), Some(42));
@@ -31,7 +31,7 @@
 //! With Result:
 //!
 //! ```rust
-//! use functional_rusty::effect::ReaderT;
+//! use lambars::effect::ReaderT;
 //!
 //! let reader: ReaderT<i32, Result<i32, String>> = ReaderT::new(|environment| Ok(environment * 2));
 //! assert_eq!(reader.run(21), Ok(42));
@@ -40,7 +40,7 @@
 //! With IO:
 //!
 //! ```rust
-//! use functional_rusty::effect::{ReaderT, IO};
+//! use lambars::effect::{ReaderT, IO};
 //!
 //! let reader: ReaderT<i32, IO<i32>> = ReaderT::new(|environment| IO::pure(environment * 2));
 //! let io = reader.run(21);
@@ -66,7 +66,7 @@ use super::IO;
 /// # Examples
 ///
 /// ```rust
-/// use functional_rusty::effect::ReaderT;
+/// use lambars::effect::ReaderT;
 ///
 /// #[derive(Clone)]
 /// struct Config { port: u16 }
@@ -101,7 +101,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::ReaderT;
+    /// use lambars::effect::ReaderT;
     ///
     /// let reader: ReaderT<i32, Option<i32>> = ReaderT::new(|environment| Some(environment * 2));
     /// assert_eq!(reader.run(21), Some(42));
@@ -128,7 +128,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::ReaderT;
+    /// use lambars::effect::ReaderT;
     ///
     /// let reader: ReaderT<i32, Option<i32>> = ReaderT::new(|environment| Some(environment + 1));
     /// assert_eq!(reader.run(41), Some(42));
@@ -175,7 +175,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::ReaderT;
+    /// use lambars::effect::ReaderT;
     ///
     /// let reader: ReaderT<i32, Option<i32>> = ReaderT::pure_option(42);
     /// assert_eq!(reader.run(999), Some(42)); // environment is ignored
@@ -198,7 +198,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::ReaderT;
+    /// use lambars::effect::ReaderT;
     ///
     /// let inner: Option<i32> = Some(42);
     /// let reader: ReaderT<String, Option<i32>> = ReaderT::lift_option(inner);
@@ -220,7 +220,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::ReaderT;
+    /// use lambars::effect::ReaderT;
     ///
     /// let reader: ReaderT<i32, Option<i32>> = ReaderT::new(|environment| Some(environment));
     /// let mapped = reader.fmap_option(|value| value * 2);
@@ -244,7 +244,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::ReaderT;
+    /// use lambars::effect::ReaderT;
     ///
     /// let reader: ReaderT<i32, Option<i32>> = ReaderT::new(|environment| Some(environment));
     /// let chained = reader.flat_map_option(|value| {
@@ -275,7 +275,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::ReaderT;
+    /// use lambars::effect::ReaderT;
     ///
     /// let reader: ReaderT<i32, Option<i32>> = ReaderT::ask_option();
     /// assert_eq!(reader.run(42), Some(42));
@@ -298,7 +298,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::ReaderT;
+    /// use lambars::effect::ReaderT;
     ///
     /// let reader: ReaderT<i32, Option<i32>> = ReaderT::new(|environment| Some(environment * 2));
     /// let modified = ReaderT::local_option(|environment| environment + 10, reader);
@@ -328,7 +328,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::ReaderT;
+    /// use lambars::effect::ReaderT;
     ///
     /// let reader: ReaderT<i32, Option<i32>> = ReaderT::ask_option();
     /// assert_eq!(reader.run(42), Some(42));
@@ -358,7 +358,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::ReaderT;
+    /// use lambars::effect::ReaderT;
     ///
     /// let reader: ReaderT<i32, Result<i32, String>> = ReaderT::pure_result(42);
     /// assert_eq!(reader.run(999), Ok(42));
@@ -379,7 +379,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::ReaderT;
+    /// use lambars::effect::ReaderT;
     ///
     /// let inner: Result<i32, String> = Ok(42);
     /// let reader: ReaderT<i32, Result<i32, String>> = ReaderT::lift_result(inner);
@@ -402,7 +402,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::ReaderT;
+    /// use lambars::effect::ReaderT;
     ///
     /// let reader: ReaderT<i32, Result<i32, String>> = ReaderT::new(|environment| Ok(environment));
     /// let mapped = reader.fmap_result(|value| value * 2);
@@ -426,7 +426,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::ReaderT;
+    /// use lambars::effect::ReaderT;
     ///
     /// let reader: ReaderT<i32, Result<i32, String>> = ReaderT::new(|environment| Ok(environment));
     /// let chained = reader.flat_map_result(|value| {
@@ -457,7 +457,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::ReaderT;
+    /// use lambars::effect::ReaderT;
     ///
     /// let reader: ReaderT<i32, Result<i32, String>> = ReaderT::ask_result();
     /// assert_eq!(reader.run(42), Ok(42));
@@ -480,7 +480,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::ReaderT;
+    /// use lambars::effect::ReaderT;
     ///
     /// let reader: ReaderT<i32, Result<i32, String>> = ReaderT::new(|environment| Ok(environment * 2));
     /// let modified = ReaderT::local_result(|environment| environment + 10, reader);
@@ -519,7 +519,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::{ReaderT, IO};
+    /// use lambars::effect::{ReaderT, IO};
     ///
     /// let reader: ReaderT<i32, IO<i32>> = ReaderT::pure_io(42);
     /// let io = reader.run(999);
@@ -541,7 +541,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::{ReaderT, IO};
+    /// use lambars::effect::{ReaderT, IO};
     ///
     /// let inner = IO::pure(42);
     /// let reader: ReaderT<String, IO<i32>> = ReaderT::lift_io(inner);
@@ -568,7 +568,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::{ReaderT, IO};
+    /// use lambars::effect::{ReaderT, IO};
     ///
     /// let reader: ReaderT<i32, IO<i32>> = ReaderT::new(|environment| IO::pure(environment));
     /// let mapped = reader.fmap_io(|value| value * 2);
@@ -598,7 +598,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::{ReaderT, IO};
+    /// use lambars::effect::{ReaderT, IO};
     ///
     /// let reader: ReaderT<i32, IO<i32>> = ReaderT::new(|environment| IO::pure(environment));
     /// let chained = reader.flat_map_io(|value| {
@@ -631,7 +631,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::{ReaderT, IO};
+    /// use lambars::effect::{ReaderT, IO};
     ///
     /// let reader: ReaderT<i32, IO<i32>> = ReaderT::ask_io();
     /// let io = reader.run(42);
@@ -655,7 +655,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::effect::{ReaderT, IO};
+    /// use lambars::effect::{ReaderT, IO};
     ///
     /// let reader: ReaderT<i32, IO<i32>> = ReaderT::new(|environment| IO::pure(environment * 2));
     /// let modified = ReaderT::local_io(|environment| environment + 10, reader);
@@ -697,7 +697,7 @@ where
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::{ReaderT, AsyncIO};
+    /// use lambars::effect::{ReaderT, AsyncIO};
     ///
     /// #[tokio::main]
     /// async fn main() {
@@ -722,7 +722,7 @@ where
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::{ReaderT, AsyncIO};
+    /// use lambars::effect::{ReaderT, AsyncIO};
     ///
     /// #[tokio::main]
     /// async fn main() {
@@ -755,7 +755,7 @@ where
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::{ReaderT, AsyncIO};
+    /// use lambars::effect::{ReaderT, AsyncIO};
     ///
     /// #[tokio::main]
     /// async fn main() {
@@ -791,7 +791,7 @@ where
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::{ReaderT, AsyncIO};
+    /// use lambars::effect::{ReaderT, AsyncIO};
     ///
     /// #[tokio::main]
     /// async fn main() {
@@ -818,7 +818,7 @@ where
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::{ReaderT, AsyncIO};
+    /// use lambars::effect::{ReaderT, AsyncIO};
     ///
     /// #[tokio::main]
     /// async fn main() {

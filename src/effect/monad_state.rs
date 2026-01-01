@@ -43,7 +43,7 @@
 //! # Examples
 //!
 //! ```rust,ignore
-//! use functional_rusty::effect::MonadState;
+//! use lambars::effect::MonadState;
 //!
 //! // State implementation will provide concrete examples
 //! ```
@@ -97,7 +97,7 @@ use crate::typeclass::Monad;
 /// # Examples
 ///
 /// ```rust,ignore
-/// use functional_rusty::effect::{MonadState, State};
+/// use lambars::effect::{MonadState, State};
 ///
 /// let computation = State::get()
 ///     .flat_map(|current: i32| {
@@ -121,7 +121,7 @@ pub trait MonadState<S>: Monad {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::{MonadState, State};
+    /// use lambars::effect::{MonadState, State};
     ///
     /// let state: State<i32, i32> = State::get();
     /// let (result, final_state) = state.run(42);
@@ -148,7 +148,7 @@ pub trait MonadState<S>: Monad {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::{MonadState, State};
+    /// use lambars::effect::{MonadState, State};
     ///
     /// let state: State<i32, ()> = State::put(100);
     /// let (_, final_state) = state.run(42);
@@ -176,7 +176,7 @@ pub trait MonadState<S>: Monad {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::{MonadState, State};
+    /// use lambars::effect::{MonadState, State};
     ///
     /// let computation: State<i32, String> = State::state(|s| {
     ///     (format!("was: {}", s), s + 1)
@@ -205,7 +205,7 @@ pub trait MonadState<S>: Monad {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::{MonadState, State};
+    /// use lambars::effect::{MonadState, State};
     ///
     /// let state: State<i32, ()> = State::modify(|x| x * 2);
     /// let (_, final_state) = state.run(21);
@@ -231,7 +231,7 @@ pub trait MonadState<S>: Monad {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::{MonadState, State};
+    /// use lambars::effect::{MonadState, State};
     ///
     /// struct Counter { value: i32, increments: u32 }
     ///

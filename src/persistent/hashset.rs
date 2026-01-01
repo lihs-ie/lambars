@@ -20,7 +20,7 @@
 //! # Examples
 //!
 //! ```rust
-//! use functional_rusty::persistent::PersistentHashSet;
+//! use lambars::persistent::PersistentHashSet;
 //!
 //! let set = PersistentHashSet::new()
 //!     .insert(1)
@@ -40,7 +40,7 @@
 //! # Set Operations
 //!
 //! ```rust
-//! use functional_rusty::persistent::PersistentHashSet;
+//! use lambars::persistent::PersistentHashSet;
 //!
 //! let set_a: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
 //! let set_b: PersistentHashSet<i32> = [2, 3, 4].into_iter().collect();
@@ -91,7 +91,7 @@ use crate::typeclass::{Foldable, TypeConstructor};
 /// # Examples
 ///
 /// ```rust
-/// use functional_rusty::persistent::PersistentHashSet;
+/// use lambars::persistent::PersistentHashSet;
 ///
 /// let set = PersistentHashSet::singleton(42);
 /// assert!(set.contains(&42));
@@ -109,7 +109,7 @@ impl<T> PersistentHashSet<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentHashSet;
+    /// use lambars::persistent::PersistentHashSet;
     ///
     /// let set: PersistentHashSet<i32> = PersistentHashSet::new();
     /// assert!(set.is_empty());
@@ -131,7 +131,7 @@ impl<T> PersistentHashSet<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentHashSet;
+    /// use lambars::persistent::PersistentHashSet;
     ///
     /// let set = PersistentHashSet::new().insert(1).insert(2);
     /// assert_eq!(set.len(), 2);
@@ -147,7 +147,7 @@ impl<T> PersistentHashSet<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentHashSet;
+    /// use lambars::persistent::PersistentHashSet;
     ///
     /// let empty: PersistentHashSet<i32> = PersistentHashSet::new();
     /// assert!(empty.is_empty());
@@ -172,7 +172,7 @@ impl<T: Clone + Hash + Eq> PersistentHashSet<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentHashSet;
+    /// use lambars::persistent::PersistentHashSet;
     ///
     /// let set = PersistentHashSet::singleton(42);
     /// assert_eq!(set.len(), 1);
@@ -201,7 +201,7 @@ impl<T: Clone + Hash + Eq> PersistentHashSet<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentHashSet;
+    /// use lambars::persistent::PersistentHashSet;
     ///
     /// let set = PersistentHashSet::new()
     ///     .insert("hello".to_string())
@@ -237,7 +237,7 @@ impl<T: Clone + Hash + Eq> PersistentHashSet<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentHashSet;
+    /// use lambars::persistent::PersistentHashSet;
     ///
     /// let set1 = PersistentHashSet::new().insert(1);
     /// let set2 = set1.insert(2);
@@ -268,7 +268,7 @@ impl<T: Clone + Hash + Eq> PersistentHashSet<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentHashSet;
+    /// use lambars::persistent::PersistentHashSet;
     ///
     /// let set = PersistentHashSet::new().insert(1).insert(2);
     /// let removed = set.remove(&1);
@@ -303,7 +303,7 @@ impl<T: Clone + Hash + Eq> PersistentHashSet<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentHashSet;
+    /// use lambars::persistent::PersistentHashSet;
     ///
     /// let set_a: PersistentHashSet<i32> = [1, 2].into_iter().collect();
     /// let set_b: PersistentHashSet<i32> = [2, 3].into_iter().collect();
@@ -337,7 +337,7 @@ impl<T: Clone + Hash + Eq> PersistentHashSet<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentHashSet;
+    /// use lambars::persistent::PersistentHashSet;
     ///
     /// let set_a: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
     /// let set_b: PersistentHashSet<i32> = [2, 3, 4].into_iter().collect();
@@ -381,7 +381,7 @@ impl<T: Clone + Hash + Eq> PersistentHashSet<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentHashSet;
+    /// use lambars::persistent::PersistentHashSet;
     ///
     /// let set_a: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
     /// let set_b: PersistentHashSet<i32> = [2, 3, 4].into_iter().collect();
@@ -418,7 +418,7 @@ impl<T: Clone + Hash + Eq> PersistentHashSet<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentHashSet;
+    /// use lambars::persistent::PersistentHashSet;
     ///
     /// let set_a: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
     /// let set_b: PersistentHashSet<i32> = [2, 3, 4].into_iter().collect();
@@ -452,7 +452,7 @@ impl<T: Clone + Hash + Eq> PersistentHashSet<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentHashSet;
+    /// use lambars::persistent::PersistentHashSet;
     ///
     /// let subset: PersistentHashSet<i32> = [1, 2].into_iter().collect();
     /// let superset: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
@@ -489,7 +489,7 @@ impl<T: Clone + Hash + Eq> PersistentHashSet<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentHashSet;
+    /// use lambars::persistent::PersistentHashSet;
     ///
     /// let superset: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
     /// let subset: PersistentHashSet<i32> = [1, 2].into_iter().collect();
@@ -515,7 +515,7 @@ impl<T: Clone + Hash + Eq> PersistentHashSet<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentHashSet;
+    /// use lambars::persistent::PersistentHashSet;
     ///
     /// let set_a: PersistentHashSet<i32> = [1, 2].into_iter().collect();
     /// let set_b: PersistentHashSet<i32> = [3, 4].into_iter().collect();
@@ -546,7 +546,7 @@ impl<T: Clone + Hash + Eq> PersistentHashSet<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentHashSet;
+    /// use lambars::persistent::PersistentHashSet;
     ///
     /// let set = PersistentHashSet::new().insert(1).insert(2).insert(3);
     ///

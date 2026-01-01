@@ -4,7 +4,7 @@
 
 #![cfg(feature = "compose")]
 
-use functional_rusty::compose::{constant, flip, identity};
+use lambars::compose::{constant, flip, identity};
 
 // =============================================================================
 // identity function tests
@@ -176,7 +176,7 @@ fn test_flip_with_closure() {
 // =============================================================================
 
 mod compose_macro_tests {
-    use functional_rusty::compose;
+    use lambars::compose;
 
     #[test]
     fn test_compose_single_function() {

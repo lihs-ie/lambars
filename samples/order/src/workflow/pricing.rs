@@ -15,7 +15,7 @@ use crate::workflow::{
     PlaceOrderError, PricedOrder, PricedOrderLine, PricedOrderProductLine, PricingError,
     PricingMethod, ValidatedOrder, ValidatedOrderLine,
 };
-use functional_rusty::control::Lazy;
+use lambars::control::Lazy;
 use rust_decimal::Decimal;
 use std::rc::Rc;
 
@@ -257,7 +257,7 @@ where
     GetPromotionPricesFn:
         Fn(&PromotionCode) -> Box<dyn Fn(&ProductCode) -> Option<Price>> + 'static,
 {
-    // functional-rusty の Lazy 型を使用して標準価格取得関数をキャッシュ
+    // lambars の Lazy 型を使用して標準価格取得関数をキャッシュ
     let cached_standard_prices: Rc<Lazy<Box<dyn Fn(&ProductCode) -> Price>, GetStandardPricesFn>> =
         Rc::new(Lazy::new(get_standard_prices));
 

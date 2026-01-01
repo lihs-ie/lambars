@@ -6,7 +6,7 @@
 //! - Monad operations (flat_map, pure)
 //! - State-specific operations (get, put, modify, gets, state)
 
-use functional_rusty::effect::State;
+use lambars::effect::State;
 use rstest::rstest;
 
 // =============================================================================

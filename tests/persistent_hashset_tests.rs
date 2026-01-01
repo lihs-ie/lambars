@@ -3,7 +3,7 @@
 //! These tests follow the TDD approach, testing all API methods
 //! and edge cases for the PersistentHashSet implementation.
 
-use functional_rusty::persistent::PersistentHashSet;
+use lambars::persistent::PersistentHashSet;
 use rstest::rstest;
 
 // =============================================================================
@@ -554,7 +554,7 @@ fn test_debug_format() {
 
 #[rstest]
 fn test_fold_left_sum() {
-    use functional_rusty::typeclass::Foldable;
+    use lambars::typeclass::Foldable;
 
     let set: PersistentHashSet<i32> = [1, 2, 3, 4, 5].into_iter().collect();
     let sum = set.fold_left(0, |accumulator, element| accumulator + element);
@@ -564,7 +564,7 @@ fn test_fold_left_sum() {
 
 #[rstest]
 fn test_fold_left_empty() {
-    use functional_rusty::typeclass::Foldable;
+    use lambars::typeclass::Foldable;
 
     let set: PersistentHashSet<i32> = PersistentHashSet::new();
     let sum = set.fold_left(0, |accumulator, element| accumulator + element);
@@ -574,7 +574,7 @@ fn test_fold_left_empty() {
 
 #[rstest]
 fn test_foldable_is_empty() {
-    use functional_rusty::typeclass::Foldable;
+    use lambars::typeclass::Foldable;
 
     let empty: PersistentHashSet<i32> = PersistentHashSet::new();
     let non_empty = PersistentHashSet::new().insert(42);
@@ -585,7 +585,7 @@ fn test_foldable_is_empty() {
 
 #[rstest]
 fn test_foldable_length() {
-    use functional_rusty::typeclass::Foldable;
+    use lambars::typeclass::Foldable;
 
     let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
 
@@ -748,7 +748,7 @@ fn test_ref_into_iterator() {
 
 #[rstest]
 fn test_foldable_fold_right() {
-    use functional_rusty::typeclass::Foldable;
+    use lambars::typeclass::Foldable;
 
     let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
     let sum = set.fold_right(0, |element, accumulator| element + accumulator);
@@ -757,7 +757,7 @@ fn test_foldable_fold_right() {
 
 #[rstest]
 fn test_foldable_fold_left_with_string() {
-    use functional_rusty::typeclass::Foldable;
+    use lambars::typeclass::Foldable;
 
     let set: PersistentHashSet<i32> = [1].into_iter().collect();
     let result = set.fold_left(String::new(), |mut accumulator, element| {
@@ -867,7 +867,7 @@ fn test_large_set_operations() {
 
 #[rstest]
 fn test_foldable_find() {
-    use functional_rusty::typeclass::Foldable;
+    use lambars::typeclass::Foldable;
 
     let set: PersistentHashSet<i32> = [10, 20, 30].into_iter().collect();
     let found = set.find(|element| *element > 15);
@@ -877,7 +877,7 @@ fn test_foldable_find() {
 
 #[rstest]
 fn test_foldable_find_not_found() {
-    use functional_rusty::typeclass::Foldable;
+    use lambars::typeclass::Foldable;
 
     let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
     let found = set.find(|element| *element > 100);
@@ -886,7 +886,7 @@ fn test_foldable_find_not_found() {
 
 #[rstest]
 fn test_foldable_exists() {
-    use functional_rusty::typeclass::Foldable;
+    use lambars::typeclass::Foldable;
 
     let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
     assert!(set.exists(|element| *element == 2));
@@ -895,7 +895,7 @@ fn test_foldable_exists() {
 
 #[rstest]
 fn test_foldable_for_all() {
-    use functional_rusty::typeclass::Foldable;
+    use lambars::typeclass::Foldable;
 
     let set: PersistentHashSet<i32> = [2, 4, 6].into_iter().collect();
     assert!(set.for_all(|element| element % 2 == 0));

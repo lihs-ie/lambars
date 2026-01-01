@@ -2,7 +2,7 @@
 //!
 //! Phase 6 の実装テスト。
 
-use functional_rusty::effect::IO;
+use lambars::effect::IO;
 use order_taking_sample::compound_types::{Address, CustomerInfo};
 use order_taking_sample::simple_types::{BillingAmount, OrderId, Price};
 use order_taking_sample::workflow::{

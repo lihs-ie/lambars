@@ -2,7 +2,7 @@
 //!
 //! PricingCatalog と acknowledge_order_with_logging を使用した統合テスト。
 
-use functional_rusty::effect::IO;
+use lambars::effect::IO;
 use order_taking_sample::compound_types::{Address, CustomerInfo};
 use order_taking_sample::simple_types::{BillingAmount, OrderId, Price, ProductCode};
 use order_taking_sample::workflow::{

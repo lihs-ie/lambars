@@ -14,7 +14,7 @@ phase_name_en: Effect System and Persistent Data Structures Practical Usage
 
 overview:
   description: |
-    functional-rusty ライブラリの Effect System（eff! マクロ）と
+    lambars ライブラリの Effect System（eff! マクロ）と
     永続データ構造（PersistentHashMap）を Order Taking サンプルアプリケーションで
     実践的に活用する。
 
@@ -22,7 +22,7 @@ overview:
     2. PersistentHashMap を使用した不変価格カタログの実装
 
   goals:
-    - functional-rusty の eff! マクロを実践的に活用
+    - lambars の eff! マクロを実践的に活用
     - PersistentHashMap を使用した関数型スタイルの価格カタログ実装
     - 不変データ構造による参照透過性の確保
     - 構造的共有による効率的なカタログ更新
@@ -200,7 +200,7 @@ requirements:
     location: src/workflow/pricing_catalog.rs
 
     type_definition: |
-      use functional_rusty::persistent::PersistentHashMap;
+      use lambars::persistent::PersistentHashMap;
 
       /// 不変の価格カタログ
       ///
@@ -615,9 +615,9 @@ artifacts:
 
 dependencies:
   internal:
-    - functional_rusty::effect::IO
-    - functional_rusty::eff!
-    - functional_rusty::persistent::PersistentHashMap
+    - lambars::effect::IO
+    - lambars::eff!
+    - lambars::persistent::PersistentHashMap
     - crate::simple_types::{ProductCode, Price}
     - crate::workflow::{PricedOrderWithShippingMethod, OrderAcknowledgmentSent}
 

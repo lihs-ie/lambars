@@ -10,7 +10,7 @@
 //! - IO <-> AsyncIO conversion
 //! - Utility methods (delay_async, timeout, race, catch_async)
 
-use functional_rusty::effect::AsyncIO;
+use lambars::effect::AsyncIO;
 use rstest::rstest;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -400,7 +400,7 @@ async fn test_async_io_then_executes_first_for_side_effect() {
 #[cfg(feature = "async")]
 mod conversion_tests {
     use super::*;
-    use functional_rusty::effect::IO;
+    use lambars::effect::IO;
 
     #[rstest]
     #[tokio::test]
@@ -546,7 +546,7 @@ async fn test_async_io_timeout_returns_none_on_timeout() {
 #[rstest]
 #[tokio::test]
 async fn test_async_io_race_returns_first_completed() {
-    use functional_rusty::control::Either;
+    use lambars::control::Either;
 
     // race は最初に完了した方を返す
     let slow = AsyncIO::delay_async(Duration::from_millis(100)).fmap(|_| "slow");
@@ -559,7 +559,7 @@ async fn test_async_io_race_returns_first_completed() {
 #[rstest]
 #[tokio::test]
 async fn test_async_io_race_with_immediate_value() {
-    use functional_rusty::control::Either;
+    use lambars::control::Either;
 
     // 両方即座に完了する場合
     let io1 = AsyncIO::pure(1);

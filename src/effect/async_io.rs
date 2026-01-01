@@ -13,7 +13,7 @@
 //! # Examples
 //!
 //! ```rust,ignore
-//! use functional_rusty::effect::AsyncIO;
+//! use lambars::effect::AsyncIO;
 //!
 //! #[tokio::main]
 //! async fn main() {
@@ -32,7 +32,7 @@
 //! # Side Effect Deferral
 //!
 //! ```rust,ignore
-//! use functional_rusty::effect::AsyncIO;
+//! use lambars::effect::AsyncIO;
 //! use std::sync::atomic::{AtomicBool, Ordering};
 //! use std::sync::Arc;
 //!
@@ -86,7 +86,7 @@ use crate::control::Either;
 /// # Examples
 ///
 /// ```rust,ignore
-/// use functional_rusty::effect::AsyncIO;
+/// use lambars::effect::AsyncIO;
 ///
 /// #[tokio::main]
 /// async fn main() {
@@ -121,7 +121,7 @@ impl<A: 'static> AsyncIO<A> {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::AsyncIO;
+    /// use lambars::effect::AsyncIO;
     ///
     /// let async_io = AsyncIO::new(|| async {
     ///     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -149,7 +149,7 @@ impl<A: 'static> AsyncIO<A> {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::AsyncIO;
+    /// use lambars::effect::AsyncIO;
     ///
     /// let future = async { 42 };
     /// let async_io = AsyncIO::from_future(future);
@@ -177,7 +177,7 @@ impl<A: Send + 'static> AsyncIO<A> {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::AsyncIO;
+    /// use lambars::effect::AsyncIO;
     ///
     /// let async_io = AsyncIO::pure(42);
     /// // run_async().await will immediately return 42
@@ -208,7 +208,7 @@ impl<A: 'static> AsyncIO<A> {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::AsyncIO;
+    /// use lambars::effect::AsyncIO;
     ///
     /// #[tokio::main]
     /// async fn main() {
@@ -229,7 +229,7 @@ impl<A: 'static> AsyncIO<A> {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::AsyncIO;
+    /// use lambars::effect::AsyncIO;
     ///
     /// let async_io = AsyncIO::pure(42);
     /// let future = async_io.into_future();
@@ -264,7 +264,7 @@ impl<A: 'static> AsyncIO<A> {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::AsyncIO;
+    /// use lambars::effect::AsyncIO;
     ///
     /// let async_io = AsyncIO::pure(21).fmap(|x| x * 2);
     /// assert_eq!(async_io.run_async().await, 42);
@@ -300,7 +300,7 @@ impl<A: 'static> AsyncIO<A> {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::AsyncIO;
+    /// use lambars::effect::AsyncIO;
     ///
     /// let function_io = AsyncIO::pure(|x: i32| x * 2);
     /// let value_io = AsyncIO::pure(21);
@@ -338,7 +338,7 @@ impl<A: 'static> AsyncIO<A> {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::AsyncIO;
+    /// use lambars::effect::AsyncIO;
     ///
     /// let io1 = AsyncIO::pure(10);
     /// let io2 = AsyncIO::pure(20);
@@ -374,7 +374,7 @@ impl<A: Send + 'static> AsyncIO<A> {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::AsyncIO;
+    /// use lambars::effect::AsyncIO;
     ///
     /// let io1 = AsyncIO::pure(10);
     /// let io2 = AsyncIO::pure(20);
@@ -411,7 +411,7 @@ impl<A: 'static> AsyncIO<A> {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::AsyncIO;
+    /// use lambars::effect::AsyncIO;
     ///
     /// let async_io = AsyncIO::pure(10).flat_map(|x| AsyncIO::pure(x * 2));
     /// assert_eq!(async_io.run_async().await, 20);
@@ -435,7 +435,7 @@ impl<A: 'static> AsyncIO<A> {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::AsyncIO;
+    /// use lambars::effect::AsyncIO;
     ///
     /// let async_io = AsyncIO::pure(10).and_then(|x| AsyncIO::pure(x + 5));
     /// assert_eq!(async_io.run_async().await, 15);
@@ -463,7 +463,7 @@ impl<A: 'static> AsyncIO<A> {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::AsyncIO;
+    /// use lambars::effect::AsyncIO;
     ///
     /// let async_io = AsyncIO::pure(10).then(AsyncIO::pure(20));
     /// assert_eq!(async_io.run_async().await, 20);
@@ -492,7 +492,7 @@ impl AsyncIO<()> {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::AsyncIO;
+    /// use lambars::effect::AsyncIO;
     /// use std::time::Duration;
     ///
     /// let async_io = AsyncIO::delay_async(Duration::from_millis(100));
@@ -515,7 +515,7 @@ impl<A: 'static> AsyncIO<A> {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::AsyncIO;
+    /// use lambars::effect::AsyncIO;
     /// use std::time::Duration;
     ///
     /// let async_io = AsyncIO::pure(42).timeout(Duration::from_millis(100));
@@ -560,8 +560,8 @@ impl<A: Send + 'static> AsyncIO<A> {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::AsyncIO;
-    /// use functional_rusty::control::Either;
+    /// use lambars::effect::AsyncIO;
+    /// use lambars::control::Either;
     /// use std::time::Duration;
     ///
     /// let slow = AsyncIO::delay_async(Duration::from_millis(100)).fmap(|_| "slow");
@@ -599,7 +599,7 @@ impl<A: Send + 'static> AsyncIO<A> {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::AsyncIO;
+    /// use lambars::effect::AsyncIO;
     ///
     /// let panicking = AsyncIO::new(|| async { panic!("oops") });
     /// let recovered = panicking.catch_async(|_| "recovered".to_string());
@@ -646,7 +646,7 @@ impl<A: Send + 'static> AsyncIO<A> {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use functional_rusty::effect::{AsyncIO, IO};
+    /// use lambars::effect::{AsyncIO, IO};
     ///
     /// fn main() {
     ///     let async_io = AsyncIO::pure(42);

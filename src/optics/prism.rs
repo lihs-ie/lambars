@@ -22,8 +22,8 @@
 //! # Examples
 //!
 //! ```
-//! use functional_rusty::optics::{Prism, FunctionPrism};
-//! use functional_rusty::prism;
+//! use lambars::optics::{Prism, FunctionPrism};
+//! use lambars::prism;
 //!
 //! #[derive(Clone, PartialEq, Debug)]
 //! enum Shape {
@@ -114,8 +114,8 @@ pub trait Prism<S, A> {
     /// # Example
     ///
     /// ```
-    /// use functional_rusty::optics::Prism;
-    /// use functional_rusty::prism;
+    /// use lambars::optics::Prism;
+    /// use lambars::prism;
     ///
     /// #[derive(Clone, PartialEq, Debug)]
     /// enum Shape {
@@ -158,8 +158,8 @@ pub trait Prism<S, A> {
     /// # Example
     ///
     /// ```
-    /// use functional_rusty::optics::Prism;
-    /// use functional_rusty::prism;
+    /// use lambars::optics::Prism;
+    /// use lambars::prism;
     ///
     /// #[derive(Clone, PartialEq, Debug)]
     /// enum Shape {
@@ -204,7 +204,7 @@ pub trait Prism<S, A> {
     /// # Example
     ///
     /// ```
-    /// use functional_rusty::optics::{Prism, FunctionPrism};
+    /// use lambars::optics::{Prism, FunctionPrism};
     ///
     /// #[derive(Clone, PartialEq, Debug)]
     /// enum Outer { Inner(Inner), Empty }
@@ -280,7 +280,7 @@ pub trait Prism<S, A> {
 /// # Example
 ///
 /// ```
-/// use functional_rusty::optics::{Prism, FunctionPrism};
+/// use lambars::optics::{Prism, FunctionPrism};
 ///
 /// #[derive(Clone, PartialEq, Debug)]
 /// enum Shape {
@@ -409,7 +409,7 @@ where
 /// # Example
 ///
 /// ```
-/// use functional_rusty::optics::{Prism, FunctionPrism};
+/// use lambars::optics::{Prism, FunctionPrism};
 ///
 /// #[derive(Clone, PartialEq, Debug)]
 /// enum Outer { Inner(Inner), Empty }
@@ -636,8 +636,8 @@ impl<P: std::fmt::Debug, S, A> std::fmt::Debug for PrismAsTraversal<P, S, A> {
 /// # Example
 ///
 /// ```
-/// use functional_rusty::optics::Prism;
-/// use functional_rusty::prism;
+/// use lambars::optics::Prism;
+/// use lambars::prism;
 ///
 /// #[derive(Clone, PartialEq, Debug)]
 /// enum MyOption<T> {

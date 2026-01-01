@@ -24,7 +24,7 @@
 //! ## Function Composition (right-to-left)
 //!
 //! ```
-//! use functional_rusty::compose;
+//! use lambars::compose;
 //!
 //! fn add_one(x: i32) -> i32 { x + 1 }
 //! fn double(x: i32) -> i32 { x * 2 }
@@ -37,7 +37,7 @@
 //! ## Pipeline (left-to-right)
 //!
 //! ```
-//! use functional_rusty::pipe;
+//! use lambars::pipe;
 //!
 //! fn add_one(x: i32) -> i32 { x + 1 }
 //! fn double(x: i32) -> i32 { x * 2 }
@@ -50,7 +50,7 @@
 //! ## Partial Application
 //!
 //! ```
-//! use functional_rusty::partial;
+//! use lambars::partial;
 //!
 //! fn add(first: i32, second: i32) -> i32 { first + second }
 //!
@@ -63,7 +63,7 @@
 //! ## Currying
 //!
 //! ```
-//! use functional_rusty::curry2;
+//! use lambars::curry2;
 //!
 //! fn add(first: i32, second: i32) -> i32 { first + second }
 //!

@@ -24,7 +24,7 @@
 /// # Examples
 ///
 /// ```
-/// use functional_rusty::compose::identity;
+/// use lambars::compose::identity;
 ///
 /// assert_eq!(identity(42), 42);
 /// assert_eq!(identity("hello"), "hello");
@@ -34,8 +34,8 @@
 /// # Use with function composition
 ///
 /// ```
-/// use functional_rusty::compose::identity;
-/// use functional_rusty::compose;
+/// use lambars::compose::identity;
+/// use lambars::compose;
 ///
 /// fn double(x: i32) -> i32 { x * 2 }
 ///
@@ -69,7 +69,7 @@ pub fn identity<T>(value: T) -> T {
 /// # Examples
 ///
 /// ```
-/// use functional_rusty::compose::constant;
+/// use lambars::compose::constant;
 ///
 /// // Create a function that always returns 5 for i32 input
 /// let always_five_from_int = constant::<_, i32>(5);
@@ -87,7 +87,7 @@ pub fn identity<T>(value: T) -> T {
 /// # Use with iterators
 ///
 /// ```
-/// use functional_rusty::compose::constant;
+/// use lambars::compose::constant;
 ///
 /// // Replace all elements with zeros
 /// let values: Vec<i32> = vec![1, 2, 3].into_iter().map(constant(0)).collect();
@@ -130,7 +130,7 @@ pub fn constant<T: Clone, U>(value: T) -> impl Fn(U) -> T {
 /// # Examples
 ///
 /// ```
-/// use functional_rusty::compose::flip;
+/// use lambars::compose::flip;
 ///
 /// fn divide(numerator: f64, denominator: f64) -> f64 {
 ///     numerator / denominator
@@ -148,7 +148,7 @@ pub fn constant<T: Clone, U>(value: T) -> impl Fn(U) -> T {
 /// # Double flip is identity
 ///
 /// ```
-/// use functional_rusty::compose::flip;
+/// use lambars::compose::flip;
 ///
 /// fn subtract(minuend: i32, subtrahend: i32) -> i32 {
 ///     minuend - subtrahend
@@ -176,7 +176,7 @@ where
 /// # Examples
 ///
 /// ```
-/// use functional_rusty::partial;
+/// use lambars::partial;
 ///
 /// fn add(first: i32, second: i32) -> i32 { first + second }
 ///
@@ -206,7 +206,7 @@ pub struct Placeholder;
 /// # Examples
 ///
 /// ```
-/// use functional_rusty::partial;
+/// use lambars::partial;
 ///
 /// fn divide(numerator: f64, denominator: f64) -> f64 {
 ///     numerator / denominator

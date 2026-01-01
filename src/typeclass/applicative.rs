@@ -49,7 +49,7 @@
 //! # Examples
 //!
 //! ```rust
-//! use functional_rusty::typeclass::Applicative;
+//! use lambars::typeclass::Applicative;
 //!
 //! // Lifting a pure value into Option context
 //! let x: Option<i32> = <Option<()>>::pure(42);
@@ -114,7 +114,7 @@ use super::identity::Identity;
 /// # Examples
 ///
 /// ```rust
-/// use functional_rusty::typeclass::Applicative;
+/// use lambars::typeclass::Applicative;
 ///
 /// // Pure lifts a value into the context
 /// let x: Option<i32> = <Option<()>>::pure(42);
@@ -143,7 +143,7 @@ pub trait Applicative: Functor {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Applicative;
+    /// use lambars::typeclass::Applicative;
     ///
     /// let x: Option<i32> = <Option<()>>::pure(42);
     /// assert_eq!(x, Some(42));
@@ -171,7 +171,7 @@ pub trait Applicative: Functor {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Applicative;
+    /// use lambars::typeclass::Applicative;
     ///
     /// let a = Some(1);
     /// let b = Some(2);
@@ -204,7 +204,7 @@ pub trait Applicative: Functor {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Applicative;
+    /// use lambars::typeclass::Applicative;
     ///
     /// let a = Some(1);
     /// let b = Some(2);
@@ -236,7 +236,7 @@ pub trait Applicative: Functor {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Applicative;
+    /// use lambars::typeclass::Applicative;
     ///
     /// let a = Some(1);
     /// let b = Some("hello");
@@ -267,7 +267,7 @@ pub trait Applicative: Functor {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Applicative;
+    /// use lambars::typeclass::Applicative;
     ///
     /// let a = Some(1);
     /// let b = Some(2);
@@ -302,7 +302,7 @@ pub trait Applicative: Functor {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Applicative;
+    /// use lambars::typeclass::Applicative;
     ///
     /// let a = Some(1);
     /// let b = Some(2);
@@ -336,7 +336,7 @@ pub trait Applicative: Functor {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Applicative;
+    /// use lambars::typeclass::Applicative;
     ///
     /// let function: Option<fn(i32) -> i32> = Some(|x| x + 1);
     /// let value = Some(5);

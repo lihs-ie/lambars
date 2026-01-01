@@ -1,12 +1,12 @@
 [package]
-name = "functional-rusty-derive"
+name = "lambars-derive"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.92.0"
-authors = ["functional-rusty contributors"]
-description = "Derive macros for functional-rusty optics (Lenses and Prisms)"
+authors = ["lambars contributors"]
+description = "Derive macros for lambars optics (Lenses and Prisms)"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/functional-rusty/functional-rusty"
+repository = "https://github.com/lambars/lambars"
 keywords = ["functional", "derive", "lens", "prism", "optics"]
 categories = ["rust-patterns", "development-tools::procedural-macro-helpers"]
 

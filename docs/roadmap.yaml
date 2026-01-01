@@ -1,4 +1,4 @@
-# Functional-Rusty プロジェクト ロードマップ
+# lambars プロジェクト ロードマップ
 # Rust で関数型プログラミングを実現するためのライブラリ開発計画
 
 version: "1.1.0"
@@ -6,7 +6,7 @@ last_updated: "2026-01-01"
 
 # プロジェクト概要
 project:
-  name: functional-rusty
+  name: lambars
   description: |
     Rust で関数型プログラミングを行うために標準で提供されていない
     関数型プログラミングの API を作成するプロジェクト
@@ -516,7 +516,7 @@ phases:
     notes: |
       Lens, Prism, Iso, Optional, Traversal の全 Optics を実装。
       各 Optics の法則（GetPut, PutGet, PutPut, PreviewReview 等）を proptest で検証。
-      functional-rusty-derive クレートで #[derive(Lenses)], #[derive(Prisms)] を提供。
+      lambars-derive クレートで #[derive(Lenses)], #[derive(Prisms)] を提供。
       永続データ構造（PersistentVector, PersistentHashMap, PersistentTreeMap）との統合も完了。
       全て #![forbid(unsafe_code)] ポリシーを遵守。
     deliverables:
@@ -616,10 +616,10 @@ phases:
         status: completed
         priority: high
         artifacts:
-          - functional-rusty-derive/Cargo.toml
-          - functional-rusty-derive/src/lib.rs
-          - functional-rusty-derive/src/lenses.rs
-          - functional-rusty-derive/src/prisms.rs
+          - lambars-derive/Cargo.toml
+          - lambars-derive/src/lib.rs
+          - lambars-derive/src/lenses.rs
+          - lambars-derive/src/prisms.rs
           - tests/derive_tests.rs
 
       - id: optics_persistent_integration

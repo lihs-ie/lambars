@@ -1,6 +1,6 @@
 //! # Order Taking Sample Application
 //!
-//! functional-rusty を使用した注文処理サンプルアプリケーション。
+//! lambars を使用した注文処理サンプルアプリケーション。
 //!
 //! ## 概要
 //!

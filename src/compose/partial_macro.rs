@@ -8,7 +8,7 @@
 /// Use `__` (double underscore) as a placeholder for arguments that should
 /// remain as parameters in the resulting function.
 ///
-/// **Important**: Do NOT import `functional_rusty::compose::__`. The `__` is
+/// **Important**: Do NOT import `lambars::compose::__`. The `__` is
 /// matched as a literal token by the macro.
 ///
 /// # Syntax
@@ -35,7 +35,7 @@
 /// ## Basic partial application
 ///
 /// ```
-/// use functional_rusty::partial;
+/// use lambars::partial;
 ///
 /// fn add(first: i32, second: i32) -> i32 { first + second }
 ///
@@ -47,7 +47,7 @@
 /// ## Fixing the second argument
 ///
 /// ```
-/// use functional_rusty::partial;
+/// use lambars::partial;
 ///
 /// fn divide(numerator: f64, denominator: f64) -> f64 {
 ///     numerator / denominator
@@ -60,7 +60,7 @@
 /// ## Three-argument function
 ///
 /// ```
-/// use functional_rusty::partial;
+/// use lambars::partial;
 ///
 /// fn format_greeting(greeting: &str, name: &str, punctuation: &str) -> String {
 ///     format!("{}, {}{}", greeting, name, punctuation)
@@ -73,7 +73,7 @@
 /// ## Creating a thunk (all arguments fixed)
 ///
 /// ```
-/// use functional_rusty::partial;
+/// use lambars::partial;
 ///
 /// fn add(first: i32, second: i32) -> i32 { first + second }
 ///
@@ -84,7 +84,7 @@
 /// ## With compose!
 ///
 /// ```
-/// use functional_rusty::{compose, partial};
+/// use lambars::{compose, partial};
 ///
 /// fn multiply(first: i32, second: i32) -> i32 { first * second }
 /// fn add(first: i32, second: i32) -> i32 { first + second }

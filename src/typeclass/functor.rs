@@ -29,7 +29,7 @@
 //! # Examples
 //!
 //! ```rust
-//! use functional_rusty::typeclass::Functor;
+//! use lambars::typeclass::Functor;
 //!
 //! // Option as a Functor
 //! let some_value: Option<i32> = Some(5);
@@ -72,7 +72,7 @@ use super::identity::Identity;
 /// # Examples
 ///
 /// ```rust
-/// use functional_rusty::typeclass::Functor;
+/// use lambars::typeclass::Functor;
 ///
 /// let x: Option<i32> = Some(5);
 /// let y: Option<String> = x.fmap(|n| n.to_string());
@@ -96,7 +96,7 @@ pub trait Functor: TypeConstructor {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Functor;
+    /// use lambars::typeclass::Functor;
     ///
     /// let x: Option<i32> = Some(5);
     /// let y: Option<i32> = x.fmap(|n| n * 2);
@@ -122,7 +122,7 @@ pub trait Functor: TypeConstructor {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Functor;
+    /// use lambars::typeclass::Functor;
     ///
     /// let x: Option<String> = Some("hello".to_string());
     /// let y: Option<usize> = x.fmap_ref(|s| s.len());
@@ -148,7 +148,7 @@ pub trait Functor: TypeConstructor {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Functor;
+    /// use lambars::typeclass::Functor;
     ///
     /// let x: Option<i32> = Some(5);
     /// assert_eq!(x.replace("replaced"), Some("replaced"));
@@ -178,7 +178,7 @@ pub trait Functor: TypeConstructor {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Functor;
+    /// use lambars::typeclass::Functor;
     ///
     /// let x: Option<i32> = Some(5);
     /// assert_eq!(x.void(), Some(()));
@@ -205,7 +205,7 @@ pub trait Functor: TypeConstructor {
 /// # Examples
 ///
 /// ```rust
-/// use functional_rusty::typeclass::FunctorMut;
+/// use lambars::typeclass::FunctorMut;
 ///
 /// let numbers = vec![1, 2, 3];
 /// let doubled: Vec<i32> = numbers.fmap_mut(|n| n * 2);
@@ -228,7 +228,7 @@ pub trait FunctorMut: Functor {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::FunctorMut;
+    /// use lambars::typeclass::FunctorMut;
     ///
     /// let v = vec![1, 2, 3];
     /// let result: Vec<i32> = v.fmap_mut(|x| x + 1);

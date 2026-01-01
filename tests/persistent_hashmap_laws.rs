@@ -3,8 +3,8 @@
 //! This module verifies that PersistentHashMap satisfies various laws
 //! and invariants using proptest.
 
-use functional_rusty::persistent::PersistentHashMap;
-use functional_rusty::typeclass::Foldable;
+use lambars::persistent::PersistentHashMap;
+use lambars::typeclass::Foldable;
 use proptest::prelude::*;
 use std::collections::HashSet;
 

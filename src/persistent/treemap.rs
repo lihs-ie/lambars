@@ -21,7 +21,7 @@
 //! # Examples
 //!
 //! ```rust
-//! use functional_rusty::persistent::PersistentTreeMap;
+//! use lambars::persistent::PersistentTreeMap;
 //!
 //! let map = PersistentTreeMap::new()
 //!     .insert(3, "three")
@@ -164,7 +164,7 @@ fn is_red<K, V>(node: &Option<Rc<Node<K, V>>>) -> bool {
 /// # Examples
 ///
 /// ```rust
-/// use functional_rusty::persistent::PersistentTreeMap;
+/// use lambars::persistent::PersistentTreeMap;
 ///
 /// let map = PersistentTreeMap::singleton(42, "answer");
 /// assert_eq!(map.get(&42), Some(&"answer"));
@@ -192,7 +192,7 @@ impl<K, V> PersistentTreeMap<K, V> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentTreeMap;
+    /// use lambars::persistent::PersistentTreeMap;
     ///
     /// let map: PersistentTreeMap<i32, String> = PersistentTreeMap::new();
     /// assert!(map.is_empty());
@@ -215,7 +215,7 @@ impl<K, V> PersistentTreeMap<K, V> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentTreeMap;
+    /// use lambars::persistent::PersistentTreeMap;
     ///
     /// let map = PersistentTreeMap::new()
     ///     .insert(1, "one")
@@ -233,7 +233,7 @@ impl<K, V> PersistentTreeMap<K, V> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentTreeMap;
+    /// use lambars::persistent::PersistentTreeMap;
     ///
     /// let empty: PersistentTreeMap<i32, String> = PersistentTreeMap::new();
     /// assert!(empty.is_empty());
@@ -259,7 +259,7 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentTreeMap;
+    /// use lambars::persistent::PersistentTreeMap;
     ///
     /// let map = PersistentTreeMap::singleton(42, "answer");
     /// assert_eq!(map.len(), 1);
@@ -287,7 +287,7 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentTreeMap;
+    /// use lambars::persistent::PersistentTreeMap;
     ///
     /// let map = PersistentTreeMap::new()
     ///     .insert("hello".to_string(), 42);
@@ -334,7 +334,7 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentTreeMap;
+    /// use lambars::persistent::PersistentTreeMap;
     ///
     /// let map = PersistentTreeMap::new()
     ///     .insert("key".to_string(), 42);
@@ -367,7 +367,7 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentTreeMap;
+    /// use lambars::persistent::PersistentTreeMap;
     ///
     /// let map1 = PersistentTreeMap::new().insert(1, "one");
     /// let map2 = map1.insert(1, "ONE");
@@ -606,7 +606,7 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentTreeMap;
+    /// use lambars::persistent::PersistentTreeMap;
     ///
     /// let map = PersistentTreeMap::new()
     ///     .insert(1, "one")
@@ -716,7 +716,7 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentTreeMap;
+    /// use lambars::persistent::PersistentTreeMap;
     ///
     /// let map = PersistentTreeMap::new()
     ///     .insert(3, "three")
@@ -758,7 +758,7 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentTreeMap;
+    /// use lambars::persistent::PersistentTreeMap;
     ///
     /// let map = PersistentTreeMap::new()
     ///     .insert(3, "three")
@@ -796,7 +796,7 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentTreeMap;
+    /// use lambars::persistent::PersistentTreeMap;
     ///
     /// let map = PersistentTreeMap::new()
     ///     .insert(3, "three")
@@ -834,7 +834,7 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentTreeMap;
+    /// use lambars::persistent::PersistentTreeMap;
     ///
     /// let map = PersistentTreeMap::new()
     ///     .insert(3, "three")
@@ -853,7 +853,7 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentTreeMap;
+    /// use lambars::persistent::PersistentTreeMap;
     ///
     /// let map = PersistentTreeMap::new()
     ///     .insert(1, 10)
@@ -884,7 +884,7 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::persistent::PersistentTreeMap;
+    /// use lambars::persistent::PersistentTreeMap;
     ///
     /// let map = PersistentTreeMap::new()
     ///     .insert(1, "one")

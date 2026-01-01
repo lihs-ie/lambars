@@ -6,7 +6,7 @@
 //! - Monad operations (flat_map, pure)
 //! - Writer-specific operations (tell, listen, pass, censor)
 
-use functional_rusty::effect::Writer;
+use lambars::effect::Writer;
 use rstest::rstest;
 
 // =============================================================================
@@ -338,7 +338,7 @@ fn writer_metrics_accumulation() {
         }
     }
 
-    impl functional_rusty::typeclass::Semigroup for Metrics {
+    impl lambars::typeclass::Semigroup for Metrics {
         fn combine(self, other: Self) -> Self {
             Metrics {
                 operation_count: self.operation_count + other.operation_count,
@@ -347,7 +347,7 @@ fn writer_metrics_accumulation() {
         }
     }
 
-    impl functional_rusty::typeclass::Monoid for Metrics {
+    impl lambars::typeclass::Monoid for Metrics {
         fn empty() -> Self {
             Metrics::default()
         }

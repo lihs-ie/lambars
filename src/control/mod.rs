@@ -13,7 +13,7 @@
 //! ## Lazy Evaluation
 //!
 //! ```rust
-//! use functional_rusty::control::Lazy;
+//! use lambars::control::Lazy;
 //!
 //! let lazy = Lazy::new(|| {
 //!     println!("Computing...");
@@ -29,7 +29,7 @@
 //! ## Stack-Safe Recursion
 //!
 //! ```rust
-//! use functional_rusty::control::Trampoline;
+//! use lambars::control::Trampoline;
 //!
 //! fn factorial(n: u64) -> Trampoline<u64> {
 //!     factorial_helper(n, 1)

@@ -1,5 +1,5 @@
 # Order Taking Sample Application Roadmap
-# functional-rusty を使用した注文処理サンプルアプリケーション
+# lambars を使用した注文処理サンプルアプリケーション
 # 参照: Domain Modeling Made Functional (F#)
 
 version: "1.0.0"
@@ -9,7 +9,7 @@ project:
   name: order-taking-sample
   description: |
     F# の「Domain Modeling Made Functional」を参考に、
-    functional-rusty ライブラリを使用して Rust で
+    lambars ライブラリを使用して Rust で
     関数型ドメインモデリングを実現するサンプルアプリケーション。
 
     ワークフロー: PlaceOrder（注文配置）
@@ -21,7 +21,7 @@ project:
     - イベント生成
 
   goals:
-    - functional-rusty の実用的な使用例を示す
+    - lambars の実用的な使用例を示す
     - ドメイン駆動設計（DDD）と関数型プログラミングの統合
     - 型安全なバリデーションと制約付き型の実装
     - Effect System（eff! マクロ）の実践的使用
@@ -32,7 +32,7 @@ project:
     - Docker + axum によるデプロイ可能なサーバー構成
 
   dependencies:
-    - functional-rusty (local path)
+    - lambars (local path)
     - serde (for JSON serialization)
     - thiserror (for error types)
 
@@ -101,7 +101,7 @@ phases:
       - phase_1
     notes: |
       F# 参照コードの Common.CompoundTypes.fs に相当。
-      functional-rusty-derive の #[derive(Lenses)] を活用。
+      lambars-derive の #[derive(Lenses)] を活用。
       Lens 合成による深いネストへの不変更新をサポート。
       全 3 要件（REQ-018〜REQ-020）を実装完了。
     deliverables:
@@ -136,7 +136,7 @@ phases:
       F# 参照コードの PlaceOrder.PublicTypes.fs, PlaceOrder.InternalTypes.fs に相当。
       型による状態遷移を表現：UnvalidatedOrder → ValidatedOrder → PricedOrder → PricedOrderWithShippingMethod → PlaceOrderEvent[]
       「Make Illegal States Unrepresentable」原則を適用。
-      functional-rusty-derive の #[derive(Lenses)] を活用。
+      lambars-derive の #[derive(Lenses)] を活用。
       thiserror による Error/Display 自動導出。
       From トレイトによるエラー型変換（? 演算子対応）。
       全 28 要件（REQ-021〜REQ-048）を実装完了。
@@ -256,7 +256,7 @@ phases:
     notes: |
       F# 参照コードの PlaceOrder.Implementation.fs の価格計算部分に相当。
       F# の result computation expression を Rust の Result + ? 演算子で再現。
-      functional-rusty の Lazy 型を使用した標準価格取得関数のキャッシュ機構を実装。
+      lambars の Lazy 型を使用した標準価格取得関数のキャッシュ機構を実装。
       依存性注入パターンにより価格取得関数を関数引数として受け取る。
       高階関数パターンによりテスト容易性と参照透過性を確保。
       全 5 要件（REQ-059〜REQ-063）を実装完了。
@@ -294,14 +294,14 @@ phases:
     completed_at: "2025-12-31"
     description: |
       配送コスト計算、VIP配送、確認メール送信を実装する。
-      F# の Async パターンを functional-rusty の IO モナドで実現。
+      F# の Async パターンを lambars の IO モナドで実現。
     dependencies:
       - phase_5
     notes: |
       F# 参照コードの PlaceOrder.Implementation.fs の配送・確認処理部分に相当。
       F# のアクティブパターンを Rust の enum + match で再現。
-      F# の Async を functional-rusty の IO モナドで再現。
-      functional-rusty の Lens を使用した不変更新パターンを適用。
+      F# の Async を lambars の IO モナドで再現。
+      lambars の Lens を使用した不変更新パターンを適用。
       依存性注入パターンにより外部サービス（メール送信）を関数引数として受け取る。
       全 6 要件（REQ-064〜REQ-069）を実装完了。
       Clippy pedantic/nursery リント準拠、テストカバレッジ 99%。
@@ -364,7 +364,7 @@ phases:
       F# の List.choose を Rust の filter_map で再現。
       F# の asyncResult computation expression を Rust の IO<Result<T, E>> で再現。
       依存性注入パターンにより全ての外部依存を関数引数として受け取る。
-      functional-rusty の IO モナドによる副作用の遅延実行。
+      lambars の IO モナドによる副作用の遅延実行。
       全 5 要件（REQ-070〜REQ-074）を実装完了。
       Clippy pedantic/nursery リント準拠、テストカバレッジ 99%。
     deliverables:
@@ -521,7 +521,7 @@ phases:
     notes: |
       既存の src 内テストを補完する形で外部テストファイルを作成。
       proptest による Smart Constructor 法則、Monad 法則、DTO 往復変換の検証を実装。
-      functional-rusty ライブラリの使用例として価値あるドキュメントを作成。
+      lambars ライブラリの使用例として価値あるドキュメントを作成。
       全 11 要件（REQ-091〜REQ-101）を実装完了。
       Clippy pedantic/nursery リント準拠、テストカバレッジ 98.89%。
     deliverables:
@@ -584,7 +584,7 @@ phases:
         name: ドキュメント
         description: |
           使用例とベストプラクティスのドキュメント
-          - usage.md: クイックスタート、制約付き型、ワークフロー実装、functional-rusty 活用
+          - usage.md: クイックスタート、制約付き型、ワークフロー実装、lambars 活用
           - architecture.md: 設計原則、モジュール構成、状態遷移、F# 版との比較
         status: completed
         priority: medium
@@ -654,7 +654,7 @@ phases:
     completed_at: "2026-01-01"
     description: |
       F# の |> パイプ演算子を使用している処理を
-      functional-rusty の pipe! マクロで置き換える。
+      lambars の pipe! マクロで置き換える。
       データフロースタイルの関数合成を実現。
     dependencies:
       - phase_10
@@ -736,7 +736,7 @@ phases:
     status: completed
     completed_at: "2026-01-01"
     description: |
-      F# の関数合成パターンを functional-rusty の compose! マクロで表現する。
+      F# の関数合成パターンを lambars の compose! マクロで表現する。
       再利用可能な合成関数を事前定義し、高階関数パターンを実現。
     dependencies:
       - phase_11
@@ -918,8 +918,8 @@ priority_definitions:
   medium: 中 - あると便利な機能
   low: 低 - 将来的に実装を検討
 
-# functional-rusty 機能の使用箇所
-functional_rusty_usage:
+# lambars 機能の使用箇所
+lambars_usage:
   typeclass:
     - Functor: Result/Option の map
     - Monad: Result/Option の flat_map

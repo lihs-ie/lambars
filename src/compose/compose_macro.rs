@@ -36,7 +36,7 @@
 /// ## Basic composition
 ///
 /// ```
-/// use functional_rusty::compose;
+/// use lambars::compose;
 ///
 /// fn add_one(x: i32) -> i32 { x + 1 }
 /// fn double(x: i32) -> i32 { x * 2 }
@@ -49,7 +49,7 @@
 /// ## Three-function composition
 ///
 /// ```
-/// use functional_rusty::compose;
+/// use lambars::compose;
 ///
 /// fn add_one(x: i32) -> i32 { x + 1 }
 /// fn double(x: i32) -> i32 { x * 2 }
@@ -64,7 +64,7 @@
 /// ## Immediate application
 ///
 /// ```
-/// use functional_rusty::compose;
+/// use lambars::compose;
 ///
 /// fn add_one(x: i32) -> i32 { x + 1 }
 /// fn double(x: i32) -> i32 { x * 2 }
@@ -77,7 +77,7 @@
 /// ## Type conversion
 ///
 /// ```
-/// use functional_rusty::compose;
+/// use lambars::compose;
 ///
 /// fn to_string(x: i32) -> String { x.to_string() }
 /// fn get_length(s: String) -> usize { s.len() }
@@ -90,7 +90,7 @@
 /// ## With closures capturing environment
 ///
 /// ```
-/// use functional_rusty::compose;
+/// use lambars::compose;
 ///
 /// let multiplier = 3;
 /// let multiply = |x: i32| x * multiplier;
@@ -103,7 +103,7 @@
 /// ## Verifying associativity
 ///
 /// ```
-/// use functional_rusty::compose;
+/// use lambars::compose;
 ///
 /// fn f(x: i32) -> i32 { x + 1 }
 /// fn g(x: i32) -> i32 { x * 2 }

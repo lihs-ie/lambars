@@ -1,6 +1,6 @@
 # Phase 2: 複合型定義 要件定義
 # Domain Modeling Made Functional の F# パターンを Rust に適用
-# functional-rusty ライブラリを使用した型安全なドメインモデリング
+# lambars ライブラリを使用した型安全なドメインモデリング
 
 id: phase2_compound_types
 name: 複合型定義
@@ -14,7 +14,7 @@ overview:
     Phase 1 で定義した基本型を組み合わせて、より高レベルなドメインエンティティを表現する。
 
     F# のレコード型パターンを Rust の構造体で実現し、
-    functional-rusty の Optics（Lens）を活用して不変データの更新を効率的に行う。
+    lambars の Optics（Lens）を活用して不変データの更新を効率的に行う。
     「Make Illegal States Unrepresentable」の原則に従い、型レベルで不正な状態を防ぐ。
 
   design_principles:
@@ -30,7 +30,7 @@ overview:
 
     - name: Lens による不変更新
       description: |
-        functional-rusty の #[derive(Lenses)] マクロを使用して、
+        lambars の #[derive(Lenses)] マクロを使用して、
         各フィールドへの Lens を自動生成する。
         深くネストしたフィールドも Lens 合成で型安全に更新できる。
 
@@ -108,7 +108,7 @@ requirements:
           LastName : String50
       }
 
-    functional_rusty_usage:
+    lambars_usage:
       - "#[derive(Lenses)] による Lens の自動導出"
       - "Result::and_then による Monad 的なエラーハンドリング"
       - "Lens::set, Lens::modify による不変更新"
@@ -119,7 +119,7 @@ requirements:
       - PartialEq
       - Eq
       - Hash
-      - Lenses  # functional-rusty-derive
+      - Lenses  # lambars-derive
 
     examples:
       valid:
@@ -222,7 +222,7 @@ requirements:
           VipStatus : VipStatus
       }
 
-    functional_rusty_usage:
+    lambars_usage:
       - "#[derive(Lenses)] による Lens の自動導出"
       - "Result::and_then による Monad 的なエラーハンドリング"
       - "Lens 合成による深いネストへのアクセス（例: customer_info.name.first_name）"
@@ -233,7 +233,7 @@ requirements:
       - Debug
       - PartialEq
       - Eq
-      - Lenses  # functional-rusty-derive
+      - Lenses  # lambars-derive
 
     examples:
       valid:
@@ -451,7 +451,7 @@ requirements:
           Country: String50
       }
 
-    functional_rusty_usage:
+    lambars_usage:
       - "#[derive(Lenses)] による Lens の自動導出"
       - "Result::and_then による Monad 的なエラーハンドリング"
       - "String50::create_option によるオプショナルフィールドの処理"
@@ -463,7 +463,7 @@ requirements:
       - PartialEq
       - Eq
       - Hash
-      - Lenses  # functional-rusty-derive
+      - Lenses  # lambars-derive
 
     examples:
       valid:
@@ -527,7 +527,7 @@ dependencies:
     - ValidationError
 
   crates:
-    - name: functional-rusty
+    - name: lambars
       version: "*"  # ワークスペース内の同バージョン
       features:
         - optics
@@ -535,12 +535,12 @@ dependencies:
       description: |
         Lens トレイトと #[derive(Lenses)] マクロを使用するため
 
-    - name: functional-rusty-derive
+    - name: lambars-derive
       version: "*"  # ワークスペース内の同バージョン
       description: |
         #[derive(Lenses)] マクロを提供する手続きマクロクレート
 
-  functional_rusty:
+  lambars:
     - module: optics
       traits:
         - Lens
@@ -661,7 +661,7 @@ implementation_notes:
       これにより不変性を保証する。
 
   - note: |
-      #[derive(Lenses)] を使用するため、functional-rusty-derive を依存関係に追加する。
+      #[derive(Lenses)] を使用するため、lambars-derive を依存関係に追加する。
       Cargo.toml の dev-dependencies ではなく dependencies に追加すること。
 
   - note: |

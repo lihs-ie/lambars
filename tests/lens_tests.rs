@@ -7,7 +7,7 @@
 //! - [`ComposedLens`]: Composition of two lenses
 //! - [`lens!`] macro: Convenient lens creation for struct fields
 
-use functional_rusty::optics::{FunctionLens, Lens};
+use lambars::optics::{FunctionLens, Lens};
 use rstest::rstest;
 
 // =============================================================================
@@ -342,8 +342,8 @@ fn test_lens_compose_three_levels() {
 /// Test lens! macro for simple field access
 #[test]
 fn test_lens_macro_simple() {
-    let x_lens = functional_rusty::lens!(Point, x);
-    let y_lens = functional_rusty::lens!(Point, y);
+    let x_lens = lambars::lens!(Point, x);
+    let y_lens = lambars::lens!(Point, y);
 
     let point = Point { x: 10, y: 20 };
     assert_eq!(*x_lens.get(&point), 10);
@@ -353,7 +353,7 @@ fn test_lens_macro_simple() {
 /// Test lens! macro for set operation
 #[test]
 fn test_lens_macro_set() {
-    let x_lens = functional_rusty::lens!(Point, x);
+    let x_lens = lambars::lens!(Point, x);
     let point = Point { x: 10, y: 20 };
     let updated = x_lens.set(point, 100);
     assert_eq!(updated, Point { x: 100, y: 20 });
@@ -362,7 +362,7 @@ fn test_lens_macro_set() {
 /// Test lens! macro for modify operation
 #[test]
 fn test_lens_macro_modify() {
-    let x_lens = functional_rusty::lens!(Point, x);
+    let x_lens = lambars::lens!(Point, x);
     let point = Point { x: 10, y: 20 };
     let doubled = x_lens.modify(point, |x| x * 2);
     assert_eq!(doubled.x, 20);
@@ -371,7 +371,7 @@ fn test_lens_macro_modify() {
 /// Test lens! macro with String field
 #[test]
 fn test_lens_macro_string_field() {
-    let name_lens = functional_rusty::lens!(Person, name);
+    let name_lens = lambars::lens!(Person, name);
 
     let person = Person {
         name: "Alice".to_string(),
@@ -388,8 +388,8 @@ fn test_lens_macro_string_field() {
 /// Test lens! macro composition for nested structures
 #[test]
 fn test_lens_macro_nested_composition() {
-    let inner_lens = functional_rusty::lens!(Outer, inner);
-    let value_lens = functional_rusty::lens!(Inner, value);
+    let inner_lens = lambars::lens!(Outer, inner);
+    let value_lens = lambars::lens!(Inner, value);
     let outer_value = inner_lens.compose(value_lens);
 
     let data = Outer {
@@ -404,9 +404,9 @@ fn test_lens_macro_nested_composition() {
 /// Test lens! macro with address composition
 #[test]
 fn test_lens_macro_address_composition() {
-    let address_lens = functional_rusty::lens!(PersonWithAddress, address);
-    let street_lens = functional_rusty::lens!(Address, street);
-    let city_lens = functional_rusty::lens!(Address, city);
+    let address_lens = lambars::lens!(PersonWithAddress, address);
+    let street_lens = lambars::lens!(Address, street);
+    let city_lens = lambars::lens!(Address, city);
 
     let person_street = address_lens.clone().compose(street_lens);
     let person_city = address_lens.compose(city_lens);
@@ -430,7 +430,7 @@ fn test_lens_macro_address_composition() {
 /// Test conversion of Lens to Traversal
 #[test]
 fn test_lens_to_traversal() {
-    let x_lens = functional_rusty::lens!(Point, x);
+    let x_lens = lambars::lens!(Point, x);
     let traversal = x_lens.to_traversal();
 
     let point = Point { x: 10, y: 20 };
@@ -447,7 +447,7 @@ fn test_lens_to_traversal() {
 /// Test lens with zero value
 #[test]
 fn test_lens_with_zero() {
-    let x_lens = functional_rusty::lens!(Point, x);
+    let x_lens = lambars::lens!(Point, x);
     let point = Point { x: 0, y: 0 };
     assert_eq!(*x_lens.get(&point), 0);
 
@@ -458,7 +458,7 @@ fn test_lens_with_zero() {
 /// Test lens with negative values
 #[test]
 fn test_lens_with_negative() {
-    let x_lens = functional_rusty::lens!(Point, x);
+    let x_lens = lambars::lens!(Point, x);
     let point = Point { x: -10, y: -20 };
     assert_eq!(*x_lens.get(&point), -10);
 
@@ -469,7 +469,7 @@ fn test_lens_with_negative() {
 /// Test lens with empty string
 #[test]
 fn test_lens_with_empty_string() {
-    let name_lens = functional_rusty::lens!(Person, name);
+    let name_lens = lambars::lens!(Person, name);
     let person = Person {
         name: String::new(),
         age: 30,
@@ -485,7 +485,7 @@ fn test_lens_with_empty_string() {
 #[case(i32::MAX)]
 #[case(i32::MIN)]
 fn test_lens_with_extreme_values(#[case] value: i32) {
-    let x_lens = functional_rusty::lens!(Point, x);
+    let x_lens = lambars::lens!(Point, x);
     let point = Point { x: value, y: 0 };
     assert_eq!(*x_lens.get(&point), value);
 
@@ -500,7 +500,7 @@ fn test_lens_with_extreme_values(#[case] value: i32) {
 /// Test that lens can be cloned and both work independently
 #[test]
 fn test_lens_clone() {
-    let x_lens = functional_rusty::lens!(Point, x);
+    let x_lens = lambars::lens!(Point, x);
     let x_lens_clone = x_lens.clone();
 
     let point = Point { x: 10, y: 20 };
@@ -510,8 +510,8 @@ fn test_lens_clone() {
 /// Test that composed lens can be cloned
 #[test]
 fn test_composed_lens_clone() {
-    let inner_lens = functional_rusty::lens!(Outer, inner);
-    let value_lens = functional_rusty::lens!(Inner, value);
+    let inner_lens = lambars::lens!(Outer, inner);
+    let value_lens = lambars::lens!(Inner, value);
     let composed = inner_lens.compose(value_lens);
     let composed_clone = composed.clone();
 
@@ -528,15 +528,15 @@ fn test_composed_lens_clone() {
 
 #[test]
 fn test_function_lens_debug() {
-    let x_lens = functional_rusty::lens!(Point, x);
+    let x_lens = lambars::lens!(Point, x);
     let debug_str = format!("{:?}", x_lens);
     assert!(debug_str.contains("FunctionLens"));
 }
 
 #[test]
 fn test_composed_lens_debug() {
-    let inner_lens = functional_rusty::lens!(Outer, inner);
-    let value_lens = functional_rusty::lens!(Inner, value);
+    let inner_lens = lambars::lens!(Outer, inner);
+    let value_lens = lambars::lens!(Inner, value);
     let composed = inner_lens.compose(value_lens);
 
     let debug_str = format!("{:?}", composed);
@@ -549,11 +549,11 @@ fn test_composed_lens_debug() {
 
 mod lens_as_traversal_additional_tests {
     use super::*;
-    use functional_rusty::optics::Traversal;
+    use lambars::optics::Traversal;
 
     #[test]
     fn test_lens_as_traversal_set_all() {
-        let x_lens = functional_rusty::lens!(Point, x);
+        let x_lens = lambars::lens!(Point, x);
         let traversal = x_lens.to_traversal();
 
         let point = Point { x: 10, y: 20 };
@@ -564,7 +564,7 @@ mod lens_as_traversal_additional_tests {
 
     #[test]
     fn test_lens_as_traversal_fold() {
-        let x_lens = functional_rusty::lens!(Point, x);
+        let x_lens = lambars::lens!(Point, x);
         let traversal = x_lens.to_traversal();
 
         let point = Point { x: 10, y: 20 };
@@ -574,7 +574,7 @@ mod lens_as_traversal_additional_tests {
 
     #[test]
     fn test_lens_as_traversal_for_all() {
-        let x_lens = functional_rusty::lens!(Point, x);
+        let x_lens = lambars::lens!(Point, x);
         let traversal = x_lens.to_traversal();
 
         let point = Point { x: 10, y: 20 };
@@ -584,7 +584,7 @@ mod lens_as_traversal_additional_tests {
 
     #[test]
     fn test_lens_as_traversal_exists() {
-        let x_lens = functional_rusty::lens!(Point, x);
+        let x_lens = lambars::lens!(Point, x);
         let traversal = x_lens.to_traversal();
 
         let point = Point { x: 10, y: 20 };
@@ -594,7 +594,7 @@ mod lens_as_traversal_additional_tests {
 
     #[test]
     fn test_lens_as_traversal_head_option() {
-        let x_lens = functional_rusty::lens!(Point, x);
+        let x_lens = lambars::lens!(Point, x);
         let traversal = x_lens.to_traversal();
 
         let point = Point { x: 10, y: 20 };

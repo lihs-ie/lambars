@@ -11,7 +11,7 @@ overview:
   description: |
     Phase 7 では PricedOrder からイベントを生成し、PlaceOrder ワークフロー全体を統合する。
     F# の Domain Modeling Made Functional パターンを Rust に適用し、
-    functional-rusty ライブラリを使用したイベント駆動ワークフローを実現する。
+    lambars ライブラリを使用したイベント駆動ワークフローを実現する。
 
     このフェーズでは以下の主要な機能を実装する:
     1. 配送明細変換: PricedOrderLine から ShippableOrderLine への変換
@@ -523,7 +523,7 @@ files:
       //! ```
 
     imports: |
-      use functional_rusty::effect::IO;
+      use lambars::effect::IO;
       use std::rc::Rc;
 
       use crate::simple_types::{Price, ProductCode};
@@ -615,7 +615,7 @@ files:
           ///
           /// ```ignore
           /// use order_taking_sample::workflow::place_order;
-          /// use functional_rusty::effect::IO;
+          /// use lambars::effect::IO;
           ///
           /// let io_result = place_order(
           ///     &check_product,
@@ -1205,7 +1205,7 @@ functional_principles:
 
   io_monad_usage:
     description: |
-      functional-rusty の IO モナドを使用した副作用の遅延実行。
+      lambars の IO モナドを使用した副作用の遅延実行。
 
     benefits:
       - 副作用（メール送信）の実行タイミングを制御できる
@@ -1274,14 +1274,14 @@ existing_implementations:
       - WorkflowValidationError
       - PricingError
 
-# functional-rusty ライブラリの使用
-functional_rusty_usage:
+# lambars ライブラリの使用
+lambars_usage:
   io_monad:
     description: |
       副作用（メール送信）の遅延実行に IO モナドを使用。
 
     import: |
-      use functional_rusty::effect::IO;
+      use lambars::effect::IO;
 
     methods:
       - pure: 純粋な値を IO でラップ

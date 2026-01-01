@@ -3,8 +3,8 @@
 //! These tests verify that PersistentList satisfies the algebraic laws
 //! for the type classes it implements.
 
-use functional_rusty::persistent::PersistentList;
-use functional_rusty::typeclass::{Foldable, FunctorMut, Monoid, Semigroup, Sum};
+use lambars::persistent::PersistentList;
+use lambars::typeclass::{Foldable, FunctorMut, Monoid, Semigroup, Sum};
 use proptest::prelude::*;
 
 // =============================================================================

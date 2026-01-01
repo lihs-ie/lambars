@@ -10,7 +10,7 @@
 
 use crate::simple_types::Price;
 use crate::workflow::priced_types::PricedOrder;
-use functional_rusty_derive::Lenses;
+use lambars_derive::Lenses;
 
 // =============================================================================
 // ShippingMethod

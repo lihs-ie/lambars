@@ -6,8 +6,8 @@
 //! Note: These tests verify trait definitions and signatures.
 //! Actual implementations will be tested in Phase 6.2 when State monad is implemented.
 
-use functional_rusty::effect::MonadState;
-use functional_rusty::typeclass::Monad;
+use lambars::effect::MonadState;
+use lambars::typeclass::Monad;
 use std::marker::PhantomData;
 
 // =============================================================================

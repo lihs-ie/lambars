@@ -23,10 +23,10 @@
 #![cfg(feature = "compose")]
 #![allow(unused_imports)]
 
-use functional_rusty::compose::constant;
-use functional_rusty::compose::flip;
-use functional_rusty::compose::identity;
-use functional_rusty::{compose, curry2, curry3, partial, pipe};
+use lambars::compose::constant;
+use lambars::compose::flip;
+use lambars::compose::identity;
+use lambars::{compose, curry2, curry3, partial, pipe};
 use proptest::prelude::*;
 
 // =============================================================================

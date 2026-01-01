@@ -5,12 +5,12 @@
 
 #![forbid(unsafe_code)]
 
-use functional_rusty::optics::persistent_optics::{
+use lambars::optics::persistent_optics::{
     index_optional, key_optional_hashmap, key_optional_treemap, persistent_hashmap_traversal,
     persistent_treemap_traversal, persistent_vector_traversal,
 };
-use functional_rusty::optics::{Optional, Traversal};
-use functional_rusty::persistent::{PersistentHashMap, PersistentTreeMap, PersistentVector};
+use lambars::optics::{Optional, Traversal};
+use lambars::persistent::{PersistentHashMap, PersistentTreeMap, PersistentVector};
 use rstest::rstest;
 
 // =============================================================================

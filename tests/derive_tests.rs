@@ -12,8 +12,8 @@
 //! enum layout doesn't allow returning a reference to a tuple that doesn't
 //! exist in memory. Use `preview_owned` and `review` for these variants.
 
-use functional_rusty::optics::{Lens, Prism};
-use functional_rusty_derive::{Lenses, Prisms};
+use lambars::optics::{Lens, Prism};
+use lambars_derive::{Lenses, Prisms};
 use rstest::rstest;
 
 // =============================================================================

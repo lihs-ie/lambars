@@ -3,19 +3,19 @@
 //! Tests for partial function application with placeholder support.
 //!
 //! Note: The `__` placeholder is a literal token in the macro pattern.
-//! Do NOT import `functional_rusty::compose::__` as it will shadow the literal.
+//! Do NOT import `lambars::compose::__` as it will shadow the literal.
 
 #![cfg(feature = "compose")]
 #![allow(unused_imports)]
 
-use functional_rusty::partial;
+use lambars::partial;
 
 // =============================================================================
 // 2-argument function tests
 // =============================================================================
 
 mod two_argument_functions {
-    use functional_rusty::partial;
+    use lambars::partial;
 
     fn add(first: i32, second: i32) -> i32 {
         first + second
@@ -100,7 +100,7 @@ mod two_argument_functions {
 // =============================================================================
 
 mod three_argument_functions {
-    use functional_rusty::partial;
+    use lambars::partial;
 
     fn add_three(first: i32, second: i32, third: i32) -> i32 {
         first + second + third
@@ -179,7 +179,7 @@ mod three_argument_functions {
 // =============================================================================
 
 mod four_argument_functions {
-    use functional_rusty::partial;
+    use lambars::partial;
 
     fn sum_four(first: i32, second: i32, third: i32, fourth: i32) -> i32 {
         first + second + third + fourth
@@ -251,7 +251,7 @@ mod four_argument_functions {
 // =============================================================================
 
 mod five_argument_functions {
-    use functional_rusty::partial;
+    use lambars::partial;
 
     fn sum_five(a: i32, b: i32, c: i32, d: i32, e: i32) -> i32 {
         a + b + c + d + e
@@ -293,7 +293,7 @@ mod five_argument_functions {
 // =============================================================================
 
 mod six_argument_functions {
-    use functional_rusty::partial;
+    use lambars::partial;
 
     fn sum_six(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32) -> i32 {
         a + b + c + d + e + f
@@ -329,7 +329,7 @@ mod six_argument_functions {
 // =============================================================================
 
 mod integration {
-    use functional_rusty::{compose, partial, pipe};
+    use lambars::{compose, partial, pipe};
 
     fn multiply(first: i32, second: i32) -> i32 {
         first * second
@@ -376,7 +376,7 @@ mod integration {
 // =============================================================================
 
 mod edge_cases {
-    use functional_rusty::partial;
+    use lambars::partial;
 
     #[test]
     fn test_partial_with_clone_type() {

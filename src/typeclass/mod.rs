@@ -37,7 +37,7 @@
 //! ## Using Semigroup
 //!
 //! ```rust
-//! use functional_rusty::typeclass::Semigroup;
+//! use lambars::typeclass::Semigroup;
 //!
 //! // String concatenation
 //! let hello = String::from("Hello, ");
@@ -53,7 +53,7 @@
 //! ## Using Monoid
 //!
 //! ```rust
-//! use functional_rusty::typeclass::{Semigroup, Monoid, Sum};
+//! use lambars::typeclass::{Semigroup, Monoid, Sum};
 //!
 //! // Combining with identity element
 //! let value = String::from("hello");
@@ -67,7 +67,7 @@
 //! ## Using Applicative
 //!
 //! ```rust
-//! use functional_rusty::typeclass::Applicative;
+//! use lambars::typeclass::Applicative;
 //!
 //! // Lifting a pure value
 //! let x: Option<i32> = <Option<()>>::pure(42);

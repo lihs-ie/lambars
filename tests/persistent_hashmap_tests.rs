@@ -3,8 +3,8 @@
 //! This module contains comprehensive unit tests for the PersistentHashMap
 //! implementation, following a TDD approach.
 
-use functional_rusty::persistent::PersistentHashMap;
-use functional_rusty::typeclass::Foldable;
+use lambars::persistent::PersistentHashMap;
+use lambars::typeclass::Foldable;
 use rstest::rstest;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};

@@ -3,7 +3,7 @@
 //! acknowledge_order_with_logging 関数のテストを実装する。
 //! eff! マクロの動作と IO 操作のチェーンを検証する。
 
-use functional_rusty::effect::IO;
+use lambars::effect::IO;
 use order_taking_sample::compound_types::{Address, CustomerInfo};
 use order_taking_sample::simple_types::{BillingAmount, OrderId, Price};
 use order_taking_sample::workflow::{

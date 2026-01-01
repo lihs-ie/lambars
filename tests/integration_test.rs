@@ -1,4 +1,4 @@
-//! Integration tests for functional-rusty library.
+//! Integration tests for lambars library.
 //!
 //! These tests verify the public API of the library works correctly
 //! across module boundaries.

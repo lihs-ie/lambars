@@ -13,7 +13,7 @@
 //! # Example
 //!
 //! ```rust
-//! use functional_rusty::typeclass::TypeConstructor;
+//! use lambars::typeclass::TypeConstructor;
 //!
 //! // Option implements TypeConstructor
 //! fn transform_type<T: TypeConstructor>(value: T) -> T::WithType<String>
@@ -54,7 +54,7 @@
 /// # Example
 ///
 /// ```rust
-/// use functional_rusty::typeclass::TypeConstructor;
+/// use lambars::typeclass::TypeConstructor;
 ///
 /// // Option<i32> implements TypeConstructor
 /// fn example<T: TypeConstructor<Inner = i32>>() {

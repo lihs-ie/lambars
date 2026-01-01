@@ -5,7 +5,7 @@
 //! - Right Identity: m.flat_map(pure) == m
 //! - Associativity: m.flat_map(f).flat_map(g) == m.flat_map(|x| f(x).flat_map(g))
 
-use functional_rusty::effect::IO;
+use lambars::effect::IO;
 use proptest::prelude::*;
 
 // =============================================================================

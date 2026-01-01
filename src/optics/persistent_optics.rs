@@ -18,8 +18,8 @@
 //! ## PersistentVector with Optional
 //!
 //! ```
-//! use functional_rusty::persistent::PersistentVector;
-//! use functional_rusty::optics::{Optional, persistent_optics::index_optional};
+//! use lambars::persistent::PersistentVector;
+//! use lambars::optics::{Optional, persistent_optics::index_optional};
 //!
 //! let vector: PersistentVector<i32> = (1..=5).collect();
 //! let optional = index_optional::<i32>(2);
@@ -33,8 +33,8 @@
 //! ## PersistentVector with Traversal
 //!
 //! ```
-//! use functional_rusty::persistent::PersistentVector;
-//! use functional_rusty::optics::{Traversal, persistent_optics::persistent_vector_traversal};
+//! use lambars::persistent::PersistentVector;
+//! use lambars::optics::{Traversal, persistent_optics::persistent_vector_traversal};
 //!
 //! let vector: PersistentVector<i32> = (1..=5).collect();
 //! let traversal = persistent_vector_traversal::<i32>();
@@ -46,8 +46,8 @@
 //! ## PersistentHashMap with Optional
 //!
 //! ```
-//! use functional_rusty::persistent::PersistentHashMap;
-//! use functional_rusty::optics::{Optional, persistent_optics::key_optional_hashmap};
+//! use lambars::persistent::PersistentHashMap;
+//! use lambars::optics::{Optional, persistent_optics::key_optional_hashmap};
 //!
 //! let map = PersistentHashMap::new()
 //!     .insert("key".to_string(), 42);
@@ -79,8 +79,8 @@ use crate::persistent::{PersistentHashMap, PersistentTreeMap, PersistentVector};
 /// # Example
 ///
 /// ```
-/// use functional_rusty::persistent::PersistentVector;
-/// use functional_rusty::optics::{Optional, persistent_optics::index_optional};
+/// use lambars::persistent::PersistentVector;
+/// use lambars::optics::{Optional, persistent_optics::index_optional};
 ///
 /// let vector: PersistentVector<i32> = (1..=5).collect();
 /// let optional = index_optional::<i32>(2);
@@ -136,8 +136,8 @@ impl<T> PersistentVectorIndexOptional<T> {
 /// # Example
 ///
 /// ```
-/// use functional_rusty::persistent::PersistentVector;
-/// use functional_rusty::optics::{Optional, persistent_optics::index_optional};
+/// use lambars::persistent::PersistentVector;
+/// use lambars::optics::{Optional, persistent_optics::index_optional};
 ///
 /// let vector: PersistentVector<i32> = (1..=5).collect();
 /// let optional = index_optional::<i32>(0);
@@ -175,8 +175,8 @@ impl<T: Clone> Optional<PersistentVector<T>, T> for PersistentVectorIndexOptiona
 /// # Example
 ///
 /// ```
-/// use functional_rusty::persistent::PersistentVector;
-/// use functional_rusty::optics::{Traversal, persistent_optics::persistent_vector_traversal};
+/// use lambars::persistent::PersistentVector;
+/// use lambars::optics::{Traversal, persistent_optics::persistent_vector_traversal};
 ///
 /// let vector: PersistentVector<i32> = (1..=5).collect();
 /// let traversal = persistent_vector_traversal::<i32>();
@@ -227,8 +227,8 @@ impl<T> Default for PersistentVectorTraversal<T> {
 /// # Example
 ///
 /// ```
-/// use functional_rusty::persistent::PersistentVector;
-/// use functional_rusty::optics::{Traversal, persistent_optics::persistent_vector_traversal};
+/// use lambars::persistent::PersistentVector;
+/// use lambars::optics::{Traversal, persistent_optics::persistent_vector_traversal};
 ///
 /// let vector: PersistentVector<i32> = (1..=3).collect();
 /// let traversal = persistent_vector_traversal::<i32>();
@@ -278,8 +278,8 @@ impl<T: Clone + 'static> Traversal<PersistentVector<T>, T> for PersistentVectorT
 /// # Example
 ///
 /// ```
-/// use functional_rusty::persistent::PersistentHashMap;
-/// use functional_rusty::optics::{Optional, persistent_optics::key_optional_hashmap};
+/// use lambars::persistent::PersistentHashMap;
+/// use lambars::optics::{Optional, persistent_optics::key_optional_hashmap};
 ///
 /// let map = PersistentHashMap::new()
 ///     .insert("key".to_string(), 42);
@@ -335,8 +335,8 @@ impl<K, V> PersistentHashMapKeyOptional<K, V> {
 /// # Example
 ///
 /// ```
-/// use functional_rusty::persistent::PersistentHashMap;
-/// use functional_rusty::optics::{Optional, persistent_optics::key_optional_hashmap};
+/// use lambars::persistent::PersistentHashMap;
+/// use lambars::optics::{Optional, persistent_optics::key_optional_hashmap};
 ///
 /// let map = PersistentHashMap::new()
 ///     .insert("hello".to_string(), "world".to_string());
@@ -377,8 +377,8 @@ impl<K: Clone + Hash + Eq, V: Clone> Optional<PersistentHashMap<K, V>, V>
 /// # Example
 ///
 /// ```
-/// use functional_rusty::persistent::PersistentHashMap;
-/// use functional_rusty::optics::{Traversal, persistent_optics::persistent_hashmap_traversal};
+/// use lambars::persistent::PersistentHashMap;
+/// use lambars::optics::{Traversal, persistent_optics::persistent_hashmap_traversal};
 ///
 /// let map = PersistentHashMap::new()
 ///     .insert("a".to_string(), 1)
@@ -429,8 +429,8 @@ impl<K, V> Default for PersistentHashMapTraversal<K, V> {
 /// # Example
 ///
 /// ```
-/// use functional_rusty::persistent::PersistentHashMap;
-/// use functional_rusty::optics::{Traversal, persistent_optics::persistent_hashmap_traversal};
+/// use lambars::persistent::PersistentHashMap;
+/// use lambars::optics::{Traversal, persistent_optics::persistent_hashmap_traversal};
 ///
 /// let map = PersistentHashMap::new()
 ///     .insert("x".to_string(), 10)
@@ -491,8 +491,8 @@ impl<K: Clone + Hash + Eq + 'static, V: Clone + 'static> Traversal<PersistentHas
 /// # Example
 ///
 /// ```
-/// use functional_rusty::persistent::PersistentTreeMap;
-/// use functional_rusty::optics::{Optional, persistent_optics::key_optional_treemap};
+/// use lambars::persistent::PersistentTreeMap;
+/// use lambars::optics::{Optional, persistent_optics::key_optional_treemap};
 ///
 /// let map = PersistentTreeMap::new()
 ///     .insert(1, "one")
@@ -549,8 +549,8 @@ impl<K, V> PersistentTreeMapKeyOptional<K, V> {
 /// # Example
 ///
 /// ```
-/// use functional_rusty::persistent::PersistentTreeMap;
-/// use functional_rusty::optics::{Optional, persistent_optics::key_optional_treemap};
+/// use lambars::persistent::PersistentTreeMap;
+/// use lambars::optics::{Optional, persistent_optics::key_optional_treemap};
 ///
 /// let map = PersistentTreeMap::new()
 ///     .insert(42, "answer");
@@ -591,8 +591,8 @@ impl<K: Clone + Ord, V: Clone> Optional<PersistentTreeMap<K, V>, V>
 /// # Example
 ///
 /// ```
-/// use functional_rusty::persistent::PersistentTreeMap;
-/// use functional_rusty::optics::{Traversal, persistent_optics::persistent_treemap_traversal};
+/// use lambars::persistent::PersistentTreeMap;
+/// use lambars::optics::{Traversal, persistent_optics::persistent_treemap_traversal};
 ///
 /// let map = PersistentTreeMap::new()
 ///     .insert(3, "three")
@@ -645,8 +645,8 @@ impl<K, V> Default for PersistentTreeMapTraversal<K, V> {
 /// # Example
 ///
 /// ```
-/// use functional_rusty::persistent::PersistentTreeMap;
-/// use functional_rusty::optics::{Traversal, persistent_optics::persistent_treemap_traversal};
+/// use lambars::persistent::PersistentTreeMap;
+/// use lambars::optics::{Traversal, persistent_optics::persistent_treemap_traversal};
 ///
 /// let map = PersistentTreeMap::new()
 ///     .insert(1, 10)

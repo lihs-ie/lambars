@@ -201,11 +201,11 @@ implementation_steps:
       green:
         description: |
           既存の実装がテストをパスすることを確認。
-          Lens 合成が動作しない場合は functional-rusty の使用方法を確認。
+          Lens 合成が動作しない場合は lambars の使用方法を確認。
         implementation_notes:
-          - functional_rusty::optics::Lens trait のインポート
+          - lambars::optics::Lens trait のインポート
           - compose! マクロまたは then メソッドによる Lens 合成
-          - Optional optics については functional_rusty::optics::Optional を使用
+          - Optional optics については lambars::optics::Optional を使用
 
       refactor:
         description: |
@@ -545,7 +545,7 @@ implementation_steps:
       red:
         description: |
           Result と Option の Monad 法則を proptest で検証する。
-          functional-rusty ライブラリの使用例としての価値も含む。
+          lambars ライブラリの使用例としての価値も含む。
 
         test_cases:
           - name: prop_result_left_identity
@@ -835,7 +835,7 @@ implementation_steps:
               ```toml
               [dependencies]
               order-taking-sample = { path = "samples/order" }
-              functional-rusty = { version = "x.y.z", features = ["full"] }
+              lambars = { version = "x.y.z", features = ["full"] }
               ```
 
               ### 最小限のサンプルコード
@@ -894,14 +894,14 @@ implementation_steps:
               ) -> Result<ValidatedOrder, ValidationError>
               ```
 
-          - title: functional-rusty の活用
+          - title: lambars の活用
             content: |
-              ## functional-rusty の活用
+              ## lambars の活用
 
               ### IO モナドによる副作用の分離
 
               ```rust
-              use functional_rusty::effect::IO;
+              use lambars::effect::IO;
 
               // 副作用は IO に閉じ込められる
               let io: IO<Response> = place_order_api(&request);
@@ -913,7 +913,7 @@ implementation_steps:
               ### Lazy 型による遅延評価
 
               ```rust
-              use functional_rusty::control::Lazy;
+              use lambars::control::Lazy;
 
               let lazy_prices = Lazy::new(|| fetch_prices_from_database());
               // この時点では fetch_prices_from_database は呼ばれない
@@ -924,7 +924,7 @@ implementation_steps:
               ### Lens による不変データ構造の更新
 
               ```rust
-              use functional_rusty::optics::Lens;
+              use lambars::optics::Lens;
 
               let updated = PersonalName::first_name_lens().set(name, new_first_name);
               ```
@@ -1070,9 +1070,9 @@ implementation_steps:
               ) -> impl Fn(UnvalidatedOrder) -> Result<...>
               ```
 
-          - title: functional-rusty との統合
+          - title: lambars との統合
             content: |
-              ## functional-rusty との統合
+              ## lambars との統合
 
               ### IO モナドの使用箇所
 

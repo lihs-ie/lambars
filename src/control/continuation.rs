@@ -19,7 +19,7 @@
 //! ## Basic Usage
 //!
 //! ```rust
-//! use functional_rusty::control::Continuation;
+//! use lambars::control::Continuation;
 //!
 //! let cont: Continuation<i32, i32> = Continuation::pure(42);
 //! let result = cont.run(|x| x * 2);
@@ -29,7 +29,7 @@
 //! ## Early Return with `call_with_current_continuation_once`
 //!
 //! ```rust
-//! use functional_rusty::control::Continuation;
+//! use lambars::control::Continuation;
 //!
 //! let cont = Continuation::call_with_current_continuation_once(|exit| {
 //!     Continuation::pure(1)
@@ -74,7 +74,7 @@ use std::rc::Rc;
 /// # Examples
 ///
 /// ```rust
-/// use functional_rusty::control::Continuation;
+/// use lambars::control::Continuation;
 ///
 /// // Create a continuation that doubles its input
 /// let double: Continuation<i32, i32> = Continuation::new(|k| k(21) * 2);
@@ -104,7 +104,7 @@ impl<R: 'static, A: 'static> Continuation<R, A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Continuation;
+    /// use lambars::control::Continuation;
     ///
     /// // A continuation that passes 42 to its continuation
     /// let cont: Continuation<String, i32> = Continuation::new(|k| k(42));
@@ -132,7 +132,7 @@ impl<R: 'static, A: 'static> Continuation<R, A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Continuation;
+    /// use lambars::control::Continuation;
     ///
     /// let cont: Continuation<i32, i32> = Continuation::pure(42);
     /// let result = cont.run(|x| x);
@@ -151,7 +151,7 @@ impl<R: 'static, A: 'static> Continuation<R, A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Continuation;
+    /// use lambars::control::Continuation;
     ///
     /// let cont: Continuation<String, i32> = Continuation::pure(42);
     /// let result = cont.run(|x| format!("The answer is {}", x));
@@ -175,7 +175,7 @@ impl<R: 'static, A: 'static> Continuation<R, A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Continuation;
+    /// use lambars::control::Continuation;
     ///
     /// let cont: Continuation<i32, i32> = Continuation::pure(21);
     /// let doubled = cont.map(|x| x * 2);
@@ -200,7 +200,7 @@ impl<R: 'static, A: 'static> Continuation<R, A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Continuation;
+    /// use lambars::control::Continuation;
     ///
     /// let cont: Continuation<i32, i32> = Continuation::pure(21);
     /// let result = cont.flat_map(|x| Continuation::pure(x * 2));
@@ -218,7 +218,7 @@ impl<R: 'static, A: 'static> Continuation<R, A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Continuation;
+    /// use lambars::control::Continuation;
     ///
     /// let cont: Continuation<i32, i32> = Continuation::pure(21);
     /// let result = cont.and_then(|x| Continuation::pure(x * 2));
@@ -241,7 +241,7 @@ impl<R: 'static, A: 'static> Continuation<R, A> {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::control::Continuation;
+    /// use lambars::control::Continuation;
     ///
     /// let first: Continuation<i32, &str> = Continuation::pure("ignored");
     /// let second: Continuation<i32, i32> = Continuation::pure(42);
@@ -281,7 +281,7 @@ impl<R: 'static, A: 'static> Continuation<R, A> {
     /// ## Early Return
     ///
     /// ```rust
-    /// use functional_rusty::control::Continuation;
+    /// use lambars::control::Continuation;
     ///
     /// // Early return when a condition is met
     /// let cont = Continuation::call_with_current_continuation_once(|exit| {

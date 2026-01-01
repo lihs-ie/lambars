@@ -4,7 +4,7 @@
 //! Lens 操作テスト、Clone/Eq テスト、およびネスト構造へのアクセステストを行う。
 //! src 内の基本テストを補完する形で設計。
 
-use functional_rusty::optics::Lens;
+use lambars::optics::Lens;
 use order_taking_sample::compound_types::{Address, CustomerInfo, PersonalName};
 use order_taking_sample::simple_types::{EmailAddress, String50, UsStateCode, VipStatus, ZipCode};
 use rstest::rstest;

@@ -25,8 +25,8 @@
 //! # Examples
 //!
 //! ```
-//! use functional_rusty::optics::{Lens, FunctionLens};
-//! use functional_rusty::lens;
+//! use lambars::optics::{Lens, FunctionLens};
+//! use lambars::lens;
 //!
 //! #[derive(Clone, PartialEq, Debug)]
 //! struct Point { x: i32, y: i32 }
@@ -96,8 +96,8 @@ pub trait Lens<S, A> {
     /// # Example
     ///
     /// ```
-    /// use functional_rusty::optics::Lens;
-    /// use functional_rusty::lens;
+    /// use lambars::optics::Lens;
+    /// use lambars::lens;
     ///
     /// #[derive(Clone, PartialEq, Debug)]
     /// struct Point { x: i32, y: i32 }
@@ -133,8 +133,8 @@ pub trait Lens<S, A> {
     /// # Example
     ///
     /// ```
-    /// use functional_rusty::optics::Lens;
-    /// use functional_rusty::lens;
+    /// use lambars::optics::Lens;
+    /// use lambars::lens;
     ///
     /// #[derive(Clone, PartialEq, Debug)]
     /// struct Person { name: String, age: u32 }
@@ -170,8 +170,8 @@ pub trait Lens<S, A> {
     /// # Example
     ///
     /// ```
-    /// use functional_rusty::optics::Lens;
-    /// use functional_rusty::lens;
+    /// use lambars::optics::Lens;
+    /// use lambars::lens;
     ///
     /// #[derive(Clone, PartialEq, Debug)]
     /// struct Address { street: String, city: String }
@@ -231,7 +231,7 @@ pub trait Lens<S, A> {
 /// # Example
 ///
 /// ```
-/// use functional_rusty::optics::{Lens, FunctionLens};
+/// use lambars::optics::{Lens, FunctionLens};
 ///
 /// #[derive(Clone, PartialEq, Debug)]
 /// struct Point { x: i32, y: i32 }
@@ -273,7 +273,7 @@ where
     /// # Example
     ///
     /// ```
-    /// use functional_rusty::optics::{Lens, FunctionLens};
+    /// use lambars::optics::{Lens, FunctionLens};
     ///
     /// #[derive(Clone, PartialEq, Debug)]
     /// struct Point { x: i32, y: i32 }
@@ -347,8 +347,8 @@ where
 /// # Example
 ///
 /// ```
-/// use functional_rusty::optics::Lens;
-/// use functional_rusty::lens;
+/// use lambars::optics::Lens;
+/// use lambars::lens;
 ///
 /// #[derive(Clone, PartialEq, Debug)]
 /// struct Inner { value: i32 }
@@ -544,8 +544,8 @@ impl<L: std::fmt::Debug, S, A> std::fmt::Debug for LensAsTraversal<L, S, A> {
 /// # Example
 ///
 /// ```
-/// use functional_rusty::optics::Lens;
-/// use functional_rusty::lens;
+/// use lambars::optics::Lens;
+/// use lambars::lens;
 ///
 /// #[derive(Clone, PartialEq, Debug)]
 /// struct Point { x: i32, y: i32 }

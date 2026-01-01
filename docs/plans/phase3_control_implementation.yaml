@@ -317,7 +317,7 @@ implementation_plan:
           /// # 例
           ///
           /// ```
-          /// use functional_rusty::control::Lazy;
+          /// use lambars::control::Lazy;
           ///
           /// let lazy = Lazy::new(|| {
           ///     println!("Computing...");
@@ -667,7 +667,7 @@ implementation_plan:
           /// # 例
           ///
           /// ```
-          /// use functional_rusty::control::Trampoline;
+          /// use lambars::control::Trampoline;
           ///
           /// fn factorial(n: u64) -> Trampoline<u64> {
           ///     factorial_helper(n, 1)
@@ -957,7 +957,7 @@ implementation_plan:
           /// # 例
           ///
           /// ```
-          /// use functional_rusty::control::Continuation;
+          /// use lambars::control::Continuation;
           ///
           /// let cont: Continuation<i32, i32> = Continuation::pure(42);
           /// let result = cont.run(|x| x * 2);
@@ -1069,7 +1069,7 @@ implementation_plan:
               /// # 例
               ///
               /// ```
-              /// use functional_rusty::control::Continuation;
+              /// use lambars::control::Continuation;
               ///
               /// // 条件を満たしたら即座にその値を返す
               /// let cont = Continuation::call_with_current_continuation_once(|exit| {

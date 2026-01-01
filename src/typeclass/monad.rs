@@ -39,7 +39,7 @@
 //! # Examples
 //!
 //! ```rust
-//! use functional_rusty::typeclass::{Monad, Applicative};
+//! use lambars::typeclass::{Monad, Applicative};
 //!
 //! // Using flat_map to chain Option computations
 //! let x = Some(5);
@@ -95,7 +95,7 @@ use super::identity::Identity;
 /// # Examples
 ///
 /// ```rust
-/// use functional_rusty::typeclass::{Monad, Applicative};
+/// use lambars::typeclass::{Monad, Applicative};
 ///
 /// let x = Some(5);
 /// let y = x.flat_map(|n| Some(n * 2));
@@ -131,7 +131,7 @@ pub trait Monad: Applicative {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Monad;
+    /// use lambars::typeclass::Monad;
     ///
     /// let x = Some(5);
     /// let y = x.flat_map(|n| Some(n * 2));
@@ -161,7 +161,7 @@ pub trait Monad: Applicative {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Monad;
+    /// use lambars::typeclass::Monad;
     ///
     /// let x = Some(5);
     /// let y = x.and_then(|n| Some(n * 2));
@@ -195,7 +195,7 @@ pub trait Monad: Applicative {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::Monad;
+    /// use lambars::typeclass::Monad;
     ///
     /// let x = Some(5);
     /// let y = x.then(Some("hello"));
@@ -263,7 +263,7 @@ impl<T, E: Clone> Monad for Result<T, E> {
 /// # Examples
 ///
 /// ```rust
-/// use functional_rusty::typeclass::MonadVec;
+/// use lambars::typeclass::MonadVec;
 ///
 /// let numbers = vec![1, 2, 3];
 /// let result = numbers.flat_map(|n| vec![n, n * 10]);
@@ -289,7 +289,7 @@ pub trait MonadVec: Sized {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::MonadVec;
+    /// use lambars::typeclass::MonadVec;
     ///
     /// let v = vec![1, 2, 3];
     /// let result = v.flat_map(|n| vec![n, n * 10]);
@@ -319,7 +319,7 @@ pub trait MonadVec: Sized {
     /// # Examples
     ///
     /// ```rust
-    /// use functional_rusty::typeclass::MonadVec;
+    /// use lambars::typeclass::MonadVec;
     ///
     /// let nested = vec![vec![1, 2], vec![3, 4]];
     /// let flat: Vec<i32> = nested.flatten();

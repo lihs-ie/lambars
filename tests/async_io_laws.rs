@@ -7,7 +7,7 @@
 //!
 //! Also verifies Functor and Applicative laws.
 
-use functional_rusty::effect::AsyncIO;
+use lambars::effect::AsyncIO;
 use proptest::prelude::*;
 
 // =============================================================================
