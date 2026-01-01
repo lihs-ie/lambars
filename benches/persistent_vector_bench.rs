@@ -3,7 +3,7 @@
 //! Compares the performance of lambars' PersistentVector against Rust's standard Vec
 //! for common operations.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use lambars::persistent::PersistentVector;
 
 // =============================================================================
@@ -116,14 +116,18 @@ fn benchmark_update(criterion: &mut Criterion) {
         );
 
         // Standard Vec clone + update (to compare fair immutable update)
-        group.bench_with_input(BenchmarkId::new("Vec_clone", size), &size, |bencher, &size| {
-            bencher.iter(|| {
-                let mut cloned = standard_vector.clone();
-                let index = (size / 2) as usize;
-                cloned[black_box(index)] = black_box(999);
-                black_box(cloned)
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("Vec_clone", size),
+            &size,
+            |bencher, &size| {
+                bencher.iter(|| {
+                    let mut cloned = standard_vector.clone();
+                    let index = (size / 2) as usize;
+                    cloned[black_box(index)] = black_box(999);
+                    black_box(cloned)
+                });
+            },
+        );
 
         // Standard Vec mutable update (in-place, for reference)
         group.bench_with_input(

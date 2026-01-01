@@ -3,7 +3,7 @@
 //! Compares the performance of lambars' PersistentHashMap against Rust's standard HashMap
 //! for common operations.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use lambars::persistent::PersistentHashMap;
 use std::collections::HashMap;
 
@@ -31,15 +31,19 @@ fn benchmark_insert(criterion: &mut Criterion) {
         );
 
         // Standard HashMap insert
-        group.bench_with_input(BenchmarkId::new("HashMap", size), &size, |bencher, &size| {
-            bencher.iter(|| {
-                let mut map = HashMap::new();
-                for index in 0..size {
-                    map.insert(black_box(index), black_box(index * 2));
-                }
-                black_box(map)
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("HashMap", size),
+            &size,
+            |bencher, &size| {
+                bencher.iter(|| {
+                    let mut map = HashMap::new();
+                    for index in 0..size {
+                        map.insert(black_box(index), black_box(index * 2));
+                    }
+                    black_box(map)
+                });
+            },
+        );
     }
 
     group.finish();
@@ -76,17 +80,21 @@ fn benchmark_get(criterion: &mut Criterion) {
         );
 
         // Standard HashMap get
-        group.bench_with_input(BenchmarkId::new("HashMap", size), &size, |bencher, &size| {
-            bencher.iter(|| {
-                let mut sum = 0;
-                for key in 0..size {
-                    if let Some(&value) = standard_map.get(&black_box(key)) {
-                        sum += value;
+        group.bench_with_input(
+            BenchmarkId::new("HashMap", size),
+            &size,
+            |bencher, &size| {
+                bencher.iter(|| {
+                    let mut sum = 0;
+                    for key in 0..size {
+                        if let Some(&value) = standard_map.get(&black_box(key)) {
+                            sum += value;
+                        }
                     }
-                }
-                black_box(sum)
-            });
-        });
+                    black_box(sum)
+                });
+            },
+        );
     }
 
     group.finish();
