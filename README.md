@@ -13,7 +13,7 @@ lambars brings functional programming abstractions to Rust that are not provided
 - **Control Structures**: Lazy evaluation, Trampoline for stack-safe recursion, Continuation monad
 - **Persistent Data Structures**: Immutable Vector, HashMap, HashSet, TreeMap, List with structural sharing
 - **Optics**: Lens, Prism, Iso, Optional, Traversal for immutable data manipulation
-- **Effect System**: Reader, Writer, State monads, IO monad, and monad transformers
+- **Effect System**: Reader, Writer, State monads, IO/AsyncIO monads, and monad transformers
 
 ### Language Comparison Guides
 
@@ -575,6 +575,50 @@ assert_eq!(io.run_unsafe(), 21);
 // IO with actual side effects
 let print_io = IO::print_line("Hello, World!");
 print_io.run_unsafe(); // Prints "Hello, World!"
+```
+
+#### AsyncIO Monad
+
+Async version of IO for integration with async runtimes like Tokio.
+
+```rust
+use lambars::effect::AsyncIO;
+
+// Create and chain async IO actions
+let async_io = AsyncIO::pure(10)
+    .fmap(|x| x * 2)
+    .flat_map(|x| AsyncIO::pure(x + 1));
+
+// Execute asynchronously
+let result = async_io.run_async().await;
+assert_eq!(result, 21);
+
+// Convert sync IO to async
+use lambars::effect::IO;
+let sync_io = IO::pure(42);
+let async_io = sync_io.to_async();
+let result = async_io.run_async().await;
+assert_eq!(result, 42);
+```
+
+#### eff_async! Macro
+
+Do-notation for AsyncIO computations.
+
+```rust
+use lambars::eff_async;
+use lambars::effect::AsyncIO;
+
+async fn example() {
+    let result = eff_async! {
+        x <= AsyncIO::pure(5);
+        y <= AsyncIO::pure(10);
+        let z = x + y;
+        AsyncIO::pure(z * 2)
+    }.run_async().await;
+
+    assert_eq!(result, 30);
+}
 ```
 
 #### Reader Monad
