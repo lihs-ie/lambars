@@ -1,0 +1,714 @@
+# lambars
+
+A functional programming library for Rust providing type classes, persistent data structures, and effect systems.
+
+## Overview
+
+lambars brings functional programming abstractions to Rust that are not provided by the standard library. The library uses Generic Associated Types (GAT) to emulate higher-kinded types (HKT), enabling powerful abstractions like Functor, Applicative, and Monad.
+
+### Features
+
+- **Type Classes**: Functor, Applicative, Monad, Foldable, Traversable, Semigroup, Monoid
+- **Function Composition**: `compose!`, `pipe!`, `partial!`, `curry!` macros
+- **Control Structures**: Lazy evaluation, Trampoline for stack-safe recursion, Continuation monad
+- **Persistent Data Structures**: Immutable Vector, HashMap, HashSet, TreeMap, List with structural sharing
+- **Optics**: Lens, Prism, Iso, Optional, Traversal for immutable data manipulation
+- **Effect System**: Reader, Writer, State monads, IO monad, and monad transformers
+
+### Language Comparison Guides
+
+If you're coming from another functional programming language, these guides will help you understand how lambars maps to familiar concepts:
+
+- [Haskell to lambars](docs/comparison/Haskell/README.md) - Comprehensive guide covering type classes, do-notation, optics, and more
+- [Scala to lambars](docs/comparison/Scala/README.md) - Covers Cats/Scalaz, Monocle, and Scala standard library
+- [F# to lambars](docs/comparison/F%23/README.md) - Covers F# core library, computation expressions, and active patterns
+
+## Requirements
+
+- Rust 1.92.0 or later
+- Edition 2024
+
+## Installation
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+lambars = "0.1.0"
+```
+
+Or with specific features:
+
+```toml
+[dependencies]
+lambars = { version = "0.1.0", features = ["typeclass", "persistent", "effect"] }
+```
+
+## Feature Flags
+
+| Feature | Description | Dependencies |
+|---------|-------------|--------------|
+| `default` | All features (same as `full`) | `typeclass`, `compose`, `control`, `persistent`, `optics`, `derive`, `effect`, `async` |
+| `full` | All features | `typeclass`, `compose`, `control`, `persistent`, `optics`, `derive`, `effect`, `async` |
+| `typeclass` | Type class traits (Functor, Monad, etc.) | None |
+| `compose` | Function composition utilities | `typeclass` |
+| `control` | Control structures (Lazy, Trampoline) | `typeclass` |
+| `persistent` | Persistent data structures | `typeclass`, `control` |
+| `optics` | Optics (Lens, Prism, etc.) | `typeclass`, `persistent` |
+| `derive` | Derive macros for Lens/Prism | `optics`, `lambars-derive` |
+| `effect` | Effect system | `typeclass`, `control` |
+| `async` | Async support (AsyncIO) | `effect`, `tokio`, `futures` |
+
+## Quick Start
+
+```rust
+use lambars::prelude::*;
+
+// Using type classes
+let numbers = vec![1, 2, 3, 4, 5];
+let doubled: Vec<i32> = numbers.fmap(|x| x * 2);
+assert_eq!(doubled, vec![2, 4, 6, 8, 10]);
+
+// Using persistent data structures
+let vector: PersistentVector<i32> = (0..100).collect();
+let updated = vector.update(50, 999).unwrap();
+assert_eq!(vector.get(50), Some(&50));     // Original unchanged
+assert_eq!(updated.get(50), Some(&999));   // New version
+
+// Using function composition
+let add_one = |x: i32| x + 1;
+let double = |x: i32| x * 2;
+let composed = compose!(add_one, double);
+assert_eq!(composed(5), 11); // add_one(double(5)) = 11
+```
+
+## Modules
+
+### Type Classes (`typeclass`)
+
+Fundamental type classes for functional programming abstractions.
+
+#### TypeConstructor (HKT Emulation)
+
+```rust
+use lambars::typeclass::TypeConstructor;
+
+// TypeConstructor enables defining generic abstractions over type constructors
+// Option<i32> can be transformed to Option<String>
+let option: Option<i32> = Some(42);
+```
+
+#### Functor
+
+Maps a function over values inside a container.
+
+```rust
+use lambars::typeclass::Functor;
+
+let option = Some(21);
+let doubled = option.fmap(|x| x * 2);
+assert_eq!(doubled, Some(42));
+
+let vec = vec![1, 2, 3];
+let squared: Vec<i32> = vec.fmap(|x| x * x);
+assert_eq!(squared, vec![1, 4, 9]);
+```
+
+#### Applicative
+
+Applies functions wrapped in a container to values in another container.
+
+```rust
+use lambars::typeclass::Applicative;
+
+// Lifting a pure value
+let x: Option<i32> = <Option<()>>::pure(42);
+assert_eq!(x, Some(42));
+
+// Combining two Option values
+let a = Some(1);
+let b = Some(2);
+let sum = a.map2(b, |x, y| x + y);
+assert_eq!(sum, Some(3));
+```
+
+#### Monad
+
+Enables sequential composition of computations.
+
+```rust
+use lambars::typeclass::Monad;
+
+let result = Some(10)
+    .flat_map(|x| Some(x * 2))
+    .flat_map(|x| Some(x + 1));
+assert_eq!(result, Some(21));
+```
+
+#### Semigroup and Monoid
+
+Associative binary operations with identity elements.
+
+```rust
+use lambars::typeclass::{Semigroup, Monoid, Sum};
+
+// String concatenation
+let hello = String::from("Hello, ");
+let world = String::from("World!");
+assert_eq!(hello.combine(world), "Hello, World!");
+
+// Numeric sums with Monoid
+let numbers = vec![Sum::new(1), Sum::new(2), Sum::new(3)];
+assert_eq!(Sum::combine_all(numbers), Sum::new(6));
+```
+
+#### Foldable
+
+Reduces a structure to a single value.
+
+```rust
+use lambars::typeclass::Foldable;
+
+let vec = vec![1, 2, 3, 4, 5];
+let sum = vec.fold_left(0, |accumulator, x| accumulator + x);
+assert_eq!(sum, 15);
+
+let product = vec.fold_left(1, |accumulator, x| accumulator * x);
+assert_eq!(product, 120);
+```
+
+#### Traversable
+
+Traverses a structure with effects.
+
+```rust
+use lambars::typeclass::Traversable;
+
+let vec = vec![Some(1), Some(2), Some(3)];
+let result = vec.sequence_option();
+assert_eq!(result, Some(vec![1, 2, 3]));
+
+let vec_with_none = vec![Some(1), None, Some(3)];
+let result = vec_with_none.sequence_option();
+assert_eq!(result, None);
+```
+
+### Function Composition (`compose`)
+
+Utilities for composing functions in a functional programming style.
+
+#### compose! (Right-to-Left Composition)
+
+```rust
+use lambars::compose;
+
+fn add_one(x: i32) -> i32 { x + 1 }
+fn double(x: i32) -> i32 { x * 2 }
+
+// compose!(f, g)(x) = f(g(x))
+let composed = compose!(add_one, double);
+assert_eq!(composed(5), 11); // add_one(double(5)) = add_one(10) = 11
+```
+
+#### pipe! (Left-to-Right Composition)
+
+```rust
+use lambars::pipe;
+
+fn add_one(x: i32) -> i32 { x + 1 }
+fn double(x: i32) -> i32 { x * 2 }
+
+// pipe!(x, f, g) = g(f(x))
+let result = pipe!(5, double, add_one);
+assert_eq!(result, 11); // add_one(double(5)) = 11
+```
+
+#### partial! (Partial Application)
+
+```rust
+use lambars::partial;
+
+fn add(first: i32, second: i32) -> i32 { first + second }
+
+// Use __ as a placeholder for remaining arguments
+let add_five = partial!(add, 5, __);
+assert_eq!(add_five(3), 8);
+```
+
+#### curry! (Currying)
+
+```rust
+use lambars::curry2;
+
+fn add(first: i32, second: i32) -> i32 { first + second }
+
+let curried_add = curry2!(add);
+let add_five = curried_add(5);
+assert_eq!(add_five(3), 8);
+```
+
+#### Helper Functions
+
+```rust
+use lambars::compose::{identity, constant, flip};
+
+// identity: returns its argument unchanged
+assert_eq!(identity(42), 42);
+
+// constant: creates a function that always returns the same value
+let always_five = constant(5);
+assert_eq!(always_five(100), 5);
+
+// flip: swaps the arguments of a binary function
+let subtract = |a, b| a - b;
+let flipped = flip(subtract);
+assert_eq!(flipped(3, 10), 7); // 10 - 3 = 7
+```
+
+### Control Structures (`control`)
+
+#### Lazy Evaluation
+
+Defers computation until needed, with memoization.
+
+```rust
+use lambars::control::Lazy;
+
+let lazy = Lazy::new(|| {
+    println!("Computing...");
+    42
+});
+// "Computing..." is not printed yet
+
+let value = lazy.force();
+// Now "Computing..." is printed and value is 42
+assert_eq!(*value, 42);
+
+// Second call uses cached value (no recomputation)
+let value2 = lazy.force();
+assert_eq!(*value2, 42);
+```
+
+#### Trampoline (Stack-Safe Recursion)
+
+Enables deep recursion without stack overflow.
+
+```rust
+use lambars::control::Trampoline;
+
+fn factorial(n: u64) -> Trampoline<u64> {
+    factorial_helper(n, 1)
+}
+
+fn factorial_helper(n: u64, accumulator: u64) -> Trampoline<u64> {
+    if n <= 1 {
+        Trampoline::done(accumulator)
+    } else {
+        Trampoline::suspend(move || factorial_helper(n - 1, n * accumulator))
+    }
+}
+
+// Works for very large n without stack overflow
+let result = factorial(10).run();
+assert_eq!(result, 3628800);
+
+// Even 100,000 iterations work safely
+let large_result = factorial(20).run();
+assert_eq!(large_result, 2432902008176640000);
+```
+
+#### Continuation Monad
+
+For advanced control flow patterns.
+
+```rust
+use lambars::control::Continuation;
+
+let cont = Continuation::pure(10)
+    .fmap(|x| x * 2)
+    .flat_map(|x| Continuation::pure(x + 1));
+
+let result = cont.run(|x| x);
+assert_eq!(result, 21);
+```
+
+### Persistent Data Structures (`persistent`)
+
+Immutable data structures with structural sharing for efficient updates.
+
+#### PersistentList
+
+Singly-linked list with O(1) prepend.
+
+```rust
+use lambars::persistent::PersistentList;
+
+let list = PersistentList::new().cons(3).cons(2).cons(1);
+assert_eq!(list.head(), Some(&1));
+
+// Structural sharing: the original list is preserved
+let extended = list.cons(0);
+assert_eq!(list.len(), 3);     // Original unchanged
+assert_eq!(extended.len(), 4); // New list
+```
+
+#### PersistentVector
+
+Dynamic array with O(log32 N) random access and updates.
+
+```rust
+use lambars::persistent::PersistentVector;
+
+let vector: PersistentVector<i32> = (0..100).collect();
+assert_eq!(vector.get(50), Some(&50));
+
+// Structural sharing preserves the original
+let updated = vector.update(50, 999).unwrap();
+assert_eq!(vector.get(50), Some(&50));     // Original unchanged
+assert_eq!(updated.get(50), Some(&999));   // New version
+
+// Push operations
+let pushed = vector.push_back(100);
+assert_eq!(pushed.len(), 101);
+```
+
+#### PersistentHashMap
+
+Hash map with O(log32 N) operations using HAMT (Hash Array Mapped Trie).
+
+```rust
+use lambars::persistent::PersistentHashMap;
+
+let map = PersistentHashMap::new()
+    .insert("one".to_string(), 1)
+    .insert("two".to_string(), 2);
+assert_eq!(map.get("one"), Some(&1));
+
+// Structural sharing
+let updated = map.insert("one".to_string(), 100);
+assert_eq!(map.get("one"), Some(&1));       // Original unchanged
+assert_eq!(updated.get("one"), Some(&100)); // New version
+
+// Removal
+let removed = map.remove("one");
+assert_eq!(removed.get("one"), None);
+```
+
+#### PersistentHashSet
+
+Hash set with set operations (union, intersection, difference).
+
+```rust
+use lambars::persistent::PersistentHashSet;
+
+let set = PersistentHashSet::new()
+    .insert(1)
+    .insert(2)
+    .insert(3);
+assert!(set.contains(&1));
+
+// Set operations
+let other: PersistentHashSet<i32> = [2, 3, 4].into_iter().collect();
+let union = set.union(&other);
+let intersection = set.intersection(&other);
+let difference = set.difference(&other);
+
+assert_eq!(union.len(), 4);        // {1, 2, 3, 4}
+assert_eq!(intersection.len(), 2); // {2, 3}
+assert_eq!(difference.len(), 1);   // {1}
+```
+
+#### PersistentTreeMap
+
+Ordered map with O(log N) operations using Red-Black Tree.
+
+```rust
+use lambars::persistent::PersistentTreeMap;
+
+let map = PersistentTreeMap::new()
+    .insert(3, "three")
+    .insert(1, "one")
+    .insert(2, "two");
+
+// Entries are always in sorted order
+let keys: Vec<&i32> = map.keys().collect();
+assert_eq!(keys, vec![&1, &2, &3]);
+
+// Range queries
+let range: Vec<(&i32, &&str)> = map.range(1..=2).collect();
+assert_eq!(range.len(), 2); // 1 and 2
+
+// Min/Max access
+assert_eq!(map.min(), Some((&1, &"one")));
+assert_eq!(map.max(), Some((&3, &"three")));
+```
+
+### Optics (`optics`)
+
+Composable accessors for immutable data manipulation.
+
+#### Lens
+
+Focus on a single field with get/set operations.
+
+```rust
+use lambars::optics::{Lens, FunctionLens};
+use lambars::lens;
+
+#[derive(Clone, PartialEq, Debug)]
+struct Address { street: String, city: String }
+
+#[derive(Clone, PartialEq, Debug)]
+struct Person { name: String, address: Address }
+
+// Create lenses using the macro
+let address_lens = lens!(Person, address);
+let street_lens = lens!(Address, street);
+
+// Compose lenses to focus on nested fields
+let person_street = address_lens.compose(street_lens);
+
+let person = Person {
+    name: "Alice".to_string(),
+    address: Address {
+        street: "Main St".to_string(),
+        city: "Tokyo".to_string(),
+    },
+};
+
+// Get nested field
+assert_eq!(*person_street.get(&person), "Main St");
+
+// Set nested field (returns new structure)
+let updated = person_street.set(person, "Oak Ave".to_string());
+assert_eq!(updated.address.street, "Oak Ave");
+assert_eq!(updated.address.city, "Tokyo"); // Other fields unchanged
+```
+
+#### Prism
+
+Focus on a variant of an enum.
+
+```rust
+use lambars::optics::{Prism, FunctionPrism};
+use lambars::prism;
+
+#[derive(Clone, PartialEq, Debug)]
+enum Shape {
+    Circle(f64),
+    Rectangle(f64, f64),
+}
+
+let circle_prism = prism!(Shape, Circle);
+
+let circle = Shape::Circle(5.0);
+assert_eq!(circle_prism.preview(&circle), Some(&5.0));
+
+let rect = Shape::Rectangle(3.0, 4.0);
+assert_eq!(circle_prism.preview(&rect), None);
+
+// Construct a value through the prism
+let constructed = circle_prism.review(10.0);
+assert!(matches!(constructed, Shape::Circle(r) if (r - 10.0).abs() < 1e-10));
+```
+
+#### Iso
+
+Bidirectional type conversions.
+
+```rust
+use lambars::optics::FunctionIso;
+
+// String <-> Vec<char> isomorphism
+let string_chars_iso = FunctionIso::new(
+    |s: String| s.chars().collect::<Vec<_>>(),
+    |chars: Vec<char>| chars.into_iter().collect::<String>(),
+);
+
+let original = "hello".to_string();
+let chars = string_chars_iso.get(original.clone());
+assert_eq!(chars, vec!['h', 'e', 'l', 'l', 'o']);
+
+// Roundtrip
+let back = string_chars_iso.reverse_get(chars);
+assert_eq!(back, original);
+```
+
+#### Traversal
+
+Focus on multiple elements.
+
+```rust
+use lambars::optics::{Traversal, VecTraversal};
+
+let traversal = VecTraversal::<i32>::new();
+let vec = vec![1, 2, 3, 4, 5];
+
+// Get all elements
+let all: Vec<&i32> = traversal.get_all(&vec);
+assert_eq!(all, vec![&1, &2, &3, &4, &5]);
+
+// Modify all elements
+let doubled = traversal.modify(vec, |x| x * 2);
+assert_eq!(doubled, vec![2, 4, 6, 8, 10]);
+```
+
+### Effect System (`effect`)
+
+Type-safe side effect handling with monads and transformers.
+
+#### IO Monad
+
+Defers side effects until explicitly executed.
+
+```rust
+use lambars::effect::IO;
+
+// Create and chain IO actions
+let io = IO::pure(10)
+    .fmap(|x| x * 2)
+    .flat_map(|x| IO::pure(x + 1));
+
+// Side effects don't occur until run_unsafe is called
+assert_eq!(io.run_unsafe(), 21);
+
+// IO with actual side effects
+let print_io = IO::print_line("Hello, World!");
+print_io.run_unsafe(); // Prints "Hello, World!"
+```
+
+#### Reader Monad
+
+Computations that read from an environment.
+
+```rust
+use lambars::effect::Reader;
+
+#[derive(Clone)]
+struct Config { multiplier: i32 }
+
+let computation = Reader::ask()
+    .flat_map(|config: Config| Reader::pure(config.multiplier * 10));
+
+let config = Config { multiplier: 5 };
+let result = computation.run(config);
+assert_eq!(result, 50);
+```
+
+#### State Monad
+
+Computations with mutable state.
+
+```rust
+use lambars::effect::State;
+
+let computation = State::get()
+    .flat_map(|state: i32| {
+        State::put(state + 10)
+            .then(State::get())
+    });
+
+let (result, final_state) = computation.run(5);
+assert_eq!(result, 15);
+assert_eq!(final_state, 15);
+```
+
+#### Writer Monad
+
+Computations that accumulate output.
+
+```rust
+use lambars::effect::Writer;
+
+let computation = Writer::tell(vec!["Starting".to_string()])
+    .then(Writer::pure(42))
+    .flat_map(|x| {
+        Writer::tell(vec![format!("Got {}", x)])
+            .then(Writer::pure(x * 2))
+    });
+
+let (result, log) = computation.run();
+assert_eq!(result, 84);
+assert_eq!(log, vec!["Starting", "Got 42"]);
+```
+
+#### MonadError
+
+Error handling abstraction.
+
+```rust
+use lambars::effect::MonadError;
+
+let computation: Result<i32, String> = Err("error".to_string());
+let recovered = <Result<i32, String>>::catch_error(computation, |e| {
+    Ok(e.len() as i32)
+});
+assert_eq!(recovered, Ok(5));
+```
+
+#### Monad Transformers
+
+Stack effects with transformers.
+
+```rust
+use lambars::effect::{ReaderT, StateT};
+
+// ReaderT adds Reader capabilities to Option
+let reader_t = ReaderT::<i32, Option<i32>>::ask_option()
+    .flat_map_option(|env| ReaderT::pure_option(env * 2));
+let result = reader_t.run_option(21);
+assert_eq!(result, Some(42));
+
+// StateT adds State capabilities to Result
+let state_t = StateT::<i32, Result<i32, String>>::get_result()
+    .flat_map_result(|s| StateT::pure_result(s * 2));
+let (result, state) = state_t.run_result(10).unwrap();
+assert_eq!(result, 20);
+assert_eq!(state, 10);
+```
+
+#### eff! Macro (Do-Notation)
+
+Convenient syntax for monadic computations.
+
+```rust
+use lambars::eff;
+use lambars::typeclass::Monad;
+
+let result = eff! {
+    x <= Some(5);
+    y <= Some(10);
+    let z = x + y;
+    Some(z * 2)
+};
+assert_eq!(result, Some(30));
+
+// Short-circuits on None
+let result = eff! {
+    x <= Some(5);
+    y <= None::<i32>;
+    Some(x + y)
+};
+assert_eq!(result, None);
+```
+
+## Safety
+
+This library is built with safety in mind:
+
+- `#![forbid(unsafe_code)]` - No unsafe code
+- `#![warn(clippy::all, clippy::pedantic, clippy::nursery)]` - Strict linting
+- Comprehensive test coverage with property-based testing
+
+## License
+
+Licensed under either of:
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+
+at your option.
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
