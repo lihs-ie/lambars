@@ -601,7 +601,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
             (Node::Bitmap { bitmap, children }, added)
         } else {
             // Different indices - create bitmap with two children
-            // Use array literal + collect() to avoid intermediate Vec allocation
+            // Use array literal + collect() for efficient small array construction
             let bitmap = (1u32 << existing_index) | (1u32 << new_index);
             let children: Rc<[Child<K, V>]> = if existing_index < new_index {
                 [
