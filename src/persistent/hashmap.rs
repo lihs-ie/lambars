@@ -443,8 +443,9 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
 
     /// Builds a new child array with the element at the specified position updated.
     ///
-    /// Uses `Iterator::collect()` to directly construct `Rc<[Child]>` without
-    /// intermediate `Vec` allocation.
+    /// Uses `Iterator::collect()` to construct `Rc<[Child]>` in a single step,
+    /// avoiding the pattern of manually creating a `Vec`, mutating it, and then
+    /// converting it to `Rc`.
     ///
     /// # Arguments
     /// * `children` - The current child array
