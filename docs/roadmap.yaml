@@ -1,7 +1,7 @@
 # lambars プロジェクト ロードマップ
 # Rust で関数型プログラミングを実現するためのライブラリ開発計画
 
-version: "1.2.0"
+version: "1.3.0"
 last_updated: "2026-01-03"
 
 # プロジェクト概要
@@ -1021,6 +1021,50 @@ phases:
           22個のユニットテスト、10個のプロパティテスト、13個の統合テストを追加。
           Scala の recommendation_feed 例を正確に再現。
           PersistentList, PersistentVector, PersistentHashMap との統合も確認。
+
+  - id: phase_11
+    name: 非同期 for-comprehension マクロ
+    name_en: Async For-Comprehension Macro
+    status: completed
+    started_at: "2026-01-03"
+    completed_at: "2026-01-03"
+    description: |
+      for_! マクロの非同期対応版として for_async! マクロを実装。
+      AsyncIO を含むイテレーションを宣言的に記述可能にする。
+    dependencies:
+      - phase_7
+      - phase_10
+    notes: |
+      for_! が Vec<T> を返すのに対し、for_async! は AsyncIO<Vec<T>> を返す。
+      遅延評価を維持し、run_async().await まで実行されない。
+      <= でコレクションバインド、<~ で AsyncIO バインドを区別。
+      eff_async! は FnOnce ベースの AsyncIO チェーン用、
+      for_async! は FnMut を要求するイテレータ + AsyncIO の組み合わせ用。
+    deliverables:
+      - id: for_async_macro
+        name: for_async! マクロ
+        description: |
+          非同期リスト内包表記を実現するマクロ。
+          以下の構文をサポート:
+          - pattern <= collection; によるコレクションからのイテレーション
+          - pattern <~ async_io; による AsyncIO からのバインド
+          - let pattern = expr; による中間値束縛
+          - yield expr による結果収集（Vec に収集）
+          戻り値は AsyncIO<Vec<T>> で遅延評価を維持。
+        status: completed
+        priority: critical
+        artifacts:
+          - src/compose/for_async_macro.rs
+          - tests/for_async_macro_tests.rs
+          - tests/for_async_macro_laws.rs
+          - tests/for_async_macro_integration.rs
+          - docs/phase_11_requirements/phase_11_1_for_async_macro.yaml
+          - docs/phase_11_implementation_plans/phase_11_1_for_async_macro.yaml
+        results: |
+          for_async! マクロ実装完了。
+          25個のユニットテスト、6個のプロパティテスト、14個の統合テストを追加。
+          eff_async! との統合、PersistentVector との統合も確認。
+          遅延評価を維持し、AsyncIO の合成（fmap, flat_map）も可能。
 
 # ステータス定義
 status_definitions:

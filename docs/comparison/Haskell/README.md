@@ -46,6 +46,7 @@ This document provides a comprehensive comparison between Haskell functional pro
 | Either | `Either e a` | `Result<A, E>` (std) |
 | Do-notation (Monad) | `do { ... }` | `eff!` macro |
 | List comprehension | `[x | x <- xs]` | `for_!` macro |
+| Async list comprehension | `do` + `async` / `ListT IO` | `for_async!` macro |
 | Function composition | `.` and `>>>` | `compose!` macro |
 | Pipe | `&` | `pipe!` macro |
 | Lens | `Control.Lens` | `Lens` trait |
@@ -960,6 +961,8 @@ let triples: Vec<(i32, i32, i32)> = for_! {
 | List generation | `for_!` | Supports multiple iterations with yield |
 | Cartesian products | `for_!` | Nested iteration |
 | Database-style queries | `eff!` | Monadic error handling |
+| Async list generation | `for_async!` | Async iteration with yield |
+| Async operations in loops | `for_async!` | Uses `<~` for AsyncIO binding |
 
 ---
 

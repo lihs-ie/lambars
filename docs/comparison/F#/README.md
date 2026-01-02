@@ -29,6 +29,7 @@ This document provides a comprehensive comparison between F# functional programm
 | Composition | `>>` | `compose!` macro |
 | Computation expressions | `async { }`, `result { }` | `eff!` macro |
 | List comprehension | `[ for ... ]`, `seq { }` | `for_!` macro |
+| Async list comprehension | `async { for ... }` | `for_async!` macro |
 | Active patterns | `(|Pattern|_|)` | `Prism` |
 | Lenses | via libraries | `Lens`, `lens!` macro |
 | Monoid | `+` operator overloading | `Semigroup`, `Monoid` traits |

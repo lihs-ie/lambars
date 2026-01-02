@@ -1,0 +1,1285 @@
+# Phase 11.1: for_async! マクロ - 実装計画
+# 要件定義: docs/phase_11_requirements/phase_11_1_for_async_macro.yaml
+
+version: "1.0.0"
+created_at: "2026-01-03"
+phase_id: phase_11_1
+phase_name: for_async! マクロ実装計画
+phase_name_en: for_async! Macro Implementation Plan
+
+# =============================================================================
+# 実装概要（Implementation Overview）
+# =============================================================================
+
+implementation_overview:
+  description: |
+    `for_!` マクロの非同期版として `for_async!` マクロを TDD で実装する。
+    コレクションの各要素に対して非同期操作を実行し、結果を `AsyncIO<Vec<T>>` として返す。
+
+    実装は以下の順序で行う:
+    1. ファイル構造の作成
+    2. 各機能の Red-Green-Refactor サイクル
+    3. プロパティベーステスト
+    4. 統合テスト
+    5. ドキュメント整備
+
+  design_principles:
+    - 既存の `for_!` および `eff_async!` マクロとの一貫性を維持
+    - `async` feature flag の下でのみ有効化
+    - 遅延評価の原則を維持（run_async() まで実行されない）
+    - "#![forbid(unsafe_code)] ポリシーを遵守"
+    - Rust のマクロパターンマッチングの制約を考慮
+
+  key_design_decisions:
+    - id: DD-001
+      name: マクロ展開戦略
+      description: |
+        `for_async!` は `AsyncIO::new(|| async { ... })` にラップして展開する。
+        イテレーションと AsyncIO バインドを統一的に処理するため、
+        全てのバインド（<= 演算子）に対して以下のロジックを適用:
+
+        1. コレクションバインド: for ループでイテレート
+        2. yield: 結果を __results に push
+
+        AsyncIO バインドの識別は構文的には困難なため、
+        `<=` による全てのバインドをイテレータとして扱い、
+        AsyncIO からの値取り出しには `.run_async().await` を使用するパターンを
+        ユーザーに提供する（または専用の構文を検討）。
+
+    - id: DD-002
+      name: AsyncIO バインドの識別問題
+      description: |
+        Rust のマクロでは、`x <= expr` において expr が IntoIterator か
+        AsyncIO かを構文的に区別できない。
+
+        解決策として以下のアプローチを採用:
+        - コレクションバインド: `pattern <= collection;`（for ループ展開）
+        - AsyncIO バインド: `pattern <~ async_io;`（await 展開）
+
+        `<~` を AsyncIO 専用のバインド演算子として導入することで、
+        構文的に明確に区別可能にする。
+
+    - id: DD-003
+      name: 順次実行と遅延評価
+      description: |
+        for_async! の結果は AsyncIO<Vec<T>> であり:
+        - run_async() が呼ばれるまで実行されない（遅延評価）
+        - 各要素に対する非同期操作は順次実行される
+        - 並列実行は将来の拡張として検討（for_async_parallel!）
+
+# =============================================================================
+# ファイル構造（File Structure）
+# =============================================================================
+
+file_structure:
+  source_files:
+    - path: src/compose/for_async_macro.rs
+      description: |
+        for_async! マクロの定義ファイル。
+        モジュールドキュメント、マクロ定義、インラインテストを含む。
+        #[cfg(feature = "async")] で条件付きコンパイル。
+      content_outline:
+        - モジュールドキュメント（//! ...）
+        - "#![forbid(unsafe_code)]"
+        - "#[macro_export]"
+        - macro_rules! for_async
+        - "#[cfg(test)] mod tests（tokio::test を使用）"
+
+    - path: src/compose/mod.rs
+      description: |
+        compose モジュールの公開設定。
+        for_async_macro モジュールの条件付き追加。
+      changes:
+        - add_conditional_module: |
+            #[cfg(feature = "async")]
+            mod for_async_macro;
+          after: "mod for_macro;"
+
+    - path: src/lib.rs
+      description: |
+        ライブラリルートでの再エクスポート。
+        for_async! マクロは #[macro_export] により自動的にクレートルートに配置される。
+        条件付きエクスポートの設定は不要（マクロ内で #[cfg] を使用）。
+      changes: []
+      notes: |
+        #[macro_export] マクロはクレートルートに自動配置されるため、
+        src/lib.rs への明示的な変更は不要。
+        ただし、マクロ定義自体を #[cfg(feature = "async")] で囲む。
+
+  test_files:
+    - path: tests/for_async_macro_tests.rs
+      description: |
+        for_async! マクロのユニットテスト。
+        #![cfg(feature = "async")] で条件付きコンパイル。
+        tokio::test を使用した非同期テスト。
+
+    - path: tests/for_async_macro_laws.rs
+      description: |
+        for_async! マクロのプロパティベーステスト。
+        proptest フレームワークを使用。
+        for_! との等価性を検証。
+
+    - path: tests/for_async_macro_integration.rs
+      description: |
+        for_async! マクロと eff_async!、永続データ構造の統合テスト。
+
+# =============================================================================
+# マクロ実装詳細（Macro Implementation Details）
+# =============================================================================
+
+macro_implementation:
+  macro_name: for_async
+  export_attribute: "#[macro_export]"
+  cfg_attribute: '#[cfg(feature = "async")]'
+
+  pattern_matching_order: |
+    Rust の macro_rules! はパターンを上から順にマッチングする。
+    より具体的なパターンを先に、より一般的なパターンを後に配置する。
+
+    順序:
+    1. yield（終端、最も優先）
+    2. AsyncIO バインド（<~ 演算子）
+    3. コレクションバインド（<= 演算子）
+       3.1. ident パターン
+       3.2. タプルパターン
+       3.3. ワイルドカードパターン
+    4. let バインディング
+       4.1. ident パターン
+       4.2. タプルパターン
+
+  rules:
+    - id: rule_1_yield
+      name: yield 終端ルール
+      priority: 1
+      description: |
+        for comprehension の終端。yield 式を __results.push() に展開。
+        このルールは再帰の基底ケースとなる。
+      pattern: "(yield $result:expr)"
+      expansion: "__results.push($result);"
+      example:
+        input: "yield x * 2"
+        output: "__results.push(x * 2);"
+      notes: |
+        実際の展開では、yield は AsyncIO::new 内の async ブロック内で
+        __results に push する形になる。
+
+    - id: rule_2_async_bind_ident
+      name: AsyncIO バインド（識別子パターン）
+      priority: 2
+      description: |
+        AsyncIO からの値取り出し。.run_async().await に展開。
+        <~ 演算子を使用して AsyncIO バインドを明示。
+      pattern: "($pattern:ident <~ $async_io:expr ; $($rest:tt)+)"
+      expansion: |
+        let $pattern = $async_io.run_async().await;
+        $crate::for_async!(@inner __results; $($rest)+)
+      example:
+        input: |
+          for_async! {
+              x <= vec![1, 2, 3];
+              data <~ fetch_async(x);
+              yield data
+          }
+        output: |
+          AsyncIO::new(move || async move {
+              let mut __results = Vec::new();
+              for x in vec![1, 2, 3].into_iter() {
+                  let data = fetch_async(x).run_async().await;
+                  __results.push(data);
+              }
+              __results
+          })
+
+    - id: rule_3_async_bind_tuple
+      name: AsyncIO バインド（タプルパターン）
+      priority: 3
+      description: |
+        AsyncIO からタプルで値を取り出す。
+      pattern: "(($($pattern:tt)*) <~ $async_io:expr ; $($rest:tt)+)"
+      expansion: |
+        let ($($pattern)*) = $async_io.run_async().await;
+        $crate::for_async!(@inner __results; $($rest)+)
+
+    - id: rule_4_async_bind_wildcard
+      name: AsyncIO バインド（ワイルドカード）
+      priority: 4
+      description: |
+        AsyncIO の結果を無視。副作用のみを実行。
+      pattern: "(_ <~ $async_io:expr ; $($rest:tt)+)"
+      expansion: |
+        let _ = $async_io.run_async().await;
+        $crate::for_async!(@inner __results; $($rest)+)
+
+    - id: rule_5_bind_ident
+      name: コレクションバインド（識別子パターン）
+      priority: 5
+      description: |
+        コレクションからの要素取り出し（識別子パターン）。
+        for ループに展開し、ネストして残りを処理。
+      pattern: "($pattern:ident <= $collection:expr ; $($rest:tt)+)"
+      expansion: |
+        for $pattern in $collection.into_iter() {
+            $crate::for_async!(@inner __results; $($rest)+)
+        }
+      example:
+        input: |
+          for_async! {
+              x <= vec![1, 2, 3];
+              yield x * 2
+          }
+        output: |
+          AsyncIO::new(move || async move {
+              let mut __results = Vec::new();
+              for x in vec![1, 2, 3].into_iter() {
+                  __results.push(x * 2);
+              }
+              __results
+          })
+
+    - id: rule_6_bind_tuple
+      name: コレクションバインド（タプルパターン）
+      priority: 6
+      description: |
+        コレクションからタプルを取り出して分解。
+      pattern: "(($($pattern:tt)*) <= $collection:expr ; $($rest:tt)+)"
+      expansion: |
+        for ($($pattern)*) in $collection.into_iter() {
+            $crate::for_async!(@inner __results; $($rest)+)
+        }
+
+    - id: rule_7_bind_wildcard
+      name: コレクションバインド（ワイルドカード）
+      priority: 7
+      description: |
+        コレクションの要素を無視してイテレーション回数分処理。
+      pattern: "(_ <= $collection:expr ; $($rest:tt)+)"
+      expansion: |
+        for _ in $collection.into_iter() {
+            $crate::for_async!(@inner __results; $($rest)+)
+        }
+
+    - id: rule_8_let_ident
+      name: let バインディング（識別子）
+      priority: 8
+      description: |
+        純粋な let バインディング。
+      pattern: "(let $pattern:ident = $expr:expr ; $($rest:tt)+)"
+      expansion: |
+        let $pattern = $expr;
+        $crate::for_async!(@inner __results; $($rest)+)
+
+    - id: rule_9_let_tuple
+      name: let バインディング（タプル）
+      priority: 9
+      description: |
+        タプルパターンによる let バインディング。
+      pattern: "(let ($($pattern:tt)*) = $expr:expr ; $($rest:tt)+)"
+      expansion: |
+        let ($($pattern)*) = $expr;
+        $crate::for_async!(@inner __results; $($rest)+)
+
+  complete_macro_definition: |
+    /// A macro for Scala-style for-comprehension over iterators with async support.
+    ///
+    /// This macro allows you to write nested iterations with async operations
+    /// in a flat, declarative style. The result is wrapped in `AsyncIO<Vec<T>>`,
+    /// ensuring deferred execution and referential transparency.
+    ///
+    /// # Syntax
+    ///
+    /// ```text
+    /// for_async! {
+    ///     pattern <= collection;           // Bind: iterate over collection
+    ///     pattern <~ async_io_expression;  // Async Bind: await AsyncIO result
+    ///     let pattern = expression;        // Pure let binding
+    ///     yield expression                 // Final expression (collected in Vec)
+    /// }
+    /// ```
+    ///
+    /// # Operators
+    ///
+    /// - `<=`: Collection bind - iterates over an `IntoIterator`
+    /// - `<~`: AsyncIO bind - awaits an `AsyncIO` and binds the result
+    ///
+    /// # Examples
+    ///
+    /// ## Basic iteration
+    ///
+    /// ```rust,ignore
+    /// use lambars::for_async;
+    /// use lambars::effect::AsyncIO;
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let result = for_async! {
+    ///         x <= vec![1, 2, 3];
+    ///         yield x * 2
+    ///     };
+    ///     assert_eq!(result.run_async().await, vec![2, 4, 6]);
+    /// }
+    /// ```
+    ///
+    /// ## With async operations
+    ///
+    /// ```rust,ignore
+    /// use lambars::for_async;
+    /// use lambars::effect::AsyncIO;
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let result = for_async! {
+    ///         x <= vec![1, 2, 3];
+    ///         data <~ AsyncIO::pure(x * 10);  // AsyncIO bind
+    ///         let processed = data + 1;
+    ///         yield processed
+    ///     };
+    ///     assert_eq!(result.run_async().await, vec![11, 21, 31]);
+    /// }
+    /// ```
+    ///
+    /// ## Nested iteration
+    ///
+    /// ```rust,ignore
+    /// use lambars::for_async;
+    /// use lambars::effect::AsyncIO;
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let result = for_async! {
+    ///         x <= vec![1, 2];
+    ///         y <= vec![10, 20];
+    ///         yield x + y
+    ///     };
+    ///     assert_eq!(result.run_async().await, vec![11, 21, 12, 22]);
+    /// }
+    /// ```
+    ///
+    /// # Deferred Execution
+    ///
+    /// The returned `AsyncIO<Vec<T>>` is lazily evaluated. No computation
+    /// occurs until `run_async().await` is called.
+    ///
+    /// # Note on Clone
+    ///
+    /// When using outer variables in inner iterations, explicit `.clone()` is required,
+    /// consistent with the synchronous `for_!` macro.
+    #[cfg(feature = "async")]
+    #[macro_export]
+    macro_rules! for_async {
+        // ==========================================================================
+        // Entry point: wrap everything in AsyncIO::new
+        // ==========================================================================
+
+        // Entry with collection bind (identifier pattern)
+        ($pattern:ident <= $collection:expr ; $($rest:tt)+) => {{
+            $crate::effect::AsyncIO::new(move || async move {
+                let mut __results = Vec::new();
+                for $pattern in $collection.into_iter() {
+                    $crate::for_async!(@inner __results; $($rest)+);
+                }
+                __results
+            })
+        }};
+
+        // Entry with collection bind (tuple pattern)
+        (($($pattern:tt)*) <= $collection:expr ; $($rest:tt)+) => {{
+            $crate::effect::AsyncIO::new(move || async move {
+                let mut __results = Vec::new();
+                for ($($pattern)*) in $collection.into_iter() {
+                    $crate::for_async!(@inner __results; $($rest)+);
+                }
+                __results
+            })
+        }};
+
+        // Entry with collection bind (wildcard pattern)
+        (_ <= $collection:expr ; $($rest:tt)+) => {{
+            $crate::effect::AsyncIO::new(move || async move {
+                let mut __results = Vec::new();
+                for _ in $collection.into_iter() {
+                    $crate::for_async!(@inner __results; $($rest)+);
+                }
+                __results
+            })
+        }};
+
+        // ==========================================================================
+        // Internal rules (@inner): process the rest of the comprehension
+        // ==========================================================================
+
+        // Terminal case: yield expression
+        (@inner $results:ident; yield $result:expr) => {{
+            $results.push($result);
+        }};
+
+        // AsyncIO bind with identifier pattern
+        (@inner $results:ident; $pattern:ident <~ $async_io:expr ; $($rest:tt)+) => {{
+            let $pattern = $async_io.run_async().await;
+            $crate::for_async!(@inner $results; $($rest)+);
+        }};
+
+        // AsyncIO bind with tuple pattern
+        (@inner $results:ident; ($($pattern:tt)*) <~ $async_io:expr ; $($rest:tt)+) => {{
+            let ($($pattern)*) = $async_io.run_async().await;
+            $crate::for_async!(@inner $results; $($rest)+);
+        }};
+
+        // AsyncIO bind with wildcard pattern
+        (@inner $results:ident; _ <~ $async_io:expr ; $($rest:tt)+) => {{
+            let _ = $async_io.run_async().await;
+            $crate::for_async!(@inner $results; $($rest)+);
+        }};
+
+        // Collection bind with identifier pattern
+        (@inner $results:ident; $pattern:ident <= $collection:expr ; $($rest:tt)+) => {{
+            for $pattern in $collection.into_iter() {
+                $crate::for_async!(@inner $results; $($rest)+);
+            }
+        }};
+
+        // Collection bind with tuple pattern
+        (@inner $results:ident; ($($pattern:tt)*) <= $collection:expr ; $($rest:tt)+) => {{
+            for ($($pattern)*) in $collection.into_iter() {
+                $crate::for_async!(@inner $results; $($rest)+);
+            }
+        }};
+
+        // Collection bind with wildcard pattern
+        (@inner $results:ident; _ <= $collection:expr ; $($rest:tt)+) => {{
+            for _ in $collection.into_iter() {
+                $crate::for_async!(@inner $results; $($rest)+);
+            }
+        }};
+
+        // Pure let binding with identifier
+        (@inner $results:ident; let $pattern:ident = $expr:expr ; $($rest:tt)+) => {{
+            let $pattern = $expr;
+            $crate::for_async!(@inner $results; $($rest)+);
+        }};
+
+        // Pure let binding with tuple pattern
+        (@inner $results:ident; let ($($pattern:tt)*) = $expr:expr ; $($rest:tt)+) => {{
+            let ($($pattern)*) = $expr;
+            $crate::for_async!(@inner $results; $($rest)+);
+        }};
+    }
+
+# =============================================================================
+# TDD 実装ステップ（TDD Implementation Steps）
+# =============================================================================
+
+tdd_steps:
+  overview: |
+    TDD の Red-Green-Refactor サイクルに従って実装を進める。
+    各ステップで:
+    1. Red: 失敗するテストを書く
+    2. Green: テストを通す最小限の実装を行う
+    3. Refactor: コードを整理する
+
+  steps:
+    - step: 1
+      name: プロジェクト構造の準備
+      type: setup
+      description: |
+        ファイルの作成とモジュールの設定を行う。
+      tasks:
+        - task: src/compose/for_async_macro.rs を作成（空のモジュール）
+        - task: src/compose/mod.rs に条件付き for_async_macro モジュールを追加
+        - task: tests/for_async_macro_tests.rs を作成（空のテストファイル）
+      verification: |
+        cargo check --features async が成功すること
+
+    - step: 2
+      name: 基本的なイテレーション（yield 終端）の実装
+      type: red_green_refactor
+      priority: critical
+      tests:
+        - name: test_single_iteration_vec
+          code: |
+            #![cfg(feature = "async")]
+            use lambars::for_async;
+            use lambars::effect::AsyncIO;
+
+            #[tokio::test]
+            async fn test_single_iteration_vec() {
+                let result = for_async! {
+                    x <= vec![1, 2, 3];
+                    yield x * 2
+                };
+                assert_eq!(result.run_async().await, vec![2, 4, 6]);
+            }
+
+        - name: test_single_iteration_array
+          code: |
+            #[tokio::test]
+            async fn test_single_iteration_array() {
+                let result = for_async! {
+                    x <= [1, 2, 3];
+                    yield x + 10
+                };
+                assert_eq!(result.run_async().await, vec![11, 12, 13]);
+            }
+
+        - name: test_single_iteration_range
+          code: |
+            #[tokio::test]
+            async fn test_single_iteration_range() {
+                let result = for_async! {
+                    x <= 1..4;
+                    yield x * x
+                };
+                assert_eq!(result.run_async().await, vec![1, 4, 9]);
+            }
+      implementation: |
+        エントリポイントルールと yield 終端ルールを実装。
+        AsyncIO::new(move || async move { ... }) でラップ。
+      verification: |
+        cargo test --features async test_single_iteration が成功すること
+
+    - step: 3
+      name: ネストイテレーションの実装
+      type: red_green_refactor
+      priority: critical
+      tests:
+        - name: test_nested_iteration_two_levels
+          code: |
+            #[tokio::test]
+            async fn test_nested_iteration_two_levels() {
+                let result = for_async! {
+                    x <= vec![1, 2];
+                    y <= vec![10, 20];
+                    yield x + y
+                };
+                assert_eq!(result.run_async().await, vec![11, 21, 12, 22]);
+            }
+
+        - name: test_nested_iteration_three_levels
+          code: |
+            #[tokio::test]
+            async fn test_nested_iteration_three_levels() {
+                let result = for_async! {
+                    x <= vec![1, 2];
+                    y <= vec![10, 20];
+                    z <= vec![100, 200];
+                    yield x + y + z
+                };
+                assert_eq!(result.run_async().await, vec![111, 211, 121, 221, 112, 212, 122, 222]);
+            }
+      implementation: |
+        @inner ルールでコレクションバインドを再帰的に処理。
+        内側のバインドは for ループとしてネストされる。
+      verification: |
+        cargo test --features async test_nested_iteration が成功すること
+
+    - step: 4
+      name: AsyncIO バインド（<~ 演算子）の実装
+      type: red_green_refactor
+      priority: critical
+      tests:
+        - name: test_async_bind_simple
+          code: |
+            #[tokio::test]
+            async fn test_async_bind_simple() {
+                let result = for_async! {
+                    x <= vec![1, 2, 3];
+                    doubled <~ AsyncIO::pure(x * 2);
+                    yield doubled
+                };
+                assert_eq!(result.run_async().await, vec![2, 4, 6]);
+            }
+
+        - name: test_async_bind_multiple
+          code: |
+            #[tokio::test]
+            async fn test_async_bind_multiple() {
+                let result = for_async! {
+                    x <= vec![1, 2];
+                    y <~ AsyncIO::pure(x * 10);
+                    z <~ AsyncIO::pure(y + 1);
+                    yield z
+                };
+                assert_eq!(result.run_async().await, vec![11, 21]);
+            }
+
+        - name: test_async_bind_with_collection
+          code: |
+            #[tokio::test]
+            async fn test_async_bind_with_collection() {
+                let result = for_async! {
+                    x <= vec![1, 2];
+                    y <= vec![10, 20];
+                    sum <~ AsyncIO::pure(x + y);
+                    yield sum
+                };
+                assert_eq!(result.run_async().await, vec![11, 21, 12, 22]);
+            }
+      implementation: |
+        <~ 演算子用のマクロルールを追加。
+        $async_io.run_async().await に展開。
+      verification: |
+        cargo test --features async test_async_bind が成功すること
+
+    - step: 5
+      name: タプルパターンの実装
+      type: red_green_refactor
+      priority: high
+      tests:
+        - name: test_tuple_pattern_collection
+          code: |
+            #[tokio::test]
+            async fn test_tuple_pattern_collection() {
+                let pairs = vec![(1, "a"), (2, "b"), (3, "c")];
+                let result = for_async! {
+                    (num, letter) <= pairs;
+                    yield format!("{}{}", num, letter)
+                };
+                assert_eq!(result.run_async().await, vec!["1a", "2b", "3c"]);
+            }
+
+        - name: test_tuple_pattern_async_bind
+          code: |
+            #[tokio::test]
+            async fn test_tuple_pattern_async_bind() {
+                let result = for_async! {
+                    x <= vec![1, 2];
+                    (a, b) <~ AsyncIO::pure((x, x * 10));
+                    yield a + b
+                };
+                assert_eq!(result.run_async().await, vec![11, 22]);
+            }
+
+        - name: test_tuple_pattern_nested
+          code: |
+            #[tokio::test]
+            async fn test_tuple_pattern_nested() {
+                let nested = vec![((1, 2), "a"), ((3, 4), "b")];
+                let result = for_async! {
+                    ((x, y), label) <= nested;
+                    yield format!("{}: ({}, {})", label, x, y)
+                };
+                assert_eq!(result.run_async().await, vec!["a: (1, 2)", "b: (3, 4)"]);
+            }
+      implementation: |
+        タプルパターン用のマクロルールを追加。
+        エントリポイントと @inner 両方に対応。
+      verification: |
+        cargo test --features async test_tuple_pattern が成功すること
+
+    - step: 6
+      name: ワイルドカードパターンの実装
+      type: red_green_refactor
+      priority: medium
+      tests:
+        - name: test_wildcard_collection
+          code: |
+            #[tokio::test]
+            async fn test_wildcard_collection() {
+                let pairs = vec![(1, "a"), (2, "b"), (3, "c")];
+                let result = for_async! {
+                    (_, letter) <= pairs;
+                    yield letter.to_uppercase()
+                };
+                assert_eq!(result.run_async().await, vec!["A", "B", "C"]);
+            }
+
+        - name: test_wildcard_full_element
+          code: |
+            #[tokio::test]
+            async fn test_wildcard_full_element() {
+                let result = for_async! {
+                    _ <= vec![1, 2, 3];
+                    yield "x"
+                };
+                assert_eq!(result.run_async().await, vec!["x", "x", "x"]);
+            }
+
+        - name: test_wildcard_async_bind
+          code: |
+            #[tokio::test]
+            async fn test_wildcard_async_bind() {
+                let result = for_async! {
+                    x <= vec![1, 2, 3];
+                    _ <~ AsyncIO::pure("ignored");
+                    yield x
+                };
+                assert_eq!(result.run_async().await, vec![1, 2, 3]);
+            }
+      implementation: |
+        ワイルドカードパターン用のマクロルールを追加。
+      verification: |
+        cargo test --features async test_wildcard が成功すること
+
+    - step: 7
+      name: let バインディングの実装
+      type: red_green_refactor
+      priority: high
+      tests:
+        - name: test_let_binding_simple
+          code: |
+            #[tokio::test]
+            async fn test_let_binding_simple() {
+                let result = for_async! {
+                    x <= vec![1, 2, 3];
+                    let doubled = x * 2;
+                    yield doubled
+                };
+                assert_eq!(result.run_async().await, vec![2, 4, 6]);
+            }
+
+        - name: test_let_binding_with_async
+          code: |
+            #[tokio::test]
+            async fn test_let_binding_with_async() {
+                let result = for_async! {
+                    x <= vec![1, 2, 3];
+                    data <~ AsyncIO::pure(x * 10);
+                    let processed = data + 1;
+                    yield processed
+                };
+                assert_eq!(result.run_async().await, vec![11, 21, 31]);
+            }
+
+        - name: test_let_binding_multiple
+          code: |
+            #[tokio::test]
+            async fn test_let_binding_multiple() {
+                let result = for_async! {
+                    x <= vec![1, 2, 3];
+                    let doubled = x * 2;
+                    let squared = doubled * doubled;
+                    yield squared
+                };
+                assert_eq!(result.run_async().await, vec![4, 16, 36]);
+            }
+
+        - name: test_let_tuple_binding
+          code: |
+            #[tokio::test]
+            async fn test_let_tuple_binding() {
+                let result = for_async! {
+                    pair <= vec![(1, 2), (3, 4), (5, 6)];
+                    let (a, b) = pair;
+                    yield a + b
+                };
+                assert_eq!(result.run_async().await, vec![3, 7, 11]);
+            }
+      implementation: |
+        let バインディング用のマクロルールを追加。
+      verification: |
+        cargo test --features async test_let_binding が成功すること
+
+    - step: 8
+      name: 空のコレクションテスト
+      type: red_green_refactor
+      priority: high
+      tests:
+        - name: test_empty_source_collection
+          code: |
+            #[tokio::test]
+            async fn test_empty_source_collection() {
+                let empty: Vec<i32> = vec![];
+                let result = for_async! {
+                    x <= empty;
+                    yield x * 2
+                };
+                assert_eq!(result.run_async().await, Vec::<i32>::new());
+            }
+
+        - name: test_empty_nested_collection
+          code: |
+            #[tokio::test]
+            async fn test_empty_nested_collection() {
+                let result = for_async! {
+                    x <= vec![1, 2, 3];
+                    y <= if x == 2 { vec![] } else { vec![x] };
+                    yield y
+                };
+                assert_eq!(result.run_async().await, vec![1, 3]);
+            }
+      implementation: |
+        既存の実装で空のコレクションを正しく処理。
+        for ループにより空のイテレータは何も push しない。
+      verification: |
+        cargo test --features async test_empty が成功すること
+
+    - step: 9
+      name: 遅延評価テスト
+      type: red_green_refactor
+      priority: critical
+      tests:
+        - name: test_deferred_execution
+          code: |
+            use std::sync::atomic::{AtomicBool, Ordering};
+            use std::sync::Arc;
+
+            #[tokio::test]
+            async fn test_deferred_execution() {
+                let executed = Arc::new(AtomicBool::new(false));
+                let executed_clone = executed.clone();
+
+                let result = for_async! {
+                    x <= vec![1, 2, 3];
+                    _ <~ AsyncIO::new(move || {
+                        let flag = executed_clone.clone();
+                        async move {
+                            flag.store(true, Ordering::SeqCst);
+                        }
+                    });
+                    yield x
+                };
+
+                // まだ実行されていない
+                assert!(!executed.load(Ordering::SeqCst));
+
+                // 実行
+                let _ = result.run_async().await;
+                assert!(executed.load(Ordering::SeqCst));
+            }
+      implementation: |
+        遅延評価は AsyncIO::new のラッピングにより自動的に保証される。
+      verification: |
+        cargo test --features async test_deferred_execution が成功すること
+
+    - step: 10
+      name: 合成テスト（fmap, flat_map）
+      type: red_green_refactor
+      priority: high
+      tests:
+        - name: test_fmap_composition
+          code: |
+            #[tokio::test]
+            async fn test_fmap_composition() {
+                let result = for_async! {
+                    x <= vec![1, 2, 3];
+                    yield x * 2
+                }.fmap(|vec| vec.into_iter().sum::<i32>());
+
+                assert_eq!(result.run_async().await, 12);
+            }
+
+        - name: test_flat_map_composition
+          code: |
+            #[tokio::test]
+            async fn test_flat_map_composition() {
+                let result = for_async! {
+                    x <= vec![1, 2, 3];
+                    yield x * 2
+                }.flat_map(|vec| AsyncIO::pure(vec.len()));
+
+                assert_eq!(result.run_async().await, 3);
+            }
+      implementation: |
+        for_async! の結果は AsyncIO<Vec<T>> であり、
+        fmap, flat_map などのメソッドが自動的に使用可能。
+      verification: |
+        cargo test --features async test_composition が成功すること
+
+    - step: 11
+      name: プロパティベーステストの実装
+      type: test
+      priority: high
+      location: tests/for_async_macro_laws.rs
+      tests:
+        - name: prop_single_iteration_equivalence
+          description: |
+            単一イテレーションは同期版 for_! と同等の結果を返す
+          code: |
+            #![cfg(feature = "async")]
+            use proptest::prelude::*;
+            use lambars::for_;
+            use lambars::for_async;
+            use lambars::effect::AsyncIO;
+
+            proptest! {
+                #[test]
+                fn prop_single_iteration_equivalence(elements in prop::collection::vec(any::<i32>(), 0..50)) {
+                    let runtime = tokio::runtime::Runtime::new().unwrap();
+                    let f = |x: i32| x.wrapping_mul(2);
+
+                    let sync_result = for_! {
+                        x <= elements.clone();
+                        yield f(x)
+                    };
+
+                    let async_result = runtime.block_on(async {
+                        for_async! {
+                            x <= elements.clone();
+                            yield f(x)
+                        }.run_async().await
+                    });
+
+                    prop_assert_eq!(sync_result, async_result);
+                }
+            }
+
+        - name: prop_nested_iteration_equivalence
+          description: |
+            ネストイテレーションは同期版と同等の結果を返す
+          code: |
+            proptest! {
+                #[test]
+                fn prop_nested_iteration_equivalence(
+                    xs in prop::collection::vec(any::<i32>(), 0..10),
+                    ys in prop::collection::vec(any::<i32>(), 0..10)
+                ) {
+                    let runtime = tokio::runtime::Runtime::new().unwrap();
+
+                    let ys_clone = ys.clone();
+                    let sync_result = for_! {
+                        x <= xs.clone();
+                        y <= ys_clone.clone();
+                        yield (x, y)
+                    };
+
+                    let ys_clone2 = ys.clone();
+                    let async_result = runtime.block_on(async {
+                        for_async! {
+                            x <= xs.clone();
+                            y <= ys_clone2.clone();
+                            yield (x, y)
+                        }.run_async().await
+                    });
+
+                    prop_assert_eq!(sync_result, async_result);
+                }
+            }
+
+        - name: prop_async_bind_pure_equivalence
+          description: |
+            AsyncIO::pure からのバインドは直接値を使用した場合と同等
+          code: |
+            proptest! {
+                #[test]
+                fn prop_async_bind_pure_equivalence(elements in prop::collection::vec(any::<i32>(), 0..50)) {
+                    let runtime = tokio::runtime::Runtime::new().unwrap();
+                    let f = |x: i32| x.wrapping_mul(2);
+
+                    // Direct computation
+                    let direct_result = for_! {
+                        x <= elements.clone();
+                        yield f(x)
+                    };
+
+                    // Via AsyncIO::pure
+                    let async_result = runtime.block_on(async {
+                        for_async! {
+                            x <= elements.clone();
+                            doubled <~ AsyncIO::pure(f(x));
+                            yield doubled
+                        }.run_async().await
+                    });
+
+                    prop_assert_eq!(direct_result, async_result);
+                }
+            }
+      verification: |
+        cargo test --features async --test for_async_macro_laws が成功すること
+
+    - step: 12
+      name: 統合テストの実装
+      type: test
+      priority: high
+      location: tests/for_async_macro_integration.rs
+      tests:
+        - name: test_with_eff_async
+          description: eff_async! 内での使用
+          code: |
+            #![cfg(feature = "async")]
+            use lambars::for_async;
+            use lambars::eff_async;
+            use lambars::effect::AsyncIO;
+
+            #[tokio::test]
+            async fn test_with_eff_async() {
+                let result = eff_async! {
+                    data_list <= for_async! {
+                        x <= vec![1, 2, 3];
+                        data <~ AsyncIO::pure(x * 10);
+                        yield data
+                    };
+                    let sum: i32 = data_list.iter().sum();
+                    AsyncIO::pure(sum)
+                };
+                assert_eq!(result.run_async().await, 60);
+            }
+
+        - name: test_with_persistent_vector
+          description: PersistentVector との組み合わせ
+          code: |
+            use lambars::persistent::PersistentVector;
+
+            #[tokio::test]
+            async fn test_with_persistent_vector() {
+                let vector = PersistentVector::from_iter([1, 2, 3]);
+                let items: Vec<_> = vector.iter().cloned().collect();
+                let result = for_async! {
+                    x <= items;
+                    yield x * 2
+                };
+                assert_eq!(result.run_async().await, vec![2, 4, 6]);
+            }
+
+        - name: test_chained_for_async
+          description: 複数の for_async! の連鎖
+          code: |
+            #[tokio::test]
+            async fn test_chained_for_async() {
+                let result = eff_async! {
+                    list1 <= for_async! {
+                        x <= vec![1, 2];
+                        yield x
+                    };
+                    list2 <= for_async! {
+                        x <= list1;
+                        yield x * 10
+                    };
+                    AsyncIO::pure(list2)
+                };
+                assert_eq!(result.run_async().await, vec![10, 20]);
+            }
+      verification: |
+        cargo test --features async --test for_async_macro_integration が成功すること
+
+    - step: 13
+      name: ドキュメントの整備
+      type: documentation
+      priority: medium
+      tasks:
+        - task: for_async_macro.rs のモジュールドキュメントを完成させる
+        - task: 各マクロルールにコメントを追加
+        - task: Examples セクションに複数の例を追加
+        - task: for_! との違いと使い分けを説明
+        - task: <~ 演算子の意味を説明
+      verification: |
+        cargo doc --features async --no-deps が警告なしで成功すること
+
+    - step: 14
+      name: clippy チェックと最終確認
+      type: verification
+      priority: critical
+      tasks:
+        - task: cargo clippy --features async -- -D warnings
+        - task: cargo fmt --check
+        - task: cargo test --features async
+        - task: cargo doc --features async --no-deps
+      verification: |
+        全てのチェックが成功すること
+
+# =============================================================================
+# 既存コードとの統合（Integration with Existing Code）
+# =============================================================================
+
+integration:
+  compose_module:
+    file: src/compose/mod.rs
+    changes:
+      - type: add_conditional_module
+        content: |
+          #[cfg(feature = "async")]
+          mod for_async_macro;
+        location: after "mod for_macro;"
+
+      - type: update_documentation
+        section: "//! # Overview"
+        add_item: "- [`for_async!`]: Async version of for-comprehension (requires `async` feature)"
+
+  lib_rs:
+    file: src/lib.rs
+    changes: []
+    notes: |
+      #[macro_export] マクロはクレートルートに自動配置されるため、
+      明示的な変更は不要。マクロ定義に #[cfg(feature = "async")] を付与。
+
+  prelude:
+    file: src/prelude.rs
+    changes: []
+    notes: |
+      for_async! マクロは compose モジュールの一部。
+      async feature が有効な場合のみ使用可能。
+
+# =============================================================================
+# 検証項目（Verification Checklist）
+# =============================================================================
+
+verification_checklist:
+  code_quality:
+    - item: "#![forbid(unsafe_code)] が有効であること"
+      command: "grep -r 'forbid(unsafe_code)' src/compose/for_async_macro.rs"
+
+    - item: "clippy 警告がないこと"
+      command: "cargo clippy --features async -- -D warnings"
+
+    - item: "フォーマットが正しいこと"
+      command: "cargo fmt --check"
+
+    - item: "ドキュメントが完備していること"
+      command: "cargo doc --features async --no-deps"
+
+    - item: "async feature なしでもコンパイルできること"
+      command: "cargo check"
+
+  functional:
+    - item: "単一イテレーションが動作すること"
+      test: "tests/for_async_macro_tests.rs::test_single_iteration_*"
+
+    - item: "ネストイテレーションが動作すること"
+      test: "tests/for_async_macro_tests.rs::test_nested_iteration_*"
+
+    - item: "AsyncIO バインド（<~）が動作すること"
+      test: "tests/for_async_macro_tests.rs::test_async_bind_*"
+
+    - item: "let バインディングが動作すること"
+      test: "tests/for_async_macro_tests.rs::test_let_binding_*"
+
+    - item: "タプルパターンが動作すること"
+      test: "tests/for_async_macro_tests.rs::test_tuple_pattern_*"
+
+    - item: "ワイルドカードパターンが動作すること"
+      test: "tests/for_async_macro_tests.rs::test_wildcard_*"
+
+    - item: "空のコレクションが正しく処理されること"
+      test: "tests/for_async_macro_tests.rs::test_empty_*"
+
+    - item: "遅延評価が正しく動作すること"
+      test: "tests/for_async_macro_tests.rs::test_deferred_execution"
+
+    - item: "fmap, flat_map との合成が動作すること"
+      test: "tests/for_async_macro_tests.rs::test_*_composition"
+
+  property_tests:
+    - item: "同期版 for_! との等価性"
+      test: "tests/for_async_macro_laws.rs::prop_single_iteration_equivalence"
+
+    - item: "ネストイテレーションの等価性"
+      test: "tests/for_async_macro_laws.rs::prop_nested_iteration_equivalence"
+
+    - item: "AsyncIO::pure バインドの等価性"
+      test: "tests/for_async_macro_laws.rs::prop_async_bind_pure_equivalence"
+
+  integration:
+    - item: "eff_async! との統合"
+      test: "tests/for_async_macro_integration.rs::test_with_eff_async"
+
+    - item: "PersistentVector との統合"
+      test: "tests/for_async_macro_integration.rs::test_with_persistent_vector"
+
+    - item: "for_async! の連鎖"
+      test: "tests/for_async_macro_integration.rs::test_chained_for_async"
+
+# =============================================================================
+# リスクと軽減策（Risks and Mitigations）
+# =============================================================================
+
+risks:
+  - id: RISK-001
+    description: |
+      <~ 演算子が既存のコードと競合する可能性
+    probability: low
+    impact: medium
+    mitigation: |
+      - <~ は Rust で有効な演算子の組み合わせだが、
+        通常のコードでは使用されない
+      - ドキュメントで明確に説明
+      - 必要に応じて別の演算子を検討（例: <<= または <<<）
+
+  - id: RISK-002
+    description: |
+      マクロのパターンマッチング順序による予期しない動作
+    probability: medium
+    impact: medium
+    mitigation: |
+      - 網羅的なテストケースの作成
+      - エッジケースのドキュメント化
+      - パターンの優先順位を明示的にコメント
+
+  - id: RISK-003
+    description: |
+      Send 境界による予期しないコンパイルエラー
+    probability: medium
+    impact: medium
+    mitigation: |
+      - AsyncIO の Send 要件をドキュメントで説明
+      - エラーメッセージが分かりやすくなるようなヘルパー trait の検討
+      - よくあるエラーパターンと解決策をドキュメント化
+
+  - id: RISK-004
+    description: |
+      深いネストでのコンパイル時間増加
+    probability: low
+    impact: low
+    mitigation: |
+      - 深いネスト時のパフォーマンステスト
+      - ドキュメントでの使用ガイドライン
+
+  - id: RISK-005
+    description: |
+      yield が将来の Rust バージョンで予約語になる可能性
+    probability: low
+    impact: high
+    mitigation: |
+      - コンパイラの警告を監視
+      - 必要に応じてマクロ名を変更（例: emit, produce）
+      - ドキュメントに注意書きを追加
+      - for_! マクロと同様の対応策
+
+# =============================================================================
+# 成果物サマリー（Deliverables Summary）
+# =============================================================================
+
+deliverables_summary:
+  source_files:
+    - src/compose/for_async_macro.rs (新規)
+    - src/compose/mod.rs (更新)
+
+  test_files:
+    - tests/for_async_macro_tests.rs (新規)
+    - tests/for_async_macro_laws.rs (新規)
+    - tests/for_async_macro_integration.rs (新規)
+
+  documentation:
+    - モジュールドキュメント (for_async_macro.rs 内)
+    - マクロドキュメント (#[macro_export] macro_rules! for_async)
+    - compose/mod.rs のドキュメント更新
+    - for_! との比較と使い分けガイド
+
+  estimated_lines_of_code:
+    source: ~150
+    tests: ~500
+    documentation: ~200
+    total: ~850
+
+# =============================================================================
+# 参照（References）
+# =============================================================================
+
+references:
+  internal:
+    - path: src/compose/for_macro.rs
+      description: |
+        同期版 for-comprehension マクロ。
+        構文とパターンマッチングの主要な参照元。
+
+    - path: src/effect/eff_async_macro.rs
+      description: |
+        AsyncIO 用の do 記法マクロ。
+        非同期バインド構文の参照。
+
+    - path: src/effect/async_io.rs
+      description: |
+        非同期副作用の遅延実行モナド。
+        for_async! の返り値の型。
+
+    - path: docs/phase_10_implementation_plans/phase_10_1_for_macro.yaml
+      description: |
+        for_! マクロの実装計画。
+        実装計画のフォーマットと構造の参照。
+
+  external:
+    - name: Scala for-comprehension
+      url: https://docs.scala-lang.org/tour/for-comprehensions.html
+
+    - name: Rust macro_rules!
+      url: https://doc.rust-lang.org/reference/macros-by-example.html
+
+    - name: The Little Book of Rust Macros
+      url: https://veykril.github.io/tlborm/

@@ -39,6 +39,7 @@ This document provides a comprehensive comparison between Scala functional progr
 | Either | `Either[E, A]` | `Result<A, E>` (std) |
 | For-comprehension (Monad) | `for { ... } yield` | `eff!` macro |
 | For-comprehension (List) | `for { ... } yield` (List) | `for_!` macro |
+| Async for-comprehension | `for { ... } yield` + `IO` | `for_async!` macro |
 | Lens | `monocle.Lens` | `Lens` trait |
 | Prism | `monocle.Prism` | `Prism` trait |
 | IO | `cats.effect.IO` | `IO` type |
@@ -738,6 +739,8 @@ let recommendations: Vec<String> = for_! {
 | Cartesian products | `for_!` | Nested iteration with yield |
 | Database-style queries | `eff!` | Monadic error handling |
 | Data generation | `for_!` | Multiple results needed |
+| Async list generation | `for_async!` | Async iteration with yield |
+| Async operations in loops | `for_async!` | Uses `<~` for AsyncIO binding |
 
 ---
 

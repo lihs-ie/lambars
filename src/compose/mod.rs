@@ -130,6 +130,8 @@
 
 mod compose_macro;
 mod curry_macro;
+#[cfg(feature = "async")]
+mod for_async_macro;
 mod for_macro;
 mod partial_macro;
 mod pipe_macro;
