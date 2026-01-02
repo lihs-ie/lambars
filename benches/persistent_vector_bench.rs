@@ -157,7 +157,9 @@ fn benchmark_update(criterion: &mut Criterion) {
 fn benchmark_iteration(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("iteration");
 
-    for size in [100, 1000, 10000] {
+    // Extended sizes for optimized iterator performance verification
+    // As per Phase 8.1 requirements (TR-002): 1,000 / 100,000 / 1,000,000 elements
+    for size in [1_000, 100_000, 1_000_000] {
         // Prepare data
         let persistent_vector: PersistentVector<i32> = (0..size).collect();
         let standard_vector: Vec<i32> = (0..size).collect();

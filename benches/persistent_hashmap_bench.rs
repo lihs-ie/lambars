@@ -14,7 +14,9 @@ use std::collections::HashMap;
 fn benchmark_insert(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("insert");
 
-    for size in [100, 1000, 10000] {
+    // Extended sizes for optimized insert performance verification
+    // As per Phase 8.2 requirements (PR-001): 1,000 / 10,000 / 100,000 elements
+    for size in [1_000, 10_000, 100_000] {
         // PersistentHashMap insert
         group.bench_with_input(
             BenchmarkId::new("PersistentHashMap", size),

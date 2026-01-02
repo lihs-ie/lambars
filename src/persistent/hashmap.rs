@@ -113,8 +113,15 @@ enum Node<K, V> {
 /// A child in a bitmap node.
 #[derive(Clone)]
 enum Child<K, V> {
-    /// A key-value entry
-    Entry { key: K, value: V },
+    /// A key-value entry with cached hash value
+    Entry {
+        /// Cached hash value for the key (avoids recomputation)
+        hash: u64,
+        /// The key
+        key: K,
+        /// The value
+        value: V,
+    },
     /// A sub-node
     Node(Rc<Node<K, V>>),
 }
@@ -316,6 +323,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
                         Child::Entry {
                             key: child_key,
                             value,
+                            ..
                         } => {
                             if child_key.borrow() == key {
                                 Some(value)
@@ -401,6 +409,92 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
             root: Rc::new(new_root),
             length: if added { self.length + 1 } else { self.length },
         }
+    }
+
+    // =========================================================================
+    // Helper functions for efficient child array operations
+    // =========================================================================
+
+    /// Builds a new child array with a new element inserted at the specified position.
+    ///
+    /// Uses `Iterator::collect()` to construct `Rc<[Child]>` in a single expression,
+    /// avoiding the pattern of manually creating a `Vec`, mutating it, and converting
+    /// it to `Rc<[Child]>`.
+    /// # Arguments
+    /// * `children` - The current child array
+    /// * `position` - The position to insert at
+    /// * `new_child` - The new child to insert
+    ///
+    /// # Returns
+    /// A new `Rc<[Child]>` with the child inserted at the specified position.
+    fn build_children_with_insert(
+        children: &[Child<K, V>],
+        position: usize,
+        new_child: &Child<K, V>,
+    ) -> Rc<[Child<K, V>]> {
+        (0..=children.len())
+            .map(|index| match index.cmp(&position) {
+                std::cmp::Ordering::Less => children[index].clone(),
+                std::cmp::Ordering::Equal => new_child.clone(),
+                std::cmp::Ordering::Greater => children[index - 1].clone(),
+            })
+            .collect()
+    }
+
+    /// Builds a new child array with the element at the specified position updated.
+    ///
+    /// Uses `Iterator::collect()` to construct `Rc<[Child]>` in a single step,
+    /// avoiding the pattern of manually creating a `Vec`, mutating it, and then
+    /// converting it to `Rc`.
+    ///
+    /// # Arguments
+    /// * `children` - The current child array
+    /// * `position` - The position to update
+    /// * `new_child` - The new child to place at the position
+    ///
+    /// # Returns
+    /// A new `Rc<[Child]>` with the child at the specified position replaced.
+    fn build_children_with_update(
+        children: &[Child<K, V>],
+        position: usize,
+        new_child: &Child<K, V>,
+    ) -> Rc<[Child<K, V>]> {
+        children
+            .iter()
+            .enumerate()
+            .map(|(index, child)| {
+                if index == position {
+                    new_child.clone()
+                } else {
+                    child.clone()
+                }
+            })
+            .collect()
+    }
+
+    /// Builds a new child array with the element at the specified position removed.
+    ///
+    /// Uses `Iterator::collect()` to directly construct `Rc<[Child]>` without
+    /// intermediate `Vec` allocation.
+    ///
+    /// # Arguments
+    /// * `children` - The current child array
+    /// * `position` - The position to remove
+    ///
+    /// # Returns
+    /// A new `Rc<[Child]>` with the child at the specified position removed.
+    fn build_children_with_remove(children: &[Child<K, V>], position: usize) -> Rc<[Child<K, V>]> {
+        children
+            .iter()
+            .enumerate()
+            .filter_map(|(index, child)| {
+                if index == position {
+                    None
+                } else {
+                    Some(child.clone())
+                }
+            })
+            .collect()
     }
 
     /// Recursive helper for insert.
@@ -501,35 +595,38 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
             };
             let (subnode, added) = Self::insert_into_node(&sub_entry, key, value, hash, depth + 1);
             let bitmap = 1u32 << existing_index;
-            let children = Rc::from(vec![Child::Node(Rc::new(subnode))]);
+            // Use std::iter::once() for single element
+            let children: Rc<[Child<K, V>]> =
+                std::iter::once(Child::Node(Rc::new(subnode))).collect();
             (Node::Bitmap { bitmap, children }, added)
         } else {
             // Different indices - create bitmap with two children
+            // Use array literal + collect() for efficient small array construction
             let bitmap = (1u32 << existing_index) | (1u32 << new_index);
-            let children: Vec<Child<K, V>> = if existing_index < new_index {
-                vec![
+            let children: Rc<[Child<K, V>]> = if existing_index < new_index {
+                [
                     Child::Entry {
+                        hash: existing_hash,
                         key: existing_key.clone(),
                         value: existing_value.clone(),
                     },
-                    Child::Entry { key, value },
+                    Child::Entry { hash, key, value },
                 ]
+                .into_iter()
+                .collect()
             } else {
-                vec![
-                    Child::Entry { key, value },
+                [
+                    Child::Entry { hash, key, value },
                     Child::Entry {
+                        hash: existing_hash,
                         key: existing_key.clone(),
                         value: existing_value.clone(),
                     },
                 ]
+                .into_iter()
+                .collect()
             };
-            (
-                Node::Bitmap {
-                    bitmap,
-                    children: Rc::from(children),
-                },
-                true,
-            )
+            (Node::Bitmap { bitmap, children }, true)
         }
     }
 
@@ -547,13 +644,16 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
         let position = (bitmap & (bit - 1)).count_ones() as usize;
 
         if bitmap & bit == 0 {
-            // Slot is empty - add new entry
-            let mut new_children = children.to_vec();
-            new_children.insert(position, Child::Entry { key, value });
+            // Slot is empty - add new entry using Iterator::collect()
+            let new_children = Self::build_children_with_insert(
+                children,
+                position,
+                &Child::Entry { hash, key, value },
+            );
             (
                 Node::Bitmap {
                     bitmap: bitmap | bit,
-                    children: Rc::from(new_children),
+                    children: new_children,
                 },
                 true,
             )
@@ -573,17 +673,16 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
         hash: u64,
         depth: usize,
     ) -> (Node<K, V>, bool) {
-        let mut new_children = children.to_vec();
-
         let (new_child, added) = match &children[position] {
             Child::Entry {
+                hash: child_hash,
                 key: child_key,
                 value: child_value,
             } => {
-                let child_hash = compute_hash(child_key);
+                // child_hash is already cached - no recomputation needed
                 if *child_key == key {
-                    (Child::Entry { key, value }, false)
-                } else if child_hash == hash {
+                    (Child::Entry { hash, key, value }, false)
+                } else if *child_hash == hash {
                     let collision = Node::Collision {
                         hash,
                         entries: Rc::from(vec![
@@ -594,7 +693,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
                     (Child::Node(Rc::new(collision)), true)
                 } else {
                     let child_entry = Node::Entry {
-                        hash: child_hash,
+                        hash: *child_hash,
                         key: child_key.clone(),
                         value: child_value.clone(),
                     };
@@ -610,11 +709,12 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
             }
         };
 
-        new_children[position] = new_child;
+        // Use Iterator::collect() to build new children array
+        let new_children = Self::build_children_with_update(children, position, &new_child);
         (
             Node::Bitmap {
                 bitmap,
-                children: Rc::from(new_children),
+                children: new_children,
             },
             added,
         )
@@ -676,28 +776,29 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
             // Same index - recurse with collision as subnode
             let (subnode, added) = Self::insert_into_node(node, key, value, hash, depth + 1);
             let bitmap = 1u32 << collision_index;
-            let children = Rc::from(vec![Child::Node(Rc::new(subnode))]);
+            // Use std::iter::once() for single element
+            let children: Rc<[Child<K, V>]> =
+                std::iter::once(Child::Node(Rc::new(subnode))).collect();
             (Node::Bitmap { bitmap, children }, added)
         } else {
+            // Use array literal + collect() for efficient small array construction
             let bitmap = (1u32 << collision_index) | (1u32 << new_index);
-            let children: Vec<Child<K, V>> = if collision_index < new_index {
-                vec![
+            let children: Rc<[Child<K, V>]> = if collision_index < new_index {
+                [
                     Child::Node(Rc::new(node.clone())),
-                    Child::Entry { key, value },
+                    Child::Entry { hash, key, value },
                 ]
+                .into_iter()
+                .collect()
             } else {
-                vec![
-                    Child::Entry { key, value },
+                [
+                    Child::Entry { hash, key, value },
                     Child::Node(Rc::new(node.clone())),
                 ]
+                .into_iter()
+                .collect()
             };
-            (
-                Node::Bitmap {
-                    bitmap,
-                    children: Rc::from(children),
-                },
-                true,
-            )
+            (Node::Bitmap { bitmap, children }, true)
         }
     }
 
@@ -835,8 +936,8 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
             return (Node::Empty, true);
         }
 
-        let mut new_children = children.to_vec();
-        new_children.remove(position);
+        // Use Iterator::collect() to build new children array
+        let new_children = Self::build_children_with_remove(children, position);
 
         Self::simplify_bitmap_if_possible(new_bitmap, new_children)
     }
@@ -861,15 +962,14 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
             return None;
         }
 
-        let mut new_children = children.to_vec();
-
         match &new_subnode {
             Node::Empty => {
                 let new_bitmap = bitmap & !(1u32 << hash_index(hash, depth));
                 if new_bitmap == 0 {
                     return Some((Node::Empty, true));
                 }
-                new_children.remove(position);
+                // Use Iterator::collect() to build new children array
+                let new_children = Self::build_children_with_remove(children, position);
                 Some(Self::simplify_bitmap_if_possible(new_bitmap, new_children))
             }
             Node::Entry {
@@ -877,11 +977,12 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
                 key: entry_key,
                 value: entry_value,
             } => {
-                new_children[position] = Child::Entry {
+                let new_child = Child::Entry {
+                    hash: *entry_hash,
                     key: entry_key.clone(),
                     value: entry_value.clone(),
                 };
-                if new_children.len() == 1 {
+                if children.len() == 1 {
                     Some((
                         Node::Entry {
                             hash: *entry_hash,
@@ -891,21 +992,26 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
                         true,
                     ))
                 } else {
+                    // Use Iterator::collect() to build new children array
+                    let new_children =
+                        Self::build_children_with_update(children, position, &new_child);
                     Some((
                         Node::Bitmap {
                             bitmap,
-                            children: Rc::from(new_children),
+                            children: new_children,
                         },
                         true,
                     ))
                 }
             }
             _ => {
-                new_children[position] = Child::Node(Rc::new(new_subnode));
+                let new_child = Child::Node(Rc::new(new_subnode));
+                // Use Iterator::collect() to build new children array
+                let new_children = Self::build_children_with_update(children, position, &new_child);
                 Some((
                     Node::Bitmap {
                         bitmap,
-                        children: Rc::from(new_children),
+                        children: new_children,
                     },
                     true,
                 ))
@@ -914,27 +1020,21 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     }
 
     /// Simplifies a Bitmap node to an Entry if it has only one child entry.
-    fn simplify_bitmap_if_possible(bitmap: u32, children: Vec<Child<K, V>>) -> (Node<K, V>, bool) {
+    fn simplify_bitmap_if_possible(bitmap: u32, children: Rc<[Child<K, V>]>) -> (Node<K, V>, bool) {
         if children.len() == 1
-            && let Child::Entry { key, value } = &children[0]
+            && let Child::Entry { hash, key, value } = &children[0]
         {
-            let entry_hash = compute_hash(key);
+            // hash is already cached - no recomputation needed
             (
                 Node::Entry {
-                    hash: entry_hash,
+                    hash: *hash,
                     key: key.clone(),
                     value: value.clone(),
                 },
                 true,
             )
         } else {
-            (
-                Node::Bitmap {
-                    bitmap,
-                    children: Rc::from(children),
-                },
-                true,
-            )
+            (Node::Bitmap { bitmap, children }, true)
         }
     }
 
@@ -1222,7 +1322,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
             Node::Bitmap { children, .. } => {
                 for child in children.iter() {
                     match child {
-                        Child::Entry { key, value } => {
+                        Child::Entry { key, value, .. } => {
                             entries.push((key, value));
                         }
                         Child::Node(subnode) => {

@@ -393,3 +393,210 @@ proptest! {
         prop_assert_eq!(vector.last(), vector.get(vector.len() - 1));
     }
 }
+
+// =============================================================================
+// Optimized Iterator Laws
+// =============================================================================
+
+proptest! {
+    /// Iterator completeness: all elements returned in correct order
+    #[test]
+    fn prop_optimized_iterator_completeness(
+        elements in prop::collection::vec(any::<i32>(), 0..1000)
+    ) {
+        let vector: PersistentVector<i32> = elements.iter().copied().collect();
+        let collected: Vec<i32> = vector.iter().copied().collect();
+
+        prop_assert_eq!(collected, elements);
+    }
+
+    /// Iterator length: count equals vector length
+    #[test]
+    fn prop_optimized_iterator_length(
+        elements in prop::collection::vec(any::<i32>(), 0..500)
+    ) {
+        let vector: PersistentVector<i32> = elements.iter().copied().collect();
+
+        prop_assert_eq!(vector.iter().count(), vector.len());
+        prop_assert_eq!(vector.iter().len(), vector.len());
+    }
+
+    /// IntoIterator equivalence: iter and into_iter return same elements
+    #[test]
+    fn prop_optimized_into_iterator_equivalence(
+        elements in prop::collection::vec(any::<i32>(), 0..500)
+    ) {
+        let vector: PersistentVector<i32> = elements.iter().copied().collect();
+        let from_iter: Vec<i32> = vector.clone().into_iter().collect();
+        let from_ref_iter: Vec<i32> = vector.iter().copied().collect();
+
+        prop_assert_eq!(from_iter, from_ref_iter);
+    }
+
+    /// size_hint accuracy: always returns correct remaining count
+    #[test]
+    fn prop_optimized_iterator_size_hint_accuracy(
+        elements in prop::collection::vec(any::<i32>(), 0..200),
+        consume_count in 0_usize..201
+    ) {
+        let vector: PersistentVector<i32> = elements.iter().copied().collect();
+        let mut iterator = vector.iter();
+
+        let to_consume = consume_count.min(elements.len());
+        for _ in 0..to_consume {
+            iterator.next();
+        }
+
+        let expected_remaining = elements.len().saturating_sub(to_consume);
+        let (lower, upper) = iterator.size_hint();
+
+        prop_assert_eq!(lower, expected_remaining);
+        prop_assert_eq!(upper, Some(expected_remaining));
+    }
+
+    /// Iterator at tree boundaries
+    #[test]
+    fn prop_optimized_iterator_tree_boundaries(
+        // Test sizes that are near boundaries (32, 64, 1024, etc.)
+        size in prop::sample::select(vec![
+            31_usize, 32, 33, 63, 64, 65, 1023, 1024, 1025
+        ])
+    ) {
+        #[allow(clippy::cast_possible_wrap)]
+        let vector: PersistentVector<i32> = (0..size as i32).collect();
+        let collected: Vec<i32> = vector.iter().copied().collect();
+        #[allow(clippy::cast_possible_wrap)]
+        let expected: Vec<i32> = (0..size as i32).collect();
+
+        prop_assert_eq!(collected, expected);
+    }
+
+    /// IntoIterator size_hint accuracy
+    #[test]
+    fn prop_optimized_into_iterator_size_hint_accuracy(
+        elements in prop::collection::vec(any::<i32>(), 0..200),
+        consume_count in 0_usize..201
+    ) {
+        let vector: PersistentVector<i32> = elements.iter().copied().collect();
+        let mut iterator = vector.into_iter();
+
+        let to_consume = consume_count.min(elements.len());
+        for _ in 0..to_consume {
+            iterator.next();
+        }
+
+        let expected_remaining = elements.len().saturating_sub(to_consume);
+        let (lower, upper) = iterator.size_hint();
+
+        prop_assert_eq!(lower, expected_remaining);
+        prop_assert_eq!(upper, Some(expected_remaining));
+    }
+}
+
+// =============================================================================
+// push_back Optimization Properties
+// =============================================================================
+
+proptest! {
+    /// from_iter preserves all elements in order
+    #[test]
+    fn prop_from_iter_preserves_elements(
+        elements in prop::collection::vec(any::<i32>(), 0..500)
+    ) {
+        let vector: PersistentVector<i32> = elements.iter().copied().collect();
+        let collected: Vec<i32> = vector.iter().copied().collect();
+        prop_assert_eq!(collected, elements);
+    }
+
+    /// from_iter preserves length
+    #[test]
+    fn prop_from_iter_preserves_length(
+        elements in prop::collection::vec(any::<i32>(), 0..500)
+    ) {
+        let vector: PersistentVector<i32> = elements.iter().copied().collect();
+        prop_assert_eq!(vector.len(), elements.len());
+    }
+
+    /// from_slice equals from_iter
+    #[test]
+    fn prop_from_slice_equals_from_iter(
+        elements in prop::collection::vec(any::<i32>(), 0..200)
+    ) {
+        let from_slice = PersistentVector::from_slice(&elements);
+        let from_iter: PersistentVector<i32> = elements.into_iter().collect();
+        prop_assert_eq!(from_slice, from_iter);
+    }
+
+    /// push_back_many equals multiple push_back
+    #[test]
+    fn prop_push_back_many_equals_multiple_push_back(
+        base_elements in prop::collection::vec(any::<i32>(), 0..100),
+        new_elements in prop::collection::vec(any::<i32>(), 0..50)
+    ) {
+        let base: PersistentVector<i32> = base_elements.iter().copied().collect();
+
+        let from_many = base.push_back_many(new_elements.iter().copied());
+        let mut from_individual = base.clone();
+        for element in &new_elements {
+            from_individual = from_individual.push_back(*element);
+        }
+
+        prop_assert_eq!(from_many, from_individual);
+    }
+
+    /// push_back_many preserves length
+    #[test]
+    fn prop_push_back_many_preserves_length(
+        base_elements in prop::collection::vec(any::<i32>(), 0..100),
+        new_elements in prop::collection::vec(any::<i32>(), 0..50)
+    ) {
+        let base: PersistentVector<i32> = base_elements.iter().copied().collect();
+        let extended = base.push_back_many(new_elements.iter().copied());
+
+        prop_assert_eq!(
+            extended.len(),
+            base_elements.len() + new_elements.len()
+        );
+    }
+
+    /// push_back_many preserves order
+    #[test]
+    fn prop_push_back_many_preserves_order(
+        base_elements in prop::collection::vec(any::<i32>(), 0..100),
+        new_elements in prop::collection::vec(any::<i32>(), 0..50)
+    ) {
+        let base: PersistentVector<i32> = base_elements.iter().copied().collect();
+        let extended = base.push_back_many(new_elements.iter().copied());
+        let collected: Vec<i32> = extended.iter().copied().collect();
+
+        let mut expected = base_elements.clone();
+        expected.extend(new_elements.iter().copied());
+
+        prop_assert_eq!(collected, expected);
+    }
+
+    /// push_tail_to_root correctness
+    #[test]
+    fn prop_push_tail_to_root_correctness(
+        n in 0_usize..5000
+    ) {
+        #[allow(clippy::cast_possible_wrap)]
+        let vector: PersistentVector<i32> = (0..n as i32).collect();
+        #[allow(clippy::cast_possible_wrap)]
+        let extended = vector.push_back(n as i32);
+
+        prop_assert_eq!(extended.len(), n + 1);
+        #[allow(clippy::cast_possible_wrap)]
+        {
+            prop_assert_eq!(extended.get(n), Some(&(n as i32)));
+        }
+
+        // All elements are correctly retained
+        for i in 0..n {
+            #[allow(clippy::cast_possible_wrap)]
+            {
+                prop_assert_eq!(extended.get(i), Some(&(i as i32)));
+            }
+        }
+    }
+}

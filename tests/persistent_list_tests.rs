@@ -784,3 +784,258 @@ fn test_flat_map_mut_multiple_elements() {
     let collected: Vec<i32> = result.into_iter().collect();
     assert_eq!(collected, vec![1, 10, 2, 20]);
 }
+
+// -----------------------------------------------------------------------------
+// build_from_vec tests (tested via from_iter)
+// -----------------------------------------------------------------------------
+
+mod build_from_vec_tests {
+    use super::*;
+
+    #[rstest]
+    fn test_from_iter_empty() {
+        let list: PersistentList<i32> = std::iter::empty().collect();
+        assert!(list.is_empty());
+        assert_eq!(list.len(), 0);
+    }
+
+    #[rstest]
+    fn test_from_iter_single() {
+        let list: PersistentList<i32> = std::iter::once(42).collect();
+        assert_eq!(list.head(), Some(&42));
+        assert_eq!(list.len(), 1);
+    }
+
+    #[rstest]
+    fn test_from_iter_multiple() {
+        let list: PersistentList<i32> = (1..=5).collect();
+        assert_eq!(list.len(), 5);
+        let collected: Vec<&i32> = list.iter().collect();
+        assert_eq!(collected, vec![&1, &2, &3, &4, &5]);
+    }
+
+    #[rstest]
+    fn test_from_iter_preserves_order() {
+        let source: Vec<i32> = vec![10, 20, 30, 40, 50];
+        let list: PersistentList<i32> = source.iter().copied().collect();
+        let collected: Vec<i32> = list.into_iter().collect();
+        assert_eq!(collected, source);
+    }
+
+    #[rstest]
+    fn test_from_iter_large() {
+        let list: PersistentList<i32> = (0..1000).collect();
+        assert_eq!(list.len(), 1000);
+        assert_eq!(list.head(), Some(&0));
+        assert_eq!(list.get(999), Some(&999));
+    }
+}
+
+// -----------------------------------------------------------------------------
+// extend_front tests
+// -----------------------------------------------------------------------------
+
+mod extend_front_tests {
+    use super::*;
+
+    #[rstest]
+    fn test_extend_front_empty_iter_to_empty_list() {
+        let list: PersistentList<i32> = PersistentList::new();
+        let extended = list.extend_front(Vec::<i32>::new());
+        assert!(extended.is_empty());
+    }
+
+    #[rstest]
+    fn test_extend_front_empty_iter_to_non_empty_list() {
+        let list = PersistentList::new().cons(3).cons(2).cons(1);
+        let extended = list.extend_front(Vec::<i32>::new());
+        assert_eq!(extended.len(), 3);
+        let collected: Vec<&i32> = extended.iter().collect();
+        assert_eq!(collected, vec![&1, &2, &3]);
+    }
+
+    #[rstest]
+    fn test_extend_front_to_empty_list() {
+        let list: PersistentList<i32> = PersistentList::new();
+        let extended = list.extend_front(vec![1, 2, 3]);
+        assert_eq!(extended.len(), 3);
+        let collected: Vec<&i32> = extended.iter().collect();
+        assert_eq!(collected, vec![&1, &2, &3]);
+    }
+
+    #[rstest]
+    fn test_extend_front_single_element() {
+        let list = PersistentList::new().cons(2);
+        let extended = list.extend_front(vec![1]);
+        let collected: Vec<&i32> = extended.iter().collect();
+        assert_eq!(collected, vec![&1, &2]);
+    }
+
+    #[rstest]
+    fn test_extend_front_multiple_elements() {
+        let list = PersistentList::new().cons(4).cons(3);
+        let extended = list.extend_front(vec![1, 2]);
+        let collected: Vec<&i32> = extended.iter().collect();
+        assert_eq!(collected, vec![&1, &2, &3, &4]);
+    }
+
+    #[rstest]
+    fn test_extend_front_preserves_original() {
+        let original = PersistentList::new().cons(3).cons(2).cons(1);
+        let _ = original.extend_front(vec![0]);
+        // The original list is unchanged
+        assert_eq!(original.len(), 3);
+        let collected: Vec<&i32> = original.iter().collect();
+        assert_eq!(collected, vec![&1, &2, &3]);
+    }
+
+    #[rstest]
+    fn test_extend_front_large() {
+        let list: PersistentList<i32> = (100..200).collect();
+        let extended = list.extend_front(0..100);
+        assert_eq!(extended.len(), 200);
+        // Verify order
+        let collected: Vec<i32> = extended.into_iter().collect();
+        let expected: Vec<i32> = (0..200).collect();
+        assert_eq!(collected, expected);
+    }
+}
+
+// -----------------------------------------------------------------------------
+// from_slice tests
+// -----------------------------------------------------------------------------
+
+mod from_slice_tests {
+    use super::*;
+
+    #[rstest]
+    fn test_from_slice_empty() {
+        let list = PersistentList::<i32>::from_slice(&[]);
+        assert!(list.is_empty());
+        assert_eq!(list.len(), 0);
+    }
+
+    #[rstest]
+    fn test_from_slice_single() {
+        let list = PersistentList::from_slice(&[42]);
+        assert_eq!(list.head(), Some(&42));
+        assert_eq!(list.len(), 1);
+    }
+
+    #[rstest]
+    fn test_from_slice_multiple() {
+        let list = PersistentList::from_slice(&[1, 2, 3, 4, 5]);
+        assert_eq!(list.len(), 5);
+        let collected: Vec<&i32> = list.iter().collect();
+        assert_eq!(collected, vec![&1, &2, &3, &4, &5]);
+    }
+
+    #[rstest]
+    fn test_from_slice_preserves_order() {
+        let source = [10, 20, 30, 40, 50];
+        let list = PersistentList::from_slice(&source);
+        let collected: Vec<i32> = list.into_iter().collect();
+        assert_eq!(collected, source.to_vec());
+    }
+
+    #[rstest]
+    fn test_from_slice_equals_from_iter() {
+        let source = vec![1, 2, 3, 4, 5];
+        let from_slice = PersistentList::from_slice(&source);
+        let from_iter: PersistentList<i32> = source.into_iter().collect();
+        assert_eq!(from_slice, from_iter);
+    }
+
+    #[rstest]
+    fn test_from_slice_with_strings() {
+        let source = ["hello", "world", "rust"];
+        let list = PersistentList::from_slice(&source);
+        assert_eq!(list.len(), 3);
+        assert_eq!(list.head(), Some(&"hello"));
+    }
+
+    #[rstest]
+    fn test_from_slice_large() {
+        let source: Vec<i32> = (0..1000).collect();
+        let list = PersistentList::from_slice(&source);
+        assert_eq!(list.len(), 1000);
+        assert_eq!(list.head(), Some(&0));
+        assert_eq!(list.get(999), Some(&999));
+    }
+}
+
+// -----------------------------------------------------------------------------
+// append optimization tests
+// -----------------------------------------------------------------------------
+
+mod append_optimization_tests {
+    use super::*;
+
+    #[rstest]
+    fn test_append_empty_to_empty() {
+        let list1: PersistentList<i32> = PersistentList::new();
+        let list2: PersistentList<i32> = PersistentList::new();
+        let result = list1.append(&list2);
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_append_non_empty_to_empty() {
+        let list1: PersistentList<i32> = PersistentList::new();
+        let list2: PersistentList<i32> = (1..=3).collect();
+        let result = list1.append(&list2);
+        let collected: Vec<&i32> = result.iter().collect();
+        assert_eq!(collected, vec![&1, &2, &3]);
+    }
+
+    #[rstest]
+    fn test_append_empty_to_non_empty() {
+        let list1: PersistentList<i32> = (1..=3).collect();
+        let list2: PersistentList<i32> = PersistentList::new();
+        let result = list1.append(&list2);
+        let collected: Vec<&i32> = result.iter().collect();
+        assert_eq!(collected, vec![&1, &2, &3]);
+    }
+
+    #[rstest]
+    fn test_append_preserves_order() {
+        let list1: PersistentList<i32> = (1..=3).collect();
+        let list2: PersistentList<i32> = (4..=6).collect();
+        let result = list1.append(&list2);
+        let collected: Vec<i32> = result.into_iter().collect();
+        assert_eq!(collected, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[rstest]
+    fn test_append_preserves_originals() {
+        let list1: PersistentList<i32> = (1..=3).collect();
+        let list2: PersistentList<i32> = (4..=6).collect();
+        let _ = list1.append(&list2);
+
+        // The original lists are unchanged
+        assert_eq!(list1.len(), 3);
+        assert_eq!(list2.len(), 3);
+    }
+
+    #[rstest]
+    fn test_append_large() {
+        let list1: PersistentList<i32> = (0..1000).collect();
+        let list2: PersistentList<i32> = (1000..2000).collect();
+        let result = list1.append(&list2);
+        assert_eq!(result.len(), 2000);
+
+        // Verify order
+        let collected: Vec<i32> = result.into_iter().collect();
+        let expected: Vec<i32> = (0..2000).collect();
+        assert_eq!(collected, expected);
+    }
+
+    #[rstest]
+    fn test_append_single_elements() {
+        let list1 = PersistentList::singleton(1);
+        let list2 = PersistentList::singleton(2);
+        let result = list1.append(&list2);
+        let collected: Vec<&i32> = result.iter().collect();
+        assert_eq!(collected, vec![&1, &2]);
+    }
+}
