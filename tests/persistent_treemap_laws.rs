@@ -474,3 +474,71 @@ proptest! {
         prop_assert_eq!(map1, map2);
     }
 }
+
+// =============================================================================
+// Hash Laws
+// =============================================================================
+
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
+/// Helper function: calculate hash value of a map
+fn calculate_hash<T: Hash>(value: &T) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
+proptest! {
+    /// Hash-Eq consistency: if a == b then hash(a) == hash(b)
+    #[test]
+    fn prop_hash_eq_consistency(
+        entries in prop::collection::vec((any::<i32>(), any::<i32>()), 0..50)
+    ) {
+        let map1: PersistentTreeMap<i32, i32> = entries.iter().cloned().collect();
+        let map2: PersistentTreeMap<i32, i32> = entries.iter().cloned().collect();
+
+        prop_assert_eq!(&map1, &map2);
+        prop_assert_eq!(calculate_hash(&map1), calculate_hash(&map2));
+    }
+
+    /// Hash determinism: the same map always produces the same hash value
+    #[test]
+    fn prop_hash_deterministic(
+        entries in prop::collection::vec((any::<i32>(), any::<i32>()), 0..50)
+    ) {
+        let map: PersistentTreeMap<i32, i32> = entries.iter().cloned().collect();
+
+        let hash1 = calculate_hash(&map);
+        let hash2 = calculate_hash(&map);
+
+        prop_assert_eq!(hash1, hash2);
+    }
+
+    /// Hash value is independent of insertion order
+    #[test]
+    fn prop_hash_insert_order_independent(
+        entries in prop::collection::vec((any::<i32>(), any::<i32>()), 2..20)
+    ) {
+        let map1: PersistentTreeMap<i32, i32> = entries.iter().cloned().collect();
+
+        let mut reversed = entries.clone();
+        reversed.reverse();
+        let map2: PersistentTreeMap<i32, i32> = reversed.iter().cloned().collect();
+
+        // The last value for the same key is used, so the results are the same
+        prop_assert_eq!(&map1, &map2);
+        prop_assert_eq!(calculate_hash(&map1), calculate_hash(&map2));
+    }
+
+    /// A cloned map has the same hash value
+    #[test]
+    fn prop_hash_clone_consistency(
+        entries in prop::collection::vec((any::<i32>(), any::<i32>()), 0..50)
+    ) {
+        let map: PersistentTreeMap<i32, i32> = entries.iter().cloned().collect();
+        let cloned = map.clone();
+
+        prop_assert_eq!(calculate_hash(&map), calculate_hash(&cloned));
+    }
+}

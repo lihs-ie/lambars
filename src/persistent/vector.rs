@@ -44,6 +44,7 @@
 //! ```
 
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::iter::FromIterator;
 use std::rc::Rc;
 
@@ -1533,6 +1534,42 @@ impl<T: PartialEq> PartialEq for PersistentVector<T> {
 }
 
 impl<T: Eq> Eq for PersistentVector<T> {}
+
+/// Computes a hash value for this vector.
+///
+/// The hash is computed by first hashing the length, then hashing each
+/// element in order using the O(N) iterator. This ensures that:
+///
+/// - Vectors with different lengths have different hashes (with high probability)
+/// - The order of elements affects the hash value
+/// - Equal vectors produce equal hash values (Hash-Eq consistency)
+///
+/// # Complexity
+///
+/// O(N) where N is the number of elements, using the optimized stack-based
+/// iterator implemented in Phase 8.1.
+///
+/// # Examples
+///
+/// ```rust
+/// use lambars::persistent::PersistentVector;
+/// use std::collections::HashMap;
+///
+/// let mut map: HashMap<PersistentVector<i32>, &str> = HashMap::new();
+/// let key: PersistentVector<i32> = (1..=3).collect();
+/// map.insert(key.clone(), "value");
+/// assert_eq!(map.get(&key), Some(&"value"));
+/// ```
+impl<T: Hash> Hash for PersistentVector<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // Hash the length first to distinguish vectors of different lengths
+        self.length.hash(state);
+        // Hash each element in order (using O(N) iterator)
+        for element in self {
+            element.hash(state);
+        }
+    }
+}
 
 impl<T: fmt::Debug> fmt::Debug for PersistentVector<T> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {

@@ -420,4 +420,59 @@ proptest! {
         let collected: Vec<i32> = list.into_iter().collect();
         prop_assert_eq!(collected, elements);
     }
+
+    // =========================================================================
+    // Hash Laws
+    // =========================================================================
+
+    /// Hash-Eq consistency: if a == b then hash(a) == hash(b)
+    #[test]
+    fn prop_hash_eq_consistency(elements in prop::collection::vec(any::<i32>(), 0..100)) {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let list1: PersistentList<i32> = elements.iter().cloned().collect();
+        let list2: PersistentList<i32> = elements.iter().cloned().collect();
+
+        prop_assert_eq!(list1.clone(), list2.clone());
+
+        let mut hasher1 = DefaultHasher::new();
+        let mut hasher2 = DefaultHasher::new();
+        list1.hash(&mut hasher1);
+        list2.hash(&mut hasher2);
+        prop_assert_eq!(hasher1.finish(), hasher2.finish());
+    }
+
+    /// Hash determinism: the same list always has the same hash value
+    #[test]
+    fn prop_hash_deterministic(elements in prop::collection::vec(any::<i32>(), 0..100)) {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let list: PersistentList<i32> = elements.iter().cloned().collect();
+
+        let mut hasher1 = DefaultHasher::new();
+        let mut hasher2 = DefaultHasher::new();
+        list.hash(&mut hasher1);
+        list.hash(&mut hasher2);
+
+        prop_assert_eq!(hasher1.finish(), hasher2.finish());
+    }
+
+    /// A cloned list has the same hash value
+    #[test]
+    fn prop_hash_clone_consistency(elements in prop::collection::vec(any::<i32>(), 0..100)) {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let list: PersistentList<i32> = elements.iter().cloned().collect();
+        let cloned = list.clone();
+
+        let mut hasher1 = DefaultHasher::new();
+        let mut hasher2 = DefaultHasher::new();
+        list.hash(&mut hasher1);
+        cloned.hash(&mut hasher2);
+
+        prop_assert_eq!(hasher1.finish(), hasher2.finish());
+    }
 }

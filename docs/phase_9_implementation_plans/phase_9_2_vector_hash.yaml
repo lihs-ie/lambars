@@ -1,0 +1,1072 @@
+# Phase 9.2: PersistentVector<T> への Hash トレイト追加 - 実装計画
+# rust-implementation-reviewer が要件定義 (phase_9_2_vector_hash.yaml) に基づいて作成
+
+version: "1.0.0"
+created_at: "2026-01-02"
+phase_id: phase_9_2
+requirements_reference: docs/phase_9_requirements/phase_9_2_vector_hash.yaml
+
+# =============================================================================
+# 実装方針
+# =============================================================================
+
+implementation_approach:
+  methodology: TDD (Test-Driven Development)
+  test_first: true
+  coverage_target: 100%
+
+  principles:
+    - テストを先に書き、レッドからグリーンへ
+    - 各要件を小さな単位に分割して段階的に実装
+    - 既存の PartialEq/Eq 実装パターンを踏襲
+    - "#![forbid(unsafe_code)] ポリシーを維持"
+    - Hash と Eq の一貫性を常に保証
+    - Phase 8.1 で最適化された O(N) イテレータを活用
+
+  coding_conventions:
+    - 変数名・関数名は略語を使用しない（URL, UUID, ULID 等の共通認識のあるもの以外）
+    - 既存の PersistentVector 実装パターンを踏襲
+    - ドキュメントコメントは英語で記載
+    - テストは日本語コメントで説明可能
+
+# =============================================================================
+# ファイル構成
+# =============================================================================
+
+file_structure:
+  source_files:
+    - path: src/persistent/vector.rs
+      description: Hash トレイト実装の追加
+      requirements:
+        - FR-001
+        - FR-002
+        - FR-003
+      modification_type: append
+      estimated_lines_added: 15-20
+      changes:
+        - "use std::hash::{Hash, Hasher}; を既存の use 文に追加"
+        - "impl<T: Hash> Hash for PersistentVector<T> の追加"
+
+  test_files:
+    - path: tests/persistent_vector_tests.rs
+      description: Hash 関連ユニットテストの追加
+      modification_type: append
+      estimated_lines_added: 100-120
+
+    - path: tests/persistent_vector_laws.rs
+      description: Hash 法則のプロパティベーステストの追加
+      modification_type: append
+      estimated_lines_added: 50-70
+
+# =============================================================================
+# 実装順序（TDD サイクル）
+# =============================================================================
+
+implementation_order:
+
+  # ---------------------------------------------------------------------------
+  # Step 1: RED - 基本ハッシュテスト作成
+  # ---------------------------------------------------------------------------
+  - step: 1
+    name: 基本ハッシュテスト作成（RED）
+    phase: red
+    description: |
+      Hash トレイトが実装されていることを確認する基本テストを作成。
+      この時点ではコンパイルエラーとなる。
+    files:
+      - tests/persistent_vector_tests.rs
+
+    tasks:
+      - id: 1.1
+        description: |
+          テスト作成: 空ベクタがハッシュ可能であること
+        test_first: true
+        test_code: |
+          // =============================================================================
+          // Hash トレイト テスト
+          // =============================================================================
+
+          mod hash_tests {
+              use super::*;
+              use std::collections::hash_map::DefaultHasher;
+              use std::hash::{Hash, Hasher};
+
+              /// 空ベクタがハッシュ可能であることを確認
+              #[rstest]
+              fn test_empty_vector_hash() {
+                  let empty: PersistentVector<i32> = PersistentVector::new();
+                  let mut hasher = DefaultHasher::new();
+                  empty.hash(&mut hasher);
+                  let _hash_value = hasher.finish();
+                  // ハッシュ値が計算できれば成功
+              }
+          }
+
+      - id: 1.2
+        description: |
+          テスト作成: 単一要素ベクタがハッシュ可能であること
+        test_first: true
+        test_code: |
+              /// 単一要素ベクタがハッシュ可能であることを確認
+              #[rstest]
+              fn test_singleton_hash() {
+                  let vector = PersistentVector::singleton(42);
+                  let mut hasher = DefaultHasher::new();
+                  vector.hash(&mut hasher);
+                  let _hash_value = hasher.finish();
+              }
+
+      - id: 1.3
+        description: |
+          テスト作成: 複数要素ベクタがハッシュ可能であること
+        test_first: true
+        test_code: |
+              /// 複数要素ベクタがハッシュ可能であることを確認
+              #[rstest]
+              fn test_multi_element_hash() {
+                  let vector: PersistentVector<i32> = (1..=5).collect();
+                  let mut hasher = DefaultHasher::new();
+                  vector.hash(&mut hasher);
+                  let _hash_value = hasher.finish();
+              }
+
+      - id: 1.4
+        description: |
+          テスト作成: 大きなベクタがハッシュ可能であること
+        test_first: true
+        test_code: |
+              /// 大きなベクタもハッシュ可能であることを確認
+              #[rstest]
+              fn test_large_vector_hash() {
+                  let vector: PersistentVector<i32> = (0..10000).collect();
+                  let mut hasher = DefaultHasher::new();
+                  vector.hash(&mut hasher);
+                  let _hash_value = hasher.finish();
+              }
+
+    expected_result: |
+      テストはコンパイルエラーとなる。
+      "the trait `Hash` is not implemented for `PersistentVector<i32>`"
+
+  # ---------------------------------------------------------------------------
+  # Step 2: GREEN - Hash トレイト実装
+  # ---------------------------------------------------------------------------
+  - step: 2
+    name: Hash トレイト実装（GREEN）
+    phase: green
+    description: |
+      PersistentVector に Hash トレイトを実装し、Step 1 のテストを通過させる。
+      Phase 8.1 で最適化された O(N) イテレータ（iter()）を活用する。
+    files:
+      - src/persistent/vector.rs
+
+    tasks:
+      - id: 2.1
+        description: |
+          use 文に Hash, Hasher を追加
+        implementation: |
+          // src/persistent/vector.rs の先頭付近（既存の use std::fmt; の下）に追加
+          use std::hash::{Hash, Hasher};
+
+      - id: 2.2
+        description: |
+          Hash トレイト実装を追加
+          位置: Eq 実装の直後（line 1535 の後）
+        implementation: |
+          impl<T: Hash> Hash for PersistentVector<T> {
+              fn hash<H: Hasher>(&self, state: &mut H) {
+                  // 長さをハッシュすることで、異なる長さのベクタを区別
+                  self.length.hash(state);
+                  // 各要素を順番にハッシュ（O(N) イテレータを活用）
+                  for element in self.iter() {
+                      element.hash(state);
+                  }
+              }
+          }
+
+    expected_result: |
+      Step 1 で作成した基本テストが全て通過する。
+      cargo test --features persistent hash_tests
+
+  # ---------------------------------------------------------------------------
+  # Step 3: RED - Hash-Eq 一貫性テスト作成
+  # ---------------------------------------------------------------------------
+  - step: 3
+    name: Hash-Eq 一貫性テスト作成（RED）
+    phase: red
+    description: |
+      Hash と Eq の一貫性（等しいベクタは同じハッシュ値を持つ）を検証するテストを作成。
+    files:
+      - tests/persistent_vector_tests.rs
+
+    tasks:
+      - id: 3.1
+        description: |
+          テスト作成: 等しいベクタは同じハッシュ値を持つ
+        test_first: true
+        test_code: |
+              /// 等しいベクタは同じハッシュ値を持つことを確認（Hash-Eq 一貫性）
+              #[rstest]
+              fn test_equal_vectors_same_hash() {
+                  let vector1: PersistentVector<i32> = (1..=5).collect();
+                  let vector2: PersistentVector<i32> = (1..=5).collect();
+                  assert_eq!(vector1, vector2);
+
+                  let mut hasher1 = DefaultHasher::new();
+                  let mut hasher2 = DefaultHasher::new();
+                  vector1.hash(&mut hasher1);
+                  vector2.hash(&mut hasher2);
+                  assert_eq!(hasher1.finish(), hasher2.finish());
+              }
+
+      - id: 3.2
+        description: |
+          テスト作成: 異なるベクタは（高確率で）異なるハッシュ値を持つ
+        test_first: true
+        test_code: |
+              /// 異なるベクタは高確率で異なるハッシュ値を持つことを確認
+              #[rstest]
+              fn test_different_vectors_likely_different_hash() {
+                  let vector1: PersistentVector<i32> = (1..=5).collect();
+                  let vector2: PersistentVector<i32> = vec![5, 4, 3, 2, 1].into_iter().collect();
+                  assert_ne!(vector1, vector2);
+
+                  let mut hasher1 = DefaultHasher::new();
+                  let mut hasher2 = DefaultHasher::new();
+                  vector1.hash(&mut hasher1);
+                  vector2.hash(&mut hasher2);
+                  // 衝突の可能性はあるが、この例では異なるはず
+                  assert_ne!(hasher1.finish(), hasher2.finish());
+              }
+
+      - id: 3.3
+        description: |
+          テスト作成: 異なる長さのベクタは異なるハッシュ値を持つ
+        test_first: true
+        test_code: |
+              /// 異なる長さのベクタは異なるハッシュ値を持つことを確認
+              #[rstest]
+              fn test_different_length_different_hash() {
+                  let vector1: PersistentVector<i32> = (1..=3).collect();
+                  let vector2: PersistentVector<i32> = (1..=5).collect();
+
+                  let mut hasher1 = DefaultHasher::new();
+                  let mut hasher2 = DefaultHasher::new();
+                  vector1.hash(&mut hasher1);
+                  vector2.hash(&mut hasher2);
+                  assert_ne!(hasher1.finish(), hasher2.finish());
+              }
+
+      - id: 3.4
+        description: |
+          テスト作成: 同じベクタに対するハッシュは決定的である
+        test_first: true
+        test_code: |
+              /// 同じベクタに対するハッシュは決定的であることを確認
+              #[rstest]
+              fn test_hash_deterministic() {
+                  let vector: PersistentVector<i32> = (1..=5).collect();
+
+                  let mut hasher1 = DefaultHasher::new();
+                  let mut hasher2 = DefaultHasher::new();
+                  vector.hash(&mut hasher1);
+                  vector.hash(&mut hasher2);
+                  assert_eq!(hasher1.finish(), hasher2.finish());
+              }
+
+    expected_result: |
+      テストは全て通過する（Step 2 で実装済みのため）。
+      もし失敗する場合は、実装を修正して GREEN に戻す。
+
+  # ---------------------------------------------------------------------------
+  # Step 4: RED - コレクション使用テスト作成
+  # ---------------------------------------------------------------------------
+  - step: 4
+    name: コレクション使用テスト作成（RED）
+    phase: red
+    description: |
+      HashMap/HashSet で PersistentVector を使用できることを検証するテストを作成。
+    files:
+      - tests/persistent_vector_tests.rs
+
+    tasks:
+      - id: 4.1
+        description: |
+          テスト作成: HashMap のキーとして使用可能
+        test_first: true
+        test_code: |
+              /// HashMap のキーとして使用可能であることを確認
+              #[rstest]
+              fn test_hashmap_key() {
+                  use std::collections::HashMap;
+
+                  let mut map: HashMap<PersistentVector<i32>, &str> = HashMap::new();
+                  let key1: PersistentVector<i32> = (1..=3).collect();
+                  let key2: PersistentVector<i32> = (4..=6).collect();
+
+                  map.insert(key1.clone(), "first");
+                  map.insert(key2.clone(), "second");
+
+                  assert_eq!(map.get(&key1), Some(&"first"));
+                  assert_eq!(map.get(&key2), Some(&"second"));
+                  // 同じ内容の新しいベクタでも取得可能
+                  let key1_copy: PersistentVector<i32> = (1..=3).collect();
+                  assert_eq!(map.get(&key1_copy), Some(&"first"));
+              }
+
+      - id: 4.2
+        description: |
+          テスト作成: HashSet の要素として使用可能
+        test_first: true
+        test_code: |
+              /// HashSet の要素として使用可能であることを確認
+              #[rstest]
+              fn test_hashset_element() {
+                  use std::collections::HashSet;
+
+                  let mut set: HashSet<PersistentVector<i32>> = HashSet::new();
+                  set.insert((1..=3).collect());
+                  set.insert((4..=6).collect());
+                  set.insert((1..=3).collect()); // 重複
+
+                  assert_eq!(set.len(), 2);
+                  let vector1: PersistentVector<i32> = (1..=3).collect();
+                  let vector2: PersistentVector<i32> = (4..=6).collect();
+                  let vector3: PersistentVector<i32> = (7..=9).collect();
+                  assert!(set.contains(&vector1));
+                  assert!(set.contains(&vector2));
+                  assert!(!set.contains(&vector3));
+              }
+
+      - id: 4.3
+        description: |
+          テスト作成: PersistentHashSet の要素として使用可能
+        test_first: true
+        test_code: |
+              /// PersistentHashSet の要素として使用可能であることを確認
+              #[rstest]
+              fn test_persistent_hashset_element() {
+                  use lambars::persistent::PersistentHashSet;
+
+                  let vector1: PersistentVector<i32> = (1..=3).collect();
+                  let vector2: PersistentVector<i32> = (4..=6).collect();
+
+                  let set = PersistentHashSet::new()
+                      .insert(vector1.clone())
+                      .insert(vector2.clone());
+
+                  assert!(set.contains(&vector1));
+                  assert!(set.contains(&vector2));
+              }
+
+      - id: 4.4
+        description: |
+          テスト作成: PersistentHashMap のキーとして使用可能
+        test_first: true
+        test_code: |
+              /// PersistentHashMap のキーとして使用可能であることを確認
+              #[rstest]
+              fn test_persistent_hashmap_key() {
+                  use lambars::persistent::PersistentHashMap;
+
+                  let key1: PersistentVector<i32> = (1..=3).collect();
+                  let key2: PersistentVector<i32> = (4..=6).collect();
+
+                  let map = PersistentHashMap::new()
+                      .insert(key1.clone(), "first")
+                      .insert(key2.clone(), "second");
+
+                  assert_eq!(map.get(&key1), Some(&"first"));
+                  assert_eq!(map.get(&key2), Some(&"second"));
+              }
+
+    expected_result: |
+      テストは全て通過する（Step 2 で実装済みのため）。
+
+  # ---------------------------------------------------------------------------
+  # Step 5: RED - ネストしたベクタのハッシュテスト
+  # ---------------------------------------------------------------------------
+  - step: 5
+    name: ネストしたベクタのハッシュテスト（RED）
+    phase: red
+    description: |
+      PersistentVector<PersistentVector<T>> のハッシュが正しく動作することを検証。
+    files:
+      - tests/persistent_vector_tests.rs
+
+    tasks:
+      - id: 5.1
+        description: |
+          テスト作成: ネストしたベクタのハッシュ
+        test_first: true
+        test_code: |
+              /// ネストしたベクタのハッシュが正しく動作することを確認
+              #[rstest]
+              fn test_nested_vector_hash() {
+                  let inner1: PersistentVector<i32> = (1..=3).collect();
+                  let inner2: PersistentVector<i32> = (4..=6).collect();
+
+                  let nested1: PersistentVector<PersistentVector<i32>> =
+                      vec![inner1.clone(), inner2.clone()].into_iter().collect();
+                  let nested2: PersistentVector<PersistentVector<i32>> =
+                      vec![inner1, inner2].into_iter().collect();
+
+                  // 同じ構造のネストしたベクタは同じハッシュ値を持つ
+                  let mut hasher1 = DefaultHasher::new();
+                  let mut hasher2 = DefaultHasher::new();
+                  nested1.hash(&mut hasher1);
+                  nested2.hash(&mut hasher2);
+                  assert_eq!(hasher1.finish(), hasher2.finish());
+              }
+
+      - id: 5.2
+        description: |
+          テスト作成: ネストしたベクタの HashSet での使用
+        test_first: true
+        test_code: |
+              /// ネストしたベクタを HashSet で使用できることを確認
+              #[rstest]
+              fn test_nested_vector_in_hashset() {
+                  use std::collections::HashSet;
+
+                  let inner1: PersistentVector<i32> = (1..=3).collect();
+                  let inner2: PersistentVector<i32> = (4..=6).collect();
+
+                  let nested1: PersistentVector<PersistentVector<i32>> =
+                      vec![inner1.clone(), inner2.clone()].into_iter().collect();
+                  let nested2: PersistentVector<PersistentVector<i32>> =
+                      vec![inner2, inner1].into_iter().collect();
+
+                  let mut set: HashSet<PersistentVector<PersistentVector<i32>>> = HashSet::new();
+                  set.insert(nested1.clone());
+                  set.insert(nested2.clone());
+
+                  // 順序が異なるので2つの異なる要素として扱われる
+                  assert_eq!(set.len(), 2);
+              }
+
+    expected_result: |
+      テストは全て通過する。
+
+  # ---------------------------------------------------------------------------
+  # Step 6: RED - プロパティベーステスト作成
+  # ---------------------------------------------------------------------------
+  - step: 6
+    name: プロパティベーステスト作成（RED）
+    phase: red
+    description: |
+      Hash 法則をプロパティベーステストで検証する。
+    files:
+      - tests/persistent_vector_laws.rs
+
+    tasks:
+      - id: 6.1
+        description: |
+          プロパティテスト: Hash-Eq 一貫性
+        test_first: true
+        test_code: |
+          // =============================================================================
+          // Hash Laws
+          // =============================================================================
+
+          use std::collections::hash_map::DefaultHasher;
+          use std::hash::{Hash, Hasher};
+
+          /// ヘルパー関数: ベクタのハッシュ値を計算
+          fn calculate_hash<T: Hash>(value: &T) -> u64 {
+              let mut hasher = DefaultHasher::new();
+              value.hash(&mut hasher);
+              hasher.finish()
+          }
+
+          #[test]
+          fn prop_hash_eq_consistency(elements in prop::collection::vec(any::<i32>(), 0..100)) {
+              // a == b ならば hash(a) == hash(b)
+              let vector1: PersistentVector<i32> = elements.iter().cloned().collect();
+              let vector2: PersistentVector<i32> = elements.iter().cloned().collect();
+
+              prop_assert_eq!(vector1, vector2);
+              prop_assert_eq!(calculate_hash(&vector1), calculate_hash(&vector2));
+          }
+
+      - id: 6.2
+        description: |
+          プロパティテスト: ハッシュの決定性
+        test_first: true
+        test_code: |
+          #[test]
+          fn prop_hash_deterministic(elements in prop::collection::vec(any::<i32>(), 0..100)) {
+              // 同じベクタは常に同じハッシュ値を持つ
+              let vector: PersistentVector<i32> = elements.iter().cloned().collect();
+
+              let hash1 = calculate_hash(&vector);
+              let hash2 = calculate_hash(&vector);
+
+              prop_assert_eq!(hash1, hash2);
+          }
+
+      - id: 6.3
+        description: |
+          プロパティテスト: clone したベクタは同じハッシュ値を持つ
+        test_first: true
+        test_code: |
+          #[test]
+          fn prop_hash_clone_consistency(elements in prop::collection::vec(any::<i32>(), 0..100)) {
+              // clone したベクタは同じハッシュ値を持つ
+              let vector: PersistentVector<i32> = elements.iter().cloned().collect();
+              let cloned = vector.clone();
+
+              prop_assert_eq!(calculate_hash(&vector), calculate_hash(&cloned));
+          }
+
+      - id: 6.4
+        description: |
+          プロパティテスト: 順序が影響すること
+        test_first: true
+        test_code: |
+          #[test]
+          fn prop_hash_order_sensitive(elements in prop::collection::vec(any::<i32>(), 2..20)) {
+              // 要素の順序が異なるベクタは高確率で異なるハッシュ値を持つ
+              let vector1: PersistentVector<i32> = elements.iter().cloned().collect();
+              let reversed: Vec<i32> = elements.iter().cloned().rev().collect();
+              let vector2: PersistentVector<i32> = reversed.iter().cloned().collect();
+
+              // 元のベクタと逆順ベクタが異なる場合のみ検証
+              if vector1 != vector2 {
+                  // ハッシュ衝突の可能性はあるが、ほとんどの場合は異なる
+                  prop_assert_ne!(calculate_hash(&vector1), calculate_hash(&vector2));
+              }
+          }
+
+      - id: 6.5
+        description: |
+          プロパティテスト: 長さが影響すること
+        test_first: true
+        test_code: |
+          #[test]
+          fn prop_hash_length_sensitive(
+              elements in prop::collection::vec(any::<i32>(), 1..50),
+              extra in any::<i32>()
+          ) {
+              // 異なる長さのベクタは高確率で異なるハッシュ値を持つ
+              let vector1: PersistentVector<i32> = elements.iter().cloned().collect();
+              let mut extended = elements.clone();
+              extended.push(extra);
+              let vector2: PersistentVector<i32> = extended.iter().cloned().collect();
+
+              prop_assert_ne!(calculate_hash(&vector1), calculate_hash(&vector2));
+          }
+
+    expected_result: |
+      プロパティテストは全て通過する。
+
+  # ---------------------------------------------------------------------------
+  # Step 7: REFACTOR - コードの整理
+  # ---------------------------------------------------------------------------
+  - step: 7
+    name: リファクタリング（REFACTOR）
+    phase: refactor
+    description: |
+      実装とテストの整理。ドキュメントコメントの追加。
+    files:
+      - src/persistent/vector.rs
+
+    tasks:
+      - id: 7.1
+        description: |
+          Hash トレイト実装にドキュメントコメントを追加
+        implementation: |
+          /// Computes a hash value for this vector.
+          ///
+          /// The hash is computed by first hashing the length, then hashing each
+          /// element in order using the O(N) iterator. This ensures that:
+          ///
+          /// - Vectors with different lengths have different hashes (with high probability)
+          /// - The order of elements affects the hash value
+          /// - Equal vectors produce equal hash values (Hash-Eq consistency)
+          ///
+          /// # Complexity
+          ///
+          /// O(N) where N is the number of elements, using the optimized stack-based
+          /// iterator implemented in Phase 8.1.
+          ///
+          /// # Examples
+          ///
+          /// ```rust
+          /// use lambars::persistent::PersistentVector;
+          /// use std::collections::HashMap;
+          ///
+          /// let mut map: HashMap<PersistentVector<i32>, &str> = HashMap::new();
+          /// let key: PersistentVector<i32> = (1..=3).collect();
+          /// map.insert(key.clone(), "value");
+          /// assert_eq!(map.get(&key), Some(&"value"));
+          /// ```
+          impl<T: Hash> Hash for PersistentVector<T> {
+              fn hash<H: Hasher>(&self, state: &mut H) {
+                  self.length.hash(state);
+                  for element in self.iter() {
+                      element.hash(state);
+                  }
+              }
+          }
+
+      - id: 7.2
+        description: |
+          テストの整理とグループ化の確認
+
+    expected_result: |
+      全てのテストが通過し、ドキュメントが完備している。
+
+# =============================================================================
+# テストファイル完全版
+# =============================================================================
+
+test_files_complete:
+
+  persistent_vector_tests.rs:
+    location: tests/persistent_vector_tests.rs
+    section_to_add: |
+      // =============================================================================
+      // Hash トレイト テスト
+      // =============================================================================
+
+      mod hash_tests {
+          use super::*;
+          use std::collections::hash_map::DefaultHasher;
+          use std::hash::{Hash, Hasher};
+
+          // -------------------------------------------------------------------------
+          // 基本ハッシュテスト
+          // -------------------------------------------------------------------------
+
+          /// 空ベクタがハッシュ可能であることを確認
+          #[rstest]
+          fn test_empty_vector_hash() {
+              let empty: PersistentVector<i32> = PersistentVector::new();
+              let mut hasher = DefaultHasher::new();
+              empty.hash(&mut hasher);
+              let _hash_value = hasher.finish();
+          }
+
+          /// 単一要素ベクタがハッシュ可能であることを確認
+          #[rstest]
+          fn test_singleton_hash() {
+              let vector = PersistentVector::singleton(42);
+              let mut hasher = DefaultHasher::new();
+              vector.hash(&mut hasher);
+              let _hash_value = hasher.finish();
+          }
+
+          /// 複数要素ベクタがハッシュ可能であることを確認
+          #[rstest]
+          fn test_multi_element_hash() {
+              let vector: PersistentVector<i32> = (1..=5).collect();
+              let mut hasher = DefaultHasher::new();
+              vector.hash(&mut hasher);
+              let _hash_value = hasher.finish();
+          }
+
+          /// 大きなベクタもハッシュ可能であることを確認
+          #[rstest]
+          fn test_large_vector_hash() {
+              let vector: PersistentVector<i32> = (0..10000).collect();
+              let mut hasher = DefaultHasher::new();
+              vector.hash(&mut hasher);
+              let _hash_value = hasher.finish();
+          }
+
+          // -------------------------------------------------------------------------
+          // Hash-Eq 一貫性テスト
+          // -------------------------------------------------------------------------
+
+          /// 等しいベクタは同じハッシュ値を持つことを確認（Hash-Eq 一貫性）
+          #[rstest]
+          fn test_equal_vectors_same_hash() {
+              let vector1: PersistentVector<i32> = (1..=5).collect();
+              let vector2: PersistentVector<i32> = (1..=5).collect();
+              assert_eq!(vector1, vector2);
+
+              let mut hasher1 = DefaultHasher::new();
+              let mut hasher2 = DefaultHasher::new();
+              vector1.hash(&mut hasher1);
+              vector2.hash(&mut hasher2);
+              assert_eq!(hasher1.finish(), hasher2.finish());
+          }
+
+          /// 異なるベクタは高確率で異なるハッシュ値を持つことを確認
+          #[rstest]
+          fn test_different_vectors_likely_different_hash() {
+              let vector1: PersistentVector<i32> = (1..=5).collect();
+              let vector2: PersistentVector<i32> = vec![5, 4, 3, 2, 1].into_iter().collect();
+              assert_ne!(vector1, vector2);
+
+              let mut hasher1 = DefaultHasher::new();
+              let mut hasher2 = DefaultHasher::new();
+              vector1.hash(&mut hasher1);
+              vector2.hash(&mut hasher2);
+              assert_ne!(hasher1.finish(), hasher2.finish());
+          }
+
+          /// 異なる長さのベクタは異なるハッシュ値を持つことを確認
+          #[rstest]
+          fn test_different_length_different_hash() {
+              let vector1: PersistentVector<i32> = (1..=3).collect();
+              let vector2: PersistentVector<i32> = (1..=5).collect();
+
+              let mut hasher1 = DefaultHasher::new();
+              let mut hasher2 = DefaultHasher::new();
+              vector1.hash(&mut hasher1);
+              vector2.hash(&mut hasher2);
+              assert_ne!(hasher1.finish(), hasher2.finish());
+          }
+
+          /// 同じベクタに対するハッシュは決定的であることを確認
+          #[rstest]
+          fn test_hash_deterministic() {
+              let vector: PersistentVector<i32> = (1..=5).collect();
+
+              let mut hasher1 = DefaultHasher::new();
+              let mut hasher2 = DefaultHasher::new();
+              vector.hash(&mut hasher1);
+              vector.hash(&mut hasher2);
+              assert_eq!(hasher1.finish(), hasher2.finish());
+          }
+
+          // -------------------------------------------------------------------------
+          // コレクション使用テスト
+          // -------------------------------------------------------------------------
+
+          /// HashMap のキーとして使用可能であることを確認
+          #[rstest]
+          fn test_hashmap_key() {
+              use std::collections::HashMap;
+
+              let mut map: HashMap<PersistentVector<i32>, &str> = HashMap::new();
+              let key1: PersistentVector<i32> = (1..=3).collect();
+              let key2: PersistentVector<i32> = (4..=6).collect();
+
+              map.insert(key1.clone(), "first");
+              map.insert(key2.clone(), "second");
+
+              assert_eq!(map.get(&key1), Some(&"first"));
+              assert_eq!(map.get(&key2), Some(&"second"));
+              let key1_copy: PersistentVector<i32> = (1..=3).collect();
+              assert_eq!(map.get(&key1_copy), Some(&"first"));
+          }
+
+          /// HashSet の要素として使用可能であることを確認
+          #[rstest]
+          fn test_hashset_element() {
+              use std::collections::HashSet;
+
+              let mut set: HashSet<PersistentVector<i32>> = HashSet::new();
+              set.insert((1..=3).collect());
+              set.insert((4..=6).collect());
+              set.insert((1..=3).collect()); // 重複
+
+              assert_eq!(set.len(), 2);
+              let vector1: PersistentVector<i32> = (1..=3).collect();
+              let vector2: PersistentVector<i32> = (4..=6).collect();
+              let vector3: PersistentVector<i32> = (7..=9).collect();
+              assert!(set.contains(&vector1));
+              assert!(set.contains(&vector2));
+              assert!(!set.contains(&vector3));
+          }
+
+          /// PersistentHashSet の要素として使用可能であることを確認
+          #[rstest]
+          fn test_persistent_hashset_element() {
+              use lambars::persistent::PersistentHashSet;
+
+              let vector1: PersistentVector<i32> = (1..=3).collect();
+              let vector2: PersistentVector<i32> = (4..=6).collect();
+
+              let set = PersistentHashSet::new()
+                  .insert(vector1.clone())
+                  .insert(vector2.clone());
+
+              assert!(set.contains(&vector1));
+              assert!(set.contains(&vector2));
+          }
+
+          /// PersistentHashMap のキーとして使用可能であることを確認
+          #[rstest]
+          fn test_persistent_hashmap_key() {
+              use lambars::persistent::PersistentHashMap;
+
+              let key1: PersistentVector<i32> = (1..=3).collect();
+              let key2: PersistentVector<i32> = (4..=6).collect();
+
+              let map = PersistentHashMap::new()
+                  .insert(key1.clone(), "first")
+                  .insert(key2.clone(), "second");
+
+              assert_eq!(map.get(&key1), Some(&"first"));
+              assert_eq!(map.get(&key2), Some(&"second"));
+          }
+
+          // -------------------------------------------------------------------------
+          // ネストしたベクタのハッシュテスト
+          // -------------------------------------------------------------------------
+
+          /// ネストしたベクタのハッシュが正しく動作することを確認
+          #[rstest]
+          fn test_nested_vector_hash() {
+              let inner1: PersistentVector<i32> = (1..=3).collect();
+              let inner2: PersistentVector<i32> = (4..=6).collect();
+
+              let nested1: PersistentVector<PersistentVector<i32>> =
+                  vec![inner1.clone(), inner2.clone()].into_iter().collect();
+              let nested2: PersistentVector<PersistentVector<i32>> =
+                  vec![inner1, inner2].into_iter().collect();
+
+              let mut hasher1 = DefaultHasher::new();
+              let mut hasher2 = DefaultHasher::new();
+              nested1.hash(&mut hasher1);
+              nested2.hash(&mut hasher2);
+              assert_eq!(hasher1.finish(), hasher2.finish());
+          }
+
+          /// ネストしたベクタを HashSet で使用できることを確認
+          #[rstest]
+          fn test_nested_vector_in_hashset() {
+              use std::collections::HashSet;
+
+              let inner1: PersistentVector<i32> = (1..=3).collect();
+              let inner2: PersistentVector<i32> = (4..=6).collect();
+
+              let nested1: PersistentVector<PersistentVector<i32>> =
+                  vec![inner1.clone(), inner2.clone()].into_iter().collect();
+              let nested2: PersistentVector<PersistentVector<i32>> =
+                  vec![inner2, inner1].into_iter().collect();
+
+              let mut set: HashSet<PersistentVector<PersistentVector<i32>>> = HashSet::new();
+              set.insert(nested1.clone());
+              set.insert(nested2.clone());
+
+              assert_eq!(set.len(), 2);
+          }
+      }
+
+  persistent_vector_laws.rs:
+    location: tests/persistent_vector_laws.rs
+    section_to_add: |
+      // =============================================================================
+      // Hash Laws
+      // =============================================================================
+
+      use std::collections::hash_map::DefaultHasher;
+      use std::hash::{Hash, Hasher};
+
+      /// ヘルパー関数: ベクタのハッシュ値を計算
+      fn calculate_hash<T: Hash>(value: &T) -> u64 {
+          let mut hasher = DefaultHasher::new();
+          value.hash(&mut hasher);
+          hasher.finish()
+      }
+
+      proptest! {
+          /// Hash-Eq 一貫性: a == b ならば hash(a) == hash(b)
+          #[test]
+          fn prop_hash_eq_consistency(elements in prop::collection::vec(any::<i32>(), 0..100)) {
+              let vector1: PersistentVector<i32> = elements.iter().cloned().collect();
+              let vector2: PersistentVector<i32> = elements.iter().cloned().collect();
+
+              prop_assert_eq!(vector1, vector2);
+              prop_assert_eq!(calculate_hash(&vector1), calculate_hash(&vector2));
+          }
+
+          /// ハッシュの決定性: 同じベクタは常に同じハッシュ値を持つ
+          #[test]
+          fn prop_hash_deterministic(elements in prop::collection::vec(any::<i32>(), 0..100)) {
+              let vector: PersistentVector<i32> = elements.iter().cloned().collect();
+
+              let hash1 = calculate_hash(&vector);
+              let hash2 = calculate_hash(&vector);
+
+              prop_assert_eq!(hash1, hash2);
+          }
+
+          /// clone したベクタは同じハッシュ値を持つ
+          #[test]
+          fn prop_hash_clone_consistency(elements in prop::collection::vec(any::<i32>(), 0..100)) {
+              let vector: PersistentVector<i32> = elements.iter().cloned().collect();
+              let cloned = vector.clone();
+
+              prop_assert_eq!(calculate_hash(&vector), calculate_hash(&cloned));
+          }
+
+          /// 要素の順序が異なるベクタは高確率で異なるハッシュ値を持つ
+          #[test]
+          fn prop_hash_order_sensitive(elements in prop::collection::vec(any::<i32>(), 2..20)) {
+              let vector1: PersistentVector<i32> = elements.iter().cloned().collect();
+              let reversed: Vec<i32> = elements.iter().cloned().rev().collect();
+              let vector2: PersistentVector<i32> = reversed.iter().cloned().collect();
+
+              // 元のベクタと逆順ベクタが異なる場合のみ検証
+              if vector1 != vector2 {
+                  // ハッシュ衝突の可能性はあるが、ほとんどの場合は異なる
+                  prop_assert_ne!(calculate_hash(&vector1), calculate_hash(&vector2));
+              }
+          }
+
+          /// 異なる長さのベクタは高確率で異なるハッシュ値を持つ
+          #[test]
+          fn prop_hash_length_sensitive(
+              elements in prop::collection::vec(any::<i32>(), 1..50),
+              extra in any::<i32>()
+          ) {
+              let vector1: PersistentVector<i32> = elements.iter().cloned().collect();
+              let mut extended = elements.clone();
+              extended.push(extra);
+              let vector2: PersistentVector<i32> = extended.iter().cloned().collect();
+
+              prop_assert_ne!(calculate_hash(&vector1), calculate_hash(&vector2));
+          }
+      }
+
+# =============================================================================
+# 依存関係グラフ
+# =============================================================================
+
+dependency_graph:
+  requirements:
+    FR-001:
+      depends_on: []
+      description: Hash トレイト実装（基盤）
+
+    FR-002:
+      depends_on:
+        - FR-001
+      description: Hash-Eq 一貫性
+
+    FR-003:
+      depends_on:
+        - FR-001
+      description: HashMap/HashSet での使用
+
+  steps:
+    step_1: []
+    step_2:
+      - step_1
+    step_3:
+      - step_2
+    step_4:
+      - step_2
+    step_5:
+      - step_2
+    step_6:
+      - step_2
+    step_7:
+      - step_3
+      - step_4
+      - step_5
+      - step_6
+
+# =============================================================================
+# テストカバレッジ要件
+# =============================================================================
+
+test_coverage:
+  target: 100%
+
+  unit_tests:
+    persistent_vector_tests.rs:
+      hash_tests:
+        basic:
+          - test_empty_vector_hash
+          - test_singleton_hash
+          - test_multi_element_hash
+          - test_large_vector_hash
+        hash_eq_consistency:
+          - test_equal_vectors_same_hash
+          - test_different_vectors_likely_different_hash
+          - test_different_length_different_hash
+          - test_hash_deterministic
+        collection_usage:
+          - test_hashmap_key
+          - test_hashset_element
+          - test_persistent_hashset_element
+          - test_persistent_hashmap_key
+        nested:
+          - test_nested_vector_hash
+          - test_nested_vector_in_hashset
+
+  law_tests:
+    persistent_vector_laws.rs:
+      hash_laws:
+        - prop_hash_eq_consistency
+        - prop_hash_deterministic
+        - prop_hash_clone_consistency
+        - prop_hash_order_sensitive
+        - prop_hash_length_sensitive
+
+# =============================================================================
+# 成功基準
+# =============================================================================
+
+success_criteria:
+
+  functional:
+    - 全ての要件（FR-001, FR-002, FR-003）が実装されていること
+    - Hash-Eq 一貫性が満たされていること（proptest で検証）
+    - HashMap/HashSet のキー・要素として使用可能であること
+    - PersistentHashMap/PersistentHashSet との統合が動作すること
+    - ネストしたベクタのハッシュが正しく動作すること
+
+  code_quality:
+    - テストカバレッジ 100%
+    - "#![forbid(unsafe_code)] を維持"
+    - clippy 警告なし
+    - ドキュメントコメント完備
+
+  non_functional:
+    - ハッシュ計算の計算量が O(N) であること（O(N) イテレータ使用）
+    - 後方互換性が維持されていること（既存コードに影響なし）
+
+# =============================================================================
+# PersistentList との主な違い
+# =============================================================================
+
+differences_from_list:
+
+  iterator_usage:
+    description: |
+      PersistentList はシンプルな再帰的イテレータを使用するが、
+      PersistentVector は Phase 8.1 で最適化されたスタックベースの
+      O(N) イテレータ（iter()）を使用する。
+
+  test_additions:
+    description: |
+      - test_large_vector_hash: 10,000要素の大きなベクタでのテスト追加
+      - prop_hash_order_sensitive: ベクタの順序敏感性のプロパティテスト追加
+      - prop_hash_length_sensitive: 長さ敏感性のプロパティテスト追加
+
+  documentation:
+    description: |
+      ドキュメントコメントに O(N) の計算量と Phase 8.1 のイテレータ最適化
+      への言及を追加。
+
+# =============================================================================
+# 実装スケジュール目安
+# =============================================================================
+
+estimated_timeline:
+  unit: hours
+
+  steps:
+    step_1_basic_tests: 0.5
+    step_2_implementation: 0.5
+    step_3_consistency_tests: 0.5
+    step_4_collection_tests: 0.5
+    step_5_nested_tests: 0.5
+    step_6_property_tests: 0.75
+    step_7_refactor: 0.5
+
+  total_estimated_hours: 3.75
+
+  notes: |
+    - TDD サイクル（テスト作成 -> 実装 -> リファクタリング）の時間を含む
+    - 実装自体はシンプルなため、短時間で完了可能
+    - テストの網羅性を重視
+    - PersistentList の実装計画より少し長めに見積もり（追加テストあり）

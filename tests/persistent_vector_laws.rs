@@ -600,3 +600,75 @@ proptest! {
         }
     }
 }
+
+// =============================================================================
+// Hash Laws
+// =============================================================================
+
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
+fn calculate_hash<T: Hash>(value: &T) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
+proptest! {
+    #[test]
+    fn prop_hash_eq_consistency(elements in prop::collection::vec(any::<i32>(), 0..100)) {
+        let vector1: PersistentVector<i32> = elements.iter().cloned().collect();
+        let vector2: PersistentVector<i32> = elements.iter().cloned().collect();
+
+        prop_assert_eq!(&vector1, &vector2);
+        prop_assert_eq!(calculate_hash(&vector1), calculate_hash(&vector2));
+    }
+
+    /// Hash determinism: the same vector always has the same hash value
+    #[test]
+    fn prop_hash_deterministic(elements in prop::collection::vec(any::<i32>(), 0..100)) {
+        let vector: PersistentVector<i32> = elements.iter().cloned().collect();
+
+        let hash1 = calculate_hash(&vector);
+        let hash2 = calculate_hash(&vector);
+
+        prop_assert_eq!(hash1, hash2);
+    }
+
+    /// Cloned vectors have the same hash value
+    #[test]
+    fn prop_hash_clone_consistency(elements in prop::collection::vec(any::<i32>(), 0..100)) {
+        let vector: PersistentVector<i32> = elements.iter().cloned().collect();
+        let cloned = vector.clone();
+
+        prop_assert_eq!(calculate_hash(&vector), calculate_hash(&cloned));
+    }
+
+    /// Vectors with different element orders have different hash values with high probability
+    #[test]
+    fn prop_hash_order_sensitive(elements in prop::collection::vec(any::<i32>(), 2..20)) {
+        let vector1: PersistentVector<i32> = elements.iter().cloned().collect();
+        let reversed: Vec<i32> = elements.iter().cloned().rev().collect();
+        let vector2: PersistentVector<i32> = reversed.iter().cloned().collect();
+
+        // Only test if the original vector and the reversed vector are different
+        if vector1 != vector2 {
+            // Hash collisions are possible but unlikely
+            prop_assert_ne!(calculate_hash(&vector1), calculate_hash(&vector2));
+        }
+    }
+
+    /// Vectors with different lengths have different hash values with high probability
+    #[test]
+    fn prop_hash_length_sensitive(
+        elements in prop::collection::vec(any::<i32>(), 1..50),
+        extra in any::<i32>()
+    ) {
+        let vector1: PersistentVector<i32> = elements.iter().cloned().collect();
+        let mut extended = elements.clone();
+        extended.push(extra);
+        let vector2: PersistentVector<i32> = extended.iter().cloned().collect();
+
+        prop_assert_ne!(calculate_hash(&vector1), calculate_hash(&vector2));
+    }
+}

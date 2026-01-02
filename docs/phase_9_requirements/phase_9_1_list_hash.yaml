@@ -1,0 +1,501 @@
+# Phase 9.1: PersistentList<T> への Hash トレイト追加 - 要件定義
+# PersistentList に Hash トレイトを実装し、ハッシュコレクションでの使用を可能にする
+
+version: "1.0.0"
+created_at: "2026-01-02"
+phase_id: phase_9_1
+phase_name: PersistentList Hash トレイト実装
+phase_name_en: PersistentList Hash Trait Implementation
+
+# =============================================================================
+# 概要（Overview）
+# =============================================================================
+
+overview:
+  description: |
+    PersistentList<T> に Hash トレイトを実装する。
+    これにより、PersistentList を HashMap のキーや HashSet の要素として使用可能になる。
+
+    現在 PersistentList には Debug, PartialEq, Eq が実装されているが、
+    Hash は未実装である。順序付き構造であるため、要素を順番にハッシュする
+    シンプルな実装が可能。
+
+  goals:
+    - PersistentList<T> に Hash トレイトを実装する（T: Hash 制約）
+    - Hash の一貫性を保証する（a == b ならば hash(a) == hash(b)）
+    - 既存の PartialEq/Eq 実装との整合性を維持する
+    - パフォーマンスを考慮した効率的なハッシュ計算
+
+  non_goals:
+    - 既存の PartialEq/Eq 実装の変更
+    - Hash アルゴリズムのカスタマイズ機能
+    - スレッドセーフ版（Arc）への対応（本フェーズのスコープ外）
+
+  functional_programming_principles:
+    referential_transparency: |
+      Hash トレイトの実装は純粋関数として振る舞う。
+      同じリストに対して常に同じハッシュ値を返す。
+
+    composability: |
+      ハッシュ計算は各要素のハッシュを順に結合することで行う。
+      これにより、リストの構造を反映したハッシュ値が得られる。
+
+# =============================================================================
+# 機能要件（Functional Requirements）
+# =============================================================================
+
+functional_requirements:
+  - id: FR-001
+    name: Hash トレイト実装
+    priority: critical
+    description: |
+      PersistentList<T> に std::hash::Hash トレイトを実装する。
+      T: Hash の制約を持つ場合にのみ Hash が有効になる。
+
+    location: src/persistent/list.rs
+
+    trait_implementation: |
+      use std::hash::{Hash, Hasher};
+
+      impl<T: Hash> Hash for PersistentList<T> {
+          fn hash<H: Hasher>(&self, state: &mut H) {
+              // 長さをハッシュすることで、異なる長さのリストを区別
+              self.length.hash(state);
+              // 各要素を順番にハッシュ
+              for element in self.iter() {
+                  element.hash(state);
+              }
+          }
+      }
+
+    design_rationale: |
+      1. 長さを先にハッシュする理由:
+         - 異なる長さのリストが同じハッシュ値になる可能性を減らす
+         - 例: [1, 2] と [1, 2, 0] の区別が容易になる
+
+      2. 順番にハッシュする理由:
+         - PersistentList は順序付き構造である
+         - [1, 2, 3] と [3, 2, 1] は異なるハッシュ値を持つべき
+         - PartialEq の実装と一貫性がある
+
+    acceptance_criteria:
+      - T: Hash の場合に PersistentList<T>: Hash が成り立つこと
+      - 空リストもハッシュ可能であること
+      - ハッシュ計算が全要素を考慮すること
+
+  - id: FR-002
+    name: Hash-Eq 一貫性
+    priority: critical
+    description: |
+      Hash トレイトの基本法則として、
+      a == b ならば hash(a) == hash(b) を満たす必要がある。
+
+      これは Rust の標準ライブラリで要求される Hash と Eq の一貫性である。
+
+    verification: |
+      プロパティベーステストで検証:
+      - 同じ要素から構築されたリストは同じハッシュ値を持つ
+      - 等しいリスト（a == b）は同じハッシュ値を持つ
+
+    acceptance_criteria:
+      - PartialEq で等しいリストは同じハッシュ値を持つこと
+      - 構造的に同一のリストは同じハッシュ値を持つこと
+
+  - id: FR-003
+    name: HashMap/HashSet での使用
+    priority: high
+    description: |
+      Hash 実装により、PersistentList を以下の用途で使用可能にする:
+      - HashMap<PersistentList<T>, V> のキー
+      - HashSet<PersistentList<T>> の要素
+      - PersistentHashMap<PersistentList<T>, V> のキー
+      - PersistentHashSet<PersistentList<T>> の要素
+
+    example: |
+      use std::collections::{HashMap, HashSet};
+      use lambars::persistent::PersistentList;
+
+      // HashMap のキーとして使用
+      let mut map: HashMap<PersistentList<i32>, String> = HashMap::new();
+      let list = PersistentList::from_iter([1, 2, 3]);
+      map.insert(list.clone(), "one-two-three".to_string());
+      assert_eq!(map.get(&list), Some(&"one-two-three".to_string()));
+
+      // HashSet の要素として使用
+      let mut set: HashSet<PersistentList<i32>> = HashSet::new();
+      set.insert(PersistentList::from_iter([1, 2, 3]));
+      set.insert(PersistentList::from_iter([4, 5, 6]));
+      assert!(set.contains(&PersistentList::from_iter([1, 2, 3])));
+
+    acceptance_criteria:
+      - HashMap のキーとして使用できること
+      - HashSet の要素として使用できること
+      - PersistentHashMap のキーとして使用できること
+      - PersistentHashSet の要素として使用できること
+
+# =============================================================================
+# 非機能要件（Non-Functional Requirements）
+# =============================================================================
+
+non_functional_requirements:
+  - id: NFR-001
+    name: パフォーマンス
+    priority: high
+    description: |
+      ハッシュ計算の計算量は O(n) であること（n = リストの長さ）。
+      各要素を一度だけ走査してハッシュ値を計算する。
+
+    complexity:
+      time: O(n)
+      space: O(1)
+
+    notes: |
+      - イテレータを使用することで追加のメモリ割り当てを避ける
+      - 各要素の hash() 呼び出しはインライン化される可能性が高い
+
+  - id: NFR-002
+    name: 安全性
+    priority: critical
+    description: |
+      実装は #![forbid(unsafe_code)] ポリシーに準拠する。
+      unsafe コードは使用しない。
+
+    verification: |
+      - コンパイル時に unsafe_code 禁止が適用されること
+      - clippy の unsafe 関連警告がないこと
+
+  - id: NFR-003
+    name: 後方互換性
+    priority: critical
+    description: |
+      既存のコードに影響を与えない追加的な変更であること。
+      - 既存の Debug, PartialEq, Eq 実装に変更なし
+      - 既存の API に変更なし
+      - 新しい Hash 実装は追加のみ
+
+# =============================================================================
+# テスト要件（Test Requirements）
+# =============================================================================
+
+test_requirements:
+  unit_tests:
+    location: tests/persistent_list_tests.rs
+    description: |
+      既存のテストファイルに Hash 関連のテストを追加する。
+
+    categories:
+      - name: 基本ハッシュテスト
+        tests:
+          - name: test_empty_list_hash
+            description: 空リストがハッシュ可能であること
+            test: |
+              use std::collections::hash_map::DefaultHasher;
+              use std::hash::{Hash, Hasher};
+
+              let empty: PersistentList<i32> = PersistentList::new();
+              let mut hasher = DefaultHasher::new();
+              empty.hash(&mut hasher);
+              let hash_value = hasher.finish();
+              // ハッシュ値が計算できることを確認
+              assert!(hash_value != 0 || hash_value == 0); // 常に true だが計算されることを確認
+
+          - name: test_singleton_hash
+            description: 単一要素リストがハッシュ可能であること
+            test: |
+              let list = PersistentList::singleton(42);
+              let mut hasher = DefaultHasher::new();
+              list.hash(&mut hasher);
+              let _ = hasher.finish();
+
+          - name: test_multi_element_hash
+            description: 複数要素リストがハッシュ可能であること
+            test: |
+              let list = PersistentList::from_iter([1, 2, 3, 4, 5]);
+              let mut hasher = DefaultHasher::new();
+              list.hash(&mut hasher);
+              let _ = hasher.finish();
+
+      - name: Hash-Eq 一貫性テスト
+        tests:
+          - name: test_equal_lists_same_hash
+            description: 等しいリストは同じハッシュ値を持つ
+            test: |
+              let list1 = PersistentList::from_iter([1, 2, 3]);
+              let list2 = PersistentList::from_iter([1, 2, 3]);
+              assert_eq!(list1, list2);
+
+              let mut hasher1 = DefaultHasher::new();
+              let mut hasher2 = DefaultHasher::new();
+              list1.hash(&mut hasher1);
+              list2.hash(&mut hasher2);
+              assert_eq!(hasher1.finish(), hasher2.finish());
+
+          - name: test_different_lists_likely_different_hash
+            description: 異なるリストは（高確率で）異なるハッシュ値を持つ
+            test: |
+              let list1 = PersistentList::from_iter([1, 2, 3]);
+              let list2 = PersistentList::from_iter([3, 2, 1]);
+              assert_ne!(list1, list2);
+
+              let mut hasher1 = DefaultHasher::new();
+              let mut hasher2 = DefaultHasher::new();
+              list1.hash(&mut hasher1);
+              list2.hash(&mut hasher2);
+              // 衝突の可能性はあるが、この例では異なるはず
+              assert_ne!(hasher1.finish(), hasher2.finish());
+
+          - name: test_different_length_different_hash
+            description: 異なる長さのリストは（高確率で）異なるハッシュ値を持つ
+            test: |
+              let list1 = PersistentList::from_iter([1, 2]);
+              let list2 = PersistentList::from_iter([1, 2, 3]);
+
+              let mut hasher1 = DefaultHasher::new();
+              let mut hasher2 = DefaultHasher::new();
+              list1.hash(&mut hasher1);
+              list2.hash(&mut hasher2);
+              assert_ne!(hasher1.finish(), hasher2.finish());
+
+      - name: コレクション使用テスト
+        tests:
+          - name: test_hashmap_key
+            description: HashMap のキーとして使用可能
+            test: |
+              use std::collections::HashMap;
+
+              let mut map: HashMap<PersistentList<i32>, &str> = HashMap::new();
+              let key1 = PersistentList::from_iter([1, 2, 3]);
+              let key2 = PersistentList::from_iter([4, 5, 6]);
+
+              map.insert(key1.clone(), "first");
+              map.insert(key2.clone(), "second");
+
+              assert_eq!(map.get(&key1), Some(&"first"));
+              assert_eq!(map.get(&key2), Some(&"second"));
+              assert_eq!(map.get(&PersistentList::from_iter([1, 2, 3])), Some(&"first"));
+
+          - name: test_hashset_element
+            description: HashSet の要素として使用可能
+            test: |
+              use std::collections::HashSet;
+
+              let mut set: HashSet<PersistentList<i32>> = HashSet::new();
+              set.insert(PersistentList::from_iter([1, 2, 3]));
+              set.insert(PersistentList::from_iter([4, 5, 6]));
+              set.insert(PersistentList::from_iter([1, 2, 3])); // 重複
+
+              assert_eq!(set.len(), 2);
+              assert!(set.contains(&PersistentList::from_iter([1, 2, 3])));
+              assert!(set.contains(&PersistentList::from_iter([4, 5, 6])));
+              assert!(!set.contains(&PersistentList::from_iter([7, 8, 9])));
+
+          - name: test_persistent_hashset_element
+            description: PersistentHashSet の要素として使用可能
+            test: |
+              use lambars::persistent::PersistentHashSet;
+
+              let list1 = PersistentList::from_iter([1, 2, 3]);
+              let list2 = PersistentList::from_iter([4, 5, 6]);
+
+              let set = PersistentHashSet::new()
+                  .insert(list1.clone())
+                  .insert(list2.clone());
+
+              assert!(set.contains(&list1));
+              assert!(set.contains(&list2));
+
+  law_tests:
+    location: tests/persistent_list_laws.rs
+    framework: proptest
+    description: |
+      プロパティベーステストで Hash 法則を検証する。
+
+    laws:
+      - name: hash_eq_consistency
+        description: "a == b ならば hash(a) == hash(b)"
+        property: |
+          proptest! {
+              #[test]
+              fn prop_hash_eq_consistency(elements in prop::collection::vec(any::<i32>(), 0..100)) {
+                  let list1: PersistentList<i32> = elements.iter().cloned().collect();
+                  let list2: PersistentList<i32> = elements.iter().cloned().collect();
+
+                  prop_assert_eq!(list1, list2);
+
+                  let mut hasher1 = DefaultHasher::new();
+                  let mut hasher2 = DefaultHasher::new();
+                  list1.hash(&mut hasher1);
+                  list2.hash(&mut hasher2);
+                  prop_assert_eq!(hasher1.finish(), hasher2.finish());
+              }
+          }
+
+      - name: hash_deterministic
+        description: "同じリストは常に同じハッシュ値を持つ"
+        property: |
+          proptest! {
+              #[test]
+              fn prop_hash_deterministic(elements in prop::collection::vec(any::<i32>(), 0..100)) {
+                  let list: PersistentList<i32> = elements.iter().cloned().collect();
+
+                  let mut hasher1 = DefaultHasher::new();
+                  let mut hasher2 = DefaultHasher::new();
+                  list.hash(&mut hasher1);
+                  list.hash(&mut hasher2);
+                  prop_assert_eq!(hasher1.finish(), hasher2.finish());
+              }
+          }
+
+      - name: hash_order_sensitive
+        description: "要素の順序が異なるリストは高確率で異なるハッシュ値を持つ"
+        property: |
+          proptest! {
+              #[test]
+              fn prop_hash_order_sensitive(elements in prop::collection::vec(any::<i32>(), 2..20)) {
+                  let list1: PersistentList<i32> = elements.iter().cloned().collect();
+                  let reversed: Vec<i32> = elements.iter().cloned().rev().collect();
+                  let list2: PersistentList<i32> = reversed.iter().cloned().collect();
+
+                  // 元のリストと逆順リストが異なる場合のみ検証
+                  if list1 != list2 {
+                      let mut hasher1 = DefaultHasher::new();
+                      let mut hasher2 = DefaultHasher::new();
+                      list1.hash(&mut hasher1);
+                      list2.hash(&mut hasher2);
+                      // ハッシュ衝突の可能性はあるが、ほとんどの場合は異なる
+                      // この検証は確率的
+                      prop_assert_ne!(hasher1.finish(), hasher2.finish());
+                  }
+              }
+          }
+
+  integration_tests:
+    location: tests/persistent_list_tests.rs
+    description: |
+      他の永続データ構造との統合テスト。
+
+    scenarios:
+      - name: list_as_hashmap_key_with_persistent_values
+        description: |
+          PersistentList をキーとして使用し、
+          値に他の永続データ構造を持つ HashMap のテスト。
+
+      - name: nested_list_hash
+        description: |
+          PersistentList<PersistentList<T>> のハッシュが正しく動作すること。
+
+# =============================================================================
+# 受け入れ基準（Acceptance Criteria）
+# =============================================================================
+
+acceptance_criteria:
+  functional:
+    - id: AC-001
+      description: PersistentList<T> で T: Hash の場合に Hash が実装されていること
+      verification: "コンパイルが成功すること"
+
+    - id: AC-002
+      description: 空リスト、単一要素リスト、複数要素リストすべてがハッシュ可能であること
+      verification: "ユニットテストが成功すること"
+
+    - id: AC-003
+      description: 等しいリストが同じハッシュ値を持つこと（Hash-Eq 一貫性）
+      verification: "プロパティベーステストが成功すること"
+
+    - id: AC-004
+      description: HashMap のキーとして使用できること
+      verification: "統合テストが成功すること"
+
+    - id: AC-005
+      description: HashSet の要素として使用できること
+      verification: "統合テストが成功すること"
+
+    - id: AC-006
+      description: PersistentHashMap のキーとして使用できること
+      verification: "統合テストが成功すること"
+
+    - id: AC-007
+      description: PersistentHashSet の要素として使用できること
+      verification: "統合テストが成功すること"
+
+  code_quality:
+    - id: AC-Q01
+      description: 全てのテストが通過すること
+      verification: "cargo test が成功すること"
+
+    - id: AC-Q02
+      description: clippy 警告がないこと
+      verification: "cargo clippy -- -D warnings が成功すること"
+
+    - id: AC-Q03
+      description: unsafe コードを使用していないこと
+      verification: "#![forbid(unsafe_code)] がエラーを出さないこと"
+
+    - id: AC-Q04
+      description: ドキュメントが完備していること
+      verification: "cargo doc が警告なしで成功すること"
+
+  performance:
+    - id: AC-P01
+      description: ハッシュ計算の計算量が O(n) であること
+      verification: "リストの長さに比例した時間で完了すること"
+
+# =============================================================================
+# 成果物（Artifacts）
+# =============================================================================
+
+artifacts:
+  source_files:
+    - path: src/persistent/list.rs
+      description: Hash トレイト実装の追加
+      changes:
+        - "use std::hash::{Hash, Hasher}; の追加"
+        - "impl<T: Hash> Hash for PersistentList<T> の追加"
+
+  test_files:
+    - path: tests/persistent_list_tests.rs
+      description: Hash 関連ユニットテストの追加
+
+    - path: tests/persistent_list_laws.rs
+      description: Hash 法則のプロパティベーステストの追加
+
+# =============================================================================
+# 依存関係（Dependencies）
+# =============================================================================
+
+dependencies:
+  internal:
+    - lambars::persistent::PersistentList
+    - lambars::persistent::PersistentHashMap (テスト用)
+    - lambars::persistent::PersistentHashSet (テスト用)
+
+  external: []
+
+  dev_dependencies:
+    - rstest: "0.18"
+      reason: パラメータ化テスト
+
+    - proptest: "1.0"
+      reason: プロパティベーステスト
+
+# =============================================================================
+# 参照（References）
+# =============================================================================
+
+references:
+  - name: "Rust std::hash::Hash"
+    url: "https://doc.rust-lang.org/std/hash/trait.Hash.html"
+    description: |
+      Rust 標準ライブラリの Hash トレイト。
+      Hash と Eq の一貫性要件が記載されている。
+
+  - name: "Rust std::collections::HashMap"
+    url: "https://doc.rust-lang.org/std/collections/struct.HashMap.html"
+    description: |
+      HashMap のキーに必要なトレイト境界（Eq + Hash）の説明。
+
+  - name: "既存の PersistentList 実装"
+    location: src/persistent/list.rs
+    description: |
+      Debug（line 715-719）、PartialEq（line 704-711）、Eq（line 713）の
+      既存実装を参考にする。

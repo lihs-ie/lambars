@@ -968,6 +968,219 @@ mod from_slice_tests {
 // append optimization tests
 // -----------------------------------------------------------------------------
 
+// =============================================================================
+// Hash Trait Tests
+// =============================================================================
+
+mod hash_tests {
+    use super::*;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    // -------------------------------------------------------------------------
+    // Basic Hash Tests
+    // -------------------------------------------------------------------------
+
+    /// Verify that an empty list is hashable
+    #[rstest]
+    fn test_empty_list_hash() {
+        let empty: PersistentList<i32> = PersistentList::new();
+        let mut hasher = DefaultHasher::new();
+        empty.hash(&mut hasher);
+        let _hash_value = hasher.finish();
+    }
+
+    /// Verify that a single-element list is hashable
+    #[rstest]
+    fn test_singleton_hash() {
+        let list = PersistentList::singleton(42);
+        let mut hasher = DefaultHasher::new();
+        list.hash(&mut hasher);
+        let _hash_value = hasher.finish();
+    }
+
+    /// Verify that a multi-element list is hashable
+    #[rstest]
+    fn test_multi_element_hash() {
+        let list: PersistentList<i32> = (1..=5).collect();
+        let mut hasher = DefaultHasher::new();
+        list.hash(&mut hasher);
+        let _hash_value = hasher.finish();
+    }
+
+    // -------------------------------------------------------------------------
+    // Hash-Eq Consistency Tests
+    // -------------------------------------------------------------------------
+
+    /// Verify that equal lists have the same hash value (Hash-Eq consistency)
+    #[rstest]
+    fn test_equal_lists_same_hash() {
+        let list1: PersistentList<i32> = (1..=3).collect();
+        let list2: PersistentList<i32> = (1..=3).collect();
+        assert_eq!(list1, list2);
+
+        let mut hasher1 = DefaultHasher::new();
+        let mut hasher2 = DefaultHasher::new();
+        list1.hash(&mut hasher1);
+        list2.hash(&mut hasher2);
+        assert_eq!(hasher1.finish(), hasher2.finish());
+    }
+
+    /// Verify that different lists have different hash values with high probability
+    #[rstest]
+    fn test_different_lists_likely_different_hash() {
+        let list1: PersistentList<i32> = (1..=3).collect();
+        let list2: PersistentList<i32> = vec![3, 2, 1].into_iter().collect();
+        assert_ne!(list1, list2);
+
+        let mut hasher1 = DefaultHasher::new();
+        let mut hasher2 = DefaultHasher::new();
+        list1.hash(&mut hasher1);
+        list2.hash(&mut hasher2);
+        assert_ne!(hasher1.finish(), hasher2.finish());
+    }
+
+    /// Verify that lists of different lengths have different hash values
+    #[rstest]
+    fn test_different_length_different_hash() {
+        let list1: PersistentList<i32> = (1..=2).collect();
+        let list2: PersistentList<i32> = (1..=3).collect();
+
+        let mut hasher1 = DefaultHasher::new();
+        let mut hasher2 = DefaultHasher::new();
+        list1.hash(&mut hasher1);
+        list2.hash(&mut hasher2);
+        assert_ne!(hasher1.finish(), hasher2.finish());
+    }
+
+    /// Verify that hash is deterministic for the same list
+    #[rstest]
+    fn test_hash_deterministic() {
+        let list: PersistentList<i32> = (1..=5).collect();
+
+        let mut hasher1 = DefaultHasher::new();
+        let mut hasher2 = DefaultHasher::new();
+        list.hash(&mut hasher1);
+        list.hash(&mut hasher2);
+        assert_eq!(hasher1.finish(), hasher2.finish());
+    }
+
+    // -------------------------------------------------------------------------
+    // Collection Usage Tests
+    // -------------------------------------------------------------------------
+
+    /// Verify that the list can be used as a HashMap key
+    #[rstest]
+    fn test_hashmap_key() {
+        use std::collections::HashMap;
+
+        let mut map: HashMap<PersistentList<i32>, &str> = HashMap::new();
+        let key1: PersistentList<i32> = (1..=3).collect();
+        let key2: PersistentList<i32> = (4..=6).collect();
+
+        map.insert(key1.clone(), "first");
+        map.insert(key2.clone(), "second");
+
+        assert_eq!(map.get(&key1), Some(&"first"));
+        assert_eq!(map.get(&key2), Some(&"second"));
+        let key1_copy: PersistentList<i32> = (1..=3).collect();
+        assert_eq!(map.get(&key1_copy), Some(&"first"));
+    }
+
+    /// Verify that the list can be used as a HashSet element
+    #[rstest]
+    fn test_hashset_element() {
+        use std::collections::HashSet;
+
+        let mut set: HashSet<PersistentList<i32>> = HashSet::new();
+        set.insert((1..=3).collect());
+        set.insert((4..=6).collect());
+        set.insert((1..=3).collect()); // duplicate
+
+        assert_eq!(set.len(), 2);
+        let list1: PersistentList<i32> = (1..=3).collect();
+        let list2: PersistentList<i32> = (4..=6).collect();
+        let list3: PersistentList<i32> = (7..=9).collect();
+        assert!(set.contains(&list1));
+        assert!(set.contains(&list2));
+        assert!(!set.contains(&list3));
+    }
+
+    /// Verify that the list can be used as a PersistentHashSet element
+    #[rstest]
+    fn test_persistent_hashset_element() {
+        use lambars::persistent::PersistentHashSet;
+
+        let list1: PersistentList<i32> = (1..=3).collect();
+        let list2: PersistentList<i32> = (4..=6).collect();
+
+        let set = PersistentHashSet::new()
+            .insert(list1.clone())
+            .insert(list2.clone());
+
+        assert!(set.contains(&list1));
+        assert!(set.contains(&list2));
+    }
+
+    /// Verify that the list can be used as a PersistentHashMap key
+    #[rstest]
+    fn test_persistent_hashmap_key() {
+        use lambars::persistent::PersistentHashMap;
+
+        let key1: PersistentList<i32> = (1..=3).collect();
+        let key2: PersistentList<i32> = (4..=6).collect();
+
+        let map = PersistentHashMap::new()
+            .insert(key1.clone(), "first")
+            .insert(key2.clone(), "second");
+
+        assert_eq!(map.get(&key1), Some(&"first"));
+        assert_eq!(map.get(&key2), Some(&"second"));
+    }
+
+    // -------------------------------------------------------------------------
+    // Nested List Hash Tests
+    // -------------------------------------------------------------------------
+
+    /// Verify that hashing works correctly for nested lists
+    #[rstest]
+    fn test_nested_list_hash() {
+        let inner1: PersistentList<i32> = (1..=3).collect();
+        let inner2: PersistentList<i32> = (4..=6).collect();
+
+        let nested1: PersistentList<PersistentList<i32>> =
+            vec![inner1.clone(), inner2.clone()].into_iter().collect();
+        let nested2: PersistentList<PersistentList<i32>> =
+            vec![inner1, inner2].into_iter().collect();
+
+        let mut hasher1 = DefaultHasher::new();
+        let mut hasher2 = DefaultHasher::new();
+        nested1.hash(&mut hasher1);
+        nested2.hash(&mut hasher2);
+        assert_eq!(hasher1.finish(), hasher2.finish());
+    }
+
+    /// Verify that nested lists can be used in a HashSet
+    #[rstest]
+    fn test_nested_list_in_hashset() {
+        use std::collections::HashSet;
+
+        let inner1: PersistentList<i32> = (1..=3).collect();
+        let inner2: PersistentList<i32> = (4..=6).collect();
+
+        let nested1: PersistentList<PersistentList<i32>> =
+            vec![inner1.clone(), inner2.clone()].into_iter().collect();
+        let nested2: PersistentList<PersistentList<i32>> =
+            vec![inner2, inner1].into_iter().collect();
+
+        let mut set: HashSet<PersistentList<PersistentList<i32>>> = HashSet::new();
+        set.insert(nested1.clone());
+        set.insert(nested2.clone());
+
+        assert_eq!(set.len(), 2);
+    }
+}
+
 mod append_optimization_tests {
     use super::*;
 

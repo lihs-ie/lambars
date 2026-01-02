@@ -51,6 +51,7 @@
 use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::iter::FromIterator;
 use std::ops::{Bound, RangeBounds};
 use std::rc::Rc;
@@ -1073,6 +1074,44 @@ impl<K: Clone + Ord, V: Clone + PartialEq> PartialEq for PersistentTreeMap<K, V>
 }
 
 impl<K: Clone + Ord, V: Clone + Eq> Eq for PersistentTreeMap<K, V> {}
+
+/// Computes a hash value for this tree map.
+///
+/// The hash is computed by first hashing the length, then hashing each
+/// (key, value) pair in key order. This ensures that:
+///
+/// - Maps with different sizes have different hashes (with high probability)
+/// - The insertion order does not affect the hash value (since iteration is in key order)
+/// - Equal maps produce equal hash values (Hash-Eq consistency)
+///
+/// # Examples
+///
+/// ```rust
+/// use lambars::persistent::PersistentTreeMap;
+/// use std::collections::HashMap;
+///
+/// let mut outer: HashMap<PersistentTreeMap<i32, String>, &str> = HashMap::new();
+/// let key = PersistentTreeMap::new()
+///     .insert(1, "one".to_string())
+///     .insert(2, "two".to_string());
+/// outer.insert(key.clone(), "value");
+/// assert_eq!(outer.get(&key), Some(&"value"));
+/// ```
+impl<K, V> Hash for PersistentTreeMap<K, V>
+where
+    K: Clone + Ord + Hash,
+    V: Clone + Hash,
+{
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // Hash the length first to distinguish maps of different sizes
+        self.length.hash(state);
+        // Hash each entry in key order (iteration returns entries in key order)
+        for (key, value) in self {
+            key.hash(state);
+            value.hash(state);
+        }
+    }
+}
 
 impl<K: Clone + Ord + fmt::Debug, V: Clone + fmt::Debug> fmt::Debug for PersistentTreeMap<K, V> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {

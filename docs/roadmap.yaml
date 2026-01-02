@@ -1,8 +1,8 @@
 # lambars プロジェクト ロードマップ
 # Rust で関数型プログラミングを実現するためのライブラリ開発計画
 
-version: "1.1.0"
-last_updated: "2026-01-01"
+version: "1.2.0"
+last_updated: "2026-01-03"
 
 # プロジェクト概要
 project:
@@ -915,6 +915,71 @@ phases:
           - samples/order/src/api/axum_handler.rs (修正)
         references:
           - samples/order/docs/issues/issue_001_async_handler_clippy.yaml
+
+  - id: phase_9
+    name: Hash トレイト実装
+    name_en: Hash Trait Implementation
+    status: completed
+    started_at: "2026-01-03"
+    completed_at: "2026-01-03"
+    description: |
+      順序付き永続データ構造に Hash トレイトを追加する。
+      HashMap/HashSet のキーや要素として使用可能にする。
+    dependencies:
+      - phase_4
+    notes: |
+      順序付き構造（List, Vector, TreeMap）のみを対象とし、
+      順序不定の構造（HashMap, HashSet）は対象外（std と同様の方針）。
+      各構造は要素を順番にハッシュする単純な実装。
+      Hash-Eq 一貫性（a == b なら hash(a) == hash(b)）を保証。
+    deliverables:
+      - id: hash_persistent_list
+        name: PersistentList Hash 実装
+        description: |
+          PersistentList<T: Hash> に Hash トレイトを実装。
+          長さをハッシュし、各要素を順番にハッシュ。
+          O(n) の計算量。
+        status: completed
+        priority: high
+        artifacts:
+          - src/persistent/list.rs
+          - docs/phase_9_requirements/phase_9_1_list_hash.yaml
+          - docs/phase_9_implementation_plans/phase_9_1_list_hash.yaml
+        results: |
+          Hash トレイト実装完了。
+          13個のユニットテスト、3個のプロパティテストを追加。
+
+      - id: hash_persistent_vector
+        name: PersistentVector Hash 実装
+        description: |
+          PersistentVector<T: Hash> に Hash トレイトを実装。
+          長さをハッシュし、O(N) イテレータで各要素を順番にハッシュ。
+          Phase 8.1 で最適化されたイテレータを活用。
+        status: completed
+        priority: high
+        artifacts:
+          - src/persistent/vector.rs
+          - docs/phase_9_requirements/phase_9_2_vector_hash.yaml
+          - docs/phase_9_implementation_plans/phase_9_2_vector_hash.yaml
+        results: |
+          Hash トレイト実装完了。
+          14個のユニットテスト、5個のプロパティテストを追加。
+
+      - id: hash_persistent_treemap
+        name: PersistentTreeMap Hash 実装
+        description: |
+          PersistentTreeMap<K: Clone + Ord + Hash, V: Clone + Hash> に Hash トレイトを実装。
+          長さをハッシュし、キー順で各(key, value)ペアをハッシュ。
+          挿入順序に依存しない安定したハッシュ値を保証。
+        status: completed
+        priority: high
+        artifacts:
+          - src/persistent/treemap.rs
+          - docs/phase_9_requirements/phase_9_3_treemap_hash.yaml
+          - docs/phase_9_implementation_plans/phase_9_3_treemap_hash.yaml
+        results: |
+          Hash トレイト実装完了。
+          16個のユニットテスト、4個のプロパティテストを追加。
 
 # ステータス定義
 status_definitions:

@@ -1221,3 +1221,286 @@ fn test_range_both_unbounded() {
         .collect();
     assert_eq!(range.len(), 3);
 }
+
+// =============================================================================
+// Hash Trait Tests
+// =============================================================================
+
+mod hash_tests {
+    use super::*;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    // -------------------------------------------------------------------------
+    // Basic Hash Tests
+    // -------------------------------------------------------------------------
+
+    /// Verify that an empty map is hashable
+    #[rstest]
+    fn test_empty_treemap_hash() {
+        let empty: PersistentTreeMap<i32, String> = PersistentTreeMap::new();
+        let mut hasher = DefaultHasher::new();
+        empty.hash(&mut hasher);
+        let _hash_value = hasher.finish();
+    }
+
+    /// Verify that a single-entry map is hashable
+    #[rstest]
+    fn test_singleton_treemap_hash() {
+        let map = PersistentTreeMap::singleton(42, "answer".to_string());
+        let mut hasher = DefaultHasher::new();
+        map.hash(&mut hasher);
+        let _hash_value = hasher.finish();
+    }
+
+    /// Verify that a multi-entry map is hashable
+    #[rstest]
+    fn test_multi_entry_treemap_hash() {
+        let map = PersistentTreeMap::new()
+            .insert(1, "one".to_string())
+            .insert(2, "two".to_string())
+            .insert(3, "three".to_string());
+        let mut hasher = DefaultHasher::new();
+        map.hash(&mut hasher);
+        let _hash_value = hasher.finish();
+    }
+
+    // -------------------------------------------------------------------------
+    // Hash-Eq Consistency Tests
+    // -------------------------------------------------------------------------
+
+    /// Verify that equal maps have the same hash value (Hash-Eq consistency)
+    #[rstest]
+    fn test_equal_treemaps_same_hash() {
+        let map1 = PersistentTreeMap::new()
+            .insert(1, "one".to_string())
+            .insert(2, "two".to_string());
+        let map2 = PersistentTreeMap::new()
+            .insert(1, "one".to_string())
+            .insert(2, "two".to_string());
+        assert_eq!(map1, map2);
+
+        let mut hasher1 = DefaultHasher::new();
+        let mut hasher2 = DefaultHasher::new();
+        map1.hash(&mut hasher1);
+        map2.hash(&mut hasher2);
+        assert_eq!(hasher1.finish(), hasher2.finish());
+    }
+
+    /// Verify that equal maps have the same hash value regardless of insertion order
+    #[rstest]
+    fn test_different_insert_order_same_hash() {
+        let map1 = PersistentTreeMap::new()
+            .insert(1, "one".to_string())
+            .insert(2, "two".to_string())
+            .insert(3, "three".to_string());
+        let map2 = PersistentTreeMap::new()
+            .insert(3, "three".to_string())
+            .insert(1, "one".to_string())
+            .insert(2, "two".to_string());
+        assert_eq!(map1, map2);
+
+        let mut hasher1 = DefaultHasher::new();
+        let mut hasher2 = DefaultHasher::new();
+        map1.hash(&mut hasher1);
+        map2.hash(&mut hasher2);
+        assert_eq!(hasher1.finish(), hasher2.finish());
+    }
+
+    /// Verify that different maps have different hash values with high probability
+    #[rstest]
+    fn test_different_treemaps_likely_different_hash() {
+        let map1 = PersistentTreeMap::new().insert(1, "one".to_string());
+        let map2 = PersistentTreeMap::new().insert(1, "ONE".to_string());
+        assert_ne!(map1, map2);
+
+        let mut hasher1 = DefaultHasher::new();
+        let mut hasher2 = DefaultHasher::new();
+        map1.hash(&mut hasher1);
+        map2.hash(&mut hasher2);
+        // Collision is possible but should differ in this example
+        assert_ne!(hasher1.finish(), hasher2.finish());
+    }
+
+    /// Verify that maps with different keys have different hash values
+    #[rstest]
+    fn test_different_keys_different_hash() {
+        let map1 = PersistentTreeMap::new().insert(1, "value".to_string());
+        let map2 = PersistentTreeMap::new().insert(2, "value".to_string());
+
+        let mut hasher1 = DefaultHasher::new();
+        let mut hasher2 = DefaultHasher::new();
+        map1.hash(&mut hasher1);
+        map2.hash(&mut hasher2);
+        assert_ne!(hasher1.finish(), hasher2.finish());
+    }
+
+    /// Verify that maps of different sizes have different hash values
+    #[rstest]
+    fn test_different_size_different_hash() {
+        let map1 = PersistentTreeMap::new().insert(1, "one".to_string());
+        let map2 = PersistentTreeMap::new()
+            .insert(1, "one".to_string())
+            .insert(2, "two".to_string());
+
+        let mut hasher1 = DefaultHasher::new();
+        let mut hasher2 = DefaultHasher::new();
+        map1.hash(&mut hasher1);
+        map2.hash(&mut hasher2);
+        assert_ne!(hasher1.finish(), hasher2.finish());
+    }
+
+    /// Verify that hash is deterministic for the same map
+    #[rstest]
+    fn test_hash_deterministic() {
+        let map = PersistentTreeMap::new()
+            .insert(1, "one".to_string())
+            .insert(2, "two".to_string())
+            .insert(3, "three".to_string());
+
+        let mut hasher1 = DefaultHasher::new();
+        let mut hasher2 = DefaultHasher::new();
+        map.hash(&mut hasher1);
+        map.hash(&mut hasher2);
+        assert_eq!(hasher1.finish(), hasher2.finish());
+    }
+
+    // -------------------------------------------------------------------------
+    // Collection Usage Tests
+    // -------------------------------------------------------------------------
+
+    /// Verify that the map can be used as a HashMap key
+    #[rstest]
+    fn test_hashmap_key() {
+        use std::collections::HashMap;
+
+        let mut map: HashMap<PersistentTreeMap<i32, String>, &str> = HashMap::new();
+        let key1 = PersistentTreeMap::new().insert(1, "one".to_string());
+        let key2 = PersistentTreeMap::new().insert(2, "two".to_string());
+
+        map.insert(key1.clone(), "first");
+        map.insert(key2.clone(), "second");
+
+        assert_eq!(map.get(&key1), Some(&"first"));
+        assert_eq!(map.get(&key2), Some(&"second"));
+        let key1_copy = PersistentTreeMap::new().insert(1, "one".to_string());
+        assert_eq!(map.get(&key1_copy), Some(&"first"));
+    }
+
+    /// Verify that the map can be used as a HashSet element
+    #[rstest]
+    fn test_hashset_element() {
+        use std::collections::HashSet;
+
+        let mut set: HashSet<PersistentTreeMap<i32, String>> = HashSet::new();
+        set.insert(PersistentTreeMap::new().insert(1, "one".to_string()));
+        set.insert(PersistentTreeMap::new().insert(2, "two".to_string()));
+        set.insert(PersistentTreeMap::new().insert(1, "one".to_string())); // duplicate
+
+        assert_eq!(set.len(), 2);
+        assert!(set.contains(&PersistentTreeMap::new().insert(1, "one".to_string())));
+        assert!(set.contains(&PersistentTreeMap::new().insert(2, "two".to_string())));
+        assert!(!set.contains(&PersistentTreeMap::new().insert(3, "three".to_string())));
+    }
+
+    /// Verify that the map can be used as a PersistentHashSet element
+    #[rstest]
+    fn test_persistent_hashset_element() {
+        use lambars::persistent::PersistentHashSet;
+
+        let treemap1 = PersistentTreeMap::new().insert(1, "one".to_string());
+        let treemap2 = PersistentTreeMap::new().insert(2, "two".to_string());
+
+        let set = PersistentHashSet::new()
+            .insert(treemap1.clone())
+            .insert(treemap2.clone());
+
+        assert!(set.contains(&treemap1));
+        assert!(set.contains(&treemap2));
+    }
+
+    /// Verify that the map can be used as a PersistentHashMap key
+    #[rstest]
+    fn test_persistent_hashmap_key() {
+        use lambars::persistent::PersistentHashMap;
+
+        let key1 = PersistentTreeMap::new().insert(1, "one".to_string());
+        let key2 = PersistentTreeMap::new().insert(2, "two".to_string());
+
+        let map = PersistentHashMap::new()
+            .insert(key1.clone(), "first")
+            .insert(key2.clone(), "second");
+
+        assert_eq!(map.get(&key1), Some(&"first"));
+        assert_eq!(map.get(&key2), Some(&"second"));
+    }
+
+    // -------------------------------------------------------------------------
+    // Nested Map Hash Tests
+    // -------------------------------------------------------------------------
+
+    /// Verify that hashing works correctly for nested maps
+    #[rstest]
+    fn test_nested_treemap_hash() {
+        let inner1 = PersistentTreeMap::new().insert(1, 10).insert(2, 20);
+        let inner2 = PersistentTreeMap::new().insert(3, 30).insert(4, 40);
+
+        let nested1: PersistentTreeMap<&str, PersistentTreeMap<i32, i32>> = PersistentTreeMap::new()
+            .insert("first", inner1.clone())
+            .insert("second", inner2.clone());
+        let nested2: PersistentTreeMap<&str, PersistentTreeMap<i32, i32>> =
+            PersistentTreeMap::new()
+                .insert("first", inner1)
+                .insert("second", inner2);
+
+        // Nested maps with the same structure have the same hash value
+        let mut hasher1 = DefaultHasher::new();
+        let mut hasher2 = DefaultHasher::new();
+        nested1.hash(&mut hasher1);
+        nested2.hash(&mut hasher2);
+        assert_eq!(hasher1.finish(), hasher2.finish());
+    }
+
+    /// Verify that hashing works correctly for maps with PersistentList values
+    #[rstest]
+    fn test_treemap_with_persistent_list_values() {
+        use lambars::persistent::PersistentList;
+
+        let list1: PersistentList<i32> = (1..=3).collect();
+        let list2: PersistentList<i32> = (4..=6).collect();
+
+        let map1: PersistentTreeMap<&str, PersistentList<i32>> = PersistentTreeMap::new()
+            .insert("first", list1.clone())
+            .insert("second", list2.clone());
+        let map2: PersistentTreeMap<&str, PersistentList<i32>> = PersistentTreeMap::new()
+            .insert("first", list1)
+            .insert("second", list2);
+
+        let mut hasher1 = DefaultHasher::new();
+        let mut hasher2 = DefaultHasher::new();
+        map1.hash(&mut hasher1);
+        map2.hash(&mut hasher2);
+        assert_eq!(hasher1.finish(), hasher2.finish());
+    }
+
+    /// Verify that nested maps can be used in a HashSet
+    #[rstest]
+    fn test_nested_treemap_in_hashset() {
+        use std::collections::HashSet;
+
+        let inner1 = PersistentTreeMap::new().insert(1, 10);
+        let inner2 = PersistentTreeMap::new().insert(2, 20);
+
+        let nested1: PersistentTreeMap<&str, PersistentTreeMap<i32, i32>> =
+            PersistentTreeMap::new().insert("key", inner1);
+        let nested2: PersistentTreeMap<&str, PersistentTreeMap<i32, i32>> =
+            PersistentTreeMap::new().insert("key", inner2);
+
+        let mut set: HashSet<PersistentTreeMap<&str, PersistentTreeMap<i32, i32>>> = HashSet::new();
+        set.insert(nested1.clone());
+        set.insert(nested2.clone());
+
+        // Since inner values differ, they are treated as two distinct elements
+        assert_eq!(set.len(), 2);
+    }
+}

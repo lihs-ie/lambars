@@ -2172,6 +2172,214 @@ mod push_back_many_tests {
 // Cycle 23: from_slice Tests
 // =============================================================================
 
+// =============================================================================
+// Cycle 24: Hash and Hash-Eq Tests
+// =============================================================================
+
+mod hash_tests {
+    use super::*;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    // -------------------------------------------------------------------------
+    // Basic Hash tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_empty_vector_hash() {
+        let empty: PersistentVector<i32> = PersistentVector::new();
+        let mut hasher = DefaultHasher::new();
+        empty.hash(&mut hasher);
+        let _hash_value = hasher.finish();
+    }
+
+    #[rstest]
+    fn test_singleton_hash() {
+        let vector = PersistentVector::singleton(42);
+        let mut hasher = DefaultHasher::new();
+        vector.hash(&mut hasher);
+        let _hash_value = hasher.finish();
+    }
+
+    #[rstest]
+    fn test_multi_element_hash() {
+        let vector: PersistentVector<i32> = (1..=5).collect();
+        let mut hasher = DefaultHasher::new();
+        vector.hash(&mut hasher);
+        let _hash_value = hasher.finish();
+    }
+
+    #[rstest]
+    fn test_large_vector_hash() {
+        let vector: PersistentVector<i32> = (0..10000).collect();
+        let mut hasher = DefaultHasher::new();
+        vector.hash(&mut hasher);
+        let _hash_value = hasher.finish();
+    }
+
+    // -------------------------------------------------------------------------
+    // Hash-Eq tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_equal_vectors_same_hash() {
+        let vector1: PersistentVector<i32> = (1..=5).collect();
+        let vector2: PersistentVector<i32> = (1..=5).collect();
+        assert_eq!(vector1, vector2);
+
+        let mut hasher1 = DefaultHasher::new();
+        let mut hasher2 = DefaultHasher::new();
+        vector1.hash(&mut hasher1);
+        vector2.hash(&mut hasher2);
+        assert_eq!(hasher1.finish(), hasher2.finish());
+    }
+
+    #[rstest]
+    fn test_different_vectors_likely_different_hash() {
+        let vector1: PersistentVector<i32> = (1..=5).collect();
+        let vector2: PersistentVector<i32> = vec![5, 4, 3, 2, 1].into_iter().collect();
+        assert_ne!(vector1, vector2);
+
+        let mut hasher1 = DefaultHasher::new();
+        let mut hasher2 = DefaultHasher::new();
+        vector1.hash(&mut hasher1);
+        vector2.hash(&mut hasher2);
+        assert_ne!(hasher1.finish(), hasher2.finish());
+    }
+
+    #[rstest]
+    fn test_different_length_different_hash() {
+        let vector1: PersistentVector<i32> = (1..=3).collect();
+        let vector2: PersistentVector<i32> = (1..=5).collect();
+
+        let mut hasher1 = DefaultHasher::new();
+        let mut hasher2 = DefaultHasher::new();
+        vector1.hash(&mut hasher1);
+        vector2.hash(&mut hasher2);
+        assert_ne!(hasher1.finish(), hasher2.finish());
+    }
+
+    #[rstest]
+    fn test_hash_deterministic() {
+        let vector: PersistentVector<i32> = (1..=5).collect();
+
+        let mut hasher1 = DefaultHasher::new();
+        let mut hasher2 = DefaultHasher::new();
+        vector.hash(&mut hasher1);
+        vector.hash(&mut hasher2);
+        assert_eq!(hasher1.finish(), hasher2.finish());
+    }
+
+    // -------------------------------------------------------------------------
+    // using PersistentVector as HashMap key / HashSet element
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_hashmap_key() {
+        use std::collections::HashMap;
+
+        let mut map: HashMap<PersistentVector<i32>, &str> = HashMap::new();
+        let key1: PersistentVector<i32> = (1..=3).collect();
+        let key2: PersistentVector<i32> = (4..=6).collect();
+
+        map.insert(key1.clone(), "first");
+        map.insert(key2.clone(), "second");
+
+        assert_eq!(map.get(&key1), Some(&"first"));
+        assert_eq!(map.get(&key2), Some(&"second"));
+        let key1_copy: PersistentVector<i32> = (1..=3).collect();
+        assert_eq!(map.get(&key1_copy), Some(&"first"));
+    }
+
+    #[rstest]
+    fn test_hashset_element() {
+        use std::collections::HashSet;
+
+        let mut set: HashSet<PersistentVector<i32>> = HashSet::new();
+        set.insert((1..=3).collect());
+        set.insert((4..=6).collect());
+        set.insert((1..=3).collect());
+
+        assert_eq!(set.len(), 2);
+        let vector1: PersistentVector<i32> = (1..=3).collect();
+        let vector2: PersistentVector<i32> = (4..=6).collect();
+        let vector3: PersistentVector<i32> = (7..=9).collect();
+        assert!(set.contains(&vector1));
+        assert!(set.contains(&vector2));
+        assert!(!set.contains(&vector3));
+    }
+
+    #[rstest]
+    fn test_persistent_hashset_element() {
+        use lambars::persistent::PersistentHashSet;
+
+        let vector1: PersistentVector<i32> = (1..=3).collect();
+        let vector2: PersistentVector<i32> = (4..=6).collect();
+
+        let set = PersistentHashSet::new()
+            .insert(vector1.clone())
+            .insert(vector2.clone());
+
+        assert!(set.contains(&vector1));
+        assert!(set.contains(&vector2));
+    }
+
+    #[rstest]
+    fn test_persistent_hashmap_key() {
+        use lambars::persistent::PersistentHashMap;
+
+        let key1: PersistentVector<i32> = (1..=3).collect();
+        let key2: PersistentVector<i32> = (4..=6).collect();
+
+        let map = PersistentHashMap::new()
+            .insert(key1.clone(), "first")
+            .insert(key2.clone(), "second");
+
+        assert_eq!(map.get(&key1), Some(&"first"));
+        assert_eq!(map.get(&key2), Some(&"second"));
+    }
+
+    // -------------------------------------------------------------------------
+    // testing nested PersistentVector hashing
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_nested_vector_hash() {
+        let inner1: PersistentVector<i32> = (1..=3).collect();
+        let inner2: PersistentVector<i32> = (4..=6).collect();
+
+        let nested1: PersistentVector<PersistentVector<i32>> =
+            vec![inner1.clone(), inner2.clone()].into_iter().collect();
+        let nested2: PersistentVector<PersistentVector<i32>> =
+            vec![inner1, inner2].into_iter().collect();
+
+        let mut hasher1 = DefaultHasher::new();
+        let mut hasher2 = DefaultHasher::new();
+        nested1.hash(&mut hasher1);
+        nested2.hash(&mut hasher2);
+        assert_eq!(hasher1.finish(), hasher2.finish());
+    }
+
+    #[rstest]
+    fn test_nested_vector_in_hashset() {
+        use std::collections::HashSet;
+
+        let inner1: PersistentVector<i32> = (1..=3).collect();
+        let inner2: PersistentVector<i32> = (4..=6).collect();
+
+        let nested1: PersistentVector<PersistentVector<i32>> =
+            vec![inner1.clone(), inner2.clone()].into_iter().collect();
+        let nested2: PersistentVector<PersistentVector<i32>> =
+            vec![inner2, inner1].into_iter().collect();
+
+        let mut set: HashSet<PersistentVector<PersistentVector<i32>>> = HashSet::new();
+        set.insert(nested1.clone());
+        set.insert(nested2.clone());
+
+        assert_eq!(set.len(), 2);
+    }
+}
+
 mod from_slice_tests {
     use super::*;
 

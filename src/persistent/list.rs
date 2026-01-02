@@ -49,6 +49,7 @@
 //! This makes `cons` an O(1) operation both in time and additional space.
 
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::iter::FromIterator;
 use std::rc::Rc;
 
@@ -711,6 +712,37 @@ impl<T: PartialEq> PartialEq for PersistentList<T> {
 }
 
 impl<T: Eq> Eq for PersistentList<T> {}
+
+/// Computes a hash value for this list.
+///
+/// The hash is computed by first hashing the length, then hashing each
+/// element in order. This ensures that:
+///
+/// - Lists with different lengths have different hashes (with high probability)
+/// - The order of elements affects the hash value
+/// - Equal lists produce equal hash values (Hash-Eq consistency)
+///
+/// # Examples
+///
+/// ```rust
+/// use lambars::persistent::PersistentList;
+/// use std::collections::HashMap;
+///
+/// let mut map: HashMap<PersistentList<i32>, &str> = HashMap::new();
+/// let key: PersistentList<i32> = (1..=3).collect();
+/// map.insert(key.clone(), "value");
+/// assert_eq!(map.get(&key), Some(&"value"));
+/// ```
+impl<T: Hash> Hash for PersistentList<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // Hash the length first to distinguish lists of different lengths
+        self.length.hash(state);
+        // Hash each element in order
+        for element in self {
+            element.hash(state);
+        }
+    }
+}
 
 impl<T: fmt::Debug> fmt::Debug for PersistentList<T> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
