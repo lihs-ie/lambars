@@ -310,4 +310,114 @@ proptest! {
     fn prop_get_zero_equals_head(list in persistent_list_strategy(20).prop_filter("non-empty", |list| !list.is_empty())) {
         prop_assert_eq!(list.get(0), list.head());
     }
+
+    #[test]
+    fn prop_from_iter_preserves_elements(
+        elements in prop::collection::vec(any::<i32>(), 0..100)
+    ) {
+        let list: PersistentList<i32> = elements.iter().copied().collect();
+        let collected: Vec<i32> = list.into_iter().collect();
+        prop_assert_eq!(collected, elements);
+    }
+
+    #[test]
+    fn prop_from_iter_preserves_length(
+        elements in prop::collection::vec(any::<i32>(), 0..100)
+    ) {
+        let list: PersistentList<i32> = elements.iter().copied().collect();
+        prop_assert_eq!(list.len(), elements.len());
+    }
+
+    #[test]
+    fn prop_from_slice_equals_from_iter(
+        elements in prop::collection::vec(any::<i32>(), 0..100)
+    ) {
+        let from_slice = PersistentList::from_slice(&elements);
+        let from_iter: PersistentList<i32> = elements.into_iter().collect();
+        prop_assert_eq!(from_slice, from_iter);
+    }
+
+    #[test]
+    fn prop_extend_front_length(
+        base_elements in prop::collection::vec(any::<i32>(), 0..50),
+        front_elements in prop::collection::vec(any::<i32>(), 0..50)
+    ) {
+        let base: PersistentList<i32> = base_elements.iter().copied().collect();
+        let extended = base.extend_front(front_elements.iter().copied());
+        prop_assert_eq!(
+            extended.len(),
+            base_elements.len() + front_elements.len()
+        );
+    }
+
+    #[test]
+    fn prop_extend_front_order(
+        base_elements in prop::collection::vec(any::<i32>(), 0..50),
+        front_elements in prop::collection::vec(any::<i32>(), 0..50)
+    ) {
+        let base: PersistentList<i32> = base_elements.iter().copied().collect();
+        let extended = base.extend_front(front_elements.iter().copied());
+        let collected: Vec<i32> = extended.into_iter().collect();
+
+        let mut expected = front_elements.clone();
+        expected.extend(base_elements.iter().copied());
+
+        prop_assert_eq!(collected, expected);
+    }
+
+    #[test]
+    fn prop_extend_front_empty_is_identity(
+        list in small_list()
+    ) {
+        let extended = list.extend_front(Vec::<i32>::new());
+        prop_assert_eq!(extended, list);
+    }
+
+    #[test]
+    fn prop_append_correctness(
+        list1_elements in prop::collection::vec(any::<i32>(), 0..50),
+        list2_elements in prop::collection::vec(any::<i32>(), 0..50)
+    ) {
+        let list1: PersistentList<i32> = list1_elements.iter().copied().collect();
+        let list2: PersistentList<i32> = list2_elements.iter().copied().collect();
+        let appended = list1.append(&list2);
+        let collected: Vec<i32> = appended.into_iter().collect();
+
+        let mut expected = list1_elements.clone();
+        expected.extend(list2_elements.iter().copied());
+
+        prop_assert_eq!(collected, expected);
+    }
+
+    #[test]
+    fn prop_append_length_sum(
+        list1_elements in prop::collection::vec(any::<i32>(), 0..50),
+        list2_elements in prop::collection::vec(any::<i32>(), 0..50)
+    ) {
+        let list1: PersistentList<i32> = list1_elements.iter().copied().collect();
+        let list2: PersistentList<i32> = list2_elements.iter().copied().collect();
+        let appended = list1.append(&list2);
+
+        prop_assert_eq!(
+            appended.len(),
+            list1_elements.len() + list2_elements.len()
+        );
+    }
+
+    #[test]
+    fn prop_from_slice_preserves_length(
+        elements in prop::collection::vec(any::<i32>(), 0..100)
+    ) {
+        let list = PersistentList::from_slice(&elements);
+        prop_assert_eq!(list.len(), elements.len());
+    }
+
+    #[test]
+    fn prop_from_slice_preserves_order(
+        elements in prop::collection::vec(any::<i32>(), 0..100)
+    ) {
+        let list = PersistentList::from_slice(&elements);
+        let collected: Vec<i32> = list.into_iter().collect();
+        prop_assert_eq!(collected, elements);
+    }
 }

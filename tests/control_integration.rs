@@ -2,7 +2,6 @@
 //! Integration tests for the control module.
 //!
 //! These tests verify that the control structures work correctly
-//! together and integrate with Phase 1 (typeclass) and Phase 2 (compose).
 
 use lambars::control::{Continuation, Either, Lazy, Trampoline};
 use rstest::rstest;

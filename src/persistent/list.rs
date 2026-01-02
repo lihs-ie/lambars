@@ -142,6 +142,36 @@ impl<T> PersistentList<T> {
         Self::new().cons(element)
     }
 
+    /// Builds a list from a Vec efficiently.
+    ///
+    /// Uses `Vec::pop()` to consume elements from the end, which is O(1),
+    /// avoiding the need for reverse iteration.
+    ///
+    /// # Arguments
+    ///
+    /// * `elements` - The Vec containing elements to build the list from
+    ///
+    /// # Returns
+    ///
+    /// A new list with elements in the same order as the Vec
+    fn build_from_vec(mut elements: Vec<T>) -> Self {
+        let length = elements.len();
+        if length == 0 {
+            return Self::new();
+        }
+
+        // Build from end to start using Vec::pop()
+        let mut head: Option<Rc<Node<T>>> = None;
+        while let Some(element) = elements.pop() {
+            head = Some(Rc::new(Node {
+                element,
+                next: head,
+            }));
+        }
+
+        Self { head, length }
+    }
+
     /// Prepends an element to the front of the list.
     ///
     /// This operation creates a new list with the element at the front,
@@ -394,12 +424,123 @@ impl<T: Clone> PersistentList<T> {
             return self.clone();
         }
 
-        // Reverse self, then prepend each element to other
+        // Collect self elements to Vec (avoiding reverse() which creates N Rc::new calls)
+        // This reduces Rc::new calls from 2N to N
+        let mut elements: Vec<T> = self.iter().cloned().collect();
+
+        // Use Vec::pop() to iterate in reverse order and cons to other
         let mut result = other.clone();
-        for element in &self.reverse() {
-            result = result.cons(element.clone());
+        while let Some(element) = elements.pop() {
+            result = Self {
+                head: Some(Rc::new(Node {
+                    element,
+                    next: result.head,
+                })),
+                length: result.length + 1,
+            };
         }
         result
+    }
+
+    /// Prepends multiple elements to the front of the list.
+    ///
+    /// The elements from the iterator are added such that the first element
+    /// of the iterator becomes the first element of the resulting list.
+    /// That is, `list.extend_front([1, 2, 3])` is equivalent to
+    /// `list.cons(3).cons(2).cons(1)`, but more efficient.
+    ///
+    /// # Arguments
+    ///
+    /// * `iter` - An iterator over elements to prepend
+    ///
+    /// # Returns
+    ///
+    /// A new list with the elements prepended (original list unchanged)
+    ///
+    /// # Complexity
+    ///
+    /// O(m) where m = `iter.count()`
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentList;
+    ///
+    /// let list = PersistentList::new().cons(4).cons(3);
+    /// let extended = list.extend_front(vec![1, 2]);
+    ///
+    /// let collected: Vec<&i32> = extended.iter().collect();
+    /// assert_eq!(collected, vec![&1, &2, &3, &4]);
+    /// ```
+    #[must_use]
+    pub fn extend_front<I: IntoIterator<Item = T>>(&self, iter: I) -> Self {
+        let mut elements: Vec<T> = iter.into_iter().collect();
+        if elements.is_empty() {
+            return self.clone();
+        }
+
+        let additional_length = elements.len();
+        let mut head = self.head.clone();
+        let mut current_length = self.length;
+
+        // Use Vec::pop() to iterate in reverse order
+        while let Some(element) = elements.pop() {
+            head = Some(Rc::new(Node {
+                element,
+                next: head,
+            }));
+            current_length += 1;
+        }
+
+        debug_assert_eq!(current_length, self.length + additional_length);
+        Self {
+            head,
+            length: current_length,
+        }
+    }
+
+    /// Creates a list from a slice.
+    ///
+    /// The first element of the slice becomes the first element of the list.
+    ///
+    /// # Arguments
+    ///
+    /// * `slice` - The slice to build the list from
+    ///
+    /// # Returns
+    ///
+    /// A new list containing the elements from the slice
+    ///
+    /// # Complexity
+    ///
+    /// O(n) where n = `slice.len()`
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentList;
+    ///
+    /// let list = PersistentList::from_slice(&[1, 2, 3]);
+    /// assert_eq!(list.head(), Some(&1));
+    /// assert_eq!(list.len(), 3);
+    /// ```
+    #[must_use]
+    pub fn from_slice(slice: &[T]) -> Self {
+        let length = slice.len();
+        if length == 0 {
+            return Self::new();
+        }
+
+        // Iterate slice in reverse order (DoubleEndedIterator makes this efficient)
+        let mut head: Option<Rc<Node<T>>> = None;
+        for element in slice.iter().rev() {
+            head = Some(Rc::new(Node {
+                element: element.clone(),
+                next: head,
+            }));
+        }
+
+        Self { head, length }
     }
 
     /// Returns a new list with elements in reverse order.
@@ -536,11 +677,7 @@ impl<T> Default for PersistentList<T> {
 impl<T: Clone> FromIterator<T> for PersistentList<T> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
         let elements: Vec<T> = iter.into_iter().collect();
-        let mut list = Self::new();
-        for element in elements.into_iter().rev() {
-            list = list.cons(element);
-        }
-        list
+        Self::build_from_vec(elements)
     }
 }
 

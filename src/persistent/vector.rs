@@ -83,9 +83,20 @@ impl<T> Node<T> {
 }
 
 impl<T: Clone> Node<T> {
-    /// Creates a leaf node with the given elements.
-    fn leaf_from_slice(elements: &[T]) -> Self {
-        Self::Leaf(Rc::from(elements))
+    /// Creates a leaf node by reusing an existing `Rc<[T]>`.
+    ///
+    /// This avoids copying the elements and only increments the reference count.
+    ///
+    /// # Arguments
+    ///
+    /// * `elements` - An existing `Rc<[T]>` to reuse
+    ///
+    /// # Returns
+    ///
+    /// A new Leaf node that shares the underlying storage
+    #[inline]
+    const fn leaf_from_rc(elements: Rc<[T]>) -> Self {
+        Self::Leaf(elements)
     }
 }
 
@@ -357,7 +368,9 @@ impl<T> PersistentVector<T> {
 
     /// Returns an iterator over references to the elements.
     ///
-    /// The iterator yields elements from front to back.
+    /// The iterator yields elements from front to back in O(N) time.
+    /// This is achieved through stack-based tree traversal, which visits
+    /// each node exactly once.
     ///
     /// # Examples
     ///
@@ -369,11 +382,8 @@ impl<T> PersistentVector<T> {
     /// assert_eq!(collected, vec![&1, &2, &3, &4, &5]);
     /// ```
     #[must_use]
-    pub const fn iter(&self) -> PersistentVectorIterator<'_, T> {
-        PersistentVectorIterator {
-            vector: self,
-            current_index: 0,
-        }
+    pub fn iter(&self) -> PersistentVectorIterator<'_, T> {
+        PersistentVectorIterator::new(self)
     }
 }
 
@@ -422,9 +432,109 @@ impl<T: Clone> PersistentVector<T> {
         }
     }
 
+    /// Appends multiple elements to the back of the vector.
+    ///
+    /// More efficient than calling `push_back` multiple times.
+    ///
+    /// # Arguments
+    ///
+    /// * `iter` - An iterator over elements to append
+    ///
+    /// # Returns
+    ///
+    /// A new vector with all elements appended (the original is unchanged)
+    ///
+    /// # Complexity
+    ///
+    /// O(M log32 N) where M = `iter.count()`, N = `self.len()`
+    /// The constant factor is smaller than M individual `push_back` calls.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentVector;
+    ///
+    /// let vector: PersistentVector<i32> = (1..=3).collect();
+    /// let extended = vector.push_back_many(4..=6);
+    ///
+    /// assert_eq!(extended.len(), 6);
+    /// let collected: Vec<i32> = extended.iter().copied().collect();
+    /// assert_eq!(collected, vec![1, 2, 3, 4, 5, 6]);
+    /// ```
+    #[must_use]
+    pub fn push_back_many<I>(&self, iter: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+    {
+        let new_elements: Vec<T> = iter.into_iter().collect();
+
+        if new_elements.is_empty() {
+            return self.clone();
+        }
+
+        // For small additions (<=4 elements), use individual push_back
+        // This avoids the overhead of collecting all elements for small cases
+        if new_elements.len() <= 4 {
+            let mut result = self.clone();
+            for element in new_elements {
+                result = result.push_back(element);
+            }
+            return result;
+        }
+
+        // For larger additions, collect all elements and rebuild
+        let total_length = self.length + new_elements.len();
+        let mut all_elements: Vec<T> = Vec::with_capacity(total_length);
+
+        // Collect existing elements via efficient O(N) iterator
+        for element in self {
+            all_elements.push(element.clone());
+        }
+        all_elements.extend(new_elements);
+
+        // Rebuild using the efficient batch construction
+        build_persistent_vector_from_vec(all_elements)
+    }
+
+    /// Creates a `PersistentVector` from a slice.
+    ///
+    /// The elements are cloned from the slice.
+    ///
+    /// # Arguments
+    ///
+    /// * `slice` - The source slice
+    ///
+    /// # Returns
+    ///
+    /// A new vector containing clones of the slice elements
+    ///
+    /// # Complexity
+    ///
+    /// O(N) where N = `slice.len()`
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentVector;
+    ///
+    /// let vector = PersistentVector::from_slice(&[1, 2, 3, 4, 5]);
+    /// assert_eq!(vector.len(), 5);
+    /// assert_eq!(vector.get(0), Some(&1));
+    /// ```
+    #[must_use]
+    pub fn from_slice(slice: &[T]) -> Self {
+        if slice.is_empty() {
+            return Self::new();
+        }
+
+        let elements: Vec<T> = slice.to_vec();
+        build_persistent_vector_from_vec(elements)
+    }
+
     /// Pushes the current tail into the root and creates a new tail with the element.
     fn push_tail_to_root(&self, element: T) -> Self {
-        let tail_leaf = Node::leaf_from_slice(&self.tail);
+        // Use leaf_from_rc to avoid copying elements - only increments reference count O(1)
+        let tail_leaf = Node::leaf_from_rc(self.tail.clone());
         let tail_offset = self.tail_offset();
 
         // Check if we need to increase the tree depth
@@ -917,65 +1027,461 @@ impl<T: Clone> PersistentVector<T> {
 // Iterator Implementation
 // =============================================================================
 
+/// The processing state of the iterator.
+///
+/// Tracks whether the iterator is traversing the tree, processing the tail,
+/// or has finished iterating.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IteratorState {
+    /// Currently traversing the tree (root) structure
+    TraversingTree,
+    /// Currently processing elements in the tail buffer
+    ProcessingTail,
+    /// All elements have been consumed
+    Exhausted,
+}
+
+/// A stack entry for tree traversal.
+///
+/// Holds a reference to a branch node's children array and tracks
+/// which child index to process next. This enables depth-first traversal
+/// with efficient backtracking.
+struct TraversalStackEntry<'a, T> {
+    /// Reference to the branch node's children array
+    children: &'a [Option<Rc<Node<T>>>; BRANCHING_FACTOR],
+    /// Index of the next child to process
+    child_index: usize,
+}
+
 /// An iterator over references to elements of a [`PersistentVector`].
+///
+/// This iterator uses a stack-based tree traversal algorithm to achieve
+/// O(N) iteration complexity instead of O(N log32 N). It maintains a cache
+/// of the current leaf node for efficient sequential access.
 pub struct PersistentVectorIterator<'a, T> {
+    /// Reference to the original vector (for lifetime and metadata)
     vector: &'a PersistentVector<T>,
-    current_index: usize,
+    /// Stack for tree traversal (maximum depth is 7 for practical sizes)
+    traversal_stack: Vec<TraversalStackEntry<'a, T>>,
+    /// Currently cached leaf node elements
+    current_leaf: Option<&'a [T]>,
+    /// Current position within the cached leaf
+    leaf_index: usize,
+    /// Current processing state
+    state: IteratorState,
+    /// Current position within the tail buffer
+    tail_index: usize,
+    /// Number of elements already returned (for `ExactSizeIterator`)
+    elements_returned: usize,
+}
+
+impl<'a, T> PersistentVectorIterator<'a, T> {
+    /// Creates a new optimized iterator for the given vector.
+    fn new(vector: &'a PersistentVector<T>) -> Self {
+        if vector.is_empty() {
+            return Self {
+                vector,
+                traversal_stack: Vec::new(),
+                current_leaf: None,
+                leaf_index: 0,
+                state: IteratorState::Exhausted,
+                tail_index: 0,
+                elements_returned: 0,
+            };
+        }
+
+        // Calculate the number of elements in the tree (excluding tail)
+        let tail_offset = vector.tail_offset();
+
+        if tail_offset == 0 {
+            // All elements are in the tail
+            Self {
+                vector,
+                traversal_stack: Vec::new(),
+                current_leaf: None,
+                leaf_index: 0,
+                state: IteratorState::ProcessingTail,
+                tail_index: 0,
+                elements_returned: 0,
+            }
+        } else {
+            // Elements exist in the tree, start traversal from root
+            let mut iterator = Self {
+                vector,
+                traversal_stack: Vec::with_capacity(7), // Maximum depth is 7
+                current_leaf: None,
+                leaf_index: 0,
+                state: IteratorState::TraversingTree,
+                tail_index: 0,
+                elements_returned: 0,
+            };
+            iterator.initialize_from_root();
+            iterator
+        }
+    }
+
+    /// Initializes the iterator from the root node.
+    ///
+    /// Pushes the root branch onto the stack and descends to the first leaf.
+    fn initialize_from_root(&mut self) {
+        match self.vector.root.as_ref() {
+            Node::Branch(children) => {
+                self.traversal_stack.push(TraversalStackEntry {
+                    children: children.as_ref(),
+                    child_index: 0,
+                });
+                self.descend_to_first_leaf();
+            }
+            Node::Leaf(elements) => {
+                // Root is directly a leaf (unusual but handle for safety)
+                self.current_leaf = Some(elements.as_ref());
+                self.leaf_index = 0;
+            }
+        }
+    }
+
+    /// Descends from the current stack top to the first leaf node.
+    ///
+    /// Traverses the tree depth-first, skipping None children, until
+    /// a leaf node is found.
+    fn descend_to_first_leaf(&mut self) {
+        loop {
+            let stack_len = self.traversal_stack.len();
+            if stack_len == 0 {
+                break;
+            }
+
+            // Get current entry information
+            let entry = &mut self.traversal_stack[stack_len - 1];
+
+            // Find the first valid child in the current branch
+            let mut found_branch: Option<&'a [Option<Rc<Node<T>>>; BRANCHING_FACTOR]> = None;
+            let mut found_leaf: Option<&'a [T]> = None;
+
+            while entry.child_index < BRANCHING_FACTOR {
+                let index = entry.child_index;
+                entry.child_index += 1;
+
+                if let Some(child) = &entry.children[index] {
+                    match child.as_ref() {
+                        Node::Branch(child_children) => {
+                            found_branch = Some(child_children.as_ref());
+                            break;
+                        }
+                        Node::Leaf(elements) => {
+                            found_leaf = Some(elements.as_ref());
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if let Some(leaf) = found_leaf {
+                self.current_leaf = Some(leaf);
+                self.leaf_index = 0;
+                return;
+            }
+
+            if let Some(branch) = found_branch {
+                self.traversal_stack.push(TraversalStackEntry {
+                    children: branch,
+                    child_index: 0,
+                });
+                continue;
+            }
+
+            // All children processed, pop this entry
+            self.traversal_stack.pop();
+        }
+    }
+
+    /// Advances to the next leaf node.
+    ///
+    /// Called when the current leaf is exhausted. Backtracks through the
+    /// stack to find the next unvisited subtree and descends to its first leaf.
+    /// Transitions to tail processing if no more leaves exist in the tree.
+    fn advance_to_next_leaf(&mut self) {
+        self.current_leaf = None;
+        self.leaf_index = 0;
+
+        // Use the same pattern as descend_to_first_leaf
+        self.descend_to_first_leaf();
+
+        // If no leaf was found, transition to tail
+        if self.current_leaf.is_none() {
+            self.state = IteratorState::ProcessingTail;
+            self.tail_index = 0;
+        }
+    }
 }
 
 impl<'a, T> Iterator for PersistentVectorIterator<'a, T> {
     type Item = &'a T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.current_index >= self.vector.length {
-            return None;
+        loop {
+            match self.state {
+                IteratorState::TraversingTree => {
+                    if let Some(leaf) = self.current_leaf {
+                        if self.leaf_index < leaf.len() {
+                            let element = &leaf[self.leaf_index];
+                            self.leaf_index += 1;
+                            self.elements_returned += 1;
+                            return Some(element);
+                        }
+                        // Current leaf is exhausted, move to next leaf
+                        self.advance_to_next_leaf();
+                    } else {
+                        // No leaf available (empty tree or initialization issue)
+                        self.state = IteratorState::ProcessingTail;
+                        self.tail_index = 0;
+                    }
+                }
+                IteratorState::ProcessingTail => {
+                    if self.tail_index < self.vector.tail.len() {
+                        let element = &self.vector.tail[self.tail_index];
+                        self.tail_index += 1;
+                        self.elements_returned += 1;
+                        return Some(element);
+                    }
+                    // Tail is also exhausted
+                    self.state = IteratorState::Exhausted;
+                    return None;
+                }
+                IteratorState::Exhausted => {
+                    return None;
+                }
+            }
         }
-
-        let item = self.vector.get(self.current_index);
-        self.current_index += 1;
-        item
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.vector.length.saturating_sub(self.current_index);
+        let remaining = self.vector.length.saturating_sub(self.elements_returned);
         (remaining, Some(remaining))
     }
 }
 
 impl<T> ExactSizeIterator for PersistentVectorIterator<'_, T> {
     fn len(&self) -> usize {
-        self.vector.length.saturating_sub(self.current_index)
+        self.vector.length.saturating_sub(self.elements_returned)
     }
 }
 
+/// A stack entry for tree traversal in the owning iterator.
+///
+/// Unlike `TraversalStackEntry`, this holds an `Rc<Node<T>>` directly
+/// to avoid lifetime issues with owned data.
+struct IntoIteratorStackEntry<T> {
+    /// The branch node (held via Rc)
+    node: Rc<Node<T>>,
+    /// Index of the next child to process
+    child_index: usize,
+}
+
 /// An owning iterator over elements of a [`PersistentVector`].
+///
+/// This iterator uses a stack-based tree traversal algorithm to achieve
+/// O(N) iteration complexity. Elements are cloned from the tree as they
+/// are returned.
 pub struct PersistentVectorIntoIterator<T> {
+    /// The original vector (for accessing the tail)
     vector: PersistentVector<T>,
-    current_index: usize,
+    /// Stack for tree traversal
+    traversal_stack: Vec<IntoIteratorStackEntry<T>>,
+    /// Currently cached leaf node (held via Rc)
+    current_leaf: Option<Rc<[T]>>,
+    /// Current position within the cached leaf
+    leaf_index: usize,
+    /// Current processing state
+    state: IteratorState,
+    /// Current position within the tail buffer
+    tail_index: usize,
+    /// Number of elements already returned
+    elements_returned: usize,
+}
+
+impl<T: Clone> PersistentVectorIntoIterator<T> {
+    /// Creates a new optimized owning iterator for the given vector.
+    fn new(vector: PersistentVector<T>) -> Self {
+        if vector.is_empty() {
+            return Self {
+                vector,
+                traversal_stack: Vec::new(),
+                current_leaf: None,
+                leaf_index: 0,
+                state: IteratorState::Exhausted,
+                tail_index: 0,
+                elements_returned: 0,
+            };
+        }
+
+        let tail_offset = vector.tail_offset();
+
+        if tail_offset == 0 {
+            // All elements are in the tail
+            Self {
+                vector,
+                traversal_stack: Vec::new(),
+                current_leaf: None,
+                leaf_index: 0,
+                state: IteratorState::ProcessingTail,
+                tail_index: 0,
+                elements_returned: 0,
+            }
+        } else {
+            // Elements exist in the tree
+            let root_clone = vector.root.clone();
+            let mut iterator = Self {
+                vector,
+                traversal_stack: Vec::with_capacity(7),
+                current_leaf: None,
+                leaf_index: 0,
+                state: IteratorState::TraversingTree,
+                tail_index: 0,
+                elements_returned: 0,
+            };
+            iterator.initialize_from_root(root_clone);
+            iterator
+        }
+    }
+
+    /// Initializes the iterator from the root node.
+    fn initialize_from_root(&mut self, root: Rc<Node<T>>) {
+        match root.as_ref() {
+            Node::Branch(_) => {
+                self.traversal_stack.push(IntoIteratorStackEntry {
+                    node: root,
+                    child_index: 0,
+                });
+                self.descend_to_first_leaf();
+            }
+            Node::Leaf(elements) => {
+                self.current_leaf = Some(elements.clone());
+                self.leaf_index = 0;
+            }
+        }
+    }
+
+    /// Descends from the current stack top to the first leaf node.
+    fn descend_to_first_leaf(&mut self) {
+        loop {
+            let stack_len = self.traversal_stack.len();
+            if stack_len == 0 {
+                break;
+            }
+
+            let entry = &mut self.traversal_stack[stack_len - 1];
+
+            let children = match entry.node.as_ref() {
+                Node::Branch(c) => c,
+                Node::Leaf(_) => {
+                    self.traversal_stack.pop();
+                    continue;
+                }
+            };
+
+            let mut found_branch: Option<Rc<Node<T>>> = None;
+            let mut found_leaf: Option<Rc<[T]>> = None;
+
+            while entry.child_index < BRANCHING_FACTOR {
+                let index = entry.child_index;
+                entry.child_index += 1;
+
+                if let Some(child) = &children[index] {
+                    match child.as_ref() {
+                        Node::Branch(_) => {
+                            found_branch = Some(child.clone());
+                            break;
+                        }
+                        Node::Leaf(elements) => {
+                            found_leaf = Some(elements.clone());
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if let Some(leaf) = found_leaf {
+                self.current_leaf = Some(leaf);
+                self.leaf_index = 0;
+                return;
+            }
+
+            if let Some(branch) = found_branch {
+                self.traversal_stack.push(IntoIteratorStackEntry {
+                    node: branch,
+                    child_index: 0,
+                });
+                continue;
+            }
+
+            // All children processed, pop this entry
+            self.traversal_stack.pop();
+        }
+    }
+
+    /// Advances to the next leaf node.
+    fn advance_to_next_leaf(&mut self) {
+        self.current_leaf = None;
+        self.leaf_index = 0;
+
+        // Use the same pattern as descend_to_first_leaf
+        self.descend_to_first_leaf();
+
+        // If no leaf was found, transition to tail
+        if self.current_leaf.is_none() {
+            self.state = IteratorState::ProcessingTail;
+            self.tail_index = 0;
+        }
+    }
 }
 
 impl<T: Clone> Iterator for PersistentVectorIntoIterator<T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.current_index >= self.vector.length {
-            return None;
+        loop {
+            match self.state {
+                IteratorState::TraversingTree => {
+                    if let Some(ref leaf) = self.current_leaf {
+                        if self.leaf_index < leaf.len() {
+                            let element = leaf[self.leaf_index].clone();
+                            self.leaf_index += 1;
+                            self.elements_returned += 1;
+                            return Some(element);
+                        }
+                        self.advance_to_next_leaf();
+                    } else {
+                        self.state = IteratorState::ProcessingTail;
+                        self.tail_index = 0;
+                    }
+                }
+                IteratorState::ProcessingTail => {
+                    if self.tail_index < self.vector.tail.len() {
+                        let element = self.vector.tail[self.tail_index].clone();
+                        self.tail_index += 1;
+                        self.elements_returned += 1;
+                        return Some(element);
+                    }
+                    self.state = IteratorState::Exhausted;
+                    return None;
+                }
+                IteratorState::Exhausted => {
+                    return None;
+                }
+            }
         }
-
-        let item = self.vector.get(self.current_index).cloned();
-        self.current_index += 1;
-        item
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.vector.length.saturating_sub(self.current_index);
+        let remaining = self.vector.length.saturating_sub(self.elements_returned);
         (remaining, Some(remaining))
     }
 }
 
 impl<T: Clone> ExactSizeIterator for PersistentVectorIntoIterator<T> {
     fn len(&self) -> usize {
-        self.vector.length.saturating_sub(self.current_index)
+        self.vector.length.saturating_sub(self.elements_returned)
     }
 }
 
@@ -992,11 +1498,8 @@ impl<T> Default for PersistentVector<T> {
 
 impl<T: Clone> FromIterator<T> for PersistentVector<T> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        let mut vector = Self::new();
-        for element in iter {
-            vector = vector.push_back(element);
-        }
-        vector
+        let elements: Vec<T> = iter.into_iter().collect();
+        build_persistent_vector_from_vec(elements)
     }
 }
 
@@ -1006,10 +1509,7 @@ impl<T: Clone> IntoIterator for PersistentVector<T> {
 
     #[inline]
     fn into_iter(self) -> Self::IntoIter {
-        PersistentVectorIntoIterator {
-            vector: self,
-            current_index: 0,
-        }
+        PersistentVectorIntoIterator::new(self)
     }
 }
 
