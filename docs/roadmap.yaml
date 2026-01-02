@@ -981,6 +981,47 @@ phases:
           Hash トレイト実装完了。
           16個のユニットテスト、4個のプロパティテストを追加。
 
+  - id: phase_10
+    name: for-comprehension マクロ
+    name_en: For-Comprehension Macro
+    status: completed
+    started_at: "2026-01-03"
+    completed_at: "2026-01-03"
+    description: |
+      Scala スタイルの for-comprehension を実現する for_! マクロを実装。
+      Vec などのイテレータに対して宣言的なネストイテレーションを可能にする。
+    dependencies:
+      - phase_2
+    notes: |
+      eff! マクロは Option/Result/State/Reader/Writer など FnOnce ベースの Monad 用。
+      for_! マクロは Vec など FnMut を要求するイテレータ用に別途設計。
+      yield キーワードにより結果を Vec として収集。
+      Clone 要件はユーザーが明示的に指定する設計（Rust の所有権モデルを尊重）。
+    deliverables:
+      - id: for_macro
+        name: for_! マクロ
+        description: |
+          Scala の for-comprehension を再現するマクロ。
+          以下の構文をサポート:
+          - pattern <= collection; によるイテレーション
+          - let pattern = expr; による中間値束縛
+          - yield expr による結果収集
+          タプルパターン、ワイルドカードパターンもサポート。
+        status: completed
+        priority: critical
+        artifacts:
+          - src/compose/for_macro.rs
+          - tests/for_macro_tests.rs
+          - tests/for_macro_laws.rs
+          - tests/for_macro_integration.rs
+          - docs/phase_10_requirements/phase_10_1_for_macro.yaml
+          - docs/phase_10_implementation_plans/phase_10_1_for_macro.yaml
+        results: |
+          for_! マクロ実装完了。
+          22個のユニットテスト、10個のプロパティテスト、13個の統合テストを追加。
+          Scala の recommendation_feed 例を正確に再現。
+          PersistentList, PersistentVector, PersistentHashMap との統合も確認。
+
 # ステータス定義
 status_definitions:
   not_started: 未着手

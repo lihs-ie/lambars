@@ -1,0 +1,1111 @@
+# Phase 10.1: for_! マクロ - 実装計画
+# 要件定義: docs/phase_10_requirements/phase_10_1_for_macro.yaml
+
+version: "1.0.0"
+created_at: "2026-01-03"
+phase_id: phase_10_1
+phase_name: for_! マクロ実装計画
+phase_name_en: for_! Macro Implementation Plan
+
+# =============================================================================
+# 実装概要（Implementation Overview）
+# =============================================================================
+
+implementation_overview:
+  description: |
+    Scala の for-comprehension を Rust で再現するための `for_!` マクロを
+    TDD（テスト駆動開発）で実装する。
+
+    実装は以下の順序で行う:
+    1. ファイル構造の作成
+    2. 各機能の Red-Green-Refactor サイクル
+    3. プロパティベーステスト
+    4. 統合テスト
+    5. ドキュメント整備
+
+  design_principles:
+    - 既存の eff! マクロとの一貫性を維持
+    - Rust のマクロパターンマッチングの制約を考慮
+    - コンパイル時にエラーが分かりやすいよう構造化
+    - #![forbid(unsafe_code)] ポリシーを遵守
+
+# =============================================================================
+# ファイル構造（File Structure）
+# =============================================================================
+
+file_structure:
+  source_files:
+    - path: src/compose/for_macro.rs
+      description: |
+        for_! マクロの定義ファイル。
+        モジュールドキュメント、マクロ定義、インラインテストを含む。
+      content_outline:
+        - モジュールドキュメント（//! ...）
+        - #![forbid(unsafe_code)]
+        - #[macro_export] macro_rules! for_
+        - #[cfg(test)] mod tests
+
+    - path: src/compose/mod.rs
+      description: |
+        compose モジュールの公開設定。
+        for_macro モジュールの追加と再エクスポート。
+      changes:
+        - add_line: "mod for_macro;"
+          after: "mod utils;"
+        - add_re_export: "pub use crate::for_;"
+          after: "pub use crate::pipe;"
+
+    - path: src/lib.rs
+      description: |
+        ライブラリルートでの再エクスポート。
+        for_! マクロは #[macro_export] により自動的にクレートルートに配置される。
+      changes: []
+      notes: |
+        #[macro_export] マクロはクレートルートに自動配置されるため、
+        src/lib.rs への明示的な変更は不要。
+
+  test_files:
+    - path: tests/for_macro_tests.rs
+      description: |
+        for_! マクロのユニットテスト。
+        要件定義の各テストケースを実装。
+
+    - path: tests/for_macro_laws.rs
+      description: |
+        for_! マクロのプロパティベーステスト。
+        proptest フレームワークを使用。
+
+    - path: tests/for_macro_integration.rs
+      description: |
+        for_! マクロと永続データ構造の統合テスト。
+
+# =============================================================================
+# マクロ実装詳細（Macro Implementation Details）
+# =============================================================================
+
+macro_implementation:
+  macro_name: for_
+  export_attribute: "#[macro_export]"
+
+  pattern_matching_order: |
+    Rust の macro_rules! はパターンを上から順にマッチングする。
+    より具体的なパターンを先に、より一般的なパターンを後に配置する。
+
+    順序:
+    1. yield（終端、最も優先）
+    2. ident パターン（最も一般的な bind）
+    3. タプルパターン
+    4. ワイルドカードパターン
+    5. let ident バインディング
+    6. let タプルバインディング
+
+  rules:
+    - id: rule_1_yield
+      name: yield 終端ルール
+      priority: 1
+      description: |
+        for comprehension の終端。yield 式を vec![] でラップする。
+      pattern: "(yield $result:expr)"
+      expansion: "vec![$result]"
+      example:
+        input: "for_! { yield 42 }"
+        output: "vec![42]"
+      notes: |
+        yield は Rust の予約語ではないため、マクロ内で使用可能。
+        ただし、将来の Rust バージョンで予約語になる可能性に注意。
+
+    - id: rule_2_bind_ident
+      name: 識別子バインドルール
+      priority: 2
+      description: |
+        イテレータからの要素取り出し（識別子パターン）。
+        into_iter().flat_map() に展開し、再帰的に残りを処理。
+      pattern: "($pattern:ident <= $collection:expr ; $($rest:tt)+)"
+      expansion: |
+        $collection.into_iter().flat_map(|$pattern| {
+            $crate::for_!($($rest)+)
+        }).collect::<Vec<_>>()
+      example:
+        input: |
+          for_! {
+              x <= vec![1, 2, 3];
+              yield x * 2
+          }
+        output: |
+          vec![1, 2, 3].into_iter().flat_map(|x| {
+              vec![x * 2]
+          }).collect::<Vec<_>>()
+      notes: |
+        $pattern:ident は単一の識別子にマッチする。
+        $crate:: プレフィックスにより、マクロの呼び出し元クレートに依存しない。
+
+    - id: rule_3_bind_tuple
+      name: タプルパターンバインドルール
+      priority: 3
+      description: |
+        イテレータからの要素取り出し（タプルパターン）。
+        タプルを分解して変数にバインドする。
+      pattern: "(($($pattern:tt)*) <= $collection:expr ; $($rest:tt)+)"
+      expansion: |
+        $collection.into_iter().flat_map(|($($pattern)*)| {
+            $crate::for_!($($rest)+)
+        }).collect::<Vec<_>>()
+      example:
+        input: |
+          for_! {
+              (key, value) <= vec![(1, "a"), (2, "b")];
+              yield format!("{}: {}", key, value)
+          }
+        output: |
+          vec![(1, "a"), (2, "b")].into_iter().flat_map(|(key, value)| {
+              vec![format!("{}: {}", key, value)]
+          }).collect::<Vec<_>>()
+      notes: |
+        $($pattern:tt)* は任意のトークン列にマッチする。
+        ネストしたタプル（例: ((a, b), c)）にも対応。
+
+    - id: rule_4_bind_wildcard
+      name: ワイルドカードパターンバインドルール
+      priority: 4
+      description: |
+        イテレータからの要素取り出し（ワイルドカードパターン）。
+        値を無視してイテレーション回数分だけ処理を行う。
+      pattern: "(_ <= $collection:expr ; $($rest:tt)+)"
+      expansion: |
+        $collection.into_iter().flat_map(|_| {
+            $crate::for_!($($rest)+)
+        }).collect::<Vec<_>>()
+      example:
+        input: |
+          for_! {
+              _ <= vec![1, 2, 3];
+              yield "x"
+          }
+        output: |
+          vec![1, 2, 3].into_iter().flat_map(|_| {
+              vec!["x"]
+          }).collect::<Vec<_>>()
+      notes: |
+        _ は Rust のワイルドカードパターンとして機能。
+        未使用変数の警告を抑制。
+
+    - id: rule_5_let_ident
+      name: let 識別子バインディングルール
+      priority: 5
+      description: |
+        純粋な let バインディング（識別子パターン）。
+        イテレーションは行わず、単に値を束縛する。
+      pattern: "(let $pattern:ident = $expr:expr ; $($rest:tt)+)"
+      expansion: |
+        {
+            let $pattern = $expr;
+            $crate::for_!($($rest)+)
+        }
+      example:
+        input: |
+          for_! {
+              x <= vec![1, 2, 3];
+              let doubled = x * 2;
+              yield doubled
+          }
+        output: |
+          vec![1, 2, 3].into_iter().flat_map(|x| {
+              {
+                  let doubled = x * 2;
+                  vec![doubled]
+              }
+          }).collect::<Vec<_>>()
+      notes: |
+        ブロック { } でスコープを作成し、変数のシャドウイングを可能に。
+
+    - id: rule_6_let_tuple
+      name: let タプルバインディングルール
+      priority: 6
+      description: |
+        純粋な let バインディング（タプルパターン）。
+        タプルを分解して複数の変数に束縛する。
+      pattern: "(let ($($pattern:tt)*) = $expr:expr ; $($rest:tt)+)"
+      expansion: |
+        {
+            let ($($pattern)*) = $expr;
+            $crate::for_!($($rest)+)
+        }
+      example:
+        input: |
+          for_! {
+              pair <= vec![(1, 2), (3, 4)];
+              let (a, b) = pair;
+              yield a + b
+          }
+        output: |
+          vec![(1, 2), (3, 4)].into_iter().flat_map(|pair| {
+              {
+                  let (a, b) = pair;
+                  vec![a + b]
+              }
+          }).collect::<Vec<_>>()
+
+  complete_macro_definition: |
+    /// A macro for Scala-style for-comprehension over iterators.
+    ///
+    /// This macro allows you to write nested iterations in a flat,
+    /// declarative style, similar to Scala's for-comprehension.
+    ///
+    /// # Syntax
+    ///
+    /// ```text
+    /// for_! {
+    ///     pattern <= collection;    // Bind: iterate over collection
+    ///     let pattern = expression; // Pure let binding
+    ///     yield expression          // Final expression (wrapped in Vec)
+    /// }
+    /// ```
+    ///
+    /// # Examples
+    ///
+    /// ## Basic iteration
+    ///
+    /// ```rust
+    /// use lambars::for_;
+    ///
+    /// let result = for_! {
+    ///     x <= vec![1, 2, 3];
+    ///     yield x * 2
+    /// };
+    /// assert_eq!(result, vec![2, 4, 6]);
+    /// ```
+    ///
+    /// ## Nested iteration
+    ///
+    /// ```rust
+    /// use lambars::for_;
+    ///
+    /// let result = for_! {
+    ///     x <= vec![1, 2];
+    ///     y <= vec![10, 20];
+    ///     yield x + y
+    /// };
+    /// assert_eq!(result, vec![11, 21, 12, 22]);
+    /// ```
+    ///
+    /// ## With let bindings
+    ///
+    /// ```rust
+    /// use lambars::for_;
+    ///
+    /// let result = for_! {
+    ///     x <= vec![1, 2, 3];
+    ///     let doubled = x * 2;
+    ///     yield doubled + 1
+    /// };
+    /// assert_eq!(result, vec![3, 5, 7]);
+    /// ```
+    ///
+    /// ## Tuple pattern
+    ///
+    /// ```rust
+    /// use lambars::for_;
+    ///
+    /// let pairs = vec![(1, "a"), (2, "b")];
+    /// let result = for_! {
+    ///     (num, letter) <= pairs;
+    ///     yield format!("{}{}", num, letter)
+    /// };
+    /// assert_eq!(result, vec!["1a", "2b"]);
+    /// ```
+    #[macro_export]
+    macro_rules! for_ {
+        // ==========================================================================
+        // Terminal case: yield wraps result in vec![]
+        // ==========================================================================
+        (yield $result:expr) => {
+            vec![$result]
+        };
+
+        // ==========================================================================
+        // Bind operation: pattern <= collection; rest
+        // ==========================================================================
+
+        // Bind with identifier pattern
+        ($pattern:ident <= $collection:expr ; $($rest:tt)+) => {{
+            $collection.into_iter().flat_map(|$pattern| {
+                $crate::for_!($($rest)+)
+            }).collect::<Vec<_>>()
+        }};
+
+        // Bind with tuple pattern
+        (($($pattern:tt)*) <= $collection:expr ; $($rest:tt)+) => {{
+            $collection.into_iter().flat_map(|($($pattern)*)| {
+                $crate::for_!($($rest)+)
+            }).collect::<Vec<_>>()
+        }};
+
+        // Bind with wildcard pattern
+        (_ <= $collection:expr ; $($rest:tt)+) => {{
+            $collection.into_iter().flat_map(|_| {
+                $crate::for_!($($rest)+)
+            }).collect::<Vec<_>>()
+        }};
+
+        // ==========================================================================
+        // Let binding: let pattern = expression; rest
+        // ==========================================================================
+
+        // Pure let binding with identifier
+        (let $pattern:ident = $expr:expr ; $($rest:tt)+) => {{
+            let $pattern = $expr;
+            $crate::for_!($($rest)+)
+        }};
+
+        // Pure let binding with tuple pattern
+        (let ($($pattern:tt)*) = $expr:expr ; $($rest:tt)+) => {{
+            let ($($pattern)*) = $expr;
+            $crate::for_!($($rest)+)
+        }};
+    }
+
+# =============================================================================
+# TDD 実装ステップ（TDD Implementation Steps）
+# =============================================================================
+
+tdd_steps:
+  overview: |
+    TDD の Red-Green-Refactor サイクルに従って実装を進める。
+    各ステップで:
+    1. Red: 失敗するテストを書く
+    2. Green: テストを通す最小限の実装を行う
+    3. Refactor: コードを整理する
+
+  steps:
+    - step: 1
+      name: プロジェクト構造の準備
+      type: setup
+      description: |
+        ファイルの作成とモジュールの設定を行う。
+      tasks:
+        - task: src/compose/for_macro.rs を作成（空のモジュール）
+        - task: src/compose/mod.rs に for_macro モジュールを追加
+        - task: tests/for_macro_tests.rs を作成（空のテストファイル）
+      verification: |
+        cargo check が成功すること
+
+    - step: 2
+      name: yield 終端ルールの実装
+      type: red_green_refactor
+      priority: critical
+      tests:
+        - name: test_yield_only
+          code: |
+            #[test]
+            fn test_yield_only() {
+                let result = for_! {
+                    yield 42
+                };
+                assert_eq!(result, vec![42]);
+            }
+      implementation: |
+        macro_rules! for_ {
+            (yield $result:expr) => {
+                vec![$result]
+            };
+        }
+      verification: |
+        cargo test test_yield_only が成功すること
+
+    - step: 3
+      name: 単一イテレーション（識別子パターン）の実装
+      type: red_green_refactor
+      priority: critical
+      tests:
+        - name: test_single_iteration_vec
+          code: |
+            #[test]
+            fn test_single_iteration_vec() {
+                let result = for_! {
+                    x <= vec![1, 2, 3];
+                    yield x * 2
+                };
+                assert_eq!(result, vec![2, 4, 6]);
+            }
+
+        - name: test_single_iteration_array
+          code: |
+            #[test]
+            fn test_single_iteration_array() {
+                let result = for_! {
+                    x <= [1, 2, 3];
+                    yield x + 10
+                };
+                assert_eq!(result, vec![11, 12, 13]);
+            }
+
+        - name: test_single_iteration_range
+          code: |
+            #[test]
+            fn test_single_iteration_range() {
+                let result = for_! {
+                    x <= 1..4;
+                    yield x * x
+                };
+                assert_eq!(result, vec![1, 4, 9]);
+            }
+      implementation: |
+        macro_rules! for_ {
+            (yield $result:expr) => {
+                vec![$result]
+            };
+
+            ($pattern:ident <= $collection:expr ; $($rest:tt)+) => {{
+                $collection.into_iter().flat_map(|$pattern| {
+                    $crate::for_!($($rest)+)
+                }).collect::<Vec<_>>()
+            }};
+        }
+      verification: |
+        cargo test test_single_iteration が成功すること
+
+    - step: 4
+      name: ネストイテレーションの実装
+      type: red_green_refactor
+      priority: critical
+      tests:
+        - name: test_nested_iteration_two_levels
+          code: |
+            #[test]
+            fn test_nested_iteration_two_levels() {
+                let result = for_! {
+                    x <= vec![1, 2];
+                    y <= vec![10, 20];
+                    yield x + y
+                };
+                assert_eq!(result, vec![11, 21, 12, 22]);
+            }
+
+        - name: test_nested_iteration_three_levels
+          code: |
+            #[test]
+            fn test_nested_iteration_three_levels() {
+                let result = for_! {
+                    x <= vec![1, 2];
+                    y <= vec![10, 20];
+                    z <= vec![100, 200];
+                    yield x + y + z
+                };
+                assert_eq!(result, vec![111, 211, 121, 221, 112, 212, 122, 222]);
+            }
+
+        - name: test_nested_iteration_dependent
+          code: |
+            #[test]
+            fn test_nested_iteration_dependent() {
+                let result = for_! {
+                    x <= vec![1, 2, 3];
+                    y <= (0..x).collect::<Vec<_>>();
+                    yield (x, y)
+                };
+                assert_eq!(result, vec![(1, 0), (2, 0), (2, 1), (3, 0), (3, 1), (3, 2)]);
+            }
+      implementation: |
+        既存の実装で再帰的にネストを処理。
+        追加の実装は不要（step 3 の実装で対応済み）。
+      verification: |
+        cargo test test_nested_iteration が成功すること
+
+    - step: 5
+      name: タプルパターンの実装
+      type: red_green_refactor
+      priority: high
+      tests:
+        - name: test_tuple_pattern_simple
+          code: |
+            #[test]
+            fn test_tuple_pattern_simple() {
+                let pairs = vec![(1, "a"), (2, "b"), (3, "c")];
+                let result = for_! {
+                    (num, letter) <= pairs;
+                    yield format!("{}{}", num, letter)
+                };
+                assert_eq!(result, vec!["1a", "2b", "3c"]);
+            }
+
+        - name: test_tuple_pattern_nested
+          code: |
+            #[test]
+            fn test_tuple_pattern_nested() {
+                let nested = vec![((1, 2), "a"), ((3, 4), "b")];
+                let result = for_! {
+                    ((x, y), label) <= nested;
+                    yield format!("{}: ({}, {})", label, x, y)
+                };
+                assert_eq!(result, vec!["a: (1, 2)", "b: (3, 4)"]);
+            }
+      implementation: |
+        マクロに以下のルールを追加:
+
+        (($($pattern:tt)*) <= $collection:expr ; $($rest:tt)+) => {{
+            $collection.into_iter().flat_map(|($($pattern)*)| {
+                $crate::for_!($($rest)+)
+            }).collect::<Vec<_>>()
+        }};
+      verification: |
+        cargo test test_tuple_pattern が成功すること
+
+    - step: 6
+      name: ワイルドカードパターンの実装
+      type: red_green_refactor
+      priority: medium
+      tests:
+        - name: test_wildcard_pattern
+          code: |
+            #[test]
+            fn test_wildcard_pattern() {
+                let pairs = vec![(1, "a"), (2, "b"), (3, "c")];
+                let result = for_! {
+                    (_, letter) <= pairs;
+                    yield letter.to_uppercase()
+                };
+                assert_eq!(result, vec!["A", "B", "C"]);
+            }
+
+        - name: test_wildcard_full_element
+          code: |
+            #[test]
+            fn test_wildcard_full_element() {
+                let result = for_! {
+                    _ <= vec![1, 2, 3];
+                    yield "x"
+                };
+                assert_eq!(result, vec!["x", "x", "x"]);
+            }
+      implementation: |
+        マクロに以下のルールを追加:
+
+        (_ <= $collection:expr ; $($rest:tt)+) => {{
+            $collection.into_iter().flat_map(|_| {
+                $crate::for_!($($rest)+)
+            }).collect::<Vec<_>>()
+        }};
+      verification: |
+        cargo test test_wildcard が成功すること
+      notes: |
+        ワイルドカードルールは識別子ルールより後に配置。
+        _ は識別子としてもマッチする可能性があるため、
+        専用ルールで明示的に処理。
+
+    - step: 7
+      name: let バインディング（識別子）の実装
+      type: red_green_refactor
+      priority: high
+      tests:
+        - name: test_let_binding_simple
+          code: |
+            #[test]
+            fn test_let_binding_simple() {
+                let result = for_! {
+                    x <= vec![1, 2, 3];
+                    let doubled = x * 2;
+                    yield doubled
+                };
+                assert_eq!(result, vec![2, 4, 6]);
+            }
+
+        - name: test_let_binding_multiple
+          code: |
+            #[test]
+            fn test_let_binding_multiple() {
+                let result = for_! {
+                    x <= vec![1, 2, 3];
+                    let doubled = x * 2;
+                    let squared = doubled * doubled;
+                    yield squared
+                };
+                assert_eq!(result, vec![4, 16, 36]);
+            }
+
+        - name: test_let_binding_with_nested_iteration
+          code: |
+            #[test]
+            fn test_let_binding_with_nested_iteration() {
+                let result = for_! {
+                    x <= vec![1, 2];
+                    let x_squared = x * x;
+                    y <= vec![10, 20];
+                    let sum = x_squared + y;
+                    yield sum
+                };
+                assert_eq!(result, vec![11, 21, 14, 24]);
+            }
+      implementation: |
+        マクロに以下のルールを追加:
+
+        (let $pattern:ident = $expr:expr ; $($rest:tt)+) => {{
+            let $pattern = $expr;
+            $crate::for_!($($rest)+)
+        }};
+      verification: |
+        cargo test test_let_binding が成功すること
+
+    - step: 8
+      name: let バインディング（タプル）の実装
+      type: red_green_refactor
+      priority: high
+      tests:
+        - name: test_let_tuple_binding
+          code: |
+            #[test]
+            fn test_let_tuple_binding() {
+                let result = for_! {
+                    pair <= vec![(1, 2), (3, 4), (5, 6)];
+                    let (a, b) = pair;
+                    yield a + b
+                };
+                assert_eq!(result, vec![3, 7, 11]);
+            }
+      implementation: |
+        マクロに以下のルールを追加:
+
+        (let ($($pattern:tt)*) = $expr:expr ; $($rest:tt)+) => {{
+            let ($($pattern)*) = $expr;
+            $crate::for_!($($rest)+)
+        }};
+      verification: |
+        cargo test test_let_tuple_binding が成功すること
+
+    - step: 9
+      name: 空のコレクションテスト
+      type: red_green_refactor
+      priority: high
+      tests:
+        - name: test_empty_source_collection
+          code: |
+            #[test]
+            fn test_empty_source_collection() {
+                let empty: Vec<i32> = vec![];
+                let result = for_! {
+                    x <= empty;
+                    yield x * 2
+                };
+                assert_eq!(result, Vec::<i32>::new());
+            }
+
+        - name: test_empty_nested_collection
+          code: |
+            #[test]
+            fn test_empty_nested_collection() {
+                let result = for_! {
+                    x <= vec![1, 2, 3];
+                    y <= if x == 2 { vec![] } else { vec![x] };
+                    yield y
+                };
+                assert_eq!(result, vec![1, 3]);
+            }
+      implementation: |
+        既存の実装で空のコレクションを正しく処理。
+        flat_map と collect により空の結果が自動的に処理される。
+      verification: |
+        cargo test test_empty が成功すること
+
+    - step: 10
+      name: Scala recommendation_feed 例の再現
+      type: red_green_refactor
+      priority: high
+      tests:
+        - name: test_recommendation_feed_example
+          code: |
+            #[test]
+            fn test_recommendation_feed_example() {
+                #[derive(Clone)]
+                struct Book {
+                    title: String,
+                    authors: Vec<String>,
+                }
+
+                #[derive(Clone)]
+                struct Movie {
+                    title: String,
+                }
+
+                fn book_adaptations(author: &str) -> Vec<Movie> {
+                    match author {
+                        "Author1" => vec![Movie { title: "Movie1".to_string() }],
+                        "Author2" => vec![
+                            Movie { title: "Movie2".to_string() },
+                            Movie { title: "Movie3".to_string() },
+                        ],
+                        _ => vec![],
+                    }
+                }
+
+                let books = vec![
+                    Book {
+                        title: "Book1".to_string(),
+                        authors: vec!["Author1".to_string()],
+                    },
+                    Book {
+                        title: "Book2".to_string(),
+                        authors: vec!["Author2".to_string()],
+                    },
+                ];
+
+                let result = for_! {
+                    book <= books.clone();
+                    author <= book.authors.clone();
+                    movie <= book_adaptations(&author);
+                    yield format!(
+                        "You may like {}, because you liked {}'s {}",
+                        movie.title, author, book.title
+                    )
+                };
+
+                assert_eq!(result, vec![
+                    "You may like Movie1, because you liked Author1's Book1",
+                    "You may like Movie2, because you liked Author2's Book2",
+                    "You may like Movie3, because you liked Author2's Book2",
+                ]);
+            }
+      implementation: |
+        既存の実装で対応可能。追加実装不要。
+      verification: |
+        cargo test test_recommendation_feed_example が成功すること
+
+    - step: 11
+      name: プロパティベーステストの実装
+      type: test
+      priority: high
+      location: tests/for_macro_laws.rs
+      tests:
+        - name: prop_single_iteration_equals_map
+          description: 単一イテレーションは map と等価
+          code: |
+            use proptest::prelude::*;
+            use lambars::for_;
+
+            proptest! {
+                #[test]
+                fn prop_single_iteration_equals_map(elements in prop::collection::vec(any::<i32>(), 0..100)) {
+                    let f = |x: i32| x.wrapping_mul(2);
+
+                    let for_result = for_! {
+                        x <= elements.clone();
+                        yield f(x)
+                    };
+
+                    let map_result: Vec<i32> = elements.into_iter().map(f).collect();
+
+                    prop_assert_eq!(for_result, map_result);
+                }
+            }
+
+        - name: prop_nested_iteration_equals_flat_map
+          description: ネストイテレーションは flat_map の連鎖と等価
+          code: |
+            proptest! {
+                #[test]
+                fn prop_nested_iteration_equals_flat_map(
+                    xs in prop::collection::vec(any::<i32>(), 0..10),
+                    ys in prop::collection::vec(any::<i32>(), 0..10)
+                ) {
+                    let ys_clone = ys.clone();
+                    let for_result = for_! {
+                        x <= xs.clone();
+                        y <= ys_clone.clone();
+                        yield (x, y)
+                    };
+
+                    let flat_map_result: Vec<(i32, i32)> = xs.into_iter()
+                        .flat_map(|x| ys.clone().into_iter().map(move |y| (x, y)))
+                        .collect();
+
+                    prop_assert_eq!(for_result, flat_map_result);
+                }
+            }
+
+        - name: prop_let_binding_pure
+          description: let バインディングは純粋な計算
+          code: |
+            proptest! {
+                #[test]
+                fn prop_let_binding_pure(elements in prop::collection::vec(any::<i32>(), 0..100)) {
+                    let for_result = for_! {
+                        x <= elements.clone();
+                        let doubled = x.wrapping_mul(2);
+                        yield doubled
+                    };
+
+                    let direct_result: Vec<i32> = elements.into_iter()
+                        .map(|x| x.wrapping_mul(2))
+                        .collect();
+
+                    prop_assert_eq!(for_result, direct_result);
+                }
+            }
+      verification: |
+        cargo test --test for_macro_laws が成功すること
+
+    - step: 12
+      name: 統合テストの実装
+      type: test
+      priority: medium
+      location: tests/for_macro_integration.rs
+      tests:
+        - name: test_with_persistent_list
+          description: PersistentList との組み合わせ
+          code: |
+            use lambars::for_;
+            use lambars::persistent::PersistentList;
+
+            #[test]
+            fn test_with_persistent_list() {
+                let list = PersistentList::from_iter([1, 2, 3]);
+                let result = for_! {
+                    x <= list.iter().cloned().collect::<Vec<_>>();
+                    yield x * 2
+                };
+                assert_eq!(result, vec![2, 4, 6]);
+            }
+
+        - name: test_with_persistent_vector
+          description: PersistentVector との組み合わせ
+          code: |
+            use lambars::for_;
+            use lambars::persistent::PersistentVector;
+
+            #[test]
+            fn test_with_persistent_vector() {
+                let vector = PersistentVector::from_iter([1, 2, 3]);
+                let result = for_! {
+                    x <= vector.iter().cloned().collect::<Vec<_>>();
+                    yield x * 2
+                };
+                assert_eq!(result, vec![2, 4, 6]);
+            }
+
+        - name: test_with_persistent_hashmap
+          description: PersistentHashMap との組み合わせ
+          code: |
+            use lambars::for_;
+            use lambars::persistent::PersistentHashMap;
+
+            #[test]
+            fn test_with_persistent_hashmap() {
+                let map = PersistentHashMap::new()
+                    .insert("a", 1)
+                    .insert("b", 2);
+
+                let pairs: Vec<_> = map.iter().collect();
+                let result = for_! {
+                    (key, value) <= pairs;
+                    yield format!("{}: {}", key, value)
+                };
+                assert_eq!(result.len(), 2);
+            }
+      verification: |
+        cargo test --test for_macro_integration が成功すること
+
+    - step: 13
+      name: ドキュメントの整備
+      type: documentation
+      priority: medium
+      tasks:
+        - task: for_macro.rs のモジュールドキュメントを完成させる
+        - task: 各マクロルールにコメントを追加
+        - task: Examples セクションに複数の例を追加
+        - task: src/compose/mod.rs のモジュールドキュメントを更新
+      verification: |
+        cargo doc --no-deps が警告なしで成功すること
+
+    - step: 14
+      name: clippy チェックと最終確認
+      type: verification
+      priority: critical
+      tasks:
+        - task: cargo clippy -- -D warnings
+        - task: cargo fmt --check
+        - task: cargo test --all-features
+        - task: cargo doc --no-deps
+      verification: |
+        全てのチェックが成功すること
+
+# =============================================================================
+# 既存コードとの統合（Integration with Existing Code）
+# =============================================================================
+
+integration:
+  compose_module:
+    file: src/compose/mod.rs
+    changes:
+      - type: add_module
+        content: "mod for_macro;"
+        location: after "mod utils;"
+
+      - type: add_re_export
+        content: "pub use crate::for_;"
+        location: after "pub use crate::pipe;"
+
+      - type: update_documentation
+        section: "//! # Overview"
+        add_item: "- [`for_!`]: Scala-style for-comprehension over iterators"
+
+  lib_rs:
+    file: src/lib.rs
+    changes: []
+    notes: |
+      #[macro_export] マクロはクレートルートに自動配置されるため、
+      明示的な変更は不要。
+
+  prelude:
+    file: src/prelude.rs
+    changes: []
+    notes: |
+      for_! マクロは compose モジュールの一部として既に prelude に含まれる。
+      追加の変更は不要。
+
+# =============================================================================
+# 検証項目（Verification Checklist）
+# =============================================================================
+
+verification_checklist:
+  code_quality:
+    - item: "#![forbid(unsafe_code)] が有効であること"
+      command: "grep -r 'forbid(unsafe_code)' src/compose/for_macro.rs"
+
+    - item: "clippy 警告がないこと"
+      command: "cargo clippy -- -D warnings"
+
+    - item: "フォーマットが正しいこと"
+      command: "cargo fmt --check"
+
+    - item: "ドキュメントが完備していること"
+      command: "cargo doc --no-deps"
+
+  functional:
+    - item: "単一イテレーションが動作すること"
+      test: "tests/for_macro_tests.rs::test_single_iteration_*"
+
+    - item: "ネストイテレーションが動作すること"
+      test: "tests/for_macro_tests.rs::test_nested_iteration_*"
+
+    - item: "let バインディングが動作すること"
+      test: "tests/for_macro_tests.rs::test_let_binding_*"
+
+    - item: "タプルパターンが動作すること"
+      test: "tests/for_macro_tests.rs::test_tuple_pattern_*"
+
+    - item: "ワイルドカードパターンが動作すること"
+      test: "tests/for_macro_tests.rs::test_wildcard_*"
+
+    - item: "空のコレクションが正しく処理されること"
+      test: "tests/for_macro_tests.rs::test_empty_*"
+
+    - item: "Scala 例が再現できること"
+      test: "tests/for_macro_tests.rs::test_recommendation_feed_example"
+
+  property_tests:
+    - item: "単一イテレーションと map の等価性"
+      test: "tests/for_macro_laws.rs::prop_single_iteration_equals_map"
+
+    - item: "ネストイテレーションと flat_map の等価性"
+      test: "tests/for_macro_laws.rs::prop_nested_iteration_equals_flat_map"
+
+    - item: "let バインディングの純粋性"
+      test: "tests/for_macro_laws.rs::prop_let_binding_pure"
+
+  integration:
+    - item: "PersistentList との統合"
+      test: "tests/for_macro_integration.rs::test_with_persistent_list"
+
+    - item: "PersistentVector との統合"
+      test: "tests/for_macro_integration.rs::test_with_persistent_vector"
+
+    - item: "PersistentHashMap との統合"
+      test: "tests/for_macro_integration.rs::test_with_persistent_hashmap"
+
+# =============================================================================
+# リスクと軽減策（Risks and Mitigations）
+# =============================================================================
+
+risks:
+  - id: RISK-001
+    description: |
+      yield が将来の Rust バージョンで予約語になる可能性
+    probability: low
+    impact: high
+    mitigation: |
+      - コンパイラの警告を監視
+      - 必要に応じてマクロ名を変更（例: for_yield!）
+      - ドキュメントに注意書きを追加
+
+  - id: RISK-002
+    description: |
+      マクロのパターンマッチング順序による予期しない動作
+    probability: medium
+    impact: medium
+    mitigation: |
+      - 網羅的なテストケースの作成
+      - エッジケースのドキュメント化
+      - パターンの優先順位を明示的にコメント
+
+  - id: RISK-003
+    description: |
+      大きなネストでのコンパイル時間増加
+    probability: low
+    impact: low
+    mitigation: |
+      - 深いネスト時のパフォーマンステスト
+      - ドキュメントでの使用ガイドライン
+
+# =============================================================================
+# 成果物サマリー（Deliverables Summary）
+# =============================================================================
+
+deliverables_summary:
+  source_files:
+    - src/compose/for_macro.rs (新規)
+    - src/compose/mod.rs (更新)
+
+  test_files:
+    - tests/for_macro_tests.rs (新規)
+    - tests/for_macro_laws.rs (新規)
+    - tests/for_macro_integration.rs (新規)
+
+  documentation:
+    - モジュールドキュメント (for_macro.rs 内)
+    - マクロドキュメント (#[macro_export] macro_rules! for_)
+    - compose/mod.rs のドキュメント更新
+
+  estimated_lines_of_code:
+    source: ~100
+    tests: ~400
+    documentation: ~150
+    total: ~650
+
+# =============================================================================
+# 参照（References）
+# =============================================================================
+
+references:
+  internal:
+    - path: src/effect/eff_macro.rs
+      description: |
+        既存の Monad 用 do 記法マクロ。
+        構文とパターンマッチングの参考。
+
+    - path: src/compose/pipe_macro.rs
+      description: |
+        パイプラインマクロ。
+        再帰的マクロ展開の参考。
+
+    - path: src/compose/compose_macro.rs
+      description: |
+        関数合成マクロ。
+        マクロ構造の参考。
+
+  external:
+    - name: Scala for-comprehension
+      url: https://docs.scala-lang.org/tour/for-comprehensions.html
+
+    - name: Rust macro_rules!
+      url: https://doc.rust-lang.org/reference/macros-by-example.html
+
+    - name: The Little Book of Rust Macros
+      url: https://veykril.github.io/tlborm/

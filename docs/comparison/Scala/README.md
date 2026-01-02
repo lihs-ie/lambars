@@ -37,7 +37,8 @@ This document provides a comprehensive comparison between Scala functional progr
 | Traverse | `Traverse[F]` | `Traversable` trait |
 | Option | `Option[A]` | `Option<A>` (std) |
 | Either | `Either[E, A]` | `Result<A, E>` (std) |
-| For-comprehension | `for { ... } yield` | `eff!` macro |
+| For-comprehension (Monad) | `for { ... } yield` | `eff!` macro |
+| For-comprehension (List) | `for { ... } yield` (List) | `for_!` macro |
 | Lens | `monocle.Lens` | `Lens` trait |
 | Prism | `monocle.Prism` | `Prism` trait |
 | IO | `cats.effect.IO` | `IO` type |
@@ -484,9 +485,28 @@ let bi_mapped: Result<String, usize> = either
 
 ---
 
-## For-Comprehensions vs eff! Macro
+## For-Comprehensions vs eff! / for_! Macros
+
+lambars provides two macros that correspond to Scala's for-comprehension:
+
+| Use Case | Scala | lambars | Description |
+|----------|-------|---------|-------------|
+| Monad binding (Option, Result, IO, State, etc.) | `for { x <- mx } yield x` | `eff!` macro | Single execution, FnOnce-based |
+| List comprehension (Vec, iterators) | `for { x <- xs } yield f(x)` | `for_!` macro | Multiple execution, FnMut-based |
+
+### Key Differences: `eff!` vs `for_!`
+
+| Aspect | `eff!` | `for_!` |
+|--------|--------|---------|
+| **Target types** | Option, Result, IO, State, Reader, Writer | Vec, Iterator |
+| **Execution** | Single execution (FnOnce) | Multiple executions (FnMut) |
+| **Final expression** | Must return wrapped value | Uses `yield` keyword |
+| **Closure type** | `move` closures | Regular closures |
+| **Typical use** | Monadic computation chaining | List comprehensions |
 
 ### Syntax Comparison
+
+#### eff! Macro (for Monads)
 
 | Scala | lambars | Description |
 |-------|---------|-------------|
@@ -494,6 +514,17 @@ let bi_mapped: Result<String, usize> = either
 | `for { x <- mx; y <- my } yield (x, y)` | `eff! { x <= mx; y <= my; expr }` | Multiple binds |
 | `for { x <- mx; if p(x) } yield x` | `eff! { x <= mx.filter(p); Some(x) }` | Guard (Option) |
 | `x = expr` (in for) | `let x = expr;` | Pure binding |
+
+#### for_! Macro (for Lists)
+
+| Scala | lambars | Description |
+|-------|---------|-------------|
+| `for { x <- xs } yield f(x)` | `for_! { x <= xs; yield f(x) }` | Basic list comprehension |
+| `for { x <- xs; y <- ys } yield (x, y)` | `for_! { x <= xs; y <= ys.clone(); yield (x, y) }` | Nested iteration |
+| `for { x <- xs; if p(x) } yield x` | `xs.into_iter().filter(p).collect()` | Filtering (use std) |
+| `x = expr` (in for) | `let x = expr;` | Pure binding |
+
+**Important**: In `for_!`, inner collections typically need `.clone()` due to Rust's ownership rules.
 
 ### Code Examples
 
@@ -586,6 +617,127 @@ let user_orders: Option<(User, Vec<Order>)> = eff! {
     Some((user, orders))
 };
 ```
+
+### List Comprehension with for_!
+
+For List-based for-comprehensions, use the `for_!` macro:
+
+```scala
+// Scala - List comprehension
+val numbers = List(1, 2, 3, 4, 5)
+val doubled: List[Int] = for {
+  n <- numbers
+} yield n * 2
+// doubled = List(2, 4, 6, 8, 10)
+
+// Nested list comprehension
+val xs = List(1, 2)
+val ys = List(10, 20)
+val cartesian: List[Int] = for {
+  x <- xs
+  y <- ys
+} yield x + y
+// cartesian = List(11, 21, 12, 22)
+
+// Book recommendations example
+case class Book(title: String, authors: List[String])
+case class Movie(title: String)
+
+val books = List(
+  Book("FP in Scala", List("Chiusano", "Bjarnason")),
+  Book("The Hobbit", List("Tolkien"))
+)
+
+def bookAdaptations(author: String): List[Movie] = {
+  if (author == "Tolkien") List(Movie("An Unexpected Journey"), Movie("The Desolation of Smaug"))
+  else List.empty
+}
+
+val recommendations: List[String] = for {
+  book <- books
+  author <- book.authors
+  movie <- bookAdaptations(author)
+} yield s"You may like ${movie.title}, because you liked ${author}'s ${book.title}"
+// recommendations = List(
+//   "You may like An Unexpected Journey, because you liked Tolkien's The Hobbit",
+//   "You may like The Desolation of Smaug, because you liked Tolkien's The Hobbit"
+// )
+```
+
+```rust
+// lambars - for_! macro
+use lambars::for_;
+
+let numbers = vec![1, 2, 3, 4, 5];
+let doubled: Vec<i32> = for_! {
+    n <= numbers;
+    yield n * 2
+};
+// doubled = vec![2, 4, 6, 8, 10]
+
+// Nested list comprehension
+let xs = vec![1, 2];
+let ys = vec![10, 20];
+let cartesian: Vec<i32> = for_! {
+    x <= xs;
+    y <= ys.clone();  // Note: clone() needed for inner iteration
+    yield x + y
+};
+// cartesian = vec![11, 21, 12, 22]
+
+// Book recommendations example
+#[derive(Clone)]
+struct Book { title: String, authors: Vec<String> }
+
+struct Movie { title: String }
+
+fn book_adaptations(author: &str) -> Vec<Movie> {
+    if author == "Tolkien" {
+        vec![
+            Movie { title: "An Unexpected Journey".to_string() },
+            Movie { title: "The Desolation of Smaug".to_string() },
+        ]
+    } else {
+        vec![]
+    }
+}
+
+let books = vec![
+    Book {
+        title: "FP in Scala".to_string(),
+        authors: vec!["Chiusano".to_string(), "Bjarnason".to_string()],
+    },
+    Book {
+        title: "The Hobbit".to_string(),
+        authors: vec!["Tolkien".to_string()],
+    },
+];
+
+let recommendations: Vec<String> = for_! {
+    book <= books;
+    author <= book.authors.clone();  // Note: clone() needed
+    movie <= book_adaptations(&author);
+    yield format!(
+        "You may like {}, because you liked {}'s {}",
+        movie.title, author, book.title
+    )
+};
+// recommendations = vec![
+//     "You may like An Unexpected Journey, because you liked Tolkien's The Hobbit",
+//     "You may like The Desolation of Smaug, because you liked Tolkien's The Hobbit",
+// ]
+```
+
+### When to Use Each Macro
+
+| Scenario | Recommended Macro | Reason |
+|----------|-------------------|--------|
+| Option/Result chaining | `eff!` | Short-circuits on None/Err |
+| IO/State/Reader/Writer | `eff!` | Designed for FnOnce monads |
+| List/Vec transformation | `for_!` | Supports multiple iterations |
+| Cartesian products | `for_!` | Nested iteration with yield |
+| Database-style queries | `eff!` | Monadic error handling |
+| Data generation | `for_!` | Multiple results needed |
 
 ---
 
@@ -1478,7 +1630,8 @@ let even = 4.is_even();    // true
 
 | Aspect | Scala | lambars (Rust) |
 |--------|-------|----------------|
-| For-comprehension | `for { x <- mx } yield x` | `eff! { x <= mx; expr }` |
+| For-comprehension (Monad) | `for { x <- mx } yield x` | `eff! { x <= mx; expr }` |
+| For-comprehension (List) | `for { x <- xs } yield x` | `for_! { x <= xs; yield x }` |
 | Type parameters | `F[A]` | `F<A>` |
 | Option | `Some(x)` / `None` | `Some(x)` / `None` |
 | Either | `Right(x)` / `Left(e)` | `Ok(x)` / `Err(e)` |
@@ -1508,18 +1661,22 @@ let even = 4.is_even();    // true
 
 ## Migration Tips
 
-1. **Replace `for` comprehension with `eff!`**: Use `<=` instead of `<-` for binding.
+1. **Replace `for` comprehension with `eff!` or `for_!`**: Use `<=` instead of `<-` for binding.
+   - Use `eff!` for monads (Option, Result, IO, State, Reader, Writer)
+   - Use `for_!` for lists (Vec) with `yield` keyword
 
-2. **Replace `Either` with `Result`**: Note the type parameter order difference (`Either[E, A]` vs `Result<A, E>`).
+2. **Use `for_!` for List comprehensions**: When translating Scala List for-comprehensions, use `for_!` with `yield`. Remember to `.clone()` inner collections due to Rust's ownership.
 
-3. **Import traits explicitly**: Unlike Scala implicits, Rust traits must be imported to use their methods.
+3. **Replace `Either` with `Result`**: Note the type parameter order difference (`Either[E, A]` vs `Result<A, E>`).
 
-4. **Use `.fmap()` instead of `.map()`**: For type class-based mapping (std `Option/Result` have `.map()` too).
+4. **Import traits explicitly**: Unlike Scala implicits, Rust traits must be imported to use their methods.
 
-5. **Use `.flat_map()` instead of `.flatMap()`**: Snake case naming convention.
+5. **Use `.fmap()` instead of `.map()`**: For type class-based mapping (std `Option/Result` have `.map()` too).
 
-6. **Add explicit type annotations**: Rust's type inference is less aggressive than Scala's.
+6. **Use `.flat_map()` instead of `.flatMap()`**: Snake case naming convention.
 
-7. **Handle ownership**: Clone values when needed, or use references appropriately.
+7. **Add explicit type annotations**: Rust's type inference is less aggressive than Scala's.
 
-8. **Use `PersistentVector` for Scala `Vector`**: Similar performance characteristics with structural sharing.
+8. **Handle ownership**: Clone values when needed, or use references appropriately.
+
+9. **Use `PersistentVector` for Scala `Vector`**: Similar performance characteristics with structural sharing.

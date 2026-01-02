@@ -12,6 +12,7 @@
 //! - [`pipe!`]: Compose functions left-to-right (data flow style)
 //! - [`partial!`]: Partial function application with placeholder support
 //! - [`curry2!`] through [`curry6!`]: Convert multi-argument functions to curried form
+//! - [`for_!`]: Scala-style for-comprehension over iterators
 //!
 //! # Helper Functions
 //!
@@ -129,6 +130,7 @@
 
 mod compose_macro;
 mod curry_macro;
+mod for_macro;
 mod partial_macro;
 mod pipe_macro;
 mod utils;
@@ -143,5 +145,6 @@ pub use crate::curry3;
 pub use crate::curry4;
 pub use crate::curry5;
 pub use crate::curry6;
+pub use crate::for_;
 pub use crate::partial;
 pub use crate::pipe;
