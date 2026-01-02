@@ -780,7 +780,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
                 std::iter::once(Child::Node(Rc::new(subnode))).collect();
             (Node::Bitmap { bitmap, children }, added)
         } else {
-            // Use array literal + collect() to avoid intermediate Vec allocation
+            // Use array literal + collect() for efficient small array construction
             let bitmap = (1u32 << collision_index) | (1u32 << new_index);
             let children: Rc<[Child<K, V>]> = if collision_index < new_index {
                 [
