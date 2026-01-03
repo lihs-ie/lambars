@@ -1,5 +1,7 @@
 //! Integration tests for Either with for_! macro.
 
+#![cfg(all(feature = "control", feature = "compose"))]
+
 use lambars::control::Either;
 use lambars::for_;
 use rstest::rstest;

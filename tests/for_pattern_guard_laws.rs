@@ -1,5 +1,7 @@
 //! Property-based tests for pattern guard (if let) in for_! macro.
 
+#![cfg(feature = "compose")]
+
 use lambars::for_;
 use proptest::prelude::*;
 

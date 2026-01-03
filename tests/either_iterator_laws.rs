@@ -1,5 +1,7 @@
 //! Property-based tests for Either IntoIterator implementation.
 
+#![cfg(feature = "control")]
+
 use lambars::control::Either;
 use proptest::prelude::*;
 

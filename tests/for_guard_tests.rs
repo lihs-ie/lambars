@@ -3,6 +3,7 @@
 //! This module tests the `if condition;` guard expression syntax that allows
 //! filtering during for-comprehension iteration.
 
+#![cfg(feature = "compose")]
 #![forbid(unsafe_code)]
 
 use lambars::for_;

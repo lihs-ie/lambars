@@ -1,5 +1,7 @@
 //! Integration tests for pattern guard (if let) support in for_! and for_async! macros.
 
+#![cfg(feature = "compose")]
+
 use lambars::for_;
 
 // =============================================================================
