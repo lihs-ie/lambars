@@ -133,15 +133,33 @@
 //!
 //! # Implementation Details
 //!
-//! The macro expands `pattern <= collection; rest` into:
+//! The macro uses internal rules for optimized expansion:
+//!
+//! ## Optimizations
+//!
+//! 1. **Single iteration uses `map`**: When there's only one iteration followed by `yield`,
+//!    the macro uses `map` instead of `flat_map` + `vec![]` for better performance.
+//!
+//! 2. **Entry points delegate to optimized rules**: Public entry points delegate to
+//!    internal `@collect` rules that handle different patterns optimally.
+//!
+//! ## Expansion Example
 //!
 //! ```rust,ignore
-//! collection.into_iter().flat_map(|pattern| {
-//!     /* expanded rest */
+//! // Single iteration:
+//! for_! { x <= xs; yield x * 2 }
+//! // Expands to:
+//! xs.into_iter().map(|x| x * 2).collect::<Vec<_>>()
+//!
+//! // Nested iteration:
+//! for_! { x <= xs; y <= ys; yield x + y }
+//! // Expands to:
+//! xs.into_iter().flat_map(|x| {
+//!     ys.into_iter().flat_map(|y| {
+//!         vec![x + y]
+//!     }).collect::<Vec<_>>()
 //! }).collect::<Vec<_>>()
 //! ```
-//!
-//! The terminal `yield expression` expands to `vec![expression]`.
 //!
 //! # Differences from eff! macro
 //!
@@ -259,55 +277,90 @@
 /// ```
 #[macro_export]
 macro_rules! for_ {
-    // ==========================================================================
-    // Terminal case: yield wraps result in vec![]
-    // ==========================================================================
+    // =========================================================================
+    // Internal rules: @collect for optimized expansion
+    // =========================================================================
 
-    (yield $result:expr) => {
-        vec![$result]
-    };
+    // @collect single iteration with identifier: use map (optimization)
+    // This rule must come BEFORE general rules for proper matching
+    (@collect $pattern:ident <= $collection:expr ; yield $result:expr) => {{
+        $collection.into_iter().map(|$pattern| $result).collect::<Vec<_>>()
+    }};
 
-    // ==========================================================================
-    // Bind operation: pattern <= collection; rest
-    // ==========================================================================
+    // @collect single iteration with tuple pattern: use map
+    (@collect ($($pattern:tt)*) <= $collection:expr ; yield $result:expr) => {{
+        $collection.into_iter().map(|($($pattern)*)| $result).collect::<Vec<_>>()
+    }};
 
-    // Bind with identifier pattern
-    // This is the most common case: x <= collection;
-    ($pattern:ident <= $collection:expr ; $($rest:tt)+) => {{
+    // @collect single iteration with wildcard: use map
+    (@collect _ <= $collection:expr ; yield $result:expr) => {{
+        $collection.into_iter().map(|_| $result).collect::<Vec<_>>()
+    }};
+
+    // @collect with identifier pattern (general nested case)
+    (@collect $pattern:ident <= $collection:expr ; $($rest:tt)+) => {{
         $collection.into_iter().flat_map(|$pattern| {
             $crate::for_!($($rest)+)
         }).collect::<Vec<_>>()
     }};
 
-    // Bind with tuple pattern
-    // Handles cases like: (a, b) <= collection;
-    (($($pattern:tt)*) <= $collection:expr ; $($rest:tt)+) => {{
+    // @collect with tuple pattern (general nested case)
+    (@collect ($($pattern:tt)*) <= $collection:expr ; $($rest:tt)+) => {{
         $collection.into_iter().flat_map(|($($pattern)*)| {
             $crate::for_!($($rest)+)
         }).collect::<Vec<_>>()
     }};
 
-    // Bind with wildcard pattern
-    // Handles cases like: _ <= collection;
-    (_ <= $collection:expr ; $($rest:tt)+) => {{
+    // @collect with wildcard pattern (general nested case)
+    (@collect _ <= $collection:expr ; $($rest:tt)+) => {{
         $collection.into_iter().flat_map(|_| {
             $crate::for_!($($rest)+)
         }).collect::<Vec<_>>()
     }};
 
-    // ==========================================================================
-    // Let binding: let pattern = expression; rest
-    // ==========================================================================
+    // @collect let binding with identifier
+    (@collect let $pattern:ident = $expr:expr ; $($rest:tt)+) => {{
+        let $pattern = $expr;
+        $crate::for_!(@collect $($rest)+)
+    }};
+
+    // @collect let binding with tuple pattern
+    (@collect let ($($pattern:tt)*) = $expr:expr ; $($rest:tt)+) => {{
+        let ($($pattern)*) = $expr;
+        $crate::for_!(@collect $($rest)+)
+    }};
+
+    // =========================================================================
+    // Public entry points
+    // =========================================================================
+
+    // Terminal case: yield wraps result in vec![]
+    (yield $result:expr) => {
+        vec![$result]
+    };
+
+    // Bind with identifier pattern - delegates to @collect
+    ($pattern:ident <= $collection:expr ; $($rest:tt)+) => {{
+        $crate::for_!(@collect $pattern <= $collection ; $($rest)+)
+    }};
+
+    // Bind with tuple pattern - delegates to @collect
+    (($($pattern:tt)*) <= $collection:expr ; $($rest:tt)+) => {{
+        $crate::for_!(@collect ($($pattern)*) <= $collection ; $($rest)+)
+    }};
+
+    // Bind with wildcard pattern - delegates to @collect
+    (_ <= $collection:expr ; $($rest:tt)+) => {{
+        $crate::for_!(@collect _ <= $collection ; $($rest)+)
+    }};
 
     // Pure let binding with identifier
-    // Handles cases like: let x = expr;
     (let $pattern:ident = $expr:expr ; $($rest:tt)+) => {{
         let $pattern = $expr;
         $crate::for_!($($rest)+)
     }};
 
     // Pure let binding with tuple pattern
-    // Handles cases like: let (a, b) = expr;
     (let ($($pattern:tt)*) = $expr:expr ; $($rest:tt)+) => {{
         let ($($pattern)*) = $expr;
         $crate::for_!($($rest)+)
@@ -390,5 +443,94 @@ mod tests {
             yield x * 2
         };
         assert_eq!(result, Vec::<i32>::new());
+    }
+
+    // =========================================================================
+    // Tests for @collect optimization
+    // =========================================================================
+
+    #[test]
+    fn test_collect_single_iteration_uses_map() {
+        // This should use map optimization
+        let result = for_! {
+            x <= vec![1, 2, 3];
+            yield x * 2
+        };
+        assert_eq!(result, vec![2, 4, 6]);
+    }
+
+    #[test]
+    fn test_collect_with_tuple_pattern() {
+        let result = for_!(@collect (a, b) <= vec![(1, 2), (3, 4)]; yield a + b);
+        assert_eq!(result, vec![3, 7]);
+    }
+
+    #[test]
+    fn test_collect_with_wildcard_pattern() {
+        let result = for_!(@collect _ <= vec![1, 2, 3]; yield 42);
+        assert_eq!(result, vec![42, 42, 42]);
+    }
+
+    // =========================================================================
+    // Edge case tests from implementation plan
+    // =========================================================================
+
+    #[test]
+    fn test_empty_collection_edge_case() {
+        let result = for_! { x <= Vec::<i32>::new(); yield x };
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_single_element_collection() {
+        let result = for_! { x <= vec![42]; yield x * 2 };
+        assert_eq!(result, vec![84]);
+    }
+
+    #[test]
+    fn test_four_level_nesting() {
+        let result = for_! {
+            a <= vec![1, 2];
+            b <= vec![10, 20];
+            c <= vec![100, 200];
+            d <= vec![1000, 2000];
+            yield a + b + c + d
+        };
+        assert_eq!(result.len(), 16);
+        // Verify first and last elements
+        assert_eq!(result[0], 1 + 10 + 100 + 1000); // 1111
+        assert_eq!(result[15], 2 + 20 + 200 + 2000); // 2222
+    }
+
+    #[test]
+    fn test_three_level_nesting() {
+        let result = for_! {
+            x <= vec![1, 2];
+            y <= vec![10, 20];
+            z <= vec![100, 200];
+            yield x + y + z
+        };
+        assert_eq!(result, vec![111, 211, 121, 221, 112, 212, 122, 222]);
+    }
+
+    #[test]
+    fn test_single_iteration_with_let_binding() {
+        let result = for_! {
+            x <= vec![1, 2, 3];
+            let y = x * 2;
+            yield y
+        };
+        assert_eq!(result, vec![2, 4, 6]);
+    }
+
+    #[test]
+    fn test_nested_with_let_binding_in_middle() {
+        let result = for_! {
+            x <= vec![1, 2];
+            let x_squared = x * x;
+            y <= vec![10, 20];
+            yield x_squared + y
+        };
+        assert_eq!(result, vec![11, 21, 14, 24]);
     }
 }

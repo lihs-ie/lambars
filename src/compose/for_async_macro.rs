@@ -98,6 +98,50 @@
 //!
 //! When using outer variables in inner iterations, explicit `.clone()` is required,
 //! consistent with the synchronous `for_!` macro.
+//!
+//! # Performance Tips
+//!
+//! ## Prefer `let` over `AsyncIO::pure()` for pure computations
+//!
+//! Pure computations should use `let` bindings instead of `AsyncIO::pure()` to avoid
+//! boxing overhead:
+//!
+//! ```rust,ignore
+//! // Recommended: Use let for pure computations
+//! for_async! {
+//!     x <= items;
+//!     let doubled = x * 2;  // No overhead
+//!     yield doubled
+//! }
+//!
+//! // Not recommended: AsyncIO::pure() adds boxing overhead
+//! for_async! {
+//!     x <= items;
+//!     doubled <~ AsyncIO::pure(x * 2);  // ~30x overhead per bind
+//!     yield doubled
+//! }
+//! ```
+//!
+//! ## When to use `<~` (async bind)
+//!
+//! Use `<~` only for actual async operations:
+//!
+//! ```rust,ignore
+//! for_async! {
+//!     x <= items;
+//!     result <~ fetch_async(x);   // Actual async operation - use <~
+//!     let processed = result * 2; // Pure computation - use let
+//!     yield processed
+//! }
+//! ```
+//!
+//! ## Performance Comparison
+//!
+//! | Pattern | Overhead | Use Case |
+//! |---------|----------|----------|
+//! | `let x = expr;` | None | Pure computations |
+//! | `x <~ AsyncIO::pure(expr);` | ~30x per bind | Avoid - use let instead |
+//! | `x <~ async_operation();` | Inherent | Actual async operations |
 
 #![forbid(unsafe_code)]
 

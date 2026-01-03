@@ -1,0 +1,632 @@
+# Phase 12: for_! マクロ最適化 - 実装計画
+# イテレータベースの展開により中間 Vec アロケーションを排除する
+
+version: "1.1.0"
+created_at: "2026-01-03"
+revised_at: "2026-01-03"
+phase_id: phase_12
+requirements_reference: docs/phase_12_requirements/phase_12_for_macro_optimization.yaml
+
+# 修正履歴:
+# v1.1.0: FP specialist レビューに基づく修正
+#   - Step 4 と Step 5 の順序を調整（map 特殊化を汎用ルールより先に配置）
+#   - FR-004 のドキュメント内容を Step 8 に明示的に転記
+#   - NFR-003 の Clippy 検証と品質チェックをテスト計画に追加
+#   - エッジケーステスト（空コレクション、単一要素、4段ネスト）を追加
+
+# =============================================================================
+# 実装概要（Implementation Overview）
+# =============================================================================
+
+implementation_overview:
+  description: |
+    for_! マクロを最適化し、手書きの flat_map チェーンと同等のパフォーマンスを達成する。
+    主な変更点:
+    1. @iter 内部ルールの導入（イテレータを返す）
+    2. @collect ルールの導入（最外層でのみ collect）
+    3. 単一イテレーションの map 特殊化
+    4. yield での std::iter::once() 使用
+
+  approach: |
+    マクロのルール構造を変更し、以下のパターンで展開する:
+
+    Before:
+    ```rust
+    collection.into_iter().flat_map(|x| {
+        inner.into_iter().flat_map(|y| {
+            vec![x + y]  // 毎回 Vec アロケーション
+        }).collect::<Vec<_>>()  // 中間 collect
+    }).collect::<Vec<_>>()  // 最終 collect
+    ```
+
+    After:
+    ```rust
+    collection.into_iter().flat_map(|x| {
+        inner.into_iter().flat_map(|y| {
+            std::iter::once(x + y)  // アロケーションなし
+        })  // collect なし
+    }).collect::<Vec<_>>()  // 最終 collect のみ
+    ```
+
+  key_insights:
+    - flat_map はイテレータを受け取るので、Vec ではなくイテレータを直接返せる
+    - std::iter::once() は単一要素のイテレータを作成し、ヒープアロケーションなし
+    - 内部ルールを使用して「collect すべきか」のコンテキストを追跡
+
+# =============================================================================
+# 実装ステップ（Implementation Steps）
+# =============================================================================
+
+implementation_steps:
+  - step: 1
+    name: "@iter yield ルールの追加"
+    description: |
+      yield で std::iter::once() を使用する @iter ルールを追加する。
+      これが最も重要な最適化ポイント。
+
+    changes:
+      - file: src/compose/for_macro.rs
+        action: add
+        location: "macro_rules! for_ の先頭（Terminal case の前）"
+        code: |
+          // ==========================================================================
+          // Internal rules: @iter returns iterators (no collect)
+          // ==========================================================================
+
+          // @iter terminal: yield with std::iter::once (no allocation)
+          (@iter yield $result:expr) => {
+              std::iter::once($result)
+          };
+
+    tests:
+      - name: "@iter yield が once を返すことの確認"
+        code: |
+          // 型チェックで Iterator を返すことを確認
+          fn assert_iterator<I: Iterator>(_: I) {}
+          assert_iterator(for_!(@iter yield 42));
+
+  - step: 2
+    name: "@iter bind ルールの追加"
+    description: |
+      バインド操作の @iter ルールを追加する。
+      collect せずにイテレータを返す。
+
+    changes:
+      - file: src/compose/for_macro.rs
+        action: add
+        location: "@iter yield の後"
+        code: |
+          // @iter with identifier pattern
+          (@iter $pattern:ident <= $collection:expr ; $($rest:tt)+) => {{
+              $collection.into_iter().flat_map(|$pattern| {
+                  $crate::for_!(@iter $($rest)+)
+              })
+          }};
+
+          // @iter with tuple pattern
+          (@iter ($($pattern:tt)*) <= $collection:expr ; $($rest:tt)+) => {{
+              $collection.into_iter().flat_map(|($($pattern)*)| {
+                  $crate::for_!(@iter $($rest)+)
+              })
+          }};
+
+          // @iter with wildcard pattern
+          (@iter _ <= $collection:expr ; $($rest:tt)+) => {{
+              $collection.into_iter().flat_map(|_| {
+                  $crate::for_!(@iter $($rest)+)
+              })
+          }};
+
+    tests:
+      - name: "@iter が Iterator を返すことの確認"
+        code: |
+          fn assert_iterator<I: Iterator>(_: I) {}
+          assert_iterator(for_!(@iter x <= vec![1, 2]; yield x));
+
+  - step: 3
+    name: "@iter let バインディングの追加"
+    description: |
+      let バインディングの @iter ルールを追加する。
+
+    changes:
+      - file: src/compose/for_macro.rs
+        action: add
+        location: "@iter bind の後"
+        code: |
+          // @iter let binding with identifier
+          (@iter let $pattern:ident = $expr:expr ; $($rest:tt)+) => {{
+              let $pattern = $expr;
+              $crate::for_!(@iter $($rest)+)
+          }};
+
+          // @iter let binding with tuple pattern
+          (@iter let ($($pattern:tt)*) = $expr:expr ; $($rest:tt)+) => {{
+              let ($($pattern)*) = $expr;
+              $crate::for_!(@iter $($rest)+)
+          }};
+
+    tests:
+      - name: "@iter let バインディングの確認"
+        code: |
+          fn assert_iterator<I: Iterator>(_: I) {}
+          assert_iterator(for_!(@iter x <= vec![1]; let y = x * 2; yield y));
+
+  - step: 4
+    name: "@collect 単一イテレーション特殊化ルールの追加（map 最適化）"
+    description: |
+      pattern <= collection ; yield result パターンを検出し、
+      flat_map ではなく map を使用する。
+      より具体的なルールなので、汎用 @collect ルールより先に配置する。
+
+    note: |
+      重要: このステップは Step 5 の汎用 @collect ルールより先にマクロに配置する必要がある。
+      Rust のマクロは上から順にマッチするため、より具体的なルールを先に配置する。
+
+    changes:
+      - file: src/compose/for_macro.rs
+        action: add
+        location: "@iter の後（@collect セクションの先頭）"
+        code: |
+          // ==========================================================================
+          // Internal rules: @collect wraps with collect (outermost layer only)
+          // ==========================================================================
+
+          // @collect single iteration with identifier: use map instead of flat_map (optimization)
+          // This rule must come BEFORE the general @collect rules for proper matching
+          (@collect $pattern:ident <= $collection:expr ; yield $result:expr) => {{
+              $collection.into_iter().map(|$pattern| $result).collect::<Vec<_>>()
+          }};
+
+          // @collect single iteration with tuple pattern: use map
+          (@collect ($($pattern:tt)*) <= $collection:expr ; yield $result:expr) => {{
+              $collection.into_iter().map(|($($pattern)*)| $result).collect::<Vec<_>>()
+          }};
+
+          // @collect single iteration with wildcard: use map
+          (@collect _ <= $collection:expr ; yield $result:expr) => {{
+              $collection.into_iter().map(|_| $result).collect::<Vec<_>>()
+          }};
+
+    tests:
+      - name: "単一イテレーションで map が使われることの確認"
+        code: |
+          let result = for_! {
+              x <= vec![1, 2, 3];
+              yield x * 2
+          };
+          assert_eq!(result, vec![2, 4, 6]);
+
+    performance_expectation: |
+      単一イテレーションで flat_map + once から map への変更により、
+      手書き map と同等のパフォーマンスが期待される。
+
+  - step: 5
+    name: "@collect 汎用ルールの追加（最外層）"
+    description: |
+      最外層で collect を行う汎用 @collect ルールを追加する。
+      内部では @iter を呼び出す。
+      Step 4 の特殊化ルールの後に配置する。
+
+    changes:
+      - file: src/compose/for_macro.rs
+        action: add
+        location: "Step 4 の @collect 特殊化ルールの後"
+        code: |
+          // @collect with identifier pattern (general case)
+          (@collect $pattern:ident <= $collection:expr ; $($rest:tt)+) => {{
+              $collection.into_iter().flat_map(|$pattern| {
+                  $crate::for_!(@iter $($rest)+)
+              }).collect::<Vec<_>>()
+          }};
+
+          // @collect with tuple pattern
+          (@collect ($($pattern:tt)*) <= $collection:expr ; $($rest:tt)+) => {{
+              $collection.into_iter().flat_map(|($($pattern)*)| {
+                  $crate::for_!(@iter $($rest)+)
+              }).collect::<Vec<_>>()
+          }};
+
+          // @collect with wildcard pattern
+          (@collect _ <= $collection:expr ; $($rest:tt)+) => {{
+              $collection.into_iter().flat_map(|_| {
+                  $crate::for_!(@iter $($rest)+)
+              }).collect::<Vec<_>>()
+          }};
+
+          // @collect let binding
+          (@collect let $pattern:ident = $expr:expr ; $($rest:tt)+) => {{
+              let $pattern = $expr;
+              $crate::for_!(@collect $($rest)+)
+          }};
+
+          (@collect let ($($pattern:tt)*) = $expr:expr ; $($rest:tt)+) => {{
+              let ($($pattern)*) = $expr;
+              $crate::for_!(@collect $($rest)+)
+          }};
+
+    tests:
+      - name: "@collect が Vec を返すことの確認"
+        code: |
+          let result: Vec<i32> = for_!(@collect x <= vec![1, 2]; yield x * 2);
+          assert_eq!(result, vec![2, 4]);
+
+  - step: 6
+    name: "エントリーポイントの変更"
+    description: |
+      既存のルールを @collect を呼び出すように変更する。
+
+    changes:
+      - file: src/compose/for_macro.rs
+        action: modify
+        description: "bind ルールを @collect に委譲"
+        before: |
+          // Bind with identifier pattern
+          // This is the most common case: x <= collection;
+          ($pattern:ident <= $collection:expr ; $($rest:tt)+) => {{
+              $collection.into_iter().flat_map(|$pattern| {
+                  $crate::for_!($($rest)+)
+              }).collect::<Vec<_>>()
+          }};
+        after: |
+          // Bind with identifier pattern
+          // This is the most common case: x <= collection;
+          // Delegates to @collect for optimized expansion
+          ($pattern:ident <= $collection:expr ; $($rest:tt)+) => {{
+              $crate::for_!(@collect $pattern <= $collection ; $($rest)+)
+          }};
+
+      - file: src/compose/for_macro.rs
+        action: modify
+        description: "tuple pattern ルールを @collect に委譲"
+        before: |
+          // Bind with tuple pattern
+          // Handles cases like: (a, b) <= collection;
+          (($($pattern:tt)*) <= $collection:expr ; $($rest:tt)+) => {{
+              $collection.into_iter().flat_map(|($($pattern)*)| {
+                  $crate::for_!($($rest)+)
+              }).collect::<Vec<_>>()
+          }};
+        after: |
+          // Bind with tuple pattern
+          // Handles cases like: (a, b) <= collection;
+          // Delegates to @collect for optimized expansion
+          (($($pattern:tt)*) <= $collection:expr ; $($rest:tt)+) => {{
+              $crate::for_!(@collect ($($pattern)*) <= $collection ; $($rest)+)
+          }};
+
+      - file: src/compose/for_macro.rs
+        action: modify
+        description: "wildcard pattern ルールを @collect に委譲"
+        before: |
+          // Bind with wildcard pattern
+          // Handles cases like: _ <= collection;
+          (_ <= $collection:expr ; $($rest:tt)+) => {{
+              $collection.into_iter().flat_map(|_| {
+                  $crate::for_!($($rest)+)
+              }).collect::<Vec<_>>()
+          }};
+        after: |
+          // Bind with wildcard pattern
+          // Handles cases like: _ <= collection;
+          // Delegates to @collect for optimized expansion
+          (_ <= $collection:expr ; $($rest:tt)+) => {{
+              $crate::for_!(@collect _ <= $collection ; $($rest)+)
+          }};
+
+    tests:
+      - name: "既存の全テストがパスすることの確認"
+        command: cargo test --features compose for_macro
+
+  - step: 7
+    name: "ドキュメントの更新"
+    description: |
+      マクロのドキュメントを更新し、実装の詳細を反映する。
+
+    changes:
+      - file: src/compose/for_macro.rs
+        action: modify
+        location: "モジュールドキュメント"
+        description: |
+          Implementation Details セクションを更新:
+          - @iter と @collect の内部ルールについて説明
+          - std::iter::once() の使用について説明
+          - 単一イテレーションの map 特殊化について説明
+
+# =============================================================================
+# for_async! ドキュメント更新
+# =============================================================================
+
+for_async_documentation:
+  - step: 8
+    name: "for_async! パフォーマンスガイダンスの追加"
+    description: |
+      for_async! マクロにパフォーマンスガイダンスのドキュメントを追加する。
+
+    changes:
+      - file: src/compose/for_async_macro.rs
+        action: modify
+        location: "モジュールドキュメント"
+        description: |
+          Performance Tips セクションを追加:
+          - let vs AsyncIO::pure() の使い分け
+          - AsyncIO::pure() のボクシングオーバーヘッドについて
+
+        documentation_content: |
+          /// # Performance Tips
+          ///
+          /// ## Prefer `let` over `AsyncIO::pure()` for pure computations
+          ///
+          /// Pure computations should use `let` bindings instead of
+          /// `AsyncIO::pure()` to avoid boxing overhead:
+          ///
+          /// ```rust,ignore
+          /// // Recommended: Use let for pure computations
+          /// for_async! {
+          ///     x <= items;
+          ///     let doubled = x * 2;  // No overhead
+          ///     yield doubled
+          /// }
+          ///
+          /// // Not recommended: AsyncIO::pure() adds boxing overhead
+          /// for_async! {
+          ///     x <= items;
+          ///     doubled <~ AsyncIO::pure(x * 2);  // ~30x overhead per bind
+          ///     yield doubled
+          /// }
+          /// ```
+          ///
+          /// ## When to use `<~` (async bind)
+          ///
+          /// Use `<~` only for actual async operations:
+          ///
+          /// ```rust,ignore
+          /// for_async! {
+          ///     x <= items;
+          ///     result <~ fetch_async(x);  // Actual async operation - use <~
+          ///     let processed = result * 2; // Pure computation - use let
+          ///     yield processed
+          /// }
+          /// ```
+          ///
+          /// ## Performance Comparison
+          ///
+          /// | Pattern | Overhead | Use Case |
+          /// |---------|----------|----------|
+          /// | `let x = expr;` | None | Pure computations |
+          /// | `x <~ AsyncIO::pure(expr);` | ~30x per bind | Avoid - use let instead |
+          /// | `x <~ async_operation();` | Inherent | Actual async operations |
+
+# =============================================================================
+# テスト計画（Test Plan）
+# =============================================================================
+
+test_plan:
+  unit_tests:
+    - name: 既存テスト回帰確認
+      command: cargo test --features compose for_macro
+      expectation: 全テストパス
+
+    - name: 法則テスト回帰確認
+      command: cargo test --features compose for_macro_laws
+      expectation: 全テストパス
+
+    - name: 統合テスト回帰確認
+      command: cargo test --features compose for_macro_integration
+      expectation: 全テストパス
+
+  new_tests:
+    - name: "@iter ルールの型チェック"
+      location: src/compose/for_macro.rs (tests モジュール)
+
+    - name: "map 特殊化の確認"
+      location: src/compose/for_macro.rs (tests モジュール)
+
+  benchmark_tests:
+    - name: パフォーマンス検証
+      command: cargo bench --bench for_macro_bench
+      expectations:
+        for_single_iteration: "1.5x 以内"
+        for_nested_two_levels: "2x 以内"
+        for_nested_three_levels: "2x 以内"
+
+  quality_checks:
+    - name: Clippy 検証
+      command: cargo clippy --all-features -- -D warnings
+      expectation: 警告なしでパス
+
+    - name: ドキュメント生成検証
+      command: cargo doc --all-features --no-deps
+      expectation: 成功
+
+  edge_case_tests:
+    - name: 空コレクションの処理
+      code: |
+        let result = for_! { x <= Vec::<i32>::new(); yield x };
+        assert!(result.is_empty());
+
+    - name: 単一要素のコレクション
+      code: |
+        let result = for_! { x <= vec![42]; yield x * 2 };
+        assert_eq!(result, vec![84]);
+
+    - name: 4段ネスト
+      description: "深いネストでも正しく動作することを確認"
+      code: |
+        let result = for_! {
+            a <= vec![1, 2];
+            b <= vec![10, 20];
+            c <= vec![100, 200];
+            d <= vec![1000, 2000];
+            yield a + b + c + d
+        };
+        assert_eq!(result.len(), 16);
+
+# =============================================================================
+# マクロルール順序（Macro Rule Order）
+# =============================================================================
+
+macro_rule_order:
+  description: |
+    マクロルールは上から順にマッチされるため、
+    より具体的なルールを先に配置する必要がある。
+
+  order:
+    # 1. @iter ルール（内部使用、イテレータを返す）
+    - "@iter yield"
+    - "@iter identifier bind"
+    - "@iter tuple bind"
+    - "@iter wildcard bind"
+    - "@iter let identifier"
+    - "@iter let tuple"
+
+    # 2. @collect ルール（最外層、Vec を返す）
+    - "@collect single iteration identifier + yield (map 特殊化)"
+    - "@collect single iteration tuple + yield (map 特殊化)"
+    - "@collect single iteration wildcard + yield (map 特殊化)"
+    - "@collect identifier bind"
+    - "@collect tuple bind"
+    - "@collect wildcard bind"
+    - "@collect let identifier"
+    - "@collect let tuple"
+
+    # 3. エントリーポイント（公開ルール）
+    - "yield (vec![] を返す、@iter 経由しない場合のフォールバック)"
+    - "identifier bind (→ @collect に委譲)"
+    - "tuple bind (→ @collect に委譲)"
+    - "wildcard bind (→ @collect に委譲)"
+    - "let identifier"
+    - "let tuple"
+
+# =============================================================================
+# 最終的なマクロ構造（Final Macro Structure）
+# =============================================================================
+
+final_macro_structure: |
+  macro_rules! for_ {
+      // =========================================================================
+      // Internal rules: @iter returns iterators (no collect)
+      // =========================================================================
+
+      // @iter terminal: yield with std::iter::once (no allocation)
+      (@iter yield $result:expr) => {
+          std::iter::once($result)
+      };
+
+      // @iter with identifier pattern (no collect)
+      (@iter $pattern:ident <= $collection:expr ; $($rest:tt)+) => {{
+          $collection.into_iter().flat_map(|$pattern| {
+              $crate::for_!(@iter $($rest)+)
+          })
+      }};
+
+      // @iter with tuple pattern
+      (@iter ($($pattern:tt)*) <= $collection:expr ; $($rest:tt)+) => {{
+          $collection.into_iter().flat_map(|($($pattern)*)| {
+              $crate::for_!(@iter $($rest)+)
+          })
+      }};
+
+      // @iter with wildcard pattern
+      (@iter _ <= $collection:expr ; $($rest:tt)+) => {{
+          $collection.into_iter().flat_map(|_| {
+              $crate::for_!(@iter $($rest)+)
+          })
+      }};
+
+      // @iter let binding with identifier
+      (@iter let $pattern:ident = $expr:expr ; $($rest:tt)+) => {{
+          let $pattern = $expr;
+          $crate::for_!(@iter $($rest)+)
+      }};
+
+      // @iter let binding with tuple pattern
+      (@iter let ($($pattern:tt)*) = $expr:expr ; $($rest:tt)+) => {{
+          let ($($pattern)*) = $expr;
+          $crate::for_!(@iter $($rest)+)
+      }};
+
+      // =========================================================================
+      // Internal rules: @collect wraps with collect (outermost layer only)
+      // =========================================================================
+
+      // @collect single iteration: use map instead of flat_map (optimization)
+      (@collect $pattern:ident <= $collection:expr ; yield $result:expr) => {{
+          $collection.into_iter().map(|$pattern| $result).collect::<Vec<_>>()
+      }};
+
+      (@collect ($($pattern:tt)*) <= $collection:expr ; yield $result:expr) => {{
+          $collection.into_iter().map(|($($pattern)*)| $result).collect::<Vec<_>>()
+      }};
+
+      (@collect _ <= $collection:expr ; yield $result:expr) => {{
+          $collection.into_iter().map(|_| $result).collect::<Vec<_>>()
+      }};
+
+      // @collect with identifier pattern
+      (@collect $pattern:ident <= $collection:expr ; $($rest:tt)+) => {{
+          $collection.into_iter().flat_map(|$pattern| {
+              $crate::for_!(@iter $($rest)+)
+          }).collect::<Vec<_>>()
+      }};
+
+      // @collect with tuple pattern
+      (@collect ($($pattern:tt)*) <= $collection:expr ; $($rest:tt)+) => {{
+          $collection.into_iter().flat_map(|($($pattern)*)| {
+              $crate::for_!(@iter $($rest)+)
+          }).collect::<Vec<_>>()
+      }};
+
+      // @collect with wildcard pattern
+      (@collect _ <= $collection:expr ; $($rest:tt)+) => {{
+          $collection.into_iter().flat_map(|_| {
+              $crate::for_!(@iter $($rest)+)
+          }).collect::<Vec<_>>()
+      }};
+
+      // @collect let binding
+      (@collect let $pattern:ident = $expr:expr ; $($rest:tt)+) => {{
+          let $pattern = $expr;
+          $crate::for_!(@collect $($rest)+)
+      }};
+
+      (@collect let ($($pattern:tt)*) = $expr:expr ; $($rest:tt)+) => {{
+          let ($($pattern)*) = $expr;
+          $crate::for_!(@collect $($rest)+)
+      }};
+
+      // =========================================================================
+      // Public entry points
+      // =========================================================================
+
+      // Terminal case: yield wraps result in vec![]
+      (yield $result:expr) => {
+          vec![$result]
+      };
+
+      // Bind with identifier pattern - delegates to @collect
+      ($pattern:ident <= $collection:expr ; $($rest:tt)+) => {{
+          $crate::for_!(@collect $pattern <= $collection ; $($rest)+)
+      }};
+
+      // Bind with tuple pattern - delegates to @collect
+      (($($pattern:tt)*) <= $collection:expr ; $($rest:tt)+) => {{
+          $crate::for_!(@collect ($($pattern)*) <= $collection ; $($rest)+)
+      }};
+
+      // Bind with wildcard pattern - delegates to @collect
+      (_ <= $collection:expr ; $($rest:tt)+) => {{
+          $crate::for_!(@collect _ <= $collection ; $($rest)+)
+      }};
+
+      // Let binding with identifier
+      (let $pattern:ident = $expr:expr ; $($rest:tt)+) => {{
+          let $pattern = $expr;
+          $crate::for_!($($rest)+)
+      }};
+
+      // Let binding with tuple pattern
+      (let ($($pattern:tt)*) = $expr:expr ; $($rest:tt)+) => {{
+          let ($($pattern)*) = $expr;
+          $crate::for_!($($rest)+)
+      }};
+  }
