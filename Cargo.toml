@@ -67,3 +67,11 @@ harness = false
 [[bench]]
 name = "effect_bench"
 harness = false
+
+[[bench]]
+name = "for_macro_bench"
+harness = false
+
+[[bench]]
+name = "for_async_macro_bench"
+harness = false
