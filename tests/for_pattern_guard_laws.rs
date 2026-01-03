@@ -70,8 +70,8 @@ proptest! {
         };
 
         let result2: Vec<i32> = values.into_iter()
-            .filter_map(|outer| outer)
-            .filter_map(|inner| inner)
+            .flatten()
+            .flatten()
             .collect();
 
         prop_assert_eq!(result1, result2);
