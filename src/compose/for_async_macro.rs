@@ -435,11 +435,7 @@ mod tests {
     #[tokio::test]
     async fn test_async_pattern_guard_option_some() {
         fn maybe_double(x: i32) -> Option<i32> {
-            if x > 0 {
-                Some(x * 2)
-            } else {
-                None
-            }
+            if x > 0 { Some(x * 2) } else { None }
         }
 
         let result = for_async! {

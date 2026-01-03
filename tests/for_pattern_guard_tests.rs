@@ -9,11 +9,7 @@ use lambars::for_;
 #[test]
 fn test_pattern_guard_option_some() {
     fn maybe_double(x: i32) -> Option<i32> {
-        if x > 0 {
-            Some(x * 2)
-        } else {
-            None
-        }
+        if x > 0 { Some(x * 2) } else { None }
     }
 
     let result = for_! {
@@ -202,11 +198,7 @@ fn test_pattern_guard_multiple_consecutive() {
     }
 
     fn maybe_double(n: i32) -> Option<i32> {
-        if n > 0 {
-            Some(n * 2)
-        } else {
-            None
-        }
+        if n > 0 { Some(n * 2) } else { None }
     }
 
     let result = for_! {
@@ -242,11 +234,7 @@ mod async_tests {
     #[tokio::test]
     async fn test_async_pattern_guard_option_some() {
         fn maybe_double(x: i32) -> Option<i32> {
-            if x > 0 {
-                Some(x * 2)
-            } else {
-                None
-            }
+            if x > 0 { Some(x * 2) } else { None }
         }
 
         let result = for_async! {
