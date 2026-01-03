@@ -244,7 +244,7 @@ fn benchmark_filter_simulation(criterion: &mut Criterion) {
                         .clone()
                         .into_iter()
                         .filter(|&x| x % 2 == 0)
-                        .map(|x| black_box(x))
+                        .map(black_box)
                         .collect();
                     black_box(result)
                 });
