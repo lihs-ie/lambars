@@ -13,7 +13,7 @@ This document provides a comprehensive comparison between Haskell functional pro
   - [Foldable](#foldable)
   - [Traversable](#traversable)
 - [Maybe and Either](#maybe-and-either)
-- [Do-Notation vs eff! Macro](#do-notation-vs-eff-macro)
+- [Do-Notation and List Comprehensions](#do-notation-and-list-comprehensions)
 - [Function Composition](#function-composition)
 - [Currying and Partial Application](#currying-and-partial-application)
 - [Lazy Evaluation](#lazy-evaluation)
@@ -44,7 +44,9 @@ This document provides a comprehensive comparison between Haskell functional pro
 | Traversable | `Traversable t` | `Traversable` trait |
 | Maybe | `Maybe a` | `Option<A>` (std) |
 | Either | `Either e a` | `Result<A, E>` (std) |
-| Do-notation | `do { ... }` | `eff!` macro |
+| Do-notation (Monad) | `do { ... }` | `eff!` macro |
+| List comprehension | `[x | x <- xs]` | `for_!` macro |
+| Async list comprehension | `do` + `async` / `ListT IO` | `for_async!` macro |
 | Function composition | `.` and `>>>` | `compose!` macro |
 | Pipe | `&` | `pipe!` macro |
 | Lens | `Control.Lens` | `Lens` trait |
@@ -720,9 +722,18 @@ let bi_mapped: Result<String, usize> = result
 
 ---
 
-## Do-Notation vs eff! Macro
+## Do-Notation and List Comprehensions
 
-### Syntax Comparison
+lambars provides two macros that correspond to Haskell's do-notation and list comprehensions:
+
+| Use Case | Haskell | lambars | Description |
+|----------|---------|---------|-------------|
+| Monad binding | `do { x <- mx; ... }` | `eff!` macro | Single execution, FnOnce-based |
+| List comprehension | `[f x | x <- xs]` | `for_!` macro | Multiple execution, FnMut-based |
+
+### eff! Macro (Do-Notation for Monads)
+
+#### Syntax Comparison
 
 | Haskell | lambars | Description |
 |---------|---------|-------------|
@@ -865,6 +876,93 @@ fn get_user_orders(uid: i32) -> Option<(User, Vec<Order>)> {
     }
 }
 ```
+
+### for_! Macro (List Comprehensions)
+
+For Haskell list comprehensions, use the `for_!` macro with `yield`:
+
+#### Syntax Comparison
+
+| Haskell | lambars | Description |
+|---------|---------|-------------|
+| `[f x \| x <- xs]` | `for_! { x <= xs; yield f(x) }` | Basic comprehension |
+| `[x + y \| x <- xs, y <- ys]` | `for_! { x <= xs; y <= ys.clone(); yield x + y }` | Nested |
+| `[x \| x <- xs, p x]` | `xs.into_iter().filter(p).collect()` | Filter (use std) |
+| `let y = expr` | `let y = expr;` | Pure binding |
+
+**Important**: In `for_!`, inner collections need `.clone()` due to Rust's ownership rules.
+
+#### Code Examples
+
+```haskell
+-- Haskell - List comprehension
+doubled :: [Int]
+doubled = [x * 2 | x <- [1, 2, 3, 4, 5]]
+-- doubled = [2, 4, 6, 8, 10]
+
+-- Nested comprehension (cartesian product)
+cartesian :: [Int]
+cartesian = [x + y | x <- [1, 2], y <- [10, 20]]
+-- cartesian = [11, 21, 12, 22]
+
+-- With filtering
+filtered :: [Int]
+filtered = [x | x <- [1, 2, 3, 4, 5], even x]
+-- filtered = [2, 4]
+
+-- Complex example with multiple generators
+triples :: [(Int, Int, Int)]
+triples = [(a, b, c) | c <- [1..10], b <- [1..c], a <- [1..b], a^2 + b^2 == c^2]
+-- triples = [(3, 4, 5), (6, 8, 10)]
+```
+
+```rust
+// lambars - for_! macro
+use lambars::for_;
+
+let doubled: Vec<i32> = for_! {
+    x <= vec![1, 2, 3, 4, 5];
+    yield x * 2
+};
+// doubled = vec![2, 4, 6, 8, 10]
+
+// Nested comprehension (cartesian product)
+let xs = vec![1, 2];
+let ys = vec![10, 20];
+let cartesian: Vec<i32> = for_! {
+    x <= xs;
+    y <= ys.clone();  // Note: clone() needed for inner iteration
+    yield x + y
+};
+// cartesian = vec![11, 21, 12, 22]
+
+// With filtering (use std iterator methods)
+let filtered: Vec<i32> = (1..=5).filter(|x| x % 2 == 0).collect();
+// filtered = vec![2, 4]
+
+// Pythagorean triples example
+let triples: Vec<(i32, i32, i32)> = for_! {
+    c <= 1..=10;
+    b <= (1..=c).collect::<Vec<_>>();
+    a <= (1..=b).collect::<Vec<_>>();
+    yield (a, b, c)
+}.into_iter()
+ .filter(|(a, b, c)| a * a + b * b == c * c)
+ .collect();
+// triples = vec![(3, 4, 5), (6, 8, 10)]
+```
+
+### When to Use Each Macro
+
+| Scenario | Recommended Macro | Reason |
+|----------|-------------------|--------|
+| Maybe/Either chaining | `eff!` | Short-circuits on Nothing/Left |
+| IO/State/Reader/Writer | `eff!` | Designed for FnOnce monads |
+| List generation | `for_!` | Supports multiple iterations with yield |
+| Cartesian products | `for_!` | Nested iteration |
+| Database-style queries | `eff!` | Monadic error handling |
+| Async list generation | `for_async!` | Async iteration with yield |
+| Async operations in loops | `for_async!` | Uses `<~` for AsyncIO binding |
 
 ---
 

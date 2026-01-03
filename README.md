@@ -9,7 +9,7 @@ lambars brings functional programming abstractions to Rust that are not provided
 ### Features
 
 - **Type Classes**: Functor, Applicative, Monad, Foldable, Traversable, Semigroup, Monoid
-- **Function Composition**: `compose!`, `pipe!`, `partial!`, `curry!` macros
+- **Function Composition**: `compose!`, `pipe!`, `partial!`, `curry!`, `eff!`, `for_!`, `for_async!` macros
 - **Control Structures**: Lazy evaluation, Trampoline for stack-safe recursion, Continuation monad
 - **Persistent Data Structures**: Immutable Vector, HashMap, HashSet, TreeMap, List with structural sharing
 - **Optics**: Lens, Prism, Iso, Optional, Traversal for immutable data manipulation
@@ -735,6 +735,97 @@ let result = eff! {
 };
 assert_eq!(result, None);
 ```
+
+#### for_! Macro (List Comprehensions)
+
+Scala/Haskell-style list comprehensions for Vec and iterators.
+
+```rust
+use lambars::for_;
+
+// Basic list comprehension
+let doubled: Vec<i32> = for_! {
+    x <= vec![1, 2, 3, 4, 5];
+    yield x * 2
+};
+assert_eq!(doubled, vec![2, 4, 6, 8, 10]);
+
+// Nested comprehension (cartesian product)
+let xs = vec![1, 2];
+let ys = vec![10, 20];
+let cartesian: Vec<i32> = for_! {
+    x <= xs;
+    y <= ys.clone();  // Clone needed for inner iteration
+    yield x + y
+};
+assert_eq!(cartesian, vec![11, 21, 12, 22]);
+
+// With let bindings
+let result: Vec<i32> = for_! {
+    x <= vec![1, 2, 3];
+    let doubled = x * 2;
+    yield doubled + 1
+};
+assert_eq!(result, vec![3, 5, 7]);
+```
+
+#### for_async! Macro (Async List Comprehensions)
+
+Async version of `for_!` for list comprehensions with async operations. Returns `AsyncIO<Vec<T>>` for lazy evaluation.
+
+```rust
+use lambars::for_async;
+use lambars::effect::AsyncIO;
+
+async fn example() {
+    // Basic async list comprehension
+    let urls = vec!["http://a.com", "http://b.com"];
+    let result: AsyncIO<Vec<String>> = for_async! {
+        url <= urls;
+        yield url.to_uppercase()
+    };
+    let uppercase_urls = result.run_async().await;
+    assert_eq!(uppercase_urls, vec!["HTTP://A.COM", "HTTP://B.COM"]);
+
+    // With AsyncIO binding using <~ operator
+    let result: AsyncIO<Vec<i32>> = for_async! {
+        x <= vec![1, 2, 3];
+        doubled <~ AsyncIO::pure(x * 2);  // <~ binds from AsyncIO
+        yield doubled + 1
+    };
+    let values = result.run_async().await;
+    assert_eq!(values, vec![3, 5, 7]);
+
+    // Nested iteration with async
+    let xs = vec![1, 2];
+    let ys = vec![10, 20];
+    let result: AsyncIO<Vec<i32>> = for_async! {
+        x <= xs;
+        y <= ys.clone();
+        sum <~ AsyncIO::pure(x + y);
+        yield sum
+    };
+    let cartesian = result.run_async().await;
+    assert_eq!(cartesian, vec![11, 21, 12, 22]);
+}
+```
+
+**Syntax:**
+- `pattern <= collection;` - Bind from IntoIterator (for loop)
+- `pattern <~ async_io;` - Bind from AsyncIO (await)
+- `let pattern = expr;` - Pure let binding
+- `yield expr` - Terminal expression (collected into Vec)
+
+#### eff! vs for_! vs for_async! : When to Use Which
+
+| Scenario | Macro | Reason |
+|----------|-------|--------|
+| Option/Result chaining | `eff!` | Short-circuits on None/Err |
+| IO/State/Reader/Writer | `eff!` | FnOnce-based monads |
+| Vec/Iterator generation | `for_!` | FnMut-based, uses yield |
+| Cartesian products | `for_!` | Multiple iterations |
+| Async monadic chaining | `eff_async!` | Sequential async operations |
+| Async list generation | `for_async!` | Async iteration with yield |
 
 ## Safety
 

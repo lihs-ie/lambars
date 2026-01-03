@@ -1,0 +1,906 @@
+# Phase 10.1: for_! マクロ - 要件定義
+# Scala の for-comprehension を Rust で再現するための for_! マクロを実装する
+
+version: "1.0.0"
+created_at: "2026-01-03"
+phase_id: phase_10_1
+phase_name: for_! マクロ実装
+phase_name_en: for_! Macro Implementation
+
+# =============================================================================
+# 概要（Overview）
+# =============================================================================
+
+overview:
+  description: |
+    Scala の for-comprehension を Rust で再現するための `for_!` マクロを実装する。
+    このマクロは、ネストしたイテレーションをフラットに記述し、
+    最終結果を `yield` で生成するパターンを提供する。
+
+    Scala での記述:
+    ```scala
+    val result = for {
+      book <- books
+      author <- book.authors
+      movie <- bookAdaptations(author)
+    } yield s"You may like ${movie.title}, because you liked $author's ${book.title}"
+    ```
+
+    Rust (lambars) での目標:
+    ```rust
+    for_! {
+        book <= books;
+        author <= book.authors.clone();
+        movie <= book_adaptations(&author);
+        yield format!("You may like {}, because you liked {}'s {}",
+            movie.title, author, book.title)
+    }
+    ```
+
+    既存の `eff!` マクロとの違い:
+    - `eff!`: Monad の flat_map チェーン（Option, Result, IO など）
+    - `for_!`: イテレータの flat_map チェーン（Vec, Iterator など）
+    - `for_!` は `yield` で結果を Vec に収集する
+
+  goals:
+    - Scala の for-comprehension と同等の表現力を Rust で実現する
+    - ネストしたイテレーションをフラットに記述できるようにする
+    - `yield` キーワードによる直感的な結果生成
+    - `let` バインディングによる中間値の束縛
+    - タプルパターンおよびワイルドカードパターンのサポート
+
+  non_goals:
+    - ガード条件（`if` 句）のサポート（将来の拡張として検討）
+    - 遅延評価によるイテレータ生成（本フェーズでは Vec を返す）
+    - 外側の変数の自動 clone（明示的に .clone() を呼ぶ必要がある）
+
+  functional_programming_principles:
+    composability: |
+      for_! マクロはネストした flat_map 呼び出しを合成可能な形で記述する。
+      各 `<= expression` は前の結果に依存した新しいイテレーションを表す。
+
+    declarative_style: |
+      命令的なネストしたループではなく、宣言的にデータ変換を記述できる。
+      「どのように」ではなく「何を」に焦点を当てた記述スタイル。
+
+    referential_transparency: |
+      for_! マクロは純粋な変換であり、副作用を持たない。
+      同じ入力に対して常に同じ出力を返す。
+
+# =============================================================================
+# 機能要件（Functional Requirements）
+# =============================================================================
+
+functional_requirements:
+  - id: FR-001
+    name: 基本的なイテレーション構文
+    priority: critical
+    description: |
+      `pattern <= expression;` 構文でイテレータからの要素取り出しを表現する。
+      内部的には `into_iter().flat_map()` に展開される。
+
+    location: src/compose/for_macro.rs
+
+    syntax: |
+      ```rust
+      for_! {
+          x <= vec![1, 2, 3];
+          yield x * 2
+      }
+      // 展開結果: vec![1, 2, 3].into_iter().flat_map(|x| vec![x * 2]).collect::<Vec<_>>()
+      ```
+
+    design_rationale: |
+      1. `<=` を使用する理由:
+         - Rust の `<-` はパターンマッチで使用できないため
+         - `eff!` マクロとの一貫性を保つ
+         - 視覚的に「値を取り出す」ことを表現
+
+      2. `into_iter()` を使用する理由:
+         - 所有権を消費することで、ライフタイムの問題を回避
+         - コレクションが直接使用可能
+
+    acceptance_criteria:
+      - Vec, 配列、Range などの IntoIterator を実装する型が使用可能
+      - パターンで要素を分解可能
+      - ネストしたイテレーションが正しく展開される
+
+  - id: FR-002
+    name: yield キーワードによる結果生成
+    priority: critical
+    description: |
+      `yield expression` で最終結果を生成する。
+      結果は Vec として収集される。
+
+    syntax: |
+      ```rust
+      for_! {
+          x <= vec![1, 2, 3];
+          yield x * 2
+      }
+      // Result: vec![2, 4, 6]
+      ```
+
+    design_rationale: |
+      1. `yield` を使用する理由:
+         - Scala の for-comprehension と同様の構文
+         - 「結果を生成する」という意図が明確
+         - `return` は Rust の予約語であり意味が異なる
+
+      2. 結果を Vec で収集する理由:
+         - イテレータを返すと、ライフタイムの問題が複雑になる
+         - 大半のユースケースでは Vec で十分
+         - 将来の拡張で遅延イテレータ版を追加可能
+
+    acceptance_criteria:
+      - yield の式が評価され、Vec の要素として収集される
+      - 空のイテレーションでは空の Vec が返される
+
+  - id: FR-003
+    name: ネストしたイテレーションのサポート
+    priority: critical
+    description: |
+      複数の `<= expression` を連続して記述することで、
+      ネストしたイテレーションを表現する。
+
+    syntax: |
+      ```rust
+      for_! {
+          x <= vec![1, 2];
+          y <= vec![10, 20];
+          yield x + y
+      }
+      // Result: vec![11, 21, 12, 22]
+      ```
+
+    expansion_example: |
+      ```rust
+      // 上記は以下に展開される:
+      vec![1, 2].into_iter().flat_map(|x| {
+          vec![10, 20].into_iter().flat_map(|y| {
+              vec![x + y]
+          }).collect::<Vec<_>>()
+      }).collect::<Vec<_>>()
+      ```
+
+    design_rationale: |
+      外側のループで束縛された変数（例: x）を内側のループで使用する場合、
+      ユーザーが明示的に .clone() を呼ぶ必要がある。
+
+      これは以下の理由による:
+      - Rust の所有権システムとの整合性
+      - マクロの予測可能性（暗黙の clone を避ける）
+      - パフォーマンスへの影響を明示的にする
+
+    acceptance_criteria:
+      - 任意の深さのネストが可能
+      - 外側の変数を内側で使用可能（明示的な clone が必要）
+      - flat_map の順序が正しい（左から右、外から内）
+
+  - id: FR-004
+    name: let バインディングのサポート
+    priority: high
+    description: |
+      `let pattern = expression;` で中間値を束縛する。
+      イテレーションではなく、単純な変数束縛。
+
+    syntax: |
+      ```rust
+      for_! {
+          x <= vec![1, 2, 3];
+          let doubled = x * 2;
+          let squared = doubled * doubled;
+          yield squared
+      }
+      // Result: vec![4, 16, 36]
+      ```
+
+    design_rationale: |
+      計算の中間結果を名前付きで保持することで、
+      可読性を向上させる。
+
+    acceptance_criteria:
+      - let で束縛した変数が後続の式で使用可能
+      - 複数の let を連続して記述可能
+      - パターンによる分解も可能
+
+  - id: FR-005
+    name: タプルパターンのサポート
+    priority: high
+    description: |
+      イテレーションでタプルを分解してバインドする。
+
+    syntax: |
+      ```rust
+      for_! {
+          (key, value) <= vec![(1, "a"), (2, "b")];
+          yield format!("{}: {}", key, value)
+      }
+      // Result: vec!["1: a", "2: b"]
+      ```
+
+    acceptance_criteria:
+      - 2要素以上のタプルを分解可能
+      - ネストしたタプルも分解可能
+      - let バインディングでもタプル分解が可能
+
+  - id: FR-006
+    name: ワイルドカードパターンのサポート
+    priority: medium
+    description: |
+      `_` パターンで不要な値を無視する。
+
+    syntax: |
+      ```rust
+      for_! {
+          (_, value) <= vec![(1, "a"), (2, "b")];
+          yield value.to_uppercase()
+      }
+      // Result: vec!["A", "B"]
+      ```
+
+    acceptance_criteria:
+      - _ で値を無視可能
+      - タプルの一部を無視可能
+      - 警告なしでコンパイル可能
+
+  - id: FR-007
+    name: 外側変数の明示的な clone
+    priority: critical
+    description: |
+      ネストしたループで外側の変数を使用する場合、
+      ユーザーは明示的に .clone() を呼ぶ必要がある。
+
+    syntax: |
+      ```rust
+      for_! {
+          book <= books;
+          // book を内側で使うため clone が必要
+          author <= book.authors.clone();
+          yield format!("{}'s {}", author, book.title.clone())
+      }
+      ```
+
+    design_rationale: |
+      1. 暗黙の clone を避ける理由:
+         - パフォーマンスへの影響が見えにくくなる
+         - Rust の「明示的であること」の原則に反する
+         - デバッグが困難になる
+
+      2. ユーザーが clone を呼ぶ場所:
+         - 内側のイテレータを生成する式（book.authors.clone()）
+         - yield 式内で外側の変数を使用する箇所（book.title.clone()）
+
+    acceptance_criteria:
+      - Clone なしの変数を内側で使用するとコンパイルエラー
+      - clone() 呼び出しで正しく動作
+
+# =============================================================================
+# 非機能要件（Non-Functional Requirements）
+# =============================================================================
+
+non_functional_requirements:
+  - id: NFR-001
+    name: 安全性
+    priority: critical
+    description: |
+      実装は #![forbid(unsafe_code)] ポリシーに準拠する。
+      unsafe コードは使用しない。
+
+    verification: |
+      - コンパイル時に unsafe_code 禁止が適用されること
+      - clippy の unsafe 関連警告がないこと
+
+  - id: NFR-002
+    name: 型推論の活用
+    priority: high
+    description: |
+      マクロ展開後のコードは Rust の型推論を活用し、
+      明示的な型注釈を最小限にする。
+
+    example: |
+      ```rust
+      // 型注釈なしで使用可能
+      let result = for_! {
+          x <= vec![1, 2, 3];
+          yield x * 2
+      };
+      // result: Vec<i32>（推論される）
+      ```
+
+    verification: |
+      - 基本的なケースで型注釈が不要であること
+      - 複雑なケースでも合理的な型注釈で動作すること
+
+  - id: NFR-003
+    name: エルゴノミクス（使いやすさ）
+    priority: high
+    description: |
+      マクロの構文は直感的で学習しやすいものにする。
+      エラーメッセージは理解しやすいものにする。
+
+    considerations:
+      - Scala の for-comprehension に慣れた開発者に親しみやすい
+      - 既存の eff! マクロとの一貫性
+      - コンパイルエラーが発生した場合の原因特定が容易
+
+  - id: NFR-004
+    name: パフォーマンス
+    priority: medium
+    description: |
+      マクロ展開後のコードは、手書きの同等コードと
+      同程度のパフォーマンスを持つ。
+
+    considerations:
+      - 不要な中間コレクションの生成を避ける（可能な範囲で）
+      - コンパイル時のマクロ展開オーバーヘッドは許容範囲内
+
+  - id: NFR-005
+    name: 後方互換性
+    priority: critical
+    description: |
+      既存の lambars API に影響を与えない追加的な変更であること。
+
+# =============================================================================
+# テスト要件（Test Requirements）
+# =============================================================================
+
+test_requirements:
+  unit_tests:
+    location: tests/for_macro_tests.rs
+    description: |
+      for_! マクロの各機能をテストする。
+
+    categories:
+      - name: 単一イテレーションテスト
+        tests:
+          - name: test_single_iteration_vec
+            description: Vec からの単一イテレーション
+            test: |
+              let result = for_! {
+                  x <= vec![1, 2, 3];
+                  yield x * 2
+              };
+              assert_eq!(result, vec![2, 4, 6]);
+
+          - name: test_single_iteration_array
+            description: 配列からの単一イテレーション
+            test: |
+              let result = for_! {
+                  x <= [1, 2, 3];
+                  yield x + 10
+              };
+              assert_eq!(result, vec![11, 12, 13]);
+
+          - name: test_single_iteration_range
+            description: Range からの単一イテレーション
+            test: |
+              let result = for_! {
+                  x <= 1..4;
+                  yield x * x
+              };
+              assert_eq!(result, vec![1, 4, 9]);
+
+      - name: ネストイテレーションテスト
+        tests:
+          - name: test_nested_iteration_two_levels
+            description: 2階層のネストイテレーション
+            test: |
+              let result = for_! {
+                  x <= vec![1, 2];
+                  y <= vec![10, 20];
+                  yield x + y
+              };
+              assert_eq!(result, vec![11, 21, 12, 22]);
+
+          - name: test_nested_iteration_three_levels
+            description: 3階層のネストイテレーション
+            test: |
+              let result = for_! {
+                  x <= vec![1, 2];
+                  y <= vec![10, 20];
+                  z <= vec![100, 200];
+                  yield x + y + z
+              };
+              assert_eq!(result, vec![111, 211, 121, 221, 112, 212, 122, 222]);
+
+          - name: test_nested_iteration_dependent
+            description: 外側の変数に依存したネストイテレーション
+            test: |
+              let result = for_! {
+                  x <= vec![1, 2, 3];
+                  y <= (0..x).collect::<Vec<_>>();
+                  yield (x, y)
+              };
+              assert_eq!(result, vec![(1, 0), (2, 0), (2, 1), (3, 0), (3, 1), (3, 2)]);
+
+      - name: let バインディングテスト
+        tests:
+          - name: test_let_binding_simple
+            description: シンプルな let バインディング
+            test: |
+              let result = for_! {
+                  x <= vec![1, 2, 3];
+                  let doubled = x * 2;
+                  yield doubled
+              };
+              assert_eq!(result, vec![2, 4, 6]);
+
+          - name: test_let_binding_multiple
+            description: 複数の let バインディング
+            test: |
+              let result = for_! {
+                  x <= vec![1, 2, 3];
+                  let doubled = x * 2;
+                  let squared = doubled * doubled;
+                  yield squared
+              };
+              assert_eq!(result, vec![4, 16, 36]);
+
+          - name: test_let_binding_with_nested_iteration
+            description: ネストイテレーションと let バインディングの組み合わせ
+            test: |
+              let result = for_! {
+                  x <= vec![1, 2];
+                  let x_squared = x * x;
+                  y <= vec![10, 20];
+                  let sum = x_squared + y;
+                  yield sum
+              };
+              assert_eq!(result, vec![11, 21, 14, 24]);
+
+      - name: 空のコレクションテスト
+        tests:
+          - name: test_empty_source_collection
+            description: 空のソースコレクション
+            test: |
+              let empty: Vec<i32> = vec![];
+              let result = for_! {
+                  x <= empty;
+                  yield x * 2
+              };
+              assert_eq!(result, Vec::<i32>::new());
+
+          - name: test_empty_nested_collection
+            description: ネストで空のコレクションが発生
+            test: |
+              let result = for_! {
+                  x <= vec![1, 2, 3];
+                  y <= if x == 2 { vec![] } else { vec![x] };
+                  yield y
+              };
+              assert_eq!(result, vec![1, 3]);
+
+      - name: タプルパターンテスト
+        tests:
+          - name: test_tuple_pattern_simple
+            description: シンプルなタプルパターン
+            test: |
+              let pairs = vec![(1, "a"), (2, "b"), (3, "c")];
+              let result = for_! {
+                  (num, letter) <= pairs;
+                  yield format!("{}{}", num, letter)
+              };
+              assert_eq!(result, vec!["1a", "2b", "3c"]);
+
+          - name: test_tuple_pattern_nested
+            description: ネストしたタプルパターン
+            test: |
+              let nested = vec![((1, 2), "a"), ((3, 4), "b")];
+              let result = for_! {
+                  ((x, y), label) <= nested;
+                  yield format!("{}: ({}, {})", label, x, y)
+              };
+              assert_eq!(result, vec!["a: (1, 2)", "b: (3, 4)"]);
+
+      - name: ワイルドカードパターンテスト
+        tests:
+          - name: test_wildcard_pattern
+            description: ワイルドカードパターンで値を無視
+            test: |
+              let pairs = vec![(1, "a"), (2, "b"), (3, "c")];
+              let result = for_! {
+                  (_, letter) <= pairs;
+                  yield letter.to_uppercase()
+              };
+              assert_eq!(result, vec!["A", "B", "C"]);
+
+      - name: Scala recommendation_feed 例の再現テスト
+        tests:
+          - name: test_recommendation_feed_example
+            description: Scala の recommendation_feed 例を再現
+            test: |
+              #[derive(Clone)]
+              struct Book {
+                  title: String,
+                  authors: Vec<String>,
+              }
+
+              #[derive(Clone)]
+              struct Movie {
+                  title: String,
+              }
+
+              fn book_adaptations(author: &str) -> Vec<Movie> {
+                  match author {
+                      "Author1" => vec![Movie { title: "Movie1".to_string() }],
+                      "Author2" => vec![
+                          Movie { title: "Movie2".to_string() },
+                          Movie { title: "Movie3".to_string() },
+                      ],
+                      _ => vec![],
+                  }
+              }
+
+              let books = vec![
+                  Book {
+                      title: "Book1".to_string(),
+                      authors: vec!["Author1".to_string()],
+                  },
+                  Book {
+                      title: "Book2".to_string(),
+                      authors: vec!["Author2".to_string()],
+                  },
+              ];
+
+              let result = for_! {
+                  book <= books.clone();
+                  author <= book.authors.clone();
+                  movie <= book_adaptations(&author);
+                  yield format!(
+                      "You may like {}, because you liked {}'s {}",
+                      movie.title, author, book.title
+                  )
+              };
+
+              assert_eq!(result, vec![
+                  "You may like Movie1, because you liked Author1's Book1",
+                  "You may like Movie2, because you liked Author2's Book2",
+                  "You may like Movie3, because you liked Author2's Book2",
+              ]);
+
+  law_tests:
+    location: tests/for_macro_laws.rs
+    framework: proptest
+    description: |
+      for_! マクロの等価性に関するプロパティをテストする。
+
+    properties:
+      - name: single_iteration_equivalence
+        description: 単一イテレーションは map と等価
+        property: |
+          proptest! {
+              #[test]
+              fn prop_single_iteration_equals_map(elements in prop::collection::vec(any::<i32>(), 0..100)) {
+                  let f = |x: i32| x * 2;
+
+                  let for_result = for_! {
+                      x <= elements.clone();
+                      yield f(x)
+                  };
+
+                  let map_result: Vec<i32> = elements.into_iter().map(f).collect();
+
+                  prop_assert_eq!(for_result, map_result);
+              }
+          }
+
+      - name: nested_iteration_equivalence
+        description: ネストイテレーションは flat_map の連鎖と等価
+        property: |
+          proptest! {
+              #[test]
+              fn prop_nested_iteration_equals_flat_map(
+                  xs in prop::collection::vec(any::<i32>(), 0..10),
+                  ys in prop::collection::vec(any::<i32>(), 0..10)
+              ) {
+                  let for_result = for_! {
+                      x <= xs.clone();
+                      y <= ys.clone();
+                      yield (x, y)
+                  };
+
+                  let flat_map_result: Vec<(i32, i32)> = xs.into_iter()
+                      .flat_map(|x| ys.clone().into_iter().map(move |y| (x, y)))
+                      .collect();
+
+                  prop_assert_eq!(for_result, flat_map_result);
+              }
+          }
+
+      - name: let_binding_purity
+        description: let バインディングは純粋な計算
+        property: |
+          proptest! {
+              #[test]
+              fn prop_let_binding_pure(elements in prop::collection::vec(any::<i32>(), 0..100)) {
+                  let for_result = for_! {
+                      x <= elements.clone();
+                      let doubled = x * 2;
+                      yield doubled
+                  };
+
+                  let direct_result: Vec<i32> = elements.into_iter().map(|x| x * 2).collect();
+
+                  prop_assert_eq!(for_result, direct_result);
+              }
+          }
+
+  integration_tests:
+    location: tests/for_macro_integration.rs
+    description: |
+      for_! マクロと他の lambars 機能との統合テスト。
+
+    scenarios:
+      - name: with_persistent_list
+        description: PersistentList との組み合わせ
+        test: |
+          use lambars::persistent::PersistentList;
+
+          let list = PersistentList::from_iter([1, 2, 3]);
+          let result = for_! {
+              x <= list.iter().cloned().collect::<Vec<_>>();
+              yield x * 2
+          };
+          assert_eq!(result, vec![2, 4, 6]);
+
+      - name: with_persistent_vector
+        description: PersistentVector との組み合わせ
+        test: |
+          use lambars::persistent::PersistentVector;
+
+          let vector = PersistentVector::from_iter([1, 2, 3]);
+          let result = for_! {
+              x <= vector.iter().cloned().collect::<Vec<_>>();
+              yield x * 2
+          };
+          assert_eq!(result, vec![2, 4, 6]);
+
+      - name: with_persistent_hashmap
+        description: PersistentHashMap との組み合わせ
+        test: |
+          use lambars::persistent::PersistentHashMap;
+
+          let map = PersistentHashMap::new()
+              .insert("a", 1)
+              .insert("b", 2);
+
+          // iter() の結果を Vec に収集してから for_! で使用
+          let pairs: Vec<_> = map.iter().collect();
+          let result = for_! {
+              (key, value) <= pairs;
+              yield format!("{}: {}", key, value)
+          };
+          assert_eq!(result.len(), 2);
+
+# =============================================================================
+# 受け入れ基準（Acceptance Criteria）
+# =============================================================================
+
+acceptance_criteria:
+  functional:
+    - id: AC-001
+      description: 単一イテレーションが正しく展開されること
+      verification: ユニットテストが成功すること
+
+    - id: AC-002
+      description: ネストしたイテレーションが正しく展開されること
+      verification: ユニットテストが成功すること
+
+    - id: AC-003
+      description: yield で結果が Vec として収集されること
+      verification: ユニットテストが成功すること
+
+    - id: AC-004
+      description: let バインディングが正しく動作すること
+      verification: ユニットテストが成功すること
+
+    - id: AC-005
+      description: タプルパターンが正しく分解されること
+      verification: ユニットテストが成功すること
+
+    - id: AC-006
+      description: ワイルドカードパターンが正しく動作すること
+      verification: ユニットテストが成功すること
+
+    - id: AC-007
+      description: 空のコレクションで空の Vec が返されること
+      verification: ユニットテストが成功すること
+
+    - id: AC-008
+      description: Scala の recommendation_feed 例が再現できること
+      verification: 統合テストが成功すること
+
+  code_quality:
+    - id: AC-Q01
+      description: 全てのテストが通過すること
+      verification: cargo test が成功すること
+
+    - id: AC-Q02
+      description: clippy 警告がないこと
+      verification: cargo clippy -- -D warnings が成功すること
+
+    - id: AC-Q03
+      description: unsafe コードを使用していないこと
+      verification: "#![forbid(unsafe_code)] がエラーを出さないこと"
+
+    - id: AC-Q04
+      description: ドキュメントが完備していること
+      verification: cargo doc が警告なしで成功すること
+
+# =============================================================================
+# マクロ設計（Macro Design）
+# =============================================================================
+
+macro_design:
+  syntax_grammar: |
+    for_comprehension := "for_!" "{" for_body "}"
+    for_body := (for_clause ";")* yield_clause
+    for_clause := pattern "<=" expression
+                | "let" pattern "=" expression
+    yield_clause := "yield" expression
+    pattern := identifier
+             | "_"
+             | "(" pattern ("," pattern)* ")"
+
+  expansion_rules:
+    - name: 単一イテレーション
+      input: |
+        for_! {
+            pattern <= expr;
+            yield result_expr
+        }
+      output: |
+        expr.into_iter().flat_map(|pattern| vec![result_expr]).collect::<Vec<_>>()
+
+    - name: ネストイテレーション
+      input: |
+        for_! {
+            pattern1 <= expr1;
+            pattern2 <= expr2;
+            yield result_expr
+        }
+      output: |
+        expr1.into_iter().flat_map(|pattern1| {
+            expr2.into_iter().flat_map(|pattern2| {
+                vec![result_expr]
+            }).collect::<Vec<_>>()
+        }).collect::<Vec<_>>()
+
+    - name: let バインディング
+      input: |
+        for_! {
+            pattern1 <= expr1;
+            let pattern2 = expr2;
+            yield result_expr
+        }
+      output: |
+        expr1.into_iter().flat_map(|pattern1| {
+            let pattern2 = expr2;
+            vec![result_expr]
+        }).collect::<Vec<_>>()
+
+  implementation_strategy: |
+    macro_rules! によるパターンマッチベースの実装。
+
+    主要なパターン:
+    1. 基底ケース: yield expression のみ
+    2. イテレーションケース: pattern <= expression; rest
+    3. let バインディングケース: let pattern = expression; rest
+
+    再帰的マクロ展開により、任意の深さのネストを処理。
+
+# =============================================================================
+# 成果物（Artifacts）
+# =============================================================================
+
+artifacts:
+  source_files:
+    - path: src/compose/for_macro.rs
+      description: for_! マクロの定義
+
+    - path: src/compose/mod.rs
+      description: for_macro モジュールの公開
+
+    - path: src/lib.rs
+      description: for_! マクロの再エクスポート
+
+  test_files:
+    - path: tests/for_macro_tests.rs
+      description: for_! マクロのユニットテスト
+
+    - path: tests/for_macro_laws.rs
+      description: for_! マクロのプロパティベーステスト
+
+    - path: tests/for_macro_integration.rs
+      description: for_! マクロの統合テスト
+
+# =============================================================================
+# 依存関係（Dependencies）
+# =============================================================================
+
+dependencies:
+  internal:
+    - lambars::persistent::PersistentList (統合テスト用)
+    - lambars::persistent::PersistentVector (統合テスト用)
+    - lambars::persistent::PersistentHashMap (統合テスト用)
+
+  external: []
+
+  dev_dependencies:
+    - rstest: "0.18"
+      reason: パラメータ化テスト
+
+    - proptest: "1.0"
+      reason: プロパティベーステスト
+
+# =============================================================================
+# 将来の拡張（Future Extensions）
+# =============================================================================
+
+future_extensions:
+  - id: FE-001
+    name: ガード条件（if 句）のサポート
+    priority: medium
+    description: |
+      Scala の for-comprehension における if 句相当の機能。
+
+      ```rust
+      for_! {
+          x <= vec![1, 2, 3, 4, 5];
+          if x % 2 == 0;
+          yield x
+      }
+      // Result: vec![2, 4]
+      ```
+
+  - id: FE-002
+    name: 遅延イテレータ版 (for_iter!)
+    priority: low
+    description: |
+      Vec ではなくイテレータを返すバージョン。
+      大量のデータを処理する場合に有用。
+
+      ```rust
+      let iter = for_iter! {
+          x <= large_collection;
+          yield x * 2
+      };
+      // iter: impl Iterator<Item = i32>
+      ```
+
+  - id: FE-003
+    name: async for_comprehension (for_async!)
+    priority: medium
+    description: |
+      非同期イテレーション用のマクロ。
+
+      ```rust
+      let result = for_async! {
+          x <= stream;
+          yield process_async(x).await
+      }.await;
+      ```
+
+# =============================================================================
+# 参照（References）
+# =============================================================================
+
+references:
+  - name: Scala for-comprehension
+    url: https://docs.scala-lang.org/tour/for-comprehensions.html
+    description: |
+      Scala の for-comprehension の公式ドキュメント。
+      本マクロの設計の主要な参照元。
+
+  - name: 既存の eff! マクロ
+    location: src/effect/eff_macro.rs
+    description: |
+      Monad 用の do 記法マクロ。
+      構文の一貫性を保つための参照。
+
+  - name: Haskell List Comprehension
+    url: https://wiki.haskell.org/List_comprehension
+    description: |
+      Haskell のリスト内包表記。
+      関数型プログラミングにおける類似概念の参照。

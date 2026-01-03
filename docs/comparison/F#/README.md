@@ -28,6 +28,8 @@ This document provides a comprehensive comparison between F# functional programm
 | Pipe operator | `\|>` | `pipe!` macro |
 | Composition | `>>` | `compose!` macro |
 | Computation expressions | `async { }`, `result { }` | `eff!` macro |
+| List comprehension | `[ for ... ]`, `seq { }` | `for_!` macro |
+| Async list comprehension | `async { for ... }` | `for_async!` macro |
 | Active patterns | `(|Pattern|_|)` | `Prism` |
 | Lenses | via libraries | `Lens`, `lens!` macro |
 | Monoid | `+` operator overloading | `Semigroup`, `Monoid` traits |
@@ -496,7 +498,7 @@ let result = flipped(3, 10);  // 7 (10 - 3)
 | `async { }` | `AsyncIO` + `eff_async!` | Async computations |
 | `result { }` | `eff!` with Result | Result-based computations |
 | `option { }` | `eff!` with Option | Option-based computations |
-| `seq { }` | Iterator combinators | Sequence generation |
+| `seq { }` / `[ for ... ]` | `for_!` macro | List/sequence generation |
 | `state { }` | `State` monad | Stateful computations |
 | `reader { }` | `Reader` monad | Environment reading |
 | `writer { }` | `Writer` monad | Logging computations |
@@ -614,6 +616,64 @@ let computation = Reader::ask()
 let result = computation.run(Config { multiplier: 2 });
 // result = 60
 ```
+
+#### F# Sequence Expressions / List Comprehensions vs lambars for_!
+
+```fsharp
+// F# - List comprehension
+let doubled = [ for x in [1; 2; 3; 4; 5] -> x * 2 ]
+// doubled = [2; 4; 6; 8; 10]
+
+// Nested comprehension
+let cartesian = [ for x in [1; 2] do
+                  for y in [10; 20] -> x + y ]
+// cartesian = [11; 21; 12; 22]
+
+// Sequence expression
+let doubledSeq = seq {
+    for x in [1; 2; 3; 4; 5] -> x * 2
+}
+// Lazy sequence that yields 2, 4, 6, 8, 10
+
+// With filtering
+let evens = [ for x in [1..10] do if x % 2 = 0 then yield x ]
+// evens = [2; 4; 6; 8; 10]
+```
+
+```rust
+// lambars - for_! macro
+use lambars::for_;
+
+let doubled: Vec<i32> = for_! {
+    x <= vec![1, 2, 3, 4, 5];
+    yield x * 2
+};
+// doubled = vec![2, 4, 6, 8, 10]
+
+// Nested comprehension
+let xs = vec![1, 2];
+let ys = vec![10, 20];
+let cartesian: Vec<i32> = for_! {
+    x <= xs;
+    y <= ys.clone();  // Note: clone() needed for inner iteration
+    yield x + y
+};
+// cartesian = vec![11, 21, 12, 22]
+
+// With filtering (use std iterator methods)
+let evens: Vec<i32> = (1..=10).filter(|x| x % 2 == 0).collect();
+// evens = vec![2, 4, 6, 8, 10]
+```
+
+### When to Use eff! vs for_!
+
+| Scenario | Recommended Macro | Reason |
+|----------|-------------------|--------|
+| `option { }` / `result { }` | `eff!` | Monadic chaining with short-circuit |
+| `async { }` | `eff_async!` | Async monadic chaining |
+| `[ for ... ]` / `seq { }` | `for_!` | List generation with yield |
+| Cartesian products | `for_!` | Multiple iterations |
+| State/Reader/Writer | `eff!` | Monadic effect chaining |
 
 ---
 

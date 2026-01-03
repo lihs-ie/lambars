@@ -1,7 +1,7 @@
 # lambars プロジェクト ロードマップ
 # Rust で関数型プログラミングを実現するためのライブラリ開発計画
 
-version: "1.2.0"
+version: "1.4.0"
 last_updated: "2026-01-03"
 
 # プロジェクト概要
@@ -980,6 +980,144 @@ phases:
         results: |
           Hash トレイト実装完了。
           16個のユニットテスト、4個のプロパティテストを追加。
+
+  - id: phase_10
+    name: for-comprehension マクロ
+    name_en: For-Comprehension Macro
+    status: completed
+    started_at: "2026-01-03"
+    completed_at: "2026-01-03"
+    description: |
+      Scala スタイルの for-comprehension を実現する for_! マクロを実装。
+      Vec などのイテレータに対して宣言的なネストイテレーションを可能にする。
+    dependencies:
+      - phase_2
+    notes: |
+      eff! マクロは Option/Result/State/Reader/Writer など FnOnce ベースの Monad 用。
+      for_! マクロは Vec など FnMut を要求するイテレータ用に別途設計。
+      yield キーワードにより結果を Vec として収集。
+      Clone 要件はユーザーが明示的に指定する設計（Rust の所有権モデルを尊重）。
+    deliverables:
+      - id: for_macro
+        name: for_! マクロ
+        description: |
+          Scala の for-comprehension を再現するマクロ。
+          以下の構文をサポート:
+          - pattern <= collection; によるイテレーション
+          - let pattern = expr; による中間値束縛
+          - yield expr による結果収集
+          タプルパターン、ワイルドカードパターンもサポート。
+        status: completed
+        priority: critical
+        artifacts:
+          - src/compose/for_macro.rs
+          - tests/for_macro_tests.rs
+          - tests/for_macro_laws.rs
+          - tests/for_macro_integration.rs
+          - docs/phase_10_requirements/phase_10_1_for_macro.yaml
+          - docs/phase_10_implementation_plans/phase_10_1_for_macro.yaml
+        results: |
+          for_! マクロ実装完了。
+          22個のユニットテスト、10個のプロパティテスト、13個の統合テストを追加。
+          Scala の recommendation_feed 例を正確に再現。
+          PersistentList, PersistentVector, PersistentHashMap との統合も確認。
+
+  - id: phase_11
+    name: 非同期 for-comprehension マクロ
+    name_en: Async For-Comprehension Macro
+    status: completed
+    started_at: "2026-01-03"
+    completed_at: "2026-01-03"
+    description: |
+      for_! マクロの非同期対応版として for_async! マクロを実装。
+      AsyncIO を含むイテレーションを宣言的に記述可能にする。
+    dependencies:
+      - phase_7
+      - phase_10
+    notes: |
+      for_! が Vec<T> を返すのに対し、for_async! は AsyncIO<Vec<T>> を返す。
+      遅延評価を維持し、run_async().await まで実行されない。
+      <= でコレクションバインド、<~ で AsyncIO バインドを区別。
+      eff_async! は FnOnce ベースの AsyncIO チェーン用、
+      for_async! は FnMut を要求するイテレータ + AsyncIO の組み合わせ用。
+    deliverables:
+      - id: for_async_macro
+        name: for_async! マクロ
+        description: |
+          非同期リスト内包表記を実現するマクロ。
+          以下の構文をサポート:
+          - pattern <= collection; によるコレクションからのイテレーション
+          - pattern <~ async_io; による AsyncIO からのバインド
+          - let pattern = expr; による中間値束縛
+          - yield expr による結果収集（Vec に収集）
+          戻り値は AsyncIO<Vec<T>> で遅延評価を維持。
+        status: completed
+        priority: critical
+        artifacts:
+          - src/compose/for_async_macro.rs
+          - tests/for_async_macro_tests.rs
+          - tests/for_async_macro_laws.rs
+          - tests/for_async_macro_integration.rs
+          - docs/phase_11_requirements/phase_11_1_for_async_macro.yaml
+          - docs/phase_11_implementation_plans/phase_11_1_for_async_macro.yaml
+        results: |
+          for_async! マクロ実装完了。
+          25個のユニットテスト、6個のプロパティテスト、14個の統合テストを追加。
+          eff_async! との統合、PersistentVector との統合も確認。
+          遅延評価を維持し、AsyncIO の合成（fmap, flat_map）も可能。
+
+  - id: phase_12
+    name: for_! / for_async! マクロ最適化
+    name_en: For Macro Optimization
+    status: completed
+    started_at: "2026-01-03"
+    completed_at: "2026-01-03"
+    description: |
+      for_! マクロのパフォーマンスを最適化し、手書き flat_map と同等の性能を達成する。
+      for_async! マクロにはパフォーマンスガイダンスのドキュメントを追加。
+    dependencies:
+      - phase_10
+      - phase_11
+    notes: |
+      ベンチマーク結果より、最適化前の for_! は手書きコードと比較して 4-37 倍遅かった。
+      原因は yield での vec![] アロケーションと各ネストレベルでの中間 collect。
+      @collect 内部ルールの導入と map 特殊化により大幅な改善を達成。
+      for_async! はマクロレベルの最適化は複雑すぎるため、
+      ドキュメントで let vs AsyncIO::pure() の使い分けをガイド。
+    deliverables:
+      - id: for_macro_optimization
+        name: for_! マクロ最適化
+        description: |
+          @collect 内部ルールの導入と map 特殊化による最適化。
+          単一イテレーションでは flat_map + vec![] の代わりに map を使用。
+          エントリーポイントは @collect に委譲し、最適化ルールを集約。
+        status: completed
+        priority: critical
+        artifacts:
+          - src/compose/for_macro.rs
+          - docs/phase_12_requirements/phase_12_for_macro_optimization.yaml
+          - docs/phase_12_implementation_plans/phase_12_for_macro_optimization.yaml
+          - benches/for_macro_bench.rs
+        results: |
+          単一イテレーション: 97% 高速化（~37x 遅い → 手書き map と同等）
+          2段ネスト: 83% 高速化（~7x 遅い → ~1.15x）
+          3段ネスト: 80% 高速化（~5x 遅い → ~1.16x）
+          17個のユニットテスト、10個のプロパティテスト、13個の統合テストがパス。
+
+      - id: for_async_documentation
+        name: for_async! パフォーマンスドキュメント
+        description: |
+          for_async! マクロにパフォーマンスガイダンスを追加。
+          let と AsyncIO::pure() の使い分け、オーバーヘッドの説明を文書化。
+        status: completed
+        priority: medium
+        artifacts:
+          - src/compose/for_async_macro.rs
+          - benches/for_async_macro_bench.rs
+        results: |
+          Performance Tips セクションを追加。
+          let バインディング（オーバーヘッドなし）vs
+          AsyncIO::pure()（~30x オーバーヘッド）の違いを明記。
 
 # ステータス定義
 status_definitions:
