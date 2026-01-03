@@ -15,6 +15,7 @@
 //! ```text
 //! for_! {
 //!     pattern <= collection;    // Bind: iterate over collection
+//!     if condition;             // Guard: filter by condition
 //!     let pattern = expression; // Pure let binding
 //!     yield expression          // Final expression (wrapped in Vec)
 //! }
@@ -25,6 +26,7 @@
 //! - **Identifier pattern**: `x <= collection;`
 //! - **Tuple pattern**: `(a, b) <= collection;`
 //! - **Wildcard pattern**: `_ <= collection;`
+//! - **Guard expression**: `if condition;` (skips iteration if condition is false)
 //! - **Let binding (identifier)**: `let x = expression;`
 //! - **Let binding (tuple)**: `let (a, b) = expression;`
 //!
@@ -86,6 +88,50 @@
 //!     yield format!("{}{}", num, letter)
 //! };
 //! assert_eq!(result, vec!["1a", "2b"]);
+//! ```
+//!
+//! ## Guard Expression (Filtering)
+//!
+//! ```rust
+//! use lambars::for_;
+//!
+//! // Basic guard - filter even numbers
+//! let result = for_! {
+//!     x <= vec![1, 2, 3, 4, 5];
+//!     if x % 2 == 0;
+//!     yield x
+//! };
+//! assert_eq!(result, vec![2, 4]);
+//! ```
+//!
+//! ## Multiple Guards
+//!
+//! ```rust
+//! use lambars::for_;
+//!
+//! // Multiple guards act as AND conditions
+//! let result = for_! {
+//!     x <= 1..=100i32;
+//!     if x % 2 == 0;
+//!     if x % 3 == 0;
+//!     if x < 50;
+//!     yield x
+//! };
+//! assert_eq!(result, vec![6, 12, 18, 24, 30, 36, 42, 48]);
+//! ```
+//!
+//! ## Guard with Let Binding
+//!
+//! ```rust
+//! use lambars::for_;
+//!
+//! let result = for_! {
+//!     x <= vec![1, 2, 3, 4, 5];
+//!     let squared = x * x;
+//!     if squared > 10;
+//!     yield squared
+//! };
+//! assert_eq!(result, vec![16, 25]);
 //! ```
 //!
 //! ## Scala-style Recommendation Feed Example
@@ -206,6 +252,7 @@
 /// ```text
 /// for_! {
 ///     pattern <= collection;    // Bind: iterate over collection
+///     if condition;             // Guard: filter by condition
 ///     let pattern = expression; // Pure let binding
 ///     yield expression          // Final expression (wrapped in Vec)
 /// }
@@ -275,6 +322,19 @@
 /// };
 /// assert_eq!(result, vec!["x", "x", "x"]);
 /// ```
+///
+/// ## Guard expression
+///
+/// ```rust
+/// use lambars::for_;
+///
+/// let result = for_! {
+///     x <= vec![1, 2, 3, 4, 5];
+///     if x % 2 == 0;
+///     yield x
+/// };
+/// assert_eq!(result, vec![2, 4]);
+/// ```
 #[macro_export]
 macro_rules! for_ {
     // =========================================================================
@@ -318,6 +378,30 @@ macro_rules! for_ {
         }).collect::<Vec<_>>()
     }};
 
+    // =========================================================================
+    // @collect guard expression rules
+    // =========================================================================
+
+    // @collect guard expression followed by yield (terminal optimization)
+    // If condition is true, wrap result in vec; otherwise return empty vec
+    (@collect if $condition:expr ; yield $result:expr) => {{
+        if $condition {
+            vec![$result]
+        } else {
+            vec![]
+        }
+    }};
+
+    // @collect guard expression (with following statements)
+    // If condition is true, continue with rest; otherwise return empty vec
+    (@collect if $condition:expr ; $($rest:tt)+) => {{
+        if $condition {
+            $crate::for_!(@collect $($rest)+)
+        } else {
+            vec![]
+        }
+    }};
+
     // @collect let binding with identifier
     (@collect let $pattern:ident = $expr:expr ; $($rest:tt)+) => {{
         let $pattern = $expr;
@@ -328,6 +412,11 @@ macro_rules! for_ {
     (@collect let ($($pattern:tt)*) = $expr:expr ; $($rest:tt)+) => {{
         let ($($pattern)*) = $expr;
         $crate::for_!(@collect $($rest)+)
+    }};
+
+    // @collect terminal case: yield wraps result in vec![]
+    (@collect yield $result:expr) => {{
+        vec![$result]
     }};
 
     // =========================================================================
@@ -352,6 +441,11 @@ macro_rules! for_ {
     // Bind with wildcard pattern - delegates to @collect
     (_ <= $collection:expr ; $($rest:tt)+) => {{
         $crate::for_!(@collect _ <= $collection ; $($rest)+)
+    }};
+
+    // Guard expression - delegates to @collect
+    (if $condition:expr ; $($rest:tt)+) => {{
+        $crate::for_!(@collect if $condition ; $($rest)+)
     }};
 
     // Pure let binding with identifier
@@ -532,5 +626,93 @@ mod tests {
             yield x_squared + y
         };
         assert_eq!(result, vec![11, 21, 14, 24]);
+    }
+
+    // =========================================================================
+    // Guard expression tests
+    // =========================================================================
+
+    #[test]
+    fn test_guard_basic_filter() {
+        let result = for_! {
+            x <= vec![1, 2, 3, 4, 5];
+            if x % 2 == 0;
+            yield x
+        };
+        assert_eq!(result, vec![2, 4]);
+    }
+
+    #[test]
+    fn test_guard_all_pass() {
+        let result = for_! {
+            x <= vec![2, 4, 6];
+            if x % 2 == 0;
+            yield x
+        };
+        assert_eq!(result, vec![2, 4, 6]);
+    }
+
+    #[test]
+    fn test_guard_all_fail() {
+        let result = for_! {
+            x <= vec![1, 3, 5];
+            if x % 2 == 0;
+            yield x
+        };
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_guard_empty_collection() {
+        let result = for_! {
+            x <= Vec::<i32>::new();
+            if x > 0;
+            yield x
+        };
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_guard_after_let() {
+        let result = for_! {
+            x <= vec![1, 2, 3, 4, 5];
+            let squared = x * x;
+            if squared > 10;
+            yield squared
+        };
+        assert_eq!(result, vec![16, 25]);
+    }
+
+    #[test]
+    fn test_guard_nested() {
+        let result = for_! {
+            x <= vec![1, 2];
+            y <= vec![10, 20];
+            if x + y > 15;
+            yield (x, y)
+        };
+        assert_eq!(result, vec![(1, 20), (2, 20)]);
+    }
+
+    #[test]
+    fn test_guard_multiple() {
+        let result = for_! {
+            x <= 1..=20i32;
+            if x % 2 == 0;
+            if x > 10;
+            yield x
+        };
+        assert_eq!(result, vec![12, 14, 16, 18, 20]);
+    }
+
+    #[test]
+    fn test_guard_between_binds() {
+        let result = for_! {
+            x <= vec![1, 2, 3];
+            if x % 2 == 1;
+            y <= vec![10, 20];
+            yield (x, y)
+        };
+        assert_eq!(result, vec![(1, 10), (1, 20), (3, 10), (3, 20)]);
     }
 }
