@@ -1,0 +1,731 @@
+# Phase 14: Either<L, R> IntoIterator Implementation
+# Either<L, R> に IntoIterator を追加し for_! マクロで使用可能にする
+# Scala の Either の Right バイアス動作を Rust で実現
+
+version: "1.0.0"
+created_at: "2026-01-03"
+phase_id: phase_14
+phase_name: Either IntoIterator 実装
+phase_name_en: Either IntoIterator Implementation
+
+# =============================================================================
+# 背景と動機
+# =============================================================================
+
+background:
+  motivation: |
+    Scala の Either 型は for 内包表記において Right バイアスとして動作する。
+    つまり、Right(value) の場合は value を yield し、Left(_) の場合は
+    イテレーションをスキップする。これにより、エラーハンドリングと
+    正常系の処理を統一的な for 内包表記で記述できる。
+
+    現在の lambars の Either<L, R> 型は IntoIterator を実装しておらず、
+    for_! マクロ（into_iter() を使用）で直接使用することができない。
+
+  scala_behavior: |
+    // Scala における Either の for 内包表記での動作
+    val rights: Seq[Int] = for {
+      x <- Seq(Right(1), Left("error"), Right(3))
+      value <- x  // Right の場合のみ value が束縛される
+    } yield value * 2
+    // 結果: Seq(2, 6) - Left はスキップされる
+
+    // 単一の Either に対する for 内包表記
+    val result: Option[Int] = for {
+      x <- Right(42)  // Right なので続行
+      y <- Right(10)
+    } yield x + y
+    // 結果: Some(52)
+
+    // Left の場合
+    val failed: Option[Int] = for {
+      x <- Left("error"): Either[String, Int]  // Left なのでスキップ
+      y <- Right(10)
+    } yield x + y
+    // 結果: None（後続処理は実行されない）
+
+  right_bias_explanation: |
+    Right バイアスとは、Either<L, R> において Right(R) を「成功」または
+    「正常な値」として扱い、Left(L) を「失敗」または「例外的な値」として
+    扱う設計パターンである。
+
+    - Right(r): イテレータは r を1つ yield する（1要素のイテレータ）
+    - Left(l): イテレータは何も yield しない（0要素のイテレータ）
+
+    これは Option<T> の IntoIterator と同じ動作パターンである：
+    - Some(t): 1要素のイテレータ
+    - None: 0要素のイテレータ
+
+  current_limitation: |
+    現在の Either 型では for_! マクロを使用できない：
+
+    // コンパイルエラー: `Either<L, R>` does not implement `IntoIterator`
+    let result = for_! {
+        value <= Either::<String, i32>::Right(42);
+        yield value * 2
+    };
+
+    // 回避策として right() で Option に変換する必要がある
+    let result = for_! {
+        value <= Either::<String, i32>::Right(42).right();
+        yield value * 2
+    };
+
+  design_decision:
+    approach: |
+      Either<L, R> に IntoIterator を実装し、Right バイアスの動作を提供する。
+      専用のイテレータ型 EitherIntoIterator<R> を定義し、
+      Right(r) の場合は std::iter::once(r) と同等の動作、
+      Left(_) の場合は std::iter::empty() と同等の動作を行う。
+
+    rationale:
+      - Scala との構文的・意味論的一貫性
+      - Option<T> の IntoIterator との類似性（Rust ユーザーにとって自然）
+      - for_! マクロとの統合が容易（into_iter() のみで動作）
+      - 既存の Either 実装への最小限の変更
+
+# =============================================================================
+# 概要
+# =============================================================================
+
+overview:
+  description: |
+    Either<L, R> に IntoIterator トレイトを実装し、for_! マクロで
+    直接使用可能にする。Right バイアスの動作により、Right(value) の場合のみ
+    イテレーションが行われ、Left(_) の場合はスキップされる。
+
+    これにより、エラーハンドリングを含む処理を for_! マクロで
+    宣言的に記述できるようになる。
+
+  goals:
+    - Either<L, R> に IntoIterator を実装（所有権版）
+    - &Either<L, R> に IntoIterator を実装（参照版）
+    - EitherIntoIterator<R> イテレータ型を定義
+    - EitherIterator<'a, R> イテレータ型を定義（参照版用）
+    - for_! マクロとの統合を確認
+
+  non_goals:
+    - Left バイアスの IntoIterator（必要なら swap() で対応）
+    - IterMut（Either は不変として扱う設計）
+    - FromIterator の実装（Either は単一値であり収集先としては不適切）
+
+  functional_programming_principles:
+    right_bias: |
+      関数型プログラミングにおいて、Either は通常 Right バイアスで使用される。
+      これは Haskell の Either および Scala 2.12+ の Either と一致する。
+      Right を「成功」「継続」として扱い、Left を「失敗」「早期終了」として扱う。
+
+    functor_consistency: |
+      IntoIterator の実装は Functor/Monad の動作と一貫している必要がある。
+      map_right が Right のみに作用するのと同様に、
+      IntoIterator も Right のみを yield する。
+
+    composability: |
+      for_! マクロでの合成が可能になることで、
+      Either を含む複雑なデータフローを宣言的に記述できる。
+
+# =============================================================================
+# 要件一覧
+# =============================================================================
+
+requirements:
+
+  # ---------------------------------------------------------------------------
+  # REQ-1401: Either<L, R> の IntoIterator 実装（所有権版）
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-1401
+    name: Either<L, R> の IntoIterator 実装（所有権版）
+    category: trait_implementation
+    priority: critical
+    description: |
+      Either<L, R> に IntoIterator トレイトを実装する。
+      Right(value) の場合は value を yield する1要素イテレータを返し、
+      Left(_) の場合は空のイテレータを返す。
+
+    location: src/control/either.rs
+
+    trait_definition: |
+      impl<L, R> IntoIterator for Either<L, R> {
+          type Item = R;
+          type IntoIter = EitherIntoIterator<R>;
+
+          fn into_iter(self) -> Self::IntoIter {
+              match self {
+                  Either::Right(value) => EitherIntoIterator::new(Some(value)),
+                  Either::Left(_) => EitherIntoIterator::new(None),
+              }
+          }
+      }
+
+    iterator_type: |
+      /// Either<L, R> の所有権を消費するイテレータ。
+      ///
+      /// Right(value) の場合は value を1回 yield し、
+      /// Left(_) の場合は何も yield しない。
+      pub struct EitherIntoIterator<R> {
+          inner: std::option::IntoIter<R>,
+      }
+
+      impl<R> EitherIntoIterator<R> {
+          /// 新しい EitherIntoIterator を作成する。
+          fn new(value: Option<R>) -> Self {
+              Self {
+                  inner: value.into_iter(),
+              }
+          }
+      }
+
+      impl<R> Iterator for EitherIntoIterator<R> {
+          type Item = R;
+
+          fn next(&mut self) -> Option<Self::Item> {
+              self.inner.next()
+          }
+
+          fn size_hint(&self) -> (usize, Option<usize>) {
+              self.inner.size_hint()
+          }
+      }
+
+      impl<R> ExactSizeIterator for EitherIntoIterator<R> {}
+      impl<R> std::iter::FusedIterator for EitherIntoIterator<R> {}
+
+    examples:
+      - name: Right の場合
+        code: |
+          use lambars::control::Either;
+
+          let right: Either<String, i32> = Either::Right(42);
+          let collected: Vec<i32> = right.into_iter().collect();
+          assert_eq!(collected, vec![42]);
+
+      - name: Left の場合
+        code: |
+          use lambars::control::Either;
+
+          let left: Either<String, i32> = Either::Left("error".to_string());
+          let collected: Vec<i32> = left.into_iter().collect();
+          assert_eq!(collected, Vec::<i32>::new());
+
+      - name: for_! マクロでの使用
+        code: |
+          use lambars::{control::Either, for_};
+
+          let result = for_! {
+              value <= Either::<String, i32>::Right(42);
+              yield value * 2
+          };
+          assert_eq!(result, vec![84]);
+
+    acceptance_criteria:
+      - Either::Right(value).into_iter() が value を含む1要素イテレータを返すこと
+      - Either::Left(_).into_iter() が空のイテレータを返すこと
+      - EitherIntoIterator が Iterator トレイトを正しく実装していること
+      - EitherIntoIterator が ExactSizeIterator を実装していること
+      - EitherIntoIterator が FusedIterator を実装していること
+      - for ループで使用可能なこと
+      - for_! マクロで使用可能なこと
+
+  # ---------------------------------------------------------------------------
+  # REQ-1402: &Either<L, R> の IntoIterator 実装（参照版）
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-1402
+    name: "&Either<L, R> の IntoIterator 実装（参照版）"
+    category: trait_implementation
+    priority: high
+    description: |
+      &Either<L, R> に IntoIterator トレイトを実装する。
+      Right(value) の場合は &value への参照を yield する1要素イテレータを返し、
+      Left(_) の場合は空のイテレータを返す。
+
+      これにより、Either を消費せずにイテレーションが可能になる。
+
+    location: src/control/either.rs
+
+    trait_definition: |
+      impl<'a, L, R> IntoIterator for &'a Either<L, R> {
+          type Item = &'a R;
+          type IntoIter = EitherIterator<'a, R>;
+
+          fn into_iter(self) -> Self::IntoIter {
+              match self {
+                  Either::Right(value) => EitherIterator::new(Some(value)),
+                  Either::Left(_) => EitherIterator::new(None),
+              }
+          }
+      }
+
+    iterator_type: |
+      /// Either<L, R> への参照に対するイテレータ。
+      ///
+      /// Right(value) の場合は &value を1回 yield し、
+      /// Left(_) の場合は何も yield しない。
+      pub struct EitherIterator<'a, R> {
+          inner: std::option::Iter<'a, R>,
+      }
+
+      impl<'a, R> EitherIterator<'a, R> {
+          /// 新しい EitherIterator を作成する。
+          fn new(value: Option<&'a R>) -> Self {
+              // Option<&R> を Option<R> の参照イテレータに変換する代わりに
+              // 直接 Option を使用
+              Self {
+                  inner: value.into_iter(),  // Note: この設計は要検討
+              }
+          }
+      }
+
+    alternative_design: |
+      // より単純な設計として std::iter::once を使用
+      impl<'a, L, R> IntoIterator for &'a Either<L, R> {
+          type Item = &'a R;
+          type IntoIter = std::iter::Flatten<std::option::IntoIter<&'a R>>;
+
+          fn into_iter(self) -> Self::IntoIter {
+              self.right_ref().into_iter().flatten()
+          }
+      }
+
+      // または専用型を使用（推奨）
+      pub struct EitherIterator<'a, R> {
+          value: Option<&'a R>,
+          exhausted: bool,
+      }
+
+    examples:
+      - name: 参照イテレーション
+        code: |
+          use lambars::control::Either;
+
+          let right: Either<String, i32> = Either::Right(42);
+          for value in &right {
+              assert_eq!(*value, 42);
+          }
+          // right はまだ使用可能
+          assert!(right.is_right());
+
+      - name: 複数の Either の参照イテレーション
+        code: |
+          use lambars::control::Either;
+
+          let eithers = vec![
+              Either::<String, i32>::Right(1),
+              Either::Left("error".to_string()),
+              Either::Right(3),
+          ];
+
+          let sum: i32 = eithers.iter()
+              .flat_map(|e| e.into_iter())
+              .sum();
+          assert_eq!(sum, 4);  // 1 + 3
+
+    acceptance_criteria:
+      - "&Either::Right(value) のイテレーションで &value が得られること"
+      - "&Either::Left(_) のイテレーションで何も得られないこと"
+      - イテレーション後も元の Either が使用可能なこと
+      - EitherIterator がライフタイムを正しく扱うこと
+
+  # ---------------------------------------------------------------------------
+  # REQ-1403: for_! マクロとの統合
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-1403
+    name: for_! マクロとの統合
+    category: integration
+    priority: critical
+    description: |
+      Either<L, R> に IntoIterator を実装することで、
+      for_! マクロで直接使用可能になることを確認する。
+      様々なパターンでの動作を検証する。
+
+    location: tests/either_for_macro_tests.rs
+
+    examples:
+      - name: 単純な Either の使用
+        code: |
+          use lambars::{control::Either, for_};
+
+          // Right の場合
+          let result = for_! {
+              x <= Either::<String, i32>::Right(42);
+              yield x * 2
+          };
+          assert_eq!(result, vec![84]);
+
+          // Left の場合
+          let result = for_! {
+              x <= Either::<String, i32>::Left("error".to_string());
+              yield x * 2
+          };
+          assert_eq!(result, Vec::<i32>::new());
+
+      - name: ネストしたイテレーションでの Either
+        code: |
+          use lambars::{control::Either, for_};
+
+          let numbers = vec![1, 2, 3];
+          let multiplier: Either<String, i32> = Either::Right(10);
+
+          let result = for_! {
+              n <= numbers;
+              m <= multiplier.clone();  // Either を clone してイテレート
+              yield n * m
+          };
+          assert_eq!(result, vec![10, 20, 30]);
+
+      - name: Vec<Either> のフラット化
+        code: |
+          use lambars::{control::Either, for_};
+
+          let eithers = vec![
+              Either::<String, i32>::Right(1),
+              Either::Left("error".to_string()),
+              Either::Right(3),
+          ];
+
+          let result = for_! {
+              either <= eithers;
+              value <= either;
+              yield value * 2
+          };
+          assert_eq!(result, vec![2, 6]);
+
+      - name: ガード式との組み合わせ
+        code: |
+          use lambars::{control::Either, for_};
+
+          let eithers = vec![
+              Either::<String, i32>::Right(1),
+              Either::Right(2),
+              Either::Right(3),
+              Either::Left("error".to_string()),
+          ];
+
+          let result = for_! {
+              either <= eithers;
+              value <= either;
+              if value % 2 == 1;
+              yield value
+          };
+          assert_eq!(result, vec![1, 3]);
+
+      - name: let 束縛との組み合わせ
+        code: |
+          use lambars::{control::Either, for_};
+
+          let result = for_! {
+              x <= Either::<String, i32>::Right(42);
+              let doubled = x * 2;
+              let tripled = doubled + x;
+              yield tripled
+          };
+          assert_eq!(result, vec![126]);  // 42 * 2 + 42 = 126
+
+    acceptance_criteria:
+      - Either を for_! マクロで直接使用できること
+      - Right の場合に正しく値が yield されること
+      - Left の場合に空の結果が返されること
+      - Vec<Either> を for_! でフラット化できること
+      - ガード式と組み合わせて使用できること
+      - let 束縛と組み合わせて使用できること
+
+  # ---------------------------------------------------------------------------
+  # REQ-1404: Iterator トレイトの最適実装
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-1404
+    name: Iterator トレイトの最適実装
+    category: optimization
+    priority: medium
+    description: |
+      EitherIntoIterator および EitherIterator に対して、
+      Iterator トレイトの追加メソッドを最適に実装する。
+      size_hint, count, last, nth などを効率的に実装する。
+
+    location: src/control/either.rs
+
+    methods_to_implement:
+      - name: size_hint
+        description: "(0, Some(0)) または (1, Some(1)) を返す"
+        implementation: |
+          fn size_hint(&self) -> (usize, Option<usize>) {
+              self.inner.size_hint()
+          }
+
+      - name: count
+        description: "0 または 1 を返す（イテレータを消費）"
+        implementation: |
+          fn count(self) -> usize {
+              self.inner.count()
+          }
+
+      - name: last
+        description: "Right の値または None を返す（イテレータを消費）"
+        implementation: |
+          fn last(self) -> Option<Self::Item> {
+              self.inner.last()
+          }
+
+      - name: nth
+        description: "n == 0 かつ Right の場合のみ Some(value) を返す"
+        implementation: |
+          fn nth(&mut self, n: usize) -> Option<Self::Item> {
+              self.inner.nth(n)
+          }
+
+    derived_traits:
+      - name: ExactSizeIterator
+        description: |
+          イテレータの正確なサイズが既知であることを示す。
+          len() メソッドを提供する。
+
+      - name: FusedIterator
+        description: |
+          None を返した後は常に None を返すことを保証する。
+          イテレータの安全な使用を可能にする。
+
+      - name: DoubleEndedIterator
+        description: |
+          後方からのイテレーションを可能にする。
+          1要素以下なので実質的に同じ動作。
+
+    acceptance_criteria:
+      - size_hint が正確な値を返すこと
+      - ExactSizeIterator が実装されていること
+      - FusedIterator が実装されていること
+      - DoubleEndedIterator が実装されていること（オプション）
+      - 各メソッドが O(1) で動作すること
+
+# =============================================================================
+# テスト要件
+# =============================================================================
+
+test_requirements:
+  unit_tests:
+    location: src/control/either.rs (inline tests)
+    categories:
+      - name: IntoIterator 基本テスト
+        tests:
+          - test_right_into_iter_yields_value
+          - test_left_into_iter_yields_nothing
+          - test_right_into_iter_collect
+          - test_left_into_iter_collect
+          - test_into_iter_for_loop
+
+      - name: 参照イテレータテスト
+        tests:
+          - test_right_ref_into_iter
+          - test_left_ref_into_iter
+          - test_ref_iter_does_not_consume
+
+      - name: Iterator トレイトメソッドテスト
+        tests:
+          - test_size_hint_right
+          - test_size_hint_left
+          - test_count_right
+          - test_count_left
+          - test_last_right
+          - test_last_left
+          - test_nth_right
+          - test_nth_left
+
+      - name: ExactSizeIterator テスト
+        tests:
+          - test_len_right
+          - test_len_left
+          - test_is_empty_right
+          - test_is_empty_left
+
+      - name: FusedIterator テスト
+        tests:
+          - test_fused_after_exhaustion
+
+  property_tests:
+    location: tests/either_iterator_laws.rs
+    categories:
+      - name: イテレータ法則テスト
+        tests:
+          - property: size_hint と実際の要素数の一致
+            description: |
+              size_hint().0 <= 実際の要素数 <= size_hint().1.unwrap_or(usize::MAX)
+          - property: count と collect().len() の一致
+            description: |
+              iter.count() == iter.collect::<Vec<_>>().len()
+          - property: ExactSizeIterator の len と count の一致
+            description: |
+              iter.len() == iter.count()
+
+      - name: Right バイアス動作テスト
+        tests:
+          - property: Right(x).into_iter().collect() == vec![x]
+          - property: Left(e).into_iter().collect() == vec![]
+          - property: Right(x).into_iter().next() == Some(x)
+          - property: Left(e).into_iter().next() == None
+
+  integration_tests:
+    location: tests/either_for_macro_tests.rs
+    scenarios:
+      - name: for_! マクロ統合テスト
+        tests:
+          - test_for_macro_with_right
+          - test_for_macro_with_left
+          - test_for_macro_nested_either
+          - test_for_macro_vec_either_flatten
+          - test_for_macro_either_with_guard
+          - test_for_macro_either_with_let
+
+      - name: 複合シナリオテスト
+        tests:
+          - test_error_handling_pipeline
+          - test_validation_chain
+          - test_mixed_option_either
+
+# =============================================================================
+# ファイル構成
+# =============================================================================
+
+artifacts:
+  source_files:
+    - path: src/control/either.rs
+      description: |
+        Either<L, R> の実装ファイル。
+        IntoIterator、EitherIntoIterator、EitherIterator を追加。
+      requirements:
+        - REQ-1401
+        - REQ-1402
+        - REQ-1404
+
+  test_files:
+    - path: tests/either_iterator_laws.rs
+      description: Either イテレータのプロパティテスト
+
+    - path: tests/either_for_macro_tests.rs
+      description: for_! マクロとの統合テスト
+
+  documentation:
+    - path: src/control/either.rs (module doc)
+      description: |
+        モジュールドキュメントに以下を追加：
+        - IntoIterator の説明
+        - Right バイアスの説明
+        - for_! マクロでの使用例
+        - Scala との対応
+
+# =============================================================================
+# 成功基準
+# =============================================================================
+
+success_criteria:
+  functional:
+    - Either<L, R> が IntoIterator を実装していること
+    - "&Either<L, R> が IntoIterator を実装していること"
+    - Right の場合に1要素のイテレータが返されること
+    - Left の場合に空のイテレータが返されること
+    - for_! マクロで直接使用できること
+    - for ループで直接使用できること
+
+  performance:
+    - IntoIterator の呼び出しが O(1) であること
+    - イテレータの next() が O(1) であること
+    - 追加のアロケーションが発生しないこと
+
+  code_quality:
+    - 全てのテストが通過すること
+    - clippy 警告がないこと
+    - "#![forbid(unsafe_code)] を維持すること"
+    - ドキュメントが更新されていること
+    - 略語を使用していないこと
+
+# =============================================================================
+# Scala との対応
+# =============================================================================
+
+scala_correspondence:
+  behavior_comparison: |
+    Scala:
+      val either: Either[String, Int] = Right(42)
+      for { x <- either } yield x * 2  // Some(84)
+
+    Rust (lambars):
+      let either: Either<String, i32> = Either::Right(42);
+      let result = for_! {
+          x <= either;
+          yield x * 2
+      };
+      // result = vec![84]
+
+  key_differences:
+    - name: 戻り値の型
+      scala: "Scala では for 内包表記の結果型は文脈に依存（Option, List など）"
+      rust: "Rust の for_! マクロは常に Vec<T> を返す"
+
+    - name: Right バイアスの明示性
+      scala: "Scala 2.12+ では Either は Right バイアス"
+      rust: "lambars の Either も Right バイアスとして IntoIterator を実装"
+
+    - name: 型パラメータの順序
+      scala: "Either[+A, +B] where A is Left, B is Right"
+      rust: "Either<L, R> where L is Left, R is Right（同じ順序）"
+
+# =============================================================================
+# 将来の拡張
+# =============================================================================
+
+future_extensions:
+  - id: left_iterator
+    name: Left バイアスイテレータ
+    description: |
+      Left 値をイテレートするためのメソッドを提供。
+      left_iter() や into_left_iter() など。
+    priority: low
+
+  - id: for_async_either
+    name: for_async! マクロとの統合
+    description: |
+      Either<L, R> を for_async! マクロでも使用可能にする。
+      IntoIterator があれば自動的に使用可能なはず。
+    priority: medium
+
+  - id: either_transpose
+    name: Either と Option/Result の変換
+    description: |
+      Either<L, Option<R>> ⇔ Option<Either<L, R>>
+      Either<L, Result<R, E>> ⇔ Result<Either<L, R>, E>
+    priority: medium
+
+# =============================================================================
+# 参照
+# =============================================================================
+
+references:
+  - name: "Scala Either"
+    url: "https://www.scala-lang.org/api/current/scala/util/Either.html"
+    description: |
+      Scala の Either 型のドキュメント。
+      Right バイアスの for 内包表記の動作。
+
+  - name: "Rust Option IntoIterator"
+    url: "https://doc.rust-lang.org/std/option/enum.Option.html#impl-IntoIterator-for-Option%3CT%3E"
+    description: |
+      Rust 標準ライブラリの Option<T> の IntoIterator 実装。
+      Either の IntoIterator 設計の参考。
+
+  - name: "Rust Iterator trait"
+    url: "https://doc.rust-lang.org/std/iter/trait.Iterator.html"
+    description: |
+      Rust 標準ライブラリの Iterator トレイト。
+      実装すべきメソッドの参考。
+
+  - name: "既存の Either 実装"
+    url: "src/control/either.rs"
+    description: |
+      現在の Either<L, R> の実装。
+      IntoIterator 追加の基盤となる。
+
+  - name: "既存の for_! マクロ実装"
+    url: "src/compose/for_macro.rs"
+    description: |
+      現在の for_! マクロの実装。
+      into_iter() を使用していることを確認。

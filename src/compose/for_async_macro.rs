@@ -17,6 +17,8 @@
 //! for_async! {
 //!     pattern <= collection;           // Bind: iterate over collection
 //!     pattern <~ async_io_expression;  // Async Bind: await AsyncIO result
+//!     if let pattern = expression;     // Pattern Guard: match pattern (skip if no match)
+//!     if condition;                    // Guard: filter by condition
 //!     let pattern = expression;        // Pure let binding
 //!     yield expression                 // Final expression (collected in Vec)
 //! }
@@ -157,6 +159,7 @@
 /// for_async! {
 ///     pattern <= collection;           // Bind: iterate over collection
 ///     pattern <~ async_io_expression;  // Async Bind: await AsyncIO result
+///     if condition;                    // Guard: filter by condition
 ///     let pattern = expression;        // Pure let binding
 ///     yield expression                 // Final expression (collected in Vec)
 /// }
@@ -166,6 +169,7 @@
 ///
 /// - `<=`: Collection bind - iterates over an `IntoIterator`
 /// - `<~`: `AsyncIO` bind - awaits an `AsyncIO` and binds the result
+/// - `if condition;`: Guard expression - skips iteration if condition is false
 ///
 /// # Examples
 ///
@@ -311,6 +315,31 @@ macro_rules! for_async {
         $results.push($result);
     }};
 
+    // =========================================================================
+    // @inner pattern guard rules (if let pattern = expression;)
+    // Must be placed BEFORE regular guard rules for correct matching
+    // =========================================================================
+
+    // @inner pattern guard (with following statements)
+    // Uses $pattern:pat to match any pattern (Rust 2021+)
+    (@inner $results:ident; if let $pattern:pat = $expr:expr ; $($rest:tt)+) => {{
+        if let $pattern = $expr {
+            $crate::for_async!(@inner $results; $($rest)+);
+        }
+    }};
+
+    // =========================================================================
+    // @inner guard expression rules
+    // =========================================================================
+
+    // @inner guard expression (with following statements)
+    // If condition is true, continue with rest; otherwise skip (no push)
+    (@inner $results:ident; if $condition:expr ; $($rest:tt)+) => {{
+        if $condition {
+            $crate::for_async!(@inner $results; $($rest)+);
+        }
+    }};
+
     // AsyncIO bind with identifier pattern
     (@inner $results:ident; $pattern:ident <~ $async_io:expr ; $($rest:tt)+) => {{
         let $pattern = $async_io.run_async().await;
@@ -372,5 +401,60 @@ mod tests {
             yield x * 2
         };
         assert_eq!(result.run_async().await, vec![2, 4, 6]);
+    }
+
+    // =========================================================================
+    // Guard expression tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_async_guard_basic() {
+        let result = for_async! {
+            x <= vec![1, 2, 3, 4, 5];
+            if x % 2 == 0;
+            yield x
+        };
+        assert_eq!(result.run_async().await, vec![2, 4]);
+    }
+
+    #[tokio::test]
+    async fn test_async_guard_multiple() {
+        let result = for_async! {
+            x <= 1..=20i32;
+            if x % 2 == 0;
+            if x > 10;
+            yield x
+        };
+        assert_eq!(result.run_async().await, vec![12, 14, 16, 18, 20]);
+    }
+
+    // =========================================================================
+    // Pattern guard tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_async_pattern_guard_option_some() {
+        fn maybe_double(x: i32) -> Option<i32> {
+            if x > 0 { Some(x * 2) } else { None }
+        }
+
+        let result = for_async! {
+            x <= vec![-1, 0, 1, 2, 3];
+            if let Some(doubled) = maybe_double(x);
+            yield doubled
+        };
+        assert_eq!(result.run_async().await, vec![2, 4, 6]);
+    }
+
+    #[tokio::test]
+    async fn test_async_pattern_guard_with_regular_guard() {
+        let items = vec![Some(1), None, Some(5), Some(10)];
+        let result = for_async! {
+            item <= items;
+            if let Some(value) = item;
+            if value > 3;
+            yield value
+        };
+        assert_eq!(result.run_async().await, vec![5, 10]);
     }
 }

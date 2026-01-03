@@ -1,0 +1,607 @@
+# Phase 13: Guard Expression Support for for_! and for_async! Macros
+# for_! および for_async! マクロへのガード式サポート追加
+# Scala の for 内包表記における if ガードの機能を Rust で実現
+
+version: "1.0.0"
+created_at: "2026-01-03"
+phase_id: phase_13
+phase_name: ガード式サポート
+phase_name_en: Guard Expression Support
+
+# =============================================================================
+# 背景と動機
+# =============================================================================
+
+background:
+  motivation: |
+    Scala の for 内包表記では、イテレーション中に条件によるフィルタリングを
+    ガード式（if 式）で記述できる。これにより、ネストした filter と map の
+    組み合わせを宣言的かつ読みやすく書くことが可能である。
+
+    現在の lambars の for_! および for_async! マクロはこの機能を持たず、
+    ガードが必要な場合は外部で filter を使用するか、yield 前に if 文を
+    手動で書く必要がある。
+
+  scala_example: |
+    // Scala の for 内包表記でのガード式
+    for {
+      r <- radiuses
+      point <- points
+      if isInside(point, r)  // ガード式：条件を満たす場合のみ続行
+    } yield (r, point)
+
+    // 複数のガード式も可能
+    for {
+      x <- 1 to 10
+      if x % 2 == 0
+      y <- 1 to 10
+      if x + y > 10
+    } yield (x, y)
+
+  current_workaround: |
+    現在は以下のような回避策が必要:
+
+    // 方法1: filter との組み合わせ（読みにくい）
+    let result = for_! {
+        r <= radiuses;
+        point <= points.clone().into_iter().filter(|p| is_inside(*p, r)).collect::<Vec<_>>();
+        yield (r, point)
+    };
+
+    // 方法2: yield 前の if 文（マクロ外での処理）
+    let result: Vec<_> = for_! {
+        r <= radiuses;
+        point <= points.clone();
+        yield if is_inside(point, r) { Some((r, point)) } else { None }
+    }.into_iter().flatten().collect();
+
+    これらは冗長で、Scala の for 内包表記の簡潔さに比べて大きく劣る。
+
+  design_decision:
+    approach: |
+      マクロルールに `if condition;` パターンを追加し、条件が false の場合は
+      残りの処理をスキップして空の結果を返す。
+
+    rationale:
+      - Scala の for 内包表記との構文的一貫性
+      - 既存の <= や <~ 演算子との共存が容易
+      - macro_rules! で実現可能な範囲の構文
+      - セミコロン必須により他のパターンとの競合を回避
+
+# =============================================================================
+# 概要
+# =============================================================================
+
+overview:
+  description: |
+    for_! および for_async! マクロにガード式（if condition;）を追加する。
+    ガード式は条件が true の場合のみ後続の処理を実行し、false の場合は
+    その反復をスキップして空の結果を返す。
+
+    これにより、Scala の for 内包表記と同様の宣言的なフィルタリングが
+    Rust の for_! および for_async! マクロで可能になる。
+
+  goals:
+    - for_! マクロにガード式（if condition;）を追加
+    - for_async! マクロにガード式（if condition;）を追加
+    - 複数のガード式を連続して使用可能にする
+    - ガード式と let 束縛の組み合わせをサポート
+    - 既存の構文との後方互換性を維持
+
+  non_goals:
+    - else 節のサポート（ガードは単純なフィルタリングのみ）
+    - パターンガード（if let パターン）のサポート（Phase 14 以降で検討）
+    - ガード式内での可変参照（&mut）の使用
+
+  functional_programming_principles:
+    purity: |
+      ガード式は純粋な述語関数であるべき。
+      副作用を持つ条件式も技術的には使用可能だが、推奨されない。
+
+    referential_transparency: |
+      ガード式の結果は入力のみに依存すべき。
+      同じ入力に対して同じ結果を返す述語を使用することが推奨される。
+
+    composability: |
+      ガード式は他のバインド（<= や <~）や let 束縛と
+      任意の順序で組み合わせ可能。
+
+    effect_isolation: |
+      for_async! でのガード式も同期的に評価される。
+      ガード式自体は AsyncIO を返さず、即座に評価される。
+
+# =============================================================================
+# 要件一覧
+# =============================================================================
+
+requirements:
+
+  # ---------------------------------------------------------------------------
+  # REQ-1301: for_! マクロへのガード式追加
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-1301
+    name: for_! マクロへのガード式追加
+    category: macro
+    priority: critical
+    description: |
+      for_! マクロにガード式（if condition;）を追加する。
+      条件が true の場合のみ後続の処理を実行し、
+      false の場合は空の Vec を返してスキップする。
+
+    location: src/compose/for_macro.rs
+
+    syntax:
+      grammar: |
+        for_! {
+            pattern <= collection;
+            if condition;          // ガード式（セミコロン必須）
+            yield expression
+        }
+
+      expansion: |
+        // ガード式の展開
+        if condition {
+            $crate::for_!(@collect $($rest)+)
+        } else {
+            vec![]
+        }
+
+    examples:
+      - name: 基本的なガード式
+        code: |
+          let result = for_! {
+              x <= vec![1, 2, 3, 4, 5];
+              if x % 2 == 0;
+              yield x
+          };
+          assert_eq!(result, vec![2, 4]);
+
+      - name: ネストしたイテレーションでのガード式
+        code: |
+          let result = for_! {
+              x <= vec![1, 2, 3];
+              y <= vec![10, 20, 30];
+              if x + y > 20;
+              yield (x, y)
+          };
+          // (1, 20), (1, 30), (2, 20), (2, 30), (3, 10), (3, 20), (3, 30)
+          assert_eq!(result.len(), 7);
+
+      - name: 外部関数をガード条件として使用
+        code: |
+          fn is_prime(n: i32) -> bool {
+              if n < 2 { return false; }
+              (2..=((n as f64).sqrt() as i32)).all(|i| n % i != 0)
+          }
+
+          let result = for_! {
+              x <= 1..=20;
+              if is_prime(x);
+              yield x
+          };
+          assert_eq!(result, vec![2, 3, 5, 7, 11, 13, 17, 19]);
+
+    implementation_notes:
+      - |
+        @collect ルールに if パターンを追加する。
+        ガード式は `if $condition:expr ;` としてマッチし、
+        条件が true なら残りを処理、false なら vec![] を返す。
+
+      - |
+        パブリックエントリポイントにも if パターンを追加する必要がある。
+        ただし、通常は最初のバインドの後にガードが来るため、
+        @collect 経由で処理されることが多い。
+
+      - |
+        単独の if（バインドなし）は意味がないため、
+        エントリポイントでの if 単独パターンは不要。
+
+    macro_rules_addition: |
+      // @collect ガード式（後続の処理あり）
+      (@collect if $condition:expr ; $($rest:tt)+) => {{
+          if $condition {
+              $crate::for_!(@collect $($rest)+)
+          } else {
+              vec![]
+          }
+      }};
+
+    acceptance_criteria:
+      - ガード式が true の場合、後続の処理が実行されること
+      - ガード式が false の場合、空の Vec が返されること
+      - 複数のガード式が連続して使用できること
+      - ガード式が let 束縛と組み合わせて使用できること
+      - 既存の for_! 構文が引き続き動作すること
+
+  # ---------------------------------------------------------------------------
+  # REQ-1302: for_async! マクロへのガード式追加
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-1302
+    name: for_async! マクロへのガード式追加
+    category: macro
+    priority: critical
+    description: |
+      for_async! マクロにガード式（if condition;）を追加する。
+      条件が true の場合のみ後続の処理を実行し、
+      false の場合はその反復をスキップする。
+
+    location: src/compose/for_async_macro.rs
+
+    syntax:
+      grammar: |
+        for_async! {
+            pattern <= collection;
+            if condition;          // ガード式（セミコロン必須）
+            yield expression
+        }
+
+      expansion: |
+        // @inner でのガード式の展開
+        if $condition {
+            $crate::for_async!(@inner $results; $($rest)+);
+        }
+        // else の場合は何もしない（results に追加しない）
+
+    examples:
+      - name: 基本的なガード式
+        code: |
+          let result = for_async! {
+              x <= vec![1, 2, 3, 4, 5];
+              if x % 2 == 0;
+              yield x
+          };
+          assert_eq!(result.run_async().await, vec![2, 4]);
+
+      - name: AsyncIO バインドとガード式の組み合わせ
+        code: |
+          let result = for_async! {
+              x <= vec![1, 2, 3];
+              data <~ fetch_async(x);
+              if data.is_valid();
+              yield data.value
+          };
+          // data.is_valid() が true の要素のみ結果に含まれる
+
+    implementation_notes:
+      - |
+        @inner ルールに if パターンを追加する。
+        for_async! は結果を __results ベクタに push する形式なので、
+        ガードが false の場合は単に push しないだけでよい。
+
+      - |
+        ガード式は同期的に評価される。
+        AsyncIO を返すガード式はサポートしない（Phase 14 以降で検討）。
+
+    macro_rules_addition: |
+      // @inner ガード式（後続の処理あり）
+      (@inner $results:ident; if $condition:expr ; $($rest:tt)+) => {{
+          if $condition {
+              $crate::for_async!(@inner $results; $($rest)+);
+          }
+      }};
+
+    acceptance_criteria:
+      - ガード式が true の場合、後続の処理が実行されること
+      - ガード式が false の場合、その反復がスキップされること
+      - AsyncIO バインド（<~）とガード式が組み合わせて使用できること
+      - 既存の for_async! 構文が引き続き動作すること
+
+  # ---------------------------------------------------------------------------
+  # REQ-1303: 複数ガード式のサポート
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-1303
+    name: 複数ガード式のサポート
+    category: macro
+    priority: high
+    description: |
+      複数のガード式を連続して使用できるようにする。
+      各ガード式は独立して評価され、全ての条件が true の場合のみ
+      後続の処理が実行される。
+
+    examples:
+      - name: 連続したガード式
+        code: |
+          let result = for_! {
+              x <= 1..=100;
+              if x % 2 == 0;
+              if x % 3 == 0;
+              if x < 50;
+              yield x
+          };
+          // 6, 12, 18, 24, 30, 36, 42, 48（2と3の倍数かつ50未満）
+          assert_eq!(result, vec![6, 12, 18, 24, 30, 36, 42, 48]);
+
+      - name: バインドとガードを交互に使用
+        code: |
+          let result = for_! {
+              x <= vec![1, 2, 3, 4];
+              if x % 2 == 0;
+              y <= vec![10, 20, 30];
+              if y > 15;
+              yield (x, y)
+          };
+          // x=2,4 かつ y=20,30 の組み合わせ
+          assert_eq!(result, vec![(2, 20), (2, 30), (4, 20), (4, 30)]);
+
+    implementation_notes:
+      - |
+        マクロの再帰的展開により、複数のガード式は自然にサポートされる。
+        各 if パターンが順次評価され、false になった時点で
+        残りの処理がスキップされる。
+
+    acceptance_criteria:
+      - 3つ以上の連続したガード式が動作すること
+      - バインドとガードを交互に使用できること
+      - 全てのガードが true の場合のみ yield が実行されること
+
+  # ---------------------------------------------------------------------------
+  # REQ-1304: ガード式と let 束縛の組み合わせ
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-1304
+    name: ガード式と let 束縛の組み合わせ
+    category: macro
+    priority: high
+    description: |
+      ガード式と let 束縛を任意の順序で組み合わせて使用できるようにする。
+      let 束縛で計算した値をガード式で使用するパターンをサポートする。
+
+    examples:
+      - name: let 束縛の値をガードで使用
+        code: |
+          let result = for_! {
+              x <= vec![1, 2, 3, 4, 5];
+              let squared = x * x;
+              if squared > 10;
+              yield squared
+          };
+          assert_eq!(result, vec![16, 25]);
+
+      - name: 複数の let 束縛とガードの組み合わせ
+        code: |
+          let result = for_! {
+              x <= vec![1, 2, 3];
+              y <= vec![10, 20, 30];
+              let sum = x + y;
+              let product = x * y;
+              if sum > 20;
+              if product > 30;
+              yield (sum, product)
+          };
+
+      - name: タプル分解と組み合わせ
+        code: |
+          let pairs = vec![(1, 2), (3, 4), (5, 6), (10, 20)];
+          let result = for_! {
+              (a, b) <= pairs;
+              let diff = b - a;
+              if diff > 1;
+              yield (a, b, diff)
+          };
+          assert_eq!(result, vec![(5, 6, 1), (10, 20, 10)].into_iter().filter(|(_, _, d)| *d > 1).collect::<Vec<_>>());
+
+    implementation_notes:
+      - |
+        let 束縛は既存の実装で対応済み。
+        ガード式を let 束縛の後に配置できるようにするため、
+        マクロルールの順序に注意が必要。
+
+      - |
+        @collect let ルールの後にガード式が来る場合、
+        let で束縛された変数をガードで参照できること。
+
+    acceptance_criteria:
+      - let で束縛した変数をガード式で使用できること
+      - let 束縛の前後にガード式を配置できること
+      - タプル分解した値をガード式で使用できること
+
+# =============================================================================
+# テスト要件
+# =============================================================================
+
+test_requirements:
+  unit_tests:
+    location: src/compose/for_macro.rs (inline tests)
+    categories:
+      - name: 基本ガード式テスト
+        tests:
+          - test_guard_basic_filter
+          - test_guard_all_pass
+          - test_guard_all_fail
+          - test_guard_empty_collection
+
+      - name: ネストイテレーションテスト
+        tests:
+          - test_guard_nested_iteration
+          - test_guard_after_second_bind
+          - test_guard_between_binds
+
+      - name: 複数ガード式テスト
+        tests:
+          - test_multiple_guards_consecutive
+          - test_guards_interleaved_with_binds
+
+      - name: let 束縛組み合わせテスト
+        tests:
+          - test_guard_after_let
+          - test_guard_using_let_value
+          - test_let_after_guard
+
+      - name: パターンマッチテスト
+        tests:
+          - test_guard_with_tuple_pattern
+          - test_guard_with_wildcard
+
+  async_tests:
+    location: src/compose/for_async_macro.rs (inline tests)
+    categories:
+      - name: 基本ガード式テスト（async）
+        tests:
+          - test_async_guard_basic_filter
+          - test_async_guard_with_async_bind
+
+      - name: 複合テスト（async）
+        tests:
+          - test_async_guard_multiple
+          - test_async_guard_with_let
+
+  integration_tests:
+    location: tests/for_guard_tests.rs
+    scenarios:
+      - name: 実用的なユースケース
+        description: |
+          実際のアプリケーションで想定されるパターンのテスト。
+          ジオメトリ計算、データフィルタリング、バリデーションなど。
+
+      - name: エッジケース
+        description: |
+          空コレクション、全要素フィルタ、全要素パスなど。
+
+      - name: パフォーマンステスト
+        description: |
+          ガード式のオーバーヘッドが許容範囲内であることを確認。
+
+# =============================================================================
+# ファイル構成
+# =============================================================================
+
+artifacts:
+  source_files:
+    - path: src/compose/for_macro.rs
+      description: for_! マクロへのガード式追加
+      requirements:
+        - REQ-1301
+        - REQ-1303
+        - REQ-1304
+
+    - path: src/compose/for_async_macro.rs
+      description: for_async! マクロへのガード式追加
+      requirements:
+        - REQ-1302
+        - REQ-1303
+        - REQ-1304
+
+  test_files:
+    - path: tests/for_guard_tests.rs
+      description: ガード式の統合テスト
+
+  documentation:
+    - path: src/compose/for_macro.rs (module doc)
+      description: |
+        既存のモジュールドキュメントにガード式の説明を追加。
+        - 構文: `if condition;`
+        - 使用例
+        - 制約事項
+
+    - path: src/compose/for_async_macro.rs (module doc)
+      description: |
+        既存のモジュールドキュメントにガード式の説明を追加。
+
+# =============================================================================
+# 成功基準
+# =============================================================================
+
+success_criteria:
+  functional:
+    - for_! でガード式が正しく動作すること
+    - for_async! でガード式が正しく動作すること
+    - 複数のガード式が連続して使用できること
+    - ガード式と let 束縛が組み合わせて使用できること
+    - 既存のマクロ構文が引き続き動作すること（後方互換性）
+
+  performance:
+    - ガード式のオーバーヘッドが無視できる程度であること（約0.5ns/ガード）
+    - 条件評価は短絡評価されること
+
+  code_quality:
+    - 全てのテストが通過すること
+    - clippy 警告がないこと（#![deny(warnings)]）
+    - #![forbid(unsafe_code)] を維持すること
+    - ドキュメントが更新されていること
+
+# =============================================================================
+# 将来の拡張
+# =============================================================================
+
+future_extensions:
+  - id: pattern_guard
+    name: パターンガード（if let）サポート
+    description: |
+      if let パターンによるマッチングをサポート。
+      Option や Result のアンラップと条件チェックを一度に行える。
+
+      for_! {
+          x <= items;
+          if let Some(value) = maybe_transform(x);
+          yield value
+      }
+    priority: medium
+
+  - id: async_guard
+    name: 非同期ガード式
+    description: |
+      AsyncIO を返すガード式のサポート。
+      非同期の条件チェック（API 呼び出しなど）を可能にする。
+
+      for_async! {
+          x <= items;
+          valid <~ is_valid_async(x);  // AsyncIO<bool>
+          if valid;
+          yield x
+      }
+    priority: low
+    note: |
+      現在の実装では、ガード式は同期的に評価される。
+      非同期ガードは `<~` でバインドしてから `if` を使う回避策がある。
+
+  - id: else_branch
+    name: else 節サポート
+    description: |
+      ガード式が false の場合のデフォルト値を指定できるようにする。
+
+      for_! {
+          x <= items;
+          if x > 0 else -1;  // false なら -1 を yield
+          yield x
+      }
+    priority: low
+    note: |
+      現状は Option::unwrap_or 等で対応可能。
+
+# =============================================================================
+# 参照
+# =============================================================================
+
+references:
+  - name: "Scala for-comprehension"
+    url: "https://docs.scala-lang.org/tour/for-comprehensions.html"
+    description: |
+      Scala の for 内包表記のドキュメント。
+      ガード式（if 節）の構文と意味論。
+
+  - name: "Haskell list comprehension"
+    url: "https://wiki.haskell.org/List_comprehension"
+    description: |
+      Haskell のリスト内包表記。
+      ガードの概念の元となる機能。
+
+  - name: "Rust macro_rules!"
+    url: "https://doc.rust-lang.org/reference/macros-by-example.html"
+    description: |
+      Rust の宣言的マクロのリファレンス。
+      パターンマッチの構文と制約。
+
+  - name: "既存の for_! 実装"
+    url: "src/compose/for_macro.rs"
+    description: |
+      現在の for_! マクロの実装。
+      ガード式追加の基盤となる。
+
+  - name: "既存の for_async! 実装"
+    url: "src/compose/for_async_macro.rs"
+    description: |
+      現在の for_async! マクロの実装。
+      ガード式追加の基盤となる。

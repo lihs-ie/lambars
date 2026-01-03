@@ -14,9 +14,11 @@
 //!
 //! ```text
 //! for_! {
-//!     pattern <= collection;    // Bind: iterate over collection
-//!     let pattern = expression; // Pure let binding
-//!     yield expression          // Final expression (wrapped in Vec)
+//!     pattern <= collection;           // Bind: iterate over collection
+//!     if let pattern = expression;     // Pattern guard: match pattern (skip if no match)
+//!     if condition;                    // Guard: filter by condition
+//!     let pattern = expression;        // Pure let binding
+//!     yield expression                 // Final expression (wrapped in Vec)
 //! }
 //! ```
 //!
@@ -25,6 +27,8 @@
 //! - **Identifier pattern**: `x <= collection;`
 //! - **Tuple pattern**: `(a, b) <= collection;`
 //! - **Wildcard pattern**: `_ <= collection;`
+//! - **Pattern guard**: `if let pattern = expression;` (skips if pattern doesn't match)
+//! - **Guard expression**: `if condition;` (skips iteration if condition is false)
 //! - **Let binding (identifier)**: `let x = expression;`
 //! - **Let binding (tuple)**: `let (a, b) = expression;`
 //!
@@ -86,6 +90,96 @@
 //!     yield format!("{}{}", num, letter)
 //! };
 //! assert_eq!(result, vec!["1a", "2b"]);
+//! ```
+//!
+//! ## Guard Expression (Filtering)
+//!
+//! ```rust
+//! use lambars::for_;
+//!
+//! // Basic guard - filter even numbers
+//! let result = for_! {
+//!     x <= vec![1, 2, 3, 4, 5];
+//!     if x % 2 == 0;
+//!     yield x
+//! };
+//! assert_eq!(result, vec![2, 4]);
+//! ```
+//!
+//! ## Multiple Guards
+//!
+//! ```rust
+//! use lambars::for_;
+//!
+//! // Multiple guards act as AND conditions
+//! let result = for_! {
+//!     x <= 1..=100i32;
+//!     if x % 2 == 0;
+//!     if x % 3 == 0;
+//!     if x < 50;
+//!     yield x
+//! };
+//! assert_eq!(result, vec![6, 12, 18, 24, 30, 36, 42, 48]);
+//! ```
+//!
+//! ## Guard with Let Binding
+//!
+//! ```rust
+//! use lambars::for_;
+//!
+//! let result = for_! {
+//!     x <= vec![1, 2, 3, 4, 5];
+//!     let squared = x * x;
+//!     if squared > 10;
+//!     yield squared
+//! };
+//! assert_eq!(result, vec![16, 25]);
+//! ```
+//!
+//! ## Pattern Guard (if let)
+//!
+//! ```rust
+//! use lambars::for_;
+//!
+//! // Extract values from Option
+//! fn maybe_double(x: i32) -> Option<i32> {
+//!     if x > 0 { Some(x * 2) } else { None }
+//! }
+//!
+//! let result = for_! {
+//!     x <= vec![-1, 0, 1, 2, 3];
+//!     if let Some(doubled) = maybe_double(x);
+//!     yield doubled
+//! };
+//! assert_eq!(result, vec![2, 4, 6]);
+//! ```
+//!
+//! ## Pattern Guard with Result
+//!
+//! ```rust
+//! use lambars::for_;
+//!
+//! let result = for_! {
+//!     s <= vec!["1", "abc", "2"];
+//!     if let Ok(n) = s.parse::<i32>();
+//!     yield n
+//! };
+//! assert_eq!(result, vec![1, 2]);
+//! ```
+//!
+//! ## Pattern Guard with Regular Guard
+//!
+//! ```rust
+//! use lambars::for_;
+//!
+//! let items = vec![Some(1), None, Some(5), Some(10)];
+//! let result = for_! {
+//!     item <= items;
+//!     if let Some(value) = item;
+//!     if value > 3;
+//!     yield value
+//! };
+//! assert_eq!(result, vec![5, 10]);
 //! ```
 //!
 //! ## Scala-style Recommendation Feed Example
@@ -206,6 +300,7 @@
 /// ```text
 /// for_! {
 ///     pattern <= collection;    // Bind: iterate over collection
+///     if condition;             // Guard: filter by condition
 ///     let pattern = expression; // Pure let binding
 ///     yield expression          // Final expression (wrapped in Vec)
 /// }
@@ -275,6 +370,19 @@
 /// };
 /// assert_eq!(result, vec!["x", "x", "x"]);
 /// ```
+///
+/// ## Guard expression
+///
+/// ```rust
+/// use lambars::for_;
+///
+/// let result = for_! {
+///     x <= vec![1, 2, 3, 4, 5];
+///     if x % 2 == 0;
+///     yield x
+/// };
+/// assert_eq!(result, vec![2, 4]);
+/// ```
 #[macro_export]
 macro_rules! for_ {
     // =========================================================================
@@ -318,6 +426,45 @@ macro_rules! for_ {
         }).collect::<Vec<_>>()
     }};
 
+    // =========================================================================
+    // @collect pattern guard rules (if let pattern = expression;)
+    // Must be placed BEFORE regular guard rules for correct matching
+    // =========================================================================
+
+    // @collect pattern guard (with following statements)
+    // Uses $pattern:pat to match any pattern (Rust 2021+)
+    (@collect if let $pattern:pat = $expr:expr ; $($rest:tt)+) => {{
+        if let $pattern = $expr {
+            $crate::for_!(@collect $($rest)+)
+        } else {
+            vec![]
+        }
+    }};
+
+    // =========================================================================
+    // @collect guard expression rules
+    // =========================================================================
+
+    // @collect guard expression followed by yield (terminal optimization)
+    // If condition is true, wrap result in vec; otherwise return empty vec
+    (@collect if $condition:expr ; yield $result:expr) => {{
+        if $condition {
+            vec![$result]
+        } else {
+            vec![]
+        }
+    }};
+
+    // @collect guard expression (with following statements)
+    // If condition is true, continue with rest; otherwise return empty vec
+    (@collect if $condition:expr ; $($rest:tt)+) => {{
+        if $condition {
+            $crate::for_!(@collect $($rest)+)
+        } else {
+            vec![]
+        }
+    }};
+
     // @collect let binding with identifier
     (@collect let $pattern:ident = $expr:expr ; $($rest:tt)+) => {{
         let $pattern = $expr;
@@ -328,6 +475,11 @@ macro_rules! for_ {
     (@collect let ($($pattern:tt)*) = $expr:expr ; $($rest:tt)+) => {{
         let ($($pattern)*) = $expr;
         $crate::for_!(@collect $($rest)+)
+    }};
+
+    // @collect terminal case: yield wraps result in vec![]
+    (@collect yield $result:expr) => {{
+        vec![$result]
     }};
 
     // =========================================================================
@@ -352,6 +504,16 @@ macro_rules! for_ {
     // Bind with wildcard pattern - delegates to @collect
     (_ <= $collection:expr ; $($rest:tt)+) => {{
         $crate::for_!(@collect _ <= $collection ; $($rest)+)
+    }};
+
+    // Pattern guard expression - delegates to @collect
+    (if let $pattern:pat = $expr:expr ; $($rest:tt)+) => {{
+        $crate::for_!(@collect if let $pattern = $expr ; $($rest)+)
+    }};
+
+    // Guard expression - delegates to @collect
+    (if $condition:expr ; $($rest:tt)+) => {{
+        $crate::for_!(@collect if $condition ; $($rest)+)
     }};
 
     // Pure let binding with identifier
@@ -532,5 +694,190 @@ mod tests {
             yield x_squared + y
         };
         assert_eq!(result, vec![11, 21, 14, 24]);
+    }
+
+    // =========================================================================
+    // Guard expression tests
+    // =========================================================================
+
+    #[test]
+    fn test_guard_basic_filter() {
+        let result = for_! {
+            x <= vec![1, 2, 3, 4, 5];
+            if x % 2 == 0;
+            yield x
+        };
+        assert_eq!(result, vec![2, 4]);
+    }
+
+    #[test]
+    fn test_guard_all_pass() {
+        let result = for_! {
+            x <= vec![2, 4, 6];
+            if x % 2 == 0;
+            yield x
+        };
+        assert_eq!(result, vec![2, 4, 6]);
+    }
+
+    #[test]
+    fn test_guard_all_fail() {
+        let result = for_! {
+            x <= vec![1, 3, 5];
+            if x % 2 == 0;
+            yield x
+        };
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_guard_empty_collection() {
+        let result = for_! {
+            x <= Vec::<i32>::new();
+            if x > 0;
+            yield x
+        };
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_guard_after_let() {
+        let result = for_! {
+            x <= vec![1, 2, 3, 4, 5];
+            let squared = x * x;
+            if squared > 10;
+            yield squared
+        };
+        assert_eq!(result, vec![16, 25]);
+    }
+
+    #[test]
+    fn test_guard_nested() {
+        let result = for_! {
+            x <= vec![1, 2];
+            y <= vec![10, 20];
+            if x + y > 15;
+            yield (x, y)
+        };
+        assert_eq!(result, vec![(1, 20), (2, 20)]);
+    }
+
+    #[test]
+    fn test_guard_multiple() {
+        let result = for_! {
+            x <= 1..=20i32;
+            if x % 2 == 0;
+            if x > 10;
+            yield x
+        };
+        assert_eq!(result, vec![12, 14, 16, 18, 20]);
+    }
+
+    #[test]
+    fn test_guard_between_binds() {
+        let result = for_! {
+            x <= vec![1, 2, 3];
+            if x % 2 == 1;
+            y <= vec![10, 20];
+            yield (x, y)
+        };
+        assert_eq!(result, vec![(1, 10), (1, 20), (3, 10), (3, 20)]);
+    }
+
+    // =========================================================================
+    // Pattern guard tests
+    // =========================================================================
+
+    #[test]
+    fn test_pattern_guard_option_some() {
+        fn maybe_double(x: i32) -> Option<i32> {
+            if x > 0 { Some(x * 2) } else { None }
+        }
+
+        let result = for_! {
+            x <= vec![-1, 0, 1, 2, 3];
+            if let Some(doubled) = maybe_double(x);
+            yield doubled
+        };
+        assert_eq!(result, vec![2, 4, 6]);
+    }
+
+    #[test]
+    fn test_pattern_guard_result_ok() {
+        let result = for_! {
+            s <= vec!["1", "abc", "2"];
+            if let Ok(n) = s.parse::<i32>();
+            yield n
+        };
+        assert_eq!(result, vec![1, 2]);
+    }
+
+    #[test]
+    fn test_pattern_guard_nested_pattern() {
+        let nested = vec![Some(Some(1)), Some(None), None, Some(Some(2))];
+        let result = for_! {
+            item <= nested;
+            if let Some(Some(value)) = item;
+            yield value
+        };
+        assert_eq!(result, vec![1, 2]);
+    }
+
+    #[test]
+    fn test_pattern_guard_with_regular_guard() {
+        let items = vec![Some(1), None, Some(5), Some(10)];
+        let result = for_! {
+            item <= items;
+            if let Some(value) = item;
+            if value > 3;
+            yield value
+        };
+        assert_eq!(result, vec![5, 10]);
+    }
+
+    #[test]
+    fn test_pattern_guard_with_let_binding() {
+        let items = vec![Some(1), None, Some(2)];
+        let result = for_! {
+            item <= items;
+            if let Some(value) = item;
+            let doubled = value * 2;
+            yield doubled
+        };
+        assert_eq!(result, vec![2, 4]);
+    }
+
+    #[test]
+    fn test_pattern_guard_multiple_consecutive() {
+        let nested = vec![Some(Some(1)), Some(None), None, Some(Some(5))];
+        let result = for_! {
+            item <= nested;
+            if let Some(inner) = item;
+            if let Some(value) = inner;
+            yield value
+        };
+        assert_eq!(result, vec![1, 5]);
+    }
+
+    #[test]
+    fn test_pattern_guard_tuple_nested() {
+        let data = vec![Some((1, "a")), None, Some((2, "b"))];
+        let result = for_! {
+            item <= data;
+            if let Some((num, letter)) = item;
+            yield format!("{}{}", num, letter)
+        };
+        assert_eq!(result, vec!["1a", "2b"]);
+    }
+
+    #[test]
+    fn test_pattern_guard_at_binding() {
+        let items = vec![Some(1), None, Some(2)];
+        let result = for_! {
+            item <= items;
+            if let whole @ Some(_) = item;
+            yield whole
+        };
+        assert_eq!(result, vec![Some(1), Some(2)]);
     }
 }

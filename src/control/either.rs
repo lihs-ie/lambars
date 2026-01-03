@@ -30,6 +30,71 @@
 //! );
 //! assert_eq!(result, "String: hello");
 //! ```
+//!
+//! # `IntoIterator` and Right Bias
+//!
+//! `Either<L, R>` implements `IntoIterator` with a right-biased behavior:
+//!
+//! - `Right(value)` yields `value` once (a 1-element iterator)
+//! - `Left(_)` yields nothing (an empty iterator)
+//!
+//! This is consistent with the Scala `Either` type and allows seamless
+//! integration with the `for_!` macro and Rust's `for` loops.
+//!
+//! ## Using with for_! macro
+//!
+//! ```rust
+//! use lambars::{control::Either, for_};
+//!
+//! // Single Either
+//! let result = for_! {
+//!     value <= Either::<String, i32>::Right(42);
+//!     yield value * 2
+//! };
+//! assert_eq!(result, vec![84]);
+//!
+//! // Flattening Vec<Either>
+//! let eithers = vec![
+//!     Either::<String, i32>::Right(1),
+//!     Either::Left("error".to_string()),
+//!     Either::Right(3),
+//! ];
+//! let result = for_! {
+//!     either <= eithers;
+//!     value <= either;
+//!     yield value * 2
+//! };
+//! assert_eq!(result, vec![2, 6]);
+//! ```
+//!
+//! ## Using with Rust's for loop
+//!
+//! ```rust
+//! use lambars::control::Either;
+//!
+//! let right: Either<String, i32> = Either::Right(42);
+//! for value in right {
+//!     println!("Got value: {}", value);
+//! }
+//!
+//! let left: Either<String, i32> = Either::Left("error".to_string());
+//! for value in left {
+//!     // This block never executes
+//!     println!("Got value: {}", value);
+//! }
+//! ```
+//!
+//! ## Scala Correspondence
+//!
+//! This behavior corresponds to Scala's for-comprehension with Either:
+//!
+//! ```text
+//! // Scala
+//! val result = for {
+//!   x <- Right(42): Either[String, Int]
+//! } yield x * 2
+//! // result: Either[String, Int] = Right(84)
+//! ```
 
 use std::fmt;
 use std::hash::Hash;
@@ -426,6 +491,34 @@ impl<L, R> Either<L, R> {
             Self::Right(value) => (None, Some(value)),
         }
     }
+
+    // =========================================================================
+    // Iterator Methods
+    // =========================================================================
+
+    /// Returns an iterator over a reference to the Right value.
+    ///
+    /// If this is `Right(value)`, the iterator yields `&value` once.
+    /// If this is `Left(_)`, the iterator yields nothing.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::control::Either;
+    ///
+    /// let right: Either<String, i32> = Either::Right(42);
+    /// let mut iter = right.iter();
+    /// assert_eq!(iter.next(), Some(&42));
+    /// assert_eq!(iter.next(), None);
+    ///
+    /// let left: Either<String, i32> = Either::Left("error".to_string());
+    /// let mut iter = left.iter();
+    /// assert_eq!(iter.next(), None);
+    /// ```
+    #[inline]
+    pub fn iter(&self) -> EitherIterator<'_, R> {
+        <&Self as IntoIterator>::into_iter(self)
+    }
 }
 
 // =============================================================================
@@ -549,10 +642,464 @@ impl<L, R> From<Either<L, R>> for Result<R, L> {
     }
 }
 
+// =============================================================================
+// Iterator Types
+// =============================================================================
+
+/// An owning iterator over the Right value of an [`Either`].
+///
+/// This struct is created by the [`into_iter`] method on [`Either`]
+/// (provided by the [`IntoIterator`] trait). See its documentation for more.
+///
+/// [`into_iter`]: IntoIterator::into_iter
+///
+/// # Right Bias
+///
+/// This iterator yields exactly one element if the Either was `Right(value)`,
+/// and zero elements if it was `Left(_)`. This is consistent with the
+/// right-biased behavior of Either in functional programming.
+///
+/// # Examples
+///
+/// ```rust
+/// use lambars::control::Either;
+///
+/// let right: Either<String, i32> = Either::Right(42);
+/// let mut iterator = right.into_iter();
+/// assert_eq!(iterator.next(), Some(42));
+/// assert_eq!(iterator.next(), None);
+///
+/// let left: Either<String, i32> = Either::Left("error".to_string());
+/// let mut iterator = left.into_iter();
+/// assert_eq!(iterator.next(), None);
+/// ```
+pub struct EitherIntoIterator<R> {
+    inner: std::option::IntoIter<R>,
+}
+
+impl<R> EitherIntoIterator<R> {
+    /// Creates a new `EitherIntoIterator` from an optional value.
+    ///
+    /// This is an internal constructor used by the `IntoIterator` implementation.
+    #[inline]
+    fn new(value: Option<R>) -> Self {
+        Self {
+            inner: value.into_iter(),
+        }
+    }
+}
+
+impl<R> Iterator for EitherIntoIterator<R> {
+    type Item = R;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next()
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+
+    #[inline]
+    fn count(self) -> usize {
+        self.inner.count()
+    }
+
+    #[inline]
+    fn last(mut self) -> Option<Self::Item> {
+        self.inner.next_back()
+    }
+
+    #[inline]
+    fn nth(&mut self, n: usize) -> Option<Self::Item> {
+        self.inner.nth(n)
+    }
+}
+
+impl<R> ExactSizeIterator for EitherIntoIterator<R> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+}
+
+impl<R> std::iter::FusedIterator for EitherIntoIterator<R> {}
+
+impl<R> DoubleEndedIterator for EitherIntoIterator<R> {
+    #[inline]
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.inner.next_back()
+    }
+}
+
+/// An iterator over a reference to the Right value of an [`Either`].
+///
+/// This struct is created by the [`into_iter`] method on [`&Either`]
+/// (provided by the [`IntoIterator`] trait). See its documentation for more.
+///
+/// [`into_iter`]: IntoIterator::into_iter
+///
+/// # Right Bias
+///
+/// This iterator yields exactly one reference if the Either is `Right(value)`,
+/// and zero references if it is `Left(_)`. The original Either is not consumed.
+///
+/// # Examples
+///
+/// ```rust
+/// use lambars::control::Either;
+///
+/// let right: Either<String, i32> = Either::Right(42);
+/// for value in &right {
+///     assert_eq!(*value, 42);
+/// }
+/// // right is still usable
+/// assert!(right.is_right());
+/// ```
+pub struct EitherIterator<'a, R> {
+    inner: std::option::IntoIter<&'a R>,
+}
+
+impl<'a, R> EitherIterator<'a, R> {
+    /// Creates a new `EitherIterator` from an optional reference.
+    ///
+    /// This is an internal constructor used by the `IntoIterator` implementation.
+    #[inline]
+    fn new(value: Option<&'a R>) -> Self {
+        Self {
+            inner: value.into_iter(),
+        }
+    }
+}
+
+impl<'a, R> Iterator for EitherIterator<'a, R> {
+    type Item = &'a R;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next()
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+
+    #[inline]
+    fn count(self) -> usize {
+        self.inner.count()
+    }
+
+    #[inline]
+    fn last(self) -> Option<Self::Item> {
+        self.inner.last()
+    }
+
+    #[inline]
+    fn nth(&mut self, n: usize) -> Option<Self::Item> {
+        self.inner.nth(n)
+    }
+}
+
+impl<R> ExactSizeIterator for EitherIterator<'_, R> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+}
+
+impl<R> std::iter::FusedIterator for EitherIterator<'_, R> {}
+
+impl<R> DoubleEndedIterator for EitherIterator<'_, R> {
+    #[inline]
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.inner.next_back()
+    }
+}
+
+// =============================================================================
+// IntoIterator Implementation
+// =============================================================================
+
+impl<L, R> IntoIterator for Either<L, R> {
+    type Item = R;
+    type IntoIter = EitherIntoIterator<R>;
+
+    /// Creates an owning iterator over the Right value.
+    ///
+    /// If this is `Right(value)`, the iterator yields `value` once.
+    /// If this is `Left(_)`, the iterator yields nothing.
+    ///
+    /// This implements the right-biased behavior of Either, consistent with
+    /// the Scala Either type and the Option type in Rust.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::control::Either;
+    ///
+    /// let right: Either<String, i32> = Either::Right(42);
+    /// let collected: Vec<i32> = right.into_iter().collect();
+    /// assert_eq!(collected, vec![42]);
+    ///
+    /// let left: Either<String, i32> = Either::Left("error".to_string());
+    /// let collected: Vec<i32> = left.into_iter().collect();
+    /// assert_eq!(collected, vec![]);
+    /// ```
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        match self {
+            Self::Right(value) => EitherIntoIterator::new(Some(value)),
+            Self::Left(_) => EitherIntoIterator::new(None),
+        }
+    }
+}
+
+impl<'a, L, R> IntoIterator for &'a Either<L, R> {
+    type Item = &'a R;
+    type IntoIter = EitherIterator<'a, R>;
+
+    /// Creates an iterator over a reference to the Right value.
+    ///
+    /// If this is `Right(value)`, the iterator yields `&value` once.
+    /// If this is `Left(_)`, the iterator yields nothing.
+    ///
+    /// The original Either is not consumed and can be used again.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::control::Either;
+    ///
+    /// let right: Either<String, i32> = Either::Right(42);
+    /// for value in &right {
+    ///     assert_eq!(*value, 42);
+    /// }
+    /// // right can still be used
+    /// assert_eq!(right.right(), Some(42));
+    /// ```
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        match self {
+            Either::Right(value) => EitherIterator::new(Some(value)),
+            Either::Left(_) => EitherIterator::new(None),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rstest::rstest;
+
+    // =========================================================================
+    // EitherIntoIterator Tests - Step 1
+    // =========================================================================
+
+    #[rstest]
+    fn test_either_into_iterator_new_some() {
+        let iterator = EitherIntoIterator::new(Some(42));
+        assert_eq!(iterator.len(), 1);
+    }
+
+    #[rstest]
+    fn test_either_into_iterator_new_none() {
+        let iterator: EitherIntoIterator<i32> = EitherIntoIterator::new(None);
+        assert_eq!(iterator.len(), 0);
+    }
+
+    // =========================================================================
+    // EitherIntoIterator Tests - Step 2: Iterator
+    // =========================================================================
+
+    #[rstest]
+    fn test_either_into_iterator_next_some() {
+        let mut iterator = EitherIntoIterator::new(Some(42));
+        assert_eq!(iterator.next(), Some(42));
+        assert_eq!(iterator.next(), None);
+    }
+
+    #[rstest]
+    fn test_either_into_iterator_next_none() {
+        let mut iterator: EitherIntoIterator<i32> = EitherIntoIterator::new(None);
+        assert_eq!(iterator.next(), None);
+    }
+
+    #[rstest]
+    fn test_either_into_iterator_size_hint_some() {
+        let iterator = EitherIntoIterator::new(Some(42));
+        assert_eq!(iterator.size_hint(), (1, Some(1)));
+    }
+
+    #[rstest]
+    fn test_either_into_iterator_size_hint_none() {
+        let iterator: EitherIntoIterator<i32> = EitherIntoIterator::new(None);
+        assert_eq!(iterator.size_hint(), (0, Some(0)));
+    }
+
+    // =========================================================================
+    // EitherIntoIterator Tests - Step 3: Additional Traits
+    // =========================================================================
+
+    #[rstest]
+    fn test_either_into_iterator_exact_size() {
+        let iterator = EitherIntoIterator::new(Some(42));
+        assert_eq!(iterator.len(), 1);
+
+        let iterator: EitherIntoIterator<i32> = EitherIntoIterator::new(None);
+        assert_eq!(iterator.len(), 0);
+    }
+
+    #[rstest]
+    fn test_either_into_iterator_fused() {
+        let mut iterator = EitherIntoIterator::new(Some(42));
+        assert_eq!(iterator.next(), Some(42));
+        assert_eq!(iterator.next(), None);
+        // FusedIterator guarantees this continues to return None
+        assert_eq!(iterator.next(), None);
+        assert_eq!(iterator.next(), None);
+    }
+
+    #[rstest]
+    fn test_either_into_iterator_double_ended() {
+        let mut iterator = EitherIntoIterator::new(Some(42));
+        assert_eq!(iterator.next_back(), Some(42));
+        assert_eq!(iterator.next_back(), None);
+
+        let mut iterator: EitherIntoIterator<i32> = EitherIntoIterator::new(None);
+        assert_eq!(iterator.next_back(), None);
+    }
+
+    // =========================================================================
+    // IntoIterator Tests - Step 4
+    // =========================================================================
+
+    #[rstest]
+    fn test_right_into_iter_yields_value() {
+        let right: Either<String, i32> = Either::Right(42);
+        let mut iterator = right.into_iter();
+        assert_eq!(iterator.next(), Some(42));
+        assert_eq!(iterator.next(), None);
+    }
+
+    #[rstest]
+    fn test_left_into_iter_yields_nothing() {
+        let left: Either<String, i32> = Either::Left("error".to_string());
+        let mut iterator = left.into_iter();
+        assert_eq!(iterator.next(), None);
+    }
+
+    #[rstest]
+    fn test_right_into_iter_collect() {
+        let right: Either<String, i32> = Either::Right(42);
+        let collected: Vec<i32> = right.into_iter().collect();
+        assert_eq!(collected, vec![42]);
+    }
+
+    #[rstest]
+    fn test_left_into_iter_collect() {
+        let left: Either<String, i32> = Either::Left("error".to_string());
+        let collected: Vec<i32> = left.into_iter().collect();
+        assert_eq!(collected, Vec::<i32>::new());
+    }
+
+    #[rstest]
+    fn test_into_iter_for_loop() {
+        let right: Either<String, i32> = Either::Right(42);
+        let mut sum = 0;
+        for value in right {
+            sum += value;
+        }
+        assert_eq!(sum, 42);
+
+        let left: Either<String, i32> = Either::Left("error".to_string());
+        let mut count = 0;
+        for _ in left {
+            count += 1;
+        }
+        assert_eq!(count, 0);
+    }
+
+    // =========================================================================
+    // EitherIterator Tests - Step 5
+    // =========================================================================
+
+    #[rstest]
+    fn test_either_iterator_new_some() {
+        let value = 42;
+        let iterator = EitherIterator::new(Some(&value));
+        assert_eq!(iterator.len(), 1);
+    }
+
+    #[rstest]
+    fn test_either_iterator_new_none() {
+        let iterator: EitherIterator<'_, i32> = EitherIterator::new(None);
+        assert_eq!(iterator.len(), 0);
+    }
+
+    #[rstest]
+    fn test_either_iterator_next() {
+        let value = 42;
+        let mut iterator = EitherIterator::new(Some(&value));
+        assert_eq!(iterator.next(), Some(&42));
+        assert_eq!(iterator.next(), None);
+    }
+
+    // =========================================================================
+    // IntoIterator for &Either Tests - Step 6
+    // =========================================================================
+
+    #[rstest]
+    fn test_right_ref_into_iter() {
+        let right: Either<String, i32> = Either::Right(42);
+        let collected: Vec<&i32> = (&right).into_iter().collect();
+        assert_eq!(collected, vec![&42]);
+        // right is still usable
+        assert!(right.is_right());
+    }
+
+    #[rstest]
+    fn test_left_ref_into_iter() {
+        let left: Either<String, i32> = Either::Left("error".to_string());
+        let collected: Vec<&i32> = (&left).into_iter().collect();
+        assert_eq!(collected, Vec::<&i32>::new());
+        // left is still usable
+        assert!(left.is_left());
+    }
+
+    #[rstest]
+    fn test_ref_iter_does_not_consume() {
+        let right: Either<String, i32> = Either::Right(42);
+
+        // First iteration
+        let mut sum = 0;
+        for value in &right {
+            sum += value;
+        }
+        assert_eq!(sum, 42);
+
+        // Second iteration - right is still usable
+        let collected: Vec<&i32> = (&right).into_iter().collect();
+        assert_eq!(collected, vec![&42]);
+    }
+
+    #[rstest]
+    fn test_ref_iter_flat_map() {
+        let eithers = [
+            Either::<String, i32>::Right(1),
+            Either::Left("error".to_string()),
+            Either::Right(3),
+        ];
+
+        let sum: i32 = eithers.iter().flat_map(|either| either.into_iter()).sum();
+        assert_eq!(sum, 4); // 1 + 3
+    }
+
+    // =========================================================================
+    // Original Tests
+    // =========================================================================
 
     #[rstest]
     fn test_either_left_construction() {
