@@ -5,7 +5,7 @@
 
 #![cfg(feature = "async")]
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use lambars::effect::AsyncIO;
 use lambars::for_;
 use lambars::for_async;
@@ -41,16 +41,20 @@ fn benchmark_async_single_iteration(criterion: &mut Criterion) {
         );
 
         // for_! macro (sync baseline)
-        group.bench_with_input(BenchmarkId::new("for_macro_sync", size), &size, |bencher, _| {
-            let data_clone = data.clone();
-            bencher.iter(|| {
-                let result = for_! {
-                    x <= data_clone.clone();
-                    yield black_box(x * 2)
-                };
-                black_box(result)
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("for_macro_sync", size),
+            &size,
+            |bencher, _| {
+                let data_clone = data.clone();
+                bencher.iter(|| {
+                    let result = for_! {
+                        x <= data_clone.clone();
+                        yield black_box(x * 2)
+                    };
+                    black_box(result)
+                });
+            },
+        );
     }
 
     group.finish();
@@ -200,18 +204,22 @@ fn benchmark_async_let_binding(criterion: &mut Criterion) {
         );
 
         // for_! macro with let binding (sync baseline)
-        group.bench_with_input(BenchmarkId::new("for_macro_sync", size), &size, |bencher, _| {
-            let data_clone = data.clone();
-            bencher.iter(|| {
-                let result = for_! {
-                    x <= data_clone.clone();
-                    let doubled = x * 2;
-                    let squared = doubled * doubled;
-                    yield black_box(squared)
-                };
-                black_box(result)
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("for_macro_sync", size),
+            &size,
+            |bencher, _| {
+                let data_clone = data.clone();
+                bencher.iter(|| {
+                    let result = for_! {
+                        x <= data_clone.clone();
+                        let doubled = x * 2;
+                        let squared = doubled * doubled;
+                        yield black_box(squared)
+                    };
+                    black_box(result)
+                });
+            },
+        );
     }
 
     group.finish();
@@ -246,22 +254,26 @@ fn benchmark_multiple_async_binds(criterion: &mut Criterion) {
         });
 
         // for_async! macro with three AsyncIO binds
-        group.bench_with_input(BenchmarkId::new("three_binds", size), &size, |bencher, _| {
-            let data_clone = data.clone();
-            bencher.iter(|| {
-                let data_inner = data_clone.clone();
-                runtime.block_on(async move {
-                    let result = for_async! {
-                        x <= data_inner;
-                        a <~ AsyncIO::pure(x + 1);
-                        b <~ AsyncIO::pure(a * 2);
-                        c <~ AsyncIO::pure(b + 10);
-                        yield black_box(c)
-                    };
-                    black_box(result.run_async().await)
-                })
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("three_binds", size),
+            &size,
+            |bencher, _| {
+                let data_clone = data.clone();
+                bencher.iter(|| {
+                    let data_inner = data_clone.clone();
+                    runtime.block_on(async move {
+                        let result = for_async! {
+                            x <= data_inner;
+                            a <~ AsyncIO::pure(x + 1);
+                            b <~ AsyncIO::pure(a * 2);
+                            c <~ AsyncIO::pure(b + 10);
+                            yield black_box(c)
+                        };
+                        black_box(result.run_async().await)
+                    })
+                });
+            },
+        );
     }
 
     group.finish();

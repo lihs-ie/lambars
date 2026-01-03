@@ -5,7 +5,7 @@
 
 #![cfg(feature = "compose")]
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use lambars::for_;
 
 // =============================================================================
@@ -39,7 +39,8 @@ fn benchmark_single_iteration(criterion: &mut Criterion) {
             &data,
             |bencher, data| {
                 bencher.iter(|| {
-                    let result: Vec<i32> = data.clone().into_iter().map(|x| black_box(x * 2)).collect();
+                    let result: Vec<i32> =
+                        data.clone().into_iter().map(|x| black_box(x * 2)).collect();
                     black_box(result)
                 });
             },
