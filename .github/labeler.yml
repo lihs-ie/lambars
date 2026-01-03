@@ -1,0 +1,59 @@
+# PR Labeler configuration
+# https://github.com/actions/labeler
+
+# Module labels
+typeclass:
+  - changed-files:
+      - any-glob-to-any-file: 'src/typeclass/**/*'
+
+compose:
+  - changed-files:
+      - any-glob-to-any-file: 'src/compose/**/*'
+
+control:
+  - changed-files:
+      - any-glob-to-any-file: 'src/control/**/*'
+
+persistent-data:
+  - changed-files:
+      - any-glob-to-any-file: 'src/persistent/**/*'
+
+optics:
+  - changed-files:
+      - any-glob-to-any-file: 'src/optics/**/*'
+
+effect-system:
+  - changed-files:
+      - any-glob-to-any-file: 'src/effect/**/*'
+
+# Infrastructure labels
+ci:
+  - changed-files:
+      - any-glob-to-any-file: '.github/**/*'
+
+documentation:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/*.md'
+          - 'docs/**/*'
+
+tests:
+  - changed-files:
+      - any-glob-to-any-file: 'tests/**/*'
+
+macro:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'lambars-derive/**/*'
+          - 'src/**/*_macro.rs'
+
+benchmarks:
+  - changed-files:
+      - any-glob-to-any-file: 'benches/**/*'
+
+dependencies:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'Cargo.toml'
+          - 'Cargo.lock'
+          - 'lambars-derive/Cargo.toml'
