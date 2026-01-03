@@ -3,6 +3,8 @@
 //! These tests verify that the for_! macro works correctly
 //! with lambars' persistent data structures.
 
+#![cfg(feature = "compose")]
+
 use lambars::for_;
 use lambars::persistent::{PersistentHashMap, PersistentList, PersistentVector};
 

@@ -3,6 +3,8 @@
 //! These tests verify that the for_! macro correctly implements
 //! Scala-style for-comprehension over iterators.
 
+#![cfg(feature = "compose")]
+
 use lambars::for_;
 
 // =============================================================================

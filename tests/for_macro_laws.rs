@@ -3,6 +3,8 @@
 //! These tests verify that the for_! macro behaves equivalently
 //! to explicit iterator operations (map, flat_map, collect).
 
+#![cfg(feature = "compose")]
+
 use lambars::for_;
 use proptest::prelude::*;
 
