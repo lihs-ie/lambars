@@ -1,0 +1,1358 @@
+# Phase 14: Either<L, R> IntoIterator 実装計画
+# TDD スタイルによる段階的実装
+
+version: "1.0.0"
+created_at: "2026-01-03"
+phase_id: phase_14
+requirement_reference: docs/phase_14_requirements/phase_14_either_into_iterator.yaml
+
+# =============================================================================
+# 概要
+# =============================================================================
+
+overview:
+  goal: |
+    Either<L, R> に IntoIterator トレイトを実装し、for_! マクロで
+    直接使用可能にする。Right バイアスの動作により、Right(value) の場合のみ
+    イテレーションが行われ、Left(_) の場合はスキップされる。
+
+  scope:
+    - EitherIntoIterator<R> 構造体の定義と Iterator 実装
+    - EitherIterator<'a, R> 構造体の定義と Iterator 実装（参照版）
+    - IntoIterator for Either<L, R>（所有権版）の実装
+    - IntoIterator for &Either<L, R>（参照版）の実装
+    - ExactSizeIterator, FusedIterator, DoubleEndedIterator の実装
+    - for_! マクロとの統合確認
+
+  design_decisions:
+    - name: Option を内部データ構造として使用
+      rationale: |
+        Either の Right バイアス動作は Option と同じパターンである。
+        Right(value) -> Some(value), Left(_) -> None として扱うことで、
+        Option の IntoIter を内部的に活用し、実装を簡潔かつ安全に保つ。
+
+    - name: 専用イテレータ型を定義
+      rationale: |
+        型エイリアスではなく専用構造体を定義することで、
+        将来の拡張（例: Left バイアスイテレータ）に対応しやすくする。
+        また、ドキュメントや型シグネチャが明確になる。
+
+    - name: std::option::IntoIter を内部で使用
+      rationale: |
+        車輪の再発明を避け、標準ライブラリの安定した実装を活用する。
+        ExactSizeIterator, FusedIterator, DoubleEndedIterator が
+        自動的に正しく動作する。
+
+  non_goals:
+    - Left バイアスの IntoIterator 実装
+    - IterMut（Either は不変として扱う設計）
+    - FromIterator の実装
+
+# =============================================================================
+# TDD ステップ分割
+# =============================================================================
+
+steps:
+  # ---------------------------------------------------------------------------
+  # Step 1: EitherIntoIterator 構造体とテスト
+  # ---------------------------------------------------------------------------
+  - id: step_1
+    name: EitherIntoIterator 構造体の定義
+    description: |
+      Either<L, R> の所有権を消費するイテレータ構造体を定義する。
+      内部的に std::option::IntoIter<R> を使用する。
+
+    tdd_phase: red_to_green
+
+    tests_to_add:
+      - location: src/control/either.rs (inline)
+        test_name: test_either_into_iterator_new_some
+        code: |
+          #[rstest]
+          fn test_either_into_iterator_new_some() {
+              let iterator = EitherIntoIterator::new(Some(42));
+              assert_eq!(iterator.len(), 1);
+          }
+
+      - location: src/control/either.rs (inline)
+        test_name: test_either_into_iterator_new_none
+        code: |
+          #[rstest]
+          fn test_either_into_iterator_new_none() {
+              let iterator: EitherIntoIterator<i32> = EitherIntoIterator::new(None);
+              assert_eq!(iterator.len(), 0);
+          }
+
+    code_to_add:
+      - location: src/control/either.rs
+        description: EitherIntoIterator 構造体の定義
+        code: |
+          // =============================================================================
+          // Iterator Types
+          // =============================================================================
+
+          /// An owning iterator over the Right value of an [`Either`].
+          ///
+          /// This struct is created by the [`into_iter`] method on [`Either`]
+          /// (provided by the [`IntoIterator`] trait). See its documentation for more.
+          ///
+          /// [`into_iter`]: IntoIterator::into_iter
+          ///
+          /// # Right Bias
+          ///
+          /// This iterator yields exactly one element if the Either was `Right(value)`,
+          /// and zero elements if it was `Left(_)`. This is consistent with the
+          /// right-biased behavior of Either in functional programming.
+          ///
+          /// # Examples
+          ///
+          /// ```rust
+          /// use lambars::control::Either;
+          ///
+          /// let right: Either<String, i32> = Either::Right(42);
+          /// let mut iterator = right.into_iter();
+          /// assert_eq!(iterator.next(), Some(42));
+          /// assert_eq!(iterator.next(), None);
+          ///
+          /// let left: Either<String, i32> = Either::Left("error".to_string());
+          /// let mut iterator = left.into_iter();
+          /// assert_eq!(iterator.next(), None);
+          /// ```
+          pub struct EitherIntoIterator<R> {
+              inner: std::option::IntoIter<R>,
+          }
+
+          impl<R> EitherIntoIterator<R> {
+              /// Creates a new `EitherIntoIterator` from an optional value.
+              ///
+              /// This is an internal constructor used by the `IntoIterator` implementation.
+              #[inline]
+              fn new(value: Option<R>) -> Self {
+                  Self {
+                      inner: value.into_iter(),
+                  }
+              }
+          }
+
+    expected_behavior: |
+      EitherIntoIterator 構造体が定義され、new メソッドで Some/None から
+      イテレータを作成できる。
+
+  # ---------------------------------------------------------------------------
+  # Step 2: Iterator トレイト実装
+  # ---------------------------------------------------------------------------
+  - id: step_2
+    name: EitherIntoIterator の Iterator トレイト実装
+    description: |
+      EitherIntoIterator に Iterator トレイトを実装する。
+      内部の std::option::IntoIter に委譲する。
+
+    tdd_phase: red_to_green
+
+    tests_to_add:
+      - location: src/control/either.rs (inline)
+        test_name: test_either_into_iterator_next_some
+        code: |
+          #[rstest]
+          fn test_either_into_iterator_next_some() {
+              let mut iterator = EitherIntoIterator::new(Some(42));
+              assert_eq!(iterator.next(), Some(42));
+              assert_eq!(iterator.next(), None);
+          }
+
+      - location: src/control/either.rs (inline)
+        test_name: test_either_into_iterator_next_none
+        code: |
+          #[rstest]
+          fn test_either_into_iterator_next_none() {
+              let mut iterator: EitherIntoIterator<i32> = EitherIntoIterator::new(None);
+              assert_eq!(iterator.next(), None);
+          }
+
+      - location: src/control/either.rs (inline)
+        test_name: test_either_into_iterator_size_hint_some
+        code: |
+          #[rstest]
+          fn test_either_into_iterator_size_hint_some() {
+              let iterator = EitherIntoIterator::new(Some(42));
+              assert_eq!(iterator.size_hint(), (1, Some(1)));
+          }
+
+      - location: src/control/either.rs (inline)
+        test_name: test_either_into_iterator_size_hint_none
+        code: |
+          #[rstest]
+          fn test_either_into_iterator_size_hint_none() {
+              let iterator: EitherIntoIterator<i32> = EitherIntoIterator::new(None);
+              assert_eq!(iterator.size_hint(), (0, Some(0)));
+          }
+
+    code_to_add:
+      - location: src/control/either.rs
+        description: Iterator トレイト実装
+        code: |
+          impl<R> Iterator for EitherIntoIterator<R> {
+              type Item = R;
+
+              #[inline]
+              fn next(&mut self) -> Option<Self::Item> {
+                  self.inner.next()
+              }
+
+              #[inline]
+              fn size_hint(&self) -> (usize, Option<usize>) {
+                  self.inner.size_hint()
+              }
+
+              #[inline]
+              fn count(self) -> usize {
+                  self.inner.count()
+              }
+
+              #[inline]
+              fn last(self) -> Option<Self::Item> {
+                  self.inner.last()
+              }
+
+              #[inline]
+              fn nth(&mut self, n: usize) -> Option<Self::Item> {
+                  self.inner.nth(n)
+              }
+          }
+
+    expected_behavior: |
+      EitherIntoIterator が Iterator として動作し、next, size_hint,
+      count, last, nth メソッドが正しく機能する。
+
+  # ---------------------------------------------------------------------------
+  # Step 3: ExactSizeIterator, FusedIterator, DoubleEndedIterator 実装
+  # ---------------------------------------------------------------------------
+  - id: step_3
+    name: 追加のイテレータトレイト実装
+    description: |
+      EitherIntoIterator に ExactSizeIterator, FusedIterator, DoubleEndedIterator を実装する。
+      これらは std::option::IntoIter が実装しているため、委譲で実装可能。
+
+    tdd_phase: red_to_green
+
+    tests_to_add:
+      - location: src/control/either.rs (inline)
+        test_name: test_either_into_iterator_exact_size
+        code: |
+          #[rstest]
+          fn test_either_into_iterator_exact_size() {
+              let iterator = EitherIntoIterator::new(Some(42));
+              assert_eq!(iterator.len(), 1);
+
+              let iterator: EitherIntoIterator<i32> = EitherIntoIterator::new(None);
+              assert_eq!(iterator.len(), 0);
+          }
+
+      - location: src/control/either.rs (inline)
+        test_name: test_either_into_iterator_fused
+        code: |
+          #[rstest]
+          fn test_either_into_iterator_fused() {
+              let mut iterator = EitherIntoIterator::new(Some(42));
+              assert_eq!(iterator.next(), Some(42));
+              assert_eq!(iterator.next(), None);
+              // FusedIterator guarantees this continues to return None
+              assert_eq!(iterator.next(), None);
+              assert_eq!(iterator.next(), None);
+          }
+
+      - location: src/control/either.rs (inline)
+        test_name: test_either_into_iterator_double_ended
+        code: |
+          #[rstest]
+          fn test_either_into_iterator_double_ended() {
+              let mut iterator = EitherIntoIterator::new(Some(42));
+              assert_eq!(iterator.next_back(), Some(42));
+              assert_eq!(iterator.next_back(), None);
+
+              let mut iterator: EitherIntoIterator<i32> = EitherIntoIterator::new(None);
+              assert_eq!(iterator.next_back(), None);
+          }
+
+    code_to_add:
+      - location: src/control/either.rs
+        description: 追加トレイト実装
+        code: |
+          impl<R> ExactSizeIterator for EitherIntoIterator<R> {
+              #[inline]
+              fn len(&self) -> usize {
+                  self.inner.len()
+              }
+          }
+
+          impl<R> std::iter::FusedIterator for EitherIntoIterator<R> {}
+
+          impl<R> DoubleEndedIterator for EitherIntoIterator<R> {
+              #[inline]
+              fn next_back(&mut self) -> Option<Self::Item> {
+                  self.inner.next_back()
+              }
+          }
+
+    expected_behavior: |
+      EitherIntoIterator が ExactSizeIterator, FusedIterator, DoubleEndedIterator を
+      正しく実装し、len(), next_back() が動作する。
+
+  # ---------------------------------------------------------------------------
+  # Step 4: IntoIterator for Either<L, R> 実装
+  # ---------------------------------------------------------------------------
+  - id: step_4
+    name: IntoIterator for Either<L, R> 実装（所有権版）
+    description: |
+      Either<L, R> に IntoIterator を実装する。
+      Right(value) は value を yield し、Left(_) は何も yield しない。
+
+    tdd_phase: red_to_green
+
+    tests_to_add:
+      - location: src/control/either.rs (inline)
+        test_name: test_right_into_iter_yields_value
+        code: |
+          #[rstest]
+          fn test_right_into_iter_yields_value() {
+              let right: Either<String, i32> = Either::Right(42);
+              let mut iterator = right.into_iter();
+              assert_eq!(iterator.next(), Some(42));
+              assert_eq!(iterator.next(), None);
+          }
+
+      - location: src/control/either.rs (inline)
+        test_name: test_left_into_iter_yields_nothing
+        code: |
+          #[rstest]
+          fn test_left_into_iter_yields_nothing() {
+              let left: Either<String, i32> = Either::Left("error".to_string());
+              let mut iterator = left.into_iter();
+              assert_eq!(iterator.next(), None);
+          }
+
+      - location: src/control/either.rs (inline)
+        test_name: test_right_into_iter_collect
+        code: |
+          #[rstest]
+          fn test_right_into_iter_collect() {
+              let right: Either<String, i32> = Either::Right(42);
+              let collected: Vec<i32> = right.into_iter().collect();
+              assert_eq!(collected, vec![42]);
+          }
+
+      - location: src/control/either.rs (inline)
+        test_name: test_left_into_iter_collect
+        code: |
+          #[rstest]
+          fn test_left_into_iter_collect() {
+              let left: Either<String, i32> = Either::Left("error".to_string());
+              let collected: Vec<i32> = left.into_iter().collect();
+              assert_eq!(collected, Vec::<i32>::new());
+          }
+
+      - location: src/control/either.rs (inline)
+        test_name: test_into_iter_for_loop
+        code: |
+          #[rstest]
+          fn test_into_iter_for_loop() {
+              let right: Either<String, i32> = Either::Right(42);
+              let mut sum = 0;
+              for value in right {
+                  sum += value;
+              }
+              assert_eq!(sum, 42);
+
+              let left: Either<String, i32> = Either::Left("error".to_string());
+              let mut count = 0;
+              for _ in left {
+                  count += 1;
+              }
+              assert_eq!(count, 0);
+          }
+
+    code_to_add:
+      - location: src/control/either.rs
+        description: IntoIterator 実装（所有権版）
+        code: |
+          // =============================================================================
+          // IntoIterator Implementation
+          // =============================================================================
+
+          impl<L, R> IntoIterator for Either<L, R> {
+              type Item = R;
+              type IntoIter = EitherIntoIterator<R>;
+
+              /// Creates an owning iterator over the Right value.
+              ///
+              /// If this is `Right(value)`, the iterator yields `value` once.
+              /// If this is `Left(_)`, the iterator yields nothing.
+              ///
+              /// This implements the right-biased behavior of Either, consistent with
+              /// the Scala Either type and the Option type in Rust.
+              ///
+              /// # Examples
+              ///
+              /// ```rust
+              /// use lambars::control::Either;
+              ///
+              /// let right: Either<String, i32> = Either::Right(42);
+              /// let collected: Vec<i32> = right.into_iter().collect();
+              /// assert_eq!(collected, vec![42]);
+              ///
+              /// let left: Either<String, i32> = Either::Left("error".to_string());
+              /// let collected: Vec<i32> = left.into_iter().collect();
+              /// assert_eq!(collected, vec![]);
+              /// ```
+              #[inline]
+              fn into_iter(self) -> Self::IntoIter {
+                  match self {
+                      Either::Right(value) => EitherIntoIterator::new(Some(value)),
+                      Either::Left(_) => EitherIntoIterator::new(None),
+                  }
+              }
+          }
+
+    expected_behavior: |
+      Either<L, R> が IntoIterator を実装し、for ループや collect で使用可能になる。
+      Right(value) は value を yield し、Left(_) は空のイテレータを返す。
+
+  # ---------------------------------------------------------------------------
+  # Step 5: EitherIterator 構造体（参照版）
+  # ---------------------------------------------------------------------------
+  - id: step_5
+    name: EitherIterator 構造体の定義（参照版）
+    description: |
+      &Either<L, R> に対するイテレータ構造体を定義する。
+      std::option::Iter を内部で使用する。
+
+    tdd_phase: red_to_green
+
+    tests_to_add:
+      - location: src/control/either.rs (inline)
+        test_name: test_either_iterator_new_some
+        code: |
+          #[rstest]
+          fn test_either_iterator_new_some() {
+              let value = 42;
+              let iterator = EitherIterator::new(Some(&value));
+              assert_eq!(iterator.len(), 1);
+          }
+
+      - location: src/control/either.rs (inline)
+        test_name: test_either_iterator_new_none
+        code: |
+          #[rstest]
+          fn test_either_iterator_new_none() {
+              let iterator: EitherIterator<'_, i32> = EitherIterator::new(None);
+              assert_eq!(iterator.len(), 0);
+          }
+
+      - location: src/control/either.rs (inline)
+        test_name: test_either_iterator_next
+        code: |
+          #[rstest]
+          fn test_either_iterator_next() {
+              let value = 42;
+              let mut iterator = EitherIterator::new(Some(&value));
+              assert_eq!(iterator.next(), Some(&42));
+              assert_eq!(iterator.next(), None);
+          }
+
+    code_to_add:
+      - location: src/control/either.rs
+        description: EitherIterator 構造体（参照版）
+        code: |
+          /// An iterator over a reference to the Right value of an [`Either`].
+          ///
+          /// This struct is created by the [`into_iter`] method on [`&Either`]
+          /// (provided by the [`IntoIterator`] trait). See its documentation for more.
+          ///
+          /// [`into_iter`]: IntoIterator::into_iter
+          ///
+          /// # Right Bias
+          ///
+          /// This iterator yields exactly one reference if the Either is `Right(value)`,
+          /// and zero references if it is `Left(_)`. The original Either is not consumed.
+          ///
+          /// # Examples
+          ///
+          /// ```rust
+          /// use lambars::control::Either;
+          ///
+          /// let right: Either<String, i32> = Either::Right(42);
+          /// for value in &right {
+          ///     assert_eq!(*value, 42);
+          /// }
+          /// // right is still usable
+          /// assert!(right.is_right());
+          /// ```
+          pub struct EitherIterator<'a, R> {
+              inner: std::option::Iter<'a, R>,
+          }
+
+          impl<'a, R> EitherIterator<'a, R> {
+              /// Creates a new `EitherIterator` from an optional reference.
+              ///
+              /// This is an internal constructor used by the `IntoIterator` implementation.
+              #[inline]
+              fn new(value: Option<&'a R>) -> Self {
+                  Self {
+                      inner: value.into_iter(),
+                  }
+              }
+          }
+
+          impl<'a, R> Iterator for EitherIterator<'a, R> {
+              type Item = &'a R;
+
+              #[inline]
+              fn next(&mut self) -> Option<Self::Item> {
+                  self.inner.next()
+              }
+
+              #[inline]
+              fn size_hint(&self) -> (usize, Option<usize>) {
+                  self.inner.size_hint()
+              }
+
+              #[inline]
+              fn count(self) -> usize {
+                  self.inner.count()
+              }
+
+              #[inline]
+              fn last(self) -> Option<Self::Item> {
+                  self.inner.last()
+              }
+
+              #[inline]
+              fn nth(&mut self, n: usize) -> Option<Self::Item> {
+                  self.inner.nth(n)
+              }
+          }
+
+          impl<R> ExactSizeIterator for EitherIterator<'_, R> {
+              #[inline]
+              fn len(&self) -> usize {
+                  self.inner.len()
+              }
+          }
+
+          impl<R> std::iter::FusedIterator for EitherIterator<'_, R> {}
+
+          impl<R> DoubleEndedIterator for EitherIterator<'_, R> {
+              #[inline]
+              fn next_back(&mut self) -> Option<Self::Item> {
+                  self.inner.next_back()
+              }
+          }
+
+    expected_behavior: |
+      EitherIterator が定義され、参照に対する Iterator として動作する。
+      ExactSizeIterator, FusedIterator, DoubleEndedIterator も実装される。
+
+  # ---------------------------------------------------------------------------
+  # Step 6: IntoIterator for &Either<L, R> 実装
+  # ---------------------------------------------------------------------------
+  - id: step_6
+    name: IntoIterator for &Either<L, R> 実装（参照版）
+    description: |
+      &Either<L, R> に IntoIterator を実装する。
+      Either を消費せずにイテレーションが可能になる。
+
+    tdd_phase: red_to_green
+
+    tests_to_add:
+      - location: src/control/either.rs (inline)
+        test_name: test_right_ref_into_iter
+        code: |
+          #[rstest]
+          fn test_right_ref_into_iter() {
+              let right: Either<String, i32> = Either::Right(42);
+              let collected: Vec<&i32> = (&right).into_iter().collect();
+              assert_eq!(collected, vec![&42]);
+              // right is still usable
+              assert!(right.is_right());
+          }
+
+      - location: src/control/either.rs (inline)
+        test_name: test_left_ref_into_iter
+        code: |
+          #[rstest]
+          fn test_left_ref_into_iter() {
+              let left: Either<String, i32> = Either::Left("error".to_string());
+              let collected: Vec<&i32> = (&left).into_iter().collect();
+              assert_eq!(collected, Vec::<&i32>::new());
+              // left is still usable
+              assert!(left.is_left());
+          }
+
+      - location: src/control/either.rs (inline)
+        test_name: test_ref_iter_does_not_consume
+        code: |
+          #[rstest]
+          fn test_ref_iter_does_not_consume() {
+              let right: Either<String, i32> = Either::Right(42);
+
+              // First iteration
+              let mut sum = 0;
+              for value in &right {
+                  sum += value;
+              }
+              assert_eq!(sum, 42);
+
+              // Second iteration - right is still usable
+              let collected: Vec<&i32> = (&right).into_iter().collect();
+              assert_eq!(collected, vec![&42]);
+          }
+
+      - location: src/control/either.rs (inline)
+        test_name: test_ref_iter_flat_map
+        code: |
+          #[rstest]
+          fn test_ref_iter_flat_map() {
+              let eithers = vec![
+                  Either::<String, i32>::Right(1),
+                  Either::Left("error".to_string()),
+                  Either::Right(3),
+              ];
+
+              let sum: i32 = eithers.iter()
+                  .flat_map(|either| either.into_iter())
+                  .sum();
+              assert_eq!(sum, 4);  // 1 + 3
+          }
+
+    code_to_add:
+      - location: src/control/either.rs
+        description: IntoIterator 実装（参照版）
+        code: |
+          impl<'a, L, R> IntoIterator for &'a Either<L, R> {
+              type Item = &'a R;
+              type IntoIter = EitherIterator<'a, R>;
+
+              /// Creates an iterator over a reference to the Right value.
+              ///
+              /// If this is `Right(value)`, the iterator yields `&value` once.
+              /// If this is `Left(_)`, the iterator yields nothing.
+              ///
+              /// The original Either is not consumed and can be used again.
+              ///
+              /// # Examples
+              ///
+              /// ```rust
+              /// use lambars::control::Either;
+              ///
+              /// let right: Either<String, i32> = Either::Right(42);
+              /// for value in &right {
+              ///     assert_eq!(*value, 42);
+              /// }
+              /// // right can still be used
+              /// assert_eq!(right.right(), Some(42));
+              /// ```
+              #[inline]
+              fn into_iter(self) -> Self::IntoIter {
+                  match self {
+                      Either::Right(value) => EitherIterator::new(Some(value)),
+                      Either::Left(_) => EitherIterator::new(None),
+                  }
+              }
+          }
+
+    expected_behavior: |
+      &Either<L, R> が IntoIterator を実装し、Either を消費せずに
+      イテレーションが可能になる。
+
+  # ---------------------------------------------------------------------------
+  # Step 7: for_! マクロ統合テスト
+  # ---------------------------------------------------------------------------
+  - id: step_7
+    name: for_! マクロとの統合テスト
+    description: |
+      Either を for_! マクロで使用するテストを追加する。
+      様々なパターンでの動作を検証する。
+
+    tdd_phase: integration_test
+
+    tests_to_add:
+      - location: tests/either_for_macro_tests.rs
+        description: for_! マクロとの統合テスト
+        code: |
+          //! Integration tests for Either with for_! macro.
+
+          use lambars::control::Either;
+          use lambars::for_;
+          use rstest::rstest;
+
+          // =============================================================================
+          // Basic Usage Tests
+          // =============================================================================
+
+          #[rstest]
+          fn test_for_macro_with_right() {
+              let result = for_! {
+                  x <= Either::<String, i32>::Right(42);
+                  yield x * 2
+              };
+              assert_eq!(result, vec![84]);
+          }
+
+          #[rstest]
+          fn test_for_macro_with_left() {
+              let result = for_! {
+                  x <= Either::<String, i32>::Left("error".to_string());
+                  yield x * 2
+              };
+              assert_eq!(result, Vec::<i32>::new());
+          }
+
+          // =============================================================================
+          // Nested Iteration Tests
+          // =============================================================================
+
+          #[rstest]
+          fn test_for_macro_nested_either() {
+              let numbers = vec![1, 2, 3];
+              let multiplier: Either<String, i32> = Either::Right(10);
+
+              let result = for_! {
+                  n <= numbers;
+                  m <= multiplier.clone();
+                  yield n * m
+              };
+              assert_eq!(result, vec![10, 20, 30]);
+          }
+
+          #[rstest]
+          fn test_for_macro_nested_either_left() {
+              let numbers = vec![1, 2, 3];
+              let multiplier: Either<String, i32> = Either::Left("error".to_string());
+
+              let result = for_! {
+                  n <= numbers;
+                  m <= multiplier.clone();
+                  yield n * m
+              };
+              assert_eq!(result, Vec::<i32>::new());
+          }
+
+          // =============================================================================
+          // Vec<Either> Flattening Tests
+          // =============================================================================
+
+          #[rstest]
+          fn test_for_macro_vec_either_flatten() {
+              let eithers = vec![
+                  Either::<String, i32>::Right(1),
+                  Either::Left("error".to_string()),
+                  Either::Right(3),
+              ];
+
+              let result = for_! {
+                  either <= eithers;
+                  value <= either;
+                  yield value * 2
+              };
+              assert_eq!(result, vec![2, 6]);
+          }
+
+          #[rstest]
+          fn test_for_macro_vec_either_all_left() {
+              let eithers = vec![
+                  Either::<String, i32>::Left("error1".to_string()),
+                  Either::Left("error2".to_string()),
+              ];
+
+              let result = for_! {
+                  either <= eithers;
+                  value <= either;
+                  yield value * 2
+              };
+              assert_eq!(result, Vec::<i32>::new());
+          }
+
+          #[rstest]
+          fn test_for_macro_vec_either_all_right() {
+              let eithers = vec![
+                  Either::<String, i32>::Right(1),
+                  Either::Right(2),
+                  Either::Right(3),
+              ];
+
+              let result = for_! {
+                  either <= eithers;
+                  value <= either;
+                  yield value
+              };
+              assert_eq!(result, vec![1, 2, 3]);
+          }
+
+          // =============================================================================
+          // Guard Expression Tests
+          // =============================================================================
+
+          #[rstest]
+          fn test_for_macro_either_with_guard() {
+              let eithers = vec![
+                  Either::<String, i32>::Right(1),
+                  Either::Right(2),
+                  Either::Right(3),
+                  Either::Left("error".to_string()),
+              ];
+
+              let result = for_! {
+                  either <= eithers;
+                  value <= either;
+                  if value % 2 == 1;
+                  yield value
+              };
+              assert_eq!(result, vec![1, 3]);
+          }
+
+          #[rstest]
+          fn test_for_macro_either_with_multiple_guards() {
+              let eithers = vec![
+                  Either::<String, i32>::Right(1),
+                  Either::Right(5),
+                  Either::Right(10),
+                  Either::Right(15),
+              ];
+
+              let result = for_! {
+                  either <= eithers;
+                  value <= either;
+                  if value > 3;
+                  if value < 12;
+                  yield value
+              };
+              assert_eq!(result, vec![5, 10]);
+          }
+
+          // =============================================================================
+          // Let Binding Tests
+          // =============================================================================
+
+          #[rstest]
+          fn test_for_macro_either_with_let() {
+              let result = for_! {
+                  x <= Either::<String, i32>::Right(42);
+                  let doubled = x * 2;
+                  let tripled = doubled + x;
+                  yield tripled
+              };
+              assert_eq!(result, vec![126]);  // 42 * 2 + 42 = 126
+          }
+
+          #[rstest]
+          fn test_for_macro_either_with_let_and_guard() {
+              let eithers = vec![
+                  Either::<String, i32>::Right(10),
+                  Either::Right(20),
+                  Either::Right(30),
+              ];
+
+              let result = for_! {
+                  either <= eithers;
+                  value <= either;
+                  let doubled = value * 2;
+                  if doubled > 25;
+                  yield doubled
+              };
+              assert_eq!(result, vec![40, 60]);
+          }
+
+          // =============================================================================
+          // Complex Scenario Tests
+          // =============================================================================
+
+          #[rstest]
+          fn test_error_handling_pipeline() {
+              fn parse_int(s: &str) -> Either<String, i32> {
+                  s.parse::<i32>()
+                      .map(Either::Right)
+                      .unwrap_or_else(|_| Either::Left(format!("Failed to parse: {}", s)))
+              }
+
+              let inputs = vec!["1", "2", "not_a_number", "4"];
+              let eithers: Vec<Either<String, i32>> = inputs.iter().map(|s| parse_int(s)).collect();
+
+              let result = for_! {
+                  either <= eithers;
+                  value <= either;
+                  yield value * 10
+              };
+              assert_eq!(result, vec![10, 20, 40]);
+          }
+
+          #[rstest]
+          fn test_validation_chain() {
+              fn validate_positive(n: i32) -> Either<String, i32> {
+                  if n > 0 {
+                      Either::Right(n)
+                  } else {
+                      Either::Left("Must be positive".to_string())
+                  }
+              }
+
+              fn validate_even(n: i32) -> Either<String, i32> {
+                  if n % 2 == 0 {
+                      Either::Right(n)
+                  } else {
+                      Either::Left("Must be even".to_string())
+                  }
+              }
+
+              let numbers = vec![-2, 1, 2, 3, 4];
+
+              let result = for_! {
+                  n <= numbers;
+                  positive <= validate_positive(n);
+                  even <= validate_even(positive);
+                  yield even
+              };
+              assert_eq!(result, vec![2, 4]);
+          }
+
+          #[rstest]
+          fn test_mixed_option_either() {
+              let option_value: Option<i32> = Some(10);
+              let either_value: Either<String, i32> = Either::Right(5);
+
+              let result = for_! {
+                  x <= option_value;
+                  y <= either_value.clone();
+                  yield x + y
+              };
+              assert_eq!(result, vec![15]);
+          }
+
+          #[rstest]
+          fn test_mixed_option_either_none() {
+              let option_value: Option<i32> = None;
+              let either_value: Either<String, i32> = Either::Right(5);
+
+              let result = for_! {
+                  x <= option_value;
+                  y <= either_value.clone();
+                  yield x + y
+              };
+              assert_eq!(result, Vec::<i32>::new());
+          }
+
+          #[rstest]
+          fn test_mixed_option_either_left() {
+              let option_value: Option<i32> = Some(10);
+              let either_value: Either<String, i32> = Either::Left("error".to_string());
+
+              let result = for_! {
+                  x <= option_value;
+                  y <= either_value.clone();
+                  yield x + y
+              };
+              assert_eq!(result, Vec::<i32>::new());
+          }
+
+    expected_behavior: |
+      Either を for_! マクロで直接使用でき、様々なパターン
+      （ネスト、ガード式、let 束縛、Vec<Either> のフラット化）が
+      正しく動作する。
+
+  # ---------------------------------------------------------------------------
+  # Step 8: プロパティテスト
+  # ---------------------------------------------------------------------------
+  - id: step_8
+    name: プロパティテストの追加
+    description: |
+      イテレータ法則と Right バイアス動作を proptest で検証する。
+
+    tdd_phase: property_test
+
+    tests_to_add:
+      - location: tests/either_iterator_laws.rs
+        description: イテレータのプロパティテスト
+        code: |
+          //! Property-based tests for Either IntoIterator implementation.
+
+          use lambars::control::Either;
+          use proptest::prelude::*;
+
+          // =============================================================================
+          // Strategy Definitions
+          // =============================================================================
+
+          fn arb_either_i32() -> impl Strategy<Value = Either<String, i32>> {
+              prop_oneof![
+                  any::<i32>().prop_map(Either::Right),
+                  "[a-z]{1,10}".prop_map(Either::Left),
+              ]
+          }
+
+          // =============================================================================
+          // Iterator Law Tests
+          // =============================================================================
+
+          proptest! {
+              /// size_hint must be accurate for Either iterators.
+              /// For Either, size_hint is always exact (0 or 1).
+              #[test]
+              fn prop_size_hint_matches_count(either in arb_either_i32()) {
+                  let iterator = either.clone().into_iter();
+                  let (lower, upper) = iterator.size_hint();
+                  let count = either.into_iter().count();
+
+                  prop_assert!(lower <= count);
+                  prop_assert!(upper == Some(count));
+              }
+
+              /// ExactSizeIterator::len must match count.
+              #[test]
+              fn prop_len_matches_count(either in arb_either_i32()) {
+                  let iterator = either.clone().into_iter();
+                  let len = iterator.len();
+                  let count = either.into_iter().count();
+
+                  prop_assert_eq!(len, count);
+              }
+
+              /// collect().len() must match count.
+              #[test]
+              fn prop_collect_len_matches_count(either in arb_either_i32()) {
+                  let collected: Vec<_> = either.clone().into_iter().collect();
+                  let count = either.into_iter().count();
+
+                  prop_assert_eq!(collected.len(), count);
+              }
+          }
+
+          // =============================================================================
+          // Right Bias Tests
+          // =============================================================================
+
+          proptest! {
+              /// Right(x).into_iter().collect() == vec![x]
+              #[test]
+              fn prop_right_yields_value(value: i32) {
+                  let right: Either<String, i32> = Either::Right(value);
+                  let collected: Vec<i32> = right.into_iter().collect();
+
+                  prop_assert_eq!(collected, vec![value]);
+              }
+
+              /// Left(e).into_iter().collect() == vec![]
+              #[test]
+              fn prop_left_yields_nothing(error in "[a-z]{1,10}") {
+                  let left: Either<String, i32> = Either::Left(error);
+                  let collected: Vec<i32> = left.into_iter().collect();
+
+                  prop_assert_eq!(collected, Vec::<i32>::new());
+              }
+
+              /// Right(x).into_iter().next() == Some(x)
+              #[test]
+              fn prop_right_next_is_some(value: i32) {
+                  let right: Either<String, i32> = Either::Right(value);
+                  let next = right.into_iter().next();
+
+                  prop_assert_eq!(next, Some(value));
+              }
+
+              /// Left(e).into_iter().next() == None
+              #[test]
+              fn prop_left_next_is_none(error in "[a-z]{1,10}") {
+                  let left: Either<String, i32> = Either::Left(error);
+                  let next = left.into_iter().next();
+
+                  prop_assert_eq!(next, None);
+              }
+          }
+
+          // =============================================================================
+          // Reference Iterator Tests
+          // =============================================================================
+
+          proptest! {
+              /// &Right(x).into_iter().collect() == vec![&x]
+              #[test]
+              fn prop_right_ref_yields_reference(value: i32) {
+                  let right: Either<String, i32> = Either::Right(value);
+                  let collected: Vec<&i32> = (&right).into_iter().collect();
+
+                  prop_assert_eq!(collected, vec![&value]);
+                  // right should still be usable
+                  prop_assert!(right.is_right());
+              }
+
+              /// &Left(e).into_iter().collect() == vec![]
+              #[test]
+              fn prop_left_ref_yields_nothing(error in "[a-z]{1,10}") {
+                  let left: Either<String, i32> = Either::Left(error.clone());
+                  let collected: Vec<&i32> = (&left).into_iter().collect();
+
+                  prop_assert_eq!(collected, Vec::<&i32>::new());
+                  // left should still be usable
+                  prop_assert!(left.is_left());
+              }
+          }
+
+          // =============================================================================
+          // FusedIterator Tests
+          // =============================================================================
+
+          proptest! {
+              /// FusedIterator: after returning None, always returns None.
+              #[test]
+              fn prop_fused_iterator(either in arb_either_i32()) {
+                  let mut iterator = either.into_iter();
+
+                  // Exhaust the iterator
+                  while iterator.next().is_some() {}
+
+                  // FusedIterator guarantees continued None
+                  prop_assert!(iterator.next().is_none());
+                  prop_assert!(iterator.next().is_none());
+                  prop_assert!(iterator.next().is_none());
+              }
+          }
+
+          // =============================================================================
+          // DoubleEndedIterator Tests
+          // =============================================================================
+
+          proptest! {
+              /// DoubleEndedIterator: next_back on Right returns the value.
+              #[test]
+              fn prop_double_ended_right(value: i32) {
+                  let right: Either<String, i32> = Either::Right(value);
+                  let mut iterator = right.into_iter();
+
+                  prop_assert_eq!(iterator.next_back(), Some(value));
+                  prop_assert_eq!(iterator.next_back(), None);
+              }
+
+              /// DoubleEndedIterator: next_back on Left returns None.
+              #[test]
+              fn prop_double_ended_left(error in "[a-z]{1,10}") {
+                  let left: Either<String, i32> = Either::Left(error);
+                  let mut iterator = left.into_iter();
+
+                  prop_assert_eq!(iterator.next_back(), None);
+              }
+          }
+
+    expected_behavior: |
+      全てのプロパティテストがパスし、イテレータ法則と Right バイアス動作が
+      任意の入力に対して正しく動作することが確認される。
+
+  # ---------------------------------------------------------------------------
+  # Step 9: ドキュメント更新
+  # ---------------------------------------------------------------------------
+  - id: step_9
+    name: ドキュメントの更新
+    description: |
+      Either モジュールのドキュメントを更新し、IntoIterator の使用例と
+      Right バイアスの説明を追加する。
+
+    tdd_phase: documentation
+
+    documentation_to_add:
+      - location: src/control/either.rs (module doc)
+        description: モジュールドキュメントに IntoIterator の説明を追加
+        content: |
+          以下のセクションをモジュールドキュメントに追加:
+
+          ## IntoIterator and Right Bias
+
+          `Either<L, R>` implements `IntoIterator` with a right-biased behavior:
+
+          - `Right(value)` yields `value` once (a 1-element iterator)
+          - `Left(_)` yields nothing (an empty iterator)
+
+          This is consistent with the Scala `Either` type and allows seamless
+          integration with the `for_!` macro and Rust's `for` loops.
+
+          ### Using with for_! macro
+
+          ```rust
+          use lambars::{control::Either, for_};
+
+          // Single Either
+          let result = for_! {
+              value <= Either::<String, i32>::Right(42);
+              yield value * 2
+          };
+          assert_eq!(result, vec![84]);
+
+          // Flattening Vec<Either>
+          let eithers = vec![
+              Either::<String, i32>::Right(1),
+              Either::Left("error".to_string()),
+              Either::Right(3),
+          ];
+          let result = for_! {
+              either <= eithers;
+              value <= either;
+              yield value * 2
+          };
+          assert_eq!(result, vec![2, 6]);
+          ```
+
+          ### Scala Correspondence
+
+          This behavior corresponds to Scala's for-comprehension with Either:
+
+          ```scala
+          // Scala
+          val result = for {
+            x <- Right(42): Either[String, Int]
+          } yield x * 2
+          // result: Either[String, Int] = Right(84)
+          ```
+
+    expected_behavior: |
+      ドキュメントが更新され、IntoIterator と for_! マクロの使用方法が
+      明確に説明される。
+
+# =============================================================================
+# ファイル変更一覧
+# =============================================================================
+
+file_changes:
+  - path: src/control/either.rs
+    changes:
+      - description: EitherIntoIterator 構造体の追加
+        lines: "~50 行"
+      - description: EitherIterator 構造体の追加
+        lines: "~40 行"
+      - description: IntoIterator for Either<L, R> の追加
+        lines: "~25 行"
+      - description: IntoIterator for &Either<L, R> の追加
+        lines: "~25 行"
+      - description: インラインテストの追加
+        lines: "~100 行"
+      - description: モジュールドキュメントの更新
+        lines: "~50 行"
+
+  - path: tests/either_for_macro_tests.rs
+    changes:
+      - description: 新規ファイル作成
+        lines: "~200 行"
+    status: new_file
+
+  - path: tests/either_iterator_laws.rs
+    changes:
+      - description: 新規ファイル作成
+        lines: "~150 行"
+    status: new_file
+
+# =============================================================================
+# チェックリスト
+# =============================================================================
+
+checklist:
+  implementation:
+    - id: check_1
+      description: EitherIntoIterator 構造体が定義されている
+      status: pending
+
+    - id: check_2
+      description: EitherIntoIterator が Iterator を実装している
+      status: pending
+
+    - id: check_3
+      description: EitherIntoIterator が ExactSizeIterator を実装している
+      status: pending
+
+    - id: check_4
+      description: EitherIntoIterator が FusedIterator を実装している
+      status: pending
+
+    - id: check_5
+      description: EitherIntoIterator が DoubleEndedIterator を実装している
+      status: pending
+
+    - id: check_6
+      description: Either<L, R> が IntoIterator を実装している
+      status: pending
+
+    - id: check_7
+      description: EitherIterator 構造体が定義されている
+      status: pending
+
+    - id: check_8
+      description: EitherIterator が Iterator, ExactSizeIterator, FusedIterator, DoubleEndedIterator を実装している
+      status: pending
+
+    - id: check_9
+      description: "&Either<L, R> が IntoIterator を実装している"
+      status: pending
+
+  tests:
+    - id: check_10
+      description: Right の場合に正しく値が yield される
+      status: pending
+
+    - id: check_11
+      description: Left の場合に空のイテレータが返される
+      status: pending
+
+    - id: check_12
+      description: for_! マクロで使用可能
+      status: pending
+
+    - id: check_13
+      description: Vec<Either> のフラット化が動作する
+      status: pending
+
+    - id: check_14
+      description: ガード式との組み合わせが動作する
+      status: pending
+
+    - id: check_15
+      description: let 束縛との組み合わせが動作する
+      status: pending
+
+    - id: check_16
+      description: プロパティテストがパスする
+      status: pending
+
+  code_quality:
+    - id: check_17
+      description: clippy 警告がない
+      status: pending
+
+    - id: check_18
+      description: "#![forbid(unsafe_code)] を維持"
+      status: pending
+
+    - id: check_19
+      description: 略語を使用していない
+      status: pending
+
+    - id: check_20
+      description: ドキュメントが更新されている
+      status: pending
+
+    - id: check_21
+      description: 全てのテストがパスする
+      status: pending
+
+# =============================================================================
+# 参照
+# =============================================================================
+
+references:
+  - name: 要件定義
+    path: docs/phase_14_requirements/phase_14_either_into_iterator.yaml
+
+  - name: 既存の Either 実装
+    path: src/control/either.rs
+
+  - name: PersistentList の IntoIterator 実装（参考）
+    path: src/persistent/list.rs
+
+  - name: Rust 標準ライブラリ Option IntoIterator
+    url: https://doc.rust-lang.org/std/option/enum.Option.html#impl-IntoIterator-for-Option%3CT%3E
+
+  - name: Rust 標準ライブラリ Iterator トレイト
+    url: https://doc.rust-lang.org/std/iter/trait.Iterator.html

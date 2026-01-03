@@ -1,0 +1,1178 @@
+# Phase 15: Pattern Guard (if let) Implementation Plan
+# for_! および for_async! マクロへのパターンガード（if let）サポート追加の実装計画
+# TDD アプローチに基づく段階的実装
+
+version: "1.0.0"
+created_at: "2026-01-03"
+phase_id: phase_15
+requirements_document: docs/phase_15_requirements/phase_15_pattern_guard.yaml
+
+# =============================================================================
+# 実装概要
+# =============================================================================
+
+implementation_overview:
+  description: |
+    for_! および for_async! マクロにパターンガード（if let pattern = expression;）を追加する。
+    既存のマクロルールの構造を維持しつつ、適切な位置に if let パターンを追加する。
+    TDD アプローチにより、テストを先に書いてから実装を進める。
+
+  approach: |
+    1. マクロの内部ルール（@collect, @inner）に if let パターンを追加
+    2. 既存のガード式ルール（if condition;）との順序を適切に設定
+       - if let を先にマッチさせる（より具体的なパターンを優先）
+    3. for_! は vec![] を返すことでスキップを実現
+    4. for_async! は何もしない（push しない）ことでスキップを実現
+
+  key_considerations:
+    - パターンは `$($pattern:tt)+` として受け取る（複雑なパターンに対応）
+    - `if let` は `if` より先にマッチさせる必要がある
+    - 既存のガード式（if condition;）との共存を維持
+    - セミコロン必須により、他のパターンとの競合を回避
+    - 既存のテストが引き続き通過することを確認
+
+  macro_pattern_explanation: |
+    パターンマッチングには `$($pattern:tt)+` を使用する理由:
+
+    1. `$pattern:pat` は単純なパターンのみマッチ
+       - Some(x) は OK
+       - Some((a, b)) は構文上の問題が発生する可能性
+
+    2. `$($pattern:tt)+` は任意のトークン列にマッチ
+       - ネストしたパターン: Some(Some(x))
+       - 構造体パターン: Point { x, y }
+       - @ バインディング: value @ Some(_)
+       - タプルパターン: (a, (b, c))
+
+    3. マクロ展開時に `if let $($pattern)+ = $expr` として再構成
+
+# =============================================================================
+# 実装ステップ
+# =============================================================================
+
+implementation_steps:
+
+  # ---------------------------------------------------------------------------
+  # Step 1: テストファイルの作成（Red Phase）
+  # ---------------------------------------------------------------------------
+  - step: 1
+    name: 統合テストファイルの作成
+    description: |
+      パターンガードの動作を検証する統合テストファイルを作成する。
+      テストは最初は失敗する（Red Phase）。
+
+    tdd_phase: red
+
+    artifacts:
+      - path: tests/for_pattern_guard_tests.rs
+        action: create
+
+    test_cases:
+      - name: test_pattern_guard_option_some
+        description: Option の Some バリアント抽出
+        code: |
+          #[test]
+          fn test_pattern_guard_option_some() {
+              fn maybe_double(x: i32) -> Option<i32> {
+                  if x > 0 { Some(x * 2) } else { None }
+              }
+
+              let result = for_! {
+                  x <= vec![-1, 0, 1, 2, 3];
+                  if let Some(doubled) = maybe_double(x);
+                  yield doubled
+              };
+              assert_eq!(result, vec![2, 4, 6]);
+          }
+
+      - name: test_pattern_guard_option_none
+        description: Option の None バリアントマッチ
+        code: |
+          #[test]
+          fn test_pattern_guard_option_none() {
+              let items = vec![Some(1), None, Some(2), None, None];
+              let result = for_! {
+                  item <= items;
+                  if let None = item;
+                  yield "none"
+              };
+              assert_eq!(result, vec!["none", "none", "none"]);
+          }
+
+      - name: test_pattern_guard_result_ok
+        description: Result の Ok バリアント抽出
+        code: |
+          #[test]
+          fn test_pattern_guard_result_ok() {
+              let result = for_! {
+                  s <= vec!["1", "abc", "2", "xyz", "3"];
+                  if let Ok(n) = s.parse::<i32>();
+                  yield n
+              };
+              assert_eq!(result, vec![1, 2, 3]);
+          }
+
+      - name: test_pattern_guard_result_err
+        description: Result の Err バリアント抽出
+        code: |
+          #[test]
+          fn test_pattern_guard_result_err() {
+              let result = for_! {
+                  s <= vec!["1", "abc", "2", "xyz"];
+                  if let Err(_) = s.parse::<i32>();
+                  yield s
+              };
+              assert_eq!(result, vec!["abc", "xyz"]);
+          }
+
+      - name: test_pattern_guard_all_match
+        description: 全要素がパターンにマッチする場合
+        code: |
+          #[test]
+          fn test_pattern_guard_all_match() {
+              let items = vec![Some(1), Some(2), Some(3)];
+              let result = for_! {
+                  item <= items;
+                  if let Some(value) = item;
+                  yield value
+              };
+              assert_eq!(result, vec![1, 2, 3]);
+          }
+
+      - name: test_pattern_guard_none_match
+        description: 全要素がパターンにマッチしない場合
+        code: |
+          #[test]
+          fn test_pattern_guard_none_match() {
+              let items: Vec<Option<i32>> = vec![None, None, None];
+              let result = for_! {
+                  item <= items;
+                  if let Some(value) = item;
+                  yield value
+              };
+              assert!(result.is_empty());
+          }
+
+      - name: test_pattern_guard_tuple
+        description: タプルパターン
+        code: |
+          #[test]
+          fn test_pattern_guard_tuple() {
+              let pairs = vec![(1, 2), (3, 4), (5, 6)];
+              let result = for_! {
+                  pair <= pairs;
+                  if let (a, b) = pair;
+                  yield a + b
+              };
+              assert_eq!(result, vec![3, 7, 11]);
+          }
+
+      - name: test_pattern_guard_struct
+        description: 構造体パターン
+        code: |
+          #[test]
+          fn test_pattern_guard_struct() {
+              #[derive(Clone)]
+              struct Point { x: i32, y: i32 }
+
+              let points = vec![
+                  Point { x: 1, y: 2 },
+                  Point { x: 3, y: 4 },
+              ];
+              let result = for_! {
+                  p <= points;
+                  if let Point { x, y } = p;
+                  yield x + y
+              };
+              assert_eq!(result, vec![3, 7]);
+          }
+
+      - name: test_pattern_guard_enum_variant
+        description: カスタム enum バリアントパターン
+        code: |
+          #[test]
+          fn test_pattern_guard_enum_variant() {
+              #[derive(Clone)]
+              enum Event {
+                  Click { x: i32, y: i32 },
+                  KeyPress(char),
+                  Resize(u32, u32),
+              }
+
+              let events = vec![
+                  Event::Click { x: 10, y: 20 },
+                  Event::KeyPress('a'),
+                  Event::Resize(800, 600),
+                  Event::Click { x: 30, y: 40 },
+              ];
+
+              let result = for_! {
+                  event <= events;
+                  if let Event::Click { x, y } = event;
+                  yield (x, y)
+              };
+              assert_eq!(result, vec![(10, 20), (30, 40)]);
+          }
+
+      - name: test_pattern_guard_at_binding
+        description: @ バインディングパターン
+        code: |
+          #[test]
+          fn test_pattern_guard_at_binding() {
+              let items = vec![Some(1), None, Some(2)];
+              let result = for_! {
+                  item <= items;
+                  if let whole @ Some(value) = item;
+                  yield (whole, value)
+              };
+              assert_eq!(result, vec![(Some(1), 1), (Some(2), 2)]);
+          }
+
+      - name: test_pattern_guard_nested
+        description: ネストしたパターン
+        code: |
+          #[test]
+          fn test_pattern_guard_nested() {
+              let nested = vec![Some(Some(1)), Some(None), None, Some(Some(2))];
+              let result = for_! {
+                  item <= nested;
+                  if let Some(Some(value)) = item;
+                  yield value
+              };
+              assert_eq!(result, vec![1, 2]);
+          }
+
+      - name: test_pattern_guard_wildcard
+        description: ワイルドカード付きパターン
+        code: |
+          #[test]
+          fn test_pattern_guard_wildcard() {
+              let items = vec![Some(1), None, Some(2)];
+              let result = for_! {
+                  item <= items.clone();
+                  if let Some(_) = item;
+                  yield "matched"
+              };
+              assert_eq!(result, vec!["matched", "matched"]);
+          }
+
+      - name: test_pattern_guard_with_regular_guard
+        description: パターンガードと通常ガードの組み合わせ
+        code: |
+          #[test]
+          fn test_pattern_guard_with_regular_guard() {
+              let items = vec![Some(1), None, Some(5), Some(10)];
+              let result = for_! {
+                  item <= items;
+                  if let Some(value) = item;
+                  if value > 3;
+                  yield value
+              };
+              assert_eq!(result, vec![5, 10]);
+          }
+
+      - name: test_pattern_guard_with_let_binding
+        description: パターンガードと let 束縛の組み合わせ
+        code: |
+          #[test]
+          fn test_pattern_guard_with_let_binding() {
+              let items = vec![Some(1), None, Some(2), Some(3)];
+              let result = for_! {
+                  item <= items;
+                  if let Some(value) = item;
+                  let doubled = value * 2;
+                  yield doubled
+              };
+              assert_eq!(result, vec![2, 4, 6]);
+          }
+
+      - name: test_pattern_guard_multiple_consecutive
+        description: 連続した複数のパターンガード
+        code: |
+          #[test]
+          fn test_pattern_guard_multiple_consecutive() {
+              fn maybe_parse(s: &str) -> Option<i32> {
+                  s.parse().ok()
+              }
+
+              fn maybe_double(n: i32) -> Option<i32> {
+                  if n > 0 { Some(n * 2) } else { None }
+              }
+
+              let result = for_! {
+                  s <= vec!["1", "abc", "-5", "10"];
+                  if let Some(n) = maybe_parse(s);
+                  if let Some(doubled) = maybe_double(n);
+                  yield doubled
+              };
+              assert_eq!(result, vec![2, 20]);
+          }
+
+      - name: test_pattern_guard_with_nested_iteration
+        description: ネストイテレーションでのパターンガード
+        code: |
+          #[test]
+          fn test_pattern_guard_with_nested_iteration() {
+              let outer = vec![Some(vec![1, 2]), None, Some(vec![3, 4])];
+              let result = for_! {
+                  opt <= outer;
+                  if let Some(inner) = opt;
+                  x <= inner;
+                  yield x * 10
+              };
+              assert_eq!(result, vec![10, 20, 30, 40]);
+          }
+
+    async_test_cases:
+      - name: test_async_pattern_guard_option_some
+        description: for_async! での基本的なパターンガード
+        code: |
+          #[tokio::test]
+          async fn test_async_pattern_guard_option_some() {
+              use lambars::for_async;
+
+              fn maybe_double(x: i32) -> Option<i32> {
+                  if x > 0 { Some(x * 2) } else { None }
+              }
+
+              let result = for_async! {
+                  x <= vec![-1, 0, 1, 2, 3];
+                  if let Some(doubled) = maybe_double(x);
+                  yield doubled
+              };
+              assert_eq!(result.run_async().await, vec![2, 4, 6]);
+          }
+
+      - name: test_async_pattern_guard_with_async_bind
+        description: AsyncIO バインドとパターンガードの組み合わせ
+        code: |
+          #[tokio::test]
+          async fn test_async_pattern_guard_with_async_bind() {
+              use lambars::for_async;
+              use lambars::effect::AsyncIO;
+
+              let result = for_async! {
+                  x <= vec![1, 2, 3];
+                  opt <~ AsyncIO::pure(if x > 1 { Some(x * 10) } else { None });
+                  if let Some(value) = opt;
+                  yield value
+              };
+              assert_eq!(result.run_async().await, vec![20, 30]);
+          }
+
+      - name: test_async_pattern_guard_multiple
+        description: for_async! での複数パターンガード
+        code: |
+          #[tokio::test]
+          async fn test_async_pattern_guard_multiple() {
+              use lambars::for_async;
+
+              let items = vec![Some(Some(1)), Some(None), None, Some(Some(5))];
+              let result = for_async! {
+                  item <= items;
+                  if let Some(inner) = item;
+                  if let Some(value) = inner;
+                  yield value
+              };
+              assert_eq!(result.run_async().await, vec![1, 5]);
+          }
+
+      - name: test_async_pattern_guard_with_regular_guard
+        description: for_async! でのパターンガードと通常ガードの組み合わせ
+        code: |
+          #[tokio::test]
+          async fn test_async_pattern_guard_with_regular_guard() {
+              use lambars::for_async;
+
+              let items = vec![Some(1), None, Some(5), Some(10)];
+              let result = for_async! {
+                  item <= items;
+                  if let Some(value) = item;
+                  if value > 3;
+                  yield value
+              };
+              assert_eq!(result.run_async().await, vec![5, 10]);
+          }
+
+      - name: test_async_pattern_guard_result_ok
+        description: for_async! での Result パターンガード
+        code: |
+          #[tokio::test]
+          async fn test_async_pattern_guard_result_ok() {
+              use lambars::for_async;
+
+              let result = for_async! {
+                  s <= vec!["1", "abc", "2"];
+                  if let Ok(n) = s.parse::<i32>();
+                  yield n
+              };
+              assert_eq!(result.run_async().await, vec![1, 2]);
+          }
+
+      - name: test_async_pattern_guard_with_let
+        description: for_async! でのパターンガードと let の組み合わせ
+        code: |
+          #[tokio::test]
+          async fn test_async_pattern_guard_with_let() {
+              use lambars::for_async;
+
+              let items = vec![Some(1), None, Some(2)];
+              let result = for_async! {
+                  item <= items;
+                  if let Some(value) = item;
+                  let doubled = value * 2;
+                  yield doubled
+              };
+              assert_eq!(result.run_async().await, vec![2, 4]);
+          }
+
+      - name: test_async_pattern_guard_nested_pattern
+        description: for_async! でのネストしたパターン
+        code: |
+          #[tokio::test]
+          async fn test_async_pattern_guard_nested_pattern() {
+              use lambars::for_async;
+
+              let data = vec![Some((1, "a")), None, Some((2, "b"))];
+              let result = for_async! {
+                  item <= data;
+                  if let Some((num, letter)) = item;
+                  yield format!("{}{}", num, letter)
+              };
+              assert_eq!(result.run_async().await, vec!["1a", "2b"]);
+          }
+
+      - name: test_async_pattern_guard_struct
+        description: for_async! での構造体パターン
+        code: |
+          #[tokio::test]
+          async fn test_async_pattern_guard_struct() {
+              use lambars::for_async;
+
+              #[derive(Clone)]
+              struct Person { name: String, age: Option<u32> }
+
+              let people = vec![
+                  Person { name: "Alice".into(), age: Some(30) },
+                  Person { name: "Bob".into(), age: None },
+                  Person { name: "Charlie".into(), age: Some(25) },
+              ];
+
+              let result = for_async! {
+                  person <= people;
+                  if let Person { name, age: Some(a) } = person;
+                  yield (name, a)
+              };
+              assert_eq!(result.run_async().await, vec![
+                  ("Alice".to_string(), 30),
+                  ("Charlie".to_string(), 25),
+              ]);
+          }
+
+  # ---------------------------------------------------------------------------
+  # Step 2: for_! マクロへのパターンガードルール追加（Green Phase）
+  # ---------------------------------------------------------------------------
+  - step: 2
+    name: for_! マクロへのパターンガードルール追加
+    description: |
+      for_! マクロの @collect 内部ルールにパターンガードパターンを追加する。
+      ルールの配置順序に注意し、既存のガード式ルールより前に配置する。
+
+    tdd_phase: green
+
+    artifacts:
+      - path: src/compose/for_macro.rs
+        action: modify
+
+    implementation_details:
+      rule_placement: |
+        @collect ルールの中で、以下の順序でルールを配置する:
+
+        1. 既存の単一イテレーション最適化ルール（yield 直前）
+        2. 既存のネストイテレーションルール
+        3. 【新規】パターンガードルール（if let ... = ...;）← 通常ガードより前
+        4. 既存のガード式ルール（if condition;）
+        5. 既存の let 束縛ルール
+        6. Terminal case
+
+        重要: `if let` は `if` より具体的なパターンなので、先にマッチさせる必要がある。
+
+      new_rules: |
+        // =========================================================================
+        // @collect パターンガードルール（if let pattern = expression;）
+        // =========================================================================
+
+        // @collect パターンガード（後続の処理あり）
+        // $($pattern:tt)+ で任意の複雑なパターンにマッチ
+        (@collect if let $($pattern:tt)+ = $expr:expr ; $($rest:tt)+) => {{
+            if let $($pattern)+ = $expr {
+                $crate::for_!(@collect $($rest)+)
+            } else {
+                vec![]
+            }
+        }};
+
+      insertion_point: |
+        行381-384の間（既存のガード式ルールの直前）に挿入する。
+        これにより、`if let` が `if` より先にマッチされる。
+
+        現在の行番号（src/compose/for_macro.rs）:
+        - 行381-383: @collect guard expression rules のコメントセクション
+        - 行385-393: @collect if $condition ; yield $result （terminal optimization）
+        - 行395-403: @collect if $condition ; $($rest)+ （non-terminal）
+
+    code_changes:
+      - description: "@collect パターンガードルールの追加"
+        location: "行381（@collect guard expression rules の直後）"
+        before: |
+          // =========================================================================
+          // @collect guard expression rules
+          // =========================================================================
+
+          // @collect guard expression followed by yield (terminal optimization)
+        after: |
+          // =========================================================================
+          // @collect pattern guard rules (if let pattern = expression;)
+          // Must be placed BEFORE regular guard rules for correct matching
+          // =========================================================================
+
+          // @collect pattern guard (with following statements)
+          // Uses $($pattern:tt)+ to match any complex pattern
+          (@collect if let $($pattern:tt)+ = $expr:expr ; $($rest:tt)+) => {{
+              if let $($pattern)+ = $expr {
+                  $crate::for_!(@collect $($rest)+)
+              } else {
+                  vec![]
+              }
+          }};
+
+          // =========================================================================
+          // @collect guard expression rules
+          // =========================================================================
+
+          // @collect guard expression followed by yield (terminal optimization)
+
+      - description: "公開エントリポイントにパターンガードルールを追加"
+        location: "行446-449（公開ガード式ルールの直前）"
+        note: |
+          for_! では `if` から始まるケースを公開エントリポイントとしてサポートしている。
+          パターンガード（if let）も同様に公開エントリポイントとして追加する。
+          既存の `(if $condition:expr ; $($rest:tt)+)` の直前に配置する。
+        before: |
+          // Guard expression - delegates to @collect
+          (if $condition:expr ; $($rest:tt)+) => {{
+        after: |
+          // Pattern guard expression - delegates to @collect
+          (if let $($pattern:tt)+ = $expr:expr ; $($rest:tt)+) => {{
+              $crate::for_!(@collect if let $($pattern)+ = $expr ; $($rest)+)
+          }};
+
+          // Guard expression - delegates to @collect
+          (if $condition:expr ; $($rest:tt)+) => {{
+
+    verification:
+      - 既存の全テストが通過すること
+      - 新規のパターンガードテストが通過すること
+      - clippy 警告がないこと
+
+  # ---------------------------------------------------------------------------
+  # Step 3: for_async! マクロへのパターンガードルール追加（Green Phase）
+  # ---------------------------------------------------------------------------
+  - step: 3
+    name: for_async! マクロへのパターンガードルール追加
+    description: |
+      for_async! マクロの @inner 内部ルールにパターンガードパターンを追加する。
+
+    tdd_phase: green
+
+    artifacts:
+      - path: src/compose/for_async_macro.rs
+        action: modify
+
+    implementation_details:
+      rule_placement: |
+        @inner ルールの中で、以下の順序でルールを配置する:
+
+        1. Terminal case: yield expression
+        2. 【新規】パターンガードルール（if let ... = ...;）← 通常ガードより前
+        3. 既存のガード式ルール（if condition;）
+        4. AsyncIO bind rules
+        5. Collection bind rules
+        6. Pure let binding rules
+
+      new_rules: |
+        // @inner パターンガード（後続の処理あり）
+        // Uses $($pattern:tt)+ to match any complex pattern
+        (@inner $results:ident; if let $($pattern:tt)+ = $expr:expr ; $($rest:tt)+) => {{
+            if let $($pattern)+ = $expr {
+                $crate::for_async!(@inner $results; $($rest)+);
+            }
+        }};
+
+      insertion_point: |
+        行317-319の間（Terminal case の直後、既存ガード式ルールの直前）に挿入する。
+
+        現在の行番号（src/compose/for_async_macro.rs）:
+        - 行312-315: Terminal case: yield expression
+        - 行317-319: @inner guard expression rules のコメントセクション
+        - 行321-327: @inner if $condition ; $($rest)+ （non-terminal）
+
+      public_entry_point_note: |
+        for_async! では `if` から始まる公開エントリポイントをサポートしていない。
+        for_async! は常に `pattern <= collection;` から開始する設計であり、
+        パターンガード（if let）や通常ガード（if）のみでマクロを開始することは想定していない。
+        したがって、for_async! にはパターンガードの公開エントリポイントルールは追加しない。
+        パターンガードは @inner ルールとして内部処理でのみ使用される。
+
+    code_changes:
+      - description: "@inner パターンガードルールの追加"
+        location: "行317（@inner guard expression rules の直後）"
+        before: |
+          // =========================================================================
+          // @inner guard expression rules
+          // =========================================================================
+
+          // @inner guard expression (with following statements)
+        after: |
+          // =========================================================================
+          // @inner pattern guard rules (if let pattern = expression;)
+          // Must be placed BEFORE regular guard rules for correct matching
+          // =========================================================================
+
+          // @inner pattern guard (with following statements)
+          // Uses $($pattern:tt)+ to match any complex pattern
+          (@inner $results:ident; if let $($pattern:tt)+ = $expr:expr ; $($rest:tt)+) => {{
+              if let $($pattern)+ = $expr {
+                  $crate::for_async!(@inner $results; $($rest)+);
+              }
+          }};
+
+          // =========================================================================
+          // @inner guard expression rules
+          // =========================================================================
+
+          // @inner guard expression (with following statements)
+
+    verification:
+      - 既存の全テストが通過すること
+      - 新規の async パターンガードテストが通過すること
+      - clippy 警告がないこと
+
+  # ---------------------------------------------------------------------------
+  # Step 4: インラインテストの追加
+  # ---------------------------------------------------------------------------
+  - step: 4
+    name: インラインテストの追加
+    description: |
+      各マクロファイル内にインラインテストを追加する。
+      これにより、モジュール単位でのテスト実行が可能になる。
+
+    tdd_phase: green
+
+    artifacts:
+      - path: src/compose/for_macro.rs
+        action: modify
+      - path: src/compose/for_async_macro.rs
+        action: modify
+
+    for_macro_inline_tests:
+      - name: test_pattern_guard_option_some
+        code: |
+          #[test]
+          fn test_pattern_guard_option_some() {
+              fn maybe_double(x: i32) -> Option<i32> {
+                  if x > 0 { Some(x * 2) } else { None }
+              }
+
+              let result = for_! {
+                  x <= vec![-1, 0, 1, 2, 3];
+                  if let Some(doubled) = maybe_double(x);
+                  yield doubled
+              };
+              assert_eq!(result, vec![2, 4, 6]);
+          }
+
+      - name: test_pattern_guard_result_ok
+        code: |
+          #[test]
+          fn test_pattern_guard_result_ok() {
+              let result = for_! {
+                  s <= vec!["1", "abc", "2"];
+                  if let Ok(n) = s.parse::<i32>();
+                  yield n
+              };
+              assert_eq!(result, vec![1, 2]);
+          }
+
+      - name: test_pattern_guard_nested_pattern
+        code: |
+          #[test]
+          fn test_pattern_guard_nested_pattern() {
+              let nested = vec![Some(Some(1)), Some(None), None, Some(Some(2))];
+              let result = for_! {
+                  item <= nested;
+                  if let Some(Some(value)) = item;
+                  yield value
+              };
+              assert_eq!(result, vec![1, 2]);
+          }
+
+      - name: test_pattern_guard_with_regular_guard
+        code: |
+          #[test]
+          fn test_pattern_guard_with_regular_guard() {
+              let items = vec![Some(1), None, Some(5), Some(10)];
+              let result = for_! {
+                  item <= items;
+                  if let Some(value) = item;
+                  if value > 3;
+                  yield value
+              };
+              assert_eq!(result, vec![5, 10]);
+          }
+
+      - name: test_pattern_guard_with_let_binding
+        code: |
+          #[test]
+          fn test_pattern_guard_with_let_binding() {
+              let items = vec![Some(1), None, Some(2)];
+              let result = for_! {
+                  item <= items;
+                  if let Some(value) = item;
+                  let doubled = value * 2;
+                  yield doubled
+              };
+              assert_eq!(result, vec![2, 4]);
+          }
+
+      - name: test_pattern_guard_multiple_consecutive
+        code: |
+          #[test]
+          fn test_pattern_guard_multiple_consecutive() {
+              let nested = vec![Some(Some(1)), Some(None), None, Some(Some(5))];
+              let result = for_! {
+                  item <= nested;
+                  if let Some(inner) = item;
+                  if let Some(value) = inner;
+                  yield value
+              };
+              assert_eq!(result, vec![1, 5]);
+          }
+
+      - name: test_pattern_guard_tuple_nested
+        code: |
+          #[test]
+          fn test_pattern_guard_tuple_nested() {
+              let data = vec![Some((1, "a")), None, Some((2, "b"))];
+              let result = for_! {
+                  item <= data;
+                  if let Some((num, letter)) = item;
+                  yield format!("{}{}", num, letter)
+              };
+              assert_eq!(result, vec!["1a", "2b"]);
+          }
+
+      - name: test_pattern_guard_at_binding
+        code: |
+          #[test]
+          fn test_pattern_guard_at_binding() {
+              let items = vec![Some(1), None, Some(2)];
+              let result = for_! {
+                  item <= items;
+                  if let whole @ Some(_) = item;
+                  yield whole
+              };
+              assert_eq!(result, vec![Some(1), Some(2)]);
+          }
+
+    for_async_macro_inline_tests:
+      - name: test_async_pattern_guard_option_some
+        code: |
+          #[tokio::test]
+          async fn test_async_pattern_guard_option_some() {
+              fn maybe_double(x: i32) -> Option<i32> {
+                  if x > 0 { Some(x * 2) } else { None }
+              }
+
+              let result = for_async! {
+                  x <= vec![-1, 0, 1, 2, 3];
+                  if let Some(doubled) = maybe_double(x);
+                  yield doubled
+              };
+              assert_eq!(result.run_async().await, vec![2, 4, 6]);
+          }
+
+      - name: test_async_pattern_guard_with_regular_guard
+        code: |
+          #[tokio::test]
+          async fn test_async_pattern_guard_with_regular_guard() {
+              let items = vec![Some(1), None, Some(5), Some(10)];
+              let result = for_async! {
+                  item <= items;
+                  if let Some(value) = item;
+                  if value > 3;
+                  yield value
+              };
+              assert_eq!(result.run_async().await, vec![5, 10]);
+          }
+
+  # ---------------------------------------------------------------------------
+  # Step 5: プロパティベーステストの追加
+  # ---------------------------------------------------------------------------
+  - step: 5
+    name: プロパティベーステストの追加
+    description: |
+      proptest を使用してパターンガードの法則を検証する。
+
+    tdd_phase: green
+
+    artifacts:
+      - path: tests/for_pattern_guard_laws.rs
+        action: create
+
+    property_tests:
+      - name: pattern_guard_option_equivalence
+        description: |
+          if let Some(x) = opt; yield x は
+          opt.into_iter().collect() と同等の結果を返す
+        code: |
+          proptest! {
+              #[test]
+              fn pattern_guard_option_equivalence(values: Vec<Option<i32>>) {
+                  let result1 = for_! {
+                      opt <= values.clone();
+                      if let Some(x) = opt;
+                      yield x
+                  };
+
+                  let result2: Vec<i32> = values.into_iter().flatten().collect();
+
+                  prop_assert_eq!(result1, result2);
+              }
+          }
+
+      - name: pattern_guard_filter_map_equivalence
+        description: |
+          パターンガードは filter_map と等価な結果を返す
+        code: |
+          proptest! {
+              #[test]
+              fn pattern_guard_filter_map_equivalence(values: Vec<i32>) {
+                  let result1 = for_! {
+                      x <= values.clone();
+                      if let Some(doubled) = if x > 0 { Some(x * 2) } else { None };
+                      yield doubled
+                  };
+
+                  let result2: Vec<i32> = values.into_iter()
+                      .filter_map(|x| if x > 0 { Some(x * 2) } else { None })
+                      .collect();
+
+                  prop_assert_eq!(result1, result2);
+              }
+          }
+
+      - name: pattern_guard_order_preservation
+        description: |
+          パターンガードは元のコレクションの順序を保持する
+        code: |
+          proptest! {
+              #[test]
+              fn pattern_guard_order_preservation(values: Vec<Option<i32>>) {
+                  let result = for_! {
+                      opt <= values.clone();
+                      if let Some(x) = opt;
+                      yield x
+                  };
+
+                  // Verify order is preserved
+                  let expected: Vec<i32> = values.into_iter().flatten().collect();
+                  prop_assert_eq!(result, expected);
+              }
+          }
+
+      - name: multiple_pattern_guards_conjunction
+        description: |
+          連続するパターンガードは論理 AND として動作する
+        code: |
+          proptest! {
+              #[test]
+              fn multiple_pattern_guards_conjunction(values: Vec<Option<Option<i32>>>) {
+                  let result1 = for_! {
+                      outer <= values.clone();
+                      if let Some(inner) = outer;
+                      if let Some(x) = inner;
+                      yield x
+                  };
+
+                  let result2: Vec<i32> = values.into_iter()
+                      .filter_map(|outer| outer)
+                      .filter_map(|inner| inner)
+                      .collect();
+
+                  prop_assert_eq!(result1, result2);
+              }
+          }
+
+  # ---------------------------------------------------------------------------
+  # Step 6: ドキュメント更新
+  # ---------------------------------------------------------------------------
+  - step: 6
+    name: ドキュメント更新
+    description: |
+      各マクロのモジュールドキュメントにパターンガードの説明を追加する。
+
+    tdd_phase: refactor
+
+    artifacts:
+      - path: src/compose/for_macro.rs
+        action: modify
+      - path: src/compose/for_async_macro.rs
+        action: modify
+
+    documentation_additions:
+      for_macro:
+        syntax_section: |
+          ## Syntax の更新
+
+          Supported Patterns セクションに追加:
+          - **Pattern guard**: `if let pattern = expression;` (skips if pattern doesn't match)
+
+          Examples セクションに追加:
+
+          ## Pattern Guard Expression
+
+          ```rust
+          use lambars::for_;
+
+          // Extract values from Option
+          fn maybe_double(x: i32) -> Option<i32> {
+              if x > 0 { Some(x * 2) } else { None }
+          }
+
+          let result = for_! {
+              x <= vec![-1, 0, 1, 2, 3];
+              if let Some(doubled) = maybe_double(x);
+              yield doubled
+          };
+          assert_eq!(result, vec![2, 4, 6]);
+          ```
+
+          ## Pattern Guard with Result
+
+          ```rust
+          use lambars::for_;
+
+          let result = for_! {
+              s <= vec!["1", "abc", "2"];
+              if let Ok(n) = s.parse::<i32>();
+              yield n
+          };
+          assert_eq!(result, vec![1, 2]);
+          ```
+
+          ## Pattern Guard with Regular Guard
+
+          ```rust
+          use lambars::for_;
+
+          let items = vec![Some(1), None, Some(5), Some(10)];
+          let result = for_! {
+              item <= items;
+              if let Some(value) = item;
+              if value > 3;
+              yield value
+          };
+          assert_eq!(result, vec![5, 10]);
+          ```
+
+      for_async_macro:
+        syntax_section: |
+          ## Syntax の更新
+
+          ```text
+          for_async! {
+              pattern <= collection;           // Bind: iterate over collection
+              pattern <~ async_io_expression;  // Async Bind: await AsyncIO result
+              if let pattern = expression;     // Pattern Guard: match pattern (NEW)
+              if condition;                    // Guard: filter by condition
+              let pattern = expression;        // Pure let binding
+              yield expression                 // Final expression (collected in Vec)
+          }
+          ```
+
+  # ---------------------------------------------------------------------------
+  # Step 7: 最終検証
+  # ---------------------------------------------------------------------------
+  - step: 7
+    name: 最終検証
+    description: |
+      全てのテストを実行し、実装が正しいことを確認する。
+      パフォーマンスの影響がないことも確認する。
+
+    tdd_phase: verification
+
+    verification_commands:
+      - command: "cargo test --all-features"
+        description: 全テストの実行
+
+      - command: "cargo test for_pattern_guard"
+        description: パターンガード関連テストの実行
+
+      - command: "cargo clippy --all-features -- -D warnings"
+        description: clippy チェック
+
+      - command: "cargo doc --all-features --no-deps"
+        description: ドキュメント生成確認
+
+    checklist:
+      - 全ての既存テストが通過すること
+      - 全ての新規テストが通過すること
+      - clippy 警告がないこと
+      - ドキュメントが正しく生成されること
+      - "#![forbid(unsafe_code)] が維持されていること"
+
+# =============================================================================
+# テストカバレッジ戦略
+# =============================================================================
+
+test_coverage_strategy:
+  description: |
+    パターンガードの全ての使用パターンをカバーするテストを作成する。
+    既存のテストとの重複を避けつつ、新機能の網羅的な検証を行う。
+
+  categories:
+    - name: 基本パターンガードテスト
+      tests:
+        - Option の Some パターン
+        - Option の None パターン
+        - Result の Ok パターン
+        - Result の Err パターン
+        - 全要素がマッチする場合
+        - 全要素がマッチしない場合
+        - 空コレクション
+
+    - name: 複雑なパターンテスト
+      tests:
+        - タプルパターン
+        - 構造体パターン
+        - enum バリアントパターン
+        - "@バインディングパターン"
+        - ネストしたパターン（Some(Some(x))）
+        - ワイルドカード付きパターン
+
+    - name: 組み合わせテスト
+      tests:
+        - パターンガード + 通常ガード
+        - パターンガード + let 束縛
+        - 連続した複数のパターンガード
+        - パターンガード + ネストイテレーション
+
+    - name: for_async! 固有テスト
+      tests:
+        - 基本パターンガード（同期）
+        - AsyncIO バインド + パターンガード
+        - 複数パターンガード
+        - パターンガード + 通常ガード
+
+# =============================================================================
+# リスクと対策
+# =============================================================================
+
+risks_and_mitigations:
+
+  - risk: マクロルールの順序による予期しないマッチ
+    severity: medium
+    mitigation: |
+      - `if let` を `if` より前に配置（より具体的なパターンを優先）
+      - 既存のテストケースが全て通過することを確認
+      - 複雑なパターンのテストを追加
+
+  - risk: tt 繰り返しによるあいまいなマッチング
+    severity: medium
+    mitigation: |
+      - `= $expr:expr ;` で終端を明確に区切る
+      - 複数の複雑なパターンでテストを実施
+      - マクロ展開を cargo expand で確認
+
+  - risk: 既存のガード式との競合
+    severity: low
+    mitigation: |
+      - `if let` と `if` の順序を適切に設定
+      - 両方を組み合わせたテストケースを追加
+      - 実際にコンパイルして動作確認
+
+  - risk: パフォーマンスへの影響
+    severity: low
+    mitigation: |
+      - パターンガードは単純な if let 文に展開されるため、オーバーヘッドは最小
+      - 既存のベンチマークに影響がないことを確認
+
+  - risk: 既存コードとの後方互換性
+    severity: low
+    mitigation: |
+      - 新しいルールは追加のみ、既存ルールは変更しない
+      - 全ての既存テストが通過することを確認
+
+# =============================================================================
+# 成果物サマリー
+# =============================================================================
+
+artifacts_summary:
+  modified_files:
+    - path: src/compose/for_macro.rs
+      changes:
+        - "@collect パターンガードルールの追加（2箇所）"
+        - "公開エントリポイントにパターンガードルールの追加"
+        - "モジュールドキュメントの更新"
+        - "インラインテストの追加（8個）"
+
+    - path: src/compose/for_async_macro.rs
+      changes:
+        - "@inner パターンガードルールの追加"
+        - "モジュールドキュメントの更新"
+        - "インラインテストの追加（2個）"
+
+  new_files:
+    - path: tests/for_pattern_guard_tests.rs
+      description: パターンガードの統合テスト（約15個）
+
+    - path: tests/for_pattern_guard_laws.rs
+      description: パターンガードのプロパティベーステスト（約4個）
+
+# =============================================================================
+# 実装時間見積もり
+# =============================================================================
+
+time_estimates:
+  step_1_tests: "45分"
+  step_2_for_macro: "30分"
+  step_3_for_async_macro: "20分"
+  step_4_inline_tests: "30分"
+  step_5_property_tests: "30分"
+  step_6_documentation: "20分"
+  step_7_verification: "15分"
+  total: "約3時間"
+
+# =============================================================================
+# 参照
+# =============================================================================
+
+references:
+  - name: "要件定義"
+    path: "docs/phase_15_requirements/phase_15_pattern_guard.yaml"
+
+  - name: "Phase 13 実装計画（ガード式）"
+    path: "docs/phase_13_implementation_plans/phase_13_guard_expression.yaml"
+
+  - name: "現在の for_! マクロ実装"
+    path: "src/compose/for_macro.rs"
+
+  - name: "現在の for_async! マクロ実装"
+    path: "src/compose/for_async_macro.rs"
+
+  - name: "Rust if let expression"
+    url: "https://doc.rust-lang.org/reference/expressions/if-expr.html#if-let-expressions"
+
+  - name: "Rust macro_rules! ドキュメント"
+    url: "https://doc.rust-lang.org/reference/macros-by-example.html"

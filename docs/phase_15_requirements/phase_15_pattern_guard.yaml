@@ -1,0 +1,900 @@
+# Phase 15: Pattern Guard (if let) Support for for_! and for_async! Macros
+# for_! および for_async! マクロへのパターンガード（if let）サポート追加
+# Scala/Haskell のパターンガードに相当する機能を Rust で実現
+
+version: "1.0.0"
+created_at: "2026-01-03"
+phase_id: phase_15
+phase_name: パターンガード（if let）サポート
+phase_name_en: Pattern Guard (if let) Support
+
+# =============================================================================
+# 背景と動機
+# =============================================================================
+
+background:
+  motivation: |
+    Phase 13 でガード式（if condition;）を実装したが、Option や Result などの
+    列挙型に対してパターンマッチングと値の抽出を同時に行いたいケースがある。
+
+    現在は以下のような回避策が必要:
+
+    ```rust
+    for_! {
+        x <= items;
+        let maybe_value = maybe_transform(x);
+        if maybe_value.is_some();
+        let value = maybe_value.unwrap();  // unwrap は安全だが冗長
+        yield value
+    }
+    ```
+
+    パターンガード（if let）を導入することで、より宣言的かつ安全に書ける:
+
+    ```rust
+    for_! {
+        x <= items;
+        if let Some(value) = maybe_transform(x);
+        yield value
+    }
+    ```
+
+  scala_haskell_comparison: |
+    Scala の for 内包表記:
+    ```scala
+    for {
+      x <- items
+      value <- maybeTransform(x)  // Option を flatMap で処理
+    } yield value
+    ```
+
+    Haskell のリスト内包表記:
+    ```haskell
+    [value | x <- items, Just value <- [maybeTransform x]]
+    ```
+
+    Rust のパターンガード:
+    ```rust
+    for_! {
+        x <= items;
+        if let Some(value) = maybe_transform(x);  // パターンガード
+        yield value
+    }
+    ```
+
+    Scala と Haskell では Option/Maybe を flatMap/bind で処理するが、
+    Rust のマクロでは if let によるパターンマッチングがより自然。
+
+  current_workaround: |
+    現在は以下のような回避策が必要:
+
+    // 方法1: is_some() + unwrap()（冗長で unwrap は好ましくない）
+    let result = for_! {
+        x <= items;
+        let opt = maybe_transform(x);
+        if opt.is_some();
+        let value = opt.unwrap();
+        yield value
+    };
+
+    // 方法2: filter_map との組み合わせ（マクロ外での処理）
+    let result: Vec<_> = items.iter()
+        .filter_map(|x| maybe_transform(*x))
+        .collect();
+
+    // 方法3: yield Option + flatten（型が複雑になる）
+    let result: Vec<_> = for_! {
+        x <= items;
+        yield maybe_transform(x)
+    }.into_iter().flatten().collect();
+
+  design_decision:
+    approach: |
+      マクロルールに `if let $pattern = $expr ;` パターンを追加し、
+      パターンにマッチした場合のみ後続の処理を実行する。
+      マッチしない場合は空の結果を返してスキップする。
+
+    rationale:
+      - Rust の標準的な `if let` 構文との一貫性
+      - Phase 13 のガード式（if condition;）との構文的統一性
+      - 既存の <= や <~ 演算子との共存が容易
+      - macro_rules! で実現可能な範囲の構文
+
+# =============================================================================
+# 概要
+# =============================================================================
+
+overview:
+  description: |
+    for_! および for_async! マクロにパターンガード（if let pattern = expression;）を追加する。
+    パターンにマッチした場合のみ後続の処理を実行し、マッチしない場合はその反復をスキップする。
+
+    これにより、Option、Result、カスタム enum などのパターンマッチングと
+    値の抽出を一度に行える宣言的な構文が可能になる。
+
+  goals:
+    - for_! マクロにパターンガード（if let pattern = expression;）を追加
+    - for_async! マクロにパターンガード（if let pattern = expression;）を追加
+    - 複数のパターンガードを連続して使用可能にする
+    - パターンガードと既存のガード式（if condition;）の組み合わせをサポート
+    - パターンガードと let 束縛の組み合わせをサポート
+    - 既存の構文との後方互換性を維持
+
+  non_goals:
+    - else 節のサポート（if let ... else はサポートしない）
+    - ネストしたパターン内での @ バインディングの完全サポート（制限付きサポートのみ）
+    - 複数パターンの OR マッチング（if let A | B = expr はサポートしない）
+
+  functional_programming_principles:
+    purity: |
+      パターンガードのマッチング自体は純粋な操作。
+      副作用を持つ式も技術的には使用可能だが、推奨されない。
+      パターンにバインドされる変数は不変であり、FP の原則に合致。
+
+    referential_transparency: |
+      パターンガードの結果は入力のみに依存すべき。
+      同じ入力に対して同じマッチング結果を返す式を使用することが推奨される。
+
+    composability: |
+      パターンガードは他のバインド（<= や <~）、let 束縛、
+      ガード式（if condition;）と任意の順序で組み合わせ可能。
+      これにより宣言的なパイプライン処理が実現できる。
+
+    effect_isolation: |
+      for_async! でのパターンガードも同期的に評価される。
+      パターンガード式自体は AsyncIO を返さず、即座に評価される。
+      非同期のパターンガードは <~ でバインドしてから if let を使う。
+
+# =============================================================================
+# 要件一覧
+# =============================================================================
+
+requirements:
+
+  # ---------------------------------------------------------------------------
+  # REQ-1501: for_! マクロへのパターンガード追加
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-1501
+    name: for_! マクロへのパターンガード追加
+    category: macro
+    priority: critical
+    description: |
+      for_! マクロにパターンガード（if let pattern = expression;）を追加する。
+      パターンにマッチした場合のみ後続の処理を実行し、
+      マッチしない場合は空の Vec を返してスキップする。
+
+    location: src/compose/for_macro.rs
+
+    syntax:
+      grammar: |
+        for_! {
+            pattern <= collection;
+            if let inner_pattern = expression;  // パターンガード（セミコロン必須）
+            yield expression
+        }
+
+      supported_patterns:
+        - name: Some パターン
+          example: "if let Some(value) = opt_expr;"
+          description: Option の Some バリアントにマッチ
+
+        - name: Ok/Err パターン
+          example: "if let Ok(value) = result_expr;"
+          description: Result の Ok または Err バリアントにマッチ
+
+        - name: タプルパターン
+          example: "if let (a, b) = tuple_expr;"
+          description: タプルの分解（ただし通常は let で十分）
+
+        - name: 構造体パターン
+          example: "if let Point { x, y } = point_expr;"
+          description: 構造体フィールドの分解
+
+        - name: @ バインディング
+          example: "if let value @ Some(_) = opt_expr;"
+          description: パターン全体を変数にバインドしつつマッチング
+
+      expansion: |
+        // パターンガードの展開
+        if let $pattern = $expr {
+            $crate::for_!(@collect $($rest)+)
+        } else {
+            vec![]
+        }
+
+    examples:
+      - name: Option の Some バリアント抽出
+        code: |
+          fn maybe_double(x: i32) -> Option<i32> {
+              if x > 0 { Some(x * 2) } else { None }
+          }
+
+          let result = for_! {
+              x <= vec![-1, 0, 1, 2, 3];
+              if let Some(doubled) = maybe_double(x);
+              yield doubled
+          };
+          assert_eq!(result, vec![2, 4, 6]);
+
+      - name: Result の Ok バリアント抽出
+        code: |
+          fn parse_positive(s: &str) -> Result<i32, &'static str> {
+              s.parse::<i32>()
+                  .map_err(|_| "parse error")
+                  .and_then(|n| if n > 0 { Ok(n) } else { Err("not positive") })
+          }
+
+          let result = for_! {
+              s <= vec!["1", "abc", "-5", "42"];
+              if let Ok(n) = parse_positive(s);
+              yield n
+          };
+          assert_eq!(result, vec![1, 42]);
+
+      - name: カスタム enum のパターンマッチ
+        code: |
+          enum Event {
+              Click { x: i32, y: i32 },
+              KeyPress(char),
+              Resize(u32, u32),
+          }
+
+          let events = vec![
+              Event::Click { x: 10, y: 20 },
+              Event::KeyPress('a'),
+              Event::Resize(800, 600),
+              Event::Click { x: 30, y: 40 },
+          ];
+
+          let result = for_! {
+              event <= events;
+              if let Event::Click { x, y } = event;
+              yield (x, y)
+          };
+          assert_eq!(result, vec![(10, 20), (30, 40)]);
+
+      - name: ネストしたパターン
+        code: |
+          let data = vec![Some((1, "a")), None, Some((2, "b"))];
+          let result = for_! {
+              item <= data;
+              if let Some((num, letter)) = item;
+              yield format!("{}{}", num, letter)
+          };
+          assert_eq!(result, vec!["1a", "2b"]);
+
+    implementation_notes:
+      - |
+        @collect ルールに if let パターンを追加する。
+        パターンは `if let $($pattern:tt)+ = $expr:expr ;` としてマッチ。
+        $pattern:pat は使用できない（複雑なパターンでの問題のため）。
+
+      - |
+        tt 繰り返しを使用することで、複雑なパターン（タプル、構造体、@ バインディング等）
+        に対応する。
+
+      - |
+        パターンガードと通常のガード式（if condition;）の区別:
+        - `if let` で始まる → パターンガード
+        - `if` のみで始まる → 通常のガード式
+
+    macro_rules_addition: |
+      // @collect パターンガード（後続の処理あり）
+      (@collect if let $($pattern:tt)+ = $expr:expr ; $($rest:tt)+) => {{
+          if let $($pattern)+ = $expr {
+              $crate::for_!(@collect $($rest)+)
+          } else {
+              vec![]
+          }
+      }};
+
+      // @collect パターンガード（yield で終端）
+      (@collect if let $($pattern:tt)+ = $expr:expr ; yield $result:expr) => {{
+          if let $($pattern)+ = $expr {
+              vec![$result]
+          } else {
+              vec![]
+          }
+      }};
+
+    acceptance_criteria:
+      - パターンガードがマッチした場合、後続の処理が実行されること
+      - パターンガードがマッチしない場合、空の Vec が返されること
+      - Some(value) パターンで Option から値を抽出できること
+      - Ok(value) / Err(e) パターンで Result から値を抽出できること
+      - タプルパターンで値を分解できること
+      - 構造体パターンでフィールドを分解できること
+      - @ バインディングが動作すること
+      - 既存の for_! 構文が引き続き動作すること
+
+  # ---------------------------------------------------------------------------
+  # REQ-1502: for_async! マクロへのパターンガード追加
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-1502
+    name: for_async! マクロへのパターンガード追加
+    category: macro
+    priority: critical
+    description: |
+      for_async! マクロにパターンガード（if let pattern = expression;）を追加する。
+      パターンにマッチした場合のみ後続の処理を実行し、
+      マッチしない場合はその反復をスキップする。
+
+    location: src/compose/for_async_macro.rs
+
+    syntax:
+      grammar: |
+        for_async! {
+            pattern <= collection;
+            if let inner_pattern = expression;  // パターンガード（セミコロン必須）
+            yield expression
+        }
+
+      expansion: |
+        // @inner でのパターンガードの展開
+        if let $($pattern)+ = $expr {
+            $crate::for_async!(@inner $results; $($rest)+);
+        }
+        // else の場合は何もしない（results に追加しない）
+
+    examples:
+      - name: 基本的なパターンガード
+        code: |
+          fn maybe_double(x: i32) -> Option<i32> {
+              if x > 0 { Some(x * 2) } else { None }
+          }
+
+          let result = for_async! {
+              x <= vec![-1, 0, 1, 2, 3];
+              if let Some(doubled) = maybe_double(x);
+              yield doubled
+          };
+          assert_eq!(result.run_async().await, vec![2, 4, 6]);
+
+      - name: AsyncIO バインドとパターンガードの組み合わせ
+        code: |
+          async fn fetch_optional(id: i32) -> AsyncIO<Option<String>> {
+              AsyncIO::pure(if id > 0 { Some(format!("data_{}", id)) } else { None })
+          }
+
+          let result = for_async! {
+              id <= vec![-1, 0, 1, 2];
+              opt <~ fetch_optional(id);
+              if let Some(data) = opt;
+              yield data
+          };
+          assert_eq!(result.run_async().await, vec!["data_1", "data_2"]);
+
+    implementation_notes:
+      - |
+        @inner ルールに if let パターンを追加する。
+        for_async! は結果を __results ベクタに push する形式なので、
+        パターンがマッチしない場合は単に push しないだけでよい。
+
+      - |
+        パターンガードは同期的に評価される。
+        AsyncIO を返すパターンガード式は <~ でバインドしてから if let を使う。
+
+    macro_rules_addition: |
+      // @inner パターンガード（後続の処理あり）
+      (@inner $results:ident; if let $($pattern:tt)+ = $expr:expr ; $($rest:tt)+) => {{
+          if let $($pattern)+ = $expr {
+              $crate::for_async!(@inner $results; $($rest)+);
+          }
+      }};
+
+    acceptance_criteria:
+      - パターンガードがマッチした場合、後続の処理が実行されること
+      - パターンガードがマッチしない場合、その反復がスキップされること
+      - AsyncIO バインド（<~）とパターンガードが組み合わせて使用できること
+      - 既存の for_async! 構文が引き続き動作すること
+
+  # ---------------------------------------------------------------------------
+  # REQ-1503: 複数パターンガードのサポート
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-1503
+    name: 複数パターンガードのサポート
+    category: macro
+    priority: high
+    description: |
+      複数のパターンガードを連続して使用できるようにする。
+      各パターンガードは独立して評価され、全てのパターンがマッチした場合のみ
+      後続の処理が実行される。
+
+    examples:
+      - name: 連続したパターンガード
+        code: |
+          fn maybe_parse(s: &str) -> Option<i32> {
+              s.parse().ok()
+          }
+
+          fn maybe_double(n: i32) -> Option<i32> {
+              if n > 0 { Some(n * 2) } else { None }
+          }
+
+          let result = for_! {
+              s <= vec!["1", "abc", "-5", "10"];
+              if let Some(n) = maybe_parse(s);
+              if let Some(doubled) = maybe_double(n);
+              yield doubled
+          };
+          assert_eq!(result, vec![2, 20]);  // "1" -> 1 -> 2, "10" -> 10 -> 20
+
+      - name: パターンガードと通常ガードの組み合わせ
+        code: |
+          let data = vec![Some(1), None, Some(2), Some(3), Some(10)];
+          let result = for_! {
+              item <= data;
+              if let Some(value) = item;
+              if value < 5;  // 通常のガード式
+              yield value
+          };
+          assert_eq!(result, vec![1, 2, 3]);
+
+    implementation_notes:
+      - |
+        マクロの再帰的展開により、複数のパターンガードは自然にサポートされる。
+        各 if let パターンが順次評価され、マッチしなかった時点で
+        残りの処理がスキップされる。
+
+    acceptance_criteria:
+      - 3つ以上の連続したパターンガードが動作すること
+      - パターンガードと通常ガード式（if condition;）を交互に使用できること
+      - 全てのパターンがマッチした場合のみ yield が実行されること
+
+  # ---------------------------------------------------------------------------
+  # REQ-1504: 既存ガード式との組み合わせ
+  # ---------------------------------------------------------------------------
+
+  - id: REQ-1504
+    name: 既存ガード式との組み合わせ
+    category: macro
+    priority: high
+    description: |
+      パターンガード（if let）と既存のガード式（if condition;）を
+      任意の順序で組み合わせて使用できるようにする。
+
+    examples:
+      - name: パターンガード後に通常ガード
+        code: |
+          let data = vec![Some(1), None, Some(5), Some(10)];
+          let result = for_! {
+              item <= data;
+              if let Some(value) = item;
+              if value > 3;
+              yield value
+          };
+          assert_eq!(result, vec![5, 10]);
+
+      - name: 通常ガード後にパターンガード
+        code: |
+          fn maybe_transform(x: i32) -> Option<String> {
+              if x > 0 { Some(format!("value_{}", x)) } else { None }
+          }
+
+          let result = for_! {
+              x <= vec![-5, -1, 0, 1, 5, 10];
+              if x >= 0;  // 非負のみ
+              if let Some(s) = maybe_transform(x);  // 変換成功のみ
+              yield s
+          };
+          assert_eq!(result, vec!["value_1", "value_5", "value_10"]);
+
+      - name: 複合パターン：let 束縛、パターンガード、通常ガードの組み合わせ
+        code: |
+          let pairs = vec![("a", Some(1)), ("b", None), ("c", Some(5)), ("d", Some(2))];
+          let result = for_! {
+              (key, opt) <= pairs;
+              if let Some(value) = opt;
+              let doubled = value * 2;
+              if doubled > 5;
+              yield (key, doubled)
+          };
+          assert_eq!(result, vec![("c", 10)]);
+
+    implementation_notes:
+      - |
+        パターンガードと通常ガードの区別は `if let` vs `if` で行う。
+        マクロルールの順序に注意が必要：
+        - `if let $($pattern:tt)+ = $expr:expr ;` を先にマッチさせる
+        - `if $condition:expr ;` は後でマッチさせる
+
+    acceptance_criteria:
+      - パターンガード後に通常ガードが使用できること
+      - 通常ガード後にパターンガードが使用できること
+      - let 束縛とパターンガードと通常ガードを任意の順序で組み合わせられること
+
+# =============================================================================
+# サポートするパターン一覧
+# =============================================================================
+
+supported_patterns:
+  - id: PATTERN-01
+    name: Some パターン
+    syntax: "if let Some(value) = expression;"
+    description: Option<T> の Some バリアントにマッチし、内部の値を抽出
+    priority: critical
+    example: |
+      let result = for_! {
+          x <= vec![Some(1), None, Some(2)];
+          if let Some(value) = x;
+          yield value
+      };
+      assert_eq!(result, vec![1, 2]);
+
+  - id: PATTERN-02
+    name: None パターン
+    syntax: "if let None = expression;"
+    description: Option<T> の None バリアントにマッチ（値の抽出なし）
+    priority: medium
+    example: |
+      let result = for_! {
+          x <= vec![Some(1), None, Some(2)];
+          if let None = x;
+          yield "none found"
+      };
+      assert_eq!(result, vec!["none found"]);
+
+  - id: PATTERN-03
+    name: Ok パターン
+    syntax: "if let Ok(value) = expression;"
+    description: Result<T, E> の Ok バリアントにマッチし、内部の値を抽出
+    priority: critical
+    example: |
+      let result = for_! {
+          s <= vec!["1", "abc", "2"];
+          if let Ok(n) = s.parse::<i32>();
+          yield n
+      };
+      assert_eq!(result, vec![1, 2]);
+
+  - id: PATTERN-04
+    name: Err パターン
+    syntax: "if let Err(e) = expression;"
+    description: Result<T, E> の Err バリアントにマッチし、エラー値を抽出
+    priority: medium
+    example: |
+      let result = for_! {
+          s <= vec!["1", "abc", "2"];
+          if let Err(_) = s.parse::<i32>();
+          yield s
+      };
+      assert_eq!(result, vec!["abc"]);
+
+  - id: PATTERN-05
+    name: タプルパターン
+    syntax: "if let (a, b) = expression;"
+    description: タプルを分解して各要素を抽出
+    priority: high
+    note: |
+      通常は `let (a, b) = expr;` で十分だが、
+      パターンガードのコンテキストでも動作する必要がある。
+    example: |
+      // 通常は let で十分だが、if let でも動作
+      let pairs = vec![(1, 2), (3, 4)];
+      let result = for_! {
+          pair <= pairs;
+          if let (a, b) = pair;
+          yield a + b
+      };
+      assert_eq!(result, vec![3, 7]);
+
+  - id: PATTERN-06
+    name: 構造体パターン
+    syntax: "if let StructName { field1, field2 } = expression;"
+    description: 構造体のフィールドを分解して抽出
+    priority: high
+    example: |
+      struct Point { x: i32, y: i32 }
+
+      let points = vec![Point { x: 1, y: 2 }, Point { x: 3, y: 4 }];
+      let result = for_! {
+          p <= points;
+          if let Point { x, y } = p;
+          yield x + y
+      };
+      assert_eq!(result, vec![3, 7]);
+
+  - id: PATTERN-07
+    name: enum バリアントパターン
+    syntax: "if let EnumName::Variant(value) = expression;"
+    description: カスタム enum の特定バリアントにマッチし、内部の値を抽出
+    priority: high
+    example: |
+      enum Message {
+          Text(String),
+          Number(i32),
+          Empty,
+      }
+
+      let messages = vec![
+          Message::Text("hello".into()),
+          Message::Number(42),
+          Message::Empty,
+      ];
+
+      let result = for_! {
+          msg <= messages;
+          if let Message::Number(n) = msg;
+          yield n
+      };
+      assert_eq!(result, vec![42]);
+
+  - id: PATTERN-08
+    name: @ バインディングパターン
+    syntax: "if let whole @ Some(inner) = expression;"
+    description: パターン全体を変数にバインドしつつ、内部もマッチング
+    priority: medium
+    example: |
+      let items = vec![Some(1), None, Some(2)];
+      let result = for_! {
+          item <= items;
+          if let whole @ Some(value) = item;
+          yield (whole, value)
+      };
+      assert_eq!(result, vec![(Some(1), 1), (Some(2), 2)]);
+
+  - id: PATTERN-09
+    name: ネストしたパターン
+    syntax: "if let Some(Some(value)) = expression;"
+    description: ネストした構造を一度にマッチング
+    priority: medium
+    example: |
+      let nested = vec![Some(Some(1)), Some(None), None, Some(Some(2))];
+      let result = for_! {
+          item <= nested;
+          if let Some(Some(value)) = item;
+          yield value
+      };
+      assert_eq!(result, vec![1, 2]);
+
+  - id: PATTERN-10
+    name: ワイルドカード付きパターン
+    syntax: "if let Some(_) = expression;"
+    description: 値の抽出は不要だがマッチングは行う
+    priority: medium
+    example: |
+      let items = vec![Some(1), None, Some(2)];
+      let result = for_! {
+          item <= items.clone();
+          if let Some(_) = item;
+          yield "matched"
+      };
+      assert_eq!(result, vec!["matched", "matched"]);
+
+# =============================================================================
+# テスト要件
+# =============================================================================
+
+test_requirements:
+  unit_tests:
+    location: src/compose/for_macro.rs (inline tests)
+    categories:
+      - name: 基本パターンガードテスト
+        tests:
+          - test_pattern_guard_option_some
+          - test_pattern_guard_option_none
+          - test_pattern_guard_result_ok
+          - test_pattern_guard_result_err
+          - test_pattern_guard_all_match
+          - test_pattern_guard_none_match
+
+      - name: 複雑なパターンテスト
+        tests:
+          - test_pattern_guard_tuple
+          - test_pattern_guard_struct
+          - test_pattern_guard_enum_variant
+          - test_pattern_guard_at_binding
+          - test_pattern_guard_nested
+
+      - name: 組み合わせテスト
+        tests:
+          - test_pattern_guard_with_regular_guard
+          - test_pattern_guard_with_let_binding
+          - test_pattern_guard_multiple_consecutive
+          - test_pattern_guard_with_nested_iteration
+
+  async_tests:
+    location: src/compose/for_async_macro.rs (inline tests)
+    categories:
+      - name: 基本パターンガードテスト（async）
+        tests:
+          - test_async_pattern_guard_option_some
+          - test_async_pattern_guard_with_async_bind
+
+      - name: 複合テスト（async）
+        tests:
+          - test_async_pattern_guard_multiple
+          - test_async_pattern_guard_with_regular_guard
+
+  integration_tests:
+    location: tests/for_pattern_guard_tests.rs
+    scenarios:
+      - name: 実用的なユースケース
+        description: |
+          実際のアプリケーションで想定されるパターンのテスト。
+          API レスポンスのパース、設定ファイルの読み込み、
+          イベント処理など。
+
+      - name: エッジケース
+        description: |
+          空コレクション、全要素マッチ、全要素アンマッチ、
+          Option<Option<T>> などのネストケース。
+
+      - name: パフォーマンステスト
+        description: |
+          パターンガードのオーバーヘッドが許容範囲内であることを確認。
+          Phase 12 の最適化方針と整合性を保つ。
+
+  property_tests:
+    location: tests/for_pattern_guard_laws.rs
+    laws:
+      - name: パターンガード同値性
+        description: |
+          if let Some(x) = opt; yield x は
+          opt.into_iter().collect() と同等の結果を返す
+
+      - name: 複数パターンガードの結合則
+        description: |
+          連続するパターンガードの順序変更が、
+          論理的に等価な場合に同じ結果を返す
+
+      - name: パターンガードと filter の等価性
+        description: |
+          特定のパターンガードは filter + map と等価な結果を返す
+
+# =============================================================================
+# ファイル構成
+# =============================================================================
+
+artifacts:
+  source_files:
+    - path: src/compose/for_macro.rs
+      description: for_! マクロへのパターンガード追加
+      requirements:
+        - REQ-1501
+        - REQ-1503
+        - REQ-1504
+
+    - path: src/compose/for_async_macro.rs
+      description: for_async! マクロへのパターンガード追加
+      requirements:
+        - REQ-1502
+        - REQ-1503
+        - REQ-1504
+
+  test_files:
+    - path: tests/for_pattern_guard_tests.rs
+      description: パターンガードの統合テスト
+
+    - path: tests/for_pattern_guard_laws.rs
+      description: パターンガードのプロパティベーステスト
+
+  documentation:
+    - path: src/compose/for_macro.rs (module doc)
+      description: |
+        既存のモジュールドキュメントにパターンガードの説明を追加。
+        - 構文: `if let pattern = expression;`
+        - サポートするパターン一覧
+        - 使用例
+        - 制約事項
+
+    - path: src/compose/for_async_macro.rs (module doc)
+      description: |
+        既存のモジュールドキュメントにパターンガードの説明を追加。
+
+# =============================================================================
+# 成功基準
+# =============================================================================
+
+success_criteria:
+  functional:
+    - for_! でパターンガードが正しく動作すること
+    - for_async! でパターンガードが正しく動作すること
+    - 全てのサポート対象パターン（PATTERN-01 から PATTERN-10）が動作すること
+    - パターンガードと通常ガード式が組み合わせて使用できること
+    - パターンガードと let 束縛が組み合わせて使用できること
+    - 既存のマクロ構文が引き続き動作すること（後方互換性）
+
+  performance:
+    - パターンガードのオーバーヘッドが無視できる程度であること
+    - 手書きの if let と同等のパフォーマンスであること
+    - 複数パターンガードでも線形のオーバーヘッドに収まること
+
+  code_quality:
+    - 全てのテストが通過すること
+    - clippy 警告がないこと（#![deny(warnings)]）
+    - #![forbid(unsafe_code)] を維持すること
+    - ドキュメントが更新されていること
+
+# =============================================================================
+# 将来の拡張
+# =============================================================================
+
+future_extensions:
+  - id: or_pattern
+    name: OR パターン（|）サポート
+    description: |
+      複数のパターンを OR で組み合わせる構文のサポート。
+
+      for_! {
+          x <= items;
+          if let Some(v) | None = x;  // OR パターン（将来）
+          yield ...
+      }
+    priority: low
+    note: |
+      Rust 1.53+ で安定化された or_patterns が必要。
+      macro_rules! でのマッチングが複雑になる可能性がある。
+
+  - id: async_pattern_guard
+    name: 非同期パターンガード
+    description: |
+      AsyncIO を返すパターンガード式のサポート。
+
+      for_async! {
+          id <= ids;
+          if let Some(data) <~ fetch_optional_async(id);  // 将来の構文
+          yield data
+      }
+    priority: low
+    note: |
+      現在は <~ でバインドしてから if let を使う回避策がある。
+      新しい演算子の導入が必要になる可能性がある。
+
+  - id: else_branch
+    name: else 節サポート
+    description: |
+      パターンにマッチしない場合のデフォルト値を指定する。
+
+      for_! {
+          x <= items;
+          if let Some(v) = x else default_value;
+          yield v
+      }
+    priority: low
+    note: |
+      現状は Option::unwrap_or や map/unwrap_or_default で対応可能。
+
+# =============================================================================
+# 参照
+# =============================================================================
+
+references:
+  - name: "Phase 13: ガード式サポート"
+    path: "docs/phase_13_requirements/phase_13_guard_expression.yaml"
+    description: |
+      Phase 13 で実装した通常のガード式（if condition;）の要件定義。
+      本 Phase はこれを拡張し、パターンマッチングを追加する。
+
+  - name: "Rust if let expression"
+    url: "https://doc.rust-lang.org/reference/expressions/if-expr.html#if-let-expressions"
+    description: |
+      Rust の if let 式のリファレンス。
+      パターンガードの意味論の基礎。
+
+  - name: "Scala pattern matching in for-comprehension"
+    url: "https://docs.scala-lang.org/tour/pattern-matching.html"
+    description: |
+      Scala の for 内包表記でのパターンマッチング。
+      Option を flatMap で処理するアプローチの参考。
+
+  - name: "Haskell pattern guards"
+    url: "https://wiki.haskell.org/Pattern_guard"
+    description: |
+      Haskell のパターンガード。
+      関数定義でのパターンマッチングと条件の組み合わせ。
+
+  - name: "既存の for_! 実装"
+    path: "src/compose/for_macro.rs"
+    description: |
+      現在の for_! マクロの実装。
+      パターンガード追加の基盤となる。
+
+  - name: "既存の for_async! 実装"
+    path: "src/compose/for_async_macro.rs"
+    description: |
+      現在の for_async! マクロの実装。
+      パターンガード追加の基盤となる。

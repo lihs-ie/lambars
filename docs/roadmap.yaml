@@ -1,7 +1,7 @@
 # lambars プロジェクト ロードマップ
 # Rust で関数型プログラミングを実現するためのライブラリ開発計画
 
-version: "1.4.0"
+version: "1.7.0"
 last_updated: "2026-01-03"
 
 # プロジェクト概要
@@ -1118,6 +1118,151 @@ phases:
           Performance Tips セクションを追加。
           let バインディング（オーバーヘッドなし）vs
           AsyncIO::pure()（~30x オーバーヘッド）の違いを明記。
+
+  - id: phase_13
+    name: ガード式サポート
+    name_en: Guard Expression Support
+    status: completed
+    started_at: "2026-01-03"
+    completed_at: "2026-01-03"
+    description: |
+      for_! および for_async! マクロに Scala スタイルのガード式（if condition;）を追加。
+      イテレーション中に条件によるフィルタリングを宣言的に記述可能にする。
+    dependencies:
+      - phase_10
+      - phase_11
+      - phase_12
+    notes: |
+      Scala の for 内包表記における if ガードと同等の機能を実現。
+      複数のガード式（AND 条件）、let 束縛との組み合わせをサポート。
+      後方互換性を完全に維持。
+    deliverables:
+      - id: for_guard_expression
+        name: for_! ガード式
+        description: |
+          for_! マクロに if condition; 構文を追加。
+          条件が true の場合のみ後続の処理を実行し、
+          false の場合は空の Vec を返してスキップ。
+        status: completed
+        priority: critical
+        artifacts:
+          - src/compose/for_macro.rs
+          - docs/phase_13_requirements/phase_13_guard_expression.yaml
+          - docs/phase_13_implementation_plans/phase_13_guard_expression.yaml
+          - tests/for_guard_tests.rs
+        results: |
+          @collect ルールにガード式パターンを追加。
+          8個のインラインテスト、15個の統合テストを追加。
+          複数ガード、let との組み合わせ、タプルパターンをサポート。
+
+      - id: for_async_guard_expression
+        name: for_async! ガード式
+        description: |
+          for_async! マクロに if condition; 構文を追加。
+          for_! と同じ構文・意味論を維持。
+        status: completed
+        priority: critical
+        artifacts:
+          - src/compose/for_async_macro.rs
+          - tests/for_guard_tests.rs
+        results: |
+          @inner ルールにガード式パターンを追加。
+          2個のインラインテスト、8個の統合テストを追加。
+          AsyncIO バインド（<~）との組み合わせをサポート。
+
+  - id: phase_14
+    name: Either IntoIterator 実装
+    name_en: Either IntoIterator Implementation
+    status: completed
+    started_at: "2026-01-03"
+    completed_at: "2026-01-03"
+    description: |
+      Either<L, R> に IntoIterator を追加し for_! マクロで使用可能にする。
+      Scala の Either の Right バイアス動作を Rust で実現。
+    dependencies:
+      - phase_3
+      - phase_10
+    notes: |
+      Scala の Either は for 内包表記において Right バイアスとして動作する。
+      Right(value) は1要素のイテレータ、Left(_) は空のイテレータを返す。
+      Option<T> の IntoIterator と同じ設計パターンを採用。
+      EitherIntoIterator, EitherIterator 構造体を内部で std::option::IntoIter に委譲。
+      ExactSizeIterator, FusedIterator, DoubleEndedIterator も実装。
+    deliverables:
+      - id: either_into_iterator
+        name: Either<L, R> IntoIterator 実装
+        description: |
+          Either<L, R> と &Either<L, R> に IntoIterator を実装。
+          Right(value) は value を yield し、Left(_) は何も yield しない。
+          EitherIntoIterator<R>（所有権版）と EitherIterator<'a, R>（参照版）を定義。
+          iter() メソッドも追加。
+        status: completed
+        priority: critical
+        artifacts:
+          - src/control/either.rs
+          - tests/either_for_macro_tests.rs
+          - tests/either_iterator_laws.rs
+          - docs/phase_14_requirements/phase_14_either_into_iterator.yaml
+          - docs/phase_14_implementation_plans/phase_14_either_into_iterator.yaml
+        results: |
+          Either IntoIterator 実装完了。
+          24個のインラインテスト、16個の統合テスト、12個のプロパティテストを追加。
+          for_! マクロとの統合、Vec<Either> のフラット化、ガード式との組み合わせを確認。
+          Scala の Either と同等の Right バイアス動作を実現。
+
+  - id: phase_15
+    name: パターンガード（if let）サポート
+    name_en: Pattern Guard Support
+    status: completed
+    started_at: "2026-01-03"
+    completed_at: "2026-01-03"
+    description: |
+      for_! および for_async! マクロにパターンガード（if let pattern = expr;）を追加。
+      Option や Result のアンラップと条件チェックを一度に行える。
+    dependencies:
+      - phase_10
+      - phase_11
+      - phase_13
+    notes: |
+      Phase 13 のガード式（if condition;）を拡張し、パターンマッチングと値の抽出を同時に行える。
+      $pattern:pat を使用することで、Rust 2021+ の拡張されたパターン構文をサポート。
+      Some, Ok, Err, タプル, 構造体, @ バインディング, ネストしたパターン等をサポート。
+      後方互換性を完全に維持。
+    deliverables:
+      - id: for_pattern_guard
+        name: for_! パターンガード
+        description: |
+          for_! マクロに if let pattern = expr; 構文を追加。
+          パターンがマッチした場合のみ後続の処理を実行し、
+          マッチしない場合は空の Vec を返してスキップ。
+        status: completed
+        priority: critical
+        artifacts:
+          - src/compose/for_macro.rs
+          - docs/phase_15_requirements/phase_15_pattern_guard.yaml
+          - docs/phase_15_implementation_plans/phase_15_pattern_guard.yaml
+          - tests/for_pattern_guard_tests.rs
+          - tests/for_pattern_guard_laws.rs
+        results: |
+          @collect ルールにパターンガードパターンを追加。
+          8個のインラインテスト、24個の統合テスト、9個のプロパティテストを追加。
+          Some, Ok, Err, タプル, 構造体, @ バインディング, ネストパターンをサポート。
+          通常ガード式（if condition;）との組み合わせも可能。
+
+      - id: for_async_pattern_guard
+        name: for_async! パターンガード
+        description: |
+          for_async! マクロに if let pattern = expr; 構文を追加。
+          for_! と同じ構文・意味論を維持。
+        status: completed
+        priority: critical
+        artifacts:
+          - src/compose/for_async_macro.rs
+          - tests/for_pattern_guard_tests.rs
+        results: |
+          @inner ルールにパターンガードパターンを追加。
+          2個のインラインテストを追加。
+          AsyncIO バインド（<~）との組み合わせをサポート。
 
 # ステータス定義
 status_definitions:
