@@ -1445,9 +1445,10 @@ mod hash_tests {
         let inner1 = PersistentTreeMap::new().insert(1, 10).insert(2, 20);
         let inner2 = PersistentTreeMap::new().insert(3, 30).insert(4, 40);
 
-        let nested1: PersistentTreeMap<&str, PersistentTreeMap<i32, i32>> = PersistentTreeMap::new()
-            .insert("first", inner1.clone())
-            .insert("second", inner2.clone());
+        let nested1: PersistentTreeMap<&str, PersistentTreeMap<i32, i32>> =
+            PersistentTreeMap::new()
+                .insert("first", inner1.clone())
+                .insert("second", inner2.clone());
         let nested2: PersistentTreeMap<&str, PersistentTreeMap<i32, i32>> =
             PersistentTreeMap::new()
                 .insert("first", inner1)
