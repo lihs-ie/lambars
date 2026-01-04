@@ -1161,8 +1161,6 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
                 if bitmap & bit == 0 {
                     None
                 } else {
-                    // SAFETY: bitmap is u32, so count_ones() returns at most 32,
-                    // which is always representable as usize.
                     let position = (bitmap & (bit - 1)).count_ones() as usize;
                     match &children[position] {
                         Child::Entry { key: child_key, .. } => {
