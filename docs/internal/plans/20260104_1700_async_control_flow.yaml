@@ -1103,7 +1103,7 @@ implementation_plan:
           impl<A, E> AsyncIO<Result<A, E>>
           where
               A: Send + 'static,
-              E: Clone + Send + 'static,
+              E: Send + 'static,
           {
               /// Executes a callback when this `AsyncIO` returns an error.
               ///

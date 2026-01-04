@@ -735,9 +735,9 @@ impl<A: Send + 'static> AsyncIO<A> {
     ///     3,
     ///     Duration::from_millis(100),
     /// );
-    /// // Delays: 100ms, 200ms before 2nd and 3rd attempts
+    /// // Delays: 100ms before 2nd attempt, 200ms before 3rd attempt
     /// ```
-    #[allow(clippy::missing_panics_doc, clippy::cast_possible_truncation)]
+    #[allow(clippy::missing_panics_doc)]
     pub fn retry_with_backoff_factory<E, F>(
         factory: F,
         max_attempts: usize,

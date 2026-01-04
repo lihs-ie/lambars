@@ -636,7 +636,7 @@ requirements:
               F: FnOnce(&E) -> Callback + Send + 'static,
               Callback: std::future::Future<Output = ()> + Send + 'static,
               A: Send + 'static,
-              E: Clone + Send + 'static,
+              E: Send + 'static,
         description: |
           Result<A, E> を返す AsyncIO がエラーの場合、callback を実行する。
           callback 実行後、元のエラーはそのまま返される。
