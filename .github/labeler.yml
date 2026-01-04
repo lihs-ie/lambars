@@ -22,7 +22,7 @@ optics:
   - changed-files:
       - any-glob-to-any-file: 'src/optics/**/*'
 
-effect-system:
+effect:
   - changed-files:
       - any-glob-to-any-file: 'src/effect/**/*'
 
