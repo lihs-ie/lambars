@@ -6,7 +6,7 @@ rust-version = "1.92.0"
 authors = ["lambars contributors"]
 description = "A functional programming library for Rust providing type classes, persistent data structures, and effect systems"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/lambars/lambars"
+repository = "https://github.com/lihs-ie/lambars"
 keywords = ["functional", "monad", "functor", "persistent", "immutable"]
 categories = ["data-structures", "rust-patterns"]
 
