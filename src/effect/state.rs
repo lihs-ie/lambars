@@ -588,10 +588,38 @@ where
     }
 }
 
+// =============================================================================
+// Display Implementation
+// =============================================================================
+
+impl<S, A> std::fmt::Display for State<S, A>
+where
+    S: 'static,
+    A: 'static,
+{
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "<State>")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rstest::rstest;
+
+    // =========================================================================
+    // Display Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_display_state() {
+        let state: State<i32, i32> = State::new(|s: i32| (s * 2, s + 1));
+        assert_eq!(format!("{state}"), "<State>");
+    }
+
+    // =========================================================================
+    // Original Tests
+    // =========================================================================
 
     #[rstest]
     fn state_new_and_run() {

@@ -584,6 +584,15 @@ impl<L: fmt::Debug, R: fmt::Debug> fmt::Debug for Either<L, R> {
     }
 }
 
+impl<L: fmt::Display, R: fmt::Display> fmt::Display for Either<L, R> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Left(value) => write!(formatter, "Left({value})"),
+            Self::Right(value) => write!(formatter, "Right({value})"),
+        }
+    }
+}
+
 // =============================================================================
 // From Implementations
 // =============================================================================
@@ -1095,6 +1104,22 @@ mod tests {
 
         let sum: i32 = eithers.iter().flat_map(|either| either.into_iter()).sum();
         assert_eq!(sum, 4); // 1 + 3
+    }
+
+    // =========================================================================
+    // Display Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_display_left() {
+        let left: Either<i32, String> = Either::Left(42);
+        assert_eq!(format!("{left}"), "Left(42)");
+    }
+
+    #[rstest]
+    fn test_display_right() {
+        let right: Either<i32, String> = Either::Right("hello".to_string());
+        assert_eq!(format!("{right}"), "Right(hello)");
     }
 
     // =========================================================================

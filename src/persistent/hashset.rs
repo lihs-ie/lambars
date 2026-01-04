@@ -690,6 +690,22 @@ impl<T: Clone + Hash + Eq + fmt::Debug> fmt::Debug for PersistentHashSet<T> {
     }
 }
 
+impl<T: Clone + Hash + Eq + fmt::Display> fmt::Display for PersistentHashSet<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{{")?;
+        let mut first = true;
+        for element in self {
+            if first {
+                first = false;
+            } else {
+                write!(formatter, ", ")?;
+            }
+            write!(formatter, "{element}")?;
+        }
+        write!(formatter, "}}")
+    }
+}
+
 // =============================================================================
 // Type Class Implementations
 // =============================================================================
@@ -736,6 +752,38 @@ impl<T: Clone + Hash + Eq> Foldable for PersistentHashSet<T> {
 mod tests {
     use super::*;
     use rstest::rstest;
+
+    // =========================================================================
+    // Display Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_display_empty_hashset() {
+        let set: PersistentHashSet<i32> = PersistentHashSet::new();
+        assert_eq!(format!("{set}"), "{}");
+    }
+
+    #[rstest]
+    fn test_display_single_element_hashset() {
+        let set = PersistentHashSet::singleton(42);
+        assert_eq!(format!("{set}"), "{42}");
+    }
+
+    #[rstest]
+    fn test_display_multiple_elements_hashset() {
+        let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+        let display = format!("{set}");
+        // HashSet is unordered, so we check that the format is correct
+        assert!(display.starts_with('{'));
+        assert!(display.ends_with('}'));
+        assert!(display.contains('1'));
+        assert!(display.contains('2'));
+        assert!(display.contains('3'));
+    }
+
+    // =========================================================================
+    // Original Tests
+    // =========================================================================
 
     #[rstest]
     fn test_new_creates_empty() {

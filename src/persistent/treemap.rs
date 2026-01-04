@@ -1119,6 +1119,24 @@ impl<K: Clone + Ord + fmt::Debug, V: Clone + fmt::Debug> fmt::Debug for Persiste
     }
 }
 
+impl<K: Clone + Ord + fmt::Display, V: Clone + fmt::Display> fmt::Display
+    for PersistentTreeMap<K, V>
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{{")?;
+        let mut first = true;
+        for (key, value) in self {
+            if first {
+                first = false;
+            } else {
+                write!(formatter, ", ")?;
+            }
+            write!(formatter, "{key}: {value}")?;
+        }
+        write!(formatter, "}}")
+    }
+}
+
 // =============================================================================
 // Type Class Implementations
 // =============================================================================
@@ -1173,6 +1191,36 @@ impl<K: Clone + Ord, V: Clone> Foldable for PersistentTreeMap<K, V> {
 mod tests {
     use super::*;
     use rstest::rstest;
+
+    // =========================================================================
+    // Display Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_display_empty_treemap() {
+        let map: PersistentTreeMap<i32, String> = PersistentTreeMap::new();
+        assert_eq!(format!("{map}"), "{}");
+    }
+
+    #[rstest]
+    fn test_display_single_element_treemap() {
+        let map = PersistentTreeMap::singleton(1, "one".to_string());
+        assert_eq!(format!("{map}"), "{1: one}");
+    }
+
+    #[rstest]
+    fn test_display_multiple_elements_treemap_sorted() {
+        let map = PersistentTreeMap::new()
+            .insert(3, "three".to_string())
+            .insert(1, "one".to_string())
+            .insert(2, "two".to_string());
+        // TreeMap should display in sorted order
+        assert_eq!(format!("{map}"), "{1: one, 2: two, 3: three}");
+    }
+
+    // =========================================================================
+    // Original Tests
+    // =========================================================================
 
     #[rstest]
     fn test_new_creates_empty() {

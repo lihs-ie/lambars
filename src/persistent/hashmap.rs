@@ -1520,6 +1520,24 @@ impl<K: Clone + Hash + Eq + fmt::Debug, V: Clone + fmt::Debug> fmt::Debug
     }
 }
 
+impl<K: Clone + Hash + Eq + fmt::Display, V: Clone + fmt::Display> fmt::Display
+    for PersistentHashMap<K, V>
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{{")?;
+        let mut first = true;
+        for (key, value) in self {
+            if first {
+                first = false;
+            } else {
+                write!(formatter, ", ")?;
+            }
+            write!(formatter, "{key}: {value}")?;
+        }
+        write!(formatter, "}}")
+    }
+}
+
 // =============================================================================
 // Type Class Implementations
 // =============================================================================
@@ -1570,6 +1588,39 @@ impl<K: Clone + Hash + Eq, V: Clone> Foldable for PersistentHashMap<K, V> {
 mod tests {
     use super::*;
     use rstest::rstest;
+
+    // =========================================================================
+    // Display Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_display_empty_hashmap() {
+        let map: PersistentHashMap<String, i32> = PersistentHashMap::new();
+        assert_eq!(format!("{map}"), "{}");
+    }
+
+    #[rstest]
+    fn test_display_single_element_hashmap() {
+        let map = PersistentHashMap::singleton("key".to_string(), 42);
+        assert_eq!(format!("{map}"), "{key: 42}");
+    }
+
+    #[rstest]
+    fn test_display_multiple_elements_hashmap() {
+        let map = PersistentHashMap::new()
+            .insert("a".to_string(), 1)
+            .insert("b".to_string(), 2);
+        let display = format!("{map}");
+        // HashMap is unordered, so we check that the format is correct
+        assert!(display.starts_with('{'));
+        assert!(display.ends_with('}'));
+        assert!(display.contains("a: 1"));
+        assert!(display.contains("b: 2"));
+    }
+
+    // =========================================================================
+    // Original Tests
+    // =========================================================================
 
     #[rstest]
     fn test_new_creates_empty() {

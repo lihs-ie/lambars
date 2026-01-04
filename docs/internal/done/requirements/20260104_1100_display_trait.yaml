@@ -1,0 +1,375 @@
+# Display トレイト実装 要件定義
+# Issue: #9 - Display トレイト実装
+# 作成日: 2026-01-04
+
+metadata:
+  title: "Display トレイト実装"
+  issue_number: 9
+  created_at: "2026-01-04"
+  author: "functional-programming-specialist"
+  status: "draft"
+
+# =============================================================================
+# 概要
+# =============================================================================
+overview:
+  summary: |
+    全ての公開型に対してユーザーフレンドリーな Display トレイトを実装する。
+    現状、全ての公開型は Debug トレイトのみが実装されており、デバッグ出力用のフォーマットしか
+    提供されていない。Display トレイトを実装することで、エンドユーザー向けの読みやすい出力形式を
+    提供する。
+
+  motivation: |
+    - Debug 出力は開発者向けであり、冗長で読みにくい場合がある
+    - Display は println!("{}", value) のようなユーザー向け出力に使用される
+    - 関数型プログラミングライブラリとして、データ構造の内容を分かりやすく表示できることは重要
+    - 他言語の関数型ライブラリ（Haskell の Show、Scala の toString）との一貫性
+
+  scope:
+    in_scope:
+      - persistent モジュールの全公開型
+      - effect モジュールの全公開型
+      - control モジュールの全公開型
+    out_of_scope:
+      - 内部構造体（Node, Child など）
+      - テスト専用の型
+      - derive マクロ関連
+
+# =============================================================================
+# 対象型と出力フォーマット
+# =============================================================================
+target_types:
+  persistent_module:
+    - type: "PersistentList<T>"
+      file: "src/persistent/list.rs"
+      current_debug: "手動実装 (debug_list)"
+      display_format: "[a, b, c, ...]"
+      display_example: "[1, 2, 3]"
+      constraints:
+        - "T: Display"
+      notes: |
+        - 空リストは "[]" と表示
+        - 要素は ", " で区切る
+        - 末尾のカンマなし
+
+    - type: "PersistentVector<T>"
+      file: "src/persistent/vector.rs"
+      current_debug: "手動実装 (debug_list)"
+      display_format: "[a, b, c, ...]"
+      display_example: "[1, 2, 3]"
+      constraints:
+        - "T: Display"
+      notes: |
+        - PersistentList と同じフォーマットで一貫性を保つ
+        - 空ベクトルは "[]" と表示
+
+    - type: "PersistentHashMap<K, V>"
+      file: "src/persistent/hashmap.rs"
+      current_debug: "手動実装 (debug_map)"
+      display_format: "{k1: v1, k2: v2, ...}"
+      display_example: "{\"a\": 1, \"b\": 2}"
+      constraints:
+        - "K: Display"
+        - "V: Display"
+      notes: |
+        - 空マップは "{}" と表示
+        - キーと値は ": " で区切る
+        - エントリは ", " で区切る
+        - 順序は不定（ハッシュベース）
+
+    - type: "PersistentTreeMap<K, V>"
+      file: "src/persistent/treemap.rs"
+      current_debug: "手動実装 (debug_map)"
+      display_format: "{k1: v1, k2: v2, ...}"
+      display_example: "{1: \"one\", 2: \"two\"}"
+      constraints:
+        - "K: Display"
+        - "V: Display"
+      notes: |
+        - PersistentHashMap と同じフォーマット
+        - エントリはキー順でソートされて表示
+
+    - type: "PersistentHashSet<T>"
+      file: "src/persistent/hashset.rs"
+      current_debug: "手動実装 (debug_set)"
+      display_format: "{a, b, c, ...}"
+      display_example: "{1, 2, 3}"
+      constraints:
+        - "T: Display"
+      notes: |
+        - 空セットは "{}" と表示
+        - 要素は ", " で区切る
+        - 順序は不定（ハッシュベース）
+
+  effect_module:
+    - type: "Reader<R, A>"
+      file: "src/effect/reader.rs"
+      current_debug: "なし（Clone のみ）"
+      display_format: "<Reader>"
+      display_example: "<Reader>"
+      constraints: []
+      notes: |
+        - 内部の関数（Rc<dyn Fn>）は表示できないため、型名のみ
+        - シンプルな型識別子として機能
+
+    - type: "State<S, A>"
+      file: "src/effect/state.rs"
+      current_debug: "なし（Clone のみ）"
+      display_format: "<State>"
+      display_example: "<State>"
+      constraints: []
+      notes: |
+        - 内部の関数（Rc<dyn Fn>）は表示できないため、型名のみ
+
+    - type: "Writer<W, A>"
+      file: "src/effect/writer.rs"
+      current_debug: "#[derive(Debug)]"
+      display_format: "Writer(result, output)"
+      display_example: "Writer(42, \"log message\")"
+      constraints:
+        - "W: Display"
+        - "A: Display"
+      notes: |
+        - result と output の両方を表示
+        - デバッグ情報としても有用
+
+    - type: "IO<A>"
+      file: "src/effect/io.rs"
+      current_debug: "なし"
+      display_format: "<IO>"
+      display_example: "<IO>"
+      constraints: []
+      notes: |
+        - 遅延実行される副作用を表す型
+        - 内部のクロージャ（Box<dyn FnOnce>）は表示できない
+        - 実行前に内容を表示することは意味論的にも不適切
+
+    - type: "AsyncIO<A>"
+      file: "src/effect/async_io.rs"
+      current_debug: "なし"
+      display_format: "<AsyncIO>"
+      display_example: "<AsyncIO>"
+      constraints: []
+      notes: |
+        - IO と同様、内部の非同期計算は表示できない
+        - feature フラグ "async" が必要
+
+  control_module:
+    - type: "Either<L, R>"
+      file: "src/control/either.rs"
+      current_debug: "手動実装 (debug_tuple)"
+      display_format: "Left(x) / Right(y)"
+      display_example: "Left(42), Right(\"success\")"
+      constraints:
+        - "L: Display"
+        - "R: Display"
+      notes: |
+        - Debug と似た形式だが、より簡潔
+        - バリアント名と値を明確に表示
+
+    - type: "Lazy<T, F>"
+      file: "src/control/lazy.rs"
+      current_debug: "手動実装（状態表示）"
+      display_format: "Lazy(value) / Lazy(<uninit>) / Lazy(<poisoned>)"
+      display_example: "Lazy(42), Lazy(<uninit>)"
+      constraints:
+        - "T: Display（初期化済みの場合のみ）"
+      notes: |
+        - 初期化済み: 値を表示
+        - 未初期化: "<uninit>" と表示
+        - 中毒状態: "<poisoned>" と表示
+        - Debug 実装と同様のパターンを使用
+
+    - type: "Trampoline<A>"
+      file: "src/control/trampoline.rs"
+      current_debug: "手動実装（バリアント表示）"
+      display_format: "Done(value) / <Suspend> / <FlatMap>"
+      display_example: "Done(42), <Suspend>"
+      constraints:
+        - "A: Display（Done の場合のみ）"
+      notes: |
+        - Done: 値を表示
+        - Suspend: 遅延計算を表すため "<Suspend>" と表示
+        - FlatMapInternal: 継続を表すため "<FlatMap>" と表示
+
+# =============================================================================
+# 設計方針
+# =============================================================================
+design_principles:
+  consistency:
+    description: |
+      全ての型で一貫したフォーマットスタイルを使用する
+    rules:
+      - "コレクション型は角括弧 [] またはブレース {} を使用"
+      - "要素の区切りは \", \" を使用"
+      - "表示不可能な内部状態は <...> で囲む"
+
+  simplicity:
+    description: |
+      Display は Debug よりもシンプルで読みやすい出力を提供する
+    rules:
+      - "型名のプレフィックスは省略可能"
+      - "内部構造の詳細は省略"
+      - "ユーザーが理解しやすい形式を優先"
+
+  safety:
+    description: |
+      表示不可能な状態を安全に処理する
+    rules:
+      - "クロージャや関数は <...> で代替表示"
+      - "未初期化状態は明示的に表示"
+      - "パニックを起こさない実装"
+
+  trait_bounds:
+    description: |
+      適切なトレイト境界を設定する
+    rules:
+      - "要素を表示する場合のみ Display 境界を要求"
+      - "表示不可能な型（関数など）には境界を追加しない"
+      - "既存の Clone 等の境界と整合性を保つ"
+
+# =============================================================================
+# 実装要件
+# =============================================================================
+implementation_requirements:
+  general:
+    - requirement: "std::fmt::Display トレイトを実装"
+      priority: "required"
+
+    - requirement: "既存の Debug 実装との一貫性を保つ"
+      priority: "required"
+
+    - requirement: "空のコレクションを適切に処理"
+      priority: "required"
+
+    - requirement: "表示不可能な内部状態を安全に処理"
+      priority: "required"
+
+  code_style:
+    - requirement: "変数名・関数名に略語を使用しない"
+      priority: "required"
+      note: "CLAUDE.md の命名規則に従う"
+
+    - requirement: "rustfmt でフォーマット"
+      priority: "required"
+
+    - requirement: "clippy 警告なし"
+      priority: "required"
+
+  testing:
+    - requirement: "各型の Display 出力をテスト"
+      priority: "required"
+
+    - requirement: "空のコレクションのテスト"
+      priority: "required"
+
+    - requirement: "エッジケース（未初期化、中毒状態など）のテスト"
+      priority: "required"
+
+    - requirement: "テストカバレッジ 100%"
+      priority: "required"
+
+  documentation:
+    - requirement: "Display フォーマットのドキュメントコメント"
+      priority: "required"
+
+    - requirement: "使用例を doc コメントに含める"
+      priority: "recommended"
+
+# =============================================================================
+# 受け入れ基準
+# =============================================================================
+acceptance_criteria:
+  functional:
+    - "全ての対象型が Display トレイトを実装している"
+    - "println!(\"{}\", value) で適切な出力が得られる"
+    - "空のコレクションが正しく表示される"
+    - "表示不可能な内部状態がパニックせずに処理される"
+
+  quality:
+    - "cargo check が通過する"
+    - "cargo clippy --all-features が警告なしで通過する"
+    - "cargo fmt --check が通過する"
+    - "cargo test --all-features が全テスト通過する"
+    - "RUSTDOCFLAGS=\"-D warnings\" cargo doc --no-deps が通過する"
+
+  compatibility:
+    - "既存の API に破壊的変更がない"
+    - "既存のテストが全て通過する"
+    - "no_std 環境での動作に影響がない（該当する場合）"
+
+# =============================================================================
+# 実装順序（推奨）
+# =============================================================================
+implementation_order:
+  - phase: 1
+    description: "シンプルな型から開始"
+    types:
+      - "Either<L, R>"
+      - "Lazy<T, F>"
+      - "Trampoline<A>"
+    rationale: "Control モジュールの型は比較的シンプルで、実装パターンを確立しやすい"
+
+  - phase: 2
+    description: "コレクション型"
+    types:
+      - "PersistentList<T>"
+      - "PersistentVector<T>"
+      - "PersistentHashSet<T>"
+    rationale: "イテレータベースの一貫した実装パターンを使用できる"
+
+  - phase: 3
+    description: "マップ型"
+    types:
+      - "PersistentHashMap<K, V>"
+      - "PersistentTreeMap<K, V>"
+    rationale: "キー・バリューペアの表示が必要で、やや複雑"
+
+  - phase: 4
+    description: "Effect 型"
+    types:
+      - "Writer<W, A>"
+      - "Reader<R, A>"
+      - "State<S, A>"
+      - "IO<A>"
+      - "AsyncIO<A>"
+    rationale: "内部状態の表示制限があり、特殊な処理が必要"
+
+# =============================================================================
+# リスクと軽減策
+# =============================================================================
+risks:
+  - risk: "大量のボイラープレートコード"
+    likelihood: "medium"
+    impact: "low"
+    mitigation: |
+      マクロや共通ヘルパー関数を検討。ただし、シンプルさを優先し、
+      必要以上の抽象化は避ける。
+
+  - risk: "既存コードとの互換性問題"
+    likelihood: "low"
+    impact: "medium"
+    mitigation: |
+      Display は新しいトレイト実装であり、既存の機能に影響を与えない。
+      ただし、型境界の追加による影響を確認する。
+
+  - risk: "パフォーマンスへの影響"
+    likelihood: "low"
+    impact: "low"
+    mitigation: |
+      Display はデバッグ・ログ出力用であり、パフォーマンスクリティカルな
+      パスでは使用されない想定。必要に応じてベンチマークを実施。
+
+# =============================================================================
+# 関連ドキュメント
+# =============================================================================
+references:
+  - name: "Rust std::fmt::Display"
+    url: "https://doc.rust-lang.org/std/fmt/trait.Display.html"
+
+  - name: "GitHub Issue #9"
+    url: "https://github.com/lihs-ie/functional-rusty/issues/9"
+
+  - name: "CLAUDE.md"
+    path: "/Users/lihs/workspace/functional-rusty/CLAUDE.md"
+    note: "命名規則、開発ポリシー"

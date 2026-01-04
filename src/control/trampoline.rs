@@ -438,10 +438,46 @@ impl<A: std::fmt::Debug> std::fmt::Debug for Trampoline<A> {
     }
 }
 
+impl<A: std::fmt::Display> std::fmt::Display for Trampoline<A> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Done(value) => write!(formatter, "Done({value})"),
+            Self::Suspend(_) => write!(formatter, "<Suspend>"),
+            Self::FlatMapInternal(_) => write!(formatter, "<FlatMap>"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rstest::rstest;
+
+    // =========================================================================
+    // Display Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_display_done() {
+        let trampoline = Trampoline::done(42);
+        assert_eq!(format!("{trampoline}"), "Done(42)");
+    }
+
+    #[rstest]
+    fn test_display_suspend() {
+        let trampoline: Trampoline<i32> = Trampoline::suspend(|| Trampoline::done(42));
+        assert_eq!(format!("{trampoline}"), "<Suspend>");
+    }
+
+    #[rstest]
+    fn test_display_flatmap_internal() {
+        let trampoline = Trampoline::done(21).flat_map(|value| Trampoline::done(value * 2));
+        assert_eq!(format!("{trampoline}"), "<FlatMap>");
+    }
+
+    // =========================================================================
+    // Original Tests
+    // =========================================================================
 
     #[rstest]
     fn test_trampoline_done() {

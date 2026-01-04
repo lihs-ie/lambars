@@ -591,10 +591,44 @@ where
     }
 }
 
+// =============================================================================
+// Display Implementation
+// =============================================================================
+
+impl<W, A> std::fmt::Display for Writer<W, A>
+where
+    W: Monoid + std::fmt::Display + 'static,
+    A: std::fmt::Display + 'static,
+{
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "Writer({}, {})", self.result, self.output)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rstest::rstest;
+
+    // =========================================================================
+    // Display Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_display_writer() {
+        let writer: Writer<String, i32> = Writer::new(42, "log".to_string());
+        assert_eq!(format!("{writer}"), "Writer(42, log)");
+    }
+
+    #[rstest]
+    fn test_display_writer_with_empty_output() {
+        let writer: Writer<String, i32> = Writer::pure(42);
+        assert_eq!(format!("{writer}"), "Writer(42, )");
+    }
+
+    // =========================================================================
+    // Original Tests
+    // =========================================================================
 
     #[rstest]
     fn writer_new_and_run() {

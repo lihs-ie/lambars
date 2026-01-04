@@ -1,0 +1,481 @@
+version: "1.0"
+name: Display trait 実装計画
+requirement_file: /Users/lihs/workspace/functional-rusty/docs/internal/done/requirements/20260104_1100_display_trait.yaml
+
+implementation_order:
+  - phase: 1
+    description: control モジュールの制御構造に Display trait を実装
+    files:
+      - src/control/either.rs
+      - src/control/lazy.rs
+      - src/control/trampoline.rs
+
+  - phase: 2
+    description: コレクション型に Display trait を実装
+    files:
+      - src/persistent/list.rs
+      - src/persistent/vector.rs
+      - src/persistent/hashset.rs
+
+  - phase: 3
+    description: マップ型に Display trait を実装
+    files:
+      - src/persistent/hashmap.rs
+      - src/persistent/treemap.rs
+
+  - phase: 4
+    description: effect モジュールのモナドに Display trait を実装
+    files:
+      - src/effect/writer.rs
+      - src/effect/reader.rs
+      - src/effect/state.rs
+      - src/effect/io.rs
+      - src/effect/async_io.rs
+
+implementation_plan:
+  # =============================================================================
+  # Phase 1: control モジュール
+  # =============================================================================
+  - file: src/control/either.rs
+    changes:
+      - location: "impl<L: fmt::Display, R: fmt::Display> fmt::Display for Either<L, R>"
+        description: |
+          既存の Debug 実装の隣に Display trait を追加。
+          Left(value) または Right(value) 形式で表示する。
+        code_snippet: |
+          impl<L: fmt::Display, R: fmt::Display> fmt::Display for Either<L, R> {
+              fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                  match self {
+                      Self::Left(value) => write!(formatter, "Left({})", value),
+                      Self::Right(value) => write!(formatter, "Right({})", value),
+                  }
+              }
+          }
+
+  - file: src/control/lazy.rs
+    changes:
+      - location: "impl<T: fmt::Display, F> fmt::Display for Lazy<T, F>"
+        description: |
+          既存の Debug 実装の隣に Display trait を追加。
+          Lazy<T, F> の型シグネチャに合わせる。
+          - 評価済み: 値を表示（例: Lazy(42)）
+          - 未初期化: Lazy(<uninit>) と表示
+          - 中毒状態: Lazy(<poisoned>) と表示
+        code_snippet: |
+          impl<T: fmt::Display, F> fmt::Display for Lazy<T, F> {
+              fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                  let state = self.state.borrow();
+                  match &*state {
+                      LazyState::Init(value) => write!(formatter, "Lazy({})", value),
+                      LazyState::Uninit(_) => write!(formatter, "Lazy(<uninit>)"),
+                      LazyState::Poisoned => write!(formatter, "Lazy(<poisoned>)"),
+                  }
+              }
+          }
+        note: |
+          Debug 実装と同様のパターンを使用。
+          state.borrow() を使用して評価を強制せずに状態を確認する。
+          型パラメータ F も含める（Lazy<T, F> の実際の定義に合わせる）。
+
+  - file: src/control/trampoline.rs
+    changes:
+      - location: "impl<A: fmt::Display> fmt::Display for Trampoline<A>"
+        description: |
+          既存の Debug 実装の隣に Display trait を追加。
+          Done の場合は Done(value) 形式、その他は <...> 形式で表示する。
+          - Done: Done(value)
+          - Suspend: <Suspend>
+          - FlatMapInternal: <FlatMap>
+        code_snippet: |
+          impl<A: fmt::Display> fmt::Display for Trampoline<A> {
+              fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                  match self {
+                      Self::Done(value) => write!(formatter, "Done({})", value),
+                      Self::Suspend(_) => write!(formatter, "<Suspend>"),
+                      Self::FlatMapInternal(_) => write!(formatter, "<FlatMap>"),
+                  }
+              }
+          }
+
+  # =============================================================================
+  # Phase 2: コレクション型
+  # =============================================================================
+  - file: src/persistent/list.rs
+    changes:
+      - location: "impl<T: fmt::Display> fmt::Display for PersistentList<T>"
+        description: |
+          既存の Debug 実装の隣に Display trait を追加。
+          リスト形式 [element1, element2, ...] で表示する。
+        code_snippet: |
+          impl<T: fmt::Display> fmt::Display for PersistentList<T> {
+              fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                  write!(formatter, "[")?;
+                  let mut first = true;
+                  for element in self.iter() {
+                      if first {
+                          first = false;
+                      } else {
+                          write!(formatter, ", ")?;
+                      }
+                      write!(formatter, "{}", element)?;
+                  }
+                  write!(formatter, "]")
+              }
+          }
+
+  - file: src/persistent/vector.rs
+    changes:
+      - location: "impl<T: fmt::Display> fmt::Display for PersistentVector<T>"
+        description: |
+          既存の Debug 実装の隣に Display trait を追加。
+          ベクター形式 [element1, element2, ...] で表示する。
+        code_snippet: |
+          impl<T: fmt::Display> fmt::Display for PersistentVector<T> {
+              fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                  write!(formatter, "[")?;
+                  let mut first = true;
+                  for element in self.iter() {
+                      if first {
+                          first = false;
+                      } else {
+                          write!(formatter, ", ")?;
+                      }
+                      write!(formatter, "{}", element)?;
+                  }
+                  write!(formatter, "]")
+              }
+          }
+
+  - file: src/persistent/hashset.rs
+    changes:
+      - location: "impl<T: fmt::Display> fmt::Display for PersistentHashSet<T>"
+        description: |
+          既存の Debug 実装の隣に Display trait を追加。
+          セット形式 {element1, element2, ...} で表示する。
+        code_snippet: |
+          impl<T: fmt::Display + Eq + Hash> fmt::Display for PersistentHashSet<T> {
+              fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                  write!(formatter, "{{")?;
+                  let mut first = true;
+                  for element in self.iter() {
+                      if first {
+                          first = false;
+                      } else {
+                          write!(formatter, ", ")?;
+                      }
+                      write!(formatter, "{}", element)?;
+                  }
+                  write!(formatter, "}}")
+              }
+          }
+
+  # =============================================================================
+  # Phase 3: マップ型
+  # =============================================================================
+  - file: src/persistent/hashmap.rs
+    changes:
+      - location: "impl<K: fmt::Display, V: fmt::Display> fmt::Display for PersistentHashMap<K, V>"
+        description: |
+          既存の Debug 実装の隣に Display trait を追加。
+          マップ形式 {key1: value1, key2: value2, ...} で表示する。
+        code_snippet: |
+          impl<K: fmt::Display + Eq + Hash, V: fmt::Display> fmt::Display for PersistentHashMap<K, V> {
+              fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                  write!(formatter, "{{")?;
+                  let mut first = true;
+                  for (key, value) in self.iter() {
+                      if first {
+                          first = false;
+                      } else {
+                          write!(formatter, ", ")?;
+                      }
+                      write!(formatter, "{}: {}", key, value)?;
+                  }
+                  write!(formatter, "}}")
+              }
+          }
+
+  - file: src/persistent/treemap.rs
+    changes:
+      - location: "impl<K: fmt::Display, V: fmt::Display> fmt::Display for PersistentTreeMap<K, V>"
+        description: |
+          既存の Debug 実装の隣に Display trait を追加。
+          マップ形式 {key1: value1, key2: value2, ...} で表示する（ソート順）。
+        code_snippet: |
+          impl<K: fmt::Display + Ord, V: fmt::Display> fmt::Display for PersistentTreeMap<K, V> {
+              fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                  write!(formatter, "{{")?;
+                  let mut first = true;
+                  for (key, value) in self.iter() {
+                      if first {
+                          first = false;
+                      } else {
+                          write!(formatter, ", ")?;
+                      }
+                      write!(formatter, "{}: {}", key, value)?;
+                  }
+                  write!(formatter, "}}")
+              }
+          }
+
+  # =============================================================================
+  # Phase 4: effect モジュール
+  # =============================================================================
+  - file: src/effect/writer.rs
+    changes:
+      - location: "impl<W: fmt::Display, A: fmt::Display> fmt::Display for Writer<W, A>"
+        description: |
+          Writer モナドに Display trait を追加。
+          Writer(result, output) 形式で表示する。
+        code_snippet: |
+          impl<W, A> fmt::Display for Writer<W, A>
+          where
+              W: Monoid + fmt::Display + 'static,
+              A: fmt::Display + 'static,
+          {
+              fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                  write!(formatter, "Writer({}, {})", self.result, self.output)
+              }
+          }
+        note: |
+          result と output フィールドが private の場合、
+          別のアプローチが必要。clone が必要な場合は run() を使用。
+
+  - file: src/effect/reader.rs
+    changes:
+      - location: "impl<R, A> fmt::Display for Reader<R, A>"
+        description: |
+          Reader モナドに Display trait を追加。
+          関数を含むため、<Reader> と表示する。
+        code_snippet: |
+          impl<R, A> fmt::Display for Reader<R, A>
+          where
+              R: 'static,
+              A: 'static,
+          {
+              fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                  write!(formatter, "<Reader>")
+              }
+          }
+
+  - file: src/effect/state.rs
+    changes:
+      - location: "impl<S, A> fmt::Display for State<S, A>"
+        description: |
+          State モナドに Display trait を追加。
+          関数を含むため、<State> と表示する。
+        code_snippet: |
+          impl<S, A> fmt::Display for State<S, A>
+          where
+              S: 'static,
+              A: 'static,
+          {
+              fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                  write!(formatter, "<State>")
+              }
+          }
+
+  - file: src/effect/io.rs
+    changes:
+      - location: "impl<A> fmt::Display for IO<A>"
+        description: |
+          IO モナドに Display trait を追加。
+          副作用を含むため、<IO> と表示する。
+        code_snippet: |
+          impl<A> fmt::Display for IO<A> {
+              fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                  write!(formatter, "<IO>")
+              }
+          }
+
+  - file: src/effect/async_io.rs
+    changes:
+      - location: "impl<A> fmt::Display for AsyncIO<A>"
+        description: |
+          AsyncIO モナドに Display trait を追加。
+          副作用を含むため、<AsyncIO> と表示する。
+        code_snippet: |
+          impl<A> fmt::Display for AsyncIO<A> {
+              fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                  write!(formatter, "<AsyncIO>")
+              }
+          }
+
+test_strategy:
+  unit_tests:
+    # Phase 1: control モジュール
+    - file: src/control/either.rs
+      tests:
+        - name: test_display_left
+          description: Left(value) が "Left(value)" と表示されることを確認
+        - name: test_display_right
+          description: Right(value) が "Right(value)" と表示されることを確認
+
+    - file: src/control/lazy.rs
+      tests:
+        - name: test_display_unevaluated_lazy
+          description: 未評価の Lazy が "Lazy(<uninit>)" と表示されることを確認
+        - name: test_display_evaluated_lazy
+          description: 評価済みの Lazy が "Lazy(value)" と表示されることを確認
+        - name: test_display_poisoned_lazy
+          description: 中毒状態の Lazy が "Lazy(<poisoned>)" と表示されることを確認
+
+    - file: src/control/trampoline.rs
+      tests:
+        - name: test_display_done
+          description: Done(value) が "Done(value)" と表示されることを確認
+        - name: test_display_suspend
+          description: Suspend が "<Suspend>" と表示されることを確認
+        - name: test_display_flatmap_internal
+          description: FlatMapInternal が "<FlatMap>" と表示されることを確認
+
+    # Phase 2: コレクション型
+    - file: src/persistent/list.rs
+      tests:
+        - name: test_display_empty_list
+          description: 空のリストが [] と表示されることを確認
+        - name: test_display_single_element_list
+          description: 単一要素のリストが [element] と表示されることを確認
+        - name: test_display_multiple_elements_list
+          description: 複数要素のリストが [e1, e2, e3] と表示されることを確認
+
+    - file: src/persistent/vector.rs
+      tests:
+        - name: test_display_empty_vector
+          description: 空のベクターが [] と表示されることを確認
+        - name: test_display_single_element_vector
+          description: 単一要素のベクターが [element] と表示されることを確認
+        - name: test_display_multiple_elements_vector
+          description: 複数要素のベクターが [e1, e2, e3] と表示されることを確認
+
+    - file: src/persistent/hashset.rs
+      tests:
+        - name: test_display_empty_hashset
+          description: 空のハッシュセットが {} と表示されることを確認
+        - name: test_display_single_element_hashset
+          description: 単一要素のハッシュセットが {element} と表示されることを確認
+        - name: test_display_multiple_elements_hashset
+          description: 複数要素のハッシュセットの表示を確認
+
+    # Phase 3: マップ型
+    - file: src/persistent/hashmap.rs
+      tests:
+        - name: test_display_empty_hashmap
+          description: 空のハッシュマップが {} と表示されることを確認
+        - name: test_display_single_entry_hashmap
+          description: "単一エントリのハッシュマップが {key: value} と表示されることを確認"
+        - name: test_display_multiple_entries_hashmap
+          description: 複数エントリのハッシュマップの表示を確認
+
+    - file: src/persistent/treemap.rs
+      tests:
+        - name: test_display_empty_treemap
+          description: 空のツリーマップが {} と表示されることを確認
+        - name: test_display_single_entry_treemap
+          description: "単一エントリのツリーマップが {key: value} と表示されることを確認"
+        - name: test_display_multiple_entries_treemap
+          description: 複数エントリのツリーマップがソート順で表示されることを確認
+
+    # Phase 4: effect モジュール
+    - file: src/effect/writer.rs
+      tests:
+        - name: test_display_writer
+          description: Writer が "Writer(result, output)" と表示されることを確認
+
+    - file: src/effect/reader.rs
+      tests:
+        - name: test_display_reader
+          description: Reader が "<Reader>" と表示されることを確認
+
+    - file: src/effect/state.rs
+      tests:
+        - name: test_display_state
+          description: State が "<State>" と表示されることを確認
+
+    - file: src/effect/io.rs
+      tests:
+        - name: test_display_io
+          description: IO が "<IO>" と表示されることを確認
+
+    - file: src/effect/async_io.rs
+      tests:
+        - name: test_display_async_io
+          description: AsyncIO が "<AsyncIO>" と表示されることを確認
+
+  integration_tests:
+    - file: tests/display_tests.rs
+      tests:
+        - name: test_display_formatting_with_format_macro
+          description: format! マクロでの Display 使用を確認
+        - name: test_display_in_string_interpolation
+          description: 文字列補間での Display 使用を確認
+        - name: test_display_with_nested_structures
+          description: ネストされた構造の Display を確認
+
+acceptance_criteria:
+  - 全ての対象型に Display trait が実装されている
+  - Display 実装が Debug 実装と整合性がある（表示形式の一貫性）
+  - format! マクロおよび println! マクロで使用できる
+  - 空のコレクションが適切に表示される
+  - 複数要素のコレクションがカンマ区切りで表示される
+  - 評価を強制しない型（Lazy, IO, AsyncIO）は適切なプレースホルダーを表示する
+  - Lazy の中毒状態が適切に表示される
+  - 既存のテストが全てパスする
+  - 新規テストが全てパスする
+  - cargo clippy が警告なしでパスする
+  - cargo fmt が適用されている
+  - テストカバレッジが既存の水準を維持する
+
+implementation_notes:
+  - |
+    Lazy 型の実装について:
+    型シグネチャは Lazy<T, F> であり、F は初期化関数の型パラメータ。
+    Display 実装では state.borrow() を使用して評価を強制せずに状態を確認する。
+    LazyState enum を直接パターンマッチングして、Init/Uninit/Poisoned を判定する。
+
+  - |
+    Lazy の中毒状態について:
+    初期化関数がパニックした場合、Lazy は Poisoned 状態になる。
+    テストでは std::panic::catch_unwind を使用してパニックを捕捉し、
+    中毒状態の表示を確認する。
+
+  - |
+    Writer 型の実装について:
+    result と output フィールドへのアクセス方法を確認する。
+    private フィールドの場合は、run() メソッドを使用するか、
+    新しいアクセサメソッドを追加する。
+
+  - |
+    HashMap の表示順序について:
+    HashMap は順序を保証しないため、テストでは要素の存在確認のみ行う。
+    または、表示前にソートしてテストの再現性を確保する。
+
+  - |
+    effect モジュールの表示形式について:
+    Reader, State, IO, AsyncIO は内部に関数やクロージャを持つため、
+    その内容を表示することはできない。
+    要件定義に従い、<Reader>, <State>, <IO>, <AsyncIO> の形式で表示する。
+
+  - |
+    Trampoline の表示形式について:
+    Done は値を持つため Done(value) の形式で表示する。
+    Suspend と FlatMapInternal は遅延計算を表すため、
+    <Suspend> と <FlatMap> の形式で表示する。
+
+  - |
+    パフォーマンス考慮:
+    Display の実装は頻繁に呼び出される可能性があるため、
+    不必要なアロケーションを避ける。
+    既存のイテレータを使用し、中間コレクションを作成しない。
+
+  - |
+    型境界について:
+    各型の Display 実装では、内部要素が Display を実装している場合のみ
+    Display を実装するように型境界を設定する。
+    これにより、Display を実装していない要素を含むコレクションも
+    コンパイルエラーなく使用できる。
+
+  - |
+    std::fmt の use 文について:
+    各ファイルで既に use std::fmt; が存在するか確認し、
+    存在しない場合は追加する。
