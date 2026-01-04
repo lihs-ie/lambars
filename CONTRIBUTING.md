@@ -6,7 +6,7 @@ Thank you for your interest in contributing to lambars! This document provides g
 
 ### Prerequisites
 
-- Rust 1.92.0 or later (nightly)
+- Rust 1.92.0 or later
 - Git
 
 ### Setting Up the Development Environment

@@ -15,11 +15,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
       - name: Generate changelog
+        id: git-cliff
         uses: orhun/git-cliff-action@v4
         with:
           config: cliff.toml
