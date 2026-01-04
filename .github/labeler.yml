@@ -14,7 +14,7 @@ control:
   - changed-files:
       - any-glob-to-any-file: 'src/control/**/*'
 
-persistent-data:
+persistent:
   - changed-files:
       - any-glob-to-any-file: 'src/persistent/**/*'
 
