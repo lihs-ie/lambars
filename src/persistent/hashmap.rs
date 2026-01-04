@@ -1614,8 +1614,8 @@ mod tests {
         // HashMap is unordered, so we check that the format is correct
         assert!(display.starts_with('{'));
         assert!(display.ends_with('}'));
-        assert!(display.contains("a: 1") || display.contains("a:1"));
-        assert!(display.contains("b: 2") || display.contains("b:2"));
+        assert!(display.contains("a: 1"));
+        assert!(display.contains("b: 2"));
     }
 
     // =========================================================================
