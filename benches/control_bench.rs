@@ -2,8 +2,9 @@
 //!
 //! Measures the performance of lambars' control flow abstractions.
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use lambars::control::{Lazy, Trampoline};
+use std::hint::black_box;
 
 // =============================================================================
 // Lazy Benchmarks
