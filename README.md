@@ -19,9 +19,9 @@ lambars brings functional programming abstractions to Rust that are not provided
 
 If you're coming from another functional programming language, these guides will help you understand how lambars maps to familiar concepts:
 
-- [Haskell to lambars](docs/comparison/Haskell/README.md) - Comprehensive guide covering type classes, do-notation, optics, and more
-- [Scala to lambars](docs/comparison/Scala/README.md) - Covers Cats/Scalaz, Monocle, and Scala standard library
-- [F# to lambars](docs/comparison/F%23/README.md) - Covers F# core library, computation expressions, and active patterns
+- [Haskell to lambars](docs/external/comparison/Haskell/README.md) - Comprehensive guide covering type classes, do-notation, optics, and more
+- [Scala to lambars](docs/external/comparison/Scala/README.md) - Covers Cats/Scalaz, Monocle, and Scala standard library
+- [F# to lambars](docs/external/comparison/F%23/README.md) - Covers F# core library, computation expressions, and active patterns
 
 ## Requirements
 
@@ -46,18 +46,18 @@ lambars = { version = "0.1.0", features = ["typeclass", "persistent", "effect"] 
 
 ## Feature Flags
 
-| Feature | Description | Dependencies |
-|---------|-------------|--------------|
-| `default` | All features (same as `full`) | `typeclass`, `compose`, `control`, `persistent`, `optics`, `derive`, `effect`, `async` |
-| `full` | All features | `typeclass`, `compose`, `control`, `persistent`, `optics`, `derive`, `effect`, `async` |
-| `typeclass` | Type class traits (Functor, Monad, etc.) | None |
-| `compose` | Function composition utilities | `typeclass` |
-| `control` | Control structures (Lazy, Trampoline) | `typeclass` |
-| `persistent` | Persistent data structures | `typeclass`, `control` |
-| `optics` | Optics (Lens, Prism, etc.) | `typeclass`, `persistent` |
-| `derive` | Derive macros for Lens/Prism | `optics`, `lambars-derive` |
-| `effect` | Effect system | `typeclass`, `control` |
-| `async` | Async support (AsyncIO) | `effect`, `tokio`, `futures` |
+| Feature      | Description                              | Dependencies                                                                           |
+| ------------ | ---------------------------------------- | -------------------------------------------------------------------------------------- |
+| `default`    | All features (same as `full`)            | `typeclass`, `compose`, `control`, `persistent`, `optics`, `derive`, `effect`, `async` |
+| `full`       | All features                             | `typeclass`, `compose`, `control`, `persistent`, `optics`, `derive`, `effect`, `async` |
+| `typeclass`  | Type class traits (Functor, Monad, etc.) | None                                                                                   |
+| `compose`    | Function composition utilities           | `typeclass`                                                                            |
+| `control`    | Control structures (Lazy, Trampoline)    | `typeclass`                                                                            |
+| `persistent` | Persistent data structures               | `typeclass`, `control`                                                                 |
+| `optics`     | Optics (Lens, Prism, etc.)               | `typeclass`, `persistent`                                                              |
+| `derive`     | Derive macros for Lens/Prism             | `optics`, `lambars-derive`                                                             |
+| `effect`     | Effect system                            | `typeclass`, `control`                                                                 |
+| `async`      | Async support (AsyncIO)                  | `effect`, `tokio`, `futures`                                                           |
 
 ## Quick Start
 
@@ -736,7 +736,7 @@ let result = eff! {
 assert_eq!(result, None);
 ```
 
-#### for_! Macro (List Comprehensions)
+#### for\_! Macro (List Comprehensions)
 
 Scala/Haskell-style list comprehensions for Vec and iterators.
 
@@ -811,21 +811,22 @@ async fn example() {
 ```
 
 **Syntax:**
+
 - `pattern <= collection;` - Bind from IntoIterator (for loop)
 - `pattern <~ async_io;` - Bind from AsyncIO (await)
 - `let pattern = expr;` - Pure let binding
 - `yield expr` - Terminal expression (collected into Vec)
 
-#### eff! vs for_! vs for_async! : When to Use Which
+#### eff! vs for\_! vs for_async! : When to Use Which
 
-| Scenario | Macro | Reason |
-|----------|-------|--------|
-| Option/Result chaining | `eff!` | Short-circuits on None/Err |
-| IO/State/Reader/Writer | `eff!` | FnOnce-based monads |
-| Vec/Iterator generation | `for_!` | FnMut-based, uses yield |
-| Cartesian products | `for_!` | Multiple iterations |
-| Async monadic chaining | `eff_async!` | Sequential async operations |
-| Async list generation | `for_async!` | Async iteration with yield |
+| Scenario                | Macro        | Reason                      |
+| ----------------------- | ------------ | --------------------------- |
+| Option/Result chaining  | `eff!`       | Short-circuits on None/Err  |
+| IO/State/Reader/Writer  | `eff!`       | FnOnce-based monads         |
+| Vec/Iterator generation | `for_!`      | FnMut-based, uses yield     |
+| Cartesian products      | `for_!`      | Multiple iterations         |
+| Async monadic chaining  | `eff_async!` | Sequential async operations |
+| Async list generation   | `for_async!` | Async iteration with yield  |
 
 ## Safety
 
