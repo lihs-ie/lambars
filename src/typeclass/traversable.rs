@@ -776,6 +776,13 @@ pub trait Traversable: Functor + Foldable {
     /// `IO<Self::WithType<B>>` - An IO that, when executed, produces the structure
     /// with all transformed values.
     ///
+    /// # Type Constraints (Result)
+    ///
+    /// When traversing `Result<T, E>`, the error type `E` must satisfy:
+    /// - `E: Clone + Send + 'static` - The `Send` constraint is required by `traverse_async_io`,
+    ///   and due to Rust's type system limitations, this constraint applies to the entire
+    ///   `Traversable` implementation for `Result<T, E>`.
+    ///
     /// # Examples
     ///
     /// ```rust
@@ -904,6 +911,14 @@ pub trait Traversable: Functor + Foldable {
     ///
     /// `AsyncIO<Self::WithType<B>>` - An `AsyncIO` that, when executed, produces the
     /// structure with all transformed values.
+    ///
+    /// # Type Constraints (Result)
+    ///
+    /// When traversing `Result<T, E>`, the error type `E` must satisfy:
+    /// - `E: Clone + Send + 'static` - Required because the error is captured by the async
+    ///   closure and may be moved between threads by the async runtime.
+    ///   This `Send` constraint is the reason why the entire `Traversable` implementation
+    ///   for `Result<T, E>` requires `E: Send`.
     ///
     /// # Examples
     ///

@@ -1,0 +1,614 @@
+# Result<T, E> の Traversable 実装における型制約の修正 実装計画
+#
+# 要件定義: docs/internal/requirements/20260105_result_type_constraint_fix.yaml
+# 技術要件:
+#   - Rust: 1.92.0
+#   - edition: 2024
+#   - testing: rstest, proptest
+#
+# 実装方針:
+#   1. impl ブロックの制約を E: Clone のみに変更
+#   2. 各効果型メソッドの where 句に必要な追加制約を明示的に記述
+#   3. 既存のテストが全てパスすることを確認
+#
+# 背景:
+#   PR #50 のレビュー指摘により、Result<T, E> の Traversable 実装で
+#   impl ブロック全体に E: Clone + Send + 'static 制約が適用されている問題を修正する。
+#   各メソッドが実際に必要とする最小限の制約のみを適用する。
+
+version: "1.0.0"
+name: "Result Type Constraint Fix Implementation Plan"
+requirement_file: "docs/internal/requirements/20260105_result_type_constraint_fix.yaml"
+
+# 実装順序の概要
+implementation_order:
+  - step: 1
+    name: "impl ブロックの基本制約の修正"
+    items:
+      - "impl ブロックの E: Clone + Send + 'static を E: Clone のみに変更"
+
+  - step: 2
+    name: "各効果型メソッドへの追加制約の適用"
+    items:
+      - "traverse_reader に E: 'static を追加"
+      - "traverse_state に E: 'static を追加"
+      - "traverse_io に E: 'static を追加"
+      - "traverse_async_io に E: Send + 'static を追加"
+
+  - step: 3
+    name: "テスト実行と確認"
+    items:
+      - 既存テストの実行確認
+      - 新しい制約が正しく機能することの確認
+
+# 実装計画詳細
+implementation_plan:
+  # ============================================================================
+  # 1. impl ブロックの基本制約の修正
+  # ============================================================================
+  - id: impl_block_constraint_fix
+    requirement_id: impl_block_constraint
+    name: "impl ブロックの基本制約を E: Clone のみに変更"
+    priority: 1
+    description: |
+      Result<T, E> の Traversable 実装の impl ブロックで、
+      エラー型 E の制約を Clone のみにする。
+
+      この変更により、traverse_option と traverse_result は
+      Send や 'static を実装していないエラー型でも使用可能になる。
+
+    files:
+      - path: src/typeclass/traversable.rs
+        description: |
+          1076行目付近の impl ブロックの制約を修正。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          impl ブロックの型パラメータ制約を変更する。
+        before: |
+          impl<T, E: Clone + Send + 'static> Traversable for Result<T, E> {
+        after: |
+          impl<T, E: Clone> Traversable for Result<T, E> {
+
+    tests:
+      - name: compile_check
+        description: 変更後にコンパイルが通ることを確認
+        test_type: compile
+        code_outline: |
+          cargo check --all-features
+
+    dependencies: []
+
+  # ============================================================================
+  # 2. traverse_reader の制約修正
+  # ============================================================================
+  - id: impl_traverse_reader_constraint
+    requirement_id: traverse_reader_constraints
+    name: "traverse_reader の where 句に E: 'static を追加"
+    priority: 2
+    description: |
+      traverse_reader メソッドの where 句に E: 'static 制約を追加する。
+
+      理由: Err ケースで Reader::new(move |_| Err(error.clone())) を返す際、
+      クロージャは 'static である必要があり、error がキャプチャされるため
+      E: 'static が必要。
+
+      注意: 既存の where 句には E: 'static が既に含まれているため、
+      実際には変更不要。impl ブロックから 'static を削除しても
+      where 句の E: 'static が有効になる。
+
+    files:
+      - path: src/typeclass/traversable.rs
+        description: |
+          traverse_reader メソッドの where 句を確認・維持。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          既存の where 句を確認し、E: 'static が含まれていることを確認する。
+        before: |
+          #[cfg(feature = "effect")]
+          fn traverse_reader<R, B, F>(self, mut function: F) -> Reader<R, Result<B, E>>
+          where
+              F: FnMut(T) -> Reader<R, B>,
+              R: Clone + 'static,
+              B: 'static,
+              Result<B, E>: 'static,
+              E: 'static,
+        after: |
+          #[cfg(feature = "effect")]
+          fn traverse_reader<R, B, F>(self, mut function: F) -> Reader<R, Result<B, E>>
+          where
+              F: FnMut(T) -> Reader<R, B>,
+              R: Clone + 'static,
+              B: 'static,
+              E: 'static,
+        notes: |
+          Result<B, E>: 'static は E: 'static と B: 'static から導出可能なため削除可能。
+          ただし、この変更は今回のスコープ外とする（別途検討）。
+
+    tests:
+      - name: test_result_traverse_reader_with_static_error
+        description: "E: 'static を満たすエラー型で traverse_reader が動作することを確認"
+        test_type: unit
+        code_outline: |
+          #[test]
+          fn result_traverse_reader_ok() {
+              let result: Result<i32, String> = Ok(5);
+              let reader = result.traverse_reader(|n| {
+                  Reader::asks(move |env: i32| n * env)
+              });
+              assert_eq!(reader.run(10), Ok(50));
+          }
+
+          #[test]
+          fn result_traverse_reader_err() {
+              let result: Result<i32, String> = Err("error".to_string());
+              let reader = result.traverse_reader(|n| {
+                  Reader::asks(move |env: i32| n * env)
+              });
+              assert_eq!(reader.run(10), Err("error".to_string()));
+          }
+
+    dependencies:
+      - impl_block_constraint_fix
+
+  # ============================================================================
+  # 3. traverse_state の制約修正
+  # ============================================================================
+  - id: impl_traverse_state_constraint
+    requirement_id: traverse_state_constraints
+    name: "traverse_state の where 句に E: 'static を追加"
+    priority: 3
+    description: |
+      traverse_state メソッドの where 句に E: 'static 制約を追加する。
+
+      理由: Err ケースで State::new(move |state| (Err(error.clone()), state)) を返す際、
+      クロージャは 'static である必要があり、error がキャプチャされるため
+      E: 'static が必要。
+
+      注意: 既存の where 句には E: 'static が既に含まれているため、
+      実際には変更不要。
+
+    files:
+      - path: src/typeclass/traversable.rs
+        description: |
+          traverse_state メソッドの where 句を確認・維持。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          既存の where 句を確認し、E: 'static が含まれていることを確認する。
+        before: |
+          #[cfg(feature = "effect")]
+          fn traverse_state<S, B, F>(self, mut function: F) -> State<S, Result<B, E>>
+          where
+              F: FnMut(T) -> State<S, B>,
+              S: Clone + 'static,
+              B: 'static,
+              Result<B, E>: 'static,
+              E: 'static,
+        after: |
+          #[cfg(feature = "effect")]
+          fn traverse_state<S, B, F>(self, mut function: F) -> State<S, Result<B, E>>
+          where
+              F: FnMut(T) -> State<S, B>,
+              S: Clone + 'static,
+              B: 'static,
+              E: 'static,
+        notes: |
+          Result<B, E>: 'static は E: 'static と B: 'static から導出可能なため削除可能。
+          ただし、この変更は今回のスコープ外とする（別途検討）。
+
+    tests:
+      - name: test_result_traverse_state_with_static_error
+        description: "E: 'static を満たすエラー型で traverse_state が動作することを確認"
+        test_type: unit
+        code_outline: |
+          #[test]
+          fn result_traverse_state_ok() {
+              let result: Result<i32, String> = Ok(5);
+              let state = result.traverse_state(|n| {
+                  State::new(move |s: i32| (n * s, s + 1))
+              });
+              assert_eq!(state.run(10), (Ok(50), 11));
+          }
+
+    dependencies:
+      - impl_block_constraint_fix
+
+  # ============================================================================
+  # 4. traverse_io の制約修正
+  # ============================================================================
+  - id: impl_traverse_io_constraint
+    requirement_id: traverse_io_constraints
+    name: "traverse_io の where 句に E: 'static を追加"
+    priority: 4
+    description: |
+      traverse_io メソッドの where 句に E: 'static 制約を追加する。
+
+      理由: Err ケースで IO::new(move || Err(error)) を返す際、
+      クロージャは 'static である必要があり、error が move されるため
+      E: 'static が必要。
+
+      注意: 現在の where 句には E: 'static が含まれていないため、
+      追加が必要。
+
+    files:
+      - path: src/typeclass/traversable.rs
+        description: |
+          traverse_io メソッドの where 句に E: 'static を追加。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          traverse_io の where 句に E: 'static を追加する。
+        before: |
+          #[cfg(feature = "effect")]
+          fn traverse_io<B, F>(self, mut function: F) -> IO<Result<B, E>>
+          where
+              F: FnMut(T) -> IO<B>,
+              B: 'static,
+          {
+        after: |
+          #[cfg(feature = "effect")]
+          fn traverse_io<B, F>(self, mut function: F) -> IO<Result<B, E>>
+          where
+              F: FnMut(T) -> IO<B>,
+              B: 'static,
+              E: 'static,
+          {
+
+    tests:
+      - name: test_result_traverse_io_with_static_error
+        description: "E: 'static を満たすエラー型で traverse_io が動作することを確認"
+        test_type: unit
+        code_outline: |
+          #[test]
+          fn result_traverse_io_ok() {
+              let result: Result<i32, String> = Ok(5);
+              let io = result.traverse_io(|n| IO::pure(n * 2));
+              assert_eq!(io.run_unsafe(), Ok(10));
+          }
+
+          #[test]
+          fn result_traverse_io_err() {
+              let result: Result<i32, String> = Err("error".to_string());
+              let io = result.traverse_io(|n| IO::pure(n * 2));
+              assert_eq!(io.run_unsafe(), Err("error".to_string()));
+          }
+
+    dependencies:
+      - impl_block_constraint_fix
+
+  # ============================================================================
+  # 5. traverse_async_io の制約修正
+  # ============================================================================
+  - id: impl_traverse_async_io_constraint
+    requirement_id: traverse_async_io_constraints
+    name: "traverse_async_io の where 句に E: Send + 'static を追加"
+    priority: 5
+    description: |
+      traverse_async_io メソッドの where 句に E: Send + 'static 制約を追加する。
+
+      理由: Err ケースで AsyncIO::new(move || async move { Err(error) }) を返す際、
+      非同期クロージャは 'static かつ Send である必要があり、
+      error が move されるため E: Send + 'static が必要。
+
+    files:
+      - path: src/typeclass/traversable.rs
+        description: |
+          traverse_async_io メソッドの where 句に E: Send + 'static を追加。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          traverse_async_io の where 句に E: Send + 'static を追加する。
+        before: |
+          #[cfg(all(feature = "effect", feature = "async"))]
+          fn traverse_async_io<B, F>(self, mut function: F) -> AsyncIO<Result<B, E>>
+          where
+              F: FnMut(T) -> AsyncIO<B>,
+              B: Send + 'static,
+          {
+        after: |
+          #[cfg(all(feature = "effect", feature = "async"))]
+          fn traverse_async_io<B, F>(self, mut function: F) -> AsyncIO<Result<B, E>>
+          where
+              F: FnMut(T) -> AsyncIO<B>,
+              B: Send + 'static,
+              E: Send + 'static,
+          {
+
+    tests:
+      - name: test_result_traverse_async_io_with_send_static_error
+        description: "E: Send + 'static を満たすエラー型で traverse_async_io が動作することを確認"
+        test_type: unit
+        code_outline: |
+          #[tokio::test]
+          async fn result_traverse_async_io_ok() {
+              let result: Result<i32, String> = Ok(5);
+              let async_io = result.traverse_async_io(|n| AsyncIO::pure(n * 2));
+              assert_eq!(async_io.run_async().await, Ok(10));
+          }
+
+          #[tokio::test]
+          async fn result_traverse_async_io_err() {
+              let result: Result<i32, String> = Err("error".to_string());
+              let async_io = result.traverse_async_io(|n| AsyncIO::pure(n * 2));
+              assert_eq!(async_io.run_async().await, Err("error".to_string()));
+          }
+
+    dependencies:
+      - impl_block_constraint_fix
+
+  # ============================================================================
+  # 6. テスト実行と確認
+  # ============================================================================
+  - id: impl_test_verification
+    requirement_id: null
+    name: "テスト実行と確認"
+    priority: 6
+    description: |
+      全ての変更が完了した後、既存のテストが全てパスすることを確認する。
+      また、新しい制約が正しく機能することを確認する。
+
+    files: []
+
+    implementation_steps:
+      - step: 1
+        description: |
+          既存テストの実行確認。
+        code_outline: |
+          cargo test --all-features
+          cargo test --no-default-features
+
+      - step: 2
+        description: |
+          lint チェックの実行。
+        code_outline: |
+          cargo clippy --all-features --all-targets -- -D warnings
+
+      - step: 3
+        description: |
+          ドキュメントビルドの確認。
+        code_outline: |
+          RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+
+    tests: []
+
+    dependencies:
+      - impl_block_constraint_fix
+      - impl_traverse_reader_constraint
+      - impl_traverse_state_constraint
+      - impl_traverse_io_constraint
+      - impl_traverse_async_io_constraint
+
+  # ============================================================================
+  # 7. rustdoc コメントの更新
+  # ============================================================================
+  - id: impl_rustdoc_update
+    requirement_id: documentation
+    name: "rustdoc コメントの更新"
+    priority: 7
+    description: |
+      各効果型メソッドの where 句に追加された制約の意図を
+      rustdoc コメントで説明する。
+
+    files:
+      - path: src/typeclass/traversable.rs
+        description: |
+          traverse_io と traverse_async_io メソッドの
+          rustdoc コメントを更新。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          traverse_io メソッドに E: 'static 制約の説明を追加。
+        code_outline: |
+          /// ...
+          /// # Type Constraints (Result)
+          ///
+          /// When traversing `Result<T, E>`, the error type `E` must satisfy:
+          /// - `E: 'static` - Required because the error is captured by the IO closure.
+
+      - step: 2
+        description: |
+          traverse_async_io メソッドに E: Send + 'static 制約の説明を追加。
+        code_outline: |
+          /// ...
+          /// # Type Constraints (Result)
+          ///
+          /// When traversing `Result<T, E>`, the error type `E` must satisfy:
+          /// - `E: Send + 'static` - Required because the error is captured by the async
+          ///   closure and may be moved between threads by the async runtime.
+
+    tests: []
+
+    dependencies:
+      - impl_test_verification
+
+# 変更箇所の詳細
+code_changes:
+  file: "src/typeclass/traversable.rs"
+  line_range: "1076-1150"
+
+  changes:
+    - location: "1076行目"
+      description: "impl ブロックの型パラメータ制約"
+      before: "impl<T, E: Clone + Send + 'static> Traversable for Result<T, E> {"
+      after: "impl<T, E: Clone> Traversable for Result<T, E> {"
+
+    - location: "1097-1110行目"
+      description: "traverse_reader の where 句（変更なし、確認のみ）"
+      notes: |
+        既存の where 句に E: 'static が含まれているため変更不要。
+        Result<B, E>: 'static 制約は冗長だが、今回のスコープ外。
+
+    - location: "1112-1125行目"
+      description: "traverse_state の where 句（変更なし、確認のみ）"
+      notes: |
+        既存の where 句に E: 'static が含まれているため変更不要。
+        Result<B, E>: 'static 制約は冗長だが、今回のスコープ外。
+
+    - location: "1127-1137行目"
+      description: "traverse_io の where 句に E: 'static を追加"
+      before: |
+        #[cfg(feature = "effect")]
+        fn traverse_io<B, F>(self, mut function: F) -> IO<Result<B, E>>
+        where
+            F: FnMut(T) -> IO<B>,
+            B: 'static,
+        {
+      after: |
+        #[cfg(feature = "effect")]
+        fn traverse_io<B, F>(self, mut function: F) -> IO<Result<B, E>>
+        where
+            F: FnMut(T) -> IO<B>,
+            B: 'static,
+            E: 'static,
+        {
+
+    - location: "1139-1149行目"
+      description: "traverse_async_io の where 句に E: Send + 'static を追加"
+      before: |
+        #[cfg(all(feature = "effect", feature = "async"))]
+        fn traverse_async_io<B, F>(self, mut function: F) -> AsyncIO<Result<B, E>>
+        where
+            F: FnMut(T) -> AsyncIO<B>,
+            B: Send + 'static,
+        {
+      after: |
+        #[cfg(all(feature = "effect", feature = "async"))]
+        fn traverse_async_io<B, F>(self, mut function: F) -> AsyncIO<Result<B, E>>
+        where
+            F: FnMut(T) -> AsyncIO<B>,
+            B: Send + 'static,
+            E: Send + 'static,
+        {
+
+# テスト戦略
+test_strategy:
+  unit_tests:
+    location: src/typeclass/traversable.rs
+    description: |
+      既存のテストが全てパスすることを確認。
+      新しい制約でコンパイルエラーが発生しないことを確認。
+
+  integration_tests:
+    location: tests/
+    description: |
+      効果型に関する統合テストが全てパスすることを確認。
+
+  verification_tests:
+    description: |
+      以下のシナリオで動作確認:
+      1. E: Clone のみを満たすエラー型で traverse_option/traverse_result が使用可能
+      2. E: Clone + 'static を満たすエラー型で traverse_reader/traverse_state/traverse_io が使用可能
+      3. E: Clone + Send + 'static を満たすエラー型で traverse_async_io が使用可能
+
+  new_tests:
+    - name: result_traverse_option_with_non_send_error
+      description: |
+        Send を実装しないエラー型で traverse_option が使用できることを確認。
+        これにより impl ブロックの制約緩和が正しく機能していることを検証。
+      code: |
+        #[rstest]
+        fn result_traverse_option_with_non_send_error() {
+            use std::rc::Rc;
+
+            let result: Result<i32, Rc<str>> = Ok(5);
+            let option = result.traverse_option(|n| Some(n * 2));
+            assert_eq!(option, Some(Ok(10)));
+
+            let result: Result<i32, Rc<str>> = Err(Rc::from("error"));
+            let option = result.traverse_option(|n| Some(n * 2));
+            assert!(matches!(option, Some(Err(_))));
+        }
+
+    - name: result_traverse_result_with_non_send_error
+      description: |
+        Send を実装しないエラー型で traverse_result が使用できることを確認。
+      code: |
+        #[rstest]
+        fn result_traverse_result_with_non_send_error() {
+            use std::rc::Rc;
+
+            let result: Result<i32, Rc<str>> = Ok(5);
+            let traversed: Result<Result<i32, Rc<str>>, &str> =
+                result.traverse_result(|n| Ok(n * 2));
+            assert_eq!(traversed, Ok(Ok(10)));
+
+            let result: Result<i32, Rc<str>> = Err(Rc::from("error"));
+            let traversed: Result<Result<i32, Rc<str>>, &str> =
+                result.traverse_result(|n| Ok(n * 2));
+            assert!(matches!(traversed, Ok(Err(_))));
+        }
+
+    - name: result_traverse_option_with_non_static_error
+      description: |
+        'static でないエラー型で traverse_option が使用できることを確認。
+        注意: Rust では参照を含む型は 'static を満たさないが、
+        所有型（String など）は 'static を満たすため、
+        このテストでは Rc を使用して Send のみをテスト。
+      code: |
+        // 上記の result_traverse_option_with_non_send_error でカバー
+
+  confirmation_steps:
+    - step: 1
+      description: |
+        traverse_option と traverse_result が追加制約なしで動作することを確認。
+        これらのメソッドは E: Clone のみを必要とする。
+      verification: |
+        - 既存のテストが全てパス
+        - 新しいテスト（non_send_error）がパス
+
+    - step: 2
+      description: |
+        traverse_reader, traverse_state, traverse_io が E: 'static を必要とすることを確認。
+        これらのメソッドは where 句で E: 'static を指定。
+      verification: |
+        - 既存のテストが全てパス
+        - E: Clone のみの型では traverse_reader 等がコンパイルエラーになることを確認（手動）
+
+    - step: 3
+      description: |
+        traverse_async_io が E: Send + 'static を必要とすることを確認。
+      verification: |
+        - 既存のテストが全てパス
+        - E: Clone + 'static のみの型では traverse_async_io がコンパイルエラーになることを確認（手動）
+
+# 完了条件
+acceptance_criteria:
+  - "impl ブロックの制約が E: Clone のみになっていること"
+  - "traverse_reader の where 句に E: 'static が含まれていること"
+  - "traverse_state の where 句に E: 'static が含まれていること"
+  - "traverse_io の where 句に E: 'static が含まれていること"
+  - "traverse_async_io の where 句に E: Send + 'static が含まれていること"
+  - "traverse_io と traverse_async_io の rustdoc コメントに型制約の説明が含まれていること"
+  - "Send を実装しないエラー型で traverse_option/traverse_result が使用可能なテストが追加されていること"
+  - "cargo check --all-features が通過すること"
+  - "cargo clippy --all-features --all-targets -- -D warnings が通過すること"
+  - "cargo test --no-default-features が通過すること"
+  - "cargo test --all-features が通過すること"
+  - "RUSTDOCFLAGS=\"-D warnings\" cargo doc --no-deps が通過すること"
+  - "既存のテストが全て成功すること"
+
+# 影響範囲
+impact_analysis:
+  breaking_changes: |
+    この変更は後方互換性がある。
+    既存のコードで E: Clone + Send + 'static を満たす型は引き続き動作する。
+    制約を緩和しているため、より多くの型で traverse_option/traverse_result が使用可能になる。
+
+  affected_files:
+    - "src/typeclass/traversable.rs"
+
+  risk_assessment: |
+    リスク: 低
+
+    理由:
+    1. 制約の緩和のみで、既存の動作に影響なし
+    2. 各メソッドの where 句で必要な制約を明示的に指定
+    3. 既存のテストで動作確認可能

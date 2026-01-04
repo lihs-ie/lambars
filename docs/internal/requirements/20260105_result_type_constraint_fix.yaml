@@ -1,0 +1,327 @@
+# Result<T, E> の Traversable 実装における型制約の修正 要件定義
+#
+# 概要:
+#   Result<T, E> の Traversable 実装において、impl ブロック全体に
+#   E: Clone + Send + 'static 制約が適用されているが、これは過剰な制約である。
+#   各メソッドが実際に必要とする最小限の制約のみを適用するように修正する。
+#
+# 背景:
+#   PR #50 のレビュー指摘により、型制約が必要以上に厳しいことが判明。
+#   Send と 'static は traverse_async_io メソッドのみに必要だが、
+#   現在は impl ブロック全体に適用されている。
+#
+# 参照:
+#   - PR #50: https://github.com/lihs-ie/lambars/pull/50
+#   - 元の要件定義: docs/internal/done/requirements/20260104_1500_traversable_effect_extension.yaml
+
+version: "1.0.0"
+name: "result_type_constraint_fix"
+description: |
+  Result<T, E> の Traversable 実装における型制約を最小化する。
+
+  現状:
+    impl<T, E: Clone + Send + 'static> Traversable for Result<T, E>
+
+  目標:
+    impl<T, E: Clone> Traversable for Result<T, E>
+
+    各メソッドで必要な追加制約は where 句で指定する。
+
+# 背景・動機
+background:
+  problem: |
+    現在の Result<T, E> の Traversable 実装では、impl ブロックに
+    E: Clone + Send + 'static という制約が適用されている。
+
+    しかし、Send は traverse_async_io メソッドのみに必要であり、
+    'static も全てのメソッドに必要なわけではない。
+
+    この過剰な制約により、以下の問題が発生する:
+
+    1. Send を実装していないエラー型を持つ Result で traverse_option や
+       traverse_result が使用できない
+    2. 'static でないエラー型を持つ Result で同様の問題が発生
+    3. API の柔軟性が不必要に制限される
+
+  motivation: |
+    関数型プログラミングの原則として、制約は必要最小限であるべきである。
+    各メソッドが実際に必要とする制約のみを課すことで:
+
+    1. より多くの型で Traversable を使用可能になる
+    2. エラーメッセージがより明確になる（どのメソッドが追加制約を必要とするか分かる）
+    3. Rust のトレイトシステムのベストプラクティスに従う
+
+  prior_art:
+    - name: "Rust 標準ライブラリの設計"
+      description: |
+        std::iter::Iterator など、Rust 標準ライブラリのトレイトは
+        メソッドごとに必要な制約を where 句で指定するパターンを採用している。
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. impl ブロックの基本制約の修正
+  # ======================================================================
+  - id: impl_block_constraint
+    name: "impl ブロックの基本制約を E: Clone のみに変更"
+    description: |
+      Result<T, E> の Traversable 実装の impl ブロックで、
+      エラー型 E の制約を Clone のみにする。
+
+    current_state: |
+      impl<T, E: Clone + Send + 'static> Traversable for Result<T, E>
+
+    target_state: |
+      impl<T, E: Clone> Traversable for Result<T, E>
+
+    rationale: |
+      traverse_option と traverse_result は E: Clone のみを必要とする。
+      これらのメソッドは Option/Result を返すため、'static も Send も不要。
+
+  # ======================================================================
+  # 2. traverse_option / traverse_result の制約
+  # ======================================================================
+  - id: traverse_option_result_constraints
+    name: "traverse_option と traverse_result の制約"
+    description: |
+      traverse_option と traverse_result は追加の制約を必要としない。
+      impl ブロックの E: Clone で十分。
+
+    methods:
+      - name: "traverse_option"
+        signature: |
+          fn traverse_option<B, F>(self, function: F) -> Option<Result<B, E>>
+          where
+              F: FnMut(T) -> Option<B>
+        required_constraints:
+          - "E: Clone (impl ブロックから)"
+        analysis: |
+          Err ケースでは error をそのまま返すため、所有権の移動のみ。
+          Clone は必要（traverse_result との一貫性のため impl に含まれている）。
+
+      - name: "traverse_result"
+        signature: |
+          fn traverse_result<B, E2, F>(self, function: F) -> Result<Result<B, E>, E2>
+          where
+              F: FnMut(T) -> Result<B, E2>
+        required_constraints:
+          - "E: Clone (impl ブロックから)"
+        analysis: |
+          traverse_option と同様、所有権の移動のみで十分。
+
+  # ======================================================================
+  # 3. traverse_reader の制約
+  # ======================================================================
+  - id: traverse_reader_constraints
+    name: "traverse_reader の追加制約"
+    description: |
+      traverse_reader は where 句で E: 'static を追加する必要がある。
+
+    methods:
+      - name: "traverse_reader"
+        signature: |
+          fn traverse_reader<R, B, F>(self, function: F) -> Reader<R, Result<B, E>>
+          where
+              F: FnMut(T) -> Reader<R, B>,
+              R: Clone + 'static,
+              B: 'static,
+              E: 'static
+        required_constraints:
+          - "E: Clone (impl ブロックから)"
+          - "E: 'static (where 句で追加)"
+        analysis: |
+          Err ケースの実装:
+            Err(error) => Reader::new(move |_| Err(error.clone()))
+
+          Reader::new はクロージャを取り、そのクロージャは 'static である必要がある。
+          クロージャ内で error.clone() を使用するため、error 自体がクロージャに
+          キャプチャされ、'static である必要がある。
+
+  # ======================================================================
+  # 4. traverse_state の制約
+  # ======================================================================
+  - id: traverse_state_constraints
+    name: "traverse_state の追加制約"
+    description: |
+      traverse_state は where 句で E: 'static を追加する必要がある。
+
+    methods:
+      - name: "traverse_state"
+        signature: |
+          fn traverse_state<S, B, F>(self, function: F) -> State<S, Result<B, E>>
+          where
+              F: FnMut(T) -> State<S, B>,
+              S: Clone + 'static,
+              B: 'static,
+              E: 'static
+        required_constraints:
+          - "E: Clone (impl ブロックから)"
+          - "E: 'static (where 句で追加)"
+        analysis: |
+          Err ケースの実装:
+            Err(error) => State::new(move |state| (Err(error.clone()), state))
+
+          State::new はクロージャを取り、そのクロージャは 'static である必要がある。
+          クロージャ内で error.clone() を使用するため、error 自体がクロージャに
+          キャプチャされ、'static である必要がある。
+
+  # ======================================================================
+  # 5. traverse_io の制約
+  # ======================================================================
+  - id: traverse_io_constraints
+    name: "traverse_io の追加制約"
+    description: |
+      traverse_io は where 句で E: 'static を追加する必要がある。
+      ただし Clone は不要（所有権を移動するため）。
+
+    methods:
+      - name: "traverse_io"
+        signature: |
+          fn traverse_io<B, F>(self, function: F) -> IO<Result<B, E>>
+          where
+              F: FnMut(T) -> IO<B>,
+              B: 'static,
+              E: 'static
+        required_constraints:
+          - "E: Clone (impl ブロックから、ただし traverse_io 自体は Clone を使用しない)"
+          - "E: 'static (where 句で追加)"
+        analysis: |
+          Err ケースの実装:
+            Err(error) => IO::new(move || Err(error))
+
+          IO::new はクロージャを取り、そのクロージャは 'static である必要がある。
+          error はクロージャに move されるため、'static である必要がある。
+          Clone は使用していないが、impl ブロックの制約として存在する。
+
+  # ======================================================================
+  # 6. traverse_async_io の制約
+  # ======================================================================
+  - id: traverse_async_io_constraints
+    name: "traverse_async_io の追加制約"
+    description: |
+      traverse_async_io は where 句で E: Send + 'static を追加する必要がある。
+
+    methods:
+      - name: "traverse_async_io"
+        signature: |
+          fn traverse_async_io<B, F>(self, function: F) -> AsyncIO<Result<B, E>>
+          where
+              F: FnMut(T) -> AsyncIO<B>,
+              B: Send + 'static,
+              E: Send + 'static
+        required_constraints:
+          - "E: Clone (impl ブロックから、ただし traverse_async_io 自体は Clone を使用しない)"
+          - "E: Send + 'static (where 句で追加)"
+        analysis: |
+          Err ケースの実装:
+            Err(error) => AsyncIO::new(move || async move { Err(error) })
+
+          AsyncIO::new は非同期クロージャを取る。非同期クロージャは:
+          - 'static である必要がある（Future が 'static を要求）
+          - Send である必要がある（非同期ランタイムがスレッド間で Future を移動する可能性）
+
+          error は非同期クロージャに move されるため、Send + 'static である必要がある。
+
+# 実装方針
+implementation_approach:
+  strategy: |
+    1. impl ブロックの制約を E: Clone のみに変更
+    2. 各効果型メソッド（traverse_reader, traverse_state, traverse_io, traverse_async_io）の
+       where 句に必要な追加制約を明示的に記述
+    3. 既存のテストが全てパスすることを確認
+    4. 追加の制約テストを作成（Send を実装しない型での traverse_option/traverse_result）
+
+  code_changes:
+    - file: "src/typeclass/traversable.rs"
+      description: "Result<T, E> の impl ブロックと各メソッドの制約を修正"
+      before: |
+        impl<T, E: Clone + Send + 'static> Traversable for Result<T, E> {
+            fn traverse_option<B, F>(self, mut function: F) -> Option<Result<B, E>>
+            where
+                F: FnMut(T) -> Option<B>,
+            { ... }
+
+            // ...
+
+            fn traverse_reader<R, B, F>(self, mut function: F) -> Reader<R, Result<B, E>>
+            where
+                F: FnMut(T) -> Reader<R, B>,
+                R: Clone + 'static,
+                B: 'static,
+                Result<B, E>: 'static,
+                E: 'static,
+            { ... }
+
+            // ...
+        }
+      after: |
+        impl<T, E: Clone> Traversable for Result<T, E> {
+            fn traverse_option<B, F>(self, mut function: F) -> Option<Result<B, E>>
+            where
+                F: FnMut(T) -> Option<B>,
+            { ... }
+
+            // ...
+
+            #[cfg(feature = "effect")]
+            fn traverse_reader<R, B, F>(self, mut function: F) -> Reader<R, Result<B, E>>
+            where
+                F: FnMut(T) -> Reader<R, B>,
+                R: Clone + 'static,
+                B: 'static,
+                E: 'static,
+            { ... }
+
+            #[cfg(feature = "effect")]
+            fn traverse_state<S, B, F>(self, mut function: F) -> State<S, Result<B, E>>
+            where
+                F: FnMut(T) -> State<S, B>,
+                S: Clone + 'static,
+                B: 'static,
+                E: 'static,
+            { ... }
+
+            #[cfg(feature = "effect")]
+            fn traverse_io<B, F>(self, mut function: F) -> IO<Result<B, E>>
+            where
+                F: FnMut(T) -> IO<B>,
+                B: 'static,
+                E: 'static,
+            { ... }
+
+            #[cfg(all(feature = "effect", feature = "async"))]
+            fn traverse_async_io<B, F>(self, mut function: F) -> AsyncIO<Result<B, E>>
+            where
+                F: FnMut(T) -> AsyncIO<B>,
+                B: Send + 'static,
+                E: Send + 'static,
+            { ... }
+        }
+
+# 非機能要件
+non_functional_requirements:
+  compatibility:
+    - "既存のコードで E: Clone + Send + 'static を満たす型は引き続き動作する"
+    - "新たに E: Clone のみを満たす型で traverse_option/traverse_result が使用可能になる"
+
+  testing:
+    - "既存の全テストがパスすること"
+    - "Send を実装しないエラー型で traverse_option が使用できることを確認するテスト"
+    - "'static でないエラー型の扱いに関する注意事項のドキュメント"
+    - "テストカバレッジ 100% を維持"
+
+  documentation:
+    - "各メソッドの where 句に追加された制約の意図を rustdoc で説明"
+
+# 変更の影響範囲
+impact_analysis:
+  breaking_changes: |
+    この変更は後方互換性がある。既存のコードは引き続き動作する。
+    制約を緩和しているため、より多くの型で使用可能になる。
+
+  affected_files:
+    - "src/typeclass/traversable.rs"
+
+  testing_scope:
+    - "Result の Traversable 実装に関する全テスト"
+    - "特に traverse_option, traverse_result が Clone のみで動作することの確認"
