@@ -46,6 +46,112 @@ use super::functor::Functor;
 use super::higher::TypeConstructor;
 use super::identity::Identity;
 
+#[cfg(feature = "effect")]
+use crate::effect::{IO, Reader, State};
+
+#[cfg(all(feature = "effect", feature = "async"))]
+use crate::effect::AsyncIO;
+
+// =============================================================================
+// Helper Traits for Effect Types
+// =============================================================================
+
+/// A trait for types that represent Reader-like computations.
+///
+/// This trait allows `sequence_reader` to extract environment and value types
+/// from the inner elements of a traversable structure.
+///
+/// # Type Parameters
+///
+/// * `Environment` - The environment type (Reader's R)
+/// * `Value` - The value type (Reader's A)
+#[cfg(feature = "effect")]
+pub trait ReaderLike {
+    /// The environment type of the Reader.
+    type Environment;
+    /// The value type of the Reader.
+    type Value;
+
+    /// Converts this value into a Reader.
+    ///
+    /// This method is used by `sequence_reader` to convert elements
+    /// into Reader values that can be traversed.
+    fn into_reader(self) -> Reader<Self::Environment, Self::Value>
+    where
+        Self::Environment: Clone + 'static,
+        Self::Value: 'static;
+}
+
+/// A trait for types that represent State-like computations.
+///
+/// This trait allows `sequence_state` to extract state and value types
+/// from the inner elements of a traversable structure.
+///
+/// # Type Parameters
+///
+/// * `StateType` - The state type (State's S)
+/// * `Value` - The value type (State's A)
+#[cfg(feature = "effect")]
+pub trait StateLike {
+    /// The state type of the State computation.
+    type StateType;
+    /// The value type of the State computation.
+    type Value;
+
+    /// Converts this value into a State.
+    ///
+    /// This method is used by `sequence_state` to convert elements
+    /// into State values that can be traversed.
+    fn into_state(self) -> State<Self::StateType, Self::Value>
+    where
+        Self::StateType: Clone + 'static,
+        Self::Value: 'static;
+}
+
+/// A trait for types that represent IO-like computations.
+///
+/// This trait allows `sequence_io` to extract the value type
+/// from the inner elements of a traversable structure.
+///
+/// # Type Parameters
+///
+/// * `Value` - The value type (IO's A)
+#[cfg(feature = "effect")]
+pub trait IOLike {
+    /// The value type of the IO computation.
+    type Value;
+
+    /// Converts this value into an IO.
+    ///
+    /// This method is used by `sequence_io` to convert elements
+    /// into IO values that can be traversed.
+    fn into_io(self) -> IO<Self::Value>
+    where
+        Self::Value: 'static;
+}
+
+/// A trait for types that represent AsyncIO-like computations.
+///
+/// This trait allows `sequence_async_io` to extract the value type
+/// from the inner elements of a traversable structure.
+///
+/// # Type Parameters
+///
+/// * `Value` - The value type (`AsyncIO`'s A)
+#[cfg(all(feature = "effect", feature = "async"))]
+pub trait AsyncIOLike {
+    /// The value type of the `AsyncIO` computation.
+    type Value;
+
+    /// Converts this value into an `AsyncIO`.
+    ///
+    /// This method is used by `sequence_async_io` to convert elements
+    /// into `AsyncIO` values that can be traversed.
+    fn into_async_io(self) -> AsyncIO<Self::Value>
+    where
+        Self::Value: Send + 'static;
+}
+
 /// A type class for structures that can be traversed with effects.
 ///
 /// `Traversable` combines the capabilities of `Functor` and `Foldable` with
@@ -377,6 +483,519 @@ pub trait Traversable: Functor + Foldable {
     {
         self.traverse_result_(function)
     }
+
+    // =========================================================================
+    // Reader Effect Methods
+    // =========================================================================
+
+    /// Applies a function returning `Reader` to each element and collects the results.
+    ///
+    /// The Reader computations are combined, and all will receive the same environment
+    /// when the resulting Reader is run.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `R` - The environment type for the Reader
+    /// * `B` - The result type of each Reader computation
+    ///
+    /// # Arguments
+    ///
+    /// * `function` - A function that transforms each element to a `Reader<R, B>`
+    ///
+    /// # Returns
+    ///
+    /// `Reader<R, Self::WithType<B>>` - A Reader that, when run with an environment,
+    /// produces the structure with all transformed values.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::typeclass::Traversable;
+    /// use lambars::effect::Reader;
+    ///
+    /// let values = vec![1, 2, 3];
+    /// let reader = values.traverse_reader(|value| {
+    ///     Reader::asks(move |multiplier: i32| value * multiplier)
+    /// });
+    /// assert_eq!(reader.run(10), vec![10, 20, 30]);
+    /// ```
+    #[cfg(feature = "effect")]
+    fn traverse_reader<R, B, F>(self, function: F) -> Reader<R, Self::WithType<B>>
+    where
+        F: FnMut(Self::Inner) -> Reader<R, B>,
+        R: Clone + 'static,
+        B: 'static,
+        Self::WithType<B>: 'static;
+
+    /// Turns a structure of `Reader`s inside out.
+    ///
+    /// Converts `Self<Reader<R, A>>` to `Reader<R, Self<A>>`.
+    ///
+    /// This is equivalent to `traverse_reader(ReaderLike::into_reader)`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::typeclass::Traversable;
+    /// use lambars::effect::Reader;
+    ///
+    /// let values: Vec<Reader<i32, i32>> = vec![
+    ///     Reader::asks(|environment: i32| environment),
+    ///     Reader::asks(|environment: i32| environment * 2),
+    /// ];
+    /// let reader = values.sequence_reader();
+    /// assert_eq!(reader.run(5), vec![5, 10]);
+    /// ```
+    #[cfg(feature = "effect")]
+    fn sequence_reader<R>(self) -> Reader<R, Self::WithType<<Self::Inner as ReaderLike>::Value>>
+    where
+        Self: Sized,
+        R: Clone + 'static,
+        Self::Inner: ReaderLike<Environment = R> + 'static,
+        <Self::Inner as ReaderLike>::Value: 'static,
+        Self::WithType<<Self::Inner as ReaderLike>::Value>: 'static,
+    {
+        self.traverse_reader(ReaderLike::into_reader)
+    }
+
+    /// Applies an effectful function for its effects only, discarding results.
+    ///
+    /// This is useful when you want to perform Reader effects on each element
+    /// but don't need to collect the results.
+    ///
+    /// # Arguments
+    ///
+    /// * `function` - A function that performs an effect returning `Reader<R, ()>`
+    ///
+    /// # Returns
+    ///
+    /// `Reader<R, ()>` - A Reader that performs all effects when run
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::typeclass::Traversable;
+    /// use lambars::effect::Reader;
+    ///
+    /// let values = vec![1, 2, 3];
+    /// let reader = values.traverse_reader_(|_| Reader::pure(()));
+    /// assert_eq!(reader.run(0), ());
+    /// ```
+    #[cfg(feature = "effect")]
+    fn traverse_reader_<R, F>(self, function: F) -> Reader<R, ()>
+    where
+        F: FnMut(Self::Inner) -> Reader<R, ()>,
+        R: Clone + 'static,
+        Self: Sized,
+        Self::WithType<()>: 'static,
+    {
+        self.traverse_reader(function).fmap(|_| ())
+    }
+
+    /// Alias for `traverse_reader_`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::typeclass::Traversable;
+    /// use lambars::effect::Reader;
+    ///
+    /// let values = vec![1, 2, 3];
+    /// let reader = values.for_each_reader(|_| Reader::pure(()));
+    /// assert_eq!(reader.run(0), ());
+    /// ```
+    #[cfg(feature = "effect")]
+    fn for_each_reader<R, F>(self, function: F) -> Reader<R, ()>
+    where
+        F: FnMut(Self::Inner) -> Reader<R, ()>,
+        R: Clone + 'static,
+        Self: Sized,
+        Self::WithType<()>: 'static,
+    {
+        self.traverse_reader_(function)
+    }
+
+    // =========================================================================
+    // State Effect Methods
+    // =========================================================================
+
+    /// Applies a function returning `State` to each element and collects the results.
+    ///
+    /// The state is threaded from left to right through each element's computation.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `S` - The state type for the State monad
+    /// * `B` - The result type of each State computation
+    ///
+    /// # Arguments
+    ///
+    /// * `function` - A function that transforms each element to a `State<S, B>`
+    ///
+    /// # Returns
+    ///
+    /// `State<S, Self::WithType<B>>` - A State that, when run with an initial state,
+    /// produces the structure with all transformed values and the final state.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::typeclass::Traversable;
+    /// use lambars::effect::State;
+    ///
+    /// let items = vec!["a", "b", "c"];
+    /// let state = items.traverse_state(|item| {
+    ///     State::new(move |index: usize| ((index, item), index + 1))
+    /// });
+    /// let (result, final_index) = state.run(0);
+    /// assert_eq!(result, vec![(0, "a"), (1, "b"), (2, "c")]);
+    /// assert_eq!(final_index, 3);
+    /// ```
+    #[cfg(feature = "effect")]
+    fn traverse_state<S, B, F>(self, function: F) -> State<S, Self::WithType<B>>
+    where
+        F: FnMut(Self::Inner) -> State<S, B>,
+        S: Clone + 'static,
+        B: 'static,
+        Self::WithType<B>: 'static;
+
+    /// Turns a structure of `State`s inside out.
+    ///
+    /// Converts `Self<State<S, A>>` to `State<S, Self<A>>`.
+    ///
+    /// This is equivalent to `traverse_state(StateLike::into_state)`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::typeclass::Traversable;
+    /// use lambars::effect::State;
+    ///
+    /// let states: Vec<State<i32, i32>> = vec![
+    ///     State::new(|state: i32| (state, state + 1)),
+    ///     State::new(|state: i32| (state * 2, state + 1)),
+    /// ];
+    /// let combined = states.sequence_state();
+    /// let (result, final_state) = combined.run(1);
+    /// assert_eq!(result, vec![1, 4]);
+    /// assert_eq!(final_state, 3);
+    /// ```
+    #[cfg(feature = "effect")]
+    fn sequence_state<S>(self) -> State<S, Self::WithType<<Self::Inner as StateLike>::Value>>
+    where
+        Self: Sized,
+        S: Clone + 'static,
+        Self::Inner: StateLike<StateType = S> + 'static,
+        <Self::Inner as StateLike>::Value: 'static,
+        Self::WithType<<Self::Inner as StateLike>::Value>: 'static,
+    {
+        self.traverse_state(StateLike::into_state)
+    }
+
+    /// Applies an effectful function for its effects only, discarding results.
+    ///
+    /// This is useful when you want to perform State effects on each element
+    /// but don't need to collect the results.
+    ///
+    /// # Arguments
+    ///
+    /// * `function` - A function that performs an effect returning `State<S, ()>`
+    ///
+    /// # Returns
+    ///
+    /// `State<S, ()>` - A State that performs all effects when run
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::typeclass::Traversable;
+    /// use lambars::effect::State;
+    ///
+    /// let values = vec![1, 2, 3];
+    /// let state = values.traverse_state_(|value| {
+    ///     State::modify(move |current: i32| current + value)
+    /// });
+    /// let ((), final_state) = state.run(0);
+    /// assert_eq!(final_state, 6);
+    /// ```
+    #[cfg(feature = "effect")]
+    fn traverse_state_<S, F>(self, function: F) -> State<S, ()>
+    where
+        F: FnMut(Self::Inner) -> State<S, ()>,
+        S: Clone + 'static,
+        Self: Sized,
+        Self::WithType<()>: 'static,
+    {
+        self.traverse_state(function).fmap(|_| ())
+    }
+
+    /// Alias for `traverse_state_`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::typeclass::Traversable;
+    /// use lambars::effect::State;
+    ///
+    /// let values = vec![1, 2, 3];
+    /// let state = values.for_each_state(|value| {
+    ///     State::modify(move |current: i32| current + value)
+    /// });
+    /// let ((), final_state) = state.run(0);
+    /// assert_eq!(final_state, 6);
+    /// ```
+    #[cfg(feature = "effect")]
+    fn for_each_state<S, F>(self, function: F) -> State<S, ()>
+    where
+        F: FnMut(Self::Inner) -> State<S, ()>,
+        S: Clone + 'static,
+        Self: Sized,
+        Self::WithType<()>: 'static,
+    {
+        self.traverse_state_(function)
+    }
+
+    // =========================================================================
+    // IO Effect Methods
+    // =========================================================================
+
+    /// Applies a function returning `IO` to each element and collects the results.
+    ///
+    /// The IO actions are executed sequentially from left to right.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `B` - The result type of each IO computation
+    ///
+    /// # Arguments
+    ///
+    /// * `function` - A function that transforms each element to an `IO<B>`
+    ///
+    /// # Returns
+    ///
+    /// `IO<Self::WithType<B>>` - An IO that, when executed, produces the structure
+    /// with all transformed values.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::typeclass::Traversable;
+    /// use lambars::effect::IO;
+    ///
+    /// let paths = vec!["a.txt", "b.txt"];
+    /// let io = paths.traverse_io(|path| {
+    ///     let path = path.to_string();
+    ///     IO::new(move || format!("content of {}", path))
+    /// });
+    /// let contents = io.run_unsafe();
+    /// assert_eq!(contents, vec!["content of a.txt".to_string(), "content of b.txt".to_string()]);
+    /// ```
+    #[cfg(feature = "effect")]
+    fn traverse_io<B, F>(self, function: F) -> IO<Self::WithType<B>>
+    where
+        F: FnMut(Self::Inner) -> IO<B>,
+        B: 'static,
+        Self::WithType<B>: 'static;
+
+    /// Turns a structure of `IO`s inside out.
+    ///
+    /// Converts `Self<IO<A>>` to `IO<Self<A>>`.
+    ///
+    /// This is equivalent to `traverse_io(IOLike::into_io)`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::typeclass::Traversable;
+    /// use lambars::effect::IO;
+    ///
+    /// let ios: Vec<IO<i32>> = vec![IO::pure(1), IO::pure(2), IO::pure(3)];
+    /// let combined = ios.sequence_io();
+    /// let result = combined.run_unsafe();
+    /// assert_eq!(result, vec![1, 2, 3]);
+    /// ```
+    #[cfg(feature = "effect")]
+    fn sequence_io(self) -> IO<Self::WithType<<Self::Inner as IOLike>::Value>>
+    where
+        Self: Sized,
+        Self::Inner: IOLike + 'static,
+        <Self::Inner as IOLike>::Value: 'static,
+        Self::WithType<<Self::Inner as IOLike>::Value>: 'static,
+    {
+        self.traverse_io(IOLike::into_io)
+    }
+
+    /// Applies an effectful function for its effects only, discarding results.
+    ///
+    /// This is useful when you want to perform IO effects on each element
+    /// but don't need to collect the results.
+    ///
+    /// # Arguments
+    ///
+    /// * `function` - A function that performs an effect returning `IO<()>`
+    ///
+    /// # Returns
+    ///
+    /// `IO<()>` - An IO that performs all effects when executed
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::typeclass::Traversable;
+    /// use lambars::effect::IO;
+    ///
+    /// let values = vec![1, 2, 3];
+    /// let io = values.traverse_io_(|_value| {
+    ///     IO::new(|| {
+    ///         // In real code, this would be a side effect
+    ///     })
+    /// });
+    /// let () = io.run_unsafe();
+    /// ```
+    #[cfg(feature = "effect")]
+    fn traverse_io_<F>(self, function: F) -> IO<()>
+    where
+        F: FnMut(Self::Inner) -> IO<()>,
+        Self: Sized,
+        Self::WithType<()>: 'static,
+    {
+        self.traverse_io(function).fmap(|_| ())
+    }
+
+    /// Alias for `traverse_io_`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::typeclass::Traversable;
+    /// use lambars::effect::IO;
+    ///
+    /// let values = vec![1, 2, 3];
+    /// let io = values.for_each_io(|_| IO::pure(()));
+    /// io.run_unsafe();
+    /// ```
+    #[cfg(feature = "effect")]
+    fn for_each_io<F>(self, function: F) -> IO<()>
+    where
+        F: FnMut(Self::Inner) -> IO<()>,
+        Self: Sized,
+        Self::WithType<()>: 'static,
+    {
+        self.traverse_io_(function)
+    }
+
+    // =========================================================================
+    // AsyncIO Effect Methods
+    // =========================================================================
+
+    /// Applies a function returning `AsyncIO` to each element and collects the results.
+    ///
+    /// The `AsyncIO` actions are executed sequentially from left to right.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `B` - The result type of each `AsyncIO` computation
+    ///
+    /// # Arguments
+    ///
+    /// * `function` - A function that transforms each element to an `AsyncIO<B>`
+    ///
+    /// # Returns
+    ///
+    /// `AsyncIO<Self::WithType<B>>` - An `AsyncIO` that, when executed, produces the
+    /// structure with all transformed values.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use lambars::typeclass::Traversable;
+    /// use lambars::effect::AsyncIO;
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let urls = vec!["http://a.com", "http://b.com"];
+    ///     let async_io = urls.traverse_async_io(|url| {
+    ///         let url = url.to_string();
+    ///         AsyncIO::new(move || async move { format!("response from {}", url) })
+    ///     });
+    ///     let responses = async_io.run_async().await;
+    ///     assert_eq!(responses, vec!["response from http://a.com", "response from http://b.com"]);
+    /// }
+    /// ```
+    #[cfg(all(feature = "effect", feature = "async"))]
+    fn traverse_async_io<B, F>(self, function: F) -> AsyncIO<Self::WithType<B>>
+    where
+        F: FnMut(Self::Inner) -> AsyncIO<B>,
+        B: Send + 'static,
+        Self::WithType<B>: Send + 'static;
+
+    /// Turns a structure of `AsyncIO`s inside out.
+    ///
+    /// Converts `Self<AsyncIO<A>>` to `AsyncIO<Self<A>>`.
+    ///
+    /// This is equivalent to `traverse_async_io(AsyncIOLike::into_async_io)`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use lambars::typeclass::Traversable;
+    /// use lambars::effect::AsyncIO;
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let async_ios: Vec<AsyncIO<i32>> = vec![
+    ///         AsyncIO::pure(1),
+    ///         AsyncIO::pure(2),
+    ///         AsyncIO::pure(3),
+    ///     ];
+    ///     let combined = async_ios.sequence_async_io();
+    ///     let result = combined.run_async().await;
+    ///     assert_eq!(result, vec![1, 2, 3]);
+    /// }
+    /// ```
+    #[cfg(all(feature = "effect", feature = "async"))]
+    fn sequence_async_io(self) -> AsyncIO<Self::WithType<<Self::Inner as AsyncIOLike>::Value>>
+    where
+        Self: Sized,
+        Self::Inner: AsyncIOLike + 'static,
+        <Self::Inner as AsyncIOLike>::Value: Send + 'static,
+        Self::WithType<<Self::Inner as AsyncIOLike>::Value>: Send + 'static,
+    {
+        self.traverse_async_io(AsyncIOLike::into_async_io)
+    }
+
+    /// Applies an effectful function for its effects only, discarding results.
+    ///
+    /// This is useful when you want to perform `AsyncIO` effects on each element
+    /// but don't need to collect the results.
+    ///
+    /// # Arguments
+    ///
+    /// * `function` - A function that performs an effect returning `AsyncIO<()>`
+    ///
+    /// # Returns
+    ///
+    /// `AsyncIO<()>` - An `AsyncIO` that performs all effects when executed
+    #[cfg(all(feature = "effect", feature = "async"))]
+    fn traverse_async_io_<F>(self, function: F) -> AsyncIO<()>
+    where
+        F: FnMut(Self::Inner) -> AsyncIO<()>,
+        Self: Sized,
+        Self::WithType<()>: Send + 'static,
+    {
+        self.traverse_async_io(function).fmap(|_| ())
+    }
+
+    /// Alias for `traverse_async_io_`.
+    #[cfg(all(feature = "effect", feature = "async"))]
+    fn for_each_async_io<F>(self, function: F) -> AsyncIO<()>
+    where
+        F: FnMut(Self::Inner) -> AsyncIO<()>,
+        Self: Sized,
+        Self::WithType<()>: Send + 'static,
+    {
+        self.traverse_async_io_(function)
+    }
 }
 
 // =============================================================================
@@ -397,13 +1016,64 @@ impl<A> Traversable for Option<A> {
     {
         self.map_or_else(|| Ok(None), |element| function(element).map(Some))
     }
+
+    #[cfg(feature = "effect")]
+    fn traverse_reader<R, B, F>(self, mut function: F) -> Reader<R, Option<B>>
+    where
+        F: FnMut(A) -> Reader<R, B>,
+        R: Clone + 'static,
+        B: 'static,
+        Option<B>: 'static,
+    {
+        self.map_or_else(
+            || Reader::new(|_| None),
+            |element| function(element).fmap(Some),
+        )
+    }
+
+    #[cfg(feature = "effect")]
+    fn traverse_state<S, B, F>(self, mut function: F) -> State<S, Option<B>>
+    where
+        F: FnMut(A) -> State<S, B>,
+        S: Clone + 'static,
+        B: 'static,
+        Option<B>: 'static,
+    {
+        self.map_or_else(
+            || State::new(|state| (None, state)),
+            |element| function(element).fmap(Some),
+        )
+    }
+
+    #[cfg(feature = "effect")]
+    fn traverse_io<B, F>(self, mut function: F) -> IO<Option<B>>
+    where
+        F: FnMut(A) -> IO<B>,
+        B: 'static,
+        Option<B>: 'static,
+    {
+        self.map_or_else(|| IO::pure(None), |element| function(element).fmap(Some))
+    }
+
+    #[cfg(all(feature = "effect", feature = "async"))]
+    fn traverse_async_io<B, F>(self, mut function: F) -> AsyncIO<Option<B>>
+    where
+        F: FnMut(A) -> AsyncIO<B>,
+        B: Send + 'static,
+        Option<B>: Send + 'static,
+    {
+        self.map_or_else(
+            || AsyncIO::pure(None),
+            |element| function(element).fmap(Some),
+        )
+    }
 }
 
 // =============================================================================
 // Result<T, E> Implementation
 // =============================================================================
 
-impl<T, E: Clone> Traversable for Result<T, E> {
+impl<T, E: Clone + Send + 'static> Traversable for Result<T, E> {
     fn traverse_option<B, F>(self, mut function: F) -> Option<Result<B, E>>
     where
         F: FnMut(T) -> Option<B>,
@@ -421,6 +1091,60 @@ impl<T, E: Clone> Traversable for Result<T, E> {
         match self {
             Ok(element) => function(element).map(Ok),
             Err(error) => Ok(Err(error)),
+        }
+    }
+
+    #[cfg(feature = "effect")]
+    fn traverse_reader<R, B, F>(self, mut function: F) -> Reader<R, Result<B, E>>
+    where
+        F: FnMut(T) -> Reader<R, B>,
+        R: Clone + 'static,
+        B: 'static,
+        Result<B, E>: 'static,
+        E: 'static,
+    {
+        match self {
+            Ok(element) => function(element).fmap(Ok),
+            Err(error) => Reader::new(move |_| Err(error.clone())),
+        }
+    }
+
+    #[cfg(feature = "effect")]
+    fn traverse_state<S, B, F>(self, mut function: F) -> State<S, Result<B, E>>
+    where
+        F: FnMut(T) -> State<S, B>,
+        S: Clone + 'static,
+        B: 'static,
+        Result<B, E>: 'static,
+        E: 'static,
+    {
+        match self {
+            Ok(element) => function(element).fmap(Ok),
+            Err(error) => State::new(move |state| (Err(error.clone()), state)),
+        }
+    }
+
+    #[cfg(feature = "effect")]
+    fn traverse_io<B, F>(self, mut function: F) -> IO<Result<B, E>>
+    where
+        F: FnMut(T) -> IO<B>,
+        B: 'static,
+    {
+        match self {
+            Ok(element) => function(element).fmap(Ok),
+            Err(error) => IO::new(move || Err(error)),
+        }
+    }
+
+    #[cfg(all(feature = "effect", feature = "async"))]
+    fn traverse_async_io<B, F>(self, mut function: F) -> AsyncIO<Result<B, E>>
+    where
+        F: FnMut(T) -> AsyncIO<B>,
+        B: Send + 'static,
+    {
+        match self {
+            Ok(element) => function(element).fmap(Ok),
+            Err(error) => AsyncIO::new(move || async move { Err(error) }),
         }
     }
 }
@@ -457,6 +1181,87 @@ impl<T> Traversable for Vec<T> {
         }
         Ok(result)
     }
+
+    #[cfg(feature = "effect")]
+    fn traverse_reader<R, B, F>(self, mut function: F) -> Reader<R, Vec<B>>
+    where
+        F: FnMut(T) -> Reader<R, B>,
+        R: Clone + 'static,
+        B: 'static,
+        Vec<B>: 'static,
+    {
+        let readers: Vec<Reader<R, B>> = self.into_iter().map(&mut function).collect();
+        Reader::new(move |environment: R| {
+            readers
+                .iter()
+                .map(|reader| reader.run(environment.clone()))
+                .collect()
+        })
+    }
+
+    #[cfg(feature = "effect")]
+    fn traverse_state<S, B, F>(self, mut function: F) -> State<S, Vec<B>>
+    where
+        F: FnMut(T) -> State<S, B>,
+        S: Clone + 'static,
+        B: 'static,
+        Vec<B>: 'static,
+    {
+        let capacity = self.len();
+        if capacity == 0 {
+            return State::new(|state| (Vec::new(), state));
+        }
+
+        let states: Vec<State<S, B>> = self.into_iter().map(&mut function).collect();
+        State::new(move |initial_state: S| {
+            let mut result = Vec::with_capacity(capacity);
+            let mut current_state = initial_state;
+            for state_computation in &states {
+                let (value, new_state) = state_computation.run(current_state);
+                result.push(value);
+                current_state = new_state;
+            }
+            (result, current_state)
+        })
+    }
+
+    #[cfg(feature = "effect")]
+    fn traverse_io<B, F>(self, mut function: F) -> IO<Vec<B>>
+    where
+        F: FnMut(T) -> IO<B>,
+        B: 'static,
+        Vec<B>: 'static,
+    {
+        let capacity = self.len();
+        let ios: Vec<IO<B>> = self.into_iter().map(&mut function).collect();
+
+        IO::new(move || {
+            let mut result = Vec::with_capacity(capacity);
+            for io in ios {
+                result.push(io.run_unsafe());
+            }
+            result
+        })
+    }
+
+    #[cfg(all(feature = "effect", feature = "async"))]
+    fn traverse_async_io<B, F>(self, mut function: F) -> AsyncIO<Vec<B>>
+    where
+        F: FnMut(T) -> AsyncIO<B>,
+        B: Send + 'static,
+        Vec<B>: Send + 'static,
+    {
+        let capacity = self.len();
+        let async_ios: Vec<AsyncIO<B>> = self.into_iter().map(&mut function).collect();
+
+        AsyncIO::new(move || async move {
+            let mut result = Vec::with_capacity(capacity);
+            for async_io in async_ios {
+                result.push(async_io.run_async().await);
+            }
+            result
+        })
+    }
 }
 
 // =============================================================================
@@ -477,6 +1282,48 @@ impl<T> Traversable for Box<T> {
     {
         function(*self).map(Box::new)
     }
+
+    #[cfg(feature = "effect")]
+    fn traverse_reader<R, B, F>(self, mut function: F) -> Reader<R, Box<B>>
+    where
+        F: FnMut(T) -> Reader<R, B>,
+        R: Clone + 'static,
+        B: 'static,
+        Box<B>: 'static,
+    {
+        function(*self).fmap(Box::new)
+    }
+
+    #[cfg(feature = "effect")]
+    fn traverse_state<S, B, F>(self, mut function: F) -> State<S, Box<B>>
+    where
+        F: FnMut(T) -> State<S, B>,
+        S: Clone + 'static,
+        B: 'static,
+        Box<B>: 'static,
+    {
+        function(*self).fmap(Box::new)
+    }
+
+    #[cfg(feature = "effect")]
+    fn traverse_io<B, F>(self, mut function: F) -> IO<Box<B>>
+    where
+        F: FnMut(T) -> IO<B>,
+        B: 'static,
+        Box<B>: 'static,
+    {
+        function(*self).fmap(Box::new)
+    }
+
+    #[cfg(all(feature = "effect", feature = "async"))]
+    fn traverse_async_io<B, F>(self, mut function: F) -> AsyncIO<Box<B>>
+    where
+        F: FnMut(T) -> AsyncIO<B>,
+        B: Send + 'static,
+        Box<B>: Send + 'static,
+    {
+        function(*self).fmap(Box::new)
+    }
 }
 
 // =============================================================================
@@ -496,6 +1343,48 @@ impl<A> Traversable for Identity<A> {
         F: FnMut(A) -> Result<B, E>,
     {
         function(self.0).map(Identity)
+    }
+
+    #[cfg(feature = "effect")]
+    fn traverse_reader<R, B, F>(self, mut function: F) -> Reader<R, Identity<B>>
+    where
+        F: FnMut(A) -> Reader<R, B>,
+        R: Clone + 'static,
+        B: 'static,
+        Identity<B>: 'static,
+    {
+        function(self.0).fmap(Identity)
+    }
+
+    #[cfg(feature = "effect")]
+    fn traverse_state<S, B, F>(self, mut function: F) -> State<S, Identity<B>>
+    where
+        F: FnMut(A) -> State<S, B>,
+        S: Clone + 'static,
+        B: 'static,
+        Identity<B>: 'static,
+    {
+        function(self.0).fmap(Identity)
+    }
+
+    #[cfg(feature = "effect")]
+    fn traverse_io<B, F>(self, mut function: F) -> IO<Identity<B>>
+    where
+        F: FnMut(A) -> IO<B>,
+        B: 'static,
+        Identity<B>: 'static,
+    {
+        function(self.0).fmap(Identity)
+    }
+
+    #[cfg(all(feature = "effect", feature = "async"))]
+    fn traverse_async_io<B, F>(self, mut function: F) -> AsyncIO<Identity<B>>
+    where
+        F: FnMut(A) -> AsyncIO<B>,
+        B: Send + 'static,
+        Identity<B>: Send + 'static,
+    {
+        function(self.0).fmap(Identity)
     }
 }
 
@@ -1141,6 +2030,570 @@ mod property_tests {
                 wrapped.traverse_option(|number| Some(number.to_string()));
 
             prop_assert_eq!(traversed, Some(Identity::new(value.to_string())));
+        }
+    }
+
+    // =========================================================================
+    // State Effect Tests
+    // =========================================================================
+
+    #[cfg(feature = "effect")]
+    mod state_tests {
+        use super::*;
+        use crate::effect::State;
+        use rstest::rstest;
+
+        #[rstest]
+        fn vec_traverse_state_threads_state_left_to_right() {
+            let values = vec![1, 2, 3];
+            let state = values.traverse_state(|value| {
+                State::new(move |current_state: i32| (value + current_state, current_state + 1))
+            });
+
+            let (result, final_state) = state.run(0);
+            // [1+0, 2+1, 3+2] = [1, 3, 5]
+            assert_eq!(result, vec![1, 3, 5]);
+            assert_eq!(final_state, 3);
+        }
+
+        #[rstest]
+        fn vec_traverse_state_empty() {
+            let values: Vec<i32> = vec![];
+            let state = values.traverse_state(|value| {
+                State::new(move |current_state: i32| (value, current_state + 1))
+            });
+
+            let (result, final_state) = state.run(0);
+            assert_eq!(result, Vec::<i32>::new());
+            assert_eq!(final_state, 0);
+        }
+
+        #[rstest]
+        fn vec_traverse_state_indexing() {
+            let items = vec!["a", "b", "c"];
+            let state = items
+                .traverse_state(|item| State::new(move |index: usize| ((index, item), index + 1)));
+
+            let (result, final_index) = state.run(0);
+            assert_eq!(result, vec![(0, "a"), (1, "b"), (2, "c")]);
+            assert_eq!(final_index, 3);
+        }
+
+        #[rstest]
+        fn option_traverse_state_some() {
+            let value = Some(5);
+            let state = value.traverse_state(|number| {
+                State::new(move |current_state: i32| (number * 2, current_state + number))
+            });
+
+            let (result, final_state) = state.run(10);
+            assert_eq!(result, Some(10));
+            assert_eq!(final_state, 15);
+        }
+
+        #[rstest]
+        fn option_traverse_state_none() {
+            let value: Option<i32> = None;
+            let state = value.traverse_state(|number| {
+                State::new(move |current_state: i32| (number * 2, current_state + number))
+            });
+
+            let (result, final_state) = state.run(10);
+            assert_eq!(result, None);
+            assert_eq!(final_state, 10);
+        }
+
+        #[rstest]
+        fn result_traverse_state_ok() {
+            let value: Result<i32, &'static str> = Ok(5);
+            let state = value.traverse_state(|number| {
+                State::new(move |current_state: i32| (number * 2, current_state + number))
+            });
+
+            let (result, final_state) = state.run(10);
+            assert_eq!(result, Ok(10));
+            assert_eq!(final_state, 15);
+        }
+
+        #[rstest]
+        fn result_traverse_state_err() {
+            let value: Result<i32, &'static str> = Err("error");
+            let state = value.traverse_state(|number| {
+                State::new(move |current_state: i32| (number * 2, current_state + number))
+            });
+
+            let (result, final_state) = state.run(10);
+            assert_eq!(result, Err("error"));
+            assert_eq!(final_state, 10);
+        }
+
+        #[rstest]
+        fn box_traverse_state() {
+            let value = Box::new(42);
+            let state = value.traverse_state(|number| {
+                State::new(move |current_state: i32| (number * 2, current_state + 1))
+            });
+
+            let (result, final_state) = state.run(0);
+            assert_eq!(*result, 84);
+            assert_eq!(final_state, 1);
+        }
+
+        #[rstest]
+        fn identity_traverse_state() {
+            let value = Identity::new(42);
+            let state = value.traverse_state(|number| {
+                State::new(move |current_state: i32| (number * 2, current_state + 1))
+            });
+
+            let (result, final_state) = state.run(0);
+            assert_eq!(result.0, 84);
+            assert_eq!(final_state, 1);
+        }
+
+        #[rstest]
+        fn vec_traverse_state_accumulator() {
+            let values = vec![1, 2, 3, 4, 5];
+            let state =
+                values.traverse_state(|value| State::new(move |sum: i32| (value, sum + value)));
+
+            let (result, total) = state.run(0);
+            assert_eq!(result, vec![1, 2, 3, 4, 5]);
+            assert_eq!(total, 15);
+        }
+
+        #[rstest]
+        fn vec_sequence_state() {
+            let states: Vec<State<i32, i32>> = vec![
+                State::new(|state: i32| (state, state + 1)),
+                State::new(|state: i32| (state * 2, state + 1)),
+            ];
+            let combined = states.sequence_state();
+            let (result, final_state) = combined.run(1);
+            // First state: result=1, new_state=2
+            // Second state: result=4, new_state=3
+            assert_eq!(result, vec![1, 4]);
+            assert_eq!(final_state, 3);
+        }
+
+        #[rstest]
+        fn vec_traverse_state_discard() {
+            let values = vec![1, 2, 3];
+            let state = values.traverse_state_(|value| State::modify(move |sum: i32| sum + value));
+
+            let (result, total) = state.run(0);
+            assert_eq!(result, ());
+            assert_eq!(total, 6);
+        }
+
+        #[rstest]
+        fn vec_for_each_state() {
+            let values = vec![1, 2, 3];
+            let state = values.for_each_state(|value| State::modify(move |sum: i32| sum + value));
+
+            let (result, total) = state.run(0);
+            assert_eq!(result, ());
+            assert_eq!(total, 6);
+        }
+    }
+
+    // =========================================================================
+    // IO Effect Tests
+    // =========================================================================
+
+    #[cfg(feature = "effect")]
+    mod io_tests {
+        use super::*;
+        use crate::effect::IO;
+        use rstest::rstest;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[rstest]
+        fn vec_traverse_io_sequential_execution() {
+            let counter = Arc::new(AtomicUsize::new(0));
+            let values = vec![1, 2, 3];
+
+            let io = values.traverse_io(|value| {
+                let counter_inner = counter.clone();
+                IO::new(move || {
+                    let previous = counter_inner.fetch_add(1, Ordering::SeqCst);
+                    (previous, value)
+                })
+            });
+
+            let result = io.run_unsafe();
+            assert_eq!(result, vec![(0, 1), (1, 2), (2, 3)]);
+        }
+
+        #[rstest]
+        fn vec_traverse_io_empty() {
+            let values: Vec<i32> = vec![];
+            let io = values.traverse_io(|value| IO::pure(value * 2));
+
+            let result = io.run_unsafe();
+            assert_eq!(result, Vec::<i32>::new());
+        }
+
+        #[rstest]
+        fn option_traverse_io_some() {
+            let value = Some(42);
+            let io = value.traverse_io(|number| IO::pure(number * 2));
+
+            let result = io.run_unsafe();
+            assert_eq!(result, Some(84));
+        }
+
+        #[rstest]
+        fn option_traverse_io_none() {
+            let value: Option<i32> = None;
+            let io = value.traverse_io(|number| IO::pure(number * 2));
+
+            let result = io.run_unsafe();
+            assert_eq!(result, None);
+        }
+
+        #[rstest]
+        fn result_traverse_io_ok() {
+            let value: Result<i32, &'static str> = Ok(42);
+            let io = value.traverse_io(|number| IO::pure(number * 2));
+
+            let result = io.run_unsafe();
+            assert_eq!(result, Ok(84));
+        }
+
+        #[rstest]
+        fn result_traverse_io_err() {
+            let value: Result<i32, &'static str> = Err("error");
+            let io = value.traverse_io(|number| IO::pure(number * 2));
+
+            let result = io.run_unsafe();
+            assert_eq!(result, Err("error"));
+        }
+
+        #[rstest]
+        fn box_traverse_io() {
+            let value = Box::new(42);
+            let io = value.traverse_io(|number| IO::pure(number * 2));
+
+            let result = io.run_unsafe();
+            assert_eq!(*result, 84);
+        }
+
+        #[rstest]
+        fn identity_traverse_io() {
+            let value = Identity::new(42);
+            let io = value.traverse_io(|number| IO::pure(number * 2));
+
+            let result = io.run_unsafe();
+            assert_eq!(result.0, 84);
+        }
+
+        #[rstest]
+        fn vec_sequence_io() {
+            let ios: Vec<IO<i32>> = vec![IO::pure(1), IO::pure(2), IO::pure(3)];
+            let combined = ios.sequence_io();
+
+            let result = combined.run_unsafe();
+            assert_eq!(result, vec![1, 2, 3]);
+        }
+
+        #[rstest]
+        fn vec_traverse_io_discard() {
+            let counter = Arc::new(AtomicUsize::new(0));
+            let values = vec![1, 2, 3];
+
+            let counter_clone = counter.clone();
+            let io = values.traverse_io_(move |_| {
+                let counter_inner = counter_clone.clone();
+                IO::new(move || {
+                    counter_inner.fetch_add(1, Ordering::SeqCst);
+                })
+            });
+
+            let () = io.run_unsafe();
+            assert_eq!(counter.load(Ordering::SeqCst), 3);
+        }
+
+        #[rstest]
+        fn vec_for_each_io() {
+            let counter = Arc::new(AtomicUsize::new(0));
+            let values = vec![1, 2, 3];
+
+            let counter_clone = counter.clone();
+            let io = values.for_each_io(move |_| {
+                let counter_inner = counter_clone.clone();
+                IO::new(move || {
+                    counter_inner.fetch_add(1, Ordering::SeqCst);
+                })
+            });
+
+            let () = io.run_unsafe();
+            assert_eq!(counter.load(Ordering::SeqCst), 3);
+        }
+    }
+
+    // =========================================================================
+    // AsyncIO Effect Tests
+    // =========================================================================
+
+    #[cfg(all(feature = "effect", feature = "async"))]
+    mod async_io_tests {
+        use super::*;
+        use crate::effect::AsyncIO;
+        use rstest::rstest;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[rstest]
+        #[tokio::test]
+        async fn vec_traverse_async_io_sequential_execution() {
+            let counter = Arc::new(AtomicUsize::new(0));
+            let values = vec![1, 2, 3];
+
+            let counter_clone = counter.clone();
+            let async_io = values.traverse_async_io(move |value| {
+                let counter_inner = counter_clone.clone();
+                AsyncIO::new(move || async move {
+                    let previous = counter_inner.fetch_add(1, Ordering::SeqCst);
+                    (previous, value)
+                })
+            });
+
+            let result = async_io.run_async().await;
+            assert_eq!(result, vec![(0, 1), (1, 2), (2, 3)]);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn vec_traverse_async_io_empty() {
+            let values: Vec<i32> = vec![];
+            let async_io = values.traverse_async_io(|value| AsyncIO::pure(value * 2));
+
+            let result = async_io.run_async().await;
+            assert_eq!(result, Vec::<i32>::new());
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn option_traverse_async_io_some() {
+            let value = Some(42);
+            let async_io = value.traverse_async_io(|number| AsyncIO::pure(number * 2));
+
+            let result = async_io.run_async().await;
+            assert_eq!(result, Some(84));
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn option_traverse_async_io_none() {
+            let value: Option<i32> = None;
+            let async_io = value.traverse_async_io(|number| AsyncIO::pure(number * 2));
+
+            let result = async_io.run_async().await;
+            assert_eq!(result, None);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn result_traverse_async_io_ok() {
+            let value: Result<i32, &'static str> = Ok(42);
+            let async_io = value.traverse_async_io(|number| AsyncIO::pure(number * 2));
+
+            let result = async_io.run_async().await;
+            assert_eq!(result, Ok(84));
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn result_traverse_async_io_err() {
+            let value: Result<i32, &'static str> = Err("error");
+            let async_io = value.traverse_async_io(|number| AsyncIO::pure(number * 2));
+
+            let result = async_io.run_async().await;
+            assert_eq!(result, Err("error"));
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn box_traverse_async_io() {
+            let value = Box::new(42);
+            let async_io = value.traverse_async_io(|number| AsyncIO::pure(number * 2));
+
+            let result = async_io.run_async().await;
+            assert_eq!(*result, 84);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn identity_traverse_async_io() {
+            let value = Identity::new(42);
+            let async_io = value.traverse_async_io(|number| AsyncIO::pure(number * 2));
+
+            let result = async_io.run_async().await;
+            assert_eq!(result.0, 84);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn vec_sequence_async_io() {
+            let async_ios: Vec<AsyncIO<i32>> =
+                vec![AsyncIO::pure(1), AsyncIO::pure(2), AsyncIO::pure(3)];
+            let combined = async_ios.sequence_async_io();
+
+            let result = combined.run_async().await;
+            assert_eq!(result, vec![1, 2, 3]);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn vec_traverse_async_io_discard() {
+            let counter = Arc::new(AtomicUsize::new(0));
+            let values = vec![1, 2, 3];
+
+            let counter_clone = counter.clone();
+            let async_io = values.traverse_async_io_(move |_| {
+                let counter_inner = counter_clone.clone();
+                AsyncIO::new(move || async move {
+                    counter_inner.fetch_add(1, Ordering::SeqCst);
+                })
+            });
+
+            async_io.run_async().await;
+            assert_eq!(counter.load(Ordering::SeqCst), 3);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn vec_for_each_async_io() {
+            let counter = Arc::new(AtomicUsize::new(0));
+            let values = vec![1, 2, 3];
+
+            let counter_clone = counter.clone();
+            let async_io = values.for_each_async_io(move |_| {
+                let counter_inner = counter_clone.clone();
+                AsyncIO::new(move || async move {
+                    counter_inner.fetch_add(1, Ordering::SeqCst);
+                })
+            });
+
+            async_io.run_async().await;
+            assert_eq!(counter.load(Ordering::SeqCst), 3);
+        }
+    }
+
+    // =========================================================================
+    // Reader Effect Tests (additional)
+    // =========================================================================
+
+    #[cfg(feature = "effect")]
+    mod reader_additional_tests {
+        use super::*;
+        use crate::effect::Reader;
+        use rstest::rstest;
+
+        #[derive(Clone)]
+        struct TestEnvironment {
+            multiplier: i32,
+        }
+
+        #[rstest]
+        fn vec_traverse_reader_all_elements() {
+            let values = vec![1, 2, 3];
+            let reader = values.traverse_reader(|number| {
+                Reader::asks(move |environment: TestEnvironment| number * environment.multiplier)
+            });
+
+            let environment = TestEnvironment { multiplier: 10 };
+            let result = reader.run(environment);
+            assert_eq!(result, vec![10, 20, 30]);
+        }
+
+        #[rstest]
+        fn option_traverse_reader_some() {
+            let value = Some(5);
+            let reader = value.traverse_reader(|number| {
+                Reader::asks(move |environment: TestEnvironment| number * environment.multiplier)
+            });
+
+            let environment = TestEnvironment { multiplier: 10 };
+            let result = reader.run(environment);
+            assert_eq!(result, Some(50));
+        }
+
+        #[rstest]
+        fn option_traverse_reader_none() {
+            let value: Option<i32> = None;
+            let reader = value.traverse_reader(|number| {
+                Reader::asks(move |environment: TestEnvironment| number * environment.multiplier)
+            });
+
+            let environment = TestEnvironment { multiplier: 10 };
+            let result = reader.run(environment);
+            assert_eq!(result, None);
+        }
+
+        #[rstest]
+        fn result_traverse_reader_ok() {
+            let value: Result<i32, &'static str> = Ok(5);
+            let reader = value.traverse_reader(|number| {
+                Reader::asks(move |environment: TestEnvironment| number * environment.multiplier)
+            });
+
+            let environment = TestEnvironment { multiplier: 10 };
+            let result = reader.run(environment);
+            assert_eq!(result, Ok(50));
+        }
+
+        #[rstest]
+        fn result_traverse_reader_err() {
+            let value: Result<i32, &'static str> = Err("error");
+            let reader = value.traverse_reader(|number| {
+                Reader::asks(move |environment: TestEnvironment| number * environment.multiplier)
+            });
+
+            let environment = TestEnvironment { multiplier: 10 };
+            let result = reader.run(environment);
+            assert_eq!(result, Err("error"));
+        }
+
+        #[rstest]
+        fn vec_sequence_reader() {
+            let readers: Vec<Reader<i32, i32>> = vec![
+                Reader::asks(|environment: i32| environment),
+                Reader::asks(|environment: i32| environment * 2),
+            ];
+            let combined = readers.sequence_reader();
+            let result = combined.run(5);
+            assert_eq!(result, vec![5, 10]);
+        }
+
+        #[rstest]
+        fn vec_traverse_reader_empty() {
+            let values: Vec<i32> = vec![];
+            let reader = values.traverse_reader(|number| {
+                Reader::asks(move |environment: TestEnvironment| number * environment.multiplier)
+            });
+
+            let environment = TestEnvironment { multiplier: 10 };
+            let result = reader.run(environment);
+            assert_eq!(result, Vec::<i32>::new());
+        }
+
+        #[rstest]
+        fn vec_traverse_reader_discard() {
+            let values = vec![1, 2, 3];
+            let reader = values.traverse_reader_(|_| Reader::pure(()));
+
+            assert_eq!(reader.run(0), ());
+        }
+
+        #[rstest]
+        fn vec_for_each_reader() {
+            let values = vec![1, 2, 3];
+            let reader = values.for_each_reader(|_| Reader::pure(()));
+
+            assert_eq!(reader.run(0), ());
         }
     }
 }

@@ -101,3 +101,9 @@ pub use monoid::Monoid;
 pub use semigroup::Semigroup;
 pub use traversable::Traversable;
 pub use wrappers::{Bounded, Max, Min, Product, Sum};
+
+#[cfg(feature = "effect")]
+pub use traversable::{IOLike, ReaderLike, StateLike};
+
+#[cfg(all(feature = "effect", feature = "async"))]
+pub use traversable::AsyncIOLike;

@@ -1197,6 +1197,21 @@ impl<A> std::fmt::Display for AsyncIO<A> {
     }
 }
 
+// =============================================================================
+// AsyncIOLike Implementation
+// =============================================================================
+
+impl<A: 'static> crate::typeclass::AsyncIOLike for AsyncIO<A> {
+    type Value = A;
+
+    fn into_async_io(self) -> Self
+    where
+        A: Send + 'static,
+    {
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
