@@ -3,9 +3,10 @@
 //! Compares the performance of lambars' PersistentList against Rust's standard VecDeque
 //! for common operations.
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use lambars::persistent::PersistentList;
 use std::collections::VecDeque;
+use std::hint::black_box;
 
 // =============================================================================
 // cons Benchmark (prepend)

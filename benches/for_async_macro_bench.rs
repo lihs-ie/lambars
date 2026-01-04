@@ -5,10 +5,11 @@
 
 #![cfg(feature = "async")]
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use lambars::effect::AsyncIO;
 use lambars::for_;
 use lambars::for_async;
+use std::hint::black_box;
 
 // =============================================================================
 // Single Iteration Benchmark

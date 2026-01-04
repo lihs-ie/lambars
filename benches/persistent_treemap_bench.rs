@@ -3,9 +3,10 @@
 //! Compares the performance of lambars' PersistentTreeMap against Rust's standard BTreeMap
 //! for common operations.
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use lambars::persistent::PersistentTreeMap;
 use std::collections::BTreeMap;
+use std::hint::black_box;
 
 // =============================================================================
 // insert Benchmark

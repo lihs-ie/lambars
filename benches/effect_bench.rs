@@ -2,8 +2,9 @@
 //!
 //! Measures the performance of lambars' effect monads.
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use lambars::effect::{IO, Reader, State};
+use std::hint::black_box;
 
 // =============================================================================
 // IO Benchmarks

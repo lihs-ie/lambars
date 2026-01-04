@@ -3,8 +3,9 @@
 //! Compares the performance of lambars' PersistentVector against Rust's standard Vec
 //! for common operations.
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use lambars::persistent::PersistentVector;
+use std::hint::black_box;
 
 // =============================================================================
 // push_back Benchmark
