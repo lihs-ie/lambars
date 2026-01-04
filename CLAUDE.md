@@ -14,13 +14,16 @@ src/
 └── effect/         # 副作用を型レベルで追跡・制御するためのシステム
 lambars-derive/     # proc-macro クレート（derive マクロ）
 docs/               # 仕様・設計ドキュメント（開発者向け）
-├── internal/
+├── internal/       # 内部設計
 │   ├── plans/          # タスクの実行計画
 │   ├── requirements/   # タスクの要件定義
 │   ├── future-work/    # 実装困難・後回しにしたもの
 │   ├── done/           # 実装完了済みの記録
 │   └── deprecated/     # 廃止された設計
-└── ...
+└── external        # 外部設計（ライブラリ使用者のためのドキュメント）
+    └── comparison/     # 他言語とのAPI対応表
+        └── {language}     # 言語名
+            └── README.md     # 言語との対応表
 samples/            # サンプルプロジェクト
 benches/            # ベンチマーク
 CHANGELOG.md        # 更新履歴
@@ -154,20 +157,29 @@ cargo clean
 
 ## 実装手順
 
-1. サブエージェント: functional-programming-specialist を起動し要件定義を作成する
+1. github mcp を使って PR を作成する
+   1. issue を対応する場合は issue と PR を紐づける
+2. サブエージェント: functional-programming-specialist を起動し要件定義を作成する
    1. 課題を解決するための方法をステップバイステップで考え、要件定義を yaml ファイルで `docs/internal/requirements/` に作成する
    2. rust-implementation-reviewer を起動し要件定義に対して実装計画を yaml ファイルで `docs/internal/plans/` に作成する
    3. functional-programming-specialist は実装計画が要件定義と異なる点がなくなるまでレビュー指摘を行う
    4. レビュー指摘がなくなるまで繰り返す（軽微な指摘も全て解決すること）
-2. サブエージェント: rust-implementation-specialist を起動し実装計画に則って TDD で実装を行う
-3. rust-implementation-reviewer を起動して実装のレビューを行う
+3. サブエージェント: rust-implementation-specialist を起動し実装計画に則って TDD で実装を行う
+4. rust-implementation-reviewer を起動して実装のレビューを行う
    1. 略語を使用していないこと
    2. 差分の対象となるテストのみを実行し失敗していないこと
    3. 差分の対象となるテストのカバレッジ 100%であること
    4. レビュー指摘がなくなるまで修正とレビューを繰り返す（軽微な指摘も全て解決すること）
-4. functional-programming-specialist を起動し要件定義の観点から実装をレビューする
-5. `docs/roadmap.yaml` を更新する
-6. 実装上困難だと判断した場合は `docs/internal/future-work/` に将来の拡張案としてファイルを書き出すこと
+5. functional-programming-specialist を起動し要件定義の観点から実装をレビューする
+6. コミット前に以下の確認を実施する
+   1. `cargo fmt` - コードフォーマット
+   2. `cargo clippy --all-features --all-targets -- -D warnings` - lint チェック
+   3. `cargo test --no-default-features` - feature なしでテスト
+   4. `cargo test --all-features` - 全 feature でテスト
+   5. `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` - ドキュメントビルド
+   6. 全てパスしたらコミット
+7. 対象の実装計画ファイルと要件定義を `docs/internal/done/` に移動する
+8. 実装上困難だと判断した場合は `docs/internal/future-work/` に将来の拡張案としてファイルを書き出すこと
    1. 書き出しが完了した場合は github mcp を使って issue を作成すること
 
 ## コミットメッセージ
