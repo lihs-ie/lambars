@@ -1,0 +1,937 @@
+# 非同期制御フローユーティリティ 要件定義
+#
+# 概要:
+#   AsyncIO に非同期制御フローの標準パターン（リトライ、タイムアウト、並列実行、
+#   リソース管理など）を追加し、実用的な非同期プログラミングを可能にする。
+#
+# 設計方針:
+#   1. 関数型プログラミングの原則（参照透過性、合成可能性）を維持
+#   2. 副作用の遅延実行（run_async() まで実行されない）を保証
+#   3. 既存の AsyncIO API との一貫性を維持
+#   4. 型安全性を最優先にする
+#   5. tokio エコシステムとの統合を考慮
+#
+# 参照:
+#   - Haskell Control.Exception.bracket
+#   - tokio::time::timeout
+#   - futures::future::select
+#   - Scala ZIO の retry/schedule
+
+version: "1.0.0"
+name: "非同期制御フローユーティリティ"
+description: |
+  AsyncIO に非同期制御フローの標準パターンを追加する。
+  これにより、実用的な非同期プログラミングに必要なユーティリティが提供される。
+
+  対象となる機能:
+  - リトライ（retry, retry_with_backoff）: 失敗時の再試行
+  - 並列実行（par, race）: 複数の非同期処理の並列/競争実行
+  - リソース管理（bracket, finally, on_error）: RAII パターンの実現
+  - タイムアウト（既存の timeout を Result ベースに拡張）
+
+  全ての操作は AsyncIO の遅延評価セマンティクスを維持し、
+  run_async() が呼ばれるまで副作用は実行されない。
+
+# =============================================================================
+# 背景・動機
+# =============================================================================
+
+background:
+  problem: |
+    現在の AsyncIO は基本的な Monad 操作（pure, fmap, flat_map）と
+    限定的なユーティリティ（timeout, race, catch_async）のみを提供している。
+
+    実用的な非同期プログラミングには以下が不足している:
+    - 失敗時の自動再試行（ネットワーク接続、一時的なエラーへの対処）
+    - 指数バックオフ付きリトライ（サーバー負荷軽減）
+    - 真の並列実行（tokio::join! 相当）
+    - リソースの確実な解放（bracket パターン）
+    - エラー時のクリーンアップ処理
+
+    これらの機能がないと、ユーザーは tokio の低レベル API を直接使用する必要があり、
+    AsyncIO の抽象化の恩恵を受けられない。
+
+  motivation: |
+    1. **関数型プログラミングの完全性**:
+       Haskell や Scala ZIO が提供する高レベルな制御フロー抽象を Rust で実現する。
+
+    2. **型安全なリソース管理**:
+       bracket パターンにより、リソースリークを型レベルで防止する。
+
+    3. **合成可能なエラーハンドリング**:
+       retry と timeout を組み合わせた堅牢な非同期処理を宣言的に記述可能にする。
+
+    4. **tokio エコシステムとの統合**:
+       tokio の機能を AsyncIO の遅延評価セマンティクスでラップし、
+       関数型スタイルで利用可能にする。
+
+  prior_art:
+    - name: "Haskell Control.Exception.bracket"
+      description: |
+        リソースの取得・使用・解放を保証するパターン。
+        例外が発生しても解放処理が実行される。
+        ```haskell
+        bracket :: IO a -> (a -> IO b) -> (a -> IO c) -> IO c
+        bracket acquire release use = ...
+        ```
+
+    - name: "Scala ZIO Schedule"
+      description: |
+        リトライとタイムアウトを宣言的に記述するスケジュール抽象。
+        指数バックオフ、最大リトライ回数、ジッターなどを合成可能に表現。
+        ```scala
+        val policy = Schedule.exponential(1.second) && Schedule.recurs(10)
+        myEffect.retry(policy)
+        ```
+
+    - name: "tokio::time::timeout"
+      description: |
+        Future にタイムアウトを設定する。
+        タイムアウト時は Elapsed エラーを返す。
+        ```rust
+        timeout(Duration::from_secs(5), async_operation()).await
+        ```
+
+    - name: "futures::future::select"
+      description: |
+        2つの Future を競争させ、先に完了した方の結果を返す。
+        ```rust
+        select(future1, future2).await
+        ```
+
+# =============================================================================
+# 要件一覧
+# =============================================================================
+
+requirements:
+  # ============================================================================
+  # フェーズ 1: リトライ操作
+  # ============================================================================
+  - id: async_control_retry
+    name: "retry - 失敗時の再試行"
+    priority: critical
+    phase: 1
+    description: |
+      AsyncIO<Result<A, E>> に対して、失敗時に指定回数まで再試行する機能を提供する。
+      リトライは AsyncIO の遅延評価セマンティクスを維持し、run_async() まで実行されない。
+
+      設計ポイント:
+      - 入力は AsyncIO<Result<A, E>> 型（Result でラップされた値）
+      - AsyncIO 自体はエラー型を持たないため、Result で表現
+      - 各リトライは独立した AsyncIO の実行となる
+      - AsyncIO は FnOnce ベースのため、リトライにはファクトリ関数が必要
+
+    methods:
+      - name: retry_with_factory
+        signature: |
+          fn retry_with_factory<A, E, F>(factory: F, max_attempts: usize) -> AsyncIO<Result<A, E>>
+          where
+            A: Send + 'static,
+            E: Send + 'static,
+            F: Fn() -> AsyncIO<Result<A, E>> + Send + 'static,
+        description: |
+          ファクトリ関数から AsyncIO を生成し、Err の場合に最大 max_attempts 回まで再試行する。
+          AsyncIO は FnOnce ベースで実行時に消費されるため、リトライのたびに
+          ファクトリ関数から新しい AsyncIO インスタンスを生成する。
+
+          成功した場合は即座に Ok(value) を返す。
+          全てのリトライが失敗した場合は、最後のエラーを返す。
+
+          max_attempts が 0 の場合は 1 回のみ実行される（リトライなし）。
+        complexity: "O(1) + max_attempts * 内部処理のコスト"
+        examples:
+          - description: "ネットワーク操作のリトライ"
+            code: |
+              let fetch_factory = || {
+                  AsyncIO::new(|| async {
+                      // ネットワーク操作
+                      fetch("https://example.com").await
+                  })
+              };
+
+              let with_retry = AsyncIO::retry_with_factory(fetch_factory, 3);
+              // 最大3回まで試行（初回 + 2回リトライ）
+
+              match with_retry.run_async().await {
+                  Ok(data) => println!("Success: {}", data),
+                  Err(e) => println!("Failed after 3 attempts: {:?}", e),
+              }
+
+    laws:
+      - name: "Retry Zero Law（リトライ0回の法則）"
+        description: "max_attempts が 0 または 1 の場合、リトライなしで1回のみ実行"
+        equation: "retry_with_factory(f, 0) ≡ retry_with_factory(f, 1) ≡ f()"
+
+      - name: "Retry Success Law（成功時の法則）"
+        description: "成功した場合はリトライしない"
+        equation: "retry_with_factory(|| pure(Ok(v)), n) ≡ pure(Ok(v))"
+
+    tests:
+      - category: "基本操作テスト"
+        cases:
+          - name: "成功時はリトライしない"
+            test: |
+              let factory = || AsyncIO::pure(Ok(42));
+              let result = AsyncIO::retry_with_factory(factory, 3).run_async().await;
+              assert_eq!(result, Ok(42));
+
+          - name: "失敗後に成功"
+            test: |
+              use std::sync::atomic::{AtomicUsize, Ordering};
+              use std::sync::Arc;
+
+              let counter = Arc::new(AtomicUsize::new(0));
+
+              let factory = {
+                  let counter = counter.clone();
+                  move || {
+                      let c = counter.clone();
+                      AsyncIO::new(move || {
+                          let c = c.clone();
+                          async move {
+                              let count = c.fetch_add(1, Ordering::SeqCst);
+                              if count < 2 {
+                                  Err("temporary error")
+                              } else {
+                                  Ok(42)
+                              }
+                          }
+                      })
+                  }
+              };
+
+              let result = AsyncIO::retry_with_factory(factory, 5).run_async().await;
+              assert_eq!(result, Ok(42));
+              assert_eq!(counter.load(Ordering::SeqCst), 3); // 3回目で成功
+
+          - name: "全リトライ失敗"
+            test: |
+              let factory = || AsyncIO::pure(Err("permanent error"));
+              let result = AsyncIO::retry_with_factory(factory, 3).run_async().await;
+              assert_eq!(result, Err("permanent error"));
+
+  - id: async_control_retry_with_backoff
+    name: "retry_with_backoff - 指数バックオフ付き再試行"
+    priority: critical
+    phase: 1
+    description: |
+      失敗時に指数バックオフで遅延を入れながら再試行する。
+      サーバー負荷軽減やレート制限への対応に有用。
+
+      バックオフ計算: delay * 2^(attempt - 1)
+      例: initial_delay = 100ms の場合
+        - 1回目のリトライ: 100ms 待機
+        - 2回目のリトライ: 200ms 待機
+        - 3回目のリトライ: 400ms 待機
+
+    methods:
+      - name: retry_with_backoff_factory
+        signature: |
+          fn retry_with_backoff_factory<A, E, F>(
+              factory: F,
+              max_attempts: usize,
+              initial_delay: Duration,
+          ) -> AsyncIO<Result<A, E>>
+          where
+            A: Send + 'static,
+            E: Send + 'static,
+            F: Fn() -> AsyncIO<Result<A, E>> + Send + 'static,
+        description: |
+          ファクトリ関数から AsyncIO を生成し、Err の場合に指数バックオフで再試行する。
+          各リトライ前に initial_delay * 2^(attempt - 1) の遅延を入れる。
+
+          max_attempts が 0 の場合は 1 回のみ実行される。
+        complexity: "O(1) + max_attempts * (内部処理のコスト + 遅延時間)"
+        examples:
+          - description: "API コールのバックオフ付きリトライ"
+            code: |
+              let api_factory = || {
+                  AsyncIO::new(|| async {
+                      call_api().await
+                  })
+              };
+
+              let with_backoff = AsyncIO::retry_with_backoff_factory(
+                  api_factory,
+                  5,                              // 最大5回試行
+                  Duration::from_millis(100),     // 初期遅延 100ms
+              );
+              // 遅延: 100ms, 200ms, 400ms, 800ms
+
+    laws:
+      - name: "Backoff Exponential Growth Law"
+        description: "遅延は指数的に増加する"
+        equation: "delay(n) = initial_delay * 2^(n - 1)"
+
+    tests:
+      - category: "基本操作テスト"
+        cases:
+          - name: "バックオフ付きリトライで成功"
+            test: |
+              use std::time::Instant;
+              use std::sync::atomic::{AtomicUsize, Ordering};
+              use std::sync::Arc;
+
+              let counter = Arc::new(AtomicUsize::new(0));
+              let start = Instant::now();
+
+              let factory = {
+                  let counter = counter.clone();
+                  move || {
+                      let c = counter.clone();
+                      AsyncIO::new(move || {
+                          let c = c.clone();
+                          async move {
+                              let count = c.fetch_add(1, Ordering::SeqCst);
+                              if count < 2 {
+                                  Err("temporary error")
+                              } else {
+                                  Ok(42)
+                              }
+                          }
+                      })
+                  }
+              };
+
+              let result = AsyncIO::retry_with_backoff_factory(
+                  factory,
+                  5,
+                  Duration::from_millis(50),
+              ).run_async().await;
+
+              assert_eq!(result, Ok(42));
+              assert_eq!(counter.load(Ordering::SeqCst), 3); // 3回目で成功
+              // 50ms + 100ms = 150ms 以上経過しているはず
+              assert!(start.elapsed() >= Duration::from_millis(150));
+
+          - name: "全リトライ失敗（バックオフ）"
+            test: |
+              use std::time::Instant;
+
+              let start = Instant::now();
+              let factory = || AsyncIO::pure(Err("permanent error"));
+
+              let result = AsyncIO::retry_with_backoff_factory(
+                  factory,
+                  3,
+                  Duration::from_millis(50),
+              ).run_async().await;
+
+              assert_eq!(result, Err("permanent error"));
+              // 50ms + 100ms = 150ms 以上経過しているはず
+              assert!(start.elapsed() >= Duration::from_millis(150));
+
+  # ============================================================================
+  # フェーズ 2: 並列実行操作
+  # ============================================================================
+  - id: async_control_par
+    name: "par - 並列実行"
+    priority: high
+    phase: 2
+    description: |
+      2つの AsyncIO を並列に実行し、両方の結果をタプルで返す。
+      tokio::join! のセマンティクスに相当する。
+
+      既存の map2 は逐次実行だが、par は真の並列実行を行う。
+
+    methods:
+      - name: par
+        signature: |
+          fn par<B>(self, other: AsyncIO<B>) -> AsyncIO<(A, B)>
+          where
+            A: Send + 'static,
+            B: Send + 'static,
+        description: |
+          2つの AsyncIO を並列に実行し、両方が完了したら結果をタプルで返す。
+          どちらか一方がパニックした場合、パニックは伝播する。
+        complexity: "O(1) + max(self のコスト, other のコスト)"
+        examples:
+          - description: "2つのAPI呼び出しを並列実行"
+            code: |
+              let user_fetch = AsyncIO::new(|| async { fetch_user(user_id).await });
+              let orders_fetch = AsyncIO::new(|| async { fetch_orders(user_id).await });
+
+              let (user, orders) = user_fetch.par(orders_fetch).run_async().await;
+              // user と orders は並列に取得される
+
+      - name: par3
+        signature: |
+          fn par3<B, C>(
+              self,
+              second: AsyncIO<B>,
+              third: AsyncIO<C>,
+          ) -> AsyncIO<(A, B, C)>
+          where
+            A: Send + 'static,
+            B: Send + 'static,
+            C: Send + 'static,
+        description: |
+          3つの AsyncIO を並列に実行する。
+        complexity: "O(1) + max(各操作のコスト)"
+
+    laws:
+      - name: "Par Commutativity Law（可換法則）"
+        description: "結果のタプル順序を除いて、par は可換"
+        equation: "a.par(b).fmap(|(x, y)| (y, x)) == b.par(a)"
+
+      - name: "Par Associativity Law（結合法則）"
+        description: "par は結合的（タプルのネスト構造は異なる）"
+        equation: "a.par(b).par(c) は a.par(b.par(c)) と同じ計算を行う"
+
+    tests:
+      - category: "基本操作テスト"
+        cases:
+          - name: "並列実行で両方の結果を取得"
+            test: |
+              let a = AsyncIO::pure(1);
+              let b = AsyncIO::pure(2);
+              let (x, y) = a.par(b).run_async().await;
+              assert_eq!((x, y), (1, 2));
+
+          - name: "並列実行は逐次実行より速い"
+            test: |
+              use std::time::{Duration, Instant};
+
+              let slow_a = AsyncIO::delay_async(Duration::from_millis(100)).fmap(|_| 1);
+              let slow_b = AsyncIO::delay_async(Duration::from_millis(100)).fmap(|_| 2);
+
+              let start = Instant::now();
+              let (x, y) = slow_a.par(slow_b).run_async().await;
+              let elapsed = start.elapsed();
+
+              assert_eq!((x, y), (1, 2));
+              // 並列実行なので 200ms より短い（100ms 程度）
+              assert!(elapsed < Duration::from_millis(150));
+
+  - id: async_control_race_result
+    name: "race_result - Result ベースの競争実行"
+    priority: high
+    phase: 2
+    description: |
+      既存の race は Either<A, B> を返すが、同じ型の AsyncIO を競争させて
+      最初に完了した結果を直接返すバージョンを追加する。
+
+    methods:
+      - name: race_result
+        signature: |
+          fn race_result(self, other: AsyncIO<A>) -> AsyncIO<A>
+          where
+            A: Send + 'static,
+        description: |
+          2つの同じ型の AsyncIO を競争させ、先に完了した方の結果を返す。
+          敗者はキャンセルされる。
+        complexity: "O(1) + min(self のコスト, other のコスト)"
+        examples:
+          - description: "プライマリとフォールバックの競争"
+            code: |
+              let primary = fetch_from_primary();
+              let fallback = fetch_from_fallback();
+
+              // 先に応答した方を使用
+              let result = primary.race_result(fallback).run_async().await;
+
+    tests:
+      - category: "基本操作テスト"
+        cases:
+          - name: "速い方が勝つ"
+            test: |
+              let fast = AsyncIO::pure(1);
+              let slow = AsyncIO::delay_async(Duration::from_millis(100)).fmap(|_| 2);
+
+              let result = fast.race_result(slow).run_async().await;
+              assert_eq!(result, 1);
+
+  # ============================================================================
+  # フェーズ 3: リソース管理操作
+  # ============================================================================
+  - id: async_control_bracket
+    name: "bracket - リソースの取得・使用・解放パターン"
+    priority: critical
+    phase: 3
+    description: |
+      リソースの取得、使用、解放を保証するパターン。
+      使用中に例外（パニック）が発生しても、解放処理は必ず実行される。
+
+      Haskell の bracket に相当:
+      ```haskell
+      bracket :: IO a -> (a -> IO b) -> (a -> IO c) -> IO c
+      bracket acquire release use = ...
+      ```
+
+      Rust では RAII パターンが一般的だが、非同期コンテキストでは
+      Drop が適切に動作しないケースがある。bracket はこれを解決する。
+
+    methods:
+      - name: bracket
+        signature: |
+          fn bracket<Resource, Result, Acquire, Use, Release>(
+              acquire: Acquire,
+              use_resource: Use,
+              release: Release,
+          ) -> AsyncIO<Result>
+          where
+              Acquire: FnOnce() -> AsyncIO<Resource> + Send + 'static,
+              Use: FnOnce(Resource) -> AsyncIO<Result> + Send + 'static,
+              Release: FnOnce(Resource) -> AsyncIO<()> + Send + 'static,
+              Resource: Clone + Send + 'static,
+              Result: Send + 'static,
+        description: |
+          1. acquire でリソースを取得
+          2. use_resource でリソースを使用
+          3. release でリソースを解放（use_resource の成功/失敗に関わらず実行）
+
+          use_resource がパニックした場合も release は実行される。
+        complexity: "O(1) + acquire + use_resource + release のコスト"
+        examples:
+          - description: "ファイルハンドルの確実な解放"
+            code: |
+              let result = AsyncIO::bracket(
+                  || AsyncIO::new(|| async { open_file("data.txt").await }),
+                  |file| AsyncIO::new(move || async move { read_all(&file).await }),
+                  |file| AsyncIO::new(move || async move { close_file(file).await }),
+              );
+
+              let content = result.run_async().await;
+
+          - description: "データベース接続の管理"
+            code: |
+              let result = AsyncIO::bracket(
+                  || AsyncIO::new(|| async { acquire_connection().await }),
+                  |conn| AsyncIO::new(move || async move {
+                      execute_query(&conn, "SELECT * FROM users").await
+                  }),
+                  |conn| AsyncIO::new(move || async move {
+                      release_connection(conn).await
+                  }),
+              );
+
+    laws:
+      - name: "Bracket Release Guarantee Law"
+        description: "use が成功/失敗に関わらず release は実行される"
+        equation: |
+          bracket(acquire, use, release) は常に release を実行する
+          （use がパニックしても）
+
+      - name: "Bracket Success Law"
+        description: "use が成功した場合、その結果が返される"
+        equation: |
+          bracket(pure(r), |r| pure(v), |_| pure(())) == pure(v)
+
+    tests:
+      - category: "基本操作テスト"
+        cases:
+          - name: "正常系: 取得→使用→解放"
+            test: |
+              use std::sync::atomic::{AtomicBool, Ordering};
+              use std::sync::Arc;
+
+              let released = Arc::new(AtomicBool::new(false));
+              let released_clone = released.clone();
+
+              let result = AsyncIO::bracket(
+                  || AsyncIO::pure(42),
+                  |x| AsyncIO::pure(x * 2),
+                  move |_| {
+                      let r = released_clone.clone();
+                      AsyncIO::new(move || async move { r.store(true, Ordering::SeqCst); })
+                  },
+              );
+
+              assert_eq!(result.run_async().await, 84);
+              assert!(released.load(Ordering::SeqCst));
+
+          - name: "異常系: use 失敗時も release 実行"
+            test: |
+              use std::sync::atomic::{AtomicBool, Ordering};
+              use std::sync::Arc;
+
+              let released = Arc::new(AtomicBool::new(false));
+              let released_clone = released.clone();
+
+              let result: AsyncIO<Result<i32, &str>> = AsyncIO::bracket(
+                  || AsyncIO::pure(42),
+                  |_| AsyncIO::pure(Err("error")),
+                  move |_| {
+                      let r = released_clone.clone();
+                      AsyncIO::new(move || async move { r.store(true, Ordering::SeqCst); })
+                  },
+              );
+
+              assert_eq!(result.run_async().await, Err("error"));
+              assert!(released.load(Ordering::SeqCst));
+
+  - id: async_control_finally
+    name: "finally - 常に実行されるクリーンアップ"
+    priority: high
+    phase: 3
+    description: |
+      成功/失敗に関わらず、最後に必ず実行される処理を指定する。
+      Java/JavaScript の finally ブロックに相当。
+
+    methods:
+      - name: finally_async
+        signature: |
+          fn finally_async<F, Cleanup>(self, cleanup: F) -> AsyncIO<A>
+          where
+              F: FnOnce() -> Cleanup + Send + 'static,
+              Cleanup: std::future::Future<Output = ()> + Send + 'static,
+              A: Send + 'static,
+        description: |
+          self の実行後（成功/失敗に関わらず）、cleanup を実行する。
+          self の結果は保持される。
+        complexity: "O(1) + self のコスト + cleanup のコスト"
+        examples:
+          - description: "処理完了後のログ出力"
+            code: |
+              let operation = AsyncIO::new(|| async {
+                  perform_operation().await
+              });
+
+              let with_cleanup = operation.finally_async(|| async {
+                  println!("Operation completed (success or failure)");
+              });
+
+    tests:
+      - category: "基本操作テスト"
+        cases:
+          - name: "成功時も finally 実行"
+            test: |
+              use std::sync::atomic::{AtomicBool, Ordering};
+              use std::sync::Arc;
+
+              let executed = Arc::new(AtomicBool::new(false));
+              let executed_clone = executed.clone();
+
+              let result = AsyncIO::pure(42)
+                  .finally_async(move || {
+                      let e = executed_clone.clone();
+                      async move { e.store(true, Ordering::SeqCst); }
+                  });
+
+              assert_eq!(result.run_async().await, 42);
+              assert!(executed.load(Ordering::SeqCst));
+
+  - id: async_control_on_error
+    name: "on_error - エラー時のコールバック"
+    priority: high
+    phase: 3
+    description: |
+      Result を返す AsyncIO がエラーを返した場合にコールバックを実行する。
+      エラーは引き続き伝播する（リカバリではない）。
+
+    methods:
+      - name: on_error
+        signature: |
+          fn on_error<E, F, Callback>(self, callback: F) -> AsyncIO<Result<A, E>>
+          where
+              F: FnOnce(&E) -> Callback + Send + 'static,
+              Callback: std::future::Future<Output = ()> + Send + 'static,
+              A: Send + 'static,
+              E: Clone + Send + 'static,
+        description: |
+          Result<A, E> を返す AsyncIO がエラーの場合、callback を実行する。
+          callback 実行後、元のエラーはそのまま返される。
+          ログ出力やメトリクス記録に有用。
+        complexity: "O(1) + self のコスト + callback のコスト（エラー時のみ）"
+        examples:
+          - description: "エラー時のログ出力"
+            code: |
+              let operation: AsyncIO<Result<Data, Error>> = AsyncIO::new(|| async {
+                  fetch_data().await
+              });
+
+              let with_logging = operation.on_error(|e| async move {
+                  log::error!("Operation failed: {:?}", e);
+              });
+
+    tests:
+      - category: "基本操作テスト"
+        cases:
+          - name: "エラー時にコールバック実行"
+            test: |
+              use std::sync::atomic::{AtomicBool, Ordering};
+              use std::sync::Arc;
+
+              let called = Arc::new(AtomicBool::new(false));
+              let called_clone = called.clone();
+
+              let action: AsyncIO<Result<i32, String>> = AsyncIO::pure(Err("error".to_string()));
+              let result = action.on_error(move |_| {
+                  let c = called_clone.clone();
+                  async move { c.store(true, Ordering::SeqCst); }
+              }).run_async().await;
+
+              assert_eq!(result, Err("error".to_string()));
+              assert!(called.load(Ordering::SeqCst));
+
+          - name: "成功時はコールバック実行しない"
+            test: |
+              use std::sync::atomic::{AtomicBool, Ordering};
+              use std::sync::Arc;
+
+              let called = Arc::new(AtomicBool::new(false));
+              let called_clone = called.clone();
+
+              let action: AsyncIO<Result<i32, String>> = AsyncIO::pure(Ok(42));
+              let result = action.on_error(move |_| {
+                  let c = called_clone.clone();
+                  async move { c.store(true, Ordering::SeqCst); }
+              }).run_async().await;
+
+              assert_eq!(result, Ok(42));
+              assert!(!called.load(Ordering::SeqCst));
+
+  # ============================================================================
+  # フェーズ 4: タイムアウト拡張
+  # ============================================================================
+  - id: async_control_timeout_result
+    name: "timeout_result - Result ベースのタイムアウト"
+    priority: medium
+    phase: 4
+    description: |
+      既存の timeout は Option<A> を返すが、より詳細なエラー情報を提供する
+      Result ベースのタイムアウトを追加する。
+
+    methods:
+      - name: timeout_result
+        signature: |
+          fn timeout_result(self, duration: Duration) -> AsyncIO<Result<A, TimeoutError>>
+          where
+            A: Send + 'static,
+        description: |
+          指定時間内に完了しなかった場合、TimeoutError を返す。
+          タイムアウト時の詳細情報（経過時間など）が取得可能。
+        complexity: "O(1) + self のコスト"
+        examples:
+          - description: "タイムアウト付き操作"
+            code: |
+              let operation = AsyncIO::new(|| async {
+                  slow_operation().await
+              });
+
+              match operation.timeout_result(Duration::from_secs(5)).run_async().await {
+                  Ok(result) => println!("Success: {:?}", result),
+                  Err(TimeoutError { duration, .. }) => {
+                      println!("Timed out after {:?}", duration);
+                  }
+              }
+
+    related_types:
+      - name: TimeoutError
+        definition: |
+          /// タイムアウトエラーを表す構造体
+          #[derive(Debug, Clone, PartialEq, Eq)]
+          pub struct TimeoutError {
+              /// 設定されたタイムアウト時間
+              pub duration: Duration,
+          }
+
+          impl std::fmt::Display for TimeoutError {
+              fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                  write!(f, "operation timed out after {:?}", self.duration)
+              }
+          }
+
+          impl std::error::Error for TimeoutError {}
+
+    tests:
+      - category: "基本操作テスト"
+        cases:
+          - name: "タイムアウト前に完了"
+            test: |
+              let action = AsyncIO::pure(42);
+              let result = action.timeout_result(Duration::from_secs(1)).run_async().await;
+              assert_eq!(result, Ok(42));
+
+          - name: "タイムアウト発生"
+            test: |
+              let slow = AsyncIO::delay_async(Duration::from_secs(10)).fmap(|_| 42);
+              let result = slow.timeout_result(Duration::from_millis(100)).run_async().await;
+              assert!(result.is_err());
+              assert_eq!(result.unwrap_err().duration, Duration::from_millis(100));
+
+# =============================================================================
+# 非機能要件
+# =============================================================================
+
+non_functional_requirements:
+  safety:
+    - "#![forbid(unsafe_code)] ポリシーに準拠"
+    - "パニックセーフな実装（bracket, finally でリソースリークを防止）"
+
+  performance:
+    - "par は真の並列実行（tokio::join! 相当のパフォーマンス）"
+    - "retry のオーバーヘッドは最小限"
+    - "不要なクローンを避ける"
+
+  compatibility:
+    - "既存の AsyncIO API との一貫性"
+    - "tokio 1.x との互換性"
+    - "async feature flag の下でのみ有効"
+
+  testing:
+    - "テストカバレッジ 100%"
+    - "プロパティベーステストによる法則の検証"
+    - "タイミングに依存するテストは適切なマージンを設定"
+
+  documentation:
+    - "全てのパブリック API にドキュメントコメント"
+    - "使用例を含む詳細なドキュメント"
+    - "法則と保証の明記"
+
+# =============================================================================
+# 実装フェーズ
+# =============================================================================
+
+implementation_phases:
+  - phase: 1
+    name: "リトライ操作"
+    description: "retry, retry_with_backoff の実装"
+    requirements:
+      - async_control_retry
+      - async_control_retry_with_backoff
+    duration_estimate: "2-3 days"
+    deliverables:
+      - "src/effect/async_io.rs への retry メソッド追加"
+      - "tests/async_io_retry_tests.rs"
+
+  - phase: 2
+    name: "並列実行操作"
+    description: "par, par3, race_result の実装"
+    requirements:
+      - async_control_par
+      - async_control_race_result
+    duration_estimate: "2-3 days"
+    dependencies:
+      - "phase 1"
+    deliverables:
+      - "src/effect/async_io.rs への par メソッド追加"
+      - "tests/async_io_par_tests.rs"
+
+  - phase: 3
+    name: "リソース管理操作"
+    description: "bracket, finally, on_error の実装"
+    requirements:
+      - async_control_bracket
+      - async_control_finally
+      - async_control_on_error
+    duration_estimate: "3-4 days"
+    dependencies:
+      - "phase 1"
+    deliverables:
+      - "src/effect/async_io.rs へのリソース管理メソッド追加"
+      - "tests/async_io_resource_tests.rs"
+
+  - phase: 4
+    name: "タイムアウト拡張"
+    description: "timeout_result と TimeoutError の実装"
+    requirements:
+      - async_control_timeout_result
+    duration_estimate: "1-2 days"
+    dependencies:
+      - "phase 1"
+    deliverables:
+      - "src/effect/async_io.rs への timeout_result 追加"
+      - "src/effect/timeout_error.rs（新規）"
+      - "tests/async_io_timeout_tests.rs"
+
+# =============================================================================
+# 将来の拡張
+# =============================================================================
+
+future_extensions:
+  - id: async_control_schedule
+    name: "Schedule - 宣言的なスケジュール記述"
+    description: |
+      Scala ZIO の Schedule に相当する、リトライポリシーの合成可能な記述。
+      ```rust
+      let policy = Schedule::exponential(Duration::from_millis(100))
+          .with_max_retries(5)
+          .with_jitter(0.1);
+      action.retry_with_schedule(policy)
+      ```
+    rationale: |
+      現時点では retry_with_backoff で基本的なユースケースをカバーする。
+      より高度なスケジュールが必要になった時点で実装を検討。
+
+  - id: async_control_circuit_breaker
+    name: "CircuitBreaker - サーキットブレーカーパターン"
+    description: |
+      連続失敗時に一時的に呼び出しを停止するパターン。
+      ```rust
+      let breaker = CircuitBreaker::new(5, Duration::from_secs(30));
+      action.with_circuit_breaker(breaker)
+      ```
+    rationale: |
+      リトライと組み合わせて使用されることが多いが、
+      状態管理が複雑なため別フェーズで検討。
+
+  - id: async_control_supervised
+    name: "Supervised - エラー監視とリカバリ"
+    description: |
+      エラー発生時に自動的に再起動するパターン。
+      Erlang/Akka のスーパーバイザーに相当。
+    rationale: |
+      アクターモデルとの統合が前提となるため、
+      Effect System の成熟後に検討。
+
+  - id: async_control_parallel_traverse
+    name: "parallel_traverse - コレクションの並列処理"
+    description: |
+      コレクションの各要素に対して非同期操作を並列実行し、
+      結果を Vec で収集する。
+      ```rust
+      let results = AsyncIO::parallel_traverse(items, |item| fetch(item));
+      ```
+    rationale: |
+      for_async! マクロは順次実行のため、並列版は別途実装が必要。
+      リトライや並列実行の基盤が整った後に検討。
+
+# =============================================================================
+# 依存関係
+# =============================================================================
+
+dependencies:
+  internal:
+    - "lambars::effect::AsyncIO"
+    - "lambars::control::Either"
+
+  external:
+    - name: tokio
+      version: "1.0"
+      features: ["rt", "rt-multi-thread", "time"]
+      reason: "非同期ランタイム、タイムアウト、遅延"
+
+    - name: futures
+      version: "0.3"
+      reason: "FutureExt, select"
+
+  dev_dependencies:
+    - name: rstest
+      version: "0.18"
+      reason: "パラメータ化テスト"
+
+    - name: proptest
+      version: "1.0"
+      reason: "プロパティベーステスト"
+
+# =============================================================================
+# 参照
+# =============================================================================
+
+references:
+  - name: "既存の AsyncIO 実装"
+    location: "src/effect/async_io.rs"
+    description: "現在の AsyncIO 実装。追加するメソッドの基盤。"
+
+  - name: "Haskell Control.Exception"
+    url: "https://hackage.haskell.org/package/base-4.17.0.0/docs/Control-Exception.html"
+    description: "bracket, finally などの参照実装"
+
+  - name: "Scala ZIO"
+    url: "https://zio.dev/reference/error-management/retrying/"
+    description: "リトライとスケジュールの設計参照"
+
+  - name: "tokio documentation"
+    url: "https://docs.rs/tokio/latest/tokio/"
+    description: "timeout, select, join などの参照"

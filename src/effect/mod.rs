@@ -124,6 +124,9 @@ mod async_io;
 #[cfg(feature = "async")]
 pub use async_io::AsyncIO;
 
+#[cfg(feature = "async")]
+pub use async_io::TimeoutError;
+
 // =============================================================================
 // Do-Notation Macros
 // =============================================================================

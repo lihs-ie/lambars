@@ -1,0 +1,1431 @@
+# 非同期制御フローユーティリティ 実装計画
+#
+# 要件定義: docs/internal/requirements/20260104_1700_async_control_flow.yaml
+# 技術要件:
+#   - Rust: 1.92.0
+#   - edition: 2024
+#   - testing: rstest, proptest
+#
+# 実装方針:
+#   1. TDD（テスト駆動開発）でテストを先に書く
+#   2. 既存の AsyncIO 構造と一貫性を保つ
+#   3. 遅延評価セマンティクスを維持し、run_async() まで副作用を発生させない
+#   4. フェーズごとに機能を独立して実装・テスト可能にする
+
+version: "1.0.0"
+name: "非同期制御フローユーティリティ Implementation Plan"
+requirement_file: "docs/internal/requirements/20260104_1700_async_control_flow.yaml"
+
+# =============================================================================
+# 実装順序の概要
+# =============================================================================
+
+implementation_order:
+  - step: 1
+    name: "フェーズ1: リトライ操作"
+    items:
+      - retry メソッドの実装
+      - retry_with_backoff メソッドの実装
+      - リトライ関連のユニットテスト
+      - リトライ法則のプロパティテスト
+
+  - step: 2
+    name: "フェーズ2: 並列実行操作"
+    items:
+      - par メソッドの実装
+      - par3 メソッドの実装
+      - race_result メソッドの実装
+      - 並列実行関連のユニットテスト
+      - 並列実行法則のプロパティテスト
+
+  - step: 3
+    name: "フェーズ3: リソース管理操作"
+    items:
+      - bracket 関数の実装
+      - finally_async メソッドの実装
+      - on_error メソッドの実装
+      - リソース管理関連のユニットテスト
+
+  - step: 4
+    name: "フェーズ4: タイムアウト拡張"
+    items:
+      - TimeoutError 構造体の実装
+      - timeout_result メソッドの実装
+      - タイムアウト関連のユニットテスト
+
+# =============================================================================
+# 実装計画詳細
+# =============================================================================
+
+implementation_plan:
+  # ============================================================================
+  # フェーズ 1: リトライ操作
+  # ============================================================================
+
+  - id: impl_retry
+    requirement_id: async_control_retry
+    name: "retry_with_factory 関数の実装"
+    priority: 1
+    description: |
+      ファクトリ関数を使用して AsyncIO<Result<A, E>> を生成し、
+      失敗時に指定回数まで再試行する機能を実装する。
+      リトライは AsyncIO の遅延評価セマンティクスを維持し、run_async() まで実行されない。
+
+      設計ポイント:
+      - AsyncIO は FnOnce ベースで実行時に消費されるため、ファクトリパターンを採用
+      - ファクトリ関数から毎回新しい AsyncIO インスタンスを生成
+      - Result が Ok の場合は即座に返す
+      - Result が Err の場合は max_attempts 回まで再試行
+      - 全て失敗した場合は最後のエラーを返す
+      - max_attempts が 0 の場合は 1 回のみ実行
+
+    files:
+      - path: src/effect/async_io.rs
+        description: |
+          AsyncIO に対する retry_with_factory 関連関数を追加する。
+          新しいセクション「Retry Operations」として追加する。
+          追加位置: 行 540 付近の timeout メソッドの後
+
+    implementation_steps:
+      - step: 1
+        description: |
+          retry_with_factory 関連関数を実装する。
+          ファクトリ関数を使って複数回実行可能にする設計を採用。
+          AsyncIO::new を使って新しい AsyncIO を作成し、
+          内部で再試行ロジックを実装する。
+        code_outline: |
+          // =============================================================================
+          // Retry Operations
+          // =============================================================================
+
+          impl<A: Send + 'static> AsyncIO<A> {
+              /// Creates a retryable version of this AsyncIO using a factory function.
+              ///
+              /// Since AsyncIO is consumed on execution, we need a factory that can
+              /// create new instances for each retry attempt.
+              ///
+              /// # Type Parameters
+              ///
+              /// * `E` - The error type
+              /// * `F` - A factory function that creates AsyncIO<Result<A, E>>
+              ///
+              /// # Arguments
+              ///
+              /// * `factory` - A function that creates a new AsyncIO for each attempt
+              /// * `max_attempts` - Maximum number of retry attempts
+              ///
+              /// # Examples
+              ///
+              /// ```rust,ignore
+              /// use lambars::effect::AsyncIO;
+              /// use std::sync::atomic::{AtomicUsize, Ordering};
+              /// use std::sync::Arc;
+              ///
+              /// let counter = Arc::new(AtomicUsize::new(0));
+              /// let counter_clone = counter.clone();
+              ///
+              /// let result = AsyncIO::retry_with_factory(
+              ///     move || {
+              ///         let c = counter_clone.clone();
+              ///         AsyncIO::new(move || {
+              ///             let c = c.clone();
+              ///             async move {
+              ///                 if c.fetch_add(1, Ordering::SeqCst) < 2 {
+              ///                     Err("fail")
+              ///                 } else {
+              ///                     Ok(42)
+              ///                 }
+              ///             }
+              ///         })
+              ///     },
+              ///     5,
+              /// );
+              /// ```
+              pub fn retry_with_factory<E, F>(factory: F, max_attempts: usize) -> AsyncIO<Result<A, E>>
+              where
+                  F: Fn() -> AsyncIO<Result<A, E>> + Send + 'static,
+                  E: Send + 'static,
+              {
+                  let effective_attempts = max_attempts.max(1);
+
+                  AsyncIO::new(move || async move {
+                      let mut last_error: Option<E> = None;
+
+                      for _ in 0..effective_attempts {
+                          let action = factory();
+                          match action.run_async().await {
+                              Ok(value) => return Ok(value),
+                              Err(error) => {
+                                  last_error = Some(error);
+                              }
+                          }
+                      }
+
+                      // All attempts failed, return the last error
+                      Err(last_error.expect("At least one attempt should have been made"))
+                  })
+              }
+          }
+
+    tests:
+      - name: test_retry_success_on_first_attempt
+        description: 最初の試行で成功した場合はリトライしない
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          #[tokio::test]
+          async fn test_retry_success_on_first_attempt() {
+              let result = AsyncIO::retry_with_factory(
+                  || AsyncIO::pure(Ok(42)),
+                  3,
+              ).run_async().await;
+              assert_eq!(result, Ok(42));
+          }
+
+      - name: test_retry_success_after_failures
+        description: 失敗後に成功した場合、成功値を返す
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          #[tokio::test]
+          async fn test_retry_success_after_failures() {
+              use std::sync::atomic::{AtomicUsize, Ordering};
+              use std::sync::Arc;
+
+              let counter = Arc::new(AtomicUsize::new(0));
+              let counter_clone = counter.clone();
+
+              let result = AsyncIO::retry_with_factory(
+                  move || {
+                      let c = counter_clone.clone();
+                      AsyncIO::new(move || {
+                          let c = c.clone();
+                          async move {
+                              let count = c.fetch_add(1, Ordering::SeqCst);
+                              if count < 2 {
+                                  Err("temporary error")
+                              } else {
+                                  Ok(42)
+                              }
+                          }
+                      })
+                  },
+                  5,
+              );
+
+              assert_eq!(result.run_async().await, Ok(42));
+              assert_eq!(counter.load(Ordering::SeqCst), 3); // 3回目で成功
+          }
+
+      - name: test_retry_all_failures
+        description: 全てのリトライが失敗した場合、最後のエラーを返す
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          #[tokio::test]
+          async fn test_retry_all_failures() {
+              use std::sync::atomic::{AtomicUsize, Ordering};
+              use std::sync::Arc;
+
+              let counter = Arc::new(AtomicUsize::new(0));
+              let counter_clone = counter.clone();
+
+              let result = AsyncIO::retry_with_factory(
+                  move || {
+                      let c = counter_clone.clone();
+                      AsyncIO::new(move || {
+                          let c = c.clone();
+                          async move {
+                              c.fetch_add(1, Ordering::SeqCst);
+                              Err::<i32, _>("permanent error")
+                          }
+                      })
+                  },
+                  3,
+              );
+
+              assert_eq!(result.run_async().await, Err("permanent error"));
+              assert_eq!(counter.load(Ordering::SeqCst), 3);
+          }
+
+      - name: test_retry_zero_attempts
+        description: max_attempts が 0 の場合は 1 回のみ実行
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          #[tokio::test]
+          async fn test_retry_zero_attempts() {
+              use std::sync::atomic::{AtomicUsize, Ordering};
+              use std::sync::Arc;
+
+              let counter = Arc::new(AtomicUsize::new(0));
+              let counter_clone = counter.clone();
+
+              let result = AsyncIO::retry_with_factory(
+                  move || {
+                      let c = counter_clone.clone();
+                      AsyncIO::new(move || {
+                          let c = c.clone();
+                          async move {
+                              c.fetch_add(1, Ordering::SeqCst);
+                              Err::<i32, _>("error")
+                          }
+                      })
+                  },
+                  0,
+              );
+
+              assert_eq!(result.run_async().await, Err("error"));
+              assert_eq!(counter.load(Ordering::SeqCst), 1);
+          }
+
+      - name: test_retry_is_lazy
+        description: retry は遅延評価を維持する
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          #[tokio::test]
+          async fn test_retry_is_lazy() {
+              use std::sync::atomic::{AtomicBool, Ordering};
+              use std::sync::Arc;
+
+              let executed = Arc::new(AtomicBool::new(false));
+              let executed_clone = executed.clone();
+
+              let action = AsyncIO::retry_with_factory(
+                  move || {
+                      let e = executed_clone.clone();
+                      AsyncIO::new(move || {
+                          let e = e.clone();
+                          async move {
+                              e.store(true, Ordering::SeqCst);
+                              Ok::<i32, &str>(42)
+                          }
+                      })
+                  },
+                  3,
+              );
+
+              // まだ実行されていない
+              assert!(!executed.load(Ordering::SeqCst));
+
+              // 実行
+              let _ = action.run_async().await;
+              assert!(executed.load(Ordering::SeqCst));
+          }
+
+    dependencies: []
+
+  - id: impl_retry_with_backoff
+    requirement_id: async_control_retry_with_backoff
+    name: "retry_with_backoff メソッドの実装"
+    priority: 2
+    description: |
+      失敗時に指数バックオフで遅延を入れながら再試行する機能を実装する。
+      バックオフ計算: delay * 2^(attempt - 1)
+
+    files:
+      - path: src/effect/async_io.rs
+        description: |
+          retry_with_backoff メソッドを追加する。
+          retry_with_factory の直後に追加する。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          retry_with_backoff_factory メソッドを実装する。
+          指数バックオフの遅延を計算し、tokio::time::sleep で待機する。
+        code_outline: |
+          impl<A: Send + 'static> AsyncIO<A> {
+              /// Retries with exponential backoff using a factory function.
+              ///
+              /// Each retry is delayed by `initial_delay * 2^(attempt - 1)`.
+              ///
+              /// # Arguments
+              ///
+              /// * `factory` - A function that creates a new AsyncIO for each attempt
+              /// * `max_attempts` - Maximum number of retry attempts
+              /// * `initial_delay` - Initial delay before the first retry
+              ///
+              /// # Examples
+              ///
+              /// ```rust,ignore
+              /// use lambars::effect::AsyncIO;
+              /// use std::time::Duration;
+              ///
+              /// let result = AsyncIO::retry_with_backoff_factory(
+              ///     || AsyncIO::pure(Err::<i32, _>("error")),
+              ///     3,
+              ///     Duration::from_millis(100),
+              /// );
+              /// // Delays: 100ms, 200ms before 2nd and 3rd attempts
+              /// ```
+              pub fn retry_with_backoff_factory<E, F>(
+                  factory: F,
+                  max_attempts: usize,
+                  initial_delay: Duration,
+              ) -> AsyncIO<Result<A, E>>
+              where
+                  F: Fn() -> AsyncIO<Result<A, E>> + Send + 'static,
+                  E: Send + 'static,
+              {
+                  let effective_attempts = max_attempts.max(1);
+
+                  AsyncIO::new(move || async move {
+                      let mut last_error: Option<E> = None;
+
+                      for attempt in 0..effective_attempts {
+                          // Apply backoff delay before retry (not on first attempt)
+                          if attempt > 0 {
+                              let delay_multiplier = 2u32.saturating_pow((attempt - 1) as u32);
+                              let delay = initial_delay.saturating_mul(delay_multiplier);
+                              tokio::time::sleep(delay).await;
+                          }
+
+                          let action = factory();
+                          match action.run_async().await {
+                              Ok(value) => return Ok(value),
+                              Err(error) => {
+                                  last_error = Some(error);
+                              }
+                          }
+                      }
+
+                      Err(last_error.expect("At least one attempt should have been made"))
+                  })
+              }
+          }
+
+    tests:
+      - name: test_retry_with_backoff_success
+        description: バックオフ付きリトライで成功
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          #[tokio::test]
+          async fn test_retry_with_backoff_success() {
+              use std::sync::atomic::{AtomicUsize, Ordering};
+              use std::sync::Arc;
+
+              let counter = Arc::new(AtomicUsize::new(0));
+              let counter_clone = counter.clone();
+
+              let result = AsyncIO::retry_with_backoff_factory(
+                  move || {
+                      let c = counter_clone.clone();
+                      AsyncIO::new(move || {
+                          let c = c.clone();
+                          async move {
+                              if c.fetch_add(1, Ordering::SeqCst) < 1 {
+                                  Err("temporary")
+                              } else {
+                                  Ok(42)
+                              }
+                          }
+                      })
+                  },
+                  3,
+                  Duration::from_millis(10),
+              );
+
+              assert_eq!(result.run_async().await, Ok(42));
+          }
+
+      - name: test_retry_with_backoff_timing
+        description: バックオフの遅延時間が正しいことを確認
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          #[tokio::test]
+          async fn test_retry_with_backoff_timing() {
+              use std::time::Instant;
+
+              let start = Instant::now();
+
+              let result = AsyncIO::retry_with_backoff_factory(
+                  || AsyncIO::pure(Err::<i32, _>("error")),
+                  3,
+                  Duration::from_millis(50),
+              );
+
+              assert_eq!(result.run_async().await, Err("error"));
+
+              // 50ms + 100ms = 150ms 以上経過しているはず
+              assert!(start.elapsed() >= Duration::from_millis(150));
+          }
+
+    dependencies:
+      - impl_retry
+
+  # ============================================================================
+  # フェーズ 2: 並列実行操作
+  # ============================================================================
+
+  - id: impl_par
+    requirement_id: async_control_par
+    name: "par メソッドの実装"
+    priority: 3
+    description: |
+      2つの AsyncIO を並列に実行し、両方の結果をタプルで返す機能を実装する。
+      tokio::join! を使用して真の並列実行を実現する。
+
+    files:
+      - path: src/effect/async_io.rs
+        description: |
+          par メソッドと par3 メソッドを追加する。
+          新しいセクション「Parallel Execution」として追加する。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          並列実行セクションを追加し、par メソッドを実装する。
+          tokio::join! を使用して両方の AsyncIO を同時に実行する。
+        code_outline: |
+          // =============================================================================
+          // Parallel Execution
+          // =============================================================================
+
+          impl<A: Send + 'static> AsyncIO<A> {
+              /// Executes two `AsyncIO` actions in parallel and returns both results as a tuple.
+              ///
+              /// This uses `tokio::join!` to run both futures concurrently.
+              ///
+              /// # Arguments
+              ///
+              /// * `other` - The second `AsyncIO` action to run in parallel.
+              ///
+              /// # Examples
+              ///
+              /// ```rust,ignore
+              /// use lambars::effect::AsyncIO;
+              ///
+              /// let a = AsyncIO::pure(1);
+              /// let b = AsyncIO::pure(2);
+              /// let (x, y) = a.par(b).run_async().await;
+              /// assert_eq!((x, y), (1, 2));
+              /// ```
+              #[must_use]
+              pub fn par<B>(self, other: AsyncIO<B>) -> AsyncIO<(A, B)>
+              where
+                  B: Send + 'static,
+              {
+                  AsyncIO::new(move || async move {
+                      tokio::join!(self.run_async(), other.run_async())
+                  })
+              }
+          }
+
+      - step: 2
+        description: |
+          par3 メソッドを追加する。
+          3つの AsyncIO を並列実行する。
+        code_outline: |
+          impl<A: Send + 'static> AsyncIO<A> {
+              /// Executes three `AsyncIO` actions in parallel and returns all results as a tuple.
+              ///
+              /// # Arguments
+              ///
+              /// * `second` - The second `AsyncIO` action.
+              /// * `third` - The third `AsyncIO` action.
+              ///
+              /// # Examples
+              ///
+              /// ```rust,ignore
+              /// use lambars::effect::AsyncIO;
+              ///
+              /// let a = AsyncIO::pure(1);
+              /// let b = AsyncIO::pure(2);
+              /// let c = AsyncIO::pure(3);
+              /// let (x, y, z) = a.par3(b, c).run_async().await;
+              /// assert_eq!((x, y, z), (1, 2, 3));
+              /// ```
+              #[must_use]
+              pub fn par3<B, C>(
+                  self,
+                  second: AsyncIO<B>,
+                  third: AsyncIO<C>,
+              ) -> AsyncIO<(A, B, C)>
+              where
+                  B: Send + 'static,
+                  C: Send + 'static,
+              {
+                  AsyncIO::new(move || async move {
+                      tokio::join!(
+                          self.run_async(),
+                          second.run_async(),
+                          third.run_async()
+                      )
+                  })
+              }
+          }
+
+    tests:
+      - name: test_par_both_results
+        description: 並列実行で両方の結果を取得
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          #[tokio::test]
+          async fn test_par_both_results() {
+              let a = AsyncIO::pure(1);
+              let b = AsyncIO::pure(2);
+              let (x, y) = a.par(b).run_async().await;
+              assert_eq!((x, y), (1, 2));
+          }
+
+      - name: test_par_is_faster_than_sequential
+        description: 並列実行は逐次実行より速い
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          #[tokio::test]
+          async fn test_par_is_faster_than_sequential() {
+              use std::time::Instant;
+
+              let slow_a = AsyncIO::delay_async(Duration::from_millis(100)).fmap(|_| 1);
+              let slow_b = AsyncIO::delay_async(Duration::from_millis(100)).fmap(|_| 2);
+
+              let start = Instant::now();
+              let (x, y) = slow_a.par(slow_b).run_async().await;
+              let elapsed = start.elapsed();
+
+              assert_eq!((x, y), (1, 2));
+              // 並列実行なので 200ms より短い（100ms + マージン程度）
+              assert!(elapsed < Duration::from_millis(150));
+          }
+
+      - name: test_par3_all_results
+        description: 3つの並列実行で全ての結果を取得
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          #[tokio::test]
+          async fn test_par3_all_results() {
+              let a = AsyncIO::pure(1);
+              let b = AsyncIO::pure(2);
+              let c = AsyncIO::pure(3);
+              let (x, y, z) = a.par3(b, c).run_async().await;
+              assert_eq!((x, y, z), (1, 2, 3));
+          }
+
+      - name: test_par_is_lazy
+        description: par は遅延評価を維持する
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          #[tokio::test]
+          async fn test_par_is_lazy() {
+              use std::sync::atomic::{AtomicBool, Ordering};
+              use std::sync::Arc;
+
+              let executed_a = Arc::new(AtomicBool::new(false));
+              let executed_b = Arc::new(AtomicBool::new(false));
+              let ea = executed_a.clone();
+              let eb = executed_b.clone();
+
+              let a = AsyncIO::new(move || {
+                  let e = ea.clone();
+                  async move { e.store(true, Ordering::SeqCst); 1 }
+              });
+              let b = AsyncIO::new(move || {
+                  let e = eb.clone();
+                  async move { e.store(true, Ordering::SeqCst); 2 }
+              });
+
+              let parred = a.par(b);
+
+              // まだ実行されていない
+              assert!(!executed_a.load(Ordering::SeqCst));
+              assert!(!executed_b.load(Ordering::SeqCst));
+
+              let _ = parred.run_async().await;
+
+              assert!(executed_a.load(Ordering::SeqCst));
+              assert!(executed_b.load(Ordering::SeqCst));
+          }
+
+    dependencies: []
+
+  - id: impl_race_result
+    requirement_id: async_control_race_result
+    name: "race_result メソッドの実装"
+    priority: 4
+    description: |
+      2つの同じ型の AsyncIO を競争させ、先に完了した方の結果を返す機能を実装する。
+      敗者はキャンセルされる。
+
+    files:
+      - path: src/effect/async_io.rs
+        description: |
+          race_result メソッドを追加する。
+          par メソッドの直後に追加する。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          race_result メソッドを実装する。
+          tokio::select! を使用して先に完了した方を返す。
+        code_outline: |
+          impl<A: Send + 'static> AsyncIO<A> {
+              /// Races two `AsyncIO` actions of the same type, returning whichever completes first.
+              ///
+              /// The slower computation is cancelled when the faster one completes.
+              ///
+              /// # Arguments
+              ///
+              /// * `other` - The second `AsyncIO` action to race against.
+              ///
+              /// # Note
+              ///
+              /// Unlike `race` which returns `Either<A, B>`, this method requires both
+              /// `AsyncIO` actions to have the same result type and returns the result directly.
+              ///
+              /// # Examples
+              ///
+              /// ```rust,ignore
+              /// use lambars::effect::AsyncIO;
+              /// use std::time::Duration;
+              ///
+              /// let slow = AsyncIO::delay_async(Duration::from_millis(100)).fmap(|_| 1);
+              /// let fast = AsyncIO::pure(2);
+              ///
+              /// let result = slow.race_result(fast).run_async().await;
+              /// assert_eq!(result, 2); // fast wins
+              /// ```
+              #[must_use]
+              pub fn race_result(self, other: AsyncIO<A>) -> AsyncIO<A> {
+                  AsyncIO::new(move || async move {
+                      tokio::select! {
+                          result = self.run_async() => result,
+                          result = other.run_async() => result,
+                      }
+                  })
+              }
+          }
+
+    tests:
+      - name: test_race_result_fast_wins
+        description: 速い方が勝つ
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          #[tokio::test]
+          async fn test_race_result_fast_wins() {
+              let fast = AsyncIO::pure(1);
+              let slow = AsyncIO::delay_async(Duration::from_millis(100)).fmap(|_| 2);
+
+              let result = fast.race_result(slow).run_async().await;
+              assert_eq!(result, 1);
+          }
+
+      - name: test_race_result_second_fast_wins
+        description: 2番目が速い場合は2番目が勝つ
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          #[tokio::test]
+          async fn test_race_result_second_fast_wins() {
+              let slow = AsyncIO::delay_async(Duration::from_millis(100)).fmap(|_| 1);
+              let fast = AsyncIO::pure(2);
+
+              let result = slow.race_result(fast).run_async().await;
+              assert_eq!(result, 2);
+          }
+
+      - name: test_race_result_cancels_loser
+        description: 敗者はキャンセルされる
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          #[tokio::test]
+          async fn test_race_result_cancels_loser() {
+              use std::sync::atomic::{AtomicBool, Ordering};
+              use std::sync::Arc;
+
+              // Note: This test verifies the loser doesn't complete fully
+              // by checking timing, not by directly observing cancellation
+
+              let start = std::time::Instant::now();
+              let slow = AsyncIO::delay_async(Duration::from_secs(10)).fmap(|_| 1);
+              let fast = AsyncIO::pure(2);
+
+              let result = slow.race_result(fast).run_async().await;
+              let elapsed = start.elapsed();
+
+              assert_eq!(result, 2);
+              // If the slow one wasn't cancelled, this would take 10 seconds
+              assert!(elapsed < Duration::from_millis(100));
+          }
+
+    dependencies:
+      - impl_par
+
+  # ============================================================================
+  # フェーズ 3: リソース管理操作
+  # ============================================================================
+
+  - id: impl_bracket
+    requirement_id: async_control_bracket
+    name: "bracket 関数の実装"
+    priority: 5
+    description: |
+      リソースの取得、使用、解放を保証する bracket パターンを実装する。
+      使用中に例外（パニック）が発生しても、解放処理は必ず実行される。
+
+    files:
+      - path: src/effect/async_io.rs
+        description: |
+          bracket 関数を追加する。
+          新しいセクション「Resource Management」として追加する。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          bracket 関数を関連関数として実装する。
+          acquire -> use -> release の順で実行し、
+          use が失敗しても release を実行することを保証する。
+        code_outline: |
+          // =============================================================================
+          // Resource Management
+          // =============================================================================
+
+          impl<A: 'static> AsyncIO<A> {
+              /// Safely acquires, uses, and releases a resource.
+              ///
+              /// This is the bracket pattern from functional programming, ensuring that
+              /// the resource is released even if the use function fails or panics.
+              ///
+              /// # Type Parameters
+              ///
+              /// * `Resource` - The type of the resource being managed
+              /// * `Acquire` - The function type for acquiring the resource
+              /// * `Use` - The function type for using the resource
+              /// * `Release` - The function type for releasing the resource
+              ///
+              /// # Arguments
+              ///
+              /// * `acquire` - A function that creates an AsyncIO to acquire the resource
+              /// * `use_resource` - A function that uses the resource and returns an AsyncIO
+              /// * `release` - A function that releases the resource
+              ///
+              /// # Examples
+              ///
+              /// ```rust,ignore
+              /// use lambars::effect::AsyncIO;
+              ///
+              /// let result = AsyncIO::bracket(
+              ///     || AsyncIO::pure(42),           // acquire
+              ///     |r| AsyncIO::pure(r * 2),       // use
+              ///     |_| AsyncIO::pure(()),          // release
+              /// );
+              /// assert_eq!(result.run_async().await, 84);
+              /// ```
+              pub fn bracket<Resource, Acquire, Use, Release>(
+                  acquire: Acquire,
+                  use_resource: Use,
+                  release: Release,
+              ) -> AsyncIO<A>
+              where
+                  Acquire: FnOnce() -> AsyncIO<Resource> + Send + 'static,
+                  Use: FnOnce(Resource) -> AsyncIO<A> + Send + 'static,
+                  Release: FnOnce(Resource) -> AsyncIO<()> + Send + 'static,
+                  Resource: Clone + Send + 'static,
+                  A: Send,
+              {
+                  AsyncIO::new(move || async move {
+                      // 1. Acquire the resource
+                      let resource = acquire().run_async().await;
+                      let resource_for_release = resource.clone();
+
+                      // 2. Use the resource, catching any panics
+                      let result = {
+                          use futures::FutureExt;
+                          use std::panic::AssertUnwindSafe;
+
+                          AssertUnwindSafe(use_resource(resource).run_async())
+                              .catch_unwind()
+                              .await
+                      };
+
+                      // 3. Release the resource (always executed)
+                      release(resource_for_release).run_async().await;
+
+                      // 4. Return the result or re-panic
+                      match result {
+                          Ok(value) => value,
+                          Err(panic_info) => std::panic::resume_unwind(panic_info),
+                      }
+                  })
+              }
+          }
+
+    tests:
+      - name: test_bracket_normal_flow
+        description: "正常系: 取得→使用→解放"
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          #[tokio::test]
+          async fn test_bracket_normal_flow() {
+              use std::sync::atomic::{AtomicBool, Ordering};
+              use std::sync::Arc;
+
+              let released = Arc::new(AtomicBool::new(false));
+              let released_clone = released.clone();
+
+              let result = AsyncIO::bracket(
+                  || AsyncIO::pure(42),
+                  |x| AsyncIO::pure(x * 2),
+                  move |_| {
+                      let r = released_clone.clone();
+                      AsyncIO::new(move || async move { r.store(true, Ordering::SeqCst); })
+                  },
+              );
+
+              assert_eq!(result.run_async().await, 84);
+              assert!(released.load(Ordering::SeqCst));
+          }
+
+      - name: test_bracket_releases_on_use_failure
+        description: 使用失敗時も解放される
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          #[tokio::test]
+          async fn test_bracket_releases_on_use_failure() {
+              use std::sync::atomic::{AtomicBool, Ordering};
+              use std::sync::Arc;
+
+              let released = Arc::new(AtomicBool::new(false));
+              let released_clone = released.clone();
+
+              let result: AsyncIO<Result<i32, &str>> = AsyncIO::bracket(
+                  || AsyncIO::pure(42),
+                  |_| AsyncIO::pure(Err("error")),
+                  move |_| {
+                      let r = released_clone.clone();
+                      AsyncIO::new(move || async move { r.store(true, Ordering::SeqCst); })
+                  },
+              );
+
+              assert_eq!(result.run_async().await, Err("error"));
+              assert!(released.load(Ordering::SeqCst));
+          }
+
+      - name: test_bracket_is_lazy
+        description: bracket は遅延評価を維持する
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          #[tokio::test]
+          async fn test_bracket_is_lazy() {
+              use std::sync::atomic::{AtomicBool, Ordering};
+              use std::sync::Arc;
+
+              let acquired = Arc::new(AtomicBool::new(false));
+              let acquired_clone = acquired.clone();
+
+              let action = AsyncIO::bracket(
+                  move || {
+                      let a = acquired_clone.clone();
+                      AsyncIO::new(move || async move {
+                          a.store(true, Ordering::SeqCst);
+                          42
+                      })
+                  },
+                  |x| AsyncIO::pure(x),
+                  |_| AsyncIO::pure(()),
+              );
+
+              // まだ実行されていない
+              assert!(!acquired.load(Ordering::SeqCst));
+
+              let _ = action.run_async().await;
+              assert!(acquired.load(Ordering::SeqCst));
+          }
+
+    dependencies: []
+
+  - id: impl_finally_async
+    requirement_id: async_control_finally
+    name: "finally_async メソッドの実装"
+    priority: 6
+    description: |
+      成功/失敗に関わらず、最後に必ず実行される処理を指定する機能を実装する。
+
+    files:
+      - path: src/effect/async_io.rs
+        description: |
+          finally_async メソッドを追加する。
+          bracket 関数の直後に追加する。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          finally_async メソッドを実装する。
+          self の実行後（成功/失敗に関わらず）、cleanup を実行する。
+        code_outline: |
+          impl<A: Send + 'static> AsyncIO<A> {
+              /// Ensures a cleanup action is always executed after this `AsyncIO`,
+              /// regardless of success or failure.
+              ///
+              /// Similar to `finally` in Java/JavaScript.
+              ///
+              /// # Type Parameters
+              ///
+              /// * `F` - The cleanup function type
+              /// * `Cleanup` - The cleanup Future type
+              ///
+              /// # Arguments
+              ///
+              /// * `cleanup` - A function that returns a Future for cleanup
+              ///
+              /// # Examples
+              ///
+              /// ```rust,ignore
+              /// use lambars::effect::AsyncIO;
+              ///
+              /// let operation = AsyncIO::pure(42)
+              ///     .finally_async(|| async { println!("cleanup"); });
+              /// ```
+              pub fn finally_async<F, Cleanup>(self, cleanup: F) -> AsyncIO<A>
+              where
+                  F: FnOnce() -> Cleanup + Send + 'static,
+                  Cleanup: std::future::Future<Output = ()> + Send + 'static,
+              {
+                  AsyncIO::new(move || async move {
+                      use futures::FutureExt;
+                      use std::panic::AssertUnwindSafe;
+
+                      // Execute self, catching any panics
+                      let result = AssertUnwindSafe(self.run_async())
+                          .catch_unwind()
+                          .await;
+
+                      // Always run cleanup
+                      cleanup().await;
+
+                      // Return the result or re-panic
+                      match result {
+                          Ok(value) => value,
+                          Err(panic_info) => std::panic::resume_unwind(panic_info),
+                      }
+                  })
+              }
+          }
+
+    tests:
+      - name: test_finally_async_on_success
+        description: 成功時も finally 実行
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          #[tokio::test]
+          async fn test_finally_async_on_success() {
+              use std::sync::atomic::{AtomicBool, Ordering};
+              use std::sync::Arc;
+
+              let executed = Arc::new(AtomicBool::new(false));
+              let executed_clone = executed.clone();
+
+              let result = AsyncIO::pure(42)
+                  .finally_async(move || {
+                      let e = executed_clone.clone();
+                      async move { e.store(true, Ordering::SeqCst); }
+                  });
+
+              assert_eq!(result.run_async().await, 42);
+              assert!(executed.load(Ordering::SeqCst));
+          }
+
+      - name: test_finally_async_preserves_result
+        description: finally は結果を変更しない
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          #[tokio::test]
+          async fn test_finally_async_preserves_result() {
+              let result: Result<i32, &str> = AsyncIO::pure(Ok(42))
+                  .finally_async(|| async {})
+                  .run_async()
+                  .await;
+
+              assert_eq!(result, Ok(42));
+          }
+
+    dependencies:
+      - impl_bracket
+
+  - id: impl_on_error
+    requirement_id: async_control_on_error
+    name: "on_error メソッドの実装"
+    priority: 7
+    description: |
+      Result を返す AsyncIO がエラーを返した場合にコールバックを実行する機能を実装する。
+      エラーは引き続き伝播する（リカバリではない）。
+
+    files:
+      - path: src/effect/async_io.rs
+        description: |
+          on_error メソッドを追加する。
+          finally_async メソッドの直後に追加する。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          on_error メソッドを AsyncIO<Result<A, E>> に対して実装する。
+          Result が Err の場合のみコールバックを実行し、エラーは伝播する。
+        code_outline: |
+          impl<A, E> AsyncIO<Result<A, E>>
+          where
+              A: Send + 'static,
+              E: Clone + Send + 'static,
+          {
+              /// Executes a callback when this `AsyncIO` returns an error.
+              ///
+              /// The error is still propagated after the callback executes.
+              /// Useful for logging or metrics.
+              ///
+              /// # Type Parameters
+              ///
+              /// * `F` - The callback function type
+              /// * `Callback` - The callback Future type
+              ///
+              /// # Arguments
+              ///
+              /// * `callback` - A function that receives the error and returns a Future
+              ///
+              /// # Examples
+              ///
+              /// ```rust,ignore
+              /// use lambars::effect::AsyncIO;
+              ///
+              /// let action: AsyncIO<Result<i32, String>> = AsyncIO::pure(Err("error".to_string()));
+              /// let with_logging = action.on_error(|e| async move {
+              ///     eprintln!("Error occurred: {}", e);
+              /// });
+              /// ```
+              pub fn on_error<F, Callback>(self, callback: F) -> AsyncIO<Result<A, E>>
+              where
+                  F: FnOnce(&E) -> Callback + Send + 'static,
+                  Callback: std::future::Future<Output = ()> + Send + 'static,
+              {
+                  AsyncIO::new(move || async move {
+                      let result = self.run_async().await;
+
+                      if let Err(ref error) = result {
+                          callback(error).await;
+                      }
+
+                      result
+                  })
+              }
+          }
+
+    tests:
+      - name: test_on_error_executes_callback
+        description: エラー時にコールバック実行
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          #[tokio::test]
+          async fn test_on_error_executes_callback() {
+              use std::sync::atomic::{AtomicBool, Ordering};
+              use std::sync::Arc;
+
+              let called = Arc::new(AtomicBool::new(false));
+              let called_clone = called.clone();
+
+              let action: AsyncIO<Result<i32, String>> = AsyncIO::pure(Err("error".to_string()));
+              let result = action.on_error(move |_| {
+                  let c = called_clone.clone();
+                  async move { c.store(true, Ordering::SeqCst); }
+              }).run_async().await;
+
+              assert_eq!(result, Err("error".to_string()));
+              assert!(called.load(Ordering::SeqCst));
+          }
+
+      - name: test_on_error_not_called_on_success
+        description: 成功時はコールバック実行しない
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          #[tokio::test]
+          async fn test_on_error_not_called_on_success() {
+              use std::sync::atomic::{AtomicBool, Ordering};
+              use std::sync::Arc;
+
+              let called = Arc::new(AtomicBool::new(false));
+              let called_clone = called.clone();
+
+              let action: AsyncIO<Result<i32, String>> = AsyncIO::pure(Ok(42));
+              let result = action.on_error(move |_| {
+                  let c = called_clone.clone();
+                  async move { c.store(true, Ordering::SeqCst); }
+              }).run_async().await;
+
+              assert_eq!(result, Ok(42));
+              assert!(!called.load(Ordering::SeqCst));
+          }
+
+      - name: test_on_error_propagates_error
+        description: エラーは伝播する
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          #[tokio::test]
+          async fn test_on_error_propagates_error() {
+              let action: AsyncIO<Result<i32, String>> = AsyncIO::pure(Err("original error".to_string()));
+              let result = action.on_error(|_| async {}).run_async().await;
+
+              assert_eq!(result, Err("original error".to_string()));
+          }
+
+    dependencies:
+      - impl_finally_async
+
+  # ============================================================================
+  # フェーズ 4: タイムアウト拡張
+  # ============================================================================
+
+  - id: impl_timeout_error
+    requirement_id: async_control_timeout_result
+    name: "TimeoutError 構造体の実装"
+    priority: 8
+    description: |
+      タイムアウトエラーを表す構造体を実装する。
+
+    files:
+      - path: src/effect/async_io.rs
+        description: |
+          TimeoutError 構造体を追加する。
+          ファイルの先頭付近（use 文の後）に追加する。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          TimeoutError 構造体を定義し、必要なトレイトを実装する。
+        code_outline: |
+          /// Error type representing a timeout.
+          ///
+          /// Contains information about the timeout duration that was exceeded.
+          ///
+          /// # Examples
+          ///
+          /// ```rust,ignore
+          /// use lambars::effect::TimeoutError;
+          /// use std::time::Duration;
+          ///
+          /// let error = TimeoutError {
+          ///     duration: Duration::from_secs(5),
+          /// };
+          /// println!("Timeout: {}", error);
+          /// ```
+          #[derive(Debug, Clone, PartialEq, Eq)]
+          pub struct TimeoutError {
+              /// The timeout duration that was exceeded.
+              pub duration: Duration,
+          }
+
+          impl std::fmt::Display for TimeoutError {
+              fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                  write!(formatter, "operation timed out after {:?}", self.duration)
+              }
+          }
+
+          impl std::error::Error for TimeoutError {}
+
+    tests:
+      - name: test_timeout_error_display
+        description: TimeoutError の Display 実装
+        test_type: unit
+        code_outline: |
+          #[test]
+          fn test_timeout_error_display() {
+              let error = TimeoutError {
+                  duration: Duration::from_secs(5),
+              };
+              assert_eq!(format!("{}", error), "operation timed out after 5s");
+          }
+
+      - name: test_timeout_error_equality
+        description: TimeoutError の等価性
+        test_type: unit
+        code_outline: |
+          #[test]
+          fn test_timeout_error_equality() {
+              let error1 = TimeoutError { duration: Duration::from_secs(5) };
+              let error2 = TimeoutError { duration: Duration::from_secs(5) };
+              let error3 = TimeoutError { duration: Duration::from_secs(10) };
+
+              assert_eq!(error1, error2);
+              assert_ne!(error1, error3);
+          }
+
+    dependencies: []
+
+  - id: impl_timeout_result
+    requirement_id: async_control_timeout_result
+    name: "timeout_result メソッドの実装"
+    priority: 9
+    description: |
+      Result ベースのタイムアウトを実装する。
+      既存の timeout は Option<A> を返すが、
+      より詳細なエラー情報を提供する Result<A, TimeoutError> を返す。
+
+    files:
+      - path: src/effect/async_io.rs
+        description: |
+          timeout_result メソッドを追加する。
+          既存の timeout メソッドの直後に追加する。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          timeout_result メソッドを実装する。
+          タイムアウト時は TimeoutError を返す。
+        code_outline: |
+          impl<A: 'static> AsyncIO<A> {
+              /// Returns a `Result` with the value if completed within the timeout,
+              /// otherwise returns a `TimeoutError`.
+              ///
+              /// Unlike `timeout` which returns `Option<A>`, this method provides
+              /// more detailed error information.
+              ///
+              /// # Arguments
+              ///
+              /// * `duration` - The maximum time to wait.
+              ///
+              /// # Examples
+              ///
+              /// ```rust,ignore
+              /// use lambars::effect::{AsyncIO, TimeoutError};
+              /// use std::time::Duration;
+              ///
+              /// let async_io = AsyncIO::pure(42).timeout_result(Duration::from_millis(100));
+              /// assert_eq!(async_io.run_async().await, Ok(42));
+              ///
+              /// let slow = AsyncIO::delay_async(Duration::from_secs(10))
+              ///     .timeout_result(Duration::from_millis(100));
+              /// match slow.run_async().await {
+              ///     Err(e) => assert_eq!(e.duration, Duration::from_millis(100)),
+              ///     Ok(_) => panic!("should have timed out"),
+              /// }
+              /// ```
+              #[must_use]
+              pub fn timeout_result(self, duration: Duration) -> AsyncIO<Result<A, TimeoutError>>
+              where
+                  A: Send,
+              {
+                  AsyncIO::new(move || async move {
+                      match tokio::time::timeout(duration, self.run_async()).await {
+                          Ok(value) => Ok(value),
+                          Err(_) => Err(TimeoutError { duration }),
+                      }
+                  })
+              }
+          }
+
+    tests:
+      - name: test_timeout_result_completes_in_time
+        description: タイムアウト前に完了
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          #[tokio::test]
+          async fn test_timeout_result_completes_in_time() {
+              let action = AsyncIO::pure(42);
+              let result = action.timeout_result(Duration::from_secs(1)).run_async().await;
+              assert_eq!(result, Ok(42));
+          }
+
+      - name: test_timeout_result_times_out
+        description: タイムアウト発生
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          #[tokio::test]
+          async fn test_timeout_result_times_out() {
+              let slow = AsyncIO::delay_async(Duration::from_secs(10)).fmap(|_| 42);
+              let result = slow.timeout_result(Duration::from_millis(100)).run_async().await;
+
+              assert!(result.is_err());
+              let error = result.unwrap_err();
+              assert_eq!(error.duration, Duration::from_millis(100));
+          }
+
+      - name: test_timeout_result_is_lazy
+        description: timeout_result は遅延評価を維持する
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          #[tokio::test]
+          async fn test_timeout_result_is_lazy() {
+              use std::sync::atomic::{AtomicBool, Ordering};
+              use std::sync::Arc;
+
+              let executed = Arc::new(AtomicBool::new(false));
+              let executed_clone = executed.clone();
+
+              let action = AsyncIO::new(move || {
+                  let e = executed_clone.clone();
+                  async move { e.store(true, Ordering::SeqCst); 42 }
+              }).timeout_result(Duration::from_secs(1));
+
+              // まだ実行されていない
+              assert!(!executed.load(Ordering::SeqCst));
+
+              let _ = action.run_async().await;
+              assert!(executed.load(Ordering::SeqCst));
+          }
+
+    dependencies:
+      - impl_timeout_error
+
+# =============================================================================
+# テスト戦略
+# =============================================================================
+
+test_strategy:
+  unit_tests:
+    location: src/effect/async_io.rs
+    description: |
+      各メソッドの基本動作をテストするユニットテストを実装する。
+      テストは既存の async_io.rs のテストセクションに追加する。
+
+  integration_tests:
+    location: tests/async_io_control_flow_tests.rs
+    description: |
+      非同期制御フローの統合テストを新規ファイルに実装する。
+      以下の観点でテストする:
+      - 複数の制御フロー機能の組み合わせ
+      - 実際の非同期操作（tokio::time::sleep など）との連携
+      - エッジケースの検証
+
+  property_tests:
+    location: tests/async_io_control_flow_laws.rs
+    description: |
+      制御フロー機能の法則を検証するプロパティテストを実装する。
+      以下の法則を検証する:
+      - Retry Zero Law: retry(0) == retry(1) == 元の動作
+      - Retry Success Law: 成功した場合はリトライしない
+      - Par Commutativity Law: 結果順序を除いて可換
+      - Bracket Release Guarantee Law: release は常に実行される
+
+# =============================================================================
+# 完了条件
+# =============================================================================
+
+acceptance_criteria:
+  - 全てのメソッドが要件定義に従って実装されていること
+  - 全てのメソッドが遅延評価セマンティクスを維持していること
+  - 全てのパブリック API にドキュメントコメントが記述されていること
+  - cargo check が通過すること
+  - cargo clippy --all-features --all-targets -- -D warnings が通過すること
+  - cargo fmt -- --check が通過すること
+  - cargo test --no-default-features が通過すること
+  - cargo test --all-features が通過すること
+  - RUSTDOCFLAGS="-D warnings" cargo doc --no-deps が通過すること
+  - テストカバレッジ 100% であること
+  - 全ての法則がプロパティテストで検証されていること
