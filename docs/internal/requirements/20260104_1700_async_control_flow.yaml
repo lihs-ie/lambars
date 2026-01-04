@@ -241,6 +241,9 @@ requirements:
           各リトライ前に initial_delay * 2^(attempt - 1) の遅延を入れる。
 
           max_attempts が 0 の場合は 1 回のみ実行される。
+
+          attempt が u32::MAX を超える場合はオーバーフローを防ぐため u32::MAX にクランプする。
+          遅延時間のオーバーフローは saturating_mul で最大値に飽和する。
         complexity: "O(1) + max_attempts * (内部処理のコスト + 遅延時間)"
         examples:
           - description: "API コールのバックオフ付きリトライ"
@@ -481,6 +484,10 @@ requirements:
           3. release でリソースを解放（use_resource の成功/失敗に関わらず実行）
 
           use_resource がパニックした場合も release は実行される。
+          release がパニックした場合:
+          - use_resource が成功していた場合: release のパニックを伝播
+          - use_resource がパニックしていた場合: 元のパニックを優先して伝播
+            （release のパニックは標準エラー出力にログを出力して抑制）
         complexity: "O(1) + acquire + use_resource + release のコスト"
         examples:
           - description: "ファイルハンドルの確実な解放"
@@ -579,6 +586,8 @@ requirements:
         description: |
           self の実行後（成功/失敗に関わらず）、cleanup を実行する。
           self の結果は保持される。
+          cleanup がパニックした場合は標準エラー出力にログを出力し、
+          元の結果/パニックを優先して返す。
         complexity: "O(1) + self のコスト + cleanup のコスト"
         examples:
           - description: "処理完了後のログ出力"

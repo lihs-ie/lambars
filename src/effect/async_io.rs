@@ -755,7 +755,8 @@ impl<A: Send + 'static> AsyncIO<A> {
             for attempt in 0..effective_attempts {
                 // Apply backoff delay before retry (not on first attempt)
                 if attempt > 0 {
-                    let delay_multiplier = 2u32.saturating_pow((attempt - 1) as u32);
+                    let exponent = u32::try_from(attempt.saturating_sub(1)).unwrap_or(u32::MAX);
+                    let delay_multiplier = 2u32.saturating_pow(exponent);
                     let delay = initial_delay.saturating_mul(delay_multiplier);
                     tokio::time::sleep(delay).await;
                 }
@@ -930,13 +931,24 @@ impl<A: 'static> AsyncIO<A> {
                 .catch_unwind()
                 .await;
 
-            // 3. Release the resource (always executed)
-            release(resource_for_release).run_async().await;
+            // 3. Release the resource (always executed), also catching panics
+            let release_result = AssertUnwindSafe(release(resource_for_release).run_async())
+                .catch_unwind()
+                .await;
 
-            // 4. Return the result or re-panic
-            match result {
-                Ok(value) => value,
-                Err(panic_info) => std::panic::resume_unwind(panic_info),
+            // 4. Return the result or re-panic, ensuring the original panic is preserved
+            match (result, release_result) {
+                (Ok(value), Ok(())) => value,
+                (Err(original_panic), Ok(())) => std::panic::resume_unwind(original_panic),
+                (Ok(_), Err(release_panic)) => std::panic::resume_unwind(release_panic),
+                (Err(original_panic), Err(_release_panic)) => {
+                    // Suppress release panic in favor of original panic
+                    eprintln!(
+                        "AsyncIO::bracket: panic in release while unwinding original panic; \
+                         suppressing release panic in favor of original panic"
+                    );
+                    std::panic::resume_unwind(original_panic)
+                }
             }
         })
     }
@@ -978,8 +990,13 @@ impl<A: Send + 'static> AsyncIO<A> {
             // Execute self, catching any panics
             let result = AssertUnwindSafe(self.run_async()).catch_unwind().await;
 
-            // Always run cleanup
-            cleanup().await;
+            // Always run cleanup, but don't let a cleanup panic
+            // suppress the original result/panic.
+            let cleanup_result = AssertUnwindSafe(cleanup()).catch_unwind().await;
+
+            if cleanup_result.is_err() {
+                eprintln!("AsyncIO::finally_async: cleanup panicked");
+            }
 
             // Return the result or re-panic
             match result {
