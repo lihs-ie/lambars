@@ -1577,6 +1577,22 @@ impl<T: fmt::Debug> fmt::Debug for PersistentVector<T> {
     }
 }
 
+impl<T: fmt::Display> fmt::Display for PersistentVector<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "[")?;
+        let mut first = true;
+        for element in self {
+            if first {
+                first = false;
+            } else {
+                write!(formatter, ", ")?;
+            }
+            write!(formatter, "{element}")?;
+        }
+        write!(formatter, "]")
+    }
+}
+
 // =============================================================================
 // Type Class Implementations
 // =============================================================================
@@ -1786,6 +1802,32 @@ impl<T: Clone> Monoid for PersistentVector<T> {
 mod tests {
     use super::*;
     use rstest::rstest;
+
+    // =========================================================================
+    // Display Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_display_empty_vector() {
+        let vector: PersistentVector<i32> = PersistentVector::new();
+        assert_eq!(format!("{vector}"), "[]");
+    }
+
+    #[rstest]
+    fn test_display_single_element_vector() {
+        let vector = PersistentVector::singleton(42);
+        assert_eq!(format!("{vector}"), "[42]");
+    }
+
+    #[rstest]
+    fn test_display_multiple_elements_vector() {
+        let vector: PersistentVector<i32> = (1..=3).collect();
+        assert_eq!(format!("{vector}"), "[1, 2, 3]");
+    }
+
+    // =========================================================================
+    // Original Tests
+    // =========================================================================
 
     #[rstest]
     fn test_new_creates_empty() {

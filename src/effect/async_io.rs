@@ -672,9 +672,33 @@ impl<A: Send + 'static> AsyncIO<A> {
     }
 }
 
+// =============================================================================
+// Display Implementation
+// =============================================================================
+
+impl<A> std::fmt::Display for AsyncIO<A> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "<AsyncIO>")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // =========================================================================
+    // Display Tests
+    // =========================================================================
+
+    #[test]
+    fn test_display_async_io() {
+        let async_io = AsyncIO::pure(42);
+        assert_eq!(format!("{async_io}"), "<AsyncIO>");
+    }
+
+    // =========================================================================
+    // Original Tests
+    // =========================================================================
 
     #[tokio::test]
     async fn test_async_io_pure_and_run() {

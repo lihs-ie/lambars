@@ -675,6 +675,17 @@ impl<T: fmt::Debug, F> fmt::Debug for Lazy<T, F> {
     }
 }
 
+impl<T: fmt::Display, F> fmt::Display for Lazy<T, F> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let state = self.state.borrow();
+        match &*state {
+            LazyState::Init(value) => write!(formatter, "Lazy({value})"),
+            LazyState::Uninit(_) => write!(formatter, "Lazy(<uninit>)"),
+            LazyState::Poisoned => write!(formatter, "Lazy(<poisoned>)"),
+        }
+    }
+}
+
 // Note: We intentionally do NOT implement Deref for Lazy.
 //
 // Reason: RefCell-based implementation returns Ref<'_, T> from force(),
@@ -689,6 +700,35 @@ mod tests {
     use super::*;
     use rstest::rstest;
     use std::cell::Cell;
+    use std::panic;
+
+    // =========================================================================
+    // Display Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_display_unevaluated_lazy() {
+        let lazy = Lazy::new(|| 42);
+        assert_eq!(format!("{lazy}"), "Lazy(<uninit>)");
+    }
+
+    #[rstest]
+    fn test_display_evaluated_lazy() {
+        let lazy = Lazy::new(|| 42);
+        let _ = lazy.force();
+        assert_eq!(format!("{lazy}"), "Lazy(42)");
+    }
+
+    #[rstest]
+    fn test_display_poisoned_lazy() {
+        let lazy = Lazy::new(|| -> i32 { panic!("initialization failed") });
+        let _ = panic::catch_unwind(panic::AssertUnwindSafe(|| lazy.force()));
+        assert_eq!(format!("{lazy}"), "Lazy(<poisoned>)");
+    }
+
+    // =========================================================================
+    // Original Tests
+    // =========================================================================
 
     #[rstest]
     fn test_lazy_basic_creation() {

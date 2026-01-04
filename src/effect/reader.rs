@@ -550,10 +550,38 @@ where
     }
 }
 
+// =============================================================================
+// Display Implementation
+// =============================================================================
+
+impl<R, A> std::fmt::Display for Reader<R, A>
+where
+    R: 'static,
+    A: 'static,
+{
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "<Reader>")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rstest::rstest;
+
+    // =========================================================================
+    // Display Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_display_reader() {
+        let reader: Reader<i32, i32> = Reader::new(|environment| environment * 2);
+        assert_eq!(format!("{reader}"), "<Reader>");
+    }
+
+    // =========================================================================
+    // Original Tests
+    // =========================================================================
 
     #[rstest]
     fn reader_new_and_run() {
