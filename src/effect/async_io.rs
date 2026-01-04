@@ -703,7 +703,8 @@ impl<A: Send + 'static> AsyncIO<A> {
 
     /// Retries with exponential backoff using a factory function.
     ///
-    /// Each retry is delayed by `initial_delay * 2^(attempt - 1)`.
+    /// Before each retry (i.e., before attempts 2..=max_attempts), the delay is
+    /// `initial_delay * 2^(attempt - 1)`, where `attempt` is the 1-based attempt number.
     ///
     /// # Type Parameters
     ///
