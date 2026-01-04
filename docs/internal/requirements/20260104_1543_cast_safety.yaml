@@ -1,0 +1,307 @@
+# キャスト型安全性改善 要件定義
+#
+# 概要:
+#   永続データ構造およびテストコードにおける usize/isize/i32/u64 間の
+#   型変換を型安全にし、潜在的なオーバーフローやトランケーションを防止する
+#
+# 設計方針:
+#   1. 関数型プログラミングの原則に従い、部分関数を避け全域関数を実現する
+#   2. コンパイル時に型安全性を保証し、実行時エラーを最小化する
+#   3. 既存の API との後方互換性を維持する
+#   4. パフォーマンスへの影響を最小限に抑える
+#
+# 参照:
+#   - Rust clippy lints: cast_possible_truncation, cast_sign_loss, cast_possible_wrap
+#   - Rust std::convert::TryFrom / TryInto traits
+#   - Issue #5: キャスト型安全性の改善
+
+version: "1.0.0"
+name: "cast_safety"
+description: |
+  永続データ構造（PersistentVector, PersistentTreeMap, PersistentHashMap）
+  およびテストコードにおける整数型間のキャストを型安全にする。
+
+  64ビット環境で非常に大きなコレクション（2^31 要素以上）を扱う場合に
+  発生しうるオーバーフローやトランケーションの問題を防止し、
+  clippy の警告を解消する。
+
+# 背景・動機
+background:
+  problem: |
+    現在のコードベースには以下の型変換に関する問題が存在する：
+
+    1. テストコード内の usize -> i32 キャスト
+       - src/persistent/vector.rs:1864 で #[allow] による警告抑制
+       - tests/except_transformer_tests.rs で多数の usize -> i32 キャスト
+
+    2. hashmap.rs における型変換
+       - u64 -> usize キャスト（hash_index 関数）
+       - u32 -> usize キャスト（bitmap の count_ones() 結果）
+
+    これらは clippy の以下の lint に抵触する可能性がある：
+    - clippy::cast_possible_truncation
+    - clippy::cast_sign_loss
+    - clippy::cast_possible_wrap
+
+    特に 64 ビット環境で usize が 64 ビット、i32 が 32 ビットの場合、
+    2^31 以上の値を扱う際にデータ損失が発生する。
+
+  motivation: |
+    関数型プログラミングの核心的な原則の一つは「全域関数」の使用である。
+    部分関数（一部の入力で未定義動作を起こす関数）を避け、
+    すべての入力に対して明確に定義された出力を返す関数を実装することで、
+    プログラムの正確性と安全性を向上させる。
+
+    型変換における潜在的なオーバーフローは部分関数の典型例である。
+    これを Result 型や checked 操作で置き換えることで、
+    全域関数として扱えるようになる。
+
+  prior_art:
+    - name: "Haskell fromIntegral"
+      description: |
+        Haskell では fromIntegral で整数型間の変換を行うが、
+        オーバーフローは未定義動作となる。より安全な変換には
+        toIntegralSized :: (Integral a, Integral b, Bits a, Bits b) => a -> Maybe b
+        を使用する。
+    - name: "Scala numeric conversions"
+      description: |
+        Scala では暗黙の変換と明示的な .toInt, .toLong などを提供。
+        安全な変換には scala.util.Try や例外処理を組み合わせる。
+    - name: "Rust TryFrom/TryInto"
+      description: |
+        Rust 標準ライブラリの TryFrom/TryInto トレイトは、
+        失敗可能な型変換を Result 型で表現する最も慣用的な方法。
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. インデックス型の統一
+  # ======================================================================
+  - id: REQ-CAST-001
+    name: "インデックス型の usize 統一"
+    description: |
+      コレクションのインデックスおよび長さを表す型を usize に統一する。
+      Rust の慣例に従い、コレクションのサイズやインデックスには
+      常に usize を使用する。
+
+      現状、vector.rs と treemap.rs では既に usize が使用されており、
+      この点は維持する。
+
+    implementations:
+      - type: "PersistentVector<T>"
+        description: |
+          length, shift, tail_offset, インデックス引数はすべて usize を維持。
+          変更不要（既に正しく実装されている）。
+      - type: "PersistentTreeMap<K, V>"
+        description: |
+          length はすべて usize を維持。
+          変更不要（既に正しく実装されている）。
+      - type: "PersistentHashMap<K, V>"
+        description: |
+          length はすべて usize を維持。
+          hash_index 関数の戻り値は usize を維持。
+
+  # ======================================================================
+  # 2. ハッシュ計算における型変換の安全化
+  # ======================================================================
+  - id: REQ-CAST-002
+    name: "hash_index 関数の型安全化"
+    description: |
+      PersistentHashMap の hash_index 関数における u64 -> usize キャストを
+      安全に行う。
+
+      現在の実装：
+      ```rust
+      const fn hash_index(hash: u64, depth: usize) -> usize {
+          ((hash >> (depth * BITS_PER_LEVEL)) & MASK) as usize
+      }
+      ```
+
+      MASK は 31 (0x1F) であるため、結果は常に 0-31 の範囲内に収まる。
+      この場合、キャストは安全であり、コメントによる明示的な説明を追加する。
+
+    methods:
+      - name: "hash_index"
+        signature: "const fn hash_index(hash: u64, depth: usize) -> usize"
+        description: |
+          ハッシュ値から特定の深さにおけるインデックス（0-31）を抽出する。
+          結果は常に BRANCHING_FACTOR (32) 未満であることが保証される。
+        examples:
+          - description: "基本的な使用例"
+            code: |
+              let hash: u64 = 0xABCDEF0123456789;
+              let index = hash_index(hash, 0);
+              assert!(index < 32);
+
+    implementations:
+      - type: "PersistentHashMap<K, V>"
+        description: |
+          hash_index 関数にドキュメントコメントを追加し、
+          キャストが安全である理由を明示する。
+
+          SAFETY コメント:
+          "MASK (0x1F = 31) との AND 演算により、結果は常に 0-31 の範囲。
+          この範囲は usize で表現可能なため、キャストは安全。"
+
+  # ======================================================================
+  # 3. ビットマップ操作における型変換の安全化
+  # ======================================================================
+  - id: REQ-CAST-003
+    name: "count_ones() 結果の型安全化"
+    description: |
+      PersistentHashMap の bitmap.count_ones() の結果（u32）を
+      usize に変換する箇所を安全化する。
+
+      現在の実装：
+      ```rust
+      let position = (bitmap & (bit - 1)).count_ones() as usize;
+      ```
+
+      bitmap は u32 であり、count_ones() の結果は最大 32。
+      これは usize で表現可能なため、キャストは安全である。
+      コメントによる明示的な説明を追加する。
+
+    implementations:
+      - type: "PersistentHashMap<K, V>"
+        description: |
+          count_ones() を使用する各箇所に SAFETY コメントを追加し、
+          キャストが安全である理由を明示する。
+
+          SAFETY コメント:
+          "u32 の count_ones() は最大 32 を返す。
+          これは usize で常に表現可能なため、キャストは安全。"
+
+  # ======================================================================
+  # 4. テストコードにおける型変換の改善
+  # ======================================================================
+  - id: REQ-CAST-004
+    name: "テストコードの型変換改善"
+    description: |
+      テストコード内の usize -> i32 キャストを安全な方法に置き換える。
+
+      対象：
+      1. src/persistent/vector.rs のテスト（1864行目）
+      2. tests/except_transformer_tests.rs の複数箇所
+
+      テストコードは小さな値（通常 1000 以下）を扱うため、
+      実際にはオーバーフローは発生しないが、以下の方法で改善する：
+
+      1. i32::try_from() を使用し、.expect() で明示的なエラーメッセージを提供
+      2. テスト用のヘルパー関数を作成して変換ロジックを集約
+
+    methods:
+      - name: "safe_usize_to_i32"
+        signature: "fn safe_usize_to_i32(value: usize) -> i32"
+        description: |
+          テスト用のヘルパー関数。usize を i32 に安全に変換する。
+          オーバーフロー時は明確なパニックメッセージを出力。
+        examples:
+          - description: "テストでの使用例"
+            code: |
+              #[cfg(test)]
+              fn safe_usize_to_i32(value: usize) -> i32 {
+                  i32::try_from(value).expect("Test value exceeds i32::MAX")
+              }
+
+              // 使用例
+              for index in 0..1000_usize {
+                  let expected = safe_usize_to_i32(index);
+                  assert_eq!(vector.get(index), Some(&expected));
+              }
+
+    implementations:
+      - type: "テストコード"
+        description: |
+          各テストファイルで使用されている `as i32` キャストを
+          明示的な try_from + expect に置き換える。
+
+          これにより：
+          - clippy 警告が解消される
+          - 万が一オーバーフローが発生した場合に明確なエラーが出る
+          - コードの意図が明確になる
+
+  # ======================================================================
+  # 5. #[allow] 属性の除去
+  # ======================================================================
+  - id: REQ-CAST-005
+    name: "#[allow] 属性の除去"
+    description: |
+      キャスト関連の clippy lint を抑制している #[allow] 属性を除去し、
+      根本的な解決を行う。
+
+      対象：
+      - src/persistent/vector.rs:1863 の #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+
+      これらの抑制は、REQ-CAST-004 の実装により不要になる。
+
+    implementations:
+      - type: "src/persistent/vector.rs"
+        description: |
+          テストコード内の #[allow] 属性を除去し、
+          型安全なキャスト方法に置き換える。
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - |
+      hash_index 関数および count_ones() のキャストは定数時間操作であり、
+      SAFETY コメントの追加のみで実行時オーバーヘッドは発生しない。
+    - |
+      テストコードの try_from + expect は本番コードには影響しない。
+      テスト実行時の微小なオーバーヘッドは許容される。
+
+  compatibility:
+    - |
+      公開 API に変更はない。すべての変更は内部実装の改善である。
+    - |
+      既存のテストがすべて通過することを確認する。
+
+  testing:
+    - |
+      既存のすべてのテストが変更後も通過すること。
+    - |
+      cargo clippy --all-features --all-targets -- -D warnings が
+      警告なしで通過すること。
+    - |
+      以下の clippy lint が明示的に有効でも警告が出ないこと：
+      - clippy::cast_possible_truncation
+      - clippy::cast_sign_loss
+      - clippy::cast_possible_wrap
+
+# 将来の拡張
+future_extensions:
+  - id: EXT-CAST-001
+    name: "checked_cast ユーティリティ"
+    description: |
+      プロジェクト全体で使用できる型安全なキャストユーティリティモジュールを
+      提供する。Result 型を返す汎用的な変換関数群。
+
+      例：
+      ```rust
+      pub fn checked_cast<From, To>(value: From) -> Result<To, CastError>
+      where
+          To: TryFrom<From>,
+      ```
+    rationale: |
+      現時点ではキャストの問題箇所が限定的であり、
+      個別対応で十分である。将来的にキャストが増加した場合に検討する。
+
+  - id: EXT-CAST-002
+    name: "newtype パターンによるインデックス型"
+    description: |
+      インデックスを表す専用の型（Index, Length など）を newtype パターンで
+      定義し、誤った型変換をコンパイル時に検出できるようにする。
+
+      例：
+      ```rust
+      #[derive(Clone, Copy, PartialEq, Eq)]
+      pub struct Index(usize);
+
+      impl Index {
+          pub fn new(value: usize) -> Self { Self(value) }
+          pub fn as_usize(self) -> usize { self.0 }
+      }
+      ```
+    rationale: |
+      現時点では過剰な抽象化となる可能性がある。
+      型安全性の問題が頻発する場合に再検討する。

@@ -1,0 +1,447 @@
+# キャスト型安全性改善 実装計画
+#
+# 要件定義: docs/internal/requirements/20260104_1543_cast_safety.yaml
+# 技術要件:
+#   - Rust: 1.92.0
+#   - edition: 2024
+#   - testing: rstest
+#
+# 実装方針:
+#   1. 既存テストを維持しながら段階的に修正
+#   2. SAFETY コメントで安全性の根拠を明示
+#   3. テストコードでは try_from + expect パターンを使用
+
+version: "1.0.0"
+name: "Cast Safety Implementation Plan"
+requirement_file: "docs/internal/requirements/20260104_1543_cast_safety.yaml"
+
+# 実装順序の概要
+implementation_order:
+  - step: 1
+    name: "hash_index 関数の SAFETY コメント追加"
+    items:
+      - hash_index 関数にドキュメントコメント追加
+      - キャストが安全である理由を SAFETY コメントで明示
+  - step: 2
+    name: "count_ones() キャストの SAFETY コメント追加"
+    items:
+      - 4箇所の count_ones() as usize に SAFETY コメント追加
+  - step: 3
+    name: "vector.rs テストコードの修正"
+    items:
+      - "'#[allow]' 属性の除去"
+      - i32::try_from + expect パターンへの置換
+  - step: 4
+    name: "except_transformer_tests.rs テストコードの修正"
+    items:
+      - 7箇所の as i32 キャストを i32::try_from + expect へ置換
+
+# 実装計画詳細
+implementation_plan:
+  # ============================================================================
+  # 0. REQ-CAST-001 の確認（変更不要）
+  # ============================================================================
+  - id: impl_verify_index_type
+    requirement_id: REQ-CAST-001
+    name: "インデックス型の usize 統一確認"
+    priority: 0
+    description: |
+      REQ-CAST-001 で要求されるインデックス型の usize 統一は
+      既存実装で充足済みである。変更は不要。
+
+    verification:
+      - "PersistentVector: length, shift, tail_offset, インデックス引数は usize"
+      - "PersistentTreeMap: length は usize"
+      - "PersistentHashMap: length, hash_index 戻り値は usize"
+
+    implementation_steps: []
+    tests: []
+    dependencies: []
+
+  # ============================================================================
+  # 1. hash_index 関数の SAFETY コメント追加
+  # ============================================================================
+  - id: impl_hash_index_safety
+    requirement_id: REQ-CAST-002
+    name: "hash_index 関数の型安全性ドキュメント"
+    priority: 1
+    description: |
+      PersistentHashMap の hash_index 関数に SAFETY コメントを追加し、
+      u64 -> usize キャストが安全である理由を明示する。
+
+      MASK は 31 (0x1F) であり、AND 演算の結果は常に 0-31 の範囲内。
+      この範囲は usize で表現可能なため、キャストは安全である。
+
+    files:
+      - path: src/persistent/hashmap.rs
+        description: |
+          hash_index 関数（85-89行目）にドキュメントコメントと
+          SAFETY コメントを追加する。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          hash_index 関数のドキュメントコメントを拡張し、
+          戻り値の範囲と安全性を明示する。
+        code_outline: |
+          /// Extracts the index at a given depth from a hash.
+          ///
+          /// # Returns
+          ///
+          /// An index in the range `0..BRANCHING_FACTOR` (0-31).
+          ///
+          /// # Safety of the cast
+          ///
+          /// The result of `(hash >> shift) & MASK` is always in the range 0-31
+          /// because MASK is 0x1F (31). This range is representable by usize on
+          /// all supported platforms, so the cast from u64 to usize is safe.
+          #[inline]
+          const fn hash_index(hash: u64, depth: usize) -> usize {
+              // SAFETY: MASK (0x1F = 31) ensures result is always 0-31,
+              // which fits in usize on all platforms.
+              ((hash >> (depth * BITS_PER_LEVEL)) & MASK) as usize
+          }
+
+    tests:
+      - name: existing_tests
+        description: 既存のテストが全て通過することを確認
+        test_type: unit
+        code_outline: |
+          # 新規テスト不要。既存テストで hash_index の正常動作を確認済み。
+
+    dependencies: []
+
+  # ============================================================================
+  # 2. count_ones() キャストの SAFETY コメント追加
+  # ============================================================================
+  - id: impl_count_ones_safety
+    requirement_id: REQ-CAST-003
+    name: "count_ones() 結果のキャスト安全性ドキュメント"
+    priority: 2
+    description: |
+      PersistentHashMap 内の 4箇所の count_ones() as usize キャストに
+      SAFETY コメントを追加する。
+
+      bitmap は u32 であり、count_ones() の結果は最大 32。
+      これは usize で常に表現可能なため、キャストは安全である。
+
+    files:
+      - path: src/persistent/hashmap.rs
+        description: |
+          以下の4箇所に SAFETY コメントを追加:
+          - 321行目: get_from_node 関数内
+          - 644行目: insert_into_bitmap_node 関数内
+          - 908行目: remove_from_bitmap_node 関数内
+          - 1154行目: find_key 関数内
+
+    implementation_steps:
+      - step: 1
+        description: |
+          321行目 (get_from_node 関数内) に SAFETY コメント追加
+        code_outline: |
+          if bitmap & bit == 0 {
+              // Slot is empty
+              None
+          } else {
+              // Count bits to find position in children array
+              // SAFETY: bitmap is u32, so count_ones() returns at most 32,
+              // which is always representable as usize.
+              let position = (bitmap & (bit - 1)).count_ones() as usize;
+
+      - step: 2
+        description: |
+          644行目 (insert_into_bitmap_node 関数内) に SAFETY コメント追加
+        code_outline: |
+          let index = hash_index(hash, depth);
+          let bit = 1u32 << index;
+          // SAFETY: bitmap is u32, so count_ones() returns at most 32,
+          // which is always representable as usize.
+          let position = (bitmap & (bit - 1)).count_ones() as usize;
+
+      - step: 3
+        description: |
+          908行目 (remove_from_bitmap_node 関数内) に SAFETY コメント追加
+        code_outline: |
+          if bitmap & bit == 0 {
+              return None;
+          }
+
+          // SAFETY: bitmap is u32, so count_ones() returns at most 32,
+          // which is always representable as usize.
+          let position = (bitmap & (bit - 1)).count_ones() as usize;
+
+      - step: 4
+        description: |
+          1154行目 (find_key 関数内) に SAFETY コメント追加
+        code_outline: |
+          if bitmap & bit == 0 {
+              None
+          } else {
+              // SAFETY: bitmap is u32, so count_ones() returns at most 32,
+              // which is always representable as usize.
+              let position = (bitmap & (bit - 1)).count_ones() as usize;
+
+    tests:
+      - name: existing_tests
+        description: 既存のテストが全て通過することを確認
+        test_type: unit
+        code_outline: |
+          # 新規テスト不要。既存テストで count_ones の正常動作を確認済み。
+
+    dependencies:
+      - impl_hash_index_safety
+
+  # ============================================================================
+  # 3. vector.rs テストコードの修正
+  # ============================================================================
+  - id: impl_vector_test_fix
+    requirement_id: REQ-CAST-004
+    name: "vector.rs テストコードの型安全化"
+    priority: 3
+    description: |
+      src/persistent/vector.rs の test_large_vector テスト（1858-1867行目）
+      にある #[allow] 属性を除去し、型安全なキャストに置き換える。
+
+    files:
+      - path: src/persistent/vector.rs
+        description: |
+          test_large_vector テスト（1858-1867行目）を修正:
+          - #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)] を除去
+          - index as i32 を i32::try_from(index).expect() に置換
+
+    implementation_steps:
+      - step: 1
+        description: |
+          #[allow] 属性を除去し、i32::try_from + expect パターンに置換
+        code_outline: |
+          #[rstest]
+          fn test_large_vector() {
+              let vector: PersistentVector<i32> = (0..1000).collect();
+              assert_eq!(vector.len(), 1000);
+              for index in 0..1000_usize {
+                  let expected = i32::try_from(index)
+                      .expect("Test index exceeds i32::MAX");
+                  assert_eq!(vector.get(index), Some(&expected));
+              }
+          }
+
+    tests:
+      - name: test_large_vector
+        description: 修正後のテストが通過することを確認
+        test_type: unit
+        code_outline: |
+          # 既存テストの修正。cargo test --lib で確認。
+
+    dependencies:
+      - impl_count_ones_safety
+
+  # ============================================================================
+  # 4. except_transformer_tests.rs テストコードの修正
+  # ============================================================================
+  - id: impl_except_transformer_test_fix
+    requirement_id: REQ-CAST-004
+    name: "except_transformer_tests.rs テストコードの型安全化"
+    priority: 4
+    description: |
+      tests/except_transformer_tests.rs 内の 7箇所の error.len() as i32
+      キャストを型安全な方法に置き換える。
+
+    files:
+      - path: tests/except_transformer_tests.rs
+        description: |
+          以下の7箇所を修正:
+          - 281行目: except_transformer_catch_option_error_recovers
+          - 294行目: except_transformer_catch_option_ok_passes_through
+          - 307行目: except_transformer_catch_option_none_passes_through
+          - 320行目: except_transformer_catch_result_error_recovers
+          - 333行目: except_transformer_catch_result_ok_passes_through
+          - 347行目: except_transformer_catch_result_outer_error_passes_through
+          - 419行目: except_transformer_catch_io
+
+    implementation_steps:
+      - step: 1
+        description: |
+          テストファイルの先頭（モジュールのインポート後）に
+          ヘルパー関数を追加
+        code_outline: |
+          /// Safely converts usize to i32 for test assertions.
+          ///
+          /// # Panics
+          ///
+          /// Panics if the value exceeds i32::MAX, which should never happen
+          /// in these tests as we're converting small string lengths.
+          fn safe_usize_to_i32(value: usize) -> i32 {
+              i32::try_from(value).expect("Test value exceeds i32::MAX")
+          }
+
+      - step: 2
+        description: |
+          281行目を修正: except_transformer_catch_option_error_recovers
+        code_outline: |
+          let recovered = ExceptT::catch_option(except_transformer, |error| {
+              ExceptT::new(Some(Ok(safe_usize_to_i32(error.len()))))
+          });
+
+      - step: 3
+        description: |
+          294行目を修正: except_transformer_catch_option_ok_passes_through
+        code_outline: |
+          let recovered = ExceptT::catch_option(except_transformer, |error| {
+              ExceptT::new(Some(Ok(safe_usize_to_i32(error.len()))))
+          });
+
+      - step: 4
+        description: |
+          307行目を修正: except_transformer_catch_option_none_passes_through
+        code_outline: |
+          let recovered = ExceptT::catch_option(except_transformer, |error| {
+              ExceptT::new(Some(Ok(safe_usize_to_i32(error.len()))))
+          });
+
+      - step: 5
+        description: |
+          320行目を修正: except_transformer_catch_result_error_recovers
+        code_outline: |
+          let recovered = ExceptT::catch_result(except_transformer, |error| {
+              ExceptT::new(Ok(Ok(safe_usize_to_i32(error.len()))))
+          });
+
+      - step: 6
+        description: |
+          333行目を修正: except_transformer_catch_result_ok_passes_through
+        code_outline: |
+          let recovered = ExceptT::catch_result(except_transformer, |error| {
+              ExceptT::new(Ok(Ok(safe_usize_to_i32(error.len()))))
+          });
+
+      - step: 7
+        description: |
+          347行目を修正: except_transformer_catch_result_outer_error_passes_through
+        code_outline: |
+          let recovered = ExceptT::catch_result(except_transformer, |error| {
+              ExceptT::new(Ok(Ok(safe_usize_to_i32(error.len()))))
+          });
+
+      - step: 8
+        description: |
+          419行目を修正: except_transformer_catch_io
+        code_outline: |
+          let recovered = ExceptT::catch_io(except_transformer, |error| {
+              ExceptT::new(IO::pure(Ok(safe_usize_to_i32(error.len()))))
+          });
+
+    tests:
+      - name: all_except_transformer_tests
+        description: 修正後の全テストが通過することを確認
+        test_type: integration
+        code_outline: |
+          # cargo test --test except_transformer_tests で確認
+
+    dependencies:
+      - impl_vector_test_fix
+
+  # ============================================================================
+  # 5. #[allow] 属性の除去確認
+  # ============================================================================
+  - id: impl_verify_allow_removal
+    requirement_id: REQ-CAST-005
+    name: "#[allow] 属性除去の確認"
+    priority: 5
+    description: |
+      impl_vector_test_fix で #[allow] 属性が正しく除去されたことを確認し、
+      clippy が警告なしで通過することを検証する。
+
+    files:
+      - path: src/persistent/vector.rs
+        description: |
+          1863行目付近の #[allow] 属性が除去されていることを確認
+
+    implementation_steps:
+      - step: 1
+        description: |
+          cargo clippy --all-features --all-targets -- -D warnings を実行し、
+          キャスト関連の警告が出ないことを確認
+        code_outline: |
+          # コマンド実行:
+          # cargo clippy --all-features --all-targets -- -D warnings
+
+    tests:
+      - name: clippy_check
+        description: clippy が警告なしで通過することを確認
+        test_type: integration
+        code_outline: |
+          # cargo clippy --all-features --all-targets -- -D warnings
+
+    dependencies:
+      - impl_except_transformer_test_fix
+
+# テスト戦略
+test_strategy:
+  unit_tests:
+    location: src/persistent/hashmap.rs, src/persistent/vector.rs
+    description: |
+      既存のユニットテストが全て通過することを確認する。
+      新規テストの追加は不要（コメント追加のみのため）。
+
+  integration_tests:
+    location: tests/except_transformer_tests.rs
+    description: |
+      修正後の統合テストが全て通過することを確認する。
+      safe_usize_to_i32 ヘルパー関数の追加と使用。
+
+  property_tests:
+    location: N/A
+    description: |
+      本実装ではプロパティテストは不要。
+      キャストの安全性はコードレビューと静的解析（clippy）で保証する。
+
+# 完了条件
+acceptance_criteria:
+  - hash_index 関数に SAFETY コメントが追加されていること
+  - 4箇所の count_ones() as usize に SAFETY コメントが追加されていること
+  - vector.rs の #[allow] 属性が除去されていること
+  - except_transformer_tests.rs の 7箇所のキャストが safe_usize_to_i32 を使用していること
+  - cargo check が通過すること
+  - cargo clippy --all-features --all-targets -- -D warnings が通過すること
+  - cargo test --no-default-features が通過すること
+  - cargo test --all-features が通過すること
+  - RUSTDOCFLAGS="-D warnings" cargo doc --no-deps が通過すること
+
+# 修正対象ファイル一覧（行番号付き）
+files_to_modify:
+  - file: src/persistent/hashmap.rs
+    changes:
+      - location: "85-89行目"
+        description: "hash_index 関数にドキュメントコメントと SAFETY コメント追加"
+      - location: "321行目"
+        description: "count_ones() as usize に SAFETY コメント追加"
+      - location: "644行目"
+        description: "count_ones() as usize に SAFETY コメント追加"
+      - location: "908行目"
+        description: "count_ones() as usize に SAFETY コメント追加"
+      - location: "1154行目"
+        description: "count_ones() as usize に SAFETY コメント追加"
+
+  - file: src/persistent/vector.rs
+    changes:
+      - location: "1863行目"
+        description: "#[allow] 属性除去、i32::try_from + expect に置換"
+
+  - file: tests/except_transformer_tests.rs
+    changes:
+      - location: "8行目付近"
+        description: "safe_usize_to_i32 ヘルパー関数追加"
+      - location: "281行目"
+        description: "error.len() as i32 を safe_usize_to_i32(error.len()) に置換"
+      - location: "294行目"
+        description: "error.len() as i32 を safe_usize_to_i32(error.len()) に置換"
+      - location: "307行目"
+        description: "error.len() as i32 を safe_usize_to_i32(error.len()) に置換"
+      - location: "320行目"
+        description: "error.len() as i32 を safe_usize_to_i32(error.len()) に置換"
+      - location: "333行目"
+        description: "error.len() as i32 を safe_usize_to_i32(error.len()) に置換"
+      - location: "347行目"
+        description: "error.len() as i32 を safe_usize_to_i32(error.len()) に置換"
+      - location: "419行目"
+        description: "error.len() as i32 を safe_usize_to_i32(error.len()) に置換"

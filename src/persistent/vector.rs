@@ -1860,8 +1860,7 @@ mod tests {
         let vector: PersistentVector<i32> = (0..1000).collect();
         assert_eq!(vector.len(), 1000);
         for index in 0..1000_usize {
-            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-            let expected = index as i32;
+            let expected = i32::try_from(index).expect("Test index exceeds i32::MAX");
             assert_eq!(vector.get(index), Some(&expected));
         }
     }
