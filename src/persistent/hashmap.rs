@@ -95,8 +95,6 @@ fn compute_hash<K: Hash + ?Sized>(key: &K) -> u64 {
 /// all supported platforms, so the cast from u64 to usize is safe.
 #[inline]
 const fn hash_index(hash: u64, depth: usize) -> usize {
-    // SAFETY: MASK (0x1F = 31) ensures result is always 0-31,
-    // which fits in usize on all platforms.
     ((hash >> (depth * BITS_PER_LEVEL)) & MASK) as usize
 }
 
@@ -330,8 +328,6 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
                     None
                 } else {
                     // Count bits to find position in children array
-                    // SAFETY: bitmap is u32, so count_ones() returns at most 32,
-                    // which is always representable as usize.
                     let position = (bitmap & (bit - 1)).count_ones() as usize;
                     match &children[position] {
                         Child::Entry {
@@ -655,8 +651,6 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     ) -> (Node<K, V>, bool) {
         let index = hash_index(hash, depth);
         let bit = 1u32 << index;
-        // SAFETY: bitmap is u32, so count_ones() returns at most 32,
-        // which is always representable as usize.
         let position = (bitmap & (bit - 1)).count_ones() as usize;
 
         if bitmap & bit == 0 {
@@ -921,8 +915,6 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
             return None;
         }
 
-        // SAFETY: bitmap is u32, so count_ones() returns at most 32,
-        // which is always representable as usize.
         let position = (bitmap & (bit - 1)).count_ones() as usize;
 
         match &children[position] {
