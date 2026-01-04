@@ -12,7 +12,7 @@ categories = ["data-structures", "rust-patterns"]
 
 [dependencies]
 lambars-derive = { path = "lambars-derive", optional = true }
-tokio = { version = "^1.0", features = ["rt", "rt-multi-thread", "time", "sync", "macros"], optional = true }
+tokio = { version = "^1.49", features = ["rt", "rt-multi-thread", "time", "sync", "macros"], optional = true }
 futures = { version = "^0.3", optional = true }
 
 [dev-dependencies]
