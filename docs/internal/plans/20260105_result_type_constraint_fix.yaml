@@ -429,6 +429,75 @@ implementation_plan:
     dependencies:
       - impl_test_verification
 
+  # ============================================================================
+  # 8. 冗長な where 句制約の削除
+  # ============================================================================
+  - id: impl_redundant_constraint_removal
+    requirement_id: redundant_constraint_removal
+    name: "冗長な Result<B, E>: 'static 制約の削除"
+    priority: 8
+    description: |
+      traverse_reader と traverse_state の where 句から
+      冗長な Result<B, E>: 'static 制約を削除する。
+
+      B: 'static と E: 'static が既に指定されているため、
+      コンパイラは Result<B, E>: 'static を自動的に推論できる。
+
+    files:
+      - path: src/typeclass/traversable.rs
+        description: |
+          traverse_reader と traverse_state の where 句を修正。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          traverse_reader の where 句から Result<B, E>: 'static を削除。
+        before: |
+          fn traverse_reader<R, B, F>(self, mut function: F) -> Reader<R, Result<B, E>>
+          where
+              F: FnMut(T) -> Reader<R, B>,
+              R: Clone + 'static,
+              B: 'static,
+              Result<B, E>: 'static,
+              E: 'static,
+        after: |
+          fn traverse_reader<R, B, F>(self, mut function: F) -> Reader<R, Result<B, E>>
+          where
+              F: FnMut(T) -> Reader<R, B>,
+              R: Clone + 'static,
+              B: 'static,
+              E: 'static,
+
+      - step: 2
+        description: |
+          traverse_state の where 句から Result<B, E>: 'static を削除。
+        before: |
+          fn traverse_state<S, B, F>(self, mut function: F) -> State<S, Result<B, E>>
+          where
+              F: FnMut(T) -> State<S, B>,
+              S: Clone + 'static,
+              B: 'static,
+              Result<B, E>: 'static,
+              E: 'static,
+        after: |
+          fn traverse_state<S, B, F>(self, mut function: F) -> State<S, Result<B, E>>
+          where
+              F: FnMut(T) -> State<S, B>,
+              S: Clone + 'static,
+              B: 'static,
+              E: 'static,
+
+    tests:
+      - name: compile_check
+        description: "変更後にコンパイルが通ることを確認"
+        test_type: compile
+        code_outline: |
+          cargo check --all-features
+          cargo test --all-features
+
+    dependencies:
+      - impl_rustdoc_update
+
 # 変更箇所の詳細
 code_changes:
   file: "src/typeclass/traversable.rs"

@@ -1115,7 +1115,6 @@ impl<T, E: Clone + Send + 'static> Traversable for Result<T, E> {
         F: FnMut(T) -> Reader<R, B>,
         R: Clone + 'static,
         B: 'static,
-        Result<B, E>: 'static,
         E: 'static,
     {
         match self {
@@ -1130,7 +1129,6 @@ impl<T, E: Clone + Send + 'static> Traversable for Result<T, E> {
         F: FnMut(T) -> State<S, B>,
         S: Clone + 'static,
         B: 'static,
-        Result<B, E>: 'static,
         E: 'static,
     {
         match self {

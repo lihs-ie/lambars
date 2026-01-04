@@ -222,6 +222,58 @@ requirements:
 
           error は非同期クロージャに move されるため、Send + 'static である必要がある。
 
+  # ======================================================================
+  # 7. 冗長な where 句制約の削除
+  # ======================================================================
+  - id: redundant_constraint_removal
+    name: "冗長な Result<B, E>: 'static 制約の削除"
+    description: |
+      traverse_reader と traverse_state の where 句に含まれる
+      Result<B, E>: 'static は冗長な制約である。
+      B: 'static と E: 'static が既に指定されているため、
+      コンパイラは Result<B, E>: 'static を自動的に推論できる。
+
+    methods:
+      - name: "traverse_reader"
+        current_where_clause: |
+          where
+              F: FnMut(T) -> Reader<R, B>,
+              R: Clone + 'static,
+              B: 'static,
+              Result<B, E>: 'static,  // <- 冗長
+              E: 'static,
+        target_where_clause: |
+          where
+              F: FnMut(T) -> Reader<R, B>,
+              R: Clone + 'static,
+              B: 'static,
+              E: 'static,
+        analysis: |
+          Result<B, E> は B と E から構成されるため、
+          B: 'static かつ E: 'static であれば Result<B, E>: 'static は自動推論される。
+
+      - name: "traverse_state"
+        current_where_clause: |
+          where
+              F: FnMut(T) -> State<S, B>,
+              S: Clone + 'static,
+              B: 'static,
+              Result<B, E>: 'static,  // <- 冗長
+              E: 'static,
+        target_where_clause: |
+          where
+              F: FnMut(T) -> State<S, B>,
+              S: Clone + 'static,
+              B: 'static,
+              E: 'static,
+        analysis: |
+          traverse_reader と同様、冗長な制約を削除する。
+
+    rationale: |
+      Rust のコンパイラは、構成要素が 'static を満たす場合、
+      複合型も 'static を満たすことを自動的に推論する。
+      明示的な制約は冗長であり、コードをより簡潔にするために削除する。
+
 # 実装方針
 implementation_approach:
   strategy: |
