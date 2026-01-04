@@ -6,6 +6,16 @@
 use lambars::effect::{ExceptT, IO};
 use rstest::rstest;
 
+/// Safely converts usize to i32 for test assertions.
+///
+/// # Panics
+///
+/// Panics if the value exceeds i32::MAX, which should never happen
+/// in these tests as we're converting small string lengths.
+fn safe_usize_to_i32(value: usize) -> i32 {
+    i32::try_from(value).expect("Test value exceeds i32::MAX")
+}
+
 // =============================================================================
 // Basic Structure Tests
 // =============================================================================
@@ -278,7 +288,7 @@ fn except_transformer_catch_option_error_recovers() {
         ExceptT::new(Some(Err("error".to_string())));
 
     let recovered = ExceptT::catch_option(except_transformer, |error| {
-        ExceptT::new(Some(Ok(error.len() as i32)))
+        ExceptT::new(Some(Ok(safe_usize_to_i32(error.len()))))
     });
 
     let result = recovered.run();
@@ -291,7 +301,7 @@ fn except_transformer_catch_option_ok_passes_through() {
         ExceptT::new(Some(Ok(42)));
 
     let recovered = ExceptT::catch_option(except_transformer, |error| {
-        ExceptT::new(Some(Ok(error.len() as i32)))
+        ExceptT::new(Some(Ok(safe_usize_to_i32(error.len()))))
     });
 
     let result = recovered.run();
@@ -304,7 +314,7 @@ fn except_transformer_catch_option_none_passes_through() {
         ExceptT::new(None::<Result<i32, String>>);
 
     let recovered = ExceptT::catch_option(except_transformer, |error| {
-        ExceptT::new(Some(Ok(error.len() as i32)))
+        ExceptT::new(Some(Ok(safe_usize_to_i32(error.len()))))
     });
 
     let result = recovered.run();
@@ -317,7 +327,7 @@ fn except_transformer_catch_result_error_recovers() {
         ExceptT::new(Ok(Err("error".to_string())));
 
     let recovered = ExceptT::catch_result(except_transformer, |error| {
-        ExceptT::new(Ok(Ok(error.len() as i32)))
+        ExceptT::new(Ok(Ok(safe_usize_to_i32(error.len()))))
     });
 
     let result = recovered.run();
@@ -330,7 +340,7 @@ fn except_transformer_catch_result_ok_passes_through() {
         ExceptT::new(Ok(Ok(42)));
 
     let recovered = ExceptT::catch_result(except_transformer, |error| {
-        ExceptT::new(Ok(Ok(error.len() as i32)))
+        ExceptT::new(Ok(Ok(safe_usize_to_i32(error.len()))))
     });
 
     let result = recovered.run();
@@ -344,7 +354,7 @@ fn except_transformer_catch_result_outer_error_passes_through() {
     );
 
     let recovered = ExceptT::catch_result(except_transformer, |error| {
-        ExceptT::new(Ok(Ok(error.len() as i32)))
+        ExceptT::new(Ok(Ok(safe_usize_to_i32(error.len()))))
     });
 
     let result = recovered.run();
@@ -416,7 +426,7 @@ fn except_transformer_catch_io() {
         ExceptT::new(IO::pure(Err("error".to_string())));
 
     let recovered = ExceptT::catch_io(except_transformer, |error| {
-        ExceptT::new(IO::pure(Ok(error.len() as i32)))
+        ExceptT::new(IO::pure(Ok(safe_usize_to_i32(error.len()))))
     });
 
     let io_result = recovered.run();

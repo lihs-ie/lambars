@@ -173,7 +173,17 @@ cargo clean
    1. 略語を使用していないこと
    2. 差分の対象となるテストのみを実行し失敗していないこと
    3. 差分の対象となるテストのカバレッジ 100%であること
-   4. レビュー指摘がなくなるまで修正とレビューを繰り返す（軽微な指摘も全て解決すること）
+   4. 不必要なコメントが記述されていないこと
+      1. コードで理解できる内容のコメントは不要
+      ```rs
+        /// 例
+        fn safety_unwrap(...) {...}
+        fn some(...) {
+         /// Safely converts usize to i32 for test assertions.
+         safety_unwrap(hoge);
+        }
+      ```
+   5. レビュー指摘がなくなるまで修正とレビューを繰り返す（軽微な指摘も全て解決すること）
 5. functional-programming-specialist を起動し要件定義の観点から実装をレビューする
 6. コミット前に以下の確認を実施する
    1. `cargo fmt` - コードフォーマット
@@ -203,28 +213,27 @@ cargo clean
 <type>(<scope>): <description>
 ```
 
-| type       | 用途               |
-| type       | 用途                         |
+| type | 用途 |
 | ---------- | ---------------------------- |
-| `feat`     | 新機能                       |
-| `fix`      | バグ修正                     |
-| `docs`     | ドキュメント                 |
-| `refactor` | リファクタリング             |
-| `perf`     | パフォーマンス改善           |
-| `test`     | テスト追加・修正             |
-| `chore`    | ビルド・CI など              |
-| `deps`     | 依存関係の更新               |
-| `modify`   | 開発支援ツールによる変更指示 |
-| scope        |
+| `feat` | 新機能 |
+| `fix` | バグ修正 |
+| `docs` | ドキュメント |
+| `refactor` | リファクタリング |
+| `perf` | パフォーマンス改善 |
+| `test` | テスト追加・修正 |
+| `chore` | ビルド・CI など |
+| `deps` | 依存関係の更新 |
+| `modify` | 開発支援ツールによる変更指示 |
+| scope |
 | ------------ |
-| `typeclass`  |
-| `compose`    |
-| `control`    |
+| `typeclass` |
+| `compose` |
+| `control` |
 | `persistent` |
-| `optics`     |
-| `effect`     |
-| `derive`     |
-| その他       |
+| `optics` |
+| `effect` |
+| `derive` |
+| その他 |
 
 ```bash
 # 例

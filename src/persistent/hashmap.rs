@@ -83,6 +83,16 @@ fn compute_hash<K: Hash + ?Sized>(key: &K) -> u64 {
 }
 
 /// Extracts the index at a given depth from a hash.
+///
+/// # Returns
+///
+/// An index in the range `0..BRANCHING_FACTOR` (0-31).
+///
+/// # Safety of the cast
+///
+/// The result of `(hash >> shift) & MASK` is always in the range 0-31
+/// because MASK is 0x1F (31). This range is representable by usize on
+/// all supported platforms, so the cast from u64 to usize is safe.
 #[inline]
 const fn hash_index(hash: u64, depth: usize) -> usize {
     ((hash >> (depth * BITS_PER_LEVEL)) & MASK) as usize
