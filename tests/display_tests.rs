@@ -189,7 +189,7 @@ fn test_display_output_is_human_readable() {
 #[test]
 fn test_display_is_consistent_with_standard_library() {
     // Verify our Display implementations follow Rust conventions
-    // Similar to how Vec<T> displays
+    // Similar to standard library collection Debug formatting (e.g., Vec<T>)
 
     let vector: PersistentVector<i32> = (1..=3).collect();
     let output = format!("{}", vector);

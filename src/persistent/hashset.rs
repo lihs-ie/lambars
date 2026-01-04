@@ -773,7 +773,7 @@ mod tests {
     fn test_display_multiple_elements_hashset() {
         let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
         let display = format!("{set}");
-        // HashMap is unordered, so we check that the format is correct
+        // HashSet is unordered, so we check that the format is correct
         assert!(display.starts_with('{'));
         assert!(display.ends_with('}'));
         assert!(display.contains('1'));

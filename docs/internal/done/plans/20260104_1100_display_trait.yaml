@@ -1,6 +1,6 @@
 version: "1.0"
 name: Display trait 実装計画
-requirement_file: /Users/lihs/workspace/functional-rusty/docs/internal/requirements/20260104_1100_display_trait.yaml
+requirement_file: /Users/lihs/workspace/functional-rusty/docs/internal/done/requirements/20260104_1100_display_trait.yaml
 
 implementation_order:
   - phase: 1
