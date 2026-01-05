@@ -1,0 +1,1613 @@
+# PersistentHashSet 遅延評価 View 操作 実装計画
+#
+# 要件定義: docs/internal/requirements/20260105_1430_hashset_view_operations.yaml
+# 技術要件:
+#   - Rust: 1.92.0
+#   - edition: 2024
+#   - testing: rstest, proptest
+#
+# 実装方針:
+#   1. TDD（テスト駆動開発）でテストを先に書く
+#   2. HashSetView は型消去を用いた Box<dyn Iterator> ベースで実装
+#   3. 変換関数は Clone 可能な Arc でラップしてイテレータを再生成可能に
+#   4. FP 法則（Functor, Filter, Monad）をプロパティテストで検証
+#   5. #![forbid(unsafe_code)] ポリシーに準拠
+
+version: "1.0.0"
+name: "HashSetView Implementation Plan"
+requirement_file: "docs/internal/requirements/20260105_1430_hashset_view_operations.yaml"
+
+# 実装順序の概要
+implementation_order:
+  - step: 1
+    name: "HashSetView 基本構造と view() メソッド"
+    items:
+      - HashSetView 構造体の定義
+      - PersistentHashSet::view() メソッドの実装
+      - HashSetView::iter() メソッドの実装
+      - 基本的なテスト
+  - step: 2
+    name: "filter 操作"
+    items:
+      - HashSetView::filter() メソッドの実装
+      - Filter 法則のプロパティテスト
+  - step: 3
+    name: "map 操作"
+    items:
+      - HashSetView::map() メソッドの実装
+      - Functor 法則のプロパティテスト
+  - step: 4
+    name: "flat_map 操作"
+    items:
+      - HashSetView::flat_map() メソッドの実装
+      - Monad 法則のプロパティテスト
+  - step: 5
+    name: "collect 操作"
+    items:
+      - HashSetView::collect() メソッドの実装
+      - 複合変換のテスト
+  - step: 6
+    name: "ユーティリティメソッド"
+    items:
+      - any, all, count, is_empty メソッドの実装
+      - ユーティリティのテスト
+
+# 実装計画詳細
+implementation_plan:
+  # ============================================================================
+  # フェーズ 1: HashSetView 基本構造と view() メソッド
+  # ============================================================================
+  - id: impl_hashset_view_structure
+    requirement_id: hashset_view_definition
+    name: "HashSetView 構造体の定義"
+    priority: 1
+    description: |
+      PersistentHashSet の遅延評価ビューを表す構造体を定義する。
+
+      設計の選択:
+      - 内部に元のセットのクローンと変換関数のチェーンを保持
+      - 変換関数は Arc<dyn Fn> でラップし、Clone 可能に
+      - iter() 呼び出し時にイテレータを生成し遅延評価
+
+      この設計により:
+      - View は Clone 可能（複数回イテレート可能）
+      - 操作定義は O(1)
+      - イテレーション時に遅延評価
+
+    files:
+      - path: src/persistent/hashset.rs
+        description: |
+          HashSetView 構造体を PersistentHashSet と同じファイルに定義する。
+          関連性が高いため同一モジュールで管理する。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          必要な use 文を追加する。
+        code_outline: |
+          use std::sync::Arc;
+
+      - step: 2
+        description: |
+          HashSetViewOperation enum を定義する。
+          これは変換操作のチェーンを表現するためのデータ構造。
+        code_outline: |
+          /// 内部的な変換操作を表す列挙型。
+          enum HashSetViewOperation<T> {
+              /// 元のセットからの初期ビュー
+              Source(PersistentHashSet<T>),
+              /// フィルタ操作
+              Filter {
+                  source: Arc<HashSetViewOperation<T>>,
+                  predicate: Arc<dyn Fn(&T) -> bool + Send + Sync>,
+              },
+          }
+
+      - step: 3
+        description: |
+          HashSetView 構造体を定義する。
+          ジェネリックな型パラメータ T を持ち、内部に操作チェーンを保持する。
+        code_outline: |
+          /// PersistentHashSet の遅延評価ビュー。
+          ///
+          /// 操作（filter, map, flat_map）は O(1) で定義され、
+          /// イテレーションまたは collect() 時に評価される。
+          ///
+          /// # 型パラメータ
+          ///
+          /// - `T`: ビューが生成する要素の型
+          ///
+          /// # 例
+          ///
+          /// ```rust
+          /// use lambars::persistent::PersistentHashSet;
+          ///
+          /// let set: PersistentHashSet<i32> = [1, 2, 3, 4, 5].into_iter().collect();
+          ///
+          /// // O(1) で View を作成
+          /// let view = set.view();
+          ///
+          /// // O(1) で変換をチェーン
+          /// let transformed = view
+          ///     .filter(|x| *x % 2 == 0)
+          ///     .map(|x| x * 2);
+          ///
+          /// // イテレーション時に評価
+          /// for element in transformed.iter() {
+          ///     println!("{}", element);
+          /// }
+          ///
+          /// // または collect() でマテリアライズ
+          /// let result: PersistentHashSet<i32> = transformed.collect();
+          /// ```
+          ///
+          /// # 計算量
+          ///
+          /// | 操作 | 定義時 | イテレーション時 | マテリアライズ時 |
+          /// |------|--------|-----------------|-----------------|
+          /// | view() | O(1) | - | - |
+          /// | filter(predicate) | O(1) | O(n) | O(n * log32 n) |
+          /// | map(function) | O(1) | O(n) | O(n * log32 n) |
+          /// | flat_map(function) | O(1) | O(n * m) | O(n * m * log32(n*m)) |
+          /// | collect() | - | - | O(n * log32 n) |
+          pub struct HashSetView<T> {
+              /// 内部の操作チェーン
+              operation: Arc<HashSetViewOperationDynamic<T>>,
+          }
+
+      - step: 4
+        description: |
+          型消去のための内部トレイトを定義する。
+          map や flat_map で型が変わるため、動的ディスパッチが必要。
+        code_outline: |
+          /// 型消去のための内部トレイト。
+          /// map/flat_map で型が変わるため、動的ディスパッチを使用する。
+          trait HashSetViewOperationDynamic<T>: Send + Sync {
+              /// イテレータを生成する
+              fn create_iterator(&self) -> Box<dyn Iterator<Item = T> + '_>;
+          }
+
+    tests:
+      - name: test_hashset_view_creation
+        description: HashSetView 構造体が正しく定義されていることを確認
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_hashset_view_struct_exists() {
+              let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+              let _view = set.view();
+              // コンパイルが通ればOK
+          }
+
+    dependencies: []
+
+  - id: impl_view_method
+    requirement_id: hashset_view_creation
+    name: "view() メソッドの実装"
+    priority: 1
+    description: |
+      PersistentHashSet から HashSetView を作成する view() メソッドを実装する。
+      この操作は O(1) で、セットのクローンを保持するのみ。
+
+    files:
+      - path: src/persistent/hashset.rs
+        description: |
+          PersistentHashSet に view() メソッドを追加する。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Source 操作のための HashSetViewOperationDynamic 実装を追加する。
+        code_outline: |
+          /// Source 操作の実装
+          struct SourceOperation<T> {
+              source: PersistentHashSet<T>,
+          }
+
+          impl<T: Clone + Hash + Eq + Send + Sync + 'static> HashSetViewOperationDynamic<T>
+              for SourceOperation<T>
+          {
+              fn create_iterator(&self) -> Box<dyn Iterator<Item = T> + '_> {
+                  Box::new(self.source.iter().cloned())
+              }
+          }
+
+      - step: 2
+        description: |
+          PersistentHashSet に view() メソッドを追加する。
+        code_outline: |
+          impl<T: Clone + Hash + Eq + Send + Sync + 'static> PersistentHashSet<T> {
+              /// このセットの遅延評価ビューを作成する。
+              ///
+              /// ビューは元のセットの要素への遅延アクセスを提供し、
+              /// filter, map, flat_map などの変換操作をチェーンできる。
+              ///
+              /// # 計算量
+              ///
+              /// O(1) - セットのクローンのみ
+              ///
+              /// # 例
+              ///
+              /// ```rust
+              /// use lambars::persistent::PersistentHashSet;
+              ///
+              /// let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+              /// let view = set.view();
+              ///
+              /// // ビューを通じて要素にアクセス
+              /// assert_eq!(view.iter().count(), 3);
+              /// ```
+              #[must_use]
+              pub fn view(&self) -> HashSetView<T> {
+                  HashSetView {
+                      operation: Arc::new(SourceOperation {
+                          source: self.clone(),
+                      }),
+                  }
+              }
+          }
+
+    tests:
+      - name: test_view_empty_set
+        description: 空のセットから view を作成
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_view_empty_set() {
+              let set: PersistentHashSet<i32> = PersistentHashSet::new();
+              let view = set.view();
+              assert_eq!(view.iter().count(), 0);
+          }
+
+      - name: test_view_non_empty_set
+        description: 要素を持つセットから view を作成
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_view_non_empty_set() {
+              let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+              let view = set.view();
+              assert_eq!(view.iter().count(), 3);
+          }
+
+      - name: test_view_preserves_elements
+        description: view がすべての要素を保持していることを確認
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_view_preserves_elements() {
+              let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+              let view = set.view();
+              let collected: PersistentHashSet<i32> = view.iter().collect();
+              assert_eq!(collected, set);
+          }
+
+    dependencies:
+      - impl_hashset_view_structure
+
+  - id: impl_view_iter
+    requirement_id: hashset_view_iterator
+    name: "HashSetView::iter() メソッドの実装"
+    priority: 1
+    description: |
+      HashSetView に対してイテレータを返す iter() メソッドを実装する。
+      変換チェーンはイテレーション中に遅延評価される。
+
+    files:
+      - path: src/persistent/hashset.rs
+        description: |
+          HashSetView に iter() メソッドを追加する。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          HashSetView に iter() メソッドを追加する。
+        code_outline: |
+          impl<T> HashSetView<T> {
+              /// このビューの要素をイテレートするイテレータを返す。
+              ///
+              /// 変換チェーンはイテレーション中に遅延評価される。
+              ///
+              /// # 計算量
+              ///
+              /// O(n) for full iteration
+              ///
+              /// # 例
+              ///
+              /// ```rust
+              /// use lambars::persistent::PersistentHashSet;
+              ///
+              /// let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+              /// let view = set.view().filter(|x| *x > 1);
+              ///
+              /// for element in view.iter() {
+              ///     println!("{}", element);  // 2, 3
+              /// }
+              /// ```
+              #[must_use]
+              pub fn iter(&self) -> impl Iterator<Item = T> + '_ {
+                  self.operation.create_iterator()
+              }
+          }
+
+    tests:
+      - name: test_iter_empty_view
+        description: 空の View のイテレーション
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_iter_empty_view() {
+              let set: PersistentHashSet<i32> = PersistentHashSet::new();
+              let count = set.view().iter().count();
+              assert_eq!(count, 0);
+          }
+
+      - name: test_iter_multiple_times
+        description: View を複数回イテレートできることを確認
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_iter_multiple_times() {
+              let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+              let view = set.view();
+
+              let count1 = view.iter().count();
+              let count2 = view.iter().count();
+
+              assert_eq!(count1, 3);
+              assert_eq!(count2, 3);
+          }
+
+    dependencies:
+      - impl_view_method
+
+  # ============================================================================
+  # フェーズ 2: filter 操作
+  # ============================================================================
+  - id: impl_filter
+    requirement_id: hashset_view_filter
+    name: "filter メソッドの実装"
+    priority: 2
+    description: |
+      HashSetView に対して述語関数でフィルタリングを行う filter メソッドを実装する。
+      この操作は O(1) で、実際のフィルタリングはイテレーション時に行われる。
+
+    files:
+      - path: src/persistent/hashset.rs
+        description: |
+          HashSetView に filter メソッドを追加する。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          FilterOperation 構造体を定義する。
+        code_outline: |
+          /// フィルタ操作の実装
+          struct FilterOperation<T> {
+              source: Arc<dyn HashSetViewOperationDynamic<T>>,
+              predicate: Arc<dyn Fn(&T) -> bool + Send + Sync>,
+          }
+
+          impl<T: 'static> HashSetViewOperationDynamic<T> for FilterOperation<T> {
+              fn create_iterator(&self) -> Box<dyn Iterator<Item = T> + '_> {
+                  let predicate = Arc::clone(&self.predicate);
+                  Box::new(
+                      self.source
+                          .create_iterator()
+                          .filter(move |item| predicate(item)),
+                  )
+              }
+          }
+
+      - step: 2
+        description: |
+          HashSetView に filter メソッドを追加する。
+        code_outline: |
+          impl<T: Clone + Hash + Eq + Send + Sync + 'static> HashSetView<T> {
+              /// 述語を満たす要素のみを含む新しい HashSetView を返す。
+              ///
+              /// 操作定義は O(1)、イテレーション時に O(n) で評価される。
+              ///
+              /// # 引数
+              ///
+              /// * `predicate` - 要素を受け取り、含めるかどうかを返す関数
+              ///
+              /// # 計算量
+              ///
+              /// - 定義時: O(1)
+              /// - イテレーション時: O(n)
+              /// - マテリアライズ時: O(n * log32 n)
+              ///
+              /// # 例
+              ///
+              /// ```rust
+              /// use lambars::persistent::PersistentHashSet;
+              ///
+              /// let set: PersistentHashSet<i32> = [1, 2, 3, 4, 5].into_iter().collect();
+              /// let evens = set.view().filter(|x| *x % 2 == 0);
+              ///
+              /// let result: PersistentHashSet<i32> = evens.collect();
+              /// assert!(result.contains(&2));
+              /// assert!(result.contains(&4));
+              /// assert!(!result.contains(&1));
+              /// ```
+              #[must_use]
+              pub fn filter<P>(self, predicate: P) -> HashSetView<T>
+              where
+                  P: Fn(&T) -> bool + Send + Sync + 'static,
+              {
+                  HashSetView {
+                      operation: Arc::new(FilterOperation {
+                          source: self.operation,
+                          predicate: Arc::new(predicate),
+                      }),
+                  }
+              }
+          }
+
+    tests:
+      - name: test_filter_empty_view
+        description: 空のビューに対する filter
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_filter_empty_view() {
+              let set: PersistentHashSet<i32> = PersistentHashSet::new();
+              let result: PersistentHashSet<i32> = set.view().filter(|_| true).collect();
+              assert!(result.is_empty());
+          }
+
+      - name: test_filter_single_element_match
+        description: 単一要素のフィルタリング（マッチ）
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_filter_single_element_match() {
+              let set: PersistentHashSet<i32> = [42].into_iter().collect();
+              let result: PersistentHashSet<i32> = set.view().filter(|x| *x == 42).collect();
+              assert_eq!(result.len(), 1);
+              assert!(result.contains(&42));
+          }
+
+      - name: test_filter_single_element_no_match
+        description: 単一要素のフィルタリング（非マッチ）
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_filter_single_element_no_match() {
+              let set: PersistentHashSet<i32> = [42].into_iter().collect();
+              let result: PersistentHashSet<i32> = set.view().filter(|x| *x != 42).collect();
+              assert!(result.is_empty());
+          }
+
+      - name: test_filter_evens
+        description: 偶数のみをフィルタリング
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_filter_evens() {
+              let set: PersistentHashSet<i32> = [1, 2, 3, 4, 5].into_iter().collect();
+              let result: PersistentHashSet<i32> = set.view().filter(|x| *x % 2 == 0).collect();
+
+              assert_eq!(result.len(), 2);
+              assert!(result.contains(&2));
+              assert!(result.contains(&4));
+              assert!(!result.contains(&1));
+              assert!(!result.contains(&3));
+              assert!(!result.contains(&5));
+          }
+
+      - name: test_filter_chain
+        description: フィルタのチェーン
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_filter_chain() {
+              let set: PersistentHashSet<i32> = (1..=20).collect();
+              let result: PersistentHashSet<i32> = set
+                  .view()
+                  .filter(|x| *x % 2 == 0)  // 偶数
+                  .filter(|x| *x % 3 == 0)  // かつ 3 の倍数
+                  .collect();
+
+              // 6, 12, 18 のみ
+              assert_eq!(result.len(), 3);
+              assert!(result.contains(&6));
+              assert!(result.contains(&12));
+              assert!(result.contains(&18));
+          }
+
+    dependencies:
+      - impl_view_iter
+
+  - id: impl_filter_laws
+    requirement_id: hashset_view_filter
+    name: "Filter 法則のプロパティテスト"
+    priority: 2
+    description: |
+      Filter 法則（空フィルタ、恒等フィルタ、合成）をプロパティテストで検証する。
+
+    files:
+      - path: tests/persistent_hashset_tests.rs
+        description: |
+          Filter 法則のプロパティテストを追加する。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Filter 法則のユニットテストを追加する。
+        code_outline: |
+          // Filter 法則テスト
+
+          #[rstest]
+          fn test_filter_empty_law() {
+              let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+              let result: PersistentHashSet<i32> = set.view().filter(|_| false).collect();
+              assert!(result.is_empty());
+          }
+
+          #[rstest]
+          fn test_filter_identity_law() {
+              let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+              let result: PersistentHashSet<i32> = set.view().filter(|_| true).collect();
+              assert_eq!(result, set);
+          }
+
+          #[rstest]
+          fn test_filter_composition_law() {
+              let set: PersistentHashSet<i32> = (1..=20).collect();
+
+              let chained: PersistentHashSet<i32> = set.view()
+                  .filter(|x| *x % 2 == 0)
+                  .filter(|x| *x > 10)
+                  .collect();
+
+              let combined: PersistentHashSet<i32> = set.view()
+                  .filter(|x| *x % 2 == 0 && *x > 10)
+                  .collect();
+
+              assert_eq!(chained, combined);
+          }
+
+      - step: 2
+        description: |
+          プロパティテストを追加する（proptest 使用）。
+        code_outline: |
+          use proptest::prelude::*;
+          use proptest::collection::hash_set;
+
+          proptest! {
+              #[test]
+              fn prop_filter_empty_law(elements in hash_set(any::<i32>(), 0..100)) {
+                  let set: PersistentHashSet<i32> = elements.into_iter().collect();
+                  let result: PersistentHashSet<i32> = set.view().filter(|_| false).collect();
+                  prop_assert!(result.is_empty());
+              }
+
+              #[test]
+              fn prop_filter_identity_law(elements in hash_set(any::<i32>(), 0..100)) {
+                  let set: PersistentHashSet<i32> = elements.into_iter().collect();
+                  let result: PersistentHashSet<i32> = set.view().filter(|_| true).collect();
+                  prop_assert_eq!(result, set);
+              }
+
+              #[test]
+              fn prop_filter_composition_law(
+                  elements in hash_set(any::<i32>(), 0..100),
+                  threshold in any::<i32>()
+              ) {
+                  let set: PersistentHashSet<i32> = elements.into_iter().collect();
+
+                  let chained: PersistentHashSet<i32> = set.view()
+                      .filter(|x| *x % 2 == 0)
+                      .filter(|x| *x > threshold)
+                      .collect();
+
+                  let combined: PersistentHashSet<i32> = set.view()
+                      .filter(|x| *x % 2 == 0 && *x > threshold)
+                      .collect();
+
+                  prop_assert_eq!(chained, combined);
+              }
+          }
+
+    tests: []
+    dependencies:
+      - impl_filter
+
+  # ============================================================================
+  # フェーズ 3: map 操作
+  # ============================================================================
+  - id: impl_map
+    requirement_id: hashset_view_map
+    name: "map メソッドの実装"
+    priority: 3
+    description: |
+      HashSetView の各要素に関数を適用し、変換された要素を含む新しい HashSetView を返す。
+      この操作は O(1) で、実際の変換はイテレーション時に行われる。
+
+      重要: map はセットの要素を変換するため、変換後に重複が発生する可能性がある。
+      イテレーション時には重複が含まれ、collect() 時に重複は自動的に除去される。
+
+    files:
+      - path: src/persistent/hashset.rs
+        description: |
+          HashSetView に map メソッドを追加する。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          MapOperation 構造体を定義する。
+          型が変わるため、ジェネリックな型パラメータを持つ。
+        code_outline: |
+          /// マップ操作の実装
+          struct MapOperation<T, U> {
+              source: Arc<dyn HashSetViewOperationDynamic<T>>,
+              function: Arc<dyn Fn(T) -> U + Send + Sync>,
+          }
+
+          impl<T: 'static, U: 'static> HashSetViewOperationDynamic<U> for MapOperation<T, U> {
+              fn create_iterator(&self) -> Box<dyn Iterator<Item = U> + '_> {
+                  let function = Arc::clone(&self.function);
+                  Box::new(self.source.create_iterator().map(move |item| function(item)))
+              }
+          }
+
+      - step: 2
+        description: |
+          HashSetView に map メソッドを追加する。
+        code_outline: |
+          impl<T: Clone + Hash + Eq + Send + Sync + 'static> HashSetView<T> {
+              /// 各要素に関数を適用し、変換された HashSetView を返す。
+              ///
+              /// 操作定義は O(1)、イテレーション時に O(n) で評価される。
+              ///
+              /// 変換後の重複要素は collect() 時に除去される。
+              /// 例: [1, 2, 3].map(|x| x % 2) は collect() 後に {0, 1} となる。
+              ///
+              /// # 引数
+              ///
+              /// * `function` - 各要素を変換する関数
+              ///
+              /// # 計算量
+              ///
+              /// - 定義時: O(1)
+              /// - イテレーション時: O(n)
+              /// - マテリアライズ時: O(n * log32 n)
+              ///
+              /// # 例
+              ///
+              /// ```rust
+              /// use lambars::persistent::PersistentHashSet;
+              ///
+              /// let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+              /// let doubled: PersistentHashSet<i32> = set.view().map(|x| x * 2).collect();
+              ///
+              /// assert!(doubled.contains(&2));
+              /// assert!(doubled.contains(&4));
+              /// assert!(doubled.contains(&6));
+              /// ```
+              #[must_use]
+              pub fn map<U, F>(self, function: F) -> HashSetView<U>
+              where
+                  F: Fn(T) -> U + Send + Sync + 'static,
+                  U: Clone + Hash + Eq + Send + Sync + 'static,
+              {
+                  HashSetView {
+                      operation: Arc::new(MapOperation {
+                          source: self.operation,
+                          function: Arc::new(function),
+                      }),
+                  }
+              }
+          }
+
+    tests:
+      - name: test_map_empty_view
+        description: 空のビューに対する map
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_map_empty_view() {
+              let set: PersistentHashSet<i32> = PersistentHashSet::new();
+              let result: PersistentHashSet<i32> = set.view().map(|x| x * 2).collect();
+              assert!(result.is_empty());
+          }
+
+      - name: test_map_single_element
+        description: 単一要素の map
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_map_single_element() {
+              let set: PersistentHashSet<i32> = [42].into_iter().collect();
+              let result: PersistentHashSet<i32> = set.view().map(|x| x * 2).collect();
+              assert_eq!(result.len(), 1);
+              assert!(result.contains(&84));
+          }
+
+      - name: test_map_double
+        description: 要素を2倍にする
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_map_double() {
+              let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+              let doubled: PersistentHashSet<i32> = set.view().map(|x| x * 2).collect();
+
+              assert_eq!(doubled.len(), 3);
+              assert!(doubled.contains(&2));
+              assert!(doubled.contains(&4));
+              assert!(doubled.contains(&6));
+          }
+
+      - name: test_map_type_conversion
+        description: 型変換
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_map_type_conversion() {
+              let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+              let strings: PersistentHashSet<String> = set
+                  .view()
+                  .map(|x| x.to_string())
+                  .collect();
+
+              assert_eq!(strings.len(), 3);
+              assert!(strings.contains("1"));
+              assert!(strings.contains("2"));
+              assert!(strings.contains("3"));
+          }
+
+      - name: test_map_with_duplicates
+        description: 重複の発生と除去
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_map_with_duplicates() {
+              let set: PersistentHashSet<i32> = [1, 2, 3, 4, 5].into_iter().collect();
+              let parities: PersistentHashSet<i32> = set
+                  .view()
+                  .map(|x| x % 2)
+                  .collect();
+
+              // 0 と 1 のみ（重複は除去）
+              assert_eq!(parities.len(), 2);
+              assert!(parities.contains(&0));
+              assert!(parities.contains(&1));
+          }
+
+    dependencies:
+      - impl_filter
+
+  - id: impl_map_laws
+    requirement_id: hashset_view_map
+    name: "Functor 法則のプロパティテスト"
+    priority: 3
+    description: |
+      Functor 法則（恒等法則、合成法則）をプロパティテストで検証する。
+
+    files:
+      - path: tests/persistent_hashset_tests.rs
+        description: |
+          Functor 法則のプロパティテストを追加する。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Functor 法則のユニットテストを追加する。
+        code_outline: |
+          // Functor 法則テスト
+
+          #[rstest]
+          fn test_map_identity_law() {
+              let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+              let result: PersistentHashSet<i32> = set.view().map(|x| x).collect();
+              assert_eq!(result, set);
+          }
+
+          #[rstest]
+          fn test_map_composition_law() {
+              let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+
+              let chained: PersistentHashSet<i32> = set.view()
+                  .map(|x| x * 2)
+                  .map(|x| x + 10)
+                  .collect();
+
+              let composed: PersistentHashSet<i32> = set.view()
+                  .map(|x| (x * 2) + 10)
+                  .collect();
+
+              assert_eq!(chained, composed);
+          }
+
+      - step: 2
+        description: |
+          プロパティテストを追加する（proptest 使用）。
+        code_outline: |
+          proptest! {
+              #[test]
+              fn prop_map_identity_law(elements in hash_set(any::<i32>(), 0..100)) {
+                  let set: PersistentHashSet<i32> = elements.into_iter().collect();
+                  let result: PersistentHashSet<i32> = set.view().map(|x| x).collect();
+                  prop_assert_eq!(result, set);
+              }
+
+              #[test]
+              fn prop_map_composition_law(
+                  elements in hash_set(any::<i32>(), 0..100),
+                  multiplier in 1..10i32,
+                  offset in any::<i32>()
+              ) {
+                  let set: PersistentHashSet<i32> = elements.into_iter().collect();
+
+                  let chained: PersistentHashSet<i32> = set.view()
+                      .map(|x| x.saturating_mul(multiplier))
+                      .map(|x| x.saturating_add(offset))
+                      .collect();
+
+                  let composed: PersistentHashSet<i32> = set.view()
+                      .map(|x| x.saturating_mul(multiplier).saturating_add(offset))
+                      .collect();
+
+                  prop_assert_eq!(chained, composed);
+              }
+          }
+
+    tests: []
+    dependencies:
+      - impl_map
+
+  # ============================================================================
+  # フェーズ 4: flat_map 操作
+  # ============================================================================
+  - id: impl_flat_map
+    requirement_id: hashset_view_flat_map
+    name: "flat_map メソッドの実装"
+    priority: 4
+    description: |
+      HashSetView の各要素に関数を適用し、結果をフラット化した HashSetView を返す。
+      これは Monad の bind 操作に相当する。
+
+    files:
+      - path: src/persistent/hashset.rs
+        description: |
+          HashSetView に flat_map メソッドを追加する。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          FlatMapOperation 構造体を定義する。
+        code_outline: |
+          /// フラットマップ操作の実装
+          struct FlatMapOperation<T, U, I>
+          where
+              I: IntoIterator<Item = U>,
+          {
+              source: Arc<dyn HashSetViewOperationDynamic<T>>,
+              function: Arc<dyn Fn(T) -> I + Send + Sync>,
+              _phantom: std::marker::PhantomData<U>,
+          }
+
+          impl<T: 'static, U: 'static, I: IntoIterator<Item = U> + 'static>
+              HashSetViewOperationDynamic<U> for FlatMapOperation<T, U, I>
+          {
+              fn create_iterator(&self) -> Box<dyn Iterator<Item = U> + '_> {
+                  let function = Arc::clone(&self.function);
+                  Box::new(
+                      self.source
+                          .create_iterator()
+                          .flat_map(move |item| function(item)),
+                  )
+              }
+          }
+
+      - step: 2
+        description: |
+          HashSetView に flat_map メソッドを追加する。
+        code_outline: |
+          impl<T: Clone + Hash + Eq + Send + Sync + 'static> HashSetView<T> {
+              /// 各要素に関数を適用し、結果をフラット化した HashSetView を返す。
+              ///
+              /// これは Monad の bind 操作に相当する。
+              /// 操作定義は O(1)、イテレーション時に O(n * m) で評価される
+              /// （m は各要素が生成する平均要素数）。
+              ///
+              /// 重複要素は collect() 時に除去される。
+              ///
+              /// # 引数
+              ///
+              /// * `function` - 各要素をイテラブルなコレクションに変換する関数
+              ///
+              /// # 計算量
+              ///
+              /// - 定義時: O(1)
+              /// - イテレーション時: O(n * m) where m = average output size per element
+              /// - マテリアライズ時: O(n * m * log32(n * m))
+              ///
+              /// # 例
+              ///
+              /// ```rust
+              /// use lambars::persistent::PersistentHashSet;
+              ///
+              /// let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+              /// let expanded: PersistentHashSet<i32> = set
+              ///     .view()
+              ///     .flat_map(|x| vec![x, x * 10, x * 100])
+              ///     .collect();
+              ///
+              /// // {1, 10, 100, 2, 20, 200, 3, 30, 300}
+              /// assert!(expanded.contains(&1));
+              /// assert!(expanded.contains(&10));
+              /// assert!(expanded.contains(&100));
+              /// ```
+              #[must_use]
+              pub fn flat_map<U, I, F>(self, function: F) -> HashSetView<U>
+              where
+                  F: Fn(T) -> I + Send + Sync + 'static,
+                  I: IntoIterator<Item = U> + 'static,
+                  U: Clone + Hash + Eq + Send + Sync + 'static,
+              {
+                  HashSetView {
+                      operation: Arc::new(FlatMapOperation {
+                          source: self.operation,
+                          function: Arc::new(function),
+                          _phantom: std::marker::PhantomData,
+                      }),
+                  }
+              }
+          }
+
+    tests:
+      - name: test_flat_map_empty_view
+        description: 空のビューに対する flat_map
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_flat_map_empty_view() {
+              let set: PersistentHashSet<i32> = PersistentHashSet::new();
+              let result: PersistentHashSet<i32> = set.view()
+                  .flat_map(|x| vec![x, x * 2])
+                  .collect();
+              assert!(result.is_empty());
+          }
+
+      - name: test_flat_map_empty_result
+        description: 空を返す flat_map
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_flat_map_empty_result() {
+              let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+              let result: PersistentHashSet<i32> = set.view()
+                  .flat_map(|_| Vec::<i32>::new())
+                  .collect();
+              assert!(result.is_empty());
+          }
+
+      - name: test_flat_map_expand
+        description: 各要素を複数の要素に展開
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_flat_map_expand() {
+              let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+              let expanded: PersistentHashSet<i32> = set
+                  .view()
+                  .flat_map(|x| vec![x, x * 10, x * 100])
+                  .collect();
+
+              assert_eq!(expanded.len(), 9);
+              assert!(expanded.contains(&1));
+              assert!(expanded.contains(&10));
+              assert!(expanded.contains(&100));
+              assert!(expanded.contains(&2));
+              assert!(expanded.contains(&20));
+              assert!(expanded.contains(&200));
+              assert!(expanded.contains(&3));
+              assert!(expanded.contains(&30));
+              assert!(expanded.contains(&300));
+          }
+
+      - name: test_flat_map_with_option
+        description: 条件付き展開（Some/None パターン）
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_flat_map_with_option() {
+              let set: PersistentHashSet<i32> = [1, 2, 3, 4, 5].into_iter().collect();
+              let filtered: PersistentHashSet<i32> = set
+                  .view()
+                  .flat_map(|x| {
+                      if x % 2 == 0 {
+                          Some(x * 2)
+                      } else {
+                          None
+                      }
+                  })
+                  .collect();
+
+              // 偶数のみ 2 倍: {4, 8}
+              assert_eq!(filtered.len(), 2);
+              assert!(filtered.contains(&4));
+              assert!(filtered.contains(&8));
+          }
+
+      - name: test_flat_map_single_returns_same_as_map
+        description: 単一要素を返す flat_map は map と等価
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_flat_map_single_returns_same_as_map() {
+              let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+
+              let flat_mapped: PersistentHashSet<i32> = set.view()
+                  .flat_map(|x| std::iter::once(x * 2))
+                  .collect();
+
+              let mapped: PersistentHashSet<i32> = set.view()
+                  .map(|x| x * 2)
+                  .collect();
+
+              assert_eq!(flat_mapped, mapped);
+          }
+
+    dependencies:
+      - impl_map
+
+  - id: impl_flat_map_laws
+    requirement_id: hashset_view_flat_map
+    name: "Monad 法則のプロパティテスト"
+    priority: 4
+    description: |
+      Monad 法則（左単位、右単位、結合）をプロパティテストで検証する。
+
+    files:
+      - path: tests/persistent_hashset_tests.rs
+        description: |
+          Monad 法則のプロパティテストを追加する。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Monad 法則のユニットテストを追加する。
+        code_outline: |
+          // Monad 法則テスト
+
+          #[rstest]
+          fn test_monad_left_identity_law() {
+              let element = 5;
+              let singleton = PersistentHashSet::singleton(element).view();
+              let result: PersistentHashSet<i32> = singleton
+                  .flat_map(|x| vec![x, x * 2])
+                  .collect();
+
+              let direct: PersistentHashSet<i32> = vec![5, 10].into_iter().collect();
+              assert_eq!(result, direct);
+          }
+
+          #[rstest]
+          fn test_monad_right_identity_law() {
+              let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+              let result: PersistentHashSet<i32> = set.view()
+                  .flat_map(|x| std::iter::once(x))
+                  .collect();
+              assert_eq!(result, set);
+          }
+
+          #[rstest]
+          fn test_monad_associativity_law() {
+              let set: PersistentHashSet<i32> = [1, 2].into_iter().collect();
+
+              let left: PersistentHashSet<i32> = set.view()
+                  .flat_map(|x| vec![x, x + 10])
+                  .flat_map(|x| vec![x * 2])
+                  .collect();
+
+              let right: PersistentHashSet<i32> = set.view()
+                  .flat_map(|x| {
+                      vec![x, x + 10]
+                          .into_iter()
+                          .flat_map(|y| vec![y * 2])
+                          .collect::<Vec<_>>()
+                  })
+                  .collect();
+
+              assert_eq!(left, right);
+          }
+
+      - step: 2
+        description: |
+          プロパティテストを追加する（proptest 使用）。
+        code_outline: |
+          proptest! {
+              #[test]
+              fn prop_monad_right_identity_law(elements in hash_set(any::<i32>(), 0..50)) {
+                  let set: PersistentHashSet<i32> = elements.into_iter().collect();
+                  let result: PersistentHashSet<i32> = set.view()
+                      .flat_map(|x| std::iter::once(x))
+                      .collect();
+                  prop_assert_eq!(result, set);
+              }
+          }
+
+    tests: []
+    dependencies:
+      - impl_flat_map
+
+  # ============================================================================
+  # フェーズ 5: collect 操作
+  # ============================================================================
+  - id: impl_collect
+    requirement_id: hashset_view_collect
+    name: "collect メソッドの実装"
+    priority: 5
+    description: |
+      HashSetView を評価し、新しい PersistentHashSet を生成する。
+      遅延評価された変換チェーンを完全に評価し、結果を永続データ構造に格納する。
+
+    files:
+      - path: src/persistent/hashset.rs
+        description: |
+          HashSetView に collect メソッドを追加する。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          HashSetView に collect メソッドを追加する。
+        code_outline: |
+          impl<T: Clone + Hash + Eq + Send + Sync + 'static> HashSetView<T> {
+              /// HashSetView を完全に評価し、PersistentHashSet を生成する。
+              ///
+              /// 変換チェーンで発生した重複要素は自動的に除去される。
+              ///
+              /// # 計算量
+              ///
+              /// O(n * log32 n)
+              ///
+              /// # 例
+              ///
+              /// ```rust
+              /// use lambars::persistent::PersistentHashSet;
+              ///
+              /// let set: PersistentHashSet<i32> = [1, 2, 3, 4, 5].into_iter().collect();
+              ///
+              /// let result: PersistentHashSet<i32> = set
+              ///     .view()
+              ///     .filter(|x| *x % 2 == 0)
+              ///     .map(|x| x * 2)
+              ///     .collect();
+              ///
+              /// assert_eq!(result.len(), 2);
+              /// assert!(result.contains(&4));   // 2 * 2
+              /// assert!(result.contains(&8));   // 4 * 2
+              /// ```
+              #[must_use]
+              pub fn collect(self) -> PersistentHashSet<T> {
+                  self.iter().collect()
+              }
+          }
+
+    tests:
+      - name: test_collect_empty_view
+        description: 空の View の collect
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_collect_empty_view() {
+              let set: PersistentHashSet<i32> = PersistentHashSet::new();
+              let result: PersistentHashSet<i32> = set.view().collect();
+              assert!(result.is_empty());
+          }
+
+      - name: test_collect_no_transformation
+        description: 変換なしの collect
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_collect_no_transformation() {
+              let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+              let result: PersistentHashSet<i32> = set.view().collect();
+              assert_eq!(result, set);
+          }
+
+      - name: test_collect_complex_transformation
+        description: 複合変換の collect
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_collect_complex_transformation() {
+              let set: PersistentHashSet<i32> = [1, 2, 3, 4, 5].into_iter().collect();
+
+              let result: PersistentHashSet<String> = set
+                  .view()
+                  .filter(|x| *x > 2)
+                  .map(|x| format!("value_{}", x))
+                  .collect();
+
+              assert_eq!(result.len(), 3);
+              assert!(result.contains("value_3"));
+              assert!(result.contains("value_4"));
+              assert!(result.contains("value_5"));
+          }
+
+      - name: test_collect_filter_map_chain
+        description: filter と map のチェーン
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_collect_filter_map_chain() {
+              let set: PersistentHashSet<i32> = (1..=10).collect();
+
+              let result: PersistentHashSet<i32> = set
+                  .view()
+                  .filter(|x| *x % 2 == 0)  // 2, 4, 6, 8, 10
+                  .map(|x| x * 2)            // 4, 8, 12, 16, 20
+                  .filter(|x| *x > 10)       // 12, 16, 20
+                  .collect();
+
+              assert_eq!(result.len(), 3);
+              assert!(result.contains(&12));
+              assert!(result.contains(&16));
+              assert!(result.contains(&20));
+          }
+
+    dependencies:
+      - impl_flat_map
+
+  # ============================================================================
+  # フェーズ 6: ユーティリティメソッド
+  # ============================================================================
+  - id: impl_utilities
+    requirement_id: hashset_view_utilities
+    name: "ユーティリティメソッドの実装"
+    priority: 6
+    description: |
+      HashSetView の利便性を向上させる追加メソッド（any, all, count, is_empty）を実装する。
+
+    files:
+      - path: src/persistent/hashset.rs
+        description: |
+          HashSetView にユーティリティメソッドを追加する。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          any メソッドを追加する。
+        code_outline: |
+          impl<T: Clone + Hash + Eq + Send + Sync + 'static> HashSetView<T> {
+              /// いずれかの要素が述語を満たすかを判定する。
+              ///
+              /// 短絡評価により、条件を満たす要素が見つかった時点で終了する。
+              ///
+              /// # 引数
+              ///
+              /// * `predicate` - 各要素を判定する関数
+              ///
+              /// # 計算量
+              ///
+              /// O(n) worst case, O(1) best case
+              ///
+              /// # 例
+              ///
+              /// ```rust
+              /// use lambars::persistent::PersistentHashSet;
+              ///
+              /// let set: PersistentHashSet<i32> = [1, 2, 3, 4, 5].into_iter().collect();
+              /// assert!(set.view().any(|x| *x > 3));
+              /// assert!(!set.view().any(|x| *x > 10));
+              /// ```
+              #[must_use]
+              pub fn any<P>(self, predicate: P) -> bool
+              where
+                  P: Fn(&T) -> bool,
+              {
+                  self.iter().any(|item| predicate(&item))
+              }
+          }
+
+      - step: 2
+        description: |
+          all メソッドを追加する。
+        code_outline: |
+              /// 全ての要素が述語を満たすかを判定する。
+              ///
+              /// 短絡評価により、条件を満たさない要素が見つかった時点で終了する。
+              ///
+              /// # 引数
+              ///
+              /// * `predicate` - 各要素を判定する関数
+              ///
+              /// # 計算量
+              ///
+              /// O(n) worst case, O(1) best case
+              ///
+              /// # 例
+              ///
+              /// ```rust
+              /// use lambars::persistent::PersistentHashSet;
+              ///
+              /// let set: PersistentHashSet<i32> = [2, 4, 6].into_iter().collect();
+              /// assert!(set.view().all(|x| *x % 2 == 0));
+              /// assert!(!set.view().all(|x| *x < 5));
+              /// ```
+              #[must_use]
+              pub fn all<P>(self, predicate: P) -> bool
+              where
+                  P: Fn(&T) -> bool,
+              {
+                  self.iter().all(|item| predicate(&item))
+              }
+
+      - step: 3
+        description: |
+          count メソッドを追加する。
+        code_outline: |
+              /// View 内の要素数を数える。
+              ///
+              /// 変換チェーンを完全に評価する必要がある。
+              ///
+              /// # 計算量
+              ///
+              /// O(n)
+              ///
+              /// # 例
+              ///
+              /// ```rust
+              /// use lambars::persistent::PersistentHashSet;
+              ///
+              /// let set: PersistentHashSet<i32> = [1, 2, 3, 4, 5].into_iter().collect();
+              /// let count = set.view().filter(|x| *x % 2 == 0).count();
+              /// assert_eq!(count, 2);
+              /// ```
+              #[must_use]
+              pub fn count(self) -> usize {
+                  self.iter().count()
+              }
+
+      - step: 4
+        description: |
+          is_empty メソッドを追加する。
+        code_outline: |
+              /// View が空かどうかを判定する。
+              ///
+              /// 短絡評価により、最初の要素が見つかった時点で終了する。
+              ///
+              /// # 計算量
+              ///
+              /// O(1) to O(n)
+              ///
+              /// # 例
+              ///
+              /// ```rust
+              /// use lambars::persistent::PersistentHashSet;
+              ///
+              /// let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+              /// assert!(set.view().filter(|x| *x > 10).is_empty());
+              /// assert!(!set.view().is_empty());
+              /// ```
+              #[must_use]
+              pub fn is_empty(self) -> bool {
+                  self.iter().next().is_none()
+              }
+
+    tests:
+      - name: test_any_with_match
+        description: any - 条件を満たす要素あり
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_any_with_match() {
+              let set: PersistentHashSet<i32> = [1, 2, 3, 4, 5].into_iter().collect();
+              assert!(set.view().any(|x| *x > 3));
+          }
+
+      - name: test_any_without_match
+        description: any - 条件を満たす要素なし
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_any_without_match() {
+              let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+              assert!(!set.view().any(|x| *x > 10));
+          }
+
+      - name: test_any_empty_view
+        description: any - 空の View
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_any_empty_view() {
+              let set: PersistentHashSet<i32> = PersistentHashSet::new();
+              assert!(!set.view().any(|_| true));
+          }
+
+      - name: test_all_satisfied
+        description: all - 全要素が条件を満たす
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_all_satisfied() {
+              let set: PersistentHashSet<i32> = [2, 4, 6].into_iter().collect();
+              assert!(set.view().all(|x| *x % 2 == 0));
+          }
+
+      - name: test_all_not_satisfied
+        description: all - 条件を満たさない要素あり
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_all_not_satisfied() {
+              let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+              assert!(!set.view().all(|x| *x % 2 == 0));
+          }
+
+      - name: test_all_empty_view
+        description: all - 空の View（空集合は全称命題を満たす）
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_all_empty_view() {
+              let set: PersistentHashSet<i32> = PersistentHashSet::new();
+              assert!(set.view().all(|_| false));
+          }
+
+      - name: test_count_filtered
+        description: count - フィルタ後の要素数
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_count_filtered() {
+              let set: PersistentHashSet<i32> = [1, 2, 3, 4, 5].into_iter().collect();
+              let count = set.view().filter(|x| *x % 2 == 0).count();
+              assert_eq!(count, 2);
+          }
+
+      - name: test_count_empty_view
+        description: count - 空の View
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_count_empty_view() {
+              let set: PersistentHashSet<i32> = PersistentHashSet::new();
+              assert_eq!(set.view().count(), 0);
+          }
+
+      - name: test_is_empty_true
+        description: is_empty - 空の View
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_is_empty_true() {
+              let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+              assert!(set.view().filter(|x| *x > 10).is_empty());
+          }
+
+      - name: test_is_empty_false
+        description: is_empty - 要素ありの View
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_is_empty_false() {
+              let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+              assert!(!set.view().is_empty());
+          }
+
+    dependencies:
+      - impl_collect
+
+  # ============================================================================
+  # Clone 実装
+  # ============================================================================
+  - id: impl_clone
+    requirement_id: hashset_view_definition
+    name: "HashSetView の Clone 実装"
+    priority: 6
+    description: |
+      HashSetView に Clone トレイトを実装し、ビューを複製可能にする。
+      Arc を使用しているため、Clone は O(1) で完了する。
+
+    files:
+      - path: src/persistent/hashset.rs
+        description: |
+          HashSetView に Clone トレイトを実装する。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          HashSetView に Clone を実装する。
+        code_outline: |
+          impl<T> Clone for HashSetView<T> {
+              fn clone(&self) -> Self {
+                  Self {
+                      operation: Arc::clone(&self.operation),
+                  }
+              }
+          }
+
+    tests:
+      - name: test_view_clone
+        description: View の Clone
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_view_clone() {
+              let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+              let view1 = set.view().filter(|x| *x > 1);
+              let view2 = view1.clone();
+
+              let result1: PersistentHashSet<i32> = view1.collect();
+              let result2: PersistentHashSet<i32> = view2.collect();
+
+              assert_eq!(result1, result2);
+          }
+
+    dependencies:
+      - impl_hashset_view_structure
+
+# テスト戦略
+test_strategy:
+  unit_tests:
+    location: src/persistent/hashset.rs
+    description: |
+      基本的なユニットテストは hashset.rs 内のテストモジュールに配置する。
+      - 各操作の基本動作テスト
+      - エッジケース（空集合、単一要素など）
+      - 型変換テスト
+
+  integration_tests:
+    location: tests/persistent_hashset_tests.rs
+    description: |
+      統合テストは既存のテストファイルに追加する。
+      - View 操作の組み合わせテスト
+      - 大規模データセットでのテスト
+      - FP 法則の検証
+
+  property_tests:
+    location: tests/persistent_hashset_tests.rs
+    description: |
+      プロパティテストで FP 法則を検証する。
+      - Filter 法則（空フィルタ、恒等フィルタ、合成）
+      - Functor 法則（恒等、合成）
+      - Monad 法則（左単位、右単位、結合）
+
+# 完了条件
+acceptance_criteria:
+  - HashSetView 構造体が定義されていること
+  - PersistentHashSet::view() メソッドが実装されていること
+  - HashSetView::filter() メソッドが O(1) で定義されること
+  - HashSetView::map() メソッドが O(1) で定義されること
+  - HashSetView::flat_map() メソッドが O(1) で定義されること
+  - HashSetView::collect() メソッドが PersistentHashSet を生成すること
+  - HashSetView::iter() メソッドがイテレータを返すこと
+  - HashSetView::any(), all(), count(), is_empty() が実装されていること
+  - Filter 法則がプロパティテストで検証されていること
+  - Functor 法則がプロパティテストで検証されていること
+  - Monad 法則がプロパティテストで検証されていること
+  - HashSetView が Clone 可能であること
+  - "#![forbid(unsafe_code)] ポリシーに準拠していること"
+  - cargo check が通過すること
+  - cargo clippy --all-features --all-targets -- -D warnings が通過すること
+  - cargo test --no-default-features が通過すること
+  - cargo test --all-features が通過すること
+  - RUSTDOCFLAGS="-D warnings" cargo doc --no-deps が通過すること
+  - テストカバレッジが 100% であること
+
+# 修正対象ファイル一覧
+files_to_modify:
+  - file: src/persistent/hashset.rs
+    changes:
+      - location: "use 文追加"
+        description: "std::sync::Arc を追加"
+      - location: "モジュール末尾"
+        description: "HashSetView 構造体と関連する型・トレイトを追加"
+      - location: "PersistentHashSet impl ブロック"
+        description: "view() メソッドを追加"
+
+  - file: tests/persistent_hashset_tests.rs
+    changes:
+      - location: "ファイル末尾"
+        description: "HashSetView のテストを追加"
+      - location: "ファイル末尾"
+        description: "FP 法則のプロパティテストを追加"

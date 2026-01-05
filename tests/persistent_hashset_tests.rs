@@ -929,3 +929,503 @@ fn test_clone_and_modify() {
     assert_eq!(set2.len(), 3);
     assert_eq!(set3.len(), 4);
 }
+
+// =============================================================================
+// HashSetView Tests
+// =============================================================================
+
+mod hashset_view_tests {
+    use super::*;
+
+    // =========================================================================
+    // Phase 1: HashSetView basic structure and view() method
+    // =========================================================================
+
+    #[rstest]
+    fn test_hashset_view_struct_exists() {
+        let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+        let _view = set.view();
+    }
+
+    #[rstest]
+    fn test_view_empty_set() {
+        let set: PersistentHashSet<i32> = PersistentHashSet::new();
+        let view = set.view();
+        assert_eq!(view.iter().count(), 0);
+    }
+
+    #[rstest]
+    fn test_view_non_empty_set() {
+        let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+        let view = set.view();
+        assert_eq!(view.iter().count(), 3);
+    }
+
+    #[rstest]
+    fn test_view_preserves_elements() {
+        let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+        let view = set.view();
+        let collected: PersistentHashSet<i32> = view.iter().collect();
+        assert_eq!(collected, set);
+    }
+
+    #[rstest]
+    fn test_iter_empty_view() {
+        let set: PersistentHashSet<i32> = PersistentHashSet::new();
+        let count = set.view().iter().count();
+        assert_eq!(count, 0);
+    }
+
+    #[rstest]
+    fn test_iter_multiple_times() {
+        let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+        let view = set.view();
+
+        let count1 = view.iter().count();
+        let count2 = view.iter().count();
+
+        assert_eq!(count1, 3);
+        assert_eq!(count2, 3);
+    }
+
+    // =========================================================================
+    // Phase 2: filter operation
+    // =========================================================================
+
+    #[rstest]
+    fn test_filter_empty_view() {
+        let set: PersistentHashSet<i32> = PersistentHashSet::new();
+        let result: PersistentHashSet<i32> = set.view().filter(|_| true).collect();
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_filter_single_element_match() {
+        let set: PersistentHashSet<i32> = [42].into_iter().collect();
+        let result: PersistentHashSet<i32> = set.view().filter(|x| *x == 42).collect();
+        assert_eq!(result.len(), 1);
+        assert!(result.contains(&42));
+    }
+
+    #[rstest]
+    fn test_filter_single_element_no_match() {
+        let set: PersistentHashSet<i32> = [42].into_iter().collect();
+        let result: PersistentHashSet<i32> = set.view().filter(|x| *x != 42).collect();
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_filter_evens() {
+        let set: PersistentHashSet<i32> = [1, 2, 3, 4, 5].into_iter().collect();
+        let result: PersistentHashSet<i32> = set.view().filter(|x| *x % 2 == 0).collect();
+
+        assert_eq!(result.len(), 2);
+        assert!(result.contains(&2));
+        assert!(result.contains(&4));
+        assert!(!result.contains(&1));
+        assert!(!result.contains(&3));
+        assert!(!result.contains(&5));
+    }
+
+    #[rstest]
+    fn test_filter_chain() {
+        let set: PersistentHashSet<i32> = (1..=20).collect();
+        let result: PersistentHashSet<i32> = set
+            .view()
+            .filter(|x| *x % 2 == 0)
+            .filter(|x| *x % 3 == 0)
+            .collect();
+
+        assert_eq!(result.len(), 3);
+        assert!(result.contains(&6));
+        assert!(result.contains(&12));
+        assert!(result.contains(&18));
+    }
+
+    #[rstest]
+    fn test_filter_empty_law() {
+        let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+        let result: PersistentHashSet<i32> = set.view().filter(|_| false).collect();
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_filter_identity_law() {
+        let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+        let result: PersistentHashSet<i32> = set.view().filter(|_| true).collect();
+        assert_eq!(result, set);
+    }
+
+    #[rstest]
+    fn test_filter_composition_law() {
+        let set: PersistentHashSet<i32> = (1..=20).collect();
+
+        let chained: PersistentHashSet<i32> = set
+            .view()
+            .filter(|x| *x % 2 == 0)
+            .filter(|x| *x > 10)
+            .collect();
+
+        let combined: PersistentHashSet<i32> =
+            set.view().filter(|x| *x % 2 == 0 && *x > 10).collect();
+
+        assert_eq!(chained, combined);
+    }
+
+    // =========================================================================
+    // Phase 3: map operation
+    // =========================================================================
+
+    #[rstest]
+    fn test_map_empty_view() {
+        let set: PersistentHashSet<i32> = PersistentHashSet::new();
+        let result: PersistentHashSet<i32> = set.view().map(|x| x * 2).collect();
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_map_single_element() {
+        let set: PersistentHashSet<i32> = [42].into_iter().collect();
+        let result: PersistentHashSet<i32> = set.view().map(|x| x * 2).collect();
+        assert_eq!(result.len(), 1);
+        assert!(result.contains(&84));
+    }
+
+    #[rstest]
+    fn test_map_double() {
+        let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+        let doubled: PersistentHashSet<i32> = set.view().map(|x| x * 2).collect();
+
+        assert_eq!(doubled.len(), 3);
+        assert!(doubled.contains(&2));
+        assert!(doubled.contains(&4));
+        assert!(doubled.contains(&6));
+    }
+
+    #[rstest]
+    fn test_map_type_conversion() {
+        let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+        let strings: PersistentHashSet<String> = set.view().map(|x| x.to_string()).collect();
+
+        assert_eq!(strings.len(), 3);
+        assert!(strings.contains("1"));
+        assert!(strings.contains("2"));
+        assert!(strings.contains("3"));
+    }
+
+    #[rstest]
+    fn test_map_with_duplicates() {
+        let set: PersistentHashSet<i32> = [1, 2, 3, 4, 5].into_iter().collect();
+        let parities: PersistentHashSet<i32> = set.view().map(|x| x % 2).collect();
+
+        assert_eq!(parities.len(), 2);
+        assert!(parities.contains(&0));
+        assert!(parities.contains(&1));
+    }
+
+    #[rstest]
+    fn test_map_identity_law() {
+        let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+        let result: PersistentHashSet<i32> = set.view().map(|x| x).collect();
+        assert_eq!(result, set);
+    }
+
+    #[rstest]
+    fn test_map_composition_law() {
+        let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+
+        let chained: PersistentHashSet<i32> = set.view().map(|x| x * 2).map(|x| x + 10).collect();
+
+        let composed: PersistentHashSet<i32> = set.view().map(|x| (x * 2) + 10).collect();
+
+        assert_eq!(chained, composed);
+    }
+
+    // =========================================================================
+    // Phase 4: flat_map operation
+    // =========================================================================
+
+    #[rstest]
+    fn test_flat_map_empty_view() {
+        let set: PersistentHashSet<i32> = PersistentHashSet::new();
+        let result: PersistentHashSet<i32> = set
+            .view()
+            .flat_map(|x| vec![x, x + 1].into_iter())
+            .collect();
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_flat_map_single_element() {
+        let set: PersistentHashSet<i32> = [1].into_iter().collect();
+        let result: PersistentHashSet<i32> = set
+            .view()
+            .flat_map(|x| vec![x, x + 10, x + 100].into_iter())
+            .collect();
+
+        assert_eq!(result.len(), 3);
+        assert!(result.contains(&1));
+        assert!(result.contains(&11));
+        assert!(result.contains(&101));
+    }
+
+    #[rstest]
+    fn test_flat_map_multiple_elements() {
+        let set: PersistentHashSet<i32> = [1, 2].into_iter().collect();
+        let result: PersistentHashSet<i32> = set
+            .view()
+            .flat_map(|x| vec![x, x * 10].into_iter())
+            .collect();
+
+        assert_eq!(result.len(), 4);
+        assert!(result.contains(&1));
+        assert!(result.contains(&10));
+        assert!(result.contains(&2));
+        assert!(result.contains(&20));
+    }
+
+    #[rstest]
+    fn test_flat_map_with_empty_result() {
+        let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+        let result: PersistentHashSet<i32> =
+            set.view().flat_map(|_| std::iter::empty::<i32>()).collect();
+
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_flat_map_with_duplicates() {
+        let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+        let result: PersistentHashSet<i32> = set
+            .view()
+            .flat_map(|x| vec![x % 2, x % 2 + 10].into_iter())
+            .collect();
+
+        assert_eq!(result.len(), 4);
+        assert!(result.contains(&0));
+        assert!(result.contains(&1));
+        assert!(result.contains(&10));
+        assert!(result.contains(&11));
+    }
+
+    #[rstest]
+    fn test_flat_map_left_identity_law() {
+        fn function(x: i32) -> impl Iterator<Item = i32> {
+            vec![x, x * 2].into_iter()
+        }
+
+        let value = 5;
+        let single: PersistentHashSet<i32> = [value].into_iter().collect();
+        let flat_mapped: PersistentHashSet<i32> = single.view().flat_map(function).collect();
+
+        let expected: PersistentHashSet<i32> = function(value).collect();
+
+        assert_eq!(flat_mapped, expected);
+    }
+
+    #[rstest]
+    fn test_flat_map_right_identity_law() {
+        let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+        let result: PersistentHashSet<i32> = set.view().flat_map(std::iter::once).collect();
+
+        assert_eq!(result, set);
+    }
+
+    #[rstest]
+    fn test_flat_map_associativity_law() {
+        fn function1(x: i32) -> impl Iterator<Item = i32> {
+            vec![x, x + 1].into_iter()
+        }
+
+        fn function2(x: i32) -> impl Iterator<Item = i32> {
+            vec![x * 10].into_iter()
+        }
+
+        let set: PersistentHashSet<i32> = [1, 2].into_iter().collect();
+
+        let left: PersistentHashSet<i32> =
+            set.view().flat_map(function1).flat_map(function2).collect();
+
+        let right: PersistentHashSet<i32> = set
+            .view()
+            .flat_map(|x| function1(x).flat_map(function2))
+            .collect();
+
+        assert_eq!(left, right);
+    }
+
+    // =========================================================================
+    // Phase 6: Utility methods (any, all, count, is_empty, Clone)
+    // =========================================================================
+
+    #[rstest]
+    fn test_any_empty_view() {
+        let set: PersistentHashSet<i32> = PersistentHashSet::new();
+        assert!(!set.view().any(|_| true));
+    }
+
+    #[rstest]
+    fn test_any_all_false() {
+        let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+        assert!(!set.view().any(|x| *x > 10));
+    }
+
+    #[rstest]
+    fn test_any_some_true() {
+        let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+        assert!(set.view().any(|x| *x == 2));
+    }
+
+    #[rstest]
+    fn test_any_all_true() {
+        let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+        assert!(set.view().any(|x| *x > 0));
+    }
+
+    #[rstest]
+    fn test_all_empty_view() {
+        let set: PersistentHashSet<i32> = PersistentHashSet::new();
+        assert!(set.view().all(|_| false));
+    }
+
+    #[rstest]
+    fn test_all_all_false() {
+        let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+        assert!(!set.view().all(|x| *x > 10));
+    }
+
+    #[rstest]
+    fn test_all_some_true() {
+        let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+        assert!(!set.view().all(|x| *x > 1));
+    }
+
+    #[rstest]
+    fn test_all_all_true() {
+        let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+        assert!(set.view().all(|x| *x > 0));
+    }
+
+    #[rstest]
+    fn test_count_empty_view() {
+        let set: PersistentHashSet<i32> = PersistentHashSet::new();
+        assert_eq!(set.view().count(), 0);
+    }
+
+    #[rstest]
+    fn test_count_non_empty_view() {
+        let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+        assert_eq!(set.view().count(), 3);
+    }
+
+    #[rstest]
+    fn test_count_after_filter() {
+        let set: PersistentHashSet<i32> = [1, 2, 3, 4, 5].into_iter().collect();
+        assert_eq!(set.view().filter(|x| *x % 2 == 0).count(), 2);
+    }
+
+    #[rstest]
+    fn test_is_empty_true() {
+        let set: PersistentHashSet<i32> = PersistentHashSet::new();
+        assert!(set.view().is_empty());
+    }
+
+    #[rstest]
+    fn test_is_empty_false() {
+        let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+        assert!(!set.view().is_empty());
+    }
+
+    #[rstest]
+    fn test_is_empty_after_filter_to_empty() {
+        let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+        assert!(set.view().filter(|x| *x > 100).is_empty());
+    }
+
+    #[rstest]
+    fn test_clone_view() {
+        let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+        let view1 = set.view();
+        let view2 = view1.clone();
+
+        let result1: PersistentHashSet<i32> = view1.collect();
+        let result2: PersistentHashSet<i32> = view2.collect();
+
+        assert_eq!(result1, result2);
+    }
+
+    #[rstest]
+    fn test_clone_filtered_view() {
+        let set: PersistentHashSet<i32> = [1, 2, 3, 4, 5].into_iter().collect();
+        let filtered = set.view().filter(|x| *x % 2 == 0);
+        let cloned = filtered.clone();
+
+        let result1: PersistentHashSet<i32> = filtered.collect();
+        let result2: PersistentHashSet<i32> = cloned.collect();
+
+        assert_eq!(result1, result2);
+    }
+
+    // =========================================================================
+    // Composite transformation tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_filter_map_chain() {
+        let set: PersistentHashSet<i32> = (1..=10).collect();
+        let result: PersistentHashSet<i32> =
+            set.view().filter(|x| *x % 2 == 0).map(|x| x * 10).collect();
+
+        assert_eq!(result.len(), 5);
+        assert!(result.contains(&20));
+        assert!(result.contains(&40));
+        assert!(result.contains(&60));
+        assert!(result.contains(&80));
+        assert!(result.contains(&100));
+    }
+
+    #[rstest]
+    fn test_map_filter_chain() {
+        let set: PersistentHashSet<i32> = (1..=5).collect();
+        let result: PersistentHashSet<i32> = set.view().map(|x| x * 2).filter(|x| *x > 5).collect();
+
+        assert_eq!(result.len(), 3);
+        assert!(result.contains(&6));
+        assert!(result.contains(&8));
+        assert!(result.contains(&10));
+    }
+
+    #[rstest]
+    fn test_filter_flat_map_chain() {
+        let set: PersistentHashSet<i32> = [1, 2, 3, 4].into_iter().collect();
+        let result: PersistentHashSet<i32> = set
+            .view()
+            .filter(|x| *x % 2 == 0)
+            .flat_map(|x| vec![x, x * 100].into_iter())
+            .collect();
+
+        assert_eq!(result.len(), 4);
+        assert!(result.contains(&2));
+        assert!(result.contains(&200));
+        assert!(result.contains(&4));
+        assert!(result.contains(&400));
+    }
+
+    #[rstest]
+    fn test_complex_chain() {
+        let set: PersistentHashSet<i32> = (1..=10).collect();
+        let result: PersistentHashSet<String> = set
+            .view()
+            .filter(|x| *x % 2 == 0)
+            .map(|x| x * 3)
+            .filter(|x| *x > 10)
+            .map(|x| format!("value_{}", x))
+            .collect();
+
+        assert_eq!(result.len(), 4);
+        assert!(result.contains("value_12"));
+        assert!(result.contains("value_18"));
+        assert!(result.contains("value_24"));
+        assert!(result.contains("value_30"));
+    }
+}
