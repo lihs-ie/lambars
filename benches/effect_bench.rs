@@ -373,6 +373,233 @@ fn benchmark_state_modify(criterion: &mut Criterion) {
 }
 
 // =============================================================================
+// AsyncIO Control Flow Benchmarks
+// =============================================================================
+
+fn benchmark_async_io_retry(criterion: &mut Criterion) {
+    use lambars::effect::AsyncIO;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let mut group = criterion.benchmark_group("async_io_retry");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+
+    // retry_with_factory: success on first attempt (no actual retry)
+    group.bench_function("retry_success_first", |bencher| {
+        bencher.iter(|| {
+            let result = runtime.block_on(async {
+                AsyncIO::retry_with_factory(|| AsyncIO::pure(Ok::<i32, &str>(42)), 3)
+                    .run_async()
+                    .await
+            });
+            black_box(result)
+        });
+    });
+
+    // retry_with_factory: success after 2 failures
+    group.bench_function("retry_success_third", |bencher| {
+        bencher.iter(|| {
+            let counter = Arc::new(AtomicUsize::new(0));
+            let counter_clone = counter.clone();
+
+            let result = runtime.block_on(async {
+                AsyncIO::retry_with_factory(
+                    move || {
+                        let c = counter_clone.clone();
+                        AsyncIO::new(move || {
+                            let c = c.clone();
+                            async move {
+                                let count = c.fetch_add(1, Ordering::SeqCst);
+                                if count < 2 { Err("fail") } else { Ok(42) }
+                            }
+                        })
+                    },
+                    5,
+                )
+                .run_async()
+                .await
+            });
+            black_box(result)
+        });
+    });
+
+    group.finish();
+}
+
+fn benchmark_async_io_par(criterion: &mut Criterion) {
+    use lambars::effect::AsyncIO;
+
+    let mut group = criterion.benchmark_group("async_io_par");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+
+    // par: two pure values
+    group.bench_function("par_pure_2", |bencher| {
+        bencher.iter(|| {
+            let result = runtime
+                .block_on(async { AsyncIO::pure(1).par(AsyncIO::pure(2)).run_async().await });
+            black_box(result)
+        });
+    });
+
+    // par3: three pure values
+    group.bench_function("par3_pure_3", |bencher| {
+        bencher.iter(|| {
+            let result = runtime.block_on(async {
+                AsyncIO::pure(1)
+                    .par3(AsyncIO::pure(2), AsyncIO::pure(3))
+                    .run_async()
+                    .await
+            });
+            black_box(result)
+        });
+    });
+
+    // race_result: two pure values
+    group.bench_function("race_result_pure", |bencher| {
+        bencher.iter(|| {
+            let result = runtime.block_on(async {
+                AsyncIO::pure(1)
+                    .race_result(AsyncIO::pure(2))
+                    .run_async()
+                    .await
+            });
+            black_box(result)
+        });
+    });
+
+    group.finish();
+}
+
+fn benchmark_async_io_bracket(criterion: &mut Criterion) {
+    use lambars::effect::AsyncIO;
+
+    let mut group = criterion.benchmark_group("async_io_bracket");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+
+    // bracket: simple acquire-use-release
+    group.bench_function("bracket_simple", |bencher| {
+        bencher.iter(|| {
+            let result = runtime.block_on(async {
+                AsyncIO::bracket(
+                    || AsyncIO::pure(42),
+                    |resource| AsyncIO::pure(resource * 2),
+                    |_| AsyncIO::pure(()),
+                )
+                .run_async()
+                .await
+            });
+            black_box(result)
+        });
+    });
+
+    // finally_async: simple cleanup
+    group.bench_function("finally_async_simple", |bencher| {
+        bencher.iter(|| {
+            let result = runtime.block_on(async {
+                AsyncIO::pure(42)
+                    .finally_async(|| async {})
+                    .run_async()
+                    .await
+            });
+            black_box(result)
+        });
+    });
+
+    // on_error: success case (callback not called)
+    group.bench_function("on_error_success", |bencher| {
+        bencher.iter(|| {
+            let result = runtime.block_on(async {
+                AsyncIO::pure(Ok::<i32, &str>(42))
+                    .on_error(|_| async {})
+                    .run_async()
+                    .await
+            });
+            black_box(result)
+        });
+    });
+
+    group.finish();
+}
+
+fn benchmark_async_io_timeout(criterion: &mut Criterion) {
+    use lambars::effect::AsyncIO;
+    use std::time::Duration;
+
+    let mut group = criterion.benchmark_group("async_io_timeout");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+
+    // timeout_result: completes before timeout
+    group.bench_function("timeout_result_success", |bencher| {
+        bencher.iter(|| {
+            let result = runtime.block_on(async {
+                AsyncIO::pure(42)
+                    .timeout_result(Duration::from_secs(10))
+                    .run_async()
+                    .await
+            });
+            black_box(result)
+        });
+    });
+
+    group.finish();
+}
+
+fn benchmark_async_io_overhead_comparison(criterion: &mut Criterion) {
+    use lambars::effect::AsyncIO;
+
+    let mut group = criterion.benchmark_group("async_io_overhead");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+
+    // Baseline: pure value
+    group.bench_function("baseline_pure", |bencher| {
+        bencher.iter(|| {
+            let result = runtime.block_on(async { AsyncIO::pure(42).run_async().await });
+            black_box(result)
+        });
+    });
+
+    // With finally_async (overhead of catch_unwind)
+    group.bench_function("with_finally_async", |bencher| {
+        bencher.iter(|| {
+            let result = runtime.block_on(async {
+                AsyncIO::pure(42)
+                    .finally_async(|| async {})
+                    .run_async()
+                    .await
+            });
+            black_box(result)
+        });
+    });
+
+    // With on_error (overhead of pattern matching)
+    group.bench_function("with_on_error", |bencher| {
+        bencher.iter(|| {
+            let result = runtime.block_on(async {
+                AsyncIO::pure(Ok::<i32, &str>(42))
+                    .on_error(|_| async {})
+                    .run_async()
+                    .await
+            });
+            black_box(result)
+        });
+    });
+
+    // With retry (no actual retry, just setup overhead)
+    group.bench_function("with_retry_no_retry", |bencher| {
+        bencher.iter(|| {
+            let result = runtime.block_on(async {
+                AsyncIO::retry_with_factory(|| AsyncIO::pure(Ok::<i32, &str>(42)), 1)
+                    .run_async()
+                    .await
+            });
+            black_box(result)
+        });
+    });
+
+    group.finish();
+}
+
+// =============================================================================
 // Criterion Group and Main
 // =============================================================================
 
@@ -387,7 +614,12 @@ criterion_group!(
     benchmark_reader_chain,
     benchmark_state_run,
     benchmark_state_chain,
-    benchmark_state_modify
+    benchmark_state_modify,
+    benchmark_async_io_retry,
+    benchmark_async_io_par,
+    benchmark_async_io_bracket,
+    benchmark_async_io_timeout,
+    benchmark_async_io_overhead_comparison
 );
 
 criterion_main!(benches);
