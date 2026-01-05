@@ -1,0 +1,1043 @@
+# Result-Based Error Handling for lift_io/lift_async_io 実装計画
+#
+# 要件定義: docs/internal/requirements/20260105_1727_result_error_handling.yaml
+# 技術要件:
+#   - Rust: 1.92.0
+#   - edition: 2024
+#   - testing: rstest
+#
+# 実装方針:
+#   1. TDD（テスト駆動開発）でテストを先に書く
+#   2. 既存の TimeoutError パターンを参考にエラー型を設計
+#   3. 後方互換性を維持しつつ、新しい安全な API を追加
+#   4. 同期版（IO）を先に実装し、非同期版（AsyncIO）は同じパターンで実装
+
+version: "1.0.0"
+name: "Result-Based Error Handling Implementation Plan"
+requirement_file: "docs/internal/requirements/20260105_1727_result_error_handling.yaml"
+
+# 実装順序の概要
+implementation_order:
+  - step: 1
+    name: "エラー型の定義"
+    items:
+      - AlreadyConsumedError 構造体の定義
+      - EffectError 列挙型の定義
+      - Display/Error トレイト実装
+      - mod.rs からの re-export
+
+  - step: 2
+    name: "ReaderT の try_lift_io 実装"
+    items:
+      - try_lift_io メソッドの追加
+      - 既存 lift_io メソッドへの非推奨マーク
+      - ユニットテストの追加
+
+  - step: 3
+    name: "StateT の try_lift_io 実装"
+    items:
+      - try_lift_io メソッドの追加
+      - 既存 lift_io メソッドへの非推奨マーク
+      - ユニットテストの追加
+
+  - step: 4
+    name: "ReaderT の try_lift_async_io 実装"
+    items:
+      - try_lift_async_io メソッドの追加
+      - 既存 lift_async_io メソッドへの非推奨マーク
+      - ユニットテストの追加
+
+  - step: 5
+    name: "StateT の try_lift_async_io 実装"
+    items:
+      - try_lift_async_io メソッドの追加
+      - 既存 lift_async_io メソッドへの非推奨マーク
+      - ユニットテストの追加
+
+# 実装計画詳細
+implementation_plan:
+  # ============================================================================
+  # 1. エラー型の定義
+  # ============================================================================
+  - id: impl_error_types
+    requirement_id: error_type_definition
+    name: "EffectError および AlreadyConsumedError の定義"
+    priority: 1
+    description: |
+      Effect システムで発生するエラーを表現する代数的データ型を定義する。
+      既存の TimeoutError の設計パターンに従い、以下を実装する：
+      - AlreadyConsumedError: IO/AsyncIO が既に消費されたことを示す構造体
+      - EffectError: Effect システムのエラーを表現する列挙型
+      - Display, Error トレイトの実装
+
+    files:
+      - path: src/effect/error.rs
+        description: |
+          新規ファイル。エラー型の定義を行う。
+          AlreadyConsumedError と EffectError を定義し、
+          std::fmt::Display と std::error::Error を実装する。
+
+      - path: src/effect/mod.rs
+        description: |
+          error モジュールの宣言と re-export を追加する。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          AlreadyConsumedError 構造体を定義する。
+          どのトランスフォーマーのどのメソッドでエラーが発生したかを記録する。
+          effect_type フィールドで IO か AsyncIO かを明確に区別する。
+        code_outline: |
+          /// Represents an error when an IO or AsyncIO has already been consumed.
+          ///
+          /// This error occurs when a lifted IO/AsyncIO is executed more than once.
+          /// IO and AsyncIO are designed to be consumed exactly once, and attempting
+          /// to execute them multiple times results in this error.
+          ///
+          /// # Examples
+          ///
+          /// ```rust
+          /// use lambars::effect::AlreadyConsumedError;
+          ///
+          /// let error = AlreadyConsumedError {
+          ///     transformer_name: "ReaderT",
+          ///     method_name: "try_lift_io",
+          ///     effect_type: "IO",
+          /// };
+          /// assert_eq!(
+          ///     format!("{}", error),
+          ///     "ReaderT::try_lift_io: IO already consumed. Use the transformer only once."
+          /// );
+          /// ```
+          #[derive(Debug, Clone, PartialEq, Eq)]
+          pub struct AlreadyConsumedError {
+              /// The name of the transformer where the error occurred.
+              pub transformer_name: &'static str,
+              /// The name of the method where the error occurred.
+              pub method_name: &'static str,
+              /// The type of effect that was consumed ("IO" or "AsyncIO").
+              pub effect_type: &'static str,
+          }
+
+      - step: 2
+        description: |
+          EffectError 列挙型を定義する。
+          現時点では AlreadyConsumed のみだが、将来的に他のエラーも追加可能。
+        code_outline: |
+          /// Represents errors that can occur in the effect system.
+          ///
+          /// This enum provides a unified error type for all effect-related errors.
+          /// Currently, it only contains `AlreadyConsumed`, but it is designed to be
+          /// extensible for future error types.
+          ///
+          /// # Examples
+          ///
+          /// ```rust
+          /// use lambars::effect::{EffectError, AlreadyConsumedError};
+          ///
+          /// let error = EffectError::AlreadyConsumed(AlreadyConsumedError {
+          ///     transformer_name: "ReaderT",
+          ///     method_name: "try_lift_io",
+          ///     effect_type: "IO",
+          /// });
+          /// println!("{}", error);
+          /// ```
+          #[derive(Debug, Clone, PartialEq, Eq)]
+          pub enum EffectError {
+              /// The IO/AsyncIO has already been consumed.
+              AlreadyConsumed(AlreadyConsumedError),
+          }
+
+      - step: 3
+        description: |
+          AlreadyConsumedError に Display トレイトを実装する。
+          effect_type を使用して具体的なエラーメッセージを生成する。
+        code_outline: |
+          impl std::fmt::Display for AlreadyConsumedError {
+              fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                  write!(
+                      formatter,
+                      "{}::{}: {} already consumed. Use the transformer only once.",
+                      self.transformer_name, self.method_name, self.effect_type
+                  )
+              }
+          }
+
+      - step: 4
+        description: |
+          EffectError に Display トレイトを実装する。
+        code_outline: |
+          impl std::fmt::Display for EffectError {
+              fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                  match self {
+                      EffectError::AlreadyConsumed(error) => write!(formatter, "{}", error),
+                  }
+              }
+          }
+
+      - step: 5
+        description: |
+          Error トレイトを実装する。
+          AlreadyConsumed は原因エラーではなくエラーそのものなので、
+          source() は None を返す（デフォルト実装を使用）。
+        code_outline: |
+          impl std::error::Error for AlreadyConsumedError {}
+
+          impl std::error::Error for EffectError {}
+
+      - step: 6
+        description: |
+          mod.rs にモジュール宣言と re-export を追加する。
+        code_outline: |
+          // src/effect/mod.rs に追加
+          mod error;
+
+          pub use error::AlreadyConsumedError;
+          pub use error::EffectError;
+
+    tests:
+      - name: test_already_consumed_error_display
+        description: AlreadyConsumedError の Display 実装をテスト
+        test_type: unit
+        code_outline: |
+          #[test]
+          fn test_already_consumed_error_display() {
+              let error = AlreadyConsumedError {
+                  transformer_name: "ReaderT",
+                  method_name: "try_lift_io",
+                  effect_type: "IO",
+              };
+              assert_eq!(
+                  format!("{}", error),
+                  "ReaderT::try_lift_io: IO already consumed. Use the transformer only once."
+              );
+          }
+
+      - name: test_effect_error_display
+        description: EffectError の Display 実装をテスト
+        test_type: unit
+        code_outline: |
+          #[test]
+          fn test_effect_error_display() {
+              let error = EffectError::AlreadyConsumed(AlreadyConsumedError {
+                  transformer_name: "StateT",
+                  method_name: "try_lift_async_io",
+                  effect_type: "AsyncIO",
+              });
+              assert_eq!(
+                  format!("{}", error),
+                  "StateT::try_lift_async_io: AsyncIO already consumed. Use the transformer only once."
+              );
+          }
+
+      - name: test_already_consumed_error_equality
+        description: AlreadyConsumedError の PartialEq 実装をテスト
+        test_type: unit
+        code_outline: |
+          #[test]
+          fn test_already_consumed_error_equality() {
+              let error1 = AlreadyConsumedError {
+                  transformer_name: "ReaderT",
+                  method_name: "try_lift_io",
+                  effect_type: "IO",
+              };
+              let error2 = AlreadyConsumedError {
+                  transformer_name: "ReaderT",
+                  method_name: "try_lift_io",
+                  effect_type: "IO",
+              };
+              let error3 = AlreadyConsumedError {
+                  transformer_name: "StateT",
+                  method_name: "try_lift_io",
+                  effect_type: "IO",
+              };
+              assert_eq!(error1, error2);
+              assert_ne!(error1, error3);
+          }
+
+      - name: test_effect_error_equality
+        description: EffectError の PartialEq 実装をテスト
+        test_type: unit
+        code_outline: |
+          #[test]
+          fn test_effect_error_equality() {
+              let error1 = EffectError::AlreadyConsumed(AlreadyConsumedError {
+                  transformer_name: "ReaderT",
+                  method_name: "try_lift_io",
+                  effect_type: "IO",
+              });
+              let error2 = EffectError::AlreadyConsumed(AlreadyConsumedError {
+                  transformer_name: "ReaderT",
+                  method_name: "try_lift_io",
+                  effect_type: "IO",
+              });
+              assert_eq!(error1, error2);
+          }
+
+      - name: test_already_consumed_error_clone
+        description: AlreadyConsumedError の Clone 実装をテスト
+        test_type: unit
+        code_outline: |
+          #[test]
+          fn test_already_consumed_error_clone() {
+              let error = AlreadyConsumedError {
+                  transformer_name: "ReaderT",
+                  method_name: "try_lift_io",
+                  effect_type: "IO",
+              };
+              let cloned = error.clone();
+              assert_eq!(error, cloned);
+          }
+
+      - name: test_effect_error_clone
+        description: EffectError の Clone 実装をテスト
+        test_type: unit
+        code_outline: |
+          #[test]
+          fn test_effect_error_clone() {
+              let error = EffectError::AlreadyConsumed(AlreadyConsumedError {
+                  transformer_name: "ReaderT",
+                  method_name: "try_lift_io",
+                  effect_type: "IO",
+              });
+              let cloned = error.clone();
+              assert_eq!(error, cloned);
+          }
+
+      - name: test_already_consumed_error_debug
+        description: AlreadyConsumedError の Debug 実装をテスト
+        test_type: unit
+        code_outline: |
+          #[test]
+          fn test_already_consumed_error_debug() {
+              let error = AlreadyConsumedError {
+                  transformer_name: "ReaderT",
+                  method_name: "try_lift_io",
+                  effect_type: "IO",
+              };
+              let debug_string = format!("{:?}", error);
+              assert!(debug_string.contains("AlreadyConsumedError"));
+              assert!(debug_string.contains("ReaderT"));
+              assert!(debug_string.contains("try_lift_io"));
+              assert!(debug_string.contains("IO"));
+          }
+
+      - name: test_effect_error_debug
+        description: EffectError の Debug 実装をテスト
+        test_type: unit
+        code_outline: |
+          #[test]
+          fn test_effect_error_debug() {
+              let error = EffectError::AlreadyConsumed(AlreadyConsumedError {
+                  transformer_name: "ReaderT",
+                  method_name: "try_lift_io",
+                  effect_type: "IO",
+              });
+              let debug_string = format!("{:?}", error);
+              assert!(debug_string.contains("AlreadyConsumed"));
+          }
+
+      - name: test_effect_error_source
+        description: EffectError の Error::source 実装をテスト（None を返す）
+        test_type: unit
+        code_outline: |
+          #[test]
+          fn test_effect_error_source() {
+              use std::error::Error;
+
+              let error = EffectError::AlreadyConsumed(AlreadyConsumedError {
+                  transformer_name: "ReaderT",
+                  method_name: "try_lift_io",
+                  effect_type: "IO",
+              });
+              assert!(error.source().is_none());
+          }
+
+      - name: test_already_consumed_error_is_error
+        description: AlreadyConsumedError が std::error::Error を実装していることをテスト
+        test_type: unit
+        code_outline: |
+          #[test]
+          fn test_already_consumed_error_is_error() {
+              use std::error::Error;
+
+              let error = AlreadyConsumedError {
+                  transformer_name: "ReaderT",
+                  method_name: "try_lift_io",
+                  effect_type: "IO",
+              };
+              let _: &dyn Error = &error;
+          }
+
+    dependencies: []
+
+  # ============================================================================
+  # 2. ReaderT の try_lift_io 実装
+  # ============================================================================
+  - id: impl_reader_transformer_try_lift_io
+    requirement_id: try_lift_io_method
+    name: "ReaderT::try_lift_io の実装"
+    priority: 2
+    description: |
+      ReaderT に try_lift_io メソッドを追加する。
+      このメソッドは IO を ReaderT にリフトし、IO が既に消費されていた場合は
+      Result::Err(EffectError::AlreadyConsumed) を返す。
+
+      戻り値の型は ReaderT<R, IO<Result<A, EffectError>>> とする。
+      これにより、呼び出し側は run 後に Result を処理できる。
+
+    files:
+      - path: src/effect/reader_transformer.rs
+        description: |
+          try_lift_io メソッドを追加し、既存の lift_io メソッドに
+          #[deprecated] アトリビュートを追加する。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          error モジュールからエラー型をインポートする。
+        code_outline: |
+          use super::error::{AlreadyConsumedError, EffectError};
+
+      - step: 2
+        description: |
+          try_lift_io メソッドを実装する。
+          IO が消費済みの場合は Err を返し、それ以外は Ok を返す。
+        code_outline: |
+          /// Lifts an `IO` into `ReaderT`, returning `Result` instead of panicking.
+          ///
+          /// This is the safe version of [`lift_io`](Self::lift_io) that returns
+          /// an error instead of panicking when the IO is consumed more than once.
+          ///
+          /// # Arguments
+          ///
+          /// * `inner` - The IO computation to lift
+          ///
+          /// # Returns
+          ///
+          /// A `ReaderT` that, when run, returns `IO<Result<A, EffectError>>`.
+          /// The first execution returns `Ok(value)`, subsequent executions
+          /// return `Err(EffectError::AlreadyConsumed)`.
+          ///
+          /// # Examples
+          ///
+          /// ```rust
+          /// use lambars::effect::{ReaderT, IO, EffectError};
+          ///
+          /// let io = IO::pure(42);
+          /// let reader: ReaderT<String, IO<Result<i32, EffectError>>> =
+          ///     ReaderT::try_lift_io(io);
+          ///
+          /// let result = reader.run("env".to_string()).run_unsafe();
+          /// assert_eq!(result, Ok(42));
+          /// ```
+          #[must_use]
+          pub fn try_lift_io(inner: IO<A>) -> ReaderT<R, IO<Result<A, EffectError>>> {
+              let inner_rc = Rc::new(std::cell::RefCell::new(Some(inner)));
+              ReaderT::new(move |_| {
+                  match inner_rc.borrow_mut().take() {
+                      Some(io) => io.fmap(Ok),
+                      None => IO::pure(Err(EffectError::AlreadyConsumed(AlreadyConsumedError {
+                          transformer_name: "ReaderT",
+                          method_name: "try_lift_io",
+                          effect_type: "IO",
+                      }))),
+                  }
+              })
+          }
+
+      - step: 3
+        description: |
+          既存の lift_io メソッドに #[deprecated] アトリビュートを追加する。
+        code_outline: |
+          #[deprecated(
+              since = "0.2.0",
+              note = "Use try_lift_io instead, which returns Result instead of panicking"
+          )]
+          #[must_use]
+          pub fn lift_io(inner: IO<A>) -> Self {
+              // 既存の実装を維持
+          }
+
+    tests:
+      - name: test_reader_transformer_try_lift_io_success
+        description: try_lift_io が正常に動作することをテスト
+        test_type: unit
+        code_outline: |
+          #[test]
+          fn test_reader_transformer_try_lift_io_success() {
+              let io = IO::pure(42);
+              let reader: ReaderT<String, IO<Result<i32, EffectError>>> =
+                  ReaderT::try_lift_io(io);
+              let result = reader.run("env".to_string()).run_unsafe();
+              assert_eq!(result, Ok(42));
+          }
+
+      - name: test_reader_transformer_try_lift_io_already_consumed
+        description: try_lift_io が二度目の実行でエラーを返すことをテスト
+        test_type: unit
+        code_outline: |
+          #[test]
+          fn test_reader_transformer_try_lift_io_already_consumed() {
+              let io = IO::pure(42);
+              let reader: ReaderT<String, IO<Result<i32, EffectError>>> =
+                  ReaderT::try_lift_io(io);
+
+              let cloned = reader.clone();
+
+              let result1 = reader.run("env1".to_string()).run_unsafe();
+              assert_eq!(result1, Ok(42));
+
+              let result2 = cloned.run("env2".to_string()).run_unsafe();
+              assert!(matches!(
+                  result2,
+                  Err(EffectError::AlreadyConsumed(AlreadyConsumedError {
+                      transformer_name: "ReaderT",
+                      method_name: "try_lift_io",
+                      effect_type: "IO",
+                  }))
+              ));
+          }
+
+      - name: test_reader_transformer_try_lift_io_error_message
+        description: try_lift_io のエラーメッセージをテスト
+        test_type: unit
+        code_outline: |
+          #[test]
+          fn test_reader_transformer_try_lift_io_error_message() {
+              let io = IO::pure(42);
+              let reader: ReaderT<String, IO<Result<i32, EffectError>>> =
+                  ReaderT::try_lift_io(io);
+
+              let cloned = reader.clone();
+              let _ = reader.run("env".to_string()).run_unsafe();
+              let result = cloned.run("env".to_string()).run_unsafe();
+
+              match result {
+                  Err(error) => {
+                      assert_eq!(
+                          error.to_string(),
+                          "ReaderT::try_lift_io: IO already consumed. Use the transformer only once."
+                      );
+                  }
+                  Ok(_) => panic!("Expected error"),
+              }
+          }
+
+    dependencies:
+      - impl_error_types
+
+  # ============================================================================
+  # 3. StateT の try_lift_io 実装
+  # ============================================================================
+  - id: impl_state_transformer_try_lift_io
+    requirement_id: try_lift_io_method
+    name: "StateT::try_lift_io の実装"
+    priority: 3
+    description: |
+      StateT に try_lift_io メソッドを追加する。
+      このメソッドは IO を StateT にリフトし、IO が既に消費されていた場合は
+      Result::Err(EffectError::AlreadyConsumed) を返す。
+
+      戻り値の型は StateT<S, IO<Result<(A, S), EffectError>>> とする。
+
+    files:
+      - path: src/effect/state_transformer.rs
+        description: |
+          try_lift_io メソッドを追加し、既存の lift_io メソッドに
+          #[deprecated] アトリビュートを追加する。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          error モジュールからエラー型をインポートする。
+        code_outline: |
+          use super::error::{AlreadyConsumedError, EffectError};
+
+      - step: 2
+        description: |
+          try_lift_io メソッドを実装する。
+        code_outline: |
+          /// Lifts an `IO` into `StateT`, returning `Result` instead of panicking.
+          ///
+          /// This is the safe version of [`lift_io`](Self::lift_io) that returns
+          /// an error instead of panicking when the IO is consumed more than once.
+          ///
+          /// # Arguments
+          ///
+          /// * `inner` - The IO computation to lift
+          ///
+          /// # Returns
+          ///
+          /// A `StateT` that, when run, returns `IO<Result<(A, S), EffectError>>`.
+          /// The first execution returns `Ok((value, state))`, subsequent executions
+          /// return `Err(EffectError::AlreadyConsumed)`.
+          ///
+          /// # Examples
+          ///
+          /// ```rust
+          /// use lambars::effect::{StateT, IO, EffectError};
+          ///
+          /// let io = IO::pure(42);
+          /// let state: StateT<String, IO<Result<(i32, String), EffectError>>> =
+          ///     StateT::try_lift_io(io);
+          ///
+          /// let result = state.run("initial".to_string()).run_unsafe();
+          /// assert_eq!(result, Ok((42, "initial".to_string())));
+          /// ```
+          #[must_use]
+          pub fn try_lift_io(inner: IO<A>) -> StateT<S, IO<Result<(A, S), EffectError>>> {
+              let inner_rc = Rc::new(std::cell::RefCell::new(Some(inner)));
+              StateT::new(move |state: S| {
+                  match inner_rc.borrow_mut().take() {
+                      Some(io) => io.fmap(move |value| Ok((value, state))),
+                      None => IO::pure(Err(EffectError::AlreadyConsumed(AlreadyConsumedError {
+                          transformer_name: "StateT",
+                          method_name: "try_lift_io",
+                          effect_type: "IO",
+                      }))),
+                  }
+              })
+          }
+
+      - step: 3
+        description: |
+          既存の lift_io メソッドに #[deprecated] アトリビュートを追加する。
+        code_outline: |
+          #[deprecated(
+              since = "0.2.0",
+              note = "Use try_lift_io instead, which returns Result instead of panicking"
+          )]
+          #[must_use]
+          pub fn lift_io(inner: IO<A>) -> Self {
+              // 既存の実装を維持
+          }
+
+    tests:
+      - name: test_state_transformer_try_lift_io_success
+        description: try_lift_io が正常に動作することをテスト
+        test_type: unit
+        code_outline: |
+          #[test]
+          fn test_state_transformer_try_lift_io_success() {
+              let io = IO::pure(42);
+              let state: StateT<String, IO<Result<(i32, String), EffectError>>> =
+                  StateT::try_lift_io(io);
+              let result = state.run("initial".to_string()).run_unsafe();
+              assert_eq!(result, Ok((42, "initial".to_string())));
+          }
+
+      - name: test_state_transformer_try_lift_io_already_consumed
+        description: try_lift_io が二度目の実行でエラーを返すことをテスト
+        test_type: unit
+        code_outline: |
+          #[test]
+          fn test_state_transformer_try_lift_io_already_consumed() {
+              let io = IO::pure(42);
+              let state: StateT<String, IO<Result<(i32, String), EffectError>>> =
+                  StateT::try_lift_io(io);
+
+              let cloned = state.clone();
+
+              let result1 = state.run("state1".to_string()).run_unsafe();
+              assert_eq!(result1, Ok((42, "state1".to_string())));
+
+              let result2 = cloned.run("state2".to_string()).run_unsafe();
+              assert!(matches!(
+                  result2,
+                  Err(EffectError::AlreadyConsumed(AlreadyConsumedError {
+                      transformer_name: "StateT",
+                      method_name: "try_lift_io",
+                      effect_type: "IO",
+                  }))
+              ));
+          }
+
+      - name: test_state_transformer_try_lift_io_error_message
+        description: try_lift_io のエラーメッセージをテスト
+        test_type: unit
+        code_outline: |
+          #[test]
+          fn test_state_transformer_try_lift_io_error_message() {
+              let io = IO::pure(42);
+              let state: StateT<String, IO<Result<(i32, String), EffectError>>> =
+                  StateT::try_lift_io(io);
+
+              let cloned = state.clone();
+              let _ = state.run("state".to_string()).run_unsafe();
+              let result = cloned.run("state".to_string()).run_unsafe();
+
+              match result {
+                  Err(error) => {
+                      assert_eq!(
+                          error.to_string(),
+                          "StateT::try_lift_io: IO already consumed. Use the transformer only once."
+                      );
+                  }
+                  Ok(_) => panic!("Expected error"),
+              }
+          }
+
+    dependencies:
+      - impl_error_types
+
+  # ============================================================================
+  # 4. ReaderT の try_lift_async_io 実装
+  # ============================================================================
+  - id: impl_reader_transformer_try_lift_async_io
+    requirement_id: try_lift_async_io_method
+    name: "ReaderT::try_lift_async_io の実装"
+    priority: 4
+    description: |
+      ReaderT に try_lift_async_io メソッドを追加する。
+      このメソッドは AsyncIO を ReaderT にリフトし、AsyncIO が既に消費されていた場合は
+      Result::Err(EffectError::AlreadyConsumed) を返す。
+
+      戻り値の型は ReaderT<R, AsyncIO<Result<A, EffectError>>> とする。
+
+    files:
+      - path: src/effect/reader_transformer.rs
+        description: |
+          try_lift_async_io メソッドを追加し、既存の lift_async_io メソッドに
+          #[deprecated] アトリビュートを追加する。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          try_lift_async_io メソッドを実装する。
+          Arc と Mutex を使用してスレッドセーフな消費状態の追跡を行う。
+        code_outline: |
+          /// Lifts an `AsyncIO` into `ReaderT`, returning `Result` instead of panicking.
+          ///
+          /// This is the safe version of [`lift_async_io`](Self::lift_async_io) that returns
+          /// an error instead of panicking when the AsyncIO is consumed more than once.
+          ///
+          /// # Arguments
+          ///
+          /// * `inner` - The AsyncIO computation to lift
+          ///
+          /// # Returns
+          ///
+          /// A `ReaderT` that, when run, returns `AsyncIO<Result<A, EffectError>>`.
+          /// The first execution returns `Ok(value)`, subsequent executions
+          /// return `Err(EffectError::AlreadyConsumed)`.
+          ///
+          /// # Examples
+          ///
+          /// ```rust,ignore
+          /// use lambars::effect::{ReaderT, AsyncIO, EffectError};
+          ///
+          /// #[tokio::main]
+          /// async fn main() {
+          ///     let async_io = AsyncIO::pure(42);
+          ///     let reader: ReaderT<String, AsyncIO<Result<i32, EffectError>>> =
+          ///         ReaderT::try_lift_async_io(async_io);
+          ///
+          ///     let result = reader.run("env".to_string()).run_async().await;
+          ///     assert_eq!(result, Ok(42));
+          /// }
+          /// ```
+          #[must_use]
+          pub fn try_lift_async_io(inner: AsyncIO<A>) -> ReaderT<R, AsyncIO<Result<A, EffectError>>>
+          where
+              A: Clone,
+          {
+              let inner_arc = std::sync::Arc::new(std::sync::Mutex::new(Some(inner)));
+              ReaderT::new(move |_| {
+                  let mut guard = inner_arc.lock().unwrap();
+                  match guard.take() {
+                      Some(async_io) => async_io.fmap(Ok),
+                      None => AsyncIO::pure(Err(EffectError::AlreadyConsumed(AlreadyConsumedError {
+                          transformer_name: "ReaderT",
+                          method_name: "try_lift_async_io",
+                          effect_type: "AsyncIO",
+                      }))),
+                  }
+              })
+          }
+
+      - step: 2
+        description: |
+          既存の lift_async_io メソッドに #[deprecated] アトリビュートを追加する。
+        code_outline: |
+          #[deprecated(
+              since = "0.2.0",
+              note = "Use try_lift_async_io instead, which returns Result instead of panicking"
+          )]
+          #[must_use]
+          pub fn lift_async_io(inner: AsyncIO<A>) -> Self
+          where
+              A: Clone,
+          {
+              // 既存の実装を維持
+          }
+
+    tests:
+      - name: test_reader_transformer_try_lift_async_io_success
+        description: try_lift_async_io が正常に動作することをテスト
+        test_type: unit
+        code_outline: |
+          #[tokio::test]
+          async fn test_reader_transformer_try_lift_async_io_success() {
+              let async_io = AsyncIO::pure(42);
+              let reader: ReaderT<String, AsyncIO<Result<i32, EffectError>>> =
+                  ReaderT::try_lift_async_io(async_io);
+              let result = reader.run("env".to_string()).run_async().await;
+              assert_eq!(result, Ok(42));
+          }
+
+      - name: test_reader_transformer_try_lift_async_io_already_consumed
+        description: try_lift_async_io が二度目の実行でエラーを返すことをテスト
+        test_type: unit
+        code_outline: |
+          #[tokio::test]
+          async fn test_reader_transformer_try_lift_async_io_already_consumed() {
+              let async_io = AsyncIO::pure(42);
+              let reader: ReaderT<String, AsyncIO<Result<i32, EffectError>>> =
+                  ReaderT::try_lift_async_io(async_io);
+
+              let cloned = reader.clone();
+
+              let result1 = reader.run("env1".to_string()).run_async().await;
+              assert_eq!(result1, Ok(42));
+
+              let result2 = cloned.run("env2".to_string()).run_async().await;
+              assert!(matches!(
+                  result2,
+                  Err(EffectError::AlreadyConsumed(AlreadyConsumedError {
+                      transformer_name: "ReaderT",
+                      method_name: "try_lift_async_io",
+                      effect_type: "AsyncIO",
+                  }))
+              ));
+          }
+
+      - name: test_reader_transformer_try_lift_async_io_error_message
+        description: try_lift_async_io のエラーメッセージをテスト
+        test_type: unit
+        code_outline: |
+          #[tokio::test]
+          async fn test_reader_transformer_try_lift_async_io_error_message() {
+              let async_io = AsyncIO::pure(42);
+              let reader: ReaderT<String, AsyncIO<Result<i32, EffectError>>> =
+                  ReaderT::try_lift_async_io(async_io);
+
+              let cloned = reader.clone();
+              let _ = reader.run("env".to_string()).run_async().await;
+              let result = cloned.run("env".to_string()).run_async().await;
+
+              match result {
+                  Err(error) => {
+                      assert_eq!(
+                          error.to_string(),
+                          "ReaderT::try_lift_async_io: AsyncIO already consumed. Use the transformer only once."
+                      );
+                  }
+                  Ok(_) => panic!("Expected error"),
+              }
+          }
+
+    dependencies:
+      - impl_error_types
+      - impl_reader_transformer_try_lift_io
+
+  # ============================================================================
+  # 5. StateT の try_lift_async_io 実装
+  # ============================================================================
+  - id: impl_state_transformer_try_lift_async_io
+    requirement_id: try_lift_async_io_method
+    name: "StateT::try_lift_async_io の実装"
+    priority: 5
+    description: |
+      StateT に try_lift_async_io メソッドを追加する。
+      このメソッドは AsyncIO を StateT にリフトし、AsyncIO が既に消費されていた場合は
+      Result::Err(EffectError::AlreadyConsumed) を返す。
+
+      戻り値の型は StateT<S, AsyncIO<Result<(A, S), EffectError>>> とする。
+
+    files:
+      - path: src/effect/state_transformer.rs
+        description: |
+          try_lift_async_io メソッドを追加し、既存の lift_async_io メソッドに
+          #[deprecated] アトリビュートを追加する。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          try_lift_async_io メソッドを実装する。
+        code_outline: |
+          /// Lifts an `AsyncIO` into `StateT`, returning `Result` instead of panicking.
+          ///
+          /// This is the safe version of [`lift_async_io`](Self::lift_async_io) that returns
+          /// an error instead of panicking when the AsyncIO is consumed more than once.
+          ///
+          /// # Arguments
+          ///
+          /// * `inner` - The AsyncIO computation to lift
+          ///
+          /// # Returns
+          ///
+          /// A `StateT` that, when run, returns `AsyncIO<Result<(A, S), EffectError>>`.
+          /// The first execution returns `Ok((value, state))`, subsequent executions
+          /// return `Err(EffectError::AlreadyConsumed)`.
+          ///
+          /// # Examples
+          ///
+          /// ```rust,ignore
+          /// use lambars::effect::{StateT, AsyncIO, EffectError};
+          ///
+          /// #[tokio::main]
+          /// async fn main() {
+          ///     let async_io = AsyncIO::pure(42);
+          ///     let state: StateT<String, AsyncIO<Result<(i32, String), EffectError>>> =
+          ///         StateT::try_lift_async_io(async_io);
+          ///
+          ///     let result = state.run("initial".to_string()).run_async().await;
+          ///     assert_eq!(result, Ok((42, "initial".to_string())));
+          /// }
+          /// ```
+          #[must_use]
+          pub fn try_lift_async_io(inner: AsyncIO<A>) -> StateT<S, AsyncIO<Result<(A, S), EffectError>>>
+          where
+              S: Clone,
+          {
+              let inner_arc = std::sync::Arc::new(std::sync::Mutex::new(Some(inner)));
+              StateT::new(move |state: S| {
+                  let mut guard = inner_arc.lock().unwrap();
+                  match guard.take() {
+                      Some(async_io) => async_io.fmap(move |value| Ok((value, state))),
+                      None => AsyncIO::pure(Err(EffectError::AlreadyConsumed(AlreadyConsumedError {
+                          transformer_name: "StateT",
+                          method_name: "try_lift_async_io",
+                          effect_type: "AsyncIO",
+                      }))),
+                  }
+              })
+          }
+
+      - step: 2
+        description: |
+          既存の lift_async_io メソッドに #[deprecated] アトリビュートを追加する。
+        code_outline: |
+          #[deprecated(
+              since = "0.2.0",
+              note = "Use try_lift_async_io instead, which returns Result instead of panicking"
+          )]
+          #[must_use]
+          pub fn lift_async_io(inner: AsyncIO<A>) -> Self
+          where
+              S: Clone,
+          {
+              // 既存の実装を維持
+          }
+
+    tests:
+      - name: test_state_transformer_try_lift_async_io_success
+        description: try_lift_async_io が正常に動作することをテスト
+        test_type: unit
+        code_outline: |
+          #[tokio::test]
+          async fn test_state_transformer_try_lift_async_io_success() {
+              let async_io = AsyncIO::pure(42);
+              let state: StateT<String, AsyncIO<Result<(i32, String), EffectError>>> =
+                  StateT::try_lift_async_io(async_io);
+              let result = state.run("initial".to_string()).run_async().await;
+              assert_eq!(result, Ok((42, "initial".to_string())));
+          }
+
+      - name: test_state_transformer_try_lift_async_io_already_consumed
+        description: try_lift_async_io が二度目の実行でエラーを返すことをテスト
+        test_type: unit
+        code_outline: |
+          #[tokio::test]
+          async fn test_state_transformer_try_lift_async_io_already_consumed() {
+              let async_io = AsyncIO::pure(42);
+              let state: StateT<String, AsyncIO<Result<(i32, String), EffectError>>> =
+                  StateT::try_lift_async_io(async_io);
+
+              let cloned = state.clone();
+
+              let result1 = state.run("state1".to_string()).run_async().await;
+              assert_eq!(result1, Ok((42, "state1".to_string())));
+
+              let result2 = cloned.run("state2".to_string()).run_async().await;
+              assert!(matches!(
+                  result2,
+                  Err(EffectError::AlreadyConsumed(AlreadyConsumedError {
+                      transformer_name: "StateT",
+                      method_name: "try_lift_async_io",
+                      effect_type: "AsyncIO",
+                  }))
+              ));
+          }
+
+      - name: test_state_transformer_try_lift_async_io_error_message
+        description: try_lift_async_io のエラーメッセージをテスト
+        test_type: unit
+        code_outline: |
+          #[tokio::test]
+          async fn test_state_transformer_try_lift_async_io_error_message() {
+              let async_io = AsyncIO::pure(42);
+              let state: StateT<String, AsyncIO<Result<(i32, String), EffectError>>> =
+                  StateT::try_lift_async_io(async_io);
+
+              let cloned = state.clone();
+              let _ = state.run("state".to_string()).run_async().await;
+              let result = cloned.run("state".to_string()).run_async().await;
+
+              match result {
+                  Err(error) => {
+                      assert_eq!(
+                          error.to_string(),
+                          "StateT::try_lift_async_io: AsyncIO already consumed. Use the transformer only once."
+                      );
+                  }
+                  Ok(_) => panic!("Expected error"),
+              }
+          }
+
+    dependencies:
+      - impl_error_types
+      - impl_state_transformer_try_lift_io
+
+# テスト戦略
+test_strategy:
+  unit_tests:
+    location: src/effect/error.rs, src/effect/reader_transformer.rs, src/effect/state_transformer.rs
+    description: |
+      各モジュールの #[cfg(test)] mod tests ブロック内にユニットテストを配置する。
+      テストは以下のカテゴリに分類する：
+      - エラー型のテスト（Display, Clone, PartialEq, Debug, Error trait）
+      - try_lift_io/try_lift_async_io の正常系テスト
+      - try_lift_io/try_lift_async_io の異常系テスト（二重消費）
+      - エラーメッセージの検証テスト
+
+  integration_tests:
+    location: tests/effect_error_tests.rs
+    description: |
+      統合テストは必要に応じて追加する。
+      主に複数のトランスフォーマーを組み合わせた場合の動作を検証する。
+
+  property_tests:
+    location: src/effect/error.rs
+    description: |
+      プロパティテストは以下を検証する：
+      - try_ メソッドは一度目の実行で常に Ok を返す
+      - try_ メソッドは二度目の実行で常に Err を返す
+
+# 完了条件
+acceptance_criteria:
+  - EffectError と AlreadyConsumedError が定義されていること
+  - Display, Clone, PartialEq, Eq, Debug トレイトが実装されていること
+  - std::error::Error トレイトが実装されていること
+  - ReaderT::try_lift_io が実装されていること
+  - ReaderT::try_lift_async_io が実装されていること
+  - StateT::try_lift_io が実装されていること
+  - StateT::try_lift_async_io が実装されていること
+  - 既存の lift_io/lift_async_io メソッドに #[deprecated] が付与されていること
+  - エラー型と新メソッドが mod.rs から re-export されていること
+  - 全てのメソッドにドキュメントコメントが記載されていること
+  - cargo check が通過すること
+  - cargo clippy が通過すること
+  - cargo test が通過すること
+  - カバレッジ 100% であること

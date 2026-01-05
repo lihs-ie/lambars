@@ -52,6 +52,7 @@
 use std::rc::Rc;
 
 use super::IO;
+use super::error::{AlreadyConsumedError, EffectError};
 
 /// A monad transformer that adds environment reading capability.
 ///
@@ -540,6 +541,7 @@ where
     /// use lambars::effect::{ReaderT, IO};
     ///
     /// let inner = IO::pure(42);
+    /// #[allow(deprecated)]
     /// let reader: ReaderT<String, IO<i32>> = ReaderT::lift_io(inner);
     /// let io = reader.run("ignored".to_string());
     /// assert_eq!(io.run_unsafe(), 42);
@@ -548,6 +550,10 @@ where
     /// # Panics
     ///
     /// Panics if the resulting `ReaderT` is run more than once.
+    #[deprecated(
+        since = "0.2.0",
+        note = "Use try_lift_io instead, which returns Result instead of panicking"
+    )]
     #[must_use]
     pub fn lift_io(inner: IO<A>) -> Self {
         // IO is not Clone, so we wrap in Rc
@@ -557,6 +563,47 @@ where
             inner_rc.borrow_mut().take().unwrap_or_else(|| {
                 panic!("ReaderT::lift_io: IO already consumed. Use the ReaderT only once.")
             })
+        })
+    }
+
+    /// Lifts an `IO` into `ReaderT`, returning `Result` instead of panicking.
+    ///
+    /// This is the safe version of [`lift_io`](Self::lift_io) that returns
+    /// an error instead of panicking when the IO is consumed more than once.
+    ///
+    /// # Arguments
+    ///
+    /// * `inner` - The IO computation to lift
+    ///
+    /// # Returns
+    ///
+    /// A `ReaderT` that, when run, returns `IO<Result<A, EffectError>>`.
+    /// The first execution returns `Ok(value)`, subsequent executions
+    /// return `Err(EffectError::AlreadyConsumed)`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::effect::{ReaderT, IO, EffectError};
+    ///
+    /// let io = IO::pure(42);
+    /// let reader: ReaderT<String, IO<Result<i32, EffectError>>> =
+    ///     ReaderT::try_lift_io(io);
+    ///
+    /// let result = reader.run("env".to_string()).run_unsafe();
+    /// assert_eq!(result, Ok(42));
+    /// ```
+    #[must_use]
+    #[allow(clippy::option_if_let_else)]
+    pub fn try_lift_io(inner: IO<A>) -> ReaderT<R, IO<Result<A, EffectError>>> {
+        let inner_rc = Rc::new(std::cell::RefCell::new(Some(inner)));
+        ReaderT::new(move |_| match inner_rc.borrow_mut().take() {
+            Some(io) => io.fmap(Ok),
+            None => IO::pure(Err(EffectError::AlreadyConsumed(AlreadyConsumedError {
+                transformer_name: "ReaderT",
+                method_name: "try_lift_io",
+                effect_type: "IO",
+            }))),
         })
     }
 
@@ -865,6 +912,7 @@ where
     /// #[tokio::main]
     /// async fn main() {
     ///     let async_io = AsyncIO::pure(42);
+    ///     #[allow(deprecated)]
     ///     let reader: ReaderT<i32, AsyncIO<i32>> = ReaderT::lift_async_io(async_io);
     ///     let result = reader.run(999).run_async().await;
     ///     assert_eq!(result, 42);
@@ -874,6 +922,10 @@ where
     /// # Panics
     ///
     /// Panics if the `ReaderT` is run more than once.
+    #[deprecated(
+        since = "0.2.0",
+        note = "Use try_lift_async_io instead, which returns Result instead of panicking"
+    )]
     #[must_use]
     pub fn lift_async_io(inner: AsyncIO<A>) -> Self
     where
@@ -887,6 +939,62 @@ where
                     "ReaderT::lift_async_io: AsyncIO already consumed. Use the ReaderT only once."
                 )
             })
+        })
+    }
+
+    /// Lifts an `AsyncIO` into `ReaderT`, returning `Result` instead of panicking.
+    ///
+    /// This is the safe version of [`lift_async_io`](Self::lift_async_io) that returns
+    /// an error instead of panicking when the `AsyncIO` is consumed more than once.
+    ///
+    /// # Arguments
+    ///
+    /// * `inner` - The `AsyncIO` computation to lift
+    ///
+    /// # Returns
+    ///
+    /// A `ReaderT` that, when run, returns `AsyncIO<Result<A, EffectError>>`.
+    /// The first execution returns `Ok(value)`, subsequent executions
+    /// return `Err(EffectError::AlreadyConsumed)`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use lambars::effect::{ReaderT, AsyncIO, EffectError};
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let async_io = AsyncIO::pure(42);
+    ///     let reader: ReaderT<String, AsyncIO<Result<i32, EffectError>>> =
+    ///         ReaderT::try_lift_async_io(async_io);
+    ///
+    ///     let result = reader.run("env".to_string()).run_async().await;
+    ///     assert_eq!(result, Ok(42));
+    /// }
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// This function will not panic under normal circumstances. The internal
+    /// `Mutex::lock` is only used for interior mutability in single-threaded
+    /// contexts and will not be poisoned.
+    #[must_use]
+    #[allow(clippy::option_if_let_else)]
+    pub fn try_lift_async_io(inner: AsyncIO<A>) -> ReaderT<R, AsyncIO<Result<A, EffectError>>>
+    where
+        A: Clone,
+    {
+        let inner_arc = std::sync::Arc::new(std::sync::Mutex::new(Some(inner)));
+        ReaderT::new(move |_| {
+            let mut guard = inner_arc.lock().unwrap();
+            match guard.take() {
+                Some(async_io) => async_io.fmap(Ok),
+                None => AsyncIO::pure(Err(EffectError::AlreadyConsumed(AlreadyConsumedError {
+                    transformer_name: "ReaderT",
+                    method_name: "try_lift_async_io",
+                    effect_type: "AsyncIO",
+                }))),
+            }
         })
     }
 
@@ -971,10 +1079,69 @@ mod tests {
     }
 
     // =========================================================================
+    // IO-specific Tests
+    // =========================================================================
+
+    mod io_tests {
+        use super::*;
+        use crate::effect::{AlreadyConsumedError, EffectError};
+
+        #[test]
+        fn reader_transformer_try_lift_io_success() {
+            let io = IO::pure(42);
+            let reader: ReaderT<String, IO<Result<i32, EffectError>>> = ReaderT::try_lift_io(io);
+            let result = reader.run("env".to_string()).run_unsafe();
+            assert_eq!(result, Ok(42));
+        }
+
+        #[test]
+        fn reader_transformer_try_lift_io_already_consumed() {
+            let io = IO::pure(42);
+            let reader: ReaderT<String, IO<Result<i32, EffectError>>> = ReaderT::try_lift_io(io);
+
+            let cloned = reader.clone();
+
+            let result1 = reader.run("env1".to_string()).run_unsafe();
+            assert_eq!(result1, Ok(42));
+
+            let result2 = cloned.run("env2".to_string()).run_unsafe();
+            assert!(matches!(
+                result2,
+                Err(EffectError::AlreadyConsumed(AlreadyConsumedError {
+                    transformer_name: "ReaderT",
+                    method_name: "try_lift_io",
+                    effect_type: "IO",
+                }))
+            ));
+        }
+
+        #[test]
+        fn reader_transformer_try_lift_io_error_message() {
+            let io = IO::pure(42);
+            let reader: ReaderT<String, IO<Result<i32, EffectError>>> = ReaderT::try_lift_io(io);
+
+            let cloned = reader.clone();
+            let _ = reader.run("env".to_string()).run_unsafe();
+            let result = cloned.run("env".to_string()).run_unsafe();
+
+            match result {
+                Err(error) => {
+                    assert_eq!(
+                        error.to_string(),
+                        "ReaderT::try_lift_io: IO already consumed. Use the transformer only once."
+                    );
+                }
+                Ok(_) => panic!("Expected error"),
+            }
+        }
+    }
+
+    // =========================================================================
     // AsyncIO-specific Tests (requires async feature)
     // =========================================================================
 
     #[cfg(feature = "async")]
+    #[allow(deprecated)]
     mod async_io_tests {
         use super::*;
 
@@ -1033,6 +1200,67 @@ mod tests {
             let result2 = reader2.run(10).run_async().await;
 
             assert_eq!(result1, result2);
+        }
+
+        // =====================================================================
+        // try_lift_async_io Tests
+        // =====================================================================
+
+        mod try_lift_async_io_tests {
+            use super::*;
+            use crate::effect::{AlreadyConsumedError, EffectError};
+
+            #[tokio::test]
+            async fn reader_transformer_try_lift_async_io_success() {
+                let async_io = AsyncIO::pure(42);
+                let reader: ReaderT<String, AsyncIO<Result<i32, EffectError>>> =
+                    ReaderT::try_lift_async_io(async_io);
+                let result = reader.run("env".to_string()).run_async().await;
+                assert_eq!(result, Ok(42));
+            }
+
+            #[tokio::test]
+            async fn reader_transformer_try_lift_async_io_already_consumed() {
+                let async_io = AsyncIO::pure(42);
+                let reader: ReaderT<String, AsyncIO<Result<i32, EffectError>>> =
+                    ReaderT::try_lift_async_io(async_io);
+
+                let cloned = reader.clone();
+
+                let result1 = reader.run("env1".to_string()).run_async().await;
+                assert_eq!(result1, Ok(42));
+
+                let result2 = cloned.run("env2".to_string()).run_async().await;
+                assert!(matches!(
+                    result2,
+                    Err(EffectError::AlreadyConsumed(AlreadyConsumedError {
+                        transformer_name: "ReaderT",
+                        method_name: "try_lift_async_io",
+                        effect_type: "AsyncIO",
+                    }))
+                ));
+            }
+
+            #[tokio::test]
+            async fn reader_transformer_try_lift_async_io_error_message() {
+                let async_io = AsyncIO::pure(42);
+                let reader: ReaderT<String, AsyncIO<Result<i32, EffectError>>> =
+                    ReaderT::try_lift_async_io(async_io);
+
+                let cloned = reader.clone();
+                let _ = reader.run("env".to_string()).run_async().await;
+                let result = cloned.run("env".to_string()).run_async().await;
+
+                match result {
+                    Err(error) => {
+                        assert_eq!(
+                            error.to_string(),
+                            "ReaderT::try_lift_async_io: AsyncIO already consumed. Use the transformer only once."
+                        );
+                    }
+                    Ok(_) => panic!("Expected error"),
+                }
+            }
         }
     }
 }
