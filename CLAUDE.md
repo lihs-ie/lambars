@@ -192,8 +192,9 @@ cargo clean
    4. `cargo test --all-features` - 全 feature でテスト
    5. `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` - ドキュメントビルド
    6. 全てパスしたらコミット
-7. 対象の実装計画ファイルと要件定義、issue 対応の場合は issue のファイルを `docs/internal/done/` に移動する
-8. 実装上困難だと判断した場合は `/new-issue <Issue名>` で Issue ファイルを作成する
+7. 実装した内容を README.md, docs/external/comparison に反映する必要があるか調査し、修正が必要な場合は変更を記載しコミットする
+8. 対象の実装計画ファイルと要件定義、issue 対応の場合は issue のファイルを `docs/internal/done/` に移動する
+9. 実装上困難だと判断した場合は `/new-issue <Issue名>` で Issue ファイルを作成する
    1. `docs/internal/issues/` に将来の拡張案として保存する
    2. github mcp を使って GitHub Issue を作成し、ファイルの `github_issue` セクションを更新する
 
@@ -213,27 +214,27 @@ cargo clean
 <type>(<scope>): <description>
 ```
 
-| type | 用途 |
-| ---------- | ---------------------------- |
-| `feat` | 新機能 |
-| `fix` | バグ修正 |
-| `docs` | ドキュメント |
-| `refactor` | リファクタリング |
-| `perf` | パフォーマンス改善 |
-| `test` | テスト追加・修正 |
-| `chore` | ビルド・CI など |
-| `deps` | 依存関係の更新 |
-| `modify` | 開発支援ツールによる変更指示 |
-| scope |
+| type         | 用途                         |
+| ------------ | ---------------------------- |
+| `feat`       | 新機能                       |
+| `fix`        | バグ修正                     |
+| `docs`       | ドキュメント                 |
+| `refactor`   | リファクタリング             |
+| `perf`       | パフォーマンス改善           |
+| `test`       | テスト追加・修正             |
+| `chore`      | ビルド・CI など              |
+| `deps`       | 依存関係の更新               |
+| `modify`     | 開発支援ツールによる変更指示 |
+| scope        |
 | ------------ |
-| `typeclass` |
-| `compose` |
-| `control` |
+| `typeclass`  |
+| `compose`    |
+| `control`    |
 | `persistent` |
-| `optics` |
-| `effect` |
-| `derive` |
-| その他 |
+| `optics`     |
+| `effect`     |
+| `derive`     |
+| その他       |
 
 ```bash
 # 例
