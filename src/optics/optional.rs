@@ -113,6 +113,29 @@ pub trait Optional<S, A> {
         })
     }
 
+    /// Modifies the focused element if present, otherwise returns the original source.
+    ///
+    /// This is a convenience method that wraps `modify_option` and returns the
+    /// original source unchanged if the element is not present.
+    ///
+    /// # Arguments
+    ///
+    /// * `source` - The source structure (consumed)
+    /// * `function` - The function to apply to the focused element
+    ///
+    /// # Returns
+    ///
+    /// The modified source if the element is present, original source otherwise
+    fn modify<F>(&self, source: S, function: F) -> S
+    where
+        F: FnOnce(A) -> A,
+        A: Clone,
+        S: Clone,
+    {
+        self.modify_option(source.clone(), function)
+            .unwrap_or(source)
+    }
+
     /// Checks if the focused element is present.
     ///
     /// # Arguments

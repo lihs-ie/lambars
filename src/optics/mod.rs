@@ -200,11 +200,19 @@
 //!    iso.get(iso.reverse_get(value)) == value
 //!    ```
 
+pub mod at;
+pub mod choice;
+pub mod each;
+pub mod filtered;
+mod fold;
 mod iso;
+pub mod ixed;
 mod lens;
+pub mod optics_compose;
 mod optional;
 pub mod persistent_optics;
 mod prism;
+pub mod sequence;
 mod standard_optics;
 mod traversal;
 
@@ -244,3 +252,8 @@ pub use traversal::OptionTraversal;
 pub use traversal::ResultTraversal;
 pub use traversal::Traversal;
 pub use traversal::VecTraversal;
+
+// Re-export Fold types
+pub use fold::ComposedFold;
+pub use fold::Fold;
+pub use fold::FunctionFold;

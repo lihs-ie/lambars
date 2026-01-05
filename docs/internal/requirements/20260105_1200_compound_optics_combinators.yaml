@@ -1,0 +1,757 @@
+# 複合 Optics コンビネータ 要件定義
+#
+# 概要:
+#   Scala monocle や Haskell Control.Lens と同等の複合 Optics コンビネータを提供し、
+#   深くネストしたデータ構造への型安全なアクセスを実現する。
+#
+# 設計方針:
+#   1. 純粋関数型プログラミングの原則に従い、全ての操作を純粋関数として実装
+#   2. 既存の Optics 型（Lens, Prism, Optional, Traversal, Iso）と合成可能な設計
+#   3. PersistentVector, PersistentHashMap との統合を考慮した汎用的な実装
+#   4. 型安全性を最大限に保証し、コンパイル時に不正な操作を検出
+#   5. Optics 法則（Lens 法則、Prism 法則等）を満たすことを保証
+#
+# 参照:
+#   - Scala monocle: https://www.optics.dev/Monocle/
+#   - Haskell Control.Lens: https://hackage.haskell.org/package/lens
+#   - GitHub Issue #12: 複合 Optics コンビネータ
+
+version: "1.0.0"
+name: "compound_optics_combinators"
+description: |
+  Rust で関数型プログラミングを行うための複合 Optics コンビネータを提供する。
+
+  標準的な Optics（Lens, Prism, Optional, Traversal）に加えて、より高度な
+  コンビネータを実装し、複雑なデータ構造への型安全なアクセスを可能にする。
+
+  主要なコンビネータ:
+  - choice: Either 上の Prism 結合
+  - filtered: 述語ベースの Optics フィルタリング
+  - each: コンテナ要素全体への Traversal
+  - at: Map キーアクセス Optional
+  - index: Vector インデックスアクセス Optional
+  - head_option: 先頭要素 Optional
+  - last_option: 末尾要素 Optional
+
+background:
+  problem: |
+    現在の lambars の Optics 実装には、標準的な複合コンビネータが不足している。
+    Scala monocle や Haskell Control.Lens と比較して、以下の操作が欠けている:
+
+    1. Either 型に対する choice 操作
+    2. 述語に基づくフィルタリング操作
+    3. コンテナ全要素への統一的なアクセス
+    4. Map のキーによるアクセス
+    5. Vector のインデックスによるアクセス
+    6. シーケンスの先頭/末尾要素へのアクセス
+
+    これらの欠如により、複雑なデータ構造の操作が冗長になり、
+    関数型プログラミングの利点を十分に活かせていない。
+
+  motivation: |
+    複合 Optics コンビネータを提供することで、以下の利点が得られる:
+
+    1. コードの簡潔性: 深くネストしたデータ構造への操作を1行で記述可能
+    2. 型安全性: コンパイル時に不正なアクセスを検出
+    3. 合成可能性: 既存の Optics と自由に合成可能
+    4. 再利用性: 汎用的なコンビネータとして様々なデータ型に適用可能
+    5. 参照透過性: 全ての操作が純粋関数として実装され、副作用がない
+
+    これにより、lambars は Haskell や Scala と同等の表現力を持つ
+    Optics ライブラリとなる。
+
+  prior_art:
+    - name: "Scala monocle"
+      description: |
+        Scala の Optics ライブラリ。Traversal, Optional, Prism などの
+        Optics 型と、each, at, index などのコンビネータを提供。
+        monocle.std パッケージで標準型へのインスタンスを提供。
+    - name: "Haskell Control.Lens"
+      description: |
+        Haskell の標準的な Optics ライブラリ。At, Ixed, Each などの
+        型クラスと、filtered, _head, _last などのコンビネータを提供。
+        非常に豊富な機能を持つが、学習曲線が急。
+    - name: "Rust optics (既存クレート)"
+      description: |
+        いくつかの Rust Optics クレートが存在するが、機能が限定的。
+        本プロジェクトは、より完全な関数型プログラミングサポートを目指す。
+
+requirements:
+  # ======================================================================
+  # 1. Choice コンビネータ（Either 上の Prism 結合）
+  # ======================================================================
+  - id: choice_combinator
+    name: "Choice コンビネータ"
+    description: |
+      Either<L, R> 型に対して、Left または Right の値にフォーカスする
+      Prism を結合するコンビネータ。
+
+      Haskell の _Left, _Right Prism と同等の機能を提供する。
+
+      使用例:
+      - Either<String, i32> から i32 値を取得/設定
+      - Either<Error, Result> のエラーハンドリング
+      - 複数の Either を連鎖的に処理
+
+    laws:
+      - name: "Prism 法則（Preview-Review）"
+        description: |
+          preview 後に review すると、preview が Some を返す場合は
+          元の値と等しくなる。
+        equation: "preview(prism, review(prism, a)) == Some(a)"
+        property_test: |
+          fn prop_prism_preview_review<A: Clone + PartialEq>(prism: &Prism<S, A>, a: A) -> bool {
+              prism.preview(&prism.review(a.clone())) == Some(a)
+          }
+
+      - name: "Prism 法則（Review-Preview）"
+        description: |
+          review 後に preview すると、元の値を返す。
+        equation: "∀s. preview(prism, s) = Some(a) → review(prism, a) = s"
+        property_test: |
+          fn prop_prism_review_preview<S: Clone + PartialEq, A>(
+              prism: &Prism<S, A>,
+              s: S
+          ) -> bool {
+              match prism.preview(&s) {
+                  Some(a) => prism.review(a) == s,
+                  None => true,
+              }
+          }
+
+    methods:
+      - name: "left"
+        signature: "fn left<L, R>() -> Prism<Either<L, R>, L>"
+        description: |
+          Either<L, R> の Left 値にフォーカスする Prism を返す。
+          Left 値が存在する場合のみ操作可能。
+        examples:
+          - description: "Left 値の取得"
+            code: |
+              let prism = Prism::left::<String, i32>();
+              let either: Either<String, i32> = Either::Left("error".to_string());
+              assert_eq!(prism.preview(&either), Some(&"error".to_string()));
+
+              let right_either: Either<String, i32> = Either::Right(42);
+              assert_eq!(prism.preview(&right_either), None);
+
+      - name: "right"
+        signature: "fn right<L, R>() -> Prism<Either<L, R>, R>"
+        description: |
+          Either<L, R> の Right 値にフォーカスする Prism を返す。
+          Right 値が存在する場合のみ操作可能。
+        examples:
+          - description: "Right 値の取得"
+            code: |
+              let prism = Prism::right::<String, i32>();
+              let either: Either<String, i32> = Either::Right(42);
+              assert_eq!(prism.preview(&either), Some(&42));
+
+      - name: "choice"
+        signature: |
+          fn choice<S, A, B>(
+              left_prism: Prism<S, A>,
+              right_prism: Prism<S, B>
+          ) -> Prism<S, Either<A, B>>
+        description: |
+          2つの Prism を結合し、どちらかの値にフォーカスする Prism を返す。
+          Left が優先され、Left が失敗した場合に Right を試行する。
+        examples:
+          - description: "2つの Prism の結合"
+            code: |
+              // sum type の異なるバリアントにアクセス
+              let combined = Prism::choice(variant_a_prism, variant_b_prism);
+
+    implementations:
+      - type: "Either<L, R>"
+        description: |
+          Rust の Result 型を Either として扱い、Left/Right へのアクセスを提供。
+          Result<T, E> は Either<E, T> と同型。
+
+  # ======================================================================
+  # 2. Filtered コンビネータ（述語ベース Optics）
+  # ======================================================================
+  - id: filtered_combinator
+    name: "Filtered コンビネータ"
+    description: |
+      述語関数に基づいて要素をフィルタリングするコンビネータ。
+      Traversal と組み合わせて使用し、条件を満たす要素のみを対象とする。
+
+      重要な制約: filtered は厳密には Traversal 法則を満たさない。
+      modify 操作で述語を無効にする変更を行うと、法則違反となる。
+      したがって、読み取り専用の Fold として扱うか、
+      述語を保持する変更のみを許可するべき。
+
+    laws:
+      - name: "Identity 法則（読み取り専用）"
+        description: |
+          filtered は主に Fold として使用されるべきで、
+          get_all 操作は同じ要素に対して同じ結果を返す。
+        equation: "get_all(filtered(p), s) は一貫した結果を返す"
+        property_test: |
+          fn prop_filtered_identity<S: Clone + PartialEq, A>(
+              traversal: &Traversal<S, A>,
+              predicate: impl Fn(&A) -> bool,
+              s: S
+          ) -> bool {
+              let filtered = traversal.filtered(&predicate);
+              filtered.get_all(&s) == filtered.get_all(&s)
+          }
+
+      - name: "フィルタリング法則"
+        description: |
+          filtered で取得される要素は全て述語を満たす。
+        equation: "∀a ∈ get_all(filtered(p), s). p(a) == true"
+        property_test: |
+          fn prop_filtered_all_satisfy<S, A>(
+              traversal: &Traversal<S, A>,
+              predicate: impl Fn(&A) -> bool,
+              s: S
+          ) -> bool {
+              let filtered = traversal.filtered(&predicate);
+              filtered.get_all(&s).iter().all(|a| predicate(a))
+          }
+
+    methods:
+      - name: "filtered"
+        signature: |
+          fn filtered<S, A, P>(predicate: P) -> Fold<S, A>
+          where
+              P: Fn(&A) -> bool
+        description: |
+          述語関数を受け取り、条件を満たす要素のみを対象とする Fold を返す。
+          modify 操作は述語を保持する場合のみ安全に使用可能。
+        examples:
+          - description: "偶数のみをフィルタリング"
+            code: |
+              let vector: PersistentVector<i32> = (1..=10).collect();
+              let evens = each::<PersistentVector<i32>, i32>()
+                  .filtered(|x| x % 2 == 0);
+
+              let result = evens.get_all(&vector);
+              assert_eq!(result, vec![&2, &4, &6, &8, &10]);
+
+      - name: "filtered_traversal"
+        signature: |
+          fn filtered_traversal<S, A, P>(predicate: P) -> FilteredTraversal<S, A, P>
+          where
+              P: Fn(&A) -> bool + Clone
+        description: |
+          modify 操作を提供するが、述語を無効にする変更は
+          未定義動作となることを明示的に示す FilteredTraversal を返す。
+        examples:
+          - description: "条件付き変更"
+            code: |
+              let vector: PersistentVector<i32> = (1..=10).collect();
+              let double_evens = each::<PersistentVector<i32>, i32>()
+                  .filtered_traversal(|x| x % 2 == 0);
+
+              // 偶数を2倍にする（述語は保持される）
+              let result = double_evens.modify(&vector, |x| x * 2);
+
+    implementations:
+      - type: "Traversal<S, A>"
+        description: |
+          任意の Traversal に対して filtered メソッドを提供。
+          結果は Fold（読み取り専用）または FilteredTraversal。
+
+  # ======================================================================
+  # 3. Each コンビネータ（コンテナ要素全体への Traversal）
+  # ======================================================================
+  - id: each_combinator
+    name: "Each コンビネータ"
+    description: |
+      コンテナの全要素にフォーカスする Traversal を提供する型クラス。
+      Haskell の Each 型クラスと同等の機能を提供する。
+
+      サポートする型:
+      - PersistentVector<T>
+      - Vec<T>
+      - Option<T>
+      - Result<T, E>（T への Traversal）
+      - タプル（同型要素の場合）
+
+    laws:
+      - name: "Traversal Identity 法則"
+        description: |
+          traverse と Identity を使用した場合、元の値と同じになる。
+        equation: "traverse(each, |x| Identity(x), s) == Identity(s)"
+        property_test: |
+          fn prop_each_identity<S: Clone + PartialEq, A: Clone>(
+              each: &Each<S, A>,
+              s: S
+          ) -> bool {
+              each.traverse(&s, |x| x.clone()) == s
+          }
+
+      - name: "Traversal Composition 法則"
+        description: |
+          traverse の合成は、関数の合成と同じ結果になる。
+        equation: "traverse(each, g . f, s) == traverse(each, g, traverse(each, f, s))"
+        property_test: |
+          fn prop_each_composition<S: Clone + PartialEq, A: Clone, B, C>(
+              each: &Each<S, A>,
+              f: impl Fn(A) -> B,
+              g: impl Fn(B) -> C,
+              s: S
+          ) -> bool {
+              // g . f の合成と traverse の2回適用が同じ結果
+              true // 実装時に詳細化
+          }
+
+    methods:
+      - name: "each"
+        signature: "fn each<C, T>() -> Traversal<C, T>"
+        description: |
+          コンテナ C の全要素 T にフォーカスする Traversal を返す。
+        examples:
+          - description: "PersistentVector の全要素を2倍"
+            code: |
+              let vector: PersistentVector<i32> = (1..=5).collect();
+              let doubled = each::<PersistentVector<i32>, i32>()
+                  .modify_all(&vector, |x| x * 2);
+
+              assert_eq!(doubled.get(0), Some(&2));
+              assert_eq!(doubled.get(4), Some(&10));
+
+          - description: "Option の要素にアクセス"
+            code: |
+              let opt: Option<i32> = Some(42);
+              let result = each::<Option<i32>, i32>().get_all(&opt);
+              assert_eq!(result, vec![&42]);
+
+              let none: Option<i32> = None;
+              let empty = each::<Option<i32>, i32>().get_all(&none);
+              assert_eq!(empty, Vec::<&i32>::new());
+
+    implementations:
+      - type: "PersistentVector<T>"
+        description: |
+          PersistentVector の全要素への Traversal を提供。
+          O(N) で全要素にアクセス/変更可能。
+
+      - type: "Vec<T>"
+        description: |
+          標準 Vec の全要素への Traversal を提供。
+
+      - type: "Option<T>"
+        description: |
+          Option の値への Traversal を提供。
+          Some の場合は1要素、None の場合は0要素。
+
+      - type: "Result<T, E>"
+        description: |
+          Result の Ok 値への Traversal を提供。
+          Ok の場合は1要素、Err の場合は0要素。
+
+  # ======================================================================
+  # 4. At コンビネータ（Map キーアクセス Optional）
+  # ======================================================================
+  - id: at_combinator
+    name: "At コンビネータ"
+    description: |
+      Map 系コンテナのキーに対応する値への Optional を提供する型クラス。
+      Haskell の At 型クラスと同等の機能を提供する。
+
+      at は Optional<Maybe> を返し、キーの追加/削除も可能。
+      存在確認だけでなく、不在の場合の挿入もサポート。
+
+    laws:
+      - name: "At Get-Set 法則"
+        description: |
+          get した値を set すると、元の状態に戻る。
+        equation: "set(at(k), get(at(k), m), m) == m"
+        property_test: |
+          fn prop_at_get_set<M: Clone + PartialEq, K, V>(
+              at: &At<M, K, V>,
+              m: M,
+              k: K
+          ) -> bool {
+              let value = at.get(&m, &k);
+              at.set(&m, &k, value) == m
+          }
+
+      - name: "At Set-Get 法則"
+        description: |
+          set した値を get すると、set した値が返る。
+        equation: "get(at(k), set(at(k), v, m)) == v"
+        property_test: |
+          fn prop_at_set_get<M, K: Clone, V: Clone + PartialEq>(
+              at: &At<M, K, V>,
+              m: M,
+              k: K,
+              v: Option<V>
+          ) -> bool {
+              at.get(&at.set(&m, &k, v.clone()), &k) == v
+          }
+
+    methods:
+      - name: "at"
+        signature: "fn at<M, K, V>(key: K) -> Lens<M, Option<V>>"
+        description: |
+          指定されたキーに対応する値への Lens を返す。
+          値の型は Option<V> で、None を set するとキーが削除される。
+        examples:
+          - description: "PersistentHashMap のキーアクセス"
+            code: |
+              let map = PersistentHashMap::new()
+                  .insert("key".to_string(), 42);
+
+              let lens = at::<PersistentHashMap<String, i32>, String, i32>(
+                  "key".to_string()
+              );
+
+              assert_eq!(lens.get(&map), Some(42));
+
+              // 値の更新
+              let updated = lens.set(&map, Some(100));
+              assert_eq!(lens.get(&updated), Some(100));
+
+              // キーの削除
+              let deleted = lens.set(&map, None);
+              assert_eq!(lens.get(&deleted), None);
+
+          - description: "存在しないキーへのアクセス"
+            code: |
+              let map: PersistentHashMap<String, i32> = PersistentHashMap::new();
+              let lens = at::<PersistentHashMap<String, i32>, String, i32>(
+                  "missing".to_string()
+              );
+
+              assert_eq!(lens.get(&map), None);
+
+              // 新しいキーの挿入
+              let inserted = lens.set(&map, Some(42));
+              assert_eq!(lens.get(&inserted), Some(42));
+
+    implementations:
+      - type: "PersistentHashMap<K, V>"
+        description: |
+          PersistentHashMap のキーアクセスを提供。
+          O(log32 N) で値の取得/設定/削除が可能。
+
+      - type: "std::collections::HashMap<K, V>"
+        description: |
+          標準 HashMap のキーアクセスを提供（参照として）。
+
+  # ======================================================================
+  # 5. Index コンビネータ（Vector インデックスアクセス Optional）
+  # ======================================================================
+  - id: index_combinator
+    name: "Index コンビネータ"
+    description: |
+      インデックスベースのコンテナの指定位置への Optional を提供する型クラス。
+      Haskell の Ixed 型クラス（ix 関数）と同等の機能を提供する。
+
+      at と異なり、index は存在する要素のみを対象とし、
+      新しい要素の挿入はサポートしない。
+
+    laws:
+      - name: "Index Get-Set 法則"
+        description: |
+          get した値を set すると、元の状態に戻る（要素が存在する場合）。
+        equation: "∀i. get(ix(i), s) = Some(a) → set(ix(i), a, s) = s"
+        property_test: |
+          fn prop_index_get_set<C: Clone + PartialEq, T: Clone>(
+              ix: &Index<C, T>,
+              c: C,
+              i: usize
+          ) -> bool {
+              match ix.get(&c, i) {
+                  Some(value) => ix.set(&c, i, value.clone()) == Some(c),
+                  None => true,
+              }
+          }
+
+      - name: "Index Set-Get 法則"
+        description: |
+          set した値を get すると、set した値が返る（要素が存在する場合）。
+        equation: "∀i, v. set(ix(i), v, s) = Some(s') → get(ix(i), s') = Some(v)"
+        property_test: |
+          fn prop_index_set_get<C, T: Clone + PartialEq>(
+              ix: &Index<C, T>,
+              c: C,
+              i: usize,
+              v: T
+          ) -> bool {
+              match ix.set(&c, i, v.clone()) {
+                  Some(new_c) => ix.get(&new_c, i) == Some(&v),
+                  None => true,
+              }
+          }
+
+    methods:
+      - name: "index"
+        signature: "fn index<C, T>(i: usize) -> Optional<C, T>"
+        description: |
+          指定されたインデックスの要素への Optional を返す。
+          インデックスが範囲外の場合は None を返す。
+        examples:
+          - description: "PersistentVector のインデックスアクセス"
+            code: |
+              let vector: PersistentVector<i32> = (1..=5).collect();
+
+              let opt = index::<PersistentVector<i32>, i32>(2);
+
+              assert_eq!(opt.get(&vector), Some(&3));
+
+              // 値の更新
+              let updated = opt.set(&vector, 100);
+              assert_eq!(updated.unwrap().get(2), Some(&100));
+
+              // 範囲外アクセス
+              let out_of_bounds = index::<PersistentVector<i32>, i32>(10);
+              assert_eq!(out_of_bounds.get(&vector), None);
+
+          - description: "Vec のインデックスアクセス"
+            code: |
+              let vec = vec![1, 2, 3, 4, 5];
+              let opt = index::<Vec<i32>, i32>(0);
+
+              assert_eq!(opt.get(&vec), Some(&1));
+
+    implementations:
+      - type: "PersistentVector<T>"
+        description: |
+          PersistentVector のインデックスアクセスを提供。
+          O(log32 N) で値の取得/設定が可能。
+
+      - type: "Vec<T>"
+        description: |
+          標準 Vec のインデックスアクセスを提供。
+          O(1) で値の取得、O(N) で変更（新しい Vec を生成）。
+
+      - type: "[T; N]"
+        description: |
+          固定長配列のインデックスアクセスを提供。
+
+  # ======================================================================
+  # 6. HeadOption コンビネータ（先頭要素 Optional）
+  # ======================================================================
+  - id: head_option_combinator
+    name: "HeadOption コンビネータ"
+    description: |
+      シーケンスの先頭要素への Optional を提供するコンビネータ。
+      Haskell の _head Traversal と同等の機能を提供する。
+
+      空のシーケンスに対しては None を返す。
+
+    laws:
+      - name: "HeadOption Get-Set 法則"
+        description: |
+          get した値を set すると、元の状態に戻る（要素が存在する場合）。
+        equation: "∀s. head_option.get(s) = Some(a) → head_option.set(s, a) = s"
+        property_test: |
+          fn prop_head_option_get_set<S: Clone + PartialEq, A: Clone>(
+              head: &HeadOption<S, A>,
+              s: S
+          ) -> bool {
+              match head.get(&s) {
+                  Some(value) => head.set(&s, value.clone()) == Some(s),
+                  None => true,
+              }
+          }
+
+    methods:
+      - name: "head_option"
+        signature: "fn head_option<S, A>() -> Optional<S, A>"
+        description: |
+          シーケンス S の先頭要素 A への Optional を返す。
+        examples:
+          - description: "PersistentVector の先頭要素"
+            code: |
+              let vector: PersistentVector<i32> = (1..=5).collect();
+              let head = head_option::<PersistentVector<i32>, i32>();
+
+              assert_eq!(head.get(&vector), Some(&1));
+
+              let updated = head.set(&vector, 100);
+              assert_eq!(updated.unwrap().get(0), Some(&100));
+
+          - description: "空のシーケンス"
+            code: |
+              let empty: PersistentVector<i32> = PersistentVector::new();
+              let head = head_option::<PersistentVector<i32>, i32>();
+
+              assert_eq!(head.get(&empty), None);
+
+    implementations:
+      - type: "PersistentVector<T>"
+        description: |
+          PersistentVector の先頭要素へのアクセスを提供。
+          get は O(log32 N)、set は O(log32 N)。
+
+      - type: "Vec<T>"
+        description: |
+          標準 Vec の先頭要素へのアクセスを提供。
+
+      - type: "&str"
+        description: |
+          文字列の先頭文字へのアクセスを提供。
+
+  # ======================================================================
+  # 7. LastOption コンビネータ（末尾要素 Optional）
+  # ======================================================================
+  - id: last_option_combinator
+    name: "LastOption コンビネータ"
+    description: |
+      シーケンスの末尾要素への Optional を提供するコンビネータ。
+      Haskell の _last Traversal と同等の機能を提供する。
+
+      空のシーケンスに対しては None を返す。
+
+    laws:
+      - name: "LastOption Get-Set 法則"
+        description: |
+          get した値を set すると、元の状態に戻る（要素が存在する場合）。
+        equation: "∀s. last_option.get(s) = Some(a) → last_option.set(s, a) = s"
+        property_test: |
+          fn prop_last_option_get_set<S: Clone + PartialEq, A: Clone>(
+              last: &LastOption<S, A>,
+              s: S
+          ) -> bool {
+              match last.get(&s) {
+                  Some(value) => last.set(&s, value.clone()) == Some(s),
+                  None => true,
+              }
+          }
+
+    methods:
+      - name: "last_option"
+        signature: "fn last_option<S, A>() -> Optional<S, A>"
+        description: |
+          シーケンス S の末尾要素 A への Optional を返す。
+        examples:
+          - description: "PersistentVector の末尾要素"
+            code: |
+              let vector: PersistentVector<i32> = (1..=5).collect();
+              let last = last_option::<PersistentVector<i32>, i32>();
+
+              assert_eq!(last.get(&vector), Some(&5));
+
+              let updated = last.set(&vector, 100);
+              assert_eq!(updated.unwrap().get(4), Some(&100));
+
+          - description: "空のシーケンス"
+            code: |
+              let empty: PersistentVector<i32> = PersistentVector::new();
+              let last = last_option::<PersistentVector<i32>, i32>();
+
+              assert_eq!(last.get(&empty), None);
+
+    implementations:
+      - type: "PersistentVector<T>"
+        description: |
+          PersistentVector の末尾要素へのアクセスを提供。
+          get は O(1)（tail から直接アクセス）、set は O(log32 N)。
+
+      - type: "Vec<T>"
+        description: |
+          標準 Vec の末尾要素へのアクセスを提供。
+
+      - type: "&str"
+        description: |
+          文字列の末尾文字へのアクセスを提供。
+
+  # ======================================================================
+  # 8. Optics 合成拡張
+  # ======================================================================
+  - id: optics_composition_extension
+    name: "Optics 合成拡張"
+    description: |
+      新しいコンビネータを既存の Optics 型と合成可能にするための拡張。
+      compose メソッドを拡張し、異なる Optics 型間の合成をサポート。
+
+    methods:
+      - name: "compose_with_optional"
+        signature: |
+          fn compose_with_optional<S, A, B>(
+              self: Lens<S, A>,
+              optional: Optional<A, B>
+          ) -> Optional<S, B>
+        description: |
+          Lens と Optional を合成し、新しい Optional を返す。
+
+      - name: "compose_with_traversal"
+        signature: |
+          fn compose_with_traversal<S, A, B>(
+              self: Lens<S, A>,
+              traversal: Traversal<A, B>
+          ) -> Traversal<S, B>
+        description: |
+          Lens と Traversal を合成し、新しい Traversal を返す。
+
+      - name: "compose_with_fold"
+        signature: |
+          fn compose_with_fold<S, A, B>(
+              self: Traversal<S, A>,
+              fold: Fold<A, B>
+          ) -> Fold<S, B>
+        description: |
+          Traversal と Fold を合成し、新しい Fold を返す。
+
+    implementations:
+      - type: "全ての Optics 型"
+        description: |
+          Lens, Prism, Optional, Traversal, Iso 間の全ての有効な合成を提供。
+          合成結果の型は、より弱い方の Optics 型となる。
+
+          合成の型階層:
+          Iso > Lens > Optional > Traversal > Fold
+          Iso > Prism > Optional > Traversal > Fold
+
+non_functional_requirements:
+  performance:
+    - "各コンビネータの時間計算量は、対象データ構造の基本操作と同等であること"
+    - "PersistentVector への index アクセスは O(log32 N)"
+    - "PersistentHashMap への at アクセスは O(log32 N)"
+    - "each による全要素走査は O(N)"
+    - "Optics 合成はコンパイル時に行われ、実行時オーバーヘッドは最小限"
+
+  compatibility:
+    - "既存の Optics 型（Lens, Prism, Optional, Traversal, Iso）との互換性を保持"
+    - "Rust 1.92.0 以上で動作すること"
+    - "no_std 環境でも使用可能（alloc クレートの feature flag で制御）"
+
+  testing:
+    - "各コンビネータに対して Optics 法則のプロパティテストを実装"
+    - "全ての実装型に対してユニットテストを作成"
+    - "カバレッジ 100% を目標"
+    - "rstest を使用したパラメタライズドテスト"
+
+future_extensions:
+  - id: indexed_traversal
+    name: "IndexedTraversal"
+    description: |
+      インデックス情報を保持した Traversal。
+      各要素にアクセスする際に、そのインデックスも取得可能。
+    rationale: |
+      現時点では基本的なコンビネータの実装を優先。
+      IndexedTraversal は型システムがより複雑になるため、
+      基本機能の安定後に実装を検討。
+
+  - id: affine_traversal
+    name: "AffineTraversal"
+    description: |
+      0個または1個の要素にフォーカスする Traversal。
+      Optional と同等だが、異なる抽象化アプローチ。
+    rationale: |
+      Optional で同等の機能を提供可能。
+      理論的な完全性のために将来的に追加を検討。
+
+  - id: plated_combinator
+    name: "Plated コンビネータ"
+    description: |
+      再帰的なデータ構造の全ての子要素にアクセスする Traversal。
+      AST 操作などに有用。
+    rationale: |
+      再帰的構造のサポートは複雑なため、
+      基本機能の実装後に検討。
+
+  - id: non_empty_traversal
+    name: "NonEmptyTraversal"
+    description: |
+      1個以上の要素を保証する Traversal（Traversal1）。
+      空でないことをコンパイル時に保証。
+    rationale: |
+      NonEmpty 型のサポートと合わせて実装を検討。
