@@ -424,3 +424,115 @@ fn state_transformer_stack_example() {
     // Stack: [1, 2, 3] -> pop returns 3, final stack [1, 2], result 30
     assert_eq!(result, Some((30, vec![1, 2])));
 }
+
+// =============================================================================
+// AsyncIO-specific Tests (requires async feature)
+// =============================================================================
+
+#[cfg(feature = "async")]
+mod async_io_tests {
+    use lambars::effect::{AsyncIO, StateT};
+    use rstest::rstest;
+
+    // =========================================================================
+    // lift_async_io Tests
+    // =========================================================================
+
+    #[rstest]
+    #[tokio::test]
+    async fn state_lift_async_io_preserves_state() {
+        let async_io = AsyncIO::pure(42);
+        let state: StateT<i32, AsyncIO<(i32, i32)>> = StateT::lift_async_io(async_io);
+        let (result, final_state) = state.run(100).run_async().await;
+        assert_eq!(result, 42);
+        assert_eq!(final_state, 100);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn state_lift_async_io_preserves_async_value() {
+        let async_io = AsyncIO::new(|| async { "hello".to_string() });
+        let state: StateT<(), AsyncIO<(String, ())>> = StateT::lift_async_io(async_io);
+        let (result, _) = state.run(()).run_async().await;
+        assert_eq!(result, "hello");
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn state_lift_state_law() {
+        let initial_state = 100;
+        let async_io = AsyncIO::pure(42);
+        let state: StateT<i32, AsyncIO<(i32, i32)>> = StateT::lift_async_io(async_io);
+        let final_state = state.exec_async(initial_state).run_async().await;
+        assert_eq!(final_state, initial_state);
+    }
+
+    // =========================================================================
+    // gets_async_io Tests
+    // =========================================================================
+
+    #[rstest]
+    #[tokio::test]
+    async fn state_gets_async_io_projects_value() {
+        let state: StateT<i32, AsyncIO<(i32, i32)>> = StateT::gets_async_io(|s: &i32| s * 2);
+        let (result, final_state) = state.run(21).run_async().await;
+        assert_eq!(result, 42);
+        assert_eq!(final_state, 21);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn state_gets_async_io_does_not_modify_state() {
+        let state: StateT<String, AsyncIO<(usize, String)>> =
+            StateT::gets_async_io(|s: &String| s.len());
+        let (result, final_state) = state.run("hello".to_string()).run_async().await;
+        assert_eq!(result, 5);
+        assert_eq!(final_state, "hello");
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn state_gets_get_law() {
+        let projection = |s: &i32| s * 2;
+
+        // gets_async_io を使用
+        let state1: StateT<i32, AsyncIO<(i32, i32)>> = StateT::gets_async_io(projection);
+        let (result1, _) = state1.run(21).run_async().await;
+
+        // get_async_io().fmap_async_io() を使用
+        let state2: StateT<i32, AsyncIO<(i32, i32)>> =
+            StateT::<i32, AsyncIO<(i32, i32)>>::get_async_io()
+                .fmap_async_io(move |s| projection(&s));
+        let (result2, _) = state2.run(21).run_async().await;
+
+        assert_eq!(result1, result2);
+    }
+
+    // =========================================================================
+    // state_async_io Tests
+    // =========================================================================
+
+    #[rstest]
+    #[tokio::test]
+    async fn state_state_async_io_transitions() {
+        let state: StateT<i32, AsyncIO<(String, i32)>> =
+            StateT::state_async_io(|s| (format!("was: {}", s), s + 1));
+        let (result, final_state) = state.run(41).run_async().await;
+        assert_eq!(result, "was: 41");
+        assert_eq!(final_state, 42);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn state_state_async_io_can_read_and_write() {
+        let state: StateT<Vec<i32>, AsyncIO<(i32, Vec<i32>)>> =
+            StateT::state_async_io(|mut s: Vec<i32>| {
+                let sum: i32 = s.iter().sum();
+                s.push(sum);
+                (sum, s)
+            });
+        let (result, final_state) = state.run(vec![1, 2, 3]).run_async().await;
+        assert_eq!(result, 6);
+        assert_eq!(final_state, vec![1, 2, 3, 6]);
+    }
+}

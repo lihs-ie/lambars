@@ -1,0 +1,1281 @@
+# Async Effect Integration 実装計画
+#
+# 概要:
+#   Issue #13 に基づき、async/await と Effect System の統合を強化する。
+#   各フェーズで TDD により実装を進め、既存の AsyncIO サポートを拡充する。
+#
+# 参照:
+#   - 要件定義: docs/internal/requirements/20260105_1200_async_effect_integration.yaml
+#   - GitHub Issue: #13
+#
+# 設計方針:
+#   - 既存の _async_io サフィックス命名規則を維持
+#   - AsyncIO の遅延評価セマンティクスを保持
+#   - モナド則を満たすことをテストで検証
+
+version: "1.0.0"
+name: "Async Effect Integration Implementation Plan"
+requirement_file: "docs/internal/requirements/20260105_1200_async_effect_integration.yaml"
+github_issue: 13
+
+# =============================================================================
+# 実装順序
+# =============================================================================
+
+implementation_order:
+  - step: 1
+    name: "IO/AsyncIO 変換の明確化"
+    description: "to_async メソッドのドキュメント改善と即時実行の動作確認テスト追加"
+    estimated_time: "1 hour"
+    items:
+      - to_async ドキュメント改善
+      - 即時実行確認テスト追加
+
+  - step: 2
+    name: "ReaderT AsyncIO サポート強化"
+    description: "lift_async_io と asks_async_io メソッドの追加"
+    estimated_time: "2 hours"
+    items:
+      - lift_async_io 実装
+      - asks_async_io 実装
+      - モナド則テスト追加
+
+  - step: 3
+    name: "StateT AsyncIO サポート強化"
+    description: "lift_async_io, gets_async_io, state_async_io メソッドの追加"
+    estimated_time: "3 hours"
+    items:
+      - lift_async_io 実装
+      - gets_async_io 実装
+      - state_async_io 実装
+      - モナド則テスト追加
+
+  - step: 4
+    name: "WriterT AsyncIO サポート"
+    description: "WriterT に AsyncIO 専用メソッドを追加"
+    estimated_time: "3 hours"
+    items:
+      - pure_async_io 実装
+      - lift_async_io 実装
+      - tell_async_io 実装
+      - fmap_async_io 実装
+      - flat_map_async_io 実装
+      - listen_async_io 実装
+
+  - step: 5
+    name: "eff_async! マクロ改善"
+    description: "ドキュメント改善と使用例の追加"
+    estimated_time: "1 hour"
+    items:
+      - ReaderT との組み合わせ例追加
+      - StateT との組み合わせ例追加
+      - WriterT との組み合わせ例追加
+
+# =============================================================================
+# 実装タスク詳細
+# =============================================================================
+
+implementation_plan:
+  # ===========================================================================
+  # フェーズ 1: IO/AsyncIO 変換の明確化
+  # ===========================================================================
+  - id: impl_io_async_doc
+    requirement_id: async_effect_io_async_conversion
+    name: "IO::to_async ドキュメント改善"
+    priority: 1
+    files:
+      - path: src/effect/io.rs
+        description: |
+          to_async メソッドのドキュメントを改善し、
+          即時実行の動作を明確に説明する。
+    implementation_steps:
+      - step: 1
+        description: |
+          to_async のドキュメントコメントを詳細化する。
+          特に、即時実行される理由と代替手段（AsyncIO::new の直接使用）を明記する。
+        code_outline: |
+          /// Converts a synchronous IO to an `AsyncIO`.
+          ///
+          /// # Important: Immediate Execution
+          ///
+          /// The IO action is executed **immediately** when `to_async` is called,
+          /// not when `run_async` is called on the resulting `AsyncIO`. This is
+          /// because `IO` is not `Send` (it contains `Box<dyn FnOnce() -> A>`
+          /// without a `Send` bound) and cannot be moved to an async context.
+          ///
+          /// If you need deferred execution in an async context, use
+          /// `AsyncIO::new` directly with your computation instead.
+          ///
+          /// # Example: Understanding Immediate Execution
+          ///
+          /// ```rust
+          /// use lambars::effect::{IO, AsyncIO};
+          /// use std::sync::atomic::{AtomicBool, Ordering};
+          /// use std::sync::Arc;
+          ///
+          /// let executed = Arc::new(AtomicBool::new(false));
+          /// let executed_clone = executed.clone();
+          ///
+          /// let io = IO::new(move || {
+          ///     executed_clone.store(true, Ordering::SeqCst);
+          ///     42
+          /// });
+          ///
+          /// // The IO action executes HERE, not when run_async is called
+          /// let async_io = io.to_async();
+          /// assert!(executed.load(Ordering::SeqCst)); // Already executed!
+          ///
+          /// // run_async just returns the pre-computed value
+          /// // let result = async_io.run_async().await;
+          /// ```
+          ///
+          /// # Recommended Alternative
+          ///
+          /// For true deferred execution, use `AsyncIO::new` directly:
+          ///
+          /// ```rust,ignore
+          /// use lambars::effect::AsyncIO;
+          ///
+          /// // This is deferred - executes only when run_async is called
+          /// let async_io = AsyncIO::new(|| async {
+          ///     println!("This runs when awaited");
+          ///     42
+          /// });
+          /// ```
+          #[must_use]
+          pub fn to_async(self) -> super::AsyncIO<A>
+    tests:
+      - name: test_to_async_executes_immediately
+        description: |
+          to_async が呼び出された時点で IO アクションが実行されることを検証する。
+          これは AsyncIO の遅延評価とは異なる動作であることを明示的にテストする。
+        test_type: unit
+        code_outline: |
+          #[cfg(feature = "async")]
+          #[test]
+          fn test_to_async_executes_immediately() {
+              use std::sync::atomic::{AtomicBool, Ordering};
+              use std::sync::Arc;
+
+              let executed = Arc::new(AtomicBool::new(false));
+              let executed_clone = executed.clone();
+
+              let io = IO::new(move || {
+                  executed_clone.store(true, Ordering::SeqCst);
+                  42
+              });
+
+              // to_async 呼び出し時点で実行される
+              let _async_io = io.to_async();
+              assert!(executed.load(Ordering::SeqCst), "IO should be executed immediately on to_async");
+          }
+
+      - name: test_to_async_result_is_captured
+        description: |
+          to_async が返す AsyncIO は、既に計算された値を保持していることを検証する。
+        test_type: unit
+        code_outline: |
+          #[cfg(feature = "async")]
+          #[tokio::test]
+          async fn test_to_async_result_is_captured() {
+              let io = IO::pure(42);
+              let async_io = io.to_async();
+              assert_eq!(async_io.run_async().await, 42);
+          }
+
+    dependencies: []
+
+  # ===========================================================================
+  # フェーズ 2: ReaderT AsyncIO サポート強化
+  # ===========================================================================
+  - id: impl_reader_lift_async_io
+    requirement_id: async_effect_reader_transformer_async
+    name: "ReaderT::lift_async_io 実装"
+    priority: 2
+    files:
+      - path: src/effect/reader_transformer.rs
+        description: |
+          AsyncIO を ReaderT に持ち上げる lift_async_io メソッドを追加する。
+    implementation_steps:
+      - step: 1
+        description: |
+          lift_async_io メソッドを実装する。
+          環境を無視して、内部の AsyncIO をそのまま返す。
+        code_outline: |
+          #[cfg(feature = "async")]
+          impl<R, A> ReaderT<R, AsyncIO<A>>
+          where
+              R: 'static,
+              A: Send + 'static,
+          {
+              /// Lifts an `AsyncIO` into `ReaderT`.
+              ///
+              /// The resulting `ReaderT` ignores the environment and returns the
+              /// inner `AsyncIO` directly.
+              ///
+              /// # Important: Single Use Only
+              ///
+              /// The resulting `ReaderT` can only be run **once**. Running it multiple
+              /// times will cause a panic. This is because `AsyncIO` is not `Clone`,
+              /// so we cannot share the inner computation across multiple runs.
+              ///
+              /// # Arguments
+              ///
+              /// * `inner` - The `AsyncIO` to lift
+              ///
+              /// # Panics
+              ///
+              /// Panics if the `ReaderT` is run more than once.
+              ///
+              /// # Examples
+              ///
+              /// ```rust,ignore
+              /// use lambars::effect::{ReaderT, AsyncIO};
+              ///
+              /// #[tokio::main]
+              /// async fn main() {
+              ///     let async_io = AsyncIO::pure(42);
+              ///     let reader: ReaderT<i32, AsyncIO<i32>> = ReaderT::lift_async_io(async_io);
+              ///     let result = reader.run(999).run_async().await;
+              ///     assert_eq!(result, 42); // Environment is ignored
+              /// }
+              /// ```
+              #[must_use]
+              pub fn lift_async_io(inner: AsyncIO<A>) -> Self
+              where
+                  A: Clone,
+              {
+                  // AsyncIO is not Clone, so we execute it once and wrap the result
+                  // This follows the same pattern as the synchronous lift_io
+                  let inner_arc = std::sync::Arc::new(std::sync::Mutex::new(Some(inner)));
+                  Self::new(move |_| {
+                      let mut guard = inner_arc.lock().unwrap();
+                      guard.take().unwrap_or_else(|| {
+                          panic!("ReaderT::lift_async_io: AsyncIO already consumed. Use the ReaderT only once.")
+                      })
+                  })
+              }
+          }
+    tests:
+      - name: test_reader_lift_async_io_ignores_environment
+        description: |
+          lift_async_io で持ち上げた AsyncIO が環境を無視することを検証する。
+        test_type: unit
+        code_outline: |
+          #[cfg(feature = "async")]
+          #[tokio::test]
+          async fn test_reader_lift_async_io_ignores_environment() {
+              let async_io = AsyncIO::pure(42);
+              let reader: ReaderT<i32, AsyncIO<i32>> = ReaderT::lift_async_io(async_io);
+              let result = reader.run(999).run_async().await;
+              assert_eq!(result, 42);
+          }
+
+      - name: test_reader_lift_async_io_preserves_value
+        description: |
+          lift_async_io で持ち上げた AsyncIO の値が保持されることを検証する。
+        test_type: unit
+        code_outline: |
+          #[cfg(feature = "async")]
+          #[tokio::test]
+          async fn test_reader_lift_async_io_preserves_value() {
+              let async_io = AsyncIO::new(|| async { "hello".to_string() });
+              let reader: ReaderT<(), AsyncIO<String>> = ReaderT::lift_async_io(async_io);
+              let result = reader.run(()).run_async().await;
+              assert_eq!(result, "hello");
+          }
+
+      - name: test_reader_lift_pure_law
+        description: |
+          Lift Pure Law を検証: lift_async_io(AsyncIO::pure(a)) == pure_async_io(a)
+        test_type: law
+        code_outline: |
+          #[cfg(feature = "async")]
+          #[tokio::test]
+          async fn test_reader_lift_pure_law() {
+              let value = 42;
+              let via_lift: ReaderT<(), AsyncIO<i32>> =
+                  ReaderT::lift_async_io(AsyncIO::pure(value));
+              let via_pure: ReaderT<(), AsyncIO<i32>> =
+                  ReaderT::pure_async_io(value);
+
+              assert_eq!(
+                  via_lift.run(()).run_async().await,
+                  via_pure.run(()).run_async().await
+              );
+          }
+
+    dependencies:
+      - impl_io_async_doc
+
+  - id: impl_reader_asks_async_io
+    requirement_id: async_effect_reader_transformer_async
+    name: "ReaderT::asks_async_io 実装"
+    priority: 2
+    files:
+      - path: src/effect/reader_transformer.rs
+        description: |
+          環境から値を射影する asks_async_io メソッドを追加する。
+    implementation_steps:
+      - step: 1
+        description: |
+          asks_async_io メソッドを実装する。
+          環境を受け取り、射影関数を適用した結果を AsyncIO で返す。
+        code_outline: |
+          #[cfg(feature = "async")]
+          impl<R, A> ReaderT<R, AsyncIO<A>>
+          where
+              R: 'static,
+              A: Send + 'static,
+          {
+              /// Returns a projected value from the environment wrapped in `AsyncIO`.
+              ///
+              /// This is equivalent to `ask_async_io().fmap_async_io(projection)` but
+              /// more concise.
+              ///
+              /// # Arguments
+              ///
+              /// * `projection` - A function that extracts a value from the environment
+              ///
+              /// # Examples
+              ///
+              /// ```rust,ignore
+              /// use lambars::effect::{ReaderT, AsyncIO};
+              ///
+              /// #[derive(Clone)]
+              /// struct Config { port: u16 }
+              ///
+              /// #[tokio::main]
+              /// async fn main() {
+              ///     let reader: ReaderT<Config, AsyncIO<u16>> =
+              ///         ReaderT::asks_async_io(|c: Config| c.port);
+              ///     let result = reader.run(Config { port: 8080 }).run_async().await;
+              ///     assert_eq!(result, 8080);
+              /// }
+              /// ```
+              #[must_use]
+              pub fn asks_async_io<F>(projection: F) -> Self
+              where
+                  R: Clone + Send,
+                  F: Fn(R) -> A + Send + Sync + 'static,
+              {
+                  Self::new(move |environment: R| AsyncIO::pure(projection(environment)))
+              }
+          }
+    tests:
+      - name: test_reader_asks_async_io_projects_value
+        description: |
+          asks_async_io が環境から値を正しく射影することを検証する。
+        test_type: unit
+        code_outline: |
+          #[cfg(feature = "async")]
+          #[tokio::test]
+          async fn test_reader_asks_async_io_projects_value() {
+              #[derive(Clone)]
+              struct Env { value: i32 }
+
+              let reader: ReaderT<Env, AsyncIO<i32>> =
+                  ReaderT::asks_async_io(|e: Env| e.value * 2);
+              let result = reader.run(Env { value: 21 }).run_async().await;
+              assert_eq!(result, 42);
+          }
+
+      - name: test_reader_ask_asks_law
+        description: |
+          Ask Asks Law を検証: asks_async_io(f) == ask_async_io().fmap_async_io(f)
+        test_type: law
+        code_outline: |
+          #[cfg(feature = "async")]
+          #[tokio::test]
+          async fn test_reader_asks_async_io_equivalent_to_ask_fmap() {
+              let projection = |x: i32| x * 3;
+
+              // asks_async_io を使用
+              let reader1: ReaderT<i32, AsyncIO<i32>> =
+                  ReaderT::asks_async_io(projection);
+              let result1 = reader1.run(10).run_async().await;
+
+              // ask_async_io().fmap_async_io() を使用
+              let reader2: ReaderT<i32, AsyncIO<i32>> =
+                  ReaderT::<i32, AsyncIO<i32>>::ask_async_io()
+                      .fmap_async_io(projection);
+              let result2 = reader2.run(10).run_async().await;
+
+              assert_eq!(result1, result2);
+          }
+
+    dependencies:
+      - impl_reader_lift_async_io
+
+  # ===========================================================================
+  # フェーズ 3: StateT AsyncIO サポート強化
+  # ===========================================================================
+  - id: impl_state_lift_async_io
+    requirement_id: async_effect_state_transformer_async
+    name: "StateT::lift_async_io 実装"
+    priority: 3
+    files:
+      - path: src/effect/state_transformer.rs
+        description: |
+          AsyncIO を StateT に持ち上げる lift_async_io メソッドを追加する。
+    implementation_steps:
+      - step: 1
+        description: |
+          lift_async_io メソッドを実装する。
+          状態を変更せず、AsyncIO の結果と現在の状態をタプルで返す。
+        code_outline: |
+          #[cfg(feature = "async")]
+          impl<S, A> StateT<S, AsyncIO<(A, S)>>
+          where
+              S: Send + 'static,
+              A: Send + 'static,
+          {
+              /// Lifts an `AsyncIO` into `StateT`.
+              ///
+              /// The state is not modified; the resulting `StateT` returns
+              /// the `AsyncIO`'s result paired with the unchanged state.
+              ///
+              /// # Important: Single Use Only
+              ///
+              /// The resulting `StateT` can only be run **once**. Running it multiple
+              /// times will cause a panic. This is because `AsyncIO` is not `Clone`,
+              /// so we cannot share the inner computation across multiple runs.
+              ///
+              /// # Arguments
+              ///
+              /// * `inner` - The `AsyncIO` to lift
+              ///
+              /// # Panics
+              ///
+              /// Panics if the `StateT` is run more than once.
+              ///
+              /// # Examples
+              ///
+              /// ```rust,ignore
+              /// use lambars::effect::{StateT, AsyncIO};
+              ///
+              /// #[tokio::main]
+              /// async fn main() {
+              ///     let async_io = AsyncIO::pure(42);
+              ///     let state: StateT<i32, AsyncIO<(i32, i32)>> = StateT::lift_async_io(async_io);
+              ///     let (result, final_state) = state.run(100).run_async().await;
+              ///     assert_eq!(result, 42);
+              ///     assert_eq!(final_state, 100); // State is unchanged
+              /// }
+              /// ```
+              #[must_use]
+              pub fn lift_async_io(inner: AsyncIO<A>) -> Self
+              where
+                  S: Clone,
+              {
+                  let inner_arc = std::sync::Arc::new(std::sync::Mutex::new(Some(inner)));
+                  Self::new(move |state: S| {
+                      let mut guard = inner_arc.lock().unwrap();
+                      let async_io = guard.take().unwrap_or_else(|| {
+                          panic!("StateT::lift_async_io: AsyncIO already consumed. Use the StateT only once.")
+                      });
+                      async_io.fmap(move |value| (value, state))
+                  })
+              }
+          }
+    tests:
+      - name: test_state_lift_async_io_preserves_state
+        description: |
+          lift_async_io が状態を変更しないことを検証する。
+        test_type: unit
+        code_outline: |
+          #[cfg(feature = "async")]
+          #[tokio::test]
+          async fn test_state_lift_async_io_preserves_state() {
+              let async_io = AsyncIO::pure(42);
+              let state: StateT<i32, AsyncIO<(i32, i32)>> = StateT::lift_async_io(async_io);
+              let (result, final_state) = state.run(100).run_async().await;
+              assert_eq!(result, 42);
+              assert_eq!(final_state, 100);
+          }
+
+      - name: test_state_lift_async_io_preserves_async_value
+        description: |
+          lift_async_io が AsyncIO の値を正しく保持することを検証する。
+        test_type: unit
+        code_outline: |
+          #[cfg(feature = "async")]
+          #[tokio::test]
+          async fn test_state_lift_async_io_preserves_async_value() {
+              let async_io = AsyncIO::new(|| async { "hello".to_string() });
+              let state: StateT<(), AsyncIO<(String, ())>> = StateT::lift_async_io(async_io);
+              let (result, _) = state.run(()).run_async().await;
+              assert_eq!(result, "hello");
+          }
+
+      - name: test_state_lift_state_law
+        description: |
+          Lift State Law を検証: lift は状態を変更しない
+          lift_async_io(async_io).exec_async(s) == async_io.fmap(|_| s)
+        test_type: law
+        code_outline: |
+          #[cfg(feature = "async")]
+          #[tokio::test]
+          async fn test_state_lift_state_law() {
+              let initial_state = 100;
+              let async_io = AsyncIO::pure(42);
+              let state: StateT<i32, AsyncIO<(i32, i32)>> = StateT::lift_async_io(async_io);
+              let final_state = state.exec_async(initial_state).run_async().await;
+              assert_eq!(final_state, initial_state);
+          }
+
+    dependencies:
+      - impl_reader_asks_async_io
+
+  - id: impl_state_gets_async_io
+    requirement_id: async_effect_state_transformer_async
+    name: "StateT::gets_async_io 実装"
+    priority: 3
+    files:
+      - path: src/effect/state_transformer.rs
+        description: |
+          状態から値を射影する gets_async_io メソッドを追加する。
+    implementation_steps:
+      - step: 1
+        description: |
+          gets_async_io メソッドを実装する。
+          状態を受け取り、射影関数を適用した結果を返す（状態は変更しない）。
+        code_outline: |
+          #[cfg(feature = "async")]
+          impl<S, A> StateT<S, AsyncIO<(A, S)>>
+          where
+              S: Send + 'static,
+              A: Send + 'static,
+          {
+              /// Returns a projected value from the state wrapped in `AsyncIO`.
+              ///
+              /// The state is not modified.
+              ///
+              /// # Arguments
+              ///
+              /// * `projection` - A function that extracts a value from the state
+              ///
+              /// # Examples
+              ///
+              /// ```rust,ignore
+              /// use lambars::effect::{StateT, AsyncIO};
+              ///
+              /// #[tokio::main]
+              /// async fn main() {
+              ///     let state: StateT<i32, AsyncIO<(i32, i32)>> =
+              ///         StateT::gets_async_io(|s: &i32| s * 2);
+              ///     let (result, final_state) = state.run(21).run_async().await;
+              ///     assert_eq!(result, 42);
+              ///     assert_eq!(final_state, 21); // State is unchanged
+              /// }
+              /// ```
+              #[must_use]
+              pub fn gets_async_io<F>(projection: F) -> Self
+              where
+                  S: Clone,
+                  F: Fn(&S) -> A + Send + Sync + 'static,
+              {
+                  let projection_arc = std::sync::Arc::new(projection);
+                  Self::new(move |state: S| {
+                      let projection_clone = projection_arc.clone();
+                      let value = projection_clone(&state);
+                      AsyncIO::pure((value, state))
+                  })
+              }
+          }
+    tests:
+      - name: test_state_gets_async_io_projects_value
+        description: |
+          gets_async_io が状態から値を正しく射影することを検証する。
+        test_type: unit
+        code_outline: |
+          #[cfg(feature = "async")]
+          #[tokio::test]
+          async fn test_state_gets_async_io_projects_value() {
+              let state: StateT<i32, AsyncIO<(i32, i32)>> =
+                  StateT::gets_async_io(|s: &i32| s * 2);
+              let (result, final_state) = state.run(21).run_async().await;
+              assert_eq!(result, 42);
+              assert_eq!(final_state, 21);
+          }
+
+      - name: test_state_gets_async_io_does_not_modify_state
+        description: |
+          gets_async_io が状態を変更しないことを検証する。
+        test_type: unit
+        code_outline: |
+          #[cfg(feature = "async")]
+          #[tokio::test]
+          async fn test_state_gets_async_io_does_not_modify_state() {
+              let state: StateT<String, AsyncIO<(usize, String)>> =
+                  StateT::gets_async_io(|s: &String| s.len());
+              let (result, final_state) = state.run("hello".to_string()).run_async().await;
+              assert_eq!(result, 5);
+              assert_eq!(final_state, "hello");
+          }
+
+      - name: test_state_gets_get_law
+        description: |
+          Gets Get Law を検証: gets_async_io(f) == get_async_io().fmap_async_io(|s| f(&s))
+        test_type: law
+        code_outline: |
+          #[cfg(feature = "async")]
+          #[tokio::test]
+          async fn test_state_gets_get_law() {
+              let projection = |s: &i32| s * 2;
+
+              // gets_async_io を使用
+              let state1: StateT<i32, AsyncIO<(i32, i32)>> =
+                  StateT::gets_async_io(projection);
+              let (result1, _) = state1.run(21).run_async().await;
+
+              // get_async_io().fmap_async_io() を使用
+              let state2: StateT<i32, AsyncIO<(i32, i32)>> =
+                  StateT::<i32, AsyncIO<(i32, i32)>>::get_async_io()
+                      .fmap_async_io(|s| projection(&s));
+              let (result2, _) = state2.run(21).run_async().await;
+
+              assert_eq!(result1, result2);
+          }
+
+    dependencies:
+      - impl_state_lift_async_io
+
+  - id: impl_state_state_async_io
+    requirement_id: async_effect_state_transformer_async
+    name: "StateT::state_async_io 実装"
+    priority: 3
+    files:
+      - path: src/effect/state_transformer.rs
+        description: |
+          状態遷移関数を実行する state_async_io メソッドを追加する。
+    implementation_steps:
+      - step: 1
+        description: |
+          state_async_io メソッドを実装する。
+          状態遷移関数を受け取り、結果と新しい状態を返す。
+        code_outline: |
+          #[cfg(feature = "async")]
+          impl<S, A> StateT<S, AsyncIO<(A, S)>>
+          where
+              S: Send + 'static,
+              A: Send + 'static,
+          {
+              /// Runs a state transition function and returns the result.
+              ///
+              /// This is the most general state operation - it takes a function
+              /// that receives the current state and returns both a result and
+              /// a new state.
+              ///
+              /// # Arguments
+              ///
+              /// * `transition` - A function that takes the state and returns (result, new_state)
+              ///
+              /// # Examples
+              ///
+              /// ```rust,ignore
+              /// use lambars::effect::{StateT, AsyncIO};
+              ///
+              /// #[tokio::main]
+              /// async fn main() {
+              ///     let state: StateT<i32, AsyncIO<(String, i32)>> =
+              ///         StateT::state_async_io(|s| (format!("was: {}", s), s + 1));
+              ///     let (result, final_state) = state.run(41).run_async().await;
+              ///     assert_eq!(result, "was: 41");
+              ///     assert_eq!(final_state, 42);
+              /// }
+              /// ```
+              #[must_use]
+              pub fn state_async_io<F>(transition: F) -> Self
+              where
+                  F: Fn(S) -> (A, S) + Send + Sync + 'static,
+              {
+                  let transition_arc = std::sync::Arc::new(transition);
+                  Self::new(move |state: S| {
+                      let transition_clone = transition_arc.clone();
+                      AsyncIO::pure(transition_clone(state))
+                  })
+              }
+          }
+    tests:
+      - name: test_state_state_async_io_transitions
+        description: |
+          state_async_io が状態遷移を正しく実行することを検証する。
+        test_type: unit
+        code_outline: |
+          #[cfg(feature = "async")]
+          #[tokio::test]
+          async fn test_state_state_async_io_transitions() {
+              let state: StateT<i32, AsyncIO<(String, i32)>> =
+                  StateT::state_async_io(|s| (format!("was: {}", s), s + 1));
+              let (result, final_state) = state.run(41).run_async().await;
+              assert_eq!(result, "was: 41");
+              assert_eq!(final_state, 42);
+          }
+
+      - name: test_state_state_async_io_can_read_and_write
+        description: |
+          state_async_io が状態の読み取りと書き込みの両方を行えることを検証する。
+        test_type: unit
+        code_outline: |
+          #[cfg(feature = "async")]
+          #[tokio::test]
+          async fn test_state_state_async_io_can_read_and_write() {
+              let state: StateT<Vec<i32>, AsyncIO<(i32, Vec<i32>)>> =
+                  StateT::state_async_io(|mut s: Vec<i32>| {
+                      let sum: i32 = s.iter().sum();
+                      s.push(sum);
+                      (sum, s)
+                  });
+              let (result, final_state) = state.run(vec![1, 2, 3]).run_async().await;
+              assert_eq!(result, 6);
+              assert_eq!(final_state, vec![1, 2, 3, 6]);
+          }
+
+    dependencies:
+      - impl_state_gets_async_io
+
+  # ===========================================================================
+  # フェーズ 4: WriterT AsyncIO サポート
+  # ===========================================================================
+  - id: impl_writer_async_io
+    requirement_id: async_effect_writer_transformer_async
+    name: "WriterT AsyncIO サポート追加"
+    priority: 4
+    files:
+      - path: src/effect/writer_transformer.rs
+        description: |
+          WriterT に AsyncIO 専用メソッドを追加する。
+          - pure_async_io
+          - lift_async_io
+          - tell_async_io
+          - fmap_async_io
+          - flat_map_async_io
+          - listen_async_io
+    implementation_steps:
+      - step: 1
+        description: |
+          #[cfg(feature = "async")] ブロックで AsyncIO をインポートする。
+        code_outline: |
+          #[cfg(feature = "async")]
+          use super::AsyncIO;
+
+      - step: 2
+        description: |
+          WriterT<W, AsyncIO<(A, W)>> に対する impl ブロックを追加する。
+        code_outline: |
+          #[cfg(feature = "async")]
+          impl<W, A> WriterT<W, AsyncIO<(A, W)>>
+          where
+              W: Monoid + Clone + Send + 'static,
+              A: Send + 'static,
+          {
+              /// Creates a `WriterT` that returns a constant value with empty output.
+              ///
+              /// # Arguments
+              ///
+              /// * `value` - The value to wrap
+              ///
+              /// # Examples
+              ///
+              /// ```rust,ignore
+              /// use lambars::effect::{WriterT, AsyncIO};
+              /// use lambars::typeclass::Monoid;
+              ///
+              /// #[tokio::main]
+              /// async fn main() {
+              ///     let writer: WriterT<Vec<String>, AsyncIO<(i32, Vec<String>)>> =
+              ///         WriterT::pure_async_io(42);
+              ///     let (value, output) = writer.run().run_async().await;
+              ///     assert_eq!(value, 42);
+              ///     assert_eq!(output, Vec::<String>::empty());
+              /// }
+              /// ```
+              pub fn pure_async_io(value: A) -> Self {
+                  Self::new(AsyncIO::pure((value, W::empty())))
+              }
+
+              /// Lifts an `AsyncIO` into `WriterT` with empty output.
+              ///
+              /// # Arguments
+              ///
+              /// * `inner` - The `AsyncIO` to lift
+              ///
+              /// # Examples
+              ///
+              /// ```rust,ignore
+              /// use lambars::effect::{WriterT, AsyncIO};
+              /// use lambars::typeclass::Monoid;
+              ///
+              /// #[tokio::main]
+              /// async fn main() {
+              ///     let inner = AsyncIO::pure(42);
+              ///     let writer: WriterT<Vec<String>, AsyncIO<(i32, Vec<String>)>> =
+              ///         WriterT::lift_async_io(inner);
+              ///     let (value, output) = writer.run().run_async().await;
+              ///     assert_eq!(value, 42);
+              ///     assert_eq!(output, Vec::<String>::empty());
+              /// }
+              /// ```
+              #[must_use]
+              pub fn lift_async_io(inner: AsyncIO<A>) -> Self {
+                  Self::new(inner.fmap(|value| (value, W::empty())))
+              }
+
+              /// Creates a `WriterT` that appends output without producing a meaningful result.
+              ///
+              /// # Arguments
+              ///
+              /// * `output` - The output to append
+              ///
+              /// # Examples
+              ///
+              /// ```rust,ignore
+              /// use lambars::effect::{WriterT, AsyncIO};
+              ///
+              /// #[tokio::main]
+              /// async fn main() {
+              ///     let writer: WriterT<Vec<String>, AsyncIO<((), Vec<String>)>> =
+              ///         WriterT::<Vec<String>, AsyncIO<((), Vec<String>)>>::tell_async_io(
+              ///             vec!["log".to_string()]
+              ///         );
+              ///     let (_, output) = writer.run().run_async().await;
+              ///     assert_eq!(output, vec!["log"]);
+              /// }
+              /// ```
+              pub fn tell_async_io(output: W) -> WriterT<W, AsyncIO<((), W)>> {
+                  WriterT::new(AsyncIO::pure(((), output)))
+              }
+
+              /// Maps a function over the value inside the `AsyncIO`.
+              ///
+              /// # Arguments
+              ///
+              /// * `function` - The function to apply to the value
+              ///
+              /// # Examples
+              ///
+              /// ```rust,ignore
+              /// use lambars::effect::{WriterT, AsyncIO};
+              ///
+              /// #[tokio::main]
+              /// async fn main() {
+              ///     let writer: WriterT<Vec<String>, AsyncIO<(i32, Vec<String>)>> =
+              ///         WriterT::new(AsyncIO::pure((21, vec!["log".to_string()])));
+              ///     let mapped = writer.fmap_async_io(|v| v * 2);
+              ///     let (value, output) = mapped.run().run_async().await;
+              ///     assert_eq!(value, 42);
+              ///     assert_eq!(output, vec!["log"]);
+              /// }
+              /// ```
+              pub fn fmap_async_io<B, F>(self, function: F) -> WriterT<W, AsyncIO<(B, W)>>
+              where
+                  F: FnOnce(A) -> B + Send + 'static,
+                  B: Send + 'static,
+              {
+                  WriterT::new(
+                      self.inner
+                          .fmap(move |(value, output)| (function(value), output)),
+                  )
+              }
+
+              /// Chains `WriterT` computations with `AsyncIO`.
+              ///
+              /// # Arguments
+              ///
+              /// * `function` - A function that takes the value and returns a new `WriterT`
+              ///
+              /// # Examples
+              ///
+              /// ```rust,ignore
+              /// use lambars::effect::{WriterT, AsyncIO};
+              ///
+              /// #[tokio::main]
+              /// async fn main() {
+              ///     let writer: WriterT<Vec<String>, AsyncIO<(i32, Vec<String>)>> =
+              ///         WriterT::new(AsyncIO::pure((10, vec!["first".to_string()])));
+              ///     let chained = writer.flat_map_async_io(|v| {
+              ///         WriterT::new(AsyncIO::pure((v * 2, vec!["second".to_string()])))
+              ///     });
+              ///     let (value, output) = chained.run().run_async().await;
+              ///     assert_eq!(value, 20);
+              ///     assert_eq!(output, vec!["first", "second"]);
+              /// }
+              /// ```
+              pub fn flat_map_async_io<B, F>(self, function: F) -> WriterT<W, AsyncIO<(B, W)>>
+              where
+                  F: FnOnce(A) -> WriterT<W, AsyncIO<(B, W)>> + Send + 'static,
+                  B: Send + 'static,
+              {
+                  WriterT::new(self.inner.flat_map(move |(value, output1)| {
+                      let next = function(value);
+                      next.inner
+                          .fmap(move |(result, output2)| (result, output1.combine(output2)))
+                  }))
+              }
+
+              /// Executes a computation and also returns its output.
+              ///
+              /// # Examples
+              ///
+              /// ```rust,ignore
+              /// use lambars::effect::{WriterT, AsyncIO};
+              ///
+              /// #[tokio::main]
+              /// async fn main() {
+              ///     let writer: WriterT<Vec<String>, AsyncIO<(i32, Vec<String>)>> =
+              ///         WriterT::new(AsyncIO::pure((42, vec!["log".to_string()])));
+              ///     let listened = WriterT::listen_async_io(writer);
+              ///     let ((value, inner_output), output) = listened.run().run_async().await;
+              ///     assert_eq!(value, 42);
+              ///     assert_eq!(inner_output, vec!["log"]);
+              ///     assert_eq!(output, vec!["log"]);
+              /// }
+              /// ```
+              #[must_use]
+              pub fn listen_async_io(
+                  computation: Self,
+              ) -> WriterT<W, AsyncIO<ListenedValue<A, W>>> {
+                  WriterT::new(
+                      computation
+                          .inner
+                          .fmap(|(value, output)| ((value, output.clone()), output)),
+                  )
+              }
+          }
+    tests:
+      - name: test_writer_pure_async_io
+        description: |
+          pure_async_io が空の出力で値を返すことを検証する。
+        test_type: unit
+        code_outline: |
+          #[cfg(feature = "async")]
+          #[tokio::test]
+          async fn test_writer_pure_async_io() {
+              use crate::typeclass::Monoid;
+
+              let writer: WriterT<Vec<String>, AsyncIO<(i32, Vec<String>)>> =
+                  WriterT::pure_async_io(42);
+              let (value, output) = writer.run().run_async().await;
+              assert_eq!(value, 42);
+              assert_eq!(output, Vec::<String>::empty());
+          }
+
+      - name: test_writer_lift_async_io
+        description: |
+          lift_async_io が AsyncIO を正しく持ち上げることを検証する。
+        test_type: unit
+        code_outline: |
+          #[cfg(feature = "async")]
+          #[tokio::test]
+          async fn test_writer_lift_async_io() {
+              use crate::typeclass::Monoid;
+
+              let inner = AsyncIO::pure(42);
+              let writer: WriterT<Vec<String>, AsyncIO<(i32, Vec<String>)>> =
+                  WriterT::lift_async_io(inner);
+              let (value, output) = writer.run().run_async().await;
+              assert_eq!(value, 42);
+              assert_eq!(output, Vec::<String>::empty());
+          }
+
+      - name: test_writer_tell_async_io
+        description: |
+          tell_async_io が出力を正しく記録することを検証する。
+        test_type: unit
+        code_outline: |
+          #[cfg(feature = "async")]
+          #[tokio::test]
+          async fn test_writer_tell_async_io() {
+              let writer: WriterT<Vec<String>, AsyncIO<((), Vec<String>)>> =
+                  WriterT::<Vec<String>, AsyncIO<((), Vec<String>)>>::tell_async_io(
+                      vec!["log".to_string()]
+                  );
+              let (_, output) = writer.run().run_async().await;
+              assert_eq!(output, vec!["log"]);
+          }
+
+      - name: test_writer_fmap_async_io
+        description: |
+          fmap_async_io が値を変換し、出力を保持することを検証する。
+        test_type: unit
+        code_outline: |
+          #[cfg(feature = "async")]
+          #[tokio::test]
+          async fn test_writer_fmap_async_io() {
+              let writer: WriterT<Vec<String>, AsyncIO<(i32, Vec<String>)>> =
+                  WriterT::new(AsyncIO::pure((21, vec!["log".to_string()])));
+              let mapped = writer.fmap_async_io(|v| v * 2);
+              let (value, output) = mapped.run().run_async().await;
+              assert_eq!(value, 42);
+              assert_eq!(output, vec!["log"]);
+          }
+
+      - name: test_writer_flat_map_async_io
+        description: |
+          flat_map_async_io が出力を結合することを検証する。
+        test_type: unit
+        code_outline: |
+          #[cfg(feature = "async")]
+          #[tokio::test]
+          async fn test_writer_flat_map_async_io() {
+              let writer: WriterT<Vec<String>, AsyncIO<(i32, Vec<String>)>> =
+                  WriterT::new(AsyncIO::pure((10, vec!["first".to_string()])));
+              let chained = writer.flat_map_async_io(|v| {
+                  WriterT::new(AsyncIO::pure((v * 2, vec!["second".to_string()])))
+              });
+              let (value, output) = chained.run().run_async().await;
+              assert_eq!(value, 20);
+              assert_eq!(output, vec!["first", "second"]);
+          }
+
+      - name: test_writer_listen_async_io
+        description: |
+          listen_async_io が出力を観測できることを検証する。
+        test_type: unit
+        code_outline: |
+          #[cfg(feature = "async")]
+          #[tokio::test]
+          async fn test_writer_listen_async_io() {
+              let writer: WriterT<Vec<String>, AsyncIO<(i32, Vec<String>)>> =
+                  WriterT::new(AsyncIO::pure((42, vec!["log".to_string()])));
+              let listened = WriterT::listen_async_io(writer);
+              let ((value, inner_output), output) = listened.run().run_async().await;
+              assert_eq!(value, 42);
+              assert_eq!(inner_output, vec!["log"]);
+              assert_eq!(output, vec!["log"]);
+          }
+
+    dependencies:
+      - impl_state_state_async_io
+
+  # ===========================================================================
+  # フェーズ 5: eff_async! マクロ改善
+  # ===========================================================================
+  - id: impl_eff_async_docs
+    requirement_id: async_effect_eff_async_macro
+    name: "eff_async! マクロドキュメント改善"
+    priority: 5
+    files:
+      - path: src/effect/eff_async_macro.rs
+        description: |
+          eff_async! マクロのドキュメントを改善し、
+          ReaderT/StateT/WriterT との組み合わせ例を追加する。
+    implementation_steps:
+      - step: 1
+        description: |
+          モジュールドキュメントに ReaderT との組み合わせ例を追加する。
+        code_outline: |
+          //! # Using with ReaderT
+          //!
+          //! `eff_async!` can be used within `ReaderT` computations:
+          //!
+          //! ```rust,ignore
+          //! use lambars::effect::{ReaderT, AsyncIO};
+          //! use lambars::eff_async;
+          //!
+          //! #[derive(Clone)]
+          //! struct Config {
+          //!     base_url: String,
+          //!     timeout_ms: u64,
+          //! }
+          //!
+          //! fn fetch_with_config() -> ReaderT<Config, AsyncIO<String>> {
+          //!     ReaderT::new(|config: Config| {
+          //!         eff_async! {
+          //!             url <= AsyncIO::pure(config.base_url.clone());
+          //!             // Simulate async fetch
+          //!             data <= AsyncIO::pure(format!("Data from {}", url));
+          //!             AsyncIO::pure(data)
+          //!         }
+          //!     })
+          //! }
+          //! ```
+
+      - step: 2
+        description: |
+          モジュールドキュメントに StateT との組み合わせ例を追加する。
+        code_outline: |
+          //! # Using with StateT
+          //!
+          //! `eff_async!` works well with `StateT` for stateful async computations:
+          //!
+          //! ```rust,ignore
+          //! use lambars::effect::{StateT, AsyncIO};
+          //! use lambars::eff_async;
+          //!
+          //! fn increment_and_double() -> StateT<i32, AsyncIO<(i32, i32)>> {
+          //!     StateT::new(|state| {
+          //!         eff_async! {
+          //!             current <= AsyncIO::pure(state);
+          //!             let doubled = current * 2;
+          //!             AsyncIO::pure((doubled, current + 1))
+          //!         }
+          //!     })
+          //! }
+          //! ```
+
+      - step: 3
+        description: |
+          モジュールドキュメントに WriterT との組み合わせ例を追加する。
+        code_outline: |
+          //! # Using with WriterT
+          //!
+          //! `eff_async!` can be combined with `WriterT` for logging:
+          //!
+          //! ```rust,ignore
+          //! use lambars::effect::{WriterT, AsyncIO};
+          //! use lambars::eff_async;
+          //!
+          //! async fn operation_with_logging() -> (i32, Vec<String>) {
+          //!     let computation = eff_async! {
+          //!         _ <= WriterT::<Vec<String>, AsyncIO<((), Vec<String>)>>::tell_async_io(
+          //!             vec!["Starting operation".to_string()]
+          //!         ).run();
+          //!         result <= AsyncIO::pure(42);
+          //!         _ <= WriterT::<Vec<String>, AsyncIO<((), Vec<String>)>>::tell_async_io(
+          //!             vec![format!("Result: {}", result)]
+          //!         ).run();
+          //!         AsyncIO::pure((result, vec!["Starting operation".to_string(), format!("Result: {}", result)]))
+          //!     };
+          //!     computation.run_async().await
+          //! }
+          //! ```
+
+    tests:
+      - name: test_eff_async_with_reader_like_pattern
+        description: |
+          eff_async! が ReaderT のようなパターンで使用できることを検証する。
+        test_type: integration
+        code_outline: |
+          #[cfg(feature = "async")]
+          #[tokio::test]
+          async fn test_eff_async_with_reader_like_pattern() {
+              #[derive(Clone)]
+              struct Config { value: i32 }
+
+              fn computation_with_config() -> ReaderT<Config, AsyncIO<i32>> {
+                  ReaderT::new(|config: Config| {
+                      eff_async! {
+                          base <= AsyncIO::pure(config.value);
+                          let doubled = base * 2;
+                          AsyncIO::pure(doubled)
+                      }
+                  })
+              }
+
+              let config = Config { value: 21 };
+              let result = computation_with_config().run(config).run_async().await;
+              assert_eq!(result, 42);
+          }
+
+      - name: test_eff_async_with_state_like_pattern
+        description: |
+          eff_async! が StateT のようなパターンで使用できることを検証する。
+        test_type: integration
+        code_outline: |
+          #[cfg(feature = "async")]
+          #[tokio::test]
+          async fn test_eff_async_with_state_like_pattern() {
+              fn stateful_computation() -> StateT<i32, AsyncIO<(String, i32)>> {
+                  StateT::new(|state| {
+                      eff_async! {
+                          current <= AsyncIO::pure(state);
+                          let message = format!("State was: {}", current);
+                          AsyncIO::pure((message, current + 1))
+                      }
+                  })
+              }
+
+              let (result, final_state) = stateful_computation().run(41).run_async().await;
+              assert_eq!(result, "State was: 41");
+              assert_eq!(final_state, 42);
+          }
+
+    dependencies:
+      - impl_writer_async_io
+
+# =============================================================================
+# テスト戦略
+# =============================================================================
+
+test_strategy:
+  unit_tests:
+    location: src/effect/*.rs
+    description: |
+      各モジュール内に #[cfg(test)] mod tests ブロックでユニットテストを配置する。
+      - 各メソッドの基本動作テスト
+      - エッジケースのテスト
+      - 遅延評価の検証テスト
+    coverage_target: 100%
+
+  integration_tests:
+    location: tests/
+    description: |
+      複数のモジュールを組み合わせた統合テストを配置する。
+      - ReaderT + AsyncIO + eff_async! の組み合わせ
+      - StateT + AsyncIO + eff_async! の組み合わせ
+      - WriterT + AsyncIO + eff_async! の組み合わせ
+      - モナド変換子のスタック
+
+  law_tests:
+    location: src/effect/*.rs
+    description: |
+      モナド則のテストを実装する。
+      - 左単位元則: pure(a).flat_map(f) == f(a)
+      - 右単位元則: m.flat_map(pure) == m
+      - 結合則: m.flat_map(f).flat_map(g) == m.flat_map(|x| f(x).flat_map(g))
+
+# =============================================================================
+# 受け入れ条件
+# =============================================================================
+
+acceptance_criteria:
+  code_quality:
+    - cargo check --all-features が通過すること
+    - cargo clippy --all-features --all-targets -- -D warnings が通過すること
+    - cargo fmt -- --check が通過すること
+    - RUSTDOCFLAGS="-D warnings" cargo doc --no-deps が通過すること
+
+  tests:
+    - cargo test --no-default-features が通過すること
+    - cargo test --all-features が通過すること
+    - 新規追加コードのカバレッジが 100% であること
+
+  functionality:
+    - IO::to_async の即時実行動作が明確にドキュメント化されていること
+    - ReaderT に lift_async_io, asks_async_io が追加されていること
+    - StateT に lift_async_io, gets_async_io, state_async_io が追加されていること
+    - WriterT に AsyncIO 専用メソッドが追加されていること
+    - eff_async! マクロのドキュメントが改善されていること
+
+  documentation:
+    - 全ての新規パブリック API にドキュメントコメントがあること
+    - 使用例が含まれていること
+    - 同期版との違いが明記されていること
+
+# =============================================================================
+# 参照
+# =============================================================================
+
+references:
+  - name: "要件定義"
+    location: "docs/internal/requirements/20260105_1200_async_effect_integration.yaml"
+
+  - name: "GitHub Issue #13"
+    url: "https://github.com/lihs-ie/functional-rusty/issues/13"
+
+  - name: "既存の AsyncIO 実装"
+    location: "src/effect/async_io.rs"
+
+  - name: "既存の ReaderT 実装"
+    location: "src/effect/reader_transformer.rs"
+
+  - name: "既存の StateT 実装"
+    location: "src/effect/state_transformer.rs"
+
+  - name: "既存の WriterT 実装"
+    location: "src/effect/writer_transformer.rs"
+
+  - name: "既存の eff_async! マクロ"
+    location: "src/effect/eff_async_macro.rs"

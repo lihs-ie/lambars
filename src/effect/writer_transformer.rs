@@ -35,6 +35,9 @@ use crate::typeclass::Monoid;
 
 use super::IO;
 
+#[cfg(feature = "async")]
+use super::AsyncIO;
+
 /// The result of `listen`: a tuple of `(value, inner_log)` paired with the outer log.
 /// The inner type `(A, W)` represents the original computation's result,
 /// and the outer `W` represents the accumulated log observed by `listen`.
@@ -415,6 +418,188 @@ where
     }
 }
 
+// =============================================================================
+// AsyncIO-specific Methods
+// =============================================================================
+
+#[cfg(feature = "async")]
+impl<W, A> WriterT<W, AsyncIO<(A, W)>>
+where
+    W: Monoid + Clone + Send + 'static,
+    A: Send + 'static,
+{
+    /// Creates a `WriterT` that returns a constant value with empty output.
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - The value to wrap
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use lambars::effect::{WriterT, AsyncIO};
+    /// use lambars::typeclass::Monoid;
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let writer: WriterT<Vec<String>, AsyncIO<(i32, Vec<String>)>> =
+    ///         WriterT::pure_async_io(42);
+    ///     let (value, output) = writer.run().run_async().await;
+    ///     assert_eq!(value, 42);
+    ///     assert_eq!(output, Vec::<String>::empty());
+    /// }
+    /// ```
+    pub fn pure_async_io(value: A) -> Self {
+        Self::new(AsyncIO::pure((value, W::empty())))
+    }
+
+    /// Lifts an `AsyncIO` into `WriterT` with empty output.
+    ///
+    /// # Arguments
+    ///
+    /// * `inner` - The `AsyncIO` to lift
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use lambars::effect::{WriterT, AsyncIO};
+    /// use lambars::typeclass::Monoid;
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let inner = AsyncIO::pure(42);
+    ///     let writer: WriterT<Vec<String>, AsyncIO<(i32, Vec<String>)>> =
+    ///         WriterT::lift_async_io(inner);
+    ///     let (value, output) = writer.run().run_async().await;
+    ///     assert_eq!(value, 42);
+    ///     assert_eq!(output, Vec::<String>::empty());
+    /// }
+    /// ```
+    #[must_use]
+    pub fn lift_async_io(inner: AsyncIO<A>) -> Self {
+        Self::new(inner.fmap(|value| (value, W::empty())))
+    }
+
+    /// Creates a `WriterT` that appends output without producing a meaningful result.
+    ///
+    /// # Arguments
+    ///
+    /// * `output` - The output to append
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use lambars::effect::{WriterT, AsyncIO};
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let writer: WriterT<Vec<String>, AsyncIO<((), Vec<String>)>> =
+    ///         WriterT::<Vec<String>, AsyncIO<((), Vec<String>)>>::tell_async_io(
+    ///             vec!["log".to_string()]
+    ///         );
+    ///     let (_, output) = writer.run().run_async().await;
+    ///     assert_eq!(output, vec!["log"]);
+    /// }
+    /// ```
+    pub fn tell_async_io(output: W) -> WriterT<W, AsyncIO<((), W)>> {
+        WriterT::new(AsyncIO::pure(((), output)))
+    }
+
+    /// Maps a function over the value inside the `AsyncIO`.
+    ///
+    /// # Arguments
+    ///
+    /// * `function` - The function to apply to the value
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use lambars::effect::{WriterT, AsyncIO};
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let writer: WriterT<Vec<String>, AsyncIO<(i32, Vec<String>)>> =
+    ///         WriterT::new(AsyncIO::pure((21, vec!["log".to_string()])));
+    ///     let mapped = writer.fmap_async_io(|v| v * 2);
+    ///     let (value, output) = mapped.run().run_async().await;
+    ///     assert_eq!(value, 42);
+    ///     assert_eq!(output, vec!["log"]);
+    /// }
+    /// ```
+    pub fn fmap_async_io<B, F>(self, function: F) -> WriterT<W, AsyncIO<(B, W)>>
+    where
+        F: FnOnce(A) -> B + Send + 'static,
+        B: Send + 'static,
+    {
+        WriterT::new(
+            self.inner
+                .fmap(move |(value, output)| (function(value), output)),
+        )
+    }
+
+    /// Chains `WriterT` computations with `AsyncIO`.
+    ///
+    /// # Arguments
+    ///
+    /// * `function` - A function that takes the value and returns a new `WriterT`
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use lambars::effect::{WriterT, AsyncIO};
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let writer: WriterT<Vec<String>, AsyncIO<(i32, Vec<String>)>> =
+    ///         WriterT::new(AsyncIO::pure((10, vec!["first".to_string()])));
+    ///     let chained = writer.flat_map_async_io(|v| {
+    ///         WriterT::new(AsyncIO::pure((v * 2, vec!["second".to_string()])))
+    ///     });
+    ///     let (value, output) = chained.run().run_async().await;
+    ///     assert_eq!(value, 20);
+    ///     assert_eq!(output, vec!["first", "second"]);
+    /// }
+    /// ```
+    pub fn flat_map_async_io<B, F>(self, function: F) -> WriterT<W, AsyncIO<(B, W)>>
+    where
+        F: FnOnce(A) -> WriterT<W, AsyncIO<(B, W)>> + Send + 'static,
+        B: Send + 'static,
+    {
+        WriterT::new(self.inner.flat_map(move |(value, output1)| {
+            let next = function(value);
+            next.inner
+                .fmap(move |(result, output2)| (result, output1.combine(output2)))
+        }))
+    }
+
+    /// Executes a computation and also returns its output.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use lambars::effect::{WriterT, AsyncIO};
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let writer: WriterT<Vec<String>, AsyncIO<(i32, Vec<String>)>> =
+    ///         WriterT::new(AsyncIO::pure((42, vec!["log".to_string()])));
+    ///     let listened = WriterT::listen_async_io(writer);
+    ///     let ((value, inner_output), output) = listened.run().run_async().await;
+    ///     assert_eq!(value, 42);
+    ///     assert_eq!(inner_output, vec!["log"]);
+    ///     assert_eq!(output, vec!["log"]);
+    /// }
+    /// ```
+    #[must_use]
+    pub fn listen_async_io(computation: Self) -> WriterT<W, AsyncIO<ListenedValue<A, W>>> {
+        WriterT::new(
+            computation
+                .inner
+                .fmap(|(value, output)| ((value, output.clone()), output)),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,5 +643,107 @@ mod tests {
             chained.run(),
             Some((20, vec!["first".to_string(), "second".to_string()]))
         );
+    }
+}
+
+#[cfg(all(test, feature = "async"))]
+mod async_io_tests {
+    use super::*;
+    use crate::typeclass::Monoid;
+
+    #[tokio::test]
+    async fn writer_pure_async_io_returns_value_with_empty_output() {
+        let writer: WriterT<Vec<String>, AsyncIO<(i32, Vec<String>)>> = WriterT::pure_async_io(42);
+        let (value, output) = writer.run().run_async().await;
+        assert_eq!(value, 42);
+        assert_eq!(output, Vec::<String>::empty());
+    }
+
+    #[tokio::test]
+    async fn writer_lift_async_io_preserves_value_with_empty_output() {
+        let inner = AsyncIO::pure(42);
+        let writer: WriterT<Vec<String>, AsyncIO<(i32, Vec<String>)>> =
+            WriterT::lift_async_io(inner);
+        let (value, output) = writer.run().run_async().await;
+        assert_eq!(value, 42);
+        assert_eq!(output, Vec::<String>::empty());
+    }
+
+    #[tokio::test]
+    async fn writer_tell_async_io_records_output() {
+        let writer: WriterT<Vec<String>, AsyncIO<((), Vec<String>)>> =
+            WriterT::<Vec<String>, AsyncIO<((), Vec<String>)>>::tell_async_io(vec![
+                "log".to_string(),
+            ]);
+        let ((), output) = writer.run().run_async().await;
+        assert_eq!(output, vec!["log"]);
+    }
+
+    #[tokio::test]
+    async fn writer_fmap_async_io_transforms_value_preserves_output() {
+        let writer: WriterT<Vec<String>, AsyncIO<(i32, Vec<String>)>> =
+            WriterT::new(AsyncIO::pure((21, vec!["log".to_string()])));
+        let mapped = writer.fmap_async_io(|v| v * 2);
+        let (value, output) = mapped.run().run_async().await;
+        assert_eq!(value, 42);
+        assert_eq!(output, vec!["log"]);
+    }
+
+    #[tokio::test]
+    async fn writer_flat_map_async_io_combines_outputs() {
+        let writer: WriterT<Vec<String>, AsyncIO<(i32, Vec<String>)>> =
+            WriterT::new(AsyncIO::pure((10, vec!["first".to_string()])));
+        let chained = writer.flat_map_async_io(|v| {
+            WriterT::new(AsyncIO::pure((v * 2, vec!["second".to_string()])))
+        });
+        let (value, output) = chained.run().run_async().await;
+        assert_eq!(value, 20);
+        assert_eq!(output, vec!["first", "second"]);
+    }
+
+    #[tokio::test]
+    async fn writer_listen_async_io_observes_output() {
+        let writer: WriterT<Vec<String>, AsyncIO<(i32, Vec<String>)>> =
+            WriterT::new(AsyncIO::pure((42, vec!["log".to_string()])));
+        let listened = WriterT::listen_async_io(writer);
+        let ((value, inner_output), output) = listened.run().run_async().await;
+        assert_eq!(value, 42);
+        assert_eq!(inner_output, vec!["log"]);
+        assert_eq!(output, vec!["log"]);
+    }
+
+    #[tokio::test]
+    async fn writer_lift_pure_law() {
+        // lift_async_io(AsyncIO::pure(a)) == pure_async_io(a)
+        let value = 42;
+        let via_lift: WriterT<Vec<String>, AsyncIO<(i32, Vec<String>)>> =
+            WriterT::lift_async_io(AsyncIO::pure(value));
+        let via_pure: WriterT<Vec<String>, AsyncIO<(i32, Vec<String>)>> =
+            WriterT::pure_async_io(value);
+
+        let (lift_value, lift_output) = via_lift.run().run_async().await;
+        let (pure_value, pure_output) = via_pure.run().run_async().await;
+
+        assert_eq!(lift_value, pure_value);
+        assert_eq!(lift_output, pure_output);
+    }
+
+    #[tokio::test]
+    async fn writer_flat_map_async_io_chains_multiple_tells() {
+        let computation = WriterT::<Vec<String>, AsyncIO<((), Vec<String>)>>::tell_async_io(vec![
+            "step1".to_string(),
+        ])
+        .flat_map_async_io(|()| {
+            WriterT::<Vec<String>, AsyncIO<((), Vec<String>)>>::tell_async_io(vec![
+                "step2".to_string(),
+            ])
+        })
+        .flat_map_async_io(|()| {
+            WriterT::<Vec<String>, AsyncIO<(i32, Vec<String>)>>::pure_async_io(42)
+        });
+
+        let (value, output) = computation.run().run_async().await;
+        assert_eq!(value, 42);
+        assert_eq!(output, vec!["step1", "step2"]);
     }
 }
