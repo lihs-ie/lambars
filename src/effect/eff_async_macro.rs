@@ -55,6 +55,66 @@
 //!     };
 //! }
 //! ```
+//!
+//! # Using with `ReaderT`
+//!
+//! `eff_async!` can be used within `ReaderT` computations:
+//!
+//! ```rust,ignore
+//! use lambars::effect::{ReaderT, AsyncIO};
+//! use lambars::eff_async;
+//!
+//! #[derive(Clone)]
+//! struct Config {
+//!     base_url: String,
+//! }
+//!
+//! fn fetch_with_config() -> ReaderT<Config, AsyncIO<String>> {
+//!     ReaderT::new(|config: Config| {
+//!         eff_async! {
+//!             url <= AsyncIO::pure(config.base_url.clone());
+//!             data <= AsyncIO::pure(format!("Data from {}", url));
+//!             AsyncIO::pure(data)
+//!         }
+//!     })
+//! }
+//! ```
+//!
+//! # Using with `StateT`
+//!
+//! `eff_async!` works well with `StateT` for stateful async computations:
+//!
+//! ```rust,ignore
+//! use lambars::effect::{StateT, AsyncIO};
+//! use lambars::eff_async;
+//!
+//! fn increment_and_double() -> StateT<i32, AsyncIO<(i32, i32)>> {
+//!     StateT::new(|state| {
+//!         eff_async! {
+//!             current <= AsyncIO::pure(state);
+//!             let doubled = current * 2;
+//!             AsyncIO::pure((doubled, current + 1))
+//!         }
+//!     })
+//! }
+//! ```
+//!
+//! # Using with `WriterT`
+//!
+//! `eff_async!` can be combined with `WriterT` for logging:
+//!
+//! ```rust,ignore
+//! use lambars::effect::{WriterT, AsyncIO};
+//! use lambars::eff_async;
+//!
+//! fn log_and_compute() -> WriterT<Vec<String>, AsyncIO<(i32, Vec<String>)>> {
+//!     WriterT::new(eff_async! {
+//!         step1 <= AsyncIO::pure(21);
+//!         step2 <= AsyncIO::pure(step1 * 2);
+//!         AsyncIO::pure((step2, vec!["Computed result".to_string()]))
+//!     })
+//! }
+//! ```
 
 /// Do-notation macro for `AsyncIO` monad.
 ///
@@ -143,7 +203,7 @@ macro_rules! eff_async {
 
 #[cfg(test)]
 mod tests {
-    use crate::effect::AsyncIO;
+    use crate::effect::{AsyncIO, ReaderT, StateT};
 
     #[tokio::test]
     async fn test_eff_async_single_bind() {
@@ -191,5 +251,44 @@ mod tests {
             AsyncIO::pure(x + y)
         };
         assert_eq!(result.run_async().await, 30);
+    }
+
+    #[tokio::test]
+    async fn test_eff_async_with_reader_like_pattern() {
+        #[derive(Clone)]
+        struct Config {
+            value: i32,
+        }
+
+        fn computation_with_config() -> ReaderT<Config, AsyncIO<i32>> {
+            ReaderT::new(|config: Config| {
+                eff_async! {
+                    base <= AsyncIO::pure(config.value);
+                    let doubled = base * 2;
+                    AsyncIO::pure(doubled)
+                }
+            })
+        }
+
+        let config = Config { value: 21 };
+        let result = computation_with_config().run(config).run_async().await;
+        assert_eq!(result, 42);
+    }
+
+    #[tokio::test]
+    async fn test_eff_async_with_state_like_pattern() {
+        fn stateful_computation() -> StateT<i32, AsyncIO<(String, i32)>> {
+            StateT::new(|state| {
+                eff_async! {
+                    current <= AsyncIO::pure(state);
+                    let message = format!("State was: {}", current);
+                    AsyncIO::pure((message, current + 1))
+                }
+            })
+        }
+
+        let (result, final_state) = stateful_computation().run(41).run_async().await;
+        assert_eq!(result, "State was: 41");
+        assert_eq!(final_state, 42);
     }
 }

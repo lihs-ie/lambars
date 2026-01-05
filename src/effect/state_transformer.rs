@@ -759,6 +759,113 @@ where
             AsyncIO::pure(((), modifier_clone(state)))
         })
     }
+
+    /// Lifts an `AsyncIO` into `StateT`.
+    ///
+    /// The state is not modified; the resulting `StateT` returns
+    /// the `AsyncIO`'s result paired with the unchanged state.
+    ///
+    /// # Important: Single Use Only
+    ///
+    /// The resulting `StateT` can only be run **once**. Running it multiple
+    /// times will cause a panic. This is because `AsyncIO` is not `Clone`,
+    /// so we cannot share the inner computation across multiple runs.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `StateT` is run more than once.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use lambars::effect::{StateT, AsyncIO};
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let async_io = AsyncIO::pure(42);
+    ///     let state: StateT<i32, AsyncIO<(i32, i32)>> = StateT::lift_async_io(async_io);
+    ///     let (result, final_state) = state.run(100).run_async().await;
+    ///     assert_eq!(result, 42);
+    ///     assert_eq!(final_state, 100);
+    /// }
+    /// ```
+    #[must_use]
+    pub fn lift_async_io(inner: AsyncIO<A>) -> Self
+    where
+        S: Clone,
+    {
+        let inner_arc = std::sync::Arc::new(std::sync::Mutex::new(Some(inner)));
+        Self::new(move |state: S| {
+            let async_io = inner_arc.lock().unwrap().take().unwrap_or_else(|| {
+                panic!("StateT::lift_async_io: AsyncIO already consumed. Use the StateT only once.")
+            });
+            async_io.fmap(move |value| (value, state))
+        })
+    }
+
+    /// Projects a value from the state without modifying it.
+    ///
+    /// This is a convenient way to read a part of the state. The projection
+    /// function receives a reference to the state and returns the projected value.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use lambars::effect::{StateT, AsyncIO};
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let state: StateT<i32, AsyncIO<(i32, i32)>> =
+    ///         StateT::gets_async_io(|s: &i32| s * 2);
+    ///     let (result, final_state) = state.run(21).run_async().await;
+    ///     assert_eq!(result, 42);
+    ///     assert_eq!(final_state, 21);
+    /// }
+    /// ```
+    #[must_use]
+    pub fn gets_async_io<F>(projection: F) -> Self
+    where
+        S: Clone,
+        F: Fn(&S) -> A + Send + Sync + 'static,
+    {
+        let projection_arc = std::sync::Arc::new(projection);
+        Self::new(move |state: S| {
+            let projection_clone = projection_arc.clone();
+            let value = projection_clone(&state);
+            AsyncIO::pure((value, state))
+        })
+    }
+
+    /// Executes a state transition function.
+    ///
+    /// The transition function takes the current state and returns both
+    /// a result value and the new state.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use lambars::effect::{StateT, AsyncIO};
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let state: StateT<i32, AsyncIO<(String, i32)>> =
+    ///         StateT::state_async_io(|s| (format!("was: {}", s), s + 1));
+    ///     let (result, final_state) = state.run(41).run_async().await;
+    ///     assert_eq!(result, "was: 41");
+    ///     assert_eq!(final_state, 42);
+    /// }
+    /// ```
+    #[must_use]
+    pub fn state_async_io<F>(transition: F) -> Self
+    where
+        F: Fn(S) -> (A, S) + Send + Sync + 'static,
+    {
+        let transition_arc = std::sync::Arc::new(transition);
+        Self::new(move |state: S| {
+            let transition_clone = transition_arc.clone();
+            AsyncIO::pure(transition_clone(state))
+        })
+    }
 }
 
 #[cfg(test)]

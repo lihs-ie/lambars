@@ -1,0 +1,809 @@
+# Async Effect Integration 要件定義
+#
+# 概要:
+#   async/await と Effect System の統合を完成させる。
+#   IO と AsyncIO の変換を改善し、MTL スタイルトレイトの非同期版を追加し、
+#   モナド変換子の AsyncIO サポートを強化する。
+#
+# 設計方針:
+#   1. 関数型プログラミングの原則（参照透過性、モナド則）を維持
+#   2. 既存の同期版 MTL トレイトとの一貫性を保つ
+#   3. Rust の所有権システムと async/await との親和性を考慮
+#   4. 遅延評価セマンティクス（run_async() まで実行されない）を保証
+#   5. tokio エコシステムとの統合
+#
+# 参照:
+#   - GitHub Issue #13: Async Effect Integration
+#   - Haskell mtl ライブラリ
+#   - Scala cats-effect / ZIO
+
+version: "1.0.0"
+name: "Async Effect Integration"
+github_issue: 13
+description: |
+  async/await と Effect System の統合を完成させる。
+
+  現状の課題:
+  1. IO -> AsyncIO 変換の問題
+     - 現在の to_async は即時実行される（IO が Send でないため）
+     - 真の遅延変換ができない
+
+  2. MTL トレイトの async サポート不足
+     - MonadReader/MonadState/MonadWriter は同期版のみ
+     - 非同期コンテキストでの使用が困難
+
+  3. モナド変換子の AsyncIO サポート
+     - ReaderT/StateT には _async_io サフィックス付きメソッドがあるが、
+       MTL トレイトとの統合が不十分
+
+  4. eff_async! マクロの改善余地
+     - 基本的な do-notation は動作するが、
+       ReaderT/StateT との組み合わせが冗長
+
+  本要件定義では、これらの課題に対する解決策を定義する。
+
+# =============================================================================
+# 背景・動機
+# =============================================================================
+
+background:
+  problem: |
+    現在の Effect System は同期的な操作を中心に設計されており、
+    async/await との統合が不完全である。
+
+    具体的な問題:
+
+    1. **IO -> AsyncIO 変換の即時実行**:
+       ```rust
+       let io = IO::new(|| {
+           println!("Side effect!");  // to_async 呼び出し時に実行される
+           42
+       });
+       let async_io = io.to_async();  // ここで副作用が発生！
+       ```
+       IO が Send でないため、クロージャを非同期コンテキストに移動できず、
+       即時実行して結果をキャプチャするしかない。
+
+    2. **MTL トレイトの非同期操作**:
+       MonadReader::ask() などは Self を返すが、
+       非同期コンテキストでは async fn ask() が必要になるケースがある。
+       しかし、Rust のトレイトは async fn を直接サポートしていない。
+
+    3. **モナド変換子の統一インターフェース**:
+       ReaderT<R, AsyncIO<A>> と ReaderT<R, IO<A>> で
+       異なるメソッド名（_async_io サフィックス）を使う必要があり、
+       コードの抽象化が困難。
+
+  motivation: |
+    1. **関数型プログラミングの完全性**:
+       Haskell の mtl が async/await 相当の機能と自然に統合されているように、
+       Rust でも同様の統合を実現する。
+
+    2. **実用的な非同期プログラミング**:
+       Web サーバー、データベースアクセスなど、実用的なアプリケーションでは
+       非同期処理と Effect System の組み合わせが必須。
+
+    3. **コードの抽象化**:
+       同期/非同期を問わず、同じ MTL インターフェースで
+       副作用を抽象化できるようにする。
+
+  prior_art:
+    - name: "Haskell async/mtl"
+      description: |
+        Haskell では IO が Async や Concurrent と自然に統合されている。
+        MonadIO クラスにより、任意の IO を含むモナドスタックで IO を実行可能。
+        ```haskell
+        class Monad m => MonadIO m where
+            liftIO :: IO a -> m a
+        ```
+
+    - name: "Scala cats-effect"
+      description: |
+        cats-effect は Async 型クラスを提供し、
+        非同期計算を抽象化している。
+        ```scala
+        trait Async[F[_]] extends Sync[F] {
+          def async[A](k: (Either[Throwable, A] => Unit) => Unit): F[A]
+        }
+        ```
+
+    - name: "Scala ZIO"
+      description: |
+        ZIO は非同期を第一級市民として扱い、
+        Environment (Reader)、State、Error を組み込みでサポート。
+        ```scala
+        type ZIO[-R, +E, +A] = ...
+        ```
+
+# =============================================================================
+# 設計方針
+# =============================================================================
+
+design_decisions:
+  io_to_async_conversion:
+    decision: "IO -> AsyncIO の遅延変換は諦め、即時実行を明確に文書化する"
+    rationale: |
+      IO<A> が Send でない根本的な理由:
+      - Box<dyn FnOnce() -> A> は Send 境界がない
+      - Send を追加すると既存の IO の使い勝手が大幅に低下
+
+      代替アプローチ:
+      1. IO に Send を要求しない（現状維持）→ to_async は即時実行
+      2. IOAsync<A> = IO<A> where A: Send のような別型を導入
+      3. AsyncIO::new() を直接使用することを推奨
+
+      結論: オプション 3 を採用。
+      to_async の動作を明確に文書化し、
+      非同期処理には最初から AsyncIO::new() を使用することを推奨する。
+
+  async_mtl_traits:
+    decision: "非同期版 MTL トレイトは導入しない"
+    rationale: |
+      検討した選択肢:
+      1. MonadReaderAsync<R> のような async 版トレイトを追加
+      2. 既存トレイトに async メソッドを追加（AFIT: async fn in trait）
+      3. ReaderT/StateT の AsyncIO 特化メソッドを強化
+
+      問題点:
+      - オプション 1: トレイトの数が2倍になり、複雑性が増す
+      - オプション 2: Rust 1.75+ で AFIT が安定化したが、
+        object safety との両立が困難
+      - オプション 3: HKT がないため完全な抽象化は難しいが、実用的
+
+      結論: オプション 3 を採用。
+      ReaderT<R, AsyncIO<A>> と StateT<S, AsyncIO<(A, S)>> の
+      メソッドを強化し、実用的なユースケースをカバーする。
+
+  transformer_naming:
+    decision: "_async_io サフィックスを維持し、一貫性を保つ"
+    rationale: |
+      Rust には HKT がないため、ReaderT<R, M> で M が何かを
+      型レベルで判断してメソッドを切り替えることができない。
+
+      現実的な解決策:
+      - 各内部モナド用のサフィックス付きメソッドを提供
+      - _option, _result, _io, _async_io の命名規則を統一
+
+      これは Rust の制約による妥協であり、
+      将来的に言語が進化すれば改善の余地がある。
+
+# =============================================================================
+# 要件一覧
+# =============================================================================
+
+requirements:
+  # ============================================================================
+  # フェーズ 1: IO/AsyncIO 変換の明確化
+  # ============================================================================
+  - id: async_effect_io_async_conversion
+    name: "IO/AsyncIO 変換の明確化と SendIO の導入"
+    priority: high
+    phase: 1
+    description: |
+      IO と AsyncIO の変換に関する設計を明確化する。
+
+      現状:
+      - IO::to_async() は即時実行される
+      - AsyncIO::to_sync() は新しい tokio Runtime を作成して同期実行
+
+      改善:
+      1. to_async の動作を明確に文書化
+      2. SendIO<A> 型の導入を検討（Send 境界付きの IO）
+
+    methods:
+      - name: "IO::to_async (既存、文書化改善)"
+        signature: |
+          impl<A: Send + 'static> IO<A> {
+              /// Converts a synchronous IO to an AsyncIO.
+              ///
+              /// **Important**: The IO action is executed **immediately** when
+              /// `to_async` is called, not when `run_async` is called. This is
+              /// because `IO` is not `Send` and cannot be moved to an async context.
+              ///
+              /// If you need deferred execution in an async context, use
+              /// `AsyncIO::new` directly with your computation.
+              ///
+              /// # Example
+              ///
+              /// ```rust,ignore
+              /// // 注意: この副作用は to_async 呼び出し時に実行される
+              /// let io = IO::new(|| {
+              ///     println!("Executed immediately!");
+              ///     42
+              /// });
+              /// let async_io = io.to_async();  // ここで "Executed immediately!" が出力
+              /// ```
+              pub fn to_async(self) -> AsyncIO<A>
+          }
+        description: |
+          既存メソッドの文書化を改善し、即時実行の挙動を明確にする。
+
+      - name: "AsyncIO::to_sync (既存、確認)"
+        signature: |
+          impl<A: Send + 'static> AsyncIO<A> {
+              pub fn to_sync(self) -> IO<A>
+          }
+        description: |
+          既存メソッド。新しい tokio Runtime を作成して同期実行する。
+          async コンテキスト内での使用は禁止（nested runtime エラー）。
+
+    tests:
+      - category: "変換テスト"
+        cases:
+          - name: "to_async は即時実行を明確に示す"
+            test: |
+              use std::sync::atomic::{AtomicBool, Ordering};
+              use std::sync::Arc;
+
+              let executed = Arc::new(AtomicBool::new(false));
+              let executed_clone = executed.clone();
+
+              let io = IO::new(move || {
+                  executed_clone.store(true, Ordering::SeqCst);
+                  42
+              });
+
+              // to_async 呼び出し時点で実行される
+              let async_io = io.to_async();
+              assert!(executed.load(Ordering::SeqCst));  // 既に実行済み
+
+          - name: "to_sync は新しい Runtime で実行"
+            test: |
+              let async_io = AsyncIO::pure(42);
+              let io = async_io.to_sync();
+              assert_eq!(io.run_unsafe(), 42);
+
+  # ============================================================================
+  # フェーズ 2: ReaderT AsyncIO サポート強化
+  # ============================================================================
+  - id: async_effect_reader_transformer_async
+    name: "ReaderT AsyncIO サポート強化"
+    priority: high
+    phase: 2
+    description: |
+      ReaderT<R, AsyncIO<A>> に対する操作を強化する。
+
+      現状の実装:
+      - pure_async_io, fmap_async_io, flat_map_async_io, ask_async_io, local_async_io
+      が実装済み
+
+      追加する機能:
+      - lift_async_io: AsyncIO を ReaderT に持ち上げる
+      - asks_async_io: 環境から値を射影して AsyncIO で返す
+
+      注: run_async は不要。既存の run メソッドが ReaderT<R, AsyncIO<A>> に対して
+      AsyncIO<A> を返すため、reader.run(env).run_async().await で実行可能。
+
+    methods:
+      - name: lift_async_io
+        signature: |
+          impl<R, A> ReaderT<R, AsyncIO<A>>
+          where
+              R: 'static,
+              A: Send + 'static,
+          {
+              pub fn lift_async_io(inner: AsyncIO<A>) -> Self
+          }
+        description: |
+          AsyncIO を ReaderT に持ち上げる。
+          環境を無視して、内部の AsyncIO をそのまま実行する。
+        complexity: "O(1)"
+        examples:
+          - description: "AsyncIO のリフト"
+            code: |
+              let async_io = AsyncIO::new(|| async { fetch_data().await });
+              let reader: ReaderT<Config, AsyncIO<Data>> = ReaderT::lift_async_io(async_io);
+
+              // 環境を与えて実行
+              let data = reader.run(config).run_async().await;
+
+      - name: asks_async_io
+        signature: |
+          impl<R, A> ReaderT<R, AsyncIO<A>>
+          where
+              R: Clone + Send + 'static,
+              A: Send + 'static,
+          {
+              pub fn asks_async_io<F>(projection: F) -> Self
+              where
+                  F: Fn(R) -> A + Send + Sync + 'static,
+          }
+        description: |
+          環境から値を射影して AsyncIO で返す。
+          ask_async_io().fmap_async_io(projection) の簡略版。
+        complexity: "O(1)"
+        examples:
+          - description: "環境から値を射影"
+            code: |
+              #[derive(Clone)]
+              struct Config { database_url: String }
+
+              let reader: ReaderT<Config, AsyncIO<String>> =
+                  ReaderT::asks_async_io(|c| c.database_url.clone());
+
+    laws:
+      - name: "Lift Pure Law"
+        description: "pure を lift しても同じ"
+        equation: "ReaderT::lift_async_io(AsyncIO::pure(a)) == ReaderT::pure_async_io(a)"
+
+      - name: "Ask Asks Law"
+        description: "asks は ask の後の fmap と同じ"
+        equation: "ReaderT::asks_async_io(f) == ReaderT::ask_async_io().fmap_async_io(f)"
+
+    tests:
+      - category: "ReaderT AsyncIO テスト"
+        cases:
+          - name: "lift_async_io で AsyncIO をリフト"
+            test: |
+              let async_io = AsyncIO::pure(42);
+              let reader: ReaderT<i32, AsyncIO<i32>> = ReaderT::lift_async_io(async_io);
+              let result = reader.run(999).run_async().await;
+              assert_eq!(result, 42);  // 環境は無視される
+
+          - name: "asks_async_io で環境から値を取得"
+            test: |
+              #[derive(Clone)]
+              struct Env { value: i32 }
+
+              let reader: ReaderT<Env, AsyncIO<i32>> =
+                  ReaderT::asks_async_io(|e| e.value * 2);
+              let result = reader.run(Env { value: 21 }).run_async().await;
+              assert_eq!(result, 42);
+
+  # ============================================================================
+  # フェーズ 3: StateT AsyncIO サポート強化
+  # ============================================================================
+  - id: async_effect_state_transformer_async
+    name: "StateT AsyncIO サポート強化"
+    priority: high
+    phase: 3
+    description: |
+      StateT<S, AsyncIO<(A, S)>> に対する操作を強化する。
+
+      現状の実装:
+      - pure_async_io, fmap_async_io, flat_map_async_io
+      - get_async_io, put_async_io, modify_async_io
+      - eval_async, exec_async
+      が実装済み
+
+      追加する機能:
+      - lift_async_io: AsyncIO を StateT に持ち上げる
+      - gets_async_io: 状態から値を射影
+      - state_async_io: 状態遷移関数を実行
+
+    methods:
+      - name: lift_async_io
+        signature: |
+          impl<S, A> StateT<S, AsyncIO<(A, S)>>
+          where
+              S: Clone + Send + 'static,
+              A: Send + 'static,
+          {
+              pub fn lift_async_io(inner: AsyncIO<A>) -> Self
+          }
+        description: |
+          AsyncIO を StateT に持ち上げる。
+          状態を変更せず、AsyncIO の結果と現在の状態をタプルで返す。
+        complexity: "O(1)"
+        examples:
+          - description: "AsyncIO のリフト"
+            code: |
+              let async_io = AsyncIO::new(|| async { fetch_data().await });
+              let state: StateT<Counter, AsyncIO<(Data, Counter)>> =
+                  StateT::lift_async_io(async_io);
+
+              // 初期状態を与えて実行
+              let (data, final_state) = state.run(initial_counter).run_async().await;
+
+      - name: gets_async_io
+        signature: |
+          impl<S, A> StateT<S, AsyncIO<(A, S)>>
+          where
+              S: Clone + Send + 'static,
+              A: Send + 'static,
+          {
+              pub fn gets_async_io<F>(projection: F) -> Self
+              where
+                  F: Fn(&S) -> A + Send + Sync + 'static,
+          }
+        description: |
+          状態から値を射影して返す。状態は変更しない。
+          get_async_io().fmap_async_io(projection) の簡略版。
+        complexity: "O(1)"
+
+      - name: state_async_io
+        signature: |
+          impl<S, A> StateT<S, AsyncIO<(A, S)>>
+          where
+              S: Send + 'static,
+              A: Send + 'static,
+          {
+              pub fn state_async_io<F>(transition: F) -> Self
+              where
+                  F: Fn(S) -> (A, S) + Send + Sync + 'static,
+          }
+        description: |
+          状態遷移関数を実行し、結果と新しい状態を返す。
+          最も基本的な状態操作。
+        complexity: "O(1)"
+
+    laws:
+      - name: "Lift State Law"
+        description: "lift は状態を変更しない"
+        equation: "lift_async_io(async_io).exec_async(s) == async_io.fmap(|_| s)"
+
+      - name: "Gets Get Law"
+        description: "gets は get の後の射影と同じ"
+        equation: "gets_async_io(f) == get_async_io().fmap_async_io(|s| f(&s))"
+
+    tests:
+      - category: "StateT AsyncIO テスト"
+        cases:
+          - name: "lift_async_io で AsyncIO をリフト"
+            test: |
+              let async_io = AsyncIO::pure(42);
+              let state: StateT<i32, AsyncIO<(i32, i32)>> = StateT::lift_async_io(async_io);
+              let (result, final_state) = state.run(100).run_async().await;
+              assert_eq!(result, 42);
+              assert_eq!(final_state, 100);  // 状態は変更されない
+
+          - name: "gets_async_io で状態から値を射影"
+            test: |
+              let state: StateT<i32, AsyncIO<(i32, i32)>> =
+                  StateT::gets_async_io(|s| s * 2);
+              let (result, final_state) = state.run(21).run_async().await;
+              assert_eq!(result, 42);
+              assert_eq!(final_state, 21);  // 状態は変更されない
+
+          - name: "state_async_io で状態遷移"
+            test: |
+              let state: StateT<i32, AsyncIO<(String, i32)>> =
+                  StateT::state_async_io(|s| (format!("was: {}", s), s + 1));
+              let (result, final_state) = state.run(41).run_async().await;
+              assert_eq!(result, "was: 41");
+              assert_eq!(final_state, 42);
+
+  # ============================================================================
+  # フェーズ 4: WriterT AsyncIO サポート
+  # ============================================================================
+  - id: async_effect_writer_transformer_async
+    name: "WriterT AsyncIO サポート"
+    priority: medium
+    phase: 4
+    description: |
+      WriterT<W, AsyncIO<(A, W)>> に対する操作を追加する。
+
+      WriterT は他の Transformer と異なり、
+      内部に M<(A, W)> を保持する構造のため、
+      AsyncIO との統合には特別な考慮が必要。
+
+    methods:
+      - name: tell_async_io
+        signature: |
+          impl<W, A> WriterT<W, AsyncIO<(A, W)>>
+          where
+              W: Monoid + Clone + Send + 'static,
+              A: Send + 'static,
+          {
+              pub fn tell_async_io(output: W) -> WriterT<W, AsyncIO<((), W)>>
+          }
+        description: |
+          出力を記録する。AsyncIO::pure を使用して遅延評価を維持。
+        complexity: "O(1)"
+
+      - name: lift_async_io
+        signature: |
+          impl<W, A> WriterT<W, AsyncIO<(A, W)>>
+          where
+              W: Monoid + Clone + Send + 'static,
+              A: Send + 'static,
+          {
+              pub fn lift_async_io(inner: AsyncIO<A>) -> Self
+          }
+        description: |
+          AsyncIO を WriterT に持ち上げる。
+          出力は Monoid::empty() となる。
+        complexity: "O(1)"
+
+    tests:
+      - category: "WriterT AsyncIO テスト"
+        cases:
+          - name: "tell_async_io で出力を記録"
+            test: |
+              let writer = WriterT::tell_async_io(vec!["log".to_string()]);
+              let ((_, output), _) = writer.run_async().await;
+              assert_eq!(output, vec!["log"]);
+
+  # ============================================================================
+  # フェーズ 5: eff_async! マクロ改善
+  # ============================================================================
+  - id: async_effect_eff_async_macro
+    name: "eff_async! マクロ改善"
+    priority: medium
+    phase: 5
+    description: |
+      eff_async! マクロの改善と使いやすさの向上。
+
+      現状:
+      - 基本的な do-notation は動作
+      - pattern <= expression; で束縛
+      - let pattern = expression; で純粋束縛
+
+      改善:
+      - エラーメッセージの改善
+      - if/match ガードのサポート（将来）
+      - ReaderT/StateT との組み合わせ例の文書化
+
+    enhancements:
+      - name: "ドキュメント改善"
+        description: |
+          ReaderT と StateT を使用した複合的な例を追加:
+
+          ```rust
+          // ReaderT<Config, AsyncIO<A>> での使用例
+          fn fetch_with_config() -> ReaderT<Config, AsyncIO<Data>> {
+              ReaderT::new(|config| {
+                  eff_async! {
+                      url <= AsyncIO::pure(config.api_url.clone());
+                      data <= fetch_data_async(url);
+                      AsyncIO::pure(data)
+                  }
+              })
+          }
+          ```
+
+      - name: "ガード式サポート（将来）"
+        description: |
+          if/match によるガード式のサポートは将来の拡張として検討:
+
+          ```rust
+          // 将来の構文案
+          eff_async! {
+              x <= some_async_op();
+              if x > 0 => AsyncIO::pure(x);
+              else => AsyncIO::pure(0);
+          }
+          ```
+
+    tests:
+      - category: "eff_async! マクロテスト"
+        cases:
+          - name: "既存テストの確認"
+            test: |
+              // 既存のテストが全て通過することを確認
+              let result = eff_async! {
+                  x <= AsyncIO::pure(5);
+                  y <= AsyncIO::pure(10);
+                  let z = x + y;
+                  AsyncIO::pure(z * 2)
+              };
+              assert_eq!(result.run_async().await, 30);
+
+# =============================================================================
+# 非機能要件
+# =============================================================================
+
+non_functional_requirements:
+  safety:
+    - "#![forbid(unsafe_code)] ポリシーに準拠"
+    - "全ての操作は AsyncIO の遅延評価セマンティクスを維持"
+    - "パニックセーフな実装"
+
+  performance:
+    - "不要なクローンを避ける"
+    - "Arc/Rc の使用を最小限に"
+    - "tokio の効率的なプリミティブを活用"
+
+  compatibility:
+    - "既存の API との後方互換性を維持"
+    - "async feature flag の下でのみ有効"
+    - "tokio 1.x との互換性"
+
+  testing:
+    - "テストカバレッジ 100%"
+    - "モナド法則のプロパティテスト"
+    - "タイミングに依存するテストは適切なマージンを設定"
+
+  documentation:
+    - "全てのパブリック API にドキュメントコメント"
+    - "使用例を含む詳細なドキュメント"
+    - "同期版との違いを明記"
+
+# =============================================================================
+# 実装フェーズ
+# =============================================================================
+
+implementation_phases:
+  - phase: 1
+    name: "IO/AsyncIO 変換の明確化"
+    description: "to_async の文書化改善"
+    requirements:
+      - async_effect_io_async_conversion
+    duration_estimate: "1 day"
+    deliverables:
+      - "src/effect/io.rs の to_async ドキュメント改善"
+      - "tests/io_async_conversion_tests.rs"
+
+  - phase: 2
+    name: "ReaderT AsyncIO サポート強化"
+    description: "lift_async_io, asks_async_io の追加"
+    requirements:
+      - async_effect_reader_transformer_async
+    duration_estimate: "2 days"
+    dependencies:
+      - "phase 1"
+    deliverables:
+      - "src/effect/reader_transformer.rs の AsyncIO メソッド追加"
+      - "tests/reader_transformer_async_tests.rs"
+
+  - phase: 3
+    name: "StateT AsyncIO サポート強化"
+    description: "lift_async_io, gets_async_io, state_async_io の追加"
+    requirements:
+      - async_effect_state_transformer_async
+    duration_estimate: "2 days"
+    dependencies:
+      - "phase 1"
+    deliverables:
+      - "src/effect/state_transformer.rs の AsyncIO メソッド追加"
+      - "tests/state_transformer_async_tests.rs"
+
+  - phase: 4
+    name: "WriterT AsyncIO サポート"
+    description: "tell_async_io, lift_async_io の追加"
+    requirements:
+      - async_effect_writer_transformer_async
+    duration_estimate: "2 days"
+    dependencies:
+      - "phase 1"
+    deliverables:
+      - "src/effect/writer_transformer.rs の AsyncIO メソッド追加"
+      - "tests/writer_transformer_async_tests.rs"
+
+  - phase: 5
+    name: "eff_async! マクロ改善"
+    description: "ドキュメント改善と使用例の追加"
+    requirements:
+      - async_effect_eff_async_macro
+    duration_estimate: "1 day"
+    dependencies:
+      - "phase 2"
+      - "phase 3"
+    deliverables:
+      - "src/effect/eff_async_macro.rs のドキュメント改善"
+      - "examples/eff_async_example.rs"
+
+# =============================================================================
+# 将来の拡張
+# =============================================================================
+
+future_extensions:
+  - id: async_effect_monad_io_trait
+    name: "MonadIO トレイト"
+    description: |
+      Haskell の MonadIO に相当するトレイト。
+      任意の IO を含むモナドスタックで IO を実行可能にする。
+
+      ```rust
+      trait MonadIO: Monad {
+          fn lift_io<A>(io: IO<A>) -> Self::WithType<A>;
+      }
+      ```
+
+      しかし、IO が Send でないため、AsyncIO との統合が困難。
+      将来的に言語機能が進化すれば再検討。
+    priority: low
+    rationale: |
+      IO が Send でないため、非同期コンテキストへの lift が困難。
+      現時点では各 Transformer に個別の lift メソッドを提供する方が実用的。
+
+  - id: async_effect_resource_monad
+    name: "Resource モナド"
+    description: |
+      リソースの取得・解放を型レベルで保証する専用モナド。
+      bracket の一般化。
+
+      ```rust
+      struct Resource<A> {
+          acquire: AsyncIO<A>,
+          release: Box<dyn Fn(A) -> AsyncIO<()>>,
+      }
+      ```
+    priority: medium
+    rationale: |
+      bracket で基本的なユースケースはカバーできるが、
+      より複雑なリソース管理には専用の抽象が必要になる可能性。
+
+  - id: async_effect_async_mtl_traits
+    name: "非同期 MTL トレイト"
+    description: |
+      MonadReaderAsync, MonadStateAsync などの非同期版トレイト。
+
+      現時点では以下の理由で見送り:
+      1. トレイトの数が2倍になり複雑性が増す
+      2. async fn in trait は object safety との両立が困難
+      3. ReaderT/StateT の個別メソッドで実用的なユースケースはカバー可能
+
+      将来的に Rust の async trait サポートが改善されれば再検討。
+    priority: low
+
+  - id: async_effect_effect_system_v2
+    name: "Effect System v2 - Algebraic Effects"
+    description: |
+      代数的効果とハンドラによる、より柔軟な効果システム。
+      Monad Transformer の欠点（合成順序の固定）を解決。
+
+      参考:
+      - Koka language
+      - Effekt language
+      - Scala ZIO 2.0
+    priority: low
+    rationale: |
+      Rust の型システムでの実現は非常に困難。
+      言語レベルでのサポートが必要になる可能性が高い。
+
+# =============================================================================
+# 依存関係
+# =============================================================================
+
+dependencies:
+  internal:
+    - "lambars::effect::IO"
+    - "lambars::effect::AsyncIO"
+    - "lambars::effect::ReaderT"
+    - "lambars::effect::StateT"
+    - "lambars::effect::WriterT"
+    - "lambars::typeclass::Monad"
+    - "lambars::typeclass::Monoid"
+
+  external:
+    - name: tokio
+      version: "1.0"
+      features: ["rt", "rt-multi-thread", "time", "sync"]
+      reason: "非同期ランタイム"
+
+    - name: futures
+      version: "0.3"
+      reason: "FutureExt"
+
+  dev_dependencies:
+    - name: rstest
+      version: "0.18"
+      reason: "パラメータ化テスト"
+
+# =============================================================================
+# 参照
+# =============================================================================
+
+references:
+  - name: "GitHub Issue #13"
+    url: "https://github.com/lihs-ie/functional-rusty/issues/13"
+    description: "本要件定義の元となる Issue"
+
+  - name: "既存の Effect System 要件定義"
+    location: "docs/internal/requirements/20250101_0500_effect.yaml"
+    description: "基本的な Effect System の要件定義"
+
+  - name: "非同期制御フロー要件定義"
+    location: "docs/internal/requirements/20260104_1700_async_control_flow.yaml"
+    description: "AsyncIO の制御フローユーティリティの要件定義"
+
+  - name: "現在の AsyncIO 実装"
+    location: "src/effect/async_io.rs"
+    description: "現在の AsyncIO 実装"
+
+  - name: "現在の ReaderT 実装"
+    location: "src/effect/reader_transformer.rs"
+    description: "現在の ReaderT 実装（AsyncIO メソッド含む）"
+
+  - name: "現在の StateT 実装"
+    location: "src/effect/state_transformer.rs"
+    description: "現在の StateT 実装（AsyncIO メソッド含む）"
+
+  - name: "Haskell mtl"
+    url: "https://hackage.haskell.org/package/mtl"
+    description: "MTL スタイルの参照実装"
+
+  - name: "Scala cats-effect"
+    url: "https://typelevel.org/cats-effect/"
+    description: "Scala での非同期効果システム"
