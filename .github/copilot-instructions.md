@@ -21,13 +21,13 @@ Rust で関数型プログラミングを行うための API ライブラリで�
 
 ```rust
 // ❌ 悪い例: 自明なコメント
-/// Safely converts usize to i32
-fn safety_unwrap(value: usize) -> i32 {
+/// Converts usize to i32 by casting
+fn cast_to_i32(value: usize) -> i32 {
     value as i32
 }
 
 // ✅ 良い例: コメントなしで意図が明確
-fn safety_unwrap(value: usize) -> i32 {
+fn cast_to_i32(value: usize) -> i32 {
     value as i32
 }
 ```
