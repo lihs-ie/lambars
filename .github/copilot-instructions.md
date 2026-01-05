@@ -22,10 +22,14 @@ Rust で関数型プログラミングを行うための API ライブラリで�
 ```rust
 // ❌ 悪い例: 自明なコメント
 /// Safely converts usize to i32
-safety_unwrap(value);
+fn safety_unwrap(value: usize) -> i32 {
+    value as i32
+}
 
 // ✅ 良い例: コメントなしで意図が明確
-safety_unwrap(value);
+fn safety_unwrap(value: usize) -> i32 {
+    value as i32
+}
 ```
 
 ### 3. テスト品質
