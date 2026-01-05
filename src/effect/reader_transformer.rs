@@ -52,7 +52,7 @@
 use std::rc::Rc;
 
 use super::IO;
-use super::error::{AlreadyConsumedError, EffectError};
+use super::error::{AlreadyConsumedError, EffectError, EffectType};
 
 /// A monad transformer that adds environment reading capability.
 ///
@@ -602,7 +602,7 @@ where
             None => IO::pure(Err(EffectError::AlreadyConsumed(AlreadyConsumedError {
                 transformer_name: "ReaderT",
                 method_name: "try_lift_io",
-                effect_type: "IO",
+                effect_type: EffectType::IO,
             }))),
         })
     }
@@ -992,7 +992,7 @@ where
                 None => AsyncIO::pure(Err(EffectError::AlreadyConsumed(AlreadyConsumedError {
                     transformer_name: "ReaderT",
                     method_name: "try_lift_async_io",
-                    effect_type: "AsyncIO",
+                    effect_type: EffectType::AsyncIO,
                 }))),
             }
         })
@@ -1084,17 +1084,25 @@ mod tests {
 
     mod io_tests {
         use super::*;
-        use crate::effect::{AlreadyConsumedError, EffectError};
+        use crate::effect::{AlreadyConsumedError, EffectError, EffectType};
+        use rstest::rstest;
 
-        #[test]
-        fn reader_transformer_try_lift_io_success() {
-            let io = IO::pure(42);
+        #[rstest]
+        #[case(42, "env", Ok(42))]
+        #[case(0, "test", Ok(0))]
+        #[case(-1, "negative", Ok(-1))]
+        fn reader_transformer_try_lift_io_success(
+            #[case] value: i32,
+            #[case] environment: &str,
+            #[case] expected: Result<i32, EffectError>,
+        ) {
+            let io = IO::pure(value);
             let reader: ReaderT<String, IO<Result<i32, EffectError>>> = ReaderT::try_lift_io(io);
-            let result = reader.run("env".to_string()).run_unsafe();
-            assert_eq!(result, Ok(42));
+            let result = reader.run(environment.to_string()).run_unsafe();
+            assert_eq!(result, expected);
         }
 
-        #[test]
+        #[rstest]
         fn reader_transformer_try_lift_io_already_consumed() {
             let io = IO::pure(42);
             let reader: ReaderT<String, IO<Result<i32, EffectError>>> = ReaderT::try_lift_io(io);
@@ -1110,12 +1118,12 @@ mod tests {
                 Err(EffectError::AlreadyConsumed(AlreadyConsumedError {
                     transformer_name: "ReaderT",
                     method_name: "try_lift_io",
-                    effect_type: "IO",
+                    effect_type: EffectType::IO,
                 }))
             ));
         }
 
-        #[test]
+        #[rstest]
         fn reader_transformer_try_lift_io_error_message() {
             let io = IO::pure(42);
             let reader: ReaderT<String, IO<Result<i32, EffectError>>> = ReaderT::try_lift_io(io);
@@ -1141,10 +1149,12 @@ mod tests {
     // =========================================================================
 
     #[cfg(feature = "async")]
-    #[allow(deprecated)]
+    #[allow(deprecated, clippy::future_not_send)]
     mod async_io_tests {
         use super::*;
+        use rstest::rstest;
 
+        #[rstest]
         #[tokio::test]
         async fn reader_lift_async_io_ignores_environment() {
             let async_io = AsyncIO::pure(42);
@@ -1153,6 +1163,7 @@ mod tests {
             assert_eq!(result, 42);
         }
 
+        #[rstest]
         #[tokio::test]
         async fn reader_lift_async_io_preserves_value() {
             let async_io = AsyncIO::new(|| async { "hello".to_string() });
@@ -1161,6 +1172,7 @@ mod tests {
             assert_eq!(result, "hello");
         }
 
+        #[rstest]
         #[tokio::test]
         async fn reader_lift_pure_law() {
             let value = 42;
@@ -1173,6 +1185,7 @@ mod tests {
             );
         }
 
+        #[rstest]
         #[tokio::test]
         async fn reader_asks_async_io_projects_value() {
             #[derive(Clone)]
@@ -1186,15 +1199,14 @@ mod tests {
             assert_eq!(result, 42);
         }
 
+        #[rstest]
         #[tokio::test]
         async fn reader_ask_asks_law() {
             let projection = |x: i32| x * 3;
 
-            // asks_async_io を使用
             let reader1: ReaderT<i32, AsyncIO<i32>> = ReaderT::asks_async_io(projection);
             let result1 = reader1.run(10).run_async().await;
 
-            // ask_async_io().fmap_async_io() を使用
             let reader2: ReaderT<i32, AsyncIO<i32>> =
                 ReaderT::<i32, AsyncIO<i32>>::ask_async_io().fmap_async_io(projection);
             let result2 = reader2.run(10).run_async().await;
@@ -1208,17 +1220,27 @@ mod tests {
 
         mod try_lift_async_io_tests {
             use super::*;
-            use crate::effect::{AlreadyConsumedError, EffectError};
+            use crate::effect::{AlreadyConsumedError, EffectError, EffectType};
+            use rstest::rstest;
 
+            #[rstest]
+            #[case(42, "env", Ok(42))]
+            #[case(0, "test", Ok(0))]
+            #[case(-1, "negative", Ok(-1))]
             #[tokio::test]
-            async fn reader_transformer_try_lift_async_io_success() {
-                let async_io = AsyncIO::pure(42);
+            async fn reader_transformer_try_lift_async_io_success(
+                #[case] value: i32,
+                #[case] environment: &str,
+                #[case] expected: Result<i32, EffectError>,
+            ) {
+                let async_io = AsyncIO::pure(value);
                 let reader: ReaderT<String, AsyncIO<Result<i32, EffectError>>> =
                     ReaderT::try_lift_async_io(async_io);
-                let result = reader.run("env".to_string()).run_async().await;
-                assert_eq!(result, Ok(42));
+                let result = reader.run(environment.to_string()).run_async().await;
+                assert_eq!(result, expected);
             }
 
+            #[rstest]
             #[tokio::test]
             async fn reader_transformer_try_lift_async_io_already_consumed() {
                 let async_io = AsyncIO::pure(42);
@@ -1236,11 +1258,12 @@ mod tests {
                     Err(EffectError::AlreadyConsumed(AlreadyConsumedError {
                         transformer_name: "ReaderT",
                         method_name: "try_lift_async_io",
-                        effect_type: "AsyncIO",
+                        effect_type: EffectType::AsyncIO,
                     }))
                 ));
             }
 
+            #[rstest]
             #[tokio::test]
             async fn reader_transformer_try_lift_async_io_error_message() {
                 let async_io = AsyncIO::pure(42);

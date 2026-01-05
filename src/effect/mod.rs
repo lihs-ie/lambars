@@ -88,6 +88,7 @@ mod error;
 
 pub use error::AlreadyConsumedError;
 pub use error::EffectError;
+pub use error::EffectType;
 
 // =============================================================================
 // MTL-Style Type Classes

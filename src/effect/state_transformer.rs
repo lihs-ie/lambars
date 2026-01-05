@@ -41,7 +41,7 @@
 use std::rc::Rc;
 
 use super::IO;
-use super::error::{AlreadyConsumedError, EffectError};
+use super::error::{AlreadyConsumedError, EffectError, EffectType};
 
 /// A monad transformer that adds state manipulation capability.
 ///
@@ -536,7 +536,7 @@ where
             None => IO::pure(Err(EffectError::AlreadyConsumed(AlreadyConsumedError {
                 transformer_name: "StateT",
                 method_name: "try_lift_io",
-                effect_type: "IO",
+                effect_type: EffectType::IO,
             }))),
         })
     }
@@ -904,7 +904,7 @@ where
                 None => AsyncIO::pure(Err(EffectError::AlreadyConsumed(AlreadyConsumedError {
                     transformer_name: "StateT",
                     method_name: "try_lift_async_io",
-                    effect_type: "AsyncIO",
+                    effect_type: EffectType::AsyncIO,
                 }))),
             }
         })
@@ -986,18 +986,26 @@ mod tests {
     #[allow(clippy::type_complexity)]
     mod io_tests {
         use super::*;
-        use crate::effect::{AlreadyConsumedError, EffectError};
+        use crate::effect::{AlreadyConsumedError, EffectError, EffectType};
+        use rstest::rstest;
 
-        #[test]
-        fn state_transformer_try_lift_io_success() {
-            let io = IO::pure(42);
+        #[rstest]
+        #[case(42, "initial", Ok((42, "initial".to_string())))]
+        #[case(0, "test", Ok((0, "test".to_string())))]
+        #[case(-1, "negative", Ok((-1, "negative".to_string())))]
+        fn state_transformer_try_lift_io_success(
+            #[case] value: i32,
+            #[case] initial_state: &str,
+            #[case] expected: Result<(i32, String), EffectError>,
+        ) {
+            let io = IO::pure(value);
             let state: StateT<String, IO<Result<(i32, String), EffectError>>> =
                 StateT::try_lift_io(io);
-            let result = state.run("initial".to_string()).run_unsafe();
-            assert_eq!(result, Ok((42, "initial".to_string())));
+            let result = state.run(initial_state.to_string()).run_unsafe();
+            assert_eq!(result, expected);
         }
 
-        #[test]
+        #[rstest]
         fn state_transformer_try_lift_io_already_consumed() {
             let io = IO::pure(42);
             let state: StateT<String, IO<Result<(i32, String), EffectError>>> =
@@ -1014,12 +1022,12 @@ mod tests {
                 Err(EffectError::AlreadyConsumed(AlreadyConsumedError {
                     transformer_name: "StateT",
                     method_name: "try_lift_io",
-                    effect_type: "IO",
+                    effect_type: EffectType::IO,
                 }))
             ));
         }
 
-        #[test]
+        #[rstest]
         fn state_transformer_try_lift_io_error_message() {
             let io = IO::pure(42);
             let state: StateT<String, IO<Result<(i32, String), EffectError>>> =
@@ -1083,20 +1091,30 @@ mod tests {
     // =========================================================================
 
     #[cfg(feature = "async")]
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity, clippy::future_not_send)]
     mod async_io_tests {
         use super::*;
-        use crate::effect::{AlreadyConsumedError, EffectError};
+        use crate::effect::{AlreadyConsumedError, EffectError, EffectType};
+        use rstest::rstest;
 
+        #[rstest]
+        #[case(42, "initial", Ok((42, "initial".to_string())))]
+        #[case(0, "test", Ok((0, "test".to_string())))]
+        #[case(-1, "negative", Ok((-1, "negative".to_string())))]
         #[tokio::test]
-        async fn state_transformer_try_lift_async_io_success() {
-            let async_io = AsyncIO::pure(42);
+        async fn state_transformer_try_lift_async_io_success(
+            #[case] value: i32,
+            #[case] initial_state: &str,
+            #[case] expected: Result<(i32, String), EffectError>,
+        ) {
+            let async_io = AsyncIO::pure(value);
             let state: StateT<String, AsyncIO<Result<(i32, String), EffectError>>> =
                 StateT::try_lift_async_io(async_io);
-            let result = state.run("initial".to_string()).run_async().await;
-            assert_eq!(result, Ok((42, "initial".to_string())));
+            let result = state.run(initial_state.to_string()).run_async().await;
+            assert_eq!(result, expected);
         }
 
+        #[rstest]
         #[tokio::test]
         async fn state_transformer_try_lift_async_io_already_consumed() {
             let async_io = AsyncIO::pure(42);
@@ -1114,11 +1132,12 @@ mod tests {
                 Err(EffectError::AlreadyConsumed(AlreadyConsumedError {
                     transformer_name: "StateT",
                     method_name: "try_lift_async_io",
-                    effect_type: "AsyncIO",
+                    effect_type: EffectType::AsyncIO,
                 }))
             ));
         }
 
+        #[rstest]
         #[tokio::test]
         async fn state_transformer_try_lift_async_io_error_message() {
             let async_io = AsyncIO::pure(42);
