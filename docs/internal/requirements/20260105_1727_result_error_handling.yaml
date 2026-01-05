@@ -1,0 +1,471 @@
+# Result-Based Error Handling for lift_io/lift_async_io 要件定義
+#
+# 概要:
+#   ReaderT/StateT の lift_io および lift_async_io メソッドで発生する
+#   panic! を Result 型によるエラー表現に置き換える。
+#
+# 設計方針:
+#   1. 関数型プログラミングの原則に従い、予測可能なエラーは Result で表現する
+#   2. 既存の API との後方互換性を維持するオプションを検討する
+#   3. エラー型は具体的かつ情報量が多いものとする
+#   4. MonadError 型クラスとの統合を考慮する
+#
+# 参照:
+#   - GitHub Issue #54: https://github.com/lihs-ie/lambars/issues/54
+#   - 既存の TimeoutError の設計パターン
+#   - Haskell の MonadError 型クラス
+#   - Rust の std::error::Error トレイト
+
+version: "1.0.0"
+name: "Result-Based Error Handling for lift_io/lift_async_io"
+description: |
+  ReaderT および StateT の lift_io/lift_async_io メソッドにおいて、
+  IO/AsyncIO が複数回消費された場合に発生する panic! を
+  Result 型によるエラー表現に置き換える。
+
+  関数型プログラミングにおいて、予測可能なエラーは例外（panic）ではなく
+  代数的データ型（Result/Either）で表現すべきである。これにより:
+
+  1. エラーの可能性が型シグネチャで明示される
+  2. 呼び出し側でエラーをハンドリングする機会が与えられる
+  3. 合成可能性が維持される（MonadError によるエラー合成）
+  4. テスト容易性が向上する
+
+# 背景・動機
+background:
+  problem: |
+    現在、以下の4箇所で panic! が使用されている:
+
+    1. src/effect/reader_transformer.rs:558 - ReaderT::lift_io
+       ```rust
+       panic!("ReaderT::lift_io: IO already consumed. Use the ReaderT only once.")
+       ```
+
+    2. src/effect/reader_transformer.rs:886 - ReaderT::lift_async_io
+       ```rust
+       panic!("ReaderT::lift_async_io: AsyncIO already consumed. Use the ReaderT only once.")
+       ```
+
+    3. src/effect/state_transformer.rs:492 - StateT::lift_io
+       ```rust
+       panic!("StateT::lift_io: IO already consumed. Use the StateT only once.")
+       ```
+
+    4. src/effect/state_transformer.rs:800 - StateT::lift_async_io
+       ```rust
+       panic!("StateT::lift_async_io: AsyncIO already consumed. Use the StateT only once.")
+       ```
+
+    これらの panic! は以下の問題を引き起こす:
+
+    - 型安全性の欠如: エラーの可能性が型で表現されていない
+    - 回復不能: 呼び出し側でエラーハンドリングできない
+    - FP原則違反: 関数型プログラミングでは予測可能なエラーは Result で表現すべき
+    - デバッグ困難: ランタイムでクラッシュするまでエラーに気づけない
+
+  motivation: |
+    関数型プログラミングの基本原則として、以下が挙げられる:
+
+    1. 全域関数の原則: 関数は全ての入力に対して値を返すべき
+    2. 参照透過性: 同じ入力に対して常に同じ出力を返す
+    3. 型による文書化: 関数の振る舞いを型シグネチャで表現する
+
+    panic! を使用すると:
+    - 関数が部分関数になる（一部の入力でクラッシュする）
+    - 参照透過性が破れる（実行するたびに異なる結果になりうる）
+    - 型がエラーの可能性を表現しない
+
+    Result 型を使用することで:
+    - 全域関数になる（全ての入力に対して Result を返す）
+    - 参照透過性が維持される（常に Ok または Err を返す）
+    - 型がエラーの可能性を明示する
+
+  prior_art:
+    - name: "Haskell の throwError/catchError"
+      description: |
+        Haskell の MonadError 型クラスは、モナド内でのエラーハンドリングを抽象化する。
+        throwError でエラーを発生させ、catchError で捕捉する。
+        ```haskell
+        class Monad m => MonadError e m | m -> e where
+            throwError :: e -> m a
+            catchError :: m a -> (e -> m a) -> m a
+        ```
+
+    - name: "Rust の std::error::Error"
+      description: |
+        Rust 標準ライブラリでは、recoverable なエラーは Result で表現し、
+        unrecoverable なエラー（論理バグ）のみ panic! を使用する。
+        IO/AsyncIO の二重消費は recoverable なエラーである。
+
+    - name: "既存の TimeoutError"
+      description: |
+        本プロジェクトの AsyncIO::timeout_result は既に Result<A, TimeoutError> を
+        返す設計になっており、これを参考にできる。
+        ```rust
+        pub fn timeout_result(self, duration: Duration) -> AsyncIO<Result<A, TimeoutError>>
+        ```
+
+    - name: "cats-effect の Concurrent"
+      description: |
+        Scala の cats-effect では、リソースの二重使用は型レベルで防止されるか、
+        エラーとして明示的に処理される。
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. エラー型の定義
+  # ======================================================================
+  - id: error_type_definition
+    name: "EffectError 型の定義"
+    description: |
+      Effect システムで発生するエラーを表現する代数的データ型を定義する。
+      将来の拡張性を考慮し、enum として設計する。
+
+    methods:
+      - name: "EffectError enum"
+        signature: |
+          #[derive(Debug, Clone, PartialEq, Eq)]
+          pub enum EffectError {
+              AlreadyConsumed(AlreadyConsumedError),
+          }
+        description: |
+          Effect システムのエラーを表現する列挙型。
+          現時点では AlreadyConsumed のみだが、将来的に他のエラーも追加可能。
+
+      - name: "AlreadyConsumedError struct"
+        signature: |
+          #[derive(Debug, Clone, PartialEq, Eq)]
+          pub struct AlreadyConsumedError {
+              pub transformer_name: &'static str,
+              pub method_name: &'static str,
+          }
+        description: |
+          IO/AsyncIO が既に消費されたことを示すエラー。
+          どのトランスフォーマーのどのメソッドでエラーが発生したかを記録する。
+
+      - name: "Display trait implementation"
+        signature: |
+          impl std::fmt::Display for EffectError
+          impl std::fmt::Display for AlreadyConsumedError
+        description: |
+          人間が読みやすいエラーメッセージを提供する。
+          例: "ReaderT::lift_io: IO already consumed. Use the transformer only once."
+
+      - name: "Error trait implementation"
+        signature: |
+          impl std::error::Error for EffectError
+          impl std::error::Error for AlreadyConsumedError
+        description: |
+          Rust 標準のエラートレイトを実装し、他のエラー型との相互運用性を確保する。
+
+    implementations:
+      - type: "EffectError"
+        description: |
+          src/effect/error.rs に新規ファイルを作成し、エラー型を定義する。
+          mod.rs から re-export して公開 API とする。
+
+    examples:
+      - description: "エラー型の使用例"
+        code: |
+          use lambars::effect::{EffectError, AlreadyConsumedError};
+
+          let error = EffectError::AlreadyConsumed(AlreadyConsumedError {
+              transformer_name: "ReaderT",
+              method_name: "lift_io",
+          });
+
+          println!("{}", error);
+          // Output: "ReaderT::lift_io: IO already consumed. Use the transformer only once."
+
+  # ======================================================================
+  # 2. try_lift_io メソッドの追加
+  # ======================================================================
+  - id: try_lift_io_method
+    name: "try_lift_io メソッドの追加"
+    description: |
+      Result を返す安全なバージョンの lift_io メソッドを追加する。
+      エラーが発生した場合は Err(EffectError::AlreadyConsumed) を返す。
+
+    methods:
+      - name: "ReaderT::try_lift_io"
+        signature: |
+          pub fn try_lift_io(inner: IO<A>) -> Self
+          where
+              Self: Sized,
+              // run メソッドの戻り値が Result<IO<A>, EffectError> になる
+        description: |
+          IO を ReaderT にリフトする。IO が既に消費されていた場合は
+          run 時に Err(EffectError::AlreadyConsumed) を返す。
+
+          注意: ReaderT<R, M> の M が IO<A> の場合、
+          このメソッドは ReaderT<R, Result<IO<A>, EffectError>> を返す形になる。
+          ただし、これは使いづらいため、代替案として
+          ReaderT<R, IO<Result<A, EffectError>>> の形式も検討する。
+
+      - name: "StateT::try_lift_io"
+        signature: |
+          pub fn try_lift_io(inner: IO<A>) -> Self
+          where
+              Self: Sized,
+        description: |
+          IO を StateT にリフトする。IO が既に消費されていた場合は
+          run 時にエラーを返す。
+
+    implementations:
+      - type: "ReaderT<R, IO<Result<A, EffectError>>>"
+        description: |
+          ReaderT に try_lift_io メソッドを追加し、
+          IO が既に消費されていた場合に Result::Err を返す。
+
+      - type: "StateT<S, IO<Result<(A, S), EffectError>>>"
+        description: |
+          StateT に try_lift_io メソッドを追加し、
+          IO が既に消費されていた場合に Result::Err を返す。
+
+    examples:
+      - description: "ReaderT::try_lift_io の使用例"
+        code: |
+          use lambars::effect::{ReaderT, IO, EffectError};
+
+          let io = IO::pure(42);
+          let reader: ReaderT<String, IO<Result<i32, EffectError>>> =
+              ReaderT::try_lift_io(io);
+
+          // 一度目の実行は成功
+          let result = reader.clone().run("env".to_string()).run_unsafe();
+          assert_eq!(result, Ok(42));
+
+          // 注意: IO は消費されるため、同じ IO インスタンスからの
+          // 二回目の実行はエラーになる（Clone が必要）
+
+  # ======================================================================
+  # 3. try_lift_async_io メソッドの追加
+  # ======================================================================
+  - id: try_lift_async_io_method
+    name: "try_lift_async_io メソッドの追加"
+    description: |
+      Result を返す安全なバージョンの lift_async_io メソッドを追加する。
+      エラーが発生した場合は Err(EffectError::AlreadyConsumed) を返す。
+
+    methods:
+      - name: "ReaderT::try_lift_async_io"
+        signature: |
+          pub fn try_lift_async_io(inner: AsyncIO<A>) -> Self
+          where
+              A: Clone,
+        description: |
+          AsyncIO を ReaderT にリフトする。AsyncIO が既に消費されていた場合は
+          run 時に Err(EffectError::AlreadyConsumed) を返す。
+
+      - name: "StateT::try_lift_async_io"
+        signature: |
+          pub fn try_lift_async_io(inner: AsyncIO<A>) -> Self
+          where
+              S: Clone,
+        description: |
+          AsyncIO を StateT にリフトする。AsyncIO が既に消費されていた場合は
+          run 時にエラーを返す。
+
+    implementations:
+      - type: "ReaderT<R, AsyncIO<Result<A, EffectError>>>"
+        description: |
+          ReaderT に try_lift_async_io メソッドを追加し、
+          AsyncIO が既に消費されていた場合に Result::Err を返す。
+
+      - type: "StateT<S, AsyncIO<Result<(A, S), EffectError>>>"
+        description: |
+          StateT に try_lift_async_io メソッドを追加し、
+          AsyncIO が既に消費されていた場合に Result::Err を返す。
+
+    examples:
+      - description: "ReaderT::try_lift_async_io の使用例"
+        code: |
+          use lambars::effect::{ReaderT, AsyncIO, EffectError};
+
+          #[tokio::main]
+          async fn main() {
+              let async_io = AsyncIO::pure(42);
+              let reader: ReaderT<String, AsyncIO<Result<i32, EffectError>>> =
+                  ReaderT::try_lift_async_io(async_io);
+
+              let result = reader.run("env".to_string()).run_async().await;
+              assert_eq!(result, Ok(42));
+          }
+
+  # ======================================================================
+  # 4. 既存メソッドの更新（オプション検討）
+  # ======================================================================
+  - id: existing_method_update
+    name: "既存の lift_io/lift_async_io メソッドの扱い"
+    description: |
+      既存の panic! を使用するメソッドの扱いについて、以下の選択肢を検討する。
+
+      選択肢 A: 既存メソッドを維持（非推奨としてマーク）
+        - lift_io, lift_async_io は panic! を維持
+        - #[deprecated] アトリビュートを追加し、try_ バージョンの使用を推奨
+        - 後方互換性を維持
+
+      選択肢 B: 既存メソッドを Result を返すように変更
+        - 破壊的変更となる
+        - 呼び出し側でエラーハンドリングが必須になる
+        - 関数型プログラミングの原則に完全に準拠
+
+      選択肢 C: 既存メソッドを削除し try_ バージョンのみ提供
+        - 最もクリーンだが、最も破壊的
+        - メソッド名から try_ プレフィックスを削除可能
+
+      推奨: 選択肢 A（既存メソッドを維持、非推奨としてマーク）
+
+      理由:
+      - 後方互換性を維持しつつ、新しい安全な API を提供
+      - 段階的な移行が可能
+      - 将来のメジャーバージョンで既存メソッドを削除可能
+
+    methods:
+      - name: "deprecation attribute"
+        signature: |
+          #[deprecated(
+              since = "X.Y.Z",
+              note = "Use try_lift_io instead, which returns Result instead of panicking"
+          )]
+          pub fn lift_io(inner: IO<A>) -> Self
+        description: |
+          既存の lift_io メソッドに非推奨マークを追加し、
+          try_lift_io の使用を推奨する。
+
+  # ======================================================================
+  # 5. ドキュメントの更新
+  # ======================================================================
+  - id: documentation_update
+    name: "ドキュメントの更新"
+    description: |
+      新しいエラー型と try_ メソッドに関するドキュメントを追加する。
+
+    methods:
+      - name: "Module-level documentation"
+        signature: "//! in src/effect/mod.rs"
+        description: |
+          Effect モジュールのドキュメントに EffectError の説明を追加し、
+          エラーハンドリングのベストプラクティスを記載する。
+
+      - name: "Method documentation"
+        signature: "/// for try_lift_io, try_lift_async_io"
+        description: |
+          各メソッドに詳細なドキュメントを追加:
+          - メソッドの目的
+          - 引数の説明
+          - 戻り値の説明
+          - エラーが発生する条件
+          - 使用例
+
+    examples:
+      - description: "メソッドドキュメントの例"
+        code: |
+          /// Lifts an IO into `ReaderT`, returning `Result` instead of panicking.
+          ///
+          /// This is the safe version of [`lift_io`](Self::lift_io) that returns
+          /// an error instead of panicking when the IO is consumed more than once.
+          ///
+          /// # Arguments
+          ///
+          /// * `inner` - The IO computation to lift
+          ///
+          /// # Returns
+          ///
+          /// A `ReaderT` that, when run, returns `Ok(value)` if the IO has not been
+          /// consumed, or `Err(EffectError::AlreadyConsumed)` if it has.
+          ///
+          /// # Examples
+          ///
+          /// ```rust
+          /// use lambars::effect::{ReaderT, IO, EffectError};
+          ///
+          /// let io = IO::pure(42);
+          /// let reader = ReaderT::try_lift_io(io);
+          /// let result = reader.run("env".to_string()).run_unsafe();
+          /// assert_eq!(result, Ok(42));
+          /// ```
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - "エラーチェックのオーバーヘッドは最小限に抑える（Option::take の使用）"
+    - "エラー型のメモリフットプリントは小さく保つ（&'static str の使用）"
+    - "既存の lift_io/lift_async_io と同等のパフォーマンスを維持"
+
+  compatibility:
+    - "既存の lift_io/lift_async_io メソッドは非推奨としてマークするが、動作は維持"
+    - "新しい try_ メソッドは追加的な変更であり、既存コードを破壊しない"
+    - "EffectError は std::error::Error を実装し、Rust エコシステムと互換"
+
+  testing:
+    - "全ての新しいメソッドに対してユニットテストを作成"
+    - "エラーケース（二重消費）のテストを必ず含める"
+    - "プロパティテスト: try_ メソッドは一度目の実行で常に Ok を返す"
+    - "プロパティテスト: try_ メソッドは二度目の実行で常に Err を返す"
+    - "既存テストが引き続きパスすることを確認"
+    - "カバレッジ 100% を目指す"
+
+  documentation:
+    - "全ての公開 API にドキュメントコメントを追加"
+    - "使用例を含める"
+    - "エラーが発生する条件を明記"
+
+# 実装の優先順位
+implementation_priority:
+  - order: 1
+    id: error_type_definition
+    reason: "他の実装の基盤となるエラー型を先に定義する必要がある"
+
+  - order: 2
+    id: try_lift_io_method
+    reason: "同期版を先に実装し、パターンを確立する"
+
+  - order: 3
+    id: try_lift_async_io_method
+    reason: "同期版と同じパターンで非同期版を実装"
+
+  - order: 4
+    id: existing_method_update
+    reason: "新しいメソッドの実装後に、既存メソッドを非推奨としてマーク"
+
+  - order: 5
+    id: documentation_update
+    reason: "全ての実装が完了した後にドキュメントを整備"
+
+# 将来の拡張
+future_extensions:
+  - id: additional_error_variants
+    name: "追加のエラーバリアント"
+    description: |
+      EffectError enum に他のエラーバリアントを追加可能:
+      - InvalidState: 不正な状態遷移
+      - ResourceUnavailable: リソースが利用不可
+      - OperationCancelled: 操作がキャンセルされた
+    rationale: |
+      現時点では AlreadyConsumed のみが必要だが、
+      Effect システムの拡張に伴い他のエラーが必要になる可能性がある。
+
+  - id: monad_error_integration
+    name: "MonadError との統合"
+    description: |
+      EffectError を MonadError 型クラスと統合し、
+      エラーの throw/catch を統一的に扱えるようにする。
+    rationale: |
+      現時点では Result 型で十分だが、
+      より高度なエラーハンドリングが必要な場合に MonadError を活用できる。
+
+  - id: remove_panicking_methods
+    name: "panic! を使用するメソッドの削除"
+    description: |
+      将来のメジャーバージョンで、非推奨となった lift_io/lift_async_io メソッドを
+      削除し、try_ プレフィックスなしの名前で Result を返すバージョンを提供する。
+    rationale: |
+      後方互換性を維持しつつ段階的に移行するため、
+      現時点では非推奨マークのみにとどめる。
+
+# 関連 Issue
+github_issue:
+  number: 54
+  url: "https://github.com/lihs-ie/lambars/issues/54"
+  title: "Replace panic! with Result in lift_io/lift_async_io methods"

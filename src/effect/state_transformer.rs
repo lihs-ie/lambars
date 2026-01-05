@@ -41,6 +41,7 @@
 use std::rc::Rc;
 
 use super::IO;
+use super::error::{AlreadyConsumedError, EffectError};
 
 /// A monad transformer that adds state manipulation capability.
 ///
@@ -484,6 +485,10 @@ where
     /// # Panics
     ///
     /// Panics if the resulting `StateT` is run more than once.
+    #[deprecated(
+        since = "0.2.0",
+        note = "Use try_lift_io instead, which returns Result instead of panicking"
+    )]
     #[must_use]
     pub fn lift_io(inner: IO<A>) -> Self {
         let inner_rc = Rc::new(std::cell::RefCell::new(Some(inner)));
@@ -492,6 +497,47 @@ where
                 panic!("StateT::lift_io: IO already consumed. Use the StateT only once.")
             });
             io.fmap(move |value| (value, state))
+        })
+    }
+
+    /// Lifts an `IO` into `StateT`, returning `Result` instead of panicking.
+    ///
+    /// This is the safe version of [`lift_io`](Self::lift_io) that returns
+    /// an error instead of panicking when the IO is consumed more than once.
+    ///
+    /// # Arguments
+    ///
+    /// * `inner` - The IO computation to lift
+    ///
+    /// # Returns
+    ///
+    /// A `StateT` that, when run, returns `IO<Result<(A, S), EffectError>>`.
+    /// The first execution returns `Ok((value, state))`, subsequent executions
+    /// return `Err(EffectError::AlreadyConsumed)`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::effect::{StateT, IO, EffectError};
+    ///
+    /// let io = IO::pure(42);
+    /// let state: StateT<String, IO<Result<(i32, String), EffectError>>> =
+    ///     StateT::try_lift_io(io);
+    ///
+    /// let result = state.run("initial".to_string()).run_unsafe();
+    /// assert_eq!(result, Ok((42, "initial".to_string())));
+    /// ```
+    #[must_use]
+    #[allow(clippy::option_if_let_else, clippy::type_complexity)]
+    pub fn try_lift_io(inner: IO<A>) -> StateT<S, IO<Result<(A, S), EffectError>>> {
+        let inner_rc = Rc::new(std::cell::RefCell::new(Some(inner)));
+        StateT::new(move |state: S| match inner_rc.borrow_mut().take() {
+            Some(io) => io.fmap(move |value| Ok((value, state))),
+            None => IO::pure(Err(EffectError::AlreadyConsumed(AlreadyConsumedError {
+                transformer_name: "StateT",
+                method_name: "try_lift_io",
+                effect_type: "IO",
+            }))),
         })
     }
 
@@ -783,12 +829,17 @@ where
     /// #[tokio::main]
     /// async fn main() {
     ///     let async_io = AsyncIO::pure(42);
+    ///     #[allow(deprecated)]
     ///     let state: StateT<i32, AsyncIO<(i32, i32)>> = StateT::lift_async_io(async_io);
     ///     let (result, final_state) = state.run(100).run_async().await;
     ///     assert_eq!(result, 42);
     ///     assert_eq!(final_state, 100);
     /// }
     /// ```
+    #[deprecated(
+        since = "0.2.0",
+        note = "Use try_lift_async_io instead, which returns Result instead of panicking"
+    )]
     #[must_use]
     pub fn lift_async_io(inner: AsyncIO<A>) -> Self
     where
@@ -800,6 +851,62 @@ where
                 panic!("StateT::lift_async_io: AsyncIO already consumed. Use the StateT only once.")
             });
             async_io.fmap(move |value| (value, state))
+        })
+    }
+
+    /// Lifts an `AsyncIO` into `StateT`, returning `Result` instead of panicking.
+    ///
+    /// This is the safe version of [`lift_async_io`](Self::lift_async_io) that returns
+    /// an error instead of panicking when the `AsyncIO` is consumed more than once.
+    ///
+    /// # Arguments
+    ///
+    /// * `inner` - The `AsyncIO` computation to lift
+    ///
+    /// # Returns
+    ///
+    /// A `StateT` that, when run, returns `AsyncIO<Result<(A, S), EffectError>>`.
+    /// The first execution returns `Ok((value, state))`, subsequent executions
+    /// return `Err(EffectError::AlreadyConsumed)`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use lambars::effect::{StateT, AsyncIO, EffectError};
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let async_io = AsyncIO::pure(42);
+    ///     let state: StateT<String, AsyncIO<Result<(i32, String), EffectError>>> =
+    ///         StateT::try_lift_async_io(async_io);
+    ///
+    ///     let result = state.run("initial".to_string()).run_async().await;
+    ///     assert_eq!(result, Ok((42, "initial".to_string())));
+    /// }
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// This function will not panic under normal circumstances. The internal
+    /// `Mutex::lock` is only used for interior mutability in single-threaded
+    /// contexts and will not be poisoned.
+    #[must_use]
+    #[allow(clippy::option_if_let_else, clippy::type_complexity)]
+    pub fn try_lift_async_io(inner: AsyncIO<A>) -> StateT<S, AsyncIO<Result<(A, S), EffectError>>>
+    where
+        S: Clone,
+    {
+        let inner_arc = std::sync::Arc::new(std::sync::Mutex::new(Some(inner)));
+        StateT::new(move |state: S| {
+            let mut guard = inner_arc.lock().unwrap();
+            match guard.take() {
+                Some(async_io) => async_io.fmap(move |value| Ok((value, state))),
+                None => AsyncIO::pure(Err(EffectError::AlreadyConsumed(AlreadyConsumedError {
+                    transformer_name: "StateT",
+                    method_name: "try_lift_async_io",
+                    effect_type: "AsyncIO",
+                }))),
+            }
         })
     }
 
@@ -872,6 +979,72 @@ where
 mod tests {
     use super::*;
 
+    // =========================================================================
+    // IO-specific Tests
+    // =========================================================================
+
+    #[allow(clippy::type_complexity)]
+    mod io_tests {
+        use super::*;
+        use crate::effect::{AlreadyConsumedError, EffectError};
+
+        #[test]
+        fn state_transformer_try_lift_io_success() {
+            let io = IO::pure(42);
+            let state: StateT<String, IO<Result<(i32, String), EffectError>>> =
+                StateT::try_lift_io(io);
+            let result = state.run("initial".to_string()).run_unsafe();
+            assert_eq!(result, Ok((42, "initial".to_string())));
+        }
+
+        #[test]
+        fn state_transformer_try_lift_io_already_consumed() {
+            let io = IO::pure(42);
+            let state: StateT<String, IO<Result<(i32, String), EffectError>>> =
+                StateT::try_lift_io(io);
+
+            let cloned = state.clone();
+
+            let result1 = state.run("state1".to_string()).run_unsafe();
+            assert_eq!(result1, Ok((42, "state1".to_string())));
+
+            let result2 = cloned.run("state2".to_string()).run_unsafe();
+            assert!(matches!(
+                result2,
+                Err(EffectError::AlreadyConsumed(AlreadyConsumedError {
+                    transformer_name: "StateT",
+                    method_name: "try_lift_io",
+                    effect_type: "IO",
+                }))
+            ));
+        }
+
+        #[test]
+        fn state_transformer_try_lift_io_error_message() {
+            let io = IO::pure(42);
+            let state: StateT<String, IO<Result<(i32, String), EffectError>>> =
+                StateT::try_lift_io(io);
+
+            let cloned = state.clone();
+            let _ = state.run("state".to_string()).run_unsafe();
+            let result = cloned.run("state".to_string()).run_unsafe();
+
+            match result {
+                Err(error) => {
+                    assert_eq!(
+                        error.to_string(),
+                        "StateT::try_lift_io: IO already consumed. Use the transformer only once."
+                    );
+                }
+                Ok(_) => panic!("Expected error"),
+            }
+        }
+    }
+
+    // =========================================================================
+    // Option-specific Tests
+    // =========================================================================
+
     #[test]
     fn state_transformer_new_and_run() {
         let state: StateT<i32, Option<(i32, i32)>> = StateT::new(|s| Some((s * 2, s + 1)));
@@ -903,5 +1076,68 @@ mod tests {
         let state: StateT<i32, Option<(i32, i32)>> = StateT::new(|s| Some((s, s + 1)));
         let chained = state.flat_map_option(|v| StateT::new(move |s| Some((v + s, s * 2))));
         assert_eq!(chained.run(10), Some((21, 22)));
+    }
+
+    // =========================================================================
+    // AsyncIO-specific Tests (requires async feature)
+    // =========================================================================
+
+    #[cfg(feature = "async")]
+    #[allow(clippy::type_complexity)]
+    mod async_io_tests {
+        use super::*;
+        use crate::effect::{AlreadyConsumedError, EffectError};
+
+        #[tokio::test]
+        async fn state_transformer_try_lift_async_io_success() {
+            let async_io = AsyncIO::pure(42);
+            let state: StateT<String, AsyncIO<Result<(i32, String), EffectError>>> =
+                StateT::try_lift_async_io(async_io);
+            let result = state.run("initial".to_string()).run_async().await;
+            assert_eq!(result, Ok((42, "initial".to_string())));
+        }
+
+        #[tokio::test]
+        async fn state_transformer_try_lift_async_io_already_consumed() {
+            let async_io = AsyncIO::pure(42);
+            let state: StateT<String, AsyncIO<Result<(i32, String), EffectError>>> =
+                StateT::try_lift_async_io(async_io);
+
+            let cloned = state.clone();
+
+            let result1 = state.run("state1".to_string()).run_async().await;
+            assert_eq!(result1, Ok((42, "state1".to_string())));
+
+            let result2 = cloned.run("state2".to_string()).run_async().await;
+            assert!(matches!(
+                result2,
+                Err(EffectError::AlreadyConsumed(AlreadyConsumedError {
+                    transformer_name: "StateT",
+                    method_name: "try_lift_async_io",
+                    effect_type: "AsyncIO",
+                }))
+            ));
+        }
+
+        #[tokio::test]
+        async fn state_transformer_try_lift_async_io_error_message() {
+            let async_io = AsyncIO::pure(42);
+            let state: StateT<String, AsyncIO<Result<(i32, String), EffectError>>> =
+                StateT::try_lift_async_io(async_io);
+
+            let cloned = state.clone();
+            let _ = state.run("state".to_string()).run_async().await;
+            let result = cloned.run("state".to_string()).run_async().await;
+
+            match result {
+                Err(error) => {
+                    assert_eq!(
+                        error.to_string(),
+                        "StateT::try_lift_async_io: AsyncIO already consumed. Use the transformer only once."
+                    );
+                }
+                Ok(_) => panic!("Expected error"),
+            }
+        }
     }
 }

@@ -296,6 +296,7 @@ fn state_transformer_with_io_basic() {
 }
 
 #[rstest]
+#[allow(deprecated)]
 fn state_transformer_lift_io() {
     let inner = IO::pure("hello".to_string());
     let state_transformer: StateT<i32, IO<(String, i32)>> = StateT::lift_io(inner);
@@ -440,6 +441,7 @@ mod async_io_tests {
 
     #[rstest]
     #[tokio::test]
+    #[allow(deprecated)]
     async fn state_lift_async_io_preserves_state() {
         let async_io = AsyncIO::pure(42);
         let state: StateT<i32, AsyncIO<(i32, i32)>> = StateT::lift_async_io(async_io);
@@ -450,6 +452,7 @@ mod async_io_tests {
 
     #[rstest]
     #[tokio::test]
+    #[allow(deprecated)]
     async fn state_lift_async_io_preserves_async_value() {
         let async_io = AsyncIO::new(|| async { "hello".to_string() });
         let state: StateT<(), AsyncIO<(String, ())>> = StateT::lift_async_io(async_io);
@@ -459,6 +462,7 @@ mod async_io_tests {
 
     #[rstest]
     #[tokio::test]
+    #[allow(deprecated)]
     async fn state_lift_state_law() {
         let initial_state = 100;
         let async_io = AsyncIO::pure(42);

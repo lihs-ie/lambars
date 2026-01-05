@@ -264,6 +264,7 @@ fn reader_transformer_with_io_basic() {
 }
 
 #[rstest]
+#[allow(deprecated)]
 fn reader_transformer_lift_io() {
     let inner = IO::pure(42);
     let reader_transformer: ReaderT<String, IO<i32>> = ReaderT::lift_io(inner);
