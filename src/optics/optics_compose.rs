@@ -1215,4 +1215,193 @@ mod tests {
         let nested = vec![vec![1, 2], vec![3, 4, 5]];
         assert_eq!(cloned.length(&nested), 5);
     }
+
+    #[test]
+    fn test_traversal_compose_fold_to_vec() {
+        let all_vecs = <Vec<Vec<i32>> as Each>::each();
+        let all_items = nested_vec_fold::<i32>();
+        let composed = all_vecs.compose_fold(all_items);
+
+        let nested = vec![vec![1, 2], vec![3, 4, 5]];
+        let result = composed.to_vec(&nested);
+        assert_eq!(result, vec![&1, &2, &3, &4, &5]);
+    }
+
+    // =========================================================================
+    // LensFoldComposition Additional Tests
+    // =========================================================================
+
+    #[test]
+    fn test_lens_compose_fold_for_all() {
+        let items_lens = lens!(Container, items);
+        let all_items = vec_fold::<i32>();
+        let composed = items_lens.compose_fold(all_items);
+
+        let all_positive = Container {
+            items: vec![1, 2, 3],
+        };
+        assert!(composed.for_all(&all_positive, |x| *x > 0));
+
+        let has_negative = Container {
+            items: vec![1, -2, 3],
+        };
+        assert!(!composed.for_all(&has_negative, |x| *x > 0));
+    }
+
+    #[test]
+    fn test_lens_compose_fold_exists() {
+        let items_lens = lens!(Container, items);
+        let all_items = vec_fold::<i32>();
+        let composed = items_lens.compose_fold(all_items);
+
+        let container = Container {
+            items: vec![1, 2, 3],
+        };
+        assert!(composed.exists(&container, |x| *x == 2));
+        assert!(!composed.exists(&container, |x| *x == 100));
+    }
+
+    #[test]
+    fn test_lens_compose_fold_head_option() {
+        let items_lens = lens!(Container, items);
+        let all_items = vec_fold::<i32>();
+        let composed = items_lens.compose_fold(all_items);
+
+        let container = Container {
+            items: vec![1, 2, 3],
+        };
+        assert_eq!(composed.head_option(&container), Some(&1));
+
+        let empty_container = Container { items: vec![] };
+        assert_eq!(composed.head_option(&empty_container), None);
+    }
+
+    #[test]
+    fn test_lens_compose_fold_last_option() {
+        let items_lens = lens!(Container, items);
+        let all_items = vec_fold::<i32>();
+        let composed = items_lens.compose_fold(all_items);
+
+        let container = Container {
+            items: vec![1, 2, 3],
+        };
+        assert_eq!(composed.last_option(&container), Some(&3));
+
+        let empty_container = Container { items: vec![] };
+        assert_eq!(composed.last_option(&empty_container), None);
+    }
+
+    #[test]
+    fn test_lens_compose_fold_is_empty() {
+        let items_lens = lens!(Container, items);
+        let all_items = vec_fold::<i32>();
+        let composed = items_lens.compose_fold(all_items);
+
+        let container = Container {
+            items: vec![1, 2, 3],
+        };
+        assert!(!composed.is_empty(&container));
+
+        let empty_container = Container { items: vec![] };
+        assert!(composed.is_empty(&empty_container));
+    }
+
+    #[test]
+    fn test_lens_compose_fold_to_vec() {
+        let items_lens = lens!(Container, items);
+        let all_items = vec_fold::<i32>();
+        let composed = items_lens.compose_fold(all_items);
+
+        let container = Container {
+            items: vec![1, 2, 3],
+        };
+        let result = composed.to_vec(&container);
+        assert_eq!(result, vec![&1, &2, &3]);
+    }
+
+    // =========================================================================
+    // OptionalOptionalComposition set when first optional is None
+    // =========================================================================
+
+    #[test]
+    fn test_optional_compose_optional_set_when_first_optional_is_none() {
+        #[derive(Clone, Debug, PartialEq)]
+        struct Nested {
+            outer: Vec<Vec<i32>>,
+        }
+
+        let outer_lens = lens!(Nested, outer);
+        let first_vec = <Vec<Vec<i32>> as Ixed<usize>>::ix(0);
+        let first_of_first = <Vec<i32> as Ixed<usize>>::ix(0);
+
+        let outer_optional = outer_lens.compose_optional(first_vec);
+        let composed = outer_optional.compose_optional(first_of_first);
+
+        let nested = Nested { outer: vec![] };
+        let updated = composed.set(nested.clone(), 100);
+        assert_eq!(updated, nested);
+    }
+
+    // =========================================================================
+    // OptionalTraversalComposition get_all_owned and modify_all when None
+    // =========================================================================
+
+    #[test]
+    fn test_optional_compose_traversal_get_all_owned() {
+        #[derive(Clone, Debug, PartialEq)]
+        struct Nested {
+            outer: Vec<Vec<i32>>,
+        }
+
+        let outer_lens = lens!(Nested, outer);
+        let first_vec = <Vec<Vec<i32>> as Ixed<usize>>::ix(0);
+        let all_items = <Vec<i32> as Each>::each();
+
+        let outer_optional = outer_lens.compose_optional(first_vec);
+        let composed = outer_optional.compose_traversal(all_items);
+
+        let nested = Nested {
+            outer: vec![vec![1, 2, 3], vec![4, 5]],
+        };
+        let result = composed.get_all_owned(nested);
+        assert_eq!(result, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_optional_compose_traversal_get_all_owned_when_none() {
+        #[derive(Clone, Debug, PartialEq)]
+        struct Nested {
+            outer: Vec<Vec<i32>>,
+        }
+
+        let outer_lens = lens!(Nested, outer);
+        let first_vec = <Vec<Vec<i32>> as Ixed<usize>>::ix(0);
+        let all_items = <Vec<i32> as Each>::each();
+
+        let outer_optional = outer_lens.compose_optional(first_vec);
+        let composed = outer_optional.compose_traversal(all_items);
+
+        let nested = Nested { outer: vec![] };
+        let result = composed.get_all_owned(nested);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_optional_compose_traversal_modify_all_when_none() {
+        #[derive(Clone, Debug, PartialEq)]
+        struct Nested {
+            outer: Vec<Vec<i32>>,
+        }
+
+        let outer_lens = lens!(Nested, outer);
+        let first_vec = <Vec<Vec<i32>> as Ixed<usize>>::ix(0);
+        let all_items = <Vec<i32> as Each>::each();
+
+        let outer_optional = outer_lens.compose_optional(first_vec);
+        let composed = outer_optional.compose_traversal(all_items);
+
+        let nested = Nested { outer: vec![] };
+        let modified = composed.modify_all(nested.clone(), |x| x * 10);
+        assert_eq!(modified, nested);
+    }
 }

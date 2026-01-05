@@ -736,7 +736,7 @@ mod tests {
     }
 
     #[test]
-    fn test_choice_prism_clone() {
+    fn test_left_and_right_prism_clone() {
         // LeftPrism and RightPrism implement Clone
         let left_p = left_prism::<i32, String>();
         let right_p = right_prism::<i32, String>();
@@ -749,6 +749,33 @@ mod tests {
 
         assert_eq!(cloned_left.preview(&left), Some(&42));
         assert_eq!(cloned_right.preview(&right), Some(&"hello".to_string()));
+    }
+
+    #[test]
+    #[allow(clippy::type_complexity, clippy::redundant_clone)]
+    fn test_choice_prism_clone() {
+        let left_p = left_prism::<i32, String>();
+        let right_p = right_prism::<String, i32>();
+
+        let combined: ChoicePrism<
+            LeftPrism<i32, String>,
+            RightPrism<String, i32>,
+            Either<i32, String>,
+            Either<String, i32>,
+            i32,
+            i32,
+        > = ChoicePrism::new(left_p, right_p);
+
+        let cloned = combined.clone();
+
+        let left: Either<Either<i32, String>, Either<String, i32>> = Either::Left(Either::Left(42));
+        let result = cloned.preview_owned(left);
+        assert_eq!(result, Some(Either::Left(42)));
+
+        let right: Either<Either<i32, String>, Either<String, i32>> =
+            Either::Right(Either::Right(100));
+        let result = cloned.preview_owned(right);
+        assert_eq!(result, Some(Either::Right(100)));
     }
 
     #[test]

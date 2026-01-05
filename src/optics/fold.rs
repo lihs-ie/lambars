@@ -654,4 +654,17 @@ mod tests {
         let debug_string = format!("{composed:?}");
         assert!(debug_string.contains("ComposedFold"));
     }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn test_composed_fold_clone() {
+        let outer = vec_fold::<Vec<i32>>();
+        let inner = vec_fold::<i32>();
+        let composed = outer.compose(inner);
+        let cloned = composed.clone();
+
+        let data = vec![vec![1, 2], vec![3, 4, 5]];
+        let sum: i32 = cloned.fold(&data, 0, |accumulator, element| accumulator + element);
+        assert_eq!(sum, 15);
+    }
 }

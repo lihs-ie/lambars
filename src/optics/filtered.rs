@@ -417,7 +417,7 @@ mod tests {
     #[test]
     fn test_filtered_fold_clone() {
         let fold = filtered(|x: &i32| x % 2 == 0);
-        let cloned = fold;
+        let cloned = fold.clone();
         let data = vec![1, 2, 3, 4, 5, 6];
 
         assert_eq!(cloned.length(&data), 3);
