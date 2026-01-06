@@ -1197,10 +1197,6 @@ impl<A> std::fmt::Display for AsyncIO<A> {
     }
 }
 
-// =============================================================================
-// AsyncIOLike Implementation
-// =============================================================================
-
 impl<A: 'static> crate::typeclass::AsyncIOLike for AsyncIO<A> {
     type Value = A;
 

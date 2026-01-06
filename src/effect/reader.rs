@@ -564,10 +564,6 @@ where
     }
 }
 
-// =============================================================================
-// ReaderLike Implementation
-// =============================================================================
-
 impl<R: 'static, A: 'static> crate::typeclass::ReaderLike for Reader<R, A> {
     type Environment = R;
     type Value = A;

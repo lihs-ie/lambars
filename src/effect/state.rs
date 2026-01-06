@@ -602,10 +602,6 @@ where
     }
 }
 
-// =============================================================================
-// StateLike Implementation
-// =============================================================================
-
 impl<S: 'static, A: 'static> crate::typeclass::StateLike for State<S, A> {
     type StateType = S;
     type Value = A;

@@ -52,10 +52,6 @@ use crate::effect::{IO, Reader, State};
 #[cfg(all(feature = "effect", feature = "async"))]
 use crate::effect::AsyncIO;
 
-// =============================================================================
-// Helper Traits for Effect Types
-// =============================================================================
-
 /// A trait for types that represent Reader-like computations.
 ///
 /// This trait allows `sequence_reader` to extract environment and value types
@@ -484,10 +480,6 @@ pub trait Traversable: Functor + Foldable {
         self.traverse_result_(function)
     }
 
-    // =========================================================================
-    // Reader Effect Methods
-    // =========================================================================
-
     /// Applies a function returning `Reader` to each element and collects the results.
     ///
     /// The Reader computations are combined, and all will receive the same environment
@@ -614,10 +606,6 @@ pub trait Traversable: Functor + Foldable {
     {
         self.traverse_reader_(function)
     }
-
-    // =========================================================================
-    // State Effect Methods
-    // =========================================================================
 
     /// Applies a function returning `State` to each element and collects the results.
     ///
@@ -755,10 +743,6 @@ pub trait Traversable: Functor + Foldable {
         self.traverse_state_(function)
     }
 
-    // =========================================================================
-    // IO Effect Methods
-    // =========================================================================
-
     /// Applies a function returning `IO` to each element and collects the results.
     ///
     /// The IO actions are executed sequentially from left to right.
@@ -890,10 +874,6 @@ pub trait Traversable: Functor + Foldable {
     {
         self.traverse_io_(function)
     }
-
-    // =========================================================================
-    // AsyncIO Effect Methods
-    // =========================================================================
 
     /// Applies a function returning `AsyncIO` to each element and collects the results.
     ///

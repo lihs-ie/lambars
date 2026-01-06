@@ -243,6 +243,22 @@ let recovered = <Result<i32, String>>::catch_error(failing, |e| {
 | `List.zip` | `Iterator::zip` (std) | Zip two lists |
 | `Seq.unfold` | Manual implementation | Generate sequence |
 
+### Traversable Operations
+
+| F# | lambars | Description |
+|----|---------|-------------|
+| `List.traverse` (custom) | `Traversable::traverse_option/result` | Traverse with Option/Result |
+| `List.sequence` (custom) | `Traversable::sequence_option/result` | Sequence Option/Result effects |
+| `List.traverse` with Reader | `Traversable::traverse_reader` | Traverse with Reader effect |
+| `List.traverse` with State | `Traversable::traverse_state` | Traverse with State effect |
+| `List.traverse` with Async | `Traversable::traverse_io` | Traverse with IO effect |
+| `List.sequence` with Reader | `Traversable::sequence_reader` | Sequence Reader effects |
+| `List.sequence` with State | `Traversable::sequence_state` | Sequence State effects |
+| `List.sequence` with Async | `Traversable::sequence_io` | Sequence IO effects |
+| `List.iter` with Reader | `Traversable::for_each_reader` | For-each with Reader effect |
+| `List.iter` with State | `Traversable::for_each_state` | For-each with State effect |
+| `List.iter` with IO | `Traversable::for_each_io` | For-each with IO effect |
+
 ### Code Examples
 
 #### F# List.map vs lambars Functor::fmap
@@ -357,6 +373,54 @@ let has_even = vec![1, 2, 3].exists(|x| x % 2 == 0);
 
 let all_positive = vec![1, 2, 3].for_all(|x| *x > 0);
 // all_positive = true
+```
+
+#### Traversable with Effect Types
+
+```fsharp
+// F# - Custom traverse with Reader-like pattern
+type Config = { Multiplier: int }
+
+let traverseReader (f: 'a -> Config -> 'b) (items: 'a list) : Config -> 'b list =
+    fun config -> items |> List.map (fun x -> f x config)
+
+let multiply x config = x * config.Multiplier
+let result = traverseReader multiply [1; 2; 3] { Multiplier = 10 }
+// result = [10; 20; 30]
+```
+
+```rust
+// lambars
+use lambars::typeclass::Traversable;
+use lambars::effect::{Reader, State, IO};
+
+// traverse_reader - traverse with Reader effect
+#[derive(Clone)]
+struct Config { multiplier: i32 }
+
+let numbers = vec![1, 2, 3];
+let reader = numbers.traverse_reader(|n| {
+    Reader::asks(move |config: &Config| n * config.multiplier)
+});
+let result = reader.run(Config { multiplier: 10 });
+// result = vec![10, 20, 30]
+
+// traverse_state - traverse with State effect (state is threaded left-to-right)
+let items = vec!["a", "b", "c"];
+let state = items.traverse_state(|item| {
+    State::new(move |index: usize| ((index, item), index + 1))
+});
+let (result, final_index) = state.run(0);
+// result = vec![(0, "a"), (1, "b"), (2, "c")]
+// final_index = 3
+
+// traverse_io - traverse with IO effect (IO actions executed sequentially)
+let paths = vec!["a.txt", "b.txt"];
+let io = paths.traverse_io(|path| {
+    IO::new(move || format!("content of {}", path))
+});
+let contents = io.run_unsafe();
+// contents = vec!["content of a.txt", "content of b.txt"]
 ```
 
 ---

@@ -497,10 +497,6 @@ impl<A> std::fmt::Display for IO<A> {
     }
 }
 
-// =============================================================================
-// IOLike Implementation
-// =============================================================================
-
 impl<A: 'static> crate::typeclass::IOLike for IO<A> {
     type Value = A;
 
