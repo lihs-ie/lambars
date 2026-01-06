@@ -499,11 +499,9 @@ mod async_io_tests {
     async fn state_gets_get_law() {
         let projection = |s: &i32| s * 2;
 
-        // gets_async_io を使用
         let state1: StateT<i32, AsyncIO<(i32, i32)>> = StateT::gets_async_io(projection);
         let (result1, _) = state1.run(21).run_async().await;
 
-        // get_async_io().fmap_async_io() を使用
         let state2: StateT<i32, AsyncIO<(i32, i32)>> =
             StateT::<i32, AsyncIO<(i32, i32)>>::get_async_io()
                 .fmap_async_io(move |s| projection(&s));

@@ -17,7 +17,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 #[rstest]
 #[tokio::test]
 async fn test_eff_async_single_bind() {
-    // 単一の bind 操作
     let result = eff_async! {
         x <= AsyncIO::pure(5);
         AsyncIO::pure(x * 2)
@@ -28,7 +27,6 @@ async fn test_eff_async_single_bind() {
 #[rstest]
 #[tokio::test]
 async fn test_eff_async_multiple_binds() {
-    // 複数の bind 操作
     let result = eff_async! {
         x <= AsyncIO::pure(5);
         y <= AsyncIO::pure(10);
@@ -41,7 +39,6 @@ async fn test_eff_async_multiple_binds() {
 #[rstest]
 #[tokio::test]
 async fn test_eff_async_with_let() {
-    // let 束縛との組み合わせ
     let result = eff_async! {
         x <= AsyncIO::pure(5);
         let doubled = x * 2;
@@ -59,7 +56,6 @@ async fn test_eff_async_with_let() {
 #[rstest]
 #[tokio::test]
 async fn test_eff_async_wildcard_pattern() {
-    // ワイルドカードパターン
     let result = eff_async! {
         _ <= AsyncIO::pure("ignored");
         AsyncIO::pure(42)
@@ -70,7 +66,6 @@ async fn test_eff_async_wildcard_pattern() {
 #[rstest]
 #[tokio::test]
 async fn test_eff_async_tuple_pattern() {
-    // タプルパターン
     let result = eff_async! {
         (x, y) <= AsyncIO::pure((10, 20));
         AsyncIO::pure(x + y)
@@ -81,7 +76,6 @@ async fn test_eff_async_tuple_pattern() {
 #[rstest]
 #[tokio::test]
 async fn test_eff_async_nested_tuple_pattern() {
-    // ネストしたタプルパターン
     let result = eff_async! {
         ((a, b), c) <= AsyncIO::pure(((1, 2), 3));
         AsyncIO::pure(a + b + c)
@@ -92,7 +86,6 @@ async fn test_eff_async_nested_tuple_pattern() {
 #[rstest]
 #[tokio::test]
 async fn test_eff_async_let_tuple_pattern() {
-    // let でのタプルパターン
     let result = eff_async! {
         pair <= AsyncIO::pure((10, 20));
         let (x, y) = pair;
@@ -108,7 +101,6 @@ async fn test_eff_async_let_tuple_pattern() {
 #[rstest]
 #[tokio::test]
 async fn test_eff_async_with_function_calls() {
-    // 関数呼び出しを含む式
     fn double(x: i32) -> i32 {
         x * 2
     }
@@ -125,7 +117,6 @@ async fn test_eff_async_with_function_calls() {
 #[rstest]
 #[tokio::test]
 async fn test_eff_async_with_closures() {
-    // クロージャを含む式
     let multiplier = 3;
 
     let result = eff_async! {
@@ -139,7 +130,6 @@ async fn test_eff_async_with_closures() {
 #[rstest]
 #[tokio::test]
 async fn test_eff_async_nested() {
-    // ネストした eff_async!
     let inner = eff_async! {
         x <= AsyncIO::pure(10);
         AsyncIO::pure(x * 2)
@@ -161,7 +151,6 @@ async fn test_eff_async_nested() {
 #[rstest]
 #[tokio::test]
 async fn test_eff_async_execution_order() {
-    // 実行順序の検証
     let order = Arc::new(std::sync::Mutex::new(Vec::new()));
 
     let order1 = order.clone();
@@ -203,7 +192,6 @@ async fn test_eff_async_execution_order() {
 #[rstest]
 #[tokio::test]
 async fn test_eff_async_is_lazy() {
-    // 遅延評価の検証
     let counter = Arc::new(AtomicUsize::new(0));
     let counter_clone = counter.clone();
 
@@ -218,10 +206,8 @@ async fn test_eff_async_is_lazy() {
         AsyncIO::pure(x)
     };
 
-    // eff_async! を呼んだだけでは実行されない
     assert_eq!(counter.load(Ordering::SeqCst), 0);
 
-    // run_async で実行
     let result = async_io.run_async().await;
     assert_eq!(result, 42);
     assert_eq!(counter.load(Ordering::SeqCst), 1);
@@ -234,7 +220,6 @@ async fn test_eff_async_is_lazy() {
 #[rstest]
 #[tokio::test]
 async fn test_eff_async_type_change() {
-    // 型変換
     let result = eff_async! {
         x <= AsyncIO::pure(42);
         let string = format!("value: {}", x);
@@ -246,7 +231,6 @@ async fn test_eff_async_type_change() {
 #[rstest]
 #[tokio::test]
 async fn test_eff_async_with_string() {
-    // 文字列の操作
     let result = eff_async! {
         s <= AsyncIO::pure("hello".to_string());
         let upper = s.to_uppercase();
@@ -262,7 +246,6 @@ async fn test_eff_async_with_string() {
 #[rstest]
 #[tokio::test]
 async fn test_eff_async_single_expression() {
-    // 単一式（bind なし）
     let result = eff_async! {
         AsyncIO::pure(42)
     };
@@ -272,7 +255,6 @@ async fn test_eff_async_single_expression() {
 #[rstest]
 #[tokio::test]
 async fn test_eff_async_only_let() {
-    // let のみ
     let result = eff_async! {
         let x = 10;
         let y = 20;
@@ -284,7 +266,6 @@ async fn test_eff_async_only_let() {
 #[rstest]
 #[tokio::test]
 async fn test_eff_async_complex_workflow() {
-    // 複雑なワークフロー
     fn validate(x: i32) -> AsyncIO<Result<i32, String>> {
         if x > 0 {
             AsyncIO::pure(Ok(x))
