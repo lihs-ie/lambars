@@ -49,57 +49,21 @@ use super::prism::Prism;
 
 /// An Optional focuses on a value that may or may not exist.
 ///
-/// # Type Parameters
-///
-/// - `S`: The source type (the whole structure)
-/// - `A`: The target type (the focused element, if present)
-///
 /// # Laws
 ///
 /// 1. **`GetOptionSet` Law**: If present, getting and setting back yields the original.
 /// 2. **`SetGetOption` Law**: If present, setting then getting yields the set value.
 pub trait Optional<S, A> {
     /// Attempts to get a reference to the focused element.
-    ///
-    /// Returns `Some` if the element is present, `None` otherwise.
-    ///
-    /// # Arguments
-    ///
-    /// * `source` - The source structure
-    ///
-    /// # Returns
-    ///
-    /// A reference to the focused element if present, `None` otherwise
     fn get_option<'a>(&self, source: &'a S) -> Option<&'a A>;
 
     /// Sets the focused element to a new value.
     ///
     /// If the element was not present, this will still set the value
     /// (by constructing the intermediate structure).
-    ///
-    /// # Arguments
-    ///
-    /// * `source` - The source structure (consumed)
-    /// * `value` - The new value for the focused element
-    ///
-    /// # Returns
-    ///
-    /// A new source with the focused element updated
     fn set(&self, source: S, value: A) -> S;
 
-    /// Modifies the focused element if present.
-    ///
-    /// Returns `Some` with the modified source if the element is present,
-    /// `None` otherwise.
-    ///
-    /// # Arguments
-    ///
-    /// * `source` - The source structure (consumed)
-    /// * `function` - The function to apply to the focused element
-    ///
-    /// # Returns
-    ///
-    /// `Some(modified_source)` if the element is present, `None` otherwise
+    /// Modifies the focused element if present, returning `None` otherwise.
     fn modify_option<F>(&self, source: S, function: F) -> Option<S>
     where
         F: FnOnce(A) -> A,
@@ -114,18 +78,6 @@ pub trait Optional<S, A> {
     }
 
     /// Modifies the focused element if present, otherwise returns the original source.
-    ///
-    /// This is a convenience method that wraps `modify_option` and returns the
-    /// original source unchanged if the element is not present.
-    ///
-    /// # Arguments
-    ///
-    /// * `source` - The source structure (consumed)
-    /// * `function` - The function to apply to the focused element
-    ///
-    /// # Returns
-    ///
-    /// The modified source if the element is present, original source otherwise
     fn modify<F>(&self, source: S, function: F) -> S
     where
         F: FnOnce(A) -> A,
@@ -137,32 +89,11 @@ pub trait Optional<S, A> {
     }
 
     /// Checks if the focused element is present.
-    ///
-    /// # Arguments
-    ///
-    /// * `source` - The source structure
-    ///
-    /// # Returns
-    ///
-    /// `true` if the element is present, `false` otherwise
     fn is_present(&self, source: &S) -> bool {
         self.get_option(source).is_some()
     }
 
     /// Composes this optional with a prism to focus on a nested optional element.
-    ///
-    /// # Type Parameters
-    ///
-    /// - `B`: The target type of the prism
-    /// - `P`: The type of the prism
-    ///
-    /// # Arguments
-    ///
-    /// * `other` - The prism to compose with
-    ///
-    /// # Returns
-    ///
-    /// A composed optional that focuses on the nested element
     fn compose<B, P>(self, other: P) -> ComposedOptional<Self, P, A>
     where
         Self: Sized,
@@ -176,12 +107,6 @@ pub trait Optional<S, A> {
 ///
 /// This struct implements the Optional trait, providing access to an element
 /// that may or may not be present within a larger structure.
-///
-/// # Type Parameters
-///
-/// - `L`: The type of the lens
-/// - `P`: The type of the prism
-/// - `A`: The intermediate type (target of L, source of P)
 ///
 /// # Example
 ///
@@ -210,15 +135,6 @@ pub struct LensPrismComposition<L, P, A> {
 
 impl<L, P, A> LensPrismComposition<L, P, A> {
     /// Creates a new `LensPrismComposition`.
-    ///
-    /// # Arguments
-    ///
-    /// * `lens` - The lens that focuses on the intermediate structure
-    /// * `prism` - The prism that focuses on the final value
-    ///
-    /// # Returns
-    ///
-    /// A new `LensPrismComposition`
     #[must_use]
     pub const fn new(lens: L, prism: P) -> Self {
         Self {
@@ -270,12 +186,6 @@ impl<L: std::fmt::Debug, P: std::fmt::Debug, A> std::fmt::Debug for LensPrismCom
 ///
 /// This struct implements the Optional trait, providing access to a nested
 /// optional element.
-///
-/// # Type Parameters
-///
-/// - `O1`: The type of the first optional
-/// - `O2`: The type of the second optional (or prism)
-/// - `A`: The intermediate type
 pub struct ComposedOptional<O1, O2, A> {
     first: O1,
     second: O2,
@@ -284,15 +194,6 @@ pub struct ComposedOptional<O1, O2, A> {
 
 impl<O1, O2, A> ComposedOptional<O1, O2, A> {
     /// Creates a new `ComposedOptional`.
-    ///
-    /// # Arguments
-    ///
-    /// * `first` - The first optional
-    /// * `second` - The second optional or prism
-    ///
-    /// # Returns
-    ///
-    /// A new `ComposedOptional`
     #[must_use]
     pub const fn new(first: O1, second: O2) -> Self {
         Self {
@@ -353,19 +254,6 @@ impl<S, A, L> LensComposeExtension<S, A> for L where L: Lens<S, A> {}
 /// Extension trait for Lens to compose with Prism.
 pub trait LensComposeExtension<S, A>: Lens<S, A> {
     /// Composes this lens with a prism to create an Optional.
-    ///
-    /// # Type Parameters
-    ///
-    /// - `B`: The target type of the prism
-    /// - `P`: The type of the prism
-    ///
-    /// # Arguments
-    ///
-    /// * `prism` - The prism to compose with
-    ///
-    /// # Returns
-    ///
-    /// An Optional that focuses on the prism's target within this lens's target
     ///
     /// # Example
     ///
