@@ -602,6 +602,19 @@ where
     }
 }
 
+impl<S: 'static, A: 'static> crate::typeclass::StateLike for State<S, A> {
+    type StateType = S;
+    type Value = A;
+
+    fn into_state(self) -> Self
+    where
+        S: Clone + 'static,
+        A: 'static,
+    {
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

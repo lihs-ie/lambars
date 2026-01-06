@@ -564,6 +564,19 @@ where
     }
 }
 
+impl<R: 'static, A: 'static> crate::typeclass::ReaderLike for Reader<R, A> {
+    type Environment = R;
+    type Value = A;
+
+    fn into_reader(self) -> Self
+    where
+        R: Clone + 'static,
+        A: 'static,
+    {
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

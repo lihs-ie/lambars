@@ -355,6 +355,15 @@ let all_positive: bool = vec![1, 2, 3].for_all(|x| *x > 0);
 | `fa.sequence` | `Traversable::sequence_option/result` | Sequence effects |
 | `fa.flatTraverse(f)` | Compose with flatten | Traverse then flatten |
 | `fa.traverseFilter(f)` | Manual implementation | Filter during traverse |
+| `fa.traverse[Reader[R, *]](f)` | `Traversable::traverse_reader` | Traverse with Reader effect |
+| `fa.traverse[State[S, *]](f)` | `Traversable::traverse_state` | Traverse with State effect |
+| `fa.traverse[IO](f)` | `Traversable::traverse_io` | Traverse with IO effect |
+| `fa.sequence[Reader[R, *]]` | `Traversable::sequence_reader` | Sequence Reader effects |
+| `fa.sequence[State[S, *]]` | `Traversable::sequence_state` | Sequence State effects |
+| `fa.sequence[IO]` | `Traversable::sequence_io` | Sequence IO effects |
+| `fa.traverse_[Reader[R, *]](f)` | `Traversable::traverse_reader_` | Traverse Reader, discard result |
+| `fa.traverse_[State[S, *]](f)` | `Traversable::traverse_state_` | Traverse State, discard result |
+| `fa.traverse_[IO](f)` | `Traversable::traverse_io_` | Traverse IO, discard result |
 
 #### Code Examples
 
@@ -406,6 +415,40 @@ let sequenced: Option<Vec<i32>> = list.sequence_option();
 let with_none: Vec<Option<i32>> = vec![Some(1), None, Some(3)];
 let sequenced_none: Option<Vec<i32>> = with_none.sequence_option();
 // sequenced_none = None
+
+// traverse_reader - traverse with Reader effect
+use lambars::effect::Reader;
+
+#[derive(Clone)]
+struct Config { multiplier: i32 }
+
+let numbers = vec![1, 2, 3];
+let reader = numbers.traverse_reader(|n| {
+    Reader::asks(move |config: &Config| n * config.multiplier)
+});
+let result = reader.run(Config { multiplier: 10 });
+// result = vec![10, 20, 30]
+
+// traverse_state - traverse with State effect (state is threaded left-to-right)
+use lambars::effect::State;
+
+let items = vec!["a", "b", "c"];
+let state = items.traverse_state(|item| {
+    State::new(move |index: usize| ((index, item), index + 1))
+});
+let (result, final_index) = state.run(0);
+// result = vec![(0, "a"), (1, "b"), (2, "c")]
+// final_index = 3
+
+// traverse_io - traverse with IO effect (IO actions executed sequentially)
+use lambars::effect::IO;
+
+let paths = vec!["a.txt", "b.txt"];
+let io = paths.traverse_io(|path| {
+    IO::new(move || format!("content of {}", path))
+});
+let contents = io.run_unsafe();
+// contents = vec!["content of a.txt", "content of b.txt"]
 ```
 
 ---

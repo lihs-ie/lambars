@@ -1,0 +1,1463 @@
+# Traversable 効果型拡張 実装計画
+#
+# 要件定義: docs/internal/requirements/20260104_1500_traversable_effect_extension.yaml
+# 技術要件:
+#   - Rust: 1.92.0
+#   - edition: 2024
+#   - testing: rstest, proptest
+#
+# 実装方針:
+#   1. TDD（テスト駆動開発）でテストを先に書く
+#   2. 既存の traverse_option/traverse_result パターンを踏襲
+#   3. ヘルパートレイトを先に定義し、その後メソッドを追加
+#   4. feature フラグ（effect）で効果型関連の traverse を制御
+#   5. 各効果型の map2 を活用して traverse を実装
+#
+# レビュー修正:
+#   - sequence_* はデフォルト実装なし（各型で個別実装必須）
+#   - ヘルパートレイトに into_* メソッドを追加
+#   - AsyncIO の Self::WithType<B>: Send 境界を追加
+#   - IO/AsyncIO の Vec 実装は FnMut で for ループ使用
+#   - Result の E: Clone 要求を全効果型で一貫して文書化
+
+version: "1.0.0"
+name: "Traversable Effect Extension Implementation Plan"
+requirement_file: "docs/internal/requirements/20260104_1500_traversable_effect_extension.yaml"
+
+# 実装順序の概要
+implementation_order:
+  - step: 1
+    name: "ヘルパートレイトの定義"
+    items:
+      - ReaderLike トレイト定義
+      - StateLike トレイト定義
+      - IOLike トレイト定義
+      - AsyncIOLike トレイト定義
+      - 各効果型への実装
+
+  - step: 2
+    name: "Traversable トレイトへの Reader メソッド追加"
+    items:
+      - traverse_reader メソッド定義
+      - sequence_reader デフォルト実装
+      - traverse_reader_ デフォルト実装
+      - for_each_reader デフォルト実装
+      - Option, Result, Vec, Box, Identity への実装
+
+  - step: 3
+    name: "Traversable トレイトへの State メソッド追加"
+    items:
+      - traverse_state メソッド定義
+      - sequence_state デフォルト実装
+      - traverse_state_ デフォルト実装
+      - for_each_state デフォルト実装
+      - Option, Result, Vec, Box, Identity への実装
+
+  - step: 4
+    name: "Traversable トレイトへの IO メソッド追加"
+    items:
+      - traverse_io メソッド定義
+      - sequence_io デフォルト実装
+      - traverse_io_ デフォルト実装
+      - for_each_io デフォルト実装
+      - Option, Result, Vec, Box, Identity への実装
+
+  - step: 5
+    name: "Traversable トレイトへの AsyncIO メソッド追加"
+    items:
+      - traverse_async_io メソッド定義
+      - sequence_async_io デフォルト実装
+      - traverse_async_io_ デフォルト実装
+      - for_each_async_io デフォルト実装
+      - Option, Result, Vec, Box, Identity への実装
+
+  - step: 6
+    name: "統合テストとドキュメント"
+    items:
+      - 統合テストファイル作成
+      - プロパティテスト作成
+      - ドキュメント更新
+
+# 実装計画詳細
+implementation_plan:
+  # ============================================================================
+  # 1. ヘルパートレイトの定義
+  # ============================================================================
+  - id: impl_helper_traits
+    requirement_id: helper_traits
+    name: "ヘルパートレイトの定義と実装"
+    priority: 1
+    description: |
+      sequence_* メソッドのために、各効果型が持つ値の型を抽出するためのヘルパートレイトを定義する。
+      これらのトレイトは Traversable トレイトと同じファイルに配置し、効果型の実装は
+      対応するモジュールに配置する。
+
+    files:
+      - path: src/typeclass/traversable.rs
+        description: |
+          ReaderLike, StateLike, IOLike, AsyncIOLike トレイトを定義。
+          ファイル冒頭の use 文も更新が必要。
+
+      - path: src/effect/reader.rs
+        description: |
+          Reader<R, A> に対する ReaderLike 実装を追加。
+
+      - path: src/effect/state.rs
+        description: |
+          State<S, A> に対する StateLike 実装を追加。
+
+      - path: src/effect/io.rs
+        description: |
+          IO<A> に対する IOLike 実装を追加。
+
+      - path: src/effect/async_io.rs
+        description: |
+          AsyncIO<A> に対する AsyncIOLike 実装を追加。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Traversable モジュールにヘルパートレイトを定義する。
+          feature フラグでゲートする。
+          sequence_* の実装のために into_* メソッドを追加する。
+        code_outline: |
+          // src/typeclass/traversable.rs に追加
+
+          /// Reader 型から環境型と値型を抽出するためのトレイト。
+          ///
+          /// sequence_reader メソッドで Self::Inner が Reader であることを
+          /// 表現するために使用される。
+          #[cfg(feature = "effect")]
+          pub trait ReaderLike {
+              /// 環境の型（Reader の R）
+              type Environment;
+              /// 値の型（Reader の A）
+              type Value;
+
+              /// 自身を Reader に変換する。
+              /// sequence_reader の実装で使用される。
+              fn into_reader(self) -> crate::effect::Reader<Self::Environment, Self::Value>
+              where
+                  Self::Environment: Clone + 'static,
+                  Self::Value: 'static;
+          }
+
+          /// State 型から状態型と値型を抽出するためのトレイト。
+          ///
+          /// sequence_state メソッドで Self::Inner が State であることを
+          /// 表現するために使用される。
+          #[cfg(feature = "effect")]
+          pub trait StateLike {
+              /// 状態の型（State の S）
+              type StateType;
+              /// 値の型（State の A）
+              type Value;
+
+              /// 自身を State に変換する。
+              /// sequence_state の実装で使用される。
+              fn into_state(self) -> crate::effect::State<Self::StateType, Self::Value>
+              where
+                  Self::StateType: Clone + 'static,
+                  Self::Value: 'static;
+          }
+
+          /// IO 型から値型を抽出するためのトレイト。
+          ///
+          /// sequence_io メソッドで Self::Inner が IO であることを
+          /// 表現するために使用される。
+          #[cfg(feature = "effect")]
+          pub trait IOLike {
+              /// 値の型（IO の A）
+              type Value;
+
+              /// 自身を IO に変換する。
+              /// sequence_io の実装で使用される。
+              fn into_io(self) -> crate::effect::IO<Self::Value>
+              where
+                  Self::Value: 'static;
+          }
+
+          /// AsyncIO 型から値型を抽出するためのトレイト。
+          ///
+          /// sequence_async_io メソッドで Self::Inner が AsyncIO であることを
+          /// 表現するために使用される。
+          #[cfg(all(feature = "effect", feature = "async"))]
+          pub trait AsyncIOLike {
+              /// 値の型（AsyncIO の A）
+              type Value;
+
+              /// 自身を AsyncIO に変換する。
+              /// sequence_async_io の実装で使用される。
+              fn into_async_io(self) -> crate::effect::AsyncIO<Self::Value>
+              where
+                  Self::Value: Send + 'static;
+          }
+
+      - step: 2
+        description: |
+          Reader に ReaderLike を実装する。into_reader は self を返す。
+        code_outline: |
+          // src/effect/reader.rs に追加
+
+          impl<R: 'static, A: 'static> crate::typeclass::ReaderLike for Reader<R, A> {
+              type Environment = R;
+              type Value = A;
+
+              fn into_reader(self) -> Reader<R, A>
+              where
+                  R: Clone + 'static,
+                  A: 'static,
+              {
+                  self
+              }
+          }
+
+      - step: 3
+        description: |
+          State に StateLike を実装する。into_state は self を返す。
+        code_outline: |
+          // src/effect/state.rs に追加
+
+          impl<S: 'static, A: 'static> crate::typeclass::StateLike for State<S, A> {
+              type StateType = S;
+              type Value = A;
+
+              fn into_state(self) -> State<S, A>
+              where
+                  S: Clone + 'static,
+                  A: 'static,
+              {
+                  self
+              }
+          }
+
+      - step: 4
+        description: |
+          IO に IOLike を実装する。into_io は self を返す。
+        code_outline: |
+          // src/effect/io.rs に追加
+
+          impl<A: 'static> crate::typeclass::IOLike for IO<A> {
+              type Value = A;
+
+              fn into_io(self) -> IO<A>
+              where
+                  A: 'static,
+              {
+                  self
+              }
+          }
+
+      - step: 5
+        description: |
+          AsyncIO に AsyncIOLike を実装する。into_async_io は self を返す。
+        code_outline: |
+          // src/effect/async_io.rs に追加
+
+          #[cfg(feature = "async")]
+          impl<A: 'static> crate::typeclass::AsyncIOLike for AsyncIO<A> {
+              type Value = A;
+
+              fn into_async_io(self) -> AsyncIO<A>
+              where
+                  A: Send + 'static,
+              {
+                  self
+              }
+          }
+
+    tests:
+      - name: test_reader_like_implementation
+        description: ReaderLike トレイトが Reader に正しく実装されていることを確認
+        test_type: unit
+        code_outline: |
+          #[cfg(test)]
+          #[cfg(feature = "effect")]
+          mod reader_like_tests {
+              use super::*;
+              use crate::effect::Reader;
+              use rstest::rstest;
+
+              #[rstest]
+              fn reader_like_extracts_types() {
+                  fn assert_reader_like<T: ReaderLike<Environment = i32, Value = String>>() {}
+                  assert_reader_like::<Reader<i32, String>>();
+              }
+          }
+
+      - name: test_state_like_implementation
+        description: StateLike トレイトが State に正しく実装されていることを確認
+        test_type: unit
+        code_outline: |
+          #[cfg(test)]
+          #[cfg(feature = "effect")]
+          mod state_like_tests {
+              use super::*;
+              use crate::effect::State;
+              use rstest::rstest;
+
+              #[rstest]
+              fn state_like_extracts_types() {
+                  fn assert_state_like<T: StateLike<StateType = i32, Value = String>>() {}
+                  assert_state_like::<State<i32, String>>();
+              }
+          }
+
+      - name: test_io_like_implementation
+        description: IOLike トレイトが IO に正しく実装されていることを確認
+        test_type: unit
+        code_outline: |
+          #[cfg(test)]
+          #[cfg(feature = "effect")]
+          mod io_like_tests {
+              use super::*;
+              use crate::effect::IO;
+              use rstest::rstest;
+
+              #[rstest]
+              fn io_like_extracts_types() {
+                  fn assert_io_like<T: IOLike<Value = i32>>() {}
+                  assert_io_like::<IO<i32>>();
+              }
+          }
+
+      - name: test_async_io_like_implementation
+        description: AsyncIOLike トレイトが AsyncIO に正しく実装されていることを確認
+        test_type: unit
+        code_outline: |
+          #[cfg(test)]
+          #[cfg(all(feature = "effect", feature = "async"))]
+          mod async_io_like_tests {
+              use super::*;
+              use crate::effect::AsyncIO;
+              use rstest::rstest;
+
+              #[rstest]
+              fn async_io_like_extracts_types() {
+                  fn assert_async_io_like<T: AsyncIOLike<Value = i32>>() {}
+                  assert_async_io_like::<AsyncIO<i32>>();
+              }
+          }
+
+    dependencies: []
+
+  # ============================================================================
+  # 2. traverse_reader の実装
+  # ============================================================================
+  - id: impl_traverse_reader
+    requirement_id: traverse_reader
+    name: "Reader に対する traverse メソッドの実装"
+    priority: 2
+    description: |
+      Traversable トレイトに traverse_reader および関連メソッドを追加し、
+      Option, Result, Vec, Box, Identity に対して実装する。
+
+    files:
+      - path: src/typeclass/traversable.rs
+        description: |
+          Traversable トレイトに traverse_reader, sequence_reader,
+          traverse_reader_, for_each_reader メソッドを追加。
+          各型への実装も追加。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Traversable トレイトに traverse_reader メソッドを追加。
+          Reader 型を使用するため、effect feature でゲートする。
+        code_outline: |
+          #[cfg(feature = "effect")]
+          use crate::effect::Reader;
+
+          // Traversable トレイト内に追加
+          #[cfg(feature = "effect")]
+          /// Reader を返す関数を各要素に適用し、結果を収集する Reader を返す。
+          ///
+          /// 環境は全ての要素変換で共有される。
+          ///
+          /// # Type Parameters
+          ///
+          /// * `R` - 環境の型
+          /// * `B` - 変換後の要素の型
+          /// * `F` - 変換関数の型
+          ///
+          /// # Examples
+          ///
+          /// ```rust
+          /// use lambars::typeclass::Traversable;
+          /// use lambars::effect::Reader;
+          ///
+          /// #[derive(Clone)]
+          /// struct Config { multiplier: i32 }
+          ///
+          /// let numbers = vec![1, 2, 3];
+          /// let reader = numbers.traverse_reader(|number| {
+          ///     Reader::asks(move |config: Config| number * config.multiplier)
+          /// });
+          ///
+          /// let config = Config { multiplier: 10 };
+          /// let result = reader.run(config);
+          /// assert_eq!(result, vec![10, 20, 30]);
+          /// ```
+          fn traverse_reader<R, B, F>(self, function: F) -> Reader<R, Self::WithType<B>>
+          where
+              R: Clone + 'static,
+              B: 'static,
+              F: FnMut(Self::Inner) -> Reader<R, B> + 'static;
+
+      - step: 2
+        description: |
+          sequence_reader, traverse_reader_, for_each_reader のデフォルト実装を追加。
+          sequence_reader は traverse_reader(ReaderLike::into_reader) で実装。
+        code_outline: |
+          // Traversable トレイト内に追加
+          #[cfg(feature = "effect")]
+          /// Reader の構造を内外反転する。
+          ///
+          /// `Self<Reader<R, A>>` を `Reader<R, Self<A>>` に変換する。
+          /// `traverse_reader(ReaderLike::into_reader)` と等価。
+          fn sequence_reader<R>(self) -> Reader<R, Self::WithType<<Self::Inner as ReaderLike>::Value>>
+          where
+              Self: Sized,
+              R: Clone + 'static,
+              Self::Inner: ReaderLike<Environment = R> + 'static,
+              <Self::Inner as ReaderLike>::Value: 'static,
+          {
+              self.traverse_reader(ReaderLike::into_reader)
+          }
+
+          #[cfg(feature = "effect")]
+          /// traverse_reader と同じだが、結果を破棄して () を返す。
+          fn traverse_reader_<R, F>(self, function: F) -> Reader<R, ()>
+          where
+              Self: Sized,
+              R: Clone + 'static,
+              F: FnMut(Self::Inner) -> Reader<R, ()> + 'static,
+          {
+              self.traverse_reader(function).fmap(|_| ())
+          }
+
+          #[cfg(feature = "effect")]
+          /// traverse_reader_ のエイリアス。
+          fn for_each_reader<R, F>(self, function: F) -> Reader<R, ()>
+          where
+              Self: Sized,
+              R: Clone + 'static,
+              F: FnMut(Self::Inner) -> Reader<R, ()> + 'static,
+          {
+              self.traverse_reader_(function)
+          }
+
+      - step: 3
+        description: |
+          Option<A> に traverse_reader を実装。
+        code_outline: |
+          #[cfg(feature = "effect")]
+          impl<A> Traversable for Option<A> {
+              fn traverse_reader<R, B, F>(self, mut function: F) -> Reader<R, Option<B>>
+              where
+                  R: Clone + 'static,
+                  B: 'static,
+                  F: FnMut(A) -> Reader<R, B> + 'static,
+              {
+                  match self {
+                      Some(value) => function(value).fmap(Some),
+                      None => Reader::pure(None),
+                  }
+              }
+          }
+
+      - step: 4
+        description: |
+          Result<T, E> に traverse_reader を実装。
+        code_outline: |
+          #[cfg(feature = "effect")]
+          impl<T, E: Clone + 'static> Traversable for Result<T, E> {
+              fn traverse_reader<R, B, F>(self, mut function: F) -> Reader<R, Result<B, E>>
+              where
+                  R: Clone + 'static,
+                  B: 'static,
+                  F: FnMut(T) -> Reader<R, B> + 'static,
+              {
+                  match self {
+                      Ok(value) => function(value).fmap(Ok),
+                      Err(error) => Reader::pure(Err(error)),
+                  }
+              }
+          }
+
+      - step: 5
+        description: |
+          Vec<T> に traverse_reader を実装。
+          map2 を使用して Reader を逐次合成する。
+          パフォーマンスのため capacity を事前確保。
+        code_outline: |
+          #[cfg(feature = "effect")]
+          impl<T> Traversable for Vec<T> {
+              fn traverse_reader<R, B, F>(self, mut function: F) -> Reader<R, Vec<B>>
+              where
+                  R: Clone + 'static,
+                  B: 'static,
+                  F: FnMut(T) -> Reader<R, B> + 'static,
+              {
+                  let capacity = self.len();
+                  if capacity == 0 {
+                      return Reader::pure(Vec::new());
+                  }
+
+                  let mut iterator = self.into_iter();
+                  let first = function(iterator.next().unwrap());
+                  let initial = first.fmap(|value| {
+                      let mut result = Vec::with_capacity(capacity);
+                      result.push(value);
+                      result
+                  });
+
+                  iterator.fold(initial, |accumulated, element| {
+                      let reader_element = function(element);
+                      accumulated.map2(reader_element, |mut vector, value| {
+                          vector.push(value);
+                          vector
+                      })
+                  })
+              }
+          }
+
+      - step: 6
+        description: |
+          Box<T> に traverse_reader を実装。
+        code_outline: |
+          #[cfg(feature = "effect")]
+          impl<T> Traversable for Box<T> {
+              fn traverse_reader<R, B, F>(self, mut function: F) -> Reader<R, Box<B>>
+              where
+                  R: Clone + 'static,
+                  B: 'static,
+                  F: FnMut(T) -> Reader<R, B> + 'static,
+              {
+                  function(*self).fmap(Box::new)
+              }
+          }
+
+      - step: 7
+        description: |
+          Identity<A> に traverse_reader を実装。
+        code_outline: |
+          #[cfg(feature = "effect")]
+          impl<A> Traversable for Identity<A> {
+              fn traverse_reader<R, B, F>(self, mut function: F) -> Reader<R, Identity<B>>
+              where
+                  R: Clone + 'static,
+                  B: 'static,
+                  F: FnMut(A) -> Reader<R, B> + 'static,
+              {
+                  function(self.0).fmap(Identity)
+              }
+          }
+
+    tests:
+      - name: test_option_traverse_reader
+        description: Option に対する traverse_reader の動作確認
+        test_type: unit
+        code_outline: |
+          #[cfg(test)]
+          #[cfg(feature = "effect")]
+          mod traverse_reader_option_tests {
+              use super::*;
+              use crate::effect::Reader;
+              use rstest::rstest;
+
+              #[derive(Clone)]
+              struct TestEnvironment {
+                  multiplier: i32,
+              }
+
+              #[rstest]
+              fn option_traverse_reader_some() {
+                  let value = Some(5);
+                  let reader = value.traverse_reader(|number| {
+                      Reader::asks(move |environment: TestEnvironment| {
+                          number * environment.multiplier
+                      })
+                  });
+
+                  let environment = TestEnvironment { multiplier: 10 };
+                  let result = reader.run(environment);
+                  assert_eq!(result, Some(50));
+              }
+
+              #[rstest]
+              fn option_traverse_reader_none() {
+                  let value: Option<i32> = None;
+                  let reader = value.traverse_reader(|number| {
+                      Reader::asks(move |environment: TestEnvironment| {
+                          number * environment.multiplier
+                      })
+                  });
+
+                  let environment = TestEnvironment { multiplier: 10 };
+                  let result = reader.run(environment);
+                  assert_eq!(result, None);
+              }
+          }
+
+      - name: test_vec_traverse_reader
+        description: Vec に対する traverse_reader の動作確認
+        test_type: unit
+        code_outline: |
+          #[cfg(test)]
+          #[cfg(feature = "effect")]
+          mod traverse_reader_vec_tests {
+              use super::*;
+              use crate::effect::Reader;
+              use rstest::rstest;
+
+              #[derive(Clone)]
+              struct TestEnvironment {
+                  multiplier: i32,
+              }
+
+              #[rstest]
+              fn vec_traverse_reader_all_elements() {
+                  let values = vec![1, 2, 3];
+                  let reader = values.traverse_reader(|number| {
+                      Reader::asks(move |environment: TestEnvironment| {
+                          number * environment.multiplier
+                      })
+                  });
+
+                  let environment = TestEnvironment { multiplier: 10 };
+                  let result = reader.run(environment);
+                  assert_eq!(result, vec![10, 20, 30]);
+              }
+
+              #[rstest]
+              fn vec_traverse_reader_empty() {
+                  let values: Vec<i32> = vec![];
+                  let reader = values.traverse_reader(|number| {
+                      Reader::asks(move |environment: TestEnvironment| {
+                          number * environment.multiplier
+                      })
+                  });
+
+                  let environment = TestEnvironment { multiplier: 10 };
+                  let result = reader.run(environment);
+                  assert_eq!(result, Vec::<i32>::new());
+              }
+
+              #[rstest]
+              fn vec_traverse_reader_single() {
+                  let values = vec![42];
+                  let reader = values.traverse_reader(|number| {
+                      Reader::asks(move |environment: TestEnvironment| {
+                          number * environment.multiplier
+                      })
+                  });
+
+                  let environment = TestEnvironment { multiplier: 2 };
+                  let result = reader.run(environment);
+                  assert_eq!(result, vec![84]);
+              }
+          }
+
+      - name: prop_traverse_reader_identity
+        description: traverse_reader の Identity 法則をプロパティテストで検証
+        test_type: property
+        code_outline: |
+          #[cfg(test)]
+          #[cfg(feature = "effect")]
+          mod traverse_reader_property_tests {
+              use super::*;
+              use crate::effect::Reader;
+              use proptest::prelude::*;
+
+              proptest! {
+                  #[test]
+                  fn prop_vec_traverse_reader_identity(
+                      values in prop::collection::vec(any::<i32>(), 0..20)
+                  ) {
+                      // traverse_reader(Reader::pure) は構造を維持して Reader でラップ
+                      let reader = values.clone().traverse_reader(|x: i32| Reader::<(), i32>::pure(x));
+                      let result = reader.run(());
+                      prop_assert_eq!(result, values);
+                  }
+              }
+          }
+
+    dependencies:
+      - impl_helper_traits
+
+  # ============================================================================
+  # 3. traverse_state の実装
+  # ============================================================================
+  - id: impl_traverse_state
+    requirement_id: traverse_state
+    name: "State に対する traverse メソッドの実装"
+    priority: 3
+    description: |
+      Traversable トレイトに traverse_state および関連メソッドを追加し、
+      Option, Result, Vec, Box, Identity に対して実装する。
+      State は左から右へ状態をスレッディングする。
+
+    files:
+      - path: src/typeclass/traversable.rs
+        description: |
+          Traversable トレイトに traverse_state, sequence_state,
+          traverse_state_, for_each_state メソッドを追加。
+          各型への実装も追加。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Traversable トレイトに traverse_state メソッドを追加。
+        code_outline: |
+          #[cfg(feature = "effect")]
+          use crate::effect::State;
+
+          // Traversable トレイト内に追加
+          #[cfg(feature = "effect")]
+          /// State を返す関数を各要素に適用し、結果を収集する State を返す。
+          ///
+          /// 状態は左から右へ各要素の処理を通じてスレッディングされる。
+          ///
+          /// # Type Parameters
+          ///
+          /// * `S` - 状態の型
+          /// * `B` - 変換後の要素の型
+          /// * `F` - 変換関数の型
+          ///
+          /// # Examples
+          ///
+          /// ```rust
+          /// use lambars::typeclass::Traversable;
+          /// use lambars::effect::State;
+          ///
+          /// let items = vec!["a", "b", "c"];
+          /// let state = items.traverse_state(|item| {
+          ///     State::new(|index: usize| ((index, item), index + 1))
+          /// });
+          ///
+          /// let (result, final_index) = state.run(0);
+          /// assert_eq!(result, vec![(0, "a"), (1, "b"), (2, "c")]);
+          /// assert_eq!(final_index, 3);
+          /// ```
+          fn traverse_state<S, B, F>(self, function: F) -> State<S, Self::WithType<B>>
+          where
+              S: Clone + 'static,
+              B: 'static,
+              F: FnMut(Self::Inner) -> State<S, B> + 'static;
+
+      - step: 2
+        description: |
+          sequence_state, traverse_state_, for_each_state のデフォルト実装を追加。
+          sequence_state は traverse_state(StateLike::into_state) で実装。
+        code_outline: |
+          #[cfg(feature = "effect")]
+          fn sequence_state<S>(self) -> State<S, Self::WithType<<Self::Inner as StateLike>::Value>>
+          where
+              Self: Sized,
+              S: Clone + 'static,
+              Self::Inner: StateLike<StateType = S> + 'static,
+              <Self::Inner as StateLike>::Value: 'static,
+          {
+              self.traverse_state(StateLike::into_state)
+          }
+
+          #[cfg(feature = "effect")]
+          fn traverse_state_<S, F>(self, function: F) -> State<S, ()>
+          where
+              Self: Sized,
+              S: Clone + 'static,
+              F: FnMut(Self::Inner) -> State<S, ()> + 'static,
+          {
+              self.traverse_state(function).fmap(|_| ())
+          }
+
+          #[cfg(feature = "effect")]
+          fn for_each_state<S, F>(self, function: F) -> State<S, ()>
+          where
+              Self: Sized,
+              S: Clone + 'static,
+              F: FnMut(Self::Inner) -> State<S, ()> + 'static,
+          {
+              self.traverse_state_(function)
+          }
+
+      - step: 3
+        description: |
+          Option<A> に traverse_state を実装。
+        code_outline: |
+          #[cfg(feature = "effect")]
+          fn traverse_state<S, B, F>(self, mut function: F) -> State<S, Option<B>>
+          where
+              S: Clone + 'static,
+              B: 'static,
+              F: FnMut(A) -> State<S, B> + 'static,
+          {
+              match self {
+                  Some(value) => function(value).fmap(Some),
+                  None => State::pure(None),
+              }
+          }
+
+      - step: 4
+        description: |
+          Result<T, E> に traverse_state を実装。
+        code_outline: |
+          #[cfg(feature = "effect")]
+          fn traverse_state<S, B, F>(self, mut function: F) -> State<S, Result<B, E>>
+          where
+              S: Clone + 'static,
+              B: 'static,
+              F: FnMut(T) -> State<S, B> + 'static,
+          {
+              match self {
+                  Ok(value) => function(value).fmap(Ok),
+                  Err(error) => State::pure(Err(error)),
+              }
+          }
+
+      - step: 5
+        description: |
+          Vec<T> に traverse_state を実装。
+          map2 を使用して State を逐次合成し、状態をスレッディング。
+        code_outline: |
+          #[cfg(feature = "effect")]
+          fn traverse_state<S, B, F>(self, mut function: F) -> State<S, Vec<B>>
+          where
+              S: Clone + 'static,
+              B: 'static,
+              F: FnMut(T) -> State<S, B> + 'static,
+          {
+              let capacity = self.len();
+              if capacity == 0 {
+                  return State::pure(Vec::new());
+              }
+
+              let mut iterator = self.into_iter();
+              let first = function(iterator.next().unwrap());
+              let initial = first.fmap(|value| {
+                  let mut result = Vec::with_capacity(capacity);
+                  result.push(value);
+                  result
+              });
+
+              iterator.fold(initial, |accumulated, element| {
+                  let state_element = function(element);
+                  accumulated.map2(state_element, |mut vector, value| {
+                      vector.push(value);
+                      vector
+                  })
+              })
+          }
+
+      - step: 6
+        description: |
+          Box<T> と Identity<A> に traverse_state を実装。
+        code_outline: |
+          #[cfg(feature = "effect")]
+          fn traverse_state<S, B, F>(self, mut function: F) -> State<S, Box<B>>
+          where
+              S: Clone + 'static,
+              B: 'static,
+              F: FnMut(T) -> State<S, B> + 'static,
+          {
+              function(*self).fmap(Box::new)
+          }
+
+          // Identity の場合
+          #[cfg(feature = "effect")]
+          fn traverse_state<S, B, F>(self, mut function: F) -> State<S, Identity<B>>
+          where
+              S: Clone + 'static,
+              B: 'static,
+              F: FnMut(A) -> State<S, B> + 'static,
+          {
+              function(self.0).fmap(Identity)
+          }
+
+    tests:
+      - name: test_vec_traverse_state_threading
+        description: Vec の traverse_state で状態が正しくスレッディングされることを確認
+        test_type: unit
+        code_outline: |
+          #[cfg(test)]
+          #[cfg(feature = "effect")]
+          mod traverse_state_tests {
+              use super::*;
+              use crate::effect::State;
+              use rstest::rstest;
+
+              #[rstest]
+              fn vec_traverse_state_threads_state() {
+                  let values = vec![1, 2, 3];
+                  let state = values.traverse_state(|value| {
+                      State::new(move |current_state: i32| {
+                          (value + current_state, current_state + 1)
+                      })
+                  });
+
+                  let (result, final_state) = state.run(0);
+                  // [1+0, 2+1, 3+2] = [1, 3, 5]
+                  assert_eq!(result, vec![1, 3, 5]);
+                  assert_eq!(final_state, 3);
+              }
+
+              #[rstest]
+              fn vec_traverse_state_indexing() {
+                  let items = vec!["a", "b", "c"];
+                  let state = items.traverse_state(|item| {
+                      State::new(move |index: usize| ((index, item), index + 1))
+                  });
+
+                  let (result, final_index) = state.run(0);
+                  assert_eq!(result, vec![(0, "a"), (1, "b"), (2, "c")]);
+                  assert_eq!(final_index, 3);
+              }
+          }
+
+      - name: prop_traverse_state_identity
+        description: traverse_state の Identity 法則をプロパティテストで検証
+        test_type: property
+        code_outline: |
+          proptest! {
+              #[test]
+              fn prop_vec_traverse_state_identity(
+                  values in prop::collection::vec(any::<i32>(), 0..20),
+                  initial_state in any::<i32>()
+              ) {
+                  let (result, final_state) = values.clone()
+                      .traverse_state(|x: i32| State::<i32, i32>::pure(x))
+                      .run(initial_state);
+                  prop_assert_eq!(result, values);
+                  prop_assert_eq!(final_state, initial_state);
+              }
+          }
+
+    dependencies:
+      - impl_helper_traits
+
+  # ============================================================================
+  # 4. traverse_io の実装
+  # ============================================================================
+  - id: impl_traverse_io
+    requirement_id: traverse_io
+    name: "IO に対する traverse メソッドの実装"
+    priority: 4
+    description: |
+      Traversable トレイトに traverse_io および関連メソッドを追加し、
+      Option, Result, Vec, Box, Identity に対して実装する。
+      IO アクションは左から右へ順次実行される。
+
+    files:
+      - path: src/typeclass/traversable.rs
+        description: |
+          Traversable トレイトに traverse_io, sequence_io,
+          traverse_io_, for_each_io メソッドを追加。
+          各型への実装も追加。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Traversable トレイトに traverse_io メソッドを追加。
+        code_outline: |
+          #[cfg(feature = "effect")]
+          use crate::effect::IO;
+
+          #[cfg(feature = "effect")]
+          /// IO を返す関数を各要素に適用し、結果を収集する IO を返す。
+          ///
+          /// IO アクションは左から右へ順次実行される。
+          ///
+          /// # Type Parameters
+          ///
+          /// * `B` - 変換後の要素の型
+          /// * `F` - 変換関数の型
+          ///
+          /// # Examples
+          ///
+          /// ```rust
+          /// use lambars::typeclass::Traversable;
+          /// use lambars::effect::IO;
+          ///
+          /// let paths = vec!["a.txt", "b.txt"];
+          /// let io = paths.traverse_io(|path| {
+          ///     let path = path.to_string();
+          ///     IO::new(move || format!("content of {}", path))
+          /// });
+          ///
+          /// let contents = io.run_unsafe();
+          /// assert_eq!(contents, vec!["content of a.txt", "content of b.txt"]);
+          /// ```
+          fn traverse_io<B, F>(self, function: F) -> IO<Self::WithType<B>>
+          where
+              B: 'static,
+              F: FnMut(Self::Inner) -> IO<B> + 'static;
+
+      - step: 2
+        description: |
+          sequence_io, traverse_io_, for_each_io のデフォルト実装を追加。
+          sequence_io は traverse_io(IOLike::into_io) で実装。
+        code_outline: |
+          #[cfg(feature = "effect")]
+          fn sequence_io(self) -> IO<Self::WithType<<Self::Inner as IOLike>::Value>>
+          where
+              Self: Sized,
+              Self::Inner: IOLike + 'static,
+              <Self::Inner as IOLike>::Value: 'static,
+          {
+              self.traverse_io(IOLike::into_io)
+          }
+
+          #[cfg(feature = "effect")]
+          fn traverse_io_<F>(self, function: F) -> IO<()>
+          where
+              Self: Sized,
+              F: FnMut(Self::Inner) -> IO<()> + 'static,
+          {
+              self.traverse_io(function).fmap(|_| ())
+          }
+
+          #[cfg(feature = "effect")]
+          fn for_each_io<F>(self, function: F) -> IO<()>
+          where
+              Self: Sized,
+              F: FnMut(Self::Inner) -> IO<()> + 'static,
+          {
+              self.traverse_io_(function)
+          }
+
+      - step: 3
+        description: |
+          Option<A>, Result<T, E>, Vec<T>, Box<T>, Identity<A> に traverse_io を実装。
+          IO は FnOnce なので map2 を使用。
+        code_outline: |
+          // Option
+          #[cfg(feature = "effect")]
+          fn traverse_io<B, F>(self, mut function: F) -> IO<Option<B>>
+          where
+              B: 'static,
+              F: FnMut(A) -> IO<B> + 'static,
+          {
+              match self {
+                  Some(value) => function(value).fmap(Some),
+                  None => IO::pure(None),
+              }
+          }
+
+          // Vec - IO は FnOnce なので flat_map で逐次実行
+          #[cfg(feature = "effect")]
+          fn traverse_io<B, F>(self, mut function: F) -> IO<Vec<B>>
+          where
+              B: 'static,
+              F: FnMut(T) -> IO<B> + 'static,
+          {
+              let capacity = self.len();
+              if capacity == 0 {
+                  return IO::pure(Vec::new());
+              }
+
+              IO::new(move || {
+                  let mut result = Vec::with_capacity(capacity);
+                  for element in self {
+                      let io = function(element);
+                      result.push(io.run_unsafe());
+                  }
+                  result
+              })
+          }
+
+    tests:
+      - name: test_vec_traverse_io_sequential
+        description: Vec の traverse_io で IO が順次実行されることを確認
+        test_type: unit
+        code_outline: |
+          #[cfg(test)]
+          #[cfg(feature = "effect")]
+          mod traverse_io_tests {
+              use super::*;
+              use crate::effect::IO;
+              use rstest::rstest;
+              use std::sync::atomic::{AtomicUsize, Ordering};
+              use std::sync::Arc;
+
+              #[rstest]
+              fn vec_traverse_io_sequential_execution() {
+                  let counter = Arc::new(AtomicUsize::new(0));
+                  let values = vec![1, 2, 3];
+
+                  let counter_clone = counter.clone();
+                  let io = values.traverse_io(move |value| {
+                      let counter_inner = counter_clone.clone();
+                      IO::new(move || {
+                          let previous = counter_inner.fetch_add(1, Ordering::SeqCst);
+                          (previous, value)
+                      })
+                  });
+
+                  let result = io.run_unsafe();
+                  assert_eq!(result, vec![(0, 1), (1, 2), (2, 3)]);
+              }
+          }
+
+      - name: prop_traverse_io_identity
+        description: traverse_io の Identity 法則をプロパティテストで検証
+        test_type: property
+        code_outline: |
+          proptest! {
+              #[test]
+              fn prop_vec_traverse_io_identity(
+                  values in prop::collection::vec(any::<i32>(), 0..20)
+              ) {
+                  let result = values.clone().traverse_io(IO::pure).run_unsafe();
+                  prop_assert_eq!(result, values);
+              }
+          }
+
+    dependencies:
+      - impl_helper_traits
+
+  # ============================================================================
+  # 5. traverse_async_io の実装
+  # ============================================================================
+  - id: impl_traverse_async_io
+    requirement_id: traverse_async_io
+    name: "AsyncIO に対する traverse メソッドの実装"
+    priority: 5
+    description: |
+      Traversable トレイトに traverse_async_io および関連メソッドを追加し、
+      Option, Result, Vec, Box, Identity に対して実装する。
+      AsyncIO アクションは左から右へ順次実行される。
+
+    files:
+      - path: src/typeclass/traversable.rs
+        description: |
+          Traversable トレイトに traverse_async_io, sequence_async_io,
+          traverse_async_io_, for_each_async_io メソッドを追加。
+          各型への実装も追加。
+          async feature でゲート。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Traversable トレイトに traverse_async_io メソッドを追加。
+        code_outline: |
+          #[cfg(all(feature = "effect", feature = "async"))]
+          use crate::effect::AsyncIO;
+
+          #[cfg(all(feature = "effect", feature = "async"))]
+          /// AsyncIO を返す関数を各要素に適用し、結果を収集する AsyncIO を返す。
+          ///
+          /// AsyncIO アクションは順次実行される。
+          ///
+          /// # Type Parameters
+          ///
+          /// * `B` - 変換後の要素の型
+          /// * `F` - 変換関数の型
+          fn traverse_async_io<B, F>(self, function: F) -> AsyncIO<Self::WithType<B>>
+          where
+              B: Send + 'static,
+              Self::WithType<B>: Send,
+              F: FnMut(Self::Inner) -> AsyncIO<B> + Send + 'static;
+
+      - step: 2
+        description: |
+          sequence_async_io, traverse_async_io_, for_each_async_io のデフォルト実装を追加。
+          sequence_async_io は traverse_async_io(AsyncIOLike::into_async_io) で実装。
+        code_outline: |
+          #[cfg(all(feature = "effect", feature = "async"))]
+          fn sequence_async_io(self) -> AsyncIO<Self::WithType<<Self::Inner as AsyncIOLike>::Value>>
+          where
+              Self: Sized,
+              Self::Inner: AsyncIOLike + 'static,
+              <Self::Inner as AsyncIOLike>::Value: Send + 'static,
+              Self::WithType<<Self::Inner as AsyncIOLike>::Value>: Send,
+          {
+              self.traverse_async_io(AsyncIOLike::into_async_io)
+          }
+
+          #[cfg(all(feature = "effect", feature = "async"))]
+          fn traverse_async_io_<F>(self, function: F) -> AsyncIO<()>
+          where
+              Self: Sized,
+              F: FnMut(Self::Inner) -> AsyncIO<()> + Send + 'static,
+          {
+              self.traverse_async_io(function).fmap(|_| ())
+          }
+
+          #[cfg(all(feature = "effect", feature = "async"))]
+          fn for_each_async_io<F>(self, function: F) -> AsyncIO<()>
+          where
+              Self: Sized,
+              F: FnMut(Self::Inner) -> AsyncIO<()> + Send + 'static,
+          {
+              self.traverse_async_io_(function)
+          }
+
+      - step: 3
+        description: |
+          各型に traverse_async_io を実装。
+          Vec の場合は flat_map で順次実行。
+        code_outline: |
+          // Vec の実装
+          #[cfg(all(feature = "effect", feature = "async"))]
+          fn traverse_async_io<B, F>(self, mut function: F) -> AsyncIO<Vec<B>>
+          where
+              B: Send + 'static,
+              F: FnMut(T) -> AsyncIO<B> + Send + 'static,
+          {
+              let capacity = self.len();
+              if capacity == 0 {
+                  return AsyncIO::pure(Vec::new());
+              }
+
+              AsyncIO::new(move || async move {
+                  let mut result = Vec::with_capacity(capacity);
+                  for element in self {
+                      let async_io = function(element);
+                      result.push(async_io.run_async().await);
+                  }
+                  result
+              })
+          }
+
+    tests:
+      - name: test_vec_traverse_async_io_sequential
+        description: Vec の traverse_async_io で AsyncIO が順次実行されることを確認
+        test_type: unit
+        code_outline: |
+          #[cfg(test)]
+          #[cfg(all(feature = "effect", feature = "async"))]
+          mod traverse_async_io_tests {
+              use super::*;
+              use crate::effect::AsyncIO;
+              use rstest::rstest;
+              use std::sync::atomic::{AtomicUsize, Ordering};
+              use std::sync::Arc;
+
+              #[tokio::test]
+              async fn vec_traverse_async_io_sequential_execution() {
+                  let counter = Arc::new(AtomicUsize::new(0));
+                  let values = vec![1, 2, 3];
+
+                  let counter_clone = counter.clone();
+                  let async_io = values.traverse_async_io(move |value| {
+                      let counter_inner = counter_clone.clone();
+                      AsyncIO::new(move || async move {
+                          let previous = counter_inner.fetch_add(1, Ordering::SeqCst);
+                          (previous, value)
+                      })
+                  });
+
+                  let result = async_io.run_async().await;
+                  assert_eq!(result, vec![(0, 1), (1, 2), (2, 3)]);
+              }
+          }
+
+      - name: prop_traverse_async_io_identity
+        description: traverse_async_io の Identity 法則をプロパティテストで検証
+        test_type: property
+        code_outline: |
+          #[tokio::test]
+          async fn prop_vec_traverse_async_io_identity() {
+              use proptest::prelude::*;
+              use proptest::test_runner::TestRunner;
+
+              let mut runner = TestRunner::default();
+              runner.run(
+                  &prop::collection::vec(any::<i32>(), 0..20),
+                  |values| {
+                      let result = tokio::runtime::Runtime::new()
+                          .unwrap()
+                          .block_on(
+                              values.clone().traverse_async_io(AsyncIO::pure).run_async()
+                          );
+                      prop_assert_eq!(result, values);
+                      Ok(())
+                  }
+              ).unwrap();
+          }
+
+    dependencies:
+      - impl_helper_traits
+
+  # ============================================================================
+  # 6. 統合テストとドキュメント
+  # ============================================================================
+  - id: impl_integration_tests
+    requirement_id: null
+    name: "統合テストとドキュメント更新"
+    priority: 6
+    description: |
+      全ての実装が完了した後、統合テストを作成し、ドキュメントを更新する。
+
+    files:
+      - path: tests/traversable_effect_tests.rs
+        description: |
+          効果型に対する traverse の統合テストファイル。
+          複数の効果型を組み合わせたテストケースを含む。
+
+      - path: docs/external/comparison/Haskell/README.md
+        description: |
+          Haskell との対応表を更新。traverse と効果型の対応を追加。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          統合テストファイルを作成。
+        code_outline: |
+          //! Integration tests for Traversable effect extensions
+          //!
+          //! Tests traverse_reader, traverse_state, traverse_io, traverse_async_io
+          //! across different types and scenarios.
+
+          #[cfg(feature = "effect")]
+          mod effect_traverse_tests {
+              use lambars::effect::{Reader, State, IO};
+              use lambars::typeclass::{Identity, Traversable};
+
+              // Reader + State の組み合わせテスト
+              #[test]
+              fn combined_reader_state_workflow() {
+                  // 設定を読みながら状態を更新するワークフロー
+              }
+
+              // IO の副作用追跡テスト
+              #[test]
+              fn io_side_effects_order() {
+                  // 副作用が正しい順序で実行されることを確認
+              }
+          }
+
+          #[cfg(all(feature = "effect", feature = "async"))]
+          mod async_effect_traverse_tests {
+              use lambars::effect::AsyncIO;
+              use lambars::typeclass::Traversable;
+
+              #[tokio::test]
+              async fn async_io_sequential_workflow() {
+                  // 非同期処理が順次実行されることを確認
+              }
+          }
+
+      - step: 2
+        description: |
+          Haskell 比較ドキュメントを更新。
+
+    tests:
+      - name: integration_combined_workflows
+        description: 複数の効果型を組み合わせたワークフローテスト
+        test_type: integration
+        code_outline: |
+          // tests/traversable_effect_tests.rs
+
+    dependencies:
+      - impl_traverse_reader
+      - impl_traverse_state
+      - impl_traverse_io
+      - impl_traverse_async_io
+
+# テスト戦略
+test_strategy:
+  unit_tests:
+    location: src/typeclass/traversable.rs
+    description: |
+      各メソッドのユニットテストは traversable.rs の tests モジュール内に配置。
+      feature フラグごとにモジュールを分割し、条件コンパイルで制御。
+
+      テストカバレッジ:
+      - 各型（Option, Result, Vec, Box, Identity）に対するテスト
+      - 正常系（Some, Ok, 非空 Vec など）
+      - 異常系（None, Err）
+      - 境界値（空 Vec, 単一要素）
+      - 状態のスレッディング（State の場合）
+      - 順次実行の確認（IO/AsyncIO の場合）
+
+  integration_tests:
+    location: tests/traversable_effect_tests.rs
+    description: |
+      効果型の traverse を組み合わせた統合テスト。
+      実際のユースケースに近いシナリオをテスト。
+
+      - 設定を読みながらデータを変換するワークフロー
+      - 状態を更新しながらバリデーションを行うワークフロー
+      - 複数のファイルを読み込んで処理するワークフロー
+
+  property_tests:
+    location: src/typeclass/traversable.rs (property_tests モジュール内)
+    description: |
+      Traversable 法則のプロパティテスト。
+
+      検証する法則:
+      - Identity: traverse_X(pure) == pure と等価
+      - Naturality: transform(traverse(f)) == traverse(transform . f)
+      - 状態スレッディング（State 専用）
+      - 順次実行の順序保証（IO/AsyncIO 専用）
+
+# 完了条件
+acceptance_criteria:
+  - ReaderLike, StateLike, IOLike, AsyncIOLike ヘルパートレイトが定義されていること
+  - 各効果型に対応するヘルパートレイトが実装されていること
+  - traverse_reader, sequence_reader, traverse_reader_, for_each_reader が実装されていること
+  - traverse_state, sequence_state, traverse_state_, for_each_state が実装されていること
+  - traverse_io, sequence_io, traverse_io_, for_each_io が実装されていること
+  - traverse_async_io, sequence_async_io, traverse_async_io_, for_each_async_io が実装されていること
+  - Option, Result, Vec, Box, Identity に対して全メソッドが実装されていること
+  - 各メソッドに rustdoc コメントがあること
+  - 各メソッドに Examples セクションがあること
+  - cargo check が通過すること
+  - cargo clippy が通過すること
+  - cargo test が通過すること（--no-default-features および --all-features）
+  - カバレッジ 100% であること
+  - State の状態スレッディングが左から右へ正しく行われること
+  - IO/AsyncIO の順次実行が正しく行われること
+  - feature フラグ（effect, async）で適切にゲートされていること
+
+# 型制約の詳細
+type_constraints:
+  result:
+    error_type: "E: Clone + 'static"
+    notes: |
+      Result の Err ケースで Reader::pure(Err(error)) 等を返す際に
+      error を Clone する必要がある。
+      既存の traverse_option/traverse_result 実装に準拠。
+
+  reader:
+    environment: "R: Clone + 'static"
+    value: "B: 'static"
+    function: "F: FnMut(Self::Inner) -> Reader<R, B> + 'static"
+    notes: |
+      Reader の map2 は R: Clone を要求する。
+      'static 境界は Rc<dyn Fn> を使用しているため必須。
+
+  state:
+    state_type: "S: Clone + 'static"
+    value: "B: 'static"
+    function: "F: FnMut(Self::Inner) -> State<S, B> + 'static"
+    notes: |
+      State の map2 は状態をスレッディングするため順序が重要。
+      'static 境界は Rc<dyn Fn> を使用しているため必須。
+
+  io:
+    value: "B: 'static"
+    function: "F: FnMut(Self::Inner) -> IO<B> + 'static"
+    notes: |
+      IO は Box<dyn FnOnce> を使用しているため、
+      Vec の traverse では IO::new 内で for ループを使用して順次実行。
+      参照透過性は IO の run_unsafe 呼び出しまで保持される。
+
+  async_io:
+    value: "B: Send + 'static"
+    result_type: "Self::WithType<B>: Send"
+    function: "F: FnMut(Self::Inner) -> AsyncIO<B> + Send + 'static"
+    notes: |
+      AsyncIO は Send 境界が必要。
+      async/await で実行されるため、型も Send を要求。
+      参照透過性は AsyncIO の run_async 呼び出しまで保持される。
+
+# パフォーマンス考慮事項
+performance_considerations:
+  - Vec の traverse では事前に capacity を確保して再割り当てを防ぐ
+  - 空の Vec に対しては early return で無駄な処理を避ける
+  - Reader/State では Rc のクローンは低コストだが、環境/状態の Clone は高コストになりうる
+  - IO/AsyncIO では FnOnce を使用するため、クロージャのキャプチャに注意
+  - sequence_* は traverse_*(|x| x) のエイリアスとして実装可能だが、より効率的な実装も検討

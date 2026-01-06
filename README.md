@@ -193,6 +193,43 @@ let result = vec_with_none.sequence_option();
 assert_eq!(result, None);
 ```
 
+##### Traversing with Effect Types
+
+Traversable also supports effect types like Reader, State, IO, and AsyncIO:
+
+```rust
+use lambars::typeclass::Traversable;
+use lambars::effect::{Reader, State, IO};
+
+// traverse_reader: Apply a function returning Reader to each element
+#[derive(Clone)]
+struct Config { multiplier: i32 }
+
+let numbers = vec![1, 2, 3];
+let reader = numbers.traverse_reader(|n| {
+    Reader::asks(move |config: &Config| n * config.multiplier)
+});
+let result = reader.run(Config { multiplier: 10 });
+assert_eq!(result, vec![10, 20, 30]);
+
+// traverse_state: Thread state through each element
+let items = vec!["a", "b", "c"];
+let state = items.traverse_state(|item| {
+    State::new(move |index: usize| ((index, item), index + 1))
+});
+let (result, final_index) = state.run(0);
+assert_eq!(result, vec![(0, "a"), (1, "b"), (2, "c")]);
+assert_eq!(final_index, 3);
+
+// traverse_io: Execute IO actions sequentially
+let paths = vec!["a.txt", "b.txt"];
+let io = paths.traverse_io(|path| {
+    IO::new(move || format!("content of {}", path))
+});
+let contents = io.run_unsafe();
+assert_eq!(contents, vec!["content of a.txt", "content of b.txt"]);
+```
+
 ### Function Composition (`compose`)
 
 Utilities for composing functions in a functional programming style.

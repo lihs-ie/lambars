@@ -1,0 +1,706 @@
+# Traversable 効果型拡張 要件定義
+#
+# 概要:
+#   現在の Traversable は traverse_option と traverse_result のみサポート。
+#   Reader, State, IO, AsyncIO など他の Applicative/Monad 型に対応するメソッドを追加。
+#
+# 設計方針:
+#   1. 既存の traverse_option/traverse_result パターンを踏襲
+#   2. 各効果型の特性（環境型、状態型、副作用）を適切に反映
+#   3. sequence_*, traverse_*_, for_each_* バリアントを一貫して提供
+#   4. Rust の HKT 不在を前提とした具体型ベースのアプローチ
+#
+# 参照:
+#   - Haskell Data.Traversable
+#   - Scala cats.Traverse
+#   - 既存の traverse_option, traverse_result 実装
+#   - Issue #10: https://github.com/lihs-ie/lambars/issues/10
+
+version: "1.0.0"
+name: "traversable_effect_extension"
+description: |
+  Traversable トレイトに Reader, State, IO, AsyncIO 向けの traverse メソッドを追加する。
+  Rust は Higher-Kinded Types (HKT) をサポートしていないため、Haskell の
+  `traverse :: Applicative f => (a -> f b) -> t a -> f (t b)` のような汎用的な
+  定義は不可能である。代わりに、具体的な効果型ごとに専用メソッドを提供する。
+
+  この設計は既存の traverse_option, traverse_result パターンと一貫性を保ち、
+  ユーザーが直感的に使用できるAPIを提供する。
+
+# 背景・動機
+background:
+  problem: |
+    現在の Traversable は Option と Result に対する traverse/sequence のみを提供。
+    実際のアプリケーションでは、以下のような操作が必要になることが多い:
+
+    1. Reader: 各要素を環境依存の計算で変換し、結果を収集
+       例: 設定に基づいて各ユーザーIDを検証
+
+    2. State: 各要素を状態付き計算で変換し、最終状態と結果を取得
+       例: 各要素にインデックスを付与（状態 = カウンタ）
+
+    3. IO: 各要素に副作用のある操作を適用し、結果を収集
+       例: 各URLからデータを取得
+
+    4. AsyncIO: 各要素に非同期操作を適用し、結果を収集
+       例: 各APIエンドポイントを並行呼び出し
+
+  motivation: |
+    関数型プログラミングにおいて Traversable は中心的な抽象化であり、
+    効果付き変換と収集を統一的に扱う。lambars が「真の関数型プログラミング」を
+    Rust で実現することを目指す以上、主要な効果型に対応した traverse は必須。
+
+    特に:
+    - Reader traverse により依存性注入パターンがより自然に
+    - State traverse により状態付きマッピングが純粋関数的に
+    - IO/AsyncIO traverse により副作用の明示的な制御が可能に
+
+  prior_art:
+    - name: "Haskell Data.Traversable"
+      description: |
+        traverse :: (Traversable t, Applicative f) => (a -> f b) -> t a -> f (t b)
+        HKT により単一の関数で全ての Applicative に対応。
+        sequenceA, mapM, sequence, for, forM なども提供。
+
+    - name: "Scala cats.Traverse"
+      description: |
+        def traverse[G[_]: Applicative, A, B](fa: F[A])(f: A => G[B]): G[F[B]]
+        implicit parameter により Applicative インスタンスを受け取る。
+        traverseFilter, flatTraverse など拡張メソッドも豊富。
+
+    - name: "既存の lambars Traversable"
+      description: |
+        traverse_option, traverse_result を個別メソッドとして提供。
+        sequence_option, sequence_result, traverse_option_, for_each_option なども提供。
+        Option, Result, Vec, Box, Identity に実装済み。
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. Reader traverse
+  # ======================================================================
+  - id: traverse_reader
+    name: "Reader に対する traverse"
+    description: |
+      各要素に Reader<R, B> を返す関数を適用し、結果を Reader<R, Self::WithType<B>> として収集する。
+      環境 R は全ての要素変換で共有される。
+
+    laws:
+      - name: "Identity"
+        description: |
+          traverse_reader(Reader::pure) は構造を維持して Reader でラップするのと等価
+        equation: "xs.traverse_reader(|x| Reader::pure(x)).run(env) == xs"
+        property_test: |
+          fn prop_traverse_reader_identity<R: Clone + 'static, A: Clone + PartialEq + 'static>(
+              xs: Vec<A>,
+              env: R
+          ) {
+              let result = xs.clone().traverse_reader(|x| Reader::pure(x));
+              assert_eq!(result.run(env), xs);
+          }
+
+      - name: "Naturality"
+        description: |
+          自然変換を traverse の前後で適用しても結果は同じ
+        equation: "transform(xs.traverse_reader(f)) == xs.traverse_reader(|x| transform(f(x)))"
+        property_test: |
+          // 自然変換 Reader<R, A> -> Option<A> を (env) -> Some(r.run(env)) で定義
+          fn prop_traverse_reader_naturality<R, A>(xs: Vec<A>, f: impl Fn(A) -> Reader<R, A>, env: R) {
+              let transformed_after = xs.clone().traverse_reader(&f).run(env.clone()).map(Some);
+              let transformed_before = xs.traverse_reader(|x| {
+                  let reader = f(x);
+                  reader.fmap(Some)
+              }).run(env);
+              assert_eq!(transformed_after, transformed_before);
+          }
+
+    methods:
+      - name: "traverse_reader"
+        signature: |
+          fn traverse_reader<R, B, F>(self, function: F) -> Reader<R, Self::WithType<B>>
+          where
+              R: Clone + 'static,
+              B: 'static,
+              F: FnMut(Self::Inner) -> Reader<R, B> + 'static
+        description: |
+          各要素に Reader を返す関数を適用し、結果を収集する Reader を返す。
+          環境は暗黙的に全ての要素変換に渡される。
+        examples:
+          - description: "Vec の各要素を環境に基づいて変換"
+            code: |
+              use lambars::typeclass::Traversable;
+              use lambars::effect::Reader;
+
+              #[derive(Clone)]
+              struct Config { multiplier: i32 }
+
+              let numbers = vec![1, 2, 3];
+              let reader = numbers.traverse_reader(|number| {
+                  Reader::asks(move |config: Config| number * config.multiplier)
+              });
+
+              let config = Config { multiplier: 10 };
+              let result = reader.run(config);
+              assert_eq!(result, vec![10, 20, 30]);
+
+      - name: "sequence_reader"
+        signature: |
+          fn sequence_reader<R>(self) -> Reader<R, Self::WithType<<Self::Inner as ReaderLike>::Value>>
+          where
+              R: Clone + 'static,
+              Self::Inner: ReaderLike<Environment = R>
+        description: |
+          Reader の構造を内外反転する。traverse_reader(|x| x) と等価だが、
+          より効率的な実装が可能。
+        examples:
+          - description: "Vec<Reader<R, A>> を Reader<R, Vec<A>> に変換"
+            code: |
+              use lambars::typeclass::Traversable;
+              use lambars::effect::Reader;
+
+              #[derive(Clone)]
+              struct Env { value: i32 }
+
+              let readers: Vec<Reader<Env, i32>> = vec![
+                  Reader::asks(|e: Env| e.value),
+                  Reader::asks(|e: Env| e.value * 2),
+              ];
+
+              let combined = readers.sequence_reader();
+              let result = combined.run(Env { value: 5 });
+              assert_eq!(result, vec![5, 10]);
+
+      - name: "traverse_reader_"
+        signature: |
+          fn traverse_reader_<R, F>(self, function: F) -> Reader<R, ()>
+          where
+              R: Clone + 'static,
+              F: FnMut(Self::Inner) -> Reader<R, ()> + 'static
+        description: |
+          traverse_reader と同じだが、結果を破棄して () を返す。
+          副作用のみを目的とする場合に使用。
+
+      - name: "for_each_reader"
+        signature: |
+          fn for_each_reader<R, F>(self, function: F) -> Reader<R, ()>
+          where
+              R: Clone + 'static,
+              F: FnMut(Self::Inner) -> Reader<R, ()> + 'static
+        description: |
+          traverse_reader_ のエイリアス。
+
+    implementations:
+      - type: "Option<A>"
+        description: |
+          Some の場合は関数を適用、None の場合は Reader::pure(None) を返す。
+
+      - type: "Result<T, E>"
+        description: |
+          Ok の場合は関数を適用、Err の場合は Reader::pure(Err(e)) を返す。
+          E: Clone が必要（既存の Traversable 実装に準拠）。
+
+      - type: "Vec<T>"
+        description: |
+          各要素に関数を適用し、全ての Reader を map2 で合成。
+          空の Vec は Reader::pure(Vec::new()) を返す。
+
+      - type: "Box<T>"
+        description: |
+          中身に関数を適用し、結果を Box でラップ。
+
+      - type: "Identity<A>"
+        description: |
+          中身に関数を適用し、結果を Identity でラップ。
+
+  # ======================================================================
+  # 2. State traverse
+  # ======================================================================
+  - id: traverse_state
+    name: "State に対する traverse"
+    description: |
+      各要素に State<S, B> を返す関数を適用し、結果を State<S, Self::WithType<B>> として収集する。
+      状態は各要素の処理を通じてスレッディングされる（左から右へ）。
+
+    laws:
+      - name: "Identity"
+        description: |
+          traverse_state(State::pure) は構造を維持して State でラップするのと等価
+        equation: "xs.traverse_state(State::pure).run(s) == (xs, s)"
+        property_test: |
+          fn prop_traverse_state_identity<S: Clone + 'static, A: Clone + PartialEq + 'static>(
+              xs: Vec<A>,
+              initial_state: S
+          ) {
+              let (result, final_state) = xs.clone()
+                  .traverse_state(|x| State::pure(x))
+                  .run(initial_state.clone());
+              assert_eq!(result, xs);
+              assert_eq!(final_state, initial_state);
+          }
+
+      - name: "State Threading"
+        description: |
+          状態は左から右へ各要素の処理を通じて伝播する
+        equation: "各要素の State は前の要素の最終状態を初期状態として受け取る"
+        property_test: |
+          fn prop_state_threading() {
+              let xs = vec![1, 2, 3];
+              // 各要素を処理しながらカウンタをインクリメント
+              let state = xs.traverse_state(|x| {
+                  State::new(|s: i32| (x + s, s + 1))
+              });
+              let (result, final_state) = state.run(0);
+              // [1+0, 2+1, 3+2] = [1, 3, 5], 最終状態 = 3
+              assert_eq!(result, vec![1, 3, 5]);
+              assert_eq!(final_state, 3);
+          }
+
+    methods:
+      - name: "traverse_state"
+        signature: |
+          fn traverse_state<S, B, F>(self, function: F) -> State<S, Self::WithType<B>>
+          where
+              S: Clone + 'static,
+              B: 'static,
+              F: FnMut(Self::Inner) -> State<S, B> + 'static
+        description: |
+          各要素に State を返す関数を適用し、結果を収集する State を返す。
+          状態は左から右へ各要素の処理を通じてスレッディングされる。
+        examples:
+          - description: "各要素にインデックスを付与"
+            code: |
+              use lambars::typeclass::Traversable;
+              use lambars::effect::State;
+
+              let items = vec!["a", "b", "c"];
+              let state = items.traverse_state(|item| {
+                  State::new(|index: usize| ((index, item), index + 1))
+              });
+
+              let (result, final_index) = state.run(0);
+              assert_eq!(result, vec![(0, "a"), (1, "b"), (2, "c")]);
+              assert_eq!(final_index, 3);
+
+      - name: "sequence_state"
+        signature: |
+          fn sequence_state<S>(self) -> State<S, Self::WithType<<Self::Inner as StateLike>::Value>>
+          where
+              S: Clone + 'static,
+              Self::Inner: StateLike<StateType = S>
+        description: |
+          State の構造を内外反転する。
+
+      - name: "traverse_state_"
+        signature: |
+          fn traverse_state_<S, F>(self, function: F) -> State<S, ()>
+          where
+              S: Clone + 'static,
+              F: FnMut(Self::Inner) -> State<S, ()> + 'static
+        description: |
+          traverse_state と同じだが、結果を破棄して () を返す。
+
+      - name: "for_each_state"
+        signature: |
+          fn for_each_state<S, F>(self, function: F) -> State<S, ()>
+          where
+              S: Clone + 'static,
+              F: FnMut(Self::Inner) -> State<S, ()> + 'static
+        description: |
+          traverse_state_ のエイリアス。
+
+    implementations:
+      - type: "Option<A>"
+        description: |
+          Some の場合は関数を適用、None の場合は State::pure(None) を返す。
+
+      - type: "Result<T, E>"
+        description: |
+          Ok の場合は関数を適用、Err の場合は State::pure(Err(e)) を返す。
+          E: Clone が必要（既存の Traversable 実装に準拠）。
+
+      - type: "Vec<T>"
+        description: |
+          各要素に関数を適用し、状態をスレッディングしながら結果を収集。
+
+      - type: "Box<T>"
+        description: |
+          中身に関数を適用し、結果を Box でラップ。
+
+      - type: "Identity<A>"
+        description: |
+          中身に関数を適用し、結果を Identity でラップ。
+
+  # ======================================================================
+  # 3. IO traverse
+  # ======================================================================
+  - id: traverse_io
+    name: "IO に対する traverse"
+    description: |
+      各要素に IO<B> を返す関数を適用し、結果を IO<Self::WithType<B>> として収集する。
+      IO アクションは左から右へ順次実行される。
+
+    laws:
+      - name: "Identity"
+        description: |
+          traverse_io(IO::pure) は構造を維持して IO でラップするのと等価
+        equation: "xs.traverse_io(IO::pure).run_unsafe() == xs"
+        property_test: |
+          fn prop_traverse_io_identity<A: Clone + PartialEq + 'static>(xs: Vec<A>) {
+              let result = xs.clone().traverse_io(|x| IO::pure(x)).run_unsafe();
+              assert_eq!(result, xs);
+          }
+
+      - name: "Sequential Execution"
+        description: |
+          IO アクションは左から右へ順次実行される
+        equation: "traverse_io の各 IO は前の IO が完了してから実行される"
+        property_test: |
+          fn prop_io_sequential() {
+              use std::sync::atomic::{AtomicUsize, Ordering};
+              use std::sync::Arc;
+
+              let counter = Arc::new(AtomicUsize::new(0));
+              let xs = vec![1, 2, 3];
+
+              let io = xs.traverse_io(|x| {
+                  let c = counter.clone();
+                  IO::new(move || {
+                      let prev = c.fetch_add(1, Ordering::SeqCst);
+                      (prev, x)
+                  })
+              });
+
+              let result = io.run_unsafe();
+              assert_eq!(result, vec![(0, 1), (1, 2), (2, 3)]);
+          }
+
+    methods:
+      - name: "traverse_io"
+        signature: |
+          fn traverse_io<B, F>(self, function: F) -> IO<Self::WithType<B>>
+          where
+              B: 'static,
+              F: FnMut(Self::Inner) -> IO<B> + 'static
+        description: |
+          各要素に IO を返す関数を適用し、結果を収集する IO を返す。
+          IO アクションは左から右へ順次実行される。
+        examples:
+          - description: "各ファイルパスからデータを読み込む（擬似コード）"
+            code: |
+              use lambars::typeclass::Traversable;
+              use lambars::effect::IO;
+
+              fn read_file(path: &str) -> IO<String> {
+                  let path = path.to_string();
+                  IO::new(move || {
+                      // 実際のファイル読み込み
+                      format!("content of {}", path)
+                  })
+              }
+
+              let paths = vec!["a.txt", "b.txt", "c.txt"];
+              let io = paths.traverse_io(|path| read_file(path));
+
+              let contents = io.run_unsafe();
+              assert_eq!(contents, vec![
+                  "content of a.txt".to_string(),
+                  "content of b.txt".to_string(),
+                  "content of c.txt".to_string(),
+              ]);
+
+      - name: "sequence_io"
+        signature: |
+          fn sequence_io(self) -> IO<Self::WithType<<Self::Inner as IOLike>::Value>>
+          where
+              Self::Inner: IOLike
+        description: |
+          IO の構造を内外反転する。
+
+      - name: "traverse_io_"
+        signature: |
+          fn traverse_io_<F>(self, function: F) -> IO<()>
+          where
+              F: FnMut(Self::Inner) -> IO<()> + 'static
+        description: |
+          traverse_io と同じだが、結果を破棄して () を返す。
+
+      - name: "for_each_io"
+        signature: |
+          fn for_each_io<F>(self, function: F) -> IO<()>
+          where
+              F: FnMut(Self::Inner) -> IO<()> + 'static
+        description: |
+          traverse_io_ のエイリアス。
+
+    implementations:
+      - type: "Option<A>"
+        description: |
+          Some の場合は関数を適用、None の場合は IO::pure(None) を返す。
+
+      - type: "Result<T, E>"
+        description: |
+          Ok の場合は関数を適用、Err の場合は IO::pure(Err(e)) を返す。
+          E: Clone が必要。
+
+      - type: "Vec<T>"
+        description: |
+          各要素に関数を適用し、順次実行して結果を収集。
+
+      - type: "Box<T>"
+        description: |
+          中身に関数を適用し、結果を Box でラップ。
+
+      - type: "Identity<A>"
+        description: |
+          中身に関数を適用し、結果を Identity でラップ。
+
+  # ======================================================================
+  # 4. AsyncIO traverse
+  # ======================================================================
+  - id: traverse_async_io
+    name: "AsyncIO に対する traverse"
+    description: |
+      各要素に AsyncIO<B> を返す関数を適用し、結果を AsyncIO<Self::WithType<B>> として収集する。
+      AsyncIO アクションは左から右へ順次実行される（並行実行はオプション）。
+
+    laws:
+      - name: "Identity"
+        description: |
+          traverse_async_io(AsyncIO::pure) は構造を維持して AsyncIO でラップするのと等価
+        equation: "xs.traverse_async_io(AsyncIO::pure).run_async().await == xs"
+        property_test: |
+          async fn prop_traverse_async_io_identity<A: Clone + PartialEq + Send + 'static>(xs: Vec<A>) {
+              let result = xs.clone().traverse_async_io(|x| AsyncIO::pure(x)).run_async().await;
+              assert_eq!(result, xs);
+          }
+
+    methods:
+      - name: "traverse_async_io"
+        signature: |
+          fn traverse_async_io<B, F>(self, function: F) -> AsyncIO<Self::WithType<B>>
+          where
+              B: Send + 'static,
+              Self::WithType<B>: Send,
+              F: FnMut(Self::Inner) -> AsyncIO<B> + Send + 'static
+        description: |
+          各要素に AsyncIO を返す関数を適用し、結果を収集する AsyncIO を返す。
+          AsyncIO アクションは順次実行される。
+        examples:
+          - description: "各URLからデータを取得（擬似コード）"
+            code: |
+              use lambars::typeclass::Traversable;
+              use lambars::effect::AsyncIO;
+
+              fn fetch_url(url: &str) -> AsyncIO<String> {
+                  let url = url.to_string();
+                  AsyncIO::new(move || async move {
+                      // 実際のHTTP取得
+                      format!("response from {}", url)
+                  })
+              }
+
+              let urls = vec!["http://a.com", "http://b.com"];
+              let async_io = urls.traverse_async_io(|url| fetch_url(url));
+
+              // async context 内で:
+              // let responses = async_io.run_async().await;
+
+      - name: "sequence_async_io"
+        signature: |
+          fn sequence_async_io(self) -> AsyncIO<Self::WithType<<Self::Inner as AsyncIOLike>::Value>>
+          where
+              Self::Inner: AsyncIOLike
+        description: |
+          AsyncIO の構造を内外反転する。
+
+      - name: "traverse_async_io_"
+        signature: |
+          fn traverse_async_io_<F>(self, function: F) -> AsyncIO<()>
+          where
+              F: FnMut(Self::Inner) -> AsyncIO<()> + Send + 'static
+        description: |
+          traverse_async_io と同じだが、結果を破棄して () を返す。
+
+      - name: "for_each_async_io"
+        signature: |
+          fn for_each_async_io<F>(self, function: F) -> AsyncIO<()>
+          where
+              F: FnMut(Self::Inner) -> AsyncIO<()> + Send + 'static
+        description: |
+          traverse_async_io_ のエイリアス。
+
+    implementations:
+      - type: "Option<A>"
+        description: |
+          Some の場合は関数を適用、None の場合は AsyncIO::pure(None) を返す。
+
+      - type: "Result<T, E>"
+        description: |
+          Ok の場合は関数を適用、Err の場合は AsyncIO::pure(Err(e)) を返す。
+          E: Clone + Send が必要。
+
+      - type: "Vec<T>"
+        description: |
+          各要素に関数を適用し、順次実行して結果を収集。
+
+      - type: "Box<T>"
+        description: |
+          中身に関数を適用し、結果を Box でラップ。
+
+      - type: "Identity<A>"
+        description: |
+          中身に関数を適用し、結果を Identity でラップ。
+
+  # ======================================================================
+  # 5. 型制約とヘルパートレイト
+  # ======================================================================
+  - id: helper_traits
+    name: "ヘルパートレイトの定義"
+    description: |
+      sequence_* メソッドのために、各効果型が持つ値の型を抽出するためのヘルパートレイトを定義。
+      これにより Self::Inner が特定の効果型であることを表現可能。
+
+    methods:
+      - name: "ReaderLike trait"
+        signature: |
+          trait ReaderLike {
+              type Environment;
+              type Value;
+              fn into_reader(self) -> Reader<Self::Environment, Self::Value>
+              where
+                  Self::Environment: Clone + 'static,
+                  Self::Value: 'static;
+          }
+        description: |
+          Reader<R, A> のような型から R と A を抽出するためのトレイト。
+          sequence_reader の実装のために into_reader メソッドを提供。
+        examples:
+          - description: "Reader に対する実装"
+            code: |
+              impl<R: 'static, A: 'static> ReaderLike for Reader<R, A> {
+                  type Environment = R;
+                  type Value = A;
+                  fn into_reader(self) -> Reader<R, A>
+                  where R: Clone + 'static, A: 'static {
+                      self
+                  }
+              }
+
+      - name: "StateLike trait"
+        signature: |
+          trait StateLike {
+              type StateType;
+              type Value;
+              fn into_state(self) -> State<Self::StateType, Self::Value>
+              where
+                  Self::StateType: Clone + 'static,
+                  Self::Value: 'static;
+          }
+        description: |
+          State<S, A> のような型から S と A を抽出するためのトレイト。
+          sequence_state の実装のために into_state メソッドを提供。
+
+      - name: "IOLike trait"
+        signature: |
+          trait IOLike {
+              type Value;
+              fn into_io(self) -> IO<Self::Value>
+              where Self::Value: 'static;
+          }
+        description: |
+          IO<A> のような型から A を抽出するためのトレイト。
+          sequence_io の実装のために into_io メソッドを提供。
+
+      - name: "AsyncIOLike trait"
+        signature: |
+          trait AsyncIOLike {
+              type Value;
+              fn into_async_io(self) -> AsyncIO<Self::Value>
+              where Self::Value: Send + 'static;
+          }
+        description: |
+          AsyncIO<A> のような型から A を抽出するためのトレイト。
+          sequence_async_io の実装のために into_async_io メソッドを提供。
+
+    implementations:
+      - type: "Reader<R, A>"
+        description: |
+          ReaderLike を実装。Environment = R, Value = A。
+
+      - type: "State<S, A>"
+        description: |
+          StateLike を実装。StateType = S, Value = A。
+
+      - type: "IO<A>"
+        description: |
+          IOLike を実装。Value = A。
+
+      - type: "AsyncIO<A>"
+        description: |
+          AsyncIOLike を実装。Value = A。
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - "Vec の traverse は事前に capacity を確保し、再割り当てを最小化"
+    - "State traverse は状態のコピーを最小限に抑える"
+    - "IO/AsyncIO traverse は不必要な中間構造を生成しない"
+    - "既存の traverse_option/traverse_result と同等以上のパフォーマンス"
+
+  compatibility:
+    - "既存の Traversable trait への後方互換なメソッド追加"
+    - "既存の traverse_option/traverse_result 実装に影響しない"
+    - "Rust edition 2024 対応"
+    - "effect feature フラグが無効の場合はコンパイルから除外"
+
+  testing:
+    - "各メソッドに対するユニットテスト（正常系、異常系、境界値）"
+    - "各実装型（Option, Result, Vec, Box, Identity）に対するテスト"
+    - "Traversable laws（Identity, Naturality, Composition）のプロパティテスト"
+    - "State のスレッディング動作を検証するテスト"
+    - "IO/AsyncIO の順次実行を検証するテスト"
+    - "テストカバレッジ 100%"
+
+  documentation:
+    - "各メソッドに対する rustdoc コメント"
+    - "使用例を含む module-level ドキュメント"
+    - "Haskell との対応関係を示すドキュメント更新"
+
+# 将来の拡張
+future_extensions:
+  - id: traverse_parallel
+    name: "並行 traverse"
+    description: |
+      AsyncIO の traverse を並行実行するバリアント。
+      traverse_async_io_parallel のような名前で提供。
+    rationale: |
+      現時点では順次実行のみをサポート。
+      並行実行はセマンティクスが異なり、エラーハンドリングも複雑になるため、
+      別途設計が必要。
+
+  - id: traverse_writer
+    name: "Writer に対する traverse"
+    description: |
+      Writer<W, B> を返す関数を適用する traverse_writer。
+    rationale: |
+      Writer は他の効果型に比べて使用頻度が低い。
+      Issue #10 のスコープ外とし、需要に応じて追加。
+
+  - id: traverse_validated
+    name: "Validated に対する traverse"
+    description: |
+      エラーを蓄積する Validated<E, A> に対する traverse。
+      Result の traverse は最初のエラーで停止するが、
+      Validated は全てのエラーを収集。
+    rationale: |
+      Validated 型自体がまだ実装されていない。
+      Validated 実装後に追加を検討。
+
+  - id: persistent_data_structures
+    name: "永続データ構造への拡張"
+    description: |
+      PersistentList, PersistentVector, PersistentTreeMap に対する
+      traverse_reader/state/io/async_io 実装。
+    rationale: |
+      まずは基本型（Vec, Option, Result, Box, Identity）に対する
+      実装を完了させ、その後永続データ構造に拡張する。
