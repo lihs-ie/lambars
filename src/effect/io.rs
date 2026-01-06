@@ -581,7 +581,7 @@ mod tests {
             42
         });
 
-        // to_async 呼び出し時点で実行される
+        // IO is executed at the point of to_async call
         let _async_io = io.to_async();
         assert!(
             executed.load(Ordering::SeqCst),
