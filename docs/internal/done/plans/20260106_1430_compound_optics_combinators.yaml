@@ -1,0 +1,1799 @@
+# 複合 Optics コンビネータ 実装計画
+#
+# 要件定義: docs/internal/requirements/20260105_1200_compound_optics_combinators.yaml
+# 技術要件:
+#   - Rust: 1.92.0
+#   - edition: 2024
+#   - testing: rstest, proptest
+#
+# 実装方針:
+#   1. TDD（テスト駆動開発）でテストを先に書く
+#   2. 既存の Optics 型との互換性を維持しつつ拡張
+#   3. 段階的に機能を追加し、各段階で完全にテスト
+#   4. Optics 法則のプロパティテストを各コンビネータに実装
+#
+# 設計上の注意事項:
+#   - 要件定義では At コンビネータは Lens<M, Option<V>> を返す設計だが、
+#     Rust の所有権モデルでは &Option<V> を返すことができないため、
+#     Optional<M, V> を返す設計に変更する。
+#   - Either 型は独自の enum として定義し、Result との混同を避ける。
+#   - Fold と Traversal の関係を明確にし、Traversal が Fold を自動実装する。
+#   - no_std 環境では alloc クレートが必要（Box<dyn Iterator> を使用するため）。
+#
+# Optics 型階層:
+#   Iso > Lens > Optional > Traversal > Fold
+#   Iso > Prism > Optional > Traversal > Fold
+#
+# コンテナ型クラス:
+#   Each     - 全要素への Traversal を提供
+#   At       - キーによる Optional を提供（Map 系）
+#   Ixed     - インデックスによる Optional を提供（シーケンス系）
+#   Sequence - 先頭/末尾への Optional を提供
+
+version: "1.0.0"
+name: "Compound Optics Combinators Implementation Plan"
+requirement_file: "docs/internal/requirements/20260105_1200_compound_optics_combinators.yaml"
+
+# 実装順序の概要
+implementation_order:
+  - step: 1
+    name: "基盤型の定義"
+    items:
+      - Fold トレイトの定義
+      - FilteredTraversal 型の定義
+      - Either 型の定義（Result を活用）
+  - step: 2
+    name: "Choice コンビネータ"
+    items:
+      - left Prism の実装
+      - right Prism の実装
+      - choice 関数の実装
+  - step: 3
+    name: "Filtered コンビネータ"
+    items:
+      - filtered 関数の実装（Fold を返す）
+      - filtered_traversal 関数の実装
+  - step: 4
+    name: "Each コンビネータ"
+    items:
+      - Each トレイトの定義
+      - PersistentVector への実装
+      - Vec, Option, Result への実装
+  - step: 5
+    name: "At コンビネータ"
+    items:
+      - At トレイトの定義
+      - PersistentHashMap への実装
+      - 標準 HashMap への参照実装
+  - step: 6
+    name: "Index コンビネータ"
+    items:
+      - Index トレイトの拡張（既存 index_optional を活用）
+      - index 関数のリファクタリング
+  - step: 7
+    name: "HeadOption / LastOption コンビネータ"
+    items:
+      - head_option 関数の実装
+      - last_option 関数の実装
+      - 各コンテナ型への実装
+  - step: 8
+    name: "Optics 合成拡張"
+    items:
+      - compose_with_optional の実装
+      - compose_with_traversal の実装
+      - compose_with_fold の実装
+
+# 実装計画詳細
+implementation_plan:
+  # ============================================================================
+  # 1. 基盤型の定義
+  # ============================================================================
+  - id: impl_fold_trait
+    requirement_id: filtered_combinator
+    name: "Fold トレイト定義"
+    priority: 1
+    description: |
+      読み取り専用の Optics である Fold トレイトを定義する。
+      Traversal から modify 操作を除いた読み取り専用バージョン。
+      filtered コンビネータの戻り値型として使用する。
+
+    files:
+      - path: src/optics/fold.rs
+        description: |
+          Fold トレイトと関連型を定義する新規ファイル。
+          get_all, fold, length, for_all, exists, head_option メソッドを提供。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Fold トレイトの基本定義。読み取り専用の Traversal として設計。
+        code_outline: |
+          /// A Fold is a read-only optic that can focus on zero or more elements.
+          ///
+          /// Unlike Traversal, Fold does not support modification operations.
+          /// It is useful for read-only access patterns like filtering.
+          pub trait Fold<S, A> {
+              /// Returns an iterator over references to all focused elements.
+              fn get_all<'a>(&self, source: &'a S) -> Box<dyn Iterator<Item = &'a A> + 'a>;
+
+              /// Folds over all focused elements.
+              fn fold<B, F>(&self, source: &S, initial: B, function: F) -> B
+              where
+                  F: FnMut(B, &A) -> B;
+
+              /// Returns the number of focused elements.
+              fn length(&self, source: &S) -> usize;
+
+              /// Tests if all focused elements satisfy a predicate.
+              fn for_all<P>(&self, source: &S, predicate: P) -> bool
+              where
+                  P: FnMut(&A) -> bool;
+
+              /// Tests if any focused element satisfies a predicate.
+              fn exists<P>(&self, source: &S, predicate: P) -> bool
+              where
+                  P: FnMut(&A) -> bool;
+
+              /// Returns a reference to the first focused element, if any.
+              fn head_option<'a>(&self, source: &'a S) -> Option<&'a A>;
+
+              /// Composes this fold with another fold.
+              fn compose<B, F2>(self, other: F2) -> ComposedFold<Self, F2, A>
+              where
+                  Self: Sized,
+                  F2: Fold<A, B>;
+          }
+
+      - step: 2
+        description: |
+          FunctionFold 構造体の実装。関数ベースの Fold。
+        code_outline: |
+          pub struct FunctionFold<S, A, G>
+          where
+              G: for<'a> Fn(&'a S) -> Box<dyn Iterator<Item = &'a A> + 'a>,
+          {
+              get_all_function: G,
+              _marker: PhantomData<(S, A)>,
+          }
+
+          impl<S, A, G> FunctionFold<S, A, G>
+          where
+              G: for<'a> Fn(&'a S) -> Box<dyn Iterator<Item = &'a A> + 'a>,
+          {
+              pub const fn new(get_all_function: G) -> Self { ... }
+          }
+
+      - step: 3
+        description: |
+          ComposedFold 構造体の実装。Fold の合成。
+        code_outline: |
+          /// A Fold composed of two Folds.
+          pub struct ComposedFold<F1, F2, A> {
+              first: F1,
+              second: F2,
+              _marker: PhantomData<A>,
+          }
+
+          impl<F1, F2, A> ComposedFold<F1, F2, A> {
+              /// Creates a new ComposedFold.
+              pub const fn new(first: F1, second: F2) -> Self {
+                  Self {
+                      first,
+                      second,
+                      _marker: PhantomData,
+                  }
+              }
+          }
+
+      - step: 4
+        description: |
+          Traversal から Fold への自動実装。
+          すべての Traversal は自動的に Fold としても使用できる。
+        code_outline: |
+          /// Blanket implementation of Fold for any Traversal.
+          ///
+          /// Every Traversal can be used as a Fold because a Traversal
+          /// provides all the read operations that a Fold needs.
+          impl<S, A, T> Fold<S, A> for T
+          where
+              T: Traversal<S, A>,
+              A: 'static,
+              S: 'static,
+          {
+              fn get_all<'a>(&self, source: &'a S) -> Box<dyn Iterator<Item = &'a A> + 'a> {
+                  Traversal::get_all(self, source)
+              }
+
+              fn fold<B, F>(&self, source: &S, initial: B, function: F) -> B
+              where
+                  F: FnMut(B, &A) -> B,
+              {
+                  Traversal::fold(self, source, initial, function)
+              }
+
+              fn length(&self, source: &S) -> usize {
+                  Traversal::length(self, source)
+              }
+
+              fn for_all<P>(&self, source: &S, predicate: P) -> bool
+              where
+                  P: FnMut(&A) -> bool,
+              {
+                  Traversal::for_all(self, source, predicate)
+              }
+
+              fn exists<P>(&self, source: &S, predicate: P) -> bool
+              where
+                  P: FnMut(&A) -> bool,
+              {
+                  Traversal::exists(self, source, predicate)
+              }
+
+              fn head_option<'a>(&self, source: &'a S) -> Option<&'a A> {
+                  Traversal::head_option(self, source)
+              }
+          }
+
+          // Note: This blanket implementation means we cannot have a separate
+          // Fold trait bound when we want to accept both Fold and Traversal.
+          // Instead, we use Fold as the bound and rely on the blanket implementation.
+          //
+          // Alternative design: Use a marker trait or separate TraversalAsFold wrapper.
+          // This would be needed if we want to avoid the blanket implementation
+          // due to potential conflicts with other implementations.
+
+    tests:
+      - name: test_fold_basic_operations
+        description: Fold の基本操作（get_all, fold, length）のテスト
+        test_type: unit
+        code_outline: |
+          #[cfg(test)]
+          mod tests {
+              use super::*;
+
+              #[test]
+              fn test_fold_get_all() {
+                  let fold = FunctionFold::new(|vec: &Vec<i32>| {
+                      Box::new(vec.iter())
+                  });
+                  let data = vec![1, 2, 3];
+                  let result: Vec<&i32> = fold.get_all(&data).collect();
+                  assert_eq!(result, vec![&1, &2, &3]);
+              }
+          }
+
+    dependencies: []
+
+  - id: impl_either_type
+    requirement_id: choice_combinator
+    name: "Either 型定義"
+    priority: 1
+    description: |
+      Choice コンビネータで使用する Either 型を定義する。
+      Result との混同を避けるため、独自の enum として定義する。
+
+      設計理由:
+      - Result<R, L> を Either<L, R> として使うと is_left()/is_right() と
+        is_err()/is_ok() が逆になり混乱を招く
+      - 独自型を定義することで明確な API を提供できる
+      - Haskell/Scala の Either と同様のセマンティクスを維持できる
+
+    files:
+      - path: src/optics/either.rs
+        description: |
+          Either 型を独自の enum として定義。
+          Left/Right のバリアントと関連ユーティリティを提供。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Either 型の enum 定義と基本メソッド。
+        code_outline: |
+          /// Either represents a value that is one of two possible types.
+          ///
+          /// Unlike Result, Either does not have a preferred "success" case.
+          /// By convention, Right is often used as the "success" case in
+          /// functional programming, but both variants are equally valid.
+          ///
+          /// # Examples
+          ///
+          /// ```
+          /// use lambars::optics::Either;
+          ///
+          /// let left_value: Either<String, i32> = Either::Left("error".to_string());
+          /// let right_value: Either<String, i32> = Either::Right(42);
+          ///
+          /// assert!(left_value.is_left());
+          /// assert!(right_value.is_right());
+          /// ```
+          #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+          pub enum Either<L, R> {
+              /// The left variant.
+              Left(L),
+              /// The right variant.
+              Right(R),
+          }
+
+          impl<L, R> Either<L, R> {
+              /// Returns true if this is a Left value.
+              pub fn is_left(&self) -> bool {
+                  matches!(self, Either::Left(_))
+              }
+
+              /// Returns true if this is a Right value.
+              pub fn is_right(&self) -> bool {
+                  matches!(self, Either::Right(_))
+              }
+
+              /// Returns a reference to the Left value, if present.
+              pub fn left(&self) -> Option<&L> {
+                  match self {
+                      Either::Left(value) => Some(value),
+                      Either::Right(_) => None,
+                  }
+              }
+
+              /// Returns a reference to the Right value, if present.
+              pub fn right(&self) -> Option<&R> {
+                  match self {
+                      Either::Left(_) => None,
+                      Either::Right(value) => Some(value),
+                  }
+              }
+
+              /// Converts from Either<L, R> to Either<&L, &R>.
+              pub fn as_ref(&self) -> Either<&L, &R> {
+                  match self {
+                      Either::Left(value) => Either::Left(value),
+                      Either::Right(value) => Either::Right(value),
+                  }
+              }
+
+              /// Maps the left value using the given function.
+              pub fn map_left<U, F>(self, function: F) -> Either<U, R>
+              where
+                  F: FnOnce(L) -> U,
+              {
+                  match self {
+                      Either::Left(value) => Either::Left(function(value)),
+                      Either::Right(value) => Either::Right(value),
+                  }
+              }
+
+              /// Maps the right value using the given function.
+              pub fn map_right<U, F>(self, function: F) -> Either<L, U>
+              where
+                  F: FnOnce(R) -> U,
+              {
+                  match self {
+                      Either::Left(value) => Either::Left(value),
+                      Either::Right(value) => Either::Right(function(value)),
+                  }
+              }
+          }
+
+          /// Creates a Left value.
+          pub fn left<L, R>(value: L) -> Either<L, R> {
+              Either::Left(value)
+          }
+
+          /// Creates a Right value.
+          pub fn right<L, R>(value: R) -> Either<L, R> {
+              Either::Right(value)
+          }
+
+    tests:
+      - name: test_either_basic
+        description: Either 型の基本操作テスト
+        test_type: unit
+        code_outline: |
+          #[test]
+          fn test_either_left() {
+              let value: Either<String, i32> = Either::Left("error".to_string());
+              assert!(value.is_left());
+              assert!(!value.is_right());
+              assert_eq!(value.left(), Some(&"error".to_string()));
+              assert_eq!(value.right(), None);
+          }
+
+          #[test]
+          fn test_either_right() {
+              let value: Either<String, i32> = Either::Right(42);
+              assert!(value.is_right());
+              assert!(!value.is_left());
+              assert_eq!(value.left(), None);
+              assert_eq!(value.right(), Some(&42));
+          }
+
+          #[test]
+          fn test_either_map_left() {
+              let value: Either<i32, String> = Either::Left(42);
+              let mapped = value.map_left(|x| x * 2);
+              assert_eq!(mapped, Either::Left(84));
+          }
+
+          #[test]
+          fn test_either_map_right() {
+              let value: Either<String, i32> = Either::Right(42);
+              let mapped = value.map_right(|x| x * 2);
+              assert_eq!(mapped, Either::Right(84));
+          }
+
+    dependencies: []
+
+  # ============================================================================
+  # 2. Choice コンビネータ
+  # ============================================================================
+  - id: impl_choice_combinator
+    requirement_id: choice_combinator
+    name: "Choice コンビネータ実装"
+    priority: 2
+    description: |
+      Either<L, R> 型に対する left/right Prism と choice 関数を実装する。
+      Haskell の _Left, _Right Prism と同等の機能を提供。
+
+    files:
+      - path: src/optics/choice.rs
+        description: |
+          Choice コンビネータを定義。
+          - EitherLeftPrism: Left 値にフォーカスする Prism
+          - EitherRightPrism: Right 値にフォーカスする Prism
+          - choice 関数: 2つの Prism を結合
+
+    implementation_steps:
+      - step: 1
+        description: |
+          EitherLeftPrism の実装。Left 値にフォーカス。
+        code_outline: |
+          /// A Prism that focuses on the Left value of an Either.
+          #[derive(Debug, Clone)]
+          pub struct EitherLeftPrism<L, R> {
+              _marker: PhantomData<(L, R)>,
+          }
+
+          impl<L, R> EitherLeftPrism<L, R> {
+              pub const fn new() -> Self { ... }
+          }
+
+          impl<L: Clone, R: Clone> Prism<Either<L, R>, L> for EitherLeftPrism<L, R> {
+              fn preview<'a>(&self, source: &'a Either<L, R>) -> Option<&'a L> {
+                  source.left()
+              }
+
+              fn review(&self, value: L) -> Either<L, R> {
+                  Either::Left(value)
+              }
+
+              fn preview_owned(&self, source: Either<L, R>) -> Option<L> {
+                  match source {
+                      Either::Left(value) => Some(value),
+                      Either::Right(_) => None,
+                  }
+              }
+          }
+
+          /// Creates a Prism focusing on the Left value of an Either.
+          pub fn prism_left<L, R>() -> EitherLeftPrism<L, R> {
+              EitherLeftPrism::new()
+          }
+
+      - step: 2
+        description: |
+          EitherRightPrism の実装。Right 値にフォーカス。
+        code_outline: |
+          /// A Prism that focuses on the Right value of an Either.
+          #[derive(Debug, Clone)]
+          pub struct EitherRightPrism<L, R> {
+              _marker: PhantomData<(L, R)>,
+          }
+
+          impl<L: Clone, R: Clone> Prism<Either<L, R>, R> for EitherRightPrism<L, R> {
+              fn preview<'a>(&self, source: &'a Either<L, R>) -> Option<&'a R> {
+                  source.right()
+              }
+
+              fn review(&self, value: R) -> Either<L, R> {
+                  Either::Right(value)
+              }
+
+              fn preview_owned(&self, source: Either<L, R>) -> Option<R> {
+                  match source {
+                      Either::Left(_) => None,
+                      Either::Right(value) => Some(value),
+                  }
+              }
+          }
+
+          /// Creates a Prism focusing on the Right value of an Either.
+          pub fn prism_right<L, R>() -> EitherRightPrism<L, R> {
+              EitherRightPrism::new()
+          }
+
+      - step: 3
+        description: |
+          choice 関数の実装。2つの Prism を結合。
+        code_outline: |
+          /// Combines two Prisms into a single Prism that tries left first, then right.
+          ///
+          /// The resulting Prism focuses on Either<A, B> where:
+          /// - Left(A) if the first prism matches
+          /// - Right(B) if the second prism matches
+          pub fn choice<S, A, B, P1, P2>(
+              left_prism: P1,
+              right_prism: P2,
+          ) -> ChoicePrism<P1, P2, S, A, B>
+          where
+              P1: Prism<S, A>,
+              P2: Prism<S, B>,
+          {
+              ChoicePrism::new(left_prism, right_prism)
+          }
+
+          pub struct ChoicePrism<P1, P2, S, A, B> {
+              left_prism: P1,
+              right_prism: P2,
+              _marker: PhantomData<(S, A, B)>,
+          }
+
+    tests:
+      - name: test_either_left_prism
+        description: Left Prism の動作テスト
+        test_type: unit
+        code_outline: |
+          #[test]
+          fn test_left_prism_preview_on_left() {
+              let prism = prism_left::<String, i32>();
+              let value: Either<String, i32> = Either::Left("error".to_string());
+              assert_eq!(prism.preview(&value), Some(&"error".to_string()));
+          }
+
+          #[test]
+          fn test_left_prism_preview_on_right() {
+              let prism = prism_left::<String, i32>();
+              let value: Either<String, i32> = Either::Right(42);
+              assert_eq!(prism.preview(&value), None);
+          }
+
+          #[test]
+          fn test_left_prism_review() {
+              let prism = prism_left::<String, i32>();
+              let reviewed = prism.review("hello".to_string());
+              assert_eq!(reviewed, Either::Left("hello".to_string()));
+          }
+
+      - name: prop_prism_laws_left
+        description: Left Prism の Prism 法則プロパティテスト
+        test_type: property
+        code_outline: |
+          proptest! {
+              #[test]
+              fn prop_left_prism_preview_review(value: String) {
+                  let prism = prism_left::<String, i32>();
+                  let reviewed = prism.review(value.clone());
+                  prop_assert_eq!(prism.preview(&reviewed), Some(&value));
+              }
+          }
+
+    dependencies:
+      - impl_either_type
+
+  # ============================================================================
+  # 3. Filtered コンビネータ
+  # ============================================================================
+  - id: impl_filtered_combinator
+    requirement_id: filtered_combinator
+    name: "Filtered コンビネータ実装"
+    priority: 3
+    description: |
+      述語関数に基づいて要素をフィルタリングするコンビネータを実装。
+      読み取り専用の filtered（Fold を返す）と
+      変更可能な filtered_traversal を提供。
+
+    files:
+      - path: src/optics/filtered.rs
+        description: |
+          Filtered コンビネータを定義。
+          - FilteredFold: 述語でフィルタリングされた Fold
+          - FilteredTraversal: 述語でフィルタリングされた Traversal
+
+    implementation_steps:
+      - step: 1
+        description: |
+          FilteredFold の実装。読み取り専用のフィルタリング。
+        code_outline: |
+          /// A Fold that filters elements based on a predicate.
+          ///
+          /// # Type Parameters
+          ///
+          /// - `S`: The source type
+          /// - `A`: The element type
+          /// - `T`: The underlying Traversal type
+          /// - `P`: The predicate function type
+          pub struct FilteredFold<S, A, T, P>
+          where
+              T: Traversal<S, A>,
+              P: Fn(&A) -> bool,
+          {
+              traversal: T,
+              predicate: P,
+              _marker: PhantomData<(S, A)>,
+          }
+
+          impl<S, A, T, P> FilteredFold<S, A, T, P>
+          where
+              T: Traversal<S, A>,
+              P: Fn(&A) -> bool,
+          {
+              /// Creates a new FilteredFold.
+              pub fn new(traversal: T, predicate: P) -> Self {
+                  Self {
+                      traversal,
+                      predicate,
+                      _marker: PhantomData,
+                  }
+              }
+          }
+
+          impl<S, A, T, P> Fold<S, A> for FilteredFold<S, A, T, P>
+          where
+              T: Traversal<S, A>,
+              P: Fn(&A) -> bool + Clone,
+              A: 'static,
+              S: 'static,
+          {
+              fn get_all<'a>(&self, source: &'a S) -> Box<dyn Iterator<Item = &'a A> + 'a> {
+                  let predicate = self.predicate.clone();
+                  Box::new(self.traversal.get_all(source).filter(move |a| predicate(a)))
+              }
+
+              fn fold<B, F>(&self, source: &S, initial: B, mut function: F) -> B
+              where
+                  F: FnMut(B, &A) -> B,
+              {
+                  let predicate = &self.predicate;
+                  self.traversal.get_all(source)
+                      .filter(|a| predicate(a))
+                      .fold(initial, |accumulator, element| function(accumulator, element))
+              }
+
+              fn length(&self, source: &S) -> usize {
+                  let predicate = &self.predicate;
+                  self.traversal.get_all(source)
+                      .filter(|a| predicate(a))
+                      .count()
+              }
+
+              fn for_all<Q>(&self, source: &S, mut predicate_to_check: Q) -> bool
+              where
+                  Q: FnMut(&A) -> bool,
+              {
+                  let predicate = &self.predicate;
+                  self.traversal.get_all(source)
+                      .filter(|a| predicate(a))
+                      .all(|a| predicate_to_check(a))
+              }
+
+              fn exists<Q>(&self, source: &S, mut predicate_to_check: Q) -> bool
+              where
+                  Q: FnMut(&A) -> bool,
+              {
+                  let predicate = &self.predicate;
+                  self.traversal.get_all(source)
+                      .filter(|a| predicate(a))
+                      .any(|a| predicate_to_check(a))
+              }
+
+              fn head_option<'a>(&self, source: &'a S) -> Option<&'a A> {
+                  let predicate = &self.predicate;
+                  self.traversal.get_all(source)
+                      .filter(|a| predicate(a))
+                      .next()
+              }
+          }
+
+          /// Creates a Fold that filters elements from a Traversal.
+          ///
+          /// The returned Fold only contains elements that satisfy the predicate.
+          /// This is a read-only operation; to modify filtered elements, use `filtered_traversal`.
+          pub fn filtered<S, A, T, P>(traversal: T, predicate: P) -> FilteredFold<S, A, T, P>
+          where
+              T: Traversal<S, A>,
+              P: Fn(&A) -> bool,
+          {
+              FilteredFold::new(traversal, predicate)
+          }
+
+      - step: 2
+        description: |
+          FilteredTraversal の実装。変更可能なフィルタリング。
+          警告: 述語を無効にする変更は未定義動作となる。
+        code_outline: |
+          /// A Traversal that filters elements based on a predicate.
+          ///
+          /// # Type Parameters
+          ///
+          /// - `S`: The source type
+          /// - `A`: The element type
+          /// - `T`: The underlying Traversal type
+          /// - `P`: The predicate function type
+          ///
+          /// # Warning
+          ///
+          /// Modifying elements in a way that invalidates the predicate
+          /// leads to undefined behavior. For example, if the predicate is
+          /// `|x| x > 0` and you modify a positive number to be negative,
+          /// the behavior is undefined.
+          ///
+          /// This is consistent with Haskell's `filtered` behavior.
+          /// If you need safe filtering, use `filtered` which returns a read-only Fold.
+          pub struct FilteredTraversal<S, A, T, P>
+          where
+              T: Traversal<S, A>,
+              P: Fn(&A) -> bool,
+          {
+              traversal: T,
+              predicate: P,
+              _marker: PhantomData<(S, A)>,
+          }
+
+          impl<S, A, T, P> FilteredTraversal<S, A, T, P>
+          where
+              T: Traversal<S, A>,
+              P: Fn(&A) -> bool,
+          {
+              /// Creates a new FilteredTraversal.
+              pub fn new(traversal: T, predicate: P) -> Self {
+                  Self {
+                      traversal,
+                      predicate,
+                      _marker: PhantomData,
+                  }
+              }
+          }
+
+          impl<S, A, T, P> Traversal<S, A> for FilteredTraversal<S, A, T, P>
+          where
+              T: Traversal<S, A>,
+              P: Fn(&A) -> bool + Clone,
+              A: Clone + 'static,
+              S: 'static,
+          {
+              fn get_all<'a>(&self, source: &'a S) -> Box<dyn Iterator<Item = &'a A> + 'a> {
+                  let predicate = self.predicate.clone();
+                  Box::new(self.traversal.get_all(source).filter(move |a| predicate(a)))
+              }
+
+              fn get_all_owned(&self, source: S) -> Vec<A> {
+                  let predicate = &self.predicate;
+                  self.traversal.get_all_owned(source)
+                      .into_iter()
+                      .filter(|a| predicate(a))
+                      .collect()
+              }
+
+              fn modify_all<F>(&self, source: S, mut function: F) -> S
+              where
+                  F: FnMut(A) -> A,
+              {
+                  let predicate = self.predicate.clone();
+                  self.traversal.modify_all(source, |a| {
+                      if predicate(&a) {
+                          function(a)
+                      } else {
+                          a
+                      }
+                  })
+              }
+          }
+
+          /// Creates a Traversal that filters elements based on a predicate.
+          ///
+          /// # Warning
+          ///
+          /// Modifying elements in a way that invalidates the predicate
+          /// leads to undefined behavior. If you need safe filtering,
+          /// use `filtered` which returns a read-only Fold.
+          pub fn filtered_traversal<S, A, T, P>(traversal: T, predicate: P) -> FilteredTraversal<S, A, T, P>
+          where
+              T: Traversal<S, A>,
+              P: Fn(&A) -> bool,
+          {
+              FilteredTraversal::new(traversal, predicate)
+          }
+
+    tests:
+      - name: test_filtered_basic
+        description: filtered の基本動作テスト
+        test_type: unit
+        code_outline: |
+          #[test]
+          fn test_filtered_get_all() {
+              let vector: PersistentVector<i32> = (1..=10).collect();
+              let traversal = persistent_vector_traversal();
+              let evens = filtered(traversal, |x: &i32| x % 2 == 0);
+
+              let result: Vec<&i32> = evens.get_all(&vector).collect();
+              assert_eq!(result, vec![&2, &4, &6, &8, &10]);
+          }
+
+      - name: prop_filtered_all_satisfy
+        description: filtered で取得した要素が全て述語を満たすことを検証
+        test_type: property
+        code_outline: |
+          proptest! {
+              #[test]
+              fn prop_filtered_elements_satisfy_predicate(data: Vec<i32>) {
+                  let traversal = VecTraversal::new();
+                  let positive = filtered(traversal, |x: &i32| *x > 0);
+
+                  for element in positive.get_all(&data) {
+                      prop_assert!(*element > 0);
+                  }
+              }
+          }
+
+    dependencies:
+      - impl_fold_trait
+
+  # ============================================================================
+  # 4. Each コンビネータ
+  # ============================================================================
+  - id: impl_each_combinator
+    requirement_id: each_combinator
+    name: "Each コンビネータ実装"
+    priority: 4
+    description: |
+      コンテナの全要素にフォーカスする Traversal を提供する型クラス Each を実装。
+      Haskell の Each 型クラスと同等の機能を提供。
+
+    files:
+      - path: src/optics/each.rs
+        description: |
+          Each トレイトと各コンテナ型への実装を定義。
+          - Each トレイト
+          - PersistentVector への実装
+          - Vec, Option, Result への実装
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Each トレイトの定義。コンテナ要素への Traversal を提供。
+        code_outline: |
+          /// A type class for containers that can provide a Traversal to all elements.
+          ///
+          /// This is equivalent to Haskell's Each type class.
+          pub trait Each<A> {
+              /// The type of Traversal this container provides.
+              type EachTraversal: Traversal<Self, A>;
+
+              /// Returns a Traversal focusing on all elements.
+              fn each_traversal() -> Self::EachTraversal;
+          }
+
+          /// Creates a Traversal focusing on all elements of a container.
+          ///
+          /// This is a convenience function that uses the Each trait.
+          pub fn each<C, A>() -> C::EachTraversal
+          where
+              C: Each<A>,
+          {
+              C::each_traversal()
+          }
+
+      - step: 2
+        description: |
+          PersistentVector への Each 実装。
+        code_outline: |
+          impl<T: Clone + 'static> Each<T> for PersistentVector<T> {
+              type EachTraversal = PersistentVectorTraversal<T>;
+
+              fn each_traversal() -> Self::EachTraversal {
+                  PersistentVectorTraversal::new()
+              }
+          }
+
+      - step: 3
+        description: |
+          Vec, Option, Result への Each 実装。
+        code_outline: |
+          impl<T: 'static> Each<T> for Vec<T> {
+              type EachTraversal = VecTraversal<T>;
+
+              fn each_traversal() -> Self::EachTraversal {
+                  VecTraversal::new()
+              }
+          }
+
+          impl<T: 'static> Each<T> for Option<T> {
+              type EachTraversal = OptionTraversal<T>;
+
+              fn each_traversal() -> Self::EachTraversal {
+                  OptionTraversal::new()
+              }
+          }
+
+          impl<T: 'static, E: 'static> Each<T> for Result<T, E> {
+              type EachTraversal = ResultTraversal<T, E>;
+
+              fn each_traversal() -> Self::EachTraversal {
+                  ResultTraversal::new()
+              }
+          }
+
+    tests:
+      - name: test_each_persistent_vector
+        description: PersistentVector での each の動作テスト
+        test_type: unit
+        code_outline: |
+          #[test]
+          fn test_each_persistent_vector() {
+              let vector: PersistentVector<i32> = (1..=5).collect();
+              let traversal = each::<PersistentVector<i32>, i32>();
+
+              let sum: i32 = traversal.get_all(&vector).sum();
+              assert_eq!(sum, 15);
+          }
+
+      - name: test_each_option
+        description: Option での each の動作テスト
+        test_type: unit
+        code_outline: |
+          #[test]
+          fn test_each_option_some() {
+              let opt: Option<i32> = Some(42);
+              let traversal = each::<Option<i32>, i32>();
+
+              let result: Vec<&i32> = traversal.get_all(&opt).collect();
+              assert_eq!(result, vec![&42]);
+          }
+
+          #[test]
+          fn test_each_option_none() {
+              let opt: Option<i32> = None;
+              let traversal = each::<Option<i32>, i32>();
+
+              assert!(traversal.get_all(&opt).next().is_none());
+          }
+
+    dependencies: []
+
+  # ============================================================================
+  # 5. At コンビネータ
+  # ============================================================================
+  - id: impl_at_combinator
+    requirement_id: at_combinator
+    name: "At コンビネータ実装"
+    priority: 5
+    description: |
+      Map 系コンテナのキーに対応する値への Optional を提供する型クラス At を実装。
+
+      設計上の注意:
+      要件定義では Haskell の At 型クラスに倣って Lens<M, Option<V>> を返す設計だが、
+      Rust の所有権モデルでは &Option<V> を返すことができない（Option<V> がどこにも
+      存在しないため）。そのため、Optional<M, V> を返す設計に変更する。
+
+      キーの削除は別途 remove メソッドで提供し、set は insert/update として機能する。
+      これは既存の PersistentHashMapKeyOptional と整合性がある。
+
+    files:
+      - path: src/optics/at.rs
+        description: |
+          At トレイトと各 Map 型への実装を定義。
+          - At トレイト（Optional を返す）
+          - PersistentHashMap への実装（既存の PersistentHashMapKeyOptional を活用）
+          - PersistentTreeMap への実装（既存の PersistentTreeMapKeyOptional を活用）
+
+    implementation_steps:
+      - step: 1
+        description: |
+          At トレイトの定義。Map キーへの Optional を提供。
+        code_outline: |
+          /// A type class for map-like containers that support key-based access.
+          ///
+          /// The at operation returns an Optional<M, V> which allows:
+          /// - Getting the value for a key (None if not present)
+          /// - Setting a value (insert or update)
+          ///
+          /// # Design Note
+          ///
+          /// Unlike Haskell's At type class which returns `Lens' m (Maybe v)`,
+          /// this trait returns `Optional<M, V>` because Rust's ownership model
+          /// does not allow returning `&Option<V>` when the `Option<V>` doesn't
+          /// exist in memory.
+          ///
+          /// Key deletion is handled separately via the map's native remove method,
+          /// not through the Optional's set operation.
+          pub trait At<K, V> {
+              /// The type of Optional this container provides for key access.
+              type AtOptional: Optional<Self, V>;
+
+              /// Returns an Optional focusing on the value for the given key.
+              ///
+              /// The Optional returns Some if the key exists, None otherwise.
+              /// Setting a value will insert or update the key-value pair.
+              fn at_optional(key: K) -> Self::AtOptional;
+          }
+
+          /// Creates an Optional focusing on a key in a map.
+          ///
+          /// # Examples
+          ///
+          /// ```
+          /// use lambars::persistent::PersistentHashMap;
+          /// use lambars::optics::{Optional, at::at};
+          ///
+          /// let map = PersistentHashMap::new()
+          ///     .insert("key".to_string(), 42);
+          /// let optional = at::<PersistentHashMap<String, i32>, _, _>("key".to_string());
+          ///
+          /// assert_eq!(optional.get_option(&map), Some(&42));
+          /// ```
+          pub fn at<M, K, V>(key: K) -> M::AtOptional
+          where
+              M: At<K, V>,
+          {
+              M::at_optional(key)
+          }
+
+      - step: 2
+        description: |
+          PersistentHashMap への At 実装。既存の PersistentHashMapKeyOptional を活用。
+        code_outline: |
+          impl<K: Clone + Hash + Eq, V: Clone> At<K, V> for PersistentHashMap<K, V> {
+              type AtOptional = PersistentHashMapKeyOptional<K, V>;
+
+              fn at_optional(key: K) -> Self::AtOptional {
+                  PersistentHashMapKeyOptional::new(key)
+              }
+          }
+
+      - step: 3
+        description: |
+          PersistentTreeMap への At 実装。既存の PersistentTreeMapKeyOptional を活用。
+        code_outline: |
+          impl<K: Clone + Ord, V: Clone> At<K, V> for PersistentTreeMap<K, V> {
+              type AtOptional = PersistentTreeMapKeyOptional<K, V>;
+
+              fn at_optional(key: K) -> Self::AtOptional {
+                  PersistentTreeMapKeyOptional::new(key)
+              }
+          }
+
+    tests:
+      - name: test_at_hashmap_basic
+        description: PersistentHashMap での at の基本動作テスト
+        test_type: unit
+        code_outline: |
+          #[test]
+          fn test_at_get_existing_key() {
+              let map = PersistentHashMap::new()
+                  .insert("key".to_string(), 42);
+              let optional = at::<PersistentHashMap<String, i32>, _, _>("key".to_string());
+
+              assert_eq!(optional.get_option(&map), Some(&42));
+          }
+
+          #[test]
+          fn test_at_get_missing_key() {
+              let map: PersistentHashMap<String, i32> = PersistentHashMap::new();
+              let optional = at::<PersistentHashMap<String, i32>, _, _>("missing".to_string());
+
+              assert_eq!(optional.get_option(&map), None);
+          }
+
+          #[test]
+          fn test_at_set_inserts_new_key() {
+              let map: PersistentHashMap<String, i32> = PersistentHashMap::new();
+              let optional = at::<PersistentHashMap<String, i32>, _, _>("new_key".to_string());
+
+              let updated = optional.set(map, 100);
+              assert_eq!(updated.get("new_key"), Some(&100));
+          }
+
+          #[test]
+          fn test_at_set_updates_existing_key() {
+              let map = PersistentHashMap::new()
+                  .insert("key".to_string(), 42);
+              let optional = at::<PersistentHashMap<String, i32>, _, _>("key".to_string());
+
+              let updated = optional.set(map, 100);
+              assert_eq!(updated.get("key"), Some(&100));
+          }
+
+      - name: prop_at_optional_laws
+        description: At の Optional 法則プロパティテスト
+        test_type: property
+        code_outline: |
+          proptest! {
+              #[test]
+              fn prop_at_get_option_set(key: String, value: i32) {
+                  // GetOptionSet 法則: get_option が Some を返す場合、
+                  // その値を set すると元のマップと等しくなる
+                  let map = PersistentHashMap::new().insert(key.clone(), value);
+                  let optional = at::<PersistentHashMap<String, i32>, _, _>(key.clone());
+
+                  if let Some(got) = optional.get_option(&map) {
+                      let set_back = optional.set(map.clone(), got.clone());
+                      prop_assert_eq!(map, set_back);
+                  }
+              }
+
+              #[test]
+              fn prop_at_set_get_option(key: String, value: i32) {
+                  // SetGetOption 法則: set した後に get_option すると
+                  // set した値が返る（キーが存在する場合）
+                  let map = PersistentHashMap::new().insert(key.clone(), 0);
+                  let optional = at::<PersistentHashMap<String, i32>, _, _>(key.clone());
+
+                  let updated = optional.set(map, value);
+                  prop_assert_eq!(optional.get_option(&updated), Some(&value));
+              }
+          }
+
+    dependencies: []
+
+  # ============================================================================
+  # 6. Index コンビネータ
+  # ============================================================================
+  - id: impl_index_combinator
+    requirement_id: index_combinator
+    name: "Index コンビネータ実装"
+    priority: 6
+    description: |
+      インデックスベースのコンテナの指定位置への Optional を提供する型クラス Ixed を実装。
+      既存の index_optional を活用しつつ、型クラスとして整理。
+
+    files:
+      - path: src/optics/index.rs
+        description: |
+          Ixed トレイトと各コンテナ型への実装を定義。
+          - Ixed トレイト
+          - index 関数
+          - 既存実装の統合
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Ixed トレイトの定義。インデックスアクセスを提供。
+        code_outline: |
+          /// A type class for containers that support index-based access.
+          ///
+          /// Unlike At, Ixed does not support inserting new elements.
+          /// It only provides access to existing elements.
+          ///
+          /// This is equivalent to Haskell's Ixed type class.
+          pub trait Ixed<I, A> {
+              /// The type of Optional this container provides for index access.
+              type IxOptional: Optional<Self, A>;
+
+              /// Returns an Optional focusing on the element at the given index.
+              fn ix(index: I) -> Self::IxOptional;
+          }
+
+          /// Creates an Optional focusing on an element at an index.
+          pub fn index<C, I, A>(i: I) -> C::IxOptional
+          where
+              C: Ixed<I, A>,
+          {
+              C::ix(i)
+          }
+
+      - step: 2
+        description: |
+          PersistentVector への Ixed 実装。既存の PersistentVectorIndexOptional を活用。
+        code_outline: |
+          impl<T: Clone> Ixed<usize, T> for PersistentVector<T> {
+              type IxOptional = PersistentVectorIndexOptional<T>;
+
+              fn ix(index: usize) -> Self::IxOptional {
+                  PersistentVectorIndexOptional::new(index)
+              }
+          }
+
+      - step: 3
+        description: |
+          Vec への Ixed 実装。
+        code_outline: |
+          pub struct VecIndexOptional<T> {
+              index: usize,
+              _marker: PhantomData<T>,
+          }
+
+          impl<T: Clone> Ixed<usize, T> for Vec<T> {
+              type IxOptional = VecIndexOptional<T>;
+
+              fn ix(index: usize) -> Self::IxOptional {
+                  VecIndexOptional::new(index)
+              }
+          }
+
+    tests:
+      - name: test_index_persistent_vector
+        description: PersistentVector での index の動作テスト
+        test_type: unit
+        code_outline: |
+          #[test]
+          fn test_index_in_bounds() {
+              let vector: PersistentVector<i32> = (1..=5).collect();
+              let opt = index::<PersistentVector<i32>, _, _>(2);
+
+              assert_eq!(opt.get_option(&vector), Some(&3));
+          }
+
+          #[test]
+          fn test_index_out_of_bounds() {
+              let vector: PersistentVector<i32> = (1..=5).collect();
+              let opt = index::<PersistentVector<i32>, _, _>(10);
+
+              assert_eq!(opt.get_option(&vector), None);
+          }
+
+      - name: prop_index_get_set_law
+        description: Index の Get-Set 法則プロパティテスト
+        test_type: property
+        code_outline: |
+          proptest! {
+              #[test]
+              fn prop_index_get_set(data: Vec<i32>, idx in 0..100usize) {
+                  let vector: PersistentVector<i32> = data.into_iter().collect();
+                  let opt = index::<PersistentVector<i32>, _, _>(idx);
+
+                  if let Some(value) = opt.get_option(&vector) {
+                      let set_back = opt.set(vector.clone(), value.clone());
+                      prop_assert_eq!(vector, set_back);
+                  }
+              }
+          }
+
+    dependencies: []
+
+  # ============================================================================
+  # 7. HeadOption / LastOption コンビネータ
+  # ============================================================================
+  - id: impl_head_last_option
+    requirement_id: head_option_combinator
+    name: "HeadOption / LastOption コンビネータ実装"
+    priority: 7
+    description: |
+      シーケンスの先頭/末尾要素への Optional を提供するコンビネータを実装。
+      Haskell の _head, _last Traversal と同等の機能を提供。
+
+      設計上の注意:
+      トレイト名は Cons ではなく Sequence を使用する。Haskell では Cons は
+      cons セル（リストの構成要素）を意味し、_head と _last は別の概念。
+      Sequence の方が意図を正確に伝えられる。
+
+    files:
+      - path: src/optics/sequence.rs
+        description: |
+          シーケンス操作コンビネータを定義。
+          - Sequence トレイト（先頭/末尾へのアクセスを提供）
+          - HeadOptional: 先頭要素への Optional
+          - LastOptional: 末尾要素への Optional
+          - head_option, last_option 関数
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Sequence トレイトの定義。先頭/末尾要素アクセスを提供する型クラス。
+        code_outline: |
+          /// A type class for sequence-like containers that have a head and last element.
+          ///
+          /// This trait provides Optional-based access to the first and last elements
+          /// of a sequence. It is similar to Haskell's _head and _last traversals.
+          ///
+          /// # Note
+          ///
+          /// The name "Sequence" is used instead of "Cons" because in Haskell,
+          /// Cons refers to cons cells (list constructors), while this trait
+          /// is about accessing the head and last elements of any sequence.
+          pub trait Sequence<A> {
+              /// The type of Optional for head access.
+              type HeadOptional: Optional<Self, A>;
+
+              /// The type of Optional for last access.
+              type LastOptional: Optional<Self, A>;
+
+              /// Returns an Optional focusing on the first element.
+              fn head_optional() -> Self::HeadOptional;
+
+              /// Returns an Optional focusing on the last element.
+              fn last_optional() -> Self::LastOptional;
+          }
+
+      - step: 2
+        description: |
+          head_option と last_option 関数の実装。
+        code_outline: |
+          /// Creates an Optional focusing on the first element of a sequence.
+          ///
+          /// # Examples
+          ///
+          /// ```
+          /// use lambars::persistent::PersistentVector;
+          /// use lambars::optics::{Optional, sequence::head_option};
+          ///
+          /// let vector: PersistentVector<i32> = (1..=5).collect();
+          /// let head = head_option::<PersistentVector<i32>, i32>();
+          ///
+          /// assert_eq!(head.get_option(&vector), Some(&1));
+          /// ```
+          pub fn head_option<S, A>() -> S::HeadOptional
+          where
+              S: Sequence<A>,
+          {
+              S::head_optional()
+          }
+
+          /// Creates an Optional focusing on the last element of a sequence.
+          ///
+          /// # Examples
+          ///
+          /// ```
+          /// use lambars::persistent::PersistentVector;
+          /// use lambars::optics::{Optional, sequence::last_option};
+          ///
+          /// let vector: PersistentVector<i32> = (1..=5).collect();
+          /// let last = last_option::<PersistentVector<i32>, i32>();
+          ///
+          /// assert_eq!(last.get_option(&vector), Some(&5));
+          /// ```
+          pub fn last_option<S, A>() -> S::LastOptional
+          where
+              S: Sequence<A>,
+          {
+              S::last_optional()
+          }
+
+      - step: 3
+        description: |
+          PersistentVector への Sequence 実装。
+        code_outline: |
+          /// An Optional focusing on the first element of a PersistentVector.
+          #[derive(Debug, Clone)]
+          pub struct PersistentVectorHeadOptional<T> {
+              _marker: PhantomData<T>,
+          }
+
+          impl<T> PersistentVectorHeadOptional<T> {
+              /// Creates a new PersistentVectorHeadOptional.
+              pub const fn new() -> Self {
+                  Self { _marker: PhantomData }
+              }
+          }
+
+          impl<T> Default for PersistentVectorHeadOptional<T> {
+              fn default() -> Self {
+                  Self::new()
+              }
+          }
+
+          impl<T: Clone> Optional<PersistentVector<T>, T> for PersistentVectorHeadOptional<T> {
+              fn get_option<'a>(&self, source: &'a PersistentVector<T>) -> Option<&'a T> {
+                  source.get(0)
+              }
+
+              fn set(&self, source: PersistentVector<T>, value: T) -> PersistentVector<T> {
+                  source.update(0, value).unwrap_or(source)
+              }
+          }
+
+          /// An Optional focusing on the last element of a PersistentVector.
+          #[derive(Debug, Clone)]
+          pub struct PersistentVectorLastOptional<T> {
+              _marker: PhantomData<T>,
+          }
+
+          impl<T> PersistentVectorLastOptional<T> {
+              /// Creates a new PersistentVectorLastOptional.
+              pub const fn new() -> Self {
+                  Self { _marker: PhantomData }
+              }
+          }
+
+          impl<T> Default for PersistentVectorLastOptional<T> {
+              fn default() -> Self {
+                  Self::new()
+              }
+          }
+
+          impl<T: Clone> Optional<PersistentVector<T>, T> for PersistentVectorLastOptional<T> {
+              fn get_option<'a>(&self, source: &'a PersistentVector<T>) -> Option<&'a T> {
+                  if source.is_empty() {
+                      None
+                  } else {
+                      source.get(source.len() - 1)
+                  }
+              }
+
+              fn set(&self, source: PersistentVector<T>, value: T) -> PersistentVector<T> {
+                  if source.is_empty() {
+                      source
+                  } else {
+                      source.update(source.len() - 1, value).unwrap_or(source)
+                  }
+              }
+          }
+
+          impl<T: Clone> Sequence<T> for PersistentVector<T> {
+              type HeadOptional = PersistentVectorHeadOptional<T>;
+              type LastOptional = PersistentVectorLastOptional<T>;
+
+              fn head_optional() -> Self::HeadOptional {
+                  PersistentVectorHeadOptional::new()
+              }
+
+              fn last_optional() -> Self::LastOptional {
+                  PersistentVectorLastOptional::new()
+              }
+          }
+
+      - step: 4
+        description: |
+          Vec への Sequence 実装。
+        code_outline: |
+          /// An Optional focusing on the first element of a Vec.
+          #[derive(Debug, Clone)]
+          pub struct VecHeadOptional<T> {
+              _marker: PhantomData<T>,
+          }
+
+          impl<T> VecHeadOptional<T> {
+              /// Creates a new VecHeadOptional.
+              pub const fn new() -> Self {
+                  Self { _marker: PhantomData }
+              }
+          }
+
+          impl<T: Clone> Optional<Vec<T>, T> for VecHeadOptional<T> {
+              fn get_option<'a>(&self, source: &'a Vec<T>) -> Option<&'a T> {
+                  source.first()
+              }
+
+              fn set(&self, mut source: Vec<T>, value: T) -> Vec<T> {
+                  if !source.is_empty() {
+                      source[0] = value;
+                  }
+                  source
+              }
+          }
+
+          /// An Optional focusing on the last element of a Vec.
+          #[derive(Debug, Clone)]
+          pub struct VecLastOptional<T> {
+              _marker: PhantomData<T>,
+          }
+
+          impl<T> VecLastOptional<T> {
+              /// Creates a new VecLastOptional.
+              pub const fn new() -> Self {
+                  Self { _marker: PhantomData }
+              }
+          }
+
+          impl<T: Clone> Optional<Vec<T>, T> for VecLastOptional<T> {
+              fn get_option<'a>(&self, source: &'a Vec<T>) -> Option<&'a T> {
+                  source.last()
+              }
+
+              fn set(&self, mut source: Vec<T>, value: T) -> Vec<T> {
+                  if let Some(last) = source.last_mut() {
+                      *last = value;
+                  }
+                  source
+              }
+          }
+
+          impl<T: Clone> Sequence<T> for Vec<T> {
+              type HeadOptional = VecHeadOptional<T>;
+              type LastOptional = VecLastOptional<T>;
+
+              fn head_optional() -> Self::HeadOptional {
+                  VecHeadOptional::new()
+              }
+
+              fn last_optional() -> Self::LastOptional {
+                  VecLastOptional::new()
+              }
+          }
+
+    tests:
+      - name: test_head_option_basic
+        description: head_option の基本動作テスト
+        test_type: unit
+        code_outline: |
+          #[test]
+          fn test_head_option_non_empty() {
+              let vector: PersistentVector<i32> = (1..=5).collect();
+              let head = head_option::<PersistentVector<i32>, i32>();
+
+              assert_eq!(head.get_option(&vector), Some(&1));
+          }
+
+          #[test]
+          fn test_head_option_empty() {
+              let empty: PersistentVector<i32> = PersistentVector::new();
+              let head = head_option::<PersistentVector<i32>, i32>();
+
+              assert_eq!(head.get_option(&empty), None);
+          }
+
+      - name: test_last_option_basic
+        description: last_option の基本動作テスト
+        test_type: unit
+        code_outline: |
+          #[test]
+          fn test_last_option_non_empty() {
+              let vector: PersistentVector<i32> = (1..=5).collect();
+              let last = last_option::<PersistentVector<i32>, i32>();
+
+              assert_eq!(last.get_option(&vector), Some(&5));
+          }
+
+          #[test]
+          fn test_last_option_empty() {
+              let empty: PersistentVector<i32> = PersistentVector::new();
+              let last = last_option::<PersistentVector<i32>, i32>();
+
+              assert_eq!(last.get_option(&empty), None);
+          }
+
+      - name: prop_head_option_get_set_law
+        description: HeadOption の Get-Set 法則プロパティテスト
+        test_type: property
+        code_outline: |
+          proptest! {
+              #[test]
+              fn prop_head_option_get_set(data: Vec<i32>) {
+                  let vector: PersistentVector<i32> = data.into_iter().collect();
+                  let head = head_option::<PersistentVector<i32>, i32>();
+
+                  if let Some(value) = head.get_option(&vector) {
+                      let set_back = head.set(vector.clone(), value.clone());
+                      prop_assert_eq!(vector, set_back);
+                  }
+              }
+          }
+
+    dependencies: []
+
+  # ============================================================================
+  # 8. Optics 合成拡張
+  # ============================================================================
+  - id: impl_optics_composition
+    requirement_id: optics_composition_extension
+    name: "Optics 合成拡張"
+    priority: 8
+    description: |
+      異なる Optics 型間の合成を可能にする拡張メソッドを実装。
+      Lens + Optional -> Optional
+      Lens + Traversal -> Traversal
+      Traversal + Fold -> Fold
+      などの合成パターンをサポート。
+
+    files:
+      - path: src/optics/compose.rs
+        description: |
+          Optics 合成の拡張トレイトを定義。
+          - LensComposeExtension の拡張
+          - TraversalComposeExtension の追加
+          - 型階層に基づく合成
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Lens の合成拡張。Optional, Traversal との合成。
+        code_outline: |
+          /// Extension trait for composing Lens with other optics.
+          pub trait LensComposeExtension<S, A>: Lens<S, A> {
+              /// Composes this lens with an optional to create an optional.
+              fn compose_optional<B, O>(self, optional: O) -> LensOptionalComposition<Self, O, A>
+              where
+                  Self: Sized,
+                  O: Optional<A, B>;
+
+              /// Composes this lens with a traversal to create a traversal.
+              fn compose_traversal<B, T>(self, traversal: T) -> LensTraversalComposition<Self, T, A>
+              where
+                  Self: Sized,
+                  T: Traversal<A, B>;
+
+              /// Composes this lens with a fold to create a fold.
+              fn compose_fold<B, F>(self, fold: F) -> LensFoldComposition<Self, F, A>
+              where
+                  Self: Sized,
+                  F: Fold<A, B>;
+          }
+
+      - step: 2
+        description: |
+          Traversal の合成拡張。Fold との合成。
+        code_outline: |
+          /// Extension trait for composing Traversal with other optics.
+          pub trait TraversalComposeExtension<S, A>: Traversal<S, A> {
+              /// Composes this traversal with a fold to create a fold.
+              fn compose_fold<B, F>(self, fold: F) -> TraversalFoldComposition<Self, F, A>
+              where
+                  Self: Sized,
+                  F: Fold<A, B>;
+          }
+
+      - step: 3
+        description: |
+          合成結果の型定義と Optics トレイト実装。
+        code_outline: |
+          /// Result of composing Lens with Optional.
+          pub struct LensOptionalComposition<L, O, A> {
+              lens: L,
+              optional: O,
+              _marker: PhantomData<A>,
+          }
+
+          impl<S, A, B, L, O> Optional<S, B> for LensOptionalComposition<L, O, A>
+          where
+              L: Lens<S, A>,
+              O: Optional<A, B>,
+              A: Clone + 'static,
+          {
+              fn get_option<'a>(&self, source: &'a S) -> Option<&'a B> {
+                  let intermediate = self.lens.get(source);
+                  self.optional.get_option(intermediate)
+              }
+
+              fn set(&self, source: S, value: B) -> S {
+                  let intermediate = self.lens.get(&source).clone();
+                  let new_intermediate = self.optional.set(intermediate, value);
+                  self.lens.set(source, new_intermediate)
+              }
+          }
+
+    tests:
+      - name: test_lens_optional_composition
+        description: Lens + Optional 合成のテスト
+        test_type: unit
+        code_outline: |
+          #[test]
+          fn test_lens_compose_optional() {
+              #[derive(Clone, PartialEq, Debug)]
+              struct Container {
+                  items: PersistentVector<i32>,
+              }
+
+              let items_lens = lens!(Container, items);
+              let first_optional = index::<PersistentVector<i32>, _, _>(0);
+              let composed = items_lens.compose_optional(first_optional);
+
+              let container = Container {
+                  items: vec![1, 2, 3].into_iter().collect(),
+              };
+
+              assert_eq!(composed.get_option(&container), Some(&1));
+          }
+
+      - name: test_lens_traversal_composition
+        description: Lens + Traversal 合成のテスト
+        test_type: unit
+        code_outline: |
+          #[test]
+          fn test_lens_compose_traversal() {
+              #[derive(Clone, PartialEq, Debug)]
+              struct Container {
+                  items: Vec<i32>,
+              }
+
+              let items_lens = lens!(Container, items);
+              let all_items = each::<Vec<i32>, i32>();
+              let composed = items_lens.compose_traversal(all_items);
+
+              let container = Container {
+                  items: vec![1, 2, 3],
+              };
+
+              let sum: i32 = composed.get_all(&container).sum();
+              assert_eq!(sum, 6);
+          }
+
+    dependencies:
+      - impl_fold_trait
+
+# テスト戦略
+test_strategy:
+  unit_tests:
+    location: src/optics/*.rs
+    description: |
+      各モジュール内に #[cfg(test)] mod tests で単体テストを配置。
+      基本的な機能の動作確認、エッジケース、エラーケースをカバー。
+
+  integration_tests:
+    location: tests/optics_combinators_tests.rs
+    description: |
+      複数のコンビネータを組み合わせた統合テスト。
+      実際のユースケースに近いシナリオでの動作確認。
+
+  property_tests:
+    location: tests/optics_laws.rs
+    description: |
+      各 Optics 型に対する法則のプロパティテスト。
+      proptest を使用して大量のランダム入力でテスト。
+
+      ## Lens 法則
+
+      1. **GetPut 法則**: get した値を set すると元に戻る
+         ```
+         lens.set(source, lens.get(&source).clone()) == source
+         ```
+
+      2. **PutGet 法則**: set した後 get すると set した値が返る
+         ```
+         lens.get(&lens.set(source, value)) == &value
+         ```
+
+      3. **PutPut 法則**: 連続する set は最後の set のみが有効
+         ```
+         lens.set(lens.set(source, value1), value2) == lens.set(source, value2)
+         ```
+
+      ## Prism 法則
+
+      1. **PreviewReview 法則**: review した値を preview すると元の値が返る
+         ```
+         prism.preview(&prism.review(value)) == Some(&value)
+         ```
+
+      2. **ReviewPreview 法則**: preview が Some を返す場合、その値を review すると元の source と等しい
+         ```
+         if let Some(a) = prism.preview(&source) {
+             prism.review(a.clone()) == source
+         }
+         ```
+
+      ## Optional 法則
+
+      1. **GetOptionSet 法則**: get_option が Some を返す場合、その値を set すると元に戻る
+         ```
+         if let Some(a) = optional.get_option(&source) {
+             optional.set(source.clone(), a.clone()) == source
+         }
+         ```
+
+      2. **SetGetOption 法則**: set した後 get_option すると set した値が返る（要素が存在する場合）
+         ```
+         if optional.get_option(&source).is_some() {
+             optional.get_option(&optional.set(source, value)) == Some(&value)
+         }
+         ```
+
+      ## Traversal 法則
+
+      1. **ModifyIdentity 法則**: identity 関数で modify すると元に戻る
+         ```
+         traversal.modify_all(source, |x| x) == source
+         ```
+
+      2. **ModifyComposition 法則**: 連続する modify は関数合成と等価
+         ```
+         traversal.modify_all(traversal.modify_all(source, f), g)
+             == traversal.modify_all(source, |x| g(f(x)))
+         ```
+
+      ## Fold 法則（追加）
+
+      1. **FoldConsistency 法則**: fold の結果は get_all の結果と一致
+         ```
+         fold.fold(&source, Vec::new(), |mut acc, x| { acc.push(x); acc })
+             == fold.get_all(&source).collect::<Vec<_>>()
+         ```
+
+# 完了条件
+acceptance_criteria:
+  - 全ての要件定義に記載されたコンビネータが実装されていること
+  - 各コンビネータに対して Optics 法則のプロパティテストが実装されていること
+  - 既存の Optics 型（Lens, Prism, Optional, Traversal, Iso）との合成が可能であること
+  - PersistentVector, PersistentHashMap, PersistentTreeMap との統合が完了していること
+  - 全てのコンビネータに対して包括的なドキュメントコメントがあること
+  - cargo check が通過すること
+  - cargo clippy が通過すること（--all-features --all-targets -- -D warnings）
+  - cargo test --no-default-features が通過すること
+  - cargo test --all-features が通過すること
+  - RUSTDOCFLAGS="-D warnings" cargo doc --no-deps が通過すること
+  - カバレッジ 100% であること

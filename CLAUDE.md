@@ -169,12 +169,19 @@ cargo clean
    5. functional-programming-specialist は実装計画が要件定義と異なる点がなくなるまでレビュー指摘を行う
    6. レビュー指摘がなくなるまで繰り返す（軽微な指摘も全て解決すること）
 3. サブエージェント: rust-implementation-specialist を起動し実装計画に則って TDD で実装を行う
-4. rust-implementation-reviewer を起動して実装のレビューを行う
+   1. テストは rstest をベースに作成すること
+      1. 標準の test create は使用しない
+   2. ここまではテストが通ることまで確認できたらコミットする
+4. rust-simplification-specialist を起動して今回変更・作成したコードの構造を簡素化する
+5. rust-implementation-reviewer を起動して実装のレビューを行う
+
    1. 略語を使用していないこと
    2. 差分の対象となるテストのみを実行し失敗していないこと
    3. 差分の対象となるテストのカバレッジ 100%であること
    4. 不必要なコメントが記述されていないこと
+
       1. コードで理解できる内容のコメントは不要
+
       ```rs
         /// 例
         fn safety_unwrap(...) {...}
@@ -182,21 +189,30 @@ cargo clean
          /// Safely converts usize to i32 for test assertions.
          safety_unwrap(hoge);
         }
+
+        enum Hoge {
+          /// This is Apple. Color is Red.　<= 冗長のための不要
+          Apple,
+          /// This is Banana. Color is Yellow. <= 冗長のための不要
+          Banana
+        }
       ```
+
    5. レビュー指摘がなくなるまで修正とレビューを繰り返す（軽微な指摘も全て解決すること）
-5. functional-programming-specialist を起動し要件定義の観点から実装をレビューする
-6. コミット前に以下の確認を実施する
+
+6. functional-programming-specialist を起動し要件定義の観点から実装をレビューする
+7. コミット前に以下の確認を実施する
    1. `cargo fmt` - コードフォーマット
    2. `cargo clippy --all-features --all-targets -- -D warnings` - lint チェック
    3. `cargo test --no-default-features` - feature なしでテスト
    4. `cargo test --all-features` - 全 feature でテスト
    5. `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` - ドキュメントビルド
    6. 全てパスしたらコミット
-7. 実装した内容を README.md, docs/external/comparison に反映する必要があるか調査し、修正が必要な場合は変更を記載しコミットする
-8. 対象の実装計画ファイルと要件定義、issue 対応の場合は issue のファイルを `docs/internal/done/` に移動する
-9. 実装上困難だと判断した場合は `/new-issue <Issue名>` で Issue ファイルを作成する
-   1. `docs/internal/issues/` に将来の拡張案として保存する
-   2. github mcp を使って GitHub Issue を作成し、ファイルの `github_issue` セクションを更新する
+8. 実装した内容を README.md, docs/external/comparison に反映する必要があるか調査し、修正が必要な場合は変更を記載しコミットする
+9. 対象の実装計画ファイルと要件定義、issue 対応の場合は issue のファイルを `docs/internal/done/` に移動する
+10. 実装上困難だと判断した場合は `/new-issue <Issue名>` で Issue ファイルを作成する
+11. `docs/internal/issues/` に将来の拡張案として保存する
+12. github mcp を使って GitHub Issue を作成し、ファイルの `github_issue` セクションを更新する
 
 ### スラッシュコマンド一覧
 
