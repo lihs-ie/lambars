@@ -1378,6 +1378,38 @@ let config = AppConfig {
 let result: String = program.run_io(config).run_unsafe();
 ```
 
+### AsyncIO Support in Transformers
+
+lambars provides AsyncIO integration for monad transformers, similar to Cats Effect's async capabilities.
+
+```rust
+// lambars - ReaderT with AsyncIO (async feature required)
+use lambars::effect::{ReaderT, AsyncIO};
+
+#[derive(Clone)]
+struct AppConfig { api_url: String }
+
+type AppAsync<A> = ReaderT<AppConfig, AsyncIO<A>>;
+
+fn get_api_url() -> AppAsync<String> {
+    ReaderT::asks_async_io(|c: &AppConfig| c.api_url.clone())
+}
+
+async fn example() {
+    let computation = get_api_url()
+        .flat_map_async_io(|url| ReaderT::pure_async_io(format!("Fetching: {}", url)));
+
+    let config = AppConfig { api_url: "https://api.example.com".to_string() };
+    let result = computation.run_async_io(config).run_async().await;
+    // result = "Fetching: https://api.example.com"
+}
+```
+
+Available AsyncIO methods:
+- `ReaderT`: `ask_async_io`, `asks_async_io`, `lift_async_io`, `pure_async_io`, `flat_map_async_io`
+- `StateT`: `get_async_io`, `gets_async_io`, `state_async_io`, `lift_async_io`, `pure_async_io`
+- `WriterT`: `tell_async_io`, `lift_async_io`, `pure_async_io`, `flat_map_async_io`, `listen_async_io`
+
 ---
 
 ## Persistent Collections

@@ -709,6 +709,16 @@ let state_t = StateT::<i32, Result<i32, String>>::get_result()
 let (result, state) = state_t.run_result(10).unwrap();
 assert_eq!(result, 20);
 assert_eq!(state, 10);
+
+// ReaderT with AsyncIO support (requires "async" feature)
+use lambars::effect::AsyncIO;
+
+async fn example() {
+    let reader_t = ReaderT::<i32, AsyncIO<i32>>::ask_async_io()
+        .flat_map_async_io(|env| ReaderT::pure_async_io(env * 2));
+    let result = reader_t.run_async_io(21).run_async().await;
+    assert_eq!(result, 42);
+}
 ```
 
 #### eff! Macro (Do-Notation)

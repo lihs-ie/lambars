@@ -1703,11 +1703,12 @@ let (result, log) = computation.run();
 | `ExceptT e m a` | `ExceptT<E, M, A>` | Exception transformer |
 | `MaybeT m a` | Custom | Maybe transformer |
 | `lift` | `lift_*` methods | Lift into transformer |
-| `liftIO` | `lift_io` | Lift IO |
+| `liftIO` | `lift_io`, `lift_async_io` | Lift IO/AsyncIO |
 | `MonadState` | `MonadState` trait | State abstraction |
 | `MonadReader` | `MonadReader` trait | Reader abstraction |
 | `MonadWriter` | `MonadWriter` trait | Writer abstraction |
 | `MonadError` | `MonadError` trait | Error abstraction |
+| Async IO in transformers | `*_async_io` methods | AsyncIO support in transformers |
 
 ### Code Examples
 
@@ -1786,6 +1787,39 @@ let computation = get_max_retries()
 let result = computation.run_result(AppConfig { max_retries: 3 });
 // result = Ok("Max is 3")
 ```
+
+### AsyncIO Support in Transformers
+
+lambars provides AsyncIO integration for monad transformers, enabling async operations within transformer stacks.
+
+```rust
+// lambars - ReaderT with AsyncIO
+use lambars::effect::{ReaderT, AsyncIO};
+
+#[derive(Clone)]
+struct Config { api_url: String }
+
+// ReaderT over AsyncIO
+type AppAsync<A> = ReaderT<Config, AsyncIO<A>>;
+
+fn get_url() -> AppAsync<String> {
+    ReaderT::asks_async_io(|c: &Config| c.api_url.clone())
+}
+
+async fn example() {
+    let computation = get_url()
+        .flat_map_async_io(|url| ReaderT::pure_async_io(format!("Fetching: {}", url)));
+
+    let config = Config { api_url: "https://api.example.com".to_string() };
+    let result = computation.run_async_io(config).run_async().await;
+    // result = "Fetching: https://api.example.com"
+}
+```
+
+Available AsyncIO methods for transformers:
+- `ReaderT`: `ask_async_io`, `asks_async_io`, `lift_async_io`, `pure_async_io`, `flat_map_async_io`
+- `StateT`: `get_async_io`, `gets_async_io`, `state_async_io`, `lift_async_io`, `pure_async_io`, `flat_map_async_io`
+- `WriterT`: `tell_async_io`, `lift_async_io`, `pure_async_io`, `flat_map_async_io`, `listen_async_io`
 
 ---
 

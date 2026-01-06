@@ -674,6 +674,39 @@ let evens: Vec<i32> = (1..=10).filter(|x| x % 2 == 0).collect();
 | `[ for ... ]` / `seq { }` | `for_!` | List generation with yield |
 | Cartesian products | `for_!` | Multiple iterations |
 | State/Reader/Writer | `eff!` | Monadic effect chaining |
+| State/Reader/Writer + Async | `*_async_io` methods | Transformer async integration |
+
+### Monad Transformers with AsyncIO
+
+lambars supports AsyncIO integration with monad transformers, similar to F#'s async workflows combined with reader/state patterns.
+
+```rust
+// lambars - ReaderT with AsyncIO
+use lambars::effect::{ReaderT, AsyncIO};
+
+#[derive(Clone)]
+struct Config { api_url: String }
+
+type AppAsync<A> = ReaderT<Config, AsyncIO<A>>;
+
+fn get_api_url() -> AppAsync<String> {
+    ReaderT::asks_async_io(|c: &Config| c.api_url.clone())
+}
+
+async fn example() {
+    let computation = get_api_url()
+        .flat_map_async_io(|url| ReaderT::pure_async_io(format!("Fetching: {}", url)));
+
+    let config = Config { api_url: "https://api.example.com".to_string() };
+    let result = computation.run_async_io(config).run_async().await;
+    // result = "Fetching: https://api.example.com"
+}
+```
+
+Available AsyncIO methods for transformers:
+- `ReaderT`: `ask_async_io`, `asks_async_io`, `lift_async_io`, `pure_async_io`, `flat_map_async_io`
+- `StateT`: `get_async_io`, `gets_async_io`, `state_async_io`, `lift_async_io`, `pure_async_io`
+- `WriterT`: `tell_async_io`, `lift_async_io`, `pure_async_io`, `flat_map_async_io`, `listen_async_io`
 
 ---
 

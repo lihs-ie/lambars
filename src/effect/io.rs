@@ -437,32 +437,51 @@ impl<A: 'static> IO<A> {
 impl<A: Send + 'static> IO<A> {
     /// Converts a synchronous IO to an `AsyncIO`.
     ///
-    /// **Important**: The IO action is executed immediately when `to_async`
-    /// is called (not when `run_async` is called). This is because `IO`
-    /// is not `Send` and cannot be moved to an async context.
+    /// # Important: Immediate Execution
     ///
-    /// If you need deferred execution in an async context, consider using
-    /// `AsyncIO::new` directly with your computation.
+    /// The IO action is executed **immediately** when `to_async` is called,
+    /// not when `run_async` is called on the resulting `AsyncIO`. This is
+    /// because `IO` is not `Send` (it contains `Box<dyn FnOnce() -> A>`
+    /// without a `Send` bound) and cannot be moved to an async context.
     ///
-    /// # Examples
+    /// If you need deferred execution in an async context, use
+    /// `AsyncIO::new` directly with your computation instead.
+    ///
+    /// # Example: Understanding Immediate Execution
+    ///
+    /// ```rust
+    /// use lambars::effect::{IO, AsyncIO};
+    /// use std::sync::atomic::{AtomicBool, Ordering};
+    /// use std::sync::Arc;
+    ///
+    /// let executed = Arc::new(AtomicBool::new(false));
+    /// let executed_clone = executed.clone();
+    ///
+    /// let io = IO::new(move || {
+    ///     executed_clone.store(true, Ordering::SeqCst);
+    ///     42
+    /// });
+    ///
+    /// // The IO action executes HERE, not when run_async is called
+    /// let async_io = io.to_async();
+    /// assert!(executed.load(Ordering::SeqCst)); // Already executed!
+    /// ```
+    ///
+    /// # Recommended Alternative
+    ///
+    /// For true deferred execution, use `AsyncIO::new` directly:
     ///
     /// ```rust,ignore
-    /// use lambars::effect::{IO, AsyncIO};
+    /// use lambars::effect::AsyncIO;
     ///
-    /// #[tokio::main]
-    /// async fn main() {
-    ///     let io = IO::pure(42);
-    ///     let async_io = io.to_async();
-    ///     let result = async_io.run_async().await;
-    ///     assert_eq!(result, 42);
-    /// }
+    /// // This is deferred - executes only when run_async is called
+    /// let async_io = AsyncIO::new(|| async {
+    ///     println!("This runs when awaited");
+    ///     42
+    /// });
     /// ```
     #[must_use]
     pub fn to_async(self) -> super::AsyncIO<A> {
-        // Execute the IO action immediately and wrap the result.
-        // This is necessary because IO is not Send (it contains
-        // Box<dyn FnOnce() -> A> without Send bound) and cannot
-        // be moved to an async context.
         let result = self.run_unsafe();
         super::AsyncIO::pure(result)
     }
@@ -542,5 +561,39 @@ mod tests {
     fn test_io_product() {
         let io = IO::pure(10).product(IO::pure(20));
         assert_eq!(io.run_unsafe(), (10, 20));
+    }
+
+    // =========================================================================
+    // to_async Tests (requires async feature)
+    // =========================================================================
+
+    #[cfg(feature = "async")]
+    #[test]
+    fn test_to_async_executes_immediately() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let executed = Arc::new(AtomicBool::new(false));
+        let executed_clone = executed.clone();
+
+        let io = IO::new(move || {
+            executed_clone.store(true, Ordering::SeqCst);
+            42
+        });
+
+        // IO is executed at the point of to_async call
+        let _async_io = io.to_async();
+        assert!(
+            executed.load(Ordering::SeqCst),
+            "IO should be executed immediately on to_async"
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn test_to_async_result_is_captured() {
+        let io = IO::pure(42);
+        let async_io = io.to_async();
+        assert_eq!(async_io.run_async().await, 42);
     }
 }
