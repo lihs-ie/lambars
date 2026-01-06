@@ -198,7 +198,7 @@ cargo clean
    7. レビュー指摘がなくなるまで繰り返す（軽微な指摘も全て解決すること）
 3. サブエージェント: rust-implementation-specialist を起動し実装計画に則って TDD で実装を行う
    1. テストは rstest をベースに作成すること
-      1. 標準の test create は使用しない
+      1. 標準の test crate は使用しない
    2. ここまではテストが通ることまで確認できたらコミットする
 4. rust-simplification-specialist を起動して今回変更・作成したコードの構造を簡素化する
 5. codex mcp にレビューをさせる
