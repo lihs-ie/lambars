@@ -1,0 +1,1685 @@
+# Algebraic Effects (代数的効果) 要件定義
+#
+# 概要:
+#   代数的効果とハンドラによる柔軟なエフェクトシステムを実装する。
+#   Monad Transformer の欠点（n^2 問題、lift の煩雑さ）を解決する。
+#
+# 設計方針:
+#   1. Rust の所有権・HKT不在を考慮した現実的な設計
+#   2. 既存の Effect System（MTL-Style, Monad Transformer）との相互運用
+#   3. GAT (Generic Associated Types) を活用した型安全な抽象化
+#   4. define_effect! マクロによる宣言的なエフェクト定義
+#   5. 段階的な実装アプローチ（完全な代数的効果ではなく、Rust で実現可能な範囲）
+#
+# 参照:
+#   - Koka language: https://koka-lang.github.io/koka/doc/book.html
+#   - Eff language: https://www.eff-lang.org/
+#   - Scala 3 Capabilities: https://docs.scala-lang.org/scala3/reference/experimental/canthrow.html
+#   - frunk-effects (Rust): https://github.com/lloydmeta/frunk
+#   - 既存の Effect System: docs/internal/requirements/20250101_0500_effect.yaml
+
+version: "1.0.0"
+name: "Algebraic Effects"
+description: |
+  代数的効果（Algebraic Effects）は、副作用をエフェクト（操作）とハンドラ（解釈）に
+  分離することで、柔軟で合成可能なエフェクトシステムを提供するパラダイムである。
+
+  ## Monad Transformer の問題点
+
+  現在の Effect System は MTL-Style + Monad Transformer のハイブリッドアプローチを
+  採用しているが、以下の問題がある:
+
+  1. **n^2 問題**: n 個のエフェクトを組み合わせるために n^2 個の実装が必要
+     - ReaderT と StateT を組み合わせる場合、ReaderT に MonadState を実装し、
+       StateT に MonadReader を実装する必要がある
+     - エフェクトが増えると指数的に実装が増加
+
+  2. **lift の煩雑さ**: Transformer スタックの深さに応じて lift が連鎖
+     - 例: ReaderT<R, StateT<S, ExceptT<E, IO<A>, A>, A>, A> では
+       IO の操作に lift().lift().lift() が必要
+
+  3. **合成順序の固定**: スタックの順序によって意味が変わる
+     - StateT<S, ExceptT<E, M, A>, A> と ExceptT<E, StateT<S, M, A>, A> は
+       エラー発生時の状態の扱いが異なる
+
+  ## 代数的効果の解決策
+
+  代数的効果では:
+
+  1. **エフェクトは単なる操作の宣言**: 実装を持たない純粋なインターフェース
+  2. **ハンドラが解釈を提供**: 同じエフェクトに異なる解釈を与えられる
+  3. **エフェクトの合成は自動的**: lift 不要で自然な合成が可能
+  4. **順序は実行時に決定**: スタックの順序に縛られない
+
+  ## Rust での実現可能性
+
+  Rust には以下の制約があるため、完全な代数的効果の実装は困難:
+
+  - **HKT 不在**: 型コンストラクタを抽象化できない
+  - **所有権**: 継続（continuation）の扱いが複雑
+  - **末尾呼び出し最適化（TCO）なし**: 深い再帰でスタックオーバーフロー
+  - **遅延評価なし**: 厳格評価による効率低下
+
+  しかし、以下の手法で「限定的な代数的効果」を実現可能:
+
+  - **GAT**: 型コンストラクタの部分的なエミュレーション
+  - **トレイトオブジェクト**: 動的ディスパッチによる柔軟性
+  - **Trampoline**: スタック安全な再帰
+  - **define_effect! マクロ**: ボイラープレートの削減
+
+# 背景・動機
+background:
+  problem: |
+    ## 現在の問題
+
+    ### 1. Monad Transformer の n^2 問題
+
+    現在の Effect System では、n 個のエフェクトを組み合わせるために、
+    各 Transformer が他のすべての MTL トレイトを実装する必要がある。
+
+    例: ReaderT, StateT, WriterT, ExceptT の 4 つがある場合:
+    - ReaderT に MonadState, MonadWriter, MonadError を実装
+    - StateT に MonadReader, MonadWriter, MonadError を実装
+    - WriterT に MonadReader, MonadState, MonadError を実装
+    - ExceptT に MonadReader, MonadState, MonadWriter を実装
+    → 合計 12 個の実装が必要（4 * 3 = 12）
+
+    新しいエフェクト（例: ContT）を追加すると:
+    - 既存の 4 つの Transformer に新しい MonadCont を実装（4 個）
+    - ContT に既存の 4 つの MTL トレイトを実装（4 個）
+    → 8 個の追加実装が必要
+
+    ### 2. lift の煩雑さ
+
+    深い Transformer スタックでは、基底 Monad の操作に複数の lift が必要:
+
+    ```rust
+    type AppM<A> = ReaderT<Config, StateT<AppState, ExceptT<AppError, IO<A>, A>, A>, A>;
+
+    fn read_file(path: &str) -> AppM<String> {
+        // IO::read_file を使うために 3 回 lift
+        ReaderT::lift(StateT::lift(ExceptT::lift(IO::read_file(path))))
+    }
+    ```
+
+    ### 3. テストの困難さ
+
+    実際の IO を含む Transformer スタックをテストするには:
+    - モック用の別の Transformer スタックを用意
+    - または newtype で IO をラップしてモック化
+
+    代数的効果なら、ハンドラを差し替えるだけでテスト可能。
+
+  motivation: |
+    ## 動機
+
+    1. **開発者体験の向上**: lift 地獄からの解放、より直感的な API
+    2. **保守性の向上**: 新しいエフェクト追加時の実装量削減
+    3. **テスタビリティ**: ハンドラ差し替えによる容易なモック化
+    4. **関数型プログラミングの完成度**: より純粋な FP パターンの提供
+    5. **将来の拡張性**: Rust のエフェクトシステム研究への貢献
+
+  prior_art:
+    - name: "Koka"
+      description: |
+        Microsoft Research による研究言語。代数的効果の先進的な実装。
+        エフェクトは effect キーワードで定義し、handle で解釈。
+        Perceus による参照カウントで効率的なメモリ管理を実現。
+
+        ```koka
+        effect ask<r> {
+          fun ask(): r
+        }
+
+        fun greeter(): <ask<string>> string {
+          "Hello, " ++ ask()
+        }
+
+        fun main() {
+          handle(greeter) {
+            ask() -> resume("World")
+          }
+        }
+        ```
+
+    - name: "Eff"
+      description: |
+        OCaml ベースの研究言語。代数的効果の初期実装の一つ。
+        effect と handler による明示的なエフェクト操作。
+
+    - name: "Scala 3 Capabilities"
+      description: |
+        Scala 3 の CanThrow を用いた限定的なエフェクト追跡。
+        capability pattern によるコンパイル時のエフェクト管理。
+        完全な代数的効果ではないが、実用的なアプローチ。
+
+    - name: "frunk-effects (Rust)"
+      description: |
+        Rust での HList を用いたエフェクト管理の試み。
+        型レベルリストでエフェクトを追跡するアプローチ。
+
+    - name: "effectful (Haskell)"
+      description: |
+        Haskell の最新エフェクトライブラリ。
+        型安全なエフェクト合成と高いパフォーマンスを両立。
+
+# 理論的背景
+theoretical_background:
+  algebraic_effects_overview:
+    description: |
+      代数的効果（Algebraic Effects）は、副作用を以下の二つに分離する:
+
+      1. **エフェクト（Effect）**: 「何ができるか」の宣言
+         - 例: State エフェクトは get と put ができる
+         - 実装は持たない、純粋なインターフェース
+
+      2. **ハンドラ（Handler）**: 「どう解釈するか」の定義
+         - 例: State をメモリ上の変数として解釈
+         - または State をデータベースとして解釈
+
+      この分離により:
+      - 同じコードに異なる解釈を与えられる（テスト、本番、シミュレーション）
+      - エフェクトの合成が自然にできる
+      - 関心の分離が明確になる
+
+  continuations_and_handlers:
+    description: |
+      代数的効果の核心は「限定継続（Delimited Continuation）」である。
+
+      エフェクト操作が呼ばれると:
+      1. 現在の継続（残りの計算）がキャプチャされる
+      2. 制御がハンドラに移る
+      3. ハンドラは継続を resume するか、別の値を返すか選択
+
+      ```
+      handle {
+        x <- get;      // ここで制御がハンドラに移る
+        y <- get;      // get の継続（y <- get; return x + y）
+        return x + y
+      } with {
+        get k -> k(current_state)  // 継続 k に状態を渡して resume
+      }
+      ```
+
+      Rust での継続の実現は所有権の制約があるが、
+      以下のアプローチで近似できる:
+
+      - **CPS 変換**: 継続を明示的なクロージャとして渡す
+      - **Trampoline**: スタック安全な再帰
+      - **コルーチン（nightly）**: ネイティブな継続サポート
+
+  effect_rows:
+    description: |
+      複数のエフェクトを持つ計算は「エフェクト行（Effect Row）」で表現:
+
+      ```
+      fn computation() -> Eff<(Reader<Config>, State<Counter>, Error<AppError>), i32>
+      ```
+
+      これは「Config を読み、Counter を状態として持ち、AppError を投げる可能性があり、
+      最終的に i32 を返す計算」を表す。
+
+      Rust では型レベルリスト（HList）でエフェクト行をエミュレート:
+
+      ```rust
+      type MyEffects = HCons<Reader<Config>, HCons<State<Counter>, HCons<Error<AppError>, HNil>>>;
+      fn computation() -> Eff<MyEffects, i32> { ... }
+      ```
+
+# 設計原則
+design_principles:
+  rust_first_design:
+    description: |
+      Rust の制約を認識し、それに適した設計を行う:
+
+      1. **所有権との共存**:
+         - 継続のキャプチャには Clone または Rc/Arc を使用
+         - FnOnce ベースの一回限りの継続をデフォルトとする
+         - 複数回 resume が必要な場合は明示的に Rc<RefCell<...>> を使用
+
+      2. **HKT 不在への対応**:
+         - GAT を最大限活用
+         - 必要に応じてトレイトオブジェクト（dyn Trait）を使用
+         - マクロによるボイラープレート生成
+
+      3. **パフォーマンス考慮**:
+         - デフォルトは静的ディスパッチ
+         - 動的ディスパッチはオプトイン
+         - Trampoline による TCO エミュレーション
+
+  gradual_adoption:
+    description: |
+      既存の Effect System からの段階的な移行をサポート:
+
+      1. **既存コードとの共存**:
+         - Monad Transformer との相互運用
+         - MTL トレイトからの自動変換
+         - 既存の eff! マクロとの互換性
+
+      2. **段階的な導入**:
+         - まず単一のエフェクトから始める
+         - 徐々に複合エフェクトに拡張
+         - 既存の Reader/State/Writer を代数的効果として再定義可能
+
+  type_safety:
+    description: |
+      型システムによるエフェクトの追跡:
+
+      1. **コンパイル時のエフェクト検証**:
+         - 未処理のエフェクトはコンパイルエラー
+         - ハンドラの不整合を型レベルで検出
+
+      2. **エフェクト行の操作**:
+         - エフェクトの追加・削除を型安全に
+         - サブタイピング（エフェクト行の包含関係）の表現
+
+# 要件一覧
+requirements:
+  # ============================================================================
+  # 1. Effect トレイト（エフェクトの基本定義）
+  # ============================================================================
+  - id: algebraic_effect_trait
+    name: Effect トレイト
+    priority: critical
+    description: |
+      エフェクトを定義するための基本トレイト。
+      各エフェクトは一つ以上の「操作（Operation）」を持つ。
+
+      ## 設計思想
+
+      Effect トレイトは「このエフェクトが提供する操作」を宣言する。
+      実際の実装はハンドラが提供するため、Effect 自体は
+      マーカートレイトに近い性質を持つ。
+
+      ## Rust での表現
+
+      ```rust
+      /// エフェクトを定義するための基本トレイト
+      pub trait Effect: 'static {
+          /// このエフェクトの名前（デバッグ用）
+          const NAME: &'static str;
+      }
+      ```
+
+      各具体的なエフェクトは関連するメソッドを持つトレイトとして定義:
+
+      ```rust
+      /// Reader エフェクト
+      pub trait ReaderEffect<R>: Effect {
+          type AskResult;
+
+          /// 環境を取得する操作
+          fn ask() -> Self::AskResult;
+      }
+      ```
+
+    internal_structure:
+      description: |
+        ```rust
+        use std::any::TypeId;
+
+        /// エフェクトを定義するための基本トレイト
+        ///
+        /// Effect は「計算が必要とする能力」を宣言する。
+        /// 具体的な実装は Handler が提供する。
+        ///
+        /// # Examples
+        ///
+        /// ```rust,ignore
+        /// // カスタムエフェクトの定義
+        /// struct LogEffect;
+        ///
+        /// impl Effect for LogEffect {
+        ///     const NAME: &'static str = "Log";
+        /// }
+        /// ```
+        pub trait Effect: 'static {
+            /// このエフェクトの名前（デバッグ・エラーメッセージ用）
+            const NAME: &'static str;
+
+            /// このエフェクトの TypeId を取得
+            fn type_id() -> TypeId {
+                TypeId::of::<Self>()
+            }
+        }
+        ```
+
+    api:
+      operations:
+        - name: NAME
+          signature: "const NAME: &'static str"
+          description: "エフェクトの名前を定義する関連定数"
+          example: |
+            impl Effect for StateEffect<S> {
+                const NAME: &'static str = "State";
+            }
+
+        - name: type_id
+          signature: "fn type_id() -> TypeId"
+          description: "エフェクトの TypeId を取得（ランタイムでのエフェクト識別用）"
+          complexity: "O(1)"
+
+    tests:
+      - category: "基本テスト"
+        cases:
+          - name: "カスタムエフェクトの定義"
+            test: |
+              struct MyEffect;
+              impl Effect for MyEffect {
+                  const NAME: &'static str = "MyEffect";
+              }
+              assert_eq!(MyEffect::NAME, "MyEffect");
+
+  # ============================================================================
+  # 2. Handler トレイト（エフェクトの解釈）
+  # ============================================================================
+  - id: algebraic_handler_trait
+    name: Handler トレイト
+    priority: critical
+    description: |
+      エフェクトを解釈するハンドラを定義するトレイト。
+      ハンドラは特定のエフェクトの各操作に対する実装を提供する。
+
+      ## 設計思想
+
+      Handler は「エフェクトをどう解釈するか」を定義する。
+      同じエフェクトに対して複数のハンドラを用意できる:
+
+      - 本番用: 実際のデータベースに接続
+      - テスト用: インメモリのモック
+      - デバッグ用: 全操作をログ出力
+
+      ## 継続の扱い
+
+      代数的効果の核心は継続（Continuation）の扱い。
+      Rust では FnOnce を使った一回限りの継続をサポート:
+
+      ```rust
+      trait Handler<E: Effect> {
+          type Result;
+
+          /// 継続を受け取り、エフェクト操作を解釈する
+          fn handle<K, A>(operation: E::Operation, continuation: K) -> Self::Result
+          where
+              K: FnOnce(E::OperationResult) -> Self::Result;
+      }
+      ```
+
+    internal_structure:
+      description: |
+        ```rust
+        use crate::control::Trampoline;
+
+        /// エフェクトの解釈を提供するハンドラ
+        ///
+        /// Handler は Effect の各操作を具体的な実装にマップする。
+        /// 継続（continuation）を受け取り、計算を続行するか
+        /// 別の値を返すかを決定できる。
+        ///
+        /// # Type Parameters
+        ///
+        /// - `E`: 処理対象のエフェクト
+        ///
+        /// # Examples
+        ///
+        /// ```rust,ignore
+        /// struct PureStateHandler<S> {
+        ///     initial_state: S,
+        /// }
+        ///
+        /// impl<S: Clone> Handler<StateEffect<S>> for PureStateHandler<S> {
+        ///     type Output<A> = (A, S);
+        ///
+        ///     fn handle<A, K>(
+        ///         self,
+        ///         computation: Eff<StateEffect<S>, A>,
+        ///         continuation: K,
+        ///     ) -> Self::Output<A>
+        ///     where
+        ///         K: FnOnce(A) -> Self::Output<A>,
+        ///     {
+        ///         // State 操作を純粋な状態渡しで解釈
+        ///     }
+        /// }
+        /// ```
+        pub trait Handler<E: Effect>: Sized {
+            /// ハンドラの出力型
+            ///
+            /// 型パラメータ A は元の計算の結果型。
+            /// Output<A> はハンドリング後の結果型。
+            ///
+            /// 例:
+            /// - State<S> のハンドラ: Output<A> = (A, S)（値と最終状態のペア）
+            /// - Error<E> のハンドラ: Output<A> = Result<A, E>
+            type Output<A>;
+
+            /// ハンドラを適用して計算を実行する
+            ///
+            /// # Arguments
+            ///
+            /// * `computation` - 処理対象のエフェクトフルな計算
+            ///
+            /// # Returns
+            ///
+            /// ハンドラの出力型でラップされた結果
+            fn run<A>(self, computation: impl FnOnce() -> Eff<E, A>) -> Self::Output<A>
+            where
+                A: 'static;
+
+            /// ハンドラを別のハンドラと合成する
+            ///
+            /// 複数のエフェクトを順番にハンドルする場合に使用。
+            fn compose<E2: Effect, H2: Handler<E2>>(self, other: H2) -> ComposedHandler<Self, H2, E, E2> {
+                ComposedHandler {
+                    first: self,
+                    second: other,
+                    _marker: std::marker::PhantomData,
+                }
+            }
+        }
+
+        /// 合成されたハンドラ
+        pub struct ComposedHandler<H1, H2, E1, E2> {
+            first: H1,
+            second: H2,
+            _marker: std::marker::PhantomData<(E1, E2)>,
+        }
+        ```
+
+    api:
+      operations:
+        - name: run
+          signature: "fn run<A>(self, computation: impl FnOnce() -> Eff<E, A>) -> Self::Output<A>"
+          description: "計算を実行し、エフェクトを解釈する"
+          complexity: "計算の複雑さに依存"
+          example: |
+            let handler = StateHandler::new(0);
+            let result = handler.run(|| {
+                let x = State::get();
+                State::put(x + 1);
+                State::get()
+            });
+            assert_eq!(result, (1, 1)); // (結果, 最終状態)
+
+        - name: compose
+          signature: "fn compose<E2, H2>(self, other: H2) -> ComposedHandler<Self, H2, E, E2>"
+          description: "複数のハンドラを合成する"
+          complexity: "O(1)"
+          example: |
+            let state_handler = StateHandler::new(0);
+            let error_handler = ErrorHandler;
+            let composed = state_handler.compose(error_handler);
+
+    laws:
+      - name: Handler Identity Law（ハンドラ恒等律）
+        description: |
+          純粋な計算（エフェクトを使わない）をハンドルしても結果は変わらない
+        equation: "handler.run(|| Eff::pure(a)) == wrap(a)"
+        note: |
+          wrap は Handler の Output 型への持ち上げ。
+          StateHandler の場合: wrap(a) = (a, initial_state)
+
+      - name: Handler Composition Law（ハンドラ合成律）
+        description: |
+          ハンドラの合成は結合的
+        equation: "(h1.compose(h2)).compose(h3) == h1.compose(h2.compose(h3))"
+
+    tests:
+      - category: "基本テスト"
+        cases:
+          - name: "StateHandler で状態管理"
+            test: |
+              let handler = StateHandler::new(10);
+              let result = handler.run(|| {
+                  let current = State::get();
+                  State::put(current * 2);
+                  State::get()
+              });
+              assert_eq!(result, (20, 20));
+
+          - name: "ErrorHandler でエラー処理"
+            test: |
+              let handler = ErrorHandler;
+              let result: Result<i32, String> = handler.run(|| {
+                  Error::throw("oops".to_string())
+              });
+              assert_eq!(result, Err("oops".to_string()));
+
+  # ============================================================================
+  # 3. Eff 型（エフェクトフルな計算）
+  # ============================================================================
+  - id: algebraic_eff_type
+    name: Eff<E, A> 型
+    priority: critical
+    description: |
+      エフェクト E を持つ計算を表す型。
+      ハンドラによって解釈されるまで実行されない（遅延評価）。
+
+      ## 設計思想
+
+      Eff は Free Monad に似た構造を持つ:
+      - Pure(A): 純粋な値
+      - Impure(Operation, Continuation): エフェクト操作と継続
+
+      ## Rust での表現
+
+      ```rust
+      pub enum Eff<E: Effect, A> {
+          /// 純粋な値
+          Pure(A),
+          /// エフェクト操作と継続
+          Impure {
+              operation: E::Operation,
+              continuation: Box<dyn FnOnce(E::OperationResult) -> Eff<E, A>>,
+          },
+      }
+      ```
+
+      ## 複合エフェクト
+
+      複数のエフェクトを持つ計算は、型レベルリストで表現:
+
+      ```rust
+      type MyComputation = Eff<(Reader<Config>, State<Counter>), i32>;
+      ```
+
+    internal_structure:
+      description: |
+        ```rust
+        use crate::typeclass::{Functor, Applicative, Monad, TypeConstructor};
+        use std::marker::PhantomData;
+
+        /// エフェクトフルな計算を表す型
+        ///
+        /// Eff<E, A> は「エフェクト E を使用し、最終的に A を返す計算」を表す。
+        /// ハンドラによって解釈されるまで実行されない。
+        ///
+        /// # Type Parameters
+        ///
+        /// - `E`: この計算が使用するエフェクト（または複合エフェクト）
+        /// - `A`: 計算の結果型
+        ///
+        /// # Monad Laws
+        ///
+        /// Eff は Monad として以下の法則を満たす:
+        ///
+        /// 1. **Left Identity**: `Eff::pure(a).flat_map(f) == f(a)`
+        /// 2. **Right Identity**: `m.flat_map(Eff::pure) == m`
+        /// 3. **Associativity**: `m.flat_map(f).flat_map(g) == m.flat_map(|x| f(x).flat_map(g))`
+        ///
+        /// # Examples
+        ///
+        /// ```rust,ignore
+        /// use lambars::effect::algebraic::{Eff, State, StateHandler};
+        ///
+        /// // State エフェクトを使った計算
+        /// fn increment() -> Eff<State<i32>, i32> {
+        ///     State::get().flat_map(|current| {
+        ///         State::put(current + 1).then(State::get())
+        ///     })
+        /// }
+        ///
+        /// // ハンドラで実行
+        /// let handler = StateHandler::new(0);
+        /// let (result, final_state) = handler.run(increment);
+        /// assert_eq!(result, 1);
+        /// assert_eq!(final_state, 1);
+        /// ```
+        pub struct Eff<E: Effect, A> {
+            /// 内部表現（Free Monad 風の構造）
+            inner: EffInner<E, A>,
+        }
+
+        /// Eff の内部表現
+        enum EffInner<E: Effect, A> {
+            /// 純粋な値
+            Pure(A),
+            /// エフェクト操作と継続
+            Impure(EffOperation<E, A>),
+        }
+
+        /// エフェクト操作の表現
+        struct EffOperation<E: Effect, A> {
+            /// 操作を表すマーカー
+            operation: E,
+            /// 継続（操作結果を受け取り、次の計算を返す）
+            continuation: Box<dyn FnOnce(Box<dyn std::any::Any>) -> Eff<E, A>>,
+        }
+
+        impl<E: Effect, A: 'static> Eff<E, A> {
+            /// 純粋な値を Eff に持ち上げる
+            pub fn pure(value: A) -> Self {
+                Self {
+                    inner: EffInner::Pure(value),
+                }
+            }
+
+            /// エフェクト操作を実行する
+            ///
+            /// この関数はエフェクトの操作を定義するために内部で使用される。
+            /// 通常は define_effect! マクロを使用することを推奨。
+            pub(crate) fn perform<R: 'static>(effect: E, extract: impl FnOnce(Box<dyn std::any::Any>) -> R + 'static) -> Eff<E, R>
+            where
+                E: Clone,
+            {
+                Eff {
+                    inner: EffInner::Impure(EffOperation {
+                        operation: effect,
+                        continuation: Box::new(move |result| Eff::pure(extract(result))),
+                    }),
+                }
+            }
+
+            /// 計算に関数を適用する（Functor）
+            pub fn fmap<B, F>(self, function: F) -> Eff<E, B>
+            where
+                F: FnOnce(A) -> B + 'static,
+                B: 'static,
+            {
+                self.flat_map(|a| Eff::pure(function(a)))
+            }
+
+            /// 計算を連鎖させる（Monad）
+            pub fn flat_map<B, F>(self, function: F) -> Eff<E, B>
+            where
+                F: FnOnce(A) -> Eff<E, B> + 'static,
+                B: 'static,
+            {
+                match self.inner {
+                    EffInner::Pure(a) => function(a),
+                    EffInner::Impure(op) => {
+                        Eff {
+                            inner: EffInner::Impure(EffOperation {
+                                operation: op.operation,
+                                continuation: Box::new(move |result| {
+                                    (op.continuation)(result).flat_map(function)
+                                }),
+                            }),
+                        }
+                    }
+                }
+            }
+
+            /// 計算を連鎖させ、最初の結果を捨てる
+            pub fn then<B>(self, next: Eff<E, B>) -> Eff<E, B>
+            where
+                B: 'static,
+            {
+                self.flat_map(|_| next)
+            }
+
+            /// 二つの計算を組み合わせる（Applicative）
+            pub fn map2<B, C, F>(self, other: Eff<E, B>, function: F) -> Eff<E, C>
+            where
+                F: FnOnce(A, B) -> C + 'static,
+                B: 'static,
+                C: 'static,
+            {
+                self.flat_map(|a| other.fmap(|b| function(a, b)))
+            }
+        }
+
+        // TypeConstructor, Functor, Applicative, Monad の実装は別途追加
+        ```
+
+    api:
+      constructors:
+        - name: pure
+          signature: "fn pure(value: A) -> Self"
+          description: "純粋な値を Eff に持ち上げる"
+          complexity: "O(1)"
+          example: |
+            let eff: Eff<NoEffect, i32> = Eff::pure(42);
+
+      operations:
+        - name: fmap
+          signature: "fn fmap<B, F>(self, function: F) -> Eff<E, B>"
+          description: "計算結果に関数を適用"
+          complexity: "O(1)"
+          example: |
+            let eff = Eff::pure(21).fmap(|x| x * 2);
+
+        - name: flat_map
+          signature: "fn flat_map<B, F>(self, function: F) -> Eff<E, B>"
+          description: "計算を連鎖させる"
+          complexity: "O(1)"
+          example: |
+            let eff = State::get().flat_map(|x| State::put(x + 1));
+
+        - name: then
+          signature: "fn then<B>(self, next: Eff<E, B>) -> Eff<E, B>"
+          description: "最初の計算の結果を捨てて次の計算を実行"
+          complexity: "O(1)"
+          example: |
+            let eff = State::put(10).then(State::get());
+
+        - name: map2
+          signature: "fn map2<B, C, F>(self, other: Eff<E, B>, function: F) -> Eff<E, C>"
+          description: "二つの計算を組み合わせる"
+          complexity: "O(1)"
+
+    laws:
+      - name: Left Identity（左単位元律）
+        equation: "Eff::pure(a).flat_map(f) == f(a)"
+        property_test: |
+          fn prop_left_identity<E: Effect, A, B>(a: A, f: impl Fn(A) -> Eff<E, B>) -> bool {
+              // 同じハンドラで実行した結果が等しい
+          }
+
+      - name: Right Identity（右単位元律）
+        equation: "m.flat_map(Eff::pure) == m"
+
+      - name: Associativity（結合律）
+        equation: "m.flat_map(f).flat_map(g) == m.flat_map(|x| f(x).flat_map(g))"
+
+    tests:
+      - category: "Monad 法則テスト"
+        cases:
+          - name: "左単位元律"
+          - name: "右単位元律"
+          - name: "結合律"
+
+      - category: "基本操作テスト"
+        cases:
+          - name: "pure で値を持ち上げ"
+          - name: "fmap で変換"
+          - name: "flat_map で連鎖"
+          - name: "then で順序付け"
+
+  # ============================================================================
+  # 4. 標準エフェクト（Reader, State, Writer, Error）
+  # ============================================================================
+  - id: algebraic_standard_effects
+    name: 標準エフェクト
+    priority: high
+    description: |
+      既存の MTL-Style トレイトに対応する代数的効果を定義。
+
+      - Reader<R>: 環境からの読み取り
+      - State<S>: 状態の読み書き
+      - Writer<W>: ログの出力
+      - Error<E>: エラーの送出
+
+      これらは既存の MonadReader, MonadState, MonadWriter, MonadError と
+      互換性を持ち、相互運用可能。
+
+    internal_structure:
+      reader_effect:
+        description: |
+          ```rust
+          /// Reader エフェクト: 環境からの読み取り
+          #[derive(Clone)]
+          pub struct Reader<R>(PhantomData<R>);
+
+          impl<R: 'static> Effect for Reader<R> {
+              const NAME: &'static str = "Reader";
+          }
+
+          impl<R: Clone + 'static> Reader<R> {
+              /// 環境全体を取得
+              pub fn ask() -> Eff<Self, R> {
+                  Eff::perform(Self(PhantomData), |r| {
+                      *r.downcast::<R>().unwrap()
+                  })
+              }
+
+              /// 環境から値を射影
+              pub fn asks<A, F>(projection: F) -> Eff<Self, A>
+              where
+                  F: FnOnce(R) -> A + 'static,
+                  A: 'static,
+              {
+                  Self::ask().fmap(projection)
+              }
+
+              /// 環境を一時的に変更して計算を実行
+              pub fn local<A, F>(modifier: F, computation: Eff<Self, A>) -> Eff<Self, A>
+              where
+                  F: FnOnce(R) -> R + 'static,
+                  A: 'static,
+              {
+                  // local は Handler で特別に処理される
+              }
+          }
+
+          /// Reader エフェクトのハンドラ
+          pub struct ReaderHandler<R> {
+              environment: R,
+          }
+
+          impl<R: Clone + 'static> Handler<Reader<R>> for ReaderHandler<R> {
+              type Output<A> = A;
+
+              fn run<A>(self, computation: impl FnOnce() -> Eff<Reader<R>, A>) -> A
+              where
+                  A: 'static,
+              {
+                  // 計算を実行し、ask が呼ばれたら環境を返す
+              }
+          }
+          ```
+
+      state_effect:
+        description: |
+          ```rust
+          /// State エフェクト: 状態の読み書き
+          #[derive(Clone)]
+          pub enum State<S> {
+              Get,
+              Put(S),
+          }
+
+          impl<S: 'static> Effect for State<S> {
+              const NAME: &'static str = "State";
+          }
+
+          impl<S: Clone + 'static> State<S> {
+              /// 現在の状態を取得
+              pub fn get() -> Eff<Self, S> {
+                  Eff::perform(Self::Get, |s| *s.downcast::<S>().unwrap())
+              }
+
+              /// 状態を設定
+              pub fn put(state: S) -> Eff<Self, ()> {
+                  Eff::perform(Self::Put(state), |_| ())
+              }
+
+              /// 状態を変更
+              pub fn modify<F>(modifier: F) -> Eff<Self, ()>
+              where
+                  F: FnOnce(S) -> S + 'static,
+              {
+                  Self::get().flat_map(|s| Self::put(modifier(s)))
+              }
+
+              /// 状態から値を取得
+              pub fn gets<A, F>(projection: F) -> Eff<Self, A>
+              where
+                  F: FnOnce(&S) -> A + 'static,
+                  A: 'static,
+              {
+                  Self::get().fmap(|s| projection(&s))
+              }
+          }
+
+          /// State エフェクトのハンドラ
+          pub struct StateHandler<S> {
+              initial_state: S,
+          }
+
+          impl<S: Clone + 'static> StateHandler<S> {
+              pub fn new(initial_state: S) -> Self {
+                  Self { initial_state }
+              }
+          }
+
+          impl<S: Clone + 'static> Handler<State<S>> for StateHandler<S> {
+              type Output<A> = (A, S);
+
+              fn run<A>(self, computation: impl FnOnce() -> Eff<State<S>, A>) -> (A, S)
+              where
+                  A: 'static,
+              {
+                  // 計算を実行し、get/put を状態で解釈
+              }
+          }
+          ```
+
+      writer_effect:
+        description: |
+          ```rust
+          use crate::typeclass::Monoid;
+
+          /// Writer エフェクト: ログの出力
+          #[derive(Clone)]
+          pub struct Writer<W>(PhantomData<W>);
+
+          impl<W: Monoid + 'static> Effect for Writer<W> {
+              const NAME: &'static str = "Writer";
+          }
+
+          impl<W: Monoid + Clone + 'static> Writer<W> {
+              /// ログを出力
+              pub fn tell(output: W) -> Eff<Self, ()> {
+                  Eff::perform(Self(PhantomData), move |_| ())
+              }
+
+              /// 計算のログを取得
+              pub fn listen<A>(computation: Eff<Self, A>) -> Eff<Self, (A, W)>
+              where
+                  A: 'static,
+              {
+                  // listen は Handler で特別に処理される
+              }
+          }
+
+          /// Writer エフェクトのハンドラ
+          pub struct WriterHandler<W>(PhantomData<W>);
+
+          impl<W: Monoid + 'static> Handler<Writer<W>> for WriterHandler<W> {
+              type Output<A> = (A, W);
+
+              fn run<A>(self, computation: impl FnOnce() -> Eff<Writer<W>, A>) -> (A, W)
+              where
+                  A: 'static,
+              {
+                  // 計算を実行し、tell されたログを蓄積
+              }
+          }
+          ```
+
+      error_effect:
+        description: |
+          ```rust
+          /// Error エフェクト: エラーの送出
+          #[derive(Clone)]
+          pub struct Error<E>(PhantomData<E>);
+
+          impl<E: 'static> Effect for Error<E> {
+              const NAME: &'static str = "Error";
+          }
+
+          impl<E: Clone + 'static> Error<E> {
+              /// エラーを送出
+              pub fn throw<A>(error: E) -> Eff<Self, A>
+              where
+                  A: 'static,
+              {
+                  Eff::perform(Self(PhantomData), |_| {
+                      // throw は継続を呼ばないので、ここには到達しない
+                      unreachable!()
+                  })
+              }
+
+              /// エラーをキャッチ
+              pub fn catch<A, F>(computation: Eff<Self, A>, handler: F) -> Eff<Self, A>
+              where
+                  F: FnOnce(E) -> Eff<Self, A> + 'static,
+                  A: 'static,
+              {
+                  // catch は Handler で特別に処理される
+              }
+          }
+
+          /// Error エフェクトのハンドラ
+          pub struct ErrorHandler<E>(PhantomData<E>);
+
+          impl<E: 'static> Handler<Error<E>> for ErrorHandler<E> {
+              type Output<A> = Result<A, E>;
+
+              fn run<A>(self, computation: impl FnOnce() -> Eff<Error<E>, A>) -> Result<A, E>
+              where
+                  A: 'static,
+              {
+                  // 計算を実行し、throw を Err に変換
+              }
+          }
+          ```
+
+    api:
+      reader_operations:
+        - name: "Reader::ask"
+          signature: "fn ask() -> Eff<Reader<R>, R>"
+          description: "環境全体を取得"
+
+        - name: "Reader::asks"
+          signature: "fn asks<A, F>(projection: F) -> Eff<Reader<R>, A>"
+          description: "環境から値を射影"
+
+        - name: "Reader::local"
+          signature: "fn local<A, F>(modifier: F, computation: Eff<Reader<R>, A>) -> Eff<Reader<R>, A>"
+          description: "環境を一時的に変更"
+
+      state_operations:
+        - name: "State::get"
+          signature: "fn get() -> Eff<State<S>, S>"
+          description: "現在の状態を取得"
+
+        - name: "State::put"
+          signature: "fn put(state: S) -> Eff<State<S>, ()>"
+          description: "状態を設定"
+
+        - name: "State::modify"
+          signature: "fn modify<F>(modifier: F) -> Eff<State<S>, ()>"
+          description: "状態を変更"
+
+        - name: "State::gets"
+          signature: "fn gets<A, F>(projection: F) -> Eff<State<S>, A>"
+          description: "状態から値を取得"
+
+      writer_operations:
+        - name: "Writer::tell"
+          signature: "fn tell(output: W) -> Eff<Writer<W>, ()>"
+          description: "ログを出力"
+
+        - name: "Writer::listen"
+          signature: "fn listen<A>(computation: Eff<Writer<W>, A>) -> Eff<Writer<W>, (A, W)>"
+          description: "計算のログを取得"
+
+      error_operations:
+        - name: "Error::throw"
+          signature: "fn throw<A>(error: E) -> Eff<Error<E>, A>"
+          description: "エラーを送出"
+
+        - name: "Error::catch"
+          signature: "fn catch<A, F>(computation: Eff<Error<E>, A>, handler: F) -> Eff<Error<E>, A>"
+          description: "エラーをキャッチ"
+
+    tests:
+      - category: "Reader エフェクトテスト"
+        cases:
+          - name: "ask で環境を取得"
+          - name: "asks で値を射影"
+          - name: "local で環境を変更"
+
+      - category: "State エフェクトテスト"
+        cases:
+          - name: "get で状態を取得"
+          - name: "put で状態を設定"
+          - name: "modify で状態を変更"
+          - name: "gets で値を取得"
+
+      - category: "Writer エフェクトテスト"
+        cases:
+          - name: "tell でログを出力"
+          - name: "listen でログを取得"
+
+      - category: "Error エフェクトテスト"
+        cases:
+          - name: "throw でエラーを送出"
+          - name: "catch でエラーをキャッチ"
+
+  # ============================================================================
+  # 5. エフェクトの合成
+  # ============================================================================
+  - id: algebraic_effect_composition
+    name: エフェクトの合成
+    priority: high
+    description: |
+      複数のエフェクトを組み合わせる機能。
+      型レベルリスト（HList）を使用してエフェクト行を表現。
+
+      ## 設計思想
+
+      複数のエフェクトを持つ計算は、各エフェクトを型レベルリストで追跡:
+
+      ```rust
+      // Reader と State の両方を使う計算
+      type MyEffects = EffectRow![Reader<Config>, State<Counter>];
+      fn my_computation() -> Eff<MyEffects, i32> { ... }
+      ```
+
+      ハンドラも対応する形で合成:
+
+      ```rust
+      let handler = ReaderHandler::new(config)
+          .compose(StateHandler::new(counter));
+      let result = handler.run(my_computation);
+      ```
+
+    internal_structure:
+      description: |
+        ```rust
+        /// 空のエフェクト行
+        pub struct EffNil;
+
+        /// エフェクト行のコンス
+        pub struct EffCons<E: Effect, Tail> {
+            _effect: PhantomData<E>,
+            _tail: PhantomData<Tail>,
+        }
+
+        /// エフェクト行を構築するマクロ
+        #[macro_export]
+        macro_rules! EffectRow {
+            () => { $crate::effect::algebraic::EffNil };
+            ($e:ty) => { $crate::effect::algebraic::EffCons<$e, $crate::effect::algebraic::EffNil> };
+            ($e:ty, $($rest:ty),+ $(,)?) => {
+                $crate::effect::algebraic::EffCons<$e, EffectRow!($($rest),+)>
+            };
+        }
+
+        /// エフェクト行にエフェクトが含まれるかを判定するトレイト
+        pub trait Member<E: Effect>: Effect {
+            /// エフェクト行から特定のエフェクトを実行
+            fn inject<A>(eff: Eff<E, A>) -> Eff<Self, A>
+            where
+                A: 'static;
+        }
+
+        // EffCons<E, Tail> は E の Member
+        impl<E: Effect, Tail> Member<E> for EffCons<E, Tail> {
+            fn inject<A>(eff: Eff<E, A>) -> Eff<Self, A>
+            where
+                A: 'static,
+            {
+                // E のエフェクト操作を EffCons<E, Tail> に注入
+            }
+        }
+
+        // EffCons<Other, Tail> は Tail が E の Member なら E の Member
+        impl<E: Effect, Other: Effect, Tail: Member<E>> Member<E> for EffCons<Other, Tail> {
+            fn inject<A>(eff: Eff<E, A>) -> Eff<Self, A>
+            where
+                A: 'static,
+            {
+                // Tail から E を探して注入
+            }
+        }
+
+        /// 複合エフェクトで単一のエフェクト操作を使うための便利関数
+        impl<Row: Member<Reader<R>>, R: Clone + 'static> EffRow<Row> {
+            pub fn ask() -> Eff<Row, R> {
+                Row::inject(Reader::ask())
+            }
+        }
+        ```
+
+    api:
+      macros:
+        - name: "EffectRow!"
+          description: "エフェクト行を構築するマクロ"
+          example: |
+            type MyEffects = EffectRow![Reader<Config>, State<Counter>, Error<AppError>];
+
+      traits:
+        - name: "Member<E>"
+          description: "エフェクト行に特定のエフェクトが含まれることを示すトレイト"
+
+    tests:
+      - category: "エフェクト合成テスト"
+        cases:
+          - name: "Reader + State の合成"
+            test: |
+              type Effects = EffectRow![Reader<i32>, State<i32>];
+
+              fn computation() -> Eff<Effects, i32> {
+                  Reader::ask().flat_map(|env| {
+                      State::get().flat_map(|state| {
+                          State::put(state + env).then(State::get())
+                      })
+                  })
+              }
+
+              let handler = ReaderHandler::new(10).compose(StateHandler::new(5));
+              let ((result, final_state), ()) = handler.run(computation);
+              assert_eq!(result, 15);
+              assert_eq!(final_state, 15);
+
+  # ============================================================================
+  # 6. define_effect! マクロ
+  # ============================================================================
+  - id: algebraic_define_effect_macro
+    name: define_effect! マクロ
+    priority: medium
+    description: |
+      エフェクトを宣言的に定義するためのマクロ。
+      ボイラープレートコードを自動生成し、DX を向上させる。
+
+      ## 使用例
+
+      ```rust
+      define_effect! {
+          /// ロギングエフェクト
+          effect Log {
+              /// メッセージをログに出力
+              fn log(message: String) -> ();
+              /// ログレベルを取得
+              fn get_level() -> LogLevel;
+          }
+      }
+
+      // これにより以下が生成される:
+      // - LogEffect 構造体（Effect を実装）
+      // - Log::log(), Log::get_level() 関数
+      // - LogHandler トレイト
+      ```
+
+    internal_structure:
+      description: |
+        ```rust
+        /// エフェクトを定義するマクロ
+        ///
+        /// # Syntax
+        ///
+        /// ```text
+        /// define_effect! {
+        ///     #[doc = "エフェクトの説明"]
+        ///     effect EffectName {
+        ///         #[doc = "操作の説明"]
+        ///         fn operation_name(param: ParamType, ...) -> ReturnType;
+        ///         ...
+        ///     }
+        /// }
+        /// ```
+        ///
+        /// # Generated Code
+        ///
+        /// - `EffectNameEffect` 構造体: Effect トレイトを実装
+        /// - `EffectName` モジュール: 各操作に対応する関数
+        /// - `EffectNameHandler` トレイト: ハンドラが実装すべきトレイト
+        ///
+        /// # Examples
+        ///
+        /// ```rust,ignore
+        /// define_effect! {
+        ///     /// コンソールエフェクト
+        ///     effect Console {
+        ///         /// 行を出力
+        ///         fn print_line(message: String) -> ();
+        ///         /// 行を読み取り
+        ///         fn read_line() -> String;
+        ///     }
+        /// }
+        ///
+        /// // 使用方法
+        /// fn greet() -> Eff<ConsoleEffect, ()> {
+        ///     Console::print_line("What is your name?".to_string())
+        ///         .then(Console::read_line())
+        ///         .flat_map(|name| {
+        ///             Console::print_line(format!("Hello, {}!", name))
+        ///         })
+        /// }
+        ///
+        /// // ハンドラの実装
+        /// struct RealConsoleHandler;
+        ///
+        /// impl ConsoleHandler for RealConsoleHandler {
+        ///     fn print_line(&mut self, message: String) -> () {
+        ///         println!("{}", message);
+        ///     }
+        ///
+        ///     fn read_line(&mut self) -> String {
+        ///         let mut buffer = String::new();
+        ///         std::io::stdin().read_line(&mut buffer).unwrap();
+        ///         buffer.trim().to_string()
+        ///     }
+        /// }
+        /// ```
+        #[macro_export]
+        macro_rules! define_effect {
+            (
+                $(#[$meta:meta])*
+                effect $name:ident {
+                    $(
+                        $(#[$op_meta:meta])*
+                        fn $op_name:ident($($param:ident: $param_ty:ty),* $(,)?) -> $ret_ty:ty;
+                    )*
+                }
+            ) => {
+                // エフェクト構造体の生成
+                paste::paste! {
+                    $(#[$meta])*
+                    #[derive(Clone)]
+                    pub enum [<$name Effect>] {
+                        $(
+                            $(#[$op_meta])*
+                            [<$op_name:camel>] { $($param: $param_ty),* },
+                        )*
+                    }
+
+                    impl $crate::effect::algebraic::Effect for [<$name Effect>] {
+                        const NAME: &'static str = stringify!($name);
+                    }
+
+                    // 操作関数の生成
+                    pub mod $name {
+                        use super::*;
+
+                        $(
+                            $(#[$op_meta])*
+                            pub fn $op_name($($param: $param_ty),*) -> $crate::effect::algebraic::Eff<[<$name Effect>], $ret_ty> {
+                                $crate::effect::algebraic::Eff::perform(
+                                    [<$name Effect>]::[<$op_name:camel>] { $($param),* },
+                                    |result| *result.downcast::<$ret_ty>().unwrap()
+                                )
+                            }
+                        )*
+                    }
+
+                    // ハンドラトレイトの生成
+                    $(#[$meta])*
+                    pub trait [<$name Handler>] {
+                        $(
+                            $(#[$op_meta])*
+                            fn $op_name(&mut self, $($param: $param_ty),*) -> $ret_ty;
+                        )*
+                    }
+                }
+            };
+        }
+        ```
+
+    api:
+      syntax:
+        - name: "effect 宣言"
+          description: "エフェクト名と操作を定義"
+          example: |
+            define_effect! {
+                effect MyEffect {
+                    fn operation1(arg: i32) -> String;
+                    fn operation2() -> bool;
+                }
+            }
+
+    tests:
+      - category: "マクロ展開テスト"
+        cases:
+          - name: "シンプルなエフェクト定義"
+          - name: "複数の操作を持つエフェクト"
+          - name: "ジェネリックなパラメータ"
+
+  # ============================================================================
+  # 7. 既存システムとの相互運用
+  # ============================================================================
+  - id: algebraic_interop
+    name: 既存システムとの相互運用
+    priority: high
+    description: |
+      既存の Effect System（Monad Transformer, MTL-Style）との相互運用機能。
+
+      - Monad Transformer から Eff への変換
+      - Eff から Monad Transformer への変換
+      - MTL トレイトの自動実装
+
+    internal_structure:
+      description: |
+        ```rust
+        /// Monad Transformer から Eff への変換
+        pub trait IntoEff<E: Effect> {
+            type Value;
+
+            fn into_eff(self) -> Eff<E, Self::Value>;
+        }
+
+        // ReaderT から Reader エフェクトへの変換
+        impl<R: Clone + 'static, M: Monad, A: 'static> IntoEff<Reader<R>> for ReaderT<R, M, A> {
+            type Value = M::WithType<A>;
+
+            fn into_eff(self) -> Eff<Reader<R>, Self::Value> {
+                Reader::ask().fmap(|env| self.run(env))
+            }
+        }
+
+        /// Eff から Monad Transformer への変換
+        pub trait FromEff<E: Effect, A> {
+            fn from_eff(eff: Eff<E, A>) -> Self;
+        }
+
+        // Reader エフェクトから ReaderT への変換
+        impl<R: Clone + 'static, A: 'static> FromEff<Reader<R>, A> for ReaderT<R, Identity, A> {
+            fn from_eff(eff: Eff<Reader<R>, A>) -> Self {
+                ReaderT::new(|env| {
+                    let handler = ReaderHandler::new(env);
+                    Identity::new(handler.run(|| eff))
+                })
+            }
+        }
+
+        /// Eff に対する MTL トレイトの実装
+        impl<R: Clone + 'static, Row: Member<Reader<R>>, A: 'static> MonadReader<R> for Eff<Row, A> {
+            fn ask() -> Self {
+                Row::inject(Reader::ask())
+            }
+
+            fn local<F>(modifier: F, computation: Self) -> Self
+            where
+                F: FnOnce(R) -> R + 'static,
+            {
+                // Row の Reader を local でラップ
+            }
+
+            fn asks<B, F>(projection: F) -> Self::WithType<B>
+            where
+                F: FnOnce(R) -> B + 'static,
+                B: 'static,
+            {
+                Row::inject(Reader::asks(projection))
+            }
+        }
+        ```
+
+    api:
+      traits:
+        - name: "IntoEff<E>"
+          description: "Monad Transformer から Eff への変換"
+          methods:
+            - "fn into_eff(self) -> Eff<E, Self::Value>"
+
+        - name: "FromEff<E, A>"
+          description: "Eff から Monad Transformer への変換"
+          methods:
+            - "fn from_eff(eff: Eff<E, A>) -> Self"
+
+      implementations:
+        - "Eff<Row, A>: MonadReader<R> where Row: Member<Reader<R>>"
+        - "Eff<Row, A>: MonadState<S> where Row: Member<State<S>>"
+        - "Eff<Row, A>: MonadWriter<W> where Row: Member<Writer<W>>"
+        - "Eff<Row, A>: MonadError<E> where Row: Member<Error<E>>"
+
+    tests:
+      - category: "相互運用テスト"
+        cases:
+          - name: "ReaderT から Eff への変換"
+          - name: "Eff から ReaderT への変換"
+          - name: "Eff に対する MonadReader の使用"
+          - name: "既存の eff! マクロとの互換性"
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - description: "静的ディスパッチ優先"
+      rationale: |
+        デフォルトでは静的ディスパッチ（モノモーフィゼーション）を使用。
+        動的ディスパッチは dyn_effect feature でオプトイン。
+
+    - description: "スタック安全性"
+      rationale: |
+        Trampoline を使用して深い再帰でもスタックオーバーフローを防ぐ。
+        必要に応じて Trampoline::run() でスタックを解放。
+
+    - description: "ゼロコスト抽象化"
+      rationale: |
+        可能な限り実行時オーバーヘッドを排除。
+        エフェクトを使わないコードは通常のコードと同等の性能。
+
+  compatibility:
+    - description: "既存 Effect System との互換性"
+      rationale: |
+        IntoEff, FromEff による双方向変換。
+        MTL トレイトの自動実装。
+        既存の eff! マクロがそのまま動作。
+
+    - description: "Rust バージョン"
+      rationale: |
+        Rust 1.92.0 以上をサポート。
+        nightly の機能（コルーチンなど）は feature flag でオプトイン。
+
+  testing:
+    - description: "プロパティベーステスト"
+      rationale: |
+        Monad 法則、Handler 法則を proptest で検証。
+        エフェクト合成の正しさを自動テスト。
+
+    - description: "統合テスト"
+      rationale: |
+        既存の Monad Transformer との相互運用を検証。
+        複合エフェクトのシナリオテスト。
+
+    - description: "ベンチマーク"
+      rationale: |
+        criterion によるパフォーマンス計測。
+        Monad Transformer との比較ベンチマーク。
+
+# 実装順序
+implementation_order:
+  - phase: "7.1"
+    name: "基盤トレイトの実装"
+    description: |
+      Effect, Handler, Eff の基本構造を実装。
+      TypeConstructor, Functor, Applicative, Monad の実装。
+    duration_estimate: "5-7 days"
+    dependencies: []
+    deliverables:
+      - src/effect/algebraic/mod.rs
+      - src/effect/algebraic/effect.rs
+      - src/effect/algebraic/handler.rs
+      - src/effect/algebraic/eff.rs
+      - tests/algebraic/eff_tests.rs
+
+  - phase: "7.2"
+    name: "標準エフェクトの実装"
+    description: |
+      Reader, State, Writer, Error エフェクトと対応するハンドラを実装。
+    duration_estimate: "5-7 days"
+    dependencies:
+      - "7.1"
+    deliverables:
+      - src/effect/algebraic/reader.rs
+      - src/effect/algebraic/state.rs
+      - src/effect/algebraic/writer.rs
+      - src/effect/algebraic/error.rs
+      - tests/algebraic/reader_tests.rs
+      - tests/algebraic/state_tests.rs
+      - tests/algebraic/writer_tests.rs
+      - tests/algebraic/error_tests.rs
+
+  - phase: "7.3"
+    name: "エフェクト合成の実装"
+    description: |
+      エフェクト行（EffectRow）と Member トレイトの実装。
+      複合エフェクトのハンドラ合成。
+    duration_estimate: "7-10 days"
+    dependencies:
+      - "7.2"
+    deliverables:
+      - src/effect/algebraic/row.rs
+      - src/effect/algebraic/member.rs
+      - tests/algebraic/composition_tests.rs
+
+  - phase: "7.4"
+    name: "define_effect! マクロの実装"
+    description: |
+      エフェクト定義マクロの実装。
+      paste クレートを使用したコード生成。
+    duration_estimate: "3-5 days"
+    dependencies:
+      - "7.2"
+    deliverables:
+      - src/effect/algebraic/macros.rs
+      - tests/algebraic/macro_tests.rs
+
+  - phase: "7.5"
+    name: "相互運用機能の実装"
+    description: |
+      IntoEff, FromEff トレイトの実装。
+      Eff に対する MTL トレイトの実装。
+    duration_estimate: "5-7 days"
+    dependencies:
+      - "7.3"
+    deliverables:
+      - src/effect/algebraic/interop.rs
+      - tests/algebraic/interop_tests.rs
+
+  - phase: "7.6"
+    name: "統合テストと文書化"
+    description: |
+      全機能の統合テスト、ドキュメント、サンプルコードの整備。
+    duration_estimate: "3-5 days"
+    dependencies:
+      - "7.1"
+      - "7.2"
+      - "7.3"
+      - "7.4"
+      - "7.5"
+    deliverables:
+      - tests/algebraic/integration_tests.rs
+      - examples/algebraic_effects_example.rs
+
+# 将来の拡張
+future_extensions:
+  - id: coroutine_based_effects
+    name: "コルーチンベースのエフェクト"
+    description: |
+      Rust の nightly コルーチン機能を使用した、より効率的なエフェクト実装。
+      継続のネイティブサポートにより、パフォーマンスと人間工学の両方が向上。
+    rationale: |
+      現時点ではコルーチンは nightly のみで、API も安定していない。
+      stable になった時点で、オプショナルな実装として追加を検討。
+
+  - id: effect_polymorphism
+    name: "エフェクト多相性"
+    description: |
+      関数がどのエフェクトを使用するかに関して多相的になる機能。
+
+      ```rust
+      fn computation<E: Member<Reader<Config>> + Member<State<Counter>>>() -> Eff<E, i32> {
+          // Reader と State の両方を使用できる
+      }
+      ```
+    rationale: |
+      型システムの複雑さと、Rust の型推論の限界により、
+      完全なエフェクト多相性は困難。
+      将来の Rust の進化に合わせて検討。
+
+  - id: async_effects
+    name: "非同期エフェクト"
+    description: |
+      async/await と代数的効果の統合。
+      AsyncEff 型による非同期エフェクトフルな計算。
+    rationale: |
+      非同期と継続の相互作用は複雑。
+      まず同期版を安定させてから、非同期版を設計。
+
+  - id: effect_inference
+    name: "エフェクト推論"
+    description: |
+      エフェクト行の自動推論による型注釈の削減。
+      使用されているエフェクトからエフェクト行を自動的に構築。
+    rationale: |
+      Rust の型推論の限界により、完全な推論は困難。
+      proc-macro を使った部分的な推論を検討。
+
+  - id: scoped_effects
+    name: "スコープ付きエフェクト"
+    description: |
+      特定のスコープ内でのみ有効なエフェクト。
+      リソース管理（ファイルハンドル、接続など）に有用。
+
+      ```rust
+      with_file("path.txt", |file| {
+          // このスコープ内でのみ file エフェクトが使用可能
+          File::read_line(file)
+      })
+      ```
+    rationale: |
+      スコープとライフタイムの相互作用が複雑。
+      基本機能が安定してから検討。
+
+# Haskell/Koka との対応表
+language_correspondence:
+  haskell_effectful:
+    - haskell: "type Eff es a = ..."
+      rust: "Eff<E, A>"
+      notes: "es は型レベルリスト、E はエフェクト行"
+
+    - haskell: "runReader :: r -> Eff (Reader r : es) a -> Eff es a"
+      rust: "ReaderHandler::run()"
+      notes: "ハンドラがエフェクトを解釈"
+
+    - haskell: "ask :: Reader r :> es => Eff es r"
+      rust: "Reader::ask() where Row: Member<Reader<R>>"
+      notes: ":> は Member トレイトに相当"
+
+  koka:
+    - koka: "effect state<s> { fun get(): s; fun set(x: s): () }"
+      rust: "define_effect! { effect State { fn get() -> S; fn put(state: S) -> (); } }"
+      notes: "マクロで同様の構文を提供"
+
+    - koka: "handle(computation) { get() -> resume(current_state); ... }"
+      rust: "StateHandler::new(initial).run(computation)"
+      notes: "ハンドラ構造体で解釈を定義"
+
+    - koka: "fun computation(): <state<int>, reader<config>> int"
+      rust: "fn computation() -> Eff<EffectRow![State<i32>, Reader<Config>], i32>"
+      notes: "EffectRow! マクロでエフェクト行を構築"

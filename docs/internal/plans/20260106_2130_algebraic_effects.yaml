@@ -1,0 +1,2510 @@
+# Algebraic Effects (代数的効果) 実装計画
+#
+# 要件定義: docs/internal/requirements/20260106_2130_algebraic_effects.yaml
+# 技術要件:
+#   - Rust: 1.92.0
+#   - edition: 2024
+#   - testing: rstest, proptest
+#
+# 実装方針:
+#   1. TDD（テスト駆動開発）でテストを先に書く
+#   2. 既存の effect モジュール（MTL-Style）との整合性を保つ
+#   3. Trampoline を活用してスタック安全性を確保
+#   4. GAT を使った HKT エミュレーションパターンを踏襲
+#   5. 段階的に実装を積み上げ、各フェーズでテストを通過させる
+
+version: "1.0.0"
+name: "Algebraic Effects Implementation Plan"
+requirement_file: "docs/internal/requirements/20260106_2130_algebraic_effects.yaml"
+
+# 実装順序の概要
+implementation_order:
+  - step: 1
+    name: "基盤トレイト・型の実装"
+    items:
+      - Effect トレイト（マーカートレイト）
+      - Eff<E, A> 型（エフェクトフルな計算の表現、Trampoline ベース）
+      - Handler トレイト（エフェクトの解釈）
+      - Eff に対する TypeConstructor, Functor, Applicative, Monad の実装
+
+  - step: 2
+    name: "標準エフェクトの実装"
+    items:
+      - Reader エフェクトと ReaderHandler（local を含む）
+      - State エフェクトと StateHandler
+      - Writer エフェクトと WriterHandler（listen を含む）
+      - Error エフェクトと ErrorHandler（catch を含む）
+
+  - step: 3
+    name: "エフェクト合成の実装"
+    items:
+      - EffNil, EffCons（型レベルリスト）
+      - Member トレイト（Index パターンによるエフェクト行のメンバーシップ判定）
+      - EffectRow! マクロ
+      - ComposedHandler（ハンドラの合成）
+
+  - step: 4
+    name: "define_effect! マクロの実装"
+    items:
+      - マクロの構文設計
+      - エフェクト構造体の生成
+      - 操作関数の生成（AtomicU32 による安全なタグ生成）
+      - ハンドラトレイトの生成
+
+  - step: 5
+    name: "既存システムとの相互運用"
+    items:
+      - IntoEff トレイト（Monad Transformer -> Eff）
+      - FromEff トレイト（Eff -> Monad Transformer）
+      - Eff に対する全 MTL トレイトの実装（MonadReader, MonadState, MonadWriter, MonadError）
+
+  - step: 6
+    name: "統合テストとドキュメント"
+    items:
+      - 統合テストシナリオの作成
+      - 法則テスト（Monad 法則、Handler 法則、各エフェクト固有の法則）
+      - ベンチマークテスト
+      - ドキュメントの整備
+      - サンプルコードの作成
+
+# 実装計画詳細
+implementation_plan:
+  # ============================================================================
+  # 1. Effect トレイト
+  # ============================================================================
+  - id: impl_effect_trait
+    requirement_id: algebraic_effect_trait
+    name: "Effect トレイトの実装"
+    priority: 1
+    description: |
+      エフェクトを定義するための基本トレイト。
+      各エフェクトを識別するためのマーカートレイト的な役割を持つ。
+
+    files:
+      - path: src/effect/algebraic/mod.rs
+        description: |
+          algebraic サブモジュールのエントリーポイント。
+          すべての公開アイテムを re-export する。
+
+      - path: src/effect/algebraic/effect.rs
+        description: |
+          Effect トレイトの定義。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          algebraic サブモジュールのディレクトリ構造を作成し、
+          Effect トレイトを定義する。
+        code_outline: |
+          // src/effect/algebraic/effect.rs
+
+          use std::any::TypeId;
+
+          /// エフェクトを定義するための基本トレイト
+          ///
+          /// Effect は「計算が必要とする能力」を宣言する。
+          /// 具体的な実装は Handler が提供する。
+          ///
+          /// # Examples
+          ///
+          /// ```rust,ignore
+          /// use lambars::effect::algebraic::Effect;
+          ///
+          /// struct LogEffect;
+          ///
+          /// impl Effect for LogEffect {
+          ///     const NAME: &'static str = "Log";
+          /// }
+          /// ```
+          pub trait Effect: 'static {
+              /// このエフェクトの名前（デバッグ・エラーメッセージ用）
+              const NAME: &'static str;
+
+              /// このエフェクトの TypeId を取得
+              #[inline]
+              fn type_id() -> TypeId {
+                  TypeId::of::<Self>()
+              }
+          }
+
+      - step: 2
+        description: |
+          NoEffect 型を定義する。エフェクトを持たない純粋な計算用。
+        code_outline: |
+          /// エフェクトを持たない計算を表すマーカー型
+          ///
+          /// Eff<NoEffect, A> は副作用のない純粋な計算を表す。
+          #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+          pub struct NoEffect;
+
+          impl Effect for NoEffect {
+              const NAME: &'static str = "NoEffect";
+          }
+
+    tests:
+      - name: test_effect_trait_basic
+        description: Effect トレイトの基本的な使用法をテスト
+        test_type: unit
+        code_outline: |
+          #[cfg(test)]
+          mod tests {
+              use super::*;
+              use rstest::rstest;
+
+              struct TestEffect;
+
+              impl Effect for TestEffect {
+                  const NAME: &'static str = "TestEffect";
+              }
+
+              #[rstest]
+              fn effect_name_is_accessible() {
+                  assert_eq!(TestEffect::NAME, "TestEffect");
+              }
+
+              #[rstest]
+              fn effect_type_id_is_unique() {
+                  let type_id_1 = TestEffect::type_id();
+                  let type_id_2 = NoEffect::type_id();
+                  assert_ne!(type_id_1, type_id_2);
+              }
+
+              #[rstest]
+              fn no_effect_name() {
+                  assert_eq!(NoEffect::NAME, "NoEffect");
+              }
+          }
+
+    dependencies: []
+
+  # ============================================================================
+  # 2. Eff<E, A> 型
+  # ============================================================================
+  - id: impl_eff_type
+    requirement_id: algebraic_eff_type
+    name: "Eff<E, A> 型の実装"
+    priority: 2
+    description: |
+      エフェクト E を持つ計算を表す型。
+      Free Monad に似た構造を持ち、Pure, Impure, FlatMap の3つのバリアントで構成される。
+      FlatMap バリアントによる遅延評価と Trampoline を内部で活用してスタック安全性を確保する。
+
+    files:
+      - path: src/effect/algebraic/eff.rs
+        description: |
+          Eff<E, A> 型の定義と基本操作の実装。
+          Functor, Applicative, Monad の機能を提供。
+          FlatMap バリアントによるスタック安全な flat_map を実装。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Eff の基本構造を定義する。
+          FlatMap バリアントを追加してスタック安全性を確保。
+        code_outline: |
+          // src/effect/algebraic/eff.rs
+
+          use crate::control::Trampoline;
+          use super::effect::Effect;
+          use std::marker::PhantomData;
+
+          /// エフェクト操作を表す内部構造体
+          ///
+          /// 型消去を使用して、異なる型のエフェクト操作を
+          /// 同じコンテナに格納できるようにする。
+          pub(crate) struct EffOperation<E: Effect, A: 'static> {
+              /// エフェクトの種類を示すマーカー
+              pub(crate) effect_marker: PhantomData<E>,
+              /// 操作の種類を識別するためのタグ
+              pub(crate) operation_tag: OperationTag,
+              /// 操作の引数（型消去）
+              pub(crate) arguments: Box<dyn std::any::Any + Send + Sync>,
+              /// 継続（結果を受け取り、次の Eff を返す）
+              pub(crate) continuation: Box<dyn FnOnce(Box<dyn std::any::Any>) -> Eff<E, A> + 'static>,
+          }
+
+          /// 操作を識別するためのタグ
+          #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+          pub struct OperationTag(pub(crate) u32);
+
+          /// エフェクトフルな計算を表す型
+          ///
+          /// Eff<E, A> は「エフェクト E を使用し、最終的に A を返す計算」を表す。
+          /// ハンドラによって解釈されるまで実行されない。
+          ///
+          /// # Type Parameters
+          ///
+          /// - `E`: この計算が使用するエフェクト
+          /// - `A`: 計算の結果型
+          ///
+          /// # Monad Laws
+          ///
+          /// Eff は Monad として以下の法則を満たす:
+          ///
+          /// 1. **Left Identity**: `Eff::pure(a).flat_map(f) == f(a)`
+          /// 2. **Right Identity**: `m.flat_map(Eff::pure) == m`
+          /// 3. **Associativity**: `m.flat_map(f).flat_map(g) == m.flat_map(|x| f(x).flat_map(g))`
+          ///
+          /// # Stack Safety
+          ///
+          /// FlatMap バリアントによる遅延評価により、深い flat_map チェーンでも
+          /// スタックオーバーフローを防ぐ。ハンドラ実行時に Trampoline を使用して
+          /// スタック安全に計算を実行する。
+          pub struct Eff<E: Effect, A: 'static> {
+              inner: EffInner<E, A>,
+          }
+
+          /// Eff の内部表現
+          enum EffInner<E: Effect, A: 'static> {
+              /// 純粋な値
+              Pure(A),
+              /// エフェクト操作と継続
+              Impure(EffOperation<E, A>),
+              /// 遅延された flat_map（スタック安全性のため）
+              FlatMap(Box<EffFlatMap<E, A>>),
+          }
+
+          /// flat_map の遅延表現（スタック安全性のため）
+          struct EffFlatMap<E: Effect, A: 'static> {
+              /// 元の計算（型消去）
+              source: Box<dyn std::any::Any + 'static>,
+              /// 変換関数（型消去）
+              transform: Box<dyn FnOnce(Box<dyn std::any::Any>) -> Eff<E, A> + 'static>,
+          }
+
+      - step: 2
+        description: |
+          Eff の基本コンストラクタと操作を実装する。
+        code_outline: |
+          impl<E: Effect, A: 'static> Eff<E, A> {
+              /// 純粋な値を Eff に持ち上げる
+              ///
+              /// # Examples
+              ///
+              /// ```rust,ignore
+              /// use lambars::effect::algebraic::{Eff, NoEffect};
+              ///
+              /// let eff: Eff<NoEffect, i32> = Eff::pure(42);
+              /// ```
+              #[inline]
+              pub fn pure(value: A) -> Self {
+                  Self {
+                      inner: EffInner::Pure(value),
+                  }
+              }
+
+              /// エフェクト操作を実行する（内部用）
+              ///
+              /// この関数はエフェクト定義で使用される。
+              /// 通常は define_effect! マクロ経由で使用することを推奨。
+              pub(crate) fn perform_raw<R: 'static>(
+                  operation_tag: OperationTag,
+                  arguments: impl std::any::Any + Send + Sync + 'static,
+              ) -> Eff<E, R> {
+                  Eff {
+                      inner: EffInner::Impure(EffOperation {
+                          effect_marker: PhantomData,
+                          operation_tag,
+                          arguments: Box::new(arguments),
+                          continuation: Box::new(|result| {
+                              let value = *result.downcast::<R>().expect("Type mismatch in Eff::perform_raw");
+                              Eff::pure(value)
+                          }),
+                      }),
+                  }
+              }
+
+              /// 計算が純粋な値かどうかを判定
+              #[inline]
+              pub fn is_pure(&self) -> bool {
+                  matches!(&self.inner, EffInner::Pure(_))
+              }
+
+              /// 内部表現を正規化して Pure または Impure に変換
+              ///
+              /// FlatMap バリアントを展開し、実際の計算構造を取得する。
+              /// ハンドラ実行時に使用。
+              pub(crate) fn normalize(self) -> Self {
+                  match self.inner {
+                      EffInner::Pure(_) | EffInner::Impure(_) => self,
+                      EffInner::FlatMap(flat_map) => {
+                          // Trampoline を使用してスタック安全に展開
+                          Self::normalize_with_trampoline(flat_map)
+                      }
+                  }
+              }
+
+              fn normalize_with_trampoline(flat_map: Box<EffFlatMap<E, A>>) -> Self {
+                  use crate::control::Trampoline;
+
+                  let mut current = Trampoline::suspend(move || {
+                      (flat_map.transform)(flat_map.source)
+                  });
+
+                  loop {
+                      match current.run() {
+                          eff => {
+                              match eff.inner {
+                                  EffInner::Pure(_) | EffInner::Impure(_) => return eff,
+                                  EffInner::FlatMap(next_flat_map) => {
+                                      current = Trampoline::suspend(move || {
+                                          (next_flat_map.transform)(next_flat_map.source)
+                                      });
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+
+      - step: 3
+        description: |
+          Functor (fmap) の実装。
+        code_outline: |
+          impl<E: Effect, A: 'static> Eff<E, A> {
+              /// 計算結果に関数を適用（Functor::fmap）
+              ///
+              /// # Examples
+              ///
+              /// ```rust,ignore
+              /// use lambars::effect::algebraic::{Eff, NoEffect};
+              ///
+              /// let eff = Eff::<NoEffect, i32>::pure(21).fmap(|x| x * 2);
+              /// ```
+              pub fn fmap<B: 'static, F>(self, function: F) -> Eff<E, B>
+              where
+                  F: FnOnce(A) -> B + 'static,
+              {
+                  self.flat_map(|a| Eff::pure(function(a)))
+              }
+          }
+
+      - step: 4
+        description: |
+          Monad (flat_map) の実装。FlatMap バリアントを使用してスタック安全性を確保。
+        code_outline: |
+          impl<E: Effect, A: 'static> Eff<E, A> {
+              /// 計算を連鎖させる（Monad::flat_map）
+              ///
+              /// FlatMap バリアントを使用して遅延評価することで、
+              /// 深い連鎖でもスタックオーバーフローを防ぐ。
+              ///
+              /// # Examples
+              ///
+              /// ```rust,ignore
+              /// use lambars::effect::algebraic::{Eff, NoEffect};
+              ///
+              /// let eff = Eff::<NoEffect, i32>::pure(10)
+              ///     .flat_map(|x| Eff::pure(x + 5));
+              /// ```
+              pub fn flat_map<B: 'static, F>(self, function: F) -> Eff<E, B>
+              where
+                  F: FnOnce(A) -> Eff<E, B> + 'static,
+              {
+                  match self.inner {
+                      EffInner::Pure(a) => function(a),
+                      EffInner::Impure(operation) => {
+                          Eff {
+                              inner: EffInner::Impure(EffOperation {
+                                  effect_marker: operation.effect_marker,
+                                  operation_tag: operation.operation_tag,
+                                  arguments: operation.arguments,
+                                  continuation: Box::new(move |result| {
+                                      // FlatMap バリアントを使用して遅延評価
+                                      Eff {
+                                          inner: EffInner::FlatMap(Box::new(EffFlatMap {
+                                              source: Box::new((operation.continuation)(result)),
+                                              transform: Box::new(move |source| {
+                                                  let eff = *source.downcast::<Eff<E, A>>().unwrap();
+                                                  eff.flat_map(function)
+                                              }),
+                                          })),
+                                      }
+                                  }),
+                              }),
+                          }
+                      }
+                      EffInner::FlatMap(flat_map) => {
+                          // 連続した FlatMap を融合
+                          Eff {
+                              inner: EffInner::FlatMap(Box::new(EffFlatMap {
+                                  source: flat_map.source,
+                                  transform: Box::new(move |source| {
+                                      let eff = (flat_map.transform)(source);
+                                      eff.flat_map(function)
+                                  }),
+                              })),
+                          }
+                      }
+                  }
+              }
+
+              /// flat_map のエイリアス
+              #[inline]
+              pub fn and_then<B: 'static, F>(self, function: F) -> Eff<E, B>
+              where
+                  F: FnOnce(A) -> Eff<E, B> + 'static,
+              {
+                  self.flat_map(function)
+              }
+
+              /// 計算を連鎖させ、最初の結果を捨てる
+              #[inline]
+              pub fn then<B: 'static>(self, next: Eff<E, B>) -> Eff<E, B> {
+                  self.flat_map(|_| next)
+              }
+          }
+
+      - step: 5
+        description: |
+          Applicative (map2, product) の実装。
+        code_outline: |
+          impl<E: Effect, A: 'static> Eff<E, A> {
+              /// 二つの計算を組み合わせる（Applicative::map2）
+              pub fn map2<B: 'static, C: 'static, F>(
+                  self,
+                  other: Eff<E, B>,
+                  function: F,
+              ) -> Eff<E, C>
+              where
+                  F: FnOnce(A, B) -> C + 'static,
+              {
+                  self.flat_map(|a| other.fmap(|b| function(a, b)))
+              }
+
+              /// 二つの計算をタプルに組み合わせる
+              pub fn product<B: 'static>(self, other: Eff<E, B>) -> Eff<E, (A, B)> {
+                  self.map2(other, |a, b| (a, b))
+              }
+          }
+
+      - step: 6
+        description: |
+          TypeConstructor, Functor, Applicative, Monad トレイトを Eff に実装する。
+        code_outline: |
+          use crate::typeclass::{TypeConstructor, Functor, Applicative, Monad};
+
+          impl<E: Effect> TypeConstructor for Eff<E, ()> {
+              type Wrapped<T: 'static> = Eff<E, T>;
+          }
+
+          impl<E: Effect, A: 'static> Functor for Eff<E, A> {
+              type Source = A;
+              type Target<T: 'static> = Eff<E, T>;
+
+              fn fmap<B: 'static, F>(self, function: F) -> Self::Target<B>
+              where
+                  F: FnOnce(Self::Source) -> B + 'static,
+              {
+                  Eff::fmap(self, function)
+              }
+          }
+
+          impl<E: Effect, A: 'static> Applicative for Eff<E, A> {
+              fn pure(value: Self::Source) -> Self {
+                  Eff::pure(value)
+              }
+
+              fn apply<B: 'static, F>(self, function: Self::Target<F>) -> Self::Target<B>
+              where
+                  F: FnOnce(Self::Source) -> B + 'static,
+              {
+                  function.flat_map(|f| self.fmap(f))
+              }
+          }
+
+          impl<E: Effect, A: 'static> Monad for Eff<E, A> {
+              fn flat_map<B: 'static, F>(self, function: F) -> Self::Target<B>
+              where
+                  F: FnOnce(Self::Source) -> Self::Target<B> + 'static,
+              {
+                  Eff::flat_map(self, function)
+              }
+          }
+
+    tests:
+      - name: test_eff_pure
+        description: Eff::pure の基本動作テスト
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn eff_pure_creates_pure_value() {
+              let eff: Eff<NoEffect, i32> = Eff::pure(42);
+              assert!(eff.is_pure());
+          }
+
+      - name: test_eff_fmap
+        description: Eff の fmap 動作テスト
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn eff_fmap_transforms_value() {
+              let eff: Eff<NoEffect, i32> = Eff::pure(21);
+              let mapped = eff.fmap(|x| x * 2);
+              assert!(mapped.is_pure());
+          }
+
+      - name: test_eff_stack_safety
+        description: 深い flat_map チェーンでスタックオーバーフローしないことを確認
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn eff_deep_flat_map_is_stack_safe() {
+              let mut eff: Eff<NoEffect, i32> = Eff::pure(0);
+              for _ in 0..10000 {
+                  eff = eff.flat_map(|x| Eff::pure(x + 1));
+              }
+              let result = PureHandler.run(eff);
+              assert_eq!(result, 10000);
+          }
+
+      - name: test_eff_typeclass_implementations
+        description: TypeConstructor, Functor, Applicative, Monad の実装テスト
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn eff_implements_functor() {
+              use crate::typeclass::Functor;
+              let eff: Eff<NoEffect, i32> = Eff::pure(10);
+              let mapped = Functor::fmap(eff, |x| x * 2);
+              let result = PureHandler.run(mapped);
+              assert_eq!(result, 20);
+          }
+
+          #[rstest]
+          fn eff_implements_applicative() {
+              use crate::typeclass::Applicative;
+              let eff: Eff<NoEffect, i32> = Applicative::pure(42);
+              let result = PureHandler.run(eff);
+              assert_eq!(result, 42);
+          }
+
+          #[rstest]
+          fn eff_implements_monad() {
+              use crate::typeclass::Monad;
+              let eff: Eff<NoEffect, i32> = Eff::pure(10);
+              let chained = Monad::flat_map(eff, |x| Eff::pure(x + 5));
+              let result = PureHandler.run(chained);
+              assert_eq!(result, 15);
+          }
+
+    dependencies:
+      - impl_effect_trait
+
+  # ============================================================================
+  # 3. Handler トレイト
+  # ============================================================================
+  - id: impl_handler_trait
+    requirement_id: algebraic_handler_trait
+    name: "Handler トレイトの実装"
+    priority: 3
+    description: |
+      エフェクトを解釈するハンドラを定義するトレイト。
+      各エフェクトの操作に対する具体的な実装を提供する。
+
+    files:
+      - path: src/effect/algebraic/handler.rs
+        description: |
+          Handler トレイトの定義と基本的なハンドラユーティリティ。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Handler トレイトを定義する。
+          GAT を使用して出力型を柔軟に定義できるようにする。
+        code_outline: |
+          // src/effect/algebraic/handler.rs
+
+          use super::effect::Effect;
+          use super::eff::Eff;
+          use crate::control::Trampoline;
+
+          /// エフェクトの解釈を提供するハンドラ
+          ///
+          /// Handler は Effect の各操作を具体的な実装にマップする。
+          /// 継続（continuation）を通じて計算を続行するか、
+          /// 別の値を返すかを決定できる。
+          ///
+          /// # Type Parameters
+          ///
+          /// - `E`: 処理対象のエフェクト
+          ///
+          /// # Laws
+          ///
+          /// ## Handler Identity Law（ハンドラ恒等律）
+          ///
+          /// 純粋な計算（エフェクトを使わない）をハンドルしても結果は変わらない:
+          /// `handler.run(Eff::pure(a)) == wrap(a)`
+          ///
+          /// wrap は Handler の Output 型への持ち上げ。
+          /// StateHandler の場合: wrap(a) = (a, initial_state)
+          ///
+          /// ## Handler Composition Law（ハンドラ合成律）
+          ///
+          /// ハンドラの合成は結合的:
+          /// `(h1.compose(h2)).compose(h3) == h1.compose(h2.compose(h3))`
+          ///
+          /// # Examples
+          ///
+          /// ```rust,ignore
+          /// use lambars::effect::algebraic::{Handler, Effect, Eff};
+          ///
+          /// struct CounterHandler {
+          ///     count: i32,
+          /// }
+          ///
+          /// impl Handler<CounterEffect> for CounterHandler {
+          ///     type Output<A> = (A, i32);
+          ///
+          ///     fn run<A: 'static>(self, computation: Eff<CounterEffect, A>) -> Self::Output<A> {
+          ///         // エフェクト操作を解釈
+          ///     }
+          /// }
+          /// ```
+          pub trait Handler<E: Effect>: Sized {
+              /// ハンドラの出力型
+              ///
+              /// 型パラメータ A は元の計算の結果型。
+              /// Output<A> はハンドリング後の結果型。
+              ///
+              /// 例:
+              /// - State<S> のハンドラ: `Output<A> = (A, S)`（値と最終状態のペア）
+              /// - Error<E> のハンドラ: `Output<A> = Result<A, E>`
+              type Output<A>;
+
+              /// ハンドラを適用して計算を実行する
+              ///
+              /// # Arguments
+              ///
+              /// * `computation` - 処理対象のエフェクトフルな計算
+              ///
+              /// # Returns
+              ///
+              /// ハンドラの出力型でラップされた結果
+              fn run<A: 'static>(self, computation: Eff<E, A>) -> Self::Output<A>;
+          }
+
+      - step: 2
+        description: |
+          PureHandler を実装する。NoEffect 用のハンドラ。
+        code_outline: |
+          use super::effect::NoEffect;
+
+          /// 純粋な計算用のハンドラ
+          ///
+          /// NoEffect を持つ計算を実行し、値を取り出す。
+          pub struct PureHandler;
+
+          impl Handler<NoEffect> for PureHandler {
+              type Output<A> = A;
+
+              fn run<A: 'static>(self, computation: Eff<NoEffect, A>) -> A {
+                  // FlatMap を正規化してから処理
+                  let normalized = computation.normalize();
+                  match normalized.inner {
+                      super::eff::EffInner::Pure(a) => a,
+                      super::eff::EffInner::Impure(_) => {
+                          panic!("NoEffect computation should not have Impure operations")
+                      }
+                      super::eff::EffInner::FlatMap(_) => {
+                          unreachable!("FlatMap should be normalized")
+                      }
+                  }
+              }
+          }
+
+      - step: 3
+        description: |
+          ハンドラの合成機能を実装する。
+        code_outline: |
+          /// 合成されたハンドラ
+          ///
+          /// 二つのハンドラを順番に適用する。
+          pub struct ComposedHandler<H1, H2, E1, E2>
+          where
+              E1: Effect,
+              E2: Effect,
+              H1: Handler<E1>,
+              H2: Handler<E2>,
+          {
+              first: H1,
+              second: H2,
+              _marker: std::marker::PhantomData<(E1, E2)>,
+          }
+
+          impl<H1, H2, E1, E2> ComposedHandler<H1, H2, E1, E2>
+          where
+              E1: Effect,
+              E2: Effect,
+              H1: Handler<E1>,
+              H2: Handler<E2>,
+          {
+              pub fn new(first: H1, second: H2) -> Self {
+                  Self {
+                      first,
+                      second,
+                      _marker: std::marker::PhantomData,
+                  }
+              }
+          }
+
+          impl<E: Effect> Handler<E> for () {
+              type Output<A> = A;
+
+              fn run<A: 'static>(self, computation: Eff<E, A>) -> A {
+                  // Identity handler - should only work for pure computations
+                  let normalized = computation.normalize();
+                  match normalized.inner {
+                      super::eff::EffInner::Pure(a) => a,
+                      super::eff::EffInner::Impure(_) => {
+                          panic!("Cannot run effectful computation without a proper handler")
+                      }
+                      super::eff::EffInner::FlatMap(_) => {
+                          unreachable!("FlatMap should be normalized")
+                      }
+                  }
+              }
+          }
+
+    tests:
+      - name: test_pure_handler
+        description: PureHandler の基本動作テスト
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn pure_handler_extracts_value() {
+              let eff = Eff::<NoEffect, i32>::pure(42);
+              let result = PureHandler.run(eff);
+              assert_eq!(result, 42);
+          }
+
+    dependencies:
+      - impl_eff_type
+
+  # ============================================================================
+  # 4. Reader エフェクト
+  # ============================================================================
+  - id: impl_reader_effect
+    requirement_id: algebraic_standard_effects
+    name: "Reader エフェクトの実装"
+    priority: 4
+    description: |
+      環境からの読み取りを提供する Reader エフェクト。
+      既存の Reader Monad と互換性のある API を提供。
+      local 操作を含む。
+
+    files:
+      - path: src/effect/algebraic/reader.rs
+        description: |
+          Reader エフェクトと ReaderHandler の実装。
+          ask, asks, local 操作を提供。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Reader エフェクト型を定義する。
+        code_outline: |
+          // src/effect/algebraic/reader.rs
+
+          use super::effect::Effect;
+          use super::eff::{Eff, OperationTag};
+          use std::marker::PhantomData;
+
+          /// Reader エフェクト: 環境からの読み取り
+          ///
+          /// # Type Parameters
+          ///
+          /// - `R`: 環境の型
+          #[derive(Clone)]
+          pub struct ReaderEffect<R>(PhantomData<R>);
+
+          impl<R: 'static> Effect for ReaderEffect<R> {
+              const NAME: &'static str = "Reader";
+          }
+
+          /// Reader 操作のタグ
+          pub(crate) mod reader_operations {
+              use super::*;
+
+              pub const ASK: OperationTag = OperationTag(1);
+              pub const LOCAL: OperationTag = OperationTag(2);
+          }
+
+      - step: 2
+        description: |
+          Reader の操作関数を定義する。local を含む。
+        code_outline: |
+          impl<R: Clone + 'static> ReaderEffect<R> {
+              /// 環境全体を取得
+              ///
+              /// # Examples
+              ///
+              /// ```rust,ignore
+              /// use lambars::effect::algebraic::{ReaderEffect, ReaderHandler};
+              ///
+              /// let computation = ReaderEffect::<i32>::ask();
+              /// let result = ReaderHandler::new(42).run(computation);
+              /// assert_eq!(result, 42);
+              /// ```
+              pub fn ask() -> Eff<Self, R> {
+                  Eff::perform_raw::<R>(reader_operations::ASK, ())
+              }
+
+              /// 環境から値を射影
+              pub fn asks<A: 'static, F>(projection: F) -> Eff<Self, A>
+              where
+                  F: FnOnce(R) -> A + 'static,
+              {
+                  Self::ask().fmap(projection)
+              }
+
+              /// 環境を一時的に変更して計算を実行
+              ///
+              /// # Arguments
+              ///
+              /// * `modifier` - 環境を変更する関数
+              /// * `computation` - 変更された環境で実行する計算
+              ///
+              /// # Examples
+              ///
+              /// ```rust,ignore
+              /// use lambars::effect::algebraic::{ReaderEffect, ReaderHandler};
+              ///
+              /// let computation = ReaderEffect::<i32>::local(
+              ///     |x| x * 2,
+              ///     ReaderEffect::ask()
+              /// );
+              /// let result = ReaderHandler::new(21).run(computation);
+              /// assert_eq!(result, 42);
+              /// ```
+              pub fn local<A: 'static, F>(modifier: F, computation: Eff<Self, A>) -> Eff<Self, A>
+              where
+                  F: FnOnce(R) -> R + 'static,
+              {
+                  // local は特殊な操作として実装
+                  // ハンドラで環境を変更して内部計算を実行
+                  Self::ask().flat_map(move |env| {
+                      let modified_env = modifier(env);
+                      Self::run_with_modified_env(modified_env, computation)
+                  })
+              }
+
+              /// 変更された環境で計算を実行（内部用）
+              fn run_with_modified_env<A: 'static>(
+                  environment: R,
+                  computation: Eff<Self, A>,
+              ) -> Eff<Self, A> {
+                  // 内部計算の ask を変更された環境で解決
+                  // これはハンドラレベルで処理される
+                  Eff::perform_raw::<A>(reader_operations::LOCAL, (environment, computation))
+              }
+          }
+
+      - step: 3
+        description: |
+          ReaderHandler を実装する。local をサポート。
+        code_outline: |
+          use super::handler::Handler;
+
+          /// Reader エフェクトのハンドラ
+          ///
+          /// # Examples
+          ///
+          /// ```rust,ignore
+          /// use lambars::effect::algebraic::{ReaderEffect, ReaderHandler};
+          ///
+          /// let handler = ReaderHandler::new("config".to_string());
+          /// let result = handler.run(ReaderEffect::ask());
+          /// assert_eq!(result, "config".to_string());
+          /// ```
+          pub struct ReaderHandler<R> {
+              environment: R,
+          }
+
+          impl<R: Clone + 'static> ReaderHandler<R> {
+              /// 新しい ReaderHandler を作成
+              pub fn new(environment: R) -> Self {
+                  Self { environment }
+              }
+          }
+
+          impl<R: Clone + 'static> Handler<ReaderEffect<R>> for ReaderHandler<R> {
+              type Output<A> = A;
+
+              fn run<A: 'static>(self, computation: Eff<ReaderEffect<R>, A>) -> A {
+                  self.run_with_environment(computation, self.environment.clone())
+              }
+          }
+
+          impl<R: Clone + 'static> ReaderHandler<R> {
+              fn run_with_environment<A: 'static>(
+                  &self,
+                  computation: Eff<ReaderEffect<R>, A>,
+                  environment: R,
+              ) -> A {
+                  // FlatMap を正規化
+                  let normalized = computation.normalize();
+                  match normalized.inner {
+                      super::eff::EffInner::Pure(a) => a,
+                      super::eff::EffInner::Impure(operation) => {
+                          match operation.operation_tag {
+                              reader_operations::ASK => {
+                                  let continuation = operation.continuation;
+                                  let next = continuation(Box::new(environment.clone()));
+                                  self.run_with_environment(next, environment)
+                              }
+                              reader_operations::LOCAL => {
+                                  // local 操作: 環境を変更して内部計算を実行
+                                  let (modified_env, inner_computation) = *operation.arguments
+                                      .downcast::<(R, Eff<ReaderEffect<R>, A>)>()
+                                      .expect("Type mismatch in Reader::local");
+                                  let inner_result = self.run_with_environment(inner_computation, modified_env);
+                                  let continuation = operation.continuation;
+                                  let next = continuation(Box::new(inner_result));
+                                  self.run_with_environment(next, environment)
+                              }
+                              _ => panic!("Unknown Reader operation"),
+                          }
+                      }
+                      super::eff::EffInner::FlatMap(_) => {
+                          unreachable!("FlatMap should be normalized")
+                      }
+                  }
+              }
+          }
+
+    tests:
+      - name: test_reader_ask
+        description: Reader::ask の動作テスト
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn reader_ask_returns_environment() {
+              let handler = ReaderHandler::new(42);
+              let computation = ReaderEffect::<i32>::ask();
+              let result = handler.run(computation);
+              assert_eq!(result, 42);
+          }
+
+      - name: test_reader_asks
+        description: Reader::asks の動作テスト
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn reader_asks_projects_environment() {
+              let handler = ReaderHandler::new("hello".to_string());
+              let computation = ReaderEffect::asks(|s: String| s.len());
+              let result = handler.run(computation);
+              assert_eq!(result, 5);
+          }
+
+      - name: test_reader_local
+        description: Reader::local の動作テスト
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn reader_local_modifies_environment() {
+              let handler = ReaderHandler::new(10);
+              let computation = ReaderEffect::<i32>::local(
+                  |x| x * 2,
+                  ReaderEffect::ask()
+              );
+              let result = handler.run(computation);
+              assert_eq!(result, 20);
+          }
+
+          #[rstest]
+          fn reader_local_restores_environment() {
+              let handler = ReaderHandler::new(10);
+              let computation = ReaderEffect::<i32>::local(
+                  |x| x * 2,
+                  ReaderEffect::ask()
+              ).flat_map(|inner| {
+                  ReaderEffect::ask().fmap(move |outer| (inner, outer))
+              });
+              let result = handler.run(computation);
+              assert_eq!(result, (20, 10)); // local 内は 20、外は 10
+          }
+
+      - name: test_reader_chain
+        description: Reader 操作の連鎖テスト
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn reader_operations_can_be_chained() {
+              let handler = ReaderHandler::new(10);
+              let computation = ReaderEffect::<i32>::ask()
+                  .flat_map(|x| ReaderEffect::asks(move |y: i32| x + y));
+              let result = handler.run(computation);
+              assert_eq!(result, 20); // 10 + 10
+          }
+
+    dependencies:
+      - impl_handler_trait
+
+  # ============================================================================
+  # 5. State エフェクト
+  # ============================================================================
+  - id: impl_state_effect
+    requirement_id: algebraic_standard_effects
+    name: "State エフェクトの実装"
+    priority: 5
+    description: |
+      状態の読み書きを提供する State エフェクト。
+      既存の State Monad と互換性のある API を提供。
+
+    files:
+      - path: src/effect/algebraic/state.rs
+        description: |
+          State エフェクトと StateHandler の実装。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          State エフェクト型を定義する。
+        code_outline: |
+          // src/effect/algebraic/state.rs
+
+          use super::effect::Effect;
+          use super::eff::{Eff, OperationTag};
+          use std::marker::PhantomData;
+
+          /// State エフェクト: 状態の読み書き
+          ///
+          /// # Type Parameters
+          ///
+          /// - `S`: 状態の型
+          #[derive(Clone)]
+          pub struct StateEffect<S>(PhantomData<S>);
+
+          impl<S: 'static> Effect for StateEffect<S> {
+              const NAME: &'static str = "State";
+          }
+
+          /// State 操作のタグ
+          pub(crate) mod state_operations {
+              use super::*;
+
+              pub const GET: OperationTag = OperationTag(10);
+              pub const PUT: OperationTag = OperationTag(11);
+          }
+
+      - step: 2
+        description: |
+          State の操作関数を定義する。
+        code_outline: |
+          impl<S: Clone + 'static> StateEffect<S> {
+              /// 現在の状態を取得
+              pub fn get() -> Eff<Self, S> {
+                  Eff::perform_raw::<S>(state_operations::GET, ())
+              }
+
+              /// 状態を設定
+              pub fn put(state: S) -> Eff<Self, ()> {
+                  Eff::perform_raw::<()>(state_operations::PUT, state)
+              }
+
+              /// 状態を変更
+              pub fn modify<F>(modifier: F) -> Eff<Self, ()>
+              where
+                  F: FnOnce(S) -> S + 'static,
+              {
+                  Self::get().flat_map(|s| Self::put(modifier(s)))
+              }
+
+              /// 状態から値を取得
+              pub fn gets<A: 'static, F>(projection: F) -> Eff<Self, A>
+              where
+                  F: FnOnce(&S) -> A + 'static,
+              {
+                  Self::get().fmap(|s| projection(&s))
+              }
+          }
+
+      - step: 3
+        description: |
+          StateHandler を実装する。
+        code_outline: |
+          use super::handler::Handler;
+          use std::cell::RefCell;
+
+          /// State エフェクトのハンドラ
+          ///
+          /// # Examples
+          ///
+          /// ```rust,ignore
+          /// use lambars::effect::algebraic::{StateEffect, StateHandler};
+          ///
+          /// let handler = StateHandler::new(0);
+          /// let computation = StateEffect::get()
+          ///     .flat_map(|x| StateEffect::put(x + 1).then(StateEffect::get()));
+          /// let (result, final_state) = handler.run(computation);
+          /// assert_eq!(result, 1);
+          /// assert_eq!(final_state, 1);
+          /// ```
+          pub struct StateHandler<S> {
+              initial_state: S,
+          }
+
+          impl<S: Clone + 'static> StateHandler<S> {
+              /// 新しい StateHandler を作成
+              pub fn new(initial_state: S) -> Self {
+                  Self { initial_state }
+              }
+          }
+
+          impl<S: Clone + 'static> Handler<StateEffect<S>> for StateHandler<S> {
+              type Output<A> = (A, S);
+
+              fn run<A: 'static>(self, computation: Eff<StateEffect<S>, A>) -> (A, S) {
+                  let state = RefCell::new(self.initial_state);
+                  let result = Self::run_with_state(computation, &state);
+                  (result, state.into_inner())
+              }
+          }
+
+          impl<S: Clone + 'static> StateHandler<S> {
+              fn run_with_state<A: 'static>(
+                  computation: Eff<StateEffect<S>, A>,
+                  state: &RefCell<S>,
+              ) -> A {
+                  // FlatMap を正規化
+                  let normalized = computation.normalize();
+                  match normalized.inner {
+                      super::eff::EffInner::Pure(a) => a,
+                      super::eff::EffInner::Impure(operation) => {
+                          match operation.operation_tag {
+                              state_operations::GET => {
+                                  let current = state.borrow().clone();
+                                  let continuation = operation.continuation;
+                                  let next = continuation(Box::new(current));
+                                  Self::run_with_state(next, state)
+                              }
+                              state_operations::PUT => {
+                                  let new_state = *operation.arguments.downcast::<S>()
+                                      .expect("Type mismatch in State::put");
+                                  *state.borrow_mut() = new_state;
+                                  let continuation = operation.continuation;
+                                  let next = continuation(Box::new(()));
+                                  Self::run_with_state(next, state)
+                              }
+                              _ => panic!("Unknown State operation"),
+                          }
+                      }
+                      super::eff::EffInner::FlatMap(_) => {
+                          unreachable!("FlatMap should be normalized")
+                      }
+                  }
+              }
+          }
+
+    tests:
+      - name: test_state_get_put
+        description: State::get と State::put のテスト
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn state_get_returns_current_state() {
+              let handler = StateHandler::new(42);
+              let (result, final_state) = handler.run(StateEffect::<i32>::get());
+              assert_eq!(result, 42);
+              assert_eq!(final_state, 42);
+          }
+
+          #[rstest]
+          fn state_put_changes_state() {
+              let handler = StateHandler::new(0);
+              let (_, final_state) = handler.run(StateEffect::put(100));
+              assert_eq!(final_state, 100);
+          }
+
+      - name: test_state_modify
+        description: State::modify のテスト
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn state_modify_transforms_state() {
+              let handler = StateHandler::new(10);
+              let (_, final_state) = handler.run(StateEffect::modify(|x| x * 2));
+              assert_eq!(final_state, 20);
+          }
+
+      - name: test_state_counter_pattern
+        description: カウンターパターンのテスト
+        test_type: integration
+        code_outline: |
+          #[rstest]
+          fn state_counter_increments() {
+              let handler = StateHandler::new(0);
+
+              let increment = || StateEffect::modify(|x: i32| x + 1);
+              let computation = increment()
+                  .then(increment())
+                  .then(increment())
+                  .then(StateEffect::get());
+
+              let (result, final_state) = handler.run(computation);
+              assert_eq!(result, 3);
+              assert_eq!(final_state, 3);
+          }
+
+    dependencies:
+      - impl_handler_trait
+
+  # ============================================================================
+  # 6. Writer エフェクト
+  # ============================================================================
+  - id: impl_writer_effect
+    requirement_id: algebraic_standard_effects
+    name: "Writer エフェクトの実装"
+    priority: 6
+    description: |
+      ログの出力を提供する Writer エフェクト。
+      Monoid を使用してログを蓄積する。
+      listen 操作を含む。
+
+    files:
+      - path: src/effect/algebraic/writer.rs
+        description: |
+          Writer エフェクトと WriterHandler の実装。
+          tell, listen 操作を提供。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Writer エフェクト型を定義する。
+        code_outline: |
+          // src/effect/algebraic/writer.rs
+
+          use super::effect::Effect;
+          use super::eff::{Eff, OperationTag};
+          use crate::typeclass::Monoid;
+          use std::marker::PhantomData;
+
+          /// Writer エフェクト: ログの出力
+          ///
+          /// # Type Parameters
+          ///
+          /// - `W`: ログの型（Monoid であること）
+          #[derive(Clone)]
+          pub struct WriterEffect<W>(PhantomData<W>);
+
+          impl<W: Monoid + 'static> Effect for WriterEffect<W> {
+              const NAME: &'static str = "Writer";
+          }
+
+          /// Writer 操作のタグ
+          pub(crate) mod writer_operations {
+              use super::*;
+
+              pub const TELL: OperationTag = OperationTag(20);
+              pub const LISTEN: OperationTag = OperationTag(21);
+          }
+
+      - step: 2
+        description: |
+          Writer の操作関数を定義する。listen を含む。
+        code_outline: |
+          impl<W: Monoid + Clone + 'static> WriterEffect<W> {
+              /// ログを出力
+              pub fn tell(output: W) -> Eff<Self, ()> {
+                  Eff::perform_raw::<()>(writer_operations::TELL, output)
+              }
+
+              /// 計算のログを取得
+              ///
+              /// 内部計算を実行し、その結果とログをタプルで返す。
+              ///
+              /// # Examples
+              ///
+              /// ```rust,ignore
+              /// use lambars::effect::algebraic::{WriterEffect, WriterHandler};
+              ///
+              /// let computation = WriterEffect::<String>::listen(
+              ///     WriterEffect::tell("hello".to_string()).then(Eff::pure(42))
+              /// );
+              /// let ((result, inner_log), total_log) = WriterHandler::new().run(computation);
+              /// assert_eq!(result, 42);
+              /// assert_eq!(inner_log, "hello");
+              /// assert_eq!(total_log, "hello");
+              /// ```
+              pub fn listen<A: 'static>(computation: Eff<Self, A>) -> Eff<Self, (A, W)> {
+                  Eff::perform_raw::<(A, W)>(writer_operations::LISTEN, computation)
+              }
+          }
+
+      - step: 3
+        description: |
+          WriterHandler を実装する。listen をサポート。
+        code_outline: |
+          use super::handler::Handler;
+          use std::cell::RefCell;
+
+          /// Writer エフェクトのハンドラ
+          pub struct WriterHandler<W>(PhantomData<W>);
+
+          impl<W: Monoid + Clone + 'static> WriterHandler<W> {
+              pub fn new() -> Self {
+                  Self(PhantomData)
+              }
+          }
+
+          impl<W: Monoid + Clone + 'static> Default for WriterHandler<W> {
+              fn default() -> Self {
+                  Self::new()
+              }
+          }
+
+          impl<W: Monoid + Clone + 'static> Handler<WriterEffect<W>> for WriterHandler<W> {
+              type Output<A> = (A, W);
+
+              fn run<A: 'static>(self, computation: Eff<WriterEffect<W>, A>) -> (A, W) {
+                  let log = RefCell::new(W::empty());
+                  let result = Self::run_with_log(computation, &log);
+                  (result, log.into_inner())
+              }
+          }
+
+          impl<W: Monoid + Clone + 'static> WriterHandler<W> {
+              fn run_with_log<A: 'static>(
+                  computation: Eff<WriterEffect<W>, A>,
+                  log: &RefCell<W>,
+              ) -> A {
+                  // FlatMap を正規化
+                  let normalized = computation.normalize();
+                  match normalized.inner {
+                      super::eff::EffInner::Pure(a) => a,
+                      super::eff::EffInner::Impure(operation) => {
+                          match operation.operation_tag {
+                              writer_operations::TELL => {
+                                  let output = *operation.arguments.downcast::<W>()
+                                      .expect("Type mismatch in Writer::tell");
+                                  let current = log.borrow().clone();
+                                  *log.borrow_mut() = current.combine(output);
+                                  let continuation = operation.continuation;
+                                  let next = continuation(Box::new(()));
+                                  Self::run_with_log(next, log)
+                              }
+                              writer_operations::LISTEN => {
+                                  // listen: 内部計算を実行し、そのログを取得
+                                  let inner_computation = *operation.arguments
+                                      .downcast::<Eff<WriterEffect<W>, A>>()
+                                      .expect("Type mismatch in Writer::listen");
+                                  let inner_log = RefCell::new(W::empty());
+                                  let inner_result = Self::run_with_log(inner_computation, &inner_log);
+                                  let inner_log_value = inner_log.into_inner();
+                                  // 内部ログを外部ログにも追加
+                                  let current = log.borrow().clone();
+                                  *log.borrow_mut() = current.combine(inner_log_value.clone());
+                                  let continuation = operation.continuation;
+                                  let next = continuation(Box::new((inner_result, inner_log_value)));
+                                  Self::run_with_log(next, log)
+                              }
+                              _ => panic!("Unknown Writer operation"),
+                          }
+                      }
+                      super::eff::EffInner::FlatMap(_) => {
+                          unreachable!("FlatMap should be normalized")
+                      }
+                  }
+              }
+          }
+
+    tests:
+      - name: test_writer_tell
+        description: Writer::tell のテスト
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn writer_tell_accumulates_log() {
+              let handler = WriterHandler::<String>::new();
+              let computation = WriterEffect::tell("hello".to_string())
+                  .then(WriterEffect::tell(" world".to_string()));
+              let ((), log) = handler.run(computation);
+              assert_eq!(log, "hello world");
+          }
+
+      - name: test_writer_listen
+        description: Writer::listen のテスト
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn writer_listen_captures_inner_log() {
+              let handler = WriterHandler::<String>::new();
+              let computation = WriterEffect::<String>::listen(
+                  WriterEffect::tell("inner".to_string()).then(Eff::pure(42))
+              );
+              let ((result, inner_log), total_log) = handler.run(computation);
+              assert_eq!(result, 42);
+              assert_eq!(inner_log, "inner");
+              assert_eq!(total_log, "inner");
+          }
+
+      - name: test_writer_with_vec
+        description: Vec を使った Writer のテスト
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn writer_with_vec_collects_logs() {
+              let handler = WriterHandler::<Vec<String>>::new();
+              let computation = WriterEffect::tell(vec!["step1".to_string()])
+                  .then(WriterEffect::tell(vec!["step2".to_string()]))
+                  .then(Eff::pure(42));
+              let (result, log) = handler.run(computation);
+              assert_eq!(result, 42);
+              assert_eq!(log, vec!["step1".to_string(), "step2".to_string()]);
+          }
+
+    dependencies:
+      - impl_handler_trait
+
+  # ============================================================================
+  # 7. Error エフェクト
+  # ============================================================================
+  - id: impl_error_effect
+    requirement_id: algebraic_standard_effects
+    name: "Error エフェクトの実装"
+    priority: 7
+    description: |
+      エラーの送出を提供する Error エフェクト。
+      throw と catch をサポート。
+
+    files:
+      - path: src/effect/algebraic/error.rs
+        description: |
+          Error エフェクトと ErrorHandler の実装。
+          throw, catch 操作を提供。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Error エフェクト型を定義する。
+        code_outline: |
+          // src/effect/algebraic/error.rs
+
+          use super::effect::Effect;
+          use super::eff::{Eff, OperationTag};
+          use std::marker::PhantomData;
+
+          /// Error エフェクト: エラーの送出
+          ///
+          /// # Type Parameters
+          ///
+          /// - `E`: エラーの型
+          #[derive(Clone)]
+          pub struct ErrorEffect<E>(PhantomData<E>);
+
+          impl<E: 'static> Effect for ErrorEffect<E> {
+              const NAME: &'static str = "Error";
+          }
+
+          /// Error 操作のタグ
+          pub(crate) mod error_operations {
+              use super::*;
+
+              pub const THROW: OperationTag = OperationTag(30);
+              pub const CATCH: OperationTag = OperationTag(31);
+          }
+
+      - step: 2
+        description: |
+          Error の操作関数を定義する。catch を含む。
+        code_outline: |
+          impl<E: Clone + 'static> ErrorEffect<E> {
+              /// エラーを送出
+              pub fn throw<A: 'static>(error: E) -> Eff<Self, A> {
+                  Eff::perform_raw::<A>(error_operations::THROW, error)
+              }
+
+              /// エラーをキャッチ
+              ///
+              /// 計算中にエラーが発生した場合、ハンドラ関数を呼び出して回復を試みる。
+              ///
+              /// # Arguments
+              ///
+              /// * `computation` - エラーを発生させる可能性のある計算
+              /// * `handler` - エラー発生時に呼び出される回復関数
+              ///
+              /// # Examples
+              ///
+              /// ```rust,ignore
+              /// use lambars::effect::algebraic::{ErrorEffect, ErrorHandler};
+              ///
+              /// let computation = ErrorEffect::<String>::catch(
+              ///     ErrorEffect::throw("error".to_string()),
+              ///     |_| Eff::pure(0) // エラーを回復
+              /// );
+              /// let result = ErrorHandler::new().run(computation);
+              /// assert_eq!(result, Ok(0));
+              /// ```
+              pub fn catch<A: 'static, F>(
+                  computation: Eff<Self, A>,
+                  recovery: F,
+              ) -> Eff<Self, A>
+              where
+                  F: FnOnce(E) -> Eff<Self, A> + 'static,
+              {
+                  Eff::perform_raw::<A>(
+                      error_operations::CATCH,
+                      (computation, Box::new(recovery) as Box<dyn FnOnce(E) -> Eff<Self, A>>)
+                  )
+              }
+          }
+
+      - step: 3
+        description: |
+          ErrorHandler を実装する。catch をサポート。
+        code_outline: |
+          use super::handler::Handler;
+
+          /// Error エフェクトのハンドラ
+          pub struct ErrorHandler<E>(PhantomData<E>);
+
+          impl<E: 'static> ErrorHandler<E> {
+              pub fn new() -> Self {
+                  Self(PhantomData)
+              }
+          }
+
+          impl<E: 'static> Default for ErrorHandler<E> {
+              fn default() -> Self {
+                  Self::new()
+              }
+          }
+
+          impl<E: Clone + 'static> Handler<ErrorEffect<E>> for ErrorHandler<E> {
+              type Output<A> = Result<A, E>;
+
+              fn run<A: 'static>(self, computation: Eff<ErrorEffect<E>, A>) -> Result<A, E> {
+                  Self::run_internal(computation)
+              }
+          }
+
+          impl<E: Clone + 'static> ErrorHandler<E> {
+              fn run_internal<A: 'static>(
+                  computation: Eff<ErrorEffect<E>, A>,
+              ) -> Result<A, E> {
+                  // FlatMap を正規化
+                  let normalized = computation.normalize();
+                  match normalized.inner {
+                      super::eff::EffInner::Pure(a) => Ok(a),
+                      super::eff::EffInner::Impure(operation) => {
+                          match operation.operation_tag {
+                              error_operations::THROW => {
+                                  let error = *operation.arguments.downcast::<E>()
+                                      .expect("Type mismatch in Error::throw");
+                                  Err(error)
+                              }
+                              error_operations::CATCH => {
+                                  // catch: 内部計算を実行し、エラーなら回復を試みる
+                                  let (inner_computation, recovery) = *operation.arguments
+                                      .downcast::<(Eff<ErrorEffect<E>, A>, Box<dyn FnOnce(E) -> Eff<ErrorEffect<E>, A>>)>()
+                                      .expect("Type mismatch in Error::catch");
+                                  match Self::run_internal(inner_computation) {
+                                      Ok(value) => {
+                                          let continuation = operation.continuation;
+                                          let next = continuation(Box::new(value));
+                                          Self::run_internal(next)
+                                      }
+                                      Err(error) => {
+                                          let recovered = recovery(error);
+                                          match Self::run_internal(recovered) {
+                                              Ok(value) => {
+                                                  let continuation = operation.continuation;
+                                                  let next = continuation(Box::new(value));
+                                                  Self::run_internal(next)
+                                              }
+                                              Err(e) => Err(e)
+                                          }
+                                      }
+                                  }
+                              }
+                              _ => panic!("Unknown Error operation"),
+                          }
+                      }
+                      super::eff::EffInner::FlatMap(_) => {
+                          unreachable!("FlatMap should be normalized")
+                      }
+                  }
+              }
+          }
+
+    tests:
+      - name: test_error_throw
+        description: Error::throw のテスト
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn error_throw_returns_err() {
+              let handler = ErrorHandler::<String>::new();
+              let computation: Eff<ErrorEffect<String>, i32> =
+                  ErrorEffect::throw("oops".to_string());
+              let result = handler.run(computation);
+              assert_eq!(result, Err("oops".to_string()));
+          }
+
+      - name: test_error_catch
+        description: Error::catch のテスト
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn error_catch_recovers_from_error() {
+              let handler = ErrorHandler::<String>::new();
+              let computation = ErrorEffect::<String>::catch(
+                  ErrorEffect::throw("error".to_string()),
+                  |_| Eff::pure(42)
+              );
+              let result = handler.run(computation);
+              assert_eq!(result, Ok(42));
+          }
+
+          #[rstest]
+          fn error_catch_passes_through_success() {
+              let handler = ErrorHandler::<String>::new();
+              let computation = ErrorEffect::<String>::catch(
+                  Eff::pure(100),
+                  |_| Eff::pure(0)
+              );
+              let result = handler.run(computation);
+              assert_eq!(result, Ok(100));
+          }
+
+      - name: test_error_pure_returns_ok
+        description: 純粋な計算は Ok を返す
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn pure_computation_returns_ok() {
+              let handler = ErrorHandler::<String>::new();
+              let computation: Eff<ErrorEffect<String>, i32> = Eff::pure(42);
+              let result = handler.run(computation);
+              assert_eq!(result, Ok(42));
+          }
+
+      - name: test_error_short_circuits
+        description: エラーは計算をショートサーキットする
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn error_short_circuits_computation() {
+              let handler = ErrorHandler::<String>::new();
+              let computation = ErrorEffect::<String>::throw::<i32>("early error".to_string())
+                  .flat_map(|x| Eff::pure(x + 1));
+              let result = handler.run(computation);
+              assert_eq!(result, Err("early error".to_string()));
+          }
+
+    dependencies:
+      - impl_handler_trait
+
+  # ============================================================================
+  # 8. エフェクト行（型レベルリスト）
+  # ============================================================================
+  - id: impl_effect_row
+    requirement_id: algebraic_effect_composition
+    name: "エフェクト行の実装"
+    priority: 8
+    description: |
+      複数のエフェクトを組み合わせるための型レベルリスト。
+      EffNil, EffCons を使用した HList パターン。
+
+    files:
+      - path: src/effect/algebraic/row.rs
+        description: |
+          エフェクト行（EffNil, EffCons）の定義。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          エフェクト行の基本型を定義する。
+        code_outline: |
+          // src/effect/algebraic/row.rs
+
+          use super::effect::Effect;
+          use std::marker::PhantomData;
+
+          /// 空のエフェクト行
+          #[derive(Clone, Copy, Debug)]
+          pub struct EffNil;
+
+          impl Effect for EffNil {
+              const NAME: &'static str = "EffNil";
+          }
+
+          /// エフェクト行のコンス（要素の追加）
+          #[derive(Clone, Copy, Debug)]
+          pub struct EffCons<E: Effect, Tail> {
+              _effect: PhantomData<E>,
+              _tail: PhantomData<Tail>,
+          }
+
+          impl<E: Effect, Tail: Effect> Effect for EffCons<E, Tail> {
+              const NAME: &'static str = "EffCons";
+          }
+
+      - step: 2
+        description: |
+          EffectRow! マクロを定義する。
+        code_outline: |
+          /// エフェクト行を構築するマクロ
+          ///
+          /// # Examples
+          ///
+          /// ```rust,ignore
+          /// use lambars::effect::algebraic::EffectRow;
+          ///
+          /// type MyEffects = EffectRow![ReaderEffect<Config>, StateEffect<Counter>];
+          /// ```
+          #[macro_export]
+          macro_rules! EffectRow {
+              () => { $crate::effect::algebraic::EffNil };
+              ($e:ty) => {
+                  $crate::effect::algebraic::EffCons<$e, $crate::effect::algebraic::EffNil>
+              };
+              ($e:ty, $($rest:ty),+ $(,)?) => {
+                  $crate::effect::algebraic::EffCons<$e, $crate::EffectRow!($($rest),+)>
+              };
+          }
+
+    tests:
+      - name: test_effect_row_macro
+        description: EffectRow! マクロのテスト
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn effect_row_empty() {
+              type Empty = EffectRow![];
+              fn assert_is_eff_nil<T: Effect>() {}
+              assert_is_eff_nil::<Empty>();
+          }
+
+          #[rstest]
+          fn effect_row_single() {
+              type Single = EffectRow![ReaderEffect<i32>];
+              fn assert_is_effect<T: Effect>() {}
+              assert_is_effect::<Single>();
+          }
+
+          #[rstest]
+          fn effect_row_multiple() {
+              type Multiple = EffectRow![ReaderEffect<i32>, StateEffect<String>];
+              fn assert_is_effect<T: Effect>() {}
+              assert_is_effect::<Multiple>();
+          }
+
+    dependencies:
+      - impl_effect_trait
+
+  # ============================================================================
+  # 9. Member トレイト（Index パターン）
+  # ============================================================================
+  - id: impl_member_trait
+    requirement_id: algebraic_effect_composition
+    name: "Member トレイトの実装"
+    priority: 9
+    description: |
+      エフェクト行に特定のエフェクトが含まれることを示すトレイト。
+      Index パターンを使用して、型レベルでエフェクトの位置を追跡する。
+      これにより「後方検索」問題を解決する。
+
+    files:
+      - path: src/effect/algebraic/member.rs
+        description: |
+          Member トレイトの定義と Index パターンによる実装。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Index パターンの型を定義する。
+        code_outline: |
+          // src/effect/algebraic/member.rs
+
+          use super::effect::Effect;
+          use super::eff::Eff;
+          use super::row::{EffNil, EffCons};
+          use std::marker::PhantomData;
+
+          /// エフェクトがエフェクト行の先頭にあることを示すインデックス
+          pub struct Here;
+
+          /// エフェクトがエフェクト行の先頭以外にあることを示すインデックス
+          pub struct There<I>(PhantomData<I>);
+
+      - step: 2
+        description: |
+          Member トレイトを Index パラメータ付きで定義する。
+        code_outline: |
+          /// エフェクト行にエフェクトが含まれることを示すトレイト
+          ///
+          /// Index 型パラメータにより、エフェクトの位置を型レベルで追跡する。
+          /// これにより、同じエフェクトが複数回出現する場合でも
+          /// 正しく区別できる。
+          ///
+          /// # Type Parameters
+          ///
+          /// - `E`: 探索対象のエフェクト
+          /// - `Index`: エフェクトの位置を示す型（Here または There<I>）
+          ///
+          /// # Examples
+          ///
+          /// ```rust,ignore
+          /// use lambars::effect::algebraic::{Member, Here, There, EffCons, EffNil};
+          ///
+          /// // ReaderEffect<i32> が先頭にある場合: Here
+          /// // StateEffect<String> が 2 番目にある場合: There<Here>
+          /// type Row = EffCons<ReaderEffect<i32>, EffCons<StateEffect<String>, EffNil>>;
+          ///
+          /// // Row は ReaderEffect<i32> の Member（Index = Here）
+          /// // Row は StateEffect<String> の Member（Index = There<Here>）
+          /// ```
+          pub trait Member<E: Effect, Index>: Effect {
+              /// エフェクト操作をエフェクト行に注入
+              fn inject<A: 'static>(eff: Eff<E, A>) -> Eff<Self, A>;
+
+              /// エフェクト行からエフェクトを射影（取り出し）
+              fn project<A: 'static>(eff: Eff<Self, A>) -> Option<Eff<E, A>>;
+          }
+
+      - step: 3
+        description: |
+          Member トレイトの実装を追加する。
+        code_outline: |
+          // EffCons<E, Tail> は E の Member（Here インデックス）
+          impl<E: Effect, Tail: Effect> Member<E, Here> for EffCons<E, Tail> {
+              fn inject<A: 'static>(eff: Eff<E, A>) -> Eff<Self, A> {
+                  // 型を変換（内部表現は同じ）
+                  // Safety: Eff<E, A> と Eff<EffCons<E, Tail>, A> は
+                  // 同じメモリレイアウトを持つ
+                  unsafe { std::mem::transmute(eff) }
+              }
+
+              fn project<A: 'static>(eff: Eff<Self, A>) -> Option<Eff<E, A>> {
+                  // 先頭のエフェクトなので常に射影可能
+                  Some(unsafe { std::mem::transmute(eff) })
+              }
+          }
+
+          // EffCons<Other, Tail> は Tail が E の Member なら E の Member（There<I> インデックス）
+          impl<E: Effect, Other: Effect, Tail: Effect, I> Member<E, There<I>> for EffCons<Other, Tail>
+          where
+              Tail: Member<E, I>,
+          {
+              fn inject<A: 'static>(eff: Eff<E, A>) -> Eff<Self, A> {
+                  // Tail に注入してから EffCons に持ち上げ
+                  let tail_eff: Eff<Tail, A> = Tail::inject(eff);
+                  unsafe { std::mem::transmute(tail_eff) }
+              }
+
+              fn project<A: 'static>(eff: Eff<Self, A>) -> Option<Eff<E, A>> {
+                  // Tail に射影を委譲
+                  let tail_eff: Eff<Tail, A> = unsafe { std::mem::transmute(eff) };
+                  Tail::project(tail_eff)
+              }
+          }
+
+      - step: 4
+        description: |
+          FindIndex トレイトを定義して、エフェクトのインデックスを自動推論できるようにする。
+        code_outline: |
+          /// エフェクト行からエフェクトのインデックスを見つけるトレイト
+          ///
+          /// このトレイトにより、Member の Index 型パラメータを
+          /// 明示的に指定せずに使用できる。
+          pub trait FindIndex<E: Effect> {
+              /// エフェクトのインデックス型
+              type Index;
+          }
+
+          // 先頭にエフェクトがある場合
+          impl<E: Effect, Tail: Effect> FindIndex<E> for EffCons<E, Tail> {
+              type Index = Here;
+          }
+
+          // 先頭以外にエフェクトがある場合
+          impl<E: Effect, Other: Effect, Tail: Effect> FindIndex<E> for EffCons<Other, Tail>
+          where
+              Tail: FindIndex<E>,
+              Self: Member<E, There<<Tail as FindIndex<E>>::Index>>,
+          {
+              type Index = There<<Tail as FindIndex<E>>::Index>;
+          }
+
+    tests:
+      - name: test_member_inject_here
+        description: Member::inject の Here インデックステスト
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn member_inject_first_element() {
+              type Row = EffCons<ReaderEffect<i32>, EffNil>;
+              let eff = ReaderEffect::<i32>::ask();
+              let injected: Eff<Row, i32> = <Row as Member<ReaderEffect<i32>, Here>>::inject(eff);
+              assert!(true); // 型が通ればOK
+          }
+
+      - name: test_member_inject_there
+        description: Member::inject の There インデックステスト
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn member_inject_second_element() {
+              type Row = EffCons<ReaderEffect<i32>, EffCons<StateEffect<String>, EffNil>>;
+              let eff = StateEffect::<String>::get();
+              let injected: Eff<Row, String> = <Row as Member<StateEffect<String>, There<Here>>>::inject(eff);
+              assert!(true); // 型が通ればOK
+          }
+
+    dependencies:
+      - impl_effect_row
+
+  # ============================================================================
+  # 10. define_effect! マクロ
+  # ============================================================================
+  - id: impl_define_effect_macro
+    requirement_id: algebraic_define_effect_macro
+    name: "define_effect! マクロの実装"
+    priority: 10
+    description: |
+      エフェクトを宣言的に定義するマクロ。
+      ボイラープレートコードを自動生成する。
+      AtomicU32 を使用した安全な OperationTag 生成。
+
+    files:
+      - path: src/effect/algebraic/macros.rs
+        description: |
+          define_effect! マクロの定義。
+          AtomicU32 による安全なタグ生成。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          安全な OperationTag 生成のためのグローバルカウンターを定義する。
+        code_outline: |
+          // src/effect/algebraic/macros.rs
+
+          use std::sync::atomic::{AtomicU32, Ordering};
+
+          /// グローバルな操作タグカウンター
+          ///
+          /// define_effect! マクロで生成される各操作に一意のタグを割り当てる。
+          /// AtomicU32 を使用してスレッドセーフに生成。
+          static NEXT_OPERATION_TAG: AtomicU32 = AtomicU32::new(1000);
+
+          /// 新しい操作タグを生成する
+          ///
+          /// スレッドセーフに一意の操作タグを生成。
+          pub fn next_operation_tag() -> super::eff::OperationTag {
+              let tag = NEXT_OPERATION_TAG.fetch_add(1, Ordering::SeqCst);
+              super::eff::OperationTag(tag)
+          }
+
+      - step: 2
+        description: |
+          define_effect! マクロを定義する（AtomicU32 ベース）。
+        code_outline: |
+          /// エフェクトを定義するマクロ
+          ///
+          /// # Examples
+          ///
+          /// ```rust,ignore
+          /// use lambars::define_effect;
+          ///
+          /// define_effect! {
+          ///     /// コンソールエフェクト
+          ///     effect Console {
+          ///         /// 行を出力
+          ///         fn print_line(message: String) -> ();
+          ///         /// 行を読み取り
+          ///         fn read_line() -> String;
+          ///     }
+          /// }
+          /// ```
+          #[macro_export]
+          macro_rules! define_effect {
+              (
+                  $(#[$meta:meta])*
+                  effect $name:ident {
+                      $(
+                          $(#[$op_meta:meta])*
+                          fn $op_name:ident($($param:ident: $param_ty:ty),* $(,)?) -> $ret_ty:ty;
+                      )*
+                  }
+              ) => {
+                  paste::paste! {
+                      $(#[$meta])*
+                      #[derive(Clone)]
+                      pub struct [<$name Effect>];
+
+                      impl $crate::effect::algebraic::Effect for [<$name Effect>] {
+                          const NAME: &'static str = stringify!($name);
+                      }
+
+                      mod [<$name:snake _operations>] {
+                          use super::*;
+                          use $crate::effect::algebraic::OperationTag;
+                          use std::sync::LazyLock;
+
+                          $(
+                              pub static [<$op_name:upper _TAG>]: LazyLock<OperationTag> =
+                                  LazyLock::new(|| {
+                                      $crate::effect::algebraic::macros::next_operation_tag()
+                                  });
+                          )*
+                      }
+
+                      impl [<$name Effect>] {
+                          $(
+                              $(#[$op_meta])*
+                              pub fn $op_name($($param: $param_ty),*) -> $crate::effect::algebraic::Eff<Self, $ret_ty> {
+                                  $crate::effect::algebraic::Eff::perform_raw::<$ret_ty>(
+                                      *[<$name:snake _operations>]::[<$op_name:upper _TAG>],
+                                      ($($param,)*)
+                                  )
+                              }
+                          )*
+                      }
+
+                      $(#[$meta])*
+                      pub trait [<$name Handler>] {
+                          $(
+                              $(#[$op_meta])*
+                              fn $op_name(&mut self, $($param: $param_ty),*) -> $ret_ty;
+                          )*
+                      }
+                  }
+              };
+          }
+
+    tests:
+      - name: test_define_effect_macro
+        description: define_effect! マクロのテスト
+        test_type: unit
+        code_outline: |
+          define_effect! {
+              /// テスト用のカウンターエフェクト
+              effect TestCounter {
+                  /// インクリメント
+                  fn increment() -> ();
+                  /// 現在値を取得
+                  fn get_count() -> i32;
+              }
+          }
+
+          #[rstest]
+          fn define_effect_creates_effect_type() {
+              assert_eq!(TestCounterEffect::NAME, "TestCounter");
+          }
+
+      - name: test_operation_tags_are_unique
+        description: 操作タグの一意性テスト
+        test_type: unit
+        code_outline: |
+          define_effect! {
+              effect EffectA {
+                  fn op_a() -> ();
+              }
+          }
+
+          define_effect! {
+              effect EffectB {
+                  fn op_b() -> ();
+              }
+          }
+
+          #[rstest]
+          fn operation_tags_are_unique() {
+              let tag_a = *effect_a_operations::OP_A_TAG;
+              let tag_b = *effect_b_operations::OP_B_TAG;
+              assert_ne!(tag_a, tag_b);
+          }
+
+    dependencies:
+      - impl_handler_trait
+
+  # ============================================================================
+  # 11. 既存システムとの相互運用
+  # ============================================================================
+  - id: impl_interop
+    requirement_id: algebraic_interop
+    name: "既存システムとの相互運用"
+    priority: 11
+    description: |
+      既存の MTL-Style トレイトおよび Monad Transformer との相互運用機能。
+      全ての MTL トレイト（MonadReader, MonadState, MonadWriter, MonadError）を
+      Eff に対して実装する。
+
+    files:
+      - path: src/effect/algebraic/interop.rs
+        description: |
+          IntoEff, FromEff トレイトと全 MTL トレイトの実装。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          IntoEff トレイトを定義する。
+        code_outline: |
+          // src/effect/algebraic/interop.rs
+
+          use super::effect::Effect;
+          use super::eff::Eff;
+
+          /// Monad Transformer から Eff への変換
+          pub trait IntoEff<E: Effect> {
+              type Value;
+
+              fn into_eff(self) -> Eff<E, Self::Value>;
+          }
+
+      - step: 2
+        description: |
+          FromEff トレイトを定義する。
+        code_outline: |
+          /// Eff から Monad Transformer への変換
+          pub trait FromEff<E: Effect, A>: Sized {
+              fn from_eff(eff: Eff<E, A>) -> Self;
+          }
+
+      - step: 3
+        description: |
+          既存の Reader との相互運用を実装する。
+        code_outline: |
+          use crate::effect::Reader as ReaderMonad;
+          use super::reader::{ReaderEffect, ReaderHandler};
+
+          impl<R: Clone + 'static, A: 'static> IntoEff<ReaderEffect<R>> for ReaderMonad<R, A> {
+              type Value = A;
+
+              fn into_eff(self) -> Eff<ReaderEffect<R>, A> {
+                  ReaderEffect::ask().fmap(move |env| self.run(env))
+              }
+          }
+
+      - step: 4
+        description: |
+          Eff に対する MonadReader トレイトの実装。
+        code_outline: |
+          use crate::effect::MonadReader;
+          use super::member::{Member, Here, There};
+          use super::reader::ReaderEffect;
+
+          impl<R: Clone + 'static, Row: Effect, I> MonadReader<R> for Eff<Row, ()>
+          where
+              Row: Member<ReaderEffect<R>, I>,
+          {
+              type WithType<T: 'static> = Eff<Row, T>;
+
+              fn ask() -> Eff<Row, R> {
+                  Row::inject(ReaderEffect::ask())
+              }
+
+              fn local<A: 'static, F>(modifier: F, computation: Eff<Row, A>) -> Eff<Row, A>
+              where
+                  F: FnOnce(R) -> R + 'static,
+              {
+                  // Row から ReaderEffect を射影し、local を適用
+                  Self::ask().flat_map(move |env| {
+                      let modified = modifier(env);
+                      // 修正された環境で計算を実行
+                      // 注: これは簡略化された実装。実際にはハンドラレベルで処理が必要
+                      computation
+                  })
+              }
+
+              fn asks<A: 'static, F>(projection: F) -> Eff<Row, A>
+              where
+                  F: FnOnce(R) -> A + 'static,
+              {
+                  Row::inject(ReaderEffect::asks(projection))
+              }
+          }
+
+      - step: 5
+        description: |
+          Eff に対する MonadState トレイトの実装。
+        code_outline: |
+          use crate::effect::MonadState;
+          use super::state::StateEffect;
+
+          impl<S: Clone + 'static, Row: Effect, I> MonadState<S> for Eff<Row, ()>
+          where
+              Row: Member<StateEffect<S>, I>,
+          {
+              type WithType<T: 'static> = Eff<Row, T>;
+
+              fn get() -> Eff<Row, S> {
+                  Row::inject(StateEffect::get())
+              }
+
+              fn put(state: S) -> Eff<Row, ()> {
+                  Row::inject(StateEffect::put(state))
+              }
+
+              fn modify<F>(modifier: F) -> Eff<Row, ()>
+              where
+                  F: FnOnce(S) -> S + 'static,
+              {
+                  Row::inject(StateEffect::modify(modifier))
+              }
+
+              fn gets<A: 'static, F>(projection: F) -> Eff<Row, A>
+              where
+                  F: FnOnce(&S) -> A + 'static,
+              {
+                  Row::inject(StateEffect::gets(projection))
+              }
+          }
+
+      - step: 6
+        description: |
+          Eff に対する MonadWriter トレイトの実装。
+        code_outline: |
+          use crate::effect::MonadWriter;
+          use crate::typeclass::Monoid;
+          use super::writer::WriterEffect;
+
+          impl<W: Monoid + Clone + 'static, Row: Effect, I> MonadWriter<W> for Eff<Row, ()>
+          where
+              Row: Member<WriterEffect<W>, I>,
+          {
+              type WithType<T: 'static> = Eff<Row, T>;
+
+              fn tell(output: W) -> Eff<Row, ()> {
+                  Row::inject(WriterEffect::tell(output))
+              }
+
+              fn listen<A: 'static>(computation: Eff<Row, A>) -> Eff<Row, (A, W)> {
+                  // 注: listen の実装はより複雑。
+                  // Row から WriterEffect を射影して listen を適用する必要がある
+                  Row::inject(WriterEffect::listen(
+                      // 注: computation を WriterEffect に射影する必要がある
+                      // これは型システムの制約上、直接は難しい
+                      unimplemented!("listen requires effect row projection")
+                  ))
+              }
+          }
+
+      - step: 7
+        description: |
+          Eff に対する MonadError トレイトの実装。
+        code_outline: |
+          use crate::effect::MonadError;
+          use super::error::ErrorEffect;
+
+          impl<E: Clone + 'static, Row: Effect, I> MonadError<E> for Eff<Row, ()>
+          where
+              Row: Member<ErrorEffect<E>, I>,
+          {
+              type WithType<T: 'static> = Eff<Row, T>;
+
+              fn throw<A: 'static>(error: E) -> Eff<Row, A> {
+                  Row::inject(ErrorEffect::throw(error))
+              }
+
+              fn catch<A: 'static, F>(computation: Eff<Row, A>, handler: F) -> Eff<Row, A>
+              where
+                  F: FnOnce(E) -> Eff<Row, A> + 'static,
+              {
+                  // 注: catch の実装も listen 同様に複雑
+                  // Row から ErrorEffect を射影して catch を適用する必要がある
+                  unimplemented!("catch requires effect row projection")
+              }
+          }
+
+    tests:
+      - name: test_reader_into_eff
+        description: Reader から Eff への変換テスト
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn reader_monad_converts_to_eff() {
+              let reader_monad = crate::effect::Reader::new(|x: i32| x * 2);
+              let eff = reader_monad.into_eff();
+
+              let handler = ReaderHandler::new(21);
+              let result = handler.run(eff);
+              assert_eq!(result, 42);
+          }
+
+      - name: test_eff_monad_reader
+        description: Eff に対する MonadReader の使用テスト
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn eff_implements_monad_reader() {
+              use crate::effect::MonadReader;
+
+              type Row = EffCons<ReaderEffect<i32>, EffNil>;
+
+              fn computation() -> Eff<Row, i32> {
+                  <Eff<Row, ()> as MonadReader<i32>>::ask()
+              }
+
+              let handler = ReaderHandler::new(42);
+              // 注: Row ハンドラの実装が必要
+              // let result = handler.run(computation());
+              // assert_eq!(result, 42);
+          }
+
+    dependencies:
+      - impl_reader_effect
+      - impl_state_effect
+      - impl_writer_effect
+      - impl_error_effect
+      - impl_member_trait
+
+# テスト戦略
+test_strategy:
+  unit_tests:
+    location: src/effect/algebraic/*.rs
+    description: |
+      各モジュール内で #[cfg(test)] ブロックを使用。
+      rstest を使用したパラメータ化テスト。
+      基本的な機能の検証に焦点。
+
+  integration_tests:
+    location: tests/algebraic/
+    description: |
+      複数のエフェクトを組み合わせたシナリオテスト。
+      実際のユースケースに近い形式でテスト。
+
+      ファイル構成:
+      - tests/algebraic/mod.rs
+      - tests/algebraic/reader_tests.rs
+      - tests/algebraic/state_tests.rs
+      - tests/algebraic/writer_tests.rs
+      - tests/algebraic/error_tests.rs
+      - tests/algebraic/composition_tests.rs
+      - tests/algebraic/interop_tests.rs
+
+  property_tests:
+    location: tests/algebraic/laws.rs
+    description: |
+      proptest を使用した法則テスト。
+
+      検証する法則:
+      - Functor 法則（Identity, Composition）
+      - Monad 法則（Left Identity, Right Identity, Associativity）
+      - Handler 法則（Identity, Composition）
+      - 各エフェクト固有の法則（State の get/put 法則など）
+
+      テストケース:
+      - prop_eff_functor_identity: Functor Identity 法則
+      - prop_eff_functor_composition: Functor Composition 法則
+      - prop_eff_left_identity: Monad Left Identity 法則
+      - prop_eff_right_identity: Monad Right Identity 法則
+      - prop_eff_associativity: Monad Associativity 法則
+      - prop_handler_identity_law: Handler Identity Law
+      - prop_handler_composition_law: Handler Composition Law
+      - prop_state_get_put: State get/put 法則
+      - prop_state_put_put: State put/put 法則
+      - prop_state_put_get: State put/get 法則
+      - prop_reader_ask_local: Reader ask/local 法則
+      - prop_writer_tell_tell: Writer tell/tell 法則
+      - prop_error_throw_catch: Error throw/catch 法則
+
+  benchmark_tests:
+    location: benches/algebraic_effects_bench.rs
+    description: |
+      criterion を使用したパフォーマンスベンチマーク。
+
+      ベンチマーク項目:
+      - pure_computation: 純粋な計算のオーバーヘッド
+      - reader_effect: Reader エフェクトのパフォーマンス
+      - state_effect: State エフェクトのパフォーマンス
+      - writer_effect: Writer エフェクトのパフォーマンス
+      - error_effect: Error エフェクトのパフォーマンス
+      - composed_effects: 複合エフェクトのパフォーマンス
+      - deep_flat_map: 深い flat_map チェーンのパフォーマンス
+      - vs_monad_transformer: Monad Transformer との比較
+
+# 完了条件
+acceptance_criteria:
+  - Effect トレイトが正しく定義されていること
+  - Eff<E, A> が TypeConstructor, Functor, Applicative, Monad として動作すること
+  - Eff<E, A> がスタック安全であること（深い flat_map チェーンでオーバーフローしないこと）
+  - Handler トレイトでエフェクトを解釈できること
+  - Reader, State, Writer, Error の4つの標準エフェクトが実装されていること
+  - Reader::local が実装されていること
+  - Writer::listen が実装されていること
+  - Error::catch が実装されていること
+  - EffectRow! マクロでエフェクトを合成できること
+  - Member トレイトが Index パターンで実装されていること
+  - define_effect! マクロでカスタムエフェクトを定義できること（安全なタグ生成）
+  - 既存の MTL-Style トレイト（MonadReader, MonadState, MonadWriter, MonadError）の基本操作（ask, get/put, tell, throw）が Eff に実装されていること
+  - MTL トレイトの高度な操作（listen, catch）は個別エフェクトでのみサポート（将来の拡張）
+  - 全ての法則テストが通過すること
+  - 全てのテストが通過すること
+  - cargo check が通過すること
+  - cargo clippy が通過すること
+  - cargo test が通過すること
+  - カバレッジ 100% であること
+
+# ファイル構成（最終形）
+file_structure:
+  - src/effect/algebraic/mod.rs
+  - src/effect/algebraic/effect.rs
+  - src/effect/algebraic/eff.rs
+  - src/effect/algebraic/handler.rs
+  - src/effect/algebraic/reader.rs
+  - src/effect/algebraic/state.rs
+  - src/effect/algebraic/writer.rs
+  - src/effect/algebraic/error.rs
+  - src/effect/algebraic/row.rs
+  - src/effect/algebraic/member.rs
+  - src/effect/algebraic/macros.rs
+  - src/effect/algebraic/interop.rs
+  - tests/algebraic/mod.rs
+  - tests/algebraic/reader_tests.rs
+  - tests/algebraic/state_tests.rs
+  - tests/algebraic/writer_tests.rs
+  - tests/algebraic/error_tests.rs
+  - tests/algebraic/composition_tests.rs
+  - tests/algebraic/interop_tests.rs
+  - tests/algebraic/laws.rs
+  - benches/algebraic_effects_bench.rs
+
+# 見積もり時間
+estimated_duration:
+  phase_1_foundation: "4-5 days"
+  phase_2_standard_effects: "5-6 days"
+  phase_3_composition: "6-8 days"
+  phase_4_macro: "2-3 days"
+  phase_5_interop: "4-5 days"
+  phase_6_integration: "3-4 days"
+  total: "24-31 days"
+
+# 注意事項
+notes:
+  - |
+    Rust の所有権システムとの整合性:
+    - 継続は FnOnce を使用（一回限りの使用）
+    - 複数回使用が必要な場合は Rc/Arc + RefCell を検討
+    - Clone 可能な型を優先
+
+  - |
+    スタック安全性:
+    - FlatMap バリアントによる遅延評価でスタック使用を抑制
+    - ハンドラ実行時に Trampoline を使用
+    - normalize() メソッドで FlatMap チェーンを安全に展開
+    - ベンチマークで深い連鎖の動作を検証
+
+  - |
+    型システムの制約:
+    - HKT 不在のため、一部の抽象化が制限される
+    - Member トレイトは Index パターンで「後方検索」問題を解決
+    - FindIndex トレイトで Index の自動推論をサポート
+    - 必要に応じてマクロで簡素化
+
+  - |
+    パフォーマンス考慮:
+    - 型消去（Box<dyn Any>）によるオーバーヘッド
+    - 可能な限り静的ディスパッチを維持
+    - ベンチマークで既存 Monad Transformer と比較
+    - FlatMap による追加の間接参照コストを評価
+
+  - |
+    安全性:
+    - define_effect! マクロの OperationTag 生成に AtomicU32 を使用
+    - unsafe コードは transmute のみに限定
+    - transmute は同じメモリレイアウトを持つ型間でのみ使用
