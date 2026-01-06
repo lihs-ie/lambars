@@ -1423,6 +1423,7 @@ Available AsyncIO methods:
 | `Map[K, V]` | `PersistentHashMap<K, V>` | Immutable hash map |
 | `SortedMap[K, V]` | `PersistentTreeMap<K, V>` | Immutable sorted map |
 | `Set[A]` | `PersistentHashSet<A>` | Immutable set |
+| `Set[A].view` | `HashSetView<A>` | Lazy view over set |
 
 ### Code Examples
 
