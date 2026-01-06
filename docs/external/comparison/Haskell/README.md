@@ -24,6 +24,7 @@ This document provides a comprehensive comparison between Haskell functional pro
   - [Reader Monad](#reader-monad)
   - [Writer Monad](#writer-monad)
 - [Monad Transformers (mtl)](#monad-transformers-mtl)
+- [Algebraic Effects](#algebraic-effects)
 - [Data Structures](#data-structures)
 - [Pattern Matching](#pattern-matching)
 - [Higher-Kinded Types](#higher-kinded-types)
@@ -60,6 +61,8 @@ This document provides a comprehensive comparison between Haskell functional pro
 | WriterT | `WriterT w m a` | `WriterT<W, M, A>` type |
 | ExceptT | `ExceptT e m a` | `ExceptT<E, M, A>` type |
 | Identity | `Identity a` | `Identity<A>` type |
+| Algebraic Effects | `Eff '[e1, e2] a` (freer-simple) | `Eff<EffCons<E1, EffCons<E2, EffNil>>, A>` |
+| Effect membership | `Member e r` | `Member<E, Index>` trait |
 | Lazy | Default (thunks) | `Lazy<A>` type |
 | Trampoline | Trampolining | `Trampoline<A>` type |
 
@@ -1820,6 +1823,149 @@ Available AsyncIO methods for transformers:
 - `ReaderT`: `ask_async_io`, `asks_async_io`, `lift_async_io`, `pure_async_io`, `flat_map_async_io`
 - `StateT`: `get_async_io`, `gets_async_io`, `state_async_io`, `lift_async_io`, `pure_async_io`, `flat_map_async_io`
 - `WriterT`: `tell_async_io`, `lift_async_io`, `pure_async_io`, `flat_map_async_io`, `listen_async_io`
+
+---
+
+## Algebraic Effects
+
+lambars provides an algebraic effects system as an alternative to monad transformers. This approach, inspired by libraries like Polysemy (Haskell), Eff (Scala/OCaml), and freer-simple, solves the n^2 problem of monad transformers.
+
+### Comparison with Haskell Effect Libraries
+
+| Haskell (freer-simple/polysemy) | lambars | Description |
+|--------------------------------|---------|-------------|
+| `Eff '[e1, e2] a` | `Eff<EffCons<E1, EffCons<E2, EffNil>>, A>` | Effect computation type |
+| `Member e r` | `Member<E, Index>` | Effect membership constraint |
+| `run` | `Handler::run` | Run handler |
+| `runReader` | `ReaderHandler::run` | Run Reader effect |
+| `runState` | `StateHandler::run` | Run State effect |
+| `runWriter` | `WriterHandler::run` | Run Writer effect |
+| `runError` | `ErrorHandler::run` | Run Error effect |
+| `send` / `embed` | `perform_raw` | Perform effect operation |
+| `interpret` | `Handler` trait impl | Define handler |
+| `reinterpret` | Handler composition | Transform effects |
+
+### Effect Row and Member
+
+```haskell
+-- Haskell (freer-simple)
+import Control.Monad.Freer
+import Control.Monad.Freer.Reader
+import Control.Monad.Freer.State
+
+computation :: (Member (Reader String) r, Member (State Int) r) => Eff r Int
+computation = do
+  env <- ask
+  s <- get
+  put (s + length env)
+  return (s + 1)
+
+result :: (Int, Int)
+result = run $ runState 10 $ runReader "hello" computation
+-- result = (11, 15)
+```
+
+```rust
+// lambars
+use lambars::effect::algebraic::{
+    Eff, ReaderEffect, ReaderHandler, StateEffect, StateHandler,
+    Member, Here, There, EffectRow, ask, get, put,
+};
+
+type MyEffects = EffectRow!(ReaderEffect<String>, StateEffect<i32>);
+
+fn computation() -> Eff<MyEffects, i32> {
+    ask::<String, MyEffects, Here>()
+        .flat_map(|env| {
+            get::<i32, MyEffects, There<Here>>()
+                .flat_map(move |s| {
+                    put::<i32, MyEffects, There<Here>>(s + env.len() as i32)
+                        .then(Eff::pure(s + 1))
+                })
+        })
+}
+
+let eff = computation();
+let with_reader = ReaderHandler::new("hello".to_string()).run(eff);
+let (result, final_state) = StateHandler::new(10).run(with_reader);
+// result = 11, final_state = 15
+```
+
+### Standard Effects
+
+| Effect | Haskell | lambars | Description |
+|--------|---------|---------|-------------|
+| Reader | `ask`, `asks`, `local` | `ask()`, `asks()`, `run_local()` | Read-only environment |
+| State | `get`, `put`, `modify` | `get()`, `put()`, `modify()` | Mutable state |
+| Writer | `tell`, `listen`, `censor` | `tell()`, `listen()` | Accumulating output |
+| Error | `throwError`, `catchError` | `throw()`, `catch()`, `attempt()` | Error handling |
+
+### Defining Custom Effects
+
+```haskell
+-- Haskell (freer-simple with TH)
+data Log r where
+  LogMsg :: String -> Log ()
+
+makeEffect ''Log
+
+-- Or manually
+logMsg :: Member Log r => String -> Eff r ()
+logMsg msg = send (LogMsg msg)
+
+-- Handler
+runLog :: Eff (Log ': r) a -> Eff r (a, [String])
+runLog = handleRelayS [] handler pure
+  where
+    handler logs (LogMsg msg) k = k (msg : logs) ()
+```
+
+```rust
+// lambars
+use lambars::define_effect;
+use lambars::effect::algebraic::{Effect, Eff};
+
+define_effect! {
+    /// Logging effect
+    effect Log {
+        /// Log a message
+        fn log_message(message: String) -> ();
+    }
+}
+
+// The macro generates:
+// - LogEffect struct implementing Effect
+// - LogEffect::log_message(message) -> Eff<LogEffect, ()>
+// - LogHandler trait with fn log_message(&mut self, message: String) -> ()
+
+// Create a computation using the effect
+fn log_computation() -> Eff<LogEffect, i32> {
+    LogEffect::log_message("Starting".to_string())
+        .then(LogEffect::log_message("Processing".to_string()))
+        .then(Eff::pure(42))
+}
+```
+
+### Key Differences from Monad Transformers
+
+| Aspect | Monad Transformers | Algebraic Effects |
+|--------|-------------------|-------------------|
+| n^2 problem | Yes (n effects need n^2 lift implementations) | No (effects compose freely) |
+| Effect order | Fixed by transformer stack | Flexible (handle in any order) |
+| Performance | Good (specialized code) | Good (continuation-based) |
+| Type complexity | Can become verbose | Uses type-level indices |
+| Lift operations | Required (`lift`, `liftIO`) | Not needed (`Member` constraint) |
+
+### When to Use Which
+
+| Scenario | Recommendation |
+|----------|----------------|
+| Simple 2-3 effect stacks | Monad Transformers (simpler types) |
+| Many effects (4+) | Algebraic Effects (no n^2 problem) |
+| Effect reordering needed | Algebraic Effects |
+| Maximum performance | Monad Transformers |
+| Extensible effects | Algebraic Effects |
+| Existing mtl codebase | Monad Transformers (compatibility) |
 
 ---
 

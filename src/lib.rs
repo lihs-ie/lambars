@@ -41,6 +41,10 @@
 // Note: Disabling redundant_closure_for_method_calls due to clippy 0.1.92 panic bug
 #![allow(clippy::redundant_closure_for_method_calls)]
 
+// Re-export paste crate for use in define_effect! macro
+#[doc(hidden)]
+pub use paste;
+
 /// Prelude module for convenient imports.
 ///
 /// Re-exports commonly used types and traits.
