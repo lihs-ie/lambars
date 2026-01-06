@@ -288,6 +288,7 @@ mod tests {
     use super::*;
     use crate::lens;
     use crate::prism;
+    use rstest::rstest;
 
     #[derive(Clone, PartialEq, Debug)]
     enum MyOption<T> {
@@ -300,57 +301,50 @@ mod tests {
         maybe_value: MyOption<i32>,
     }
 
-    #[test]
-    fn test_lens_prism_composition_get_option_some() {
+    #[rstest]
+    #[case(MyOption::Some(42), Some(&42))]
+    #[case(MyOption::None, None)]
+    fn test_lens_prism_composition_get_option(
+        #[case] input: MyOption<i32>,
+        #[case] expected: Option<&i32>,
+    ) {
         let container_lens = lens!(Container, maybe_value);
         let some_prism = prism!(MyOption<i32>, Some);
         let optional = container_lens.compose_prism(some_prism);
 
-        let container = Container {
-            maybe_value: MyOption::Some(42),
-        };
-        assert_eq!(optional.get_option(&container), Some(&42));
+        let container = Container { maybe_value: input };
+        assert_eq!(optional.get_option(&container), expected);
     }
 
-    #[test]
-    fn test_lens_prism_composition_get_option_none() {
+    #[rstest]
+    #[case(MyOption::Some(42), 100, MyOption::Some(100))]
+    #[case(MyOption::None, 100, MyOption::Some(100))]
+    fn test_lens_prism_composition_set(
+        #[case] input: MyOption<i32>,
+        #[case] new_value: i32,
+        #[case] expected: MyOption<i32>,
+    ) {
         let container_lens = lens!(Container, maybe_value);
         let some_prism = prism!(MyOption<i32>, Some);
         let optional = container_lens.compose_prism(some_prism);
 
-        let container = Container {
-            maybe_value: MyOption::None,
-        };
-        assert_eq!(optional.get_option(&container), None);
+        let container = Container { maybe_value: input };
+        let updated = optional.set(container, new_value);
+        assert_eq!(updated.maybe_value, expected);
     }
 
-    #[test]
-    fn test_lens_prism_composition_set() {
+    #[rstest]
+    #[case(MyOption::Some(42), true)]
+    #[case(MyOption::None, false)]
+    fn test_lens_prism_composition_is_present(
+        #[case] input: MyOption<i32>,
+        #[case] expected: bool,
+    ) {
         let container_lens = lens!(Container, maybe_value);
         let some_prism = prism!(MyOption<i32>, Some);
         let optional = container_lens.compose_prism(some_prism);
 
-        let container = Container {
-            maybe_value: MyOption::Some(42),
-        };
-        let updated = optional.set(container, 100);
-        assert_eq!(updated.maybe_value, MyOption::Some(100));
-    }
-
-    #[test]
-    fn test_lens_prism_composition_is_present() {
-        let container_lens = lens!(Container, maybe_value);
-        let some_prism = prism!(MyOption<i32>, Some);
-        let optional = container_lens.compose_prism(some_prism);
-
-        let some_container = Container {
-            maybe_value: MyOption::Some(42),
-        };
-        assert!(optional.is_present(&some_container));
-
-        let none_container = Container {
-            maybe_value: MyOption::None,
-        };
-        assert!(!optional.is_present(&none_container));
+        let container = Container { maybe_value: input };
+        assert_eq!(optional.is_present(&container), expected);
     }
 }
