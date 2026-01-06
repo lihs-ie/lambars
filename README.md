@@ -699,6 +699,69 @@ let recovered = <Result<i32, String>>::catch_error(computation, |e| {
 assert_eq!(recovered, Ok(5));
 ```
 
+#### Algebraic Effects
+
+Alternative to Monad Transformers that solves the n^2 problem.
+
+```rust
+use lambars::effect::algebraic::{
+    Eff, Effect, Handler, ReaderEffect, StateEffect, WriterEffect, ErrorEffect,
+    EffectRow, Member, Here, There,
+};
+
+// Define effects using the effect row
+type MyEffects = EffectRow!(ReaderEffect<String>, StateEffect<i32>);
+
+// Create computations with multiple effects
+fn computation() -> Eff<MyEffects, i32> {
+    use lambars::effect::algebraic::{ask, get, put};
+
+    ask::<String, MyEffects, Here>()
+        .flat_map(|env| {
+            get::<i32, MyEffects, There<Here>>()
+                .flat_map(move |state| {
+                    put::<i32, MyEffects, There<Here>>(state + env.len() as i32)
+                        .then(Eff::pure(state + 1))
+                })
+        })
+}
+
+// Run with handlers
+let eff = computation();
+let with_reader = ReaderEffect::handler("hello".to_string()).run(eff);
+let (result, final_state) = StateEffect::handler(10).run(with_reader);
+// result = 11, final_state = 15
+```
+
+**Key Features:**
+- **No n^2 problem**: Adding a new effect doesn't require new lift implementations
+- **Type-safe composition**: Effect rows track which effects are available
+- **Stack-safe**: Deep `flat_map` chains don't overflow the stack
+- **Standard effects**: Reader, State, Writer, Error
+- **Custom effects**: Use `define_effect!` macro to define your own effects
+
+```rust
+use lambars::effect::algebraic::define_effect;
+
+// Define a custom logging effect
+define_effect! {
+    /// Custom logging effect
+    pub LogEffect {
+        /// Log a message
+        fn log(message: String) -> ();
+    }
+}
+
+// Implement the handler
+struct ConsoleLogger;
+impl LogEffectHandler for ConsoleLogger {
+    fn handle_log(&self, message: String, resume: impl FnOnce(()) -> Eff<NoEffect, A>) -> Eff<NoEffect, A> {
+        println!("{}", message);
+        resume(())
+    }
+}
+```
+
 #### Monad Transformers
 
 Stack effects with transformers.
