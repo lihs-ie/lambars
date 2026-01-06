@@ -119,6 +119,7 @@ mod vector;
 pub use hashmap::PersistentHashMap;
 pub use hashmap::PersistentHashMapIntoIterator;
 pub use hashmap::PersistentHashMapIterator;
+pub use hashset::HashSetView;
 pub use hashset::PersistentHashSet;
 pub use hashset::PersistentHashSetIntoIterator;
 pub use hashset::PersistentHashSetIterator;
