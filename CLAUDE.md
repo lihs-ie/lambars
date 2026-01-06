@@ -157,6 +157,33 @@ cargo clean
 - edition: 2024
 - testing: rstest
 
+## レビュー体制
+
+### 1. Codex レビュー
+
+- **タイミング**: 各フェーズの設計・計画段階
+- **目的**: 技術的な妥当性確認、ベストプラクティスの提案
+- **対象**: 設計ドキュメント、実装計画、主要なコード変更
+- **方法**: MCP `mcp__codex__codex` ツールを使用
+- **確認事項**:
+  - アーキテクチャの妥当性
+  - 既存コードとの整合性
+  - パフォーマンスへの影響
+  - セキュリティリスク
+
+### 2. Sub-Agent レビュー
+
+- **タイミング**: 必要に応じて（複雑な実装、重要な変更）
+- **目的**: 特定領域の専門的レビュー
+- **対象**: アーキテクチャ設計、コード品質、セキュリティ
+- **方法**: Task ツールで専門エージェントを起動
+  - `rust-implementation-reviewer`: アーキテクチャ・実装レビュー
+  - `functional-programming-specialist`: 関数型プログラミングとしてのコード品質レビュー
+- **確認事項**:
+  - SOLID 原則の遵守
+  - デザインパターンの適用
+  - 長期的な保守性
+
 ## 実装手順
 
 1. github mcp を使って PR を作成する
@@ -166,14 +193,16 @@ cargo clean
    2. 課題を解決するための方法をステップバイステップで考え、要件定義を作成する
    3. `/new-plan <機能名>` で実装計画テンプレートを取得する
    4. rust-implementation-reviewer を起動し要件定義に対して実装計画を作成する
-   5. functional-programming-specialist は実装計画が要件定義と異なる点がなくなるまでレビュー指摘を行う
-   6. レビュー指摘がなくなるまで繰り返す（軽微な指摘も全て解決すること）
+   5. codex mcp にレビューをさせる
+   6. functional-programming-specialist は実装計画が要件定義と異なる点がなくなるまでレビュー指摘を行う
+   7. レビュー指摘がなくなるまで繰り返す（軽微な指摘も全て解決すること）
 3. サブエージェント: rust-implementation-specialist を起動し実装計画に則って TDD で実装を行う
    1. テストは rstest をベースに作成すること
       1. 標準の test create は使用しない
    2. ここまではテストが通ることまで確認できたらコミットする
 4. rust-simplification-specialist を起動して今回変更・作成したコードの構造を簡素化する
-5. rust-implementation-reviewer を起動して実装のレビューを行う
+5. codex mcp にレビューをさせる
+6. rust-implementation-reviewer を起動して実装のレビューを行う
 
    1. 略語を使用していないこと
    2. 差分の対象となるテストのみを実行し失敗していないこと
@@ -200,19 +229,19 @@ cargo clean
 
    5. レビュー指摘がなくなるまで修正とレビューを繰り返す（軽微な指摘も全て解決すること）
 
-6. functional-programming-specialist を起動し要件定義の観点から実装をレビューする
-7. コミット前に以下の確認を実施する
+7. functional-programming-specialist を起動し要件定義の観点から実装をレビューする
+8. コミット前に以下の確認を実施する
    1. `cargo fmt` - コードフォーマット
    2. `cargo clippy --all-features --all-targets -- -D warnings` - lint チェック
    3. `cargo test --no-default-features` - feature なしでテスト
    4. `cargo test --all-features` - 全 feature でテスト
    5. `cargo doc --no-deps` - ドキュメントビルド
    6. 全てパスしたらコミット
-8. 実装した内容を README.md, docs/external/comparison に反映する必要があるか調査し、修正が必要な場合は変更を記載しコミットする
-9. 対象の実装計画ファイルと要件定義、issue 対応の場合は issue のファイルを `docs/internal/done/` に移動する
-10. 実装上困難だと判断した場合は `/new-issue <Issue名>` で Issue ファイルを作成する
-11. `docs/internal/issues/` に将来の拡張案として保存する
-12. github mcp を使って GitHub Issue を作成し、ファイルの `github_issue` セクションを更新する
+9. 実装した内容を README.md, docs/external/comparison に反映する必要があるか調査し、修正が必要な場合は変更を記載しコミットする
+10. 対象の実装計画ファイルと要件定義、issue 対応の場合は issue のファイルを `docs/internal/done/` に移動する
+11. 実装上困難だと判断した場合は `/new-issue <Issue名>` で Issue ファイルを作成する
+12. `docs/internal/issues/` に将来の拡張案として保存する
+13. github mcp を使って GitHub Issue を作成し、ファイルの `github_issue` セクションを更新する
 
 ### スラッシュコマンド一覧
 
