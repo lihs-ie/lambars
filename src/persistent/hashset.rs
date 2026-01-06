@@ -60,6 +60,7 @@ use std::borrow::Borrow;
 use std::fmt;
 use std::hash::Hash;
 use std::iter::FromIterator;
+use std::sync::Arc;
 
 use super::PersistentHashMap;
 use crate::typeclass::{Foldable, TypeConstructor};
@@ -99,7 +100,6 @@ use crate::typeclass::{Foldable, TypeConstructor};
 /// ```
 #[derive(Clone)]
 pub struct PersistentHashSet<T> {
-    /// Internal hash map with () as value type
     inner: PersistentHashMap<T, ()>,
 }
 
@@ -703,6 +703,470 @@ impl<T: Clone + Hash + Eq + fmt::Display> fmt::Display for PersistentHashSet<T> 
             write!(formatter, "{element}")?;
         }
         write!(formatter, "}}")
+    }
+}
+
+// =============================================================================
+// HashSetView Definition
+// =============================================================================
+
+/// Internal trait for type-erased view operations.
+///
+/// This trait enables dynamic dispatch for view operations, allowing
+/// map and `flat_map` to change the element type while maintaining a
+/// uniform interface.
+trait HashSetViewOperationDynamic<T> {
+    /// Creates an iterator over the view's elements.
+    fn create_iterator(&self) -> Box<dyn Iterator<Item = T> + '_>;
+}
+
+/// Source operation that wraps the original set.
+struct SourceOperation<T> {
+    source: PersistentHashSet<T>,
+}
+
+impl<T: Clone + Hash + Eq + 'static> HashSetViewOperationDynamic<T> for SourceOperation<T> {
+    fn create_iterator(&self) -> Box<dyn Iterator<Item = T> + '_> {
+        Box::new(self.source.iter().cloned())
+    }
+}
+
+/// Filter operation that wraps a source operation and a predicate.
+struct FilterOperation<T> {
+    source: Arc<dyn HashSetViewOperationDynamic<T>>,
+    predicate: Arc<dyn Fn(&T) -> bool + 'static>,
+}
+
+impl<T: 'static> HashSetViewOperationDynamic<T> for FilterOperation<T> {
+    fn create_iterator(&self) -> Box<dyn Iterator<Item = T> + '_> {
+        let predicate = Arc::clone(&self.predicate);
+        Box::new(
+            self.source
+                .create_iterator()
+                .filter(move |item| predicate(item)),
+        )
+    }
+}
+
+/// Map operation that transforms elements using a function.
+struct MapOperation<T, U> {
+    source: Arc<dyn HashSetViewOperationDynamic<T>>,
+    function: Arc<dyn Fn(T) -> U + 'static>,
+}
+
+impl<T: 'static, U: 'static> HashSetViewOperationDynamic<U> for MapOperation<T, U> {
+    fn create_iterator(&self) -> Box<dyn Iterator<Item = U> + '_> {
+        let function = Arc::clone(&self.function);
+        Box::new(
+            self.source
+                .create_iterator()
+                .map(move |item| function(item)),
+        )
+    }
+}
+
+/// `FlatMap` operation that transforms each element into an iterator and flattens.
+struct FlatMapOperation<T, U, I>
+where
+    I: Iterator<Item = U>,
+{
+    source: Arc<dyn HashSetViewOperationDynamic<T>>,
+    function: Arc<dyn Fn(T) -> I + 'static>,
+}
+
+impl<T: 'static, U: 'static, I: Iterator<Item = U> + 'static> HashSetViewOperationDynamic<U>
+    for FlatMapOperation<T, U, I>
+{
+    fn create_iterator(&self) -> Box<dyn Iterator<Item = U> + '_> {
+        let function = Arc::clone(&self.function);
+        Box::new(
+            self.source
+                .create_iterator()
+                .flat_map(move |item| function(item)),
+        )
+    }
+}
+
+/// A lazy evaluation view over a [`PersistentHashSet`].
+///
+/// Operations (filter, map, `flat_map`) are defined in O(1) time and
+/// evaluated lazily during iteration or materialization via `collect()`.
+///
+/// # Type Parameters
+///
+/// - `T`: The type of elements produced by this view
+///
+/// # Examples
+///
+/// ```rust
+/// use lambars::persistent::PersistentHashSet;
+///
+/// let set: PersistentHashSet<i32> = [1, 2, 3, 4, 5].into_iter().collect();
+///
+/// // O(1) to create View
+/// let view = set.view();
+///
+/// // O(1) to chain transformations
+/// let transformed = view
+///     .filter(|x| *x % 2 == 0)
+///     .map(|x| x * 2);
+///
+/// // Evaluated during iteration
+/// for element in transformed.iter() {
+///     println!("{}", element);
+/// }
+///
+/// // Or materialize with collect()
+/// let result: PersistentHashSet<i32> = set.view()
+///     .filter(|x| *x % 2 == 0)
+///     .map(|x| x * 2)
+///     .collect();
+/// ```
+///
+/// # Complexity
+///
+/// | Operation | Definition | Iteration | Materialization |
+/// |-----------|------------|-----------|-----------------|
+/// | view() | O(1) | - | - |
+/// | filter(predicate) | O(1) | O(n) | O(n * log32 n) |
+/// | map(function) | O(1) | O(n) | O(n * log32 n) |
+/// | flat_map(function) | O(1) | O(n * m) | O(n * m * log32(n*m)) |
+/// | collect() | - | - | O(n * log32 n) |
+pub struct HashSetView<T> {
+    operation: Arc<dyn HashSetViewOperationDynamic<T>>,
+}
+
+impl<T: Clone + Hash + Eq + 'static> PersistentHashSet<T> {
+    /// Creates a lazy evaluation view of this set.
+    ///
+    /// The view provides lazy access to the set's elements and supports
+    /// chaining filter, map, and `flat_map` operations.
+    ///
+    /// # Complexity
+    ///
+    /// O(1) - only clones the set reference
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentHashSet;
+    ///
+    /// let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+    /// let view = set.view();
+    ///
+    /// // Access elements through the view
+    /// assert_eq!(view.iter().count(), 3);
+    /// ```
+    #[must_use]
+    pub fn view(&self) -> HashSetView<T> {
+        HashSetView {
+            operation: Arc::new(SourceOperation {
+                source: self.clone(),
+            }),
+        }
+    }
+}
+
+impl<T> HashSetView<T> {
+    /// Returns an iterator over the view's elements.
+    ///
+    /// The transformation chain is evaluated lazily during iteration.
+    ///
+    /// # Complexity
+    ///
+    /// O(n) for full iteration
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentHashSet;
+    ///
+    /// let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+    /// let view = set.view().filter(|x| *x > 1);
+    ///
+    /// for element in view.iter() {
+    ///     println!("{}", element);  // 2, 3
+    /// }
+    /// ```
+    pub fn iter(&self) -> impl Iterator<Item = T> + '_ {
+        self.operation.create_iterator()
+    }
+}
+
+impl<T: Clone + Hash + Eq + 'static> HashSetView<T> {
+    /// Returns a new view containing only elements that satisfy the predicate.
+    ///
+    /// Operation definition is O(1); evaluation occurs during iteration.
+    ///
+    /// # Arguments
+    ///
+    /// * `predicate` - A function that returns true for elements to include
+    ///
+    /// # Complexity
+    ///
+    /// - Definition: O(1)
+    /// - Iteration: O(n)
+    /// - Materialization: O(n * log32 n)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentHashSet;
+    ///
+    /// let set: PersistentHashSet<i32> = [1, 2, 3, 4, 5].into_iter().collect();
+    /// let evens = set.view().filter(|x| *x % 2 == 0);
+    ///
+    /// let result: PersistentHashSet<i32> = evens.collect();
+    /// assert!(result.contains(&2));
+    /// assert!(result.contains(&4));
+    /// assert!(!result.contains(&1));
+    /// ```
+    #[must_use]
+    pub fn filter<P>(self, predicate: P) -> Self
+    where
+        P: Fn(&T) -> bool + 'static,
+    {
+        Self {
+            operation: Arc::new(FilterOperation {
+                source: self.operation,
+                predicate: Arc::new(predicate),
+            }),
+        }
+    }
+
+    /// Fully evaluates the view and produces a new [`PersistentHashSet`].
+    ///
+    /// Duplicate elements from the transformation chain are automatically removed.
+    ///
+    /// # Complexity
+    ///
+    /// O(n * log32 n)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentHashSet;
+    ///
+    /// let set: PersistentHashSet<i32> = [1, 2, 3, 4, 5].into_iter().collect();
+    ///
+    /// let result: PersistentHashSet<i32> = set
+    ///     .view()
+    ///     .filter(|x| *x % 2 == 0)
+    ///     .map(|x| x * 2)
+    ///     .collect();
+    ///
+    /// assert_eq!(result.len(), 2);
+    /// assert!(result.contains(&4));   // 2 * 2
+    /// assert!(result.contains(&8));   // 4 * 2
+    /// ```
+    #[must_use]
+    pub fn collect(self) -> PersistentHashSet<T> {
+        self.iter().collect()
+    }
+
+    /// Applies a function to each element and returns a new view.
+    ///
+    /// Operation definition is O(1); evaluation occurs during iteration.
+    ///
+    /// Duplicate elements after transformation are removed during `collect()`.
+    /// For example: `[1, 2, 3].map(|x| x % 2)` produces `{0, 1}` after collect.
+    ///
+    /// # Arguments
+    ///
+    /// * `function` - A function to transform each element
+    ///
+    /// # Complexity
+    ///
+    /// - Definition: O(1)
+    /// - Iteration: O(n)
+    /// - Materialization: O(n * log32 n)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentHashSet;
+    ///
+    /// let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+    /// let doubled: PersistentHashSet<i32> = set.view().map(|x| x * 2).collect();
+    ///
+    /// assert!(doubled.contains(&2));
+    /// assert!(doubled.contains(&4));
+    /// assert!(doubled.contains(&6));
+    /// ```
+    #[must_use]
+    pub fn map<U, F>(self, function: F) -> HashSetView<U>
+    where
+        F: Fn(T) -> U + 'static,
+        U: Clone + Hash + Eq + 'static,
+    {
+        HashSetView {
+            operation: Arc::new(MapOperation {
+                source: self.operation,
+                function: Arc::new(function),
+            }),
+        }
+    }
+
+    /// Applies a function that returns an iterator to each element
+    /// and flattens the results into a single view.
+    ///
+    /// Operation definition is O(1); evaluation occurs during iteration.
+    ///
+    /// This is the Monad `bind` operation for sets. Each element is
+    /// transformed into an iterator, and all results are flattened
+    /// into a single set (duplicates removed during `collect()`).
+    ///
+    /// # Arguments
+    ///
+    /// * `function` - A function that returns an iterator for each element
+    ///
+    /// # Complexity
+    ///
+    /// - Definition: O(1)
+    /// - Iteration: O(n * m) where m is average iterator size
+    /// - Materialization: O(n * m * log32(n * m))
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentHashSet;
+    ///
+    /// let set: PersistentHashSet<i32> = [1, 2].into_iter().collect();
+    /// let result: PersistentHashSet<i32> = set
+    ///     .view()
+    ///     .flat_map(|x| vec![x, x * 10].into_iter())
+    ///     .collect();
+    ///
+    /// assert!(result.contains(&1));
+    /// assert!(result.contains(&10));
+    /// assert!(result.contains(&2));
+    /// assert!(result.contains(&20));
+    /// ```
+    #[must_use]
+    pub fn flat_map<U, I, F>(self, function: F) -> HashSetView<U>
+    where
+        F: Fn(T) -> I + 'static,
+        I: Iterator<Item = U> + 'static,
+        U: Clone + Hash + Eq + 'static,
+    {
+        HashSetView {
+            operation: Arc::new(FlatMapOperation {
+                source: self.operation,
+                function: Arc::new(function),
+            }),
+        }
+    }
+
+    /// Returns `true` if any element satisfies the predicate.
+    ///
+    /// Returns `false` for empty views.
+    ///
+    /// # Arguments
+    ///
+    /// * `predicate` - A function that returns true for matching elements
+    ///
+    /// # Complexity
+    ///
+    /// O(n) worst case, but short-circuits on first match
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentHashSet;
+    ///
+    /// let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+    ///
+    /// assert!(set.view().any(|x| *x == 2));
+    /// assert!(!set.view().any(|x| *x > 10));
+    /// ```
+    #[must_use]
+    pub fn any<P>(&self, predicate: P) -> bool
+    where
+        P: Fn(&T) -> bool,
+    {
+        self.iter().any(|item| predicate(&item))
+    }
+
+    /// Returns `true` if all elements satisfy the predicate.
+    ///
+    /// Returns `true` for empty views (vacuous truth).
+    ///
+    /// # Arguments
+    ///
+    /// * `predicate` - A function that returns true for matching elements
+    ///
+    /// # Complexity
+    ///
+    /// O(n) worst case, but short-circuits on first non-match
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentHashSet;
+    ///
+    /// let set: PersistentHashSet<i32> = [2, 4, 6].into_iter().collect();
+    ///
+    /// assert!(set.view().all(|x| *x % 2 == 0));
+    /// assert!(!set.view().all(|x| *x > 3));
+    /// ```
+    #[must_use]
+    pub fn all<P>(&self, predicate: P) -> bool
+    where
+        P: Fn(&T) -> bool,
+    {
+        self.iter().all(|item| predicate(&item))
+    }
+
+    /// Returns the number of elements in the view.
+    ///
+    /// # Complexity
+    ///
+    /// O(n) - requires full iteration
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentHashSet;
+    ///
+    /// let set: PersistentHashSet<i32> = [1, 2, 3, 4, 5].into_iter().collect();
+    ///
+    /// assert_eq!(set.view().count(), 5);
+    /// assert_eq!(set.view().filter(|x| *x % 2 == 0).count(), 2);
+    /// ```
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.iter().count()
+    }
+
+    /// Returns `true` if the view contains no elements.
+    ///
+    /// # Complexity
+    ///
+    /// O(1) if no transformations, O(n) worst case with transformations
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentHashSet;
+    ///
+    /// let empty: PersistentHashSet<i32> = PersistentHashSet::new();
+    /// assert!(empty.view().is_empty());
+    ///
+    /// let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+    /// assert!(!set.view().is_empty());
+    /// assert!(set.view().filter(|x| *x > 100).is_empty());
+    /// ```
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.iter().next().is_none()
+    }
+}
+
+impl<T> Clone for HashSetView<T> {
+    fn clone(&self) -> Self {
+        Self {
+            operation: Arc::clone(&self.operation),
+        }
     }
 }
 

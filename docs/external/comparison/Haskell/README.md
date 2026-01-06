@@ -1948,6 +1948,14 @@ let union_set = set1.union(&set2);
 
 let intersection_set = set1.intersection(&set2);
 // intersection_set contains {2, 3}
+
+// HashSetView - lazy evaluation (similar to Haskell's lazy semantics)
+let result: PersistentHashSet<i32> = set1
+    .view()
+    .filter(|x| *x % 2 == 1)
+    .map(|x| x * 10)
+    .collect();
+// result contains {10, 30}
 ```
 
 ---

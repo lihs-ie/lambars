@@ -1,0 +1,103 @@
+# Issue: PersistentHashMap の Arc 移行による Send+Sync 対応
+# 実装時に発見された、将来対応が必要な項目
+
+deferred_features:
+  - id: persistent_hashmap_arc_migration
+    name: "PersistentHashMap の Arc 移行による Send+Sync 対応"
+    discovered_date: "2026-01-06"
+    priority: medium
+    category: enhancement
+    labels:
+      - "persistent"
+      - "performance"
+      - "safety"
+      - "refactoring"
+
+    # 問題の説明
+    problem:
+      summary: "PersistentHashMap が Rc を使用しているため Send+Sync を実装できない"
+      details: |
+        HashSetView の実装レビュー中に、PersistentHashSet および HashSetView が
+        Send+Sync を実装できないことが判明した。
+
+        - PersistentHashMap が内部で Rc<Node<K, V>> を使用している
+        - Rc は Send でも Sync でもないため、これを使用する型も自動的に Send+Sync にならない
+        - PersistentHashSet は PersistentHashMap<T, ()> をラップしているため同様の制約を受ける
+        - HashSetView も PersistentHashSet を参照するため Send+Sync にならない
+
+        これにより、マルチスレッド環境での使用が制限される。
+
+      rust_limitation: |
+        ```rust
+        // 現在の実装
+        pub struct PersistentHashMap<K, V> {
+            root: Rc<Node<K, V>>,  // Rc は !Send + !Sync
+            size: usize,
+        }
+
+        // これにより以下のコードはコンパイルエラー
+        fn send_to_thread<T: Send>(value: T) {}
+
+        let map = PersistentHashMap::new();
+        send_to_thread(map);  // error: Rc<...> cannot be sent between threads safely
+        ```
+
+    # 解決策の提案
+    solution:
+      approach: "Rc を Arc に置き換えてスレッドセーフな実装に移行する"
+      options:
+        - name: "全面的な Arc 移行"
+          description: |
+            PersistentHashMap の Rc を全て Arc に置き換える。
+            関連する全ての永続データ構造（PersistentHashSet, HashSetView）も
+            自動的に Send+Sync になる。
+          pros:
+            - 全ての永続データ構造がスレッドセーフになる
+            - API の変更なしで移行可能
+            - HashSetView などの派生型も自動的に対応
+          cons:
+            - Arc は Rc より若干オーバーヘッドがある（アトミック操作）
+            - シングルスレッド環境では不要なコストが発生する
+
+        - name: "feature flag による切り替え"
+          description: |
+            feature flag (例: `thread-safe`) により Rc/Arc を切り替え可能にする。
+            デフォルトは Rc（シングルスレッド向け）、feature 有効時は Arc を使用。
+          pros:
+            - ユースケースに応じて最適な実装を選択できる
+            - シングルスレッド環境でのパフォーマンスを維持
+          cons:
+            - 実装の複雑さが増す
+            - 条件付きコンパイルによるメンテナンスコスト
+            - 両方の実装をテストする必要がある
+
+        - name: "Arc のみの新しいモジュール"
+          description: |
+            既存の Rc 実装を維持しつつ、Arc ベースの別モジュール
+            (例: persistent::sync) を追加する。
+          pros:
+            - 後方互換性を完全に維持
+            - 移行期間を設けられる
+          cons:
+            - コードの重複が発生
+            - メンテナンスコストが2倍
+
+      recommended: "全面的な Arc 移行"
+      estimated_complexity: medium
+
+    # 参考情報
+    references:
+      - "https://doc.rust-lang.org/std/sync/struct.Arc.html"
+      - "https://doc.rust-lang.org/nomicon/send-and-sync.html"
+      - "im-rs crate (Arc ベースの永続データ構造実装)"
+
+    # 関連する要件・実装
+    related:
+      requirement_id: "20260105_1430_hashset_view_operations"
+      plan_id: "20260105_1430_hashset_view_operations"
+
+    # GitHub Issue 情報（作成後に追記）
+    github_issue:
+      number: 60
+      url: "https://github.com/lihs-ie/lambars/issues/60"
+      created: true

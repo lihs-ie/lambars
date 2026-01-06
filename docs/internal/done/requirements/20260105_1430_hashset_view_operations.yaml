@@ -1,0 +1,1030 @@
+# PersistentHashSet 遅延評価 View 操作 要件定義
+#
+# 概要:
+#   PersistentHashSet に遅延評価 View パターンを導入し、filter, map, flat_map 操作を
+#   O(1) で定義可能にする。実際の計算はイテレーション時またはマテリアライズ時に行われる。
+#
+# 設計方針:
+#   1. 操作定義時は O(1) - 変換チェーンの構築のみ
+#   2. イテレーション時に遅延評価 - 必要な要素のみ計算
+#   3. マテリアライズ時に完全評価 - collect() で新しい PersistentHashSet を生成
+#   4. 関数型プログラミングの法則（Functor, Filter, Monad）を満たす
+#   5. Clojure の遅延シーケンスモデルに倣った設計
+#
+# 参照:
+#   - Clojure lazy sequences
+#   - Scala views (scala.collection.View)
+#   - Haskell Data.Set
+#   - Rust std::iter::Iterator
+
+version: "1.0.0"
+name: "PersistentHashSet 遅延評価 View 操作"
+description: |
+  PersistentHashSet に遅延評価パターンを導入する。
+
+  現状の問題:
+  - filter/map/flat_map を即時評価で実装すると、操作ごとに O(n) のコストがかかる
+  - チェーン操作 set.filter(p1).map(f).filter(p2) は 3 * O(n) となる
+
+  解決策:
+  - HashSetView を導入し、操作を遅延評価する
+  - 操作定義は O(1)、イテレーション/マテリアライズ時に評価
+  - チェーン操作は単一パスで処理される
+
+  アーキテクチャ:
+  ```
+  PersistentHashSet<T>
+          |
+          v view() で O(1) 変換
+  HashSetView<T>  --- filter/map/flat_map ---> HashSetView<U>  (O(1) チェーン)
+          |                                          |
+          v iter()                                   v iter()
+     Iterator<T>                               Iterator<U>
+          |                                          |
+          v collect()                                v collect()
+  PersistentHashSet<T>                      PersistentHashSet<U>
+        (O(n * log32 n))                      (O(n * log32 n))
+  ```
+
+# =============================================================================
+# 背景・動機
+# =============================================================================
+
+background:
+  problem: |
+    現在の PersistentHashSet には filter/map/flat_map が実装されていない。
+    これらを即時評価で実装すると、以下の問題が発生する:
+
+    1. **計算量の累積**:
+       即時評価では、各操作で新しい PersistentHashSet を構築する必要がある。
+       set.filter(p1).map(f).filter(p2) は 3 回の完全イテレーションを行う。
+
+    2. **中間データ構造の生成**:
+       各操作で中間的な PersistentHashSet が生成され、メモリを消費する。
+
+    3. **合成の非効率性**:
+       関数型プログラミングでは操作のチェーンが頻繁に使用されるが、
+       即時評価ではチェーンが長くなるほど非効率になる。
+
+  motivation: |
+    1. **遅延評価による効率化**:
+       操作定義を O(1) にし、実際の計算を必要時まで遅延させる。
+       チェーン操作は単一パスで処理される。
+
+    2. **関数型プログラミングパターンのサポート**:
+       Functor（map）、Filter、Monad（flat_map）の法則を満たす実装により、
+       数学的に正確な操作を保証する。
+
+    3. **Rust エコシステムとの整合性**:
+       Rust の Iterator パターンと同様の遅延評価モデルを採用し、
+       既存の Iterator トレイトと相互運用可能にする。
+
+    4. **Clojure スタイルの永続データ構造**:
+       Clojure の遅延シーケンスモデルを参考に、
+       効率的な関数型コレクション操作を実現する。
+
+  prior_art:
+    - name: "Clojure lazy sequences"
+      description: |
+        Clojure の遅延シーケンスは、操作を遅延評価し、
+        必要な要素のみを計算する。map, filter, mapcat などの
+        操作は遅延シーケンスを返す。
+        ```clojure
+        (->> #{1 2 3 4 5}
+             (filter even?)
+             (map #(* 2 %)))
+        ;; 遅延評価され、realize 時に計算
+        ```
+
+    - name: "Scala views"
+      description: |
+        Scala の View はコレクション操作を遅延評価する。
+        ```scala
+        val result = Set(1, 2, 3, 4, 5)
+          .view
+          .filter(_ % 2 == 0)
+          .map(_ * 2)
+          .toSet
+        // 単一パスで処理
+        ```
+
+    - name: "Haskell Data.Set"
+      description: |
+        Haskell の Set.map, Set.filter は純粋関数だが、
+        遅延評価言語のため自然に遅延される。
+        ```haskell
+        import qualified Data.Set as Set
+        Set.map (*2) $ Set.filter even $ Set.fromList [1..5]
+        ```
+
+    - name: "Rust Iterator"
+      description: |
+        Rust の Iterator は遅延評価され、チェーン操作は
+        単一パスで処理される。
+        ```rust
+        vec![1, 2, 3, 4, 5]
+            .iter()
+            .filter(|x| **x % 2 == 0)
+            .map(|x| x * 2)
+            .collect::<Vec<_>>()
+        ```
+
+# =============================================================================
+# 要件一覧
+# =============================================================================
+
+requirements:
+  # ============================================================================
+  # フェーズ 1: HashSetView 基本構造
+  # ============================================================================
+  - id: hashset_view_definition
+    name: "HashSetView 構造体の定義"
+    priority: critical
+    phase: 1
+    description: |
+      PersistentHashSet の遅延評価ビューを表す構造体。
+      内部的には変換操作のチェーンを保持し、イテレーション時に評価する。
+
+      設計ポイント:
+      - ジェネリックな型パラメータで様々な変換をサポート
+      - 所有権を取らず、参照またはクローンで動作
+      - Send + Sync を満たし、スレッドセーフに
+
+    definition:
+      structure: |
+        /// PersistentHashSet の遅延評価ビュー。
+        ///
+        /// 操作（filter, map, flat_map）は O(1) で定義され、
+        /// イテレーションまたは collect() 時に評価される。
+        ///
+        /// # 型パラメータ
+        ///
+        /// - `T`: ビューが生成する要素の型
+        ///
+        /// # 例
+        ///
+        /// ```rust
+        /// use lambars::persistent::PersistentHashSet;
+        ///
+        /// let set: PersistentHashSet<i32> = [1, 2, 3, 4, 5].into_iter().collect();
+        ///
+        /// // O(1) で View を作成
+        /// let view = set.view();
+        ///
+        /// // O(1) で変換をチェーン
+        /// let transformed = view
+        ///     .filter(|x| *x % 2 == 0)
+        ///     .map(|x| x * 2);
+        ///
+        /// // イテレーション時に評価
+        /// for element in transformed.iter() {
+        ///     println!("{}", element);
+        /// }
+        ///
+        /// // または collect() でマテリアライズ
+        /// let result: PersistentHashSet<i32> = transformed.collect();
+        /// ```
+        pub struct HashSetView<T> {
+            // 内部実装は詳細設計で決定
+            // 候補:
+            // 1. Box<dyn Iterator> ベース
+            // 2. 変換関数のスタック
+            // 3. enum ベースの操作チェーン
+        }
+
+    constraints:
+      - "Clone 可能（変換チェーンを複製可能）"
+      - "イテレーション中の元データへの変更は未定義動作"
+      - "スレッドセーフ（T: Send + Sync の場合）"
+
+    complexity:
+      creation: "O(1)"
+      memory: "O(チェーンの深さ)"
+
+  - id: hashset_view_creation
+    name: "view() - HashSetView の作成"
+    priority: critical
+    phase: 1
+    description: |
+      PersistentHashSet から HashSetView を作成する。
+      この操作は O(1) で、元のセットへの参照を保持する。
+
+    methods:
+      - name: view
+        signature: |
+          impl<T: Clone + Hash + Eq> PersistentHashSet<T> {
+              fn view(&self) -> HashSetView<T>
+        description: |
+          PersistentHashSet から HashSetView を作成する。
+          HashSetView は内部的に元のセットの要素を参照し、
+          遅延評価のための変換チェーンを構築する基盤となる。
+
+          この操作自体は O(1) で、データのコピーは行わない。
+        complexity: "O(1)"
+        examples:
+          - description: "基本的な view() の使用"
+            code: |
+              let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+              let view = set.view();
+              // view は set の要素への遅延アクセスを提供
+
+    tests:
+      - category: "基本操作テスト"
+        cases:
+          - name: "空のセットから view を作成"
+            test: |
+              let set: PersistentHashSet<i32> = PersistentHashSet::new();
+              let view = set.view();
+              assert_eq!(view.iter().count(), 0);
+
+          - name: "要素を持つセットから view を作成"
+            test: |
+              let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+              let view = set.view();
+              assert_eq!(view.iter().count(), 3);
+
+  # ============================================================================
+  # フェーズ 2: filter 操作
+  # ============================================================================
+  - id: hashset_view_filter
+    name: "filter - 述語によるフィルタリング"
+    priority: critical
+    phase: 2
+    description: |
+      HashSetView に対して述語関数でフィルタリングを行う。
+      この操作は O(1) で、実際のフィルタリングはイテレーション時に行われる。
+
+    methods:
+      - name: filter
+        signature: |
+          impl<T> HashSetView<T> {
+              fn filter<P>(self, predicate: P) -> HashSetView<T>
+              where
+                  P: Fn(&T) -> bool + Clone + 'static,
+          }
+        description: |
+          述語を満たす要素のみを含む新しい HashSetView を返す。
+          操作定義は O(1)、イテレーション時に O(n) で評価される。
+
+          predicate は Clone を要求するのは、View が複数回イテレート
+          可能であるため。
+        complexity:
+          definition: "O(1)"
+          iteration: "O(n)"
+          materialization: "O(n * log32 n)"
+        examples:
+          - description: "偶数のみをフィルタリング"
+            code: |
+              let set: PersistentHashSet<i32> = [1, 2, 3, 4, 5].into_iter().collect();
+              let evens = set.view().filter(|x| *x % 2 == 0);
+
+              let result: PersistentHashSet<i32> = evens.collect();
+              assert!(result.contains(&2));
+              assert!(result.contains(&4));
+              assert!(!result.contains(&1));
+
+          - description: "フィルタのチェーン"
+            code: |
+              let set: PersistentHashSet<i32> = (1..=100).collect();
+              let result: PersistentHashSet<i32> = set
+                  .view()
+                  .filter(|x| *x % 2 == 0)  // 偶数
+                  .filter(|x| *x % 3 == 0)  // かつ 3 の倍数
+                  .collect();
+
+              // 6, 12, 18, ... 6 の倍数のみ
+              assert!(result.contains(&6));
+              assert!(result.contains(&12));
+              assert!(!result.contains(&4));
+
+    laws:
+      - name: "Empty Filter Law（空フィルタの法則）"
+        description: "常に false を返す述語はすべての要素を除外する"
+        equation: "view.filter(|_| false).collect() == empty"
+        test: |
+          let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+          let result: PersistentHashSet<i32> = set.view().filter(|_| false).collect();
+          assert!(result.is_empty());
+
+      - name: "Identity Filter Law（恒等フィルタの法則）"
+        description: "常に true を返す述語は元の集合と等しい"
+        equation: "view.filter(|_| true).collect() == original"
+        test: |
+          let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+          let result: PersistentHashSet<i32> = set.view().filter(|_| true).collect();
+          assert_eq!(result, set);
+
+      - name: "Filter Composition Law（フィルタ合成の法則）"
+        description: "フィルタのチェーンは述語の AND と等価"
+        equation: "view.filter(p1).filter(p2) == view.filter(|x| p1(x) && p2(x))"
+        test: |
+          let set: PersistentHashSet<i32> = (1..=20).collect();
+
+          let p1 = |x: &i32| *x % 2 == 0;
+          let p2 = |x: &i32| *x > 10;
+
+          let chained: PersistentHashSet<i32> = set.view()
+              .filter(p1)
+              .filter(p2)
+              .collect();
+
+          let combined: PersistentHashSet<i32> = set.view()
+              .filter(|x| p1(x) && p2(x))
+              .collect();
+
+          assert_eq!(chained, combined);
+
+    tests:
+      - category: "基本操作テスト"
+        cases:
+          - name: "空のビューに対する filter"
+            test: |
+              let set: PersistentHashSet<i32> = PersistentHashSet::new();
+              let result: PersistentHashSet<i32> = set.view().filter(|_| true).collect();
+              assert!(result.is_empty());
+
+          - name: "単一要素のフィルタリング（マッチ）"
+            test: |
+              let set: PersistentHashSet<i32> = [42].into_iter().collect();
+              let result: PersistentHashSet<i32> = set.view().filter(|x| *x == 42).collect();
+              assert_eq!(result.len(), 1);
+              assert!(result.contains(&42));
+
+          - name: "単一要素のフィルタリング（非マッチ）"
+            test: |
+              let set: PersistentHashSet<i32> = [42].into_iter().collect();
+              let result: PersistentHashSet<i32> = set.view().filter(|x| *x != 42).collect();
+              assert!(result.is_empty());
+
+  # ============================================================================
+  # フェーズ 3: map 操作
+  # ============================================================================
+  - id: hashset_view_map
+    name: "map - 要素の変換"
+    priority: critical
+    phase: 3
+    description: |
+      HashSetView の各要素に関数を適用し、変換された要素を含む新しい HashSetView を返す。
+      この操作は O(1) で、実際の変換はイテレーション時に行われる。
+
+      重要: map はセットの要素を変換するため、変換後に重複が発生する可能性がある。
+      collect() 時に重複は自動的に除去される。
+
+    methods:
+      - name: map
+        signature: |
+          impl<T> HashSetView<T> {
+              fn map<U, F>(self, function: F) -> HashSetView<U>
+              where
+                  F: Fn(T) -> U + Clone + 'static,
+                  U: Clone + Hash + Eq,
+          }
+        description: |
+          各要素に関数を適用し、変換された HashSetView を返す。
+          操作定義は O(1)、イテレーション時に O(n) で評価される。
+
+          変換後の重複要素は collect() 時に除去される。
+          例: [1, 2, 3].map(|x| x % 2) は [0, 1] となる。
+        complexity:
+          definition: "O(1)"
+          iteration: "O(n)"
+          materialization: "O(n * log32 n)"
+        examples:
+          - description: "要素を2倍にする"
+            code: |
+              let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+              let doubled: PersistentHashSet<i32> = set.view().map(|x| x * 2).collect();
+
+              assert!(doubled.contains(&2));
+              assert!(doubled.contains(&4));
+              assert!(doubled.contains(&6));
+
+          - description: "型変換"
+            code: |
+              let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+              let strings: PersistentHashSet<String> = set
+                  .view()
+                  .map(|x| x.to_string())
+                  .collect();
+
+              assert!(strings.contains("1"));
+              assert!(strings.contains("2"));
+              assert!(strings.contains("3"));
+
+          - description: "重複の発生と除去"
+            code: |
+              let set: PersistentHashSet<i32> = [1, 2, 3, 4, 5].into_iter().collect();
+              let parities: PersistentHashSet<i32> = set
+                  .view()
+                  .map(|x| x % 2)
+                  .collect();
+
+              // 0 と 1 のみ（重複は除去）
+              assert_eq!(parities.len(), 2);
+              assert!(parities.contains(&0));
+              assert!(parities.contains(&1));
+
+    laws:
+      - name: "Functor Identity Law（恒等法則）"
+        description: "恒等関数による map は元の集合と等しい"
+        equation: "view.map(|x| x).collect() == original"
+        test: |
+          let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+          let result: PersistentHashSet<i32> = set.view().map(|x| x).collect();
+          assert_eq!(result, set);
+
+      - name: "Functor Composition Law（合成法則）"
+        description: "map のチェーンは関数合成と等価"
+        equation: "view.map(f).map(g) == view.map(|x| g(f(x)))"
+        test: |
+          let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+
+          let f = |x: i32| x * 2;
+          let g = |x: i32| x + 10;
+
+          let chained: PersistentHashSet<i32> = set.view()
+              .map(f)
+              .map(g)
+              .collect();
+
+          let composed: PersistentHashSet<i32> = set.view()
+              .map(|x| g(f(x)))
+              .collect();
+
+          assert_eq!(chained, composed);
+
+    tests:
+      - category: "基本操作テスト"
+        cases:
+          - name: "空のビューに対する map"
+            test: |
+              let set: PersistentHashSet<i32> = PersistentHashSet::new();
+              let result: PersistentHashSet<i32> = set.view().map(|x| x * 2).collect();
+              assert!(result.is_empty());
+
+          - name: "単一要素の map"
+            test: |
+              let set: PersistentHashSet<i32> = [42].into_iter().collect();
+              let result: PersistentHashSet<i32> = set.view().map(|x| x * 2).collect();
+              assert_eq!(result.len(), 1);
+              assert!(result.contains(&84));
+
+  # ============================================================================
+  # フェーズ 4: flat_map 操作
+  # ============================================================================
+  - id: hashset_view_flat_map
+    name: "flat_map - 要素の変換とフラット化"
+    priority: critical
+    phase: 4
+    description: |
+      HashSetView の各要素に関数を適用し、結果をフラット化した HashSetView を返す。
+      これは Monad の bind 操作に相当する。
+
+      関数は各要素に対してイテラブルなコレクションを返し、
+      全ての結果がフラット化されて単一の HashSetView となる。
+
+    methods:
+      - name: flat_map
+        signature: |
+          impl<T> HashSetView<T> {
+              fn flat_map<U, I, F>(self, function: F) -> HashSetView<U>
+              where
+                  F: Fn(T) -> I + Clone + 'static,
+                  I: IntoIterator<Item = U>,
+                  U: Clone + Hash + Eq,
+          }
+        description: |
+          各要素に関数を適用し、結果をフラット化した HashSetView を返す。
+          操作定義は O(1)、イテレーション時に O(n * m) で評価される
+          （m は各要素が生成する平均要素数）。
+
+          重複要素は collect() 時に除去される。
+        complexity:
+          definition: "O(1)"
+          iteration: "O(n * m) where m = average output size per element"
+          materialization: "O(n * m * log32(n * m))"
+        examples:
+          - description: "各要素を複数の要素に展開"
+            code: |
+              let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+              let expanded: PersistentHashSet<i32> = set
+                  .view()
+                  .flat_map(|x| vec![x, x * 10, x * 100])
+                  .collect();
+
+              // {1, 10, 100, 2, 20, 200, 3, 30, 300}
+              assert!(expanded.contains(&1));
+              assert!(expanded.contains(&10));
+              assert!(expanded.contains(&100));
+              assert!(expanded.contains(&2));
+              assert!(expanded.contains(&200));
+
+          - description: "条件付き展開（Some/None パターン）"
+            code: |
+              let set: PersistentHashSet<i32> = [1, 2, 3, 4, 5].into_iter().collect();
+              let filtered: PersistentHashSet<i32> = set
+                  .view()
+                  .flat_map(|x| {
+                      if x % 2 == 0 {
+                          Some(x * 2)
+                      } else {
+                          None
+                      }
+                  })
+                  .collect();
+
+              // 偶数のみ 2 倍: {4, 8}
+              assert_eq!(filtered.len(), 2);
+              assert!(filtered.contains(&4));
+              assert!(filtered.contains(&8));
+
+    laws:
+      - name: "Monad Left Identity Law（左単位法則）"
+        description: "単一要素の view に対する flat_map は関数の直接適用と等価"
+        equation: "HashSetView::singleton(x).flat_map(f) == f(x).collect()"
+        note: |
+          HashSetView::singleton は単一要素の View を作成するヘルパー。
+          実装では PersistentHashSet::singleton(x).view() で代用可能。
+        test: |
+          let f = |x: i32| vec![x, x * 2];
+          let singleton = PersistentHashSet::singleton(5).view();
+          let result: PersistentHashSet<i32> = singleton.flat_map(f.clone()).collect();
+
+          let direct: PersistentHashSet<i32> = f(5).into_iter().collect();
+          assert_eq!(result, direct);
+
+      - name: "Monad Right Identity Law（右単位法則）"
+        description: "view.flat_map(singleton) は元の集合と等価"
+        equation: "view.flat_map(|x| [x]) == view"
+        test: |
+          let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+          let result: PersistentHashSet<i32> = set.view()
+              .flat_map(|x| std::iter::once(x))
+              .collect();
+          assert_eq!(result, set);
+
+      - name: "Monad Associativity Law（結合法則）"
+        description: "flat_map のチェーンは結合的"
+        equation: "view.flat_map(f).flat_map(g) == view.flat_map(|x| f(x).flat_map(g))"
+        test: |
+          let set: PersistentHashSet<i32> = [1, 2].into_iter().collect();
+
+          let f = |x: i32| vec![x, x + 10];
+          let g = |x: i32| vec![x * 2];
+
+          let left: PersistentHashSet<i32> = set.view()
+              .flat_map(f.clone())
+              .flat_map(g.clone())
+              .collect();
+
+          let right: PersistentHashSet<i32> = set.view()
+              .flat_map(|x| {
+                  f(x).into_iter().flat_map(g.clone()).collect::<Vec<_>>()
+              })
+              .collect();
+
+          assert_eq!(left, right);
+
+    tests:
+      - category: "基本操作テスト"
+        cases:
+          - name: "空のビューに対する flat_map"
+            test: |
+              let set: PersistentHashSet<i32> = PersistentHashSet::new();
+              let result: PersistentHashSet<i32> = set.view()
+                  .flat_map(|x| vec![x, x * 2])
+                  .collect();
+              assert!(result.is_empty());
+
+          - name: "空を返す flat_map"
+            test: |
+              let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+              let result: PersistentHashSet<i32> = set.view()
+                  .flat_map(|_| Vec::<i32>::new())
+                  .collect();
+              assert!(result.is_empty());
+
+          - name: "単一要素を返す flat_map（map と等価）"
+            test: |
+              let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+
+              let flat_mapped: PersistentHashSet<i32> = set.view()
+                  .flat_map(|x| std::iter::once(x * 2))
+                  .collect();
+
+              let mapped: PersistentHashSet<i32> = set.view()
+                  .map(|x| x * 2)
+                  .collect();
+
+              assert_eq!(flat_mapped, mapped);
+
+  # ============================================================================
+  # フェーズ 5: Iterator と collect
+  # ============================================================================
+  - id: hashset_view_iterator
+    name: "Iterator トレイト実装"
+    priority: critical
+    phase: 5
+    description: |
+      HashSetView に対する Iterator トレイト実装。
+      遅延評価された変換チェーンをイテレーション時に評価する。
+
+    methods:
+      - name: iter
+        signature: |
+          impl<T> HashSetView<T> {
+              fn iter(&self) -> impl Iterator<Item = T> + '_
+          }
+        description: |
+          HashSetView の要素をイテレートするイテレータを返す。
+          変換チェーンはイテレーション中に遅延評価される。
+
+          注意: セットの特性上、重複要素が発生する可能性がある
+          （map で同じ値が生成された場合など）。
+          重複を除去するには collect() を使用する。
+        complexity: "O(n) for full iteration"
+        examples:
+          - description: "イテレーションによる要素アクセス"
+            code: |
+              let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+              let view = set.view().filter(|x| *x > 1);
+
+              for element in view.iter() {
+                  println!("{}", element);  // 2, 3
+              }
+
+    tests:
+      - category: "基本操作テスト"
+        cases:
+          - name: "空の View のイテレーション"
+            test: |
+              let set: PersistentHashSet<i32> = PersistentHashSet::new();
+              let count = set.view().iter().count();
+              assert_eq!(count, 0);
+
+          - name: "変換チェーンのイテレーション"
+            test: |
+              let set: PersistentHashSet<i32> = [1, 2, 3, 4].into_iter().collect();
+              let view = set.view()
+                  .filter(|x| *x % 2 == 0)
+                  .map(|x| x * 10);
+
+              let elements: Vec<i32> = view.iter().collect();
+              assert_eq!(elements.len(), 2);
+              assert!(elements.contains(&20));
+              assert!(elements.contains(&40));
+
+  - id: hashset_view_collect
+    name: "collect - マテリアライズ"
+    priority: critical
+    phase: 5
+    description: |
+      HashSetView を評価し、新しい PersistentHashSet を生成する。
+      遅延評価された変換チェーンを完全に評価し、結果を永続データ構造に格納する。
+
+    methods:
+      - name: collect
+        signature: |
+          impl<T: Clone + Hash + Eq> HashSetView<T> {
+              fn collect(self) -> PersistentHashSet<T>
+          }
+        description: |
+          HashSetView を完全に評価し、PersistentHashSet を生成する。
+          変換チェーンで発生した重複要素は自動的に除去される。
+        complexity: "O(n * log32 n)"
+        examples:
+          - description: "View から PersistentHashSet への変換"
+            code: |
+              let set: PersistentHashSet<i32> = [1, 2, 3, 4, 5].into_iter().collect();
+
+              let result: PersistentHashSet<i32> = set
+                  .view()
+                  .filter(|x| *x % 2 == 0)
+                  .map(|x| x * 2)
+                  .collect();
+
+              assert_eq!(result.len(), 2);
+              assert!(result.contains(&4));   // 2 * 2
+              assert!(result.contains(&8));   // 4 * 2
+
+    tests:
+      - category: "基本操作テスト"
+        cases:
+          - name: "空の View の collect"
+            test: |
+              let set: PersistentHashSet<i32> = PersistentHashSet::new();
+              let result: PersistentHashSet<i32> = set.view().collect();
+              assert!(result.is_empty());
+
+          - name: "変換なしの collect"
+            test: |
+              let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+              let result: PersistentHashSet<i32> = set.view().collect();
+              assert_eq!(result, set);
+
+          - name: "複合変換の collect"
+            test: |
+              let set: PersistentHashSet<i32> = [1, 2, 3, 4, 5].into_iter().collect();
+
+              let result: PersistentHashSet<String> = set
+                  .view()
+                  .filter(|x| *x > 2)
+                  .map(|x| format!("value_{}", x))
+                  .collect();
+
+              assert_eq!(result.len(), 3);
+              assert!(result.contains("value_3"));
+              assert!(result.contains("value_4"));
+              assert!(result.contains("value_5"));
+
+  # ============================================================================
+  # フェーズ 6: 追加ユーティリティ
+  # ============================================================================
+  - id: hashset_view_utilities
+    name: "追加ユーティリティメソッド"
+    priority: medium
+    phase: 6
+    description: |
+      HashSetView の利便性を向上させる追加メソッド。
+
+    methods:
+      - name: any
+        signature: |
+          impl<T> HashSetView<T> {
+              fn any<P>(self, predicate: P) -> bool
+              where
+                  P: Fn(&T) -> bool,
+          }
+        description: |
+          いずれかの要素が述語を満たすかを判定する。
+          短絡評価により、条件を満たす要素が見つかった時点で終了する。
+        complexity: "O(n) worst case, O(1) best case"
+
+      - name: all
+        signature: |
+          impl<T> HashSetView<T> {
+              fn all<P>(self, predicate: P) -> bool
+              where
+                  P: Fn(&T) -> bool,
+          }
+        description: |
+          全ての要素が述語を満たすかを判定する。
+          短絡評価により、条件を満たさない要素が見つかった時点で終了する。
+        complexity: "O(n) worst case, O(1) best case"
+
+      - name: count
+        signature: |
+          impl<T> HashSetView<T> {
+              fn count(self) -> usize
+          }
+        description: |
+          View 内の要素数を数える。
+          変換チェーンを完全に評価する必要がある。
+        complexity: "O(n)"
+
+      - name: is_empty
+        signature: |
+          impl<T> HashSetView<T> {
+              fn is_empty(self) -> bool
+          }
+        description: |
+          View が空かどうかを判定する。
+          短絡評価により、最初の要素が見つかった時点で終了する。
+        complexity: "O(1) to O(n)"
+
+    tests:
+      - category: "ユーティリティテスト"
+        cases:
+          - name: "any - 条件を満たす要素あり"
+            test: |
+              let set: PersistentHashSet<i32> = [1, 2, 3, 4, 5].into_iter().collect();
+              assert!(set.view().any(|x| *x > 3));
+
+          - name: "any - 条件を満たす要素なし"
+            test: |
+              let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+              assert!(!set.view().any(|x| *x > 10));
+
+          - name: "all - 全要素が条件を満たす"
+            test: |
+              let set: PersistentHashSet<i32> = [2, 4, 6].into_iter().collect();
+              assert!(set.view().all(|x| *x % 2 == 0));
+
+          - name: "all - 条件を満たさない要素あり"
+            test: |
+              let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+              assert!(!set.view().all(|x| *x % 2 == 0));
+
+          - name: "count"
+            test: |
+              let set: PersistentHashSet<i32> = [1, 2, 3, 4, 5].into_iter().collect();
+              let count = set.view().filter(|x| *x % 2 == 0).count();
+              assert_eq!(count, 2);
+
+          - name: "is_empty - 空の View"
+            test: |
+              let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+              assert!(set.view().filter(|x| *x > 10).is_empty());
+
+          - name: "is_empty - 要素ありの View"
+            test: |
+              let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+              assert!(!set.view().is_empty());
+
+# =============================================================================
+# 非機能要件
+# =============================================================================
+
+non_functional_requirements:
+  safety:
+    - "#![forbid(unsafe_code)] ポリシーに準拠"
+    - "パニックセーフな実装"
+    - "イテレーション中の元データ変更は未定義動作（ドキュメントで警告）"
+
+  performance:
+    - "操作定義（filter, map, flat_map）は O(1)"
+    - "イテレーションは単一パスで処理（中間データ構造なし）"
+    - "不要なクローンを避ける（参照ベースの処理）"
+    - "大規模データセットでも効率的に動作"
+
+  compatibility:
+    - "既存の PersistentHashSet API との一貫性"
+    - "Rust の Iterator パターンとの相互運用"
+    - "persistent feature flag の下で有効"
+
+  testing:
+    - "テストカバレッジ 100%"
+    - "プロパティベーステストによる法則の検証"
+    - "大規模データセットでのパフォーマンステスト"
+
+  documentation:
+    - "全てのパブリック API にドキュメントコメント"
+    - "使用例を含む詳細なドキュメント"
+    - "FP 法則と保証の明記"
+    - "計算量の明記"
+
+# =============================================================================
+# 実装フェーズ
+# =============================================================================
+
+implementation_phases:
+  - phase: 1
+    name: "HashSetView 基本構造"
+    description: "HashSetView 構造体と view() メソッドの実装"
+    requirements:
+      - hashset_view_definition
+      - hashset_view_creation
+    duration_estimate: "1-2 days"
+    deliverables:
+      - "src/persistent/hashset_view.rs（新規）"
+      - "src/persistent/hashset.rs への view() メソッド追加"
+
+  - phase: 2
+    name: "filter 操作"
+    description: "filter メソッドと Filter 法則のテスト"
+    requirements:
+      - hashset_view_filter
+    duration_estimate: "1 day"
+    dependencies:
+      - "phase 1"
+    deliverables:
+      - "filter メソッドの実装"
+      - "Filter 法則のプロパティテスト"
+
+  - phase: 3
+    name: "map 操作"
+    description: "map メソッドと Functor 法則のテスト"
+    requirements:
+      - hashset_view_map
+    duration_estimate: "1 day"
+    dependencies:
+      - "phase 2"
+    deliverables:
+      - "map メソッドの実装"
+      - "Functor 法則のプロパティテスト"
+
+  - phase: 4
+    name: "flat_map 操作"
+    description: "flat_map メソッドと Monad 法則のテスト"
+    requirements:
+      - hashset_view_flat_map
+    duration_estimate: "1-2 days"
+    dependencies:
+      - "phase 3"
+    deliverables:
+      - "flat_map メソッドの実装"
+      - "Monad 法則のプロパティテスト"
+
+  - phase: 5
+    name: "Iterator と collect"
+    description: "Iterator トレイト実装と collect メソッド"
+    requirements:
+      - hashset_view_iterator
+      - hashset_view_collect
+    duration_estimate: "1 day"
+    dependencies:
+      - "phase 4"
+    deliverables:
+      - "Iterator トレイト実装"
+      - "collect メソッドの実装"
+
+  - phase: 6
+    name: "追加ユーティリティ"
+    description: "any, all, count, is_empty などのユーティリティ"
+    requirements:
+      - hashset_view_utilities
+    duration_estimate: "0.5 day"
+    dependencies:
+      - "phase 5"
+    deliverables:
+      - "ユーティリティメソッドの実装"
+
+# =============================================================================
+# 将来の拡張
+# =============================================================================
+
+future_extensions:
+  - id: hashset_view_take_skip
+    name: "take/skip 操作"
+    description: |
+      View の先頭 n 要素を取得/スキップする操作。
+      ただし、HashSet は順序を持たないため、用途は限定的。
+    rationale: |
+      Iterator との互換性のために将来追加を検討。
+      ただし、順序が非決定的であることをドキュメントで明記する必要がある。
+
+  - id: hashset_view_partition
+    name: "partition 操作"
+    description: |
+      述語に基づいて View を2つに分割する。
+      ```rust
+      let (evens, odds) = set.view().partition(|x| x % 2 == 0);
+      ```
+    rationale: |
+      filter の拡張として有用だが、2つの View を返すため
+      実装が複雑になる。基本操作の安定後に検討。
+
+  - id: hashset_view_zip
+    name: "zip 操作"
+    description: |
+      2つの View を組み合わせる操作。
+      ただし、HashSet は順序を持たないため、用途は限定的。
+    rationale: |
+      順序付きコレクションでは有用だが、
+      HashSet では意味が曖昧なため、優先度低。
+
+  - id: hashset_view_parallel
+    name: "並列イテレーション"
+    description: |
+      rayon を使用した並列イテレーション。
+      ```rust
+      set.view().par_iter().filter(...).collect()
+      ```
+    rationale: |
+      大規模データセットでのパフォーマンス向上に有効。
+      rayon との統合後に検討。
+
+# =============================================================================
+# 依存関係
+# =============================================================================
+
+dependencies:
+  internal:
+    - "lambars::persistent::PersistentHashSet"
+    - "lambars::persistent::PersistentHashMap"
+
+  external: []
+
+  dev_dependencies:
+    - name: rstest
+      version: "0.18"
+      reason: "パラメータ化テスト"
+
+    - name: proptest
+      version: "1.0"
+      reason: "プロパティベーステスト（法則検証）"
+
+# =============================================================================
+# 参照
+# =============================================================================
+
+references:
+  - name: "既存の PersistentHashSet 実装"
+    location: "src/persistent/hashset.rs"
+    description: "現在の PersistentHashSet 実装。view() メソッドを追加する。"
+
+  - name: "既存の Lazy 実装"
+    location: "src/control/lazy.rs"
+    description: "遅延評価の参考実装。ただし、View は異なるパターン。"
+
+  - name: "Clojure lazy sequences"
+    url: "https://clojure.org/reference/sequences"
+    description: "遅延シーケンスの設計参照"
+
+  - name: "Scala views"
+    url: "https://docs.scala-lang.org/overviews/collections-2.13/views.html"
+    description: "View パターンの設計参照"
+
+  - name: "GitHub Issue #11"
+    url: "https://github.com/lihs-ie/lambars/issues/11"
+    description: "HashSet 集合操作の完備に関する Issue"

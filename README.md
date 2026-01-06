@@ -416,6 +416,15 @@ let difference = set.difference(&other);
 assert_eq!(union.len(), 4);        // {1, 2, 3, 4}
 assert_eq!(intersection.len(), 2); // {2, 3}
 assert_eq!(difference.len(), 1);   // {1}
+
+// Lazy evaluation with HashSetView
+let result: PersistentHashSet<i32> = set
+    .view()
+    .filter(|x| *x % 2 == 1)
+    .map(|x| x * 10)
+    .collect();
+assert!(result.contains(&10));  // 1 * 10
+assert!(result.contains(&30));  // 3 * 10
 ```
 
 #### PersistentTreeMap
