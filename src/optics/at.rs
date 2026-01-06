@@ -238,21 +238,15 @@ pub fn at<T: At<K>, K>(key: K) -> T::AtOptional {
 mod tests {
     use super::{At, HashMap, HashMapAt, at};
     use crate::optics::Optional;
+    use rstest::rstest;
 
-    #[test]
-    fn test_hashmap_at_get_existing() {
+    #[rstest]
+    #[case("key".to_string(), Some(42))]
+    #[case("other".to_string(), None)]
+    fn test_hashmap_at_get(#[case] key: String, #[case] expected: Option<i32>) {
         let map: HashMap<String, i32> = std::iter::once(("key".to_string(), 42)).collect();
-        let optional = <HashMap<String, i32> as At<String>>::at("key".to_string());
-
-        assert_eq!(optional.get_option(&map), Some(&42));
-    }
-
-    #[test]
-    fn test_hashmap_at_get_non_existing() {
-        let map: HashMap<String, i32> = std::iter::once(("key".to_string(), 42)).collect();
-        let optional = <HashMap<String, i32> as At<String>>::at("other".to_string());
-
-        assert_eq!(optional.get_option(&map), None);
+        let optional = <HashMap<String, i32> as At<String>>::at(key);
+        assert_eq!(optional.get_option(&map).copied(), expected);
     }
 
     #[test]
@@ -282,15 +276,13 @@ mod tests {
         assert_eq!(modified.get("key"), Some(&84));
     }
 
-    #[test]
-    fn test_hashmap_at_is_present() {
+    #[rstest]
+    #[case("key".to_string(), true)]
+    #[case("other".to_string(), false)]
+    fn test_hashmap_at_is_present(#[case] key: String, #[case] expected: bool) {
         let map: HashMap<String, i32> = std::iter::once(("key".to_string(), 42)).collect();
-        let optional = <HashMap<String, i32> as At<String>>::at("key".to_string());
-
-        assert!(optional.is_present(&map));
-
-        let other_optional = <HashMap<String, i32> as At<String>>::at("other".to_string());
-        assert!(!other_optional.is_present(&map));
+        let optional = <HashMap<String, i32> as At<String>>::at(key);
+        assert_eq!(optional.is_present(&map), expected);
     }
 
     #[test]
@@ -354,21 +346,15 @@ mod persistent_tests {
     use super::{At, Optional};
     use crate::optics::at::{PersistentHashMapAt, PersistentTreeMapAt};
     use crate::persistent::{PersistentHashMap, PersistentTreeMap};
+    use rstest::rstest;
 
-    #[test]
-    fn test_persistent_hashmap_at_get_existing() {
+    #[rstest]
+    #[case("key".to_string(), Some(42))]
+    #[case("other".to_string(), None)]
+    fn test_persistent_hashmap_at_get(#[case] key: String, #[case] expected: Option<i32>) {
         let map = PersistentHashMap::new().insert("key".to_string(), 42);
-        let optional = <PersistentHashMap<String, i32> as At<String>>::at("key".to_string());
-
-        assert_eq!(optional.get_option(&map), Some(&42));
-    }
-
-    #[test]
-    fn test_persistent_hashmap_at_get_non_existing() {
-        let map = PersistentHashMap::new().insert("key".to_string(), 42);
-        let optional = <PersistentHashMap<String, i32> as At<String>>::at("other".to_string());
-
-        assert_eq!(optional.get_option(&map), None);
+        let optional = <PersistentHashMap<String, i32> as At<String>>::at(key);
+        assert_eq!(optional.get_option(&map).copied(), expected);
     }
 
     #[test]
@@ -414,20 +400,13 @@ mod persistent_tests {
         assert!(debug_string.contains("PersistentHashMapAt"));
     }
 
-    #[test]
-    fn test_persistent_treemap_at_get_existing() {
+    #[rstest]
+    #[case("key".to_string(), Some(42))]
+    #[case("other".to_string(), None)]
+    fn test_persistent_treemap_at_get(#[case] key: String, #[case] expected: Option<i32>) {
         let map = PersistentTreeMap::new().insert("key".to_string(), 42);
-        let optional = <PersistentTreeMap<String, i32> as At<String>>::at("key".to_string());
-
-        assert_eq!(optional.get_option(&map), Some(&42));
-    }
-
-    #[test]
-    fn test_persistent_treemap_at_get_non_existing() {
-        let map = PersistentTreeMap::new().insert("key".to_string(), 42);
-        let optional = <PersistentTreeMap<String, i32> as At<String>>::at("other".to_string());
-
-        assert_eq!(optional.get_option(&map), None);
+        let optional = <PersistentTreeMap<String, i32> as At<String>>::at(key);
+        assert_eq!(optional.get_option(&map).copied(), expected);
     }
 
     #[test]

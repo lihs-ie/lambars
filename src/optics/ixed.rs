@@ -355,39 +355,25 @@ pub fn index<T: Ixed<I>, I>(index: I) -> T::IxOptional {
 #[cfg(test)]
 mod tests {
     use super::{HashMap, HashMapIx, Ixed, Optional, VecIx, index, ix};
+    use rstest::rstest;
 
-    #[test]
-    fn test_vec_ix_get_valid_index() {
+    #[rstest]
+    #[case(2, Some(3))]
+    #[case(10, None)]
+    fn test_vec_ix_get(#[case] index: usize, #[case] expected: Option<i32>) {
         let vec = vec![1, 2, 3, 4, 5];
-        let optional = <Vec<i32> as Ixed<usize>>::ix(2);
-
-        assert_eq!(optional.get_option(&vec), Some(&3));
+        let optional = <Vec<i32> as Ixed<usize>>::ix(index);
+        assert_eq!(optional.get_option(&vec).copied(), expected);
     }
 
-    #[test]
-    fn test_vec_ix_get_invalid_index() {
+    #[rstest]
+    #[case(2, vec![1, 2, 100, 4, 5])]
+    #[case(10, vec![1, 2, 3, 4, 5])]
+    fn test_vec_ix_set(#[case] index: usize, #[case] expected: Vec<i32>) {
         let vec = vec![1, 2, 3, 4, 5];
-        let optional = <Vec<i32> as Ixed<usize>>::ix(10);
-
-        assert_eq!(optional.get_option(&vec), None);
-    }
-
-    #[test]
-    fn test_vec_ix_set_valid_index() {
-        let vec = vec![1, 2, 3, 4, 5];
-        let optional = <Vec<i32> as Ixed<usize>>::ix(2);
-
+        let optional = <Vec<i32> as Ixed<usize>>::ix(index);
         let updated = optional.set(vec, 100);
-        assert_eq!(updated, vec![1, 2, 100, 4, 5]);
-    }
-
-    #[test]
-    fn test_vec_ix_set_invalid_index() {
-        let vec = vec![1, 2, 3, 4, 5];
-        let optional = <Vec<i32> as Ixed<usize>>::ix(10);
-
-        let updated = optional.set(vec.clone(), 100);
-        assert_eq!(updated, vec);
+        assert_eq!(updated, expected);
     }
 
     #[test]
@@ -399,15 +385,13 @@ mod tests {
         assert_eq!(modified, vec![1, 2, 6, 4, 5]);
     }
 
-    #[test]
-    fn test_vec_ix_is_present() {
+    #[rstest]
+    #[case(2, true)]
+    #[case(10, false)]
+    fn test_vec_ix_is_present(#[case] index: usize, #[case] expected: bool) {
         let vec = vec![1, 2, 3, 4, 5];
-
-        let valid_optional = <Vec<i32> as Ixed<usize>>::ix(2);
-        assert!(valid_optional.is_present(&vec));
-
-        let invalid_optional = <Vec<i32> as Ixed<usize>>::ix(10);
-        assert!(!invalid_optional.is_present(&vec));
+        let optional = <Vec<i32> as Ixed<usize>>::ix(index);
+        assert_eq!(optional.is_present(&vec), expected);
     }
 
     #[test]
@@ -426,20 +410,13 @@ mod tests {
         assert!(debug_string.contains("VecIx"));
     }
 
-    #[test]
-    fn test_hashmap_ix_get_existing() {
+    #[rstest]
+    #[case("key".to_string(), Some(42))]
+    #[case("other".to_string(), None)]
+    fn test_hashmap_ix_get(#[case] key: String, #[case] expected: Option<i32>) {
         let map: HashMap<String, i32> = std::iter::once(("key".to_string(), 42)).collect();
-        let optional = <HashMap<String, i32> as Ixed<String>>::ix("key".to_string());
-
-        assert_eq!(optional.get_option(&map), Some(&42));
-    }
-
-    #[test]
-    fn test_hashmap_ix_get_non_existing() {
-        let map: HashMap<String, i32> = std::iter::once(("key".to_string(), 42)).collect();
-        let optional = <HashMap<String, i32> as Ixed<String>>::ix("other".to_string());
-
-        assert_eq!(optional.get_option(&map), None);
+        let optional = <HashMap<String, i32> as Ixed<String>>::ix(key);
+        assert_eq!(optional.get_option(&map).copied(), expected);
     }
 
     #[test]
@@ -529,21 +506,15 @@ mod persistent_tests {
     use super::{Ixed, Optional};
     use crate::optics::ixed::{PersistentHashMapIx, PersistentTreeMapIx, PersistentVectorIx};
     use crate::persistent::{PersistentHashMap, PersistentTreeMap, PersistentVector};
+    use rstest::rstest;
 
-    #[test]
-    fn test_persistent_vector_ix_get_valid() {
+    #[rstest]
+    #[case(2, Some(3))]
+    #[case(10, None)]
+    fn test_persistent_vector_ix_get(#[case] index: usize, #[case] expected: Option<i32>) {
         let vector: PersistentVector<i32> = (1..=5).collect();
-        let optional = <PersistentVector<i32> as Ixed<usize>>::ix(2);
-
-        assert_eq!(optional.get_option(&vector), Some(&3));
-    }
-
-    #[test]
-    fn test_persistent_vector_ix_get_invalid() {
-        let vector: PersistentVector<i32> = (1..=5).collect();
-        let optional = <PersistentVector<i32> as Ixed<usize>>::ix(10);
-
-        assert_eq!(optional.get_option(&vector), None);
+        let optional = <PersistentVector<i32> as Ixed<usize>>::ix(index);
+        assert_eq!(optional.get_option(&vector).copied(), expected);
     }
 
     #[test]
@@ -589,20 +560,13 @@ mod persistent_tests {
         assert!(debug_string.contains("PersistentVectorIx"));
     }
 
-    #[test]
-    fn test_persistent_hashmap_ix_get_existing() {
+    #[rstest]
+    #[case("key".to_string(), Some(42))]
+    #[case("other".to_string(), None)]
+    fn test_persistent_hashmap_ix_get(#[case] key: String, #[case] expected: Option<i32>) {
         let map = PersistentHashMap::new().insert("key".to_string(), 42);
-        let optional = <PersistentHashMap<String, i32> as Ixed<String>>::ix("key".to_string());
-
-        assert_eq!(optional.get_option(&map), Some(&42));
-    }
-
-    #[test]
-    fn test_persistent_hashmap_ix_get_non_existing() {
-        let map = PersistentHashMap::new().insert("key".to_string(), 42);
-        let optional = <PersistentHashMap<String, i32> as Ixed<String>>::ix("other".to_string());
-
-        assert_eq!(optional.get_option(&map), None);
+        let optional = <PersistentHashMap<String, i32> as Ixed<String>>::ix(key);
+        assert_eq!(optional.get_option(&map).copied(), expected);
     }
 
     #[test]
@@ -639,20 +603,13 @@ mod persistent_tests {
         assert!(debug_string.contains("PersistentHashMapIx"));
     }
 
-    #[test]
-    fn test_persistent_treemap_ix_get_existing() {
+    #[rstest]
+    #[case("key".to_string(), Some(42))]
+    #[case("other".to_string(), None)]
+    fn test_persistent_treemap_ix_get(#[case] key: String, #[case] expected: Option<i32>) {
         let map = PersistentTreeMap::new().insert("key".to_string(), 42);
-        let optional = <PersistentTreeMap<String, i32> as Ixed<String>>::ix("key".to_string());
-
-        assert_eq!(optional.get_option(&map), Some(&42));
-    }
-
-    #[test]
-    fn test_persistent_treemap_ix_get_non_existing() {
-        let map = PersistentTreeMap::new().insert("key".to_string(), 42);
-        let optional = <PersistentTreeMap<String, i32> as Ixed<String>>::ix("other".to_string());
-
-        assert_eq!(optional.get_option(&map), None);
+        let optional = <PersistentTreeMap<String, i32> as Ixed<String>>::ix(key);
+        assert_eq!(optional.get_option(&map).copied(), expected);
     }
 
     #[test]

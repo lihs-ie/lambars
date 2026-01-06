@@ -282,6 +282,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     #[test]
     fn test_filtered_fold_filters_elements() {
@@ -292,13 +293,17 @@ mod tests {
         assert_eq!(evens, vec![&2, &4, &6]);
     }
 
-    #[test]
-    fn test_filtered_fold_empty_result() {
-        let fold = filtered(|x: &i32| *x > 100);
-        let data = vec![1, 2, 3, 4, 5, 6];
-
+    #[rstest]
+    #[case(vec![1, 2, 3, 4, 5, 6], 100, true)]
+    #[case(vec![], 0, true)]
+    fn test_filtered_fold_empty_result(
+        #[case] data: Vec<i32>,
+        #[case] threshold: i32,
+        #[case] expected_empty: bool,
+    ) {
+        let fold = filtered(move |x: &i32| *x > threshold);
         let result: Vec<&i32> = fold.to_vec(&data);
-        assert!(result.is_empty());
+        assert_eq!(result.is_empty(), expected_empty);
     }
 
     #[test]
@@ -311,21 +316,12 @@ mod tests {
     }
 
     #[test]
-    fn test_filtered_fold_empty_source() {
-        let fold = filtered(|x: &i32| x % 2 == 0);
-        let data: Vec<i32> = vec![];
-
-        let result: Vec<&i32> = fold.to_vec(&data);
-        assert!(result.is_empty());
-    }
-
-    #[test]
     fn test_filtered_fold_fold_operation() {
         let fold = filtered(|x: &i32| x % 2 == 0);
         let data = vec![1, 2, 3, 4, 5, 6];
 
         let sum = fold.fold(&data, 0, |accumulator, element| accumulator + element);
-        assert_eq!(sum, 12); // 2 + 4 + 6
+        assert_eq!(sum, 12);
     }
 
     #[test]
@@ -336,40 +332,36 @@ mod tests {
         assert_eq!(fold.length(&data), 3);
     }
 
-    #[test]
-    fn test_filtered_fold_for_all() {
+    #[rstest]
+    #[case(vec![1, 2, 3, 4, 5, 6], 0, true)]
+    #[case(vec![1, 2, 3, 4, 5, 6], 3, false)]
+    fn test_filtered_fold_for_all(
+        #[case] data: Vec<i32>,
+        #[case] threshold: i32,
+        #[case] expected: bool,
+    ) {
         let fold = filtered(|x: &i32| x % 2 == 0);
-        let data = vec![1, 2, 3, 4, 5, 6];
-
-        // All filtered elements are even (by definition)
-        assert!(fold.for_all(&data, |x| x % 2 == 0));
-        // Not all filtered elements are greater than 3
-        assert!(!fold.for_all(&data, |x| *x > 3));
+        assert_eq!(fold.for_all(&data, |x| *x > threshold), expected);
     }
 
-    #[test]
-    fn test_filtered_fold_exists() {
+    #[rstest]
+    #[case(vec![1, 2, 3, 4, 5, 6], 4, true)]
+    #[case(vec![1, 2, 3, 4, 5, 6], 3, false)]
+    fn test_filtered_fold_exists(
+        #[case] data: Vec<i32>,
+        #[case] target: i32,
+        #[case] expected: bool,
+    ) {
         let fold = filtered(|x: &i32| x % 2 == 0);
-        let data = vec![1, 2, 3, 4, 5, 6];
-
-        assert!(fold.exists(&data, |x| *x == 4));
-        assert!(!fold.exists(&data, |x| *x == 3)); // 3 is odd, not in filtered result
+        assert_eq!(fold.exists(&data, |x| *x == target), expected);
     }
 
-    #[test]
-    fn test_filtered_fold_head_option() {
+    #[rstest]
+    #[case(vec![1, 2, 3, 4, 5, 6], Some(2))]
+    #[case(vec![1, 3, 5], None)]
+    fn test_filtered_fold_head_option(#[case] data: Vec<i32>, #[case] expected: Option<i32>) {
         let fold = filtered(|x: &i32| x % 2 == 0);
-        let data = vec![1, 2, 3, 4, 5, 6];
-
-        assert_eq!(fold.head_option(&data), Some(&2));
-    }
-
-    #[test]
-    fn test_filtered_fold_head_option_empty() {
-        let fold = filtered(|x: &i32| *x > 100);
-        let data = vec![1, 2, 3, 4, 5, 6];
-
-        assert_eq!(fold.head_option(&data), None);
+        assert_eq!(fold.head_option(&data).copied(), expected);
     }
 
     #[test]
@@ -380,15 +372,16 @@ mod tests {
         assert_eq!(fold.last_option(&data), Some(&6));
     }
 
-    #[test]
-    fn test_filtered_fold_is_empty() {
-        let fold = filtered(|x: &i32| *x > 100);
-        let data = vec![1, 2, 3, 4, 5, 6];
-
-        assert!(fold.is_empty(&data));
-
-        let fold2 = filtered(|x: &i32| x % 2 == 0);
-        assert!(!fold2.is_empty(&data));
+    #[rstest]
+    #[case(vec![1, 2, 3, 4, 5, 6], 100, true)]
+    #[case(vec![1, 2, 3, 4, 5, 6], 0, false)]
+    fn test_filtered_fold_is_empty(
+        #[case] data: Vec<i32>,
+        #[case] threshold: i32,
+        #[case] expected: bool,
+    ) {
+        let fold = filtered(move |x: &i32| *x > threshold);
+        assert_eq!(fold.is_empty(&data), expected);
     }
 
     #[test]
@@ -476,7 +469,7 @@ mod tests {
         let data = vec![1, 2, 3, 4, 5, 6];
 
         let sum = traversal.fold(&data, 0, |accumulator, element| accumulator + element);
-        assert_eq!(sum, 12); // 2 + 4 + 6
+        assert_eq!(sum, 12);
     }
 
     #[test]
@@ -495,13 +488,16 @@ mod tests {
         assert!(traversal.for_all(&data, |x| x % 2 == 0));
     }
 
-    #[test]
-    fn test_filtered_traversal_exists() {
+    #[rstest]
+    #[case(vec![1, 2, 3, 4, 5, 6], 4, true)]
+    #[case(vec![1, 2, 3, 4, 5, 6], 3, false)]
+    fn test_filtered_traversal_exists(
+        #[case] data: Vec<i32>,
+        #[case] target: i32,
+        #[case] expected: bool,
+    ) {
         let traversal = filtered_traversal(|x: &i32| x % 2 == 0);
-        let data = vec![1, 2, 3, 4, 5, 6];
-
-        assert!(traversal.exists(&data, |x| *x == 4));
-        assert!(!traversal.exists(&data, |x| *x == 3));
+        assert_eq!(traversal.exists(&data, |x| *x == target), expected);
     }
 
     #[test]
@@ -545,10 +541,8 @@ mod tests {
         let function_f = |x: i32| x + 10;
         let function_g = |x: i32| x * 2;
 
-        // Apply f then g to positive elements
         let sequential =
             traversal.modify_all(traversal.modify_all(data.clone(), function_f), function_g);
-        // Apply composed function to positive elements
         let composed = traversal.modify_all(data, |x| function_g(function_f(x)));
 
         assert_eq!(sequential, composed);

@@ -471,14 +471,15 @@ pub fn each<T: Each>() -> T::EachTraversal {
 #[cfg(test)]
 mod tests {
     use super::{Each, OptionEach, ResultEach, Traversal, VecEach, each};
+    use rstest::rstest;
 
-    #[test]
-    fn test_vec_each_get_all() {
-        let vec = vec![1, 2, 3, 4, 5];
+    #[rstest]
+    #[case(vec![1, 2, 3, 4, 5], vec![1, 2, 3, 4, 5])]
+    #[case(vec![], vec![])]
+    fn test_vec_each_get_all(#[case] data: Vec<i32>, #[case] expected: Vec<i32>) {
         let traversal = <Vec<i32> as Each>::each();
-
-        let elements: Vec<&i32> = traversal.get_all(&vec).collect();
-        assert_eq!(elements, vec![&1, &2, &3, &4, &5]);
+        let elements: Vec<i32> = traversal.get_all(&data).copied().collect();
+        assert_eq!(elements, expected);
     }
 
     #[test]
@@ -509,15 +510,6 @@ mod tests {
     }
 
     #[test]
-    fn test_vec_each_empty() {
-        let vec: Vec<i32> = vec![];
-        let traversal = <Vec<i32> as Each>::each();
-
-        let elements: Vec<&i32> = traversal.get_all(&vec).collect();
-        assert!(elements.is_empty());
-    }
-
-    #[test]
     fn test_vec_each_fold() {
         let vec = vec![1, 2, 3, 4, 5];
         let traversal = <Vec<i32> as Each>::each();
@@ -526,12 +518,12 @@ mod tests {
         assert_eq!(sum, 15);
     }
 
-    #[test]
-    fn test_vec_each_length() {
-        let vec = vec![1, 2, 3, 4, 5];
+    #[rstest]
+    #[case(vec![1, 2, 3, 4, 5], 5)]
+    #[case(vec![], 0)]
+    fn test_vec_each_length(#[case] data: Vec<i32>, #[case] expected: usize) {
         let traversal = <Vec<i32> as Each>::each();
-
-        assert_eq!(traversal.length(&vec), 5);
+        assert_eq!(traversal.length(&data), expected);
     }
 
     #[test]
@@ -558,76 +550,40 @@ mod tests {
         assert_eq!(traversal.length(&vec), 3);
     }
 
-    #[test]
-    fn test_option_each_get_all_some() {
-        let option = Some(42);
+    #[rstest]
+    #[case(Some(42), vec![42])]
+    #[case(None, vec![])]
+    fn test_option_each_get_all(#[case] option: Option<i32>, #[case] expected: Vec<i32>) {
         let traversal = <Option<i32> as Each>::each();
-
-        let elements: Vec<&i32> = traversal.get_all(&option).collect();
-        assert_eq!(elements, vec![&42]);
+        let elements: Vec<i32> = traversal.get_all(&option).copied().collect();
+        assert_eq!(elements, expected);
     }
 
-    #[test]
-    fn test_option_each_get_all_none() {
-        let option: Option<i32> = None;
+    #[rstest]
+    #[case(Some(42), vec![42])]
+    #[case(None, vec![])]
+    fn test_option_each_get_all_owned(#[case] option: Option<i32>, #[case] expected: Vec<i32>) {
         let traversal = <Option<i32> as Each>::each();
-
-        let elements: Vec<&i32> = traversal.get_all(&option).collect();
-        assert!(elements.is_empty());
-    }
-
-    #[test]
-    fn test_option_each_get_all_owned_some() {
-        let option = Some(42);
-        let traversal = <Option<i32> as Each>::each();
-
         let elements = traversal.get_all_owned(option);
-        assert_eq!(elements, vec![42]);
+        assert_eq!(elements, expected);
     }
 
-    #[test]
-    fn test_option_each_get_all_owned_none() {
-        let option: Option<i32> = None;
+    #[rstest]
+    #[case(Some(42), Some(84))]
+    #[case(None, None)]
+    fn test_option_each_modify_all(#[case] input: Option<i32>, #[case] expected: Option<i32>) {
         let traversal = <Option<i32> as Each>::each();
-
-        let elements = traversal.get_all_owned(option);
-        assert!(elements.is_empty());
+        let doubled = traversal.modify_all(input, |x| x * 2);
+        assert_eq!(doubled, expected);
     }
 
-    #[test]
-    fn test_option_each_modify_all_some() {
-        let option = Some(42);
+    #[rstest]
+    #[case(Some(42), 42)]
+    #[case(None, 0)]
+    fn test_option_each_fold(#[case] option: Option<i32>, #[case] expected: i32) {
         let traversal = <Option<i32> as Each>::each();
-
-        let doubled = traversal.modify_all(option, |x| x * 2);
-        assert_eq!(doubled, Some(84));
-    }
-
-    #[test]
-    fn test_option_each_modify_all_none() {
-        let option: Option<i32> = None;
-        let traversal = <Option<i32> as Each>::each();
-
-        let result = traversal.modify_all(option, |x| x * 2);
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn test_option_each_fold_some() {
-        let option = Some(42);
-        let traversal = <Option<i32> as Each>::each();
-
         let sum = traversal.fold(&option, 0, |accumulator, element| accumulator + element);
-        assert_eq!(sum, 42);
-    }
-
-    #[test]
-    fn test_option_each_fold_none() {
-        let option: Option<i32> = None;
-        let traversal = <Option<i32> as Each>::each();
-
-        let sum = traversal.fold(&option, 0, |accumulator, element| accumulator + element);
-        assert_eq!(sum, 0);
+        assert_eq!(sum, expected);
     }
 
     #[test]
@@ -654,76 +610,46 @@ mod tests {
         assert_eq!(traversal.length(&option), 1);
     }
 
-    #[test]
-    fn test_result_each_get_all_ok() {
-        let result: Result<i32, String> = Ok(42);
+    #[rstest]
+    #[case(Ok(42), vec![42])]
+    #[case(Err("error".to_string()), vec![])]
+    fn test_result_each_get_all(#[case] result: Result<i32, String>, #[case] expected: Vec<i32>) {
         let traversal = <Result<i32, String> as Each>::each();
-
-        let elements: Vec<&i32> = traversal.get_all(&result).collect();
-        assert_eq!(elements, vec![&42]);
+        let elements: Vec<i32> = traversal.get_all(&result).copied().collect();
+        assert_eq!(elements, expected);
     }
 
-    #[test]
-    fn test_result_each_get_all_err() {
-        let result: Result<i32, String> = Err("error".to_string());
+    #[rstest]
+    #[case(Ok(42), vec![42])]
+    #[case(Err("error".to_string()), vec![])]
+    fn test_result_each_get_all_owned(
+        #[case] result: Result<i32, String>,
+        #[case] expected: Vec<i32>,
+    ) {
         let traversal = <Result<i32, String> as Each>::each();
-
-        let elements: Vec<&i32> = traversal.get_all(&result).collect();
-        assert!(elements.is_empty());
-    }
-
-    #[test]
-    fn test_result_each_get_all_owned_ok() {
-        let result: Result<i32, String> = Ok(42);
-        let traversal = <Result<i32, String> as Each>::each();
-
         let elements = traversal.get_all_owned(result);
-        assert_eq!(elements, vec![42]);
+        assert_eq!(elements, expected);
     }
 
-    #[test]
-    fn test_result_each_get_all_owned_err() {
-        let result: Result<i32, String> = Err("error".to_string());
+    #[rstest]
+    #[case(Ok(42), Ok(84))]
+    #[case(Err("error".to_string()), Err("error".to_string()))]
+    fn test_result_each_modify_all(
+        #[case] input: Result<i32, String>,
+        #[case] expected: Result<i32, String>,
+    ) {
         let traversal = <Result<i32, String> as Each>::each();
-
-        let elements = traversal.get_all_owned(result);
-        assert!(elements.is_empty());
+        let doubled = traversal.modify_all(input, |x| x * 2);
+        assert_eq!(doubled, expected);
     }
 
-    #[test]
-    fn test_result_each_modify_all_ok() {
-        let result: Result<i32, String> = Ok(42);
+    #[rstest]
+    #[case(Ok(42), 42)]
+    #[case(Err("error".to_string()), 0)]
+    fn test_result_each_fold(#[case] result: Result<i32, String>, #[case] expected: i32) {
         let traversal = <Result<i32, String> as Each>::each();
-
-        let doubled = traversal.modify_all(result, |x| x * 2);
-        assert_eq!(doubled, Ok(84));
-    }
-
-    #[test]
-    fn test_result_each_modify_all_err() {
-        let result: Result<i32, String> = Err("error".to_string());
-        let traversal = <Result<i32, String> as Each>::each();
-
-        let modified = traversal.modify_all(result, |x| x * 2);
-        assert_eq!(modified, Err("error".to_string()));
-    }
-
-    #[test]
-    fn test_result_each_fold_ok() {
-        let result: Result<i32, String> = Ok(42);
-        let traversal = <Result<i32, String> as Each>::each();
-
         let sum = traversal.fold(&result, 0, |accumulator, element| accumulator + element);
-        assert_eq!(sum, 42);
-    }
-
-    #[test]
-    fn test_result_each_fold_err() {
-        let result: Result<i32, String> = Err("error".to_string());
-        let traversal = <Result<i32, String> as Each>::each();
-
-        let sum = traversal.fold(&result, 0, |accumulator, element| accumulator + element);
-        assert_eq!(sum, 0);
+        assert_eq!(sum, expected);
     }
 
     #[test]

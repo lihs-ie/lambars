@@ -326,6 +326,7 @@ impl<F1: std::fmt::Debug, F2: std::fmt::Debug, A> std::fmt::Debug for ComposedFo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     #[allow(clippy::type_complexity)]
     fn vec_fold<T: 'static>() -> FunctionFold<
@@ -352,99 +353,55 @@ mod tests {
         assert_eq!(sum, 15);
     }
 
-    #[test]
-    fn test_length() {
+    #[rstest]
+    #[case(vec![1, 2, 3, 4, 5], 5)]
+    #[case(vec![], 0)]
+    #[case(vec![42], 1)]
+    fn test_length(#[case] data: Vec<i32>, #[case] expected: usize) {
         let fold = vec_fold::<i32>();
-
-        let data = vec![1, 2, 3, 4, 5];
-        assert_eq!(fold.length(&data), 5);
-
-        let empty: Vec<i32> = vec![];
-        assert_eq!(fold.length(&empty), 0);
+        assert_eq!(fold.length(&data), expected);
     }
 
-    #[test]
-    fn test_for_all_true() {
+    #[rstest]
+    #[case(vec![1, 2, 3, 4, 5], true)]
+    #[case(vec![1, -2, 3], false)]
+    #[case(vec![], true)]
+    fn test_for_all_positive(#[case] data: Vec<i32>, #[case] expected: bool) {
         let fold = vec_fold::<i32>();
-        let positive = vec![1, 2, 3, 4, 5];
-        assert!(fold.for_all(&positive, |x| *x > 0));
+        assert_eq!(fold.for_all(&data, |x| *x > 0), expected);
     }
 
-    #[test]
-    fn test_for_all_false() {
+    #[rstest]
+    #[case(vec![1, 2, 3, 4, 5], 3, true)]
+    #[case(vec![1, 2, 3, 4, 5], 10, false)]
+    #[case(vec![], 1, false)]
+    fn test_exists(#[case] data: Vec<i32>, #[case] target: i32, #[case] expected: bool) {
         let fold = vec_fold::<i32>();
-        let mixed = vec![1, -2, 3];
-        assert!(!fold.for_all(&mixed, |x| *x > 0));
+        assert_eq!(fold.exists(&data, |x| *x == target), expected);
     }
 
-    #[test]
-    fn test_for_all_empty_is_true() {
+    #[rstest]
+    #[case(vec![1, 2, 3], Some(1))]
+    #[case(vec![], None)]
+    fn test_head_option(#[case] data: Vec<i32>, #[case] expected: Option<i32>) {
         let fold = vec_fold::<i32>();
-        let empty: Vec<i32> = vec![];
-        assert!(fold.for_all(&empty, |x| *x > 0));
+        assert_eq!(fold.head_option(&data).copied(), expected);
     }
 
-    #[test]
-    fn test_exists_true() {
+    #[rstest]
+    #[case(vec![1, 2, 3], Some(3))]
+    #[case(vec![], None)]
+    fn test_last_option(#[case] data: Vec<i32>, #[case] expected: Option<i32>) {
         let fold = vec_fold::<i32>();
-        let data = vec![1, 2, 3, 4, 5];
-        assert!(fold.exists(&data, |x| *x == 3));
+        assert_eq!(fold.last_option(&data).copied(), expected);
     }
 
-    #[test]
-    fn test_exists_false() {
+    #[rstest]
+    #[case(vec![], true)]
+    #[case(vec![1, 2, 3], false)]
+    fn test_is_empty(#[case] data: Vec<i32>, #[case] expected: bool) {
         let fold = vec_fold::<i32>();
-        let data = vec![1, 2, 3, 4, 5];
-        assert!(!fold.exists(&data, |x| *x == 10));
-    }
-
-    #[test]
-    fn test_exists_empty_is_false() {
-        let fold = vec_fold::<i32>();
-        let empty: Vec<i32> = vec![];
-        assert!(!fold.exists(&empty, |x| *x == 1));
-    }
-
-    #[test]
-    fn test_head_option_non_empty() {
-        let fold = vec_fold::<i32>();
-        let data = vec![1, 2, 3];
-        assert_eq!(fold.head_option(&data), Some(&1));
-    }
-
-    #[test]
-    fn test_head_option_empty() {
-        let fold = vec_fold::<i32>();
-        let empty: Vec<i32> = vec![];
-        assert_eq!(fold.head_option(&empty), None);
-    }
-
-    #[test]
-    fn test_last_option_non_empty() {
-        let fold = vec_fold::<i32>();
-        let data = vec![1, 2, 3];
-        assert_eq!(fold.last_option(&data), Some(&3));
-    }
-
-    #[test]
-    fn test_last_option_empty() {
-        let fold = vec_fold::<i32>();
-        let empty: Vec<i32> = vec![];
-        assert_eq!(fold.last_option(&empty), None);
-    }
-
-    #[test]
-    fn test_is_empty_true() {
-        let fold = vec_fold::<i32>();
-        let empty: Vec<i32> = vec![];
-        assert!(fold.is_empty(&empty));
-    }
-
-    #[test]
-    fn test_is_empty_false() {
-        let fold = vec_fold::<i32>();
-        let data = vec![1, 2, 3];
-        assert!(!fold.is_empty(&data));
+        assert_eq!(fold.is_empty(&data), expected);
     }
 
     #[test]

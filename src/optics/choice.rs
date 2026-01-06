@@ -371,19 +371,14 @@ where
 mod tests {
     use super::*;
     use crate::optics::FunctionPrism;
+    use rstest::rstest;
 
-    #[test]
-    fn test_left_prism_preview_left() {
+    #[rstest]
+    #[case(Either::Left(42), Some(42))]
+    #[case(Either::Right("hello".to_string()), None)]
+    fn test_left_prism_preview(#[case] input: Either<i32, String>, #[case] expected: Option<i32>) {
         let prism: LeftPrism<i32, String> = LeftPrism::new();
-        let left: Either<i32, String> = Either::Left(42);
-        assert_eq!(prism.preview(&left), Some(&42));
-    }
-
-    #[test]
-    fn test_left_prism_preview_right() {
-        let prism: LeftPrism<i32, String> = LeftPrism::new();
-        let right: Either<i32, String> = Either::Right("hello".to_string());
-        assert_eq!(prism.preview(&right), None);
+        assert_eq!(prism.preview(&input).copied(), expected);
     }
 
     #[test]
@@ -393,18 +388,15 @@ mod tests {
         assert_eq!(result, Either::Left(42));
     }
 
-    #[test]
-    fn test_left_prism_preview_owned_left() {
+    #[rstest]
+    #[case(Either::Left(42), Some(42))]
+    #[case(Either::Right("hello".to_string()), None)]
+    fn test_left_prism_preview_owned(
+        #[case] input: Either<i32, String>,
+        #[case] expected: Option<i32>,
+    ) {
         let prism: LeftPrism<i32, String> = LeftPrism::new();
-        let left: Either<i32, String> = Either::Left(42);
-        assert_eq!(prism.preview_owned(left), Some(42));
-    }
-
-    #[test]
-    fn test_left_prism_preview_owned_right() {
-        let prism: LeftPrism<i32, String> = LeftPrism::new();
-        let right: Either<i32, String> = Either::Right("hello".to_string());
-        assert_eq!(prism.preview_owned(right), None);
+        assert_eq!(prism.preview_owned(input), expected);
     }
 
     #[test]
@@ -436,18 +428,15 @@ mod tests {
         assert_eq!(prism.preview(&left), Some(&42));
     }
 
-    #[test]
-    fn test_right_prism_preview_right() {
+    #[rstest]
+    #[case(Either::Right("hello".to_string()), Some("hello".to_string()))]
+    #[case(Either::Left(42), None)]
+    fn test_right_prism_preview(
+        #[case] input: Either<i32, String>,
+        #[case] expected: Option<String>,
+    ) {
         let prism: RightPrism<i32, String> = RightPrism::new();
-        let right: Either<i32, String> = Either::Right("hello".to_string());
-        assert_eq!(prism.preview(&right), Some(&"hello".to_string()));
-    }
-
-    #[test]
-    fn test_right_prism_preview_left() {
-        let prism: RightPrism<i32, String> = RightPrism::new();
-        let left: Either<i32, String> = Either::Left(42);
-        assert_eq!(prism.preview(&left), None);
+        assert_eq!(prism.preview(&input).cloned(), expected);
     }
 
     #[test]
@@ -457,18 +446,15 @@ mod tests {
         assert_eq!(result, Either::Right("hello".to_string()));
     }
 
-    #[test]
-    fn test_right_prism_preview_owned_right() {
+    #[rstest]
+    #[case(Either::Right("hello".to_string()), Some("hello".to_string()))]
+    #[case(Either::Left(42), None)]
+    fn test_right_prism_preview_owned(
+        #[case] input: Either<i32, String>,
+        #[case] expected: Option<String>,
+    ) {
         let prism: RightPrism<i32, String> = RightPrism::new();
-        let right: Either<i32, String> = Either::Right("hello".to_string());
-        assert_eq!(prism.preview_owned(right), Some("hello".to_string()));
-    }
-
-    #[test]
-    fn test_right_prism_preview_owned_left() {
-        let prism: RightPrism<i32, String> = RightPrism::new();
-        let left: Either<i32, String> = Either::Left(42);
-        assert_eq!(prism.preview_owned(left), None);
+        assert_eq!(prism.preview_owned(input), expected);
     }
 
     #[test]
@@ -626,18 +612,16 @@ mod tests {
         assert_eq!(result, None);
     }
 
-    #[test]
-    fn test_choice_prism_review_left() {
+    #[rstest]
+    #[case(Either::Left(42), Either::Left(42))]
+    #[case(Either::Right("hello".to_string()), Either::Right("hello".to_string()))]
+    fn test_choice_prism_review(
+        #[case] input: Either<i32, String>,
+        #[case] expected: Either<i32, String>,
+    ) {
         let combined = choice(identity_prism_int(), identity_prism_string());
-        let result = combined.review(Either::Left(42));
-        assert_eq!(result, Either::Left(42));
-    }
-
-    #[test]
-    fn test_choice_prism_review_right() {
-        let combined = choice(identity_prism_int(), identity_prism_string());
-        let result = combined.review(Either::Right("hello".to_string()));
-        assert_eq!(result, Either::Right("hello".to_string()));
+        let result = combined.review(input);
+        assert_eq!(result, expected);
     }
 
     #[test]
@@ -651,7 +635,6 @@ mod tests {
 
     #[test]
     fn test_left_and_right_prism_clone() {
-        // LeftPrism and RightPrism implement Clone
         let left_p = left_prism::<i32, String>();
         let right_p = right_prism::<i32, String>();
 

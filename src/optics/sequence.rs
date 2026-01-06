@@ -319,39 +319,25 @@ pub fn last_option<S: Sequence>() -> S::LastOptional {
 #[cfg(test)]
 mod tests {
     use super::{Optional, Sequence, VecHeadOptional, VecLastOptional, head_option, last_option};
+    use rstest::rstest;
 
-    #[test]
-    fn test_vec_head_get_non_empty() {
-        let vec = vec![1, 2, 3, 4, 5];
+    #[rstest]
+    #[case(vec![1, 2, 3, 4, 5], Some(1))]
+    #[case(vec![], None)]
+    #[case(vec![42], Some(42))]
+    fn test_vec_head_get(#[case] data: Vec<i32>, #[case] expected: Option<i32>) {
         let optional = <Vec<i32> as Sequence>::head_optional();
-
-        assert_eq!(optional.get_option(&vec), Some(&1));
+        assert_eq!(optional.get_option(&data).copied(), expected);
     }
 
-    #[test]
-    fn test_vec_head_get_empty() {
-        let vec: Vec<i32> = vec![];
+    #[rstest]
+    #[case(vec![1, 2, 3, 4, 5], 100, vec![100, 2, 3, 4, 5])]
+    #[case(vec![], 100, vec![])]
+    #[case(vec![42], 100, vec![100])]
+    fn test_vec_head_set(#[case] data: Vec<i32>, #[case] value: i32, #[case] expected: Vec<i32>) {
         let optional = <Vec<i32> as Sequence>::head_optional();
-
-        assert_eq!(optional.get_option(&vec), None);
-    }
-
-    #[test]
-    fn test_vec_head_set_non_empty() {
-        let vec = vec![1, 2, 3, 4, 5];
-        let optional = <Vec<i32> as Sequence>::head_optional();
-
-        let updated = optional.set(vec, 100);
-        assert_eq!(updated, vec![100, 2, 3, 4, 5]);
-    }
-
-    #[test]
-    fn test_vec_head_set_empty() {
-        let vec: Vec<i32> = vec![];
-        let optional = <Vec<i32> as Sequence>::head_optional();
-
-        let updated = optional.set(vec, 100);
-        assert!(updated.is_empty());
+        let updated = optional.set(data, value);
+        assert_eq!(updated, expected);
     }
 
     #[test]
@@ -363,14 +349,12 @@ mod tests {
         assert_eq!(modified, vec![10, 2, 3, 4, 5]);
     }
 
-    #[test]
-    fn test_vec_head_is_present() {
-        let non_empty = vec![1, 2, 3];
-        let empty: Vec<i32> = vec![];
+    #[rstest]
+    #[case(vec![1, 2, 3], true)]
+    #[case(vec![], false)]
+    fn test_vec_head_is_present(#[case] data: Vec<i32>, #[case] expected: bool) {
         let optional = <Vec<i32> as Sequence>::head_optional();
-
-        assert!(optional.is_present(&non_empty));
-        assert!(!optional.is_present(&empty));
+        assert_eq!(optional.is_present(&data), expected);
     }
 
     #[test]
@@ -397,38 +381,23 @@ mod tests {
         assert_eq!(optional.get_option(&vec), Some(&1));
     }
 
-    #[test]
-    fn test_vec_last_get_non_empty() {
-        let vec = vec![1, 2, 3, 4, 5];
+    #[rstest]
+    #[case(vec![1, 2, 3, 4, 5], Some(5))]
+    #[case(vec![], None)]
+    #[case(vec![42], Some(42))]
+    fn test_vec_last_get(#[case] data: Vec<i32>, #[case] expected: Option<i32>) {
         let optional = <Vec<i32> as Sequence>::last_optional();
-
-        assert_eq!(optional.get_option(&vec), Some(&5));
+        assert_eq!(optional.get_option(&data).copied(), expected);
     }
 
-    #[test]
-    fn test_vec_last_get_empty() {
-        let vec: Vec<i32> = vec![];
+    #[rstest]
+    #[case(vec![1, 2, 3, 4, 5], 100, vec![1, 2, 3, 4, 100])]
+    #[case(vec![], 100, vec![])]
+    #[case(vec![42], 100, vec![100])]
+    fn test_vec_last_set(#[case] data: Vec<i32>, #[case] value: i32, #[case] expected: Vec<i32>) {
         let optional = <Vec<i32> as Sequence>::last_optional();
-
-        assert_eq!(optional.get_option(&vec), None);
-    }
-
-    #[test]
-    fn test_vec_last_set_non_empty() {
-        let vec = vec![1, 2, 3, 4, 5];
-        let optional = <Vec<i32> as Sequence>::last_optional();
-
-        let updated = optional.set(vec, 100);
-        assert_eq!(updated, vec![1, 2, 3, 4, 100]);
-    }
-
-    #[test]
-    fn test_vec_last_set_empty() {
-        let vec: Vec<i32> = vec![];
-        let optional = <Vec<i32> as Sequence>::last_optional();
-
-        let updated = optional.set(vec, 100);
-        assert!(updated.is_empty());
+        let updated = optional.set(data, value);
+        assert_eq!(updated, expected);
     }
 
     #[test]
@@ -440,14 +409,12 @@ mod tests {
         assert_eq!(modified, vec![1, 2, 3, 4, 50]);
     }
 
-    #[test]
-    fn test_vec_last_is_present() {
-        let non_empty = vec![1, 2, 3];
-        let empty: Vec<i32> = vec![];
+    #[rstest]
+    #[case(vec![1, 2, 3], true)]
+    #[case(vec![], false)]
+    fn test_vec_last_is_present(#[case] data: Vec<i32>, #[case] expected: bool) {
         let optional = <Vec<i32> as Sequence>::last_optional();
-
-        assert!(optional.is_present(&non_empty));
-        assert!(!optional.is_present(&empty));
+        assert_eq!(optional.is_present(&data), expected);
     }
 
     #[test]
@@ -472,22 +439,6 @@ mod tests {
         let vec = vec![1, 2, 3];
 
         assert_eq!(optional.get_option(&vec), Some(&3));
-    }
-
-    #[test]
-    fn test_vec_head_single_element() {
-        let vec = vec![42];
-        let optional = <Vec<i32> as Sequence>::head_optional();
-
-        assert_eq!(optional.get_option(&vec), Some(&42));
-    }
-
-    #[test]
-    fn test_vec_last_single_element() {
-        let vec = vec![42];
-        let optional = <Vec<i32> as Sequence>::last_optional();
-
-        assert_eq!(optional.get_option(&vec), Some(&42));
     }
 
     #[test]
@@ -583,21 +534,20 @@ mod persistent_tests {
     use super::{Optional, Sequence, head_option, last_option};
     use crate::optics::sequence::{PersistentVectorHeadOptional, PersistentVectorLastOptional};
     use crate::persistent::PersistentVector;
+    use rstest::rstest;
 
-    #[test]
-    fn test_persistent_vector_head_get_non_empty() {
-        let vector: PersistentVector<i32> = (1..=5).collect();
-        let optional = <PersistentVector<i32> as Sequence>::head_optional();
-
-        assert_eq!(optional.get_option(&vector), Some(&1));
+    fn make_vector(values: &[i32]) -> PersistentVector<i32> {
+        values.iter().copied().collect()
     }
 
-    #[test]
-    fn test_persistent_vector_head_get_empty() {
-        let vector: PersistentVector<i32> = PersistentVector::new();
+    #[rstest]
+    #[case(&[1, 2, 3, 4, 5], Some(1))]
+    #[case(&[], None)]
+    #[case(&[42], Some(42))]
+    fn test_persistent_vector_head_get(#[case] values: &[i32], #[case] expected: Option<i32>) {
+        let vector = make_vector(values);
         let optional = <PersistentVector<i32> as Sequence>::head_optional();
-
-        assert_eq!(optional.get_option(&vector), None);
+        assert_eq!(optional.get_option(&vector).copied(), expected);
     }
 
     #[test]
@@ -652,20 +602,14 @@ mod persistent_tests {
         assert_eq!(optional.get_option(&vector), Some(&1));
     }
 
-    #[test]
-    fn test_persistent_vector_last_get_non_empty() {
-        let vector: PersistentVector<i32> = (1..=5).collect();
+    #[rstest]
+    #[case(&[1, 2, 3, 4, 5], Some(5))]
+    #[case(&[], None)]
+    #[case(&[42], Some(42))]
+    fn test_persistent_vector_last_get(#[case] values: &[i32], #[case] expected: Option<i32>) {
+        let vector = make_vector(values);
         let optional = <PersistentVector<i32> as Sequence>::last_optional();
-
-        assert_eq!(optional.get_option(&vector), Some(&5));
-    }
-
-    #[test]
-    fn test_persistent_vector_last_get_empty() {
-        let vector: PersistentVector<i32> = PersistentVector::new();
-        let optional = <PersistentVector<i32> as Sequence>::last_optional();
-
-        assert_eq!(optional.get_option(&vector), None);
+        assert_eq!(optional.get_option(&vector).copied(), expected);
     }
 
     #[test]
@@ -718,26 +662,6 @@ mod persistent_tests {
         let vector: PersistentVector<i32> = (1..=5).collect();
 
         assert_eq!(optional.get_option(&vector), Some(&5));
-    }
-
-    // =========================================================================
-    // Single Element Tests
-    // =========================================================================
-
-    #[test]
-    fn test_persistent_vector_head_single_element() {
-        let vector: PersistentVector<i32> = std::iter::once(42).collect();
-        let optional = <PersistentVector<i32> as Sequence>::head_optional();
-
-        assert_eq!(optional.get_option(&vector), Some(&42));
-    }
-
-    #[test]
-    fn test_persistent_vector_last_single_element() {
-        let vector: PersistentVector<i32> = std::iter::once(42).collect();
-        let optional = <PersistentVector<i32> as Sequence>::last_optional();
-
-        assert_eq!(optional.get_option(&vector), Some(&42));
     }
 
     #[test]
