@@ -22,9 +22,9 @@
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EffectType {
-    /// Synchronous IO effect.
+    /// `IO`
     IO,
-    /// Asynchronous IO effect.
+    /// `AsyncIO`
     AsyncIO,
 }
 
@@ -60,11 +60,11 @@ impl std::fmt::Display for EffectType {
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlreadyConsumedError {
-    /// The name of the transformer where the error occurred.
+    /// Transformer name (e.g., `ReaderT`, `StateT`).
     pub transformer_name: &'static str,
-    /// The name of the method where the error occurred.
+    /// Method name (e.g., `try_lift_io`).
     pub method_name: &'static str,
-    /// The type of effect that was consumed.
+    /// Effect type.
     pub effect_type: EffectType,
 }
 
