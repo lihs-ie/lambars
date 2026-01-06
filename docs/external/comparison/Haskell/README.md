@@ -1868,8 +1868,8 @@ result = run $ runState 10 $ runReader "hello" computation
 ```rust
 // lambars
 use lambars::effect::algebraic::{
-    Eff, ReaderEffect, StateEffect, Member, Here, There, EffectRow,
-    ask, get, put,
+    Eff, ReaderEffect, ReaderHandler, StateEffect, StateHandler,
+    Member, Here, There, EffectRow, ask, get, put,
 };
 
 type MyEffects = EffectRow!(ReaderEffect<String>, StateEffect<i32>);
@@ -1886,8 +1886,8 @@ fn computation() -> Eff<MyEffects, i32> {
 }
 
 let eff = computation();
-let with_reader = ReaderEffect::handler("hello".to_string()).run(eff);
-let (result, final_state) = StateEffect::handler(10).run(with_reader);
+let with_reader = ReaderHandler::new("hello".to_string()).run(eff);
+let (result, final_state) = StateHandler::new(10).run(with_reader);
 // result = 11, final_state = 15
 ```
 
@@ -1922,28 +1922,27 @@ runLog = handleRelayS [] handler pure
 
 ```rust
 // lambars
-use lambars::effect::algebraic::define_effect;
+use lambars::define_effect;
+use lambars::effect::algebraic::{Effect, Eff};
 
 define_effect! {
     /// Logging effect
-    pub LogEffect {
+    effect Log {
         /// Log a message
         fn log_message(message: String) -> ();
     }
 }
 
-// Custom handler
-struct VecLogger {
-    logs: std::cell::RefCell<Vec<String>>,
-}
+// The macro generates:
+// - LogEffect struct implementing Effect
+// - LogEffect::log_message(message) -> Eff<LogEffect, ()>
+// - LogHandler trait with fn log_message(&mut self, message: String) -> ()
 
-impl LogEffectHandler for VecLogger {
-    type Output<A> = (A, Vec<String>);
-
-    fn run<A>(&self, eff: Eff<LogEffect, A>) -> Self::Output<A> {
-        // Handler implementation
-        todo!()
-    }
+// Create a computation using the effect
+fn log_computation() -> Eff<LogEffect, i32> {
+    LogEffect::log_message("Starting".to_string())
+        .then(LogEffect::log_message("Processing".to_string()))
+        .then(Eff::pure(42))
 }
 ```
 

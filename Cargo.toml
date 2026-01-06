@@ -76,3 +76,7 @@ harness = false
 [[bench]]
 name = "for_async_macro_bench"
 harness = false
+
+[[bench]]
+name = "algebraic_effect_bench"
+harness = false

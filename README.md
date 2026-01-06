@@ -705,8 +705,8 @@ Alternative to Monad Transformers that solves the n^2 problem.
 
 ```rust
 use lambars::effect::algebraic::{
-    Eff, Effect, Handler, ReaderEffect, StateEffect, WriterEffect, ErrorEffect,
-    EffectRow, Member, Here, There,
+    Eff, Effect, Handler, ReaderEffect, ReaderHandler, StateEffect, StateHandler,
+    WriterEffect, ErrorEffect, EffectRow, Member, Here, There,
 };
 
 // Define effects using the effect row
@@ -728,8 +728,8 @@ fn computation() -> Eff<MyEffects, i32> {
 
 // Run with handlers
 let eff = computation();
-let with_reader = ReaderEffect::handler("hello".to_string()).run(eff);
-let (result, final_state) = StateEffect::handler(10).run(with_reader);
+let with_reader = ReaderHandler::new("hello".to_string()).run(eff);
+let (result, final_state) = StateHandler::new(10).run(with_reader);
 // result = 11, final_state = 15
 ```
 
@@ -741,24 +741,28 @@ let (result, final_state) = StateEffect::handler(10).run(with_reader);
 - **Custom effects**: Use `define_effect!` macro to define your own effects
 
 ```rust
-use lambars::effect::algebraic::define_effect;
+use lambars::define_effect;
+use lambars::effect::algebraic::{Effect, Eff};
 
 // Define a custom logging effect
 define_effect! {
     /// Custom logging effect
-    pub LogEffect {
+    effect Log {
         /// Log a message
         fn log(message: String) -> ();
     }
 }
 
-// Implement the handler
-struct ConsoleLogger;
-impl LogEffectHandler for ConsoleLogger {
-    fn handle_log(&self, message: String, resume: impl FnOnce(()) -> Eff<NoEffect, A>) -> Eff<NoEffect, A> {
-        println!("{}", message);
-        resume(())
-    }
+// The macro generates:
+// - LogEffect struct implementing Effect
+// - LogEffect::log(message) -> Eff<LogEffect, ()>
+// - LogHandler trait with fn log(&mut self, message: String) -> ()
+
+// Create a computation using the effect
+fn log_computation() -> Eff<LogEffect, i32> {
+    LogEffect::log("Hello".to_string())
+        .then(LogEffect::log("World".to_string()))
+        .then(Eff::pure(42))
 }
 ```
 
