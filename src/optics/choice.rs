@@ -372,10 +372,6 @@ mod tests {
     use super::*;
     use crate::optics::FunctionPrism;
 
-    // =========================================================================
-    // LeftPrism Tests
-    // =========================================================================
-
     #[test]
     fn test_left_prism_preview_left() {
         let prism: LeftPrism<i32, String> = LeftPrism::new();
@@ -439,10 +435,6 @@ mod tests {
         let left: Either<i32, String> = Either::Left(42);
         assert_eq!(prism.preview(&left), Some(&42));
     }
-
-    // =========================================================================
-    // RightPrism Tests
-    // =========================================================================
 
     #[test]
     fn test_right_prism_preview_right() {
@@ -508,13 +500,8 @@ mod tests {
         assert_eq!(prism.preview(&right), Some(&"hello".to_string()));
     }
 
-    // =========================================================================
-    // Prism Laws Tests for LeftPrism
-    // =========================================================================
-
     #[test]
     fn test_left_prism_preview_review_law() {
-        // Law: prism.preview(&prism.review(value)) == Some(&value)
         let prism = left_prism::<i32, String>();
         let value = 42;
         let reviewed = prism.review(value);
@@ -523,8 +510,6 @@ mod tests {
 
     #[test]
     fn test_left_prism_review_preview_law() {
-        // Law: if prism.preview(source).is_some() then
-        //      prism.review(prism.preview(source).unwrap().clone()) == source
         let prism = left_prism::<i32, String>();
         let source: Either<i32, String> = Either::Left(42);
 
@@ -534,13 +519,8 @@ mod tests {
         }
     }
 
-    // =========================================================================
-    // Prism Laws Tests for RightPrism
-    // =========================================================================
-
     #[test]
     fn test_right_prism_preview_review_law() {
-        // Law: prism.preview(&prism.review(value)) == Some(&value)
         let prism = right_prism::<i32, String>();
         let value = "hello".to_string();
         let reviewed = prism.review(value.clone());
@@ -549,8 +529,6 @@ mod tests {
 
     #[test]
     fn test_right_prism_review_preview_law() {
-        // Law: if prism.preview(source).is_some() then
-        //      prism.review(prism.preview(source).unwrap().clone()) == source
         let prism = right_prism::<i32, String>();
         let source: Either<i32, String> = Either::Right("hello".to_string());
 
@@ -559,10 +537,6 @@ mod tests {
             assert_eq!(reconstructed, source);
         }
     }
-
-    // =========================================================================
-    // ChoicePrism Tests
-    // =========================================================================
 
     #[allow(clippy::type_complexity)]
     fn identity_prism_int() -> FunctionPrism<
@@ -668,8 +642,6 @@ mod tests {
 
     #[test]
     fn test_choice_prism_preview_returns_none() {
-        // The reference-returning preview cannot work for ChoicePrism
-        // because we would need to allocate a new Either
         let combined = choice(identity_prism_int(), identity_prism_string());
         let left: Either<i32, String> = Either::Left(42);
 

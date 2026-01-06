@@ -356,10 +356,6 @@ pub fn index<T: Ixed<I>, I>(index: I) -> T::IxOptional {
 mod tests {
     use super::{HashMap, HashMapIx, Ixed, Optional, VecIx, index, ix};
 
-    // =========================================================================
-    // VecIx Tests
-    // =========================================================================
-
     #[test]
     fn test_vec_ix_get_valid_index() {
         let vec = vec![1, 2, 3, 4, 5];
@@ -430,10 +426,6 @@ mod tests {
         assert!(debug_string.contains("VecIx"));
     }
 
-    // =========================================================================
-    // HashMapIx Tests
-    // =========================================================================
-
     #[test]
     fn test_hashmap_ix_get_existing() {
         let map: HashMap<String, i32> = std::iter::once(("key".to_string(), 42)).collect();
@@ -461,7 +453,6 @@ mod tests {
 
     #[test]
     fn test_hashmap_ix_set_non_existing_no_effect() {
-        // Unlike At, Ixed does not insert new keys
         let map: HashMap<String, i32> = HashMap::new();
         let optional = <HashMap<String, i32> as Ixed<String>>::ix("new_key".to_string());
 
@@ -485,10 +476,6 @@ mod tests {
         assert!(debug_string.contains("HashMapIx"));
     }
 
-    // =========================================================================
-    // Convenience Function Tests
-    // =========================================================================
-
     #[test]
     fn test_ix_convenience_function() {
         let vec = vec![1, 2, 3];
@@ -505,14 +492,8 @@ mod tests {
         assert_eq!(optional.get_option(&vec), Some(&2));
     }
 
-    // =========================================================================
-    // Optional Law Tests
-    // =========================================================================
-
     #[test]
     fn test_vec_ix_get_set_law() {
-        // Law: optional.set(source, optional.get_option(&source).unwrap().clone()) == source
-        // (when the index is valid)
         let vec = vec![1, 2, 3, 4, 5];
         let optional = <Vec<i32> as Ixed<usize>>::ix(2);
 
@@ -524,8 +505,6 @@ mod tests {
 
     #[test]
     fn test_vec_ix_set_get_law() {
-        // Law: optional.get_option(&optional.set(source, value)) == Some(&value)
-        // (when the index is valid)
         let vec = vec![1, 2, 3, 4, 5];
         let optional = <Vec<i32> as Ixed<usize>>::ix(2);
 
@@ -535,7 +514,6 @@ mod tests {
 
     #[test]
     fn test_vec_ix_set_set_law() {
-        // Law: optional.set(optional.set(source, v1), v2) == optional.set(source, v2)
         let vec = vec![1, 2, 3, 4, 5];
         let optional = <Vec<i32> as Ixed<usize>>::ix(2);
 
@@ -551,10 +529,6 @@ mod persistent_tests {
     use super::{Ixed, Optional};
     use crate::optics::ixed::{PersistentHashMapIx, PersistentTreeMapIx, PersistentVectorIx};
     use crate::persistent::{PersistentHashMap, PersistentTreeMap, PersistentVector};
-
-    // =========================================================================
-    // PersistentVectorIx Tests
-    // =========================================================================
 
     #[test]
     fn test_persistent_vector_ix_get_valid() {
@@ -615,10 +589,6 @@ mod persistent_tests {
         assert!(debug_string.contains("PersistentVectorIx"));
     }
 
-    // =========================================================================
-    // PersistentHashMapIx Tests
-    // =========================================================================
-
     #[test]
     fn test_persistent_hashmap_ix_get_existing() {
         let map = PersistentHashMap::new().insert("key".to_string(), 42);
@@ -668,10 +638,6 @@ mod persistent_tests {
         let debug_string = format!("{optional:?}");
         assert!(debug_string.contains("PersistentHashMapIx"));
     }
-
-    // =========================================================================
-    // PersistentTreeMapIx Tests
-    // =========================================================================
 
     #[test]
     fn test_persistent_treemap_ix_get_existing() {

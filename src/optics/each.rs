@@ -472,10 +472,6 @@ pub fn each<T: Each>() -> T::EachTraversal {
 mod tests {
     use super::{Each, OptionEach, ResultEach, Traversal, VecEach, each};
 
-    // =========================================================================
-    // VecEach Tests
-    // =========================================================================
-
     #[test]
     fn test_vec_each_get_all() {
         let vec = vec![1, 2, 3, 4, 5];
@@ -561,10 +557,6 @@ mod tests {
 
         assert_eq!(traversal.length(&vec), 3);
     }
-
-    // =========================================================================
-    // OptionEach Tests
-    // =========================================================================
 
     #[test]
     fn test_option_each_get_all_some() {
@@ -662,10 +654,6 @@ mod tests {
         assert_eq!(traversal.length(&option), 1);
     }
 
-    // =========================================================================
-    // ResultEach Tests
-    // =========================================================================
-
     #[test]
     fn test_result_each_get_all_ok() {
         let result: Result<i32, String> = Ok(42);
@@ -762,10 +750,6 @@ mod tests {
         assert_eq!(traversal.length(&result), 1);
     }
 
-    // =========================================================================
-    // Convenience Function Tests
-    // =========================================================================
-
     #[test]
     fn test_each_convenience_function() {
         let vec = vec![1, 2, 3, 4, 5];
@@ -774,10 +758,6 @@ mod tests {
         let doubled = traversal.modify_all(vec, |x| x * 2);
         assert_eq!(doubled, vec![2, 4, 6, 8, 10]);
     }
-
-    // =========================================================================
-    // Traversal Law Tests
-    // =========================================================================
 
     #[test]
     fn test_vec_each_identity_law() {
@@ -856,10 +836,6 @@ mod persistent_tests {
     use crate::optics::each::{PersistentHashMapEach, PersistentTreeMapEach, PersistentVectorEach};
     use crate::persistent::{PersistentHashMap, PersistentTreeMap, PersistentVector};
 
-    // =========================================================================
-    // PersistentVectorEach Tests
-    // =========================================================================
-
     #[test]
     fn test_persistent_vector_each_get_all() {
         let vector: PersistentVector<i32> = (1..=5).collect();
@@ -911,10 +887,6 @@ mod persistent_tests {
 
         assert_eq!(traversal.length(&vector), 3);
     }
-
-    // =========================================================================
-    // PersistentHashMapEach Tests
-    // =========================================================================
 
     #[test]
     fn test_persistent_hashmap_each_get_all() {
@@ -976,10 +948,6 @@ mod persistent_tests {
 
         assert_eq!(traversal.length(&map), 1);
     }
-
-    // =========================================================================
-    // PersistentTreeMapEach Tests
-    // =========================================================================
 
     #[test]
     fn test_persistent_treemap_each_get_all() {

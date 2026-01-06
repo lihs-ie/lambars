@@ -283,10 +283,6 @@ where
 mod tests {
     use super::*;
 
-    // =========================================================================
-    // FilteredFold Tests
-    // =========================================================================
-
     #[test]
     fn test_filtered_fold_filters_elements() {
         let fold = filtered(|x: &i32| x % 2 == 0);
@@ -411,10 +407,6 @@ mod tests {
         assert!(debug_string.contains("FilteredFold"));
     }
 
-    // =========================================================================
-    // FilteredTraversal Tests
-    // =========================================================================
-
     #[test]
     fn test_filtered_traversal_modify_matching_elements() {
         let traversal = filtered_traversal(|x: &i32| x % 2 == 0);
@@ -536,13 +528,8 @@ mod tests {
         assert!(debug_string.contains("FilteredTraversal"));
     }
 
-    // =========================================================================
-    // Traversal Law Tests
-    // =========================================================================
-
     #[test]
     fn test_filtered_traversal_identity_law() {
-        // Law: traversal.modify_all(source, |x| x) == source
         let traversal = filtered_traversal(|x: &i32| x % 2 == 0);
         let data = vec![1, 2, 3, 4, 5, 6];
 
@@ -552,12 +539,6 @@ mod tests {
 
     #[test]
     fn test_filtered_traversal_composition_law() {
-        // For FilteredTraversal, the composition law only holds when the predicate
-        // is invariant under the transformations. In general, f(x) may change whether
-        // the predicate holds.
-        //
-        // Here we test with a predicate that checks for positive numbers,
-        // and functions that preserve positivity.
         let traversal = filtered_traversal(|x: &i32| *x > 0);
         let data = vec![-1, 2, 3, -4, 5, 6];
 

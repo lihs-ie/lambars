@@ -320,10 +320,6 @@ pub fn last_option<S: Sequence>() -> S::LastOptional {
 mod tests {
     use super::{Optional, Sequence, VecHeadOptional, VecLastOptional, head_option, last_option};
 
-    // =========================================================================
-    // VecHeadOptional Tests
-    // =========================================================================
-
     #[test]
     fn test_vec_head_get_non_empty() {
         let vec = vec![1, 2, 3, 4, 5];
@@ -400,10 +396,6 @@ mod tests {
 
         assert_eq!(optional.get_option(&vec), Some(&1));
     }
-
-    // =========================================================================
-    // VecLastOptional Tests
-    // =========================================================================
 
     #[test]
     fn test_vec_last_get_non_empty() {
@@ -482,10 +474,6 @@ mod tests {
         assert_eq!(optional.get_option(&vec), Some(&3));
     }
 
-    // =========================================================================
-    // Single Element Tests
-    // =========================================================================
-
     #[test]
     fn test_vec_head_single_element() {
         let vec = vec![42];
@@ -511,10 +499,6 @@ mod tests {
         assert_eq!(head.get_option(&vec), last.get_option(&vec));
     }
 
-    // =========================================================================
-    // Convenience Function Tests
-    // =========================================================================
-
     #[test]
     fn test_head_option_convenience_function() {
         let vec = vec![1, 2, 3];
@@ -531,14 +515,8 @@ mod tests {
         assert_eq!(optional.get_option(&vec), Some(&3));
     }
 
-    // =========================================================================
-    // Optional Law Tests
-    // =========================================================================
-
     #[test]
     fn test_vec_head_get_set_law() {
-        // Law: optional.set(source, optional.get_option(&source).unwrap().clone()) == source
-        // (when element is present)
         let vec = vec![1, 2, 3, 4, 5];
         let optional = <Vec<i32> as Sequence>::head_optional();
 
@@ -550,8 +528,6 @@ mod tests {
 
     #[test]
     fn test_vec_head_set_get_law() {
-        // Law: optional.get_option(&optional.set(source, value)) == Some(&value)
-        // (when element is present)
         let vec = vec![1, 2, 3, 4, 5];
         let optional = <Vec<i32> as Sequence>::head_optional();
 
@@ -561,7 +537,6 @@ mod tests {
 
     #[test]
     fn test_vec_head_set_set_law() {
-        // Law: optional.set(optional.set(source, v1), v2) == optional.set(source, v2)
         let vec = vec![1, 2, 3, 4, 5];
         let optional = <Vec<i32> as Sequence>::head_optional();
 
@@ -608,10 +583,6 @@ mod persistent_tests {
     use super::{Optional, Sequence, head_option, last_option};
     use crate::optics::sequence::{PersistentVectorHeadOptional, PersistentVectorLastOptional};
     use crate::persistent::PersistentVector;
-
-    // =========================================================================
-    // PersistentVectorHeadOptional Tests
-    // =========================================================================
 
     #[test]
     fn test_persistent_vector_head_get_non_empty() {
@@ -680,10 +651,6 @@ mod persistent_tests {
 
         assert_eq!(optional.get_option(&vector), Some(&1));
     }
-
-    // =========================================================================
-    // PersistentVectorLastOptional Tests
-    // =========================================================================
 
     #[test]
     fn test_persistent_vector_last_get_non_empty() {
@@ -773,10 +740,6 @@ mod persistent_tests {
         assert_eq!(optional.get_option(&vector), Some(&42));
     }
 
-    // =========================================================================
-    // Convenience Function Tests
-    // =========================================================================
-
     #[test]
     fn test_head_option_persistent_vector() {
         let vector: PersistentVector<i32> = (1..=5).collect();
@@ -792,10 +755,6 @@ mod persistent_tests {
 
         assert_eq!(optional.get_option(&vector), Some(&5));
     }
-
-    // =========================================================================
-    // Optional Law Tests
-    // =========================================================================
 
     #[test]
     fn test_persistent_vector_head_get_set_law() {

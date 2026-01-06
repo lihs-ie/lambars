@@ -795,10 +795,6 @@ mod tests {
         items: Vec<i32>,
     }
 
-    // =========================================================================
-    // Lens + Optional Tests
-    // =========================================================================
-
     #[test]
     fn test_lens_compose_optional_get_option() {
         let items_lens = lens!(Container, items);
@@ -846,10 +842,6 @@ mod tests {
         };
         assert_eq!(cloned.get_option(&container), Some(&1));
     }
-
-    // =========================================================================
-    // Lens + Traversal Tests
-    // =========================================================================
 
     #[test]
     fn test_lens_compose_traversal_get_all() {
@@ -903,10 +895,6 @@ mod tests {
         let sum: i32 = cloned.get_all(&container).sum();
         assert_eq!(sum, 6);
     }
-
-    // =========================================================================
-    // Lens + Fold Tests
-    // =========================================================================
 
     #[allow(clippy::type_complexity)]
     fn vec_fold<T: 'static>() -> crate::optics::FunctionFold<
@@ -967,10 +955,6 @@ mod tests {
         };
         assert_eq!(cloned.length(&container), 3);
     }
-
-    // =========================================================================
-    // Optional + Optional Tests
-    // =========================================================================
 
     #[test]
     fn test_optional_compose_optional_get_option() {
@@ -1054,10 +1038,6 @@ mod tests {
         assert_eq!(cloned.get_option(&nested), Some(&1));
     }
 
-    // =========================================================================
-    // Optional + Traversal Tests
-    // =========================================================================
-
     #[test]
     fn test_optional_compose_traversal_get_all() {
         #[derive(Clone, Debug, PartialEq)]
@@ -1140,10 +1120,6 @@ mod tests {
         let result: Vec<&i32> = cloned.get_all(&nested).collect();
         assert_eq!(result, vec![&1, &2, &3]);
     }
-
-    // =========================================================================
-    // Traversal + Fold Tests
-    // =========================================================================
 
     #[allow(clippy::type_complexity)]
     fn nested_vec_fold<T: 'static>() -> crate::optics::FunctionFold<
@@ -1274,10 +1250,6 @@ mod tests {
         assert_eq!(result, vec![&1, &2, &3, &4, &5]);
     }
 
-    // =========================================================================
-    // LensFoldComposition Additional Tests
-    // =========================================================================
-
     #[test]
     fn test_lens_compose_fold_for_all() {
         let items_lens = lens!(Container, items);
@@ -1366,10 +1338,6 @@ mod tests {
         assert_eq!(result, vec![&1, &2, &3]);
     }
 
-    // =========================================================================
-    // OptionalOptionalComposition set when first optional is None
-    // =========================================================================
-
     #[test]
     fn test_optional_compose_optional_set_when_first_optional_is_none() {
         #[derive(Clone, Debug, PartialEq)]
@@ -1388,10 +1356,6 @@ mod tests {
         let updated = composed.set(nested.clone(), 100);
         assert_eq!(updated, nested);
     }
-
-    // =========================================================================
-    // OptionalTraversalComposition get_all_owned and modify_all when None
-    // =========================================================================
 
     #[test]
     fn test_optional_compose_traversal_get_all_owned() {

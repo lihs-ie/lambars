@@ -239,10 +239,6 @@ mod tests {
     use super::{At, HashMap, HashMapAt, at};
     use crate::optics::Optional;
 
-    // =========================================================================
-    // HashMapAt Tests
-    // =========================================================================
-
     #[test]
     fn test_hashmap_at_get_existing() {
         let map: HashMap<String, i32> = std::iter::once(("key".to_string(), 42)).collect();
@@ -313,10 +309,6 @@ mod tests {
         assert!(debug_string.contains("HashMapAt"));
     }
 
-    // =========================================================================
-    // Convenience Function Tests
-    // =========================================================================
-
     #[test]
     fn test_at_convenience_function() {
         let map: HashMap<String, i32> = std::iter::once(("a".to_string(), 1)).collect();
@@ -325,14 +317,8 @@ mod tests {
         assert_eq!(optional.get_option(&map), Some(&1));
     }
 
-    // =========================================================================
-    // Optional Law Tests
-    // =========================================================================
-
     #[test]
     fn test_hashmap_at_get_set_law() {
-        // Law: optional.set(source, optional.get_option(&source).unwrap().clone()) == source
-        // (when the key exists)
         let map: HashMap<String, i32> = std::iter::once(("key".to_string(), 42)).collect();
         let optional = <HashMap<String, i32> as At<String>>::at("key".to_string());
 
@@ -344,8 +330,6 @@ mod tests {
 
     #[test]
     fn test_hashmap_at_set_get_law() {
-        // Law: optional.get_option(&optional.set(source, value)) == Some(&value)
-        // (after setting, the value is always present)
         let map: HashMap<String, i32> = HashMap::new();
         let optional = <HashMap<String, i32> as At<String>>::at("key".to_string());
 
@@ -355,7 +339,6 @@ mod tests {
 
     #[test]
     fn test_hashmap_at_set_set_law() {
-        // Law: optional.set(optional.set(source, v1), v2) == optional.set(source, v2)
         let map: HashMap<String, i32> = HashMap::new();
         let optional = <HashMap<String, i32> as At<String>>::at("key".to_string());
 
@@ -371,10 +354,6 @@ mod persistent_tests {
     use super::{At, Optional};
     use crate::optics::at::{PersistentHashMapAt, PersistentTreeMapAt};
     use crate::persistent::{PersistentHashMap, PersistentTreeMap};
-
-    // =========================================================================
-    // PersistentHashMapAt Tests
-    // =========================================================================
 
     #[test]
     fn test_persistent_hashmap_at_get_existing() {
@@ -434,10 +413,6 @@ mod persistent_tests {
         let debug_string = format!("{optional:?}");
         assert!(debug_string.contains("PersistentHashMapAt"));
     }
-
-    // =========================================================================
-    // PersistentTreeMapAt Tests
-    // =========================================================================
 
     #[test]
     fn test_persistent_treemap_at_get_existing() {
