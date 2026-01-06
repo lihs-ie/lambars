@@ -41,22 +41,6 @@ use crate::optics::Optional;
 /// Types implementing this trait can provide an Optional that focuses on a
 /// value at a specific key, with the ability to insert new values or delete
 /// existing ones.
-///
-/// # Type Parameters
-///
-/// - `K`: The key type
-///
-/// # Example
-///
-/// ```
-/// use std::collections::HashMap;
-/// use lambars::optics::{Optional, at::At};
-///
-/// let map: HashMap<String, i32> = [("a".to_string(), 1)].into_iter().collect();
-/// let optional = <HashMap<String, i32> as At<String>>::at("a".to_string());
-///
-/// assert_eq!(optional.get_option(&map), Some(&1));
-/// ```
 pub trait At<K>: Sized {
     /// The value type stored in this container.
     type Value;
@@ -65,23 +49,10 @@ pub trait At<K>: Sized {
     type AtOptional: Optional<Self, Self::Value>;
 
     /// Returns an Optional that focuses on the value at the given key.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - The key to focus on
-    ///
-    /// # Returns
-    ///
-    /// An Optional that can get/set/modify the value at the key
     fn at(key: K) -> Self::AtOptional;
 }
 
 /// An Optional for `HashMap` that focuses on a value at a specific key.
-///
-/// # Type Parameters
-///
-/// - `K`: The key type
-/// - `V`: The value type
 #[derive(Debug, Clone)]
 pub struct HashMapAt<K, V> {
     key: K,
@@ -211,18 +182,6 @@ mod persistent_implementations {
 pub use persistent_implementations::*;
 
 /// Convenience function to get an `At` Optional for a type.
-///
-/// # Example
-///
-/// ```
-/// use std::collections::HashMap;
-/// use lambars::optics::{Optional, at::at};
-///
-/// let map: HashMap<String, i32> = [("a".to_string(), 1)].into_iter().collect();
-/// let optional = at::<HashMap<String, i32>, _>("a".to_string());
-///
-/// assert_eq!(optional.get_option(&map), Some(&1));
-/// ```
 pub fn at<T: At<K>, K>(key: K) -> T::AtOptional {
     T::at(key)
 }

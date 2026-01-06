@@ -37,21 +37,6 @@ use crate::optics::Optional;
 ///
 /// Types implementing this trait can provide an Optional that focuses on an
 /// element at a specific index.
-///
-/// # Type Parameters
-///
-/// - `I`: The index type
-///
-/// # Example
-///
-/// ```
-/// use lambars::optics::{Optional, ixed::Ixed};
-///
-/// let vec = vec![1, 2, 3];
-/// let optional = <Vec<i32> as Ixed<usize>>::ix(1);
-///
-/// assert_eq!(optional.get_option(&vec), Some(&2));
-/// ```
 pub trait Ixed<I>: Sized {
     /// The element type.
     type Element;
@@ -60,22 +45,10 @@ pub trait Ixed<I>: Sized {
     type IxOptional: Optional<Self, Self::Element>;
 
     /// Returns an Optional that focuses on the element at the given index.
-    ///
-    /// # Arguments
-    ///
-    /// * `index` - The index to focus on
-    ///
-    /// # Returns
-    ///
-    /// An Optional that can get/set/modify the element at the index
     fn ix(index: I) -> Self::IxOptional;
 }
 
 /// An Optional for `Vec<T>` that focuses on an element at a specific index.
-///
-/// # Type Parameters
-///
-/// - `T`: The element type
 #[derive(Debug, Clone)]
 pub struct VecIx<T> {
     index: usize,
@@ -116,11 +89,6 @@ impl<T: Clone> Ixed<usize> for Vec<T> {
 }
 
 /// An Optional for `HashMap<K, V>` that focuses on a value at a specific key.
-///
-/// # Type Parameters
-///
-/// - `K`: The key type
-/// - `V`: The value type
 #[derive(Debug, Clone)]
 pub struct HashMapIx<K, V> {
     key: K,
@@ -297,35 +265,11 @@ mod persistent_implementations {
 pub use persistent_implementations::*;
 
 /// Convenience function to get an `Ix` Optional for a type.
-///
-/// # Example
-///
-/// ```
-/// use lambars::optics::{Optional, ixed::ix};
-///
-/// let vec = vec![1, 2, 3];
-/// let optional = ix::<Vec<i32>, _>(1);
-///
-/// assert_eq!(optional.get_option(&vec), Some(&2));
-/// ```
 pub fn ix<T: Ixed<I>, I>(index: I) -> T::IxOptional {
     T::ix(index)
 }
 
 /// Convenience function that is an alias for `ix`.
-///
-/// This provides a more descriptive name when working with indexed structures.
-///
-/// # Example
-///
-/// ```
-/// use lambars::optics::{Optional, ixed::index};
-///
-/// let vec = vec![1, 2, 3];
-/// let optional = index::<Vec<i32>, _>(1);
-///
-/// assert_eq!(optional.get_option(&vec), Some(&2));
-/// ```
 pub fn index<T: Ixed<I>, I>(index: I) -> T::IxOptional {
     T::ix(index)
 }

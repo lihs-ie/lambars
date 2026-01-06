@@ -73,26 +73,6 @@ use crate::control::Either;
 use crate::optics::Prism;
 
 /// A Prism that focuses on the Left variant of an Either.
-///
-/// # Type Parameters
-///
-/// - `L`: The type of the Left variant
-/// - `R`: The type of the Right variant
-///
-/// # Example
-///
-/// ```
-/// use lambars::control::Either;
-/// use lambars::optics::{Prism, choice::LeftPrism};
-///
-/// let prism: LeftPrism<i32, String> = LeftPrism::new();
-///
-/// let left: Either<i32, String> = Either::Left(42);
-/// assert_eq!(prism.preview(&left), Some(&42));
-///
-/// let right: Either<i32, String> = Either::Right("hello".to_string());
-/// assert_eq!(prism.preview(&right), None);
-/// ```
 #[cfg(feature = "control")]
 #[derive(Debug, Clone)]
 pub struct LeftPrism<L, R> {
@@ -133,24 +113,6 @@ impl<L: Clone, R: Clone> Prism<Either<L, R>, L> for LeftPrism<L, R> {
 }
 
 /// Creates a `LeftPrism` for the given types.
-///
-/// This is a convenience function for creating a `LeftPrism`.
-///
-/// # Type Parameters
-///
-/// - `L`: The type of the Left variant
-/// - `R`: The type of the Right variant
-///
-/// # Example
-///
-/// ```
-/// use lambars::control::Either;
-/// use lambars::optics::{Prism, choice::left_prism};
-///
-/// let prism = left_prism::<i32, String>();
-/// let left: Either<i32, String> = Either::Left(42);
-/// assert_eq!(prism.preview(&left), Some(&42));
-/// ```
 #[cfg(feature = "control")]
 #[must_use]
 pub const fn left_prism<L, R>() -> LeftPrism<L, R> {
@@ -158,26 +120,6 @@ pub const fn left_prism<L, R>() -> LeftPrism<L, R> {
 }
 
 /// A Prism that focuses on the Right variant of an Either.
-///
-/// # Type Parameters
-///
-/// - `L`: The type of the Left variant
-/// - `R`: The type of the Right variant
-///
-/// # Example
-///
-/// ```
-/// use lambars::control::Either;
-/// use lambars::optics::{Prism, choice::RightPrism};
-///
-/// let prism: RightPrism<i32, String> = RightPrism::new();
-///
-/// let right: Either<i32, String> = Either::Right("hello".to_string());
-/// assert_eq!(prism.preview(&right), Some(&"hello".to_string()));
-///
-/// let left: Either<i32, String> = Either::Left(42);
-/// assert_eq!(prism.preview(&left), None);
-/// ```
 #[cfg(feature = "control")]
 #[derive(Debug, Clone)]
 pub struct RightPrism<L, R> {
@@ -218,24 +160,6 @@ impl<L: Clone, R: Clone> Prism<Either<L, R>, R> for RightPrism<L, R> {
 }
 
 /// Creates a `RightPrism` for the given types.
-///
-/// This is a convenience function for creating a `RightPrism`.
-///
-/// # Type Parameters
-///
-/// - `L`: The type of the Left variant
-/// - `R`: The type of the Right variant
-///
-/// # Example
-///
-/// ```
-/// use lambars::control::Either;
-/// use lambars::optics::{Prism, choice::right_prism};
-///
-/// let prism = right_prism::<i32, String>();
-/// let right: Either<i32, String> = Either::Right("hello".to_string());
-/// assert_eq!(prism.preview(&right), Some(&"hello".to_string()));
-/// ```
 #[cfg(feature = "control")]
 #[must_use]
 pub const fn right_prism<L, R>() -> RightPrism<L, R> {
@@ -246,42 +170,6 @@ pub const fn right_prism<L, R>() -> RightPrism<L, R> {
 ///
 /// This allows focusing on a value within either the Left or Right branch
 /// of an Either, applying the appropriate Prism based on which branch is present.
-///
-/// # Type Parameters
-///
-/// - `P1`: The type of the Prism for the Left branch
-/// - `P2`: The type of the Prism for the Right branch
-/// - `L`: The source type of P1 (Left variant's type)
-/// - `R`: The source type of P2 (Right variant's type)
-/// - `A`: The target type of P1 (value focused on in Left)
-/// - `B`: The target type of P2 (value focused on in Right)
-///
-/// # Example
-///
-/// ```
-/// use lambars::control::Either;
-/// use lambars::optics::{Prism, FunctionPrism, choice::choice};
-///
-/// // Prism for even numbers
-/// let even = FunctionPrism::new(
-///     |n: &i32| if *n % 2 == 0 { Some(n) } else { None },
-///     |n: i32| n,
-///     |n: i32| if n % 2 == 0 { Some(n) } else { None },
-/// );
-///
-/// // Prism for non-empty strings
-/// let non_empty = FunctionPrism::new(
-///     |s: &String| if s.is_empty() { None } else { Some(s) },
-///     |s: String| s,
-///     |s: String| if s.is_empty() { None } else { Some(s) },
-/// );
-///
-/// let combined = choice(even, non_empty);
-///
-/// // ChoicePrism requires preview_owned because it transforms the inner type
-/// let left_even: Either<i32, String> = Either::Left(42);
-/// assert!(combined.preview_owned(left_even).is_some());
-/// ```
 #[cfg(feature = "control")]
 pub struct ChoicePrism<P1, P2, L, R, A, B> {
     left_prism: P1,
@@ -292,11 +180,6 @@ pub struct ChoicePrism<P1, P2, L, R, A, B> {
 #[cfg(feature = "control")]
 impl<P1, P2, L, R, A, B> ChoicePrism<P1, P2, L, R, A, B> {
     /// Creates a new `ChoicePrism` from two Prisms.
-    ///
-    /// # Arguments
-    ///
-    /// * `left_prism` - The Prism to apply when the source is Left
-    /// * `right_prism` - The Prism to apply when the source is Right
     #[must_use]
     pub const fn new(left_prism: P1, right_prism: P2) -> Self {
         Self {
@@ -342,13 +225,8 @@ where
     B: Clone,
 {
     fn preview<'a>(&self, source: &'a Either<L, R>) -> Option<&'a Either<A, B>> {
-        // We cannot return a reference to Either<A, B> because we would need
-        // to create a new Either from the inner references, which we can't do
-        // without allocation. So we return None and rely on preview_owned for
-        // the actual implementation.
-        //
-        // This is a limitation - the reference-returning preview only works
-        // when the source directly contains the target type.
+        // Cannot return a reference because we would need to allocate a new Either.
+        // Use preview_owned instead.
         let _ = source;
         None
     }
@@ -372,46 +250,6 @@ where
 ///
 /// The resulting Prism focuses on `Either<A, B>` within an `Either<L, R>`,
 /// where P1 focuses on `A` within `L`, and P2 focuses on `B` within `R`.
-///
-/// # Type Parameters
-///
-/// - `L`: The source type of the left Prism
-/// - `R`: The source type of the right Prism
-/// - `A`: The target type of the left Prism
-/// - `B`: The target type of the right Prism
-/// - `P1`: The type of the left Prism
-/// - `P2`: The type of the right Prism
-///
-/// # Arguments
-///
-/// * `left_prism` - The Prism to apply to the Left variant
-/// * `right_prism` - The Prism to apply to the Right variant
-///
-/// # Example
-///
-/// ```
-/// use lambars::control::Either;
-/// use lambars::optics::{Prism, FunctionPrism, choice::choice};
-///
-/// // Identity prisms (always succeed)
-/// let id_left = FunctionPrism::new(
-///     |n: &i32| Some(n),
-///     |n: i32| n,
-///     |n: i32| Some(n),
-/// );
-///
-/// let id_right = FunctionPrism::new(
-///     |s: &String| Some(s),
-///     |s: String| s,
-///     |s: String| Some(s),
-/// );
-///
-/// let combined = choice(id_left, id_right);
-///
-/// let left: Either<i32, String> = Either::Left(42);
-/// let result = combined.preview_owned(left);
-/// assert_eq!(result, Some(Either::Left(42)));
-/// ```
 #[cfg(feature = "control")]
 #[must_use]
 pub const fn choice<L, R, A, B, P1, P2>(

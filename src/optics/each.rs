@@ -45,21 +45,6 @@ use crate::optics::Traversal;
 ///
 /// Types implementing this trait can provide a Traversal that focuses on
 /// all of their elements.
-///
-/// # Type Parameters
-///
-/// - `A`: The element type
-///
-/// # Example
-///
-/// ```
-/// use lambars::optics::{Traversal, each::Each};
-///
-/// let vec = vec![1, 2, 3];
-/// let traversal = <Vec<i32> as Each>::each();
-/// let sum: i32 = traversal.fold(&vec, 0, |accumulator, element| accumulator + element);
-/// assert_eq!(sum, 6);
-/// ```
 pub trait Each: Sized {
     /// The element type.
     type Element;
@@ -68,10 +53,6 @@ pub trait Each: Sized {
     type EachTraversal: Traversal<Self, Self::Element>;
 
     /// Returns a Traversal that focuses on all elements.
-    ///
-    /// # Returns
-    ///
-    /// A Traversal that can access and modify all elements of this container
     fn each() -> Self::EachTraversal;
 }
 

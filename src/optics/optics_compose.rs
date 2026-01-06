@@ -50,12 +50,6 @@ use crate::optics::Traversal;
 // =============================================================================
 
 /// Result of composing a Lens with an Optional.
-///
-/// # Type Parameters
-///
-/// - `L`: The lens type
-/// - `O`: The optional type
-/// - `A`: The intermediate type (target of L, source of O)
 #[derive(Debug)]
 pub struct LensOptionalComposition<L, O, A> {
     lens: L,
@@ -64,7 +58,7 @@ pub struct LensOptionalComposition<L, O, A> {
 }
 
 impl<L, O, A> LensOptionalComposition<L, O, A> {
-    /// Creates a new `LensOptionalComposition`.
+    /// Creates a new composition.
     #[must_use]
     pub const fn new(lens: L, optional: O) -> Self {
         Self {
@@ -106,40 +100,6 @@ where
 /// Extension trait for composing Lens with Optional.
 pub trait LensComposeWithOptional<S, A>: Lens<S, A> {
     /// Composes this lens with an optional to create an optional.
-    ///
-    /// # Type Parameters
-    ///
-    /// - `B`: The target type of the optional
-    /// - `O`: The type of the optional
-    ///
-    /// # Arguments
-    ///
-    /// * `optional` - The optional to compose with
-    ///
-    /// # Returns
-    ///
-    /// An Optional that focuses on the optional's target within this lens's target
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use lambars::optics::{Lens, Optional};
-    /// use lambars::optics::optics_compose::LensComposeWithOptional;
-    /// use lambars::optics::ixed::Ixed;
-    /// use lambars::lens;
-    ///
-    /// #[derive(Clone, Debug, PartialEq)]
-    /// struct Container {
-    ///     items: Vec<i32>,
-    /// }
-    ///
-    /// let items_lens = lens!(Container, items);
-    /// let first_item = <Vec<i32> as Ixed<usize>>::ix(0);
-    /// let composed = items_lens.compose_optional(first_item);
-    ///
-    /// let container = Container { items: vec![1, 2, 3] };
-    /// assert_eq!(composed.get_option(&container), Some(&1));
-    /// ```
     fn compose_optional<B, O>(self, optional: O) -> LensOptionalComposition<Self, O, A>
     where
         Self: Sized,
@@ -156,12 +116,6 @@ impl<S, A, L> LensComposeWithOptional<S, A> for L where L: Lens<S, A> {}
 // =============================================================================
 
 /// Result of composing a Lens with a Traversal.
-///
-/// # Type Parameters
-///
-/// - `L`: The lens type
-/// - `T`: The traversal type
-/// - `A`: The intermediate type (target of L, source of T)
 #[derive(Debug)]
 pub struct LensTraversalComposition<L, T, A> {
     lens: L,
@@ -170,7 +124,7 @@ pub struct LensTraversalComposition<L, T, A> {
 }
 
 impl<L, T, A> LensTraversalComposition<L, T, A> {
-    /// Creates a new `LensTraversalComposition`.
+    /// Creates a new composition.
     #[must_use]
     pub const fn new(lens: L, traversal: T) -> Self {
         Self {
@@ -222,41 +176,6 @@ where
 /// Extension trait for composing Lens with Traversal.
 pub trait LensComposeWithTraversal<S, A>: Lens<S, A> {
     /// Composes this lens with a traversal to create a traversal.
-    ///
-    /// # Type Parameters
-    ///
-    /// - `B`: The target type of the traversal
-    /// - `T`: The type of the traversal
-    ///
-    /// # Arguments
-    ///
-    /// * `traversal` - The traversal to compose with
-    ///
-    /// # Returns
-    ///
-    /// A Traversal that focuses on all elements of the traversal within this lens's target
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use lambars::optics::{Lens, Traversal};
-    /// use lambars::optics::optics_compose::LensComposeWithTraversal;
-    /// use lambars::optics::each::Each;
-    /// use lambars::lens;
-    ///
-    /// #[derive(Clone, Debug, PartialEq)]
-    /// struct Container {
-    ///     items: Vec<i32>,
-    /// }
-    ///
-    /// let items_lens = lens!(Container, items);
-    /// let all_items = <Vec<i32> as Each>::each();
-    /// let composed = items_lens.compose_traversal(all_items);
-    ///
-    /// let container = Container { items: vec![1, 2, 3] };
-    /// let sum: i32 = composed.get_all(&container).sum();
-    /// assert_eq!(sum, 6);
-    /// ```
     fn compose_traversal<B, T>(self, traversal: T) -> LensTraversalComposition<Self, T, A>
     where
         Self: Sized,
@@ -273,12 +192,6 @@ impl<S, A, L> LensComposeWithTraversal<S, A> for L where L: Lens<S, A> {}
 // =============================================================================
 
 /// Result of composing a Lens with a Fold.
-///
-/// # Type Parameters
-///
-/// - `L`: The lens type
-/// - `F`: The fold type
-/// - `A`: The intermediate type (target of L, source of F)
 #[derive(Debug)]
 pub struct LensFoldComposition<L, F, A> {
     lens: L,
@@ -287,7 +200,7 @@ pub struct LensFoldComposition<L, F, A> {
 }
 
 impl<L, F, A> LensFoldComposition<L, F, A> {
-    /// Creates a new `LensFoldComposition`.
+    /// Creates a new composition.
     #[must_use]
     pub const fn new(lens: L, fold: F) -> Self {
         Self {
@@ -374,19 +287,6 @@ where
 /// Extension trait for composing Lens with Fold.
 pub trait LensComposeWithFold<S, A>: Lens<S, A> {
     /// Composes this lens with a fold to create a fold.
-    ///
-    /// # Type Parameters
-    ///
-    /// - `B`: The target type of the fold
-    /// - `F`: The type of the fold
-    ///
-    /// # Arguments
-    ///
-    /// * `fold` - The fold to compose with
-    ///
-    /// # Returns
-    ///
-    /// A Fold that focuses on all elements of the fold within this lens's target
     fn compose_fold<B, F2>(self, fold: F2) -> LensFoldComposition<Self, F2, A>
     where
         Self: Sized,
@@ -403,12 +303,6 @@ impl<S, A, L> LensComposeWithFold<S, A> for L where L: Lens<S, A> {}
 // =============================================================================
 
 /// Result of composing a Traversal with a Fold.
-///
-/// # Type Parameters
-///
-/// - `T`: The traversal type
-/// - `F`: The fold type
-/// - `A`: The intermediate type (target of T, source of F)
 #[derive(Debug)]
 pub struct TraversalFoldComposition<T, F, A> {
     traversal: T,
@@ -417,7 +311,7 @@ pub struct TraversalFoldComposition<T, F, A> {
 }
 
 impl<T, F, A> TraversalFoldComposition<T, F, A> {
-    /// Creates a new `TraversalFoldComposition`.
+    /// Creates a new composition.
     #[must_use]
     pub const fn new(traversal: T, fold: F) -> Self {
         Self {
@@ -519,19 +413,6 @@ where
 /// Extension trait for composing Traversal with Fold.
 pub trait TraversalComposeWithFold<S, A>: Traversal<S, A> {
     /// Composes this traversal with a fold to create a fold.
-    ///
-    /// # Type Parameters
-    ///
-    /// - `B`: The target type of the fold
-    /// - `F`: The type of the fold
-    ///
-    /// # Arguments
-    ///
-    /// * `fold` - The fold to compose with
-    ///
-    /// # Returns
-    ///
-    /// A Fold that focuses on all elements of the fold within all targets of this traversal
     fn compose_fold<B, F2>(self, fold: F2) -> TraversalFoldComposition<Self, F2, A>
     where
         Self: Sized,
@@ -548,12 +429,6 @@ impl<S, A, T> TraversalComposeWithFold<S, A> for T where T: Traversal<S, A> {}
 // =============================================================================
 
 /// Result of composing two Optionals.
-///
-/// # Type Parameters
-///
-/// - `O1`: The first optional type
-/// - `O2`: The second optional type
-/// - `A`: The intermediate type (target of O1, source of O2)
 #[derive(Debug)]
 pub struct OptionalOptionalComposition<O1, O2, A> {
     first: O1,
@@ -562,7 +437,7 @@ pub struct OptionalOptionalComposition<O1, O2, A> {
 }
 
 impl<O1, O2, A> OptionalOptionalComposition<O1, O2, A> {
-    /// Creates a new `OptionalOptionalComposition`.
+    /// Creates a new composition.
     #[must_use]
     pub const fn new(first: O1, second: O2) -> Self {
         Self {
@@ -608,19 +483,6 @@ where
 /// Extension trait for composing Optional with Optional.
 pub trait OptionalComposeWithOptional<S, A>: Optional<S, A> {
     /// Composes this optional with another optional to create an optional.
-    ///
-    /// # Type Parameters
-    ///
-    /// - `B`: The target type of the second optional
-    /// - `O`: The type of the second optional
-    ///
-    /// # Arguments
-    ///
-    /// * `other` - The optional to compose with
-    ///
-    /// # Returns
-    ///
-    /// An Optional that focuses on the second optional's target within this optional's target
     fn compose_optional<B, O>(self, other: O) -> OptionalOptionalComposition<Self, O, A>
     where
         Self: Sized,
@@ -637,12 +499,6 @@ impl<S, A, O> OptionalComposeWithOptional<S, A> for O where O: Optional<S, A> {}
 // =============================================================================
 
 /// Result of composing an Optional with a Traversal.
-///
-/// # Type Parameters
-///
-/// - `O`: The optional type
-/// - `T`: The traversal type
-/// - `A`: The intermediate type (target of O, source of T)
 #[derive(Debug)]
 pub struct OptionalTraversalComposition<O, T, A> {
     optional: O,
@@ -651,7 +507,7 @@ pub struct OptionalTraversalComposition<O, T, A> {
 }
 
 impl<O, T, A> OptionalTraversalComposition<O, T, A> {
-    /// Creates a new `OptionalTraversalComposition`.
+    /// Creates a new composition.
     #[must_use]
     pub const fn new(optional: O, traversal: T) -> Self {
         Self {
@@ -712,19 +568,6 @@ where
 /// Extension trait for composing Optional with Traversal.
 pub trait OptionalComposeWithTraversal<S, A>: Optional<S, A> {
     /// Composes this optional with a traversal to create a traversal.
-    ///
-    /// # Type Parameters
-    ///
-    /// - `B`: The target type of the traversal
-    /// - `T`: The type of the traversal
-    ///
-    /// # Arguments
-    ///
-    /// * `traversal` - The traversal to compose with
-    ///
-    /// # Returns
-    ///
-    /// A Traversal that focuses on all elements of the traversal within this optional's target
     fn compose_traversal<B, T>(self, traversal: T) -> OptionalTraversalComposition<Self, T, A>
     where
         Self: Sized,
