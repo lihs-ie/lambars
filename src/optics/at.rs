@@ -41,6 +41,25 @@ use crate::optics::Optional;
 /// Types implementing this trait can provide an Optional that focuses on a
 /// value at a specific key, with the ability to insert new values or delete
 /// existing ones.
+///
+/// # Difference from [`Ixed`](crate::optics::ixed::Ixed)
+///
+/// - `At`: Allows insertion of new keys via `set`
+/// - `Ixed`: Only accesses existing keys, `set` on non-existent keys is a no-op
+///
+/// # Examples
+///
+/// ```
+/// use std::collections::HashMap;
+/// use lambars::optics::{Optional, at::At};
+///
+/// let mut map: HashMap<String, i32> = HashMap::new();
+/// let optional = <HashMap<String, i32> as At<String>>::at("key".to_string());
+///
+/// // Insert a new key
+/// let map = optional.set(map, 42);
+/// assert_eq!(map.get("key"), Some(&42));
+/// ```
 pub trait At<K>: Sized {
     /// The value type stored in this container.
     type Value;
@@ -53,6 +72,23 @@ pub trait At<K>: Sized {
 }
 
 /// An Optional for `HashMap` that focuses on a value at a specific key.
+///
+/// Unlike [`HashMapIx`](crate::optics::ixed::HashMapIx), this Optional will
+/// insert the key if it doesn't exist when using `set`.
+///
+/// # Examples
+///
+/// ```
+/// use std::collections::HashMap;
+/// use lambars::optics::{Optional, at::HashMapAt};
+///
+/// let optional = HashMapAt::<String, i32>::new("key".to_string());
+/// let map: HashMap<String, i32> = HashMap::new();
+///
+/// // Insert a new key
+/// let map = optional.set(map, 42);
+/// assert_eq!(map.get("key"), Some(&42));
+/// ```
 #[derive(Debug, Clone)]
 pub struct HashMapAt<K, V> {
     key: K,
@@ -182,6 +218,18 @@ mod persistent_implementations {
 pub use persistent_implementations::*;
 
 /// Convenience function to get an `At` Optional for a type.
+///
+/// # Examples
+///
+/// ```
+/// use std::collections::HashMap;
+/// use lambars::optics::{Optional, at::at};
+///
+/// let map: HashMap<String, i32> = std::iter::once(("key".to_string(), 42)).collect();
+/// let optional = at::<HashMap<String, i32>, _>("key".to_string());
+///
+/// assert_eq!(optional.get_option(&map), Some(&42));
+/// ```
 pub fn at<T: At<K>, K>(key: K) -> T::AtOptional {
     T::at(key)
 }

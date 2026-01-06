@@ -73,6 +73,26 @@ use crate::control::Either;
 use crate::optics::Prism;
 
 /// A Prism that focuses on the Left variant of an Either.
+///
+/// # Type Parameters
+///
+/// - `L`: The Left variant type
+/// - `R`: The Right variant type
+///
+/// # Examples
+///
+/// ```
+/// use lambars::control::Either;
+/// use lambars::optics::{Prism, choice::LeftPrism};
+///
+/// let prism: LeftPrism<i32, String> = LeftPrism::new();
+///
+/// let left: Either<i32, String> = Either::Left(42);
+/// assert_eq!(prism.preview(&left), Some(&42));
+///
+/// let right: Either<i32, String> = Either::Right("hello".to_string());
+/// assert_eq!(prism.preview(&right), None);
+/// ```
 #[cfg(feature = "control")]
 #[derive(Debug, Clone)]
 pub struct LeftPrism<L, R> {
@@ -113,6 +133,19 @@ impl<L: Clone, R: Clone> Prism<Either<L, R>, L> for LeftPrism<L, R> {
 }
 
 /// Creates a `LeftPrism` for the given types.
+///
+/// This is a convenience function equivalent to `LeftPrism::new()`.
+///
+/// # Examples
+///
+/// ```
+/// use lambars::control::Either;
+/// use lambars::optics::{Prism, choice::left_prism};
+///
+/// let prism = left_prism::<i32, String>();
+/// let left: Either<i32, String> = Either::Left(42);
+/// assert_eq!(prism.preview(&left), Some(&42));
+/// ```
 #[cfg(feature = "control")]
 #[must_use]
 pub const fn left_prism<L, R>() -> LeftPrism<L, R> {
@@ -120,6 +153,26 @@ pub const fn left_prism<L, R>() -> LeftPrism<L, R> {
 }
 
 /// A Prism that focuses on the Right variant of an Either.
+///
+/// # Type Parameters
+///
+/// - `L`: The Left variant type
+/// - `R`: The Right variant type
+///
+/// # Examples
+///
+/// ```
+/// use lambars::control::Either;
+/// use lambars::optics::{Prism, choice::RightPrism};
+///
+/// let prism: RightPrism<i32, String> = RightPrism::new();
+///
+/// let right: Either<i32, String> = Either::Right("hello".to_string());
+/// assert_eq!(prism.preview(&right), Some(&"hello".to_string()));
+///
+/// let left: Either<i32, String> = Either::Left(42);
+/// assert_eq!(prism.preview(&left), None);
+/// ```
 #[cfg(feature = "control")]
 #[derive(Debug, Clone)]
 pub struct RightPrism<L, R> {
@@ -160,6 +213,19 @@ impl<L: Clone, R: Clone> Prism<Either<L, R>, R> for RightPrism<L, R> {
 }
 
 /// Creates a `RightPrism` for the given types.
+///
+/// This is a convenience function equivalent to `RightPrism::new()`.
+///
+/// # Examples
+///
+/// ```
+/// use lambars::control::Either;
+/// use lambars::optics::{Prism, choice::right_prism};
+///
+/// let prism = right_prism::<i32, String>();
+/// let right: Either<i32, String> = Either::Right("hello".to_string());
+/// assert_eq!(prism.preview(&right), Some(&"hello".to_string()));
+/// ```
 #[cfg(feature = "control")]
 #[must_use]
 pub const fn right_prism<L, R>() -> RightPrism<L, R> {
@@ -170,6 +236,20 @@ pub const fn right_prism<L, R>() -> RightPrism<L, R> {
 ///
 /// This allows focusing on a value within either the Left or Right branch
 /// of an Either, applying the appropriate Prism based on which branch is present.
+///
+/// # Type Parameters
+///
+/// - `P1`: The Prism type for the Left branch
+/// - `P2`: The Prism type for the Right branch
+/// - `L`: The Left variant type of the source Either
+/// - `R`: The Right variant type of the source Either
+/// - `A`: The target type when focusing through the Left branch
+/// - `B`: The target type when focusing through the Right branch
+///
+/// # Note
+///
+/// The `preview` method returns `None` because `ChoicePrism` transforms the type.
+/// Use `preview_owned` instead for owned access.
 #[cfg(feature = "control")]
 pub struct ChoicePrism<P1, P2, L, R, A, B> {
     left_prism: P1,
@@ -250,6 +330,30 @@ where
 ///
 /// The resulting Prism focuses on `Either<A, B>` within an `Either<L, R>`,
 /// where P1 focuses on `A` within `L`, and P2 focuses on `B` within `R`.
+///
+/// # Examples
+///
+/// ```
+/// use lambars::control::Either;
+/// use lambars::optics::{Prism, FunctionPrism, choice::choice};
+///
+/// // Identity prisms for demonstration
+/// let int_prism = FunctionPrism::new(
+///     |n: &i32| Some(n),
+///     |n: i32| n,
+///     |n: i32| Some(n),
+/// );
+/// let str_prism = FunctionPrism::new(
+///     |s: &String| Some(s),
+///     |s: String| s,
+///     |s: String| Some(s),
+/// );
+///
+/// let combined = choice(int_prism, str_prism);
+///
+/// let left: Either<i32, String> = Either::Left(42);
+/// assert_eq!(combined.preview_owned(left), Some(Either::Left(42)));
+/// ```
 #[cfg(feature = "control")]
 #[must_use]
 pub const fn choice<L, R, A, B, P1, P2>(

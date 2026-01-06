@@ -30,6 +30,20 @@ use crate::optics::Optional;
 ///
 /// This trait provides Optional-based access to the first and last elements
 /// of a sequence.
+///
+/// # Examples
+///
+/// ```
+/// use lambars::optics::{Optional, sequence::Sequence};
+///
+/// let vec = vec![1, 2, 3, 4, 5];
+///
+/// let head = <Vec<i32> as Sequence>::head_optional();
+/// let last = <Vec<i32> as Sequence>::last_optional();
+///
+/// assert_eq!(head.get_option(&vec), Some(&1));
+/// assert_eq!(last.get_option(&vec), Some(&5));
+/// ```
 pub trait Sequence: Sized {
     /// The element type of this sequence.
     type Element;
@@ -48,6 +62,25 @@ pub trait Sequence: Sized {
 }
 
 /// An Optional focusing on the first element of a `Vec<T>`.
+///
+/// Returns `None` and performs no modification if the vector is empty.
+///
+/// # Examples
+///
+/// ```
+/// use lambars::optics::{Optional, sequence::VecHeadOptional};
+///
+/// let optional = VecHeadOptional::<i32>::new();
+///
+/// let vec = vec![1, 2, 3];
+/// assert_eq!(optional.get_option(&vec), Some(&1));
+///
+/// let updated = optional.set(vec, 100);
+/// assert_eq!(updated, vec![100, 2, 3]);
+///
+/// let empty: Vec<i32> = vec![];
+/// assert_eq!(optional.get_option(&empty), None);
+/// ```
 #[derive(Debug, Clone)]
 pub struct VecHeadOptional<T> {
     _marker: PhantomData<T>,
@@ -83,6 +116,25 @@ impl<T: Clone> Optional<Vec<T>, T> for VecHeadOptional<T> {
 }
 
 /// An Optional focusing on the last element of a `Vec<T>`.
+///
+/// Returns `None` and performs no modification if the vector is empty.
+///
+/// # Examples
+///
+/// ```
+/// use lambars::optics::{Optional, sequence::VecLastOptional};
+///
+/// let optional = VecLastOptional::<i32>::new();
+///
+/// let vec = vec![1, 2, 3];
+/// assert_eq!(optional.get_option(&vec), Some(&3));
+///
+/// let updated = optional.set(vec, 100);
+/// assert_eq!(updated, vec![1, 2, 100]);
+///
+/// let empty: Vec<i32> = vec![];
+/// assert_eq!(optional.get_option(&empty), None);
+/// ```
 #[derive(Debug, Clone)]
 pub struct VecLastOptional<T> {
     _marker: PhantomData<T>,
@@ -231,12 +283,34 @@ mod persistent_implementations {
 pub use persistent_implementations::*;
 
 /// Creates an Optional focusing on the first element of a sequence.
+///
+/// # Examples
+///
+/// ```
+/// use lambars::optics::{Optional, sequence::head_option};
+///
+/// let vec = vec![1, 2, 3];
+/// let optional = head_option::<Vec<i32>>();
+///
+/// assert_eq!(optional.get_option(&vec), Some(&1));
+/// ```
 #[must_use]
 pub fn head_option<S: Sequence>() -> S::HeadOptional {
     S::head_optional()
 }
 
 /// Creates an Optional focusing on the last element of a sequence.
+///
+/// # Examples
+///
+/// ```
+/// use lambars::optics::{Optional, sequence::last_option};
+///
+/// let vec = vec![1, 2, 3];
+/// let optional = last_option::<Vec<i32>>();
+///
+/// assert_eq!(optional.get_option(&vec), Some(&3));
+/// ```
 #[must_use]
 pub fn last_option<S: Sequence>() -> S::LastOptional {
     S::last_optional()

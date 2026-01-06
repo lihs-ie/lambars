@@ -113,7 +113,27 @@ pub trait Fold<S, A> {
         self.get_all(source).collect()
     }
 
-    /// Composes this fold with another fold.
+    /// Composes this fold with another fold to create a nested fold.
+    ///
+    /// The resulting fold focuses on elements that can be reached by first
+    /// applying this fold, then applying the second fold to each intermediate result.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use lambars::optics::{Fold, FunctionFold};
+    ///
+    /// let outer: FunctionFold<Vec<Vec<i32>>, Vec<i32>, _> = FunctionFold::new(
+    ///     |vec: &Vec<Vec<i32>>| Box::new(vec.iter())
+    /// );
+    /// let inner: FunctionFold<Vec<i32>, i32, _> = FunctionFold::new(
+    ///     |vec: &Vec<i32>| Box::new(vec.iter())
+    /// );
+    ///
+    /// let composed = outer.compose(inner);
+    /// let data = vec![vec![1, 2], vec![3, 4]];
+    /// assert_eq!(composed.length(&data), 4);
+    /// ```
     fn compose<B, F2>(self, other: F2) -> ComposedFold<Self, F2, A>
     where
         Self: Sized,
@@ -124,6 +144,30 @@ pub trait Fold<S, A> {
 }
 
 /// A Fold implemented using a function.
+///
+/// This struct allows creating a Fold from a closure that returns an iterator
+/// over references to the focused elements.
+///
+/// # Type Parameters
+///
+/// - `S`: The source type (the whole structure)
+/// - `A`: The target type (the focused elements)
+/// - `G`: The getter function type
+///
+/// # Examples
+///
+/// ```
+/// use lambars::optics::{Fold, FunctionFold};
+///
+/// // Create a fold that focuses on all elements in a Vec
+/// let fold: FunctionFold<Vec<i32>, i32, _> = FunctionFold::new(
+///     |vec: &Vec<i32>| Box::new(vec.iter())
+/// );
+///
+/// let data = vec![1, 2, 3, 4, 5];
+/// let sum: i32 = fold.get_all(&data).sum();
+/// assert_eq!(sum, 15);
+/// ```
 pub struct FunctionFold<S, A, G>
 where
     G: for<'a> Fn(&'a S) -> Box<dyn Iterator<Item = &'a A> + 'a>,
@@ -136,7 +180,20 @@ impl<S, A, G> FunctionFold<S, A, G>
 where
     G: for<'a> Fn(&'a S) -> Box<dyn Iterator<Item = &'a A> + 'a>,
 {
-    /// Creates a new `FunctionFold` from a `get_all` function.
+    /// Creates a new `FunctionFold` from a getter function.
+    ///
+    /// The getter function should return a boxed iterator over references
+    /// to all focused elements in the source structure.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use lambars::optics::{Fold, FunctionFold};
+    ///
+    /// let fold: FunctionFold<Vec<i32>, i32, _> = FunctionFold::new(
+    ///     |vec: &Vec<i32>| Box::new(vec.iter())
+    /// );
+    /// ```
     #[must_use]
     pub const fn new(get_all_function: G) -> Self {
         Self {
@@ -183,6 +240,33 @@ where
 /// This allows focusing on nested elements by composing a fold that focuses
 /// on an intermediate structure with a fold that focuses on elements within
 /// that structure.
+///
+/// # Type Parameters
+///
+/// - `F1`: The first fold type (outer)
+/// - `F2`: The second fold type (inner)
+/// - `A`: The intermediate type
+///
+/// # Examples
+///
+/// ```
+/// use lambars::optics::{Fold, FunctionFold};
+///
+/// // Create folds for nested vectors
+/// let outer: FunctionFold<Vec<Vec<i32>>, Vec<i32>, _> = FunctionFold::new(
+///     |vec: &Vec<Vec<i32>>| Box::new(vec.iter())
+/// );
+/// let inner: FunctionFold<Vec<i32>, i32, _> = FunctionFold::new(
+///     |vec: &Vec<i32>| Box::new(vec.iter())
+/// );
+///
+/// // Compose to focus on all inner elements
+/// let composed = outer.compose(inner);
+///
+/// let data = vec![vec![1, 2], vec![3, 4, 5]];
+/// let sum: i32 = composed.fold(&data, 0, |acc, x| acc + x);
+/// assert_eq!(sum, 15);
+/// ```
 pub struct ComposedFold<F1, F2, A> {
     first: F1,
     second: F2,
@@ -190,7 +274,7 @@ pub struct ComposedFold<F1, F2, A> {
 }
 
 impl<F1, F2, A> ComposedFold<F1, F2, A> {
-    /// Creates a new composed fold.
+    /// Creates a new composed fold from two folds.
     #[must_use]
     pub const fn new(first: F1, second: F2) -> Self {
         Self {

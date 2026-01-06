@@ -39,6 +39,24 @@ use crate::optics::{Fold, Traversal};
 /// A Fold that filters elements based on a predicate.
 ///
 /// This Fold yields only elements that satisfy the predicate.
+///
+/// # Type Parameters
+///
+/// - `S`: The source type (the collection)
+/// - `A`: The element type
+/// - `P`: The predicate function type
+///
+/// # Examples
+///
+/// ```
+/// use lambars::optics::{Fold, filtered::FilteredFold};
+///
+/// let fold: FilteredFold<Vec<i32>, i32, _> = FilteredFold::new(|x: &i32| *x > 0);
+///
+/// let data = vec![-1, 2, -3, 4, -5, 6];
+/// let positives: Vec<&i32> = fold.to_vec(&data);
+/// assert_eq!(positives, vec![&2, &4, &6]);
+/// ```
 pub struct FilteredFold<S, A, P>
 where
     P: Fn(&A) -> bool,
@@ -52,6 +70,14 @@ where
     P: Fn(&A) -> bool,
 {
     /// Creates a new `FilteredFold` with the given predicate.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use lambars::optics::filtered::FilteredFold;
+    ///
+    /// let fold: FilteredFold<Vec<i32>, i32, _> = FilteredFold::new(|x: &i32| x % 2 == 0);
+    /// ```
     #[must_use]
     pub const fn new(predicate: P) -> Self {
         Self {
@@ -96,6 +122,20 @@ where
 }
 
 /// Creates a `FilteredFold` for `Vec<A>` with the given predicate.
+///
+/// This is a convenience function for creating a filtered fold over vectors.
+///
+/// # Examples
+///
+/// ```
+/// use lambars::optics::{Fold, filtered::filtered};
+///
+/// let even_fold = filtered(|x: &i32| x % 2 == 0);
+/// let data = vec![1, 2, 3, 4, 5, 6];
+///
+/// let evens: Vec<&i32> = even_fold.to_vec(&data);
+/// assert_eq!(evens, vec![&2, &4, &6]);
+/// ```
 #[must_use]
 pub const fn filtered<A, P>(predicate: P) -> FilteredFold<Vec<A>, A, P>
 where
@@ -106,7 +146,27 @@ where
 
 /// A Traversal that only modifies elements satisfying a predicate.
 ///
-/// Elements that don't satisfy the predicate are left unchanged.
+/// Elements that don't satisfy the predicate are left unchanged during
+/// modification operations.
+///
+/// # Type Parameters
+///
+/// - `S`: The source type (the collection)
+/// - `A`: The element type
+/// - `P`: The predicate function type
+///
+/// # Examples
+///
+/// ```
+/// use lambars::optics::{Traversal, filtered::FilteredTraversal};
+///
+/// let traversal: FilteredTraversal<Vec<i32>, i32, _> =
+///     FilteredTraversal::new(|x: &i32| x % 2 == 0);
+///
+/// let data = vec![1, 2, 3, 4, 5, 6];
+/// let doubled = traversal.modify_all(data, |x| x * 2);
+/// assert_eq!(doubled, vec![1, 4, 3, 8, 5, 12]);
+/// ```
 pub struct FilteredTraversal<S, A, P>
 where
     P: Fn(&A) -> bool,
@@ -120,6 +180,15 @@ where
     P: Fn(&A) -> bool,
 {
     /// Creates a new `FilteredTraversal` with the given predicate.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use lambars::optics::filtered::FilteredTraversal;
+    ///
+    /// let traversal: FilteredTraversal<Vec<i32>, i32, _> =
+    ///     FilteredTraversal::new(|x: &i32| x % 2 == 0);
+    /// ```
     #[must_use]
     pub const fn new(predicate: P) -> Self {
         Self {
@@ -187,6 +256,21 @@ where
 }
 
 /// Creates a `FilteredTraversal` for `Vec<A>` with the given predicate.
+///
+/// This is a convenience function for creating a filtered traversal over vectors.
+///
+/// # Examples
+///
+/// ```
+/// use lambars::optics::{Traversal, filtered::filtered_traversal};
+///
+/// let even_traversal = filtered_traversal(|x: &i32| x % 2 == 0);
+/// let data = vec![1, 2, 3, 4, 5, 6];
+///
+/// // Double only even numbers
+/// let doubled = even_traversal.modify_all(data, |x| x * 2);
+/// assert_eq!(doubled, vec![1, 4, 3, 8, 5, 12]);
+/// ```
 #[must_use]
 pub const fn filtered_traversal<A, P>(predicate: P) -> FilteredTraversal<Vec<A>, A, P>
 where

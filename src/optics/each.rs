@@ -45,6 +45,18 @@ use crate::optics::Traversal;
 ///
 /// Types implementing this trait can provide a Traversal that focuses on
 /// all of their elements.
+///
+/// # Examples
+///
+/// ```
+/// use lambars::optics::{Traversal, each::Each};
+///
+/// let vec = vec![1, 2, 3, 4, 5];
+/// let traversal = <Vec<i32> as Each>::each();
+///
+/// let doubled = traversal.modify_all(vec, |x| x * 2);
+/// assert_eq!(doubled, vec![2, 4, 6, 8, 10]);
+/// ```
 pub trait Each: Sized {
     /// The element type.
     type Element;
@@ -59,6 +71,18 @@ pub trait Each: Sized {
 /// A Traversal for `Vec<T>`.
 ///
 /// This traversal focuses on all elements of a vector.
+///
+/// # Examples
+///
+/// ```
+/// use lambars::optics::{Traversal, each::VecEach};
+///
+/// let traversal = VecEach::<i32>::new();
+/// let vec = vec![1, 2, 3];
+///
+/// let doubled = traversal.modify_all(vec, |x| x * 2);
+/// assert_eq!(doubled, vec![2, 4, 6]);
+/// ```
 #[derive(Debug, Clone)]
 pub struct VecEach<T> {
     _marker: PhantomData<T>,
@@ -109,6 +133,22 @@ impl<T: Clone + 'static> Each for Vec<T> {
 /// A Traversal for `Option<T>`.
 ///
 /// This traversal focuses on the contained value, if present.
+///
+/// # Examples
+///
+/// ```
+/// use lambars::optics::{Traversal, each::OptionEach};
+///
+/// let traversal = OptionEach::<i32>::new();
+///
+/// let some_value = Some(42);
+/// let doubled = traversal.modify_all(some_value, |x| x * 2);
+/// assert_eq!(doubled, Some(84));
+///
+/// let none_value: Option<i32> = None;
+/// let result = traversal.modify_all(none_value, |x| x * 2);
+/// assert_eq!(result, None);
+/// ```
 #[derive(Debug, Clone)]
 pub struct OptionEach<T> {
     _marker: PhantomData<T>,
@@ -159,6 +199,23 @@ impl<T: Clone + 'static> Each for Option<T> {
 /// A Traversal for `Result<T, E>`.
 ///
 /// This traversal focuses on the Ok value, if present.
+/// The Err case is left unchanged during modification.
+///
+/// # Examples
+///
+/// ```
+/// use lambars::optics::{Traversal, each::ResultEach};
+///
+/// let traversal = ResultEach::<i32, String>::new();
+///
+/// let ok_value: Result<i32, String> = Ok(42);
+/// let doubled = traversal.modify_all(ok_value, |x| x * 2);
+/// assert_eq!(doubled, Ok(84));
+///
+/// let err_value: Result<i32, String> = Err("error".to_string());
+/// let result = traversal.modify_all(err_value.clone(), |x| x * 2);
+/// assert_eq!(result, err_value);
+/// ```
 #[derive(Debug, Clone)]
 pub struct ResultEach<T, E> {
     _marker: PhantomData<(T, E)>,

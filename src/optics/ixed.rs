@@ -37,6 +37,25 @@ use crate::optics::Optional;
 ///
 /// Types implementing this trait can provide an Optional that focuses on an
 /// element at a specific index.
+///
+/// # Difference from [`At`](crate::optics::at::At)
+///
+/// - `Ixed`: Only accesses existing elements, `set` on non-existent indices is a no-op
+/// - `At`: For maps, allows insertion of new keys
+///
+/// # Examples
+///
+/// ```
+/// use lambars::optics::{Optional, ixed::Ixed};
+///
+/// let vec = vec![1, 2, 3, 4, 5];
+/// let optional = <Vec<i32> as Ixed<usize>>::ix(2);
+///
+/// assert_eq!(optional.get_option(&vec), Some(&3));
+///
+/// let updated = optional.set(vec, 100);
+/// assert_eq!(updated[2], 100);
+/// ```
 pub trait Ixed<I>: Sized {
     /// The element type.
     type Element;
@@ -49,6 +68,23 @@ pub trait Ixed<I>: Sized {
 }
 
 /// An Optional for `Vec<T>` that focuses on an element at a specific index.
+///
+/// If the index is out of bounds, `get_option` returns `None` and `set` is a no-op.
+///
+/// # Examples
+///
+/// ```
+/// use lambars::optics::{Optional, ixed::VecIx};
+///
+/// let optional = VecIx::<i32>::new(2);
+/// let vec = vec![1, 2, 3, 4, 5];
+///
+/// assert_eq!(optional.get_option(&vec), Some(&3));
+///
+/// // Out of bounds access returns None
+/// let out_of_bounds = VecIx::<i32>::new(10);
+/// assert_eq!(out_of_bounds.get_option(&vec), None);
+/// ```
 #[derive(Debug, Clone)]
 pub struct VecIx<T> {
     index: usize,
@@ -89,6 +125,26 @@ impl<T: Clone> Ixed<usize> for Vec<T> {
 }
 
 /// An Optional for `HashMap<K, V>` that focuses on a value at a specific key.
+///
+/// Unlike [`HashMapAt`](crate::optics::at::HashMapAt), this Optional will
+/// NOT insert the key if it doesn't exist when using `set`.
+///
+/// # Examples
+///
+/// ```
+/// use std::collections::HashMap;
+/// use lambars::optics::{Optional, ixed::HashMapIx};
+///
+/// let optional = HashMapIx::<String, i32>::new("key".to_string());
+/// let map: HashMap<String, i32> = std::iter::once(("key".to_string(), 42)).collect();
+///
+/// assert_eq!(optional.get_option(&map), Some(&42));
+///
+/// // set on non-existent key is a no-op
+/// let empty_map: HashMap<String, i32> = HashMap::new();
+/// let result = optional.set(empty_map.clone(), 100);
+/// assert!(!result.contains_key("key"));
+/// ```
 #[derive(Debug, Clone)]
 pub struct HashMapIx<K, V> {
     key: K,
@@ -265,11 +321,33 @@ mod persistent_implementations {
 pub use persistent_implementations::*;
 
 /// Convenience function to get an `Ix` Optional for a type.
+///
+/// # Examples
+///
+/// ```
+/// use lambars::optics::{Optional, ixed::ix};
+///
+/// let vec = vec![1, 2, 3];
+/// let optional = ix::<Vec<i32>, _>(1);
+///
+/// assert_eq!(optional.get_option(&vec), Some(&2));
+/// ```
 pub fn ix<T: Ixed<I>, I>(index: I) -> T::IxOptional {
     T::ix(index)
 }
 
 /// Convenience function that is an alias for `ix`.
+///
+/// # Examples
+///
+/// ```
+/// use lambars::optics::{Optional, ixed::index};
+///
+/// let vec = vec![1, 2, 3];
+/// let optional = index::<Vec<i32>, _>(1);
+///
+/// assert_eq!(optional.get_option(&vec), Some(&2));
+/// ```
 pub fn index<T: Ixed<I>, I>(index: I) -> T::IxOptional {
     T::ix(index)
 }
