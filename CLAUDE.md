@@ -211,6 +211,8 @@ cargo clean
    2. 課題を解決するための方法をステップバイステップで考え、要件定義を作成する
    3. `/new-plan <機能名>` で実装計画テンプレートを取得する
    4. rust-implementation-reviewer を起動し要件定義に対して実装計画を作成する
+      1. #[test]は使用せず#[rstest]を使用すること
+      2. tokio のテストが必要な場合は#[tokio::test]と#[rstest]を併用すること
    5. codex mcp にレビューをさせる
    6. functional-programming-specialist は実装計画が要件定義と異なる点がなくなるまでレビュー指摘を行う
    7. レビュー指摘がなくなるまで繰り返す（軽微な指摘も全て解決すること）
