@@ -166,7 +166,7 @@ fn generate_curry_from_closure(closure: &ExprClosure) -> TokenStream2 {
 
     if argument_count < 2 {
         return syn::Error::new(
-            closure.span(),
+            proc_macro2::Span::call_site(),
             "curry! requires a function with at least 2 arguments",
         )
         .to_compile_error();
