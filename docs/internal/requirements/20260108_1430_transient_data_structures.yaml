@@ -1,0 +1,1073 @@
+# Transient データ構造 要件定義
+#
+# 概要:
+#   バッチ更新のための一時的可変版（Transient）データ構造を実装する。
+#   Clojure の transient!/persistent! パターンを参考に設計。
+#
+# 設計方針:
+#   1. Rust の所有権システムを活用した型安全な設計
+#   2. 関数型プログラミングの原則（最終的な不変性）を維持
+#   3. 既存の永続データ構造との相互変換を効率的に実現（変更なしなら O(1)）
+#   4. バッチ更新時のパフォーマンス向上（構造共有のオーバーヘッド削減）
+#   5. 変更操作は &mut self を取り、戻り値を使用しない（非チェーン型 API）
+#
+# 参照:
+#   - Clojure Transients (https://clojure.org/reference/transients)
+#   - Understanding Clojure's Transients (https://hypirion.com/musings/understanding-clojure-transients)
+#   - GitHub Issue #23
+#   - docs/internal/requirements/20250101_0300_persistent.yaml
+
+version: "1.0.0"
+name: "transient_data_structures"
+description: |
+  Transient データ構造は、永続データ構造のバッチ更新を効率化するための
+  一時的な可変バージョンである。
+
+  永続データ構造では各更新操作ごとに構造共有のためのノードコピーが発生するが、
+  Transient ではこのオーバーヘッドを削減し、一連の更新が完了した後に
+  永続データ構造に変換することで、パフォーマンスと不変性を両立する。
+
+  実装対象:
+  - TransientVector: PersistentVector の一時的可変版
+  - TransientHashMap: PersistentHashMap の一時的可変版
+  - TransientHashSet: PersistentHashSet の一時的可変版
+
+  注: TransientList は構造上のメリットがないため実装しない（Clojure と同様）。
+  TransientTreeMap は赤黒木のバランシング操作が複雑なため将来の拡張とする。
+
+# 背景・動機
+background:
+  problem: |
+    現在の永続データ構造は、各更新操作ごとに以下のオーバーヘッドが発生する:
+
+    1. パスコピー（Path Copying）
+       - 変更されるノードからルートまでの全ノードをコピー
+       - PersistentVector: O(log32 N) ノードのコピー/更新
+       - PersistentHashMap: O(log32 N) ノードのコピー/更新
+
+    2. 参照カウント操作
+       - 新しい Rc/Arc の生成
+       - 参照カウントの増減
+
+    3. メモリアロケーション
+       - 新しいノードの確保
+
+    バッチ更新（例: 10,000 要素の追加）では、これらのオーバーヘッドが
+    累積し、パフォーマンスが大幅に低下する。
+
+    具体例:
+    ```rust
+    // 現在の方法: 各 push_back で構造共有のコピーが発生
+    let mut vector = PersistentVector::new();
+    for i in 0..10000 {
+        vector = vector.push_back(i);  // 毎回 O(log32 N) のコピー
+    }
+    ```
+
+  motivation: |
+    1. パフォーマンスの向上
+       - バッチ更新時に 2-3 倍の高速化が期待できる
+       - メモリアロケーション回数の削減
+       - 参照カウント操作の削減
+
+    2. 関数型プログラミングパターンの完全サポート
+       - Clojure の transient!/persistent! は広く使われるパターン
+       - 「構築時は可変、使用時は不変」という自然な設計
+       - Scala の mutable.Builder パターンに類似
+
+    3. 実用性の向上
+       - ファイル読み込みからのデータ構造構築
+       - データベースクエリ結果の格納
+       - 大量データの変換処理
+
+    4. Rust の所有権システムとの親和性
+       - Clojure と異なり、Rust では所有権により自然に安全性を保証
+       - `mut` の使用が明示的で、意図が明確
+
+  prior_art:
+    - name: "Clojure Transients"
+      description: |
+        Clojure の transient!/persistent! パターン。
+        - transient: O(1) で永続構造から一時的可変構造を作成
+        - conj!, assoc!, dissoc!: 変更操作（戻り値を使用する必要あり）
+        - persistent!: O(1) で永続構造に変換（元の transient は使用不可に）
+        - スレッド所有権の追跡（edit フィールド）
+
+    - name: "im-rs TransientHashMap"
+      description: |
+        Rust の im クレートの transient 実装。
+        - focus()/unfocus() パターン
+        - 所有権ベースの安全性
+
+    - name: "Scala mutable.Builder"
+      description: |
+        Scala のビルダーパターン。
+        - addOne/addAll で要素追加
+        - result() で不変コレクションに変換
+
+# 理論的背景
+theoretical_background:
+  transient_ownership:
+    description: |
+      Transient データ構造の核心は「所有権の追跡」である。
+
+      Clojure のアプローチ:
+      - 各ノードに edit フィールド（AtomicReference<Thread>）を持つ
+      - transient 作成時に新しい一意 ID を割り当て
+      - 変更操作時に ID をチェックし、一致すれば直接変更、不一致ならコピー
+      - persistent! 時に ID を null に設定（以降の変更を禁止）
+
+      Rust でのアプローチ:
+      - 所有権システムにより、edit フィールドなしで安全性を保証
+      - TransientVector を所有している間のみ変更可能
+      - persistent() で所有権を消費し、PersistentVector を返す
+      - ライフタイムと借用チェックにより、二重使用を防止
+
+  mutation_strategy:
+    description: |
+      Transient での変更戦略:
+
+      1. ノード形式の統一
+         - Transient は内部的に永続構造と同じ `Node<T>` 形式でノードを保持
+         - `ReferenceCounter<Node<T>>` としてラップ
+         - 別途 TransientNode enum は使用しない
+
+      2. コピーオンライト（Copy-on-Write）
+         - 変更時は `Rc::make_mut()` / `Arc::make_mut()` を使用
+         - 参照カウントが 1 なら直接変更（追加コピーなし）
+         - 参照カウントが 2 以上ならコピー後に変更
+         - これにより T: Clone 制約が必要となる
+
+      3. persistent() の O(1) 保証
+         - ノードは既に `ReferenceCounter<Node<T>>` 形式
+         - persistent() は単純なフィールド移動で完了
+         - tail の `Vec<T>` → `ReferenceCounter<[T]>` 変換のみ必要（定数時間）
+
+  functional_purity_preservation:
+    description: |
+      Transient は一時的な可変性を提供するが、関数型プログラミングの
+      純粋性は以下の方法で維持される:
+
+      1. スコープの限定
+         - Transient は所有者のみがアクセス可能
+         - 外部から観測不可能な変更は参照透過性を損なわない
+
+      2. 最終的な不変性
+         - persistent() で不変構造に変換されるまで「未完成」
+         - 完成後は永続データ構造として振る舞う
+
+      3. 線形型に類似
+         - Transient は一度しか使用できない（persistent() で消費）
+         - 線形型の「使用後は無効化」というセマンティクス
+         - Clone/Copy トレイトを実装しない（複製による複数所有者を防止）
+
+      4. 構築時の意図的な不純領域
+         - Transient は「構築フェーズ」専用の不純な領域として位置付け
+         - get_mut() などの破壊的操作は構築フェーズでのみ許可
+         - persistent() により「構築完了」を宣言し、以降は純粋な世界に戻る
+         - この境界は所有権システムにより静的に強制される
+
+  copy_on_write_guarantee:
+    description: |
+      共有ノードへの安全性保証:
+
+      1. COW 条件
+         - 変更操作を行う前に、共有ノードは必ずコピーされる
+         - Rc::make_mut() / Arc::make_mut() が自動的に COW を実行
+         - 参照カウントが 1 の場合のみ直接変更、それ以外はコピー
+
+      2. 不変条件
+         - 永続構造から作成された Transient が共有ノードを変更することはない
+         - 変更は参照カウントが 1 のノードに対してのみ行われる
+
+      3. 実装上の保証
+         - Rc::make_mut() / Arc::make_mut() の標準ライブラリ実装を利用
+         - これらの関数は内部で参照カウントをチェックし、必要に応じてコピー
+         - unsafe コード不要で COW を実現
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. Transient 変換インターフェース（概念的定義）
+  # ======================================================================
+  - id: transient_interface
+    name: "Transient 変換インターフェース"
+    description: |
+      永続データ構造と Transient データ構造の相互変換を定義する。
+
+      注: これは概念的なインターフェース定義であり、実装では Rust trait ではなく
+      各型の固有メソッド（inherent method）として提供する。
+      これにより、既存コードへの影響を回避し、メソッド解決の優先順位問題を防ぐ。
+
+    methods:
+      - name: "transient"
+        signature: "fn transient(self) -> Self::Transient"
+        description: |
+          永続データ構造から Transient を作成する。
+          所有権を消費し、一時的可変構造を返す。
+        examples:
+          - description: "PersistentVector から TransientVector を作成"
+            code: |
+              let persistent = PersistentVector::from_iter(0..100);
+              let transient = persistent.transient();
+              // persistent は使用不可（所有権が移動）
+
+      - name: "persistent"
+        signature: "fn persistent(self) -> Self::Persistent"
+        description: |
+          Transient から永続データ構造に変換する。
+          所有権を消費し、不変構造を返す。
+        examples:
+          - description: "TransientVector から PersistentVector に変換"
+            code: |
+              let mut transient = PersistentVector::new().transient();
+              for i in 0..1000 {
+                  transient.push_back(i);
+              }
+              let persistent = transient.persistent();
+              // transient は使用不可（所有権が移動）
+
+    type_constraints:
+      description: |
+        COW（Copy-on-Write）を実現するため、以下の型制約が必要:
+
+        - TransientVector<T>: T: Clone
+        - TransientHashMap<K, V>: K: Clone + Hash + Eq, V: Clone
+        - TransientHashSet<T>: T: Clone + Hash + Eq
+
+        これらの制約は既存の永続データ構造の FromIterator/IntoIterator 実装の
+        型制約と一致する（vector.rs:2000, hashmap.rs:1826, hashset.rs:633 参照）。
+
+        注: 永続データ構造の基本型（PersistentVector<T> 等）自体は Clone を
+        要求しないが、多くの操作（FromIterator, IntoIterator, Functor 等）では
+        T: Clone が必要となる。Transient は変更操作に特化しているため、
+        型レベルで Clone を要求することは既存の使用パターンと整合する。
+
+    implementations:
+      - type: "PersistentVector<T> where T: Clone"
+        description: |
+          PersistentVector から TransientVector への変換を実装。
+
+      - type: "PersistentHashMap<K, V> where K: Clone + Hash + Eq, V: Clone"
+        description: |
+          PersistentHashMap から TransientHashMap への変換を実装。
+
+      - type: "PersistentHashSet<T> where T: Clone + Hash + Eq"
+        description: |
+          PersistentHashSet から TransientHashSet への変換を実装。
+
+  # ======================================================================
+  # 2. TransientVector
+  # ======================================================================
+  - id: transient_vector
+    name: "TransientVector<T>"
+    description: |
+      PersistentVector の一時的可変版。
+      バッチ更新時のパフォーマンスを向上させる。
+
+    laws:
+      - name: "Transient-Persistent Roundtrip Law"
+        description: |
+          transient() と persistent() の往復は等価性を保つ
+        equation: "vector.transient().persistent() == vector"
+        property_test: |
+          fn prop_roundtrip(vector: PersistentVector<i32>) {
+              let result = vector.clone().transient().persistent();
+              prop_assert_eq!(result, vector);
+          }
+
+      - name: "Mutation Equivalence Law"
+        description: |
+          Transient での変更は永続版での変更と同じ結果を生む
+        equation: |
+          { let mut t = persistent.transient(); t.push_back(x); t.persistent() } ==
+          persistent.push_back(x)
+        property_test: |
+          fn prop_mutation_equivalence(
+              vector: PersistentVector<i32>,
+              element: i32
+          ) {
+              let via_transient = {
+                  let mut t = vector.clone().transient();
+                  t.push_back(element);
+                  t.persistent()
+              };
+              let via_persistent = vector.push_back(element);
+              prop_assert_eq!(via_transient, via_persistent);
+          }
+
+    methods:
+      - name: "push_back"
+        signature: "fn push_back(&mut self, element: T)"
+        description: |
+          末尾に要素を追加する。
+          永続版と異なり、戻り値ではなく自身を変更する。
+        examples:
+          - description: "要素の追加"
+            code: |
+              let mut transient = PersistentVector::new().transient();
+              transient.push_back(1);
+              transient.push_back(2);
+              transient.push_back(3);
+              let persistent = transient.persistent();
+              assert_eq!(persistent.len(), 3);
+
+      - name: "pop_back"
+        signature: "fn pop_back(&mut self) -> Option<T>"
+        description: |
+          末尾から要素を削除し、その要素を返す。
+        examples:
+          - description: "要素の削除"
+            code: |
+              let mut transient = PersistentVector::from_iter([1, 2, 3]).transient();
+              assert_eq!(transient.pop_back(), Some(3));
+              assert_eq!(transient.pop_back(), Some(2));
+
+      - name: "update"
+        signature: "fn update(&mut self, index: usize, element: T) -> Option<T>"
+        description: |
+          指定インデックスの要素を更新する。
+          成功時は古い要素を Some で返し、範囲外は None を返す。
+
+          関数型プログラミングの観点:
+          - 古い値へのアクセスが可能になり、値の変換チェーンが自然に書ける
+          - Option によるエラー表現で、Result との組み合わせも容易
+        examples:
+          - description: "要素の更新"
+            code: |
+              let mut transient = PersistentVector::from_iter([1, 2, 3]).transient();
+              let old = transient.update(1, 20);
+              assert_eq!(old, Some(2));
+              let persistent = transient.persistent();
+              assert_eq!(persistent.get(1), Some(&20));
+          - description: "範囲外アクセス"
+            code: |
+              let mut transient = PersistentVector::from_iter([1, 2, 3]).transient();
+              let old = transient.update(10, 100);
+              assert_eq!(old, None);
+
+      - name: "update_with"
+        signature: "fn update_with<F>(&mut self, index: usize, f: F) -> bool where F: FnOnce(T) -> T"
+        description: |
+          指定インデックスの要素を関数で変換して更新する。
+          成功時は true、範囲外は false を返す。
+
+          関数型プログラミングの観点:
+          - 純粋な関数による更新パターンを提供
+          - get_mut() による可変参照の直接操作を避けられる
+          - 参照透過性を維持しやすい設計
+        examples:
+          - description: "関数による要素の更新"
+            code: |
+              let mut transient = PersistentVector::from_iter([1, 2, 3]).transient();
+              assert!(transient.update_with(1, |x| x * 10));
+              let persistent = transient.persistent();
+              assert_eq!(persistent.get(1), Some(&20));
+
+      - name: "get"
+        signature: "fn get(&self, index: usize) -> Option<&T>"
+        description: |
+          指定インデックスの要素への参照を返す。
+        examples:
+          - description: "要素の取得"
+            code: |
+              let transient = PersistentVector::from_iter([1, 2, 3]).transient();
+              assert_eq!(transient.get(0), Some(&1));
+
+      - name: "len"
+        signature: "fn len(&self) -> usize"
+        description: |
+          要素数を返す。
+
+      - name: "is_empty"
+        signature: "fn is_empty(&self) -> bool"
+        description: |
+          空かどうかを返す。
+
+      - name: "extend"
+        signature: "fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I)"
+        description: |
+          イテレータから複数の要素を追加する。
+        examples:
+          - description: "複数要素の追加"
+            code: |
+              let mut transient = PersistentVector::new().transient();
+              transient.extend(0..1000);
+              let persistent = transient.persistent();
+              assert_eq!(persistent.len(), 1000);
+
+      - name: "persistent"
+        signature: "fn persistent(self) -> PersistentVector<T>"
+        description: |
+          永続データ構造に変換する。所有権を消費する。
+
+      - name: "new"
+        signature: "fn new() -> Self"
+        description: |
+          空の TransientVector を作成する。
+          FromIterator 最適化などで、永続構造を経由せずに直接構築する場合に使用。
+        examples:
+          - description: "空の TransientVector を作成"
+            code: |
+              let mut transient = TransientVector::new();
+              transient.push_back(1);
+              let persistent = transient.persistent();
+
+    implementations:
+      - type: "TransientVector<T>"
+        description: |
+          内部構造:
+          ```rust
+          pub struct TransientVector<T> {
+              // 変更中のルートノード（常に Node 形式で保持）
+              root: ReferenceCounter<Node<T>>,
+              // 変更中のテールバッファ
+              tail: Vec<T>,
+              // 要素数
+              length: usize,
+              // シフト量
+              shift: usize,
+          }
+          ```
+
+          設計方針:
+          - ノードは常に `Node<T>` 形式で保持し、`ReferenceCounter` でラップ
+          - 変更時は `Rc::make_mut()` / `Arc::make_mut()` で COW を実行
+          - 参照カウントが 1 なら直接変更、それ以外はコピー後に変更
+          - `persistent()` 時はフィールドをそのまま移動（O(1)）
+
+          この設計により:
+          - 別途 TransientNode enum は不要
+          - persistent() は単純なフィールド移動で O(1)
+          - unsafe コード不要
+          - 既存の Node 構造をそのまま再利用
+
+  # ======================================================================
+  # 3. TransientHashMap
+  # ======================================================================
+  - id: transient_hashmap
+    name: "TransientHashMap<K, V>"
+    description: |
+      PersistentHashMap の一時的可変版。
+
+    laws:
+      - name: "Transient-Persistent Roundtrip Law"
+        description: |
+          transient() と persistent() の往復は等価性を保つ
+        equation: "map.transient().persistent() == map"
+        property_test: |
+          fn prop_roundtrip(map: PersistentHashMap<String, i32>) {
+              let result = map.clone().transient().persistent();
+              prop_assert_eq!(result, map);
+          }
+
+      - name: "Insert Equivalence Law"
+        description: |
+          Transient での insert は永続版と同じ結果を生む
+        equation: |
+          { let mut t = map.transient(); t.insert(k, v); t.persistent() } ==
+          map.insert(k, v)
+        property_test: |
+          fn prop_insert_equivalence(
+              map: PersistentHashMap<String, i32>,
+              key: String,
+              value: i32
+          ) {
+              let via_transient = {
+                  let mut t = map.clone().transient();
+                  t.insert(key.clone(), value);
+                  t.persistent()
+              };
+              let via_persistent = map.insert(key, value);
+              prop_assert_eq!(via_transient, via_persistent);
+          }
+
+    methods:
+      - name: "insert"
+        signature: "fn insert(&mut self, key: K, value: V) -> Option<V>"
+        description: |
+          キー・値ペアを追加する。
+          既存キーがあれば古い値を返す。
+        examples:
+          - description: "キー・値の追加"
+            code: |
+              let mut transient = PersistentHashMap::new().transient();
+              transient.insert("one".to_string(), 1);
+              transient.insert("two".to_string(), 2);
+              let persistent = transient.persistent();
+              assert_eq!(persistent.get("one"), Some(&1));
+
+      - name: "remove"
+        signature: "fn remove<Q>(&mut self, key: &Q) -> Option<V> where K: Borrow<Q>, Q: Hash + Eq + ?Sized"
+        description: |
+          キーを削除し、値があれば返す。
+        examples:
+          - description: "キーの削除"
+            code: |
+              let mut transient = PersistentHashMap::from_iter([
+                  ("a".to_string(), 1),
+                  ("b".to_string(), 2),
+              ]).transient();
+              assert_eq!(transient.remove("a"), Some(1));
+              let persistent = transient.persistent();
+              assert_eq!(persistent.get("a"), None);
+
+      - name: "get"
+        signature: "fn get<Q>(&self, key: &Q) -> Option<&V> where K: Borrow<Q>, Q: Hash + Eq + ?Sized"
+        description: |
+          キーに対応する値への参照を返す。
+
+      - name: "get_mut"
+        signature: "fn get_mut<Q>(&mut self, key: &Q) -> Option<&mut V> where K: Borrow<Q>, Q: Hash + Eq + ?Sized"
+        description: |
+          キーに対応する値への可変参照を返す。
+
+          重要: この操作は構築フェーズ専用の不純な操作である。
+          呼び出し前に、対象ノードが共有されている場合は自動的に
+          コピーオンライト（COW）が実行され、Transient が独自に所有する
+          ノードに対してのみ可変参照を返す。
+
+          この設計により、永続構造との構造共有が破壊されることはない。
+
+          注意: COW は「ノード」レベルで行われる。値 V 自体が内部可変性を持つ型
+          （例: Rc<RefCell<T>>）の場合、その内部状態の変更は COW の対象外となる。
+          このような型を使用する場合は、ユーザーの責任で整合性を維持すること。
+          関数型プログラミングの原則に従い、値には不変な型を使用することを推奨する。
+
+          【関数型プログラミングの観点からの注意】
+          この操作は「構築フェーズ専用の意図的な不純領域」として位置づけられる。
+          可能な限り update_with() による純粋な関数での更新を推奨する。
+        examples:
+          - description: "値の直接変更"
+            code: |
+              let mut transient = PersistentHashMap::from_iter([
+                  ("count".to_string(), 0),
+              ]).transient();
+              if let Some(count) = transient.get_mut("count") {
+                  *count += 1;
+              }
+              // persistent() で不変世界に戻る
+              let persistent = transient.persistent();
+
+      - name: "update_with"
+        signature: "fn update_with<Q, F>(&mut self, key: &Q, f: F) -> bool where K: Borrow<Q>, Q: Hash + Eq + ?Sized, F: FnOnce(V) -> V"
+        description: |
+          キーに対応する値を関数で変換して更新する。
+          キーが存在する場合は true、存在しない場合は false を返す。
+
+          関数型プログラミングの観点:
+          - 純粋な関数による更新パターンを提供
+          - get_mut() による可変参照の直接操作を避けられる
+          - 参照透過性を維持しやすい設計
+        examples:
+          - description: "関数による値の更新"
+            code: |
+              let mut transient = PersistentHashMap::from_iter([
+                  ("count".to_string(), 0),
+              ]).transient();
+              assert!(transient.update_with("count", |x| x + 1));
+              let persistent = transient.persistent();
+              assert_eq!(persistent.get("count"), Some(&1));
+
+      - name: "contains_key"
+        signature: "fn contains_key<Q>(&self, key: &Q) -> bool where K: Borrow<Q>, Q: Hash + Eq + ?Sized"
+        description: |
+          キーが存在するかを返す。
+
+      - name: "len"
+        signature: "fn len(&self) -> usize"
+        description: |
+          エントリ数を返す。
+
+      - name: "is_empty"
+        signature: "fn is_empty(&self) -> bool"
+        description: |
+          空かどうかを返す。
+
+      - name: "extend"
+        signature: "fn extend<I: IntoIterator<Item = (K, V)>>(&mut self, iter: I)"
+        description: |
+          イテレータから複数のキー・値ペアを追加する。
+
+      - name: "persistent"
+        signature: "fn persistent(self) -> PersistentHashMap<K, V>"
+        description: |
+          永続データ構造に変換する。
+
+      - name: "new"
+        signature: "fn new() -> Self"
+        description: |
+          空の TransientHashMap を作成する。
+          FromIterator 最適化などで、永続構造を経由せずに直接構築する場合に使用。
+
+    implementations:
+      - type: "TransientHashMap<K, V>"
+        description: |
+          内部構造:
+          ```rust
+          pub struct TransientHashMap<K, V> {
+              // 変更中のルートノード（常に Node 形式で保持）
+              root: ReferenceCounter<Node<K, V>>,
+              // エントリ数
+              length: usize,
+          }
+          ```
+
+          設計方針:
+          - ノードは常に `Node<K, V>` 形式で保持し、`ReferenceCounter` でラップ
+          - 変更時は `Rc::make_mut()` / `Arc::make_mut()` で COW を実行
+          - `persistent()` 時はフィールドをそのまま移動（O(1)）
+          - TransientVector と同様の設計原則を適用
+
+  # ======================================================================
+  # 4. TransientHashSet
+  # ======================================================================
+  - id: transient_hashset
+    name: "TransientHashSet<T>"
+    description: |
+      PersistentHashSet の一時的可変版。
+      TransientHashMap<T, ()> のラッパーとして実装。
+
+    laws:
+      - name: "Transient-Persistent Roundtrip Law"
+        description: |
+          transient() と persistent() の往復は等価性を保つ
+        equation: "set.transient().persistent() == set"
+
+      - name: "Insert Equivalence Law"
+        description: |
+          Transient での insert は永続版と同じ結果を生む
+        equation: |
+          { let mut t = set.transient(); t.insert(x); t.persistent() } ==
+          set.insert(x)
+
+    methods:
+      - name: "insert"
+        signature: "fn insert(&mut self, element: T) -> bool"
+        description: |
+          要素を追加する。
+          新規追加なら true、既存なら false を返す。
+        examples:
+          - description: "要素の追加"
+            code: |
+              let mut transient = PersistentHashSet::new().transient();
+              assert!(transient.insert(1));
+              assert!(!transient.insert(1));  // 既存
+              let persistent = transient.persistent();
+              assert!(persistent.contains(&1));
+
+      - name: "remove"
+        signature: "fn remove<Q>(&mut self, element: &Q) -> bool where T: Borrow<Q>, Q: Hash + Eq + ?Sized"
+        description: |
+          要素を削除する。
+          削除できたら true、存在しなければ false を返す。
+
+      - name: "contains"
+        signature: "fn contains<Q>(&self, element: &Q) -> bool where T: Borrow<Q>, Q: Hash + Eq + ?Sized"
+        description: |
+          要素が存在するかを返す。
+
+      - name: "len"
+        signature: "fn len(&self) -> usize"
+        description: |
+          要素数を返す。
+
+      - name: "is_empty"
+        signature: "fn is_empty(&self) -> bool"
+        description: |
+          空かどうかを返す。
+
+      - name: "extend"
+        signature: "fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I)"
+        description: |
+          イテレータから複数の要素を追加する。
+
+      - name: "persistent"
+        signature: "fn persistent(self) -> PersistentHashSet<T>"
+        description: |
+          永続データ構造に変換する。
+
+      - name: "new"
+        signature: "fn new() -> Self"
+        description: |
+          空の TransientHashSet を作成する。
+          FromIterator 最適化などで、永続構造を経由せずに直接構築する場合に使用。
+
+    implementations:
+      - type: "TransientHashSet<T>"
+        description: |
+          内部構造:
+          ```rust
+          pub struct TransientHashSet<T> {
+              inner: TransientHashMap<T, ()>,
+          }
+          ```
+
+  # ======================================================================
+  # 5. FromIterator / Extend の最適化
+  # ======================================================================
+  - id: from_iterator_optimization
+    name: "FromIterator / Extend の最適化"
+    description: |
+      永続データ構造の FromIterator 実装を Transient を使用して最適化する。
+
+    methods:
+      - name: "FromIterator::from_iter"
+        signature: "fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self"
+        description: |
+          内部で Transient を使用してバッチ構築を最適化。
+        examples:
+          - description: "最適化された collect"
+            code: |
+              // 内部で transient を使用して高速化
+              let vector: PersistentVector<i32> = (0..10000).collect();
+
+    implementations:
+      - type: "PersistentVector<T> where T: Clone"
+        description: |
+          既存の FromIterator 実装（vector.rs:2000）を Transient で最適化。
+          ```rust
+          impl<T: Clone> FromIterator<T> for PersistentVector<T> {
+              fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+                  let mut transient = TransientVector::new();
+                  transient.extend(iter);
+                  transient.persistent()
+              }
+          }
+          ```
+
+      - type: "PersistentHashMap<K, V> where K: Clone + Hash + Eq, V: Clone"
+        description: |
+          既存の FromIterator 実装（hashmap.rs:1826）を Transient で最適化。
+          ```rust
+          impl<K: Clone + Hash + Eq, V: Clone> FromIterator<(K, V)>
+              for PersistentHashMap<K, V>
+          {
+              fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+                  let mut transient = TransientHashMap::new();
+                  transient.extend(iter);
+                  transient.persistent()
+              }
+          }
+          ```
+
+      - type: "PersistentHashSet<T> where T: Clone + Hash + Eq"
+        description: |
+          ```rust
+          impl<T: Hash + Eq + Clone> FromIterator<T> for PersistentHashSet<T> {
+              fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+                  let mut transient = TransientHashSet::new();
+                  transient.extend(iter);
+                  transient.persistent()
+              }
+          }
+          ```
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - requirement: "transient() 変換は O(1) で完了すること"
+      rationale: |
+        transient(self) は所有権を消費するため、元の永続構造のノードを
+        そのまま共有状態（Shared）として保持できる。
+        ノードのコピーは発生せず、構造体のフィールド移動のみで O(1)。
+
+        注: 元の永続構造を保持しつつ Transient を作成する場合は、
+        呼び出し側で clone() が必要であり、clone() は O(N) となる。
+        これは呼び出し側の責任であり、transient() 自体は O(1) を保証する。
+
+    - requirement: "persistent() 変換は O(1) で完了すること"
+      rationale: |
+        persistent(self) は所有権を消費し、変更済みノード（Owned）を
+        ReferenceCounter でラップして永続構造に変換する。
+        ノード数に関わらず、ルートノードのラップと構造体構築のみで O(1)。
+
+        注: 変更済みノードは既に適切な形式で保持されているため、
+        追加のコピーや変換は不要。
+      implementation_note: |
+        O(1) persistent() を実現するための実装戦略:
+
+        計算量の定義: O(1) は「要素数 N に依存しない定数時間」を意味する。
+
+        核心的な設計決定:
+        - Transient は内部的に永続構造と同じ `Node<T>` 形式でノードを保持
+        - 別途 TransientNode enum や TransientBranch 型は使用しない
+        - これにより persistent() は単純なフィールド移動で完了
+
+        persistent() の実装:
+        ```rust
+        impl<T: Clone> TransientVector<T> {
+            pub fn persistent(self) -> PersistentVector<T> {
+                // tail を ReferenceCounter にラップ（1回のアロケーション）
+                let tail = ReferenceCounter::from(self.tail.into_boxed_slice());
+
+                PersistentVector {
+                    root: self.root,  // そのまま移動（O(1)）
+                    tail,
+                    length: self.length,
+                    shift: self.shift,
+                }
+            }
+        }
+        ```
+
+        この設計により:
+        - 新規アロケーションは tail のラップのみ（定数回）
+        - ノードの走査・変換は不要
+        - unsafe コード不要
+        - #![forbid(unsafe_code)] を完全に遵守
+
+    - requirement: "バッチ push_back 10,000 要素で永続版より高速であること"
+      rationale: |
+        構造共有のオーバーヘッド（パスコピー、参照カウント操作）を削減することで、
+        永続版より高速になることを期待する。
+
+        具体的な改善率は実装とハードウェアに依存するため、
+        ベンチマークで実測し、改善が確認できることを要件とする。
+      benchmark:
+        name: "batch_push_back_10000"
+        baseline: "PersistentVector で 10,000 要素を順次 push_back"
+        target: "TransientVector で 10,000 要素を順次 push_back"
+        environment: |
+          - Rust: stable (1.92.0+)
+          - Build: --release
+          - criterion を使用した統計的測定
+
+    - requirement: "メモリ使用量は永続版と同等以下"
+      rationale: |
+        Transient は永続版のノードを可能な限り再利用する。
+      measurement:
+        method: |
+          - 10,000 要素の構築後にメモリ使用量を計測
+          - 計測ツール: jemalloc/dhat または std::alloc::GlobalAlloc ラッパー
+          - 比較対象: 同じ要素数の永続版構造
+        acceptance: |
+          Transient 構築中のピークメモリ使用量が
+          永続版の同要素数構築のピーク使用量の 110% 以下であること。
+
+  compatibility:
+    - requirement: "既存の永続データ構造 API に影響を与えないこと"
+      rationale: |
+        transient() メソッドの追加のみで、既存コードの動作は変わらない。
+
+    - requirement: "arc feature との互換性を維持"
+      rationale: |
+        Transient も ReferenceCounter<T> を使用し、Rc/Arc 切り替えに対応。
+
+    - requirement: "Transient 型は Send/Sync を実装しない（シングルスレッド使用を前提）"
+      rationale: |
+        Transient は構築フェーズ専用の可変構造であり、スレッド間共有は想定しない。
+
+        - arc feature が有効でも、Transient 自体は Send/Sync を実装しない
+        - 構築が完了した永続構造（PersistentVector 等）は arc 有効時に Send/Sync
+        - これにより、構築中のスレッド安全性の問題を回避
+
+        注: 将来的に並列構築が必要になった場合は、future_extensions の
+        parallel_transient として別途検討する。
+      implementation:
+        description: |
+          Rust の auto trait により Arc を使用すると自動的に Send/Sync が
+          実装される可能性があるため、明示的に非 Send/Sync 化する。
+          PhantomData<Rc<()>> を使用することで確実に !Send + !Sync を保証。
+          （Rc<T> は !Send + !Sync であることが保証されているため）
+        code: |
+          ```rust
+          use std::marker::PhantomData;
+          use std::rc::Rc;
+
+          pub struct TransientVector<T> {
+              root: ReferenceCounter<Node<T>>,
+              tail: Vec<T>,
+              length: usize,
+              shift: usize,
+              // Send/Sync の自動実装を防止（Rc<()> は !Send + !Sync）
+              _marker: PhantomData<Rc<()>>,
+          }
+
+          // TransientHashMap, TransientHashSet も同様
+          ```
+        verification: |
+          static_assertions クレートを使用してコンパイル時に Send/Sync が
+          実装されていないことを検証。常時（テスト以外のビルドでも）検証する:
+          ```rust
+          // モジュールレベルで静的アサーション（#[cfg(test)]なし）
+          use static_assertions::assert_not_impl_any;
+
+          // 基本型での検証
+          assert_not_impl_any!(TransientVector<i32>: Send, Sync);
+          assert_not_impl_any!(TransientHashMap<i32, i32>: Send, Sync);
+          assert_not_impl_any!(TransientHashSet<i32>: Send, Sync);
+
+          // Send+Sync を実装する型での検証（型境界を満たす場合でも !Send/!Sync）
+          assert_not_impl_any!(TransientVector<String>: Send, Sync);
+          assert_not_impl_any!(TransientHashMap<String, String>: Send, Sync);
+          assert_not_impl_any!(TransientHashSet<String>: Send, Sync);
+
+          // Arc を使用する型での検証（arc feature 有効時）
+          #[cfg(feature = "arc")]
+          mod arc_send_sync_tests {
+              use super::*;
+              use std::sync::Arc;
+
+              // Arc<T> where T: Send+Sync でも Transient は !Send/!Sync
+              assert_not_impl_any!(TransientVector<Arc<i32>>: Send, Sync);
+              assert_not_impl_any!(TransientHashMap<Arc<i32>, Arc<i32>>: Send, Sync);
+              assert_not_impl_any!(TransientHashSet<Arc<i32>>: Send, Sync);
+          }
+          ```
+
+          設計保証:
+          - PhantomData<Rc<()>> により、T の型境界に関係なく常に !Send/!Sync
+          - Rc<T> は標準ライブラリで !Send + !Sync が保証されている
+          - Rust の negative impl は不安定機能のため PhantomData で代替
+          - static_assertions は dependencies（dev-dependencies ではない）として追加
+
+          これらのアサーションはコンパイル時に評価され、
+          Send/Sync が実装されている場合はコンパイルエラーになる。
+
+    - requirement: "トレイトメソッド名の衝突リスクを回避"
+      rationale: |
+        transient/persistent は固有メソッド（inherent method）としてのみ実装する。
+        トレイトとしての抽象化は行わない。
+
+        理由:
+        1. 固有メソッドはトレイトメソッドより優先されるため、
+           既存コードのメソッド解決に影響を与えない
+        2. transient/persistent の振る舞いは型ごとに異なるため、
+           トレイトで抽象化するメリットが薄い
+        3. 将来的にトレイトが必要になった場合は、
+           into_transient/into_persistent など別名で追加可能
+
+        注: 要件定義の transient_trait セクションは設計上のインターフェース記述であり、
+        実装では trait ではなく固有メソッドとして提供する。
+
+  safety:
+    - requirement: "所有権システムにより使用後の Transient へのアクセスを防止"
+      rationale: |
+        persistent() が所有権を消費するため、コンパイル時に検出可能。
+
+    - requirement: "Transient 型は Clone/Copy トレイトを実装しない"
+      rationale: |
+        線形型のセマンティクスを強制するため、複製を禁止する。
+        これにより、複数の可変所有者が生まれることを防ぎ、
+        参照透過性と純粋性の前提を維持する。
+
+        ```rust
+        // コンパイルエラーになる例
+        let t1 = vector.transient();
+        let t2 = t1.clone();  // エラー: Clone が実装されていない
+        ```
+
+    - requirement: "#![forbid(unsafe_code)] ポリシーに準拠"
+      rationale: |
+        Rc::make_mut() / Arc::make_mut() など safe API のみを使用。
+
+  testing:
+    - requirement: "テストカバレッジ: 行カバレッジ 90% 以上を目標とする"
+      rationale: |
+        - 計測ツール: cargo llvm-cov
+        - 計測対象: src/persistent/transient_*.rs
+        - 除外: panic ハンドラ、unreachable コードパス
+
+    - requirement: "プロパティベーステスト（proptest）による法則検証"
+      rationale: |
+        - Transient-Persistent Roundtrip Law
+        - Mutation Equivalence Law
+        - 各ケース 1000 回以上のランダムテスト
+
+    - requirement: "ベンチマークによるパフォーマンス計測"
+      benchmarks:
+        - name: "vector_push_back_10000"
+          description: "TransientVector vs PersistentVector で 10,000 要素を順次 push_back"
+          data_type: "i32"
+          element_count: 10000
+          criterion_config: "sample_size = 100"
+
+        - name: "hashmap_insert_10000"
+          description: "TransientHashMap vs PersistentHashMap で 10,000 エントリを順次 insert"
+          data_type: "(String, i32)"
+          element_count: 10000
+          criterion_config: "sample_size = 100"
+
+        - name: "hashset_insert_10000"
+          description: "TransientHashSet vs PersistentHashSet で 10,000 要素を順次 insert"
+          data_type: "i32"
+          element_count: 10000
+          criterion_config: "sample_size = 100"
+
+        - name: "collect_optimization"
+          description: "FromIterator 実装の Transient 最適化効果を計測"
+          data_type: "i32"
+          element_count: 10000
+          criterion_config: "sample_size = 100"
+
+# 実装順序
+implementation_order:
+  - phase: "5.1"
+    name: "TransientVector"
+    description: "最も使用頻度が高く、実装がシンプル"
+    duration_estimate: "3-4 days"
+    dependencies: []
+
+  - phase: "5.2"
+    name: "TransientHashMap"
+    description: "HAMT の変更が複雑だが、パフォーマンス改善効果が大きい"
+    duration_estimate: "4-5 days"
+    dependencies:
+      - "5.1"
+
+  - phase: "5.3"
+    name: "TransientHashSet"
+    description: "TransientHashMap のラッパー"
+    duration_estimate: "1-2 days"
+    dependencies:
+      - "5.2"
+
+  - phase: "5.4"
+    name: "FromIterator 最適化"
+    description: "既存の collect 実装を Transient で最適化"
+    duration_estimate: "1 day"
+    dependencies:
+      - "5.1"
+      - "5.2"
+      - "5.3"
+
+# 将来の拡張
+future_extensions:
+  - id: transient_treemap
+    name: "TransientTreeMap"
+    description: |
+      赤黒木の Transient 版。バランシング操作の複雑さから後回し。
+    rationale: |
+      - 赤黒木のバランシングは複雑で、変更箇所の追跡が難しい
+      - PersistentTreeMap の使用頻度は HashMap より低い
+      - 需要に応じて将来実装
+
+  - id: transient_builder
+    name: "Transient ビルダーマクロ"
+    description: |
+      Transient 操作をより簡潔に記述するためのマクロ。
+    rationale: |
+      ```rust
+      // マクロなし
+      let vector = {
+          let mut t = PersistentVector::new().transient();
+          t.push_back(1);
+          t.push_back(2);
+          t.persistent()
+      };
+
+      // マクロあり
+      let vector = transient_build!(PersistentVector {
+          push_back(1),
+          push_back(2),
+      });
+      ```
+
+  - id: parallel_transient
+    name: "並列 Transient"
+    description: |
+      arc feature 有効時、複数スレッドから安全に使用できる Transient。
+    rationale: |
+      - 現在の Transient はシングルスレッド使用を前提
+      - 並列構築のニーズがあれば検討
