@@ -843,6 +843,387 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
         self.iter().map(|(_, value)| value)
     }
 
+    /// Applies a function to all values, keeping keys unchanged.
+    ///
+    /// Returns a new map with the same keys but transformed values.
+    /// The length of the map is preserved, and entries remain in sorted key order.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `W` - The type of the transformed values
+    /// * `F` - The transformation function type
+    ///
+    /// # Arguments
+    ///
+    /// * `function` - A function to apply to each value
+    ///
+    /// # Complexity
+    ///
+    /// O(n log n) where n is the number of entries
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentTreeMap;
+    ///
+    /// let map = PersistentTreeMap::new()
+    ///     .insert(1, 10)
+    ///     .insert(2, 20);
+    /// let doubled = map.map_values(|v| v * 2);
+    /// assert_eq!(doubled.get(&1), Some(&20));
+    /// assert_eq!(doubled.get(&2), Some(&40));
+    /// ```
+    #[must_use]
+    pub fn map_values<W, F>(&self, mut function: F) -> PersistentTreeMap<K, W>
+    where
+        K: Clone + Ord,
+        W: Clone,
+        F: FnMut(&V) -> W,
+    {
+        self.iter()
+            .map(|(key, value)| (key.clone(), function(value)))
+            .collect()
+    }
+
+    /// Applies a function to all keys, keeping values unchanged.
+    ///
+    /// Returns a new map with transformed keys and the original values.
+    /// The new map will be ordered by the new keys.
+    ///
+    /// # Warning
+    ///
+    /// Key transformation may cause collisions. When multiple original keys
+    /// map to the same new key, only one entry will be kept. The collision
+    /// behavior depends on internal iteration order.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `L` - The type of the transformed keys
+    /// * `F` - The transformation function type
+    ///
+    /// # Arguments
+    ///
+    /// * `function` - A function to apply to each key
+    ///
+    /// # Complexity
+    ///
+    /// O(n log n) where n is the number of entries
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentTreeMap;
+    ///
+    /// let map = PersistentTreeMap::new()
+    ///     .insert("a".to_string(), 1)
+    ///     .insert("bb".to_string(), 2)
+    ///     .insert("ccc".to_string(), 3);
+    /// let by_length = map.map_keys(|k| k.len());
+    /// assert_eq!(by_length.get(&1), Some(&1));
+    /// assert_eq!(by_length.get(&2), Some(&2));
+    /// assert_eq!(by_length.get(&3), Some(&3));
+    /// ```
+    #[must_use]
+    pub fn map_keys<L, F>(&self, mut function: F) -> PersistentTreeMap<L, V>
+    where
+        L: Clone + Ord,
+        V: Clone,
+        F: FnMut(&K) -> L,
+    {
+        self.iter()
+            .map(|(key, value)| (function(key), value.clone()))
+            .collect()
+    }
+
+    /// Applies a function to each entry, keeping only those that return Some.
+    ///
+    /// This combines filtering and mapping in a single operation.
+    /// Entries for which the function returns None are excluded from the result.
+    /// The result maintains sorted key order.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `W` - The type of the transformed values
+    /// * `F` - The filter-map function type
+    ///
+    /// # Arguments
+    ///
+    /// * `function` - A function that receives a reference to the key and the value,
+    ///   and returns `Some(new_value)` to include or `None` to exclude
+    ///
+    /// # Complexity
+    ///
+    /// O(n log n) where n is the number of entries
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentTreeMap;
+    ///
+    /// let map = PersistentTreeMap::new()
+    ///     .insert(1, "1".to_string())
+    ///     .insert(2, "abc".to_string())
+    ///     .insert(3, "42".to_string());
+    /// let parsed = map.filter_map(|_, v| v.parse::<i32>().ok());
+    /// assert_eq!(parsed.len(), 2);
+    /// assert_eq!(parsed.get(&1), Some(&1));
+    /// assert_eq!(parsed.get(&3), Some(&42));
+    /// ```
+    #[must_use]
+    pub fn filter_map<W, F>(&self, mut function: F) -> PersistentTreeMap<K, W>
+    where
+        K: Clone + Ord,
+        W: Clone,
+        F: FnMut(&K, &V) -> Option<W>,
+    {
+        self.iter()
+            .filter_map(|(key, value)| {
+                function(key, value).map(|new_value| (key.clone(), new_value))
+            })
+            .collect()
+    }
+
+    /// Returns an iterator over key-value pairs in sorted key order.
+    ///
+    /// This is an alias for [`iter`](Self::iter), provided for API consistency
+    /// with other functional programming languages.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentTreeMap;
+    ///
+    /// let map = PersistentTreeMap::new()
+    ///     .insert(1, "one")
+    ///     .insert(2, "two");
+    /// for (key, value) in map.entries() {
+    ///     println!("{}: {}", key, value);
+    /// }
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn entries(&self) -> PersistentTreeMapIterator<'_, K, V> {
+        self.iter()
+    }
+
+    /// Merges two maps, with values from `other` taking precedence on key conflicts.
+    ///
+    /// Returns a new map containing all entries from both maps.
+    /// When a key exists in both maps, the value from `other` is used.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The map to merge with
+    ///
+    /// # Complexity
+    ///
+    /// O(m log(n + m)) where n is the size of self and m is the size of other
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentTreeMap;
+    ///
+    /// let map1 = PersistentTreeMap::new()
+    ///     .insert(1, "one")
+    ///     .insert(2, "two");
+    /// let map2 = PersistentTreeMap::new()
+    ///     .insert(2, "TWO")
+    ///     .insert(3, "three");
+    /// let merged = map1.merge(&map2);
+    /// assert_eq!(merged.get(&1), Some(&"one"));
+    /// assert_eq!(merged.get(&2), Some(&"TWO")); // From map2
+    /// assert_eq!(merged.get(&3), Some(&"three"));
+    /// ```
+    #[must_use]
+    pub fn merge(&self, other: &Self) -> Self {
+        let mut result = self.clone();
+        for (key, value) in other {
+            result = result.insert(key.clone(), value.clone());
+        }
+        result
+    }
+
+    /// Merges two maps with a custom conflict resolver.
+    ///
+    /// Returns a new map containing all entries from both maps.
+    /// When a key exists in both maps, the resolver function is called
+    /// with the key and both values to determine the final value.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The map to merge with
+    /// * `resolver` - A function that receives (key, `self_value`, `other_value`) and
+    ///   returns the value to use in the merged map
+    ///
+    /// # Complexity
+    ///
+    /// O(m log(n + m)) where n is the size of self and m is the size of other
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentTreeMap;
+    ///
+    /// let map1 = PersistentTreeMap::new()
+    ///     .insert(1, 100)
+    ///     .insert(2, 200);
+    /// let map2 = PersistentTreeMap::new()
+    ///     .insert(2, 50)
+    ///     .insert(3, 300);
+    /// let merged = map1.merge_with(&map2, |_, v1, v2| *v1.max(v2));
+    /// assert_eq!(merged.get(&1), Some(&100));
+    /// assert_eq!(merged.get(&2), Some(&200)); // max(200, 50)
+    /// assert_eq!(merged.get(&3), Some(&300));
+    /// ```
+    #[must_use]
+    pub fn merge_with<F>(&self, other: &Self, mut resolver: F) -> Self
+    where
+        F: FnMut(&K, &V, &V) -> V,
+    {
+        let mut result = self.clone();
+        for (key, other_value) in other {
+            let new_value = result.get(key).map_or_else(
+                || other_value.clone(),
+                |self_value| resolver(key, self_value, other_value),
+            );
+            result = result.insert(key.clone(), new_value);
+        }
+        result
+    }
+
+    /// Removes entries for which the predicate returns true.
+    ///
+    /// Returns a new map containing only entries for which the predicate
+    /// returns false. The result maintains sorted key order.
+    ///
+    /// # Arguments
+    ///
+    /// * `predicate` - A function that receives a reference to the key and value,
+    ///   and returns true if the entry should be deleted
+    ///
+    /// # Complexity
+    ///
+    /// O(n log n) where n is the number of entries
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentTreeMap;
+    ///
+    /// let map = PersistentTreeMap::new()
+    ///     .insert(1, 10)
+    ///     .insert(2, 20)
+    ///     .insert(3, 30);
+    /// let small_values = map.delete_if(|_, v| *v >= 20);
+    /// assert_eq!(small_values.len(), 1);
+    /// assert_eq!(small_values.get(&1), Some(&10));
+    /// ```
+    #[must_use]
+    pub fn delete_if<F>(&self, mut predicate: F) -> Self
+    where
+        K: Clone + Ord,
+        V: Clone,
+        F: FnMut(&K, &V) -> bool,
+    {
+        self.iter()
+            .filter(|(key, value)| !predicate(key, value))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    /// Keeps only entries for which the predicate returns true.
+    ///
+    /// Returns a new map containing only entries for which the predicate
+    /// returns true. The result maintains sorted key order.
+    ///
+    /// # Arguments
+    ///
+    /// * `predicate` - A function that receives a reference to the key and value,
+    ///   and returns true if the entry should be kept
+    ///
+    /// # Complexity
+    ///
+    /// O(n log n) where n is the number of entries
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentTreeMap;
+    ///
+    /// let map = PersistentTreeMap::new()
+    ///     .insert(1, 10)
+    ///     .insert(2, 20)
+    ///     .insert(3, 30);
+    /// let even_keys = map.keep_if(|k, _| k % 2 == 0);
+    /// assert_eq!(even_keys.len(), 1);
+    /// assert_eq!(even_keys.get(&2), Some(&20));
+    /// ```
+    #[must_use]
+    pub fn keep_if<F>(&self, mut predicate: F) -> Self
+    where
+        K: Clone + Ord,
+        V: Clone,
+        F: FnMut(&K, &V) -> bool,
+    {
+        self.iter()
+            .filter(|(key, value)| predicate(key, value))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    /// Partitions the map into two maps based on a predicate.
+    ///
+    /// Returns a tuple of two maps:
+    /// - The first contains entries for which the predicate returns true
+    /// - The second contains entries for which the predicate returns false
+    ///
+    /// Both resulting maps maintain sorted key order.
+    ///
+    /// # Arguments
+    ///
+    /// * `predicate` - A function that receives a reference to the key and value,
+    ///   and returns true to include in the first map, false for the second
+    ///
+    /// # Complexity
+    ///
+    /// O(n log n) where n is the number of entries
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentTreeMap;
+    ///
+    /// let map = PersistentTreeMap::new()
+    ///     .insert(1, 10)
+    ///     .insert(2, 20)
+    ///     .insert(3, 30)
+    ///     .insert(4, 40);
+    /// let (even_keys, odd_keys) = map.partition(|k, _| k % 2 == 0);
+    /// assert_eq!(even_keys.len(), 2);
+    /// assert_eq!(odd_keys.len(), 2);
+    /// ```
+    #[must_use]
+    pub fn partition<F>(&self, mut predicate: F) -> (Self, Self)
+    where
+        K: Clone + Ord,
+        V: Clone,
+        F: FnMut(&K, &V) -> bool,
+    {
+        let mut matching = Self::new();
+        let mut not_matching = Self::new();
+
+        for (key, value) in self {
+            if predicate(key, value) {
+                matching = matching.insert(key.clone(), value.clone());
+            } else {
+                not_matching = not_matching.insert(key.clone(), value.clone());
+            }
+        }
+
+        (matching, not_matching)
+    }
+
     /// Returns an iterator over entries within the specified range.
     ///
     /// The range is specified using Rust's range syntax:
@@ -1340,5 +1721,460 @@ mod tests {
 
         let sum = map.fold_left(0, |accumulator, value| accumulator + value);
         assert_eq!(sum, 60);
+    }
+
+    // =========================================================================
+    // map_values Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_map_values_treemap_empty() {
+        let map: PersistentTreeMap<i32, i32> = PersistentTreeMap::new();
+        let result = map.map_values(|v| v * 2);
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_map_values_treemap_basic() {
+        let map = PersistentTreeMap::new().insert(1, 10).insert(2, 20);
+        let doubled = map.map_values(|v| v * 2);
+        assert_eq!(doubled.get(&1), Some(&20));
+        assert_eq!(doubled.get(&2), Some(&40));
+    }
+
+    #[rstest]
+    fn test_map_values_treemap_preserves_order() {
+        let map = PersistentTreeMap::new()
+            .insert(3, 30)
+            .insert(1, 10)
+            .insert(2, 20);
+        let result = map.map_values(|v| v / 10);
+        let keys: Vec<&i32> = result.keys().collect();
+        assert_eq!(keys, vec![&1, &2, &3]);
+    }
+
+    #[rstest]
+    fn test_map_values_treemap_type_change() {
+        let map = PersistentTreeMap::new().insert(1, 100).insert(2, 200);
+        let stringified = map.map_values(|v| v.to_string());
+        assert_eq!(stringified.get(&1), Some(&"100".to_string()));
+        assert_eq!(stringified.get(&2), Some(&"200".to_string()));
+    }
+
+    #[rstest]
+    fn test_map_values_treemap_identity_law() {
+        let map = PersistentTreeMap::new().insert(1, 10).insert(2, 20);
+        let result = map.map_values(|v| *v);
+        assert_eq!(result, map);
+    }
+
+    #[rstest]
+    fn test_map_values_treemap_length_preservation() {
+        let map = PersistentTreeMap::new()
+            .insert(1, 10)
+            .insert(2, 20)
+            .insert(3, 30);
+        let result = map.map_values(|v| v * 2);
+        assert_eq!(result.len(), map.len());
+    }
+
+    // =========================================================================
+    // map_keys Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_map_keys_treemap_empty() {
+        let map: PersistentTreeMap<String, i32> = PersistentTreeMap::new();
+        let result = map.map_keys(|k| k.len());
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_map_keys_treemap_basic() {
+        let map = PersistentTreeMap::new()
+            .insert("a".to_string(), 1)
+            .insert("bb".to_string(), 2)
+            .insert("ccc".to_string(), 3);
+        let by_length = map.map_keys(|k| k.len());
+        assert_eq!(by_length.get(&1), Some(&1));
+        assert_eq!(by_length.get(&2), Some(&2));
+        assert_eq!(by_length.get(&3), Some(&3));
+    }
+
+    #[rstest]
+    fn test_map_keys_treemap_reorders() {
+        let map = PersistentTreeMap::new()
+            .insert(1, "a".to_string())
+            .insert(2, "b".to_string())
+            .insert(3, "c".to_string());
+        let negated = map.map_keys(|k| -k);
+        let keys: Vec<&i32> = negated.keys().collect();
+        assert_eq!(keys, vec![&-3, &-2, &-1]);
+    }
+
+    #[rstest]
+    fn test_map_keys_treemap_collision() {
+        let map = PersistentTreeMap::new()
+            .insert("a".to_string(), 1)
+            .insert("A".to_string(), 2);
+        let uppercased = map.map_keys(|k| k.to_uppercase());
+        assert_eq!(uppercased.len(), 1);
+        assert!(uppercased.contains_key("A"));
+    }
+
+    // =========================================================================
+    // filter_map Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_filter_map_treemap_empty() {
+        let map: PersistentTreeMap<i32, i32> = PersistentTreeMap::new();
+        let result = map.filter_map(|_, v| Some(v * 2));
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_filter_map_treemap_basic() {
+        let map = PersistentTreeMap::new()
+            .insert(1, "1".to_string())
+            .insert(2, "abc".to_string())
+            .insert(3, "42".to_string());
+        let parsed = map.filter_map(|_, v| v.parse::<i32>().ok());
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed.get(&1), Some(&1));
+        assert_eq!(parsed.get(&3), Some(&42));
+    }
+
+    #[rstest]
+    fn test_filter_map_treemap_preserves_order() {
+        let map = PersistentTreeMap::new()
+            .insert(5, 50)
+            .insert(1, 10)
+            .insert(3, 30);
+        let filtered = map.filter_map(|k, v| if *k > 1 { Some(*v) } else { None });
+        let keys: Vec<&i32> = filtered.keys().collect();
+        assert_eq!(keys, vec![&3, &5]);
+    }
+
+    #[rstest]
+    fn test_filter_map_treemap_all_none() {
+        let map = PersistentTreeMap::new().insert(1, 10).insert(2, 20);
+        let result: PersistentTreeMap<i32, i32> = map.filter_map(|_, _| None);
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_filter_map_treemap_all_some() {
+        let map = PersistentTreeMap::new().insert(1, 10).insert(2, 20);
+        let result = map.filter_map(|_, v| Some(*v));
+        assert_eq!(result, map);
+    }
+
+    // =========================================================================
+    // entries Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_entries_treemap_equals_iter() {
+        let map = PersistentTreeMap::new()
+            .insert(1, "one".to_string())
+            .insert(2, "two".to_string());
+        let iter_entries: Vec<_> = map.iter().collect();
+        let entries_entries: Vec<_> = map.entries().collect();
+        assert_eq!(iter_entries, entries_entries);
+    }
+
+    #[rstest]
+    fn test_entries_treemap_count_equals_len() {
+        let map = PersistentTreeMap::new()
+            .insert(1, "one".to_string())
+            .insert(2, "two".to_string())
+            .insert(3, "three".to_string());
+        assert_eq!(map.entries().count(), map.len());
+    }
+
+    // =========================================================================
+    // merge Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_merge_treemap_empty_left() {
+        let empty: PersistentTreeMap<i32, String> = PersistentTreeMap::new();
+        let other = PersistentTreeMap::singleton(1, "one".to_string());
+        let result = empty.merge(&other);
+        assert_eq!(result, other);
+    }
+
+    #[rstest]
+    fn test_merge_treemap_empty_right() {
+        let map = PersistentTreeMap::singleton(1, "one".to_string());
+        let empty: PersistentTreeMap<i32, String> = PersistentTreeMap::new();
+        let result = map.merge(&empty);
+        assert_eq!(result, map);
+    }
+
+    #[rstest]
+    fn test_merge_treemap_no_overlap() {
+        let map1 = PersistentTreeMap::new()
+            .insert(1, "one".to_string())
+            .insert(2, "two".to_string());
+        let map2 = PersistentTreeMap::new()
+            .insert(3, "three".to_string())
+            .insert(4, "four".to_string());
+        let result = map1.merge(&map2);
+        assert_eq!(result.len(), 4);
+    }
+
+    #[rstest]
+    fn test_merge_treemap_with_overlap() {
+        let map1 = PersistentTreeMap::new()
+            .insert(1, "one".to_string())
+            .insert(2, "two".to_string());
+        let map2 = PersistentTreeMap::new()
+            .insert(2, "TWO".to_string())
+            .insert(3, "three".to_string());
+        let result = map1.merge(&map2);
+        assert_eq!(result.len(), 3);
+        assert_eq!(result.get(&2), Some(&"TWO".to_string()));
+    }
+
+    #[rstest]
+    fn test_merge_treemap_preserves_order() {
+        let map1 = PersistentTreeMap::singleton(2, "two".to_string());
+        let map2 = PersistentTreeMap::new()
+            .insert(1, "one".to_string())
+            .insert(3, "three".to_string());
+        let result = map1.merge(&map2);
+        let keys: Vec<&i32> = result.keys().collect();
+        assert_eq!(keys, vec![&1, &2, &3]);
+    }
+
+    // =========================================================================
+    // merge_with Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_merge_with_treemap_sum() {
+        let map1 = PersistentTreeMap::new().insert(1, 100).insert(2, 200);
+        let map2 = PersistentTreeMap::new().insert(2, 50).insert(3, 300);
+        let merged = map1.merge_with(&map2, |_, v1, v2| v1 + v2);
+        assert_eq!(merged.get(&1), Some(&100));
+        assert_eq!(merged.get(&2), Some(&250));
+        assert_eq!(merged.get(&3), Some(&300));
+    }
+
+    #[rstest]
+    fn test_merge_with_treemap_preserves_order() {
+        let map1 = PersistentTreeMap::singleton(2, 20);
+        let map2 = PersistentTreeMap::new().insert(1, 10).insert(3, 30);
+        let result = map1.merge_with(&map2, |_, v1, v2| v1 + v2);
+        let keys: Vec<&i32> = result.keys().collect();
+        assert_eq!(keys, vec![&1, &2, &3]);
+    }
+
+    #[rstest]
+    fn test_merge_with_treemap_empty_left() {
+        let empty: PersistentTreeMap<i32, i32> = PersistentTreeMap::new();
+        let other = PersistentTreeMap::singleton(1, 100);
+        let result = empty.merge_with(&other, |_, v1, v2| v1 + v2);
+        assert_eq!(result, other);
+    }
+
+    #[rstest]
+    fn test_merge_with_treemap_max_resolver() {
+        let map1 = PersistentTreeMap::new().insert(1, 100).insert(2, 5);
+        let map2 = PersistentTreeMap::new().insert(1, 50).insert(2, 500);
+        let merged = map1.merge_with(&map2, |_, v1, v2| *v1.max(v2));
+        assert_eq!(merged.get(&1), Some(&100));
+        assert_eq!(merged.get(&2), Some(&500));
+    }
+
+    // =========================================================================
+    // delete_if Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_delete_if_treemap_empty() {
+        let map: PersistentTreeMap<i32, i32> = PersistentTreeMap::new();
+        let result = map.delete_if(|_, _| true);
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_delete_if_treemap_basic() {
+        let map = PersistentTreeMap::new()
+            .insert(1, 10)
+            .insert(2, 20)
+            .insert(3, 30);
+        let small = map.delete_if(|_, v| *v >= 20);
+        assert_eq!(small.len(), 1);
+        assert_eq!(small.get(&1), Some(&10));
+    }
+
+    #[rstest]
+    fn test_delete_if_treemap_preserves_order() {
+        let map = PersistentTreeMap::new()
+            .insert(5, 50)
+            .insert(1, 10)
+            .insert(3, 30);
+        let filtered = map.delete_if(|k, _| *k == 3);
+        let keys: Vec<&i32> = filtered.keys().collect();
+        assert_eq!(keys, vec![&1, &5]);
+    }
+
+    #[rstest]
+    fn test_delete_if_treemap_none() {
+        let map = PersistentTreeMap::new().insert(1, 10).insert(2, 20);
+        let result = map.delete_if(|_, _| false);
+        assert_eq!(result, map);
+    }
+
+    #[rstest]
+    fn test_delete_if_treemap_all() {
+        let map = PersistentTreeMap::new().insert(1, 10).insert(2, 20);
+        let result = map.delete_if(|_, _| true);
+        assert!(result.is_empty());
+    }
+
+    // =========================================================================
+    // keep_if Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_keep_if_treemap_empty() {
+        let map: PersistentTreeMap<i32, i32> = PersistentTreeMap::new();
+        let result = map.keep_if(|_, _| true);
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_keep_if_treemap_basic() {
+        let map = PersistentTreeMap::new()
+            .insert(1, 10)
+            .insert(2, 20)
+            .insert(3, 30);
+        let even_keys = map.keep_if(|k, _| k % 2 == 0);
+        assert_eq!(even_keys.len(), 1);
+        assert_eq!(even_keys.get(&2), Some(&20));
+    }
+
+    #[rstest]
+    fn test_keep_if_treemap_preserves_order() {
+        let map = PersistentTreeMap::new()
+            .insert(5, 50)
+            .insert(1, 10)
+            .insert(3, 30);
+        let filtered = map.keep_if(|k, _| *k > 1);
+        let keys: Vec<&i32> = filtered.keys().collect();
+        assert_eq!(keys, vec![&3, &5]);
+    }
+
+    #[rstest]
+    fn test_keep_if_treemap_all() {
+        let map = PersistentTreeMap::new().insert(1, 10).insert(2, 20);
+        let result = map.keep_if(|_, _| true);
+        assert_eq!(result, map);
+    }
+
+    #[rstest]
+    fn test_keep_if_treemap_none() {
+        let map = PersistentTreeMap::new().insert(1, 10).insert(2, 20);
+        let result = map.keep_if(|_, _| false);
+        assert!(result.is_empty());
+    }
+
+    // =========================================================================
+    // partition Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_partition_treemap_empty() {
+        let map: PersistentTreeMap<i32, i32> = PersistentTreeMap::new();
+        let (matching, not_matching) = map.partition(|_, _| true);
+        assert!(matching.is_empty());
+        assert!(not_matching.is_empty());
+    }
+
+    #[rstest]
+    fn test_partition_treemap_basic() {
+        let map = PersistentTreeMap::new()
+            .insert(1, 10)
+            .insert(2, 20)
+            .insert(3, 30)
+            .insert(4, 40);
+        let (even_keys, odd_keys) = map.partition(|k, _| k % 2 == 0);
+        assert_eq!(even_keys.len(), 2);
+        assert_eq!(odd_keys.len(), 2);
+        assert!(even_keys.contains_key(&2));
+        assert!(even_keys.contains_key(&4));
+        assert!(odd_keys.contains_key(&1));
+        assert!(odd_keys.contains_key(&3));
+    }
+
+    #[rstest]
+    fn test_partition_treemap_preserves_order() {
+        let map = PersistentTreeMap::new()
+            .insert(5, 50)
+            .insert(1, 10)
+            .insert(3, 30)
+            .insert(2, 20)
+            .insert(4, 40);
+        let (evens, odds) = map.partition(|k, _| k % 2 == 0);
+        let even_keys: Vec<&i32> = evens.keys().collect();
+        let odd_keys: Vec<&i32> = odds.keys().collect();
+        assert_eq!(even_keys, vec![&2, &4]);
+        assert_eq!(odd_keys, vec![&1, &3, &5]);
+    }
+
+    #[rstest]
+    fn test_partition_treemap_by_key_range() {
+        let map = PersistentTreeMap::new()
+            .insert(1, "one".to_string())
+            .insert(5, "five".to_string())
+            .insert(10, "ten".to_string())
+            .insert(15, "fifteen".to_string());
+        let (small, large) = map.partition(|k, _| *k < 10);
+        assert_eq!(small.len(), 2);
+        assert_eq!(large.len(), 2);
+    }
+
+    #[rstest]
+    fn test_partition_treemap_all_match() {
+        let map = PersistentTreeMap::new().insert(1, 10).insert(2, 20);
+        let (matching, not_matching) = map.partition(|_, _| true);
+        assert_eq!(matching, map);
+        assert!(not_matching.is_empty());
+    }
+
+    #[rstest]
+    fn test_partition_treemap_none_match() {
+        let map = PersistentTreeMap::new().insert(1, 10).insert(2, 20);
+        let (matching, not_matching) = map.partition(|_, _| false);
+        assert!(matching.is_empty());
+        assert_eq!(not_matching, map);
+    }
+
+    #[rstest]
+    fn test_partition_treemap_completeness() {
+        let map = PersistentTreeMap::new()
+            .insert(1, 10)
+            .insert(2, 20)
+            .insert(3, 30);
+        let (matching, not_matching) = map.partition(|k, _| k % 2 == 0);
+        assert_eq!(matching.len() + not_matching.len(), map.len());
+    }
+
+    #[rstest]
+    fn test_partition_treemap_equals_keep_if_delete_if() {
+        let map = PersistentTreeMap::new()
+            .insert(1, 10)
+            .insert(2, 20)
+            .insert(3, 30);
+        let predicate = |k: &i32, _: &i32| k % 2 == 0;
+        let (matching, not_matching) = map.partition(predicate);
+        let kept = map.keep_if(predicate);
+        let deleted_complement = map.keep_if(|k, v| !predicate(k, v));
+        assert_eq!(matching, kept);
+        assert_eq!(not_matching, deleted_complement);
     }
 }

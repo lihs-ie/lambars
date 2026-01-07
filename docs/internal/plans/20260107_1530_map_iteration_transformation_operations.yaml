@@ -1,0 +1,2043 @@
+# Map 反復・変換操作 実装計画
+#
+# 要件定義: docs/internal/requirements/20260107_1500_map_iteration_transformation_operations.yaml
+# 技術要件:
+#   - Rust: 1.92.0
+#   - edition: 2024
+#   - testing: rstest
+#
+# 実装方針:
+#   1. TDD（テスト駆動開発）でテストを先に書く
+#   2. PersistentHashMap と PersistentTreeMap で共通のAPIを提供する
+#   3. 既存の iter(), keys(), values(), merge() との互換性を維持する
+#   4. 構造的共有を可能な限り維持する
+#   5. 純粋関数として実装し、参照透過性を保証する
+#   6. 所有権方針: 基本的に &self を受け取り、新しいインスタンスを返す
+#      - 既存API（insert, merge, iter）と一貫性を保つ
+#      - 変換操作（map_values等）は into_iter を使うが、&self から clone して使用
+
+version: "1.0.0"
+name: "Map Iteration and Transformation Operations Implementation Plan"
+requirement_file: "docs/internal/requirements/20260107_1500_map_iteration_transformation_operations.yaml"
+
+# 既存実装の調査結果
+existing_implementation_analysis:
+  persistent_hashmap:
+    file: "src/persistent/hashmap.rs"
+    existing_methods:
+      - name: "iter"
+        signature: "fn iter(&self) -> PersistentHashMapIterator<'_, K, V>"
+        notes: |
+          先行収集型イテレータ。collect_entries() で全エントリをVecに収集してから反復。
+          真の遅延評価ではないが、要件定義では「確認・改善」とあり、
+          今回は entries() を iter() のエイリアスとして追加し、
+          遅延評価への改善は将来の拡張とする。
+      - name: "keys"
+        signature: "fn keys(&self) -> impl Iterator<Item = &K>"
+        notes: "iter().map() で実装済み。"
+      - name: "values"
+        signature: "fn values(&self) -> impl Iterator<Item = &V>"
+        notes: "iter().map() で実装済み。"
+      - name: "merge"
+        signature: "fn merge(&self, other: &Self) -> Self"
+        notes: |
+          既存実装あり。other の値が優先される。
+          全エントリをイテレートして insert する実装。
+    methods_to_add:
+      - map_values
+      - map_keys
+      - filter_map
+      - entries (iter のエイリアス)
+      - merge_with
+      - delete_if
+      - keep_if
+      - partition
+    # 注: keys, values メソッドは既存実装を維持するため、追加作業は不要
+    # 既存テストでカバーされているため、本計画では動作確認タスクをスキップ
+
+  persistent_treemap:
+    file: "src/persistent/treemap.rs"
+    existing_methods:
+      - name: "iter"
+        signature: "fn iter(&self) -> PersistentTreeMapIterator<'_, K, V>"
+        notes: |
+          先行収集型イテレータ。collect_entries_in_order() で in-order 走査してVecに収集。
+          真の遅延評価ではないが、entries() を iter() のエイリアスとして追加。
+      - name: "keys"
+        signature: "fn keys(&self) -> impl Iterator<Item = &K>"
+        notes: "iter().map() で実装済み。"
+      - name: "values"
+        signature: "fn values(&self) -> impl Iterator<Item = &V>"
+        notes: "iter().map() で実装済み。"
+    methods_to_add:
+      - map_values
+      - map_keys
+      - filter_map
+      - entries (iter のエイリアス)
+      - merge
+      - merge_with
+      - delete_if
+      - keep_if
+      - partition
+
+# 実装順序の概要
+implementation_order:
+  - step: 1
+    name: "基本的な変換操作"
+    items:
+      - map_values（HashMapとTreeMap両方）
+      - map_keys（HashMapとTreeMap両方）
+    rationale: |
+      他の操作に依存しない基本操作。
+      Functor的な操作として最も基本的。
+
+  - step: 2
+    name: "フィルタ変換操作"
+    items:
+      - filter_map（HashMapとTreeMap両方）
+    rationale: |
+      map_values の知見を活かして実装。
+      filter と map の組み合わせ。
+
+  - step: 3
+    name: "遅延評価イテレータ"
+    items:
+      - entries（iter のエイリアスとして追加）
+    rationale: |
+      既存の iter() をそのまま活用。
+      将来の遅延評価への移行を容易にするため、
+      entries という名前で公開。
+
+  - step: 4
+    name: "マージ操作"
+    items:
+      - merge（TreeMapに新規追加）
+      - merge_with（HashMapとTreeMap両方）
+    rationale: |
+      HashMapには既存の merge があるため、
+      TreeMap に merge を追加してから merge_with を両方に追加。
+
+  - step: 5
+    name: "述語ベース操作"
+    items:
+      - delete_if（HashMapとTreeMap両方）
+      - keep_if（HashMapとTreeMap両方）
+    rationale: |
+      filter_map の実装パターンを活用。
+      delete_if と keep_if は互いに補完関係。
+
+  - step: 6
+    name: "分割操作"
+    items:
+      - partition（HashMapとTreeMap両方）
+    rationale: |
+      delete_if と keep_if を1回の走査で同時実行する最適化版。
+      最後に実装することで、既存操作との整合性を確認しやすい。
+
+# 実装計画詳細
+implementation_plan:
+  # ============================================================================
+  # 1. map_values - 値のみを変換
+  # ============================================================================
+  - id: impl_map_values
+    requirement_id: map_values
+    name: "map_values - 値のみを変換"
+    priority: 1
+    description: |
+      Map の全ての値に関数を適用し、キーは保持したまま新しい Map を返す。
+      キーの型は変わらず、値の型のみが変換される。
+
+      PersistentHashMap: HAMT 構造を走査し、各エントリの値に関数を適用。
+      PersistentTreeMap: Red-Black Tree を in-order で走査し、各エントリの値に関数を適用。
+
+    files:
+      - path: src/persistent/hashmap.rs
+        description: |
+          PersistentHashMap に map_values メソッドを追加。
+          iter() で全エントリを取得し、変換後の値で新しい Map を構築。
+
+      - path: src/persistent/treemap.rs
+        description: |
+          PersistentTreeMap に map_values メソッドを追加。
+          iter() で全エントリを取得し、変換後の値で新しい Map を構築。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          PersistentHashMap に map_values メソッドを追加。
+        code_outline: |
+          /// Applies a function to all values, keeping keys unchanged.
+          ///
+          /// Returns a new map with the same keys but transformed values.
+          /// The length of the map is preserved.
+          ///
+          /// # Type Parameters
+          ///
+          /// * `W` - The type of the transformed values
+          /// * `F` - The transformation function type
+          ///
+          /// # Arguments
+          ///
+          /// * `function` - A function to apply to each value
+          ///
+          /// # Complexity
+          ///
+          /// O(n) where n is the number of entries
+          ///
+          /// # Examples
+          ///
+          /// ```rust
+          /// use lambars::persistent::PersistentHashMap;
+          ///
+          /// let map = PersistentHashMap::new()
+          ///     .insert("a".to_string(), 1)
+          ///     .insert("b".to_string(), 2);
+          /// let doubled = map.map_values(|v| v * 2);
+          /// assert_eq!(doubled.get("a"), Some(&2));
+          /// assert_eq!(doubled.get("b"), Some(&4));
+          /// ```
+          #[must_use]
+          pub fn map_values<W, F>(&self, mut function: F) -> PersistentHashMap<K, W>
+          where
+              K: Clone + Hash + Eq,
+              W: Clone,
+              F: FnMut(&V) -> W,
+          {
+              self.iter()
+                  .map(|(key, value)| (key.clone(), function(value)))
+                  .collect()
+          }
+
+      - step: 2
+        description: |
+          PersistentTreeMap に map_values メソッドを追加。
+        code_outline: |
+          /// Applies a function to all values, keeping keys unchanged.
+          ///
+          /// Returns a new map with the same keys but transformed values.
+          /// The length of the map is preserved, and entries remain in sorted key order.
+          ///
+          /// # Type Parameters
+          ///
+          /// * `W` - The type of the transformed values
+          /// * `F` - The transformation function type
+          ///
+          /// # Arguments
+          ///
+          /// * `function` - A function to apply to each value
+          ///
+          /// # Complexity
+          ///
+          /// O(n log n) where n is the number of entries
+          ///
+          /// # Examples
+          ///
+          /// ```rust
+          /// use lambars::persistent::PersistentTreeMap;
+          ///
+          /// let map = PersistentTreeMap::new()
+          ///     .insert(1, 10)
+          ///     .insert(2, 20);
+          /// let doubled = map.map_values(|v| v * 2);
+          /// assert_eq!(doubled.get(&1), Some(&20));
+          /// assert_eq!(doubled.get(&2), Some(&40));
+          /// ```
+          #[must_use]
+          pub fn map_values<W, F>(&self, mut function: F) -> PersistentTreeMap<K, W>
+          where
+              K: Clone + Ord,
+              W: Clone,
+              F: FnMut(&V) -> W,
+          {
+              self.iter()
+                  .map(|(key, value)| (key.clone(), function(value)))
+                  .collect()
+          }
+
+    tests:
+      - name: test_map_values_hashmap
+        description: PersistentHashMap の map_values の基本動作テスト
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_map_values_empty() {
+              let map: PersistentHashMap<String, i32> = PersistentHashMap::new();
+              let result = map.map_values(|v| v * 2);
+              assert!(result.is_empty());
+          }
+
+          #[rstest]
+          fn test_map_values_basic() {
+              let map = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("b".to_string(), 2);
+              let doubled = map.map_values(|v| v * 2);
+              assert_eq!(doubled.get("a"), Some(&2));
+              assert_eq!(doubled.get("b"), Some(&4));
+              assert_eq!(doubled.len(), 2);
+          }
+
+          #[rstest]
+          fn test_map_values_type_change() {
+              let map = PersistentHashMap::new()
+                  .insert(1, 100)
+                  .insert(2, 200);
+              let stringified = map.map_values(|v| v.to_string());
+              assert_eq!(stringified.get(&1), Some(&"100".to_string()));
+              assert_eq!(stringified.get(&2), Some(&"200".to_string()));
+          }
+
+          #[rstest]
+          fn test_map_values_identity_law() {
+              let map = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("b".to_string(), 2);
+              let result = map.clone().map_values(|v| *v);
+              assert_eq!(result, map);
+          }
+
+          #[rstest]
+          fn test_map_values_length_preservation() {
+              let map = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("b".to_string(), 2)
+                  .insert("c".to_string(), 3);
+              let result = map.clone().map_values(|v| v * 2);
+              assert_eq!(result.len(), map.len());
+          }
+
+          #[rstest]
+          fn test_map_values_composition_law() {
+              let map = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("b".to_string(), 2);
+              let f = |v: &i32| v * 2;
+              let g = |v: &i32| v + 10;
+              let chained = map.clone().map_values(f).map_values(g);
+              let composed = map.map_values(|v| g(&f(v)));
+              assert_eq!(chained, composed);
+          }
+
+      - name: test_map_values_treemap
+        description: PersistentTreeMap の map_values の基本動作テスト
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_map_values_treemap_empty() {
+              let map: PersistentTreeMap<i32, i32> = PersistentTreeMap::new();
+              let result = map.map_values(|v| v * 2);
+              assert!(result.is_empty());
+          }
+
+          #[rstest]
+          fn test_map_values_treemap_basic() {
+              let map = PersistentTreeMap::new()
+                  .insert(1, 10)
+                  .insert(2, 20);
+              let doubled = map.map_values(|v| v * 2);
+              assert_eq!(doubled.get(&1), Some(&20));
+              assert_eq!(doubled.get(&2), Some(&40));
+          }
+
+          #[rstest]
+          fn test_map_values_treemap_preserves_order() {
+              let map = PersistentTreeMap::new()
+                  .insert(3, 30)
+                  .insert(1, 10)
+                  .insert(2, 20);
+              let result = map.map_values(|v| v / 10);
+              let keys: Vec<&i32> = result.keys().collect();
+              assert_eq!(keys, vec![&1, &2, &3]);
+          }
+
+    dependencies: []
+
+  # ============================================================================
+  # 2. map_keys - キーのみを変換
+  # ============================================================================
+  - id: impl_map_keys
+    requirement_id: map_keys
+    name: "map_keys - キーのみを変換"
+    priority: 2
+    description: |
+      Map の全てのキーに関数を適用し、値は保持したまま新しい Map を返す。
+
+      注意: キーの変換により衝突が発生する可能性がある。
+      衝突時は後から処理されたエントリが優先される。
+
+    files:
+      - path: src/persistent/hashmap.rs
+        description: |
+          PersistentHashMap に map_keys メソッドを追加。
+          新しいキーの型 L に対して Hash + Eq 制約が必要。
+
+      - path: src/persistent/treemap.rs
+        description: |
+          PersistentTreeMap に map_keys メソッドを追加。
+          新しいキーの型 L に対して Ord 制約が必要。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          PersistentHashMap に map_keys メソッドを追加。
+        code_outline: |
+          /// Applies a function to all keys, keeping values unchanged.
+          ///
+          /// Returns a new map with transformed keys and the original values.
+          ///
+          /// # Warning
+          ///
+          /// Key transformation may cause collisions. When multiple original keys
+          /// map to the same new key, only one entry will be kept (the one
+          /// processed last, which depends on iteration order).
+          ///
+          /// # Type Parameters
+          ///
+          /// * `L` - The type of the transformed keys
+          /// * `F` - The transformation function type
+          ///
+          /// # Arguments
+          ///
+          /// * `function` - A function to apply to each key
+          ///
+          /// # Complexity
+          ///
+          /// O(n) where n is the number of entries
+          ///
+          /// # Examples
+          ///
+          /// ```rust
+          /// use lambars::persistent::PersistentHashMap;
+          ///
+          /// let map = PersistentHashMap::new()
+          ///     .insert("hello".to_string(), 1)
+          ///     .insert("world".to_string(), 2);
+          /// let uppercased = map.map_keys(|k| k.to_uppercase());
+          /// assert_eq!(uppercased.get("HELLO"), Some(&1));
+          /// assert_eq!(uppercased.get("WORLD"), Some(&2));
+          /// ```
+          #[must_use]
+          pub fn map_keys<L, F>(&self, mut function: F) -> PersistentHashMap<L, V>
+          where
+              L: Clone + Hash + Eq,
+              V: Clone,
+              F: FnMut(&K) -> L,
+          {
+              self.iter()
+                  .map(|(key, value)| (function(key), value.clone()))
+                  .collect()
+          }
+
+      - step: 2
+        description: |
+          PersistentTreeMap に map_keys メソッドを追加。
+        code_outline: |
+          /// Applies a function to all keys, keeping values unchanged.
+          ///
+          /// Returns a new map with transformed keys and the original values.
+          /// The new map will be ordered by the new keys.
+          ///
+          /// # Warning
+          ///
+          /// Key transformation may cause collisions. When multiple original keys
+          /// map to the same new key, only one entry will be kept. The collision
+          /// behavior depends on internal iteration order.
+          ///
+          /// # Type Parameters
+          ///
+          /// * `L` - The type of the transformed keys
+          /// * `F` - The transformation function type
+          ///
+          /// # Arguments
+          ///
+          /// * `function` - A function to apply to each key
+          ///
+          /// # Complexity
+          ///
+          /// O(n log n) where n is the number of entries
+          ///
+          /// # Examples
+          ///
+          /// ```rust
+          /// use lambars::persistent::PersistentTreeMap;
+          ///
+          /// let map = PersistentTreeMap::new()
+          ///     .insert("a".to_string(), 1)
+          ///     .insert("bb".to_string(), 2)
+          ///     .insert("ccc".to_string(), 3);
+          /// let by_length = map.map_keys(|k| k.len());
+          /// assert_eq!(by_length.get(&1), Some(&1));
+          /// assert_eq!(by_length.get(&2), Some(&2));
+          /// assert_eq!(by_length.get(&3), Some(&3));
+          /// ```
+          #[must_use]
+          pub fn map_keys<L, F>(&self, mut function: F) -> PersistentTreeMap<L, V>
+          where
+              L: Clone + Ord,
+              V: Clone,
+              F: FnMut(&K) -> L,
+          {
+              self.iter()
+                  .map(|(key, value)| (function(key), value.clone()))
+                  .collect()
+          }
+
+    tests:
+      - name: test_map_keys_hashmap
+        description: PersistentHashMap の map_keys の基本動作テスト
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_map_keys_empty() {
+              let map: PersistentHashMap<String, i32> = PersistentHashMap::new();
+              let result = map.map_keys(|k| k.to_uppercase());
+              assert!(result.is_empty());
+          }
+
+          #[rstest]
+          fn test_map_keys_basic() {
+              let map = PersistentHashMap::new()
+                  .insert("hello".to_string(), 1)
+                  .insert("world".to_string(), 2);
+              let uppercased = map.map_keys(|k| k.to_uppercase());
+              assert_eq!(uppercased.get("HELLO"), Some(&1));
+              assert_eq!(uppercased.get("WORLD"), Some(&2));
+          }
+
+          #[rstest]
+          fn test_map_keys_type_change() {
+              let map = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("bb".to_string(), 2)
+                  .insert("ccc".to_string(), 3);
+              let by_length = map.map_keys(|k| k.len());
+              assert_eq!(by_length.get(&1), Some(&1));
+              assert_eq!(by_length.get(&2), Some(&2));
+              assert_eq!(by_length.get(&3), Some(&3));
+          }
+
+          #[rstest]
+          fn test_map_keys_collision() {
+              let map = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("A".to_string(), 2);
+              let uppercased = map.map_keys(|k| k.to_uppercase());
+              // One of the values should survive
+              assert_eq!(uppercased.len(), 1);
+              assert!(uppercased.contains_key("A"));
+          }
+
+          #[rstest]
+          fn test_map_keys_identity_law() {
+              let map = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("b".to_string(), 2);
+              let result = map.clone().map_keys(|k| k.clone());
+              assert_eq!(result, map);
+          }
+
+          #[rstest]
+          fn test_map_keys_length_upper_bound() {
+              let map = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("A".to_string(), 2);
+              let result = map.clone().map_keys(|k| k.to_uppercase());
+              assert!(result.len() <= map.len());
+          }
+
+      - name: test_map_keys_treemap
+        description: PersistentTreeMap の map_keys の基本動作テスト
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_map_keys_treemap_empty() {
+              let map: PersistentTreeMap<String, i32> = PersistentTreeMap::new();
+              let result = map.map_keys(|k| k.len());
+              assert!(result.is_empty());
+          }
+
+          #[rstest]
+          fn test_map_keys_treemap_basic() {
+              let map = PersistentTreeMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("bb".to_string(), 2)
+                  .insert("ccc".to_string(), 3);
+              let by_length = map.map_keys(|k| k.len());
+              assert_eq!(by_length.get(&1), Some(&1));
+              assert_eq!(by_length.get(&2), Some(&2));
+              assert_eq!(by_length.get(&3), Some(&3));
+          }
+
+          #[rstest]
+          fn test_map_keys_treemap_reorders() {
+              let map = PersistentTreeMap::new()
+                  .insert(1, "a".to_string())
+                  .insert(2, "b".to_string())
+                  .insert(3, "c".to_string());
+              let negated = map.map_keys(|k| -k);
+              let keys: Vec<&i32> = negated.keys().collect();
+              assert_eq!(keys, vec![&-3, &-2, &-1]);
+          }
+
+    dependencies:
+      - impl_map_values
+
+  # ============================================================================
+  # 3. filter_map - フィルタと変換を同時に
+  # ============================================================================
+  - id: impl_filter_map
+    requirement_id: filter_map
+    name: "filter_map - フィルタと変換を同時に"
+    priority: 3
+    description: |
+      各エントリに対して関数を適用し、Some を返した場合のみ結果に含める。
+      None を返した場合、そのエントリは結果から除外される。
+
+      filter と map を組み合わせた操作で、1回の走査で両方を実行する。
+
+    files:
+      - path: src/persistent/hashmap.rs
+        description: |
+          PersistentHashMap に filter_map メソッドを追加。
+
+      - path: src/persistent/treemap.rs
+        description: |
+          PersistentTreeMap に filter_map メソッドを追加。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          PersistentHashMap に filter_map メソッドを追加。
+        code_outline: |
+          /// Applies a function to each entry, keeping only those that return Some.
+          ///
+          /// This combines filtering and mapping in a single operation.
+          /// Entries for which the function returns None are excluded from the result.
+          ///
+          /// # Type Parameters
+          ///
+          /// * `W` - The type of the transformed values
+          /// * `F` - The filter-map function type
+          ///
+          /// # Arguments
+          ///
+          /// * `function` - A function that receives a reference to the key and the value,
+          ///   and returns Some(new_value) to include or None to exclude
+          ///
+          /// # Complexity
+          ///
+          /// O(n) where n is the number of entries
+          ///
+          /// # Examples
+          ///
+          /// ```rust
+          /// use lambars::persistent::PersistentHashMap;
+          ///
+          /// let map = PersistentHashMap::new()
+          ///     .insert("a".to_string(), 1)
+          ///     .insert("b".to_string(), 2)
+          ///     .insert("c".to_string(), 3);
+          /// let evens_doubled = map.filter_map(|_, v| {
+          ///     if v % 2 == 0 { Some(v * 2) } else { None }
+          /// });
+          /// assert_eq!(evens_doubled.len(), 1);
+          /// assert_eq!(evens_doubled.get("b"), Some(&4));
+          /// ```
+          #[must_use]
+          pub fn filter_map<W, F>(&self, mut function: F) -> PersistentHashMap<K, W>
+          where
+              K: Clone + Hash + Eq,
+              W: Clone,
+              F: FnMut(&K, &V) -> Option<W>,
+          {
+              self.iter()
+                  .filter_map(|(key, value)| function(key, value).map(|new_value| (key.clone(), new_value)))
+                  .collect()
+          }
+
+      - step: 2
+        description: |
+          PersistentTreeMap に filter_map メソッドを追加。
+        code_outline: |
+          /// Applies a function to each entry, keeping only those that return Some.
+          ///
+          /// This combines filtering and mapping in a single operation.
+          /// Entries for which the function returns None are excluded from the result.
+          /// The result maintains sorted key order.
+          ///
+          /// # Type Parameters
+          ///
+          /// * `W` - The type of the transformed values
+          /// * `F` - The filter-map function type
+          ///
+          /// # Arguments
+          ///
+          /// * `function` - A function that receives a reference to the key and the value,
+          ///   and returns Some(new_value) to include or None to exclude
+          ///
+          /// # Complexity
+          ///
+          /// O(n log n) where n is the number of entries
+          ///
+          /// # Examples
+          ///
+          /// ```rust
+          /// use lambars::persistent::PersistentTreeMap;
+          ///
+          /// let map = PersistentTreeMap::new()
+          ///     .insert(1, "1".to_string())
+          ///     .insert(2, "abc".to_string())
+          ///     .insert(3, "42".to_string());
+          /// let parsed = map.filter_map(|_, v| v.parse::<i32>().ok());
+          /// assert_eq!(parsed.len(), 2);
+          /// assert_eq!(parsed.get(&1), Some(&1));
+          /// assert_eq!(parsed.get(&3), Some(&42));
+          /// ```
+          #[must_use]
+          pub fn filter_map<W, F>(&self, mut function: F) -> PersistentTreeMap<K, W>
+          where
+              K: Clone + Ord,
+              W: Clone,
+              F: FnMut(&K, &V) -> Option<W>,
+          {
+              self.iter()
+                  .filter_map(|(key, value)| function(key, value).map(|new_value| (key.clone(), new_value)))
+                  .collect()
+          }
+
+    tests:
+      - name: test_filter_map_hashmap
+        description: PersistentHashMap の filter_map の基本動作テスト
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_filter_map_empty() {
+              let map: PersistentHashMap<String, i32> = PersistentHashMap::new();
+              let result = map.filter_map(|_, v| Some(v * 2));
+              assert!(result.is_empty());
+          }
+
+          #[rstest]
+          fn test_filter_map_basic() {
+              let map = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("b".to_string(), 2)
+                  .insert("c".to_string(), 3)
+                  .insert("d".to_string(), 4);
+              let evens_doubled = map.filter_map(|_, v| {
+                  if v % 2 == 0 { Some(v * 2) } else { None }
+              });
+              assert_eq!(evens_doubled.len(), 2);
+              assert_eq!(evens_doubled.get("b"), Some(&4));
+              assert_eq!(evens_doubled.get("d"), Some(&8));
+          }
+
+          #[rstest]
+          fn test_filter_map_all_none() {
+              let map = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("b".to_string(), 2);
+              let result: PersistentHashMap<String, i32> = map.filter_map(|_, _| None);
+              assert!(result.is_empty());
+          }
+
+          #[rstest]
+          fn test_filter_map_all_some() {
+              let map = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("b".to_string(), 2);
+              let result = map.clone().filter_map(|_, v| Some(*v));
+              assert_eq!(result, map);
+          }
+
+          #[rstest]
+          fn test_filter_map_identity_with_some() {
+              let map = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("b".to_string(), 2);
+              let filter_mapped = map.clone().filter_map(|_, v| Some(*v * 2));
+              let map_valued = map.map_values(|v| v * 2);
+              assert_eq!(filter_mapped, map_valued);
+          }
+
+          #[rstest]
+          fn test_filter_map_type_change() {
+              let map = PersistentHashMap::new()
+                  .insert("valid".to_string(), "42".to_string())
+                  .insert("invalid".to_string(), "abc".to_string());
+              let parsed = map.filter_map(|_, v| v.parse::<i32>().ok());
+              assert_eq!(parsed.len(), 1);
+              assert_eq!(parsed.get("valid"), Some(&42));
+          }
+
+          #[rstest]
+          fn test_filter_map_uses_key() {
+              let map = PersistentHashMap::new()
+                  .insert("keep".to_string(), 1)
+                  .insert("drop".to_string(), 2);
+              let result = map.filter_map(|k, v| {
+                  if k.starts_with("keep") { Some(v) } else { None }
+              });
+              assert_eq!(result.len(), 1);
+              assert!(result.contains_key("keep"));
+          }
+
+      - name: test_filter_map_treemap
+        description: PersistentTreeMap の filter_map の基本動作テスト
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_filter_map_treemap_empty() {
+              let map: PersistentTreeMap<i32, i32> = PersistentTreeMap::new();
+              let result = map.filter_map(|_, v| Some(v * 2));
+              assert!(result.is_empty());
+          }
+
+          #[rstest]
+          fn test_filter_map_treemap_basic() {
+              let map = PersistentTreeMap::new()
+                  .insert(1, "1".to_string())
+                  .insert(2, "abc".to_string())
+                  .insert(3, "42".to_string());
+              let parsed = map.filter_map(|_, v| v.parse::<i32>().ok());
+              assert_eq!(parsed.len(), 2);
+              assert_eq!(parsed.get(&1), Some(&1));
+              assert_eq!(parsed.get(&3), Some(&42));
+          }
+
+          #[rstest]
+          fn test_filter_map_treemap_preserves_order() {
+              let map = PersistentTreeMap::new()
+                  .insert(5, 50)
+                  .insert(1, 10)
+                  .insert(3, 30);
+              let filtered = map.filter_map(|k, v| {
+                  if *k > 1 { Some(v) } else { None }
+              });
+              let keys: Vec<&i32> = filtered.keys().collect();
+              assert_eq!(keys, vec![&3, &5]);
+          }
+
+    dependencies:
+      - impl_map_values
+
+  # ============================================================================
+  # 4. entries - 遅延評価イテレータ（iter のエイリアス）
+  # ============================================================================
+  - id: impl_entries
+    requirement_id: lazy_iterators
+    name: "entries - iter のエイリアス"
+    priority: 4
+    description: |
+      キーと値のペアを返すイテレータ。
+      現時点では iter() のエイリアスとして実装。
+
+      将来的に真の遅延評価イテレータへの移行を容易にするため、
+      entries という名前で公開する。
+
+    files:
+      - path: src/persistent/hashmap.rs
+        description: |
+          PersistentHashMap に entries メソッドを追加（iter のエイリアス）。
+
+      - path: src/persistent/treemap.rs
+        description: |
+          PersistentTreeMap に entries メソッドを追加（iter のエイリアス）。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          PersistentHashMap に entries メソッドを追加。
+        code_outline: |
+          /// Returns an iterator over key-value pairs.
+          ///
+          /// This is an alias for [`iter`](Self::iter), provided for API consistency
+          /// with other functional programming languages.
+          ///
+          /// # Examples
+          ///
+          /// ```rust
+          /// use lambars::persistent::PersistentHashMap;
+          ///
+          /// let map = PersistentHashMap::new()
+          ///     .insert("a".to_string(), 1)
+          ///     .insert("b".to_string(), 2);
+          /// for (key, value) in map.entries() {
+          ///     println!("{}: {}", key, value);
+          /// }
+          /// ```
+          #[inline]
+          #[must_use]
+          pub fn entries(&self) -> PersistentHashMapIterator<'_, K, V> {
+              self.iter()
+          }
+
+      - step: 2
+        description: |
+          PersistentTreeMap に entries メソッドを追加。
+        code_outline: |
+          /// Returns an iterator over key-value pairs in sorted key order.
+          ///
+          /// This is an alias for [`iter`](Self::iter), provided for API consistency
+          /// with other functional programming languages.
+          ///
+          /// # Examples
+          ///
+          /// ```rust
+          /// use lambars::persistent::PersistentTreeMap;
+          ///
+          /// let map = PersistentTreeMap::new()
+          ///     .insert(1, "one")
+          ///     .insert(2, "two");
+          /// for (key, value) in map.entries() {
+          ///     println!("{}: {}", key, value);
+          /// }
+          /// ```
+          #[inline]
+          #[must_use]
+          pub fn entries(&self) -> PersistentTreeMapIterator<'_, K, V> {
+              self.iter()
+          }
+
+    tests:
+      - name: test_entries
+        description: entries メソッドが iter と同じ動作をすることのテスト
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_entries_hashmap_equals_iter() {
+              let map = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("b".to_string(), 2);
+              let iter_entries: Vec<_> = map.iter().collect();
+              let entries_entries: Vec<_> = map.entries().collect();
+              assert_eq!(iter_entries, entries_entries);
+          }
+
+          #[rstest]
+          fn test_entries_treemap_equals_iter() {
+              let map = PersistentTreeMap::new()
+                  .insert(1, "one".to_string())
+                  .insert(2, "two".to_string());
+              let iter_entries: Vec<_> = map.iter().collect();
+              let entries_entries: Vec<_> = map.entries().collect();
+              assert_eq!(iter_entries, entries_entries);
+          }
+
+          #[rstest]
+          fn test_entries_count_equals_len() {
+              let map = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("b".to_string(), 2)
+                  .insert("c".to_string(), 3);
+              assert_eq!(map.entries().count(), map.len());
+          }
+
+    dependencies: []
+
+  # ============================================================================
+  # 5. merge（TreeMap） - Map のマージ
+  # ============================================================================
+  - id: impl_merge_treemap
+    requirement_id: merge_operations
+    name: "merge - PersistentTreeMap のマージ"
+    priority: 5
+    description: |
+      PersistentTreeMap に merge メソッドを追加。
+      他の Map からエントリを追加し、衝突時は other が優先。
+
+      PersistentHashMap には既存実装があるため、TreeMap のみ追加。
+
+    files:
+      - path: src/persistent/treemap.rs
+        description: |
+          PersistentTreeMap に merge メソッドを追加。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          PersistentTreeMap に merge メソッドを追加。
+        code_outline: |
+          /// Merges two maps, with values from `other` taking precedence on key conflicts.
+          ///
+          /// Returns a new map containing all entries from both maps.
+          /// When a key exists in both maps, the value from `other` is used.
+          ///
+          /// # Arguments
+          ///
+          /// * `other` - The map to merge with
+          ///
+          /// # Complexity
+          ///
+          /// O(m log(n + m)) where n is the size of self and m is the size of other
+          ///
+          /// # Examples
+          ///
+          /// ```rust
+          /// use lambars::persistent::PersistentTreeMap;
+          ///
+          /// let map1 = PersistentTreeMap::new()
+          ///     .insert(1, "one")
+          ///     .insert(2, "two");
+          /// let map2 = PersistentTreeMap::new()
+          ///     .insert(2, "TWO")
+          ///     .insert(3, "three");
+          /// let merged = map1.merge(&map2);
+          /// assert_eq!(merged.get(&1), Some(&"one"));
+          /// assert_eq!(merged.get(&2), Some(&"TWO")); // From map2
+          /// assert_eq!(merged.get(&3), Some(&"three"));
+          /// ```
+          #[must_use]
+          pub fn merge(&self, other: &Self) -> Self {
+              let mut result = self.clone();
+              for (key, value) in other {
+                  result = result.insert(key.clone(), value.clone());
+              }
+              result
+          }
+
+    tests:
+      - name: test_merge_treemap
+        description: PersistentTreeMap の merge の基本動作テスト
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_merge_treemap_empty_left() {
+              let empty: PersistentTreeMap<i32, String> = PersistentTreeMap::new();
+              let other = PersistentTreeMap::singleton(1, "one".to_string());
+              let result = empty.merge(&other);
+              assert_eq!(result, other);
+          }
+
+          #[rstest]
+          fn test_merge_treemap_empty_right() {
+              let map = PersistentTreeMap::singleton(1, "one".to_string());
+              let empty: PersistentTreeMap<i32, String> = PersistentTreeMap::new();
+              let result = map.merge(&empty);
+              assert_eq!(result, map);
+          }
+
+          #[rstest]
+          fn test_merge_treemap_no_overlap() {
+              let map1 = PersistentTreeMap::new()
+                  .insert(1, "one".to_string())
+                  .insert(2, "two".to_string());
+              let map2 = PersistentTreeMap::new()
+                  .insert(3, "three".to_string())
+                  .insert(4, "four".to_string());
+              let result = map1.merge(&map2);
+              assert_eq!(result.len(), 4);
+          }
+
+          #[rstest]
+          fn test_merge_treemap_with_overlap() {
+              let map1 = PersistentTreeMap::new()
+                  .insert(1, "one".to_string())
+                  .insert(2, "two".to_string());
+              let map2 = PersistentTreeMap::new()
+                  .insert(2, "TWO".to_string())
+                  .insert(3, "three".to_string());
+              let result = map1.merge(&map2);
+              assert_eq!(result.len(), 3);
+              assert_eq!(result.get(&2), Some(&"TWO".to_string()));
+          }
+
+          #[rstest]
+          fn test_merge_treemap_preserves_order() {
+              let map1 = PersistentTreeMap::singleton(2, "two".to_string());
+              let map2 = PersistentTreeMap::new()
+                  .insert(1, "one".to_string())
+                  .insert(3, "three".to_string());
+              let result = map1.merge(&map2);
+              let keys: Vec<&i32> = result.keys().collect();
+              assert_eq!(keys, vec![&1, &2, &3]);
+          }
+
+    dependencies: []
+
+  # ============================================================================
+  # 6. merge_with - 衝突時のカスタム処理付きマージ
+  # ============================================================================
+  - id: impl_merge_with
+    requirement_id: merge_operations
+    name: "merge_with - 衝突時のカスタム処理付きマージ"
+    priority: 6
+    description: |
+      他の Map のエントリを追加し、キー衝突時は resolver 関数で解決する。
+
+      PersistentHashMap と PersistentTreeMap の両方に追加。
+
+    files:
+      - path: src/persistent/hashmap.rs
+        description: |
+          PersistentHashMap に merge_with メソッドを追加。
+
+      - path: src/persistent/treemap.rs
+        description: |
+          PersistentTreeMap に merge_with メソッドを追加。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          PersistentHashMap に merge_with メソッドを追加。
+        code_outline: |
+          /// Merges two maps with a custom conflict resolver.
+          ///
+          /// Returns a new map containing all entries from both maps.
+          /// When a key exists in both maps, the resolver function is called
+          /// with the key and both values to determine the final value.
+          ///
+          /// # Arguments
+          ///
+          /// * `other` - The map to merge with
+          /// * `resolver` - A function that receives (key, self_value, other_value) and
+          ///   returns the value to use in the merged map
+          ///
+          /// # Complexity
+          ///
+          /// O(n + m) where n and m are the sizes of the two maps
+          ///
+          /// # Examples
+          ///
+          /// ```rust
+          /// use lambars::persistent::PersistentHashMap;
+          ///
+          /// let map1 = PersistentHashMap::new()
+          ///     .insert("a".to_string(), 1)
+          ///     .insert("b".to_string(), 2);
+          /// let map2 = PersistentHashMap::new()
+          ///     .insert("b".to_string(), 20)
+          ///     .insert("c".to_string(), 3);
+          /// let merged = map1.merge_with(&map2, |_, v1, v2| v1 + v2);
+          /// assert_eq!(merged.get("a"), Some(&1));
+          /// assert_eq!(merged.get("b"), Some(&22)); // 2 + 20
+          /// assert_eq!(merged.get("c"), Some(&3));
+          /// ```
+          #[must_use]
+          pub fn merge_with<F>(&self, other: &Self, mut resolver: F) -> Self
+          where
+              F: FnMut(&K, &V, &V) -> V,
+          {
+              let mut result = self.clone();
+              for (key, other_value) in other {
+                  result = match result.get(key) {
+                      Some(self_value) => {
+                          let resolved_value = resolver(key, self_value, other_value);
+                          result.insert(key.clone(), resolved_value)
+                      }
+                      None => result.insert(key.clone(), other_value.clone()),
+                  };
+              }
+              result
+          }
+
+      - step: 2
+        description: |
+          PersistentTreeMap に merge_with メソッドを追加。
+        code_outline: |
+          /// Merges two maps with a custom conflict resolver.
+          ///
+          /// Returns a new map containing all entries from both maps.
+          /// When a key exists in both maps, the resolver function is called
+          /// with the key and both values to determine the final value.
+          ///
+          /// # Arguments
+          ///
+          /// * `other` - The map to merge with
+          /// * `resolver` - A function that receives (key, self_value, other_value) and
+          ///   returns the value to use in the merged map
+          ///
+          /// # Complexity
+          ///
+          /// O(m log(n + m)) where n is the size of self and m is the size of other
+          ///
+          /// # Examples
+          ///
+          /// ```rust
+          /// use lambars::persistent::PersistentTreeMap;
+          ///
+          /// let map1 = PersistentTreeMap::new()
+          ///     .insert(1, 100)
+          ///     .insert(2, 200);
+          /// let map2 = PersistentTreeMap::new()
+          ///     .insert(2, 50)
+          ///     .insert(3, 300);
+          /// let merged = map1.merge_with(&map2, |_, v1, v2| *v1.max(v2));
+          /// assert_eq!(merged.get(&1), Some(&100));
+          /// assert_eq!(merged.get(&2), Some(&200)); // max(200, 50)
+          /// assert_eq!(merged.get(&3), Some(&300));
+          /// ```
+          #[must_use]
+          pub fn merge_with<F>(&self, other: &Self, mut resolver: F) -> Self
+          where
+              F: FnMut(&K, &V, &V) -> V,
+          {
+              let mut result = self.clone();
+              for (key, other_value) in other {
+                  result = match result.get(key) {
+                      Some(self_value) => {
+                          let resolved_value = resolver(key, self_value, other_value);
+                          result.insert(key.clone(), resolved_value)
+                      }
+                      None => result.insert(key.clone(), other_value.clone()),
+                  };
+              }
+              result
+          }
+
+    tests:
+      - name: test_merge_with_hashmap
+        description: PersistentHashMap の merge_with の基本動作テスト
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_merge_with_empty_left() {
+              let empty: PersistentHashMap<String, i32> = PersistentHashMap::new();
+              let other = PersistentHashMap::singleton("a".to_string(), 1);
+              let result = empty.merge_with(&other, |_, v1, v2| v1 + v2);
+              assert_eq!(result, other);
+          }
+
+          #[rstest]
+          fn test_merge_with_empty_right() {
+              let map = PersistentHashMap::singleton("a".to_string(), 1);
+              let empty: PersistentHashMap<String, i32> = PersistentHashMap::new();
+              let result = map.merge_with(&empty, |_, v1, v2| v1 + v2);
+              assert_eq!(result, map);
+          }
+
+          #[rstest]
+          fn test_merge_with_sum_resolver() {
+              let map1 = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("b".to_string(), 2);
+              let map2 = PersistentHashMap::new()
+                  .insert("b".to_string(), 20)
+                  .insert("c".to_string(), 3);
+              let merged = map1.merge_with(&map2, |_, v1, v2| v1 + v2);
+              assert_eq!(merged.get("a"), Some(&1));
+              assert_eq!(merged.get("b"), Some(&22));
+              assert_eq!(merged.get("c"), Some(&3));
+          }
+
+          #[rstest]
+          fn test_merge_with_max_resolver() {
+              let map1 = PersistentHashMap::new()
+                  .insert("x".to_string(), 100)
+                  .insert("y".to_string(), 5);
+              let map2 = PersistentHashMap::new()
+                  .insert("x".to_string(), 50)
+                  .insert("y".to_string(), 500);
+              let merged = map1.merge_with(&map2, |_, v1, v2| *v1.max(v2));
+              assert_eq!(merged.get("x"), Some(&100));
+              assert_eq!(merged.get("y"), Some(&500));
+          }
+
+          #[rstest]
+          fn test_merge_with_left_wins() {
+              let map1 = PersistentHashMap::singleton("a".to_string(), 1);
+              let map2 = PersistentHashMap::singleton("a".to_string(), 2);
+              let merged = map1.merge_with(&map2, |_, v1, _| *v1);
+              assert_eq!(merged.get("a"), Some(&1));
+          }
+
+          #[rstest]
+          fn test_merge_with_right_wins() {
+              let map1 = PersistentHashMap::singleton("a".to_string(), 1);
+              let map2 = PersistentHashMap::singleton("a".to_string(), 2);
+              let merged = map1.merge_with(&map2, |_, _, v2| *v2);
+              assert_eq!(merged.get("a"), Some(&2));
+          }
+
+          #[rstest]
+          fn test_merge_with_commutativity_with_commutative_resolver() {
+              let map1 = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("b".to_string(), 2);
+              let map2 = PersistentHashMap::new()
+                  .insert("b".to_string(), 20)
+                  .insert("c".to_string(), 3);
+              let merged1 = map1.merge_with(&map2, |_, v1, v2| v1 + v2);
+              let merged2 = map2.merge_with(&map1, |_, v1, v2| v1 + v2);
+              assert_eq!(merged1, merged2);
+          }
+
+      - name: test_merge_with_treemap
+        description: PersistentTreeMap の merge_with の基本動作テスト
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_merge_with_treemap_sum() {
+              let map1 = PersistentTreeMap::new()
+                  .insert(1, 100)
+                  .insert(2, 200);
+              let map2 = PersistentTreeMap::new()
+                  .insert(2, 50)
+                  .insert(3, 300);
+              let merged = map1.merge_with(&map2, |_, v1, v2| v1 + v2);
+              assert_eq!(merged.get(&1), Some(&100));
+              assert_eq!(merged.get(&2), Some(&250));
+              assert_eq!(merged.get(&3), Some(&300));
+          }
+
+          #[rstest]
+          fn test_merge_with_treemap_preserves_order() {
+              let map1 = PersistentTreeMap::singleton(2, 20);
+              let map2 = PersistentTreeMap::new()
+                  .insert(1, 10)
+                  .insert(3, 30);
+              let result = map1.merge_with(&map2, |_, v1, v2| v1 + v2);
+              let keys: Vec<&i32> = result.keys().collect();
+              assert_eq!(keys, vec![&1, &2, &3]);
+          }
+
+    dependencies:
+      - impl_merge_treemap
+
+  # ============================================================================
+  # 7. delete_if - 述語ベースの削除
+  # ============================================================================
+  - id: impl_delete_if
+    requirement_id: predicate_operations
+    name: "delete_if - 述語ベースの削除"
+    priority: 7
+    description: |
+      述語関数に基づいてエントリを削除する操作。
+      述語が true を返すエントリを削除した新しい Map を返す。
+
+    files:
+      - path: src/persistent/hashmap.rs
+        description: |
+          PersistentHashMap に delete_if メソッドを追加。
+
+      - path: src/persistent/treemap.rs
+        description: |
+          PersistentTreeMap に delete_if メソッドを追加。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          PersistentHashMap に delete_if メソッドを追加。
+        code_outline: |
+          /// Removes entries for which the predicate returns true.
+          ///
+          /// Returns a new map containing only entries for which the predicate
+          /// returns false.
+          ///
+          /// # Arguments
+          ///
+          /// * `predicate` - A function that receives a reference to the key and value,
+          ///   and returns true if the entry should be deleted
+          ///
+          /// # Complexity
+          ///
+          /// O(n) where n is the number of entries
+          ///
+          /// # Examples
+          ///
+          /// ```rust
+          /// use lambars::persistent::PersistentHashMap;
+          ///
+          /// let map = PersistentHashMap::new()
+          ///     .insert("a".to_string(), 1)
+          ///     .insert("b".to_string(), 2)
+          ///     .insert("c".to_string(), 3);
+          /// let odds_only = map.delete_if(|_, v| v % 2 == 0);
+          /// assert_eq!(odds_only.len(), 2);
+          /// assert!(odds_only.contains_key("a"));
+          /// assert!(odds_only.contains_key("c"));
+          /// ```
+          #[must_use]
+          pub fn delete_if<F>(&self, mut predicate: F) -> Self
+          where
+              K: Clone + Hash + Eq,
+              V: Clone,
+              F: FnMut(&K, &V) -> bool,
+          {
+              self.iter()
+                  .filter(|(key, value)| !predicate(key, value))
+                  .map(|(k, v)| (k.clone(), v.clone()))
+                  .collect()
+          }
+
+      - step: 2
+        description: |
+          PersistentTreeMap に delete_if メソッドを追加。
+        code_outline: |
+          /// Removes entries for which the predicate returns true.
+          ///
+          /// Returns a new map containing only entries for which the predicate
+          /// returns false. The result maintains sorted key order.
+          ///
+          /// # Arguments
+          ///
+          /// * `predicate` - A function that receives a reference to the key and value,
+          ///   and returns true if the entry should be deleted
+          ///
+          /// # Complexity
+          ///
+          /// O(n log n) where n is the number of entries
+          ///
+          /// # Examples
+          ///
+          /// ```rust
+          /// use lambars::persistent::PersistentTreeMap;
+          ///
+          /// let map = PersistentTreeMap::new()
+          ///     .insert(1, 10)
+          ///     .insert(2, 20)
+          ///     .insert(3, 30);
+          /// let small_values = map.delete_if(|_, v| *v >= 20);
+          /// assert_eq!(small_values.len(), 1);
+          /// assert_eq!(small_values.get(&1), Some(&10));
+          /// ```
+          #[must_use]
+          pub fn delete_if<F>(&self, mut predicate: F) -> Self
+          where
+              K: Clone + Ord,
+              V: Clone,
+              F: FnMut(&K, &V) -> bool,
+          {
+              self.iter()
+                  .filter(|(key, value)| !predicate(key, value))
+                  .map(|(k, v)| (k.clone(), v.clone()))
+                  .collect()
+          }
+
+    tests:
+      - name: test_delete_if_hashmap
+        description: PersistentHashMap の delete_if の基本動作テスト
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_delete_if_empty() {
+              let map: PersistentHashMap<String, i32> = PersistentHashMap::new();
+              let result = map.delete_if(|_, _| true);
+              assert!(result.is_empty());
+          }
+
+          #[rstest]
+          fn test_delete_if_none() {
+              let map = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("b".to_string(), 2);
+              let result = map.clone().delete_if(|_, _| false);
+              assert_eq!(result, map);
+          }
+
+          #[rstest]
+          fn test_delete_if_all() {
+              let map = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("b".to_string(), 2);
+              let result = map.delete_if(|_, _| true);
+              assert!(result.is_empty());
+          }
+
+          #[rstest]
+          fn test_delete_if_evens() {
+              let map = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("b".to_string(), 2)
+                  .insert("c".to_string(), 3)
+                  .insert("d".to_string(), 4);
+              let odds = map.delete_if(|_, v| v % 2 == 0);
+              assert_eq!(odds.len(), 2);
+              assert!(odds.contains_key("a"));
+              assert!(odds.contains_key("c"));
+          }
+
+          #[rstest]
+          fn test_delete_if_by_key() {
+              let map = PersistentHashMap::new()
+                  .insert("keep".to_string(), 1)
+                  .insert("delete".to_string(), 2);
+              let result = map.delete_if(|k, _| k.starts_with("delete"));
+              assert_eq!(result.len(), 1);
+              assert!(result.contains_key("keep"));
+          }
+
+      - name: test_delete_if_treemap
+        description: PersistentTreeMap の delete_if の基本動作テスト
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_delete_if_treemap_empty() {
+              let map: PersistentTreeMap<i32, i32> = PersistentTreeMap::new();
+              let result = map.delete_if(|_, _| true);
+              assert!(result.is_empty());
+          }
+
+          #[rstest]
+          fn test_delete_if_treemap_basic() {
+              let map = PersistentTreeMap::new()
+                  .insert(1, 10)
+                  .insert(2, 20)
+                  .insert(3, 30);
+              let small = map.delete_if(|_, v| *v >= 20);
+              assert_eq!(small.len(), 1);
+              assert_eq!(small.get(&1), Some(&10));
+          }
+
+          #[rstest]
+          fn test_delete_if_treemap_preserves_order() {
+              let map = PersistentTreeMap::new()
+                  .insert(5, 50)
+                  .insert(1, 10)
+                  .insert(3, 30);
+              let filtered = map.delete_if(|k, _| *k == 3);
+              let keys: Vec<&i32> = filtered.keys().collect();
+              assert_eq!(keys, vec![&1, &5]);
+          }
+
+    dependencies:
+      - impl_filter_map
+
+  # ============================================================================
+  # 8. keep_if - 述語ベースの保持
+  # ============================================================================
+  - id: impl_keep_if
+    requirement_id: predicate_operations
+    name: "keep_if - 述語ベースの保持"
+    priority: 8
+    description: |
+      述語関数に基づいてエントリを保持する操作。
+      述語が true を返すエントリのみを保持した新しい Map を返す。
+
+      filter と同義だが、より明示的な命名。
+
+    files:
+      - path: src/persistent/hashmap.rs
+        description: |
+          PersistentHashMap に keep_if メソッドを追加。
+
+      - path: src/persistent/treemap.rs
+        description: |
+          PersistentTreeMap に keep_if メソッドを追加。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          PersistentHashMap に keep_if メソッドを追加。
+        code_outline: |
+          /// Keeps only entries for which the predicate returns true.
+          ///
+          /// Returns a new map containing only entries for which the predicate
+          /// returns true. This is equivalent to `filter` but with a more explicit name.
+          ///
+          /// # Arguments
+          ///
+          /// * `predicate` - A function that receives a reference to the key and value,
+          ///   and returns true if the entry should be kept
+          ///
+          /// # Complexity
+          ///
+          /// O(n) where n is the number of entries
+          ///
+          /// # Examples
+          ///
+          /// ```rust
+          /// use lambars::persistent::PersistentHashMap;
+          ///
+          /// let map = PersistentHashMap::new()
+          ///     .insert("small".to_string(), 5)
+          ///     .insert("medium".to_string(), 15)
+          ///     .insert("large".to_string(), 100);
+          /// let large_values = map.keep_if(|_, v| *v >= 10);
+          /// assert_eq!(large_values.len(), 2);
+          /// assert!(large_values.contains_key("medium"));
+          /// assert!(large_values.contains_key("large"));
+          /// ```
+          #[must_use]
+          pub fn keep_if<F>(&self, mut predicate: F) -> Self
+          where
+              K: Clone + Hash + Eq,
+              V: Clone,
+              F: FnMut(&K, &V) -> bool,
+          {
+              self.iter()
+                  .filter(|(key, value)| predicate(key, value))
+                  .map(|(k, v)| (k.clone(), v.clone()))
+                  .collect()
+          }
+
+      - step: 2
+        description: |
+          PersistentTreeMap に keep_if メソッドを追加。
+        code_outline: |
+          /// Keeps only entries for which the predicate returns true.
+          ///
+          /// Returns a new map containing only entries for which the predicate
+          /// returns true. The result maintains sorted key order.
+          ///
+          /// # Arguments
+          ///
+          /// * `predicate` - A function that receives a reference to the key and value,
+          ///   and returns true if the entry should be kept
+          ///
+          /// # Complexity
+          ///
+          /// O(n log n) where n is the number of entries
+          ///
+          /// # Examples
+          ///
+          /// ```rust
+          /// use lambars::persistent::PersistentTreeMap;
+          ///
+          /// let map = PersistentTreeMap::new()
+          ///     .insert(1, 10)
+          ///     .insert(2, 20)
+          ///     .insert(3, 30);
+          /// let even_keys = map.keep_if(|k, _| k % 2 == 0);
+          /// assert_eq!(even_keys.len(), 1);
+          /// assert_eq!(even_keys.get(&2), Some(&20));
+          /// ```
+          #[must_use]
+          pub fn keep_if<F>(&self, mut predicate: F) -> Self
+          where
+              K: Clone + Ord,
+              V: Clone,
+              F: FnMut(&K, &V) -> bool,
+          {
+              self.iter()
+                  .filter(|(key, value)| predicate(key, value))
+                  .map(|(k, v)| (k.clone(), v.clone()))
+                  .collect()
+          }
+
+    tests:
+      - name: test_keep_if_hashmap
+        description: PersistentHashMap の keep_if の基本動作テスト
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_keep_if_empty() {
+              let map: PersistentHashMap<String, i32> = PersistentHashMap::new();
+              let result = map.keep_if(|_, _| true);
+              assert!(result.is_empty());
+          }
+
+          #[rstest]
+          fn test_keep_if_all() {
+              let map = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("b".to_string(), 2);
+              let result = map.clone().keep_if(|_, _| true);
+              assert_eq!(result, map);
+          }
+
+          #[rstest]
+          fn test_keep_if_none() {
+              let map = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("b".to_string(), 2);
+              let result = map.keep_if(|_, _| false);
+              assert!(result.is_empty());
+          }
+
+          #[rstest]
+          fn test_keep_if_evens() {
+              let map = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("b".to_string(), 2)
+                  .insert("c".to_string(), 3)
+                  .insert("d".to_string(), 4);
+              let evens = map.keep_if(|_, v| v % 2 == 0);
+              assert_eq!(evens.len(), 2);
+              assert!(evens.contains_key("b"));
+              assert!(evens.contains_key("d"));
+          }
+
+          #[rstest]
+          fn test_keep_if_complement_of_delete_if() {
+              let map = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("b".to_string(), 2)
+                  .insert("c".to_string(), 3);
+              let predicate = |_: &String, v: &i32| v % 2 == 0;
+              let kept = map.clone().keep_if(predicate);
+              let deleted = map.delete_if(|k, v| !predicate(k, v));
+              assert_eq!(kept, deleted);
+          }
+
+      - name: test_keep_if_treemap
+        description: PersistentTreeMap の keep_if の基本動作テスト
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_keep_if_treemap_empty() {
+              let map: PersistentTreeMap<i32, i32> = PersistentTreeMap::new();
+              let result = map.keep_if(|_, _| true);
+              assert!(result.is_empty());
+          }
+
+          #[rstest]
+          fn test_keep_if_treemap_basic() {
+              let map = PersistentTreeMap::new()
+                  .insert(1, 10)
+                  .insert(2, 20)
+                  .insert(3, 30);
+              let even_keys = map.keep_if(|k, _| k % 2 == 0);
+              assert_eq!(even_keys.len(), 1);
+              assert_eq!(even_keys.get(&2), Some(&20));
+          }
+
+          #[rstest]
+          fn test_keep_if_treemap_preserves_order() {
+              let map = PersistentTreeMap::new()
+                  .insert(5, 50)
+                  .insert(1, 10)
+                  .insert(3, 30);
+              let filtered = map.keep_if(|k, _| *k > 1);
+              let keys: Vec<&i32> = filtered.keys().collect();
+              assert_eq!(keys, vec![&3, &5]);
+          }
+
+    dependencies:
+      - impl_delete_if
+
+  # ============================================================================
+  # 9. partition - 述語で分割
+  # ============================================================================
+  - id: impl_partition
+    requirement_id: partition
+    name: "partition - 述語で分割"
+    priority: 9
+    description: |
+      述語関数に基づいて Map を2つに分割する。
+
+      返り値は (matching, not_matching) のタプル:
+      - matching: 述語が true を返したエントリ
+      - not_matching: 述語が false を返したエントリ
+
+      keep_if と delete_if を同時に実行する最適化版。
+
+    files:
+      - path: src/persistent/hashmap.rs
+        description: |
+          PersistentHashMap に partition メソッドを追加。
+
+      - path: src/persistent/treemap.rs
+        description: |
+          PersistentTreeMap に partition メソッドを追加。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          PersistentHashMap に partition メソッドを追加。
+        code_outline: |
+          /// Partitions the map into two maps based on a predicate.
+          ///
+          /// Returns a tuple of two maps:
+          /// - The first contains entries for which the predicate returns true
+          /// - The second contains entries for which the predicate returns false
+          ///
+          /// This is more efficient than calling both `keep_if` and `delete_if`
+          /// as it only traverses the map once.
+          ///
+          /// # Arguments
+          ///
+          /// * `predicate` - A function that receives a reference to the key and value,
+          ///   and returns true to include in the first map, false for the second
+          ///
+          /// # Complexity
+          ///
+          /// O(n) where n is the number of entries
+          ///
+          /// # Examples
+          ///
+          /// ```rust
+          /// use lambars::persistent::PersistentHashMap;
+          ///
+          /// let map = PersistentHashMap::new()
+          ///     .insert("a".to_string(), 1)
+          ///     .insert("b".to_string(), 2)
+          ///     .insert("c".to_string(), 3)
+          ///     .insert("d".to_string(), 4);
+          /// let (evens, odds) = map.partition(|_, v| v % 2 == 0);
+          /// assert_eq!(evens.len(), 2);
+          /// assert_eq!(odds.len(), 2);
+          /// assert!(evens.contains_key("b"));
+          /// assert!(evens.contains_key("d"));
+          /// assert!(odds.contains_key("a"));
+          /// assert!(odds.contains_key("c"));
+          /// ```
+          #[must_use]
+          pub fn partition<F>(&self, mut predicate: F) -> (Self, Self)
+          where
+              K: Clone + Hash + Eq,
+              V: Clone,
+              F: FnMut(&K, &V) -> bool,
+          {
+              let mut matching = Self::new();
+              let mut not_matching = Self::new();
+
+              for (key, value) in self.iter() {
+                  if predicate(key, value) {
+                      matching = matching.insert(key.clone(), value.clone());
+                  } else {
+                      not_matching = not_matching.insert(key.clone(), value.clone());
+                  }
+              }
+
+              (matching, not_matching)
+          }
+
+      - step: 2
+        description: |
+          PersistentTreeMap に partition メソッドを追加。
+        code_outline: |
+          /// Partitions the map into two maps based on a predicate.
+          ///
+          /// Returns a tuple of two maps:
+          /// - The first contains entries for which the predicate returns true
+          /// - The second contains entries for which the predicate returns false
+          ///
+          /// Both resulting maps maintain sorted key order.
+          ///
+          /// # Arguments
+          ///
+          /// * `predicate` - A function that receives a reference to the key and value,
+          ///   and returns true to include in the first map, false for the second
+          ///
+          /// # Complexity
+          ///
+          /// O(n log n) where n is the number of entries
+          ///
+          /// # Examples
+          ///
+          /// ```rust
+          /// use lambars::persistent::PersistentTreeMap;
+          ///
+          /// let map = PersistentTreeMap::new()
+          ///     .insert(1, 10)
+          ///     .insert(2, 20)
+          ///     .insert(3, 30)
+          ///     .insert(4, 40);
+          /// let (even_keys, odd_keys) = map.partition(|k, _| k % 2 == 0);
+          /// assert_eq!(even_keys.len(), 2);
+          /// assert_eq!(odd_keys.len(), 2);
+          /// ```
+          #[must_use]
+          pub fn partition<F>(&self, mut predicate: F) -> (Self, Self)
+          where
+              K: Clone + Ord,
+              V: Clone,
+              F: FnMut(&K, &V) -> bool,
+          {
+              let mut matching = Self::new();
+              let mut not_matching = Self::new();
+
+              for (key, value) in self.iter() {
+                  if predicate(key, value) {
+                      matching = matching.insert(key.clone(), value.clone());
+                  } else {
+                      not_matching = not_matching.insert(key.clone(), value.clone());
+                  }
+              }
+
+              (matching, not_matching)
+          }
+
+    tests:
+      - name: test_partition_hashmap
+        description: PersistentHashMap の partition の基本動作テスト
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_partition_empty() {
+              let map: PersistentHashMap<String, i32> = PersistentHashMap::new();
+              let (matching, not_matching) = map.partition(|_, _| true);
+              assert!(matching.is_empty());
+              assert!(not_matching.is_empty());
+          }
+
+          #[rstest]
+          fn test_partition_all_match() {
+              let map = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("b".to_string(), 2);
+              let (matching, not_matching) = map.clone().partition(|_, _| true);
+              assert_eq!(matching, map);
+              assert!(not_matching.is_empty());
+          }
+
+          #[rstest]
+          fn test_partition_none_match() {
+              let map = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("b".to_string(), 2);
+              let (matching, not_matching) = map.clone().partition(|_, _| false);
+              assert!(matching.is_empty());
+              assert_eq!(not_matching, map);
+          }
+
+          #[rstest]
+          fn test_partition_even_odd() {
+              let map = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("b".to_string(), 2)
+                  .insert("c".to_string(), 3)
+                  .insert("d".to_string(), 4);
+              let (evens, odds) = map.partition(|_, v| v % 2 == 0);
+              assert_eq!(evens.len(), 2);
+              assert_eq!(odds.len(), 2);
+              assert!(evens.contains_key("b"));
+              assert!(evens.contains_key("d"));
+              assert!(odds.contains_key("a"));
+              assert!(odds.contains_key("c"));
+          }
+
+          #[rstest]
+          fn test_partition_completeness() {
+              let map = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("b".to_string(), 2)
+                  .insert("c".to_string(), 3);
+              let (matching, not_matching) = map.clone().partition(|_, v| v % 2 == 0);
+              assert_eq!(matching.len() + not_matching.len(), map.len());
+          }
+
+          #[rstest]
+          fn test_partition_disjointness() {
+              let map = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("b".to_string(), 2)
+                  .insert("c".to_string(), 3);
+              let (matching, not_matching) = map.partition(|_, v| v % 2 == 0);
+              for (key, _) in &matching {
+                  assert!(!not_matching.contains_key(key));
+              }
+          }
+
+          #[rstest]
+          fn test_partition_equals_keep_if_delete_if() {
+              let map = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("b".to_string(), 2)
+                  .insert("c".to_string(), 3);
+              let predicate = |_: &String, v: &i32| v % 2 == 0;
+              let (matching, not_matching) = map.clone().partition(predicate);
+              let kept = map.clone().keep_if(predicate);
+              let deleted_complement = map.keep_if(|k, v| !predicate(k, v));
+              assert_eq!(matching, kept);
+              assert_eq!(not_matching, deleted_complement);
+          }
+
+      - name: test_partition_treemap
+        description: PersistentTreeMap の partition の基本動作テスト
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_partition_treemap_empty() {
+              let map: PersistentTreeMap<i32, i32> = PersistentTreeMap::new();
+              let (matching, not_matching) = map.partition(|_, _| true);
+              assert!(matching.is_empty());
+              assert!(not_matching.is_empty());
+          }
+
+          #[rstest]
+          fn test_partition_treemap_basic() {
+              let map = PersistentTreeMap::new()
+                  .insert(1, 10)
+                  .insert(2, 20)
+                  .insert(3, 30)
+                  .insert(4, 40);
+              let (even_keys, odd_keys) = map.partition(|k, _| k % 2 == 0);
+              assert_eq!(even_keys.len(), 2);
+              assert_eq!(odd_keys.len(), 2);
+              assert!(even_keys.contains_key(&2));
+              assert!(even_keys.contains_key(&4));
+              assert!(odd_keys.contains_key(&1));
+              assert!(odd_keys.contains_key(&3));
+          }
+
+          #[rstest]
+          fn test_partition_treemap_preserves_order() {
+              let map = PersistentTreeMap::new()
+                  .insert(5, 50)
+                  .insert(1, 10)
+                  .insert(3, 30)
+                  .insert(2, 20)
+                  .insert(4, 40);
+              let (evens, odds) = map.partition(|k, _| k % 2 == 0);
+              let even_keys: Vec<&i32> = evens.keys().collect();
+              let odd_keys: Vec<&i32> = odds.keys().collect();
+              assert_eq!(even_keys, vec![&2, &4]);
+              assert_eq!(odd_keys, vec![&1, &3, &5]);
+          }
+
+          #[rstest]
+          fn test_partition_treemap_by_key_range() {
+              let map = PersistentTreeMap::new()
+                  .insert(1, "one".to_string())
+                  .insert(5, "five".to_string())
+                  .insert(10, "ten".to_string())
+                  .insert(15, "fifteen".to_string());
+              let (small, large) = map.partition(|k, _| *k < 10);
+              assert_eq!(small.len(), 2);
+              assert_eq!(large.len(), 2);
+          }
+
+    dependencies:
+      - impl_keep_if
+      - impl_delete_if
+
+# テスト戦略
+test_strategy:
+  unit_tests:
+    location: |
+      src/persistent/hashmap.rs (mod tests)
+      src/persistent/treemap.rs (mod tests)
+    description: |
+      各メソッドの基本動作を検証するユニットテスト。
+      rstest を使用し、以下のケースをカバー:
+      - 空の Map に対する操作
+      - 単一要素の Map に対する操作
+      - 複数要素の Map に対する操作
+      - 境界値のテスト
+      - 型変換のテスト（map_values, map_keys, filter_map）
+      - 法則の検証（Identity Law, Length Preservation など）
+
+  integration_tests:
+    location: tests/persistent_map_tests.rs
+    description: |
+      PersistentHashMap と PersistentTreeMap で同一の操作が
+      同じ結果を返すことを検証する統合テスト。
+      両方の Map 型で共通のテストケースを実行。
+
+  property_tests:
+    location: tests/persistent_map_laws.rs
+    description: |
+      プロパティベーステストで法則を検証。
+      将来の拡張として検討（今回のスコープ外）。
+
+# 完了条件
+acceptance_criteria:
+  - 全ての実装タスクが完了していること
+  - PersistentHashMap に以下のメソッドが追加されていること
+    - map_values
+    - map_keys
+    - filter_map
+    - entries
+    - merge_with
+    - delete_if
+    - keep_if
+    - partition
+  - PersistentTreeMap に以下のメソッドが追加されていること
+    - map_values
+    - map_keys
+    - filter_map
+    - entries
+    - merge
+    - merge_with
+    - delete_if
+    - keep_if
+    - partition
+  - 全てのメソッドに適切な rustdoc コメントがあること
+  - 全てのメソッドにユニットテストがあること
+  - cargo check が通過すること
+  - cargo clippy が通過すること
+  - cargo test が通過すること
+  - cargo fmt が実行されていること
+  - カバレッジ 100% を目指すこと

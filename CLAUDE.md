@@ -197,7 +197,6 @@ cargo clean
 - **対象**: アーキテクチャ設計、コード品質、セキュリティ
 - **方法**: Task ツールで専門エージェントを起動
   - `rust-implementation-reviewer`: アーキテクチャ・実装レビュー
-  - `functional-programming-specialist`: 関数型プログラミングとしてのコード品質レビュー
 - **確認事項**:
   - SOLID 原則の遵守
   - デザインパターンの適用
@@ -222,32 +221,9 @@ cargo clean
 4. rust-simplification-specialist を起動して今回変更・作成したコードの構造を簡素化する
 5. codex mcp にレビューをさせる
 6. rust-implementation-reviewer を起動して実装のレビューを行う
-
    1. 略語を使用していないこと
    2. 差分の対象となるテストのみを実行し失敗していないこと
-   3. 差分の対象となるテストのカバレッジ 100%であること
-   4. 不必要なコメントが記述されていないこと
-
-      1. コードで理解できる内容のコメントは不要
-
-      ```rs
-        /// 例
-        fn safety_unwrap(...) {...}
-        fn some(...) {
-         /// Safely converts usize to i32 for test assertions.
-         safety_unwrap(hoge);
-        }
-
-        enum Hoge {
-          /// This is Apple. Color is Red.　<= 冗長のための不要
-          Apple,
-          /// This is Banana. Color is Yellow. <= 冗長のための不要
-          Banana
-        }
-      ```
-
-   5. レビュー指摘がなくなるまで修正とレビューを繰り返す（軽微な指摘も全て解決すること）
-
+   3. レビュー指摘がなくなるまで修正とレビューを繰り返す（軽微な指摘も全て解決すること）
 7. functional-programming-specialist を起動し要件定義の観点から実装をレビューする
 8. コミット前に以下の確認を実施する
    1. `cargo fmt` - コードフォーマット

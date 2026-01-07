@@ -2155,6 +2155,17 @@ fn log_computation() -> Eff<LogEffect, i32> {
 | `M.lookup k m` | `get` method | Lookup |
 | `M.delete k m` | `remove` method | Delete |
 | `M.member k m` | `contains_key` method | Membership |
+| `M.map f m` | `map_values` method | Transform values |
+| `M.mapKeys f m` | `map_keys` method | Transform keys |
+| `M.mapMaybe f m` | `filter_map` method | Filter and transform |
+| `M.toList m` | `entries` method | Get all entries |
+| `M.keys m` | `keys` method | Get all keys |
+| `M.elems m` | `values` method | Get all values |
+| `M.union m1 m2` | `merge` method | Merge (right wins) |
+| `M.unionWith f m1 m2` | `merge_with` method | Merge with resolver |
+| `M.filter p m` | `keep_if` method | Keep matching entries |
+| `M.filterWithKey p m` | `keep_if` method | Keep matching entries |
+| `M.partition p m` | `partition` method | Split by predicate |
 
 ### Sets
 

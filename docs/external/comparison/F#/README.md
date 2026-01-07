@@ -1104,6 +1104,22 @@ fn add<T: Semigroup>(a: T, b: T) -> T {
 | - | `PersistentVector<T>` | Immutable vector (Clojure-style) |
 | - | `PersistentHashMap<K, V>` | Immutable hash map (HAMT) |
 
+### Map Operations
+
+| F# | lambars | Description |
+|---------|---------|-------------|
+| `Map.map f m` | `map_values` method | Transform values |
+| `Map.map f m` (key in f) | `map_values` method | Transform values (key available in closure) |
+| `Map.toSeq m` | `entries` method | Get all entries |
+| `Map.keys m` | `keys` method | Get all keys |
+| `Map.values m` | `values` method | Get all values |
+| `Map.fold f m1 m2` | `merge` method | Merge (right wins) |
+| - | `merge_with` method | Merge with custom resolver |
+| `Map.filter p m` | `keep_if` method | Keep matching entries |
+| - | `delete_if` method | Remove matching entries |
+| `Map.partition p m` | `partition` method | Split by predicate |
+| `Map.pick f m` | `filter_map` method | Filter and transform |
+
 ### Code Examples
 
 #### F# List vs lambars PersistentList
