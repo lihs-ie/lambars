@@ -2031,6 +2031,18 @@ fn log_computation() -> Eff<LogEffect, i32> {
 | `length xs` | `Foldable::length` | Length |
 | `null xs` | `Foldable::is_empty` | Empty check |
 | `reverse xs` | `PersistentList::reverse` | Reverse |
+| `take n xs` | `PersistentList::take` | Take first n elements |
+| `drop n xs` | `PersistentList::drop_first` | Drop first n elements |
+| `splitAt n xs` | `PersistentList::split_at` | Split at index |
+| `zip xs ys` | `PersistentList::zip` | Zip two lists |
+| `unzip xs` | `PersistentList::<(A,B)>::unzip` | Unzip list of pairs |
+| `findIndex p xs` | `PersistentList::find_index` | Find index of first match |
+| `foldl1 f xs` | `PersistentList::fold_left1` | Left fold without initial value |
+| `foldr1 f xs` | `PersistentList::fold_right1` | Right fold without initial value |
+| `scanl f z xs` | `PersistentList::scan_left` | Left scan with initial value |
+| `partition p xs` | `PersistentList::partition` | Split by predicate |
+| `intersperse x xs` | `PersistentList::intersperse` | Insert between elements |
+| `intercalate xs xss` | `PersistentList::intercalate` | Insert list between lists and flatten |
 
 ### Vectors
 
@@ -2041,6 +2053,18 @@ fn log_computation() -> Eff<LogEffect, i32> {
 | `V.//` | `PersistentVector::update` | Update element |
 | `V.snoc` | `PersistentVector::push_back` | Append |
 | `V.length` | `PersistentVector::len` | Length |
+| `V.take n v` | `PersistentVector::take` | Take first n elements |
+| `V.drop n v` | `PersistentVector::drop_first` | Drop first n elements |
+| `V.splitAt n v` | `PersistentVector::split_at` | Split at index |
+| `V.zip v1 v2` | `PersistentVector::zip` | Zip two vectors |
+| `V.unzip v` | `PersistentVector::<(A,B)>::unzip` | Unzip vector of pairs |
+| `V.findIndex p v` | `PersistentVector::find_index` | Find index of first match |
+| `V.foldl1 f v` | `PersistentVector::fold_left1` | Left fold without initial value |
+| `V.foldr1 f v` | `PersistentVector::fold_right1` | Right fold without initial value |
+| `V.scanl f z v` | `PersistentVector::scan_left` | Left scan with initial value |
+| `V.partition p v` | `PersistentVector::partition` | Split by predicate |
+| (N/A) | `PersistentVector::intersperse` | Insert between elements |
+| (N/A) | `PersistentVector::intercalate` | Insert vector between vectors and flatten |
 
 ### Maps
 

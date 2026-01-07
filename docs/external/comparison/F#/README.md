@@ -240,7 +240,18 @@ let recovered = <Result<i32, String>>::catch_error(failing, |e| {
 | `List.find` | `Foldable::find` | Find first matching |
 | `List.tryFind` | `Foldable::find` | Find (returns Option) |
 | `List.choose` | `Iterator::filter_map` (std) | Filter and map |
-| `List.zip` | `Iterator::zip` (std) | Zip two lists |
+| `List.zip` | `PersistentList::zip` | Zip two lists |
+| `List.unzip` | `PersistentList::<(A,B)>::unzip` | Unzip list of pairs |
+| `List.take` | `PersistentList::take` | Take first n elements |
+| `List.skip` | `PersistentList::drop_first` | Skip first n elements |
+| `List.splitAt` | `PersistentList::split_at` | Split at index |
+| `List.findIndex` | `PersistentList::find_index` | Find index of first match |
+| `List.reduce` | `PersistentList::fold_left1` | Left fold without initial value |
+| `List.reduceBack` | `PersistentList::fold_right1` | Right fold without initial value |
+| `List.scan` | `PersistentList::scan_left` | Left scan with initial value |
+| `List.partition` | `PersistentList::partition` | Split by predicate |
+| (N/A) | `PersistentList::intersperse` | Insert between elements |
+| `String.concat sep` | `PersistentList::intercalate` | Insert list between lists and flatten |
 | `Seq.unfold` | Manual implementation | Generate sequence |
 
 ### Traversable Operations

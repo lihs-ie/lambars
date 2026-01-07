@@ -1,0 +1,832 @@
+# Issue 6: List/Vector ユーティリティ操作の追加 - 要件定義
+#
+# 概要:
+#   PersistentList と PersistentVector に関数型プログラミングで一般的な
+#   リスト/ベクタ操作を追加する。Haskell Data.List および Scala
+#   scala.collection.immutable.List/Vector を参考に、12のユーティリティ操作を実装する。
+#
+# 参照:
+#   - Haskell Data.List: https://hackage.haskell.org/package/base/docs/Data-List.html
+#   - Scala List: https://www.scala-lang.org/api/current/scala/collection/immutable/List.html
+#   - Scala Vector: https://www.scala-lang.org/api/current/scala/collection/immutable/Vector.html
+#   - GitHub Issue #6
+
+version: "1.0.0"
+name: "List/Vector Utility Operations"
+description: |
+  永続データ構造 PersistentList<T> と PersistentVector<T> に、関数型プログラミングで
+  頻繁に使用されるユーティリティ操作を追加する。これらの操作は Haskell の Data.List や
+  Scala のコレクションライブラリで提供されている標準的な操作であり、関数型スタイルの
+  プログラミングを Rust で行う際に不可欠なものである。
+
+theoretical_background:
+  list_operations_in_fp:
+    description: |
+      関数型プログラミングにおいて、リスト（及びその派生）は最も基本的なデータ構造である。
+      以下の操作は、純粋関数型言語において長年の実績があり、代数的性質が明確に定義されている。
+
+      操作の分類:
+      1. サブシーケンス操作: take, drop_first, split_at
+      2. 結合/分離操作: zip, unzip, partition
+      3. 検索操作: find_index
+      4. 畳み込み操作: fold_left1, fold_right1, scan_left
+      5. 挿入操作: intersperse, intercalate
+
+  algebraic_properties:
+    take_drop_laws:
+      description: |
+        take と drop_first は以下の代数的法則を満たす:
+
+        1. 分解則 (Split Property):
+           xs == take(n, xs) ++ drop_first(n, xs)
+
+        2. 長さ制約:
+           len(take(n, xs)) == min(n, len(xs))
+           len(drop_first(n, xs)) == max(0, len(xs) - n)
+
+        3. 空リスト:
+           take(n, []) == []
+           drop_first(n, []) == []
+
+        4. ゼロ要素:
+           take(0, xs) == []
+           drop_first(0, xs) == xs
+
+        5. 冪等性 (連続適用):
+           take(m, take(n, xs)) == take(min(m, n), xs)
+
+    split_at_laws:
+      description: |
+        split_at は take と drop_first の組み合わせとして定義される:
+
+        split_at(n, xs) == (take(n, xs), drop_first(n, xs))
+
+        この定義から自動的に take/drop_first の法則を継承する。
+
+    zip_unzip_laws:
+      description: |
+        zip と unzip は互いに逆関数的な関係にある（ただし長さの制約あり）:
+
+        1. 右逆元 (Right Inverse):
+           unzip(zip(xs, ys)) == (take(min(len(xs), len(ys)), xs),
+                                   take(min(len(xs), len(ys)), ys))
+
+        2. 左逆元 (Left Inverse - ペアのリストの場合):
+           zip(unzip(xys).0, unzip(xys).1) == xys
+           (where xys: List<(A, B)>)
+
+        3. 長さの性質:
+           len(zip(xs, ys)) == min(len(xs), len(ys))
+
+    fold1_laws:
+      description: |
+        fold_left1 と fold_right1 は初期値なしの畳み込みで、非空リストに対してのみ定義される:
+
+        1. 単一要素:
+           fold_left1([x], f) == Some(x)
+           fold_right1([x], f) == Some(x)
+
+        2. 空リスト:
+           fold_left1([], f) == None
+           fold_right1([], f) == None
+
+        3. fold_left との関係 (非空リストの場合):
+           fold_left1([x1, x2, ..., xn], f) == Some(fold_left([x2, ..., xn], x1, f))
+
+        4. fold_right との関係 (非空リストの場合):
+           fold_right1([x1, x2, ..., xn], f) == Some(fold_right([x1, ..., x(n-1)], xn, f))
+
+    scan_left_laws:
+      description: |
+        scan_left は中間結果を保持する畳み込みで、Haskell の scanl に準拠:
+
+        1. 長さの性質 (Haskell準拠):
+           len(scan_left(xs, init, f)) == len(xs) + 1
+
+           注: 初期値を含むため、入力リストより1つ多い要素を持つ
+
+        2. 先頭要素:
+           scan_left(xs, init, f).head() == Some(&init)
+
+        3. 末尾要素:
+           scan_left(xs, init, f).last() == Some(&fold_left(xs, init, f))
+
+        4. 空リスト:
+           scan_left([], init, f) == [init]
+
+        5. fold_left との関係:
+           scan_left(xs, init, f).last() == Some(&fold_left(xs, init, f))
+
+    partition_laws:
+      description: |
+        partition は述語に基づく分割で、以下の性質を持つ:
+
+        1. 完全性 (Completeness):
+           partition(xs, p).0 ++ partition(xs, p).1 は xs の置換
+           (要素の順序は保持されるが、2つのリストに分割される)
+
+        2. 正確性 (Correctness):
+           すべての x in partition(xs, p).0 について p(x) == true
+           すべての x in partition(xs, p).1 について p(x) == false
+
+        3. filter との関係:
+           partition(xs, p).0 == filter(xs, p)
+           partition(xs, p).1 == filter(xs, |x| !p(x))
+
+    intersperse_intercalate_laws:
+      description: |
+        intersperse と intercalate は要素/リストの挿入操作:
+
+        1. intersperse の長さ:
+           len(intersperse(xs, sep)) == max(0, 2 * len(xs) - 1)  (非空の場合)
+           intersperse([], sep) == []
+
+        2. intercalate の定義:
+           intercalate(xss, sep) == flatten(intersperse(xss, sep))
+           (where xss: List<List<A>>)
+
+        3. 単一要素:
+           intersperse([x], sep) == [x]
+
+        4. 空リスト:
+           intersperse([], sep) == []
+           intercalate([], sep) == []
+
+requirements:
+  # ============================================================================
+  # 1. take - 先頭 n 要素を取得
+  # ============================================================================
+  - id: take
+    name: take
+    priority: high
+    description: |
+      先頭から n 要素を取得する。n がリストの長さを超える場合は、
+      リスト全体を返す（エラーではなく）。
+
+      Haskell: take :: Int -> [a] -> [a]
+      Scala: def take(n: Int): List[A]
+
+    api:
+      persistent_list:
+        signature: "fn take(&self, count: usize) -> Self where T: Clone"
+        complexity: "O(min(n, count))"
+        example: |
+          let list: PersistentList<i32> = (1..=5).collect();
+          let taken = list.take(3);
+          // taken = [1, 2, 3]
+
+          let over = list.take(10);
+          // over = [1, 2, 3, 4, 5] (元のリスト全体)
+
+          let zero = list.take(0);
+          // zero = []
+
+      persistent_vector:
+        signature: "fn take(&self, count: usize) -> Self where T: Clone"
+        complexity: "O(min(n, count))"
+        note: "slice(0, count) を使用。iter ベースのため実質 O(count)"
+        example: |
+          let vector: PersistentVector<i32> = (1..=5).collect();
+          let taken = vector.take(3);
+          // taken = [1, 2, 3]
+
+    laws:
+      - name: "分解則"
+        property: "xs == take(n, xs).append(drop_first(n, xs))"
+      - name: "長さ制約"
+        property: "take(n, xs).len() == min(n, xs.len())"
+      - name: "空リスト"
+        property: "take(n, []) == []"
+      - name: "ゼロ要素"
+        property: "take(0, xs) == []"
+
+  # ============================================================================
+  # 2. drop_first - 先頭 n 要素をスキップ
+  # ============================================================================
+  - id: drop_first
+    name: drop_first
+    priority: high
+    description: |
+      先頭から n 要素をスキップし、残りの要素を返す。
+      n がリストの長さ以上の場合は空リストを返す。
+
+      注: Rust では `drop` は Drop トレイトの予約語であるため、`drop_first` を使用する。
+
+      Haskell: drop :: Int -> [a] -> [a]
+      Scala: def drop(n: Int): List[A]
+
+    api:
+      persistent_list:
+        signature: "fn drop_first(&self, count: usize) -> Self where T: Clone"
+        complexity: "O(min(n, count)) for traversal, O(1) for structural sharing"
+        example: |
+          let list: PersistentList<i32> = (1..=5).collect();
+          let dropped = list.drop_first(2);
+          // dropped = [3, 4, 5]
+
+          let all_dropped = list.drop_first(10);
+          // all_dropped = []
+
+          let none_dropped = list.drop_first(0);
+          // none_dropped = [1, 2, 3, 4, 5]
+
+      persistent_vector:
+        signature: "fn drop_first(&self, count: usize) -> Self where T: Clone"
+        complexity: "O(n)"
+        note: "現在の slice 実装では skip(count) を伴うため実質 O(n)"
+        example: |
+          let vector: PersistentVector<i32> = (1..=5).collect();
+          let dropped = vector.drop_first(2);
+          // dropped = [3, 4, 5]
+
+    laws:
+      - name: "分解則"
+        property: "xs == take(n, xs).append(drop_first(n, xs))"
+      - name: "長さ制約"
+        property: "drop_first(n, xs).len() == max(0, xs.len() - n)"
+      - name: "空リスト"
+        property: "drop_first(n, []) == []"
+      - name: "ゼロ要素"
+        property: "drop_first(0, xs) == xs"
+
+  # ============================================================================
+  # 3. split_at - 指定位置で分割
+  # ============================================================================
+  - id: split_at
+    name: split_at
+    priority: high
+    description: |
+      指定したインデックスでリストを2つに分割する。
+      take と drop_first を組み合わせた便利メソッド。
+
+      Haskell: splitAt :: Int -> [a] -> ([a], [a])
+      Scala: def splitAt(n: Int): (List[A], List[A])
+
+    api:
+      persistent_list:
+        signature: "fn split_at(&self, index: usize) -> (Self, Self) where T: Clone"
+        complexity: "O(index)"
+        example: |
+          let list: PersistentList<i32> = (1..=5).collect();
+          let (left, right) = list.split_at(2);
+          // left = [1, 2]
+          // right = [3, 4, 5]
+
+          let (empty_left, all) = list.split_at(0);
+          // empty_left = []
+          // all = [1, 2, 3, 4, 5]
+
+      persistent_vector:
+        signature: "fn split_at(&self, index: usize) -> (Self, Self) where T: Clone"
+        complexity: "O(n)"
+        example: |
+          let vector: PersistentVector<i32> = (1..=5).collect();
+          let (left, right) = vector.split_at(2);
+          // left = [1, 2]
+          // right = [3, 4, 5]
+
+    laws:
+      - name: "take/drop_first との等価性"
+        property: "split_at(n, xs) == (take(n, xs), drop_first(n, xs))"
+      - name: "結合で元に戻る"
+        property: "split_at(n, xs).0.append(split_at(n, xs).1) == xs"
+
+  # ============================================================================
+  # 4. zip - 2つのリストを結合
+  # ============================================================================
+  - id: zip
+    name: zip
+    priority: high
+    description: |
+      2つのリストを対応する位置の要素をペアにして結合する。
+      短い方のリストの長さに合わせる（余った要素は無視）。
+
+      Haskell: zip :: [a] -> [b] -> [(a, b)]
+      Scala: def zip[B](that: List[B]): List[(A, B)]
+
+    api:
+      persistent_list:
+        signature: "fn zip<U>(&self, other: &PersistentList<U>) -> PersistentList<(T, U)> where T: Clone, U: Clone"
+        complexity: "O(min(n, m)) where n = self.len(), m = other.len()"
+        example: |
+          let list1: PersistentList<i32> = (1..=3).collect();
+          let list2: PersistentList<char> = vec!['a', 'b', 'c'].into_iter().collect();
+          let zipped = list1.zip(&list2);
+          // zipped = [(1, 'a'), (2, 'b'), (3, 'c')]
+
+          let short: PersistentList<i32> = (1..=2).collect();
+          let long: PersistentList<char> = vec!['a', 'b', 'c', 'd'].into_iter().collect();
+          let zipped2 = short.zip(&long);
+          // zipped2 = [(1, 'a'), (2, 'b')]
+
+      persistent_vector:
+        signature: "fn zip<U>(&self, other: &PersistentVector<U>) -> PersistentVector<(T, U)> where T: Clone, U: Clone"
+        complexity: "O(min(n, m))"
+        example: |
+          let vector1: PersistentVector<i32> = (1..=3).collect();
+          let vector2: PersistentVector<&str> = vec!["a", "b", "c"].into_iter().collect();
+          let zipped = vector1.zip(&vector2);
+          // zipped = [(1, "a"), (2, "b"), (3, "c")]
+
+    laws:
+      - name: "長さの性質"
+        property: "zip(xs, ys).len() == min(xs.len(), ys.len())"
+      - name: "空リストとの zip"
+        property: "zip([], ys) == [] && zip(xs, []) == []"
+
+  # ============================================================================
+  # 5. unzip - ペアのリストを分離
+  # ============================================================================
+  - id: unzip
+    name: unzip
+    priority: high
+    description: |
+      ペアのリストを2つのリストに分離する。
+      where T: Into<(A, B)> の汎用メソッドとして実装し、
+      タプルだけでなく Into トレイトを実装した任意の型に対応する。
+
+      Haskell: unzip :: [(a, b)] -> ([a], [b])
+      Scala: def unzip[A1, A2]: (List[A1], List[A2])
+
+    design_decision: |
+      Haskell の `unzip :: [(a, b)] -> ([a], [b])` に忠実に、
+      `PersistentList<(A, B)>` に対する特殊化された impl として実装する。
+      これにより型推論が自然に機能し、使いやすいAPIとなる。
+
+    api:
+      persistent_list:
+        signature: "impl<A: Clone, B: Clone> PersistentList<(A, B)> { fn unzip(&self) -> (PersistentList<A>, PersistentList<B>) }"
+        complexity: "O(n)"
+        example: |
+          let pairs: PersistentList<(i32, char)> = vec![(1, 'a'), (2, 'b'), (3, 'c')]
+              .into_iter().collect();
+          let (numbers, chars) = pairs.unzip();
+          // numbers = [1, 2, 3]
+          // chars = ['a', 'b', 'c']
+
+      persistent_vector:
+        signature: "impl<A: Clone, B: Clone> PersistentVector<(A, B)> { fn unzip(&self) -> (PersistentVector<A>, PersistentVector<B>) }"
+        complexity: "O(n)"
+        example: |
+          let pairs: PersistentVector<(i32, &str)> = vec![(1, "a"), (2, "b"), (3, "c")]
+              .into_iter().collect();
+          let (numbers, strings) = pairs.unzip();
+          // numbers = [1, 2, 3]
+          // strings = ["a", "b", "c"]
+
+    laws:
+      - name: "zip の逆"
+        property: "zip(unzip(xys).0, unzip(xys).1) == xys (where xys: List<(A, B)>)"
+      - name: "長さの保存"
+        property: "unzip(xys).0.len() == xys.len() && unzip(xys).1.len() == xys.len()"
+
+  # ============================================================================
+  # 6. find_index - 述語に基づく検索
+  # ============================================================================
+  - id: find_index
+    name: find_index
+    priority: high
+    description: |
+      述語を満たす最初の要素のインデックスを返す。
+      見つからない場合は None を返す。
+
+      Haskell: findIndex :: (a -> Bool) -> [a] -> Maybe Int
+      Scala: def indexWhere(p: A => Boolean): Int (-1 if not found)
+
+    api:
+      persistent_list:
+        signature: "fn find_index<P>(&self, predicate: P) -> Option<usize> where P: Fn(&T) -> bool"
+        complexity: "O(n) worst case, O(k) where k is the index of the first match"
+        example: |
+          let list: PersistentList<i32> = (1..=5).collect();
+          let index = list.find_index(|x| *x > 3);
+          // index = Some(3)  (element 4 is at index 3)
+
+          let not_found = list.find_index(|x| *x > 10);
+          // not_found = None
+
+      persistent_vector:
+        signature: "fn find_index<P>(&self, predicate: P) -> Option<usize> where P: Fn(&T) -> bool"
+        complexity: "O(n) worst case"
+        example: |
+          let vector: PersistentVector<i32> = (1..=5).collect();
+          let index = vector.find_index(|x| *x == 3);
+          // index = Some(2)
+
+    laws:
+      - name: "見つかった場合の整合性"
+        property: "find_index(xs, p).map(|i| xs.get(i)).flatten().map(p) == Some(true) if found"
+      - name: "最初の一致"
+        property: "find_index(xs, p) returns the smallest index i where p(xs[i]) == true"
+
+  # ============================================================================
+  # 7. fold_left1 - 初期値なしの左畳み込み
+  # ============================================================================
+  - id: fold_left1
+    name: fold_left1
+    priority: medium
+    description: |
+      初期値なしの左畳み込み。リストの先頭要素を初期値として使用する。
+      空リストの場合は None を返す。
+
+      Haskell: foldl1 :: (a -> a -> a) -> [a] -> a (部分関数)
+      Scala: def reduceLeft[B >: A](op: (B, A) => B): B (例外を投げる)
+
+      注: Haskell/Scala と異なり、空リストの場合は Option を返す安全な設計とする。
+
+    api:
+      persistent_list:
+        signature: "fn fold_left1<F>(&self, function: F) -> Option<T> where T: Clone, F: FnMut(T, T) -> T"
+        complexity: "O(n)"
+        example: |
+          let list: PersistentList<i32> = (1..=5).collect();
+          let sum = list.fold_left1(|accumulator, x| accumulator + x);
+          // sum = Some(15)  // 1 + 2 + 3 + 4 + 5
+
+          let max = list.fold_left1(|accumulator, x| if x > accumulator { x } else { accumulator });
+          // max = Some(5)
+
+          let empty: PersistentList<i32> = PersistentList::new();
+          let result = empty.fold_left1(|a, b| a + b);
+          // result = None
+
+      persistent_vector:
+        signature: "fn fold_left1<F>(&self, function: F) -> Option<T> where T: Clone, F: FnMut(T, T) -> T"
+        complexity: "O(n)"
+        example: |
+          let vector: PersistentVector<i32> = (1..=5).collect();
+          let product = vector.fold_left1(|accumulator, x| accumulator * x);
+          // product = Some(120)  // 1 * 2 * 3 * 4 * 5
+
+    laws:
+      - name: "単一要素"
+        property: "fold_left1([x], f) == Some(x)"
+      - name: "空リスト"
+        property: "fold_left1([], f) == None"
+      - name: "fold_left との関係"
+        property: "fold_left1([x1, x2, ..., xn], f) == Some(fold_left([x2, ..., xn], x1, f))"
+
+  # ============================================================================
+  # 8. fold_right1 - 初期値なしの右畳み込み
+  # ============================================================================
+  - id: fold_right1
+    name: fold_right1
+    priority: medium
+    description: |
+      初期値なしの右畳み込み。リストの末尾要素を初期値として使用する。
+      空リストの場合は None を返す。
+
+      Haskell: foldr1 :: (a -> a -> a) -> [a] -> a (部分関数)
+      Scala: def reduceRight[B >: A](op: (A, B) => B): B (例外を投げる)
+
+      注: Haskell/Scala と異なり、空リストの場合は Option を返す安全な設計とする。
+
+    api:
+      persistent_list:
+        signature: "fn fold_right1<F>(&self, function: F) -> Option<T> where T: Clone, F: FnMut(T, T) -> T"
+        complexity: "O(n)"
+        example: |
+          let list: PersistentList<i32> = (1..=5).collect();
+          // fold_right1 with subtraction: 1 - (2 - (3 - (4 - 5)))
+          let result = list.fold_right1(|x, accumulator| x - accumulator);
+          // result = Some(3)  // 1 - (2 - (3 - (4 - 5))) = 1 - (2 - (3 - (-1))) = 1 - (2 - 4) = 1 - (-2) = 3
+
+          let empty: PersistentList<i32> = PersistentList::new();
+          let result = empty.fold_right1(|a, b| a + b);
+          // result = None
+
+      persistent_vector:
+        signature: "fn fold_right1<F>(&self, function: F) -> Option<T> where T: Clone, F: FnMut(T, T) -> T"
+        complexity: "O(n)"
+        example: |
+          let vector: PersistentVector<String> = vec!["a", "b", "c"]
+              .into_iter().map(String::from).collect();
+          let result = vector.fold_right1(|x, accumulator| format!("({} . {})", x, accumulator));
+          // result = Some("(a . (b . c))")
+
+    laws:
+      - name: "単一要素"
+        property: "fold_right1([x], f) == Some(x)"
+      - name: "空リスト"
+        property: "fold_right1([], f) == None"
+      - name: "fold_right との関係"
+        property: "fold_right1([x1, ..., xn], f) == Some(fold_right([x1, ..., x(n-1)], xn, f))"
+
+  # ============================================================================
+  # 9. scan_left - 中間結果を保持する畳み込み
+  # ============================================================================
+  - id: scan_left
+    name: scan_left
+    priority: medium
+    description: |
+      左畳み込みの各ステップの中間結果を保持するリストを返す。
+      Haskell の scanl に準拠し、初期値を含む（結果の長さは入力 + 1）。
+
+      Haskell: scanl :: (b -> a -> b) -> b -> [a] -> [b]
+      Scala: def scanLeft[B](z: B)(op: (B, A) => B): List[B]
+
+    design_decision: |
+      Haskell の scanl に準拠し、初期値を含める:
+      - 入力リストの長さが n の場合、出力は n+1 要素
+      - 先頭要素は常に初期値
+      - 末尾要素は fold_left の結果と一致
+
+      これは関数型プログラミングの標準的な定義であり、
+      中間状態の追跡やデバッグに有用である。
+
+    api:
+      persistent_list:
+        signature: "fn scan_left<B, F>(&self, initial: B, function: F) -> PersistentList<B> where B: Clone, F: FnMut(B, &T) -> B"
+        complexity: "O(n)"
+        example: |
+          let list: PersistentList<i32> = (1..=4).collect();
+          let scanned = list.scan_left(0, |accumulator, x| accumulator + x);
+          // scanned = [0, 1, 3, 6, 10]
+          // 0 (initial), 0+1=1, 1+2=3, 3+3=6, 6+4=10
+
+          let empty: PersistentList<i32> = PersistentList::new();
+          let scanned_empty = empty.scan_left(42, |a, b| a + b);
+          // scanned_empty = [42]
+
+      persistent_vector:
+        signature: "fn scan_left<B, F>(&self, initial: B, function: F) -> PersistentVector<B> where B: Clone, F: FnMut(B, &T) -> B"
+        complexity: "O(n)"
+        example: |
+          let vector: PersistentVector<i32> = (1..=3).collect();
+          let running_product = vector.scan_left(1, |accumulator, x| accumulator * x);
+          // running_product = [1, 1, 2, 6]
+          // 1 (initial), 1*1=1, 1*2=2, 2*3=6
+
+    laws:
+      - name: "長さの性質 (Haskell準拠)"
+        property: "scan_left(xs, init, f).len() == xs.len() + 1"
+      - name: "先頭要素"
+        property: "scan_left(xs, init, f).head() == Some(&init)"
+      - name: "末尾要素"
+        property: "scan_left(xs, init, f).last() == Some(&fold_left(xs, init, f))"
+      - name: "空リスト"
+        property: "scan_left([], init, f) == [init]"
+
+  # ============================================================================
+  # 10. partition - 述語で分割
+  # ============================================================================
+  - id: partition
+    name: partition
+    priority: medium
+    description: |
+      述語に基づいてリストを2つに分割する。
+      述語を満たす要素と満たさない要素に分けて返す。
+
+      Haskell: partition :: (a -> Bool) -> [a] -> ([a], [a])
+      Scala: def partition(p: A => Boolean): (List[A], List[A])
+
+    api:
+      persistent_list:
+        signature: "fn partition<P>(&self, predicate: P) -> (Self, Self) where T: Clone, P: Fn(&T) -> bool"
+        complexity: "O(n)"
+        example: |
+          let list: PersistentList<i32> = (1..=6).collect();
+          let (evens, odds) = list.partition(|x| x % 2 == 0);
+          // evens = [2, 4, 6]
+          // odds = [1, 3, 5]
+
+      persistent_vector:
+        signature: "fn partition<P>(&self, predicate: P) -> (Self, Self) where T: Clone, P: Fn(&T) -> bool"
+        complexity: "O(n)"
+        example: |
+          let vector: PersistentVector<i32> = (1..=6).collect();
+          let (positive, non_positive) = vector.partition(|x| *x > 3);
+          // positive = [4, 5, 6]
+          // non_positive = [1, 2, 3]
+
+    laws:
+      - name: "完全性"
+        property: "partition(xs, p).0.len() + partition(xs, p).1.len() == xs.len()"
+      - name: "正確性 (true側)"
+        property: "all elements in partition(xs, p).0 satisfy p"
+      - name: "正確性 (false側)"
+        property: "all elements in partition(xs, p).1 do not satisfy p"
+      - name: "順序の保持"
+        property: "elements in each partition maintain their relative order from xs"
+
+  # ============================================================================
+  # 11. intersperse - 要素間に値を挿入
+  # ============================================================================
+  - id: intersperse
+    name: intersperse
+    priority: medium
+    description: |
+      リストの各要素の間に指定した値を挿入する。
+
+      Haskell: intersperse :: a -> [a] -> [a]
+      Scala: (mkString で類似機能、直接の intersperse はない)
+
+    api:
+      persistent_list:
+        signature: "fn intersperse(&self, separator: T) -> Self where T: Clone"
+        complexity: "O(n)"
+        example: |
+          let list: PersistentList<i32> = vec![1, 2, 3].into_iter().collect();
+          let interspersed = list.intersperse(0);
+          // interspersed = [1, 0, 2, 0, 3]
+
+          let single: PersistentList<i32> = vec![42].into_iter().collect();
+          let single_interspersed = single.intersperse(0);
+          // single_interspersed = [42]
+
+          let empty: PersistentList<i32> = PersistentList::new();
+          let empty_interspersed = empty.intersperse(0);
+          // empty_interspersed = []
+
+      persistent_vector:
+        signature: "fn intersperse(&self, separator: T) -> Self where T: Clone"
+        complexity: "O(n)"
+        example: |
+          let vector: PersistentVector<char> = vec!['a', 'b', 'c'].into_iter().collect();
+          let interspersed = vector.intersperse('-');
+          // interspersed = ['a', '-', 'b', '-', 'c']
+
+    laws:
+      - name: "長さの性質"
+        property: "intersperse(xs, sep).len() == max(0, 2 * xs.len() - 1) for non-empty xs"
+      - name: "単一要素"
+        property: "intersperse([x], sep) == [x]"
+      - name: "空リスト"
+        property: "intersperse([], sep) == []"
+      - name: "先頭と末尾"
+        property: "intersperse(xs, sep).head() == xs.head() && intersperse(xs, sep).last() == xs.last()"
+
+  # ============================================================================
+  # 12. intercalate - リスト間に値を挿入してフラット化
+  # ============================================================================
+  - id: intercalate
+    name: intercalate
+    priority: medium
+    description: |
+      リストのリストの間に指定したリストを挿入し、結果をフラット化する。
+      intersperse してから flatten したものと等価。
+
+      Haskell: intercalate :: [a] -> [[a]] -> [a]
+      Scala: (mkString + flatten で類似機能)
+
+    api:
+      persistent_list:
+        signature: "fn intercalate(&self, separator: &PersistentList<T>) -> PersistentList<T> where T: Clone"
+        note: "PersistentList<PersistentList<T>> に対するメソッドとして実装"
+        complexity: "O(total elements)"
+        example: |
+          let lists: PersistentList<PersistentList<i32>> = vec![
+              vec![1, 2].into_iter().collect(),
+              vec![3, 4].into_iter().collect(),
+              vec![5, 6].into_iter().collect(),
+          ].into_iter().collect();
+          let separator: PersistentList<i32> = vec![0].into_iter().collect();
+          let result = lists.intercalate(&separator);
+          // result = [1, 2, 0, 3, 4, 0, 5, 6]
+
+      persistent_vector:
+        signature: "fn intercalate(&self, separator: &PersistentVector<T>) -> PersistentVector<T> where T: Clone"
+        note: "PersistentVector<PersistentVector<T>> に対するメソッドとして実装"
+        complexity: "O(total elements)"
+        example: |
+          let vectors: PersistentVector<PersistentVector<char>> = vec![
+              vec!['a', 'b'].into_iter().collect(),
+              vec!['c', 'd'].into_iter().collect(),
+          ].into_iter().collect();
+          let separator: PersistentVector<char> = vec!['-'].into_iter().collect();
+          let result = vectors.intercalate(&separator);
+          // result = ['a', 'b', '-', 'c', 'd']
+
+    laws:
+      - name: "intersperse + flatten との等価性"
+        property: "intercalate(xss, sep) == flatten(intersperse(xss, sep))"
+      - name: "空のリストのリスト"
+        property: "intercalate([], sep) == []"
+      - name: "単一リスト"
+        property: "intercalate([xs], sep) == xs"
+
+# ==============================================================================
+# 共通テスト要件
+# ==============================================================================
+test_requirements:
+  unit_tests:
+    - name: "基本動作テスト"
+      description: "各操作の基本的な動作を確認"
+      coverage:
+        - 通常のケース（複数要素）
+        - 境界ケース（空リスト、単一要素）
+        - エッジケース（インデックス超過など）
+
+    - name: "法則テスト"
+      description: "各操作が満たすべき代数的法則を確認"
+      coverage:
+        - take/drop_first の分解則
+        - zip/unzip の逆関係
+        - scan_left の長さ性質
+        - partition の完全性と正確性
+
+    - name: "型テスト"
+      description: "様々な型での動作を確認"
+      coverage:
+        - プリミティブ型 (i32, char, bool)
+        - String
+        - カスタム構造体
+
+  property_based_tests:
+    description: |
+      QuickCheck スタイルのプロパティベーステストで
+      代数的法則が任意の入力に対して成り立つことを確認。
+
+  integration_tests:
+    - name: "PersistentList との統合"
+      description: "既存の PersistentList API との整合性を確認"
+
+    - name: "PersistentVector との統合"
+      description: "既存の PersistentVector API との整合性を確認"
+
+    - name: "型クラスとの統合"
+      description: "Functor, Foldable 等の型クラスとの組み合わせ動作を確認"
+
+# ==============================================================================
+# 計算量要件まとめ
+# ==============================================================================
+complexity_requirements:
+  persistent_list:
+    take: "O(min(n, count))"
+    drop_first: "O(min(n, count))"
+    split_at: "O(index)"
+    zip: "O(min(n, m))"
+    unzip: "O(n)"
+    find_index: "O(n) worst case"
+    fold_left1: "O(n)"
+    fold_right1: "O(n)"
+    scan_left: "O(n)"
+    partition: "O(n)"
+    intersperse: "O(n)"
+    intercalate: "O(total elements)"
+
+  persistent_vector:
+    take: "O(min(n, count))"
+    drop_first: "O(n)"
+    split_at: "O(n)"
+    zip: "O(min(n, m))"
+    unzip: "O(n)"
+    find_index: "O(n)"
+    fold_left1: "O(n)"
+    fold_right1: "O(n)"
+    scan_left: "O(n)"
+    partition: "O(n)"
+    intersperse: "O(n)"
+    intercalate: "O(total elements)"
+
+# ==============================================================================
+# 実装優先順位
+# ==============================================================================
+implementation_priority:
+  high:
+    - take
+    - drop_first
+    - split_at
+    - zip
+    - unzip
+    - find_index
+
+  medium:
+    - fold_left1
+    - fold_right1
+    - scan_left
+    - partition
+    - intersperse
+    - intercalate
+
+# ==============================================================================
+# 他言語との対応表
+# ==============================================================================
+language_comparison:
+  haskell_data_list:
+    take: "take"
+    drop_first: "drop"
+    split_at: "splitAt"
+    zip: "zip"
+    unzip: "unzip"
+    find_index: "findIndex"
+    fold_left1: "foldl1"
+    fold_right1: "foldr1"
+    scan_left: "scanl"
+    partition: "partition"
+    intersperse: "intersperse"
+    intercalate: "intercalate"
+
+  scala_list:
+    take: "take"
+    drop_first: "drop"
+    split_at: "splitAt"
+    zip: "zip"
+    unzip: "unzip"
+    find_index: "indexWhere"
+    fold_left1: "reduceLeft"
+    fold_right1: "reduceRight"
+    scan_left: "scanLeft"
+    partition: "partition"
+    intersperse: "(via mkString or manual)"
+    intercalate: "(via mkString + flatten)"
