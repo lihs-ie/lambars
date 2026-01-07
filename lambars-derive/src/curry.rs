@@ -252,7 +252,5 @@ mod tests {
     use rstest::rstest;
 
     #[rstest]
-    fn test_module_compiles() {
-        // Actual functionality is tested via integration tests
-    }
+    fn test_module_compiles() {}
 }
