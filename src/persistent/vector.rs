@@ -97,7 +97,7 @@ impl<T: Clone> Node<T> {
     ///
     /// A new Leaf node that shares the underlying storage
     #[inline]
-    const fn leaf_from_rc(elements: ReferenceCounter<[T]>) -> Self {
+    const fn leaf_from_reference_counter(elements: ReferenceCounter<[T]>) -> Self {
         Self::Leaf(elements)
     }
 }
@@ -564,8 +564,8 @@ impl<T: Clone> PersistentVector<T> {
 
     /// Pushes the current tail into the root and creates a new tail with the element.
     fn push_tail_to_root(&self, element: T) -> Self {
-        // Use leaf_from_rc to avoid copying elements - only increments reference count O(1)
-        let tail_leaf = Node::leaf_from_rc(self.tail.clone());
+        // Use leaf_from_reference_counter to avoid copying elements - only increments reference count O(1)
+        let tail_leaf = Node::leaf_from_reference_counter(self.tail.clone());
         let tail_offset = self.tail_offset();
 
         // Check if we need to increase the tree depth
