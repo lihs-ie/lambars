@@ -577,6 +577,7 @@ let result = flipped(3, 10);  // 7 (10 - 3)
 | `state { }` | `State` monad | Stateful computations |
 | `reader { }` | `Reader` monad | Environment reading |
 | `writer { }` | `Writer` monad | Logging computations |
+| `rws { }` (custom) | `RWS` monad | Combined Reader + Writer + State |
 
 ### Code Examples
 
@@ -691,6 +692,65 @@ let computation = Reader::ask()
 let result = computation.run(Config { multiplier: 2 });
 // result = 60
 ```
+
+#### F# RWS Pattern vs lambars RWS Monad
+
+F# doesn't have a built-in RWS computation expression, but the pattern can be implemented manually. lambars provides a dedicated `RWS` monad that combines Reader, Writer, and State functionality.
+
+```fsharp
+// F# - Manual RWS pattern (Reader + Writer + State combined)
+type Config = { Multiplier: int }
+type Log = string list
+
+// RWS-like function: Config -> State -> (Result, State, Log)
+let rwsComputation config state =
+    let result = state * config.Multiplier
+    let newState = result
+    let log = [sprintf "Multiplied %d by %d" state config.Multiplier]
+    (result, newState, log)
+
+// Usage
+let config = { Multiplier = 2 }
+let initialState = 10
+let (result, finalState, log) = rwsComputation config initialState
+// result = 20, finalState = 20, log = ["Multiplied 10 by 2"]
+```
+
+```rust
+// lambars
+use lambars::effect::RWS;
+
+#[derive(Clone)]
+struct Config { multiplier: i32 }
+
+let computation: RWS<Config, Vec<String>, i32, i32> = RWS::ask()
+    .flat_map(|config| {
+        RWS::get().flat_map(move |state| {
+            let result = state * config.multiplier;
+            RWS::put(result)
+                .then(RWS::tell(vec![format!("Multiplied {} by {}", state, config.multiplier)]))
+                .then(RWS::pure(result))
+        })
+    });
+
+let (result, final_state, log) = computation.run(Config { multiplier: 2 }, 10);
+// result = 20, final_state = 20, log = vec!["Multiplied 10 by 2"]
+```
+
+The `RWS` monad provides the following operations:
+
+| F# Pattern | lambars | Description |
+|-----------|---------|-------------|
+| `fun config -> ...` | `RWS::ask` | Access the environment |
+| `fun config -> f config` | `RWS::asks` | Access derived value from environment |
+| `fun _ state -> (state, state, [])` | `RWS::get` | Get current state |
+| `fun _ _ -> ((), newState, [])` | `RWS::put` | Set new state |
+| `fun _ state -> ((), f state, [])` | `RWS::modify` | Modify state with function |
+| `fun _ state -> (f state, state, [])` | `RWS::gets` | Get derived value from state |
+| `fun _ state -> ((), state, log)` | `RWS::tell` | Append to log output |
+| N/A | `RWS::listen` | Access log within computation |
+| N/A | `RWS::listens` | Access transformed log |
+| N/A | `RWS::local` | Run with modified environment |
 
 #### F# Sequence Expressions / List Comprehensions vs lambars for_!
 

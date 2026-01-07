@@ -46,6 +46,7 @@ This document provides a comprehensive comparison between Scala functional progr
 | State | `cats.data.State` | `State` type |
 | Reader | `cats.data.Reader` | `Reader` type |
 | Writer | `cats.data.Writer` | `Writer` type |
+| RWS | `cats.data.ReaderWriterState` | `RWS` type |
 | StateT | `cats.data.StateT` | `StateT` type |
 | ReaderT | `cats.data.ReaderT` | `ReaderT` type |
 | WriterT | `cats.data.WriterT` | `WriterT` type |
@@ -1315,6 +1316,70 @@ fn log_computation(x: i32) -> Writer<Vec<String>, i32> {
 let (result, log) = log_computation(5).run();
 // log = vec!["Got 5", "Doubled to 10"], result = 10
 ```
+
+### RWS Monad (ReaderWriterState)
+
+| Scala (Cats) | lambars | Description |
+|--------------|---------|-------------|
+| `ReaderWriterState.pure(a)` | `RWS::pure` | Pure value |
+| `ReaderWriterState.ask` | `RWS::ask` | Get environment |
+| `ReaderWriterState.get` | `RWS::get` | Get state |
+| `ReaderWriterState.set(s)` | `RWS::put` | Set state |
+| `ReaderWriterState.modify(f)` | `RWS::modify` | Modify state |
+| `ReaderWriterState.inspect(f)` | `RWS::gets` | Get derived value |
+| `ReaderWriterState.tell(w)` | `RWS::tell` | Append to log |
+| `rws.local(f)` | `RWS::local` | Modify environment locally |
+| `rws.listen` | `RWS::listen` | Access log in computation |
+| `rws.run(env, state)` | `RWS::run` | Run with environment and state |
+
+#### Code Examples
+
+```scala
+// Scala (Cats)
+import cats.data.ReaderWriterState
+import cats.data.RWS  // type alias
+
+case class Config(multiplier: Int)
+type Log = Vector[String]
+
+val computation: RWS[Config, Log, Int, Int] = for {
+  config <- ReaderWriterState.ask[Config, Log, Int]
+  state  <- ReaderWriterState.get[Config, Log, Int]
+  result = state * config.multiplier
+  _      <- ReaderWriterState.set[Config, Log, Int](result)
+  _      <- ReaderWriterState.tell[Config, Log, Int](Vector(s"Multiplied $state by ${config.multiplier}"))
+} yield result
+
+val (log, finalState, result) = computation.run(Config(2), 10).value
+// log = Vector("Multiplied 10 by 2"), finalState = 20, result = 20
+```
+
+```rust
+// lambars
+use lambars::effect::RWS;
+use lambars::eff;
+
+#[derive(Clone)]
+struct Config { multiplier: i32 }
+
+let computation: RWS<Config, Vec<String>, i32, i32> = RWS::ask()
+    .flat_map(|config| {
+        RWS::get().flat_map(move |state| {
+            let result = state * config.multiplier;
+            RWS::put(result)
+                .then(RWS::tell(vec![format!("Multiplied {} by {}", state, config.multiplier)]))
+                .then(RWS::pure(result))
+        })
+    });
+
+let (result, final_state, log) = computation.run(Config { multiplier: 2 }, 10);
+// result = 20, final_state = 20, log = vec!["Multiplied 10 by 2"]
+```
+
+The `RWS` monad is useful when you need all three capabilities:
+- **Reader**: Access shared configuration or environment
+- **Writer**: Accumulate logs or other monoidal output
+- **State**: Manage mutable state through computation
 
 ---
 
