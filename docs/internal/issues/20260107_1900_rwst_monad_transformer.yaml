@@ -1,0 +1,90 @@
+# Issue: RWST Monad Transformer
+# RWS モナド実装時に発見された、将来対応が必要な項目
+
+deferred_features:
+  - id: rwst_monad_transformer
+    name: "RWST Monad Transformer"
+    discovered_date: "2026-01-07"
+    priority: medium
+    category: enhancement
+    labels:
+      - "effect"
+      - "enhancement"
+      - "traits"
+      - "api"
+
+    # 問題の説明
+    problem:
+      summary: "RWS モナドのトランスフォーマー版（RWST）が未実装"
+      details: |
+        RWS モナド（Reader + Writer + State の合成）は実装済みだが、
+        他のモナドと組み合わせて使用するためのトランスフォーマー版（RWST）が未実装。
+
+        - 現状: RWS<R, W, S, A> は単体で動作するモナドとして実装
+        - 課題: IO や AsyncIO などの副作用を持つモナドと組み合わせることができない
+        - 影響: 実際のアプリケーションでは、設定の読み取り、ログ出力、状態管理に加えて、
+                IO 操作（ファイル読み書き、ネットワーク通信など）が必要になることが多い
+
+      # Haskell の RWST の型シグネチャ
+      rust_limitation: |
+        ```haskell
+        -- Haskell の RWST
+        newtype RWST r w s m a = RWST { runRWST :: r -> s -> m (a, s, w) }
+
+        -- 現在の lambars の RWS
+        struct RWS<R, W, S, A>(Rc<dyn Fn(R, S) -> (A, S, W)>)
+
+        -- 必要な RWST
+        struct RWST<R, W, S, M, A>(Rc<dyn Fn(R, S) -> M<(A, S, W)>>)
+        -- where M: Monad
+        ```
+
+    # 解決策の提案
+    solution:
+      approach: "既存の ReaderT, WriterT, StateT の実装パターンを参考に RWST を実装"
+      options:
+        - name: "独立した RWST 型として実装"
+          description: |
+            新しい RWST<R, W, S, M, A> 型を定義し、
+            RWS と同様の API を提供しつつ、内部モナド M を抽象化する。
+          pros:
+            - 型シグネチャが明確
+            - HaskellのRWSTとの対応が取りやすい
+            - 単一の型で Reader + Writer + State + 任意モナドの機能を提供
+          cons:
+            - 実装が複雑になる
+            - 5つの型パラメータが必要で、使用時の型注釈が煩雑になる可能性
+            - 既存の ReaderT, WriterT, StateT との組み合わせとの重複
+
+        - name: "ReaderT + WriterT + StateT の組み合わせで代替"
+          description: |
+            RWST を実装せず、既存のトランスフォーマーを組み合わせて使用する。
+            type RWST<R, W, S, M, A> = ReaderT<R, WriterT<W, StateT<S, M, A>>>
+          pros:
+            - 新しい型を追加する必要がない
+            - 既存のトランスフォーマーの実装を再利用
+          cons:
+            - 型がネストして複雑になる
+            - パフォーマンスオーバーヘッドの可能性
+            - 使いやすさが低下
+
+      recommended: "独立した RWST 型として実装"
+      estimated_complexity: high
+
+    # 参考情報
+    references:
+      - "Haskell Control.Monad.RWS.Strict/Lazy"
+      - "Scalaz RWST"
+      - "Cats ReaderWriterStateT"
+      - "既存の lambars ReaderT, WriterT, StateT 実装"
+
+    # 関連する要件・実装
+    related:
+      requirement_id: "20260107_1430_rws_monad"
+      plan_id: "20260107_1530_rws_monad"
+
+    # GitHub Issue 情報（作成後に追記）
+    github_issue:
+      number: 65
+      url: "https://github.com/lihs-ie/lambars/issues/65"
+      created: true
