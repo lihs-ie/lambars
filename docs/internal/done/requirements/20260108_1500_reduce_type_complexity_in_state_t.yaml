@@ -1,0 +1,754 @@
+# StateT/ReaderT の型複雑度削減 要件定義
+#
+# 概要:
+#   StateT および ReaderT の try_lift_io/try_lift_async_io メソッドの
+#   戻り値型が複雑すぎるため、型エイリアスを導入して clippy::type_complexity
+#   の lint 警告を解消する。
+#
+# 設計方針:
+#   1. 関数型プログラミングの原則に従い、型の意図を明確に表現する命名を行う
+#   2. 既存の API との後方互換性を完全に維持する
+#   3. 型エイリアスは意味のある抽象化を提供し、コードの可読性を向上させる
+#   4. StateT と ReaderT で一貫した命名規則を使用する
+#   5. 失敗は例外（panic）ではなく型（Result）で表現する
+#   6. 計算の記述と実行を分離し、参照透過性を維持する
+#
+# 参照:
+#   - GitHub Issue #56: https://github.com/lihs-ie/lambars/issues/56
+#   - Rust API Guidelines: https://rust-lang.github.io/api-guidelines/
+#   - clippy::type_complexity lint: https://rust-lang.github.io/rust-clippy/
+
+version: "1.0.0"
+name: "Reduce Type Complexity in StateT/ReaderT"
+description: |
+  StateT および ReaderT の try_lift_io と try_lift_async_io メソッドにおいて、
+  戻り値型が clippy::type_complexity の警告を引き起こすほど複雑になっている。
+  現在は #[allow(clippy::type_complexity)] で抑制しているが、これは根本的な
+  解決ではない。
+
+  型エイリアスを導入することで:
+
+  1. 型の意図が明確になる: 複雑な型構造に意味のある名前を付ける
+  2. コードの可読性が向上する: メソッドシグネチャが読みやすくなる
+  3. 保守性が向上する: 型の変更が一箇所で済む
+  4. lint 警告が解消される: #[allow(...)] が不要になる
+
+  関数型プログラミングの観点から:
+
+  - 型エイリアスは「型レベルの抽象化」を提供し、複雑な型構造を意味のある概念として表現する
+  - 失敗の可能性は Result 型で表現し、例外を制御フローに使用しない
+  - try_lift_* メソッドは「計算の記述」のみを行い、「実行」は run メソッドで行う
+  - 状態の変化は破壊的操作ではなく、新しい値 (A, S) を返すことで表現される
+
+# 背景・動機
+background:
+  problem: |
+    現在、以下の4箇所で clippy::type_complexity 警告が #[allow] で抑制されている:
+
+    1. src/effect/state_transformer.rs:531-532 - StateT::try_lift_io
+       ```rust
+       #[allow(clippy::option_if_let_else, clippy::type_complexity)]
+       pub fn try_lift_io(inner: IO<A>) -> StateT<S, IO<Result<(A, S), EffectError>>>
+       ```
+
+    2. src/effect/state_transformer.rs:894-895 - StateT::try_lift_async_io
+       ```rust
+       #[allow(clippy::option_if_let_else, clippy::type_complexity)]
+       pub fn try_lift_async_io(inner: AsyncIO<A>) -> StateT<S, AsyncIO<Result<(A, S), EffectError>>>
+       ```
+
+    3. src/effect/reader_transformer.rs:596-598 - ReaderT::try_lift_io
+       (現在は警告なしだが、同様に複雑な型を使用)
+       ```rust
+       pub fn try_lift_io(inner: IO<A>) -> ReaderT<R, IO<Result<A, EffectError>>>
+       ```
+
+    4. src/effect/reader_transformer.rs:981-983 - ReaderT::try_lift_async_io
+       (現在は警告なしだが、同様に複雑な型を使用)
+       ```rust
+       pub fn try_lift_async_io(inner: AsyncIO<A>) -> ReaderT<R, AsyncIO<Result<A, EffectError>>>
+       ```
+
+    これらの問題点:
+
+    - #[allow] による警告抑制は根本的な解決ではない
+    - 型が複雑で、メソッドシグネチャの意図が読み取りにくい
+    - 同じ型構造がテストコードにも繰り返し現れ、冗長になっている
+    - 型の変更が必要な場合、複数箇所を修正する必要がある
+
+  motivation: |
+    Rust において型エイリアスは以下の目的で使用される:
+
+    1. 型の意図を明確にする
+       - `type UserId = u64` は単なる u64 より意図が明確
+       - 複雑なジェネリック型に名前を付けることで、その目的を表現できる
+
+    2. コードの可読性を向上させる
+       - 長い型シグネチャを短くできる
+       - 関数のシグネチャがシンプルになり、理解しやすくなる
+
+    3. 保守性を向上させる
+       - 型定義の変更が一箇所で済む
+       - DRY 原則に従い、重複を排除できる
+
+    4. 型レベルの抽象化を提供する
+       - 関数型プログラミングでは、型は重要なドキュメントである
+       - 適切な名前を付けることで、型が表現する概念を明確にできる
+
+    本プロジェクトでは既に型エイリアスが使用されている:
+    - src/control/continuation.rs: ContinuationFunction, CpsFunction, ContinuationHolder
+    - src/effect/writer_transformer.rs: ListenedValue
+    - src/persistent/mod.rs: ReferenceCounter
+    - src/persistent/hashset.rs: HashSetIntoIteratorInner
+
+    これらのパターンに従い、StateT/ReaderT の複雑な戻り値型にも
+    適切な型エイリアスを導入する。
+
+  prior_art:
+    - name: "Haskell の type synonyms"
+      description: |
+        Haskell では type キーワードで型シノニムを定義する。
+        モナドトランスフォーマーの複雑な型に名前を付けることは一般的。
+        ```haskell
+        type AppM a = ReaderT Config (StateT AppState IO) a
+        type Parser a = StateT String Maybe a
+        ```
+
+    - name: "Rust 標準ライブラリの型エイリアス"
+      description: |
+        Rust 標準ライブラリでも複雑な型に型エイリアスが使用されている。
+        ```rust
+        pub type Result<T> = result::Result<T, Error>;  // std::io::Result
+        pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+        ```
+
+    - name: "本プロジェクトの既存パターン"
+      description: |
+        本プロジェクトでは、以下のような型エイリアスが既に使用されている:
+        ```rust
+        // src/control/continuation.rs
+        type ContinuationFunction<A, R> = Box<dyn FnOnce(A) -> R>;
+        type CpsFunction<A, R> = Box<dyn FnOnce(ContinuationFunction<A, R>) -> R>;
+
+        // src/effect/writer_transformer.rs
+        type ListenedValue<A, W> = ((A, W), W);
+
+        // src/persistent/mod.rs
+        pub(crate) type ReferenceCounter<T> = std::sync::Arc<T>;
+        ```
+
+    - name: "clippy のガイダンス"
+      description: |
+        clippy::type_complexity lint は、型が複雑すぎる場合に警告を発する。
+        推奨される解決策は型エイリアスの導入である。
+        https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+# 命名規則
+naming_conventions:
+  description: |
+    型エイリアスの命名において、以下の規則に従う:
+
+    1. 語順: [対象] + [操作] + [効果型]
+       - 対象（StateT, ReaderT）を先頭に配置
+       - 操作（TryLift）を中央に配置
+       - 効果型（IO, AsyncIO）を末尾に配置
+       - 例: StateTTryLiftIO, ReaderTTryLiftAsyncIO
+
+    2. 型パラメータ順: <S/R, A>
+       - 状態/環境の型パラメータを先に配置
+       - 値の型パラメータを後に配置
+       - 例: StateTTryLiftIO<S, A>, ReaderTTryLiftIO<R, A>
+       - 理由: 元の StateT<S, M>, ReaderT<R, M> の順序と一致させる
+
+    3. Result 型エイリアスの型パラメータ
+       - StateT: <S, A> - 状態 S を結果に含むため、両方の型パラメータが必要
+         - 例: StateTTryLiftResult<S, A> = Result<(A, S), EffectError>
+       - ReaderT: <A> のみ - 環境 R は読み取り専用で結果に含まれないため
+         - 例: ReaderTTryLiftResult<A> = Result<A, EffectError>
+       - この違いは StateT と ReaderT の本質的な差異を反映している
+
+  rationale: |
+    この命名規則を採用した理由:
+
+    1. 一貫性: 元の StateT<S, M>, ReaderT<R, M> と同じ型パラメータ順序
+    2. 可読性: 「StateTTryLiftIO」は「StateT の TryLift で IO を使用」と読める
+    3. 発見性: StateT から始まるため、IDE の補完で見つけやすい
+    4. 既存パターンとの整合性: 本プロジェクトの既存の型エイリアスと一貫
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. StateT 用の型エイリアス定義
+  # ======================================================================
+  - id: state_t_type_aliases
+    name: "StateT 用型エイリアスの定義"
+    description: |
+      StateT の try_lift_io/try_lift_async_io メソッドで使用される
+      複雑な戻り値型に対して、意味のある型エイリアスを定義する。
+
+      関数型プログラミングの原則:
+      - 状態の変化は破壊的操作ではなく、新しい値 (A, S) を返すことで表現される
+      - 失敗は Result 型で表現し、panic を使用しない
+      - try_lift_* は計算の「記述」のみを行い、run で「実行」する
+
+    methods:
+      - name: "StateTTryLiftResult<S, A> 型エイリアス"
+        signature: |
+          /// Result type for StateT operations that may fail due to effect consumption.
+          ///
+          /// This type represents the result of a stateful computation that:
+          /// - Succeeds with a value `A` and new state `S`, or
+          /// - Fails with an `EffectError` (e.g., when the effect is already consumed)
+          ///
+          /// # Functional Programming Note
+          ///
+          /// State changes are represented by returning a new `(A, S)` tuple,
+          /// not by mutating existing state. This preserves immutability and
+          /// referential transparency.
+          ///
+          /// # Type Parameters
+          ///
+          /// - `S`: The state type
+          /// - `A`: The value type
+          pub type StateTTryLiftResult<S, A> = Result<(A, S), EffectError>;
+        description: |
+          StateT の try_lift 系メソッドで使用される Result 型。
+          値と状態のタプル、またはエラーを表現する。
+
+          この型エイリアスにより、`Result<(A, S), EffectError>` という
+          複雑な型構造に意味のある名前が付けられる。
+
+          不変性の原則: 状態 S は変更されるのではなく、新しい値として返される。
+
+      - name: "StateTTryLiftIO<S, A> 型エイリアス"
+        signature: |
+          /// StateT type wrapping an IO that may fail due to effect consumption.
+          ///
+          /// This is the return type of `StateT::try_lift_io`.
+          ///
+          /// # Functional Programming Note
+          ///
+          /// This type represents a **description** of a computation, not its execution.
+          /// The actual IO effect is only performed when `run` is called, followed by
+          /// `run_unsafe` on the resulting IO. This separation of description and
+          /// execution maintains referential transparency.
+          ///
+          /// # Type Parameters
+          ///
+          /// - `S`: The state type
+          /// - `A`: The value type
+          pub type StateTTryLiftIO<S, A> = StateT<S, IO<StateTTryLiftResult<S, A>>>;
+        description: |
+          StateT::try_lift_io の戻り値型。
+          IO 内で StateT の操作結果を表現する。
+
+          参照透過性: この型を作成しただけでは IO は実行されない。
+          run メソッドで IO を取得し、run_unsafe で実行することで初めて
+          副作用が発生する。
+
+      - name: "StateTTryLiftAsyncIO<S, A> 型エイリアス"
+        signature: |
+          /// StateT type wrapping an AsyncIO that may fail due to effect consumption.
+          ///
+          /// This is the return type of `StateT::try_lift_async_io`.
+          ///
+          /// # Functional Programming Note
+          ///
+          /// This type represents a **description** of an asynchronous computation,
+          /// not its execution. The actual AsyncIO effect is only performed when
+          /// `run` is called, followed by `run_async().await` on the resulting AsyncIO.
+          ///
+          /// # Type Parameters
+          ///
+          /// - `S`: The state type
+          /// - `A`: The value type
+          #[cfg(feature = "async")]
+          pub type StateTTryLiftAsyncIO<S, A> = StateT<S, AsyncIO<StateTTryLiftResult<S, A>>>;
+        description: |
+          StateT::try_lift_async_io の戻り値型。
+          AsyncIO 内で StateT の操作結果を表現する。
+
+          参照透過性: この型を作成しただけでは AsyncIO は実行されない。
+          run メソッドで AsyncIO を取得し、run_async().await で実行することで
+          初めて副作用が発生する。
+
+          注意: この型エイリアスは `async` feature が有効な場合のみ定義される。
+
+    implementations:
+      - type: "src/effect/state_transformer.rs"
+        description: |
+          型エイリアスをモジュールの先頭（use 文の後、impl ブロックの前）に定義する。
+          ドキュメントコメントを必ず付ける。
+
+          配置規約:
+          - `StateTTryLiftResult` と `StateTTryLiftIO` は常に定義される
+          - `StateTTryLiftAsyncIO` は `#[cfg(feature = "async")]` ブロック内、
+            または AsyncIO の use 文と同じ cfg ブロック内に配置する
+          - 既存の cfg ブロック構造と整合性を保つこと
+
+    examples:
+      - description: "型エイリアス使用前のシグネチャ"
+        code: |
+          // Before: 複雑で読みにくい
+          #[allow(clippy::type_complexity)]
+          pub fn try_lift_io(inner: IO<A>) -> StateT<S, IO<Result<(A, S), EffectError>>>
+
+      - description: "型エイリアス使用後のシグネチャ"
+        code: |
+          // After: シンプルで意図が明確
+          pub fn try_lift_io(inner: IO<A>) -> StateTTryLiftIO<S, A>
+
+  # ======================================================================
+  # 2. ReaderT 用の型エイリアス定義
+  # ======================================================================
+  - id: reader_t_type_aliases
+    name: "ReaderT 用型エイリアスの定義"
+    description: |
+      ReaderT の try_lift_io/try_lift_async_io メソッドで使用される
+      複雑な戻り値型に対して、意味のある型エイリアスを定義する。
+
+      StateT と同様の命名規則に従い、一貫性を保つ。
+
+      関数型プログラミングの原則:
+      - ReaderT は読み取り専用の環境を提供し、環境は変更されない
+      - 失敗は Result 型で表現し、panic を使用しない
+      - try_lift_* は計算の「記述」のみを行い、run で「実行」する
+
+    methods:
+      - name: "ReaderTTryLiftResult<A> 型エイリアス"
+        signature: |
+          /// Result type for ReaderT operations that may fail due to effect consumption.
+          ///
+          /// This type represents the result of an environment-dependent computation that:
+          /// - Succeeds with a value `A`, or
+          /// - Fails with an `EffectError` (e.g., when the effect is already consumed)
+          ///
+          /// # Type Parameters
+          ///
+          /// - `A`: The value type
+          ///
+          /// # Difference from StateTTryLiftResult
+          ///
+          /// ReaderT does not modify state, so it returns only `A` (not `(A, S)`).
+          /// The environment `R` is read-only and not included in the result.
+          pub type ReaderTTryLiftResult<A> = Result<A, EffectError>;
+        description: |
+          ReaderT の try_lift 系メソッドで使用される Result 型。
+          値、またはエラーを表現する。
+
+          注意: ReaderT は状態を持たないため、StateT とは異なり
+          タプルではなく単一の値を返す。環境 R は読み取り専用であり、
+          結果には含まれない。
+
+      - name: "ReaderTTryLiftIO<R, A> 型エイリアス"
+        signature: |
+          /// ReaderT type wrapping an IO that may fail due to effect consumption.
+          ///
+          /// This is the return type of `ReaderT::try_lift_io`.
+          ///
+          /// # Functional Programming Note
+          ///
+          /// This type represents a **description** of a computation, not its execution.
+          /// The actual IO effect is only performed when `run` is called, followed by
+          /// `run_unsafe` on the resulting IO.
+          ///
+          /// # Type Parameters
+          ///
+          /// - `R`: The environment type
+          /// - `A`: The value type
+          pub type ReaderTTryLiftIO<R, A> = ReaderT<R, IO<ReaderTTryLiftResult<A>>>;
+        description: |
+          ReaderT::try_lift_io の戻り値型。
+          IO 内で ReaderT の操作結果を表現する。
+
+          参照透過性: この型を作成しただけでは IO は実行されない。
+
+      - name: "ReaderTTryLiftAsyncIO<R, A> 型エイリアス"
+        signature: |
+          /// ReaderT type wrapping an AsyncIO that may fail due to effect consumption.
+          ///
+          /// This is the return type of `ReaderT::try_lift_async_io`.
+          ///
+          /// # Functional Programming Note
+          ///
+          /// This type represents a **description** of an asynchronous computation,
+          /// not its execution. The actual AsyncIO effect is only performed when
+          /// `run` is called, followed by `run_async().await` on the resulting AsyncIO.
+          ///
+          /// # Type Parameters
+          ///
+          /// - `R`: The environment type
+          /// - `A`: The value type
+          #[cfg(feature = "async")]
+          pub type ReaderTTryLiftAsyncIO<R, A> = ReaderT<R, AsyncIO<ReaderTTryLiftResult<A>>>;
+        description: |
+          ReaderT::try_lift_async_io の戻り値型。
+          AsyncIO 内で ReaderT の操作結果を表現する。
+
+          参照透過性: この型を作成しただけでは AsyncIO は実行されない。
+
+          注意: この型エイリアスは `async` feature が有効な場合のみ定義される。
+
+    implementations:
+      - type: "src/effect/reader_transformer.rs"
+        description: |
+          型エイリアスをモジュールの先頭（use 文の後、impl ブロックの前）に定義する。
+          ドキュメントコメントを必ず付ける。
+
+          配置規約:
+          - `ReaderTTryLiftResult` と `ReaderTTryLiftIO` は常に定義される
+          - `ReaderTTryLiftAsyncIO` は `#[cfg(feature = "async")]` ブロック内、
+            または AsyncIO の use 文と同じ cfg ブロック内に配置する
+          - 既存の cfg ブロック構造と整合性を保つこと
+
+    examples:
+      - description: "型エイリアス使用前のシグネチャ"
+        code: |
+          // Before: やや複雑
+          pub fn try_lift_io(inner: IO<A>) -> ReaderT<R, IO<Result<A, EffectError>>>
+
+      - description: "型エイリアス使用後のシグネチャ"
+        code: |
+          // After: シンプルで意図が明確
+          pub fn try_lift_io(inner: IO<A>) -> ReaderTTryLiftIO<R, A>
+
+  # ======================================================================
+  # 3. メソッドシグネチャの更新
+  # ======================================================================
+  - id: update_method_signatures
+    name: "メソッドシグネチャの更新"
+    description: |
+      定義した型エイリアスを使用してメソッドシグネチャを更新し、
+      #[allow(clippy::type_complexity)] を削除する。
+
+    methods:
+      - name: "StateT::try_lift_io の更新"
+        signature: |
+          /// Lifts an `IO` into `StateT`, returning `Result` instead of panicking.
+          ///
+          /// # Functional Programming Note
+          ///
+          /// This method creates a **description** of a computation. The IO is not
+          /// executed until `run` is called followed by `run_unsafe`. This separation
+          /// of description and execution maintains referential transparency.
+          ///
+          /// State changes are represented by returning a new `(A, S)` tuple,
+          /// not by mutating existing state.
+          ///
+          /// # Returns
+          ///
+          /// A [`StateTTryLiftIO<S, A>`] that, when run, returns
+          /// `IO<StateTTryLiftResult<S, A>>`.
+          #[must_use]
+          #[allow(clippy::option_if_let_else)]
+          pub fn try_lift_io(inner: IO<A>) -> StateTTryLiftIO<S, A>
+        description: |
+          clippy::type_complexity の #[allow] を削除し、
+          型エイリアスを使用する。
+          clippy::option_if_let_else は残す（別の問題のため）。
+
+      - name: "StateT::try_lift_async_io の更新"
+        signature: |
+          /// Lifts an `AsyncIO` into `StateT`, returning `Result` instead of panicking.
+          ///
+          /// # Functional Programming Note
+          ///
+          /// This method creates a **description** of an asynchronous computation.
+          /// The AsyncIO is not executed until `run` is called followed by
+          /// `run_async().await`.
+          ///
+          /// # Returns
+          ///
+          /// A [`StateTTryLiftAsyncIO<S, A>`] that, when run, returns
+          /// `AsyncIO<StateTTryLiftResult<S, A>>`.
+          #[must_use]
+          #[allow(clippy::option_if_let_else)]
+          pub fn try_lift_async_io(inner: AsyncIO<A>) -> StateTTryLiftAsyncIO<S, A>
+          where
+              S: Clone,
+        description: |
+          clippy::type_complexity の #[allow] を削除し、
+          型エイリアスを使用する。
+
+          前提: 既存実装において、このメソッドは `#[cfg(feature = "async")]` で
+          囲まれた impl ブロック内に定義されている。この構造は維持する。
+
+      - name: "ReaderT::try_lift_io の更新"
+        signature: |
+          /// Lifts an `IO` into `ReaderT`, returning `Result` instead of panicking.
+          ///
+          /// # Functional Programming Note
+          ///
+          /// This method creates a **description** of a computation. The IO is not
+          /// executed until `run` is called followed by `run_unsafe`.
+          ///
+          /// # Returns
+          ///
+          /// A [`ReaderTTryLiftIO<R, A>`] that, when run, returns
+          /// `IO<ReaderTTryLiftResult<A>>`.
+          #[must_use]
+          #[allow(clippy::option_if_let_else)]
+          pub fn try_lift_io(inner: IO<A>) -> ReaderTTryLiftIO<R, A>
+        description: |
+          型エイリアスを使用して、シグネチャを簡潔にする。
+
+      - name: "ReaderT::try_lift_async_io の更新"
+        signature: |
+          /// Lifts an `AsyncIO` into `ReaderT`, returning `Result` instead of panicking.
+          ///
+          /// # Functional Programming Note
+          ///
+          /// This method creates a **description** of an asynchronous computation.
+          /// The AsyncIO is not executed until `run` is called followed by
+          /// `run_async().await`.
+          ///
+          /// # Returns
+          ///
+          /// A [`ReaderTTryLiftAsyncIO<R, A>`] that, when run, returns
+          /// `AsyncIO<ReaderTTryLiftResult<A>>`.
+          #[must_use]
+          #[allow(clippy::option_if_let_else)]
+          pub fn try_lift_async_io(inner: AsyncIO<A>) -> ReaderTTryLiftAsyncIO<R, A>
+          where
+              A: Clone,
+        description: |
+          型エイリアスを使用して、シグネチャを簡潔にする。
+
+          前提: 既存実装において、このメソッドは `#[cfg(feature = "async")]` で
+          囲まれた impl ブロック内に定義されている。この構造は維持する。
+
+    implementations:
+      - type: "src/effect/state_transformer.rs"
+        description: |
+          StateT の try_lift_io と try_lift_async_io メソッドを更新。
+
+      - type: "src/effect/reader_transformer.rs"
+        description: |
+          ReaderT の try_lift_io と try_lift_async_io メソッドを更新。
+
+  # ======================================================================
+  # 4. テストコードの更新
+  # ======================================================================
+  - id: update_test_code
+    name: "テストコードの更新"
+    description: |
+      テストコードで使用されている複雑な型注釈を、
+      新しい型エイリアスを使用するように更新する。
+
+      これにより:
+      - テストコードの可読性が向上する
+      - 型エイリアスが正しく動作することを検証できる
+      - #[allow(clippy::type_complexity)] の必要性がなくなる
+
+      前提:
+      - 既存実装において、async_io_tests モジュールは `#[cfg(feature = "async")]`
+        で囲まれている。この構造は維持する。
+      - io_tests モジュールは常に有効（feature 条件なし）
+
+    methods:
+      - name: "StateT テストの更新"
+        signature: |
+          // Before:
+          #[allow(clippy::type_complexity)]
+          mod io_tests {
+              let state: StateT<String, IO<Result<(i32, String), EffectError>>> = ...
+
+          // After:
+          mod io_tests {
+              let state: StateTTryLiftIO<String, i32> = ...
+        description: |
+          io_tests モジュールと async_io_tests モジュールの
+          型注釈を更新する。
+
+          注意: async_io_tests は既に `#[cfg(feature = "async")]` で
+          囲まれているため、この構造は維持する。
+
+      - name: "ReaderT テストの更新"
+        signature: |
+          // Before:
+          let reader: ReaderT<String, IO<Result<i32, EffectError>>> = ...
+
+          // After:
+          let reader: ReaderTTryLiftIO<String, i32> = ...
+        description: |
+          io_tests モジュールと async_io_tests モジュールの
+          型注釈を更新する。
+
+          注意: async_io_tests は既に `#[cfg(feature = "async")]` で
+          囲まれているため、この構造は維持する。
+
+    implementations:
+      - type: "src/effect/state_transformer.rs の tests モジュール"
+        description: |
+          io_tests と async_io_tests の型注釈を更新し、
+          #[allow(clippy::type_complexity)] を削除する。
+
+          前提: async_io_tests は既に `#[cfg(feature = "async")]` で
+          囲まれている。この構造は維持する。
+
+      - type: "src/effect/reader_transformer.rs の tests モジュール"
+        description: |
+          io_tests と async_io_tests の型注釈を更新する。
+          （async_io_tests 内の try_lift_async_io_tests を含む）
+
+          前提: async_io_tests は既に `#[cfg(feature = "async")]` で
+          囲まれている。この構造は維持する。
+
+  # ======================================================================
+  # 5. 公開 API としてのエクスポート
+  # ======================================================================
+  - id: export_type_aliases
+    name: "型エイリアスの公開 API としてのエクスポート"
+    description: |
+      定義した型エイリアスをモジュールの公開 API として
+      適切にエクスポートする。
+
+      考慮事項:
+      - ユーザーがこれらの型を使用できるようにする
+      - mod.rs での re-export を検討
+      - ドキュメントでの言及
+
+    methods:
+      - name: "mod.rs での re-export"
+        signature: |
+          // src/effect/mod.rs
+
+          // 常に利用可能な型エイリアス
+          pub use state_transformer::{
+              StateT,
+              StateTTryLiftResult,
+              StateTTryLiftIO,
+          };
+          pub use reader_transformer::{
+              ReaderT,
+              ReaderTTryLiftResult,
+              ReaderTTryLiftIO,
+          };
+
+          // async feature が有効な場合のみ利用可能な型エイリアス
+          #[cfg(feature = "async")]
+          pub use state_transformer::StateTTryLiftAsyncIO;
+          #[cfg(feature = "async")]
+          pub use reader_transformer::ReaderTTryLiftAsyncIO;
+        description: |
+          型エイリアスを effect モジュールの公開 API として
+          re-export する。これにより、ユーザーは
+          `lambars::effect::StateTTryLiftIO` のようにアクセスできる。
+
+          重要: AsyncIO 系の型エイリアスは `async` feature が有効な場合のみ
+          re-export される。これにより、feature 無効時のビルドエラーを防ぐ。
+
+    implementations:
+      - type: "src/effect/mod.rs"
+        description: |
+          state_transformer と reader_transformer から
+          型エイリアスを re-export する。
+
+          注意:
+          - 基本型（Result, IO 系）は常に re-export
+          - AsyncIO 系は `#[cfg(feature = "async")]` 条件付きで re-export
+          - 既存の mod.rs の cfg 構造と整合性を保つこと
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - "型エイリアスはコンパイル時のみの概念であり、ランタイムオーバーヘッドはゼロ"
+    - "既存のコードと同等のパフォーマンスを維持"
+
+  compatibility:
+    - "型エイリアスは追加的な変更であり、既存の型をそのまま使用するコードも動作する"
+    - "後方互換性を完全に維持する"
+    - "型エイリアスを使用した場合と直接型を記述した場合で、完全に等価な型となる"
+
+  testing:
+    - "既存のテストが全てパスすることを確認"
+    - "型エイリアスを使用したテストが正しく型チェックされることを確認"
+    - "カバレッジ 100% を維持"
+
+  documentation:
+    - "全ての型エイリアスに詳細なドキュメントコメントを追加"
+    - "型パラメータの説明を含める"
+    - "使用例をドキュメントに含める"
+    - "メソッドドキュメントで型エイリアスへの参照を追加"
+    - "関数型プログラミングの原則（計算と実行の分離、不変性）を明記"
+
+# 実装の優先順位
+implementation_priority:
+  - order: 1
+    id: state_t_type_aliases
+    reason: |
+      Issue #56 の主な対象は StateT であるため、まず StateT の
+      型エイリアスを定義する。これにより clippy 警告が解消される。
+
+  - order: 2
+    id: reader_t_type_aliases
+    reason: |
+      StateT と同様のパターンで ReaderT の型エイリアスを定義し、
+      一貫性を保つ。
+
+  - order: 3
+    id: update_method_signatures
+    reason: |
+      型エイリアス定義後、メソッドシグネチャを更新して
+      #[allow(clippy::type_complexity)] を削除する。
+
+  - order: 4
+    id: update_test_code
+    reason: |
+      テストコードも型エイリアスを使用するように更新し、
+      テストモジュールの #[allow] も削除する。
+
+  - order: 5
+    id: export_type_aliases
+    reason: |
+      最後に、型エイリアスを公開 API としてエクスポートし、
+      ドキュメントを整備する。
+
+# 将来の拡張
+future_extensions:
+  - id: additional_type_aliases
+    name: "追加の型エイリアス"
+    description: |
+      他のモナドトランスフォーマー（WriterT など）や
+      複雑な型を返すメソッドに対しても、同様の型エイリアスを
+      導入することを検討する。
+    rationale: |
+      現時点では StateT と ReaderT の try_lift 系メソッドのみが
+      対象だが、将来的に他のトランスフォーマーにも同様のパターンを
+      適用する可能性がある。
+
+  - id: newtype_wrapper
+    name: "Newtype ラッパーの検討"
+    description: |
+      型エイリアスの代わりに newtype ラッパーを使用することで、
+      より強い型安全性を提供することを検討する。
+      ```rust
+      pub struct StateTTryLiftIO<S, A>(StateT<S, IO<Result<(A, S), EffectError>>>);
+      ```
+    rationale: |
+      型エイリアスは元の型と完全に同一視されるため、
+      誤用を防ぐ効果は限定的。newtype を使用すると
+      明示的な変換が必要になり、型安全性が向上する。
+      ただし、使い勝手とのトレードオフがある。
+
+  - id: generic_try_lift_result
+    name: "汎用的な TryLiftResult 型"
+    description: |
+      StateT と ReaderT で共通の TryLiftResult 型を定義し、
+      より汎用的な抽象化を提供することを検討する。
+    rationale: |
+      現時点では StateT と ReaderT で別々の Result 型エイリアスを
+      定義している。これは以下の理由による:
+
+      1. StateT は (A, S) を返し、ReaderT は A を返すため、型構造が異なる
+      2. 別々の型エイリアスにすることで、各トランスフォーマーの意図が明確になる
+      3. 将来的に各トランスフォーマー固有のエラー型を追加する可能性がある
+
+      共通の型を使用するには、HKT（Higher-Kinded Types）のような
+      抽象化が必要であり、Rust では現時点で困難。
+
+# 関連 Issue
+github_issue:
+  number: 56
+  url: "https://github.com/lihs-ie/lambars/issues/56"
+  title: "StateT type complexity warning"
