@@ -405,8 +405,8 @@ impl<T> PersistentVector<T> {
     /// use lambars::persistent::PersistentVector;
     ///
     /// let vector: PersistentVector<i32> = (1..=5).collect();
-    /// let index = vector.find_index(|x| *x == 3);
-    /// // index = Some(2)
+    /// let index = vector.find_index(|x| *x > 3);
+    /// // index = Some(3)
     /// ```
     #[must_use]
     pub fn find_index<P>(&self, predicate: P) -> Option<usize>
