@@ -1,0 +1,1018 @@
+# serde サポート 実装計画
+#
+# 要件定義: docs/internal/requirements/20260107_1330_serde_support.yaml
+# 技術要件:
+#   - Rust: 1.92.0
+#   - edition: 2024
+#   - testing: rstest, proptest
+#
+# 実装方針:
+#   1. TDD（テスト駆動開発）でテストを先に書く
+#   2. 各データ構造に対して手動で Serialize/Deserialize を実装する
+#   3. Visitor パターンを使用したデシリアライズを採用する
+#   4. feature フラグ "serde" で条件付きコンパイルを行う
+#   5. size_hint は上限チェック（MAX_PREALLOCATE_SIZE）を設ける
+#   6. 統合テストには #![cfg(feature = "serde")] を付与
+#   7. 参照: https://serde.rs/impl-deserialize.html, https://serde.rs/deserialize-map.html
+
+version: "1.0.0"
+name: "serde_support Implementation Plan"
+requirement_file: "docs/internal/requirements/20260107_1330_serde_support.yaml"
+
+# 実装順序の概要
+implementation_order:
+  - step: 1
+    name: "Cargo.toml と feature フラグの設定"
+    items:
+      - serde 依存関係の追加
+      - serde feature フラグの定義
+
+  - step: 2
+    name: "Either 型の serde 実装"
+    items:
+      - derive マクロによる自動実装
+      - 条件付きコンパイル設定
+
+  - step: 3
+    name: "PersistentList の serde 実装"
+    items:
+      - Serialize の手動実装（serialize_seq）
+      - Deserialize の Visitor パターン実装
+
+  - step: 4
+    name: "PersistentVector の serde 実装"
+    items:
+      - Serialize の手動実装（serialize_seq）
+      - Deserialize の Visitor パターン実装
+
+  - step: 5
+    name: "PersistentHashSet の serde 実装"
+    items:
+      - Serialize の手動実装（serialize_seq）
+      - Deserialize の Visitor パターン実装
+
+  - step: 6
+    name: "PersistentHashMap の serde 実装"
+    items:
+      - Serialize の手動実装（serialize_map）
+      - Deserialize の Visitor パターン実装
+
+  - step: 7
+    name: "PersistentTreeMap の serde 実装"
+    items:
+      - Serialize の手動実装（serialize_map）
+      - Deserialize の Visitor パターン実装
+
+# 実装計画詳細
+implementation_plan:
+  # ============================================================================
+  # Step 1: Cargo.toml と feature フラグの設定
+  # ============================================================================
+  - id: impl_cargo_toml
+    requirement_id: serde_feature_flag
+    name: "Cargo.toml の更新"
+    priority: 1
+    description: |
+      Cargo.toml に serde 依存関係と feature フラグを追加する。
+      serde は optional 依存関係として追加し、derive feature を有効にする。
+
+    files:
+      - path: Cargo.toml
+        description: |
+          - [dependencies] セクションに serde をオプショナルで追加
+          - [features] セクションに serde feature を定義
+          - [dev-dependencies] に serde_json を追加（テスト用）
+
+    implementation_steps:
+      - step: 1
+        description: |
+          serde 依存関係を追加する
+        code_outline: |
+          [dependencies]
+          serde = { version = "1.0", features = ["derive"], optional = true }
+
+          [dev-dependencies]
+          serde_json = "1.0"
+
+      - step: 2
+        description: |
+          serde feature を定義する
+        code_outline: |
+          [features]
+          serde = ["dep:serde"]
+
+    tests:
+      - name: test_feature_compilation
+        description: cargo build --features serde がエラーなく完了することを確認
+        test_type: integration
+        code_outline: |
+          # シェルコマンドで確認
+          cargo build --features serde
+          cargo build --no-default-features
+          cargo build --features "persistent,serde"
+
+    dependencies: []
+
+  # ============================================================================
+  # Step 2: Either 型の serde 実装
+  # ============================================================================
+  - id: impl_either_serde
+    requirement_id: either_serde
+    name: "Either の Serialize/Deserialize 実装"
+    priority: 2
+    description: |
+      Either<L, R> に対して serde の derive マクロを使用して
+      Serialize と Deserialize を実装する。
+      既存の derive 属性に条件付きで追加する。
+
+    files:
+      - path: src/control/either.rs
+        description: |
+          - #[cfg_attr(feature = "serde", derive(...))] を追加
+          - serde の re-export を追加
+          - テストモジュールに serde テストを追加
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Either enum に条件付き derive を追加する
+        code_outline: |
+          #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+          #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+          pub enum Either<L, R> {
+              Left(L),
+              Right(R),
+          }
+
+      - step: 2
+        description: |
+          テストを追加する
+        code_outline: |
+          #[cfg(all(test, feature = "serde"))]
+          mod serde_tests {
+              use super::*;
+              use rstest::rstest;
+
+              #[rstest]
+              fn test_serialize_left() {
+                  let left: Either<i32, String> = Either::Left(42);
+                  let json = serde_json::to_string(&left).unwrap();
+                  assert_eq!(json, r#"{"Left":42}"#);
+              }
+
+              #[rstest]
+              fn test_serialize_right() {
+                  let right: Either<i32, String> = Either::Right("hello".to_string());
+                  let json = serde_json::to_string(&right).unwrap();
+                  assert_eq!(json, r#"{"Right":"hello"}"#);
+              }
+
+              #[rstest]
+              fn test_roundtrip_left() {
+                  let original: Either<i32, String> = Either::Left(42);
+                  let json = serde_json::to_string(&original).unwrap();
+                  let restored: Either<i32, String> = serde_json::from_str(&json).unwrap();
+                  assert_eq!(original, restored);
+              }
+
+              #[rstest]
+              fn test_roundtrip_right() {
+                  let original: Either<i32, String> = Either::Right("hello".to_string());
+                  let json = serde_json::to_string(&original).unwrap();
+                  let restored: Either<i32, String> = serde_json::from_str(&json).unwrap();
+                  assert_eq!(original, restored);
+              }
+
+              #[rstest]
+              fn test_variant_distinction() {
+                  let left: Either<i32, i32> = Either::Left(42);
+                  let right: Either<i32, i32> = Either::Right(42);
+                  let left_json = serde_json::to_string(&left).unwrap();
+                  let right_json = serde_json::to_string(&right).unwrap();
+                  assert_ne!(left_json, right_json);
+              }
+          }
+
+    tests:
+      - name: test_serialize_left
+        description: Left バリアントのシリアライズ
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_serialize_left() {
+              let left: Either<i32, String> = Either::Left(42);
+              let json = serde_json::to_string(&left).unwrap();
+              assert_eq!(json, r#"{"Left":42}"#);
+          }
+
+      - name: test_serialize_right
+        description: Right バリアントのシリアライズ
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_serialize_right() {
+              let right: Either<i32, String> = Either::Right("hello".to_string());
+              let json = serde_json::to_string(&right).unwrap();
+              assert_eq!(json, r#"{"Right":"hello"}"#);
+          }
+
+      - name: test_roundtrip
+        description: ラウンドトリップ法則の検証
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_roundtrip() {
+              let original: Either<i32, String> = Either::Left(42);
+              let json = serde_json::to_string(&original).unwrap();
+              let restored: Either<i32, String> = serde_json::from_str(&json).unwrap();
+              assert_eq!(original, restored);
+          }
+
+    dependencies:
+      - impl_cargo_toml
+
+  # ============================================================================
+  # Step 3: PersistentList の serde 実装
+  # ============================================================================
+  - id: impl_persistent_list_serde
+    requirement_id: persistent_list_serde
+    name: "PersistentList の Serialize/Deserialize 実装"
+    priority: 3
+    description: |
+      PersistentList<T> に対して手動で Serialize と Deserialize を実装する。
+      Serialize は serialize_seq を使用し、Deserialize は Visitor パターンを使用する。
+      リストは JSON 配列としてシリアライズされる。
+
+    files:
+      - path: src/persistent/list.rs
+        description: |
+          - Serialize 実装を追加
+          - Deserialize 実装（Visitor パターン）を追加
+          - serde テストを追加
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Serialize トレイトを実装する
+        code_outline: |
+          #[cfg(feature = "serde")]
+          impl<T: serde::Serialize> serde::Serialize for PersistentList<T> {
+              fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+              where
+                  S: serde::Serializer,
+              {
+                  use serde::ser::SerializeSeq;
+                  let mut seq = serializer.serialize_seq(Some(self.len()))?;
+                  for element in self {
+                      seq.serialize_element(element)?;
+                  }
+                  seq.end()
+              }
+          }
+
+      - step: 2
+        description: |
+          Visitor 構造体を定義する
+        code_outline: |
+          #[cfg(feature = "serde")]
+          struct PersistentListVisitor<T> {
+              marker: std::marker::PhantomData<T>,
+          }
+
+          #[cfg(feature = "serde")]
+          impl<T> PersistentListVisitor<T> {
+              fn new() -> Self {
+                  Self {
+                      marker: std::marker::PhantomData,
+                  }
+              }
+          }
+
+      - step: 3
+        description: |
+          Visitor トレイトを実装する
+        code_outline: |
+          #[cfg(feature = "serde")]
+          impl<'de, T> serde::de::Visitor<'de> for PersistentListVisitor<T>
+          where
+              T: serde::Deserialize<'de> + Clone,
+          {
+              type Value = PersistentList<T>;
+
+              fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                  formatter.write_str("a sequence")
+              }
+
+              fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+              where
+                  A: serde::de::SeqAccess<'de>,
+              {
+                  // セキュリティ: 過剰なメモリ確保を防ぐため上限を設ける
+                  const MAX_PREALLOCATE: usize = 4096;
+                  let capacity = seq.size_hint().unwrap_or(0).min(MAX_PREALLOCATE);
+                  let mut elements = Vec::with_capacity(capacity);
+                  while let Some(element) = seq.next_element()? {
+                      elements.push(element);
+                  }
+                  Ok(elements.into_iter().collect())
+              }
+          }
+
+      - step: 4
+        description: |
+          Deserialize トレイトを実装する
+        code_outline: |
+          #[cfg(feature = "serde")]
+          impl<'de, T> serde::Deserialize<'de> for PersistentList<T>
+          where
+              T: serde::Deserialize<'de> + Clone,
+          {
+              fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+              where
+                  D: serde::Deserializer<'de>,
+              {
+                  deserializer.deserialize_seq(PersistentListVisitor::new())
+              }
+          }
+
+    tests:
+      - name: test_serialize_empty
+        description: 空リストのシリアライズ
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_serialize_empty() {
+              let list: PersistentList<i32> = PersistentList::new();
+              let json = serde_json::to_string(&list).unwrap();
+              assert_eq!(json, "[]");
+          }
+
+      - name: test_serialize_elements
+        description: 要素を持つリストのシリアライズ
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_serialize_elements() {
+              let list: PersistentList<i32> = (1..=3).collect();
+              let json = serde_json::to_string(&list).unwrap();
+              assert_eq!(json, "[1,2,3]");
+          }
+
+      - name: test_deserialize_empty
+        description: 空配列からのデシリアライズ
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_deserialize_empty() {
+              let json = "[]";
+              let list: PersistentList<i32> = serde_json::from_str(json).unwrap();
+              assert!(list.is_empty());
+          }
+
+      - name: test_deserialize_elements
+        description: 要素を持つ配列からのデシリアライズ
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_deserialize_elements() {
+              let json = "[1,2,3]";
+              let list: PersistentList<i32> = serde_json::from_str(json).unwrap();
+              assert_eq!(list.len(), 3);
+              assert_eq!(list.get(0), Some(&1));
+              assert_eq!(list.get(1), Some(&2));
+              assert_eq!(list.get(2), Some(&3));
+          }
+
+      - name: test_roundtrip
+        description: ラウンドトリップ法則の検証
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_roundtrip() {
+              let original: PersistentList<i32> = (1..=100).collect();
+              let json = serde_json::to_string(&original).unwrap();
+              let restored: PersistentList<i32> = serde_json::from_str(&json).unwrap();
+              assert_eq!(original, restored);
+          }
+
+      - name: test_order_preservation
+        description: 順序保存法則の検証
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_order_preservation() {
+              let list: PersistentList<i32> = (0..100).collect();
+              let json = serde_json::to_string(&list).unwrap();
+              let restored: PersistentList<i32> = serde_json::from_str(&json).unwrap();
+              for i in 0..100 {
+                  assert_eq!(list.get(i), restored.get(i));
+              }
+          }
+
+    dependencies:
+      - impl_cargo_toml
+
+  # ============================================================================
+  # Step 4: PersistentVector の serde 実装
+  # ============================================================================
+  - id: impl_persistent_vector_serde
+    requirement_id: persistent_vector_serde
+    name: "PersistentVector の Serialize/Deserialize 実装"
+    priority: 4
+    description: |
+      PersistentVector<T> に対して手動で Serialize と Deserialize を実装する。
+      Serialize は serialize_seq を使用し、Deserialize は Visitor パターンを使用する。
+
+    files:
+      - path: src/persistent/vector.rs
+        description: |
+          - Serialize 実装を追加
+          - Deserialize 実装（Visitor パターン）を追加
+          - serde テストを追加
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Serialize トレイトを実装する
+        code_outline: |
+          #[cfg(feature = "serde")]
+          impl<T: serde::Serialize> serde::Serialize for PersistentVector<T> {
+              fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+              where
+                  S: serde::Serializer,
+              {
+                  use serde::ser::SerializeSeq;
+                  let mut seq = serializer.serialize_seq(Some(self.len()))?;
+                  for element in self.iter() {
+                      seq.serialize_element(element)?;
+                  }
+                  seq.end()
+              }
+          }
+
+      - step: 2
+        description: |
+          Visitor と Deserialize を実装する
+        code_outline: |
+          #[cfg(feature = "serde")]
+          struct PersistentVectorVisitor<T> {
+              marker: std::marker::PhantomData<T>,
+          }
+
+          #[cfg(feature = "serde")]
+          impl<'de, T> serde::de::Visitor<'de> for PersistentVectorVisitor<T>
+          where
+              T: serde::Deserialize<'de> + Clone,
+          {
+              type Value = PersistentVector<T>;
+
+              fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                  formatter.write_str("a sequence")
+              }
+
+              fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+              where
+                  A: serde::de::SeqAccess<'de>,
+              {
+                  // セキュリティ: 過剰なメモリ確保を防ぐため上限を設ける
+                  const MAX_PREALLOCATE: usize = 4096;
+                  let capacity = seq.size_hint().unwrap_or(0).min(MAX_PREALLOCATE);
+                  let mut elements = Vec::with_capacity(capacity);
+                  while let Some(element) = seq.next_element()? {
+                      elements.push(element);
+                  }
+                  Ok(elements.into_iter().collect())
+              }
+          }
+
+          #[cfg(feature = "serde")]
+          impl<'de, T> serde::Deserialize<'de> for PersistentVector<T>
+          where
+              T: serde::Deserialize<'de> + Clone,
+          {
+              fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+              where
+                  D: serde::Deserializer<'de>,
+              {
+                  deserializer.deserialize_seq(PersistentVectorVisitor {
+                      marker: std::marker::PhantomData,
+                  })
+              }
+          }
+
+    tests:
+      - name: test_serialize_empty
+        description: 空ベクターのシリアライズ
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_serialize_empty() {
+              let vector: PersistentVector<i32> = PersistentVector::new();
+              let json = serde_json::to_string(&vector).unwrap();
+              assert_eq!(json, "[]");
+          }
+
+      - name: test_serialize_elements
+        description: 要素を持つベクターのシリアライズ
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_serialize_elements() {
+              let vector: PersistentVector<i32> = (1..=3).collect();
+              let json = serde_json::to_string(&vector).unwrap();
+              assert_eq!(json, "[1,2,3]");
+          }
+
+      - name: test_roundtrip
+        description: ラウンドトリップ法則の検証
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_roundtrip() {
+              let original: PersistentVector<i32> = (1..=1000).collect();
+              let json = serde_json::to_string(&original).unwrap();
+              let restored: PersistentVector<i32> = serde_json::from_str(&json).unwrap();
+              assert_eq!(original, restored);
+          }
+
+      - name: test_index_preservation
+        description: インデックスアクセス保存法則の検証
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_index_preservation() {
+              let vector: PersistentVector<i32> = (0..1000).collect();
+              let json = serde_json::to_string(&vector).unwrap();
+              let restored: PersistentVector<i32> = serde_json::from_str(&json).unwrap();
+              for i in 0..1000 {
+                  assert_eq!(vector.get(i), restored.get(i));
+              }
+          }
+
+    dependencies:
+      - impl_cargo_toml
+
+  # ============================================================================
+  # Step 5: PersistentHashSet の serde 実装
+  # ============================================================================
+  - id: impl_persistent_hashset_serde
+    requirement_id: persistent_hashset_serde
+    name: "PersistentHashSet の Serialize/Deserialize 実装"
+    priority: 5
+    description: |
+      PersistentHashSet<T> に対して手動で Serialize と Deserialize を実装する。
+      セットは配列としてシリアライズされる。
+
+    files:
+      - path: src/persistent/hashset.rs
+        description: |
+          - Serialize 実装を追加
+          - Deserialize 実装（Visitor パターン）を追加
+          - serde テストを追加
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Serialize トレイトを実装する
+        code_outline: |
+          #[cfg(feature = "serde")]
+          impl<T: serde::Serialize> serde::Serialize for PersistentHashSet<T> {
+              fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+              where
+                  S: serde::Serializer,
+              {
+                  use serde::ser::SerializeSeq;
+                  let mut seq = serializer.serialize_seq(Some(self.len()))?;
+                  for element in self.iter() {
+                      seq.serialize_element(element)?;
+                  }
+                  seq.end()
+              }
+          }
+
+      - step: 2
+        description: |
+          Visitor と Deserialize を実装する
+        code_outline: |
+          #[cfg(feature = "serde")]
+          struct PersistentHashSetVisitor<T> {
+              marker: std::marker::PhantomData<T>,
+          }
+
+          #[cfg(feature = "serde")]
+          impl<'de, T> serde::de::Visitor<'de> for PersistentHashSetVisitor<T>
+          where
+              T: serde::Deserialize<'de> + Clone + std::hash::Hash + Eq,
+          {
+              type Value = PersistentHashSet<T>;
+
+              fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                  formatter.write_str("a sequence")
+              }
+
+              fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+              where
+                  A: serde::de::SeqAccess<'de>,
+              {
+                  let mut set = PersistentHashSet::new();
+                  while let Some(element) = seq.next_element()? {
+                      set = set.insert(element);
+                  }
+                  Ok(set)
+              }
+          }
+
+          #[cfg(feature = "serde")]
+          impl<'de, T> serde::Deserialize<'de> for PersistentHashSet<T>
+          where
+              T: serde::Deserialize<'de> + Clone + std::hash::Hash + Eq,
+          {
+              fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+              where
+                  D: serde::Deserializer<'de>,
+              {
+                  deserializer.deserialize_seq(PersistentHashSetVisitor {
+                      marker: std::marker::PhantomData,
+                  })
+              }
+          }
+
+    tests:
+      - name: test_serialize_empty
+        description: 空セットのシリアライズ
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_serialize_empty() {
+              let set: PersistentHashSet<i32> = PersistentHashSet::new();
+              let json = serde_json::to_string(&set).unwrap();
+              assert_eq!(json, "[]");
+          }
+
+      - name: test_roundtrip
+        description: ラウンドトリップ法則の検証
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_roundtrip() {
+              let original: PersistentHashSet<i32> = [1, 2, 3, 4, 5].into_iter().collect();
+              let json = serde_json::to_string(&original).unwrap();
+              let restored: PersistentHashSet<i32> = serde_json::from_str(&json).unwrap();
+              assert_eq!(original, restored);
+          }
+
+      - name: test_element_preservation
+        description: 要素保存法則の検証
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_element_preservation() {
+              let set: PersistentHashSet<i32> = [1, 2, 3, 4, 5].into_iter().collect();
+              let json = serde_json::to_string(&set).unwrap();
+              let restored: PersistentHashSet<i32> = serde_json::from_str(&json).unwrap();
+              for element in [1, 2, 3, 4, 5] {
+                  assert!(restored.contains(&element));
+              }
+          }
+
+      - name: test_deserialize_with_duplicates
+        description: 重複要素を含む配列からのデシリアライズ
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_deserialize_with_duplicates() {
+              let json = "[1,2,2,3,3,3]";
+              let set: PersistentHashSet<i32> = serde_json::from_str(json).unwrap();
+              assert_eq!(set.len(), 3);
+          }
+
+    dependencies:
+      - impl_cargo_toml
+
+  # ============================================================================
+  # Step 6: PersistentHashMap の serde 実装
+  # ============================================================================
+  - id: impl_persistent_hashmap_serde
+    requirement_id: persistent_hashmap_serde
+    name: "PersistentHashMap の Serialize/Deserialize 実装"
+    priority: 6
+    description: |
+      PersistentHashMap<K, V> に対して手動で Serialize と Deserialize を実装する。
+      マップはオブジェクトとしてシリアライズされる。
+
+    files:
+      - path: src/persistent/hashmap.rs
+        description: |
+          - Serialize 実装を追加（serialize_map）
+          - Deserialize 実装（Visitor パターン、visit_map）を追加
+          - serde テストを追加
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Serialize トレイトを実装する
+        code_outline: |
+          #[cfg(feature = "serde")]
+          impl<K, V> serde::Serialize for PersistentHashMap<K, V>
+          where
+              K: serde::Serialize,
+              V: serde::Serialize,
+          {
+              fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+              where
+                  S: serde::Serializer,
+              {
+                  use serde::ser::SerializeMap;
+                  let mut map = serializer.serialize_map(Some(self.len()))?;
+                  for (key, value) in self.iter() {
+                      map.serialize_entry(key, value)?;
+                  }
+                  map.end()
+              }
+          }
+
+      - step: 2
+        description: |
+          Visitor と Deserialize を実装する
+        code_outline: |
+          #[cfg(feature = "serde")]
+          struct PersistentHashMapVisitor<K, V> {
+              marker: std::marker::PhantomData<(K, V)>,
+          }
+
+          #[cfg(feature = "serde")]
+          impl<'de, K, V> serde::de::Visitor<'de> for PersistentHashMapVisitor<K, V>
+          where
+              K: serde::Deserialize<'de> + Clone + std::hash::Hash + Eq,
+              V: serde::Deserialize<'de> + Clone,
+          {
+              type Value = PersistentHashMap<K, V>;
+
+              fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                  formatter.write_str("a map")
+              }
+
+              fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+              where
+                  A: serde::de::MapAccess<'de>,
+              {
+                  let mut result = PersistentHashMap::new();
+                  while let Some((key, value)) = map.next_entry()? {
+                      result = result.insert(key, value);
+                  }
+                  Ok(result)
+              }
+          }
+
+          #[cfg(feature = "serde")]
+          impl<'de, K, V> serde::Deserialize<'de> for PersistentHashMap<K, V>
+          where
+              K: serde::Deserialize<'de> + Clone + std::hash::Hash + Eq,
+              V: serde::Deserialize<'de> + Clone,
+          {
+              fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+              where
+                  D: serde::Deserializer<'de>,
+              {
+                  deserializer.deserialize_map(PersistentHashMapVisitor {
+                      marker: std::marker::PhantomData,
+                  })
+              }
+          }
+
+    tests:
+      - name: test_serialize_empty
+        description: 空マップのシリアライズ
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_serialize_empty() {
+              let map: PersistentHashMap<String, i32> = PersistentHashMap::new();
+              let json = serde_json::to_string(&map).unwrap();
+              assert_eq!(json, "{}");
+          }
+
+      - name: test_serialize_entries
+        description: エントリを持つマップのシリアライズ
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_serialize_entries() {
+              let map = PersistentHashMap::new()
+                  .insert("key".to_string(), 42);
+              let json = serde_json::to_string(&map).unwrap();
+              assert!(json.contains("\"key\":42") || json.contains("\"key\": 42"));
+          }
+
+      - name: test_roundtrip
+        description: ラウンドトリップ法則の検証
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_roundtrip() {
+              let original = PersistentHashMap::new()
+                  .insert("one".to_string(), 1)
+                  .insert("two".to_string(), 2)
+                  .insert("three".to_string(), 3);
+              let json = serde_json::to_string(&original).unwrap();
+              let restored: PersistentHashMap<String, i32> = serde_json::from_str(&json).unwrap();
+              assert_eq!(original, restored);
+          }
+
+      - name: test_key_value_preservation
+        description: キー・値保存法則の検証
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_key_value_preservation() {
+              let map = PersistentHashMap::new()
+                  .insert("one".to_string(), 1)
+                  .insert("two".to_string(), 2)
+                  .insert("three".to_string(), 3);
+              let json = serde_json::to_string(&map).unwrap();
+              let restored: PersistentHashMap<String, i32> = serde_json::from_str(&json).unwrap();
+              for key in ["one", "two", "three"] {
+                  assert_eq!(map.get(key), restored.get(key));
+              }
+          }
+
+    dependencies:
+      - impl_cargo_toml
+
+  # ============================================================================
+  # Step 7: PersistentTreeMap の serde 実装
+  # ============================================================================
+  - id: impl_persistent_treemap_serde
+    requirement_id: persistent_treemap_serde
+    name: "PersistentTreeMap の Serialize/Deserialize 実装"
+    priority: 7
+    description: |
+      PersistentTreeMap<K, V> に対して手動で Serialize と Deserialize を実装する。
+      マップはオブジェクトとしてシリアライズされ、キーはソート順で出力される。
+
+    files:
+      - path: src/persistent/treemap.rs
+        description: |
+          - Serialize 実装を追加（serialize_map、ソート順）
+          - Deserialize 実装（Visitor パターン、visit_map）を追加
+          - serde テストを追加
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Serialize トレイトを実装する
+        code_outline: |
+          #[cfg(feature = "serde")]
+          impl<K, V> serde::Serialize for PersistentTreeMap<K, V>
+          where
+              K: serde::Serialize + Ord,
+              V: serde::Serialize,
+          {
+              fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+              where
+                  S: serde::Serializer,
+              {
+                  use serde::ser::SerializeMap;
+                  let mut map = serializer.serialize_map(Some(self.len()))?;
+                  for (key, value) in self.iter() {
+                      map.serialize_entry(key, value)?;
+                  }
+                  map.end()
+              }
+          }
+
+      - step: 2
+        description: |
+          Visitor と Deserialize を実装する
+        code_outline: |
+          #[cfg(feature = "serde")]
+          struct PersistentTreeMapVisitor<K, V> {
+              marker: std::marker::PhantomData<(K, V)>,
+          }
+
+          #[cfg(feature = "serde")]
+          impl<'de, K, V> serde::de::Visitor<'de> for PersistentTreeMapVisitor<K, V>
+          where
+              K: serde::Deserialize<'de> + Clone + Ord,
+              V: serde::Deserialize<'de> + Clone,
+          {
+              type Value = PersistentTreeMap<K, V>;
+
+              fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                  formatter.write_str("a map")
+              }
+
+              fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+              where
+                  A: serde::de::MapAccess<'de>,
+              {
+                  let mut result = PersistentTreeMap::new();
+                  while let Some((key, value)) = map.next_entry()? {
+                      result = result.insert(key, value);
+                  }
+                  Ok(result)
+              }
+          }
+
+          #[cfg(feature = "serde")]
+          impl<'de, K, V> serde::Deserialize<'de> for PersistentTreeMap<K, V>
+          where
+              K: serde::Deserialize<'de> + Clone + Ord,
+              V: serde::Deserialize<'de> + Clone,
+          {
+              fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+              where
+                  D: serde::Deserializer<'de>,
+              {
+                  deserializer.deserialize_map(PersistentTreeMapVisitor {
+                      marker: std::marker::PhantomData,
+                  })
+              }
+          }
+
+    tests:
+      - name: test_serialize_empty
+        description: 空マップのシリアライズ
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_serialize_empty() {
+              let map: PersistentTreeMap<String, i32> = PersistentTreeMap::new();
+              let json = serde_json::to_string(&map).unwrap();
+              assert_eq!(json, "{}");
+          }
+
+      - name: test_roundtrip
+        description: ラウンドトリップ法則の検証
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_roundtrip() {
+              let original = PersistentTreeMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("b".to_string(), 2)
+                  .insert("c".to_string(), 3);
+              let json = serde_json::to_string(&original).unwrap();
+              let restored: PersistentTreeMap<String, i32> = serde_json::from_str(&json).unwrap();
+              assert_eq!(original, restored);
+          }
+
+      - name: test_order_preserved
+        description: デシリアライズ後もソート順が保持されることを検証
+        test_type: unit
+        code_outline: |
+          #[rstest]
+          fn test_order_preserved() {
+              let json = r#"{"c":3,"a":1,"b":2}"#;
+              let map: PersistentTreeMap<String, i32> = serde_json::from_str(json).unwrap();
+              let keys: Vec<&String> = map.keys().collect();
+              assert_eq!(keys, vec!["a", "b", "c"]);
+          }
+
+    dependencies:
+      - impl_cargo_toml
+
+# テスト戦略
+test_strategy:
+  unit_tests:
+    location: src/**/*.rs
+    description: |
+      各データ構造のソースファイル内に #[cfg(all(test, feature = "serde"))]
+      モジュールを作成し、以下のテストを実装する：
+      - 空のデータ構造のシリアライズ/デシリアライズ
+      - 単一要素のシリアライズ/デシリアライズ
+      - 複数要素のシリアライズ/デシリアライズ
+      - ラウンドトリップ法則の検証
+      - 要素/キー・値の保存法則の検証
+
+  integration_tests:
+    location: tests/serde_tests.rs
+    description: |
+      統合テストとして以下を実装する：
+      - ファイル先頭に #![cfg(feature = "serde")] を付与
+      - JSON フォーマットでのテスト
+      - 大規模データ（1000要素以上）のテスト
+      - ネストしたデータ構造のテスト
+
+  property_tests:
+    location: tests/serde_tests.rs (同一ファイル内)
+    description: |
+      proptest を使用して以下のプロパティを検証する：
+      - ラウンドトリップ法則: deserialize(serialize(x)) == x
+      - 順序保存法則（List, Vector）
+      - 要素保存法則（Set, Map）
+      - proptest マクロは #[test] を内部で使用するため例外として許可
+
+# 完了条件
+acceptance_criteria:
+  - Cargo.toml に serde feature が正しく設定されていること
+  - serde feature なしでビルドが成功すること
+  - serde feature ありでビルドが成功すること
+  - 全てのデータ構造に Serialize/Deserialize が実装されていること
+  - ラウンドトリップ法則が全てのデータ構造で成立すること
+  - 空、単一要素、大規模データのテストが存在すること
+  - cargo check が通過すること
+  - cargo clippy が通過すること
+  - cargo test --features serde が通過すること
+  - cargo test --no-default-features が通過すること
+  - カバレッジ 100% であること

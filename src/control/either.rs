@@ -124,6 +124,7 @@ use std::hash::Hash;
 /// assert_eq!(doubled, Either::Right(84));
 /// ```
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Either<L, R> {
     /// The left variant, conventionally representing failure or the first alternative.
     Left(L),
@@ -1151,5 +1152,64 @@ mod tests {
         let either: Either<String, i32> = err.into();
         let result: Result<i32, String> = either.into();
         assert_eq!(result, Err("error".to_string()));
+    }
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod serde_tests {
+    use super::*;
+    use rstest::rstest;
+
+    #[rstest]
+    fn test_serialize_left() {
+        let left: Either<i32, String> = Either::Left(42);
+        let json = serde_json::to_string(&left).unwrap();
+        assert_eq!(json, r#"{"Left":42}"#);
+    }
+
+    #[rstest]
+    fn test_serialize_right() {
+        let right: Either<i32, String> = Either::Right("hello".to_string());
+        let json = serde_json::to_string(&right).unwrap();
+        assert_eq!(json, r#"{"Right":"hello"}"#);
+    }
+
+    #[rstest]
+    fn test_deserialize_left() {
+        let json = r#"{"Left":42}"#;
+        let either: Either<i32, String> = serde_json::from_str(json).unwrap();
+        assert_eq!(either, Either::Left(42));
+    }
+
+    #[rstest]
+    fn test_deserialize_right() {
+        let json = r#"{"Right":"hello"}"#;
+        let either: Either<i32, String> = serde_json::from_str(json).unwrap();
+        assert_eq!(either, Either::Right("hello".to_string()));
+    }
+
+    #[rstest]
+    fn test_roundtrip_left() {
+        let original: Either<i32, String> = Either::Left(42);
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: Either<i32, String> = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, restored);
+    }
+
+    #[rstest]
+    fn test_roundtrip_right() {
+        let original: Either<i32, String> = Either::Right("hello".to_string());
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: Either<i32, String> = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, restored);
+    }
+
+    #[rstest]
+    fn test_variant_distinction() {
+        let left: Either<i32, i32> = Either::Left(42);
+        let right: Either<i32, i32> = Either::Right(42);
+        let left_json = serde_json::to_string(&left).unwrap();
+        let right_json = serde_json::to_string(&right).unwrap();
+        assert_ne!(left_json, right_json);
     }
 }

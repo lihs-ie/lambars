@@ -1,0 +1,801 @@
+# serde サポート 要件定義
+#
+# 概要:
+#   永続データ構造と Either 型に対する serde による
+#   シリアライズ/デシリアライズ機能を提供する。
+#
+# 設計方針:
+#   1. オプショナル feature フラグによる導入（デフォルトでは無効）
+#   2. 純粋関数として設計（シリアライズは値から値への変換）
+#   3. 不変データ構造の特性を維持しつつシリアライズ可能に
+#   4. im-rs, rpds などの既存実装を参考にしたベストプラクティス
+#   5. 型安全性を保証（コンパイル時に Serialize/Deserialize の有無を検証）
+#
+# 参照:
+#   - serde crate: https://serde.rs/
+#   - im crate: https://docs.rs/im/latest/im/
+#   - rpds crate: https://github.com/orium/rpds
+#   - Implementing Serialize: https://serde.rs/impl-serialize.html
+#   - Implementing Deserialize: https://serde.rs/impl-deserialize.html
+
+version: "1.0.0"
+name: "serde_support"
+description: |
+  lambars の永続データ構造（PersistentList, PersistentVector, PersistentHashMap,
+  PersistentTreeMap, PersistentHashSet）および Either 型に対して、
+  serde の Serialize および Deserialize トレイトを実装する。
+
+  これにより、JSON, MessagePack, YAML, TOML などの様々なフォーマットへの
+  シリアライズ/デシリアライズが可能となる。
+
+  関数型プログラミングの観点から、シリアライズは純粋な値変換として扱い、
+  副作用を伴う I/O 操作は serde の外部（呼び出し側）で行う設計とする。
+
+# 背景・動機
+background:
+  problem: |
+    現在の lambars ライブラリでは、永続データ構造を外部フォーマット（JSON,
+    MessagePack など）に変換する手段が存在しない。これにより以下の問題がある：
+
+    1. データの永続化（ファイル保存、データベース保存）ができない
+    2. ネットワーク通信でのデータ交換ができない
+    3. 設定ファイルからの読み込みができない
+    4. 他のシステムとの相互運用性が制限される
+
+    関数型プログラミングでは不変データ構造を多用するため、
+    これらの構造体をシリアライズできないことは実用上の大きな制約となる。
+
+  motivation: |
+    serde エコシステムとの統合により、以下のメリットが得られる：
+
+    1. Rust エコシステムとの高い互換性
+       - serde_json, rmp-serde, serde_yaml など多数のフォーマットに対応
+
+    2. 型安全なシリアライズ/デシリアライズ
+       - コンパイル時に型チェックが行われる
+       - 実行時エラーを最小限に抑制
+
+    3. 関数型プログラミングとの親和性
+       - シリアライズは純粋関数として扱える
+       - 値から値への変換として設計
+
+    4. オプショナル機能としての導入
+       - feature フラグで制御し、不要な依存関係を回避
+
+  prior_art:
+    - name: "im crate"
+      description: |
+        Rust の不変データ構造ライブラリ。serde feature フラグで
+        Vector, HashMap, HashSet, OrdMap, OrdSet に対する
+        Serialize/Deserialize を提供。Arc を使用したスレッドセーフ版と
+        Rc を使用した高速版（im-rc）がある。
+        参照: https://docs.rs/im/latest/im/
+
+    - name: "rpds crate"
+      description: |
+        Rust Persistent Data Structures。serde feature フラグで
+        シリアライズ機能を提供。archery crate を使用して
+        Rc/Arc をパラメータ化している。
+        参照: https://github.com/orium/rpds
+
+    - name: "serde framework"
+      description: |
+        Rust のシリアライズ/デシリアライズフレームワーク。
+        Visitor パターンを使用したデシリアライズ、
+        serialize_seq/serialize_map による効率的なシリアライズを提供。
+        参照: https://serde.rs/
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. Feature フラグ設計
+  # ======================================================================
+  - id: serde_feature_flag
+    name: "serde feature フラグの追加"
+    description: |
+      Cargo.toml に serde feature フラグを追加し、オプショナルな
+      依存関係として serde を導入する。この機能は default features
+      には含めず、ユーザーが明示的に有効化する必要がある。
+
+    methods:
+      - name: "Cargo.toml の更新"
+        signature: |
+          [dependencies]
+          serde = { version = "1.0", features = ["derive"], optional = true }
+
+          [features]
+          serde = ["dep:serde"]
+        description: |
+          serde 依存関係をオプショナルとして追加する。
+          derive feature を有効にし、#[derive(Serialize, Deserialize)] を
+          使用可能にする。
+
+    implementations:
+      - type: "Cargo.toml"
+        description: |
+          - serde をオプショナル依存関係として追加
+          - serde feature を定義（default には含めない）
+          - 既存の feature との組み合わせを考慮
+
+  # ======================================================================
+  # 2. PersistentList の serde 実装
+  # ======================================================================
+  - id: persistent_list_serde
+    name: "PersistentList の Serialize/Deserialize 実装"
+    description: |
+      PersistentList<T> に対して serde の Serialize および Deserialize
+      トレイトを実装する。リストは配列としてシリアライズされる。
+
+    laws:
+      - name: "ラウンドトリップ法則"
+        description: |
+          シリアライズ後にデシリアライズすると元の値と等しくなる。
+          これは serde 実装の基本的な正当性を保証する。
+        equation: "deserialize(serialize(list)) == list"
+        property_test: |
+          use proptest::prelude::*;
+          use serde_json;
+
+          proptest! {
+              #[rstest]
+              fn test_roundtrip_persistent_list(elements: Vec<i32>) {
+                  let list: PersistentList<i32> = elements.into_iter().collect();
+                  let json = serde_json::to_string(&list).unwrap();
+                  let restored: PersistentList<i32> = serde_json::from_str(&json).unwrap();
+                  assert_eq!(list, restored);
+              }
+          }
+
+      - name: "順序保存法則"
+        description: |
+          シリアライズ/デシリアライズ後も要素の順序が保存される。
+        equation: "∀i. restored.get(i) == original.get(i)"
+        property_test: |
+          #[rstest]
+          fn test_order_preservation() {
+              let list: PersistentList<i32> = (0..100).collect();
+              let json = serde_json::to_string(&list).unwrap();
+              let restored: PersistentList<i32> = serde_json::from_str(&json).unwrap();
+              for i in 0..100 {
+                  assert_eq!(list.get(i), restored.get(i));
+              }
+          }
+
+    methods:
+      - name: "Serialize 実装"
+        signature: |
+          impl<T: Serialize> Serialize for PersistentList<T> {
+              fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+              where
+                  S: Serializer;
+          }
+        description: |
+          リストを配列としてシリアライズする。
+          serialize_seq を使用し、各要素を順次シリアライズする。
+        examples:
+          - description: "JSON シリアライズ"
+            code: |
+              use lambars::persistent::PersistentList;
+              use serde_json;
+
+              let list: PersistentList<i32> = (1..=3).collect();
+              let json = serde_json::to_string(&list).unwrap();
+              assert_eq!(json, "[1,2,3]");
+
+      - name: "Deserialize 実装"
+        signature: |
+          impl<'de, T: Deserialize<'de> + Clone> Deserialize<'de> for PersistentList<T> {
+              fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+              where
+                  D: Deserializer<'de>;
+          }
+        description: |
+          配列からリストをデシリアライズする。
+          Visitor パターンを使用し、visit_seq で要素を収集する。
+        examples:
+          - description: "JSON デシリアライズ"
+            code: |
+              use lambars::persistent::PersistentList;
+              use serde_json;
+
+              let json = "[1,2,3]";
+              let list: PersistentList<i32> = serde_json::from_str(json).unwrap();
+              assert_eq!(list.len(), 3);
+              assert_eq!(list.get(0), Some(&1));
+
+    implementations:
+      - type: "PersistentList<T>"
+        description: |
+          - Serialize: serialize_seq を使用して要素を順次出力
+          - Deserialize: Visitor パターンで visit_seq を実装
+          - 条件付きコンパイル: #[cfg(feature = "serde")]
+          - 要素型の制約: T: Serialize + Clone（Serialize 時）
+          - 要素型の制約: T: Deserialize + Clone（Deserialize 時）
+
+  # ======================================================================
+  # 3. PersistentVector の serde 実装
+  # ======================================================================
+  - id: persistent_vector_serde
+    name: "PersistentVector の Serialize/Deserialize 実装"
+    description: |
+      PersistentVector<T> に対して serde の Serialize および Deserialize
+      トレイトを実装する。ベクターは配列としてシリアライズされる。
+
+    laws:
+      - name: "ラウンドトリップ法則"
+        description: |
+          シリアライズ後にデシリアライズすると元の値と等しくなる。
+        equation: "deserialize(serialize(vector)) == vector"
+        property_test: |
+          use proptest::prelude::*;
+
+          proptest! {
+              #[rstest]
+              fn test_roundtrip_persistent_vector(elements: Vec<i32>) {
+                  let vector: PersistentVector<i32> = elements.into_iter().collect();
+                  let json = serde_json::to_string(&vector).unwrap();
+                  let restored: PersistentVector<i32> = serde_json::from_str(&json).unwrap();
+                  assert_eq!(vector, restored);
+              }
+          }
+
+      - name: "インデックスアクセス保存法則"
+        description: |
+          シリアライズ/デシリアライズ後も各インデックスの値が保存される。
+        equation: "∀i < len. restored.get(i) == original.get(i)"
+        property_test: |
+          #[rstest]
+          fn test_index_preservation() {
+              let vector: PersistentVector<i32> = (0..1000).collect();
+              let json = serde_json::to_string(&vector).unwrap();
+              let restored: PersistentVector<i32> = serde_json::from_str(&json).unwrap();
+              for i in 0..1000 {
+                  assert_eq!(vector.get(i), restored.get(i));
+              }
+          }
+
+    methods:
+      - name: "Serialize 実装"
+        signature: |
+          impl<T: Serialize> Serialize for PersistentVector<T> {
+              fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+              where
+                  S: Serializer;
+          }
+        description: |
+          ベクターを配列としてシリアライズする。
+          長さを事前に提供することで、効率的なシリアライズが可能。
+        examples:
+          - description: "JSON シリアライズ"
+            code: |
+              use lambars::persistent::PersistentVector;
+              use serde_json;
+
+              let vector: PersistentVector<i32> = (1..=3).collect();
+              let json = serde_json::to_string(&vector).unwrap();
+              assert_eq!(json, "[1,2,3]");
+
+      - name: "Deserialize 実装"
+        signature: |
+          impl<'de, T: Deserialize<'de> + Clone> Deserialize<'de> for PersistentVector<T> {
+              fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+              where
+                  D: Deserializer<'de>;
+          }
+        description: |
+          配列からベクターをデシリアライズする。
+          Visitor パターンで効率的にベクターを構築する。
+        examples:
+          - description: "JSON デシリアライズ"
+            code: |
+              use lambars::persistent::PersistentVector;
+              use serde_json;
+
+              let json = "[1,2,3,4,5]";
+              let vector: PersistentVector<i32> = serde_json::from_str(json).unwrap();
+              assert_eq!(vector.len(), 5);
+              assert_eq!(vector.get(2), Some(&3));
+
+    implementations:
+      - type: "PersistentVector<T>"
+        description: |
+          - Serialize: serialize_seq(Some(self.len())) で長さを提供
+          - Deserialize: visit_seq で要素を収集後、collect() で構築
+          - 条件付きコンパイル: #[cfg(feature = "serde")]
+
+  # ======================================================================
+  # 4. PersistentHashMap の serde 実装
+  # ======================================================================
+  - id: persistent_hashmap_serde
+    name: "PersistentHashMap の Serialize/Deserialize 実装"
+    description: |
+      PersistentHashMap<K, V> に対して serde の Serialize および Deserialize
+      トレイトを実装する。マップはオブジェクト/マップとしてシリアライズされる。
+
+    laws:
+      - name: "ラウンドトリップ法則"
+        description: |
+          シリアライズ後にデシリアライズすると元の値と等しくなる。
+        equation: "deserialize(serialize(map)) == map"
+        property_test: |
+          use proptest::prelude::*;
+          use std::collections::HashMap;
+
+          proptest! {
+              #[rstest]
+              fn test_roundtrip_persistent_hashmap(entries: HashMap<String, i32>) {
+                  let map: PersistentHashMap<String, i32> = entries.into_iter().collect();
+                  let json = serde_json::to_string(&map).unwrap();
+                  let restored: PersistentHashMap<String, i32> = serde_json::from_str(&json).unwrap();
+                  assert_eq!(map, restored);
+              }
+          }
+
+      - name: "キー・値保存法則"
+        description: |
+          シリアライズ/デシリアライズ後も全てのキーに対して値が保存される。
+        equation: "∀k ∈ keys. restored.get(k) == original.get(k)"
+        property_test: |
+          #[rstest]
+          fn test_key_value_preservation() {
+              let map: PersistentHashMap<String, i32> = [
+                  ("one".to_string(), 1),
+                  ("two".to_string(), 2),
+                  ("three".to_string(), 3),
+              ].into_iter().collect();
+              let json = serde_json::to_string(&map).unwrap();
+              let restored: PersistentHashMap<String, i32> = serde_json::from_str(&json).unwrap();
+              for key in ["one", "two", "three"] {
+                  assert_eq!(map.get(key), restored.get(key));
+              }
+          }
+
+    methods:
+      - name: "Serialize 実装"
+        signature: |
+          impl<K: Serialize, V: Serialize> Serialize for PersistentHashMap<K, V> {
+              fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+              where
+                  S: Serializer;
+          }
+        description: |
+          マップをシリアライズする。
+          serialize_map を使用し、各キー・値ペアを順次シリアライズする。
+        examples:
+          - description: "JSON シリアライズ"
+            code: |
+              use lambars::persistent::PersistentHashMap;
+              use serde_json;
+
+              let map = PersistentHashMap::new()
+                  .insert("key".to_string(), 42);
+              let json = serde_json::to_string(&map).unwrap();
+              assert!(json.contains("\"key\":42"));
+
+      - name: "Deserialize 実装"
+        signature: |
+          impl<'de, K, V> Deserialize<'de> for PersistentHashMap<K, V>
+          where
+              K: Deserialize<'de> + Clone + Hash + Eq,
+              V: Deserialize<'de> + Clone;
+          {
+              fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+              where
+                  D: Deserializer<'de>;
+          }
+        description: |
+          マップからハッシュマップをデシリアライズする。
+          Visitor パターンで visit_map を実装する。
+        examples:
+          - description: "JSON デシリアライズ"
+            code: |
+              use lambars::persistent::PersistentHashMap;
+              use serde_json;
+
+              let json = r#"{"key":42,"other":100}"#;
+              let map: PersistentHashMap<String, i32> = serde_json::from_str(json).unwrap();
+              assert_eq!(map.get("key"), Some(&42));
+              assert_eq!(map.get("other"), Some(&100));
+
+    implementations:
+      - type: "PersistentHashMap<K, V>"
+        description: |
+          - Serialize: serialize_map(Some(self.len())) で長さを提供
+          - Deserialize: visit_map で各エントリを収集し insert で構築
+          - 条件付きコンパイル: #[cfg(feature = "serde")]
+          - キー型の制約: K: Hash + Eq + Clone
+
+  # ======================================================================
+  # 5. PersistentTreeMap の serde 実装
+  # ======================================================================
+  - id: persistent_treemap_serde
+    name: "PersistentTreeMap の Serialize/Deserialize 実装"
+    description: |
+      PersistentTreeMap<K, V> に対して serde の Serialize および Deserialize
+      トレイトを実装する。マップはオブジェクト/マップとしてシリアライズされる。
+      シリアライズ時はキーの順序が保存される。
+
+    laws:
+      - name: "ラウンドトリップ法則"
+        description: |
+          シリアライズ後にデシリアライズすると元の値と等しくなる。
+        equation: "deserialize(serialize(map)) == map"
+        property_test: |
+          use proptest::prelude::*;
+
+          proptest! {
+              #[rstest]
+              fn test_roundtrip_persistent_treemap(entries: Vec<(i32, String)>) {
+                  let map: PersistentTreeMap<i32, String> = entries.into_iter().collect();
+                  let json = serde_json::to_string(&map).unwrap();
+                  let restored: PersistentTreeMap<i32, String> = serde_json::from_str(&json).unwrap();
+                  assert_eq!(map, restored);
+              }
+          }
+
+      - name: "順序保存法則"
+        description: |
+          TreeMap の特性として、キーの順序がシリアライズ出力に反映される。
+        equation: "keys are serialized in sorted order"
+        property_test: |
+          #[rstest]
+          fn test_order_in_serialization() {
+              let map = PersistentTreeMap::new()
+                  .insert(3, "three")
+                  .insert(1, "one")
+                  .insert(2, "two");
+              let json = serde_json::to_string(&map).unwrap();
+              // JSON オブジェクトは順序を保持しないため、
+              // 配列形式でシリアライズするか、MessagePack など
+              // 順序を保持するフォーマットでテストする
+          }
+
+    methods:
+      - name: "Serialize 実装"
+        signature: |
+          impl<K: Serialize + Ord, V: Serialize> Serialize for PersistentTreeMap<K, V> {
+              fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+              where
+                  S: Serializer;
+          }
+        description: |
+          マップをシリアライズする。キーはソート順で出力される。
+        examples:
+          - description: "JSON シリアライズ"
+            code: |
+              use lambars::persistent::PersistentTreeMap;
+              use serde_json;
+
+              let map = PersistentTreeMap::new()
+                  .insert("b".to_string(), 2)
+                  .insert("a".to_string(), 1);
+              let json = serde_json::to_string(&map).unwrap();
+              // キーはソート順で出力される
+
+      - name: "Deserialize 実装"
+        signature: |
+          impl<'de, K, V> Deserialize<'de> for PersistentTreeMap<K, V>
+          where
+              K: Deserialize<'de> + Clone + Ord,
+              V: Deserialize<'de> + Clone;
+          {
+              fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+              where
+                  D: Deserializer<'de>;
+          }
+        description: |
+          マップからツリーマップをデシリアライズする。
+        examples:
+          - description: "JSON デシリアライズ"
+            code: |
+              use lambars::persistent::PersistentTreeMap;
+              use serde_json;
+
+              let json = r#"{"a":1,"b":2}"#;
+              let map: PersistentTreeMap<String, i32> = serde_json::from_str(json).unwrap();
+              let keys: Vec<&String> = map.keys().collect();
+              assert_eq!(keys, vec!["a", "b"]); // ソート順
+
+    implementations:
+      - type: "PersistentTreeMap<K, V>"
+        description: |
+          - Serialize: serialize_map で順序付きでシリアライズ
+          - Deserialize: visit_map で収集後、順序付きで構築
+          - 条件付きコンパイル: #[cfg(feature = "serde")]
+          - キー型の制約: K: Ord + Clone
+
+  # ======================================================================
+  # 6. PersistentHashSet の serde 実装
+  # ======================================================================
+  - id: persistent_hashset_serde
+    name: "PersistentHashSet の Serialize/Deserialize 実装"
+    description: |
+      PersistentHashSet<T> に対して serde の Serialize および Deserialize
+      トレイトを実装する。セットは配列としてシリアライズされる。
+
+    laws:
+      - name: "ラウンドトリップ法則"
+        description: |
+          シリアライズ後にデシリアライズすると元の値と等しくなる。
+        equation: "deserialize(serialize(set)) == set"
+        property_test: |
+          use proptest::prelude::*;
+          use std::collections::HashSet;
+
+          proptest! {
+              #[rstest]
+              fn test_roundtrip_persistent_hashset(elements: HashSet<i32>) {
+                  let set: PersistentHashSet<i32> = elements.into_iter().collect();
+                  let json = serde_json::to_string(&set).unwrap();
+                  let restored: PersistentHashSet<i32> = serde_json::from_str(&json).unwrap();
+                  assert_eq!(set, restored);
+              }
+          }
+
+      - name: "要素保存法則"
+        description: |
+          シリアライズ/デシリアライズ後も全ての要素が保存される。
+        equation: "∀x ∈ set. restored.contains(x)"
+        property_test: |
+          #[rstest]
+          fn test_element_preservation() {
+              let set: PersistentHashSet<i32> = [1, 2, 3, 4, 5].into_iter().collect();
+              let json = serde_json::to_string(&set).unwrap();
+              let restored: PersistentHashSet<i32> = serde_json::from_str(&json).unwrap();
+              for element in [1, 2, 3, 4, 5] {
+                  assert!(restored.contains(&element));
+              }
+          }
+
+    methods:
+      - name: "Serialize 実装"
+        signature: |
+          impl<T: Serialize> Serialize for PersistentHashSet<T> {
+              fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+              where
+                  S: Serializer;
+          }
+        description: |
+          セットを配列としてシリアライズする。
+          serialize_seq を使用して各要素を出力する。
+        examples:
+          - description: "JSON シリアライズ"
+            code: |
+              use lambars::persistent::PersistentHashSet;
+              use serde_json;
+
+              let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+              let json = serde_json::to_string(&set).unwrap();
+              // 順序は保証されないが、要素は含まれる
+
+      - name: "Deserialize 実装"
+        signature: |
+          impl<'de, T> Deserialize<'de> for PersistentHashSet<T>
+          where
+              T: Deserialize<'de> + Clone + Hash + Eq;
+          {
+              fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+              where
+                  D: Deserializer<'de>;
+          }
+        description: |
+          配列からセットをデシリアライズする。
+          重複要素は自動的に除去される。
+        examples:
+          - description: "JSON デシリアライズ（重複除去）"
+            code: |
+              use lambars::persistent::PersistentHashSet;
+              use serde_json;
+
+              let json = "[1,2,2,3,3,3]";
+              let set: PersistentHashSet<i32> = serde_json::from_str(json).unwrap();
+              assert_eq!(set.len(), 3); // 重複は除去される
+
+    implementations:
+      - type: "PersistentHashSet<T>"
+        description: |
+          - Serialize: serialize_seq で要素を出力
+          - Deserialize: visit_seq で収集、重複は insert で自動除去
+          - 条件付きコンパイル: #[cfg(feature = "serde")]
+          - 要素型の制約: T: Hash + Eq + Clone
+
+  # ======================================================================
+  # 7. Either の serde 実装
+  # ======================================================================
+  - id: either_serde
+    name: "Either の Serialize/Deserialize 実装"
+    description: |
+      Either<L, R> に対して serde の Serialize および Deserialize
+      トレイトを実装する。タグ付き enum としてシリアライズされる。
+
+    laws:
+      - name: "ラウンドトリップ法則（Left）"
+        description: |
+          Left 値のシリアライズ/デシリアライズが正しく行われる。
+        equation: "deserialize(serialize(Left(x))) == Left(x)"
+        property_test: |
+          use proptest::prelude::*;
+
+          proptest! {
+              #[rstest]
+              fn test_roundtrip_either_left(value: i32) {
+                  let either: Either<i32, String> = Either::Left(value);
+                  let json = serde_json::to_string(&either).unwrap();
+                  let restored: Either<i32, String> = serde_json::from_str(&json).unwrap();
+                  assert_eq!(either, restored);
+              }
+          }
+
+      - name: "ラウンドトリップ法則（Right）"
+        description: |
+          Right 値のシリアライズ/デシリアライズが正しく行われる。
+        equation: "deserialize(serialize(Right(x))) == Right(x)"
+        property_test: |
+          use proptest::prelude::*;
+
+          proptest! {
+              #[rstest]
+              fn test_roundtrip_either_right(value: String) {
+                  let either: Either<i32, String> = Either::Right(value);
+                  let json = serde_json::to_string(&either).unwrap();
+                  let restored: Either<i32, String> = serde_json::from_str(&json).unwrap();
+                  assert_eq!(either, restored);
+              }
+          }
+
+      - name: "バリアント識別法則"
+        description: |
+          Left と Right が正しく区別されてシリアライズされる。
+        equation: "Left != Right in serialized form"
+        property_test: |
+          #[rstest]
+          fn test_variant_distinction() {
+              let left: Either<i32, i32> = Either::Left(42);
+              let right: Either<i32, i32> = Either::Right(42);
+              let left_json = serde_json::to_string(&left).unwrap();
+              let right_json = serde_json::to_string(&right).unwrap();
+              assert_ne!(left_json, right_json);
+          }
+
+    methods:
+      - name: "Serialize 実装"
+        signature: |
+          impl<L: Serialize, R: Serialize> Serialize for Either<L, R> {
+              fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+              where
+                  S: Serializer;
+          }
+        description: |
+          Either をタグ付き enum としてシリアライズする。
+          #[derive(Serialize)] で自動生成できるが、
+          手動実装も可能。
+        examples:
+          - description: "JSON シリアライズ"
+            code: |
+              use lambars::control::Either;
+              use serde_json;
+
+              let left: Either<i32, String> = Either::Left(42);
+              let json = serde_json::to_string(&left).unwrap();
+              assert_eq!(json, r#"{"Left":42}"#);
+
+              let right: Either<i32, String> = Either::Right("hello".to_string());
+              let json = serde_json::to_string(&right).unwrap();
+              assert_eq!(json, r#"{"Right":"hello"}"#);
+
+      - name: "Deserialize 実装"
+        signature: |
+          impl<'de, L: Deserialize<'de>, R: Deserialize<'de>> Deserialize<'de> for Either<L, R> {
+              fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+              where
+                  D: Deserializer<'de>;
+          }
+        description: |
+          タグ付き enum からデシリアライズする。
+        examples:
+          - description: "JSON デシリアライズ"
+            code: |
+              use lambars::control::Either;
+              use serde_json;
+
+              let json = r#"{"Left":42}"#;
+              let either: Either<i32, String> = serde_json::from_str(json).unwrap();
+              assert_eq!(either, Either::Left(42));
+
+              let json = r#"{"Right":"hello"}"#;
+              let either: Either<i32, String> = serde_json::from_str(json).unwrap();
+              assert_eq!(either, Either::Right("hello".to_string()));
+
+    implementations:
+      - type: "Either<L, R>"
+        description: |
+          - #[derive(Serialize, Deserialize)] で自動実装
+          - 条件付きコンパイル: #[cfg_attr(feature = "serde", derive(...))]
+          - 外部から見たバリアント名は "Left" と "Right"
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - |
+      シリアライズの計算量は O(n) を維持する（n は要素数またはエントリ数）。
+    - |
+      デシリアライズの計算量は O(n) を目標とするが、
+      PersistentTreeMap は逐次 insert による O(n log n) を許容する。
+      （ソート済み入力からのバルク構築は将来の最適化として検討）
+    - |
+      大規模データ（10万要素以上）でも許容可能な性能を実現する。
+    - |
+      serde feature を無効にした場合、コンパイル時間やバイナリサイズに
+      影響を与えない。
+
+  compatibility:
+    - |
+      serde 1.0 以上と互換性を持つ。
+    - |
+      serde_json での動作を必須とし、テストで検証する。
+      rmp-serde, serde_yaml, bincode などは将来の拡張として対応を検討する。
+    - |
+      既存の lambars API との後方互換性を維持する
+      （feature を有効にしても既存コードは動作する）。
+    - |
+      Rust 1.92.0 以上で動作する。
+
+  security:
+    - |
+      size_hint を使用する場合、過剰なメモリ確保を防ぐため
+      上限チェック（最大 1MB 相当）を設ける。
+    - |
+      悪意ある入力に対する防御を考慮した実装とする。
+
+  testing:
+    - |
+      各データ構造に対して以下のテストを実装する：
+      - ラウンドトリップテスト（シリアライズ → デシリアライズ → 等価性検証）
+      - 空のデータ構造のテスト
+      - 単一要素のテスト
+      - 大規模データのテスト（1000要素以上）
+    - |
+      テストカバレッジ 100% を目標とする。
+    - |
+      rstest を使用したテストを作成する。
+      ただし、proptest を使用する場合は #[test] の使用を例外として許可する。
+    - |
+      統合テストファイルには #![cfg(feature = "serde")] を付与し、
+      cargo test --no-default-features でのビルドエラーを防ぐ。
+
+# 将来の拡張
+future_extensions:
+  - id: serde_with_integration
+    name: "serde_with クレートとの統合"
+    description: |
+      serde_with クレートを使用して、より柔軟なシリアライズオプションを提供する。
+      例えば、永続データ構造を標準コレクション形式でシリアライズする選択肢など。
+    rationale: |
+      現時点では基本的な serde 実装に集中し、
+      追加の柔軟性は需要を見て検討する。
+
+  - id: compact_serialization
+    name: "コンパクトシリアライズ形式"
+    description: |
+      永続データ構造の内部構造（構造共有など）を活かした
+      より効率的なシリアライズ形式の提供。
+    rationale: |
+      標準的な serde シリアライズでは内部構造は失われるため、
+      まずは互換性を優先し、独自形式は後日検討する。
+
+  - id: streaming_deserialize
+    name: "ストリーミングデシリアライズ"
+    description: |
+      大規模データに対して、メモリ効率の良いストリーミング
+      デシリアライズをサポートする。
+    rationale: |
+      現時点では標準的な一括デシリアライズで十分。
+      メモリ制約のあるユースケースで需要があれば検討する。
+
+  - id: schema_validation
+    name: "スキーマ検証"
+    description: |
+      JSON Schema などによるデシリアライズ前の検証機能。
+    rationale: |
+      serde 自体の型検証で基本的な安全性は確保されている。
+      追加の検証は需要を見て検討する。
