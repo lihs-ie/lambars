@@ -1401,7 +1401,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     ///
     /// # Arguments
     ///
-    /// * `function` - A function to apply to each value
+    /// * `transform` - A function to apply to each value
     ///
     /// # Complexity
     ///
@@ -1420,14 +1420,14 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     /// assert_eq!(doubled.get("b"), Some(&4));
     /// ```
     #[must_use]
-    pub fn map_values<W, F>(&self, mut function: F) -> PersistentHashMap<K, W>
+    pub fn map_values<W, F>(&self, mut transform: F) -> PersistentHashMap<K, W>
     where
         K: Clone + Hash + Eq,
         W: Clone,
         F: FnMut(&V) -> W,
     {
         self.iter()
-            .map(|(key, value)| (key.clone(), function(value)))
+            .map(|(key, value)| (key.clone(), transform(value)))
             .collect()
     }
 
@@ -1448,7 +1448,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     ///
     /// # Arguments
     ///
-    /// * `function` - A function to apply to each key
+    /// * `transform` - A function to apply to each key
     ///
     /// # Complexity
     ///
@@ -1467,14 +1467,14 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     /// assert_eq!(uppercased.get("WORLD"), Some(&2));
     /// ```
     #[must_use]
-    pub fn map_keys<L, F>(&self, mut function: F) -> PersistentHashMap<L, V>
+    pub fn map_keys<L, F>(&self, mut transform: F) -> PersistentHashMap<L, V>
     where
         L: Clone + Hash + Eq,
         V: Clone,
         F: FnMut(&K) -> L,
     {
         self.iter()
-            .map(|(key, value)| (function(key), value.clone()))
+            .map(|(key, value)| (transform(key), value.clone()))
             .collect()
     }
 
@@ -1490,7 +1490,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     ///
     /// # Arguments
     ///
-    /// * `function` - A function that receives a reference to the key and the value,
+    /// * `filter_transform` - A function that receives a reference to the key and the value,
     ///   and returns `Some(new_value)` to include or `None` to exclude
     ///
     /// # Complexity
@@ -1513,7 +1513,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     /// assert_eq!(evens_doubled.get("b"), Some(&4));
     /// ```
     #[must_use]
-    pub fn filter_map<W, F>(&self, mut function: F) -> PersistentHashMap<K, W>
+    pub fn filter_map<W, F>(&self, mut filter_transform: F) -> PersistentHashMap<K, W>
     where
         K: Clone + Hash + Eq,
         W: Clone,
@@ -1521,7 +1521,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     {
         self.iter()
             .filter_map(|(key, value)| {
-                function(key, value).map(|new_value| (key.clone(), new_value))
+                filter_transform(key, value).map(|new_value| (key.clone(), new_value))
             })
             .collect()
     }

@@ -855,7 +855,7 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
     ///
     /// # Arguments
     ///
-    /// * `function` - A function to apply to each value
+    /// * `transform` - A function to apply to each value
     ///
     /// # Complexity
     ///
@@ -874,14 +874,14 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
     /// assert_eq!(doubled.get(&2), Some(&40));
     /// ```
     #[must_use]
-    pub fn map_values<W, F>(&self, mut function: F) -> PersistentTreeMap<K, W>
+    pub fn map_values<W, F>(&self, mut transform: F) -> PersistentTreeMap<K, W>
     where
         K: Clone + Ord,
         W: Clone,
         F: FnMut(&V) -> W,
     {
         self.iter()
-            .map(|(key, value)| (key.clone(), function(value)))
+            .map(|(key, value)| (key.clone(), transform(value)))
             .collect()
     }
 
@@ -903,7 +903,7 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
     ///
     /// # Arguments
     ///
-    /// * `function` - A function to apply to each key
+    /// * `transform` - A function to apply to each key
     ///
     /// # Complexity
     ///
@@ -924,14 +924,14 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
     /// assert_eq!(by_length.get(&3), Some(&3));
     /// ```
     #[must_use]
-    pub fn map_keys<L, F>(&self, mut function: F) -> PersistentTreeMap<L, V>
+    pub fn map_keys<L, F>(&self, mut transform: F) -> PersistentTreeMap<L, V>
     where
         L: Clone + Ord,
         V: Clone,
         F: FnMut(&K) -> L,
     {
         self.iter()
-            .map(|(key, value)| (function(key), value.clone()))
+            .map(|(key, value)| (transform(key), value.clone()))
             .collect()
     }
 
@@ -948,7 +948,7 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
     ///
     /// # Arguments
     ///
-    /// * `function` - A function that receives a reference to the key and the value,
+    /// * `filter_transform` - A function that receives a reference to the key and the value,
     ///   and returns `Some(new_value)` to include or `None` to exclude
     ///
     /// # Complexity
@@ -970,7 +970,7 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
     /// assert_eq!(parsed.get(&3), Some(&42));
     /// ```
     #[must_use]
-    pub fn filter_map<W, F>(&self, mut function: F) -> PersistentTreeMap<K, W>
+    pub fn filter_map<W, F>(&self, mut filter_transform: F) -> PersistentTreeMap<K, W>
     where
         K: Clone + Ord,
         W: Clone,
@@ -978,7 +978,7 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
     {
         self.iter()
             .filter_map(|(key, value)| {
-                function(key, value).map(|new_value| (key.clone(), new_value))
+                filter_transform(key, value).map(|new_value| (key.clone(), new_value))
             })
             .collect()
     }
