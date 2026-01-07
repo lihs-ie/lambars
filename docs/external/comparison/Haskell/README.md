@@ -1122,7 +1122,7 @@ let x = identity(42);
 
 | Haskell | lambars | Description |
 |---------|---------|-------------|
-| Auto-curried | `curry2!` - `curry6!` | Explicit currying |
+| Auto-curried | `curry!(fn, arity)` or `curry!(\|args...\| body)` | Explicit currying |
 | Partial application | `partial!` | Partial application |
 | Sections `(+1)`, `(1+)` | Closures | Operator sections |
 | `uncurry f` | `\|(a, b)\| f(a, b)` | Uncurry |
@@ -1167,12 +1167,18 @@ addTuple = uncurry add
 
 ```rust
 // lambars
-use lambars::{curry2, curry3, partial};
+use lambars::{curry, partial};
 
 fn add(a: i32, b: i32) -> i32 { a + b }
 
-// Currying
-let curried_add = curry2!(add);
+// Currying with function name + arity form
+let curried_add = curry!(add, 2);
+let add_five = curried_add(5);
+let result = add_five(3);
+// result = 8
+
+// Currying with closure form
+let curried_add = curry!(|a, b| add(a, b));
 let add_five = curried_add(5);
 let result = add_five(3);
 // result = 8
@@ -1180,7 +1186,7 @@ let result = add_five(3);
 // Multi-argument currying
 fn add3(a: i32, b: i32, c: i32) -> i32 { a + b + c }
 
-let curried_add3 = curry3!(add3);
+let curried_add3 = curry!(add3, 3);
 let add_five = curried_add3(5);
 let add_five_and_ten = add_five(10);
 let result3 = add_five_and_ten(3);

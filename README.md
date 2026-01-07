@@ -275,14 +275,35 @@ assert_eq!(add_five(3), 8);
 
 #### curry! (Currying)
 
+Transforms multi-argument functions into chains of single-argument functions.
+
 ```rust
-use lambars::curry2;
+use lambars::curry;
 
 fn add(first: i32, second: i32) -> i32 { first + second }
 
-let curried_add = curry2!(add);
+// Closure form: curry!(|args...| body)
+let curried_add = curry!(|a, b| add(a, b));
 let add_five = curried_add(5);
 assert_eq!(add_five(3), 8);
+
+// Function name + arity form: curry!(function_name, arity)
+let curried_add = curry!(add, 2);
+let add_ten = curried_add(10);
+assert_eq!(add_ten(7), 17);
+
+// Works with any number of arguments (2 or more)
+fn sum_four(a: i32, b: i32, c: i32, d: i32) -> i32 { a + b + c + d }
+let curried = curry!(sum_four, 4);
+let step1 = curried(1);
+let step2 = step1(2);
+let step3 = step2(3);
+assert_eq!(step3(4), 10);
+
+// Partial application can be reused
+let add_one = curried_add(1);
+assert_eq!(add_one(5), 6);
+assert_eq!(add_one(10), 11); // Reusable!
 ```
 
 #### Helper Functions

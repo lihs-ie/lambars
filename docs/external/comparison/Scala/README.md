@@ -794,7 +794,7 @@ let recommendations: Vec<String> = for_! {
 |-------|---------|-------------|
 | `f andThen g` | `compose!(g, f)` | Left-to-right |
 | `f compose g` | `compose!(f, g)` | Right-to-left |
-| `f.curried` | `curry2!`, `curry3!`, etc. | Curry function |
+| `f.curried` | `curry!(fn, arity)` | Curry function |
 | `f.tupled` | Manual | Accept tuple |
 | `Function.const(x)` | `constant(x)` | Constant function |
 | `identity` | `identity` | Identity function |
@@ -825,7 +825,7 @@ val id: Int => Int = identity
 
 ```rust
 // lambars
-use lambars::{compose, curry2};
+use lambars::{compose, curry};
 use lambars::compose::{identity, constant};
 
 fn add_one(x: i32) -> i32 { x + 1 }
@@ -838,9 +838,9 @@ let composed2 = compose!(add_one, double);  // add_one(double(x))
 let result1 = composed1(5);  // 12 = (5 + 1) * 2
 let result2 = composed2(5);  // 11 = (5 * 2) + 1
 
-// Currying
+// Currying with function name + arity form
 fn add(a: i32, b: i32) -> i32 { a + b }
-let curried_add = curry2!(add);
+let curried_add = curry!(add, 2);
 let add_five = curried_add(5);
 let sum = add_five(3);  // 8
 

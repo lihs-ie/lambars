@@ -81,6 +81,10 @@ pub mod typeclass;
 #[cfg(feature = "compose")]
 pub mod compose;
 
+// Re-export curry! macro at crate root for convenience
+#[cfg(feature = "compose")]
+pub use lambars_derive::curry;
+
 #[cfg(feature = "control")]
 pub mod control;
 

@@ -1,0 +1,5 @@
+error: curry! requires a function with at least 2 arguments
+ --> tests/compile_fail/curry_function_arity_zero.rs:8:29
+  |
+8 |     let _ = lambars::curry!(constant, 0);
+  |                             ^^^^^^^^

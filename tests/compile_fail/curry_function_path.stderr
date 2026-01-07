@@ -1,0 +1,5 @@
+error: curry! with function name requires arity: curry!(function_name, 2)
+ --> tests/compile_fail/curry_function_path.rs:8:29
+  |
+8 |     let _ = lambars::curry!(add);
+  |                             ^^^

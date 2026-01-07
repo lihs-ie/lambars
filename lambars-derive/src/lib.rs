@@ -1,12 +1,17 @@
-//! Derive macros for lambars optics.
+//! Derive macros for lambars optics and function composition.
 //!
 //! This crate provides procedural macros for automatically generating
-//! optics (Lens and Prism) implementations for Rust types.
+//! optics (Lens and Prism) implementations for Rust types, as well as
+//! function composition utilities.
 //!
 //! # Available Derive Macros
 //!
 //! - [`Lenses`]: Generates lens methods for struct fields
 //! - [`Prisms`]: Generates prism methods for enum variants
+//!
+//! # Available Function-like Macros
+//!
+//! - [`curry!`]: Converts multi-argument closures into curried form
 //!
 //! # Example: Lenses
 //!
@@ -49,6 +54,21 @@
 //! let circle_prism = Shape::circle_prism();
 //! assert_eq!(circle_prism.preview(&circle), Some(&5.0));
 //! ```
+//!
+//! # Example: Currying
+//!
+//! ```rust,ignore
+//! use lambars::curry;
+//!
+//! // Curry a closure
+//! let add = curry!(|a: i32, b: i32| a + b);
+//! assert_eq!(add(5)(3), 8);
+//!
+//! // Partial application
+//! let add_five = add(5);
+//! assert_eq!(add_five(10), 15);
+//! assert_eq!(add_five(20), 25);
+//! ```
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -56,6 +76,7 @@
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
 
+mod curry;
 mod lenses;
 mod prisms;
 
@@ -215,4 +236,103 @@ pub fn derive_lenses(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(Prisms)]
 pub fn derive_prisms(input: TokenStream) -> TokenStream {
     prisms::derive_prisms_impl(input)
+}
+
+/// Converts a multi-argument closure into curried form.
+///
+/// Currying transforms a closure that takes multiple arguments into
+/// a sequence of closures, each taking a single argument.
+///
+/// # Usage
+///
+/// ```rust,ignore
+/// use lambars::curry;
+///
+/// // With a closure
+/// let curried = curry!(|a: i32, b: i32| a + b);
+/// assert_eq!(curried(5)(3), 8);
+///
+/// // Partial application
+/// let add_five = curried(5);
+/// assert_eq!(add_five(10), 15);
+/// assert_eq!(add_five(20), 25);
+/// ```
+///
+/// # Wrapping existing functions
+///
+/// To curry an existing function, wrap it in a closure:
+///
+/// ```rust,ignore
+/// use lambars::curry;
+///
+/// fn add(a: i32, b: i32) -> i32 { a + b }
+///
+/// // Wrap the function in a closure
+/// let curried = curry!(|a, b| add(a, b));
+/// assert_eq!(curried(5)(3), 8);
+/// ```
+///
+/// # Multi-argument closures
+///
+/// The macro supports closures with 2 or more arguments:
+///
+/// ```rust,ignore
+/// use lambars::curry;
+///
+/// // 3 arguments
+/// let curried = curry!(|a: i32, b: i32, c: i32| a + b + c);
+/// assert_eq!(curried(1)(2)(3), 6);
+///
+/// // 6 arguments
+/// let curried = curry!(|a: i32, b: i32, c: i32, d: i32, e: i32, f: i32| {
+///     a + b + c + d + e + f
+/// });
+/// assert_eq!(curried(1)(2)(3)(4)(5)(6), 21);
+/// ```
+///
+/// # Reusability
+///
+/// Curried closures and their partial applications can be reused:
+///
+/// ```rust,ignore
+/// use lambars::curry;
+///
+/// let multiply = curry!(|first: i32, second: i32| first * second);
+/// let double = multiply(2);
+/// let triple = multiply(3);
+///
+/// assert_eq!(double(5), 10);
+/// assert_eq!(triple(5), 15);
+/// assert_eq!(double(5), 10); // Still works!
+/// ```
+///
+/// # Type constraints
+///
+/// - **Arguments (except the last)**: Must implement `Clone`
+/// - **Last argument**: No special constraints
+///
+/// This is because `Rc::unwrap_or_clone` is used internally to
+/// enable reuse of partial applications.
+///
+/// ```rust,ignore
+/// struct NonClone(i32);
+///
+/// // OK: NonClone as last argument
+/// let curried = curry!(|a: i32, b: NonClone| a + b.0);
+///
+/// // Error: NonClone as non-last argument (Clone required)
+/// // let curried = curry!(|a: NonClone, b: i32| a.0 + b);
+/// ```
+///
+/// # Implementation Notes
+///
+/// The generated code uses `std::rc::Rc` to share the closure and
+/// arguments across nested closures. This enables:
+///
+/// - Multiple calls to the same curried closure
+/// - Reuse of partial applications
+/// - Support for non-Copy argument types (requires Clone)
+#[proc_macro]
+pub fn curry(input: TokenStream) -> TokenStream {
+    curry::curry_impl(input)
 }

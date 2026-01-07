@@ -1,0 +1,992 @@
+# 可変長 curry マクロ 要件定義
+#
+# 概要:
+#   複数引数関数を任意の引数数に対応してカリー化する統一された curry! マクロを提供する。
+#   既存の curry2! ~ curry6! を全て削除し、単一の curry! マクロに置き換える。
+#
+# 設計方針:
+#   1. procedural macro で引数数を解析し、適切なカリー化コードを生成
+#   2. 数学的なカリー化の定義との整合性を維持
+#   3. 参照透過性と部分適用の再利用可能性を保証
+#   4. 型安全性を維持しつつ、直感的な API を提供
+#   5. 2つの入力形式をサポート:
+#      - クロージャ式: curry!(|a, b| body)
+#      - 関数名+引数数: curry!(function_name, arity)
+#
+# 参照:
+#   - docs/internal/requirements/20250101_0100_compose.yaml の curry_macro セクション
+#   - Haskell の curry/uncurry 関数
+#   - Scala の curried メソッド
+
+version: "1.3.0"
+name: "Variadic Curry Macro"
+description: |
+  カリー化（currying）は、複数引数の関数を単一引数関数のチェーンに変換する操作である。
+
+  現在の実装では curry2! から curry6! まで個別のマクロとして提供されているが、
+  これは以下の問題を抱えている:
+
+  1. コードの重複: 各マクロが類似のパターンを繰り返している
+  2. 拡張性の欠如: 7引数以上の関数に対応するには新しいマクロを追加する必要がある
+  3. 一貫性の欠如: curry2!, curry3! など数字付きのマクロ名が直感的でない
+
+  本要件では、任意の引数数に対応する統一された curry! マクロを procedural macro として
+  実装し、既存の curry2! ~ curry6! を完全に置き換える。
+
+  ## 入力形式
+
+  curry! マクロは以下の2つの入力形式をサポートする:
+
+  **1. クロージャ式形式**
+
+  ```rust
+  curry!(|a, b, c| body)
+  ```
+
+  クロージャ式のパターンから引数数を自動的に解析する。
+
+  **2. 関数名+引数数形式**
+
+  ```rust
+  curry!(function_name, arity)
+  ```
+
+  関数名と引数数を明示的に指定する。Rust の procedural macro では関数名だけから
+  引数数を自動検出することは不可能（型情報はマクロ展開後に解決されるため）であり、
+  引数数の明示的な指定が必要となる。
+
+  ## 両形式の同等性
+
+  両形式は同等の意味論を持つ:
+
+  ```rust
+  // 以下の2つは同じ結果を生成する
+  curry!(add, 2)
+  curry!(|a, b| add(a, b))
+  ```
+
+  参照透過性、部分適用の再利用可能性、型制約は両形式で同一である。
+
+# 背景・動機
+background:
+  problem: |
+    現在の curry マクロ実装には以下の問題がある:
+
+    1. コードの重複
+       - curry2! から curry6! まで、ほぼ同じパターンのネストしたクロージャを
+         手動で記述している
+       - 引数数が増えるごとに、Rc::clone と Rc::unwrap_or_clone の呼び出しが
+         指数関数的に増加
+
+    2. 保守性の低下
+       - 各マクロの修正が必要な場合、5つ全てを更新する必要がある
+       - バグ修正や最適化の適用が困難
+
+    3. 拡張性の制限
+       - 7引数以上の関数をカリー化する場合、新しいマクロを追加する必要がある
+       - 実用上は6引数で十分な場合が多いが、柔軟性に欠ける
+
+    4. ユーザー体験の一貫性
+       - curry2!, curry3! のような数字付きの命名は、引数の数を事前に
+         知っている必要があり、関数の引数数を変更した際にマクロ名も
+         変更する必要がある
+
+  motivation: |
+    統一された curry! マクロを提供することで:
+
+    1. 単一のマクロで任意の引数数に対応
+    2. procedural macro による自動的なコード生成で保守性向上
+    3. 一貫した API により、学習コストを削減
+    4. 将来的な最適化や機能追加を容易に
+
+  prior_art:
+    - name: "Haskell curry/uncurry"
+      description: |
+        Haskell では、タプル引数の関数をカリー化形式に変換する curry 関数と、
+        その逆の uncurry 関数が標準で提供される。
+
+        curry :: ((a, b) -> c) -> a -> b -> c
+        uncurry :: (a -> b -> c) -> (a, b) -> c
+
+        Haskell の関数は元々カリー化されているため、明示的なカリー化が
+        必要なのはタプル引数の関数のみである。
+
+    - name: "Scala curried"
+      description: |
+        Scala では Function2 ~ Function22 に curried メソッドが提供される。
+
+        val add: (Int, Int) => Int = _ + _
+        val curriedAdd: Int => Int => Int = add.curried
+        curriedAdd(1)(2) // 3
+
+        メソッドチェーンで自然にカリー化できるが、関数のアリティに応じた
+        異なる型（Function2, Function3 など）が必要。
+
+    - name: "Rust fp-core curry マクロ"
+      description: |
+        fp-core クレートでは、declarative macro で curry! を提供している。
+        しかし、Rust の制約により引数数の自動検出は困難で、
+        curry!(2, f) のように引数数を明示的に指定する必要がある。
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. curry! マクロの基本機能
+  # ======================================================================
+  - id: variadic_curry_macro
+    name: "可変長 curry! マクロ"
+    description: |
+      任意の引数数（2引数以上）の関数またはクロージャをカリー化する統一された curry! マクロを提供する。
+
+      以下の2つの入力形式をサポートする:
+
+      1. **クロージャ式形式**: curry!(closure_expression)
+         - クロージャのパターンから引数数を自動的に解析
+         - 例: curry!(|a, b, c| a + b + c)
+
+      2. **関数名+引数数形式**: curry!(function_expression, arity)
+         - 関数名（またはパス）と引数数を明示的に指定
+         - 例: curry!(add, 2), curry!(module::function, 3)
+
+      両形式は同等の意味論を持ち、同じカリー化されたクロージャを生成する。
+
+    # 法則（該当する場合）
+    laws:
+      - name: "Curry-Uncurry Identity（カリー化・非カリー化の恒等性）"
+        description: |
+          カリー化した関数を展開して呼び出した結果は、
+          元の関数を直接呼び出した結果と等しい。
+        equation: |
+          curry(|a, b, c, ...| f(a, b, c, ...))(a)(b)(c)... = f(a, b, c, ...)
+          curry(f, n)(a)(b)(c)... = f(a, b, c, ...)  // 関数名+引数数形式
+        property_test: |
+          #[rstest]
+          #[case(1, 2)]
+          #[case(0, 0)]
+          #[case(-5, 10)]
+          fn test_curry_uncurry_identity_2args(
+              #[case] a: i32,
+              #[case] b: i32,
+          ) {
+              fn add(first: i32, second: i32) -> i32 { first + second }
+
+              // クロージャ形式
+              let curried_closure = curry!(|first, second| add(first, second));
+              let uncurried_result_closure = curried_closure(a)(b);
+
+              // 関数名+引数数形式
+              let curried_function = curry!(add, 2);
+              let uncurried_result_function = curried_function(a)(b);
+
+              let direct_result = add(a, b);
+
+              assert_eq!(uncurried_result_closure, direct_result);
+              assert_eq!(uncurried_result_function, direct_result);
+          }
+
+      - name: "Partial Application Reusability（部分適用の再利用可能性）"
+        description: |
+          カリー化された関数の部分適用は、何度でも再利用可能である。
+          同じ部分適用に異なる引数を渡しても、前回の呼び出しの影響を受けない。
+        equation: |
+          let partial = curry(|a, b| f(a, b))(a);
+          partial(b1) と partial(b2) は独立して評価可能
+        property_test: |
+          #[rstest]
+          fn test_partial_application_reusability() {
+              fn multiply(first: i32, second: i32) -> i32 { first * second }
+
+              // クロージャ形式
+              let curried = curry!(|first, second| multiply(first, second));
+              let double = curried(2);
+
+              // double は複数回再利用可能
+              assert_eq!(double(5), 10);
+              assert_eq!(double(10), 20);
+              assert_eq!(double(0), 0);
+
+              // 関数名+引数数形式
+              let curried_fn = curry!(multiply, 2);
+              let triple = curried_fn(3);
+              assert_eq!(triple(5), 15);
+
+              // double は影響を受けない
+              assert_eq!(double(5), 10);
+          }
+
+      - name: "Referential Transparency（参照透過性）"
+        description: |
+          カリー化された関数は参照透過的である。
+          同じ引数を渡せば、常に同じ結果を返す。
+        equation: |
+          curry(|a, b| f(a, b))(a)(b) = curry(|a, b| f(a, b))(a)(b) for all calls
+          curry(f, 2)(a)(b) = curry(f, 2)(a)(b) for all calls
+        property_test: |
+          #[rstest]
+          fn test_referential_transparency() {
+              fn add(first: i32, second: i32) -> i32 { first + second }
+
+              let curried_closure = curry!(|first, second| add(first, second));
+              let curried_function = curry!(add, 2);
+
+              // 同じ引数での呼び出しは常に同じ結果
+              let result1 = curried_closure(5)(3);
+              let result2 = curried_closure(5)(3);
+              let result3 = curried_function(5)(3);
+              let result4 = curried_function(5)(3);
+
+              assert_eq!(result1, result2);
+              assert_eq!(result3, result4);
+              assert_eq!(result1, result3);
+          }
+
+      - name: "Form Equivalence（形式の同等性）"
+        description: |
+          クロージャ形式と関数名+引数数形式は同等の結果を生成する。
+        equation: |
+          curry!(f, n)(a1)(a2)...(an) = curry!(|a1, a2, ..., an| f(a1, a2, ..., an))(a1)(a2)...(an)
+        property_test: |
+          #[rstest]
+          fn test_form_equivalence() {
+              fn add(first: i32, second: i32) -> i32 { first + second }
+
+              let curried_closure = curry!(|first, second| add(first, second));
+              let curried_function = curry!(add, 2);
+
+              // 両形式は同じ結果を返す
+              assert_eq!(curried_closure(10)(20), curried_function(10)(20));
+              assert_eq!(curried_closure(0)(0), curried_function(0)(0));
+              assert_eq!(curried_closure(-5)(5), curried_function(-5)(5));
+          }
+
+    # メソッド定義（マクロのシグネチャ）
+    methods:
+      - name: "curry! (クロージャ形式)"
+        signature: |
+          curry!(closure_expression)
+
+          // 展開結果（2引数の場合）:
+          // |arg1| {
+          //     |arg2| {
+          //         closure_expression(arg1, arg2)
+          //     }
+          // }
+        description: |
+          クロージャ式をカリー化形式に変換する。
+
+          入力の関数式は以下の形式を受け付ける:
+          - クロージャ: curry!(|a, b| a + b)
+          - クロージャ（関数をラップ）: curry!(|a, b| add(a, b))
+
+          生成されるコードは std::rc::Rc を使用して、
+          関数と引数をクロージャ間で共有する。
+
+          戻り値の型は、ネストしたクロージャの型となり、
+          各段階で impl Fn(ArgN) -> NextClosure を返す。
+        examples:
+          - description: "2引数クロージャのカリー化"
+            code: |
+              use lambars::curry;
+
+              let curried = curry!(|first: i32, second: i32| first + second);
+              assert_eq!(curried(5)(3), 8);
+
+              // 部分適用
+              let add_five = curried(5);
+              assert_eq!(add_five(10), 15);
+              assert_eq!(add_five(20), 25);
+
+          - description: "既存関数をラップしてカリー化"
+            code: |
+              use lambars::curry;
+
+              fn add(first: i32, second: i32) -> i32 { first + second }
+
+              // 関数名を直接渡すのではなく、クロージャでラップする
+              let curried = curry!(|first, second| add(first, second));
+              assert_eq!(curried(5)(3), 8);
+
+          - description: "3引数クロージャのカリー化"
+            code: |
+              use lambars::curry;
+
+              let curried = curry!(|width: f64, height: f64, depth: f64| {
+                  width * height * depth
+              });
+              let with_width = curried(2.0);
+              let with_width_height = with_width(3.0);
+              let result = with_width_height(4.0);
+
+              assert!((result - 24.0).abs() < f64::EPSILON);
+
+          - description: "6引数クロージャのカリー化"
+            code: |
+              use lambars::curry;
+
+              let curried = curry!(|a: i32, b: i32, c: i32, d: i32, e: i32, f: i32| {
+                  a + b + c + d + e + f
+              });
+              assert_eq!(curried(1)(2)(3)(4)(5)(6), 21);
+
+      - name: "curry! (関数名+引数数形式)"
+        signature: |
+          curry!(function_expression, arity)
+
+          // 展開結果（2引数の場合、例: curry!(add, 2)）:
+          // {
+          //     let __lambars_function = ::std::rc::Rc::new(add);
+          //     move |__lambars_argument_0| {
+          //         let __lambars_function = ::std::rc::Rc::clone(&__lambars_function);
+          //         let __lambars_argument_0 = ::std::rc::Rc::new(__lambars_argument_0);
+          //         move |__lambars_argument_1| {
+          //             __lambars_function(
+          //                 ::std::rc::Rc::unwrap_or_clone(::std::rc::Rc::clone(&__lambars_argument_0)),
+          //                 __lambars_argument_1,
+          //             )
+          //         }
+          //     }
+          // }
+        description: |
+          関数名（またはパス）と引数数を明示的に指定してカリー化する。
+
+          Rust の procedural macro では関数名だけから引数数を自動検出することは
+          不可能である（型情報はマクロ展開後に解決されるため）。
+          そのため、引数数を明示的に指定する形式を採用している。
+
+          入力:
+          - function_expression: 関数名またはパス（add, module::function, Type::method など）
+          - arity: 引数の数（2以上の整数リテラル）
+
+          生成されるコードはクロージャ形式と同等で、std::rc::Rc を使用して
+          関数と引数をクロージャ間で共有する。
+
+          **引数数と実際の関数シグネチャの不一致**:
+          指定した引数数が実際の関数シグネチャと異なる場合、
+          生成されたコードは Rust コンパイラによる型エラーとなる。
+          これは curry! マクロ自体のエラーではなく、通常の Rust の型チェックに委譲される。
+        examples:
+          - description: "2引数関数のカリー化"
+            code: |
+              use lambars::curry;
+
+              fn add(first: i32, second: i32) -> i32 { first + second }
+
+              let curried = curry!(add, 2);
+              assert_eq!(curried(5)(3), 8);
+
+              // 部分適用
+              let add_five = curried(5);
+              assert_eq!(add_five(10), 15);
+              assert_eq!(add_five(20), 25);
+
+          - description: "モジュールパス付き関数のカリー化"
+            code: |
+              use lambars::curry;
+
+              mod math {
+                  pub fn multiply(first: i32, second: i32) -> i32 { first * second }
+              }
+
+              let curried = curry!(math::multiply, 2);
+              assert_eq!(curried(3)(4), 12);
+
+          - description: "6引数関数のカリー化"
+            code: |
+              use lambars::curry;
+
+              fn sum6(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32) -> i32 {
+                  a + b + c + d + e + f
+              }
+
+              let curried = curry!(sum6, 6);
+              assert_eq!(curried(1)(2)(3)(4)(5)(6), 21);
+
+          - description: "クロージャ形式との同等性"
+            code: |
+              use lambars::curry;
+
+              fn add(first: i32, second: i32) -> i32 { first + second }
+
+              // 以下の2つは同じ結果を生成する
+              let curried_closure = curry!(|first, second| add(first, second));
+              let curried_function = curry!(add, 2);
+
+              assert_eq!(curried_closure(5)(3), curried_function(5)(3));
+
+    # 実装対象の型
+    implementations:
+      - type: "Fn traits"
+        description: |
+          curry! マクロは Fn トレイトを実装するクロージャ式に対して動作する。
+
+          生成されるクロージャは Fn を実装し、何度でも呼び出し可能。
+          これは std::rc::Rc を使用して関数と引数を共有することで実現される。
+
+  # ======================================================================
+  # 2. 引数数の解析
+  # ======================================================================
+  - id: argument_count_analysis
+    name: "引数数の解析"
+    description: |
+      procedural macro で入力形式に応じて引数数を解析する。
+
+      **1. クロージャ式形式**: クロージャのパターンから自動検出
+      **2. 関数名+引数数形式**: 明示的に指定された引数数を使用
+
+    methods:
+      - name: "引数数の検出方法"
+        signature: "N/A (procedural macro internal)"
+        description: |
+          引数数の検出は以下の方法で行う:
+
+          1. クロージャ式の場合（単一引数）:
+             - |arg1, arg2, ...| body の形式をパース
+             - パターンの数をカウント
+             - 2引数未満の場合はコンパイルエラー
+
+          2. 関数名+引数数の場合（カンマ区切りの2引数）:
+             - 第1引数: 関数式（Expr::Path など）
+             - 第2引数: 引数数（整数リテラル）
+             - 引数数が2未満の場合はコンパイルエラー
+
+          実装方針:
+          - syn::ExprClosure を使用してクロージャ式を解析
+          - syn::Expr と syn::LitInt を使用して関数名+引数数形式を解析
+          - 入力がどちらの形式かは、カンマの有無とトークン構造で判別
+        examples:
+          - description: "クロージャの引数数自動検出"
+            code: |
+              // 引数数は |a, b, c| から自動的に3と判定される
+              let curried = curry!(|a: i32, b: i32, c: i32| a + b + c);
+              assert_eq!(curried(1)(2)(3), 6);
+
+          - description: "関数名+引数数の明示的指定"
+            code: |
+              fn add(a: i32, b: i32) -> i32 { a + b }
+
+              // 引数数は 2 と明示的に指定
+              let curried = curry!(add, 2);
+              assert_eq!(curried(1)(2), 3);
+
+          - description: "引数数不一致時のコンパイルエラー（型エラー）"
+            code: |
+              fn add(a: i32, b: i32) -> i32 { a + b }
+
+              // 引数数を間違えて指定した場合、Rust コンパイラの型エラーとなる
+              // let curried = curry!(add, 3);  // コンパイルエラー: 引数が足りない
+              // let curried = curry!(add, 1);  // コンパイルエラー: 引数が多すぎる
+
+  # ======================================================================
+  # 3. Rc による共有メカニズム
+  # ======================================================================
+  - id: rc_sharing_mechanism
+    name: "Rc による関数・引数の共有"
+    description: |
+      カリー化されたクロージャが複数回呼び出し可能であるために、
+      std::rc::Rc を使用して関数と引数を共有する。
+
+      これは現在の curry2! ~ curry6! と同じメカニズムであり、
+      部分適用の再利用を可能にする。
+
+      両入力形式（クロージャ形式、関数名+引数数形式）で同じ共有メカニズムを使用する。
+
+    methods:
+      - name: "Rc 共有パターン"
+        signature: "N/A (generated code pattern)"
+        description: |
+          生成されるコードは以下のパターンに従う:
+
+          **クロージャ形式の場合**:
+          ```rust
+          let function = ::std::rc::Rc::new($closure);
+          move |arg1| {
+              let function = ::std::rc::Rc::clone(&function);
+              let arg1 = ::std::rc::Rc::new(arg1);
+              move |arg2| {
+                  let function = ::std::rc::Rc::clone(&function);
+                  let arg1 = ::std::rc::Rc::clone(&arg1);
+                  let arg2 = ::std::rc::Rc::new(arg2);
+                  move |arg3| {
+                      function(
+                          ::std::rc::Rc::unwrap_or_clone(::std::rc::Rc::clone(&arg1)),
+                          ::std::rc::Rc::unwrap_or_clone(::std::rc::Rc::clone(&arg2)),
+                          arg3,
+                      )
+                  }
+              }
+          }
+          ```
+
+          **関数名+引数数形式の場合** (例: curry!(add, 2)):
+          ```rust
+          {
+              let __lambars_function = ::std::rc::Rc::new(add);
+              move |__lambars_argument_0| {
+                  let __lambars_function = ::std::rc::Rc::clone(&__lambars_function);
+                  let __lambars_argument_0 = ::std::rc::Rc::new(__lambars_argument_0);
+                  move |__lambars_argument_1| {
+                      __lambars_function(
+                          ::std::rc::Rc::unwrap_or_clone(::std::rc::Rc::clone(&__lambars_argument_0)),
+                          __lambars_argument_1,
+                      )
+                  }
+              }
+          }
+          ```
+
+          最後の引数は Rc でラップせず、直接渡される。
+          これにより不要なオーバーヘッドを削減する。
+        examples:
+          - description: "Clone 型の引数"
+            code: |
+              let curried = curry!(|first: String, second: String| {
+                  format!("{}{}", first, second)
+              });
+              let hello = curried(String::from("Hello, "));
+
+              // hello は複数回呼び出し可能
+              assert_eq!(hello(String::from("World")), "Hello, World");
+              assert_eq!(hello(String::from("Rust")), "Hello, Rust");
+
+  # ======================================================================
+  # 4. 型制約
+  # ======================================================================
+  - id: type_constraints
+    name: "型制約"
+    description: |
+      curry! マクロが生成するコードに必要な型制約を定義する。
+
+      両入力形式（クロージャ形式、関数名+引数数形式）で同一の型制約が適用される。
+
+    methods:
+      - name: "必要なトレイト境界"
+        signature: "N/A (type constraints)"
+        description: |
+          curry! マクロを使用するための型制約:
+
+          1. クロージャ/関数: Fn トレイトを実装
+             - 複数回呼び出される可能性があるため、FnOnce では不十分
+             - FnMut も理論上は可能だが、純粋性の観点から Fn を推奨
+
+          2. **引数（最後の引数を除く）: Clone トレイトが必須**
+             - Rc::unwrap_or_clone を使用するため、Clone が必要
+             - 部分適用を複数回再利用する場合、引数値を複製する必要がある
+             - この制約は設計上の必然であり、回避不可能
+
+          3. 最後の引数: 特別な制約なし
+             - 最後の引数は Rc でラップせず直接渡される
+             - Clone を実装していない型も使用可能
+
+          これらの制約は両入力形式で同一である。
+        examples:
+          - description: "Clone を実装しない型の使用制限"
+            code: |
+              struct NonClone(i32);
+
+              // NG: Clone を実装しない型は最後以外の引数で使用不可
+              // let curried = curry!(|a: NonClone, b: i32| a.0 + b);
+              // curried(NonClone(5))(3); // コンパイルエラー: NonClone が Clone を実装していない
+
+              // OK: 最後の引数としては使用可能
+              let curried = curry!(|a: i32, b: NonClone| a + b.0);
+              assert_eq!(curried(5)(NonClone(3)), 8);
+
+          - description: "Clone を実装する型の使用"
+            code: |
+              // String は Clone を実装しているため、最後以外の引数でも使用可能
+              let curried = curry!(|first: String, second: String| {
+                  format!("{}{}", first, second)
+              });
+
+              let hello = curried(String::from("Hello, "));
+              // hello は複数回呼び出し可能（String が Clone されるため）
+              assert_eq!(hello(String::from("World")), "Hello, World");
+              assert_eq!(hello(String::from("Rust")), "Hello, Rust");
+
+  # ======================================================================
+  # 5. 既存マクロの削除
+  # ======================================================================
+  - id: remove_existing_curry_macros
+    name: "既存 curry マクロの削除"
+    description: |
+      curry2!, curry3!, curry4!, curry5!, curry6! を全て削除し、
+      curry! マクロに統一する。
+
+      後方互換性は考慮しない（Issue の方針による）。
+
+    methods:
+      - name: "削除対象"
+        signature: "N/A"
+        description: |
+          以下のマクロを削除する:
+
+          1. curry2! - src/compose/curry_macro.rs
+          2. curry3! - src/compose/curry_macro.rs
+          3. curry4! - src/compose/curry_macro.rs
+          4. curry5! - src/compose/curry_macro.rs
+          5. curry6! - src/compose/curry_macro.rs
+
+          以下のエクスポートを削除する:
+
+          1. src/compose/mod.rs の re-export
+          2. lib.rs での参照（該当する場合）
+        examples:
+          - description: "移行例（クロージャ形式）"
+            code: |
+              // Before (削除される構文)
+              use lambars::curry2;
+              fn add(a: i32, b: i32) -> i32 { a + b }
+              let curried = curry2!(add);
+
+              // After (新しい構文 - クロージャ形式)
+              use lambars::curry;
+              fn add(a: i32, b: i32) -> i32 { a + b }
+              let curried = curry!(|a, b| add(a, b));
+
+          - description: "移行例（関数名+引数数形式）"
+            code: |
+              // Before (削除される構文)
+              use lambars::curry2;
+              fn add(a: i32, b: i32) -> i32 { a + b }
+              let curried = curry2!(add);
+
+              // After (新しい構文 - 関数名+引数数形式)
+              use lambars::curry;
+              fn add(a: i32, b: i32) -> i32 { a + b }
+              let curried = curry!(add, 2);
+
+  # ======================================================================
+  # 6. compose! / pipe! との統合
+  # ======================================================================
+  - id: compose_pipe_integration
+    name: "compose! / pipe! との統合"
+    description: |
+      curry! で生成されたクロージャは compose! や pipe! と組み合わせて使用可能。
+      既存のテストで確認されている統合機能を維持する。
+
+      両入力形式（クロージャ形式、関数名+引数数形式）で同様に統合可能。
+
+    methods:
+      - name: "統合パターン"
+        signature: "N/A"
+        description: |
+          カリー化された関数の部分適用は、単一引数関数として
+          compose! や pipe! と組み合わせ可能。
+        examples:
+          - description: "compose! との組み合わせ（クロージャ形式）"
+            code: |
+              use lambars::{compose, curry};
+
+              let double = curry!(|first: i32, second: i32| first * second)(2);
+              let add_ten = curry!(|first: i32, second: i32| first + second)(10);
+
+              let double_then_add_ten = compose!(add_ten, double);
+              assert_eq!(double_then_add_ten(5), 20);
+
+          - description: "compose! との組み合わせ（関数名+引数数形式）"
+            code: |
+              use lambars::{compose, curry};
+
+              fn multiply(first: i32, second: i32) -> i32 { first * second }
+              fn add(first: i32, second: i32) -> i32 { first + second }
+
+              let double = curry!(multiply, 2)(2);
+              let add_ten = curry!(add, 2)(10);
+
+              let double_then_add_ten = compose!(add_ten, double);
+              assert_eq!(double_then_add_ten(5), 20);
+
+          - description: "pipe! との組み合わせ"
+            code: |
+              use lambars::{pipe, curry};
+
+              fn multiply(first: i32, second: i32) -> i32 { first * second }
+              fn add(first: i32, second: i32) -> i32 { first + second }
+
+              let double = curry!(multiply, 2)(2);
+              let add_ten = curry!(add, 2)(10);
+
+              let result = pipe!(5, double, add_ten);
+              assert_eq!(result, 20);
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - "curry! のコンパイル時間は、同等の手書きコードと同程度であること"
+    - "生成されるランタイムコードは、手書きの curry2! ~ curry6! と同等の性能を持つこと"
+    - "Rc の使用によるオーバーヘッドは最小限に抑えること"
+    - "最後の引数は Rc でラップしないことで、不要なアロケーションを回避すること"
+    - "両入力形式（クロージャ形式、関数名+引数数形式）で同等の性能を持つこと"
+
+  compatibility:
+    - "Rust 1.92.0 以上で動作すること"
+    - "edition 2024 に対応すること"
+    - "既存の compose!, pipe!, partial! との組み合わせが動作すること"
+    - "std に依存（::std::rc::Rc を使用）"
+    - "compose feature は既に std 依存であり、no_std 対応は将来の拡張として検討"
+
+  testing:
+    - "既存の curry_tests.rs のテストを curry! マクロ用に更新すること"
+    - "2引数から6引数までの関数に対するテストを含めること"
+    - "部分適用の再利用テストを含めること"
+    - "compose! / pipe! との統合テストを維持すること"
+    - "rstest を使用すること（#[test] は使用しない）"
+    - "compile_fail テストは trybuild を使用すること"
+    - "trybuild テストランナーは #[test] を例外として許可する（trybuild と rstest の互換性が低いため）"
+    - "クロージャ形式と関数名+引数数形式の両方に対するテストを含めること"
+    - "両形式の同等性を検証するテストを含めること"
+
+  documentation:
+    - "curry! マクロのドキュメントコメントを追加すること"
+    - "使用例を含めること（両形式）"
+    - "型制約の説明を含めること"
+    - "compose/mod.rs のモジュールドキュメントを更新すること"
+    - "両形式の選択ガイダンスを含めること"
+
+# FP観点の注意事項
+functional_programming_notes:
+  purity:
+    description: |
+      curry! マクロは純粋関数の変換を目的として設計されている。
+
+      **推奨**: カリー化するクロージャ/関数は純粋関数であるべき
+      - 同じ引数に対して常に同じ結果を返す
+      - 副作用（I/O、状態変更、例外）を持たない
+
+      **副作用を含むクロージャ/関数**:
+      カリー化自体は技術的には可能だが、以下の点に注意:
+      - 副作用の発生タイミングが不明確になる
+      - 部分適用の再利用で予期しない動作が発生する可能性
+      - 参照透過性が失われる
+
+      副作用を含む関数をカリー化する場合、その管理は呼び出し側の責務となる。
+
+  referential_transparency:
+    description: |
+      curry! で生成されたクロージャは参照透過的であるべき。
+
+      参照透過性の条件:
+      1. 同じ引数に対して常に同じ結果を返す
+      2. 式をその値で置き換えてもプログラムの意味が変わらない
+
+      これを保証するため:
+      - カリー化するクロージャ/関数は純粋関数であるべき
+      - 外部状態への依存を避けるべき
+      - 可変参照（&mut）をキャプチャしないこと
+
+  form_equivalence:
+    description: |
+      クロージャ形式と関数名+引数数形式は同等の意味論を持つ。
+
+      同等性の保証:
+      1. 同じ引数に対して同じ結果を返す
+      2. 部分適用の再利用可能性は両形式で同一
+      3. 型制約（Clone 必須など）は両形式で同一
+      4. compose! / pipe! との統合は両形式で同様に動作
+
+      形式の選択ガイダンス:
+      - 関数名+引数数形式: 既存関数をそのままカリー化する場合に簡潔
+      - クロージャ形式: インライン処理や変数キャプチャが必要な場合に便利
+
+# 将来の拡張
+future_extensions:
+  - id: arc_support
+    name: "Arc サポート"
+    description: |
+      マルチスレッド環境でカリー化された関数を使用するために、
+      Rc の代わりに Arc を使用するオプションを提供する。
+
+      feature flag "arc" が有効な場合、curry! は Arc を使用する
+      コードを生成する。
+    rationale: |
+      現時点では Rc で十分なユースケースが多いため、
+      Arc サポートは将来の拡張として検討する。
+      feature flag による切り替えで対応可能。
+
+  - id: no_std_support
+    name: "no_std サポート"
+    description: |
+      no_std 環境での curry! マクロサポート。
+      alloc クレートの Rc を使用するようにコード生成を変更する。
+
+      ```rust
+      // std 環境（現在）
+      ::std::rc::Rc
+
+      // no_std 環境（将来）
+      ::alloc::rc::Rc
+      ```
+    rationale: |
+      現時点では compose feature 自体が std に依存しているため、
+      no_std 対応は Arc サポートと同時に検討する。
+      feature flag による条件分岐で対応可能。
+
+  - id: uncurry_macro
+    name: "uncurry! マクロ"
+    description: |
+      カリー化された関数を通常の複数引数関数に戻す uncurry! マクロ。
+
+      uncurry!(curried_function)(a, b, c) = curried_function(a)(b)(c)
+    rationale: |
+      curry-uncurry の恒等性を保証するために有用だが、
+      現時点での優先度は低い。
+
+  - id: auto_curry_attribute
+    name: "#[curry] 属性マクロ"
+    description: |
+      関数定義に #[curry] 属性を付けることで、自動的にカリー化された
+      バージョンも生成する属性マクロ。
+
+      ```rust
+      #[curry]
+      fn add(a: i32, b: i32) -> i32 { a + b }
+
+      // 以下が自動生成される:
+      // fn add_curried() -> impl Fn(i32) -> impl Fn(i32) -> i32 { ... }
+      ```
+    rationale: |
+      便利な機能だが、関数のシグネチャ変更に伴う複雑性があるため、
+      まずは curry! マクロの安定性を確保してから検討する。
+
+  - id: generic_arity
+    name: "7引数以上のサポート"
+    description: |
+      現在の実装では6引数までをサポートしているが、
+      procedural macro により任意の引数数に対応可能。
+
+      ただし、引数数が多い関数は設計上の問題を示唆することが多いため、
+      妥当な上限（例: 12引数）を設けることを検討する。
+    rationale: |
+      実用上は6引数で十分な場合がほとんどだが、
+      procedural macro の柔軟性を活かして拡張可能にしておく。
+
+# 実装上の考慮事項
+implementation_notes:
+  procedural_macro_design:
+    description: |
+      curry! マクロは lambars-derive クレートに procedural macro として実装する。
+
+      主な設計決定:
+
+      1. マクロの入力形式
+         - 2つの入力形式をサポート:
+           a) curry!(closure_expression) - クロージャ式形式
+           b) curry!(function_expression, arity) - 関数名+引数数形式
+         - 入力がどちらの形式かは、カンマの有無とトークン構造で判別
+
+      2. 入力形式の判別ロジック
+         - カンマで区切られた2つの要素があり、2番目が整数リテラルの場合:
+           関数名+引数数形式として処理
+         - それ以外の場合: クロージャ式形式として処理
+
+      3. 引数数の検出
+         - クロージャ形式: パターンをパースして引数数を取得
+         - 関数名+引数数形式: 第2引数の整数リテラルを使用
+         - 2引数未満: コンパイルエラー
+
+      4. コード生成
+         - syn クレートで入力をパース
+         - quote クレートで出力コードを生成
+         - 引数数に応じたネストしたクロージャを生成
+         - 両形式で同じコード生成パターンを使用
+
+      5. エラーハンドリング
+         - 0引数または1引数に対するエラー
+         - パース失敗時の分かりやすいエラーメッセージ
+         - 型エラー（引数数不一致など）は Rust コンパイラに委譲
+
+  code_generation_pattern:
+    description: |
+      生成されるコードのパターン:
+
+      **クロージャ形式の入力**: curry!(|a: i32, b: i32, c: i32| a + b + c)
+
+      **関数名+引数数形式の入力**: curry!(add, 3) (where fn add(a: i32, b: i32, c: i32) -> i32)
+
+      **両形式で共通の出力**:
+      ```rust
+      {
+          let __lambars_function = ::std::rc::Rc::new(|a: i32, b: i32, c: i32| a + b + c);
+          // または
+          // let __lambars_function = ::std::rc::Rc::new(add);
+
+          move |__lambars_argument_0| {
+              let __lambars_function = ::std::rc::Rc::clone(&__lambars_function);
+              let __lambars_argument_0 = ::std::rc::Rc::new(__lambars_argument_0);
+              move |__lambars_argument_1| {
+                  let __lambars_function = ::std::rc::Rc::clone(&__lambars_function);
+                  let __lambars_argument_0 = ::std::rc::Rc::clone(&__lambars_argument_0);
+                  let __lambars_argument_1 = ::std::rc::Rc::new(__lambars_argument_1);
+                  move |__lambars_argument_2| {
+                      __lambars_function(
+                          ::std::rc::Rc::unwrap_or_clone(::std::rc::Rc::clone(&__lambars_argument_0)),
+                          ::std::rc::Rc::unwrap_or_clone(::std::rc::Rc::clone(&__lambars_argument_1)),
+                          __lambars_argument_2,
+                      )
+                  }
+              }
+          }
+      }
+      ```
+
+      変数名には衝突を避けるため __lambars_ プレフィックスを使用する。
+
+  error_messages:
+    description: |
+      ユーザーフレンドリーなエラーメッセージを提供する:
+
+      1. "curry! requires a function with at least 2 arguments"
+         - 0引数または1引数のクロージャに対して
+         - 関数名+引数数形式で arity < 2 の場合
+
+      2. "curry! expected an integer literal for arity"
+         - 関数名+引数数形式で第2引数が整数リテラルでない場合
+
+      3. 型エラーは Rust コンパイラのメッセージに委譲
+         - 引数の型不一致
+         - 指定した引数数と実際の関数シグネチャの不一致
+         - Clone トレイト境界の不足
+
+  migration_guide:
+    description: |
+      curry2! ~ curry6! から curry! への移行ガイド:
+
+      **オプション1: クロージャ形式（既存の推奨方法）**
+
+      Before:
+      ```rust
+      use lambars::curry2;
+      fn add(a: i32, b: i32) -> i32 { a + b }
+      let curried = curry2!(add);
+      ```
+
+      After:
+      ```rust
+      use lambars::curry;
+      fn add(a: i32, b: i32) -> i32 { a + b }
+      let curried = curry!(|a, b| add(a, b));
+      ```
+
+      **オプション2: 関数名+引数数形式（新規追加）**
+
+      Before:
+      ```rust
+      use lambars::curry2;
+      fn add(a: i32, b: i32) -> i32 { a + b }
+      let curried = curry2!(add);
+      ```
+
+      After:
+      ```rust
+      use lambars::curry;
+      fn add(a: i32, b: i32) -> i32 { a + b }
+      let curried = curry!(add, 2);
+      ```
+
+      **形式の選択ガイダンス**:
+      - 関数名+引数数形式: 既存関数をそのままカリー化する場合に簡潔
+      - クロージャ形式: インライン処理や変数キャプチャが必要な場合に便利
+
+      **共通の変更点**:
+      - インポートを curry2!, curry3! などから curry! に変更
+      - 動作は同一（Rc を使用したネストしたクロージャ）
