@@ -1,0 +1,393 @@
+# スレッドセーフ永続構造 要件定義
+#
+# 概要:
+#   現在のRcベース永続データ構造をArcベースに切り替え可能にし、
+#   スレッドセーフな並行処理をサポートする。
+#
+# 設計方針:
+#   1. featureフラグによるRc/Arc切り替え方式（im-rs方式）を採用
+#   2. 既存APIとの完全な互換性を維持
+#   3. 関数型プログラミングの不変性・参照透過性を保証
+#
+# 参照:
+#   - im-rs クレート (https://docs.rs/im/)
+#   - Rust標準ライブラリ Send/Sync トレイト
+#   - lambars Issue #24
+
+version: "1.0.0"
+name: "thread_safe_persistent"
+description: |
+  lambarsの永続データ構造（PersistentList, PersistentVector, PersistentHashMap,
+  PersistentHashSet, PersistentTreeMap）にスレッドセーフなバリアントを追加する。
+
+  featureフラグ「arc」を有効にすることで、内部参照カウント型がRcからArcに切り替わり、
+  Send + Syncトレイトが自動的に実装される。これにより、マルチスレッド環境での
+  安全な共有が可能になる。
+
+# 背景・動機
+background:
+  problem: |
+    現在のlambars永続データ構造は全てstd::rc::Rcを使用して構造共有を実現している。
+    Rcはスレッドセーフではないため（Send, Syncを実装していない）、以下の問題がある:
+
+    1. マルチスレッド環境でデータ構造を共有できない
+    2. async/awaitコンテキストでの使用が制限される
+    3. 並行処理を行うアプリケーションでの採用障壁となる
+
+    関数型プログラミングにおいて不変データ構造は本質的にスレッドセーフであるべきだが、
+    Rustの型システムではRc使用により明示的にスレッドセーフではないと宣言されている。
+
+  motivation: |
+    1. 関数型プログラミングの原則との整合性
+       - 不変データ構造は本質的に競合状態を起こさない
+       - 参照透過性は並行処理と相性が良い
+       - Arcへの切り替えでRustの型システムがこれを保証
+
+    2. 実用性の向上
+       - webサーバー、並行処理、async/awaitでの利用が可能に
+       - 既存の関数型エコシステム（rayon等）との統合
+
+    3. im-rsとの整合性
+       - im-rsはArc版（im）とRc版（im-rc）を提供
+       - 業界標準に準拠することで学習コストを削減
+
+  prior_art:
+    - name: "im-rs"
+      description: |
+        Rustの代表的な永続データ構造ライブラリ。
+        - im: Arcベース、スレッドセーフ
+        - im-rc: Rcベース、シングルスレッド向けパフォーマンス優先
+        featureフラグではなく別クレートとして分離している点が特徴。
+
+    - name: "rpds"
+      description: |
+        Rust Persistent Data Structures。
+        generic-arcという型パラメータでRc/Arcを抽象化。
+
+    - name: "Haskell Data.Sequence/Data.Map"
+      description: |
+        Haskellの永続データ構造は言語レベルで不変性が保証され、
+        GHCランタイムが並行処理を安全に管理。
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. featureフラグ設計
+  # ======================================================================
+  - id: feature_flag_design
+    name: "featureフラグによるRc/Arc切り替え"
+    description: |
+      Cargo.tomlにfeatureフラグ「arc」を追加し、有効時にRcの代わりにArcを使用する。
+      条件付きコンパイルにより、シングルスレッド環境ではRcの低オーバーヘッドを維持し、
+      マルチスレッド環境ではArcによるスレッドセーフを提供する。
+
+    methods:
+      - name: "feature flag definition"
+        signature: |
+          [features]
+          arc = []
+        description: |
+          Cargo.tomlに「arc」featureを追加。
+          有効時: std::sync::Arc を使用
+          無効時: std::rc::Rc を使用（デフォルト）
+
+      - name: "reference_counted type alias"
+        signature: |
+          #[cfg(feature = "arc")]
+          pub(crate) type ReferenceCounter<T> = std::sync::Arc<T>;
+
+          #[cfg(not(feature = "arc"))]
+          pub(crate) type ReferenceCounter<T> = std::rc::Rc<T>;
+        description: |
+          内部で使用する参照カウント型のエイリアス。
+          永続データ構造モジュール内で統一的に使用する。
+
+    implementations:
+      - type: "src/persistent/mod.rs"
+        description: |
+          参照カウント型エイリアスの定義場所。
+          全永続データ構造から参照される共通定義。
+
+  # ======================================================================
+  # 2. Send + Sync トレイト実装
+  # ======================================================================
+  - id: send_sync_implementation
+    name: "Send + Sync トレイトの条件付き実装"
+    description: |
+      arcフィーチャーが有効な場合、全永続データ構造にSend + Syncトレイトを実装する。
+      要素型TがSend + Syncを実装している場合に限り、コンテナ型もSend + Syncとなる。
+
+    laws:
+      - name: "Thread Safety Law"
+        description: |
+          arcフィーチャー有効時、T: Send + Syncならば
+          PersistentX<T>: Send + Sync（X = List, Vector, HashMap, HashSet, TreeMap）
+        equation: |
+          T: Send + Sync => PersistentX<T>: Send + Sync
+        property_test: |
+          fn is_send_sync<T: Send + Sync>() {}
+
+          #[cfg(feature = "arc")]
+          fn test_send_sync() {
+              is_send_sync::<PersistentList<i32>>();
+              is_send_sync::<PersistentVector<String>>();
+              is_send_sync::<PersistentHashMap<String, i32>>();
+              is_send_sync::<PersistentHashSet<i32>>();
+              is_send_sync::<PersistentTreeMap<String, i32>>();
+          }
+
+    implementations:
+      - type: "PersistentList<T>"
+        description: |
+          T: Send + Sync の場合、PersistentList<T>はSend + Sync。
+          内部Node<T>もArc<Node<T>>となりスレッドセーフ。
+
+      - type: "PersistentVector<T>"
+        description: |
+          T: Send + Sync の場合、PersistentVector<T>はSend + Sync。
+          Radix Balanced Tree内部ノードもArcで管理。
+
+      - type: "PersistentHashMap<K, V>"
+        description: |
+          K: Send + Sync, V: Send + Sync の場合、
+          PersistentHashMap<K, V>はSend + Sync。
+          HAMTノードもArcで管理。
+
+      - type: "PersistentHashSet<T>"
+        description: |
+          T: Send + Sync の場合、PersistentHashSet<T>はSend + Sync。
+          内部HashMapを通じて自動的に実装される。
+
+      - type: "PersistentTreeMap<K, V>"
+        description: |
+          K: Send + Sync, V: Send + Sync の場合、
+          PersistentTreeMap<K, V>はSend + Sync。
+          Red-Black TreeノードもArcで管理。
+
+  # ======================================================================
+  # 3. API互換性
+  # ======================================================================
+  - id: api_compatibility
+    name: "既存APIとの完全互換性"
+    description: |
+      featureフラグの切り替えによりユーザーコードの変更を必要としない。
+      全ての公開APIシグネチャは変更なし。
+
+    laws:
+      - name: "API Stability Law"
+        description: |
+          arc feature有効/無効で公開APIに変更がないことを保証
+        equation: |
+          signature(API, arc=true) == signature(API, arc=false)
+        property_test: |
+          // 同一のテストコードがarc feature有無で動作することを確認
+          fn test_api_compatibility() {
+              let list = PersistentList::new().cons(1).cons(2);
+              assert_eq!(list.head(), Some(&2));
+              assert_eq!(list.len(), 2);
+
+              let vector: PersistentVector<i32> = (0..100).collect();
+              assert_eq!(vector.get(50), Some(&50));
+
+              let map = PersistentHashMap::new()
+                  .insert("key".to_string(), 42);
+              assert_eq!(map.get("key"), Some(&42));
+          }
+
+    methods:
+      - name: "全永続データ構造の公開メソッド"
+        signature: "既存シグネチャを維持"
+        description: |
+          以下のメソッドを含む全公開APIが変更なしで動作:
+          - コンストラクタ: new(), singleton()
+          - 要素操作: cons(), push_back(), insert(), remove()
+          - 参照: get(), head(), first(), last()
+          - イテレーション: iter(), into_iter()
+          - 型クラス: Functor, Foldable, Monad等
+
+  # ======================================================================
+  # 4. 参照透過性の維持
+  # ======================================================================
+  - id: referential_transparency
+    name: "参照透過性の維持"
+    description: |
+      スレッドセーフ化により参照透過性が損なわれないことを保証。
+      同じ入力に対して常に同じ出力を返す純粋関数の性質を維持。
+
+    laws:
+      - name: "Referential Transparency Law"
+        description: |
+          任意の純粋関数fと永続データ構造xに対して、
+          f(x)は常に同じ結果を返す（スレッドコンテキストに依存しない）
+        equation: |
+          forall f: pure, x: Persistent. f(x) == f(x)
+        property_test: |
+          use std::thread;
+
+          #[cfg(feature = "arc")]
+          fn test_referential_transparency() {
+              let list: PersistentList<i32> = (1..=1000).collect();
+              let list_clone = list.clone();
+
+              let handle1 = thread::spawn(move || {
+                  list.iter().sum::<i32>()
+              });
+
+              let handle2 = thread::spawn(move || {
+                  list_clone.iter().sum::<i32>()
+              });
+
+              assert_eq!(handle1.join().unwrap(), handle2.join().unwrap());
+          }
+
+  # ======================================================================
+  # 5. 不変性保証
+  # ======================================================================
+  - id: immutability_guarantee
+    name: "不変性の型レベル保証"
+    description: |
+      Arc使用時でも内部可変性（Interior Mutability）を導入しない。
+      永続データ構造の不変性はRustの型システムにより静的に保証される。
+
+    laws:
+      - name: "Immutability Law"
+        description: |
+          永続データ構造への操作は常に新しいインスタンスを返し、
+          元のインスタンスは変更されない
+        equation: |
+          let x = PersistentX::new()
+          let y = x.operation(...)
+          // x is unchanged, y is a new instance
+        property_test: |
+          fn test_immutability() {
+              let original = PersistentVector::new()
+                  .push_back(1)
+                  .push_back(2);
+
+              let modified = original.push_back(3);
+
+              assert_eq!(original.len(), 2);  // 元のインスタンスは不変
+              assert_eq!(modified.len(), 3);  // 新しいインスタンス
+          }
+
+  # ======================================================================
+  # 6. 実装対象データ構造
+  # ======================================================================
+  - id: target_data_structures
+    name: "実装対象の永続データ構造"
+    description: |
+      全5種類の永続データ構造にスレッドセーフサポートを追加。
+      優先順位は利用頻度と複雑性に基づく。
+
+    implementations:
+      - type: "PersistentList"
+        description: |
+          優先度: 高
+          理由: 最もシンプルな構造、基本的なリンクリストのためRc->Arc置換が容易
+          影響範囲: Node<T>のhead参照、tail参照
+
+      - type: "PersistentVector"
+        description: |
+          優先度: 高
+          理由: 最も頻繁に使用されるデータ構造、パフォーマンスへの影響を測定
+          影響範囲: Node<T>（Branch/Leaf）、tail Rc<[T]>
+
+      - type: "PersistentHashMap"
+        description: |
+          優先度: 中
+          理由: HAMTの複雑な構造、Child<K,V>とNode<K,V>の変換が必要
+          影響範囲: Node<K,V>、Child::Node内のRc、Collision内のRc<[(K,V)]>
+
+      - type: "PersistentHashSet"
+        description: |
+          優先度: 中
+          理由: 内部でPersistentHashMapを使用、自動的にスレッドセーフ化
+          影響範囲: 内部HashMapを通じて自動的に適用
+
+      - type: "PersistentTreeMap"
+        description: |
+          優先度: 低
+          理由: Red-Black Treeの複雑なリバランス処理、最後に実装
+          影響範囲: Node<K,V>の左右子ノード参照
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - |
+      arcフィーチャー無効時（デフォルト）のパフォーマンスに影響を与えない。
+      条件付きコンパイルにより、シングルスレッド環境ではRcの低オーバーヘッドを維持。
+    - |
+      arcフィーチャー有効時のオーバーヘッドは許容範囲内とする。
+      Arcのアトミック参照カウントによるオーバーヘッドは10-20%程度を目安。
+    - |
+      ベンチマークを追加し、Rc版とArc版のパフォーマンス差を継続的に測定。
+
+  compatibility:
+    - |
+      既存のユーザーコードはfeatureフラグ変更のみでスレッドセーフ版に移行可能。
+      コード変更は一切不要。
+    - |
+      serdeフィーチャーとの組み合わせで正常に動作することを保証。
+    - |
+      型クラス（Functor, Foldable, Monad等）の実装に影響を与えない。
+
+  testing:
+    - |
+      全既存テストがarcフィーチャー有効/無効の両方で通過すること。
+    - |
+      スレッドセーフ性を検証するマルチスレッドテストを追加。
+      - 複数スレッドからの同時読み取り
+      - スレッド間でのデータ構造共有
+    - |
+      serdeフィーチャーとarcフィーチャーの組み合わせで
+      シリアライズ/デシリアライズが正常に動作することを検証。
+    - |
+      基本的なベンチマークを追加し、Rc版とArc版のパフォーマンス差を測定。
+      継続的な測定はCI/CD環境で実施可能な形で整備。
+
+  # 将来のテスト拡張（今回のスコープ外）
+  future_testing:
+    - |
+      プロパティベーステスト（proptest）でarcフィーチャー有効時の
+      参照透過性・不変性を網羅的に検証。
+    - |
+      async/awaitコンテキストでの使用テスト（tokio環境）。
+      Rustの非同期エコシステムが成熟した段階で追加。
+
+# 将来の拡張
+future_extensions:
+  - id: rayon_integration
+    name: "rayonクレートとの統合"
+    description: |
+      arcフィーチャー有効時にrayonによる並列イテレーションをサポート。
+      par_iter()メソッドを追加し、データ並列処理を可能にする。
+    rationale: |
+      本要件定義の範囲外。スレッドセーフ基盤が整った後に実装。
+      rayonとの統合は別featureフラグ（rayon）で管理予定。
+
+  - id: async_iterator
+    name: "非同期イテレータサポート"
+    description: |
+      Stream/AsyncIteratorトレイトの実装により、async/await環境での
+      効率的なイテレーションをサポート。
+    rationale: |
+      Rustの非同期イテレータAPIがまだ安定化されていない。
+      安定化後に実装を検討。
+
+  - id: separate_crate
+    name: "別クレートとしての分離（lambars-rc）"
+    description: |
+      im-rsのようにRc版を別クレート（lambars-rc）として分離する選択肢。
+      現時点ではfeatureフラグ方式を採用するが、将来的にニーズがあれば検討。
+    rationale: |
+      featureフラグ方式の方がユーザーにとって依存関係管理が簡単。
+      別クレート方式は保守コストが倍増するため、明確な需要があるまで延期。
+
+  - id: lock_free_optimization
+    name: "ロックフリー最適化"
+    description: |
+      特定のホットパス（tail操作など）でロックフリーアルゴリズムを採用し、
+      Arcのオーバーヘッドを軽減。
+    rationale: |
+      複雑性が大幅に増加するため、パフォーマンス問題が顕在化した場合のみ検討。
+      現時点では標準的なArc使用で十分と判断。

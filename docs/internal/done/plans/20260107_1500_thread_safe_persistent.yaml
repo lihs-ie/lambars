@@ -1,0 +1,1429 @@
+# スレッドセーフ永続構造 実装計画
+#
+# 要件定義: docs/internal/requirements/20260107_1500_thread_safe_persistent.yaml
+# 技術要件:
+#   - Rust: 1.92.0
+#   - edition: 2024
+#   - testing: rstest
+#
+# 実装方針:
+#   1. TDD（テスト駆動開発）でテストを先に書く
+#   2. featureフラグ「arc」によるRc/Arc切り替えを実装
+#   3. 参照カウント型エイリアス（ReferenceCounter）を定義
+#   4. 各データ構造のRc→ReferenceCounterへの置換
+#   5. Send + Syncの条件付きテスト
+#   6. マルチスレッドテストの追加
+#   7. 既存テストがarc feature有効/無効両方で通過することを確認
+#
+# 注意事項:
+#   - hashset.rsでは既に`use std::sync::Arc`が存在するが、未使用
+#   - 既存APIシグネチャは一切変更しない
+#   - 内部実装のみを条件付きコンパイルで切り替える
+
+version: "1.0.0"
+name: "Thread-Safe Persistent Data Structures Implementation Plan"
+requirement_file: "docs/internal/requirements/20260107_1500_thread_safe_persistent.yaml"
+
+# 既存実装の調査結果
+existing_implementation_analysis:
+  persistent_list:
+    file: "src/persistent/list.rs"
+    current_rc_usage:
+      - name: "Node<T>"
+        location: "line 68"
+        description: "next: Option<Rc<Self>>"
+      - name: "PersistentList<T>"
+        location: "line 100"
+        description: "head: Option<Rc<Node<T>>>"
+    imports:
+      - "use std::rc::Rc; (line 54)"
+
+  persistent_vector:
+    file: "src/persistent/vector.rs"
+    current_rc_usage:
+      - name: "Node<T>::Branch"
+        location: "line 74"
+        description: "Rc<[Option<Rc<Self>>; BRANCHING_FACTOR]>"
+      - name: "Node<T>::Leaf"
+        location: "line 76"
+        description: "Rc<[T]>"
+      - name: "PersistentVector<T>"
+        location: "line 144, 147"
+        description: "root: Rc<Node<T>>, tail: Rc<[T]>"
+    imports:
+      - "use std::rc::Rc; (line 49)"
+
+  persistent_hashmap:
+    file: "src/persistent/hashmap.rs"
+    current_rc_usage:
+      - name: "Node<K,V>::Bitmap"
+        location: "line 117"
+        description: "children: Rc<[Child<K, V>]>"
+      - name: "Node<K,V>::Collision"
+        location: "line 120"
+        description: "entries: Rc<[(K, V)]>"
+      - name: "Child<K,V>::Node"
+        location: "line 136"
+        description: "Node(Rc<Node<K, V>>)"
+      - name: "PersistentHashMap<K,V>"
+        location: "line 178"
+        description: "root: Rc<Node<K, V>>"
+    imports:
+      - "use std::rc::Rc; (line 53)"
+
+  persistent_hashset:
+    file: "src/persistent/hashset.rs"
+    current_rc_usage:
+      - name: "none (uses PersistentHashMap internally)"
+        description: |
+          PersistentHashSetはPersistentHashMapをラップしているため、
+          直接Rcを使用していない。HashMapがスレッドセーフになれば
+          自動的にHashSetもスレッドセーフになる。
+    imports:
+      - "use std::sync::Arc; (line 63) - 現在未使用"
+    notes: |
+      Arc のインポートが既にあるが未使用。
+      この実装では削除するか、ReferenceCounterエイリアスに統一する。
+
+  persistent_treemap:
+    file: "src/persistent/treemap.rs"
+    current_rc_usage:
+      - name: "Node<K,V>"
+        location: "line 82-83"
+        description: "left: Option<Rc<Self>>, right: Option<Rc<Self>>"
+      - name: "PersistentTreeMap<K,V>"
+        location: "line 185"
+        description: "root: Option<Rc<Node<K, V>>>"
+    imports:
+      - "use std::rc::Rc; (line 57)"
+
+# 実装順序の概要
+implementation_order:
+  - step: 1
+    name: "基盤準備: ReferenceCounterエイリアスとfeatureフラグ"
+    items:
+      - Cargo.tomlにarc featureを追加
+      - src/persistent/mod.rsにReferenceCounterエイリアスを定義
+    rationale: |
+      全データ構造で共通して使用するため、最初に基盤を整備する。
+      これにより、各データ構造の実装が簡潔になる。
+
+  - step: 2
+    name: "PersistentList のスレッドセーフ化"
+    items:
+      - Rc→ReferenceCounterへの置換
+      - Send + Sync条件付きテスト
+      - マルチスレッドテスト
+    rationale: |
+      最もシンプルな構造のため、パターンを確立するのに最適。
+      Node<T>とPersistentList<T>の2箇所のみ変更。
+
+  - step: 3
+    name: "PersistentVector のスレッドセーフ化"
+    items:
+      - Rc→ReferenceCounterへの置換
+      - Send + Sync条件付きテスト
+      - マルチスレッドテスト
+    rationale: |
+      Listの次に頻繁に使用され、Radix Balanced Treeの
+      複雑な構造でのパターンを確認できる。
+
+  - step: 4
+    name: "PersistentHashMap のスレッドセーフ化"
+    items:
+      - Rc→ReferenceCounterへの置換
+      - Send + Sync条件付きテスト
+      - マルチスレッドテスト
+    rationale: |
+      HAMTの複雑な構造。Node, Child, Collision全てで
+      ReferenceCounterを使用する必要がある。
+
+  - step: 5
+    name: "PersistentHashSet のスレッドセーフ化"
+    items:
+      - 未使用のArcインポートを削除（または統一）
+      - Send + Sync条件付きテスト
+      - マルチスレッドテスト
+    rationale: |
+      内部でPersistentHashMapを使用しているため、
+      HashMapがスレッドセーフになれば自動的に適用される。
+      テストの追加とインポートの整理のみ。
+
+  - step: 6
+    name: "PersistentTreeMap のスレッドセーフ化"
+    items:
+      - Rc→ReferenceCounterへの置換
+      - Send + Sync条件付きテスト
+      - マルチスレッドテスト
+    rationale: |
+      Red-Black Treeの複雑なリバランス処理があるが、
+      Rcの使用箇所は限定的。最後に実装。
+
+  - step: 7
+    name: "統合テストと検証"
+    items:
+      - 全既存テストがarc feature有効/無効両方で通過することを確認
+      - CI設定の更新（両feature設定でテスト実行）
+    rationale: |
+      全データ構造の実装完了後、回帰テストを実施。
+
+# 実装計画詳細
+implementation_plan:
+  # ============================================================================
+  # 1. 基盤準備: ReferenceCounterエイリアスとfeatureフラグ
+  # ============================================================================
+  - id: impl_foundation
+    requirement_id: feature_flag_design
+    name: "基盤準備: ReferenceCounterエイリアスとfeatureフラグ"
+    priority: 1
+    description: |
+      Cargo.tomlにarc featureを追加し、src/persistent/mod.rsに
+      条件付きコンパイルでRc/Arcを切り替えるReferenceCounterエイリアスを定義する。
+
+    files:
+      - path: Cargo.toml
+        description: |
+          [features]セクションにarc featureを追加。
+          persistent featureとの組み合わせを考慮。
+
+      - path: src/persistent/mod.rs
+        description: |
+          ReferenceCounterエイリアスを定義。
+          arc feature有効時はArc、無効時はRcを使用。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Cargo.tomlにarc featureを追加。
+        code_outline: |
+          [features]
+          # 既存のfeature定義の後に追加
+          arc = []
+
+      - step: 2
+        description: |
+          src/persistent/mod.rsにReferenceCounterエイリアスを追加。
+        code_outline: |
+          // モジュール宣言の後、pub use の前に追加
+
+          /// Reference-counted smart pointer type.
+          ///
+          /// When the `arc` feature is enabled, this is `std::sync::Arc`,
+          /// which is thread-safe but has slightly higher overhead.
+          ///
+          /// When the `arc` feature is disabled (default), this is `std::rc::Rc`,
+          /// which is faster but not thread-safe.
+          #[cfg(feature = "arc")]
+          pub(crate) type ReferenceCounter<T> = std::sync::Arc<T>;
+
+          /// Reference-counted smart pointer type.
+          ///
+          /// When the `arc` feature is enabled, this is `std::sync::Arc`,
+          /// which is thread-safe but has slightly higher overhead.
+          ///
+          /// When the `arc` feature is disabled (default), this is `std::rc::Rc`,
+          /// which is faster but not thread-safe.
+          #[cfg(not(feature = "arc"))]
+          pub(crate) type ReferenceCounter<T> = std::rc::Rc<T>;
+
+    tests:
+      - name: test_reference_counter_alias
+        description: ReferenceCounterエイリアスが正しく定義されていることのテスト
+        test_type: unit
+        code_outline: |
+          #[cfg(test)]
+          mod reference_counter_tests {
+              use super::ReferenceCounter;
+              use rstest::rstest;
+
+              #[rstest]
+              fn test_reference_counter_clone() {
+                  let rc: ReferenceCounter<i32> = ReferenceCounter::new(42);
+                  let rc2 = rc.clone();
+                  assert_eq!(*rc, *rc2);
+              }
+
+              #[rstest]
+              fn test_reference_counter_strong_count() {
+                  let rc: ReferenceCounter<i32> = ReferenceCounter::new(42);
+                  assert_eq!(ReferenceCounter::strong_count(&rc), 1);
+                  let rc2 = rc.clone();
+                  assert_eq!(ReferenceCounter::strong_count(&rc), 2);
+                  drop(rc2);
+                  assert_eq!(ReferenceCounter::strong_count(&rc), 1);
+              }
+          }
+
+    dependencies: []
+
+  # ============================================================================
+  # 2. PersistentList のスレッドセーフ化
+  # ============================================================================
+  - id: impl_list_thread_safe
+    requirement_id: target_data_structures
+    name: "PersistentList のスレッドセーフ化"
+    priority: 2
+    description: |
+      PersistentListの内部Rcを全てReferenceCounterに置換する。
+      Node<T>とPersistentList<T>の2箇所を変更。
+      Send + Syncのコンパイル時チェックとマルチスレッドテストを追加。
+
+    files:
+      - path: src/persistent/list.rs
+        description: |
+          - `use std::rc::Rc`を削除
+          - `use super::ReferenceCounter`を追加
+          - Node<T>のRcをReferenceCounterに置換
+          - PersistentList<T>のRcをReferenceCounterに置換
+          - PersistentListIteratorのRcをReferenceCounterに置換
+
+    implementation_steps:
+      - step: 1
+        description: |
+          use文を変更: std::rc::Rc→super::ReferenceCounter
+        code_outline: |
+          // 変更前
+          use std::rc::Rc;
+
+          // 変更後
+          use super::ReferenceCounter;
+
+      - step: 2
+        description: |
+          Node<T>のRc使用箇所をReferenceCounterに置換
+        code_outline: |
+          /// Internal node structure for the persistent list.
+          struct Node<T> {
+              /// The element stored in this node.
+              element: T,
+              /// Reference to the next node (if any).
+              next: Option<ReferenceCounter<Self>>,
+          }
+
+      - step: 3
+        description: |
+          PersistentList<T>のRc使用箇所をReferenceCounterに置換
+        code_outline: |
+          #[derive(Clone)]
+          pub struct PersistentList<T> {
+              /// Reference to the head node (if any).
+              head: Option<ReferenceCounter<Node<T>>>,
+              /// Cached length for O(1) access.
+              length: usize,
+          }
+
+      - step: 4
+        description: |
+          PersistentListIteratorのRc参照をReferenceCounterに置換
+        code_outline: |
+          /// An iterator over references to elements of a [`PersistentList`].
+          pub struct PersistentListIterator<'a, T> {
+              current: Option<&'a ReferenceCounter<Node<T>>>,
+          }
+
+      - step: 5
+        description: |
+          全てのRc::new呼び出しをReferenceCounter::newに置換
+        code_outline: |
+          // 例: cons メソッド内
+          Self {
+              head: Some(ReferenceCounter::new(Node {
+                  element,
+                  next: self.head.clone(),
+              })),
+              length: self.length + 1,
+          }
+
+    tests:
+      - name: test_list_send_sync
+        description: arc feature有効時にPersistentListがSend + Syncを実装することのテスト
+        test_type: unit
+        code_outline: |
+          #[cfg(all(test, feature = "arc"))]
+          mod send_sync_tests {
+              use super::*;
+              use rstest::rstest;
+
+              /// Compile-time check that PersistentList<T> is Send when T: Send
+              fn assert_send<T: Send>() {}
+
+              /// Compile-time check that PersistentList<T> is Sync when T: Sync
+              fn assert_sync<T: Sync>() {}
+
+              #[rstest]
+              fn test_list_is_send() {
+                  assert_send::<PersistentList<i32>>();
+                  assert_send::<PersistentList<String>>();
+              }
+
+              #[rstest]
+              fn test_list_is_sync() {
+                  assert_sync::<PersistentList<i32>>();
+                  assert_sync::<PersistentList<String>>();
+              }
+
+              #[rstest]
+              fn test_list_send_sync_combined() {
+                  fn is_send_sync<T: Send + Sync>() {}
+                  is_send_sync::<PersistentList<i32>>();
+                  is_send_sync::<PersistentList<String>>();
+              }
+          }
+
+      - name: test_list_multithread
+        description: マルチスレッド環境でPersistentListを共有できることのテスト
+        test_type: unit
+        code_outline: |
+          #[cfg(all(test, feature = "arc"))]
+          mod multithread_tests {
+              use super::*;
+              use rstest::rstest;
+              use std::thread;
+
+              #[rstest]
+              fn test_list_shared_across_threads() {
+                  let list: PersistentList<i32> = (1..=1000).collect();
+
+                  let list1 = list.clone();
+                  let list2 = list.clone();
+
+                  let handle1 = thread::spawn(move || {
+                      list1.iter().sum::<i32>()
+                  });
+
+                  let handle2 = thread::spawn(move || {
+                      list2.iter().sum::<i32>()
+                  });
+
+                  let sum1 = handle1.join().unwrap();
+                  let sum2 = handle2.join().unwrap();
+
+                  assert_eq!(sum1, sum2);
+                  assert_eq!(sum1, (1..=1000).sum());
+              }
+
+              #[rstest]
+              fn test_list_concurrent_cons() {
+                  let list: PersistentList<i32> = PersistentList::new();
+
+                  let list1 = list.clone();
+                  let list2 = list.clone();
+
+                  let handle1 = thread::spawn(move || {
+                      list1.cons(1).cons(2).cons(3)
+                  });
+
+                  let handle2 = thread::spawn(move || {
+                      list2.cons(4).cons(5).cons(6)
+                  });
+
+                  let result1 = handle1.join().unwrap();
+                  let result2 = handle2.join().unwrap();
+
+                  // 元のリストは空のまま、各スレッドで独立したリストが生成される
+                  assert_eq!(result1.len(), 3);
+                  assert_eq!(result2.len(), 3);
+              }
+
+              #[rstest]
+              fn test_list_referential_transparency() {
+                  let list: PersistentList<i32> = (1..=1000).collect();
+                  let list_clone = list.clone();
+
+                  let handle1 = thread::spawn(move || {
+                      list.iter().sum::<i32>()
+                  });
+
+                  let handle2 = thread::spawn(move || {
+                      list_clone.iter().sum::<i32>()
+                  });
+
+                  // 同じ入力に対して常に同じ出力（参照透過性）
+                  assert_eq!(handle1.join().unwrap(), handle2.join().unwrap());
+              }
+          }
+
+    dependencies:
+      - impl_foundation
+
+  # ============================================================================
+  # 3. PersistentVector のスレッドセーフ化
+  # ============================================================================
+  - id: impl_vector_thread_safe
+    requirement_id: target_data_structures
+    name: "PersistentVector のスレッドセーフ化"
+    priority: 3
+    description: |
+      PersistentVectorの内部Rcを全てReferenceCounterに置換する。
+      Node<T>（Branch, Leaf）とPersistentVector<T>の複数箇所を変更。
+
+    files:
+      - path: src/persistent/vector.rs
+        description: |
+          - `use std::rc::Rc`を削除
+          - `use super::ReferenceCounter`を追加
+          - Node<T>::BranchのRcをReferenceCounterに置換
+          - Node<T>::LeafのRcをReferenceCounterに置換
+          - PersistentVector<T>のroot, tailをReferenceCounterに置換
+
+    implementation_steps:
+      - step: 1
+        description: |
+          use文を変更
+        code_outline: |
+          // 変更前
+          use std::rc::Rc;
+
+          // 変更後
+          use super::ReferenceCounter;
+
+      - step: 2
+        description: |
+          Node<T>のRc使用箇所をReferenceCounterに置換
+        code_outline: |
+          #[derive(Clone)]
+          enum Node<T> {
+              /// Branch node containing child nodes
+              Branch(ReferenceCounter<[Option<ReferenceCounter<Self>>; BRANCHING_FACTOR]>),
+              /// Leaf node containing actual elements
+              Leaf(ReferenceCounter<[T]>),
+          }
+
+      - step: 3
+        description: |
+          PersistentVector<T>のRc使用箇所をReferenceCounterに置換
+        code_outline: |
+          #[derive(Clone)]
+          pub struct PersistentVector<T> {
+              /// Total number of elements
+              length: usize,
+              /// Shift amount for index calculation
+              shift: usize,
+              /// Root node of the trie
+              root: ReferenceCounter<Node<T>>,
+              /// Tail buffer for efficient append
+              tail: ReferenceCounter<[T]>,
+          }
+
+      - step: 4
+        description: |
+          全てのRc::new, Rc::fromをReferenceCounter::new, ReferenceCounter::fromに置換
+
+    tests:
+      - name: test_vector_send_sync
+        description: arc feature有効時にPersistentVectorがSend + Syncを実装することのテスト
+        test_type: unit
+        code_outline: |
+          #[cfg(all(test, feature = "arc"))]
+          mod send_sync_tests {
+              use super::*;
+              use rstest::rstest;
+
+              fn assert_send<T: Send>() {}
+              fn assert_sync<T: Sync>() {}
+
+              #[rstest]
+              fn test_vector_is_send() {
+                  assert_send::<PersistentVector<i32>>();
+                  assert_send::<PersistentVector<String>>();
+              }
+
+              #[rstest]
+              fn test_vector_is_sync() {
+                  assert_sync::<PersistentVector<i32>>();
+                  assert_sync::<PersistentVector<String>>();
+              }
+
+              #[rstest]
+              fn test_vector_send_sync_combined() {
+                  fn is_send_sync<T: Send + Sync>() {}
+                  is_send_sync::<PersistentVector<i32>>();
+                  is_send_sync::<PersistentVector<String>>();
+              }
+          }
+
+      - name: test_vector_multithread
+        description: マルチスレッド環境でPersistentVectorを共有できることのテスト
+        test_type: unit
+        code_outline: |
+          #[cfg(all(test, feature = "arc"))]
+          mod multithread_tests {
+              use super::*;
+              use rstest::rstest;
+              use std::thread;
+
+              #[rstest]
+              fn test_vector_shared_across_threads() {
+                  let vector: PersistentVector<i32> = (0..10000).collect();
+
+                  let vec1 = vector.clone();
+                  let vec2 = vector.clone();
+
+                  let handle1 = thread::spawn(move || {
+                      vec1.iter().sum::<i32>()
+                  });
+
+                  let handle2 = thread::spawn(move || {
+                      vec2.iter().sum::<i32>()
+                  });
+
+                  let sum1 = handle1.join().unwrap();
+                  let sum2 = handle2.join().unwrap();
+
+                  assert_eq!(sum1, sum2);
+                  assert_eq!(sum1, (0..10000).sum());
+              }
+
+              #[rstest]
+              fn test_vector_concurrent_push_back() {
+                  let vector: PersistentVector<i32> = PersistentVector::new();
+
+                  let vec1 = vector.clone();
+                  let vec2 = vector.clone();
+
+                  let handle1 = thread::spawn(move || {
+                      vec1.push_back(1).push_back(2).push_back(3)
+                  });
+
+                  let handle2 = thread::spawn(move || {
+                      vec2.push_back(4).push_back(5).push_back(6)
+                  });
+
+                  let result1 = handle1.join().unwrap();
+                  let result2 = handle2.join().unwrap();
+
+                  assert_eq!(result1.len(), 3);
+                  assert_eq!(result2.len(), 3);
+              }
+
+              #[rstest]
+              fn test_vector_concurrent_random_access() {
+                  let vector: PersistentVector<i32> = (0..10000).collect();
+
+                  let handles: Vec<_> = (0..4)
+                      .map(|thread_id| {
+                          let vec_clone = vector.clone();
+                          thread::spawn(move || {
+                              let start = thread_id * 2500;
+                              let end = start + 2500;
+                              (start..end).map(|i| *vec_clone.get(i).unwrap()).sum::<i32>()
+                          })
+                      })
+                      .collect();
+
+                  let total: i32 = handles
+                      .into_iter()
+                      .map(|h| h.join().unwrap())
+                      .sum();
+
+                  assert_eq!(total, (0..10000).sum());
+              }
+          }
+
+    dependencies:
+      - impl_list_thread_safe
+
+  # ============================================================================
+  # 4. PersistentHashMap のスレッドセーフ化
+  # ============================================================================
+  - id: impl_hashmap_thread_safe
+    requirement_id: target_data_structures
+    name: "PersistentHashMap のスレッドセーフ化"
+    priority: 4
+    description: |
+      PersistentHashMapの内部Rcを全てReferenceCounterに置換する。
+      Node<K,V>（Bitmap, Collision）、Child<K,V>、PersistentHashMap<K,V>を変更。
+
+    files:
+      - path: src/persistent/hashmap.rs
+        description: |
+          - `use std::rc::Rc`を削除
+          - `use super::ReferenceCounter`を追加
+          - Node<K,V>::BitmapのchildrenをReferenceCounterに置換
+          - Node<K,V>::CollisionのentriesをReferenceCounterに置換
+          - Child<K,V>::NodeのRcをReferenceCounterに置換
+          - PersistentHashMap<K,V>のrootをReferenceCounterに置換
+
+    implementation_steps:
+      - step: 1
+        description: |
+          use文を変更
+        code_outline: |
+          // 変更前
+          use std::rc::Rc;
+
+          // 変更後
+          use super::ReferenceCounter;
+
+      - step: 2
+        description: |
+          Node<K,V>のRc使用箇所をReferenceCounterに置換
+        code_outline: |
+          #[derive(Clone)]
+          enum Node<K, V> {
+              Empty,
+              Entry { hash: u64, key: K, value: V },
+              Bitmap {
+                  bitmap: u32,
+                  children: ReferenceCounter<[Child<K, V>]>,
+              },
+              Collision { hash: u64, entries: ReferenceCounter<[(K, V)]> },
+          }
+
+      - step: 3
+        description: |
+          Child<K,V>のRc使用箇所をReferenceCounterに置換
+        code_outline: |
+          #[derive(Clone)]
+          enum Child<K, V> {
+              Entry { hash: u64, key: K, value: V },
+              Node(ReferenceCounter<Node<K, V>>),
+          }
+
+      - step: 4
+        description: |
+          PersistentHashMap<K,V>のRc使用箇所をReferenceCounterに置換
+        code_outline: |
+          #[derive(Clone)]
+          pub struct PersistentHashMap<K, V> {
+              root: ReferenceCounter<Node<K, V>>,
+              length: usize,
+          }
+
+    tests:
+      - name: test_hashmap_send_sync
+        description: arc feature有効時にPersistentHashMapがSend + Syncを実装することのテスト
+        test_type: unit
+        code_outline: |
+          #[cfg(all(test, feature = "arc"))]
+          mod send_sync_tests {
+              use super::*;
+              use rstest::rstest;
+
+              fn assert_send<T: Send>() {}
+              fn assert_sync<T: Sync>() {}
+
+              #[rstest]
+              fn test_hashmap_is_send() {
+                  assert_send::<PersistentHashMap<String, i32>>();
+                  assert_send::<PersistentHashMap<i32, String>>();
+              }
+
+              #[rstest]
+              fn test_hashmap_is_sync() {
+                  assert_sync::<PersistentHashMap<String, i32>>();
+                  assert_sync::<PersistentHashMap<i32, String>>();
+              }
+
+              #[rstest]
+              fn test_hashmap_send_sync_combined() {
+                  fn is_send_sync<T: Send + Sync>() {}
+                  is_send_sync::<PersistentHashMap<String, i32>>();
+                  is_send_sync::<PersistentHashMap<i32, String>>();
+              }
+          }
+
+      - name: test_hashmap_multithread
+        description: マルチスレッド環境でPersistentHashMapを共有できることのテスト
+        test_type: unit
+        code_outline: |
+          #[cfg(all(test, feature = "arc"))]
+          mod multithread_tests {
+              use super::*;
+              use rstest::rstest;
+              use std::thread;
+
+              #[rstest]
+              fn test_hashmap_shared_across_threads() {
+                  let mut map = PersistentHashMap::new();
+                  for i in 0..1000 {
+                      map = map.insert(format!("key_{}", i), i);
+                  }
+
+                  let map1 = map.clone();
+                  let map2 = map.clone();
+
+                  let handle1 = thread::spawn(move || {
+                      map1.iter().map(|(_, v)| v).sum::<i32>()
+                  });
+
+                  let handle2 = thread::spawn(move || {
+                      map2.iter().map(|(_, v)| v).sum::<i32>()
+                  });
+
+                  let sum1 = handle1.join().unwrap();
+                  let sum2 = handle2.join().unwrap();
+
+                  assert_eq!(sum1, sum2);
+                  assert_eq!(sum1, (0..1000).sum());
+              }
+
+              #[rstest]
+              fn test_hashmap_concurrent_insert() {
+                  let map: PersistentHashMap<String, i32> = PersistentHashMap::new();
+
+                  let map1 = map.clone();
+                  let map2 = map.clone();
+
+                  let handle1 = thread::spawn(move || {
+                      map1.insert("a".to_string(), 1)
+                          .insert("b".to_string(), 2)
+                  });
+
+                  let handle2 = thread::spawn(move || {
+                      map2.insert("c".to_string(), 3)
+                          .insert("d".to_string(), 4)
+                  });
+
+                  let result1 = handle1.join().unwrap();
+                  let result2 = handle2.join().unwrap();
+
+                  assert_eq!(result1.len(), 2);
+                  assert_eq!(result2.len(), 2);
+              }
+
+              #[rstest]
+              fn test_hashmap_concurrent_get() {
+                  let mut map = PersistentHashMap::new();
+                  for i in 0..1000 {
+                      map = map.insert(format!("key_{}", i), i);
+                  }
+
+                  let handles: Vec<_> = (0..4)
+                      .map(|thread_id| {
+                          let map_clone = map.clone();
+                          thread::spawn(move || {
+                              let start = thread_id * 250;
+                              let end = start + 250;
+                              (start..end)
+                                  .filter_map(|i| map_clone.get(&format!("key_{}", i)).copied())
+                                  .sum::<i32>()
+                          })
+                      })
+                      .collect();
+
+                  let total: i32 = handles
+                      .into_iter()
+                      .map(|h| h.join().unwrap())
+                      .sum();
+
+                  assert_eq!(total, (0..1000).sum());
+              }
+          }
+
+    dependencies:
+      - impl_vector_thread_safe
+
+  # ============================================================================
+  # 5. PersistentHashSet のスレッドセーフ化
+  # ============================================================================
+  - id: impl_hashset_thread_safe
+    requirement_id: target_data_structures
+    name: "PersistentHashSet のスレッドセーフ化"
+    priority: 5
+    description: |
+      PersistentHashSetは内部でPersistentHashMapを使用しているため、
+      HashMapがスレッドセーフになれば自動的にスレッドセーフになる。
+      テストを追加する。
+
+      注意: HashSetViewは既存実装で`std::sync::Arc`を使用しているが、
+      これはdyn Traitオブジェクトの所有権管理のためであり、
+      今回のRc/Arc切り替えスコープとは異なる。
+      HashSetViewのReferenceCounter対応は将来のIssueとして検討。
+
+    files:
+      - path: src/persistent/hashset.rs
+        description: |
+          - Send + Syncテストを追加
+          - マルチスレッドテストを追加
+          - HashSetViewのArcは既存実装のため変更なし
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Send + Syncテストとマルチスレッドテストを追加
+
+    tests:
+      - name: test_hashset_send_sync
+        description: arc feature有効時にPersistentHashSetがSend + Syncを実装することのテスト
+        test_type: unit
+        code_outline: |
+          #[cfg(all(test, feature = "arc"))]
+          mod send_sync_tests {
+              use super::*;
+              use rstest::rstest;
+
+              fn assert_send<T: Send>() {}
+              fn assert_sync<T: Sync>() {}
+
+              #[rstest]
+              fn test_hashset_is_send() {
+                  assert_send::<PersistentHashSet<i32>>();
+                  assert_send::<PersistentHashSet<String>>();
+              }
+
+              #[rstest]
+              fn test_hashset_is_sync() {
+                  assert_sync::<PersistentHashSet<i32>>();
+                  assert_sync::<PersistentHashSet<String>>();
+              }
+
+              #[rstest]
+              fn test_hashset_send_sync_combined() {
+                  fn is_send_sync<T: Send + Sync>() {}
+                  is_send_sync::<PersistentHashSet<i32>>();
+                  is_send_sync::<PersistentHashSet<String>>();
+              }
+          }
+
+      - name: test_hashset_multithread
+        description: マルチスレッド環境でPersistentHashSetを共有できることのテスト
+        test_type: unit
+        code_outline: |
+          #[cfg(all(test, feature = "arc"))]
+          mod multithread_tests {
+              use super::*;
+              use rstest::rstest;
+              use std::thread;
+
+              #[rstest]
+              fn test_hashset_shared_across_threads() {
+                  let set: PersistentHashSet<i32> = (0..1000).collect();
+
+                  let set1 = set.clone();
+                  let set2 = set.clone();
+
+                  let handle1 = thread::spawn(move || {
+                      set1.iter().sum::<i32>()
+                  });
+
+                  let handle2 = thread::spawn(move || {
+                      set2.iter().sum::<i32>()
+                  });
+
+                  let sum1 = handle1.join().unwrap();
+                  let sum2 = handle2.join().unwrap();
+
+                  assert_eq!(sum1, sum2);
+                  assert_eq!(sum1, (0..1000).sum());
+              }
+
+              #[rstest]
+              fn test_hashset_concurrent_insert() {
+                  let set: PersistentHashSet<i32> = PersistentHashSet::new();
+
+                  let set1 = set.clone();
+                  let set2 = set.clone();
+
+                  let handle1 = thread::spawn(move || {
+                      set1.insert(1).insert(2).insert(3)
+                  });
+
+                  let handle2 = thread::spawn(move || {
+                      set2.insert(4).insert(5).insert(6)
+                  });
+
+                  let result1 = handle1.join().unwrap();
+                  let result2 = handle2.join().unwrap();
+
+                  assert_eq!(result1.len(), 3);
+                  assert_eq!(result2.len(), 3);
+              }
+
+              #[rstest]
+              fn test_hashset_concurrent_contains() {
+                  let set: PersistentHashSet<i32> = (0..1000).collect();
+
+                  let handles: Vec<_> = (0..4)
+                      .map(|thread_id| {
+                          let set_clone = set.clone();
+                          thread::spawn(move || {
+                              let start = thread_id * 250;
+                              let end = start + 250;
+                              (start..end)
+                                  .filter(|i| set_clone.contains(i))
+                                  .count()
+                          })
+                      })
+                      .collect();
+
+                  let total: usize = handles
+                      .into_iter()
+                      .map(|h| h.join().unwrap())
+                      .sum();
+
+                  assert_eq!(total, 1000);
+              }
+          }
+
+    dependencies:
+      - impl_hashmap_thread_safe
+
+  # ============================================================================
+  # 6. PersistentTreeMap のスレッドセーフ化
+  # ============================================================================
+  - id: impl_treemap_thread_safe
+    requirement_id: target_data_structures
+    name: "PersistentTreeMap のスレッドセーフ化"
+    priority: 6
+    description: |
+      PersistentTreeMapの内部Rcを全てReferenceCounterに置換する。
+      Node<K,V>とPersistentTreeMap<K,V>を変更。
+
+    files:
+      - path: src/persistent/treemap.rs
+        description: |
+          - `use std::rc::Rc`を削除
+          - `use super::ReferenceCounter`を追加
+          - Node<K,V>のleft, rightをReferenceCounterに置換
+          - PersistentTreeMap<K,V>のrootをReferenceCounterに置換
+
+    implementation_steps:
+      - step: 1
+        description: |
+          use文を変更
+        code_outline: |
+          // 変更前
+          use std::rc::Rc;
+
+          // 変更後
+          use super::ReferenceCounter;
+
+      - step: 2
+        description: |
+          Node<K,V>のRc使用箇所をReferenceCounterに置換
+        code_outline: |
+          #[derive(Clone)]
+          struct Node<K, V> {
+              key: K,
+              value: V,
+              color: Color,
+              left: Option<ReferenceCounter<Self>>,
+              right: Option<ReferenceCounter<Self>>,
+          }
+
+      - step: 3
+        description: |
+          PersistentTreeMap<K,V>のRc使用箇所をReferenceCounterに置換
+        code_outline: |
+          #[derive(Clone)]
+          pub struct PersistentTreeMap<K, V> {
+              root: Option<ReferenceCounter<Node<K, V>>>,
+              length: usize,
+          }
+
+    tests:
+      - name: test_treemap_send_sync
+        description: arc feature有効時にPersistentTreeMapがSend + Syncを実装することのテスト
+        test_type: unit
+        code_outline: |
+          #[cfg(all(test, feature = "arc"))]
+          mod send_sync_tests {
+              use super::*;
+              use rstest::rstest;
+
+              fn assert_send<T: Send>() {}
+              fn assert_sync<T: Sync>() {}
+
+              #[rstest]
+              fn test_treemap_is_send() {
+                  assert_send::<PersistentTreeMap<i32, String>>();
+                  assert_send::<PersistentTreeMap<String, i32>>();
+              }
+
+              #[rstest]
+              fn test_treemap_is_sync() {
+                  assert_sync::<PersistentTreeMap<i32, String>>();
+                  assert_sync::<PersistentTreeMap<String, i32>>();
+              }
+
+              #[rstest]
+              fn test_treemap_send_sync_combined() {
+                  fn is_send_sync<T: Send + Sync>() {}
+                  is_send_sync::<PersistentTreeMap<i32, String>>();
+                  is_send_sync::<PersistentTreeMap<String, i32>>();
+              }
+          }
+
+      - name: test_treemap_multithread
+        description: マルチスレッド環境でPersistentTreeMapを共有できることのテスト
+        test_type: unit
+        code_outline: |
+          #[cfg(all(test, feature = "arc"))]
+          mod multithread_tests {
+              use super::*;
+              use rstest::rstest;
+              use std::thread;
+
+              #[rstest]
+              fn test_treemap_shared_across_threads() {
+                  let mut map = PersistentTreeMap::new();
+                  for i in 0..1000 {
+                      map = map.insert(i, format!("value_{}", i));
+                  }
+
+                  let map1 = map.clone();
+                  let map2 = map.clone();
+
+                  let handle1 = thread::spawn(move || {
+                      map1.iter().count()
+                  });
+
+                  let handle2 = thread::spawn(move || {
+                      map2.iter().count()
+                  });
+
+                  let count1 = handle1.join().unwrap();
+                  let count2 = handle2.join().unwrap();
+
+                  assert_eq!(count1, 1000);
+                  assert_eq!(count2, 1000);
+              }
+
+              #[rstest]
+              fn test_treemap_concurrent_insert() {
+                  let map: PersistentTreeMap<i32, String> = PersistentTreeMap::new();
+
+                  let map1 = map.clone();
+                  let map2 = map.clone();
+
+                  let handle1 = thread::spawn(move || {
+                      map1.insert(1, "one".to_string())
+                          .insert(2, "two".to_string())
+                  });
+
+                  let handle2 = thread::spawn(move || {
+                      map2.insert(3, "three".to_string())
+                          .insert(4, "four".to_string())
+                  });
+
+                  let result1 = handle1.join().unwrap();
+                  let result2 = handle2.join().unwrap();
+
+                  assert_eq!(result1.len(), 2);
+                  assert_eq!(result2.len(), 2);
+              }
+
+              #[rstest]
+              fn test_treemap_concurrent_range_query() {
+                  let mut map = PersistentTreeMap::new();
+                  for i in 0..1000 {
+                      map = map.insert(i, i * 10);
+                  }
+
+                  let handles: Vec<_> = (0..4)
+                      .map(|thread_id| {
+                          let map_clone = map.clone();
+                          let start = thread_id * 250;
+                          let end = start + 250;
+                          thread::spawn(move || {
+                              map_clone.range(start..end).count()
+                          })
+                      })
+                      .collect();
+
+                  let total: usize = handles
+                      .into_iter()
+                      .map(|h| h.join().unwrap())
+                      .sum();
+
+                  assert_eq!(total, 1000);
+              }
+
+              #[rstest]
+              fn test_treemap_preserves_order_across_threads() {
+                  let mut map = PersistentTreeMap::new();
+                  for i in (0..100).rev() {
+                      map = map.insert(i, i);
+                  }
+
+                  let map1 = map.clone();
+                  let map2 = map.clone();
+
+                  let handle1 = thread::spawn(move || {
+                      map1.keys().copied().collect::<Vec<_>>()
+                  });
+
+                  let handle2 = thread::spawn(move || {
+                      map2.keys().copied().collect::<Vec<_>>()
+                  });
+
+                  let keys1 = handle1.join().unwrap();
+                  let keys2 = handle2.join().unwrap();
+
+                  // 両方のスレッドで同じソート順序
+                  assert_eq!(keys1, keys2);
+                  assert_eq!(keys1, (0..100).collect::<Vec<_>>());
+              }
+          }
+
+    dependencies:
+      - impl_hashset_thread_safe
+
+  # ============================================================================
+  # 7. 統合テストと検証
+  # ============================================================================
+  - id: impl_integration_tests
+    requirement_id: api_compatibility
+    name: "統合テストと検証"
+    priority: 7
+    description: |
+      全データ構造の実装完了後、以下を検証:
+      - 全既存テストがarc feature有効/無効両方で通過すること
+      - API互換性が維持されていること
+      - serdeとの組み合わせが正常に動作すること
+
+    files:
+      - path: tests/thread_safe_persistent_tests.rs
+        description: |
+          統合テストファイル。
+          arc feature有効時の動作を検証。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          統合テストファイルを作成
+        code_outline: |
+          //! Thread-safe persistent data structures integration tests.
+          //!
+          //! These tests verify that all persistent data structures work correctly
+          //! with the `arc` feature enabled.
+
+          #![cfg(feature = "arc")]
+
+          use lambars::persistent::{
+              PersistentHashMap, PersistentHashSet, PersistentList,
+              PersistentTreeMap, PersistentVector,
+          };
+          use rstest::rstest;
+          use std::thread;
+
+          // API互換性テスト
+          #[rstest]
+          fn test_api_compatibility_list() {
+              let list = PersistentList::new().cons(1).cons(2);
+              assert_eq!(list.head(), Some(&2));
+              assert_eq!(list.len(), 2);
+          }
+
+          #[rstest]
+          fn test_api_compatibility_vector() {
+              let vector: PersistentVector<i32> = (0..100).collect();
+              assert_eq!(vector.get(50), Some(&50));
+          }
+
+          #[rstest]
+          fn test_api_compatibility_hashmap() {
+              let map = PersistentHashMap::new()
+                  .insert("key".to_string(), 42);
+              assert_eq!(map.get("key"), Some(&42));
+          }
+
+          #[rstest]
+          fn test_api_compatibility_hashset() {
+              let set = PersistentHashSet::new().insert(1).insert(2);
+              assert!(set.contains(&1));
+              assert!(set.contains(&2));
+          }
+
+          #[rstest]
+          fn test_api_compatibility_treemap() {
+              let map = PersistentTreeMap::new()
+                  .insert(1, "one")
+                  .insert(2, "two");
+              assert_eq!(map.get(&1), Some(&"one"));
+          }
+
+          // 全データ構造の並行アクセステスト
+          #[rstest]
+          fn test_all_structures_concurrent_access() {
+              let list: PersistentList<i32> = (1..=100).collect();
+              let vector: PersistentVector<i32> = (1..=100).collect();
+              let hashmap: PersistentHashMap<i32, i32> =
+                  (1..=100).map(|i| (i, i * 10)).collect();
+              let hashset: PersistentHashSet<i32> = (1..=100).collect();
+              let treemap: PersistentTreeMap<i32, i32> =
+                  (1..=100).map(|i| (i, i * 10)).collect();
+
+              let handles: Vec<_> = vec![
+                  {
+                      let l = list.clone();
+                      thread::spawn(move || l.iter().sum::<i32>())
+                  },
+                  {
+                      let v = vector.clone();
+                      thread::spawn(move || v.iter().sum::<i32>())
+                  },
+                  {
+                      let m = hashmap.clone();
+                      thread::spawn(move || m.iter().map(|(_, v)| v).sum::<i32>())
+                  },
+                  {
+                      let s = hashset.clone();
+                      thread::spawn(move || s.iter().sum::<i32>())
+                  },
+                  {
+                      let t = treemap.clone();
+                      thread::spawn(move || t.iter().map(|(_, v)| v).sum::<i32>())
+                  },
+              ];
+
+              let results: Vec<i32> = handles
+                  .into_iter()
+                  .map(|h| h.join().unwrap())
+                  .collect();
+
+              // list, vector, hashset は 1+2+...+100 = 5050
+              assert_eq!(results[0], 5050);
+              assert_eq!(results[1], 5050);
+              assert_eq!(results[3], 5050);
+
+              // hashmap, treemap は 10+20+...+1000 = 50500
+              assert_eq!(results[2], 50500);
+              assert_eq!(results[4], 50500);
+          }
+
+    tests:
+      - name: test_feature_flag_both_modes
+        description: arc feature有効/無効両方でテストが通過することの確認手順
+        test_type: manual
+        code_outline: |
+          # arc feature無効でテスト
+          cargo test --features "persistent"
+
+          # arc feature有効でテスト
+          cargo test --features "persistent,arc"
+
+          # 全feature + arcでテスト
+          cargo test --all-features
+
+    dependencies:
+      - impl_treemap_thread_safe
+
+# テスト戦略
+test_strategy:
+  unit_tests:
+    location: |
+      各データ構造のソースファイル内 (mod tests)
+    description: |
+      各データ構造のSend + Syncコンパイル時チェックと
+      マルチスレッドテストをユニットテストとして追加。
+      rstest を使用し、以下のケースをカバー:
+      - Send トレイトのコンパイル時チェック
+      - Sync トレイトのコンパイル時チェック
+      - 複数スレッドからの同時読み取り
+      - スレッド間でのデータ構造共有
+      - 参照透過性の検証
+      全てのテストは#[cfg(all(test, feature = "arc"))]で
+      arc feature有効時のみ実行される。
+
+  integration_tests:
+    location: tests/thread_safe_persistent_tests.rs
+    description: |
+      全データ構造の統合テスト。
+      API互換性と並行アクセスを検証。
+
+  serde_tests:
+    location: tests/thread_safe_persistent_tests.rs
+    description: |
+      serdeフィーチャーとarcフィーチャーの組み合わせテスト。
+      各データ構造のシリアライズ/デシリアライズが
+      arc feature有効時でも正常に動作することを検証。
+    code_outline: |
+      #[cfg(all(feature = "arc", feature = "serde"))]
+      mod serde_tests {
+          use super::*;
+          use rstest::rstest;
+
+          #[rstest]
+          fn test_list_serde_with_arc() {
+              let list: PersistentList<i32> = (1..=10).collect();
+              let serialized = serde_json::to_string(&list).unwrap();
+              let deserialized: PersistentList<i32> =
+                  serde_json::from_str(&serialized).unwrap();
+              assert_eq!(list.len(), deserialized.len());
+          }
+
+          // 同様に他のデータ構造も検証
+      }
+
+  benchmark_tests:
+    location: benches/thread_safe_persistent_bench.rs
+    description: |
+      Rc版とArc版のパフォーマンス差を測定するベンチマーク。
+      criterion を使用し、以下の操作をベンチマーク:
+      - cons/push_back/insert 操作
+      - get/contains 操作
+      - イテレーション
+    code_outline: |
+      use criterion::{criterion_group, criterion_main, Criterion};
+      use lambars::persistent::PersistentVector;
+
+      fn bench_vector_push_back(c: &mut Criterion) {
+          c.bench_function("vector_push_back_1000", |b| {
+              b.iter(|| {
+                  let mut v = PersistentVector::new();
+                  for i in 0..1000 {
+                      v = v.push_back(i);
+                  }
+                  v
+              })
+          });
+      }
+
+      criterion_group!(benches, bench_vector_push_back);
+      criterion_main!(benches);
+
+  property_tests:
+    location: |
+      将来の拡張として検討（今回のスコープ外）
+    description: |
+      proptestを使用した参照透過性の検証。
+      任意の操作列に対してスレッド間で結果が一致することを検証。
+
+  regression_tests:
+    description: |
+      既存の全テストがarc feature有効/無効両方で通過することを確認。
+      CI設定で両方のfeature設定でテストを実行。
+
+# 完了条件
+acceptance_criteria:
+  - Cargo.tomlにarc featureが追加されていること
+  - src/persistent/mod.rsにReferenceCounterエイリアスが定義されていること
+  - 全永続データ構造のRcがReferenceCounterに置換されていること
+    - PersistentList
+    - PersistentVector
+    - PersistentHashMap
+    - PersistentHashSet（未使用Arcインポート削除）
+    - PersistentTreeMap
+  - arc feature有効時にSend + Syncが実装されることのテストがあること
+  - arc feature有効時のマルチスレッドテストがあること
+  - serdeフィーチャーとarcフィーチャーの組み合わせテストがあること
+  - 基本的なベンチマークが追加されていること（benches/thread_safe_persistent_bench.rs）
+  - 全既存テストがarc feature有効/無効両方で通過すること
+  - cargo check が通過すること
+  - cargo clippy --all-features --all-targets -- -D warnings が通過すること
+  - cargo test が通過すること（arc feature無効）
+  - cargo test --features "arc" が通過すること（arc feature有効）
+  - cargo test --features "arc,serde" が通過すること（arc + serde）
+  - cargo fmt が実行されていること
+  - 公開APIシグネチャに変更がないこと
+  - 内部可変性（RefCell等）を導入していないこと（不変性保証）
+
+# CI設定の推奨更新
+ci_recommendations:
+  - description: |
+      GitHub Actionsのワークフローに以下を追加:
+      - arc feature無効でのテスト実行
+      - arc feature有効でのテスト実行
+    code_outline: |
+      # .github/workflows/ci.yml への追加
+      jobs:
+        test:
+          strategy:
+            matrix:
+              features:
+                - ""  # デフォルト（arc無効）
+                - "--features arc"  # arc有効
+          steps:
+            - run: cargo test ${{ matrix.features }}

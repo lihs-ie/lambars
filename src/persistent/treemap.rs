@@ -48,13 +48,13 @@
 //!
 //! These invariants ensure the tree height is O(log N).
 
+use super::ReferenceCounter;
 use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::iter::FromIterator;
 use std::ops::{Bound, RangeBounds};
-use std::rc::Rc;
 
 use crate::typeclass::{Foldable, TypeConstructor};
 
@@ -79,8 +79,8 @@ struct Node<K, V> {
     key: K,
     value: V,
     color: Color,
-    left: Option<Rc<Self>>,
-    right: Option<Rc<Self>>,
+    left: Option<ReferenceCounter<Self>>,
+    right: Option<ReferenceCounter<Self>>,
 }
 
 impl<K, V> Node<K, V> {
@@ -111,7 +111,11 @@ impl<K, V> Node<K, V> {
     }
 
     /// Creates a copy of this node with new children.
-    fn with_children(&self, left: Option<Rc<Self>>, right: Option<Rc<Self>>) -> Self
+    fn with_children(
+        &self,
+        left: Option<ReferenceCounter<Self>>,
+        right: Option<ReferenceCounter<Self>>,
+    ) -> Self
     where
         K: Clone,
         V: Clone,
@@ -132,7 +136,7 @@ impl<K, V> Node<K, V> {
 }
 
 /// Helper function to check if an optional node is red.
-fn is_red<K, V>(node: Option<&Rc<Node<K, V>>>) -> bool {
+fn is_red<K, V>(node: Option<&ReferenceCounter<Node<K, V>>>) -> bool {
     node.is_some_and(|node| node.is_red())
 }
 
@@ -182,7 +186,7 @@ fn is_red<K, V>(node: Option<&Rc<Node<K, V>>>) -> bool {
 #[derive(Clone)]
 pub struct PersistentTreeMap<K, V> {
     /// Root node of the tree
-    root: Option<Rc<Node<K, V>>>,
+    root: Option<ReferenceCounter<Node<K, V>>>,
     /// Number of entries
     length: usize,
 }
@@ -307,7 +311,10 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
     }
 
     /// Recursive helper for get.
-    fn get_from_node<'a, Q>(node: Option<&'a Rc<Node<K, V>>>, key: &Q) -> Option<&'a V>
+    fn get_from_node<'a, Q>(
+        node: Option<&'a ReferenceCounter<Node<K, V>>>,
+        key: &Q,
+    ) -> Option<&'a V>
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
@@ -382,7 +389,7 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
             || None,
             |node_ref| {
                 if node_ref.is_red() {
-                    Some(Rc::new(node_ref.with_color(Color::Black)))
+                    Some(ReferenceCounter::new(node_ref.with_color(Color::Black)))
                 } else {
                     Some(node_ref)
                 }
@@ -398,14 +405,14 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
     /// Recursive helper for insert.
     /// Returns (`new_node`, `was_added`) where `was_added` is true if a new entry was added.
     fn insert_into_node(
-        node: Option<&Rc<Node<K, V>>>,
+        node: Option<&ReferenceCounter<Node<K, V>>>,
         key: K,
         value: V,
-    ) -> (Option<Rc<Node<K, V>>>, bool) {
+    ) -> (Option<ReferenceCounter<Node<K, V>>>, bool) {
         match node {
             None => {
                 // Insert new red node
-                (Some(Rc::new(Node::new_red(key, value))), true)
+                (Some(ReferenceCounter::new(Node::new_red(key, value))), true)
             }
             Some(node_ref) => {
                 match key.cmp(&node_ref.key) {
@@ -413,13 +420,13 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
                         let (new_left, added) =
                             Self::insert_into_node(node_ref.left.as_ref(), key, value);
                         let new_node = node_ref.with_children(new_left, node_ref.right.clone());
-                        (Some(Rc::new(Self::balance(new_node))), added)
+                        (Some(ReferenceCounter::new(Self::balance(new_node))), added)
                     }
                     Ordering::Greater => {
                         let (new_right, added) =
                             Self::insert_into_node(node_ref.right.as_ref(), key, value);
                         let new_node = node_ref.with_children(node_ref.left.clone(), new_right);
-                        (Some(Rc::new(Self::balance(new_node))), added)
+                        (Some(ReferenceCounter::new(Self::balance(new_node))), added)
                     }
                     Ordering::Equal => {
                         // Key exists, update value
@@ -430,7 +437,7 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
                             left: node_ref.left.clone(),
                             right: node_ref.right.clone(),
                         };
-                        (Some(Rc::new(new_node)), false)
+                        (Some(ReferenceCounter::new(new_node)), false)
                     }
                 }
             }
@@ -455,7 +462,8 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
         {
             // First rotate left on the left child, then rotate right on node
             let new_left = Self::rotate_left((**left).clone());
-            let new_node = node.with_children(Some(Rc::new(new_left)), node.right.clone());
+            let new_node =
+                node.with_children(Some(ReferenceCounter::new(new_left)), node.right.clone());
             return Self::rotate_right_and_recolor(new_node);
         }
 
@@ -474,7 +482,8 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
         {
             // First rotate right on the right child, then rotate left on node
             let new_right = Self::rotate_right((**right).clone());
-            let new_node = node.with_children(node.left.clone(), Some(Rc::new(new_right)));
+            let new_node =
+                node.with_children(node.left.clone(), Some(ReferenceCounter::new(new_right)));
             return Self::rotate_left_and_recolor(new_node);
         }
 
@@ -496,7 +505,7 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
                 value: left.value.clone(),
                 color: left.color,
                 left: left.left.clone(),
-                right: Some(Rc::new(new_node)),
+                right: Some(ReferenceCounter::new(new_node)),
             }
         } else {
             node
@@ -517,7 +526,7 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
                 key: right.key.clone(),
                 value: right.value.clone(),
                 color: right.color,
-                left: Some(Rc::new(new_node)),
+                left: Some(ReferenceCounter::new(new_node)),
                 right: right.right.clone(),
             }
         } else {
@@ -541,14 +550,14 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
             let new_left = left
                 .left
                 .as_ref()
-                .map(|left_left| Rc::new(left_left.with_color(Color::Black)));
+                .map(|left_left| ReferenceCounter::new(left_left.with_color(Color::Black)));
 
             Node {
                 key: left.key.clone(),
                 value: left.value.clone(),
                 color: Color::Black,
                 left: new_left,
-                right: Some(Rc::new(new_right)),
+                right: Some(ReferenceCounter::new(new_right)),
             }
         } else {
             node
@@ -571,13 +580,13 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
             let new_right = right
                 .right
                 .as_ref()
-                .map(|right_right| Rc::new(right_right.with_color(Color::Black)));
+                .map(|right_right| ReferenceCounter::new(right_right.with_color(Color::Black)));
 
             Node {
                 key: right.key.clone(),
                 value: right.value.clone(),
                 color: Color::Black,
-                left: Some(Rc::new(new_left)),
+                left: Some(ReferenceCounter::new(new_left)),
                 right: new_right,
             }
         } else {
@@ -627,7 +636,7 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
         // Make root black if it exists
         let black_root = new_root.map(|node| {
             if node.is_red() {
-                Rc::new(node.with_color(Color::Black))
+                ReferenceCounter::new(node.with_color(Color::Black))
             } else {
                 node
             }
@@ -640,7 +649,10 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
     }
 
     /// Recursive helper for remove.
-    fn remove_from_node<Q>(node: Option<&Rc<Node<K, V>>>, key: &Q) -> Option<Rc<Node<K, V>>>
+    fn remove_from_node<Q>(
+        node: Option<&ReferenceCounter<Node<K, V>>>,
+        key: &Q,
+    ) -> Option<ReferenceCounter<Node<K, V>>>
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
@@ -650,12 +662,12 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
                 Ordering::Less => {
                     let new_left = Self::remove_from_node(node_ref.left.as_ref(), key);
                     let new_node = node_ref.with_children(new_left, node_ref.right.clone());
-                    Some(Rc::new(Self::balance_after_delete(new_node)))
+                    Some(ReferenceCounter::new(Self::balance_after_delete(new_node)))
                 }
                 Ordering::Greater => {
                     let new_right = Self::remove_from_node(node_ref.right.as_ref(), key);
                     let new_node = node_ref.with_children(node_ref.left.clone(), new_right);
-                    Some(Rc::new(Self::balance_after_delete(new_node)))
+                    Some(ReferenceCounter::new(Self::balance_after_delete(new_node)))
                 }
                 Ordering::Equal => {
                     // Found the node to remove
@@ -677,7 +689,7 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
                                 left: node_ref.left.clone(),
                                 right: new_right,
                             };
-                            Some(Rc::new(Self::balance_after_delete(new_node)))
+                            Some(ReferenceCounter::new(Self::balance_after_delete(new_node)))
                         }
                     }
                 }
@@ -686,7 +698,7 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
     }
 
     /// Finds the minimum key-value pair in a subtree.
-    fn find_min_entry(node: &Rc<Node<K, V>>) -> (K, V) {
+    fn find_min_entry(node: &ReferenceCounter<Node<K, V>>) -> (K, V) {
         node.left.as_ref().map_or_else(
             || (node.key.clone(), node.value.clone()),
             |left| Self::find_min_entry(left),
@@ -725,7 +737,7 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
     }
 
     /// Recursive helper for min.
-    fn min_from_node(node: Option<&Rc<Node<K, V>>>) -> Option<(&K, &V)> {
+    fn min_from_node(node: Option<&ReferenceCounter<Node<K, V>>>) -> Option<(&K, &V)> {
         node.and_then(|node_ref| {
             node_ref.left.as_ref().map_or_else(
                 || Some((&node_ref.key, &node_ref.value)),
@@ -758,7 +770,7 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
     }
 
     /// Recursive helper for max.
-    fn max_from_node(node: Option<&Rc<Node<K, V>>>) -> Option<(&K, &V)> {
+    fn max_from_node(node: Option<&ReferenceCounter<Node<K, V>>>) -> Option<(&K, &V)> {
         node.and_then(|node_ref| {
             node_ref.right.as_ref().map_or_else(
                 || Some((&node_ref.key, &node_ref.value)),
@@ -795,7 +807,7 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
 
     /// Collects all entries in sorted order (in-order traversal).
     fn collect_entries_in_order<'a>(
-        node: Option<&'a Rc<Node<K, V>>>,
+        node: Option<&'a ReferenceCounter<Node<K, V>>>,
         entries: &mut Vec<(&'a K, &'a V)>,
     ) {
         if let Some(node_ref) = node {
@@ -2176,5 +2188,155 @@ mod tests {
         let deleted_complement = map.keep_if(|k, v| !predicate(k, v));
         assert_eq!(matching, kept);
         assert_eq!(not_matching, deleted_complement);
+    }
+}
+
+// =============================================================================
+// Send + Sync Tests (arc feature only)
+// =============================================================================
+
+#[cfg(all(test, feature = "arc"))]
+mod send_sync_tests {
+    use super::*;
+    use rstest::rstest;
+
+    const fn assert_send<T: Send>() {}
+    const fn assert_sync<T: Sync>() {}
+
+    #[rstest]
+    fn test_treemap_is_send() {
+        assert_send::<PersistentTreeMap<i32, String>>();
+        assert_send::<PersistentTreeMap<String, i32>>();
+    }
+
+    #[rstest]
+    fn test_treemap_is_sync() {
+        assert_sync::<PersistentTreeMap<i32, String>>();
+        assert_sync::<PersistentTreeMap<String, i32>>();
+    }
+
+    #[rstest]
+    fn test_treemap_send_sync_combined() {
+        fn is_send_sync<T: Send + Sync>() {}
+        is_send_sync::<PersistentTreeMap<i32, String>>();
+        is_send_sync::<PersistentTreeMap<String, i32>>();
+    }
+}
+
+// =============================================================================
+// Multithread Tests (arc feature only)
+// =============================================================================
+
+#[cfg(all(test, feature = "arc"))]
+mod multithread_tests {
+    use super::*;
+    use rstest::rstest;
+    use std::sync::Arc;
+    use std::thread;
+
+    #[rstest]
+    fn test_treemap_shared_across_threads() {
+        let map = Arc::new(
+            PersistentTreeMap::new()
+                .insert(1, "one")
+                .insert(2, "two")
+                .insert(3, "three"),
+        );
+
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let map_clone = Arc::clone(&map);
+                thread::spawn(move || {
+                    assert_eq!(map_clone.get(&1), Some(&"one"));
+                    assert_eq!(map_clone.get(&2), Some(&"two"));
+                    assert_eq!(map_clone.get(&3), Some(&"three"));
+                    assert_eq!(map_clone.len(), 3);
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().expect("Thread panicked");
+        }
+    }
+
+    #[rstest]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    fn test_treemap_concurrent_insert() {
+        let base_map = Arc::new(PersistentTreeMap::new().insert(0, "base"));
+
+        let results: Vec<_> = (1..=4)
+            .map(|index| {
+                let map_clone = Arc::clone(&base_map);
+                thread::spawn(move || {
+                    let new_map = map_clone.insert(index, "new");
+                    assert_eq!(new_map.get(&index), Some(&"new"));
+                    assert_eq!(new_map.get(&0), Some(&"base"));
+                    new_map
+                })
+            })
+            .map(|handle| handle.join().expect("Thread panicked"))
+            .collect();
+
+        // Each thread should have created an independent map with 2 entries
+        for (index, map) in results.iter().enumerate() {
+            assert_eq!(map.len(), 2);
+            assert_eq!(map.get(&((index + 1) as i32)), Some(&"new"));
+        }
+
+        // Original map should be unchanged
+        assert_eq!(base_map.len(), 1);
+    }
+
+    #[rstest]
+    fn test_treemap_referential_transparency() {
+        let map = Arc::new(PersistentTreeMap::new().insert(1, "one").insert(2, "two"));
+
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let map_clone = Arc::clone(&map);
+                thread::spawn(move || {
+                    let updated = map_clone.insert(3, "three");
+                    // Original should be unchanged
+                    assert_eq!(map_clone.len(), 2);
+                    assert_eq!(map_clone.get(&3), None);
+                    // New map should have the addition
+                    assert_eq!(updated.len(), 3);
+                    assert_eq!(updated.get(&3), Some(&"three"));
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().expect("Thread panicked");
+        }
+
+        // Original should still be unchanged
+        assert_eq!(map.len(), 2);
+    }
+
+    #[rstest]
+    fn test_treemap_concurrent_ordered_iteration() {
+        let map = Arc::new(
+            PersistentTreeMap::new()
+                .insert(3, "three")
+                .insert(1, "one")
+                .insert(2, "two"),
+        );
+
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let map_clone = Arc::clone(&map);
+                thread::spawn(move || {
+                    let keys: Vec<&i32> = map_clone.keys().collect();
+                    // TreeMap should always return keys in sorted order
+                    assert_eq!(keys, vec![&1, &2, &3]);
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().expect("Thread panicked");
+        }
     }
 }

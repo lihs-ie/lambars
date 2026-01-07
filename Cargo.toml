@@ -35,6 +35,7 @@ optics = ["typeclass", "persistent"]
 derive = ["optics", "dep:lambars-derive"]
 effect = ["typeclass", "control"]
 async = ["effect", "dep:tokio", "dep:futures"]
+arc = []
 
 [lints.rust]
 unsafe_code = "forbid"

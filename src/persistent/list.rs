@@ -51,7 +51,8 @@
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::iter::FromIterator;
-use std::rc::Rc;
+
+use super::ReferenceCounter;
 
 use crate::typeclass::{
     Applicative, Foldable, Functor, FunctorMut, Monad, Monoid, Semigroup, TypeConstructor,
@@ -60,12 +61,12 @@ use crate::typeclass::{
 /// Internal node structure for the persistent list.
 ///
 /// Each node contains an element and an optional reference to the next node.
-/// Using `Rc` enables structural sharing between lists.
+/// Using `ReferenceCounter` enables structural sharing between lists.
 struct Node<T> {
     /// The element stored in this node.
     element: T,
     /// Reference to the next node (if any).
-    next: Option<Rc<Self>>,
+    next: Option<ReferenceCounter<Self>>,
 }
 
 /// A persistent (immutable) singly-linked list.
@@ -97,7 +98,7 @@ struct Node<T> {
 #[derive(Clone)]
 pub struct PersistentList<T> {
     /// Reference to the head node (if any).
-    head: Option<Rc<Node<T>>>,
+    head: Option<ReferenceCounter<Node<T>>>,
     /// Cached length for O(1) access.
     length: usize,
 }
@@ -162,9 +163,9 @@ impl<T> PersistentList<T> {
         }
 
         // Build from end to start using Vec::pop()
-        let mut head: Option<Rc<Node<T>>> = None;
+        let mut head: Option<ReferenceCounter<Node<T>>> = None;
         while let Some(element) = elements.pop() {
-            head = Some(Rc::new(Node {
+            head = Some(ReferenceCounter::new(Node {
                 element,
                 next: head,
             }));
@@ -203,7 +204,7 @@ impl<T> PersistentList<T> {
     #[must_use]
     pub fn cons(&self, element: T) -> Self {
         Self {
-            head: Some(Rc::new(Node {
+            head: Some(ReferenceCounter::new(Node {
                 element,
                 next: self.head.clone(),
             })),
@@ -457,15 +458,15 @@ impl<T: Clone> PersistentList<T> {
             return self.clone();
         }
 
-        // Collect self elements to Vec (avoiding reverse() which creates N Rc::new calls)
-        // This reduces Rc::new calls from 2N to N
+        // Collect self elements to Vec (avoiding reverse() which creates N ReferenceCounter::new calls)
+        // This reduces ReferenceCounter::new calls from 2N to N
         let mut elements: Vec<T> = self.iter().cloned().collect();
 
         // Use Vec::pop() to iterate in reverse order and cons to other
         let mut result = other.clone();
         while let Some(element) = elements.pop() {
             result = Self {
-                head: Some(Rc::new(Node {
+                head: Some(ReferenceCounter::new(Node {
                     element,
                     next: result.head,
                 })),
@@ -518,7 +519,7 @@ impl<T: Clone> PersistentList<T> {
 
         // Use Vec::pop() to iterate in reverse order
         while let Some(element) = elements.pop() {
-            head = Some(Rc::new(Node {
+            head = Some(ReferenceCounter::new(Node {
                 element,
                 next: head,
             }));
@@ -565,9 +566,9 @@ impl<T: Clone> PersistentList<T> {
         }
 
         // Iterate slice in reverse order (DoubleEndedIterator makes this efficient)
-        let mut head: Option<Rc<Node<T>>> = None;
+        let mut head: Option<ReferenceCounter<Node<T>>> = None;
         for element in slice.iter().rev() {
-            head = Some(Rc::new(Node {
+            head = Some(ReferenceCounter::new(Node {
                 element: element.clone(),
                 next: head,
             }));
@@ -1097,7 +1098,7 @@ impl<T: Clone> PersistentList<PersistentList<T>> {
 
 /// An iterator over references to elements of a [`PersistentList`].
 pub struct PersistentListIterator<'a, T> {
-    current: Option<&'a Rc<Node<T>>>,
+    current: Option<&'a ReferenceCounter<Node<T>>>,
 }
 
 impl<'a, T> Iterator for PersistentListIterator<'a, T> {
@@ -1289,7 +1290,7 @@ impl<T: Clone> FunctorMut for PersistentList<T> {
         // Build list from end to start to maintain order
         for element in elements.into_iter().rev() {
             result = PersistentList {
-                head: Some(Rc::new(Node {
+                head: Some(ReferenceCounter::new(Node {
                     element: function(element),
                     next: result.head,
                 })),
@@ -1308,7 +1309,7 @@ impl<T: Clone> FunctorMut for PersistentList<T> {
         let mut result = PersistentList::new();
         for element in elements.into_iter().rev() {
             result = PersistentList {
-                head: Some(Rc::new(Node {
+                head: Some(ReferenceCounter::new(Node {
                     element: function(element),
                     next: result.head,
                 })),
@@ -2178,5 +2179,94 @@ mod tests {
         let result = outer.intercalate(&separator);
         let collected: Vec<char> = result.iter().copied().collect();
         assert_eq!(collected, vec!['a', 'b', '-', '-', 'c', 'd']);
+    }
+}
+
+// =============================================================================
+// Thread Safety Tests (arc feature only)
+// =============================================================================
+
+#[cfg(all(test, feature = "arc"))]
+mod send_sync_tests {
+    use super::*;
+    use rstest::rstest;
+
+    const fn assert_send<T: Send>() {}
+    const fn assert_sync<T: Sync>() {}
+
+    #[rstest]
+    fn test_list_is_send() {
+        assert_send::<PersistentList<i32>>();
+        assert_send::<PersistentList<String>>();
+    }
+
+    #[rstest]
+    fn test_list_is_sync() {
+        assert_sync::<PersistentList<i32>>();
+        assert_sync::<PersistentList<String>>();
+    }
+
+    #[rstest]
+    fn test_list_send_sync_combined() {
+        fn is_send_sync<T: Send + Sync>() {}
+        is_send_sync::<PersistentList<i32>>();
+        is_send_sync::<PersistentList<String>>();
+    }
+}
+
+#[cfg(all(test, feature = "arc"))]
+mod multithread_tests {
+    use super::*;
+    use rstest::rstest;
+    use std::thread;
+
+    #[rstest]
+    fn test_list_shared_across_threads() {
+        let list: PersistentList<i32> = (1..=1000).collect();
+
+        let list1 = list.clone();
+        let list2 = list;
+
+        let handle1 = thread::spawn(move || list1.iter().sum::<i32>());
+
+        let handle2 = thread::spawn(move || list2.iter().sum::<i32>());
+
+        let sum1 = handle1.join().unwrap();
+        let sum2 = handle2.join().unwrap();
+
+        assert_eq!(sum1, sum2);
+        assert_eq!(sum1, (1..=1000).sum());
+    }
+
+    #[rstest]
+    fn test_list_concurrent_cons() {
+        let list: PersistentList<i32> = PersistentList::new();
+
+        let list1 = list.clone();
+        let list2 = list;
+
+        let handle1 = thread::spawn(move || list1.cons(1).cons(2).cons(3));
+
+        let handle2 = thread::spawn(move || list2.cons(4).cons(5).cons(6));
+
+        let result1 = handle1.join().unwrap();
+        let result2 = handle2.join().unwrap();
+
+        // Original list is empty, each thread creates independent lists
+        assert_eq!(result1.len(), 3);
+        assert_eq!(result2.len(), 3);
+    }
+
+    #[rstest]
+    fn test_list_referential_transparency() {
+        let list: PersistentList<i32> = (1..=1000).collect();
+        let list_clone = list.clone();
+
+        let handle1 = thread::spawn(move || list.iter().sum::<i32>());
+
+        let handle2 = thread::spawn(move || list_clone.iter().sum::<i32>());
+
+        // Same input always produces same output (referential transparency)
+        assert_eq!(handle1.join().unwrap(), handle2.join().unwrap());
     }
 }
