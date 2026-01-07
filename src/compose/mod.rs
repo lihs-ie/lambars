@@ -11,7 +11,7 @@
 //! - [`compose!`]: Compose functions right-to-left (mathematical composition)
 //! - [`pipe!`]: Compose functions left-to-right (data flow style)
 //! - [`partial!`]: Partial function application with placeholder support
-//! - [`curry2!`] through [`curry6!`]: Convert multi-argument functions to curried form
+//! - [`curry!`]: Convert multi-argument closures to curried form
 //! - [`for_!`]: Scala-style for-comprehension over iterators
 //!
 //! # Helper Functions
@@ -64,13 +64,31 @@
 //! ## Currying
 //!
 //! ```
-//! use lambars::curry2;
+//! use lambars::curry;
 //!
 //! fn add(first: i32, second: i32) -> i32 { first + second }
 //!
-//! let curried_add = curry2!(add);
+//! // Wrap the function in a closure
+//! let curried_add = curry!(|a, b| add(a, b));
 //! let add_five = curried_add(5);
 //! assert_eq!(add_five(3), 8);
+//! ```
+//!
+//! ### Type Constraints
+//!
+//! Arguments (except the last) must implement `Clone`:
+//!
+//! ```
+//! use lambars::curry;
+//!
+//! struct NonClone(i32);
+//!
+//! // OK: NonClone as last argument
+//! let curried = curry!(|a: i32, b: NonClone| a + b.0);
+//! assert_eq!(curried(5)(NonClone(3)), 8);
+//!
+//! // Error: NonClone as non-last argument (Clone required)
+//! // let curried = curry!(|a: NonClone, b: i32| a.0 + b);
 //! ```
 //!
 //! # Mathematical Background
@@ -129,7 +147,6 @@
 //! - **Flip Definition**: `flip(f)(a, b) == f(b, a)`
 
 mod compose_macro;
-mod curry_macro;
 #[cfg(feature = "async")]
 mod for_async_macro;
 mod for_macro;
@@ -142,11 +159,9 @@ pub use utils::{__, Placeholder, constant, flip, identity};
 
 // Re-export macros (they are already at crate root via #[macro_export])
 pub use crate::compose;
-pub use crate::curry2;
-pub use crate::curry3;
-pub use crate::curry4;
-pub use crate::curry5;
-pub use crate::curry6;
 pub use crate::for_;
 pub use crate::partial;
 pub use crate::pipe;
+
+// Re-export curry! macro from lambars-derive
+pub use lambars_derive::curry;

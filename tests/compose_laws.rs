@@ -16,17 +16,18 @@
 //! - **Flip Definition**: `flip(f)(a, b) == f(b, a)`
 //!
 //! ## Curry Laws
-//! - **Equivalence**: `curry2!(f)(a)(b) == f(a, b)`
+//! - **Equivalence**: `curry!(|a, b| f(a, b))(a)(b) == f(a, b)`
 //!
 //! Using proptest, we generate random inputs to thoroughly verify these laws
 //! across a wide range of values.
 
 #![allow(unused_imports)]
+#![allow(clippy::redundant_closure)]
 
 use lambars::compose::constant;
 use lambars::compose::flip;
 use lambars::compose::identity;
-use lambars::{compose, curry2, curry3, partial, pipe};
+use lambars::{compose, curry, partial, pipe};
 use proptest::prelude::*;
 
 // =============================================================================
@@ -201,32 +202,32 @@ proptest! {
 // =============================================================================
 
 proptest! {
-    /// Curry2 equivalence: curry2!(f)(a)(b) == f(a, b)
+    /// Curry equivalence (2 args): curry!(|x, y| f(x, y))(a)(b) == f(a, b)
     #[test]
-    fn prop_curry2_equivalence(a in any::<i32>(), b in any::<i32>()) {
+    fn prop_curry_two_args_equivalence(a in any::<i32>(), b in any::<i32>()) {
         let function = |x: i32, y: i32| x.wrapping_add(y);
 
-        let curried = curry2!(function);
+        let curried = curry!(|x, y| function(x, y));
 
         prop_assert_eq!(curried(a)(b), function(a, b));
     }
 
-    /// Curry3 equivalence: curry3!(f)(a)(b)(c) == f(a, b, c)
+    /// Curry equivalence (3 args): curry!(|x, y, z| f(x, y, z))(a)(b)(c) == f(a, b, c)
     #[test]
-    fn prop_curry3_equivalence(a in any::<i32>(), b in any::<i32>(), c in any::<i32>()) {
+    fn prop_curry_three_args_equivalence(a in any::<i32>(), b in any::<i32>(), c in any::<i32>()) {
         let function = |x: i32, y: i32, z: i32| x.wrapping_add(y).wrapping_add(z);
 
-        let curried = curry3!(function);
+        let curried = curry!(|x, y, z| function(x, y, z));
 
         prop_assert_eq!(curried(a)(b)(c), function(a, b, c));
     }
 
     /// Curried function can be partially applied and reused
     #[test]
-    fn prop_curry2_partial_reuse(a in any::<i32>(), b1 in any::<i32>(), b2 in any::<i32>()) {
+    fn prop_curry_partial_reuse(a in any::<i32>(), b1 in any::<i32>(), b2 in any::<i32>()) {
         let function = |x: i32, y: i32| x.wrapping_add(y);
 
-        let curried = curry2!(function);
+        let curried = curry!(|x, y| function(x, y));
         let partial = curried(a);
 
         // Same partial can be called with different arguments
@@ -282,8 +283,8 @@ proptest! {
         let add = |a: i32, b: i32| a.wrapping_add(b);
         let multiply = |a: i32, b: i32| a.wrapping_mul(b);
 
-        let add_five = curry2!(add)(5);
-        let double = curry2!(multiply)(2);
+        let add_five = curry!(|a, b| add(a, b))(5);
+        let double = curry!(|a, b| multiply(a, b))(2);
 
         // compose!(add_five, double)(x) = add_five(double(x)) = double(x) + 5
         let composed = compose!(add_five, double);

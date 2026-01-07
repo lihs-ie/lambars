@@ -1,0 +1,7 @@
+error: curry! requires a function with at least 2 arguments
+ --> tests/compile_fail/curry_single_argument.rs:5:13
+  |
+5 |     let _ = lambars::curry!(|a: i32| a + 1);
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the macro `lambars::curry` (in Nightly builds, run with -Z macro-backtrace for more info)

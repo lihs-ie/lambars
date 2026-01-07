@@ -7,13 +7,14 @@
 //! - `compose!` macro
 //! - `pipe!` macro
 //! - `partial!` macro
-//! - `curry2!` through `curry6!` macros
+//! - `curry!` macro
 //! - `identity`, `constant`, `flip` helper functions
 
 #![allow(unused_imports)]
+#![allow(clippy::redundant_closure)]
 
 use lambars::compose::{constant, flip, identity};
-use lambars::{compose, curry2, curry3, curry4, partial, pipe};
+use lambars::{compose, curry, partial, pipe};
 
 // =============================================================================
 // Complex Pipeline Scenarios
@@ -56,8 +57,8 @@ fn test_curried_functions_in_pipeline() {
     let add = |first: i32, second: i32| first + second;
     let multiply = |first: i32, second: i32| first * second;
 
-    let add_ten = curry2!(add)(10);
-    let triple = curry2!(multiply)(3);
+    let add_ten = curry!(|first, second| add(first, second))(10);
+    let triple = curry!(|first, second| multiply(first, second))(3);
 
     // Build a processing pipeline with curried functions
     let result = pipe!(5, triple, add_ten);
@@ -138,9 +139,10 @@ fn test_function_reuse_patterns() {
     let add = |first: i32, second: i32| first + second;
 
     // Create a family of related functions
-    let add_one = curry2!(add)(1);
-    let add_five = curry2!(add)(5);
-    let add_ten = curry2!(add)(10);
+    let add_curried = curry!(|first, second| add(first, second));
+    let add_one = add_curried(1);
+    let add_five = add_curried(5);
+    let add_ten = add_curried(10);
 
     // All are reusable
     assert_eq!(add_one(100), 101);
@@ -219,7 +221,7 @@ fn test_numeric_calculations_with_curry() {
     }
 
     // Create specific linear functions: y = mx + b
-    let curried = curry3!(linear_equation);
+    let curried = curry!(|slope, intercept, variable| linear_equation(slope, intercept, variable));
 
     // y = 2x + 3
     let line1 = curried(2.0)(3.0);
@@ -257,7 +259,7 @@ fn test_optional_value_processing() {
         }
     }
 
-    let curried_divide = curry2!(safe_divide);
+    let curried_divide = curry!(|numerator, denominator| safe_divide(numerator, denominator));
     let divide_100_by = curried_divide(100);
 
     assert_eq!(divide_100_by(5), Some(20));
@@ -291,7 +293,7 @@ fn test_curry_with_owned_types() {
         format!("{first}{second}")
     }
 
-    let curried = curry2!(concatenate);
+    let curried = curry!(|first, second| concatenate(first, second));
     let hello_plus = curried(String::from("Hello, "));
 
     assert_eq!(hello_plus(String::from("World!")), "Hello, World!");
@@ -332,7 +334,7 @@ fn test_nested_compositions() {
 #[test]
 fn test_curried_function_reuse_many_times() {
     let add = |first: i32, second: i32| first + second;
-    let add_five = curry2!(add)(5);
+    let add_five = curry!(|first, second| add(first, second))(5);
 
     // Should be able to reuse the curried function many times
     let sum: i32 = (0..1000).map(&add_five).sum();

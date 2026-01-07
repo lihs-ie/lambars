@@ -1,0 +1,5 @@
+error: curry! expected an integer literal for arity
+ --> tests/compile_fail/curry_invalid_arity_type.rs:8:34
+  |
+8 |     let _ = lambars::curry!(add, "two");
+  |                                  ^^^^^

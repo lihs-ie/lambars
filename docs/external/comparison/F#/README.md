@@ -447,7 +447,7 @@ let contents = io.run_unsafe();
 | `>>` (compose forward) | `compose!` (reversed) | Compose left-to-right |
 | `<<` (compose backward) | `compose!` | Compose right-to-left |
 | Partial application | `partial!` | Fix some arguments |
-| Currying (automatic) | `curry2!` - `curry6!` | Convert to curried form |
+| Currying (automatic) | `curry!(fn, arity)` or `curry!(\|args...\| body)` | Convert to curried form |
 
 ### Code Examples
 
@@ -517,7 +517,7 @@ let add_five = partial!(add, 5, __);
 let result = add_five(3);  // 8
 ```
 
-#### F# Automatic Currying vs lambars curry! Macros
+#### F# Automatic Currying vs lambars curry! Macro
 
 ```fsharp
 // F# - functions are curried by default
@@ -529,11 +529,18 @@ let result = addFiveAndTen 3  // 18
 
 ```rust
 // lambars
-use lambars::curry3;
+use lambars::curry;
 
 fn add(a: i32, b: i32, c: i32) -> i32 { a + b + c }
 
-let curried = curry3!(add);
+// Using function name + arity form
+let curried = curry!(add, 3);
+let add_five = curried(5);
+let add_five_and_ten = add_five(10);
+let result = add_five_and_ten(3);  // 18
+
+// Or using closure form
+let curried = curry!(|a, b, c| add(a, b, c));
 let add_five = curried(5);
 let add_five_and_ten = add_five(10);
 let result = add_five_and_ten(3);  // 18

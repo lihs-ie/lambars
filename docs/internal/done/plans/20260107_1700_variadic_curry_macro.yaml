@@ -1,0 +1,1718 @@
+# 可変長 curry マクロ 実装計画
+#
+# 要件定義: docs/internal/requirements/20260107_1700_variadic_curry_macro.yaml
+# 技術要件:
+#   - Rust: 1.92.0
+#   - edition: 2024
+#   - testing: rstest
+#   - compile_fail testing: trybuild
+#
+# 実装方針:
+#   1. TDD（テスト駆動開発）でテストを先に書く
+#   2. procedural macro として lambars-derive クレートに実装
+#   3. 既存の curry2! ~ curry6! と同等の機能を提供
+#   4. 後方互換性は考慮しない（既存マクロは完全削除）
+#   5. 2つの入力形式をサポート:
+#      - クロージャ式形式: curry!(|a, b| body)
+#      - 関数名+引数数形式: curry!(function_name, arity)
+
+version: "1.3.0"
+name: "Variadic Curry Macro Implementation Plan"
+requirement_file: "docs/internal/requirements/20260107_1700_variadic_curry_macro.yaml"
+
+# 実装順序の概要
+implementation_order:
+  - step: 1
+    name: "依存関係の追加"
+    items:
+      - trybuild を dev-dependencies に追加
+  - step: 2
+    name: "テストの作成"
+    items:
+      - curry! マクロの統合テスト作成（tests/curry_tests.rs）
+      - クロージャ形式: 2引数から6引数までの基本テスト
+      - 関数名+引数数形式: 2引数から6引数までの基本テスト
+      - 両形式の同等性テスト
+      - 部分適用の再利用テスト
+      - 参照透過性テスト
+      - compose!/pipe! との統合テスト
+      - compile_fail テスト（trybuild 使用）
+  - step: 3
+    name: "procedural macro の実装"
+    items:
+      - lambars-derive に curry モジュール追加
+      - 入力形式の判別処理（クロージャ vs 関数名+引数数）
+      - クロージャ式のパース処理
+      - 関数名+引数数形式のパース処理
+      - ネストしたクロージャの生成（両形式で共通）
+      - エラーメッセージの生成
+  - step: 4
+    name: "既存マクロの削除と統合"
+    items:
+      - curry2! ~ curry6! の削除
+      - compose/mod.rs の更新
+      - lib.rs での re-export 設定
+  - step: 5
+    name: "ドキュメントの更新"
+    items:
+      - curry! マクロのドキュメントコメント（両形式）
+      - モジュールドキュメントの更新
+      - 使用例の追加（両形式）
+      - 形式の選択ガイダンス
+
+# 実装計画詳細
+implementation_plan:
+  # ============================================================================
+  # 0. 依存関係の追加
+  # ============================================================================
+  - id: impl_add_trybuild_dependency
+    requirement_id: variadic_curry_macro
+    name: "trybuild 依存関係の追加"
+    priority: 0
+    description: |
+      compile_fail テストを行うために trybuild を dev-dependencies に追加する。
+
+    files:
+      - path: Cargo.toml
+        description: |
+          trybuild を dev-dependencies に追加。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Cargo.toml に trybuild を追加。
+        code_outline: |
+          [dev-dependencies]
+          trybuild = "1.0"
+
+    tests: []
+    dependencies: []
+
+  # ============================================================================
+  # 1. テストの作成（TDD: テストを先に書く）
+  # ============================================================================
+  - id: impl_curry_tests
+    requirement_id: variadic_curry_macro
+    name: "curry! マクロのテスト作成"
+    priority: 1
+    description: |
+      curry! マクロの動作を検証するためのテストを先に作成する。
+      既存の curry2! ~ curry6! のテストを curry! マクロ用に書き換える。
+
+      **重要**: 統合テストは tests/curry_tests.rs（lambars 側）に配置する。
+      lambars-derive/tests/ に配置すると、lambars::compose! などを使用する際に
+      循環依存が発生するため。
+
+      **v1.3.0追加**: 関数名+引数数形式のテストと、両形式の同等性テストを追加。
+
+    files:
+      - path: tests/curry_tests.rs
+        description: |
+          curry! マクロの統合テストファイル。
+          rstest を使用してパラメータ化テストを実装。
+          クロージャ形式と関数名+引数数形式の両方をテスト。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          テストファイルの基本構造を作成。
+          2引数クロージャのカリー化テスト。
+        code_outline: |
+          //! Integration tests for the curry! macro.
+
+          use rstest::rstest;
+
+          // テスト用ヘルパー関数
+          fn add(first: i32, second: i32) -> i32 {
+              first + second
+          }
+
+          fn multiply(first: i32, second: i32) -> i32 {
+              first * second
+          }
+
+          /// 2引数クロージャのカリー化基本テスト（クロージャ形式）
+          #[rstest]
+          #[case(1, 2, 3)]
+          #[case(0, 0, 0)]
+          #[case(-5, 10, 5)]
+          fn test_curry_closure_two_arguments_basic(
+              #[case] first: i32,
+              #[case] second: i32,
+              #[case] expected: i32,
+          ) {
+              let curried = lambars::curry!(|a, b| add(a, b));
+              assert_eq!(curried(first)(second), expected);
+          }
+
+      - step: 2
+        description: |
+          2引数関数名+引数数形式のカリー化基本テスト。
+        code_outline: |
+          /// 2引数関数のカリー化基本テスト（関数名+引数数形式）
+          #[rstest]
+          #[case(1, 2, 3)]
+          #[case(0, 0, 0)]
+          #[case(-5, 10, 5)]
+          fn test_curry_function_two_arguments_basic(
+              #[case] first: i32,
+              #[case] second: i32,
+              #[case] expected: i32,
+          ) {
+              let curried = lambars::curry!(add, 2);
+              assert_eq!(curried(first)(second), expected);
+          }
+
+      - step: 3
+        description: |
+          3引数から6引数までのクロージャのカリー化テスト。
+        code_outline: |
+          fn add_three(first: i32, second: i32, third: i32) -> i32 {
+              first + second + third
+          }
+
+          fn sum_six(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32) -> i32 {
+              a + b + c + d + e + f
+          }
+
+          #[rstest]
+          fn test_curry_closure_three_arguments() {
+              let curried = lambars::curry!(|a, b, c| add_three(a, b, c));
+              assert_eq!(curried(1)(2)(3), 6);
+          }
+
+          #[rstest]
+          fn test_curry_closure_six_arguments() {
+              let curried = lambars::curry!(|a, b, c, d, e, f| sum_six(a, b, c, d, e, f));
+              assert_eq!(curried(1)(2)(3)(4)(5)(6), 21);
+          }
+
+      - step: 4
+        description: |
+          3引数から6引数までの関数名+引数数形式のカリー化テスト。
+        code_outline: |
+          #[rstest]
+          fn test_curry_function_three_arguments() {
+              let curried = lambars::curry!(add_three, 3);
+              assert_eq!(curried(1)(2)(3), 6);
+          }
+
+          #[rstest]
+          fn test_curry_function_six_arguments() {
+              let curried = lambars::curry!(sum_six, 6);
+              assert_eq!(curried(1)(2)(3)(4)(5)(6), 21);
+          }
+
+      - step: 5
+        description: |
+          モジュールパス付き関数のカリー化テスト（関数名+引数数形式）。
+        code_outline: |
+          mod math {
+              pub fn multiply(first: i32, second: i32) -> i32 {
+                  first * second
+              }
+
+              pub fn add_three(first: i32, second: i32, third: i32) -> i32 {
+                  first + second + third
+              }
+          }
+
+          #[rstest]
+          fn test_curry_function_with_module_path_two_arguments() {
+              let curried = lambars::curry!(math::multiply, 2);
+              assert_eq!(curried(3)(4), 12);
+          }
+
+          #[rstest]
+          fn test_curry_function_with_module_path_three_arguments() {
+              let curried = lambars::curry!(math::add_three, 3);
+              assert_eq!(curried(1)(2)(3), 6);
+          }
+
+      - step: 5b
+        description: |
+          Type::method 形式のカリー化テスト（関数名+引数数形式）。
+        code_outline: |
+          struct Calculator;
+
+          impl Calculator {
+              fn add(first: i32, second: i32) -> i32 {
+                  first + second
+              }
+
+              fn multiply_three(first: i32, second: i32, third: i32) -> i32 {
+                  first * second * third
+              }
+          }
+
+          #[rstest]
+          fn test_curry_function_with_type_method_two_arguments() {
+              let curried = lambars::curry!(Calculator::add, 2);
+              assert_eq!(curried(5)(3), 8);
+          }
+
+          #[rstest]
+          fn test_curry_function_with_type_method_three_arguments() {
+              let curried = lambars::curry!(Calculator::multiply_three, 3);
+              assert_eq!(curried(2)(3)(4), 24);
+          }
+
+      - step: 6
+        description: |
+          両形式の同等性テスト。
+          クロージャ形式と関数名+引数数形式が同じ結果を返すことを検証。
+        code_outline: |
+          #[rstest]
+          #[case(1, 2)]
+          #[case(0, 0)]
+          #[case(-5, 10)]
+          fn test_form_equivalence_two_arguments(
+              #[case] first: i32,
+              #[case] second: i32,
+          ) {
+              let curried_closure = lambars::curry!(|a, b| add(a, b));
+              let curried_function = lambars::curry!(add, 2);
+
+              assert_eq!(
+                  curried_closure(first)(second),
+                  curried_function(first)(second)
+              );
+          }
+
+          #[rstest]
+          fn test_form_equivalence_three_arguments() {
+              let curried_closure = lambars::curry!(|a, b, c| add_three(a, b, c));
+              let curried_function = lambars::curry!(add_three, 3);
+
+              assert_eq!(
+                  curried_closure(1)(2)(3),
+                  curried_function(1)(2)(3)
+              );
+          }
+
+          #[rstest]
+          fn test_form_equivalence_six_arguments() {
+              let curried_closure = lambars::curry!(|a, b, c, d, e, f| sum_six(a, b, c, d, e, f));
+              let curried_function = lambars::curry!(sum_six, 6);
+
+              assert_eq!(
+                  curried_closure(1)(2)(3)(4)(5)(6),
+                  curried_function(1)(2)(3)(4)(5)(6)
+              );
+          }
+
+      - step: 7
+        description: |
+          部分適用の再利用テスト（両形式）。
+          同じ部分適用を複数回使用できることを検証。
+        code_outline: |
+          #[rstest]
+          fn test_partial_application_reusability_closure() {
+              let curried = lambars::curry!(|first, second| multiply(first, second));
+              let double = curried(2);
+
+              // double は複数回再利用可能
+              assert_eq!(double(5), 10);
+              assert_eq!(double(10), 20);
+              assert_eq!(double(0), 0);
+
+              // 別の部分適用も作成可能
+              let triple = curried(3);
+              assert_eq!(triple(5), 15);
+
+              // double は影響を受けない
+              assert_eq!(double(5), 10);
+          }
+
+          #[rstest]
+          fn test_partial_application_reusability_function() {
+              let curried = lambars::curry!(multiply, 2);
+              let double = curried(2);
+
+              // double は複数回再利用可能
+              assert_eq!(double(5), 10);
+              assert_eq!(double(10), 20);
+              assert_eq!(double(0), 0);
+
+              // 別の部分適用も作成可能
+              let triple = curried(3);
+              assert_eq!(triple(5), 15);
+
+              // double は影響を受けない
+              assert_eq!(double(5), 10);
+          }
+
+      - step: 8
+        description: |
+          参照透過性テスト（両形式）。
+          同じ引数での呼び出しは常に同じ結果を返すことを検証。
+        code_outline: |
+          #[rstest]
+          fn test_referential_transparency_closure() {
+              let curried = lambars::curry!(|first, second| add(first, second));
+
+              // 同じ引数での呼び出しは常に同じ結果
+              let result1 = curried(5)(3);
+              let result2 = curried(5)(3);
+              let result3 = curried(5)(3);
+
+              assert_eq!(result1, result2);
+              assert_eq!(result2, result3);
+          }
+
+          #[rstest]
+          fn test_referential_transparency_function() {
+              let curried = lambars::curry!(add, 2);
+
+              // 同じ引数での呼び出しは常に同じ結果
+              let result1 = curried(5)(3);
+              let result2 = curried(5)(3);
+              let result3 = curried(5)(3);
+
+              assert_eq!(result1, result2);
+              assert_eq!(result2, result3);
+          }
+
+      - step: 9
+        description: |
+          インラインクロージャのカリー化テスト。
+          クロージャ式を直接渡すことを検証。
+        code_outline: |
+          #[rstest]
+          fn test_curry_with_inline_closure() {
+              let curried = lambars::curry!(|first: i32, second: i32| first + second);
+              assert_eq!(curried(10)(20), 30);
+          }
+
+          #[rstest]
+          fn test_curry_with_inline_closure_three_arguments() {
+              let curried = lambars::curry!(|a: i32, b: i32, c: i32| a * b + c);
+              assert_eq!(curried(2)(3)(4), 10);
+          }
+
+      - step: 10
+        description: |
+          compose! / pipe! との統合テスト（両形式）。
+        code_outline: |
+          #[rstest]
+          fn test_curry_closure_with_compose() {
+              let double = lambars::curry!(|a, b| multiply(a, b))(2);
+              let add_ten = lambars::curry!(|a, b| add(a, b))(10);
+
+              let double_then_add_ten = lambars::compose!(add_ten, double);
+              assert_eq!(double_then_add_ten(5), 20);
+          }
+
+          #[rstest]
+          fn test_curry_function_with_compose() {
+              let double = lambars::curry!(multiply, 2)(2);
+              let add_ten = lambars::curry!(add, 2)(10);
+
+              let double_then_add_ten = lambars::compose!(add_ten, double);
+              assert_eq!(double_then_add_ten(5), 20);
+          }
+
+          #[rstest]
+          fn test_curry_closure_with_pipe() {
+              let double = lambars::curry!(|a, b| multiply(a, b))(2);
+              let add_ten = lambars::curry!(|a, b| add(a, b))(10);
+
+              let result = lambars::pipe!(5, double, add_ten);
+              assert_eq!(result, 20);
+          }
+
+          #[rstest]
+          fn test_curry_function_with_pipe() {
+              let double = lambars::curry!(multiply, 2)(2);
+              let add_ten = lambars::curry!(add, 2)(10);
+
+              let result = lambars::pipe!(5, double, add_ten);
+              assert_eq!(result, 20);
+          }
+
+      - step: 11
+        description: |
+          Clone を実装する型のテスト。
+          String など Clone が必要な型での動作を検証。
+        code_outline: |
+          fn concat(first: String, second: String) -> String {
+              format!("{}{}", first, second)
+          }
+
+          #[rstest]
+          fn test_curry_closure_with_clone_types() {
+              let curried = lambars::curry!(|first, second| concat(first, second));
+              let hello = curried(String::from("Hello, "));
+
+              // hello は複数回呼び出し可能
+              assert_eq!(hello(String::from("World")), "Hello, World");
+              assert_eq!(hello(String::from("Rust")), "Hello, Rust");
+          }
+
+          #[rstest]
+          fn test_curry_function_with_clone_types() {
+              let curried = lambars::curry!(concat, 2);
+              let hello = curried(String::from("Hello, "));
+
+              // hello は複数回呼び出し可能
+              assert_eq!(hello(String::from("World")), "Hello, World");
+              assert_eq!(hello(String::from("Rust")), "Hello, Rust");
+          }
+
+      - step: 12
+        description: |
+          Clone を実装しない型が最後の引数として使用可能なことを検証。
+        code_outline: |
+          struct NonClone(i32);
+
+          #[rstest]
+          fn test_curry_closure_with_non_clone_last_argument() {
+              let curried = lambars::curry!(|a: i32, b: NonClone| a + b.0);
+              assert_eq!(curried(5)(NonClone(3)), 8);
+          }
+
+          #[rstest]
+          fn test_curry_function_with_non_clone_last_argument() {
+              fn add_non_clone(a: i32, b: NonClone) -> i32 {
+                  a + b.0
+              }
+              let curried = lambars::curry!(add_non_clone, 2);
+              assert_eq!(curried(5)(NonClone(3)), 8);
+          }
+
+    tests:
+      - name: curry_tests
+        description: curry! マクロの統合テスト（両形式）
+        test_type: integration
+        code_outline: |
+          // 上記の implementation_steps で定義したテストを
+          // tests/curry_tests.rs に配置
+
+    dependencies:
+      - impl_add_trybuild_dependency
+
+  # ============================================================================
+  # 1.1. compile_fail テストの作成
+  # ============================================================================
+  - id: impl_curry_compile_fail_tests
+    requirement_id: argument_count_analysis
+    name: "compile_fail テストの作成"
+    priority: 1
+    description: |
+      trybuild を使用して、コンパイルエラーが正しく発生することを検証する。
+      - 1引数以下のクロージャを渡した場合のエラー
+      - 関数名のみ（引数数なし）を渡した場合のエラー
+      - 引数数が整数リテラルでない場合のエラー
+
+      **注意**: trybuild テストランナーは #[test] を使用する（例外）。
+      trybuild は #[test] との組み合わせが標準的な使い方であり、
+      rstest との互換性が低いため。
+
+    files:
+      - path: tests/curry_compile_fail_tests.rs
+        description: |
+          trybuild を使用した compile_fail テスト。
+
+      - path: tests/compile_fail/curry_single_argument.rs
+        description: |
+          1引数クロージャを渡した場合のコンパイルエラーテスト。
+
+      - path: tests/compile_fail/curry_single_argument.stderr
+        description: |
+          期待されるエラーメッセージ。
+
+      - path: tests/compile_fail/curry_zero_arguments.rs
+        description: |
+          0引数クロージャを渡した場合のコンパイルエラーテスト。
+
+      - path: tests/compile_fail/curry_zero_arguments.stderr
+        description: |
+          期待されるエラーメッセージ。
+
+      - path: tests/compile_fail/curry_function_without_arity.rs
+        description: |
+          関数名のみ（引数数なし）を渡した場合のコンパイルエラーテスト。
+
+      - path: tests/compile_fail/curry_function_without_arity.stderr
+        description: |
+          期待されるエラーメッセージ。
+
+      - path: tests/compile_fail/curry_invalid_arity_type.rs
+        description: |
+          引数数が整数リテラルでない場合のコンパイルエラーテスト。
+
+      - path: tests/compile_fail/curry_invalid_arity_type.stderr
+        description: |
+          期待されるエラーメッセージ。
+
+      - path: tests/compile_fail/curry_function_arity_one.rs
+        description: |
+          関数名+引数数形式で引数数が1の場合のコンパイルエラーテスト。
+
+      - path: tests/compile_fail/curry_function_arity_one.stderr
+        description: |
+          期待されるエラーメッセージ。
+
+      - path: tests/compile_fail/curry_function_arity_zero.rs
+        description: |
+          関数名+引数数形式で引数数が0の場合のコンパイルエラーテスト。
+
+      - path: tests/compile_fail/curry_function_arity_zero.stderr
+        description: |
+          期待されるエラーメッセージ。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          trybuild テストランナーを作成。
+          **注意**: trybuild は #[test] を使用する（rstest との互換性が低いため例外）。
+        code_outline: |
+          // tests/curry_compile_fail_tests.rs
+          // trybuild は #[test] との組み合わせが標準的な使い方であり、
+          // rstest との互換性が低いため、#[test] を例外として使用する。
+          #[test]
+          fn curry_compile_fail_tests() {
+              let t = trybuild::TestCases::new();
+              t.compile_fail("tests/compile_fail/curry_*.rs");
+          }
+
+      - step: 2
+        description: |
+          1引数クロージャを渡した場合のテストケース。
+        code_outline: |
+          // tests/compile_fail/curry_single_argument.rs
+          fn main() {
+              let _ = lambars::curry!(|a: i32| a + 1);
+          }
+
+          // tests/compile_fail/curry_single_argument.stderr
+          // error: curry! requires a function with at least 2 arguments
+
+      - step: 3
+        description: |
+          0引数クロージャを渡した場合のテストケース。
+        code_outline: |
+          // tests/compile_fail/curry_zero_arguments.rs
+          fn main() {
+              let _ = lambars::curry!(|| 42);
+          }
+
+          // tests/compile_fail/curry_zero_arguments.stderr
+          // error: curry! requires a function with at least 2 arguments
+
+      - step: 4
+        description: |
+          関数名のみ（引数数なし）を渡した場合のテストケース。
+        code_outline: |
+          // tests/compile_fail/curry_function_without_arity.rs
+          fn add(a: i32, b: i32) -> i32 { a + b }
+
+          fn main() {
+              let _ = lambars::curry!(add);
+          }
+
+          // tests/compile_fail/curry_function_without_arity.stderr
+          // error: curry! with function name requires arity: curry!(function_name, 2)
+
+      - step: 5
+        description: |
+          引数数が整数リテラルでない場合のテストケース。
+        code_outline: |
+          // tests/compile_fail/curry_invalid_arity_type.rs
+          fn add(a: i32, b: i32) -> i32 { a + b }
+
+          fn main() {
+              let _ = lambars::curry!(add, "two");
+          }
+
+          // tests/compile_fail/curry_invalid_arity_type.stderr
+          // error: curry! expected an integer literal for arity
+
+      - step: 6
+        description: |
+          関数名+引数数形式で引数数が1の場合のテストケース。
+        code_outline: |
+          // tests/compile_fail/curry_function_arity_one.rs
+          fn identity(a: i32) -> i32 { a }
+
+          fn main() {
+              let _ = lambars::curry!(identity, 1);
+          }
+
+          // tests/compile_fail/curry_function_arity_one.stderr
+          // error: curry! requires a function with at least 2 arguments
+
+      - step: 7
+        description: |
+          関数名+引数数形式で引数数が0の場合のテストケース。
+        code_outline: |
+          // tests/compile_fail/curry_function_arity_zero.rs
+          fn constant() -> i32 { 42 }
+
+          fn main() {
+              let _ = lambars::curry!(constant, 0);
+          }
+
+          // tests/compile_fail/curry_function_arity_zero.stderr
+          // error: curry! requires a function with at least 2 arguments
+
+    tests:
+      - name: curry_compile_fail_tests
+        description: curry! マクロのコンパイルエラーテスト
+        test_type: compile_fail
+        code_outline: |
+          // trybuild で compile_fail を検証
+
+    dependencies:
+      - impl_add_trybuild_dependency
+
+  # ============================================================================
+  # 2. procedural macro の実装
+  # ============================================================================
+  - id: impl_curry_macro_module
+    requirement_id: variadic_curry_macro
+    name: "curry モジュールの作成"
+    priority: 2
+    description: |
+      lambars-derive クレートに curry.rs モジュールを追加し、
+      curry! procedural macro を実装する。
+
+      **v1.3.0追加**: 2つの入力形式をサポート:
+      - クロージャ式形式: curry!(|a, b| body)
+      - 関数名+引数数形式: curry!(function_name, arity)
+
+    files:
+      - path: lambars-derive/src/curry.rs
+        description: |
+          curry! procedural macro の実装。
+          syn でパース、quote でコード生成。
+          入力形式の判別と両形式の処理を実装。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          curry モジュールの基本構造を作成。
+          入力形式の判別ロジックを実装。
+        code_outline: |
+          //! Implementation of the `curry!` procedural macro.
+          //!
+          //! This module provides the curry! macro that transforms
+          //! multi-argument closures or functions into curried form.
+          //!
+          //! # Supported Input Forms
+          //!
+          //! 1. Closure form: `curry!(|a, b| body)`
+          //! 2. Function name + arity form: `curry!(function_name, arity)`
+
+          use proc_macro::TokenStream;
+          use proc_macro2::TokenStream as TokenStream2;
+          use quote::quote;
+          use syn::{Expr, ExprClosure, ExprLit, ExprPath, Lit, Pat, Token, parse_macro_input, spanned::Spanned};
+          use syn::punctuated::Punctuated;
+
+          /// Input form for the curry! macro.
+          enum CurryInput {
+              /// Closure form: curry!(|a, b| body)
+              Closure(ExprClosure),
+              /// Function name + arity form: curry!(function_name, arity)
+              FunctionWithArity {
+                  function: ExprPath,
+                  arity: usize,
+              },
+          }
+
+          /// Main implementation of the curry! macro.
+          pub fn curry_impl(input: TokenStream) -> TokenStream {
+              let parsed_input = parse_curry_input(input);
+
+              let expanded = match parsed_input {
+                  Ok(CurryInput::Closure(closure)) => generate_curry_from_closure(&closure),
+                  Ok(CurryInput::FunctionWithArity { function, arity }) => {
+                      generate_curry_from_function(&function, arity)
+                  }
+                  Err(error) => error.to_compile_error(),
+              };
+
+              TokenStream::from(expanded)
+          }
+
+      - step: 2
+        description: |
+          入力形式を判別してパースする関数を実装。
+        code_outline: |
+          /// Parses the curry! macro input and determines the form.
+          fn parse_curry_input(input: TokenStream) -> syn::Result<CurryInput> {
+              // まずカンマ区切りの式リストとしてパースを試みる
+              let input2: proc_macro2::TokenStream = input.clone().into();
+
+              // Punctuated<Expr, Token![,]> としてパース
+              let parser = Punctuated::<Expr, Token![,]>::parse_terminated;
+              let expressions: Punctuated<Expr, Token![,]> = syn::parse::Parser::parse2(parser, input2.clone())?;
+
+              match expressions.len() {
+                  1 => {
+                      // 単一の式: クロージャ形式または関数名のみ（エラー）
+                      let expr = expressions.into_iter().next().unwrap();
+                      match expr {
+                          Expr::Closure(closure) => Ok(CurryInput::Closure(closure)),
+                          Expr::Path(path) => {
+                              // 関数名のみ: 引数数が必要
+                              Err(syn::Error::new(
+                                  path.span(),
+                                  "curry! with function name requires arity: curry!(function_name, 2)",
+                              ))
+                          }
+                          _ => {
+                              Err(syn::Error::new(
+                                  expr.span(),
+                                  "curry! requires a closure or function name with arity",
+                              ))
+                          }
+                      }
+                  }
+                  2 => {
+                      // 2つの式: 関数名+引数数形式
+                      let mut iter = expressions.into_iter();
+                      let first = iter.next().unwrap();
+                      let second = iter.next().unwrap();
+
+                      // 第1引数: 関数パス
+                      let function = match first {
+                          Expr::Path(path) => path,
+                          _ => {
+                              return Err(syn::Error::new(
+                                  first.span(),
+                                  "expected a function name or path",
+                              ));
+                          }
+                      };
+
+                      // 第2引数: 整数リテラル
+                      let arity = match second {
+                          Expr::Lit(ExprLit { lit: Lit::Int(lit_int), .. }) => {
+                              lit_int.base10_parse::<usize>()?
+                          }
+                          _ => {
+                              return Err(syn::Error::new(
+                                  second.span(),
+                                  "curry! expected an integer literal for arity",
+                              ));
+                          }
+                      };
+
+                      if arity < 2 {
+                          return Err(syn::Error::new(
+                              function.span(),
+                              "curry! requires a function with at least 2 arguments",
+                          ));
+                      }
+
+                      Ok(CurryInput::FunctionWithArity { function, arity })
+                  }
+                  _ => {
+                      Err(syn::Error::new(
+                          proc_macro2::Span::call_site(),
+                          "curry! requires a closure or function name with arity",
+                      ))
+                  }
+              }
+          }
+
+      - step: 3
+        description: |
+          クロージャ式から引数を抽出し、カリー化コードを生成する関数を実装。
+        code_outline: |
+          /// Extracts argument patterns from a closure.
+          fn extract_closure_arguments(closure: &ExprClosure) -> Vec<&Pat> {
+              closure.inputs.iter().collect()
+          }
+
+          /// Generates curried code from a closure expression.
+          fn generate_curry_from_closure(closure: &ExprClosure) -> TokenStream2 {
+              let arguments = extract_closure_arguments(closure);
+              let argument_count = arguments.len();
+
+              if argument_count < 2 {
+                  return syn::Error::new(
+                      closure.span(),
+                      "curry! requires a function with at least 2 arguments",
+                  )
+                  .to_compile_error();
+              }
+
+              generate_nested_closures_for_closure(closure, argument_count)
+          }
+
+      - step: 4
+        description: |
+          関数名+引数数形式からカリー化コードを生成する関数を実装。
+        code_outline: |
+          /// Generates curried code from a function name and arity.
+          fn generate_curry_from_function(function: &ExprPath, arity: usize) -> TokenStream2 {
+              generate_nested_closures_for_function(function, arity)
+          }
+
+      - step: 5
+        description: |
+          クロージャ形式用のネストしたクロージャを生成するコア関数を実装。
+        code_outline: |
+          /// Generates nested closures for currying a closure expression.
+          fn generate_nested_closures_for_closure(
+              closure: &ExprClosure,
+              argument_count: usize,
+          ) -> TokenStream2 {
+              // 変数名の生成（衝突を避けるため __lambars_ プレフィックス）
+              let argument_identifiers: Vec<_> = (0..argument_count)
+                  .map(|index| quote::format_ident!("__lambars_argument_{}", index))
+                  .collect();
+
+              // 最後のクロージャの本体を生成
+              let final_arguments: Vec<_> = argument_identifiers
+                  .iter()
+                  .enumerate()
+                  .map(|(index, identifier)| {
+                      if index < argument_count - 1 {
+                          quote! {
+                              ::std::rc::Rc::unwrap_or_clone(
+                                  ::std::rc::Rc::clone(&#identifier)
+                              )
+                          }
+                      } else {
+                          quote! { #identifier }
+                      }
+                  })
+                  .collect();
+
+              // 関数呼び出しの生成
+              let function_call = quote! {
+                  __lambars_function(#(#final_arguments),*)
+              };
+
+              // ネストしたクロージャを再帰的に構築
+              generate_closure_chain(&argument_identifiers, argument_count, function_call, closure)
+          }
+
+      - step: 6
+        description: |
+          関数名+引数数形式用のネストしたクロージャを生成するコア関数を実装。
+        code_outline: |
+          /// Generates nested closures for currying a function by name and arity.
+          fn generate_nested_closures_for_function(
+              function: &ExprPath,
+              arity: usize,
+          ) -> TokenStream2 {
+              // 変数名の生成
+              let argument_identifiers: Vec<_> = (0..arity)
+                  .map(|index| quote::format_ident!("__lambars_argument_{}", index))
+                  .collect();
+
+              // 最後のクロージャの本体を生成
+              let final_arguments: Vec<_> = argument_identifiers
+                  .iter()
+                  .enumerate()
+                  .map(|(index, identifier)| {
+                      if index < arity - 1 {
+                          quote! {
+                              ::std::rc::Rc::unwrap_or_clone(
+                                  ::std::rc::Rc::clone(&#identifier)
+                              )
+                          }
+                      } else {
+                          quote! { #identifier }
+                      }
+                  })
+                  .collect();
+
+              // 関数呼び出しの生成
+              let function_call = quote! {
+                  __lambars_function(#(#final_arguments),*)
+              };
+
+              // ネストしたクロージャを再帰的に構築
+              generate_closure_chain_for_function(&argument_identifiers, arity, function_call, function)
+          }
+
+      - step: 7
+        description: |
+          クロージャ形式用のクロージャチェーンを生成するヘルパー関数を実装。
+        code_outline: |
+          /// Generates a chain of closures from innermost to outermost (closure form).
+          fn generate_closure_chain(
+              argument_identifiers: &[proc_macro2::Ident],
+              argument_count: usize,
+              innermost_body: TokenStream2,
+              closure: &ExprClosure,
+          ) -> TokenStream2 {
+              let mut current_body = innermost_body;
+
+              // 内側から外側に向かって構築（最後の引数から最初の引数へ）
+              for index in (0..argument_count).rev() {
+                  let identifier = &argument_identifiers[index];
+
+                  if index == argument_count - 1 {
+                      // 最後の引数: Rc でラップしない
+                      current_body = quote! {
+                          move |#identifier| {
+                              #current_body
+                          }
+                      };
+                  } else {
+                      // 中間の引数: Rc clone と Rc::new
+                      let clones_before: Vec<_> = argument_identifiers[..index]
+                          .iter()
+                          .map(|id| {
+                              quote! {
+                                  let #id = ::std::rc::Rc::clone(&#id);
+                              }
+                          })
+                          .collect();
+
+                      current_body = quote! {
+                          move |#identifier| {
+                              let __lambars_function = ::std::rc::Rc::clone(&__lambars_function);
+                              #(#clones_before)*
+                              let #identifier = ::std::rc::Rc::new(#identifier);
+                              #current_body
+                          }
+                      };
+                  }
+              }
+
+              // 最外層: function を Rc でラップ
+              quote! {
+                  {
+                      let __lambars_function = ::std::rc::Rc::new(#closure);
+                      #current_body
+                  }
+              }
+          }
+
+      - step: 8
+        description: |
+          関数名+引数数形式用のクロージャチェーンを生成するヘルパー関数を実装。
+        code_outline: |
+          /// Generates a chain of closures from innermost to outermost (function form).
+          fn generate_closure_chain_for_function(
+              argument_identifiers: &[proc_macro2::Ident],
+              arity: usize,
+              innermost_body: TokenStream2,
+              function: &ExprPath,
+          ) -> TokenStream2 {
+              let mut current_body = innermost_body;
+
+              // 内側から外側に向かって構築（最後の引数から最初の引数へ）
+              for index in (0..arity).rev() {
+                  let identifier = &argument_identifiers[index];
+
+                  if index == arity - 1 {
+                      // 最後の引数: Rc でラップしない
+                      current_body = quote! {
+                          move |#identifier| {
+                              #current_body
+                          }
+                      };
+                  } else {
+                      // 中間の引数: Rc clone と Rc::new
+                      let clones_before: Vec<_> = argument_identifiers[..index]
+                          .iter()
+                          .map(|id| {
+                              quote! {
+                                  let #id = ::std::rc::Rc::clone(&#id);
+                              }
+                          })
+                          .collect();
+
+                      current_body = quote! {
+                          move |#identifier| {
+                              let __lambars_function = ::std::rc::Rc::clone(&__lambars_function);
+                              #(#clones_before)*
+                              let #identifier = ::std::rc::Rc::new(#identifier);
+                              #current_body
+                          }
+                      };
+                  }
+              }
+
+              // 最外層: function を Rc でラップ
+              quote! {
+                  {
+                      let __lambars_function = ::std::rc::Rc::new(#function);
+                      #current_body
+                  }
+              }
+          }
+
+    tests:
+      - name: test_curry_module
+        description: curry モジュールのユニットテスト
+        test_type: unit
+        code_outline: |
+          #[cfg(test)]
+          mod tests {
+              use rstest::rstest;
+
+              #[rstest]
+              fn test_module_exists() {
+                  // モジュールがコンパイルできることを確認
+              }
+          }
+
+    dependencies:
+      - impl_curry_tests
+      - impl_curry_compile_fail_tests
+
+  - id: impl_curry_macro_lib_integration
+    requirement_id: variadic_curry_macro
+    name: "lib.rs への統合"
+    priority: 3
+    description: |
+      lambars-derive/src/lib.rs に curry! マクロをエクスポート。
+
+    files:
+      - path: lambars-derive/src/lib.rs
+        description: |
+          curry モジュールの追加と #[proc_macro] のエクスポート。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          curry モジュールの追加と proc_macro 関数の定義。
+        code_outline: |
+          mod curry;
+
+          /// Converts a multi-argument closure or function into curried form.
+          ///
+          /// Currying transforms a function that takes multiple arguments into
+          /// a sequence of functions, each taking a single argument.
+          ///
+          /// # Usage Forms
+          ///
+          /// ## 1. Closure Form
+          ///
+          /// ```rust,ignore
+          /// use lambars::curry;
+          ///
+          /// let curried = curry!(|a: i32, b: i32| a + b);
+          /// assert_eq!(curried(5)(3), 8);
+          /// ```
+          ///
+          /// ## 2. Function Name + Arity Form
+          ///
+          /// ```rust,ignore
+          /// use lambars::curry;
+          ///
+          /// fn add(a: i32, b: i32) -> i32 { a + b }
+          ///
+          /// let curried = curry!(add, 2);
+          /// assert_eq!(curried(5)(3), 8);
+          /// ```
+          ///
+          /// # Form Equivalence
+          ///
+          /// Both forms produce equivalent curried functions:
+          ///
+          /// ```rust,ignore
+          /// use lambars::curry;
+          ///
+          /// fn add(a: i32, b: i32) -> i32 { a + b }
+          ///
+          /// let curried_closure = curry!(|a, b| add(a, b));
+          /// let curried_function = curry!(add, 2);
+          ///
+          /// assert_eq!(curried_closure(5)(3), curried_function(5)(3));
+          /// ```
+          ///
+          /// # Partial Application
+          ///
+          /// Curried closures and their partial applications can be reused:
+          ///
+          /// ```rust,ignore
+          /// use lambars::curry;
+          ///
+          /// fn multiply(first: i32, second: i32) -> i32 { first * second }
+          ///
+          /// let curried = curry!(multiply, 2);
+          /// let double = curried(2);
+          /// let triple = curried(3);
+          ///
+          /// assert_eq!(double(5), 10);
+          /// assert_eq!(triple(5), 15);
+          /// assert_eq!(double(5), 10); // Still works!
+          /// ```
+          ///
+          /// # Multi-Argument Functions
+          ///
+          /// The macro supports functions with 2 or more arguments:
+          ///
+          /// ```rust,ignore
+          /// use lambars::curry;
+          ///
+          /// fn sum3(a: i32, b: i32, c: i32) -> i32 { a + b + c }
+          /// fn sum6(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32) -> i32 {
+          ///     a + b + c + d + e + f
+          /// }
+          ///
+          /// let curried3 = curry!(sum3, 3);
+          /// assert_eq!(curried3(1)(2)(3), 6);
+          ///
+          /// let curried6 = curry!(sum6, 6);
+          /// assert_eq!(curried6(1)(2)(3)(4)(5)(6), 21);
+          /// ```
+          ///
+          /// # Module Path Support
+          ///
+          /// The function name + arity form supports module paths:
+          ///
+          /// ```rust,ignore
+          /// use lambars::curry;
+          ///
+          /// mod math {
+          ///     pub fn multiply(a: i32, b: i32) -> i32 { a * b }
+          /// }
+          ///
+          /// let curried = curry!(math::multiply, 2);
+          /// assert_eq!(curried(3)(4), 12);
+          /// ```
+          ///
+          /// # Type Constraints
+          ///
+          /// - **Arguments (except the last)**: Must implement `Clone`
+          /// - **Last argument**: No special constraints
+          ///
+          /// This is because `Rc::unwrap_or_clone` is used internally to
+          /// enable reuse of partial applications.
+          ///
+          /// ```rust,ignore
+          /// struct NonClone(i32);
+          ///
+          /// // OK: NonClone as last argument
+          /// let curried = curry!(|a: i32, b: NonClone| a + b.0);
+          ///
+          /// // Error: NonClone as non-last argument (Clone required)
+          /// // let curried = curry!(|a: NonClone, b: i32| a.0 + b);
+          /// ```
+          ///
+          /// # Choosing a Form
+          ///
+          /// - **Function name + arity form**: Concise when currying existing functions
+          /// - **Closure form**: Useful for inline expressions or variable captures
+          ///
+          /// # Implementation Notes
+          ///
+          /// The generated code uses `std::rc::Rc` to share the function and
+          /// arguments across nested closures. This enables:
+          ///
+          /// - Multiple calls to the same curried closure
+          /// - Reuse of partial applications
+          /// - Support for non-Copy argument types (requires Clone)
+          #[proc_macro]
+          pub fn curry(input: TokenStream) -> TokenStream {
+              curry::curry_impl(input)
+          }
+
+    tests:
+      - name: test_curry_export
+        description: curry! マクロのエクスポートテスト
+        test_type: integration
+        code_outline: |
+          // tests/curry_tests.rs で検証
+
+    dependencies:
+      - impl_curry_macro_module
+
+  # ============================================================================
+  # 3. 既存マクロの削除と lambars クレートへの統合
+  # ============================================================================
+  - id: impl_remove_existing_curry_macros
+    requirement_id: remove_existing_curry_macros
+    name: "既存 curry マクロの削除"
+    priority: 4
+    description: |
+      src/compose/curry_macro.rs から curry2! ~ curry6! を削除し、
+      lambars-derive の curry! マクロを使用するように変更。
+
+    files:
+      - path: src/compose/curry_macro.rs
+        description: |
+          既存の curry2! ~ curry6! マクロを削除。
+          ファイル自体は削除し、新しい curry! マクロへの移行ガイドを
+          compose/mod.rs のドキュメントに記載。
+
+      - path: src/compose/mod.rs
+        description: |
+          curry_macro モジュールの削除と、
+          lambars-derive からの curry! マクロの re-export。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          curry_macro.rs ファイルを削除。
+        code_outline: |
+          // ファイルを削除
+
+      - step: 2
+        description: |
+          compose/mod.rs を更新。
+          curry_macro モジュールの参照を削除し、
+          curry2! ~ curry6! の re-export を削除。
+        code_outline: |
+          //! Function composition utilities.
+          //!
+          //! # Currying
+          //!
+          //! Use the `curry!` macro to transform multi-argument closures or functions:
+          //!
+          //! ## Closure Form
+          //!
+          //! ```rust
+          //! use lambars::curry;
+          //!
+          //! let add = curry!(|first: i32, second: i32| first + second);
+          //! let add_five = add(5);
+          //! assert_eq!(add_five(3), 8);
+          //! ```
+          //!
+          //! ## Function Name + Arity Form
+          //!
+          //! ```rust
+          //! use lambars::curry;
+          //!
+          //! fn add(first: i32, second: i32) -> i32 { first + second }
+          //!
+          //! let curried = curry!(add, 2);
+          //! assert_eq!(curried(5)(3), 8);
+          //! ```
+          //!
+          //! ## Migration from curry2!/curry3!/etc.
+          //!
+          //! The numbered curry macros have been replaced with a single `curry!` macro.
+          //!
+          //! **Option 1: Function name + arity form (simpler)**
+          //!
+          //! ```rust,ignore
+          //! // Before
+          //! use lambars::curry2;
+          //! let curried = curry2!(add);
+          //!
+          //! // After
+          //! use lambars::curry;
+          //! let curried = curry!(add, 2);
+          //! ```
+          //!
+          //! **Option 2: Closure form**
+          //!
+          //! ```rust,ignore
+          //! // Before
+          //! use lambars::curry2;
+          //! let curried = curry2!(add);
+          //!
+          //! // After
+          //! use lambars::curry;
+          //! let curried = curry!(|a, b| add(a, b));
+          //! ```
+
+          mod compose_macro;
+          // curry_macro は削除
+          #[cfg(feature = "async")]
+          mod for_async_macro;
+          mod for_macro;
+          mod partial_macro;
+          mod pipe_macro;
+          mod utils;
+
+          pub use utils::{__, Placeholder, constant, flip, identity};
+
+          pub use crate::compose;
+          // curry2! ~ curry6! の re-export を削除
+          // curry! は lambars-derive から直接 re-export
+          pub use crate::for_;
+          pub use crate::partial;
+          pub use crate::pipe;
+
+      - step: 3
+        description: |
+          lib.rs または Cargo.toml を更新して
+          lambars-derive の curry! マクロを re-export。
+        code_outline: |
+          // Cargo.toml に lambars-derive を依存として追加（まだなら）
+          // または pub use lambars_derive::curry; を追加
+
+    tests:
+      - name: test_macro_removal
+        description: 既存マクロの削除確認テスト
+        test_type: integration
+        code_outline: |
+          // curry2!, curry3! などが使用できないことを確認
+          // compile_fail テストで検証
+
+    dependencies:
+      - impl_curry_macro_lib_integration
+
+  - id: impl_lambars_reexport
+    requirement_id: variadic_curry_macro
+    name: "lambars クレートへの re-export"
+    priority: 5
+    description: |
+      lambars クレートから curry! マクロを re-export し、
+      ユーザーが use lambars::curry; で使用できるようにする。
+
+    files:
+      - path: Cargo.toml
+        description: |
+          lambars-derive への依存を追加（compose feature 有効時）。
+
+      - path: src/lib.rs
+        description: |
+          lambars-derive::curry の re-export を追加。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          Cargo.toml に lambars-derive への依存を追加。
+        code_outline: |
+          [dependencies]
+          lambars-derive = { path = "lambars-derive", optional = true }
+
+          [features]
+          compose = ["lambars-derive"]
+
+      - step: 2
+        description: |
+          src/lib.rs に curry! の re-export を追加。
+        code_outline: |
+          #[cfg(feature = "compose")]
+          pub use lambars_derive::curry;
+
+    tests:
+      - name: test_reexport
+        description: re-export の動作確認テスト
+        test_type: integration
+        code_outline: |
+          use lambars::curry;
+
+          #[rstest]
+          fn test_curry_from_lambars_closure() {
+              let add = curry!(|a: i32, b: i32| a + b);
+              assert_eq!(add(1)(2), 3);
+          }
+
+          #[rstest]
+          fn test_curry_from_lambars_function() {
+              fn add(a: i32, b: i32) -> i32 { a + b }
+              let curried = curry!(add, 2);
+              assert_eq!(curried(1)(2), 3);
+          }
+
+    dependencies:
+      - impl_remove_existing_curry_macros
+
+  # ============================================================================
+  # 4. compose! / pipe! との統合確認
+  # ============================================================================
+  - id: impl_compose_pipe_integration
+    requirement_id: compose_pipe_integration
+    name: "compose! / pipe! との統合テスト"
+    priority: 6
+    description: |
+      curry! で生成されたクロージャが compose! や pipe! と
+      正しく組み合わせて使用できることを確認するテスト。
+
+      **注意**: 統合テストは tests/（lambars 側）に配置する。
+
+      **v1.3.0追加**: 両形式での統合テストを実施。
+
+    files:
+      - path: tests/curry_compose_integration_tests.rs
+        description: |
+          curry! と compose!/pipe! の統合テスト（両形式）。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          統合テストファイルを作成（両形式をテスト）。
+        code_outline: |
+          //! Integration tests for curry! with compose! and pipe!.
+
+          use rstest::rstest;
+
+          fn multiply(first: i32, second: i32) -> i32 {
+              first * second
+          }
+
+          fn add(first: i32, second: i32) -> i32 {
+              first + second
+          }
+
+          // クロージャ形式でのテスト
+
+          #[rstest]
+          fn test_curry_closure_with_compose() {
+              let double = lambars::curry!(|a, b| multiply(a, b))(2);
+              let add_ten = lambars::curry!(|a, b| add(a, b))(10);
+
+              let double_then_add_ten = lambars::compose!(add_ten, double);
+              assert_eq!(double_then_add_ten(5), 20);
+          }
+
+          #[rstest]
+          fn test_curry_closure_with_pipe() {
+              let double = lambars::curry!(|a, b| multiply(a, b))(2);
+              let add_ten = lambars::curry!(|a, b| add(a, b))(10);
+
+              let result = lambars::pipe!(5, double, add_ten);
+              assert_eq!(result, 20);
+          }
+
+          // 関数名+引数数形式でのテスト
+
+          #[rstest]
+          fn test_curry_function_with_compose() {
+              let double = lambars::curry!(multiply, 2)(2);
+              let add_ten = lambars::curry!(add, 2)(10);
+
+              let double_then_add_ten = lambars::compose!(add_ten, double);
+              assert_eq!(double_then_add_ten(5), 20);
+          }
+
+          #[rstest]
+          fn test_curry_function_with_pipe() {
+              let double = lambars::curry!(multiply, 2)(2);
+              let add_ten = lambars::curry!(add, 2)(10);
+
+              let result = lambars::pipe!(5, double, add_ten);
+              assert_eq!(result, 20);
+          }
+
+          // 両形式の混合テスト
+
+          #[rstest]
+          fn test_curry_mixed_forms_with_compose() {
+              let double = lambars::curry!(multiply, 2)(2);
+              let add_ten = lambars::curry!(|a, b| add(a, b))(10);
+
+              let double_then_add_ten = lambars::compose!(add_ten, double);
+              assert_eq!(double_then_add_ten(5), 20);
+          }
+
+          #[rstest]
+          fn test_curry_with_compose_multiple_stages() {
+              let curried = lambars::curry!(|a: i32, b: i32, c: i32| a + b + c);
+              let partial1 = curried(1);
+              let partial2 = partial1(2);
+
+              // partial2 は単一引数関数として compose に使用可能
+              let increment = |x: i32| x + 1;
+              let composed = lambars::compose!(partial2, increment);
+
+              assert_eq!(composed(10), 14); // increment(10) = 11, then 1 + 2 + 11 = 14
+          }
+
+    tests:
+      - name: curry_compose_integration_tests
+        description: curry! と compose!/pipe! の統合テスト（両形式）
+        test_type: integration
+        code_outline: |
+          // 上記のテストをファイルに配置
+
+    dependencies:
+      - impl_lambars_reexport
+
+  # ============================================================================
+  # 5. ドキュメントの更新
+  # ============================================================================
+  - id: impl_documentation_update
+    requirement_id: variadic_curry_macro
+    name: "ドキュメントの更新"
+    priority: 7
+    description: |
+      curry! マクロのドキュメントを更新し、
+      両形式の使用例と移行ガイドを追加。
+
+    files:
+      - path: src/compose/mod.rs
+        description: |
+          モジュールドキュメントを curry! マクロ用に更新（両形式）。
+
+      - path: lambars-derive/src/lib.rs
+        description: |
+          curry! マクロの詳細なドキュメントコメント（両形式）。
+
+    implementation_steps:
+      - step: 1
+        description: |
+          compose/mod.rs のモジュールドキュメントを更新。
+          curry2! ~ curry6! への参照を curry! に変更。
+          両形式の使用例を追加。
+        code_outline: |
+          //! # Currying
+          //!
+          //! ## Closure Form
+          //!
+          //! ```
+          //! use lambars::curry;
+          //!
+          //! let add = curry!(|first: i32, second: i32| first + second);
+          //! let add_five = add(5);
+          //! assert_eq!(add_five(3), 8);
+          //! ```
+          //!
+          //! ## Function Name + Arity Form
+          //!
+          //! ```
+          //! use lambars::curry;
+          //!
+          //! fn add(first: i32, second: i32) -> i32 { first + second }
+          //!
+          //! let curried = curry!(add, 2);
+          //! assert_eq!(curried(5)(3), 8);
+          //! ```
+          //!
+          //! ## Form Selection Guide
+          //!
+          //! - **Function name + arity form**: Concise when currying existing functions
+          //! - **Closure form**: Useful for inline expressions or variable captures
+          //!
+          //! ## Type Constraints
+          //!
+          //! Arguments (except the last) must implement `Clone`:
+          //!
+          //! ```
+          //! use lambars::curry;
+          //!
+          //! struct NonClone(i32);
+          //!
+          //! // OK: NonClone as last argument
+          //! let curried = curry!(|a: i32, b: NonClone| a + b.0);
+          //!
+          //! // Error: NonClone as non-last argument
+          //! // let curried = curry!(|a: NonClone, b: i32| a.0 + b);
+          //! ```
+
+      - step: 2
+        description: |
+          lambars-derive/src/lib.rs の curry! ドキュメントを充実。
+          両形式の使用例、制限事項、移行ガイドを追加。
+        code_outline: |
+          /// # Migration from curry2!/curry3!/etc.
+          ///
+          /// If you were using the numbered curry macros:
+          ///
+          /// ## Option 1: Function name + arity form (simpler)
+          ///
+          /// ```rust,ignore
+          /// // Before
+          /// use lambars::curry2;
+          /// fn add(a: i32, b: i32) -> i32 { a + b }
+          /// let curried = curry2!(add);
+          ///
+          /// // After
+          /// use lambars::curry;
+          /// fn add(a: i32, b: i32) -> i32 { a + b }
+          /// let curried = curry!(add, 2);
+          /// ```
+          ///
+          /// ## Option 2: Closure form
+          ///
+          /// ```rust,ignore
+          /// // Before
+          /// use lambars::curry2;
+          /// fn add(a: i32, b: i32) -> i32 { a + b }
+          /// let curried = curry2!(add);
+          ///
+          /// // After
+          /// use lambars::curry;
+          /// fn add(a: i32, b: i32) -> i32 { a + b }
+          /// let curried = curry!(|a, b| add(a, b));
+          /// ```
+
+    tests:
+      - name: test_documentation
+        description: ドキュメントテスト
+        test_type: unit
+        code_outline: |
+          // cargo doc --no-deps でドキュメントがビルドできることを確認
+          // cargo test --doc でドキュメントテストが通ることを確認
+
+    dependencies:
+      - impl_compose_pipe_integration
+
+# テスト戦略
+test_strategy:
+  unit_tests:
+    location: lambars-derive/src/curry.rs
+    description: |
+      curry モジュール内のユニットテスト。
+      - モジュールのコンパイル確認
+      - 内部関数の動作確認（可能な範囲で）
+
+  integration_tests:
+    location: tests/
+    description: |
+      curry! マクロの統合テスト。
+      - tests/curry_tests.rs: 基本機能テスト（両形式）
+      - tests/curry_compose_integration_tests.rs: compose!/pipe! との統合テスト（両形式）
+
+      **重要**: 統合テストは tests/（lambars 側）に配置する。
+      lambars-derive/tests/ に配置すると、lambars::compose! などを使用する際に
+      循環依存が発生するため。
+
+      全てのテストは rstest を使用。
+      #[test] は使用しない（trybuild テストランナーを除く）。
+
+      **v1.3.0追加**:
+      - クロージャ形式と関数名+引数数形式の両方に対するテストを含める
+      - 両形式の同等性を検証するテストを含める
+      - モジュールパス付き関数のテストを含める
+
+  compile_fail_tests:
+    location: tests/compile_fail/
+    description: |
+      trybuild を使用した compile_fail テスト。
+
+      **クロージャ形式のエラー:**
+      - tests/compile_fail/curry_single_argument.rs: 1引数クロージャのエラー
+      - tests/compile_fail/curry_zero_arguments.rs: 0引数クロージャのエラー
+
+      **関数名+引数数形式のエラー:**
+      - tests/compile_fail/curry_function_without_arity.rs: 関数名のみ（引数数なし）のエラー
+      - tests/compile_fail/curry_invalid_arity_type.rs: 引数数が整数リテラルでないエラー
+      - tests/compile_fail/curry_function_arity_one.rs: 引数数が1のエラー
+      - tests/compile_fail/curry_function_arity_zero.rs: 引数数が0のエラー
+
+      trybuild テストランナー: tests/curry_compile_fail_tests.rs
+
+      **注意**: trybuild テストランナーは #[test] を使用する（例外）。
+      trybuild は #[test] との組み合わせが標準的な使い方であり、
+      rstest との互換性が低いため。
+
+# 完了条件
+acceptance_criteria:
+  # クロージャ形式
+  - curry! マクロがクロージャ形式（curry!(|a, b| body)）で2引数以上のクロージャに対して動作すること
+  - クロージャ式の引数数を自動検出できること
+
+  # 関数名+引数数形式
+  - curry! マクロが関数名+引数数形式（curry!(function_name, arity)）で動作すること
+  - モジュールパス付き関数（module::function, Type::method）をサポートすること
+
+  # 両形式の共通
+  - 両形式が同等の結果を生成すること（Form Equivalence）
+  - 部分適用が複数回再利用可能であること
+  - compose! / pipe! との組み合わせが動作すること
+
+  # エラーハンドリング
+  - 1引数以下のクロージャに対して明確なエラーメッセージが表示されること
+  - 関数名のみ（引数数なし）に対して明確なエラーメッセージが表示されること
+  - 引数数が整数リテラルでない場合に明確なエラーメッセージが表示されること
+
+  # 既存機能の削除と移行
+  - 既存の curry2! ~ curry6! が削除されていること
+  - use lambars::curry; でマクロを使用できること
+
+  # 品質基準
+  - ドキュメントが両形式について更新されていること
+  - cargo check が通過すること
+  - cargo clippy --all-features --all-targets -- -D warnings が通過すること
+  - cargo test が通過すること
+  - cargo doc --no-deps が通過すること
+  - lambars-derive/src/curry.rs のカバレッジ 100% であること
