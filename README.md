@@ -58,6 +58,7 @@ lambars = { version = "0.1.0", features = ["typeclass", "persistent", "effect"] 
 | `derive`     | Derive macros for Lens/Prism             | `optics`, `lambars-derive`                                                             |
 | `effect`     | Effect system                            | `typeclass`, `control`                                                                 |
 | `async`      | Async support (AsyncIO)                  | `effect`, `tokio`, `futures`                                                           |
+| `serde`      | Serialization/Deserialization support    | `serde`                                                                                |
 
 ## Quick Start
 
