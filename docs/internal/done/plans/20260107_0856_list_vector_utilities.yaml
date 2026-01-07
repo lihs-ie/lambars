@@ -1,0 +1,1003 @@
+# Issue 6: List/Vector ユーティリティ操作 実装計画
+#
+# 要件定義: docs/internal/requirements/20260107_0853_list_vector_utilities.yaml
+# 技術要件:
+#   - Rust: 1.92.0
+#   - edition: 2024
+#   - testing: rstest
+#
+# 実装方針:
+#   1. TDD（テスト駆動開発）でテストを先に書く
+#   2. 既存の実装パターン（Clone制約、Option<T>）に従う
+#   3. PersistentList と PersistentVector を並行して実装
+
+version: "1.0.0"
+name: "List/Vector Utility Operations Implementation Plan"
+requirement_file: "docs/internal/requirements/20260107_0853_list_vector_utilities.yaml"
+
+# 実装順序の概要
+implementation_order:
+  - step: 1
+    name: "基本スライシング操作"
+    items:
+      - take (PersistentList, PersistentVector)
+      - drop_first (PersistentList, PersistentVector)
+      - split_at (PersistentList, PersistentVector)
+
+  - step: 2
+    name: "検索操作"
+    items:
+      - find_index (PersistentList, PersistentVector)
+
+  - step: 3
+    name: "畳み込み拡張"
+    items:
+      - fold_left1 (PersistentList, PersistentVector)
+      - fold_right1 (PersistentList, PersistentVector)
+      - scan_left (PersistentList, PersistentVector)
+
+  - step: 4
+    name: "分割・結合操作"
+    items:
+      - partition (PersistentList, PersistentVector)
+      - zip (PersistentList, PersistentVector)
+      - unzip (PersistentList, PersistentVector)
+
+  - step: 5
+    name: "挿入操作"
+    items:
+      - intersperse (PersistentList, PersistentVector)
+      - intercalate (PersistentList, PersistentVector)
+
+# 実装計画詳細
+implementation_plan:
+  # ============================================================================
+  # 1. take - 先頭 n 要素を取得
+  # ============================================================================
+  - id: impl_take
+    requirement_id: take
+    name: "take implementation"
+    priority: 1
+    description: |
+      先頭から n 要素を取得する。n がリストの長さを超える場合は全要素を返す。
+
+    files:
+      - path: src/persistent/list.rs
+        description: PersistentList への take 実装
+      - path: src/persistent/vector.rs
+        description: PersistentVector への take 実装
+
+    implementation_steps:
+      - step: 1
+        description: PersistentList::take の実装
+        code_outline: |
+          impl<T: Clone> PersistentList<T> {
+              pub fn take(&self, count: usize) -> Self {
+                  let actual_count = count.min(self.len());
+                  self.iter().take(actual_count).cloned().collect()
+              }
+          }
+
+      - step: 2
+        description: PersistentVector::take の実装
+        code_outline: |
+          impl<T: Clone> PersistentVector<T> {
+              pub fn take(&self, count: usize) -> Self {
+                  let actual_count = count.min(self.len());
+                  self.slice(0, actual_count)
+              }
+          }
+
+    tests:
+      - name: test_take_basic
+        description: 基本的な take 動作
+        test_type: unit
+      - name: test_take_empty
+        description: 空リストに対する take
+        test_type: unit
+      - name: test_take_zero
+        description: take(0) の動作
+        test_type: unit
+      - name: test_take_exceeds_length
+        description: n > length の場合
+        test_type: unit
+      - name: test_take_drop_split_law
+        description: 分解則 xs == take(n, xs).append(drop_first(n, xs))
+        test_type: unit
+
+    dependencies: []
+
+  # ============================================================================
+  # 2. drop_first - 先頭 n 要素をスキップ
+  # ============================================================================
+  - id: impl_drop_first
+    requirement_id: drop_first
+    name: "drop_first implementation"
+    priority: 1
+    description: |
+      先頭から n 要素をスキップし、残りを返す。
+
+    files:
+      - path: src/persistent/list.rs
+        description: PersistentList への drop_first 実装
+      - path: src/persistent/vector.rs
+        description: PersistentVector への drop_first 実装
+
+    implementation_steps:
+      - step: 1
+        description: PersistentList::drop_first の実装（構造共有を活用）
+        code_outline: |
+          impl<T: Clone> PersistentList<T> {
+              pub fn drop_first(&self, count: usize) -> Self {
+                  let mut current = self.clone();
+                  for _ in 0..count.min(self.len()) {
+                      current = current.tail();
+                  }
+                  current
+              }
+          }
+
+      - step: 2
+        description: PersistentVector::drop_first の実装
+        code_outline: |
+          impl<T: Clone> PersistentVector<T> {
+              pub fn drop_first(&self, count: usize) -> Self {
+                  if count >= self.len() {
+                      Self::new()
+                  } else {
+                      self.slice(count, self.len())
+                  }
+              }
+          }
+
+    tests:
+      - name: test_drop_first_basic
+        description: 基本的な drop_first 動作
+        test_type: unit
+      - name: test_drop_first_empty
+        description: 空リストに対する drop_first
+        test_type: unit
+      - name: test_drop_first_zero
+        description: drop_first(0) の動作
+        test_type: unit
+      - name: test_drop_first_exceeds_length
+        description: n >= length の場合
+        test_type: unit
+
+    dependencies: []
+
+  # ============================================================================
+  # 3. split_at - 指定位置で分割
+  # ============================================================================
+  - id: impl_split_at
+    requirement_id: split_at
+    name: "split_at implementation"
+    priority: 1
+    description: |
+      指定したインデックスでリストを2つに分割する。
+
+    files:
+      - path: src/persistent/list.rs
+        description: PersistentList への split_at 実装
+      - path: src/persistent/vector.rs
+        description: PersistentVector への split_at 実装
+
+    implementation_steps:
+      - step: 1
+        description: PersistentList::split_at の実装
+        code_outline: |
+          impl<T: Clone> PersistentList<T> {
+              pub fn split_at(&self, index: usize) -> (Self, Self) {
+                  (self.take(index), self.drop_first(index))
+              }
+          }
+
+      - step: 2
+        description: PersistentVector::split_at の実装
+        code_outline: |
+          impl<T: Clone> PersistentVector<T> {
+              pub fn split_at(&self, index: usize) -> (Self, Self) {
+                  (self.take(index), self.drop_first(index))
+              }
+          }
+
+    tests:
+      - name: test_split_at_basic
+        description: 基本的な split_at 動作
+        test_type: unit
+      - name: test_split_at_zero
+        description: split_at(0) の動作
+        test_type: unit
+      - name: test_split_at_length
+        description: split_at(length) の動作
+        test_type: unit
+      - name: test_split_at_law
+        description: take/drop_first との等価性法則
+        test_type: unit
+
+    dependencies:
+      - impl_take
+      - impl_drop_first
+
+  # ============================================================================
+  # 4. find_index - 述語に基づく検索
+  # ============================================================================
+  - id: impl_find_index
+    requirement_id: find_index
+    name: "find_index implementation"
+    priority: 2
+    description: |
+      述語を満たす最初の要素のインデックスを返す。
+
+    files:
+      - path: src/persistent/list.rs
+        description: PersistentList への find_index 実装
+      - path: src/persistent/vector.rs
+        description: PersistentVector への find_index 実装
+
+    implementation_steps:
+      - step: 1
+        description: PersistentList::find_index の実装
+        code_outline: |
+          impl<T> PersistentList<T> {
+              pub fn find_index<P>(&self, predicate: P) -> Option<usize>
+              where
+                  P: Fn(&T) -> bool,
+              {
+                  self.iter().position(|x| predicate(x))
+              }
+          }
+
+      - step: 2
+        description: PersistentVector::find_index の実装
+        code_outline: |
+          impl<T> PersistentVector<T> {
+              pub fn find_index<P>(&self, predicate: P) -> Option<usize>
+              where
+                  P: Fn(&T) -> bool,
+              {
+                  self.iter().position(|x| predicate(x))
+              }
+          }
+
+    tests:
+      - name: test_find_index_found
+        description: 要素が見つかる場合
+        test_type: unit
+      - name: test_find_index_not_found
+        description: 要素が見つからない場合
+        test_type: unit
+      - name: test_find_index_empty
+        description: 空リストに対する検索
+        test_type: unit
+      - name: test_find_index_first_match
+        description: 複数一致時に最初のインデックスを返す
+        test_type: unit
+
+    dependencies: []
+
+  # ============================================================================
+  # 5. fold_left1 - 初期値なしの左畳み込み
+  # ============================================================================
+  - id: impl_fold_left1
+    requirement_id: fold_left1
+    name: "fold_left1 implementation"
+    priority: 3
+    description: |
+      初期値なしの左畳み込み。空リストの場合は None を返す。
+
+    files:
+      - path: src/persistent/list.rs
+        description: PersistentList への fold_left1 実装
+      - path: src/persistent/vector.rs
+        description: PersistentVector への fold_left1 実装
+
+    implementation_steps:
+      - step: 1
+        description: PersistentList::fold_left1 の実装
+        code_outline: |
+          impl<T: Clone> PersistentList<T> {
+              pub fn fold_left1<F>(&self, mut function: F) -> Option<T>
+              where
+                  F: FnMut(T, T) -> T,
+              {
+                  let mut iter = self.iter();
+                  let initial = iter.next()?.clone();
+                  Some(iter.cloned().fold(initial, function))
+              }
+          }
+
+      - step: 2
+        description: PersistentVector::fold_left1 の実装
+        code_outline: |
+          impl<T: Clone> PersistentVector<T> {
+              pub fn fold_left1<F>(&self, mut function: F) -> Option<T>
+              where
+                  F: FnMut(T, T) -> T,
+              {
+                  let mut iter = self.iter();
+                  let initial = iter.next()?.clone();
+                  Some(iter.cloned().fold(initial, function))
+              }
+          }
+
+    tests:
+      - name: test_fold_left1_sum
+        description: 合計計算
+        test_type: unit
+      - name: test_fold_left1_single
+        description: 単一要素
+        test_type: unit
+      - name: test_fold_left1_empty
+        description: 空リスト（None を返す）
+        test_type: unit
+      - name: test_fold_left1_order
+        description: 左から右への順序
+        test_type: unit
+
+    dependencies: []
+
+  # ============================================================================
+  # 6. fold_right1 - 初期値なしの右畳み込み
+  # ============================================================================
+  - id: impl_fold_right1
+    requirement_id: fold_right1
+    name: "fold_right1 implementation"
+    priority: 3
+    description: |
+      初期値なしの右畳み込み。空リストの場合は None を返す。
+
+    files:
+      - path: src/persistent/list.rs
+        description: PersistentList への fold_right1 実装
+      - path: src/persistent/vector.rs
+        description: PersistentVector への fold_right1 実装
+
+    implementation_steps:
+      - step: 1
+        description: |
+          PersistentList::fold_right1 の実装
+
+          注意: 逆順イテレータに対して fold を使用。
+          - elements.into_iter().rev() で末尾から先頭への順序に反転
+          - iter.next() で本来の末尾要素を初期値として取得
+          - 残りの要素を fold で処理（既に逆順なので fold で正しい）
+
+          rfold を使用すると二重に反転してしまうため、fold が正しい選択。
+        code_outline: |
+          impl<T: Clone> PersistentList<T> {
+              pub fn fold_right1<F>(&self, mut function: F) -> Option<T>
+              where
+                  F: FnMut(T, T) -> T,
+              {
+                  let elements: Vec<T> = self.iter().cloned().collect();
+                  let mut iter = elements.into_iter().rev();
+                  let initial = iter.next()?;
+                  Some(iter.fold(initial, |accumulator, x| function(x, accumulator)))
+              }
+          }
+
+      - step: 2
+        description: |
+          PersistentVector::fold_right1 の実装
+
+          PersistentList と同様の実装。逆順イテレータに fold を使用。
+        code_outline: |
+          impl<T: Clone> PersistentVector<T> {
+              pub fn fold_right1<F>(&self, mut function: F) -> Option<T>
+              where
+                  F: FnMut(T, T) -> T,
+              {
+                  let elements: Vec<T> = self.iter().cloned().collect();
+                  let mut iter = elements.into_iter().rev();
+                  let initial = iter.next()?;
+                  Some(iter.fold(initial, |accumulator, x| function(x, accumulator)))
+              }
+          }
+
+    tests:
+      - name: test_fold_right1_basic
+        description: 基本的な右畳み込み
+        test_type: unit
+      - name: test_fold_right1_single
+        description: 単一要素
+        test_type: unit
+      - name: test_fold_right1_empty
+        description: 空リスト（None を返す）
+        test_type: unit
+      - name: test_fold_right1_order
+        description: 右から左への順序
+        test_type: unit
+
+    dependencies: []
+
+  # ============================================================================
+  # 7. scan_left - 中間結果を保持する畳み込み
+  # ============================================================================
+  - id: impl_scan_left
+    requirement_id: scan_left
+    name: "scan_left implementation"
+    priority: 3
+    description: |
+      左畳み込みの各ステップの中間結果を保持。初期値を含む（Haskell準拠）。
+
+    files:
+      - path: src/persistent/list.rs
+        description: PersistentList への scan_left 実装
+      - path: src/persistent/vector.rs
+        description: PersistentVector への scan_left 実装
+
+    implementation_steps:
+      - step: 1
+        description: PersistentList::scan_left の実装
+        code_outline: |
+          impl<T> PersistentList<T> {
+              pub fn scan_left<B, F>(&self, initial: B, mut function: F) -> PersistentList<B>
+              where
+                  B: Clone,
+                  F: FnMut(B, &T) -> B,
+              {
+                  let mut results = vec![initial.clone()];
+                  let mut accumulator = initial;
+                  for element in self.iter() {
+                      accumulator = function(accumulator, element);
+                      results.push(accumulator.clone());
+                  }
+                  results.into_iter().collect()
+              }
+          }
+
+      - step: 2
+        description: PersistentVector::scan_left の実装
+        code_outline: |
+          impl<T> PersistentVector<T> {
+              pub fn scan_left<B, F>(&self, initial: B, mut function: F) -> PersistentVector<B>
+              where
+                  B: Clone,
+                  F: FnMut(B, &T) -> B,
+              {
+                  let mut results = Vec::with_capacity(self.len() + 1);
+                  results.push(initial.clone());
+                  let mut accumulator = initial;
+                  for element in self.iter() {
+                      accumulator = function(accumulator, element);
+                      results.push(accumulator.clone());
+                  }
+                  results.into_iter().collect()
+              }
+          }
+
+    tests:
+      - name: test_scan_left_running_sum
+        description: 累積和
+        test_type: unit
+      - name: test_scan_left_empty
+        description: 空リスト（初期値のみ）
+        test_type: unit
+      - name: test_scan_left_length
+        description: 結果の長さが n+1
+        test_type: unit
+      - name: test_scan_left_first_last
+        description: 先頭が初期値、末尾が fold_left の結果
+        test_type: unit
+
+    dependencies: []
+
+  # ============================================================================
+  # 8. partition - 述語で分割
+  # ============================================================================
+  - id: impl_partition
+    requirement_id: partition
+    name: "partition implementation"
+    priority: 4
+    description: |
+      述語に基づいてリストを2つに分割する。
+
+    files:
+      - path: src/persistent/list.rs
+        description: PersistentList への partition 実装
+      - path: src/persistent/vector.rs
+        description: PersistentVector への partition 実装
+
+    implementation_steps:
+      - step: 1
+        description: PersistentList::partition の実装
+        code_outline: |
+          impl<T: Clone> PersistentList<T> {
+              pub fn partition<P>(&self, predicate: P) -> (Self, Self)
+              where
+                  P: Fn(&T) -> bool,
+              {
+                  let mut true_elements = Vec::new();
+                  let mut false_elements = Vec::new();
+                  for element in self.iter() {
+                      if predicate(element) {
+                          true_elements.push(element.clone());
+                      } else {
+                          false_elements.push(element.clone());
+                      }
+                  }
+                  (true_elements.into_iter().collect(), false_elements.into_iter().collect())
+              }
+          }
+
+      - step: 2
+        description: PersistentVector::partition の実装
+        code_outline: |
+          impl<T: Clone> PersistentVector<T> {
+              pub fn partition<P>(&self, predicate: P) -> (Self, Self)
+              where
+                  P: Fn(&T) -> bool,
+              {
+                  let mut true_elements = Vec::new();
+                  let mut false_elements = Vec::new();
+                  for element in self.iter() {
+                      if predicate(element) {
+                          true_elements.push(element.clone());
+                      } else {
+                          false_elements.push(element.clone());
+                      }
+                  }
+                  (true_elements.into_iter().collect(), false_elements.into_iter().collect())
+              }
+          }
+
+    tests:
+      - name: test_partition_even_odd
+        description: 偶数・奇数での分割
+        test_type: unit
+      - name: test_partition_empty
+        description: 空リスト
+        test_type: unit
+      - name: test_partition_all_true
+        description: 全て述語を満たす
+        test_type: unit
+      - name: test_partition_all_false
+        description: 全て述語を満たさない
+        test_type: unit
+      - name: test_partition_completeness
+        description: 完全性法則（要素数の合計）
+        test_type: unit
+
+    dependencies: []
+
+  # ============================================================================
+  # 9. zip - 2つのリストを結合
+  # ============================================================================
+  - id: impl_zip
+    requirement_id: zip
+    name: "zip implementation"
+    priority: 4
+    description: |
+      2つのリストを対応する位置の要素をペアにして結合する。
+
+    files:
+      - path: src/persistent/list.rs
+        description: PersistentList への zip 実装
+      - path: src/persistent/vector.rs
+        description: PersistentVector への zip 実装
+
+    implementation_steps:
+      - step: 1
+        description: PersistentList::zip の実装
+        code_outline: |
+          impl<T: Clone> PersistentList<T> {
+              pub fn zip<U: Clone>(&self, other: &PersistentList<U>) -> PersistentList<(T, U)> {
+                  self.iter()
+                      .zip(other.iter())
+                      .map(|(a, b)| (a.clone(), b.clone()))
+                      .collect()
+              }
+          }
+
+      - step: 2
+        description: PersistentVector::zip の実装
+        code_outline: |
+          impl<T: Clone> PersistentVector<T> {
+              pub fn zip<U: Clone>(&self, other: &PersistentVector<U>) -> PersistentVector<(T, U)> {
+                  self.iter()
+                      .zip(other.iter())
+                      .map(|(a, b)| (a.clone(), b.clone()))
+                      .collect()
+              }
+          }
+
+    tests:
+      - name: test_zip_same_length
+        description: 同じ長さのリスト
+        test_type: unit
+      - name: test_zip_different_length
+        description: 異なる長さのリスト
+        test_type: unit
+      - name: test_zip_empty
+        description: 空リストとの zip
+        test_type: unit
+      - name: test_zip_length_law
+        description: 長さの法則
+        test_type: unit
+      - name: test_zip_unzip_inverse
+        description: zip/unzip の逆関係 zip(unzip(xys).0, unzip(xys).1) == xys
+        test_type: unit
+
+    dependencies: []
+
+  # ============================================================================
+  # 10. unzip - ペアのリストを分離
+  # ============================================================================
+  - id: impl_unzip
+    requirement_id: unzip
+    name: "unzip implementation"
+    priority: 4
+    description: |
+      ペアのリストを2つのリストに分離する。
+      Haskell の unzip :: [(a, b)] -> ([a], [b]) に忠実に、
+      PersistentList<(A, B)> / PersistentVector<(A, B)> に対する特殊化された impl として実装。
+
+    files:
+      - path: src/persistent/list.rs
+        description: PersistentList<(A, B)> への unzip 実装
+      - path: src/persistent/vector.rs
+        description: PersistentVector<(A, B)> への unzip 実装
+
+    implementation_steps:
+      - step: 1
+        description: PersistentList<(A, B)>::unzip の実装
+        code_outline: |
+          impl<A: Clone, B: Clone> PersistentList<(A, B)> {
+              pub fn unzip(&self) -> (PersistentList<A>, PersistentList<B>) {
+                  let mut first = Vec::new();
+                  let mut second = Vec::new();
+                  for (a, b) in self.iter() {
+                      first.push(a.clone());
+                      second.push(b.clone());
+                  }
+                  (first.into_iter().collect(), second.into_iter().collect())
+              }
+          }
+
+      - step: 2
+        description: PersistentVector<(A, B)>::unzip の実装
+        code_outline: |
+          impl<A: Clone, B: Clone> PersistentVector<(A, B)> {
+              pub fn unzip(&self) -> (PersistentVector<A>, PersistentVector<B>) {
+                  let mut first = Vec::with_capacity(self.len());
+                  let mut second = Vec::with_capacity(self.len());
+                  for (a, b) in self.iter() {
+                      first.push(a.clone());
+                      second.push(b.clone());
+                  }
+                  (first.into_iter().collect(), second.into_iter().collect())
+              }
+          }
+
+    tests:
+      - name: test_unzip_basic
+        description: 基本的な unzip
+        test_type: unit
+      - name: test_unzip_empty
+        description: 空リスト
+        test_type: unit
+      - name: test_unzip_length_preservation
+        description: 長さの保存
+        test_type: unit
+      - name: test_zip_unzip_inverse
+        description: zip の逆
+        test_type: unit
+
+    dependencies:
+      - impl_zip
+
+  # ============================================================================
+  # 11. intersperse - 要素間に値を挿入
+  # ============================================================================
+  - id: impl_intersperse
+    requirement_id: intersperse
+    name: "intersperse implementation"
+    priority: 5
+    description: |
+      リストの各要素の間に指定した値を挿入する。
+
+    files:
+      - path: src/persistent/list.rs
+        description: PersistentList への intersperse 実装
+      - path: src/persistent/vector.rs
+        description: PersistentVector への intersperse 実装
+
+    implementation_steps:
+      - step: 1
+        description: PersistentList::intersperse の実装
+        code_outline: |
+          impl<T: Clone> PersistentList<T> {
+              pub fn intersperse(&self, separator: T) -> Self {
+                  if self.len() <= 1 {
+                      return self.clone();
+                  }
+                  let mut result = Vec::with_capacity(2 * self.len() - 1);
+                  let mut first = true;
+                  for element in self.iter() {
+                      if !first {
+                          result.push(separator.clone());
+                      }
+                      result.push(element.clone());
+                      first = false;
+                  }
+                  result.into_iter().collect()
+              }
+          }
+
+      - step: 2
+        description: PersistentVector::intersperse の実装
+        code_outline: |
+          impl<T: Clone> PersistentVector<T> {
+              pub fn intersperse(&self, separator: T) -> Self {
+                  if self.len() <= 1 {
+                      return self.clone();
+                  }
+                  let mut result = Vec::with_capacity(2 * self.len() - 1);
+                  let mut first = true;
+                  for element in self.iter() {
+                      if !first {
+                          result.push(separator.clone());
+                      }
+                      result.push(element.clone());
+                      first = false;
+                  }
+                  result.into_iter().collect()
+              }
+          }
+
+    tests:
+      - name: test_intersperse_basic
+        description: 基本的な intersperse
+        test_type: unit
+      - name: test_intersperse_single
+        description: 単一要素（変化なし）
+        test_type: unit
+      - name: test_intersperse_empty
+        description: 空リスト
+        test_type: unit
+      - name: test_intersperse_length
+        description: 長さの法則 (2n-1)
+        test_type: unit
+
+    dependencies: []
+
+  # ============================================================================
+  # 12. intercalate - リスト間に値を挿入してフラット化
+  # ============================================================================
+  - id: impl_intercalate
+    requirement_id: intercalate
+    name: "intercalate implementation"
+    priority: 5
+    description: |
+      リストのリストの間に指定したリストを挿入し、結果をフラット化する。
+      PersistentList<PersistentList<T>> / PersistentVector<PersistentVector<T>> に対するメソッドとして実装。
+
+    files:
+      - path: src/persistent/list.rs
+        description: PersistentList<PersistentList<T>> への intercalate 実装
+      - path: src/persistent/vector.rs
+        description: PersistentVector<PersistentVector<T>> への intercalate 実装
+
+    implementation_steps:
+      - step: 1
+        description: PersistentList<PersistentList<T>>::intercalate の実装
+        code_outline: |
+          impl<T: Clone> PersistentList<PersistentList<T>> {
+              pub fn intercalate(&self, separator: &PersistentList<T>) -> PersistentList<T> {
+                  if self.is_empty() {
+                      return PersistentList::new();
+                  }
+                  let mut result = Vec::new();
+                  let mut first = true;
+                  for list in self.iter() {
+                      if !first {
+                          result.extend(separator.iter().cloned());
+                      }
+                      result.extend(list.iter().cloned());
+                      first = false;
+                  }
+                  result.into_iter().collect()
+              }
+          }
+
+      - step: 2
+        description: PersistentVector<PersistentVector<T>>::intercalate の実装
+        code_outline: |
+          impl<T: Clone> PersistentVector<PersistentVector<T>> {
+              pub fn intercalate(&self, separator: &PersistentVector<T>) -> PersistentVector<T> {
+                  if self.is_empty() {
+                      return PersistentVector::new();
+                  }
+                  let mut result = Vec::new();
+                  let mut first = true;
+                  for vector in self.iter() {
+                      if !first {
+                          result.extend(separator.iter().cloned());
+                      }
+                      result.extend(vector.iter().cloned());
+                      first = false;
+                  }
+                  result.into_iter().collect()
+              }
+          }
+
+    tests:
+      - name: test_intercalate_basic
+        description: 基本的な intercalate
+        test_type: unit
+      - name: test_intercalate_empty
+        description: 空のリストのリスト
+        test_type: unit
+      - name: test_intercalate_single
+        description: 単一リスト
+        test_type: unit
+      - name: test_intercalate_empty_separator
+        description: 空のセパレータ
+        test_type: unit
+
+    dependencies:
+      - impl_intersperse
+
+# テスト戦略
+test_strategy:
+  unit_tests:
+    location: src/persistent/list.rs, src/persistent/vector.rs
+    description: |
+      各メソッドに対するユニットテストを実装ファイル内の #[cfg(test)] モジュールに記述。
+      rstest を使用してパラメータ化テストを実装。
+
+  integration_tests:
+    location: tests/persistent_list_tests.rs, tests/persistent_vector_tests.rs
+    description: |
+      複数の操作を組み合わせた統合テストを記述。
+      既存のテストファイルに追加。
+      - 型クラスとの統合テスト（Functor, Foldable との組み合わせ）
+      - 型テスト（プリミティブ型 i32/char/bool、String、カスタム構造体）
+
+  property_based_tests:
+    location: tests/persistent_list_laws.rs, tests/persistent_vector_laws.rs
+    description: |
+      proptest を使用したプロパティベーステストで代数的法則を検証。
+      PersistentList と PersistentVector の両方に対して同一の法則をテストする。
+    tests:
+      # PersistentList 用テスト
+      - name: test_list_take_drop_split_law
+        description: take/drop_first の分解則 (PersistentList)
+        property: |
+          forall xs: PersistentList<i32>, n: usize.
+            xs == xs.take(n).append(&xs.drop_first(n))
+
+      - name: test_list_zip_unzip_left_inverse
+        description: zip/unzip の左逆元 (PersistentList)
+        property: |
+          forall xys: PersistentList<(i32, char)>.
+            let (xs, ys) = xys.unzip();
+            xs.zip(&ys) == xys
+
+      - name: test_list_zip_unzip_right_inverse
+        description: zip/unzip の右逆元 (PersistentList)
+        property: |
+          forall xs: PersistentList<i32>, ys: PersistentList<char>.
+            let min_len = xs.len().min(ys.len());
+            let (xs2, ys2) = xs.zip(&ys).unzip();
+            xs2 == xs.take(min_len) && ys2 == ys.take(min_len)
+
+      - name: test_list_scan_left_length
+        description: scan_left の長さ性質 (PersistentList)
+        property: |
+          forall xs: PersistentList<i32>, init: i32.
+            xs.scan_left(init, |a, b| a + b).len() == xs.len() + 1
+
+      - name: test_list_partition_completeness
+        description: partition の完全性 (PersistentList)
+        property: |
+          forall xs: PersistentList<i32>.
+            let (t, f) = xs.partition(|x| x % 2 == 0);
+            t.len() + f.len() == xs.len()
+
+      - name: test_list_partition_correctness
+        description: partition の正確性 (PersistentList)
+        property: |
+          forall xs: PersistentList<i32>.
+            let (t, f) = xs.partition(|x| x % 2 == 0);
+            t.iter().all(|x| x % 2 == 0) && f.iter().all(|x| x % 2 != 0)
+
+      - name: test_list_partition_order_preservation
+        description: partition の順序保持 (PersistentList)
+        property: |
+          forall xs: PersistentList<i32>.
+            let (t, f) = xs.partition(|x| x % 2 == 0);
+            t の要素が xs 内での相対順序を保持 &&
+            f の要素が xs 内での相対順序を保持
+
+      - name: test_list_intersperse_length
+        description: intersperse の長さ性質 (PersistentList)
+        property: |
+          forall xs: PersistentList<i32>, sep: i32.
+            xs.len() > 0 => xs.intersperse(sep).len() == 2 * xs.len() - 1
+            xs.len() == 0 => xs.intersperse(sep).len() == 0
+
+      - name: test_list_intercalate_definition
+        description: intercalate の定義則 (PersistentList)
+        property: |
+          forall lists: PersistentList<PersistentList<i32>>, sep: PersistentList<i32>.
+            lists.intercalate(&sep) == lists.intersperse(sep).flatten()
+
+      # PersistentVector 用テスト
+      - name: test_vector_take_drop_split_law
+        description: take/drop_first の分解則 (PersistentVector)
+        property: |
+          forall xs: PersistentVector<i32>, n: usize.
+            xs == xs.take(n).append(&xs.drop_first(n))
+
+      - name: test_vector_zip_unzip_left_inverse
+        description: zip/unzip の左逆元 (PersistentVector)
+        property: |
+          forall xys: PersistentVector<(i32, char)>.
+            let (xs, ys) = xys.unzip();
+            xs.zip(&ys) == xys
+
+      - name: test_vector_zip_unzip_right_inverse
+        description: zip/unzip の右逆元 (PersistentVector)
+        property: |
+          forall xs: PersistentVector<i32>, ys: PersistentVector<char>.
+            let min_len = xs.len().min(ys.len());
+            let (xs2, ys2) = xs.zip(&ys).unzip();
+            xs2 == xs.take(min_len) && ys2 == ys.take(min_len)
+
+      - name: test_vector_scan_left_length
+        description: scan_left の長さ性質 (PersistentVector)
+        property: |
+          forall xs: PersistentVector<i32>, init: i32.
+            xs.scan_left(init, |a, b| a + b).len() == xs.len() + 1
+
+      - name: test_vector_partition_completeness
+        description: partition の完全性 (PersistentVector)
+        property: |
+          forall xs: PersistentVector<i32>.
+            let (t, f) = xs.partition(|x| x % 2 == 0);
+            t.len() + f.len() == xs.len()
+
+      - name: test_vector_partition_correctness
+        description: partition の正確性 (PersistentVector)
+        property: |
+          forall xs: PersistentVector<i32>.
+            let (t, f) = xs.partition(|x| x % 2 == 0);
+            t.iter().all(|x| x % 2 == 0) && f.iter().all(|x| x % 2 != 0)
+
+      - name: test_vector_partition_order_preservation
+        description: partition の順序保持 (PersistentVector)
+        property: |
+          forall xs: PersistentVector<i32>.
+            let (t, f) = xs.partition(|x| x % 2 == 0);
+            t の要素が xs 内での相対順序を保持 &&
+            f の要素が xs 内での相対順序を保持
+
+      - name: test_vector_intersperse_length
+        description: intersperse の長さ性質 (PersistentVector)
+        property: |
+          forall xs: PersistentVector<i32>, sep: i32.
+            xs.len() > 0 => xs.intersperse(sep).len() == 2 * xs.len() - 1
+            xs.len() == 0 => xs.intersperse(sep).len() == 0
+
+      - name: test_vector_intercalate_definition
+        description: intercalate の定義則 (PersistentVector)
+        property: |
+          forall lists: PersistentVector<PersistentVector<i32>>, sep: PersistentVector<i32>.
+            lists.intercalate(&sep) == lists.intersperse(sep).flatten()
+
+# 完了条件
+acceptance_criteria:
+  - 12個のすべての操作が PersistentList と PersistentVector に実装されている
+  - 各操作に対するユニットテストが存在する
+  - proptest によるプロパティベーステストが実装されている
+  - take/drop_first の分解則が検証されている
+  - zip/unzip の逆関係が検証されている
+  - scan_left の長さ性質（n+1）が検証されている
+  - partition の完全性が検証されている
+  - cargo check が通過すること
+  - cargo clippy --all-features --all-targets -- -D warnings が通過すること
+  - cargo test --all-features が通過すること
+  - cargo test --no-default-features が通過すること
+  - cargo doc --no-deps が通過すること

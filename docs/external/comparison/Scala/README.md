@@ -1468,6 +1468,33 @@ Available AsyncIO methods:
 | `Set[A]` | `PersistentHashSet<A>` | Immutable set |
 | `Set[A].view` | `HashSetView<A>` | Lazy view over set |
 
+### List/Vector Operations
+
+| Scala | lambars | Description |
+|-------|---------|-------------|
+| `list.take(n)` | `PersistentList::take` | Take first n elements |
+| `list.drop(n)` | `PersistentList::drop_first` | Drop first n elements |
+| `list.splitAt(n)` | `PersistentList::split_at` | Split at index |
+| `list.zip(other)` | `PersistentList::zip` | Zip two lists |
+| `list.unzip` | `PersistentList::<(A,B)>::unzip` | Unzip list of pairs |
+| `list.indexWhere(p)` | `PersistentList::find_index` | Find index of first match |
+| `list.reduceLeft(f)` | `PersistentList::fold_left1` | Left fold without initial value |
+| `list.reduceRight(f)` | `PersistentList::fold_right1` | Right fold without initial value |
+| `list.scanLeft(z)(f)` | `PersistentList::scan_left` | Left scan with initial value |
+| `list.partition(p)` | `PersistentList::partition` | Split by predicate |
+| `list.mkString(sep)` | `PersistentList::intersperse` | Insert between elements |
+| `lists.mkString(sep)` | `PersistentList::intercalate` | Insert list between lists and flatten |
+| `vec.take(n)` | `PersistentVector::take` | Take first n elements |
+| `vec.drop(n)` | `PersistentVector::drop_first` | Drop first n elements |
+| `vec.splitAt(n)` | `PersistentVector::split_at` | Split at index |
+| `vec.zip(other)` | `PersistentVector::zip` | Zip two vectors |
+| `vec.unzip` | `PersistentVector::<(A,B)>::unzip` | Unzip vector of pairs |
+| `vec.indexWhere(p)` | `PersistentVector::find_index` | Find index of first match |
+| `vec.reduceLeft(f)` | `PersistentVector::fold_left1` | Left fold without initial value |
+| `vec.reduceRight(f)` | `PersistentVector::fold_right1` | Right fold without initial value |
+| `vec.scanLeft(z)(f)` | `PersistentVector::scan_left` | Left scan with initial value |
+| `vec.partition(p)` | `PersistentVector::partition` | Split by predicate |
+
 ### Code Examples
 
 ```scala

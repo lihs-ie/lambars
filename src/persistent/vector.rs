@@ -386,6 +386,35 @@ impl<T> PersistentVector<T> {
     pub fn iter(&self) -> PersistentVectorIterator<'_, T> {
         PersistentVectorIterator::new(self)
     }
+
+    /// Finds the index of the first element that satisfies the predicate.
+    ///
+    /// Returns `Some(index)` if an element is found, `None` otherwise.
+    ///
+    /// # Arguments
+    ///
+    /// * `predicate` - A function that returns `true` for the target element
+    ///
+    /// # Complexity
+    ///
+    /// O(n) worst case
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentVector;
+    ///
+    /// let vector: PersistentVector<i32> = (1..=5).collect();
+    /// let index = vector.find_index(|x| *x == 3);
+    /// // index = Some(2)
+    /// ```
+    #[must_use]
+    pub fn find_index<P>(&self, predicate: P) -> Option<usize>
+    where
+        P: Fn(&T) -> bool,
+    {
+        self.iter().position(predicate)
+    }
 }
 
 impl<T: Clone> PersistentVector<T> {
@@ -976,6 +1005,350 @@ impl<T: Clone> PersistentVector<T> {
         result
     }
 
+    /// Returns a new vector containing the first `count` elements.
+    ///
+    /// If `count` exceeds the vector's length, returns a copy of the entire vector.
+    ///
+    /// # Arguments
+    ///
+    /// * `count` - The number of elements to take from the front
+    ///
+    /// # Complexity
+    ///
+    /// O(min(n, count))
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentVector;
+    ///
+    /// let vector: PersistentVector<i32> = (1..=5).collect();
+    /// let taken = vector.take(3);
+    /// // taken = [1, 2, 3]
+    ///
+    /// let over = vector.take(10);
+    /// // over = [1, 2, 3, 4, 5] (entire vector)
+    ///
+    /// let zero = vector.take(0);
+    /// // zero = []
+    /// ```
+    #[must_use]
+    pub fn take(&self, count: usize) -> Self {
+        let actual_count = count.min(self.len());
+        self.slice(0, actual_count)
+    }
+
+    /// Returns a new vector with the first `count` elements removed.
+    ///
+    /// If `count` exceeds the vector's length, returns an empty vector.
+    ///
+    /// # Arguments
+    ///
+    /// * `count` - The number of elements to skip from the front
+    ///
+    /// # Complexity
+    ///
+    /// O(n)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentVector;
+    ///
+    /// let vector: PersistentVector<i32> = (1..=5).collect();
+    /// let dropped = vector.drop_first(2);
+    /// // dropped = [3, 4, 5]
+    ///
+    /// let all_dropped = vector.drop_first(10);
+    /// // all_dropped = []
+    ///
+    /// let none_dropped = vector.drop_first(0);
+    /// // none_dropped = [1, 2, 3, 4, 5]
+    /// ```
+    #[must_use]
+    pub fn drop_first(&self, count: usize) -> Self {
+        if count >= self.len() {
+            Self::new()
+        } else {
+            self.slice(count, self.len())
+        }
+    }
+
+    /// Splits the vector at the given index.
+    ///
+    /// Returns a tuple of two vectors: the first contains elements before the index,
+    /// and the second contains elements from the index onward.
+    ///
+    /// This is equivalent to `(self.take(index), self.drop_first(index))`.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - The position at which to split the vector
+    ///
+    /// # Complexity
+    ///
+    /// O(n)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentVector;
+    ///
+    /// let vector: PersistentVector<i32> = (1..=5).collect();
+    /// let (left, right) = vector.split_at(2);
+    /// // left = [1, 2]
+    /// // right = [3, 4, 5]
+    ///
+    /// let (empty_left, all) = vector.split_at(0);
+    /// // empty_left = []
+    /// // all = [1, 2, 3, 4, 5]
+    /// ```
+    #[must_use]
+    pub fn split_at(&self, index: usize) -> (Self, Self) {
+        (self.take(index), self.drop_first(index))
+    }
+
+    /// Folds the vector using the first element as the initial accumulator.
+    ///
+    /// Returns `None` if the vector is empty, otherwise returns `Some(result)`.
+    ///
+    /// # Arguments
+    ///
+    /// * `function` - A function that combines the accumulator with each element
+    ///
+    /// # Complexity
+    ///
+    /// O(n)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentVector;
+    ///
+    /// let vector: PersistentVector<i32> = (1..=5).collect();
+    /// let sum = vector.fold_left1(|accumulator, x| accumulator + x);
+    /// // sum = Some(15)
+    ///
+    /// let empty: PersistentVector<i32> = PersistentVector::new();
+    /// let result = empty.fold_left1(|accumulator, x| accumulator + x);
+    /// // result = None
+    /// ```
+    #[must_use]
+    pub fn fold_left1<F>(&self, mut function: F) -> Option<T>
+    where
+        F: FnMut(T, T) -> T,
+    {
+        let mut iter = self.iter();
+        let first = iter.next()?.clone();
+        Some(iter.fold(first, |accumulator, x| function(accumulator, x.clone())))
+    }
+
+    /// Folds the vector from the right using the last element as the initial accumulator.
+    ///
+    /// Returns `None` if the vector is empty, otherwise returns `Some(result)`.
+    ///
+    /// # Arguments
+    ///
+    /// * `function` - A function that combines each element with the accumulator
+    ///
+    /// # Complexity
+    ///
+    /// O(n)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentVector;
+    ///
+    /// let vector: PersistentVector<i32> = (1..=5).collect();
+    /// let sum = vector.fold_right1(|x, accumulator| x + accumulator);
+    /// // sum = Some(15)
+    ///
+    /// let vector2: PersistentVector<i32> = (1..=4).collect();
+    /// let result = vector2.fold_right1(|x, accumulator| x - accumulator);
+    /// // result = Some(1 - (2 - (3 - 4))) = Some(-2)
+    /// ```
+    #[must_use]
+    pub fn fold_right1<F>(&self, mut function: F) -> Option<T>
+    where
+        F: FnMut(T, T) -> T,
+    {
+        let elements: Vec<T> = self.iter().cloned().collect();
+        let mut iter = elements.into_iter().rev();
+        let last = iter.next()?;
+        Some(iter.fold(last, |accumulator, x| function(x, accumulator)))
+    }
+
+    /// Returns a vector of intermediate accumulator values from a left fold.
+    ///
+    /// The returned vector starts with the initial value and includes each
+    /// intermediate result of applying the function.
+    ///
+    /// # Arguments
+    ///
+    /// * `initial` - The initial accumulator value
+    /// * `function` - A function that combines the accumulator with each element
+    ///
+    /// # Complexity
+    ///
+    /// O(n)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentVector;
+    ///
+    /// let vector: PersistentVector<i32> = (1..=4).collect();
+    /// let scanned = vector.scan_left(0, |accumulator, x| accumulator + x);
+    /// // scanned = [0, 1, 3, 6, 10]
+    ///
+    /// let empty: PersistentVector<i32> = PersistentVector::new();
+    /// let scanned_empty = empty.scan_left(0, |accumulator, x| accumulator + x);
+    /// // scanned_empty = [0]
+    /// ```
+    #[must_use]
+    pub fn scan_left<B, F>(&self, initial: B, mut function: F) -> PersistentVector<B>
+    where
+        B: Clone,
+        F: FnMut(B, &T) -> B,
+    {
+        let mut results = Vec::with_capacity(self.len() + 1);
+        let mut accumulator = initial;
+        results.push(accumulator.clone());
+
+        for element in self {
+            accumulator = function(accumulator, element);
+            results.push(accumulator.clone());
+        }
+
+        results.into_iter().collect()
+    }
+
+    /// Partitions the vector into two vectors based on a predicate.
+    ///
+    /// Returns a tuple where the first vector contains elements for which the
+    /// predicate returns `true`, and the second vector contains elements for
+    /// which it returns `false`. Order is preserved in both vectors.
+    ///
+    /// # Arguments
+    ///
+    /// * `predicate` - A function that returns `true` for elements to include
+    ///   in the first vector
+    ///
+    /// # Complexity
+    ///
+    /// O(n)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentVector;
+    ///
+    /// let vector: PersistentVector<i32> = (1..=6).collect();
+    /// let (evens, odds) = vector.partition(|x| x % 2 == 0);
+    /// // evens = [2, 4, 6]
+    /// // odds = [1, 3, 5]
+    /// ```
+    #[must_use]
+    pub fn partition<P>(&self, predicate: P) -> (Self, Self)
+    where
+        P: Fn(&T) -> bool,
+    {
+        let mut pass = Vec::new();
+        let mut fail = Vec::new();
+
+        for element in self {
+            if predicate(element) {
+                pass.push(element.clone());
+            } else {
+                fail.push(element.clone());
+            }
+        }
+
+        (pass.into_iter().collect(), fail.into_iter().collect())
+    }
+
+    /// Zips this vector with another vector into a vector of pairs.
+    ///
+    /// The resulting vector has the length of the shorter input vector.
+    /// If either vector is empty, returns an empty vector.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The vector to zip with
+    ///
+    /// # Complexity
+    ///
+    /// O(min(n, m)) where n and m are the lengths of the two vectors
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentVector;
+    ///
+    /// let vector1: PersistentVector<i32> = (1..=3).collect();
+    /// let vector2: PersistentVector<char> = vec!['a', 'b', 'c'].into_iter().collect();
+    /// let zipped = vector1.zip(&vector2);
+    /// // zipped = [(1, 'a'), (2, 'b'), (3, 'c')]
+    ///
+    /// // Different lengths
+    /// let short: PersistentVector<i32> = (1..=2).collect();
+    /// let zipped_short = short.zip(&vector2);
+    /// // zipped_short = [(1, 'a'), (2, 'b')]
+    /// ```
+    #[must_use]
+    pub fn zip<U: Clone>(&self, other: &PersistentVector<U>) -> PersistentVector<(T, U)> {
+        self.iter()
+            .zip(other.iter())
+            .map(|(a, b)| (a.clone(), b.clone()))
+            .collect()
+    }
+
+    /// Returns a new vector with the separator inserted between each element.
+    ///
+    /// # Arguments
+    ///
+    /// * `separator` - The element to insert between each pair of elements
+    ///
+    /// # Returns
+    ///
+    /// A new vector with separators inserted between elements. Returns an empty vector
+    /// if the original vector is empty, and returns a single-element vector unchanged.
+    ///
+    /// # Complexity
+    ///
+    /// O(n) time and space
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentVector;
+    ///
+    /// let vector: PersistentVector<i32> = (1..=4).collect();
+    /// let result = vector.intersperse(0);
+    ///
+    /// let collected: Vec<i32> = result.iter().cloned().collect();
+    /// assert_eq!(collected, vec![1, 0, 2, 0, 3, 0, 4]);
+    /// ```
+    #[must_use]
+    pub fn intersperse(&self, separator: T) -> Self {
+        let mut iter = self.iter();
+        let Some(first) = iter.next() else {
+            return Self::new();
+        };
+
+        let result_length = self.len() * 2 - 1;
+        let mut result = Vec::with_capacity(result_length);
+        result.push(first.clone());
+
+        for element in iter {
+            result.push(separator.clone());
+            result.push(element.clone());
+        }
+
+        result.into_iter().collect()
+    }
+
     /// Returns a new vector containing elements from index `start` (inclusive)
     /// to index `end` (exclusive).
     ///
@@ -1021,6 +1394,110 @@ impl<T: Clone> PersistentVector<T> {
             .take(clamped_end - start)
             .cloned()
             .collect()
+    }
+}
+
+// =============================================================================
+// Specialized Methods for Tuple Elements
+// =============================================================================
+
+impl<A: Clone, B: Clone> PersistentVector<(A, B)> {
+    /// Separates a vector of pairs into two vectors.
+    ///
+    /// This is the inverse operation of [`zip`].
+    ///
+    /// # Returns
+    ///
+    /// A tuple containing two vectors: one with all first elements and one with all
+    /// second elements.
+    ///
+    /// # Complexity
+    ///
+    /// O(n) time and space
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentVector;
+    ///
+    /// let pairs: PersistentVector<(i32, char)> =
+    ///     vec![(1, 'a'), (2, 'b'), (3, 'c')].into_iter().collect();
+    /// let (numbers, chars) = pairs.unzip();
+    ///
+    /// let numbers_collected: Vec<i32> = numbers.iter().cloned().collect();
+    /// let chars_collected: Vec<char> = chars.iter().cloned().collect();
+    /// assert_eq!(numbers_collected, vec![1, 2, 3]);
+    /// assert_eq!(chars_collected, vec!['a', 'b', 'c']);
+    /// ```
+    ///
+    /// [`zip`]: PersistentVector::zip
+    #[must_use]
+    pub fn unzip(&self) -> (PersistentVector<A>, PersistentVector<B>) {
+        let mut first_elements = Vec::with_capacity(self.len());
+        let mut second_elements = Vec::with_capacity(self.len());
+        for (a, b) in self {
+            first_elements.push(a.clone());
+            second_elements.push(b.clone());
+        }
+        (
+            first_elements.into_iter().collect(),
+            second_elements.into_iter().collect(),
+        )
+    }
+}
+
+// =============================================================================
+// Specialized Methods for Nested Vectors
+// =============================================================================
+
+impl<T: Clone> PersistentVector<PersistentVector<T>> {
+    /// Inserts a separator vector between each inner vector and flattens the result.
+    ///
+    /// This is equivalent to `intersperse` followed by `flatten`.
+    ///
+    /// # Arguments
+    ///
+    /// * `separator` - The vector to insert between each pair of inner vectors
+    ///
+    /// # Returns
+    ///
+    /// A flattened vector with separators inserted between the original inner vectors.
+    ///
+    /// # Complexity
+    ///
+    /// O(n * m) time and space, where n is the number of inner vectors and m is
+    /// the average length of inner vectors
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentVector;
+    ///
+    /// let inner1: PersistentVector<i32> = vec![1, 2].into_iter().collect();
+    /// let inner2: PersistentVector<i32> = vec![3, 4].into_iter().collect();
+    /// let outer: PersistentVector<PersistentVector<i32>> =
+    ///     vec![inner1, inner2].into_iter().collect();
+    /// let separator: PersistentVector<i32> = vec![0].into_iter().collect();
+    /// let result = outer.intercalate(&separator);
+    ///
+    /// let collected: Vec<i32> = result.iter().cloned().collect();
+    /// assert_eq!(collected, vec![1, 2, 0, 3, 4]);
+    /// ```
+    #[must_use]
+    pub fn intercalate(&self, separator: &PersistentVector<T>) -> PersistentVector<T> {
+        let mut iter = self.iter();
+        let Some(first) = iter.next() else {
+            return PersistentVector::new();
+        };
+
+        let mut result: Vec<T> = first.iter().cloned().collect();
+
+        for inner in iter {
+            result.extend(separator.iter().cloned());
+            result.extend(inner.iter().cloned());
+        }
+
+        result.into_iter().collect()
     }
 }
 
@@ -1916,7 +2393,7 @@ mod tests {
     #[rstest]
     fn test_fold_left() {
         let vector: PersistentVector<i32> = (1..=5).collect();
-        let sum = vector.fold_left(0, |acc, x| acc + x);
+        let sum = vector.fold_left(0, |accumulator, x| accumulator + x);
         assert_eq!(sum, 15);
     }
 
@@ -1932,5 +2409,601 @@ mod tests {
     fn test_monoid_empty() {
         let empty: PersistentVector<i32> = PersistentVector::empty();
         assert!(empty.is_empty());
+    }
+
+    // =========================================================================
+    // take Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_take_basic() {
+        let vector: PersistentVector<i32> = (1..=5).collect();
+        let taken = vector.take(3);
+        let collected: Vec<&i32> = taken.iter().collect();
+        assert_eq!(collected, vec![&1, &2, &3]);
+        assert_eq!(taken.len(), 3);
+    }
+
+    #[rstest]
+    fn test_take_empty() {
+        let vector: PersistentVector<i32> = PersistentVector::new();
+        let taken = vector.take(5);
+        assert!(taken.is_empty());
+        assert_eq!(taken.len(), 0);
+    }
+
+    #[rstest]
+    fn test_take_zero() {
+        let vector: PersistentVector<i32> = (1..=5).collect();
+        let taken = vector.take(0);
+        assert!(taken.is_empty());
+        assert_eq!(taken.len(), 0);
+    }
+
+    #[rstest]
+    fn test_take_exceeds_length() {
+        let vector: PersistentVector<i32> = (1..=3).collect();
+        let taken = vector.take(10);
+        let collected: Vec<&i32> = taken.iter().collect();
+        assert_eq!(collected, vec![&1, &2, &3]);
+        assert_eq!(taken.len(), 3);
+    }
+
+    #[rstest]
+    fn test_take_exact_length() {
+        let vector: PersistentVector<i32> = (1..=5).collect();
+        let taken = vector.take(5);
+        assert_eq!(vector, taken);
+    }
+
+    // =========================================================================
+    // drop_first Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_drop_first_basic() {
+        let vector: PersistentVector<i32> = (1..=5).collect();
+        let dropped = vector.drop_first(2);
+        let collected: Vec<&i32> = dropped.iter().collect();
+        assert_eq!(collected, vec![&3, &4, &5]);
+        assert_eq!(dropped.len(), 3);
+    }
+
+    #[rstest]
+    fn test_drop_first_empty() {
+        let vector: PersistentVector<i32> = PersistentVector::new();
+        let dropped = vector.drop_first(5);
+        assert!(dropped.is_empty());
+        assert_eq!(dropped.len(), 0);
+    }
+
+    #[rstest]
+    fn test_drop_first_zero() {
+        let vector: PersistentVector<i32> = (1..=5).collect();
+        let dropped = vector.drop_first(0);
+        assert_eq!(vector, dropped);
+    }
+
+    #[rstest]
+    fn test_drop_first_exceeds_length() {
+        let vector: PersistentVector<i32> = (1..=3).collect();
+        let dropped = vector.drop_first(10);
+        assert!(dropped.is_empty());
+        assert_eq!(dropped.len(), 0);
+    }
+
+    #[rstest]
+    fn test_drop_first_exact_length() {
+        let vector: PersistentVector<i32> = (1..=5).collect();
+        let dropped = vector.drop_first(5);
+        assert!(dropped.is_empty());
+    }
+
+    // =========================================================================
+    // split_at Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_split_at_basic() {
+        let vector: PersistentVector<i32> = (1..=5).collect();
+        let (left, right) = vector.split_at(2);
+        let left_collected: Vec<&i32> = left.iter().collect();
+        let right_collected: Vec<&i32> = right.iter().collect();
+        assert_eq!(left_collected, vec![&1, &2]);
+        assert_eq!(right_collected, vec![&3, &4, &5]);
+    }
+
+    #[rstest]
+    fn test_split_at_zero() {
+        let vector: PersistentVector<i32> = (1..=5).collect();
+        let (left, right) = vector.split_at(0);
+        assert!(left.is_empty());
+        assert_eq!(right, vector);
+    }
+
+    #[rstest]
+    fn test_split_at_length() {
+        let vector: PersistentVector<i32> = (1..=5).collect();
+        let (left, right) = vector.split_at(5);
+        assert_eq!(left, vector);
+        assert!(right.is_empty());
+    }
+
+    #[rstest]
+    fn test_split_at_exceeds_length() {
+        let vector: PersistentVector<i32> = (1..=3).collect();
+        let (left, right) = vector.split_at(10);
+        assert_eq!(left, vector);
+        assert!(right.is_empty());
+    }
+
+    #[rstest]
+    fn test_split_at_law() {
+        let vector: PersistentVector<i32> = (1..=5).collect();
+        let (left, right) = vector.split_at(3);
+        assert_eq!(left, vector.take(3));
+        assert_eq!(right, vector.drop_first(3));
+    }
+
+    #[rstest]
+    fn test_split_at_empty() {
+        let vector: PersistentVector<i32> = PersistentVector::new();
+        let (left, right) = vector.split_at(2);
+        assert!(left.is_empty());
+        assert!(right.is_empty());
+    }
+
+    // =========================================================================
+    // find_index Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_find_index_found() {
+        let vector: PersistentVector<i32> = (1..=5).collect();
+        let index = vector.find_index(|x| *x > 3);
+        assert_eq!(index, Some(3));
+    }
+
+    #[rstest]
+    fn test_find_index_not_found() {
+        let vector: PersistentVector<i32> = (1..=5).collect();
+        let index = vector.find_index(|x| *x > 10);
+        assert_eq!(index, None);
+    }
+
+    #[rstest]
+    fn test_find_index_empty() {
+        let vector: PersistentVector<i32> = PersistentVector::new();
+        let index = vector.find_index(|x| *x > 0);
+        assert_eq!(index, None);
+    }
+
+    #[rstest]
+    fn test_find_index_first_match() {
+        let vector: PersistentVector<i32> = vec![1, 3, 3, 3, 5].into_iter().collect();
+        let index = vector.find_index(|x| *x == 3);
+        assert_eq!(index, Some(1));
+    }
+
+    #[rstest]
+    fn test_find_index_at_start() {
+        let vector: PersistentVector<i32> = (1..=5).collect();
+        let index = vector.find_index(|x| *x == 1);
+        assert_eq!(index, Some(0));
+    }
+
+    #[rstest]
+    fn test_find_index_at_end() {
+        let vector: PersistentVector<i32> = (1..=5).collect();
+        let index = vector.find_index(|x| *x == 5);
+        assert_eq!(index, Some(4));
+    }
+
+    // =========================================================================
+    // fold_left1 Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_fold_left1_basic() {
+        let vector: PersistentVector<i32> = (1..=5).collect();
+        let sum = vector.fold_left1(|accumulator, x| accumulator + x);
+        assert_eq!(sum, Some(15));
+    }
+
+    #[rstest]
+    fn test_fold_left1_empty() {
+        let vector: PersistentVector<i32> = PersistentVector::new();
+        let result = vector.fold_left1(|accumulator, x| accumulator + x);
+        assert_eq!(result, None);
+    }
+
+    #[rstest]
+    fn test_fold_left1_single_element() {
+        let vector: PersistentVector<i32> = vec![42].into_iter().collect();
+        let result = vector.fold_left1(|accumulator, x| accumulator + x);
+        assert_eq!(result, Some(42));
+    }
+
+    #[rstest]
+    fn test_fold_left1_subtraction() {
+        let vector: PersistentVector<i32> = (1..=4).collect();
+        let result = vector.fold_left1(|accumulator, x| accumulator - x);
+        assert_eq!(result, Some(1 - 2 - 3 - 4));
+    }
+
+    #[rstest]
+    fn test_fold_left1_max() {
+        let vector: PersistentVector<i32> = vec![3, 1, 4, 1, 5, 9, 2, 6].into_iter().collect();
+        let result =
+            vector.fold_left1(|accumulator, x| if accumulator > x { accumulator } else { x });
+        assert_eq!(result, Some(9));
+    }
+
+    // =========================================================================
+    // fold_right1 Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_fold_right1_basic() {
+        let vector: PersistentVector<i32> = (1..=5).collect();
+        let sum = vector.fold_right1(|x, accumulator| x + accumulator);
+        assert_eq!(sum, Some(15));
+    }
+
+    #[rstest]
+    fn test_fold_right1_empty() {
+        let vector: PersistentVector<i32> = PersistentVector::new();
+        let result = vector.fold_right1(|x, accumulator| x + accumulator);
+        assert_eq!(result, None);
+    }
+
+    #[rstest]
+    fn test_fold_right1_single_element() {
+        let vector: PersistentVector<i32> = vec![42].into_iter().collect();
+        let result = vector.fold_right1(|x, accumulator| x + accumulator);
+        assert_eq!(result, Some(42));
+    }
+
+    #[rstest]
+    fn test_fold_right1_subtraction() {
+        let vector: PersistentVector<i32> = (1..=4).collect();
+        let result = vector.fold_right1(|x, accumulator| x - accumulator);
+        assert_eq!(result, Some(1 - (2 - (3 - 4))));
+    }
+
+    #[rstest]
+    fn test_fold_right1_list_construction() {
+        let vector: PersistentVector<String> =
+            vec!["a", "b", "c"].into_iter().map(String::from).collect();
+        let result = vector.fold_right1(|x, accumulator| format!("({x} {accumulator})"));
+        assert_eq!(result, Some("(a (b c))".to_string()));
+    }
+
+    // =========================================================================
+    // scan_left Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_scan_left_basic() {
+        let vector: PersistentVector<i32> = (1..=4).collect();
+        let scanned = vector.scan_left(0, |accumulator, x| accumulator + x);
+        let collected: Vec<i32> = scanned.iter().copied().collect();
+        assert_eq!(collected, vec![0, 1, 3, 6, 10]);
+    }
+
+    #[rstest]
+    fn test_scan_left_empty() {
+        let vector: PersistentVector<i32> = PersistentVector::new();
+        let scanned = vector.scan_left(0, |accumulator, x| accumulator + x);
+        let collected: Vec<i32> = scanned.iter().copied().collect();
+        assert_eq!(collected, vec![0]);
+    }
+
+    #[rstest]
+    fn test_scan_left_single_element() {
+        let vector: PersistentVector<i32> = vec![5].into_iter().collect();
+        let scanned = vector.scan_left(10, |accumulator, x| accumulator + x);
+        let collected: Vec<i32> = scanned.iter().copied().collect();
+        assert_eq!(collected, vec![10, 15]);
+    }
+
+    #[rstest]
+    fn test_scan_left_type_change() {
+        let vector: PersistentVector<i32> = (1..=3).collect();
+        let scanned = vector.scan_left(String::new(), |accumulator, x| format!("{accumulator}{x}"));
+        let collected: Vec<String> = scanned.iter().cloned().collect();
+        assert_eq!(
+            collected,
+            vec![
+                String::new(),
+                "1".to_string(),
+                "12".to_string(),
+                "123".to_string()
+            ]
+        );
+    }
+
+    #[rstest]
+    fn test_scan_left_running_max() {
+        let vector: PersistentVector<i32> = vec![3, 1, 4, 1, 5, 9, 2, 6].into_iter().collect();
+        let scanned = vector.scan_left(i32::MIN, |accumulator, x| accumulator.max(*x));
+        let collected: Vec<i32> = scanned.iter().copied().collect();
+        assert_eq!(collected, vec![i32::MIN, 3, 3, 4, 4, 5, 9, 9, 9]);
+    }
+
+    // =========================================================================
+    // partition Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_partition_basic() {
+        let vector: PersistentVector<i32> = (1..=6).collect();
+        let (evens, odds) = vector.partition(|x| x % 2 == 0);
+        let evens_collected: Vec<i32> = evens.iter().copied().collect();
+        let odds_collected: Vec<i32> = odds.iter().copied().collect();
+        assert_eq!(evens_collected, vec![2, 4, 6]);
+        assert_eq!(odds_collected, vec![1, 3, 5]);
+    }
+
+    #[rstest]
+    fn test_partition_empty() {
+        let vector: PersistentVector<i32> = PersistentVector::new();
+        let (pass, fail) = vector.partition(|x| x % 2 == 0);
+        assert!(pass.is_empty());
+        assert!(fail.is_empty());
+    }
+
+    #[rstest]
+    fn test_partition_all_pass() {
+        let vector: PersistentVector<i32> = (2..=8).step_by(2).collect();
+        let (pass, fail) = vector.partition(|x| x % 2 == 0);
+        let pass_collected: Vec<i32> = pass.iter().copied().collect();
+        assert_eq!(pass_collected, vec![2, 4, 6, 8]);
+        assert!(fail.is_empty());
+    }
+
+    #[rstest]
+    fn test_partition_all_fail() {
+        let vector: PersistentVector<i32> = (1..=7).step_by(2).collect();
+        let (pass, fail) = vector.partition(|x| x % 2 == 0);
+        assert!(pass.is_empty());
+        let fail_collected: Vec<i32> = fail.iter().copied().collect();
+        assert_eq!(fail_collected, vec![1, 3, 5, 7]);
+    }
+
+    #[rstest]
+    fn test_partition_preserves_order() {
+        let vector: PersistentVector<i32> = (1..=10).collect();
+        let (pass, fail) = vector.partition(|x| x % 3 == 0);
+        let pass_collected: Vec<i32> = pass.iter().copied().collect();
+        let fail_collected: Vec<i32> = fail.iter().copied().collect();
+        assert_eq!(pass_collected, vec![3, 6, 9]);
+        assert_eq!(fail_collected, vec![1, 2, 4, 5, 7, 8, 10]);
+    }
+
+    // =========================================================================
+    // zip Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_zip_basic() {
+        let vector1: PersistentVector<i32> = (1..=3).collect();
+        let vector2: PersistentVector<char> = vec!['a', 'b', 'c'].into_iter().collect();
+        let zipped = vector1.zip(&vector2);
+        let collected: Vec<(i32, char)> = zipped.iter().copied().collect();
+        assert_eq!(collected, vec![(1, 'a'), (2, 'b'), (3, 'c')]);
+    }
+
+    #[rstest]
+    fn test_zip_empty_first() {
+        let vector1: PersistentVector<i32> = PersistentVector::new();
+        let vector2: PersistentVector<char> = vec!['a', 'b', 'c'].into_iter().collect();
+        let zipped = vector1.zip(&vector2);
+        assert!(zipped.is_empty());
+    }
+
+    #[rstest]
+    fn test_zip_empty_second() {
+        let vector1: PersistentVector<i32> = (1..=3).collect();
+        let vector2: PersistentVector<char> = PersistentVector::new();
+        let zipped = vector1.zip(&vector2);
+        assert!(zipped.is_empty());
+    }
+
+    #[rstest]
+    fn test_zip_both_empty() {
+        let vector1: PersistentVector<i32> = PersistentVector::new();
+        let vector2: PersistentVector<char> = PersistentVector::new();
+        let zipped = vector1.zip(&vector2);
+        assert!(zipped.is_empty());
+    }
+
+    #[rstest]
+    fn test_zip_different_lengths_first_shorter() {
+        let vector1: PersistentVector<i32> = (1..=2).collect();
+        let vector2: PersistentVector<char> = vec!['a', 'b', 'c', 'd'].into_iter().collect();
+        let zipped = vector1.zip(&vector2);
+        let collected: Vec<(i32, char)> = zipped.iter().copied().collect();
+        assert_eq!(collected, vec![(1, 'a'), (2, 'b')]);
+    }
+
+    #[rstest]
+    fn test_zip_different_lengths_second_shorter() {
+        let vector1: PersistentVector<i32> = (1..=5).collect();
+        let vector2: PersistentVector<char> = vec!['a', 'b'].into_iter().collect();
+        let zipped = vector1.zip(&vector2);
+        let collected: Vec<(i32, char)> = zipped.iter().copied().collect();
+        assert_eq!(collected, vec![(1, 'a'), (2, 'b')]);
+    }
+
+    // =========================================================================
+    // unzip Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_unzip_basic() {
+        let vector: PersistentVector<(i32, char)> =
+            vec![(1, 'a'), (2, 'b'), (3, 'c')].into_iter().collect();
+        let (first, second) = vector.unzip();
+        let first_collected: Vec<i32> = first.iter().copied().collect();
+        let second_collected: Vec<char> = second.iter().copied().collect();
+        assert_eq!(first_collected, vec![1, 2, 3]);
+        assert_eq!(second_collected, vec!['a', 'b', 'c']);
+    }
+
+    #[rstest]
+    fn test_unzip_empty() {
+        let vector: PersistentVector<(i32, char)> = PersistentVector::new();
+        let (first, second) = vector.unzip();
+        assert!(first.is_empty());
+        assert!(second.is_empty());
+    }
+
+    #[rstest]
+    fn test_unzip_single_element() {
+        let vector: PersistentVector<(i32, char)> = vec![(42, 'x')].into_iter().collect();
+        let (first, second) = vector.unzip();
+        let first_collected: Vec<i32> = first.iter().copied().collect();
+        let second_collected: Vec<char> = second.iter().copied().collect();
+        assert_eq!(first_collected, vec![42]);
+        assert_eq!(second_collected, vec!['x']);
+    }
+
+    #[rstest]
+    fn test_unzip_roundtrip_with_zip() {
+        let vector1: PersistentVector<i32> = (1..=5).collect();
+        let vector2: PersistentVector<char> = vec!['a', 'b', 'c', 'd', 'e'].into_iter().collect();
+        let zipped = vector1.zip(&vector2);
+        let (unzipped1, unzipped2) = zipped.unzip();
+        let collected1: Vec<i32> = unzipped1.iter().copied().collect();
+        let collected2: Vec<char> = unzipped2.iter().copied().collect();
+        assert_eq!(collected1, vec![1, 2, 3, 4, 5]);
+        assert_eq!(collected2, vec!['a', 'b', 'c', 'd', 'e']);
+    }
+
+    // =========================================================================
+    // intersperse Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_intersperse_basic() {
+        let vector: PersistentVector<i32> = (1..=4).collect();
+        let result = vector.intersperse(0);
+        let collected: Vec<i32> = result.iter().copied().collect();
+        assert_eq!(collected, vec![1, 0, 2, 0, 3, 0, 4]);
+    }
+
+    #[rstest]
+    fn test_intersperse_empty() {
+        let vector: PersistentVector<i32> = PersistentVector::new();
+        let result = vector.intersperse(0);
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_intersperse_single_element() {
+        let vector: PersistentVector<i32> = vec![42].into_iter().collect();
+        let result = vector.intersperse(0);
+        let collected: Vec<i32> = result.iter().copied().collect();
+        assert_eq!(collected, vec![42]);
+    }
+
+    #[rstest]
+    fn test_intersperse_two_elements() {
+        let vector: PersistentVector<char> = vec!['a', 'b'].into_iter().collect();
+        let result = vector.intersperse('-');
+        let collected: Vec<char> = result.iter().copied().collect();
+        assert_eq!(collected, vec!['a', '-', 'b']);
+    }
+
+    #[rstest]
+    fn test_intersperse_strings() {
+        let vector: PersistentVector<String> =
+            vec!["foo".to_string(), "bar".to_string(), "baz".to_string()]
+                .into_iter()
+                .collect();
+        let result = vector.intersperse(",".to_string());
+        let collected: Vec<String> = result.iter().cloned().collect();
+        assert_eq!(
+            collected,
+            vec![
+                "foo".to_string(),
+                ",".to_string(),
+                "bar".to_string(),
+                ",".to_string(),
+                "baz".to_string()
+            ]
+        );
+    }
+
+    // =========================================================================
+    // intercalate Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_intercalate_basic() {
+        let inner1: PersistentVector<i32> = vec![1, 2].into_iter().collect();
+        let inner2: PersistentVector<i32> = vec![3, 4].into_iter().collect();
+        let inner3: PersistentVector<i32> = vec![5, 6].into_iter().collect();
+        let outer: PersistentVector<PersistentVector<i32>> =
+            vec![inner1, inner2, inner3].into_iter().collect();
+        let separator: PersistentVector<i32> = vec![0].into_iter().collect();
+        let result = outer.intercalate(&separator);
+        let collected: Vec<i32> = result.iter().copied().collect();
+        assert_eq!(collected, vec![1, 2, 0, 3, 4, 0, 5, 6]);
+    }
+
+    #[rstest]
+    fn test_intercalate_empty_outer() {
+        let outer: PersistentVector<PersistentVector<i32>> = PersistentVector::new();
+        let separator: PersistentVector<i32> = vec![0].into_iter().collect();
+        let result = outer.intercalate(&separator);
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_intercalate_single_inner() {
+        let inner: PersistentVector<i32> = vec![1, 2, 3].into_iter().collect();
+        let outer: PersistentVector<PersistentVector<i32>> = vec![inner].into_iter().collect();
+        let separator: PersistentVector<i32> = vec![0].into_iter().collect();
+        let result = outer.intercalate(&separator);
+        let collected: Vec<i32> = result.iter().copied().collect();
+        assert_eq!(collected, vec![1, 2, 3]);
+    }
+
+    #[rstest]
+    fn test_intercalate_empty_separator() {
+        let inner1: PersistentVector<i32> = vec![1, 2].into_iter().collect();
+        let inner2: PersistentVector<i32> = vec![3, 4].into_iter().collect();
+        let outer: PersistentVector<PersistentVector<i32>> =
+            vec![inner1, inner2].into_iter().collect();
+        let separator: PersistentVector<i32> = PersistentVector::new();
+        let result = outer.intercalate(&separator);
+        let collected: Vec<i32> = result.iter().copied().collect();
+        assert_eq!(collected, vec![1, 2, 3, 4]);
+    }
+
+    #[rstest]
+    fn test_intercalate_empty_inner_vectors() {
+        let inner1: PersistentVector<i32> = PersistentVector::new();
+        let inner2: PersistentVector<i32> = PersistentVector::new();
+        let outer: PersistentVector<PersistentVector<i32>> =
+            vec![inner1, inner2].into_iter().collect();
+        let separator: PersistentVector<i32> = vec![0].into_iter().collect();
+        let result = outer.intercalate(&separator);
+        let collected: Vec<i32> = result.iter().copied().collect();
+        assert_eq!(collected, vec![0]);
+    }
+
+    #[rstest]
+    fn test_intercalate_multi_element_separator() {
+        let inner1: PersistentVector<char> = vec!['a', 'b'].into_iter().collect();
+        let inner2: PersistentVector<char> = vec!['c', 'd'].into_iter().collect();
+        let outer: PersistentVector<PersistentVector<char>> =
+            vec![inner1, inner2].into_iter().collect();
+        let separator: PersistentVector<char> = vec!['-', '-'].into_iter().collect();
+        let result = outer.intercalate(&separator);
+        let collected: Vec<char> = result.iter().copied().collect();
+        assert_eq!(collected, vec!['a', 'b', '-', '-', 'c', 'd']);
     }
 }
