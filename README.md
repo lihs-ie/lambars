@@ -722,6 +722,34 @@ assert_eq!(result, 84);
 assert_eq!(log, vec!["Starting", "Got 42"]);
 ```
 
+#### RWS Monad
+
+Combined Reader + Writer + State monad for computations that need all three effects.
+
+```rust
+use lambars::effect::RWS;
+
+#[derive(Clone)]
+struct Config { multiplier: i32 }
+
+// RWS combines environment reading, log accumulation, and state management
+let computation: RWS<Config, Vec<String>, i32, i32> = RWS::ask()
+    .flat_map(|config| {
+        RWS::get().flat_map(move |state| {
+            let result = state * config.multiplier;
+            RWS::put(result)
+                .then(RWS::tell(vec![format!("Multiplied {} by {}", state, config.multiplier)]))
+                .then(RWS::pure(result))
+        })
+    });
+
+let config = Config { multiplier: 3 };
+let (result, final_state, log) = computation.run(config, 10);
+assert_eq!(result, 30);
+assert_eq!(final_state, 30);
+assert_eq!(log, vec!["Multiplied 10 by 3"]);
+```
+
 #### MonadError
 
 Error handling abstraction.

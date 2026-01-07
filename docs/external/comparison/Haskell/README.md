@@ -23,6 +23,7 @@ This document provides a comprehensive comparison between Haskell functional pro
   - [State Monad](#state-monad)
   - [Reader Monad](#reader-monad)
   - [Writer Monad](#writer-monad)
+  - [RWS Monad](#rws-monad)
 - [Monad Transformers (mtl)](#monad-transformers-mtl)
 - [Algebraic Effects](#algebraic-effects)
 - [Data Structures](#data-structures)
@@ -56,6 +57,7 @@ This document provides a comprehensive comparison between Haskell functional pro
 | State | `State s a` | `State<S, A>` type |
 | Reader | `Reader r a` | `Reader<R, A>` type |
 | Writer | `Writer w a` | `Writer<W, A>` type |
+| RWS | `RWS r w s a` | `RWS<R, W, S, A>` type |
 | StateT | `StateT s m a` | `StateT<S, M, A>` type |
 | ReaderT | `ReaderT r m a` | `ReaderT<R, M, A>` type |
 | WriterT | `WriterT w m a` | `WriterT<W, M, A>` type |
@@ -1738,6 +1740,83 @@ let computation: Logged<i32> = eff! {
 let (result, log) = computation.run();
 // result = 20
 // log = vec!["Starting", "Got 10", "Doubled to 20"]
+```
+
+### RWS Monad
+
+| Haskell | lambars | Description |
+|---------|---------|-------------|
+| `RWS r w s a` | `RWS<R, W, S, A>` | Combined Reader + Writer + State |
+| `rws f` | `RWS::new` | Create from function |
+| `runRWS m r s` | `RWS::run` | Run with environment and state |
+| `evalRWS m r s` | `RWS::eval` | Get (result, output) only |
+| `execRWS m r s` | `RWS::exec` | Get (state, output) only |
+| `mapRWS f m` | `RWS::map_rws` | Transform (result, state, output) |
+| `withRWS f m` | `RWS::with_rws` | Transform (environment, state) input |
+| `ask` | `RWS::ask` | Get environment |
+| `asks f` | `RWS::asks` | Project from environment |
+| `local f m` | `RWS::local` | Modify environment locally |
+| `tell w` | `RWS::tell` | Add output |
+| `listen m` | `RWS::listen` | Capture output |
+| `censor f m` | `RWS::censor` | Transform output |
+| `get` | `RWS::get` | Get state |
+| `put s` | `RWS::put` | Set state |
+| `modify f` | `RWS::modify` | Modify state |
+| `gets f` | `RWS::gets` | Project from state |
+
+#### Code Examples
+
+```haskell
+-- Haskell
+import Control.Monad.RWS
+
+data Config = Config { configMultiplier :: Int }
+type AppState = Int
+type AppLog = [String]
+
+type App a = RWS Config AppLog AppState a
+
+computation :: App Int
+computation = do
+  config <- ask
+  state <- get
+  let result = state * configMultiplier config
+  put result
+  tell [show state ++ " * " ++ show (configMultiplier config) ++ " = " ++ show result]
+  return result
+
+(result, finalState, log) :: (Int, Int, [String])
+(result, finalState, log) = runRWS computation (Config 3) 10
+-- result = 30
+-- finalState = 30
+-- log = ["10 * 3 = 30"]
+```
+
+```rust
+// lambars
+use lambars::effect::RWS;
+use lambars::eff;
+
+#[derive(Clone)]
+struct Config { multiplier: i32 }
+type AppState = i32;
+type AppLog = Vec<String>;
+
+type App<A> = RWS<Config, AppLog, AppState, A>;
+
+let computation: App<i32> = eff! {
+    config <= RWS::ask();
+    state <= RWS::get();
+    let result = state * config.multiplier;
+    _ <= RWS::put(result);
+    _ <= RWS::tell(vec![format!("{} * {} = {}", state, config.multiplier, result)]);
+    RWS::pure(result)
+};
+
+let (result, final_state, log) = computation.run(Config { multiplier: 3 }, 10);
+// result = 30
+// final_state = 30
+// log = vec!["10 * 3 = 30"]
 ```
 
 ---
