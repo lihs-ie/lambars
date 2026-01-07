@@ -84,3 +84,8 @@ harness = false
 [[bench]]
 name = "algebraic_effect_bench"
 harness = false
+
+[[bench]]
+name = "serde_bench"
+harness = false
+required-features = ["serde"]
