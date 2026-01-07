@@ -158,9 +158,15 @@ mod state_transformer;
 mod writer_transformer;
 
 pub use except_transformer::ExceptT;
-pub use reader_transformer::ReaderT;
-pub use state_transformer::StateT;
+pub use reader_transformer::{ReaderT, ReaderTTryLiftIO, ReaderTTryLiftResult};
+pub use state_transformer::{StateT, StateTTryLiftIO, StateTTryLiftResult};
 pub use writer_transformer::WriterT;
+
+// AsyncIO-specific type aliases (requires async feature)
+#[cfg(feature = "async")]
+pub use reader_transformer::ReaderTTryLiftAsyncIO;
+#[cfg(feature = "async")]
+pub use state_transformer::StateTTryLiftAsyncIO;
 
 // =============================================================================
 // Algebraic Effects

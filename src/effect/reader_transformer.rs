@@ -54,6 +54,43 @@ use std::rc::Rc;
 use super::IO;
 use super::error::{AlreadyConsumedError, EffectError, EffectType};
 
+// =============================================================================
+// Type Aliases for Type Complexity Reduction
+// =============================================================================
+
+/// Result type for `ReaderT` operations that may fail due to effect consumption.
+///
+/// This type represents the result of an environment-dependent computation that:
+/// - Succeeds with a value `A`, or
+/// - Fails with an [`EffectError`] (e.g., when the effect is already consumed)
+///
+/// # Type Parameters
+///
+/// - `A`: The value type
+///
+/// # Difference from `StateTTryLiftResult`
+///
+/// `ReaderT` does not modify state, so it returns only `A` (not `(A, S)`).
+/// The environment `R` is read-only and not included in the result.
+pub type ReaderTTryLiftResult<A> = Result<A, EffectError>;
+
+/// `ReaderT` type wrapping an `IO` that may fail due to effect consumption.
+///
+/// This is the return type of [`ReaderT::try_lift_io`].
+///
+/// # Functional Programming Note
+///
+/// This type represents a **description** of a computation, not its execution.
+/// The actual IO effect is only performed when `run` is called, followed by
+/// `run_unsafe` on the resulting IO. This separation of description and
+/// execution maintains referential transparency.
+///
+/// # Type Parameters
+///
+/// - `R`: The environment type
+/// - `A`: The value type
+pub type ReaderTTryLiftIO<R, A> = ReaderT<R, IO<ReaderTTryLiftResult<A>>>;
+
 /// A monad transformer that adds environment reading capability.
 ///
 /// `ReaderT<R, M>` represents a computation that, given an environment of type `R`,
@@ -584,18 +621,17 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use lambars::effect::{ReaderT, IO, EffectError};
+    /// use lambars::effect::{ReaderT, ReaderTTryLiftIO, IO, EffectError};
     ///
     /// let io = IO::pure(42);
-    /// let reader: ReaderT<String, IO<Result<i32, EffectError>>> =
-    ///     ReaderT::try_lift_io(io);
+    /// let reader: ReaderTTryLiftIO<String, i32> = ReaderT::try_lift_io(io);
     ///
     /// let result = reader.run("env".to_string()).run_unsafe();
     /// assert_eq!(result, Ok(42));
     /// ```
     #[must_use]
     #[allow(clippy::option_if_let_else)]
-    pub fn try_lift_io(inner: IO<A>) -> ReaderT<R, IO<Result<A, EffectError>>> {
+    pub fn try_lift_io(inner: IO<A>) -> ReaderTTryLiftIO<R, A> {
         let inner_rc = Rc::new(std::cell::RefCell::new(Some(inner)));
         ReaderT::new(move |_| match inner_rc.borrow_mut().take() {
             Some(io) => io.fmap(Ok),
@@ -730,6 +766,23 @@ where
 
 #[cfg(feature = "async")]
 use super::AsyncIO;
+
+/// `ReaderT` type wrapping an `AsyncIO` that may fail due to effect consumption.
+///
+/// This is the return type of [`ReaderT::try_lift_async_io`].
+///
+/// # Functional Programming Note
+///
+/// This type represents a **description** of an asynchronous computation,
+/// not its execution. The actual `AsyncIO` effect is only performed when
+/// `run` is called, followed by `run_async().await` on the resulting `AsyncIO`.
+///
+/// # Type Parameters
+///
+/// - `R`: The environment type
+/// - `A`: The value type
+#[cfg(feature = "async")]
+pub type ReaderTTryLiftAsyncIO<R, A> = ReaderT<R, AsyncIO<ReaderTTryLiftResult<A>>>;
 
 #[cfg(feature = "async")]
 impl<R, A> ReaderT<R, AsyncIO<A>>
@@ -960,12 +1013,12 @@ where
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use lambars::effect::{ReaderT, AsyncIO, EffectError};
+    /// use lambars::effect::{ReaderT, ReaderTTryLiftAsyncIO, AsyncIO, EffectError};
     ///
     /// #[tokio::main]
     /// async fn main() {
     ///     let async_io = AsyncIO::pure(42);
-    ///     let reader: ReaderT<String, AsyncIO<Result<i32, EffectError>>> =
+    ///     let reader: ReaderTTryLiftAsyncIO<String, i32> =
     ///         ReaderT::try_lift_async_io(async_io);
     ///
     ///     let result = reader.run("env".to_string()).run_async().await;
@@ -980,7 +1033,7 @@ where
     /// contexts and will not be poisoned.
     #[must_use]
     #[allow(clippy::option_if_let_else)]
-    pub fn try_lift_async_io(inner: AsyncIO<A>) -> ReaderT<R, AsyncIO<Result<A, EffectError>>>
+    pub fn try_lift_async_io(inner: AsyncIO<A>) -> ReaderTTryLiftAsyncIO<R, A>
     where
         A: Clone,
     {
@@ -1084,7 +1137,7 @@ mod tests {
 
     mod io_tests {
         use super::*;
-        use crate::effect::{AlreadyConsumedError, EffectError, EffectType};
+        use crate::effect::{AlreadyConsumedError, EffectError, EffectType, ReaderTTryLiftIO};
         use rstest::rstest;
 
         #[rstest]
@@ -1097,7 +1150,7 @@ mod tests {
             #[case] expected: Result<i32, EffectError>,
         ) {
             let io = IO::pure(value);
-            let reader: ReaderT<String, IO<Result<i32, EffectError>>> = ReaderT::try_lift_io(io);
+            let reader: ReaderTTryLiftIO<String, i32> = ReaderT::try_lift_io(io);
             let result = reader.run(environment.to_string()).run_unsafe();
             assert_eq!(result, expected);
         }
@@ -1105,7 +1158,7 @@ mod tests {
         #[rstest]
         fn reader_transformer_try_lift_io_already_consumed() {
             let io = IO::pure(42);
-            let reader: ReaderT<String, IO<Result<i32, EffectError>>> = ReaderT::try_lift_io(io);
+            let reader: ReaderTTryLiftIO<String, i32> = ReaderT::try_lift_io(io);
 
             let cloned = reader.clone();
 
@@ -1126,7 +1179,7 @@ mod tests {
         #[rstest]
         fn reader_transformer_try_lift_io_error_message() {
             let io = IO::pure(42);
-            let reader: ReaderT<String, IO<Result<i32, EffectError>>> = ReaderT::try_lift_io(io);
+            let reader: ReaderTTryLiftIO<String, i32> = ReaderT::try_lift_io(io);
 
             let cloned = reader.clone();
             let _ = reader.run("env".to_string()).run_unsafe();
@@ -1220,7 +1273,9 @@ mod tests {
 
         mod try_lift_async_io_tests {
             use super::*;
-            use crate::effect::{AlreadyConsumedError, EffectError, EffectType};
+            use crate::effect::{
+                AlreadyConsumedError, EffectError, EffectType, ReaderTTryLiftAsyncIO,
+            };
             use rstest::rstest;
 
             #[rstest]
@@ -1234,7 +1289,7 @@ mod tests {
                 #[case] expected: Result<i32, EffectError>,
             ) {
                 let async_io = AsyncIO::pure(value);
-                let reader: ReaderT<String, AsyncIO<Result<i32, EffectError>>> =
+                let reader: ReaderTTryLiftAsyncIO<String, i32> =
                     ReaderT::try_lift_async_io(async_io);
                 let result = reader.run(environment.to_string()).run_async().await;
                 assert_eq!(result, expected);
@@ -1244,7 +1299,7 @@ mod tests {
             #[tokio::test]
             async fn reader_transformer_try_lift_async_io_already_consumed() {
                 let async_io = AsyncIO::pure(42);
-                let reader: ReaderT<String, AsyncIO<Result<i32, EffectError>>> =
+                let reader: ReaderTTryLiftAsyncIO<String, i32> =
                     ReaderT::try_lift_async_io(async_io);
 
                 let cloned = reader.clone();
@@ -1267,7 +1322,7 @@ mod tests {
             #[tokio::test]
             async fn reader_transformer_try_lift_async_io_error_message() {
                 let async_io = AsyncIO::pure(42);
-                let reader: ReaderT<String, AsyncIO<Result<i32, EffectError>>> =
+                let reader: ReaderTTryLiftAsyncIO<String, i32> =
                     ReaderT::try_lift_async_io(async_io);
 
                 let cloned = reader.clone();

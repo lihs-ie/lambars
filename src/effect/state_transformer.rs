@@ -43,6 +43,45 @@ use std::rc::Rc;
 use super::IO;
 use super::error::{AlreadyConsumedError, EffectError, EffectType};
 
+// =============================================================================
+// Type Aliases for Type Complexity Reduction
+// =============================================================================
+
+/// Result type for `StateT` operations that may fail due to effect consumption.
+///
+/// This type represents the result of a stateful computation that:
+/// - Succeeds with a value `A` and new state `S`, or
+/// - Fails with an [`EffectError`] (e.g., when the effect is already consumed)
+///
+/// # Functional Programming Note
+///
+/// State changes are represented by returning a new `(A, S)` tuple,
+/// not by mutating existing state. This preserves immutability and
+/// referential transparency.
+///
+/// # Type Parameters
+///
+/// - `S`: The state type
+/// - `A`: The value type
+pub type StateTTryLiftResult<S, A> = Result<(A, S), EffectError>;
+
+/// `StateT` type wrapping an `IO` that may fail due to effect consumption.
+///
+/// This is the return type of [`StateT::try_lift_io`].
+///
+/// # Functional Programming Note
+///
+/// This type represents a **description** of a computation, not its execution.
+/// The actual IO effect is only performed when `run` is called, followed by
+/// `run_unsafe` on the resulting IO. This separation of description and
+/// execution maintains referential transparency.
+///
+/// # Type Parameters
+///
+/// - `S`: The state type
+/// - `A`: The value type
+pub type StateTTryLiftIO<S, A> = StateT<S, IO<StateTTryLiftResult<S, A>>>;
+
 /// A monad transformer that adds state manipulation capability.
 ///
 /// `StateT<S, M>` represents a computation that, given an initial state of type `S`,
@@ -518,18 +557,17 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// use lambars::effect::{StateT, IO, EffectError};
+    /// use lambars::effect::{StateT, StateTTryLiftIO, IO, EffectError};
     ///
     /// let io = IO::pure(42);
-    /// let state: StateT<String, IO<Result<(i32, String), EffectError>>> =
-    ///     StateT::try_lift_io(io);
+    /// let state: StateTTryLiftIO<String, i32> = StateT::try_lift_io(io);
     ///
     /// let result = state.run("initial".to_string()).run_unsafe();
     /// assert_eq!(result, Ok((42, "initial".to_string())));
     /// ```
     #[must_use]
-    #[allow(clippy::option_if_let_else, clippy::type_complexity)]
-    pub fn try_lift_io(inner: IO<A>) -> StateT<S, IO<Result<(A, S), EffectError>>> {
+    #[allow(clippy::option_if_let_else)]
+    pub fn try_lift_io(inner: IO<A>) -> StateTTryLiftIO<S, A> {
         let inner_rc = Rc::new(std::cell::RefCell::new(Some(inner)));
         StateT::new(move |state: S| match inner_rc.borrow_mut().take() {
             Some(io) => io.fmap(move |value| Ok((value, state))),
@@ -607,6 +645,23 @@ where
 
 #[cfg(feature = "async")]
 use super::AsyncIO;
+
+/// `StateT` type wrapping an `AsyncIO` that may fail due to effect consumption.
+///
+/// This is the return type of [`StateT::try_lift_async_io`].
+///
+/// # Functional Programming Note
+///
+/// This type represents a **description** of an asynchronous computation,
+/// not its execution. The actual `AsyncIO` effect is only performed when
+/// `run` is called, followed by `run_async().await` on the resulting `AsyncIO`.
+///
+/// # Type Parameters
+///
+/// - `S`: The state type
+/// - `A`: The value type
+#[cfg(feature = "async")]
+pub type StateTTryLiftAsyncIO<S, A> = StateT<S, AsyncIO<StateTTryLiftResult<S, A>>>;
 
 #[cfg(feature = "async")]
 impl<S, A> StateT<S, AsyncIO<(A, S)>>
@@ -872,12 +927,12 @@ where
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use lambars::effect::{StateT, AsyncIO, EffectError};
+    /// use lambars::effect::{StateT, StateTTryLiftAsyncIO, AsyncIO, EffectError};
     ///
     /// #[tokio::main]
     /// async fn main() {
     ///     let async_io = AsyncIO::pure(42);
-    ///     let state: StateT<String, AsyncIO<Result<(i32, String), EffectError>>> =
+    ///     let state: StateTTryLiftAsyncIO<String, i32> =
     ///         StateT::try_lift_async_io(async_io);
     ///
     ///     let result = state.run("initial".to_string()).run_async().await;
@@ -891,8 +946,8 @@ where
     /// `Mutex::lock` is only used for interior mutability in single-threaded
     /// contexts and will not be poisoned.
     #[must_use]
-    #[allow(clippy::option_if_let_else, clippy::type_complexity)]
-    pub fn try_lift_async_io(inner: AsyncIO<A>) -> StateT<S, AsyncIO<Result<(A, S), EffectError>>>
+    #[allow(clippy::option_if_let_else)]
+    pub fn try_lift_async_io(inner: AsyncIO<A>) -> StateTTryLiftAsyncIO<S, A>
     where
         S: Clone,
     {
@@ -983,10 +1038,9 @@ mod tests {
     // IO-specific Tests
     // =========================================================================
 
-    #[allow(clippy::type_complexity)]
     mod io_tests {
         use super::*;
-        use crate::effect::{AlreadyConsumedError, EffectError, EffectType};
+        use crate::effect::{AlreadyConsumedError, EffectError, EffectType, StateTTryLiftIO};
         use rstest::rstest;
 
         #[rstest]
@@ -999,8 +1053,7 @@ mod tests {
             #[case] expected: Result<(i32, String), EffectError>,
         ) {
             let io = IO::pure(value);
-            let state: StateT<String, IO<Result<(i32, String), EffectError>>> =
-                StateT::try_lift_io(io);
+            let state: StateTTryLiftIO<String, i32> = StateT::try_lift_io(io);
             let result = state.run(initial_state.to_string()).run_unsafe();
             assert_eq!(result, expected);
         }
@@ -1008,8 +1061,7 @@ mod tests {
         #[rstest]
         fn state_transformer_try_lift_io_already_consumed() {
             let io = IO::pure(42);
-            let state: StateT<String, IO<Result<(i32, String), EffectError>>> =
-                StateT::try_lift_io(io);
+            let state: StateTTryLiftIO<String, i32> = StateT::try_lift_io(io);
 
             let cloned = state.clone();
 
@@ -1030,8 +1082,7 @@ mod tests {
         #[rstest]
         fn state_transformer_try_lift_io_error_message() {
             let io = IO::pure(42);
-            let state: StateT<String, IO<Result<(i32, String), EffectError>>> =
-                StateT::try_lift_io(io);
+            let state: StateTTryLiftIO<String, i32> = StateT::try_lift_io(io);
 
             let cloned = state.clone();
             let _ = state.run("state".to_string()).run_unsafe();
@@ -1091,10 +1142,10 @@ mod tests {
     // =========================================================================
 
     #[cfg(feature = "async")]
-    #[allow(clippy::type_complexity, clippy::future_not_send)]
+    #[allow(clippy::future_not_send)]
     mod async_io_tests {
         use super::*;
-        use crate::effect::{AlreadyConsumedError, EffectError, EffectType};
+        use crate::effect::{AlreadyConsumedError, EffectError, EffectType, StateTTryLiftAsyncIO};
         use rstest::rstest;
 
         #[rstest]
@@ -1108,8 +1159,7 @@ mod tests {
             #[case] expected: Result<(i32, String), EffectError>,
         ) {
             let async_io = AsyncIO::pure(value);
-            let state: StateT<String, AsyncIO<Result<(i32, String), EffectError>>> =
-                StateT::try_lift_async_io(async_io);
+            let state: StateTTryLiftAsyncIO<String, i32> = StateT::try_lift_async_io(async_io);
             let result = state.run(initial_state.to_string()).run_async().await;
             assert_eq!(result, expected);
         }
@@ -1118,8 +1168,7 @@ mod tests {
         #[tokio::test]
         async fn state_transformer_try_lift_async_io_already_consumed() {
             let async_io = AsyncIO::pure(42);
-            let state: StateT<String, AsyncIO<Result<(i32, String), EffectError>>> =
-                StateT::try_lift_async_io(async_io);
+            let state: StateTTryLiftAsyncIO<String, i32> = StateT::try_lift_async_io(async_io);
 
             let cloned = state.clone();
 
@@ -1141,8 +1190,7 @@ mod tests {
         #[tokio::test]
         async fn state_transformer_try_lift_async_io_error_message() {
             let async_io = AsyncIO::pure(42);
-            let state: StateT<String, AsyncIO<Result<(i32, String), EffectError>>> =
-                StateT::try_lift_async_io(async_io);
+            let state: StateTTryLiftAsyncIO<String, i32> = StateT::try_lift_async_io(async_io);
 
             let cloned = state.clone();
             let _ = state.run("state".to_string()).run_async().await;
