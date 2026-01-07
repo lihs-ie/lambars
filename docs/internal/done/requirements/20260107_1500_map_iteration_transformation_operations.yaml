@@ -1,0 +1,966 @@
+# Map 反復・変換操作 要件定義
+#
+# 概要:
+#   PersistentHashMap と PersistentTreeMap に対する反復・変換操作の強化。
+#   11個の操作を追加し、関数型プログラミングの原則に従った API を提供する。
+#
+# 設計方針:
+#   1. 不変性の維持: 全ての操作は新しい Map を返し、元の Map を変更しない
+#   2. 構造的共有: 可能な限り既存のノードを再利用してメモリ効率を向上
+#   3. 遅延評価: イテレータベースの操作は遅延評価を活用
+#   4. 参照透過性: 同じ入力に対して常に同じ出力を返す純粋関数として実装
+#
+# 参照:
+#   - GitHub Issue #7: Map 反復・変換操作の強化
+#   - Scala scala.collection.immutable.Map
+#   - Clojure PersistentHashMap
+#   - Haskell Data.Map / Data.HashMap
+
+version: "1.0.0"
+name: "map_iteration_transformation_operations"
+description: |
+  PersistentHashMap と PersistentTreeMap に対して、関数型プログラミングで
+  一般的に使用される反復・変換操作を追加する。
+
+  対象となる操作は以下の 11 種類:
+  - map_values: 値のみを変換
+  - map_keys: キーのみを変換
+  - filter_map: フィルタと変換を同時に実行
+  - entries: iter のエイリアス（遅延評価への改善は将来の拡張）
+  - keys: 既存実装を維持（遅延評価への改善は将来の拡張）
+  - values: 既存実装を維持（遅延評価への改善は将来の拡張）
+  - merge: 他の Map とマージ（既存実装あり、merge_with との整合性確認）
+  - merge_with: 衝突時のカスタム処理付きマージ
+  - delete_if: 述語ベース削除
+  - keep_if: 述語ベース保持
+  - partition: 述語で分割
+
+# 背景・動機
+background:
+  problem: |
+    現在の PersistentHashMap と PersistentTreeMap には基本的な CRUD 操作
+    (insert, get, remove, update) は実装されているが、関数型プログラミングで
+    頻繁に使用される高階関数ベースの反復・変換操作が不足している。
+
+    具体的に不足している機能:
+    1. 値またはキーのみを変換する操作
+    2. フィルタリングと変換を組み合わせた操作
+    3. 複数の Map をマージする際の衝突解決
+    4. 述語に基づく要素の選択・削除・分割
+
+    これにより、ユーザーは手動でイテレータを使用して新しい Map を構築する
+    必要があり、コードが冗長になりやすい。
+
+  motivation: |
+    1. 関数型プログラミングの慣用的なパターンをサポートする
+    2. Scala、Haskell、Clojure などの関数型言語と同等の API を提供する
+    3. コードの簡潔性と表現力を向上させる
+    4. 構造的共有を活用した効率的な実装を提供する
+    5. lambars ライブラリの一貫性を維持する（List, Vector との API 統一）
+
+  prior_art:
+    - name: "Scala scala.collection.immutable.Map"
+      description: |
+        Scala の不変 Map は mapValues, filterKeys, transform, ++（マージ）、
+        partition などの豊富な高階関数を提供する。
+        特に mapValues は view ベースの遅延評価版と strict 版がある。
+    - name: "Haskell Data.Map"
+      description: |
+        Haskell の Data.Map は mapWithKey, filterWithKey, mapMaybe,
+        mapMaybeWithKey, unionWith, partitionWithKey などを提供。
+        全ての操作は純粋関数として実装されている。
+    - name: "Clojure PersistentHashMap"
+      description: |
+        Clojure の PersistentHashMap は HAMT ベースで、
+        map, filter, reduce, merge, merge-with などの操作を提供。
+        遅延シーケンスとの統合が特徴。
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. 値の変換操作
+  # ======================================================================
+  - id: map_values
+    name: "map_values - 値のみを変換"
+    description: |
+      Map の全ての値に関数を適用し、キーは保持したまま新しい Map を返す。
+      キーの型は変わらず、値の型のみが変換される。
+
+      この操作は参照透過性を持ち、同じ Map と関数に対して常に同じ結果を返す。
+
+    laws:
+      - name: "Identity Law"
+        description: |
+          恒等関数を適用した場合、元の Map と等価な Map が返される。
+        equation: "map.map_values(|v| v.clone()) == map"
+        property_test: |
+          fn prop_map_values_identity<K: Clone + Hash + Eq, V: Clone + Eq>(
+              map: PersistentHashMap<K, V>
+          ) -> bool {
+              map.clone().map_values(|v| v.clone()) == map
+          }
+
+      - name: "Composition Law"
+        description: |
+          2つの関数を合成して適用した結果は、順番に適用した結果と等しい。
+        equation: "map.map_values(f).map_values(g) == map.map_values(|v| g(f(v)))"
+        property_test: |
+          fn prop_map_values_composition<K, V, W, X>(
+              map: PersistentHashMap<K, V>,
+              f: fn(V) -> W,
+              g: fn(W) -> X
+          ) -> bool {
+              map.clone().map_values(f).map_values(g) == map.map_values(|v| g(f(v)))
+          }
+
+      - name: "Length Preservation"
+        description: |
+          map_values は Map の要素数を変更しない。
+        equation: "map.map_values(f).len() == map.len()"
+        property_test: |
+          fn prop_map_values_length<K, V, W>(
+              map: PersistentHashMap<K, V>,
+              f: fn(V) -> W
+          ) -> bool {
+              map.clone().map_values(f).len() == map.len()
+          }
+
+    methods:
+      - name: "map_values"
+        signature: |
+          fn map_values<W, F>(&self, function: F) -> PersistentHashMap<K, W>
+          where
+              K: Clone + Hash + Eq,
+              W: Clone,
+              F: FnMut(&V) -> W
+        description: |
+          全ての値に関数を適用し、新しい Map を返す。
+          キーは変更されず、構造的共有が可能な限り維持される。
+        examples:
+          - description: "数値を2倍にする"
+            code: |
+              let map = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("b".to_string(), 2);
+              let doubled = map.map_values(|v| v * 2);
+              assert_eq!(doubled.get("a"), Some(&2));
+              assert_eq!(doubled.get("b"), Some(&4));
+
+          - description: "文字列に変換する"
+            code: |
+              let map = PersistentHashMap::new()
+                  .insert(1, 100)
+                  .insert(2, 200);
+              let stringified = map.map_values(|v| v.to_string());
+              assert_eq!(stringified.get(&1), Some(&"100".to_string()));
+
+    implementations:
+      - type: "PersistentHashMap<K, V>"
+        description: |
+          HAMT 構造を走査し、各エントリの値に関数を適用する。
+          新しい Map を構築する際、キーのハッシュ値は再計算不要（キーが同一のため）。
+
+      - type: "PersistentTreeMap<K, V>"
+        description: |
+          Red-Black Tree を in-order で走査し、各エントリの値に関数を適用する。
+          キーの順序は維持される。
+
+  # ======================================================================
+  # 2. キーの変換操作
+  # ======================================================================
+  - id: map_keys
+    name: "map_keys - キーのみを変換"
+    description: |
+      Map の全てのキーに関数を適用し、値は保持したまま新しい Map を返す。
+
+      注意: キーの変換により衝突が発生する可能性がある。
+      衝突時は後から処理されたエントリが優先される。
+      この動作は内部走査順に依存するため、同一の論理的 Map でも
+      結果が異なる可能性がある。衝突の制御が必要な場合は
+      map_keys_with（将来の拡張）を検討する。
+
+      この操作は「衝突が発生しない場合」に限り参照透過性を持つ。
+      衝突発生時の結果は入力 Map の内部構造に依存する。
+
+    laws:
+      - name: "Identity Law (collision-free)"
+        description: |
+          恒等関数を適用した場合（衝突なし）、元の Map と等価な Map が返される。
+        equation: "map.map_keys(|k| k.clone()) == map"
+        property_test: |
+          fn prop_map_keys_identity<K: Clone + Hash + Eq, V: Clone + Eq>(
+              map: PersistentHashMap<K, V>
+          ) -> bool {
+              map.clone().map_keys(|k| k.clone()) == map
+          }
+
+      - name: "Length Upper Bound"
+        description: |
+          map_keys 後の要素数は元の要素数以下（衝突により減少する可能性）。
+        equation: "map.map_keys(f).len() <= map.len()"
+        property_test: |
+          fn prop_map_keys_length<K, L, V>(
+              map: PersistentHashMap<K, V>,
+              f: fn(K) -> L
+          ) -> bool {
+              map.clone().map_keys(f).len() <= map.len()
+          }
+
+    methods:
+      - name: "map_keys"
+        signature: |
+          fn map_keys<L, F>(&self, function: F) -> PersistentHashMap<L, V>
+          where
+              L: Clone + Hash + Eq,
+              V: Clone,
+              F: FnMut(&K) -> L
+        description: |
+          全てのキーに関数を適用し、新しい Map を返す。
+          値は変更されない。キー衝突時は後から処理されたエントリが優先される。
+        examples:
+          - description: "キーを大文字に変換"
+            code: |
+              let map = PersistentHashMap::new()
+                  .insert("hello".to_string(), 1)
+                  .insert("world".to_string(), 2);
+              let uppercased = map.map_keys(|k| k.to_uppercase());
+              assert_eq!(uppercased.get("HELLO"), Some(&1));
+              assert_eq!(uppercased.get("WORLD"), Some(&2));
+
+          - description: "キーの長さを新しいキーとする"
+            code: |
+              let map = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("bb".to_string(), 2)
+                  .insert("ccc".to_string(), 3);
+              let by_length = map.map_keys(|k| k.len());
+              assert_eq!(by_length.get(&1), Some(&1));
+              assert_eq!(by_length.get(&2), Some(&2));
+              assert_eq!(by_length.get(&3), Some(&3));
+
+    implementations:
+      - type: "PersistentHashMap<K, V>"
+        description: |
+          HAMT 構造を走査し、各エントリのキーに関数を適用する。
+          新しいキーのハッシュ値を計算し、新しい Map を構築する。
+
+      - type: "PersistentTreeMap<K, V>"
+        description: |
+          Red-Black Tree を走査し、各エントリのキーに関数を適用する。
+          新しいキーの順序に基づいて新しい Tree を構築する。
+
+  # ======================================================================
+  # 3. フィルタと変換の同時実行
+  # ======================================================================
+  - id: filter_map
+    name: "filter_map - フィルタと変換を同時に"
+    description: |
+      各エントリに対して関数を適用し、Some を返した場合のみ結果に含める。
+      None を返した場合、そのエントリは結果から除外される。
+
+      これは filter と map を組み合わせた操作で、1回の走査で両方を実行する。
+      Haskell の mapMaybe、Rust Iterator の filter_map に相当する。
+
+    laws:
+      - name: "Equivalence to Filter then Map"
+        description: |
+          filter_map は filter と map の組み合わせと等価。
+        equation: |
+          map.filter_map(f) == map.filter(|k, v| f(k, v).is_some())
+                                   .map_values(|v| f(k, v).unwrap())
+        property_test: |
+          // 概念的な等価性を示す
+
+      - name: "Identity with Some"
+        description: |
+          常に Some を返す関数を適用した場合、map_values と等価。
+        equation: "map.filter_map(|k, v| Some(f(v))) == map.map_values(f)"
+        property_test: |
+          fn prop_filter_map_some<K, V, W>(
+              map: PersistentHashMap<K, V>,
+              f: fn(V) -> W
+          ) -> bool {
+              map.clone().filter_map(|_, v| Some(f(v))) == map.map_values(f)
+          }
+
+      - name: "Empty with None"
+        description: |
+          常に None を返す関数を適用した場合、空の Map が返される。
+        equation: "map.filter_map(|_, _| None::<W>).is_empty() == true"
+        property_test: |
+          fn prop_filter_map_none<K, V, W>(
+              map: PersistentHashMap<K, V>
+          ) -> bool {
+              map.filter_map(|_, _| None::<W>).is_empty()
+          }
+
+    methods:
+      - name: "filter_map"
+        signature: |
+          fn filter_map<W, F>(&self, function: F) -> PersistentHashMap<K, W>
+          where
+              K: Clone + Hash + Eq,
+              W: Clone,
+              F: FnMut(&K, &V) -> Option<W>
+        description: |
+          各エントリに対して関数を適用し、Some(value) を返した場合のみ
+          結果の Map に含める。None を返した場合は除外される。
+        examples:
+          - description: "偶数の値のみを2倍にして残す"
+            code: |
+              let map = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("b".to_string(), 2)
+                  .insert("c".to_string(), 3)
+                  .insert("d".to_string(), 4);
+              let result = map.filter_map(|_, v| {
+                  if v % 2 == 0 { Some(v * 2) } else { None }
+              });
+              assert_eq!(result.len(), 2);
+              assert_eq!(result.get("b"), Some(&4));
+              assert_eq!(result.get("d"), Some(&8));
+
+          - description: "文字列を数値にパースできるものだけ残す"
+            code: |
+              let map = PersistentHashMap::new()
+                  .insert("valid".to_string(), "42".to_string())
+                  .insert("invalid".to_string(), "abc".to_string());
+              let result = map.filter_map(|_, v| v.parse::<i32>().ok());
+              assert_eq!(result.len(), 1);
+              assert_eq!(result.get("valid"), Some(&42));
+
+    implementations:
+      - type: "PersistentHashMap<K, V>"
+        description: |
+          HAMT 構造を走査し、各エントリに対して関数を適用する。
+          Some を返したエントリのみで新しい Map を構築する。
+
+      - type: "PersistentTreeMap<K, V>"
+        description: |
+          Red-Black Tree を in-order で走査し、各エントリに対して関数を適用する。
+          Some を返したエントリのみで新しい Tree を構築する。
+
+  # ======================================================================
+  # 4. イテレータエイリアス（entries）
+  # ======================================================================
+  - id: lazy_iterators
+    name: "イテレータエイリアス（entries）"
+    description: |
+      Map のエントリに対するイテレータのエイリアスを提供する。
+
+      現在の実装では iter(), keys(), values() が存在する。
+      これらは先行収集型（全エントリをVecに収集してから反復）であり、
+      真の遅延評価ではないが、今回のスコープでは以下の方針とする：
+
+      - entries() を iter() のエイリアスとして追加
+      - keys(), values() は既存実装を維持
+      - 真の遅延評価への改善は将来の拡張として記録
+
+      この方針により、API の命名一貫性を確保しつつ、
+      実装の複雑さを抑える。
+
+    laws:
+      - name: "Completeness"
+        description: |
+          イテレータは全てのエントリを正確に1回ずつ返す。
+        equation: "map.entries().count() == map.len()"
+        property_test: |
+          fn prop_entries_complete<K, V>(
+              map: PersistentHashMap<K, V>
+          ) -> bool {
+              map.entries().count() == map.len()
+          }
+
+      - name: "Consistency"
+        description: |
+          entries から取得した (k, v) ペアは、map.get(k) == Some(v) を満たす。
+        equation: "for (k, v) in map.entries() => map.get(k) == Some(v)"
+        property_test: |
+          fn prop_entries_consistent<K: Hash + Eq, V: Eq>(
+              map: PersistentHashMap<K, V>
+          ) -> bool {
+              map.entries().all(|(k, v)| map.get(k) == Some(v))
+          }
+
+    methods:
+      - name: "entries"
+        signature: |
+          fn entries(&self) -> impl Iterator<Item = (&K, &V)>
+        description: |
+          キーと値のペアを返す遅延評価イテレータ。
+          既存の iter() のエイリアスまたは改善版として提供。
+        examples:
+          - description: "全エントリを走査"
+            code: |
+              let map = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("b".to_string(), 2);
+              for (key, value) in map.entries() {
+                  println!("{}: {}", key, value);
+              }
+
+      - name: "keys"
+        signature: |
+          fn keys(&self) -> impl Iterator<Item = &K>
+        description: |
+          キーのみを返す遅延評価イテレータ。
+          既存実装の確認・改善。
+        examples:
+          - description: "全キーを収集"
+            code: |
+              let map = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("b".to_string(), 2);
+              let keys: Vec<&String> = map.keys().collect();
+
+      - name: "values"
+        signature: |
+          fn values(&self) -> impl Iterator<Item = &V>
+        description: |
+          値のみを返す遅延評価イテレータ。
+          既存実装の確認・改善。
+        examples:
+          - description: "全値の合計"
+            code: |
+              let map = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("b".to_string(), 2);
+              let sum: i32 = map.values().sum();
+              assert_eq!(sum, 3);
+
+    implementations:
+      - type: "PersistentHashMap<K, V>"
+        description: |
+          現在の先行収集型実装を維持し、entries() を iter() のエイリアスとして追加。
+          真の遅延評価への改善は将来の拡張として記録。
+
+      - type: "PersistentTreeMap<K, V>"
+        description: |
+          現在の先行収集型実装を維持し、entries() を iter() のエイリアスとして追加。
+          真の遅延評価への改善は将来の拡張として記録。
+
+  # ======================================================================
+  # 5. マージ操作
+  # ======================================================================
+  - id: merge_operations
+    name: "merge / merge_with - Map のマージ"
+    description: |
+      2つの Map を1つにマージする操作。
+
+      - merge: 既存実装あり。他の Map からエントリを追加し、衝突時は other が優先。
+      - merge_with: 衝突時のカスタム処理を指定可能。
+
+      merge は merge_with の特殊ケース: merge_with(other, |_, _, new| new)
+
+    laws:
+      - name: "Right Identity (merge)"
+        description: |
+          空の Map とマージしても変化しない。
+        equation: "map.merge(&PersistentHashMap::new()) == map"
+        property_test: |
+          fn prop_merge_right_identity<K, V>(
+              map: PersistentHashMap<K, V>
+          ) -> bool {
+              map.clone().merge(&PersistentHashMap::new()) == map
+          }
+
+      - name: "Left Identity (merge)"
+        description: |
+          空の Map に他の Map をマージすると other と等価。
+        equation: "PersistentHashMap::new().merge(&other) == other"
+        property_test: |
+          fn prop_merge_left_identity<K, V>(
+              other: PersistentHashMap<K, V>
+          ) -> bool {
+              PersistentHashMap::new().merge(&other) == other
+          }
+
+      - name: "merge_with Commutativity (with commutative resolver)"
+        description: |
+          resolver 関数が可換であれば、merge_with も可換。
+        equation: |
+          // f が可換であれば:
+          map1.merge_with(&map2, f) == map2.merge_with(&map1, |k, b, a| f(k, a, b))
+        property_test: |
+          // 可換な resolver（例: 加算）での検証
+
+    methods:
+      - name: "merge"
+        signature: |
+          fn merge(&self, other: &Self) -> Self
+        description: |
+          他の Map のエントリを全て追加する。
+          キーが衝突した場合、other の値が優先される。
+          既存実装の確認・ドキュメント整備。
+        examples:
+          - description: "2つの Map をマージ"
+            code: |
+              let map1 = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("b".to_string(), 2);
+              let map2 = PersistentHashMap::new()
+                  .insert("b".to_string(), 20)
+                  .insert("c".to_string(), 3);
+              let merged = map1.merge(&map2);
+              assert_eq!(merged.get("a"), Some(&1));
+              assert_eq!(merged.get("b"), Some(&20)); // map2 の値が優先
+              assert_eq!(merged.get("c"), Some(&3));
+
+      - name: "merge_with"
+        signature: |
+          fn merge_with<F>(&self, other: &Self, resolver: F) -> Self
+          where
+              F: FnMut(&K, &V, &V) -> V
+        description: |
+          他の Map のエントリを追加し、キー衝突時は resolver 関数で解決する。
+          resolver は (key, self_value, other_value) -> resolved_value を受け取る。
+        examples:
+          - description: "衝突時に値を加算"
+            code: |
+              let map1 = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("b".to_string(), 2);
+              let map2 = PersistentHashMap::new()
+                  .insert("b".to_string(), 20)
+                  .insert("c".to_string(), 3);
+              let merged = map1.merge_with(&map2, |_, v1, v2| v1 + v2);
+              assert_eq!(merged.get("a"), Some(&1));
+              assert_eq!(merged.get("b"), Some(&22)); // 2 + 20
+              assert_eq!(merged.get("c"), Some(&3));
+
+          - description: "衝突時に大きい値を採用"
+            code: |
+              let map1 = PersistentHashMap::new()
+                  .insert("x".to_string(), 100)
+                  .insert("y".to_string(), 5);
+              let map2 = PersistentHashMap::new()
+                  .insert("x".to_string(), 50)
+                  .insert("y".to_string(), 500);
+              let merged = map1.merge_with(&map2, |_, v1, v2| *v1.max(v2));
+              assert_eq!(merged.get("x"), Some(&100));
+              assert_eq!(merged.get("y"), Some(&500));
+
+    implementations:
+      - type: "PersistentHashMap<K, V>"
+        description: |
+          既存の merge 実装を確認し、merge_with を追加。
+          効率的な実装のため、小さい Map から大きい Map へマージする最適化を検討。
+
+      - type: "PersistentTreeMap<K, V>"
+        description: |
+          merge と merge_with を実装。
+          両方の Tree を走査し、新しい Tree を構築する。
+
+  # ======================================================================
+  # 6. 述語ベースの削除・保持
+  # ======================================================================
+  - id: predicate_operations
+    name: "delete_if / keep_if - 述語ベースの削除・保持"
+    description: |
+      述語関数に基づいてエントリを削除または保持する操作。
+
+      - delete_if: 述語が true を返すエントリを削除
+      - keep_if: 述語が true を返すエントリのみを保持（filter と同義）
+
+      これらは互いに補完的: delete_if(p) == keep_if(|k, v| !p(k, v))
+
+    laws:
+      - name: "Complement Relationship"
+        description: |
+          delete_if と keep_if は補完関係にある。
+        equation: "map.delete_if(p) == map.keep_if(|k, v| !p(k, v))"
+        property_test: |
+          fn prop_complement<K, V>(
+              map: PersistentHashMap<K, V>,
+              p: fn(&K, &V) -> bool
+          ) -> bool {
+              map.clone().delete_if(p) == map.keep_if(|k, v| !p(k, v))
+          }
+
+      - name: "Always True (delete_if)"
+        description: |
+          常に true を返す述語で delete_if すると空の Map になる。
+        equation: "map.delete_if(|_, _| true).is_empty() == true"
+        property_test: |
+          fn prop_delete_all<K, V>(
+              map: PersistentHashMap<K, V>
+          ) -> bool {
+              map.delete_if(|_, _| true).is_empty()
+          }
+
+      - name: "Always False (delete_if)"
+        description: |
+          常に false を返す述語で delete_if すると元の Map と等価。
+        equation: "map.delete_if(|_, _| false) == map"
+        property_test: |
+          fn prop_delete_none<K, V>(
+              map: PersistentHashMap<K, V>
+          ) -> bool {
+              map.clone().delete_if(|_, _| false) == map
+          }
+
+      - name: "Always True (keep_if)"
+        description: |
+          常に true を返す述語で keep_if すると元の Map と等価。
+        equation: "map.keep_if(|_, _| true) == map"
+        property_test: |
+          fn prop_keep_all<K, V>(
+              map: PersistentHashMap<K, V>
+          ) -> bool {
+              map.clone().keep_if(|_, _| true) == map
+          }
+
+    methods:
+      - name: "delete_if"
+        signature: |
+          fn delete_if<F>(&self, predicate: F) -> Self
+          where
+              K: Clone + Hash + Eq,
+              V: Clone,
+              F: FnMut(&K, &V) -> bool
+        description: |
+          述語が true を返すエントリを削除した新しい Map を返す。
+        examples:
+          - description: "偶数の値を持つエントリを削除"
+            code: |
+              let map = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("b".to_string(), 2)
+                  .insert("c".to_string(), 3)
+                  .insert("d".to_string(), 4);
+              let result = map.delete_if(|_, v| v % 2 == 0);
+              assert_eq!(result.len(), 2);
+              assert!(result.contains_key("a"));
+              assert!(result.contains_key("c"));
+
+      - name: "keep_if"
+        signature: |
+          fn keep_if<F>(&self, predicate: F) -> Self
+          where
+              K: Clone + Hash + Eq,
+              V: Clone,
+              F: FnMut(&K, &V) -> bool
+        description: |
+          述語が true を返すエントリのみを保持した新しい Map を返す。
+          filter と同義だが、より明示的な命名。
+        examples:
+          - description: "値が10以上のエントリのみ保持"
+            code: |
+              let map = PersistentHashMap::new()
+                  .insert("small".to_string(), 5)
+                  .insert("medium".to_string(), 15)
+                  .insert("large".to_string(), 100);
+              let result = map.keep_if(|_, v| *v >= 10);
+              assert_eq!(result.len(), 2);
+              assert!(result.contains_key("medium"));
+              assert!(result.contains_key("large"));
+
+    implementations:
+      - type: "PersistentHashMap<K, V>"
+        description: |
+          HAMT 構造を走査し、述語に基づいてエントリを選択。
+          可能な限り構造的共有を維持する（変更のないサブツリーは再利用）。
+
+      - type: "PersistentTreeMap<K, V>"
+        description: |
+          Red-Black Tree を走査し、述語に基づいてエントリを選択。
+
+  # ======================================================================
+  # 7. 分割操作
+  # ======================================================================
+  - id: partition
+    name: "partition - 述語で分割"
+    description: |
+      述語関数に基づいて Map を2つに分割する。
+
+      返り値は (matching, not_matching) のタプルで:
+      - matching: 述語が true を返したエントリ
+      - not_matching: 述語が false を返したエントリ
+
+      これは keep_if と delete_if を同時に実行し、両方の結果を返す最適化版。
+
+    laws:
+      - name: "Completeness"
+        description: |
+          分割された2つの Map の和集合は元の Map と等価。
+        equation: "let (a, b) = map.partition(p); a.merge(&b) == map (要素数)"
+        property_test: |
+          fn prop_partition_complete<K, V>(
+              map: PersistentHashMap<K, V>,
+              p: fn(&K, &V) -> bool
+          ) -> bool {
+              let (matching, not_matching) = map.clone().partition(p);
+              matching.len() + not_matching.len() == map.len()
+          }
+
+      - name: "Disjointness"
+        description: |
+          分割された2つの Map は共通のキーを持たない。
+        equation: "let (a, b) = map.partition(p); a.keys().all(|k| !b.contains_key(k))"
+        property_test: |
+          fn prop_partition_disjoint<K, V>(
+              map: PersistentHashMap<K, V>,
+              p: fn(&K, &V) -> bool
+          ) -> bool {
+              let (matching, not_matching) = map.partition(p);
+              matching.keys().all(|k| !not_matching.contains_key(k))
+          }
+
+      - name: "Correctness"
+        description: |
+          matching は keep_if と、not_matching は delete_if と等価。
+        equation: |
+          let (matching, not_matching) = map.partition(p);
+          matching == map.keep_if(p) && not_matching == map.delete_if(p)
+        property_test: |
+          fn prop_partition_correct<K, V>(
+              map: PersistentHashMap<K, V>,
+              p: fn(&K, &V) -> bool
+          ) -> bool {
+              let (matching, not_matching) = map.clone().partition(p.clone());
+              matching == map.clone().keep_if(p.clone()) &&
+              not_matching == map.delete_if(|k, v| !p(k, v))
+          }
+
+    methods:
+      - name: "partition"
+        signature: |
+          fn partition<F>(&self, predicate: F) -> (Self, Self)
+          where
+              K: Clone + Hash + Eq,
+              V: Clone,
+              F: FnMut(&K, &V) -> bool
+        description: |
+          述語に基づいて Map を2つに分割する。
+          タプルの最初の要素は述語が true を返したエントリ、
+          2番目は false を返したエントリを含む。
+        examples:
+          - description: "偶数と奇数で分割"
+            code: |
+              let map = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("b".to_string(), 2)
+                  .insert("c".to_string(), 3)
+                  .insert("d".to_string(), 4);
+              let (evens, odds) = map.partition(|_, v| v % 2 == 0);
+              assert_eq!(evens.len(), 2);
+              assert_eq!(odds.len(), 2);
+              assert!(evens.contains_key("b"));
+              assert!(evens.contains_key("d"));
+              assert!(odds.contains_key("a"));
+              assert!(odds.contains_key("c"));
+
+          - description: "キーの長さで分割"
+            code: |
+              let map = PersistentHashMap::new()
+                  .insert("a".to_string(), 1)
+                  .insert("abc".to_string(), 2)
+                  .insert("abcde".to_string(), 3);
+              let (short, long) = map.partition(|k, _| k.len() <= 2);
+              assert_eq!(short.len(), 1); // "a"
+              assert_eq!(long.len(), 2);  // "abc", "abcde"
+
+    implementations:
+      - type: "PersistentHashMap<K, V>"
+        description: |
+          HAMT 構造を1回走査し、各エントリを述語に基づいて2つの Map に振り分ける。
+          keep_if と delete_if を別々に呼ぶより効率的（1回の走査で完了）。
+
+      - type: "PersistentTreeMap<K, V>"
+        description: |
+          Red-Black Tree を1回走査し、各エントリを2つの Tree に振り分ける。
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    hashmap:
+      - |
+        map_values, map_keys: O(n) - 全エントリを走査
+      - |
+        filter_map: O(n) - 全エントリを走査
+      - |
+        delete_if, keep_if: O(n) - 全エントリを走査
+      - |
+        partition: O(n) - 全エントリを走査（1回で2つの Map を構築）
+      - |
+        merge: O(m) where m は other のサイズ
+      - |
+        merge_with: O(m) - merge と同等
+    treemap:
+      - |
+        map_values, map_keys: O(n log n) - 全エントリを走査して新しい Tree を構築
+      - |
+        filter_map: O(n log n) - 全エントリを走査して新しい Tree を構築
+      - |
+        delete_if, keep_if: O(n log n) - 全エントリを走査して新しい Tree を構築
+      - |
+        partition: O(n log n) - 全エントリを走査（1回で2つの Tree を構築）
+      - |
+        merge: O(m log(n + m)) where m は other のサイズ、n は self のサイズ
+      - |
+        merge_with: O(m log(n + m)) - merge と同等
+    common:
+      - |
+        entries, keys, values イテレータ: 現時点は先行収集型 O(n)
+      - |
+        構造的共有: 変更のないサブツリーは再利用し、メモリ効率を維持
+
+  compatibility:
+    - |
+      既存の API との互換性を維持
+    - |
+      既存の iter(), keys(), values() メソッドは維持（entries() は alias または改善版として追加）
+    - |
+      既存の merge() メソッドの動作は変更しない
+    - |
+      Foldable トレイト実装との一貫性を維持
+
+  testing:
+    - |
+      各操作に対して単体テストを実装
+    - |
+      プロパティベーステスト（法則の検証）を実装
+    - |
+      空の Map に対する操作のテスト
+    - |
+      大きな Map（1000要素以上）に対するテスト
+    - |
+      構造的共有が正しく維持されていることの検証
+    - |
+      PersistentHashMap と PersistentTreeMap の両方で同一のテストケースを実行
+    - |
+      イテレータの遅延評価が正しく機能することの検証
+    - |
+      rstest を使用してテストを記述
+
+# 他言語との対応関係
+language_comparison:
+  scala:
+    - lambars: "map_values"
+      scala: "mapValues / transform((k, v) => f(v))"
+      notes: "Scala の mapValues は view ベース（遅延評価）"
+    - lambars: "map_keys"
+      scala: "map { case (k, v) => (f(k), v) }.toMap"
+      notes: "Scala には直接的な mapKeys はない"
+    - lambars: "filter_map"
+      scala: "collect { case (k, v) if cond => (k, f(v)) }"
+      notes: "collect は partial function を使用"
+    - lambars: "merge"
+      scala: "++ (map1 ++ map2)"
+      notes: "右側が優先"
+    - lambars: "merge_with"
+      scala: "merged + (k -> resolver(...))"
+      notes: "Scala 2.13+ では updatedWith を使用"
+    - lambars: "delete_if"
+      scala: "filterNot { case (k, v) => predicate(k, v) }"
+      notes: ""
+    - lambars: "keep_if"
+      scala: "filter { case (k, v) => predicate(k, v) }"
+      notes: ""
+    - lambars: "partition"
+      scala: "partition { case (k, v) => predicate(k, v) }"
+      notes: ""
+
+  haskell:
+    - lambars: "map_values"
+      haskell: "Data.Map.map"
+      notes: "Haskell の map は値のみを変換"
+    - lambars: "map_keys"
+      haskell: "Data.Map.mapKeys"
+      notes: "衝突時は combine で指定可能（mapKeysWith）"
+    - lambars: "filter_map"
+      haskell: "Data.Map.mapMaybe"
+      notes: "mapMaybeWithKey でキーも参照可能"
+    - lambars: "merge"
+      haskell: "Data.Map.union"
+      notes: "左側が優先（lambars と逆）"
+    - lambars: "merge_with"
+      haskell: "Data.Map.unionWith"
+      notes: "unionWithKey でキーも参照可能"
+    - lambars: "delete_if"
+      haskell: "Data.Map.filterWithKey (\\k v -> not (p k v))"
+      notes: ""
+    - lambars: "keep_if"
+      haskell: "Data.Map.filterWithKey"
+      notes: ""
+    - lambars: "partition"
+      haskell: "Data.Map.partitionWithKey"
+      notes: ""
+
+  clojure:
+    - lambars: "map_values"
+      clojure: "(into {} (map (fn [[k v]] [k (f v)]) m))"
+      notes: "または update-vals (Clojure 1.11+)"
+    - lambars: "map_keys"
+      clojure: "(into {} (map (fn [[k v]] [(f k) v]) m))"
+      notes: "または update-keys (Clojure 1.11+)"
+    - lambars: "filter_map"
+      clojure: "(into {} (keep (fn [[k v]] (when-let [r (f k v)] [k r])) m))"
+      notes: ""
+    - lambars: "merge"
+      clojure: "(merge m1 m2)"
+      notes: "右側が優先"
+    - lambars: "merge_with"
+      clojure: "(merge-with f m1 m2)"
+      notes: ""
+    - lambars: "delete_if"
+      clojure: "(into {} (remove (fn [[k v]] (p k v)) m))"
+      notes: ""
+    - lambars: "keep_if"
+      clojure: "(into {} (filter (fn [[k v]] (p k v)) m))"
+      notes: ""
+    - lambars: "partition"
+      clojure: "[(into {} (filter p m)) (into {} (remove p m))]"
+      notes: ""
+
+# 将来の拡張
+future_extensions:
+  - id: "lazy_iterators_improvement"
+    name: "真の遅延評価イテレータ"
+    description: |
+      現在の iter(), keys(), values() は先行収集型であり、
+      全エントリをVecに収集してから反復する。
+      真の遅延評価（ステートフルイテレータ）への改善を検討する。
+
+      期待される利点:
+      - 大きな Map でも最初の要素取得は O(log n)
+      - 部分的な走査で早期終了可能
+      - メモリ効率が良い（全要素を先に収集しない）
+    rationale: |
+      初期実装の複雑さを抑えるため、既存実装を維持する。
+      パフォーマンス要件が明確になった時点で改善を検討。
+
+  - id: "map_keys_with"
+    name: "map_keys_with - 衝突解決付きキー変換"
+    description: |
+      map_keys の拡張版で、キー衝突時の解決方法を指定可能。
+      fn map_keys_with<L, F, R>(self, f: F, resolver: R) -> Map<L, V>
+      where R: FnMut(&L, &V, &V) -> V
+    rationale: |
+      map_keys での衝突を明示的に制御したいユースケースがあるが、
+      初期実装の複雑さを抑えるため、将来の拡張とする。
+
+  - id: "transform"
+    name: "transform - キーと値を同時に変換"
+    description: |
+      キーと値の両方を同時に変換する操作。
+      fn transform<L, W, F>(self, f: F) -> Map<L, W>
+      where F: FnMut(K, V) -> (L, W)
+    rationale: |
+      map_keys と map_values を組み合わせるより効率的だが、
+      使用頻度が低いと予想されるため、将来の拡張とする。
+
+  - id: "symmetric_difference"
+    name: "symmetric_difference - 対称差"
+    description: |
+      2つの Map の対称差（どちらか一方にのみ存在するキー）を返す。
+    rationale: |
+      集合演算として有用だが、Map 操作の優先度は低い。
+      将来の Set 操作拡張と合わせて検討。
+
+  - id: "diff"
+    name: "diff - 差分の計算"
+    description: |
+      2つの Map の差分を計算し、追加・変更・削除されたエントリを返す。
+    rationale: |
+      バージョン管理やデバッグに有用だが、基本操作より優先度が低い。

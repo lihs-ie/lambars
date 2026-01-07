@@ -1388,6 +1388,353 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     pub fn values(&self) -> impl Iterator<Item = &V> {
         self.iter().map(|(_, value)| value)
     }
+
+    /// Applies a function to all values, keeping keys unchanged.
+    ///
+    /// Returns a new map with the same keys but transformed values.
+    /// The length of the map is preserved.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `W` - The type of the transformed values
+    /// * `F` - The transformation function type
+    ///
+    /// # Arguments
+    ///
+    /// * `transform` - A function to apply to each value
+    ///
+    /// # Complexity
+    ///
+    /// O(n) where n is the number of entries
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentHashMap;
+    ///
+    /// let map = PersistentHashMap::new()
+    ///     .insert("a".to_string(), 1)
+    ///     .insert("b".to_string(), 2);
+    /// let doubled = map.map_values(|v| v * 2);
+    /// assert_eq!(doubled.get("a"), Some(&2));
+    /// assert_eq!(doubled.get("b"), Some(&4));
+    /// ```
+    #[must_use]
+    pub fn map_values<W, F>(&self, mut transform: F) -> PersistentHashMap<K, W>
+    where
+        K: Clone + Hash + Eq,
+        W: Clone,
+        F: FnMut(&V) -> W,
+    {
+        self.iter()
+            .map(|(key, value)| (key.clone(), transform(value)))
+            .collect()
+    }
+
+    /// Applies a function to all keys, keeping values unchanged.
+    ///
+    /// Returns a new map with transformed keys and the original values.
+    ///
+    /// # Warning
+    ///
+    /// Key transformation may cause collisions. When multiple original keys
+    /// map to the same new key, only one entry will be kept (the one
+    /// processed last, which depends on iteration order).
+    ///
+    /// # Type Parameters
+    ///
+    /// * `L` - The type of the transformed keys
+    /// * `F` - The transformation function type
+    ///
+    /// # Arguments
+    ///
+    /// * `transform` - A function to apply to each key
+    ///
+    /// # Complexity
+    ///
+    /// O(n) where n is the number of entries
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentHashMap;
+    ///
+    /// let map = PersistentHashMap::new()
+    ///     .insert("hello".to_string(), 1)
+    ///     .insert("world".to_string(), 2);
+    /// let uppercased = map.map_keys(|k| k.to_uppercase());
+    /// assert_eq!(uppercased.get("HELLO"), Some(&1));
+    /// assert_eq!(uppercased.get("WORLD"), Some(&2));
+    /// ```
+    #[must_use]
+    pub fn map_keys<L, F>(&self, mut transform: F) -> PersistentHashMap<L, V>
+    where
+        L: Clone + Hash + Eq,
+        V: Clone,
+        F: FnMut(&K) -> L,
+    {
+        self.iter()
+            .map(|(key, value)| (transform(key), value.clone()))
+            .collect()
+    }
+
+    /// Applies a function to each entry, keeping only those that return Some.
+    ///
+    /// This combines filtering and mapping in a single operation.
+    /// Entries for which the function returns None are excluded from the result.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `W` - The type of the transformed values
+    /// * `F` - The filter-map function type
+    ///
+    /// # Arguments
+    ///
+    /// * `filter_transform` - A function that receives a reference to the key and the value,
+    ///   and returns `Some(new_value)` to include or `None` to exclude
+    ///
+    /// # Complexity
+    ///
+    /// O(n) where n is the number of entries
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentHashMap;
+    ///
+    /// let map = PersistentHashMap::new()
+    ///     .insert("a".to_string(), 1)
+    ///     .insert("b".to_string(), 2)
+    ///     .insert("c".to_string(), 3);
+    /// let evens_doubled = map.filter_map(|_, v| {
+    ///     if v % 2 == 0 { Some(v * 2) } else { None }
+    /// });
+    /// assert_eq!(evens_doubled.len(), 1);
+    /// assert_eq!(evens_doubled.get("b"), Some(&4));
+    /// ```
+    #[must_use]
+    pub fn filter_map<W, F>(&self, mut filter_transform: F) -> PersistentHashMap<K, W>
+    where
+        K: Clone + Hash + Eq,
+        W: Clone,
+        F: FnMut(&K, &V) -> Option<W>,
+    {
+        self.iter()
+            .filter_map(|(key, value)| {
+                filter_transform(key, value).map(|new_value| (key.clone(), new_value))
+            })
+            .collect()
+    }
+
+    /// Returns an iterator over key-value pairs.
+    ///
+    /// This is an alias for [`iter`](Self::iter), provided for API consistency
+    /// with other functional programming languages.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentHashMap;
+    ///
+    /// let map = PersistentHashMap::new()
+    ///     .insert("a".to_string(), 1)
+    ///     .insert("b".to_string(), 2);
+    /// for (key, value) in map.entries() {
+    ///     println!("{}: {}", key, value);
+    /// }
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn entries(&self) -> PersistentHashMapIterator<'_, K, V> {
+        self.iter()
+    }
+
+    /// Merges two maps with a custom conflict resolver.
+    ///
+    /// Returns a new map containing all entries from both maps.
+    /// When a key exists in both maps, the resolver function is called
+    /// with the key and both values to determine the final value.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The map to merge with
+    /// * `resolver` - A function that receives (key, `self_value`, `other_value`) and
+    ///   returns the value to use in the merged map
+    ///
+    /// # Complexity
+    ///
+    /// O(n + m) where n and m are the sizes of the two maps
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentHashMap;
+    ///
+    /// let map1 = PersistentHashMap::new()
+    ///     .insert("a".to_string(), 1)
+    ///     .insert("b".to_string(), 2);
+    /// let map2 = PersistentHashMap::new()
+    ///     .insert("b".to_string(), 20)
+    ///     .insert("c".to_string(), 3);
+    /// let merged = map1.merge_with(&map2, |_, v1, v2| v1 + v2);
+    /// assert_eq!(merged.get("a"), Some(&1));
+    /// assert_eq!(merged.get("b"), Some(&22)); // 2 + 20
+    /// assert_eq!(merged.get("c"), Some(&3));
+    /// ```
+    #[must_use]
+    pub fn merge_with<F>(&self, other: &Self, mut resolver: F) -> Self
+    where
+        F: FnMut(&K, &V, &V) -> V,
+    {
+        let mut result = self.clone();
+        for (key, other_value) in other {
+            let new_value = result.get(key).map_or_else(
+                || other_value.clone(),
+                |self_value| resolver(key, self_value, other_value),
+            );
+            result = result.insert(key.clone(), new_value);
+        }
+        result
+    }
+
+    /// Removes entries for which the predicate returns true.
+    ///
+    /// Returns a new map containing only entries for which the predicate
+    /// returns false.
+    ///
+    /// # Arguments
+    ///
+    /// * `predicate` - A function that receives a reference to the key and value,
+    ///   and returns true if the entry should be deleted
+    ///
+    /// # Complexity
+    ///
+    /// O(n) where n is the number of entries
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentHashMap;
+    ///
+    /// let map = PersistentHashMap::new()
+    ///     .insert("a".to_string(), 1)
+    ///     .insert("b".to_string(), 2)
+    ///     .insert("c".to_string(), 3);
+    /// let odds_only = map.delete_if(|_, v| v % 2 == 0);
+    /// assert_eq!(odds_only.len(), 2);
+    /// assert!(odds_only.contains_key("a"));
+    /// assert!(odds_only.contains_key("c"));
+    /// ```
+    #[must_use]
+    pub fn delete_if<F>(&self, mut predicate: F) -> Self
+    where
+        K: Clone + Hash + Eq,
+        V: Clone,
+        F: FnMut(&K, &V) -> bool,
+    {
+        self.iter()
+            .filter(|(key, value)| !predicate(key, value))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    /// Keeps only entries for which the predicate returns true.
+    ///
+    /// Returns a new map containing only entries for which the predicate
+    /// returns true. This is equivalent to `filter` but with a more explicit name.
+    ///
+    /// # Arguments
+    ///
+    /// * `predicate` - A function that receives a reference to the key and value,
+    ///   and returns true if the entry should be kept
+    ///
+    /// # Complexity
+    ///
+    /// O(n) where n is the number of entries
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentHashMap;
+    ///
+    /// let map = PersistentHashMap::new()
+    ///     .insert("small".to_string(), 5)
+    ///     .insert("medium".to_string(), 15)
+    ///     .insert("large".to_string(), 100);
+    /// let large_values = map.keep_if(|_, v| *v >= 10);
+    /// assert_eq!(large_values.len(), 2);
+    /// assert!(large_values.contains_key("medium"));
+    /// assert!(large_values.contains_key("large"));
+    /// ```
+    #[must_use]
+    pub fn keep_if<F>(&self, mut predicate: F) -> Self
+    where
+        K: Clone + Hash + Eq,
+        V: Clone,
+        F: FnMut(&K, &V) -> bool,
+    {
+        self.iter()
+            .filter(|(key, value)| predicate(key, value))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    /// Partitions the map into two maps based on a predicate.
+    ///
+    /// Returns a tuple of two maps:
+    /// - The first contains entries for which the predicate returns true
+    /// - The second contains entries for which the predicate returns false
+    ///
+    /// This is more efficient than calling both `keep_if` and `delete_if`
+    /// as it only traverses the map once.
+    ///
+    /// # Arguments
+    ///
+    /// * `predicate` - A function that receives a reference to the key and value,
+    ///   and returns true to include in the first map, false for the second
+    ///
+    /// # Complexity
+    ///
+    /// O(n) where n is the number of entries
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentHashMap;
+    ///
+    /// let map = PersistentHashMap::new()
+    ///     .insert("a".to_string(), 1)
+    ///     .insert("b".to_string(), 2)
+    ///     .insert("c".to_string(), 3)
+    ///     .insert("d".to_string(), 4);
+    /// let (evens, odds) = map.partition(|_, v| v % 2 == 0);
+    /// assert_eq!(evens.len(), 2);
+    /// assert_eq!(odds.len(), 2);
+    /// assert!(evens.contains_key("b"));
+    /// assert!(evens.contains_key("d"));
+    /// assert!(odds.contains_key("a"));
+    /// assert!(odds.contains_key("c"));
+    /// ```
+    #[must_use]
+    pub fn partition<F>(&self, mut predicate: F) -> (Self, Self)
+    where
+        K: Clone + Hash + Eq,
+        V: Clone,
+        F: FnMut(&K, &V) -> bool,
+    {
+        let mut matching = Self::new();
+        let mut not_matching = Self::new();
+
+        for (key, value) in self {
+            if predicate(key, value) {
+                matching = matching.insert(key.clone(), value.clone());
+            } else {
+                not_matching = not_matching.insert(key.clone(), value.clone());
+            }
+        }
+
+        (matching, not_matching)
+    }
 }
 
 // =============================================================================
@@ -1732,5 +2079,494 @@ mod tests {
 
         let sum = map.fold_left(0, |accumulator, value| accumulator + value);
         assert_eq!(sum, 6);
+    }
+
+    // =========================================================================
+    // map_values Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_map_values_empty() {
+        let map: PersistentHashMap<String, i32> = PersistentHashMap::new();
+        let result = map.map_values(|v| v * 2);
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_map_values_basic() {
+        let map = PersistentHashMap::new()
+            .insert("a".to_string(), 1)
+            .insert("b".to_string(), 2);
+        let doubled = map.map_values(|v| v * 2);
+        assert_eq!(doubled.get("a"), Some(&2));
+        assert_eq!(doubled.get("b"), Some(&4));
+        assert_eq!(doubled.len(), 2);
+    }
+
+    #[rstest]
+    fn test_map_values_type_change() {
+        let map = PersistentHashMap::new().insert(1, 100).insert(2, 200);
+        let stringified = map.map_values(|v| v.to_string());
+        assert_eq!(stringified.get(&1), Some(&"100".to_string()));
+        assert_eq!(stringified.get(&2), Some(&"200".to_string()));
+    }
+
+    #[rstest]
+    fn test_map_values_identity_law() {
+        let map = PersistentHashMap::new()
+            .insert("a".to_string(), 1)
+            .insert("b".to_string(), 2);
+        let result = map.map_values(|v| *v);
+        assert_eq!(result, map);
+    }
+
+    #[rstest]
+    fn test_map_values_length_preservation() {
+        let map = PersistentHashMap::new()
+            .insert("a".to_string(), 1)
+            .insert("b".to_string(), 2)
+            .insert("c".to_string(), 3);
+        let result = map.map_values(|v| v * 2);
+        assert_eq!(result.len(), map.len());
+    }
+
+    #[rstest]
+    fn test_map_values_composition_law() {
+        let map = PersistentHashMap::new()
+            .insert("a".to_string(), 1)
+            .insert("b".to_string(), 2);
+        let f = |v: &i32| v * 2;
+        let g = |v: &i32| v + 10;
+        let chained = map.map_values(f).map_values(g);
+        let composed = map.map_values(|v| g(&f(v)));
+        assert_eq!(chained, composed);
+    }
+
+    // =========================================================================
+    // map_keys Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_map_keys_empty() {
+        let map: PersistentHashMap<String, i32> = PersistentHashMap::new();
+        let result = map.map_keys(|k| k.to_uppercase());
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_map_keys_basic() {
+        let map = PersistentHashMap::new()
+            .insert("hello".to_string(), 1)
+            .insert("world".to_string(), 2);
+        let uppercased = map.map_keys(|k| k.to_uppercase());
+        assert_eq!(uppercased.get("HELLO"), Some(&1));
+        assert_eq!(uppercased.get("WORLD"), Some(&2));
+    }
+
+    #[rstest]
+    fn test_map_keys_type_change() {
+        let map = PersistentHashMap::new()
+            .insert("a".to_string(), 1)
+            .insert("bb".to_string(), 2)
+            .insert("ccc".to_string(), 3);
+        let by_length = map.map_keys(|k| k.len());
+        assert_eq!(by_length.get(&1), Some(&1));
+        assert_eq!(by_length.get(&2), Some(&2));
+        assert_eq!(by_length.get(&3), Some(&3));
+    }
+
+    #[rstest]
+    fn test_map_keys_collision() {
+        let map = PersistentHashMap::new()
+            .insert("a".to_string(), 1)
+            .insert("A".to_string(), 2);
+        let uppercased = map.map_keys(|k| k.to_uppercase());
+        assert_eq!(uppercased.len(), 1);
+        assert!(uppercased.contains_key("A"));
+    }
+
+    #[rstest]
+    fn test_map_keys_identity_law() {
+        let map = PersistentHashMap::new()
+            .insert("a".to_string(), 1)
+            .insert("b".to_string(), 2);
+        let result = map.map_keys(|k| k.clone());
+        assert_eq!(result, map);
+    }
+
+    #[rstest]
+    fn test_map_keys_length_upper_bound() {
+        let map = PersistentHashMap::new()
+            .insert("a".to_string(), 1)
+            .insert("A".to_string(), 2);
+        let result = map.map_keys(|k| k.to_uppercase());
+        assert!(result.len() <= map.len());
+    }
+
+    // =========================================================================
+    // filter_map Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_filter_map_empty() {
+        let map: PersistentHashMap<String, i32> = PersistentHashMap::new();
+        let result = map.filter_map(|_, v| Some(v * 2));
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_filter_map_basic() {
+        let map = PersistentHashMap::new()
+            .insert("a".to_string(), 1)
+            .insert("b".to_string(), 2)
+            .insert("c".to_string(), 3)
+            .insert("d".to_string(), 4);
+        let evens_doubled = map.filter_map(|_, v| if v % 2 == 0 { Some(v * 2) } else { None });
+        assert_eq!(evens_doubled.len(), 2);
+        assert_eq!(evens_doubled.get("b"), Some(&4));
+        assert_eq!(evens_doubled.get("d"), Some(&8));
+    }
+
+    #[rstest]
+    fn test_filter_map_all_none() {
+        let map = PersistentHashMap::new()
+            .insert("a".to_string(), 1)
+            .insert("b".to_string(), 2);
+        let result: PersistentHashMap<String, i32> = map.filter_map(|_, _| None);
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_filter_map_all_some() {
+        let map = PersistentHashMap::new()
+            .insert("a".to_string(), 1)
+            .insert("b".to_string(), 2);
+        let result = map.filter_map(|_, v| Some(*v));
+        assert_eq!(result, map);
+    }
+
+    #[rstest]
+    fn test_filter_map_identity_with_some() {
+        let map = PersistentHashMap::new()
+            .insert("a".to_string(), 1)
+            .insert("b".to_string(), 2);
+        let filter_mapped = map.filter_map(|_, v| Some(*v * 2));
+        let map_valued = map.map_values(|v| v * 2);
+        assert_eq!(filter_mapped, map_valued);
+    }
+
+    #[rstest]
+    fn test_filter_map_type_change() {
+        let map = PersistentHashMap::new()
+            .insert("valid".to_string(), "42".to_string())
+            .insert("invalid".to_string(), "abc".to_string());
+        let parsed = map.filter_map(|_, v| v.parse::<i32>().ok());
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed.get("valid"), Some(&42));
+    }
+
+    #[rstest]
+    fn test_filter_map_uses_key() {
+        let map = PersistentHashMap::new()
+            .insert("keep".to_string(), 1)
+            .insert("drop".to_string(), 2);
+        let result = map.filter_map(|k, v| {
+            if k.starts_with("keep") {
+                Some(*v)
+            } else {
+                None
+            }
+        });
+        assert_eq!(result.len(), 1);
+        assert!(result.contains_key("keep"));
+    }
+
+    // =========================================================================
+    // entries Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_entries_hashmap_equals_iter() {
+        let map = PersistentHashMap::new()
+            .insert("a".to_string(), 1)
+            .insert("b".to_string(), 2);
+        let iter_entries: Vec<_> = map.iter().collect();
+        let entries_entries: Vec<_> = map.entries().collect();
+        assert_eq!(iter_entries, entries_entries);
+    }
+
+    #[rstest]
+    fn test_entries_count_equals_len() {
+        let map = PersistentHashMap::new()
+            .insert("a".to_string(), 1)
+            .insert("b".to_string(), 2)
+            .insert("c".to_string(), 3);
+        assert_eq!(map.entries().count(), map.len());
+    }
+
+    // =========================================================================
+    // merge_with Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_merge_with_empty_left() {
+        let empty: PersistentHashMap<String, i32> = PersistentHashMap::new();
+        let other = PersistentHashMap::singleton("a".to_string(), 1);
+        let result = empty.merge_with(&other, |_, v1, v2| v1 + v2);
+        assert_eq!(result, other);
+    }
+
+    #[rstest]
+    fn test_merge_with_empty_right() {
+        let map = PersistentHashMap::singleton("a".to_string(), 1);
+        let empty: PersistentHashMap<String, i32> = PersistentHashMap::new();
+        let result = map.merge_with(&empty, |_, v1, v2| v1 + v2);
+        assert_eq!(result, map);
+    }
+
+    #[rstest]
+    fn test_merge_with_sum_resolver() {
+        let map1 = PersistentHashMap::new()
+            .insert("a".to_string(), 1)
+            .insert("b".to_string(), 2);
+        let map2 = PersistentHashMap::new()
+            .insert("b".to_string(), 20)
+            .insert("c".to_string(), 3);
+        let merged = map1.merge_with(&map2, |_, v1, v2| v1 + v2);
+        assert_eq!(merged.get("a"), Some(&1));
+        assert_eq!(merged.get("b"), Some(&22));
+        assert_eq!(merged.get("c"), Some(&3));
+    }
+
+    #[rstest]
+    fn test_merge_with_max_resolver() {
+        let map1 = PersistentHashMap::new()
+            .insert("x".to_string(), 100)
+            .insert("y".to_string(), 5);
+        let map2 = PersistentHashMap::new()
+            .insert("x".to_string(), 50)
+            .insert("y".to_string(), 500);
+        let merged = map1.merge_with(&map2, |_, v1, v2| *v1.max(v2));
+        assert_eq!(merged.get("x"), Some(&100));
+        assert_eq!(merged.get("y"), Some(&500));
+    }
+
+    #[rstest]
+    fn test_merge_with_left_wins() {
+        let map1 = PersistentHashMap::singleton("a".to_string(), 1);
+        let map2 = PersistentHashMap::singleton("a".to_string(), 2);
+        let merged = map1.merge_with(&map2, |_, v1, _| *v1);
+        assert_eq!(merged.get("a"), Some(&1));
+    }
+
+    #[rstest]
+    fn test_merge_with_right_wins() {
+        let map1 = PersistentHashMap::singleton("a".to_string(), 1);
+        let map2 = PersistentHashMap::singleton("a".to_string(), 2);
+        let merged = map1.merge_with(&map2, |_, _, v2| *v2);
+        assert_eq!(merged.get("a"), Some(&2));
+    }
+
+    #[rstest]
+    fn test_merge_with_commutativity_with_commutative_resolver() {
+        let map1 = PersistentHashMap::new()
+            .insert("a".to_string(), 1)
+            .insert("b".to_string(), 2);
+        let map2 = PersistentHashMap::new()
+            .insert("b".to_string(), 20)
+            .insert("c".to_string(), 3);
+        let merged1 = map1.merge_with(&map2, |_, v1, v2| v1 + v2);
+        let merged2 = map2.merge_with(&map1, |_, v1, v2| v1 + v2);
+        assert_eq!(merged1, merged2);
+    }
+
+    // =========================================================================
+    // delete_if Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_delete_if_empty() {
+        let map: PersistentHashMap<String, i32> = PersistentHashMap::new();
+        let result = map.delete_if(|_, _| true);
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_delete_if_none() {
+        let map = PersistentHashMap::new()
+            .insert("a".to_string(), 1)
+            .insert("b".to_string(), 2);
+        let result = map.delete_if(|_, _| false);
+        assert_eq!(result, map);
+    }
+
+    #[rstest]
+    fn test_delete_if_all() {
+        let map = PersistentHashMap::new()
+            .insert("a".to_string(), 1)
+            .insert("b".to_string(), 2);
+        let result = map.delete_if(|_, _| true);
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_delete_if_evens() {
+        let map = PersistentHashMap::new()
+            .insert("a".to_string(), 1)
+            .insert("b".to_string(), 2)
+            .insert("c".to_string(), 3)
+            .insert("d".to_string(), 4);
+        let odds = map.delete_if(|_, v| v % 2 == 0);
+        assert_eq!(odds.len(), 2);
+        assert!(odds.contains_key("a"));
+        assert!(odds.contains_key("c"));
+    }
+
+    #[rstest]
+    fn test_delete_if_by_key() {
+        let map = PersistentHashMap::new()
+            .insert("keep".to_string(), 1)
+            .insert("delete".to_string(), 2);
+        let result = map.delete_if(|k, _| k.starts_with("delete"));
+        assert_eq!(result.len(), 1);
+        assert!(result.contains_key("keep"));
+    }
+
+    // =========================================================================
+    // keep_if Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_keep_if_empty() {
+        let map: PersistentHashMap<String, i32> = PersistentHashMap::new();
+        let result = map.keep_if(|_, _| true);
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_keep_if_all() {
+        let map = PersistentHashMap::new()
+            .insert("a".to_string(), 1)
+            .insert("b".to_string(), 2);
+        let result = map.keep_if(|_, _| true);
+        assert_eq!(result, map);
+    }
+
+    #[rstest]
+    fn test_keep_if_none() {
+        let map = PersistentHashMap::new()
+            .insert("a".to_string(), 1)
+            .insert("b".to_string(), 2);
+        let result = map.keep_if(|_, _| false);
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_keep_if_evens() {
+        let map = PersistentHashMap::new()
+            .insert("a".to_string(), 1)
+            .insert("b".to_string(), 2)
+            .insert("c".to_string(), 3)
+            .insert("d".to_string(), 4);
+        let evens = map.keep_if(|_, v| v % 2 == 0);
+        assert_eq!(evens.len(), 2);
+        assert!(evens.contains_key("b"));
+        assert!(evens.contains_key("d"));
+    }
+
+    #[rstest]
+    fn test_keep_if_complement_of_delete_if() {
+        let map = PersistentHashMap::new()
+            .insert("a".to_string(), 1)
+            .insert("b".to_string(), 2)
+            .insert("c".to_string(), 3);
+        let predicate = |_: &String, v: &i32| v % 2 == 0;
+        let kept = map.keep_if(predicate);
+        let deleted = map.delete_if(|k, v| !predicate(k, v));
+        assert_eq!(kept, deleted);
+    }
+
+    // =========================================================================
+    // partition Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_partition_empty() {
+        let map: PersistentHashMap<String, i32> = PersistentHashMap::new();
+        let (matching, not_matching) = map.partition(|_, _| true);
+        assert!(matching.is_empty());
+        assert!(not_matching.is_empty());
+    }
+
+    #[rstest]
+    fn test_partition_all_match() {
+        let map = PersistentHashMap::new()
+            .insert("a".to_string(), 1)
+            .insert("b".to_string(), 2);
+        let (matching, not_matching) = map.partition(|_, _| true);
+        assert_eq!(matching, map);
+        assert!(not_matching.is_empty());
+    }
+
+    #[rstest]
+    fn test_partition_none_match() {
+        let map = PersistentHashMap::new()
+            .insert("a".to_string(), 1)
+            .insert("b".to_string(), 2);
+        let (matching, not_matching) = map.partition(|_, _| false);
+        assert!(matching.is_empty());
+        assert_eq!(not_matching, map);
+    }
+
+    #[rstest]
+    fn test_partition_even_odd() {
+        let map = PersistentHashMap::new()
+            .insert("a".to_string(), 1)
+            .insert("b".to_string(), 2)
+            .insert("c".to_string(), 3)
+            .insert("d".to_string(), 4);
+        let (evens, odds) = map.partition(|_, v| v % 2 == 0);
+        assert_eq!(evens.len(), 2);
+        assert_eq!(odds.len(), 2);
+        assert!(evens.contains_key("b"));
+        assert!(evens.contains_key("d"));
+        assert!(odds.contains_key("a"));
+        assert!(odds.contains_key("c"));
+    }
+
+    #[rstest]
+    fn test_partition_completeness() {
+        let map = PersistentHashMap::new()
+            .insert("a".to_string(), 1)
+            .insert("b".to_string(), 2)
+            .insert("c".to_string(), 3);
+        let (matching, not_matching) = map.partition(|_, v| v % 2 == 0);
+        assert_eq!(matching.len() + not_matching.len(), map.len());
+    }
+
+    #[rstest]
+    fn test_partition_disjointness() {
+        let map = PersistentHashMap::new()
+            .insert("a".to_string(), 1)
+            .insert("b".to_string(), 2)
+            .insert("c".to_string(), 3);
+        let (matching, not_matching) = map.partition(|_, v| v % 2 == 0);
+        for (key, _) in &matching {
+            assert!(!not_matching.contains_key(key));
+        }
+    }
+
+    #[rstest]
+    fn test_partition_equals_keep_if_delete_if() {
+        let map = PersistentHashMap::new()
+            .insert("a".to_string(), 1)
+            .insert("b".to_string(), 2)
+            .insert("c".to_string(), 3);
+        let predicate = |_: &String, v: &i32| v % 2 == 0;
+        let (matching, not_matching) = map.partition(predicate);
+        let kept = map.keep_if(predicate);
+        let deleted_complement = map.keep_if(|k, v| !predicate(k, v));
+        assert_eq!(matching, kept);
+        assert_eq!(not_matching, deleted_complement);
     }
 }

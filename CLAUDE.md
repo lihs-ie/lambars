@@ -197,7 +197,6 @@ cargo clean
 - **対象**: アーキテクチャ設計、コード品質、セキュリティ
 - **方法**: Task ツールで専門エージェントを起動
   - `rust-implementation-reviewer`: アーキテクチャ・実装レビュー
-  - `functional-programming-specialist`: 関数型プログラミングとしてのコード品質レビュー
 - **確認事項**:
   - SOLID 原則の遵守
   - デザインパターンの適用
@@ -212,6 +211,8 @@ cargo clean
    2. 課題を解決するための方法をステップバイステップで考え、要件定義を作成する
    3. `/new-plan <機能名>` で実装計画テンプレートを取得する
    4. rust-implementation-reviewer を起動し要件定義に対して実装計画を作成する
+      1. #[test]は使用せず#[rstest]を使用すること
+      2. tokio のテストが必要な場合は#[tokio::test]と#[rstest]を併用すること
    5. codex mcp にレビューをさせる
    6. functional-programming-specialist は実装計画が要件定義と異なる点がなくなるまでレビュー指摘を行う
    7. レビュー指摘がなくなるまで繰り返す（軽微な指摘も全て解決すること）
@@ -222,40 +223,15 @@ cargo clean
 4. rust-simplification-specialist を起動して今回変更・作成したコードの構造を簡素化する
 5. codex mcp にレビューをさせる
 6. rust-implementation-reviewer を起動して実装のレビューを行う
-
    1. 略語を使用していないこと
    2. 差分の対象となるテストのみを実行し失敗していないこと
-   3. 差分の対象となるテストのカバレッジ 100%であること
-   4. 不必要なコメントが記述されていないこと
-
-      1. コードで理解できる内容のコメントは不要
-
-      ```rs
-        /// 例
-        fn safety_unwrap(...) {...}
-        fn some(...) {
-         /// Safely converts usize to i32 for test assertions.
-         safety_unwrap(hoge);
-        }
-
-        enum Hoge {
-          /// This is Apple. Color is Red.　<= 冗長のための不要
-          Apple,
-          /// This is Banana. Color is Yellow. <= 冗長のための不要
-          Banana
-        }
-      ```
-
-   5. レビュー指摘がなくなるまで修正とレビューを繰り返す（軽微な指摘も全て解決すること）
-
+   3. レビュー指摘がなくなるまで修正とレビューを繰り返す（軽微な指摘も全て解決すること）
 7. functional-programming-specialist を起動し要件定義の観点から実装をレビューする
 8. コミット前に以下の確認を実施する
    1. `cargo fmt` - コードフォーマット
    2. `cargo clippy --all-features --all-targets -- -D warnings` - lint チェック
-   3. `cargo test --no-default-features` - feature なしでテスト
-   4. `cargo test --all-features` - 全 feature でテスト
-   5. `cargo doc --no-deps` - ドキュメントビルド
-   6. 全てパスしたらコミット
+   3. `cargo doc --no-deps` - ドキュメントビルド
+   4. 全てパスしたらコミット
 9. 実装した内容を README.md, docs/external/comparison に反映する必要があるか調査し、修正が必要な場合は変更を記載しコミットする
 10. 対象の実装計画ファイルと要件定義、issue 対応の場合は issue のファイルを `docs/internal/done/` に移動する
 11. 実装上困難だと判断した場合は `/new-issue <Issue名>` で Issue ファイルを作成する

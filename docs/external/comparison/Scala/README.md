@@ -1560,6 +1560,23 @@ Available AsyncIO methods:
 | `vec.scanLeft(z)(f)` | `PersistentVector::scan_left` | Left scan with initial value |
 | `vec.partition(p)` | `PersistentVector::partition` | Split by predicate |
 
+### Map Operations
+
+| Scala | lambars | Description |
+|-------|---------|-------------|
+| `map.mapValues(f)` | `PersistentHashMap::map_values` | Transform values |
+| `map.transform((k, v) => f(k, v))` | `PersistentHashMap::map_values` | Transform values (key available in closure) |
+| `map.map { case (k, v) => (f(k), v) }` | `PersistentHashMap::map_keys` | Transform keys |
+| `map.collect { case (k, v) if p(k, v) => (k, f(v)) }` | `PersistentHashMap::filter_map` | Filter and transform |
+| `map.toList` | `PersistentHashMap::entries` | Get all entries |
+| `map.keys` | `PersistentHashMap::keys` | Get all keys |
+| `map.values` | `PersistentHashMap::values` | Get all values |
+| `map1 ++ map2` | `PersistentHashMap::merge` | Merge (right wins) |
+| `map1.merged(map2)((k, v1, v2) => f(k, v1, v2))` | `PersistentHashMap::merge_with` | Merge with resolver |
+| `map.filter { case (k, v) => p(k, v) }` | `PersistentHashMap::keep_if` | Keep matching entries |
+| `map.filterNot { case (k, v) => p(k, v) }` | `PersistentHashMap::delete_if` | Remove matching entries |
+| `map.partition { case (k, v) => p(k, v) }` | `PersistentHashMap::partition` | Split by predicate |
+
 ### Code Examples
 
 ```scala
