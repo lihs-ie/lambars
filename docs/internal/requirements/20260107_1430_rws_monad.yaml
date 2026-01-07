@@ -1,0 +1,972 @@
+# RWS Monad 要件定義
+#
+# 概要:
+#   Reader + Writer + State を統合した RWS モナドを実装する。
+#   3つの効果を同時に使う場合に、Transformer のスタックが煩雑になる問題を解決する。
+#
+# 背景:
+#   現在、Reader, Writer, State を同時に使用する場合、
+#   ReaderT<R, WriterT<W, State<S, A>, A>, A> のような深いスタックが必要になり、
+#   コードが複雑になる。RWS モナドはこれらを単一の型に統合し、
+#   より簡潔で効率的な実装を提供する。
+#
+# 参照:
+#   - Haskell: Control.Monad.RWS (https://hackage.haskell.org/package/mtl/docs/Control-Monad-RWS-Strict.html)
+#   - 既存実装: src/effect/reader.rs, src/effect/writer.rs, src/effect/state.rs
+#   - 関連トレイト: src/effect/monad_reader.rs, src/effect/monad_writer.rs, src/effect/monad_state.rs
+#   - Issue #15: RWS モナドの追加
+
+version: "1.0.0"
+name: "RWS Monad"
+description: |
+  RWS モナドは、Reader（環境読み取り）、Writer（ログ出力）、State（状態管理）の
+  3つの効果を単一のモナドに統合した構造である。
+
+  主な利点:
+  - Transformer スタックの簡素化
+  - 3つの効果を同時に使用する場合のボイラープレート削減
+  - 効率的な実装（中間のラッピングなし）
+
+  Haskell での定義:
+  ```haskell
+  newtype RWS r w s a = RWS { runRWS :: r -> s -> (a, s, w) }
+  ```
+
+# =============================================================================
+# 理論的背景
+# =============================================================================
+theoretical_background:
+  rws_overview:
+    description: |
+      RWS モナドは、以下の3つの効果を組み合わせた計算を表現する:
+
+      1. **Reader 効果**: 読み取り専用の環境 R へのアクセス
+      2. **Writer 効果**: ログ/出力 W の蓄積（W は Monoid）
+      3. **State 効果**: 状態 S の読み書き
+
+      内部的には関数 `R -> S -> (A, S, W)` として表現される:
+      - 環境 R と初期状態 S を受け取る
+      - 結果 A、最終状態 S、蓄積された出力 W を返す
+
+  relationship_to_transformers:
+    description: |
+      RWS<R, W, S, A> は以下の Transformer スタックと等価:
+
+      ```
+      ReaderT<R, WriterT<W, State<S, A>, A>, A>
+      または
+      ReaderT<R, StateT<S, Writer<W, A>, A>, A>
+      ```
+
+      RWS を直接使用することで:
+      - lift の連鎖が不要
+      - 型シグネチャが簡潔
+      - 潜在的にパフォーマンスが向上
+
+  laws:
+    description: |
+      RWS は Functor, Applicative, Monad の法則に加え、
+      MonadReader, MonadWriter, MonadState の各法則を満たす必要がある。
+
+      これらの法則は個別のモナドと同一であり、
+      組み合わせても整合性が保たれる。
+
+# =============================================================================
+# 設計原則
+# =============================================================================
+design_principles:
+  consistency_with_existing:
+    description: |
+      既存の Reader, Writer, State の実装パターンと一貫性を保つ:
+      - Rc<dyn Fn> を使用した関数のラッピング（Reader, State と同様）
+      - Clone 可能な構造
+      - 'static 境界の採用
+      - メソッドチェーンによる合成
+
+  type_safety:
+    description: |
+      型パラメータの制約を明確にする:
+      - W: Monoid（出力の結合に必要）
+      - R, S, A: 'static（Rc<dyn Fn> に必要）
+      - Clone は必要な操作でのみ要求:
+        - R: Clone は flat_map 等で環境を複製するため必要
+        - S: Clone は get() で状態を取得する場合のみ必要
+        - W: Clone は listen/listens で出力を取得する場合のみ必要
+
+  performance_considerations:
+    description: |
+      flat_map 連鎖時のパフォーマンスに関する注意事項:
+      - flat_map で environment.clone() が発生するため、R が大きな構造の場合はコストに注意
+      - 必要に応じて R を Rc<T> や Arc<T> でラップすることを推奨
+      - S と W は flat_map 内でクローンされない（関数合成で自動的に受け渡される）
+
+  ergonomics:
+    description: |
+      使いやすさを重視:
+      - 直感的なメソッド名（run, eval, exec）
+      - 既存の Reader/Writer/State と同様の API
+      - MonadReader, MonadWriter, MonadState トレイトとの互換性
+
+# =============================================================================
+# 要件
+# =============================================================================
+requirements:
+  # ==========================================================================
+  # 1. RWS<R, W, S, A> 構造体
+  # ==========================================================================
+  - id: rws_struct
+    name: RWS<R, W, S, A> 構造体
+    priority: critical
+    description: |
+      Reader + Writer + State を統合したモナド構造体。
+
+      Haskell の RWS に相当:
+      ```haskell
+      newtype RWS r w s a = RWS { runRWS :: r -> s -> (a, s, w) }
+      ```
+
+    internal_structure:
+      description: |
+        ```rust
+        use std::rc::Rc;
+        use crate::typeclass::Monoid;
+
+        /// Reader + Writer + State を統合したモナド
+        ///
+        /// # Type Parameters
+        ///
+        /// - `R`: 環境の型（読み取り専用）
+        /// - `W`: 出力の型（Monoid である必要がある）
+        /// - `S`: 状態の型
+        /// - `A`: 結果の型
+        ///
+        /// # Examples
+        ///
+        /// ```rust
+        /// use lambars::effect::RWS;
+        /// use lambars::typeclass::Monoid;
+        ///
+        /// // 環境から値を読み、状態を更新し、ログを出力する計算
+        /// let rws: RWS<i32, Vec<String>, i32, i32> = RWS::new(|env, state| {
+        ///     let result = env + state;
+        ///     let new_state = state + 1;
+        ///     let log = vec![format!("computed: {}", result)];
+        ///     (result, new_state, log)
+        /// });
+        ///
+        /// let (result, final_state, output) = rws.run(10, 5);
+        /// assert_eq!(result, 15);
+        /// assert_eq!(final_state, 6);
+        /// assert_eq!(output, vec!["computed: 15"]);
+        /// ```
+        pub struct RWS<R, W, S, A>
+        where
+            R: 'static,
+            W: Monoid + 'static,
+            S: 'static,
+            A: 'static,
+        {
+            /// 内部の計算関数
+            /// 環境 R と状態 S を受け取り、(結果 A, 新状態 S, 出力 W) を返す
+            run_function: Rc<dyn Fn(R, S) -> (A, S, W)>,
+        }
+        ```
+
+    type_parameters:
+      - name: R
+        description: "環境の型（読み取り専用）"
+        constraints:
+          - "'static"
+        notes: "Reader の環境に相当"
+
+      - name: W
+        description: "出力の型"
+        constraints:
+          - "Monoid"
+          - "'static"
+        notes: "Writer の出力に相当。Monoid により出力を結合可能"
+
+      - name: S
+        description: "状態の型"
+        constraints:
+          - "'static"
+        notes: "State の状態に相当"
+
+      - name: A
+        description: "結果の型"
+        constraints:
+          - "'static"
+        notes: "計算の結果"
+
+  # ==========================================================================
+  # 2. 基本操作
+  # ==========================================================================
+  - id: rws_basic_operations
+    name: 基本操作
+    priority: critical
+    description: |
+      RWS の基本的なコンストラクタと実行メソッド。
+
+    api:
+      constructors:
+        - name: new
+          signature: |
+            pub fn new<F>(function: F) -> Self
+            where
+                F: Fn(R, S) -> (A, S, W) + 'static
+          description: "関数から RWS を構築"
+          complexity: "O(1)"
+          example: |
+            let rws: RWS<Config, Vec<String>, AppState, i32> = RWS::new(|config, state| {
+                let result = config.multiplier * state.value;
+                let new_state = AppState { value: state.value + 1 };
+                let log = vec![format!("computed: {}", result)];
+                (result, new_state, log)
+            });
+
+        - name: pure
+          signature: |
+            pub fn pure(value: A) -> Self
+            where
+                A: Clone
+          description: "値を RWS に持ち上げる（環境・状態は変更せず、出力は空）"
+          complexity: "O(1)"
+          example: |
+            let rws: RWS<i32, Vec<String>, i32, i32> = RWS::pure(42);
+            let (result, state, output) = rws.run(0, 0);
+            assert_eq!(result, 42);
+            assert_eq!(state, 0);  // 状態は変更されない
+            assert!(output.is_empty());  // 出力は空
+
+      operations:
+        - name: run
+          signature: |
+            pub fn run(&self, environment: R, initial_state: S) -> (A, S, W)
+          description: "環境と初期状態を与えて計算を実行し、結果・最終状態・出力を返す"
+          complexity: "O(1) + 内部計算のコスト"
+          example: |
+            let rws: RWS<i32, String, i32, i32> = RWS::new(|env, state| {
+                (env + state, state * 2, format!("env={}, state={}", env, state))
+            });
+            let (result, final_state, output) = rws.run(10, 5);
+            assert_eq!(result, 15);
+            assert_eq!(final_state, 10);
+            assert_eq!(output, "env=10, state=5");
+
+        - name: eval
+          signature: |
+            pub fn eval(&self, environment: R, initial_state: S) -> (A, W)
+          description: "計算を実行し、結果と出力のみを返す（最終状態は破棄）"
+          complexity: "O(1) + 内部計算のコスト"
+          example: |
+            let rws: RWS<i32, String, i32, i32> = RWS::pure(42);
+            let (result, output) = rws.eval(0, 0);
+            assert_eq!(result, 42);
+            assert!(output.is_empty());
+
+        - name: exec
+          signature: |
+            pub fn exec(&self, environment: R, initial_state: S) -> (S, W)
+          description: "計算を実行し、最終状態と出力のみを返す（結果は破棄）"
+          complexity: "O(1) + 内部計算のコスト"
+          example: |
+            let rws: RWS<i32, String, i32, ()> = RWS::new(|_, state| {
+                ((), state + 1, "incremented".to_string())
+            });
+            let (final_state, output) = rws.exec(0, 10);
+            assert_eq!(final_state, 11);
+            assert_eq!(output, "incremented");
+
+  # ==========================================================================
+  # 3. Functor/Monad 操作
+  # ==========================================================================
+  - id: rws_functor_monad
+    name: Functor/Monad 操作
+    priority: critical
+    description: |
+      Functor と Monad のインターフェースを提供するメソッド。
+
+      注: Reader, Writer, State と同様に、トレイト実装ではなく
+      inherent メソッドとして提供する。これは Rust の型システムの
+      制約（'static 境界と HKT の欠如）に対応するため。
+
+    api:
+      operations:
+        - name: fmap
+          signature: |
+            pub fn fmap<B, F>(self, function: F) -> RWS<R, W, S, B>
+            where
+                F: Fn(A) -> B + 'static,
+                B: 'static
+          description: "結果に関数を適用（Functor 操作）"
+          complexity: "O(1)"
+          example: |
+            let rws: RWS<i32, String, i32, i32> = RWS::pure(21);
+            let mapped = rws.fmap(|x| x * 2);
+            let (result, _, _) = mapped.run(0, 0);
+            assert_eq!(result, 42);
+
+        - name: flat_map
+          signature: |
+            pub fn flat_map<B, F>(self, function: F) -> RWS<R, W, S, B>
+            where
+                F: Fn(A) -> RWS<R, W, S, B> + 'static,
+                B: 'static,
+                R: Clone
+          description: |
+            RWS を返す関数を連鎖（Monad 操作）
+
+            注: 既存の Reader/State と同様に、R: Clone のみを要求する。
+            S と W の Clone は不要（内部の関数合成で自動的に受け渡される）。
+          complexity: "O(1)"
+          example: |
+            let rws1: RWS<i32, Vec<String>, i32, i32> = RWS::new(|env, state| {
+                (env, state, vec!["first".to_string()])
+            });
+            let rws2 = rws1.flat_map(|x| RWS::new(move |_, state| {
+                (x + state, state + 1, vec!["second".to_string()])
+            }));
+            let (result, final_state, output) = rws2.run(10, 5);
+            assert_eq!(result, 15);  // 10 + 5
+            assert_eq!(final_state, 6);  // 5 + 1
+            assert_eq!(output, vec!["first", "second"]);
+
+        - name: and_then
+          signature: |
+            pub fn and_then<B, F>(self, function: F) -> RWS<R, W, S, B>
+            where
+                F: Fn(A) -> RWS<R, W, S, B> + 'static,
+                B: 'static,
+                R: Clone
+          description: "flat_map のエイリアス（Rust の命名規則に合わせる）"
+          complexity: "O(1)"
+
+        - name: then
+          signature: |
+            pub fn then<B>(self, next: RWS<R, W, S, B>) -> RWS<R, W, S, B>
+            where
+                B: 'static,
+                R: Clone
+          description: "2つの RWS を順番に実行し、最初の結果を破棄"
+          complexity: "O(1)"
+          example: |
+            let log1: RWS<(), Vec<String>, (), ()> = RWS::new(|_, _| {
+                ((), (), vec!["step 1".to_string()])
+            });
+            let log2: RWS<(), Vec<String>, (), i32> = RWS::new(|_, _| {
+                (42, (), vec!["step 2".to_string()])
+            });
+            let combined = log1.then(log2);
+            let (result, _, output) = combined.run((), ());
+            assert_eq!(result, 42);
+            assert_eq!(output, vec!["step 1", "step 2"]);
+
+        - name: map2
+          signature: |
+            pub fn map2<B, C, F>(self, other: RWS<R, W, S, B>, function: F) -> RWS<R, W, S, C>
+            where
+                F: Fn(A, B) -> C + 'static,
+                B: 'static,
+                C: 'static,
+                R: Clone
+          description: "2つの RWS の結果を関数で結合（Applicative 操作）"
+          complexity: "O(1)"
+          example: |
+            let rws1: RWS<i32, String, i32, i32> = RWS::pure(10);
+            let rws2: RWS<i32, String, i32, i32> = RWS::pure(20);
+            let combined = rws1.map2(rws2, |a, b| a + b);
+            let (result, _, _) = combined.run(0, 0);
+            assert_eq!(result, 30);
+
+        - name: product
+          signature: |
+            pub fn product<B>(self, other: RWS<R, W, S, B>) -> RWS<R, W, S, (A, B)>
+            where
+                B: 'static,
+                R: Clone
+          description: "2つの RWS の結果をタプルに結合"
+          complexity: "O(1)"
+
+        - name: apply
+          signature: |
+            pub fn apply<B, Output>(self, other: RWS<R, W, S, B>) -> RWS<R, W, S, Output>
+            where
+                A: Fn(B) -> Output + 'static,
+                B: 'static,
+                Output: 'static,
+                R: Clone
+          description: "関数を含む RWS を値を含む RWS に適用"
+          complexity: "O(1)"
+
+  # ==========================================================================
+  # 4. MonadReader 操作
+  # ==========================================================================
+  - id: rws_monad_reader
+    name: MonadReader 操作
+    priority: critical
+    description: |
+      MonadReader<R> インターフェースを提供するメソッド。
+      環境を読み取る操作。
+
+    api:
+      operations:
+        - name: ask
+          signature: |
+            pub fn ask() -> RWS<R, W, S, R>
+            where
+                R: Clone
+          description: "環境全体を取得"
+          complexity: "O(1)"
+          example: |
+            #[derive(Clone)]
+            struct Config { port: u16 }
+
+            let rws: RWS<Config, String, (), Config> = RWS::ask();
+            let (config, _, _) = rws.run(Config { port: 8080 }, ());
+            assert_eq!(config.port, 8080);
+
+        - name: asks
+          signature: |
+            pub fn asks<B, F>(projection: F) -> RWS<R, W, S, B>
+            where
+                F: Fn(R) -> B + 'static,
+                B: 'static
+          description: "環境から特定の値を射影して取得"
+          complexity: "O(1)"
+          example: |
+            #[derive(Clone)]
+            struct Config { port: u16, host: String }
+
+            let rws: RWS<Config, String, (), u16> = RWS::asks(|c| c.port);
+            let (port, _, _) = rws.run(Config { port: 8080, host: "localhost".to_string() }, ());
+            assert_eq!(port, 8080);
+
+        - name: local
+          signature: |
+            pub fn local<F>(modifier: F, computation: Self) -> Self
+            where
+                F: Fn(R) -> R + 'static
+          description: "環境を一時的に変更して計算を実行"
+          complexity: "O(1)"
+          example: |
+            let rws: RWS<i32, String, (), i32> = RWS::ask();
+            let modified = RWS::local(|env| env * 2, rws);
+            let (result, _, _) = modified.run(21, ());
+            assert_eq!(result, 42);  // 21 * 2
+
+    laws:
+      - name: Ask Local Identity Law
+        description: "identity 関数で local しても変わらない"
+        equation: "RWS::local(|r| r, m) == m"
+
+      - name: Ask Local Composition Law
+        description: "local の連続適用は関数合成と同じ"
+        equation: "RWS::local(f, RWS::local(g, m)) == RWS::local(|r| g(f(r)), m)"
+
+      - name: Ask Retrieval Law
+        description: "ask で取得した値は環境と一致"
+        equation: "RWS::ask().run(r, s) == (r, s, W::empty())"
+
+  # ==========================================================================
+  # 5. MonadWriter 操作
+  # ==========================================================================
+  - id: rws_monad_writer
+    name: MonadWriter 操作
+    priority: critical
+    description: |
+      MonadWriter<W> インターフェースを提供するメソッド。
+      出力/ログを蓄積する操作。
+
+    api:
+      operations:
+        - name: tell
+          signature: |
+            pub fn tell(output: W) -> RWS<R, W, S, ()>
+          description: "出力を追加（結果は unit）"
+          complexity: "O(1)"
+          example: |
+            let rws: RWS<(), Vec<String>, (), ()> = RWS::tell(vec!["log message".to_string()]);
+            let (_, _, output) = rws.run((), ());
+            assert_eq!(output, vec!["log message"]);
+
+        - name: listen
+          signature: |
+            pub fn listen(computation: Self) -> RWS<R, W, S, (A, W)>
+            where
+                W: Clone
+          description: "計算を実行し、その出力も結果として取得"
+          complexity: "O(1)"
+          example: |
+            let rws: RWS<(), Vec<String>, (), i32> = RWS::new(|_, _| {
+                (42, (), vec!["computed".to_string()])
+            });
+            let listened = RWS::listen(rws);
+            let ((result, captured_output), _, total_output) = listened.run((), ());
+            assert_eq!(result, 42);
+            assert_eq!(captured_output, vec!["computed"]);
+            assert_eq!(total_output, vec!["computed"]);
+
+        - name: pass
+          signature: |
+            pub fn pass<F>(computation: RWS<R, W, S, (A, F)>) -> RWS<R, W, S, A>
+            where
+                F: Fn(W) -> W + 'static
+          description: "計算を実行し、出力を変換関数で変更"
+          complexity: "O(1)"
+          example: |
+            let rws: RWS<(), Vec<String>, (), (i32, fn(Vec<String>) -> Vec<String>)> =
+                RWS::new(|_, _| {
+                    let modifier: fn(Vec<String>) -> Vec<String> = |output| {
+                        output.into_iter().map(|s| s.to_uppercase()).collect()
+                    };
+                    ((42, modifier), (), vec!["hello".to_string()])
+                });
+            let passed = RWS::pass(rws);
+            let (result, _, output) = passed.run((), ());
+            assert_eq!(result, 42);
+            assert_eq!(output, vec!["HELLO"]);
+
+        - name: censor
+          signature: |
+            pub fn censor<F>(modifier: F, computation: Self) -> Self
+            where
+                F: Fn(W) -> W + 'static
+          description: "計算の出力を変換関数で変更"
+          complexity: "O(1)"
+          example: |
+            let rws: RWS<(), Vec<String>, (), i32> = RWS::new(|_, _| {
+                (42, (), vec!["hello".to_string()])
+            });
+            let censored = RWS::censor(
+                |output| output.into_iter().map(|s| s.to_uppercase()).collect(),
+                rws
+            );
+            let (result, _, output) = censored.run((), ());
+            assert_eq!(result, 42);
+            assert_eq!(output, vec!["HELLO"]);
+
+        - name: listens
+          signature: |
+            pub fn listens<B, F>(projection: F, computation: Self) -> RWS<R, W, S, (A, B)>
+            where
+                F: Fn(&W) -> B + 'static,
+                B: 'static,
+                W: Clone
+          description: "listen の結果から出力の一部を射影して取得"
+          complexity: "O(1)"
+
+    laws:
+      - name: Tell Monoid Law
+        description: "tell の連続は Monoid の combine と同じ"
+        equation: "RWS::tell(w1).then(RWS::tell(w2)) == RWS::tell(w1.combine(w2))"
+
+      - name: Listen Tell Law
+        description: "tell した値は listen で取得できる"
+        equation: "RWS::listen(RWS::tell(w)) == RWS::tell(w).fmap(|_| ((), w))"
+
+      - name: Pass Identity Law
+        description: "identity 関数で pass しても変わらない"
+        equation: "RWS::pass(m.fmap(|a| (a, |w| w))) == m"
+
+      - name: Censor Definition
+        description: "censor は pass で定義できる"
+        equation: "RWS::censor(f, m) == RWS::pass(m.fmap(|a| (a, f)))"
+
+  # ==========================================================================
+  # 6. MonadState 操作
+  # ==========================================================================
+  - id: rws_monad_state
+    name: MonadState 操作
+    priority: critical
+    description: |
+      MonadState<S> インターフェースを提供するメソッド。
+      状態を読み書きする操作。
+
+    api:
+      operations:
+        - name: get
+          signature: |
+            pub fn get() -> RWS<R, W, S, S>
+            where
+                S: Clone
+          description: "現在の状態を取得"
+          complexity: "O(1)"
+          example: |
+            let rws: RWS<(), String, i32, i32> = RWS::get();
+            let (state, final_state, _) = rws.run((), 42);
+            assert_eq!(state, 42);
+            assert_eq!(final_state, 42);  // 状態は変更されない
+
+        - name: put
+          signature: |
+            pub fn put(new_state: S) -> RWS<R, W, S, ()>
+            where
+                S: Clone
+          description: "状態を新しい値で置き換える"
+          complexity: "O(1)"
+          example: |
+            let rws: RWS<(), String, i32, ()> = RWS::put(100);
+            let (_, final_state, _) = rws.run((), 42);
+            assert_eq!(final_state, 100);
+
+        - name: state
+          signature: |
+            pub fn state<B, F>(transition: F) -> RWS<R, W, S, B>
+            where
+                F: Fn(S) -> (B, S) + 'static,
+                B: 'static
+          description: "状態遷移関数を実行し、結果と新しい状態を取得"
+          complexity: "O(1)"
+          example: |
+            let rws: RWS<(), String, i32, String> = RWS::state(|s| {
+                (format!("was: {}", s), s + 1)
+            });
+            let (result, final_state, _) = rws.run((), 41);
+            assert_eq!(result, "was: 41");
+            assert_eq!(final_state, 42);
+
+        - name: modify
+          signature: |
+            pub fn modify<F>(modifier: F) -> RWS<R, W, S, ()>
+            where
+                F: Fn(S) -> S + 'static
+          description: "状態を変換する"
+          complexity: "O(1)"
+          example: |
+            let rws: RWS<(), String, i32, ()> = RWS::modify(|x| x * 2);
+            let (_, final_state, _) = rws.run((), 21);
+            assert_eq!(final_state, 42);
+
+        - name: gets
+          signature: |
+            pub fn gets<B, F>(projection: F) -> RWS<R, W, S, B>
+            where
+                F: Fn(&S) -> B + 'static,
+                B: 'static
+          description: "状態から値を射影して取得（状態は変更しない）"
+          complexity: "O(1)"
+          example: |
+            #[derive(Clone)]
+            struct AppState { counter: i32, name: String }
+
+            let rws: RWS<(), String, AppState, i32> = RWS::gets(|s| s.counter);
+            let (counter, _, _) = rws.run((), AppState { counter: 42, name: "test".to_string() });
+            assert_eq!(counter, 42);
+
+    laws:
+      - name: Get Put Law
+        description: "get した値を put しても状態は変わらない"
+        equation: "RWS::get().flat_map(|s| RWS::put(s)) == RWS::pure(())"
+
+      - name: Put Get Law
+        description: "put した値は get で取得できる"
+        equation: "RWS::put(s).then(RWS::get()) returns s"
+
+      - name: Put Put Law
+        description: "連続して put した場合、最後の値が設定される"
+        equation: "RWS::put(s1).then(RWS::put(s2)) == RWS::put(s2)"
+
+      - name: Modify Composition Law
+        description: "modify の連続適用は関数合成と同じ"
+        equation: "RWS::modify(f).then(RWS::modify(g)) == RWS::modify(|s| g(f(s)))"
+
+  # ==========================================================================
+  # 7. 追加ユーティリティ
+  # ==========================================================================
+  - id: rws_utilities
+    name: 追加ユーティリティ
+    priority: high
+    description: |
+      RWS の利便性を高める追加メソッド。
+
+    api:
+      operations:
+        - name: map_rws
+          signature: |
+            pub fn map_rws<B, W2, F>(self, function: F) -> RWS<R, W2, S, B>
+            where
+                F: Fn((A, S, W)) -> (B, S, W2) + 'static,
+                W2: Monoid + 'static,
+                B: 'static
+          description: "結果、状態、出力のすべてを変換"
+          complexity: "O(1)"
+          example: |
+            let rws: RWS<i32, String, i32, i32> = RWS::new(|env, state| {
+                (env + state, state, "log".to_string())
+            });
+            let mapped = rws.map_rws(|(result, state, output)| {
+                (result * 2, state + 1, output.to_uppercase())
+            });
+
+        - name: with_rws
+          signature: |
+            pub fn with_rws<R2, F>(self, function: F) -> RWS<R2, W, S, A>
+            where
+                F: Fn(R2, S) -> (R, S) + 'static,
+                R2: 'static
+          description: "初期環境と状態を変換してから計算を実行"
+          complexity: "O(1)"
+          example: |
+            let rws: RWS<i32, String, i32, i32> = RWS::ask();
+            let with_transformed = rws.with_rws(|env: String, state| {
+                (env.len() as i32, state)
+            });
+
+  # ==========================================================================
+  # 8. Clone と Display 実装
+  # ==========================================================================
+  - id: rws_standard_traits
+    name: 標準トレイト実装
+    priority: high
+    description: |
+      Clone と Display トレイトの実装。
+
+    implementations:
+      - trait: Clone
+        description: "Rc を使用しているため、浅いクローンが可能"
+        example: |
+          let rws: RWS<i32, String, i32, i32> = RWS::pure(42);
+          let cloned = rws.clone();
+
+      - trait: Display
+        description: "デバッグ用の表示"
+        format: "<RWS>"
+        example: |
+          let rws: RWS<i32, String, i32, i32> = RWS::pure(42);
+          assert_eq!(format!("{}", rws), "<RWS>");
+
+# =============================================================================
+# 非機能要件
+# =============================================================================
+non_functional_requirements:
+  performance:
+    description: |
+      - 中間 Transformer スタックを使用しないため、オーバーヘッドが少ない
+      - Rc<dyn Fn> による関数のクローンは O(1)
+      - flat_map の連鎖はスタックを消費するが、通常の使用では問題ない
+
+  compatibility:
+    description: |
+      - Haskell の Control.Monad.RWS.Strict との API 互換性を維持
+      - 既存の Reader, Writer, State と同様の使用感
+      - MonadReader, MonadWriter, MonadState トレイトとの概念的互換性
+
+  test_coverage:
+    target: "100%"
+    categories:
+      - "コンストラクタ（new, pure）"
+      - "実行メソッド（run, eval, exec）"
+      - "Functor 操作（fmap）"
+      - "Monad 操作（flat_map, then, map2, product, apply）"
+      - "MonadReader 操作（ask, asks, local）"
+      - "MonadWriter 操作（tell, listen, pass, censor, listens）"
+      - "MonadState 操作（get, put, state, modify, gets）"
+      - "ユーティリティ（map_rws, with_rws）"
+      - "Clone と Display"
+      - "法則テスト（Functor, Monad, Reader, Writer, State 法則）"
+
+# =============================================================================
+# テスト戦略
+# =============================================================================
+testing_strategy:
+  unit_tests:
+    description: "各メソッドの基本的な動作を検証"
+    categories:
+      - category: "コンストラクタテスト"
+        cases:
+          - "new で関数から RWS を作成"
+          - "pure で値を RWS に持ち上げる"
+
+      - category: "実行メソッドテスト"
+        cases:
+          - "run で完全な結果を取得"
+          - "eval で結果と出力のみを取得"
+          - "exec で状態と出力のみを取得"
+
+      - category: "Functor/Monad テスト"
+        cases:
+          - "fmap で結果を変換"
+          - "flat_map で RWS を連鎖"
+          - "then で副作用を順番に実行"
+          - "map2 で2つの RWS を結合"
+
+      - category: "MonadReader テスト"
+        cases:
+          - "ask で環境を取得"
+          - "asks で環境の一部を取得"
+          - "local で環境を一時変更"
+
+      - category: "MonadWriter テスト"
+        cases:
+          - "tell でログを出力"
+          - "複数の tell は連結される"
+          - "listen で出力を取得"
+          - "censor で出力を変換"
+
+      - category: "MonadState テスト"
+        cases:
+          - "get で状態を取得"
+          - "put で状態を設定"
+          - "modify で状態を変換"
+          - "gets で状態の一部を取得"
+
+  property_tests:
+    description: "法則をプロパティベーステストで検証"
+    framework: "proptest"
+    properties:
+      - "Functor Identity Law"
+      - "Functor Composition Law"
+      - "Monad Left Identity Law"
+      - "Monad Right Identity Law"
+      - "Monad Associativity Law"
+      - "MonadReader Ask Local Identity Law"
+      - "MonadReader Ask Local Composition Law"
+      - "MonadWriter Tell Monoid Law"
+      - "MonadState Get Put Law"
+      - "MonadState Put Get Law"
+      - "MonadState Put Put Law"
+
+  integration_tests:
+    description: "複合的なシナリオを検証"
+    scenarios:
+      - "Reader, Writer, State の3つの効果を同時に使用"
+      - "複雑な計算のチェーン"
+      - "既存の Reader/Writer/State との互換性確認"
+
+# =============================================================================
+# 将来の拡張
+# =============================================================================
+future_extensions:
+  - name: "RWST (RWS Transformer)"
+    priority: medium
+    description: |
+      RWS 効果を他の Monad に追加する Transformer。
+
+      ```rust
+      pub struct RWST<R, W, S, M, A>
+      where
+          M: Monad,
+          W: Monoid,
+      {
+          run_rwst: Rc<dyn Fn(R, S) -> M::WithType<(A, S, W)>>,
+      }
+      ```
+
+      これにより、RWS + IO や RWS + Result などの組み合わせが可能になる。
+
+  - name: "Strict/Lazy バリアント"
+    priority: low
+    description: |
+      Haskell と同様に、Strict と Lazy のバリアントを提供。
+      現在の実装は Strict（即時評価）に相当。
+
+  - name: "CPS バリアント"
+    priority: low
+    description: |
+      継続渡しスタイル（CPS）による実装。
+      一定のスペース使用量を保証できる。
+
+# =============================================================================
+# Haskell との対応表
+# =============================================================================
+haskell_correspondence:
+  types:
+    - haskell: "RWS r w s a"
+      rust: "RWS<R, W, S, A>"
+      notes: "構造は同一"
+
+    - haskell: "RWST r w s m a"
+      rust: "RWST<R, W, S, M, A> (将来実装)"
+      notes: "Transformer バージョン"
+
+  functions:
+    - haskell: "rws :: (r -> s -> (a, s, w)) -> RWS r w s a"
+      rust: "RWS::new"
+      notes: "コンストラクタ"
+
+    - haskell: "runRWS :: RWS r w s a -> r -> s -> (a, s, w)"
+      rust: "RWS::run"
+      notes: "計算を実行"
+
+    - haskell: "evalRWS :: RWS r w s a -> r -> s -> (a, w)"
+      rust: "RWS::eval"
+      notes: "結果と出力のみ"
+
+    - haskell: "execRWS :: RWS r w s a -> r -> s -> (s, w)"
+      rust: "RWS::exec"
+      notes: "状態と出力のみ"
+
+    - haskell: "mapRWS :: ((a, s, w) -> (b, s, w')) -> RWS r w s a -> RWS r w' s b"
+      rust: "RWS::map_rws"
+      notes: "全要素を変換"
+
+    - haskell: "withRWS :: (r' -> s -> (r, s)) -> RWS r w s a -> RWS r' w s a"
+      rust: "RWS::with_rws"
+      notes: "初期環境/状態を変換"
+
+  monad_reader:
+    - haskell: "ask :: MonadReader r m => m r"
+      rust: "RWS::ask()"
+      notes: "環境を取得"
+
+    - haskell: "asks :: MonadReader r m => (r -> a) -> m a"
+      rust: "RWS::asks(f)"
+      notes: "環境から射影"
+
+    - haskell: "local :: MonadReader r m => (r -> r) -> m a -> m a"
+      rust: "RWS::local(f, m)"
+      notes: "環境を一時変更"
+
+  monad_writer:
+    - haskell: "tell :: MonadWriter w m => w -> m ()"
+      rust: "RWS::tell(w)"
+      notes: "出力を追加"
+
+    - haskell: "listen :: MonadWriter w m => m a -> m (a, w)"
+      rust: "RWS::listen(m)"
+      notes: "出力を取得"
+
+    - haskell: "pass :: MonadWriter w m => m (a, w -> w) -> m a"
+      rust: "RWS::pass(m)"
+      notes: "出力を変換"
+
+    - haskell: "censor :: MonadWriter w m => (w -> w) -> m a -> m a"
+      rust: "RWS::censor(f, m)"
+      notes: "出力を変換"
+
+  monad_state:
+    - haskell: "get :: MonadState s m => m s"
+      rust: "RWS::get()"
+      notes: "状態を取得"
+
+    - haskell: "put :: MonadState s m => s -> m ()"
+      rust: "RWS::put(s)"
+      notes: "状態を設定"
+
+    - haskell: "state :: MonadState s m => (s -> (a, s)) -> m a"
+      rust: "RWS::state(f)"
+      notes: "状態遷移"
+
+    - haskell: "modify :: MonadState s m => (s -> s) -> m ()"
+      rust: "RWS::modify(f)"
+      notes: "状態を変換"
+
+    - haskell: "gets :: MonadState s m => (s -> a) -> m a"
+      rust: "RWS::gets(f)"
+      notes: "状態から射影"
+
+# =============================================================================
+# 参照
+# =============================================================================
+references:
+  - title: "Control.Monad.RWS.Strict - Hackage"
+    url: "https://hackage.haskell.org/package/mtl/docs/Control-Monad-RWS-Strict.html"
+    description: "Haskell mtl ライブラリの RWS ドキュメント"
+
+  - title: "Control.Monad.RWS - Hackage"
+    url: "https://hackage.haskell.org/package/mtl-2.3.1/docs/Control-Monad-RWS.html"
+    description: "Haskell mtl ライブラリの RWS 概要"
+
+  - title: "GitHub - haskell/mtl"
+    url: "https://github.com/haskell/mtl"
+    description: "mtl ライブラリのソースコード"

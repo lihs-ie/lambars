@@ -109,10 +109,12 @@ pub use monad_writer::MonadWriter;
 // =============================================================================
 
 mod reader;
+mod rws;
 mod state;
 mod writer;
 
 pub use reader::Reader;
+pub use rws::RWS;
 pub use state::State;
 pub use writer::Writer;
 
