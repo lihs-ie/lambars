@@ -112,8 +112,8 @@ fn test_hashset_with_strings() {
 #[rstest]
 fn test_hashmap_json_roundtrip() {
     let mut map: PersistentHashMap<String, i32> = PersistentHashMap::new();
-    for index in 0..100 {
-        map = map.insert(format!("key{index}"), index);
+    for element_index in 0..100 {
+        map = map.insert(format!("key{element_index}"), element_index);
     }
     let json = serde_json::to_string(&map).unwrap();
     let restored: PersistentHashMap<String, i32> = serde_json::from_str(&json).unwrap();
@@ -139,8 +139,8 @@ fn test_hashmap_with_nested_values() {
 #[rstest]
 fn test_treemap_json_roundtrip() {
     let mut map: PersistentTreeMap<String, i32> = PersistentTreeMap::new();
-    for index in 0..100 {
-        map = map.insert(format!("key{index:03}"), index);
+    for element_index in 0..100 {
+        map = map.insert(format!("key{element_index:03}"), element_index);
     }
     let json = serde_json::to_string(&map).unwrap();
     let restored: PersistentTreeMap<String, i32> = serde_json::from_str(&json).unwrap();

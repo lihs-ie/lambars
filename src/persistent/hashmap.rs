@@ -2658,7 +2658,6 @@ mod tests {
     }
 }
 
-<<<<<<< HEAD
 // =============================================================================
 // Send + Sync Tests (arc feature only)
 // =============================================================================
@@ -2875,8 +2874,8 @@ mod serde_tests {
     #[rstest]
     fn test_roundtrip_large() {
         let mut original: PersistentHashMap<String, i32> = PersistentHashMap::new();
-        for index in 0..100 {
-            original = original.insert(format!("key{index}"), index);
+        for element_index in 0..100 {
+            original = original.insert(format!("key{element_index}"), element_index);
         }
         let json = serde_json::to_string(&original).unwrap();
         let restored: PersistentHashMap<String, i32> = serde_json::from_str(&json).unwrap();
@@ -2886,14 +2885,14 @@ mod serde_tests {
     #[rstest]
     fn test_entry_preservation() {
         let mut map: PersistentHashMap<String, i32> = PersistentHashMap::new();
-        for index in 0..100 {
-            map = map.insert(format!("key{index}"), index);
+        for element_index in 0..100 {
+            map = map.insert(format!("key{element_index}"), element_index);
         }
         let json = serde_json::to_string(&map).unwrap();
         let restored: PersistentHashMap<String, i32> = serde_json::from_str(&json).unwrap();
-        for index in 0..100 {
-            let key = format!("key{index}");
-            assert_eq!(restored.get(&key), Some(&index));
+        for element_index in 0..100 {
+            let key = format!("key{element_index}");
+            assert_eq!(restored.get(&key), Some(&element_index));
         }
     }
 

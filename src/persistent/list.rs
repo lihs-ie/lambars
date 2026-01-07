@@ -2253,7 +2253,6 @@ mod tests {
     }
 }
 
-<<<<<<< HEAD
 // =============================================================================
 // Thread Safety Tests (arc feature only)
 // =============================================================================
@@ -2307,7 +2306,7 @@ mod multithread_tests {
         let sum2 = handle2.join().unwrap();
 
         assert_eq!(sum1, sum2);
-        assert_eq!(sum1, (1..=1000).sum());
+        assert_eq!(sum1, (1..=1000).sum::<i32>());
     }
 
     #[rstest]
@@ -2415,8 +2414,8 @@ mod serde_tests {
         let list: PersistentList<i32> = (0..100).collect();
         let json = serde_json::to_string(&list).unwrap();
         let restored: PersistentList<i32> = serde_json::from_str(&json).unwrap();
-        for index in 0..100 {
-            assert_eq!(list.get(index), restored.get(index));
+        for element_index in 0..100 {
+            assert_eq!(list.get(element_index), restored.get(element_index));
         }
     }
 

@@ -2269,7 +2269,6 @@ mod tests {
     }
 }
 
-<<<<<<< HEAD
 // =============================================================================
 // Send + Sync Tests (arc feature only)
 // =============================================================================
@@ -2485,8 +2484,8 @@ mod serde_tests {
     #[rstest]
     fn test_roundtrip_large() {
         let mut original: PersistentTreeMap<String, i32> = PersistentTreeMap::new();
-        for index in 0..100 {
-            original = original.insert(format!("key{index:03}"), index);
+        for element_index in 0..100 {
+            original = original.insert(format!("key{element_index:03}"), element_index);
         }
         let json = serde_json::to_string(&original).unwrap();
         let restored: PersistentTreeMap<String, i32> = serde_json::from_str(&json).unwrap();
@@ -2496,14 +2495,14 @@ mod serde_tests {
     #[rstest]
     fn test_entry_preservation() {
         let mut map: PersistentTreeMap<String, i32> = PersistentTreeMap::new();
-        for index in 0..100 {
-            map = map.insert(format!("key{index}"), index);
+        for element_index in 0..100 {
+            map = map.insert(format!("key{element_index}"), element_index);
         }
         let json = serde_json::to_string(&map).unwrap();
         let restored: PersistentTreeMap<String, i32> = serde_json::from_str(&json).unwrap();
-        for index in 0..100 {
-            let key = format!("key{index}");
-            assert_eq!(restored.get(&key), Some(&index));
+        for element_index in 0..100 {
+            let key = format!("key{element_index}");
+            assert_eq!(restored.get(&key), Some(&element_index));
         }
     }
 

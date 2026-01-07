@@ -1221,9 +1221,7 @@ impl<T: serde::Serialize + Clone + Hash + Eq> serde::Serialize for PersistentHas
     {
         use serde::ser::SerializeSeq;
         let mut seq = serializer.serialize_seq(Some(self.len()))?;
-        // Note: PersistentHashSet does not implement IntoIterator for &Self,
-        // so we must use iter() explicitly.
-        for element in self.iter() {
+        for element in self {
             seq.serialize_element(&element)?;
         }
         seq.end()
@@ -1447,7 +1445,6 @@ mod tests {
     }
 }
 
-<<<<<<< HEAD
 // =============================================================================
 // Send + Sync Tests (arc feature only)
 // =============================================================================
@@ -1679,8 +1676,8 @@ mod serde_tests {
         let set: PersistentHashSet<i32> = (0..100).collect();
         let json = serde_json::to_string(&set).unwrap();
         let restored: PersistentHashSet<i32> = serde_json::from_str(&json).unwrap();
-        for index in 0..100 {
-            assert!(restored.contains(&index));
+        for element_value in 0..100 {
+            assert!(restored.contains(&element_value));
         }
     }
 
