@@ -196,47 +196,60 @@ cargo clean
 - **目的**: 特定領域の専門的レビュー
 - **対象**: アーキテクチャ設計、コード品質、セキュリティ
 - **方法**: Task ツールで専門エージェントを起動
-  - `rust-implementation-reviewer`: アーキテクチャ・実装レビュー
+  - `functional-programming-specialist`: アーキテクチャ・実装レビュー
 - **確認事項**:
   - SOLID 原則の遵守
   - デザインパターンの適用
   - 長期的な保守性
+  - 関数型プログラミングとしてのアーキテクチャ妥当性
+    - 参照透過性（Referential Transparency）
+      - 同じ入力に対して常に同じ出力を返すか
+      - 外部状態（グローバル変数、時刻、乱数など）に依存していないか
+      - 関数呼び出しを「値」に置き換えても意味が変わらないか
+    - 純粋関数（Pure Function）
+      - 副作用（I/O、DB、ログ、状態変更）が含まれていないか
+      - 「計算」と「実行」が分離されているか
+      - テストが引数と戻り値だけで書けるか
+    - 不変性（Immutability）
+      - 引数や既存のデータを直接変更していないか
+      - push, splice, ++, -- などの破壊的操作をしていないか
+      - 新しい値を返す設計になっているか
+    - 例外を制御フローに使っていないか
+      - 失敗やエラーが型として表現されているか
+      - Result, Either, Option などの値で表現できないか
+    - 高階関数・コレクション操作が自然か
+      - for / while の代わりに map / filter / reduce を使えているか
+      - 「どう処理するか」より「何をしたいか」が読めるか
+      - 処理の流れがパイプラインとして理解できるか
 
 ## 実装手順
 
-1. github mcp を使って PR を作成する
+1. gh コマンド を使って PR を作成する
    1. issue を対応する場合は issue と PR を紐づける
 2. サブエージェント: functional-programming-specialist を起動し要件定義を作成する
    1. `/new-requirement <機能名>` で要件定義テンプレートを取得する
    2. 課題を解決するための方法をステップバイステップで考え、要件定義を作成する
-   3. `/new-plan <機能名>` で実装計画テンプレートを取得する
-   4. rust-implementation-reviewer を起動し要件定義に対して実装計画を作成する
-      1. #[test]は使用せず#[rstest]を使用すること
-      2. tokio のテストが必要な場合は#[tokio::test]と#[rstest]を併用すること
-   5. codex mcp にレビューをさせる
-   6. functional-programming-specialist は実装計画が要件定義と異なる点がなくなるまでレビュー指摘を行う
-   7. レビュー指摘がなくなるまで繰り返す（軽微な指摘も全て解決すること）
+   3. codex mcp にレビューをさせる
+   4. functional-programming-specialist は要件定義が関数型プログラミングのアーキテクチャとして妥当と判断するまでレビュー指摘を行う
+   5. レビュー指摘がなくなるまで繰り返す（軽微な指摘も全て解決すること）
 3. サブエージェント: rust-implementation-specialist を起動し実装計画に則って TDD で実装を行う
    1. テストは rstest をベースに作成すること
       1. 標準の test crate は使用しない
    2. ここまではテストが通ることまで確認できたらコミットする
 4. rust-simplification-specialist を起動して今回変更・作成したコードの構造を簡素化する
 5. codex mcp にレビューをさせる
-6. rust-implementation-reviewer を起動して実装のレビューを行う
-   1. 略語を使用していないこと
-   2. 差分の対象となるテストのみを実行し失敗していないこと
-   3. レビュー指摘がなくなるまで修正とレビューを繰り返す（軽微な指摘も全て解決すること）
-7. functional-programming-specialist を起動し要件定義の観点から実装をレビューする
-8. コミット前に以下の確認を実施する
+   1. レビュー指摘がなくなるまで修正とレビューを繰り返す（軽微な指摘も全て解決すること）
+6. functional-programming-specialist を起動し要件定義の観点から実装をレビューする
+7. コミット前に以下の確認を実施する
    1. `cargo fmt` - コードフォーマット
    2. `cargo clippy --all-features --all-targets -- -D warnings` - lint チェック
    3. `cargo doc --no-deps` - ドキュメントビルド
    4. 全てパスしたらコミット
-9. 実装した内容を README.md, docs/external/comparison に反映する必要があるか調査し、修正が必要な場合は変更を記載しコミットする
-10. 対象の実装計画ファイルと要件定義、issue 対応の場合は issue のファイルを `docs/internal/done/` に移動する
-11. 実装上困難だと判断した場合は `/new-issue <Issue名>` で Issue ファイルを作成する
-12. `docs/internal/issues/` に将来の拡張案として保存する
-13. github mcp を使って GitHub Issue を作成し、ファイルの `github_issue` セクションを更新する
+8. 実装した内容を README.md, docs/external/comparison に反映する必要があるか調査し、修正が必要な場合は変更を記載しコミットする
+9. 対象の実装計画ファイルと要件定義、issue 対応の場合は issue のファイルを `docs/internal/done/` に移動する
+10. 実装上困難だと判断した場合は `/new-issue <Issue名>` で Issue ファイルを作成する
+11. `docs/internal/issues/` に将来の拡張案として保存する
+12. gh コマンド を使って GitHub Issue を作成し、ファイルの `github_issue` セクションを更新する
 
 ### スラッシュコマンド一覧
 
