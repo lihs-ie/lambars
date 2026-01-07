@@ -232,7 +232,7 @@ cargo clean
    3. codex mcp にレビューをさせる
    4. functional-programming-specialist は要件定義が関数型プログラミングのアーキテクチャとして妥当と判断するまでレビュー指摘を行う
    5. レビュー指摘がなくなるまで繰り返す（軽微な指摘も全て解決すること）
-3. サブエージェント: rust-implementation-specialist を起動し実装計画に則って TDD で実装を行う
+3. サブエージェント: rust-implementation-specialist を起動し要件定義に則って TDD で実装を行う
    1. テストは rstest をベースに作成すること
       1. 標準の test crate は使用しない
    2. ここまではテストが通ることまで確認できたらコミットする
@@ -246,7 +246,7 @@ cargo clean
    3. `cargo doc --no-deps` - ドキュメントビルド
    4. 全てパスしたらコミット
 8. 実装した内容を README.md, docs/external/comparison に反映する必要があるか調査し、修正が必要な場合は変更を記載しコミットする
-9. 対象の実装計画ファイルと要件定義、issue 対応の場合は issue のファイルを `docs/internal/done/` に移動する
+9. 対象の要件定義、issue 対応の場合は issue のファイルを `docs/internal/done/` に移動する
 10. 実装上困難だと判断した場合は `/new-issue <Issue名>` で Issue ファイルを作成する
 11. `docs/internal/issues/` に将来の拡張案として保存する
 12. gh コマンド を使って GitHub Issue を作成し、ファイルの `github_issue` セクションを更新する
