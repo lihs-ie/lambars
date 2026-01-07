@@ -124,13 +124,6 @@
 #[cfg(feature = "arc")]
 pub(crate) type ReferenceCounter<T> = std::sync::Arc<T>;
 
-/// Reference-counted smart pointer type.
-///
-/// When the `arc` feature is enabled, this is `std::sync::Arc`,
-/// which is thread-safe but has slightly higher overhead.
-///
-/// When the `arc` feature is disabled (default), this is `std::rc::Rc`,
-/// which is faster but not thread-safe.
 #[cfg(not(feature = "arc"))]
 pub(crate) type ReferenceCounter<T> = std::rc::Rc<T>;
 

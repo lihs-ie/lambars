@@ -2191,10 +2191,7 @@ mod send_sync_tests {
     use super::*;
     use rstest::rstest;
 
-    /// Compile-time check that `PersistentList<T>` is Send when T: Send
     const fn assert_send<T: Send>() {}
-
-    /// Compile-time check that `PersistentList<T>` is Sync when T: Sync
     const fn assert_sync<T: Sync>() {}
 
     #[rstest]
