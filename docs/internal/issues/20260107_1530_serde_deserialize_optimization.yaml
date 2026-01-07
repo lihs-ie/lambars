@@ -1,0 +1,116 @@
+# Issue: serde デシリアライズ時の Vec 二重作成最適化
+# 実装時に発見された、将来対応が必要な項目
+
+deferred_features:
+  - id: serde_deserialize_optimization
+    name: "serde デシリアライズ時の Vec 二重作成最適化"
+    discovered_date: "2026-01-07"
+    priority: low
+    category: performance
+    labels:
+      - "persistent"
+      - "performance"
+      - "enhancement"
+
+    # 問題の説明
+    problem:
+      summary: "デシリアライズ時に Vec を二重作成しており、余分なメモリ確保とムーブが発生する"
+      details: |
+        現在の serde Deserialize 実装では、以下の手順でデシリアライズを行っている：
+
+        1. SeqAccess/MapAccess から要素を Vec に収集
+        2. Vec を collect() で永続データ構造に変換
+        3. collect() の FromIterator 実装内で再度 Vec を作成
+
+        この結果、同じ要素が2回 Vec に格納され、余分なメモリ確保と
+        要素のムーブが発生している。
+
+        影響を受けるデータ構造：
+        - PersistentList (src/persistent/list.rs:1476)
+        - PersistentVector (src/persistent/vector.rs:2324)
+        - PersistentHashSet (src/persistent/hashset.rs)
+        - PersistentHashMap (src/persistent/hashmap.rs)
+        - PersistentTreeMap (src/persistent/treemap.rs)
+
+      # 現在のコード例
+      rust_limitation: |
+        ```rust
+        // 現在の実装 (list.rs:1470-1477)
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut elements = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(4096));
+            while let Some(element) = seq.next_element()? {
+                elements.push(element);  // 1回目の Vec 作成
+            }
+            Ok(elements.into_iter().collect())  // collect() 内で2回目の Vec 作成
+        }
+
+        // FromIterator 実装 (list.rs:1161-1164)
+        impl<T: Clone> FromIterator<T> for PersistentList<T> {
+            fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+                let elements: Vec<T> = iter.into_iter().collect();  // 2回目の Vec
+                Self::build_from_vec(elements)
+            }
+        }
+        ```
+
+    # 解決策の提案
+    solution:
+      approach: "Visitor 内で直接 build_from_vec / 専用ビルダーを使用する"
+      options:
+        - name: "build_from_vec を直接呼び出す"
+          description: |
+            デシリアライズ時に collect() を使わず、各データ構造の
+            内部ビルダー関数を直接呼び出す。
+          pros:
+            - 実装がシンプル
+            - Vec が1回だけ作成される
+            - 既存の build_from_vec 関数を活用
+          cons:
+            - 内部実装への依存が増える
+            - 各データ構造で個別対応が必要
+
+        - name: "ストリーミングビルダーを導入"
+          description: |
+            Iterator を受け取り、直接永続データ構造を構築する
+            専用のビルダートレイトを導入する。
+          pros:
+            - Vec を完全に回避可能
+            - メモリ効率が最大化
+            - 将来的な拡張性
+          cons:
+            - 実装が複雑
+            - 新しいトレイト/関数の追加が必要
+            - テストの追加が必要
+
+        - name: "FromIterator 実装の最適化"
+          description: |
+            FromIterator 実装自体を最適化し、Iterator から
+            直接構築するように変更する。
+          pros:
+            - collect() の使用箇所全てに恩恵
+            - API の変更なし
+          cons:
+            - 既存のテストへの影響確認が必要
+            - 一部のデータ構造では難しい可能性
+
+      recommended: "build_from_vec を直接呼び出す"
+      estimated_complexity: low
+
+    # 参考情報
+    references:
+      - "Codex レビュー結果 (2026-01-07)"
+      - "serde Visitor パターン: https://serde.rs/impl-deserialize.html"
+
+    # 関連する要件・実装
+    related:
+      requirement_id: "serde_support"
+      plan_id: "20260107_1330_serde_support"
+
+    # GitHub Issue 情報（作成後に追記）
+    github_issue:
+      number: 69
+      url: "https://github.com/lihs-ie/lambars/issues/69"
+      created: true

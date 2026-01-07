@@ -1577,6 +1577,84 @@ impl<K: Clone + Ord, V: Clone> Foldable for PersistentTreeMap<K, V> {
 }
 
 // =============================================================================
+// Serde Support
+// =============================================================================
+
+#[cfg(feature = "serde")]
+impl<K, V> serde::Serialize for PersistentTreeMap<K, V>
+where
+    K: serde::Serialize + Clone + Ord,
+    V: serde::Serialize + Clone,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(self.len()))?;
+        for (key, value) in self {
+            map.serialize_entry(key, value)?;
+        }
+        map.end()
+    }
+}
+
+#[cfg(feature = "serde")]
+struct PersistentTreeMapVisitor<K, V> {
+    key_marker: std::marker::PhantomData<K>,
+    value_marker: std::marker::PhantomData<V>,
+}
+
+#[cfg(feature = "serde")]
+impl<K, V> PersistentTreeMapVisitor<K, V> {
+    const fn new() -> Self {
+        Self {
+            key_marker: std::marker::PhantomData,
+            value_marker: std::marker::PhantomData,
+        }
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de, K, V> serde::de::Visitor<'de> for PersistentTreeMapVisitor<K, V>
+where
+    K: serde::Deserialize<'de> + Clone + Ord,
+    V: serde::Deserialize<'de> + Clone,
+{
+    type Value = PersistentTreeMap<K, V>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("a map")
+    }
+
+    fn visit_map<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::MapAccess<'de>,
+    {
+        // Note: Sequential insert ensures gradual memory usage even for large inputs.
+        let mut map = PersistentTreeMap::new();
+        while let Some((key, value)) = access.next_entry()? {
+            map = map.insert(key, value);
+        }
+        Ok(map)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de, K, V> serde::Deserialize<'de> for PersistentTreeMap<K, V>
+where
+    K: serde::Deserialize<'de> + Clone + Ord,
+    V: serde::Deserialize<'de> + Clone,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_map(PersistentTreeMapVisitor::new())
+    }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -2338,5 +2416,122 @@ mod multithread_tests {
         for handle in handles {
             handle.join().expect("Thread panicked");
         }
+    }
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod serde_tests {
+    use super::*;
+    use rstest::rstest;
+
+    #[rstest]
+    fn test_serialize_empty() {
+        let map: PersistentTreeMap<String, i32> = PersistentTreeMap::new();
+        let json = serde_json::to_string(&map).unwrap();
+        assert_eq!(json, "{}");
+    }
+
+    #[rstest]
+    fn test_serialize_single_entry() {
+        let map = PersistentTreeMap::singleton("key".to_string(), 42);
+        let json = serde_json::to_string(&map).unwrap();
+        assert_eq!(json, r#"{"key":42}"#);
+    }
+
+    #[rstest]
+    fn test_serialize_multiple_entries() {
+        let map = PersistentTreeMap::new()
+            .insert("a".to_string(), 1)
+            .insert("b".to_string(), 2)
+            .insert("c".to_string(), 3);
+        let json = serde_json::to_string(&map).unwrap();
+        assert_eq!(json, r#"{"a":1,"b":2,"c":3}"#);
+    }
+
+    #[rstest]
+    fn test_deserialize_empty() {
+        let json = "{}";
+        let map: PersistentTreeMap<String, i32> = serde_json::from_str(json).unwrap();
+        assert!(map.is_empty());
+    }
+
+    #[rstest]
+    fn test_deserialize_single_entry() {
+        let json = r#"{"key":42}"#;
+        let map: PersistentTreeMap<String, i32> = serde_json::from_str(json).unwrap();
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get("key"), Some(&42));
+    }
+
+    #[rstest]
+    fn test_deserialize_multiple_entries() {
+        let json = r#"{"a":1,"b":2,"c":3}"#;
+        let map: PersistentTreeMap<String, i32> = serde_json::from_str(json).unwrap();
+        assert_eq!(map.len(), 3);
+        assert_eq!(map.get("a"), Some(&1));
+        assert_eq!(map.get("b"), Some(&2));
+        assert_eq!(map.get("c"), Some(&3));
+    }
+
+    #[rstest]
+    fn test_roundtrip_empty() {
+        let original: PersistentTreeMap<String, i32> = PersistentTreeMap::new();
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: PersistentTreeMap<String, i32> = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, restored);
+    }
+
+    #[rstest]
+    fn test_roundtrip_large() {
+        let mut original: PersistentTreeMap<String, i32> = PersistentTreeMap::new();
+        for element_index in 0..100 {
+            original = original.insert(format!("key{element_index:03}"), element_index);
+        }
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: PersistentTreeMap<String, i32> = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, restored);
+    }
+
+    #[rstest]
+    fn test_entry_preservation() {
+        let mut map: PersistentTreeMap<String, i32> = PersistentTreeMap::new();
+        for element_index in 0..100 {
+            map = map.insert(format!("key{element_index}"), element_index);
+        }
+        let json = serde_json::to_string(&map).unwrap();
+        let restored: PersistentTreeMap<String, i32> = serde_json::from_str(&json).unwrap();
+        for element_index in 0..100 {
+            let key = format!("key{element_index}");
+            assert_eq!(restored.get(&key), Some(&element_index));
+        }
+    }
+
+    #[rstest]
+    fn test_order_preservation() {
+        let map = PersistentTreeMap::new()
+            .insert("c".to_string(), 3)
+            .insert("a".to_string(), 1)
+            .insert("b".to_string(), 2);
+        let json = serde_json::to_string(&map).unwrap();
+        assert_eq!(json, r#"{"a":1,"b":2,"c":3}"#);
+    }
+
+    #[rstest]
+    fn test_serialize_nested_values() {
+        let map = PersistentTreeMap::new()
+            .insert("numbers".to_string(), vec![1, 2, 3])
+            .insert("empty".to_string(), vec![]);
+        let json = serde_json::to_string(&map).unwrap();
+        let restored: PersistentTreeMap<String, Vec<i32>> = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.get("numbers"), Some(&vec![1, 2, 3]));
+        assert_eq!(restored.get("empty"), Some(&vec![]));
+    }
+
+    #[rstest]
+    fn test_deserialize_overwrites_duplicate_keys() {
+        let json = r#"{"key":1,"key":2}"#;
+        let map: PersistentTreeMap<String, i32> = serde_json::from_str(json).unwrap();
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get("key"), Some(&2));
     }
 }

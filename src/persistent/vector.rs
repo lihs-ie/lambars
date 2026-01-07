@@ -2307,6 +2307,77 @@ impl<T: Clone> Monoid for PersistentVector<T> {
 }
 
 // =============================================================================
+// Serde Support
+// =============================================================================
+
+#[cfg(feature = "serde")]
+impl<T: serde::Serialize> serde::Serialize for PersistentVector<T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeSeq;
+        let mut seq = serializer.serialize_seq(Some(self.len()))?;
+        for element in self {
+            seq.serialize_element(element)?;
+        }
+        seq.end()
+    }
+}
+
+#[cfg(feature = "serde")]
+struct PersistentVectorVisitor<T> {
+    marker: std::marker::PhantomData<T>,
+}
+
+#[cfg(feature = "serde")]
+impl<T> PersistentVectorVisitor<T> {
+    const fn new() -> Self {
+        Self {
+            marker: std::marker::PhantomData,
+        }
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de, T> serde::de::Visitor<'de> for PersistentVectorVisitor<T>
+where
+    T: serde::Deserialize<'de> + Clone,
+{
+    type Value = PersistentVector<T>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("a sequence")
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        const MAX_PREALLOCATE: usize = 4096;
+        let capacity = seq.size_hint().unwrap_or(0).min(MAX_PREALLOCATE);
+        let mut elements = Vec::with_capacity(capacity);
+        while let Some(element) = seq.next_element()? {
+            elements.push(element);
+        }
+        Ok(elements.into_iter().collect())
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de, T> serde::Deserialize<'de> for PersistentVector<T>
+where
+    T: serde::Deserialize<'de> + Clone,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(PersistentVectorVisitor::new())
+    }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -3096,7 +3167,7 @@ mod multithread_tests {
         let sum2 = handle2.join().unwrap();
 
         assert_eq!(sum1, sum2);
-        assert_eq!(sum1, (0..10000).sum());
+        assert_eq!(sum1, (0..10000).sum::<i32>());
     }
 
     #[rstest]
@@ -3135,7 +3206,7 @@ mod multithread_tests {
             .map(|handle| handle.join().unwrap())
             .sum();
 
-        assert_eq!(total, (0..10000).sum());
+        assert_eq!(total, (0..10000).sum::<i32>());
     }
 
     #[rstest]
@@ -3149,5 +3220,101 @@ mod multithread_tests {
 
         // Same input always produces same output (referential transparency)
         assert_eq!(handle1.join().unwrap(), handle2.join().unwrap());
+    }
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod serde_tests {
+    use super::*;
+    use rstest::rstest;
+
+    #[rstest]
+    fn test_serialize_empty() {
+        let vector: PersistentVector<i32> = PersistentVector::new();
+        let json = serde_json::to_string(&vector).unwrap();
+        assert_eq!(json, "[]");
+    }
+
+    #[rstest]
+    fn test_serialize_single_element() {
+        let vector = PersistentVector::singleton(42);
+        let json = serde_json::to_string(&vector).unwrap();
+        assert_eq!(json, "[42]");
+    }
+
+    #[rstest]
+    fn test_serialize_multiple_elements() {
+        let vector: PersistentVector<i32> = (1..=3).collect();
+        let json = serde_json::to_string(&vector).unwrap();
+        assert_eq!(json, "[1,2,3]");
+    }
+
+    #[rstest]
+    fn test_deserialize_empty() {
+        let json = "[]";
+        let vector: PersistentVector<i32> = serde_json::from_str(json).unwrap();
+        assert!(vector.is_empty());
+    }
+
+    #[rstest]
+    fn test_deserialize_single_element() {
+        let json = "[42]";
+        let vector: PersistentVector<i32> = serde_json::from_str(json).unwrap();
+        assert_eq!(vector.len(), 1);
+        assert_eq!(vector.get(0), Some(&42));
+    }
+
+    #[rstest]
+    fn test_deserialize_multiple_elements() {
+        let json = "[1,2,3]";
+        let vector: PersistentVector<i32> = serde_json::from_str(json).unwrap();
+        assert_eq!(vector.len(), 3);
+        assert_eq!(vector.get(0), Some(&1));
+        assert_eq!(vector.get(1), Some(&2));
+        assert_eq!(vector.get(2), Some(&3));
+    }
+
+    #[rstest]
+    fn test_roundtrip_empty() {
+        let original: PersistentVector<i32> = PersistentVector::new();
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: PersistentVector<i32> = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, restored);
+    }
+
+    #[rstest]
+    fn test_roundtrip_large() {
+        let original: PersistentVector<i32> = (1..=100).collect();
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: PersistentVector<i32> = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, restored);
+    }
+
+    #[rstest]
+    fn test_order_preservation() {
+        let vector: PersistentVector<i32> = (0..100).collect();
+        let json = serde_json::to_string(&vector).unwrap();
+        let restored: PersistentVector<i32> = serde_json::from_str(&json).unwrap();
+        for element_index in 0..100 {
+            assert_eq!(vector.get(element_index), restored.get(element_index));
+        }
+    }
+
+    #[rstest]
+    fn test_serialize_strings() {
+        let vector: PersistentVector<String> = vec!["hello".to_string(), "world".to_string()]
+            .into_iter()
+            .collect();
+        let json = serde_json::to_string(&vector).unwrap();
+        assert_eq!(json, r#"["hello","world"]"#);
+    }
+
+    #[rstest]
+    fn test_deserialize_strings() {
+        let json = r#"["hello","world"]"#;
+        let vector: PersistentVector<String> = serde_json::from_str(json).unwrap();
+        assert_eq!(vector.len(), 2);
+        assert_eq!(vector.get(0), Some(&"hello".to_string()));
+        assert_eq!(vector.get(1), Some(&"world".to_string()));
     }
 }

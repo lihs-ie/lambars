@@ -1209,6 +1209,77 @@ impl<T: Clone + Hash + Eq> Foldable for PersistentHashSet<T> {
 }
 
 // =============================================================================
+// Serde Support
+// =============================================================================
+
+#[cfg(feature = "serde")]
+#[allow(clippy::explicit_iter_loop)]
+impl<T: serde::Serialize + Clone + Hash + Eq> serde::Serialize for PersistentHashSet<T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeSeq;
+        let mut seq = serializer.serialize_seq(Some(self.len()))?;
+        for element in self {
+            seq.serialize_element(&element)?;
+        }
+        seq.end()
+    }
+}
+
+#[cfg(feature = "serde")]
+struct PersistentHashSetVisitor<T> {
+    marker: std::marker::PhantomData<T>,
+}
+
+#[cfg(feature = "serde")]
+impl<T> PersistentHashSetVisitor<T> {
+    const fn new() -> Self {
+        Self {
+            marker: std::marker::PhantomData,
+        }
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de, T> serde::de::Visitor<'de> for PersistentHashSetVisitor<T>
+where
+    T: serde::Deserialize<'de> + Clone + Hash + Eq,
+{
+    type Value = PersistentHashSet<T>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("a sequence")
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        // Note: Sequential insert ensures gradual memory usage even for large inputs.
+        let mut set = PersistentHashSet::new();
+        while let Some(element) = seq.next_element()? {
+            set = set.insert(element);
+        }
+        Ok(set)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de, T> serde::Deserialize<'de> for PersistentHashSet<T>
+where
+    T: serde::Deserialize<'de> + Clone + Hash + Eq,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(PersistentHashSetVisitor::new())
+    }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -1527,5 +1598,119 @@ mod multithread_tests {
         for handle in handles {
             handle.join().expect("Thread panicked");
         }
+    }
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod serde_tests {
+    use super::*;
+    use rstest::rstest;
+    use std::collections::HashSet;
+
+    #[rstest]
+    fn test_serialize_empty() {
+        let set: PersistentHashSet<i32> = PersistentHashSet::new();
+        let json = serde_json::to_string(&set).unwrap();
+        assert_eq!(json, "[]");
+    }
+
+    #[rstest]
+    fn test_serialize_single_element() {
+        let set = PersistentHashSet::singleton(42);
+        let json = serde_json::to_string(&set).unwrap();
+        assert_eq!(json, "[42]");
+    }
+
+    #[rstest]
+    fn test_serialize_multiple_elements() {
+        let set: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+        let json = serde_json::to_string(&set).unwrap();
+        let parsed: Vec<i32> = serde_json::from_str(&json).unwrap();
+        let parsed_set: HashSet<i32> = parsed.into_iter().collect();
+        assert_eq!(parsed_set, [1, 2, 3].into_iter().collect());
+    }
+
+    #[rstest]
+    fn test_deserialize_empty() {
+        let json = "[]";
+        let set: PersistentHashSet<i32> = serde_json::from_str(json).unwrap();
+        assert!(set.is_empty());
+    }
+
+    #[rstest]
+    fn test_deserialize_single_element() {
+        let json = "[42]";
+        let set: PersistentHashSet<i32> = serde_json::from_str(json).unwrap();
+        assert_eq!(set.len(), 1);
+        assert!(set.contains(&42));
+    }
+
+    #[rstest]
+    fn test_deserialize_multiple_elements() {
+        let json = "[1,2,3]";
+        let set: PersistentHashSet<i32> = serde_json::from_str(json).unwrap();
+        assert_eq!(set.len(), 3);
+        assert!(set.contains(&1));
+        assert!(set.contains(&2));
+        assert!(set.contains(&3));
+    }
+
+    #[rstest]
+    fn test_roundtrip_empty() {
+        let original: PersistentHashSet<i32> = PersistentHashSet::new();
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: PersistentHashSet<i32> = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, restored);
+    }
+
+    #[rstest]
+    fn test_roundtrip_large() {
+        let original: PersistentHashSet<i32> = (1..=100).collect();
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: PersistentHashSet<i32> = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, restored);
+    }
+
+    #[rstest]
+    fn test_element_preservation() {
+        let set: PersistentHashSet<i32> = (0..100).collect();
+        let json = serde_json::to_string(&set).unwrap();
+        let restored: PersistentHashSet<i32> = serde_json::from_str(&json).unwrap();
+        for element_value in 0..100 {
+            assert!(restored.contains(&element_value));
+        }
+    }
+
+    #[rstest]
+    fn test_serialize_strings() {
+        let set: PersistentHashSet<String> = vec!["hello".to_string(), "world".to_string()]
+            .into_iter()
+            .collect();
+        let json = serde_json::to_string(&set).unwrap();
+        let parsed: Vec<String> = serde_json::from_str(&json).unwrap();
+        let parsed_set: HashSet<String> = parsed.into_iter().collect();
+        let expected: HashSet<String> = ["hello".to_string(), "world".to_string()]
+            .into_iter()
+            .collect();
+        assert_eq!(parsed_set, expected);
+    }
+
+    #[rstest]
+    fn test_deserialize_strings() {
+        let json = r#"["hello","world"]"#;
+        let set: PersistentHashSet<String> = serde_json::from_str(json).unwrap();
+        assert_eq!(set.len(), 2);
+        assert!(set.contains("hello"));
+        assert!(set.contains("world"));
+    }
+
+    #[rstest]
+    fn test_deserialize_deduplicates() {
+        let json = "[1,2,2,3,3,3]";
+        let set: PersistentHashSet<i32> = serde_json::from_str(json).unwrap();
+        assert_eq!(set.len(), 3);
+        assert!(set.contains(&1));
+        assert!(set.contains(&2));
+        assert!(set.contains(&3));
     }
 }
