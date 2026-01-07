@@ -110,6 +110,30 @@
 //! assert_eq!(range.len(), 2); // 1 and 2
 //! ```
 
+// =============================================================================
+// Reference Counter Type Alias
+// =============================================================================
+
+/// Reference-counted smart pointer type.
+///
+/// When the `arc` feature is enabled, this is `std::sync::Arc`,
+/// which is thread-safe but has slightly higher overhead.
+///
+/// When the `arc` feature is disabled (default), this is `std::rc::Rc`,
+/// which is faster but not thread-safe.
+#[cfg(feature = "arc")]
+pub(crate) type ReferenceCounter<T> = std::sync::Arc<T>;
+
+/// Reference-counted smart pointer type.
+///
+/// When the `arc` feature is enabled, this is `std::sync::Arc`,
+/// which is thread-safe but has slightly higher overhead.
+///
+/// When the `arc` feature is disabled (default), this is `std::rc::Rc`,
+/// which is faster but not thread-safe.
+#[cfg(not(feature = "arc"))]
+pub(crate) type ReferenceCounter<T> = std::rc::Rc<T>;
+
 mod hashmap;
 mod hashset;
 mod list;
@@ -133,3 +157,30 @@ pub use treemap::PersistentTreeMapRangeIterator;
 pub use vector::PersistentVector;
 pub use vector::PersistentVectorIntoIterator;
 pub use vector::PersistentVectorIterator;
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+#[cfg(test)]
+mod reference_counter_tests {
+    use super::ReferenceCounter;
+    use rstest::rstest;
+
+    #[rstest]
+    fn test_reference_counter_clone() {
+        let reference_counter: ReferenceCounter<i32> = ReferenceCounter::new(42);
+        let reference_counter_clone = reference_counter.clone();
+        assert_eq!(*reference_counter, *reference_counter_clone);
+    }
+
+    #[rstest]
+    fn test_reference_counter_strong_count() {
+        let reference_counter: ReferenceCounter<i32> = ReferenceCounter::new(42);
+        assert_eq!(ReferenceCounter::strong_count(&reference_counter), 1);
+        let reference_counter_clone = reference_counter.clone();
+        assert_eq!(ReferenceCounter::strong_count(&reference_counter), 2);
+        drop(reference_counter_clone);
+        assert_eq!(ReferenceCounter::strong_count(&reference_counter), 1);
+    }
+}

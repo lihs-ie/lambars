@@ -45,12 +45,12 @@
 //! - Collision nodes for hash collisions
 //! - Structural sharing via `Rc`
 
+use super::ReferenceCounter;
 use std::borrow::Borrow;
 use std::collections::hash_map::DefaultHasher;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::iter::FromIterator;
-use std::rc::Rc;
 
 use crate::typeclass::{Foldable, TypeConstructor};
 
@@ -114,10 +114,13 @@ enum Node<K, V> {
         /// Bitmap indicating which slots are occupied
         bitmap: u32,
         /// Children (entries or subnodes), compressed
-        children: Rc<[Child<K, V>]>,
+        children: ReferenceCounter<[Child<K, V>]>,
     },
     /// Collision node for keys with the same hash
-    Collision { hash: u64, entries: Rc<[(K, V)]> },
+    Collision {
+        hash: u64,
+        entries: ReferenceCounter<[(K, V)]>,
+    },
 }
 
 /// A child in a bitmap node.
@@ -133,7 +136,7 @@ enum Child<K, V> {
         value: V,
     },
     /// A sub-node
-    Node(Rc<Node<K, V>>),
+    Node(ReferenceCounter<Node<K, V>>),
 }
 
 impl<K, V> Node<K, V> {
@@ -175,7 +178,7 @@ impl<K, V> Node<K, V> {
 #[derive(Clone)]
 pub struct PersistentHashMap<K, V> {
     /// Root node of the trie
-    root: Rc<Node<K, V>>,
+    root: ReferenceCounter<Node<K, V>>,
     /// Number of entries
     length: usize,
 }
@@ -195,7 +198,7 @@ impl<K, V> PersistentHashMap<K, V> {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            root: Rc::new(Node::empty()),
+            root: ReferenceCounter::new(Node::empty()),
             length: 0,
         }
     }
@@ -416,7 +419,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
         let (new_root, added) = Self::insert_into_node(&self.root, key, value, hash, 0);
 
         Self {
-            root: Rc::new(new_root),
+            root: ReferenceCounter::new(new_root),
             length: if added { self.length + 1 } else { self.length },
         }
     }
@@ -427,21 +430,21 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
 
     /// Builds a new child array with a new element inserted at the specified position.
     ///
-    /// Uses `Iterator::collect()` to construct `Rc<[Child]>` in a single expression,
+    /// Uses `Iterator::collect()` to construct `ReferenceCounter<[Child]>` in a single expression,
     /// avoiding the pattern of manually creating a `Vec`, mutating it, and converting
-    /// it to `Rc<[Child]>`.
+    /// it to `ReferenceCounter<[Child]>`.
     /// # Arguments
     /// * `children` - The current child array
     /// * `position` - The position to insert at
     /// * `new_child` - The new child to insert
     ///
     /// # Returns
-    /// A new `Rc<[Child]>` with the child inserted at the specified position.
+    /// A new `ReferenceCounter<[Child]>` with the child inserted at the specified position.
     fn build_children_with_insert(
         children: &[Child<K, V>],
         position: usize,
         new_child: &Child<K, V>,
-    ) -> Rc<[Child<K, V>]> {
+    ) -> ReferenceCounter<[Child<K, V>]> {
         (0..=children.len())
             .map(|index| match index.cmp(&position) {
                 std::cmp::Ordering::Less => children[index].clone(),
@@ -453,7 +456,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
 
     /// Builds a new child array with the element at the specified position updated.
     ///
-    /// Uses `Iterator::collect()` to construct `Rc<[Child]>` in a single step,
+    /// Uses `Iterator::collect()` to construct `ReferenceCounter<[Child]>` in a single step,
     /// avoiding the pattern of manually creating a `Vec`, mutating it, and then
     /// converting it to `Rc`.
     ///
@@ -463,12 +466,12 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     /// * `new_child` - The new child to place at the position
     ///
     /// # Returns
-    /// A new `Rc<[Child]>` with the child at the specified position replaced.
+    /// A new `ReferenceCounter<[Child]>` with the child at the specified position replaced.
     fn build_children_with_update(
         children: &[Child<K, V>],
         position: usize,
         new_child: &Child<K, V>,
-    ) -> Rc<[Child<K, V>]> {
+    ) -> ReferenceCounter<[Child<K, V>]> {
         children
             .iter()
             .enumerate()
@@ -484,7 +487,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
 
     /// Builds a new child array with the element at the specified position removed.
     ///
-    /// Uses `Iterator::collect()` to directly construct `Rc<[Child]>` without
+    /// Uses `Iterator::collect()` to directly construct `ReferenceCounter<[Child]>` without
     /// intermediate `Vec` allocation.
     ///
     /// # Arguments
@@ -492,8 +495,11 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     /// * `position` - The position to remove
     ///
     /// # Returns
-    /// A new `Rc<[Child]>` with the child at the specified position removed.
-    fn build_children_with_remove(children: &[Child<K, V>], position: usize) -> Rc<[Child<K, V>]> {
+    /// A new `ReferenceCounter<[Child]>` with the child at the specified position removed.
+    fn build_children_with_remove(
+        children: &[Child<K, V>],
+        position: usize,
+    ) -> ReferenceCounter<[Child<K, V>]> {
         children
             .iter()
             .enumerate()
@@ -564,7 +570,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
             (Node::Entry { hash, key, value }, false)
         } else if existing_hash == hash {
             // Hash collision - create collision node
-            let entries = Rc::from(vec![
+            let entries = ReferenceCounter::from(vec![
                 (existing_key.clone(), existing_value.clone()),
                 (key, value),
             ]);
@@ -606,14 +612,14 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
             let (subnode, added) = Self::insert_into_node(&sub_entry, key, value, hash, depth + 1);
             let bitmap = 1u32 << existing_index;
             // Use std::iter::once() for single element
-            let children: Rc<[Child<K, V>]> =
-                std::iter::once(Child::Node(Rc::new(subnode))).collect();
+            let children: ReferenceCounter<[Child<K, V>]> =
+                std::iter::once(Child::Node(ReferenceCounter::new(subnode))).collect();
             (Node::Bitmap { bitmap, children }, added)
         } else {
             // Different indices - create bitmap with two children
             // Use array literal + collect() for efficient small array construction
             let bitmap = (1u32 << existing_index) | (1u32 << new_index);
-            let children: Rc<[Child<K, V>]> = if existing_index < new_index {
+            let children: ReferenceCounter<[Child<K, V>]> = if existing_index < new_index {
                 [
                     Child::Entry {
                         hash: existing_hash,
@@ -643,7 +649,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     /// Helper for inserting into a Bitmap node.
     fn insert_into_bitmap_node(
         bitmap: u32,
-        children: &Rc<[Child<K, V>]>,
+        children: &ReferenceCounter<[Child<K, V>]>,
         key: K,
         value: V,
         hash: u64,
@@ -676,7 +682,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     /// Helper for inserting into an occupied slot in a Bitmap node.
     fn insert_into_occupied_slot(
         bitmap: u32,
-        children: &Rc<[Child<K, V>]>,
+        children: &ReferenceCounter<[Child<K, V>]>,
         position: usize,
         key: K,
         value: V,
@@ -695,12 +701,12 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
                 } else if *child_hash == hash {
                     let collision = Node::Collision {
                         hash,
-                        entries: Rc::from(vec![
+                        entries: ReferenceCounter::from(vec![
                             (child_key.clone(), child_value.clone()),
                             (key, value),
                         ]),
                     };
-                    (Child::Node(Rc::new(collision)), true)
+                    (Child::Node(ReferenceCounter::new(collision)), true)
                 } else {
                     let child_entry = Node::Entry {
                         hash: *child_hash,
@@ -709,13 +715,13 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
                     };
                     let (subnode, added) =
                         Self::insert_into_node(&child_entry, key, value, hash, depth + 1);
-                    (Child::Node(Rc::new(subnode)), added)
+                    (Child::Node(ReferenceCounter::new(subnode)), added)
                 }
             }
             Child::Node(subnode) => {
                 let (new_subnode, added) =
                     Self::insert_into_node(subnode, key, value, hash, depth + 1);
-                (Child::Node(Rc::new(new_subnode)), added)
+                (Child::Node(ReferenceCounter::new(new_subnode)), added)
             }
         };
 
@@ -734,7 +740,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     fn insert_into_collision_node(
         node: &Node<K, V>,
         collision_hash: u64,
-        entries: &Rc<[(K, V)]>,
+        entries: &ReferenceCounter<[(K, V)]>,
         key: K,
         value: V,
         hash: u64,
@@ -760,7 +766,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
             (
                 Node::Collision {
                     hash: collision_hash,
-                    entries: Rc::from(new_entries),
+                    entries: ReferenceCounter::from(new_entries),
                 },
                 !found,
             )
@@ -787,15 +793,15 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
             let (subnode, added) = Self::insert_into_node(node, key, value, hash, depth + 1);
             let bitmap = 1u32 << collision_index;
             // Use std::iter::once() for single element
-            let children: Rc<[Child<K, V>]> =
-                std::iter::once(Child::Node(Rc::new(subnode))).collect();
+            let children: ReferenceCounter<[Child<K, V>]> =
+                std::iter::once(Child::Node(ReferenceCounter::new(subnode))).collect();
             (Node::Bitmap { bitmap, children }, added)
         } else {
             // Use array literal + collect() for efficient small array construction
             let bitmap = (1u32 << collision_index) | (1u32 << new_index);
-            let children: Rc<[Child<K, V>]> = if collision_index < new_index {
+            let children: ReferenceCounter<[Child<K, V>]> = if collision_index < new_index {
                 [
-                    Child::Node(Rc::new(node.clone())),
+                    Child::Node(ReferenceCounter::new(node.clone())),
                     Child::Entry { hash, key, value },
                 ]
                 .into_iter()
@@ -803,7 +809,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
             } else {
                 [
                     Child::Entry { hash, key, value },
-                    Child::Node(Rc::new(node.clone())),
+                    Child::Node(ReferenceCounter::new(node.clone())),
                 ]
                 .into_iter()
                 .collect()
@@ -850,7 +856,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
             Some((new_root, removed)) => {
                 if removed {
                     Self {
-                        root: Rc::new(new_root),
+                        root: ReferenceCounter::new(new_root),
                         length: self.length.saturating_sub(1),
                     }
                 } else {
@@ -899,7 +905,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     /// Helper for removing from a Bitmap node.
     fn remove_from_bitmap_node<Q>(
         bitmap: u32,
-        children: &Rc<[Child<K, V>]>,
+        children: &ReferenceCounter<[Child<K, V>]>,
         key: &Q,
         hash: u64,
         depth: usize,
@@ -936,7 +942,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     /// Helper for removing an entry from a Bitmap node.
     fn remove_entry_from_bitmap(
         bitmap: u32,
-        children: &Rc<[Child<K, V>]>,
+        children: &ReferenceCounter<[Child<K, V>]>,
         position: usize,
         bit: u32,
     ) -> (Node<K, V>, bool) {
@@ -955,9 +961,9 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     /// Helper for removing from a subnode within a Bitmap node.
     fn remove_from_subnode<Q>(
         bitmap: u32,
-        children: &Rc<[Child<K, V>]>,
+        children: &ReferenceCounter<[Child<K, V>]>,
         position: usize,
-        subnode: &Rc<Node<K, V>>,
+        subnode: &ReferenceCounter<Node<K, V>>,
         key: &Q,
         hash: u64,
         depth: usize,
@@ -1015,7 +1021,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
                 }
             }
             _ => {
-                let new_child = Child::Node(Rc::new(new_subnode));
+                let new_child = Child::Node(ReferenceCounter::new(new_subnode));
                 // Use Iterator::collect() to build new children array
                 let new_children = Self::build_children_with_update(children, position, &new_child);
                 Some((
@@ -1030,7 +1036,10 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     }
 
     /// Simplifies a Bitmap node to an Entry if it has only one child entry.
-    fn simplify_bitmap_if_possible(bitmap: u32, children: Rc<[Child<K, V>]>) -> (Node<K, V>, bool) {
+    fn simplify_bitmap_if_possible(
+        bitmap: u32,
+        children: ReferenceCounter<[Child<K, V>]>,
+    ) -> (Node<K, V>, bool) {
         if children.len() == 1
             && let Child::Entry { hash, key, value } = &children[0]
         {
@@ -1051,7 +1060,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     /// Helper for removing from a Collision node.
     fn remove_from_collision_node<Q>(
         collision_hash: u64,
-        entries: &Rc<[(K, V)]>,
+        entries: &ReferenceCounter<[(K, V)]>,
         key: &Q,
         hash: u64,
     ) -> Option<(Node<K, V>, bool)>
@@ -1086,7 +1095,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
             Some((
                 Node::Collision {
                     hash: collision_hash,
-                    entries: Rc::from(new_entries),
+                    entries: ReferenceCounter::from(new_entries),
                 },
                 true,
             ))
@@ -2568,5 +2577,158 @@ mod tests {
         let deleted_complement = map.keep_if(|k, v| !predicate(k, v));
         assert_eq!(matching, kept);
         assert_eq!(not_matching, deleted_complement);
+    }
+}
+
+// =============================================================================
+// Send + Sync Tests (arc feature only)
+// =============================================================================
+
+#[cfg(all(test, feature = "arc"))]
+mod send_sync_tests {
+    use super::*;
+    use rstest::rstest;
+
+    const fn assert_send<T: Send>() {}
+    const fn assert_sync<T: Sync>() {}
+
+    #[rstest]
+    fn test_hashmap_is_send() {
+        assert_send::<PersistentHashMap<String, i32>>();
+        assert_send::<PersistentHashMap<i32, String>>();
+    }
+
+    #[rstest]
+    fn test_hashmap_is_sync() {
+        assert_sync::<PersistentHashMap<String, i32>>();
+        assert_sync::<PersistentHashMap<i32, String>>();
+    }
+
+    #[rstest]
+    fn test_hashmap_send_sync_combined() {
+        fn is_send_sync<T: Send + Sync>() {}
+        is_send_sync::<PersistentHashMap<String, i32>>();
+        is_send_sync::<PersistentHashMap<i32, String>>();
+    }
+}
+
+// =============================================================================
+// Multithread Tests (arc feature only)
+// =============================================================================
+
+#[cfg(all(test, feature = "arc"))]
+mod multithread_tests {
+    use super::*;
+    use rstest::rstest;
+    use std::sync::Arc;
+    use std::thread;
+
+    #[rstest]
+    fn test_hashmap_shared_across_threads() {
+        let map = Arc::new(
+            PersistentHashMap::new()
+                .insert("one".to_string(), 1)
+                .insert("two".to_string(), 2)
+                .insert("three".to_string(), 3),
+        );
+
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let map_clone = Arc::clone(&map);
+                thread::spawn(move || {
+                    assert_eq!(map_clone.get("one"), Some(&1));
+                    assert_eq!(map_clone.get("two"), Some(&2));
+                    assert_eq!(map_clone.get("three"), Some(&3));
+                    assert_eq!(map_clone.len(), 3);
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().expect("Thread panicked");
+        }
+    }
+
+    #[rstest]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    fn test_hashmap_concurrent_insert() {
+        let base_map = Arc::new(PersistentHashMap::new().insert("base".to_string(), 0));
+
+        let results: Vec<_> = (0..4)
+            .map(|index| {
+                let map_clone = Arc::clone(&base_map);
+                thread::spawn(move || {
+                    let new_map = map_clone.insert(format!("key_{index}"), index);
+                    assert_eq!(new_map.get(&format!("key_{index}")), Some(&index));
+                    assert_eq!(new_map.get("base"), Some(&0));
+                    new_map
+                })
+            })
+            .map(|handle| handle.join().expect("Thread panicked"))
+            .collect();
+
+        // Each thread should have created an independent map with 2 entries
+        for (index, map) in results.iter().enumerate() {
+            assert_eq!(map.len(), 2);
+            assert_eq!(map.get(&format!("key_{index}")), Some(&(index as i32)));
+        }
+
+        // Original map should be unchanged
+        assert_eq!(base_map.len(), 1);
+    }
+
+    #[rstest]
+    fn test_hashmap_referential_transparency() {
+        let map = Arc::new(
+            PersistentHashMap::new()
+                .insert("a".to_string(), 1)
+                .insert("b".to_string(), 2),
+        );
+
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let map_clone = Arc::clone(&map);
+                thread::spawn(move || {
+                    let updated = map_clone.insert("c".to_string(), 3);
+                    // Original should be unchanged
+                    assert_eq!(map_clone.len(), 2);
+                    assert_eq!(map_clone.get("c"), None);
+                    // New map should have the addition
+                    assert_eq!(updated.len(), 3);
+                    assert_eq!(updated.get("c"), Some(&3));
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().expect("Thread panicked");
+        }
+
+        // Original should still be unchanged
+        assert_eq!(map.len(), 2);
+    }
+
+    #[rstest]
+    fn test_hashmap_concurrent_iteration() {
+        let map = Arc::new(
+            PersistentHashMap::new()
+                .insert("a".to_string(), 1)
+                .insert("b".to_string(), 2)
+                .insert("c".to_string(), 3),
+        );
+
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let map_clone = Arc::clone(&map);
+                thread::spawn(move || {
+                    let sum: i32 = map_clone.iter().map(|(_, v)| v).sum();
+                    assert_eq!(sum, 6);
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().expect("Thread panicked");
+        }
     }
 }

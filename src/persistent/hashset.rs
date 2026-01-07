@@ -1373,3 +1373,159 @@ mod tests {
         assert_eq!(sum, 15);
     }
 }
+
+// =============================================================================
+// Send + Sync Tests (arc feature only)
+// =============================================================================
+
+#[cfg(all(test, feature = "arc"))]
+mod send_sync_tests {
+    use super::*;
+    use rstest::rstest;
+
+    const fn assert_send<T: Send>() {}
+    const fn assert_sync<T: Sync>() {}
+
+    #[rstest]
+    fn test_hashset_is_send() {
+        assert_send::<PersistentHashSet<i32>>();
+        assert_send::<PersistentHashSet<String>>();
+    }
+
+    #[rstest]
+    fn test_hashset_is_sync() {
+        assert_sync::<PersistentHashSet<i32>>();
+        assert_sync::<PersistentHashSet<String>>();
+    }
+
+    #[rstest]
+    fn test_hashset_send_sync_combined() {
+        fn is_send_sync<T: Send + Sync>() {}
+        is_send_sync::<PersistentHashSet<i32>>();
+        is_send_sync::<PersistentHashSet<String>>();
+    }
+}
+
+// =============================================================================
+// Multithread Tests (arc feature only)
+// =============================================================================
+
+#[cfg(all(test, feature = "arc"))]
+mod multithread_tests {
+    use super::*;
+    use rstest::rstest;
+    use std::sync::Arc;
+    use std::thread;
+
+    #[rstest]
+    fn test_hashset_shared_across_threads() {
+        let set = Arc::new(PersistentHashSet::new().insert(1).insert(2).insert(3));
+
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let set_clone = Arc::clone(&set);
+                thread::spawn(move || {
+                    assert!(set_clone.contains(&1));
+                    assert!(set_clone.contains(&2));
+                    assert!(set_clone.contains(&3));
+                    assert_eq!(set_clone.len(), 3);
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().expect("Thread panicked");
+        }
+    }
+
+    #[rstest]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    fn test_hashset_concurrent_insert() {
+        let base_set = Arc::new(PersistentHashSet::new().insert(0));
+
+        let results: Vec<_> = (1..=4)
+            .map(|index| {
+                let set_clone = Arc::clone(&base_set);
+                thread::spawn(move || {
+                    let new_set = set_clone.insert(index);
+                    assert!(new_set.contains(&index));
+                    assert!(new_set.contains(&0));
+                    new_set
+                })
+            })
+            .map(|handle| handle.join().expect("Thread panicked"))
+            .collect();
+
+        // Each thread should have created an independent set with 2 elements
+        for (index, set) in results.iter().enumerate() {
+            assert_eq!(set.len(), 2);
+            assert!(set.contains(&((index + 1) as i32)));
+        }
+
+        // Original set should be unchanged
+        assert_eq!(base_set.len(), 1);
+    }
+
+    #[rstest]
+    fn test_hashset_referential_transparency() {
+        let set = Arc::new(PersistentHashSet::new().insert(1).insert(2));
+
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let set_clone = Arc::clone(&set);
+                thread::spawn(move || {
+                    let updated = set_clone.insert(3);
+                    // Original should be unchanged
+                    assert_eq!(set_clone.len(), 2);
+                    assert!(!set_clone.contains(&3));
+                    // New set should have the addition
+                    assert_eq!(updated.len(), 3);
+                    assert!(updated.contains(&3));
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().expect("Thread panicked");
+        }
+
+        // Original should still be unchanged
+        assert_eq!(set.len(), 2);
+    }
+
+    #[rstest]
+    fn test_hashset_concurrent_set_operations() {
+        let set_a = Arc::new(PersistentHashSet::new().insert(1).insert(2).insert(3));
+        let set_b = Arc::new(PersistentHashSet::new().insert(2).insert(3).insert(4));
+
+        let handles: Vec<_> = (0..4)
+            .map(|index| {
+                let set_a_clone = Arc::clone(&set_a);
+                let set_b_clone = Arc::clone(&set_b);
+                thread::spawn(move || match index % 4 {
+                    0 => {
+                        let union = set_a_clone.union(&set_b_clone);
+                        assert_eq!(union.len(), 4);
+                    }
+                    1 => {
+                        let intersection = set_a_clone.intersection(&set_b_clone);
+                        assert_eq!(intersection.len(), 2);
+                    }
+                    2 => {
+                        let difference = set_a_clone.difference(&set_b_clone);
+                        assert_eq!(difference.len(), 1);
+                    }
+                    3 => {
+                        let symmetric_difference = set_a_clone.symmetric_difference(&set_b_clone);
+                        assert_eq!(symmetric_difference.len(), 2);
+                    }
+                    _ => unreachable!(),
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().expect("Thread panicked");
+        }
+    }
+}

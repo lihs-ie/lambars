@@ -46,7 +46,8 @@
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::iter::FromIterator;
-use std::rc::Rc;
+
+use super::ReferenceCounter;
 
 use crate::typeclass::{Foldable, Functor, FunctorMut, Monoid, Semigroup, TypeConstructor};
 
@@ -71,32 +72,32 @@ const MASK: usize = BRANCHING_FACTOR - 1;
 #[derive(Clone)]
 enum Node<T> {
     /// Branch node containing child nodes
-    Branch(Rc<[Option<Rc<Self>>; BRANCHING_FACTOR]>),
+    Branch(ReferenceCounter<[Option<ReferenceCounter<Self>>; BRANCHING_FACTOR]>),
     /// Leaf node containing actual elements
-    Leaf(Rc<[T]>),
+    Leaf(ReferenceCounter<[T]>),
 }
 
 impl<T> Node<T> {
     /// Creates an empty branch node.
     fn empty_branch() -> Self {
-        Self::Branch(Rc::new(std::array::from_fn(|_| None)))
+        Self::Branch(ReferenceCounter::new(std::array::from_fn(|_| None)))
     }
 }
 
 impl<T: Clone> Node<T> {
-    /// Creates a leaf node by reusing an existing `Rc<[T]>`.
+    /// Creates a leaf node by reusing an existing `ReferenceCounter<[T]>`.
     ///
     /// This avoids copying the elements and only increments the reference count.
     ///
     /// # Arguments
     ///
-    /// * `elements` - An existing `Rc<[T]>` to reuse
+    /// * `elements` - An existing `ReferenceCounter<[T]>` to reuse
     ///
     /// # Returns
     ///
     /// A new Leaf node that shares the underlying storage
     #[inline]
-    const fn leaf_from_rc(elements: Rc<[T]>) -> Self {
+    const fn leaf_from_rc(elements: ReferenceCounter<[T]>) -> Self {
         Self::Leaf(elements)
     }
 }
@@ -141,9 +142,9 @@ pub struct PersistentVector<T> {
     /// Shift amount for index calculation: (depth - 1) * `BITS_PER_LEVEL`
     shift: usize,
     /// Root node of the trie
-    root: Rc<Node<T>>,
+    root: ReferenceCounter<Node<T>>,
     /// Tail buffer for efficient append (up to 32 elements)
-    tail: Rc<[T]>,
+    tail: ReferenceCounter<[T]>,
 }
 
 impl<T> PersistentVector<T> {
@@ -163,8 +164,8 @@ impl<T> PersistentVector<T> {
         Self {
             length: 0,
             shift: BITS_PER_LEVEL,
-            root: Rc::new(Node::empty_branch()),
-            tail: Rc::from(Vec::<T>::new()),
+            root: ReferenceCounter::new(Node::empty_branch()),
+            tail: ReferenceCounter::from(Vec::<T>::new()),
         }
     }
 
@@ -189,8 +190,8 @@ impl<T> PersistentVector<T> {
         Self {
             length: 1,
             shift: BITS_PER_LEVEL,
-            root: Rc::new(Node::empty_branch()),
-            tail: Rc::from(vec![element]),
+            root: ReferenceCounter::new(Node::empty_branch()),
+            tail: ReferenceCounter::from(vec![element]),
         }
     }
 
@@ -454,7 +455,7 @@ impl<T: Clone> PersistentVector<T> {
                 length: self.length + 1,
                 shift: self.shift,
                 root: self.root.clone(),
-                tail: Rc::from(new_tail.as_slice()),
+                tail: ReferenceCounter::from(new_tail.as_slice()),
             }
         } else {
             // Tail is full, push tail to root and create new tail
@@ -574,16 +575,17 @@ impl<T: Clone> PersistentVector<T> {
 
         if root_overflow {
             // Create a new root level
-            let mut new_root_children: [Option<Rc<Node<T>>>; BRANCHING_FACTOR] =
+            let mut new_root_children: [Option<ReferenceCounter<Node<T>>>; BRANCHING_FACTOR] =
                 std::array::from_fn(|_| None);
             new_root_children[0] = Some(self.root.clone());
-            new_root_children[1] = Some(Rc::new(Self::new_path(self.shift, tail_leaf)));
+            new_root_children[1] =
+                Some(ReferenceCounter::new(Self::new_path(self.shift, tail_leaf)));
 
             Self {
                 length: self.length + 1,
                 shift: self.shift + BITS_PER_LEVEL,
-                root: Rc::new(Node::Branch(Rc::new(new_root_children))),
-                tail: Rc::from([element].as_slice()),
+                root: ReferenceCounter::new(Node::Branch(ReferenceCounter::new(new_root_children))),
+                tail: ReferenceCounter::from([element].as_slice()),
             }
         } else {
             // Push tail into existing root
@@ -593,8 +595,8 @@ impl<T: Clone> PersistentVector<T> {
             Self {
                 length: self.length + 1,
                 shift: self.shift,
-                root: Rc::new(new_root),
-                tail: Rc::from([element].as_slice()),
+                root: ReferenceCounter::new(new_root),
+                tail: ReferenceCounter::from([element].as_slice()),
             }
         }
     }
@@ -604,16 +606,19 @@ impl<T: Clone> PersistentVector<T> {
         if level == 0 {
             node
         } else {
-            let mut children: [Option<Rc<Node<T>>>; BRANCHING_FACTOR] =
+            let mut children: [Option<ReferenceCounter<Node<T>>>; BRANCHING_FACTOR] =
                 std::array::from_fn(|_| None);
-            children[0] = Some(Rc::new(Self::new_path(level - BITS_PER_LEVEL, node)));
-            Node::Branch(Rc::new(children))
+            children[0] = Some(ReferenceCounter::new(Self::new_path(
+                level - BITS_PER_LEVEL,
+                node,
+            )));
+            Node::Branch(ReferenceCounter::new(children))
         }
     }
 
     /// Pushes a tail leaf into the tree at the given level.
     fn push_tail_into_node(
-        node: &Rc<Node<T>>,
+        node: &ReferenceCounter<Node<T>>,
         level: usize,
         tail_offset: usize,
         tail_node: Node<T>,
@@ -626,7 +631,7 @@ impl<T: Clone> PersistentVector<T> {
 
                 if level == BITS_PER_LEVEL {
                     // We're at the bottom branch level, insert the tail leaf
-                    new_children[subindex] = Some(Rc::new(tail_node));
+                    new_children[subindex] = Some(ReferenceCounter::new(tail_node));
                 } else {
                     // Recurse down
                     let child = match &children[subindex] {
@@ -638,10 +643,10 @@ impl<T: Clone> PersistentVector<T> {
                         ),
                         None => Self::new_path(level - BITS_PER_LEVEL, tail_node),
                     };
-                    new_children[subindex] = Some(Rc::new(child));
+                    new_children[subindex] = Some(ReferenceCounter::new(child));
                 }
 
-                Node::Branch(Rc::new(new_children))
+                Node::Branch(ReferenceCounter::new(new_children))
             }
             Node::Leaf(_) => {
                 // This shouldn't happen in a well-formed tree
@@ -694,7 +699,7 @@ impl<T: Clone> PersistentVector<T> {
                 length: self.length - 1,
                 shift: self.shift,
                 root: self.root.clone(),
-                tail: Rc::from(new_tail.as_slice()),
+                tail: ReferenceCounter::from(new_tail.as_slice()),
             };
 
             Some((new_vector, element))
@@ -721,7 +726,7 @@ impl<T: Clone> PersistentVector<T> {
     }
 
     /// Gets the leaf at the given offset.
-    fn get_leaf_at(&self, offset: usize) -> Rc<[T]> {
+    fn get_leaf_at(&self, offset: usize) -> ReferenceCounter<[T]> {
         let mut node = &self.root;
         let mut level = self.shift;
 
@@ -733,7 +738,7 @@ impl<T: Clone> PersistentVector<T> {
                         node = child;
                         level -= BITS_PER_LEVEL;
                     } else {
-                        return Rc::from([].as_slice());
+                        return ReferenceCounter::from([].as_slice());
                     }
                 }
                 Node::Leaf(_) => break,
@@ -742,12 +747,12 @@ impl<T: Clone> PersistentVector<T> {
 
         match node.as_ref() {
             Node::Leaf(elements) => elements.clone(),
-            Node::Branch(_) => Rc::from([].as_slice()),
+            Node::Branch(_) => ReferenceCounter::from([].as_slice()),
         }
     }
 
     /// Removes the tail from the root.
-    fn pop_tail_from_root(&self) -> (Rc<Node<T>>, usize) {
+    fn pop_tail_from_root(&self) -> (ReferenceCounter<Node<T>>, usize) {
         let tail_offset = self.length - 2; // Last valid index after pop
         let (new_root, _) = Self::do_pop_tail(&self.root, self.shift, tail_offset);
 
@@ -770,7 +775,11 @@ impl<T: Clone> PersistentVector<T> {
     }
 
     /// Recursively pops the tail from the tree.
-    fn do_pop_tail(node: &Rc<Node<T>>, level: usize, offset: usize) -> (Rc<Node<T>>, bool) {
+    fn do_pop_tail(
+        node: &ReferenceCounter<Node<T>>,
+        level: usize,
+        offset: usize,
+    ) -> (ReferenceCounter<Node<T>>, bool) {
         let subindex = (offset >> level) & MASK;
 
         match node.as_ref() {
@@ -781,7 +790,10 @@ impl<T: Clone> PersistentVector<T> {
                     new_children[subindex] = None;
 
                     let all_none = new_children.iter().all(|c| c.is_none());
-                    (Rc::new(Node::Branch(Rc::new(new_children))), all_none)
+                    (
+                        ReferenceCounter::new(Node::Branch(ReferenceCounter::new(new_children))),
+                        all_none,
+                    )
                 } else if let Some(child) = &children[subindex] {
                     let (new_child, is_empty) =
                         Self::do_pop_tail(child, level - BITS_PER_LEVEL, offset);
@@ -794,7 +806,10 @@ impl<T: Clone> PersistentVector<T> {
                     }
 
                     let all_none = new_children.iter().all(|c| c.is_none());
-                    (Rc::new(Node::Branch(Rc::new(new_children))), all_none)
+                    (
+                        ReferenceCounter::new(Node::Branch(ReferenceCounter::new(new_children))),
+                        all_none,
+                    )
                 } else {
                     (node.clone(), false)
                 }
@@ -916,7 +931,7 @@ impl<T: Clone> PersistentVector<T> {
                 length: self.length,
                 shift: self.shift,
                 root: self.root.clone(),
-                tail: Rc::from(new_tail.as_slice()),
+                tail: ReferenceCounter::from(new_tail.as_slice()),
             })
         } else {
             // Element is in the root
@@ -925,14 +940,19 @@ impl<T: Clone> PersistentVector<T> {
             Some(Self {
                 length: self.length,
                 shift: self.shift,
-                root: Rc::new(new_root),
+                root: ReferenceCounter::new(new_root),
                 tail: self.tail.clone(),
             })
         }
     }
 
     /// Updates an element in the root tree.
-    fn update_in_root(node: &Rc<Node<T>>, level: usize, index: usize, element: T) -> Node<T> {
+    fn update_in_root(
+        node: &ReferenceCounter<Node<T>>,
+        level: usize,
+        index: usize,
+        element: T,
+    ) -> Node<T> {
         match node.as_ref() {
             Node::Branch(children) => {
                 let subindex = (index >> level) & MASK;
@@ -940,7 +960,7 @@ impl<T: Clone> PersistentVector<T> {
 
                 if level > 0 {
                     if let Some(child) = &children[subindex] {
-                        new_children[subindex] = Some(Rc::new(Self::update_in_root(
+                        new_children[subindex] = Some(ReferenceCounter::new(Self::update_in_root(
                             child,
                             level - BITS_PER_LEVEL,
                             index,
@@ -948,11 +968,12 @@ impl<T: Clone> PersistentVector<T> {
                         )));
                     }
                 } else if let Some(child) = &children[subindex] {
-                    new_children[subindex] =
-                        Some(Rc::new(Self::update_in_root(child, 0, index, element)));
+                    new_children[subindex] = Some(ReferenceCounter::new(Self::update_in_root(
+                        child, 0, index, element,
+                    )));
                 }
 
-                Node::Branch(Rc::new(new_children))
+                Node::Branch(ReferenceCounter::new(new_children))
             }
             Node::Leaf(elements) => {
                 let leaf_index = index & MASK;
@@ -960,7 +981,7 @@ impl<T: Clone> PersistentVector<T> {
                 if leaf_index < new_elements.len() {
                     new_elements[leaf_index] = element;
                 }
-                Node::Leaf(Rc::from(new_elements.as_slice()))
+                Node::Leaf(ReferenceCounter::from(new_elements.as_slice()))
             }
         }
     }
@@ -1526,7 +1547,7 @@ enum IteratorState {
 /// with efficient backtracking.
 struct TraversalStackEntry<'a, T> {
     /// Reference to the branch node's children array
-    children: &'a [Option<Rc<Node<T>>>; BRANCHING_FACTOR],
+    children: &'a [Option<ReferenceCounter<Node<T>>>; BRANCHING_FACTOR],
     /// Index of the next child to process
     child_index: usize,
 }
@@ -1633,7 +1654,9 @@ impl<'a, T> PersistentVectorIterator<'a, T> {
             let entry = &mut self.traversal_stack[stack_len - 1];
 
             // Find the first valid child in the current branch
-            let mut found_branch: Option<&'a [Option<Rc<Node<T>>>; BRANCHING_FACTOR]> = None;
+            let mut found_branch: Option<
+                &'a [Option<ReferenceCounter<Node<T>>>; BRANCHING_FACTOR],
+            > = None;
             let mut found_leaf: Option<&'a [T]> = None;
 
             while entry.child_index < BRANCHING_FACTOR {
@@ -1747,11 +1770,11 @@ impl<T> ExactSizeIterator for PersistentVectorIterator<'_, T> {
 
 /// A stack entry for tree traversal in the owning iterator.
 ///
-/// Unlike `TraversalStackEntry`, this holds an `Rc<Node<T>>` directly
+/// Unlike `TraversalStackEntry`, this holds an `ReferenceCounter<Node<T>>` directly
 /// to avoid lifetime issues with owned data.
 struct IntoIteratorStackEntry<T> {
     /// The branch node (held via Rc)
-    node: Rc<Node<T>>,
+    node: ReferenceCounter<Node<T>>,
     /// Index of the next child to process
     child_index: usize,
 }
@@ -1767,7 +1790,7 @@ pub struct PersistentVectorIntoIterator<T> {
     /// Stack for tree traversal
     traversal_stack: Vec<IntoIteratorStackEntry<T>>,
     /// Currently cached leaf node (held via Rc)
-    current_leaf: Option<Rc<[T]>>,
+    current_leaf: Option<ReferenceCounter<[T]>>,
     /// Current position within the cached leaf
     leaf_index: usize,
     /// Current processing state
@@ -1824,7 +1847,7 @@ impl<T: Clone> PersistentVectorIntoIterator<T> {
     }
 
     /// Initializes the iterator from the root node.
-    fn initialize_from_root(&mut self, root: Rc<Node<T>>) {
+    fn initialize_from_root(&mut self, root: ReferenceCounter<Node<T>>) {
         match root.as_ref() {
             Node::Branch(_) => {
                 self.traversal_stack.push(IntoIteratorStackEntry {
@@ -1858,8 +1881,8 @@ impl<T: Clone> PersistentVectorIntoIterator<T> {
                 }
             };
 
-            let mut found_branch: Option<Rc<Node<T>>> = None;
-            let mut found_leaf: Option<Rc<[T]>> = None;
+            let mut found_branch: Option<ReferenceCounter<Node<T>>> = None;
+            let mut found_leaf: Option<ReferenceCounter<[T]>> = None;
 
             while entry.child_index < BRANCHING_FACTOR {
                 let index = entry.child_index;
@@ -2138,8 +2161,8 @@ fn build_persistent_vector_from_vec<T>(elements: Vec<T>) -> PersistentVector<T> 
         return PersistentVector {
             length,
             shift: BITS_PER_LEVEL,
-            root: Rc::new(Node::empty_branch()),
-            tail: Rc::from(elements),
+            root: ReferenceCounter::new(Node::empty_branch()),
+            tail: ReferenceCounter::from(elements),
         };
     }
 
@@ -2164,18 +2187,18 @@ fn build_persistent_vector_from_vec<T>(elements: Vec<T>) -> PersistentVector<T> 
         length,
         shift,
         root,
-        tail: Rc::from(tail_elements),
+        tail: ReferenceCounter::from(tail_elements),
     }
 }
 
 /// Build the root tree from a vector of elements.
-fn build_root_from_elements<T>(elements: Vec<T>) -> (Rc<Node<T>>, usize) {
+fn build_root_from_elements<T>(elements: Vec<T>) -> (ReferenceCounter<Node<T>>, usize) {
     if elements.is_empty() {
-        return (Rc::new(Node::empty_branch()), BITS_PER_LEVEL);
+        return (ReferenceCounter::new(Node::empty_branch()), BITS_PER_LEVEL);
     }
 
     // Split into chunks of BRANCHING_FACTOR
-    let mut leaves: Vec<Rc<Node<T>>> = Vec::new();
+    let mut leaves: Vec<ReferenceCounter<Node<T>>> = Vec::new();
     let mut iter = elements.into_iter();
 
     loop {
@@ -2183,14 +2206,20 @@ fn build_root_from_elements<T>(elements: Vec<T>) -> (Rc<Node<T>>, usize) {
         if chunk.is_empty() {
             break;
         }
-        leaves.push(Rc::new(Node::Leaf(Rc::from(chunk))));
+        leaves.push(ReferenceCounter::new(Node::Leaf(ReferenceCounter::from(
+            chunk,
+        ))));
     }
 
     // If there's only one leaf, wrap it in a branch
     if leaves.len() == 1 {
-        let mut children: [Option<Rc<Node<T>>>; BRANCHING_FACTOR] = std::array::from_fn(|_| None);
+        let mut children: [Option<ReferenceCounter<Node<T>>>; BRANCHING_FACTOR] =
+            std::array::from_fn(|_| None);
         children[0] = Some(leaves.remove(0));
-        return (Rc::new(Node::Branch(Rc::new(children))), BITS_PER_LEVEL);
+        return (
+            ReferenceCounter::new(Node::Branch(ReferenceCounter::new(children))),
+            BITS_PER_LEVEL,
+        );
     }
 
     // Build tree bottom-up
@@ -2198,15 +2227,17 @@ fn build_root_from_elements<T>(elements: Vec<T>) -> (Rc<Node<T>>, usize) {
     let mut shift = BITS_PER_LEVEL;
 
     while current_level.len() > BRANCHING_FACTOR {
-        let mut next_level: Vec<Rc<Node<T>>> = Vec::new();
+        let mut next_level: Vec<ReferenceCounter<Node<T>>> = Vec::new();
 
         for chunk in current_level.chunks(BRANCHING_FACTOR) {
-            let mut children: [Option<Rc<Node<T>>>; BRANCHING_FACTOR] =
+            let mut children: [Option<ReferenceCounter<Node<T>>>; BRANCHING_FACTOR] =
                 std::array::from_fn(|_| None);
             for (index, node) in chunk.iter().enumerate() {
                 children[index] = Some(node.clone());
             }
-            next_level.push(Rc::new(Node::Branch(Rc::new(children))));
+            next_level.push(ReferenceCounter::new(Node::Branch(ReferenceCounter::new(
+                children,
+            ))));
         }
 
         current_level = next_level;
@@ -2214,12 +2245,16 @@ fn build_root_from_elements<T>(elements: Vec<T>) -> (Rc<Node<T>>, usize) {
     }
 
     // Wrap the remaining nodes in the root branch
-    let mut root_children: [Option<Rc<Node<T>>>; BRANCHING_FACTOR] = std::array::from_fn(|_| None);
+    let mut root_children: [Option<ReferenceCounter<Node<T>>>; BRANCHING_FACTOR] =
+        std::array::from_fn(|_| None);
     for (index, node) in current_level.into_iter().enumerate() {
         root_children[index] = Some(node);
     }
 
-    (Rc::new(Node::Branch(Rc::new(root_children))), shift)
+    (
+        ReferenceCounter::new(Node::Branch(ReferenceCounter::new(root_children))),
+        shift,
+    )
 }
 
 impl<T: Clone> Foldable for PersistentVector<T> {
@@ -3005,5 +3040,117 @@ mod tests {
         let result = outer.intercalate(&separator);
         let collected: Vec<char> = result.iter().copied().collect();
         assert_eq!(collected, vec!['a', 'b', '-', '-', 'c', 'd']);
+    }
+}
+
+// =============================================================================
+// Thread Safety Tests (arc feature only)
+// =============================================================================
+
+#[cfg(all(test, feature = "arc"))]
+mod send_sync_tests {
+    use super::*;
+    use rstest::rstest;
+
+    /// Compile-time check that `PersistentVector<T>` is Send when T: Send
+    const fn assert_send<T: Send>() {}
+
+    /// Compile-time check that `PersistentVector<T>` is Sync when T: Sync
+    const fn assert_sync<T: Sync>() {}
+
+    #[rstest]
+    fn test_vector_is_send() {
+        assert_send::<PersistentVector<i32>>();
+        assert_send::<PersistentVector<String>>();
+    }
+
+    #[rstest]
+    fn test_vector_is_sync() {
+        assert_sync::<PersistentVector<i32>>();
+        assert_sync::<PersistentVector<String>>();
+    }
+
+    #[rstest]
+    fn test_vector_send_sync_combined() {
+        fn is_send_sync<T: Send + Sync>() {}
+        is_send_sync::<PersistentVector<i32>>();
+        is_send_sync::<PersistentVector<String>>();
+    }
+}
+
+#[cfg(all(test, feature = "arc"))]
+mod multithread_tests {
+    use super::*;
+    use rstest::rstest;
+    use std::thread;
+
+    #[rstest]
+    fn test_vector_shared_across_threads() {
+        let vector: PersistentVector<i32> = (0..10000).collect();
+
+        let vector1 = vector.clone();
+        let vector2 = vector;
+
+        let handle1 = thread::spawn(move || vector1.iter().sum::<i32>());
+
+        let handle2 = thread::spawn(move || vector2.iter().sum::<i32>());
+
+        let sum1 = handle1.join().unwrap();
+        let sum2 = handle2.join().unwrap();
+
+        assert_eq!(sum1, sum2);
+        assert_eq!(sum1, (0..10000).sum());
+    }
+
+    #[rstest]
+    fn test_vector_concurrent_push_back() {
+        let vector: PersistentVector<i32> = PersistentVector::new();
+
+        let vector1 = vector.clone();
+        let vector2 = vector;
+
+        let handle1 = thread::spawn(move || vector1.push_back(1).push_back(2).push_back(3));
+
+        let handle2 = thread::spawn(move || vector2.push_back(4).push_back(5).push_back(6));
+
+        let result1 = handle1.join().unwrap();
+        let result2 = handle2.join().unwrap();
+
+        assert_eq!(result1.len(), 3);
+        assert_eq!(result2.len(), 3);
+    }
+
+    #[rstest]
+    fn test_vector_concurrent_random_access() {
+        let vector: PersistentVector<i32> = (0..10000).collect();
+
+        let total: i32 = (0..4)
+            .map(|thread_id| {
+                let vector_clone = vector.clone();
+                thread::spawn(move || {
+                    let start = thread_id * 2500;
+                    let end = start + 2500;
+                    (start..end)
+                        .map(|i| *vector_clone.get(i).unwrap())
+                        .sum::<i32>()
+                })
+            })
+            .map(|handle| handle.join().unwrap())
+            .sum();
+
+        assert_eq!(total, (0..10000).sum());
+    }
+
+    #[rstest]
+    fn test_vector_referential_transparency() {
+        let vector: PersistentVector<i32> = (0..10000).collect();
+        let vector_clone = vector.clone();
+
+        let handle1 = thread::spawn(move || vector.iter().sum::<i32>());
+
+        let handle2 = thread::spawn(move || vector_clone.iter().sum::<i32>());
+
+        // Same input always produces same output (referential transparency)
+        assert_eq!(handle1.join().unwrap(), handle2.join().unwrap());
     }
 }
