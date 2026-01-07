@@ -43,7 +43,7 @@
 //! - 32-way branching (5 bits per level)
 //! - Bitmap to track which slots are occupied
 //! - Collision nodes for hash collisions
-//! - Structural sharing via `Rc`
+//! - Structural sharing via reference counting (`Rc` or `Arc` with `arc` feature)
 
 use super::ReferenceCounter;
 use std::borrow::Borrow;
@@ -458,7 +458,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     ///
     /// Uses `Iterator::collect()` to construct `ReferenceCounter<[Child]>` in a single step,
     /// avoiding the pattern of manually creating a `Vec`, mutating it, and then
-    /// converting it to `Rc`.
+    /// converting it to a reference-counted pointer.
     ///
     /// # Arguments
     /// * `children` - The current child array

@@ -824,22 +824,24 @@ implementation_plan:
     description: |
       PersistentHashSetは内部でPersistentHashMapを使用しているため、
       HashMapがスレッドセーフになれば自動的にスレッドセーフになる。
-      未使用のArcインポートを削除し、テストを追加する。
+      テストを追加する。
+
+      注意: HashSetViewは既存実装で`std::sync::Arc`を使用しているが、
+      これはdyn Traitオブジェクトの所有権管理のためであり、
+      今回のRc/Arc切り替えスコープとは異なる。
+      HashSetViewのReferenceCounter対応は将来のIssueとして検討。
 
     files:
       - path: src/persistent/hashset.rs
         description: |
-          - 未使用の`use std::sync::Arc`を削除
           - Send + Syncテストを追加
           - マルチスレッドテストを追加
+          - HashSetViewのArcは既存実装のため変更なし
 
     implementation_steps:
       - step: 1
         description: |
-          未使用のArcインポートを削除
-        code_outline: |
-          // 削除する行:
-          // use std::sync::Arc;
+          Send + Syncテストとマルチスレッドテストを追加
 
     tests:
       - name: test_hashset_send_sync

@@ -1773,7 +1773,7 @@ impl<T> ExactSizeIterator for PersistentVectorIterator<'_, T> {
 /// Unlike `TraversalStackEntry`, this holds an `ReferenceCounter<Node<T>>` directly
 /// to avoid lifetime issues with owned data.
 struct IntoIteratorStackEntry<T> {
-    /// The branch node (held via Rc)
+    /// The branch node (held via reference counting)
     node: ReferenceCounter<Node<T>>,
     /// Index of the next child to process
     child_index: usize,
@@ -1789,7 +1789,7 @@ pub struct PersistentVectorIntoIterator<T> {
     vector: PersistentVector<T>,
     /// Stack for tree traversal
     traversal_stack: Vec<IntoIteratorStackEntry<T>>,
-    /// Currently cached leaf node (held via Rc)
+    /// Currently cached leaf node (held via reference counting)
     current_leaf: Option<ReferenceCounter<[T]>>,
     /// Current position within the cached leaf
     leaf_index: usize,
