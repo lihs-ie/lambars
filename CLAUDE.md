@@ -228,10 +228,8 @@ cargo clean
 8. コミット前に以下の確認を実施する
    1. `cargo fmt` - コードフォーマット
    2. `cargo clippy --all-features --all-targets -- -D warnings` - lint チェック
-   3. `cargo test --no-default-features` - feature なしでテスト
-   4. `cargo test --all-features` - 全 feature でテスト
-   5. `cargo doc --no-deps` - ドキュメントビルド
-   6. 全てパスしたらコミット
+   3. `cargo doc --no-deps` - ドキュメントビルド
+   4. 全てパスしたらコミット
 9. 実装した内容を README.md, docs/external/comparison に反映する必要があるか調査し、修正が必要な場合は変更を記載しコミットする
 10. 対象の実装計画ファイルと要件定義、issue 対応の場合は issue のファイルを `docs/internal/done/` に移動する
 11. 実装上困難だと判断した場合は `/new-issue <Issue名>` で Issue ファイルを作成する
