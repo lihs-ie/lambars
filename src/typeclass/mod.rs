@@ -7,6 +7,7 @@
 //! - [`FunctorMut`]: Mapping with mutable functions for multi-element containers
 //! - [`Applicative`]: Applying functions within containers
 //! - [`Monad`]: Sequencing computations with dependency
+//! - [`Flatten`]: Flattening nested monadic structures
 //! - [`Foldable`]: Folding over structures to produce summary values
 //! - [`Traversable`]: Traversing structures with effects
 //! - [`Semigroup`]: Associative binary operations
@@ -96,7 +97,7 @@ pub use foldable::Foldable;
 pub use functor::{Functor, FunctorMut};
 pub use higher::TypeConstructor;
 pub use identity::Identity;
-pub use monad::{Monad, MonadVec};
+pub use monad::{Flatten, Monad, MonadVec};
 pub use monoid::Monoid;
 pub use semigroup::Semigroup;
 pub use traversable::Traversable;

@@ -60,6 +60,90 @@
 use super::applicative::Applicative;
 use super::identity::Identity;
 
+/// Flattens nested monadic structures `M<M<A>>` into `M<A>`.
+///
+/// Equivalent to Haskell's `join` or Scala's `flatten` in `cats.FlatMap`.
+///
+/// Due to Rust's lack of higher-kinded types, this trait is implemented for specific
+/// nested types rather than generically within `Monad`.
+///
+/// # Laws
+///
+/// ## Flatten-FlatMap Equivalence
+///
+/// ```text
+/// nested.flatten() == nested.flat_map(|x| x)
+/// ```
+///
+/// ## Flatten Associativity
+///
+/// ```text
+/// nested.flatten().flatten() == nested.flat_map(|m| m.flatten())
+/// ```
+///
+/// # Note on Vec
+///
+/// `Vec` does not implement this trait because `MonadVec::flatten` uses `IntoIterator`
+/// semantics, supporting transformations like `Vec<String>` to `Vec<char>`.
+///
+/// # Examples
+///
+/// ```rust
+/// use lambars::typeclass::Flatten;
+///
+/// let option: Option<Option<i32>> = Some(Some(42));
+/// assert_eq!(option.flatten(), Some(42));
+///
+/// let result: Result<Result<i32, &str>, &str> = Ok(Ok(42));
+/// assert_eq!(result.flatten(), Ok(42));
+///
+/// let boxed: Box<Box<i32>> = Box::new(Box::new(42));
+/// assert_eq!(*boxed.flatten(), 42);
+/// ```
+pub trait Flatten {
+    /// The resulting type after flattening (`M<A>` for `M<M<A>>`).
+    type Flattened;
+
+    /// Removes one level of nesting.
+    fn flatten(self) -> Self::Flattened;
+}
+
+impl<T> Flatten for Option<Option<T>> {
+    type Flattened = Option<T>;
+
+    #[inline]
+    fn flatten(self) -> Self::Flattened {
+        self.and_then(core::convert::identity)
+    }
+}
+
+impl<T, E> Flatten for Result<Result<T, E>, E> {
+    type Flattened = Result<T, E>;
+
+    #[inline]
+    fn flatten(self) -> Self::Flattened {
+        self.and_then(core::convert::identity)
+    }
+}
+
+impl<T> Flatten for Box<Box<T>> {
+    type Flattened = Box<T>;
+
+    #[inline]
+    fn flatten(self) -> Self::Flattened {
+        *self
+    }
+}
+
+impl<T> Flatten for Identity<Identity<T>> {
+    type Flattened = Identity<T>;
+
+    #[inline]
+    fn flatten(self) -> Self::Flattened {
+        self.into_inner()
+    }
+}
+
 /// A type class for types that support sequencing of computations.
 ///
 /// `Monad` extends `Applicative` with `flat_map`, which allows the result
@@ -688,6 +772,256 @@ mod tests {
     }
 
     // =========================================================================
+    // Flatten Trait Tests
+    // =========================================================================
+
+    mod flatten_tests {
+        use super::*;
+        use crate::typeclass::Flatten;
+
+        // =====================================================================
+        // Option<Option<T>> Flatten Tests
+        // =====================================================================
+
+        #[rstest]
+        fn option_flatten_trait_some_some() {
+            let nested: Option<Option<i32>> = Some(Some(42));
+            let flat: Option<i32> = nested.flatten();
+            assert_eq!(flat, Some(42));
+        }
+
+        #[rstest]
+        fn option_flatten_trait_some_none() {
+            let nested: Option<Option<i32>> = Some(None);
+            let flat: Option<i32> = nested.flatten();
+            assert_eq!(flat, None);
+        }
+
+        #[rstest]
+        fn option_flatten_trait_none() {
+            let nested: Option<Option<i32>> = None;
+            let flat: Option<i32> = nested.flatten();
+            assert_eq!(flat, None);
+        }
+
+        // =====================================================================
+        // Result<Result<T, E>, E> Flatten Tests
+        // =====================================================================
+
+        #[rstest]
+        fn result_flatten_trait_ok_ok() {
+            let nested: Result<Result<i32, String>, String> = Ok(Ok(42));
+            let flat: Result<i32, String> = nested.flatten();
+            assert_eq!(flat, Ok(42));
+        }
+
+        #[rstest]
+        fn result_flatten_trait_ok_err() {
+            let nested: Result<Result<i32, String>, String> = Ok(Err("inner error".to_string()));
+            let flat: Result<i32, String> = nested.flatten();
+            assert_eq!(flat, Err("inner error".to_string()));
+        }
+
+        #[rstest]
+        fn result_flatten_trait_err() {
+            let nested: Result<Result<i32, String>, String> = Err("outer error".to_string());
+            let flat: Result<i32, String> = nested.flatten();
+            assert_eq!(flat, Err("outer error".to_string()));
+        }
+
+        // =====================================================================
+        // Box<Box<T>> Flatten Tests
+        // =====================================================================
+
+        #[rstest]
+        fn box_flatten_trait_basic() {
+            let nested: Box<Box<i32>> = Box::new(Box::new(42));
+            let flat: Box<i32> = nested.flatten();
+            assert_eq!(*flat, 42);
+        }
+
+        #[rstest]
+        fn box_flatten_trait_with_string() {
+            let nested: Box<Box<String>> = Box::new(Box::new("hello".to_string()));
+            let flat: Box<String> = nested.flatten();
+            assert_eq!(*flat, "hello");
+        }
+
+        // =====================================================================
+        // Identity<Identity<T>> Flatten Tests
+        // =====================================================================
+
+        #[rstest]
+        fn identity_flatten_trait_basic() {
+            let nested: Identity<Identity<i32>> = Identity::new(Identity::new(42));
+            let flat: Identity<i32> = nested.flatten();
+            assert_eq!(flat, Identity::new(42));
+        }
+
+        #[rstest]
+        fn identity_flatten_trait_with_string() {
+            let nested: Identity<Identity<String>> =
+                Identity::new(Identity::new("hello".to_string()));
+            let flat: Identity<String> = nested.flatten();
+            assert_eq!(flat, Identity::new("hello".to_string()));
+        }
+
+        // =====================================================================
+        // Flatten-FlatMap Equivalence Tests
+        // =====================================================================
+
+        #[rstest]
+        fn option_flatten_equals_flat_map_identity() {
+            let nested: Option<Option<i32>> = Some(Some(42));
+            let flatten_result = nested.flatten();
+            let flat_map_result = nested.flat_map(|inner| inner);
+            assert_eq!(flatten_result, flat_map_result);
+        }
+
+        #[rstest]
+        fn result_flatten_equals_flat_map_identity() {
+            let nested: Result<Result<i32, String>, String> = Ok(Ok(42));
+            let flatten_result = nested.clone().flatten();
+            let flat_map_result = nested.flat_map(|inner| inner);
+            assert_eq!(flatten_result, flat_map_result);
+        }
+
+        #[rstest]
+        fn box_flatten_equals_flat_map_identity() {
+            let nested: Box<Box<i32>> = Box::new(Box::new(42));
+            let nested_clone: Box<Box<i32>> = Box::new(Box::new(42));
+            let flatten_result = nested.flatten();
+            let flat_map_result = nested_clone.flat_map(|inner| inner);
+            assert_eq!(flatten_result, flat_map_result);
+        }
+
+        #[rstest]
+        fn identity_flatten_equals_flat_map_identity() {
+            let nested: Identity<Identity<i32>> = Identity::new(Identity::new(42));
+            let flatten_result = nested.flatten();
+            let flat_map_result = nested.flat_map(|inner| inner);
+            assert_eq!(flatten_result, flat_map_result);
+        }
+
+        // =====================================================================
+        // Flatten Associativity Tests (Triple Nested)
+        // =====================================================================
+
+        #[rstest]
+        fn option_flatten_associativity() {
+            let triple_nested: Option<Option<Option<i32>>> = Some(Some(Some(42)));
+            let left = triple_nested.flatten().flatten();
+            let right = triple_nested.flat_map(|middle| middle.flatten());
+            assert_eq!(left, right);
+            assert_eq!(left, Some(42));
+        }
+
+        #[rstest]
+        fn result_flatten_associativity() {
+            let triple_nested: Result<Result<Result<i32, String>, String>, String> = Ok(Ok(Ok(42)));
+            let left = triple_nested.clone().flatten().flatten();
+            let right = triple_nested.flat_map(|middle| middle.flatten());
+            assert_eq!(left, right);
+            assert_eq!(left, Ok(42));
+        }
+
+        #[rstest]
+        fn box_flatten_associativity() {
+            let triple_nested: Box<Box<Box<i32>>> = Box::new(Box::new(Box::new(42)));
+            let triple_nested_clone: Box<Box<Box<i32>>> = Box::new(Box::new(Box::new(42)));
+            let left = triple_nested.flatten().flatten();
+            let right = triple_nested_clone.flat_map(|middle| middle.flatten());
+            assert_eq!(left, right);
+            assert_eq!(*left, 42);
+        }
+
+        #[rstest]
+        fn identity_flatten_associativity() {
+            let triple_nested: Identity<Identity<Identity<i32>>> =
+                Identity::new(Identity::new(Identity::new(42)));
+            let left = triple_nested.flatten().flatten();
+            let right = triple_nested.flat_map(|middle| middle.flatten());
+            assert_eq!(left, right);
+            assert_eq!(left, Identity::new(42));
+        }
+
+        // =====================================================================
+        // Edge Cases
+        // =====================================================================
+
+        #[rstest]
+        fn option_flatten_none_outer() {
+            let nested: Option<Option<i32>> = None;
+            assert_eq!(nested.flatten(), None);
+        }
+
+        #[rstest]
+        fn option_flatten_none_inner() {
+            let nested: Option<Option<i32>> = Some(None);
+            assert_eq!(nested.flatten(), None);
+        }
+
+        #[rstest]
+        fn result_flatten_err_outer() {
+            let nested: Result<Result<i32, String>, String> = Err("outer".to_string());
+            assert_eq!(nested.flatten(), Err("outer".to_string()));
+        }
+
+        #[rstest]
+        fn result_flatten_err_inner() {
+            let nested: Result<Result<i32, String>, String> = Ok(Err("inner".to_string()));
+            assert_eq!(nested.flatten(), Err("inner".to_string()));
+        }
+
+        // =====================================================================
+        // Flatten with Monad Law Consistency
+        // =====================================================================
+
+        #[rstest]
+        fn option_flatten_with_flat_map_law() {
+            // m.flat_map(f).flatten() == m.flat_map(|x| f(x).flatten())
+            let monad: Option<i32> = Some(42);
+            let function = |n: i32| Some(Some(n.to_string()));
+
+            let left = monad.flat_map(function).flatten();
+            let right = monad.flat_map(|x| function(x).flatten());
+            assert_eq!(left, right);
+        }
+
+        #[rstest]
+        fn result_flatten_with_flat_map_law() {
+            let monad: Result<i32, String> = Ok(42);
+            let function =
+                |n: i32| -> Result<Result<String, String>, String> { Ok(Ok(n.to_string())) };
+
+            let left = monad.clone().flat_map(function).flatten();
+            let right = monad.flat_map(|x| function(x).flatten());
+            assert_eq!(left, right);
+        }
+
+        #[rstest]
+        fn box_flatten_with_flat_map_law() {
+            let monad: Box<i32> = Box::new(42);
+            let monad_clone: Box<i32> = Box::new(42);
+            let function = |n: i32| Box::new(Box::new(n.to_string()));
+
+            let left = monad.flat_map(function).flatten();
+            let right = monad_clone.flat_map(|x| function(x).flatten());
+            assert_eq!(left, right);
+        }
+
+        #[rstest]
+        fn identity_flatten_with_flat_map_law() {
+            let monad: Identity<i32> = Identity::new(42);
+            let function = |n: i32| Identity::new(Identity::new(n.to_string()));
+
+            let left = monad.flat_map(function).flatten();
+            let right = monad.flat_map(|x| function(x).flatten());
+            assert_eq!(left, right);
+        }
+    }
+
+    // =========================================================================
     // Monad Law Tests (Unit Tests)
     // =========================================================================
 
@@ -986,7 +1320,7 @@ mod tests {
 #[cfg(test)]
 mod property_tests {
     use super::*;
-    use crate::typeclass::{Applicative, ApplicativeVec};
+    use crate::typeclass::{Applicative, ApplicativeVec, Flatten};
     use proptest::prelude::*;
 
     // =========================================================================
@@ -1111,6 +1445,67 @@ mod property_tests {
             let left: Vec<i32> = monad.clone().flat_map(function1).flat_map(function2);
             let right: Vec<i32> = monad.flat_map(|x| function1(x).flat_map(function2));
 
+            prop_assert_eq!(left, right);
+        }
+
+        // =====================================================================
+        // Flatten Trait Property Tests
+        // =====================================================================
+
+        // Flatten-FlatMap Equivalence: flatten() == flat_map(|x| x)
+
+        #[test]
+        fn prop_option_flatten_flatmap_equivalence(nested in any::<Option<Option<i32>>>()) {
+            prop_assert_eq!(nested.flatten(), nested.flat_map(|inner| inner));
+        }
+
+        #[test]
+        fn prop_result_flatten_flatmap_equivalence(
+            nested in prop::result::maybe_ok(
+                prop::result::maybe_ok(any::<i32>(), any::<String>()),
+                any::<String>()
+            )
+        ) {
+            prop_assert_eq!(nested.clone().flatten(), nested.flat_map(|inner| inner));
+        }
+
+        #[test]
+        fn prop_identity_flatten_flatmap_equivalence(value in any::<i32>()) {
+            let nested = Identity::new(Identity::new(value));
+            prop_assert_eq!(nested.flatten(), nested.flat_map(|inner| inner));
+        }
+
+        // Flatten Associativity: nested.flatten().flatten() == nested.flat_map(|m| m.flatten())
+
+        #[test]
+        fn prop_option_flatten_associativity(
+            triple_nested in any::<Option<Option<Option<i32>>>>()
+        ) {
+            let left = triple_nested.flatten().flatten();
+            let right = triple_nested.flat_map(|middle| middle.flatten());
+            prop_assert_eq!(left, right);
+        }
+
+        #[test]
+        fn prop_result_flatten_associativity(
+            triple_nested in prop::result::maybe_ok(
+                prop::result::maybe_ok(
+                    prop::result::maybe_ok(any::<i32>(), any::<String>()),
+                    any::<String>()
+                ),
+                any::<String>()
+            )
+        ) {
+            let left = triple_nested.clone().flatten().flatten();
+            let right = triple_nested.flat_map(|middle| middle.flatten());
+            prop_assert_eq!(left, right);
+        }
+
+        #[test]
+        fn prop_identity_flatten_associativity(value in any::<i32>()) {
+            let triple_nested = Identity::new(Identity::new(Identity::new(value)));
+            let left = triple_nested.flatten().flatten();
+            let right = triple_nested.flat_map(|middle| middle.flatten());
             prop_assert_eq!(left, right);
         }
     }

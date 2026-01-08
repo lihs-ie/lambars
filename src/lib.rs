@@ -40,6 +40,8 @@
 #![warn(clippy::nursery)]
 // Note: Disabling redundant_closure_for_method_calls due to clippy 0.1.92 panic bug
 #![allow(clippy::redundant_closure_for_method_calls)]
+// Note: proptest generates large arrays in property tests for nested types
+#![cfg_attr(test, allow(clippy::large_stack_arrays))]
 
 // Re-export paste crate for use in define_effect! macro
 #[doc(hidden)]
