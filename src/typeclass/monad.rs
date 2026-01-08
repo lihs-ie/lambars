@@ -889,9 +889,9 @@ mod tests {
         #[rstest]
         fn box_flatten_equals_flat_map_identity() {
             let nested: Box<Box<i32>> = Box::new(Box::new(42));
-            let nested_clone: Box<Box<i32>> = Box::new(Box::new(42));
             let flatten_result = nested.flatten();
-            let flat_map_result = nested_clone.flat_map(|inner| inner);
+            let nested: Box<Box<i32>> = Box::new(Box::new(42));
+            let flat_map_result = nested.flat_map(|inner| inner);
             assert_eq!(flatten_result, flat_map_result);
         }
 
@@ -928,9 +928,9 @@ mod tests {
         #[rstest]
         fn box_flatten_associativity() {
             let triple_nested: Box<Box<Box<i32>>> = Box::new(Box::new(Box::new(42)));
-            let triple_nested_clone: Box<Box<Box<i32>>> = Box::new(Box::new(Box::new(42)));
             let left = triple_nested.flatten().flatten();
-            let right = triple_nested_clone.flat_map(|middle| middle.flatten());
+            let triple_nested: Box<Box<Box<i32>>> = Box::new(Box::new(Box::new(42)));
+            let right = triple_nested.flat_map(|middle| middle.flatten());
             assert_eq!(left, right);
             assert_eq!(*left, 42);
         }
@@ -1002,11 +1002,10 @@ mod tests {
         #[rstest]
         fn box_flatten_with_flat_map_law() {
             let monad: Box<i32> = Box::new(42);
-            let monad_clone: Box<i32> = Box::new(42);
             let function = |n: i32| Box::new(Box::new(n.to_string()));
-
             let left = monad.flat_map(function).flatten();
-            let right = monad_clone.flat_map(|x| function(x).flatten());
+            let monad: Box<i32> = Box::new(42);
+            let right = monad.flat_map(|x| function(x).flatten());
             assert_eq!(left, right);
         }
 
@@ -1505,6 +1504,24 @@ mod property_tests {
         fn prop_identity_flatten_associativity(value in any::<i32>()) {
             let triple_nested = Identity::new(Identity::new(Identity::new(value)));
             let left = triple_nested.flatten().flatten();
+            let right = triple_nested.flat_map(|middle| middle.flatten());
+            prop_assert_eq!(left, right);
+        }
+
+        #[test]
+        fn prop_box_flatten_flatmap_equivalence(value in any::<i32>()) {
+            let nested: Box<Box<i32>> = Box::new(Box::new(value));
+            let flatten_result = nested.flatten();
+            let nested: Box<Box<i32>> = Box::new(Box::new(value));
+            let flat_map_result = nested.flat_map(|inner| inner);
+            prop_assert_eq!(flatten_result, flat_map_result);
+        }
+
+        #[test]
+        fn prop_box_flatten_associativity(value in any::<i32>()) {
+            let triple_nested: Box<Box<Box<i32>>> = Box::new(Box::new(Box::new(value)));
+            let left = triple_nested.flatten().flatten();
+            let triple_nested: Box<Box<Box<i32>>> = Box::new(Box::new(Box::new(value)));
             let right = triple_nested.flat_map(|middle| middle.flatten());
             prop_assert_eq!(left, right);
         }
