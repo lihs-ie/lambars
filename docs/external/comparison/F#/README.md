@@ -159,7 +159,15 @@ let computation = eff! {
 |----|---------|-------------|
 | `try ... with` | `MonadError::catch_error` | Catch and handle errors |
 | `raise` / `failwith` | `MonadError::throw_error` | Throw an error |
-| `Result.mapError` | `ExceptT::map_error` | Transform error type |
+| `Result.mapError` | `MonadErrorExt::map_error` | Transform error type |
+| (pattern match) | `MonadError::handle_error` | Convert error to success value |
+| (pattern match) | `MonadError::adapt_error` | Transform error in same type |
+| (pattern match) | `MonadError::recover` | Partial function recovery |
+| (pattern match) | `MonadError::recover_with_partial` | Monadic partial recovery |
+| (custom) | `MonadError::ensure` | Validate with predicate |
+| (custom) | `MonadError::ensure_or` | Validate with value-dependent error |
+| (custom) | `MonadError::redeem` | Transform both success and error |
+| (custom) | `MonadError::redeem_with` | Monadic redeem |
 
 ### Code Examples
 
@@ -192,7 +200,7 @@ let result: Result<i32, String> = Ok("42".to_string())
 #### F# Error Handling vs lambars MonadError
 
 ```fsharp
-// F#
+// F# - handle_error equivalent (convert error to success)
 let handleError result =
     match result with
     | Ok x -> Ok x
@@ -200,17 +208,68 @@ let handleError result =
 
 let recovered = Error "error" |> handleError
 // recovered = Ok 5
+
+// F# - adapt_error equivalent (add context)
+let adaptError result =
+    match result with
+    | Ok x -> Ok x
+    | Error e -> Error (sprintf "Context: %s" e)
+
+let adapted = Error "original" |> adaptError
+// adapted = Error "Context: original"
+
+// F# - ensure equivalent (validate with predicate)
+let ensurePositive result =
+    match result with
+    | Error e -> Error e
+    | Ok x when x > 0 -> Ok x
+    | Ok _ -> Error "Value must be positive"
+
+let validated = Ok 5 |> ensurePositive
+// validated = Ok 5
+
+// F# - redeem equivalent (transform both cases)
+let redeem result =
+    match result with
+    | Ok x -> Ok (sprintf "Success: %d" x)
+    | Error e -> Ok (sprintf "Error: %s" e)
+
+let redeemed = Ok 42 |> redeem
+// redeemed = Ok "Success: 42"
 ```
 
 ```rust
 // lambars
 use lambars::effect::MonadError;
 
+// handle_error - convert error to success value
 let failing: Result<i32, String> = Err("error".to_string());
-let recovered = <Result<i32, String>>::catch_error(failing, |e| {
-    Ok(e.len() as i32)
-});
+let recovered = <Result<i32, String>>::handle_error(failing, |e| e.len() as i32);
 // recovered = Ok(5)
+
+// adapt_error - add context to error
+let computation: Result<i32, String> = Err("original".to_string());
+let adapted = <Result<i32, String>>::adapt_error(
+    computation,
+    |e| format!("Context: {}", e)
+);
+// adapted = Err("Context: original")
+
+// ensure - validate with predicate
+let validated = <Result<i32, String>>::ensure(
+    Ok(5),
+    || "Value must be positive".to_string(),
+    |&x| x > 0
+);
+// validated = Ok(5)
+
+// redeem - transform both success and error
+let redeemed = <Result<i32, String>>::redeem(
+    Ok(42),
+    |e| format!("Error: {}", e),
+    |v| format!("Success: {}", v)
+);
+// redeemed = Ok("Success: 42")
 ```
 
 ---
