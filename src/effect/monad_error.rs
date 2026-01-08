@@ -47,10 +47,6 @@
 
 use crate::typeclass::Monad;
 
-// =============================================================================
-// MonadErrorExt Trait - Extension for error type transformation
-// =============================================================================
-
 /// Extension trait for error type transformation.
 ///
 /// This trait provides `map_error` which transforms the error type of a
@@ -59,29 +55,9 @@ use crate::typeclass::Monad;
 ///
 /// # Laws
 ///
-/// ## Identity Law
-///
-/// Mapping with the identity function returns the original computation:
-///
-/// ```text
-/// computation.map_error(|e| e) == computation
-/// ```
-///
-/// ## Composition Law
-///
-/// Two consecutive `map_error` calls are equivalent to composing the functions:
-///
-/// ```text
-/// computation.map_error(f).map_error(g) == computation.map_error(|e| g(f(e)))
-/// ```
-///
-/// ## Success Preservation Law
-///
-/// Success values are not affected by `map_error`:
-///
-/// ```text
-/// pure(a).map_error(f) == pure(a)
-/// ```
+/// - **Identity**: `computation.map_error(|e| e) == computation`
+/// - **Composition**: `computation.map_error(f).map_error(g) == computation.map_error(|e| g(f(e)))`
+/// - **Success Preservation**: `pure(a).map_error(f) == pure(a)`
 ///
 /// # Examples
 ///
@@ -100,41 +76,20 @@ pub trait MonadErrorExt<E> {
 
     /// Transforms the error type using the provided function.
     ///
-    /// This operation transforms errors of type `E` into errors of type `E2`.
-    /// Success values are not affected.
-    ///
-    /// # Arguments
-    ///
-    /// * `transform` - A function to transform the error. Must be a pure function
-    ///   (no side effects, same output for same input).
-    ///
-    /// # Returns
-    ///
-    /// A computation with the transformed error type.
-    ///
     /// # Errors
     ///
-    /// Returns `Err(E2)` if the original computation was an error, with the
-    /// error transformed by the provided function.
+    /// Returns `Err(E2)` if the original computation was an error.
     ///
     /// # Examples
     ///
     /// ```rust
     /// use lambars::effect::MonadErrorExt;
     ///
-    /// // Transform error type from i32 to String
     /// let computation: Result<i32, i32> = Err(404);
     /// let mapped: Result<i32, String> = computation.map_error(|code| {
     ///     format!("HTTP Error: {}", code)
     /// });
     /// assert_eq!(mapped, Err("HTTP Error: 404".to_string()));
-    ///
-    /// // Success values are preserved
-    /// let success: Result<i32, i32> = Ok(42);
-    /// let mapped: Result<i32, String> = success.map_error(|code| {
-    ///     format!("HTTP Error: {}", code)
-    /// });
-    /// assert_eq!(mapped, Ok(42));
     /// ```
     fn map_error<E2, F>(self, transform: F) -> Result<Self::Value, E2>
     where
@@ -158,35 +113,11 @@ impl<A, E> MonadErrorExt<E> for Result<A, E> {
 /// of type `E`. This is the core abstraction for error handling in
 /// a functional style.
 ///
-/// # Type Parameters
-///
-/// - `E`: The error type
-///
 /// # Laws
 ///
-/// ## Throw Catch Law
-///
-/// Catching a thrown error should apply the handler:
-///
-/// ```text
-/// catch_error(throw_error(e), handler) == handler(e)
-/// ```
-///
-/// ## Catch Pure Law
-///
-/// Catching when there's no error should return the original:
-///
-/// ```text
-/// catch_error(pure(a), handler) == pure(a)
-/// ```
-///
-/// ## Throw Short-Circuit Law
-///
-/// Throwing an error should short-circuit subsequent computations:
-///
-/// ```text
-/// throw_error(e).flat_map(f) == throw_error(e)
-/// ```
+/// - **Throw Catch**: `catch_error(throw_error(e), handler) == handler(e)`
+/// - **Catch Pure**: `catch_error(pure(a), handler) == pure(a)`
+/// - **Throw Short-Circuit**: `throw_error(e).flat_map(f) == throw_error(e)`
 ///
 /// # Examples
 ///
@@ -208,18 +139,6 @@ impl<A, E> MonadErrorExt<E> for Result<A, E> {
 pub trait MonadError<E>: Monad {
     /// Throws an error, short-circuiting the computation.
     ///
-    /// This creates a computation that represents a failure with
-    /// the given error value. Any subsequent `flat_map` operations
-    /// will be skipped.
-    ///
-    /// # Arguments
-    ///
-    /// * `error` - The error value to throw
-    ///
-    /// # Returns
-    ///
-    /// A computation representing the error.
-    ///
     /// # Examples
     ///
     /// ```rust
@@ -233,20 +152,6 @@ pub trait MonadError<E>: Monad {
         A: 'static;
 
     /// Catches an error and applies a handler to recover.
-    ///
-    /// If the computation fails with an error, the handler is applied
-    /// to the error to produce a recovery computation. If the computation
-    /// succeeds, the handler is not called.
-    ///
-    /// # Arguments
-    ///
-    /// * `computation` - The computation that might fail
-    /// * `handler` - A function that handles the error
-    ///
-    /// # Returns
-    ///
-    /// The original computation if successful, or the result of
-    /// applying the handler if it failed.
     ///
     /// # Examples
     ///
@@ -264,18 +169,6 @@ pub trait MonadError<E>: Monad {
 
     /// Converts a `Result` into this error-handling monad.
     ///
-    /// This is a convenience method for lifting a `Result` into
-    /// the monad. `Ok` values become successful computations,
-    /// and `Err` values become thrown errors.
-    ///
-    /// # Arguments
-    ///
-    /// * `result` - The Result to convert
-    ///
-    /// # Returns
-    ///
-    /// A computation representing the Result.
-    ///
     /// # Examples
     ///
     /// ```rust
@@ -283,9 +176,6 @@ pub trait MonadError<E>: Monad {
     ///
     /// let ok: Result<i32, String> = <Result<i32, String>>::from_result(Ok(42));
     /// assert_eq!(ok, Ok(42));
-    ///
-    /// let err: Result<i32, String> = <Result<i32, String>>::from_result(Err("fail".to_string()));
-    /// assert_eq!(err, Err("fail".to_string()));
     /// ```
     fn from_result<A>(result: Result<A, E>) -> Self::WithType<A>
     where
@@ -294,21 +184,7 @@ pub trait MonadError<E>: Monad {
 
     /// Returns a default computation if the original fails.
     ///
-    /// This is a simpler alternative to `catch_error` when you
-    /// just want to provide a fallback value without inspecting
-    /// the error.
-    ///
-    /// Note: This method is named `recover_with` to avoid collision with
-    /// the standard library's `Result::or_else` method.
-    ///
-    /// # Arguments
-    ///
-    /// * `computation` - The computation that might fail
-    /// * `default` - The fallback computation to use on error
-    ///
-    /// # Returns
-    ///
-    /// The original computation if successful, or the default if it failed.
+    /// Named `recover_with` to avoid collision with `Result::or_else`.
     ///
     /// # Examples
     ///
@@ -328,33 +204,19 @@ pub trait MonadError<E>: Monad {
 
     /// Transforms an error within the same error type.
     ///
-    /// This is similar to `map_error` but keeps the error type the same.
     /// Useful for adding context information to errors.
-    ///
-    /// # Arguments
-    ///
-    /// * `computation` - The computation that might fail
-    /// * `transform` - A function to transform the error. Must be a pure function
-    ///   (no side effects, same output for same input).
-    ///
-    /// # Returns
-    ///
-    /// The computation with the transformed error.
     ///
     /// # Examples
     ///
     /// ```rust
     /// use lambars::effect::MonadError;
     ///
-    /// fn read_config() -> Result<String, String> {
-    ///     Err("file not found".to_string())
-    /// }
-    ///
-    /// let result = <Result<String, String>>::adapt_error(
-    ///     read_config(),
+    /// let result: Result<i32, String> = Err("file not found".to_string());
+    /// let adapted = <Result<i32, String>>::adapt_error(
+    ///     result,
     ///     |error| format!("failed to read config: {}", error)
     /// );
-    /// assert_eq!(result, Err("failed to read config: file not found".to_string()));
+    /// assert_eq!(adapted, Err("failed to read config: file not found".to_string()));
     /// ```
     fn adapt_error<A, F>(computation: Self::WithType<A>, transform: F) -> Self::WithType<A>
     where
@@ -363,19 +225,7 @@ pub trait MonadError<E>: Monad {
 
     /// Converts an error to a success value.
     ///
-    /// If the computation fails, the handler is applied to the error
-    /// to produce a success value. This is different from `catch_error`
-    /// in that the handler returns a plain value, not a computation.
-    ///
-    /// # Arguments
-    ///
-    /// * `computation` - The computation that might fail
-    /// * `handler` - A function that converts the error to a success value.
-    ///   Must be a pure function (no side effects, same output for same input).
-    ///
-    /// # Returns
-    ///
-    /// The original value if successful, or the handler's result if it failed.
+    /// Unlike `catch_error`, the handler returns a plain value, not a computation.
     ///
     /// # Examples
     ///
@@ -393,20 +243,11 @@ pub trait MonadError<E>: Monad {
 
     /// Recovers from specific errors using a partial function.
     ///
-    /// The partial handler receives a reference to the error and returns
-    /// `Some(value)` if it can handle the error, or `None` if it cannot.
-    /// If `None` is returned, the original error is preserved.
+    /// Returns `Some(value)` if it can handle the error, `None` to preserve the original error.
     ///
-    /// # Arguments
-    ///
-    /// * `computation` - The computation that might fail
-    /// * `partial_handler` - A function that may handle the error.
-    ///   Must be a pure function (no side effects, same output for same input).
-    ///
-    /// # Returns
-    ///
-    /// The original value if successful, the handler's result if it matched,
-    /// or the original error if the handler returned `None`.
+    /// The handler receives a reference to the error (`&E`) rather than taking ownership.
+    /// This allows the original error to be preserved when the handler returns `None`,
+    /// without requiring additional trait bounds beyond what the implementation already requires.
     ///
     /// # Examples
     ///
@@ -414,10 +255,7 @@ pub trait MonadError<E>: Monad {
     /// use lambars::effect::MonadError;
     ///
     /// #[derive(Debug, Clone, PartialEq)]
-    /// enum AppError {
-    ///     NotFound,
-    ///     Unauthorized,
-    /// }
+    /// enum AppError { NotFound, Unauthorized }
     ///
     /// let not_found: Result<i32, AppError> = Err(AppError::NotFound);
     /// let recovered = <Result<i32, AppError>>::recover(not_found, |e| {
@@ -435,38 +273,22 @@ pub trait MonadError<E>: Monad {
 
     /// Recovers from specific errors using a partial function that returns a computation.
     ///
-    /// Similar to `recover`, but the handler returns a computation instead of a plain value.
-    ///
-    /// # Arguments
-    ///
-    /// * `computation` - The computation that might fail
-    /// * `partial_handler` - A function that may handle the error.
-    ///   Must be a pure function (no side effects, same output for same input).
-    ///
-    /// # Returns
-    ///
-    /// The original value if successful, the handler's computation if it matched,
-    /// or the original error if the handler returned `None`.
+    /// Like `recover`, the handler receives a reference to the error (`&E`)
+    /// to allow preserving the original error when returning `None`.
     ///
     /// # Examples
     ///
     /// ```rust
     /// use lambars::effect::MonadError;
     ///
-    /// fn fetch_from_database(key: &str) -> Result<String, String> {
+    /// fn fetch_from_database() -> Result<String, String> {
     ///     Ok("data from db".to_string())
     /// }
     ///
     /// let cache_result: Result<String, String> = Err("cache miss".to_string());
     /// let recovered = <Result<String, String>>::recover_with_partial(
     ///     cache_result,
-    ///     |error| {
-    ///         if error.contains("cache miss") {
-    ///             Some(fetch_from_database("user:1"))
-    ///         } else {
-    ///             None
-    ///         }
-    ///     }
+    ///     |error| if error.contains("cache miss") { Some(fetch_from_database()) } else { None }
     /// );
     /// assert_eq!(recovered, Ok("data from db".to_string()));
     /// ```
@@ -479,23 +301,6 @@ pub trait MonadError<E>: Monad {
         A: 'static;
 
     /// Ensures a condition holds for the success value.
-    ///
-    /// If the computation succeeds and the predicate returns `true`,
-    /// the value is returned. If the predicate returns `false`,
-    /// an error is generated using the error function.
-    ///
-    /// # Arguments
-    ///
-    /// * `computation` - The computation to validate
-    /// * `error` - A function to generate the error (lazily evaluated).
-    ///   Must be a pure function (no side effects, same output for same input).
-    /// * `predicate` - A function to test the value.
-    ///   Must be a pure function (no side effects, same output for same input).
-    ///
-    /// # Returns
-    ///
-    /// The original value if successful and predicate holds,
-    /// or an error if the predicate fails.
     ///
     /// # Examples
     ///
@@ -519,23 +324,10 @@ pub trait MonadError<E>: Monad {
         P: FnOnce(&A) -> bool,
         A: 'static;
 
-    /// Ensures a condition holds for the success value, with value-dependent error.
+    /// Like `ensure`, but the error function receives the failing value.
     ///
-    /// Similar to `ensure`, but the error function receives a reference to the value,
-    /// allowing the error message to include information about the failing value.
-    ///
-    /// # Arguments
-    ///
-    /// * `computation` - The computation to validate
-    /// * `error_fn` - A function to generate the error from the value reference.
-    ///   Must be a pure function (no side effects, same output for same input).
-    /// * `predicate` - A function to test the value.
-    ///   Must be a pure function (no side effects, same output for same input).
-    ///
-    /// # Returns
-    ///
-    /// The original value if successful and predicate holds,
-    /// or an error if the predicate fails.
+    /// The error function receives a reference to the value (`&A`)
+    /// to include it in the error message without requiring `Clone`.
     ///
     /// # Examples
     ///
@@ -564,21 +356,6 @@ pub trait MonadError<E>: Monad {
         A: 'static;
 
     /// Transforms both success and error values to the same type.
-    ///
-    /// This is useful when you want to convert a computation to a unified
-    /// result type, regardless of whether it succeeded or failed.
-    ///
-    /// # Arguments
-    ///
-    /// * `computation` - The computation to transform
-    /// * `recover` - A function to transform errors.
-    ///   Must be a pure function (no side effects, same output for same input).
-    /// * `transform` - A function to transform success values.
-    ///   Must be a pure function (no side effects, same output for same input).
-    ///
-    /// # Returns
-    ///
-    /// A successful computation containing the transformed value.
     ///
     /// # Examples
     ///
@@ -610,22 +387,7 @@ pub trait MonadError<E>: Monad {
         A: 'static,
         B: 'static;
 
-    /// Transforms both success and error values to computations.
-    ///
-    /// Similar to `redeem`, but the transformation functions return
-    /// computations instead of plain values.
-    ///
-    /// # Arguments
-    ///
-    /// * `computation` - The computation to transform
-    /// * `recover` - A function to transform errors into computations.
-    ///   Must be a pure function (no side effects, same output for same input).
-    /// * `bind` - A function to transform success values into computations.
-    ///   Must be a pure function (no side effects, same output for same input).
-    ///
-    /// # Returns
-    ///
-    /// The result of the appropriate transformation.
+    /// Like `redeem`, but the transformation functions return computations.
     ///
     /// # Examples
     ///
@@ -636,22 +398,12 @@ pub trait MonadError<E>: Monad {
     ///     <Result<i32, String>>::redeem_with(
     ///         result,
     ///         |e| Ok(format!("Handled error: {}", e)),
-    ///         |v| {
-    ///             if v > 100 {
-    ///                 Err("Value too large".to_string())
-    ///             } else {
-    ///                 Ok(format!("Processed: {}", v))
-    ///             }
-    ///         }
+    ///         |v| if v > 100 { Err("Value too large".to_string()) } else { Ok(format!("Processed: {}", v)) }
     ///     )
     /// }
     ///
     /// assert_eq!(process_result(Ok(42)), Ok("Processed: 42".to_string()));
     /// assert_eq!(process_result(Ok(200)), Err("Value too large".to_string()));
-    /// assert_eq!(
-    ///     process_result(Err("not found".to_string())),
-    ///     Ok("Handled error: not found".to_string())
-    /// );
     /// ```
     fn redeem_with<A, B, Recover, Bind>(
         computation: Self::WithType<A>,
@@ -664,10 +416,6 @@ pub trait MonadError<E>: Monad {
         A: 'static,
         B: 'static;
 }
-
-// =============================================================================
-// Result<T, E> Implementation
-// =============================================================================
 
 impl<T, E: Clone> MonadError<E> for Result<T, E> {
     fn throw_error<A>(error: E) -> Result<A, E>
@@ -682,10 +430,7 @@ impl<T, E: Clone> MonadError<E> for Result<T, E> {
         F: FnOnce(E) -> Result<A, E> + 'static,
         A: 'static,
     {
-        match computation {
-            Ok(value) => Ok(value),
-            Err(error) => handler(error),
-        }
+        computation.or_else(handler)
     }
 
     fn from_result<A>(result: Result<A, E>) -> Result<A, E>
@@ -716,10 +461,7 @@ impl<T, E: Clone> MonadError<E> for Result<T, E> {
         F: FnOnce(E) -> A,
         A: 'static,
     {
-        match computation {
-            Ok(value) => Ok(value),
-            Err(error) => Ok(handler(error)),
-        }
+        Ok(computation.unwrap_or_else(handler))
     }
 
     fn recover<A, F>(computation: Result<A, E>, partial_handler: F) -> Result<A, E>
@@ -785,10 +527,7 @@ impl<T, E: Clone> MonadError<E> for Result<T, E> {
         A: 'static,
         B: 'static,
     {
-        match computation {
-            Ok(value) => Ok(transform(value)),
-            Err(error) => Ok(recover(error)),
-        }
+        Ok(computation.map_or_else(recover, transform))
     }
 
     fn redeem_with<A, B, Recover, Bind>(
@@ -802,10 +541,7 @@ impl<T, E: Clone> MonadError<E> for Result<T, E> {
         A: 'static,
         B: 'static,
     {
-        match computation {
-            Ok(value) => bind(value),
-            Err(error) => recover(error),
-        }
+        computation.map_or_else(recover, bind)
     }
 }
 
@@ -815,31 +551,20 @@ mod tests {
     use crate::typeclass::Applicative;
     use rstest::rstest;
 
-    // =========================================================================
-    // Trait Definition Tests
-    // =========================================================================
-
     #[rstest]
     fn monad_error_trait_is_defined() {
-        // Just verify the trait exists and can be referenced
         fn assert_trait_exists<M: MonadError<String>>() {}
         let _ = assert_trait_exists::<Result<(), String>>;
     }
 
     #[rstest]
     fn monad_error_requires_monad() {
-        // MonadError should require Monad as a supertrait
         fn assert_monad<M: Monad>() {}
         fn assert_monad_error<M: MonadError<String>>() {
-            // If M implements MonadError, it must also implement Monad
             assert_monad::<M>();
         }
         let _ = assert_monad_error::<Result<(), String>>;
     }
-
-    // =========================================================================
-    // Result Implementation Tests
-    // =========================================================================
 
     #[rstest]
     fn result_throw_error_creates_err() {
@@ -891,10 +616,6 @@ mod tests {
         assert_eq!(result, Ok(42));
     }
 
-    // =========================================================================
-    // Law Tests
-    // =========================================================================
-
     #[rstest]
     fn result_throw_catch_law() {
         let error = "test".to_string();
@@ -932,10 +653,6 @@ mod tests {
         assert_eq!(left, right);
     }
 
-    // =========================================================================
-    // MonadErrorExt Tests
-    // =========================================================================
-
     #[rstest]
     fn monad_error_ext_trait_is_defined() {
         fn assert_trait_exists<E, T: MonadErrorExt<E>>() {}
@@ -958,10 +675,6 @@ mod tests {
         assert_eq!(mapped, Ok(42));
     }
 
-    // =========================================================================
-    // adapt_error Tests
-    // =========================================================================
-
     #[rstest]
     fn result_adapt_error_transforms_err() {
         let computation: Result<i32, String> = Err("file not found".to_string());
@@ -982,10 +695,6 @@ mod tests {
         });
         assert_eq!(adapted, Ok(42));
     }
-
-    // =========================================================================
-    // handle_error Tests
-    // =========================================================================
 
     #[rstest]
     fn result_handle_error_converts_err_to_ok() {
@@ -1008,10 +717,6 @@ mod tests {
         let handled = <Result<i32, String>>::handle_error(failing, |e| e.len() as i32);
         assert_eq!(handled, Ok(5));
     }
-
-    // =========================================================================
-    // recover Tests
-    // =========================================================================
 
     #[derive(Debug, Clone, PartialEq)]
     #[allow(dead_code)]
@@ -1047,10 +752,6 @@ mod tests {
         let recovered = <Result<i32, TestError>>::recover(success, |_| Some(0));
         assert_eq!(recovered, Ok(42));
     }
-
-    // =========================================================================
-    // recover_with_partial Tests
-    // =========================================================================
 
     #[rstest]
     fn result_recover_with_partial_matches_and_recovers() {
@@ -1096,10 +797,6 @@ mod tests {
         assert_eq!(recovered, Err("database error".to_string()));
     }
 
-    // =========================================================================
-    // ensure Tests
-    // =========================================================================
-
     #[rstest]
     fn result_ensure_passes_when_predicate_true() {
         let computation: Result<i32, String> = Ok(25);
@@ -1132,10 +829,6 @@ mod tests {
         );
         assert_eq!(ensured, Err("initial error".to_string()));
     }
-
-    // =========================================================================
-    // ensure_or Tests
-    // =========================================================================
 
     #[rstest]
     fn result_ensure_or_passes_when_predicate_true() {
@@ -1170,10 +863,6 @@ mod tests {
         assert_eq!(ensured, Err("initial error".to_string()));
     }
 
-    // =========================================================================
-    // redeem Tests
-    // =========================================================================
-
     #[rstest]
     fn result_redeem_transforms_ok() {
         let success: Result<i32, String> = Ok(42);
@@ -1195,10 +884,6 @@ mod tests {
         );
         assert_eq!(redeemed, Ok("Error: not found".to_string()));
     }
-
-    // =========================================================================
-    // redeem_with Tests
-    // =========================================================================
 
     #[rstest]
     fn result_redeem_with_transforms_ok() {
@@ -1239,11 +924,6 @@ mod tests {
         assert_eq!(redeemed, Err("Value too large".to_string()));
     }
 
-    // =========================================================================
-    // Law Tests for New Methods
-    // =========================================================================
-
-    // map_error Identity Law
     #[rstest]
     fn result_map_error_identity_law() {
         let computation: Result<i32, String> = Err("error".to_string());
@@ -1251,7 +931,6 @@ mod tests {
         assert_eq!(mapped, computation);
     }
 
-    // map_error Composition Law
     #[rstest]
     fn result_map_error_composition_law() {
         let computation: Result<i32, String> = Err("error".to_string());
@@ -1266,7 +945,6 @@ mod tests {
         assert_eq!(left, right);
     }
 
-    // map_error Success Preservation Law
     #[rstest]
     fn result_map_error_success_preservation_law() {
         let success: Result<i32, String> = Ok(42);
@@ -1274,7 +952,6 @@ mod tests {
         assert_eq!(mapped, success);
     }
 
-    // adapt_error Identity Law
     #[rstest]
     fn result_adapt_error_identity_law() {
         let computation: Result<i32, String> = Err("error".to_string());
@@ -1282,7 +959,6 @@ mod tests {
         assert_eq!(adapted, computation);
     }
 
-    // adapt_error Success Preservation Law
     #[rstest]
     fn result_adapt_error_success_preservation_law() {
         let success: Result<i32, String> = Ok(42);
@@ -1291,7 +967,6 @@ mod tests {
         assert_eq!(adapted, success);
     }
 
-    // handle_error Handle Throw Law
     #[rstest]
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     fn result_handle_error_handle_throw_law() {
@@ -1306,7 +981,6 @@ mod tests {
         assert_eq!(left, right);
     }
 
-    // handle_error Success Preservation Law
     #[rstest]
     fn result_handle_error_success_preservation_law() {
         let success: Result<i32, String> = Ok(42);
@@ -1314,7 +988,6 @@ mod tests {
         assert_eq!(handled, success);
     }
 
-    // recover Matching Law
     #[rstest]
     fn result_recover_matching_law() {
         let error = "error".to_string();
@@ -1328,7 +1001,6 @@ mod tests {
         assert_eq!(left, right);
     }
 
-    // recover Non-Matching Law
     #[rstest]
     fn result_recover_non_matching_law() {
         let error = "error".to_string();
@@ -1341,7 +1013,6 @@ mod tests {
         assert_eq!(left, right);
     }
 
-    // recover Success Preservation Law
     #[rstest]
     fn result_recover_success_preservation_law() {
         let success: Result<i32, String> = Ok(42);
@@ -1349,7 +1020,6 @@ mod tests {
         assert_eq!(recovered, success);
     }
 
-    // recover_with_partial Matching Law
     #[rstest]
     fn result_recover_with_partial_matching_law() {
         let error = "error".to_string();
@@ -1362,7 +1032,6 @@ mod tests {
         assert_eq!(left, recovery);
     }
 
-    // recover_with_partial Non-Matching Law
     #[rstest]
     fn result_recover_with_partial_non_matching_law() {
         let error = "error".to_string();
@@ -1375,7 +1044,6 @@ mod tests {
         assert_eq!(left, right);
     }
 
-    // ensure True Law
     #[rstest]
     fn result_ensure_true_law() {
         let value = 42;
@@ -1386,7 +1054,6 @@ mod tests {
         assert_eq!(ensured, success);
     }
 
-    // ensure False Law
     #[rstest]
     fn result_ensure_false_law() {
         let value = 42;
@@ -1398,7 +1065,6 @@ mod tests {
         assert_eq!(ensured, thrown);
     }
 
-    // ensure Error Passthrough Law
     #[rstest]
     fn result_ensure_error_passthrough_law() {
         let error1 = "error1".to_string();
@@ -1410,7 +1076,6 @@ mod tests {
         assert_eq!(ensured, original);
     }
 
-    // ensure_or True Law
     #[rstest]
     fn result_ensure_or_true_law() {
         let value = 42;
@@ -1421,7 +1086,6 @@ mod tests {
         assert_eq!(ensured, success);
     }
 
-    // ensure_or False Law
     #[rstest]
     fn result_ensure_or_false_law() {
         let value = 42;
@@ -1434,7 +1098,6 @@ mod tests {
         assert_eq!(ensured, thrown);
     }
 
-    // redeem Success Law
     #[rstest]
     fn result_redeem_success_law() {
         let value = 42;
@@ -1447,7 +1110,6 @@ mod tests {
         assert_eq!(redeemed, expected);
     }
 
-    // redeem Error Law
     #[rstest]
     fn result_redeem_error_law() {
         let error = "error".to_string();
@@ -1459,7 +1121,6 @@ mod tests {
         assert_eq!(redeemed, expected);
     }
 
-    // redeem_with Success Law
     #[rstest]
     fn result_redeem_with_success_law() {
         let value = 42;
@@ -1472,7 +1133,6 @@ mod tests {
         assert_eq!(redeemed, expected);
     }
 
-    // redeem_with Error Law
     #[rstest]
     fn result_redeem_with_error_law() {
         let error = "error".to_string();
@@ -1493,10 +1153,6 @@ mod property_tests {
     use proptest::prelude::*;
 
     proptest! {
-        // =====================================================================
-        // map_error Property Tests
-        // =====================================================================
-
         #[test]
         fn prop_map_error_identity(
             computation in prop::result::maybe_ok(any::<i32>(), any::<String>())
@@ -1524,10 +1180,6 @@ mod property_tests {
             prop_assert_eq!(mapped, success);
         }
 
-        // =====================================================================
-        // adapt_error Property Tests
-        // =====================================================================
-
         #[test]
         fn prop_adapt_error_identity(
             computation in prop::result::maybe_ok(any::<i32>(), any::<String>())
@@ -1542,10 +1194,6 @@ mod property_tests {
             let adapted = <Result<i32, String>>::adapt_error(success.clone(), |e| format!("context: {e}"));
             prop_assert_eq!(adapted, success);
         }
-
-        // =====================================================================
-        // handle_error Property Tests
-        // =====================================================================
 
         #[test]
         #[allow(clippy::large_stack_arrays)]
@@ -1566,10 +1214,6 @@ mod property_tests {
             let handled = <Result<i32, String>>::handle_error(success.clone(), |_| 0);
             prop_assert_eq!(handled, success);
         }
-
-        // =====================================================================
-        // recover Property Tests
-        // =====================================================================
 
         #[test]
         #[allow(clippy::large_stack_arrays)]
@@ -1600,10 +1244,6 @@ mod property_tests {
             prop_assert_eq!(recovered, success);
         }
 
-        // =====================================================================
-        // recover_with_partial Property Tests
-        // =====================================================================
-
         #[test]
         #[allow(clippy::large_stack_arrays)]
         fn prop_recover_with_partial_matching(error in any::<String>(), recovery_value in any::<i32>()) {
@@ -1625,10 +1265,6 @@ mod property_tests {
             let right: Result<i32, String> = <Result<i32, String>>::throw_error(error);
             prop_assert_eq!(left, right);
         }
-
-        // =====================================================================
-        // ensure Property Tests
-        // =====================================================================
 
         #[test]
         fn prop_ensure_true(value in any::<i32>()) {
@@ -1655,10 +1291,6 @@ mod property_tests {
             prop_assert_eq!(ensured, original);
         }
 
-        // =====================================================================
-        // ensure_or Property Tests
-        // =====================================================================
-
         #[test]
         fn prop_ensure_or_true(value in any::<i32>()) {
             let success: Result<i32, String> = Ok(value);
@@ -1677,10 +1309,6 @@ mod property_tests {
             let thrown: Result<i32, String> = <Result<i32, String>>::throw_error(format!("Invalid value: {value}"));
             prop_assert_eq!(ensured, thrown);
         }
-
-        // =====================================================================
-        // redeem Property Tests
-        // =====================================================================
 
         #[test]
         fn prop_redeem_success(value in any::<i32>()) {
@@ -1702,10 +1330,6 @@ mod property_tests {
             let expected: Result<String, String> = <Result<(), String>>::pure(recover(error));
             prop_assert_eq!(redeemed, expected);
         }
-
-        // =====================================================================
-        // redeem_with Property Tests
-        // =====================================================================
 
         #[test]
         fn prop_redeem_with_success(value in any::<i32>()) {

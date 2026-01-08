@@ -1,0 +1,1247 @@
+# MonadError エラーハンドリング強化 要件定義
+#
+# 概要:
+#   MonadError トレイトに実用的なエラーハンドリング操作を追加する。
+#   Scala cats の MonadError/ApplicativeError および Rust anyhow を参考に、
+#   関数型プログラミングの原則に従った型安全なエラーハンドリング API を提供する。
+#
+# 設計方針:
+#   1. 参照透過性を維持し、全ての操作を純粋関数として設計する
+#   2. エラー型の変換は型安全に行い、コンパイル時に検証可能とする
+#   3. 既存の MonadError トレイトとの後方互換性を維持する
+#   4. Scala cats の設計パターンを Rust の型システムに適合させる
+#   5. ハンドラ関数は純粋関数であることを前提とする（副作用は future_extensions で対応）
+#
+# 参照:
+#   - GitHub Issue #16: https://github.com/lihs-ie/lambars/issues/16
+#   - Scala cats MonadError: https://typelevel.org/cats/typeclasses/applicativemonaderror.html
+#   - Rust anyhow: https://docs.rs/anyhow/
+
+version: "1.0.0"
+name: "Enhanced Error Handling for MonadError"
+description: |
+  MonadError トレイトの機能を拡張し、実用的なエラーハンドリングパターンを提供する。
+
+  現在の MonadError は以下の基本操作のみを提供している:
+  - throw_error: エラーを発生させる
+  - catch_error: エラーをキャッチしてリカバリする
+  - from_result: Result を MonadError に変換する
+  - recover_with: エラー時にデフォルトの計算結果を返す
+
+  これらに加えて、以下の操作を追加する:
+  - map_error: エラー型を変換する（拡張トレイト MonadErrorExt として提供）
+  - adapt_error: エラーに文脈情報を追加する（エラー変換）
+  - handle_error: エラーを成功値に変換する
+  - recover: 部分関数によるエラーリカバリ
+  - ensure: 条件検証（条件を満たさない場合にエラー）
+  - ensure_or: 条件検証（値の参照に基づくエラー生成）
+  - redeem: 成功/失敗の両方を変換する
+  - redeem_with: 成功/失敗の両方をモナディックに変換する
+
+  純粋性の前提:
+  全てのハンドラ関数（handler, transform, predicate など）は純粋関数であることを
+  前提とする。副作用を伴うエラー処理（ログ出力など）は future_extensions の
+  on_error で対応予定。
+
+# 背景・動機
+background:
+  problem: |
+    現在の MonadError は基本的なエラーハンドリング操作のみを提供しており、
+    実用的なアプリケーション開発において以下の機能が不足している:
+
+    1. エラーの文脈情報追加:
+       エラーが発生した際に「どこで」「なぜ」発生したかの情報を追加できない。
+       例: "file not found" -> "failed to read config: file not found"
+
+    2. エラー型の変換:
+       異なるエラー型を持つ計算を合成する際、エラー型の変換が煩雑。
+       現状は手動で catch_error と throw_error を組み合わせる必要がある。
+
+    3. 条件検証:
+       値が条件を満たすことを検証し、満たさない場合にエラーを発生させる
+       パターンが頻出するが、専用の操作がない。
+
+    4. 統一的なエラー処理:
+       成功時と失敗時で異なる変換を行うパターン（redeem）が頻出するが、
+       現状は attempt + map の組み合わせで記述する必要がある。
+
+  motivation: |
+    関数型プログラミングにおいて、エラーハンドリングは以下の原則に従うべきである:
+
+    1. 合成可能性: エラーハンドリング操作は他の操作と自然に合成できるべき
+    2. 型安全性: エラーの可能性は型シグネチャで明示されるべき
+    3. 参照透過性: エラーハンドリング操作は副作用を持たないべき
+
+    Scala cats の MonadError/ApplicativeError は、これらの原則に従った
+    豊富なエラーハンドリング操作を提供しており、Rust でも同様の
+    操作を提供することで、より表現力の高いエラーハンドリングが可能になる。
+
+  prior_art:
+    - name: "Scala cats MonadError/ApplicativeError"
+      description: |
+        Scala cats は MonadError と ApplicativeError を提供し、
+        以下のメソッドを含む豊富なエラーハンドリング API を提供する:
+        - handleError / handleErrorWith: エラーを成功値/計算に変換
+        - recover / recoverWith: 部分関数によるリカバリ
+        - adaptError: エラー型の変換（部分関数）
+        - ensure / ensureOr: 条件検証
+        - redeem / redeemWith: 成功/失敗の統一処理
+        - attempt: Either への変換
+        - rethrow: Either からの復元
+
+    - name: "Rust anyhow"
+      description: |
+        anyhow は Rust でのエラーハンドリングを簡素化するライブラリ:
+        - context() / with_context(): エラーに文脈情報を追加
+        - ensure!: 条件検証マクロ
+        - downcast_ref(): エラー型の取得
+        - Error trait: 全てのエラーを統一的に扱う
+
+    - name: "Haskell Control.Monad.Except"
+      description: |
+        Haskell の MonadError は以下の操作を提供:
+        - throwError: エラーを発生
+        - catchError: エラーをキャッチ
+        - liftEither: Either からの変換
+        - mapError: エラー型の変換（mtl-2.3以降）
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. map_error - エラー型の変換（拡張トレイトとして提供）
+  # ======================================================================
+  - id: map_error
+    name: "map_error - エラー型の変換"
+    description: |
+      エラー型を別の型に変換する操作。成功値は変更されない。
+
+      この操作は Result::map_err に相当し、エラーの型を変換しつつ
+      成功値はそのまま保持する。異なるエラー型を持つ計算を
+      統一的なエラー型で扱う場合に使用する。
+
+      型安全性: 変換関数 E -> E2 を受け取り、戻り値の型が異なるため、
+      MonadError トレイトではなく拡張トレイト MonadErrorExt として提供する。
+      これにより Rust の型システムとの整合性を保つ。
+
+    laws:
+      - name: "Identity Law"
+        description: |
+          恒等関数で変換した場合、元の値と等しい
+        equation: "map_error(computation, |e| e) == computation"
+        property_test: |
+          // Result<A, E> に対して直接テスト
+          fn prop_map_error_identity(computation: Result<i32, String>) -> bool {
+              let mapped = computation.clone().map_error(|e| e);
+              mapped == computation
+          }
+
+      - name: "Composition Law"
+        description: |
+          2回の map_error は、関数合成した1回の map_error と等しい
+        equation: "map_error(map_error(fa, f), g) == map_error(fa, g . f)"
+        property_test: |
+          fn prop_map_error_composition(
+              computation: Result<i32, String>,
+              f: fn(String) -> String,
+              g: fn(String) -> String,
+          ) -> bool {
+              let left = computation.clone().map_error(f).map_error(g);
+              let right = computation.map_error(|e| g(f(e)));
+              left == right
+          }
+
+      - name: "Success Preservation Law"
+        description: |
+          成功値に対して map_error を適用しても値は変わらない
+        equation: "map_error(pure(a), f) == pure(a)"
+        property_test: |
+          fn prop_map_error_preserves_success(a: i32) -> bool {
+              let success: Result<i32, String> = Ok(a);
+              let mapped: Result<i32, String> = success.clone().map_error(|e| format!("wrapped: {}", e));
+              // 型が同じになるように修正（String -> String）
+              mapped == success
+          }
+
+    methods:
+      - name: "map_error"
+        signature: |
+          // MonadErrorExt トレイトとして提供
+          pub trait MonadErrorExt<E> {
+              type Value;
+
+              fn map_error<E2, F>(self, transform: F) -> Result<Self::Value, E2>
+              where
+                  F: FnOnce(E) -> E2;
+          }
+
+          impl<A, E> MonadErrorExt<E> for Result<A, E> {
+              type Value = A;
+
+              fn map_error<E2, F>(self, transform: F) -> Result<A, E2>
+              where
+                  F: FnOnce(E) -> E2
+              {
+                  self.map_err(transform)
+              }
+          }
+        description: |
+          エラー型を E から E2 に変換する。成功値は変更されない。
+
+          MonadError トレイトの一部ではなく、拡張トレイト MonadErrorExt として
+          提供する。これは Rust の型システムにおいて、トレイトメソッドの
+          戻り値型を動的に変更できないためである。
+
+          ハンドラ関数は純粋関数であること:
+          transform 関数は副作用を持たず、同じ入力に対して常に同じ出力を返すべき。
+        examples:
+          - description: "エラー型の変換"
+            code: |
+              use lambars::effect::MonadErrorExt;
+
+              // i32 エラーを String エラーに変換
+              let computation: Result<i32, i32> = Err(404);
+              let mapped: Result<i32, String> = computation.map_error(|code| {
+                  format!("HTTP Error: {}", code)
+              });
+              assert_eq!(mapped, Err("HTTP Error: 404".to_string()));
+
+              // 成功値は変わらない
+              let success: Result<i32, i32> = Ok(42);
+              let mapped: Result<i32, String> = success.map_error(|code| {
+                  format!("HTTP Error: {}", code)
+              });
+              assert_eq!(mapped, Ok(42));
+
+    implementations:
+      - type: "Result<T, E>"
+        description: |
+          Result::map_err を使用して実装する。
+          ```rust
+          impl<A, E> MonadErrorExt<E> for Result<A, E> {
+              type Value = A;
+
+              fn map_error<E2, F>(self, transform: F) -> Result<A, E2>
+              where
+                  F: FnOnce(E) -> E2
+              {
+                  self.map_err(transform)
+              }
+          }
+          ```
+
+  # ======================================================================
+  # 2. adapt_error - エラーに文脈情報を追加
+  # ======================================================================
+  - id: adapt_error
+    name: "adapt_error - エラーに文脈情報を追加"
+    description: |
+      エラーを変換する操作。map_error と似ているが、同じエラー型内での
+      変換に特化している。Scala cats の adaptError に相当する。
+
+      主な用途は、エラーに文脈情報を追加すること:
+      - "file not found" -> "failed to read config: file not found"
+      - DatabaseError { message } -> DatabaseError { message, context: "user lookup" }
+
+      anyhow の context() / with_context() と同様の機能を提供する。
+
+    laws:
+      - name: "Identity Law"
+        description: |
+          恒等関数で変換した場合、元の値と等しい
+        equation: "adapt_error(computation, |e| e) == computation"
+        property_test: |
+          fn prop_adapt_error_identity<M: MonadError<String>>(
+              computation: M::WithType<i32>
+          ) -> bool
+          where M::WithType<i32>: Clone + PartialEq
+          {
+              let adapted = M::adapt_error(computation.clone(), |e| e);
+              adapted == computation
+          }
+
+      - name: "Success Preservation Law"
+        description: |
+          成功値に対して adapt_error を適用しても値は変わらない
+        equation: "adapt_error(pure(a), f) == pure(a)"
+        property_test: |
+          fn prop_adapt_error_preserves_success<M: MonadError<String>>(a: i32) -> bool
+          where M::WithType<i32>: Clone + PartialEq
+          {
+              let success: M::WithType<i32> = M::pure(a);
+              let adapted = M::adapt_error(success.clone(), |e| format!("context: {}", e));
+              adapted == success
+          }
+
+    methods:
+      - name: "adapt_error"
+        signature: |
+          fn adapt_error<A, F>(
+              computation: Self::WithType<A>,
+              transform: F
+          ) -> Self::WithType<A>
+          where
+              F: FnOnce(E) -> E,
+              A: 'static;
+        description: |
+          エラーを同じ型内で変換する。文脈情報の追加などに使用する。
+          map_error の特殊ケースで、エラー型を変えない変換。
+
+          ハンドラ関数は純粋関数であること:
+          transform 関数は副作用を持たず、同じ入力に対して常に同じ出力を返すべき。
+        examples:
+          - description: "エラーに文脈を追加"
+            code: |
+              use lambars::effect::MonadError;
+
+              fn read_config() -> Result<String, String> {
+                  Err("file not found".to_string())
+              }
+
+              let result = <Result<String, String>>::adapt_error(
+                  read_config(),
+                  |error| format!("failed to read config: {}", error)
+              );
+              assert_eq!(result, Err("failed to read config: file not found".to_string()));
+
+    implementations:
+      - type: "Result<T, E>"
+        description: |
+          map_err を使用して実装する。catch_error + throw_error の最適化版。
+
+  # ======================================================================
+  # 3. handle_error - エラーを成功値に変換
+  # ======================================================================
+  - id: handle_error
+    name: "handle_error - エラーを成功値に変換"
+    description: |
+      エラーを成功値に変換する操作。catch_error と異なり、
+      変換関数は直接成功値を返す（モナドにラップしない）。
+
+      Scala cats の handleError に相当する。
+
+    laws:
+      - name: "Handle Throw Law"
+        description: |
+          throw_error したエラーを handle_error で処理すると、
+          handler の結果が成功値として返る
+        equation: "handle_error(throw_error(e), handler) == pure(handler(e))"
+        property_test: |
+          fn prop_handle_throw<M: MonadError<String>>(error: String) -> bool
+          where M::WithType<i32>: PartialEq
+          {
+              let handler = |e: String| e.len() as i32;
+              let left = M::handle_error(M::throw_error::<i32>(error.clone()), handler);
+              let right: M::WithType<i32> = M::pure(handler(error));
+              left == right
+          }
+
+      - name: "Success Preservation Law"
+        description: |
+          成功値に対して handle_error を適用しても値は変わらない
+        equation: "handle_error(pure(a), handler) == pure(a)"
+        property_test: |
+          fn prop_handle_preserves_success<M: MonadError<String>>(a: i32) -> bool
+          where M::WithType<i32>: Clone + PartialEq
+          {
+              let success: M::WithType<i32> = M::pure(a);
+              let handled = M::handle_error(success.clone(), |_| 0);
+              handled == success
+          }
+
+    methods:
+      - name: "handle_error"
+        signature: |
+          fn handle_error<A, F>(
+              computation: Self::WithType<A>,
+              handler: F
+          ) -> Self::WithType<A>
+          where
+              F: FnOnce(E) -> A,
+              A: 'static;
+        description: |
+          エラーを成功値に変換する。catch_error の特殊ケースで、
+          handler が直接成功値を返す。
+
+          handle_error(fa, f) == catch_error(fa, |e| pure(f(e)))
+
+          ハンドラ関数は純粋関数であること:
+          handler 関数は副作用を持たず、同じ入力に対して常に同じ出力を返すべき。
+        examples:
+          - description: "エラーをデフォルト値に変換"
+            code: |
+              use lambars::effect::MonadError;
+
+              let failing: Result<i32, String> = Err("error".to_string());
+              let handled = <Result<i32, String>>::handle_error(failing, |_| 0);
+              assert_eq!(handled, Ok(0));
+
+              let success: Result<i32, String> = Ok(42);
+              let handled = <Result<i32, String>>::handle_error(success, |_| 0);
+              assert_eq!(handled, Ok(42));
+
+    implementations:
+      - type: "Result<T, E>"
+        description: |
+          match 式で実装する。Err の場合は handler を適用して Ok でラップ。
+
+  # ======================================================================
+  # 4. recover - 部分関数によるエラーリカバリ
+  # ======================================================================
+  - id: recover
+    name: "recover - 部分関数によるエラーリカバリ"
+    description: |
+      特定のエラーのみをリカバリする操作。リカバリ関数が Some を返した場合のみ
+      リカバリを行い、None を返した場合は元のエラーを保持する。
+
+      Scala cats の recover に相当する。Scala では PartialFunction を使用するが、
+      Rust では Option<A> を返す関数として表現する。
+
+      Rust の所有権システムとの整合性:
+      partial_handler はエラーの参照を受け取る（&E）。これにより、
+      None を返した場合でも元のエラー（所有権あり）をそのまま保持できる。
+      E: Clone 制約は不要。
+
+    laws:
+      - name: "Recover Matching Law"
+        description: |
+          リカバリ関数がマッチした場合、その値でリカバリされる
+        equation: "recover(throw_error(e), |_| Some(a)) == pure(a)"
+        property_test: |
+          fn prop_recover_matching<M: MonadError<String>>(error: String, value: i32) -> bool
+          where M::WithType<i32>: PartialEq
+          {
+              let left = M::recover(M::throw_error::<i32>(error), |_| Some(value));
+              let right: M::WithType<i32> = M::pure(value);
+              left == right
+          }
+
+      - name: "Recover Non-Matching Law"
+        description: |
+          リカバリ関数がマッチしなかった場合、元のエラーが保持される
+        equation: "recover(throw_error(e), |_| None) == throw_error(e)"
+        property_test: |
+          fn prop_recover_non_matching<M: MonadError<String>>(error: String) -> bool
+          where M::WithType<i32>: PartialEq, String: Clone
+          {
+              let left: M::WithType<i32> = M::recover(M::throw_error(error.clone()), |_| None);
+              let right: M::WithType<i32> = M::throw_error(error);
+              left == right
+          }
+
+      - name: "Success Preservation Law"
+        description: |
+          成功値に対して recover を適用しても値は変わらない
+        equation: "recover(pure(a), f) == pure(a)"
+        property_test: |
+          fn prop_recover_preserves_success<M: MonadError<String>>(a: i32) -> bool
+          where M::WithType<i32>: Clone + PartialEq
+          {
+              let success: M::WithType<i32> = M::pure(a);
+              let recovered = M::recover(success.clone(), |_| Some(0));
+              recovered == success
+          }
+
+    methods:
+      - name: "recover"
+        signature: |
+          fn recover<A, F>(
+              computation: Self::WithType<A>,
+              partial_handler: F
+          ) -> Self::WithType<A>
+          where
+              F: FnOnce(&E) -> Option<A>,
+              A: 'static;
+        description: |
+          特定のエラーのみをリカバリする。partial_handler が Some(a) を返した場合は
+          その値でリカバリし、None を返した場合は元のエラーを保持する。
+
+          partial_handler はエラーの参照を受け取る（&E）。これにより、
+          None を返した場合でも元のエラー（所有権あり）をそのまま保持できる。
+          E: Clone 制約は不要。
+
+          ハンドラ関数は純粋関数であること:
+          partial_handler 関数は副作用を持たず、同じ入力に対して常に同じ出力を返すべき。
+        examples:
+          - description: "特定のエラーコードのみリカバリ"
+            code: |
+              use lambars::effect::MonadError;
+
+              #[derive(Debug, Clone, PartialEq)]
+              enum AppError {
+                  NotFound,
+                  Unauthorized,
+                  Internal(String),
+              }
+
+              let not_found: Result<i32, AppError> = Err(AppError::NotFound);
+
+              // NotFound のみリカバリ（参照を受け取る）
+              let recovered = <Result<i32, AppError>>::recover(not_found, |e| {
+                  match e {
+                      AppError::NotFound => Some(0),  // デフォルト値でリカバリ
+                      _ => None,  // その他のエラーは保持
+                  }
+              });
+              assert_eq!(recovered, Ok(0));
+
+              // Unauthorized はリカバリされない
+              let unauthorized: Result<i32, AppError> = Err(AppError::Unauthorized);
+              let not_recovered = <Result<i32, AppError>>::recover(unauthorized, |e| {
+                  match e {
+                      AppError::NotFound => Some(0),
+                      _ => None,
+                  }
+              });
+              assert_eq!(not_recovered, Err(AppError::Unauthorized));
+
+    implementations:
+      - type: "Result<T, E>"
+        description: |
+          match 式で実装。Err の場合は partial_handler にエラーの参照を渡し、
+          Some なら Ok でラップ、None なら元の Err をそのまま返す。
+          ```rust
+          fn recover<A, F>(self, partial_handler: F) -> Result<A, E>
+          where
+              F: FnOnce(&E) -> Option<A>,
+          {
+              match self {
+                  Ok(a) => Ok(a),
+                  Err(e) => match partial_handler(&e) {
+                      Some(a) => Ok(a),
+                      None => Err(e),  // e は所有されているのでそのまま使える
+                  }
+              }
+          }
+          ```
+
+  # ======================================================================
+  # 5. recover_with_partial - モナディックな部分関数によるエラーリカバリ
+  # ======================================================================
+  - id: recover_with_partial
+    name: "recover_with_partial - モナディックな部分関数によるエラーリカバリ"
+    description: |
+      特定のエラーのみをモナディックにリカバリする操作。
+      リカバリ関数が Some(M::WithType<A>) を返した場合のみリカバリを行う。
+
+      Scala cats の recoverWith に相当する。
+
+      注意: 既存の recover_with メソッドは全てのエラーに対して
+      デフォルト計算を適用するが、この操作は部分的なリカバリを行う。
+      名前の衝突を避けるため、recover_with_partial として追加する。
+
+      Rust の所有権システムとの整合性:
+      recover と同様に partial_handler はエラーの参照を受け取る（&E）。
+      E: Clone 制約は不要。
+
+    laws:
+      - name: "RecoverWith Matching Law"
+        description: |
+          リカバリ関数がマッチした場合、その計算結果でリカバリされる
+        equation: "recover_with_partial(throw_error(e), |_| Some(ma)) == ma"
+        property_test: |
+          fn prop_recover_with_matching<M: MonadError<String>>(
+              error: String,
+              recovery: M::WithType<i32>
+          ) -> bool
+          where M::WithType<i32>: Clone + PartialEq
+          {
+              let left = M::recover_with_partial(
+                  M::throw_error::<i32>(error),
+                  |_| Some(recovery.clone())
+              );
+              left == recovery
+          }
+
+      - name: "RecoverWith Non-Matching Law"
+        description: |
+          リカバリ関数がマッチしなかった場合、元のエラーが保持される
+        equation: "recover_with_partial(throw_error(e), |_| None) == throw_error(e)"
+        property_test: |
+          fn prop_recover_with_non_matching<M: MonadError<String>>(error: String) -> bool
+          where M::WithType<i32>: PartialEq, String: Clone
+          {
+              let left: M::WithType<i32> = M::recover_with_partial(
+                  M::throw_error(error.clone()),
+                  |_| None
+              );
+              let right: M::WithType<i32> = M::throw_error(error);
+              left == right
+          }
+
+    methods:
+      - name: "recover_with_partial"
+        signature: |
+          fn recover_with_partial<A, F>(
+              computation: Self::WithType<A>,
+              partial_handler: F
+          ) -> Self::WithType<A>
+          where
+              F: FnOnce(&E) -> Option<Self::WithType<A>>,
+              A: 'static;
+        description: |
+          特定のエラーのみをモナディックにリカバリする。
+          partial_handler が Some(ma) を返した場合はその計算結果でリカバリし、
+          None を返した場合は元のエラーを保持する。
+
+          partial_handler はエラーの参照を受け取る（&E）。
+          E: Clone 制約は不要。
+
+          ハンドラ関数は純粋関数であること:
+          partial_handler 関数は副作用を持たず、同じ入力に対して常に同じ出力を返すべき。
+        examples:
+          - description: "特定のエラーをモナディックにリカバリ"
+            code: |
+              use lambars::effect::MonadError;
+
+              fn fetch_from_cache(key: &str) -> Result<String, String> {
+                  Err("cache miss".to_string())
+              }
+
+              fn fetch_from_database(key: &str) -> Result<String, String> {
+                  Ok("data from db".to_string())
+              }
+
+              let cache_result = fetch_from_cache("user:1");
+
+              // キャッシュミスの場合のみDBから取得（参照を受け取る）
+              let recovered = <Result<String, String>>::recover_with_partial(
+                  cache_result,
+                  |error| {
+                      if error.contains("cache miss") {
+                          Some(fetch_from_database("user:1"))
+                      } else {
+                          None
+                      }
+                  }
+              );
+              assert_eq!(recovered, Ok("data from db".to_string()));
+
+    implementations:
+      - type: "Result<T, E>"
+        description: |
+          match 式で実装。Err の場合は partial_handler にエラーの参照を渡し、
+          Some(result) ならその result を返し、None なら元の Err をそのまま返す。
+          ```rust
+          fn recover_with_partial<A, F>(self, partial_handler: F) -> Result<A, E>
+          where
+              F: FnOnce(&E) -> Option<Result<A, E>>,
+          {
+              match self {
+                  Ok(a) => Ok(a),
+                  Err(e) => match partial_handler(&e) {
+                      Some(result) => result,
+                      None => Err(e),  // e は所有されているのでそのまま使える
+                  }
+              }
+          }
+          ```
+
+  # ======================================================================
+  # 6. ensure - 条件検証
+  # ======================================================================
+  - id: ensure
+    name: "ensure - 条件検証"
+    description: |
+      成功値が条件を満たすことを検証する操作。条件を満たさない場合は
+      指定されたエラーを発生させる。
+
+      Scala cats の ensure および Rust anyhow の ensure! マクロに相当する。
+
+    laws:
+      - name: "Ensure True Law"
+        description: |
+          条件が true の場合、元の値がそのまま返る
+        equation: "ensure(pure(a), || error, |_| true) == pure(a)"
+        property_test: |
+          fn prop_ensure_true<M: MonadError<String>>(a: i32) -> bool
+          where M::WithType<i32>: Clone + PartialEq
+          {
+              let success: M::WithType<i32> = M::pure(a);
+              let ensured = M::ensure(success.clone(), || "error".to_string(), |_| true);
+              ensured == success
+          }
+
+      - name: "Ensure False Law"
+        description: |
+          条件が false の場合、エラーが発生する
+        equation: "ensure(pure(a), || error, |_| false) == throw_error(error)"
+        property_test: |
+          fn prop_ensure_false<M: MonadError<String>>(a: i32, error: String) -> bool
+          where M::WithType<i32>: PartialEq, String: Clone
+          {
+              let success: M::WithType<i32> = M::pure(a);
+              let ensured = M::ensure(success, || error.clone(), |_| false);
+              let thrown: M::WithType<i32> = M::throw_error(error);
+              ensured == thrown
+          }
+
+      - name: "Ensure Error Passthrough Law"
+        description: |
+          既にエラーの場合、条件は評価されずエラーがそのまま返る
+        equation: "ensure(throw_error(e1), || e2, pred) == throw_error(e1)"
+        property_test: |
+          fn prop_ensure_error_passthrough<M: MonadError<String>>(
+              error1: String,
+              error2: String
+          ) -> bool
+          where M::WithType<i32>: PartialEq, String: Clone
+          {
+              let thrown: M::WithType<i32> = M::throw_error(error1.clone());
+              let ensured = M::ensure(thrown, || error2, |_| false);
+              let original: M::WithType<i32> = M::throw_error(error1);
+              ensured == original
+          }
+
+    methods:
+      - name: "ensure"
+        signature: |
+          fn ensure<A, F, P>(
+              computation: Self::WithType<A>,
+              error: F,
+              predicate: P
+          ) -> Self::WithType<A>
+          where
+              F: FnOnce() -> E,
+              P: FnOnce(&A) -> bool,
+              A: 'static;
+        description: |
+          成功値が条件を満たすことを検証する。
+          predicate が true を返した場合は元の値を返し、
+          false を返した場合は error() で生成したエラーを発生させる。
+
+          error は遅延評価され、条件が false の場合のみ評価される。
+
+          ハンドラ関数は純粋関数であること:
+          error および predicate 関数は副作用を持たず、同じ入力に対して常に同じ出力を返すべき。
+        examples:
+          - description: "値の範囲検証"
+            code: |
+              use lambars::effect::MonadError;
+
+              fn validate_age(age: i32) -> Result<i32, String> {
+                  <Result<i32, String>>::ensure(
+                      Ok(age),
+                      || "Age must be between 0 and 150".to_string(),
+                      |&a| a >= 0 && a <= 150
+                  )
+              }
+
+              assert_eq!(validate_age(25), Ok(25));
+              assert_eq!(validate_age(-5), Err("Age must be between 0 and 150".to_string()));
+              assert_eq!(validate_age(200), Err("Age must be between 0 and 150".to_string()));
+
+    implementations:
+      - type: "Result<T, E>"
+        description: |
+          flat_map を使用して実装:
+          ```rust
+          computation.flat_map(|a| {
+              if predicate(&a) {
+                  Ok(a)
+              } else {
+                  Err(error())
+              }
+          })
+          ```
+
+  # ======================================================================
+  # 7. ensure_or - 値の参照に基づくエラー生成での条件検証
+  # ======================================================================
+  - id: ensure_or
+    name: "ensure_or - 値の参照に基づくエラー生成での条件検証"
+    description: |
+      ensure の変種で、エラー生成関数が成功値の参照を受け取る。
+      これにより、検証に失敗した値をエラーメッセージに含められる。
+
+      Scala cats の ensureOr に相当する。
+
+      Rust の所有権システムとの整合性:
+      error_fn は値の参照（&A）を受け取るため、A: Clone 制約は不要。
+      これにより、所有権を移動せずにエラーメッセージに値の情報を含められる。
+
+    laws:
+      - name: "EnsureOr True Law"
+        description: |
+          条件が true の場合、元の値がそのまま返る
+        equation: "ensure_or(pure(a), |_| error, |_| true) == pure(a)"
+        property_test: |
+          fn prop_ensure_or_true<M: MonadError<String>>(a: i32) -> bool
+          where M::WithType<i32>: Clone + PartialEq
+          {
+              let success: M::WithType<i32> = M::pure(a);
+              let ensured = M::ensure_or(success.clone(), |_| "error".to_string(), |_| true);
+              ensured == success
+          }
+
+      - name: "EnsureOr False Law"
+        description: |
+          条件が false の場合、値の参照を使ってエラーが生成される
+        equation: "ensure_or(pure(a), error_fn, |_| false) == throw_error(error_fn(&a))"
+        property_test: |
+          fn prop_ensure_or_false<M: MonadError<String>>(a: i32) -> bool
+          where M::WithType<i32>: PartialEq
+          {
+              let error_fn = |v: &i32| format!("Invalid value: {}", v);
+              let success: M::WithType<i32> = M::pure(a);
+              let ensured = M::ensure_or(success, error_fn, |_| false);
+              let thrown: M::WithType<i32> = M::throw_error(format!("Invalid value: {}", a));
+              ensured == thrown
+          }
+
+    methods:
+      - name: "ensure_or"
+        signature: |
+          fn ensure_or<A, F, P>(
+              computation: Self::WithType<A>,
+              error_fn: F,
+              predicate: P
+          ) -> Self::WithType<A>
+          where
+              F: FnOnce(&A) -> E,
+              P: FnOnce(&A) -> bool,
+              A: 'static;
+        description: |
+          成功値が条件を満たすことを検証する。
+          predicate が true を返した場合は元の値を返し、
+          false を返した場合は error_fn(&value) で生成したエラーを発生させる。
+
+          ensure と異なり、エラー生成関数が値の参照を受け取るため、
+          検証に失敗した値をエラーメッセージに含められる。
+          A: Clone 制約は不要。
+
+          ハンドラ関数は純粋関数であること:
+          error_fn および predicate 関数は副作用を持たず、同じ入力に対して常に同じ出力を返すべき。
+        examples:
+          - description: "値を含むエラーメッセージの生成"
+            code: |
+              use lambars::effect::MonadError;
+
+              fn validate_positive(n: i32) -> Result<i32, String> {
+                  <Result<i32, String>>::ensure_or(
+                      Ok(n),
+                      |v| format!("{} is not a positive number", v),
+                      |&v| v > 0
+                  )
+              }
+
+              assert_eq!(validate_positive(42), Ok(42));
+              assert_eq!(validate_positive(-5), Err("-5 is not a positive number".to_string()));
+
+    implementations:
+      - type: "Result<T, E>"
+        description: |
+          flat_map を使用して実装:
+          ```rust
+          computation.flat_map(|a| {
+              if predicate(&a) {
+                  Ok(a)
+              } else {
+                  Err(error_fn(&a))
+              }
+          })
+          ```
+
+  # ======================================================================
+  # 8. redeem - 成功/失敗の両方を変換
+  # ======================================================================
+  - id: redeem
+    name: "redeem - 成功/失敗の両方を変換"
+    description: |
+      成功値と失敗値の両方を同じ型に変換する操作。
+      attempt と map の組み合わせの最適化版。
+
+      Scala cats の redeem に相当する。
+
+      redeem(fa, recover, transform) == fa.attempt().map(|r| r.fold(recover, transform))
+
+    laws:
+      - name: "Redeem Success Law"
+        description: |
+          成功値に対しては transform が適用される
+        equation: "redeem(pure(a), recover, transform) == pure(transform(a))"
+        property_test: |
+          fn prop_redeem_success<M: MonadError<String>>(a: i32) -> bool
+          where M::WithType<String>: PartialEq
+          {
+              let success: M::WithType<i32> = M::pure(a);
+              let redeemed = M::redeem(
+                  success,
+                  |_| "recovered".to_string(),
+                  |v| format!("success: {}", v)
+              );
+              let expected: M::WithType<String> = M::pure(format!("success: {}", a));
+              redeemed == expected
+          }
+
+      - name: "Redeem Error Law"
+        description: |
+          失敗値に対しては recover が適用される
+        equation: "redeem(throw_error(e), recover, transform) == pure(recover(e))"
+        property_test: |
+          fn prop_redeem_error<M: MonadError<String>>(error: String) -> bool
+          where M::WithType<String>: PartialEq, String: Clone
+          {
+              let failed: M::WithType<i32> = M::throw_error(error.clone());
+              let redeemed = M::redeem(
+                  failed,
+                  |e| format!("error: {}", e),
+                  |v| format!("success: {}", v)
+              );
+              let expected: M::WithType<String> = M::pure(format!("error: {}", error));
+              redeemed == expected
+          }
+
+    methods:
+      - name: "redeem"
+        signature: |
+          fn redeem<A, B, Recover, Transform>(
+              computation: Self::WithType<A>,
+              recover: Recover,
+              transform: Transform
+          ) -> Self::WithType<B>
+          where
+              Recover: FnOnce(E) -> B,
+              Transform: FnOnce(A) -> B,
+              A: 'static,
+              B: 'static;
+        description: |
+          成功値と失敗値の両方を同じ型 B に変換する。
+          - 成功した場合: transform(value) を返す
+          - 失敗した場合: recover(error) を返す
+
+          結果は常に成功（pure(B)）として返される。
+
+          ハンドラ関数は純粋関数であること:
+          recover および transform 関数は副作用を持たず、同じ入力に対して常に同じ出力を返すべき。
+        examples:
+          - description: "成功/失敗を統一的に処理"
+            code: |
+              use lambars::effect::MonadError;
+
+              fn to_status_message(result: Result<i32, String>) -> Result<String, String> {
+                  <Result<i32, String>>::redeem(
+                      result,
+                      |e| format!("Error: {}", e),
+                      |v| format!("Success: {}", v)
+                  )
+              }
+
+              assert_eq!(
+                  to_status_message(Ok(42)),
+                  Ok("Success: 42".to_string())
+              );
+              assert_eq!(
+                  to_status_message(Err("not found".to_string())),
+                  Ok("Error: not found".to_string())
+              );
+
+    implementations:
+      - type: "Result<T, E>"
+        description: |
+          match 式で実装:
+          ```rust
+          match computation {
+              Ok(a) => Ok(transform(a)),
+              Err(e) => Ok(recover(e)),
+          }
+          ```
+
+  # ======================================================================
+  # 9. redeem_with - モナディックな成功/失敗の両方を変換
+  # ======================================================================
+  - id: redeem_with
+    name: "redeem_with - モナディックな成功/失敗の両方を変換"
+    description: |
+      成功値と失敗値の両方をモナディックに変換する操作。
+      catch_error と flat_map の組み合わせの最適化版。
+
+      Scala cats の redeemWith に相当する。
+
+      redeemWith(fa, recover, bind) == catch_error(flat_map(fa, bind), recover)
+
+    laws:
+      - name: "RedeemWith Success Law"
+        description: |
+          成功値に対しては bind が適用される
+        equation: "redeem_with(pure(a), recover, bind) == bind(a)"
+        property_test: |
+          fn prop_redeem_with_success<M: MonadError<String>>(a: i32) -> bool
+          where M::WithType<String>: Clone + PartialEq
+          {
+              let bind = |v: i32| M::pure::<String>(format!("success: {}", v));
+              let success: M::WithType<i32> = M::pure(a);
+              let redeemed = M::redeem_with(
+                  success,
+                  |_| M::pure("recovered".to_string()),
+                  bind
+              );
+              let expected = bind(a);
+              redeemed == expected
+          }
+
+      - name: "RedeemWith Error Law"
+        description: |
+          失敗値に対しては recover が適用される
+        equation: "redeem_with(throw_error(e), recover, bind) == recover(e)"
+        property_test: |
+          fn prop_redeem_with_error<M: MonadError<String>>(error: String) -> bool
+          where M::WithType<String>: Clone + PartialEq
+          {
+              let recover = |e: String| M::pure::<String>(format!("error: {}", e));
+              let failed: M::WithType<i32> = M::throw_error(error.clone());
+              let redeemed = M::redeem_with(
+                  failed,
+                  recover,
+                  |v| M::pure(format!("success: {}", v))
+              );
+              let expected = recover(error);
+              redeemed == expected
+          }
+
+    methods:
+      - name: "redeem_with"
+        signature: |
+          fn redeem_with<A, B, Recover, Bind>(
+              computation: Self::WithType<A>,
+              recover: Recover,
+              bind: Bind
+          ) -> Self::WithType<B>
+          where
+              Recover: FnOnce(E) -> Self::WithType<B>,
+              Bind: FnOnce(A) -> Self::WithType<B>,
+              A: 'static,
+              B: 'static;
+        description: |
+          成功値と失敗値の両方をモナディックに変換する。
+          - 成功した場合: bind(value) を返す（新たなエラーが発生する可能性あり）
+          - 失敗した場合: recover(error) を返す
+
+          redeem と異なり、変換結果もエラーを含む可能性がある。
+
+          ハンドラ関数は純粋関数であること:
+          recover および bind 関数は副作用を持たず、同じ入力に対して常に同じ出力を返すべき。
+        examples:
+          - description: "成功/失敗をモナディックに処理"
+            code: |
+              use lambars::effect::MonadError;
+
+              fn process_result(result: Result<i32, String>) -> Result<String, String> {
+                  <Result<i32, String>>::redeem_with(
+                      result,
+                      |e| Ok(format!("Handled error: {}", e)),
+                      |v| {
+                          if v > 100 {
+                              Err("Value too large".to_string())
+                          } else {
+                              Ok(format!("Processed: {}", v))
+                          }
+                      }
+                  )
+              }
+
+              assert_eq!(process_result(Ok(42)), Ok("Processed: 42".to_string()));
+              assert_eq!(process_result(Ok(200)), Err("Value too large".to_string()));
+              assert_eq!(process_result(Err("not found".to_string())),
+                         Ok("Handled error: not found".to_string()));
+
+    implementations:
+      - type: "Result<T, E>"
+        description: |
+          match 式で実装:
+          ```rust
+          match computation {
+              Ok(a) => bind(a),
+              Err(e) => recover(e),
+          }
+          ```
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - "全ての操作は既存の MonadError 操作と同等のパフォーマンスを維持する"
+    - "遅延評価が必要な引数（error in ensure）は実際に必要になるまで評価しない"
+    - "不必要なクローンを避け、可能な限り所有権を移動する"
+
+  compatibility:
+    - "既存の MonadError トレイトとの後方互換性を維持する"
+    - "既存の Result<T, E> 実装を拡張し、新しい操作を追加する"
+    - "ExceptT トランスフォーマーにも同様の操作を追加する"
+    - "map_error は拡張トレイト MonadErrorExt として提供し、MonadError トレイトを変更しない"
+
+  testing:
+    - "全ての新しいメソッドに対してユニットテストを作成する"
+    - "法則テストをプロパティベーステストで実装する"
+    - "エッジケース（空のエラー、ネストした構造など）をテストする"
+    - "カバレッジ 100% を目指す"
+
+  documentation:
+    - "全ての公開 API にドキュメントコメントを追加する"
+    - "使用例を含める"
+    - "ハンドラ関数が純粋関数であることを各メソッドのドキュメントに明記する"
+    - "Scala cats との対応関係を docs/external/comparison/Scala/README.md に追加する"
+
+# 実装の優先順位
+implementation_priority:
+  - order: 1
+    id: map_error
+    reason: "最も基本的な操作であり、拡張トレイト MonadErrorExt として実装"
+
+  - order: 2
+    id: adapt_error
+    reason: "map_error の特殊ケースとして簡単に実装でき、実用性が高い"
+
+  - order: 3
+    id: handle_error
+    reason: "catch_error の特殊ケースとして簡単に実装できる"
+
+  - order: 4
+    id: recover
+    reason: "部分的なリカバリパターンの基盤となる"
+
+  - order: 5
+    id: recover_with_partial
+    reason: "recover のモナディック版"
+
+  - order: 6
+    id: ensure
+    reason: "バリデーションパターンの基盤となる"
+
+  - order: 7
+    id: ensure_or
+    reason: "ensure の変種として追加（参照を受け取る設計）"
+
+  - order: 8
+    id: redeem
+    reason: "成功/失敗の統一処理パターン"
+
+  - order: 9
+    id: redeem_with
+    reason: "redeem のモナディック版"
+
+# 将来の拡張
+future_extensions:
+  - id: on_error
+    name: "on_error - エラー発生時の副作用実行"
+    description: |
+      エラー発生時に副作用（ログ出力など）を実行する操作。
+      エラーは保持され、副作用のみが実行される。
+
+      Scala cats の onError に相当する。
+
+      この操作は副作用を伴うため、現在の要件（純粋関数のみ）には含めない。
+      IO モナドとの統合後に実装を検討する。
+    rationale: |
+      副作用を伴う操作であり、IO モナドとの統合が必要。
+      Effect システムの設計が固まってから実装する。
+
+  - id: attempt
+    name: "attempt - Either/Result への変換"
+    description: |
+      MonadError<E> を MonadError<Never> かつ WithType<Result<A, E>> に変換。
+      エラーを値として扱えるようにする。
+    rationale: |
+      Rust の Result 型との相互運用性を考慮し、
+      型システムの設計を慎重に行う必要がある。
+
+  - id: rethrow
+    name: "rethrow - Result からの復元"
+    description: |
+      WithType<Result<A, E>> を WithType<A> に変換。
+      attempt の逆操作。
+    rationale: |
+      attempt と対で実装する必要がある。
+
+  - id: applicative_error_trait
+    name: "ApplicativeError トレイト"
+    description: |
+      MonadError の一部操作を Applicative レベルで提供する。
+      Scala cats の ApplicativeError に相当する。
+    rationale: |
+      現時点では MonadError に全ての操作を集約するが、
+      将来的にトレイト階層を整理する際に分離を検討する。
+
+# 設計上の考慮事項
+design_considerations:
+  - topic: "map_error の型シグネチャと実装方針"
+    consideration: |
+      Rust の型システムでは、トレイトメソッドの戻り値型を
+      Self::WithType<A> から異なるエラー型の Self::WithType<A> に
+      変更することが困難。
+
+      決定: 拡張トレイト MonadErrorExt<E> として提供する。
+      - MonadError トレイト本体は変更しない
+      - Result<A, E> に対して impl MonadErrorExt<E> を提供
+      - 戻り値は具体的な型 Result<A, E2> を返す
+
+      これにより:
+      - 既存の MonadError トレイトとの後方互換性を維持
+      - Rust の型システムとの整合性を確保
+      - GAT (WithErrorType) を導入せずに実装可能
+
+  - topic: "既存の recover_with との名前衝突"
+    consideration: |
+      既存の recover_with は全てのエラーに対してデフォルト計算を適用するが、
+      Scala cats の recoverWith は部分関数によるリカバリを行う。
+
+      決定: 既存の recover_with を維持し、新しい操作を recover_with_partial と命名。
+      これにより後方互換性を維持する。
+
+  - topic: "recover / recover_with_partial の所有権問題"
+    consideration: |
+      partial_handler が None を返した場合に元のエラーを保持する必要がある。
+
+      決定:
+      - partial_handler は &E を受け取る設計にする
+      - E: Clone 制約は不要（元の E をそのまま使用できるため）
+      - None の場合は元の Err(e) をそのまま返す
+
+      実装例:
+      ```rust
+      fn recover<A, F>(self, partial_handler: F) -> Result<A, E>
+      where
+          F: FnOnce(&E) -> Option<A>,
+      {
+          match self {
+              Ok(a) => Ok(a),
+              Err(e) => match partial_handler(&e) {
+                  Some(a) => Ok(a),
+                  None => Err(e),  // e は所有されているのでそのまま使える
+              }
+          }
+      }
+      ```
+
+  - topic: "ensure_or の Clone 制約"
+    consideration: |
+      ensure_or では、検証に失敗した場合に値をエラー生成関数に渡す必要がある。
+
+      決定: error_fn が &A を受け取る設計にする。
+      - A: Clone 制約は不要
+      - 所有権を移動せずにエラーメッセージに値の情報を含められる
+      - 設計考慮と実装の整合性を確保
+
+  - topic: "'static 制約の削除"
+    consideration: |
+      全てのメソッドに 'static 制約を付けると、借用データでの利用を
+      不必要に制限する。
+
+      決定: 'static 制約は必要最小限に抑える。
+      - 型パラメータ A, B に対しては 'static を維持（GAT の制約）
+      - クロージャ型 F に対しては 'static を削除
+      - 具体的な実装で必要な場合のみ追加
+
+  - topic: "ハンドラ関数の純粋性"
+    consideration: |
+      関数型プログラミングの原則として、ハンドラ関数は純粋関数であるべきだが、
+      Rust の型システムでは純粋性を強制できない。
+
+      決定:
+      - 各メソッドのドキュメントに「ハンドラ関数は純粋関数であること」を明記
+      - 副作用を伴うエラー処理は future_extensions.on_error で対応
+      - IO モナドとの統合後に副作用を型レベルで追跡可能にする
+
+# 関連 Issue
+github_issue:
+  number: 16
+  url: "https://github.com/lihs-ie/lambars/issues/16"
+  title: "MonadError の機能強化"

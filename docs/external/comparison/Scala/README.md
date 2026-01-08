@@ -1180,6 +1180,89 @@ let result = recovered.run_unsafe();
 // result = 0
 ```
 
+### MonadError
+
+| Scala (Cats) | lambars | Description |
+|--------------|---------|-------------|
+| `MonadError[F, E]` | `MonadError<E>` trait | Error handling abstraction |
+| `raiseError(e)` | `MonadError::throw_error` | Throw an error |
+| `handleErrorWith(f)` | `MonadError::catch_error` | Catch and handle with computation |
+| `handleError(f)` | `MonadError::handle_error` | Convert error to success value |
+| `adaptError(pf)` | `MonadError::adapt_error` | Transform error in same type |
+| `recover(pf)` | `MonadError::recover` | Partial function recovery |
+| `recoverWith(pf)` | `MonadError::recover_with_partial` | Monadic partial recovery |
+| `ensure(p)(e)` | `MonadError::ensure` | Validate with predicate |
+| `ensureOr(p)(e)` | `MonadError::ensure_or` | Validate with value-dependent error |
+| `redeem(fe, fa)` | `MonadError::redeem` | Transform both success and error |
+| `redeemWith(fe, fa)` | `MonadError::redeem_with` | Monadic redeem |
+| `attempt` | Manual with catch_error | Catch error as Either/Result |
+| (N/A) | `MonadErrorExt::map_error` | Transform error type |
+
+#### Code Examples
+
+```scala
+// Scala (Cats)
+import cats.MonadError
+import cats.syntax.monadError._
+
+def validatePositive[F[_]](n: Int)(implicit me: MonadError[F, String]): F[Int] =
+  me.ensure(me.pure(n))(_ > 0, s"$n is not positive")
+
+// Using ensure
+val result: Either[String, Int] = validatePositive[Either[String, *]](5)
+// result = Right(5)
+
+val failed: Either[String, Int] = validatePositive[Either[String, *]](-1)
+// failed = Left("-1 is not positive")
+
+// Using adaptError
+val adapted: Either[String, Int] = Right(42).adaptError {
+  case e => s"Context: $e"
+}
+
+// Using redeem
+val redeemed: Either[String, String] = Right(42).redeem(
+  e => s"Error: $e",
+  v => s"Success: $v"
+)
+// redeemed = Right("Success: 42")
+```
+
+```rust
+// lambars
+use lambars::effect::MonadError;
+
+fn validate_positive(n: i32) -> Result<i32, String> {
+    <Result<i32, String>>::ensure(
+        Ok(n),
+        || format!("{} is not positive", n),
+        |&v| v > 0
+    )
+}
+
+// Using ensure
+let result = validate_positive(5);
+// result = Ok(5)
+
+let failed = validate_positive(-1);
+// failed = Err("-1 is not positive")
+
+// Using adapt_error
+let computation: Result<i32, String> = Err("error".to_string());
+let adapted = <Result<i32, String>>::adapt_error(
+    computation,
+    |e| format!("Context: {}", e)
+);
+
+// Using redeem
+let redeemed = <Result<i32, String>>::redeem(
+    Ok(42),
+    |e| format!("Error: {}", e),
+    |v| format!("Success: {}", v)
+);
+// redeemed = Ok("Success: 42")
+```
+
 ### State Monad
 
 | Scala (Cats) | lambars | Description |

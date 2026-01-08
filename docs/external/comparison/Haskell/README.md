@@ -1850,6 +1850,18 @@ let (result, final_state, log) = computation.run(Config { multiplier: 3 }, 10);
 | `MonadReader` | `MonadReader` trait | Reader abstraction |
 | `MonadWriter` | `MonadWriter` trait | Writer abstraction |
 | `MonadError` | `MonadError` trait | Error abstraction |
+| `throwError` | `MonadError::throw_error` | Throw an error |
+| `catchError` | `MonadError::catch_error` | Catch and handle errors |
+| `liftEither` | `MonadError::from_result` | Lift Either/Result |
+| `handleError` | `MonadError::handle_error` | Convert error to success value |
+| (custom) | `MonadError::adapt_error` | Transform error in same type |
+| (custom) | `MonadError::recover` | Partial function recovery |
+| (custom) | `MonadError::recover_with_partial` | Monadic partial recovery |
+| (custom) | `MonadError::ensure` | Validate with predicate |
+| (custom) | `MonadError::ensure_or` | Validate with value-dependent error |
+| (custom) | `MonadError::redeem` | Transform both success and error |
+| (custom) | `MonadError::redeem_with` | Monadic redeem |
+| (custom) | `MonadErrorExt::map_error` | Transform error type |
 | Async IO in transformers | `*_async_io` methods | AsyncIO support in transformers |
 
 ### Code Examples
