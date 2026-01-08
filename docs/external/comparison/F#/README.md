@@ -53,7 +53,7 @@ This document provides a comprehensive comparison between F# functional programm
 | `Option.isNone` | `Option::is_none` (std) | Check if None |
 | `Option.iter` | `Option::iter` (std) | Iterate over value |
 | `Option.toList` | `Option::into_iter().collect()` | Convert to list |
-| `Option.flatten` | `Option::flatten` (std) | Flatten nested option |
+| `Option.flatten` | `Flatten::flatten` / `Option::flatten` (std) | Flatten nested option |
 | `Option.map2` | `Applicative::map2` | Combine two options |
 | `Option.map3` | `Applicative::map3` | Combine three options |
 
