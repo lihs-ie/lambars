@@ -311,6 +311,7 @@ let redeemed = <Result<i32, String>>::redeem(
 | `List.partition` | `PersistentList::partition` | Split by predicate |
 | (N/A) | `PersistentList::intersperse` | Insert between elements |
 | `String.concat sep` | `PersistentList::intercalate` | Insert list between lists and flatten |
+| `compare` | `Ord::cmp` | Lexicographic ordering (requires `T: Ord`) |
 | `Seq.unfold` | Manual implementation | Generate sequence |
 
 ### Traversable Operations

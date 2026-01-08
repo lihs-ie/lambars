@@ -2146,6 +2146,7 @@ fn log_computation() -> Eff<LogEffect, i32> {
 | `partition p xs` | `PersistentList::partition` | Split by predicate |
 | `intersperse x xs` | `PersistentList::intersperse` | Insert between elements |
 | `intercalate xs xss` | `PersistentList::intercalate` | Insert list between lists and flatten |
+| `compare xs ys` | `Ord::cmp` | Lexicographic ordering (requires `T: Ord`) |
 
 ### Vectors
 
@@ -2168,6 +2169,7 @@ fn log_computation() -> Eff<LogEffect, i32> {
 | `V.partition p v` | `PersistentVector::partition` | Split by predicate |
 | (N/A) | `PersistentVector::intersperse` | Insert between elements |
 | (N/A) | `PersistentVector::intercalate` | Insert vector between vectors and flatten |
+| `compare v1 v2` | `Ord::cmp` | Lexicographic ordering (requires `T: Ord`) |
 
 ### Maps
 

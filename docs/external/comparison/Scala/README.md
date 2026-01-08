@@ -1648,6 +1648,8 @@ Available AsyncIO methods:
 | `vec.reduceRight(f)` | `PersistentVector::fold_right1` | Right fold without initial value |
 | `vec.scanLeft(z)(f)` | `PersistentVector::scan_left` | Left scan with initial value |
 | `vec.partition(p)` | `PersistentVector::partition` | Split by predicate |
+| `Ordering[List[A]]` | `Ord` for `PersistentList<A: Ord>` | Lexicographic ordering |
+| `Ordering[Vector[A]]` | `Ord` for `PersistentVector<A: Ord>` | Lexicographic ordering |
 
 ### Map Operations
 
