@@ -97,3 +97,8 @@ required-features = ["serde"]
 [[bench]]
 name = "transient_bench"
 harness = false
+
+[[bench]]
+name = "rayon_bench"
+harness = false
+required-features = ["rayon"]
