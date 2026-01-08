@@ -60,9 +60,11 @@ use std::borrow::Borrow;
 use std::fmt;
 use std::hash::Hash;
 use std::iter::FromIterator;
+use std::marker::PhantomData;
+use std::rc::Rc;
 use std::sync::Arc;
 
-use super::PersistentHashMap;
+use super::{PersistentHashMap, TransientHashMap};
 use crate::typeclass::{Foldable, TypeConstructor};
 
 // =============================================================================
@@ -632,11 +634,9 @@ impl<T> Default for PersistentHashSet<T> {
 
 impl<T: Clone + Hash + Eq> FromIterator<T> for PersistentHashSet<T> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        let mut set = Self::new();
-        for element in iter {
-            set = set.insert(element);
-        }
-        set
+        let mut transient = TransientHashSet::new();
+        transient.extend(iter);
+        transient.persistent()
     }
 }
 
@@ -1209,6 +1209,354 @@ impl<T: Clone + Hash + Eq> Foldable for PersistentHashSet<T> {
 }
 
 // =============================================================================
+// TransientHashSet Definition
+// =============================================================================
+
+/// A transient (temporarily mutable) hash set for efficient batch updates.
+///
+/// `TransientHashSet` is a wrapper around [`TransientHashMap<T, ()>`](TransientHashMap)
+/// that provides efficient mutable operations for building a hash set.
+/// After batch updates, convert to [`PersistentHashSet`] using [`persistent()`](Self::persistent).
+///
+/// # Design
+///
+/// - Internally uses `TransientHashMap<T, ()>` for all operations
+/// - `PhantomData<Rc<()>>` ensures `!Send` and `!Sync` for thread safety
+/// - Clone/Copy traits are intentionally not implemented (linear type semantics)
+///
+/// # Examples
+///
+/// ```rust
+/// use lambars::persistent::{PersistentHashSet, TransientHashSet};
+///
+/// // Build a set efficiently using transient operations
+/// let mut transient = TransientHashSet::new();
+/// transient.insert(1);
+/// transient.insert(2);
+/// transient.insert(3);
+///
+/// // Convert to persistent set
+/// let persistent = transient.persistent();
+/// assert!(persistent.contains(&1));
+/// assert_eq!(persistent.len(), 3);
+/// ```
+///
+/// # Transient-Persistent Pattern
+///
+/// ```rust
+/// use lambars::persistent::PersistentHashSet;
+///
+/// // Start with a persistent set
+/// let persistent: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+///
+/// // Convert to transient for batch updates
+/// let mut transient = persistent.transient();
+/// transient.insert(4);
+/// transient.insert(5);
+/// transient.remove(&1);
+///
+/// // Convert back to persistent
+/// let new_persistent = transient.persistent();
+/// assert_eq!(new_persistent.len(), 4);
+/// assert!(!new_persistent.contains(&1));
+/// assert!(new_persistent.contains(&4));
+/// ```
+pub struct TransientHashSet<T> {
+    inner: TransientHashMap<T, ()>,
+    /// Marker to ensure `!Send` and `!Sync`.
+    _marker: PhantomData<Rc<()>>,
+}
+
+// Static assertions to verify TransientHashSet is not Send/Sync
+static_assertions::assert_not_impl_any!(TransientHashSet<i32>: Send, Sync);
+static_assertions::assert_not_impl_any!(TransientHashSet<String>: Send, Sync);
+
+// Arc feature verification: even with Arc, TransientHashSet remains !Send/!Sync
+#[cfg(feature = "arc")]
+mod arc_send_sync_verification_hashset {
+    use super::TransientHashSet;
+    use std::sync::Arc;
+
+    // Arc<T> where T: Send+Sync is Send+Sync, but TransientHashSet should still be !Send/!Sync
+    static_assertions::assert_not_impl_any!(TransientHashSet<Arc<i32>>: Send, Sync);
+    static_assertions::assert_not_impl_any!(TransientHashSet<Arc<String>>: Send, Sync);
+}
+
+// =============================================================================
+// TransientHashSet Implementation
+// =============================================================================
+
+impl<T> TransientHashSet<T> {
+    /// Returns the number of elements in the set.
+    ///
+    /// # Complexity
+    ///
+    /// O(1)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientHashSet;
+    ///
+    /// let mut transient: TransientHashSet<i32> = TransientHashSet::new();
+    /// assert_eq!(transient.len(), 0);
+    /// transient.insert(42);
+    /// assert_eq!(transient.len(), 1);
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Returns `true` if the set contains no elements.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientHashSet;
+    ///
+    /// let mut transient: TransientHashSet<i32> = TransientHashSet::new();
+    /// assert!(transient.is_empty());
+    /// transient.insert(42);
+    /// assert!(!transient.is_empty());
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+}
+
+impl<T: Clone + Hash + Eq> TransientHashSet<T> {
+    /// Creates a new empty `TransientHashSet`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientHashSet;
+    ///
+    /// let transient: TransientHashSet<i32> = TransientHashSet::new();
+    /// assert!(transient.is_empty());
+    /// ```
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            inner: TransientHashMap::new(),
+            _marker: PhantomData,
+        }
+    }
+
+    /// Returns `true` if the set contains the specified element.
+    ///
+    /// The element may be any borrowed form of the set's element type,
+    /// but `Hash` and `Eq` on the borrowed form must match those for
+    /// the element type.
+    ///
+    /// # Arguments
+    ///
+    /// * `element` - The element to check for
+    ///
+    /// # Complexity
+    ///
+    /// O(log32 N)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientHashSet;
+    ///
+    /// let mut transient: TransientHashSet<String> = TransientHashSet::new();
+    /// transient.insert("hello".to_string());
+    ///
+    /// // Can use &str to look up String elements
+    /// assert!(transient.contains("hello"));
+    /// assert!(!transient.contains("world"));
+    /// ```
+    #[must_use]
+    pub fn contains<Q>(&self, element: &Q) -> bool
+    where
+        T: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.inner.contains_key(element)
+    }
+
+    /// Inserts an element into the set.
+    ///
+    /// Returns `true` if the element was newly inserted, `false` if it was already present.
+    ///
+    /// # Arguments
+    ///
+    /// * `element` - The element to insert
+    ///
+    /// # Returns
+    ///
+    /// `true` if the element was not present, `false` if it was already present.
+    ///
+    /// # Complexity
+    ///
+    /// O(log32 N) amortized
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientHashSet;
+    ///
+    /// let mut transient: TransientHashSet<i32> = TransientHashSet::new();
+    /// assert!(transient.insert(1));   // New element
+    /// assert!(!transient.insert(1));  // Already exists
+    /// assert_eq!(transient.len(), 1);
+    /// ```
+    pub fn insert(&mut self, element: T) -> bool {
+        self.inner.insert(element, ()).is_none()
+    }
+
+    /// Removes an element from the set.
+    ///
+    /// Returns `true` if the element was present and removed, `false` if it was not present.
+    ///
+    /// # Arguments
+    ///
+    /// * `element` - The element to remove
+    ///
+    /// # Returns
+    ///
+    /// `true` if the element was removed, `false` if it was not present.
+    ///
+    /// # Complexity
+    ///
+    /// O(log32 N)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientHashSet;
+    ///
+    /// let mut transient: TransientHashSet<i32> = TransientHashSet::new();
+    /// transient.insert(1);
+    /// transient.insert(2);
+    ///
+    /// assert!(transient.remove(&1));   // Was present
+    /// assert!(!transient.remove(&1));  // Already removed
+    /// assert_eq!(transient.len(), 1);
+    /// ```
+    pub fn remove<Q>(&mut self, element: &Q) -> bool
+    where
+        T: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.inner.remove(element).is_some()
+    }
+
+    /// Extends the set with elements from an iterator.
+    ///
+    /// # Arguments
+    ///
+    /// * `iter` - An iterator over elements to insert
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientHashSet;
+    ///
+    /// let mut transient: TransientHashSet<i32> = TransientHashSet::new();
+    /// transient.extend([1, 2, 3, 4, 5]);
+    /// assert_eq!(transient.len(), 5);
+    /// ```
+    pub fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        for element in iter {
+            self.insert(element);
+        }
+    }
+
+    /// Converts this transient set into a persistent set.
+    ///
+    /// This consumes the `TransientHashSet` and returns a `PersistentHashSet`.
+    /// The conversion is O(1) as it simply moves the internal data.
+    ///
+    /// # Complexity
+    ///
+    /// O(1) - only moves fields
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientHashSet;
+    ///
+    /// let mut transient: TransientHashSet<i32> = TransientHashSet::new();
+    /// transient.insert(1);
+    /// transient.insert(2);
+    /// let persistent = transient.persistent();
+    /// assert_eq!(persistent.len(), 2);
+    /// assert!(persistent.contains(&1));
+    /// ```
+    #[must_use]
+    pub fn persistent(self) -> PersistentHashSet<T> {
+        PersistentHashSet {
+            inner: self.inner.persistent(),
+        }
+    }
+}
+
+impl<T: Clone + Hash + Eq> Default for TransientHashSet<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T: Clone + Hash + Eq> FromIterator<T> for TransientHashSet<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        let mut transient = Self::new();
+        transient.extend(iter);
+        transient
+    }
+}
+
+// =============================================================================
+// PersistentHashSet::transient() method
+// =============================================================================
+
+impl<T: Clone + Hash + Eq> PersistentHashSet<T> {
+    /// Converts this persistent set into a transient set.
+    ///
+    /// This consumes the `PersistentHashSet` and returns a `TransientHashSet`
+    /// that can be efficiently mutated. The conversion is O(1) as it simply
+    /// moves the internal data.
+    ///
+    /// # Complexity
+    ///
+    /// O(1) - only moves fields
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentHashSet;
+    ///
+    /// let persistent: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+    ///
+    /// // Convert to transient for batch updates
+    /// let mut transient = persistent.transient();
+    /// transient.insert(4);
+    /// transient.insert(5);
+    /// transient.remove(&1);
+    ///
+    /// // Convert back to persistent
+    /// let new_persistent = transient.persistent();
+    /// assert_eq!(new_persistent.len(), 4);
+    /// assert!(!new_persistent.contains(&1));
+    /// assert!(new_persistent.contains(&4));
+    /// ```
+    #[must_use]
+    pub fn transient(self) -> TransientHashSet<T> {
+        TransientHashSet {
+            inner: self.inner.transient(),
+            _marker: PhantomData,
+        }
+    }
+}
+
+// =============================================================================
 // Serde Support
 // =============================================================================
 
@@ -1712,5 +2060,357 @@ mod serde_tests {
         assert!(set.contains(&1));
         assert!(set.contains(&2));
         assert!(set.contains(&3));
+    }
+}
+
+// =============================================================================
+// TransientHashSet Tests
+// =============================================================================
+
+#[cfg(test)]
+mod transient_hashset_tests {
+    use super::*;
+    use rstest::rstest;
+
+    // =========================================================================
+    // Basic Functionality Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_transient_hashset_new() {
+        let transient: TransientHashSet<i32> = TransientHashSet::new();
+        assert!(transient.is_empty());
+        assert_eq!(transient.len(), 0);
+    }
+
+    #[rstest]
+    fn test_transient_hashset_insert_and_contains() {
+        let mut transient: TransientHashSet<i32> = TransientHashSet::new();
+        assert!(transient.insert(1));
+        assert!(transient.insert(2));
+        assert!(transient.insert(3));
+
+        assert_eq!(transient.len(), 3);
+        assert!(transient.contains(&1));
+        assert!(transient.contains(&2));
+        assert!(transient.contains(&3));
+        assert!(!transient.contains(&4));
+    }
+
+    #[rstest]
+    fn test_transient_hashset_insert_duplicate_returns_false() {
+        let mut transient: TransientHashSet<i32> = TransientHashSet::new();
+        assert!(transient.insert(1)); // New element
+        assert!(!transient.insert(1)); // Already exists
+        assert_eq!(transient.len(), 1);
+    }
+
+    #[rstest]
+    fn test_transient_hashset_remove() {
+        let mut transient: TransientHashSet<i32> = TransientHashSet::new();
+        transient.insert(1);
+        transient.insert(2);
+        transient.insert(3);
+
+        assert!(transient.remove(&1)); // Was present
+        assert_eq!(transient.len(), 2);
+        assert!(!transient.contains(&1));
+        assert!(transient.contains(&2));
+
+        assert!(!transient.remove(&1)); // Already removed
+    }
+
+    #[rstest]
+    fn test_transient_hashset_extend() {
+        let mut transient: TransientHashSet<i32> = TransientHashSet::new();
+        transient.extend([1, 2, 3, 4, 5]);
+        assert_eq!(transient.len(), 5);
+        for element in 1..=5 {
+            assert!(transient.contains(&element));
+        }
+    }
+
+    #[rstest]
+    fn test_transient_hashset_from_iterator() {
+        let transient: TransientHashSet<i32> = [1, 2, 3].into_iter().collect();
+        assert_eq!(transient.len(), 3);
+        assert!(transient.contains(&1));
+        assert!(transient.contains(&2));
+        assert!(transient.contains(&3));
+    }
+
+    #[rstest]
+    fn test_transient_hashset_default() {
+        let transient: TransientHashSet<i32> = TransientHashSet::default();
+        assert!(transient.is_empty());
+    }
+
+    // =========================================================================
+    // Persistent Conversion Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_transient_hashset_persistent() {
+        let mut transient: TransientHashSet<i32> = TransientHashSet::new();
+        transient.insert(1);
+        transient.insert(2);
+        transient.insert(3);
+
+        let persistent = transient.persistent();
+        assert_eq!(persistent.len(), 3);
+        assert!(persistent.contains(&1));
+        assert!(persistent.contains(&2));
+        assert!(persistent.contains(&3));
+    }
+
+    #[rstest]
+    fn test_persistent_hashset_transient() {
+        let persistent: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+
+        let mut transient = persistent.transient();
+        transient.insert(4);
+        transient.insert(5);
+        transient.remove(&1);
+
+        let new_persistent = transient.persistent();
+        assert_eq!(new_persistent.len(), 4);
+        assert!(!new_persistent.contains(&1));
+        assert!(new_persistent.contains(&2));
+        assert!(new_persistent.contains(&3));
+        assert!(new_persistent.contains(&4));
+        assert!(new_persistent.contains(&5));
+    }
+
+    // =========================================================================
+    // Transient-Persistent Roundtrip Law Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_roundtrip_empty_set() {
+        let original: PersistentHashSet<i32> = PersistentHashSet::new();
+        let result = original.clone().transient().persistent();
+        assert_eq!(result, original);
+    }
+
+    #[rstest]
+    fn test_roundtrip_single_element() {
+        let original = PersistentHashSet::singleton(42);
+        let result = original.clone().transient().persistent();
+        assert_eq!(result, original);
+    }
+
+    #[rstest]
+    fn test_roundtrip_multiple_elements() {
+        let original: PersistentHashSet<i32> = [1, 2, 3, 4, 5].into_iter().collect();
+        let result = original.clone().transient().persistent();
+        assert_eq!(result, original);
+    }
+
+    #[rstest]
+    fn test_roundtrip_large_set() {
+        let original: PersistentHashSet<i32> = (0..1000).collect();
+        let result = original.clone().transient().persistent();
+        assert_eq!(result, original);
+    }
+
+    #[rstest]
+    fn test_roundtrip_string_elements() {
+        let original: PersistentHashSet<String> = vec![
+            "hello".to_string(),
+            "world".to_string(),
+            "foo".to_string(),
+            "bar".to_string(),
+        ]
+        .into_iter()
+        .collect();
+        let result = original.clone().transient().persistent();
+        assert_eq!(result, original);
+    }
+
+    // =========================================================================
+    // Mutation Equivalence Law Tests (Insert)
+    // =========================================================================
+
+    #[rstest]
+    fn test_insert_equivalence_empty_set() {
+        let original: PersistentHashSet<i32> = PersistentHashSet::new();
+        let element = 42;
+
+        let via_transient = {
+            let mut transient = original.clone().transient();
+            transient.insert(element);
+            transient.persistent()
+        };
+        let via_persistent = original.insert(element);
+
+        assert_eq!(via_transient, via_persistent);
+    }
+
+    #[rstest]
+    fn test_insert_equivalence_existing_element() {
+        let original: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+        let element = 2; // Already exists
+
+        let via_transient = {
+            let mut transient = original.clone().transient();
+            transient.insert(element);
+            transient.persistent()
+        };
+        let via_persistent = original.insert(element);
+
+        assert_eq!(via_transient, via_persistent);
+    }
+
+    #[rstest]
+    fn test_insert_equivalence_new_element() {
+        let original: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+        let element = 4; // New element
+
+        let via_transient = {
+            let mut transient = original.clone().transient();
+            transient.insert(element);
+            transient.persistent()
+        };
+        let via_persistent = original.insert(element);
+
+        assert_eq!(via_transient, via_persistent);
+    }
+
+    // =========================================================================
+    // Mutation Equivalence Law Tests (Remove)
+    // =========================================================================
+
+    #[rstest]
+    fn test_remove_equivalence_existing_element() {
+        let original: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+        let element = 2;
+
+        let via_transient = {
+            let mut transient = original.clone().transient();
+            transient.remove(&element);
+            transient.persistent()
+        };
+        let via_persistent = original.remove(&element);
+
+        assert_eq!(via_transient, via_persistent);
+    }
+
+    #[rstest]
+    fn test_remove_equivalence_non_existing_element() {
+        let original: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
+        let element = 100; // Non-existing
+
+        let via_transient = {
+            let mut transient = original.clone().transient();
+            transient.remove(&element);
+            transient.persistent()
+        };
+        let via_persistent = original.remove(&element);
+
+        assert_eq!(via_transient, via_persistent);
+    }
+
+    // =========================================================================
+    // Batch Operations Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_transient_batch_operations() {
+        let mut transient: TransientHashSet<i32> = TransientHashSet::new();
+
+        // Insert many elements
+        for element in 0..100 {
+            transient.insert(element);
+        }
+
+        // Remove some elements
+        for element in 25..75 {
+            transient.remove(&element);
+        }
+
+        let persistent = transient.persistent();
+
+        // Verify the results
+        assert_eq!(persistent.len(), 50); // 0..25 and 75..100
+
+        for element in 0..25 {
+            assert!(persistent.contains(&element));
+        }
+
+        for element in 25..75 {
+            assert!(!persistent.contains(&element));
+        }
+
+        for element in 75..100 {
+            assert!(persistent.contains(&element));
+        }
+    }
+
+    #[rstest]
+    fn test_transient_many_insertions() {
+        let mut transient: TransientHashSet<i32> = TransientHashSet::new();
+
+        for element in 0..1000 {
+            transient.insert(element);
+        }
+
+        let persistent = transient.persistent();
+        assert_eq!(persistent.len(), 1000);
+
+        for element in 0..1000 {
+            assert!(persistent.contains(&element));
+        }
+    }
+
+    // =========================================================================
+    // String Element Tests (Borrow trait usage)
+    // =========================================================================
+
+    #[rstest]
+    fn test_transient_hashset_string_borrow() {
+        let mut transient: TransientHashSet<String> = TransientHashSet::new();
+        transient.insert("hello".to_string());
+        transient.insert("world".to_string());
+
+        // Test using &str (borrowed form)
+        assert!(transient.contains("hello"));
+        assert!(transient.contains("world"));
+        assert!(!transient.contains("other"));
+
+        assert!(transient.remove("hello"));
+        assert!(!transient.contains("hello"));
+    }
+
+    // =========================================================================
+    // Edge Cases Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_transient_hashset_empty_to_persistent() {
+        let transient: TransientHashSet<i32> = TransientHashSet::new();
+        let persistent = transient.persistent();
+        assert!(persistent.is_empty());
+    }
+
+    #[rstest]
+    fn test_transient_remove_from_empty() {
+        let mut transient: TransientHashSet<i32> = TransientHashSet::new();
+        assert!(!transient.remove(&42));
+        assert!(transient.is_empty());
+    }
+
+    #[rstest]
+    fn test_transient_insert_and_remove_same_element() {
+        let mut transient: TransientHashSet<i32> = TransientHashSet::new();
+        assert!(transient.insert(42));
+        assert!(transient.remove(&42));
+        assert!(transient.is_empty());
+    }
+
+    #[rstest]
+    fn test_transient_extend_with_duplicates() {
+        let mut transient: TransientHashSet<i32> = TransientHashSet::new();
+        transient.extend([1, 2, 2, 3, 3, 3]);
+        assert_eq!(transient.len(), 3);
     }
 }

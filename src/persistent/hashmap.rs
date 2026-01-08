@@ -51,6 +51,8 @@ use std::collections::hash_map::DefaultHasher;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::iter::FromIterator;
+use std::marker::PhantomData;
+use std::rc::Rc;
 
 use crate::typeclass::{Foldable, TypeConstructor};
 
@@ -1825,11 +1827,9 @@ impl<K, V> Default for PersistentHashMap<K, V> {
 
 impl<K: Clone + Hash + Eq, V: Clone> FromIterator<(K, V)> for PersistentHashMap<K, V> {
     fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
-        let mut map = Self::new();
-        for (key, value) in iter {
-            map = map.insert(key, value);
-        }
-        map
+        let mut transient = TransientHashMap::new();
+        transient.extend(iter);
+        transient.persistent()
     }
 }
 
@@ -2021,6 +2021,872 @@ where
         D: serde::Deserializer<'de>,
     {
         deserializer.deserialize_map(PersistentHashMapVisitor::new())
+    }
+}
+
+// =============================================================================
+// TransientHashMap Definition
+// =============================================================================
+
+/// A transient (temporarily mutable) hash map for efficient batch updates.
+///
+/// `TransientHashMap` provides mutable operations for batch construction of hash maps.
+/// Once construction is complete, it can be converted back to a [`PersistentHashMap`]
+/// using the [`persistent()`](TransientHashMap::persistent) method.
+///
+/// # Design
+///
+/// Transient data structures use Copy-on-Write (COW) semantics via `Rc::make_mut()`
+/// / `Arc::make_mut()` to efficiently share structure with the persistent version
+/// while allowing mutation.
+///
+/// # Thread Safety
+///
+/// `TransientHashMap` is intentionally not `Send` or `Sync`. It is designed for
+/// single-threaded batch construction. For thread-safe operations, convert back
+/// to `PersistentHashMap`.
+///
+/// # Examples
+///
+/// ```rust
+/// use lambars::persistent::{PersistentHashMap, TransientHashMap};
+///
+/// // Build a map efficiently using transient operations
+/// let mut transient = TransientHashMap::new();
+/// transient.insert("one".to_string(), 1);
+/// transient.insert("two".to_string(), 2);
+/// transient.insert("three".to_string(), 3);
+///
+/// // Convert to persistent map
+/// let persistent = transient.persistent();
+/// assert_eq!(persistent.get("one"), Some(&1));
+/// assert_eq!(persistent.len(), 3);
+/// ```
+pub struct TransientHashMap<K, V> {
+    root: ReferenceCounter<Node<K, V>>,
+    length: usize,
+    /// Marker to ensure `!Send` and `!Sync`.
+    _marker: PhantomData<Rc<()>>,
+}
+
+// Static assertions to verify TransientHashMap is not Send/Sync
+static_assertions::assert_not_impl_any!(TransientHashMap<i32, i32>: Send, Sync);
+static_assertions::assert_not_impl_any!(TransientHashMap<String, String>: Send, Sync);
+
+// Arc feature verification: even with Arc, TransientHashMap remains !Send/!Sync
+#[cfg(feature = "arc")]
+mod arc_send_sync_verification_hashmap {
+    use super::TransientHashMap;
+    use std::sync::Arc;
+
+    // Arc<T> where T: Send+Sync is Send+Sync, but TransientHashMap should still be !Send/!Sync
+    static_assertions::assert_not_impl_any!(TransientHashMap<Arc<i32>, Arc<i32>>: Send, Sync);
+    static_assertions::assert_not_impl_any!(TransientHashMap<Arc<String>, Arc<String>>: Send, Sync);
+}
+
+// =============================================================================
+// TransientHashMap Implementation
+// =============================================================================
+
+impl<K, V> TransientHashMap<K, V> {
+    /// Returns the number of entries in the map.
+    ///
+    /// # Complexity
+    ///
+    /// O(1)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientHashMap;
+    ///
+    /// let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+    /// assert_eq!(transient.len(), 0);
+    /// transient.insert("key".to_string(), 42);
+    /// assert_eq!(transient.len(), 1);
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.length
+    }
+
+    /// Returns `true` if the map contains no entries.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientHashMap;
+    ///
+    /// let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+    /// assert!(transient.is_empty());
+    /// transient.insert("key".to_string(), 42);
+    /// assert!(!transient.is_empty());
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.length == 0
+    }
+}
+
+impl<K: Clone + Hash + Eq, V: Clone> TransientHashMap<K, V> {
+    /// Creates a new empty `TransientHashMap`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientHashMap;
+    ///
+    /// let transient: TransientHashMap<String, i32> = TransientHashMap::new();
+    /// assert!(transient.is_empty());
+    /// ```
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            root: ReferenceCounter::new(Node::empty()),
+            length: 0,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Returns a reference to the value corresponding to the key.
+    ///
+    /// The key may be any borrowed form of the map's key type, but `Hash` and
+    /// `Eq` on the borrowed form must match those for the key type.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to look up
+    ///
+    /// # Complexity
+    ///
+    /// O(log32 N)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientHashMap;
+    ///
+    /// let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+    /// transient.insert("hello".to_string(), 42);
+    ///
+    /// // Can use &str to look up String keys
+    /// assert_eq!(transient.get("hello"), Some(&42));
+    /// assert_eq!(transient.get("world"), None);
+    /// ```
+    #[must_use]
+    pub fn get<Q>(&self, key: &Q) -> Option<&V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        let hash = compute_hash(key);
+        PersistentHashMap::get_from_node(&self.root, key, hash, 0)
+    }
+
+    /// Returns `true` if the map contains the given key.
+    ///
+    /// The key may be any borrowed form of the map's key type.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to check
+    ///
+    /// # Complexity
+    ///
+    /// O(log32 N)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientHashMap;
+    ///
+    /// let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+    /// transient.insert("key".to_string(), 42);
+    ///
+    /// assert!(transient.contains_key("key"));
+    /// assert!(!transient.contains_key("other"));
+    /// ```
+    #[must_use]
+    pub fn contains_key<Q>(&self, key: &Q) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.get(key).is_some()
+    }
+
+    /// Inserts a key-value pair into the map.
+    ///
+    /// If the map already contains the key, the old value is replaced and returned.
+    /// Otherwise, `None` is returned.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to insert
+    /// * `value` - The value to associate with the key
+    ///
+    /// # Returns
+    ///
+    /// The old value if the key was already present, otherwise `None`.
+    ///
+    /// # Complexity
+    ///
+    /// O(log32 N)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientHashMap;
+    ///
+    /// let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+    /// assert_eq!(transient.insert("key".to_string(), 1), None);
+    /// assert_eq!(transient.insert("key".to_string(), 2), Some(1));
+    /// assert_eq!(transient.get("key"), Some(&2));
+    /// ```
+    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
+        let hash = compute_hash(&key);
+        let root = ReferenceCounter::make_mut(&mut self.root);
+        let (old_value, added) = Self::insert_into_node_cow(root, key, value, hash, 0);
+        if added {
+            self.length += 1;
+        }
+        old_value
+    }
+
+    /// Recursively inserts into a node using COW semantics.
+    /// Returns (`old_value`, `was_added`).
+    fn insert_into_node_cow(
+        node: &mut Node<K, V>,
+        key: K,
+        value: V,
+        hash: u64,
+        depth: usize,
+    ) -> (Option<V>, bool) {
+        match node {
+            Node::Empty => {
+                *node = Node::Entry { hash, key, value };
+                (None, true)
+            }
+            Node::Entry {
+                hash: existing_hash,
+                key: existing_key,
+                value: existing_value,
+            } => {
+                if *existing_hash == hash && *existing_key == key {
+                    // Same key, replace value
+                    let old_value = std::mem::replace(existing_value, value);
+                    (Some(old_value), false)
+                } else if *existing_hash == hash {
+                    // Hash collision - create collision node
+                    let entries = ReferenceCounter::from(vec![
+                        (existing_key.clone(), existing_value.clone()),
+                        (key, value),
+                    ]);
+                    *node = Node::Collision {
+                        hash: *existing_hash,
+                        entries,
+                    };
+                    (None, true)
+                } else {
+                    // Different hash - need to create a bitmap node
+                    let (new_node, _) = PersistentHashMap::create_bitmap_from_two_entries(
+                        *existing_hash,
+                        existing_key,
+                        existing_value,
+                        key,
+                        value,
+                        hash,
+                        depth,
+                    );
+                    *node = new_node;
+                    (None, true)
+                }
+            }
+            Node::Bitmap { bitmap, children } => {
+                Self::insert_into_bitmap_node_cow(bitmap, children, key, value, hash, depth)
+            }
+            Node::Collision {
+                hash: collision_hash,
+                entries,
+            } => {
+                if hash == *collision_hash {
+                    // Same hash - update or add to collision node
+                    let entries_mut = ReferenceCounter::make_mut(entries);
+                    for entry in entries_mut.iter_mut() {
+                        if entry.0 == key {
+                            let old_value = std::mem::replace(&mut entry.1, value);
+                            return (Some(old_value), false);
+                        }
+                    }
+                    // Key not found, add new entry
+                    let mut new_entries = entries_mut.to_vec();
+                    new_entries.push((key, value));
+                    *entries = ReferenceCounter::from(new_entries);
+                    (None, true)
+                } else {
+                    // Different hash - convert collision to bitmap and insert
+                    let collision_entries = entries.to_vec();
+                    let collision_hash_value = *collision_hash;
+
+                    // Create bitmap node from collision entries
+                    let index = hash_index(collision_hash_value, depth);
+                    let bit = 1u32 << index;
+                    let collision_child = Child::Node(ReferenceCounter::new(Node::Collision {
+                        hash: collision_hash_value,
+                        entries: ReferenceCounter::from(collision_entries),
+                    }));
+
+                    let new_index = hash_index(hash, depth);
+                    let new_bit = 1u32 << new_index;
+
+                    if index == new_index {
+                        // Same index, create subnode
+                        let mut subnode = Node::Collision {
+                            hash: collision_hash_value,
+                            entries: entries.clone(),
+                        };
+                        let result =
+                            Self::insert_into_node_cow(&mut subnode, key, value, hash, depth + 1);
+                        *node = Node::Bitmap {
+                            bitmap: bit,
+                            children: ReferenceCounter::from(vec![Child::Node(
+                                ReferenceCounter::new(subnode),
+                            )]),
+                        };
+                        result
+                    } else {
+                        // Different index
+                        let new_child = Child::Entry { hash, key, value };
+                        let (first, second) = if index < new_index {
+                            (collision_child, new_child)
+                        } else {
+                            (new_child, collision_child)
+                        };
+                        *node = Node::Bitmap {
+                            bitmap: bit | new_bit,
+                            children: ReferenceCounter::from(vec![first, second]),
+                        };
+                        (None, true)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Inserts into a bitmap node using COW semantics.
+    fn insert_into_bitmap_node_cow(
+        bitmap: &mut u32,
+        children: &mut ReferenceCounter<[Child<K, V>]>,
+        key: K,
+        value: V,
+        hash: u64,
+        depth: usize,
+    ) -> (Option<V>, bool) {
+        let index = hash_index(hash, depth);
+        let bit = 1u32 << index;
+        let position = (*bitmap & (bit - 1)).count_ones() as usize;
+        let children_mut = ReferenceCounter::make_mut(children);
+
+        if *bitmap & bit == 0 {
+            // Slot is empty - add new entry
+            let mut new_children = children_mut.to_vec();
+            new_children.insert(position, Child::Entry { hash, key, value });
+            *children = ReferenceCounter::from(new_children);
+            *bitmap |= bit;
+            (None, true)
+        } else {
+            // Slot is occupied
+            match &mut children_mut[position] {
+                Child::Entry {
+                    hash: child_hash,
+                    key: child_key,
+                    value: child_value,
+                } => {
+                    if *child_key == key {
+                        // Same key, replace value
+                        let old_value = std::mem::replace(child_value, value);
+                        (Some(old_value), false)
+                    } else if *child_hash == hash {
+                        // Hash collision - create collision node
+                        let collision = Node::Collision {
+                            hash,
+                            entries: ReferenceCounter::from(vec![
+                                (child_key.clone(), child_value.clone()),
+                                (key, value),
+                            ]),
+                        };
+                        children_mut[position] = Child::Node(ReferenceCounter::new(collision));
+                        (None, true)
+                    } else {
+                        // Different hash - create subnode
+                        let child_entry = Node::Entry {
+                            hash: *child_hash,
+                            key: child_key.clone(),
+                            value: child_value.clone(),
+                        };
+                        let (subnode, _) = PersistentHashMap::insert_into_node(
+                            &child_entry,
+                            key,
+                            value,
+                            hash,
+                            depth + 1,
+                        );
+                        children_mut[position] = Child::Node(ReferenceCounter::new(subnode));
+                        (None, true)
+                    }
+                }
+                Child::Node(subnode) => {
+                    let subnode_mut = ReferenceCounter::make_mut(subnode);
+                    Self::insert_into_node_cow(subnode_mut, key, value, hash, depth + 1)
+                }
+            }
+        }
+    }
+
+    /// Removes a key from the map and returns the value if it was present.
+    ///
+    /// The key may be any borrowed form of the map's key type.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to remove
+    ///
+    /// # Returns
+    ///
+    /// The removed value if the key was present, otherwise `None`.
+    ///
+    /// # Complexity
+    ///
+    /// O(log32 N)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientHashMap;
+    ///
+    /// let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+    /// transient.insert("key".to_string(), 42);
+    /// assert_eq!(transient.remove("key"), Some(42));
+    /// assert_eq!(transient.remove("key"), None);
+    /// assert!(transient.is_empty());
+    /// ```
+    pub fn remove<Q>(&mut self, key: &Q) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        let hash = compute_hash(key);
+        let root = ReferenceCounter::make_mut(&mut self.root);
+        let result = Self::remove_from_node_cow(root, key, hash, 0);
+        if result.is_some() {
+            self.length = self.length.saturating_sub(1);
+        }
+        result
+    }
+
+    /// Recursively removes from a node using COW semantics.
+    fn remove_from_node_cow<Q>(node: &mut Node<K, V>, key: &Q, hash: u64, depth: usize) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        match node {
+            Node::Empty => None,
+            Node::Entry {
+                hash: entry_hash,
+                key: entry_key,
+                value,
+            } => {
+                if *entry_hash == hash && (*entry_key).borrow() == key {
+                    let old_value = value.clone();
+                    *node = Node::Empty;
+                    Some(old_value)
+                } else {
+                    None
+                }
+            }
+            Node::Bitmap { bitmap, children } => {
+                Self::remove_from_bitmap_node_cow(bitmap, children, key, hash, depth)
+            }
+            Node::Collision {
+                hash: collision_hash,
+                entries,
+            } => {
+                if *collision_hash != hash {
+                    return None;
+                }
+
+                let entries_mut = ReferenceCounter::make_mut(entries);
+                let found_index = entries_mut
+                    .iter()
+                    .position(|(entry_key, _)| entry_key.borrow() == key)?;
+
+                let removed_value = entries_mut[found_index].1.clone();
+
+                if entries_mut.len() == 2 {
+                    // Convert back to single entry
+                    let other_index = 1 - found_index;
+                    let (remaining_key, remaining_value) = entries_mut[other_index].clone();
+                    *node = Node::Entry {
+                        hash: *collision_hash,
+                        key: remaining_key,
+                        value: remaining_value,
+                    };
+                } else {
+                    let mut new_entries = entries_mut.to_vec();
+                    new_entries.remove(found_index);
+                    *entries = ReferenceCounter::from(new_entries);
+                }
+
+                Some(removed_value)
+            }
+        }
+    }
+
+    /// Removes from a bitmap node using COW semantics.
+    fn remove_from_bitmap_node_cow<Q>(
+        bitmap: &mut u32,
+        children: &mut ReferenceCounter<[Child<K, V>]>,
+        key: &Q,
+        hash: u64,
+        depth: usize,
+    ) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        let index = hash_index(hash, depth);
+        let bit = 1u32 << index;
+
+        if *bitmap & bit == 0 {
+            return None;
+        }
+
+        let position = (*bitmap & (bit - 1)).count_ones() as usize;
+        let children_mut = ReferenceCounter::make_mut(children);
+
+        match &mut children_mut[position] {
+            Child::Entry {
+                key: child_key,
+                value: child_value,
+                ..
+            } => {
+                if (*child_key).borrow() == key {
+                    let removed_value = child_value.clone();
+
+                    // Remove this entry from the bitmap
+                    let new_bitmap = *bitmap & !bit;
+                    if new_bitmap == 0 {
+                        // This would make the bitmap empty - not expected at root
+                        // but handle it gracefully
+                    }
+
+                    let mut new_children = children_mut.to_vec();
+                    new_children.remove(position);
+                    *children = ReferenceCounter::from(new_children);
+                    *bitmap = new_bitmap;
+
+                    Some(removed_value)
+                } else {
+                    None
+                }
+            }
+            Child::Node(subnode) => {
+                let subnode_mut = ReferenceCounter::make_mut(subnode);
+                let result = Self::remove_from_node_cow(subnode_mut, key, hash, depth + 1);
+
+                if result.is_some() {
+                    // Check if we need to simplify the structure
+                    match subnode_mut {
+                        Node::Empty => {
+                            // Remove this child
+                            let new_bitmap = *bitmap & !bit;
+                            let mut new_children = children_mut.to_vec();
+                            new_children.remove(position);
+                            *children = ReferenceCounter::from(new_children);
+                            *bitmap = new_bitmap;
+                        }
+                        Node::Entry {
+                            hash: entry_hash,
+                            key: entry_key,
+                            value: entry_value,
+                        } => {
+                            // Promote entry up
+                            children_mut[position] = Child::Entry {
+                                hash: *entry_hash,
+                                key: entry_key.clone(),
+                                value: entry_value.clone(),
+                            };
+                        }
+                        _ => {}
+                    }
+                }
+
+                result
+            }
+        }
+    }
+
+    /// Returns a mutable reference to the value corresponding to the key.
+    ///
+    /// This operation uses Copy-on-Write (COW) semantics to ensure that
+    /// shared nodes are copied before mutation.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to look up
+    ///
+    /// # Complexity
+    ///
+    /// O(log32 N)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientHashMap;
+    ///
+    /// let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+    /// transient.insert("count".to_string(), 0);
+    ///
+    /// if let Some(count) = transient.get_mut("count") {
+    ///     *count += 1;
+    /// }
+    ///
+    /// assert_eq!(transient.get("count"), Some(&1));
+    /// ```
+    pub fn get_mut<Q>(&mut self, key: &Q) -> Option<&mut V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        let hash = compute_hash(key);
+        let root = ReferenceCounter::make_mut(&mut self.root);
+        Self::get_mut_from_node(root, key, hash, 0)
+    }
+
+    /// Recursively gets a mutable reference from a node using COW semantics.
+    fn get_mut_from_node<'a, Q>(
+        node: &'a mut Node<K, V>,
+        key: &Q,
+        hash: u64,
+        depth: usize,
+    ) -> Option<&'a mut V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        match node {
+            Node::Empty => None,
+            Node::Entry {
+                hash: entry_hash,
+                key: entry_key,
+                value,
+            } => {
+                if *entry_hash == hash && (*entry_key).borrow() == key {
+                    Some(value)
+                } else {
+                    None
+                }
+            }
+            Node::Bitmap { bitmap, children } => {
+                let index = hash_index(hash, depth);
+                let bit = 1u32 << index;
+
+                if *bitmap & bit == 0 {
+                    return None;
+                }
+
+                let position = (*bitmap & (bit - 1)).count_ones() as usize;
+                let children_mut = ReferenceCounter::make_mut(children);
+
+                match &mut children_mut[position] {
+                    Child::Entry {
+                        hash: child_hash,
+                        key: child_key,
+                        value,
+                    } => {
+                        if *child_hash == hash && (*child_key).borrow() == key {
+                            Some(value)
+                        } else {
+                            None
+                        }
+                    }
+                    Child::Node(subnode) => {
+                        let subnode_mut = ReferenceCounter::make_mut(subnode);
+                        Self::get_mut_from_node(subnode_mut, key, hash, depth + 1)
+                    }
+                }
+            }
+            Node::Collision {
+                hash: collision_hash,
+                entries,
+            } => {
+                if *collision_hash != hash {
+                    return None;
+                }
+
+                let entries_mut = ReferenceCounter::make_mut(entries);
+                for entry in entries_mut.iter_mut() {
+                    if entry.0.borrow() == key {
+                        return Some(&mut entry.1);
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    /// Updates the value at the given key using a function.
+    ///
+    /// Returns `true` if the key was found and updated, `false` otherwise.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to update
+    /// * `function` - A function that transforms the old value into the new value
+    ///
+    /// # Complexity
+    ///
+    /// O(log32 N)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientHashMap;
+    ///
+    /// let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+    /// transient.insert("count".to_string(), 10);
+    ///
+    /// assert!(transient.update_with("count", |x| x * 2));
+    /// assert_eq!(transient.get("count"), Some(&20));
+    ///
+    /// assert!(!transient.update_with("missing", |x| x * 2));
+    /// ```
+    pub fn update_with<Q, F>(&mut self, key: &Q, function: F) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+        F: FnOnce(V) -> V,
+    {
+        self.get_mut(key).is_some_and(|value_ref| {
+            let old_value = value_ref.clone();
+            *value_ref = function(old_value);
+            true
+        })
+    }
+
+    /// Extends the map with elements from an iterator.
+    ///
+    /// # Arguments
+    ///
+    /// * `iter` - An iterator over key-value pairs to insert
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientHashMap;
+    ///
+    /// let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+    /// transient.extend([
+    ///     ("one".to_string(), 1),
+    ///     ("two".to_string(), 2),
+    ///     ("three".to_string(), 3),
+    /// ]);
+    /// assert_eq!(transient.len(), 3);
+    /// ```
+    pub fn extend<I: IntoIterator<Item = (K, V)>>(&mut self, iter: I) {
+        for (key, value) in iter {
+            self.insert(key, value);
+        }
+    }
+
+    /// Converts this transient map into a persistent map.
+    ///
+    /// This consumes the `TransientHashMap` and returns a `PersistentHashMap`.
+    /// The conversion is O(1) as it simply moves the internal data.
+    ///
+    /// # Complexity
+    ///
+    /// O(1) - only moves fields
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientHashMap;
+    ///
+    /// let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+    /// transient.insert("one".to_string(), 1);
+    /// transient.insert("two".to_string(), 2);
+    /// let persistent = transient.persistent();
+    /// assert_eq!(persistent.len(), 2);
+    /// assert_eq!(persistent.get("one"), Some(&1));
+    /// ```
+    #[must_use]
+    pub fn persistent(self) -> PersistentHashMap<K, V> {
+        PersistentHashMap {
+            root: self.root,
+            length: self.length,
+        }
+    }
+}
+
+impl<K: Clone + Hash + Eq, V: Clone> Default for TransientHashMap<K, V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<K: Clone + Hash + Eq, V: Clone> FromIterator<(K, V)> for TransientHashMap<K, V> {
+    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+        let mut transient = Self::new();
+        transient.extend(iter);
+        transient
+    }
+}
+
+// =============================================================================
+// PersistentHashMap::transient() method
+// =============================================================================
+
+impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
+    /// Converts this persistent map into a transient map.
+    ///
+    /// This consumes the `PersistentHashMap` and returns a `TransientHashMap`
+    /// that can be efficiently mutated. The conversion is O(1) as it simply
+    /// moves the internal data.
+    ///
+    /// # Complexity
+    ///
+    /// O(1) - only moves fields
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentHashMap;
+    ///
+    /// let persistent: PersistentHashMap<String, i32> = [
+    ///     ("one".to_string(), 1),
+    ///     ("two".to_string(), 2),
+    /// ].into_iter().collect();
+    ///
+    /// let mut transient = persistent.transient();
+    /// transient.insert("three".to_string(), 3);
+    /// transient.remove("one");
+    ///
+    /// let new_persistent = transient.persistent();
+    /// assert_eq!(new_persistent.len(), 2);
+    /// assert_eq!(new_persistent.get("two"), Some(&2));
+    /// assert_eq!(new_persistent.get("three"), Some(&3));
+    /// ```
+    #[must_use]
+    pub fn transient(self) -> TransientHashMap<K, V> {
+        TransientHashMap {
+            root: self.root,
+            length: self.length,
+            _marker: PhantomData,
+        }
     }
 }
 
@@ -2913,5 +3779,321 @@ mod serde_tests {
         let map: PersistentHashMap<String, i32> = serde_json::from_str(json).unwrap();
         assert_eq!(map.len(), 1);
         assert_eq!(map.get("key"), Some(&2));
+    }
+}
+
+// =============================================================================
+// TransientHashMap Tests
+// =============================================================================
+
+#[cfg(test)]
+mod transient_hashmap_tests {
+    use super::*;
+    use rstest::rstest;
+
+    #[rstest]
+    fn test_transient_hashmap_new() {
+        let transient: TransientHashMap<String, i32> = TransientHashMap::new();
+        assert!(transient.is_empty());
+        assert_eq!(transient.len(), 0);
+    }
+
+    #[rstest]
+    fn test_transient_hashmap_insert_and_get() {
+        let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+        assert_eq!(transient.insert("one".to_string(), 1), None);
+        assert_eq!(transient.insert("two".to_string(), 2), None);
+
+        assert_eq!(transient.len(), 2);
+        assert_eq!(transient.get("one"), Some(&1));
+        assert_eq!(transient.get("two"), Some(&2));
+        assert_eq!(transient.get("three"), None);
+    }
+
+    #[rstest]
+    fn test_transient_hashmap_insert_overwrites() {
+        let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+        assert_eq!(transient.insert("key".to_string(), 1), None);
+        assert_eq!(transient.insert("key".to_string(), 2), Some(1));
+        assert_eq!(transient.get("key"), Some(&2));
+        assert_eq!(transient.len(), 1);
+    }
+
+    #[rstest]
+    fn test_transient_hashmap_remove() {
+        let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+        transient.insert("a".to_string(), 1);
+        transient.insert("b".to_string(), 2);
+
+        assert_eq!(transient.remove("a"), Some(1));
+        assert_eq!(transient.len(), 1);
+        assert_eq!(transient.get("a"), None);
+        assert_eq!(transient.get("b"), Some(&2));
+
+        assert_eq!(transient.remove("a"), None);
+    }
+
+    #[rstest]
+    fn test_transient_hashmap_contains_key() {
+        let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+        transient.insert("key".to_string(), 42);
+
+        assert!(transient.contains_key("key"));
+        assert!(!transient.contains_key("other"));
+    }
+
+    #[rstest]
+    fn test_transient_hashmap_get_mut() {
+        let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+        transient.insert("count".to_string(), 0);
+
+        if let Some(count) = transient.get_mut("count") {
+            *count += 10;
+        }
+
+        assert_eq!(transient.get("count"), Some(&10));
+    }
+
+    #[rstest]
+    fn test_transient_hashmap_update_with() {
+        let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+        transient.insert("count".to_string(), 5);
+
+        assert!(transient.update_with("count", |x| x * 2));
+        assert_eq!(transient.get("count"), Some(&10));
+
+        assert!(!transient.update_with("missing", |x| x * 2));
+    }
+
+    #[rstest]
+    fn test_transient_hashmap_extend() {
+        let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+        transient.extend([
+            ("one".to_string(), 1),
+            ("two".to_string(), 2),
+            ("three".to_string(), 3),
+        ]);
+
+        assert_eq!(transient.len(), 3);
+        assert_eq!(transient.get("one"), Some(&1));
+        assert_eq!(transient.get("two"), Some(&2));
+        assert_eq!(transient.get("three"), Some(&3));
+    }
+
+    #[rstest]
+    fn test_transient_hashmap_from_iterator() {
+        let transient: TransientHashMap<String, i32> = [("a".to_string(), 1), ("b".to_string(), 2)]
+            .into_iter()
+            .collect();
+
+        assert_eq!(transient.len(), 2);
+        assert_eq!(transient.get("a"), Some(&1));
+        assert_eq!(transient.get("b"), Some(&2));
+    }
+
+    #[rstest]
+    fn test_transient_hashmap_persistent() {
+        let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+        transient.insert("one".to_string(), 1);
+        transient.insert("two".to_string(), 2);
+
+        let persistent = transient.persistent();
+        assert_eq!(persistent.len(), 2);
+        assert_eq!(persistent.get("one"), Some(&1));
+        assert_eq!(persistent.get("two"), Some(&2));
+    }
+
+    #[rstest]
+    fn test_persistent_hashmap_transient() {
+        let persistent: PersistentHashMap<String, i32> =
+            [("one".to_string(), 1), ("two".to_string(), 2)]
+                .into_iter()
+                .collect();
+
+        let mut transient = persistent.transient();
+        transient.insert("three".to_string(), 3);
+        transient.remove("one");
+
+        let new_persistent = transient.persistent();
+        assert_eq!(new_persistent.len(), 2);
+        assert_eq!(new_persistent.get("one"), None);
+        assert_eq!(new_persistent.get("two"), Some(&2));
+        assert_eq!(new_persistent.get("three"), Some(&3));
+    }
+
+    // =========================================================================
+    // Transient-Persistent Roundtrip Law Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_transient_persistent_roundtrip_empty() {
+        let original: PersistentHashMap<String, i32> = PersistentHashMap::new();
+        let result = original.clone().transient().persistent();
+        assert_eq!(result, original);
+    }
+
+    #[rstest]
+    fn test_transient_persistent_roundtrip_single() {
+        let original = PersistentHashMap::singleton("key".to_string(), 42);
+        let result = original.clone().transient().persistent();
+        assert_eq!(result, original);
+    }
+
+    #[rstest]
+    fn test_transient_persistent_roundtrip_multiple() {
+        let original: PersistentHashMap<String, i32> = [
+            ("a".to_string(), 1),
+            ("b".to_string(), 2),
+            ("c".to_string(), 3),
+        ]
+        .into_iter()
+        .collect();
+        let result = original.clone().transient().persistent();
+        assert_eq!(result, original);
+    }
+
+    #[rstest]
+    fn test_transient_persistent_roundtrip_large() {
+        let mut original: PersistentHashMap<String, i32> = PersistentHashMap::new();
+        for i in 0..1000 {
+            original = original.insert(format!("key{i}"), i);
+        }
+        let result = original.clone().transient().persistent();
+        assert_eq!(result, original);
+    }
+
+    // =========================================================================
+    // Mutation Equivalence Law Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_insert_equivalence() {
+        let base: PersistentHashMap<String, i32> = [("a".to_string(), 1), ("b".to_string(), 2)]
+            .into_iter()
+            .collect();
+
+        let via_persistent = base.insert("c".to_string(), 3);
+
+        let via_transient = {
+            let mut transient = base.transient();
+            transient.insert("c".to_string(), 3);
+            transient.persistent()
+        };
+
+        assert_eq!(via_persistent, via_transient);
+    }
+
+    #[rstest]
+    fn test_remove_equivalence() {
+        let base: PersistentHashMap<String, i32> = [
+            ("a".to_string(), 1),
+            ("b".to_string(), 2),
+            ("c".to_string(), 3),
+        ]
+        .into_iter()
+        .collect();
+
+        let via_persistent = base.remove("b");
+
+        let via_transient = {
+            let mut transient = base.transient();
+            transient.remove("b");
+            transient.persistent()
+        };
+
+        assert_eq!(via_persistent, via_transient);
+    }
+
+    // =========================================================================
+    // COW (Copy-on-Write) Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_transient_cow_preserves_original_persistent() {
+        let original: PersistentHashMap<String, i32> = [("a".to_string(), 1), ("b".to_string(), 2)]
+            .into_iter()
+            .collect();
+
+        // Clone the original before creating transient
+        let original_clone = original.clone();
+
+        let mut transient = original.transient();
+        transient.insert("c".to_string(), 3);
+        transient.remove("a");
+
+        let modified = transient.persistent();
+
+        // The original clone should be unchanged
+        assert_eq!(original_clone.len(), 2);
+        assert_eq!(original_clone.get("a"), Some(&1));
+        assert_eq!(original_clone.get("b"), Some(&2));
+        assert_eq!(original_clone.get("c"), None);
+
+        // The modified version should have the changes
+        assert_eq!(modified.len(), 2);
+        assert_eq!(modified.get("a"), None);
+        assert_eq!(modified.get("b"), Some(&2));
+        assert_eq!(modified.get("c"), Some(&3));
+    }
+
+    #[rstest]
+    fn test_transient_batch_operations() {
+        let mut transient: TransientHashMap<i32, i32> = TransientHashMap::new();
+
+        // Insert many elements
+        for i in 0..100 {
+            transient.insert(i, i * 10);
+        }
+
+        // Update some elements
+        for i in 0..50 {
+            transient.update_with(&i, |v| v + 1);
+        }
+
+        // Remove some elements
+        for i in 25..75 {
+            transient.remove(&i);
+        }
+
+        let persistent = transient.persistent();
+
+        // Verify the results
+        assert_eq!(persistent.len(), 50); // 0..25 and 75..100
+
+        for i in 0..25 {
+            assert_eq!(persistent.get(&i), Some(&(i * 10 + 1)));
+        }
+
+        for i in 25..75 {
+            assert_eq!(persistent.get(&i), None);
+        }
+
+        for i in 75..100 {
+            assert_eq!(persistent.get(&i), Some(&(i * 10)));
+        }
+    }
+
+    #[rstest]
+    fn test_transient_default() {
+        let transient: TransientHashMap<String, i32> = TransientHashMap::default();
+        assert!(transient.is_empty());
+    }
+
+    #[rstest]
+    fn test_transient_hashmap_many_insertions() {
+        let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+
+        for i in 0..1000 {
+            transient.insert(format!("key{i}"), i);
+        }
+
+        assert_eq!(transient.len(), 1000);
+
+        for i in 0..1000 {
+            assert_eq!(transient.get(&format!("key{i}")), Some(&i));
+        }
+
+        let persistent = transient.persistent();
+        assert_eq!(persistent.len(), 1000);
     }
 }

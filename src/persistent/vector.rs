@@ -103,6 +103,75 @@ impl<T: Clone> Node<T> {
 }
 
 // =============================================================================
+// TransientVector Definition
+// =============================================================================
+
+use std::marker::PhantomData;
+use std::rc::Rc;
+
+/// A transient (temporarily mutable) version of `PersistentVector`.
+///
+/// `TransientVector` provides efficient batch mutation operations by avoiding
+/// the structural sharing overhead during construction. Once all mutations
+/// are complete, call [`TransientVector::persistent()`] to convert back to an
+/// immutable `PersistentVector`.
+///
+/// # Design
+///
+/// This follows the Clojure transient pattern:
+/// - Convert from persistent to transient with `transient()`
+/// - Perform batch mutations with `&mut self` methods
+/// - Convert back with `persistent()`
+///
+/// # Thread Safety
+///
+/// `TransientVector` is intentionally **not** `Send` or `Sync`. It is designed
+/// for single-threaded batch construction. Once converted to `PersistentVector`,
+/// the result can be shared across threads (when the `arc` feature is enabled).
+///
+/// # Type Constraints
+///
+/// `TransientVector<T>` requires `T: Clone` because Copy-on-Write (COW)
+/// semantics are used internally via `Rc::make_mut()` / `Arc::make_mut()`.
+///
+/// # Examples
+///
+/// ```rust
+/// use lambars::persistent::PersistentVector;
+///
+/// // Efficient batch construction
+/// let mut transient = PersistentVector::new().transient();
+/// for i in 0..1000 {
+///     transient.push_back(i);
+/// }
+/// let persistent = transient.persistent();
+/// assert_eq!(persistent.len(), 1000);
+/// ```
+pub struct TransientVector<T> {
+    root: ReferenceCounter<Node<T>>,
+    tail: Vec<T>,
+    length: usize,
+    shift: usize,
+    /// Marker to ensure `!Send` and `!Sync`.
+    _marker: PhantomData<Rc<()>>,
+}
+
+// Static assertions to verify TransientVector is not Send/Sync
+static_assertions::assert_not_impl_any!(TransientVector<i32>: Send, Sync);
+static_assertions::assert_not_impl_any!(TransientVector<String>: Send, Sync);
+
+// Arc feature verification: even with Arc, TransientVector remains !Send/!Sync
+#[cfg(feature = "arc")]
+mod arc_send_sync_verification {
+    use super::TransientVector;
+    use std::sync::Arc;
+
+    // Arc<T> where T: Send+Sync is Send+Sync, but TransientVector should still be !Send/!Sync
+    static_assertions::assert_not_impl_any!(TransientVector<Arc<i32>>: Send, Sync);
+    static_assertions::assert_not_impl_any!(TransientVector<Arc<String>>: Send, Sync);
+}
+
+// =============================================================================
 // PersistentVector Definition
 // =============================================================================
 
@@ -2257,6 +2326,687 @@ fn build_root_from_elements<T>(elements: Vec<T>) -> (ReferenceCounter<Node<T>>, 
     )
 }
 
+// =============================================================================
+// TransientVector Implementation
+// =============================================================================
+
+impl<T: Clone> TransientVector<T> {
+    /// Creates a new empty `TransientVector`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientVector;
+    ///
+    /// let transient: TransientVector<i32> = TransientVector::new();
+    /// assert!(transient.is_empty());
+    /// ```
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            root: ReferenceCounter::new(Node::empty_branch()),
+            tail: Vec::new(),
+            length: 0,
+            shift: BITS_PER_LEVEL,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Returns the number of elements in the vector.
+    ///
+    /// # Complexity
+    ///
+    /// O(1)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientVector;
+    ///
+    /// let mut transient: TransientVector<i32> = TransientVector::new();
+    /// assert_eq!(transient.len(), 0);
+    /// transient.push_back(1);
+    /// assert_eq!(transient.len(), 1);
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.length
+    }
+
+    /// Returns `true` if the vector contains no elements.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientVector;
+    ///
+    /// let mut transient: TransientVector<i32> = TransientVector::new();
+    /// assert!(transient.is_empty());
+    /// transient.push_back(1);
+    /// assert!(!transient.is_empty());
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.length == 0
+    }
+
+    /// Returns the starting index of the tail buffer.
+    #[inline]
+    const fn tail_offset(&self) -> usize {
+        if self.length < BRANCHING_FACTOR {
+            0
+        } else {
+            ((self.length - 1) >> BITS_PER_LEVEL) << BITS_PER_LEVEL
+        }
+    }
+
+    /// Returns a reference to the element at the given index.
+    ///
+    /// Returns `None` if the index is out of bounds.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - The zero-based index of the element
+    ///
+    /// # Complexity
+    ///
+    /// O(log32 N)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientVector;
+    ///
+    /// let mut transient: TransientVector<i32> = TransientVector::new();
+    /// transient.push_back(1);
+    /// transient.push_back(2);
+    /// assert_eq!(transient.get(0), Some(&1));
+    /// assert_eq!(transient.get(1), Some(&2));
+    /// assert_eq!(transient.get(10), None);
+    /// ```
+    #[must_use]
+    pub fn get(&self, index: usize) -> Option<&T> {
+        if index >= self.length {
+            return None;
+        }
+
+        let tail_offset = self.tail_offset();
+
+        if index >= tail_offset {
+            // Element is in the tail
+            self.tail.get(index - tail_offset)
+        } else {
+            // Element is in the root tree
+            self.get_from_root(index)
+        }
+    }
+
+    /// Gets an element from the root tree.
+    fn get_from_root(&self, index: usize) -> Option<&T> {
+        let mut node = &self.root;
+        let mut level = self.shift;
+
+        while level > 0 {
+            match node.as_ref() {
+                Node::Branch(children) => {
+                    let child_index = (index >> level) & MASK;
+                    match &children[child_index] {
+                        Some(child) => {
+                            node = child;
+                            level -= BITS_PER_LEVEL;
+                        }
+                        None => return None,
+                    }
+                }
+                Node::Leaf(_) => break,
+            }
+        }
+
+        match node.as_ref() {
+            Node::Leaf(elements) => elements.get(index & MASK),
+            Node::Branch(children) => {
+                let child_index = index & MASK;
+                children[child_index]
+                    .as_ref()
+                    .and_then(|child| match child.as_ref() {
+                        Node::Leaf(elements) => elements.first(),
+                        Node::Branch(_) => None,
+                    })
+            }
+        }
+    }
+
+    /// Appends an element to the back of the vector.
+    ///
+    /// This method mutates `self` in place, unlike `PersistentVector::push_back`
+    /// which returns a new vector.
+    ///
+    /// # Arguments
+    ///
+    /// * `element` - The element to append
+    ///
+    /// # Complexity
+    ///
+    /// O(log32 N) amortized O(1) due to tail optimization
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientVector;
+    ///
+    /// let mut transient: TransientVector<i32> = TransientVector::new();
+    /// transient.push_back(1);
+    /// transient.push_back(2);
+    /// transient.push_back(3);
+    /// assert_eq!(transient.len(), 3);
+    /// ```
+    pub fn push_back(&mut self, element: T) {
+        if self.tail.len() < BRANCHING_FACTOR {
+            // Tail has space, just add to tail
+            self.tail.push(element);
+        } else {
+            // Tail is full, push tail to root and create new tail
+            self.push_tail_to_root();
+            self.tail = vec![element];
+        }
+        self.length += 1;
+    }
+
+    /// Pushes the current tail into the root tree.
+    fn push_tail_to_root(&mut self) {
+        let tail_leaf = Node::Leaf(ReferenceCounter::from(std::mem::take(&mut self.tail)));
+        let tail_offset = self.tail_offset();
+
+        // Check if we need to increase the tree depth
+        let root_overflow = (tail_offset >> self.shift) >= BRANCHING_FACTOR;
+
+        if root_overflow {
+            // Create a new root level
+            let mut new_root_children: [Option<ReferenceCounter<Node<T>>>; BRANCHING_FACTOR] =
+                std::array::from_fn(|_| None);
+            new_root_children[0] = Some(self.root.clone());
+            new_root_children[1] =
+                Some(ReferenceCounter::new(Self::new_path(self.shift, tail_leaf)));
+
+            self.root =
+                ReferenceCounter::new(Node::Branch(ReferenceCounter::new(new_root_children)));
+            self.shift += BITS_PER_LEVEL;
+        } else {
+            // Push tail into existing root using COW
+            self.push_tail_into_root_cow(tail_offset, tail_leaf);
+        }
+    }
+
+    /// Creates a new path from root to the leaf.
+    fn new_path(level: usize, node: Node<T>) -> Node<T> {
+        if level == 0 {
+            node
+        } else {
+            let mut children: [Option<ReferenceCounter<Node<T>>>; BRANCHING_FACTOR] =
+                std::array::from_fn(|_| None);
+            children[0] = Some(ReferenceCounter::new(Self::new_path(
+                level - BITS_PER_LEVEL,
+                node,
+            )));
+            Node::Branch(ReferenceCounter::new(children))
+        }
+    }
+
+    /// Pushes a tail leaf into the tree using Copy-on-Write semantics.
+    fn push_tail_into_root_cow(&mut self, tail_offset: usize, tail_node: Node<T>) {
+        // Use Rc::make_mut / Arc::make_mut for COW
+        let root = ReferenceCounter::make_mut(&mut self.root);
+        Self::push_tail_into_node_cow(root, self.shift, tail_offset, tail_node);
+    }
+
+    /// Recursively pushes a tail node into the tree with COW.
+    fn push_tail_into_node_cow(
+        node: &mut Node<T>,
+        level: usize,
+        tail_offset: usize,
+        tail_node: Node<T>,
+    ) {
+        let subindex = (tail_offset >> level) & MASK;
+
+        match node {
+            Node::Branch(children) => {
+                let children_mut = ReferenceCounter::make_mut(children);
+
+                if level == BITS_PER_LEVEL {
+                    // We're at the bottom branch level, insert the tail leaf
+                    children_mut[subindex] = Some(ReferenceCounter::new(tail_node));
+                } else {
+                    // Recurse down
+                    match &mut children_mut[subindex] {
+                        Some(child) => {
+                            let child_mut = ReferenceCounter::make_mut(child);
+                            Self::push_tail_into_node_cow(
+                                child_mut,
+                                level - BITS_PER_LEVEL,
+                                tail_offset,
+                                tail_node,
+                            );
+                        }
+                        None => {
+                            children_mut[subindex] = Some(ReferenceCounter::new(Self::new_path(
+                                level - BITS_PER_LEVEL,
+                                tail_node,
+                            )));
+                        }
+                    }
+                }
+            }
+            Node::Leaf(_) => {
+                // This shouldn't happen in a well-formed tree
+                *node = tail_node;
+            }
+        }
+    }
+
+    /// Removes the last element from the vector and returns it.
+    ///
+    /// Returns `None` if the vector is empty.
+    ///
+    /// # Complexity
+    ///
+    /// O(log32 N)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientVector;
+    ///
+    /// let mut transient: TransientVector<i32> = TransientVector::new();
+    /// transient.push_back(1);
+    /// transient.push_back(2);
+    /// transient.push_back(3);
+    /// assert_eq!(transient.pop_back(), Some(3));
+    /// assert_eq!(transient.pop_back(), Some(2));
+    /// assert_eq!(transient.len(), 1);
+    /// ```
+    pub fn pop_back(&mut self) -> Option<T> {
+        if self.is_empty() {
+            return None;
+        }
+
+        if self.tail.len() > 1 {
+            // Tail has more than one element, just pop from tail
+            self.length -= 1;
+            self.tail.pop()
+        } else if !self.tail.is_empty() {
+            // Tail has exactly one element
+            if self.length == 1 {
+                // This is the last element
+                self.length = 0;
+                self.tail.pop()
+            } else {
+                // Need to get a new tail from root
+                let popped = self.tail.pop();
+                let new_tail_offset = self.tail_offset().saturating_sub(BRANCHING_FACTOR);
+                let new_tail = self.get_leaf_at(new_tail_offset);
+                self.pop_tail_from_root_cow();
+                self.tail = new_tail.to_vec();
+                self.length -= 1;
+                popped
+            }
+        } else {
+            // Tail is empty (shouldn't happen in normal use, but handle defensively)
+            None
+        }
+    }
+
+    /// Gets the leaf at the given offset.
+    fn get_leaf_at(&self, offset: usize) -> ReferenceCounter<[T]> {
+        let mut node = &self.root;
+        let mut level = self.shift;
+
+        while level > 0 {
+            match node.as_ref() {
+                Node::Branch(children) => {
+                    let child_index = (offset >> level) & MASK;
+                    if let Some(child) = &children[child_index] {
+                        node = child;
+                        level -= BITS_PER_LEVEL;
+                    } else {
+                        return ReferenceCounter::from(Vec::<T>::new());
+                    }
+                }
+                Node::Leaf(_) => break,
+            }
+        }
+
+        match node.as_ref() {
+            Node::Leaf(elements) => elements.clone(),
+            Node::Branch(_) => ReferenceCounter::from(Vec::<T>::new()),
+        }
+    }
+
+    /// Removes the tail from the root using COW.
+    fn pop_tail_from_root_cow(&mut self) {
+        let tail_offset = self.length - 2; // Last valid index after pop
+
+        // Use COW to modify the root
+        let root = ReferenceCounter::make_mut(&mut self.root);
+        let is_empty = Self::do_pop_tail_cow(root, self.shift, tail_offset);
+
+        // Check if we should reduce tree depth
+        if is_empty && self.shift > BITS_PER_LEVEL {
+            match &*self.root {
+                Node::Branch(children) => {
+                    let non_none_count = children.iter().filter(|c| c.is_some()).count();
+                    if non_none_count == 1
+                        && let Some(only_child) = &children[0]
+                    {
+                        self.root = only_child.clone();
+                        self.shift -= BITS_PER_LEVEL;
+                    }
+                }
+                Node::Leaf(_) => {}
+            }
+        }
+    }
+
+    /// Recursively pops the tail from the tree with COW.
+    fn do_pop_tail_cow(node: &mut Node<T>, level: usize, offset: usize) -> bool {
+        let subindex = (offset >> level) & MASK;
+
+        match node {
+            Node::Branch(children) => {
+                let children_mut = ReferenceCounter::make_mut(children);
+
+                if level == BITS_PER_LEVEL {
+                    // At bottom level, remove the child
+                    children_mut[subindex] = None;
+                    children_mut.iter().all(|c| c.is_none())
+                } else if let Some(child) = &mut children_mut[subindex] {
+                    let child_mut = ReferenceCounter::make_mut(child);
+                    let is_empty = Self::do_pop_tail_cow(child_mut, level - BITS_PER_LEVEL, offset);
+
+                    if is_empty {
+                        children_mut[subindex] = None;
+                    }
+
+                    children_mut.iter().all(|c| c.is_none())
+                } else {
+                    false
+                }
+            }
+            Node::Leaf(_) => true,
+        }
+    }
+
+    /// Updates the element at the given index.
+    ///
+    /// Returns `Some(old_element)` if the index is valid, `None` if out of bounds.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - The zero-based index to update
+    /// * `element` - The new element value
+    ///
+    /// # Complexity
+    ///
+    /// O(log32 N)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientVector;
+    ///
+    /// let mut transient: TransientVector<i32> = TransientVector::new();
+    /// transient.push_back(1);
+    /// transient.push_back(2);
+    /// transient.push_back(3);
+    /// let old = transient.update(1, 20);
+    /// assert_eq!(old, Some(2));
+    /// assert_eq!(transient.get(1), Some(&20));
+    /// ```
+    pub fn update(&mut self, index: usize, element: T) -> Option<T> {
+        if index >= self.length {
+            return None;
+        }
+
+        let tail_offset = self.tail_offset();
+
+        if index >= tail_offset {
+            // Element is in the tail
+            let tail_index = index - tail_offset;
+            let old = std::mem::replace(&mut self.tail[tail_index], element);
+            Some(old)
+        } else {
+            // Element is in the root tree
+            Some(self.update_in_root_cow(index, element))
+        }
+    }
+
+    /// Updates an element in the root tree using COW.
+    fn update_in_root_cow(&mut self, index: usize, element: T) -> T {
+        let root = ReferenceCounter::make_mut(&mut self.root);
+        Self::do_update_in_root_cow(root, self.shift, index, element)
+    }
+
+    /// Recursively updates an element in the tree with COW.
+    fn do_update_in_root_cow(node: &mut Node<T>, level: usize, index: usize, element: T) -> T {
+        match node {
+            Node::Branch(children) => {
+                let subindex = (index >> level) & MASK;
+                let children_mut = ReferenceCounter::make_mut(children);
+
+                if let Some(child) = &mut children_mut[subindex] {
+                    let child_mut = ReferenceCounter::make_mut(child);
+                    Self::do_update_in_root_cow(child_mut, level - BITS_PER_LEVEL, index, element)
+                } else {
+                    debug_assert!(
+                        false,
+                        "TransientVector internal invariant violation: missing child node at index {index}, level {level}"
+                    );
+                    element
+                }
+            }
+            Node::Leaf(elements) => {
+                let leaf_index = index & MASK;
+                let elements_mut = ReferenceCounter::make_mut(elements);
+                std::mem::replace(&mut elements_mut[leaf_index], element)
+            }
+        }
+    }
+
+    /// Updates the element at the given index using a function.
+    ///
+    /// Returns `true` if the update was successful, `false` if the index was out of bounds.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - The zero-based index to update
+    /// * `function` - A function that transforms the old element into the new element
+    ///
+    /// # Complexity
+    ///
+    /// O(log32 N)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientVector;
+    ///
+    /// let mut transient: TransientVector<i32> = TransientVector::new();
+    /// transient.push_back(1);
+    /// transient.push_back(2);
+    /// transient.push_back(3);
+    /// assert!(transient.update_with(1, |x| x * 10));
+    /// assert_eq!(transient.get(1), Some(&20));
+    /// assert!(!transient.update_with(10, |x| x * 10));
+    /// ```
+    pub fn update_with<F>(&mut self, index: usize, function: F) -> bool
+    where
+        F: FnOnce(T) -> T,
+    {
+        if index >= self.length {
+            return false;
+        }
+
+        let tail_offset = self.tail_offset();
+
+        if index >= tail_offset {
+            // Element is in the tail
+            let tail_index = index - tail_offset;
+            // Use clone to get the old value since T: Clone is already required
+            let old = self.tail[tail_index].clone();
+            self.tail[tail_index] = function(old);
+        } else {
+            // Element is in the root tree
+            self.update_with_in_root_cow(index, function);
+        }
+        true
+    }
+
+    /// Updates an element in the root tree using a function with COW.
+    fn update_with_in_root_cow<F>(&mut self, index: usize, function: F)
+    where
+        F: FnOnce(T) -> T,
+    {
+        let root = ReferenceCounter::make_mut(&mut self.root);
+        Self::do_update_with_in_root_cow(root, self.shift, index, function);
+    }
+
+    /// Recursively updates an element in the tree using a function with COW.
+    fn do_update_with_in_root_cow<F>(node: &mut Node<T>, level: usize, index: usize, function: F)
+    where
+        F: FnOnce(T) -> T,
+    {
+        match node {
+            Node::Branch(children) => {
+                let subindex = (index >> level) & MASK;
+                let children_mut = ReferenceCounter::make_mut(children);
+
+                if let Some(child) = &mut children_mut[subindex] {
+                    let child_mut = ReferenceCounter::make_mut(child);
+                    Self::do_update_with_in_root_cow(
+                        child_mut,
+                        level - BITS_PER_LEVEL,
+                        index,
+                        function,
+                    );
+                }
+            }
+            Node::Leaf(elements) => {
+                let leaf_index = index & MASK;
+                let elements_mut = ReferenceCounter::make_mut(elements);
+                // Use clone to get the old value since T: Clone is already required
+                let old = elements_mut[leaf_index].clone();
+                elements_mut[leaf_index] = function(old);
+            }
+        }
+    }
+
+    /// Extends the vector with elements from an iterator.
+    ///
+    /// # Arguments
+    ///
+    /// * `iter` - An iterator over elements to append
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientVector;
+    ///
+    /// let mut transient: TransientVector<i32> = TransientVector::new();
+    /// transient.extend(0..1000);
+    /// assert_eq!(transient.len(), 1000);
+    /// ```
+    pub fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        for element in iter {
+            self.push_back(element);
+        }
+    }
+
+    /// Converts this transient vector into a persistent vector.
+    ///
+    /// This consumes the `TransientVector` and returns a `PersistentVector`.
+    /// The conversion is O(1) as it simply moves the internal data.
+    ///
+    /// # Complexity
+    ///
+    /// O(1) - only moves fields and wraps the tail
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientVector;
+    ///
+    /// let mut transient: TransientVector<i32> = TransientVector::new();
+    /// transient.push_back(1);
+    /// transient.push_back(2);
+    /// transient.push_back(3);
+    /// let persistent = transient.persistent();
+    /// assert_eq!(persistent.len(), 3);
+    /// assert_eq!(persistent.get(0), Some(&1));
+    /// ```
+    #[must_use]
+    pub fn persistent(self) -> PersistentVector<T> {
+        PersistentVector {
+            length: self.length,
+            shift: self.shift,
+            root: self.root,
+            tail: ReferenceCounter::from(self.tail),
+        }
+    }
+}
+
+impl<T: Clone> Default for TransientVector<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T: Clone> FromIterator<T> for TransientVector<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        let mut transient = Self::new();
+        transient.extend(iter);
+        transient
+    }
+}
+
+// =============================================================================
+// PersistentVector::transient() method
+// =============================================================================
+
+impl<T: Clone> PersistentVector<T> {
+    /// Converts this persistent vector into a transient vector.
+    ///
+    /// This consumes the `PersistentVector` and returns a `TransientVector`
+    /// that can be efficiently mutated.
+    ///
+    /// # Complexity
+    ///
+    /// O(1) - moves root and copies tail (max 32 elements)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentVector;
+    ///
+    /// let persistent: PersistentVector<i32> = (1..=3).collect();
+    /// let mut transient = persistent.transient();
+    /// transient.push_back(4);
+    /// transient.push_back(5);
+    /// let new_persistent = transient.persistent();
+    /// assert_eq!(new_persistent.len(), 5);
+    /// ```
+    #[must_use]
+    pub fn transient(self) -> TransientVector<T> {
+        TransientVector {
+            root: self.root,
+            tail: self.tail.to_vec(),
+            length: self.length,
+            shift: self.shift,
+            _marker: PhantomData,
+        }
+    }
+}
+
 impl<T: Clone> Foldable for PersistentVector<T> {
     fn fold_left<B, F>(self, init: B, function: F) -> B
     where
@@ -3316,5 +4066,463 @@ mod serde_tests {
         assert_eq!(vector.len(), 2);
         assert_eq!(vector.get(0), Some(&"hello".to_string()));
         assert_eq!(vector.get(1), Some(&"world".to_string()));
+    }
+}
+
+// =============================================================================
+// TransientVector Tests
+// =============================================================================
+
+#[cfg(test)]
+#[allow(clippy::cast_sign_loss)]
+mod transient_vector_tests {
+    use super::*;
+    use rstest::rstest;
+
+    // -------------------------------------------------------------------------
+    // Basic Construction Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_new_creates_empty_transient() {
+        let transient: TransientVector<i32> = TransientVector::new();
+        assert!(transient.is_empty());
+        assert_eq!(transient.len(), 0);
+    }
+
+    #[rstest]
+    fn test_default_creates_empty_transient() {
+        let transient: TransientVector<i32> = TransientVector::default();
+        assert!(transient.is_empty());
+        assert_eq!(transient.len(), 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // push_back Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_push_back_single_element() {
+        let mut transient: TransientVector<i32> = TransientVector::new();
+        transient.push_back(42);
+        assert_eq!(transient.len(), 1);
+        assert_eq!(transient.get(0), Some(&42));
+    }
+
+    #[rstest]
+    fn test_push_back_multiple_elements() {
+        let mut transient: TransientVector<i32> = TransientVector::new();
+        for element_value in 0i32..100 {
+            transient.push_back(element_value);
+        }
+        assert_eq!(transient.len(), 100);
+        for element_value in 0i32..100 {
+            assert_eq!(transient.get(element_value as usize), Some(&element_value));
+        }
+    }
+
+    #[rstest]
+    fn test_push_back_fills_tail_and_root() {
+        let mut transient: TransientVector<i32> = TransientVector::new();
+        // Push more than BRANCHING_FACTOR elements to test root tree creation
+        for element_value in 0i32..100 {
+            transient.push_back(element_value);
+        }
+        assert_eq!(transient.len(), 100);
+        // Verify all elements
+        for element_value in 0i32..100 {
+            assert_eq!(transient.get(element_value as usize), Some(&element_value));
+        }
+    }
+
+    #[rstest]
+    fn test_push_back_large_vector() {
+        let mut transient: TransientVector<i32> = TransientVector::new();
+        for element_index in 0..10_000 {
+            transient.push_back(element_index);
+        }
+        assert_eq!(transient.len(), 10_000);
+        // Spot check some elements
+        assert_eq!(transient.get(0), Some(&0));
+        assert_eq!(transient.get(5_000), Some(&5_000));
+        assert_eq!(transient.get(9_999), Some(&9_999));
+    }
+
+    // -------------------------------------------------------------------------
+    // pop_back Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_pop_back_empty_returns_none() {
+        let mut transient: TransientVector<i32> = TransientVector::new();
+        assert_eq!(transient.pop_back(), None);
+    }
+
+    #[rstest]
+    fn test_pop_back_single_element() {
+        let mut transient: TransientVector<i32> = TransientVector::new();
+        transient.push_back(42);
+        assert_eq!(transient.pop_back(), Some(42));
+        assert!(transient.is_empty());
+    }
+
+    #[rstest]
+    fn test_pop_back_multiple_elements() {
+        let mut transient: TransientVector<i32> = TransientVector::new();
+        transient.push_back(1);
+        transient.push_back(2);
+        transient.push_back(3);
+        assert_eq!(transient.pop_back(), Some(3));
+        assert_eq!(transient.pop_back(), Some(2));
+        assert_eq!(transient.pop_back(), Some(1));
+        assert!(transient.is_empty());
+    }
+
+    #[rstest]
+    fn test_pop_back_from_root() {
+        let mut transient: TransientVector<i32> = TransientVector::new();
+        // Push more than BRANCHING_FACTOR elements
+        for element_index in 0..50 {
+            transient.push_back(element_index);
+        }
+        // Pop all elements
+        for element_index in (0..50).rev() {
+            assert_eq!(transient.pop_back(), Some(element_index));
+        }
+        assert!(transient.is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // get Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_get_out_of_bounds() {
+        let transient: TransientVector<i32> = TransientVector::new();
+        assert_eq!(transient.get(0), None);
+        assert_eq!(transient.get(100), None);
+    }
+
+    #[rstest]
+    fn test_get_from_tail() {
+        let mut transient: TransientVector<i32> = TransientVector::new();
+        transient.push_back(1);
+        transient.push_back(2);
+        transient.push_back(3);
+        assert_eq!(transient.get(0), Some(&1));
+        assert_eq!(transient.get(1), Some(&2));
+        assert_eq!(transient.get(2), Some(&3));
+    }
+
+    #[rstest]
+    fn test_get_from_root() {
+        let mut transient: TransientVector<i32> = TransientVector::new();
+        for element_index in 0..100 {
+            transient.push_back(element_index);
+        }
+        // Elements in the root tree
+        assert_eq!(transient.get(0), Some(&0));
+        assert_eq!(transient.get(31), Some(&31));
+        // Elements in tail
+        assert_eq!(transient.get(99), Some(&99));
+    }
+
+    // -------------------------------------------------------------------------
+    // update Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_update_out_of_bounds() {
+        let mut transient: TransientVector<i32> = TransientVector::new();
+        transient.push_back(1);
+        assert_eq!(transient.update(10, 100), None);
+    }
+
+    #[rstest]
+    fn test_update_in_tail() {
+        let mut transient: TransientVector<i32> = TransientVector::new();
+        transient.push_back(1);
+        transient.push_back(2);
+        transient.push_back(3);
+        let old = transient.update(1, 20);
+        assert_eq!(old, Some(2));
+        assert_eq!(transient.get(1), Some(&20));
+    }
+
+    #[rstest]
+    fn test_update_in_root() {
+        let mut transient: TransientVector<i32> = TransientVector::new();
+        for element_index in 0..100 {
+            transient.push_back(element_index);
+        }
+        let old = transient.update(50, 500);
+        assert_eq!(old, Some(50));
+        assert_eq!(transient.get(50), Some(&500));
+    }
+
+    // -------------------------------------------------------------------------
+    // update_with Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_update_with_out_of_bounds() {
+        let mut transient: TransientVector<i32> = TransientVector::new();
+        transient.push_back(1);
+        assert!(!transient.update_with(10, |x| x * 10));
+    }
+
+    #[rstest]
+    fn test_update_with_in_tail() {
+        let mut transient: TransientVector<i32> = TransientVector::new();
+        transient.push_back(1);
+        transient.push_back(2);
+        transient.push_back(3);
+        assert!(transient.update_with(1, |x| x * 10));
+        assert_eq!(transient.get(1), Some(&20));
+    }
+
+    #[rstest]
+    fn test_update_with_in_root() {
+        let mut transient: TransientVector<i32> = TransientVector::new();
+        for element_index in 0..100 {
+            transient.push_back(element_index);
+        }
+        assert!(transient.update_with(50, |x| x * 10));
+        assert_eq!(transient.get(50), Some(&500));
+    }
+
+    // -------------------------------------------------------------------------
+    // extend Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_extend_empty_iterator() {
+        let mut transient: TransientVector<i32> = TransientVector::new();
+        transient.extend(std::iter::empty());
+        assert!(transient.is_empty());
+    }
+
+    #[rstest]
+    fn test_extend_from_iterator() {
+        let mut transient: TransientVector<i32> = TransientVector::new();
+        transient.extend(0i32..1000);
+        assert_eq!(transient.len(), 1000);
+        for element_value in 0i32..1000 {
+            assert_eq!(transient.get(element_value as usize), Some(&element_value));
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // FromIterator Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_from_iterator() {
+        let transient: TransientVector<i32> = (0i32..100).collect();
+        assert_eq!(transient.len(), 100);
+        for element_value in 0i32..100 {
+            assert_eq!(transient.get(element_value as usize), Some(&element_value));
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // persistent Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_persistent_empty() {
+        let transient: TransientVector<i32> = TransientVector::new();
+        let persistent = transient.persistent();
+        assert!(persistent.is_empty());
+    }
+
+    #[rstest]
+    fn test_persistent_with_elements() {
+        let mut transient: TransientVector<i32> = TransientVector::new();
+        transient.push_back(1);
+        transient.push_back(2);
+        transient.push_back(3);
+        let persistent = transient.persistent();
+        assert_eq!(persistent.len(), 3);
+        assert_eq!(persistent.get(0), Some(&1));
+        assert_eq!(persistent.get(1), Some(&2));
+        assert_eq!(persistent.get(2), Some(&3));
+    }
+
+    #[rstest]
+    fn test_persistent_large_vector() {
+        let mut transient: TransientVector<i32> = TransientVector::new();
+        for element_value in 0i32..10_000 {
+            transient.push_back(element_value);
+        }
+        let persistent = transient.persistent();
+        assert_eq!(persistent.len(), 10_000);
+        for element_value in 0i32..10_000 {
+            assert_eq!(persistent.get(element_value as usize), Some(&element_value));
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // transient Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_transient_empty() {
+        let persistent: PersistentVector<i32> = PersistentVector::new();
+        let transient = persistent.transient();
+        assert!(transient.is_empty());
+    }
+
+    #[rstest]
+    fn test_transient_with_elements() {
+        let persistent: PersistentVector<i32> = (1..=3).collect();
+        let transient = persistent.transient();
+        assert_eq!(transient.len(), 3);
+        assert_eq!(transient.get(0), Some(&1));
+        assert_eq!(transient.get(1), Some(&2));
+        assert_eq!(transient.get(2), Some(&3));
+    }
+
+    #[rstest]
+    fn test_transient_modify_and_persistent() {
+        let persistent: PersistentVector<i32> = (1..=3).collect();
+        let mut transient = persistent.transient();
+        transient.push_back(4);
+        transient.push_back(5);
+        let new_persistent = transient.persistent();
+        assert_eq!(new_persistent.len(), 5);
+        assert_eq!(new_persistent.get(3), Some(&4));
+        assert_eq!(new_persistent.get(4), Some(&5));
+    }
+
+    // -------------------------------------------------------------------------
+    // Roundtrip Law Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_roundtrip_empty() {
+        let original: PersistentVector<i32> = PersistentVector::new();
+        let result = original.clone().transient().persistent();
+        assert_eq!(original, result);
+    }
+
+    #[rstest]
+    fn test_roundtrip_small() {
+        let original: PersistentVector<i32> = (1..=10).collect();
+        let result = original.clone().transient().persistent();
+        assert_eq!(original, result);
+    }
+
+    #[rstest]
+    fn test_roundtrip_large() {
+        let original: PersistentVector<i32> = (0..10_000).collect();
+        let result = original.clone().transient().persistent();
+        assert_eq!(original, result);
+    }
+
+    // -------------------------------------------------------------------------
+    // Mutation Equivalence Law Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_mutation_equivalence_push_back() {
+        let persistent: PersistentVector<i32> = (1..=3).collect();
+        let element = 42;
+
+        // Via transient
+        let via_transient = {
+            let mut transient = persistent.clone().transient();
+            transient.push_back(element);
+            transient.persistent()
+        };
+
+        // Via persistent
+        let via_persistent = persistent.push_back(element);
+
+        assert_eq!(via_transient, via_persistent);
+    }
+
+    #[rstest]
+    fn test_mutation_equivalence_update() {
+        let persistent: PersistentVector<i32> = (1..=10).collect();
+        let index = 5;
+        let element = 500;
+
+        // Via transient
+        let via_transient = {
+            let mut transient = persistent.clone().transient();
+            transient.update(index, element);
+            transient.persistent()
+        };
+
+        // Via persistent
+        let via_persistent = persistent.update(index, element).unwrap();
+
+        assert_eq!(via_transient, via_persistent);
+    }
+
+    #[rstest]
+    fn test_mutation_equivalence_multiple_operations() {
+        let persistent: PersistentVector<i32> = (0..100).collect();
+
+        // Via transient
+        let via_transient = {
+            let mut transient = persistent.clone().transient();
+            for element_value in 100i32..200 {
+                transient.push_back(element_value);
+            }
+            transient.update(50, 5000);
+            transient.persistent()
+        };
+
+        // Via persistent (need a mutable copy)
+        let mut via_persistent = persistent;
+        for element_value in 100i32..200 {
+            via_persistent = via_persistent.push_back(element_value);
+        }
+        via_persistent = via_persistent.update(50, 5000).unwrap();
+
+        assert_eq!(via_transient, via_persistent);
+    }
+
+    // -------------------------------------------------------------------------
+    // COW (Copy-on-Write) Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_cow_shared_structure() {
+        // Create a persistent vector
+        let persistent1: PersistentVector<i32> = (0..100).collect();
+
+        // Clone it (shares structure)
+        let persistent2 = persistent1.clone();
+
+        // Convert first to transient and modify
+        let mut transient = persistent1.transient();
+        transient.update(50, 5000);
+        let modified = transient.persistent();
+
+        // Original clone should be unchanged
+        assert_eq!(persistent2.get(50), Some(&50));
+        assert_eq!(modified.get(50), Some(&5000));
+    }
+
+    #[rstest]
+    fn test_cow_push_back_shared() {
+        // Create a persistent vector
+        let persistent1: PersistentVector<i32> = (0..100).collect();
+
+        // Clone it (shares structure)
+        let persistent2 = persistent1.clone();
+
+        // Convert first to transient and push
+        let mut transient = persistent1.transient();
+        transient.push_back(100);
+        transient.push_back(101);
+        let modified = transient.persistent();
+
+        // Original clone should be unchanged
+        assert_eq!(persistent2.len(), 100);
+        assert_eq!(modified.len(), 102);
     }
 }
