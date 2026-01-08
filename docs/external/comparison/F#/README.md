@@ -1,5 +1,7 @@
 # F# to lambars API Comparison Guide
 
+[English](README.md) | [日本語](README.ja.md)
+
 This document provides a comprehensive comparison between F# functional programming constructs and their equivalents in lambars (Rust).
 
 ## Table of Contents

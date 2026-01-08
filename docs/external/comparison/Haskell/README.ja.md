@@ -1,43 +1,43 @@
-# Haskell to lambars API Comparison Guide
+# Haskell から lambars への API 対応ガイド
 
 [English](README.md) | [日本語](README.ja.md)
 
-This document provides a comprehensive comparison between Haskell functional programming constructs and their equivalents in lambars (Rust). Haskell is the canonical pure functional programming language, and lambars aims to bring many of its abstractions to Rust.
+このドキュメントは、Haskell の関数型プログラミング構造と lambars (Rust) における同等の機能との包括的な対応関係を提供します。Haskell は正統な純粋関数型プログラミング言語であり、lambars はその多くの抽象化を Rust にもたらすことを目指しています。
 
-## Table of Contents
+## 目次
 
-- [Overview](#overview)
-- [Type Classes](#type-classes)
+- [概要](#概要)
+- [型クラス](#型クラス)
   - [Functor](#functor)
   - [Applicative](#applicative)
   - [Monad](#monad)
-  - [Semigroup and Monoid](#semigroup-and-monoid)
+  - [Semigroup と Monoid](#semigroup-と-monoid)
   - [Foldable](#foldable)
   - [Traversable](#traversable)
-- [Maybe and Either](#maybe-and-either)
-- [Do-Notation and List Comprehensions](#do-notation-and-list-comprehensions)
-- [Function Composition](#function-composition)
-- [Currying and Partial Application](#currying-and-partial-application)
-- [Lazy Evaluation](#lazy-evaluation)
+- [Maybe と Either](#maybe-と-either)
+- [Do記法とリスト内包表記](#do記法とリスト内包表記)
+- [関数合成](#関数合成)
+- [カリー化と部分適用](#カリー化と部分適用)
+- [遅延評価](#遅延評価)
 - [Optics (lens)](#optics-lens)
-- [Effect Monads](#effect-monads)
+- [エフェクトモナド](#エフェクトモナド)
   - [IO Monad](#io-monad)
   - [State Monad](#state-monad)
   - [Reader Monad](#reader-monad)
   - [Writer Monad](#writer-monad)
   - [RWS Monad](#rws-monad)
-- [Monad Transformers (mtl)](#monad-transformers-mtl)
-- [Algebraic Effects](#algebraic-effects)
-- [Data Structures](#data-structures)
-- [Pattern Matching](#pattern-matching)
-- [Higher-Kinded Types](#higher-kinded-types)
-- [Algebraic Data Types](#algebraic-data-types)
+- [モナド変換子 (mtl)](#モナド変換子-mtl)
+- [代数的エフェクト](#代数的エフェクト)
+- [データ構造](#データ構造)
+- [パターンマッチング](#パターンマッチング)
+- [高カインド型](#高カインド型)
+- [代数的データ型](#代数的データ型)
 
 ---
 
-## Overview
+## 概要
 
-| Concept | Haskell | lambars (Rust) |
+| 概念 | Haskell | lambars (Rust) |
 |---------|---------|----------------|
 | Functor | `Functor f` | `Functor` trait |
 | Applicative | `Applicative f` | `Applicative` trait |
@@ -48,50 +48,50 @@ This document provides a comprehensive comparison between Haskell functional pro
 | Traversable | `Traversable t` | `Traversable` trait |
 | Maybe | `Maybe a` | `Option<A>` (std) |
 | Either | `Either e a` | `Result<A, E>` (std) |
-| Do-notation (Monad) | `do { ... }` | `eff!` macro |
-| List comprehension | `[x | x <- xs]` | `for_!` macro |
-| Async list comprehension | `do` + `async` / `ListT IO` | `for_async!` macro |
-| Function composition | `.` and `>>>` | `compose!` macro |
-| Pipe | `&` | `pipe!` macro |
+| Do記法 (Monad) | `do { ... }` | `eff!` マクロ |
+| リスト内包表記 | `[x | x <- xs]` | `for_!` マクロ |
+| 非同期リスト内包表記 | `do` + `async` / `ListT IO` | `for_async!` マクロ |
+| 関数合成 | `.` と `>>>` | `compose!` マクロ |
+| パイプ | `&` | `pipe!` マクロ |
 | Lens | `Control.Lens` | `Lens` trait |
 | Prism | `Control.Lens.Prism` | `Prism` trait |
-| IO | `IO a` | `IO<A>` type |
-| State | `State s a` | `State<S, A>` type |
-| Reader | `Reader r a` | `Reader<R, A>` type |
-| Writer | `Writer w a` | `Writer<W, A>` type |
-| RWS | `RWS r w s a` | `RWS<R, W, S, A>` type |
-| StateT | `StateT s m a` | `StateT<S, M, A>` type |
-| ReaderT | `ReaderT r m a` | `ReaderT<R, M, A>` type |
-| WriterT | `WriterT w m a` | `WriterT<W, M, A>` type |
-| ExceptT | `ExceptT e m a` | `ExceptT<E, M, A>` type |
-| Identity | `Identity a` | `Identity<A>` type |
-| Algebraic Effects | `Eff '[e1, e2] a` (freer-simple) | `Eff<EffCons<E1, EffCons<E2, EffNil>>, A>` |
-| Effect membership | `Member e r` | `Member<E, Index>` trait |
-| Lazy | Default (thunks) | `Lazy<A>` type |
-| Trampoline | Trampolining | `Trampoline<A>` type |
+| IO | `IO a` | `IO<A>` 型 |
+| State | `State s a` | `State<S, A>` 型 |
+| Reader | `Reader r a` | `Reader<R, A>` 型 |
+| Writer | `Writer w a` | `Writer<W, A>` 型 |
+| RWS | `RWS r w s a` | `RWS<R, W, S, A>` 型 |
+| StateT | `StateT s m a` | `StateT<S, M, A>` 型 |
+| ReaderT | `ReaderT r m a` | `ReaderT<R, M, A>` 型 |
+| WriterT | `WriterT w m a` | `WriterT<W, M, A>` 型 |
+| ExceptT | `ExceptT e m a` | `ExceptT<E, M, A>` 型 |
+| Identity | `Identity a` | `Identity<A>` 型 |
+| 代数的エフェクト | `Eff '[e1, e2] a` (freer-simple) | `Eff<EffCons<E1, EffCons<E2, EffNil>>, A>` |
+| エフェクトメンバーシップ | `Member e r` | `Member<E, Index>` trait |
+| 遅延評価 | デフォルト (サンク) | `Lazy<A>` 型 |
+| トランポリン | トランポリン処理 | `Trampoline<A>` 型 |
 
 ---
 
-## Type Classes
+## 型クラス
 
 ### Functor
 
-| Haskell | lambars | Description |
+| Haskell | lambars | 説明 |
 |---------|---------|-------------|
-| `fmap f fa` | `Functor::fmap` | Map function over functor |
-| `f <$> fa` | `fa.fmap(f)` | Infix fmap |
-| `fa $> b` | `fa.fmap(\|_\| b)` | Replace with constant |
-| `void fa` | `fa.fmap(\|_\| ())` | Discard value |
-| `fa <$ b` | `fa.fmap(\|_\| b)` | Replace keeping structure |
+| `fmap f fa` | `Functor::fmap` | Functor 上で関数をマップ |
+| `f <$> fa` | `fa.fmap(f)` | 中置 fmap |
+| `fa $> b` | `fa.fmap(\|_\| b)` | 定数で置換 |
+| `void fa` | `fa.fmap(\|_\| ())` | 値を破棄 |
+| `fa <$ b` | `fa.fmap(\|_\| b)` | 構造を保持して置換 |
 
-#### Functor Laws
+#### Functor の法則
 
 ```
-1. Identity:     fmap id == id
-2. Composition:  fmap (f . g) == fmap f . fmap g
+1. 恒等性:     fmap id == id
+2. 合成性:     fmap (f . g) == fmap f . fmap g
 ```
 
-#### Code Examples
+#### コード例
 
 ```haskell
 -- Haskell
@@ -101,17 +101,17 @@ doubled :: Maybe Int
 doubled = fmap (*2) (Just 21)
 -- doubled = Just 42
 
--- Using infix operator
+-- 中置演算子の使用
 doubled' :: Maybe Int
 doubled' = (*2) <$> Just 21
 -- doubled' = Just 42
 
--- List functor
+-- リスト Functor
 doubledList :: [Int]
 doubledList = fmap (*2) [1, 2, 3]
 -- doubledList = [2, 4, 6]
 
--- Replace value
+-- 値の置換
 replaced :: Maybe String
 replaced = Just 42 $> "hello"
 -- replaced = Just "hello"
@@ -124,37 +124,37 @@ use lambars::typeclass::Functor;
 let doubled: Option<i32> = Some(21).fmap(|x| x * 2);
 // doubled = Some(42)
 
-// List (Vec) functor
+// リスト (Vec) Functor
 let doubled_list: Vec<i32> = vec![1, 2, 3].fmap(|x| x * 2);
 // doubled_list = vec![2, 4, 6]
 
-// Replace value
+// 値の置換
 let replaced: Option<String> = Some(42).fmap(|_| "hello".to_string());
 // replaced = Some("hello".to_string())
 ```
 
 ### Applicative
 
-| Haskell | lambars | Description |
+| Haskell | lambars | 説明 |
 |---------|---------|-------------|
-| `pure a` | `Applicative::pure` | Lift value into context |
-| `ff <*> fa` | `Applicative::apply` | Apply wrapped function |
-| `liftA2 f fa fb` | `Applicative::map2` | Lift binary function |
-| `liftA3 f fa fb fc` | `Applicative::map3` | Lift ternary function |
-| `fa *> fb` | `fa.map2(fb, \|_, b\| b)` | Sequence, keep right |
-| `fa <* fb` | `fa.map2(fb, \|a, _\| a)` | Sequence, keep left |
-| `(,) <$> fa <*> fb` | `Applicative::product` | Pair values |
+| `pure a` | `Applicative::pure` | コンテキストに値をリフト |
+| `ff <*> fa` | `Applicative::apply` | ラップされた関数を適用 |
+| `liftA2 f fa fb` | `Applicative::map2` | 二項関数をリフト |
+| `liftA3 f fa fb fc` | `Applicative::map3` | 三項関数をリフト |
+| `fa *> fb` | `fa.map2(fb, \|_, b\| b)` | 順序付け、右側を保持 |
+| `fa <* fb` | `fa.map2(fb, \|a, _\| a)` | 順序付け、左側を保持 |
+| `(,) <$> fa <*> fb` | `Applicative::product` | 値をペア化 |
 
-#### Applicative Laws
+#### Applicative の法則
 
 ```
-1. Identity:     pure id <*> v == v
-2. Composition:  pure (.) <*> u <*> v <*> w == u <*> (v <*> w)
-3. Homomorphism: pure f <*> pure x == pure (f x)
-4. Interchange:  u <*> pure y == pure ($ y) <*> u
+1. 恒等性:        pure id <*> v == v
+2. 合成性:        pure (.) <*> u <*> v <*> w == u <*> (v <*> w)
+3. 準同型性:      pure f <*> pure x == pure (f x)
+4. 交換性:        u <*> pure y == pure ($ y) <*> u
 ```
 
-#### Code Examples
+#### コード例
 
 ```haskell
 -- Haskell
@@ -164,12 +164,12 @@ x :: Maybe Int
 x = pure 42
 -- x = Just 42
 
--- Apply function in context
+-- コンテキスト内で関数を適用
 result :: Maybe Int
 result = Just (+) <*> Just 10 <*> Just 20
 -- result = Just 30
 
--- Using liftA2
+-- liftA2 の使用
 sum :: Maybe Int
 sum = liftA2 (+) (Just 10) (Just 20)
 -- sum = Just 30
@@ -179,12 +179,12 @@ sum3 :: Maybe Int
 sum3 = liftA3 (\a b c -> a + b + c) (Just 1) (Just 2) (Just 3)
 -- sum3 = Just 6
 
--- Pairing
+-- ペア化
 paired :: Maybe (Int, String)
 paired = (,) <$> Just 42 <*> Just "hello"
 -- paired = Just (42, "hello")
 
--- Sequence operators
+-- 順序演算子
 sequenceRight :: Maybe Int
 sequenceRight = Just 10 *> Just 20
 -- sequenceRight = Just 20
@@ -197,65 +197,65 @@ use lambars::typeclass::Applicative;
 let x: Option<i32> = <Option<()>>::pure(42);
 // x = Some(42)
 
-// Using map2
+// map2 の使用
 let sum: Option<i32> = Some(10).map2(Some(20), |a, b| a + b);
 // sum = Some(30)
 
-// Using map3
+// map3 の使用
 let sum3: Option<i32> = Some(1).map3(Some(2), Some(3), |a, b, c| a + b + c);
 // sum3 = Some(6)
 
-// Pairing with product
+// product でペア化
 let paired: Option<(i32, String)> = Some(42).product(Some("hello".to_string()));
 // paired = Some((42, "hello".to_string()))
 
-// Sequence (keep right)
+// 順序付け (右側を保持)
 let sequence_right: Option<i32> = Some(10).map2(Some(20), |_, b| b);
 // sequence_right = Some(20)
 ```
 
 ### Monad
 
-| Haskell | lambars | Description |
+| Haskell | lambars | 説明 |
 |---------|---------|-------------|
-| `return a` | `Monad::pure` (via Applicative) | Lift into monad |
-| `ma >>= f` | `Monad::flat_map` | Bind operation |
-| `ma >> mb` | `Monad::then` | Sequence, keep right |
-| `join mma` | `Flatten::flatten` / `Option::flatten` (std) | Flatten nested monad |
-| `ma =<< f` | `f(ma.run())` | Reversed bind |
-| `>=>` (Kleisli) | Manual composition | Compose monadic functions |
-| `<=<` (Kleisli) | Manual composition | Reverse Kleisli composition |
+| `return a` | `Monad::pure` (Applicative 経由) | Monad にリフト |
+| `ma >>= f` | `Monad::flat_map` | バインド操作 |
+| `ma >> mb` | `Monad::then` | 順序付け、右側を保持 |
+| `join mma` | `Flatten::flatten` / `Option::flatten` (std) | ネストされた Monad を平坦化 |
+| `ma =<< f` | `f(ma.run())` | 逆バインド |
+| `>=>` (Kleisli) | 手動合成 | Monad 関数の合成 |
+| `<=<` (Kleisli) | 手動合成 | 逆 Kleisli 合成 |
 
-#### Monad Laws
+#### Monad の法則
 
 ```
-1. Left Identity:  return a >>= f  ==  f a
-2. Right Identity: m >>= return    ==  m
-3. Associativity:  (m >>= f) >>= g ==  m >>= (\x -> f x >>= g)
+1. 左単位元:     return a >>= f  ==  f a
+2. 右単位元:     m >>= return    ==  m
+3. 結合性:       (m >>= f) >>= g ==  m >>= (\x -> f x >>= g)
 ```
 
-#### Code Examples
+#### コード例
 
 ```haskell
 -- Haskell
 import Control.Monad
 
--- Safe division
+-- 安全な除算
 safeDivide :: Int -> Int -> Maybe Int
 safeDivide _ 0 = Nothing
 safeDivide x y = Just (x `div` y)
 
--- Bind operation
+-- バインド操作
 result :: Maybe Int
 result = Just 10 >>= \x -> safeDivide x 2
 -- result = Just 5
 
--- Chaining
+-- チェーン
 chained :: Maybe Int
 chained = Just 100 >>= safeDivide 10 >>= safeDivide 2
 -- chained = Just 5
 
--- Using join
+-- join の使用
 nested :: Maybe (Maybe Int)
 nested = Just (Just 42)
 
@@ -263,12 +263,12 @@ flattened :: Maybe Int
 flattened = join nested
 -- flattened = Just 42
 
--- Sequence
+-- 順序付け
 sequenced :: Maybe Int
 sequenced = Just 10 >> Just 20
 -- sequenced = Just 20
 
--- Kleisli composition
+-- Kleisli 合成
 (>=>) :: Monad m => (a -> m b) -> (b -> m c) -> a -> m c
 (f >=> g) x = f x >>= g
 
@@ -286,37 +286,37 @@ safeSqrtLog = safeSqrt >=> safeLog
 // lambars
 use lambars::typeclass::Monad;
 
-// Safe division
+// 安全な除算
 fn safe_divide(x: i32, y: i32) -> Option<i32> {
     if y == 0 { None } else { Some(x / y) }
 }
 
-// Bind operation
+// バインド操作
 let result: Option<i32> = Some(10).flat_map(|x| safe_divide(x, 2));
 // result = Some(5)
 
-// Chaining
+// チェーン
 let chained: Option<i32> = Some(100)
     .flat_map(|x| safe_divide(10, x))
     .flat_map(|x| safe_divide(x, 2));
-// Note: This gives None because safe_divide(10, 100) = 0, then safe_divide(0, 2) = 0
+// 注: safe_divide(10, 100) = 0 で、safe_divide(0, 2) = 0 なので None が返る
 
-// Using Flatten trait (also works with std Option::flatten)
+// Flatten trait の使用 (std の Option::flatten でも動作)
 use lambars::typeclass::Flatten;
 let nested: Option<Option<i32>> = Some(Some(42));
 let flattened: Option<i32> = nested.flatten();
 // flattened = Some(42)
 
-// Flatten also works for Result, Box, Identity
+// Flatten は Result、Box、Identity でも動作
 let nested_result: Result<Result<i32, &str>, &str> = Ok(Ok(42));
 let flattened_result: Result<i32, &str> = nested_result.flatten();
 // flattened_result = Ok(42)
 
-// Sequence with then
+// then で順序付け
 let sequenced: Option<i32> = Some(10).then(Some(20));
 // sequenced = Some(20)
 
-// Kleisli-like composition (manual)
+// Kleisli 風の合成 (手動)
 fn safe_sqrt(x: f64) -> Option<f64> {
     if x < 0.0 { None } else { Some(x.sqrt()) }
 }
@@ -330,65 +330,65 @@ fn safe_sqrt_log(x: f64) -> Option<f64> {
 }
 ```
 
-### Semigroup and Monoid
+### Semigroup と Monoid
 
-| Haskell | lambars | Description |
+| Haskell | lambars | 説明 |
 |---------|---------|-------------|
-| `a <> b` | `Semigroup::combine` | Combine two values |
-| `sconcat` | `Semigroup::combine` (folded) | Combine non-empty list |
-| `mempty` | `Monoid::empty` | Identity element |
-| `mconcat` | `Monoid::combine_all` | Fold list with mappend |
-| `mappend` | `Semigroup::combine` | Same as `<>` |
-| `Sum`, `Product` | `Sum`, `Product` | Numeric wrappers |
-| `Min`, `Max` | `Min`, `Max` | Bounded wrappers |
-| `First`, `Last` | Custom implementation | First/Last non-Nothing |
-| `Endo` | Custom implementation | Endomorphism monoid |
-| `Dual` | Custom implementation | Reversed monoid |
+| `a <> b` | `Semigroup::combine` | 二つの値を結合 |
+| `sconcat` | `Semigroup::combine` (fold された) | 非空リストを結合 |
+| `mempty` | `Monoid::empty` | 単位元 |
+| `mconcat` | `Monoid::combine_all` | mappend でリストを fold |
+| `mappend` | `Semigroup::combine` | `<>` と同じ |
+| `Sum`, `Product` | `Sum`, `Product` | 数値ラッパー |
+| `Min`, `Max` | `Min`, `Max` | 境界付きラッパー |
+| `First`, `Last` | カスタム実装 | 最初/最後の非 Nothing |
+| `Endo` | カスタム実装 | 自己準同型 Monoid |
+| `Dual` | カスタム実装 | 逆 Monoid |
 
-#### Semigroup/Monoid Laws
+#### Semigroup/Monoid の法則
 
 ```
 Semigroup:
-  Associativity: (a <> b) <> c == a <> (b <> c)
+  結合性: (a <> b) <> c == a <> (b <> c)
 
 Monoid:
-  Left Identity:  mempty <> a == a
-  Right Identity: a <> mempty == a
+  左単位元:  mempty <> a == a
+  右単位元:  a <> mempty == a
 ```
 
-#### Code Examples
+#### コード例
 
 ```haskell
 -- Haskell
 import Data.Semigroup
 import Data.Monoid
 
--- String concatenation
+-- 文字列の連結
 combined :: String
 combined = "Hello, " <> "World!"
 -- combined = "Hello, World!"
 
--- List concatenation
+-- リストの連結
 listCombined :: [Int]
 listCombined = [1, 2] <> [3, 4]
 -- listCombined = [1, 2, 3, 4]
 
--- Using Sum monoid
+-- Sum Monoid の使用
 sumResult :: Sum Int
 sumResult = mconcat [Sum 1, Sum 2, Sum 3, Sum 4, Sum 5]
 -- sumResult = Sum 15
 
--- Using Product monoid
+-- Product Monoid の使用
 productResult :: Product Int
 productResult = mconcat [Product 1, Product 2, Product 3, Product 4, Product 5]
 -- productResult = Product 120
 
--- Using Max and Min
+-- Max と Min の使用
 maxResult :: Max Int
 maxResult = mconcat [Max 3, Max 1, Max 4, Max 1, Max 5]
 -- maxResult = Max 5
 
--- Option/Maybe as monoid (with inner semigroup)
+-- Monoid としての Option/Maybe (内部 Semigroup と共に)
 maybeResult :: Maybe String
 maybeResult = Just "Hello" <> Just " World"
 -- maybeResult = Just "Hello World"
@@ -398,30 +398,30 @@ maybeResult = Just "Hello" <> Just " World"
 // lambars
 use lambars::typeclass::{Semigroup, Monoid, Sum, Product, Max, Min};
 
-// String concatenation
+// 文字列の連結
 let combined: String = "Hello, ".to_string().combine("World!".to_string());
 // combined = "Hello, World!"
 
-// Vec concatenation
+// Vec の連結
 let list_combined: Vec<i32> = vec![1, 2].combine(vec![3, 4]);
 // list_combined = vec![1, 2, 3, 4]
 
-// Using Sum monoid
+// Sum Monoid の使用
 let items = vec![Sum::new(1), Sum::new(2), Sum::new(3), Sum::new(4), Sum::new(5)];
 let sum_result: Sum<i32> = Sum::combine_all(items);
 // sum_result = Sum(15)
 
-// Using Product monoid
+// Product Monoid の使用
 let items = vec![Product::new(1), Product::new(2), Product::new(3), Product::new(4), Product::new(5)];
 let product_result: Product<i32> = Product::combine_all(items);
 // product_result = Product(120)
 
-// Using Max
+// Max の使用
 let items = vec![Max::new(3), Max::new(1), Max::new(4), Max::new(1), Max::new(5)];
 let max_result: Max<i32> = Max::combine_all(items);
 // max_result = Max(5)
 
-// Option as semigroup
+// Semigroup としての Option
 let maybe_result: Option<String> = Some("Hello".to_string())
     .combine(Some(" World".to_string()));
 // maybe_result = Some("Hello World")
@@ -429,36 +429,36 @@ let maybe_result: Option<String> = Some("Hello".to_string())
 
 ### Foldable
 
-| Haskell | lambars | Description |
+| Haskell | lambars | 説明 |
 |---------|---------|-------------|
-| `foldl f z t` | `Foldable::fold_left` | Left fold |
-| `foldr f z t` | `Foldable::fold_right` | Right fold |
-| `foldMap f t` | `Foldable::fold_map` | Map then fold |
-| `fold t` | `Foldable::fold` | Fold with Monoid |
-| `length t` | `Foldable::length` | Count elements |
-| `null t` | `Foldable::is_empty` | Check empty |
-| `elem x t` | Manual implementation | Element membership |
-| `find p t` | `Foldable::find` | Find first matching |
-| `any p t` | `Foldable::exists` | Any element matches |
-| `all p t` | `Foldable::for_all` | All elements match |
-| `toList t` | `Foldable::to_vec` | Convert to list |
-| `sum t` | `fold_left(0, \|a,b\| a+b)` | Sum elements |
-| `product t` | `fold_left(1, \|a,b\| a*b)` | Product of elements |
-| `maximum t` | `fold_left` with max | Maximum element |
-| `minimum t` | `fold_left` with min | Minimum element |
+| `foldl f z t` | `Foldable::fold_left` | 左畳み込み |
+| `foldr f z t` | `Foldable::fold_right` | 右畳み込み |
+| `foldMap f t` | `Foldable::fold_map` | マップしてから畳み込み |
+| `fold t` | `Foldable::fold` | Monoid で畳み込み |
+| `length t` | `Foldable::length` | 要素数をカウント |
+| `null t` | `Foldable::is_empty` | 空チェック |
+| `elem x t` | 手動実装 | 要素のメンバーシップ |
+| `find p t` | `Foldable::find` | 最初にマッチした要素を検索 |
+| `any p t` | `Foldable::exists` | いずれかの要素がマッチ |
+| `all p t` | `Foldable::for_all` | 全ての要素がマッチ |
+| `toList t` | `Foldable::to_vec` | リストに変換 |
+| `sum t` | `fold_left(0, \|a,b\| a+b)` | 要素の合計 |
+| `product t` | `fold_left(1, \|a,b\| a*b)` | 要素の積 |
+| `maximum t` | `fold_left` で max を使用 | 最大要素 |
+| `minimum t` | `fold_left` で min を使用 | 最小要素 |
 
-#### Code Examples
+#### コード例
 
 ```haskell
 -- Haskell
 import Data.Foldable
 
--- Left fold
+-- 左畳み込み
 sumList :: Int
 sumList = foldl (+) 0 [1, 2, 3, 4, 5]
 -- sumList = 15
 
--- Right fold
+-- 右畳み込み
 productList :: Int
 productList = foldr (*) 1 [1, 2, 3, 4, 5]
 -- productList = 120
@@ -473,7 +473,7 @@ found :: Maybe Int
 found = find (> 3) [1, 2, 3, 4, 5]
 -- found = Just 4
 
--- any and all
+-- any と all
 hasEven :: Bool
 hasEven = any even [1, 2, 3]
 -- hasEven = True
@@ -482,7 +482,7 @@ allPositive :: Bool
 allPositive = all (> 0) [1, 2, 3]
 -- allPositive = True
 
--- length and null
+-- length と null
 listLength :: Int
 listLength = length [1, 2, 3, 4, 5]
 -- listLength = 5
@@ -496,11 +496,11 @@ isEmpty = null []
 // lambars
 use lambars::typeclass::{Foldable, Monoid};
 
-// Left fold
+// 左畳み込み
 let sum_list: i32 = vec![1, 2, 3, 4, 5].fold_left(0, |acc, x| acc + x);
 // sum_list = 15
 
-// Right fold
+// 右畳み込み
 let product_list: i32 = vec![1, 2, 3, 4, 5].fold_right(1, |x, acc| x * acc);
 // product_list = 120
 
@@ -512,14 +512,14 @@ let concat_strings: String = vec![1, 2, 3].fold_map(|x| x.to_string());
 let found: Option<&i32> = vec![1, 2, 3, 4, 5].find(|x| **x > 3);
 // found = Some(&4)
 
-// exists and for_all
+// exists と for_all
 let has_even: bool = vec![1, 2, 3].exists(|x| x % 2 == 0);
 // has_even = true
 
 let all_positive: bool = vec![1, 2, 3].for_all(|x| *x > 0);
 // all_positive = true
 
-// length and is_empty
+// length と is_empty
 let list_length: usize = vec![1, 2, 3, 4, 5].length();
 // list_length = 5
 
@@ -529,38 +529,38 @@ let is_empty: bool = Vec::<i32>::new().is_empty();
 
 ### Traversable
 
-| Haskell | lambars | Description |
+| Haskell | lambars | 説明 |
 |---------|---------|-------------|
-| `traverse f t` | `Traversable::traverse_option/result` | Traverse with effect |
-| `sequenceA t` | `Traversable::sequence_option/result` | Sequence effects |
-| `for t f` | `traverse` with flipped args | Traverse (args flipped) |
-| `mapM f t` | `traverse_option/result` | Same as traverse (for Monad) |
-| `sequence t` | `sequence_option/result` | Same as sequenceA (for Monad) |
-| `forM t f` | `traverse` flipped | Same as for (for Monad) |
-| `traverse @(Reader r)` | `Traversable::traverse_reader` | Traverse with Reader effect |
-| `traverse @(State s)` | `Traversable::traverse_state` | Traverse with State effect |
-| `traverse @IO` | `Traversable::traverse_io` | Traverse with IO effect |
-| `traverse @(Async IO)` | `Traversable::traverse_async_io` | Traverse with AsyncIO effect |
-| `sequence @(Reader r)` | `Traversable::sequence_reader` | Sequence Reader effects |
-| `sequence @(State s)` | `Traversable::sequence_state` | Sequence State effects |
-| `sequence @IO` | `Traversable::sequence_io` | Sequence IO effects |
-| `sequence @(Async IO)` | `Traversable::sequence_async_io` | Sequence AsyncIO effects |
-| `traverse_ @(Reader r)` | `Traversable::traverse_reader_` | Traverse Reader, discard result |
-| `traverse_ @(State s)` | `Traversable::traverse_state_` | Traverse State, discard result |
-| `traverse_ @IO` | `Traversable::traverse_io_` | Traverse IO, discard result |
-| `for_ @(Reader r)` | `Traversable::for_each_reader` | Alias for traverse_reader_ |
-| `for_ @(State s)` | `Traversable::for_each_state` | Alias for traverse_state_ |
-| `for_ @IO` | `Traversable::for_each_io` | Alias for traverse_io_ |
+| `traverse f t` | `Traversable::traverse_option/result` | エフェクトと共に走査 |
+| `sequenceA t` | `Traversable::sequence_option/result` | エフェクトの順序付け |
+| `for t f` | `traverse` で引数を反転 | 走査 (引数反転) |
+| `mapM f t` | `traverse_option/result` | traverse と同じ (Monad 用) |
+| `sequence t` | `sequence_option/result` | sequenceA と同じ (Monad 用) |
+| `forM t f` | `traverse` 反転 | for と同じ (Monad 用) |
+| `traverse @(Reader r)` | `Traversable::traverse_reader` | Reader エフェクトで走査 |
+| `traverse @(State s)` | `Traversable::traverse_state` | State エフェクトで走査 |
+| `traverse @IO` | `Traversable::traverse_io` | IO エフェクトで走査 |
+| `traverse @(Async IO)` | `Traversable::traverse_async_io` | AsyncIO エフェクトで走査 |
+| `sequence @(Reader r)` | `Traversable::sequence_reader` | Reader エフェクトの順序付け |
+| `sequence @(State s)` | `Traversable::sequence_state` | State エフェクトの順序付け |
+| `sequence @IO` | `Traversable::sequence_io` | IO エフェクトの順序付け |
+| `sequence @(Async IO)` | `Traversable::sequence_async_io` | AsyncIO エフェクトの順序付け |
+| `traverse_ @(Reader r)` | `Traversable::traverse_reader_` | Reader を走査、結果を破棄 |
+| `traverse_ @(State s)` | `Traversable::traverse_state_` | State を走査、結果を破棄 |
+| `traverse_ @IO` | `Traversable::traverse_io_` | IO を走査、結果を破棄 |
+| `for_ @(Reader r)` | `Traversable::for_each_reader` | traverse_reader_ のエイリアス |
+| `for_ @(State s)` | `Traversable::for_each_state` | traverse_state_ のエイリアス |
+| `for_ @IO` | `Traversable::for_each_io` | traverse_io_ のエイリアス |
 
-#### Traversable Laws
+#### Traversable の法則
 
 ```
-1. Naturality:    t . traverse f == traverse (t . f)  (for any applicative transformation t)
-2. Identity:      traverse Identity == Identity
-3. Composition:   traverse (Compose . fmap g . f) == Compose . fmap (traverse g) . traverse f
+1. 自然性:     t . traverse f == traverse (t . f)  (任意の Applicative 変換 t に対して)
+2. 恒等性:     traverse Identity == Identity
+3. 合成性:     traverse (Compose . fmap g . f) == Compose . fmap (traverse g) . traverse f
 ```
 
-#### Code Examples
+#### コード例
 
 ```haskell
 -- Haskell
@@ -595,7 +595,7 @@ sequencedNothing :: Maybe [Int]
 sequencedNothing = sequenceA withNothing
 -- sequencedNothing = Nothing
 
--- With Either
+-- Either との組み合わせ
 parseIntEither :: String -> Either String Int
 parseIntEither s = case reads s of
   [(n, "")] -> Right n
@@ -634,7 +634,7 @@ let with_none: Vec<Option<i32>> = vec![Some(1), None, Some(3)];
 let sequenced_none: Option<Vec<i32>> = with_none.sequence_option();
 // sequenced_none = None
 
-// With Result
+// Result との組み合わせ
 fn parse_int_result(s: &str) -> Result<i32, String> {
     s.parse().map_err(|_| format!("Cannot parse: {}", s))
 }
@@ -647,7 +647,7 @@ let result_err: Result<Vec<i32>, String> = vec!["1", "two", "3"]
     .traverse_result(parse_int_result);
 // result_err = Err("Cannot parse: two")
 
-// traverse_reader - traverse with Reader effect
+// traverse_reader - Reader エフェクトで走査
 use lambars::effect::Reader;
 
 #[derive(Clone)]
@@ -660,7 +660,7 @@ let reader = numbers.traverse_reader(|n| {
 let result = reader.run(Config { multiplier: 10 });
 // result = vec![10, 20, 30]
 
-// traverse_state - traverse with State effect (state is threaded left-to-right)
+// traverse_state - State エフェクトで走査 (状態は左から右へスレッド)
 use lambars::effect::State;
 
 let items = vec!["a", "b", "c"];
@@ -671,7 +671,7 @@ let (result, final_index) = state.run(0);
 // result = vec![(0, "a"), (1, "b"), (2, "c")]
 // final_index = 3
 
-// traverse_io - traverse with IO effect (IO actions executed sequentially)
+// traverse_io - IO エフェクトで走査 (IO アクションは順次実行)
 use lambars::effect::IO;
 
 let paths = vec!["a.txt", "b.txt"];
@@ -684,55 +684,55 @@ let contents = io.run_unsafe();
 
 ---
 
-## Maybe and Either
+## Maybe と Either
 
 ### Maybe / Option
 
-| Haskell | lambars / Rust std | Description |
+| Haskell | lambars / Rust std | 説明 |
 |---------|-------------------|-------------|
-| `Just x` | `Some(x)` | Construct Just/Some |
-| `Nothing` | `None` | Construct Nothing/None |
-| `fmap f ma` | `Functor::fmap` | Map over Maybe |
-| `ma >>= f` | `Monad::flat_map` | Bind |
-| `fromMaybe d ma` | `Option::unwrap_or` | Default value |
-| `maybe d f ma` | `Option::map_or` | Fold Maybe |
-| `isJust ma` | `Option::is_some` | Test for Just |
-| `isNothing ma` | `Option::is_none` | Test for Nothing |
-| `fromJust ma` | `Option::unwrap` | Extract (unsafe) |
-| `listToMaybe xs` | `xs.first()` | First element |
-| `maybeToList ma` | `Option::into_iter` | To list |
-| `catMaybes xs` | `Iterator::flatten` | Filter Nothings |
-| `mapMaybe f xs` | `Iterator::filter_map` | Map and filter |
-| `ma <\|> mb` | `Option::or` | Alternative |
-| `guard cond` | `if cond { Some(()) } else { None }` | Guard in monad |
+| `Just x` | `Some(x)` | Just/Some の構築 |
+| `Nothing` | `None` | Nothing/None の構築 |
+| `fmap f ma` | `Functor::fmap` | Maybe 上でマップ |
+| `ma >>= f` | `Monad::flat_map` | バインド |
+| `fromMaybe d ma` | `Option::unwrap_or` | デフォルト値 |
+| `maybe d f ma` | `Option::map_or` | Maybe を畳み込み |
+| `isJust ma` | `Option::is_some` | Just のテスト |
+| `isNothing ma` | `Option::is_none` | Nothing のテスト |
+| `fromJust ma` | `Option::unwrap` | 抽出 (安全でない) |
+| `listToMaybe xs` | `xs.first()` | 最初の要素 |
+| `maybeToList ma` | `Option::into_iter` | リストへ |
+| `catMaybes xs` | `Iterator::flatten` | Nothing をフィルタ |
+| `mapMaybe f xs` | `Iterator::filter_map` | マップとフィルタ |
+| `ma <\|> mb` | `Option::or` | 代替 |
+| `guard cond` | `if cond { Some(()) } else { None }` | Monad でのガード |
 
 ### Either / Result
 
-| Haskell | lambars / Rust std | Description |
+| Haskell | lambars / Rust std | 説明 |
 |---------|-------------------|-------------|
-| `Right x` | `Ok(x)` | Construct Right/Ok |
-| `Left e` | `Err(e)` | Construct Left/Err |
-| `fmap f ea` | `Functor::fmap` / `Result::map` | Map over Right |
-| `first f ea` | `Result::map_err` | Map over Left |
-| `bimap f g ea` | Manual | Map both sides |
-| `ea >>= f` | `Monad::flat_map` | Bind |
-| `either f g ea` | `Result::map_or_else` | Fold Either |
-| `isRight ea` | `Result::is_ok` | Test for Right |
-| `isLeft ea` | `Result::is_err` | Test for Left |
-| `fromRight d ea` | `Result::unwrap_or` | Default for Right |
-| `fromLeft d ea` | `Result::err().unwrap_or` | Default for Left |
-| `rights xs` | `Iterator::filter_map(\|r\| r.ok())` | Filter Rights |
-| `lefts xs` | `Iterator::filter_map(\|r\| r.err())` | Filter Lefts |
-| `partitionEithers` | Manual | Split into two lists |
+| `Right x` | `Ok(x)` | Right/Ok の構築 |
+| `Left e` | `Err(e)` | Left/Err の構築 |
+| `fmap f ea` | `Functor::fmap` / `Result::map` | Right 上でマップ |
+| `first f ea` | `Result::map_err` | Left 上でマップ |
+| `bimap f g ea` | 手動 | 両側をマップ |
+| `ea >>= f` | `Monad::flat_map` | バインド |
+| `either f g ea` | `Result::map_or_else` | Either を畳み込み |
+| `isRight ea` | `Result::is_ok` | Right のテスト |
+| `isLeft ea` | `Result::is_err` | Left のテスト |
+| `fromRight d ea` | `Result::unwrap_or` | Right のデフォルト |
+| `fromLeft d ea` | `Result::err().unwrap_or` | Left のデフォルト |
+| `rights xs` | `Iterator::filter_map(\|r\| r.ok())` | Right をフィルタ |
+| `lefts xs` | `Iterator::filter_map(\|r\| r.err())` | Left をフィルタ |
+| `partitionEithers` | 手動 | 二つのリストに分割 |
 
-#### Code Examples
+#### コード例
 
 ```haskell
 -- Haskell
 import Data.Maybe
 import Data.Either
 
--- Maybe operations
+-- Maybe 操作
 doubled :: Maybe Int
 doubled = fmap (*2) (Just 21)
 -- doubled = Just 42
@@ -741,7 +741,7 @@ defaulted :: Int
 defaulted = fromMaybe 0 Nothing
 -- defaulted = 0
 
--- Either operations
+-- Either 操作
 mapped :: Either String Int
 mapped = fmap (*2) (Right 21)
 -- mapped = Right 42
@@ -759,21 +759,21 @@ biMapped = bimap length show (Right 42)
 // lambars / std
 use lambars::typeclass::{Functor, Monad};
 
-// Option operations
+// Option 操作
 let doubled: Option<i32> = Some(21).fmap(|x| x * 2);
 // doubled = Some(42)
 
 let defaulted: i32 = None.unwrap_or(0);
 // defaulted = 0
 
-// Result operations
+// Result 操作
 let mapped: Result<i32, String> = Ok(21).fmap(|x| x * 2);
 // mapped = Ok(42)
 
 let left_mapped: Result<i32, usize> = Err("error".to_string()).map_err(|e| e.len());
 // left_mapped = Err(5)
 
-// bimap equivalent
+// bimap 相当
 let result: Result<i32, String> = Ok(42);
 let bi_mapped: Result<String, usize> = result
     .map(|x| x.to_string())
@@ -783,31 +783,31 @@ let bi_mapped: Result<String, usize> = result
 
 ---
 
-## Do-Notation and List Comprehensions
+## Do記法とリスト内包表記
 
-lambars provides two macros that correspond to Haskell's do-notation and list comprehensions:
+lambars は、Haskell の do 記法とリスト内包表記に対応する二つのマクロを提供します:
 
-| Use Case | Haskell | lambars | Description |
+| ユースケース | Haskell | lambars | 説明 |
 |----------|---------|---------|-------------|
-| Monad binding | `do { x <- mx; ... }` | `eff!` macro | Single execution, FnOnce-based |
-| List comprehension | `[f x | x <- xs]` | `for_!` macro | Multiple execution, FnMut-based |
+| Monad バインド | `do { x <- mx; ... }` | `eff!` マクロ | 単一実行、FnOnce ベース |
+| リスト内包表記 | `[f x | x <- xs]` | `for_!` マクロ | 複数実行、FnMut ベース |
 
-### eff! Macro (Do-Notation for Monads)
+### eff! マクロ (Monad の Do 記法)
 
-#### Syntax Comparison
+#### 構文比較
 
-| Haskell | lambars | Description |
+| Haskell | lambars | 説明 |
 |---------|---------|-------------|
-| `do { x <- mx; ... }` | `eff! { x <= mx; ... }` | Bind |
-| `let x = expr` | `let x = expr;` | Pure binding |
-| `pure x` | `Some(x)` / `Ok(x)` / etc. | Return value |
-| `mx >> my` | `_ <= mx; my` | Sequence (discard) |
-| Guard (MonadPlus) | `_ <= guard(cond);` | Guard |
+| `do { x <- mx; ... }` | `eff! { x <= mx; ... }` | バインド |
+| `let x = expr` | `let x = expr;` | 純粋なバインド |
+| `pure x` | `Some(x)` / `Ok(x)` / など | 値を返す |
+| `mx >> my` | `_ <= mx; my` | 順序付け (破棄) |
+| ガード (MonadPlus) | `_ <= guard(cond);` | ガード |
 
-### Code Examples
+### コード例
 
 ```haskell
--- Haskell - do notation
+-- Haskell - do 記法
 computation :: Maybe Int
 computation = do
   x <- Just 10
@@ -816,7 +816,7 @@ computation = do
   pure (z * 2)
 -- computation = Just 60
 
--- With guards (requires MonadPlus/Alternative)
+-- ガード付き (MonadPlus/Alternative が必要)
 withGuard :: Maybe Int
 withGuard = do
   x <- Just 10
@@ -824,7 +824,7 @@ withGuard = do
   pure (x * 2)
 -- withGuard = Just 20
 
--- Nested computations
+-- ネストされた計算
 nested :: Maybe Int
 nested = do
   list <- Just [1, 2, 3]
@@ -833,7 +833,7 @@ nested = do
   pure doubled
 -- nested = Just 2
 
--- Either do-notation
+-- Either の do 記法
 eitherComputation :: Either String Int
 eitherComputation = do
   x <- Right 10
@@ -841,7 +841,7 @@ eitherComputation = do
   pure (x + y)
 -- eitherComputation = Right 30
 
--- With pattern matching
+-- パターンマッチング付き
 withPattern :: Maybe (Int, Int)
 withPattern = do
   (a, b) <- Just (10, 20)
@@ -850,7 +850,7 @@ withPattern = do
 ```
 
 ```rust
-// lambars - eff! macro
+// lambars - eff! マクロ
 use lambars::eff;
 
 let computation: Option<i32> = eff! {
@@ -861,7 +861,7 @@ let computation: Option<i32> = eff! {
 };
 // computation = Some(60)
 
-// With guard-like pattern
+// ガード風のパターン
 fn guard(condition: bool) -> Option<()> {
     if condition { Some(()) } else { None }
 }
@@ -873,7 +873,7 @@ let with_guard: Option<i32> = eff! {
 };
 // with_guard = Some(20)
 
-// Nested computations
+// ネストされた計算
 let nested: Option<i32> = eff! {
     list <= Some(vec![1, 2, 3]);
     first <= list.first().copied();
@@ -882,7 +882,7 @@ let nested: Option<i32> = eff! {
 };
 // nested = Some(2)
 
-// Result eff! macro
+// Result の eff! マクロ
 let result_computation: Result<i32, String> = eff! {
     x <= Ok::<i32, String>(10);
     y <= Ok::<i32, String>(20);
@@ -890,7 +890,7 @@ let result_computation: Result<i32, String> = eff! {
 };
 // result_computation = Ok(30)
 
-// With tuple destructuring
+// タプル分解付き
 let with_pattern: Option<(i32, i32)> = eff! {
     pair <= Some((10, 20));
     let (a, b) = pair;
@@ -899,10 +899,10 @@ let with_pattern: Option<(i32, i32)> = eff! {
 // with_pattern = Some((30, 200))
 ```
 
-### Complex Examples
+### 複雑な例
 
 ```haskell
--- Haskell - Database-like operations
+-- Haskell - データベース風の操作
 data User = User { userId :: Int, userName :: String }
 data Order = Order { orderId :: Int, orderUserId :: Int, orderAmount :: Double }
 
@@ -926,8 +926,8 @@ use lambars::eff;
 struct User { user_id: i32, user_name: String }
 struct Order { order_id: i32, order_user_id: i32, order_amount: f64 }
 
-fn find_user(id: i32) -> Option<User> { None } // placeholder
-fn find_orders(user_id: i32) -> Option<Vec<Order>> { None } // placeholder
+fn find_user(id: i32) -> Option<User> { None } // プレースホルダー
+fn find_orders(user_id: i32) -> Option<Vec<Order>> { None } // プレースホルダー
 
 fn get_user_orders(uid: i32) -> Option<(User, Vec<Order>)> {
     eff! {
@@ -938,47 +938,47 @@ fn get_user_orders(uid: i32) -> Option<(User, Vec<Order>)> {
 }
 ```
 
-### for_! Macro (List Comprehensions)
+### for_! マクロ (リスト内包表記)
 
-For Haskell list comprehensions, use the `for_!` macro with `yield`:
+Haskell のリスト内包表記には、`yield` を使った `for_!` マクロを使用します:
 
-#### Syntax Comparison
+#### 構文比較
 
-| Haskell | lambars | Description |
+| Haskell | lambars | 説明 |
 |---------|---------|-------------|
-| `[f x \| x <- xs]` | `for_! { x <= xs; yield f(x) }` | Basic comprehension |
-| `[x + y \| x <- xs, y <- ys]` | `for_! { x <= xs; y <= ys.clone(); yield x + y }` | Nested |
-| `[x \| x <- xs, p x]` | `xs.into_iter().filter(p).collect()` | Filter (use std) |
-| `let y = expr` | `let y = expr;` | Pure binding |
+| `[f x \| x <- xs]` | `for_! { x <= xs; yield f(x) }` | 基本的な内包表記 |
+| `[x + y \| x <- xs, y <- ys]` | `for_! { x <= xs; y <= ys.clone(); yield x + y }` | ネスト |
+| `[x \| x <- xs, p x]` | `xs.into_iter().filter(p).collect()` | フィルタ (std を使用) |
+| `let y = expr` | `let y = expr;` | 純粋なバインド |
 
-**Important**: In `for_!`, inner collections need `.clone()` due to Rust's ownership rules.
+**重要**: `for_!` では、Rust の所有権ルールにより内部コレクションは `.clone()` が必要です。
 
-#### Code Examples
+#### コード例
 
 ```haskell
--- Haskell - List comprehension
+-- Haskell - リスト内包表記
 doubled :: [Int]
 doubled = [x * 2 | x <- [1, 2, 3, 4, 5]]
 -- doubled = [2, 4, 6, 8, 10]
 
--- Nested comprehension (cartesian product)
+-- ネストされた内包表記 (直積)
 cartesian :: [Int]
 cartesian = [x + y | x <- [1, 2], y <- [10, 20]]
 -- cartesian = [11, 21, 12, 22]
 
--- With filtering
+-- フィルタ付き
 filtered :: [Int]
 filtered = [x | x <- [1, 2, 3, 4, 5], even x]
 -- filtered = [2, 4]
 
--- Complex example with multiple generators
+-- 複数のジェネレータを持つ複雑な例
 triples :: [(Int, Int, Int)]
 triples = [(a, b, c) | c <- [1..10], b <- [1..c], a <- [1..b], a^2 + b^2 == c^2]
 -- triples = [(3, 4, 5), (6, 8, 10)]
 ```
 
 ```rust
-// lambars - for_! macro
+// lambars - for_! マクロ
 use lambars::for_;
 
 let doubled: Vec<i32> = for_! {
@@ -987,21 +987,21 @@ let doubled: Vec<i32> = for_! {
 };
 // doubled = vec![2, 4, 6, 8, 10]
 
-// Nested comprehension (cartesian product)
+// ネストされた内包表記 (直積)
 let xs = vec![1, 2];
 let ys = vec![10, 20];
 let cartesian: Vec<i32> = for_! {
     x <= xs;
-    y <= ys.clone();  // Note: clone() needed for inner iteration
+    y <= ys.clone();  // 注: 内部イテレーションには clone() が必要
     yield x + y
 };
 // cartesian = vec![11, 21, 12, 22]
 
-// With filtering (use std iterator methods)
+// フィルタ付き (std のイテレータメソッドを使用)
 let filtered: Vec<i32> = (1..=5).filter(|x| x % 2 == 0).collect();
 // filtered = vec![2, 4]
 
-// Pythagorean triples example
+// ピタゴラス三組の例
 let triples: Vec<(i32, i32, i32)> = for_! {
     c <= 1..=10;
     b <= (1..=c).collect::<Vec<_>>();
@@ -1013,35 +1013,35 @@ let triples: Vec<(i32, i32, i32)> = for_! {
 // triples = vec![(3, 4, 5), (6, 8, 10)]
 ```
 
-### When to Use Each Macro
+### 各マクロを使用すべき時
 
-| Scenario | Recommended Macro | Reason |
+| シナリオ | 推奨マクロ | 理由 |
 |----------|-------------------|--------|
-| Maybe/Either chaining | `eff!` | Short-circuits on Nothing/Left |
-| IO/State/Reader/Writer | `eff!` | Designed for FnOnce monads |
-| List generation | `for_!` | Supports multiple iterations with yield |
-| Cartesian products | `for_!` | Nested iteration |
-| Database-style queries | `eff!` | Monadic error handling |
-| Async list generation | `for_async!` | Async iteration with yield |
-| Async operations in loops | `for_async!` | Uses `<~` for AsyncIO binding |
+| Maybe/Either のチェーン | `eff!` | Nothing/Left で短絡 |
+| IO/State/Reader/Writer | `eff!` | FnOnce Monad 向けに設計 |
+| リスト生成 | `for_!` | yield での複数イテレーションをサポート |
+| 直積 | `for_!` | ネストされたイテレーション |
+| データベース風のクエリ | `eff!` | Monad でのエラー処理 |
+| 非同期リスト生成 | `for_async!` | yield での非同期イテレーション |
+| ループ内の非同期操作 | `for_async!` | AsyncIO バインドに `<~` を使用 |
 
 ---
 
-## Function Composition
+## 関数合成
 
-| Haskell | lambars | Description |
+| Haskell | lambars | 説明 |
 |---------|---------|-------------|
-| `f . g` | `compose!(f, g)` | Right-to-left composition |
-| `f >>> g` (Control.Arrow) | `compose!(g, f)` | Left-to-right composition |
-| `f <<< g` (Control.Arrow) | `compose!(f, g)` | Same as `.` |
-| `x & f` | `pipe!(x, f)` | Pipe operator |
-| `f $ x` | `f(x)` | Function application |
-| `flip f` | `flip(f)` | Flip arguments |
-| `const x` | `constant(x)` | Constant function |
-| `id` | `identity` | Identity function |
-| `on` | Manual implementation | Binary function on projection |
+| `f . g` | `compose!(f, g)` | 右から左への合成 |
+| `f >>> g` (Control.Arrow) | `compose!(g, f)` | 左から右への合成 |
+| `f <<< g` (Control.Arrow) | `compose!(f, g)` | `.` と同じ |
+| `x & f` | `pipe!(x, f)` | パイプ演算子 |
+| `f $ x` | `f(x)` | 関数適用 |
+| `flip f` | `flip(f)` | 引数の反転 |
+| `const x` | `constant(x)` | 定数関数 |
+| `id` | `identity` | 恒等関数 |
+| `on` | 手動実装 | 射影上の二項関数 |
 
-### Code Examples
+### コード例
 
 ```haskell
 -- Haskell
@@ -1057,17 +1057,17 @@ double = (*2)
 square :: Int -> Int
 square = (^2)
 
--- Right-to-left composition (.)
+-- 右から左への合成 (.)
 composed1 :: Int -> Int
 composed1 = addOne . double . square
 -- composed1 5 = addOne (double (square 5)) = addOne (double 25) = addOne 50 = 51
 
--- Left-to-right composition (>>>)
+-- 左から右への合成 (>>>)
 composed2 :: Int -> Int
 composed2 = square >>> double >>> addOne
 -- composed2 5 = 51
 
--- Using pipe (&)
+-- パイプ (&) の使用
 result :: Int
 result = 5 & square & double & addOne
 -- result = 51
@@ -1078,7 +1078,7 @@ subtract' = (-)
 
 flippedSubtract :: Int -> Int -> Int
 flippedSubtract = flip subtract'
--- flippedSubtract 3 10 = 7 (i.e., 10 - 3)
+-- flippedSubtract 3 10 = 7 (つまり 10 - 3)
 
 -- const
 alwaysFive :: a -> Int
@@ -1099,12 +1099,12 @@ fn add_one(x: i32) -> i32 { x + 1 }
 fn double(x: i32) -> i32 { x * 2 }
 fn square(x: i32) -> i32 { x * x }
 
-// Right-to-left composition (like Haskell's .)
+// 右から左への合成 (Haskell の . のように)
 let composed1 = compose!(add_one, double, square);
 let result1 = composed1(5);
 // result1 = 51
 
-// Using pipe! for left-to-right data flow
+// 左から右のデータフローに pipe! を使用
 let result2 = pipe!(5, square, double, add_one);
 // result2 = 51
 
@@ -1112,7 +1112,7 @@ let result2 = pipe!(5, square, double, add_one);
 fn subtract(a: i32, b: i32) -> i32 { a - b }
 let flipped_subtract = flip(subtract);
 let result = flipped_subtract(3, 10);
-// result = 7 (i.e., 10 - 3)
+// result = 7 (つまり 10 - 3)
 
 // constant
 let always_five = constant(5);
@@ -1126,19 +1126,19 @@ let x = identity(42);
 
 ---
 
-## Currying and Partial Application
+## カリー化と部分適用
 
-| Haskell | lambars | Description |
+| Haskell | lambars | 説明 |
 |---------|---------|-------------|
-| Auto-curried | `curry!(fn, arity)` or `curry!(\|args...\| body)` | Explicit currying |
-| Partial application | `partial!` | Partial application |
-| Sections `(+1)`, `(1+)` | Closures | Operator sections |
-| `uncurry f` | `\|(a, b)\| f(a, b)` | Uncurry |
+| 自動カリー化 | `curry!(fn, arity)` または `curry!(\|args...\| body)` | 明示的なカリー化 |
+| 部分適用 | `partial!` | 部分適用 |
+| セクション `(+1)`, `(1+)` | クロージャ | 演算子セクション |
+| `uncurry f` | `\|(a, b)\| f(a, b)` | アンカリー |
 
-### Code Examples
+### コード例
 
 ```haskell
--- Haskell - All functions are curried by default
+-- Haskell - 全ての関数はデフォルトでカリー化されている
 add :: Int -> Int -> Int
 add x y = x + y
 
@@ -1149,7 +1149,7 @@ result :: Int
 result = addFive 3
 -- result = 8
 
--- Multi-argument partial application
+-- 複数引数の部分適用
 add3 :: Int -> Int -> Int -> Int
 add3 x y z = x + y + z
 
@@ -1160,7 +1160,7 @@ result3 :: Int
 result3 = addFiveAndTen 3
 -- result3 = 18
 
--- Sections
+-- セクション
 addOne :: Int -> Int
 addOne = (+1)
 
@@ -1179,19 +1179,19 @@ use lambars::{curry, partial};
 
 fn add(a: i32, b: i32) -> i32 { a + b }
 
-// Currying with function name + arity form
+// 関数名 + アリティ形式でのカリー化
 let curried_add = curry!(add, 2);
 let add_five = curried_add(5);
 let result = add_five(3);
 // result = 8
 
-// Currying with closure form
+// クロージャ形式でのカリー化
 let curried_add = curry!(|a, b| add(a, b));
 let add_five = curried_add(5);
 let result = add_five(3);
 // result = 8
 
-// Multi-argument currying
+// 複数引数のカリー化
 fn add3(a: i32, b: i32, c: i32) -> i32 { a + b + c }
 
 let curried_add3 = curry!(add3, 3);
@@ -1200,16 +1200,16 @@ let add_five_and_ten = add_five(10);
 let result3 = add_five_and_ten(3);
 // result3 = 18
 
-// Partial application with placeholders
+// プレースホルダを使った部分適用
 let add_five_partial = partial!(add, 5, __);
 let result = add_five_partial(3);
 // result = 8
 
-// Sections equivalent (closures)
+// セクション相当 (クロージャ)
 let add_one = |x: i32| x + 1;
 let halve = |x: f64| x / 2.0;
 
-// uncurry equivalent
+// uncurry 相当
 let add_tuple = |(a, b): (i32, i32)| add(a, b);
 let result = add_tuple((3, 5));
 // result = 8
@@ -1217,37 +1217,37 @@ let result = add_tuple((3, 5));
 
 ---
 
-## Lazy Evaluation
+## 遅延評価
 
-| Haskell | lambars | Description |
+| Haskell | lambars | 説明 |
 |---------|---------|-------------|
-| Default lazy | `Lazy::new` | Explicit lazy |
-| `seq a b` | `Lazy::force` | Force evaluation |
-| Bang patterns `!x` | Rust is strict | Strict patterns |
-| `$!` (strict apply) | Normal application | Strict application |
-| Infinite lists | `Iterator` | Lazy sequences |
-| `take n xs` | `Iterator::take` | Take n elements |
-| `drop n xs` | `Iterator::skip` | Skip n elements |
-| `iterate f x` | `std::iter::successors` | Iterate function |
-| `repeat x` | `std::iter::repeat` | Infinite repeat |
-| `cycle xs` | `Iterator::cycle` | Cycle list |
+| デフォルトで遅延 | `Lazy::new` | 明示的な遅延 |
+| `seq a b` | `Lazy::force` | 評価の強制 |
+| バンパターン `!x` | Rust は正格 | 正格パターン |
+| `$!` (正格適用) | 通常の適用 | 正格適用 |
+| 無限リスト | `Iterator` | 遅延シーケンス |
+| `take n xs` | `Iterator::take` | n 要素を取得 |
+| `drop n xs` | `Iterator::skip` | n 要素をスキップ |
+| `iterate f x` | `std::iter::successors` | 関数の反復 |
+| `repeat x` | `std::iter::repeat` | 無限の繰り返し |
+| `cycle xs` | `Iterator::cycle` | リストを循環 |
 
-### Code Examples
+### コード例
 
 ```haskell
--- Haskell - Lazy by default
+-- Haskell - デフォルトで遅延
 expensive :: Int
 expensive = trace "Computing..." (42 * 1000000)
 
--- Not evaluated until needed
+-- 必要になるまで評価されない
 main :: IO ()
 main = do
-  let x = expensive  -- Not computed yet
+  let x = expensive  -- まだ計算されない
   putStrLn "Before"
-  print x            -- Now computed
-  print x            -- Cached, not recomputed
+  print x            -- ここで計算される
+  print x            -- キャッシュされ、再計算されない
 
--- Infinite lists
+-- 無限リスト
 naturals :: [Int]
 naturals = [0..]
 
@@ -1255,7 +1255,7 @@ firstTen :: [Int]
 firstTen = take 10 naturals
 -- firstTen = [0,1,2,3,4,5,6,7,8,9]
 
--- Infinite list with iterate
+-- iterate を使った無限リスト
 powersOfTwo :: [Int]
 powersOfTwo = iterate (*2) 1
 
@@ -1263,13 +1263,13 @@ firstPowers :: [Int]
 firstPowers = take 10 powersOfTwo
 -- firstPowers = [1,2,4,8,16,32,64,128,256,512]
 
--- Forcing evaluation with seq
+-- seq で評価を強制
 strictSum :: Int -> Int -> Int
 strictSum x y = x `seq` y `seq` (x + y)
 ```
 
 ```rust
-// lambars - Explicit lazy evaluation
+// lambars - 明示的な遅延評価
 use lambars::control::Lazy;
 
 let expensive = Lazy::new(|| {
@@ -1277,17 +1277,17 @@ let expensive = Lazy::new(|| {
     42 * 1000000
 });
 
-// Not evaluated until needed
+// 必要になるまで評価されない
 println!("Before");
-let x = expensive.force();  // Now computed, prints "Computing..."
-let y = expensive.force();  // Cached, not recomputed
+let x = expensive.force();  // ここで計算され、"Computing..." が表示される
+let y = expensive.force();  // キャッシュされ、再計算されない
 
-// Infinite iterators (similar to Haskell's lazy lists)
+// 無限イテレータ (Haskell の遅延リストに類似)
 let naturals = 0..;
 let first_ten: Vec<i32> = naturals.take(10).collect();
 // first_ten = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 
-// iterate equivalent
+// iterate 相当
 let powers_of_two = std::iter::successors(Some(1), |&n| Some(n * 2));
 let first_powers: Vec<i32> = powers_of_two.take(10).collect();
 // first_powers = vec![1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
@@ -1307,48 +1307,48 @@ let cycled: Vec<i32> = vec![1, 2, 3].into_iter().cycle().take(7).collect();
 
 ### Lens
 
-| Haskell (lens) | lambars | Description |
+| Haskell (lens) | lambars | 説明 |
 |----------------|---------|-------------|
-| `makeLenses ''Type` | `lens!(Type, field)` | Generate lenses |
-| `view l s` / `s ^. l` | `Lens::get` | Get focused value |
-| `set l a s` / `s & l .~ a` | `Lens::set` | Set value |
-| `over l f s` / `s & l %~ f` | `Lens::modify` | Modify value |
-| `l1 . l2` | `Lens::compose` | Compose lenses |
-| `_1`, `_2` | `lens!((A,B), 0)` | Tuple lenses |
+| `makeLenses ''Type` | `lens!(Type, field)` | レンズの生成 |
+| `view l s` / `s ^. l` | `Lens::get` | フォーカスした値を取得 |
+| `set l a s` / `s & l .~ a` | `Lens::set` | 値を設定 |
+| `over l f s` / `s & l %~ f` | `Lens::modify` | 値を変更 |
+| `l1 . l2` | `Lens::compose` | レンズの合成 |
+| `_1`, `_2` | `lens!((A,B), 0)` | タプルレンズ |
 
 ### Prism
 
-| Haskell (lens) | lambars | Description |
+| Haskell (lens) | lambars | 説明 |
 |----------------|---------|-------------|
-| `makePrisms ''Type` | `prism!(Type, Variant)` | Generate prisms |
-| `preview p s` / `s ^? p` | `Prism::preview` | Get if matches |
-| `review p a` / `p # a` | `Prism::review` | Construct from value |
-| `over p f s` / `s & p %~ f` | `Prism::modify` | Modify if matches |
-| `_Just`, `_Nothing` | `prism!(Option, Some)` | Maybe prisms |
-| `_Left`, `_Right` | `prism!(Result, Ok)` | Either prisms |
+| `makePrisms ''Type` | `prism!(Type, Variant)` | Prism の生成 |
+| `preview p s` / `s ^? p` | `Prism::preview` | マッチすれば取得 |
+| `review p a` / `p # a` | `Prism::review` | 値から構築 |
+| `over p f s` / `s & p %~ f` | `Prism::modify` | マッチすれば変更 |
+| `_Just`, `_Nothing` | `prism!(Option, Some)` | Maybe prism |
+| `_Left`, `_Right` | `prism!(Result, Ok)` | Either prism |
 
 ### Iso
 
-| Haskell (lens) | lambars | Description |
+| Haskell (lens) | lambars | 説明 |
 |----------------|---------|-------------|
-| `iso f g` | `FunctionIso::new` | Create isomorphism |
-| `view i s` | `Iso::get` | Forward conversion |
-| `review i a` | `Iso::reverse_get` | Backward conversion |
-| `from i` | `Iso::reverse` | Flip direction |
+| `iso f g` | `FunctionIso::new` | 同型の作成 |
+| `view i s` | `Iso::get` | 前方変換 |
+| `review i a` | `Iso::reverse_get` | 後方変換 |
+| `from i` | `Iso::reverse` | 方向の反転 |
 
 ### Traversal
 
-| Haskell (lens) | lambars | Description |
+| Haskell (lens) | lambars | 説明 |
 |----------------|---------|-------------|
-| `traversed` | `VecTraversal::new` | List traversal |
-| `toListOf t s` | `Traversal::get_all` | Get all targets |
-| `over t f s` | `Traversal::modify` | Modify all targets |
-| `each` | `VecTraversal` | Each element |
+| `traversed` | `VecTraversal::new` | リスト走査 |
+| `toListOf t s` | `Traversal::get_all` | 全てのターゲットを取得 |
+| `over t f s` | `Traversal::modify` | 全てのターゲットを変更 |
+| `each` | `VecTraversal` | 各要素 |
 
-### Code Examples
+### コード例
 
 ```haskell
--- Haskell (lens library)
+-- Haskell (lens ライブラリ)
 {-# LANGUAGE TemplateHaskell #-}
 import Control.Lens
 
@@ -1364,19 +1364,19 @@ data Person = Person
   } deriving (Show)
 makeLenses ''Person
 
--- Get
+-- 取得
 streetName :: Person -> String
 streetName p = p ^. address . street
 
--- Set
+-- 設定
 setStreet :: Person -> String -> Person
 setStreet p s = p & address . street .~ s
 
--- Modify
+-- 変更
 upperStreet :: Person -> Person
 upperStreet p = p & address . street %~ map toUpper
 
--- Example
+-- 例
 person :: Person
 person = Person "Alice" (Address "Main St" "Tokyo")
 
@@ -1388,7 +1388,7 @@ updated :: Person
 updated = person & address . street .~ "Oak Ave"
 -- updated.address.street = "Oak Ave"
 
--- Prism example
+-- Prism の例
 data Shape = Circle Double | Rectangle Double Double
 
 _Circle :: Prism' Shape Double
@@ -1424,7 +1424,7 @@ struct Person {
 let address_lens = lens!(Person, address);
 let street_lens = lens!(Address, street);
 
-// Compose lenses
+// レンズの合成
 let person_street = address_lens.compose(street_lens);
 
 let person = Person {
@@ -1435,19 +1435,19 @@ let person = Person {
     },
 };
 
-// Get
+// 取得
 let street_name: &String = person_street.get(&person);
 // street_name = "Main St"
 
-// Set
+// 設定
 let updated = person_street.set(person.clone(), "Oak Ave".to_string());
 // updated.address.street = "Oak Ave"
 
-// Modify
+// 変更
 let uppercased = person_street.modify(person, |s| s.to_uppercase());
 // uppercased.address.street = "MAIN ST"
 
-// Prism example
+// Prism の例
 #[derive(Clone, Debug, PartialEq)]
 enum Shape {
     Circle(f64),
@@ -1461,29 +1461,29 @@ let shape = Shape::Circle(5.0);
 let radius: Option<&f64> = circle_prism.preview(&shape);
 // radius = Some(&5.0)
 
-// Review (construct)
+// Review (構築)
 let constructed: Shape = circle_prism.review(10.0);
 // constructed = Shape::Circle(10.0)
 ```
 
 ---
 
-## Effect Monads
+## エフェクトモナド
 
 ### IO Monad
 
-| Haskell | lambars | Description |
+| Haskell | lambars | 説明 |
 |---------|---------|-------------|
-| `pure a` / `return a` | `IO::pure` | Pure value in IO |
-| `IO action` | `IO::new` | Create IO action |
-| `io >>= f` | `IO::flat_map` | Bind IO actions |
-| `io >> io2` | `IO::then` | Sequence |
-| `putStrLn s` | `IO::print_line` | Print line |
-| `getLine` | `IO::read_line` | Read line |
-| `threadDelay n` | `IO::delay` | Delay execution |
-| `catch io handler` | `IO::catch` | Handle exceptions |
+| `pure a` / `return a` | `IO::pure` | IO 内の純粋な値 |
+| `IO action` | `IO::new` | IO アクションの作成 |
+| `io >>= f` | `IO::flat_map` | IO アクションのバインド |
+| `io >> io2` | `IO::then` | 順序付け |
+| `putStrLn s` | `IO::print_line` | 行を出力 |
+| `getLine` | `IO::read_line` | 行を読み込み |
+| `threadDelay n` | `IO::delay` | 実行を遅延 |
+| `catch io handler` | `IO::catch` | 例外を処理 |
 
-#### Code Examples
+#### コード例
 
 ```haskell
 -- Haskell
@@ -1500,13 +1500,13 @@ chained = do
   y <- pure 20
   pure (x + y)
 
--- Error handling
+-- エラー処理
 safeComputation :: IO Int
 safeComputation = catch
   (error "oops" :: IO Int)
   (\(e :: SomeException) -> pure 0)
 
--- Main example
+-- main の例
 main :: IO ()
 main = do
   putStrLn "Enter a number:"
@@ -1527,36 +1527,36 @@ let computation: IO<i32> = IO::new(|| {
 let chained: IO<i32> = IO::pure(10)
     .flat_map(|x| IO::pure(20).fmap(move |y| x + y));
 
-// Error handling
+// エラー処理
 let safe_computation: IO<i32> = IO::catch(
     IO::new(|| panic!("oops")),
     |_| 0
 );
 
-// Using run_unsafe to execute
+// run_unsafe で実行
 let result = computation.run_unsafe();
-// Prints "Computing..." and result = 42
+// "Computing..." が表示され、result = 42
 
-// IO actions
+// IO アクション
 let print_io = IO::print_line("Hello, World!");
-print_io.run_unsafe();  // Prints "Hello, World!"
+print_io.run_unsafe();  // "Hello, World!" が表示される
 ```
 
 ### State Monad
 
-| Haskell | lambars | Description |
+| Haskell | lambars | 説明 |
 |---------|---------|-------------|
-| `pure a` / `return a` | `State::pure` | Pure value |
-| `get` | `State::get` | Get state |
-| `put s` | `State::put` | Set state |
-| `modify f` | `State::modify` | Modify state |
-| `gets f` | `State::gets` | Get derived value |
-| `runState m s` | `State::run` | Run with initial state |
-| `evalState m s` | `State::eval` | Get result only |
-| `execState m s` | `State::exec` | Get final state only |
-| `state f` | `State::from_transition` | Create from function |
+| `pure a` / `return a` | `State::pure` | 純粋な値 |
+| `get` | `State::get` | 状態を取得 |
+| `put s` | `State::put` | 状態を設定 |
+| `modify f` | `State::modify` | 状態を変更 |
+| `gets f` | `State::gets` | 派生値を取得 |
+| `runState m s` | `State::run` | 初期状態で実行 |
+| `evalState m s` | `State::eval` | 結果のみ取得 |
+| `execState m s` | `State::exec` | 最終状態のみ取得 |
+| `state f` | `State::from_transition` | 関数から作成 |
 
-#### Code Examples
+#### コード例
 
 ```haskell
 -- Haskell
@@ -1583,7 +1583,7 @@ computation = do
 
 result :: (Int, Int)
 result = runState computation 0
--- result = (2, 2)  -- (return value, final state)
+-- result = (2, 2)  -- (戻り値、最終状態)
 ```
 
 ```rust
@@ -1619,15 +1619,15 @@ let (result, final_state) = computation.run(0);
 
 ### Reader Monad
 
-| Haskell | lambars | Description |
+| Haskell | lambars | 説明 |
 |---------|---------|-------------|
-| `pure a` / `return a` | `Reader::pure` | Pure value |
-| `ask` | `Reader::ask` | Get environment |
-| `asks f` | `Reader::asks` | Get derived value |
-| `local f m` | `Reader::local` | Modify environment |
-| `runReader m r` | `Reader::run` | Run with environment |
+| `pure a` / `return a` | `Reader::pure` | 純粋な値 |
+| `ask` | `Reader::ask` | 環境を取得 |
+| `asks f` | `Reader::asks` | 派生値を取得 |
+| `local f m` | `Reader::local` | 環境を変更 |
+| `runReader m r` | `Reader::run` | 環境と共に実行 |
 
-#### Code Examples
+#### コード例
 
 ```haskell
 -- Haskell
@@ -1695,17 +1695,17 @@ let result = get_url().run(Config {
 
 ### Writer Monad
 
-| Haskell | lambars | Description |
+| Haskell | lambars | 説明 |
 |---------|---------|-------------|
-| `pure a` / `return a` | `Writer::pure` | Pure value |
-| `tell w` | `Writer::tell` | Log output |
-| `listen m` | `Writer::listen` | Access log in computation |
-| `pass m` | `Writer::pass` | Transform log |
-| `censor f m` | `Writer::censor` | Censor log |
-| `runWriter m` | `Writer::run` | Get (result, log) |
-| `execWriter m` | `Writer::exec` | Get log only |
+| `pure a` / `return a` | `Writer::pure` | 純粋な値 |
+| `tell w` | `Writer::tell` | 出力をログ |
+| `listen m` | `Writer::listen` | 計算内でログにアクセス |
+| `pass m` | `Writer::pass` | ログを変換 |
+| `censor f m` | `Writer::censor` | ログを検閲 |
+| `runWriter m` | `Writer::run` | (結果、ログ) を取得 |
+| `execWriter m` | `Writer::exec` | ログのみ取得 |
 
-#### Code Examples
+#### コード例
 
 ```haskell
 -- Haskell
@@ -1758,27 +1758,27 @@ let (result, log) = computation.run();
 
 ### RWS Monad
 
-| Haskell | lambars | Description |
+| Haskell | lambars | 説明 |
 |---------|---------|-------------|
-| `RWS r w s a` | `RWS<R, W, S, A>` | Combined Reader + Writer + State |
-| `rws f` | `RWS::new` | Create from function |
-| `runRWS m r s` | `RWS::run` | Run with environment and state |
-| `evalRWS m r s` | `RWS::eval` | Get (result, output) only |
-| `execRWS m r s` | `RWS::exec` | Get (state, output) only |
-| `mapRWS f m` | `RWS::map_rws` | Transform (result, state, output) |
-| `withRWS f m` | `RWS::with_rws` | Transform (environment, state) input |
-| `ask` | `RWS::ask` | Get environment |
-| `asks f` | `RWS::asks` | Project from environment |
-| `local f m` | `RWS::local` | Modify environment locally |
-| `tell w` | `RWS::tell` | Add output |
-| `listen m` | `RWS::listen` | Capture output |
-| `censor f m` | `RWS::censor` | Transform output |
-| `get` | `RWS::get` | Get state |
-| `put s` | `RWS::put` | Set state |
-| `modify f` | `RWS::modify` | Modify state |
-| `gets f` | `RWS::gets` | Project from state |
+| `RWS r w s a` | `RWS<R, W, S, A>` | Reader + Writer + State の組み合わせ |
+| `rws f` | `RWS::new` | 関数から作成 |
+| `runRWS m r s` | `RWS::run` | 環境と状態で実行 |
+| `evalRWS m r s` | `RWS::eval` | (結果、出力) のみ取得 |
+| `execRWS m r s` | `RWS::exec` | (状態、出力) のみ取得 |
+| `mapRWS f m` | `RWS::map_rws` | (結果、状態、出力) を変換 |
+| `withRWS f m` | `RWS::with_rws` | (環境、状態) 入力を変換 |
+| `ask` | `RWS::ask` | 環境を取得 |
+| `asks f` | `RWS::asks` | 環境から射影 |
+| `local f m` | `RWS::local` | 環境をローカルに変更 |
+| `tell w` | `RWS::tell` | 出力を追加 |
+| `listen m` | `RWS::listen` | 出力をキャプチャ |
+| `censor f m` | `RWS::censor` | 出力を変換 |
+| `get` | `RWS::get` | 状態を取得 |
+| `put s` | `RWS::put` | 状態を設定 |
+| `modify f` | `RWS::modify` | 状態を変更 |
+| `gets f` | `RWS::gets` | 状態から射影 |
 
-#### Code Examples
+#### コード例
 
 ```haskell
 -- Haskell
@@ -1835,38 +1835,38 @@ let (result, final_state, log) = computation.run(Config { multiplier: 3 }, 10);
 
 ---
 
-## Monad Transformers (mtl)
+## モナド変換子 (mtl)
 
-### Comparison
+### 比較
 
-| Haskell (mtl) | lambars | Description |
+| Haskell (mtl) | lambars | 説明 |
 |---------------|---------|-------------|
-| `StateT s m a` | `StateT<S, M, A>` | State transformer |
-| `ReaderT r m a` | `ReaderT<R, M, A>` | Reader transformer |
-| `WriterT w m a` | `WriterT<W, M, A>` | Writer transformer |
-| `ExceptT e m a` | `ExceptT<E, M, A>` | Exception transformer |
-| `MaybeT m a` | Custom | Maybe transformer |
-| `lift` | `lift_*` methods | Lift into transformer |
-| `liftIO` | `lift_io`, `lift_async_io` | Lift IO/AsyncIO |
-| `MonadState` | `MonadState` trait | State abstraction |
-| `MonadReader` | `MonadReader` trait | Reader abstraction |
-| `MonadWriter` | `MonadWriter` trait | Writer abstraction |
-| `MonadError` | `MonadError` trait | Error abstraction |
-| `throwError` | `MonadError::throw_error` | Throw an error |
-| `catchError` | `MonadError::catch_error` | Catch and handle errors |
-| `liftEither` | `MonadError::from_result` | Lift Either/Result |
-| `handleError` | `MonadError::handle_error` | Convert error to success value |
-| (custom) | `MonadError::adapt_error` | Transform error in same type |
-| (custom) | `MonadError::recover` | Partial function recovery |
-| (custom) | `MonadError::recover_with_partial` | Monadic partial recovery |
-| (custom) | `MonadError::ensure` | Validate with predicate |
-| (custom) | `MonadError::ensure_or` | Validate with value-dependent error |
-| (custom) | `MonadError::redeem` | Transform both success and error |
-| (custom) | `MonadError::redeem_with` | Monadic redeem |
-| (custom) | `MonadErrorExt::map_error` | Transform error type |
-| Async IO in transformers | `*_async_io` methods | AsyncIO support in transformers |
+| `StateT s m a` | `StateT<S, M, A>` | State 変換子 |
+| `ReaderT r m a` | `ReaderT<R, M, A>` | Reader 変換子 |
+| `WriterT w m a` | `WriterT<W, M, A>` | Writer 変換子 |
+| `ExceptT e m a` | `ExceptT<E, M, A>` | 例外変換子 |
+| `MaybeT m a` | カスタム | Maybe 変換子 |
+| `lift` | `lift_*` メソッド | 変換子にリフト |
+| `liftIO` | `lift_io`, `lift_async_io` | IO/AsyncIO をリフト |
+| `MonadState` | `MonadState` trait | State の抽象化 |
+| `MonadReader` | `MonadReader` trait | Reader の抽象化 |
+| `MonadWriter` | `MonadWriter` trait | Writer の抽象化 |
+| `MonadError` | `MonadError` trait | Error の抽象化 |
+| `throwError` | `MonadError::throw_error` | エラーをスロー |
+| `catchError` | `MonadError::catch_error` | エラーをキャッチして処理 |
+| `liftEither` | `MonadError::from_result` | Either/Result をリフト |
+| `handleError` | `MonadError::handle_error` | エラーを成功値に変換 |
+| (カスタム) | `MonadError::adapt_error` | 同じ型内でエラーを変換 |
+| (カスタム) | `MonadError::recover` | 部分関数による復旧 |
+| (カスタム) | `MonadError::recover_with_partial` | Monad 部分復旧 |
+| (カスタム) | `MonadError::ensure` | 述語で検証 |
+| (カスタム) | `MonadError::ensure_or` | 値依存エラーで検証 |
+| (カスタム) | `MonadError::redeem` | 成功とエラーの両方を変換 |
+| (カスタム) | `MonadError::redeem_with` | Monad redeem |
+| (カスタム) | `MonadErrorExt::map_error` | エラー型を変換 |
+| 変換子内の非同期 IO | `*_async_io` メソッド | 変換子での AsyncIO サポート |
 
-### Code Examples
+### コード例
 
 ```haskell
 -- Haskell (mtl)
@@ -1875,7 +1875,7 @@ import Control.Monad.Reader
 import Control.Monad.Except
 
 data AppConfig = AppConfig { configMaxRetries :: Int }
-type AppState = Int  -- retry count
+type AppState = Int  -- リトライ回数
 type AppError = String
 
 type App a = ExceptT AppError (StateT AppState (Reader AppConfig)) a
@@ -1916,8 +1916,8 @@ struct AppConfig { max_retries: i32 }
 type AppState = i32;
 type AppError = String;
 
-// Due to Rust's type system, we work with concrete transformer stacks
-// Here's a simplified example with ReaderT over Result
+// Rust の型システムにより、具体的な変換子スタックで動作します
+// これは Result 上の ReaderT の簡略化された例です
 
 type App<A> = ReaderT<AppConfig, Result<A, AppError>>;
 
@@ -1944,18 +1944,18 @@ let result = computation.run_result(AppConfig { max_retries: 3 });
 // result = Ok("Max is 3")
 ```
 
-### AsyncIO Support in Transformers
+### 変換子での AsyncIO サポート
 
-lambars provides AsyncIO integration for monad transformers, enabling async operations within transformer stacks.
+lambars は、モナド変換子の AsyncIO 統合を提供し、変換子スタック内での非同期操作を可能にします。
 
 ```rust
-// lambars - ReaderT with AsyncIO
+// lambars - AsyncIO を使った ReaderT
 use lambars::effect::{ReaderT, AsyncIO};
 
 #[derive(Clone)]
 struct Config { api_url: String }
 
-// ReaderT over AsyncIO
+// AsyncIO 上の ReaderT
 type AppAsync<A> = ReaderT<Config, AsyncIO<A>>;
 
 fn get_url() -> AppAsync<String> {
@@ -1972,33 +1972,33 @@ async fn example() {
 }
 ```
 
-Available AsyncIO methods for transformers:
+変換子で利用可能な AsyncIO メソッド:
 - `ReaderT`: `ask_async_io`, `asks_async_io`, `lift_async_io`, `pure_async_io`, `flat_map_async_io`
 - `StateT`: `get_async_io`, `gets_async_io`, `state_async_io`, `lift_async_io`, `pure_async_io`, `flat_map_async_io`
 - `WriterT`: `tell_async_io`, `lift_async_io`, `pure_async_io`, `flat_map_async_io`, `listen_async_io`
 
 ---
 
-## Algebraic Effects
+## 代数的エフェクト
 
-lambars provides an algebraic effects system as an alternative to monad transformers. This approach, inspired by libraries like Polysemy (Haskell), Eff (Scala/OCaml), and freer-simple, solves the n^2 problem of monad transformers.
+lambars は、モナド変換子の代替として代数的エフェクトシステムを提供します。このアプローチは、Polysemy (Haskell)、Eff (Scala/OCaml)、freer-simple などのライブラリに触発されており、モナド変換子の n^2 問題を解決します。
 
-### Comparison with Haskell Effect Libraries
+### Haskell エフェクトライブラリとの比較
 
-| Haskell (freer-simple/polysemy) | lambars | Description |
+| Haskell (freer-simple/polysemy) | lambars | 説明 |
 |--------------------------------|---------|-------------|
-| `Eff '[e1, e2] a` | `Eff<EffCons<E1, EffCons<E2, EffNil>>, A>` | Effect computation type |
-| `Member e r` | `Member<E, Index>` | Effect membership constraint |
-| `run` | `Handler::run` | Run handler |
-| `runReader` | `ReaderHandler::run` | Run Reader effect |
-| `runState` | `StateHandler::run` | Run State effect |
-| `runWriter` | `WriterHandler::run` | Run Writer effect |
-| `runError` | `ErrorHandler::run` | Run Error effect |
-| `send` / `embed` | `perform_raw` | Perform effect operation |
-| `interpret` | `Handler` trait impl | Define handler |
-| `reinterpret` | Handler composition | Transform effects |
+| `Eff '[e1, e2] a` | `Eff<EffCons<E1, EffCons<E2, EffNil>>, A>` | エフェクト計算型 |
+| `Member e r` | `Member<E, Index>` | エフェクトメンバーシップ制約 |
+| `run` | `Handler::run` | ハンドラを実行 |
+| `runReader` | `ReaderHandler::run` | Reader エフェクトを実行 |
+| `runState` | `StateHandler::run` | State エフェクトを実行 |
+| `runWriter` | `WriterHandler::run` | Writer エフェクトを実行 |
+| `runError` | `ErrorHandler::run` | Error エフェクトを実行 |
+| `send` / `embed` | `perform_raw` | エフェクト操作を実行 |
+| `interpret` | `Handler` trait impl | ハンドラを定義 |
+| `reinterpret` | ハンドラの合成 | エフェクトを変換 |
 
-### Effect Row and Member
+### エフェクト Row と Member
 
 ```haskell
 -- Haskell (freer-simple)
@@ -2044,16 +2044,16 @@ let (result, final_state) = StateHandler::new(10).run(with_reader);
 // result = 11, final_state = 15
 ```
 
-### Standard Effects
+### 標準エフェクト
 
-| Effect | Haskell | lambars | Description |
+| エフェクト | Haskell | lambars | 説明 |
 |--------|---------|---------|-------------|
-| Reader | `ask`, `asks`, `local` | `ask()`, `asks()`, `run_local()` | Read-only environment |
-| State | `get`, `put`, `modify` | `get()`, `put()`, `modify()` | Mutable state |
-| Writer | `tell`, `listen`, `censor` | `tell()`, `listen()` | Accumulating output |
-| Error | `throwError`, `catchError` | `throw()`, `catch()`, `attempt()` | Error handling |
+| Reader | `ask`, `asks`, `local` | `ask()`, `asks()`, `run_local()` | 読み取り専用環境 |
+| State | `get`, `put`, `modify` | `get()`, `put()`, `modify()` | 可変状態 |
+| Writer | `tell`, `listen`, `censor` | `tell()`, `listen()` | 出力の累積 |
+| Error | `throwError`, `catchError` | `throw()`, `catch()`, `attempt()` | エラー処理 |
 
-### Defining Custom Effects
+### カスタムエフェクトの定義
 
 ```haskell
 -- Haskell (freer-simple with TH)
@@ -2062,11 +2062,11 @@ data Log r where
 
 makeEffect ''Log
 
--- Or manually
+-- または手動で
 logMsg :: Member Log r => String -> Eff r ()
 logMsg msg = send (LogMsg msg)
 
--- Handler
+-- ハンドラ
 runLog :: Eff (Log ': r) a -> Eff r (a, [String])
 runLog = handleRelayS [] handler pure
   where
@@ -2079,19 +2079,19 @@ use lambars::define_effect;
 use lambars::effect::algebraic::{Effect, Eff};
 
 define_effect! {
-    /// Logging effect
+    /// ロギングエフェクト
     effect Log {
-        /// Log a message
+        /// メッセージをログに記録
         fn log_message(message: String) -> ();
     }
 }
 
-// The macro generates:
-// - LogEffect struct implementing Effect
+// マクロが生成するもの:
+// - Effect を実装した LogEffect 構造体
 // - LogEffect::log_message(message) -> Eff<LogEffect, ()>
-// - LogHandler trait with fn log_message(&mut self, message: String) -> ()
+// - fn log_message(&mut self, message: String) -> () を持つ LogHandler trait
 
-// Create a computation using the effect
+// エフェクトを使った計算を作成
 fn log_computation() -> Eff<LogEffect, i32> {
     LogEffect::log_message("Starting".to_string())
         .then(LogEffect::log_message("Processing".to_string()))
@@ -2099,121 +2099,121 @@ fn log_computation() -> Eff<LogEffect, i32> {
 }
 ```
 
-### Key Differences from Monad Transformers
+### モナド変換子との主な違い
 
-| Aspect | Monad Transformers | Algebraic Effects |
+| 側面 | モナド変換子 | 代数的エフェクト |
 |--------|-------------------|-------------------|
-| n^2 problem | Yes (n effects need n^2 lift implementations) | No (effects compose freely) |
-| Effect order | Fixed by transformer stack | Flexible (handle in any order) |
-| Performance | Good (specialized code) | Good (continuation-based) |
-| Type complexity | Can become verbose | Uses type-level indices |
-| Lift operations | Required (`lift`, `liftIO`) | Not needed (`Member` constraint) |
+| n^2 問題 | あり (n エフェクトに n^2 の lift 実装が必要) | なし (エフェクトは自由に合成) |
+| エフェクトの順序 | 変換子スタックで固定 | 柔軟 (任意の順序で処理) |
+| パフォーマンス | 良好 (特殊化されたコード) | 良好 (継続ベース) |
+| 型の複雑さ | 冗長になり得る | 型レベルインデックスを使用 |
+| Lift 操作 | 必要 (`lift`, `liftIO`) | 不要 (`Member` 制約) |
 
-### When to Use Which
+### どちらを使うべきか
 
-| Scenario | Recommendation |
+| シナリオ | 推奨事項 |
 |----------|----------------|
-| Simple 2-3 effect stacks | Monad Transformers (simpler types) |
-| Many effects (4+) | Algebraic Effects (no n^2 problem) |
-| Effect reordering needed | Algebraic Effects |
-| Maximum performance | Monad Transformers |
-| Extensible effects | Algebraic Effects |
-| Existing mtl codebase | Monad Transformers (compatibility) |
+| シンプルな 2-3 エフェクトスタック | モナド変換子 (より単純な型) |
+| 多数のエフェクト (4+) | 代数的エフェクト (n^2 問題なし) |
+| エフェクトの並び替えが必要 | 代数的エフェクト |
+| 最高のパフォーマンス | モナド変換子 |
+| 拡張可能なエフェクト | 代数的エフェクト |
+| 既存の mtl コードベース | モナド変換子 (互換性) |
 
 ---
 
-## Data Structures
+## データ構造
 
-### Lists and Sequences
+### リストとシーケンス
 
-| Haskell | lambars | Description |
+| Haskell | lambars | 説明 |
 |---------|---------|-------------|
-| `[a]` (List) | `PersistentList<A>` | Immutable list |
-| `x : xs` | `PersistentList::cons` | Prepend |
-| `head xs` | `PersistentList::head` | First element |
-| `tail xs` | `PersistentList::tail` | Rest of list |
-| `xs ++ ys` | `Semigroup::combine` | Concatenate |
-| `length xs` | `Foldable::length` | Length |
-| `null xs` | `Foldable::is_empty` | Empty check |
-| `reverse xs` | `PersistentList::reverse` | Reverse |
-| `take n xs` | `PersistentList::take` | Take first n elements |
-| `drop n xs` | `PersistentList::drop_first` | Drop first n elements |
-| `splitAt n xs` | `PersistentList::split_at` | Split at index |
-| `zip xs ys` | `PersistentList::zip` | Zip two lists |
-| `unzip xs` | `PersistentList::<(A,B)>::unzip` | Unzip list of pairs |
-| `findIndex p xs` | `PersistentList::find_index` | Find index of first match |
-| `foldl1 f xs` | `PersistentList::fold_left1` | Left fold without initial value |
-| `foldr1 f xs` | `PersistentList::fold_right1` | Right fold without initial value |
-| `scanl f z xs` | `PersistentList::scan_left` | Left scan with initial value |
-| `partition p xs` | `PersistentList::partition` | Split by predicate |
-| `intersperse x xs` | `PersistentList::intersperse` | Insert between elements |
-| `intercalate xs xss` | `PersistentList::intercalate` | Insert list between lists and flatten |
-| `compare xs ys` | `Ord::cmp` | Lexicographic ordering (requires `T: Ord`) |
+| `[a]` (List) | `PersistentList<A>` | 不変リスト |
+| `x : xs` | `PersistentList::cons` | 先頭に追加 |
+| `head xs` | `PersistentList::head` | 最初の要素 |
+| `tail xs` | `PersistentList::tail` | リストの残り |
+| `xs ++ ys` | `Semigroup::combine` | 連結 |
+| `length xs` | `Foldable::length` | 長さ |
+| `null xs` | `Foldable::is_empty` | 空チェック |
+| `reverse xs` | `PersistentList::reverse` | 逆順 |
+| `take n xs` | `PersistentList::take` | 最初の n 要素を取得 |
+| `drop n xs` | `PersistentList::drop_first` | 最初の n 要素を削除 |
+| `splitAt n xs` | `PersistentList::split_at` | インデックスで分割 |
+| `zip xs ys` | `PersistentList::zip` | 二つのリストを zip |
+| `unzip xs` | `PersistentList::<(A,B)>::unzip` | ペアのリストを unzip |
+| `findIndex p xs` | `PersistentList::find_index` | 最初にマッチしたインデックスを検索 |
+| `foldl1 f xs` | `PersistentList::fold_left1` | 初期値なしの左畳み込み |
+| `foldr1 f xs` | `PersistentList::fold_right1` | 初期値なしの右畳み込み |
+| `scanl f z xs` | `PersistentList::scan_left` | 初期値ありの左スキャン |
+| `partition p xs` | `PersistentList::partition` | 述語で分割 |
+| `intersperse x xs` | `PersistentList::intersperse` | 要素間に挿入 |
+| `intercalate xs xss` | `PersistentList::intercalate` | リスト間にリストを挿入して平坦化 |
+| `compare xs ys` | `Ord::cmp` | 辞書順 (T: Ord が必要) |
 
-### Vectors
+### ベクトル
 
-| Haskell | lambars | Description |
+| Haskell | lambars | 説明 |
 |---------|---------|-------------|
-| `Data.Vector` | `PersistentVector<A>` | Immutable vector |
-| `V.!` | `PersistentVector::get` | Index access |
-| `V.//` | `PersistentVector::update` | Update element |
-| `V.snoc` | `PersistentVector::push_back` | Append |
-| `V.length` | `PersistentVector::len` | Length |
-| `V.take n v` | `PersistentVector::take` | Take first n elements |
-| `V.drop n v` | `PersistentVector::drop_first` | Drop first n elements |
-| `V.splitAt n v` | `PersistentVector::split_at` | Split at index |
-| `V.zip v1 v2` | `PersistentVector::zip` | Zip two vectors |
-| `V.unzip v` | `PersistentVector::<(A,B)>::unzip` | Unzip vector of pairs |
-| `V.findIndex p v` | `PersistentVector::find_index` | Find index of first match |
-| `V.foldl1 f v` | `PersistentVector::fold_left1` | Left fold without initial value |
-| `V.foldr1 f v` | `PersistentVector::fold_right1` | Right fold without initial value |
-| `V.scanl f z v` | `PersistentVector::scan_left` | Left scan with initial value |
-| `V.partition p v` | `PersistentVector::partition` | Split by predicate |
-| (N/A) | `PersistentVector::intersperse` | Insert between elements |
-| (N/A) | `PersistentVector::intercalate` | Insert vector between vectors and flatten |
-| `compare v1 v2` | `Ord::cmp` | Lexicographic ordering (requires `T: Ord`) |
+| `Data.Vector` | `PersistentVector<A>` | 不変ベクトル |
+| `V.!` | `PersistentVector::get` | インデックスアクセス |
+| `V.//` | `PersistentVector::update` | 要素の更新 |
+| `V.snoc` | `PersistentVector::push_back` | 追加 |
+| `V.length` | `PersistentVector::len` | 長さ |
+| `V.take n v` | `PersistentVector::take` | 最初の n 要素を取得 |
+| `V.drop n v` | `PersistentVector::drop_first` | 最初の n 要素を削除 |
+| `V.splitAt n v` | `PersistentVector::split_at` | インデックスで分割 |
+| `V.zip v1 v2` | `PersistentVector::zip` | 二つのベクトルを zip |
+| `V.unzip v` | `PersistentVector::<(A,B)>::unzip` | ペアのベクトルを unzip |
+| `V.findIndex p v` | `PersistentVector::find_index` | 最初にマッチしたインデックスを検索 |
+| `V.foldl1 f v` | `PersistentVector::fold_left1` | 初期値なしの左畳み込み |
+| `V.foldr1 f v` | `PersistentVector::fold_right1` | 初期値なしの右畳み込み |
+| `V.scanl f z v` | `PersistentVector::scan_left` | 初期値ありの左スキャン |
+| `V.partition p v` | `PersistentVector::partition` | 述語で分割 |
+| (N/A) | `PersistentVector::intersperse` | 要素間に挿入 |
+| (N/A) | `PersistentVector::intercalate` | ベクトル間にベクトルを挿入して平坦化 |
+| `compare v1 v2` | `Ord::cmp` | 辞書順 (T: Ord が必要) |
 
-### Maps
+### マップ
 
-| Haskell | lambars | Description |
+| Haskell | lambars | 説明 |
 |---------|---------|-------------|
-| `Data.Map` | `PersistentTreeMap<K, V>` | Ordered map |
-| `Data.HashMap` | `PersistentHashMap<K, V>` | Hash map |
-| `M.insert k v m` | `insert` method | Insert |
-| `M.lookup k m` | `get` method | Lookup |
-| `M.delete k m` | `remove` method | Delete |
-| `M.member k m` | `contains_key` method | Membership |
-| `M.map f m` | `map_values` method | Transform values |
-| `M.mapKeys f m` | `map_keys` method | Transform keys |
-| `M.mapMaybe f m` | `filter_map` method | Filter and transform |
-| `M.toList m` | `entries` method | Get all entries |
-| `M.keys m` | `keys` method | Get all keys |
-| `M.elems m` | `values` method | Get all values |
-| `M.union m1 m2` | `merge` method | Merge (right wins) |
-| `M.unionWith f m1 m2` | `merge_with` method | Merge with resolver |
-| `M.filter p m` | `keep_if` method | Keep matching entries |
-| `M.filterWithKey p m` | `keep_if` method | Keep matching entries |
-| `M.partition p m` | `partition` method | Split by predicate |
+| `Data.Map` | `PersistentTreeMap<K, V>` | 順序付きマップ |
+| `Data.HashMap` | `PersistentHashMap<K, V>` | ハッシュマップ |
+| `M.insert k v m` | `insert` メソッド | 挿入 |
+| `M.lookup k m` | `get` メソッド | 検索 |
+| `M.delete k m` | `remove` メソッド | 削除 |
+| `M.member k m` | `contains_key` メソッド | メンバーシップ |
+| `M.map f m` | `map_values` メソッド | 値を変換 |
+| `M.mapKeys f m` | `map_keys` メソッド | キーを変換 |
+| `M.mapMaybe f m` | `filter_map` メソッド | フィルタと変換 |
+| `M.toList m` | `entries` メソッド | 全エントリを取得 |
+| `M.keys m` | `keys` メソッド | 全キーを取得 |
+| `M.elems m` | `values` メソッド | 全値を取得 |
+| `M.union m1 m2` | `merge` メソッド | マージ (右が優先) |
+| `M.unionWith f m1 m2` | `merge_with` メソッド | リゾルバでマージ |
+| `M.filter p m` | `keep_if` メソッド | マッチするエントリを保持 |
+| `M.filterWithKey p m` | `keep_if` メソッド | マッチするエントリを保持 |
+| `M.partition p m` | `partition` メソッド | 述語で分割 |
 
-### Sets
+### セット
 
-| Haskell | lambars | Description |
+| Haskell | lambars | 説明 |
 |---------|---------|-------------|
-| `Data.Set` | `PersistentHashSet<A>` | Set |
-| `S.insert x s` | `insert` method | Insert |
-| `S.member x s` | `contains` method | Membership |
-| `S.union s1 s2` | `union` method | Union |
-| `S.intersection` | `intersection` method | Intersection |
-| `S.difference` | `difference` method | Difference |
+| `Data.Set` | `PersistentHashSet<A>` | セット |
+| `S.insert x s` | `insert` メソッド | 挿入 |
+| `S.member x s` | `contains` メソッド | メンバーシップ |
+| `S.union s1 s2` | `union` メソッド | 和集合 |
+| `S.intersection` | `intersection` メソッド | 積集合 |
+| `S.difference` | `difference` メソッド | 差集合 |
 
-### Code Examples
+### コード例
 
 ```haskell
 -- Haskell
 import qualified Data.Map as M
 import qualified Data.Set as S
 
--- List operations
+-- リスト操作
 list :: [Int]
 list = 1 : 2 : 3 : []
 
@@ -2225,7 +2225,7 @@ tailList :: [Int]
 tailList = tail list
 -- tailList = [2, 3]
 
--- Map operations
+-- マップ操作
 map1 :: M.Map String Int
 map1 = M.fromList [("one", 1), ("two", 2)]
 
@@ -2236,7 +2236,7 @@ value :: Maybe Int
 value = M.lookup "one" map1
 -- value = Just 1
 
--- Set operations
+-- セット操作
 set1 :: S.Set Int
 set1 = S.fromList [1, 2, 3]
 
@@ -2256,7 +2256,7 @@ intersectionSet = S.intersection set1 set2
 // lambars
 use lambars::persistent::{PersistentList, PersistentHashMap, PersistentHashSet, PersistentTreeMap};
 
-// List operations
+// リスト操作
 let list = PersistentList::new().cons(3).cons(2).cons(1);
 
 let head_elem: Option<&i32> = list.head();
@@ -2265,7 +2265,7 @@ let head_elem: Option<&i32> = list.head();
 let tail_list: Option<PersistentList<i32>> = list.tail();
 // tail_list = Some(PersistentList [2, 3])
 
-// HashMap operations
+// HashMap 操作
 let map1 = PersistentHashMap::new()
     .insert("one".to_string(), 1)
     .insert("two".to_string(), 2);
@@ -2275,42 +2275,42 @@ let updated = map1.insert("three".to_string(), 3);
 let value: Option<&i32> = map1.get("one");
 // value = Some(&1)
 
-// HashSet operations
+// HashSet 操作
 let set1: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
 let set2: PersistentHashSet<i32> = [2, 3, 4].into_iter().collect();
 
 let union_set = set1.union(&set2);
-// union_set contains {1, 2, 3, 4}
+// union_set は {1, 2, 3, 4} を含む
 
 let intersection_set = set1.intersection(&set2);
-// intersection_set contains {2, 3}
+// intersection_set は {2, 3} を含む
 
-// HashSetView - lazy evaluation (similar to Haskell's lazy semantics)
+// HashSetView - 遅延評価 (Haskell の遅延セマンティクスに類似)
 let result: PersistentHashSet<i32> = set1
     .view()
     .filter(|x| *x % 2 == 1)
     .map(|x| x * 10)
     .collect();
-// result contains {10, 30}
+// result は {10, 30} を含む
 ```
 
 ---
 
-## Pattern Matching
+## パターンマッチング
 
-| Haskell | Rust | Description |
+| Haskell | Rust | 説明 |
 |---------|------|-------------|
-| `case x of ...` | `match x { ... }` | Match expression |
-| `_ -> ...` | `_ => ...` | Wildcard |
-| `x@pattern` | `x @ pattern` | As-pattern |
-| `(a, b)` | `(a, b)` | Tuple pattern |
+| `case x of ...` | `match x { ... }` | マッチ式 |
+| `_ -> ...` | `_ => ...` | ワイルドカード |
+| `x@pattern` | `x @ pattern` | As パターン |
+| `(a, b)` | `(a, b)` | タプルパターン |
 | `Just x` | `Some(x)` | Maybe/Option |
 | `Left e` / `Right a` | `Err(e)` / `Ok(a)` | Either/Result |
-| `[]` | `[]` or `vec![]` | Empty list |
-| `x:xs` | Custom | Cons pattern |
-| Guards `| cond` | `if cond =>` | Guards |
+| `[]` | `[]` または `vec![]` | 空リスト |
+| `x:xs` | カスタム | Cons パターン |
+| ガード `| cond` | `if cond =>` | ガード |
 
-### Code Examples
+### コード例
 
 ```haskell
 -- Haskell
@@ -2322,14 +2322,14 @@ describeNumber n = case n of
     | x > 100 -> "large"
     | otherwise -> "other"
 
--- Maybe pattern matching
+-- Maybe のパターンマッチング
 describeMaybe :: Maybe Int -> String
 describeMaybe m = case m of
   Nothing -> "nothing"
   Just 0 -> "zero"
   Just n -> "some: " ++ show n
 
--- List pattern matching
+-- リストのパターンマッチング
 describeList :: [a] -> String
 describeList xs = case xs of
   [] -> "empty"
@@ -2337,7 +2337,7 @@ describeList xs = case xs of
   [_, _] -> "pair"
   _ -> "many"
 
--- As-patterns
+-- As パターン
 duplicateFirst :: [a] -> [a]
 duplicateFirst xs@(x:_) = x : xs
 duplicateFirst [] = []
@@ -2355,7 +2355,7 @@ fn describe_number(n: i32) -> String {
     }
 }
 
-// Option pattern matching
+// Option のパターンマッチング
 fn describe_option(m: Option<i32>) -> String {
     match m {
         None => "nothing".to_string(),
@@ -2364,7 +2364,7 @@ fn describe_option(m: Option<i32>) -> String {
     }
 }
 
-// Slice pattern matching
+// スライスのパターンマッチング
 fn describe_slice<T>(xs: &[T]) -> String {
     match xs {
         [] => "empty".to_string(),
@@ -2374,7 +2374,7 @@ fn describe_slice<T>(xs: &[T]) -> String {
     }
 }
 
-// As-patterns
+// As パターン
 fn duplicate_first<T: Clone>(xs: &[T]) -> Vec<T> {
     match xs {
         [] => vec![],
@@ -2390,23 +2390,23 @@ fn duplicate_first<T: Clone>(xs: &[T]) -> Vec<T> {
 
 ---
 
-## Higher-Kinded Types
+## 高カインド型
 
-Haskell natively supports higher-kinded types (HKT), while Rust does not. lambars uses Generic Associated Types (GAT) to emulate HKT.
+Haskell はネイティブに高カインド型 (HKT) をサポートしていますが、Rust にはありません。lambars は Generic Associated Types (GAT) を使用して HKT をエミュレートします。
 
-### Comparison
+### 比較
 
 ```haskell
--- Haskell - Native HKT
+-- Haskell - ネイティブ HKT
 class Functor f where
   fmap :: (a -> b) -> f a -> f b
 
--- 'f' is a type constructor of kind * -> *
--- This allows abstracting over Option, List, Either e, etc.
+-- 'f' はカインド * -> * の型コンストラクタ
+-- これにより Option、List、Either e などを抽象化できる
 ```
 
 ```rust
-// lambars - HKT Emulation via GAT
+// lambars - GAT による HKT エミュレーション
 pub trait TypeConstructor {
     type Inner;
     type WithType<B>: TypeConstructor<Inner = B>;
@@ -2418,24 +2418,24 @@ pub trait Functor: TypeConstructor {
         F: FnOnce(Self::Inner) -> B;
 }
 
-// TypeConstructor allows changing the type parameter
-// While not as elegant as Haskell's HKT, it enables similar abstractions
+// TypeConstructor は型パラメータの変更を可能にします
+// Haskell の HKT ほどエレガントではありませんが、同様の抽象化を可能にします
 ```
 
-### Limitations
+### 制限事項
 
-1. **No direct kind polymorphism**: Rust can't express `* -> *` as a type parameter
-2. **More verbose**: Trait bounds become complex with nested type constructors
-3. **Limited inference**: Type annotations often required
-4. **Specific implementations**: Some operations (like `traverse`) need type-specific variants
+1. **直接的なカインド多相性なし**: Rust は型パラメータとして `* -> *` を表現できない
+2. **より冗長**: ネストされた型コンストラクタでは trait の境界が複雑になる
+3. **限定的な推論**: 型注釈が必要になることが多い
+4. **特殊な実装**: `traverse` のような操作には型固有のバリアントが必要
 
 ---
 
-## Algebraic Data Types
+## 代数的データ型
 
-Both Haskell and Rust support algebraic data types, with similar but syntactically different definitions.
+Haskell と Rust は共に代数的データ型をサポートしていますが、構文は異なります。
 
-### Sum Types (Enums)
+### 直和型 (Enum)
 
 ```haskell
 -- Haskell
@@ -2471,7 +2471,7 @@ enum List<A> {
 }
 ```
 
-### Product Types (Structs/Records)
+### 直積型 (構造体/レコード)
 
 ```haskell
 -- Haskell
@@ -2481,7 +2481,7 @@ data Person = Person
   , email :: String
   }
 
--- Record syntax provides automatic getters
+-- レコード構文は自動的にゲッターを提供
 getName :: Person -> String
 getName = name
 ```
@@ -2494,7 +2494,7 @@ struct Person {
     email: String,
 }
 
-// Field access is direct
+// フィールドアクセスは直接
 fn get_name(p: &Person) -> &str {
     &p.name
 }
@@ -2522,9 +2522,9 @@ struct Email(String);
 
 ---
 
-## Summary: Key Differences
+## まとめ: 主な違い
 
-### Syntax Mapping
+### 構文マッピング
 
 | Haskell | Rust (lambars) |
 |---------|----------------|
@@ -2535,7 +2535,7 @@ struct Email(String);
 | `do { x <- m; ... }` | `eff! { x <= m; ... }` |
 | `\x -> x + 1` | `\|x\| x + 1` |
 | `x :: Int` | `x: i32` |
-| `[a]` | `Vec<A>` or `PersistentList<A>` |
+| `[a]` | `Vec<A>` または `PersistentList<A>` |
 | `Maybe a` | `Option<A>` |
 | `Either e a` | `Result<A, E>` |
 | `IO a` | `IO<A>` |
@@ -2543,20 +2543,18 @@ struct Email(String);
 | `m >>= f` | `m.flat_map(f)` |
 | `fmap f m` | `m.fmap(f)` |
 
-### Conceptual Differences
+### 概念的な違い
 
-1. **Laziness**: Haskell is lazy by default; Rust is strict (use `Lazy` for explicit laziness)
+1. **遅延性**: Haskell はデフォルトで遅延、Rust は正格 (明示的な遅延には `Lazy` を使用)
 
-2. **Purity**: Haskell enforces purity via IO; Rust allows side effects anywhere (use IO monad for discipline)
+2. **純粋性**: Haskell は IO を通じて純粋性を強制、Rust はどこでも副作用を許可 (規律のために IO モナドを使用)
 
-3. **Higher-Kinded Types**: Haskell has native HKT; Rust emulates via GAT
+3. **高カインド型**: Haskell はネイティブ HKT、Rust は GAT によるエミュレーション
 
-4. **Type Classes vs Traits**: Similar concepts, but Haskell's are more flexible with orphan instances
+4. **型クラス vs Trait**: 似た概念だが、Haskell の方が孤児インスタンスで柔軟性が高い
 
-5. **Currying**: Haskell functions are curried by default; Rust requires explicit currying
+5. **カリー化**: Haskell の関数はデフォルトでカリー化、Rust は明示的なカリー化が必要
 
-6. **Memory Management**: Haskell uses GC; Rust uses ownership/borrowing
+6. **メモリ管理**: Haskell は GC、Rust は所有権/借用
 
-7. **Pattern Matching**: Both support it, but Rust requires explicit handling of all cases
-
-8. **Inference**: Haskell has global type inference; Rust has local inference with occasional annotations needed
+7. **パターンマッチング**: 両方サポートするが、Rust は全ケースの明示的な処理が必要
