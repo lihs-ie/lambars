@@ -2437,3 +2437,259 @@ mod serde_tests {
         assert_eq!(list.get(1), Some(&"world".to_string()));
     }
 }
+
+// =============================================================================
+// Rayon Parallel Iterator Support
+// =============================================================================
+
+#[cfg(feature = "rayon")]
+mod rayon_support {
+    use super::PersistentList;
+    use rayon::iter::plumbing::{Consumer, Producer, ProducerCallback, UnindexedConsumer, bridge};
+    use rayon::iter::{FromParallelIterator, IntoParallelIterator, ParallelIterator};
+
+    /// A parallel iterator over owned elements of a [`PersistentList`].
+    pub struct PersistentListParallelIterator<T> {
+        elements: Vec<T>,
+    }
+
+    impl<T: Clone + Send> IntoParallelIterator for PersistentList<T> {
+        type Iter = PersistentListParallelIterator<T>;
+        type Item = T;
+
+        fn into_par_iter(self) -> Self::Iter {
+            PersistentListParallelIterator {
+                elements: self.into_iter().collect(),
+            }
+        }
+    }
+
+    impl<T: Clone + Send> ParallelIterator for PersistentListParallelIterator<T> {
+        type Item = T;
+
+        fn drive_unindexed<C>(self, consumer: C) -> C::Result
+        where
+            C: UnindexedConsumer<Self::Item>,
+        {
+            bridge(self, consumer)
+        }
+
+        fn opt_len(&self) -> Option<usize> {
+            Some(self.elements.len())
+        }
+    }
+
+    impl<T: Clone + Send> rayon::iter::IndexedParallelIterator for PersistentListParallelIterator<T> {
+        fn len(&self) -> usize {
+            self.elements.len()
+        }
+
+        fn drive<C: Consumer<Self::Item>>(self, consumer: C) -> C::Result {
+            bridge(self, consumer)
+        }
+
+        fn with_producer<CB: ProducerCallback<Self::Item>>(self, callback: CB) -> CB::Output {
+            callback.callback(ListProducer {
+                elements: self.elements,
+            })
+        }
+    }
+
+    struct ListProducer<T> {
+        elements: Vec<T>,
+    }
+
+    impl<T: Clone + Send> Producer for ListProducer<T> {
+        type Item = T;
+        type IntoIter = std::vec::IntoIter<T>;
+
+        fn into_iter(self) -> Self::IntoIter {
+            self.elements.into_iter()
+        }
+
+        fn split_at(self, index: usize) -> (Self, Self) {
+            let mut left = self.elements;
+            let right = left.split_off(index);
+            (Self { elements: left }, Self { elements: right })
+        }
+    }
+
+    /// A parallel iterator over references to elements of a [`PersistentList`].
+    pub struct PersistentListParallelRefIterator<'a, T> {
+        elements: Vec<&'a T>,
+    }
+
+    impl<'a, T: Sync> IntoParallelIterator for &'a PersistentList<T> {
+        type Iter = PersistentListParallelRefIterator<'a, T>;
+        type Item = &'a T;
+
+        fn into_par_iter(self) -> Self::Iter {
+            PersistentListParallelRefIterator {
+                elements: self.iter().collect(),
+            }
+        }
+    }
+
+    impl<'a, T: Sync> ParallelIterator for PersistentListParallelRefIterator<'a, T> {
+        type Item = &'a T;
+
+        fn drive_unindexed<C>(self, consumer: C) -> C::Result
+        where
+            C: UnindexedConsumer<Self::Item>,
+        {
+            bridge(self, consumer)
+        }
+
+        fn opt_len(&self) -> Option<usize> {
+            Some(self.elements.len())
+        }
+    }
+
+    impl<T: Sync> rayon::iter::IndexedParallelIterator for PersistentListParallelRefIterator<'_, T> {
+        fn len(&self) -> usize {
+            self.elements.len()
+        }
+
+        fn drive<C: Consumer<Self::Item>>(self, consumer: C) -> C::Result {
+            bridge(self, consumer)
+        }
+
+        fn with_producer<CB: ProducerCallback<Self::Item>>(self, callback: CB) -> CB::Output {
+            callback.callback(ListRefProducer {
+                elements: self.elements,
+            })
+        }
+    }
+
+    struct ListRefProducer<'a, T> {
+        elements: Vec<&'a T>,
+    }
+
+    impl<'a, T: Sync> Producer for ListRefProducer<'a, T> {
+        type Item = &'a T;
+        type IntoIter = std::vec::IntoIter<&'a T>;
+
+        fn into_iter(self) -> Self::IntoIter {
+            self.elements.into_iter()
+        }
+
+        fn split_at(self, index: usize) -> (Self, Self) {
+            let mut left = self.elements;
+            let right = left.split_off(index);
+            (Self { elements: left }, Self { elements: right })
+        }
+    }
+
+    impl<T: Sync> PersistentList<T> {
+        /// Returns a parallel iterator over references to the elements.
+        ///
+        /// # Performance Considerations
+        ///
+        /// This method collects all elements into a `Vec<&T>` before parallel
+        /// processing, requiring O(n) additional memory. For small lists,
+        /// the parallelization overhead may outweigh the benefits.
+        ///
+        /// Consider using `iter()` for sequential processing when:
+        /// - The list is small (< 1000 elements)
+        /// - Memory is constrained
+        #[inline]
+        #[must_use]
+        pub fn par_iter(&self) -> PersistentListParallelRefIterator<'_, T> {
+            self.into_par_iter()
+        }
+    }
+
+    impl<T: Clone + Send> FromParallelIterator<T> for PersistentList<T> {
+        fn from_par_iter<I>(par_iter: I) -> Self
+        where
+            I: IntoParallelIterator<Item = T>,
+        {
+            par_iter
+                .into_par_iter()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .collect()
+        }
+    }
+}
+
+#[cfg(feature = "rayon")]
+pub use rayon_support::PersistentListParallelIterator;
+#[cfg(feature = "rayon")]
+pub use rayon_support::PersistentListParallelRefIterator;
+
+#[cfg(all(test, feature = "rayon"))]
+mod rayon_tests {
+    use super::PersistentList;
+    use rayon::prelude::*;
+    use rstest::rstest;
+
+    #[rstest]
+    fn test_into_par_iter_empty() {
+        let list: PersistentList<i32> = PersistentList::new();
+        let result: Vec<i32> = list.into_par_iter().collect();
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_into_par_iter_single_element() {
+        let list: PersistentList<i32> = PersistentList::singleton(42);
+        let result: Vec<i32> = list.into_par_iter().collect();
+        assert_eq!(result, vec![42]);
+    }
+
+    #[rstest]
+    fn test_into_par_iter_multiple_elements() {
+        let list: PersistentList<i32> = (0..100).collect();
+        let mut result: Vec<i32> = list.into_par_iter().collect();
+        result.sort_unstable();
+        assert_eq!(result, (0..100).collect::<Vec<_>>());
+    }
+
+    #[rstest]
+    fn test_into_par_iter_sum() {
+        let list: PersistentList<i32> = (0..1000).collect();
+        let sum: i32 = list.into_par_iter().sum();
+        let expected: i32 = (0..1000).sum();
+        assert_eq!(sum, expected);
+    }
+
+    #[rstest]
+    fn test_par_iter_empty() {
+        let list: PersistentList<i32> = PersistentList::new();
+        let result: Vec<&i32> = list.par_iter().collect();
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_par_iter_preserves_original() {
+        let list: PersistentList<i32> = (0..100).collect();
+        let sum: i32 = list.par_iter().sum();
+        assert_eq!(list.len(), 100);
+        assert_eq!(sum, (0..100).sum::<i32>());
+    }
+
+    #[rstest]
+    fn test_from_par_iter_vec() {
+        let source: Vec<i32> = (0..1000).collect();
+        let list: PersistentList<i32> = source.into_par_iter().collect();
+        assert_eq!(list.len(), 1000);
+    }
+
+    #[rstest]
+    fn test_parallel_sequential_sum_equivalence() {
+        // PersistentList uses recursive iteration, so we use smaller sizes
+        let list: PersistentList<i32> = (0..1000).collect();
+        let parallel_sum: i32 = list.par_iter().sum();
+        let sequential_sum: i32 = list.iter().sum();
+        assert_eq!(parallel_sum, sequential_sum);
+    }
+
+    #[rstest]
+    fn test_large_parallel_map() {
+        // PersistentList uses recursive iteration, so we use smaller sizes
+        let list: PersistentList<i32> = (0..1000).collect();
+        let result: PersistentList<i32> = list.into_par_iter().map(|x| x * 2).collect();
+        assert_eq!(result.len(), 1000);
+    }
+}

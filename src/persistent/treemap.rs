@@ -1655,6 +1655,356 @@ where
 }
 
 // =============================================================================
+// Rayon Parallel Iterator Support
+// =============================================================================
+
+#[cfg(feature = "rayon")]
+mod rayon_support {
+    use super::PersistentTreeMap;
+    use rayon::iter::plumbing::{Consumer, Producer, ProducerCallback, UnindexedConsumer, bridge};
+    use rayon::iter::{FromParallelIterator, IntoParallelIterator, ParallelIterator};
+
+    /// A parallel iterator over owned key-value pairs of a [`PersistentTreeMap`].
+    pub struct PersistentTreeMapParallelIterator<K, V> {
+        elements: Vec<(K, V)>,
+    }
+
+    impl<K: Clone + Ord + Send, V: Clone + Send> IntoParallelIterator for PersistentTreeMap<K, V> {
+        type Iter = PersistentTreeMapParallelIterator<K, V>;
+        type Item = (K, V);
+
+        fn into_par_iter(self) -> Self::Iter {
+            PersistentTreeMapParallelIterator {
+                elements: self.into_iter().collect(),
+            }
+        }
+    }
+
+    impl<K: Clone + Ord + Send, V: Clone + Send> ParallelIterator
+        for PersistentTreeMapParallelIterator<K, V>
+    {
+        type Item = (K, V);
+
+        fn drive_unindexed<C>(self, consumer: C) -> C::Result
+        where
+            C: UnindexedConsumer<Self::Item>,
+        {
+            bridge(self, consumer)
+        }
+
+        fn opt_len(&self) -> Option<usize> {
+            Some(self.elements.len())
+        }
+    }
+
+    impl<K: Clone + Ord + Send, V: Clone + Send> rayon::iter::IndexedParallelIterator
+        for PersistentTreeMapParallelIterator<K, V>
+    {
+        fn len(&self) -> usize {
+            self.elements.len()
+        }
+
+        fn drive<C: Consumer<Self::Item>>(self, consumer: C) -> C::Result {
+            bridge(self, consumer)
+        }
+
+        fn with_producer<CB: ProducerCallback<Self::Item>>(self, callback: CB) -> CB::Output {
+            callback.callback(TreeMapProducer {
+                elements: self.elements,
+            })
+        }
+    }
+
+    struct TreeMapProducer<K, V> {
+        elements: Vec<(K, V)>,
+    }
+
+    impl<K: Clone + Ord + Send, V: Clone + Send> Producer for TreeMapProducer<K, V> {
+        type Item = (K, V);
+        type IntoIter = std::vec::IntoIter<(K, V)>;
+
+        fn into_iter(self) -> Self::IntoIter {
+            self.elements.into_iter()
+        }
+
+        fn split_at(self, index: usize) -> (Self, Self) {
+            let mut left = self.elements;
+            let right = left.split_off(index);
+            (Self { elements: left }, Self { elements: right })
+        }
+    }
+
+    /// A parallel iterator over references to key-value pairs of a [`PersistentTreeMap`].
+    pub struct PersistentTreeMapParallelRefIterator<'a, K, V> {
+        elements: Vec<(&'a K, &'a V)>,
+    }
+
+    impl<'a, K: Clone + Ord + Sync, V: Clone + Sync> IntoParallelIterator
+        for &'a PersistentTreeMap<K, V>
+    {
+        type Iter = PersistentTreeMapParallelRefIterator<'a, K, V>;
+        type Item = (&'a K, &'a V);
+
+        fn into_par_iter(self) -> Self::Iter {
+            PersistentTreeMapParallelRefIterator {
+                elements: self.iter().collect(),
+            }
+        }
+    }
+
+    impl<'a, K: Sync, V: Sync> ParallelIterator for PersistentTreeMapParallelRefIterator<'a, K, V> {
+        type Item = (&'a K, &'a V);
+
+        fn drive_unindexed<C>(self, consumer: C) -> C::Result
+        where
+            C: UnindexedConsumer<Self::Item>,
+        {
+            bridge(self, consumer)
+        }
+
+        fn opt_len(&self) -> Option<usize> {
+            Some(self.elements.len())
+        }
+    }
+
+    impl<K: Sync, V: Sync> rayon::iter::IndexedParallelIterator
+        for PersistentTreeMapParallelRefIterator<'_, K, V>
+    {
+        fn len(&self) -> usize {
+            self.elements.len()
+        }
+
+        fn drive<C: Consumer<Self::Item>>(self, consumer: C) -> C::Result {
+            bridge(self, consumer)
+        }
+
+        fn with_producer<CB: ProducerCallback<Self::Item>>(self, callback: CB) -> CB::Output {
+            callback.callback(TreeMapRefProducer {
+                elements: self.elements,
+            })
+        }
+    }
+
+    struct TreeMapRefProducer<'a, K, V> {
+        elements: Vec<(&'a K, &'a V)>,
+    }
+
+    impl<'a, K: Sync, V: Sync> Producer for TreeMapRefProducer<'a, K, V> {
+        type Item = (&'a K, &'a V);
+        type IntoIter = std::vec::IntoIter<(&'a K, &'a V)>;
+
+        fn into_iter(self) -> Self::IntoIter {
+            self.elements.into_iter()
+        }
+
+        fn split_at(self, index: usize) -> (Self, Self) {
+            let mut left = self.elements;
+            let right = left.split_off(index);
+            (Self { elements: left }, Self { elements: right })
+        }
+    }
+
+    impl<K: Clone + Ord + Sync, V: Clone + Sync> PersistentTreeMap<K, V> {
+        /// Returns a parallel iterator over references to the key-value pairs.
+        ///
+        /// Note: The iteration order is unspecified and may vary between runs.
+        /// Use `iter()` if you need deterministic key ordering.
+        #[inline]
+        #[must_use]
+        pub fn par_iter(&self) -> PersistentTreeMapParallelRefIterator<'_, K, V> {
+            self.into_par_iter()
+        }
+    }
+
+    impl<K: Clone + Ord + Send, V: Clone + Send> FromParallelIterator<(K, V)>
+        for PersistentTreeMap<K, V>
+    {
+        /// Collects key-value pairs from a parallel iterator into a [`PersistentTreeMap`].
+        ///
+        /// # Non-determinism
+        ///
+        /// If the parallel iterator yields duplicate keys, which value is retained
+        /// is non-deterministic. For deterministic results with duplicate keys,
+        /// use sequential collection via `iter().collect()`.
+        fn from_par_iter<I>(par_iter: I) -> Self
+        where
+            I: IntoParallelIterator<Item = (K, V)>,
+        {
+            par_iter
+                .into_par_iter()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .collect()
+        }
+    }
+}
+
+#[cfg(feature = "rayon")]
+pub use rayon_support::PersistentTreeMapParallelIterator;
+#[cfg(feature = "rayon")]
+pub use rayon_support::PersistentTreeMapParallelRefIterator;
+
+#[cfg(all(test, feature = "rayon"))]
+mod rayon_tests {
+    use super::PersistentTreeMap;
+    use rayon::prelude::*;
+    use rstest::rstest;
+
+    #[rstest]
+    fn test_into_par_iter_empty() {
+        let map: PersistentTreeMap<i32, i32> = PersistentTreeMap::new();
+        let result: Vec<(i32, i32)> = map.into_par_iter().collect();
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_into_par_iter_single_element() {
+        let map = PersistentTreeMap::singleton(42, "answer".to_string());
+        let result: Vec<(i32, String)> = map.into_par_iter().collect();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], (42, "answer".to_string()));
+    }
+
+    #[rstest]
+    fn test_into_par_iter_multiple_elements() {
+        let map = PersistentTreeMap::new()
+            .insert(1, "one".to_string())
+            .insert(2, "two".to_string())
+            .insert(3, "three".to_string());
+        let mut result: Vec<(i32, String)> = map.into_par_iter().collect();
+        result.sort_unstable_by_key(|(key, _)| *key);
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0], (1, "one".to_string()));
+        assert_eq!(result[1], (2, "two".to_string()));
+        assert_eq!(result[2], (3, "three".to_string()));
+    }
+
+    #[rstest]
+    fn test_into_par_iter_parallel_sum() {
+        let map: PersistentTreeMap<i32, i32> = (0..1000).map(|index| (index, index * 2)).collect();
+        let sum: i32 = map.into_par_iter().map(|(_, value)| value).sum();
+        let expected: i32 = (0..1000).map(|index| index * 2).sum();
+        assert_eq!(sum, expected);
+    }
+
+    #[rstest]
+    fn test_par_iter_empty() {
+        let map: PersistentTreeMap<i32, i32> = PersistentTreeMap::new();
+        let result: Vec<(&i32, &i32)> = map.par_iter().collect();
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_par_iter_single_element() {
+        let map = PersistentTreeMap::singleton(42, "answer".to_string());
+        let result: Vec<(&i32, &String)> = map.par_iter().collect();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], (&42, &"answer".to_string()));
+    }
+
+    #[rstest]
+    fn test_par_iter_multiple_elements() {
+        let map = PersistentTreeMap::new()
+            .insert(1, "one".to_string())
+            .insert(2, "two".to_string())
+            .insert(3, "three".to_string());
+        let mut result: Vec<(&i32, &String)> = map.par_iter().collect();
+        result.sort_unstable_by_key(|(key, _)| *key);
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0], (&1, &"one".to_string()));
+        assert_eq!(result[1], (&2, &"two".to_string()));
+        assert_eq!(result[2], (&3, &"three".to_string()));
+    }
+
+    #[rstest]
+    fn test_par_iter_preserves_original() {
+        let map = PersistentTreeMap::new()
+            .insert(1, "one".to_string())
+            .insert(2, "two".to_string());
+        let _: Vec<(&i32, &String)> = map.par_iter().collect();
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get(&1), Some(&"one".to_string()));
+        assert_eq!(map.get(&2), Some(&"two".to_string()));
+    }
+
+    #[rstest]
+    fn test_par_iter_parallel_sum() {
+        let map: PersistentTreeMap<i32, i32> = (0..1000).map(|index| (index, index * 2)).collect();
+        let sum: i32 = map.par_iter().map(|(_, value)| *value).sum();
+        let expected: i32 = (0..1000).map(|index| index * 2).sum();
+        assert_eq!(sum, expected);
+    }
+
+    #[rstest]
+    fn test_from_par_iter_empty() {
+        let result: PersistentTreeMap<i32, i32> =
+            Vec::<(i32, i32)>::new().into_par_iter().collect();
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_from_par_iter_single_element() {
+        let result: PersistentTreeMap<i32, String> =
+            vec![(42, "answer".to_string())].into_par_iter().collect();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.get(&42), Some(&"answer".to_string()));
+    }
+
+    #[rstest]
+    fn test_from_par_iter_multiple_elements() {
+        let result: PersistentTreeMap<i32, String> = vec![
+            (1, "one".to_string()),
+            (2, "two".to_string()),
+            (3, "three".to_string()),
+        ]
+        .into_par_iter()
+        .collect();
+        assert_eq!(result.len(), 3);
+        assert_eq!(result.get(&1), Some(&"one".to_string()));
+        assert_eq!(result.get(&2), Some(&"two".to_string()));
+        assert_eq!(result.get(&3), Some(&"three".to_string()));
+    }
+
+    #[rstest]
+    fn test_from_par_iter_with_duplicates() {
+        let result: PersistentTreeMap<i32, String> = vec![
+            (1, "first".to_string()),
+            (1, "second".to_string()),
+            (2, "two".to_string()),
+        ]
+        .into_par_iter()
+        .collect();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.get(&2), Some(&"two".to_string()));
+    }
+
+    #[rstest]
+    fn test_parallel_map_operation() {
+        let map: PersistentTreeMap<i32, i32> = (0..100).map(|index| (index, index)).collect();
+        let doubled: PersistentTreeMap<i32, i32> = map
+            .into_par_iter()
+            .map(|(key, value)| (key, value * 2))
+            .collect();
+        for index in 0..100 {
+            assert_eq!(doubled.get(&index), Some(&(index * 2)));
+        }
+    }
+
+    #[rstest]
+    fn test_parallel_filter_operation() {
+        let map: PersistentTreeMap<i32, i32> = (0..100).map(|index| (index, index)).collect();
+        let evens: PersistentTreeMap<i32, i32> = map
+            .into_par_iter()
+            .filter(|(key, _)| key % 2 == 0)
+            .collect();
+        assert_eq!(evens.len(), 50);
+        for index in (0..100).filter(|index| index % 2 == 0) {
+            assert_eq!(evens.get(&index), Some(&index));
+        }
+    }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 

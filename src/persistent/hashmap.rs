@@ -4097,3 +4097,272 @@ mod transient_hashmap_tests {
         assert_eq!(persistent.len(), 1000);
     }
 }
+
+// =============================================================================
+// Rayon Parallel Iterator Support
+// =============================================================================
+
+#[cfg(feature = "rayon")]
+mod rayon_support {
+    use super::{Hash, PersistentHashMap};
+    use rayon::iter::plumbing::{Consumer, Producer, ProducerCallback, UnindexedConsumer, bridge};
+    use rayon::iter::{FromParallelIterator, IntoParallelIterator, ParallelIterator};
+
+    /// A parallel iterator over owned key-value pairs of a [`PersistentHashMap`].
+    pub struct PersistentHashMapParallelIterator<K, V> {
+        elements: Vec<(K, V)>,
+    }
+
+    impl<K: Clone + Hash + Eq + Send, V: Clone + Send> IntoParallelIterator
+        for PersistentHashMap<K, V>
+    {
+        type Iter = PersistentHashMapParallelIterator<K, V>;
+        type Item = (K, V);
+
+        fn into_par_iter(self) -> Self::Iter {
+            PersistentHashMapParallelIterator {
+                elements: self.into_iter().collect(),
+            }
+        }
+    }
+
+    impl<K: Clone + Hash + Eq + Send, V: Clone + Send> ParallelIterator
+        for PersistentHashMapParallelIterator<K, V>
+    {
+        type Item = (K, V);
+
+        fn drive_unindexed<C>(self, consumer: C) -> C::Result
+        where
+            C: UnindexedConsumer<Self::Item>,
+        {
+            bridge(self, consumer)
+        }
+
+        fn opt_len(&self) -> Option<usize> {
+            Some(self.elements.len())
+        }
+    }
+
+    impl<K: Clone + Hash + Eq + Send, V: Clone + Send> rayon::iter::IndexedParallelIterator
+        for PersistentHashMapParallelIterator<K, V>
+    {
+        fn len(&self) -> usize {
+            self.elements.len()
+        }
+
+        fn drive<C: Consumer<Self::Item>>(self, consumer: C) -> C::Result {
+            bridge(self, consumer)
+        }
+
+        fn with_producer<CB: ProducerCallback<Self::Item>>(self, callback: CB) -> CB::Output {
+            callback.callback(HashMapProducer {
+                elements: self.elements,
+            })
+        }
+    }
+
+    struct HashMapProducer<K, V> {
+        elements: Vec<(K, V)>,
+    }
+
+    impl<K: Clone + Hash + Eq + Send, V: Clone + Send> Producer for HashMapProducer<K, V> {
+        type Item = (K, V);
+        type IntoIter = std::vec::IntoIter<(K, V)>;
+
+        fn into_iter(self) -> Self::IntoIter {
+            self.elements.into_iter()
+        }
+
+        fn split_at(self, index: usize) -> (Self, Self) {
+            let mut left = self.elements;
+            let right = left.split_off(index);
+            (Self { elements: left }, Self { elements: right })
+        }
+    }
+
+    /// A parallel iterator over references to key-value pairs of a [`PersistentHashMap`].
+    pub struct PersistentHashMapParallelRefIterator<'a, K, V> {
+        elements: Vec<(&'a K, &'a V)>,
+    }
+
+    impl<'a, K: Clone + Hash + Eq + Sync, V: Clone + Sync> IntoParallelIterator
+        for &'a PersistentHashMap<K, V>
+    {
+        type Iter = PersistentHashMapParallelRefIterator<'a, K, V>;
+        type Item = (&'a K, &'a V);
+
+        fn into_par_iter(self) -> Self::Iter {
+            PersistentHashMapParallelRefIterator {
+                elements: self.iter().collect(),
+            }
+        }
+    }
+
+    impl<'a, K: Sync, V: Sync> ParallelIterator for PersistentHashMapParallelRefIterator<'a, K, V> {
+        type Item = (&'a K, &'a V);
+
+        fn drive_unindexed<C>(self, consumer: C) -> C::Result
+        where
+            C: UnindexedConsumer<Self::Item>,
+        {
+            bridge(self, consumer)
+        }
+
+        fn opt_len(&self) -> Option<usize> {
+            Some(self.elements.len())
+        }
+    }
+
+    impl<K: Sync, V: Sync> rayon::iter::IndexedParallelIterator
+        for PersistentHashMapParallelRefIterator<'_, K, V>
+    {
+        fn len(&self) -> usize {
+            self.elements.len()
+        }
+
+        fn drive<C: Consumer<Self::Item>>(self, consumer: C) -> C::Result {
+            bridge(self, consumer)
+        }
+
+        fn with_producer<CB: ProducerCallback<Self::Item>>(self, callback: CB) -> CB::Output {
+            callback.callback(HashMapRefProducer {
+                elements: self.elements,
+            })
+        }
+    }
+
+    struct HashMapRefProducer<'a, K, V> {
+        elements: Vec<(&'a K, &'a V)>,
+    }
+
+    impl<'a, K: Sync, V: Sync> Producer for HashMapRefProducer<'a, K, V> {
+        type Item = (&'a K, &'a V);
+        type IntoIter = std::vec::IntoIter<(&'a K, &'a V)>;
+
+        fn into_iter(self) -> Self::IntoIter {
+            self.elements.into_iter()
+        }
+
+        fn split_at(self, index: usize) -> (Self, Self) {
+            let mut left = self.elements;
+            let right = left.split_off(index);
+            (Self { elements: left }, Self { elements: right })
+        }
+    }
+
+    impl<K: Clone + Hash + Eq + Sync, V: Clone + Sync> PersistentHashMap<K, V> {
+        /// Returns a parallel iterator over references to the key-value pairs.
+        ///
+        /// Note: The iteration order is unspecified and may vary between runs.
+        /// Use `iter()` if you need deterministic ordering.
+        #[inline]
+        #[must_use]
+        pub fn par_iter(&self) -> PersistentHashMapParallelRefIterator<'_, K, V> {
+            self.into_par_iter()
+        }
+    }
+
+    impl<K: Clone + Hash + Eq + Send, V: Clone + Send> FromParallelIterator<(K, V)>
+        for PersistentHashMap<K, V>
+    {
+        /// Collects key-value pairs from a parallel iterator into a [`PersistentHashMap`].
+        ///
+        /// # Non-determinism
+        ///
+        /// If the parallel iterator yields duplicate keys, which value is retained
+        /// is non-deterministic. For deterministic results with duplicate keys,
+        /// use sequential collection via `iter().collect()`.
+        fn from_par_iter<I>(par_iter: I) -> Self
+        where
+            I: IntoParallelIterator<Item = (K, V)>,
+        {
+            par_iter
+                .into_par_iter()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .collect()
+        }
+    }
+}
+
+#[cfg(feature = "rayon")]
+pub use rayon_support::PersistentHashMapParallelIterator;
+#[cfg(feature = "rayon")]
+pub use rayon_support::PersistentHashMapParallelRefIterator;
+
+#[cfg(all(test, feature = "rayon"))]
+mod rayon_tests {
+    use super::PersistentHashMap;
+    use rayon::prelude::*;
+    use rstest::rstest;
+
+    #[rstest]
+    fn test_into_par_iter_empty() {
+        let map: PersistentHashMap<i32, i32> = PersistentHashMap::new();
+        let result: Vec<(i32, i32)> = map.into_par_iter().collect();
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_into_par_iter_single_element() {
+        let map = PersistentHashMap::singleton(42, "answer".to_string());
+        let result: Vec<(i32, String)> = map.into_par_iter().collect();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], (42, "answer".to_string()));
+    }
+
+    #[rstest]
+    fn test_into_par_iter_multiple_elements() {
+        let map: PersistentHashMap<i32, i32> = (0..100).map(|x| (x, x * 10)).collect();
+        let mut result: Vec<(i32, i32)> = map.into_par_iter().collect();
+        result.sort_unstable_by_key(|(k, _)| *k);
+        let expected: Vec<(i32, i32)> = (0..100).map(|x| (x, x * 10)).collect();
+        assert_eq!(result, expected);
+    }
+
+    #[rstest]
+    fn test_into_par_iter_sum_values() {
+        let map: PersistentHashMap<i32, i32> = (0..1000).map(|x| (x, x)).collect();
+        let sum: i32 = map.into_par_iter().map(|(_, v)| v).sum();
+        let expected: i32 = (0..1000).sum();
+        assert_eq!(sum, expected);
+    }
+
+    #[rstest]
+    fn test_par_iter_empty() {
+        let map: PersistentHashMap<i32, i32> = PersistentHashMap::new();
+        let result: Vec<(&i32, &i32)> = map.par_iter().collect();
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_par_iter_preserves_original() {
+        let map: PersistentHashMap<i32, i32> = (0..100).map(|x| (x, x * 10)).collect();
+        let sum: i32 = map.par_iter().map(|(_, v)| *v).sum();
+        assert_eq!(map.len(), 100);
+        assert_eq!(sum, (0..100).map(|x| x * 10).sum::<i32>());
+    }
+
+    #[rstest]
+    fn test_from_par_iter_vec() {
+        let source: Vec<(i32, i32)> = (0..1000).map(|x| (x, x * 2)).collect();
+        let map: PersistentHashMap<i32, i32> = source.into_par_iter().collect();
+        assert_eq!(map.len(), 1000);
+    }
+
+    #[rstest]
+    fn test_parallel_sequential_sum_equivalence() {
+        let map: PersistentHashMap<i32, i32> = (0..1000).map(|x| (x, x)).collect();
+        let parallel_sum: i32 = map.par_iter().map(|(_, v)| *v).sum();
+        let sequential_sum: i32 = map.iter().map(|(_, v)| *v).sum();
+        assert_eq!(parallel_sum, sequential_sum);
+    }
+
+    #[rstest]
+    fn test_large_parallel_map() {
+        let map: PersistentHashMap<i32, i32> = (0..100_000).map(|x| (x, x)).collect();
+        let result: PersistentHashMap<i32, i32> =
+            map.into_par_iter().map(|(k, v)| (k, v * 2)).collect();
+        assert_eq!(result.len(), 100_000);
+    }
+}

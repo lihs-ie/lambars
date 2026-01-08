@@ -154,6 +154,28 @@ pub use vector::PersistentVectorIntoIterator;
 pub use vector::PersistentVectorIterator;
 pub use vector::TransientVector;
 
+// Rayon parallel iterator re-exports
+#[cfg(feature = "rayon")]
+pub use hashmap::PersistentHashMapParallelIterator;
+#[cfg(feature = "rayon")]
+pub use hashmap::PersistentHashMapParallelRefIterator;
+#[cfg(feature = "rayon")]
+pub use hashset::PersistentHashSetParallelIterator;
+#[cfg(feature = "rayon")]
+pub use hashset::PersistentHashSetParallelRefIterator;
+#[cfg(feature = "rayon")]
+pub use list::PersistentListParallelIterator;
+#[cfg(feature = "rayon")]
+pub use list::PersistentListParallelRefIterator;
+#[cfg(feature = "rayon")]
+pub use treemap::PersistentTreeMapParallelIterator;
+#[cfg(feature = "rayon")]
+pub use treemap::PersistentTreeMapParallelRefIterator;
+#[cfg(feature = "rayon")]
+pub use vector::PersistentVectorParallelIterator;
+#[cfg(feature = "rayon")]
+pub use vector::PersistentVectorParallelRefIterator;
+
 // =============================================================================
 // Tests
 // =============================================================================

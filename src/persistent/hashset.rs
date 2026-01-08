@@ -2414,3 +2414,252 @@ mod transient_hashset_tests {
         assert_eq!(transient.len(), 3);
     }
 }
+
+// =============================================================================
+// Rayon Parallel Iterator Support
+// =============================================================================
+
+#[cfg(feature = "rayon")]
+mod rayon_support {
+    use super::{Hash, PersistentHashSet};
+    use rayon::iter::plumbing::{Consumer, Producer, ProducerCallback, UnindexedConsumer, bridge};
+    use rayon::iter::{FromParallelIterator, IntoParallelIterator, ParallelIterator};
+
+    /// A parallel iterator over owned elements of a [`PersistentHashSet`].
+    pub struct PersistentHashSetParallelIterator<T> {
+        elements: Vec<T>,
+    }
+
+    impl<T: Clone + Hash + Eq + Send> IntoParallelIterator for PersistentHashSet<T> {
+        type Iter = PersistentHashSetParallelIterator<T>;
+        type Item = T;
+
+        fn into_par_iter(self) -> Self::Iter {
+            PersistentHashSetParallelIterator {
+                elements: self.into_iter().collect(),
+            }
+        }
+    }
+
+    impl<T: Clone + Hash + Eq + Send> ParallelIterator for PersistentHashSetParallelIterator<T> {
+        type Item = T;
+
+        fn drive_unindexed<C>(self, consumer: C) -> C::Result
+        where
+            C: UnindexedConsumer<Self::Item>,
+        {
+            bridge(self, consumer)
+        }
+
+        fn opt_len(&self) -> Option<usize> {
+            Some(self.elements.len())
+        }
+    }
+
+    impl<T: Clone + Hash + Eq + Send> rayon::iter::IndexedParallelIterator
+        for PersistentHashSetParallelIterator<T>
+    {
+        fn len(&self) -> usize {
+            self.elements.len()
+        }
+
+        fn drive<C: Consumer<Self::Item>>(self, consumer: C) -> C::Result {
+            bridge(self, consumer)
+        }
+
+        fn with_producer<CB: ProducerCallback<Self::Item>>(self, callback: CB) -> CB::Output {
+            callback.callback(HashSetProducer {
+                elements: self.elements,
+            })
+        }
+    }
+
+    struct HashSetProducer<T> {
+        elements: Vec<T>,
+    }
+
+    impl<T: Clone + Hash + Eq + Send> Producer for HashSetProducer<T> {
+        type Item = T;
+        type IntoIter = std::vec::IntoIter<T>;
+
+        fn into_iter(self) -> Self::IntoIter {
+            self.elements.into_iter()
+        }
+
+        fn split_at(self, index: usize) -> (Self, Self) {
+            let mut left = self.elements;
+            let right = left.split_off(index);
+            (Self { elements: left }, Self { elements: right })
+        }
+    }
+
+    /// A parallel iterator over references to elements of a [`PersistentHashSet`].
+    pub struct PersistentHashSetParallelRefIterator<'a, T> {
+        elements: Vec<&'a T>,
+    }
+
+    impl<'a, T: Clone + Hash + Eq + Sync> IntoParallelIterator for &'a PersistentHashSet<T> {
+        type Iter = PersistentHashSetParallelRefIterator<'a, T>;
+        type Item = &'a T;
+
+        fn into_par_iter(self) -> Self::Iter {
+            PersistentHashSetParallelRefIterator {
+                elements: self.iter().collect(),
+            }
+        }
+    }
+
+    impl<'a, T: Sync> ParallelIterator for PersistentHashSetParallelRefIterator<'a, T> {
+        type Item = &'a T;
+
+        fn drive_unindexed<C>(self, consumer: C) -> C::Result
+        where
+            C: UnindexedConsumer<Self::Item>,
+        {
+            bridge(self, consumer)
+        }
+
+        fn opt_len(&self) -> Option<usize> {
+            Some(self.elements.len())
+        }
+    }
+
+    impl<T: Sync> rayon::iter::IndexedParallelIterator for PersistentHashSetParallelRefIterator<'_, T> {
+        fn len(&self) -> usize {
+            self.elements.len()
+        }
+
+        fn drive<C: Consumer<Self::Item>>(self, consumer: C) -> C::Result {
+            bridge(self, consumer)
+        }
+
+        fn with_producer<CB: ProducerCallback<Self::Item>>(self, callback: CB) -> CB::Output {
+            callback.callback(HashSetRefProducer {
+                elements: self.elements,
+            })
+        }
+    }
+
+    struct HashSetRefProducer<'a, T> {
+        elements: Vec<&'a T>,
+    }
+
+    impl<'a, T: Sync> Producer for HashSetRefProducer<'a, T> {
+        type Item = &'a T;
+        type IntoIter = std::vec::IntoIter<&'a T>;
+
+        fn into_iter(self) -> Self::IntoIter {
+            self.elements.into_iter()
+        }
+
+        fn split_at(self, index: usize) -> (Self, Self) {
+            let mut left = self.elements;
+            let right = left.split_off(index);
+            (Self { elements: left }, Self { elements: right })
+        }
+    }
+
+    impl<T: Clone + Hash + Eq + Sync> PersistentHashSet<T> {
+        /// Returns a parallel iterator over references to the elements.
+        ///
+        /// Note: The iteration order is unspecified and may vary between runs.
+        /// Use `iter()` if you need deterministic ordering.
+        #[inline]
+        #[must_use]
+        pub fn par_iter(&self) -> PersistentHashSetParallelRefIterator<'_, T> {
+            self.into_par_iter()
+        }
+    }
+
+    impl<T: Clone + Hash + Eq + Send> FromParallelIterator<T> for PersistentHashSet<T> {
+        fn from_par_iter<I>(par_iter: I) -> Self
+        where
+            I: IntoParallelIterator<Item = T>,
+        {
+            par_iter
+                .into_par_iter()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .collect()
+        }
+    }
+}
+
+#[cfg(feature = "rayon")]
+pub use rayon_support::PersistentHashSetParallelIterator;
+#[cfg(feature = "rayon")]
+pub use rayon_support::PersistentHashSetParallelRefIterator;
+
+#[cfg(all(test, feature = "rayon"))]
+mod rayon_tests {
+    use super::PersistentHashSet;
+    use rayon::prelude::*;
+    use rstest::rstest;
+
+    #[rstest]
+    fn test_into_par_iter_empty() {
+        let set: PersistentHashSet<i32> = PersistentHashSet::new();
+        let result: Vec<i32> = set.into_par_iter().collect();
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_into_par_iter_single_element() {
+        let set = PersistentHashSet::singleton(42);
+        let result: Vec<i32> = set.into_par_iter().collect();
+        assert_eq!(result, vec![42]);
+    }
+
+    #[rstest]
+    fn test_into_par_iter_multiple_elements() {
+        let set: PersistentHashSet<i32> = (0..100).collect();
+        let mut result: Vec<i32> = set.into_par_iter().collect();
+        result.sort_unstable();
+        assert_eq!(result, (0..100).collect::<Vec<_>>());
+    }
+
+    #[rstest]
+    fn test_into_par_iter_sum() {
+        let set: PersistentHashSet<i32> = (0..1000).collect();
+        let sum: i32 = set.into_par_iter().sum();
+        let expected: i32 = (0..1000).sum();
+        assert_eq!(sum, expected);
+    }
+
+    #[rstest]
+    fn test_par_iter_empty() {
+        let set: PersistentHashSet<i32> = PersistentHashSet::new();
+        let result: Vec<&i32> = set.par_iter().collect();
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_par_iter_preserves_original() {
+        let set: PersistentHashSet<i32> = (0..100).collect();
+        let sum: i32 = set.par_iter().sum();
+        assert_eq!(set.len(), 100);
+        assert_eq!(sum, (0..100).sum::<i32>());
+    }
+
+    #[rstest]
+    fn test_from_par_iter_vec() {
+        let source: Vec<i32> = (0..1000).collect();
+        let set: PersistentHashSet<i32> = source.into_par_iter().collect();
+        assert_eq!(set.len(), 1000);
+    }
+
+    #[rstest]
+    fn test_parallel_sequential_sum_equivalence() {
+        let set: PersistentHashSet<i32> = (0..1000).collect();
+        let parallel_sum: i32 = set.par_iter().sum();
+        let sequential_sum: i32 = set.iter().sum();
+        assert_eq!(parallel_sum, sequential_sum);
+    }
+
+    #[rstest]
+    fn test_large_parallel_map() {
+        let set: PersistentHashSet<i32> = (0..100_000).collect();
+        let result: PersistentHashSet<i32> = set.into_par_iter().map(|x| x * 2).collect();
+        assert_eq!(result.len(), 100_000);
+    }
+}

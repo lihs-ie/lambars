@@ -4526,3 +4526,477 @@ mod transient_vector_tests {
         assert_eq!(modified.len(), 102);
     }
 }
+
+// =============================================================================
+// Rayon Parallel Iterator Support
+// =============================================================================
+
+#[cfg(feature = "rayon")]
+mod rayon_support {
+    use super::PersistentVector;
+    use rayon::iter::plumbing::{Consumer, Producer, ProducerCallback, UnindexedConsumer, bridge};
+    use rayon::iter::{
+        FromParallelIterator, IndexedParallelIterator, IntoParallelIterator, ParallelIterator,
+    };
+
+    /// A parallel iterator over owned elements of a [`PersistentVector`].
+    pub struct PersistentVectorParallelIterator<T> {
+        elements: Vec<T>,
+    }
+
+    impl<T: Clone + Send> IntoParallelIterator for PersistentVector<T> {
+        type Iter = PersistentVectorParallelIterator<T>;
+        type Item = T;
+
+        fn into_par_iter(self) -> Self::Iter {
+            PersistentVectorParallelIterator {
+                elements: self.into_iter().collect(),
+            }
+        }
+    }
+
+    impl<T: Clone + Send> ParallelIterator for PersistentVectorParallelIterator<T> {
+        type Item = T;
+
+        fn drive_unindexed<C>(self, consumer: C) -> C::Result
+        where
+            C: UnindexedConsumer<Self::Item>,
+        {
+            bridge(self, consumer)
+        }
+
+        fn opt_len(&self) -> Option<usize> {
+            Some(self.elements.len())
+        }
+    }
+
+    impl<T: Clone + Send> IndexedParallelIterator for PersistentVectorParallelIterator<T> {
+        fn len(&self) -> usize {
+            self.elements.len()
+        }
+
+        fn drive<C: Consumer<Self::Item>>(self, consumer: C) -> C::Result {
+            bridge(self, consumer)
+        }
+
+        fn with_producer<CB: ProducerCallback<Self::Item>>(self, callback: CB) -> CB::Output {
+            callback.callback(VectorProducer {
+                elements: self.elements,
+            })
+        }
+    }
+
+    struct VectorProducer<T> {
+        elements: Vec<T>,
+    }
+
+    impl<T: Clone + Send> Producer for VectorProducer<T> {
+        type Item = T;
+        type IntoIter = std::vec::IntoIter<T>;
+
+        fn into_iter(self) -> Self::IntoIter {
+            self.elements.into_iter()
+        }
+
+        fn split_at(self, index: usize) -> (Self, Self) {
+            let mut left = self.elements;
+            let right = left.split_off(index);
+            (Self { elements: left }, Self { elements: right })
+        }
+    }
+
+    /// A parallel iterator over references to elements of a [`PersistentVector`].
+    pub struct PersistentVectorParallelRefIterator<'a, T> {
+        elements: Vec<&'a T>,
+    }
+
+    impl<'a, T: Sync> IntoParallelIterator for &'a PersistentVector<T> {
+        type Iter = PersistentVectorParallelRefIterator<'a, T>;
+        type Item = &'a T;
+
+        fn into_par_iter(self) -> Self::Iter {
+            PersistentVectorParallelRefIterator {
+                elements: self.iter().collect(),
+            }
+        }
+    }
+
+    impl<'a, T: Sync> ParallelIterator for PersistentVectorParallelRefIterator<'a, T> {
+        type Item = &'a T;
+
+        fn drive_unindexed<C>(self, consumer: C) -> C::Result
+        where
+            C: UnindexedConsumer<Self::Item>,
+        {
+            bridge(self, consumer)
+        }
+
+        fn opt_len(&self) -> Option<usize> {
+            Some(self.elements.len())
+        }
+    }
+
+    impl<T: Sync> IndexedParallelIterator for PersistentVectorParallelRefIterator<'_, T> {
+        fn len(&self) -> usize {
+            self.elements.len()
+        }
+
+        fn drive<C: Consumer<Self::Item>>(self, consumer: C) -> C::Result {
+            bridge(self, consumer)
+        }
+
+        fn with_producer<CB: ProducerCallback<Self::Item>>(self, callback: CB) -> CB::Output {
+            callback.callback(VectorRefProducer {
+                elements: self.elements,
+            })
+        }
+    }
+
+    struct VectorRefProducer<'a, T> {
+        elements: Vec<&'a T>,
+    }
+
+    impl<'a, T: Sync> Producer for VectorRefProducer<'a, T> {
+        type Item = &'a T;
+        type IntoIter = std::vec::IntoIter<&'a T>;
+
+        fn into_iter(self) -> Self::IntoIter {
+            self.elements.into_iter()
+        }
+
+        fn split_at(self, index: usize) -> (Self, Self) {
+            let mut left = self.elements;
+            let right = left.split_off(index);
+            (Self { elements: left }, Self { elements: right })
+        }
+    }
+
+    impl<T: Sync> PersistentVector<T> {
+        /// Returns a parallel iterator over references to the elements.
+        ///
+        /// This method preserves the original vector, allowing continued use
+        /// after iteration.
+        ///
+        /// # Performance Note
+        ///
+        /// The iterator collects element references into a `Vec` for efficient
+        /// parallel splitting. This adds O(n) memory overhead but enables
+        /// work-stealing parallelism.
+        #[inline]
+        #[must_use]
+        pub fn par_iter(&self) -> PersistentVectorParallelRefIterator<'_, T> {
+            self.into_par_iter()
+        }
+    }
+
+    impl<T: Clone + Send> FromParallelIterator<T> for PersistentVector<T> {
+        fn from_par_iter<I>(par_iter: I) -> Self
+        where
+            I: IntoParallelIterator<Item = T>,
+        {
+            par_iter
+                .into_par_iter()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .collect()
+        }
+    }
+}
+
+#[cfg(feature = "rayon")]
+pub use rayon_support::PersistentVectorParallelIterator;
+#[cfg(feature = "rayon")]
+pub use rayon_support::PersistentVectorParallelRefIterator;
+
+// =============================================================================
+// Rayon Tests
+// =============================================================================
+
+#[cfg(all(test, feature = "rayon"))]
+mod rayon_tests {
+    use super::PersistentVector;
+    use rayon::prelude::*;
+    use rstest::rstest;
+
+    // =========================================================================
+    // IntoParallelIterator Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_into_par_iter_empty() {
+        let vector: PersistentVector<i32> = PersistentVector::new();
+        let result: Vec<i32> = vector.into_par_iter().collect();
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_into_par_iter_single_element() {
+        let vector: PersistentVector<i32> = PersistentVector::singleton(42);
+        let result: Vec<i32> = vector.into_par_iter().collect();
+        assert_eq!(result, vec![42]);
+    }
+
+    #[rstest]
+    fn test_into_par_iter_multiple_elements() {
+        let vector: PersistentVector<i32> = (0..100).collect();
+        let mut result: Vec<i32> = vector.into_par_iter().collect();
+        result.sort_unstable();
+        assert_eq!(result, (0..100).collect::<Vec<_>>());
+    }
+
+    #[rstest]
+    fn test_into_par_iter_map() {
+        let vector: PersistentVector<i32> = (0..1000).collect();
+        let mut result: Vec<i32> = vector.into_par_iter().map(|x| x * 2).collect();
+        result.sort_unstable();
+        let expected: Vec<i32> = (0..1000).map(|x| x * 2).collect();
+        assert_eq!(result, expected);
+    }
+
+    #[rstest]
+    fn test_into_par_iter_filter() {
+        let vector: PersistentVector<i32> = (0..1000).collect();
+        let mut result: Vec<i32> = vector.into_par_iter().filter(|&x| x % 2 == 0).collect();
+        result.sort_unstable();
+        let expected: Vec<i32> = (0..1000).filter(|&x| x % 2 == 0).collect();
+        assert_eq!(result, expected);
+    }
+
+    #[rstest]
+    fn test_into_par_iter_sum() {
+        let vector: PersistentVector<i32> = (0..10000).collect();
+        let sum: i32 = vector.into_par_iter().sum();
+        let expected: i32 = (0..10000).sum();
+        assert_eq!(sum, expected);
+    }
+
+    #[rstest]
+    fn test_into_par_iter_reduce() {
+        let vector: PersistentVector<i32> = (1..=100).collect();
+        let product: i32 = vector
+            .into_par_iter()
+            .reduce(|| 1, |a, b| a.wrapping_mul(b));
+        let expected: i32 = (1..=100).fold(1, |a, b| a.wrapping_mul(b));
+        assert_eq!(product, expected);
+    }
+
+    // =========================================================================
+    // par_iter (Reference) Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_par_iter_empty() {
+        let vector: PersistentVector<i32> = PersistentVector::new();
+        let result: Vec<&i32> = vector.par_iter().collect();
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_par_iter_single_element() {
+        let vector: PersistentVector<i32> = PersistentVector::singleton(42);
+        let result: Vec<&i32> = vector.par_iter().collect();
+        assert_eq!(result, vec![&42]);
+    }
+
+    #[rstest]
+    fn test_par_iter_preserves_original() {
+        let vector: PersistentVector<i32> = (0..100).collect();
+        let sum: i32 = vector.par_iter().sum();
+        // Vector should still be usable
+        assert_eq!(vector.len(), 100);
+        assert_eq!(sum, (0..100).sum::<i32>());
+    }
+
+    #[rstest]
+    fn test_par_iter_map_cloned() {
+        let vector: PersistentVector<i32> = (0..1000).collect();
+        let mut result: Vec<i32> = vector.par_iter().map(|&x| x * 2).collect();
+        result.sort_unstable();
+        let expected: Vec<i32> = (0..1000).map(|x| x * 2).collect();
+        assert_eq!(result, expected);
+    }
+
+    #[rstest]
+    fn test_par_iter_filter_cloned() {
+        let vector: PersistentVector<i32> = (0..1000).collect();
+        let mut result: Vec<i32> = vector
+            .par_iter()
+            .filter(|&&x| x % 2 == 0)
+            .copied()
+            .collect();
+        result.sort_unstable();
+        let expected: Vec<i32> = (0..1000).filter(|&x| x % 2 == 0).collect();
+        assert_eq!(result, expected);
+    }
+
+    // =========================================================================
+    // IndexedParallelIterator Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_indexed_par_iter_enumerate() {
+        let vector: PersistentVector<char> = "hello world".chars().collect();
+        let mut result: Vec<(usize, char)> = vector.into_par_iter().enumerate().collect();
+        result.sort_unstable_by_key(|(index, _)| *index);
+        let expected: Vec<(usize, char)> = "hello world".chars().enumerate().collect();
+        assert_eq!(result, expected);
+    }
+
+    #[rstest]
+    fn test_indexed_par_iter_zip() {
+        let vector1: PersistentVector<i32> = (0..100).collect();
+        let vector2: PersistentVector<i32> = (100..200).collect();
+
+        let mut result: Vec<(i32, i32)> = vector1
+            .into_par_iter()
+            .zip(vector2.into_par_iter())
+            .collect();
+        result.sort_unstable();
+
+        let expected: Vec<(i32, i32)> = (0..100).zip(100..200).collect();
+        assert_eq!(result, expected);
+    }
+
+    #[rstest]
+    fn test_indexed_par_iter_take() {
+        let vector: PersistentVector<i32> = (0..100).collect();
+        let mut result: Vec<i32> = vector.into_par_iter().take(10).collect();
+        result.sort_unstable();
+        // take with IndexedParallelIterator preserves order
+        assert_eq!(result.len(), 10);
+        // Elements should be from 0..10
+        for expected_value in 0..10 {
+            assert!(result.contains(&expected_value));
+        }
+    }
+
+    #[rstest]
+    fn test_indexed_par_iter_skip() {
+        let vector: PersistentVector<i32> = (0..100).collect();
+        let mut result: Vec<i32> = vector.into_par_iter().skip(90).collect();
+        result.sort_unstable();
+        assert_eq!(result.len(), 10);
+        // Elements should be from 90..100
+        for expected_value in 90..100 {
+            assert!(result.contains(&expected_value));
+        }
+    }
+
+    // =========================================================================
+    // FromParallelIterator Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_from_par_iter_vec() {
+        let source: Vec<i32> = (0..1000).collect();
+        let vector: PersistentVector<i32> = source.into_par_iter().collect();
+        assert_eq!(vector.len(), 1000);
+    }
+
+    #[rstest]
+    fn test_from_par_iter_map() {
+        let source: Vec<i32> = (0..1000).collect();
+        let vector: PersistentVector<i32> = source.into_par_iter().map(|x| x * 2).collect();
+        assert_eq!(vector.len(), 1000);
+        // Check some values
+        for element_index in 0_i32..1000 {
+            #[allow(clippy::cast_sign_loss)]
+            let index = element_index as usize;
+            assert_eq!(vector.get(index), Some(&(element_index * 2)));
+        }
+    }
+
+    #[rstest]
+    fn test_from_par_iter_filter() {
+        let source: Vec<i32> = (0..1000).collect();
+        let vector: PersistentVector<i32> =
+            source.into_par_iter().filter(|&x| x % 2 == 0).collect();
+        assert_eq!(vector.len(), 500);
+    }
+
+    // =========================================================================
+    // Parallel-Sequential Equivalence Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_parallel_sequential_sum_equivalence() {
+        let vector: PersistentVector<i32> = (0..10000).collect();
+        let parallel_sum: i32 = vector.par_iter().sum();
+        let sequential_sum: i32 = vector.iter().sum();
+        assert_eq!(parallel_sum, sequential_sum);
+    }
+
+    #[rstest]
+    fn test_parallel_sequential_map_equivalence() {
+        let vector: PersistentVector<i32> = (0..1000).collect();
+
+        let mut parallel_result: Vec<i32> = vector.par_iter().map(|&x| x * 2).collect();
+        parallel_result.sort_unstable();
+
+        let mut sequential_result: Vec<i32> = vector.iter().map(|&x| x * 2).collect();
+        sequential_result.sort_unstable();
+
+        assert_eq!(parallel_result, sequential_result);
+    }
+
+    #[rstest]
+    fn test_parallel_sequential_filter_equivalence() {
+        let vector: PersistentVector<i32> = (0..1000).collect();
+
+        let mut parallel_result: Vec<i32> = vector
+            .par_iter()
+            .filter(|&&x| x % 3 == 0)
+            .copied()
+            .collect();
+        parallel_result.sort_unstable();
+
+        let mut sequential_result: Vec<i32> =
+            vector.iter().filter(|&&x| x % 3 == 0).copied().collect();
+        sequential_result.sort_unstable();
+
+        assert_eq!(parallel_result, sequential_result);
+    }
+
+    #[rstest]
+    fn test_parallel_sequential_count_equivalence() {
+        let vector: PersistentVector<i32> = (0..10000).collect();
+        let parallel_count = vector.par_iter().filter(|&&x| x % 7 == 0).count();
+        let sequential_count = vector.iter().filter(|&&x| x % 7 == 0).count();
+        assert_eq!(parallel_count, sequential_count);
+    }
+
+    #[rstest]
+    fn test_parallel_sequential_any_equivalence() {
+        let vector: PersistentVector<i32> = (0..10000).collect();
+        let parallel_any = vector.par_iter().any(|&x| x == 5000);
+        let sequential_any = vector.iter().any(|&x| x == 5000);
+        assert_eq!(parallel_any, sequential_any);
+    }
+
+    #[rstest]
+    fn test_parallel_sequential_all_equivalence() {
+        let vector: PersistentVector<i32> = (0..10000).collect();
+        let parallel_all = vector.par_iter().all(|&x| x >= 0);
+        let sequential_all = vector.iter().all(|&x| x >= 0);
+        assert_eq!(parallel_all, sequential_all);
+    }
+
+    // =========================================================================
+    // Large Data Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_large_parallel_map() {
+        let vector: PersistentVector<i32> = (0..100_000).collect();
+        let result: PersistentVector<i32> = vector.into_par_iter().map(|x| x * 2).collect();
+        assert_eq!(result.len(), 100_000);
+    }
+
+    #[rstest]
+    fn test_large_parallel_sum() {
+        let vector: PersistentVector<i64> = (0..100_000_i64).collect();
+        let sum: i64 = vector.into_par_iter().sum();
+        let expected: i64 = (0..100_000_i64).sum();
+        assert_eq!(sum, expected);
+    }
+}

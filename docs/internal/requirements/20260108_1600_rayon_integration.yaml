@@ -1,0 +1,906 @@
+# rayon 統合 要件定義
+#
+# 概要:
+#   永続データ構造に対する並列処理を可能にするため、rayon クレートとの統合を行う。
+#   feature flag による有効化で、ParallelIterator トレイトの実装を提供する。
+#
+# 設計方針:
+#   1. 関数型プログラミングの原則を維持（参照透過性、純粋関数、不変性）
+#   2. feature flag（rayon）による有効化で、依存を必要としないユーザーに影響を与えない
+#   3. 既存の永続データ構造 API との一貫性を維持
+#   4. rayon の ParallelIterator トレイトを正しく実装し、並列処理の恩恵を受けられるようにする
+#
+# 参照:
+#   - Issue #113: rayon 統合
+#   - rayon crate documentation: https://docs.rs/rayon/
+#   - rayon ParallelIterator trait: https://docs.rs/rayon/latest/rayon/iter/trait.ParallelIterator.html
+#   - CLAUDE.md の「4.1 永続データ構造・不変コレクションの標準」セクション
+
+version: "1.0.0"
+name: "rayon_integration"
+issue_reference: "#113"
+description: |
+  永続データ構造（PersistentList, PersistentVector, PersistentHashMap,
+  PersistentHashSet, PersistentTreeMap）に対する並列処理機能を提供する。
+
+  rayon クレートの ParallelIterator トレイトを実装することで、
+  map, filter, reduce などの並列バージョンを使用可能にする。
+
+  この機能は `rayon` feature flag で有効化され、
+  `arc` feature に依存する（Send + Sync が必要なため）。
+
+# 背景・動機
+background:
+  problem: |
+    現在の永続データ構造は逐次処理のみをサポートしている。
+    大量のデータを処理する場合、マルチコア CPU の能力を活用できない。
+
+    関数型プログラミングでは純粋関数と不変データを使用するため、
+    並列処理との相性が非常に良い。しかし、現状ではこの利点を
+    活かすための API が提供されていない。
+
+  motivation: |
+    関数型プログラミングの重要な利点の一つは「並列化の容易さ」である。
+
+    純粋関数は副作用を持たないため、複数の評価を並列に実行しても
+    結果は常に同じになる（参照透過性）。永続データ構造は不変であるため、
+    複数のスレッドから安全に読み取ることができる。
+
+    これらの特性を活かし、rayon との統合により以下を実現する：
+    - 大規模データの効率的な並列処理
+    - マルチコア CPU の有効活用
+    - 既存の関数型 API との一貫性維持
+
+  prior_art:
+    - name: "Scala parallel collections"
+      description: |
+        Scala は .par メソッドで並列コレクションを取得し、
+        通常のコレクション操作を並列実行できる。
+        例: collection.par.map(f).filter(p).reduce(op)
+    - name: "Clojure reducers/transducers"
+      description: |
+        Clojure は reducers ライブラリで fold/reduce の並列版を提供。
+        fork/join パターンで分割統治を実現。
+    - name: "Haskell parallel/monad-par"
+      description: |
+        Haskell は Strategies や Par モナドで並列性を表現。
+        純粋関数の並列評価を安全に行える。
+    - name: "rayon (Rust)"
+      description: |
+        Rust の rayon は work-stealing アルゴリズムで効率的な並列処理を提供。
+        ParallelIterator トレイトで標準イテレータと同様の操作を並列化。
+
+# 理論的背景
+theoretical_background:
+  parallel_functional_programming:
+    description: |
+      純粋関数型プログラミングと並列処理は相性が良い。
+
+      理由:
+      1. 参照透過性: 式をその値に置き換えても意味が変わらない
+         - 並列評価の順序に依存しない
+         - 結果の決定性が保証される
+
+      2. 不変性: データは変更されない
+         - 複数スレッドからの読み取りが安全
+         - ロックが不要（またはリーダーロックのみ）
+
+      3. 副作用の分離: 副作用は型で明示される
+         - 並列化可能な純粋計算と副作用を分離できる
+         - 安全に並列化できる部分を識別しやすい
+
+      rayon との統合はこれらの原則に基づき、
+      永続データ構造の純粋な操作を並列化する。
+
+  data_parallelism:
+    description: |
+      データ並列性（Data Parallelism）は、同じ操作を複数のデータ要素に
+      並列に適用するパラダイム。
+
+      rayon はこのパラダイムを実装し、以下の特徴を持つ：
+      - Work-stealing: スレッドプール内でタスクを動的に分散
+      - 分割統治: データを再帰的に分割して並列処理
+      - 結合: 部分結果を結合して最終結果を生成
+
+      永続データ構造は不変であるため、分割時にデータのコピーが
+      不要で、構造的共有によりメモリ効率も良い。
+
+  thread_safety_requirements:
+    description: |
+      rayon で並列処理を行うには、データ型が Send + Sync を
+      実装している必要がある：
+
+      - Send: 型の値を別スレッドに安全に転送できる
+      - Sync: 型の参照を複数スレッド間で安全に共有できる
+
+      永続データ構造は現在 Rc を使用しているため、
+      デフォルトでは Send + Sync を実装しない。
+
+      `arc` feature を有効にすると内部で Arc を使用するように
+      切り替わり、Send + Sync が実装される。
+
+      したがって、`rayon` feature は `arc` feature に依存する。
+
+# 要件一覧
+requirements:
+  # ============================================================================
+  # 1. Feature Flag 設計
+  # ============================================================================
+  - id: REQ-RAYON-001
+    name: "rayon feature flag の追加"
+    priority: critical
+    description: |
+      Cargo.toml に rayon feature flag を追加する。
+      この feature は arc feature に依存し、rayon クレートへの依存を追加する。
+
+    implementations:
+      - type: "Cargo.toml"
+        description: |
+          ```toml
+          [dependencies]
+          rayon = { version = "1.10", optional = true }
+
+          [features]
+          rayon = ["arc", "dep:rayon"]
+          ```
+
+          rayon feature を有効にすると：
+          1. arc feature が自動的に有効になる（Send + Sync 実装のため）
+          2. rayon クレートが依存関係に追加される
+          3. ParallelIterator 実装が有効になる
+
+    tests:
+      - description: "feature flag の組み合わせテスト"
+        cases:
+          - "rayon feature 無効時は rayon 依存なし"
+          - "rayon feature 有効時は arc feature も有効"
+          - "rayon feature 有効時のビルドが成功"
+
+  # ============================================================================
+  # 2. IntoParallelIterator 実装（所有権移動版）
+  # ============================================================================
+  - id: REQ-RAYON-002
+    name: "IntoParallelIterator の実装"
+    priority: critical
+    description: |
+      各永続データ構造に対して IntoParallelIterator トレイトを実装する。
+      これにより、into_par_iter() メソッドで並列イテレータを取得できる。
+
+      型境界の設計:
+      - T: Send は必須（要素を別スレッドに転送するため）
+      - T: Clone は既存の IntoIterator 実装に合わせて要求
+        （永続データ構造は構造的共有を使用しており、要素のクローンが必要）
+
+      順序の保証:
+      - ParallelIterator は一般に順序を保証しない
+      - 順序が必要な場合は逐次 iter() を使用すること
+      - PersistentVector の IndexedParallelIterator は順序を保証する操作
+        （enumerate, zip_eq など）をサポート
+
+    api:
+      - trait: "IntoParallelIterator"
+        signature: |
+          impl<T> IntoParallelIterator for PersistentList<T>
+          where
+              T: Clone + Send,
+          {
+              type Iter: ParallelIterator<Item = T>;
+              type Item = T;
+
+              fn into_par_iter(self) -> Self::Iter;
+          }
+        description: |
+          永続データ構造を消費し、並列イテレータを返す。
+          各要素は並列に処理可能。
+
+          型境界:
+          - T: Clone - 要素をクローンして返す（既存の IntoIterator と同じ）
+          - T: Send - 要素を別スレッドに転送可能
+
+    implementations:
+      - type: "PersistentList<T>"
+        description: |
+          リストを Vec に変換してから rayon::vec::IntoIter を使用。
+          リストは逐次的なデータ構造のため、まず要素を収集する必要がある。
+          計算量: O(n) の前処理 + 並列処理
+
+          順序: 並列イテレータは順序を保証しない。
+          順序が必要な場合は iter() を使用すること。
+
+      - type: "PersistentVector<T>"
+        description: |
+          Radix Balanced Tree の構造を活かした並列イテレータ。
+          32分岐の各サブツリーを並列に処理可能。
+          IndexedParallelIterator を実装し、順序を保証する操作をサポート。
+
+          順序保証（操作別）:
+          - map: 順序保証あり（IndexedParallelIterator の場合）
+            - 入力インデックス i の要素は出力インデックス i に対応
+          - filter: 順序保証なし
+            - 要素が除外されるため、インデックス対応が崩れる
+            - 結果の要素集合は同一だが、順序は非決定的
+          - enumerate: 順序保証あり
+            - (index, element) のペアが元のインデックス順で列挙される
+          - zip_eq: 順序保証あり
+            - 同じインデックスの要素同士がペアになる
+          - take / skip: 順序保証あり
+            - 先頭/末尾から指定数の要素を取得
+          - reduce / fold: 順序非保証（結合順序は非決定的）
+            - 結果は結合的操作なら同じ
+          - collect: 順序は IndexedParallelIterator なら保証
+            - filter 後の collect は順序非保証
+
+          注意: 順序を保証する操作も、IndexedParallelIterator を
+          返すイテレータから開始した場合のみ保証される。
+
+      - type: "PersistentHashMap<K, V>"
+        description: |
+          HAMT の各ブランチを並列に走査。
+          エントリ (K, V) のペアを並列に処理。
+
+          順序: HashMap は本来順序を持たないため、並列でも順序非保証。
+
+      - type: "PersistentHashSet<T>"
+        description: |
+          内部の PersistentHashMap の並列イテレータを利用。
+          要素 T を並列に処理。
+
+          順序: HashSet は本来順序を持たないため、並列でも順序非保証。
+
+      - type: "PersistentTreeMap<K, V>"
+        description: |
+          赤黒木を中間ノードで分割して並列処理。
+
+          順序: 並列イテレータは順序を保証しない。
+          キー順でのイテレーションが必要な場合は逐次 iter() を使用すること。
+          これは TreeMap の特性（キー順序付き）と並列処理の特性
+          （順序非保証）のトレードオフである。
+
+    examples:
+      - description: "PersistentVector の並列 map"
+        code: |
+          use lambars::persistent::PersistentVector;
+          use rayon::prelude::*;
+
+          let vector: PersistentVector<i32> = (0..10000).collect();
+          let doubled: Vec<i32> = vector.into_par_iter()
+              .map(|x| x * 2)
+              .collect();
+
+      - description: "PersistentHashMap の並列 filter"
+        code: |
+          use lambars::persistent::PersistentHashMap;
+          use rayon::prelude::*;
+
+          let map: PersistentHashMap<i32, String> = /* ... */;
+          let filtered: Vec<(i32, String)> = map.into_par_iter()
+              .filter(|(k, _)| *k > 100)
+              .collect();
+
+  # ============================================================================
+  # 3. IntoParallelRefIterator 実装（参照版）
+  # ============================================================================
+  - id: REQ-RAYON-003
+    name: "参照ベースの並列イテレータ"
+    priority: high
+    description: |
+      各永続データ構造に対して par_iter() メソッドを実装する。
+      これにより、構造体を消費せずに並列イテレータを取得できる。
+
+      rayon は IntoParallelRefIterator トレイトを提供しているが、
+      通常は &T に対する IntoParallelIterator として実装する。
+
+      型境界の設計:
+      - T: Sync は必須（参照を複数スレッド間で共有するため）
+      - T: Clone は不要（参照を返すだけなので）
+
+      実装上の考慮事項:
+      - PersistentList の par_iter() は内部で Vec<&T> を生成するため、
+        O(n) の追加メモリが必要になる。大規模リストでは注意が必要。
+      - 小さなリストでは逐次 iter() の使用を推奨する。
+
+    api:
+      - method: "par_iter"
+        signature: |
+          impl<T> PersistentVector<T>
+          where
+              T: Sync,
+          {
+              pub fn par_iter(&self) -> impl ParallelIterator<Item = &T>;
+          }
+        description: |
+          永続データ構造の参照から並列イテレータを取得。
+          元の構造体は保持されたまま、要素への参照を並列に処理。
+
+          型境界:
+          - T: Sync - 参照を複数スレッド間で安全に共有可能
+
+    implementations:
+      - type: "すべての永続データ構造"
+        description: |
+          &self から ParallelIterator を返す par_iter() メソッドを実装。
+
+          実装方法:
+          1. rayon::iter::IntoParallelIterator for &'a Structure<T> を実装
+          2. par_iter(&self) -> (&self).into_par_iter() のショートカットを提供
+
+      - type: "PersistentList<T>"
+        note: |
+          実装上の制約:
+          - リストを走査して Vec<&T> を構築する必要がある（O(n) 追加メモリ）
+          - 並列化のオーバーヘッドが大きいため、小さなリストでは非推奨
+          - ドキュメントでこの制約を明記し、逐次 iter() の使用を推奨する
+
+    examples:
+      - description: "構造体を保持したまま並列処理"
+        code: |
+          use lambars::persistent::PersistentVector;
+          use rayon::prelude::*;
+
+          let vector: PersistentVector<i32> = (0..10000).collect();
+
+          // 並列で合計を計算（vector は消費されない）
+          let sum: i32 = vector.par_iter().sum();
+
+          // vector は引き続き使用可能
+          assert_eq!(vector.len(), 10000);
+
+  # ============================================================================
+  # 4. IndexedParallelIterator 実装（PersistentVector 専用）
+  # ============================================================================
+  - id: REQ-RAYON-004
+    name: "IndexedParallelIterator の実装"
+    priority: medium
+    description: |
+      PersistentVector に対して IndexedParallelIterator を実装する。
+      これにより、インデックスベースの並列操作が可能になる。
+
+      PersistentVector は O(log32 N) でインデックスアクセスが可能であり、
+      範囲による分割が効率的に行える。
+
+      他のデータ構造（List, HashMap, HashSet, TreeMap）はインデックス
+      アクセスが効率的ではないため、IndexedParallelIterator は実装しない。
+
+    api:
+      - trait: "IndexedParallelIterator"
+        signature: |
+          // 所有権版（into_par_iter から取得）
+          impl<T> IndexedParallelIterator for PersistentVectorParIter<T>
+          where
+              T: Clone + Send,
+          {
+              fn len(&self) -> usize;
+              fn drive<C: Consumer<Self::Item>>(self, consumer: C) -> C::Result;
+              fn with_producer<CB: ProducerCallback<Self::Item>>(self, callback: CB) -> CB::Output;
+          }
+
+          // 参照版（par_iter から取得）
+          impl<'a, T> IndexedParallelIterator for PersistentVectorParRefIter<'a, T>
+          where
+              T: Sync,
+          {
+              fn len(&self) -> usize;
+              fn drive<C: Consumer<Self::Item>>(self, consumer: C) -> C::Result;
+              fn with_producer<CB: ProducerCallback<Self::Item>>(self, callback: CB) -> CB::Output;
+          }
+        description: |
+          インデックスベースの分割を可能にするトレイト。
+          zip_eq, enumerate などの操作が効率的に実行できる。
+
+          IndexedParallelIterator は PersistentVector 専用で、
+          順序を保証する操作（enumerate, zip_eq, take, skip など）をサポート。
+
+    implementations:
+      - type: "PersistentVector<T>"
+        description: |
+          Producer トレイトを実装し、範囲による効率的な分割を提供。
+
+          分割戦略:
+          1. ベクターを中間点で2分割
+          2. 各サブ範囲を再帰的に分割（work-stealing で動的に調整）
+          3. 最小分割サイズに達したら逐次処理
+
+          Radix Balanced Tree の構造により、範囲の抽出は O(log32 N)。
+
+    examples:
+      - description: "enumerate を使用した並列処理"
+        code: |
+          use lambars::persistent::PersistentVector;
+          use rayon::prelude::*;
+
+          let vector: PersistentVector<char> = "hello".chars().collect();
+          let indexed: Vec<(usize, char)> = vector.par_iter()
+              .enumerate()
+              .collect();
+          // [(0, 'h'), (1, 'e'), (2, 'l'), (3, 'l'), (4, 'o')]
+
+      - description: "zip_eq を使用した並列処理"
+        code: |
+          use lambars::persistent::PersistentVector;
+          use rayon::prelude::*;
+
+          let vector1: PersistentVector<i32> = (0..100).collect();
+          let vector2: PersistentVector<i32> = (100..200).collect();
+
+          let sums: Vec<i32> = vector1.par_iter()
+              .zip_eq(vector2.par_iter())
+              .map(|(a, b)| a + b)
+              .collect();
+
+  # ============================================================================
+  # 5. ParallelIterator 操作のサポート
+  # ============================================================================
+  - id: REQ-RAYON-005
+    name: "主要な ParallelIterator 操作のサポート"
+    priority: high
+    description: |
+      rayon の ParallelIterator が提供する主要な操作をすべてサポートする。
+      これらは ParallelIterator トレイトを正しく実装することで自動的に利用可能になる。
+
+    supported_operations:
+      transformation:
+        - name: "map"
+          signature: "fn map<F, R>(self, f: F) -> Map<Self, F>"
+          description: "各要素に関数を並列適用"
+          purity: "純粋（関数 F が純粋であれば）"
+
+        - name: "filter"
+          signature: "fn filter<F>(self, f: F) -> Filter<Self, F>"
+          description: "条件を満たす要素のみを保持"
+          purity: "純粋（述語 F が純粋であれば）"
+
+        - name: "flat_map"
+          signature: "fn flat_map<F, I>(self, f: F) -> FlatMap<Self, F>"
+          description: "各要素を複数の要素に展開し平坦化"
+          purity: "純粋（関数 F が純粋であれば）"
+
+        - name: "filter_map"
+          signature: "fn filter_map<F, R>(self, f: F) -> FilterMap<Self, F>"
+          description: "map と filter を組み合わせた操作"
+          purity: "純粋（関数 F が純粋であれば）"
+
+      aggregation:
+        - name: "reduce"
+          signature: "fn reduce<OP, ID>(self, identity: ID, op: OP) -> Self::Item"
+          description: "要素を結合して単一の値に畳み込む"
+          purity: "純粋（操作 OP が結合的で純粋であれば）"
+          note: |
+            reduce の操作は結合的でなければならない。
+            (a op b) op c == a op (b op c)
+            並列実行では評価順序が非決定的になるため。
+
+        - name: "fold"
+          signature: "fn fold<T, ID, F>(self, identity: ID, f: F) -> Fold<Self, ID, F>"
+          description: "各スレッドローカルな累積器で畳み込む"
+          purity: "純粋（関数 F が純粋であれば）"
+
+        - name: "sum"
+          signature: "fn sum<S>(self) -> S"
+          description: "要素の合計を計算"
+          purity: "純粋"
+
+        - name: "product"
+          signature: "fn product<P>(self) -> P"
+          description: "要素の積を計算"
+          purity: "純粋"
+
+        - name: "min / max"
+          signature: "fn min(self) -> Option<Self::Item>"
+          description: "最小/最大要素を取得"
+          purity: "純粋"
+
+      search:
+        - name: "find_any"
+          signature: "fn find_any<P>(self, predicate: P) -> Option<Self::Item>"
+          description: "条件を満たす任意の要素を取得（非決定的）"
+          purity: "純粋（述語 P が純粋であれば）"
+          note: |
+            find_any は並列実行のため、どの要素が返されるかは非決定的。
+            これは参照透過性を破らない（結果は常に条件を満たす要素）が、
+            「どの」要素かは実行ごとに異なる可能性がある。
+
+        - name: "any / all"
+          signature: "fn any<P>(self, predicate: P) -> bool"
+          description: "条件を満たす要素の存在/全要素の条件チェック"
+          purity: "純粋（述語 P が純粋であれば）"
+
+      collection:
+        - name: "collect"
+          signature: "fn collect<C: FromParallelIterator<Self::Item>>(self) -> C"
+          description: "結果をコレクションに収集"
+          purity: "純粋"
+
+        - name: "for_each"
+          signature: "fn for_each<OP>(self, op: OP)"
+          description: "各要素に対して操作を実行（副作用用）"
+          purity: "不純（副作用を実行）"
+          note: |
+            for_each は副作用を実行するためのメソッド。
+            関数型プログラミングでは collect を優先し、
+            必要な場合のみ for_each を使用すること。
+
+    examples:
+      - description: "並列 map + filter + reduce"
+        code: |
+          use lambars::persistent::PersistentVector;
+          use rayon::prelude::*;
+
+          let vector: PersistentVector<i32> = (1..=1000).collect();
+
+          // 偶数を2倍して合計（並列処理）
+          let result: i32 = vector.par_iter()
+              .filter(|x| *x % 2 == 0)
+              .map(|x| x * 2)
+              .sum();
+
+          // 逐次処理と同じ結果になることを確認
+          let expected: i32 = vector.iter()
+              .filter(|x| *x % 2 == 0)
+              .map(|x| x * 2)
+              .sum();
+
+          assert_eq!(result, expected);
+
+  # ============================================================================
+  # 6. collect による永続データ構造への収集
+  # ============================================================================
+  - id: REQ-RAYON-006
+    name: "FromParallelIterator の実装"
+    priority: medium
+    description: |
+      ParallelIterator の結果を永続データ構造に直接収集できるようにする。
+      FromParallelIterator トレイトを各永続データ構造に実装する。
+
+    api:
+      - trait: "FromParallelIterator"
+        signature: |
+          impl<T> FromParallelIterator<T> for PersistentVector<T>
+          where
+              T: Send,
+          {
+              fn from_par_iter<I>(par_iter: I) -> Self
+              where
+                  I: IntoParallelIterator<Item = T>;
+          }
+        description: |
+          並列イテレータの結果を永続データ構造に収集。
+
+          型境界:
+          - T: Send - 並列イテレータの要素を別スレッドに転送可能
+          - T: Sync は不要（要素の所有権を転送するため、参照共有は発生しない）
+
+    implementations:
+      - type: "PersistentVector<T>"
+        description: |
+          並列で要素を収集し、TransientVector を使用して効率的に構築。
+
+          実装戦略:
+          rayon の collect_into_vec() または同等のメカニズムを使用。
+          IndexedParallelIterator の場合、rayon は Producer トレイトを
+          通じて事前にサイズを把握し、各スレッドが担当する範囲に
+          直接書き込むため、順序が自動的に保持される。
+
+          1. IndexedParallelIterator の場合:
+             - rayon の Producer ベースの並列収集を使用
+             - 事前にサイズが判明しているため、各スレッドが担当範囲に直接書き込み
+             - ソート不要で O(n) の計算量
+             - 順序保証あり
+          2. 非インデックスの ParallelIterator の場合:
+             - 各スレッドで部分的な Vec を構築
+             - 部分結果を結合（順序は非決定的）
+             - 順序保証なし
+
+          順序保証:
+          - IndexedParallelIterator からの collect: 順序保証あり（O(n)）
+          - filter 後など非インデックスイテレータからの collect: 順序保証なし
+
+      - type: "PersistentHashMap<K, V>"
+        description: |
+          並列で (K, V) ペアを収集し、TransientHashMap を使用して構築。
+
+          重複キーの解決規則:
+          - 同一キーが複数存在する場合、どの値が採用されるかは非決定的
+          - これは並列処理の特性であり、rayon の標準的な動作
+          - 決定的な結果が必要な場合は、先に重複を除去するか、
+            逐次 collect() を使用すること
+
+      - type: "PersistentHashSet<T>"
+        description: |
+          並列で要素を収集し、TransientHashSet を使用して構築。
+
+          重複要素の扱い:
+          - 同一要素が複数存在する場合、1つだけが保持される（セットの性質）
+          - 結果は決定的（同じ要素は1つ）
+
+      - type: "PersistentList<T>"
+        description: |
+          並列で要素を収集し、Vec 経由で PersistentList に変換。
+          リストは逐次的な構造のため、直接的な並列構築は困難。
+
+          順序:
+          - 並列収集のため、元の順序は保持されない
+          - これは API 一貫性要件の例外である（下記参照）
+          - 順序が重要な場合は逐次 collect() を使用すること
+
+          API 一貫性の例外事項:
+          - PersistentList は本来順序を持つデータ構造だが、
+            FromParallelIterator では順序非保証となる
+          - 理由: 並列収集後にリストを構築する際、元の順序を
+            維持するには O(n log n) のソートが必要となり、
+            並列化の利点が失われる
+          - 順序が必要な場合は iter().collect() を使用すること
+
+      - type: "PersistentTreeMap<K, V>"
+        description: |
+          並列で (K, V) ペアを収集後、逐次的に挿入。
+          順序を維持する必要があるため、並列構築には制限がある。
+
+          重複キーの解決規則:
+          - 同一キーが複数存在する場合、どの値が採用されるかは非決定的
+          - これは並列処理の特性であり、rayon の標準的な動作
+          - 決定的な結果が必要な場合は、先に重複を除去するか、
+            逐次 collect() を使用すること
+
+    examples:
+      - description: "並列処理結果を PersistentVector に収集"
+        code: |
+          use lambars::persistent::PersistentVector;
+          use rayon::prelude::*;
+
+          let source: Vec<i32> = (0..10000).collect();
+
+          let vector: PersistentVector<i32> = source.par_iter()
+              .map(|x| x * 2)
+              .collect();
+
+          assert_eq!(vector.len(), 10000);
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - description: "並列処理のオーバーヘッド"
+      requirement: |
+        小さなデータセット（要素数 < 1000）では逐次処理より遅くなる可能性がある。
+        これは rayon の一般的な特性であり、受け入れる。
+
+        ドキュメントで以下を明記する:
+        - 並列処理は大きなデータセットで効果的
+        - 小さなデータセットでは逐次処理（iter()）を推奨
+
+    - description: "スケーラビリティ"
+      requirement: |
+        CPU コア数に応じて処理速度が向上すること。
+        理想的には、N コアで約 N 倍の高速化（実際にはオーバーヘッドで下回る）。
+
+    - description: "メモリ使用量"
+      requirement: |
+        並列処理中の追加メモリ使用量は、スレッド数に比例する程度に抑える。
+        構造的共有により、データのコピーを最小限に。
+
+  compatibility:
+    - description: "後方互換性"
+      requirement: |
+        rayon feature を無効にした場合、既存の API は変更なく動作すること。
+        新しい依存関係は追加されない。
+
+    - description: "API 一貫性"
+      requirement: |
+        並列 API は逐次 API と一貫したセマンティクスを持つこと。
+
+        例外（並列処理の特性による）:
+        - find_any: どの要素が返されるかは非決定的
+        - PersistentList の FromParallelIterator: 順序非保証
+          （リストは本来順序を持つが、並列収集では順序維持コストが高い）
+        - filter 後の collect: 順序非保証（インデックス対応が崩れる）
+        - HashMap/TreeMap の FromParallelIterator での重複キー: 非決定的
+
+  referential_transparency:
+    - description: "参照透過性の維持"
+      requirement: |
+        純粋な操作（map, filter, reduce など）の結果は、
+        並列実行でも逐次実行でも同じになること。
+
+        結果の同一性の定義:
+        - 整数型: 完全に同一の結果
+        - 浮動小数点型: 結合順序により誤差が発生する可能性がある
+          （sum, product などの集約操作）
+          - これは IEEE 754 浮動小数点演算の特性であり、
+            並列処理固有の問題ではない
+          - 厳密な結果が必要な場合は逐次処理を使用すること
+        - コレクション型: 要素の集合として同一（順序は一般に非保証）
+          - 例外: PersistentVector の IndexedParallelIterator 由来の
+            操作（map, enumerate, zip_eq, take, skip, collect）は
+            順序を保証する
+          - filter 後の collect は順序非保証（インデックス対応が崩れるため）
+
+        例外（非決定的な動作）:
+        - find_any: どの要素が返されるかは非決定的
+        - for_each の実行順序: 非決定的
+        - FromParallelIterator でのキー重複: どの値が採用されるか非決定的
+        - filter 後の collect: 順序非保証
+
+    - description: "不変性の保証"
+      requirement: |
+        並列処理中も元のデータ構造は変更されないこと。
+        par_iter() で取得したイテレータを使用しても、
+        元の構造体は安全に保持される。
+
+  testing:
+    - description: "並列処理の正確性"
+      requirement: |
+        逐次処理と並列処理で同じ結果になることをテストで検証。
+        プロパティベーステスト（proptest）で広範な入力をカバー。
+
+    - description: "スレッドセーフ性"
+      requirement: |
+        複数スレッドからの同時アクセスでデータ競合が発生しないこと。
+        rayon + arc feature の組み合わせで Send + Sync を保証。
+
+    - description: "テストカバレッジ"
+      requirement: |
+        - 各データ構造の IntoParallelIterator 実装
+        - 各データ構造の par_iter() 実装
+        - PersistentVector の IndexedParallelIterator 実装
+        - 主要な ParallelIterator 操作（map, filter, reduce, etc.）
+        - FromParallelIterator 実装
+        - エッジケース（空のコレクション、単一要素、大量要素）
+
+# 実装戦略
+implementation_strategy:
+  phases:
+    - phase: "1. 基盤整備"
+      description: |
+        - Cargo.toml への rayon 依存追加
+        - feature flag の設定（rayon -> arc 依存）
+        - 基本的な型制約の確認
+
+    - phase: "2. PersistentVector 実装"
+      description: |
+        PersistentVector は最も並列化に適した構造。
+        - IntoParallelIterator 実装
+        - par_iter() 実装
+        - IndexedParallelIterator 実装
+        - FromParallelIterator 実装
+        - テスト作成
+
+    - phase: "3. PersistentHashMap/HashSet 実装"
+      description: |
+        HAMT 構造を活かした並列化。
+        - IntoParallelIterator 実装
+        - par_iter() 実装
+        - FromParallelIterator 実装
+        - テスト作成
+
+    - phase: "4. PersistentList/TreeMap 実装"
+      description: |
+        逐次的な構造のため、Vec 経由での並列化。
+        - IntoParallelIterator 実装
+        - par_iter() 実装
+        - FromParallelIterator 実装
+        - テスト作成
+
+    - phase: "5. ドキュメントとベンチマーク"
+      description: |
+        - API ドキュメントの整備
+        - 使用例の追加
+        - パフォーマンスベンチマークの作成
+        - README への記載
+
+# テスト戦略
+testing_strategy:
+  unit_tests:
+    description: "各メソッドの正確性を検証"
+    cases:
+      - "空のコレクションに対する並列操作"
+      - "単一要素のコレクションに対する並列操作"
+      - "大量要素のコレクションに対する並列操作"
+      - "各 ParallelIterator 操作（map, filter, reduce など）"
+
+  property_tests:
+    description: "ランダムな入力で並列・逐次の一致を検証"
+    framework: "proptest"
+    properties:
+      - name: "並列・逐次一致（整数型）"
+        description: |
+          整数型の純粋な操作について、並列処理と逐次処理で同じ結果になること。
+          proptest! {
+              fn prop_parallel_equals_sequential_int(data: Vec<i32>) {
+                  let vector: PersistentVector<i32> = data.into_iter().collect();
+                  let parallel_sum: i32 = vector.par_iter().sum();
+                  let sequential_sum: i32 = vector.iter().sum();
+                  prop_assert_eq!(parallel_sum, sequential_sum);
+              }
+          }
+
+      - name: "並列・逐次一致（集合としての等価性）"
+        description: |
+          filter や map の結果は、要素の集合として同一であること（順序は非保証）。
+          proptest! {
+              fn prop_parallel_filter_same_elements(data: Vec<i32>) {
+                  let vector: PersistentVector<i32> = data.into_iter().collect();
+                  let mut parallel_result: Vec<i32> = vector.par_iter()
+                      .filter(|x| *x > 0)
+                      .cloned()
+                      .collect();
+                  let mut sequential_result: Vec<i32> = vector.iter()
+                      .filter(|x| *x > 0)
+                      .cloned()
+                      .collect();
+                  parallel_result.sort();
+                  sequential_result.sort();
+                  prop_assert_eq!(parallel_result, sequential_result);
+              }
+          }
+
+      - name: "浮動小数点の注意事項"
+        description: |
+          浮動小数点型の集約操作（sum, product）は、結合順序により
+          結果が異なる可能性がある。テストでは許容誤差を設定するか、
+          整数型を使用する。
+
+  benchmark_tests:
+    description: "並列処理のパフォーマンスを計測"
+    benchmarks:
+      - "逐次 vs 並列 map（要素数 10000, 100000, 1000000）"
+      - "逐次 vs 並列 reduce（要素数 10000, 100000, 1000000）"
+      - "逐次 vs 並列 filter + collect（要素数 10000, 100000, 1000000）"
+
+# 将来の拡張
+future_extensions:
+  - id: EXT-RAYON-001
+    name: "ParallelExtend 実装"
+    description: |
+      既存の永続データ構造に並列で要素を追加する機能。
+      TransientVector/TransientHashMap との連携。
+
+  - id: EXT-RAYON-002
+    name: "カスタム分割戦略"
+    description: |
+      データ構造固有の分割戦略を提供し、
+      デフォルトよりも効率的な並列化を実現。
+
+  - id: EXT-RAYON-003
+    name: "並列ソート"
+    description: |
+      PersistentVector に対する並列ソート機能。
+      rayon::slice::par_sort との統合。
+
+# 関数型プログラミング観点での考慮事項
+functional_programming_considerations:
+  referential_transparency:
+    description: |
+      並列処理を行っても参照透過性を維持する。
+
+      純粋関数の並列評価:
+      - map(f) の結果は評価順序に依存しない（f が純粋なら）
+      - reduce(op) の結果は結合順序に依存しない（op が結合的なら）
+      - filter(p) の結果セットは評価順序に依存しない（p が純粋なら）
+
+      非決定性の明示:
+      - find_any は名前で非決定性を示す
+      - find_first が必要な場合は逐次処理を使用
+
+  purity:
+    description: |
+      ParallelIterator の操作に渡す関数は純粋であるべき。
+
+      純粋でない関数を渡した場合の問題:
+      - 副作用の実行順序が非決定的
+      - データ競合の可能性（Mutex などで防護が必要）
+      - 結果の再現性がない
+
+      ドキュメントで以下を推奨:
+      - map, filter, reduce には純粋関数を渡す
+      - 副作用が必要な場合は for_each を使用
+      - 可能な限り collect で結果を収集し、副作用は後で実行
+
+  immutability:
+    description: |
+      永続データ構造の不変性は並列処理でも維持される。
+
+      - 元のデータ構造は変更されない
+      - par_iter() で取得したイテレータを使用しても安全
+      - 複数スレッドから同時に読み取り可能
+
+      Arc による参照カウントは原子操作で行われるため、
+      スレッドセーフに構造的共有を維持できる。
