@@ -1,6 +1,6 @@
 # Scala to lambars API Comparison Guide
 
-[English](README.md) | [日本語](README.ja.md)
+[日本語](README.ja.md)
 
 This document provides a comprehensive comparison between Scala functional programming constructs (including Cats and Scalaz libraries) and their equivalents in lambars (Rust).
 
@@ -28,31 +28,31 @@ This document provides a comprehensive comparison between Scala functional progr
 
 ## Overview
 
-| Concept | Scala (Cats) | lambars (Rust) |
-|---------|--------------|----------------|
-| Functor | `Functor[F]` | `Functor` trait |
-| Applicative | `Applicative[F]` | `Applicative` trait |
-| Monad | `Monad[F]` | `Monad` trait |
-| Semigroup | `Semigroup[A]` | `Semigroup` trait |
-| Monoid | `Monoid[A]` | `Monoid` trait |
-| Foldable | `Foldable[F]` | `Foldable` trait |
-| Traverse | `Traverse[F]` | `Traversable` trait |
-| Option | `Option[A]` | `Option<A>` (std) |
-| Either | `Either[E, A]` | `Result<A, E>` (std) |
-| For-comprehension (Monad) | `for { ... } yield` | `eff!` macro |
-| For-comprehension (List) | `for { ... } yield` (List) | `for_!` macro |
-| Async for-comprehension | `for { ... } yield` + `IO` | `for_async!` macro |
-| Lens | `monocle.Lens` | `Lens` trait |
-| Prism | `monocle.Prism` | `Prism` trait |
-| IO | `cats.effect.IO` | `IO` type |
-| State | `cats.data.State` | `State` type |
-| Reader | `cats.data.Reader` | `Reader` type |
-| Writer | `cats.data.Writer` | `Writer` type |
-| RWS | `cats.data.ReaderWriterState` | `RWS` type |
-| StateT | `cats.data.StateT` | `StateT` type |
-| ReaderT | `cats.data.ReaderT` | `ReaderT` type |
-| WriterT | `cats.data.WriterT` | `WriterT` type |
-| EitherT | `cats.data.EitherT` | `ExceptT` type |
+| Concept                   | Scala (Cats)                  | lambars (Rust)       |
+| ------------------------- | ----------------------------- | -------------------- |
+| Functor                   | `Functor[F]`                  | `Functor` trait      |
+| Applicative               | `Applicative[F]`              | `Applicative` trait  |
+| Monad                     | `Monad[F]`                    | `Monad` trait        |
+| Semigroup                 | `Semigroup[A]`                | `Semigroup` trait    |
+| Monoid                    | `Monoid[A]`                   | `Monoid` trait       |
+| Foldable                  | `Foldable[F]`                 | `Foldable` trait     |
+| Traverse                  | `Traverse[F]`                 | `Traversable` trait  |
+| Option                    | `Option[A]`                   | `Option<A>` (std)    |
+| Either                    | `Either[E, A]`                | `Result<A, E>` (std) |
+| For-comprehension (Monad) | `for { ... } yield`           | `eff!` macro         |
+| For-comprehension (List)  | `for { ... } yield` (List)    | `for_!` macro        |
+| Async for-comprehension   | `for { ... } yield` + `IO`    | `for_async!` macro   |
+| Lens                      | `monocle.Lens`                | `Lens` trait         |
+| Prism                     | `monocle.Prism`               | `Prism` trait        |
+| IO                        | `cats.effect.IO`              | `IO` type            |
+| State                     | `cats.data.State`             | `State` type         |
+| Reader                    | `cats.data.Reader`            | `Reader` type        |
+| Writer                    | `cats.data.Writer`            | `Writer` type        |
+| RWS                       | `cats.data.ReaderWriterState` | `RWS` type           |
+| StateT                    | `cats.data.StateT`            | `StateT` type        |
+| ReaderT                   | `cats.data.ReaderT`           | `ReaderT` type       |
+| WriterT                   | `cats.data.WriterT`           | `WriterT` type       |
+| EitherT                   | `cats.data.EitherT`           | `ExceptT` type       |
 
 ---
 
@@ -60,13 +60,13 @@ This document provides a comprehensive comparison between Scala functional progr
 
 ### Functor
 
-| Scala (Cats) | lambars | Description |
-|--------------|---------|-------------|
-| `F[A].map(f)` | `Functor::fmap` | Transform inner value |
-| `F[A].as(b)` | `fmap(\|_\| b)` | Replace with constant |
-| `F[A].void` | `fmap(\|_\| ())` | Discard value |
-| `F[A].fproduct(f)` | `fmap(\|a\| (a.clone(), f(a)))` | Pair with function result |
-| `Functor[F].lift(f)` | Manual implementation | Lift function to functor |
+| Scala (Cats)         | lambars                         | Description               |
+| -------------------- | ------------------------------- | ------------------------- |
+| `F[A].map(f)`        | `Functor::fmap`                 | Transform inner value     |
+| `F[A].as(b)`         | `fmap(\|_\| b)`                 | Replace with constant     |
+| `F[A].void`          | `fmap(\|_\| ())`                | Discard value             |
+| `F[A].fproduct(f)`   | `fmap(\|a\| (a.clone(), f(a)))` | Pair with function result |
+| `Functor[F].lift(f)` | Manual implementation           | Lift function to functor  |
 
 #### Code Examples
 
@@ -107,14 +107,14 @@ where
 
 ### Applicative
 
-| Scala (Cats) | lambars | Description |
-|--------------|---------|-------------|
-| `A.pure[F]` | `Applicative::pure` | Lift value into context |
-| `(fa, fb).mapN(f)` | `Applicative::map2` | Combine with function |
-| `(fa, fb).tupled` | `Applicative::product` | Combine into tuple |
-| `fa.ap(ff)` | `Applicative::apply` | Apply wrapped function |
-| `fa *> fb` | `fa.map2(fb, \|_, b\| b)` | Sequence, keep right |
-| `fa <* fb` | `fa.map2(fb, \|a, _\| a)` | Sequence, keep left |
+| Scala (Cats)       | lambars                   | Description             |
+| ------------------ | ------------------------- | ----------------------- |
+| `A.pure[F]`        | `Applicative::pure`       | Lift value into context |
+| `(fa, fb).mapN(f)` | `Applicative::map2`       | Combine with function   |
+| `(fa, fb).tupled`  | `Applicative::product`    | Combine into tuple      |
+| `fa.ap(ff)`        | `Applicative::apply`      | Apply wrapped function  |
+| `fa *> fb`         | `fa.map2(fb, \|_, b\| b)` | Sequence, keep right    |
+| `fa <* fb`         | `fa.map2(fb, \|a, _\| a)` | Sequence, keep left     |
 
 #### Code Examples
 
@@ -158,15 +158,15 @@ let sum3: Option<i32> = Some(1).map3(Some(2), Some(3), |a, b, c| a + b + c);
 
 ### Monad
 
-| Scala (Cats) | lambars | Description |
-|--------------|---------|-------------|
-| `fa.flatMap(f)` | `Monad::flat_map` | Chain computations |
-| `fa.flatten` | `Flatten::flatten` / `Option::flatten` (std) | Flatten nested |
-| `fa >> fb` | `Monad::then` | Sequence, keep right |
-| `fa.mproduct(f)` | `flat_map(\|a\| f(a).map(\|b\| (a, b)))` | Pair with result |
-| `fa.ifM(ifTrue, ifFalse)` | Manual implementation | Conditional |
-| `Monad[F].whileM_` | Manual implementation | While loop |
-| `Monad[F].iterateWhile` | Manual implementation | Iterate with condition |
+| Scala (Cats)              | lambars                                      | Description            |
+| ------------------------- | -------------------------------------------- | ---------------------- |
+| `fa.flatMap(f)`           | `Monad::flat_map`                            | Chain computations     |
+| `fa.flatten`              | `Flatten::flatten` / `Option::flatten` (std) | Flatten nested         |
+| `fa >> fb`                | `Monad::then`                                | Sequence, keep right   |
+| `fa.mproduct(f)`          | `flat_map(\|a\| f(a).map(\|b\| (a, b)))`     | Pair with result       |
+| `fa.ifM(ifTrue, ifFalse)` | Manual implementation                        | Conditional            |
+| `Monad[F].whileM_`        | Manual implementation                        | While loop             |
+| `Monad[F].iterateWhile`   | Manual implementation                        | Iterate with condition |
 
 #### Code Examples
 
@@ -232,13 +232,13 @@ let flat_result: Result<i32, &str> = nested_result.flatten();
 
 ### Semigroup and Monoid
 
-| Scala (Cats) | lambars | Description |
-|--------------|---------|-------------|
-| `a \|+\| b` | `Semigroup::combine` | Combine values |
-| `Monoid[A].empty` | `Monoid::empty` | Identity element |
+| Scala (Cats)                 | lambars               | Description       |
+| ---------------------------- | --------------------- | ----------------- |
+| `a \|+\| b`                  | `Semigroup::combine`  | Combine values    |
+| `Monoid[A].empty`            | `Monoid::empty`       | Identity element  |
 | `Monoid[A].combineAll(list)` | `Monoid::combine_all` | Fold with combine |
-| `a.combineN(n)` | Manual loop | Combine n times |
-| `Semigroup.maybeCombine` | `Option::combine` | Combine options |
+| `a.combineN(n)`              | Manual loop           | Combine n times   |
+| `Semigroup.maybeCombine`     | `Option::combine`     | Combine options   |
 
 #### Code Examples
 
@@ -287,19 +287,19 @@ let combined: Vec<i32> = vec1.combine(vec2);
 
 ### Foldable
 
-| Scala (Cats) | lambars | Description |
-|--------------|---------|-------------|
-| `fa.foldLeft(b)(f)` | `Foldable::fold_left` | Left fold |
-| `fa.foldRight(lb)(f)` | `Foldable::fold_right` | Right fold |
-| `fa.foldMap(f)` | `Foldable::fold_map` | Map then fold |
-| `fa.fold` | `Foldable::fold` | Fold with Monoid |
-| `fa.find(p)` | `Foldable::find` | Find first matching |
-| `fa.exists(p)` | `Foldable::exists` | Any matches |
-| `fa.forall(p)` | `Foldable::for_all` | All match |
-| `fa.isEmpty` | `Foldable::is_empty` | Check empty |
-| `fa.nonEmpty` | `!Foldable::is_empty` | Check non-empty |
-| `fa.size` | `Foldable::length` | Count elements |
-| `fa.toList` | `Foldable::to_vec` | Convert to list |
+| Scala (Cats)          | lambars                | Description         |
+| --------------------- | ---------------------- | ------------------- |
+| `fa.foldLeft(b)(f)`   | `Foldable::fold_left`  | Left fold           |
+| `fa.foldRight(lb)(f)` | `Foldable::fold_right` | Right fold          |
+| `fa.foldMap(f)`       | `Foldable::fold_map`   | Map then fold       |
+| `fa.fold`             | `Foldable::fold`       | Fold with Monoid    |
+| `fa.find(p)`          | `Foldable::find`       | Find first matching |
+| `fa.exists(p)`        | `Foldable::exists`     | Any matches         |
+| `fa.forall(p)`        | `Foldable::for_all`    | All match           |
+| `fa.isEmpty`          | `Foldable::is_empty`   | Check empty         |
+| `fa.nonEmpty`         | `!Foldable::is_empty`  | Check non-empty     |
+| `fa.size`             | `Foldable::length`     | Count elements      |
+| `fa.toList`           | `Foldable::to_vec`     | Convert to list     |
 
 #### Code Examples
 
@@ -358,21 +358,21 @@ let all_positive: bool = vec![1, 2, 3].for_all(|x| *x > 0);
 
 ### Traversable
 
-| Scala (Cats) | lambars | Description |
-|--------------|---------|-------------|
-| `fa.traverse(f)` | `Traversable::traverse_option/result` | Traverse with effect |
-| `fa.sequence` | `Traversable::sequence_option/result` | Sequence effects |
-| `fa.flatTraverse(f)` | Compose with flatten | Traverse then flatten |
-| `fa.traverseFilter(f)` | Manual implementation | Filter during traverse |
-| `fa.traverse[Reader[R, *]](f)` | `Traversable::traverse_reader` | Traverse with Reader effect |
-| `fa.traverse[State[S, *]](f)` | `Traversable::traverse_state` | Traverse with State effect |
-| `fa.traverse[IO](f)` | `Traversable::traverse_io` | Traverse with IO effect |
-| `fa.sequence[Reader[R, *]]` | `Traversable::sequence_reader` | Sequence Reader effects |
-| `fa.sequence[State[S, *]]` | `Traversable::sequence_state` | Sequence State effects |
-| `fa.sequence[IO]` | `Traversable::sequence_io` | Sequence IO effects |
-| `fa.traverse_[Reader[R, *]](f)` | `Traversable::traverse_reader_` | Traverse Reader, discard result |
-| `fa.traverse_[State[S, *]](f)` | `Traversable::traverse_state_` | Traverse State, discard result |
-| `fa.traverse_[IO](f)` | `Traversable::traverse_io_` | Traverse IO, discard result |
+| Scala (Cats)                    | lambars                               | Description                     |
+| ------------------------------- | ------------------------------------- | ------------------------------- |
+| `fa.traverse(f)`                | `Traversable::traverse_option/result` | Traverse with effect            |
+| `fa.sequence`                   | `Traversable::sequence_option/result` | Sequence effects                |
+| `fa.flatTraverse(f)`            | Compose with flatten                  | Traverse then flatten           |
+| `fa.traverseFilter(f)`          | Manual implementation                 | Filter during traverse          |
+| `fa.traverse[Reader[R, *]](f)`  | `Traversable::traverse_reader`        | Traverse with Reader effect     |
+| `fa.traverse[State[S, *]](f)`   | `Traversable::traverse_state`         | Traverse with State effect      |
+| `fa.traverse[IO](f)`            | `Traversable::traverse_io`            | Traverse with IO effect         |
+| `fa.sequence[Reader[R, *]]`     | `Traversable::sequence_reader`        | Sequence Reader effects         |
+| `fa.sequence[State[S, *]]`      | `Traversable::sequence_state`         | Sequence State effects          |
+| `fa.sequence[IO]`               | `Traversable::sequence_io`            | Sequence IO effects             |
+| `fa.traverse_[Reader[R, *]](f)` | `Traversable::traverse_reader_`       | Traverse Reader, discard result |
+| `fa.traverse_[State[S, *]](f)`  | `Traversable::traverse_state_`        | Traverse State, discard result  |
+| `fa.traverse_[IO](f)`           | `Traversable::traverse_io_`           | Traverse IO, discard result     |
 
 #### Code Examples
 
@@ -466,39 +466,39 @@ let contents = io.run_unsafe();
 
 ### Option
 
-| Scala | lambars / Rust std | Description |
-|-------|-------------------|-------------|
-| `Some(x)` | `Some(x)` | Construct Some |
-| `None` | `None` | Construct None |
-| `opt.map(f)` | `Functor::fmap` | Transform value |
-| `opt.flatMap(f)` | `Monad::flat_map` | Chain computation |
-| `opt.getOrElse(default)` | `Option::unwrap_or` | Default value |
-| `opt.orElse(alt)` | `Option::or` | Alternative |
-| `opt.fold(ifEmpty)(f)` | `Option::map_or` | Fold with default |
-| `opt.filter(p)` | `Option::filter` | Filter by predicate |
-| `opt.filterNot(p)` | `filter(\|x\| !p(x))` | Filter inverse |
-| `opt.contains(x)` | `Option::contains` | Contains value |
-| `opt.exists(p)` | `Option::is_some_and` | Test with predicate |
-| `opt.forall(p)` | `opt.map_or(true, p)` | All satisfy |
-| `opt.toRight(left)` | `Option::ok_or` | To Either/Result |
-| `opt.toLeft(right)` | `opt.ok_or(right).swap()` | To Either (left) |
-| `opt.zip(other)` | `Option::zip` | Zip two options |
+| Scala                    | lambars / Rust std        | Description         |
+| ------------------------ | ------------------------- | ------------------- |
+| `Some(x)`                | `Some(x)`                 | Construct Some      |
+| `None`                   | `None`                    | Construct None      |
+| `opt.map(f)`             | `Functor::fmap`           | Transform value     |
+| `opt.flatMap(f)`         | `Monad::flat_map`         | Chain computation   |
+| `opt.getOrElse(default)` | `Option::unwrap_or`       | Default value       |
+| `opt.orElse(alt)`        | `Option::or`              | Alternative         |
+| `opt.fold(ifEmpty)(f)`   | `Option::map_or`          | Fold with default   |
+| `opt.filter(p)`          | `Option::filter`          | Filter by predicate |
+| `opt.filterNot(p)`       | `filter(\|x\| !p(x))`     | Filter inverse      |
+| `opt.contains(x)`        | `Option::contains`        | Contains value      |
+| `opt.exists(p)`          | `Option::is_some_and`     | Test with predicate |
+| `opt.forall(p)`          | `opt.map_or(true, p)`     | All satisfy         |
+| `opt.toRight(left)`      | `Option::ok_or`           | To Either/Result    |
+| `opt.toLeft(right)`      | `opt.ok_or(right).swap()` | To Either (left)    |
+| `opt.zip(other)`         | `Option::zip`             | Zip two options     |
 
 ### Either / Result
 
-| Scala | lambars / Rust std | Description |
-|-------|-------------------|-------------|
-| `Right(x)` | `Ok(x)` | Right/Ok value |
-| `Left(e)` | `Err(e)` | Left/Error value |
-| `either.map(f)` | `Functor::fmap` / `Result::map` | Map right |
-| `either.leftMap(f)` | `Result::map_err` | Map left |
-| `either.flatMap(f)` | `Monad::flat_map` | Chain |
-| `either.bimap(f, g)` | Manual | Map both sides |
-| `either.fold(f, g)` | `Result::map_or_else` | Fold both |
-| `either.swap` | `Result::swap` (nightly) | Swap sides |
-| `either.toOption` | `Result::ok` | To Option |
-| `either.getOrElse(d)` | `Result::unwrap_or` | Default |
-| `either.orElse(alt)` | `Result::or` | Alternative |
+| Scala                 | lambars / Rust std              | Description      |
+| --------------------- | ------------------------------- | ---------------- |
+| `Right(x)`            | `Ok(x)`                         | Right/Ok value   |
+| `Left(e)`             | `Err(e)`                        | Left/Error value |
+| `either.map(f)`       | `Functor::fmap` / `Result::map` | Map right        |
+| `either.leftMap(f)`   | `Result::map_err`               | Map left         |
+| `either.flatMap(f)`   | `Monad::flat_map`               | Chain            |
+| `either.bimap(f, g)`  | Manual                          | Map both sides   |
+| `either.fold(f, g)`   | `Result::map_or_else`           | Fold both        |
+| `either.swap`         | `Result::swap` (nightly)        | Swap sides       |
+| `either.toOption`     | `Result::ok`                    | To Option        |
+| `either.getOrElse(d)` | `Result::unwrap_or`             | Default          |
+| `either.orElse(alt)`  | `Result::or`                    | Alternative      |
 
 #### Code Examples
 
@@ -538,44 +538,44 @@ let bi_mapped: Result<String, usize> = either
 
 ---
 
-## For-Comprehensions vs eff! / for_! Macros
+## For-Comprehensions vs eff! / for\_! Macros
 
 lambars provides two macros that correspond to Scala's for-comprehension:
 
-| Use Case | Scala | lambars | Description |
-|----------|-------|---------|-------------|
-| Monad binding (Option, Result, IO, State, etc.) | `for { x <- mx } yield x` | `eff!` macro | Single execution, FnOnce-based |
-| List comprehension (Vec, iterators) | `for { x <- xs } yield f(x)` | `for_!` macro | Multiple execution, FnMut-based |
+| Use Case                                        | Scala                        | lambars       | Description                     |
+| ----------------------------------------------- | ---------------------------- | ------------- | ------------------------------- |
+| Monad binding (Option, Result, IO, State, etc.) | `for { x <- mx } yield x`    | `eff!` macro  | Single execution, FnOnce-based  |
+| List comprehension (Vec, iterators)             | `for { x <- xs } yield f(x)` | `for_!` macro | Multiple execution, FnMut-based |
 
 ### Key Differences: `eff!` vs `for_!`
 
-| Aspect | `eff!` | `for_!` |
-|--------|--------|---------|
-| **Target types** | Option, Result, IO, State, Reader, Writer | Vec, Iterator |
-| **Execution** | Single execution (FnOnce) | Multiple executions (FnMut) |
-| **Final expression** | Must return wrapped value | Uses `yield` keyword |
-| **Closure type** | `move` closures | Regular closures |
-| **Typical use** | Monadic computation chaining | List comprehensions |
+| Aspect               | `eff!`                                    | `for_!`                     |
+| -------------------- | ----------------------------------------- | --------------------------- |
+| **Target types**     | Option, Result, IO, State, Reader, Writer | Vec, Iterator               |
+| **Execution**        | Single execution (FnOnce)                 | Multiple executions (FnMut) |
+| **Final expression** | Must return wrapped value                 | Uses `yield` keyword        |
+| **Closure type**     | `move` closures                           | Regular closures            |
+| **Typical use**      | Monadic computation chaining              | List comprehensions         |
 
 ### Syntax Comparison
 
 #### eff! Macro (for Monads)
 
-| Scala | lambars | Description |
-|-------|---------|-------------|
-| `for { x <- mx } yield x` | `eff! { x <= mx; mx2 }` | Basic bind |
-| `for { x <- mx; y <- my } yield (x, y)` | `eff! { x <= mx; y <= my; expr }` | Multiple binds |
-| `for { x <- mx; if p(x) } yield x` | `eff! { x <= mx.filter(p); Some(x) }` | Guard (Option) |
-| `x = expr` (in for) | `let x = expr;` | Pure binding |
+| Scala                                   | lambars                               | Description    |
+| --------------------------------------- | ------------------------------------- | -------------- |
+| `for { x <- mx } yield x`               | `eff! { x <= mx; mx2 }`               | Basic bind     |
+| `for { x <- mx; y <- my } yield (x, y)` | `eff! { x <= mx; y <= my; expr }`     | Multiple binds |
+| `for { x <- mx; if p(x) } yield x`      | `eff! { x <= mx.filter(p); Some(x) }` | Guard (Option) |
+| `x = expr` (in for)                     | `let x = expr;`                       | Pure binding   |
 
-#### for_! Macro (for Lists)
+#### for\_! Macro (for Lists)
 
-| Scala | lambars | Description |
-|-------|---------|-------------|
-| `for { x <- xs } yield f(x)` | `for_! { x <= xs; yield f(x) }` | Basic list comprehension |
-| `for { x <- xs; y <- ys } yield (x, y)` | `for_! { x <= xs; y <= ys.clone(); yield (x, y) }` | Nested iteration |
-| `for { x <- xs; if p(x) } yield x` | `xs.into_iter().filter(p).collect()` | Filtering (use std) |
-| `x = expr` (in for) | `let x = expr;` | Pure binding |
+| Scala                                   | lambars                                            | Description              |
+| --------------------------------------- | -------------------------------------------------- | ------------------------ |
+| `for { x <- xs } yield f(x)`            | `for_! { x <= xs; yield f(x) }`                    | Basic list comprehension |
+| `for { x <- xs; y <- ys } yield (x, y)` | `for_! { x <= xs; y <= ys.clone(); yield (x, y) }` | Nested iteration         |
+| `for { x <- xs; if p(x) } yield x`      | `xs.into_iter().filter(p).collect()`               | Filtering (use std)      |
+| `x = expr` (in for)                     | `let x = expr;`                                    | Pure binding             |
 
 **Important**: In `for_!`, inner collections typically need `.clone()` due to Rust's ownership rules.
 
@@ -671,7 +671,7 @@ let user_orders: Option<(User, Vec<Order>)> = eff! {
 };
 ```
 
-### List Comprehension with for_!
+### List Comprehension with for\_!
 
 For List-based for-comprehensions, use the `for_!` macro:
 
@@ -783,29 +783,29 @@ let recommendations: Vec<String> = for_! {
 
 ### When to Use Each Macro
 
-| Scenario | Recommended Macro | Reason |
-|----------|-------------------|--------|
-| Option/Result chaining | `eff!` | Short-circuits on None/Err |
-| IO/State/Reader/Writer | `eff!` | Designed for FnOnce monads |
-| List/Vec transformation | `for_!` | Supports multiple iterations |
-| Cartesian products | `for_!` | Nested iteration with yield |
-| Database-style queries | `eff!` | Monadic error handling |
-| Data generation | `for_!` | Multiple results needed |
-| Async list generation | `for_async!` | Async iteration with yield |
-| Async operations in loops | `for_async!` | Uses `<~` for AsyncIO binding |
+| Scenario                  | Recommended Macro | Reason                        |
+| ------------------------- | ----------------- | ----------------------------- |
+| Option/Result chaining    | `eff!`            | Short-circuits on None/Err    |
+| IO/State/Reader/Writer    | `eff!`            | Designed for FnOnce monads    |
+| List/Vec transformation   | `for_!`           | Supports multiple iterations  |
+| Cartesian products        | `for_!`           | Nested iteration with yield   |
+| Database-style queries    | `eff!`            | Monadic error handling        |
+| Data generation           | `for_!`           | Multiple results needed       |
+| Async list generation     | `for_async!`      | Async iteration with yield    |
+| Async operations in loops | `for_async!`      | Uses `<~` for AsyncIO binding |
 
 ---
 
 ## Function Composition
 
-| Scala | lambars | Description |
-|-------|---------|-------------|
-| `f andThen g` | `compose!(g, f)` | Left-to-right |
-| `f compose g` | `compose!(f, g)` | Right-to-left |
-| `f.curried` | `curry!(fn, arity)` | Curry function |
-| `f.tupled` | Manual | Accept tuple |
-| `Function.const(x)` | `constant(x)` | Constant function |
-| `identity` | `identity` | Identity function |
+| Scala               | lambars             | Description       |
+| ------------------- | ------------------- | ----------------- |
+| `f andThen g`       | `compose!(g, f)`    | Left-to-right     |
+| `f compose g`       | `compose!(f, g)`    | Right-to-left     |
+| `f.curried`         | `curry!(fn, arity)` | Curry function    |
+| `f.tupled`          | Manual              | Accept tuple      |
+| `Function.const(x)` | `constant(x)`       | Constant function |
+| `identity`          | `identity`          | Identity function |
 
 ### Code Examples
 
@@ -865,13 +865,13 @@ let x = identity(42);  // 42
 
 ### Lens
 
-| Scala (Monocle) | lambars | Description |
-|-----------------|---------|-------------|
-| `GenLens[S](_.field)` | `lens!(S, field)` | Create lens |
-| `lens.get(s)` | `Lens::get` | Get focused value |
-| `lens.replace(a)(s)` | `Lens::set` | Set value |
-| `lens.modify(f)(s)` | `Lens::modify` | Modify value |
-| `lens1.andThen(lens2)` | `Lens::compose` | Compose lenses |
+| Scala (Monocle)        | lambars           | Description       |
+| ---------------------- | ----------------- | ----------------- |
+| `GenLens[S](_.field)`  | `lens!(S, field)` | Create lens       |
+| `lens.get(s)`          | `Lens::get`       | Get focused value |
+| `lens.replace(a)(s)`   | `Lens::set`       | Set value         |
+| `lens.modify(f)(s)`    | `Lens::modify`    | Modify value      |
+| `lens1.andThen(lens2)` | `Lens::compose`   | Compose lenses    |
 
 #### Code Examples
 
@@ -933,13 +933,13 @@ let modified: Person = person_street_lens.modify(person, |s| s.to_uppercase());
 
 ### Prism
 
-| Scala (Monocle) | lambars | Description |
-|-----------------|---------|-------------|
-| `Prism[S, A](getOption)(reverseGet)` | `FunctionPrism::new` | Create prism |
-| `GenPrism[S, A]` | `prism!(S, Variant)` | Derive prism |
-| `prism.getOption(s)` | `Prism::preview` | Get if matches |
-| `prism.reverseGet(a)` | `Prism::review` | Construct from value |
-| `prism.modify(f)(s)` | `Prism::modify` | Modify if matches |
+| Scala (Monocle)                      | lambars              | Description          |
+| ------------------------------------ | -------------------- | -------------------- |
+| `Prism[S, A](getOption)(reverseGet)` | `FunctionPrism::new` | Create prism         |
+| `GenPrism[S, A]`                     | `prism!(S, Variant)` | Derive prism         |
+| `prism.getOption(s)`                 | `Prism::preview`     | Get if matches       |
+| `prism.reverseGet(a)`                | `Prism::review`      | Construct from value |
+| `prism.modify(f)(s)`                 | `Prism::modify`      | Modify if matches    |
 
 #### Code Examples
 
@@ -992,13 +992,13 @@ let modified: Shape = circle_prism.modify(shape, |r| r * 2.0);
 
 ### Optional and Traversal
 
-| Scala (Monocle) | lambars | Description |
-|-----------------|---------|-------------|
-| `Optional[S, A]` | `Optional` trait | May or may not exist |
-| `lens.andThen(prism)` | `LensComposeExtension::compose_prism` | Lens + Prism |
-| `Traversal[S, A]` | `Traversal` trait | Multiple targets |
-| `traversal.getAll(s)` | `Traversal::get_all` | Get all values |
-| `traversal.modify(f)(s)` | `Traversal::modify` | Modify all |
+| Scala (Monocle)          | lambars                               | Description          |
+| ------------------------ | ------------------------------------- | -------------------- |
+| `Optional[S, A]`         | `Optional` trait                      | May or may not exist |
+| `lens.andThen(prism)`    | `LensComposeExtension::compose_prism` | Lens + Prism         |
+| `Traversal[S, A]`        | `Traversal` trait                     | Multiple targets     |
+| `traversal.getAll(s)`    | `Traversal::get_all`                  | Get all values       |
+| `traversal.modify(f)(s)` | `Traversal::modify`                   | Modify all           |
 
 #### Code Examples
 
@@ -1069,13 +1069,13 @@ let raised = employees_lens.set(company, raised_employees);
 
 ### Iso
 
-| Scala (Monocle) | lambars | Description |
-|-----------------|---------|-------------|
-| `Iso[S, A](get)(reverseGet)` | `FunctionIso::new` | Create iso |
-| `iso.get(s)` | `Iso::get` | Forward conversion |
-| `iso.reverseGet(a)` | `Iso::reverse_get` | Backward conversion |
-| `iso.reverse` | `Iso::reverse` | Swap directions |
-| `iso1.andThen(iso2)` | `Iso::compose` | Compose isos |
+| Scala (Monocle)              | lambars            | Description         |
+| ---------------------------- | ------------------ | ------------------- |
+| `Iso[S, A](get)(reverseGet)` | `FunctionIso::new` | Create iso          |
+| `iso.get(s)`                 | `Iso::get`         | Forward conversion  |
+| `iso.reverseGet(a)`          | `Iso::reverse_get` | Backward conversion |
+| `iso.reverse`                | `Iso::reverse`     | Swap directions     |
+| `iso1.andThen(iso2)`         | `Iso::compose`     | Compose isos        |
 
 #### Code Examples
 
@@ -1122,17 +1122,17 @@ let vec_string_iso = string_vec_iso.reverse();
 
 ### IO Monad
 
-| Scala (Cats Effect) | lambars | Description |
-|---------------------|---------|-------------|
-| `IO.pure(a)` | `IO::pure` | Pure value |
-| `IO.delay(expr)` | `IO::new` | Suspended effect |
-| `IO.raiseError(e)` | `IO::catch` with panic | Raise error |
-| `io.flatMap(f)` | `IO::flat_map` | Chain effects |
-| `io.map(f)` | `IO::fmap` | Transform result |
-| `io.attempt` | `IO::catch` | Catch errors |
-| `io.unsafeRunSync()` | `IO::run_unsafe` | Execute effects |
-| `io *> io2` | `IO::then` | Sequence |
-| `io.void` | `io.fmap(\|_\| ())` | Discard result |
+| Scala (Cats Effect)  | lambars                | Description      |
+| -------------------- | ---------------------- | ---------------- |
+| `IO.pure(a)`         | `IO::pure`             | Pure value       |
+| `IO.delay(expr)`     | `IO::new`              | Suspended effect |
+| `IO.raiseError(e)`   | `IO::catch` with panic | Raise error      |
+| `io.flatMap(f)`      | `IO::flat_map`         | Chain effects    |
+| `io.map(f)`          | `IO::fmap`             | Transform result |
+| `io.attempt`         | `IO::catch`            | Catch errors     |
+| `io.unsafeRunSync()` | `IO::run_unsafe`       | Execute effects  |
+| `io *> io2`          | `IO::then`             | Sequence         |
+| `io.void`            | `io.fmap(\|_\| ())`    | Discard result   |
 
 #### Code Examples
 
@@ -1184,21 +1184,21 @@ let result = recovered.run_unsafe();
 
 ### MonadError
 
-| Scala (Cats) | lambars | Description |
-|--------------|---------|-------------|
-| `MonadError[F, E]` | `MonadError<E>` trait | Error handling abstraction |
-| `raiseError(e)` | `MonadError::throw_error` | Throw an error |
-| `handleErrorWith(f)` | `MonadError::catch_error` | Catch and handle with computation |
-| `handleError(f)` | `MonadError::handle_error` | Convert error to success value |
-| `adaptError(pf)` | `MonadError::adapt_error` | Transform error in same type |
-| `recover(pf)` | `MonadError::recover` | Partial function recovery |
-| `recoverWith(pf)` | `MonadError::recover_with_partial` | Monadic partial recovery |
-| `ensure(p)(e)` | `MonadError::ensure` | Validate with predicate |
-| `ensureOr(p)(e)` | `MonadError::ensure_or` | Validate with value-dependent error |
-| `redeem(fe, fa)` | `MonadError::redeem` | Transform both success and error |
-| `redeemWith(fe, fa)` | `MonadError::redeem_with` | Monadic redeem |
-| `attempt` | Manual with catch_error | Catch error as Either/Result |
-| (N/A) | `MonadErrorExt::map_error` | Transform error type |
+| Scala (Cats)         | lambars                            | Description                         |
+| -------------------- | ---------------------------------- | ----------------------------------- |
+| `MonadError[F, E]`   | `MonadError<E>` trait              | Error handling abstraction          |
+| `raiseError(e)`      | `MonadError::throw_error`          | Throw an error                      |
+| `handleErrorWith(f)` | `MonadError::catch_error`          | Catch and handle with computation   |
+| `handleError(f)`     | `MonadError::handle_error`         | Convert error to success value      |
+| `adaptError(pf)`     | `MonadError::adapt_error`          | Transform error in same type        |
+| `recover(pf)`        | `MonadError::recover`              | Partial function recovery           |
+| `recoverWith(pf)`    | `MonadError::recover_with_partial` | Monadic partial recovery            |
+| `ensure(p)(e)`       | `MonadError::ensure`               | Validate with predicate             |
+| `ensureOr(p)(e)`     | `MonadError::ensure_or`            | Validate with value-dependent error |
+| `redeem(fe, fa)`     | `MonadError::redeem`               | Transform both success and error    |
+| `redeemWith(fe, fa)` | `MonadError::redeem_with`          | Monadic redeem                      |
+| `attempt`            | Manual with catch_error            | Catch error as Either/Result        |
+| (N/A)                | `MonadErrorExt::map_error`         | Transform error type                |
 
 #### Code Examples
 
@@ -1267,16 +1267,16 @@ let redeemed = <Result<i32, String>>::redeem(
 
 ### State Monad
 
-| Scala (Cats) | lambars | Description |
-|--------------|---------|-------------|
-| `State.pure(a)` | `State::pure` | Pure value |
-| `State.get` | `State::get` | Get state |
-| `State.set(s)` | `State::put` | Set state |
-| `State.modify(f)` | `State::modify` | Modify state |
-| `State.inspect(f)` | `State::gets` | Get derived value |
-| `state.run(s).value` | `State::run` | Run with initial state |
-| `state.runS(s).value` | `State::exec` | Get final state |
-| `state.runA(s).value` | `State::eval` | Get result only |
+| Scala (Cats)          | lambars         | Description            |
+| --------------------- | --------------- | ---------------------- |
+| `State.pure(a)`       | `State::pure`   | Pure value             |
+| `State.get`           | `State::get`    | Get state              |
+| `State.set(s)`        | `State::put`    | Set state              |
+| `State.modify(f)`     | `State::modify` | Modify state           |
+| `State.inspect(f)`    | `State::gets`   | Get derived value      |
+| `state.run(s).value`  | `State::run`    | Run with initial state |
+| `state.runS(s).value` | `State::exec`   | Get final state        |
+| `state.runA(s).value` | `State::eval`   | Get result only        |
 
 #### Code Examples
 
@@ -1312,12 +1312,12 @@ let (result, final_state) = computation.run(5);
 
 ### Reader Monad
 
-| Scala (Cats) | lambars | Description |
-|--------------|---------|-------------|
-| `Reader.pure(a)` | `Reader::pure` | Pure value |
-| `Reader.ask` | `Reader::ask` | Get environment |
-| `Reader.local(f)(r)` | `Reader::local` | Modify environment |
-| `reader.run(env)` | `Reader::run` | Run with environment |
+| Scala (Cats)         | lambars         | Description          |
+| -------------------- | --------------- | -------------------- |
+| `Reader.pure(a)`     | `Reader::pure`  | Pure value           |
+| `Reader.ask`         | `Reader::ask`   | Get environment      |
+| `Reader.local(f)(r)` | `Reader::local` | Modify environment   |
+| `reader.run(env)`    | `Reader::run`   | Run with environment |
 
 #### Code Examples
 
@@ -1363,13 +1363,13 @@ let result = computation.run(Config {
 
 ### Writer Monad
 
-| Scala (Cats) | lambars | Description |
-|--------------|---------|-------------|
-| `Writer.pure(a)` | `Writer::pure` | Pure value |
-| `Writer.tell(w)` | `Writer::tell` | Log output |
-| `Writer.value(a)` | `Writer::pure` | Alias for pure |
-| `writer.run` | `Writer::run` | Get (result, log) |
-| `writer.listen` | `Writer::listen` | Access log in computation |
+| Scala (Cats)      | lambars          | Description               |
+| ----------------- | ---------------- | ------------------------- |
+| `Writer.pure(a)`  | `Writer::pure`   | Pure value                |
+| `Writer.tell(w)`  | `Writer::tell`   | Log output                |
+| `Writer.value(a)` | `Writer::pure`   | Alias for pure            |
+| `writer.run`      | `Writer::run`    | Get (result, log)         |
+| `writer.listen`   | `Writer::listen` | Access log in computation |
 
 #### Code Examples
 
@@ -1410,18 +1410,18 @@ let (result, log) = log_computation(5).run();
 
 ### RWS Monad (ReaderWriterState)
 
-| Scala (Cats) | lambars | Description |
-|--------------|---------|-------------|
-| `ReaderWriterState.pure(a)` | `RWS::pure` | Pure value |
-| `ReaderWriterState.ask` | `RWS::ask` | Get environment |
-| `ReaderWriterState.get` | `RWS::get` | Get state |
-| `ReaderWriterState.set(s)` | `RWS::put` | Set state |
-| `ReaderWriterState.modify(f)` | `RWS::modify` | Modify state |
-| `ReaderWriterState.inspect(f)` | `RWS::gets` | Get derived value |
-| `ReaderWriterState.tell(w)` | `RWS::tell` | Append to log |
-| `rws.local(f)` | `RWS::local` | Modify environment locally |
-| `rws.listen` | `RWS::listen` | Access log in computation |
-| `rws.run(env, state)` | `RWS::run` | Run with environment and state |
+| Scala (Cats)                   | lambars       | Description                    |
+| ------------------------------ | ------------- | ------------------------------ |
+| `ReaderWriterState.pure(a)`    | `RWS::pure`   | Pure value                     |
+| `ReaderWriterState.ask`        | `RWS::ask`    | Get environment                |
+| `ReaderWriterState.get`        | `RWS::get`    | Get state                      |
+| `ReaderWriterState.set(s)`     | `RWS::put`    | Set state                      |
+| `ReaderWriterState.modify(f)`  | `RWS::modify` | Modify state                   |
+| `ReaderWriterState.inspect(f)` | `RWS::gets`   | Get derived value              |
+| `ReaderWriterState.tell(w)`    | `RWS::tell`   | Append to log                  |
+| `rws.local(f)`                 | `RWS::local`  | Modify environment locally     |
+| `rws.listen`                   | `RWS::listen` | Access log in computation      |
+| `rws.run(env, state)`          | `RWS::run`    | Run with environment and state |
 
 #### Code Examples
 
@@ -1468,6 +1468,7 @@ let (result, final_state, log) = computation.run(Config { multiplier: 2 }, 10);
 ```
 
 The `RWS` monad is useful when you need all three capabilities:
+
 - **Reader**: Access shared configuration or environment
 - **Writer**: Accumulate logs or other monoidal output
 - **State**: Manage mutable state through computation
@@ -1478,14 +1479,14 @@ The `RWS` monad is useful when you need all three capabilities:
 
 ### Comparison
 
-| Scala (Cats) | lambars | Description |
-|--------------|---------|-------------|
-| `OptionT[F, A]` | Custom implementation | Option in F |
-| `EitherT[F, E, A]` | `ExceptT<E, F, A>` | Either in F |
-| `StateT[F, S, A]` | `StateT<S, F, A>` | State in F |
-| `ReaderT[F, R, A]` | `ReaderT<R, F, A>` | Reader in F |
-| `WriterT[F, W, A]` | `WriterT<W, F, A>` | Writer in F |
-| `Kleisli[F, A, B]` | `ReaderT<A, F, B>` | Function wrapper |
+| Scala (Cats)       | lambars               | Description      |
+| ------------------ | --------------------- | ---------------- |
+| `OptionT[F, A]`    | Custom implementation | Option in F      |
+| `EitherT[F, E, A]` | `ExceptT<E, F, A>`    | Either in F      |
+| `StateT[F, S, A]`  | `StateT<S, F, A>`     | State in F       |
+| `ReaderT[F, R, A]` | `ReaderT<R, F, A>`    | Reader in F      |
+| `WriterT[F, W, A]` | `WriterT<W, F, A>`    | Writer in F      |
+| `Kleisli[F, A, B]` | `ReaderT<A, F, B>`    | Function wrapper |
 
 ### Code Examples
 
@@ -1605,6 +1606,7 @@ async fn example() {
 ```
 
 Available AsyncIO methods:
+
 - `ReaderT`: `ask_async_io`, `asks_async_io`, `lift_async_io`, `pure_async_io`, `flat_map_async_io`
 - `StateT`: `get_async_io`, `gets_async_io`, `state_async_io`, `lift_async_io`, `pure_async_io`
 - `WriterT`: `tell_async_io`, `lift_async_io`, `pure_async_io`, `flat_map_async_io`, `listen_async_io`
@@ -1615,60 +1617,60 @@ Available AsyncIO methods:
 
 ### Comparison
 
-| Scala | lambars | Description |
-|-------|---------|-------------|
-| `List[A]` | `PersistentList<A>` | Immutable list |
-| `Vector[A]` | `PersistentVector<A>` | Immutable vector |
-| `Map[K, V]` | `PersistentHashMap<K, V>` | Immutable hash map |
+| Scala             | lambars                   | Description          |
+| ----------------- | ------------------------- | -------------------- |
+| `List[A]`         | `PersistentList<A>`       | Immutable list       |
+| `Vector[A]`       | `PersistentVector<A>`     | Immutable vector     |
+| `Map[K, V]`       | `PersistentHashMap<K, V>` | Immutable hash map   |
 | `SortedMap[K, V]` | `PersistentTreeMap<K, V>` | Immutable sorted map |
-| `Set[A]` | `PersistentHashSet<A>` | Immutable set |
-| `Set[A].view` | `HashSetView<A>` | Lazy view over set |
+| `Set[A]`          | `PersistentHashSet<A>`    | Immutable set        |
+| `Set[A].view`     | `HashSetView<A>`          | Lazy view over set   |
 
 ### List/Vector Operations
 
-| Scala | lambars | Description |
-|-------|---------|-------------|
-| `list.take(n)` | `PersistentList::take` | Take first n elements |
-| `list.drop(n)` | `PersistentList::drop_first` | Drop first n elements |
-| `list.splitAt(n)` | `PersistentList::split_at` | Split at index |
-| `list.zip(other)` | `PersistentList::zip` | Zip two lists |
-| `list.unzip` | `PersistentList::<(A,B)>::unzip` | Unzip list of pairs |
-| `list.indexWhere(p)` | `PersistentList::find_index` | Find index of first match |
-| `list.reduceLeft(f)` | `PersistentList::fold_left1` | Left fold without initial value |
-| `list.reduceRight(f)` | `PersistentList::fold_right1` | Right fold without initial value |
-| `list.scanLeft(z)(f)` | `PersistentList::scan_left` | Left scan with initial value |
-| `list.partition(p)` | `PersistentList::partition` | Split by predicate |
-| `list.mkString(sep)` | `PersistentList::intersperse` | Insert between elements |
-| `lists.mkString(sep)` | `PersistentList::intercalate` | Insert list between lists and flatten |
-| `vec.take(n)` | `PersistentVector::take` | Take first n elements |
-| `vec.drop(n)` | `PersistentVector::drop_first` | Drop first n elements |
-| `vec.splitAt(n)` | `PersistentVector::split_at` | Split at index |
-| `vec.zip(other)` | `PersistentVector::zip` | Zip two vectors |
-| `vec.unzip` | `PersistentVector::<(A,B)>::unzip` | Unzip vector of pairs |
-| `vec.indexWhere(p)` | `PersistentVector::find_index` | Find index of first match |
-| `vec.reduceLeft(f)` | `PersistentVector::fold_left1` | Left fold without initial value |
-| `vec.reduceRight(f)` | `PersistentVector::fold_right1` | Right fold without initial value |
-| `vec.scanLeft(z)(f)` | `PersistentVector::scan_left` | Left scan with initial value |
-| `vec.partition(p)` | `PersistentVector::partition` | Split by predicate |
-| `Ordering[List[A]]` | `Ord` for `PersistentList<A: Ord>` | Lexicographic ordering |
-| `Ordering[Vector[A]]` | `Ord` for `PersistentVector<A: Ord>` | Lexicographic ordering |
+| Scala                 | lambars                              | Description                           |
+| --------------------- | ------------------------------------ | ------------------------------------- |
+| `list.take(n)`        | `PersistentList::take`               | Take first n elements                 |
+| `list.drop(n)`        | `PersistentList::drop_first`         | Drop first n elements                 |
+| `list.splitAt(n)`     | `PersistentList::split_at`           | Split at index                        |
+| `list.zip(other)`     | `PersistentList::zip`                | Zip two lists                         |
+| `list.unzip`          | `PersistentList::<(A,B)>::unzip`     | Unzip list of pairs                   |
+| `list.indexWhere(p)`  | `PersistentList::find_index`         | Find index of first match             |
+| `list.reduceLeft(f)`  | `PersistentList::fold_left1`         | Left fold without initial value       |
+| `list.reduceRight(f)` | `PersistentList::fold_right1`        | Right fold without initial value      |
+| `list.scanLeft(z)(f)` | `PersistentList::scan_left`          | Left scan with initial value          |
+| `list.partition(p)`   | `PersistentList::partition`          | Split by predicate                    |
+| `list.mkString(sep)`  | `PersistentList::intersperse`        | Insert between elements               |
+| `lists.mkString(sep)` | `PersistentList::intercalate`        | Insert list between lists and flatten |
+| `vec.take(n)`         | `PersistentVector::take`             | Take first n elements                 |
+| `vec.drop(n)`         | `PersistentVector::drop_first`       | Drop first n elements                 |
+| `vec.splitAt(n)`      | `PersistentVector::split_at`         | Split at index                        |
+| `vec.zip(other)`      | `PersistentVector::zip`              | Zip two vectors                       |
+| `vec.unzip`           | `PersistentVector::<(A,B)>::unzip`   | Unzip vector of pairs                 |
+| `vec.indexWhere(p)`   | `PersistentVector::find_index`       | Find index of first match             |
+| `vec.reduceLeft(f)`   | `PersistentVector::fold_left1`       | Left fold without initial value       |
+| `vec.reduceRight(f)`  | `PersistentVector::fold_right1`      | Right fold without initial value      |
+| `vec.scanLeft(z)(f)`  | `PersistentVector::scan_left`        | Left scan with initial value          |
+| `vec.partition(p)`    | `PersistentVector::partition`        | Split by predicate                    |
+| `Ordering[List[A]]`   | `Ord` for `PersistentList<A: Ord>`   | Lexicographic ordering                |
+| `Ordering[Vector[A]]` | `Ord` for `PersistentVector<A: Ord>` | Lexicographic ordering                |
 
 ### Map Operations
 
-| Scala | lambars | Description |
-|-------|---------|-------------|
-| `map.mapValues(f)` | `PersistentHashMap::map_values` | Transform values |
-| `map.transform((k, v) => f(k, v))` | `PersistentHashMap::map_values` | Transform values (key available in closure) |
-| `map.map { case (k, v) => (f(k), v) }` | `PersistentHashMap::map_keys` | Transform keys |
-| `map.collect { case (k, v) if p(k, v) => (k, f(v)) }` | `PersistentHashMap::filter_map` | Filter and transform |
-| `map.toList` | `PersistentHashMap::entries` | Get all entries |
-| `map.keys` | `PersistentHashMap::keys` | Get all keys |
-| `map.values` | `PersistentHashMap::values` | Get all values |
-| `map1 ++ map2` | `PersistentHashMap::merge` | Merge (right wins) |
-| `map1.merged(map2)((k, v1, v2) => f(k, v1, v2))` | `PersistentHashMap::merge_with` | Merge with resolver |
-| `map.filter { case (k, v) => p(k, v) }` | `PersistentHashMap::keep_if` | Keep matching entries |
-| `map.filterNot { case (k, v) => p(k, v) }` | `PersistentHashMap::delete_if` | Remove matching entries |
-| `map.partition { case (k, v) => p(k, v) }` | `PersistentHashMap::partition` | Split by predicate |
+| Scala                                                 | lambars                         | Description                                 |
+| ----------------------------------------------------- | ------------------------------- | ------------------------------------------- |
+| `map.mapValues(f)`                                    | `PersistentHashMap::map_values` | Transform values                            |
+| `map.transform((k, v) => f(k, v))`                    | `PersistentHashMap::map_values` | Transform values (key available in closure) |
+| `map.map { case (k, v) => (f(k), v) }`                | `PersistentHashMap::map_keys`   | Transform keys                              |
+| `map.collect { case (k, v) if p(k, v) => (k, f(v)) }` | `PersistentHashMap::filter_map` | Filter and transform                        |
+| `map.toList`                                          | `PersistentHashMap::entries`    | Get all entries                             |
+| `map.keys`                                            | `PersistentHashMap::keys`       | Get all keys                                |
+| `map.values`                                          | `PersistentHashMap::values`     | Get all values                              |
+| `map1 ++ map2`                                        | `PersistentHashMap::merge`      | Merge (right wins)                          |
+| `map1.merged(map2)((k, v1, v2) => f(k, v1, v2))`      | `PersistentHashMap::merge_with` | Merge with resolver                         |
+| `map.filter { case (k, v) => p(k, v) }`               | `PersistentHashMap::keep_if`    | Keep matching entries                       |
+| `map.filterNot { case (k, v) => p(k, v) }`            | `PersistentHashMap::delete_if`  | Remove matching entries                     |
+| `map.partition { case (k, v) => p(k, v) }`            | `PersistentHashMap::partition`  | Split by predicate                          |
 
 ### Code Examples
 
@@ -1772,16 +1774,16 @@ Scala provides parallel collections through `.par`, while lambars integrates wit
 
 ### Comparison
 
-| Scala | lambars | Description |
-|-------|---------|-------------|
-| `collection.par` | `into_par_iter()` (requires `rayon` feature) | Convert to parallel collection |
-| `collection.par.map(f)` | `par_iter().map(f)` | Parallel map |
-| `collection.par.filter(p)` | `par_iter().filter(p)` | Parallel filter |
-| `collection.par.reduce(f)` | `par_iter().reduce(identity, f)` | Parallel reduce |
-| `collection.par.sum` | `par_iter().sum()` | Parallel sum |
-| `collection.par.find(p)` | `par_iter().find_any(p)` | Find (non-deterministic) |
-| `collection.par.forall(p)` | `par_iter().all(p)` | All match predicate |
-| `collection.par.exists(p)` | `par_iter().any(p)` | Any matches predicate |
+| Scala                      | lambars                                      | Description                    |
+| -------------------------- | -------------------------------------------- | ------------------------------ |
+| `collection.par`           | `into_par_iter()` (requires `rayon` feature) | Convert to parallel collection |
+| `collection.par.map(f)`    | `par_iter().map(f)`                          | Parallel map                   |
+| `collection.par.filter(p)` | `par_iter().filter(p)`                       | Parallel filter                |
+| `collection.par.reduce(f)` | `par_iter().reduce(identity, f)`             | Parallel reduce                |
+| `collection.par.sum`       | `par_iter().sum()`                           | Parallel sum                   |
+| `collection.par.find(p)`   | `par_iter().find_any(p)`                     | Find (non-deterministic)       |
+| `collection.par.forall(p)` | `par_iter().all(p)`                          | All match predicate            |
+| `collection.par.exists(p)` | `par_iter().any(p)`                          | Any matches predicate          |
 
 ### Code Examples
 
@@ -1821,11 +1823,11 @@ Parallel operations in both Scala and lambars may not preserve order for certain
 
 ## Lazy Evaluation
 
-| Scala | lambars | Description |
-|-------|---------|-------------|
-| `lazy val x = expr` | `Lazy::new(\|\| expr)` | Lazy value |
-| `x` (force) | `Lazy::force` | Force evaluation |
-| `LazyList` | `Iterator` | Lazy sequence |
+| Scala               | lambars                | Description      |
+| ------------------- | ---------------------- | ---------------- |
+| `lazy val x = expr` | `Lazy::new(\|\| expr)` | Lazy value       |
+| `x` (force)         | `Lazy::force`          | Force evaluation |
+| `LazyList`          | `Iterator`             | Lazy sequence    |
 
 ### Code Examples
 
@@ -1962,18 +1964,18 @@ let even = 4.is_even();    // true
 
 ### Syntax Differences
 
-| Aspect | Scala | lambars (Rust) |
-|--------|-------|----------------|
-| For-comprehension (Monad) | `for { x <- mx } yield x` | `eff! { x <= mx; expr }` |
-| For-comprehension (List) | `for { x <- xs } yield x` | `for_! { x <= xs; yield x }` |
-| Type parameters | `F[A]` | `F<A>` |
-| Option | `Some(x)` / `None` | `Some(x)` / `None` |
-| Either | `Right(x)` / `Left(e)` | `Ok(x)` / `Err(e)` |
-| Lambda | `x => x + 1` | `\|x\| x + 1` |
-| Method call | `obj.method(arg)` | `obj.method(arg)` |
-| Type annotation | `x: Int` | `x: i32` |
-| Trait definition | `trait T { }` | `trait T { }` |
-| Implicit | `implicit val` | N/A (explicit traits) |
+| Aspect                    | Scala                     | lambars (Rust)               |
+| ------------------------- | ------------------------- | ---------------------------- |
+| For-comprehension (Monad) | `for { x <- mx } yield x` | `eff! { x <= mx; expr }`     |
+| For-comprehension (List)  | `for { x <- xs } yield x` | `for_! { x <= xs; yield x }` |
+| Type parameters           | `F[A]`                    | `F<A>`                       |
+| Option                    | `Some(x)` / `None`        | `Some(x)` / `None`           |
+| Either                    | `Right(x)` / `Left(e)`    | `Ok(x)` / `Err(e)`           |
+| Lambda                    | `x => x + 1`              | `\|x\| x + 1`                |
+| Method call               | `obj.method(arg)`         | `obj.method(arg)`            |
+| Type annotation           | `x: Int`                  | `x: i32`                     |
+| Trait definition          | `trait T { }`             | `trait T { }`                |
+| Implicit                  | `implicit val`            | N/A (explicit traits)        |
 
 ### Conceptual Differences
 
@@ -1996,6 +1998,7 @@ let even = 4.is_even();    // true
 ## Migration Tips
 
 1. **Replace `for` comprehension with `eff!` or `for_!`**: Use `<=` instead of `<-` for binding.
+
    - Use `eff!` for monads (Option, Result, IO, State, Reader, Writer)
    - Use `for_!` for lists (Vec) with `yield` keyword
 

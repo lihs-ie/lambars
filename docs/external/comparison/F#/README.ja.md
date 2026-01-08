@@ -1,8 +1,8 @@
 # F# から lambars への API 対応ガイド
 
-[English](README.md) | [日本語](README.ja.md)
+[English](README.en.md)
 
-> **Note**: このドキュメントはAIによって翻訳されました。誤りや不自然な表現がある場合は、Issue または Pull Request でお知らせください。
+> **Note**: このドキュメントは AI によって翻訳されました。誤りや不自然な表現がある場合は、Issue または Pull Request でお知らせください。
 
 本ドキュメントは、F# の関数型プログラミング構文と lambars (Rust) の同等の機能を包括的に比較します。
 
@@ -23,20 +23,20 @@
 
 ## 概要
 
-| 概念 | F# | lambars (Rust) |
-|---------|-----|----------------|
-| Option 型 | `Option<'T>` | `Option<T>` (std) |
-| Result 型 | `Result<'T, 'E>` | `Result<T, E>` (std) |
-| リスト型 | `list<'T>` (immutable) | `PersistentList<T>` |
-| シーケンス | `seq<'T>` (lazy) | `Iterator` / `Lazy<T>` |
-| パイプ演算子 | `\|>` | `pipe!` マクロ |
-| 合成 | `>>` | `compose!` マクロ |
-| コンピュテーション式 | `async { }`, `result { }` | `eff!` マクロ |
-| リスト内包表記 | `[ for ... ]`, `seq { }` | `for_!` マクロ |
-| 非同期リスト内包表記 | `async { for ... }` | `for_async!` マクロ |
-| アクティブパターン | `(|Pattern|_|)` | `Prism` |
-| レンズ | ライブラリ経由 | `Lens`, `lens!` マクロ |
-| Monoid | `+` 演算子オーバーロード | `Semigroup`, `Monoid` トレイト |
+| 概念                 | F#                        | lambars (Rust)                 |
+| -------------------- | ------------------------- | ------------------------------ | --- | --- | ------- |
+| Option 型            | `Option<'T>`              | `Option<T>` (std)              |
+| Result 型            | `Result<'T, 'E>`          | `Result<T, E>` (std)           |
+| リスト型             | `list<'T>` (immutable)    | `PersistentList<T>`            |
+| シーケンス           | `seq<'T>` (lazy)          | `Iterator` / `Lazy<T>`         |
+| パイプ演算子         | `\|>`                     | `pipe!` マクロ                 |
+| 合成                 | `>>`                      | `compose!` マクロ              |
+| コンピュテーション式 | `async { }`, `result { }` | `eff!` マクロ                  |
+| リスト内包表記       | `[ for ... ]`, `seq { }`  | `for_!` マクロ                 |
+| 非同期リスト内包表記 | `async { for ... }`       | `for_async!` マクロ            |
+| アクティブパターン   | `(                        | Pattern                        | \_  | )`  | `Prism` |
+| レンズ               | ライブラリ経由            | `Lens`, `lens!` マクロ         |
+| Monoid               | `+` 演算子オーバーロード  | `Semigroup`, `Monoid` トレイト |
 
 ---
 
@@ -44,22 +44,22 @@
 
 ### 基本操作
 
-| F# | lambars | 説明 |
-|----|---------|-------------|
-| `Option.map` | `Functor::fmap` | 内部の値を変換 |
-| `Option.bind` | `Monad::flat_map` | 計算を連鎖 |
-| `Option.filter` | `Option::filter` (std) | 述語でフィルタ |
-| `Option.defaultValue` | `Option::unwrap_or` (std) | デフォルト値を提供 |
-| `Option.defaultWith` | `Option::unwrap_or_else` (std) | 遅延デフォルト |
-| `Option.orElse` | `Option::or` (std) | 代替 Option |
-| `Option.orElseWith` | `Option::or_else` (std) | 遅延代替 |
-| `Option.isSome` | `Option::is_some` (std) | Some かチェック |
-| `Option.isNone` | `Option::is_none` (std) | None かチェック |
-| `Option.iter` | `Option::iter` (std) | 値をイテレート |
-| `Option.toList` | `Option::into_iter().collect()` | リストに変換 |
-| `Option.flatten` | `Flatten::flatten` / `Option::flatten` (std) | ネストした Option を平坦化 |
-| `Option.map2` | `Applicative::map2` | 2つの Option を結合 |
-| `Option.map3` | `Applicative::map3` | 3つの Option を結合 |
+| F#                    | lambars                                      | 説明                       |
+| --------------------- | -------------------------------------------- | -------------------------- |
+| `Option.map`          | `Functor::fmap`                              | 内部の値を変換             |
+| `Option.bind`         | `Monad::flat_map`                            | 計算を連鎖                 |
+| `Option.filter`       | `Option::filter` (std)                       | 述語でフィルタ             |
+| `Option.defaultValue` | `Option::unwrap_or` (std)                    | デフォルト値を提供         |
+| `Option.defaultWith`  | `Option::unwrap_or_else` (std)               | 遅延デフォルト             |
+| `Option.orElse`       | `Option::or` (std)                           | 代替 Option                |
+| `Option.orElseWith`   | `Option::or_else` (std)                      | 遅延代替                   |
+| `Option.isSome`       | `Option::is_some` (std)                      | Some かチェック            |
+| `Option.isNone`       | `Option::is_none` (std)                      | None かチェック            |
+| `Option.iter`         | `Option::iter` (std)                         | 値をイテレート             |
+| `Option.toList`       | `Option::into_iter().collect()`              | リストに変換               |
+| `Option.flatten`      | `Flatten::flatten` / `Option::flatten` (std) | ネストした Option を平坦化 |
+| `Option.map2`         | `Applicative::map2`                          | 2 つの Option を結合       |
+| `Option.map3`         | `Applicative::map3`                          | 3 つの Option を結合       |
 
 ### コード例
 
@@ -146,32 +146,32 @@ let computation = eff! {
 
 ### 基本操作
 
-| F# | lambars | 説明 |
-|----|---------|-------------|
-| `Result.map` | `Functor::fmap` | Ok 値を変換 |
-| `Result.mapError` | `Result::map_err` (std) | Error 値を変換 |
-| `Result.bind` | `Monad::flat_map` | 計算を連鎖 |
-| `Result.isOk` | `Result::is_ok` (std) | Ok かチェック |
-| `Result.isError` | `Result::is_err` (std) | Error かチェック |
-| `Result.defaultValue` | `Result::unwrap_or` (std) | エラー時のデフォルト |
-| `Result.defaultWith` | `Result::unwrap_or_else` (std) | 遅延デフォルト |
-| `Result.toOption` | `Result::ok` (std) | Option に変換 |
+| F#                    | lambars                        | 説明                 |
+| --------------------- | ------------------------------ | -------------------- |
+| `Result.map`          | `Functor::fmap`                | Ok 値を変換          |
+| `Result.mapError`     | `Result::map_err` (std)        | Error 値を変換       |
+| `Result.bind`         | `Monad::flat_map`              | 計算を連鎖           |
+| `Result.isOk`         | `Result::is_ok` (std)          | Ok かチェック        |
+| `Result.isError`      | `Result::is_err` (std)         | Error かチェック     |
+| `Result.defaultValue` | `Result::unwrap_or` (std)      | エラー時のデフォルト |
+| `Result.defaultWith`  | `Result::unwrap_or_else` (std) | 遅延デフォルト       |
+| `Result.toOption`     | `Result::ok` (std)             | Option に変換        |
 
 ### エラーハンドリング
 
-| F# | lambars | 説明 |
-|----|---------|-------------|
-| `try ... with` | `MonadError::catch_error` | エラーをキャッチして処理 |
-| `raise` / `failwith` | `MonadError::throw_error` | エラーを投げる |
-| `Result.mapError` | `MonadErrorExt::map_error` | エラー型を変換 |
-| (パターンマッチ) | `MonadError::handle_error` | エラーを成功値に変換 |
-| (パターンマッチ) | `MonadError::adapt_error` | 同じ型内でエラーを変換 |
-| (パターンマッチ) | `MonadError::recover` | 部分関数で復旧 |
-| (パターンマッチ) | `MonadError::recover_with_partial` | モナド的部分復旧 |
-| (カスタム) | `MonadError::ensure` | 述語で検証 |
-| (カスタム) | `MonadError::ensure_or` | 値依存のエラーで検証 |
-| (カスタム) | `MonadError::redeem` | 成功とエラーの両方を変換 |
-| (カスタム) | `MonadError::redeem_with` | モナド的 redeem |
+| F#                   | lambars                            | 説明                     |
+| -------------------- | ---------------------------------- | ------------------------ |
+| `try ... with`       | `MonadError::catch_error`          | エラーをキャッチして処理 |
+| `raise` / `failwith` | `MonadError::throw_error`          | エラーを投げる           |
+| `Result.mapError`    | `MonadErrorExt::map_error`         | エラー型を変換           |
+| (パターンマッチ)     | `MonadError::handle_error`         | エラーを成功値に変換     |
+| (パターンマッチ)     | `MonadError::adapt_error`          | 同じ型内でエラーを変換   |
+| (パターンマッチ)     | `MonadError::recover`              | 部分関数で復旧           |
+| (パターンマッチ)     | `MonadError::recover_with_partial` | モナド的部分復旧         |
+| (カスタム)           | `MonadError::ensure`               | 述語で検証               |
+| (カスタム)           | `MonadError::ensure_or`            | 値依存のエラーで検証     |
+| (カスタム)           | `MonadError::redeem`               | 成功とエラーの両方を変換 |
+| (カスタム)           | `MonadError::redeem_with`          | モナド的 redeem          |
 
 ### コード例
 
@@ -282,57 +282,57 @@ let redeemed = <Result<i32, String>>::redeem(
 
 ### コレクション操作
 
-| F# | lambars | 説明 |
-|----|---------|-------------|
-| `List.map` | `Functor::fmap` / `FunctorMut::fmap_mut` | 要素を変換 |
-| `List.collect` | `Monad::flat_map` + `flatten` | マップして平坦化 |
-| `List.filter` | `Iterator::filter` (std) | 要素をフィルタ |
-| `List.fold` | `Foldable::fold_left` | 左畳み込み |
-| `List.foldBack` | `Foldable::fold_right` | 右畳み込み |
-| `List.reduce` | `Iterator::reduce` (std) | 初期値なしで削減 |
-| `List.sum` | `Foldable::fold_left` + `Monoid` | 要素を合計 |
-| `List.length` | `Foldable::length` | 要素数をカウント |
-| `List.isEmpty` | `Foldable::is_empty` | 空かチェック |
-| `List.head` | `PersistentList::head` | 最初の要素 |
-| `List.tail` | `PersistentList::tail` | リストの残り |
-| `List.cons` | `PersistentList::cons` | 要素を先頭に追加 |
-| `List.append` | `Semigroup::combine` | リストを連結 |
-| `List.rev` | `PersistentList::reverse` | リストを逆順に |
-| `List.exists` | `Foldable::exists` | いずれかの要素がマッチ |
-| `List.forall` | `Foldable::for_all` | すべての要素がマッチ |
-| `List.find` | `Foldable::find` | 最初のマッチを検索 |
-| `List.tryFind` | `Foldable::find` | 検索 (Option を返す) |
-| `List.choose` | `Iterator::filter_map` (std) | フィルタとマップ |
-| `List.zip` | `PersistentList::zip` | 2つのリストを zip |
-| `List.unzip` | `PersistentList::<(A,B)>::unzip` | ペアのリストを unzip |
-| `List.take` | `PersistentList::take` | 最初の n 要素を取得 |
-| `List.skip` | `PersistentList::drop_first` | 最初の n 要素をスキップ |
-| `List.splitAt` | `PersistentList::split_at` | インデックスで分割 |
-| `List.findIndex` | `PersistentList::find_index` | 最初のマッチのインデックスを検索 |
-| `List.reduce` | `PersistentList::fold_left1` | 初期値なしの左畳み込み |
-| `List.reduceBack` | `PersistentList::fold_right1` | 初期値なしの右畳み込み |
-| `List.scan` | `PersistentList::scan_left` | 初期値付き左スキャン |
-| `List.partition` | `PersistentList::partition` | 述語で分割 |
-| (N/A) | `PersistentList::intersperse` | 要素間に挿入 |
-| `String.concat sep` | `PersistentList::intercalate` | リスト間にリストを挿入して平坦化 |
-| `compare` | `Ord::cmp` | 辞書順比較 (`T: Ord` が必要) |
-| `Seq.unfold` | 手動実装 | シーケンスを生成 |
+| F#                  | lambars                                  | 説明                             |
+| ------------------- | ---------------------------------------- | -------------------------------- |
+| `List.map`          | `Functor::fmap` / `FunctorMut::fmap_mut` | 要素を変換                       |
+| `List.collect`      | `Monad::flat_map` + `flatten`            | マップして平坦化                 |
+| `List.filter`       | `Iterator::filter` (std)                 | 要素をフィルタ                   |
+| `List.fold`         | `Foldable::fold_left`                    | 左畳み込み                       |
+| `List.foldBack`     | `Foldable::fold_right`                   | 右畳み込み                       |
+| `List.reduce`       | `Iterator::reduce` (std)                 | 初期値なしで削減                 |
+| `List.sum`          | `Foldable::fold_left` + `Monoid`         | 要素を合計                       |
+| `List.length`       | `Foldable::length`                       | 要素数をカウント                 |
+| `List.isEmpty`      | `Foldable::is_empty`                     | 空かチェック                     |
+| `List.head`         | `PersistentList::head`                   | 最初の要素                       |
+| `List.tail`         | `PersistentList::tail`                   | リストの残り                     |
+| `List.cons`         | `PersistentList::cons`                   | 要素を先頭に追加                 |
+| `List.append`       | `Semigroup::combine`                     | リストを連結                     |
+| `List.rev`          | `PersistentList::reverse`                | リストを逆順に                   |
+| `List.exists`       | `Foldable::exists`                       | いずれかの要素がマッチ           |
+| `List.forall`       | `Foldable::for_all`                      | すべての要素がマッチ             |
+| `List.find`         | `Foldable::find`                         | 最初のマッチを検索               |
+| `List.tryFind`      | `Foldable::find`                         | 検索 (Option を返す)             |
+| `List.choose`       | `Iterator::filter_map` (std)             | フィルタとマップ                 |
+| `List.zip`          | `PersistentList::zip`                    | 2 つのリストを zip               |
+| `List.unzip`        | `PersistentList::<(A,B)>::unzip`         | ペアのリストを unzip             |
+| `List.take`         | `PersistentList::take`                   | 最初の n 要素を取得              |
+| `List.skip`         | `PersistentList::drop_first`             | 最初の n 要素をスキップ          |
+| `List.splitAt`      | `PersistentList::split_at`               | インデックスで分割               |
+| `List.findIndex`    | `PersistentList::find_index`             | 最初のマッチのインデックスを検索 |
+| `List.reduce`       | `PersistentList::fold_left1`             | 初期値なしの左畳み込み           |
+| `List.reduceBack`   | `PersistentList::fold_right1`            | 初期値なしの右畳み込み           |
+| `List.scan`         | `PersistentList::scan_left`              | 初期値付き左スキャン             |
+| `List.partition`    | `PersistentList::partition`              | 述語で分割                       |
+| (N/A)               | `PersistentList::intersperse`            | 要素間に挿入                     |
+| `String.concat sep` | `PersistentList::intercalate`            | リスト間にリストを挿入して平坦化 |
+| `compare`           | `Ord::cmp`                               | 辞書順比較 (`T: Ord` が必要)     |
+| `Seq.unfold`        | 手動実装                                 | シーケンスを生成                 |
 
 ### Traversable 操作
 
-| F# | lambars | 説明 |
-|----|---------|-------------|
-| `List.traverse` (カスタム) | `Traversable::traverse_option/result` | Option/Result でトラバース |
-| `List.sequence` (カスタム) | `Traversable::sequence_option/result` | Option/Result エフェクトをシーケンス |
-| Reader での `List.traverse` | `Traversable::traverse_reader` | Reader エフェクトでトラバース |
-| State での `List.traverse` | `Traversable::traverse_state` | State エフェクトでトラバース |
-| Async での `List.traverse` | `Traversable::traverse_io` | IO エフェクトでトラバース |
-| Reader での `List.sequence` | `Traversable::sequence_reader` | Reader エフェクトをシーケンス |
-| State での `List.sequence` | `Traversable::sequence_state` | State エフェクトをシーケンス |
-| Async での `List.sequence` | `Traversable::sequence_io` | IO エフェクトをシーケンス |
-| Reader での `List.iter` | `Traversable::for_each_reader` | Reader エフェクトで for-each |
-| State での `List.iter` | `Traversable::for_each_state` | State エフェクトで for-each |
-| IO での `List.iter` | `Traversable::for_each_io` | IO エフェクトで for-each |
+| F#                          | lambars                               | 説明                                 |
+| --------------------------- | ------------------------------------- | ------------------------------------ |
+| `List.traverse` (カスタム)  | `Traversable::traverse_option/result` | Option/Result でトラバース           |
+| `List.sequence` (カスタム)  | `Traversable::sequence_option/result` | Option/Result エフェクトをシーケンス |
+| Reader での `List.traverse` | `Traversable::traverse_reader`        | Reader エフェクトでトラバース        |
+| State での `List.traverse`  | `Traversable::traverse_state`         | State エフェクトでトラバース         |
+| Async での `List.traverse`  | `Traversable::traverse_io`            | IO エフェクトでトラバース            |
+| Reader での `List.sequence` | `Traversable::sequence_reader`        | Reader エフェクトをシーケンス        |
+| State での `List.sequence`  | `Traversable::sequence_state`         | State エフェクトをシーケンス         |
+| Async での `List.sequence`  | `Traversable::sequence_io`            | IO エフェクトをシーケンス            |
+| Reader での `List.iter`     | `Traversable::for_each_reader`        | Reader エフェクトで for-each         |
+| State での `List.iter`      | `Traversable::for_each_state`         | State エフェクトで for-each          |
+| IO での `List.iter`         | `Traversable::for_each_io`            | IO エフェクトで for-each             |
 
 ### コード例
 
@@ -504,14 +504,14 @@ let contents = io.run_unsafe();
 
 ### 演算子とマクロ
 
-| F# | lambars | 説明 |
-|----|---------|-------------|
-| `\|>` (前方パイプ) | `pipe!` | 値を関数に適用 |
-| `<\|` (後方パイプ) | 関数呼び出し | 関数を値に適用 |
-| `>>` (前方合成) | `compose!` (逆順) | 左から右へ合成 |
-| `<<` (後方合成) | `compose!` | 右から左へ合成 |
-| 部分適用 | `partial!` | いくつかの引数を固定 |
-| カリー化 (自動) | `curry!(fn, arity)` or `curry!(\|args...\| body)` | カリー化形式に変換 |
+| F#                 | lambars                                           | 説明                 |
+| ------------------ | ------------------------------------------------- | -------------------- |
+| `\|>` (前方パイプ) | `pipe!`                                           | 値を関数に適用       |
+| `<\|` (後方パイプ) | 関数呼び出し                                      | 関数を値に適用       |
+| `>>` (前方合成)    | `compose!` (逆順)                                 | 左から右へ合成       |
+| `<<` (後方合成)    | `compose!`                                        | 右から左へ合成       |
+| 部分適用           | `partial!`                                        | いくつかの引数を固定 |
+| カリー化 (自動)    | `curry!(fn, arity)` or `curry!(\|args...\| body)` | カリー化形式に変換   |
 
 ### コード例
 
@@ -639,16 +639,16 @@ let result = flipped(3, 10);  // 7 (10 - 3)
 
 ### 比較概要
 
-| F# | lambars | 説明 |
-|----|---------|-------------|
-| `async { }` | `AsyncIO` + `eff_async!` | 非同期計算 |
-| `result { }` | Result での `eff!` | Result ベースの計算 |
-| `option { }` | Option での `eff!` | Option ベースの計算 |
-| `seq { }` / `[ for ... ]` | `for_!` マクロ | リスト/シーケンス生成 |
-| `state { }` | `State` Monad | 状態を持つ計算 |
-| `reader { }` | `Reader` Monad | 環境の読み取り |
-| `writer { }` | `Writer` Monad | ログ出力する計算 |
-| `rws { }` (カスタム) | `RWS` Monad | Reader + Writer + State の組み合わせ |
+| F#                        | lambars                  | 説明                                 |
+| ------------------------- | ------------------------ | ------------------------------------ |
+| `async { }`               | `AsyncIO` + `eff_async!` | 非同期計算                           |
+| `result { }`              | Result での `eff!`       | Result ベースの計算                  |
+| `option { }`              | Option での `eff!`       | Option ベースの計算                  |
+| `seq { }` / `[ for ... ]` | `for_!` マクロ           | リスト/シーケンス生成                |
+| `state { }`               | `State` Monad            | 状態を持つ計算                       |
+| `reader { }`              | `Reader` Monad           | 環境の読み取り                       |
+| `writer { }`              | `Writer` Monad           | ログ出力する計算                     |
+| `rws { }` (カスタム)      | `RWS` Monad              | Reader + Writer + State の組み合わせ |
 
 ### コード例
 
@@ -810,20 +810,20 @@ let (result, final_state, log) = computation.run(Config { multiplier: 2 }, 10);
 
 `RWS` Monad は以下の操作を提供します:
 
-| F# パターン | lambars | 説明 |
-|-----------|---------|-------------|
-| `fun config -> ...` | `RWS::ask` | 環境にアクセス |
-| `fun config -> f config` | `RWS::asks` | 環境から派生した値にアクセス |
-| `fun _ state -> (state, state, [])` | `RWS::get` | 現在の状態を取得 |
-| `fun _ _ -> ((), newState, [])` | `RWS::put` | 新しい状態を設定 |
-| `fun _ state -> ((), f state, [])` | `RWS::modify` | 関数で状態を変更 |
-| `fun _ state -> (f state, state, [])` | `RWS::gets` | 状態から派生した値を取得 |
-| `fun _ state -> ((), state, log)` | `RWS::tell` | ログ出力に追加 |
-| N/A | `RWS::listen` | 計算内でログにアクセス |
-| N/A | `RWS::listens` | 変換されたログにアクセス |
-| N/A | `RWS::local` | 変更された環境で実行 |
+| F# パターン                           | lambars        | 説明                         |
+| ------------------------------------- | -------------- | ---------------------------- |
+| `fun config -> ...`                   | `RWS::ask`     | 環境にアクセス               |
+| `fun config -> f config`              | `RWS::asks`    | 環境から派生した値にアクセス |
+| `fun _ state -> (state, state, [])`   | `RWS::get`     | 現在の状態を取得             |
+| `fun _ _ -> ((), newState, [])`       | `RWS::put`     | 新しい状態を設定             |
+| `fun _ state -> ((), f state, [])`    | `RWS::modify`  | 関数で状態を変更             |
+| `fun _ state -> (f state, state, [])` | `RWS::gets`    | 状態から派生した値を取得     |
+| `fun _ state -> ((), state, log)`     | `RWS::tell`    | ログ出力に追加               |
+| N/A                                   | `RWS::listen`  | 計算内でログにアクセス       |
+| N/A                                   | `RWS::listens` | 変換されたログにアクセス     |
+| N/A                                   | `RWS::local`   | 変更された環境で実行         |
 
-#### F# シーケンス式 / リスト内包表記 vs lambars for_!
+#### F# シーケンス式 / リスト内包表記 vs lambars for\_!
 
 ```fsharp
 // F# - リスト内包表記
@@ -871,15 +871,15 @@ let evens: Vec<i32> = (1..=10).filter(|x| x % 2 == 0).collect();
 // evens = vec![2, 4, 6, 8, 10]
 ```
 
-### eff! と for_! の使い分け
+### eff! と for\_! の使い分け
 
-| シナリオ | 推奨マクロ | 理由 |
-|----------|-------------------|--------|
-| `option { }` / `result { }` | `eff!` | 短絡評価を伴うモナド連鎖 |
-| `async { }` | `eff_async!` | 非同期モナド連鎖 |
-| `[ for ... ]` / `seq { }` | `for_!` | yield を使ったリスト生成 |
-| 直積 | `for_!` | 複数のイテレーション |
-| State/Reader/Writer | `eff!` | モナドエフェクト連鎖 |
+| シナリオ                    | 推奨マクロ            | 理由                           |
+| --------------------------- | --------------------- | ------------------------------ |
+| `option { }` / `result { }` | `eff!`                | 短絡評価を伴うモナド連鎖       |
+| `async { }`                 | `eff_async!`          | 非同期モナド連鎖               |
+| `[ for ... ]` / `seq { }`   | `for_!`               | yield を使ったリスト生成       |
+| 直積                        | `for_!`               | 複数のイテレーション           |
+| State/Reader/Writer         | `eff!`                | モナドエフェクト連鎖           |
 | State/Reader/Writer + Async | `*_async_io` メソッド | トランスフォーマーの非同期統合 |
 
 ### AsyncIO を使った Monad Transformer
@@ -910,6 +910,7 @@ async fn example() {
 ```
 
 トランスフォーマーで利用可能な AsyncIO メソッド:
+
 - `ReaderT`: `ask_async_io`, `asks_async_io`, `lift_async_io`, `pure_async_io`, `flat_map_async_io`
 - `StateT`: `get_async_io`, `gets_async_io`, `state_async_io`, `lift_async_io`, `pure_async_io`
 - `WriterT`: `tell_async_io`, `lift_async_io`, `pure_async_io`, `flat_map_async_io`, `listen_async_io`
@@ -920,12 +921,12 @@ async fn example() {
 
 ### 比較
 
-| F# | lambars | 説明 |
-|----|---------|-------------|
-| アクティブパターン (完全) | `Prism` | enum バリアントのマッチ |
-| アクティブパターン (部分) | `Optional` | マッチするかもしれない |
-| レコードフィールドアクセス | `Lens` | フィールドの取得/設定 |
-| ネストしたアクセス | 合成された Optics | 深いアクセス |
+| F#                         | lambars           | 説明                    |
+| -------------------------- | ----------------- | ----------------------- |
+| アクティブパターン (完全)  | `Prism`           | enum バリアントのマッチ |
+| アクティブパターン (部分)  | `Optional`        | マッチするかもしれない  |
+| レコードフィールドアクセス | `Lens`            | フィールドの取得/設定   |
+| ネストしたアクセス         | 合成された Optics | 深いアクセス            |
 
 ### コード例
 
@@ -1048,12 +1049,12 @@ let updated = person_street.set(person, "Oak Ave".to_string());
 
 ### 比較
 
-| F# | lambars | 説明 |
-|----|---------|-------------|
-| `lazy { expr }` | `Lazy::new(\|\| expr)` | 遅延計算 |
-| `Lazy.Force` | `Lazy::force` | 評価を強制 |
-| `Lazy.Value` | `Lazy::force` | 値にアクセス |
-| `seq { }` | `Iterator` | 遅延シーケンス |
+| F#              | lambars                | 説明           |
+| --------------- | ---------------------- | -------------- |
+| `lazy { expr }` | `Lazy::new(\|\| expr)` | 遅延計算       |
+| `Lazy.Force`    | `Lazy::force`          | 評価を強制     |
+| `Lazy.Value`    | `Lazy::force`          | 値にアクセス   |
+| `seq { }`       | `Iterator`             | 遅延シーケンス |
 
 ### コード例
 
@@ -1112,13 +1113,13 @@ let first_ten: Vec<i32> = (0..).take(10).collect();
 
 ### 比較
 
-| F# 概念 | lambars トレイト | 説明 |
-|------------|---------------|-------------|
-| `IComparable<'T>` | `Ord` (std) | 順序比較 |
-| `IEquatable<'T>` | `Eq` (std) | 等価性 |
-| `+` を持つインターフェース | `Semigroup` | 結合的な結合 |
-| `Zero` を持つインターフェース | `Monoid` | 単位元 |
-| `IEnumerable<'T>` | `IntoIterator` (std) | イテレーション |
+| F# 概念                       | lambars トレイト     | 説明           |
+| ----------------------------- | -------------------- | -------------- |
+| `IComparable<'T>`             | `Ord` (std)          | 順序比較       |
+| `IEquatable<'T>`              | `Eq` (std)           | 等価性         |
+| `+` を持つインターフェース    | `Semigroup`          | 結合的な結合   |
+| `Zero` を持つインターフェース | `Monoid`             | 単位元         |
+| `IEnumerable<'T>`             | `IntoIterator` (std) | イテレーション |
 
 ### コード例
 
@@ -1167,29 +1168,29 @@ fn add<T: Semigroup>(a: T, b: T) -> T {
 
 ### 比較
 
-| F# 型 | lambars 型 | 説明 |
-|---------|--------------|-------------|
-| `list<'T>` | `PersistentList<T>` | 不変の単方向リスト |
-| `Map<'K, 'V>` | `PersistentTreeMap<K, V>` | 不変の順序付きマップ |
-| `Set<'T>` | `PersistentHashSet<T>` | 不変の集合 |
-| - | `PersistentVector<T>` | 不変ベクタ (Clojure スタイル) |
-| - | `PersistentHashMap<K, V>` | 不変ハッシュマップ (HAMT) |
+| F# 型         | lambars 型                | 説明                          |
+| ------------- | ------------------------- | ----------------------------- |
+| `list<'T>`    | `PersistentList<T>`       | 不変の単方向リスト            |
+| `Map<'K, 'V>` | `PersistentTreeMap<K, V>` | 不変の順序付きマップ          |
+| `Set<'T>`     | `PersistentHashSet<T>`    | 不変の集合                    |
+| -             | `PersistentVector<T>`     | 不変ベクタ (Clojure スタイル) |
+| -             | `PersistentHashMap<K, V>` | 不変ハッシュマップ (HAMT)     |
 
 ### Map 操作
 
-| F# | lambars | 説明 |
-|---------|---------|-------------|
-| `Map.map f m` | `map_values` メソッド | 値を変換 |
+| F#                       | lambars               | 説明                                  |
+| ------------------------ | --------------------- | ------------------------------------- |
+| `Map.map f m`            | `map_values` メソッド | 値を変換                              |
 | `Map.map f m` (f にキー) | `map_values` メソッド | 値を変換 (クロージャでキーが利用可能) |
-| `Map.toSeq m` | `entries` メソッド | すべてのエントリを取得 |
-| `Map.keys m` | `keys` メソッド | すべてのキーを取得 |
-| `Map.values m` | `values` メソッド | すべての値を取得 |
-| `Map.fold f m1 m2` | `merge` メソッド | マージ (右側が優先) |
-| - | `merge_with` メソッド | カスタム解決でマージ |
-| `Map.filter p m` | `keep_if` メソッド | マッチするエントリを保持 |
-| - | `delete_if` メソッド | マッチするエントリを削除 |
-| `Map.partition p m` | `partition` メソッド | 述語で分割 |
-| `Map.pick f m` | `filter_map` メソッド | フィルタと変換 |
+| `Map.toSeq m`            | `entries` メソッド    | すべてのエントリを取得                |
+| `Map.keys m`             | `keys` メソッド       | すべてのキーを取得                    |
+| `Map.values m`           | `values` メソッド     | すべての値を取得                      |
+| `Map.fold f m1 m2`       | `merge` メソッド      | マージ (右側が優先)                   |
+| -                        | `merge_with` メソッド | カスタム解決でマージ                  |
+| `Map.filter p m`         | `keep_if` メソッド    | マッチするエントリを保持              |
+| -                        | `delete_if` メソッド  | マッチするエントリを削除              |
+| `Map.partition p m`      | `partition` メソッド  | 述語で分割                            |
+| `Map.pick f m`           | `filter_map` メソッド | フィルタと変換                        |
 
 ### コード例
 
@@ -1277,17 +1278,17 @@ let difference = set1.difference(&set2);      // {1}
 
 ### 構文の違い
 
-| 側面 | F# | lambars (Rust) |
-|--------|-----|----------------|
-| 関数適用 | `f x y` | `f(x, y)` |
-| パイプ構文 | `x \|> f` | `pipe!(x, f)` |
-| 合成 | `f >> g` | `compose!(g, f)` |
-| CE での Let バインディング | `let! x = m` | `x <= m;` |
-| ラムダ | `fun x -> x + 1` | `\|x\| x + 1` |
-| 型注釈 | `x: int` | `x: i32` |
-| ジェネリック型 | `'T` | `T` |
-| Option | `Some x` / `None` | `Some(x)` / `None` |
-| Result | `Ok x` / `Error e` | `Ok(x)` / `Err(e)` |
+| 側面                       | F#                 | lambars (Rust)     |
+| -------------------------- | ------------------ | ------------------ |
+| 関数適用                   | `f x y`            | `f(x, y)`          |
+| パイプ構文                 | `x \|> f`          | `pipe!(x, f)`      |
+| 合成                       | `f >> g`           | `compose!(g, f)`   |
+| CE での Let バインディング | `let! x = m`       | `x <= m;`          |
+| ラムダ                     | `fun x -> x + 1`   | `\|x\| x + 1`      |
+| 型注釈                     | `x: int`           | `x: i32`           |
+| ジェネリック型             | `'T`               | `T`                |
+| Option                     | `Some x` / `None`  | `Some(x)` / `None` |
+| Result                     | `Ok x` / `Error e` | `Ok(x)` / `Err(e)` |
 
 ### 概念的な違い
 

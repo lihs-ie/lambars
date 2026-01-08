@@ -1,6 +1,6 @@
 # F# to lambars API Comparison Guide
 
-[English](README.md) | [日本語](README.ja.md)
+[日本語](README.ja.md)
 
 This document provides a comprehensive comparison between F# functional programming constructs and their equivalents in lambars (Rust).
 
@@ -21,20 +21,20 @@ This document provides a comprehensive comparison between F# functional programm
 
 ## Overview
 
-| Concept | F# | lambars (Rust) |
-|---------|-----|----------------|
-| Option type | `Option<'T>` | `Option<T>` (std) |
-| Result type | `Result<'T, 'E>` | `Result<T, E>` (std) |
-| List type | `list<'T>` (immutable) | `PersistentList<T>` |
-| Sequence | `seq<'T>` (lazy) | `Iterator` / `Lazy<T>` |
-| Pipe operator | `\|>` | `pipe!` macro |
-| Composition | `>>` | `compose!` macro |
-| Computation expressions | `async { }`, `result { }` | `eff!` macro |
-| List comprehension | `[ for ... ]`, `seq { }` | `for_!` macro |
-| Async list comprehension | `async { for ... }` | `for_async!` macro |
-| Active patterns | `(|Pattern|_|)` | `Prism` |
-| Lenses | via libraries | `Lens`, `lens!` macro |
-| Monoid | `+` operator overloading | `Semigroup`, `Monoid` traits |
+| Concept                  | F#                        | lambars (Rust)               |
+| ------------------------ | ------------------------- | ---------------------------- | --- | --- | ------- |
+| Option type              | `Option<'T>`              | `Option<T>` (std)            |
+| Result type              | `Result<'T, 'E>`          | `Result<T, E>` (std)         |
+| List type                | `list<'T>` (immutable)    | `PersistentList<T>`          |
+| Sequence                 | `seq<'T>` (lazy)          | `Iterator` / `Lazy<T>`       |
+| Pipe operator            | `\|>`                     | `pipe!` macro                |
+| Composition              | `>>`                      | `compose!` macro             |
+| Computation expressions  | `async { }`, `result { }` | `eff!` macro                 |
+| List comprehension       | `[ for ... ]`, `seq { }`  | `for_!` macro                |
+| Async list comprehension | `async { for ... }`       | `for_async!` macro           |
+| Active patterns          | `(                        | Pattern                      | \_  | )`  | `Prism` |
+| Lenses                   | via libraries             | `Lens`, `lens!` macro        |
+| Monoid                   | `+` operator overloading  | `Semigroup`, `Monoid` traits |
 
 ---
 
@@ -42,22 +42,22 @@ This document provides a comprehensive comparison between F# functional programm
 
 ### Basic Operations
 
-| F# | lambars | Description |
-|----|---------|-------------|
-| `Option.map` | `Functor::fmap` | Transform the inner value |
-| `Option.bind` | `Monad::flat_map` | Chain computations |
-| `Option.filter` | `Option::filter` (std) | Filter based on predicate |
-| `Option.defaultValue` | `Option::unwrap_or` (std) | Provide default |
-| `Option.defaultWith` | `Option::unwrap_or_else` (std) | Lazy default |
-| `Option.orElse` | `Option::or` (std) | Alternative option |
-| `Option.orElseWith` | `Option::or_else` (std) | Lazy alternative |
-| `Option.isSome` | `Option::is_some` (std) | Check if Some |
-| `Option.isNone` | `Option::is_none` (std) | Check if None |
-| `Option.iter` | `Option::iter` (std) | Iterate over value |
-| `Option.toList` | `Option::into_iter().collect()` | Convert to list |
-| `Option.flatten` | `Flatten::flatten` / `Option::flatten` (std) | Flatten nested option |
-| `Option.map2` | `Applicative::map2` | Combine two options |
-| `Option.map3` | `Applicative::map3` | Combine three options |
+| F#                    | lambars                                      | Description               |
+| --------------------- | -------------------------------------------- | ------------------------- |
+| `Option.map`          | `Functor::fmap`                              | Transform the inner value |
+| `Option.bind`         | `Monad::flat_map`                            | Chain computations        |
+| `Option.filter`       | `Option::filter` (std)                       | Filter based on predicate |
+| `Option.defaultValue` | `Option::unwrap_or` (std)                    | Provide default           |
+| `Option.defaultWith`  | `Option::unwrap_or_else` (std)               | Lazy default              |
+| `Option.orElse`       | `Option::or` (std)                           | Alternative option        |
+| `Option.orElseWith`   | `Option::or_else` (std)                      | Lazy alternative          |
+| `Option.isSome`       | `Option::is_some` (std)                      | Check if Some             |
+| `Option.isNone`       | `Option::is_none` (std)                      | Check if None             |
+| `Option.iter`         | `Option::iter` (std)                         | Iterate over value        |
+| `Option.toList`       | `Option::into_iter().collect()`              | Convert to list           |
+| `Option.flatten`      | `Flatten::flatten` / `Option::flatten` (std) | Flatten nested option     |
+| `Option.map2`         | `Applicative::map2`                          | Combine two options       |
+| `Option.map3`         | `Applicative::map3`                          | Combine three options     |
 
 ### Code Examples
 
@@ -144,32 +144,32 @@ let computation = eff! {
 
 ### Basic Operations
 
-| F# | lambars | Description |
-|----|---------|-------------|
-| `Result.map` | `Functor::fmap` | Transform Ok value |
-| `Result.mapError` | `Result::map_err` (std) | Transform Error value |
-| `Result.bind` | `Monad::flat_map` | Chain computations |
-| `Result.isOk` | `Result::is_ok` (std) | Check if Ok |
-| `Result.isError` | `Result::is_err` (std) | Check if Error |
-| `Result.defaultValue` | `Result::unwrap_or` (std) | Default on error |
-| `Result.defaultWith` | `Result::unwrap_or_else` (std) | Lazy default |
-| `Result.toOption` | `Result::ok` (std) | Convert to Option |
+| F#                    | lambars                        | Description           |
+| --------------------- | ------------------------------ | --------------------- |
+| `Result.map`          | `Functor::fmap`                | Transform Ok value    |
+| `Result.mapError`     | `Result::map_err` (std)        | Transform Error value |
+| `Result.bind`         | `Monad::flat_map`              | Chain computations    |
+| `Result.isOk`         | `Result::is_ok` (std)          | Check if Ok           |
+| `Result.isError`      | `Result::is_err` (std)         | Check if Error        |
+| `Result.defaultValue` | `Result::unwrap_or` (std)      | Default on error      |
+| `Result.defaultWith`  | `Result::unwrap_or_else` (std) | Lazy default          |
+| `Result.toOption`     | `Result::ok` (std)             | Convert to Option     |
 
 ### Error Handling
 
-| F# | lambars | Description |
-|----|---------|-------------|
-| `try ... with` | `MonadError::catch_error` | Catch and handle errors |
-| `raise` / `failwith` | `MonadError::throw_error` | Throw an error |
-| `Result.mapError` | `MonadErrorExt::map_error` | Transform error type |
-| (pattern match) | `MonadError::handle_error` | Convert error to success value |
-| (pattern match) | `MonadError::adapt_error` | Transform error in same type |
-| (pattern match) | `MonadError::recover` | Partial function recovery |
-| (pattern match) | `MonadError::recover_with_partial` | Monadic partial recovery |
-| (custom) | `MonadError::ensure` | Validate with predicate |
-| (custom) | `MonadError::ensure_or` | Validate with value-dependent error |
-| (custom) | `MonadError::redeem` | Transform both success and error |
-| (custom) | `MonadError::redeem_with` | Monadic redeem |
+| F#                   | lambars                            | Description                         |
+| -------------------- | ---------------------------------- | ----------------------------------- |
+| `try ... with`       | `MonadError::catch_error`          | Catch and handle errors             |
+| `raise` / `failwith` | `MonadError::throw_error`          | Throw an error                      |
+| `Result.mapError`    | `MonadErrorExt::map_error`         | Transform error type                |
+| (pattern match)      | `MonadError::handle_error`         | Convert error to success value      |
+| (pattern match)      | `MonadError::adapt_error`          | Transform error in same type        |
+| (pattern match)      | `MonadError::recover`              | Partial function recovery           |
+| (pattern match)      | `MonadError::recover_with_partial` | Monadic partial recovery            |
+| (custom)             | `MonadError::ensure`               | Validate with predicate             |
+| (custom)             | `MonadError::ensure_or`            | Validate with value-dependent error |
+| (custom)             | `MonadError::redeem`               | Transform both success and error    |
+| (custom)             | `MonadError::redeem_with`          | Monadic redeem                      |
 
 ### Code Examples
 
@@ -280,57 +280,57 @@ let redeemed = <Result<i32, String>>::redeem(
 
 ### Collection Operations
 
-| F# | lambars | Description |
-|----|---------|-------------|
-| `List.map` | `Functor::fmap` / `FunctorMut::fmap_mut` | Transform elements |
-| `List.collect` | `Monad::flat_map` + `flatten` | Map and flatten |
-| `List.filter` | `Iterator::filter` (std) | Filter elements |
-| `List.fold` | `Foldable::fold_left` | Left fold |
-| `List.foldBack` | `Foldable::fold_right` | Right fold |
-| `List.reduce` | `Iterator::reduce` (std) | Reduce without initial |
-| `List.sum` | `Foldable::fold_left` + `Monoid` | Sum elements |
-| `List.length` | `Foldable::length` | Count elements |
-| `List.isEmpty` | `Foldable::is_empty` | Check if empty |
-| `List.head` | `PersistentList::head` | First element |
-| `List.tail` | `PersistentList::tail` | Rest of list |
-| `List.cons` | `PersistentList::cons` | Prepend element |
-| `List.append` | `Semigroup::combine` | Concatenate lists |
-| `List.rev` | `PersistentList::reverse` | Reverse list |
-| `List.exists` | `Foldable::exists` | Any element matches |
-| `List.forall` | `Foldable::for_all` | All elements match |
-| `List.find` | `Foldable::find` | Find first matching |
-| `List.tryFind` | `Foldable::find` | Find (returns Option) |
-| `List.choose` | `Iterator::filter_map` (std) | Filter and map |
-| `List.zip` | `PersistentList::zip` | Zip two lists |
-| `List.unzip` | `PersistentList::<(A,B)>::unzip` | Unzip list of pairs |
-| `List.take` | `PersistentList::take` | Take first n elements |
-| `List.skip` | `PersistentList::drop_first` | Skip first n elements |
-| `List.splitAt` | `PersistentList::split_at` | Split at index |
-| `List.findIndex` | `PersistentList::find_index` | Find index of first match |
-| `List.reduce` | `PersistentList::fold_left1` | Left fold without initial value |
-| `List.reduceBack` | `PersistentList::fold_right1` | Right fold without initial value |
-| `List.scan` | `PersistentList::scan_left` | Left scan with initial value |
-| `List.partition` | `PersistentList::partition` | Split by predicate |
-| (N/A) | `PersistentList::intersperse` | Insert between elements |
-| `String.concat sep` | `PersistentList::intercalate` | Insert list between lists and flatten |
-| `compare` | `Ord::cmp` | Lexicographic ordering (requires `T: Ord`) |
-| `Seq.unfold` | Manual implementation | Generate sequence |
+| F#                  | lambars                                  | Description                                |
+| ------------------- | ---------------------------------------- | ------------------------------------------ |
+| `List.map`          | `Functor::fmap` / `FunctorMut::fmap_mut` | Transform elements                         |
+| `List.collect`      | `Monad::flat_map` + `flatten`            | Map and flatten                            |
+| `List.filter`       | `Iterator::filter` (std)                 | Filter elements                            |
+| `List.fold`         | `Foldable::fold_left`                    | Left fold                                  |
+| `List.foldBack`     | `Foldable::fold_right`                   | Right fold                                 |
+| `List.reduce`       | `Iterator::reduce` (std)                 | Reduce without initial                     |
+| `List.sum`          | `Foldable::fold_left` + `Monoid`         | Sum elements                               |
+| `List.length`       | `Foldable::length`                       | Count elements                             |
+| `List.isEmpty`      | `Foldable::is_empty`                     | Check if empty                             |
+| `List.head`         | `PersistentList::head`                   | First element                              |
+| `List.tail`         | `PersistentList::tail`                   | Rest of list                               |
+| `List.cons`         | `PersistentList::cons`                   | Prepend element                            |
+| `List.append`       | `Semigroup::combine`                     | Concatenate lists                          |
+| `List.rev`          | `PersistentList::reverse`                | Reverse list                               |
+| `List.exists`       | `Foldable::exists`                       | Any element matches                        |
+| `List.forall`       | `Foldable::for_all`                      | All elements match                         |
+| `List.find`         | `Foldable::find`                         | Find first matching                        |
+| `List.tryFind`      | `Foldable::find`                         | Find (returns Option)                      |
+| `List.choose`       | `Iterator::filter_map` (std)             | Filter and map                             |
+| `List.zip`          | `PersistentList::zip`                    | Zip two lists                              |
+| `List.unzip`        | `PersistentList::<(A,B)>::unzip`         | Unzip list of pairs                        |
+| `List.take`         | `PersistentList::take`                   | Take first n elements                      |
+| `List.skip`         | `PersistentList::drop_first`             | Skip first n elements                      |
+| `List.splitAt`      | `PersistentList::split_at`               | Split at index                             |
+| `List.findIndex`    | `PersistentList::find_index`             | Find index of first match                  |
+| `List.reduce`       | `PersistentList::fold_left1`             | Left fold without initial value            |
+| `List.reduceBack`   | `PersistentList::fold_right1`            | Right fold without initial value           |
+| `List.scan`         | `PersistentList::scan_left`              | Left scan with initial value               |
+| `List.partition`    | `PersistentList::partition`              | Split by predicate                         |
+| (N/A)               | `PersistentList::intersperse`            | Insert between elements                    |
+| `String.concat sep` | `PersistentList::intercalate`            | Insert list between lists and flatten      |
+| `compare`           | `Ord::cmp`                               | Lexicographic ordering (requires `T: Ord`) |
+| `Seq.unfold`        | Manual implementation                    | Generate sequence                          |
 
 ### Traversable Operations
 
-| F# | lambars | Description |
-|----|---------|-------------|
-| `List.traverse` (custom) | `Traversable::traverse_option/result` | Traverse with Option/Result |
-| `List.sequence` (custom) | `Traversable::sequence_option/result` | Sequence Option/Result effects |
-| `List.traverse` with Reader | `Traversable::traverse_reader` | Traverse with Reader effect |
-| `List.traverse` with State | `Traversable::traverse_state` | Traverse with State effect |
-| `List.traverse` with Async | `Traversable::traverse_io` | Traverse with IO effect |
-| `List.sequence` with Reader | `Traversable::sequence_reader` | Sequence Reader effects |
-| `List.sequence` with State | `Traversable::sequence_state` | Sequence State effects |
-| `List.sequence` with Async | `Traversable::sequence_io` | Sequence IO effects |
-| `List.iter` with Reader | `Traversable::for_each_reader` | For-each with Reader effect |
-| `List.iter` with State | `Traversable::for_each_state` | For-each with State effect |
-| `List.iter` with IO | `Traversable::for_each_io` | For-each with IO effect |
+| F#                          | lambars                               | Description                    |
+| --------------------------- | ------------------------------------- | ------------------------------ |
+| `List.traverse` (custom)    | `Traversable::traverse_option/result` | Traverse with Option/Result    |
+| `List.sequence` (custom)    | `Traversable::sequence_option/result` | Sequence Option/Result effects |
+| `List.traverse` with Reader | `Traversable::traverse_reader`        | Traverse with Reader effect    |
+| `List.traverse` with State  | `Traversable::traverse_state`         | Traverse with State effect     |
+| `List.traverse` with Async  | `Traversable::traverse_io`            | Traverse with IO effect        |
+| `List.sequence` with Reader | `Traversable::sequence_reader`        | Sequence Reader effects        |
+| `List.sequence` with State  | `Traversable::sequence_state`         | Sequence State effects         |
+| `List.sequence` with Async  | `Traversable::sequence_io`            | Sequence IO effects            |
+| `List.iter` with Reader     | `Traversable::for_each_reader`        | For-each with Reader effect    |
+| `List.iter` with State      | `Traversable::for_each_state`         | For-each with State effect     |
+| `List.iter` with IO         | `Traversable::for_each_io`            | For-each with IO effect        |
 
 ### Code Examples
 
@@ -502,14 +502,14 @@ let contents = io.run_unsafe();
 
 ### Operators and Macros
 
-| F# | lambars | Description |
-|----|---------|-------------|
-| `\|>` (pipe forward) | `pipe!` | Apply value to function |
-| `<\|` (pipe backward) | Function call | Apply function to value |
-| `>>` (compose forward) | `compose!` (reversed) | Compose left-to-right |
-| `<<` (compose backward) | `compose!` | Compose right-to-left |
-| Partial application | `partial!` | Fix some arguments |
-| Currying (automatic) | `curry!(fn, arity)` or `curry!(\|args...\| body)` | Convert to curried form |
+| F#                      | lambars                                           | Description             |
+| ----------------------- | ------------------------------------------------- | ----------------------- |
+| `\|>` (pipe forward)    | `pipe!`                                           | Apply value to function |
+| `<\|` (pipe backward)   | Function call                                     | Apply function to value |
+| `>>` (compose forward)  | `compose!` (reversed)                             | Compose left-to-right   |
+| `<<` (compose backward) | `compose!`                                        | Compose right-to-left   |
+| Partial application     | `partial!`                                        | Fix some arguments      |
+| Currying (automatic)    | `curry!(fn, arity)` or `curry!(\|args...\| body)` | Convert to curried form |
 
 ### Code Examples
 
@@ -637,16 +637,16 @@ let result = flipped(3, 10);  // 7 (10 - 3)
 
 ### Comparison Overview
 
-| F# | lambars | Description |
-|----|---------|-------------|
-| `async { }` | `AsyncIO` + `eff_async!` | Async computations |
-| `result { }` | `eff!` with Result | Result-based computations |
-| `option { }` | `eff!` with Option | Option-based computations |
-| `seq { }` / `[ for ... ]` | `for_!` macro | List/sequence generation |
-| `state { }` | `State` monad | Stateful computations |
-| `reader { }` | `Reader` monad | Environment reading |
-| `writer { }` | `Writer` monad | Logging computations |
-| `rws { }` (custom) | `RWS` monad | Combined Reader + Writer + State |
+| F#                        | lambars                  | Description                      |
+| ------------------------- | ------------------------ | -------------------------------- |
+| `async { }`               | `AsyncIO` + `eff_async!` | Async computations               |
+| `result { }`              | `eff!` with Result       | Result-based computations        |
+| `option { }`              | `eff!` with Option       | Option-based computations        |
+| `seq { }` / `[ for ... ]` | `for_!` macro            | List/sequence generation         |
+| `state { }`               | `State` monad            | Stateful computations            |
+| `reader { }`              | `Reader` monad           | Environment reading              |
+| `writer { }`              | `Writer` monad           | Logging computations             |
+| `rws { }` (custom)        | `RWS` monad              | Combined Reader + Writer + State |
 
 ### Code Examples
 
@@ -808,20 +808,20 @@ let (result, final_state, log) = computation.run(Config { multiplier: 2 }, 10);
 
 The `RWS` monad provides the following operations:
 
-| F# Pattern | lambars | Description |
-|-----------|---------|-------------|
-| `fun config -> ...` | `RWS::ask` | Access the environment |
-| `fun config -> f config` | `RWS::asks` | Access derived value from environment |
-| `fun _ state -> (state, state, [])` | `RWS::get` | Get current state |
-| `fun _ _ -> ((), newState, [])` | `RWS::put` | Set new state |
-| `fun _ state -> ((), f state, [])` | `RWS::modify` | Modify state with function |
-| `fun _ state -> (f state, state, [])` | `RWS::gets` | Get derived value from state |
-| `fun _ state -> ((), state, log)` | `RWS::tell` | Append to log output |
-| N/A | `RWS::listen` | Access log within computation |
-| N/A | `RWS::listens` | Access transformed log |
-| N/A | `RWS::local` | Run with modified environment |
+| F# Pattern                            | lambars        | Description                           |
+| ------------------------------------- | -------------- | ------------------------------------- |
+| `fun config -> ...`                   | `RWS::ask`     | Access the environment                |
+| `fun config -> f config`              | `RWS::asks`    | Access derived value from environment |
+| `fun _ state -> (state, state, [])`   | `RWS::get`     | Get current state                     |
+| `fun _ _ -> ((), newState, [])`       | `RWS::put`     | Set new state                         |
+| `fun _ state -> ((), f state, [])`    | `RWS::modify`  | Modify state with function            |
+| `fun _ state -> (f state, state, [])` | `RWS::gets`    | Get derived value from state          |
+| `fun _ state -> ((), state, log)`     | `RWS::tell`    | Append to log output                  |
+| N/A                                   | `RWS::listen`  | Access log within computation         |
+| N/A                                   | `RWS::listens` | Access transformed log                |
+| N/A                                   | `RWS::local`   | Run with modified environment         |
 
-#### F# Sequence Expressions / List Comprehensions vs lambars for_!
+#### F# Sequence Expressions / List Comprehensions vs lambars for\_!
 
 ```fsharp
 // F# - List comprehension
@@ -869,16 +869,16 @@ let evens: Vec<i32> = (1..=10).filter(|x| x % 2 == 0).collect();
 // evens = vec![2, 4, 6, 8, 10]
 ```
 
-### When to Use eff! vs for_!
+### When to Use eff! vs for\_!
 
-| Scenario | Recommended Macro | Reason |
-|----------|-------------------|--------|
-| `option { }` / `result { }` | `eff!` | Monadic chaining with short-circuit |
-| `async { }` | `eff_async!` | Async monadic chaining |
-| `[ for ... ]` / `seq { }` | `for_!` | List generation with yield |
-| Cartesian products | `for_!` | Multiple iterations |
-| State/Reader/Writer | `eff!` | Monadic effect chaining |
-| State/Reader/Writer + Async | `*_async_io` methods | Transformer async integration |
+| Scenario                    | Recommended Macro    | Reason                              |
+| --------------------------- | -------------------- | ----------------------------------- |
+| `option { }` / `result { }` | `eff!`               | Monadic chaining with short-circuit |
+| `async { }`                 | `eff_async!`         | Async monadic chaining              |
+| `[ for ... ]` / `seq { }`   | `for_!`              | List generation with yield          |
+| Cartesian products          | `for_!`              | Multiple iterations                 |
+| State/Reader/Writer         | `eff!`               | Monadic effect chaining             |
+| State/Reader/Writer + Async | `*_async_io` methods | Transformer async integration       |
 
 ### Monad Transformers with AsyncIO
 
@@ -908,6 +908,7 @@ async fn example() {
 ```
 
 Available AsyncIO methods for transformers:
+
 - `ReaderT`: `ask_async_io`, `asks_async_io`, `lift_async_io`, `pure_async_io`, `flat_map_async_io`
 - `StateT`: `get_async_io`, `gets_async_io`, `state_async_io`, `lift_async_io`, `pure_async_io`
 - `WriterT`: `tell_async_io`, `lift_async_io`, `pure_async_io`, `flat_map_async_io`, `listen_async_io`
@@ -918,12 +919,12 @@ Available AsyncIO methods for transformers:
 
 ### Comparison
 
-| F# | lambars | Description |
-|----|---------|-------------|
-| Active Pattern (complete) | `Prism` | Match enum variants |
-| Active Pattern (partial) | `Optional` | May or may not match |
-| Record field access | `Lens` | Get/set field |
-| Nested access | Composed optics | Deep access |
+| F#                        | lambars         | Description          |
+| ------------------------- | --------------- | -------------------- |
+| Active Pattern (complete) | `Prism`         | Match enum variants  |
+| Active Pattern (partial)  | `Optional`      | May or may not match |
+| Record field access       | `Lens`          | Get/set field        |
+| Nested access             | Composed optics | Deep access          |
 
 ### Code Examples
 
@@ -1046,12 +1047,12 @@ let updated = person_street.set(person, "Oak Ave".to_string());
 
 ### Comparison
 
-| F# | lambars | Description |
-|----|---------|-------------|
+| F#              | lambars                | Description          |
+| --------------- | ---------------------- | -------------------- |
 | `lazy { expr }` | `Lazy::new(\|\| expr)` | Deferred computation |
-| `Lazy.Force` | `Lazy::force` | Force evaluation |
-| `Lazy.Value` | `Lazy::force` | Access value |
-| `seq { }` | `Iterator` | Lazy sequence |
+| `Lazy.Force`    | `Lazy::force`          | Force evaluation     |
+| `Lazy.Value`    | `Lazy::force`          | Access value         |
+| `seq { }`       | `Iterator`             | Lazy sequence        |
 
 ### Code Examples
 
@@ -1110,13 +1111,13 @@ let first_ten: Vec<i32> = (0..).take(10).collect();
 
 ### Comparison
 
-| F# Concept | lambars Trait | Description |
-|------------|---------------|-------------|
-| `IComparable<'T>` | `Ord` (std) | Ordered comparison |
-| `IEquatable<'T>` | `Eq` (std) | Equality |
-| Interface with `+` | `Semigroup` | Associative combination |
-| Interface with `Zero` | `Monoid` | Identity element |
-| `IEnumerable<'T>` | `IntoIterator` (std) | Iteration |
+| F# Concept            | lambars Trait        | Description             |
+| --------------------- | -------------------- | ----------------------- |
+| `IComparable<'T>`     | `Ord` (std)          | Ordered comparison      |
+| `IEquatable<'T>`      | `Eq` (std)           | Equality                |
+| Interface with `+`    | `Semigroup`          | Associative combination |
+| Interface with `Zero` | `Monoid`             | Identity element        |
+| `IEnumerable<'T>`     | `IntoIterator` (std) | Iteration               |
 
 ### Code Examples
 
@@ -1165,29 +1166,29 @@ fn add<T: Semigroup>(a: T, b: T) -> T {
 
 ### Comparison
 
-| F# Type | lambars Type | Description |
-|---------|--------------|-------------|
-| `list<'T>` | `PersistentList<T>` | Immutable singly-linked list |
-| `Map<'K, 'V>` | `PersistentTreeMap<K, V>` | Immutable ordered map |
-| `Set<'T>` | `PersistentHashSet<T>` | Immutable set |
-| - | `PersistentVector<T>` | Immutable vector (Clojure-style) |
-| - | `PersistentHashMap<K, V>` | Immutable hash map (HAMT) |
+| F# Type       | lambars Type              | Description                      |
+| ------------- | ------------------------- | -------------------------------- |
+| `list<'T>`    | `PersistentList<T>`       | Immutable singly-linked list     |
+| `Map<'K, 'V>` | `PersistentTreeMap<K, V>` | Immutable ordered map            |
+| `Set<'T>`     | `PersistentHashSet<T>`    | Immutable set                    |
+| -             | `PersistentVector<T>`     | Immutable vector (Clojure-style) |
+| -             | `PersistentHashMap<K, V>` | Immutable hash map (HAMT)        |
 
 ### Map Operations
 
-| F# | lambars | Description |
-|---------|---------|-------------|
-| `Map.map f m` | `map_values` method | Transform values |
+| F#                       | lambars             | Description                                 |
+| ------------------------ | ------------------- | ------------------------------------------- |
+| `Map.map f m`            | `map_values` method | Transform values                            |
 | `Map.map f m` (key in f) | `map_values` method | Transform values (key available in closure) |
-| `Map.toSeq m` | `entries` method | Get all entries |
-| `Map.keys m` | `keys` method | Get all keys |
-| `Map.values m` | `values` method | Get all values |
-| `Map.fold f m1 m2` | `merge` method | Merge (right wins) |
-| - | `merge_with` method | Merge with custom resolver |
-| `Map.filter p m` | `keep_if` method | Keep matching entries |
-| - | `delete_if` method | Remove matching entries |
-| `Map.partition p m` | `partition` method | Split by predicate |
-| `Map.pick f m` | `filter_map` method | Filter and transform |
+| `Map.toSeq m`            | `entries` method    | Get all entries                             |
+| `Map.keys m`             | `keys` method       | Get all keys                                |
+| `Map.values m`           | `values` method     | Get all values                              |
+| `Map.fold f m1 m2`       | `merge` method      | Merge (right wins)                          |
+| -                        | `merge_with` method | Merge with custom resolver                  |
+| `Map.filter p m`         | `keep_if` method    | Keep matching entries                       |
+| -                        | `delete_if` method  | Remove matching entries                     |
+| `Map.partition p m`      | `partition` method  | Split by predicate                          |
+| `Map.pick f m`           | `filter_map` method | Filter and transform                        |
 
 ### Code Examples
 
@@ -1275,17 +1276,17 @@ let difference = set1.difference(&set2);      // {1}
 
 ### Syntax Differences
 
-| Aspect | F# | lambars (Rust) |
-|--------|-----|----------------|
-| Function application | `f x y` | `f(x, y)` |
-| Pipe syntax | `x \|> f` | `pipe!(x, f)` |
-| Composition | `f >> g` | `compose!(g, f)` |
-| Let binding in CE | `let! x = m` | `x <= m;` |
-| Lambda | `fun x -> x + 1` | `\|x\| x + 1` |
-| Type annotation | `x: int` | `x: i32` |
-| Generic type | `'T` | `T` |
-| Option | `Some x` / `None` | `Some(x)` / `None` |
-| Result | `Ok x` / `Error e` | `Ok(x)` / `Err(e)` |
+| Aspect               | F#                 | lambars (Rust)     |
+| -------------------- | ------------------ | ------------------ |
+| Function application | `f x y`            | `f(x, y)`          |
+| Pipe syntax          | `x \|> f`          | `pipe!(x, f)`      |
+| Composition          | `f >> g`           | `compose!(g, f)`   |
+| Let binding in CE    | `let! x = m`       | `x <= m;`          |
+| Lambda               | `fun x -> x + 1`   | `\|x\| x + 1`      |
+| Type annotation      | `x: int`           | `x: i32`           |
+| Generic type         | `'T`               | `T`                |
+| Option               | `Some x` / `None`  | `Some(x)` / `None` |
+| Result               | `Ok x` / `Error e` | `Ok(x)` / `Err(e)` |
 
 ### Conceptual Differences
 

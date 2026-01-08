@@ -1,6 +1,6 @@
 # Haskell to lambars API Comparison Guide
 
-[English](README.md) | [日本語](README.ja.md)
+[日本語](README.ja.md)
 
 This document provides a comprehensive comparison between Haskell functional programming constructs and their equivalents in lambars (Rust). Haskell is the canonical pure functional programming language, and lambars aims to bring many of its abstractions to Rust.
 
@@ -37,38 +37,38 @@ This document provides a comprehensive comparison between Haskell functional pro
 
 ## Overview
 
-| Concept | Haskell | lambars (Rust) |
-|---------|---------|----------------|
-| Functor | `Functor f` | `Functor` trait |
-| Applicative | `Applicative f` | `Applicative` trait |
-| Monad | `Monad m` | `Monad` trait |
-| Semigroup | `Semigroup a` | `Semigroup` trait |
-| Monoid | `Monoid a` | `Monoid` trait |
-| Foldable | `Foldable t` | `Foldable` trait |
-| Traversable | `Traversable t` | `Traversable` trait |
-| Maybe | `Maybe a` | `Option<A>` (std) |
-| Either | `Either e a` | `Result<A, E>` (std) |
-| Do-notation (Monad) | `do { ... }` | `eff!` macro |
-| List comprehension | `[x | x <- xs]` | `for_!` macro |
-| Async list comprehension | `do` + `async` / `ListT IO` | `for_async!` macro |
-| Function composition | `.` and `>>>` | `compose!` macro |
-| Pipe | `&` | `pipe!` macro |
-| Lens | `Control.Lens` | `Lens` trait |
-| Prism | `Control.Lens.Prism` | `Prism` trait |
-| IO | `IO a` | `IO<A>` type |
-| State | `State s a` | `State<S, A>` type |
-| Reader | `Reader r a` | `Reader<R, A>` type |
-| Writer | `Writer w a` | `Writer<W, A>` type |
-| RWS | `RWS r w s a` | `RWS<R, W, S, A>` type |
-| StateT | `StateT s m a` | `StateT<S, M, A>` type |
-| ReaderT | `ReaderT r m a` | `ReaderT<R, M, A>` type |
-| WriterT | `WriterT w m a` | `WriterT<W, M, A>` type |
-| ExceptT | `ExceptT e m a` | `ExceptT<E, M, A>` type |
-| Identity | `Identity a` | `Identity<A>` type |
-| Algebraic Effects | `Eff '[e1, e2] a` (freer-simple) | `Eff<EffCons<E1, EffCons<E2, EffNil>>, A>` |
-| Effect membership | `Member e r` | `Member<E, Index>` trait |
-| Lazy | Default (thunks) | `Lazy<A>` type |
-| Trampoline | Trampolining | `Trampoline<A>` type |
+| Concept                  | Haskell                          | lambars (Rust)                             |
+| ------------------------ | -------------------------------- | ------------------------------------------ | ------------- |
+| Functor                  | `Functor f`                      | `Functor` trait                            |
+| Applicative              | `Applicative f`                  | `Applicative` trait                        |
+| Monad                    | `Monad m`                        | `Monad` trait                              |
+| Semigroup                | `Semigroup a`                    | `Semigroup` trait                          |
+| Monoid                   | `Monoid a`                       | `Monoid` trait                             |
+| Foldable                 | `Foldable t`                     | `Foldable` trait                           |
+| Traversable              | `Traversable t`                  | `Traversable` trait                        |
+| Maybe                    | `Maybe a`                        | `Option<A>` (std)                          |
+| Either                   | `Either e a`                     | `Result<A, E>` (std)                       |
+| Do-notation (Monad)      | `do { ... }`                     | `eff!` macro                               |
+| List comprehension       | `[x                              | x <- xs]`                                  | `for_!` macro |
+| Async list comprehension | `do` + `async` / `ListT IO`      | `for_async!` macro                         |
+| Function composition     | `.` and `>>>`                    | `compose!` macro                           |
+| Pipe                     | `&`                              | `pipe!` macro                              |
+| Lens                     | `Control.Lens`                   | `Lens` trait                               |
+| Prism                    | `Control.Lens.Prism`             | `Prism` trait                              |
+| IO                       | `IO a`                           | `IO<A>` type                               |
+| State                    | `State s a`                      | `State<S, A>` type                         |
+| Reader                   | `Reader r a`                     | `Reader<R, A>` type                        |
+| Writer                   | `Writer w a`                     | `Writer<W, A>` type                        |
+| RWS                      | `RWS r w s a`                    | `RWS<R, W, S, A>` type                     |
+| StateT                   | `StateT s m a`                   | `StateT<S, M, A>` type                     |
+| ReaderT                  | `ReaderT r m a`                  | `ReaderT<R, M, A>` type                    |
+| WriterT                  | `WriterT w m a`                  | `WriterT<W, M, A>` type                    |
+| ExceptT                  | `ExceptT e m a`                  | `ExceptT<E, M, A>` type                    |
+| Identity                 | `Identity a`                     | `Identity<A>` type                         |
+| Algebraic Effects        | `Eff '[e1, e2] a` (freer-simple) | `Eff<EffCons<E1, EffCons<E2, EffNil>>, A>` |
+| Effect membership        | `Member e r`                     | `Member<E, Index>` trait                   |
+| Lazy                     | Default (thunks)                 | `Lazy<A>` type                             |
+| Trampoline               | Trampolining                     | `Trampoline<A>` type                       |
 
 ---
 
@@ -76,13 +76,13 @@ This document provides a comprehensive comparison between Haskell functional pro
 
 ### Functor
 
-| Haskell | lambars | Description |
-|---------|---------|-------------|
-| `fmap f fa` | `Functor::fmap` | Map function over functor |
-| `f <$> fa` | `fa.fmap(f)` | Infix fmap |
-| `fa $> b` | `fa.fmap(\|_\| b)` | Replace with constant |
-| `void fa` | `fa.fmap(\|_\| ())` | Discard value |
-| `fa <$ b` | `fa.fmap(\|_\| b)` | Replace keeping structure |
+| Haskell     | lambars             | Description               |
+| ----------- | ------------------- | ------------------------- |
+| `fmap f fa` | `Functor::fmap`     | Map function over functor |
+| `f <$> fa`  | `fa.fmap(f)`        | Infix fmap                |
+| `fa $> b`   | `fa.fmap(\|_\| b)`  | Replace with constant     |
+| `void fa`   | `fa.fmap(\|_\| ())` | Discard value             |
+| `fa <$ b`   | `fa.fmap(\|_\| b)`  | Replace keeping structure |
 
 #### Functor Laws
 
@@ -135,15 +135,15 @@ let replaced: Option<String> = Some(42).fmap(|_| "hello".to_string());
 
 ### Applicative
 
-| Haskell | lambars | Description |
-|---------|---------|-------------|
-| `pure a` | `Applicative::pure` | Lift value into context |
-| `ff <*> fa` | `Applicative::apply` | Apply wrapped function |
-| `liftA2 f fa fb` | `Applicative::map2` | Lift binary function |
-| `liftA3 f fa fb fc` | `Applicative::map3` | Lift ternary function |
-| `fa *> fb` | `fa.map2(fb, \|_, b\| b)` | Sequence, keep right |
-| `fa <* fb` | `fa.map2(fb, \|a, _\| a)` | Sequence, keep left |
-| `(,) <$> fa <*> fb` | `Applicative::product` | Pair values |
+| Haskell             | lambars                   | Description             |
+| ------------------- | ------------------------- | ----------------------- |
+| `pure a`            | `Applicative::pure`       | Lift value into context |
+| `ff <*> fa`         | `Applicative::apply`      | Apply wrapped function  |
+| `liftA2 f fa fb`    | `Applicative::map2`       | Lift binary function    |
+| `liftA3 f fa fb fc` | `Applicative::map3`       | Lift ternary function   |
+| `fa *> fb`          | `fa.map2(fb, \|_, b\| b)` | Sequence, keep right    |
+| `fa <* fb`          | `fa.map2(fb, \|a, _\| a)` | Sequence, keep left     |
+| `(,) <$> fa <*> fb` | `Applicative::product`    | Pair values             |
 
 #### Applicative Laws
 
@@ -216,15 +216,15 @@ let sequence_right: Option<i32> = Some(10).map2(Some(20), |_, b| b);
 
 ### Monad
 
-| Haskell | lambars | Description |
-|---------|---------|-------------|
-| `return a` | `Monad::pure` (via Applicative) | Lift into monad |
-| `ma >>= f` | `Monad::flat_map` | Bind operation |
-| `ma >> mb` | `Monad::then` | Sequence, keep right |
-| `join mma` | `Flatten::flatten` / `Option::flatten` (std) | Flatten nested monad |
-| `ma =<< f` | `f(ma.run())` | Reversed bind |
-| `>=>` (Kleisli) | Manual composition | Compose monadic functions |
-| `<=<` (Kleisli) | Manual composition | Reverse Kleisli composition |
+| Haskell         | lambars                                      | Description                 |
+| --------------- | -------------------------------------------- | --------------------------- |
+| `return a`      | `Monad::pure` (via Applicative)              | Lift into monad             |
+| `ma >>= f`      | `Monad::flat_map`                            | Bind operation              |
+| `ma >> mb`      | `Monad::then`                                | Sequence, keep right        |
+| `join mma`      | `Flatten::flatten` / `Option::flatten` (std) | Flatten nested monad        |
+| `ma =<< f`      | `f(ma.run())`                                | Reversed bind               |
+| `>=>` (Kleisli) | Manual composition                           | Compose monadic functions   |
+| `<=<` (Kleisli) | Manual composition                           | Reverse Kleisli composition |
 
 #### Monad Laws
 
@@ -332,18 +332,18 @@ fn safe_sqrt_log(x: f64) -> Option<f64> {
 
 ### Semigroup and Monoid
 
-| Haskell | lambars | Description |
-|---------|---------|-------------|
-| `a <> b` | `Semigroup::combine` | Combine two values |
-| `sconcat` | `Semigroup::combine` (folded) | Combine non-empty list |
-| `mempty` | `Monoid::empty` | Identity element |
-| `mconcat` | `Monoid::combine_all` | Fold list with mappend |
-| `mappend` | `Semigroup::combine` | Same as `<>` |
-| `Sum`, `Product` | `Sum`, `Product` | Numeric wrappers |
-| `Min`, `Max` | `Min`, `Max` | Bounded wrappers |
-| `First`, `Last` | Custom implementation | First/Last non-Nothing |
-| `Endo` | Custom implementation | Endomorphism monoid |
-| `Dual` | Custom implementation | Reversed monoid |
+| Haskell          | lambars                       | Description            |
+| ---------------- | ----------------------------- | ---------------------- |
+| `a <> b`         | `Semigroup::combine`          | Combine two values     |
+| `sconcat`        | `Semigroup::combine` (folded) | Combine non-empty list |
+| `mempty`         | `Monoid::empty`               | Identity element       |
+| `mconcat`        | `Monoid::combine_all`         | Fold list with mappend |
+| `mappend`        | `Semigroup::combine`          | Same as `<>`           |
+| `Sum`, `Product` | `Sum`, `Product`              | Numeric wrappers       |
+| `Min`, `Max`     | `Min`, `Max`                  | Bounded wrappers       |
+| `First`, `Last`  | Custom implementation         | First/Last non-Nothing |
+| `Endo`           | Custom implementation         | Endomorphism monoid    |
+| `Dual`           | Custom implementation         | Reversed monoid        |
 
 #### Semigroup/Monoid Laws
 
@@ -429,23 +429,23 @@ let maybe_result: Option<String> = Some("Hello".to_string())
 
 ### Foldable
 
-| Haskell | lambars | Description |
-|---------|---------|-------------|
-| `foldl f z t` | `Foldable::fold_left` | Left fold |
-| `foldr f z t` | `Foldable::fold_right` | Right fold |
-| `foldMap f t` | `Foldable::fold_map` | Map then fold |
-| `fold t` | `Foldable::fold` | Fold with Monoid |
-| `length t` | `Foldable::length` | Count elements |
-| `null t` | `Foldable::is_empty` | Check empty |
-| `elem x t` | Manual implementation | Element membership |
-| `find p t` | `Foldable::find` | Find first matching |
-| `any p t` | `Foldable::exists` | Any element matches |
-| `all p t` | `Foldable::for_all` | All elements match |
-| `toList t` | `Foldable::to_vec` | Convert to list |
-| `sum t` | `fold_left(0, \|a,b\| a+b)` | Sum elements |
-| `product t` | `fold_left(1, \|a,b\| a*b)` | Product of elements |
-| `maximum t` | `fold_left` with max | Maximum element |
-| `minimum t` | `fold_left` with min | Minimum element |
+| Haskell       | lambars                     | Description         |
+| ------------- | --------------------------- | ------------------- |
+| `foldl f z t` | `Foldable::fold_left`       | Left fold           |
+| `foldr f z t` | `Foldable::fold_right`      | Right fold          |
+| `foldMap f t` | `Foldable::fold_map`        | Map then fold       |
+| `fold t`      | `Foldable::fold`            | Fold with Monoid    |
+| `length t`    | `Foldable::length`          | Count elements      |
+| `null t`      | `Foldable::is_empty`        | Check empty         |
+| `elem x t`    | Manual implementation       | Element membership  |
+| `find p t`    | `Foldable::find`            | Find first matching |
+| `any p t`     | `Foldable::exists`          | Any element matches |
+| `all p t`     | `Foldable::for_all`         | All elements match  |
+| `toList t`    | `Foldable::to_vec`          | Convert to list     |
+| `sum t`       | `fold_left(0, \|a,b\| a+b)` | Sum elements        |
+| `product t`   | `fold_left(1, \|a,b\| a*b)` | Product of elements |
+| `maximum t`   | `fold_left` with max        | Maximum element     |
+| `minimum t`   | `fold_left` with min        | Minimum element     |
 
 #### Code Examples
 
@@ -529,28 +529,28 @@ let is_empty: bool = Vec::<i32>::new().is_empty();
 
 ### Traversable
 
-| Haskell | lambars | Description |
-|---------|---------|-------------|
-| `traverse f t` | `Traversable::traverse_option/result` | Traverse with effect |
-| `sequenceA t` | `Traversable::sequence_option/result` | Sequence effects |
-| `for t f` | `traverse` with flipped args | Traverse (args flipped) |
-| `mapM f t` | `traverse_option/result` | Same as traverse (for Monad) |
-| `sequence t` | `sequence_option/result` | Same as sequenceA (for Monad) |
-| `forM t f` | `traverse` flipped | Same as for (for Monad) |
-| `traverse @(Reader r)` | `Traversable::traverse_reader` | Traverse with Reader effect |
-| `traverse @(State s)` | `Traversable::traverse_state` | Traverse with State effect |
-| `traverse @IO` | `Traversable::traverse_io` | Traverse with IO effect |
-| `traverse @(Async IO)` | `Traversable::traverse_async_io` | Traverse with AsyncIO effect |
-| `sequence @(Reader r)` | `Traversable::sequence_reader` | Sequence Reader effects |
-| `sequence @(State s)` | `Traversable::sequence_state` | Sequence State effects |
-| `sequence @IO` | `Traversable::sequence_io` | Sequence IO effects |
-| `sequence @(Async IO)` | `Traversable::sequence_async_io` | Sequence AsyncIO effects |
-| `traverse_ @(Reader r)` | `Traversable::traverse_reader_` | Traverse Reader, discard result |
-| `traverse_ @(State s)` | `Traversable::traverse_state_` | Traverse State, discard result |
-| `traverse_ @IO` | `Traversable::traverse_io_` | Traverse IO, discard result |
-| `for_ @(Reader r)` | `Traversable::for_each_reader` | Alias for traverse_reader_ |
-| `for_ @(State s)` | `Traversable::for_each_state` | Alias for traverse_state_ |
-| `for_ @IO` | `Traversable::for_each_io` | Alias for traverse_io_ |
+| Haskell                 | lambars                               | Description                     |
+| ----------------------- | ------------------------------------- | ------------------------------- |
+| `traverse f t`          | `Traversable::traverse_option/result` | Traverse with effect            |
+| `sequenceA t`           | `Traversable::sequence_option/result` | Sequence effects                |
+| `for t f`               | `traverse` with flipped args          | Traverse (args flipped)         |
+| `mapM f t`              | `traverse_option/result`              | Same as traverse (for Monad)    |
+| `sequence t`            | `sequence_option/result`              | Same as sequenceA (for Monad)   |
+| `forM t f`              | `traverse` flipped                    | Same as for (for Monad)         |
+| `traverse @(Reader r)`  | `Traversable::traverse_reader`        | Traverse with Reader effect     |
+| `traverse @(State s)`   | `Traversable::traverse_state`         | Traverse with State effect      |
+| `traverse @IO`          | `Traversable::traverse_io`            | Traverse with IO effect         |
+| `traverse @(Async IO)`  | `Traversable::traverse_async_io`      | Traverse with AsyncIO effect    |
+| `sequence @(Reader r)`  | `Traversable::sequence_reader`        | Sequence Reader effects         |
+| `sequence @(State s)`   | `Traversable::sequence_state`         | Sequence State effects          |
+| `sequence @IO`          | `Traversable::sequence_io`            | Sequence IO effects             |
+| `sequence @(Async IO)`  | `Traversable::sequence_async_io`      | Sequence AsyncIO effects        |
+| `traverse_ @(Reader r)` | `Traversable::traverse_reader_`       | Traverse Reader, discard result |
+| `traverse_ @(State s)`  | `Traversable::traverse_state_`        | Traverse State, discard result  |
+| `traverse_ @IO`         | `Traversable::traverse_io_`           | Traverse IO, discard result     |
+| `for_ @(Reader r)`      | `Traversable::for_each_reader`        | Alias for traverse*reader*      |
+| `for_ @(State s)`       | `Traversable::for_each_state`         | Alias for traverse*state*       |
+| `for_ @IO`              | `Traversable::for_each_io`            | Alias for traverse*io*          |
 
 #### Traversable Laws
 
@@ -688,42 +688,42 @@ let contents = io.run_unsafe();
 
 ### Maybe / Option
 
-| Haskell | lambars / Rust std | Description |
-|---------|-------------------|-------------|
-| `Just x` | `Some(x)` | Construct Just/Some |
-| `Nothing` | `None` | Construct Nothing/None |
-| `fmap f ma` | `Functor::fmap` | Map over Maybe |
-| `ma >>= f` | `Monad::flat_map` | Bind |
-| `fromMaybe d ma` | `Option::unwrap_or` | Default value |
-| `maybe d f ma` | `Option::map_or` | Fold Maybe |
-| `isJust ma` | `Option::is_some` | Test for Just |
-| `isNothing ma` | `Option::is_none` | Test for Nothing |
-| `fromJust ma` | `Option::unwrap` | Extract (unsafe) |
-| `listToMaybe xs` | `xs.first()` | First element |
-| `maybeToList ma` | `Option::into_iter` | To list |
-| `catMaybes xs` | `Iterator::flatten` | Filter Nothings |
-| `mapMaybe f xs` | `Iterator::filter_map` | Map and filter |
-| `ma <\|> mb` | `Option::or` | Alternative |
-| `guard cond` | `if cond { Some(()) } else { None }` | Guard in monad |
+| Haskell          | lambars / Rust std                   | Description            |
+| ---------------- | ------------------------------------ | ---------------------- |
+| `Just x`         | `Some(x)`                            | Construct Just/Some    |
+| `Nothing`        | `None`                               | Construct Nothing/None |
+| `fmap f ma`      | `Functor::fmap`                      | Map over Maybe         |
+| `ma >>= f`       | `Monad::flat_map`                    | Bind                   |
+| `fromMaybe d ma` | `Option::unwrap_or`                  | Default value          |
+| `maybe d f ma`   | `Option::map_or`                     | Fold Maybe             |
+| `isJust ma`      | `Option::is_some`                    | Test for Just          |
+| `isNothing ma`   | `Option::is_none`                    | Test for Nothing       |
+| `fromJust ma`    | `Option::unwrap`                     | Extract (unsafe)       |
+| `listToMaybe xs` | `xs.first()`                         | First element          |
+| `maybeToList ma` | `Option::into_iter`                  | To list                |
+| `catMaybes xs`   | `Iterator::flatten`                  | Filter Nothings        |
+| `mapMaybe f xs`  | `Iterator::filter_map`               | Map and filter         |
+| `ma <\|> mb`     | `Option::or`                         | Alternative            |
+| `guard cond`     | `if cond { Some(()) } else { None }` | Guard in monad         |
 
 ### Either / Result
 
-| Haskell | lambars / Rust std | Description |
-|---------|-------------------|-------------|
-| `Right x` | `Ok(x)` | Construct Right/Ok |
-| `Left e` | `Err(e)` | Construct Left/Err |
-| `fmap f ea` | `Functor::fmap` / `Result::map` | Map over Right |
-| `first f ea` | `Result::map_err` | Map over Left |
-| `bimap f g ea` | Manual | Map both sides |
-| `ea >>= f` | `Monad::flat_map` | Bind |
-| `either f g ea` | `Result::map_or_else` | Fold Either |
-| `isRight ea` | `Result::is_ok` | Test for Right |
-| `isLeft ea` | `Result::is_err` | Test for Left |
-| `fromRight d ea` | `Result::unwrap_or` | Default for Right |
-| `fromLeft d ea` | `Result::err().unwrap_or` | Default for Left |
-| `rights xs` | `Iterator::filter_map(\|r\| r.ok())` | Filter Rights |
-| `lefts xs` | `Iterator::filter_map(\|r\| r.err())` | Filter Lefts |
-| `partitionEithers` | Manual | Split into two lists |
+| Haskell            | lambars / Rust std                    | Description          |
+| ------------------ | ------------------------------------- | -------------------- |
+| `Right x`          | `Ok(x)`                               | Construct Right/Ok   |
+| `Left e`           | `Err(e)`                              | Construct Left/Err   |
+| `fmap f ea`        | `Functor::fmap` / `Result::map`       | Map over Right       |
+| `first f ea`       | `Result::map_err`                     | Map over Left        |
+| `bimap f g ea`     | Manual                                | Map both sides       |
+| `ea >>= f`         | `Monad::flat_map`                     | Bind                 |
+| `either f g ea`    | `Result::map_or_else`                 | Fold Either          |
+| `isRight ea`       | `Result::is_ok`                       | Test for Right       |
+| `isLeft ea`        | `Result::is_err`                      | Test for Left        |
+| `fromRight d ea`   | `Result::unwrap_or`                   | Default for Right    |
+| `fromLeft d ea`    | `Result::err().unwrap_or`             | Default for Left     |
+| `rights xs`        | `Iterator::filter_map(\|r\| r.ok())`  | Filter Rights        |
+| `lefts xs`         | `Iterator::filter_map(\|r\| r.err())` | Filter Lefts         |
+| `partitionEithers` | Manual                                | Split into two lists |
 
 #### Code Examples
 
@@ -787,22 +787,22 @@ let bi_mapped: Result<String, usize> = result
 
 lambars provides two macros that correspond to Haskell's do-notation and list comprehensions:
 
-| Use Case | Haskell | lambars | Description |
-|----------|---------|---------|-------------|
-| Monad binding | `do { x <- mx; ... }` | `eff!` macro | Single execution, FnOnce-based |
-| List comprehension | `[f x | x <- xs]` | `for_!` macro | Multiple execution, FnMut-based |
+| Use Case           | Haskell               | lambars      | Description                    |
+| ------------------ | --------------------- | ------------ | ------------------------------ | ------------------------------- |
+| Monad binding      | `do { x <- mx; ... }` | `eff!` macro | Single execution, FnOnce-based |
+| List comprehension | `[f x                 | x <- xs]`    | `for_!` macro                  | Multiple execution, FnMut-based |
 
 ### eff! Macro (Do-Notation for Monads)
 
 #### Syntax Comparison
 
-| Haskell | lambars | Description |
-|---------|---------|-------------|
-| `do { x <- mx; ... }` | `eff! { x <= mx; ... }` | Bind |
-| `let x = expr` | `let x = expr;` | Pure binding |
-| `pure x` | `Some(x)` / `Ok(x)` / etc. | Return value |
-| `mx >> my` | `_ <= mx; my` | Sequence (discard) |
-| Guard (MonadPlus) | `_ <= guard(cond);` | Guard |
+| Haskell               | lambars                    | Description        |
+| --------------------- | -------------------------- | ------------------ |
+| `do { x <- mx; ... }` | `eff! { x <= mx; ... }`    | Bind               |
+| `let x = expr`        | `let x = expr;`            | Pure binding       |
+| `pure x`              | `Some(x)` / `Ok(x)` / etc. | Return value       |
+| `mx >> my`            | `_ <= mx; my`              | Sequence (discard) |
+| Guard (MonadPlus)     | `_ <= guard(cond);`        | Guard              |
 
 ### Code Examples
 
@@ -938,18 +938,18 @@ fn get_user_orders(uid: i32) -> Option<(User, Vec<Order>)> {
 }
 ```
 
-### for_! Macro (List Comprehensions)
+### for\_! Macro (List Comprehensions)
 
 For Haskell list comprehensions, use the `for_!` macro with `yield`:
 
 #### Syntax Comparison
 
-| Haskell | lambars | Description |
-|---------|---------|-------------|
-| `[f x \| x <- xs]` | `for_! { x <= xs; yield f(x) }` | Basic comprehension |
-| `[x + y \| x <- xs, y <- ys]` | `for_! { x <= xs; y <= ys.clone(); yield x + y }` | Nested |
-| `[x \| x <- xs, p x]` | `xs.into_iter().filter(p).collect()` | Filter (use std) |
-| `let y = expr` | `let y = expr;` | Pure binding |
+| Haskell                       | lambars                                           | Description         |
+| ----------------------------- | ------------------------------------------------- | ------------------- |
+| `[f x \| x <- xs]`            | `for_! { x <= xs; yield f(x) }`                   | Basic comprehension |
+| `[x + y \| x <- xs, y <- ys]` | `for_! { x <= xs; y <= ys.clone(); yield x + y }` | Nested              |
+| `[x \| x <- xs, p x]`         | `xs.into_iter().filter(p).collect()`              | Filter (use std)    |
+| `let y = expr`                | `let y = expr;`                                   | Pure binding        |
 
 **Important**: In `for_!`, inner collections need `.clone()` due to Rust's ownership rules.
 
@@ -1015,31 +1015,31 @@ let triples: Vec<(i32, i32, i32)> = for_! {
 
 ### When to Use Each Macro
 
-| Scenario | Recommended Macro | Reason |
-|----------|-------------------|--------|
-| Maybe/Either chaining | `eff!` | Short-circuits on Nothing/Left |
-| IO/State/Reader/Writer | `eff!` | Designed for FnOnce monads |
-| List generation | `for_!` | Supports multiple iterations with yield |
-| Cartesian products | `for_!` | Nested iteration |
-| Database-style queries | `eff!` | Monadic error handling |
-| Async list generation | `for_async!` | Async iteration with yield |
-| Async operations in loops | `for_async!` | Uses `<~` for AsyncIO binding |
+| Scenario                  | Recommended Macro | Reason                                  |
+| ------------------------- | ----------------- | --------------------------------------- |
+| Maybe/Either chaining     | `eff!`            | Short-circuits on Nothing/Left          |
+| IO/State/Reader/Writer    | `eff!`            | Designed for FnOnce monads              |
+| List generation           | `for_!`           | Supports multiple iterations with yield |
+| Cartesian products        | `for_!`           | Nested iteration                        |
+| Database-style queries    | `eff!`            | Monadic error handling                  |
+| Async list generation     | `for_async!`      | Async iteration with yield              |
+| Async operations in loops | `for_async!`      | Uses `<~` for AsyncIO binding           |
 
 ---
 
 ## Function Composition
 
-| Haskell | lambars | Description |
-|---------|---------|-------------|
-| `f . g` | `compose!(f, g)` | Right-to-left composition |
-| `f >>> g` (Control.Arrow) | `compose!(g, f)` | Left-to-right composition |
-| `f <<< g` (Control.Arrow) | `compose!(f, g)` | Same as `.` |
-| `x & f` | `pipe!(x, f)` | Pipe operator |
-| `f $ x` | `f(x)` | Function application |
-| `flip f` | `flip(f)` | Flip arguments |
-| `const x` | `constant(x)` | Constant function |
-| `id` | `identity` | Identity function |
-| `on` | Manual implementation | Binary function on projection |
+| Haskell                   | lambars               | Description                   |
+| ------------------------- | --------------------- | ----------------------------- |
+| `f . g`                   | `compose!(f, g)`      | Right-to-left composition     |
+| `f >>> g` (Control.Arrow) | `compose!(g, f)`      | Left-to-right composition     |
+| `f <<< g` (Control.Arrow) | `compose!(f, g)`      | Same as `.`                   |
+| `x & f`                   | `pipe!(x, f)`         | Pipe operator                 |
+| `f $ x`                   | `f(x)`                | Function application          |
+| `flip f`                  | `flip(f)`             | Flip arguments                |
+| `const x`                 | `constant(x)`         | Constant function             |
+| `id`                      | `identity`            | Identity function             |
+| `on`                      | Manual implementation | Binary function on projection |
 
 ### Code Examples
 
@@ -1128,12 +1128,12 @@ let x = identity(42);
 
 ## Currying and Partial Application
 
-| Haskell | lambars | Description |
-|---------|---------|-------------|
-| Auto-curried | `curry!(fn, arity)` or `curry!(\|args...\| body)` | Explicit currying |
-| Partial application | `partial!` | Partial application |
-| Sections `(+1)`, `(1+)` | Closures | Operator sections |
-| `uncurry f` | `\|(a, b)\| f(a, b)` | Uncurry |
+| Haskell                 | lambars                                           | Description         |
+| ----------------------- | ------------------------------------------------- | ------------------- |
+| Auto-curried            | `curry!(fn, arity)` or `curry!(\|args...\| body)` | Explicit currying   |
+| Partial application     | `partial!`                                        | Partial application |
+| Sections `(+1)`, `(1+)` | Closures                                          | Operator sections   |
+| `uncurry f`             | `\|(a, b)\| f(a, b)`                              | Uncurry             |
 
 ### Code Examples
 
@@ -1219,18 +1219,18 @@ let result = add_tuple((3, 5));
 
 ## Lazy Evaluation
 
-| Haskell | lambars | Description |
-|---------|---------|-------------|
-| Default lazy | `Lazy::new` | Explicit lazy |
-| `seq a b` | `Lazy::force` | Force evaluation |
-| Bang patterns `!x` | Rust is strict | Strict patterns |
-| `$!` (strict apply) | Normal application | Strict application |
-| Infinite lists | `Iterator` | Lazy sequences |
-| `take n xs` | `Iterator::take` | Take n elements |
-| `drop n xs` | `Iterator::skip` | Skip n elements |
-| `iterate f x` | `std::iter::successors` | Iterate function |
-| `repeat x` | `std::iter::repeat` | Infinite repeat |
-| `cycle xs` | `Iterator::cycle` | Cycle list |
+| Haskell             | lambars                 | Description        |
+| ------------------- | ----------------------- | ------------------ |
+| Default lazy        | `Lazy::new`             | Explicit lazy      |
+| `seq a b`           | `Lazy::force`           | Force evaluation   |
+| Bang patterns `!x`  | Rust is strict          | Strict patterns    |
+| `$!` (strict apply) | Normal application      | Strict application |
+| Infinite lists      | `Iterator`              | Lazy sequences     |
+| `take n xs`         | `Iterator::take`        | Take n elements    |
+| `drop n xs`         | `Iterator::skip`        | Skip n elements    |
+| `iterate f x`       | `std::iter::successors` | Iterate function   |
+| `repeat x`          | `std::iter::repeat`     | Infinite repeat    |
+| `cycle xs`          | `Iterator::cycle`       | Cycle list         |
 
 ### Code Examples
 
@@ -1307,43 +1307,43 @@ let cycled: Vec<i32> = vec![1, 2, 3].into_iter().cycle().take(7).collect();
 
 ### Lens
 
-| Haskell (lens) | lambars | Description |
-|----------------|---------|-------------|
-| `makeLenses ''Type` | `lens!(Type, field)` | Generate lenses |
-| `view l s` / `s ^. l` | `Lens::get` | Get focused value |
-| `set l a s` / `s & l .~ a` | `Lens::set` | Set value |
-| `over l f s` / `s & l %~ f` | `Lens::modify` | Modify value |
-| `l1 . l2` | `Lens::compose` | Compose lenses |
-| `_1`, `_2` | `lens!((A,B), 0)` | Tuple lenses |
+| Haskell (lens)              | lambars              | Description       |
+| --------------------------- | -------------------- | ----------------- |
+| `makeLenses ''Type`         | `lens!(Type, field)` | Generate lenses   |
+| `view l s` / `s ^. l`       | `Lens::get`          | Get focused value |
+| `set l a s` / `s & l .~ a`  | `Lens::set`          | Set value         |
+| `over l f s` / `s & l %~ f` | `Lens::modify`       | Modify value      |
+| `l1 . l2`                   | `Lens::compose`      | Compose lenses    |
+| `_1`, `_2`                  | `lens!((A,B), 0)`    | Tuple lenses      |
 
 ### Prism
 
-| Haskell (lens) | lambars | Description |
-|----------------|---------|-------------|
-| `makePrisms ''Type` | `prism!(Type, Variant)` | Generate prisms |
-| `preview p s` / `s ^? p` | `Prism::preview` | Get if matches |
-| `review p a` / `p # a` | `Prism::review` | Construct from value |
-| `over p f s` / `s & p %~ f` | `Prism::modify` | Modify if matches |
-| `_Just`, `_Nothing` | `prism!(Option, Some)` | Maybe prisms |
-| `_Left`, `_Right` | `prism!(Result, Ok)` | Either prisms |
+| Haskell (lens)              | lambars                 | Description          |
+| --------------------------- | ----------------------- | -------------------- |
+| `makePrisms ''Type`         | `prism!(Type, Variant)` | Generate prisms      |
+| `preview p s` / `s ^? p`    | `Prism::preview`        | Get if matches       |
+| `review p a` / `p # a`      | `Prism::review`         | Construct from value |
+| `over p f s` / `s & p %~ f` | `Prism::modify`         | Modify if matches    |
+| `_Just`, `_Nothing`         | `prism!(Option, Some)`  | Maybe prisms         |
+| `_Left`, `_Right`           | `prism!(Result, Ok)`    | Either prisms        |
 
 ### Iso
 
-| Haskell (lens) | lambars | Description |
-|----------------|---------|-------------|
-| `iso f g` | `FunctionIso::new` | Create isomorphism |
-| `view i s` | `Iso::get` | Forward conversion |
-| `review i a` | `Iso::reverse_get` | Backward conversion |
-| `from i` | `Iso::reverse` | Flip direction |
+| Haskell (lens) | lambars            | Description         |
+| -------------- | ------------------ | ------------------- |
+| `iso f g`      | `FunctionIso::new` | Create isomorphism  |
+| `view i s`     | `Iso::get`         | Forward conversion  |
+| `review i a`   | `Iso::reverse_get` | Backward conversion |
+| `from i`       | `Iso::reverse`     | Flip direction      |
 
 ### Traversal
 
-| Haskell (lens) | lambars | Description |
-|----------------|---------|-------------|
-| `traversed` | `VecTraversal::new` | List traversal |
-| `toListOf t s` | `Traversal::get_all` | Get all targets |
-| `over t f s` | `Traversal::modify` | Modify all targets |
-| `each` | `VecTraversal` | Each element |
+| Haskell (lens) | lambars              | Description        |
+| -------------- | -------------------- | ------------------ |
+| `traversed`    | `VecTraversal::new`  | List traversal     |
+| `toListOf t s` | `Traversal::get_all` | Get all targets    |
+| `over t f s`   | `Traversal::modify`  | Modify all targets |
+| `each`         | `VecTraversal`       | Each element       |
 
 ### Code Examples
 
@@ -1472,16 +1472,16 @@ let constructed: Shape = circle_prism.review(10.0);
 
 ### IO Monad
 
-| Haskell | lambars | Description |
-|---------|---------|-------------|
-| `pure a` / `return a` | `IO::pure` | Pure value in IO |
-| `IO action` | `IO::new` | Create IO action |
-| `io >>= f` | `IO::flat_map` | Bind IO actions |
-| `io >> io2` | `IO::then` | Sequence |
-| `putStrLn s` | `IO::print_line` | Print line |
-| `getLine` | `IO::read_line` | Read line |
-| `threadDelay n` | `IO::delay` | Delay execution |
-| `catch io handler` | `IO::catch` | Handle exceptions |
+| Haskell               | lambars          | Description       |
+| --------------------- | ---------------- | ----------------- |
+| `pure a` / `return a` | `IO::pure`       | Pure value in IO  |
+| `IO action`           | `IO::new`        | Create IO action  |
+| `io >>= f`            | `IO::flat_map`   | Bind IO actions   |
+| `io >> io2`           | `IO::then`       | Sequence          |
+| `putStrLn s`          | `IO::print_line` | Print line        |
+| `getLine`             | `IO::read_line`  | Read line         |
+| `threadDelay n`       | `IO::delay`      | Delay execution   |
+| `catch io handler`    | `IO::catch`      | Handle exceptions |
 
 #### Code Examples
 
@@ -1544,17 +1544,17 @@ print_io.run_unsafe();  // Prints "Hello, World!"
 
 ### State Monad
 
-| Haskell | lambars | Description |
-|---------|---------|-------------|
-| `pure a` / `return a` | `State::pure` | Pure value |
-| `get` | `State::get` | Get state |
-| `put s` | `State::put` | Set state |
-| `modify f` | `State::modify` | Modify state |
-| `gets f` | `State::gets` | Get derived value |
-| `runState m s` | `State::run` | Run with initial state |
-| `evalState m s` | `State::eval` | Get result only |
-| `execState m s` | `State::exec` | Get final state only |
-| `state f` | `State::from_transition` | Create from function |
+| Haskell               | lambars                  | Description            |
+| --------------------- | ------------------------ | ---------------------- |
+| `pure a` / `return a` | `State::pure`            | Pure value             |
+| `get`                 | `State::get`             | Get state              |
+| `put s`               | `State::put`             | Set state              |
+| `modify f`            | `State::modify`          | Modify state           |
+| `gets f`              | `State::gets`            | Get derived value      |
+| `runState m s`        | `State::run`             | Run with initial state |
+| `evalState m s`       | `State::eval`            | Get result only        |
+| `execState m s`       | `State::exec`            | Get final state only   |
+| `state f`             | `State::from_transition` | Create from function   |
 
 #### Code Examples
 
@@ -1619,13 +1619,13 @@ let (result, final_state) = computation.run(0);
 
 ### Reader Monad
 
-| Haskell | lambars | Description |
-|---------|---------|-------------|
-| `pure a` / `return a` | `Reader::pure` | Pure value |
-| `ask` | `Reader::ask` | Get environment |
-| `asks f` | `Reader::asks` | Get derived value |
-| `local f m` | `Reader::local` | Modify environment |
-| `runReader m r` | `Reader::run` | Run with environment |
+| Haskell               | lambars         | Description          |
+| --------------------- | --------------- | -------------------- |
+| `pure a` / `return a` | `Reader::pure`  | Pure value           |
+| `ask`                 | `Reader::ask`   | Get environment      |
+| `asks f`              | `Reader::asks`  | Get derived value    |
+| `local f m`           | `Reader::local` | Modify environment   |
+| `runReader m r`       | `Reader::run`   | Run with environment |
 
 #### Code Examples
 
@@ -1695,15 +1695,15 @@ let result = get_url().run(Config {
 
 ### Writer Monad
 
-| Haskell | lambars | Description |
-|---------|---------|-------------|
-| `pure a` / `return a` | `Writer::pure` | Pure value |
-| `tell w` | `Writer::tell` | Log output |
-| `listen m` | `Writer::listen` | Access log in computation |
-| `pass m` | `Writer::pass` | Transform log |
-| `censor f m` | `Writer::censor` | Censor log |
-| `runWriter m` | `Writer::run` | Get (result, log) |
-| `execWriter m` | `Writer::exec` | Get log only |
+| Haskell               | lambars          | Description               |
+| --------------------- | ---------------- | ------------------------- |
+| `pure a` / `return a` | `Writer::pure`   | Pure value                |
+| `tell w`              | `Writer::tell`   | Log output                |
+| `listen m`            | `Writer::listen` | Access log in computation |
+| `pass m`              | `Writer::pass`   | Transform log             |
+| `censor f m`          | `Writer::censor` | Censor log                |
+| `runWriter m`         | `Writer::run`    | Get (result, log)         |
+| `execWriter m`        | `Writer::exec`   | Get log only              |
 
 #### Code Examples
 
@@ -1758,25 +1758,25 @@ let (result, log) = computation.run();
 
 ### RWS Monad
 
-| Haskell | lambars | Description |
-|---------|---------|-------------|
-| `RWS r w s a` | `RWS<R, W, S, A>` | Combined Reader + Writer + State |
-| `rws f` | `RWS::new` | Create from function |
-| `runRWS m r s` | `RWS::run` | Run with environment and state |
-| `evalRWS m r s` | `RWS::eval` | Get (result, output) only |
-| `execRWS m r s` | `RWS::exec` | Get (state, output) only |
-| `mapRWS f m` | `RWS::map_rws` | Transform (result, state, output) |
-| `withRWS f m` | `RWS::with_rws` | Transform (environment, state) input |
-| `ask` | `RWS::ask` | Get environment |
-| `asks f` | `RWS::asks` | Project from environment |
-| `local f m` | `RWS::local` | Modify environment locally |
-| `tell w` | `RWS::tell` | Add output |
-| `listen m` | `RWS::listen` | Capture output |
-| `censor f m` | `RWS::censor` | Transform output |
-| `get` | `RWS::get` | Get state |
-| `put s` | `RWS::put` | Set state |
-| `modify f` | `RWS::modify` | Modify state |
-| `gets f` | `RWS::gets` | Project from state |
+| Haskell         | lambars           | Description                          |
+| --------------- | ----------------- | ------------------------------------ |
+| `RWS r w s a`   | `RWS<R, W, S, A>` | Combined Reader + Writer + State     |
+| `rws f`         | `RWS::new`        | Create from function                 |
+| `runRWS m r s`  | `RWS::run`        | Run with environment and state       |
+| `evalRWS m r s` | `RWS::eval`       | Get (result, output) only            |
+| `execRWS m r s` | `RWS::exec`       | Get (state, output) only             |
+| `mapRWS f m`    | `RWS::map_rws`    | Transform (result, state, output)    |
+| `withRWS f m`   | `RWS::with_rws`   | Transform (environment, state) input |
+| `ask`           | `RWS::ask`        | Get environment                      |
+| `asks f`        | `RWS::asks`       | Project from environment             |
+| `local f m`     | `RWS::local`      | Modify environment locally           |
+| `tell w`        | `RWS::tell`       | Add output                           |
+| `listen m`      | `RWS::listen`     | Capture output                       |
+| `censor f m`    | `RWS::censor`     | Transform output                     |
+| `get`           | `RWS::get`        | Get state                            |
+| `put s`         | `RWS::put`        | Set state                            |
+| `modify f`      | `RWS::modify`     | Modify state                         |
+| `gets f`        | `RWS::gets`       | Project from state                   |
 
 #### Code Examples
 
@@ -1839,32 +1839,32 @@ let (result, final_state, log) = computation.run(Config { multiplier: 3 }, 10);
 
 ### Comparison
 
-| Haskell (mtl) | lambars | Description |
-|---------------|---------|-------------|
-| `StateT s m a` | `StateT<S, M, A>` | State transformer |
-| `ReaderT r m a` | `ReaderT<R, M, A>` | Reader transformer |
-| `WriterT w m a` | `WriterT<W, M, A>` | Writer transformer |
-| `ExceptT e m a` | `ExceptT<E, M, A>` | Exception transformer |
-| `MaybeT m a` | Custom | Maybe transformer |
-| `lift` | `lift_*` methods | Lift into transformer |
-| `liftIO` | `lift_io`, `lift_async_io` | Lift IO/AsyncIO |
-| `MonadState` | `MonadState` trait | State abstraction |
-| `MonadReader` | `MonadReader` trait | Reader abstraction |
-| `MonadWriter` | `MonadWriter` trait | Writer abstraction |
-| `MonadError` | `MonadError` trait | Error abstraction |
-| `throwError` | `MonadError::throw_error` | Throw an error |
-| `catchError` | `MonadError::catch_error` | Catch and handle errors |
-| `liftEither` | `MonadError::from_result` | Lift Either/Result |
-| `handleError` | `MonadError::handle_error` | Convert error to success value |
-| (custom) | `MonadError::adapt_error` | Transform error in same type |
-| (custom) | `MonadError::recover` | Partial function recovery |
-| (custom) | `MonadError::recover_with_partial` | Monadic partial recovery |
-| (custom) | `MonadError::ensure` | Validate with predicate |
-| (custom) | `MonadError::ensure_or` | Validate with value-dependent error |
-| (custom) | `MonadError::redeem` | Transform both success and error |
-| (custom) | `MonadError::redeem_with` | Monadic redeem |
-| (custom) | `MonadErrorExt::map_error` | Transform error type |
-| Async IO in transformers | `*_async_io` methods | AsyncIO support in transformers |
+| Haskell (mtl)            | lambars                            | Description                         |
+| ------------------------ | ---------------------------------- | ----------------------------------- |
+| `StateT s m a`           | `StateT<S, M, A>`                  | State transformer                   |
+| `ReaderT r m a`          | `ReaderT<R, M, A>`                 | Reader transformer                  |
+| `WriterT w m a`          | `WriterT<W, M, A>`                 | Writer transformer                  |
+| `ExceptT e m a`          | `ExceptT<E, M, A>`                 | Exception transformer               |
+| `MaybeT m a`             | Custom                             | Maybe transformer                   |
+| `lift`                   | `lift_*` methods                   | Lift into transformer               |
+| `liftIO`                 | `lift_io`, `lift_async_io`         | Lift IO/AsyncIO                     |
+| `MonadState`             | `MonadState` trait                 | State abstraction                   |
+| `MonadReader`            | `MonadReader` trait                | Reader abstraction                  |
+| `MonadWriter`            | `MonadWriter` trait                | Writer abstraction                  |
+| `MonadError`             | `MonadError` trait                 | Error abstraction                   |
+| `throwError`             | `MonadError::throw_error`          | Throw an error                      |
+| `catchError`             | `MonadError::catch_error`          | Catch and handle errors             |
+| `liftEither`             | `MonadError::from_result`          | Lift Either/Result                  |
+| `handleError`            | `MonadError::handle_error`         | Convert error to success value      |
+| (custom)                 | `MonadError::adapt_error`          | Transform error in same type        |
+| (custom)                 | `MonadError::recover`              | Partial function recovery           |
+| (custom)                 | `MonadError::recover_with_partial` | Monadic partial recovery            |
+| (custom)                 | `MonadError::ensure`               | Validate with predicate             |
+| (custom)                 | `MonadError::ensure_or`            | Validate with value-dependent error |
+| (custom)                 | `MonadError::redeem`               | Transform both success and error    |
+| (custom)                 | `MonadError::redeem_with`          | Monadic redeem                      |
+| (custom)                 | `MonadErrorExt::map_error`         | Transform error type                |
+| Async IO in transformers | `*_async_io` methods               | AsyncIO support in transformers     |
 
 ### Code Examples
 
@@ -1973,6 +1973,7 @@ async fn example() {
 ```
 
 Available AsyncIO methods for transformers:
+
 - `ReaderT`: `ask_async_io`, `asks_async_io`, `lift_async_io`, `pure_async_io`, `flat_map_async_io`
 - `StateT`: `get_async_io`, `gets_async_io`, `state_async_io`, `lift_async_io`, `pure_async_io`, `flat_map_async_io`
 - `WriterT`: `tell_async_io`, `lift_async_io`, `pure_async_io`, `flat_map_async_io`, `listen_async_io`
@@ -1985,18 +1986,18 @@ lambars provides an algebraic effects system as an alternative to monad transfor
 
 ### Comparison with Haskell Effect Libraries
 
-| Haskell (freer-simple/polysemy) | lambars | Description |
-|--------------------------------|---------|-------------|
-| `Eff '[e1, e2] a` | `Eff<EffCons<E1, EffCons<E2, EffNil>>, A>` | Effect computation type |
-| `Member e r` | `Member<E, Index>` | Effect membership constraint |
-| `run` | `Handler::run` | Run handler |
-| `runReader` | `ReaderHandler::run` | Run Reader effect |
-| `runState` | `StateHandler::run` | Run State effect |
-| `runWriter` | `WriterHandler::run` | Run Writer effect |
-| `runError` | `ErrorHandler::run` | Run Error effect |
-| `send` / `embed` | `perform_raw` | Perform effect operation |
-| `interpret` | `Handler` trait impl | Define handler |
-| `reinterpret` | Handler composition | Transform effects |
+| Haskell (freer-simple/polysemy) | lambars                                    | Description                  |
+| ------------------------------- | ------------------------------------------ | ---------------------------- |
+| `Eff '[e1, e2] a`               | `Eff<EffCons<E1, EffCons<E2, EffNil>>, A>` | Effect computation type      |
+| `Member e r`                    | `Member<E, Index>`                         | Effect membership constraint |
+| `run`                           | `Handler::run`                             | Run handler                  |
+| `runReader`                     | `ReaderHandler::run`                       | Run Reader effect            |
+| `runState`                      | `StateHandler::run`                        | Run State effect             |
+| `runWriter`                     | `WriterHandler::run`                       | Run Writer effect            |
+| `runError`                      | `ErrorHandler::run`                        | Run Error effect             |
+| `send` / `embed`                | `perform_raw`                              | Perform effect operation     |
+| `interpret`                     | `Handler` trait impl                       | Define handler               |
+| `reinterpret`                   | Handler composition                        | Transform effects            |
 
 ### Effect Row and Member
 
@@ -2046,12 +2047,12 @@ let (result, final_state) = StateHandler::new(10).run(with_reader);
 
 ### Standard Effects
 
-| Effect | Haskell | lambars | Description |
-|--------|---------|---------|-------------|
-| Reader | `ask`, `asks`, `local` | `ask()`, `asks()`, `run_local()` | Read-only environment |
-| State | `get`, `put`, `modify` | `get()`, `put()`, `modify()` | Mutable state |
-| Writer | `tell`, `listen`, `censor` | `tell()`, `listen()` | Accumulating output |
-| Error | `throwError`, `catchError` | `throw()`, `catch()`, `attempt()` | Error handling |
+| Effect | Haskell                    | lambars                           | Description           |
+| ------ | -------------------------- | --------------------------------- | --------------------- |
+| Reader | `ask`, `asks`, `local`     | `ask()`, `asks()`, `run_local()`  | Read-only environment |
+| State  | `get`, `put`, `modify`     | `get()`, `put()`, `modify()`      | Mutable state         |
+| Writer | `tell`, `listen`, `censor` | `tell()`, `listen()`              | Accumulating output   |
+| Error  | `throwError`, `catchError` | `throw()`, `catch()`, `attempt()` | Error handling        |
 
 ### Defining Custom Effects
 
@@ -2101,24 +2102,24 @@ fn log_computation() -> Eff<LogEffect, i32> {
 
 ### Key Differences from Monad Transformers
 
-| Aspect | Monad Transformers | Algebraic Effects |
-|--------|-------------------|-------------------|
-| n^2 problem | Yes (n effects need n^2 lift implementations) | No (effects compose freely) |
-| Effect order | Fixed by transformer stack | Flexible (handle in any order) |
-| Performance | Good (specialized code) | Good (continuation-based) |
-| Type complexity | Can become verbose | Uses type-level indices |
-| Lift operations | Required (`lift`, `liftIO`) | Not needed (`Member` constraint) |
+| Aspect          | Monad Transformers                            | Algebraic Effects                |
+| --------------- | --------------------------------------------- | -------------------------------- |
+| n^2 problem     | Yes (n effects need n^2 lift implementations) | No (effects compose freely)      |
+| Effect order    | Fixed by transformer stack                    | Flexible (handle in any order)   |
+| Performance     | Good (specialized code)                       | Good (continuation-based)        |
+| Type complexity | Can become verbose                            | Uses type-level indices          |
+| Lift operations | Required (`lift`, `liftIO`)                   | Not needed (`Member` constraint) |
 
 ### When to Use Which
 
-| Scenario | Recommendation |
-|----------|----------------|
+| Scenario                 | Recommendation                     |
+| ------------------------ | ---------------------------------- |
 | Simple 2-3 effect stacks | Monad Transformers (simpler types) |
-| Many effects (4+) | Algebraic Effects (no n^2 problem) |
-| Effect reordering needed | Algebraic Effects |
-| Maximum performance | Monad Transformers |
-| Extensible effects | Algebraic Effects |
-| Existing mtl codebase | Monad Transformers (compatibility) |
+| Many effects (4+)        | Algebraic Effects (no n^2 problem) |
+| Effect reordering needed | Algebraic Effects                  |
+| Maximum performance      | Monad Transformers                 |
+| Extensible effects       | Algebraic Effects                  |
+| Existing mtl codebase    | Monad Transformers (compatibility) |
 
 ---
 
@@ -2126,85 +2127,85 @@ fn log_computation() -> Eff<LogEffect, i32> {
 
 ### Lists and Sequences
 
-| Haskell | lambars | Description |
-|---------|---------|-------------|
-| `[a]` (List) | `PersistentList<A>` | Immutable list |
-| `x : xs` | `PersistentList::cons` | Prepend |
-| `head xs` | `PersistentList::head` | First element |
-| `tail xs` | `PersistentList::tail` | Rest of list |
-| `xs ++ ys` | `Semigroup::combine` | Concatenate |
-| `length xs` | `Foldable::length` | Length |
-| `null xs` | `Foldable::is_empty` | Empty check |
-| `reverse xs` | `PersistentList::reverse` | Reverse |
-| `take n xs` | `PersistentList::take` | Take first n elements |
-| `drop n xs` | `PersistentList::drop_first` | Drop first n elements |
-| `splitAt n xs` | `PersistentList::split_at` | Split at index |
-| `zip xs ys` | `PersistentList::zip` | Zip two lists |
-| `unzip xs` | `PersistentList::<(A,B)>::unzip` | Unzip list of pairs |
-| `findIndex p xs` | `PersistentList::find_index` | Find index of first match |
-| `foldl1 f xs` | `PersistentList::fold_left1` | Left fold without initial value |
-| `foldr1 f xs` | `PersistentList::fold_right1` | Right fold without initial value |
-| `scanl f z xs` | `PersistentList::scan_left` | Left scan with initial value |
-| `partition p xs` | `PersistentList::partition` | Split by predicate |
-| `intersperse x xs` | `PersistentList::intersperse` | Insert between elements |
-| `intercalate xs xss` | `PersistentList::intercalate` | Insert list between lists and flatten |
-| `compare xs ys` | `Ord::cmp` | Lexicographic ordering (requires `T: Ord`) |
+| Haskell              | lambars                          | Description                                |
+| -------------------- | -------------------------------- | ------------------------------------------ |
+| `[a]` (List)         | `PersistentList<A>`              | Immutable list                             |
+| `x : xs`             | `PersistentList::cons`           | Prepend                                    |
+| `head xs`            | `PersistentList::head`           | First element                              |
+| `tail xs`            | `PersistentList::tail`           | Rest of list                               |
+| `xs ++ ys`           | `Semigroup::combine`             | Concatenate                                |
+| `length xs`          | `Foldable::length`               | Length                                     |
+| `null xs`            | `Foldable::is_empty`             | Empty check                                |
+| `reverse xs`         | `PersistentList::reverse`        | Reverse                                    |
+| `take n xs`          | `PersistentList::take`           | Take first n elements                      |
+| `drop n xs`          | `PersistentList::drop_first`     | Drop first n elements                      |
+| `splitAt n xs`       | `PersistentList::split_at`       | Split at index                             |
+| `zip xs ys`          | `PersistentList::zip`            | Zip two lists                              |
+| `unzip xs`           | `PersistentList::<(A,B)>::unzip` | Unzip list of pairs                        |
+| `findIndex p xs`     | `PersistentList::find_index`     | Find index of first match                  |
+| `foldl1 f xs`        | `PersistentList::fold_left1`     | Left fold without initial value            |
+| `foldr1 f xs`        | `PersistentList::fold_right1`    | Right fold without initial value           |
+| `scanl f z xs`       | `PersistentList::scan_left`      | Left scan with initial value               |
+| `partition p xs`     | `PersistentList::partition`      | Split by predicate                         |
+| `intersperse x xs`   | `PersistentList::intersperse`    | Insert between elements                    |
+| `intercalate xs xss` | `PersistentList::intercalate`    | Insert list between lists and flatten      |
+| `compare xs ys`      | `Ord::cmp`                       | Lexicographic ordering (requires `T: Ord`) |
 
 ### Vectors
 
-| Haskell | lambars | Description |
-|---------|---------|-------------|
-| `Data.Vector` | `PersistentVector<A>` | Immutable vector |
-| `V.!` | `PersistentVector::get` | Index access |
-| `V.//` | `PersistentVector::update` | Update element |
-| `V.snoc` | `PersistentVector::push_back` | Append |
-| `V.length` | `PersistentVector::len` | Length |
-| `V.take n v` | `PersistentVector::take` | Take first n elements |
-| `V.drop n v` | `PersistentVector::drop_first` | Drop first n elements |
-| `V.splitAt n v` | `PersistentVector::split_at` | Split at index |
-| `V.zip v1 v2` | `PersistentVector::zip` | Zip two vectors |
-| `V.unzip v` | `PersistentVector::<(A,B)>::unzip` | Unzip vector of pairs |
-| `V.findIndex p v` | `PersistentVector::find_index` | Find index of first match |
-| `V.foldl1 f v` | `PersistentVector::fold_left1` | Left fold without initial value |
-| `V.foldr1 f v` | `PersistentVector::fold_right1` | Right fold without initial value |
-| `V.scanl f z v` | `PersistentVector::scan_left` | Left scan with initial value |
-| `V.partition p v` | `PersistentVector::partition` | Split by predicate |
-| (N/A) | `PersistentVector::intersperse` | Insert between elements |
-| (N/A) | `PersistentVector::intercalate` | Insert vector between vectors and flatten |
-| `compare v1 v2` | `Ord::cmp` | Lexicographic ordering (requires `T: Ord`) |
+| Haskell           | lambars                            | Description                                |
+| ----------------- | ---------------------------------- | ------------------------------------------ |
+| `Data.Vector`     | `PersistentVector<A>`              | Immutable vector                           |
+| `V.!`             | `PersistentVector::get`            | Index access                               |
+| `V.//`            | `PersistentVector::update`         | Update element                             |
+| `V.snoc`          | `PersistentVector::push_back`      | Append                                     |
+| `V.length`        | `PersistentVector::len`            | Length                                     |
+| `V.take n v`      | `PersistentVector::take`           | Take first n elements                      |
+| `V.drop n v`      | `PersistentVector::drop_first`     | Drop first n elements                      |
+| `V.splitAt n v`   | `PersistentVector::split_at`       | Split at index                             |
+| `V.zip v1 v2`     | `PersistentVector::zip`            | Zip two vectors                            |
+| `V.unzip v`       | `PersistentVector::<(A,B)>::unzip` | Unzip vector of pairs                      |
+| `V.findIndex p v` | `PersistentVector::find_index`     | Find index of first match                  |
+| `V.foldl1 f v`    | `PersistentVector::fold_left1`     | Left fold without initial value            |
+| `V.foldr1 f v`    | `PersistentVector::fold_right1`    | Right fold without initial value           |
+| `V.scanl f z v`   | `PersistentVector::scan_left`      | Left scan with initial value               |
+| `V.partition p v` | `PersistentVector::partition`      | Split by predicate                         |
+| (N/A)             | `PersistentVector::intersperse`    | Insert between elements                    |
+| (N/A)             | `PersistentVector::intercalate`    | Insert vector between vectors and flatten  |
+| `compare v1 v2`   | `Ord::cmp`                         | Lexicographic ordering (requires `T: Ord`) |
 
 ### Maps
 
-| Haskell | lambars | Description |
-|---------|---------|-------------|
-| `Data.Map` | `PersistentTreeMap<K, V>` | Ordered map |
-| `Data.HashMap` | `PersistentHashMap<K, V>` | Hash map |
-| `M.insert k v m` | `insert` method | Insert |
-| `M.lookup k m` | `get` method | Lookup |
-| `M.delete k m` | `remove` method | Delete |
-| `M.member k m` | `contains_key` method | Membership |
-| `M.map f m` | `map_values` method | Transform values |
-| `M.mapKeys f m` | `map_keys` method | Transform keys |
-| `M.mapMaybe f m` | `filter_map` method | Filter and transform |
-| `M.toList m` | `entries` method | Get all entries |
-| `M.keys m` | `keys` method | Get all keys |
-| `M.elems m` | `values` method | Get all values |
-| `M.union m1 m2` | `merge` method | Merge (right wins) |
-| `M.unionWith f m1 m2` | `merge_with` method | Merge with resolver |
-| `M.filter p m` | `keep_if` method | Keep matching entries |
-| `M.filterWithKey p m` | `keep_if` method | Keep matching entries |
-| `M.partition p m` | `partition` method | Split by predicate |
+| Haskell               | lambars                   | Description           |
+| --------------------- | ------------------------- | --------------------- |
+| `Data.Map`            | `PersistentTreeMap<K, V>` | Ordered map           |
+| `Data.HashMap`        | `PersistentHashMap<K, V>` | Hash map              |
+| `M.insert k v m`      | `insert` method           | Insert                |
+| `M.lookup k m`        | `get` method              | Lookup                |
+| `M.delete k m`        | `remove` method           | Delete                |
+| `M.member k m`        | `contains_key` method     | Membership            |
+| `M.map f m`           | `map_values` method       | Transform values      |
+| `M.mapKeys f m`       | `map_keys` method         | Transform keys        |
+| `M.mapMaybe f m`      | `filter_map` method       | Filter and transform  |
+| `M.toList m`          | `entries` method          | Get all entries       |
+| `M.keys m`            | `keys` method             | Get all keys          |
+| `M.elems m`           | `values` method           | Get all values        |
+| `M.union m1 m2`       | `merge` method            | Merge (right wins)    |
+| `M.unionWith f m1 m2` | `merge_with` method       | Merge with resolver   |
+| `M.filter p m`        | `keep_if` method          | Keep matching entries |
+| `M.filterWithKey p m` | `keep_if` method          | Keep matching entries |
+| `M.partition p m`     | `partition` method        | Split by predicate    |
 
 ### Sets
 
-| Haskell | lambars | Description |
-|---------|---------|-------------|
-| `Data.Set` | `PersistentHashSet<A>` | Set |
-| `S.insert x s` | `insert` method | Insert |
-| `S.member x s` | `contains` method | Membership |
-| `S.union s1 s2` | `union` method | Union |
-| `S.intersection` | `intersection` method | Intersection |
-| `S.difference` | `difference` method | Difference |
+| Haskell          | lambars                | Description  |
+| ---------------- | ---------------------- | ------------ |
+| `Data.Set`       | `PersistentHashSet<A>` | Set          |
+| `S.insert x s`   | `insert` method        | Insert       |
+| `S.member x s`   | `contains` method      | Membership   |
+| `S.union s1 s2`  | `union` method         | Union        |
+| `S.intersection` | `intersection` method  | Intersection |
+| `S.difference`   | `difference` method    | Difference   |
 
 ### Code Examples
 
@@ -2298,17 +2299,17 @@ let result: PersistentHashSet<i32> = set1
 
 ## Pattern Matching
 
-| Haskell | Rust | Description |
-|---------|------|-------------|
-| `case x of ...` | `match x { ... }` | Match expression |
-| `_ -> ...` | `_ => ...` | Wildcard |
-| `x@pattern` | `x @ pattern` | As-pattern |
-| `(a, b)` | `(a, b)` | Tuple pattern |
-| `Just x` | `Some(x)` | Maybe/Option |
-| `Left e` / `Right a` | `Err(e)` / `Ok(a)` | Either/Result |
-| `[]` | `[]` or `vec![]` | Empty list |
-| `x:xs` | Custom | Cons pattern |
-| Guards `| cond` | `if cond =>` | Guards |
+| Haskell              | Rust               | Description      |
+| -------------------- | ------------------ | ---------------- | ------ |
+| `case x of ...`      | `match x { ... }`  | Match expression |
+| `_ -> ...`           | `_ => ...`         | Wildcard         |
+| `x@pattern`          | `x @ pattern`      | As-pattern       |
+| `(a, b)`             | `(a, b)`           | Tuple pattern    |
+| `Just x`             | `Some(x)`          | Maybe/Option     |
+| `Left e` / `Right a` | `Err(e)` / `Ok(a)` | Either/Result    |
+| `[]`                 | `[]` or `vec![]`   | Empty list       |
+| `x:xs`               | Custom             | Cons pattern     |
+| Guards `             | cond`              | `if cond =>`     | Guards |
 
 ### Code Examples
 
@@ -2526,22 +2527,22 @@ struct Email(String);
 
 ### Syntax Mapping
 
-| Haskell | Rust (lambars) |
-|---------|----------------|
-| `f x` | `f(x)` |
-| `f $ x` | `f(x)` |
-| `x & f` | `pipe!(x, f)` |
-| `f . g` | `compose!(f, g)` |
-| `do { x <- m; ... }` | `eff! { x <= m; ... }` |
-| `\x -> x + 1` | `\|x\| x + 1` |
-| `x :: Int` | `x: i32` |
-| `[a]` | `Vec<A>` or `PersistentList<A>` |
-| `Maybe a` | `Option<A>` |
-| `Either e a` | `Result<A, E>` |
-| `IO a` | `IO<A>` |
-| `pure x` | `Applicative::pure(x)` |
-| `m >>= f` | `m.flat_map(f)` |
-| `fmap f m` | `m.fmap(f)` |
+| Haskell              | Rust (lambars)                  |
+| -------------------- | ------------------------------- |
+| `f x`                | `f(x)`                          |
+| `f $ x`              | `f(x)`                          |
+| `x & f`              | `pipe!(x, f)`                   |
+| `f . g`              | `compose!(f, g)`                |
+| `do { x <- m; ... }` | `eff! { x <= m; ... }`          |
+| `\x -> x + 1`        | `\|x\| x + 1`                   |
+| `x :: Int`           | `x: i32`                        |
+| `[a]`                | `Vec<A>` or `PersistentList<A>` |
+| `Maybe a`            | `Option<A>`                     |
+| `Either e a`         | `Result<A, E>`                  |
+| `IO a`               | `IO<A>`                         |
+| `pure x`             | `Applicative::pure(x)`          |
+| `m >>= f`            | `m.flat_map(f)`                 |
+| `fmap f m`           | `m.fmap(f)`                     |
 
 ### Conceptual Differences
 

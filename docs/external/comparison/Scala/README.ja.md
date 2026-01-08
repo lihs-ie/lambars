@@ -1,8 +1,8 @@
 # Scala to lambars API 比較ガイド
 
-[English](README.md) | [日本語](README.ja.md)
+[English](README.en.md)
 
-> **Note**: このドキュメントはAIによって翻訳されました。誤りや不自然な表現がある場合は、Issue または Pull Request でお知らせください。
+> **Note**: このドキュメントは AI によって翻訳されました。誤りや不自然な表現がある場合は、Issue または Pull Request でお知らせください。
 
 このドキュメントは、Scala の関数型プログラミング構造（Cats および Scalaz ライブラリを含む）と、lambars（Rust）での同等の機能を包括的に比較します。
 
@@ -30,31 +30,31 @@
 
 ## 概要
 
-| 概念 | Scala (Cats) | lambars (Rust) |
-|---------|--------------|----------------|
-| Functor | `Functor[F]` | `Functor` trait |
-| Applicative | `Applicative[F]` | `Applicative` trait |
-| Monad | `Monad[F]` | `Monad` trait |
-| Semigroup | `Semigroup[A]` | `Semigroup` trait |
-| Monoid | `Monoid[A]` | `Monoid` trait |
-| Foldable | `Foldable[F]` | `Foldable` trait |
-| Traverse | `Traverse[F]` | `Traversable` trait |
-| Option | `Option[A]` | `Option<A>` (std) |
-| Either | `Either[E, A]` | `Result<A, E>` (std) |
-| For-comprehension (Monad) | `for { ... } yield` | `eff!` macro |
-| For-comprehension (List) | `for { ... } yield` (List) | `for_!` macro |
-| Async for-comprehension | `for { ... } yield` + `IO` | `for_async!` macro |
-| Lens | `monocle.Lens` | `Lens` trait |
-| Prism | `monocle.Prism` | `Prism` trait |
-| IO | `cats.effect.IO` | `IO` type |
-| State | `cats.data.State` | `State` type |
-| Reader | `cats.data.Reader` | `Reader` type |
-| Writer | `cats.data.Writer` | `Writer` type |
-| RWS | `cats.data.ReaderWriterState` | `RWS` type |
-| StateT | `cats.data.StateT` | `StateT` type |
-| ReaderT | `cats.data.ReaderT` | `ReaderT` type |
-| WriterT | `cats.data.WriterT` | `WriterT` type |
-| EitherT | `cats.data.EitherT` | `ExceptT` type |
+| 概念                      | Scala (Cats)                  | lambars (Rust)       |
+| ------------------------- | ----------------------------- | -------------------- |
+| Functor                   | `Functor[F]`                  | `Functor` trait      |
+| Applicative               | `Applicative[F]`              | `Applicative` trait  |
+| Monad                     | `Monad[F]`                    | `Monad` trait        |
+| Semigroup                 | `Semigroup[A]`                | `Semigroup` trait    |
+| Monoid                    | `Monoid[A]`                   | `Monoid` trait       |
+| Foldable                  | `Foldable[F]`                 | `Foldable` trait     |
+| Traverse                  | `Traverse[F]`                 | `Traversable` trait  |
+| Option                    | `Option[A]`                   | `Option<A>` (std)    |
+| Either                    | `Either[E, A]`                | `Result<A, E>` (std) |
+| For-comprehension (Monad) | `for { ... } yield`           | `eff!` macro         |
+| For-comprehension (List)  | `for { ... } yield` (List)    | `for_!` macro        |
+| Async for-comprehension   | `for { ... } yield` + `IO`    | `for_async!` macro   |
+| Lens                      | `monocle.Lens`                | `Lens` trait         |
+| Prism                     | `monocle.Prism`               | `Prism` trait        |
+| IO                        | `cats.effect.IO`              | `IO` type            |
+| State                     | `cats.data.State`             | `State` type         |
+| Reader                    | `cats.data.Reader`            | `Reader` type        |
+| Writer                    | `cats.data.Writer`            | `Writer` type        |
+| RWS                       | `cats.data.ReaderWriterState` | `RWS` type           |
+| StateT                    | `cats.data.StateT`            | `StateT` type        |
+| ReaderT                   | `cats.data.ReaderT`           | `ReaderT` type       |
+| WriterT                   | `cats.data.WriterT`           | `WriterT` type       |
+| EitherT                   | `cats.data.EitherT`           | `ExceptT` type       |
 
 ---
 
@@ -62,13 +62,13 @@
 
 ### Functor
 
-| Scala (Cats) | lambars | 説明 |
-|--------------|---------|-------------|
-| `F[A].map(f)` | `Functor::fmap` | 内部の値を変換 |
-| `F[A].as(b)` | `fmap(\|_\| b)` | 定数で置き換える |
-| `F[A].void` | `fmap(\|_\| ())` | 値を捨てる |
-| `F[A].fproduct(f)` | `fmap(\|a\| (a.clone(), f(a)))` | 関数結果とペアにする |
-| `Functor[F].lift(f)` | 手動実装 | 関数を functor にリフト |
+| Scala (Cats)         | lambars                         | 説明                    |
+| -------------------- | ------------------------------- | ----------------------- |
+| `F[A].map(f)`        | `Functor::fmap`                 | 内部の値を変換          |
+| `F[A].as(b)`         | `fmap(\|_\| b)`                 | 定数で置き換える        |
+| `F[A].void`          | `fmap(\|_\| ())`                | 値を捨てる              |
+| `F[A].fproduct(f)`   | `fmap(\|a\| (a.clone(), f(a)))` | 関数結果とペアにする    |
+| `Functor[F].lift(f)` | 手動実装                        | 関数を functor にリフト |
 
 #### コード例
 
@@ -109,14 +109,14 @@ where
 
 ### Applicative
 
-| Scala (Cats) | lambars | 説明 |
-|--------------|---------|-------------|
-| `A.pure[F]` | `Applicative::pure` | 値をコンテキストにリフト |
-| `(fa, fb).mapN(f)` | `Applicative::map2` | 関数で結合 |
-| `(fa, fb).tupled` | `Applicative::product` | タプルに結合 |
-| `fa.ap(ff)` | `Applicative::apply` | ラップされた関数を適用 |
-| `fa *> fb` | `fa.map2(fb, \|_, b\| b)` | シーケンス、右を保持 |
-| `fa <* fb` | `fa.map2(fb, \|a, _\| a)` | シーケンス、左を保持 |
+| Scala (Cats)       | lambars                   | 説明                     |
+| ------------------ | ------------------------- | ------------------------ |
+| `A.pure[F]`        | `Applicative::pure`       | 値をコンテキストにリフト |
+| `(fa, fb).mapN(f)` | `Applicative::map2`       | 関数で結合               |
+| `(fa, fb).tupled`  | `Applicative::product`    | タプルに結合             |
+| `fa.ap(ff)`        | `Applicative::apply`      | ラップされた関数を適用   |
+| `fa *> fb`         | `fa.map2(fb, \|_, b\| b)` | シーケンス、右を保持     |
+| `fa <* fb`         | `fa.map2(fb, \|a, _\| a)` | シーケンス、左を保持     |
 
 #### コード例
 
@@ -160,15 +160,15 @@ let sum3: Option<i32> = Some(1).map3(Some(2), Some(3), |a, b, c| a + b + c);
 
 ### Monad
 
-| Scala (Cats) | lambars | 説明 |
-|--------------|---------|-------------|
-| `fa.flatMap(f)` | `Monad::flat_map` | 計算を連鎖 |
-| `fa.flatten` | `Flatten::flatten` / `Option::flatten` (std) | ネストを平坦化 |
-| `fa >> fb` | `Monad::then` | シーケンス、右を保持 |
-| `fa.mproduct(f)` | `flat_map(\|a\| f(a).map(\|b\| (a, b)))` | 結果とペアにする |
-| `fa.ifM(ifTrue, ifFalse)` | 手動実装 | 条件分岐 |
-| `Monad[F].whileM_` | 手動実装 | while ループ |
-| `Monad[F].iterateWhile` | 手動実装 | 条件付き反復 |
+| Scala (Cats)              | lambars                                      | 説明                 |
+| ------------------------- | -------------------------------------------- | -------------------- |
+| `fa.flatMap(f)`           | `Monad::flat_map`                            | 計算を連鎖           |
+| `fa.flatten`              | `Flatten::flatten` / `Option::flatten` (std) | ネストを平坦化       |
+| `fa >> fb`                | `Monad::then`                                | シーケンス、右を保持 |
+| `fa.mproduct(f)`          | `flat_map(\|a\| f(a).map(\|b\| (a, b)))`     | 結果とペアにする     |
+| `fa.ifM(ifTrue, ifFalse)` | 手動実装                                     | 条件分岐             |
+| `Monad[F].whileM_`        | 手動実装                                     | while ループ         |
+| `Monad[F].iterateWhile`   | 手動実装                                     | 条件付き反復         |
 
 #### コード例
 
@@ -234,13 +234,13 @@ let flat_result: Result<i32, &str> = nested_result.flatten();
 
 ### Semigroup and Monoid
 
-| Scala (Cats) | lambars | 説明 |
-|--------------|---------|-------------|
-| `a \|+\| b` | `Semigroup::combine` | 値を結合 |
-| `Monoid[A].empty` | `Monoid::empty` | 単位元 |
+| Scala (Cats)                 | lambars               | 説明               |
+| ---------------------------- | --------------------- | ------------------ |
+| `a \|+\| b`                  | `Semigroup::combine`  | 値を結合           |
+| `Monoid[A].empty`            | `Monoid::empty`       | 単位元             |
 | `Monoid[A].combineAll(list)` | `Monoid::combine_all` | combine で畳み込む |
-| `a.combineN(n)` | 手動ループ | n 回結合 |
-| `Semigroup.maybeCombine` | `Option::combine` | option を結合 |
+| `a.combineN(n)`              | 手動ループ            | n 回結合           |
+| `Semigroup.maybeCombine`     | `Option::combine`     | option を結合      |
 
 #### コード例
 
@@ -289,19 +289,19 @@ let combined: Vec<i32> = vec1.combine(vec2);
 
 ### Foldable
 
-| Scala (Cats) | lambars | 説明 |
-|--------------|---------|-------------|
-| `fa.foldLeft(b)(f)` | `Foldable::fold_left` | 左畳み込み |
-| `fa.foldRight(lb)(f)` | `Foldable::fold_right` | 右畳み込み |
-| `fa.foldMap(f)` | `Foldable::fold_map` | マップしてから畳み込む |
-| `fa.fold` | `Foldable::fold` | Monoid で畳み込む |
-| `fa.find(p)` | `Foldable::find` | 最初にマッチするものを検索 |
-| `fa.exists(p)` | `Foldable::exists` | いずれかがマッチ |
-| `fa.forall(p)` | `Foldable::for_all` | すべてがマッチ |
-| `fa.isEmpty` | `Foldable::is_empty` | 空チェック |
-| `fa.nonEmpty` | `!Foldable::is_empty` | 非空チェック |
-| `fa.size` | `Foldable::length` | 要素数をカウント |
-| `fa.toList` | `Foldable::to_vec` | リストに変換 |
+| Scala (Cats)          | lambars                | 説明                       |
+| --------------------- | ---------------------- | -------------------------- |
+| `fa.foldLeft(b)(f)`   | `Foldable::fold_left`  | 左畳み込み                 |
+| `fa.foldRight(lb)(f)` | `Foldable::fold_right` | 右畳み込み                 |
+| `fa.foldMap(f)`       | `Foldable::fold_map`   | マップしてから畳み込む     |
+| `fa.fold`             | `Foldable::fold`       | Monoid で畳み込む          |
+| `fa.find(p)`          | `Foldable::find`       | 最初にマッチするものを検索 |
+| `fa.exists(p)`        | `Foldable::exists`     | いずれかがマッチ           |
+| `fa.forall(p)`        | `Foldable::for_all`    | すべてがマッチ             |
+| `fa.isEmpty`          | `Foldable::is_empty`   | 空チェック                 |
+| `fa.nonEmpty`         | `!Foldable::is_empty`  | 非空チェック               |
+| `fa.size`             | `Foldable::length`     | 要素数をカウント           |
+| `fa.toList`           | `Foldable::to_vec`     | リストに変換               |
 
 #### コード例
 
@@ -360,21 +360,21 @@ let all_positive: bool = vec![1, 2, 3].for_all(|x| *x > 0);
 
 ### Traversable
 
-| Scala (Cats) | lambars | 説明 |
-|--------------|---------|-------------|
-| `fa.traverse(f)` | `Traversable::traverse_option/result` | エフェクトでトラバース |
-| `fa.sequence` | `Traversable::sequence_option/result` | エフェクトをシーケンス |
-| `fa.flatTraverse(f)` | flatten と合成 | トラバースして平坦化 |
-| `fa.traverseFilter(f)` | 手動実装 | トラバース中にフィルタ |
-| `fa.traverse[Reader[R, *]](f)` | `Traversable::traverse_reader` | Reader エフェクトでトラバース |
-| `fa.traverse[State[S, *]](f)` | `Traversable::traverse_state` | State エフェクトでトラバース |
-| `fa.traverse[IO](f)` | `Traversable::traverse_io` | IO エフェクトでトラバース |
-| `fa.sequence[Reader[R, *]]` | `Traversable::sequence_reader` | Reader エフェクトをシーケンス |
-| `fa.sequence[State[S, *]]` | `Traversable::sequence_state` | State エフェクトをシーケンス |
-| `fa.sequence[IO]` | `Traversable::sequence_io` | IO エフェクトをシーケンス |
-| `fa.traverse_[Reader[R, *]](f)` | `Traversable::traverse_reader_` | Reader をトラバース、結果を破棄 |
-| `fa.traverse_[State[S, *]](f)` | `Traversable::traverse_state_` | State をトラバース、結果を破棄 |
-| `fa.traverse_[IO](f)` | `Traversable::traverse_io_` | IO をトラバース、結果を破棄 |
+| Scala (Cats)                    | lambars                               | 説明                            |
+| ------------------------------- | ------------------------------------- | ------------------------------- |
+| `fa.traverse(f)`                | `Traversable::traverse_option/result` | エフェクトでトラバース          |
+| `fa.sequence`                   | `Traversable::sequence_option/result` | エフェクトをシーケンス          |
+| `fa.flatTraverse(f)`            | flatten と合成                        | トラバースして平坦化            |
+| `fa.traverseFilter(f)`          | 手動実装                              | トラバース中にフィルタ          |
+| `fa.traverse[Reader[R, *]](f)`  | `Traversable::traverse_reader`        | Reader エフェクトでトラバース   |
+| `fa.traverse[State[S, *]](f)`   | `Traversable::traverse_state`         | State エフェクトでトラバース    |
+| `fa.traverse[IO](f)`            | `Traversable::traverse_io`            | IO エフェクトでトラバース       |
+| `fa.sequence[Reader[R, *]]`     | `Traversable::sequence_reader`        | Reader エフェクトをシーケンス   |
+| `fa.sequence[State[S, *]]`      | `Traversable::sequence_state`         | State エフェクトをシーケンス    |
+| `fa.sequence[IO]`               | `Traversable::sequence_io`            | IO エフェクトをシーケンス       |
+| `fa.traverse_[Reader[R, *]](f)` | `Traversable::traverse_reader_`       | Reader をトラバース、結果を破棄 |
+| `fa.traverse_[State[S, *]](f)`  | `Traversable::traverse_state_`        | State をトラバース、結果を破棄  |
+| `fa.traverse_[IO](f)`           | `Traversable::traverse_io_`           | IO をトラバース、結果を破棄     |
 
 #### コード例
 
@@ -468,39 +468,39 @@ let contents = io.run_unsafe();
 
 ### Option
 
-| Scala | lambars / Rust std | 説明 |
-|-------|-------------------|-------------|
-| `Some(x)` | `Some(x)` | Some を構築 |
-| `None` | `None` | None を構築 |
-| `opt.map(f)` | `Functor::fmap` | 値を変換 |
-| `opt.flatMap(f)` | `Monad::flat_map` | 計算を連鎖 |
-| `opt.getOrElse(default)` | `Option::unwrap_or` | デフォルト値 |
-| `opt.orElse(alt)` | `Option::or` | 代替値 |
-| `opt.fold(ifEmpty)(f)` | `Option::map_or` | デフォルト値で畳み込む |
-| `opt.filter(p)` | `Option::filter` | 述語でフィルタ |
-| `opt.filterNot(p)` | `filter(\|x\| !p(x))` | 逆フィルタ |
-| `opt.contains(x)` | `Option::contains` | 値を含む |
-| `opt.exists(p)` | `Option::is_some_and` | 述語でテスト |
-| `opt.forall(p)` | `opt.map_or(true, p)` | すべてが満たす |
-| `opt.toRight(left)` | `Option::ok_or` | Either/Result に変換 |
-| `opt.toLeft(right)` | `opt.ok_or(right).swap()` | Either（左）に変換 |
-| `opt.zip(other)` | `Option::zip` | 2 つの option を zip |
+| Scala                    | lambars / Rust std        | 説明                   |
+| ------------------------ | ------------------------- | ---------------------- |
+| `Some(x)`                | `Some(x)`                 | Some を構築            |
+| `None`                   | `None`                    | None を構築            |
+| `opt.map(f)`             | `Functor::fmap`           | 値を変換               |
+| `opt.flatMap(f)`         | `Monad::flat_map`         | 計算を連鎖             |
+| `opt.getOrElse(default)` | `Option::unwrap_or`       | デフォルト値           |
+| `opt.orElse(alt)`        | `Option::or`              | 代替値                 |
+| `opt.fold(ifEmpty)(f)`   | `Option::map_or`          | デフォルト値で畳み込む |
+| `opt.filter(p)`          | `Option::filter`          | 述語でフィルタ         |
+| `opt.filterNot(p)`       | `filter(\|x\| !p(x))`     | 逆フィルタ             |
+| `opt.contains(x)`        | `Option::contains`        | 値を含む               |
+| `opt.exists(p)`          | `Option::is_some_and`     | 述語でテスト           |
+| `opt.forall(p)`          | `opt.map_or(true, p)`     | すべてが満たす         |
+| `opt.toRight(left)`      | `Option::ok_or`           | Either/Result に変換   |
+| `opt.toLeft(right)`      | `opt.ok_or(right).swap()` | Either（左）に変換     |
+| `opt.zip(other)`         | `Option::zip`             | 2 つの option を zip   |
 
 ### Either / Result
 
-| Scala | lambars / Rust std | 説明 |
-|-------|-------------------|-------------|
-| `Right(x)` | `Ok(x)` | Right/Ok 値 |
-| `Left(e)` | `Err(e)` | Left/Error 値 |
-| `either.map(f)` | `Functor::fmap` / `Result::map` | 右をマップ |
-| `either.leftMap(f)` | `Result::map_err` | 左をマップ |
-| `either.flatMap(f)` | `Monad::flat_map` | 連鎖 |
-| `either.bimap(f, g)` | 手動実装 | 両側をマップ |
-| `either.fold(f, g)` | `Result::map_or_else` | 両側を畳み込む |
-| `either.swap` | `Result::swap` (nightly) | 両側を入れ替え |
-| `either.toOption` | `Result::ok` | Option に変換 |
-| `either.getOrElse(d)` | `Result::unwrap_or` | デフォルト値 |
-| `either.orElse(alt)` | `Result::or` | 代替値 |
+| Scala                 | lambars / Rust std              | 説明           |
+| --------------------- | ------------------------------- | -------------- |
+| `Right(x)`            | `Ok(x)`                         | Right/Ok 値    |
+| `Left(e)`             | `Err(e)`                        | Left/Error 値  |
+| `either.map(f)`       | `Functor::fmap` / `Result::map` | 右をマップ     |
+| `either.leftMap(f)`   | `Result::map_err`               | 左をマップ     |
+| `either.flatMap(f)`   | `Monad::flat_map`               | 連鎖           |
+| `either.bimap(f, g)`  | 手動実装                        | 両側をマップ   |
+| `either.fold(f, g)`   | `Result::map_or_else`           | 両側を畳み込む |
+| `either.swap`         | `Result::swap` (nightly)        | 両側を入れ替え |
+| `either.toOption`     | `Result::ok`                    | Option に変換  |
+| `either.getOrElse(d)` | `Result::unwrap_or`             | デフォルト値   |
+| `either.orElse(alt)`  | `Result::or`                    | 代替値         |
 
 #### コード例
 
@@ -540,44 +540,44 @@ let bi_mapped: Result<String, usize> = either
 
 ---
 
-## for 内包表記 vs eff! / for_! マクロ
+## for 内包表記 vs eff! / for\_! マクロ
 
 lambars は Scala の for 内包表記に対応する 2 つのマクロを提供します：
 
-| ユースケース | Scala | lambars | 説明 |
-|----------|-------|---------|-------------|
-| Monad バインディング (Option, Result, IO, State など) | `for { x <- mx } yield x` | `eff!` macro | 単一実行、FnOnce ベース |
-| リスト内包表記 (Vec, iterators) | `for { x <- xs } yield f(x)` | `for_!` macro | 複数実行、FnMut ベース |
+| ユースケース                                          | Scala                        | lambars       | 説明                    |
+| ----------------------------------------------------- | ---------------------------- | ------------- | ----------------------- |
+| Monad バインディング (Option, Result, IO, State など) | `for { x <- mx } yield x`    | `eff!` macro  | 単一実行、FnOnce ベース |
+| リスト内包表記 (Vec, iterators)                       | `for { x <- xs } yield f(x)` | `for_!` macro | 複数実行、FnMut ベース  |
 
 ### 主な違い：`eff!` vs `for_!`
 
-| 側面 | `eff!` | `for_!` |
-|--------|--------|---------|
-| **対象型** | Option, Result, IO, State, Reader, Writer | Vec, Iterator |
-| **実行** | 単一実行 (FnOnce) | 複数実行 (FnMut) |
-| **最終式** | ラップされた値を返す必要がある | `yield` キーワードを使用 |
-| **クロージャ型** | `move` クロージャ | 通常のクロージャ |
-| **典型的な用途** | モナディック計算の連鎖 | リスト内包表記 |
+| 側面             | `eff!`                                    | `for_!`                  |
+| ---------------- | ----------------------------------------- | ------------------------ |
+| **対象型**       | Option, Result, IO, State, Reader, Writer | Vec, Iterator            |
+| **実行**         | 単一実行 (FnOnce)                         | 複数実行 (FnMut)         |
+| **最終式**       | ラップされた値を返す必要がある            | `yield` キーワードを使用 |
+| **クロージャ型** | `move` クロージャ                         | 通常のクロージャ         |
+| **典型的な用途** | モナディック計算の連鎖                    | リスト内包表記           |
 
 ### 構文比較
 
 #### eff! マクロ（Monad 用）
 
-| Scala | lambars | 説明 |
-|-------|---------|-------------|
-| `for { x <- mx } yield x` | `eff! { x <= mx; mx2 }` | 基本バインド |
-| `for { x <- mx; y <- my } yield (x, y)` | `eff! { x <= mx; y <= my; expr }` | 複数バインド |
-| `for { x <- mx; if p(x) } yield x` | `eff! { x <= mx.filter(p); Some(x) }` | ガード（Option） |
-| `x = expr` (in for) | `let x = expr;` | 純粋なバインディング |
+| Scala                                   | lambars                               | 説明                 |
+| --------------------------------------- | ------------------------------------- | -------------------- |
+| `for { x <- mx } yield x`               | `eff! { x <= mx; mx2 }`               | 基本バインド         |
+| `for { x <- mx; y <- my } yield (x, y)` | `eff! { x <= mx; y <= my; expr }`     | 複数バインド         |
+| `for { x <- mx; if p(x) } yield x`      | `eff! { x <= mx.filter(p); Some(x) }` | ガード（Option）     |
+| `x = expr` (in for)                     | `let x = expr;`                       | 純粋なバインディング |
 
-#### for_! マクロ（List 用）
+#### for\_! マクロ（List 用）
 
-| Scala | lambars | 説明 |
-|-------|---------|-------------|
-| `for { x <- xs } yield f(x)` | `for_! { x <= xs; yield f(x) }` | 基本リスト内包表記 |
-| `for { x <- xs; y <- ys } yield (x, y)` | `for_! { x <= xs; y <= ys.clone(); yield (x, y) }` | ネストされた反復 |
-| `for { x <- xs; if p(x) } yield x` | `xs.into_iter().filter(p).collect()` | フィルタリング（std を使用） |
-| `x = expr` (in for) | `let x = expr;` | 純粋なバインディング |
+| Scala                                   | lambars                                            | 説明                         |
+| --------------------------------------- | -------------------------------------------------- | ---------------------------- |
+| `for { x <- xs } yield f(x)`            | `for_! { x <= xs; yield f(x) }`                    | 基本リスト内包表記           |
+| `for { x <- xs; y <- ys } yield (x, y)` | `for_! { x <= xs; y <= ys.clone(); yield (x, y) }` | ネストされた反復             |
+| `for { x <- xs; if p(x) } yield x`      | `xs.into_iter().filter(p).collect()`               | フィルタリング（std を使用） |
+| `x = expr` (in for)                     | `let x = expr;`                                    | 純粋なバインディング         |
 
 **重要**：`for_!` では、Rust の所有権ルールにより、内部コレクションには通常 `.clone()` が必要です。
 
@@ -673,7 +673,7 @@ let user_orders: Option<(User, Vec<Order>)> = eff! {
 };
 ```
 
-### for_! を使ったリスト内包表記
+### for\_! を使ったリスト内包表記
 
 リストベースの for 内包表記には `for_!` マクロを使用します：
 
@@ -785,29 +785,29 @@ let recommendations: Vec<String> = for_! {
 
 ### 各マクロの使用タイミング
 
-| シナリオ | 推奨マクロ | 理由 |
-|----------|-------------------|--------|
-| Option/Result の連鎖 | `eff!` | None/Err で短絡 |
-| IO/State/Reader/Writer | `eff!` | FnOnce モナド用に設計 |
-| List/Vec の変換 | `for_!` | 複数反復をサポート |
-| 直積 | `for_!` | yield を使ったネスト反復 |
-| データベース風クエリ | `eff!` | モナディックエラーハンドリング |
-| データ生成 | `for_!` | 複数の結果が必要 |
-| 非同期リスト生成 | `for_async!` | yield を使った非同期反復 |
-| ループ内の非同期操作 | `for_async!` | AsyncIO バインディングに `<~` を使用 |
+| シナリオ               | 推奨マクロ   | 理由                                 |
+| ---------------------- | ------------ | ------------------------------------ |
+| Option/Result の連鎖   | `eff!`       | None/Err で短絡                      |
+| IO/State/Reader/Writer | `eff!`       | FnOnce モナド用に設計                |
+| List/Vec の変換        | `for_!`      | 複数反復をサポート                   |
+| 直積                   | `for_!`      | yield を使ったネスト反復             |
+| データベース風クエリ   | `eff!`       | モナディックエラーハンドリング       |
+| データ生成             | `for_!`      | 複数の結果が必要                     |
+| 非同期リスト生成       | `for_async!` | yield を使った非同期反復             |
+| ループ内の非同期操作   | `for_async!` | AsyncIO バインディングに `<~` を使用 |
 
 ---
 
 ## 関数合成
 
-| Scala | lambars | 説明 |
-|-------|---------|-------------|
-| `f andThen g` | `compose!(g, f)` | 左から右 |
-| `f compose g` | `compose!(f, g)` | 右から左 |
-| `f.curried` | `curry!(fn, arity)` | 関数をカリー化 |
-| `f.tupled` | 手動実装 | タプルを受け取る |
-| `Function.const(x)` | `constant(x)` | 定数関数 |
-| `identity` | `identity` | 恒等関数 |
+| Scala               | lambars             | 説明             |
+| ------------------- | ------------------- | ---------------- |
+| `f andThen g`       | `compose!(g, f)`    | 左から右         |
+| `f compose g`       | `compose!(f, g)`    | 右から左         |
+| `f.curried`         | `curry!(fn, arity)` | 関数をカリー化   |
+| `f.tupled`          | 手動実装            | タプルを受け取る |
+| `Function.const(x)` | `constant(x)`       | 定数関数         |
+| `identity`          | `identity`          | 恒等関数         |
 
 ### コード例
 
@@ -867,13 +867,13 @@ let x = identity(42);  // 42
 
 ### Lens
 
-| Scala (Monocle) | lambars | 説明 |
-|-----------------|---------|-------------|
-| `GenLens[S](_.field)` | `lens!(S, field)` | lens を作成 |
-| `lens.get(s)` | `Lens::get` | フォーカスした値を取得 |
-| `lens.replace(a)(s)` | `Lens::set` | 値を設定 |
-| `lens.modify(f)(s)` | `Lens::modify` | 値を変更 |
-| `lens1.andThen(lens2)` | `Lens::compose` | lens を合成 |
+| Scala (Monocle)        | lambars           | 説明                   |
+| ---------------------- | ----------------- | ---------------------- |
+| `GenLens[S](_.field)`  | `lens!(S, field)` | lens を作成            |
+| `lens.get(s)`          | `Lens::get`       | フォーカスした値を取得 |
+| `lens.replace(a)(s)`   | `Lens::set`       | 値を設定               |
+| `lens.modify(f)(s)`    | `Lens::modify`    | 値を変更               |
+| `lens1.andThen(lens2)` | `Lens::compose`   | lens を合成            |
 
 #### コード例
 
@@ -935,13 +935,13 @@ let modified: Person = person_street_lens.modify(person, |s| s.to_uppercase());
 
 ### Prism
 
-| Scala (Monocle) | lambars | 説明 |
-|-----------------|---------|-------------|
-| `Prism[S, A](getOption)(reverseGet)` | `FunctionPrism::new` | prism を作成 |
-| `GenPrism[S, A]` | `prism!(S, Variant)` | prism を導出 |
-| `prism.getOption(s)` | `Prism::preview` | マッチしたら取得 |
-| `prism.reverseGet(a)` | `Prism::review` | 値から構築 |
-| `prism.modify(f)(s)` | `Prism::modify` | マッチしたら変更 |
+| Scala (Monocle)                      | lambars              | 説明             |
+| ------------------------------------ | -------------------- | ---------------- |
+| `Prism[S, A](getOption)(reverseGet)` | `FunctionPrism::new` | prism を作成     |
+| `GenPrism[S, A]`                     | `prism!(S, Variant)` | prism を導出     |
+| `prism.getOption(s)`                 | `Prism::preview`     | マッチしたら取得 |
+| `prism.reverseGet(a)`                | `Prism::review`      | 値から構築       |
+| `prism.modify(f)(s)`                 | `Prism::modify`      | マッチしたら変更 |
 
 #### コード例
 
@@ -994,13 +994,13 @@ let modified: Shape = circle_prism.modify(shape, |r| r * 2.0);
 
 ### Optional と Traversal
 
-| Scala (Monocle) | lambars | 説明 |
-|-----------------|---------|-------------|
-| `Optional[S, A]` | `Optional` trait | 存在しない可能性がある |
-| `lens.andThen(prism)` | `LensComposeExtension::compose_prism` | Lens + Prism |
-| `Traversal[S, A]` | `Traversal` trait | 複数のターゲット |
-| `traversal.getAll(s)` | `Traversal::get_all` | すべての値を取得 |
-| `traversal.modify(f)(s)` | `Traversal::modify` | すべてを変更 |
+| Scala (Monocle)          | lambars                               | 説明                   |
+| ------------------------ | ------------------------------------- | ---------------------- |
+| `Optional[S, A]`         | `Optional` trait                      | 存在しない可能性がある |
+| `lens.andThen(prism)`    | `LensComposeExtension::compose_prism` | Lens + Prism           |
+| `Traversal[S, A]`        | `Traversal` trait                     | 複数のターゲット       |
+| `traversal.getAll(s)`    | `Traversal::get_all`                  | すべての値を取得       |
+| `traversal.modify(f)(s)` | `Traversal::modify`                   | すべてを変更           |
 
 #### コード例
 
@@ -1071,13 +1071,13 @@ let raised = employees_lens.set(company, raised_employees);
 
 ### Iso
 
-| Scala (Monocle) | lambars | 説明 |
-|-----------------|---------|-------------|
-| `Iso[S, A](get)(reverseGet)` | `FunctionIso::new` | iso を作成 |
-| `iso.get(s)` | `Iso::get` | 順方向変換 |
-| `iso.reverseGet(a)` | `Iso::reverse_get` | 逆方向変換 |
-| `iso.reverse` | `Iso::reverse` | 方向を入れ替え |
-| `iso1.andThen(iso2)` | `Iso::compose` | iso を合成 |
+| Scala (Monocle)              | lambars            | 説明           |
+| ---------------------------- | ------------------ | -------------- |
+| `Iso[S, A](get)(reverseGet)` | `FunctionIso::new` | iso を作成     |
+| `iso.get(s)`                 | `Iso::get`         | 順方向変換     |
+| `iso.reverseGet(a)`          | `Iso::reverse_get` | 逆方向変換     |
+| `iso.reverse`                | `Iso::reverse`     | 方向を入れ替え |
+| `iso1.andThen(iso2)`         | `Iso::compose`     | iso を合成     |
 
 #### コード例
 
@@ -1124,17 +1124,17 @@ let vec_string_iso = string_vec_iso.reverse();
 
 ### IO Monad
 
-| Scala (Cats Effect) | lambars | 説明 |
-|---------------------|---------|-------------|
-| `IO.pure(a)` | `IO::pure` | 純粋な値 |
-| `IO.delay(expr)` | `IO::new` | 停止されたエフェクト |
-| `IO.raiseError(e)` | `IO::catch` with panic | エラーを発生 |
-| `io.flatMap(f)` | `IO::flat_map` | エフェクトを連鎖 |
-| `io.map(f)` | `IO::fmap` | 結果を変換 |
-| `io.attempt` | `IO::catch` | エラーをキャッチ |
-| `io.unsafeRunSync()` | `IO::run_unsafe` | エフェクトを実行 |
-| `io *> io2` | `IO::then` | シーケンス |
-| `io.void` | `io.fmap(\|_\| ())` | 結果を破棄 |
+| Scala (Cats Effect)  | lambars                | 説明                 |
+| -------------------- | ---------------------- | -------------------- |
+| `IO.pure(a)`         | `IO::pure`             | 純粋な値             |
+| `IO.delay(expr)`     | `IO::new`              | 停止されたエフェクト |
+| `IO.raiseError(e)`   | `IO::catch` with panic | エラーを発生         |
+| `io.flatMap(f)`      | `IO::flat_map`         | エフェクトを連鎖     |
+| `io.map(f)`          | `IO::fmap`             | 結果を変換           |
+| `io.attempt`         | `IO::catch`            | エラーをキャッチ     |
+| `io.unsafeRunSync()` | `IO::run_unsafe`       | エフェクトを実行     |
+| `io *> io2`          | `IO::then`             | シーケンス           |
+| `io.void`            | `io.fmap(\|_\| ())`    | 結果を破棄           |
 
 #### コード例
 
@@ -1186,21 +1186,21 @@ let result = recovered.run_unsafe();
 
 ### MonadError
 
-| Scala (Cats) | lambars | 説明 |
-|--------------|---------|-------------|
-| `MonadError[F, E]` | `MonadError<E>` trait | エラーハンドリング抽象化 |
-| `raiseError(e)` | `MonadError::throw_error` | エラーを投げる |
-| `handleErrorWith(f)` | `MonadError::catch_error` | キャッチして計算で処理 |
-| `handleError(f)` | `MonadError::handle_error` | エラーを成功値に変換 |
-| `adaptError(pf)` | `MonadError::adapt_error` | 同じ型内でエラーを変換 |
-| `recover(pf)` | `MonadError::recover` | 部分関数によるリカバリ |
-| `recoverWith(pf)` | `MonadError::recover_with_partial` | モナディック部分リカバリ |
-| `ensure(p)(e)` | `MonadError::ensure` | 述語で検証 |
-| `ensureOr(p)(e)` | `MonadError::ensure_or` | 値依存エラーで検証 |
-| `redeem(fe, fa)` | `MonadError::redeem` | 成功とエラーの両方を変換 |
-| `redeemWith(fe, fa)` | `MonadError::redeem_with` | モナディック redeem |
-| `attempt` | catch_error で手動実装 | エラーを Either/Result としてキャッチ |
-| (N/A) | `MonadErrorExt::map_error` | エラー型を変換 |
+| Scala (Cats)         | lambars                            | 説明                                  |
+| -------------------- | ---------------------------------- | ------------------------------------- |
+| `MonadError[F, E]`   | `MonadError<E>` trait              | エラーハンドリング抽象化              |
+| `raiseError(e)`      | `MonadError::throw_error`          | エラーを投げる                        |
+| `handleErrorWith(f)` | `MonadError::catch_error`          | キャッチして計算で処理                |
+| `handleError(f)`     | `MonadError::handle_error`         | エラーを成功値に変換                  |
+| `adaptError(pf)`     | `MonadError::adapt_error`          | 同じ型内でエラーを変換                |
+| `recover(pf)`        | `MonadError::recover`              | 部分関数によるリカバリ                |
+| `recoverWith(pf)`    | `MonadError::recover_with_partial` | モナディック部分リカバリ              |
+| `ensure(p)(e)`       | `MonadError::ensure`               | 述語で検証                            |
+| `ensureOr(p)(e)`     | `MonadError::ensure_or`            | 値依存エラーで検証                    |
+| `redeem(fe, fa)`     | `MonadError::redeem`               | 成功とエラーの両方を変換              |
+| `redeemWith(fe, fa)` | `MonadError::redeem_with`          | モナディック redeem                   |
+| `attempt`            | catch_error で手動実装             | エラーを Either/Result としてキャッチ |
+| (N/A)                | `MonadErrorExt::map_error`         | エラー型を変換                        |
 
 #### コード例
 
@@ -1269,16 +1269,16 @@ let redeemed = <Result<i32, String>>::redeem(
 
 ### State Monad
 
-| Scala (Cats) | lambars | 説明 |
-|--------------|---------|-------------|
-| `State.pure(a)` | `State::pure` | 純粋な値 |
-| `State.get` | `State::get` | 状態を取得 |
-| `State.set(s)` | `State::put` | 状態を設定 |
-| `State.modify(f)` | `State::modify` | 状態を変更 |
-| `State.inspect(f)` | `State::gets` | 派生値を取得 |
-| `state.run(s).value` | `State::run` | 初期状態で実行 |
-| `state.runS(s).value` | `State::exec` | 最終状態を取得 |
-| `state.runA(s).value` | `State::eval` | 結果のみを取得 |
+| Scala (Cats)          | lambars         | 説明           |
+| --------------------- | --------------- | -------------- |
+| `State.pure(a)`       | `State::pure`   | 純粋な値       |
+| `State.get`           | `State::get`    | 状態を取得     |
+| `State.set(s)`        | `State::put`    | 状態を設定     |
+| `State.modify(f)`     | `State::modify` | 状態を変更     |
+| `State.inspect(f)`    | `State::gets`   | 派生値を取得   |
+| `state.run(s).value`  | `State::run`    | 初期状態で実行 |
+| `state.runS(s).value` | `State::exec`   | 最終状態を取得 |
+| `state.runA(s).value` | `State::eval`   | 結果のみを取得 |
 
 #### コード例
 
@@ -1314,12 +1314,12 @@ let (result, final_state) = computation.run(5);
 
 ### Reader Monad
 
-| Scala (Cats) | lambars | 説明 |
-|--------------|---------|-------------|
-| `Reader.pure(a)` | `Reader::pure` | 純粋な値 |
-| `Reader.ask` | `Reader::ask` | 環境を取得 |
+| Scala (Cats)         | lambars         | 説明       |
+| -------------------- | --------------- | ---------- |
+| `Reader.pure(a)`     | `Reader::pure`  | 純粋な値   |
+| `Reader.ask`         | `Reader::ask`   | 環境を取得 |
 | `Reader.local(f)(r)` | `Reader::local` | 環境を変更 |
-| `reader.run(env)` | `Reader::run` | 環境で実行 |
+| `reader.run(env)`    | `Reader::run`   | 環境で実行 |
 
 #### コード例
 
@@ -1365,13 +1365,13 @@ let result = computation.run(Config {
 
 ### Writer Monad
 
-| Scala (Cats) | lambars | 説明 |
-|--------------|---------|-------------|
-| `Writer.pure(a)` | `Writer::pure` | 純粋な値 |
-| `Writer.tell(w)` | `Writer::tell` | 出力をログ |
-| `Writer.value(a)` | `Writer::pure` | pure のエイリアス |
-| `writer.run` | `Writer::run` | (結果, ログ) を取得 |
-| `writer.listen` | `Writer::listen` | 計算内でログにアクセス |
+| Scala (Cats)      | lambars          | 説明                   |
+| ----------------- | ---------------- | ---------------------- |
+| `Writer.pure(a)`  | `Writer::pure`   | 純粋な値               |
+| `Writer.tell(w)`  | `Writer::tell`   | 出力をログ             |
+| `Writer.value(a)` | `Writer::pure`   | pure のエイリアス      |
+| `writer.run`      | `Writer::run`    | (結果, ログ) を取得    |
+| `writer.listen`   | `Writer::listen` | 計算内でログにアクセス |
 
 #### コード例
 
@@ -1412,18 +1412,18 @@ let (result, log) = log_computation(5).run();
 
 ### RWS Monad (ReaderWriterState)
 
-| Scala (Cats) | lambars | 説明 |
-|--------------|---------|-------------|
-| `ReaderWriterState.pure(a)` | `RWS::pure` | 純粋な値 |
-| `ReaderWriterState.ask` | `RWS::ask` | 環境を取得 |
-| `ReaderWriterState.get` | `RWS::get` | 状態を取得 |
-| `ReaderWriterState.set(s)` | `RWS::put` | 状態を設定 |
-| `ReaderWriterState.modify(f)` | `RWS::modify` | 状態を変更 |
-| `ReaderWriterState.inspect(f)` | `RWS::gets` | 派生値を取得 |
-| `ReaderWriterState.tell(w)` | `RWS::tell` | ログに追加 |
-| `rws.local(f)` | `RWS::local` | 環境をローカルに変更 |
-| `rws.listen` | `RWS::listen` | 計算内でログにアクセス |
-| `rws.run(env, state)` | `RWS::run` | 環境と状態で実行 |
+| Scala (Cats)                   | lambars       | 説明                   |
+| ------------------------------ | ------------- | ---------------------- |
+| `ReaderWriterState.pure(a)`    | `RWS::pure`   | 純粋な値               |
+| `ReaderWriterState.ask`        | `RWS::ask`    | 環境を取得             |
+| `ReaderWriterState.get`        | `RWS::get`    | 状態を取得             |
+| `ReaderWriterState.set(s)`     | `RWS::put`    | 状態を設定             |
+| `ReaderWriterState.modify(f)`  | `RWS::modify` | 状態を変更             |
+| `ReaderWriterState.inspect(f)` | `RWS::gets`   | 派生値を取得           |
+| `ReaderWriterState.tell(w)`    | `RWS::tell`   | ログに追加             |
+| `rws.local(f)`                 | `RWS::local`  | 環境をローカルに変更   |
+| `rws.listen`                   | `RWS::listen` | 計算内でログにアクセス |
+| `rws.run(env, state)`          | `RWS::run`    | 環境と状態で実行       |
 
 #### コード例
 
@@ -1470,6 +1470,7 @@ let (result, final_state, log) = computation.run(Config { multiplier: 2 }, 10);
 ```
 
 `RWS` モナドは 3 つの機能すべてが必要な場合に便利です：
+
 - **Reader**：共有設定や環境へのアクセス
 - **Writer**：ログやその他のモノイダルな出力の蓄積
 - **State**：計算を通じた可変状態の管理
@@ -1480,14 +1481,14 @@ let (result, final_state, log) = computation.run(Config { multiplier: 2 }, 10);
 
 ### 比較
 
-| Scala (Cats) | lambars | 説明 |
-|--------------|---------|-------------|
-| `OptionT[F, A]` | カスタム実装 | F 内の Option |
+| Scala (Cats)       | lambars            | 説明          |
+| ------------------ | ------------------ | ------------- |
+| `OptionT[F, A]`    | カスタム実装       | F 内の Option |
 | `EitherT[F, E, A]` | `ExceptT<E, F, A>` | F 内の Either |
-| `StateT[F, S, A]` | `StateT<S, F, A>` | F 内の State |
+| `StateT[F, S, A]`  | `StateT<S, F, A>`  | F 内の State  |
 | `ReaderT[F, R, A]` | `ReaderT<R, F, A>` | F 内の Reader |
 | `WriterT[F, W, A]` | `WriterT<W, F, A>` | F 内の Writer |
-| `Kleisli[F, A, B]` | `ReaderT<A, F, B>` | 関数ラッパー |
+| `Kleisli[F, A, B]` | `ReaderT<A, F, B>` | 関数ラッパー  |
 
 ### コード例
 
@@ -1607,6 +1608,7 @@ async fn example() {
 ```
 
 利用可能な AsyncIO メソッド：
+
 - `ReaderT`：`ask_async_io`、`asks_async_io`、`lift_async_io`、`pure_async_io`、`flat_map_async_io`
 - `StateT`：`get_async_io`、`gets_async_io`、`state_async_io`、`lift_async_io`、`pure_async_io`
 - `WriterT`：`tell_async_io`、`lift_async_io`、`pure_async_io`、`flat_map_async_io`、`listen_async_io`
@@ -1617,60 +1619,60 @@ async fn example() {
 
 ### 比較
 
-| Scala | lambars | 説明 |
-|-------|---------|-------------|
-| `List[A]` | `PersistentList<A>` | イミュータブルリスト |
-| `Vector[A]` | `PersistentVector<A>` | イミュータブルベクター |
-| `Map[K, V]` | `PersistentHashMap<K, V>` | イミュータブルハッシュマップ |
+| Scala             | lambars                   | 説明                           |
+| ----------------- | ------------------------- | ------------------------------ |
+| `List[A]`         | `PersistentList<A>`       | イミュータブルリスト           |
+| `Vector[A]`       | `PersistentVector<A>`     | イミュータブルベクター         |
+| `Map[K, V]`       | `PersistentHashMap<K, V>` | イミュータブルハッシュマップ   |
 | `SortedMap[K, V]` | `PersistentTreeMap<K, V>` | イミュータブルソート済みマップ |
-| `Set[A]` | `PersistentHashSet<A>` | イミュータブルセット |
-| `Set[A].view` | `HashSetView<A>` | セット上の遅延ビュー |
+| `Set[A]`          | `PersistentHashSet<A>`    | イミュータブルセット           |
+| `Set[A].view`     | `HashSetView<A>`          | セット上の遅延ビュー           |
 
 ### List/Vector 操作
 
-| Scala | lambars | 説明 |
-|-------|---------|-------------|
-| `list.take(n)` | `PersistentList::take` | 最初の n 要素を取る |
-| `list.drop(n)` | `PersistentList::drop_first` | 最初の n 要素を除く |
-| `list.splitAt(n)` | `PersistentList::split_at` | インデックスで分割 |
-| `list.zip(other)` | `PersistentList::zip` | 2 つのリストを zip |
-| `list.unzip` | `PersistentList::<(A,B)>::unzip` | ペアのリストを unzip |
-| `list.indexWhere(p)` | `PersistentList::find_index` | 最初にマッチするインデックスを検索 |
-| `list.reduceLeft(f)` | `PersistentList::fold_left1` | 初期値なしの左畳み込み |
-| `list.reduceRight(f)` | `PersistentList::fold_right1` | 初期値なしの右畳み込み |
-| `list.scanLeft(z)(f)` | `PersistentList::scan_left` | 初期値ありの左スキャン |
-| `list.partition(p)` | `PersistentList::partition` | 述語で分割 |
-| `list.mkString(sep)` | `PersistentList::intersperse` | 要素間に挿入 |
-| `lists.mkString(sep)` | `PersistentList::intercalate` | リスト間にリストを挿入して平坦化 |
-| `vec.take(n)` | `PersistentVector::take` | 最初の n 要素を取る |
-| `vec.drop(n)` | `PersistentVector::drop_first` | 最初の n 要素を除く |
-| `vec.splitAt(n)` | `PersistentVector::split_at` | インデックスで分割 |
-| `vec.zip(other)` | `PersistentVector::zip` | 2 つのベクターを zip |
-| `vec.unzip` | `PersistentVector::<(A,B)>::unzip` | ペアのベクターを unzip |
-| `vec.indexWhere(p)` | `PersistentVector::find_index` | 最初にマッチするインデックスを検索 |
-| `vec.reduceLeft(f)` | `PersistentVector::fold_left1` | 初期値なしの左畳み込み |
-| `vec.reduceRight(f)` | `PersistentVector::fold_right1` | 初期値なしの右畳み込み |
-| `vec.scanLeft(z)(f)` | `PersistentVector::scan_left` | 初期値ありの左スキャン |
-| `vec.partition(p)` | `PersistentVector::partition` | 述語で分割 |
-| `Ordering[List[A]]` | `Ord` for `PersistentList<A: Ord>` | 辞書順序 |
-| `Ordering[Vector[A]]` | `Ord` for `PersistentVector<A: Ord>` | 辞書順序 |
+| Scala                 | lambars                              | 説明                               |
+| --------------------- | ------------------------------------ | ---------------------------------- |
+| `list.take(n)`        | `PersistentList::take`               | 最初の n 要素を取る                |
+| `list.drop(n)`        | `PersistentList::drop_first`         | 最初の n 要素を除く                |
+| `list.splitAt(n)`     | `PersistentList::split_at`           | インデックスで分割                 |
+| `list.zip(other)`     | `PersistentList::zip`                | 2 つのリストを zip                 |
+| `list.unzip`          | `PersistentList::<(A,B)>::unzip`     | ペアのリストを unzip               |
+| `list.indexWhere(p)`  | `PersistentList::find_index`         | 最初にマッチするインデックスを検索 |
+| `list.reduceLeft(f)`  | `PersistentList::fold_left1`         | 初期値なしの左畳み込み             |
+| `list.reduceRight(f)` | `PersistentList::fold_right1`        | 初期値なしの右畳み込み             |
+| `list.scanLeft(z)(f)` | `PersistentList::scan_left`          | 初期値ありの左スキャン             |
+| `list.partition(p)`   | `PersistentList::partition`          | 述語で分割                         |
+| `list.mkString(sep)`  | `PersistentList::intersperse`        | 要素間に挿入                       |
+| `lists.mkString(sep)` | `PersistentList::intercalate`        | リスト間にリストを挿入して平坦化   |
+| `vec.take(n)`         | `PersistentVector::take`             | 最初の n 要素を取る                |
+| `vec.drop(n)`         | `PersistentVector::drop_first`       | 最初の n 要素を除く                |
+| `vec.splitAt(n)`      | `PersistentVector::split_at`         | インデックスで分割                 |
+| `vec.zip(other)`      | `PersistentVector::zip`              | 2 つのベクターを zip               |
+| `vec.unzip`           | `PersistentVector::<(A,B)>::unzip`   | ペアのベクターを unzip             |
+| `vec.indexWhere(p)`   | `PersistentVector::find_index`       | 最初にマッチするインデックスを検索 |
+| `vec.reduceLeft(f)`   | `PersistentVector::fold_left1`       | 初期値なしの左畳み込み             |
+| `vec.reduceRight(f)`  | `PersistentVector::fold_right1`      | 初期値なしの右畳み込み             |
+| `vec.scanLeft(z)(f)`  | `PersistentVector::scan_left`        | 初期値ありの左スキャン             |
+| `vec.partition(p)`    | `PersistentVector::partition`        | 述語で分割                         |
+| `Ordering[List[A]]`   | `Ord` for `PersistentList<A: Ord>`   | 辞書順序                           |
+| `Ordering[Vector[A]]` | `Ord` for `PersistentVector<A: Ord>` | 辞書順序                           |
 
 ### Map 操作
 
-| Scala | lambars | 説明 |
-|-------|---------|-------------|
-| `map.mapValues(f)` | `PersistentHashMap::map_values` | 値を変換 |
-| `map.transform((k, v) => f(k, v))` | `PersistentHashMap::map_values` | 値を変換（クロージャ内でキーが利用可能） |
-| `map.map { case (k, v) => (f(k), v) }` | `PersistentHashMap::map_keys` | キーを変換 |
-| `map.collect { case (k, v) if p(k, v) => (k, f(v)) }` | `PersistentHashMap::filter_map` | フィルタして変換 |
-| `map.toList` | `PersistentHashMap::entries` | すべてのエントリを取得 |
-| `map.keys` | `PersistentHashMap::keys` | すべてのキーを取得 |
-| `map.values` | `PersistentHashMap::values` | すべての値を取得 |
-| `map1 ++ map2` | `PersistentHashMap::merge` | マージ（右が優先） |
-| `map1.merged(map2)((k, v1, v2) => f(k, v1, v2))` | `PersistentHashMap::merge_with` | リゾルバー付きマージ |
-| `map.filter { case (k, v) => p(k, v) }` | `PersistentHashMap::keep_if` | マッチするエントリを保持 |
-| `map.filterNot { case (k, v) => p(k, v) }` | `PersistentHashMap::delete_if` | マッチするエントリを削除 |
-| `map.partition { case (k, v) => p(k, v) }` | `PersistentHashMap::partition` | 述語で分割 |
+| Scala                                                 | lambars                         | 説明                                     |
+| ----------------------------------------------------- | ------------------------------- | ---------------------------------------- |
+| `map.mapValues(f)`                                    | `PersistentHashMap::map_values` | 値を変換                                 |
+| `map.transform((k, v) => f(k, v))`                    | `PersistentHashMap::map_values` | 値を変換（クロージャ内でキーが利用可能） |
+| `map.map { case (k, v) => (f(k), v) }`                | `PersistentHashMap::map_keys`   | キーを変換                               |
+| `map.collect { case (k, v) if p(k, v) => (k, f(v)) }` | `PersistentHashMap::filter_map` | フィルタして変換                         |
+| `map.toList`                                          | `PersistentHashMap::entries`    | すべてのエントリを取得                   |
+| `map.keys`                                            | `PersistentHashMap::keys`       | すべてのキーを取得                       |
+| `map.values`                                          | `PersistentHashMap::values`     | すべての値を取得                         |
+| `map1 ++ map2`                                        | `PersistentHashMap::merge`      | マージ（右が優先）                       |
+| `map1.merged(map2)((k, v1, v2) => f(k, v1, v2))`      | `PersistentHashMap::merge_with` | リゾルバー付きマージ                     |
+| `map.filter { case (k, v) => p(k, v) }`               | `PersistentHashMap::keep_if`    | マッチするエントリを保持                 |
+| `map.filterNot { case (k, v) => p(k, v) }`            | `PersistentHashMap::delete_if`  | マッチするエントリを削除                 |
+| `map.partition { case (k, v) => p(k, v) }`            | `PersistentHashMap::partition`  | 述語で分割                               |
 
 ### コード例
 
@@ -1774,16 +1776,16 @@ Scala は `.par` を通じて並列コレクションを提供し、lambars は�
 
 ### 比較
 
-| Scala | lambars | 説明 |
-|-------|---------|-------------|
-| `collection.par` | `into_par_iter()` (`rayon` feature が必要) | 並列コレクションに変換 |
-| `collection.par.map(f)` | `par_iter().map(f)` | 並列マップ |
-| `collection.par.filter(p)` | `par_iter().filter(p)` | 並列フィルタ |
-| `collection.par.reduce(f)` | `par_iter().reduce(identity, f)` | 並列畳み込み |
-| `collection.par.sum` | `par_iter().sum()` | 並列合計 |
-| `collection.par.find(p)` | `par_iter().find_any(p)` | 検索（非決定的） |
-| `collection.par.forall(p)` | `par_iter().all(p)` | すべてが述語にマッチ |
-| `collection.par.exists(p)` | `par_iter().any(p)` | いずれかが述語にマッチ |
+| Scala                      | lambars                                    | 説明                   |
+| -------------------------- | ------------------------------------------ | ---------------------- |
+| `collection.par`           | `into_par_iter()` (`rayon` feature が必要) | 並列コレクションに変換 |
+| `collection.par.map(f)`    | `par_iter().map(f)`                        | 並列マップ             |
+| `collection.par.filter(p)` | `par_iter().filter(p)`                     | 並列フィルタ           |
+| `collection.par.reduce(f)` | `par_iter().reduce(identity, f)`           | 並列畳み込み           |
+| `collection.par.sum`       | `par_iter().sum()`                         | 並列合計               |
+| `collection.par.find(p)`   | `par_iter().find_any(p)`                   | 検索（非決定的）       |
+| `collection.par.forall(p)` | `par_iter().all(p)`                        | すべてが述語にマッチ   |
+| `collection.par.exists(p)` | `par_iter().any(p)`                        | いずれかが述語にマッチ |
 
 ### コード例
 
@@ -1823,11 +1825,11 @@ Scala と lambars の両方で、並列操作は特定の操作で順序を保�
 
 ## 遅延評価
 
-| Scala | lambars | 説明 |
-|-------|---------|-------------|
-| `lazy val x = expr` | `Lazy::new(\|\| expr)` | 遅延値 |
-| `x` (force) | `Lazy::force` | 評価を強制 |
-| `LazyList` | `Iterator` | 遅延シーケンス |
+| Scala               | lambars                | 説明           |
+| ------------------- | ---------------------- | -------------- |
+| `lazy val x = expr` | `Lazy::new(\|\| expr)` | 遅延値         |
+| `x` (force)         | `Lazy::force`          | 評価を強制     |
+| `LazyList`          | `Iterator`             | 遅延シーケンス |
 
 ### コード例
 
@@ -1964,18 +1966,18 @@ let even = 4.is_even();    // true
 
 ### 構文の違い
 
-| 側面 | Scala | lambars (Rust) |
-|--------|-------|----------------|
-| for 内包表記（Monad） | `for { x <- mx } yield x` | `eff! { x <= mx; expr }` |
-| for 内包表記（List） | `for { x <- xs } yield x` | `for_! { x <= xs; yield x }` |
-| 型パラメータ | `F[A]` | `F<A>` |
-| Option | `Some(x)` / `None` | `Some(x)` / `None` |
-| Either | `Right(x)` / `Left(e)` | `Ok(x)` / `Err(e)` |
-| ラムダ | `x => x + 1` | `\|x\| x + 1` |
-| メソッド呼び出し | `obj.method(arg)` | `obj.method(arg)` |
-| 型注釈 | `x: Int` | `x: i32` |
-| trait 定義 | `trait T { }` | `trait T { }` |
-| Implicit | `implicit val` | N/A（明示的な trait） |
+| 側面                  | Scala                     | lambars (Rust)               |
+| --------------------- | ------------------------- | ---------------------------- |
+| for 内包表記（Monad） | `for { x <- mx } yield x` | `eff! { x <= mx; expr }`     |
+| for 内包表記（List）  | `for { x <- xs } yield x` | `for_! { x <= xs; yield x }` |
+| 型パラメータ          | `F[A]`                    | `F<A>`                       |
+| Option                | `Some(x)` / `None`        | `Some(x)` / `None`           |
+| Either                | `Right(x)` / `Left(e)`    | `Ok(x)` / `Err(e)`           |
+| ラムダ                | `x => x + 1`              | `\|x\| x + 1`                |
+| メソッド呼び出し      | `obj.method(arg)`         | `obj.method(arg)`            |
+| 型注釈                | `x: Int`                  | `x: i32`                     |
+| trait 定義            | `trait T { }`             | `trait T { }`                |
+| Implicit              | `implicit val`            | N/A（明示的な trait）        |
 
 ### 概念の違い
 
@@ -1998,6 +2000,7 @@ let even = 4.is_even();    // true
 ## 移行のヒント
 
 1. **`for` 内包表記を `eff!` または `for_!` に置き換える**：バインディングには `<-` の代わりに `<=` を使用。
+
    - モナド（Option、Result、IO、State、Reader、Writer）には `eff!` を使用
    - リスト（Vec）には `yield` キーワード付きで `for_!` を使用
 
