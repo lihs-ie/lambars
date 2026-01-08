@@ -1,0 +1,147 @@
+# Issue: CodSpeed導入による継続的ベンチマーク
+# CI/CDパイプラインでのパフォーマンス測定・リグレッション検出の自動化
+
+deferred_features:
+  - id: codspeed_integration
+    name: "CodSpeed導入による継続的ベンチマーク"
+    discovered_date: "2026-01-08"
+    priority: medium
+    category: enhancement
+    labels:
+      - "enhancement"
+      - "performance"
+      - "ci"
+
+    # 問題の説明
+    problem:
+      summary: "PRごとのパフォーマンスリグレッション検出が自動化されていない"
+      details: |
+        現在のプロジェクトでは criterion を使用したベンチマークが存在するが、
+        以下の課題がある：
+
+        1. ベンチマークはローカル実行のみで、CI での自動実行がない
+        2. PR でのパフォーマンスリグレッションを検出する仕組みがない
+        3. パフォーマンス変化の履歴追跡ができない
+        4. フレームグラフなどの詳細なプロファイリング情報が自動生成されない
+
+        これにより、パフォーマンス低下が気づかれずにマージされるリスクがある。
+
+    # 解決策の提案
+    solution:
+      approach: "CodSpeed を導入し、GitHub Actions でベンチマークを自動実行する"
+      options:
+        - name: "CodSpeed + criterion互換レイヤー"
+          description: |
+            CodSpeed の criterion 互換パッケージを使用して、
+            既存の criterion ベンチマークをそのまま活用する。
+
+            Cargo.toml の変更:
+            ```toml
+            [dev-dependencies]
+            criterion = { package = "codspeed-criterion-compat", version = "2.7" }
+            ```
+
+            GitHub Actions ワークフロー追加:
+            ```yaml
+            name: CodSpeed Benchmarks
+
+            on:
+              push:
+                branches: [main]
+              pull_request:
+              workflow_dispatch:
+
+            jobs:
+              benchmarks:
+                runs-on: ubuntu-latest
+                steps:
+                  - uses: actions/checkout@v4
+                  - uses: moonrepo/setup-rust@v1
+                    with:
+                      bins: cargo-codspeed
+                  - name: Build benchmarks
+                    run: cargo codspeed build
+                  - name: Run benchmarks
+                    uses: CodSpeedHQ/action@v3
+                    with:
+                      token: ${{ secrets.CODSPEED_TOKEN }}
+                      run: cargo codspeed run
+            ```
+          pros:
+            - 既存の criterion ベンチマークをそのまま使用可能
+            - PR に自動でパフォーマンスレポートがコメントされる
+            - フレームグラフが自動生成される
+            - パフォーマンス履歴の追跡が可能
+            - Public OSS プロジェクトは無料
+          cons:
+            - 外部サービスへの依存
+            - CODSPEED_TOKEN の管理が必要
+            - CI 実行時間が増加する可能性
+
+        - name: "GitHub Actions のみでベンチマーク"
+          description: |
+            CodSpeed を使用せず、GitHub Actions で criterion を直接実行し、
+            結果を Artifact として保存する。
+          pros:
+            - 外部サービスへの依存なし
+            - シンプルな構成
+          cons:
+            - PR へのレポート自動生成なし
+            - 履歴追跡が困難
+            - フレームグラフなし
+
+      recommended: "CodSpeed + criterion互換レイヤー"
+      estimated_complexity: low
+
+    # 実装手順
+    implementation_steps:
+      - step: 1
+        description: "CodSpeed にリポジトリを登録"
+        details: |
+          1. https://codspeed.io にアクセス
+          2. GitHub アカウントで認証
+          3. lihs-ie/lambars リポジトリを追加
+
+      - step: 2
+        description: "GitHub Secrets に CODSPEED_TOKEN を追加"
+        details: |
+          1. リポジトリの Settings > Secrets and variables > Actions
+          2. New repository secret で CODSPEED_TOKEN を追加
+
+      - step: 3
+        description: "Cargo.toml の依存関係を更新"
+        details: |
+          既存の criterion を codspeed-criterion-compat に置き換え:
+          ```toml
+          [dev-dependencies]
+          criterion = { package = "codspeed-criterion-compat", version = "2.7", features = ["html_reports"] }
+          ```
+
+      - step: 4
+        description: "GitHub Actions ワークフローを追加"
+        details: |
+          .github/workflows/codspeed.yml を作成
+
+      - step: 5
+        description: "動作確認"
+        details: |
+          1. PR を作成してベンチマークが実行されることを確認
+          2. CodSpeed ダッシュボードで結果を確認
+
+    # 参考情報
+    references:
+      - "CodSpeed 公式ドキュメント: https://codspeed.io/docs"
+      - "CodSpeed CI導入記事: https://zenn.dev/termoshtt/articles/codspeed-continuous-benchmarking"
+      - "codspeed-criterion-compat: https://crates.io/crates/codspeed-criterion-compat"
+      - "CodSpeed GitHub Action: https://github.com/CodSpeedHQ/action"
+
+    # 関連する要件・実装
+    related:
+      requirement_id: null
+      plan_id: null
+
+    # GitHub Issue 情報（作成後に追記）
+    github_issue:
+      number: 77
+      url: "https://github.com/lihs-ie/lambars/issues/77"
+      created: true
