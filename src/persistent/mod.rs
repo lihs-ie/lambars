@@ -136,10 +136,12 @@ mod vector;
 pub use hashmap::PersistentHashMap;
 pub use hashmap::PersistentHashMapIntoIterator;
 pub use hashmap::PersistentHashMapIterator;
+pub use hashmap::TransientHashMap;
 pub use hashset::HashSetView;
 pub use hashset::PersistentHashSet;
 pub use hashset::PersistentHashSetIntoIterator;
 pub use hashset::PersistentHashSetIterator;
+pub use hashset::TransientHashSet;
 pub use list::PersistentList;
 pub use list::PersistentListIntoIterator;
 pub use list::PersistentListIterator;
@@ -150,6 +152,7 @@ pub use treemap::PersistentTreeMapRangeIterator;
 pub use vector::PersistentVector;
 pub use vector::PersistentVectorIntoIterator;
 pub use vector::PersistentVectorIterator;
+pub use vector::TransientVector;
 
 // =============================================================================
 // Tests
