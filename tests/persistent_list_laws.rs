@@ -475,4 +475,63 @@ proptest! {
 
         prop_assert_eq!(hasher1.finish(), hasher2.finish());
     }
+
+    // =========================================================================
+    // Ord Laws
+    // =========================================================================
+
+    #[test]
+    fn prop_ord_reflexivity(list in small_list()) {
+        prop_assert_eq!(list.cmp(&list), std::cmp::Ordering::Equal);
+    }
+
+    #[test]
+    fn prop_ord_antisymmetry(list1 in small_list(), list2 in small_list()) {
+        if list1 <= list2 && list2 <= list1 {
+            prop_assert_eq!(list1, list2);
+        }
+    }
+
+    #[test]
+    fn prop_ord_transitivity(
+        list1 in small_list(),
+        list2 in small_list(),
+        list3 in small_list()
+    ) {
+        if list1 <= list2 && list2 <= list3 {
+            prop_assert!(list1 <= list3);
+        }
+    }
+
+    #[test]
+    fn prop_ord_totality(list1 in small_list(), list2 in small_list()) {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        match list1.cmp(&list2) {
+            Less => {
+                prop_assert!(list1 < list2);
+                prop_assert!(list1 != list2);
+                prop_assert!(list1 <= list2);
+            }
+            Equal => {
+                prop_assert!(list1 >= list2);
+                prop_assert!(list1 == list2);
+                prop_assert!(list1 <= list2);
+            }
+            Greater => {
+                prop_assert!(list1 >= list2);
+                prop_assert!(list1 != list2);
+                prop_assert!(list1 > list2);
+            }
+        }
+    }
+
+    #[test]
+    fn prop_ord_consistency_with_partial_ord(list1 in small_list(), list2 in small_list()) {
+        prop_assert_eq!(list1.partial_cmp(&list2), Some(list1.cmp(&list2)));
+    }
+
+    #[test]
+    fn prop_ord_consistency_with_eq(list1 in small_list(), list2 in small_list()) {
+        prop_assert_eq!(list1.cmp(&list2) == std::cmp::Ordering::Equal, list1 == list2);
+    }
 }

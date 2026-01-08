@@ -2104,6 +2104,73 @@ impl<T: PartialEq> PartialEq for PersistentVector<T> {
 
 impl<T: Eq> Eq for PersistentVector<T> {}
 
+/// Compares two vectors lexicographically for partial ordering.
+///
+/// This implementation enables comparison operators (`<`, `<=`, `>`, `>=`) for
+/// `PersistentVector<T>` when the element type `T` supports partial ordering.
+///
+/// The comparison follows lexicographic ordering:
+/// 1. Compare elements pairwise from the beginning
+/// 2. The first non-equal pair determines the ordering
+/// 3. If all compared elements are equal:
+///    - A shorter vector is less than a longer vector
+///    - Vectors of equal length are equal
+///
+/// Returns `None` if any element comparison returns `None` (e.g., when
+/// comparing `NaN` values in floating-point types).
+///
+/// # Examples
+///
+/// ```rust
+/// use lambars::persistent::PersistentVector;
+/// use std::cmp::Ordering;
+///
+/// let vector1: PersistentVector<i32> = vec![1, 2, 3].into_iter().collect();
+/// let vector2: PersistentVector<i32> = vec![1, 2, 4].into_iter().collect();
+/// assert_eq!(vector1.partial_cmp(&vector2), Some(Ordering::Less));
+///
+/// let prefix: PersistentVector<i32> = vec![1, 2].into_iter().collect();
+/// let extended: PersistentVector<i32> = vec![1, 2, 3].into_iter().collect();
+/// assert_eq!(prefix.partial_cmp(&extended), Some(Ordering::Less));
+/// ```
+impl<T: PartialOrd> PartialOrd for PersistentVector<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.iter().partial_cmp(other.iter())
+    }
+}
+
+/// Compares two vectors lexicographically for total ordering.
+///
+/// This implementation enables `PersistentVector<T>` to be used as keys in
+/// `BTreeMap`/`BTreeSet` and to be sorted when the element type `T` supports
+/// total ordering.
+///
+/// The comparison follows lexicographic ordering, identical to `PartialOrd`,
+/// but always returns a definite `Ordering` since `T: Ord` guarantees total
+/// ordering for all elements.
+///
+/// # Examples
+///
+/// ```rust
+/// use lambars::persistent::PersistentVector;
+/// use std::collections::BTreeSet;
+///
+/// let mut set: BTreeSet<PersistentVector<i32>> = BTreeSet::new();
+/// set.insert(vec![1, 2, 3].into_iter().collect());
+/// set.insert(vec![1, 2, 2].into_iter().collect());
+/// set.insert(vec![1, 2, 4].into_iter().collect());
+///
+/// let ordered: Vec<PersistentVector<i32>> = set.iter().cloned().collect();
+/// assert_eq!(ordered[0], vec![1, 2, 2].into_iter().collect());
+/// assert_eq!(ordered[1], vec![1, 2, 3].into_iter().collect());
+/// assert_eq!(ordered[2], vec![1, 2, 4].into_iter().collect());
+/// ```
+impl<T: Ord> Ord for PersistentVector<T> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.iter().cmp(other.iter())
+    }
+}
+
 /// Computes a hash value for this vector.
 ///
 /// The hash is computed by first hashing the length, then hashing each
@@ -3861,6 +3928,150 @@ mod tests {
         let result = outer.intercalate(&separator);
         let collected: Vec<char> = result.iter().copied().collect();
         assert_eq!(collected, vec!['a', 'b', '-', '-', 'c', 'd']);
+    }
+
+    // =========================================================================
+    // Ord / PartialOrd Tests
+    // =========================================================================
+
+    mod ord_tests {
+        use super::*;
+        use std::cmp::Ordering;
+        use std::collections::{BTreeMap, BTreeSet};
+
+        #[rstest]
+        fn test_ord_empty_equals_empty() {
+            let empty1: PersistentVector<i32> = PersistentVector::new();
+            let empty2: PersistentVector<i32> = PersistentVector::new();
+            assert_eq!(empty1.cmp(&empty2), Ordering::Equal);
+            assert_eq!(empty1.partial_cmp(&empty2), Some(Ordering::Equal));
+        }
+
+        #[rstest]
+        fn test_ord_empty_less_than_non_empty() {
+            let empty: PersistentVector<i32> = PersistentVector::new();
+            let non_empty = PersistentVector::singleton(1);
+            assert_eq!(empty.cmp(&non_empty), Ordering::Less);
+            assert_eq!(non_empty.cmp(&empty), Ordering::Greater);
+        }
+
+        #[rstest]
+        fn test_ord_single_element_comparison() {
+            let vector1 = PersistentVector::singleton(1);
+            let vector2 = PersistentVector::singleton(2);
+            let vector3 = PersistentVector::singleton(1);
+            assert_eq!(vector1.cmp(&vector2), Ordering::Less);
+            assert_eq!(vector2.cmp(&vector1), Ordering::Greater);
+            assert_eq!(vector1.cmp(&vector3), Ordering::Equal);
+        }
+
+        #[rstest]
+        fn test_ord_lexicographic_comparison() {
+            let vector1: PersistentVector<i32> = vec![1, 2, 3].into_iter().collect();
+            let vector2: PersistentVector<i32> = vec![1, 2, 4].into_iter().collect();
+            let vector3: PersistentVector<i32> = vec![1, 3, 2].into_iter().collect();
+            assert_eq!(vector1.cmp(&vector2), Ordering::Less);
+            assert_eq!(vector1.cmp(&vector3), Ordering::Less);
+            assert_eq!(vector2.cmp(&vector3), Ordering::Less);
+        }
+
+        #[rstest]
+        fn test_ord_prefix_is_less() {
+            let prefix: PersistentVector<i32> = vec![1, 2].into_iter().collect();
+            let extended: PersistentVector<i32> = vec![1, 2, 3].into_iter().collect();
+            assert_eq!(prefix.cmp(&extended), Ordering::Less);
+            assert_eq!(extended.cmp(&prefix), Ordering::Greater);
+        }
+
+        #[rstest]
+        fn test_ord_first_difference_determines_order() {
+            let vector1: PersistentVector<i32> = vec![1, 2, 9].into_iter().collect();
+            let vector2: PersistentVector<i32> = vec![1, 3, 0].into_iter().collect();
+            assert_eq!(vector1.cmp(&vector2), Ordering::Less);
+        }
+
+        #[rstest]
+        fn test_partial_cmp_with_nan() {
+            let vector1: PersistentVector<f64> = vec![1.0, f64::NAN, 3.0].into_iter().collect();
+            let vector2: PersistentVector<f64> = vec![1.0, 2.0, 3.0].into_iter().collect();
+            assert_eq!(vector1.partial_cmp(&vector2), None);
+
+            let empty1: PersistentVector<f64> = PersistentVector::new();
+            let empty2: PersistentVector<f64> = PersistentVector::new();
+            assert_eq!(empty1.partial_cmp(&empty2), Some(Ordering::Equal));
+
+            let vector3: PersistentVector<f64> = vec![1.0, 2.0].into_iter().collect();
+            let vector4: PersistentVector<f64> = vec![1.0, 3.0].into_iter().collect();
+            assert_eq!(vector3.partial_cmp(&vector4), Some(Ordering::Less));
+        }
+
+        #[rstest]
+        fn test_partial_cmp_nan_not_reached_due_to_earlier_difference() {
+            let vector1: PersistentVector<f64> = vec![1.0, f64::NAN].into_iter().collect();
+            let vector2: PersistentVector<f64> = vec![2.0, f64::NAN].into_iter().collect();
+            assert_eq!(vector1.partial_cmp(&vector2), Some(Ordering::Less));
+        }
+
+        #[rstest]
+        fn test_ord_comparison_operators() {
+            let vector1: PersistentVector<i32> = vec![1, 2, 3].into_iter().collect();
+            let vector2: PersistentVector<i32> = vec![1, 2, 4].into_iter().collect();
+            let vector3: PersistentVector<i32> = vec![1, 2, 3].into_iter().collect();
+
+            assert!(vector1 < vector2);
+            assert!(vector2 > vector1);
+            assert!(vector1 <= vector2);
+            assert!(vector2 >= vector1);
+            assert!(vector1 <= vector3);
+            assert!(vector1 >= vector3);
+        }
+
+        #[rstest]
+        fn test_ord_in_btreeset() {
+            let mut set: BTreeSet<PersistentVector<i32>> = BTreeSet::new();
+            set.insert(vec![1, 2, 3].into_iter().collect());
+            set.insert(vec![1, 2, 2].into_iter().collect());
+            set.insert(vec![1, 2, 4].into_iter().collect());
+
+            let ordered: Vec<PersistentVector<i32>> = set.iter().cloned().collect();
+            assert_eq!(ordered.len(), 3);
+            assert_eq!(ordered[0], vec![1, 2, 2].into_iter().collect());
+            assert_eq!(ordered[1], vec![1, 2, 3].into_iter().collect());
+            assert_eq!(ordered[2], vec![1, 2, 4].into_iter().collect());
+        }
+
+        #[rstest]
+        fn test_ord_in_btreemap_key() {
+            let mut map: BTreeMap<PersistentVector<i32>, &str> = BTreeMap::new();
+            map.insert(vec![1, 2, 3].into_iter().collect(), "middle");
+            map.insert(vec![1, 2, 2].into_iter().collect(), "first");
+            map.insert(vec![1, 2, 4].into_iter().collect(), "last");
+
+            let keys: Vec<PersistentVector<i32>> = map.keys().cloned().collect();
+            assert_eq!(keys.len(), 3);
+            assert_eq!(keys[0], vec![1, 2, 2].into_iter().collect());
+            assert_eq!(keys[1], vec![1, 2, 3].into_iter().collect());
+            assert_eq!(keys[2], vec![1, 2, 4].into_iter().collect());
+
+            assert_eq!(
+                map.get(&vec![1, 2, 2].into_iter().collect()),
+                Some(&"first")
+            );
+        }
+
+        #[rstest]
+        fn test_ord_vec_sort() {
+            let vector1: PersistentVector<i32> = vec![1, 2, 4].into_iter().collect();
+            let vector2: PersistentVector<i32> = vec![1, 2, 2].into_iter().collect();
+            let vector3: PersistentVector<i32> = vec![1, 2, 3].into_iter().collect();
+
+            let mut vectors = [vector1.clone(), vector2.clone(), vector3.clone()];
+            vectors.sort();
+
+            assert_eq!(vectors[0], vector2);
+            assert_eq!(vectors[1], vector3);
+            assert_eq!(vectors[2], vector1);
+        }
     }
 }
 

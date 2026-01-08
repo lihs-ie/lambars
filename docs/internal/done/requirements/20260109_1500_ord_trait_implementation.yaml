@@ -1,0 +1,776 @@
+# Ord Trait Implementation for Persistent Collections
+#
+# Overview:
+#   PersistentList<T> and PersistentVector<T> have PartialEq but lack Ord.
+#   This prevents natural lexicographic ordering for sorting and comparisons.
+#
+# Design Principles:
+#   1. Implement PartialOrd trait under T: PartialOrd constraint
+#   2. Implement Ord trait under T: Ord constraint
+#   3. Use lexicographic ordering (same as Haskell lists, Rust Vec, etc.)
+#   4. Maintain referential transparency - same inputs produce same ordering
+#   5. Pure function implementation - no side effects during comparison
+#   6. Preserve immutability - comparison never modifies data
+#   7. Iterator order consistency - comparison relies on iter() which must be
+#      deterministic and consistent with index order (0, 1, 2, ...)
+#
+# References:
+#   - GitHub Issue #18: Ord trait implementation
+#   - Rust std::cmp::Ord documentation
+#   - Haskell Data.Ord (lexicographic comparison for lists)
+#   - Existing PartialEq implementations in list.rs and vector.rs
+
+version: "1.0.0"
+name: "Ord Trait Implementation"
+description: |
+  PersistentList<T> and PersistentVector<T> currently implement PartialEq and Eq,
+  but do not implement PartialOrd and Ord. This means these collections cannot be
+  used in contexts requiring ordering, such as:
+
+  - Using collections as keys in BTreeMap/BTreeSet
+  - Sorting collections of collections
+  - Natural ordering comparisons (min, max, etc.)
+
+  This requirement implements lexicographic ordering for both types, following
+  the same semantics as Rust's Vec<T> and Haskell's list Ord instance.
+
+background:
+  problem: |
+    Current PersistentList and PersistentVector only implement PartialEq/Eq.
+    Users cannot:
+    - Compare two lists/vectors for ordering (less than, greater than)
+    - Use these types as keys in ordered collections (BTreeMap, BTreeSet)
+    - Sort a collection of lists/vectors naturally
+    - Use min/max/clamp operations on these types
+
+    Example of current limitation:
+    ```rust
+    let list1 = PersistentList::from_iter([1, 2, 3]);
+    let list2 = PersistentList::from_iter([1, 2, 4]);
+    // This does not compile:
+    // let _is_less = list1 < list2;
+    ```
+
+  motivation: |
+    Lexicographic ordering is a natural and expected feature for sequence types
+    in functional programming. All major FP languages provide this:
+
+    - Haskell: `instance Ord a => Ord [a]`
+    - Scala: `implicit def seqOrdering[A: Ordering]: Ordering[Seq[A]]`
+    - F#: `compare` function for lists
+    - Rust: `impl<T: Ord> Ord for Vec<T>`
+
+    Without Ord, PersistentList and PersistentVector are incomplete as
+    general-purpose functional data structures.
+
+  prior_art:
+    - name: "Rust std::vec::Vec"
+      description: |
+        Vec<T> implements Ord when T: Ord using lexicographic comparison.
+        This is the standard expected behavior in Rust.
+
+        Implementation:
+        - Compare elements pairwise from the beginning
+        - First non-equal pair determines the ordering
+        - If all compared elements are equal, shorter is less than longer
+
+    - name: "Haskell List Ord instance"
+      description: |
+        Haskell lists implement Ord with lexicographic ordering:
+        ```haskell
+        instance Ord a => Ord [a] where
+          compare [] []         = EQ
+          compare [] (_:_)      = LT
+          compare (_:_) []      = GT
+          compare (x:xs) (y:ys) = case compare x y of
+            EQ -> compare xs ys
+            other -> other
+        ```
+
+requirements:
+  # ============================================================================
+  # 1. PartialOrd Implementation
+  # ============================================================================
+  - id: partial_ord_persistent_list
+    name: "PartialOrd for PersistentList<T>"
+    description: |
+      Implement std::cmp::PartialOrd for PersistentList<T> where T: PartialOrd.
+
+      This enables comparison operators (<, <=, >, >=) for lists when the
+      element type supports partial ordering.
+
+    methods:
+      - name: partial_cmp
+        signature: "fn partial_cmp(&self, other: &Self) -> Option<Ordering>"
+        description: |
+          Compare two lists lexicographically.
+
+          Algorithm:
+          1. Iterate through both lists simultaneously
+          2. For each pair of elements (a, b):
+             - If a.partial_cmp(b) returns Some(Less) or Some(Greater), return that
+             - If a.partial_cmp(b) returns None, return None
+             - If a.partial_cmp(b) returns Some(Equal), continue to next pair
+          3. If all compared elements are equal:
+             - If self is shorter, return Some(Less)
+             - If self is longer, return Some(Greater)
+             - If same length, return Some(Equal)
+
+          Returns None only if any element comparison returns None.
+        examples:
+          - description: "Basic comparison"
+            code: |
+              let list1 = PersistentList::from_iter([1, 2, 3]);
+              let list2 = PersistentList::from_iter([1, 2, 4]);
+              assert_eq!(list1.partial_cmp(&list2), Some(Ordering::Less));
+
+          - description: "Different lengths"
+            code: |
+              let shorter = PersistentList::from_iter([1, 2]);
+              let longer = PersistentList::from_iter([1, 2, 3]);
+              assert_eq!(shorter.partial_cmp(&longer), Some(Ordering::Less));
+
+          - description: "Empty lists"
+            code: |
+              let empty1: PersistentList<i32> = PersistentList::new();
+              let empty2: PersistentList<i32> = PersistentList::new();
+              assert_eq!(empty1.partial_cmp(&empty2), Some(Ordering::Equal));
+
+          - description: "PartialOrd with None (NaN elements)"
+            code: |
+              // When element comparison returns None, the collection comparison also returns None
+              let list1 = PersistentList::from_iter([1.0, f64::NAN, 3.0]);
+              let list2 = PersistentList::from_iter([1.0, 2.0, 3.0]);
+              // NaN comparisons return None
+              assert_eq!(list1.partial_cmp(&list2), None);
+
+              // Empty lists still compare equal even with NaN-capable types
+              let empty1: PersistentList<f64> = PersistentList::new();
+              let empty2: PersistentList<f64> = PersistentList::new();
+              assert_eq!(empty1.partial_cmp(&empty2), Some(Ordering::Equal));
+
+              // If NaN is not reached, comparison works normally
+              let list3 = PersistentList::from_iter([1.0, 2.0]);
+              let list4 = PersistentList::from_iter([1.0, 3.0]);
+              assert_eq!(list3.partial_cmp(&list4), Some(Ordering::Less));
+
+    implementations:
+      - type: "PersistentList<T: PartialOrd>"
+        description: |
+          Implementation uses iterator-based comparison for efficiency:
+          ```rust
+          impl<T: PartialOrd> PartialOrd for PersistentList<T> {
+              fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+                  self.iter().partial_cmp(other.iter())
+              }
+          }
+          ```
+
+  - id: partial_ord_persistent_vector
+    name: "PartialOrd for PersistentVector<T>"
+    description: |
+      Implement std::cmp::PartialOrd for PersistentVector<T> where T: PartialOrd.
+
+    methods:
+      - name: partial_cmp
+        signature: "fn partial_cmp(&self, other: &Self) -> Option<Ordering>"
+        description: |
+          Compare two vectors lexicographically using the same algorithm
+          as PersistentList.
+        examples:
+          - description: "Basic comparison"
+            code: |
+              let vec1 = PersistentVector::from_iter([1, 2, 3]);
+              let vec2 = PersistentVector::from_iter([1, 2, 4]);
+              assert_eq!(vec1.partial_cmp(&vec2), Some(Ordering::Less));
+
+          - description: "Different lengths"
+            code: |
+              let shorter = PersistentVector::from_iter([1, 2]);
+              let longer = PersistentVector::from_iter([1, 2, 3]);
+              assert_eq!(shorter.partial_cmp(&longer), Some(Ordering::Less));
+
+          - description: "Empty vectors"
+            code: |
+              let empty1: PersistentVector<i32> = PersistentVector::new();
+              let empty2: PersistentVector<i32> = PersistentVector::new();
+              assert_eq!(empty1.partial_cmp(&empty2), Some(Ordering::Equal));
+
+          - description: "PartialOrd with None (NaN elements)"
+            code: |
+              // When element comparison returns None, the collection comparison also returns None
+              let vec1 = PersistentVector::from_iter([1.0, f64::NAN, 3.0]);
+              let vec2 = PersistentVector::from_iter([1.0, 2.0, 3.0]);
+              assert_eq!(vec1.partial_cmp(&vec2), None);
+
+    implementations:
+      - type: "PersistentVector<T: PartialOrd>"
+        description: |
+          Implementation uses iterator-based comparison:
+          ```rust
+          impl<T: PartialOrd> PartialOrd for PersistentVector<T> {
+              fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+                  self.iter().partial_cmp(other.iter())
+              }
+          }
+          ```
+
+  # ============================================================================
+  # 2. Ord Implementation
+  # ============================================================================
+  - id: ord_persistent_list
+    name: "Ord for PersistentList<T>"
+    description: |
+      Implement std::cmp::Ord for PersistentList<T> where T: Ord.
+
+      This is required for using PersistentList as keys in BTreeMap/BTreeSet
+      and for total ordering operations.
+
+    laws:
+      - name: "Reflexivity"
+        description: |
+          Every element is equal to itself: a == a
+        equation: "a.cmp(&a) == Equal"
+        property_test: |
+          proptest! {
+            fn reflexivity(list: PersistentList<i32>) {
+              prop_assert_eq!(list.cmp(&list), Ordering::Equal);
+              prop_assert!(list == list);
+            }
+          }
+
+      - name: "Antisymmetry"
+        description: |
+          If a <= b and b <= a, then a == b
+        equation: "a.cmp(&b) == Equal <=> a == b"
+        property_test: |
+          proptest! {
+            fn antisymmetry(list1: PersistentList<i32>, list2: PersistentList<i32>) {
+              if list1 <= list2 && list2 <= list1 {
+                prop_assert_eq!(list1, list2);
+              }
+            }
+          }
+
+      - name: "Transitivity"
+        description: |
+          If a <= b and b <= c, then a <= c
+        equation: "(a <= b && b <= c) => a <= c"
+        property_test: |
+          proptest! {
+            fn transitivity(a: PersistentList<i32>, b: PersistentList<i32>, c: PersistentList<i32>) {
+              if a <= b && b <= c {
+                prop_assert!(a <= c);
+              }
+            }
+          }
+
+      - name: "Totality (Trichotomy)"
+        description: |
+          For any two lists a and b, exactly one of a < b, a == b, or a > b holds.
+          This is the trichotomy law - the three cases are mutually exclusive.
+        equation: "a.cmp(&b) returns exactly one of Less, Equal, or Greater"
+        property_test: |
+          proptest! {
+            fn totality(list1: PersistentList<i32>, list2: PersistentList<i32>) {
+              // Verify that cmp returns exactly one of Less, Equal, or Greater
+              // This tests both that it never panics and that the result is well-defined
+              match list1.cmp(&list2) {
+                Ordering::Less => {
+                  prop_assert!(list1 < list2);
+                  prop_assert!(!(list1 == list2));
+                  prop_assert!(!(list1 > list2));
+                }
+                Ordering::Equal => {
+                  prop_assert!(!(list1 < list2));
+                  prop_assert!(list1 == list2);
+                  prop_assert!(!(list1 > list2));
+                }
+                Ordering::Greater => {
+                  prop_assert!(!(list1 < list2));
+                  prop_assert!(!(list1 == list2));
+                  prop_assert!(list1 > list2);
+                }
+              }
+            }
+          }
+
+      - name: "Consistency with PartialOrd"
+        description: |
+          partial_cmp must return Some(cmp) for types implementing Ord
+        equation: "a.partial_cmp(&b) == Some(a.cmp(&b))"
+        property_test: |
+          proptest! {
+            fn consistency_with_partial_ord(list1: PersistentList<i32>, list2: PersistentList<i32>) {
+              prop_assert_eq!(list1.partial_cmp(&list2), Some(list1.cmp(&list2)));
+            }
+          }
+
+      - name: "Consistency with Eq"
+        description: |
+          cmp returning Equal must be consistent with == returning true
+        equation: "a.cmp(&b) == Equal <=> a == b"
+        property_test: |
+          proptest! {
+            fn consistency_with_eq(list1: PersistentList<i32>, list2: PersistentList<i32>) {
+              prop_assert_eq!(list1.cmp(&list2) == Ordering::Equal, list1 == list2);
+            }
+          }
+
+    methods:
+      - name: cmp
+        signature: "fn cmp(&self, other: &Self) -> Ordering"
+        description: |
+          Compare two lists lexicographically, returning a total ordering.
+
+          Uses the same algorithm as partial_cmp but always returns a definite
+          Ordering value (never None) since T: Ord guarantees total ordering.
+        examples:
+          - description: "Using in BTreeSet"
+            code: |
+              use std::collections::BTreeSet;
+
+              let mut set: BTreeSet<PersistentList<i32>> = BTreeSet::new();
+              set.insert(PersistentList::from_iter([1, 2, 3]));
+              set.insert(PersistentList::from_iter([1, 2, 2]));
+              set.insert(PersistentList::from_iter([1, 2, 4]));
+
+              let ordered: Vec<_> = set.iter().cloned().collect();
+              assert_eq!(ordered[0], PersistentList::from_iter([1, 2, 2]));
+              assert_eq!(ordered[1], PersistentList::from_iter([1, 2, 3]));
+              assert_eq!(ordered[2], PersistentList::from_iter([1, 2, 4]));
+
+    implementations:
+      - type: "PersistentList<T: Ord>"
+        description: |
+          Implementation uses iterator-based comparison:
+          ```rust
+          impl<T: Ord> Ord for PersistentList<T> {
+              fn cmp(&self, other: &Self) -> Ordering {
+                  self.iter().cmp(other.iter())
+              }
+          }
+          ```
+
+  - id: ord_persistent_vector
+    name: "Ord for PersistentVector<T>"
+    description: |
+      Implement std::cmp::Ord for PersistentVector<T> where T: Ord.
+
+    laws:
+      - name: "Reflexivity"
+        description: |
+          Every element is equal to itself: a == a
+        equation: "a.cmp(&a) == Equal"
+        property_test: |
+          proptest! {
+            fn reflexivity_vector(vec: PersistentVector<i32>) {
+              prop_assert_eq!(vec.cmp(&vec), Ordering::Equal);
+              prop_assert!(vec == vec);
+            }
+          }
+
+      - name: "Antisymmetry"
+        description: |
+          If a <= b and b <= a, then a == b
+        equation: "a.cmp(&b) == Equal <=> a == b"
+        property_test: |
+          proptest! {
+            fn antisymmetry_vector(vec1: PersistentVector<i32>, vec2: PersistentVector<i32>) {
+              if vec1 <= vec2 && vec2 <= vec1 {
+                prop_assert_eq!(vec1, vec2);
+              }
+            }
+          }
+
+      - name: "Transitivity"
+        description: |
+          If a <= b and b <= c, then a <= c
+        equation: "(a <= b && b <= c) => a <= c"
+        property_test: |
+          proptest! {
+            fn transitivity_vector(a: PersistentVector<i32>, b: PersistentVector<i32>, c: PersistentVector<i32>) {
+              if a <= b && b <= c {
+                prop_assert!(a <= c);
+              }
+            }
+          }
+
+      - name: "Totality (Trichotomy)"
+        description: |
+          For any two vectors a and b, exactly one of a < b, a == b, or a > b holds.
+        equation: "a.cmp(&b) returns exactly one of Less, Equal, or Greater"
+        property_test: |
+          proptest! {
+            fn totality_vector(vec1: PersistentVector<i32>, vec2: PersistentVector<i32>) {
+              match vec1.cmp(&vec2) {
+                Ordering::Less => {
+                  prop_assert!(vec1 < vec2);
+                  prop_assert!(!(vec1 == vec2));
+                  prop_assert!(!(vec1 > vec2));
+                }
+                Ordering::Equal => {
+                  prop_assert!(!(vec1 < vec2));
+                  prop_assert!(vec1 == vec2);
+                  prop_assert!(!(vec1 > vec2));
+                }
+                Ordering::Greater => {
+                  prop_assert!(!(vec1 < vec2));
+                  prop_assert!(!(vec1 == vec2));
+                  prop_assert!(vec1 > vec2);
+                }
+              }
+            }
+          }
+
+      - name: "Consistency with PartialOrd"
+        description: |
+          partial_cmp must return Some(cmp) for types implementing Ord
+        equation: "a.partial_cmp(&b) == Some(a.cmp(&b))"
+        property_test: |
+          proptest! {
+            fn consistency_with_partial_ord_vector(vec1: PersistentVector<i32>, vec2: PersistentVector<i32>) {
+              prop_assert_eq!(vec1.partial_cmp(&vec2), Some(vec1.cmp(&vec2)));
+            }
+          }
+
+      - name: "Consistency with Eq"
+        description: |
+          cmp returning Equal must be consistent with == returning true
+        equation: "a.cmp(&b) == Equal <=> a == b"
+        property_test: |
+          proptest! {
+            fn consistency_with_eq_vector(vec1: PersistentVector<i32>, vec2: PersistentVector<i32>) {
+              prop_assert_eq!(vec1.cmp(&vec2) == Ordering::Equal, vec1 == vec2);
+            }
+          }
+
+    methods:
+      - name: cmp
+        signature: "fn cmp(&self, other: &Self) -> Ordering"
+        description: |
+          Compare two vectors lexicographically.
+        examples:
+          - description: "Using in BTreeSet"
+            code: |
+              use std::collections::BTreeSet;
+
+              let mut set: BTreeSet<PersistentVector<i32>> = BTreeSet::new();
+              set.insert(PersistentVector::from_iter([1, 2, 3]));
+              set.insert(PersistentVector::from_iter([1, 2, 2]));
+              set.insert(PersistentVector::from_iter([1, 2, 4]));
+
+              let ordered: Vec<_> = set.iter().cloned().collect();
+              assert_eq!(ordered[0], PersistentVector::from_iter([1, 2, 2]));
+              assert_eq!(ordered[1], PersistentVector::from_iter([1, 2, 3]));
+              assert_eq!(ordered[2], PersistentVector::from_iter([1, 2, 4]));
+
+    implementations:
+      - type: "PersistentVector<T: Ord>"
+        description: |
+          Implementation uses iterator-based comparison:
+          ```rust
+          impl<T: Ord> Ord for PersistentVector<T> {
+              fn cmp(&self, other: &Self) -> Ordering {
+                  self.iter().cmp(other.iter())
+              }
+          }
+          ```
+
+  # ============================================================================
+  # 3. Edge Cases
+  # ============================================================================
+  - id: edge_cases
+    name: "Edge Case Handling"
+    description: |
+      Proper handling of edge cases in lexicographic comparison.
+
+    methods:
+      - name: "Empty collection comparison"
+        signature: "N/A"
+        description: |
+          Edge cases for empty collections:
+          - [] == [] (empty equals empty)
+          - [] < [x, ...] (empty is less than non-empty)
+          - [x, ...] > [] (non-empty is greater than empty)
+        examples:
+          - description: "Empty vs empty"
+            code: |
+              let empty1: PersistentList<i32> = PersistentList::new();
+              let empty2: PersistentList<i32> = PersistentList::new();
+              assert_eq!(empty1.cmp(&empty2), Ordering::Equal);
+
+          - description: "Empty vs non-empty"
+            code: |
+              let empty: PersistentList<i32> = PersistentList::new();
+              let non_empty = PersistentList::from_iter([1]);
+              assert_eq!(empty.cmp(&non_empty), Ordering::Less);
+              assert_eq!(non_empty.cmp(&empty), Ordering::Greater);
+
+      - name: "Same length comparison"
+        signature: "N/A"
+        description: |
+          When both collections have the same length:
+          - Compare element by element
+          - First difference determines result
+          - All equal means collections are equal
+        examples:
+          - description: "Same length, different elements"
+            code: |
+              let list1 = PersistentList::from_iter([1, 2, 3]);
+              let list2 = PersistentList::from_iter([1, 3, 2]);
+              assert_eq!(list1.cmp(&list2), Ordering::Less); // 2 < 3 at index 1
+
+      - name: "Different length comparison"
+        signature: "N/A"
+        description: |
+          When collections have different lengths and common prefix is equal:
+          - [1, 2] < [1, 2, 3] (shorter is less)
+          - [1, 2, 3] > [1, 2] (longer is greater)
+        examples:
+          - description: "Prefix relationship (PersistentList)"
+            code: |
+              let prefix = PersistentList::from_iter([1, 2]);
+              let extended = PersistentList::from_iter([1, 2, 3]);
+              assert_eq!(prefix.cmp(&extended), Ordering::Less);
+
+          - description: "Prefix relationship (PersistentVector)"
+            code: |
+              let prefix = PersistentVector::from_iter([1, 2]);
+              let extended = PersistentVector::from_iter([1, 2, 3]);
+              assert_eq!(prefix.cmp(&extended), Ordering::Less);
+
+  - id: edge_cases_vector
+    name: "Edge Case Handling for PersistentVector"
+    description: |
+      Proper handling of edge cases in lexicographic comparison for PersistentVector.
+      These mirror the PersistentList edge cases to ensure equivalent coverage.
+
+    methods:
+      - name: "Empty vector comparison"
+        signature: "N/A"
+        description: |
+          Edge cases for empty vectors:
+          - [] == [] (empty equals empty)
+          - [] < [x, ...] (empty is less than non-empty)
+          - [x, ...] > [] (non-empty is greater than empty)
+        examples:
+          - description: "Empty vs empty"
+            code: |
+              let empty1: PersistentVector<i32> = PersistentVector::new();
+              let empty2: PersistentVector<i32> = PersistentVector::new();
+              assert_eq!(empty1.cmp(&empty2), Ordering::Equal);
+
+          - description: "Empty vs non-empty"
+            code: |
+              let empty: PersistentVector<i32> = PersistentVector::new();
+              let non_empty = PersistentVector::from_iter([1]);
+              assert_eq!(empty.cmp(&non_empty), Ordering::Less);
+              assert_eq!(non_empty.cmp(&empty), Ordering::Greater);
+
+      - name: "Same length vector comparison"
+        signature: "N/A"
+        description: |
+          When both vectors have the same length:
+          - Compare element by element
+          - First difference determines result
+          - All equal means vectors are equal
+        examples:
+          - description: "Same length, different elements"
+            code: |
+              let vec1 = PersistentVector::from_iter([1, 2, 3]);
+              let vec2 = PersistentVector::from_iter([1, 3, 2]);
+              assert_eq!(vec1.cmp(&vec2), Ordering::Less); // 2 < 3 at index 1
+
+      - name: "PartialOrd None case for PersistentVector"
+        signature: "N/A"
+        description: |
+          When element comparison returns None (e.g., NaN), the vector comparison
+          also returns None.
+        examples:
+          - description: "NaN in middle of comparison"
+            code: |
+              let vec1 = PersistentVector::from_iter([1.0, f64::NAN, 3.0]);
+              let vec2 = PersistentVector::from_iter([1.0, 2.0, 3.0]);
+              assert_eq!(vec1.partial_cmp(&vec2), None);
+
+          - description: "Empty vectors with NaN-capable type"
+            code: |
+              let empty1: PersistentVector<f64> = PersistentVector::new();
+              let empty2: PersistentVector<f64> = PersistentVector::new();
+              assert_eq!(empty1.partial_cmp(&empty2), Some(Ordering::Equal));
+
+          - description: "NaN not reached due to earlier difference"
+            code: |
+              let vec1 = PersistentVector::from_iter([1.0, f64::NAN]);
+              let vec2 = PersistentVector::from_iter([2.0, f64::NAN]);
+              // First element differs, so NaN is never compared
+              assert_eq!(vec1.partial_cmp(&vec2), Some(Ordering::Less));
+
+non_functional_requirements:
+  iterator_order_guarantee:
+    - "iter() must return elements in deterministic, index-order sequence (0, 1, 2, ...)"
+    - "For PersistentList: iter() follows head-to-tail order (index 0 is head)"
+    - "For PersistentVector: iter() follows index order from get(0) to get(len-1)"
+    - "The iteration order must be consistent across all instances with same logical content"
+    - "This guarantees referential transparency: same data produces same comparison result"
+
+  eq_consistency:
+    - "Existing PartialEq/Eq implementations use lexicographic element comparison"
+    - "Two collections are equal iff they have the same length and all corresponding elements are equal"
+    - "Ord::cmp returning Equal must be equivalent to PartialEq returning true"
+
+  performance:
+    - "Comparison should be O(min(n, m)) where n and m are collection lengths"
+    - "Short-circuit on first difference (no need to compare remaining elements)"
+    - "No additional memory allocation during comparison"
+    - "PersistentList iter() is O(1) per element (follows linked structure)"
+    - "PersistentVector iter() is O(log n) worst-case per element (tree traversal), O(1) amortized in practice"
+
+  compatibility:
+    - "Consistent with std::cmp::Ord semantics"
+    - "Consistent with existing PartialEq implementation"
+    - "Works with all standard library functions expecting Ord (sort, BTreeMap, etc.)"
+
+  testing:
+    - "100% code coverage for new implementations"
+    - "Property-based tests for Ord laws"
+    - "Edge case tests (empty, single element, same length, different length)"
+    - "Integration tests with BTreeSet/BTreeMap"
+
+# Test Cases Summary
+test_cases:
+  # ==========================================================================
+  # PersistentList Unit Tests
+  # ==========================================================================
+  persistent_list_unit_tests:
+    - name: "list_empty_equals_empty"
+      description: "Two empty lists should be equal"
+
+    - name: "list_empty_less_than_non_empty"
+      description: "Empty list is less than any non-empty list"
+
+    - name: "list_single_element_comparison"
+      description: "Single element lists compare by element value"
+
+    - name: "list_lexicographic_comparison"
+      description: "Multi-element lists compare lexicographically"
+
+    - name: "list_prefix_is_less"
+      description: "[1,2] < [1,2,3]"
+
+    - name: "list_first_difference_determines_order"
+      description: "[1,2,9] < [1,3,0] because 2 < 3"
+
+    - name: "list_partial_cmp_with_nan"
+      description: "partial_cmp returns None when NaN is encountered"
+
+  # ==========================================================================
+  # PersistentVector Unit Tests
+  # ==========================================================================
+  persistent_vector_unit_tests:
+    - name: "vector_empty_equals_empty"
+      description: "Two empty vectors should be equal"
+
+    - name: "vector_empty_less_than_non_empty"
+      description: "Empty vector is less than any non-empty vector"
+
+    - name: "vector_single_element_comparison"
+      description: "Single element vectors compare by element value"
+
+    - name: "vector_lexicographic_comparison"
+      description: "Multi-element vectors compare lexicographically"
+
+    - name: "vector_prefix_is_less"
+      description: "[1,2] < [1,2,3]"
+
+    - name: "vector_first_difference_determines_order"
+      description: "[1,2,9] < [1,3,0] because 2 < 3"
+
+    - name: "vector_partial_cmp_with_nan"
+      description: "partial_cmp returns None when NaN is encountered"
+
+  # ==========================================================================
+  # PersistentList Property Tests
+  # ==========================================================================
+  persistent_list_property_tests:
+    - name: "list_reflexivity"
+      description: "a.cmp(&a) == Equal for all lists a"
+
+    - name: "list_antisymmetry"
+      description: "if a <= b and b <= a, then a == b"
+
+    - name: "list_transitivity"
+      description: "a <= b && b <= c implies a <= c"
+
+    - name: "list_totality_trichotomy"
+      description: "exactly one of a < b, a == b, a > b holds"
+
+    - name: "list_consistency_with_eq"
+      description: "a.cmp(&b) == Equal iff a == b"
+
+    - name: "list_consistency_with_partial_cmp"
+      description: "a.partial_cmp(&b) == Some(a.cmp(&b)) for T: Ord"
+
+  # ==========================================================================
+  # PersistentVector Property Tests
+  # ==========================================================================
+  persistent_vector_property_tests:
+    - name: "vector_reflexivity"
+      description: "a.cmp(&a) == Equal for all vectors a"
+
+    - name: "vector_antisymmetry"
+      description: "if a <= b and b <= a, then a == b"
+
+    - name: "vector_transitivity"
+      description: "a <= b && b <= c implies a <= c"
+
+    - name: "vector_totality_trichotomy"
+      description: "exactly one of a < b, a == b, a > b holds"
+
+    - name: "vector_consistency_with_eq"
+      description: "a.cmp(&b) == Equal iff a == b"
+
+    - name: "vector_consistency_with_partial_cmp"
+      description: "a.partial_cmp(&b) == Some(a.cmp(&b)) for T: Ord"
+
+  # ==========================================================================
+  # Integration Tests
+  # ==========================================================================
+  integration_tests:
+    - name: "list_in_btreeset"
+      description: "PersistentList can be used as BTreeSet element"
+
+    - name: "list_in_btreemap_key"
+      description: "PersistentList can be used as BTreeMap key"
+
+    - name: "vector_in_btreeset"
+      description: "PersistentVector can be used as BTreeSet element"
+
+    - name: "vector_in_btreemap_key"
+      description: "PersistentVector can be used as BTreeMap key"
+
+    - name: "list_sort"
+      description: "Vec<PersistentList<T>> can be sorted"
+
+    - name: "vector_sort"
+      description: "Vec<PersistentVector<T>> can be sorted"
+
+future_extensions:
+  - id: ord_for_other_collections
+    name: "Ord for other persistent collections"
+    description: |
+      Consider implementing Ord for PersistentHashSet and PersistentTreeMap
+      where meaningful (e.g., TreeMap could compare by entries in order).
+    rationale: |
+      HashMap/HashSet do not have a natural ordering since iteration order
+      is not deterministic. TreeMap could have ordering based on entries.
+
+  - id: custom_comparators
+    name: "Custom comparator support"
+    description: |
+      Allow users to provide custom comparison functions for sorting
+      collections, similar to sort_by in standard library.
+    rationale: |
+      Current implementation provides only natural ordering. Users may
+      want to sort by different criteria without wrapping elements.

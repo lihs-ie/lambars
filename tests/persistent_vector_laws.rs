@@ -672,3 +672,74 @@ proptest! {
         prop_assert_ne!(calculate_hash(&vector1), calculate_hash(&vector2));
     }
 }
+
+// =============================================================================
+// Ord Laws
+// =============================================================================
+
+/// Generates a `PersistentVector<i32>` with up to `max_size` elements.
+fn persistent_vector_strategy(max_size: usize) -> impl Strategy<Value = PersistentVector<i32>> {
+    prop::collection::vec(any::<i32>(), 0..max_size).prop_map(|vector| vector.into_iter().collect())
+}
+
+/// Generates a small `PersistentVector<i32>` for faster tests.
+fn small_vector() -> impl Strategy<Value = PersistentVector<i32>> {
+    persistent_vector_strategy(20)
+}
+
+proptest! {
+    #[test]
+    fn prop_ord_reflexivity(vector in small_vector()) {
+        prop_assert_eq!(vector.cmp(&vector), std::cmp::Ordering::Equal);
+    }
+
+    #[test]
+    fn prop_ord_antisymmetry(vector1 in small_vector(), vector2 in small_vector()) {
+        if vector1 <= vector2 && vector2 <= vector1 {
+            prop_assert_eq!(vector1, vector2);
+        }
+    }
+
+    #[test]
+    fn prop_ord_transitivity(
+        vector1 in small_vector(),
+        vector2 in small_vector(),
+        vector3 in small_vector()
+    ) {
+        if vector1 <= vector2 && vector2 <= vector3 {
+            prop_assert!(vector1 <= vector3);
+        }
+    }
+
+    #[test]
+    fn prop_ord_totality(vector1 in small_vector(), vector2 in small_vector()) {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        match vector1.cmp(&vector2) {
+            Less => {
+                prop_assert!(vector1 < vector2);
+                prop_assert!(vector1 != vector2);
+                prop_assert!(vector1 <= vector2);
+            }
+            Equal => {
+                prop_assert!(vector1 >= vector2);
+                prop_assert!(vector1 == vector2);
+                prop_assert!(vector1 <= vector2);
+            }
+            Greater => {
+                prop_assert!(vector1 >= vector2);
+                prop_assert!(vector1 != vector2);
+                prop_assert!(vector1 > vector2);
+            }
+        }
+    }
+
+    #[test]
+    fn prop_ord_consistency_with_partial_ord(vector1 in small_vector(), vector2 in small_vector()) {
+        prop_assert_eq!(vector1.partial_cmp(&vector2), Some(vector1.cmp(&vector2)));
+    }
+
+    #[test]
+    fn prop_ord_consistency_with_eq(vector1 in small_vector(), vector2 in small_vector()) {
+        prop_assert_eq!(vector1.cmp(&vector2) == std::cmp::Ordering::Equal, vector1 == vector2);
+    }
+}
