@@ -91,3 +91,7 @@ harness = false
 name = "serde_bench"
 harness = false
 required-features = ["serde"]
+
+[[bench]]
+name = "transient_bench"
+harness = false
