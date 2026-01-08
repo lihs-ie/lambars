@@ -1,0 +1,572 @@
+# Monad Flatten トレイト 要件定義
+#
+# 概要:
+#   M<M<A>> -> M<A> の変換（flatten）を型安全に提供するトレイトを定義する。
+#   Rust の型システム制約（HKT 不在、GAT 制約）により、Monad トレイト内で
+#   汎用的な flatten を実装することが困難であるため、独立したトレイトとして設計する。
+#
+# 設計方針:
+#   1. Flatten トレイトを新規作成し、入れ子のモナド型を平坦化する操作を提供
+#   2. 既存の Monad トレイトとは独立した設計（継承関係なし）
+#   3. 型ごとに個別実装を提供（Option, Result, Box, Identity）
+#   4. Vec は MonadVec::flatten と意味論が異なるため対象外
+#   5. 関数型プログラミングの原則（参照透過性、不変性、合成可能性）に従う
+#
+# 参照:
+#   - docs/internal/issues/20250101_0000_typeclass_future_work.yaml (monad_flatten)
+#   - src/typeclass/monad.rs
+#   - Haskell: Control.Monad.join
+#   - Scala: cats.FlatMap.flatten
+
+version: "1.0.0"
+name: "Monad Flatten Trait"
+description: |
+  Rust で M<M<A>> -> M<A> の変換を型安全に提供するための Flatten トレイトを定義する。
+
+  Monad の基本操作である flatten（Haskell では join）は、入れ子のモナドを
+  一段階平坦化する操作である。理論的には flat_map(identity) として定義可能だが、
+  Rust の型システムでは以下の制約により Monad トレイト内での汎用実装が困難:
+
+  1. HKT の不在: M<M<A>> という「入れ子のコンテナ型」を汎用的に表現できない
+  2. GAT の制約: TypeConstructor<Inner = Self::WithType<A>> のような自己参照型が困難
+  3. 型推論の限界: flat_map(|x| x) の型推論が複雑になる
+
+  本トレイトは、この問題を回避するため Monad トレイトから独立した設計とし、
+  具体型ごとに実装を提供する。
+
+  設計上の重要な注意:
+  Flatten トレイトは「入れ子型に対する契約」である。実装者は Self が M<M<A>> の形式
+  （入れ子のモナド型）であることを保証する責任を持つ。型システムはこの制約を強制
+  できないため、誤った型（例: Option<i32>）に Flatten を実装しないよう注意が必要。
+
+  正しい実装例:
+  - Option<Option<T>> に対して Flatten を実装
+  - Result<Result<T, E>, E> に対して Flatten を実装
+  - Box<Box<T>> に対して Flatten を実装
+  - Identity<Identity<T>> に対して Flatten を実装
+
+  対象外:
+  - Vec<Vec<T>>: MonadVec::flatten が IntoIterator ベースの異なる意味論を持つため対象外
+
+  誤った実装例:
+  - Option<T>（入れ子ではない）に対して Flatten を実装してはならない
+
+# 背景・動機
+background:
+  problem: |
+    現状の lambars では flatten 操作が以下のように断片的:
+    - Option, Result: Rust 標準ライブラリの flatten() を使用
+    - Vec: MonadVec トレイトで独自の flatten を提供
+    - Box, Identity: flatten が未実装（テストでは flat_map(|inner| inner) で代用）
+
+    この断片的な状況は以下の問題を引き起こす:
+    1. API の一貫性がない
+    2. Box や Identity でのコード例が冗長になる
+    3. 新しい Monad 型を追加する際の指針が不明確
+
+  motivation: |
+    統一的な Flatten トレイトを提供することで:
+    1. Option, Result, Box, Identity で一貫した flatten API を提供
+    2. 合成可能で宣言的なコードスタイルをサポート
+    3. 他の関数型ライブラリ（Haskell の join、Scala の flatten）との対応を明確化
+
+    注: Vec は MonadVec::flatten が異なる意味論（IntoIterator ベース）を持つため、
+    Flatten トレイトの対象外とし、名前衝突を回避する。
+
+  prior_art:
+    - name: "Haskell Control.Monad.join"
+      description: |
+        join :: Monad m => m (m a) -> m a
+        join x = x >>= id
+        Monad クラスのデフォルトメソッドとして定義されている。
+
+    - name: "Scala cats.FlatMap.flatten"
+      description: |
+        def flatten[A](ffa: F[F[A]]): F[A] = flatMap(ffa)(identity)
+        FlatMap 型クラスのメソッドとして提供。
+        implicit evidence により F[F[A]] の制約を表現。
+
+    - name: "Rust std::option::Option::flatten"
+      description: |
+        fn flatten(self) -> Option<T> where T: Option<U>
+        Option<Option<T>> を Option<T> に変換。
+        Rust 1.40.0 で安定化。
+
+    - name: "Rust std::result::Result::flatten"
+      description: |
+        fn flatten(self) -> Result<T, E> where T: Result<U, E>
+        Result<Result<T, E>, E> を Result<T, E> に変換。
+        Rust 1.47.0 で安定化。
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. Flatten トレイト定義
+  # ======================================================================
+  - id: flatten_trait_definition
+    name: Flatten トレイト定義
+    description: |
+      入れ子のモナド型 M<M<A>> を M<A> に平坦化するトレイトを定義する。
+
+      設計上のポイント:
+      1. 独立したトレイト: Monad トレイトとは継承関係を持たない
+      2. 関連型 Flattened: 平坦化後の型を表現
+      3. 消費型メソッド: self を消費して新しい値を返す（不変性の原則）
+
+      TypeConstructor との関係:
+      TypeConstructor を実装している型に対しては、以下の型等式が推奨される。
+
+        推奨される型等式（TypeConstructor 実装型のみ）:
+        Self: TypeConstructor
+        Self::Inner: TypeConstructor
+        Self::Flattened = Self::WithType<<Self::Inner as TypeConstructor>::Inner>
+
+        具体例（Option<Option<i32>>）:
+        - Self = Option<Option<i32>>
+        - Self::Inner = Option<i32>
+        - <Self::Inner as TypeConstructor>::Inner = i32
+        - Self::Flattened = Option<i32> = Self::WithType<i32>
+
+      注意: この型等式は TypeConstructor 実装型に対する推奨であり、
+      TypeConstructor を実装していない型に Flatten を実装する場合は適用されない。
+
+      関連型の設計:
+      - Flatten トレイトは Flattened のみを定義
+      - TypeConstructor を実装していない型にも Flatten を実装可能（柔軟性のため）
+      - TypeConstructor 実装型では、上記の型等式を満たすことで
+        flat_map(|x| x) と flatten() の同値性が型レベルで整合する
+
+    laws:
+      - name: Flatten-FlatMap 同値性
+        description: |
+          flatten は flat_map(identity) と同じ結果を返す。
+          これは flatten の定義的な法則であり、Monad トレイトを実装している型で検証可能。
+
+          注意: Vec は Monad トレイトを直接実装していない（MonadVec を使用）ため、
+          この法則の検証は MonadVec::flat_map との同値性として別途行う。
+
+          型の関係:
+          - Self は M<M<A>> の形式（入れ子のモナド型）
+          - Self::Inner = M<A>（内部のモナド型）
+          - Self::Flattened = M<A>（平坦化後の型）
+          - 実装要件: Self::Flattened = Self::Inner（同型性）
+          - flat_map(|x| x) において、x: Self::Inner を Self::Flattened として返す
+          - この同型性により flatten() と flat_map(|x| x) の同値性が成立
+        equation: "self.flatten() == self.flat_map(|x| x)"
+        applicable_types: "Monad トレイトを実装している型（Option, Result, Box, Identity）"
+        property_test: |
+          // 具体型ごとにテストを実装する（汎用的な型制約が困難なため）
+          // 例: Option<Option<i32>> のテスト
+          fn prop_option_flatten_flatmap_equivalence(nested: Option<Option<i32>>) -> bool {
+              use crate::typeclass::{Flatten, Monad};
+              nested.clone().flatten() == nested.flat_map(|inner| inner)
+          }
+
+          // 例: Result<Result<i32, String>, String> のテスト
+          fn prop_result_flatten_flatmap_equivalence(
+              nested: Result<Result<i32, String>, String>
+          ) -> bool {
+              use crate::typeclass::{Flatten, Monad};
+              nested.clone().flatten() == nested.flat_map(|inner| inner)
+          }
+
+          // 注: 汎用的なプロパティテストは Rust の型システム制約により困難。
+          // 各具体型に対して個別にテストを記述する。
+
+
+      - name: Flatten-Join 結合性
+        description: |
+          三重にネストしたモナド M<M<M<A>>> に対して、
+          どの順序で flatten を適用しても同じ結果になる。
+          これは Monad の結合律から導かれる。
+
+          法則の前提条件（API 制約）:
+          - M: Flatten + Monad（外側の型）
+          - M::Inner: Flatten（中間層が平坦化可能）
+
+          法則は flat_map ベースで表現する（Functor::fmap に依存しない）:
+          - nested.flatten().flatten() は M<M<M<A>>> -> M<A>
+          - nested.flat_map(|m| m.flatten()) も M<M<M<A>>> -> M<A>
+            （flat_map が M<M<A>> -> M<A> を返し、その結果が M<A>）
+          - 両者が等価であることを検証
+
+          純粋関数の前提:
+          - 法則の検証では、flat_map に渡す関数は純粋（副作用なし）であること
+          - 同じ入力に対して常に同じ出力を返すこと（参照透過性）
+          - テストで使用する関数（|m| m.flatten()）は純粋である
+
+        equation: "nested.flatten().flatten() == nested.flat_map(|m| m.flatten())"
+        applicable_types: "Option, Result, Box, Identity"
+        property_test: |
+          // 具体型ごとにテストを実装する
+          // テスト用の制約（Clone, PartialEq）は法則自体の要件ではなく検証のための制約
+          // 注: flat_map に渡す関数は純粋であること（副作用なし）
+
+          // 例: Option<Option<Option<i32>>> のテスト
+          fn prop_option_flatten_associativity(
+              triple_nested: Option<Option<Option<i32>>>
+          ) -> bool {
+              use crate::typeclass::{Flatten, Monad};
+              let left = triple_nested.clone().flatten().flatten();
+              let right = triple_nested.flat_map(|m| m.flatten());
+              left == right
+          }
+
+          // 例: Result<Result<Result<i32, String>, String>, String> のテスト
+          fn prop_result_flatten_associativity(
+              triple_nested: Result<Result<Result<i32, String>, String>, String>
+          ) -> bool {
+              use crate::typeclass::{Flatten, Monad};
+              let left = triple_nested.clone().flatten().flatten();
+              let right = triple_nested.flat_map(|m| m.flatten());
+              left == right
+          }
+
+
+    methods:
+      - name: flatten
+        signature: "fn flatten(self) -> Self::Flattened"
+        description: |
+          入れ子のモナドを一段階平坦化する。
+
+          M<M<A>> -> M<A> の変換を行う。
+          self を消費し、新しい値を返す（所有権を取るバージョン）。
+
+          これは Monad の flat_map(identity) と等価であるが、
+          より宣言的で意図が明確なコードを書くことができる。
+        examples:
+          - description: "Option の flatten"
+            code: |
+              use lambars::typeclass::Flatten;
+
+              let nested: Option<Option<i32>> = Some(Some(42));
+              let flat: Option<i32> = nested.flatten();
+              assert_eq!(flat, Some(42));
+
+              let nested_none: Option<Option<i32>> = Some(None);
+              let flat_none: Option<i32> = nested_none.flatten();
+              assert_eq!(flat_none, None);
+
+          - description: "Result の flatten"
+            code: |
+              use lambars::typeclass::Flatten;
+
+              let nested: Result<Result<i32, &str>, &str> = Ok(Ok(42));
+              let flat: Result<i32, &str> = nested.flatten();
+              assert_eq!(flat, Ok(42));
+
+              let inner_err: Result<Result<i32, &str>, &str> = Ok(Err("inner error"));
+              let flat_inner_err: Result<i32, &str> = inner_err.flatten();
+              assert_eq!(flat_inner_err, Err("inner error"));
+
+          - description: "Box の flatten"
+            code: |
+              use lambars::typeclass::Flatten;
+
+              let nested: Box<Box<i32>> = Box::new(Box::new(42));
+              let flat: Box<i32> = nested.flatten();
+              assert_eq!(*flat, 42);
+
+          - description: "Identity の flatten"
+            code: |
+              use lambars::typeclass::{Identity, Flatten};
+
+              let nested: Identity<Identity<i32>> = Identity::new(Identity::new(42));
+              let flat: Identity<i32> = nested.flatten();
+              assert_eq!(flat, Identity::new(42));
+
+
+    implementations:
+      - type: "Option<Option<T>>"
+        description: |
+          Option の Flatten 実装。
+          Some(Some(x)).flatten() == Some(x)
+          Some(None).flatten() == None
+          None.flatten() == None
+
+          内部的には Rust 標準ライブラリの Option::flatten() に委譲する。
+
+      - type: "Result<Result<T, E>, E>"
+        description: |
+          Result の Flatten 実装。
+          同一のエラー型 E を持つ入れ子の Result を平坦化する。
+
+          Ok(Ok(x)).flatten() == Ok(x)
+          Ok(Err(e)).flatten() == Err(e)
+          Err(e).flatten() == Err(e)
+
+          内部的には Rust 標準ライブラリの Result::flatten() に委譲する。
+
+      - type: "Box<Box<T>>"
+        description: |
+          Box の Flatten 実装。
+          Box::new(Box::new(x)).flatten() == Box::new(x)
+
+          内部の Box をアンボックスして返す。
+
+      - type: "Identity<Identity<T>>"
+        description: |
+          Identity の Flatten 実装。
+          Identity(Identity(x)).flatten() == Identity(x)
+
+          内部の Identity をアンラップして返す。
+
+    dependencies: []
+
+    note_on_vec: |
+      Vec には Flatten トレイトを実装しない。
+
+      理由:
+      1. MonadVec::flatten は IntoIterator<Item = B> を使用しており、
+         Vec<String> -> Vec<char> のような変換をサポートする一般的な flatten
+      2. Monad の flatten（M<M<A>> -> M<A>）とは意味論が異なる
+      3. 両方のトレイトを実装すると名前衝突が発生し、曖昧性が生じる
+
+      Vec のユーザーは既存の MonadVec::flatten を継続使用する。
+
+  # ======================================================================
+  # 2. FlattenExt 拡張トレイト（将来の拡張 - 初期実装スコープ外）
+  # ======================================================================
+  - id: flatten_ext_trait
+    name: FlattenExt 拡張トレイト
+    description: |
+      Flatten トレイトに追加の便利メソッドを提供する拡張トレイト。
+
+      注意: この要件は初期実装のスコープ外。将来の拡張候補として記録。
+      初期実装では Flatten トレイトのみを提供する。
+
+    status: "将来の拡張（初期実装対象外）"
+
+    trait_bounds: "Flatten + Monad"
+    description_extended: |
+      FlattenExt は Flatten と Monad の両方を実装している型に対して
+      追加のメソッドを提供する拡張トレイト。
+
+    rationale: |
+      flatten_with と Monad::flat_map の違い:
+      - flat_map: 任意の M<B> を返す汎用的な操作
+      - flatten_with: 平坦化を意図した操作で、戻り値型が Flattened に制約される
+
+      ユースケース:
+      - 型推論の補助: flatten_with は戻り値型が明確なため、型推論が容易
+      - 意図の明示: 「平坦化」という意図をコード上で明示できる
+      - API の一貫性: Flatten トレイトの拡張として自然な位置付け
+
+      ただし、flat_map で同等の操作が可能なため、優先度は低い。
+      実際のユースケースが明確になった時点で実装を検討する。
+
+    methods:
+      - name: flatten_with
+        signature: |
+          fn flatten_with<F>(self, combine: F) -> Self::Flattened
+          where
+              F: FnOnce(Self::Inner) -> Self::Flattened
+        description: |
+          カスタムの結合関数を使用して平坦化する。
+
+          トレイト境界:
+          - Self: Flatten + Monad（トレイト定義で要求）
+
+          型の関係:
+          - Self::Inner: 内部のモナド型（TypeConstructor から継承）
+          - Self::Flattened: 平坦化後の型（Flatten トレイトから）
+
+          flat_map との違い:
+          - 戻り値型が Self::Flattened に制約される
+          - 平坦化という意図が明確になる
+
+    implementations: []
+    dependencies:
+      - flatten_trait_definition
+
+  # ======================================================================
+  # 3. MonadVec との関係（Vec は Flatten 対象外）
+  # ======================================================================
+  - id: monad_vec_relationship
+    name: MonadVec との関係
+    description: |
+      Vec には Flatten トレイトを実装しない。
+
+      理由:
+      1. MonadVec::flatten は IntoIterator<Item = B> を使用しており、
+         Vec<String> -> Vec<char> のような一般的な flatten をサポート
+      2. Monad の flatten（M<M<A>> -> M<A>）とは意味論が異なる
+      3. 両方のトレイトを実装すると名前衝突が発生し、曖昧性が生じる
+
+      MonadVec::flatten の仕様:
+      ```rust
+      fn flatten<B>(self) -> Vec<B>
+      where
+          Self::VecInner: IntoIterator<Item = B>;
+      ```
+
+      これは Iterator::flatten に対応する操作であり、
+      型クラス理論における Monad の join（flatten）とは異なる。
+
+      Vec のユーザーは:
+      - Vec<Vec<T>> の平坦化: MonadVec::flatten を使用
+      - Vec<String> -> Vec<char>: MonadVec::flatten を使用
+      - Monad の法則検証: MonadVec トレイトで行う（既存の実装）
+
+    methods: []
+    implementations: []
+    dependencies: []
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - "flatten は O(1) の時間計算量を持つ（Option, Result, Box, Identity）"
+    - "Option, Result, Box, Identity の flatten はゼロコスト抽象化を維持"
+
+  compatibility:
+    - "Rust 標準ライブラリの flatten との互換性を維持（Option, Result）"
+    - "既存の Monad トレイト実装を変更しない"
+    - "MonadVec::flatten との名前衝突を回避（Vec には Flatten を実装しない）"
+    - "将来の Monad 型追加に対応できる拡張性を持つ"
+
+  testing:
+    - "各型の Flatten 実装に対するユニットテストを作成"
+    - "Flatten-FlatMap 同値性の法則をプロパティテストで検証"
+    - "エッジケース（空のコンテナ、None、Err）のテストを含める"
+    - "rstest を使用してパラメータ化テストを作成"
+
+# テスト要件
+test_requirements:
+  unit_tests:
+    - name: "Option flatten 基本動作"
+      cases:
+        - "Some(Some(x)).flatten() == Some(x)"
+        - "Some(None).flatten() == None"
+        - "None.flatten() == None"
+
+    - name: "Result flatten 基本動作"
+      cases:
+        - "Ok(Ok(x)).flatten() == Ok(x)"
+        - "Ok(Err(e)).flatten() == Err(e)"
+        - "Err(e).flatten() == Err(e)"
+
+    - name: "Box flatten 基本動作"
+      cases:
+        - "Box::new(Box::new(x)).flatten() == Box::new(x)"
+
+    - name: "Identity flatten 基本動作"
+      cases:
+        - "Identity(Identity(x)).flatten() == Identity(x)"
+
+  property_tests:
+    - name: "Flatten-FlatMap 同値性"
+      description: |
+        Monad トレイトを実装している型で flatten() == flat_map(|x| x) を検証。
+
+        テスト用制約（法則自体の要件ではない）:
+        - Clone: プロパティテストで左辺と右辺を比較するため
+        - PartialEq: 等価性の検証のため
+        - Result<T, E> の E: Clone は Monad 実装の制約（テスト固有ではない）
+      types:
+        - Option<Option<i32>>
+        - "Result<Result<i32, String>, String>"
+        - Box<Box<i32>>
+        - Identity<Identity<i32>>
+
+    - name: "Flatten 結合性"
+      description: |
+        三重ネストに対して flatten の適用順序が結果に影響しないことを検証。
+        Flatten + Monad を実装している型が対象。
+
+        テスト用制約（法則自体の要件ではない）:
+        - Clone: プロパティテストで左辺と右辺を比較するため
+        - PartialEq: 等価性の検証のため
+
+        型固有の注意点:
+        - Result<T, E> の E: Clone は Monad 実装の制約
+      types:
+        - Option<Option<Option<i32>>>
+        - Result<Result<Result<i32, String>, String>, String>
+        - Box<Box<Box<i32>>>
+        - Identity<Identity<Identity<i32>>>
+
+  law_tests:
+    - name: "Flatten と Monad 法則の整合性"
+      description: |
+        Flatten の実装が既存の Monad 法則と矛盾しないことを検証する。
+
+        対象型: Monad トレイトを実装している型（Option, Result, Box, Identity）
+        目的: flatten が flat_map(identity) の意味論と一致することを確認
+
+        検証内容:
+        - flatten を flat_map で表現した場合の結合律の成立
+        - m.flat_map(f).flatten() == m.flat_map(|x| f(x).flatten()) の成立
+
+        f の型条件（必須）:
+        - f: A -> M<M<B>>（入れ子のモナドを返す関数）
+        - M<M<B>>: Flatten を実装していること
+        - f は純粋関数であること（副作用なし、参照透過性を満たす）
+        - 例: f: i32 -> Option<Option<String>>
+
+        型制約の明示:
+        ```rust
+        fn test_law<M, A, B, F>(m: M, f: F) -> bool
+        where
+            M: Monad<Inner = A> + Clone,  // Monad は TypeConstructor を継承
+            M::WithType<M::WithType<B>>: Flatten<Flattened = M::WithType<B>>,
+            M::WithType<B>: PartialEq,
+            F: Fn(A) -> M::WithType<M::WithType<B>> + Clone,
+        {
+            let left = m.clone().flat_map(f.clone()).flatten();
+            let right = m.flat_map(|x| f(x).flatten());
+            left == right
+        }
+        ```
+
+        注: Monad トレイトは TypeConstructor を継承しているため、
+        M: Monad は暗黙的に M: TypeConstructor を含む。
+
+        具体例:
+        ```rust
+        // m: Option<i32>, f: i32 -> Option<Option<String>>
+        let m: Option<i32> = Some(42);
+        let f = |n: i32| Some(Some(n.to_string()));
+
+        // 左辺: m.flat_map(f).flatten()
+        // m.flat_map(f) = Some(Some("42"))
+        // .flatten() = Some("42")
+
+        // 右辺: m.flat_map(|x| f(x).flatten())
+        // f(42).flatten() = Some("42")
+        // m.flat_map(...) = Some("42")
+
+        // 両辺が等しい
+        ```
+
+        注意: Vec には Flatten トレイトを実装しないため、この法則テストの対象外。
+        Vec の flatten は MonadVec トレイトで提供される（異なる意味論）。
+
+# 将来の拡張
+future_extensions:
+  - id: flatten_n
+    name: "多段 flatten (flatten_n)"
+    description: |
+      複数段階のネストを一度に平坦化する操作。
+      flatten_n(3) は M<M<M<M<A>>>> -> M<A> を行う。
+    rationale: |
+      現時点では単純な一段階 flatten のみを提供し、
+      複数段階は連続した flatten() 呼び出しで対応する。
+      ユースケースが明確になった時点で追加を検討。
+
+  - id: try_flatten
+    name: "エラーハンドリング付き flatten (try_flatten)"
+    description: |
+      flatten 中にエラーが発生した場合に Result を返す操作。
+      主に外部リソースを扱うモナド変換子で有用。
+    rationale: |
+      現時点の Flatten 対象は全て純粋な操作であり、
+      エラーが発生する可能性がない。
+      IO モナドや Effect システムとの統合時に再検討。
+
+  - id: async_flatten
+    name: "非同期 flatten"
+    description: |
+      Future<Future<T>> -> Future<T> のような非同期モナドの平坦化。
+    rationale: |
+      非同期サポートは別途 async_control_flow で対応予定。
+      Flatten トレイトとの統合は将来の課題。

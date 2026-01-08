@@ -219,7 +219,7 @@ let sequence_right: Option<i32> = Some(10).map2(Some(20), |_, b| b);
 | `return a` | `Monad::pure` (via Applicative) | Lift into monad |
 | `ma >>= f` | `Monad::flat_map` | Bind operation |
 | `ma >> mb` | `Monad::then` | Sequence, keep right |
-| `join mma` | `Option::flatten` (std) | Flatten nested monad |
+| `join mma` | `Flatten::flatten` / `Option::flatten` (std) | Flatten nested monad |
 | `ma =<< f` | `f(ma.run())` | Reversed bind |
 | `>=>` (Kleisli) | Manual composition | Compose monadic functions |
 | `<=<` (Kleisli) | Manual composition | Reverse Kleisli composition |
@@ -299,10 +299,16 @@ let chained: Option<i32> = Some(100)
     .flat_map(|x| safe_divide(x, 2));
 // Note: This gives None because safe_divide(10, 100) = 0, then safe_divide(0, 2) = 0
 
-// Using flatten (std)
+// Using Flatten trait (also works with std Option::flatten)
+use lambars::typeclass::Flatten;
 let nested: Option<Option<i32>> = Some(Some(42));
 let flattened: Option<i32> = nested.flatten();
 // flattened = Some(42)
+
+// Flatten also works for Result, Box, Identity
+let nested_result: Result<Result<i32, &str>, &str> = Ok(Ok(42));
+let flattened_result: Result<i32, &str> = nested_result.flatten();
+// flattened_result = Ok(42)
 
 // Sequence with then
 let sequenced: Option<i32> = Some(10).then(Some(20));

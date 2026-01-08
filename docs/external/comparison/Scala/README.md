@@ -159,7 +159,7 @@ let sum3: Option<i32> = Some(1).map3(Some(2), Some(3), |a, b, c| a + b + c);
 | Scala (Cats) | lambars | Description |
 |--------------|---------|-------------|
 | `fa.flatMap(f)` | `Monad::flat_map` | Chain computations |
-| `fa.flatten` | `Option::flatten` (std) | Flatten nested |
+| `fa.flatten` | `Flatten::flatten` / `Option::flatten` (std) | Flatten nested |
 | `fa >> fb` | `Monad::then` | Sequence, keep right |
 | `fa.mproduct(f)` | `flat_map(\|a\| f(a).map(\|b\| (a, b)))` | Pair with result |
 | `fa.ifM(ifTrue, ifFalse)` | Manual implementation | Conditional |
@@ -216,10 +216,16 @@ let chained: Option<i32> = eff! {
 };
 // chained = Some(5)
 
-// Flatten (std)
+// Flatten (using Flatten trait or std Option::flatten)
+use lambars::typeclass::Flatten;
 let nested: Option<Option<i32>> = Some(Some(42));
 let flat: Option<i32> = nested.flatten();
 // flat = Some(42)
+
+// Flatten also works for Result, Box, Identity
+let nested_result: Result<Result<i32, &str>, &str> = Ok(Ok(42));
+let flat_result: Result<i32, &str> = nested_result.flatten();
+// flat_result = Ok(42)
 ```
 
 ### Semigroup and Monoid
