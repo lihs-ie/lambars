@@ -1,6 +1,6 @@
 # lambars
 
-[English](README.en.md) | [日本語](README.ja.md)
+[English](README.md) | [日本語](README.ja.md)
 
 A functional programming library for Rust providing type classes, persistent data structures, and effect systems.
 
