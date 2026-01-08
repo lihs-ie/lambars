@@ -100,6 +100,7 @@ mod monad_state;
 mod monad_writer;
 
 pub use monad_error::MonadError;
+pub use monad_error::MonadErrorExt;
 pub use monad_reader::MonadReader;
 pub use monad_state::MonadState;
 pub use monad_writer::MonadWriter;
