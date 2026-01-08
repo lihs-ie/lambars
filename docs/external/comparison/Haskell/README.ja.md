@@ -2,6 +2,8 @@
 
 [English](README.md) | [日本語](README.ja.md)
 
+> **Note**: このドキュメントはAIによって翻訳されました。誤りや不自然な表現がある場合は、Issue または Pull Request でお知らせください。
+
 このドキュメントは、Haskell の関数型プログラミング構造と lambars (Rust) における同等の機能との包括的な対応関係を提供します。Haskell は正統な純粋関数型プログラミング言語であり、lambars はその多くの抽象化を Rust にもたらすことを目指しています。
 
 ## 目次

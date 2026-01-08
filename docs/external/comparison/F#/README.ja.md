@@ -2,6 +2,8 @@
 
 [English](README.md) | [日本語](README.ja.md)
 
+> **Note**: このドキュメントはAIによって翻訳されました。誤りや不自然な表現がある場合は、Issue または Pull Request でお知らせください。
+
 本ドキュメントは、F# の関数型プログラミング構文と lambars (Rust) の同等の機能を包括的に比較します。
 
 ## 目次
