@@ -419,6 +419,7 @@ dependencies = [
  "lambars-derive",
  "paste",
  "proptest",
+ "rayon",
  "rstest",
  "serde",
  "serde_json",

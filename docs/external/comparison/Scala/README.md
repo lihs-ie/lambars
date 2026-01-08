@@ -1762,6 +1762,59 @@ let removed = map.remove("a");
 
 ---
 
+## Parallel Collections
+
+Scala provides parallel collections through `.par`, while lambars integrates with rayon for parallel iteration.
+
+### Comparison
+
+| Scala | lambars | Description |
+|-------|---------|-------------|
+| `collection.par` | `into_par_iter()` (requires `rayon` feature) | Convert to parallel collection |
+| `collection.par.map(f)` | `par_iter().map(f)` | Parallel map |
+| `collection.par.filter(p)` | `par_iter().filter(p)` | Parallel filter |
+| `collection.par.reduce(f)` | `par_iter().reduce(identity, f)` | Parallel reduce |
+| `collection.par.sum` | `par_iter().sum()` | Parallel sum |
+| `collection.par.find(p)` | `par_iter().find_any(p)` | Find (non-deterministic) |
+| `collection.par.forall(p)` | `par_iter().all(p)` | All match predicate |
+| `collection.par.exists(p)` | `par_iter().any(p)` | Any matches predicate |
+
+### Code Examples
+
+```scala
+// Scala
+import scala.collection.parallel.CollectionConverters._
+
+val numbers = Vector.range(0, 10000)
+val doubled = numbers.par.map(_ * 2).toVector
+val sum = numbers.par.sum
+val filtered = numbers.par.filter(_ % 2 == 0).toVector
+```
+
+```rust
+// lambars (requires `rayon` feature)
+use lambars::persistent::PersistentVector;
+use rayon::prelude::*;
+
+let numbers: PersistentVector<i32> = (0..10000).collect();
+let doubled: Vec<i32> = numbers.par_iter().map(|x| x * 2).collect();
+let sum: i32 = numbers.par_iter().sum();
+let filtered: Vec<i32> = numbers.par_iter().filter(|x| *x % 2 == 0).cloned().collect();
+
+// Original vector is unchanged
+assert_eq!(numbers.len(), 10000);
+```
+
+### Note on Ordering
+
+Parallel operations in both Scala and lambars may not preserve order for certain operations:
+
+- `filter`: Order may not be preserved (use sequential version for ordering)
+- `find_any`: Returns any matching element (non-deterministic)
+- `reduce`: Result depends on associativity of operation
+
+---
+
 ## Lazy Evaluation
 
 | Scala | lambars | Description |
