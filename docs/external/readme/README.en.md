@@ -21,9 +21,9 @@ lambars brings functional programming abstractions to Rust that are not provided
 
 If you're coming from another functional programming language, these guides will help you understand how lambars maps to familiar concepts:
 
-- [Haskell to lambars](docs/external/comparison/Haskell/README.en.md) - Comprehensive guide covering type classes, do-notation, optics, and more
-- [Scala to lambars](docs/external/comparison/Scala/README.en.md) - Covers Cats/Scalaz, Monocle, and Scala standard library
-- [F# to lambars](docs/external/comparison/F%23/README.end.md) - Covers F# core library, computation expressions, and active patterns
+- [Haskell to lambars](../comparison/Haskell/README.en.md) - Comprehensive guide covering type classes, do-notation, optics, and more
+- [Scala to lambars](../comparison/Scala/README.en.md) - Covers Cats/Scalaz, Monocle, and Scala standard library
+- [F# to lambars](../comparison/F%23/README.en.md) - Covers F# core library, computation expressions, and active patterns
 
 ## Requirements
 

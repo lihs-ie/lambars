@@ -23,9 +23,9 @@ lambars は、Rust の標準ライブラリでは提供されていない関数�
 
 他の関数型プログラミング言語からの移行をお考えの方は、以下のガイドが lambars の概念を理解する手助けになります:
 
-- [Haskell から lambars へ](/docs/external/comparison/Haskell/README.ja.md) - 型クラス、do 記法、optics などを網羅した包括的ガイド
-- [Scala から lambars へ](/docs/external/comparison/Scala/README.ja.md) - Cats/Scalaz、Monocle、Scala 標準ライブラリをカバー
-- [F# から lambars へ](/docs/external/comparison/F%23/README.ja.md) - F# コアライブラリ、計算式、アクティブパターンをカバー
+- [Haskell から lambars へ](../comparison/Haskell/README.ja.md) - 型クラス、do 記法、optics などを網羅した包括的ガイド
+- [Scala から lambars へ](../comparison/Scala/README.ja.md) - Cats/Scalaz、Monocle、Scala 標準ライブラリをカバー
+- [F# から lambars へ](../comparison/F%23/README.ja.md) - F# コアライブラリ、計算式、アクティブパターンをカバー
 
 ## 必要条件
 
