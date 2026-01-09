@@ -1,0 +1,1228 @@
+# API Design
+# Project: Dungeon of Pure Functions
+# Layer: API (Axum)
+
+metadata:
+  version: "1.0.0"
+  created_at: "2026-01-09"
+  updated_at: "2026-01-09"
+  status: draft
+  framework: axum
+
+# =============================================================================
+# Design Principles
+# =============================================================================
+
+design_principles:
+  - name: Thin Controller Pattern
+    description: |
+      API ハンドラーは薄く保ち、ビジネスロジックは Workflow 層に委譲する。
+      ハンドラーの責務は DTO 変換とエラーハンドリングのみ。
+
+  - name: Functional Error Handling
+    description: |
+      エラーは Result 型で表現し、例外を使わない。
+      WorkflowError → HTTP ステータスコードの変換を一元管理。
+
+  - name: Immutable Request/Response
+    description: |
+      リクエスト・レスポンス DTO は不変。
+      serde による JSON シリアライズ/デシリアライズを使用。
+
+  - name: Dependency Injection
+    description: |
+      Axum の State 拡張で依存関係を注入。
+      テスト時にモック可能な設計。
+
+# =============================================================================
+# Base Configuration
+# =============================================================================
+
+base_configuration:
+  base_path: /api/v1
+  content_type: application/json
+  character_encoding: UTF-8
+
+  common_headers:
+    request:
+      - name: Content-Type
+        value: application/json
+        required: true
+      - name: X-Request-ID
+        value: UUID
+        required: false
+        description: リクエストトレーシング用
+
+    response:
+      - name: Content-Type
+        value: application/json
+      - name: X-Request-ID
+        value: echo from request or generated
+      - name: X-Response-Time
+        value: milliseconds
+
+# =============================================================================
+# Error Response Format
+# =============================================================================
+
+error_response:
+  format:
+    type: object
+    properties:
+      error:
+        type: object
+        properties:
+          code:
+            type: string
+            description: エラーコード
+          message:
+            type: string
+            description: 人間が読めるエラーメッセージ
+          details:
+            type: object
+            nullable: true
+            description: 追加のエラー詳細
+
+  example: |
+    {
+      "error": {
+        "code": "GAME_NOT_FOUND",
+        "message": "Game session not found",
+        "details": {
+          "game_id": "550e8400-e29b-41d4-a716-446655440000"
+        }
+      }
+    }
+
+  mapping:
+    - workflow_error: "WorkflowError::NotFound"
+      http_status: 404
+      error_code: "{ENTITY}_NOT_FOUND"
+
+    - workflow_error: "WorkflowError::Domain(ValidationError)"
+      http_status: 400
+      error_code: "VALIDATION_ERROR"
+
+    - workflow_error: "WorkflowError::Domain(CommandError)"
+      http_status: 400
+      error_code: "INVALID_COMMAND"
+
+    - workflow_error: "WorkflowError::Domain(GameSessionError::SessionAlreadyCompleted)"
+      http_status: 409
+      error_code: "GAME_ALREADY_COMPLETED"
+
+    - workflow_error: "WorkflowError::Domain(PlayerError::HealthExhausted)"
+      http_status: 409
+      error_code: "PLAYER_DEAD"
+
+    - workflow_error: "WorkflowError::Domain(FloorError::TileNotWalkable)"
+      http_status: 400
+      error_code: "INVALID_MOVEMENT"
+
+    - workflow_error: "WorkflowError::Domain(CombatError::TargetNotInRange)"
+      http_status: 400
+      error_code: "TARGET_NOT_IN_RANGE"
+
+    - workflow_error: "WorkflowError::Repository"
+      http_status: 500
+      error_code: "INTERNAL_ERROR"
+
+    - workflow_error: "WorkflowError::EventStore"
+      http_status: 500
+      error_code: "INTERNAL_ERROR"
+
+# =============================================================================
+# Endpoints
+# =============================================================================
+
+endpoints:
+  # ===========================================================================
+  # Game Session Management
+  # ===========================================================================
+  game_session:
+    # -------------------------------------------------------------------------
+    # Create Game
+    # -------------------------------------------------------------------------
+    - method: POST
+      path: /games
+      name: CreateGame
+      description: 新規ゲームセッションを作成する
+      workflow: CreateGame
+
+      request:
+        body:
+          type: CreateGameRequest
+          properties:
+            player_name:
+              type: string
+              min_length: 1
+              max_length: 50
+              description: プレイヤー名
+            seed:
+              type: integer
+              nullable: true
+              description: 乱数シード（省略時は自動生成）
+
+          example: |
+            {
+              "player_name": "Hero",
+              "seed": 12345
+            }
+
+      response:
+        status: 201
+        body:
+          type: GameSessionResponse
+          properties:
+            game_id:
+              type: string
+              format: uuid
+            player:
+              "$ref": "#/definitions/PlayerResponse"
+            floor:
+              "$ref": "#/definitions/FloorSummaryResponse"
+            turn_count:
+              type: integer
+            status:
+              type: string
+              enum: [in_progress, victory, defeat, paused]
+
+          example: |
+            {
+              "game_id": "550e8400-e29b-41d4-a716-446655440000",
+              "player": {
+                "player_id": "660e8400-e29b-41d4-a716-446655440001",
+                "name": "Hero",
+                "position": { "x": 5, "y": 10 },
+                "health": { "current": 100, "max": 100 },
+                "mana": { "current": 50, "max": 50 },
+                "level": 1,
+                "experience": 0
+              },
+              "floor": {
+                "level": 1,
+                "width": 50,
+                "height": 50,
+                "explored_percentage": 5.2
+              },
+              "turn_count": 0,
+              "status": "in_progress"
+            }
+
+      errors:
+        - status: 400
+          code: VALIDATION_ERROR
+          description: プレイヤー名が不正
+
+    # -------------------------------------------------------------------------
+    # Get Game
+    # -------------------------------------------------------------------------
+    - method: GET
+      path: "/games/{game_id}"
+      name: GetGame
+      description: ゲームセッションの状態を取得する
+      workflow: ResumeGame
+
+      request:
+        path_params:
+          - name: game_id
+            type: string
+            format: uuid
+            description: ゲームセッションID
+
+      response:
+        status: 200
+        body:
+          type: GameSessionResponse
+          description: ゲームセッションの現在状態
+
+      errors:
+        - status: 404
+          code: GAME_NOT_FOUND
+          description: 指定されたゲームが存在しない
+
+    # -------------------------------------------------------------------------
+    # End Game
+    # -------------------------------------------------------------------------
+    - method: POST
+      path: "/games/{game_id}/end"
+      name: EndGame
+      description: ゲームセッションを終了する
+      workflow: EndGame
+
+      request:
+        path_params:
+          - name: game_id
+            type: string
+            format: uuid
+        body:
+          type: EndGameRequest
+          properties:
+            outcome:
+              type: string
+              enum: [victory, defeat, abandon]
+              description: ゲーム終了理由
+
+          example: |
+            {
+              "outcome": "abandon"
+            }
+
+      response:
+        status: 200
+        body:
+          type: GameEndResponse
+          properties:
+            game_id:
+              type: string
+              format: uuid
+            final_score:
+              type: integer
+            dungeon_depth:
+              type: integer
+            turns_survived:
+              type: integer
+            enemies_defeated:
+              type: integer
+            outcome:
+              type: string
+
+          example: |
+            {
+              "game_id": "550e8400-e29b-41d4-a716-446655440000",
+              "final_score": 15000,
+              "dungeon_depth": 5,
+              "turns_survived": 120,
+              "enemies_defeated": 23,
+              "outcome": "defeat"
+            }
+
+      errors:
+        - status: 404
+          code: GAME_NOT_FOUND
+        - status: 409
+          code: GAME_ALREADY_COMPLETED
+
+  # ===========================================================================
+  # Commands (Turn Processing)
+  # ===========================================================================
+  commands:
+    # -------------------------------------------------------------------------
+    # Execute Command
+    # -------------------------------------------------------------------------
+    - method: POST
+      path: "/games/{game_id}/commands"
+      name: ExecuteCommand
+      description: コマンドを実行してターンを処理する
+      workflow: ProcessTurn
+
+      request:
+        path_params:
+          - name: game_id
+            type: string
+            format: uuid
+        body:
+          type: ExecuteCommandRequest
+          properties:
+            command:
+              type: object
+              oneOf:
+                - "$ref": "#/definitions/MoveCommand"
+                - "$ref": "#/definitions/AttackCommand"
+                - "$ref": "#/definitions/UseItemCommand"
+                - "$ref": "#/definitions/PickUpCommand"
+                - "$ref": "#/definitions/DropCommand"
+                - "$ref": "#/definitions/EquipCommand"
+                - "$ref": "#/definitions/UnequipCommand"
+                - "$ref": "#/definitions/WaitCommand"
+                - "$ref": "#/definitions/DescendCommand"
+                - "$ref": "#/definitions/AscendCommand"
+
+          examples:
+            move: |
+              {
+                "command": {
+                  "type": "move",
+                  "direction": "north"
+                }
+              }
+            attack: |
+              {
+                "command": {
+                  "type": "attack",
+                  "target_id": "770e8400-e29b-41d4-a716-446655440002"
+                }
+              }
+            use_item: |
+              {
+                "command": {
+                  "type": "use_item",
+                  "item_id": "880e8400-e29b-41d4-a716-446655440003"
+                }
+              }
+            wait: |
+              {
+                "command": {
+                  "type": "wait"
+                }
+              }
+
+      response:
+        status: 200
+        body:
+          type: TurnResultResponse
+          properties:
+            game:
+              "$ref": "#/definitions/GameSessionResponse"
+            turn_events:
+              type: array
+              items:
+                "$ref": "#/definitions/GameEventResponse"
+            game_over:
+              type: boolean
+            game_over_reason:
+              type: string
+              nullable: true
+
+          example: |
+            {
+              "game": { ... },
+              "turn_events": [
+                { "type": "TurnStarted", "turn": 1 },
+                { "type": "PlayerMoved", "from": { "x": 5, "y": 10 }, "to": { "x": 5, "y": 9 } },
+                { "type": "EnemyMoved", "enemy_id": "...", "from": { "x": 10, "y": 15 }, "to": { "x": 9, "y": 15 } },
+                { "type": "TurnEnded", "turn": 1 }
+              ],
+              "game_over": false,
+              "game_over_reason": null
+            }
+
+      errors:
+        - status: 400
+          code: INVALID_COMMAND
+          description: コマンドが不正
+        - status: 400
+          code: INVALID_MOVEMENT
+          description: 移動先が壁または通行不可
+        - status: 400
+          code: TARGET_NOT_IN_RANGE
+          description: 攻撃対象が射程外
+        - status: 404
+          code: GAME_NOT_FOUND
+        - status: 409
+          code: GAME_ALREADY_COMPLETED
+        - status: 409
+          code: PLAYER_DEAD
+
+  # ===========================================================================
+  # Player Information
+  # ===========================================================================
+  player:
+    # -------------------------------------------------------------------------
+    # Get Player
+    # -------------------------------------------------------------------------
+    - method: GET
+      path: "/games/{game_id}/player"
+      name: GetPlayer
+      description: プレイヤーの詳細情報を取得する
+
+      request:
+        path_params:
+          - name: game_id
+            type: string
+            format: uuid
+
+      response:
+        status: 200
+        body:
+          type: PlayerDetailResponse
+          properties:
+            player_id:
+              type: string
+              format: uuid
+            name:
+              type: string
+            position:
+              "$ref": "#/definitions/PositionResponse"
+            health:
+              "$ref": "#/definitions/ResourceResponse"
+            mana:
+              "$ref": "#/definitions/ResourceResponse"
+            level:
+              type: integer
+            experience:
+              type: integer
+            experience_to_next_level:
+              type: integer
+            base_stats:
+              "$ref": "#/definitions/BaseStatsResponse"
+            combat_stats:
+              "$ref": "#/definitions/CombatStatsResponse"
+            equipment:
+              "$ref": "#/definitions/EquipmentResponse"
+            status_effects:
+              type: array
+              items:
+                "$ref": "#/definitions/StatusEffectResponse"
+
+      errors:
+        - status: 404
+          code: GAME_NOT_FOUND
+
+    # -------------------------------------------------------------------------
+    # Get Inventory
+    # -------------------------------------------------------------------------
+    - method: GET
+      path: "/games/{game_id}/inventory"
+      name: GetInventory
+      description: インベントリを取得する
+
+      request:
+        path_params:
+          - name: game_id
+            type: string
+            format: uuid
+
+      response:
+        status: 200
+        body:
+          type: InventoryResponse
+          properties:
+            capacity:
+              type: integer
+            used_slots:
+              type: integer
+            items:
+              type: array
+              items:
+                "$ref": "#/definitions/ItemStackResponse"
+
+          example: |
+            {
+              "capacity": 20,
+              "used_slots": 5,
+              "items": [
+                {
+                  "item": {
+                    "item_id": "880e8400-e29b-41d4-a716-446655440003",
+                    "name": "Health Potion",
+                    "kind": "consumable",
+                    "description": "Restores 50 HP"
+                  },
+                  "quantity": 3
+                }
+              ]
+            }
+
+      errors:
+        - status: 404
+          code: GAME_NOT_FOUND
+
+  # ===========================================================================
+  # Floor Information
+  # ===========================================================================
+  floor:
+    # -------------------------------------------------------------------------
+    # Get Floor
+    # -------------------------------------------------------------------------
+    - method: GET
+      path: "/games/{game_id}/floor"
+      name: GetFloor
+      description: 現在フロアの情報を取得する
+
+      request:
+        path_params:
+          - name: game_id
+            type: string
+            format: uuid
+        query_params:
+          - name: include_fog
+            type: boolean
+            default: true
+            description: 未探索エリアを隠すか
+
+      response:
+        status: 200
+        body:
+          type: FloorResponse
+          properties:
+            level:
+              type: integer
+            width:
+              type: integer
+            height:
+              type: integer
+            tiles:
+              type: array
+              items:
+                type: array
+                items:
+                  "$ref": "#/definitions/TileResponse"
+            visible_enemies:
+              type: array
+              items:
+                "$ref": "#/definitions/EnemySummaryResponse"
+            visible_items:
+              type: array
+              items:
+                "$ref": "#/definitions/DroppedItemResponse"
+            stairs_up:
+              "$ref": "#/definitions/PositionResponse"
+              nullable: true
+            stairs_down:
+              "$ref": "#/definitions/PositionResponse"
+              nullable: true
+
+      errors:
+        - status: 404
+          code: GAME_NOT_FOUND
+
+    # -------------------------------------------------------------------------
+    # Get Visible Area
+    # -------------------------------------------------------------------------
+    - method: GET
+      path: "/games/{game_id}/floor/visible"
+      name: GetVisibleArea
+      description: プレイヤーの視界範囲のみを取得する（軽量版）
+
+      request:
+        path_params:
+          - name: game_id
+            type: string
+            format: uuid
+
+      response:
+        status: 200
+        body:
+          type: VisibleAreaResponse
+          properties:
+            player_position:
+              "$ref": "#/definitions/PositionResponse"
+            visible_tiles:
+              type: array
+              items:
+                type: object
+                properties:
+                  position:
+                    "$ref": "#/definitions/PositionResponse"
+                  tile:
+                    "$ref": "#/definitions/TileResponse"
+            visible_enemies:
+              type: array
+              items:
+                "$ref": "#/definitions/EnemySummaryResponse"
+            visible_items:
+              type: array
+              items:
+                "$ref": "#/definitions/DroppedItemResponse"
+
+      errors:
+        - status: 404
+          code: GAME_NOT_FOUND
+
+  # ===========================================================================
+  # Events
+  # ===========================================================================
+  events:
+    # -------------------------------------------------------------------------
+    # Get Events
+    # -------------------------------------------------------------------------
+    - method: GET
+      path: "/games/{game_id}/events"
+      name: GetEvents
+      description: イベントログを取得する
+
+      request:
+        path_params:
+          - name: game_id
+            type: string
+            format: uuid
+        query_params:
+          - name: since
+            type: integer
+            description: このシーケンス番号以降のイベントを取得
+            default: 0
+          - name: limit
+            type: integer
+            description: 取得するイベント数の上限
+            default: 100
+            max: 1000
+
+      response:
+        status: 200
+        body:
+          type: EventsResponse
+          properties:
+            events:
+              type: array
+              items:
+                "$ref": "#/definitions/GameEventResponse"
+            next_sequence:
+              type: integer
+              description: 次のページ取得用シーケンス番号
+            has_more:
+              type: boolean
+
+          example: |
+            {
+              "events": [
+                {
+                  "sequence": 1,
+                  "type": "GameStarted",
+                  "data": { "game_id": "...", "seed": 12345 },
+                  "occurred_at": "2026-01-09T12:00:00Z"
+                },
+                {
+                  "sequence": 2,
+                  "type": "TurnStarted",
+                  "data": { "turn": 1 },
+                  "occurred_at": "2026-01-09T12:00:01Z"
+                }
+              ],
+              "next_sequence": 3,
+              "has_more": true
+            }
+
+      errors:
+        - status: 404
+          code: GAME_NOT_FOUND
+
+  # ===========================================================================
+  # Leaderboard
+  # ===========================================================================
+  leaderboard:
+    # -------------------------------------------------------------------------
+    # Get Leaderboard
+    # -------------------------------------------------------------------------
+    - method: GET
+      path: /leaderboard
+      name: GetLeaderboard
+      description: リーダーボードを取得する
+
+      request:
+        query_params:
+          - name: type
+            type: string
+            enum: [global, daily, weekly]
+            default: global
+          - name: limit
+            type: integer
+            default: 10
+            max: 100
+
+      response:
+        status: 200
+        body:
+          type: LeaderboardResponse
+          properties:
+            type:
+              type: string
+            entries:
+              type: array
+              items:
+                "$ref": "#/definitions/LeaderboardEntryResponse"
+
+          example: |
+            {
+              "type": "global",
+              "entries": [
+                {
+                  "rank": 1,
+                  "player_name": "Champion",
+                  "score": 50000,
+                  "dungeon_depth": 10,
+                  "outcome": "victory",
+                  "completed_at": "2026-01-08T15:30:00Z"
+                },
+                {
+                  "rank": 2,
+                  "player_name": "Hero",
+                  "score": 35000,
+                  "dungeon_depth": 7,
+                  "outcome": "defeat",
+                  "completed_at": "2026-01-09T10:00:00Z"
+                }
+              ]
+            }
+
+  # ===========================================================================
+  # Health Check
+  # ===========================================================================
+  health:
+    - method: GET
+      path: /health
+      name: HealthCheck
+      description: ヘルスチェックエンドポイント
+
+      response:
+        status: 200
+        body:
+          type: HealthResponse
+          properties:
+            status:
+              type: string
+              enum: [healthy, degraded, unhealthy]
+            version:
+              type: string
+            components:
+              type: object
+              properties:
+                database:
+                  type: string
+                  enum: [up, down]
+                cache:
+                  type: string
+                  enum: [up, down]
+
+          example: |
+            {
+              "status": "healthy",
+              "version": "1.0.0",
+              "components": {
+                "database": "up",
+                "cache": "up"
+              }
+            }
+
+# =============================================================================
+# Type Definitions
+# =============================================================================
+
+definitions:
+  # ---------------------------------------------------------------------------
+  # Command Types
+  # ---------------------------------------------------------------------------
+  MoveCommand:
+    type: object
+    properties:
+      type:
+        type: string
+        const: move
+      direction:
+        type: string
+        enum: [north, south, east, west]
+
+  AttackCommand:
+    type: object
+    properties:
+      type:
+        type: string
+        const: attack
+      target_id:
+        type: string
+        format: uuid
+
+  UseItemCommand:
+    type: object
+    properties:
+      type:
+        type: string
+        const: use_item
+      item_id:
+        type: string
+        format: uuid
+      target_id:
+        type: string
+        format: uuid
+        nullable: true
+
+  PickUpCommand:
+    type: object
+    properties:
+      type:
+        type: string
+        const: pick_up
+      item_id:
+        type: string
+        format: uuid
+
+  DropCommand:
+    type: object
+    properties:
+      type:
+        type: string
+        const: drop
+      item_id:
+        type: string
+        format: uuid
+
+  EquipCommand:
+    type: object
+    properties:
+      type:
+        type: string
+        const: equip
+      item_id:
+        type: string
+        format: uuid
+
+  UnequipCommand:
+    type: object
+    properties:
+      type:
+        type: string
+        const: unequip
+      slot:
+        type: string
+        enum: [weapon, armor, helmet, accessory]
+
+  WaitCommand:
+    type: object
+    properties:
+      type:
+        type: string
+        const: wait
+
+  DescendCommand:
+    type: object
+    properties:
+      type:
+        type: string
+        const: descend
+
+  AscendCommand:
+    type: object
+    properties:
+      type:
+        type: string
+        const: ascend
+
+  # ---------------------------------------------------------------------------
+  # Response Types
+  # ---------------------------------------------------------------------------
+  PositionResponse:
+    type: object
+    properties:
+      x:
+        type: integer
+      y:
+        type: integer
+
+  ResourceResponse:
+    type: object
+    properties:
+      current:
+        type: integer
+      max:
+        type: integer
+
+  BaseStatsResponse:
+    type: object
+    properties:
+      strength:
+        type: integer
+      dexterity:
+        type: integer
+      intelligence:
+        type: integer
+      vitality:
+        type: integer
+
+  CombatStatsResponse:
+    type: object
+    properties:
+      attack:
+        type: integer
+      defense:
+        type: integer
+      speed:
+        type: integer
+
+  PlayerResponse:
+    type: object
+    properties:
+      player_id:
+        type: string
+        format: uuid
+      name:
+        type: string
+      position:
+        "$ref": "#/definitions/PositionResponse"
+      health:
+        "$ref": "#/definitions/ResourceResponse"
+      mana:
+        "$ref": "#/definitions/ResourceResponse"
+      level:
+        type: integer
+      experience:
+        type: integer
+
+  FloorSummaryResponse:
+    type: object
+    properties:
+      level:
+        type: integer
+      width:
+        type: integer
+      height:
+        type: integer
+      explored_percentage:
+        type: number
+
+  TileResponse:
+    type: object
+    properties:
+      kind:
+        type: string
+        enum: [floor, wall, door_open, door_closed, stairs_up, stairs_down, trap, unknown]
+      is_explored:
+        type: boolean
+      is_visible:
+        type: boolean
+
+  EnemySummaryResponse:
+    type: object
+    properties:
+      enemy_id:
+        type: string
+        format: uuid
+      enemy_type:
+        type: string
+      position:
+        "$ref": "#/definitions/PositionResponse"
+      health_percentage:
+        type: number
+        description: HP の残り割合 (0.0 - 1.0)
+
+  DroppedItemResponse:
+    type: object
+    properties:
+      item_id:
+        type: string
+        format: uuid
+      name:
+        type: string
+      position:
+        "$ref": "#/definitions/PositionResponse"
+
+  ItemResponse:
+    type: object
+    properties:
+      item_id:
+        type: string
+        format: uuid
+      name:
+        type: string
+      kind:
+        type: string
+        enum: [weapon, armor, consumable, material]
+      description:
+        type: string
+      rarity:
+        type: string
+        enum: [common, uncommon, rare, epic, legendary]
+
+  ItemStackResponse:
+    type: object
+    properties:
+      item:
+        "$ref": "#/definitions/ItemResponse"
+      quantity:
+        type: integer
+
+  EquipmentResponse:
+    type: object
+    properties:
+      weapon:
+        "$ref": "#/definitions/ItemResponse"
+        nullable: true
+      armor:
+        "$ref": "#/definitions/ItemResponse"
+        nullable: true
+      helmet:
+        "$ref": "#/definitions/ItemResponse"
+        nullable: true
+      accessory:
+        "$ref": "#/definitions/ItemResponse"
+        nullable: true
+
+  StatusEffectResponse:
+    type: object
+    properties:
+      effect_type:
+        type: string
+        enum: [poison, burn, freeze, stun, buff_attack, buff_defense, regeneration]
+      remaining_turns:
+        type: integer
+      magnitude:
+        type: number
+
+  GameEventResponse:
+    type: object
+    properties:
+      sequence:
+        type: integer
+      type:
+        type: string
+      data:
+        type: object
+      occurred_at:
+        type: string
+        format: date-time
+
+  LeaderboardEntryResponse:
+    type: object
+    properties:
+      rank:
+        type: integer
+      player_name:
+        type: string
+      score:
+        type: integer
+      dungeon_depth:
+        type: integer
+      outcome:
+        type: string
+        enum: [victory, defeat]
+      completed_at:
+        type: string
+        format: date-time
+
+# =============================================================================
+# Implementation Structure
+# =============================================================================
+
+implementation_structure:
+  directory: src/api/
+  files:
+    - name: mod.rs
+      description: モジュール定義
+
+    - name: router.rs
+      description: |
+        Axum ルーター定義
+        ```rust
+        pub fn create_router(state: AppState) -> Router {
+            Router::new()
+                .route("/api/v1/games", post(handlers::create_game))
+                .route("/api/v1/games/:game_id", get(handlers::get_game))
+                .route("/api/v1/games/:game_id/end", post(handlers::end_game))
+                .route("/api/v1/games/:game_id/commands", post(handlers::execute_command))
+                .route("/api/v1/games/:game_id/player", get(handlers::get_player))
+                .route("/api/v1/games/:game_id/inventory", get(handlers::get_inventory))
+                .route("/api/v1/games/:game_id/floor", get(handlers::get_floor))
+                .route("/api/v1/games/:game_id/floor/visible", get(handlers::get_visible_area))
+                .route("/api/v1/games/:game_id/events", get(handlers::get_events))
+                .route("/api/v1/leaderboard", get(handlers::get_leaderboard))
+                .route("/api/v1/health", get(handlers::health_check))
+                .with_state(state)
+        }
+        ```
+
+    - name: handlers/mod.rs
+      description: ハンドラーモジュール
+
+    - name: handlers/game.rs
+      description: ゲームセッション関連ハンドラー
+
+    - name: handlers/command.rs
+      description: コマンド実行ハンドラー
+
+    - name: handlers/player.rs
+      description: プレイヤー情報ハンドラー
+
+    - name: handlers/floor.rs
+      description: フロア情報ハンドラー
+
+    - name: handlers/events.rs
+      description: イベントログハンドラー
+
+    - name: handlers/leaderboard.rs
+      description: リーダーボードハンドラー
+
+    - name: handlers/health.rs
+      description: ヘルスチェックハンドラー
+
+    - name: dto/mod.rs
+      description: DTO モジュール
+
+    - name: dto/request.rs
+      description: リクエスト DTO
+
+    - name: dto/response.rs
+      description: レスポンス DTO
+
+    - name: dto/command.rs
+      description: コマンド DTO
+
+    - name: error.rs
+      description: |
+        エラーハンドリング
+        ```rust
+        impl IntoResponse for ApiError {
+            fn into_response(self) -> Response {
+                let (status, error_code, message) = match self.0 {
+                    WorkflowError::NotFound { entity_type, .. } => {
+                        (StatusCode::NOT_FOUND, format!("{}_NOT_FOUND", entity_type.to_uppercase()), "Resource not found")
+                    }
+                    WorkflowError::Domain(domain_error) => {
+                        map_domain_error(domain_error)
+                    }
+                    _ => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Internal server error")
+                };
+                // ...
+            }
+        }
+        ```
+
+    - name: state.rs
+      description: |
+        アプリケーション状態
+        ```rust
+        #[derive(Clone)]
+        pub struct AppState {
+            pub workflows: Arc<Workflows>,
+            pub config: Arc<AppConfig>,
+        }
+
+        pub struct Workflows {
+            pub create_game: Box<dyn Fn(CreateGameCommand) -> AsyncIO<WorkflowResult<GameSession>> + Send + Sync>,
+            pub resume_game: Box<dyn Fn(ResumeGameCommand) -> AsyncIO<WorkflowResult<GameSession>> + Send + Sync>,
+            pub process_turn: Box<dyn Fn(ProcessTurnCommand) -> AsyncIO<WorkflowResult<GameSession>> + Send + Sync>,
+            // ...
+        }
+        ```
+
+    - name: middleware.rs
+      description: |
+        ミドルウェア定義
+        - リクエストID生成
+        - レスポンスタイム計測
+        - エラーログ
+
+# =============================================================================
+# Handler Implementation Pattern
+# =============================================================================
+
+handler_pattern:
+  description: |
+    各ハンドラーは以下のパターンに従う：
+    1. リクエストを DTO としてパース
+    2. DTO を Command に変換
+    3. Workflow を呼び出し
+    4. 結果を Response DTO に変換
+    5. エラーは ApiError に変換
+
+  example: |
+    pub async fn create_game(
+        State(state): State<AppState>,
+        Json(request): Json<CreateGameRequest>,
+    ) -> Result<(StatusCode, Json<GameSessionResponse>), ApiError> {
+        // 1. DTO から Command へ変換
+        let command = CreateGameCommand {
+            player_name: PlayerName::new(request.player_name)
+                .map_err(|e| ApiError::validation(e))?,
+            seed: request.seed.map(RandomSeed::new),
+        };
+
+        // 2. Workflow 呼び出し（AsyncIO を実行）
+        let session = (state.workflows.create_game)(command)
+            .run()
+            .await
+            .map_err(ApiError::from)?;
+
+        // 3. Response DTO に変換
+        let response = GameSessionResponse::from(session);
+
+        Ok((StatusCode::CREATED, Json(response)))
+    }
