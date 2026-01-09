@@ -23,7 +23,7 @@ static_assertions = "1.1"
 rstest = "^0.26"
 proptest = "1.5"
 lambars-derive = { path = "lambars-derive" }
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "sync", "macros"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "sync", "macros", "test-util"] }
 criterion = { version = "0.8", features = ["html_reports"] }
 serde_json = "1.0"
 trybuild = "1.0"

@@ -1,0 +1,666 @@
+# traverse_async_io_parallel 要件定義
+#
+# 概要:
+#   AsyncIO の traverse を並行実行するバリアント `traverse_async_io_parallel` を実装する。
+#   複数の AsyncIO 操作を同時に実行することでパフォーマンスを向上させる。
+#
+# 設計方針:
+#   1. 結果の順序は入力の順序を維持（実行順序は非決定的）
+#   2. 全タスク完了待機（パニック時も含め、全て完了するまで待機）
+#   3. 既存の traverse_async_io との API 一貫性を維持
+#   4. tokio の並行実行機能（spawn, join_all）を活用
+#   5. パニックを制御フローに使用しない（Result 型でエラーを表現）
+#   6. パニックは全タスク完了後に最初のものを再スロー
+#
+# 参照:
+#   - Haskell Control.Concurrent.Async (mapConcurrently)
+#   - Scala cats Parallel (parTraverse)
+#   - Rust futures join_all
+#   - 既存の traverse_async_io 実装
+#   - Issue #81: https://github.com/lihs-ie/lambars/issues/81
+
+version: "1.2.0"
+name: "traverse_async_io_parallel"
+description: |
+  AsyncIO の traverse を並行実行するバリアント `traverse_async_io_parallel` を Traversable トレイトに追加する。
+
+  現在の traverse_async_io は順次実行（sequential）のみをサポートしている。
+  並行実行版では、複数の AsyncIO 操作を同時に実行することで、
+  I/O バウンドな処理のパフォーマンスを大幅に向上させることができる。
+
+  ## 順次実行との違い
+
+  並行実行は順次実行とセマンティクスが異なるため、別メソッドとして提供する:
+  - 実行順序: 非決定的（どのタスクが先に完了するかは保証されない）
+  - 結果順序: 入力の順序を維持（タスク完了順ではない）
+  - 副作用の順序: 非決定的（ログ出力などの順序は保証されない）
+
+  ## 参照透過性について
+
+  AsyncIO は「副作用の記述」と「副作用の実行」を分離する設計である。
+  traverse_async_io_parallel は「並行実行する AsyncIO の記述」を返す純粋関数であり、
+  run_async() を呼ぶまで実際の副作用は発生しない。
+
+  ただし、run_async() 実行時の副作用の順序は非決定的となるため、
+  観測可能な副作用（ログ、外部 I/O など）の順序に依存するコードは
+  traverse_async_io_parallel を使用すべきではない。
+
+  ## エラーハンドリング戦略
+
+  Rust の慣習に従い、ビジネスロジックのエラーは Result 型で表現する:
+
+  1. **Result を返す関数の場合**:
+     - 全ての結果（Ok/Err 両方）が収集される
+     - Err は通常の値として扱われ、特別な処理は行われない
+     - 呼び出し側で sequence_result 等を使ってエラーを処理する
+
+  2. **パニック発生時（プログラミングエラー）**:
+     - パニックは「回復不能なプログラミングエラー」として扱う（Rust の慣習）
+     - 全てのタスクが完了するまで待機する（リソースリーク防止）
+     - 完了後、最初に発生したパニックを再スローする
+     - パニック情報（メッセージ、バックトレース）は保持される
+
+  3. **キャンセル発生時（外部からの abort）**:
+     - 本実装では明示的なキャンセル機構を提供しない
+     - 外部から JoinHandle::abort() が呼ばれた場合のみ発生しうる
+     - キャンセルは「予期しない外部介入」であり、パニックとして再スローする
+     - これは tokio::spawn の制約に基づく設計上の決定である
+     - 構造化されたキャンセル機構は将来の拡張（cancellation_token）で対応
+
+# 背景・動機
+background:
+  problem: |
+    現在の traverse_async_io は各 AsyncIO を順次実行する。
+    これにより、独立した I/O 操作を並行実行できず、パフォーマンスが低下する:
+
+    ```rust
+    // 現在の実装（順次実行）
+    let urls = vec!["http://a.com", "http://b.com", "http://c.com"];
+    let results = urls.traverse_async_io(fetch_url).run_async().await;
+    // 各 fetch が 100ms かかる場合、合計 300ms かかる
+    ```
+
+    並行実行であれば、これを約 100ms で完了できる。
+
+  motivation: |
+    関数型プログラミングにおいて、効果の並行実行は重要なパターンである:
+
+    1. **パフォーマンス向上**: 独立した I/O 操作を並行実行することで、
+       レイテンシを大幅に削減できる。
+
+    2. **関数型の抽象化**: 並行性を明示的に型レベルで表現することで、
+       意図が明確になり、コードの可読性が向上する。
+
+    3. **業界標準**: Haskell の mapConcurrently、Scala の parTraverse など、
+       主要な関数型言語は並行 traverse を標準で提供している。
+
+    4. **Applicative の本質**: 並行実行は Applicative の「独立した効果の合成」
+       というセマンティクスと自然に対応する。
+
+  prior_art:
+    - name: "Haskell Control.Concurrent.Async"
+      description: |
+        `mapConcurrently :: Traversable t => (a -> IO b) -> t a -> IO (t b)`
+
+        各要素に対して IO アクションを並行実行し、結果を元の構造で返す。
+        いずれかのアクションが例外を投げると、他の全てのアクションがキャンセルされ、
+        例外が再スローされる（fail-fast セマンティクス）。
+
+        Haskell では例外が制御フローに使われることがあるが、
+        Rust ではこのパターンは推奨されないため、本実装では採用しない。
+        代わりに、全タスク完了後にパニックを再スローする方式を採用する。
+
+        ```haskell
+        import Control.Concurrent.Async
+
+        pages <- mapConcurrently getURL ["url1", "url2", "url3"]
+        ```
+
+    - name: "Scala cats Parallel"
+      description: |
+        `parTraverse[G[_]: Parallel, A, B](fa: F[A])(f: A => G[B]): G[F[B]]`
+
+        Parallel 型クラスを使用して traverse を並行化する。
+        IO の場合は実際に並行実行され、Either の場合はエラーを蓄積する
+        （Parallel インスタンスのセマンティクスに依存）。
+
+        Scala cats の parTraverse は Parallel インスタンスによって
+        エラー蓄積（Validated）と fail-fast（Either）を切り替えられる。
+        本実装では、初期リリースでは全結果収集を採用する。
+
+        ```scala
+        import cats.implicits._
+        import cats.effect.IO
+
+        val urls = List("url1", "url2", "url3")
+        val results: IO[List[Response]] = urls.parTraverse(fetchUrl)
+        ```
+
+    - name: "Rust futures join_all"
+      description: |
+        `futures::future::join_all<I>(iter: I) -> JoinAll<I::Item>`
+
+        複数の Future を並行実行し、全ての結果を Vec として返す。
+        パニックは伝播せず、全ての Future が完了するまで待機する。
+        tokio::spawn を使用した場合、JoinHandle からパニック情報を取得可能。
+
+        ```rust
+        use futures::future::join_all;
+
+        let futures = urls.iter().map(fetch_url);
+        let results = join_all(futures).await;
+        ```
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. traverse_async_io_parallel メソッド
+  # ======================================================================
+  - id: traverse_async_io_parallel
+    name: "並行 AsyncIO traverse"
+    description: |
+      各要素に AsyncIO<B> を返す関数を適用し、全ての AsyncIO を並行実行して
+      結果を AsyncIO<Self::WithType<B>> として収集する。
+
+      **セマンティクス**:
+      - 全ての AsyncIO タスクは同時に開始される
+      - 全てのタスクが完了するまで待機する（パニック時も含む）
+      - 結果は入力の順序を維持する（実行完了順ではない）
+      - 副作用の実行順序は非決定的
+
+      **エラーハンドリング**:
+      - Result を返す関数の場合、全ての結果（Ok/Err）が収集される
+      - パニックは全タスク完了後に最初に発生したものを再スローする
+      - パニック情報は JoinError から取得可能
+
+      **前提条件（tokio ランタイム）**:
+      - 本メソッドは tokio ランタイム上での実行を前提とする
+      - tokio::spawn を使用するため、Self::Inner が Send + 'static を満たす必要がある
+      - tokio ランタイム外での呼び出しはパニックとなる
+
+    laws:
+      - name: "Identity"
+        description: |
+          traverse_async_io_parallel(AsyncIO::pure) は構造を維持して AsyncIO でラップするのと等価
+        equation: "xs.traverse_async_io_parallel(AsyncIO::pure).run_async().await == xs"
+        property_test: |
+          #[rstest]
+          #[tokio::test]
+          async fn prop_traverse_async_io_parallel_identity() {
+              let xs = vec![1, 2, 3];
+              let result = xs.clone()
+                  .traverse_async_io_parallel(|x| AsyncIO::pure(x))
+                  .run_async()
+                  .await;
+              assert_eq!(result, xs);
+          }
+
+      - name: "Order Preservation"
+        description: |
+          結果の順序は入力の順序と一致する（実行完了順ではない）
+        equation: "結果のインデックス i の値は、入力のインデックス i の要素に対応する"
+        property_test: |
+          #[rstest]
+          #[tokio::test(start_paused = true)]
+          async fn prop_order_preservation() {
+              use std::time::Duration;
+
+              // 後の要素ほど速く完了するように設定
+              let delays = vec![100u64, 50, 10];
+              let async_io = delays.traverse_async_io_parallel(|delay| {
+                  AsyncIO::new(move || async move {
+                      tokio::time::sleep(Duration::from_millis(delay)).await;
+                      delay
+                  })
+              });
+
+              let result = async_io.run_async().await;
+              // 完了順ではなく、入力順で返される
+              assert_eq!(result, vec![100, 50, 10]);
+          }
+
+      - name: "Parallel Execution"
+        description: |
+          各タスクは並行して実行される（順次実行ではない）
+        equation: "n 個の独立したタスクの合計時間 ≈ 最長タスクの時間"
+        property_test: |
+          #[rstest]
+          #[tokio::test(start_paused = true)]
+          async fn prop_parallel_execution() {
+              use std::time::Duration;
+
+              let values = vec![1, 2, 3];
+
+              let async_io = values.traverse_async_io_parallel(|v| {
+                  AsyncIO::new(move || async move {
+                      tokio::time::sleep(Duration::from_millis(100)).await;
+                      v
+                  })
+              });
+
+              let start = tokio::time::Instant::now();
+              let _ = async_io.run_async().await;
+              let elapsed = start.elapsed();
+
+              // 並行実行なら約 100ms、順次なら約 300ms
+              // start_paused = true により仮想時間で自動的に進行
+              assert!(elapsed < Duration::from_millis(150));
+          }
+
+    methods:
+      - name: "traverse_async_io_parallel"
+        signature: |
+          fn traverse_async_io_parallel<B, F>(self, function: F) -> AsyncIO<Self::WithType<B>>
+          where
+              F: FnMut(Self::Inner) -> AsyncIO<B> + 'static,
+              B: Send + 'static,
+              Self: Sized,
+              Self::Inner: Send + 'static
+        description: |
+          各要素に AsyncIO を返す関数を適用し、全ての AsyncIO を並行実行して結果を収集する。
+
+          # 型パラメータ
+
+          - `B`: 変換後の要素の型。Send + 'static 制約が必要（tokio::spawn の戻り値に必要）。
+          - `F`: 変換関数。'static 制約のみ必要（関数自体は spawn 前に適用されるため Send 不要）。
+
+          # 型制約の理由
+
+          - `B: Send + 'static`: tokio::spawn の戻り値として別スレッドから返される可能性があるため。
+          - `Self::Inner: Send + 'static`: AsyncIO の内部で spawn されるタスクに渡されるため。
+          - `F: 'static`: AsyncIO クロージャ内で使用されるため。Send は不要（spawn 前に全要素に適用済み）。
+
+          # 戻り値
+
+          全ての要素を並行に変換し、結果を元の構造に格納した AsyncIO。
+
+          # パニック
+
+          - tokio ランタイム外で run_async() を呼び出した場合
+          - いずれかのタスクがパニックした場合（全タスク完了後に再スロー）
+
+          # JoinError の扱い
+
+          tokio::spawn は以下の場合に JoinError を返す:
+          1. タスクがパニックした場合 - into_panic() でパニック情報を取得し、全タスク完了後に再スロー
+          2. タスクがキャンセルされた場合 - 本実装では明示的なキャンセルは行わないため、
+             外部からのキャンセル（abort()）があった場合のみ発生。この場合もパニックと同様に扱う。
+
+          # 注意事項
+
+          - 副作用の実行順序は非決定的
+          - 全てのタスクが完了するまで待機する（パニック時も含む）
+          - Result を返す場合、全ての Err が収集される
+        examples:
+          - description: "複数の URL を並行してフェッチ"
+            code: |
+              use lambars::typeclass::Traversable;
+              use lambars::effect::AsyncIO;
+
+              fn fetch_url(url: &str) -> AsyncIO<String> {
+                  let url = url.to_string();
+                  AsyncIO::new(move || async move {
+                      // 実際の HTTP リクエスト
+                      format!("response from {}", url)
+                  })
+              }
+
+              #[tokio::main]
+              async fn main() {
+                  let urls = vec!["http://a.com", "http://b.com", "http://c.com"];
+                  let async_io = urls.traverse_async_io_parallel(|url| fetch_url(url));
+
+                  let responses = async_io.run_async().await;
+                  // 3 つの URL が並行してフェッチされる
+                  assert_eq!(responses.len(), 3);
+              }
+
+          - description: "エラーハンドリング（Result を返す関数）"
+            code: |
+              use lambars::typeclass::Traversable;
+              use lambars::effect::AsyncIO;
+
+              fn parse_async(s: &str) -> AsyncIO<Result<i32, String>> {
+                  let s = s.to_string();
+                  AsyncIO::new(move || async move {
+                      s.parse::<i32>()
+                          .map_err(|_| format!("Failed to parse: {}", s))
+                  })
+              }
+
+              #[tokio::main]
+              async fn main() {
+                  let inputs = vec!["1", "2", "three"];
+                  let async_io = inputs.traverse_async_io_parallel(|s| parse_async(s));
+
+                  let results: Vec<Result<i32, String>> = async_io.run_async().await;
+                  // 全ての結果が返される（Err も含む）
+                  assert!(matches!(results[0], Ok(1)));
+                  assert!(matches!(results[1], Ok(2)));
+                  assert!(matches!(results[2], Err(_)));
+
+                  // sequence_result を使って Vec<Result<A, E>> -> Result<Vec<A>, E> に変換可能
+                  let combined: Result<Vec<i32>, String> = results.sequence_result();
+                  assert!(combined.is_err());
+              }
+
+    implementations:
+      - type: "Vec<T>"
+        description: |
+          各要素に関数を適用し、全ての AsyncIO を並行実行して結果を Vec として収集する。
+
+          実装は tokio::spawn を使用して各タスクを別のタスクとして起動し、
+          全ての JoinHandle を await する。パニックは全タスク完了後に再スローされる。
+
+          ```rust
+          fn traverse_async_io_parallel<B, F>(self, mut function: F) -> AsyncIO<Vec<B>>
+          where
+              F: FnMut(T) -> AsyncIO<B> + 'static,
+              B: Send + 'static,
+              T: Send + 'static,
+          {
+              if self.is_empty() {
+                  return AsyncIO::pure(Vec::new());
+              }
+
+              // 関数は spawn 前に全要素に適用するため、Send 不要
+              let async_ios: Vec<AsyncIO<B>> = self.into_iter().map(&mut function).collect();
+              let capacity = async_ios.len();
+
+              AsyncIO::new(move || async move {
+                  // 全てのタスクを spawn
+                  let handles: Vec<_> = async_ios
+                      .into_iter()
+                      .map(|io| tokio::spawn(io.run_async()))
+                      .collect();
+
+                  // 全ての結果を収集（JoinError 情報も保持）
+                  let mut results = Vec::with_capacity(capacity);
+                  let mut first_join_error: Option<tokio::task::JoinError> = None;
+
+                  for handle in handles {
+                      match handle.await {
+                          Ok(value) => results.push(value),
+                          Err(join_error) => {
+                              // JoinError を保持（最初のもののみ）
+                              // パニックとキャンセルの両方を捕捉
+                              if first_join_error.is_none() {
+                                  first_join_error = Some(join_error);
+                              }
+                              // 他のタスクも完了まで待機
+                          }
+                      }
+                  }
+
+                  // 全タスク完了後、JoinError があれば処理
+                  if let Some(join_error) = first_join_error {
+                      if join_error.is_panic() {
+                          // パニックの場合は再スロー
+                          std::panic::resume_unwind(join_error.into_panic());
+                      } else {
+                          // キャンセルの場合（外部からの abort）
+                          // キャンセルもパニックとして扱う
+                          panic!("Task was cancelled");
+                      }
+                  }
+
+                  results
+              })
+          }
+          ```
+
+          **注意**:
+          - パニック/キャンセル発生時は結果が不完全（該当タスクの結果が欠落）となる。
+          - パニック/キャンセルがない場合のみ、完全な結果が返される。
+          - キャンセルは本実装では明示的に行わないが、外部から abort() された場合に発生しうる。
+
+      - type: "Option<A>"
+        description: |
+          Some の場合は関数を適用、None の場合は AsyncIO::pure(None) を返す。
+          単一要素なので、並行実行との違いは実質的にない。
+          traverse_async_io と同じ実装を委譲する。
+
+      - type: "Result<T, E>"
+        description: |
+          Ok の場合は関数を適用、Err の場合は AsyncIO::pure(Err(e)) を返す。
+          単一要素なので、並行実行との違いは実質的にない。
+          E: Clone + Send + 'static が必要。
+          traverse_async_io と同じ実装を委譲する。
+
+      - type: "Box<T>"
+        description: |
+          中身に関数を適用し、結果を Box でラップ。
+          単一要素なので、並行実行との違いは実質的にない。
+          traverse_async_io と同じ実装を委譲する。
+
+      - type: "Identity<A>"
+        description: |
+          中身に関数を適用し、結果を Identity でラップ。
+          単一要素なので、並行実行との違いは実質的にない。
+          traverse_async_io と同じ実装を委譲する。
+
+  # ======================================================================
+  # 2. sequence_async_io_parallel メソッド
+  # ======================================================================
+  - id: sequence_async_io_parallel
+    name: "並行 AsyncIO sequence"
+    description: |
+      AsyncIO の構造を内外反転し、全ての AsyncIO を並行実行する。
+      traverse_async_io_parallel(AsyncIOLike::into_async_io) と等価。
+
+    methods:
+      - name: "sequence_async_io_parallel"
+        signature: |
+          fn sequence_async_io_parallel(self) -> AsyncIO<Self::WithType<<Self::Inner as AsyncIOLike>::Value>>
+          where
+              Self: Sized,
+              Self::Inner: AsyncIOLike + Send + 'static,
+              <Self::Inner as AsyncIOLike>::Value: Send + 'static
+        description: |
+          AsyncIO の構造を内外反転する並行版。
+          Vec<AsyncIO<A>> を AsyncIO<Vec<A>> に変換し、全ての AsyncIO を並行実行する。
+
+          デフォルト実装として traverse_async_io_parallel(AsyncIOLike::into_async_io) を使用。
+        examples:
+          - description: "Vec<AsyncIO<A>> を AsyncIO<Vec<A>> に並行変換"
+            code: |
+              use lambars::typeclass::Traversable;
+              use lambars::effect::AsyncIO;
+
+              #[tokio::main]
+              async fn main() {
+                  let async_ios: Vec<AsyncIO<i32>> = vec![
+                      AsyncIO::pure(1),
+                      AsyncIO::pure(2),
+                      AsyncIO::pure(3),
+                  ];
+
+                  let combined = async_ios.sequence_async_io_parallel();
+                  let result = combined.run_async().await;
+                  assert_eq!(result, vec![1, 2, 3]);
+              }
+
+    implementations:
+      - type: "Vec<AsyncIO<A>>"
+        description: |
+          全ての AsyncIO を並行実行し、結果を Vec として収集する。
+
+  # ======================================================================
+  # 3. traverse_async_io_parallel_ および for_each_async_io_parallel メソッド
+  # ======================================================================
+  - id: traverse_async_io_parallel_discard
+    name: "並行 AsyncIO traverse（結果破棄）"
+    description: |
+      traverse_async_io_parallel と同じだが、結果を破棄して () を返す。
+      副作用のみを目的とする並行実行に使用。
+
+    methods:
+      - name: "traverse_async_io_parallel_"
+        signature: |
+          fn traverse_async_io_parallel_<F>(self, function: F) -> AsyncIO<()>
+          where
+              F: FnMut(Self::Inner) -> AsyncIO<()> + 'static,
+              Self: Sized,
+              Self::Inner: Send + 'static
+        description: |
+          各要素に AsyncIO<()> を返す関数を適用し、全ての AsyncIO を並行実行する。
+          結果は破棄され、() が返される。
+
+          デフォルト実装として traverse_async_io_parallel(function).fmap(|_| ()) を使用。
+
+      - name: "for_each_async_io_parallel"
+        signature: |
+          fn for_each_async_io_parallel<F>(self, function: F) -> AsyncIO<()>
+          where
+              F: FnMut(Self::Inner) -> AsyncIO<()> + 'static,
+              Self: Sized,
+              Self::Inner: Send + 'static
+        description: |
+          traverse_async_io_parallel_ のエイリアス。
+
+    implementations:
+      - type: "Vec<T>"
+        description: |
+          各要素に対して副作用を並行実行し、結果を破棄する。
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - "Vec の traverse_async_io_parallel は tokio::spawn を使用してタスクを並行実行"
+    - "結果を収集する際に順序を維持するため、インデックスベースで処理"
+    - "空の Vec は即座に AsyncIO::pure(Vec::new()) を返す（tokio::spawn を呼ばない）"
+    - "単一要素の構造（Option, Result, Box, Identity）は traverse_async_io に委譲"
+    - "タスク管理のオーバーヘッドは tokio のスケジューラに依存"
+
+  compatibility:
+    - "既存の Traversable trait への後方互換なメソッド追加"
+    - "既存の traverse_async_io 実装に影響しない"
+    - "async feature フラグが無効の場合はコンパイルから除外"
+    - "Rust edition 2024 対応"
+    - "tokio 1.x ランタイム必須（ランタイム非存在時はパニック）"
+
+  testing:
+    - "各メソッドに対するユニットテスト（正常系、異常系、境界値）"
+    - "各実装型（Option, Result, Vec, Box, Identity）に対するテスト"
+    - "並行実行の検証（#[tokio::test(start_paused = true)] を使用した仮想時間テスト）"
+    - "順序保持の検証（完了順ではなく入力順であることの確認）"
+    - "パニック捕捉と再スローの検証"
+    - "空の Vec に対するテスト"
+    - "テストカバレッジ 100%"
+    - "rstest を使用したテスト実装"
+
+  documentation:
+    - "各メソッドに対する rustdoc コメント"
+    - "並行実行と順次実行の違いを明確に説明"
+    - "tokio ランタイム必須であることを明記"
+    - "Send + 'static 制約の理由を説明"
+    - "パニック時の動作（全タスク完了後に再スロー）を明記"
+    - "エラーハンドリングのセマンティクスを文書化"
+    - "使用例を含む module-level ドキュメント"
+
+# 将来の拡張
+future_extensions:
+  - id: fail_fast_variant
+    name: "fail-fast バリアント"
+    description: |
+      最初のエラー/パニックで即座に停止し、他のタスクをキャンセルするバリアント。
+      Haskell の mapConcurrently と同様のセマンティクス。
+
+      ```rust
+      fn traverse_async_io_parallel_fail_fast<B, F>(
+          self,
+          function: F
+      ) -> AsyncIO<Self::WithType<B>>
+      ```
+
+      tokio::select! と AbortHandle を使用して実装。
+    rationale: |
+      初期実装は全タスク完了待機に集中する。
+      fail-fast は実装が複雑になるため、別途設計が必要。
+
+  - id: error_accumulation
+    name: "エラー蓄積モード"
+    description: |
+      全てのエラーを蓄積して返すバリアント。
+      全てのタスクを完了まで待ち、全てのエラーを NonEmptyList<E> として返す。
+
+      ```rust
+      fn traverse_async_io_parallel_validated<B, E, F>(
+          self,
+          function: F
+      ) -> AsyncIO<Result<Self::WithType<B>, NonEmptyList<E>>>
+      ```
+    rationale: |
+      Validated 型との組み合わせで検討する。
+      Scala cats の parTraverse + Validated と同様のパターン。
+
+  - id: bounded_parallelism
+    name: "並行数制限付きバリアント"
+    description: |
+      同時に実行されるタスク数を制限した traverse_async_io_parallel。
+      tokio::sync::Semaphore を使用した実装を想定。
+
+      ```rust
+      fn traverse_async_io_parallel_n<B, F>(
+          self,
+          concurrency: usize,
+          function: F
+      ) -> AsyncIO<Self::WithType<B>>
+      ```
+
+      用途:
+      - 外部 API のレート制限への対応
+      - メモリ使用量の制御
+      - ファイルディスクリプタ数の制限
+    rationale: |
+      基本的な並行実行を先に実装し、制限付きは需要に応じて追加する。
+
+  - id: cancellation_token
+    name: "キャンセルトークン対応"
+    description: |
+      外部からのキャンセル要求を受け付けるバリアント。
+      CancellationToken を引数に取り、キャンセル時に全てのタスクを停止する。
+
+      ```rust
+      fn traverse_async_io_parallel_cancellable<B, F>(
+          self,
+          token: CancellationToken,
+          function: F,
+      ) -> AsyncIO<Result<Self::WithType<B>, Cancelled>>
+      ```
+    rationale: |
+      キャンセル機構は独立した設計が必要。
+      tokio_util::sync::CancellationToken との統合を検討する。
+
+  - id: timeout
+    name: "タイムアウト付きバリアント"
+    description: |
+      全体のタイムアウトを設定するバリアント。
+      指定時間内に全タスクが完了しなければ、残りのタスクをキャンセルする。
+
+      ```rust
+      fn traverse_async_io_parallel_timeout<B, F>(
+          self,
+          timeout: Duration,
+          function: F,
+      ) -> AsyncIO<Result<Self::WithType<B>, TimeoutError>>
+      ```
+    rationale: |
+      タイムアウトは既存の AsyncIO::timeout と組み合わせて部分的に実現可能。
+      全体のタイムアウトは別途設計が必要。
+
+  - id: non_tokio_runtime
+    name: "tokio 以外のランタイム対応"
+    description: |
+      async-std や smol など、tokio 以外のランタイムでも動作するバリアント。
+      trait を使用してランタイムを抽象化する。
+
+      ```rust
+      trait Runtime {
+          fn spawn<F>(future: F) -> JoinHandle<F::Output>
+          where F: Future + Send + 'static;
+      }
+      ```
+    rationale: |
+      tokio が事実上の標準となっているため、初期実装は tokio に集中する。
+      他のランタイム対応は需要に応じて検討する。
