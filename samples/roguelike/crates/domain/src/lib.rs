@@ -4,9 +4,11 @@
 //! domain events, and domain services. All logic is implemented as pure
 //! functions without side effects.
 
-pub mod aggregates;
-pub mod entities;
-pub mod errors;
-pub mod events;
-pub mod services;
-pub mod values;
+pub mod combat;
+pub mod command;
+pub mod common;
+pub mod enemy;
+pub mod floor;
+pub mod game_session;
+pub mod item;
+pub mod player;
