@@ -543,6 +543,7 @@ let is_empty: bool = Vec::<i32>::new().is_empty();
 | `traverse @(State s)`   | `Traversable::traverse_state`         | State エフェクトで走査        |
 | `traverse @IO`          | `Traversable::traverse_io`            | IO エフェクトで走査           |
 | `traverse @(Async IO)`  | `Traversable::traverse_async_io`      | AsyncIO エフェクトで走査      |
+| `mapConcurrently`       | `Traversable::traverse_async_io_parallel` | AsyncIO エフェクトで並行走査  |
 | `sequence @(Reader r)`  | `Traversable::sequence_reader`        | Reader エフェクトの順序付け   |
 | `sequence @(State s)`   | `Traversable::sequence_state`         | State エフェクトの順序付け    |
 | `sequence @IO`          | `Traversable::sequence_io`            | IO エフェクトの順序付け       |

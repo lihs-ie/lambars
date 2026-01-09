@@ -991,6 +991,156 @@ pub trait Traversable: Functor + Foldable {
     {
         self.traverse_async_io_(function)
     }
+
+    /// Applies a function returning `AsyncIO` to each element and collects the results in parallel.
+    ///
+    /// All `AsyncIO` actions are spawned concurrently using `tokio::spawn`, and the results
+    /// are collected in the original order (not completion order).
+    ///
+    /// # Type Parameters
+    ///
+    /// * `B` - The result type of each `AsyncIO` computation. Must be `Send + 'static`
+    ///   because values are returned from spawned tasks.
+    ///
+    /// # Arguments
+    ///
+    /// * `function` - A function that transforms each element to an `AsyncIO<B>`.
+    ///   The `'static` bound is required because the function is captured in the `AsyncIO` closure.
+    ///   `Send` is **not** required because the function is applied to all elements before spawning.
+    ///
+    /// # Returns
+    ///
+    /// `AsyncIO<Self::WithType<B>>` - An `AsyncIO` that, when executed, produces the
+    /// structure with all transformed values in the original order.
+    ///
+    /// # Semantics
+    ///
+    /// - All `AsyncIO` tasks are started simultaneously
+    /// - All tasks are awaited (no fail-fast on panic)
+    /// - Results maintain input order (not completion order)
+    /// - Side effect execution order is non-deterministic
+    ///
+    /// # Panics
+    ///
+    /// - If called outside of a tokio runtime, `run_async()` will panic
+    /// - If any task panics, the panic is re-thrown after all tasks complete
+    /// - Only the first panic is re-thrown; others are lost
+    ///
+    /// # Resource Usage Warning
+    ///
+    /// This method spawns one tokio task per element without any concurrency limit.
+    /// For large input collections, this can lead to:
+    /// - High memory usage (each task has its own stack)
+    /// - Thread pool exhaustion
+    /// - File descriptor limits being reached
+    ///
+    /// For bounded concurrency, consider using a semaphore or chunking the input manually.
+    /// A bounded variant (`traverse_async_io_parallel_n`) is planned for future releases.
+    ///
+    /// # Type Constraints (Result)
+    ///
+    /// When traversing `Result<T, E>`, the error type `E` must satisfy:
+    /// - `E: Clone + Send + 'static` - Required because the error is captured by the async
+    ///   closure and may be moved between threads by the async runtime.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use lambars::typeclass::Traversable;
+    /// use lambars::effect::AsyncIO;
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let urls = vec!["http://a.com", "http://b.com", "http://c.com"];
+    ///     let async_io = urls.traverse_async_io_parallel(|url| {
+    ///         let url = url.to_string();
+    ///         AsyncIO::new(move || async move { format!("response from {}", url) })
+    ///     });
+    ///     let responses = async_io.run_async().await;
+    ///     // All URLs fetched in parallel; results in original order
+    ///     assert_eq!(responses.len(), 3);
+    /// }
+    /// ```
+    #[cfg(all(feature = "effect", feature = "async"))]
+    fn traverse_async_io_parallel<B, F>(self, function: F) -> AsyncIO<Self::WithType<B>>
+    where
+        F: FnMut(Self::Inner) -> AsyncIO<B> + 'static,
+        B: Send + 'static,
+        Self::Inner: Send + 'static,
+        Self::WithType<B>: Send + 'static;
+
+    /// Turns a structure of `AsyncIO`s inside out, executing them in parallel.
+    ///
+    /// Converts `Self<AsyncIO<A>>` to `AsyncIO<Self<A>>`, running all `AsyncIO` actions
+    /// concurrently.
+    ///
+    /// This is equivalent to `traverse_async_io_parallel(AsyncIOLike::into_async_io)`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use lambars::typeclass::Traversable;
+    /// use lambars::effect::AsyncIO;
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let async_ios: Vec<AsyncIO<i32>> = vec![
+    ///         AsyncIO::pure(1),
+    ///         AsyncIO::pure(2),
+    ///         AsyncIO::pure(3),
+    ///     ];
+    ///     let combined = async_ios.sequence_async_io_parallel();
+    ///     let result = combined.run_async().await;
+    ///     assert_eq!(result, vec![1, 2, 3]);
+    /// }
+    /// ```
+    #[cfg(all(feature = "effect", feature = "async"))]
+    fn sequence_async_io_parallel(
+        self,
+    ) -> AsyncIO<Self::WithType<<Self::Inner as AsyncIOLike>::Value>>
+    where
+        Self: Sized,
+        Self::Inner: AsyncIOLike + Send + 'static,
+        <Self::Inner as AsyncIOLike>::Value: Send + 'static,
+        Self::WithType<<Self::Inner as AsyncIOLike>::Value>: Send + 'static,
+    {
+        self.traverse_async_io_parallel(AsyncIOLike::into_async_io)
+    }
+
+    /// Applies an effectful function for its effects only, discarding results, in parallel.
+    ///
+    /// This is useful when you want to perform `AsyncIO` effects on each element
+    /// concurrently but don't need to collect the results.
+    ///
+    /// # Arguments
+    ///
+    /// * `function` - A function that performs an effect returning `AsyncIO<()>`
+    ///
+    /// # Returns
+    ///
+    /// `AsyncIO<()>` - An `AsyncIO` that performs all effects in parallel when executed
+    #[cfg(all(feature = "effect", feature = "async"))]
+    fn traverse_async_io_parallel_<F>(self, function: F) -> AsyncIO<()>
+    where
+        F: FnMut(Self::Inner) -> AsyncIO<()> + 'static,
+        Self: Sized,
+        Self::Inner: Send + 'static,
+        Self::WithType<()>: Send + 'static,
+    {
+        self.traverse_async_io_parallel(function).fmap(|_| ())
+    }
+
+    /// Alias for `traverse_async_io_parallel_`.
+    #[cfg(all(feature = "effect", feature = "async"))]
+    fn for_each_async_io_parallel<F>(self, function: F) -> AsyncIO<()>
+    where
+        F: FnMut(Self::Inner) -> AsyncIO<()> + 'static,
+        Self: Sized,
+        Self::Inner: Send + 'static,
+        Self::WithType<()>: Send + 'static,
+    {
+        self.traverse_async_io_parallel_(function)
+    }
 }
 
 // =============================================================================
@@ -1061,6 +1211,17 @@ impl<A> Traversable for Option<A> {
             || AsyncIO::pure(None),
             |element| function(element).fmap(Some),
         )
+    }
+
+    #[cfg(all(feature = "effect", feature = "async"))]
+    fn traverse_async_io_parallel<B, F>(self, function: F) -> AsyncIO<Option<B>>
+    where
+        F: FnMut(A) -> AsyncIO<B> + 'static,
+        B: Send + 'static,
+        A: Send + 'static,
+        Option<B>: Send + 'static,
+    {
+        self.traverse_async_io(function)
     }
 }
 
@@ -1139,6 +1300,17 @@ impl<T, E: Clone + Send + 'static> Traversable for Result<T, E> {
             Ok(element) => function(element).fmap(Ok),
             Err(error) => AsyncIO::new(move || async move { Err(error) }),
         }
+    }
+
+    #[cfg(all(feature = "effect", feature = "async"))]
+    fn traverse_async_io_parallel<B, F>(self, function: F) -> AsyncIO<Result<B, E>>
+    where
+        F: FnMut(T) -> AsyncIO<B> + 'static,
+        B: Send + 'static,
+        T: Send + 'static,
+        Result<B, E>: Send + 'static,
+    {
+        self.traverse_async_io(function)
     }
 }
 
@@ -1255,6 +1427,59 @@ impl<T> Traversable for Vec<T> {
             result
         })
     }
+
+    #[cfg(all(feature = "effect", feature = "async"))]
+    fn traverse_async_io_parallel<B, F>(self, mut function: F) -> AsyncIO<Vec<B>>
+    where
+        F: FnMut(T) -> AsyncIO<B> + 'static,
+        B: Send + 'static,
+        T: Send + 'static,
+        Vec<B>: Send + 'static,
+    {
+        if self.is_empty() {
+            return AsyncIO::pure(Vec::new());
+        }
+
+        // F doesn't need Send: apply function before spawning
+        let async_ios: Vec<AsyncIO<B>> = self.into_iter().map(&mut function).collect();
+        let capacity = async_ios.len();
+
+        AsyncIO::new(move || async move {
+            let handles: Vec<_> = async_ios
+                .into_iter()
+                .map(|async_io| tokio::spawn(async_io.run_async()))
+                .collect();
+
+            let mut results = Vec::with_capacity(capacity);
+            let mut first_panic: Option<Box<dyn std::any::Any + Send>> = None;
+            let mut first_cancellation: Option<tokio::task::JoinError> = None;
+
+            for handle in handles {
+                match handle.await {
+                    Ok(value) => results.push(value),
+                    Err(join_error) => {
+                        if join_error.is_panic() {
+                            if first_panic.is_none() {
+                                first_panic = Some(join_error.into_panic());
+                            }
+                        } else if first_cancellation.is_none() {
+                            first_cancellation = Some(join_error);
+                        }
+                    }
+                }
+            }
+
+            // Panic takes priority over cancellation
+            if let Some(panic_payload) = first_panic {
+                std::panic::resume_unwind(panic_payload);
+            }
+            if let Some(join_error) = first_cancellation {
+                panic!("Task was cancelled: {join_error}");
+            }
+
+            results
+        })
+    }
 }
 
 // =============================================================================
@@ -1317,6 +1542,17 @@ impl<T> Traversable for Box<T> {
     {
         function(*self).fmap(Box::new)
     }
+
+    #[cfg(all(feature = "effect", feature = "async"))]
+    fn traverse_async_io_parallel<B, F>(self, function: F) -> AsyncIO<Box<B>>
+    where
+        F: FnMut(T) -> AsyncIO<B> + 'static,
+        B: Send + 'static,
+        T: Send + 'static,
+        Box<B>: Send + 'static,
+    {
+        self.traverse_async_io(function)
+    }
 }
 
 // =============================================================================
@@ -1378,6 +1614,17 @@ impl<A> Traversable for Identity<A> {
         Identity<B>: Send + 'static,
     {
         function(self.0).fmap(Identity)
+    }
+
+    #[cfg(all(feature = "effect", feature = "async"))]
+    fn traverse_async_io_parallel<B, F>(self, function: F) -> AsyncIO<Identity<B>>
+    where
+        F: FnMut(A) -> AsyncIO<B> + 'static,
+        B: Send + 'static,
+        A: Send + 'static,
+        Identity<B>: Send + 'static,
+    {
+        self.traverse_async_io(function)
     }
 }
 
@@ -2472,6 +2719,374 @@ mod property_tests {
 
             async_io.run_async().await;
             assert_eq!(counter.load(Ordering::SeqCst), 3);
+        }
+
+        // =========================================================================
+        // traverse_async_io_parallel Tests
+        // =========================================================================
+
+        #[rstest]
+        #[tokio::test]
+        async fn vec_traverse_async_io_parallel_basic() {
+            let values = vec![1, 2, 3];
+            let async_io = values.traverse_async_io_parallel(|value| AsyncIO::pure(value * 2));
+
+            let result = async_io.run_async().await;
+            assert_eq!(result, vec![2, 4, 6]);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn vec_traverse_async_io_parallel_empty() {
+            let values: Vec<i32> = vec![];
+            let async_io = values.traverse_async_io_parallel(|value| AsyncIO::pure(value * 2));
+
+            let result = async_io.run_async().await;
+            assert_eq!(result, Vec::<i32>::new());
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn vec_traverse_async_io_parallel_single_element() {
+            let values = vec![42];
+            let async_io = values.traverse_async_io_parallel(|value| AsyncIO::pure(value * 2));
+
+            let result = async_io.run_async().await;
+            assert_eq!(result, vec![84]);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn vec_traverse_async_io_parallel_identity() {
+            let values = vec![1, 2, 3];
+            let async_io = values.clone().traverse_async_io_parallel(AsyncIO::pure);
+
+            let result = async_io.run_async().await;
+            assert_eq!(result, values);
+        }
+
+        #[rstest]
+        #[tokio::test(start_paused = true)]
+        async fn vec_traverse_async_io_parallel_order_preservation() {
+            use std::time::Duration;
+
+            // Delays configured so later elements complete faster
+            let delays = vec![100u64, 50, 10];
+            let async_io = delays.traverse_async_io_parallel(|delay| {
+                AsyncIO::new(move || async move {
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                    delay
+                })
+            });
+
+            let result = async_io.run_async().await;
+            // Results maintain input order, not completion order
+            assert_eq!(result, vec![100, 50, 10]);
+        }
+
+        #[rstest]
+        #[tokio::test(start_paused = true)]
+        async fn vec_traverse_async_io_parallel_is_parallel() {
+            use std::time::Duration;
+
+            let values = vec![1, 2, 3];
+
+            let async_io = values.traverse_async_io_parallel(|value| {
+                AsyncIO::new(move || async move {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    value
+                })
+            });
+
+            let start = tokio::time::Instant::now();
+            let _ = async_io.run_async().await;
+            let elapsed = start.elapsed();
+
+            // Parallel execution: ~100ms (not 300ms for sequential)
+            assert!(elapsed < Duration::from_millis(150));
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn vec_traverse_async_io_parallel_with_result_all_ok() {
+            let inputs = vec!["1", "2", "3"];
+            let async_io = inputs.traverse_async_io_parallel(|string| {
+                let string = string.to_string();
+                AsyncIO::new(move || async move {
+                    string
+                        .parse::<i32>()
+                        .map_err(|_| format!("Failed to parse: {string}"))
+                })
+            });
+
+            let results: Vec<Result<i32, String>> = async_io.run_async().await;
+            assert!(results.iter().all(|result| result.is_ok()));
+            assert_eq!(
+                results
+                    .into_iter()
+                    .map(|result| result.unwrap())
+                    .collect::<Vec<_>>(),
+                vec![1, 2, 3]
+            );
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn vec_traverse_async_io_parallel_with_result_some_err() {
+            let inputs = vec!["1", "invalid", "3"];
+            let async_io = inputs.traverse_async_io_parallel(|string| {
+                let string = string.to_string();
+                AsyncIO::new(move || async move {
+                    string
+                        .parse::<i32>()
+                        .map_err(|_| format!("Failed to parse: {string}"))
+                })
+            });
+
+            let results: Vec<Result<i32, String>> = async_io.run_async().await;
+            // All results are collected including errors
+            assert!(results[0].is_ok());
+            assert!(results[1].is_err());
+            assert!(results[2].is_ok());
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn option_traverse_async_io_parallel_some() {
+            let value = Some(42);
+            let async_io = value.traverse_async_io_parallel(|number| AsyncIO::pure(number * 2));
+
+            let result = async_io.run_async().await;
+            assert_eq!(result, Some(84));
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn option_traverse_async_io_parallel_none() {
+            let value: Option<i32> = None;
+            let async_io = value.traverse_async_io_parallel(|number| AsyncIO::pure(number * 2));
+
+            let result = async_io.run_async().await;
+            assert_eq!(result, None);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn result_traverse_async_io_parallel_ok() {
+            let value: Result<i32, &'static str> = Ok(42);
+            let async_io = value.traverse_async_io_parallel(|number| AsyncIO::pure(number * 2));
+
+            let result = async_io.run_async().await;
+            assert_eq!(result, Ok(84));
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn result_traverse_async_io_parallel_err() {
+            let value: Result<i32, &'static str> = Err("error");
+            let async_io = value.traverse_async_io_parallel(|number| AsyncIO::pure(number * 2));
+
+            let result = async_io.run_async().await;
+            assert_eq!(result, Err("error"));
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn box_traverse_async_io_parallel() {
+            let value = Box::new(42);
+            let async_io = value.traverse_async_io_parallel(|number| AsyncIO::pure(number * 2));
+
+            let result = async_io.run_async().await;
+            assert_eq!(*result, 84);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn identity_traverse_async_io_parallel() {
+            let value = Identity::new(42);
+            let async_io = value.traverse_async_io_parallel(|number| AsyncIO::pure(number * 2));
+
+            let result = async_io.run_async().await;
+            assert_eq!(result.0, 84);
+        }
+
+        // =========================================================================
+        // sequence_async_io_parallel Tests
+        // =========================================================================
+
+        #[rstest]
+        #[tokio::test]
+        async fn vec_sequence_async_io_parallel_basic() {
+            let async_ios: Vec<AsyncIO<i32>> =
+                vec![AsyncIO::pure(1), AsyncIO::pure(2), AsyncIO::pure(3)];
+            let combined = async_ios.sequence_async_io_parallel();
+
+            let result = combined.run_async().await;
+            assert_eq!(result, vec![1, 2, 3]);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn vec_sequence_async_io_parallel_empty() {
+            let async_ios: Vec<AsyncIO<i32>> = vec![];
+            let combined = async_ios.sequence_async_io_parallel();
+
+            let result = combined.run_async().await;
+            assert_eq!(result, Vec::<i32>::new());
+        }
+
+        #[rstest]
+        #[tokio::test(start_paused = true)]
+        async fn vec_sequence_async_io_parallel_is_parallel() {
+            use std::time::Duration;
+
+            let async_ios: Vec<AsyncIO<i32>> = vec![
+                AsyncIO::new(|| async {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    1
+                }),
+                AsyncIO::new(|| async {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    2
+                }),
+                AsyncIO::new(|| async {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    3
+                }),
+            ];
+
+            let start = tokio::time::Instant::now();
+            let result = async_ios.sequence_async_io_parallel().run_async().await;
+            let elapsed = start.elapsed();
+
+            assert_eq!(result, vec![1, 2, 3]);
+            assert!(elapsed < Duration::from_millis(150));
+        }
+
+        // =========================================================================
+        // traverse_async_io_parallel_ / for_each_async_io_parallel Tests
+        // =========================================================================
+
+        #[rstest]
+        #[tokio::test]
+        async fn vec_traverse_async_io_parallel_discard() {
+            let counter = Arc::new(AtomicUsize::new(0));
+            let values = vec![1, 2, 3];
+
+            let counter_clone = counter.clone();
+            let async_io = values.traverse_async_io_parallel_(move |_| {
+                let counter_inner = counter_clone.clone();
+                AsyncIO::new(move || async move {
+                    counter_inner.fetch_add(1, Ordering::SeqCst);
+                })
+            });
+
+            async_io.run_async().await;
+            assert_eq!(counter.load(Ordering::SeqCst), 3);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn vec_for_each_async_io_parallel() {
+            let counter = Arc::new(AtomicUsize::new(0));
+            let values = vec![1, 2, 3];
+
+            let counter_clone = counter.clone();
+            let async_io = values.for_each_async_io_parallel(move |_| {
+                let counter_inner = counter_clone.clone();
+                AsyncIO::new(move || async move {
+                    counter_inner.fetch_add(1, Ordering::SeqCst);
+                })
+            });
+
+            async_io.run_async().await;
+            assert_eq!(counter.load(Ordering::SeqCst), 3);
+        }
+
+        #[rstest]
+        #[tokio::test(start_paused = true)]
+        async fn vec_traverse_async_io_parallel_discard_is_parallel() {
+            use std::time::Duration;
+
+            let values = vec![1, 2, 3];
+
+            let async_io = values.traverse_async_io_parallel_(|_| {
+                AsyncIO::new(|| async {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                })
+            });
+
+            let start = tokio::time::Instant::now();
+            async_io.run_async().await;
+            let elapsed = start.elapsed();
+
+            assert!(elapsed < Duration::from_millis(150));
+        }
+
+        // =========================================================================
+        // Panic Handling Tests
+        // =========================================================================
+
+        #[rstest]
+        #[tokio::test]
+        #[should_panic(expected = "intentional panic")]
+        async fn vec_traverse_async_io_parallel_panic_rethrow() {
+            let values = vec![1, 2, 3];
+
+            let async_io = values.traverse_async_io_parallel(|value| {
+                AsyncIO::new(move || async move {
+                    assert!(value != 2, "intentional panic");
+                    value
+                })
+            });
+
+            async_io.run_async().await;
+        }
+
+        #[rstest]
+        fn vec_traverse_async_io_parallel_all_tasks_complete_before_panic() {
+            use std::sync::atomic::AtomicBool;
+
+            let completed_1 = Arc::new(AtomicBool::new(false));
+            let completed_3 = Arc::new(AtomicBool::new(false));
+
+            let values = vec![1, 2, 3];
+
+            let completed_1_clone = completed_1.clone();
+            let completed_3_clone = completed_3.clone();
+
+            let async_io = values.traverse_async_io_parallel(move |value| {
+                let completed_1_inner = completed_1_clone.clone();
+                let completed_3_inner = completed_3_clone.clone();
+                AsyncIO::new(move || async move {
+                    match value {
+                        1 => {
+                            completed_1_inner.store(true, Ordering::SeqCst);
+                            1
+                        }
+                        2 => {
+                            panic!("intentional panic");
+                        }
+                        3 => {
+                            completed_3_inner.store(true, Ordering::SeqCst);
+                            3
+                        }
+                        _ => value,
+                    }
+                })
+            });
+
+            // Create a new runtime outside of any async context
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                tokio::runtime::Runtime::new()
+                    .unwrap()
+                    .block_on(async_io.run_async())
+            }));
+
+            assert!(result.is_err()); // Should have panicked
+            // Both non-panicking tasks should have completed
+            assert!(completed_1.load(Ordering::SeqCst));
+            assert!(completed_3.load(Ordering::SeqCst));
         }
     }
 

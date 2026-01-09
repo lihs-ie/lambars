@@ -541,6 +541,7 @@ let is_empty: bool = Vec::<i32>::new().is_empty();
 | `traverse @(State s)`   | `Traversable::traverse_state`         | Traverse with State effect      |
 | `traverse @IO`          | `Traversable::traverse_io`            | Traverse with IO effect         |
 | `traverse @(Async IO)`  | `Traversable::traverse_async_io`      | Traverse with AsyncIO effect    |
+| `mapConcurrently`       | `Traversable::traverse_async_io_parallel` | Traverse AsyncIO in parallel    |
 | `sequence @(Reader r)`  | `Traversable::sequence_reader`        | Sequence Reader effects         |
 | `sequence @(State s)`   | `Traversable::sequence_state`         | Sequence State effects          |
 | `sequence @IO`          | `Traversable::sequence_io`            | Sequence IO effects             |

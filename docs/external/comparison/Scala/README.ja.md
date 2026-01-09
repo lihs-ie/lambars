@@ -369,6 +369,7 @@ let all_positive: bool = vec![1, 2, 3].for_all(|x| *x > 0);
 | `fa.traverse[Reader[R, *]](f)`  | `Traversable::traverse_reader`        | Reader エフェクトでトラバース   |
 | `fa.traverse[State[S, *]](f)`   | `Traversable::traverse_state`         | State エフェクトでトラバース    |
 | `fa.traverse[IO](f)`            | `Traversable::traverse_io`            | IO エフェクトでトラバース       |
+| `fa.parTraverse[IO](f)`         | `Traversable::traverse_async_io_parallel` | IO エフェクトで並行トラバース   |
 | `fa.sequence[Reader[R, *]]`     | `Traversable::sequence_reader`        | Reader エフェクトをシーケンス   |
 | `fa.sequence[State[S, *]]`      | `Traversable::sequence_state`         | State エフェクトをシーケンス    |
 | `fa.sequence[IO]`               | `Traversable::sequence_io`            | IO エフェクトをシーケンス       |
