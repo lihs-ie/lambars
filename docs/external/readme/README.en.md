@@ -1,6 +1,6 @@
 # lambars
 
-[日本語](README.ja.md)
+[日本語](/docs/external/readme/README.ja.md)
 
 A functional programming library for Rust providing type classes, persistent data structures, and effect systems.
 
@@ -23,7 +23,7 @@ If you're coming from another functional programming language, these guides will
 
 - [Haskell to lambars](docs/external/comparison/Haskell/README.en.md) - Comprehensive guide covering type classes, do-notation, optics, and more
 - [Scala to lambars](docs/external/comparison/Scala/README.en.md) - Covers Cats/Scalaz, Monocle, and Scala standard library
-- [F# to lambars](docs/external/comparison/F%23/README.en.md) - Covers F# core library, computation expressions, and active patterns
+- [F# to lambars](docs/external/comparison/F%23/README.end.md) - Covers F# core library, computation expressions, and active patterns
 
 ## Requirements
 
