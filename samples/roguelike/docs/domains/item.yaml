@@ -1,0 +1,239 @@
+# Item Domain
+# Project: Dungeon of Pure Functions
+# Domain: Item
+
+metadata:
+  version: "1.0.0"
+  created_at: "2026-01-09"
+  updated_at: "2026-01-09"
+  status: draft
+  domain: Item
+  responsibility: アイテム管理
+
+imports:
+  - common.yaml
+
+# =============================================================================
+# Value Objects - Identifiers
+# =============================================================================
+
+value_objects:
+  identifiers:
+    - name: ItemIdentifier
+      type: UUID
+      constraints:
+        - 非空
+        - ユニーク
+      description: アイテム識別子
+
+# =============================================================================
+# Entities
+# =============================================================================
+
+entities:
+  - name: Item
+    type: struct
+    derive:
+      - Clone
+      - Debug
+    description: アイテム
+    fields:
+      - { name: identifier, type: ItemIdentifier }
+      - { name: name, type: String }
+      - { name: description, type: Description }
+      - { name: kind, type: ItemKind }
+
+  - name: DroppedItem
+    type: struct
+    derive:
+      - Clone
+      - Debug
+    description: ドロップアイテム
+    fields:
+      - { name: identifier, type: EntityIdentifier }
+      - { name: item, type: Item }
+      - { name: position, type: Position }
+
+# =============================================================================
+# Enums
+# =============================================================================
+
+enums:
+  - name: ItemKind
+    type: enum
+    derive:
+      - Clone
+      - Debug
+      - Prisms
+    description: アイテム種別
+    variants:
+      - { name: Weapon, data: WeaponData }
+      - { name: Armor, data: ArmorData }
+      - { name: Consumable, data: ConsumableData }
+      - { name: Material, data: MaterialData }
+
+  - name: WeaponType
+    type: enum
+    derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+    description: 武器種別
+    variants:
+      - Sword
+      - Axe
+      - Spear
+      - Bow
+      - Staff
+      - Dagger
+
+  - name: ArmorSlot
+    type: enum
+    derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+    description: 防具スロット
+    variants:
+      - Body
+      - Head
+      - Accessory
+
+  - name: ConsumableEffect
+    type: enum
+    derive:
+      - Clone
+      - Debug
+    description: 消耗品効果
+    variants:
+      - { name: Heal, data: { amount: u32 } }
+      - { name: RestoreMana, data: { amount: u32 } }
+      - { name: ApplyStatus, data: { effect: StatusEffectType, duration: u32 } }
+      - { name: RemoveStatus, data: { effect: StatusEffectType } }
+
+  - name: ItemEffect
+    type: enum
+    derive:
+      - Clone
+      - Debug
+    description: アイテム効果（イベント用）
+    variants:
+      - { name: Healed, data: { amount: u32 } }
+      - { name: ManaRestored, data: { amount: u32 } }
+      - { name: StatusApplied, data: { effect: StatusEffectType } }
+      - { name: StatusRemoved, data: { effect: StatusEffectType } }
+
+# =============================================================================
+# Value Objects - Compounds
+# =============================================================================
+
+value_objects_compounds:
+  - name: WeaponData
+    type: struct
+    description: 武器データ
+    fields:
+      - { name: attack_bonus, type: Attack }
+      - { name: weapon_type, type: WeaponType }
+      - { name: range, type: u32 }
+
+  - name: ArmorData
+    type: struct
+    description: 防具データ
+    fields:
+      - { name: defense_bonus, type: Defense }
+      - { name: armor_slot, type: ArmorSlot }
+
+  - name: ConsumableData
+    type: struct
+    description: 消耗品データ
+    fields:
+      - { name: effect, type: ConsumableEffect }
+      - { name: max_stack, type: u32 }
+
+  - name: MaterialData
+    type: struct
+    description: 素材データ
+    fields:
+      - { name: rarity, type: Rarity }
+      - { name: max_stack, type: u32 }
+
+# =============================================================================
+# Domain Events
+# =============================================================================
+
+domain_events:
+  - name: ItemPickedUp
+    description: アイテム拾得
+    fields:
+      - { name: item_identifier, type: ItemIdentifier }
+
+  - name: ItemDropped
+    description: アイテムドロップ
+    fields:
+      - { name: item_identifier, type: ItemIdentifier }
+      - { name: position, type: Position }
+
+  - name: ItemUsed
+    description: アイテム使用
+    fields:
+      - { name: item_identifier, type: ItemIdentifier }
+      - { name: effect, type: ItemEffect }
+
+  - name: ItemEquipped
+    description: アイテム装備
+    fields:
+      - { name: item_identifier, type: ItemIdentifier }
+      - { name: slot, type: EquipmentSlot }
+
+  - name: ItemUnequipped
+    description: アイテム装備解除
+    fields:
+      - { name: slot, type: EquipmentSlot }
+
+# =============================================================================
+# Errors
+# =============================================================================
+
+errors:
+  - name: ItemError
+    type: enum
+    derive:
+      - Debug
+      - Clone
+      - PartialEq
+      - Eq
+    description: Itemドメインエラー
+    variants:
+      - name: ItemNotFound
+        fields:
+          - { name: item_identifier, type: String }
+
+      - name: ItemNotUsable
+        fields:
+          - { name: item_identifier, type: String }
+
+      - name: ItemNotEquippable
+        fields:
+          - { name: item_identifier, type: String }
+
+      - name: StackOverflow
+        fields:
+          - { name: max_stack, type: u32 }
+
+      - name: InvalidItemQuantity
+
+# =============================================================================
+# lambars Usage
+# =============================================================================
+
+lambars_usage:
+  - feature: Prism
+    usage: アイテム種別ごとの処理
+
+  - feature: PersistentHashMap
+    usage: アイテムカタログ
+
+  - feature: Traversal
+    usage: 全装備への効果適用

@@ -1,0 +1,208 @@
+# GameSession Domain
+# Project: Dungeon of Pure Functions
+# Aggregate: GameSession (Root)
+
+metadata:
+  version: "1.0.0"
+  created_at: "2026-01-09"
+  updated_at: "2026-01-09"
+  status: draft
+  domain: GameSession
+  responsibility: ゲームセッション管理
+
+imports:
+  - common.yaml
+
+# =============================================================================
+# Value Objects
+# =============================================================================
+
+value_objects:
+  identifiers:
+    - name: GameIdentifier
+      type: UUID
+      constraints:
+        - 非空
+        - ユニーク
+      description: ゲームセッション識別子
+
+# =============================================================================
+# Aggregate
+# =============================================================================
+
+aggregate:
+  name: GameSession
+  root: true
+  description: ゲーム全体を統括する集約ルート
+  fields:
+    - name: identifier
+      type: GameIdentifier
+      description: ゲームセッション識別子
+
+    - name: player
+      type: Player
+      description: プレイヤー集約への参照
+
+    - name: current_floor
+      type: Floor
+      description: 現在フロア
+
+    - name: entities
+      type: "PersistentHashMap<EntityIdentifier, Entity>"
+      description: エンティティ一覧
+
+    - name: event_log
+      type: "PersistentList<GameEvent>"
+      description: イベント履歴
+
+    - name: turn_count
+      type: TurnCount
+      description: ターン数
+
+    - name: status
+      type: GameStatus
+      description: ゲーム状態
+
+    - name: seed
+      type: RandomSeed
+      description: 乱数シード（再現用）
+
+  invariants:
+    - condition: identifier は作成後変更不可
+      verification_timing: 常時
+
+    - condition: turn_count は単調増加のみ
+      verification_timing: ターン終了時
+
+    - condition: event_log は追記のみ（削除不可）
+      verification_timing: イベント追加時
+
+    - condition: seed は作成時に固定
+      verification_timing: 作成時
+
+# =============================================================================
+# Enums
+# =============================================================================
+
+enums:
+  - name: GameStatus
+    type: enum
+    derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+      - Prisms
+    description: ゲーム状態
+    variants:
+      - InProgress
+      - Victory
+      - Defeat
+      - Paused
+
+  - name: GameOutcome
+    type: enum
+    derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+    description: ゲーム結果
+    variants:
+      - Victory
+      - Defeat
+      - Abandoned
+
+# =============================================================================
+# Entities
+# =============================================================================
+
+entities:
+  - name: Entity
+    type: enum
+    derive:
+      - Clone
+      - Debug
+      - Prisms
+    description: ゲーム内エンティティ
+    variants:
+      - { name: Player, data: Player }
+      - { name: Enemy, data: Enemy }
+      - { name: Item, data: DroppedItem }
+
+# =============================================================================
+# Domain Events
+# =============================================================================
+
+domain_events:
+  - name: GameStarted
+    description: ゲーム開始
+    fields:
+      - { name: game_identifier, type: GameIdentifier }
+      - { name: seed, type: RandomSeed }
+
+  - name: GameEnded
+    description: ゲーム終了
+    fields:
+      - { name: outcome, type: GameOutcome }
+
+  - name: TurnStarted
+    description: ターン開始
+    fields:
+      - { name: turn, type: TurnCount }
+
+  - name: TurnEnded
+    description: ターン終了
+    fields:
+      - { name: turn, type: TurnCount }
+
+# =============================================================================
+# Errors
+# =============================================================================
+
+errors:
+  - name: GameSessionError
+    type: enum
+    derive:
+      - Debug
+      - Clone
+      - PartialEq
+      - Eq
+    description: GameSession集約エラー
+    variants:
+      - name: SessionNotFound
+        fields:
+          - { name: session_identifier, type: String }
+
+      - name: SessionAlreadyExists
+        fields:
+          - { name: session_identifier, type: String }
+
+      - name: SessionAlreadyCompleted
+
+      - name: InvalidSeed
+
+      - name: EventSequenceOutOfOrder
+        fields:
+          - { name: expected, type: u64 }
+          - { name: actual, type: u64 }
+
+# =============================================================================
+# lambars Usage
+# =============================================================================
+
+lambars_usage:
+  - feature: PersistentList
+    usage: イベントログ（event_log）
+
+  - feature: PersistentHashMap
+    usage: エンティティ管理（entities）
+
+  - feature: RWS
+    usage: ゲームループ全体の統合エフェクト
+
+  - feature: State
+    usage: ゲーム状態管理、ターン進行
+
+  - feature: Writer
+    usage: イベント履歴出力

@@ -1,0 +1,238 @@
+# Player Domain
+# Project: Dungeon of Pure Functions
+# Aggregate: Player
+
+metadata:
+  version: "1.0.0"
+  created_at: "2026-01-09"
+  updated_at: "2026-01-09"
+  status: draft
+  domain: Player
+  responsibility: プレイヤーキャラクター管理
+
+imports:
+  - common.yaml
+
+# =============================================================================
+# Value Objects - Identifiers
+# =============================================================================
+
+value_objects:
+  identifiers:
+    - name: PlayerIdentifier
+      type: UUID
+      constraints:
+        - 非空
+        - ユニーク
+      description: プレイヤー識別子
+
+# =============================================================================
+# Aggregate
+# =============================================================================
+
+aggregate:
+  name: Player
+  root: true
+  description: プレイヤーキャラクター集約
+  derive:
+    - Clone
+    - Debug
+    - Lenses
+  fields:
+    - name: identifier
+      type: PlayerIdentifier
+      description: プレイヤー識別子
+
+    - name: name
+      type: PlayerName
+      description: プレイヤー名
+
+    - name: position
+      type: Position
+      description: 現在位置
+
+    - name: stats
+      type: CombatStats
+      description: 戦闘能力値
+
+    - name: base_stats
+      type: BaseStats
+      description: 基礎能力値
+
+    - name: level
+      type: Level
+      description: レベル
+
+    - name: experience
+      type: Experience
+      description: 経験値
+
+    - name: equipment
+      type: EquipmentSlots
+      description: 装備スロット
+
+    - name: inventory
+      type: Inventory
+      description: インベントリ
+
+    - name: status_effects
+      type: "PersistentVector<StatusEffect>"
+      description: 状態異常
+
+  invariants:
+    - condition: "0 <= health <= max_health"
+      verification_timing: ダメージ/回復時
+
+    - condition: "0 <= mana <= max_mana"
+      verification_timing: 魔法使用/回復時
+
+    - condition: "1 <= level <= MAX_LEVEL (99)"
+      verification_timing: レベルアップ時
+
+    - condition: "experience >= 0"
+      verification_timing: 経験値獲得時
+
+    - condition: "inventory.items.len() <= inventory.capacity"
+      verification_timing: アイテム追加時
+
+    - condition: 同一スロットに複数装備不可
+      verification_timing: 装備変更時
+
+# =============================================================================
+# Compounds
+# =============================================================================
+
+compounds:
+  - name: EquipmentSlots
+    type: struct
+    description: 装備スロット
+    fields:
+      - { name: weapon, type: "Option<Item>" }
+      - { name: armor, type: "Option<Item>" }
+      - { name: helmet, type: "Option<Item>" }
+      - { name: accessory, type: "Option<Item>" }
+
+  - name: Inventory
+    type: struct
+    description: インベントリ
+    fields:
+      - { name: items, type: "PersistentVector<ItemStack>" }
+      - { name: capacity, type: u32 }
+    constraints:
+      - "items.len() <= capacity"
+
+  - name: ItemStack
+    type: struct
+    description: アイテムスタック
+    fields:
+      - { name: item, type: Item }
+      - { name: quantity, type: u32 }
+    constraints:
+      - "quantity >= 1"
+
+  - name: EquipmentSlot
+    type: enum
+    description: 装備スロット種別
+    variants:
+      - Weapon
+      - Armor
+      - Helmet
+      - Accessory
+
+# =============================================================================
+# Domain Events
+# =============================================================================
+
+domain_events:
+  - name: PlayerMoved
+    description: プレイヤー移動
+    fields:
+      - { name: from, type: Position }
+      - { name: to, type: Position }
+
+  - name: PlayerAttacked
+    description: プレイヤーが攻撃
+    fields:
+      - { name: target, type: EntityIdentifier }
+      - { name: damage, type: Damage }
+
+  - name: PlayerDamaged
+    description: プレイヤーがダメージを受けた
+    fields:
+      - { name: source, type: EntityIdentifier }
+      - { name: damage, type: Damage }
+
+  - name: PlayerLeveledUp
+    description: レベルアップ
+    fields:
+      - { name: new_level, type: Level }
+
+  - name: PlayerDied
+    description: プレイヤー死亡
+
+  - name: ExperienceGained
+    description: 経験値獲得
+    fields:
+      - { name: amount, type: Experience }
+      - { name: total, type: Experience }
+
+# =============================================================================
+# Errors
+# =============================================================================
+
+errors:
+  - name: PlayerError
+    type: enum
+    derive:
+      - Debug
+      - Clone
+      - PartialEq
+      - Eq
+    description: Player集約エラー
+    variants:
+      - name: PlayerNotFound
+        fields:
+          - { name: player_identifier, type: String }
+
+      - name: HealthExhausted
+
+      - name: ManaInsufficient
+        fields:
+          - { name: required, type: u32 }
+          - { name: available, type: u32 }
+
+      - name: InventoryFull
+        fields:
+          - { name: capacity, type: u32 }
+
+      - name: ItemNotInInventory
+        fields:
+          - { name: item_identifier, type: String }
+
+      - name: EquipmentSlotOccupied
+        fields:
+          - { name: slot, type: String }
+
+      - name: CannotEquipItemType
+        fields:
+          - { name: item_type, type: String }
+          - { name: slot, type: String }
+
+      - name: LevelCapReached
+
+# =============================================================================
+# lambars Usage
+# =============================================================================
+
+lambars_usage:
+  - feature: Lens
+    usage: プレイヤー状態の深い更新、装備スロット操作
+
+  - feature: PersistentVector
+    usage: インベントリ、状態異常リスト
+
+  - feature: State
+    usage: プレイヤー状態管理
+
+  - feature: Foldable
+    usage: インベントリ集計

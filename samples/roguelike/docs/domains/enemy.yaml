@@ -1,0 +1,220 @@
+# Enemy Domain
+# Project: Dungeon of Pure Functions
+# Aggregate: Enemy
+
+metadata:
+  version: "1.0.0"
+  created_at: "2026-01-09"
+  updated_at: "2026-01-09"
+  status: draft
+  domain: Enemy
+  responsibility: 敵キャラクター管理
+
+imports:
+  - common.yaml
+
+# =============================================================================
+# Value Objects - Identifiers
+# =============================================================================
+
+value_objects:
+  identifiers:
+    - name: EntityIdentifier
+      type: UUID
+      constraints:
+        - 非空
+        - ユニーク
+      description: エンティティ識別子（敵、ドロップアイテムなど）
+
+  compounds:
+    - name: LootTable
+      type: struct
+      description: ドロップテーブル
+      fields:
+        - { name: entries, type: "PersistentVector<LootEntry>" }
+
+    - name: LootEntry
+      type: struct
+      description: ドロップエントリ
+      fields:
+        - { name: item_identifier, type: ItemIdentifier }
+        - { name: drop_rate, type: f32 }
+        - { name: min_quantity, type: u32 }
+        - { name: max_quantity, type: u32 }
+
+# =============================================================================
+# Aggregate
+# =============================================================================
+
+aggregate:
+  name: Enemy
+  root: true
+  description: 敵キャラクター集約
+  derive:
+    - Clone
+    - Debug
+  fields:
+    - name: identifier
+      type: EntityIdentifier
+      description: 敵識別子
+
+    - name: enemy_type
+      type: EnemyType
+      description: 敵種別
+
+    - name: position
+      type: Position
+      description: 現在位置
+
+    - name: stats
+      type: CombatStats
+      description: 戦闘能力値
+
+    - name: behavior
+      type: AiBehavior
+      description: AI行動パターン
+
+    - name: loot_table
+      type: LootTable
+      description: ドロップテーブル
+
+    - name: status_effects
+      type: "PersistentVector<StatusEffect>"
+      description: 状態異常
+
+  invariants:
+    - condition: "0 <= health <= max_health (0で死亡)"
+      verification_timing: ダメージ適用時
+
+    - condition: Position はフロア境界内
+      verification_timing: 移動時
+
+# =============================================================================
+# Enums
+# =============================================================================
+
+enums:
+  - name: EnemyType
+    type: enum
+    derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+    description: 敵種別
+    variants:
+      - Goblin
+      - Skeleton
+      - Orc
+      - Slime
+      - Bat
+      - Spider
+      - Zombie
+      - Ghost
+      - Minotaur
+      - Dragon
+
+  - name: AiBehavior
+    type: enum
+    derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+    description: AI行動パターン
+    variants:
+      - Aggressive
+      - Defensive
+      - Passive
+      - Patrol
+      - Flee
+
+# =============================================================================
+# Domain Events
+# =============================================================================
+
+domain_events:
+  - name: EnemySpawned
+    description: 敵スポーン
+    fields:
+      - { name: enemy_identifier, type: EntityIdentifier }
+      - { name: enemy_type, type: EnemyType }
+      - { name: position, type: Position }
+
+  - name: EnemyMoved
+    description: 敵移動
+    fields:
+      - { name: enemy_identifier, type: EntityIdentifier }
+      - { name: from, type: Position }
+      - { name: to, type: Position }
+
+  - name: EnemyAttacked
+    description: 敵がダメージを受けた
+    fields:
+      - { name: enemy_identifier, type: EntityIdentifier }
+      - { name: damage, type: Damage }
+
+  - name: EnemyDied
+    description: 敵死亡
+    fields:
+      - { name: enemy_identifier, type: EntityIdentifier }
+      - { name: loot, type: "Vec<Item>" }
+
+# =============================================================================
+# Errors
+# =============================================================================
+
+errors:
+  - name: EnemyError
+    type: enum
+    derive:
+      - Debug
+      - Clone
+      - PartialEq
+      - Eq
+    description: Enemy集約エラー
+    variants:
+      - name: EnemyNotFound
+        fields:
+          - { name: enemy_identifier, type: String }
+
+      - name: EnemyAlreadyDead
+        fields:
+          - { name: enemy_identifier, type: String }
+
+      - name: InvalidBehaviorPattern
+
+# =============================================================================
+# Domain Services
+# =============================================================================
+
+domain_services:
+  - name: PathfindingService
+    responsibility: 経路探索 (A*)
+    lambars_features:
+      - Trampoline
+    methods:
+      - name: find_path
+        inputs:
+          - { name: floor, type: "&Floor" }
+          - { name: from, type: Position }
+          - { name: to, type: Position }
+        output: "Trampoline<Option<Vec<Position>>>"
+        description: Trampoline でスタック安全な A* 実装
+
+# =============================================================================
+# lambars Usage
+# =============================================================================
+
+lambars_usage:
+  - feature: Trampoline
+    usage: 経路探索（A*アルゴリズム）
+
+  - feature: Reader
+    usage: AI行動決定時のゲーム設定参照
+
+  - feature: PersistentVector
+    usage: 状態異常リスト
+
+  - feature: Lazy
+    usage: 敵パターン遅延評価

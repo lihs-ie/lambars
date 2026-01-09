@@ -1,0 +1,167 @@
+# Command Domain
+# Project: Dungeon of Pure Functions
+# Domain: Command
+
+metadata:
+  version: "1.0.0"
+  created_at: "2026-01-09"
+  updated_at: "2026-01-09"
+  status: draft
+  domain: Command
+  responsibility: コマンド処理
+
+imports:
+  - common.yaml
+
+# =============================================================================
+# Domain Description
+# =============================================================================
+
+description: |
+  コマンドドメインはプレイヤー入力の解析、検証、実行を担当する。
+  State モナドを使用してゲーム状態を純粋に更新し、
+  Either を使用してコマンド実行の成功/失敗を表現する。
+
+# =============================================================================
+# Enums
+# =============================================================================
+
+enums:
+  - name: Command
+    type: enum
+    derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+      - Prisms
+    description: ゲームコマンド
+    variants:
+      - { name: Move, data: Direction }
+      - { name: Attack, data: EntityIdentifier }
+      - { name: UseItem, data: ItemIdentifier }
+      - { name: PickUp, data: ItemIdentifier }
+      - { name: Drop, data: ItemIdentifier }
+      - { name: Equip, data: ItemIdentifier }
+      - { name: Unequip, data: EquipmentSlot }
+      - Wait
+      - Descend
+      - Ascend
+
+# =============================================================================
+# Domain Services
+# =============================================================================
+
+domain_services:
+  - name: CommandValidator
+    responsibility: コマンド検証
+    lambars_features:
+      - Either
+    methods:
+      - name: validate
+        inputs:
+          - { name: command, type: "&Command" }
+          - { name: game_state, type: "&GameState" }
+        output: "Either<CommandError, ValidatedCommand>"
+        description: コマンドが現在の状態で有効かを検証
+
+  - name: CommandExecutor
+    responsibility: コマンド実行
+    lambars_features:
+      - State
+      - Writer
+    methods:
+      - name: execute
+        inputs:
+          - { name: command, type: ValidatedCommand }
+        output: "State<GameState, Vec<GameEvent>>"
+        description: 検証済みコマンドを実行し、イベントを生成
+
+# =============================================================================
+# Value Objects
+# =============================================================================
+
+value_objects:
+  - name: ValidatedCommand
+    type: struct
+    description: 検証済みコマンド
+    fields:
+      - { name: command, type: Command }
+      - { name: validated_at, type: TurnCount }
+
+# =============================================================================
+# Errors
+# =============================================================================
+
+errors:
+  - name: CommandError
+    type: enum
+    derive:
+      - Debug
+      - Clone
+      - PartialEq
+      - Eq
+    description: Commandドメインエラー
+    variants:
+      - name: InvalidCommand
+        fields:
+          - { name: reason, type: String }
+
+      - name: CommandNotAllowed
+        fields:
+          - { name: command, type: String }
+          - { name: reason, type: String }
+
+      - name: TargetRequired
+
+      - name: DirectionRequired
+
+# =============================================================================
+# lambars Usage
+# =============================================================================
+
+lambars_usage:
+  - feature: State
+    usage: コマンド実行によるゲーム状態更新
+
+  - feature: Either
+    usage: コマンド検証結果（成功/失敗）
+
+  - feature: Prism
+    usage: コマンド種別ごとの処理
+
+  - feature: compose!/pipe!
+    usage: コマンド処理パイプライン
+
+  - feature: Writer
+    usage: コマンド実行ログ
+
+# =============================================================================
+# Technical Highlights
+# =============================================================================
+
+technical_highlights:
+  command_pipeline:
+    description: コマンド処理パイプライン
+    code: |
+      fn process_command(command: Command, state: &GameState) -> Either<CommandError, GameState> {
+          pipe!(
+              command,
+              |cmd| validate_command(&cmd, state),
+              |validated| execute_command(validated, state)
+          )
+      }
+
+  state_monad_execution:
+    description: State モナドによるコマンド実行
+    code: |
+      fn execute_move(direction: Direction) -> State<GameState, Vec<GameEvent>> {
+          State::modify(|state| {
+              let new_position = state.player.position.move_to(direction);
+              let events = vec![GameEvent::PlayerMoved {
+                  from: state.player.position,
+                  to: new_position,
+              }];
+              (state.with_player_position(new_position), events)
+          })
+      }

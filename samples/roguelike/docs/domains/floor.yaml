@@ -1,0 +1,256 @@
+# Floor Domain
+# Project: Dungeon of Pure Functions
+# Aggregate: Floor (Dungeon)
+
+metadata:
+  version: "1.0.0"
+  created_at: "2026-01-09"
+  updated_at: "2026-01-09"
+  status: draft
+  domain: Dungeon
+  responsibility: ダンジョン構造管理
+
+imports:
+  - common.yaml
+
+# =============================================================================
+# Value Objects - Identifiers
+# =============================================================================
+
+value_objects:
+  identifiers:
+    - name: FloorIdentifier
+      type: u32
+      constraints:
+        - ">= 0"
+      description: フロア識別子
+
+  compounds:
+    - name: Tile
+      type: struct
+      description: タイル
+      fields:
+        - { name: kind, type: TileKind }
+        - { name: is_explored, type: bool }
+        - { name: is_visible, type: bool }
+
+    - name: Room
+      type: struct
+      description: 部屋
+      fields:
+        - { name: top_left, type: Position }
+        - { name: width, type: u32 }
+        - { name: height, type: u32 }
+      constraints:
+        - "width >= 3"
+        - "height >= 3"
+
+    - name: Corridor
+      type: struct
+      description: 通路
+      fields:
+        - { name: start, type: Position }
+        - { name: end, type: Position }
+
+# =============================================================================
+# Aggregate
+# =============================================================================
+
+aggregate:
+  name: Floor
+  root: true
+  description: ダンジョンフロア集約
+  derive:
+    - Clone
+    - Debug
+  fields:
+    - name: identifier
+      type: FloorIdentifier
+      description: フロア識別子
+
+    - name: level
+      type: FloorLevel
+      description: 階層番号
+
+    - name: tiles
+      type: "PersistentVector<PersistentVector<Tile>>"
+      description: タイルマップ
+
+    - name: rooms
+      type: "PersistentVector<Room>"
+      description: 部屋一覧
+
+    - name: corridors
+      type: "PersistentVector<Corridor>"
+      description: 通路一覧
+
+    - name: spawn_points
+      type: "PersistentVector<Position>"
+      description: スポーン地点
+
+    - name: stairs_up
+      type: "Option<Position>"
+      description: 上り階段
+
+    - name: stairs_down
+      type: "Option<Position>"
+      description: 下り階段
+
+  invariants:
+    - condition: "Width, Height: 正の値"
+      verification_timing: フロア生成時
+
+    - condition: stairs_up は最初のフロアでは None
+      verification_timing: フロア生成時
+
+    - condition: stairs_down は最後のフロアでは None
+      verification_timing: フロア生成時
+
+    - condition: 全ての Room は Corridor で接続されている
+      verification_timing: フロア生成時
+
+# =============================================================================
+# Enums
+# =============================================================================
+
+enums:
+  - name: TileKind
+    type: enum
+    derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+      - Prisms
+    description: タイル種別
+    variants:
+      - Floor
+      - Wall
+      - { name: Door, data: { is_open: bool } }
+      - StairsUp
+      - StairsDown
+      - { name: Trap, data: { trap_type: TrapType } }
+
+  - name: TrapType
+    type: enum
+    derive:
+      - Clone
+      - Debug
+      - PartialEq
+      - Eq
+    description: トラップ種別
+    variants:
+      - Spike
+      - Poison
+      - Teleport
+      - Alarm
+
+# =============================================================================
+# Domain Events
+# =============================================================================
+
+domain_events:
+  - name: FloorEntered
+    description: フロア進入
+    fields:
+      - { name: floor_level, type: FloorLevel }
+
+  - name: TileExplored
+    description: タイル探索
+    fields:
+      - { name: position, type: Position }
+
+  - name: TrapTriggered
+    description: トラップ発動
+    fields:
+      - { name: position, type: Position }
+      - { name: trap_type, type: TrapType }
+
+# =============================================================================
+# Errors
+# =============================================================================
+
+errors:
+  - name: FloorError
+    type: enum
+    derive:
+      - Debug
+      - Clone
+      - PartialEq
+      - Eq
+    description: Floor集約エラー
+    variants:
+      - name: FloorNotFound
+        fields:
+          - { name: floor_identifier, type: u32 }
+
+      - name: PositionOutOfBounds
+        fields:
+          - { name: position, type: "(i32, i32)" }
+          - { name: bounds, type: "(u32, u32)" }
+
+      - name: TileNotWalkable
+        fields:
+          - { name: position, type: "(i32, i32)" }
+          - { name: tile_type, type: String }
+
+      - name: NoStairsAtPosition
+        fields:
+          - { name: position, type: "(i32, i32)" }
+
+      - name: RoomsNotConnected
+
+      - name: InvalidFloorGeneration
+        fields:
+          - { name: reason, type: String }
+
+# =============================================================================
+# Domain Services
+# =============================================================================
+
+domain_services:
+  - name: DungeonGeneratorService
+    responsibility: ダンジョン生成
+    lambars_features:
+      - Lazy
+    methods:
+      - name: generate
+        inputs:
+          - { name: level, type: FloorLevel }
+          - { name: seed, type: RandomSeed }
+        output: "Lazy<Floor>"
+        description: Lazy で遅延生成
+
+  - name: VisibilityService
+    responsibility: 視界計算 (Shadowcasting)
+    lambars_features:
+      - Trampoline
+      - PersistentHashSet
+    methods:
+      - name: calculate_fov
+        inputs:
+          - { name: floor, type: "&Floor" }
+          - { name: origin, type: Position }
+          - { name: radius, type: u32 }
+        output: "Trampoline<PersistentHashSet<Position>>"
+        description: Trampoline でスタック安全な Shadowcasting
+
+# =============================================================================
+# lambars Usage
+# =============================================================================
+
+lambars_usage:
+  - feature: PersistentVector
+    usage: タイルマップ、部屋一覧、通路一覧
+
+  - feature: Lazy
+    usage: ダンジョンフロア遅延生成
+
+  - feature: Trampoline
+    usage: 視界計算（Shadowcasting）
+
+  - feature: PersistentHashSet
+    usage: 探索済み座標
+
+  - feature: Prism
+    usage: タイル種別ごとの処理

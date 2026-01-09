@@ -1,0 +1,148 @@
+# Combat Domain
+# Project: Dungeon of Pure Functions
+# Domain: Combat
+
+metadata:
+  version: "1.0.0"
+  created_at: "2026-01-09"
+  updated_at: "2026-01-09"
+  status: draft
+  domain: Combat
+  responsibility: 戦闘システム
+
+imports:
+  - common.yaml
+
+# =============================================================================
+# Domain Description
+# =============================================================================
+
+description: |
+  戦闘システムは純粋関数で構成され、ダメージ計算、効果適用、
+  ターン解決を担当する。Semigroup/Monoid を活用してダメージ修正値を合成し、
+  pipe! マクロでダメージ計算パイプラインを構築する。
+
+# =============================================================================
+# Invariants
+# =============================================================================
+
+invariants:
+  - condition: "Damage >= 1 (最低保証ダメージ)"
+    verification_timing: ダメージ計算時
+
+# =============================================================================
+# Domain Services
+# =============================================================================
+
+domain_services:
+  - name: DamageCalculator
+    responsibility: ダメージ計算
+    lambars_features:
+      - Semigroup
+      - pipe!
+    description: |
+      Semigroup でモディファイア合成
+      pipe! でダメージ計算パイプライン
+    methods:
+      - name: calculate
+        inputs:
+          - { name: attacker, type: "&CombatStats" }
+          - { name: defender, type: "&CombatStats" }
+          - { name: modifiers, type: "&[DamageModifier]" }
+        output: Damage
+        implementation: |
+          let combined = modifiers.iter().cloned().fold(
+              DamageModifier::identity(),
+              |acc, m| acc.combine(m)
+          );
+          pipe!(
+              attacker.attack.value(),
+              |d| combined.apply(d),
+              |d| d.saturating_sub(defender.defense.value()),
+              |d| Damage::new(d.max(1))
+          )
+
+  - name: TurnResolver
+    responsibility: ターン解決
+    lambars_features:
+      - PersistentTreeMap
+      - State
+    methods:
+      - name: resolve_turn
+        inputs:
+          - { name: entities, type: "&PersistentHashMap<EntityIdentifier, Entity>" }
+          - { name: commands, type: "&PersistentVector<(EntityIdentifier, Command)>" }
+        output: "State<GameState, Vec<GameEvent>>"
+        description: 速度順でコマンドを解決
+
+# =============================================================================
+# Errors
+# =============================================================================
+
+errors:
+  - name: CombatError
+    type: enum
+    derive:
+      - Debug
+      - Clone
+      - PartialEq
+      - Eq
+    description: Combatドメインエラー
+    variants:
+      - name: TargetNotInRange
+        fields:
+          - { name: attacker, type: "(i32, i32)" }
+          - { name: target, type: "(i32, i32)" }
+          - { name: range, type: u32 }
+
+      - name: TargetNotAttackable
+        fields:
+          - { name: target_identifier, type: String }
+
+      - name: NoValidTarget
+
+      - name: InvalidDamageCalculation
+
+# =============================================================================
+# lambars Usage
+# =============================================================================
+
+lambars_usage:
+  - feature: Semigroup/Monoid
+    usage: ダメージ修正値の合成
+
+  - feature: pipe!
+    usage: ダメージ計算パイプライン
+
+  - feature: PersistentTreeMap
+    usage: ターン順管理（速度順）
+
+  - feature: State
+    usage: 戦闘状態管理
+
+  - feature: Writer
+    usage: 戦闘ログ出力
+
+# =============================================================================
+# Technical Highlights
+# =============================================================================
+
+technical_highlights:
+  semigroup_damage:
+    description: Semigroup によるダメージ計算合成
+    code: |
+      impl Semigroup for DamageModifier {
+          fn combine(self, other: Self) -> Self {
+              DamageModifier {
+                  multiplier: self.multiplier * other.multiplier,
+                  flat_bonus: self.flat_bonus + other.flat_bonus,
+              }
+          }
+      }
+
+      let final_damage = pipe!(
+          base_damage,
+          |d| apply_weapon_modifier(weapon, d),
+          |d| apply_status_effects(effects, d),
+          |d| apply_armor_reduction(armor, d)
+      );

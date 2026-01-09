@@ -1,0 +1,361 @@
+# Common Domain Concepts
+# Project: Dungeon of Pure Functions
+# Shared value objects, types, and conventions across all domains
+
+metadata:
+  version: "1.0.0"
+  created_at: "2026-01-09"
+  updated_at: "2026-01-09"
+  status: draft
+
+# =============================================================================
+# Naming Conventions
+# =============================================================================
+
+naming_conventions:
+  identifiers:
+    rule: "xxIdentifier (not xxID)"
+    examples:
+      - GameIdentifier
+      - PlayerIdentifier
+      - EntityIdentifier
+      - ItemIdentifier
+      - FloorIdentifier
+
+# =============================================================================
+# Common Value Objects
+# =============================================================================
+
+value_objects:
+  # ---------------------------------------------------------------------------
+  # Coordinates
+  # ---------------------------------------------------------------------------
+  coordinates:
+    - name: Position
+      type: struct
+      fields:
+        - { name: x, type: i32 }
+        - { name: y, type: i32 }
+      constraints:
+        - フロア境界内
+      description: 2D座標
+
+    - name: Direction
+      type: enum
+      variants:
+        - Up
+        - Down
+        - Left
+        - Right
+      description: 移動方向
+
+    - name: Distance
+      type: u32
+      constraints:
+        - ">= 0"
+      description: 距離
+
+  # ---------------------------------------------------------------------------
+  # Numeric Types
+  # ---------------------------------------------------------------------------
+  numerics:
+    - name: Health
+      type: u32
+      constraints:
+        - "0 <= value <= MAX_HEALTH"
+      usage: HP
+      description: 体力値
+
+    - name: Mana
+      type: u32
+      constraints:
+        - "0 <= value <= MAX_MANA"
+      usage: MP
+      description: 魔力値
+
+    - name: Experience
+      type: u64
+      constraints:
+        - ">= 0"
+      usage: 経験値
+      description: 経験値
+
+    - name: Level
+      type: u8
+      constraints:
+        - "1 <= value <= 99"
+      usage: レベル
+      description: キャラクターレベル
+
+    - name: Attack
+      type: u32
+      constraints:
+        - ">= 0"
+      usage: 攻撃力
+      description: 攻撃力
+
+    - name: Defense
+      type: u32
+      constraints:
+        - ">= 0"
+      usage: 防御力
+      description: 防御力
+
+    - name: Speed
+      type: u32
+      constraints:
+        - ">= 0"
+      usage: 速度
+      description: 行動速度
+
+    - name: Damage
+      type: u32
+      constraints:
+        - ">= 0"
+      usage: ダメージ量
+      description: ダメージ値
+
+    - name: TurnCount
+      type: u64
+      constraints:
+        - ">= 0"
+      usage: ターン数
+      description: ゲームターン数
+
+    - name: FloorLevel
+      type: u32
+      constraints:
+        - ">= 1"
+      usage: 階層番号
+      description: ダンジョン階層
+
+    - name: Stat
+      type: u32
+      constraints:
+        - "1 <= value <= 99"
+      description: 基礎能力値
+
+  # ---------------------------------------------------------------------------
+  # String Types
+  # ---------------------------------------------------------------------------
+  strings:
+    - name: PlayerName
+      type: String
+      constraints:
+        - "1 <= length <= 50"
+        - 非空
+      description: プレイヤー名
+
+    - name: Description
+      type: String
+      constraints:
+        - "length <= 500"
+      description: 説明文
+
+  # ---------------------------------------------------------------------------
+  # Compound Types
+  # ---------------------------------------------------------------------------
+  compounds:
+    - name: CombatStats
+      type: struct
+      description: 戦闘能力値
+      fields:
+        - { name: health, type: Health }
+        - { name: max_health, type: Health }
+        - { name: mana, type: Mana }
+        - { name: max_mana, type: Mana }
+        - { name: attack, type: Attack }
+        - { name: defense, type: Defense }
+        - { name: speed, type: Speed }
+
+    - name: BaseStats
+      type: struct
+      description: 基礎能力値
+      fields:
+        - { name: strength, type: Stat }
+        - { name: dexterity, type: Stat }
+        - { name: intelligence, type: Stat }
+        - { name: vitality, type: Stat }
+
+    - name: RandomSeed
+      type: u64
+      description: 乱数シード（ゲーム再現用）
+
+    - name: DamageModifier
+      type: struct
+      description: ダメージ修正値
+      fields:
+        - { name: multiplier, type: f32 }
+        - { name: flat_bonus, type: i32 }
+      typeclass_instances:
+        - Semigroup
+        - Monoid
+
+  # ---------------------------------------------------------------------------
+  # Status Effects
+  # ---------------------------------------------------------------------------
+  status:
+    - name: StatusEffect
+      type: struct
+      description: 状態異常
+      fields:
+        - { name: effect_type, type: StatusEffectType }
+        - { name: remaining_turns, type: u32 }
+        - { name: potency, type: u32 }
+
+    - name: StatusEffectType
+      type: enum
+      description: 状態異常タイプ
+      variants:
+        - Poison
+        - Burn
+        - Freeze
+        - Stun
+        - Haste
+        - Shield
+        - Regeneration
+
+# =============================================================================
+# Common Enums
+# =============================================================================
+
+enums:
+  - name: Rarity
+    type: enum
+    description: レアリティ
+    variants:
+      - Common
+      - Uncommon
+      - Rare
+      - Epic
+      - Legendary
+
+# =============================================================================
+# Common Errors
+# =============================================================================
+
+errors:
+  - name: ValidationError
+    type: enum
+    derive:
+      - Debug
+      - Clone
+      - PartialEq
+      - Eq
+    description: 共通バリデーションエラー
+    variants:
+      - name: EmptyValue
+        fields:
+          - { name: field, type: String }
+      - name: OutOfRange
+        fields:
+          - { name: field, type: String }
+          - { name: min, type: String }
+          - { name: max, type: String }
+          - { name: actual, type: String }
+      - name: InvalidFormat
+        fields:
+          - { name: field, type: String }
+          - { name: expected, type: String }
+      - name: ConstraintViolation
+        fields:
+          - { name: field, type: String }
+          - { name: constraint, type: String }
+
+  - name: DomainError
+    type: enum
+    derive:
+      - Debug
+      - Clone
+      - PartialEq
+      - Eq
+    description: 統合ドメインエラー
+    variants:
+      - { name: Validation, data: ValidationError }
+      - { name: GameSession, data: GameSessionError }
+      - { name: Player, data: PlayerError }
+      - { name: Enemy, data: EnemyError }
+      - { name: Floor, data: FloorError }
+      - { name: Combat, data: CombatError }
+      - { name: Item, data: ItemError }
+      - { name: Command, data: CommandError }
+
+# =============================================================================
+# lambars Feature Mapping (Common)
+# =============================================================================
+
+lambars_mapping:
+  typeclass:
+    - feature: Functor/Monad
+      usage: コマンド実行チェーン、ダメージ計算パイプライン
+
+    - feature: Foldable/Traversable
+      usage: インベントリ集計、全エンティティへの一括処理
+
+    - feature: Semigroup/Monoid
+      usage: ステータス効果の合成、ダメージ修正値の累積
+
+  compose:
+    - feature: compose!/pipe!
+      usage: コマンド処理パイプライン、AI 行動決定
+
+    - feature: partial!/curry!
+      usage: ダメージ計算関数の部分適用
+
+    - feature: for_!/for_async!
+      usage: ターン処理ループ、非同期セーブ/ロード
+
+  control:
+    - feature: Lazy
+      usage: ダンジョンフロア遅延生成、敵パターン遅延評価
+
+    - feature: Trampoline
+      usage: 経路探索（深い再帰）、視界計算
+
+    - feature: Either
+      usage: 行動結果（成功/失敗）、移動可否判定
+
+  persistent:
+    - feature: PersistentList
+      usage: イベントログ、コマンド履歴
+
+    - feature: PersistentVector
+      usage: ダンジョンタイルマップ、インベントリ
+
+    - feature: PersistentHashMap
+      usage: エンティティ管理、アイテムカタログ
+
+    - feature: PersistentHashSet
+      usage: 探索済み座標、取得済みアイテムID
+
+    - feature: PersistentTreeMap
+      usage: ターン順管理、イニシアチブ順序
+
+  optics:
+    - feature: Lens
+      usage: プレイヤー状態の深い更新、装備スロット操作
+
+    - feature: Prism
+      usage: エンティティ種別ごとの処理、アイテム種別判定
+
+    - feature: Traversal
+      usage: 全装備への効果適用、マップ全体への変換
+
+  effect:
+    - feature: Reader
+      usage: ゲーム設定・難易度の読み取り
+
+    - feature: State
+      usage: ゲーム状態管理、ターン進行
+
+    - feature: Writer
+      usage: 戦闘ログ、イベント履歴出力
+
+    - feature: RWS
+      usage: ゲームループ全体の統合エフェクト
+
+    - feature: IO/AsyncIO
+      usage: ユーザー入力、セーブ/ロード
+
+    - feature: Eff
+      usage: 乱数生成、ログ、状態を代数的エフェクトで合成
