@@ -1,0 +1,246 @@
+# Map 真の遅延評価イテレータ 要件定義
+#
+# 概要:
+#   PersistentHashMap と PersistentTreeMap の iter(), keys(), values() を
+#   先行収集型から真の遅延評価イテレータに改善する。
+#
+# 設計方針:
+#   1. スタックベースの深さ優先走査で遅延評価を実現
+#   2. PersistentVector の既存パターンを踏襲
+#   3. 既存 API との完全な後方互換性を維持
+#
+# 参照:
+#   - Issue #108: https://github.com/lihs-ie/lambars/issues/108
+#   - docs/internal/done/requirements/20260107_1500_map_iteration_transformation_operations.yaml
+
+version: "1.0.0"
+name: "lazy_map_iterator"
+description: |
+  PersistentHashMap と PersistentTreeMap のイテレータを真の遅延評価に改善する。
+  現在の実装は iter() 呼び出し時に全エントリを Vec に収集する先行収集型であり、
+  メモリ効率と早期終了パターンで非効率。本改善により、イテレータ作成時のコストを
+  O(n) から O(1) または O(log n) に削減し、部分的な走査での早期終了を可能にする。
+
+background:
+  problem: |
+    現在の iter() 実装は先行収集型：
+    - PersistentHashMap: collect_entries() で全エントリを Vec に収集
+    - PersistentTreeMap: collect_entries_in_order() で全エントリを Vec に収集
+
+    これにより以下の問題が発生：
+    1. イテレータ作成時に O(n) の時間と空間が必要
+    2. iter().take(10) のような部分走査でも全要素を先に収集
+    3. 大きな Map で最初の要素を取得するだけでも O(n) のコスト
+  motivation: |
+    真の遅延評価イテレータにより：
+    1. イテレータ作成コストを O(1) または O(log n) に削減
+    2. 早期終了パターン（take, find, any, all）での効率向上
+    3. メモリ使用量の削減（O(n) → O(log n) または O(1)）
+  prior_art:
+    - name: "PersistentVectorIterator"
+      description: |
+        src/persistent/vector.rs (1600-1838行目) に実装済みのスタックベース遅延イテレータ。
+        TraversalStackEntry と IteratorState を使用した深さ優先走査パターン。
+    - name: "Rust 標準 BTreeMap::Iter"
+      description: |
+        std::collections::BTreeMap の iter() は真の遅延評価イテレータ。
+        スタックベースの in-order 走査を実装。
+    - name: "im-rs PersistentHashMap"
+      description: |
+        im crate の PersistentHashMap も遅延評価イテレータを提供。
+
+requirements:
+  # ======================================================================
+  # 1. PersistentTreeMap 遅延イテレータ
+  # ======================================================================
+  - id: treemap_lazy_iterator
+    name: "PersistentTreeMap 遅延評価イテレータ"
+    description: |
+      PersistentTreeMap の iter() をスタックベースの in-order 走査に変更する。
+      Red-Black Tree の構造を活かし、左端のパスをスタックに積む方式で実装。
+
+    methods:
+      - name: "iter"
+        signature: "fn iter(&self) -> PersistentTreeMapIterator<'_, K, V>"
+        description: |
+          真の遅延評価イテレータを返す。
+          初期化時に左端のパスをスタックに積み、next() 呼び出し時に
+          次のノードを効率的に取得する。
+        examples:
+          - description: "最初の要素のみ取得（効率的）"
+            code: |
+              let map: PersistentTreeMap<i32, i32> = (0..100000).map(|i| (i, i)).collect();
+              let first = map.iter().next();  // O(log n) で完了
+          - description: "早期終了パターン"
+            code: |
+              let map: PersistentTreeMap<i32, i32> = (0..100000).map(|i| (i, i)).collect();
+              let first_10: Vec<_> = map.iter().take(10).collect();  // O(10 + log n)
+
+    implementations:
+      - type: "PersistentTreeMapIterator<'a, K, V>"
+        description: |
+          スタックベースの in-order 走査イテレータ。
+
+          構造:
+          ```rust
+          pub struct PersistentTreeMapIterator<'a, K, V> {
+              stack: Vec<&'a ReferenceCounter<Node<K, V>>>,
+              remaining: usize,
+          }
+          ```
+
+          計算量:
+          - iter() 作成: O(log n)（左端パスの積み上げ）
+          - next(): O(1) amortized
+          - 空間: O(log n)（スタックサイズ）
+
+  # ======================================================================
+  # 2. PersistentHashMap 遅延イテレータ
+  # ======================================================================
+  - id: hashmap_lazy_iterator
+    name: "PersistentHashMap 遅延評価イテレータ"
+    description: |
+      PersistentHashMap の iter() をスタックベースの深さ優先走査に変更する。
+      HAMT の構造（Bitmap ノード、Collision ノード）を効率的に走査。
+
+    methods:
+      - name: "iter"
+        signature: "fn iter(&self) -> PersistentHashMapIterator<'_, K, V>"
+        description: |
+          真の遅延評価イテレータを返す。
+          HAMT の各ノードタイプ（Empty, Entry, Bitmap, Collision）を
+          スタックベースで走査し、要素を遅延取得する。
+        examples:
+          - description: "最初の要素のみ取得（効率的）"
+            code: |
+              let map: PersistentHashMap<i32, i32> = (0..100000).map(|i| (i, i)).collect();
+              let first = map.iter().next();  // O(1) で完了
+          - description: "早期終了パターン"
+            code: |
+              let map: PersistentHashMap<i32, i32> = (0..100000).map(|i| (i, i)).collect();
+              let first_10: Vec<_> = map.iter().take(10).collect();  // O(10)
+
+    implementations:
+      - type: "PersistentHashMapIterator<'a, K, V>"
+        description: |
+          スタックベースの深さ優先走査イテレータ。
+
+          構造:
+          ```rust
+          enum StackFrame<'a, K, V> {
+              BitmapNode {
+                  children: &'a [Child<K, V>],
+                  index: usize,
+              },
+              CollisionNode {
+                  entries: &'a [(K, V)],
+                  index: usize,
+              },
+          }
+
+          pub struct PersistentHashMapIterator<'a, K, V> {
+              stack: Vec<StackFrame<'a, K, V>>,
+              pending_entry: Option<(&'a K, &'a V)>,
+              remaining: usize,
+          }
+          ```
+
+          計算量:
+          - iter() 作成: O(1)
+          - next(): O(1) amortized
+          - 空間: O(13)（HAMT の最大深度）= O(1)
+
+  # ======================================================================
+  # 3. ExactSizeIterator 実装
+  # ======================================================================
+  - id: exact_size_iterator
+    name: "ExactSizeIterator トレイト実装"
+    description: |
+      remaining フィールドを使用して正確な残り要素数を提供する。
+      これにより size_hint() が正確な値を返し、collect() 等での
+      メモリ事前確保が効率化される。
+
+    implementations:
+      - type: "PersistentTreeMapIterator"
+        description: |
+          length フィールドから remaining を追跡し、
+          ExactSizeIterator を実装。
+      - type: "PersistentHashMapIterator"
+        description: |
+          length フィールドから remaining を追跡し、
+          ExactSizeIterator を実装。
+
+  # ======================================================================
+  # 4. FusedIterator 実装
+  # ======================================================================
+  - id: fused_iterator
+    name: "FusedIterator トレイト実装"
+    description: |
+      一度 None を返した後も安全に next() を呼び出せることを保証する。
+      Rust の標準イテレータ契約に準拠。
+
+    implementations:
+      - type: "PersistentTreeMapIterator"
+        description: "FusedIterator マーカートレイトを実装"
+      - type: "PersistentHashMapIterator"
+        description: "FusedIterator マーカートレイトを実装"
+
+non_functional_requirements:
+  performance:
+    - "iter() 作成: PersistentTreeMap O(log n), PersistentHashMap O(1)"
+    - "next() 呼び出し: 両方とも O(1) amortized"
+    - "全要素走査: 現行と同等の O(n)"
+    - "早期終了パターン: O(k + log n) または O(k)（k は取得要素数）"
+  compatibility:
+    - "既存の iter() 戻り値型 (&K, &V) を維持"
+    - "keys(), values() は iter() のラッパーなので自動的に遅延化"
+    - "既存テストが全てパスすること"
+    - "PersistentHashMap: 現行の DFS 順序（children.iter() 順）を維持する"
+    - "PersistentTreeMap: 現行の in-order 走査順序（ソート順）を維持する"
+  testing:
+    - "既存のイテレーションテストが全てパス"
+    - "早期終了パターンのテスト追加"
+    - "空の Map に対するテスト"
+    - "単一要素の Map に対するテスト"
+    - "大規模 Map（100,000要素）でのベンチマーク比較"
+    - "順序の回帰テスト: 現行実装と新実装で同一の順序を返すことを確認"
+
+# 設計上の注記
+design_notes:
+  - id: iterator_mutability
+    description: |
+      イテレータは内部状態（スタック、インデックス、残り要素数）を持つ。
+      これは Rust の Iterator トレイトの要件であり、`next(&mut self)` の
+      シグネチャにより不可避。ただし、この可変性は以下の点で制御されている：
+      1. 元の Map は不変のまま保持される
+      2. イテレータは Map への参照を保持するのみで、Map を変更しない
+      3. イテレータの状態変更は走査位置の追跡のみに限定される
+      これは Haskell の遅延評価リストが内部でサンクを持つのと類似した妥協点。
+
+  - id: pending_entry_purpose
+    description: |
+      PersistentHashMapIterator の pending_entry フィールドの用途：
+      HAMT の走査では、Entry ノードや Bitmap ノードの Child::Entry を
+      発見した際に、スタック操作を完了する前に要素を保持する必要がある。
+      これにより next() の実装がシンプルになり、advance() メソッドで
+      次の要素を事前に検索しておくパターンを実現する。
+
+future_extensions:
+  - id: into_iterator_optimization
+    name: "IntoIterator の遅延化"
+    description: |
+      into_iter() も同様にスタックベースの遅延評価に変更する。
+      所有権を持つイテレータでは ReferenceCounter を保持して
+      要素を Clone する必要がある。
+    rationale: |
+      まず iter() の改善を優先し、into_iter() は後続のイシューで対応。
+      into_iter() は所有権の扱いがより複雑なため、別途検討が必要。
+
+  - id: double_ended_iterator
+    name: "DoubleEndedIterator 実装"
+    description: |
+      PersistentTreeMap に対して DoubleEndedIterator を実装し、
+      rev() や next_back() をサポートする。
+    rationale: |
+      TreeMap は順序付きなので DoubleEndedIterator が有用だが、
+      実装の複雑さを考慮し、基本的な遅延評価を優先。

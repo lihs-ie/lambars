@@ -215,6 +215,152 @@ fn benchmark_iteration(criterion: &mut Criterion) {
 }
 
 // =============================================================================
+// iteration_early_exit Benchmark (Issue #108)
+// =============================================================================
+
+fn benchmark_iteration_early_exit(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("iteration_early_exit");
+
+    for size in [1000, 10000, 100000] {
+        let persistent_map: PersistentHashMap<i32, i32> =
+            (0..size).map(|index| (index, index * 2)).collect();
+        let standard_map: HashMap<i32, i32> = (0..size).map(|index| (index, index * 2)).collect();
+
+        for take_count in [1, 10, 100] {
+            let label = format!("{}/take_{}", size, take_count);
+
+            group.bench_with_input(
+                BenchmarkId::new("PersistentHashMap", &label),
+                &take_count,
+                |bencher, &take_count| {
+                    bencher.iter(|| {
+                        let result: Vec<_> = persistent_map.iter().take(take_count).collect();
+                        black_box(result)
+                    });
+                },
+            );
+
+            group.bench_with_input(
+                BenchmarkId::new("HashMap", &label),
+                &take_count,
+                |bencher, &take_count| {
+                    bencher.iter(|| {
+                        let result: Vec<_> = standard_map.iter().take(take_count).collect();
+                        black_box(result)
+                    });
+                },
+            );
+        }
+    }
+
+    group.finish();
+}
+
+// =============================================================================
+// iteration_first Benchmark (Issue #108)
+// =============================================================================
+
+fn benchmark_iteration_first(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("iteration_first");
+
+    for size in [1000, 10000, 100000] {
+        let persistent_map: PersistentHashMap<i32, i32> =
+            (0..size).map(|index| (index, index * 2)).collect();
+        let standard_map: HashMap<i32, i32> = (0..size).map(|index| (index, index * 2)).collect();
+
+        group.bench_with_input(
+            BenchmarkId::new("PersistentHashMap", size),
+            &size,
+            |bencher, _| {
+                bencher.iter(|| {
+                    let first = persistent_map.iter().next();
+                    black_box(first)
+                });
+            },
+        );
+
+        group.bench_with_input(BenchmarkId::new("HashMap", size), &size, |bencher, _| {
+            bencher.iter(|| {
+                let first = standard_map.iter().next();
+                black_box(first)
+            });
+        });
+    }
+
+    group.finish();
+}
+
+// =============================================================================
+// iteration_create Benchmark (Issue #108)
+// =============================================================================
+
+fn benchmark_iteration_create(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("iteration_create");
+
+    for size in [1000, 10000, 100000] {
+        let persistent_map: PersistentHashMap<i32, i32> =
+            (0..size).map(|index| (index, index * 2)).collect();
+        let standard_map: HashMap<i32, i32> = (0..size).map(|index| (index, index * 2)).collect();
+
+        group.bench_with_input(
+            BenchmarkId::new("PersistentHashMap", size),
+            &size,
+            |bencher, _| {
+                bencher.iter(|| {
+                    let iterator = persistent_map.iter();
+                    black_box(iterator)
+                });
+            },
+        );
+
+        group.bench_with_input(BenchmarkId::new("HashMap", size), &size, |bencher, _| {
+            bencher.iter(|| {
+                let iterator = standard_map.iter();
+                black_box(iterator)
+            });
+        });
+    }
+
+    group.finish();
+}
+
+// =============================================================================
+// iteration_find Benchmark (Issue #108)
+// =============================================================================
+
+fn benchmark_iteration_find(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("iteration_find");
+
+    for size in [1000, 10000, 100000] {
+        let persistent_map: PersistentHashMap<i32, i32> =
+            (0..size).map(|index| (index, index * 2)).collect();
+        let standard_map: HashMap<i32, i32> = (0..size).map(|index| (index, index * 2)).collect();
+
+        let target = size / 2;
+
+        group.bench_with_input(
+            BenchmarkId::new("PersistentHashMap", size),
+            &size,
+            |bencher, _| {
+                bencher.iter(|| {
+                    let found = persistent_map.iter().find(|(key, _)| **key == target);
+                    black_box(found)
+                });
+            },
+        );
+
+        group.bench_with_input(BenchmarkId::new("HashMap", size), &size, |bencher, _| {
+            bencher.iter(|| {
+                let found = standard_map.iter().find(|(key, _)| **key == target);
+                black_box(found)
+            });
+        });
+    }
+
+    group.finish();
+}
+
+// =============================================================================
 // Criterion Group and Main
 // =============================================================================
 
@@ -223,7 +369,11 @@ criterion_group!(
     benchmark_insert,
     benchmark_get,
     benchmark_remove,
-    benchmark_iteration
+    benchmark_iteration,
+    benchmark_iteration_early_exit,
+    benchmark_iteration_first,
+    benchmark_iteration_create,
+    benchmark_iteration_find
 );
 
 criterion_main!(benches);
