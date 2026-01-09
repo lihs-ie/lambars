@@ -995,3 +995,619 @@ redis:
 
       - name: rate_limiter.rs
         description: RateLimiter adapter 実装
+
+# =============================================================================
+# lambars Usage in Infrastructure Layer
+# =============================================================================
+
+lambars_usage:
+  overview: |
+    インフラストラクチャ層では lambars の以下の機能を活用する：
+    - AsyncIO: 全ての DB/Redis 操作を純粋な値として表現
+    - bracket: リソース（接続プール）の安全な取得・解放
+    - pipe!/compose!: クエリ結果の変換パイプライン
+    - PersistentVector/PersistentHashMap: ドメインオブジェクトのシリアライズ/デシリアライズ
+    - Either: エラーハンドリング
+    - Traversable: バッチ操作の合成
+
+  features:
+    # -------------------------------------------------------------------------
+    # AsyncIO - 副作用の明示的な管理
+    # -------------------------------------------------------------------------
+    - name: AsyncIO
+      description: |
+        全ての DB/Redis 操作は AsyncIO でラップされ、副作用が型レベルで追跡される。
+        これにより、IO 操作の合成が可能になり、実行タイミングを制御できる。
+      usage_locations:
+        - MySQL Repository の全メソッド
+        - Redis Cache の全メソッド
+        - EventStore の全メソッド
+        - SnapshotStore の全メソッド
+
+      code_example: |
+        // GameSessionRepository の実装例
+        impl GameSessionRepository for MySqlGameSessionRepository {
+            fn find_by_id(&self, id: &GameIdentifier) -> AsyncIO<Option<GameSession>> {
+                let pool = self.pool.clone();
+                let id = id.clone();
+
+                AsyncIO::new(async move {
+                    let row = sqlx::query_as::<_, GameSessionRow>(
+                        "SELECT * FROM game_sessions WHERE game_id = ?"
+                    )
+                    .bind(id.as_bytes())
+                    .fetch_optional(&pool)
+                    .await?;
+
+                    Ok(row.map(GameSession::from))
+                })
+            }
+
+            fn save(&self, session: &GameSession) -> AsyncIO<()> {
+                let pool = self.pool.clone();
+                let session = session.clone();
+
+                AsyncIO::new(async move {
+                    sqlx::query(
+                        "INSERT INTO game_sessions (...) VALUES (...) ON DUPLICATE KEY UPDATE ..."
+                    )
+                    .bind(...)
+                    .execute(&pool)
+                    .await?;
+
+                    Ok(())
+                })
+            }
+        }
+
+    # -------------------------------------------------------------------------
+    # bracket - リソース安全な接続管理
+    # -------------------------------------------------------------------------
+    - name: bracket
+      description: |
+        AsyncIO::bracket を使用して、DB 接続やトランザクションの
+        安全な取得・解放を保証する。エラー発生時も確実にリソースが解放される。
+      usage_locations:
+        - トランザクション管理
+        - 接続プールからの接続取得
+        - 分散ロックの取得・解放
+
+      code_example: |
+        // トランザクションでの bracket 使用例
+        fn save_with_events(
+            &self,
+            session: &GameSession,
+            events: &[GameEvent],
+        ) -> AsyncIO<()> {
+            let pool = self.pool.clone();
+            let session = session.clone();
+            let events = events.to_vec();
+
+            // bracket パターン: acquire -> use -> release
+            AsyncIO::bracket(
+                // acquire: トランザクション開始
+                AsyncIO::new(async move {
+                    pool.begin().await.map_err(InfraError::from)
+                }),
+                // release: コミットまたはロールバック
+                |tx, result| AsyncIO::new(async move {
+                    match result {
+                        Ok(_) => tx.commit().await.map_err(InfraError::from),
+                        Err(_) => tx.rollback().await.map_err(InfraError::from),
+                    }
+                }),
+                // use: トランザクション内の操作
+                |tx| AsyncIO::new(async move {
+                    // セッション保存
+                    sqlx::query("INSERT INTO game_sessions ...")
+                        .execute(&mut *tx)
+                        .await?;
+
+                    // イベント保存
+                    for event in events {
+                        sqlx::query("INSERT INTO game_events ...")
+                            .execute(&mut *tx)
+                            .await?;
+                    }
+
+                    Ok(())
+                })
+            )
+        }
+
+        // 分散ロックでの bracket 使用例
+        fn with_turn_lock<A>(
+            &self,
+            game_id: &GameIdentifier,
+            action: AsyncIO<A>,
+        ) -> AsyncIO<A> {
+            AsyncIO::bracket(
+                // acquire: ロック取得
+                self.turn_lock.acquire(game_id, Duration::from_secs(30)),
+                // release: ロック解放
+                |lock_id, _| self.turn_lock.release(game_id, &lock_id),
+                // use: ロック内の操作
+                |_| action
+            )
+        }
+
+    # -------------------------------------------------------------------------
+    # pipe!/compose! - クエリ結果の変換
+    # -------------------------------------------------------------------------
+    - name: "pipe!/compose!"
+      description: |
+        DB から取得した生データをドメインオブジェクトに変換する際、
+        pipe! マクロで変換パイプラインを構築する。
+      usage_locations:
+        - Row → Entity 変換
+        - JSON → 永続データ構造変換
+        - 複数テーブル結合結果の組み立て
+
+      code_example: |
+        // Row からドメインオブジェクトへの変換パイプライン
+        impl From<GameSessionRow> for GameSession {
+            fn from(row: GameSessionRow) -> Self {
+                pipe!(
+                    row,
+                    |r| GameIdentifier::from_bytes(&r.game_id),
+                    |id| {
+                        let status = pipe!(
+                            r.status.as_str(),
+                            |s| match s {
+                                "in_progress" => GameStatus::InProgress,
+                                "victory" => GameStatus::Victory,
+                                "defeat" => GameStatus::Defeat,
+                                "paused" => GameStatus::Paused,
+                                _ => GameStatus::InProgress,
+                            }
+                        );
+                        (id, status)
+                    },
+                    |(id, status)| GameSession {
+                        identifier: id,
+                        turn_count: TurnCount::new(r.turn_count),
+                        status,
+                        seed: RandomSeed::new(r.random_seed),
+                        event_sequence: r.event_sequence,
+                        // ... 他のフィールドも同様に変換
+                    }
+                )
+            }
+        }
+
+        // 複数クエリ結果の合成
+        fn load_full_session(&self, id: &GameIdentifier) -> AsyncIO<Option<GameSession>> {
+            pipe!(
+                self.find_session_row(id),
+                |session_io| session_io.flat_map(|opt_row| {
+                    match opt_row {
+                        Some(row) => pipe!(
+                            AsyncIO::pure(row),
+                            |row_io| row_io.flat_map(|r| {
+                                // 関連データを並列取得
+                                let player_io = self.load_player(&r.player_id);
+                                let floor_io = self.load_floor(&r.game_id, r.current_floor_level);
+                                let enemies_io = self.load_enemies(&r.game_id, r.current_floor_level);
+
+                                // 全て合成
+                                player_io.flat_map(move |player| {
+                                    floor_io.flat_map(move |floor| {
+                                        enemies_io.map(move |enemies| {
+                                            Some(GameSession::assemble(r, player, floor, enemies))
+                                        })
+                                    })
+                                })
+                            })
+                        ),
+                        None => AsyncIO::pure(None),
+                    }
+                })
+            )
+        }
+
+    # -------------------------------------------------------------------------
+    # PersistentVector/PersistentHashMap - シリアライズ
+    # -------------------------------------------------------------------------
+    - name: Persistent Data Structures
+      description: |
+        ドメインで使用する永続データ構造（PersistentVector, PersistentHashMap 等）を
+        JSON/bincode にシリアライズ/デシリアライズする。
+        serde の Serialize/Deserialize を活用。
+      usage_locations:
+        - MySQL JSON カラムへの保存
+        - Redis bincode シリアライズ
+        - スナップショット保存
+
+      code_example: |
+        // PersistentVector のシリアライズ実装
+        // lambars の PersistentVector は serde を実装済み
+
+        // Inventory (PersistentVector<ItemStack>) の JSON 変換
+        fn serialize_inventory(inventory: &Inventory) -> serde_json::Value {
+            // PersistentVector は自動的に JSON 配列にシリアライズされる
+            serde_json::to_value(&inventory.items).unwrap()
+        }
+
+        fn deserialize_inventory(json: serde_json::Value, capacity: u32) -> Inventory {
+            let items: PersistentVector<ItemStack> = serde_json::from_value(json).unwrap();
+            Inventory { items, capacity }
+        }
+
+        // Tiles (PersistentVector<PersistentVector<Tile>>) の変換
+        fn serialize_tiles(tiles: &PersistentVector<PersistentVector<Tile>>) -> serde_json::Value {
+            serde_json::to_value(tiles).unwrap()
+        }
+
+        // Entities (PersistentHashMap<EntityId, Entity>) の変換
+        fn serialize_entities(
+            entities: &PersistentHashMap<EntityIdentifier, Entity>
+        ) -> serde_json::Value {
+            // PersistentHashMap は JSON オブジェクトにシリアライズ
+            serde_json::to_value(entities).unwrap()
+        }
+
+        // Redis bincode シリアライズ
+        fn to_bincode<T: Serialize>(value: &T) -> Vec<u8> {
+            bincode::serialize(value).unwrap()
+        }
+
+        fn from_bincode<T: DeserializeOwned>(bytes: &[u8]) -> T {
+            bincode::deserialize(bytes).unwrap()
+        }
+
+    # -------------------------------------------------------------------------
+    # Either - エラーハンドリング
+    # -------------------------------------------------------------------------
+    - name: Either
+      description: |
+        インフラ層のエラーを Either で表現し、
+        ドメインエラーとインフラエラーを型安全に区別する。
+      usage_locations:
+        - Repository エラーハンドリング
+        - 接続エラー処理
+        - シリアライズエラー処理
+
+      code_example: |
+        // インフラエラー型
+        pub enum InfraError {
+            Database(sqlx::Error),
+            Cache(redis::RedisError),
+            Serialization(SerializationError),
+            NotFound { entity_type: String, id: String },
+        }
+
+        // Either を使ったエラー変換
+        fn find_by_id(&self, id: &GameIdentifier) -> AsyncIO<Either<InfraError, Option<GameSession>>> {
+            let pool = self.pool.clone();
+            let id = id.clone();
+
+            AsyncIO::new(async move {
+                match sqlx::query_as::<_, GameSessionRow>("SELECT * FROM game_sessions WHERE game_id = ?")
+                    .bind(id.as_bytes())
+                    .fetch_optional(&pool)
+                    .await
+                {
+                    Ok(Some(row)) => Either::Right(Some(GameSession::from(row))),
+                    Ok(None) => Either::Right(None),
+                    Err(e) => Either::Left(InfraError::Database(e)),
+                }
+            })
+        }
+
+        // Either の合成
+        fn save_and_cache(
+            &self,
+            session: &GameSession,
+        ) -> AsyncIO<Either<InfraError, ()>> {
+            pipe!(
+                self.repository.save(session),
+                |save_io| save_io.flat_map(|result| {
+                    match result {
+                        Either::Right(()) => {
+                            // 保存成功 → キャッシュ更新
+                            self.cache.set(&session.identifier, session, self.config.cache_ttl)
+                                .map(|cache_result| cache_result)
+                        }
+                        Either::Left(e) => AsyncIO::pure(Either::Left(e)),
+                    }
+                })
+            )
+        }
+
+    # -------------------------------------------------------------------------
+    # Traversable - バッチ操作
+    # -------------------------------------------------------------------------
+    - name: Traversable
+      description: |
+        複数のエンティティを一括で操作する際、
+        Traversable を使って AsyncIO のリストを合成する。
+      usage_locations:
+        - 複数敵の一括保存
+        - 複数イベントの一括追加
+        - バッチクエリ結果の変換
+
+      code_example: |
+        // 複数イベントの一括保存
+        fn append_events(
+            &self,
+            game_id: &GameIdentifier,
+            events: &[GameEvent],
+        ) -> AsyncIO<()> {
+            // Vec<GameEvent> → Vec<AsyncIO<()>> → AsyncIO<Vec<()>> → AsyncIO<()>
+            let insert_ios: Vec<AsyncIO<()>> = events
+                .iter()
+                .enumerate()
+                .map(|(seq, event)| self.insert_event(game_id, seq as u64, event))
+                .collect();
+
+            // Traversable::sequence で全ての AsyncIO を合成
+            AsyncIO::sequence(insert_ios).map(|_| ())
+        }
+
+        // 複数敵の一括読み込み
+        fn load_enemies(
+            &self,
+            game_id: &GameIdentifier,
+            floor_level: u32,
+        ) -> AsyncIO<PersistentVector<Enemy>> {
+            let pool = self.pool.clone();
+
+            AsyncIO::new(async move {
+                let rows = sqlx::query_as::<_, EnemyRow>(
+                    "SELECT * FROM enemies WHERE game_id = ? AND floor_level = ? AND is_alive = TRUE"
+                )
+                .bind(game_id.as_bytes())
+                .bind(floor_level)
+                .fetch_all(&pool)
+                .await?;
+
+                // Vec<EnemyRow> を PersistentVector<Enemy> に変換
+                Ok(rows.into_iter().map(Enemy::from).collect())
+            })
+        }
+
+    # -------------------------------------------------------------------------
+    # Foldable - 集計クエリ結果の処理
+    # -------------------------------------------------------------------------
+    - name: Foldable
+      description: |
+        クエリ結果の集計や変換に Foldable を使用。
+        Event Sourcing での状態再構築にも活用。
+      usage_locations:
+        - イベントからの状態再構築
+        - 統計情報の集計
+        - リーダーボードスコア計算
+
+      code_example: |
+        // Event Sourcing: イベントからの状態再構築
+        fn reconstruct_from_events(
+            &self,
+            game_id: &GameIdentifier,
+            base_state: Option<GameSession>,
+            since_sequence: u64,
+        ) -> AsyncIO<GameSession> {
+            pipe!(
+                self.load_events_since(game_id, since_sequence),
+                |events_io| events_io.map(|events| {
+                    let initial = base_state.unwrap_or_else(GameSession::empty);
+
+                    // Foldable::fold_left でイベントを順次適用
+                    events.fold_left(initial, |state, event| {
+                        state.apply_event(&event)
+                    })
+                })
+            )
+        }
+
+        // スコア計算
+        fn calculate_final_score(session: &GameSession) -> u64 {
+            // 複数の要素を fold で集計
+            let base_score = session.turn_count.value() * 10;
+
+            let enemy_score = session.defeated_enemies
+                .fold_left(0u64, |acc, enemy| {
+                    acc + enemy.score_value()
+                });
+
+            let depth_bonus = session.max_floor_reached * 1000;
+
+            base_score + enemy_score + depth_bonus
+        }
+
+  # ---------------------------------------------------------------------------
+  # Implementation Examples
+  # ---------------------------------------------------------------------------
+  implementation_examples:
+    mysql_repository: |
+      // MySQL Repository の完全な実装例
+      pub struct MySqlGameSessionRepository {
+          pool: MySqlPool,
+      }
+
+      impl MySqlGameSessionRepository {
+          pub fn new(pool: MySqlPool) -> Self {
+              Self { pool }
+          }
+      }
+
+      impl GameSessionRepository for MySqlGameSessionRepository {
+          fn find_by_id(&self, id: &GameIdentifier) -> AsyncIO<Option<GameSession>> {
+              let pool = self.pool.clone();
+              let id_bytes = id.as_bytes().to_vec();
+
+              AsyncIO::new(async move {
+                  // メインクエリ
+                  let session_row = sqlx::query_as::<_, GameSessionRow>(
+                      "SELECT * FROM game_sessions WHERE game_id = ?"
+                  )
+                  .bind(&id_bytes)
+                  .fetch_optional(&pool)
+                  .await?;
+
+                  match session_row {
+                      Some(row) => {
+                          // 関連データを取得
+                          let player = sqlx::query_as::<_, PlayerRow>(
+                              "SELECT * FROM players WHERE player_id = ?"
+                          )
+                          .bind(&row.player_id)
+                          .fetch_one(&pool)
+                          .await?;
+
+                          let floor = sqlx::query_as::<_, FloorRow>(
+                              "SELECT * FROM floors WHERE game_id = ? AND level = ?"
+                          )
+                          .bind(&id_bytes)
+                          .bind(row.current_floor_level)
+                          .fetch_one(&pool)
+                          .await?;
+
+                          let enemies = sqlx::query_as::<_, EnemyRow>(
+                              "SELECT * FROM enemies WHERE game_id = ? AND floor_level = ? AND is_alive = TRUE"
+                          )
+                          .bind(&id_bytes)
+                          .bind(row.current_floor_level)
+                          .fetch_all(&pool)
+                          .await?;
+
+                          // pipe! で組み立て
+                          Ok(Some(pipe!(
+                              (row, player, floor, enemies),
+                              |(r, p, f, e)| GameSession::assemble(
+                                  GameSessionData::from(r),
+                                  Player::from(p),
+                                  Floor::from(f),
+                                  e.into_iter().map(Enemy::from).collect()
+                              )
+                          )))
+                      }
+                      None => Ok(None),
+                  }
+              })
+          }
+
+          fn save(&self, session: &GameSession) -> AsyncIO<()> {
+              let pool = self.pool.clone();
+              let session = session.clone();
+
+              AsyncIO::bracket(
+                  // トランザクション開始
+                  AsyncIO::new({
+                      let pool = pool.clone();
+                      async move { pool.begin().await.map_err(InfraError::from) }
+                  }),
+                  // コミット/ロールバック
+                  |mut tx, result| AsyncIO::new(async move {
+                      match result {
+                          Ok(_) => tx.commit().await.map_err(InfraError::from),
+                          Err(e) => {
+                              let _ = tx.rollback().await;
+                              Err(e)
+                          }
+                      }
+                  }),
+                  // トランザクション内操作
+                  |mut tx| AsyncIO::new(async move {
+                      // game_sessions UPSERT
+                      sqlx::query(r#"
+                          INSERT INTO game_sessions (game_id, player_id, current_floor_level, turn_count, status, random_seed, event_sequence)
+                          VALUES (?, ?, ?, ?, ?, ?, ?)
+                          ON DUPLICATE KEY UPDATE
+                              current_floor_level = VALUES(current_floor_level),
+                              turn_count = VALUES(turn_count),
+                              status = VALUES(status),
+                              event_sequence = VALUES(event_sequence)
+                      "#)
+                      .bind(session.identifier.as_bytes())
+                      .bind(session.player.identifier.as_bytes())
+                      .bind(session.current_floor.level.value())
+                      .bind(session.turn_count.value())
+                      .bind(session.status.as_str())
+                      .bind(session.seed.value())
+                      .bind(session.event_sequence)
+                      .execute(&mut *tx)
+                      .await?;
+
+                      // players UPSERT
+                      sqlx::query(r#"
+                          INSERT INTO players (player_id, game_id, name, position_x, position_y, ...)
+                          VALUES (?, ?, ?, ?, ?, ...)
+                          ON DUPLICATE KEY UPDATE ...
+                      "#)
+                      .bind(...)
+                      .execute(&mut *tx)
+                      .await?;
+
+                      // floors UPSERT
+                      // enemies UPSERT
+                      // ...
+
+                      Ok(())
+                  })
+              )
+          }
+      }
+
+    redis_cache: |
+      // Redis Cache の実装例
+      pub struct RedisSessionCache {
+          client: redis::Client,
+          config: CacheConfig,
+      }
+
+      impl SessionCache for RedisSessionCache {
+          fn get(&self, game_id: &GameIdentifier) -> AsyncIO<Option<GameSession>> {
+              let client = self.client.clone();
+              let key = format!("{}:roguelike:session:{}", self.config.env, game_id);
+
+              AsyncIO::new(async move {
+                  let mut conn = client.get_async_connection().await?;
+                  let bytes: Option<Vec<u8>> = redis::cmd("GET")
+                      .arg(&key)
+                      .query_async(&mut conn)
+                      .await?;
+
+                  Ok(bytes.map(|b| from_bincode(&b)))
+              })
+          }
+
+          fn set(
+              &self,
+              game_id: &GameIdentifier,
+              session: &GameSession,
+              ttl: Duration,
+          ) -> AsyncIO<()> {
+              let client = self.client.clone();
+              let key = format!("{}:roguelike:session:{}", self.config.env, game_id);
+              let bytes = to_bincode(session);
+              let ttl_secs = ttl.as_secs() as usize;
+
+              AsyncIO::new(async move {
+                  let mut conn = client.get_async_connection().await?;
+                  redis::cmd("SET")
+                      .arg(&key)
+                      .arg(bytes)
+                      .arg("EX")
+                      .arg(ttl_secs)
+                      .query_async(&mut conn)
+                      .await?;
+
+                  Ok(())
+              })
+          }
+
+          fn invalidate(&self, game_id: &GameIdentifier) -> AsyncIO<()> {
+              let client = self.client.clone();
+              let key = format!("{}:roguelike:session:{}", self.config.env, game_id);
+
+              AsyncIO::new(async move {
+                  let mut conn = client.get_async_connection().await?;
+                  redis::cmd("DEL")
+                      .arg(&key)
+                      .query_async(&mut conn)
+                      .await?;
+
+                  Ok(())
+              })
+          }
+      }

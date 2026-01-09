@@ -1226,3 +1226,566 @@ handler_pattern:
 
         Ok((StatusCode::CREATED, Json(response)))
     }
+
+# =============================================================================
+# lambars Usage in API Layer
+# =============================================================================
+
+lambars_usage:
+  overview: |
+    API 層では lambars の以下の機能を活用する：
+    - AsyncIO: Workflow の実行と HTTP レスポンスへの変換
+    - Either: エラーハンドリングと HTTP ステータスコードへの変換
+    - pipe!/compose!: リクエスト処理パイプライン
+    - Functor/Monad: レスポンス変換チェーン
+    - Prism: コマンド種別の解析
+
+  features:
+    # -------------------------------------------------------------------------
+    # AsyncIO - Workflow の実行
+    # -------------------------------------------------------------------------
+    - name: AsyncIO
+      description: |
+        Workflow から返される AsyncIO を API ハンドラーで実行する。
+        AsyncIO::run() で Future に変換し、await で結果を取得。
+      usage_locations:
+        - 全ての API ハンドラー
+        - Workflow 呼び出し
+
+      code_example: |
+        // AsyncIO の実行パターン
+        pub async fn create_game(
+            State(state): State<AppState>,
+            Json(request): Json<CreateGameRequest>,
+        ) -> Result<impl IntoResponse, ApiError> {
+            let command = CreateGameCommand::try_from(request)?;
+
+            // AsyncIO を実行
+            // run() で Future に変換 → await で結果取得
+            let session = (state.workflows.create_game)(command)
+                .run()
+                .await
+                .map_err(ApiError::from)?;
+
+            Ok((StatusCode::CREATED, Json(GameSessionResponse::from(session))))
+        }
+
+        // 複数の AsyncIO を合成して実行
+        pub async fn get_game_with_details(
+            State(state): State<AppState>,
+            Path(game_id): Path<String>,
+        ) -> Result<impl IntoResponse, ApiError> {
+            let id = GameIdentifier::parse(&game_id)?;
+
+            // 複数の Workflow を合成
+            let combined_io = pipe!(
+                (state.workflows.resume_game)(ResumeGameCommand { game_identifier: id.clone() }),
+                |session_io| session_io.flat_map(|session| {
+                    (state.workflows.get_events)(GetEventsCommand {
+                        game_identifier: id.clone(),
+                        since: 0,
+                        limit: 10,
+                    })
+                    .map(move |events| (session, events))
+                })
+            );
+
+            let (session, recent_events) = combined_io.run().await.map_err(ApiError::from)?;
+
+            Ok(Json(GameWithEventsResponse {
+                game: GameSessionResponse::from(session),
+                recent_events: recent_events.into_iter().map(GameEventResponse::from).collect(),
+            }))
+        }
+
+    # -------------------------------------------------------------------------
+    # Either - エラーハンドリング
+    # -------------------------------------------------------------------------
+    - name: Either
+      description: |
+        WorkflowError を Either で表現し、
+        Left(Error) → HTTP エラーレスポンス、Right(Success) → HTTP 成功レスポンス
+        に変換する。
+      usage_locations:
+        - エラーレスポンス変換
+        - バリデーションエラー処理
+        - ドメインエラー → HTTP ステータスコード変換
+
+      code_example: |
+        // Either を使ったエラーハンドリング
+        pub struct ApiError(WorkflowError);
+
+        impl IntoResponse for ApiError {
+            fn into_response(self) -> Response {
+                // Either パターンでエラーを分類
+                let (status, error_response) = match &self.0 {
+                    WorkflowError::NotFound { entity_type, identifier } => {
+                        (
+                            StatusCode::NOT_FOUND,
+                            ErrorResponse {
+                                code: format!("{}_NOT_FOUND", entity_type.to_uppercase()),
+                                message: format!("{} not found", entity_type),
+                                details: Some(json!({ "id": identifier })),
+                            }
+                        )
+                    }
+                    WorkflowError::Domain(domain_error) => {
+                        map_domain_error_to_response(domain_error)
+                    }
+                    WorkflowError::Repository(_) | WorkflowError::EventStore(_) => {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            ErrorResponse {
+                                code: "INTERNAL_ERROR".to_string(),
+                                message: "Internal server error".to_string(),
+                                details: None,
+                            }
+                        )
+                    }
+                };
+
+                (status, Json(json!({ "error": error_response }))).into_response()
+            }
+        }
+
+        // ドメインエラーの変換
+        fn map_domain_error_to_response(error: &DomainError) -> (StatusCode, ErrorResponse) {
+            match error {
+                DomainError::Validation(v) => (
+                    StatusCode::BAD_REQUEST,
+                    ErrorResponse {
+                        code: "VALIDATION_ERROR".to_string(),
+                        message: format!("Validation failed: {:?}", v),
+                        details: None,
+                    }
+                ),
+                DomainError::Command(CommandError::InvalidCommand { reason }) => (
+                    StatusCode::BAD_REQUEST,
+                    ErrorResponse {
+                        code: "INVALID_COMMAND".to_string(),
+                        message: reason.clone(),
+                        details: None,
+                    }
+                ),
+                DomainError::GameSession(GameSessionError::SessionAlreadyCompleted) => (
+                    StatusCode::CONFLICT,
+                    ErrorResponse {
+                        code: "GAME_ALREADY_COMPLETED".to_string(),
+                        message: "Game session has already ended".to_string(),
+                        details: None,
+                    }
+                ),
+                DomainError::Player(PlayerError::HealthExhausted) => (
+                    StatusCode::CONFLICT,
+                    ErrorResponse {
+                        code: "PLAYER_DEAD".to_string(),
+                        message: "Player has been defeated".to_string(),
+                        details: None,
+                    }
+                ),
+                DomainError::Floor(FloorError::TileNotWalkable { position, tile_type }) => (
+                    StatusCode::BAD_REQUEST,
+                    ErrorResponse {
+                        code: "INVALID_MOVEMENT".to_string(),
+                        message: format!("Cannot move to {:?}: {}", position, tile_type),
+                        details: Some(json!({ "position": position, "tile_type": tile_type })),
+                    }
+                ),
+                // ... 他のエラーパターン
+                _ => (
+                    StatusCode::BAD_REQUEST,
+                    ErrorResponse {
+                        code: "DOMAIN_ERROR".to_string(),
+                        message: format!("{:?}", error),
+                        details: None,
+                    }
+                ),
+            }
+        }
+
+    # -------------------------------------------------------------------------
+    # pipe!/compose! - リクエスト処理パイプライン
+    # -------------------------------------------------------------------------
+    - name: "pipe!/compose!"
+      description: |
+        リクエストの処理を pipe! で構築し、
+        バリデーション → 変換 → Workflow 呼び出し → レスポンス変換
+        のパイプラインを明確に表現する。
+      usage_locations:
+        - DTO → Command 変換
+        - レスポンス構築
+        - バリデーションチェーン
+
+      code_example: |
+        // リクエスト処理パイプライン
+        pub async fn execute_command(
+            State(state): State<AppState>,
+            Path(game_id): Path<String>,
+            Json(request): Json<ExecuteCommandRequest>,
+        ) -> Result<impl IntoResponse, ApiError> {
+            // pipe! でリクエスト処理を構築
+            let result = pipe!(
+                // Step 1: パス変数のバリデーション
+                GameIdentifier::parse(&game_id),
+                |id_result| id_result.map_err(ApiError::from),
+                // Step 2: コマンドのパース
+                |id| {
+                    let command = pipe!(
+                        &request.command,
+                        |cmd| parse_command(cmd),
+                        |parsed| parsed.map(|c| ProcessTurnCommand {
+                            game_identifier: id,
+                            player_command: c,
+                        })
+                    )?;
+                    Ok(command)
+                }
+            )?;
+
+            // Workflow 実行
+            let session = (state.workflows.process_turn)(result)
+                .run()
+                .await
+                .map_err(ApiError::from)?;
+
+            // レスポンス構築
+            let response = pipe!(
+                session,
+                |s| TurnResultResponse {
+                    game: GameSessionResponse::from(&s),
+                    turn_events: s.last_turn_events().iter().map(GameEventResponse::from).collect(),
+                    game_over: s.is_game_over(),
+                    game_over_reason: s.game_over_reason().map(|r| r.to_string()),
+                }
+            );
+
+            Ok(Json(response))
+        }
+
+        // コマンドのパース（Prism 的なパターンマッチ）
+        fn parse_command(request: &CommandRequest) -> Result<Command, ApiError> {
+            pipe!(
+                request,
+                |r| match r.command_type.as_str() {
+                    "move" => {
+                        let direction = r.direction
+                            .as_ref()
+                            .ok_or(ApiError::validation("direction required for move command"))?;
+                        Ok(Command::Move(Direction::parse(direction)?))
+                    }
+                    "attack" => {
+                        let target_id = r.target_id
+                            .as_ref()
+                            .ok_or(ApiError::validation("target_id required for attack command"))?;
+                        Ok(Command::Attack(EntityIdentifier::parse(target_id)?))
+                    }
+                    "use_item" => {
+                        let item_id = r.item_id
+                            .as_ref()
+                            .ok_or(ApiError::validation("item_id required for use_item command"))?;
+                        Ok(Command::UseItem(ItemIdentifier::parse(item_id)?))
+                    }
+                    "wait" => Ok(Command::Wait),
+                    "descend" => Ok(Command::Descend),
+                    "ascend" => Ok(Command::Ascend),
+                    _ => Err(ApiError::validation(format!("unknown command type: {}", r.command_type))),
+                }
+            )
+        }
+
+    # -------------------------------------------------------------------------
+    # Functor/Monad - レスポンス変換
+    # -------------------------------------------------------------------------
+    - name: Functor/Monad
+      description: |
+        ドメインオブジェクトから DTO への変換に
+        map/flat_map を活用し、変換ロジックを合成する。
+      usage_locations:
+        - GameSession → GameSessionResponse
+        - Player → PlayerResponse
+        - Floor → FloorResponse
+        - Events → EventsResponse
+
+      code_example: |
+        // Functor を使ったレスポンス変換
+        impl From<&GameSession> for GameSessionResponse {
+            fn from(session: &GameSession) -> Self {
+                // 各フィールドを map で変換
+                Self {
+                    game_id: session.identifier.to_string(),
+                    player: PlayerResponse::from(&session.player),
+                    floor: FloorSummaryResponse::from(&session.current_floor),
+                    turn_count: session.turn_count.value(),
+                    status: session.status.as_str().to_string(),
+                }
+            }
+        }
+
+        impl From<&Player> for PlayerDetailResponse {
+            fn from(player: &Player) -> Self {
+                Self {
+                    player_id: player.identifier.to_string(),
+                    name: player.name.value().to_string(),
+                    position: PositionResponse::from(&player.position),
+                    health: ResourceResponse {
+                        current: player.stats.health.current(),
+                        max: player.stats.health.max(),
+                    },
+                    mana: ResourceResponse {
+                        current: player.stats.mana.current(),
+                        max: player.stats.mana.max(),
+                    },
+                    level: player.level.value(),
+                    experience: player.experience.value(),
+                    experience_to_next_level: player.experience_to_next_level(),
+                    base_stats: BaseStatsResponse::from(&player.base_stats),
+                    combat_stats: CombatStatsResponse::from(&player.combat_stats),
+                    equipment: EquipmentResponse::from(&player.equipment),
+                    // PersistentVector を map で変換
+                    status_effects: player.status_effects
+                        .iter()
+                        .map(StatusEffectResponse::from)
+                        .collect(),
+                }
+            }
+        }
+
+        // インベントリの変換（PersistentVector の map）
+        impl From<&Inventory> for InventoryResponse {
+            fn from(inventory: &Inventory) -> Self {
+                Self {
+                    capacity: inventory.capacity,
+                    used_slots: inventory.items.len() as u32,
+                    // PersistentVector<ItemStack> → Vec<ItemStackResponse>
+                    items: inventory.items
+                        .iter()
+                        .map(ItemStackResponse::from)
+                        .collect(),
+                }
+            }
+        }
+
+        // フロアタイルの変換（2D PersistentVector の map）
+        impl From<&Floor> for FloorResponse {
+            fn from(floor: &Floor) -> Self {
+                Self {
+                    level: floor.level.value(),
+                    width: floor.width,
+                    height: floor.height,
+                    // PersistentVector<PersistentVector<Tile>> → Vec<Vec<TileResponse>>
+                    tiles: floor.tiles
+                        .iter()
+                        .map(|row| row.iter().map(TileResponse::from).collect())
+                        .collect(),
+                    visible_enemies: floor.visible_enemies()
+                        .iter()
+                        .map(EnemySummaryResponse::from)
+                        .collect(),
+                    visible_items: floor.visible_items()
+                        .iter()
+                        .map(DroppedItemResponse::from)
+                        .collect(),
+                    stairs_up: floor.stairs_up.as_ref().map(PositionResponse::from),
+                    stairs_down: floor.stairs_down.as_ref().map(PositionResponse::from),
+                }
+            }
+        }
+
+    # -------------------------------------------------------------------------
+    # Prism - コマンド種別の解析
+    # -------------------------------------------------------------------------
+    - name: Prism
+      description: |
+        リクエストから受け取った JSON コマンドを
+        Prism 的なパターンマッチでドメインの Command enum に変換する。
+      usage_locations:
+        - ExecuteCommand ハンドラー
+        - コマンドバリデーション
+
+      code_example: |
+        // Prism 的なコマンド解析
+        #[derive(Debug, Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        pub enum CommandRequest {
+            Move { direction: String },
+            Attack { target_id: String },
+            UseItem { item_id: String, target_id: Option<String> },
+            PickUp { item_id: String },
+            Drop { item_id: String },
+            Equip { item_id: String },
+            Unequip { slot: String },
+            Wait,
+            Descend,
+            Ascend,
+        }
+
+        impl TryFrom<CommandRequest> for Command {
+            type Error = ApiError;
+
+            fn try_from(request: CommandRequest) -> Result<Self, Self::Error> {
+                // Prism 的なパターンマッチ
+                match request {
+                    CommandRequest::Move { direction } => {
+                        let dir = Direction::parse(&direction)
+                            .map_err(|_| ApiError::validation("invalid direction"))?;
+                        Ok(Command::Move(dir))
+                    }
+                    CommandRequest::Attack { target_id } => {
+                        let id = EntityIdentifier::parse(&target_id)
+                            .map_err(|_| ApiError::validation("invalid target_id"))?;
+                        Ok(Command::Attack(id))
+                    }
+                    CommandRequest::UseItem { item_id, target_id } => {
+                        let item = ItemIdentifier::parse(&item_id)
+                            .map_err(|_| ApiError::validation("invalid item_id"))?;
+                        let target = target_id
+                            .map(|id| EntityIdentifier::parse(&id))
+                            .transpose()
+                            .map_err(|_| ApiError::validation("invalid target_id"))?;
+                        Ok(Command::UseItem { item, target })
+                    }
+                    CommandRequest::PickUp { item_id } => {
+                        let id = ItemIdentifier::parse(&item_id)
+                            .map_err(|_| ApiError::validation("invalid item_id"))?;
+                        Ok(Command::PickUp(id))
+                    }
+                    CommandRequest::Drop { item_id } => {
+                        let id = ItemIdentifier::parse(&item_id)
+                            .map_err(|_| ApiError::validation("invalid item_id"))?;
+                        Ok(Command::Drop(id))
+                    }
+                    CommandRequest::Equip { item_id } => {
+                        let id = ItemIdentifier::parse(&item_id)
+                            .map_err(|_| ApiError::validation("invalid item_id"))?;
+                        Ok(Command::Equip(id))
+                    }
+                    CommandRequest::Unequip { slot } => {
+                        let equipment_slot = EquipmentSlot::parse(&slot)
+                            .map_err(|_| ApiError::validation("invalid equipment slot"))?;
+                        Ok(Command::Unequip(equipment_slot))
+                    }
+                    CommandRequest::Wait => Ok(Command::Wait),
+                    CommandRequest::Descend => Ok(Command::Descend),
+                    CommandRequest::Ascend => Ok(Command::Ascend),
+                }
+            }
+        }
+
+  # ---------------------------------------------------------------------------
+  # Full Handler Implementation Example
+  # ---------------------------------------------------------------------------
+  implementation_example: |
+    // 完全なハンドラー実装例
+    use axum::{
+        extract::{Path, Query, State},
+        http::StatusCode,
+        response::IntoResponse,
+        Json,
+    };
+    use lambars::{effect::AsyncIO, compose::pipe};
+
+    pub async fn execute_command(
+        State(state): State<AppState>,
+        Path(game_id): Path<String>,
+        Json(request): Json<ExecuteCommandRequest>,
+    ) -> Result<impl IntoResponse, ApiError> {
+        // 1. バリデーションと変換（pipe! で構築）
+        let command = pipe!(
+            // ゲームID のパース
+            GameIdentifier::parse(&game_id)
+                .map_err(|_| ApiError::validation("invalid game_id"))?,
+            // コマンドのパース
+            |game_id| {
+                let player_command = Command::try_from(request.command)?;
+                ProcessTurnCommand {
+                    game_identifier: game_id,
+                    player_command,
+                }
+            }
+        );
+
+        // 2. Workflow 実行（AsyncIO を実行）
+        let session = (state.workflows.process_turn)(command)
+            .run()  // AsyncIO<T> → Future<T>
+            .await
+            .map_err(ApiError::from)?;
+
+        // 3. レスポンス構築（Functor で変換）
+        let response = TurnResultResponse {
+            game: GameSessionResponse::from(&session),
+            turn_events: session.last_turn_events()
+                .iter()
+                .map(GameEventResponse::from)
+                .collect(),
+            game_over: session.is_game_over(),
+            game_over_reason: session.game_over_reason().map(|r| r.to_string()),
+        };
+
+        Ok(Json(response))
+    }
+
+    // イベントログ取得（ページネーション対応）
+    pub async fn get_events(
+        State(state): State<AppState>,
+        Path(game_id): Path<String>,
+        Query(params): Query<GetEventsParams>,
+    ) -> Result<impl IntoResponse, ApiError> {
+        let game_id = GameIdentifier::parse(&game_id)
+            .map_err(|_| ApiError::validation("invalid game_id"))?;
+
+        let command = GetEventsCommand {
+            game_identifier: game_id,
+            since: params.since.unwrap_or(0),
+            limit: params.limit.unwrap_or(100).min(1000),
+        };
+
+        // イベント取得
+        let events = (state.workflows.get_events)(command)
+            .run()
+            .await
+            .map_err(ApiError::from)?;
+
+        // レスポンス構築
+        let response = EventsResponse {
+            events: events.items
+                .iter()
+                .map(GameEventResponse::from)
+                .collect(),
+            next_sequence: events.next_sequence,
+            has_more: events.has_more,
+        };
+
+        Ok(Json(response))
+    }
+
+    // ヘルスチェック（複数の AsyncIO を合成）
+    pub async fn health_check(
+        State(state): State<AppState>,
+    ) -> impl IntoResponse {
+        // 複数のヘルスチェックを並列実行
+        let db_check = state.health_checks.database.check();
+        let cache_check = state.health_checks.cache.check();
+
+        // AsyncIO::zip で並列合成
+        let (db_status, cache_status) = AsyncIO::zip(db_check, cache_check)
+            .run()
+            .await
+            .unwrap_or(("down".to_string(), "down".to_string()));
+
+        let overall_status = if db_status == "up" && cache_status == "up" {
+            "healthy"
+        } else if db_status == "up" || cache_status == "up" {
+            "degraded"
+        } else {
+            "unhealthy"
+        };
+
+        Json(HealthResponse {
+            status: overall_status.to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            components: ComponentsStatus {
+                database: db_status,
+                cache: cache_status,
+            },
+        })
+    }
