@@ -1723,23 +1723,14 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
 // Iterator Implementation
 // =============================================================================
 
-/// A stack frame for lazy depth-first traversal of the HAMT structure.
-///
-/// This enum represents the current position within a node during iteration.
-/// It tracks which children have been processed and which are pending.
+/// Stack frame for depth-first HAMT traversal.
 enum StackFrame<'a, K, V> {
-    /// A bitmap node with its children slice and current index.
     BitmapNode {
-        /// Reference to the children slice of the bitmap node.
         children: &'a [Child<K, V>],
-        /// The index of the next child to process.
         index: usize,
     },
-    /// A collision node with its entries slice and current index.
     CollisionNode {
-        /// Reference to the entries slice of the collision node.
         entries: &'a [(K, V)],
-        /// The index of the next entry to process.
         index: usize,
     },
 }
@@ -1766,22 +1757,15 @@ enum StackFrame<'a, K, V> {
 /// efficient early termination. Operations like `take(k)`, `find()`, `any()`,
 /// and `all()` only traverse the elements actually needed.
 pub struct PersistentHashMapIterator<'a, K, V> {
-    /// Stack for depth-first traversal of the HAMT structure.
     stack: Vec<StackFrame<'a, K, V>>,
-    /// A pending entry to be returned on the next `next()` call.
-    /// This is used when an entry is discovered during stack traversal
-    /// but needs to be returned before continuing traversal.
     pending_entry: Option<(&'a K, &'a V)>,
-    /// The number of remaining elements to iterate.
     remaining: usize,
 }
 
 impl<'a, K, V> PersistentHashMapIterator<'a, K, V> {
-    /// Creates a new lazy iterator for the given root node and length.
     fn new(root: &'a Node<K, V>, length: usize) -> Self {
         let mut iterator = Self {
-            // Maximum HAMT depth is 13 (64-bit hash / 5 bits per level = 12.8)
-            stack: Vec::with_capacity(13),
+            stack: Vec::with_capacity(13), // Maximum HAMT depth for 64-bit hash
             pending_entry: None,
             remaining: length,
         };
@@ -1793,21 +1777,13 @@ impl<'a, K, V> PersistentHashMapIterator<'a, K, V> {
         iterator
     }
 
-    /// Initializes the iterator from a root node.
-    ///
-    /// This method handles the root node's type and sets up the initial state
-    /// for iteration. It advances to find the first entry if needed.
     fn initialize_from_node(&mut self, node: &'a Node<K, V>) {
         match node {
-            Node::Empty => {
-                // Nothing to iterate
-            }
+            Node::Empty => {}
             Node::Entry { key, value, .. } => {
-                // Root is a single entry
                 self.pending_entry = Some((key, value));
             }
             Node::Bitmap { children, .. } => {
-                // Push the bitmap node onto the stack and advance to find first entry
                 self.stack.push(StackFrame::BitmapNode {
                     children: children.as_ref(),
                     index: 0,
@@ -1815,7 +1791,6 @@ impl<'a, K, V> PersistentHashMapIterator<'a, K, V> {
                 self.advance();
             }
             Node::Collision { entries, .. } => {
-                // Push the collision node onto the stack and advance to find first entry
                 self.stack.push(StackFrame::CollisionNode {
                     entries: entries.as_ref(),
                     index: 0,
@@ -1825,17 +1800,11 @@ impl<'a, K, V> PersistentHashMapIterator<'a, K, V> {
         }
     }
 
-    /// Advances the iterator to find the next entry.
-    ///
-    /// This method performs depth-first traversal of the HAMT structure,
-    /// descending into child nodes and backtracking when necessary.
-    /// When an entry is found, it is stored in `pending_entry`.
     fn advance(&mut self) {
         while let Some(frame) = self.stack.last_mut() {
             match frame {
                 StackFrame::BitmapNode { children, index } => {
                     if *index >= children.len() {
-                        // All children processed, pop this frame
                         self.stack.pop();
                         continue;
                     }
@@ -1845,48 +1814,38 @@ impl<'a, K, V> PersistentHashMapIterator<'a, K, V> {
 
                     match &children[current_index] {
                         Child::Entry { key, value, .. } => {
-                            // Found an entry
                             self.pending_entry = Some((key, value));
                             return;
                         }
-                        Child::Node(subnode) => {
-                            // Descend into the child node
-                            match subnode.as_ref() {
-                                Node::Empty => {
-                                    // Skip empty nodes (shouldn't normally occur)
-                                }
-                                Node::Entry { key, value, .. } => {
-                                    // Found an entry in a child node
-                                    self.pending_entry = Some((key, value));
-                                    return;
-                                }
-                                Node::Bitmap {
-                                    children: child_children,
-                                    ..
-                                } => {
-                                    // Push the child bitmap node onto the stack
-                                    self.stack.push(StackFrame::BitmapNode {
-                                        children: child_children.as_ref(),
-                                        index: 0,
-                                    });
-                                }
-                                Node::Collision {
-                                    entries: child_entries,
-                                    ..
-                                } => {
-                                    // Push the child collision node onto the stack
-                                    self.stack.push(StackFrame::CollisionNode {
-                                        entries: child_entries.as_ref(),
-                                        index: 0,
-                                    });
-                                }
+                        Child::Node(subnode) => match subnode.as_ref() {
+                            Node::Empty => {}
+                            Node::Entry { key, value, .. } => {
+                                self.pending_entry = Some((key, value));
+                                return;
                             }
-                        }
+                            Node::Bitmap {
+                                children: child_children,
+                                ..
+                            } => {
+                                self.stack.push(StackFrame::BitmapNode {
+                                    children: child_children.as_ref(),
+                                    index: 0,
+                                });
+                            }
+                            Node::Collision {
+                                entries: child_entries,
+                                ..
+                            } => {
+                                self.stack.push(StackFrame::CollisionNode {
+                                    entries: child_entries.as_ref(),
+                                    index: 0,
+                                });
+                            }
+                        },
                     }
                 }
                 StackFrame::CollisionNode { entries, index } => {
                     if *index >= entries.len() {
-                        // All entries processed, pop this frame
                         self.stack.pop();
                         continue;
                     }
@@ -1911,14 +1870,11 @@ impl<'a, K, V> Iterator for PersistentHashMapIterator<'a, K, V> {
             return None;
         }
 
-        // Take the pending entry and advance to find the next one
         let result = self.pending_entry.take();
-
         if result.is_some() {
             self.remaining -= 1;
             self.advance();
         }
-
         result
     }
 

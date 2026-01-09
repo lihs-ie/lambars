@@ -1312,21 +1312,13 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
 /// assert_eq!(first_three.len(), 3);
 /// ```
 pub struct PersistentTreeMapIterator<'a, K, V> {
-    /// Stack for in-order traversal. Contains nodes whose left subtree
-    /// has been fully processed but the node itself and right subtree remain.
     stack: Vec<&'a ReferenceCounter<Node<K, V>>>,
-    /// Number of remaining elements to iterate.
     remaining: usize,
 }
 
 impl<'a, K, V> PersistentTreeMapIterator<'a, K, V> {
-    /// Creates a new lazy iterator for the tree rooted at the given node.
-    ///
-    /// Initializes the stack by pushing all nodes along the leftmost path,
-    /// which positions the iterator at the smallest key.
     fn new(root: Option<&'a ReferenceCounter<Node<K, V>>>, length: usize) -> Self {
         let mut iterator = Self {
-            // Red-Black tree height is O(log n), so stack capacity is bounded
             stack: Vec::with_capacity(Self::estimated_stack_capacity(length)),
             remaining: length,
         };
@@ -1334,22 +1326,15 @@ impl<'a, K, V> PersistentTreeMapIterator<'a, K, V> {
         iterator
     }
 
-    /// Estimates the required stack capacity based on tree size.
-    ///
-    /// Red-Black tree height is at most 2 * log2(n + 1), so we use
-    /// a conservative estimate to avoid reallocations.
+    /// Red-Black tree height is at most 2 * log2(n + 1).
     const fn estimated_stack_capacity(length: usize) -> usize {
         if length == 0 {
             0
         } else {
-            // 2 * ceil(log2(n + 1)) + 1 for safety margin
             2 * (usize::BITS - length.leading_zeros()) as usize + 1
         }
     }
 
-    /// Pushes all nodes along the leftmost path from the given node onto the stack.
-    ///
-    /// This prepares the iterator to return nodes in ascending key order.
     fn push_leftmost_path(&mut self, mut node: Option<&'a ReferenceCounter<Node<K, V>>>) {
         while let Some(current) = node {
             self.stack.push(current);
@@ -1362,16 +1347,9 @@ impl<'a, K, V> Iterator for PersistentTreeMapIterator<'a, K, V> {
     type Item = (&'a K, &'a V);
 
     fn next(&mut self) -> Option<Self::Item> {
-        // Pop the next node from the stack
         let node = self.stack.pop()?;
-
-        // Decrement remaining count
         self.remaining = self.remaining.saturating_sub(1);
-
-        // If the node has a right child, push its leftmost path
-        // This ensures we visit the right subtree in ascending order
         self.push_leftmost_path(node.right.as_ref());
-
         Some((&node.key, &node.value))
     }
 
