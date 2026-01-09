@@ -1,0 +1,739 @@
+# Floor Workflow
+# Project: Dungeon of Pure Functions
+# Aggregate: Floor
+
+metadata:
+  version: "1.0.0"
+  created_at: "2026-01-09"
+  updated_at: "2026-01-09"
+  status: draft
+  aggregate: Floor
+
+imports:
+  - common.yaml
+
+# =============================================================================
+# Workflow Overview
+# =============================================================================
+
+overview:
+  description: |
+    Floorワークフローはダンジョンフロアの生成と管理を担当する。
+    フロア生成は純粋関数で行われ、Lazy評価により必要な部分のみを計算する。
+    視界計算にはTrampolineを使用してスタック安全性を確保する。
+
+  responsibilities:
+    - ダンジョンフロアの生成
+    - フロア間の移動
+    - 視界の計算と更新
+    - 罠の発動処理
+    - アイテム配置
+
+# =============================================================================
+# Use Cases
+# =============================================================================
+
+use_cases:
+  # ---------------------------------------------------------------------------
+  # Generate Floor
+  # ---------------------------------------------------------------------------
+  - name: GenerateFloor
+    description: 新しいダンジョンフロアを生成する
+    command:
+      name: GenerateFloorCommand
+      fields:
+        - { name: game_identifier, type: GameIdentifier }
+        - { name: floor_level, type: u32 }
+
+    workflow_steps:
+      - step: 1
+        name: Load Session
+        type: io
+        description: セッションをキャッシュから取得
+        port: SessionCache
+        operation: get
+
+      - step: 2
+        name: Get Floor Configuration
+        type: pure
+        description: フロアレベルに応じた生成設定を取得
+        function: get_floor_configuration
+        config_ref: floor_config
+
+      - step: 3
+        name: Generate Floor Layout
+        type: pure
+        description: フロアレイアウトを生成（Lazy評価）
+        function: DungeonGeneratorService::generate
+        lambars_feature: Lazy
+
+      - step: 4
+        name: Place Stairs
+        type: pure
+        description: 階段を配置
+        function: place_stairs
+
+      - step: 5
+        name: Place Items
+        type: pure
+        description: アイテムを配置
+        function: place_items
+
+      - step: 6
+        name: Place Traps
+        type: pure
+        description: 罠を配置
+        function: place_traps
+
+      - step: 7
+        name: Update Session with Floor
+        type: pure
+        description: セッションにフロアを設定
+        function: update_session_floor
+
+      - step: 8
+        name: Generate Events
+        type: pure
+        description: FloorGeneratedイベントを生成
+        events:
+          - FloorGenerated
+
+      - step: 9
+        name: Update Cache
+        type: io
+        description: セッションをキャッシュに保存
+        port: SessionCache
+        operation: set
+
+      - step: 10
+        name: Append Events
+        type: io
+        description: イベントをイベントストアに追加
+        port: EventStore
+        operation: append
+
+    result:
+      success: GameSession
+      errors:
+        - WorkflowError::NotFound
+        - WorkflowError::Domain(FloorError::InvalidFloorGeneration)
+
+    type_signature: |
+      fn generate_floor<C, E>(
+          cache: &C,
+          event_store: &E,
+      ) -> impl Fn(GenerateFloorCommand) -> AsyncIO<WorkflowResult<GameSession>>
+      where
+          C: SessionCache,
+          E: EventStore,
+
+  # ---------------------------------------------------------------------------
+  # Descend Floor
+  # ---------------------------------------------------------------------------
+  - name: DescendFloor
+    description: 下の階に降りる
+    command:
+      name: DescendFloorCommand
+      fields:
+        - { name: game_identifier, type: GameIdentifier }
+
+    workflow_steps:
+      - step: 1
+        name: Load Session
+        type: io
+        description: セッションをキャッシュから取得
+        port: SessionCache
+        operation: get
+
+      - step: 2
+        name: Validate At Stairs
+        type: pure
+        description: プレイヤーが下り階段にいるかを検証
+        function: validate_at_down_stairs
+
+      - step: 3
+        name: Calculate Next Floor Level
+        type: pure
+        description: 次のフロアレベルを計算
+        function: calculate_next_floor_level
+
+      - step: 4
+        name: Generate New Floor
+        type: pure
+        description: 新しいフロアを生成（Lazy）
+        function: DungeonGeneratorService::generate
+        lambars_feature: Lazy
+
+      - step: 5
+        name: Update Player Position
+        type: pure
+        description: プレイヤーをスポーンポイントに移動
+        function: set_player_at_spawn_point
+        lambars_feature: Lens
+
+      - step: 6
+        name: Spawn Enemies
+        type: pure
+        description: 敵をスポーン
+        function: spawn_floor_enemies
+
+      - step: 7
+        name: Update Session
+        type: pure
+        description: セッションを更新
+        function: update_session_for_floor_change
+
+      - step: 8
+        name: Generate Events
+        type: pure
+        description: イベントを生成
+        events:
+          - PlayerDescended
+          - FloorGenerated
+
+      - step: 9
+        name: Update Cache
+        type: io
+        description: セッションをキャッシュに保存
+        port: SessionCache
+        operation: set
+
+      - step: 10
+        name: Append Events
+        type: io
+        description: イベントをイベントストアに追加
+        port: EventStore
+        operation: append
+
+    result:
+      success: GameSession
+      errors:
+        - WorkflowError::NotFound
+        - WorkflowError::Domain(FloorError::NoStairsAtPosition)
+
+    type_signature: |
+      fn descend_floor<C, E>(
+          cache: &C,
+          event_store: &E,
+      ) -> impl Fn(DescendFloorCommand) -> AsyncIO<WorkflowResult<GameSession>>
+
+  # ---------------------------------------------------------------------------
+  # Update Visibility
+  # ---------------------------------------------------------------------------
+  - name: UpdateVisibility
+    description: プレイヤーの視界を更新する
+    command:
+      name: UpdateVisibilityCommand
+      fields:
+        - { name: game_identifier, type: GameIdentifier }
+
+    workflow_steps:
+      - step: 1
+        name: Load Session
+        type: io
+        description: セッションをキャッシュから取得
+        port: SessionCache
+        operation: get
+
+      - step: 2
+        name: Get Player Position
+        type: pure
+        description: プレイヤーの位置を取得
+        function: get_player_position
+
+      - step: 3
+        name: Calculate Field of View
+        type: pure
+        description: 視野を計算（Trampoline使用）
+        function: VisibilityService::calculate_fov
+        lambars_feature: Trampoline
+
+      - step: 4
+        name: Update Explored Tiles
+        type: pure
+        description: 探索済みタイルを更新
+        function: update_explored_tiles
+        lambars_feature: PersistentHashSet
+
+      - step: 5
+        name: Update Session Visibility
+        type: pure
+        description: セッションの視界情報を更新
+        function: update_session_visibility
+
+      - step: 6
+        name: Update Cache
+        type: io
+        description: セッションをキャッシュに保存
+        port: SessionCache
+        operation: set
+
+    result:
+      success: GameSession
+      errors:
+        - WorkflowError::NotFound
+
+    type_signature: |
+      fn update_visibility<C>(
+          cache: &C,
+      ) -> impl Fn(UpdateVisibilityCommand) -> AsyncIO<WorkflowResult<GameSession>>
+
+  # ---------------------------------------------------------------------------
+  # Trigger Trap
+  # ---------------------------------------------------------------------------
+  - name: TriggerTrap
+    description: 罠を発動する
+    command:
+      name: TriggerTrapCommand
+      fields:
+        - { name: game_identifier, type: GameIdentifier }
+        - { name: position, type: Position }
+        - { name: target, type: EntityIdentifier }
+
+    workflow_steps:
+      - step: 1
+        name: Load Session
+        type: io
+        description: セッションをキャッシュから取得
+        port: SessionCache
+        operation: get
+
+      - step: 2
+        name: Find Trap
+        type: pure
+        description: 位置にある罠を検索
+        function: find_trap_at_position
+
+      - step: 3
+        name: Calculate Trap Effect
+        type: pure
+        description: 罠の効果を計算
+        function: calculate_trap_effect
+
+      - step: 4
+        name: Apply Trap Effect
+        type: pure
+        description: 罠の効果を適用
+        function: apply_trap_effect
+
+      - step: 5
+        name: Disarm Trap (if one-time)
+        type: pure
+        description: 一度きりの罠を解除
+        function: disarm_trap
+        condition: one_time_trap
+
+      - step: 6
+        name: Generate Events
+        type: pure
+        description: TrapTriggeredイベントを生成
+        events:
+          - TrapTriggered
+          - PlayerDamaged (if player)
+          - EnemyDamaged (if enemy)
+
+      - step: 7
+        name: Update Cache
+        type: io
+        description: セッションをキャッシュに保存
+        port: SessionCache
+        operation: set
+
+      - step: 8
+        name: Append Events
+        type: io
+        description: イベントをイベントストアに追加
+        port: EventStore
+        operation: append
+
+    result:
+      success: GameSession
+      errors:
+        - WorkflowError::NotFound
+
+    type_signature: |
+      fn trigger_trap<C, E>(
+          cache: &C,
+          event_store: &E,
+      ) -> impl Fn(TriggerTrapCommand) -> AsyncIO<WorkflowResult<GameSession>>
+
+# =============================================================================
+# Pure Functions (Domain Logic)
+# =============================================================================
+
+pure_functions:
+  - name: get_floor_configuration
+    description: フロア生成設定を取得
+    signature: "fn get_floor_configuration(floor_level: u32, config: &GameConfig) -> FloorGenerationConfig"
+
+  - name: place_stairs
+    description: 階段を配置
+    signature: "fn place_stairs(floor: Floor, level: u32, max_level: u32) -> Floor"
+    implementation: |
+      let floor_with_up = if level > 1 {
+          floor.with_up_stairs(floor.spawn_point())
+      } else {
+          floor
+      };
+
+      if level < max_level {
+          let down_pos = find_down_stairs_position(&floor_with_up);
+          floor_with_up.with_down_stairs(down_pos)
+      } else {
+          floor_with_up
+      }
+
+  - name: place_items
+    description: アイテムを配置
+    signature: "fn place_items(floor: Floor, config: &FloorGenerationConfig, seed: RandomSeed) -> Floor"
+
+  - name: place_traps
+    description: 罠を配置
+    signature: "fn place_traps(floor: Floor, config: &FloorGenerationConfig, seed: RandomSeed) -> Floor"
+
+  - name: validate_at_down_stairs
+    description: プレイヤーが下り階段にいるかを検証
+    signature: "fn validate_at_down_stairs(floor: &Floor, player_position: Position) -> Result<(), FloorError>"
+
+  - name: calculate_next_floor_level
+    description: 次のフロアレベルを計算
+    signature: "fn calculate_next_floor_level(current_level: u32) -> u32"
+    implementation: "current_level + 1"
+
+  - name: set_player_at_spawn_point
+    description: プレイヤーをスポーンポイントに配置
+    signature: "fn set_player_at_spawn_point(session: GameSession, spawn_point: Position) -> GameSession"
+
+  - name: spawn_floor_enemies
+    description: フロアに敵をスポーン
+    signature: "fn spawn_floor_enemies(floor: &Floor, level: u32, seed: RandomSeed) -> Vec<Enemy>"
+
+  - name: get_player_position
+    description: プレイヤー位置を取得
+    signature: "fn get_player_position(session: &GameSession) -> Position"
+
+  - name: update_explored_tiles
+    description: 探索済みタイルを更新
+    signature: "fn update_explored_tiles(explored: PersistentHashSet<Position>, visible: &[Position]) -> PersistentHashSet<Position>"
+    implementation: |
+      visible.iter().fold(explored, |acc, pos| acc.insert(*pos))
+
+  - name: find_trap_at_position
+    description: 位置にある罠を検索
+    signature: "fn find_trap_at_position(floor: &Floor, position: Position) -> Option<&Trap>"
+
+  - name: calculate_trap_effect
+    description: 罠の効果を計算
+    signature: "fn calculate_trap_effect(trap: &Trap) -> TrapEffect"
+
+  - name: apply_trap_effect
+    description: 罠の効果を適用
+    signature: "fn apply_trap_effect(session: GameSession, target: EntityIdentifier, effect: &TrapEffect) -> GameSession"
+
+  - name: disarm_trap
+    description: 罠を解除
+    signature: "fn disarm_trap(floor: Floor, position: Position) -> Floor"
+
+# =============================================================================
+# Technical Highlights
+# =============================================================================
+
+technical_highlights:
+  - name: GenerateFloor Workflow Pipeline
+    description: pipe! による GenerateFloor ワークフローの全体像
+    code: |
+      fn generate_floor_workflow<C, E>(
+          cache: &C,
+          event_store: &E,
+          config: &WorkflowConfig,
+      ) -> impl Fn(GenerateFloorCommand) -> AsyncIO<WorkflowResult<GameSession>>
+      where
+          C: SessionCache,
+          E: EventStore,
+      {
+          move |cmd| {
+              let game_id = cmd.game_identifier.clone();
+              let floor_level = cmd.floor_level;
+
+              pipe!(
+                  // [IO] セッション取得
+                  cache.get(&game_id),
+                  |io| io.flat_map(|opt| {
+                      opt.ok_or(WorkflowError::not_found("GameSession", &game_id))
+                          .map(AsyncIO::pure)
+                          .unwrap_or_else(AsyncIO::fail)
+                  }),
+                  // [Pure] フロア生成パイプライン（Lazy評価）
+                  |io| io.map(|session| {
+                      pipe!(
+                          session,
+                          |s| {
+                              let floor_config = get_floor_configuration(floor_level, &config.game_config);
+                              (s, floor_config)
+                          },
+                          |(s, floor_config)| {
+                              // Lazy でフロアを遅延生成
+                              let lazy_floor = DungeonGeneratorService::generate(floor_level, s.seed);
+                              let floor = lazy_floor.force();
+                              (s, floor, floor_config)
+                          },
+                          |(s, floor, floor_config)| {
+                              // pipe! で階段・アイテム・罠を順次配置
+                              let with_stairs = place_stairs(floor, floor_level, config.game_config.max_floor_level);
+                              let with_items = place_items(with_stairs, &floor_config, s.seed);
+                              let with_traps = place_traps(with_items, &floor_config, s.seed);
+                              (s, with_traps)
+                          },
+                          |(s, floor)| {
+                              let updated = floor_lens().set(s, floor.clone());
+                              let events = vec![GameEvent::FloorGenerated {
+                                  level: floor_level,
+                                  width: floor.width,
+                                  height: floor.height,
+                              }];
+                              (updated, events)
+                          }
+                      )
+                  }),
+                  // [IO] 永続化
+                  |io| io.flat_map(|(session, events)| {
+                      pipe!(
+                          cache.set(&game_id, &session, config.cache_ttl),
+                          |io| io.flat_map(|_| event_store.append(&game_id, &events)),
+                          |io| io.map(|_| Ok(session))
+                      )
+                  })
+              )
+          }
+      }
+
+  - name: DescendFloor Workflow Pipeline
+    description: pipe! による DescendFloor ワークフローの全体像
+    code: |
+      fn descend_floor_workflow<C, E>(
+          cache: &C,
+          event_store: &E,
+          config: &WorkflowConfig,
+      ) -> impl Fn(DescendFloorCommand) -> AsyncIO<WorkflowResult<GameSession>>
+      {
+          move |cmd| {
+              let game_id = cmd.game_identifier.clone();
+
+              pipe!(
+                  // [IO] セッション取得
+                  cache.get(&game_id),
+                  |io| io.flat_map(|opt| {
+                      opt.ok_or(WorkflowError::not_found("GameSession", &game_id))
+                          .map(AsyncIO::pure)
+                          .unwrap_or_else(AsyncIO::fail)
+                  }),
+                  // [Pure] 階層移動パイプライン
+                  |io| io.map(|session| {
+                      pipe!(
+                          session,
+                          |s| validate_at_down_stairs(&s.current_floor, s.player.position)
+                              .map(|_| s),
+                          |result| result.map(|s| {
+                              let next_level = calculate_next_floor_level(s.current_floor.level);
+                              (s, next_level)
+                          }),
+                          |result| result.map(|(s, next_level)| {
+                              // Lazy で新フロア生成
+                              let new_floor = pipe!(
+                                  DungeonGeneratorService::generate(next_level, s.seed),
+                                  |lazy| lazy.force(),
+                                  |floor| place_stairs(floor, next_level, config.game_config.max_floor_level),
+                                  |floor| place_items(floor, &get_floor_configuration(next_level, &config.game_config), s.seed),
+                                  |floor| place_traps(floor, &get_floor_configuration(next_level, &config.game_config), s.seed)
+                              );
+                              (s, new_floor)
+                          }),
+                          |result| result.map(|(s, new_floor)| {
+                              // プレイヤー位置を更新（Lens）
+                              let spawn = new_floor.spawn_point();
+                              let with_floor = floor_lens().set(s, new_floor);
+                              let with_player = player_position_lens().set(with_floor, spawn);
+                              with_player
+                          }),
+                          |result| result.map(|s| {
+                              // 敵をスポーン
+                              let enemies = spawn_floor_enemies(&s.current_floor, s.current_floor.level, s.seed);
+                              let with_enemies = enemies.into_iter().fold(s, |acc, enemy| {
+                                  entities_lens().modify(acc, |e| e.insert(enemy.identifier.clone(), Entity::Enemy(enemy)))
+                              });
+                              with_enemies
+                          }),
+                          |result| result.map(|s| {
+                              let events = vec![
+                                  GameEvent::PlayerDescended { to_level: s.current_floor.level },
+                                  GameEvent::FloorGenerated {
+                                      level: s.current_floor.level,
+                                      width: s.current_floor.width,
+                                      height: s.current_floor.height,
+                                  },
+                              ];
+                              (s, events)
+                          })
+                      )
+                  }),
+                  // [IO] 永続化
+                  |io| io.flat_map(|result| {
+                      match result {
+                          Ok((session, events)) => pipe!(
+                              cache.set(&game_id, &session, config.cache_ttl),
+                              |io| io.flat_map(|_| event_store.append(&game_id, &events)),
+                              |io| io.map(|_| Ok(session))
+                          ),
+                          Err(e) => AsyncIO::pure(Err(WorkflowError::Domain(e))),
+                      }
+                  })
+              )
+          }
+      }
+
+  - name: UpdateVisibility Workflow Pipeline
+    description: pipe! による UpdateVisibility ワークフローの全体像
+    code: |
+      fn update_visibility_workflow<C>(
+          cache: &C,
+          config: &WorkflowConfig,
+      ) -> impl Fn(UpdateVisibilityCommand) -> AsyncIO<WorkflowResult<GameSession>>
+      where
+          C: SessionCache,
+      {
+          move |cmd| {
+              let game_id = cmd.game_identifier.clone();
+
+              pipe!(
+                  // [IO] セッション取得
+                  cache.get(&game_id),
+                  |io| io.flat_map(|opt| {
+                      opt.ok_or(WorkflowError::not_found("GameSession", &game_id))
+                          .map(AsyncIO::pure)
+                          .unwrap_or_else(AsyncIO::fail)
+                  }),
+                  // [Pure] 視界計算パイプライン（Trampoline + PersistentHashSet）
+                  |io| io.map(|session| {
+                      pipe!(
+                          session,
+                          |s| {
+                              let player_pos = get_player_position(&s);
+                              (s, player_pos)
+                          },
+                          |(s, pos)| {
+                              // Trampoline でスタック安全な視界計算
+                              let visible = VisibilityService::calculate_fov(
+                                  &s.current_floor,
+                                  pos,
+                                  config.game_config.fov_radius,
+                              ).run();
+                              (s, visible)
+                          },
+                          |(s, visible)| {
+                              // PersistentHashSet で探索済みタイルを更新
+                              let new_explored = visible.iter().fold(
+                                  s.visibility.explored.clone(),
+                                  |acc, pos| acc.insert(*pos)
+                              );
+                              (s, visible, new_explored)
+                          },
+                          |(s, visible, explored)| {
+                              let updated = visibility_lens().set(s, FloorVisibility {
+                                  currently_visible: visible,
+                                  explored,
+                              });
+                              updated
+                          }
+                      )
+                  }),
+                  // [IO] キャッシュ更新
+                  |io| io.flat_map(|session| {
+                      cache.set(&game_id, &session, config.cache_ttl)
+                          .map(|_| Ok(session))
+                  })
+              )
+          }
+      }
+
+  - name: TriggerTrap Workflow Pipeline
+    description: pipe! による TriggerTrap ワークフローの全体像
+    code: |
+      fn trigger_trap_workflow<C, E>(
+          cache: &C,
+          event_store: &E,
+          config: &WorkflowConfig,
+      ) -> impl Fn(TriggerTrapCommand) -> AsyncIO<WorkflowResult<GameSession>>
+      {
+          move |cmd| {
+              let game_id = cmd.game_identifier.clone();
+              let position = cmd.position;
+              let target = cmd.target.clone();
+
+              pipe!(
+                  // [IO] セッション取得
+                  cache.get(&game_id),
+                  |io| io.flat_map(|opt| {
+                      opt.ok_or(WorkflowError::not_found("GameSession", &game_id))
+                          .map(AsyncIO::pure)
+                          .unwrap_or_else(AsyncIO::fail)
+                  }),
+                  // [Pure] 罠発動パイプライン
+                  |io| io.map(|session| {
+                      pipe!(
+                          session,
+                          |s| {
+                              find_trap_at_position(&s.current_floor, position)
+                                  .map(|trap| (s, trap.clone()))
+                                  .unwrap_or_else(|| (s, Trap::none()))
+                          },
+                          |(s, trap)| {
+                              if trap.is_none() {
+                                  return (s, vec![]);
+                              }
+                              let effect = calculate_trap_effect(&trap);
+                              (s, trap, effect)
+                          },
+                          |(s, trap, effect)| {
+                              let with_effect = apply_trap_effect(s, target.clone(), &effect);
+                              (with_effect, trap, effect)
+                          },
+                          |(s, trap, effect)| {
+                              // 一度きりの罠なら解除
+                              let updated = if trap.is_one_time {
+                                  floor_lens().modify(s, |f| disarm_trap(f, position))
+                              } else {
+                                  s
+                              };
+
+                              let mut events = vec![GameEvent::TrapTriggered {
+                                  position,
+                                  trap_type: trap.trap_type,
+                              }];
+
+                              // ターゲットに応じたダメージイベント
+                              if target == EntityIdentifier::player() {
+                                  events.push(GameEvent::PlayerDamaged {
+                                      source: EntityIdentifier::trap(position),
+                                      damage: effect.damage,
+                                  });
+                              } else {
+                                  events.push(GameEvent::EnemyDamaged {
+                                      entity: target.clone(),
+                                      damage: effect.damage,
+                                  });
+                              }
+                              (updated, events)
+                          }
+                      )
+                  }),
+                  // [IO] 永続化
+                  |io| io.flat_map(|(session, events)| {
+                      pipe!(
+                          cache.set(&game_id, &session, config.cache_ttl),
+                          |io| io.flat_map(|_| event_store.append(&game_id, &events)),
+                          |io| io.map(|_| Ok(session))
+                      )
+                  })
+              )
+          }
+      }

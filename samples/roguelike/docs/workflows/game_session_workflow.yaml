@@ -1,0 +1,555 @@
+# GameSession Workflow
+# Project: Dungeon of Pure Functions
+# Aggregate: GameSession
+
+metadata:
+  version: "1.0.0"
+  created_at: "2026-01-09"
+  updated_at: "2026-01-09"
+  status: draft
+  aggregate: GameSession
+
+imports:
+  - common.yaml
+
+# =============================================================================
+# Workflow Overview
+# =============================================================================
+
+overview:
+  description: |
+    GameSessionワークフローはゲームセッションのライフサイクル全体を管理する。
+    ゲームの作成、再開、終了、および状態の永続化を担当する。
+
+  responsibilities:
+    - ゲームセッションの作成
+    - ゲームセッションの再開（Event Sourcing による状態復元）
+    - ゲームセッションの終了
+    - スナップショットの作成
+    - セッションキャッシュの管理
+
+# =============================================================================
+# Use Cases
+# =============================================================================
+
+use_cases:
+  # ---------------------------------------------------------------------------
+  # Create Game
+  # ---------------------------------------------------------------------------
+  - name: CreateGame
+    description: 新規ゲームセッションを作成する
+    command:
+      name: CreateGameCommand
+      fields:
+        - { name: player_name, type: PlayerName }
+        - { name: seed, type: "Option<RandomSeed>" }
+
+    workflow_steps:
+      - step: 1
+        name: Generate Seed
+        type: io
+        description: シードが指定されていない場合、乱数シードを生成
+        port: RandomGenerator
+        operation: generate_seed
+
+      - step: 2
+        name: Create Identifiers
+        type: pure
+        description: ゲームとプレイヤーの識別子を生成
+        function: create_identifiers
+
+      - step: 3
+        name: Generate Initial Floor
+        type: pure
+        description: 最初のダンジョンフロアを生成
+        function: DungeonGeneratorService::generate
+
+      - step: 4
+        name: Create Player
+        type: pure
+        description: 初期プレイヤーを作成
+        function: create_initial_player
+
+      - step: 5
+        name: Create GameSession
+        type: pure
+        description: ゲームセッションを作成
+        function: GameSession::new
+
+      - step: 6
+        name: Generate Events
+        type: pure
+        description: GameStarted イベントを生成
+        events:
+          - GameStarted
+
+      - step: 7
+        name: Persist Session
+        type: io
+        description: セッションをリポジトリに保存
+        port: GameSessionRepository
+        operation: save
+
+      - step: 8
+        name: Append Events
+        type: io
+        description: イベントをイベントストアに追加
+        port: EventStore
+        operation: append
+
+      - step: 9
+        name: Cache Session
+        type: io
+        description: セッションをキャッシュに保存
+        port: SessionCache
+        operation: set
+
+    result:
+      success: GameSession
+      errors:
+        - WorkflowError::Repository
+        - WorkflowError::EventStore
+
+    type_signature: |
+      fn create_game<R, E, C, G>(
+          repository: &R,
+          event_store: &E,
+          cache: &C,
+          random: &G,
+      ) -> impl Fn(CreateGameCommand) -> AsyncIO<WorkflowResult<GameSession>>
+      where
+          R: GameSessionRepository,
+          E: EventStore,
+          C: SessionCache,
+          G: RandomGenerator,
+
+  # ---------------------------------------------------------------------------
+  # Resume Game
+  # ---------------------------------------------------------------------------
+  - name: ResumeGame
+    description: 既存のゲームセッションを再開する（Event Sourcingで状態復元）
+    command:
+      name: ResumeGameCommand
+      fields:
+        - { name: game_identifier, type: GameIdentifier }
+
+    workflow_steps:
+      - step: 1
+        name: Check Cache
+        type: io
+        description: キャッシュからセッションを取得
+        port: SessionCache
+        operation: get
+
+      - step: 2
+        name: Load Snapshot (if cache miss)
+        type: io
+        description: キャッシュにない場合、最新スナップショットを取得
+        port: SnapshotStore
+        operation: load_latest_snapshot
+        condition: cache_miss
+
+      - step: 3
+        name: Load Events Since Snapshot
+        type: io
+        description: スナップショット以降のイベントを取得
+        port: EventStore
+        operation: load_events_since
+
+      - step: 4
+        name: Reconstruct State
+        type: pure
+        description: イベントを適用して状態を再構築（fold）
+        function: reconstruct_from_events
+        lambars_feature: Foldable
+
+      - step: 5
+        name: Validate Session Status
+        type: pure
+        description: セッションがアクティブか検証
+        function: validate_session_active
+
+      - step: 6
+        name: Update Cache
+        type: io
+        description: 再構築した状態をキャッシュに保存
+        port: SessionCache
+        operation: set
+
+    result:
+      success: GameSession
+      errors:
+        - WorkflowError::NotFound
+        - WorkflowError::Domain(GameSessionError::SessionAlreadyCompleted)
+
+    type_signature: |
+      fn resume_game<R, E, S, C>(
+          repository: &R,
+          event_store: &E,
+          snapshot_store: &S,
+          cache: &C,
+      ) -> impl Fn(ResumeGameCommand) -> AsyncIO<WorkflowResult<GameSession>>
+      where
+          R: GameSessionRepository,
+          E: EventStore,
+          S: SnapshotStore,
+          C: SessionCache,
+
+  # ---------------------------------------------------------------------------
+  # End Game
+  # ---------------------------------------------------------------------------
+  - name: EndGame
+    description: ゲームセッションを終了する
+    command:
+      name: EndGameCommand
+      fields:
+        - { name: game_identifier, type: GameIdentifier }
+        - { name: outcome, type: GameOutcome }
+
+    workflow_steps:
+      - step: 1
+        name: Load Session
+        type: io
+        description: セッションを取得
+        port: SessionCache
+        operation: get
+
+      - step: 2
+        name: Validate Can End
+        type: pure
+        description: 終了可能か検証
+        function: validate_can_end
+
+      - step: 3
+        name: Update Status
+        type: pure
+        description: ステータスを更新（純粋関数）
+        function: GameSession::end
+
+      - step: 4
+        name: Generate Events
+        type: pure
+        description: GameEnded イベントを生成
+        events:
+          - GameEnded
+
+      - step: 5
+        name: Persist Session
+        type: io
+        description: セッションを保存
+        port: GameSessionRepository
+        operation: save
+
+      - step: 6
+        name: Append Events
+        type: io
+        description: イベントを追加
+        port: EventStore
+        operation: append
+
+      - step: 7
+        name: Create Final Snapshot
+        type: io
+        description: 最終スナップショットを作成
+        port: SnapshotStore
+        operation: save_snapshot
+
+      - step: 8
+        name: Invalidate Cache
+        type: io
+        description: キャッシュを無効化
+        port: SessionCache
+        operation: invalidate
+
+    result:
+      success: GameSession
+      errors:
+        - WorkflowError::NotFound
+        - WorkflowError::Domain(GameSessionError::SessionAlreadyCompleted)
+
+    type_signature: |
+      fn end_game<R, E, S, C>(
+          repository: &R,
+          event_store: &E,
+          snapshot_store: &S,
+          cache: &C,
+      ) -> impl Fn(EndGameCommand) -> AsyncIO<WorkflowResult<GameSession>>
+
+  # ---------------------------------------------------------------------------
+  # Create Snapshot
+  # ---------------------------------------------------------------------------
+  - name: CreateSnapshot
+    description: スナップショットを作成する（定期実行）
+    command:
+      name: CreateSnapshotCommand
+      fields:
+        - { name: game_identifier, type: GameIdentifier }
+
+    workflow_steps:
+      - step: 1
+        name: Load Session
+        type: io
+        description: セッションを取得
+        port: SessionCache
+        operation: get
+
+      - step: 2
+        name: Check Snapshot Needed
+        type: pure
+        description: スナップショットが必要か判定
+        function: should_create_snapshot
+        config_ref: snapshot_interval
+
+      - step: 3
+        name: Save Snapshot
+        type: io
+        description: スナップショットを保存
+        port: SnapshotStore
+        operation: save_snapshot
+        condition: snapshot_needed
+
+    result:
+      success: "()"
+      errors:
+        - WorkflowError::NotFound
+        - WorkflowError::Repository
+
+# =============================================================================
+# Pure Functions (Domain Logic)
+# =============================================================================
+
+pure_functions:
+  - name: create_identifiers
+    description: ゲームとプレイヤーの識別子を生成
+    signature: "fn create_identifiers(seed: RandomSeed) -> (GameIdentifier, PlayerIdentifier)"
+
+  - name: create_initial_player
+    description: 初期プレイヤーを作成
+    signature: "fn create_initial_player(id: PlayerIdentifier, name: PlayerName, position: Position) -> Player"
+
+  - name: reconstruct_from_events
+    description: イベントから状態を再構築
+    signature: "fn reconstruct_from_events(initial: GameSession, events: &[GameEvent]) -> GameSession"
+    implementation: |
+      events.iter().fold(initial, |state, event| state.apply_event(event))
+
+  - name: validate_session_active
+    description: セッションがアクティブか検証
+    signature: "fn validate_session_active(session: &GameSession) -> Result<(), GameSessionError>"
+
+  - name: validate_can_end
+    description: 終了可能か検証
+    signature: "fn validate_can_end(session: &GameSession) -> Result<(), GameSessionError>"
+
+  - name: should_create_snapshot
+    description: スナップショットが必要か判定
+    signature: "fn should_create_snapshot(session: &GameSession, interval: u64) -> bool"
+
+# =============================================================================
+# Event Sourcing Pattern
+# =============================================================================
+
+event_sourcing:
+  description: |
+    GameSessionはEvent Sourcingパターンを採用。
+    全ての状態変化はイベントとして記録され、
+    イベントを再生することで任意の時点の状態を復元できる。
+
+  state_reconstruction:
+    description: |
+      1. 最新スナップショットを取得
+      2. スナップショット以降のイベントを取得
+      3. スナップショットにイベントをfoldして現在状態を再構築
+
+    code: |
+      fn reconstruct_session(
+          snapshot: Option<(GameSession, u64)>,
+          events: Vec<GameEvent>,
+      ) -> GameSession {
+          match snapshot {
+              Some((base_state, _)) => {
+                  events.iter().fold(base_state, |state, event| {
+                      state.apply_event(event)
+                  })
+              }
+              None => {
+                  // スナップショットがない場合は全イベントから再構築
+                  events.iter().fold(GameSession::empty(), |state, event| {
+                      state.apply_event(event)
+                  })
+              }
+          }
+      }
+
+# =============================================================================
+# Technical Highlights
+# =============================================================================
+
+technical_highlights:
+  - name: CreateGame Workflow Pipeline
+    description: pipe! による CreateGame ワークフローの全体像
+    code: |
+      fn create_game_workflow<R, E, C, G>(
+          repository: &R,
+          event_store: &E,
+          cache: &C,
+          random: &G,
+          config: &WorkflowConfig,
+      ) -> impl Fn(CreateGameCommand) -> AsyncIO<WorkflowResult<GameSession>>
+      where
+          R: GameSessionRepository,
+          E: EventStore,
+          C: SessionCache,
+          G: RandomGenerator,
+      {
+          move |cmd| {
+              // [IO] シード生成
+              let seed_io = cmd.seed
+                  .map(AsyncIO::pure)
+                  .unwrap_or_else(|| random.generate_seed());
+
+              seed_io.flat_map(|seed| {
+                  // [Pure] ドメインロジックをpipe!で合成
+                  let (session, events) = pipe!(
+                      seed,
+                      |s| create_identifiers(s),
+                      |(game_id, player_id)| {
+                          let floor = DungeonGeneratorService::generate(1, seed).force();
+                          (game_id, player_id, floor)
+                      },
+                      |(game_id, player_id, floor)| {
+                          let player = create_initial_player(player_id, cmd.player_name.clone(), floor.spawn_point());
+                          (game_id, player, floor)
+                      },
+                      |(game_id, player, floor)| {
+                          let session = GameSession::new(game_id.clone(), player, floor, seed);
+                          let events = vec![GameEvent::GameStarted { game_id, seed }];
+                          (session, events)
+                      }
+                  );
+
+                  // [IO] 永続化をpipe!で合成
+                  pipe!(
+                      AsyncIO::pure((session.clone(), events.clone())),
+                      |io| io.flat_map(|(s, _)| repository.save(&s).map(move |_| s)),
+                      |io| io.flat_map(|s| {
+                          event_store.append(&s.identifier, &events).map(move |_| s)
+                      }),
+                      |io| io.flat_map(|s| {
+                          cache.set(&s.identifier, &s, config.cache_ttl).map(move |_| s)
+                      })
+                  )
+              })
+          }
+      }
+
+  - name: ResumeGame Workflow Pipeline
+    description: pipe! による ResumeGame ワークフローの全体像
+    code: |
+      fn resume_game_workflow<E, S, C>(
+          event_store: &E,
+          snapshot_store: &S,
+          cache: &C,
+      ) -> impl Fn(ResumeGameCommand) -> AsyncIO<WorkflowResult<GameSession>>
+      where
+          E: EventStore,
+          S: SnapshotStore,
+          C: SessionCache,
+      {
+          move |cmd| {
+              let game_id = cmd.game_identifier.clone();
+
+              pipe!(
+                  // [IO] キャッシュ確認
+                  cache.get(&game_id),
+                  |cache_io| cache_io.flat_map(|cached| {
+                      match cached {
+                          Some(session) => AsyncIO::pure(Ok(session)),
+                          None => {
+                              // [IO] スナップショット + イベント取得
+                              pipe!(
+                                  snapshot_store.load_latest_snapshot(&game_id),
+                                  |snap_io| snap_io.flat_map(|snapshot| {
+                                      let since = snapshot.as_ref().map(|(_, seq)| *seq).unwrap_or(0);
+                                      event_store.load_events_since(&game_id, since)
+                                          .map(move |events| (snapshot, events))
+                                  }),
+                                  // [Pure] 状態再構築
+                                  |io| io.map(|(snapshot, events)| {
+                                      pipe!(
+                                          snapshot,
+                                          |snap| snap.map(|(s, _)| s).unwrap_or_else(GameSession::empty),
+                                          |initial| reconstruct_from_events(initial, &events),
+                                          |session| validate_session_active(&session).map(|_| session)
+                                      )
+                                  })
+                              )
+                          }
+                      }
+                  }),
+                  // [IO] キャッシュ更新
+                  |io| io.flat_map(|result| {
+                      match result {
+                          Ok(session) => cache.set(&game_id, &session, config.cache_ttl)
+                              .map(move |_| Ok(session)),
+                          Err(e) => AsyncIO::pure(Err(e)),
+                      }
+                  })
+              )
+          }
+      }
+
+  - name: EndGame Workflow Pipeline
+    description: pipe! による EndGame ワークフローの全体像
+    code: |
+      fn end_game_workflow<R, E, S, C>(
+          repository: &R,
+          event_store: &E,
+          snapshot_store: &S,
+          cache: &C,
+      ) -> impl Fn(EndGameCommand) -> AsyncIO<WorkflowResult<GameSession>>
+      {
+          move |cmd| {
+              let game_id = cmd.game_identifier.clone();
+              let outcome = cmd.outcome.clone();
+
+              pipe!(
+                  // [IO] セッション取得
+                  cache.get(&game_id),
+                  |io| io.flat_map(|opt| {
+                      opt.ok_or(WorkflowError::NotFound {
+                          entity_type: "GameSession".into(),
+                          identifier: game_id.to_string(),
+                      }).map(AsyncIO::pure).unwrap_or_else(AsyncIO::fail)
+                  }),
+                  // [Pure] ドメインロジック
+                  |io| io.map(|session| {
+                      pipe!(
+                          session,
+                          |s| validate_can_end(&s).map(|_| s),
+                          |result| result.map(|s| s.end(outcome.clone())),
+                          |result| result.map(|s| {
+                              let events = vec![GameEvent::GameEnded {
+                                  game_id: s.identifier.clone(),
+                                  outcome: outcome.clone(),
+                              }];
+                              (s, events)
+                          })
+                      )
+                  }),
+                  // [IO] 永続化
+                  |io| io.flat_map(|result| {
+                      match result {
+                          Ok((session, events)) => pipe!(
+                              repository.save(&session),
+                              |io| io.flat_map(|_| event_store.append(&game_id, &events)),
+                              |io| io.flat_map(|_| snapshot_store.save_snapshot(&game_id, &session, session.event_sequence())),
+                              |io| io.flat_map(|_| cache.invalidate(&game_id)),
+                              |io| io.map(|_| Ok(session))
+                          ),
+                          Err(e) => AsyncIO::pure(Err(WorkflowError::Domain(e))),
+                      }
+                  })
+              )
+          }
+      }

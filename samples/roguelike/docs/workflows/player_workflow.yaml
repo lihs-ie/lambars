@@ -1,0 +1,884 @@
+# Player Workflow
+# Project: Dungeon of Pure Functions
+# Aggregate: Player
+
+metadata:
+  version: "1.0.0"
+  created_at: "2026-01-09"
+  updated_at: "2026-01-09"
+  status: draft
+  aggregate: Player
+
+imports:
+  - common.yaml
+
+# =============================================================================
+# Workflow Overview
+# =============================================================================
+
+overview:
+  description: |
+    Playerワークフローはプレイヤーキャラクターの状態変化を管理する。
+    移動、戦闘、アイテム操作、レベルアップなど、プレイヤーに関する
+    全てのアクションを純粋関数で処理し、IOは端に追いやる。
+
+  responsibilities:
+    - プレイヤーの移動処理
+    - プレイヤーの戦闘（攻撃・被ダメージ）
+    - アイテムの取得・使用・装備
+    - レベルアップ処理
+    - 状態異常の適用・解除
+
+# =============================================================================
+# Use Cases
+# =============================================================================
+
+use_cases:
+  # ---------------------------------------------------------------------------
+  # Move Player
+  # ---------------------------------------------------------------------------
+  - name: MovePlayer
+    description: プレイヤーを指定方向に移動する
+    command:
+      name: MovePlayerCommand
+      fields:
+        - { name: game_identifier, type: GameIdentifier }
+        - { name: direction, type: Direction }
+
+    workflow_steps:
+      - step: 1
+        name: Load Session
+        type: io
+        description: セッションをキャッシュから取得
+        port: SessionCache
+        operation: get
+
+      - step: 2
+        name: Calculate New Position
+        type: pure
+        description: 新しい位置を計算
+        function: calculate_new_position
+
+      - step: 3
+        name: Validate Movement
+        type: pure
+        description: 移動先が有効かを検証（壁、敵の存在など）
+        function: validate_movement
+
+      - step: 4
+        name: Update Player Position
+        type: pure
+        description: プレイヤー位置を更新（Lensを使用）
+        function: update_player_position
+        lambars_feature: Lens
+
+      - step: 5
+        name: Update Visibility
+        type: pure
+        description: 視界を再計算
+        function: VisibilityService::calculate_fov
+        lambars_feature: Trampoline
+
+      - step: 6
+        name: Generate Events
+        type: pure
+        description: PlayerMovedイベントを生成
+        events:
+          - PlayerMoved
+
+      - step: 7
+        name: Update Cache
+        type: io
+        description: セッションをキャッシュに保存
+        port: SessionCache
+        operation: set
+
+      - step: 8
+        name: Append Events
+        type: io
+        description: イベントをイベントストアに追加
+        port: EventStore
+        operation: append
+
+    result:
+      success: GameSession
+      errors:
+        - WorkflowError::NotFound
+        - WorkflowError::Domain(FloorError::PositionOutOfBounds)
+        - WorkflowError::Domain(FloorError::TileNotWalkable)
+
+    type_signature: |
+      fn move_player<C, E>(
+          cache: &C,
+          event_store: &E,
+      ) -> impl Fn(MovePlayerCommand) -> AsyncIO<WorkflowResult<GameSession>>
+      where
+          C: SessionCache,
+          E: EventStore,
+
+  # ---------------------------------------------------------------------------
+  # Attack Enemy
+  # ---------------------------------------------------------------------------
+  - name: AttackEnemy
+    description: プレイヤーが敵を攻撃する
+    command:
+      name: AttackEnemyCommand
+      fields:
+        - { name: game_identifier, type: GameIdentifier }
+        - { name: target, type: EntityIdentifier }
+
+    workflow_steps:
+      - step: 1
+        name: Load Session
+        type: io
+        description: セッションをキャッシュから取得
+        port: SessionCache
+        operation: get
+
+      - step: 2
+        name: Validate Target
+        type: pure
+        description: ターゲットが攻撃可能かを検証
+        function: validate_attack_target
+
+      - step: 3
+        name: Calculate Damage
+        type: pure
+        description: ダメージを計算（Semigroupでモディファイア合成）
+        function: DamageCalculator::calculate
+        lambars_feature: Semigroup
+
+      - step: 4
+        name: Apply Damage
+        type: pure
+        description: 敵にダメージを適用
+        function: apply_damage_to_enemy
+
+      - step: 5
+        name: Check Enemy Death
+        type: pure
+        description: 敵が死亡したかを確認
+        function: check_enemy_death
+
+      - step: 6
+        name: Award Experience (if killed)
+        type: pure
+        description: 経験値を付与（敵を倒した場合）
+        function: award_experience
+        condition: enemy_killed
+
+      - step: 7
+        name: Check Level Up
+        type: pure
+        description: レベルアップを確認
+        function: check_level_up
+
+      - step: 8
+        name: Generate Events
+        type: pure
+        description: イベントを生成
+        events:
+          - PlayerAttacked
+          - EnemyDamaged
+          - EnemyDied (if killed)
+          - ExperienceGained
+          - PlayerLeveledUp (if level up)
+
+      - step: 9
+        name: Update Cache
+        type: io
+        description: セッションをキャッシュに保存
+        port: SessionCache
+        operation: set
+
+      - step: 10
+        name: Append Events
+        type: io
+        description: イベントをイベントストアに追加
+        port: EventStore
+        operation: append
+
+    result:
+      success: GameSession
+      errors:
+        - WorkflowError::NotFound
+        - WorkflowError::Domain(CombatError::TargetNotInRange)
+        - WorkflowError::Domain(CombatError::TargetNotAttackable)
+
+    type_signature: |
+      fn attack_enemy<C, E>(
+          cache: &C,
+          event_store: &E,
+      ) -> impl Fn(AttackEnemyCommand) -> AsyncIO<WorkflowResult<GameSession>>
+
+  # ---------------------------------------------------------------------------
+  # Use Item
+  # ---------------------------------------------------------------------------
+  - name: UseItem
+    description: アイテムを使用する
+    command:
+      name: UseItemCommand
+      fields:
+        - { name: game_identifier, type: GameIdentifier }
+        - { name: item_identifier, type: ItemIdentifier }
+
+    workflow_steps:
+      - step: 1
+        name: Load Session
+        type: io
+        description: セッションをキャッシュから取得
+        port: SessionCache
+        operation: get
+
+      - step: 2
+        name: Find Item in Inventory
+        type: pure
+        description: インベントリからアイテムを検索
+        function: find_item_in_inventory
+
+      - step: 3
+        name: Validate Item Usage
+        type: pure
+        description: アイテムが使用可能かを検証
+        function: validate_item_usage
+
+      - step: 4
+        name: Apply Item Effect
+        type: pure
+        description: アイテム効果を適用
+        function: apply_item_effect
+
+      - step: 5
+        name: Remove Item from Inventory
+        type: pure
+        description: 消耗品の場合、インベントリから削除
+        function: remove_item_from_inventory
+        lambars_feature: Lens
+        condition: consumable
+
+      - step: 6
+        name: Generate Events
+        type: pure
+        description: ItemUsedイベントを生成
+        events:
+          - ItemUsed
+
+      - step: 7
+        name: Update Cache
+        type: io
+        description: セッションをキャッシュに保存
+        port: SessionCache
+        operation: set
+
+      - step: 8
+        name: Append Events
+        type: io
+        description: イベントをイベントストアに追加
+        port: EventStore
+        operation: append
+
+    result:
+      success: GameSession
+      errors:
+        - WorkflowError::NotFound
+        - WorkflowError::Domain(ItemError::ItemNotFound)
+        - WorkflowError::Domain(ItemError::ItemNotUsable)
+
+    type_signature: |
+      fn use_item<C, E>(
+          cache: &C,
+          event_store: &E,
+      ) -> impl Fn(UseItemCommand) -> AsyncIO<WorkflowResult<GameSession>>
+
+  # ---------------------------------------------------------------------------
+  # Pick Up Item
+  # ---------------------------------------------------------------------------
+  - name: PickUpItem
+    description: 地面からアイテムを拾う
+    command:
+      name: PickUpItemCommand
+      fields:
+        - { name: game_identifier, type: GameIdentifier }
+        - { name: item_identifier, type: ItemIdentifier }
+
+    workflow_steps:
+      - step: 1
+        name: Load Session
+        type: io
+        description: セッションをキャッシュから取得
+        port: SessionCache
+        operation: get
+
+      - step: 2
+        name: Find Dropped Item
+        type: pure
+        description: 地面のアイテムを検索
+        function: find_dropped_item_at_position
+
+      - step: 3
+        name: Validate Inventory Space
+        type: pure
+        description: インベントリに空きがあるかを検証
+        function: validate_inventory_space
+
+      - step: 4
+        name: Add Item to Inventory
+        type: pure
+        description: アイテムをインベントリに追加
+        function: add_item_to_inventory
+        lambars_feature: Lens
+
+      - step: 5
+        name: Remove Item from Floor
+        type: pure
+        description: 地面からアイテムを削除
+        function: remove_item_from_floor
+
+      - step: 6
+        name: Generate Events
+        type: pure
+        description: ItemPickedUpイベントを生成
+        events:
+          - ItemPickedUp
+
+      - step: 7
+        name: Update Cache
+        type: io
+        description: セッションをキャッシュに保存
+        port: SessionCache
+        operation: set
+
+      - step: 8
+        name: Append Events
+        type: io
+        description: イベントをイベントストアに追加
+        port: EventStore
+        operation: append
+
+    result:
+      success: GameSession
+      errors:
+        - WorkflowError::NotFound
+        - WorkflowError::Domain(ItemError::ItemNotFound)
+        - WorkflowError::Domain(PlayerError::InventoryFull)
+
+    type_signature: |
+      fn pick_up_item<C, E>(
+          cache: &C,
+          event_store: &E,
+      ) -> impl Fn(PickUpItemCommand) -> AsyncIO<WorkflowResult<GameSession>>
+
+  # ---------------------------------------------------------------------------
+  # Equip Item
+  # ---------------------------------------------------------------------------
+  - name: EquipItem
+    description: アイテムを装備する
+    command:
+      name: EquipItemCommand
+      fields:
+        - { name: game_identifier, type: GameIdentifier }
+        - { name: item_identifier, type: ItemIdentifier }
+
+    workflow_steps:
+      - step: 1
+        name: Load Session
+        type: io
+        description: セッションをキャッシュから取得
+        port: SessionCache
+        operation: get
+
+      - step: 2
+        name: Find Item in Inventory
+        type: pure
+        description: インベントリからアイテムを検索
+        function: find_item_in_inventory
+
+      - step: 3
+        name: Validate Equippable
+        type: pure
+        description: アイテムが装備可能かを検証
+        function: validate_item_equippable
+
+      - step: 4
+        name: Determine Equipment Slot
+        type: pure
+        description: 装備スロットを決定
+        function: determine_equipment_slot
+
+      - step: 5
+        name: Unequip Current (if occupied)
+        type: pure
+        description: 現在の装備を外す
+        function: unequip_current_item
+        condition: slot_occupied
+
+      - step: 6
+        name: Equip Item
+        type: pure
+        description: アイテムを装備
+        function: equip_item
+        lambars_feature: Lens
+
+      - step: 7
+        name: Recalculate Stats
+        type: pure
+        description: 戦闘能力値を再計算
+        function: recalculate_combat_stats
+
+      - step: 8
+        name: Generate Events
+        type: pure
+        description: ItemEquippedイベントを生成
+        events:
+          - ItemUnequipped (if unequipped)
+          - ItemEquipped
+
+      - step: 9
+        name: Update Cache
+        type: io
+        description: セッションをキャッシュに保存
+        port: SessionCache
+        operation: set
+
+      - step: 10
+        name: Append Events
+        type: io
+        description: イベントをイベントストアに追加
+        port: EventStore
+        operation: append
+
+    result:
+      success: GameSession
+      errors:
+        - WorkflowError::NotFound
+        - WorkflowError::Domain(ItemError::ItemNotFound)
+        - WorkflowError::Domain(ItemError::ItemNotEquippable)
+
+    type_signature: |
+      fn equip_item<C, E>(
+          cache: &C,
+          event_store: &E,
+      ) -> impl Fn(EquipItemCommand) -> AsyncIO<WorkflowResult<GameSession>>
+
+  # ---------------------------------------------------------------------------
+  # Take Damage
+  # ---------------------------------------------------------------------------
+  - name: TakeDamage
+    description: プレイヤーがダメージを受ける
+    command:
+      name: TakeDamageCommand
+      fields:
+        - { name: game_identifier, type: GameIdentifier }
+        - { name: source, type: EntityIdentifier }
+        - { name: base_damage, type: Damage }
+
+    workflow_steps:
+      - step: 1
+        name: Load Session
+        type: io
+        description: セッションをキャッシュから取得
+        port: SessionCache
+        operation: get
+
+      - step: 2
+        name: Calculate Final Damage
+        type: pure
+        description: 防御力・装備・状態異常を考慮して最終ダメージを計算
+        function: calculate_damage_reduction
+        lambars_feature: Semigroup
+
+      - step: 3
+        name: Apply Damage
+        type: pure
+        description: ダメージを適用
+        function: apply_damage_to_player
+        lambars_feature: Lens
+
+      - step: 4
+        name: Check Player Death
+        type: pure
+        description: プレイヤーが死亡したかを確認
+        function: check_player_death
+
+      - step: 5
+        name: Generate Events
+        type: pure
+        description: イベントを生成
+        events:
+          - PlayerDamaged
+          - PlayerDied (if dead)
+
+      - step: 6
+        name: Update Cache
+        type: io
+        description: セッションをキャッシュに保存
+        port: SessionCache
+        operation: set
+
+      - step: 7
+        name: Append Events
+        type: io
+        description: イベントをイベントストアに追加
+        port: EventStore
+        operation: append
+
+    result:
+      success: GameSession
+      errors:
+        - WorkflowError::NotFound
+
+    type_signature: |
+      fn take_damage<C, E>(
+          cache: &C,
+          event_store: &E,
+      ) -> impl Fn(TakeDamageCommand) -> AsyncIO<WorkflowResult<GameSession>>
+
+# =============================================================================
+# Pure Functions (Domain Logic)
+# =============================================================================
+
+pure_functions:
+  - name: calculate_new_position
+    description: 方向から新しい位置を計算
+    signature: "fn calculate_new_position(current: Position, direction: Direction) -> Position"
+
+  - name: validate_movement
+    description: 移動が有効かを検証
+    signature: "fn validate_movement(floor: &Floor, from: Position, to: Position) -> Result<(), FloorError>"
+
+  - name: update_player_position
+    description: プレイヤー位置を更新
+    signature: "fn update_player_position(session: GameSession, new_position: Position) -> GameSession"
+    implementation: |
+      player_position_lens().set(session, new_position)
+
+  - name: validate_attack_target
+    description: 攻撃対象が有効かを検証
+    signature: "fn validate_attack_target(session: &GameSession, target: EntityIdentifier) -> Result<&Enemy, CombatError>"
+
+  - name: apply_damage_to_enemy
+    description: 敵にダメージを適用
+    signature: "fn apply_damage_to_enemy(session: GameSession, target: EntityIdentifier, damage: Damage) -> GameSession"
+
+  - name: check_enemy_death
+    description: 敵が死亡したかを確認
+    signature: "fn check_enemy_death(enemy: &Enemy) -> bool"
+    implementation: "enemy.stats.health.value() == 0"
+
+  - name: award_experience
+    description: 経験値を付与
+    signature: "fn award_experience(session: GameSession, experience: Experience) -> GameSession"
+
+  - name: check_level_up
+    description: レベルアップを確認
+    signature: "fn check_level_up(player: &Player) -> Option<Level>"
+
+  - name: find_item_in_inventory
+    description: インベントリからアイテムを検索
+    signature: "fn find_item_in_inventory(inventory: &Inventory, item_id: ItemIdentifier) -> Option<&ItemStack>"
+
+  - name: validate_item_usage
+    description: アイテムが使用可能かを検証
+    signature: "fn validate_item_usage(item: &Item) -> Result<(), ItemError>"
+
+  - name: apply_item_effect
+    description: アイテム効果を適用
+    signature: "fn apply_item_effect(session: GameSession, effect: &ItemEffect) -> GameSession"
+
+  - name: remove_item_from_inventory
+    description: インベントリからアイテムを削除
+    signature: "fn remove_item_from_inventory(session: GameSession, item_id: ItemIdentifier) -> GameSession"
+
+  - name: validate_inventory_space
+    description: インベントリに空きがあるかを検証
+    signature: "fn validate_inventory_space(inventory: &Inventory) -> Result<(), PlayerError>"
+
+  - name: add_item_to_inventory
+    description: アイテムをインベントリに追加
+    signature: "fn add_item_to_inventory(session: GameSession, item: Item) -> GameSession"
+
+  - name: calculate_damage_reduction
+    description: ダメージ軽減を計算
+    signature: "fn calculate_damage_reduction(player: &Player, base_damage: Damage) -> Damage"
+
+  - name: apply_damage_to_player
+    description: プレイヤーにダメージを適用
+    signature: "fn apply_damage_to_player(session: GameSession, damage: Damage) -> GameSession"
+
+  - name: check_player_death
+    description: プレイヤーが死亡したかを確認
+    signature: "fn check_player_death(player: &Player) -> bool"
+    implementation: "player.stats.health.value() == 0"
+
+# =============================================================================
+# Technical Highlights
+# =============================================================================
+
+technical_highlights:
+  - name: MovePlayer Workflow Pipeline
+    description: pipe! による MovePlayer ワークフローの全体像
+    code: |
+      fn move_player_workflow<C, E>(
+          cache: &C,
+          event_store: &E,
+          config: &WorkflowConfig,
+      ) -> impl Fn(MovePlayerCommand) -> AsyncIO<WorkflowResult<GameSession>>
+      where
+          C: SessionCache,
+          E: EventStore,
+      {
+          move |cmd| {
+              let game_id = cmd.game_identifier.clone();
+              let direction = cmd.direction;
+
+              pipe!(
+                  // [IO] セッション取得
+                  cache.get(&game_id),
+                  |io| io.flat_map(|opt| {
+                      opt.ok_or(WorkflowError::not_found("GameSession", &game_id))
+                          .map(AsyncIO::pure)
+                          .unwrap_or_else(AsyncIO::fail)
+                  }),
+                  // [Pure] ドメインロジックをpipe!で合成
+                  |io| io.map(|session| {
+                      pipe!(
+                          session,
+                          |s| {
+                              let new_pos = calculate_new_position(s.player.position, direction);
+                              (s, new_pos)
+                          },
+                          |(s, new_pos)| {
+                              validate_movement(&s.current_floor, s.player.position, new_pos)
+                                  .map(|_| (s, new_pos))
+                          },
+                          |result| result.map(|(s, new_pos)| {
+                              let from = s.player.position;
+                              let updated = update_player_position(s, new_pos);
+                              let with_fov = VisibilityService::calculate_fov(&updated.current_floor, new_pos, config.game_config.fov_radius)
+                                  .run()
+                                  .pipe(|visible| update_session_visibility(updated, visible));
+                              let events = vec![GameEvent::PlayerMoved { from, to: new_pos }];
+                              (with_fov, events)
+                          })
+                      )
+                  }),
+                  // [IO] 永続化
+                  |io| io.flat_map(|result| {
+                      match result {
+                          Ok((session, events)) => pipe!(
+                              cache.set(&game_id, &session, config.cache_ttl),
+                              |io| io.flat_map(|_| event_store.append(&game_id, &events)),
+                              |io| io.map(|_| Ok(session))
+                          ),
+                          Err(e) => AsyncIO::pure(Err(WorkflowError::Domain(e))),
+                      }
+                  })
+              )
+          }
+      }
+
+  - name: AttackEnemy Workflow Pipeline
+    description: pipe! による AttackEnemy ワークフローの全体像
+    code: |
+      fn attack_enemy_workflow<C, E>(
+          cache: &C,
+          event_store: &E,
+          config: &WorkflowConfig,
+      ) -> impl Fn(AttackEnemyCommand) -> AsyncIO<WorkflowResult<GameSession>>
+      {
+          move |cmd| {
+              let game_id = cmd.game_identifier.clone();
+              let target_id = cmd.target.clone();
+
+              pipe!(
+                  // [IO] セッション取得
+                  cache.get(&game_id),
+                  |io| io.flat_map(|opt| {
+                      opt.ok_or(WorkflowError::not_found("GameSession", &game_id))
+                          .map(AsyncIO::pure)
+                          .unwrap_or_else(AsyncIO::fail)
+                  }),
+                  // [Pure] 攻撃処理パイプライン
+                  |io| io.map(|session| {
+                      pipe!(
+                          session,
+                          |s| validate_attack_target(&s, target_id.clone()).map(|enemy| (s, enemy.clone())),
+                          |result| result.map(|(s, enemy)| {
+                              let modifiers = collect_damage_modifiers(&s.player);
+                              let damage = DamageCalculator::calculate(&s.player.stats, &enemy.stats, &modifiers);
+                              (s, enemy, damage)
+                          }),
+                          |result| result.map(|(s, enemy, damage)| {
+                              let updated = apply_damage_to_enemy(s, target_id.clone(), damage);
+                              (updated, enemy, damage)
+                          }),
+                          |result| result.map(|(s, enemy, damage)| {
+                              let mut events = vec![
+                                  GameEvent::PlayerAttacked { target: target_id.clone(), damage },
+                                  GameEvent::EnemyDamaged { entity: target_id.clone(), damage },
+                              ];
+
+                              let (final_session, extra_events) = if check_enemy_death(&get_enemy(&s, &target_id)) {
+                                  let exp = enemy.experience_value;
+                                  let with_exp = award_experience(s, exp);
+                                  let mut extra = vec![
+                                      GameEvent::EnemyDied { entity: target_id.clone() },
+                                      GameEvent::ExperienceGained { amount: exp, total: with_exp.player.experience },
+                                  ];
+
+                                  if let Some(new_level) = check_level_up(&with_exp.player) {
+                                      extra.push(GameEvent::PlayerLeveledUp { new_level });
+                                  }
+                                  (with_exp, extra)
+                              } else {
+                                  (s, vec![])
+                              };
+
+                              events.extend(extra_events);
+                              (final_session, events)
+                          })
+                      )
+                  }),
+                  // [IO] 永続化
+                  |io| io.flat_map(|result| {
+                      match result {
+                          Ok((session, events)) => pipe!(
+                              cache.set(&game_id, &session, config.cache_ttl),
+                              |io| io.flat_map(|_| event_store.append(&game_id, &events)),
+                              |io| io.map(|_| Ok(session))
+                          ),
+                          Err(e) => AsyncIO::pure(Err(WorkflowError::Domain(e))),
+                      }
+                  })
+              )
+          }
+      }
+
+  - name: UseItem Workflow Pipeline
+    description: pipe! による UseItem ワークフローの全体像
+    code: |
+      fn use_item_workflow<C, E>(
+          cache: &C,
+          event_store: &E,
+          config: &WorkflowConfig,
+      ) -> impl Fn(UseItemCommand) -> AsyncIO<WorkflowResult<GameSession>>
+      {
+          move |cmd| {
+              let game_id = cmd.game_identifier.clone();
+              let item_id = cmd.item_identifier.clone();
+
+              pipe!(
+                  // [IO] セッション取得
+                  cache.get(&game_id),
+                  |io| io.flat_map(|opt| {
+                      opt.ok_or(WorkflowError::not_found("GameSession", &game_id))
+                          .map(AsyncIO::pure)
+                          .unwrap_or_else(AsyncIO::fail)
+                  }),
+                  // [Pure] アイテム使用パイプライン
+                  |io| io.map(|session| {
+                      pipe!(
+                          session,
+                          |s| find_item_in_inventory(&s.player.inventory, item_id.clone())
+                              .ok_or(ItemError::ItemNotFound { item_identifier: item_id.to_string() })
+                              .map(|stack| (s, stack.item.clone())),
+                          |result| result.and_then(|(s, item)| {
+                              validate_item_usage(&item).map(|_| (s, item))
+                          }),
+                          |result| result.map(|(s, item)| {
+                              let effect = item.effect();
+                              let with_effect = apply_item_effect(s, &effect);
+                              let updated = if item.is_consumable() {
+                                  remove_item_from_inventory(with_effect, item_id.clone())
+                              } else {
+                                  with_effect
+                              };
+                              let events = vec![GameEvent::ItemUsed { item: item_id.clone(), effect }];
+                              (updated, events)
+                          })
+                      )
+                  }),
+                  // [IO] 永続化
+                  |io| io.flat_map(|result| {
+                      match result {
+                          Ok((session, events)) => pipe!(
+                              cache.set(&game_id, &session, config.cache_ttl),
+                              |io| io.flat_map(|_| event_store.append(&game_id, &events)),
+                              |io| io.map(|_| Ok(session))
+                          ),
+                          Err(e) => AsyncIO::pure(Err(WorkflowError::Domain(e))),
+                      }
+                  })
+              )
+          }
+      }
+
+  - name: TakeDamage Workflow Pipeline
+    description: pipe! による TakeDamage ワークフローの全体像
+    code: |
+      fn take_damage_workflow<C, E>(
+          cache: &C,
+          event_store: &E,
+          config: &WorkflowConfig,
+      ) -> impl Fn(TakeDamageCommand) -> AsyncIO<WorkflowResult<GameSession>>
+      {
+          move |cmd| {
+              let game_id = cmd.game_identifier.clone();
+              let source = cmd.source.clone();
+              let base_damage = cmd.base_damage;
+
+              pipe!(
+                  // [IO] セッション取得
+                  cache.get(&game_id),
+                  |io| io.flat_map(|opt| {
+                      opt.ok_or(WorkflowError::not_found("GameSession", &game_id))
+                          .map(AsyncIO::pure)
+                          .unwrap_or_else(AsyncIO::fail)
+                  }),
+                  // [Pure] ダメージ処理パイプライン (Semigroup でモディファイア合成)
+                  |io| io.map(|session| {
+                      pipe!(
+                          session,
+                          |s| {
+                              // Semigroup でダメージ軽減を合成
+                              let final_damage = pipe!(
+                                  base_damage,
+                                  |d| get_armor_modifier(&s.player.equipment).apply(d),
+                                  |d| s.player.status_effects.iter()
+                                      .filter_map(|e| e.damage_reduction_modifier())
+                                      .fold(DamageModifier::identity(), |acc, m| acc.combine(m))
+                                      .apply(d),
+                                  |d| Damage::new(d.value().max(1))
+                              );
+                              (s, final_damage)
+                          },
+                          |(s, damage)| {
+                              // Lens でプレイヤー体力を更新
+                              let updated = player_health_lens().modify(s, |health| {
+                                  Health::new(health.value().saturating_sub(damage.value()))
+                              });
+                              (updated, damage)
+                          },
+                          |(s, damage)| {
+                              let is_dead = check_player_death(&s.player);
+                              let mut events = vec![
+                                  GameEvent::PlayerDamaged { source: source.clone(), damage },
+                              ];
+                              if is_dead {
+                                  events.push(GameEvent::PlayerDied);
+                              }
+                              (s, events)
+                          }
+                      )
+                  }),
+                  // [IO] 永続化
+                  |io| io.flat_map(|(session, events)| {
+                      pipe!(
+                          cache.set(&game_id, &session, config.cache_ttl),
+                          |io| io.flat_map(|_| event_store.append(&game_id, &events)),
+                          |io| io.map(|_| Ok(session))
+                      )
+                  })
+              )
+          }
+      }

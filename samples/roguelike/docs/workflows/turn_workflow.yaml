@@ -1,0 +1,616 @@
+# Turn Workflow
+# Project: Dungeon of Pure Functions
+# Domain: Turn Management
+
+metadata:
+  version: "1.0.0"
+  created_at: "2026-01-09"
+  updated_at: "2026-01-09"
+  status: draft
+  domain: Turn
+
+imports:
+  - common.yaml
+
+# =============================================================================
+# Workflow Overview
+# =============================================================================
+
+overview:
+  description: |
+    Turnワークフローはゲームのターン進行を統括する。
+    プレイヤーコマンドの受付、敵のAI行動、状態異常の処理など、
+    1ターンの流れを純粋関数で制御する。
+
+    RWSモナドを使用して、設定の読み取り（Reader）、イベントの記録（Writer）、
+    ゲーム状態の更新（State）を統合的に扱う。
+
+  responsibilities:
+    - ターンの開始・終了処理
+    - プレイヤーコマンドの処理
+    - 敵AI行動の実行
+    - 状態異常の進行
+    - ターン終了時の処理（回復、効果解除など）
+
+# =============================================================================
+# Use Cases
+# =============================================================================
+
+use_cases:
+  # ---------------------------------------------------------------------------
+  # Process Turn
+  # ---------------------------------------------------------------------------
+  - name: ProcessTurn
+    description: 1ターンを処理する
+    command:
+      name: ProcessTurnCommand
+      fields:
+        - { name: game_identifier, type: GameIdentifier }
+        - { name: player_command, type: Command }
+
+    workflow_steps:
+      - step: 1
+        name: Load Session
+        type: io
+        description: セッションをキャッシュから取得
+        port: SessionCache
+        operation: get
+
+      - step: 2
+        name: Start Turn
+        type: pure
+        description: ターン開始処理（ターンカウント増加）
+        function: start_turn
+
+      - step: 3
+        name: Validate Player Command
+        type: pure
+        description: プレイヤーコマンドを検証
+        function: CommandValidator::validate
+        lambars_feature: Either
+
+      - step: 4
+        name: Execute Player Command
+        type: pure
+        description: プレイヤーコマンドを実行
+        function: CommandExecutor::execute
+        lambars_feature: State
+
+      - step: 5
+        name: Process Enemy Turns
+        type: pure
+        description: 全ての敵のターンを処理
+        function: process_all_enemy_turns
+        lambars_feature: Foldable
+
+      - step: 6
+        name: Process Status Effects
+        type: pure
+        description: 状態異常を進行（ダメージ、持続時間減少）
+        function: process_status_effects
+
+      - step: 7
+        name: End Turn
+        type: pure
+        description: ターン終了処理
+        function: end_turn
+
+      - step: 8
+        name: Check Game Over
+        type: pure
+        description: ゲームオーバー判定
+        function: check_game_over
+
+      - step: 9
+        name: Generate Events
+        type: pure
+        description: イベントを生成
+        events:
+          - TurnStarted
+          - (player command events)
+          - (enemy action events)
+          - (status effect events)
+          - TurnEnded
+
+      - step: 10
+        name: Update Cache
+        type: io
+        description: セッションをキャッシュに保存
+        port: SessionCache
+        operation: set
+
+      - step: 11
+        name: Append Events
+        type: io
+        description: イベントをイベントストアに追加
+        port: EventStore
+        operation: append
+
+      - step: 12
+        name: Check Snapshot Needed
+        type: pure
+        description: スナップショットが必要か判定
+        function: should_create_snapshot
+
+      - step: 13
+        name: Create Snapshot (if needed)
+        type: io
+        description: スナップショットを作成
+        port: SnapshotStore
+        operation: save_snapshot
+        condition: snapshot_needed
+
+    result:
+      success: GameSession
+      errors:
+        - WorkflowError::NotFound
+        - WorkflowError::Domain(CommandError)
+        - WorkflowError::Domain(GameSessionError::SessionAlreadyCompleted)
+
+    type_signature: |
+      fn process_turn<C, E, S>(
+          cache: &C,
+          event_store: &E,
+          snapshot_store: &S,
+      ) -> impl Fn(ProcessTurnCommand) -> AsyncIO<WorkflowResult<GameSession>>
+      where
+          C: SessionCache,
+          E: EventStore,
+          S: SnapshotStore,
+
+  # ---------------------------------------------------------------------------
+  # Wait Turn
+  # ---------------------------------------------------------------------------
+  - name: WaitTurn
+    description: プレイヤーが待機する（何もしない）
+    command:
+      name: WaitTurnCommand
+      fields:
+        - { name: game_identifier, type: GameIdentifier }
+
+    workflow_steps:
+      - step: 1
+        name: Load Session
+        type: io
+        description: セッションをキャッシュから取得
+        port: SessionCache
+        operation: get
+
+      - step: 2
+        name: Start Turn
+        type: pure
+        description: ターン開始処理
+        function: start_turn
+
+      - step: 3
+        name: Apply Wait Bonus
+        type: pure
+        description: 待機ボーナスを適用（HP回復など）
+        function: apply_wait_bonus
+
+      - step: 4
+        name: Process Enemy Turns
+        type: pure
+        description: 全ての敵のターンを処理
+        function: process_all_enemy_turns
+
+      - step: 5
+        name: Process Status Effects
+        type: pure
+        description: 状態異常を進行
+        function: process_status_effects
+
+      - step: 6
+        name: End Turn
+        type: pure
+        description: ターン終了処理
+        function: end_turn
+
+      - step: 7
+        name: Generate Events
+        type: pure
+        description: イベントを生成
+        events:
+          - TurnStarted
+          - PlayerWaited
+          - TurnEnded
+
+      - step: 8
+        name: Update Cache
+        type: io
+        description: セッションをキャッシュに保存
+        port: SessionCache
+        operation: set
+
+      - step: 9
+        name: Append Events
+        type: io
+        description: イベントをイベントストアに追加
+        port: EventStore
+        operation: append
+
+    result:
+      success: GameSession
+      errors:
+        - WorkflowError::NotFound
+
+    type_signature: |
+      fn wait_turn<C, E>(
+          cache: &C,
+          event_store: &E,
+      ) -> impl Fn(WaitTurnCommand) -> AsyncIO<WorkflowResult<GameSession>>
+
+# =============================================================================
+# Pure Functions (Domain Logic)
+# =============================================================================
+
+pure_functions:
+  - name: start_turn
+    description: ターン開始処理
+    signature: "fn start_turn(session: GameSession) -> (GameSession, TurnStarted)"
+    implementation: |
+      let new_turn = session.turn_count.increment();
+      let event = TurnStarted { turn: new_turn };
+      (session.with_turn_count(new_turn), event)
+
+  - name: process_all_enemy_turns
+    description: 全ての敵のターンを処理（Foldable）
+    signature: "fn process_all_enemy_turns(session: GameSession) -> (GameSession, Vec<GameEvent>)"
+    implementation: |
+      session.entities.iter()
+          .filter_map(|(id, entity)| entity.as_enemy().map(|e| (id.clone(), e)))
+          .sorted_by_key(|(_, e)| std::cmp::Reverse(e.stats.speed.value()))
+          .fold((session, vec![]), |(state, events), (id, _)| {
+              let (new_state, new_events) = process_enemy_turn(state, &id);
+              (new_state, [events, new_events].concat())
+          })
+
+  - name: process_status_effects
+    description: 状態異常を進行
+    signature: "fn process_status_effects(session: GameSession) -> (GameSession, Vec<GameEvent>)"
+
+  - name: end_turn
+    description: ターン終了処理
+    signature: "fn end_turn(session: GameSession) -> (GameSession, TurnEnded)"
+
+  - name: check_game_over
+    description: ゲームオーバー判定
+    signature: "fn check_game_over(session: &GameSession) -> Option<GameOutcome>"
+    implementation: |
+      if session.player.stats.health.value() == 0 {
+          Some(GameOutcome::Defeat)
+      } else if session.current_floor.level >= session.config.max_floor_level
+          && session.player.position == session.current_floor.goal_position() {
+          Some(GameOutcome::Victory)
+      } else {
+          None
+      }
+
+  - name: apply_wait_bonus
+    description: 待機ボーナスを適用
+    signature: "fn apply_wait_bonus(session: GameSession, config: &GameConfig) -> GameSession"
+    implementation: |
+      player_health_lens().modify(session, |health| {
+          Health::new((health.value() + config.wait_heal_amount).min(session.player.stats.max_health.value()))
+      })
+
+  - name: resolve_turn_order
+    description: ターン順序を解決（速度順）
+    signature: "fn resolve_turn_order(entities: &PersistentHashMap<EntityIdentifier, Entity>) -> Vec<EntityIdentifier>"
+    implementation: |
+      let mut ordered: Vec<_> = entities.iter()
+          .map(|(id, entity)| (id.clone(), entity.speed()))
+          .collect();
+      ordered.sort_by_key(|(_, speed)| std::cmp::Reverse(*speed));
+      ordered.into_iter().map(|(id, _)| id).collect()
+
+# =============================================================================
+# RWS Monad Integration
+# =============================================================================
+
+rws_integration:
+  description: |
+    ターン処理全体をRWSモナドで統合し、
+    設定読み取り・イベント記録・状態更新を透過的に扱う。
+
+  type_definition: |
+    type TurnEffect<A> = RWS<GameConfig, Vec<GameEvent>, GameSession, A>
+
+  usage_example: |
+    fn process_player_command(command: ValidatedCommand) -> TurnEffect<()> {
+        RWS::new(|config, session| {
+            let (new_session, events) = execute_command(command, session, config);
+            ((), events, new_session)
+        })
+    }
+
+    fn process_enemy_turn(enemy_id: EntityIdentifier) -> TurnEffect<()> {
+        RWS::new(|config, session| {
+            let enemy = session.entities.get(&enemy_id).unwrap();
+            let action = decide_enemy_action(enemy, &session, config);
+            let (new_session, events) = execute_enemy_action(action, session);
+            ((), events, new_session)
+        })
+    }
+
+    fn process_turn(command: Command) -> TurnEffect<Option<GameOutcome>> {
+        for_comprehension! {
+            _start <- start_turn_effect();
+            validated <- validate_command(command);
+            _player <- process_player_command(validated);
+            _enemies <- process_all_enemies();
+            _status <- process_status_effects_effect();
+            _end <- end_turn_effect();
+            outcome <- check_game_over_effect();
+            yield outcome
+        }
+    }
+
+# =============================================================================
+# Technical Highlights
+# =============================================================================
+
+technical_highlights:
+  - name: ProcessTurn Workflow Pipeline
+    description: pipe! による ProcessTurn ワークフローの全体像
+    code: |
+      fn process_turn_workflow<C, E, S>(
+          cache: &C,
+          event_store: &E,
+          snapshot_store: &S,
+          config: &WorkflowConfig,
+      ) -> impl Fn(ProcessTurnCommand) -> AsyncIO<WorkflowResult<GameSession>>
+      where
+          C: SessionCache,
+          E: EventStore,
+          S: SnapshotStore,
+      {
+          move |cmd| {
+              let game_id = cmd.game_identifier.clone();
+              let player_command = cmd.player_command.clone();
+
+              pipe!(
+                  // [IO] セッション取得
+                  cache.get(&game_id),
+                  |io| io.flat_map(|opt| {
+                      opt.ok_or(WorkflowError::not_found("GameSession", &game_id))
+                          .map(AsyncIO::pure)
+                          .unwrap_or_else(AsyncIO::fail)
+                  }),
+                  // [Pure] ターン処理パイプライン
+                  |io| io.map(|session| {
+                      pipe!(
+                          session,
+                          // Step 1: ターン開始
+                          |s| {
+                              let (updated, start_event) = start_turn(s);
+                              (updated, vec![start_event.into()])
+                          },
+                          // Step 2-3: コマンド検証・実行
+                          |(s, events)| {
+                              let validation_result = CommandValidator::validate(&player_command, &s);
+                              match validation_result {
+                                  Either::Right(validated) => {
+                                      let (updated, cmd_events) = CommandExecutor::execute(validated, s);
+                                      (Ok(updated), [events, cmd_events].concat())
+                                  }
+                                  Either::Left(err) => (Err(err), events),
+                              }
+                          },
+                          // Step 4: 敵ターン処理（fold）
+                          |(result, events)| {
+                              result.map(|s| {
+                                  let enemy_ids = resolve_turn_order(&s.entities);
+                                  let (final_state, enemy_events) = enemy_ids.into_iter().fold(
+                                      (s, vec![]),
+                                      |(state, evts), enemy_id| {
+                                          let (new_state, new_evts) = pipe!(
+                                              state,
+                                              |st| find_enemy_by_id(&st, enemy_id.clone())
+                                                  .map(|e| (st, e.clone())),
+                                              |opt| opt.map(|(st, enemy)| {
+                                                  let action = decide_enemy_action(&enemy, &st);
+                                                  execute_enemy_action(st, enemy_id.clone(), action)
+                                              }).unwrap_or((state, vec![]))
+                                          );
+                                          (new_state, [evts, new_evts].concat())
+                                      }
+                                  );
+                                  (final_state, [events.clone(), enemy_events].concat())
+                              }).map_err(|e| (e, events.clone()))
+                          },
+                          // Step 5: 状態異常処理
+                          |result| {
+                              match result {
+                                  Ok((s, events)) => {
+                                      let (updated, status_events) = process_status_effects(s);
+                                      (Ok(updated), [events, status_events].concat())
+                                  }
+                                  Err((e, events)) => (Err(e), events),
+                              }
+                          },
+                          // Step 6-7: ターン終了・ゲームオーバー判定
+                          |result| {
+                              match result {
+                                  Ok((s, events)) => {
+                                      let (ended, end_event) = end_turn(s);
+                                      let outcome = check_game_over(&ended);
+                                      (Ok((ended, outcome)), [events, vec![end_event.into()]].concat())
+                                  }
+                                  Err((e, events)) => (Err(e), events),
+                              }
+                          }
+                      )
+                  }),
+                  // [IO] 永続化
+                  |io| io.flat_map(|(result, events)| {
+                      match result {
+                          Ok((session, outcome)) => pipe!(
+                              cache.set(&game_id, &session, config.cache_ttl),
+                              |io| io.flat_map(|_| event_store.append(&game_id, &events)),
+                              |io| io.flat_map(|_| {
+                                  if should_create_snapshot(&session, config.snapshot_interval) {
+                                      snapshot_store.save_snapshot(&game_id, &session, session.event_sequence())
+                                  } else {
+                                      AsyncIO::pure(())
+                                  }
+                              }),
+                              |io| io.map(|_| Ok(session))
+                          ),
+                          Err(e) => AsyncIO::pure(Err(WorkflowError::Domain(e))),
+                      }
+                  })
+              )
+          }
+      }
+
+  - name: WaitTurn Workflow Pipeline
+    description: pipe! による WaitTurn ワークフローの全体像
+    code: |
+      fn wait_turn_workflow<C, E>(
+          cache: &C,
+          event_store: &E,
+          config: &WorkflowConfig,
+      ) -> impl Fn(WaitTurnCommand) -> AsyncIO<WorkflowResult<GameSession>>
+      {
+          move |cmd| {
+              let game_id = cmd.game_identifier.clone();
+
+              pipe!(
+                  // [IO] セッション取得
+                  cache.get(&game_id),
+                  |io| io.flat_map(|opt| {
+                      opt.ok_or(WorkflowError::not_found("GameSession", &game_id))
+                          .map(AsyncIO::pure)
+                          .unwrap_or_else(AsyncIO::fail)
+                  }),
+                  // [Pure] 待機ターン処理パイプライン
+                  |io| io.map(|session| {
+                      pipe!(
+                          session,
+                          // ターン開始
+                          |s| {
+                              let (updated, start_event) = start_turn(s);
+                              (updated, vec![start_event.into()])
+                          },
+                          // 待機ボーナス適用（HP回復など）
+                          |(s, events)| {
+                              let with_bonus = apply_wait_bonus(s, &config.game_config);
+                              let wait_event = GameEvent::PlayerWaited;
+                              (with_bonus, [events, vec![wait_event]].concat())
+                          },
+                          // 敵ターン処理（fold）
+                          |(s, events)| {
+                              let enemy_ids = resolve_turn_order(&s.entities);
+                              let (final_state, enemy_events) = enemy_ids.into_iter().fold(
+                                  (s, vec![]),
+                                  |(state, evts), enemy_id| {
+                                      let (new_state, new_evts) = process_single_enemy_turn(state, &enemy_id);
+                                      (new_state, [evts, new_evts].concat())
+                                  }
+                              );
+                              (final_state, [events, enemy_events].concat())
+                          },
+                          // 状態異常処理
+                          |(s, events)| {
+                              let (updated, status_events) = process_status_effects(s);
+                              (updated, [events, status_events].concat())
+                          },
+                          // ターン終了
+                          |(s, events)| {
+                              let (ended, end_event) = end_turn(s);
+                              (ended, [events, vec![end_event.into()]].concat())
+                          }
+                      )
+                  }),
+                  // [IO] 永続化
+                  |io| io.flat_map(|(session, events)| {
+                      pipe!(
+                          cache.set(&game_id, &session, config.cache_ttl),
+                          |io| io.flat_map(|_| event_store.append(&game_id, &events)),
+                          |io| io.map(|_| Ok(session))
+                      )
+                  })
+              )
+          }
+      }
+
+  - name: Enemy Turn Processing with Fold
+    description: pipe! と fold を組み合わせた敵ターン処理
+    code: |
+      fn process_all_enemy_turns(session: GameSession) -> (GameSession, Vec<GameEvent>) {
+          let enemy_ids = resolve_turn_order(&session.entities);
+
+          pipe!(
+              enemy_ids,
+              |ids| ids.into_iter().fold(
+                  (session, vec![]),
+                  |(state, events), enemy_id| {
+                      pipe!(
+                          state,
+                          |s| find_enemy_by_id(&s, enemy_id.clone())
+                              .filter(|e| e.is_alive())
+                              .map(|enemy| (s.clone(), enemy.clone())),
+                          |opt| match opt {
+                              Some((s, enemy)) => {
+                                  let action = decide_enemy_action(&enemy, &s);
+                                  let (updated, action_events) = pipe!(
+                                      action,
+                                      |a| match a {
+                                          EnemyAction::Move(dir) => execute_enemy_move(s, &enemy_id, dir),
+                                          EnemyAction::Attack(target) => execute_enemy_attack(s, &enemy_id, target),
+                                          EnemyAction::Wait => (s, vec![]),
+                                      }
+                                  );
+                                  (updated, [events.clone(), action_events].concat())
+                              }
+                              None => (state, events.clone()),
+                          }
+                      )
+                  }
+              )
+          )
+      }
+
+  - name: Status Effect Processing Pipeline
+    description: pipe! による状態異常処理
+    code: |
+      fn process_status_effects(session: GameSession) -> (GameSession, Vec<GameEvent>) {
+          pipe!(
+              session,
+              // プレイヤーの状態異常を処理
+              |s| {
+                  s.player.status_effects.iter().fold(
+                      (s, vec![]),
+                      |(state, events), effect| {
+                          pipe!(
+                              effect,
+                              |e| apply_status_effect_damage(state.clone(), e),
+                              |(updated, damage_event)| {
+                                  let decremented = decrement_effect_duration(updated, e);
+                                  let expired_event = if e.remaining_turns <= 1 {
+                                      Some(GameEvent::StatusEffectExpired {
+                                          entity: EntityIdentifier::player(),
+                                          effect_type: e.effect_type,
+                                      })
+                                  } else {
+                                      None
+                                  };
+                                  (decremented, [events.clone(), damage_event, expired_event.into_iter().collect()].concat())
+                              }
+                          )
+                      }
+                  )
+              },
+              // 期限切れの状態異常を削除
+              |(s, events)| {
+                  let cleaned = player_status_effects_lens().modify(s, |effects| {
+                      effects.iter()
+                          .filter(|e| e.remaining_turns > 0)
+                          .cloned()
+                          .collect()
+                  });
+                  (cleaned, events)
+              }
+          )
+      }

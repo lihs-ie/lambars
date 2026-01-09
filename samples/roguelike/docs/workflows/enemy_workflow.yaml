@@ -1,0 +1,638 @@
+# Enemy Workflow
+# Project: Dungeon of Pure Functions
+# Aggregate: Enemy
+
+metadata:
+  version: "1.0.0"
+  created_at: "2026-01-09"
+  updated_at: "2026-01-09"
+  status: draft
+  aggregate: Enemy
+
+imports:
+  - common.yaml
+
+# =============================================================================
+# Workflow Overview
+# =============================================================================
+
+overview:
+  description: |
+    Enemyワークフローは敵キャラクターの行動を管理する。
+    AIによる行動決定、移動、攻撃などを純粋関数で処理し、
+    経路探索にはTrampolineを使用してスタック安全性を確保する。
+
+  responsibilities:
+    - 敵の行動決定（AI）
+    - 敵の移動処理
+    - 敵の攻撃処理
+    - 敵のスポーン
+    - 敵の死亡処理
+
+# =============================================================================
+# Use Cases
+# =============================================================================
+
+use_cases:
+  # ---------------------------------------------------------------------------
+  # Process Enemy Turn
+  # ---------------------------------------------------------------------------
+  - name: ProcessEnemyTurn
+    description: 敵のターンを処理する
+    command:
+      name: ProcessEnemyTurnCommand
+      fields:
+        - { name: game_identifier, type: GameIdentifier }
+        - { name: entity_identifier, type: EntityIdentifier }
+
+    workflow_steps:
+      - step: 1
+        name: Load Session
+        type: io
+        description: セッションをキャッシュから取得
+        port: SessionCache
+        operation: get
+
+      - step: 2
+        name: Find Enemy
+        type: pure
+        description: 対象の敵を検索
+        function: find_enemy_by_id
+
+      - step: 3
+        name: Validate Enemy Active
+        type: pure
+        description: 敵がアクティブ（生存）かを検証
+        function: validate_enemy_active
+
+      - step: 4
+        name: Decide Action
+        type: pure
+        description: AIで行動を決定
+        function: decide_enemy_action
+
+      - step: 5
+        name: Execute Action
+        type: pure
+        description: 決定した行動を実行
+        function: execute_enemy_action
+        lambars_feature: Trampoline
+
+      - step: 6
+        name: Generate Events
+        type: pure
+        description: イベントを生成
+        events:
+          - EnemyMoved
+          - EnemyAttacked
+          - PlayerDamaged (if attacked player)
+
+      - step: 7
+        name: Update Cache
+        type: io
+        description: セッションをキャッシュに保存
+        port: SessionCache
+        operation: set
+
+      - step: 8
+        name: Append Events
+        type: io
+        description: イベントをイベントストアに追加
+        port: EventStore
+        operation: append
+
+    result:
+      success: GameSession
+      errors:
+        - WorkflowError::NotFound
+        - WorkflowError::Domain(EnemyError::EnemyNotFound)
+        - WorkflowError::Domain(EnemyError::EnemyAlreadyDead)
+
+    type_signature: |
+      fn process_enemy_turn<C, E>(
+          cache: &C,
+          event_store: &E,
+      ) -> impl Fn(ProcessEnemyTurnCommand) -> AsyncIO<WorkflowResult<GameSession>>
+      where
+          C: SessionCache,
+          E: EventStore,
+
+  # ---------------------------------------------------------------------------
+  # Spawn Enemies
+  # ---------------------------------------------------------------------------
+  - name: SpawnEnemies
+    description: フロアに敵をスポーンする
+    command:
+      name: SpawnEnemiesCommand
+      fields:
+        - { name: game_identifier, type: GameIdentifier }
+        - { name: floor_level, type: u32 }
+
+    workflow_steps:
+      - step: 1
+        name: Load Session
+        type: io
+        description: セッションをキャッシュから取得
+        port: SessionCache
+        operation: get
+
+      - step: 2
+        name: Get Spawn Configuration
+        type: pure
+        description: フロアレベルに応じたスポーン設定を取得
+        function: get_spawn_configuration
+        config_ref: spawn_config
+
+      - step: 3
+        name: Find Valid Spawn Points
+        type: pure
+        description: 有効なスポーンポイントを検索
+        function: find_valid_spawn_points
+
+      - step: 4
+        name: Generate Enemies
+        type: pure
+        description: 敵を生成
+        function: generate_enemies
+
+      - step: 5
+        name: Add Enemies to Session
+        type: pure
+        description: 敵をセッションに追加
+        function: add_enemies_to_session
+        lambars_feature: PersistentHashMap
+
+      - step: 6
+        name: Generate Events
+        type: pure
+        description: EnemySpawnedイベントを生成
+        events:
+          - EnemySpawned
+
+      - step: 7
+        name: Update Cache
+        type: io
+        description: セッションをキャッシュに保存
+        port: SessionCache
+        operation: set
+
+      - step: 8
+        name: Append Events
+        type: io
+        description: イベントをイベントストアに追加
+        port: EventStore
+        operation: append
+
+    result:
+      success: GameSession
+      errors:
+        - WorkflowError::NotFound
+
+    type_signature: |
+      fn spawn_enemies<C, E>(
+          cache: &C,
+          event_store: &E,
+      ) -> impl Fn(SpawnEnemiesCommand) -> AsyncIO<WorkflowResult<GameSession>>
+
+  # ---------------------------------------------------------------------------
+  # Enemy Death
+  # ---------------------------------------------------------------------------
+  - name: ProcessEnemyDeath
+    description: 敵の死亡を処理する
+    command:
+      name: ProcessEnemyDeathCommand
+      fields:
+        - { name: game_identifier, type: GameIdentifier }
+        - { name: entity_identifier, type: EntityIdentifier }
+
+    workflow_steps:
+      - step: 1
+        name: Load Session
+        type: io
+        description: セッションをキャッシュから取得
+        port: SessionCache
+        operation: get
+
+      - step: 2
+        name: Find Enemy
+        type: pure
+        description: 対象の敵を検索
+        function: find_enemy_by_id
+
+      - step: 3
+        name: Calculate Loot
+        type: pure
+        description: ドロップアイテムを計算
+        function: calculate_loot
+
+      - step: 4
+        name: Drop Items
+        type: pure
+        description: アイテムを地面に配置
+        function: drop_items_at_position
+
+      - step: 5
+        name: Remove Enemy from Session
+        type: pure
+        description: 敵をセッションから削除
+        function: remove_enemy_from_session
+        lambars_feature: PersistentHashMap
+
+      - step: 6
+        name: Generate Events
+        type: pure
+        description: イベントを生成
+        events:
+          - EnemyDied
+          - ItemDropped
+
+      - step: 7
+        name: Update Cache
+        type: io
+        description: セッションをキャッシュに保存
+        port: SessionCache
+        operation: set
+
+      - step: 8
+        name: Append Events
+        type: io
+        description: イベントをイベントストアに追加
+        port: EventStore
+        operation: append
+
+    result:
+      success: GameSession
+      errors:
+        - WorkflowError::NotFound
+        - WorkflowError::Domain(EnemyError::EnemyNotFound)
+
+    type_signature: |
+      fn process_enemy_death<C, E>(
+          cache: &C,
+          event_store: &E,
+      ) -> impl Fn(ProcessEnemyDeathCommand) -> AsyncIO<WorkflowResult<GameSession>>
+
+# =============================================================================
+# Pure Functions (Domain Logic)
+# =============================================================================
+
+pure_functions:
+  - name: find_enemy_by_id
+    description: IDで敵を検索
+    signature: "fn find_enemy_by_id(session: &GameSession, id: EntityIdentifier) -> Option<&Enemy>"
+
+  - name: validate_enemy_active
+    description: 敵がアクティブかを検証
+    signature: "fn validate_enemy_active(enemy: &Enemy) -> Result<(), EnemyError>"
+
+  - name: decide_enemy_action
+    description: AIで行動を決定
+    signature: "fn decide_enemy_action(enemy: &Enemy, session: &GameSession) -> EnemyAction"
+    implementation: |
+      match enemy.behavior {
+          AiBehavior::Aggressive => decide_aggressive_action(enemy, session),
+          AiBehavior::Defensive => decide_defensive_action(enemy, session),
+          AiBehavior::Patrol => decide_patrol_action(enemy, session),
+          AiBehavior::Stationary => EnemyAction::Wait,
+      }
+
+  - name: execute_enemy_action
+    description: 敵の行動を実行
+    signature: "fn execute_enemy_action(session: GameSession, enemy_id: EntityIdentifier, action: EnemyAction) -> GameSession"
+
+  - name: calculate_path_to_target
+    description: ターゲットへの経路を計算（A*アルゴリズム、Trampoline使用）
+    signature: "fn calculate_path_to_target(floor: &Floor, from: Position, to: Position) -> Trampoline<Vec<Position>>"
+
+  - name: get_spawn_configuration
+    description: スポーン設定を取得
+    signature: "fn get_spawn_configuration(floor_level: u32, config: &GameConfig) -> SpawnConfig"
+
+  - name: find_valid_spawn_points
+    description: 有効なスポーンポイントを検索
+    signature: "fn find_valid_spawn_points(floor: &Floor, count: usize) -> Vec<Position>"
+
+  - name: generate_enemies
+    description: 敵を生成
+    signature: "fn generate_enemies(spawn_points: &[Position], config: &SpawnConfig, seed: RandomSeed) -> Vec<Enemy>"
+
+  - name: add_enemies_to_session
+    description: 敵をセッションに追加
+    signature: "fn add_enemies_to_session(session: GameSession, enemies: Vec<Enemy>) -> GameSession"
+    implementation: |
+      enemies.into_iter().fold(session, |s, enemy| {
+          entities_lens().modify(s, |entities| {
+              entities.insert(enemy.identifier.clone(), Entity::Enemy(enemy))
+          })
+      })
+
+  - name: calculate_loot
+    description: ドロップアイテムを計算
+    signature: "fn calculate_loot(enemy: &Enemy, seed: RandomSeed) -> Vec<Item>"
+
+  - name: drop_items_at_position
+    description: アイテムを地面に配置
+    signature: "fn drop_items_at_position(session: GameSession, position: Position, items: Vec<Item>) -> GameSession"
+
+  - name: remove_enemy_from_session
+    description: 敵をセッションから削除
+    signature: "fn remove_enemy_from_session(session: GameSession, enemy_id: EntityIdentifier) -> GameSession"
+    implementation: |
+      entities_lens().modify(session, |entities| entities.remove(&enemy_id))
+
+# =============================================================================
+# AI Behaviors
+# =============================================================================
+
+ai_behaviors:
+  - name: Aggressive
+    description: 常にプレイヤーに向かって移動・攻撃
+    logic: |
+      1. プレイヤーが攻撃範囲内なら攻撃
+      2. そうでなければプレイヤーに向かって移動
+
+  - name: Defensive
+    description: 一定距離内に入ったら反撃
+    logic: |
+      1. プレイヤーが一定距離内で攻撃範囲内なら攻撃
+      2. 一定距離内だが攻撃範囲外なら追跡
+      3. 一定距離外なら待機
+
+  - name: Patrol
+    description: 巡回しつつ、プレイヤーを発見したら追跡
+    logic: |
+      1. プレイヤーが視界内かつ攻撃範囲内なら攻撃
+      2. プレイヤーが視界内なら追跡
+      3. そうでなければ巡回経路に沿って移動
+
+  - name: Stationary
+    description: 移動せず、攻撃範囲内なら攻撃
+    logic: |
+      1. プレイヤーが攻撃範囲内なら攻撃
+      2. そうでなければ待機
+
+# =============================================================================
+# Technical Highlights
+# =============================================================================
+
+technical_highlights:
+  - name: ProcessEnemyTurn Workflow Pipeline
+    description: pipe! による ProcessEnemyTurn ワークフローの全体像
+    code: |
+      fn process_enemy_turn_workflow<C, E>(
+          cache: &C,
+          event_store: &E,
+          config: &WorkflowConfig,
+      ) -> impl Fn(ProcessEnemyTurnCommand) -> AsyncIO<WorkflowResult<GameSession>>
+      where
+          C: SessionCache,
+          E: EventStore,
+      {
+          move |cmd| {
+              let game_id = cmd.game_identifier.clone();
+              let enemy_id = cmd.entity_identifier.clone();
+
+              pipe!(
+                  // [IO] セッション取得
+                  cache.get(&game_id),
+                  |io| io.flat_map(|opt| {
+                      opt.ok_or(WorkflowError::not_found("GameSession", &game_id))
+                          .map(AsyncIO::pure)
+                          .unwrap_or_else(AsyncIO::fail)
+                  }),
+                  // [Pure] 敵行動パイプライン
+                  |io| io.map(|session| {
+                      pipe!(
+                          session,
+                          |s| find_enemy_by_id(&s, enemy_id.clone())
+                              .ok_or(EnemyError::EnemyNotFound { entity_identifier: enemy_id.to_string() })
+                              .map(|enemy| (s, enemy.clone())),
+                          |result| result.and_then(|(s, enemy)| {
+                              validate_enemy_active(&enemy).map(|_| (s, enemy))
+                          }),
+                          |result| result.map(|(s, enemy)| {
+                              let action = decide_enemy_action(&enemy, &s);
+                              (s, enemy, action)
+                          }),
+                          |result| result.map(|(s, enemy, action)| {
+                              // Trampoline で経路計算（スタック安全）
+                              let (updated, events) = match action {
+                                  EnemyAction::Move(direction) => {
+                                      let new_pos = enemy.position.move_to(direction);
+                                      let moved = entity_position_lens(&enemy_id).set(s, new_pos);
+                                      (moved, vec![GameEvent::EnemyMoved {
+                                          entity: enemy_id.clone(),
+                                          from: enemy.position,
+                                          to: new_pos,
+                                      }])
+                                  }
+                                  EnemyAction::Attack(target) => {
+                                      let damage = DamageCalculator::calculate(&enemy.stats, &s.player.stats, &[]);
+                                      let damaged = player_health_lens().modify(s, |h| {
+                                          Health::new(h.value().saturating_sub(damage.value()))
+                                      });
+                                      (damaged, vec![
+                                          GameEvent::EnemyAttacked { entity: enemy_id.clone(), target, damage },
+                                          GameEvent::PlayerDamaged { source: enemy_id.clone(), damage },
+                                      ])
+                                  }
+                                  EnemyAction::Wait => (s, vec![]),
+                              };
+                              (updated, events)
+                          })
+                      )
+                  }),
+                  // [IO] 永続化
+                  |io| io.flat_map(|result| {
+                      match result {
+                          Ok((session, events)) => pipe!(
+                              cache.set(&game_id, &session, config.cache_ttl),
+                              |io| io.flat_map(|_| event_store.append(&game_id, &events)),
+                              |io| io.map(|_| Ok(session))
+                          ),
+                          Err(e) => AsyncIO::pure(Err(WorkflowError::Domain(e))),
+                      }
+                  })
+              )
+          }
+      }
+
+  - name: SpawnEnemies Workflow Pipeline
+    description: pipe! による SpawnEnemies ワークフローの全体像
+    code: |
+      fn spawn_enemies_workflow<C, E>(
+          cache: &C,
+          event_store: &E,
+          config: &WorkflowConfig,
+      ) -> impl Fn(SpawnEnemiesCommand) -> AsyncIO<WorkflowResult<GameSession>>
+      {
+          move |cmd| {
+              let game_id = cmd.game_identifier.clone();
+              let floor_level = cmd.floor_level;
+
+              pipe!(
+                  // [IO] セッション取得
+                  cache.get(&game_id),
+                  |io| io.flat_map(|opt| {
+                      opt.ok_or(WorkflowError::not_found("GameSession", &game_id))
+                          .map(AsyncIO::pure)
+                          .unwrap_or_else(AsyncIO::fail)
+                  }),
+                  // [Pure] スポーン処理パイプライン
+                  |io| io.map(|session| {
+                      pipe!(
+                          session,
+                          |s| {
+                              let spawn_config = get_spawn_configuration(floor_level, &config.game_config);
+                              (s, spawn_config)
+                          },
+                          |(s, spawn_config)| {
+                              let spawn_points = find_valid_spawn_points(&s.current_floor, spawn_config.enemy_count);
+                              (s, spawn_config, spawn_points)
+                          },
+                          |(s, spawn_config, spawn_points)| {
+                              let enemies = generate_enemies(&spawn_points, &spawn_config, s.seed);
+                              (s, enemies)
+                          },
+                          |(s, enemies)| {
+                              // PersistentHashMap で敵を追加（fold）
+                              let events: Vec<GameEvent> = enemies.iter()
+                                  .map(|e| GameEvent::EnemySpawned {
+                                      entity: e.identifier.clone(),
+                                      position: e.position,
+                                      enemy_type: e.enemy_type.clone(),
+                                  })
+                                  .collect();
+
+                              let updated = enemies.into_iter().fold(s, |acc, enemy| {
+                                  entities_lens().modify(acc, |entities| {
+                                      entities.insert(enemy.identifier.clone(), Entity::Enemy(enemy))
+                                  })
+                              });
+                              (updated, events)
+                          }
+                      )
+                  }),
+                  // [IO] 永続化
+                  |io| io.flat_map(|(session, events)| {
+                      pipe!(
+                          cache.set(&game_id, &session, config.cache_ttl),
+                          |io| io.flat_map(|_| event_store.append(&game_id, &events)),
+                          |io| io.map(|_| Ok(session))
+                      )
+                  })
+              )
+          }
+      }
+
+  - name: ProcessEnemyDeath Workflow Pipeline
+    description: pipe! による ProcessEnemyDeath ワークフローの全体像
+    code: |
+      fn process_enemy_death_workflow<C, E>(
+          cache: &C,
+          event_store: &E,
+          config: &WorkflowConfig,
+      ) -> impl Fn(ProcessEnemyDeathCommand) -> AsyncIO<WorkflowResult<GameSession>>
+      {
+          move |cmd| {
+              let game_id = cmd.game_identifier.clone();
+              let enemy_id = cmd.entity_identifier.clone();
+
+              pipe!(
+                  // [IO] セッション取得
+                  cache.get(&game_id),
+                  |io| io.flat_map(|opt| {
+                      opt.ok_or(WorkflowError::not_found("GameSession", &game_id))
+                          .map(AsyncIO::pure)
+                          .unwrap_or_else(AsyncIO::fail)
+                  }),
+                  // [Pure] 死亡処理パイプライン
+                  |io| io.map(|session| {
+                      pipe!(
+                          session,
+                          |s| find_enemy_by_id(&s, enemy_id.clone())
+                              .ok_or(EnemyError::EnemyNotFound { entity_identifier: enemy_id.to_string() })
+                              .map(|enemy| (s, enemy.clone())),
+                          |result| result.map(|(s, enemy)| {
+                              let loot = calculate_loot(&enemy, s.seed);
+                              (s, enemy, loot)
+                          }),
+                          |result| result.map(|(s, enemy, loot)| {
+                              let position = enemy.position;
+                              let with_items = drop_items_at_position(s, position, loot.clone());
+                              (with_items, enemy, loot)
+                          }),
+                          |result| result.map(|(s, enemy, loot)| {
+                              // PersistentHashMap から敵を削除
+                              let removed = entities_lens().modify(s, |entities| {
+                                  entities.remove(&enemy_id)
+                              });
+
+                              let mut events = vec![GameEvent::EnemyDied { entity: enemy_id.clone() }];
+                              events.extend(loot.into_iter().map(|item| {
+                                  GameEvent::ItemDropped {
+                                      item: item.identifier.clone(),
+                                      position: enemy.position,
+                                  }
+                              }));
+                              (removed, events)
+                          })
+                      )
+                  }),
+                  // [IO] 永続化
+                  |io| io.flat_map(|result| {
+                      match result {
+                          Ok((session, events)) => pipe!(
+                              cache.set(&game_id, &session, config.cache_ttl),
+                              |io| io.flat_map(|_| event_store.append(&game_id, &events)),
+                              |io| io.map(|_| Ok(session))
+                          ),
+                          Err(e) => AsyncIO::pure(Err(WorkflowError::Domain(e))),
+                      }
+                  })
+              )
+          }
+      }
+
+  - name: Trampoline for A* Pathfinding
+    description: pipe! と Trampoline を組み合わせた経路探索
+    code: |
+      fn calculate_path_to_target(
+          floor: &Floor,
+          from: Position,
+          to: Position,
+      ) -> Trampoline<Vec<Position>> {
+          fn a_star_step(
+              floor: &Floor,
+              state: AStarState,
+              target: Position,
+          ) -> Trampoline<Vec<Position>> {
+              pipe!(
+                  state.open_set.min(),
+                  |min_opt| match min_opt {
+                      None => Trampoline::done(vec![]),
+                      Some((_, current)) if current == target => {
+                          Trampoline::done(reconstruct_path(&state.came_from, current))
+                      }
+                      Some((_, current)) => {
+                          let new_state = pipe!(
+                              current,
+                              |c| get_neighbors(floor, c),
+                              |neighbors| neighbors.into_iter().fold(state.clone(), |acc, neighbor| {
+                                  process_neighbor(acc, current, neighbor, target)
+                              }),
+                              |s| AStarState {
+                                  open_set: s.open_set.remove(&current),
+                                  closed_set: s.closed_set.insert(current),
+                                  ..s
+                              }
+                          );
+                          // スタック安全な再帰
+                          Trampoline::suspend(move || a_star_step(floor, new_state, target))
+                      }
+                  }
+              )
+          }
+
+          a_star_step(floor, AStarState::initial(from), to)
+      }

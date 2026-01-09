@@ -1,0 +1,298 @@
+# Workflow Common Concepts
+# Project: Dungeon of Pure Functions
+# Onion Architecture: Application Layer
+
+metadata:
+  version: "1.0.0"
+  created_at: "2026-01-09"
+  updated_at: "2026-01-09"
+  status: draft
+
+# =============================================================================
+# Onion Architecture Overview
+# =============================================================================
+
+architecture:
+  description: |
+    ワークフロー層（Application Layer）はオニオンアーキテクチャの中間層に位置し、
+    ドメイン層の純粋関数を組み合わせてユースケースを実現する。
+
+    IO/AsyncIO処理はワークフローの「端」に追いやり、
+    コアロジックは純粋関数で構成する。
+
+  layers:
+    - name: Domain Layer (Core)
+      description: 純粋関数のみ、副作用なし
+      contains:
+        - Value Objects
+        - Entities
+        - Aggregates
+        - Domain Services
+        - Domain Events
+
+    - name: Application Layer (Workflow)
+      description: ユースケースの実現、型シグネチャ定義
+      contains:
+        - Workflow Types
+        - Ports (trait definitions)
+        - Use Case Orchestration
+
+    - name: Infrastructure Layer
+      description: 外部システムとの接続
+      contains:
+        - Repository Implementations
+        - External API Clients
+        - Cache Implementations
+
+    - name: API Layer
+      description: HTTP/CLI インターフェース
+      contains:
+        - Handlers
+        - DTOs
+        - Routing
+
+  dependency_direction: |
+    外側 → 内側
+    Infrastructure → Application → Domain
+    ※ Domain は何にも依存しない
+
+# =============================================================================
+# Workflow Design Principles
+# =============================================================================
+
+principles:
+  - name: IO at the Edges
+    description: |
+      IO/AsyncIO処理はワークフローの開始時（データ取得）と
+      終了時（データ保存）のみに限定する。
+      中間処理は全て純粋関数で構成する。
+    pattern: |
+      1. [IO] データ取得（リポジトリ、キャッシュ）
+      2. [Pure] ドメインロジック実行
+      3. [Pure] イベント生成
+      4. [IO] データ保存（リポジトリ、キャッシュ）
+      5. [IO] 外部通知（必要な場合）
+
+  - name: Ports and Adapters
+    description: |
+      外部依存はトレイト（Port）として抽象化し、
+      具体実装（Adapter）はインフラストラクチャ層で提供する。
+    example: |
+      // Port (trait)
+      pub trait GameSessionRepository {
+          fn find_by_id(&self, id: &GameIdentifier) -> AsyncIO<Option<GameSession>>;
+          fn save(&self, session: &GameSession) -> AsyncIO<()>;
+      }
+
+      // Adapter (implementation)
+      pub struct MySqlGameSessionRepository { ... }
+      impl GameSessionRepository for MySqlGameSessionRepository { ... }
+
+  - name: Dependency Injection via Higher-Order Functions
+    description: |
+      依存関係は高階関数のパラメータとして注入する。
+      これによりテスト容易性と柔軟性を確保する。
+    example: |
+      fn create_game_workflow<R: GameSessionRepository>(
+          repository: &R,
+      ) -> impl Fn(CreateGameCommand) -> AsyncIO<Result<GameSession, WorkflowError>>
+
+  - name: RWS Monad for Workflow Composition
+    description: |
+      Reader（設定読み取り）、Writer（イベントログ）、State（状態管理）を
+      RWSモナドで統合し、ワークフローを合成する。
+
+# =============================================================================
+# Common Ports (Traits)
+# =============================================================================
+
+ports:
+  repositories:
+    - name: GameSessionRepository
+      description: ゲームセッションの永続化
+      methods:
+        - name: find_by_id
+          signature: "fn find_by_id(&self, id: &GameIdentifier) -> AsyncIO<Option<GameSession>>"
+        - name: save
+          signature: "fn save(&self, session: &GameSession) -> AsyncIO<()>"
+        - name: delete
+          signature: "fn delete(&self, id: &GameIdentifier) -> AsyncIO<()>"
+        - name: list_active
+          signature: "fn list_active(&self) -> AsyncIO<Vec<GameIdentifier>>"
+
+    - name: EventStore
+      description: イベントの永続化（Event Sourcing）
+      methods:
+        - name: append
+          signature: "fn append(&self, session_id: &GameIdentifier, events: &[GameEvent]) -> AsyncIO<()>"
+        - name: load_events
+          signature: "fn load_events(&self, session_id: &GameIdentifier) -> AsyncIO<Vec<GameEvent>>"
+        - name: load_events_since
+          signature: "fn load_events_since(&self, session_id: &GameIdentifier, sequence: u64) -> AsyncIO<Vec<GameEvent>>"
+
+    - name: SnapshotStore
+      description: スナップショットの永続化
+      methods:
+        - name: save_snapshot
+          signature: "fn save_snapshot(&self, session_id: &GameIdentifier, state: &GameSession, sequence: u64) -> AsyncIO<()>"
+        - name: load_latest_snapshot
+          signature: "fn load_latest_snapshot(&self, session_id: &GameIdentifier) -> AsyncIO<Option<(GameSession, u64)>>"
+
+  caches:
+    - name: SessionCache
+      description: セッションキャッシュ
+      methods:
+        - name: get
+          signature: "fn get(&self, id: &GameIdentifier) -> AsyncIO<Option<GameSession>>"
+        - name: set
+          signature: "fn set(&self, id: &GameIdentifier, session: &GameSession, ttl: Duration) -> AsyncIO<()>"
+        - name: invalidate
+          signature: "fn invalidate(&self, id: &GameIdentifier) -> AsyncIO<()>"
+
+  external:
+    - name: RandomGenerator
+      description: 乱数生成（テスト可能性のため抽象化）
+      methods:
+        - name: generate_seed
+          signature: "fn generate_seed(&self) -> AsyncIO<RandomSeed>"
+        - name: next_u32
+          signature: "fn next_u32(&self, seed: &RandomSeed) -> (u32, RandomSeed)"
+
+# =============================================================================
+# Common Workflow Types
+# =============================================================================
+
+workflow_types:
+  - name: WorkflowResult
+    type: alias
+    definition: "Result<T, WorkflowError>"
+    description: ワークフロー実行結果
+
+  - name: WorkflowEffect
+    type: alias
+    definition: "RWS<WorkflowConfig, Vec<GameEvent>, GameSession, T>"
+    description: ワークフローエフェクト（純粋部分）
+
+  - name: WorkflowIO
+    type: alias
+    definition: "AsyncIO<WorkflowResult<T>>"
+    description: ワークフローIO（副作用部分）
+
+# =============================================================================
+# Common Errors
+# =============================================================================
+
+errors:
+  - name: WorkflowError
+    type: enum
+    derive:
+      - Debug
+      - Clone
+      - PartialEq
+      - Eq
+    description: ワークフローエラー
+    variants:
+      - name: Domain
+        data: DomainError
+        description: ドメインエラー
+
+      - name: NotFound
+        fields:
+          - { name: entity_type, type: String }
+          - { name: identifier, type: String }
+        description: エンティティ未発見
+
+      - name: Conflict
+        fields:
+          - { name: reason, type: String }
+        description: 競合エラー
+
+      - name: Repository
+        fields:
+          - { name: operation, type: String }
+          - { name: message, type: String }
+        description: リポジトリエラー
+
+      - name: Cache
+        fields:
+          - { name: operation, type: String }
+          - { name: message, type: String }
+        description: キャッシュエラー
+
+      - name: EventStore
+        fields:
+          - { name: operation, type: String }
+          - { name: message, type: String }
+        description: イベントストアエラー
+
+# =============================================================================
+# Workflow Configuration
+# =============================================================================
+
+config:
+  - name: WorkflowConfig
+    type: struct
+    description: ワークフロー設定
+    fields:
+      - name: game_config
+        type: GameConfig
+        description: ゲーム設定
+
+      - name: snapshot_interval
+        type: u64
+        description: スナップショット作成間隔（イベント数）
+
+      - name: cache_ttl
+        type: Duration
+        description: キャッシュTTL
+
+  - name: GameConfig
+    type: struct
+    description: ゲーム設定
+    fields:
+      - name: max_floor_level
+        type: u32
+        description: 最大階層数
+
+      - name: max_player_level
+        type: u8
+        description: 最大プレイヤーレベル
+
+      - name: inventory_capacity
+        type: u32
+        description: インベントリ容量
+
+      - name: fov_radius
+        type: u32
+        description: 視界半径
+
+# =============================================================================
+# lambars Usage in Workflows
+# =============================================================================
+
+lambars_usage:
+  - feature: RWS
+    usage: |
+      ワークフロー全体の統合エフェクト
+      - Reader: GameConfig の読み取り
+      - Writer: GameEvent の記録
+      - State: GameSession の更新
+
+  - feature: AsyncIO
+    usage: |
+      ワークフローの端でのみ使用
+      - リポジトリからのデータ取得
+      - リポジトリへのデータ保存
+      - キャッシュ操作
+      - 外部API呼び出し
+
+  - feature: Either
+    usage: |
+      ワークフロー結果の表現
+      - 成功/失敗の明示的な表現
+      - エラーハンドリング
+
+  - feature: pipe!/compose!
+    usage: |
+      ワークフローステップの合成
+      - 純粋関数のパイプライン
