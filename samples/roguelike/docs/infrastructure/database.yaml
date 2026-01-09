@@ -1,0 +1,997 @@
+# Infrastructure Design: Database
+# Project: Dungeon of Pure Functions
+# Component: MySQL + Redis
+
+metadata:
+  version: "1.0.0"
+  created_at: "2026-01-09"
+  updated_at: "2026-01-09"
+  status: draft
+
+# =============================================================================
+# Design Principles
+# =============================================================================
+
+design_principles:
+  - name: UUID Storage Optimization
+    description: UUID を BINARY(16) で格納し、VARCHAR(36) より効率的に
+
+  - name: Normalized Columns for Frequent Queries
+    description: 頻繁に検索・フィルタするフィールドは正規化カラムに
+
+  - name: JSON for Complex Structures
+    description: 永続データ構造やネストした値オブジェクトは JSON カラムに
+
+  - name: Event Sourcing Compliance
+    description: イベントは追記のみ、変更・削除不可
+
+# =============================================================================
+# MySQL Schema
+# =============================================================================
+
+mysql:
+  tables:
+    # -------------------------------------------------------------------------
+    # game_sessions - ゲームセッション（集約ルート）
+    # -------------------------------------------------------------------------
+    - name: game_sessions
+      description: ゲームセッションの主要情報を格納
+      aggregate: GameSession
+
+      columns:
+        - name: game_id
+          type: BINARY(16)
+          constraints: [PRIMARY KEY]
+          mapping:
+            aggregate_field: identifier
+            conversion: UUID → bytes
+
+        - name: player_id
+          type: BINARY(16)
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: player.identifier
+            conversion: UUID → bytes
+
+        - name: current_floor_level
+          type: INT UNSIGNED
+          constraints: [NOT NULL, DEFAULT 1]
+          mapping:
+            aggregate_field: current_floor.level
+            conversion: FloorLevel.0
+
+        - name: turn_count
+          type: BIGINT UNSIGNED
+          constraints: [NOT NULL, DEFAULT 0]
+          mapping:
+            aggregate_field: turn_count
+            conversion: TurnCount.0
+
+        - name: status
+          type: "ENUM('in_progress', 'victory', 'defeat', 'paused')"
+          constraints: [NOT NULL, DEFAULT 'in_progress']
+          mapping:
+            aggregate_field: status
+            conversion: GameStatus → ENUM variant name
+
+        - name: random_seed
+          type: BIGINT UNSIGNED
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: seed
+            conversion: RandomSeed.0
+
+        - name: event_sequence
+          type: BIGINT UNSIGNED
+          constraints: [NOT NULL, DEFAULT 0]
+          mapping:
+            aggregate_field: event_sequence
+            conversion: 直接マッピング
+
+        - name: created_at
+          type: TIMESTAMP(6)
+          constraints: [NOT NULL, DEFAULT CURRENT_TIMESTAMP(6)]
+          mapping:
+            aggregate_field: metadata.created_at
+
+        - name: updated_at
+          type: TIMESTAMP(6)
+          constraints: [NOT NULL, DEFAULT CURRENT_TIMESTAMP(6), ON UPDATE CURRENT_TIMESTAMP(6)]
+          mapping:
+            aggregate_field: metadata.updated_at
+
+      indexes:
+        - name: idx_player_id
+          columns: [player_id]
+        - name: idx_status
+          columns: [status]
+        - name: idx_created_at
+          columns: [created_at]
+
+    # -------------------------------------------------------------------------
+    # players - プレイヤー
+    # -------------------------------------------------------------------------
+    - name: players
+      description: プレイヤーの状態を格納
+      aggregate: Player
+
+      columns:
+        - name: player_id
+          type: BINARY(16)
+          constraints: [PRIMARY KEY]
+          mapping:
+            aggregate_field: identifier
+            conversion: UUID → bytes
+
+        - name: game_id
+          type: BINARY(16)
+          constraints: [NOT NULL, "FOREIGN KEY → game_sessions(game_id) ON DELETE CASCADE"]
+          mapping:
+            aggregate_field: "外部参照"
+
+        - name: name
+          type: VARCHAR(50)
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: name
+            conversion: PlayerName.0
+
+        - name: position_x
+          type: INT
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: position.x
+            conversion: Position.x
+
+        - name: position_y
+          type: INT
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: position.y
+            conversion: Position.y
+
+        - name: current_health
+          type: INT UNSIGNED
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: stats.health.current
+            conversion: Health.current
+
+        - name: max_health
+          type: INT UNSIGNED
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: stats.health.max
+            conversion: Health.max
+
+        - name: current_mana
+          type: INT UNSIGNED
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: stats.mana.current
+            conversion: Mana.current
+
+        - name: max_mana
+          type: INT UNSIGNED
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: stats.mana.max
+            conversion: Mana.max
+
+        - name: level
+          type: TINYINT UNSIGNED
+          constraints: [NOT NULL, DEFAULT 1]
+          mapping:
+            aggregate_field: level
+            conversion: Level.0
+
+        - name: experience
+          type: BIGINT UNSIGNED
+          constraints: [NOT NULL, DEFAULT 0]
+          mapping:
+            aggregate_field: experience
+            conversion: Experience.0
+
+        - name: base_stats
+          type: JSON
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: base_stats
+            conversion: BaseStats → JSON
+          json_schema:
+            type: object
+            properties:
+              strength: { type: integer }
+              dexterity: { type: integer }
+              intelligence: { type: integer }
+              vitality: { type: integer }
+
+        - name: combat_stats
+          type: JSON
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: "combat_stats (attack, defense, speed のみ)"
+            conversion: CombatStats → JSON
+          json_schema:
+            type: object
+            properties:
+              attack: { type: integer }
+              defense: { type: integer }
+              speed: { type: integer }
+
+        - name: equipment_slots
+          type: JSON
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: equipment
+            conversion: EquipmentSlots → JSON
+          json_schema:
+            type: object
+            properties:
+              weapon: { "$ref": "#/definitions/Item", nullable: true }
+              armor: { "$ref": "#/definitions/Item", nullable: true }
+              helmet: { "$ref": "#/definitions/Item", nullable: true }
+              accessory: { "$ref": "#/definitions/Item", nullable: true }
+
+        - name: inventory
+          type: JSON
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: inventory.items
+            conversion: PersistentVector<ItemStack> → JSON array
+          json_schema:
+            type: array
+            items:
+              type: object
+              properties:
+                item: { "$ref": "#/definitions/Item" }
+                quantity: { type: integer, minimum: 1 }
+
+        - name: status_effects
+          type: JSON
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: status_effects
+            conversion: PersistentVector<StatusEffect> → JSON array
+          json_schema:
+            type: array
+            items:
+              type: object
+              properties:
+                effect_type: { type: string }
+                remaining_turns: { type: integer }
+                magnitude: { type: number }
+
+      indexes:
+        - name: idx_game_id
+          columns: [game_id]
+
+    # -------------------------------------------------------------------------
+    # floors - フロア
+    # -------------------------------------------------------------------------
+    - name: floors
+      description: ダンジョンフロアの情報を格納
+      aggregate: Floor
+
+      columns:
+        - name: floor_id
+          type: BINARY(16)
+          constraints: [PRIMARY KEY]
+          mapping:
+            aggregate_field: identifier
+            conversion: UUID → bytes
+
+        - name: game_id
+          type: BINARY(16)
+          constraints: [NOT NULL, "FOREIGN KEY → game_sessions(game_id) ON DELETE CASCADE"]
+
+        - name: level
+          type: INT UNSIGNED
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: level
+            conversion: FloorLevel.0
+
+        - name: width
+          type: INT UNSIGNED
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: width
+
+        - name: height
+          type: INT UNSIGNED
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: height
+
+        - name: stairs_up_x
+          type: INT
+          constraints: [NULLABLE]
+          mapping:
+            aggregate_field: stairs_up.x
+            conversion: "Option<Position>.map(|p| p.x)"
+
+        - name: stairs_up_y
+          type: INT
+          constraints: [NULLABLE]
+          mapping:
+            aggregate_field: stairs_up.y
+            conversion: "Option<Position>.map(|p| p.y)"
+
+        - name: stairs_down_x
+          type: INT
+          constraints: [NULLABLE]
+          mapping:
+            aggregate_field: stairs_down.x
+            conversion: "Option<Position>.map(|p| p.x)"
+
+        - name: stairs_down_y
+          type: INT
+          constraints: [NULLABLE]
+          mapping:
+            aggregate_field: stairs_down.y
+            conversion: "Option<Position>.map(|p| p.y)"
+
+        - name: tiles
+          type: JSON
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: tiles
+            conversion: PersistentVector<PersistentVector<Tile>> → JSON 2D array
+          json_schema:
+            type: array
+            items:
+              type: array
+              items:
+                type: object
+                properties:
+                  kind: { type: string, enum: [Floor, Wall, Door, StairsUp, StairsDown, Trap] }
+                  is_explored: { type: boolean }
+                  is_visible: { type: boolean }
+                  door_is_open: { type: boolean, nullable: true }
+                  trap_type: { type: string, nullable: true }
+
+        - name: rooms
+          type: JSON
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: rooms
+            conversion: PersistentVector<Room> → JSON array
+          json_schema:
+            type: array
+            items:
+              type: object
+              properties:
+                top_left: { type: object, properties: { x: { type: integer }, y: { type: integer } } }
+                width: { type: integer }
+                height: { type: integer }
+
+        - name: corridors
+          type: JSON
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: corridors
+            conversion: PersistentVector<Corridor> → JSON array
+
+        - name: spawn_points
+          type: JSON
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: spawn_points
+            conversion: PersistentVector<Position> → JSON array
+          json_schema:
+            type: array
+            items:
+              type: object
+              properties:
+                x: { type: integer }
+                y: { type: integer }
+
+      indexes:
+        - name: idx_game_id
+          columns: [game_id]
+        - name: uk_game_floor
+          columns: [game_id, level]
+          unique: true
+
+    # -------------------------------------------------------------------------
+    # enemies - 敵
+    # -------------------------------------------------------------------------
+    - name: enemies
+      description: 敵キャラクターの情報を格納
+      aggregate: Enemy
+
+      columns:
+        - name: enemy_id
+          type: BINARY(16)
+          constraints: [PRIMARY KEY]
+          mapping:
+            aggregate_field: identifier
+            conversion: UUID → bytes
+
+        - name: game_id
+          type: BINARY(16)
+          constraints: [NOT NULL, "FOREIGN KEY → game_sessions(game_id) ON DELETE CASCADE"]
+
+        - name: floor_level
+          type: INT UNSIGNED
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: "外部参照 - 所属フロア"
+
+        - name: enemy_type
+          type: VARCHAR(50)
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: enemy_type
+            conversion: "EnemyType variant name (Goblin, Skeleton, etc.)"
+
+        - name: position_x
+          type: INT
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: position.x
+
+        - name: position_y
+          type: INT
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: position.y
+
+        - name: current_health
+          type: INT UNSIGNED
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: stats.health.current
+
+        - name: max_health
+          type: INT UNSIGNED
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: stats.health.max
+
+        - name: is_alive
+          type: BOOLEAN
+          constraints: [NOT NULL, DEFAULT TRUE]
+          mapping:
+            aggregate_field: "derived: stats.health.current > 0"
+
+        - name: combat_stats
+          type: JSON
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: stats
+            conversion: CombatStats → JSON
+
+        - name: behavior
+          type: JSON
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: behavior
+            conversion: AiBehavior → JSON
+          json_schema:
+            type: object
+            properties:
+              pattern: { type: string, enum: [Aggressive, Defensive, Patrol, Flee] }
+              detection_range: { type: integer }
+              attack_range: { type: integer }
+              flee_threshold: { type: number }
+
+        - name: loot_table
+          type: JSON
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: loot_table
+            conversion: LootTable → JSON
+
+        - name: status_effects
+          type: JSON
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: status_effects
+            conversion: PersistentVector<StatusEffect> → JSON array
+
+      indexes:
+        - name: idx_game_id
+          columns: [game_id]
+        - name: idx_game_floor
+          columns: [game_id, floor_level]
+        - name: idx_alive
+          columns: [game_id, is_alive]
+
+    # -------------------------------------------------------------------------
+    # game_events - イベントストア
+    # -------------------------------------------------------------------------
+    - name: game_events
+      description: Event Sourcing のイベントストア
+      aggregate: GameEvent
+
+      columns:
+        - name: event_id
+          type: BIGINT UNSIGNED
+          constraints: [PRIMARY KEY, AUTO_INCREMENT]
+
+        - name: game_id
+          type: BINARY(16)
+          constraints: [NOT NULL, "FOREIGN KEY → game_sessions(game_id) ON DELETE CASCADE"]
+          mapping:
+            aggregate_field: "外部参照"
+
+        - name: sequence_number
+          type: BIGINT UNSIGNED
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: "イベントのシーケンス番号"
+
+        - name: event_type
+          type: VARCHAR(100)
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: GameEvent variant name
+            conversion: "GameStarted, PlayerMoved, EnemyDied, etc."
+
+        - name: aggregate_type
+          type: VARCHAR(50)
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: 対象の集約種別
+            conversion: "GameSession, Player, Enemy, Floor"
+
+        - name: aggregate_id
+          type: BINARY(16)
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: 対象集約の識別子
+
+        - name: event_data
+          type: JSON
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: イベントのペイロード
+            conversion: GameEvent の各 variant のフィールド → JSON
+          json_schema_examples:
+            PlayerMoved:
+              type: object
+              properties:
+                from: { type: object, properties: { x: { type: integer }, y: { type: integer } } }
+                to: { type: object, properties: { x: { type: integer }, y: { type: integer } } }
+            PlayerAttacked:
+              type: object
+              properties:
+                target: { type: string, description: "EntityId as hex string" }
+                damage: { type: integer }
+            EnemyDied:
+              type: object
+              properties:
+                enemy_id: { type: string }
+                loot: { type: array, items: { "$ref": "#/definitions/Item" } }
+
+        - name: occurred_at
+          type: TIMESTAMP(6)
+          constraints: [NOT NULL, DEFAULT CURRENT_TIMESTAMP(6)]
+
+      indexes:
+        - name: uk_game_sequence
+          columns: [game_id, sequence_number]
+          unique: true
+        - name: idx_game_aggregate
+          columns: [game_id, aggregate_type, aggregate_id]
+        - name: idx_occurred_at
+          columns: [occurred_at]
+
+    # -------------------------------------------------------------------------
+    # game_snapshots - スナップショット
+    # -------------------------------------------------------------------------
+    - name: game_snapshots
+      description: パフォーマンス最適化のためのスナップショット
+
+      columns:
+        - name: snapshot_id
+          type: BIGINT UNSIGNED
+          constraints: [PRIMARY KEY, AUTO_INCREMENT]
+
+        - name: game_id
+          type: BINARY(16)
+          constraints: [NOT NULL, "FOREIGN KEY → game_sessions(game_id) ON DELETE CASCADE"]
+
+        - name: sequence_number
+          type: BIGINT UNSIGNED
+          constraints: [NOT NULL]
+          mapping:
+            description: "スナップショット時点のイベントシーケンス番号"
+
+        - name: state_data
+          type: JSON
+          constraints: [NOT NULL]
+          mapping:
+            aggregate_field: GameSession 全体の状態
+            conversion: 全集約をネストした JSON
+          json_schema:
+            type: object
+            properties:
+              game_session:
+                type: object
+                description: GameSession の全フィールド
+              player:
+                type: object
+                description: Player の全フィールド
+              floor:
+                type: object
+                description: 現在 Floor の全フィールド
+              enemies:
+                type: array
+                items:
+                  type: object
+                  description: Enemy の全フィールド
+
+        - name: created_at
+          type: TIMESTAMP(6)
+          constraints: [NOT NULL, DEFAULT CURRENT_TIMESTAMP(6)]
+
+      indexes:
+        - name: idx_game_sequence
+          columns: [game_id, sequence_number DESC]
+
+    # -------------------------------------------------------------------------
+    # leaderboard - リーダーボード
+    # -------------------------------------------------------------------------
+    - name: leaderboard
+      description: ゲーム終了時のスコアランキング
+
+      columns:
+        - name: entry_id
+          type: BIGINT UNSIGNED
+          constraints: [PRIMARY KEY, AUTO_INCREMENT]
+
+        - name: player_name
+          type: VARCHAR(50)
+          constraints: [NOT NULL]
+
+        - name: game_id
+          type: BINARY(16)
+          constraints: [NOT NULL]
+
+        - name: score
+          type: BIGINT UNSIGNED
+          constraints: [NOT NULL]
+
+        - name: dungeon_depth
+          type: INT UNSIGNED
+          constraints: [NOT NULL]
+
+        - name: turns_survived
+          type: BIGINT UNSIGNED
+          constraints: [NOT NULL]
+
+        - name: enemies_defeated
+          type: INT UNSIGNED
+          constraints: [NOT NULL]
+
+        - name: outcome
+          type: "ENUM('victory', 'defeat')"
+          constraints: [NOT NULL]
+
+        - name: completed_at
+          type: TIMESTAMP(6)
+          constraints: [NOT NULL]
+
+      indexes:
+        - name: idx_score
+          columns: [score DESC]
+        - name: idx_completed_at
+          columns: [completed_at DESC]
+        - name: idx_outcome_score
+          columns: [outcome, score DESC]
+
+  # ---------------------------------------------------------------------------
+  # Migration Files
+  # ---------------------------------------------------------------------------
+  migrations:
+    - file: 001_initial_schema.sql
+      description: game_sessions, players, floors, enemies テーブル作成
+
+    - file: 002_event_store.sql
+      description: game_events, game_snapshots テーブル作成
+
+    - file: 003_leaderboard.sql
+      description: leaderboard テーブル作成
+
+    - file: 004_indexes.sql
+      description: 追加インデックス最適化
+
+# =============================================================================
+# Redis Design
+# =============================================================================
+
+redis:
+  serialization:
+    primary: bincode
+    description: |
+      bincode は Rust ネイティブで最高のパフォーマンス。
+      開発環境では JSON も選択可能（feature flag で切替）。
+    comparison:
+      - format: bincode
+        size: smallest
+        speed: fastest
+        human_readable: false
+        recommended: true
+
+      - format: JSON
+        size: large
+        speed: slow
+        human_readable: true
+        use_case: development/debugging
+
+      - format: MessagePack
+        size: medium
+        speed: medium
+        human_readable: false
+        use_case: alternative
+
+  key_naming:
+    pattern: "{env}:roguelike:{domain}:{resource_type}:{identifier}"
+    prefixes:
+      - name: dev
+        description: 開発環境
+      - name: prod
+        description: 本番環境
+      - name: test
+        description: テスト環境
+
+  data_stores:
+    # -------------------------------------------------------------------------
+    # Session Cache
+    # -------------------------------------------------------------------------
+    - name: SessionCache
+      description: アクティブなゲームセッションのキャッシュ
+      key_pattern: "{env}:roguelike:session:{game_id}"
+      data_structure: "String (bytes)"
+      ttl: 3600  # 1 hour
+      serialization: bincode
+
+      cached_structure:
+        name: CachedGameSession
+        fields:
+          - name: game_id
+            type: "[u8; 16]"
+            description: UUID bytes
+          - name: player
+            type: CachedPlayer
+          - name: current_floor
+            type: CachedFloor
+          - name: enemies
+            type: "Vec<CachedEnemy>"
+          - name: turn_count
+            type: u64
+          - name: status
+            type: u8
+            description: GameStatus enum discriminant
+          - name: seed
+            type: u64
+          - name: event_sequence
+            type: u64
+
+      size_estimate:
+        base_info: "~100 bytes"
+        player: "~500 bytes"
+        floor_50x50: "~10KB"
+        enemies_20: "~2KB"
+        total: "~15KB per session"
+
+      port_interface:
+        trait_name: SessionCache
+        methods:
+          - name: get
+            signature: "fn get(&self, game_id: &GameIdentifier) -> AsyncIO<Option<GameSession>>"
+            redis_operation: "GET {env}:roguelike:session:{game_id}"
+
+          - name: set
+            signature: "fn set(&self, game_id: &GameIdentifier, session: &GameSession, ttl: Duration) -> AsyncIO<()>"
+            redis_operation: "SET {env}:roguelike:session:{game_id} {data} EX {ttl}"
+
+          - name: invalidate
+            signature: "fn invalidate(&self, game_id: &GameIdentifier) -> AsyncIO<()>"
+            redis_operation: "DEL {env}:roguelike:session:{game_id}"
+
+          - name: exists
+            signature: "fn exists(&self, game_id: &GameIdentifier) -> AsyncIO<bool>"
+            redis_operation: "EXISTS {env}:roguelike:session:{game_id}"
+
+    # -------------------------------------------------------------------------
+    # Turn Lock
+    # -------------------------------------------------------------------------
+    - name: TurnLock
+      description: ターン処理の分散ロック
+      key_pattern: "{env}:roguelike:lock:turn:{game_id}"
+      data_structure: String
+      ttl: 30  # 30 seconds
+      serialization: "none (UUID string)"
+
+      lock_structure:
+        fields:
+          - name: lock_id
+            type: String
+            description: UUID 文字列（所有者識別）
+          - name: acquired_at
+            type: i64
+            description: Unix timestamp
+
+      operations:
+        acquire: "SET {env}:roguelike:lock:turn:{game_id} {lock_id} NX EX 30"
+        release: "Lua script (CAS - compare and swap)"
+        extend: "Lua script (TTL extension)"
+
+      lua_scripts:
+        release: |
+          local lock_id = redis.call('GET', KEYS[1])
+          if lock_id == ARGV[1] then
+              return redis.call('DEL', KEYS[1])
+          else
+              return 0
+          end
+
+        extend: |
+          local lock_id = redis.call('GET', KEYS[1])
+          if lock_id == ARGV[1] then
+              return redis.call('EXPIRE', KEYS[1], ARGV[2])
+          else
+              return 0
+          end
+
+      port_interface:
+        trait_name: TurnLock
+        methods:
+          - name: acquire
+            signature: "fn acquire(&self, game_id: &GameIdentifier, ttl: Duration) -> AsyncIO<Option<LockId>>"
+
+          - name: release
+            signature: "fn release(&self, game_id: &GameIdentifier, lock_id: &LockId) -> AsyncIO<bool>"
+
+          - name: extend
+            signature: "fn extend(&self, game_id: &GameIdentifier, lock_id: &LockId, ttl: Duration) -> AsyncIO<bool>"
+
+    # -------------------------------------------------------------------------
+    # Temporary Data Cache
+    # -------------------------------------------------------------------------
+    - name: TemporaryDataCache
+      description: ターン中の一時データキャッシュ
+      key_pattern: "{env}:roguelike:temp:{game_id}:{key}"
+      data_structure: "String (bytes)"
+      ttl: 300  # 5 minutes
+      serialization: bincode
+
+      port_interface:
+        trait_name: TemporaryDataCache
+        methods:
+          - name: get
+            signature: "fn get<T: DeserializeOwned>(&self, game_id: &GameIdentifier, key: &str) -> AsyncIO<Option<T>>"
+
+          - name: set
+            signature: "fn set<T: Serialize>(&self, game_id: &GameIdentifier, key: &str, value: &T, ttl: Duration) -> AsyncIO<()>"
+
+          - name: delete
+            signature: "fn delete(&self, game_id: &GameIdentifier, key: &str) -> AsyncIO<()>"
+
+    # -------------------------------------------------------------------------
+    # Active Session Registry
+    # -------------------------------------------------------------------------
+    - name: ActiveSessionRegistry
+      description: アクティブなセッション一覧
+      key_pattern: "{env}:roguelike:active_sessions"
+      data_structure: Set
+      ttl: none
+      serialization: game_id strings
+
+      port_interface:
+        trait_name: ActiveSessionRegistry
+        methods:
+          - name: register
+            signature: "fn register(&self, game_id: &GameIdentifier) -> AsyncIO<()>"
+            redis_operation: "SADD {env}:roguelike:active_sessions {game_id}"
+
+          - name: unregister
+            signature: "fn unregister(&self, game_id: &GameIdentifier) -> AsyncIO<()>"
+            redis_operation: "SREM {env}:roguelike:active_sessions {game_id}"
+
+          - name: list_all
+            signature: "fn list_all(&self) -> AsyncIO<Vec<GameIdentifier>>"
+            redis_operation: "SMEMBERS {env}:roguelike:active_sessions"
+
+          - name: count
+            signature: "fn count(&self) -> AsyncIO<u64>"
+            redis_operation: "SCARD {env}:roguelike:active_sessions"
+
+    # -------------------------------------------------------------------------
+    # Leaderboard
+    # -------------------------------------------------------------------------
+    - name: Leaderboard
+      description: スコアランキング
+      key_patterns:
+        global: "{env}:roguelike:leaderboard:global"
+        daily: "{env}:roguelike:leaderboard:daily:{YYYYMMDD}"
+      data_structure: Sorted Set
+      ttl:
+        global: none
+        daily: 604800  # 7 days
+      serialization:
+        score: f64
+        member: JSON string
+
+      member_structure:
+        fields:
+          - name: player_name
+            type: String
+          - name: game_id
+            type: String
+          - name: dungeon_depth
+            type: u32
+          - name: outcome
+            type: String
+
+      port_interface:
+        trait_name: Leaderboard
+        methods:
+          - name: add_score
+            signature: "fn add_score(&self, entry: &LeaderboardEntry) -> AsyncIO<()>"
+            redis_operation: "ZADD {key} {score} {member_json}"
+
+          - name: get_top
+            signature: "fn get_top(&self, count: usize) -> AsyncIO<Vec<LeaderboardEntry>>"
+            redis_operation: "ZREVRANGE {key} 0 {count-1} WITHSCORES"
+
+          - name: get_rank
+            signature: "fn get_rank(&self, game_id: &GameIdentifier) -> AsyncIO<Option<u64>>"
+            redis_operation: "ZREVRANK {key} {member}"
+
+    # -------------------------------------------------------------------------
+    # Rate Limiter
+    # -------------------------------------------------------------------------
+    - name: RateLimiter
+      description: API レート制限
+      key_pattern: "{env}:roguelike:ratelimit:{player_id}:{endpoint}"
+      data_structure: "String (counter)"
+      ttl: 60  # 1 minute
+      serialization: "none (integer)"
+
+      port_interface:
+        trait_name: RateLimiter
+        methods:
+          - name: increment
+            signature: "fn increment(&self, player_id: &str, endpoint: &str) -> AsyncIO<u64>"
+            redis_operation: "INCR {key}"
+
+          - name: check_limit
+            signature: "fn check_limit(&self, player_id: &str, endpoint: &str, limit: u64) -> AsyncIO<bool>"
+
+  # ---------------------------------------------------------------------------
+  # Adapter Implementation Structure
+  # ---------------------------------------------------------------------------
+  adapter_structure:
+    directory: "src/infrastructure/redis/"
+    files:
+      - name: mod.rs
+        description: モジュール定義
+
+      - name: connection.rs
+        description: Redis 接続プール管理
+
+      - name: serialization.rs
+        description: bincode/JSON シリアライズ切替
+
+      - name: session_cache.rs
+        description: SessionCache adapter 実装
+
+      - name: turn_lock.rs
+        description: TurnLock adapter 実装（Lua scripts）
+
+      - name: temp_cache.rs
+        description: TemporaryDataCache adapter 実装
+
+      - name: active_sessions.rs
+        description: ActiveSessionRegistry adapter 実装
+
+      - name: leaderboard.rs
+        description: Leaderboard adapter 実装
+
+      - name: rate_limiter.rs
+        description: RateLimiter adapter 実装
