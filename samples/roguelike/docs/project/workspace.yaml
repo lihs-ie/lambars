@@ -1,0 +1,704 @@
+# =============================================================================
+# Rust Workspace Structure Design
+# =============================================================================
+# Dungeon of Pure Functions - Workspace 構成設計
+# =============================================================================
+
+metadata:
+  document_type: workspace_design
+  version: "1.0.0"
+  created_at: "2025-01-09"
+  updated_at: "2025-01-09"
+  status: draft
+
+# =============================================================================
+# Overview
+# =============================================================================
+
+overview:
+  description: |
+    Dungeon of Pure Functions は Rust のワークスペース機能を使用して、
+    オニオンアーキテクチャの各レイヤーを独立したクレートとして構成する。
+    これにより、依存関係の方向を強制し、レイヤー間の結合度を低く保つ。
+
+  architecture: |
+    ┌─────────────────────────────────────────────────────────────┐
+    │                    roguelike-api                            │
+    │              (HTTP handlers, DTOs)                          │
+    ├─────────────────────────────────────────────────────────────┤
+    │               roguelike-infrastructure                      │
+    │        (MySQL Repository, Redis Cache, File I/O)           │
+    ├─────────────────────────────────────────────────────────────┤
+    │                 roguelike-workflow                          │
+    │           (Workflow - 抽象型定義、合成)                      │
+    ├─────────────────────────────────────────────────────────────┤
+    │                  roguelike-domain                           │
+    │     (Entities, Value Objects, Domain Events, Services)     │
+    │              ※ 純粋関数のみ、副作用なし                      │
+    └─────────────────────────────────────────────────────────────┘
+
+  dependency_direction: |
+    依存関係は常に内側（Domain）に向かう:
+    - api → infrastructure, workflow
+    - infrastructure → workflow, domain
+    - workflow → domain
+    - domain → (外部依存なし、lambars のみ)
+
+# =============================================================================
+# Directory Structure
+# =============================================================================
+
+directory_structure:
+  description: |
+    samples/roguelike/
+    ├── Cargo.toml              # Workspace root
+    ├── README.md               # Project documentation
+    ├── docs/                   # Design documents
+    │   ├── domains/
+    │   ├── workflows/
+    │   ├── infrastructure/
+    │   ├── api/
+    │   └── project/            # Workspace structure design (this file)
+    └── crates/
+        ├── domain/             # Domain layer crate
+        ├── workflow/           # Workflow layer crate
+        ├── infrastructure/     # Infrastructure layer crate
+        └── api/                # API layer crate
+
+# =============================================================================
+# Workspace Cargo.toml
+# =============================================================================
+
+workspace_cargo_toml:
+  file: Cargo.toml
+  content: |
+    [workspace]
+    resolver = "3"
+    members = [
+        "crates/domain",
+        "crates/workflow",
+        "crates/infrastructure",
+        "crates/api",
+    ]
+
+    [workspace.package]
+    version = "0.1.0"
+    edition = "2024"
+    rust-version = "1.92.0"
+    authors = ["lambars contributors"]
+    license = "MIT OR Apache-2.0"
+    repository = "https://github.com/lihs-ie/lambars"
+
+    [workspace.dependencies]
+    # Internal crates
+    roguelike-domain = { path = "crates/domain" }
+    roguelike-workflow = { path = "crates/workflow" }
+    roguelike-infrastructure = { path = "crates/infrastructure" }
+    roguelike-api = { path = "crates/api" }
+
+    # lambars
+    lambars = { path = "../..", features = ["full"] }
+
+    # Async runtime
+    tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+    futures = "0.3"
+
+    # Web framework
+    axum = "0.8"
+    tower = "0.5"
+    tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+    # Database
+    sqlx = { version = "0.8", features = ["runtime-tokio", "mysql", "uuid", "chrono", "json"] }
+
+    # Redis
+    redis = { version = "0.31", features = ["tokio-comp", "connection-manager"] }
+
+    # Serialization
+    serde = { version = "1.0", features = ["derive"] }
+    serde_json = "1.0"
+    bincode = "1.3"
+
+    # UUID
+    uuid = { version = "1.11", features = ["v4", "serde"] }
+
+    # Date/Time
+    chrono = { version = "0.4", features = ["serde"] }
+
+    # Logging
+    tracing = "0.1"
+    tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+    # Error handling
+    thiserror = "2.0"
+    anyhow = "1.0"
+
+    # Testing
+    rstest = "0.26"
+    proptest = "1.5"
+
+    [workspace.lints.rust]
+    unsafe_code = "forbid"
+
+    [workspace.lints.clippy]
+    module_name_repetitions = "allow"
+    must_use_candidate = "allow"
+
+# =============================================================================
+# Domain Crate
+# =============================================================================
+
+domain_crate:
+  name: roguelike-domain
+  path: crates/domain
+  description: |
+    ドメイン層クレート。エンティティ、値オブジェクト、集約、
+    ドメインイベント、ドメインサービスを含む。
+    全てのロジックは純粋関数として実装され、副作用を持たない。
+
+  cargo_toml:
+    file: crates/domain/Cargo.toml
+    content: |
+      [package]
+      name = "roguelike-domain"
+      description = "Domain layer for Dungeon of Pure Functions roguelike game"
+      version.workspace = true
+      edition.workspace = true
+      rust-version.workspace = true
+      authors.workspace = true
+      license.workspace = true
+      repository.workspace = true
+
+      [dependencies]
+      lambars.workspace = true
+      uuid.workspace = true
+      chrono.workspace = true
+      serde.workspace = true
+      thiserror.workspace = true
+
+      [dev-dependencies]
+      rstest.workspace = true
+      proptest.workspace = true
+
+      [lints]
+      workspace = true
+
+  module_structure:
+    file: crates/domain/src/lib.rs
+    content: |
+      //! Domain layer for Dungeon of Pure Functions
+      //!
+      //! This crate contains all domain entities, value objects, aggregates,
+      //! domain events, and domain services. All logic is implemented as pure
+      //! functions without side effects.
+
+      pub mod aggregates;
+      pub mod entities;
+      pub mod errors;
+      pub mod events;
+      pub mod services;
+      pub mod values;
+
+  submodules:
+    - name: values
+      description: 値オブジェクト（Position, Health, Mana など）
+      files:
+        - values/mod.rs
+        - values/position.rs
+        - values/health.rs
+        - values/mana.rs
+        - values/experience.rs
+        - values/damage.rs
+        - values/seed.rs
+
+    - name: entities
+      description: エンティティ（Player, Enemy, Item, Tile など）
+      files:
+        - entities/mod.rs
+        - entities/player.rs
+        - entities/enemy.rs
+        - entities/item.rs
+        - entities/tile.rs
+        - entities/room.rs
+
+    - name: aggregates
+      description: 集約ルート（GameSession, Floor）
+      files:
+        - aggregates/mod.rs
+        - aggregates/game_session.rs
+        - aggregates/floor.rs
+
+    - name: events
+      description: ドメインイベント
+      files:
+        - events/mod.rs
+        - events/game_event.rs
+        - events/combat_event.rs
+        - events/movement_event.rs
+        - events/item_event.rs
+
+    - name: services
+      description: ドメインサービス（純粋関数）
+      files:
+        - services/mod.rs
+        - services/combat.rs
+        - services/movement.rs
+        - services/floor_generation.rs
+        - services/pathfinding.rs
+        - services/field_of_view.rs
+
+    - name: errors
+      description: ドメインエラー型
+      files:
+        - errors/mod.rs
+        - errors/validation.rs
+        - errors/game_session.rs
+        - errors/player.rs
+        - errors/enemy.rs
+        - errors/floor.rs
+        - errors/combat.rs
+        - errors/item.rs
+        - errors/command.rs
+
+  lambars_usage:
+    - feature: PersistentVector
+      usage: "インベントリ、イベント履歴、敵リスト等の不変コレクション"
+    - feature: PersistentHashMap
+      usage: "位置→エンティティのマッピング、アイテム辞書"
+    - feature: Either
+      usage: "ドメインエラーの表現（Either<DomainError, T>）"
+    - feature: pipe!/compose!
+      usage: "ドメインロジックの関数合成"
+    - feature: Functor/Monad
+      usage: "値オブジェクトの変換操作"
+
+# =============================================================================
+# Workflow Crate
+# =============================================================================
+
+workflow_crate:
+  name: roguelike-workflow
+  path: crates/workflow
+  description: |
+    ワークフロー層クレート。アプリケーションのユースケースを
+    AsyncIO を使用した関数型ワークフローとして定義する。
+    具体的な IO 実装は含まず、抽象的なポート（trait）を定義。
+
+  cargo_toml:
+    file: crates/workflow/Cargo.toml
+    content: |
+      [package]
+      name = "roguelike-workflow"
+      description = "Workflow layer for Dungeon of Pure Functions roguelike game"
+      version.workspace = true
+      edition.workspace = true
+      rust-version.workspace = true
+      authors.workspace = true
+      license.workspace = true
+      repository.workspace = true
+
+      [dependencies]
+      roguelike-domain.workspace = true
+      lambars.workspace = true
+      uuid.workspace = true
+      chrono.workspace = true
+      thiserror.workspace = true
+
+      [dev-dependencies]
+      rstest.workspace = true
+
+      [lints]
+      workspace = true
+
+  module_structure:
+    file: crates/workflow/src/lib.rs
+    content: |
+      //! Workflow layer for Dungeon of Pure Functions
+      //!
+      //! This crate defines application use cases as functional workflows
+      //! using AsyncIO. It contains abstract port definitions (traits)
+      //! without concrete IO implementations.
+
+      pub mod commands;
+      pub mod errors;
+      pub mod ports;
+      pub mod workflows;
+
+  submodules:
+    - name: ports
+      description: 抽象ポート定義（Repository, Cache, EventStore trait）
+      files:
+        - ports/mod.rs
+        - ports/game_session_repository.rs
+        - ports/event_store.rs
+        - ports/snapshot_store.rs
+        - ports/cache.rs
+        - ports/random.rs
+
+    - name: commands
+      description: ワークフローへの入力コマンド
+      files:
+        - commands/mod.rs
+        - commands/game.rs
+        - commands/turn.rs
+        - commands/player.rs
+
+    - name: workflows
+      description: ワークフロー実装
+      files:
+        - workflows/mod.rs
+        - workflows/game_workflow.rs
+        - workflows/turn_workflow.rs
+        - workflows/player_workflow.rs
+
+    - name: errors
+      description: ワークフローエラー型
+      files:
+        - errors/mod.rs
+        - errors/workflow_error.rs
+
+  lambars_usage:
+    - feature: AsyncIO
+      usage: "全てのワークフローの戻り値型（AsyncIO<Either<WorkflowError, T>>）"
+    - feature: Either
+      usage: "エラーハンドリング（ドメインエラー、インフラエラーの統合）"
+    - feature: pipe!/compose!
+      usage: "ワークフローステップの関数合成"
+    - feature: for_async!
+      usage: "複数の AsyncIO 操作の合成（モナディック合成）"
+    - feature: Traversable
+      usage: "バッチ操作（複数エンティティの一括処理）"
+
+# =============================================================================
+# Infrastructure Crate
+# =============================================================================
+
+infrastructure_crate:
+  name: roguelike-infrastructure
+  path: crates/infrastructure
+  description: |
+    インフラストラクチャ層クレート。ワークフロー層で定義された
+    ポート（trait）の具体的な実装を提供する。
+    MySQL、Redis、ファイル I/O などの外部システムとの連携を担当。
+
+  cargo_toml:
+    file: crates/infrastructure/Cargo.toml
+    content: |
+      [package]
+      name = "roguelike-infrastructure"
+      description = "Infrastructure layer for Dungeon of Pure Functions roguelike game"
+      version.workspace = true
+      edition.workspace = true
+      rust-version.workspace = true
+      authors.workspace = true
+      license.workspace = true
+      repository.workspace = true
+
+      [dependencies]
+      roguelike-domain.workspace = true
+      roguelike-workflow.workspace = true
+      lambars.workspace = true
+      tokio.workspace = true
+      futures.workspace = true
+      sqlx.workspace = true
+      redis.workspace = true
+      serde.workspace = true
+      serde_json.workspace = true
+      bincode.workspace = true
+      uuid.workspace = true
+      chrono.workspace = true
+      thiserror.workspace = true
+      tracing.workspace = true
+
+      [dev-dependencies]
+      rstest.workspace = true
+
+      [lints]
+      workspace = true
+
+  module_structure:
+    file: crates/infrastructure/src/lib.rs
+    content: |
+      //! Infrastructure layer for Dungeon of Pure Functions
+      //!
+      //! This crate provides concrete implementations of the ports
+      //! defined in the workflow layer. It handles all external I/O
+      //! including MySQL, Redis, and file operations.
+
+      pub mod adapters;
+      pub mod config;
+      pub mod errors;
+
+  submodules:
+    - name: adapters
+      description: ポートの具体的な実装（アダプター）
+      files:
+        - adapters/mod.rs
+        - adapters/mysql/mod.rs
+        - adapters/mysql/game_session_repository.rs
+        - adapters/mysql/event_store.rs
+        - adapters/mysql/snapshot_store.rs
+        - adapters/redis/mod.rs
+        - adapters/redis/cache.rs
+        - adapters/redis/distributed_lock.rs
+        - adapters/random.rs
+
+    - name: config
+      description: 設定関連
+      files:
+        - config/mod.rs
+        - config/database.rs
+        - config/redis.rs
+
+    - name: errors
+      description: インフラストラクチャエラー型
+      files:
+        - errors/mod.rs
+        - errors/database.rs
+        - errors/cache.rs
+
+  lambars_usage:
+    - feature: AsyncIO
+      usage: "全ての DB/Redis 操作を AsyncIO でラップ"
+    - feature: bracket
+      usage: "トランザクション、分散ロックのリソース安全な管理"
+    - feature: pipe!/compose!
+      usage: "Row → Entity 変換パイプライン"
+    - feature: PersistentVector/PersistentHashMap
+      usage: "JSON/bincode シリアライズ/デシリアライズ"
+    - feature: Either
+      usage: "DB エラーの表現"
+    - feature: Traversable
+      usage: "バッチ INSERT/SELECT 操作"
+    - feature: Foldable
+      usage: "Event Sourcing の状態復元（イベント列の fold）"
+
+# =============================================================================
+# API Crate
+# =============================================================================
+
+api_crate:
+  name: roguelike-api
+  path: crates/api
+  description: |
+    API 層クレート。HTTP エンドポイント、DTO、エラーレスポンス変換を担当。
+    Axum フレームワークを使用し、ワークフローを呼び出して結果を HTTP レスポンスに変換。
+
+  cargo_toml:
+    file: crates/api/Cargo.toml
+    content: |
+      [package]
+      name = "roguelike-api"
+      description = "API layer for Dungeon of Pure Functions roguelike game"
+      version.workspace = true
+      edition.workspace = true
+      rust-version.workspace = true
+      authors.workspace = true
+      license.workspace = true
+      repository.workspace = true
+
+      [[bin]]
+      name = "roguelike-server"
+      path = "src/main.rs"
+
+      [dependencies]
+      roguelike-domain.workspace = true
+      roguelike-workflow.workspace = true
+      roguelike-infrastructure.workspace = true
+      lambars.workspace = true
+      tokio.workspace = true
+      axum.workspace = true
+      tower.workspace = true
+      tower-http.workspace = true
+      serde.workspace = true
+      serde_json.workspace = true
+      uuid.workspace = true
+      chrono.workspace = true
+      thiserror.workspace = true
+      anyhow.workspace = true
+      tracing.workspace = true
+      tracing-subscriber.workspace = true
+
+      [dev-dependencies]
+      rstest.workspace = true
+
+      [lints]
+      workspace = true
+
+  module_structure:
+    file: crates/api/src/lib.rs
+    content: |
+      //! API layer for Dungeon of Pure Functions
+      //!
+      //! This crate provides HTTP endpoints using the Axum framework.
+      //! It transforms workflow results into HTTP responses and handles
+      //! all API-level concerns like DTOs and error responses.
+
+      pub mod dto;
+      pub mod errors;
+      pub mod handlers;
+      pub mod routes;
+      pub mod state;
+
+  main_rs:
+    file: crates/api/src/main.rs
+    content: |
+      //! Dungeon of Pure Functions - Game Server
+      //!
+      //! Entry point for the roguelike game server.
+
+      use roguelike_api::{routes, state::AppState};
+      use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+      #[tokio::main]
+      async fn main() -> anyhow::Result<()> {
+          // Initialize tracing
+          tracing_subscriber::registry()
+              .with(tracing_subscriber::EnvFilter::from_default_env())
+              .with(tracing_subscriber::fmt::layer())
+              .init();
+
+          // Initialize application state
+          let state = AppState::new().await?;
+
+          // Build router
+          let app = routes::create_router(state);
+
+          // Start server
+          let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
+          tracing::info!("Server listening on {}", listener.local_addr()?);
+          axum::serve(listener, app).await?;
+
+          Ok(())
+      }
+
+  submodules:
+    - name: handlers
+      description: HTTP ハンドラー
+      files:
+        - handlers/mod.rs
+        - handlers/game.rs
+        - handlers/turn.rs
+        - handlers/player.rs
+        - handlers/health.rs
+
+    - name: dto
+      description: Data Transfer Objects
+      files:
+        - dto/mod.rs
+        - dto/request.rs
+        - dto/response.rs
+
+    - name: errors
+      description: API エラーレスポンス変換
+      files:
+        - errors/mod.rs
+        - errors/api_error.rs
+
+    - name: routes
+      description: ルーティング定義
+      files:
+        - routes/mod.rs
+
+    - name: state
+      description: アプリケーション状態
+      files:
+        - state/mod.rs
+
+  lambars_usage:
+    - feature: AsyncIO
+      usage: "Workflow の実行（AsyncIO::run() で Future に変換）"
+    - feature: Either
+      usage: "WorkflowError → HTTP ステータスコード変換"
+    - feature: pipe!/compose!
+      usage: "リクエスト処理パイプライン"
+    - feature: Functor/Monad
+      usage: "レスポンス変換チェーン"
+    - feature: Prism
+      usage: "コマンド種別の解析"
+
+# =============================================================================
+# Dependency Graph
+# =============================================================================
+
+dependency_graph:
+  description: |
+    クレート間の依存関係を視覚化。矢印は「依存する」方向を示す。
+
+  ascii_diagram: |
+    ┌───────────────────┐
+    │   roguelike-api   │
+    └─────────┬─────────┘
+              │
+              ├─────────────────────────┐
+              │                         │
+              ▼                         ▼
+    ┌───────────────────────┐  ┌───────────────────┐
+    │roguelike-infrastructure│  │ roguelike-workflow│
+    └───────────┬───────────┘  └─────────┬─────────┘
+                │                         │
+                ├─────────────────────────┤
+                │                         │
+                ▼                         ▼
+              ┌───────────────────────────┐
+              │     roguelike-domain      │
+              └───────────────────────────┘
+                            │
+                            ▼
+              ┌───────────────────────────┐
+              │         lambars           │
+              └───────────────────────────┘
+
+  dependency_table:
+    - crate: roguelike-domain
+      depends_on:
+        - lambars
+
+    - crate: roguelike-workflow
+      depends_on:
+        - roguelike-domain
+        - lambars
+
+    - crate: roguelike-infrastructure
+      depends_on:
+        - roguelike-domain
+        - roguelike-workflow
+        - lambars
+
+    - crate: roguelike-api
+      depends_on:
+        - roguelike-domain
+        - roguelike-workflow
+        - roguelike-infrastructure
+        - lambars
+
+# =============================================================================
+# Build & Test Commands
+# =============================================================================
+
+commands:
+  build:
+    all: "cargo build --workspace"
+    release: "cargo build --workspace --release"
+    single: "cargo build -p roguelike-domain"
+
+  test:
+    all: "cargo test --workspace"
+    single: "cargo test -p roguelike-domain"
+    with_output: "cargo test --workspace -- --nocapture"
+
+  check:
+    all: "cargo check --workspace"
+    clippy: "cargo clippy --workspace --all-targets -- -D warnings"
+
+  format:
+    check: "cargo fmt --all -- --check"
+    apply: "cargo fmt --all"
+
+  doc:
+    build: "cargo doc --workspace --no-deps"
+    open: "cargo doc --workspace --no-deps --open"
+
+  run:
+    server: "cargo run -p roguelike-api"
+    server_release: "cargo run -p roguelike-api --release"
