@@ -1,6 +1,6 @@
 # lambars
 
-[English](/README.md)
+[English](README.en.md)
 
 > **Note**: このドキュメントは AI によって翻訳されました。誤りや不自然な表現がある場合は、Issue または Pull Request でお知らせください。
 
