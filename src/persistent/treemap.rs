@@ -797,24 +797,7 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
     /// ```
     #[must_use]
     pub fn iter(&self) -> PersistentTreeMapIterator<'_, K, V> {
-        let mut entries = Vec::with_capacity(self.length);
-        Self::collect_entries_in_order(self.root.as_ref(), &mut entries);
-        PersistentTreeMapIterator {
-            entries,
-            current_index: 0,
-        }
-    }
-
-    /// Collects all entries in sorted order (in-order traversal).
-    fn collect_entries_in_order<'a>(
-        node: Option<&'a ReferenceCounter<Node<K, V>>>,
-        entries: &mut Vec<(&'a K, &'a V)>,
-    ) {
-        if let Some(node_ref) = node {
-            Self::collect_entries_in_order(node_ref.left.as_ref(), entries);
-            entries.push((&node_ref.key, &node_ref.value));
-            Self::collect_entries_in_order(node_ref.right.as_ref(), entries);
-        }
+        PersistentTreeMapIterator::new(self.root.as_ref(), self.length)
     }
 
     /// Returns an iterator over keys in sorted order.
@@ -1306,35 +1289,82 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
 // =============================================================================
 
 /// An iterator over key-value pairs of a [`PersistentTreeMap`].
+///
+/// This iterator uses a stack-based in-order traversal algorithm, providing
+/// true lazy evaluation. Instead of collecting all entries upfront, it traverses
+/// the Red-Black tree on demand, enabling efficient early termination patterns.
+///
+/// # Complexity
+///
+/// - Creation: O(log n) - pushes the leftmost path onto the stack
+/// - `next()`: O(1) amortized - each node is pushed and popped exactly once
+/// - Space: O(log n) - stack depth is bounded by tree height
+///
+/// # Examples
+///
+/// ```rust
+/// use lambars::persistent::PersistentTreeMap;
+///
+/// let map: PersistentTreeMap<i32, i32> = (0..1000).map(|i| (i, i * 10)).collect();
+///
+/// // Early termination is efficient - only visits first few nodes
+/// let first_three: Vec<_> = map.iter().take(3).collect();
+/// assert_eq!(first_three.len(), 3);
+/// ```
 pub struct PersistentTreeMapIterator<'a, K, V> {
-    entries: Vec<(&'a K, &'a V)>,
-    current_index: usize,
+    stack: Vec<&'a ReferenceCounter<Node<K, V>>>,
+    remaining: usize,
+}
+
+impl<'a, K, V> PersistentTreeMapIterator<'a, K, V> {
+    fn new(root: Option<&'a ReferenceCounter<Node<K, V>>>, length: usize) -> Self {
+        let mut iterator = Self {
+            stack: Vec::with_capacity(Self::estimated_stack_capacity(length)),
+            remaining: length,
+        };
+        iterator.push_leftmost_path(root);
+        iterator
+    }
+
+    /// Red-Black tree height is at most 2 * log2(n + 1).
+    const fn estimated_stack_capacity(length: usize) -> usize {
+        if length == 0 {
+            0
+        } else {
+            2 * (usize::BITS - length.leading_zeros()) as usize + 1
+        }
+    }
+
+    fn push_leftmost_path(&mut self, mut node: Option<&'a ReferenceCounter<Node<K, V>>>) {
+        while let Some(current) = node {
+            self.stack.push(current);
+            node = current.left.as_ref();
+        }
+    }
 }
 
 impl<'a, K, V> Iterator for PersistentTreeMapIterator<'a, K, V> {
     type Item = (&'a K, &'a V);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.current_index >= self.entries.len() {
-            None
-        } else {
-            let entry = self.entries[self.current_index];
-            self.current_index += 1;
-            Some(entry)
-        }
+        let node = self.stack.pop()?;
+        self.remaining = self.remaining.saturating_sub(1);
+        self.push_leftmost_path(node.right.as_ref());
+        Some((&node.key, &node.value))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.entries.len().saturating_sub(self.current_index);
-        (remaining, Some(remaining))
+        (self.remaining, Some(self.remaining))
     }
 }
 
 impl<K, V> ExactSizeIterator for PersistentTreeMapIterator<'_, K, V> {
     fn len(&self) -> usize {
-        self.entries.len().saturating_sub(self.current_index)
+        self.remaining
     }
 }
+
+impl<K, V> std::iter::FusedIterator for PersistentTreeMapIterator<'_, K, V> {}
 
 /// A range iterator over key-value pairs of a [`PersistentTreeMap`].
 pub struct PersistentTreeMapRangeIterator<'a, K, V> {
@@ -2766,6 +2796,163 @@ mod multithread_tests {
         for handle in handles {
             handle.join().expect("Thread panicked");
         }
+    }
+
+    // =========================================================================
+    // Lazy Iterator Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_lazy_iterator_empty_map() {
+        let map: PersistentTreeMap<i32, String> = PersistentTreeMap::new();
+        let mut iterator = map.iter();
+        assert_eq!(iterator.next(), None);
+        // FusedIterator: calling next() after None should still return None
+        assert_eq!(iterator.next(), None);
+    }
+
+    #[rstest]
+    fn test_lazy_iterator_single_element() {
+        let map = PersistentTreeMap::singleton(42, "answer".to_string());
+        let mut iterator = map.iter();
+        assert_eq!(iterator.next(), Some((&42, &"answer".to_string())));
+        assert_eq!(iterator.next(), None);
+    }
+
+    #[rstest]
+    fn test_lazy_iterator_in_order_traversal() {
+        let map = PersistentTreeMap::new()
+            .insert(3, "three".to_string())
+            .insert(1, "one".to_string())
+            .insert(5, "five".to_string())
+            .insert(2, "two".to_string())
+            .insert(4, "four".to_string());
+
+        let entries: Vec<(&i32, &String)> = map.iter().collect();
+        let keys: Vec<&i32> = entries.iter().map(|(key, _)| *key).collect();
+        assert_eq!(keys, vec![&1, &2, &3, &4, &5]);
+    }
+
+    #[rstest]
+    fn test_lazy_iterator_early_termination() {
+        let map: PersistentTreeMap<i32, i32> = (0..100).map(|index| (index, index * 10)).collect();
+
+        // take() should work efficiently with lazy evaluation
+        let first_five: Vec<(&i32, &i32)> = map.iter().take(5).collect();
+        assert_eq!(first_five.len(), 5);
+        assert_eq!(first_five[0], (&0, &0));
+        assert_eq!(first_five[4], (&4, &40));
+    }
+
+    #[rstest]
+    fn test_lazy_iterator_exact_size() {
+        let map = PersistentTreeMap::new()
+            .insert(1, "one".to_string())
+            .insert(2, "two".to_string())
+            .insert(3, "three".to_string());
+
+        let mut iterator = map.iter();
+        assert_eq!(iterator.len(), 3);
+
+        iterator.next();
+        assert_eq!(iterator.len(), 2);
+
+        iterator.next();
+        assert_eq!(iterator.len(), 1);
+
+        iterator.next();
+        assert_eq!(iterator.len(), 0);
+
+        // After exhaustion
+        iterator.next();
+        assert_eq!(iterator.len(), 0);
+    }
+
+    #[rstest]
+    fn test_lazy_iterator_size_hint() {
+        let map = PersistentTreeMap::new()
+            .insert(1, "one".to_string())
+            .insert(2, "two".to_string())
+            .insert(3, "three".to_string());
+
+        let mut iterator = map.iter();
+        assert_eq!(iterator.size_hint(), (3, Some(3)));
+
+        iterator.next();
+        assert_eq!(iterator.size_hint(), (2, Some(2)));
+
+        iterator.next();
+        iterator.next();
+        assert_eq!(iterator.size_hint(), (0, Some(0)));
+    }
+
+    #[rstest]
+    fn test_lazy_iterator_find() {
+        let map: PersistentTreeMap<i32, i32> = (0..1000).map(|index| (index, index * 10)).collect();
+
+        // find() should benefit from lazy evaluation
+        let result = map.iter().find(|(key, _)| **key == 50);
+        assert_eq!(result, Some((&50, &500)));
+    }
+
+    #[rstest]
+    fn test_lazy_iterator_any() {
+        let map: PersistentTreeMap<i32, i32> = (0..1000).map(|index| (index, index * 10)).collect();
+
+        // any() should short-circuit with lazy evaluation
+        let has_fifty = map.iter().any(|(key, _)| *key == 50);
+        assert!(has_fifty);
+    }
+
+    #[rstest]
+    fn test_lazy_iterator_all() {
+        let map: PersistentTreeMap<i32, i32> = (0..100).map(|index| (index, index * 10)).collect();
+
+        let all_non_negative = map.iter().all(|(key, _)| *key >= 0);
+        assert!(all_non_negative);
+
+        let all_less_than_fifty = map.iter().all(|(key, _)| *key < 50);
+        assert!(!all_less_than_fifty);
+    }
+
+    #[rstest]
+    fn test_lazy_iterator_preserves_sorted_order_large() {
+        let map: PersistentTreeMap<i32, i32> = (0..1000).map(|index| (index, index)).collect();
+
+        let keys: Vec<i32> = map.iter().map(|(key, _)| *key).collect();
+        let mut sorted_keys = keys.clone();
+        sorted_keys.sort_unstable();
+        assert_eq!(keys, sorted_keys);
+    }
+
+    #[rstest]
+    fn test_lazy_iterator_fused_behavior() {
+        let map = PersistentTreeMap::singleton(1, "one".to_string());
+        let mut iterator = map.iter();
+
+        assert_eq!(iterator.next(), Some((&1, &"one".to_string())));
+        assert_eq!(iterator.next(), None);
+        // FusedIterator guarantees these will also be None
+        assert_eq!(iterator.next(), None);
+        assert_eq!(iterator.next(), None);
+    }
+
+    #[rstest]
+    fn test_lazy_iterator_order_consistency_with_keys_values() {
+        let map = PersistentTreeMap::new()
+            .insert(5, "five".to_string())
+            .insert(3, "three".to_string())
+            .insert(7, "seven".to_string())
+            .insert(1, "one".to_string())
+            .insert(9, "nine".to_string());
+
+        let iter_keys: Vec<&i32> = map.iter().map(|(key, _)| key).collect();
+        let keys_method: Vec<&i32> = map.keys().collect();
+        assert_eq!(iter_keys, keys_method);
+
+        let iter_values: Vec<&String> = map.iter().map(|(_, value)| value).collect();
+        let values_method: Vec<&String> = map.values().collect();
+        assert_eq!(iter_values, values_method);
     }
 }
 
