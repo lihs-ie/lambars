@@ -1,0 +1,37 @@
+[package]
+name = "roguelike-api"
+description = "API layer for Dungeon of Pure Functions roguelike game"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "roguelike-server"
+path = "src/main.rs"
+
+[dependencies]
+roguelike-domain.workspace = true
+roguelike-workflow.workspace = true
+roguelike-infrastructure.workspace = true
+lambars.workspace = true
+tokio.workspace = true
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
+
+[lints]
+workspace = true

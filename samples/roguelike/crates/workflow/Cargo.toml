@@ -1,0 +1,22 @@
+[package]
+name = "roguelike-workflow"
+description = "Workflow layer for Dungeon of Pure Functions roguelike game"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+roguelike-domain.workspace = true
+lambars.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
+
+[lints]
+workspace = true
