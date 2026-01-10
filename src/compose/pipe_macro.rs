@@ -37,8 +37,8 @@
 ///
 /// For working with monadic types (`Option`, `Result`, `Box`, `Identity`, etc.):
 ///
-/// - `pipe!(m, => f)` - Lift operator: applies `f` using `fmap` (equivalent to `m.flat_map(|v| M::pure(f(v)))`)
-/// - `pipe!(m, =>> f)` - Bind operator: applies `f` using `flat_map` (equivalent to `m.flat_map(f)`)
+/// - `pipe!(m, => f)` - Lift operator: applies `f` using [`Functor::fmap`](crate::typeclass::Functor::fmap) (semantically equivalent to `m.flat_map(|v| M::pure(f(v)))`)
+/// - `pipe!(m, =>> f)` - Bind operator: applies `f` using [`Monad::flat_map`](crate::typeclass::Monad::flat_map)
 ///
 /// These operators can be mixed freely:
 ///

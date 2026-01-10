@@ -1,8 +1,9 @@
 # pipe! マクロのモナド対応拡張 要件定義
 #
 # 概要:
-#   pipe! マクロを拡張し、|> と >> 演算子を追加することで、
+#   pipe! マクロを拡張し、=> (lift) と =>> (bind) 演算子を追加することで、
 #   純粋関数とモナド関数を統一的に合成できるようにする。
+#   （Rust のマクロ構文制約により |> と >> は使用不可のため代替演算子を採用）
 #
 # 設計方針:
 #   1. 既存の pipe! マクロの後方互換性を維持
@@ -45,9 +46,9 @@ background:
     ```rust
     pipe!(
         seed_io,
-        |> create_identifiers,  // 純粋関数をリフト
-        >> persist_session,     // モナド関数を適用
-        >> cache_session
+        => create_identifiers,   // 純粋関数をリフト
+        =>> persist_session,     // モナド関数を適用
+        =>> cache_session
     )
     ```
 
@@ -77,25 +78,30 @@ requirements:
   # 1. 新しい演算子の導入
   # ======================================================================
   - id: pipe_lift_operator
-    name: "リフト演算子 (|>) の導入"
+    name: "リフト演算子 (=>) の導入"
     description: |
-      pipe! マクロに |> 演算子を追加する。
+      pipe! マクロに => 演算子を追加する。
       この演算子は純粋関数を適用し、結果をモナドにリフトする。
 
-      展開結果:
+      意味論的等価表現:
       ```rust
-      pipe!(m, |> f) => m.flat_map(|v| M::pure(f(v)))
+      pipe!(m, => f) ≡ m.flat_map(|v| M::pure(f(v)))
       ```
 
-      ただし、Rust のマクロ構文では | が単独で使えないため、
-      代替として `=>` を使用する可能性がある。
+      実装では型推論を簡潔にするため Functor::fmap を使用する:
+      ```rust
+      pipe!(m, => f) → m.fmap(f)
+      ```
+
+      （fmap と flat_map + pure は Functor/Monad 則により等価）
 
     methods:
       - name: "pipe! with lift operator"
         signature: "pipe!(monad, => pure_function)"
         description: |
           モナド値に純粋関数を適用し、結果をリフトする。
-          内部的には flat_map と pure の組み合わせで実現する。
+          意味論的には flat_map と pure の組み合わせと等価だが、
+          実装では Functor::fmap を使用（型推論がよりシンプル）。
         examples:
           - description: "Option に対する純粋関数のリフト"
             code: |
@@ -115,18 +121,15 @@ requirements:
               assert_eq!(result, Some(12));
 
   - id: pipe_bind_operator
-    name: "バインド演算子 (>>) の導入"
+    name: "バインド演算子 (=>>) の導入"
     description: |
-      pipe! マクロに >> 演算子を追加する。
+      pipe! マクロに =>> 演算子を追加する。
       この演算子はモナド関数を直接適用する（flat_map）。
 
       展開結果:
       ```rust
-      pipe!(m, >> f) => m.flat_map(f)
+      pipe!(m, =>> f) → m.flat_map(f)
       ```
-
-      Rust のマクロ構文では >> がシフト演算子として解釈される可能性があるため、
-      代替として `=>>` または `~>` を使用する可能性がある。
 
     methods:
       - name: "pipe! with bind operator"
