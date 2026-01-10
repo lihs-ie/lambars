@@ -1477,16 +1477,21 @@ let constructed: Shape = circle_prism.review(10.0);
 
 ### IO Monad
 
-| Haskell               | lambars          | 説明                    |
-| --------------------- | ---------------- | ----------------------- |
-| `pure a` / `return a` | `IO::pure`       | IO 内の純粋な値         |
-| `IO action`           | `IO::new`        | IO アクションの作成     |
-| `io >>= f`            | `IO::flat_map`   | IO アクションのバインド |
-| `io >> io2`           | `IO::then`       | 順序付け                |
-| `putStrLn s`          | `IO::print_line` | 行を出力                |
-| `getLine`             | `IO::read_line`  | 行を読み込み            |
-| `threadDelay n`       | `IO::delay`      | 実行を遅延              |
-| `catch io handler`    | `IO::catch`      | 例外を処理              |
+IO は `Functor`、`Applicative`、`Monad` トレイトを実装しており、`pipe!` マクロの演算子で使用できます。
+
+| Haskell               | lambars                  | 説明                    |
+| --------------------- | ------------------------ | ----------------------- |
+| `pure a` / `return a` | `IO::pure`               | IO 内の純粋な値         |
+| `IO action`           | `IO::new`                | IO アクションの作成     |
+| `fmap f io`           | `io.fmap(f)` (Functor)   | IO をマップ             |
+| `io >>= f`            | `io.flat_map(f)` (Monad) | IO アクションのバインド |
+| `io >> io2`           | `io.then(io2)` (Monad)   | 順序付け                |
+| `putStrLn s`          | `IO::print_line`         | 行を出力                |
+| `getLine`             | `IO::read_line`          | 行を読み込み            |
+| `threadDelay n`       | `IO::delay`              | 実行を遅延              |
+| `catch io handler`    | `IO::catch`              | 例外を処理              |
+
+> **注**: `fmap`、`flat_map`、`then` はトレイトのインポートが必要: `use lambars::typeclass::{Functor, Monad};`
 
 #### コード例
 
@@ -1523,6 +1528,7 @@ main = do
 ```rust
 // lambars
 use lambars::effect::IO;
+use lambars::typeclass::{Functor, Monad};
 
 let computation: IO<i32> = IO::new(|| {
     println!("Computing...");

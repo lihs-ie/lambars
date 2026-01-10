@@ -295,6 +295,16 @@ let result = pipe!(
     => |x| x * 2                                     // lift: Some(30)
 );
 assert_eq!(result, Some(30));
+
+// IO monad with pipe!
+use lambars::effect::IO;
+
+let io_result = pipe!(
+    IO::pure(5),
+    => |x| x + 1,           // lift: IO(6)
+    =>> |x| IO::pure(x * 2) // bind: IO(12)
+).run_unsafe();
+assert_eq!(io_result, 12);
 ```
 
 #### partial! (Partial Application)

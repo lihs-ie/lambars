@@ -1197,6 +1197,52 @@ impl<A> std::fmt::Display for AsyncIO<A> {
     }
 }
 
+// =============================================================================
+// TypeConstructor Implementation
+// =============================================================================
+
+impl<A> crate::typeclass::TypeConstructor for AsyncIO<A> {
+    type Inner = A;
+    type WithType<B> = AsyncIO<B>;
+}
+
+// =============================================================================
+// NOTE: Functor, Applicative, Monad trait implementations for AsyncIO
+// =============================================================================
+//
+// Due to Rust's type system limitations, AsyncIO cannot implement the standard
+// Functor, Applicative, and Monad traits. The issue is that AsyncIO requires
+// `Send` bounds on closures and values (because futures need to be sendable
+// between threads), but the trait definitions do not include these bounds.
+//
+// Rust does not allow trait implementations to add stricter bounds than what
+// the trait definition specifies. Therefore, we cannot add `F: Send` or `B: Send`
+// in the trait method implementations.
+//
+// As a workaround, AsyncIO provides the following inherent methods that mirror
+// the trait functionality:
+//
+// - `fmap` (Functor::fmap equivalent)
+// - `flat_map` (Monad::flat_map equivalent)
+// - `and_then` (Monad::and_then equivalent)
+// - `then` (Monad::then equivalent)
+// - `map2` (Applicative::map2 equivalent)
+// - `product` (Applicative::product equivalent)
+//
+// These methods are defined in the "Functor Operations", "Applicative Operations",
+// and "Monad Operations" sections above.
+//
+// For a future enhancement, consider:
+// 1. Adding `Send` bounds to the Functor/Applicative/Monad traits (breaking change)
+// 2. Creating AsyncFunctor/AsyncApplicative/AsyncMonad traits with Send bounds
+// 3. Using Higher-Kinded Type emulation that supports Send bounds
+//
+// See Issue #XXX for tracking this limitation.
+
+// =============================================================================
+// AsyncIOLike Implementation
+// =============================================================================
+
 impl<A: 'static> crate::typeclass::AsyncIOLike for AsyncIO<A> {
     type Value = A;
 
@@ -1818,5 +1864,235 @@ mod tests {
         let result = action.on_error(|_| async {}).run_async().await;
 
         assert_eq!(result, Err("original error".to_string()));
+    }
+
+    // =========================================================================
+    // TypeConstructor Tests
+    // =========================================================================
+    //
+    // NOTE: AsyncIO implements only TypeConstructor trait.
+    // Functor, Applicative, and Monad traits cannot be implemented due to Rust's
+    // type system limitations (requires Send bounds not present in trait definitions).
+    // See the NOTE section in the trait implementations above for details.
+    //
+    // Instead, AsyncIO provides equivalent inherent methods (fmap, flat_map, etc.)
+    // which are tested in the "Original Tests" section above.
+    // =========================================================================
+
+    mod typeclass_tests {
+        use super::*;
+        use crate::typeclass::TypeConstructor;
+        use rstest::rstest;
+
+        // =====================================================================
+        // TypeConstructor Tests
+        // =====================================================================
+
+        #[rstest]
+        fn asyncio_type_constructor_inner_type() {
+            // Verify that TypeConstructor is implemented correctly
+            fn assert_type_constructor<T: TypeConstructor>() {}
+            assert_type_constructor::<AsyncIO<i32>>();
+        }
+
+        #[rstest]
+        fn asyncio_type_constructor_with_type() {
+            // Verify that WithType associated type works correctly
+            fn check_with_type<T: TypeConstructor>()
+            where
+                T::WithType<String>: Sized,
+            {
+            }
+            check_with_type::<AsyncIO<i32>>();
+        }
+    }
+
+    // =========================================================================
+    // Inherent Method Law Tests (Functor/Monad Laws using inherent methods)
+    // =========================================================================
+
+    mod inherent_method_law_tests {
+        use super::*;
+        use rstest::rstest;
+
+        // =====================================================================
+        // Functor Laws (using inherent fmap method)
+        // =====================================================================
+
+        #[rstest]
+        #[tokio::test]
+        async fn asyncio_fmap_identity_law() {
+            // fmap(|x| x) should not change the value
+            let async_io = AsyncIO::pure(42);
+            let result = async_io.fmap(|x| x).run_async().await;
+            assert_eq!(result, 42);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn asyncio_fmap_composition_law() {
+            // fmap(f).fmap(g) == fmap(|x| g(f(x)))
+            let f = |x: i32| x + 1;
+            let g = |x: i32| x * 2;
+
+            let async_io1 = AsyncIO::pure(5);
+            let async_io2 = AsyncIO::pure(5);
+
+            let result1 = async_io1.fmap(f).fmap(g).run_async().await;
+            let result2 = async_io2.fmap(move |x| g(f(x))).run_async().await;
+
+            assert_eq!(result1, result2);
+        }
+
+        // =====================================================================
+        // Monad Laws (using inherent flat_map method)
+        // =====================================================================
+
+        #[rstest]
+        #[tokio::test]
+        async fn asyncio_flat_map_left_identity_law() {
+            // pure(a).flat_map(f) == f(a)
+            let value = 5;
+            let f = |x: i32| AsyncIO::pure(x * 2);
+
+            let result1 = AsyncIO::pure(value).flat_map(f).run_async().await;
+            let result2 = f(value).run_async().await;
+
+            assert_eq!(result1, result2);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn asyncio_flat_map_right_identity_law() {
+            // m.flat_map(pure) == m
+            let async_io = AsyncIO::pure(42);
+            let result = async_io.flat_map(AsyncIO::pure).run_async().await;
+            assert_eq!(result, 42);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn asyncio_flat_map_associativity_law() {
+            // m.flat_map(f).flat_map(g) == m.flat_map(|x| f(x).flat_map(g))
+            let f = |x: i32| AsyncIO::pure(x + 1);
+            let g = |x: i32| AsyncIO::pure(x * 2);
+
+            let async_io1 = AsyncIO::pure(5);
+            let async_io2 = AsyncIO::pure(5);
+
+            let result1 = async_io1.flat_map(f).flat_map(g).run_async().await;
+            let result2 = async_io2
+                .flat_map(move |x| f(x).flat_map(g))
+                .run_async()
+                .await;
+
+            assert_eq!(result1, result2);
+        }
+
+        // =====================================================================
+        // Method Chaining Tests (using inherent methods)
+        // =====================================================================
+
+        #[rstest]
+        #[tokio::test]
+        async fn asyncio_method_chaining() {
+            let async_io = AsyncIO::pure(10);
+            let result = async_io.fmap(|x| x + 1).fmap(|x| x * 2).run_async().await;
+            assert_eq!(result, 22);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn asyncio_mixed_method_chaining() {
+            let async_io = AsyncIO::pure(5);
+            let result = async_io
+                .fmap(|x| x + 1) // 6
+                .flat_map(|x| AsyncIO::pure(x * 2)) // 12
+                .fmap(|x| x.to_string()) // "12"
+                .run_async()
+                .await;
+            assert_eq!(result, "12");
+        }
+
+        // =====================================================================
+        // Laziness Tests (ensuring deferred execution)
+        // =====================================================================
+
+        #[rstest]
+        #[tokio::test]
+        async fn asyncio_fmap_is_lazy() {
+            use std::sync::Arc;
+            use std::sync::atomic::{AtomicBool, Ordering};
+
+            let executed = Arc::new(AtomicBool::new(false));
+            let executed_clone = executed.clone();
+
+            let async_io = AsyncIO::new(move || async move {
+                executed_clone.store(true, Ordering::SeqCst);
+                42
+            });
+
+            let mapped = async_io.fmap(|x| x * 2);
+
+            // Not executed yet
+            assert!(!executed.load(Ordering::SeqCst));
+
+            let result = mapped.run_async().await;
+            assert!(executed.load(Ordering::SeqCst));
+            assert_eq!(result, 84);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn asyncio_flat_map_is_lazy() {
+            use std::sync::Arc;
+            use std::sync::atomic::{AtomicBool, Ordering};
+
+            let executed = Arc::new(AtomicBool::new(false));
+            let executed_clone = executed.clone();
+
+            let async_io = AsyncIO::new(move || async move {
+                executed_clone.store(true, Ordering::SeqCst);
+                42
+            });
+
+            let flat_mapped = async_io.flat_map(|x| AsyncIO::pure(x * 2));
+
+            // Not executed yet
+            assert!(!executed.load(Ordering::SeqCst));
+
+            let result = flat_mapped.run_async().await;
+            assert!(executed.load(Ordering::SeqCst));
+            assert_eq!(result, 84);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn asyncio_map2_is_lazy() {
+            use std::sync::Arc;
+            use std::sync::atomic::{AtomicUsize, Ordering};
+
+            let counter = Arc::new(AtomicUsize::new(0));
+            let counter1 = counter.clone();
+            let counter2 = counter.clone();
+
+            let async_io1 = AsyncIO::new(move || async move {
+                counter1.fetch_add(1, Ordering::SeqCst);
+                10
+            });
+            let async_io2 = AsyncIO::new(move || async move {
+                counter2.fetch_add(1, Ordering::SeqCst);
+                20
+            });
+
+            let combined = async_io1.map2(async_io2, |a, b| a + b);
+
+            // Not executed yet
+            assert_eq!(counter.load(Ordering::SeqCst), 0);
+
+            let result = combined.run_async().await;
+            assert_eq!(counter.load(Ordering::SeqCst), 2);
+            assert_eq!(result, 30);
+        }
     }
 }

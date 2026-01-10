@@ -716,3 +716,86 @@ mod monad_extension_tests {
         }
     }
 }
+
+#[cfg(all(test, feature = "effect"))]
+mod io_pipe_tests {
+    use crate::effect::IO;
+    use rstest::rstest;
+
+    #[rstest]
+    fn io_lift_operator() {
+        let result = pipe!(IO::pure(5), => |x| x * 2).run_unsafe();
+        assert_eq!(result, 10);
+    }
+
+    #[rstest]
+    fn io_bind_operator() {
+        let result = pipe!(
+            IO::pure(5),
+            =>> |x| IO::pure(x * 2)
+        )
+        .run_unsafe();
+        assert_eq!(result, 10);
+    }
+
+    #[rstest]
+    fn io_mixed_with_pure_functions() {
+        let result = pipe!(
+            IO::pure(5),
+            => |x| x + 1,            // lift: IO(6)
+            =>> |x| IO::pure(x * 2), // bind: IO(12)
+            => |x| x.to_string()     // lift: IO("12")
+        )
+        .run_unsafe();
+        assert_eq!(result, "12");
+    }
+
+    #[rstest]
+    fn io_chain_multiple_lifts() {
+        let result = pipe!(
+            IO::pure(1),
+            => |x| x + 1,
+            => |x| x * 2,
+            => |x| x + 3
+        )
+        .run_unsafe();
+        assert_eq!(result, 7); // ((1 + 1) * 2) + 3 = 7
+    }
+
+    #[rstest]
+    fn io_chain_multiple_binds() {
+        let result = pipe!(
+            IO::pure(1),
+            =>> |x| IO::pure(x + 1),
+            =>> |x| IO::pure(x * 2),
+            =>> |x| IO::pure(x + 3)
+        )
+        .run_unsafe();
+        assert_eq!(result, 7);
+    }
+
+    #[rstest]
+    fn io_preserves_deferred_execution() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let counter = Rc::new(Cell::new(0));
+        let counter_clone = counter.clone();
+
+        let io = pipe!(
+            IO::new(move || {
+                counter_clone.set(counter_clone.get() + 1);
+                5
+            }),
+            => |x| x * 2
+        );
+
+        // IO が作成されただけでは実行されない
+        assert_eq!(counter.get(), 0);
+
+        // run_unsafe() を呼ぶと実行される
+        let result = io.run_unsafe();
+        assert_eq!(result, 10);
+        assert_eq!(counter.get(), 1);
+    }
+}

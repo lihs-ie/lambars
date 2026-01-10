@@ -14,12 +14,13 @@
 //!
 //! ```rust
 //! use lambars::effect::IO;
+//! use lambars::typeclass::{Functor, Monad};
 //!
 //! // Create a pure IO action
 //! let io = IO::pure(42);
 //! assert_eq!(io.run_unsafe(), 42);
 //!
-//! // Chain IO actions
+//! // Chain IO actions using Functor and Monad traits
 //! let io = IO::pure(10)
 //!     .fmap(|x| x * 2)
 //!     .flat_map(|x| IO::pure(x + 1));
@@ -152,157 +153,12 @@ impl<A: 'static> IO<A> {
     pub fn run_unsafe(self) -> A {
         (self.run_io)()
     }
-
-    /// Transforms the result of an IO action using a function.
-    ///
-    /// This is the `fmap` operation from Functor.
-    ///
-    /// # Arguments
-    ///
-    /// * `function` - A function to apply to the result.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use lambars::effect::IO;
-    ///
-    /// let io = IO::pure(21).fmap(|x| x * 2);
-    /// assert_eq!(io.run_unsafe(), 42);
-    /// ```
-    pub fn fmap<B, F>(self, function: F) -> IO<B>
-    where
-        F: FnOnce(A) -> B + 'static,
-        B: 'static,
-    {
-        IO::new(move || {
-            let a = self.run_unsafe();
-            function(a)
-        })
-    }
-
-    /// Chains IO actions, passing the result of the first to a function
-    /// that produces the second.
-    ///
-    /// This is the `bind` operation from Monad.
-    ///
-    /// # Arguments
-    ///
-    /// * `function` - A function that takes the result and returns a new IO action.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use lambars::effect::IO;
-    ///
-    /// let io = IO::pure(10).flat_map(|x| IO::pure(x * 2));
-    /// assert_eq!(io.run_unsafe(), 20);
-    /// ```
-    pub fn flat_map<B, F>(self, function: F) -> IO<B>
-    where
-        F: FnOnce(A) -> IO<B> + 'static,
-        B: 'static,
-    {
-        IO::new(move || {
-            let a = self.run_unsafe();
-            let io_b = function(a);
-            io_b.run_unsafe()
-        })
-    }
-
-    /// Alias for `flat_map`.
-    ///
-    /// This is the conventional Rust name for monadic bind.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use lambars::effect::IO;
-    ///
-    /// let io = IO::pure(10).and_then(|x| IO::pure(x + 5));
-    /// assert_eq!(io.run_unsafe(), 15);
-    /// ```
-    pub fn and_then<B, F>(self, function: F) -> IO<B>
-    where
-        F: FnOnce(A) -> IO<B> + 'static,
-        B: 'static,
-    {
-        self.flat_map(function)
-    }
-
-    /// Sequences two IO actions, discarding the result of the first.
-    ///
-    /// The first action is still executed for its side effects.
-    ///
-    /// # Arguments
-    ///
-    /// * `next` - The IO action to execute after this one.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use lambars::effect::IO;
-    ///
-    /// let io = IO::pure(10).then(IO::pure(20));
-    /// assert_eq!(io.run_unsafe(), 20);
-    /// ```
-    #[must_use]
-    pub fn then<B>(self, next: IO<B>) -> IO<B>
-    where
-        B: 'static,
-    {
-        self.flat_map(move |_| next)
-    }
-
-    /// Combines two IO actions using a function.
-    ///
-    /// # Arguments
-    ///
-    /// * `other` - The second IO action.
-    /// * `function` - A function to combine the results.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use lambars::effect::IO;
-    ///
-    /// let io1 = IO::pure(10);
-    /// let io2 = IO::pure(20);
-    /// let io = io1.map2(io2, |a, b| a + b);
-    /// assert_eq!(io.run_unsafe(), 30);
-    /// ```
-    pub fn map2<B, C, F>(self, other: IO<B>, function: F) -> IO<C>
-    where
-        F: FnOnce(A, B) -> C + 'static,
-        B: 'static,
-        C: 'static,
-    {
-        self.flat_map(move |a| other.fmap(move |b| function(a, b)))
-    }
-
-    /// Combines two IO actions into a tuple.
-    ///
-    /// # Arguments
-    ///
-    /// * `other` - The second IO action.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use lambars::effect::IO;
-    ///
-    /// let io1 = IO::pure(10);
-    /// let io2 = IO::pure("hello".to_string());
-    /// let io = io1.product(io2);
-    /// assert_eq!(io.run_unsafe(), (10, "hello".to_string()));
-    /// ```
-    #[must_use]
-    pub fn product<B>(self, other: IO<B>) -> IO<(A, B)>
-    where
-        B: 'static,
-    {
-        self.map2(other, |a, b| (a, b))
-    }
 }
+
+// Note: fmap, flat_map, and_then, then, map2, product methods are available
+// through the Functor, Applicative, and Monad trait implementations.
+// Import these traits to use them:
+//   use lambars::typeclass::{Functor, Applicative, Monad};
 
 // =============================================================================
 // Convenience Constructors
@@ -497,6 +353,127 @@ impl<A> std::fmt::Display for IO<A> {
     }
 }
 
+// =============================================================================
+// TypeConstructor Implementation
+// =============================================================================
+
+impl<A> crate::typeclass::TypeConstructor for IO<A> {
+    type Inner = A;
+    type WithType<B> = IO<B>;
+}
+
+// =============================================================================
+// Functor Implementation
+// =============================================================================
+
+impl<A: 'static> crate::typeclass::Functor for IO<A> {
+    fn fmap<B, F>(self, function: F) -> Self::WithType<B>
+    where
+        F: FnOnce(Self::Inner) -> B + 'static,
+        B: 'static,
+    {
+        IO::new(move || {
+            let a = self.run_unsafe();
+            function(a)
+        })
+    }
+
+    fn fmap_ref<B, F>(&self, _function: F) -> Self::WithType<B>
+    where
+        F: FnOnce(&Self::Inner) -> B + 'static,
+        B: 'static,
+    {
+        // IO cannot implement fmap_ref properly because the value is not available
+        // until the IO is executed. We would need to execute the IO to get a reference.
+        // This is a limitation of IO's deferred execution model.
+        unimplemented!(
+            "IO::fmap_ref is not available. Use fmap instead, which executes the IO lazily."
+        )
+    }
+}
+
+// =============================================================================
+// Applicative Implementation
+// =============================================================================
+
+impl<A: 'static> crate::typeclass::Applicative for IO<A> {
+    fn pure<B>(value: B) -> Self::WithType<B>
+    where
+        B: 'static,
+    {
+        IO::new(move || value)
+    }
+
+    fn map2<B, C, F>(self, other: Self::WithType<B>, function: F) -> Self::WithType<C>
+    where
+        F: FnOnce(A, B) -> C + 'static,
+        B: 'static,
+        C: 'static,
+    {
+        IO::new(move || {
+            let a = self.run_unsafe();
+            let b = other.run_unsafe();
+            function(a, b)
+        })
+    }
+
+    fn map3<B, C, D, F>(
+        self,
+        second: Self::WithType<B>,
+        third: Self::WithType<C>,
+        function: F,
+    ) -> Self::WithType<D>
+    where
+        F: FnOnce(A, B, C) -> D + 'static,
+        B: 'static,
+        C: 'static,
+        D: 'static,
+    {
+        IO::new(move || {
+            let a = self.run_unsafe();
+            let b = second.run_unsafe();
+            let c = third.run_unsafe();
+            function(a, b, c)
+        })
+    }
+
+    fn apply<B, Output>(self, other: Self::WithType<B>) -> Self::WithType<Output>
+    where
+        Self: Sized,
+        Self::Inner: FnOnce(B) -> Output,
+        B: 'static,
+        Output: 'static,
+    {
+        IO::new(move || {
+            let function = self.run_unsafe();
+            let b = other.run_unsafe();
+            function(b)
+        })
+    }
+}
+
+// =============================================================================
+// Monad Implementation
+// =============================================================================
+
+impl<A: 'static> crate::typeclass::Monad for IO<A> {
+    fn flat_map<B, F>(self, function: F) -> Self::WithType<B>
+    where
+        F: FnOnce(Self::Inner) -> Self::WithType<B> + 'static,
+        B: 'static,
+    {
+        IO::new(move || {
+            let a = self.run_unsafe();
+            let io_b = function(a);
+            io_b.run_unsafe()
+        })
+    }
+}
+
+// =============================================================================
+// IOLike Implementation
+// =============================================================================
+
 impl<A: 'static> crate::typeclass::IOLike for IO<A> {
     type Value = A;
 
@@ -511,67 +488,324 @@ impl<A: 'static> crate::typeclass::IOLike for IO<A> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::typeclass::{Applicative, Functor, Monad, TypeConstructor};
+    use rstest::rstest;
 
     // =========================================================================
     // Display Tests
     // =========================================================================
 
-    #[test]
+    #[rstest]
     fn test_display_io() {
         let io = IO::pure(42);
         assert_eq!(format!("{io}"), "<IO>");
     }
 
     // =========================================================================
-    // Original Tests
+    // Original Tests (Updated to use Trait methods)
     // =========================================================================
 
-    #[test]
+    #[rstest]
     fn test_io_pure_and_run() {
         let io = IO::pure(42);
         assert_eq!(io.run_unsafe(), 42);
     }
 
-    #[test]
+    #[rstest]
     fn test_io_new_and_run() {
         let io = IO::new(|| 10 + 20);
         assert_eq!(io.run_unsafe(), 30);
     }
 
-    #[test]
+    #[rstest]
     fn test_io_fmap() {
-        let io = IO::pure(21).fmap(|x| x * 2);
+        let io = Functor::fmap(IO::pure(21), |x| x * 2);
         assert_eq!(io.run_unsafe(), 42);
     }
 
-    #[test]
+    #[rstest]
     fn test_io_flat_map() {
-        let io = IO::pure(10).flat_map(|x| IO::pure(x * 2));
+        let io = Monad::flat_map(IO::pure(10), |x| IO::pure(x * 2));
         assert_eq!(io.run_unsafe(), 20);
     }
 
-    #[test]
+    #[rstest]
     fn test_io_and_then() {
-        let io = IO::pure(10).and_then(|x| IO::pure(x + 5));
+        let io = Monad::and_then(IO::pure(10), |x| IO::pure(x + 5));
         assert_eq!(io.run_unsafe(), 15);
     }
 
-    #[test]
+    #[rstest]
     fn test_io_then() {
         let io = IO::pure(10).then(IO::pure(20));
         assert_eq!(io.run_unsafe(), 20);
     }
 
-    #[test]
+    #[rstest]
     fn test_io_map2() {
-        let io = IO::pure(10).map2(IO::pure(20), |a, b| a + b);
+        let io = Applicative::map2(IO::pure(10), IO::pure(20), |a, b| a + b);
         assert_eq!(io.run_unsafe(), 30);
     }
 
-    #[test]
+    #[rstest]
     fn test_io_product() {
-        let io = IO::pure(10).product(IO::pure(20));
+        let io = Applicative::product(IO::pure(10), IO::pure(20));
         assert_eq!(io.run_unsafe(), (10, 20));
+    }
+
+    // =========================================================================
+    // TypeConstructor Tests
+    // =========================================================================
+
+    #[rstest]
+    fn io_type_constructor_inner_type_is_correct() {
+        fn assert_inner<T: TypeConstructor<Inner = i32>>() {}
+        assert_inner::<IO<i32>>();
+    }
+
+    #[rstest]
+    fn io_type_constructor_with_type_produces_correct_type() {
+        // This verifies that IO<i32>::WithType<String> is IO<String>
+        fn assert_io_with_type<A: TypeConstructor<WithType<String> = IO<String>>>() {}
+        assert_io_with_type::<IO<i32>>();
+    }
+
+    // =========================================================================
+    // Functor Tests
+    // =========================================================================
+
+    #[rstest]
+    fn io_functor_fmap() {
+        let io = IO::pure(5);
+        let result = Functor::fmap(io, |x| x * 2).run_unsafe();
+        assert_eq!(result, 10);
+    }
+
+    #[rstest]
+    fn io_functor_fmap_type_transformation() {
+        let io = IO::pure(42);
+        let result = Functor::fmap(io, |x| x.to_string()).run_unsafe();
+        assert_eq!(result, "42");
+    }
+
+    #[rstest]
+    fn io_functor_identity_law() {
+        let io = IO::pure(42);
+        let result = Functor::fmap(io, |x| x).run_unsafe();
+        assert_eq!(result, 42);
+    }
+
+    #[rstest]
+    fn io_functor_composition_law() {
+        let function1 = |x: i32| x + 1;
+        let function2 = |x: i32| x * 2;
+
+        let io1 = IO::pure(5);
+        let io2 = IO::pure(5);
+
+        let result1 = Functor::fmap(Functor::fmap(io1, function1), function2).run_unsafe();
+        let result2 = Functor::fmap(io2, move |x| function2(function1(x))).run_unsafe();
+
+        assert_eq!(result1, result2);
+        assert_eq!(result1, 12); // (5 + 1) * 2 = 12
+    }
+
+    // Note: io_functor_fmap_ref is not tested because IO::fmap_ref is unimplemented
+    // due to the deferred execution model of IO (the value is not available until run_unsafe)
+
+    #[rstest]
+    fn io_functor_replace() {
+        let io = IO::pure(42);
+        let result = io.replace("replaced").run_unsafe();
+        assert_eq!(result, "replaced");
+    }
+
+    #[rstest]
+    #[allow(clippy::let_unit_value)]
+    fn io_functor_void() {
+        let io = IO::pure(42);
+        let result: () = io.void().run_unsafe();
+        assert_eq!(result, ());
+    }
+
+    // =========================================================================
+    // Applicative Tests
+    // =========================================================================
+
+    #[rstest]
+    fn io_applicative_pure() {
+        let io: IO<i32> = <IO<i32> as Applicative>::pure(42);
+        assert_eq!(io.run_unsafe(), 42);
+    }
+
+    #[rstest]
+    fn io_applicative_map2() {
+        let io1 = IO::pure(2);
+        let io2 = IO::pure(3);
+        let result = Applicative::map2(io1, io2, |a, b| a + b).run_unsafe();
+        assert_eq!(result, 5);
+    }
+
+    #[rstest]
+    fn io_applicative_map3() {
+        let io1 = IO::pure(1);
+        let io2 = IO::pure(2);
+        let io3 = IO::pure(3);
+        let result = Applicative::map3(io1, io2, io3, |a, b, c| a + b + c).run_unsafe();
+        assert_eq!(result, 6);
+    }
+
+    #[rstest]
+    fn io_applicative_product() {
+        let io1 = IO::pure(10);
+        let io2 = IO::pure("hello");
+        let result = Applicative::product(io1, io2).run_unsafe();
+        assert_eq!(result, (10, "hello"));
+    }
+
+    #[rstest]
+    fn io_applicative_product_left() {
+        let io1 = IO::pure(10);
+        let io2 = IO::pure(20);
+        let result = io1.product_left(io2).run_unsafe();
+        assert_eq!(result, 10);
+    }
+
+    #[rstest]
+    fn io_applicative_product_right() {
+        let io1 = IO::pure(10);
+        let io2 = IO::pure(20);
+        let result = io1.product_right(io2).run_unsafe();
+        assert_eq!(result, 20);
+    }
+
+    #[rstest]
+    fn io_applicative_apply() {
+        let io_function: IO<fn(i32) -> i32> = IO::pure(|x| x + 1);
+        let io_value = IO::pure(5);
+        let result = io_function.apply(io_value).run_unsafe();
+        assert_eq!(result, 6);
+    }
+
+    // =========================================================================
+    // Monad Tests
+    // =========================================================================
+
+    #[rstest]
+    fn io_monad_flat_map() {
+        let io = IO::pure(5);
+        let result = Monad::flat_map(io, |x| IO::pure(x * 2)).run_unsafe();
+        assert_eq!(result, 10);
+    }
+
+    #[rstest]
+    fn io_monad_and_then() {
+        let io = IO::pure(5);
+        let result = Monad::and_then(io, |x| IO::pure(x + 3)).run_unsafe();
+        assert_eq!(result, 8);
+    }
+
+    #[rstest]
+    fn io_monad_then() {
+        let io1 = IO::pure(10);
+        let io2 = IO::pure("hello");
+        let result = Monad::then(io1, io2).run_unsafe();
+        assert_eq!(result, "hello");
+    }
+
+    #[rstest]
+    fn io_monad_left_identity_law() {
+        let value = 5;
+        let function = |x: i32| IO::pure(x * 2);
+
+        let result1 = Monad::flat_map(IO::pure(value), function).run_unsafe();
+        let result2 = function(value).run_unsafe();
+
+        assert_eq!(result1, result2);
+        assert_eq!(result1, 10);
+    }
+
+    #[rstest]
+    fn io_monad_right_identity_law() {
+        let io = IO::pure(42);
+        let result: i32 = Monad::flat_map(io, <IO<i32> as Applicative>::pure).run_unsafe();
+        assert_eq!(result, 42);
+    }
+
+    #[rstest]
+    fn io_monad_associativity_law() {
+        let function1 = |x: i32| IO::pure(x + 1);
+        let function2 = |x: i32| IO::pure(x * 2);
+
+        let io1 = IO::pure(5);
+        let io2 = IO::pure(5);
+
+        let result1 = Monad::flat_map(Monad::flat_map(io1, function1), function2).run_unsafe();
+        let result2 =
+            Monad::flat_map(io2, move |x| Monad::flat_map(function1(x), function2)).run_unsafe();
+
+        assert_eq!(result1, result2);
+        assert_eq!(result1, 12); // (5 + 1) * 2 = 12
+    }
+
+    // =========================================================================
+    // Side Effect Deferral Tests with Traits
+    // =========================================================================
+
+    #[rstest]
+    fn io_functor_fmap_defers_execution() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let executed = Arc::new(AtomicBool::new(false));
+        let executed_clone = executed.clone();
+
+        let io = IO::new(move || {
+            executed_clone.store(true, Ordering::SeqCst);
+            42
+        });
+
+        // fmap should not execute the IO
+        let mapped = Functor::fmap(io, |x| x * 2);
+        assert!(!executed.load(Ordering::SeqCst));
+
+        // run_unsafe should execute
+        let result = mapped.run_unsafe();
+        assert!(executed.load(Ordering::SeqCst));
+        assert_eq!(result, 84);
+    }
+
+    #[rstest]
+    fn io_monad_flat_map_defers_execution() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let executed1 = Arc::new(AtomicBool::new(false));
+        let executed2 = Arc::new(AtomicBool::new(false));
+        let executed1_clone = executed1.clone();
+        let executed2_clone = executed2.clone();
+
+        let io1 = IO::new(move || {
+            executed1_clone.store(true, Ordering::SeqCst);
+            10
+        });
+
+        let io2 = Monad::flat_map(io1, move |x| {
+            IO::new(move || {
+                executed2_clone.store(true, Ordering::SeqCst);
+                x * 2
+            })
+        });
+
+        // Neither should be executed yet
+        assert!(!executed1.load(Ordering::SeqCst));
+        assert!(!executed2.load(Ordering::SeqCst));
+
+        // run_unsafe should execute both
+        let result = io2.run_unsafe();
+        assert!(executed1.load(Ordering::SeqCst));
+        assert!(executed2.load(Ordering::SeqCst));
+        assert_eq!(result, 20);
     }
 
     // =========================================================================
@@ -579,7 +813,7 @@ mod tests {
     // =========================================================================
 
     #[cfg(feature = "async")]
-    #[test]
+    #[rstest]
     fn test_to_async_executes_immediately() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};

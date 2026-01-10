@@ -1475,16 +1475,21 @@ let constructed: Shape = circle_prism.review(10.0);
 
 ### IO Monad
 
-| Haskell               | lambars          | Description       |
-| --------------------- | ---------------- | ----------------- |
-| `pure a` / `return a` | `IO::pure`       | Pure value in IO  |
-| `IO action`           | `IO::new`        | Create IO action  |
-| `io >>= f`            | `IO::flat_map`   | Bind IO actions   |
-| `io >> io2`           | `IO::then`       | Sequence          |
-| `putStrLn s`          | `IO::print_line` | Print line        |
-| `getLine`             | `IO::read_line`  | Read line         |
-| `threadDelay n`       | `IO::delay`      | Delay execution   |
-| `catch io handler`    | `IO::catch`      | Handle exceptions |
+IO implements `Functor`, `Applicative`, and `Monad` traits, enabling use with `pipe!` macro operators.
+
+| Haskell               | lambars                | Description       |
+| --------------------- | ---------------------- | ----------------- |
+| `pure a` / `return a` | `IO::pure`             | Pure value in IO  |
+| `IO action`           | `IO::new`              | Create IO action  |
+| `fmap f io`           | `io.fmap(f)` (Functor) | Map over IO       |
+| `io >>= f`            | `io.flat_map(f)` (Monad) | Bind IO actions |
+| `io >> io2`           | `io.then(io2)` (Monad) | Sequence          |
+| `putStrLn s`          | `IO::print_line`       | Print line        |
+| `getLine`             | `IO::read_line`        | Read line         |
+| `threadDelay n`       | `IO::delay`            | Delay execution   |
+| `catch io handler`    | `IO::catch`            | Handle exceptions |
+
+> **Note**: `fmap`, `flat_map`, `then` require importing trait: `use lambars::typeclass::{Functor, Monad};`
 
 #### Code Examples
 
@@ -1521,6 +1526,7 @@ main = do
 ```rust
 // lambars
 use lambars::effect::IO;
+use lambars::typeclass::{Functor, Monad};
 
 let computation: IO<i32> = IO::new(|| {
     println!("Computing...");

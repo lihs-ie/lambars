@@ -227,7 +227,8 @@ pub trait Monad: Applicative {
     /// ```
     fn flat_map<B, F>(self, function: F) -> Self::WithType<B>
     where
-        F: FnOnce(Self::Inner) -> Self::WithType<B>;
+        F: FnOnce(Self::Inner) -> Self::WithType<B> + 'static,
+        B: 'static;
 
     /// Alias for `flat_map` to match Rust's naming conventions.
     ///
@@ -255,7 +256,8 @@ pub trait Monad: Applicative {
     fn and_then<B, F>(self, function: F) -> Self::WithType<B>
     where
         Self: Sized,
-        F: FnOnce(Self::Inner) -> Self::WithType<B>,
+        F: FnOnce(Self::Inner) -> Self::WithType<B> + 'static,
+        B: 'static,
     {
         self.flat_map(function)
     }
@@ -293,6 +295,9 @@ pub trait Monad: Applicative {
     fn then<B>(self, next: Self::WithType<B>) -> Self::WithType<B>
     where
         Self: Sized,
+        Self::Inner: 'static,
+        Self::WithType<B>: 'static,
+        B: 'static,
     {
         self.flat_map(|_| next)
     }
@@ -984,7 +989,7 @@ mod tests {
             let function = |n: i32| Some(Some(n.to_string()));
 
             let left = monad.flat_map(function).flatten();
-            let right = monad.flat_map(|x| function(x).flatten());
+            let right = monad.flat_map(move |x| function(x).flatten());
             assert_eq!(left, right);
         }
 
@@ -995,7 +1000,7 @@ mod tests {
                 |n: i32| -> Result<Result<String, String>, String> { Ok(Ok(n.to_string())) };
 
             let left = monad.clone().flat_map(function).flatten();
-            let right = monad.flat_map(|x| function(x).flatten());
+            let right = monad.flat_map(move |x| function(x).flatten());
             assert_eq!(left, right);
         }
 
@@ -1005,7 +1010,7 @@ mod tests {
             let function = |n: i32| Box::new(Box::new(n.to_string()));
             let left = monad.flat_map(function).flatten();
             let monad: Box<i32> = Box::new(42);
-            let right = monad.flat_map(|x| function(x).flatten());
+            let right = monad.flat_map(move |x| function(x).flatten());
             assert_eq!(left, right);
         }
 
@@ -1015,7 +1020,7 @@ mod tests {
             let function = |n: i32| Identity::new(Identity::new(n.to_string()));
 
             let left = monad.flat_map(function).flatten();
-            let right = monad.flat_map(|x| function(x).flatten());
+            let right = monad.flat_map(move |x| function(x).flatten());
             assert_eq!(left, right);
         }
     }
@@ -1127,7 +1132,7 @@ mod tests {
         let function2 = |n: i32| Some(n * 2);
 
         let left = monad.flat_map(function1).flat_map(function2);
-        let right = monad.flat_map(|x| function1(x).flat_map(function2));
+        let right = monad.flat_map(move |x| function1(x).flat_map(function2));
 
         assert_eq!(left, right);
         assert_eq!(left, Some(12)); // (5 + 1) * 2 = 12
@@ -1140,7 +1145,7 @@ mod tests {
         let function2 = |n: i32| if n > 0 { Some(n * 2) } else { None };
 
         let left = monad.flat_map(function1).flat_map(function2);
-        let right = monad.flat_map(|x| function1(x).flat_map(function2));
+        let right = monad.flat_map(move |x| function1(x).flat_map(function2));
 
         assert_eq!(left, right);
         assert_eq!(left, None); // 5 - 10 = -5, which fails function2
@@ -1153,7 +1158,7 @@ mod tests {
         let function2 = |n: i32| -> Result<i32, &str> { Ok(n * 2) };
 
         let left = monad.flat_map(function1).flat_map(function2);
-        let right = monad.flat_map(|x| function1(x).flat_map(function2));
+        let right = monad.flat_map(move |x| function1(x).flat_map(function2));
 
         assert_eq!(left, right);
         assert_eq!(left, Ok(12));
@@ -1166,7 +1171,7 @@ mod tests {
         let function2 = |n: i32| Box::new(n * 2);
 
         let left = Box::new(5).flat_map(function1).flat_map(function2);
-        let right = monad.flat_map(|x| function1(x).flat_map(function2));
+        let right = monad.flat_map(move |x| function1(x).flat_map(function2));
 
         assert_eq!(left, right);
         assert_eq!(*left, 12);
@@ -1179,7 +1184,7 @@ mod tests {
         let function2 = |n: i32| Identity::new(n * 2);
 
         let left = monad.flat_map(function1).flat_map(function2);
-        let right = monad.flat_map(|x| function1(x).flat_map(function2));
+        let right = monad.flat_map(move |x| function1(x).flat_map(function2));
 
         assert_eq!(left, right);
         assert_eq!(left, Identity::new(12));
@@ -1219,7 +1224,7 @@ mod tests {
         let function2 = |n: i32| vec![n, n * 100];
 
         let left: Vec<i32> = monad.clone().flat_map(function1).flat_map(function2);
-        let right: Vec<i32> = monad.flat_map(|x| function1(x).flat_map(function2));
+        let right: Vec<i32> = monad.flat_map(move |x| function1(x).flat_map(function2));
 
         assert_eq!(left, right);
         // [1, 11, 2, 12] -> each element goes through function2
@@ -1407,7 +1412,7 @@ mod property_tests {
             let function2 = |n: i32| Some(n.wrapping_mul(2));
 
             let left = monad.flat_map(function1).flat_map(function2);
-            let right = monad.flat_map(|x| function1(x).flat_map(function2));
+            let right = monad.flat_map(move |x| function1(x).flat_map(function2));
 
             prop_assert_eq!(left, right);
         }
@@ -1419,7 +1424,7 @@ mod property_tests {
             let function2 = |n: i32| -> Result<i32, ()> { Ok(n.wrapping_mul(2)) };
 
             let left = monad.flat_map(function1).flat_map(function2);
-            let right = monad.flat_map(|x| function1(x).flat_map(function2));
+            let right = monad.flat_map(move |x| function1(x).flat_map(function2));
 
             prop_assert_eq!(left, right);
         }
@@ -1431,7 +1436,7 @@ mod property_tests {
             let function2 = |n: i32| Identity::new(n.wrapping_mul(2));
 
             let left = monad.flat_map(function1).flat_map(function2);
-            let right = monad.flat_map(|x| function1(x).flat_map(function2));
+            let right = monad.flat_map(move |x| function1(x).flat_map(function2));
 
             prop_assert_eq!(left, right);
         }
@@ -1442,7 +1447,7 @@ mod property_tests {
             let function2 = |n: i32| vec![n.wrapping_mul(10)];
 
             let left: Vec<i32> = monad.clone().flat_map(function1).flat_map(function2);
-            let right: Vec<i32> = monad.flat_map(|x| function1(x).flat_map(function2));
+            let right: Vec<i32> = monad.flat_map(move |x| function1(x).flat_map(function2));
 
             prop_assert_eq!(left, right);
         }

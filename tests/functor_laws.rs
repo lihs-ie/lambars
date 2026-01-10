@@ -31,7 +31,7 @@ proptest! {
         let function2 = |n: i32| n.wrapping_mul(2);
 
         let left = value.fmap(function1).fmap(function2);
-        let right = value.fmap(|x| function2(function1(x)));
+        let right = value.fmap(move |x| function2(function1(x)));
 
         prop_assert_eq!(left, right);
     }
@@ -50,7 +50,7 @@ proptest! {
         let function2 = |n: usize| n.wrapping_mul(2);
 
         let left = value.clone().fmap(function1).fmap(function2);
-        let right = value.fmap(|x| function2(function1(x)));
+        let right = value.fmap(move |x| function2(function1(x)));
 
         prop_assert_eq!(left, right);
     }
@@ -75,7 +75,7 @@ proptest! {
         let function2 = |n: i32| n.wrapping_mul(2);
 
         let left = value.clone().fmap(function1).fmap(function2);
-        let right = value.fmap(|x| function2(function1(x)));
+        let right = value.fmap(move |x| function2(function1(x)));
 
         prop_assert_eq!(left, right);
     }
@@ -137,7 +137,7 @@ proptest! {
         let function2 = |n: i32| n.wrapping_mul(2);
 
         let left = Box::new(value).fmap(function1).fmap(function2);
-        let right = Box::new(value).fmap(|x| function2(function1(x)));
+        let right = Box::new(value).fmap(move |x| function2(function1(x)));
 
         prop_assert_eq!(*left, *right);
     }
@@ -171,7 +171,7 @@ proptest! {
         let function2 = |n: i32| n.wrapping_mul(2);
 
         let left = Identity::new(value).fmap(function1).fmap(function2);
-        let right = Identity::new(value).fmap(|x| function2(function1(x)));
+        let right = Identity::new(value).fmap(move |x| function2(function1(x)));
 
         prop_assert_eq!(left, right);
     }
@@ -191,7 +191,7 @@ proptest! {
         let function2 = |n: usize| n.wrapping_mul(2);
 
         let left = Identity::new(value.clone()).fmap(function1).fmap(function2);
-        let right = Identity::new(value).fmap(|x| function2(function1(x)));
+        let right = Identity::new(value).fmap(move |x| function2(function1(x)));
 
         prop_assert_eq!(left, right);
     }
