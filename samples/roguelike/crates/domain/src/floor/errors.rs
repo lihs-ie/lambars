@@ -60,6 +60,24 @@ pub enum FloorError {
         /// The reason for the invalid generation.
         reason: String,
     },
+
+    /// Player is not at stairs position.
+    NotAtStairs {
+        /// The player's current position.
+        player_position: (i32, i32),
+    },
+
+    /// No trap exists at the position.
+    NoTrapAtPosition {
+        /// The position where a trap was expected.
+        position: (i32, i32),
+    },
+
+    /// Trap has already been disarmed.
+    TrapAlreadyDisarmed {
+        /// The position of the disarmed trap.
+        position: (i32, i32),
+    },
 }
 
 impl FloorError {
@@ -161,6 +179,60 @@ impl FloorError {
         }
     }
 
+    /// Creates a NotAtStairs error.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use roguelike_domain::floor::FloorError;
+    /// use roguelike_domain::common::Position;
+    ///
+    /// let error = FloorError::not_at_stairs(Position::new(5, 5));
+    /// assert!(matches!(error, FloorError::NotAtStairs { .. }));
+    /// ```
+    #[must_use]
+    pub fn not_at_stairs(position: crate::common::Position) -> Self {
+        Self::NotAtStairs {
+            player_position: (position.x(), position.y()),
+        }
+    }
+
+    /// Creates a NoTrapAtPosition error.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use roguelike_domain::floor::FloorError;
+    /// use roguelike_domain::common::Position;
+    ///
+    /// let error = FloorError::no_trap_at_position(Position::new(10, 10));
+    /// assert!(matches!(error, FloorError::NoTrapAtPosition { .. }));
+    /// ```
+    #[must_use]
+    pub fn no_trap_at_position(position: crate::common::Position) -> Self {
+        Self::NoTrapAtPosition {
+            position: (position.x(), position.y()),
+        }
+    }
+
+    /// Creates a TrapAlreadyDisarmed error.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use roguelike_domain::floor::FloorError;
+    /// use roguelike_domain::common::Position;
+    ///
+    /// let error = FloorError::trap_already_disarmed(Position::new(15, 15));
+    /// assert!(matches!(error, FloorError::TrapAlreadyDisarmed { .. }));
+    /// ```
+    #[must_use]
+    pub fn trap_already_disarmed(position: crate::common::Position) -> Self {
+        Self::TrapAlreadyDisarmed {
+            position: (position.x(), position.y()),
+        }
+    }
+
     /// Returns true if this is a recoverable error.
     ///
     /// Position-related errors are generally recoverable as they indicate
@@ -174,6 +246,9 @@ impl FloorError {
             Self::NoStairsAtPosition { .. } => true,
             Self::RoomsNotConnected => false,
             Self::InvalidFloorGeneration { .. } => false,
+            Self::NotAtStairs { .. } => true,
+            Self::NoTrapAtPosition { .. } => true,
+            Self::TrapAlreadyDisarmed { .. } => true,
         }
     }
 
@@ -185,6 +260,9 @@ impl FloorError {
             Self::PositionOutOfBounds { .. }
                 | Self::TileNotWalkable { .. }
                 | Self::NoStairsAtPosition { .. }
+                | Self::NotAtStairs { .. }
+                | Self::NoTrapAtPosition { .. }
+                | Self::TrapAlreadyDisarmed { .. }
         )
     }
 
@@ -233,6 +311,27 @@ impl fmt::Display for FloorError {
             }
             Self::InvalidFloorGeneration { reason } => {
                 write!(formatter, "Invalid floor generation: {}", reason)
+            }
+            Self::NotAtStairs { player_position } => {
+                write!(
+                    formatter,
+                    "Player at ({}, {}) is not at stairs",
+                    player_position.0, player_position.1
+                )
+            }
+            Self::NoTrapAtPosition { position } => {
+                write!(
+                    formatter,
+                    "No trap at position ({}, {})",
+                    position.0, position.1
+                )
+            }
+            Self::TrapAlreadyDisarmed { position } => {
+                write!(
+                    formatter,
+                    "Trap at ({}, {}) has already been disarmed",
+                    position.0, position.1
+                )
             }
         }
     }

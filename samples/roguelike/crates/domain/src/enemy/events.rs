@@ -229,24 +229,28 @@ impl EnemyAttacked {
 
 /// Event emitted when an enemy dies.
 ///
-/// This event captures the enemy's death and the loot table that
-/// defines potential item drops.
+/// This event captures the enemy's death and metadata about the loot
+/// that was dropped. The actual loot items are handled separately
+/// as part of the game state.
 ///
 /// # Examples
 ///
 /// ```
-/// use roguelike_domain::enemy::{EnemyDied, EntityIdentifier, LootTable};
+/// use roguelike_domain::enemy::{EnemyDied, EntityIdentifier};
+/// use roguelike_domain::common::Position;
 ///
 /// let event = EnemyDied::new(
 ///     EntityIdentifier::new(),
-///     LootTable::empty(),
+///     Position::new(10, 20),
+///     3,  // 3 loot entries
 /// );
-/// println!("Enemy died with {} loot entries", event.loot().len());
+/// println!("Enemy died with {} loot entries", event.loot_entry_count());
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnemyDied {
     enemy_identifier: EntityIdentifier,
-    loot: LootTable,
+    death_position: Position,
+    loot_entry_count: usize,
 }
 
 impl EnemyDied {
@@ -255,13 +259,37 @@ impl EnemyDied {
     /// # Arguments
     ///
     /// * `enemy_identifier` - The unique identifier of the dead enemy
-    /// * `loot` - The loot table for potential drops
+    /// * `death_position` - The position where the enemy died
+    /// * `loot_entry_count` - The number of loot entries dropped
     #[must_use]
-    pub const fn new(enemy_identifier: EntityIdentifier, loot: LootTable) -> Self {
+    pub const fn new(
+        enemy_identifier: EntityIdentifier,
+        death_position: Position,
+        loot_entry_count: usize,
+    ) -> Self {
         Self {
             enemy_identifier,
-            loot,
+            death_position,
+            loot_entry_count,
         }
+    }
+
+    /// Creates an EnemyDied event from a loot table.
+    ///
+    /// This is a convenience method that extracts the loot count from a table.
+    ///
+    /// # Arguments
+    ///
+    /// * `enemy_identifier` - The unique identifier of the dead enemy
+    /// * `death_position` - The position where the enemy died
+    /// * `loot` - The loot table (used only to extract count)
+    #[must_use]
+    pub fn from_loot_table(
+        enemy_identifier: EntityIdentifier,
+        death_position: Position,
+        loot: &LootTable,
+    ) -> Self {
+        Self::new(enemy_identifier, death_position, loot.len())
     }
 
     /// Returns the enemy identifier.
@@ -270,16 +298,22 @@ impl EnemyDied {
         self.enemy_identifier
     }
 
-    /// Returns the loot table.
+    /// Returns the position where the enemy died.
     #[must_use]
-    pub const fn loot(&self) -> &LootTable {
-        &self.loot
+    pub const fn death_position(&self) -> Position {
+        self.death_position
     }
 
-    /// Returns true if the enemy has any potential loot.
+    /// Returns the number of loot entries.
     #[must_use]
-    pub fn has_loot(&self) -> bool {
-        !self.loot.is_empty()
+    pub const fn loot_entry_count(&self) -> usize {
+        self.loot_entry_count
+    }
+
+    /// Returns true if the enemy dropped any loot.
+    #[must_use]
+    pub const fn has_loot(&self) -> bool {
+        self.loot_entry_count > 0
     }
 }
 
@@ -547,35 +581,47 @@ mod tests {
         #[rstest]
         fn new_creates_event() {
             let identifier = EntityIdentifier::new();
-            let loot = LootTable::empty();
-            let event = EnemyDied::new(identifier, loot.clone());
+            let position = Position::new(10, 20);
+            let event = EnemyDied::new(identifier, position, 3);
 
             assert_eq!(event.enemy_identifier(), identifier);
-            assert_eq!(*event.loot(), loot);
+            assert_eq!(event.death_position(), position);
+            assert_eq!(event.loot_entry_count(), 3);
         }
 
         #[rstest]
-        fn has_loot_false_for_empty() {
-            let event = EnemyDied::new(EntityIdentifier::new(), LootTable::empty());
+        fn from_loot_table_creates_event() {
+            let identifier = EntityIdentifier::new();
+            let position = Position::new(10, 20);
+            let item_identifier = ItemIdentifier::new();
+            let entry = LootEntry::new(item_identifier, 0.5, 1, 1).unwrap();
+            let loot = LootTable::empty().with_entry(entry);
+
+            let event = EnemyDied::from_loot_table(identifier, position, &loot);
+
+            assert_eq!(event.enemy_identifier(), identifier);
+            assert_eq!(event.death_position(), position);
+            assert_eq!(event.loot_entry_count(), 1);
+        }
+
+        #[rstest]
+        fn has_loot_false_for_zero_count() {
+            let event = EnemyDied::new(EntityIdentifier::new(), Position::new(0, 0), 0);
             assert!(!event.has_loot());
         }
 
         #[rstest]
         fn has_loot_true_with_entries() {
-            let item_identifier = ItemIdentifier::new();
-            let entry = LootEntry::new(item_identifier, 0.5, 1, 1).unwrap();
-            let loot = LootTable::empty().with_entry(entry);
-            let event = EnemyDied::new(EntityIdentifier::new(), loot);
-
+            let event = EnemyDied::new(EntityIdentifier::new(), Position::new(0, 0), 5);
             assert!(event.has_loot());
         }
 
         #[rstest]
-        fn clone_preserves_values() {
-            let event = EnemyDied::new(EntityIdentifier::new(), LootTable::empty());
-            let cloned = event.clone();
+        fn copy_preserves_values() {
+            let event = EnemyDied::new(EntityIdentifier::new(), Position::new(5, 10), 2);
+            let copied = event;
 
-            assert_eq!(event, cloned);
+            assert_eq!(event, copied);
         }
     }
 
@@ -607,7 +653,7 @@ mod tests {
         }
 
         fn create_death_event() -> EnemyDied {
-            EnemyDied::new(EntityIdentifier::new(), LootTable::empty())
+            EnemyDied::new(EntityIdentifier::new(), Position::new(0, 0), 0)
         }
 
         #[rstest]

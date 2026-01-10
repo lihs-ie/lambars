@@ -418,7 +418,7 @@ impl fmt::Display for TurnEnded {
 ///
 /// assert!(started.is_game_started());
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum GameSessionEvent {
     /// A new game session has started.
     Started(GameStarted),
@@ -428,6 +428,20 @@ pub enum GameSessionEvent {
     TurnStarted(TurnStarted),
     /// A turn has ended.
     TurnEnded(TurnEnded),
+    /// An enemy has spawned.
+    EnemySpawned(crate::enemy::EnemySpawned),
+    /// An enemy has moved.
+    EnemyMoved(crate::enemy::EnemyMoved),
+    /// An enemy has been attacked.
+    EnemyAttacked(crate::enemy::EnemyAttacked),
+    /// An enemy has died.
+    EnemyDied(crate::enemy::EnemyDied),
+    /// A floor has been entered.
+    FloorEntered(crate::floor::FloorEntered),
+    /// A tile has been explored.
+    TileExplored(crate::floor::TileExplored),
+    /// A trap has been triggered.
+    TrapTriggered(crate::floor::TrapTriggered),
 }
 
 impl GameSessionEvent {
@@ -453,6 +467,69 @@ impl GameSessionEvent {
     #[must_use]
     pub const fn is_turn_ended(&self) -> bool {
         matches!(self, Self::TurnEnded(_))
+    }
+
+    /// Returns true if this is an enemy spawned event.
+    #[must_use]
+    pub const fn is_enemy_spawned(&self) -> bool {
+        matches!(self, Self::EnemySpawned(_))
+    }
+
+    /// Returns true if this is an enemy moved event.
+    #[must_use]
+    pub const fn is_enemy_moved(&self) -> bool {
+        matches!(self, Self::EnemyMoved(_))
+    }
+
+    /// Returns true if this is an enemy attacked event.
+    #[must_use]
+    pub const fn is_enemy_attacked(&self) -> bool {
+        matches!(self, Self::EnemyAttacked(_))
+    }
+
+    /// Returns true if this is an enemy died event.
+    #[must_use]
+    pub const fn is_enemy_died(&self) -> bool {
+        matches!(self, Self::EnemyDied(_))
+    }
+
+    /// Returns true if this is any enemy-related event.
+    #[must_use]
+    pub const fn is_enemy_event(&self) -> bool {
+        matches!(
+            self,
+            Self::EnemySpawned(_)
+                | Self::EnemyMoved(_)
+                | Self::EnemyAttacked(_)
+                | Self::EnemyDied(_)
+        )
+    }
+
+    /// Returns true if this is a floor entered event.
+    #[must_use]
+    pub const fn is_floor_entered(&self) -> bool {
+        matches!(self, Self::FloorEntered(_))
+    }
+
+    /// Returns true if this is a tile explored event.
+    #[must_use]
+    pub const fn is_tile_explored(&self) -> bool {
+        matches!(self, Self::TileExplored(_))
+    }
+
+    /// Returns true if this is a trap triggered event.
+    #[must_use]
+    pub const fn is_trap_triggered(&self) -> bool {
+        matches!(self, Self::TrapTriggered(_))
+    }
+
+    /// Returns true if this is any floor-related event.
+    #[must_use]
+    pub const fn is_floor_event(&self) -> bool {
+        matches!(
+            self,
+            Self::FloorEntered(_) | Self::TileExplored(_) | Self::TrapTriggered(_)
+        )
     }
 
     /// Attempts to extract the game started event.
@@ -490,6 +567,69 @@ impl GameSessionEvent {
             _ => None,
         }
     }
+
+    /// Attempts to extract the enemy spawned event.
+    #[must_use]
+    pub const fn as_enemy_spawned(&self) -> Option<&crate::enemy::EnemySpawned> {
+        match self {
+            Self::EnemySpawned(event) => Some(event),
+            _ => None,
+        }
+    }
+
+    /// Attempts to extract the enemy moved event.
+    #[must_use]
+    pub const fn as_enemy_moved(&self) -> Option<&crate::enemy::EnemyMoved> {
+        match self {
+            Self::EnemyMoved(event) => Some(event),
+            _ => None,
+        }
+    }
+
+    /// Attempts to extract the enemy attacked event.
+    #[must_use]
+    pub const fn as_enemy_attacked(&self) -> Option<&crate::enemy::EnemyAttacked> {
+        match self {
+            Self::EnemyAttacked(event) => Some(event),
+            _ => None,
+        }
+    }
+
+    /// Attempts to extract the enemy died event.
+    #[must_use]
+    pub const fn as_enemy_died(&self) -> Option<&crate::enemy::EnemyDied> {
+        match self {
+            Self::EnemyDied(event) => Some(event),
+            _ => None,
+        }
+    }
+
+    /// Attempts to extract the floor entered event.
+    #[must_use]
+    pub const fn as_floor_entered(&self) -> Option<&crate::floor::FloorEntered> {
+        match self {
+            Self::FloorEntered(event) => Some(event),
+            _ => None,
+        }
+    }
+
+    /// Attempts to extract the tile explored event.
+    #[must_use]
+    pub const fn as_tile_explored(&self) -> Option<&crate::floor::TileExplored> {
+        match self {
+            Self::TileExplored(event) => Some(event),
+            _ => None,
+        }
+    }
+
+    /// Attempts to extract the trap triggered event.
+    #[must_use]
+    pub const fn as_trap_triggered(&self) -> Option<&crate::floor::TrapTriggered> {
+        match self {
+            Self::TrapTriggered(event) => Some(event),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for GameSessionEvent {
@@ -499,6 +639,35 @@ impl fmt::Display for GameSessionEvent {
             Self::Ended(event) => write!(formatter, "{}", event),
             Self::TurnStarted(event) => write!(formatter, "{}", event),
             Self::TurnEnded(event) => write!(formatter, "{}", event),
+            Self::EnemySpawned(event) => write!(
+                formatter,
+                "Enemy {} spawned at {}",
+                event.enemy_identifier(),
+                event.position()
+            ),
+            Self::EnemyMoved(event) => write!(
+                formatter,
+                "Enemy {} moved from {} to {}",
+                event.enemy_identifier(),
+                event.from(),
+                event.to()
+            ),
+            Self::EnemyAttacked(event) => write!(
+                formatter,
+                "Enemy {} attacked for {} damage",
+                event.enemy_identifier(),
+                event.damage().value()
+            ),
+            Self::EnemyDied(event) => write!(
+                formatter,
+                "Enemy {} died at {} (loot: {} entries)",
+                event.enemy_identifier(),
+                event.death_position(),
+                event.loot_entry_count()
+            ),
+            Self::FloorEntered(event) => write!(formatter, "{}", event),
+            Self::TileExplored(event) => write!(formatter, "{}", event),
+            Self::TrapTriggered(event) => write!(formatter, "{}", event),
         }
     }
 }
@@ -524,6 +693,48 @@ impl From<TurnStarted> for GameSessionEvent {
 impl From<TurnEnded> for GameSessionEvent {
     fn from(event: TurnEnded) -> Self {
         Self::TurnEnded(event)
+    }
+}
+
+impl From<crate::enemy::EnemySpawned> for GameSessionEvent {
+    fn from(event: crate::enemy::EnemySpawned) -> Self {
+        Self::EnemySpawned(event)
+    }
+}
+
+impl From<crate::enemy::EnemyMoved> for GameSessionEvent {
+    fn from(event: crate::enemy::EnemyMoved) -> Self {
+        Self::EnemyMoved(event)
+    }
+}
+
+impl From<crate::enemy::EnemyAttacked> for GameSessionEvent {
+    fn from(event: crate::enemy::EnemyAttacked) -> Self {
+        Self::EnemyAttacked(event)
+    }
+}
+
+impl From<crate::enemy::EnemyDied> for GameSessionEvent {
+    fn from(event: crate::enemy::EnemyDied) -> Self {
+        Self::EnemyDied(event)
+    }
+}
+
+impl From<crate::floor::FloorEntered> for GameSessionEvent {
+    fn from(event: crate::floor::FloorEntered) -> Self {
+        Self::FloorEntered(event)
+    }
+}
+
+impl From<crate::floor::TileExplored> for GameSessionEvent {
+    fn from(event: crate::floor::TileExplored) -> Self {
+        Self::TileExplored(event)
+    }
+}
+
+impl From<crate::floor::TrapTriggered> for GameSessionEvent {
+    fn from(event: crate::floor::TrapTriggered) -> Self {
+        Self::TrapTriggered(event)
     }
 }
 

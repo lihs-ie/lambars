@@ -1470,6 +1470,7 @@ dependencies = [
  "roguelike-domain",
  "rstest",
  "thiserror",
+ "tokio",
  "uuid",
 ]
 

@@ -144,11 +144,14 @@ impl Error for ValidationError {}
 pub enum DomainError {
     /// A validation error occurred.
     Validation(ValidationError),
+    /// A game session error occurred.
+    GameSession(crate::game_session::GameSessionError),
+    /// An enemy error occurred.
+    Enemy(crate::enemy::EnemyError),
+    /// A floor error occurred.
+    Floor(crate::floor::FloorError),
     // Future subdomain errors will be added here:
-    // GameSession(GameSessionError),
     // Player(PlayerError),
-    // Enemy(EnemyError),
-    // Floor(FloorError),
     // Combat(CombatError),
     // Item(ItemError),
     // Command(CommandError),
@@ -160,6 +163,21 @@ impl DomainError {
         matches!(self, Self::Validation(_))
     }
 
+    /// Returns true if this is a game session error.
+    pub fn is_game_session_error(&self) -> bool {
+        matches!(self, Self::GameSession(_))
+    }
+
+    /// Returns true if this is an enemy error.
+    pub fn is_enemy_error(&self) -> bool {
+        matches!(self, Self::Enemy(_))
+    }
+
+    /// Returns true if this is a floor error.
+    pub fn is_floor_error(&self) -> bool {
+        matches!(self, Self::Floor(_))
+    }
+
     /// Returns true if this error is recoverable.
     ///
     /// Validation errors are generally recoverable as they indicate
@@ -167,6 +185,9 @@ impl DomainError {
     pub fn is_recoverable(&self) -> bool {
         match self {
             Self::Validation(_) => true,
+            Self::GameSession(error) => error.is_recoverable(),
+            Self::Enemy(error) => error.is_recoverable(),
+            Self::Floor(error) => error.is_recoverable(),
         }
     }
 }
@@ -175,6 +196,9 @@ impl fmt::Display for DomainError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Validation(error) => write!(formatter, "Validation error: {}", error),
+            Self::GameSession(error) => write!(formatter, "Game session error: {}", error),
+            Self::Enemy(error) => write!(formatter, "Enemy error: {}", error),
+            Self::Floor(error) => write!(formatter, "Floor error: {}", error),
         }
     }
 }
@@ -183,6 +207,9 @@ impl Error for DomainError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Validation(error) => Some(error),
+            Self::GameSession(error) => Some(error),
+            Self::Enemy(error) => Some(error),
+            Self::Floor(error) => Some(error),
         }
     }
 }
@@ -190,6 +217,24 @@ impl Error for DomainError {
 impl From<ValidationError> for DomainError {
     fn from(error: ValidationError) -> Self {
         Self::Validation(error)
+    }
+}
+
+impl From<crate::game_session::GameSessionError> for DomainError {
+    fn from(error: crate::game_session::GameSessionError) -> Self {
+        Self::GameSession(error)
+    }
+}
+
+impl From<crate::enemy::EnemyError> for DomainError {
+    fn from(error: crate::enemy::EnemyError) -> Self {
+        Self::Enemy(error)
+    }
+}
+
+impl From<crate::floor::FloorError> for DomainError {
+    fn from(error: crate::floor::FloorError) -> Self {
+        Self::Floor(error)
     }
 }
 
@@ -335,6 +380,7 @@ mod tests {
 
     mod domain_error {
         use super::*;
+        use crate::enemy::EnemyError;
 
         #[rstest]
         fn from_validation_error() {
@@ -345,14 +391,46 @@ mod tests {
         }
 
         #[rstest]
+        fn from_enemy_error() {
+            let enemy_error = EnemyError::enemy_not_found("abc-123");
+            let domain_error: DomainError = enemy_error.clone().into();
+
+            assert!(matches!(domain_error, DomainError::Enemy(_)));
+        }
+
+        #[rstest]
         fn is_validation_error_returns_true_for_validation() {
             let error = DomainError::Validation(ValidationError::empty_value("field"));
             assert!(error.is_validation_error());
         }
 
         #[rstest]
+        fn is_enemy_error_returns_true_for_enemy() {
+            let error = DomainError::Enemy(EnemyError::enemy_not_found("abc-123"));
+            assert!(error.is_enemy_error());
+        }
+
+        #[rstest]
+        fn is_enemy_error_returns_false_for_validation() {
+            let error = DomainError::Validation(ValidationError::empty_value("field"));
+            assert!(!error.is_enemy_error());
+        }
+
+        #[rstest]
         fn is_recoverable_returns_true_for_validation() {
             let error = DomainError::Validation(ValidationError::empty_value("field"));
+            assert!(error.is_recoverable());
+        }
+
+        #[rstest]
+        fn is_recoverable_returns_false_for_enemy_not_found() {
+            let error = DomainError::Enemy(EnemyError::enemy_not_found("abc-123"));
+            assert!(!error.is_recoverable());
+        }
+
+        #[rstest]
+        fn is_recoverable_returns_true_for_invalid_behavior() {
+            let error = DomainError::Enemy(EnemyError::invalid_behavior_pattern());
             assert!(error.is_recoverable());
         }
 
@@ -366,8 +444,23 @@ mod tests {
         }
 
         #[rstest]
+        fn display_enemy_error() {
+            let error = DomainError::Enemy(EnemyError::enemy_not_found("abc-123"));
+            let display = format!("{}", error);
+            assert!(display.contains("Enemy error"));
+            assert!(display.contains("abc-123"));
+        }
+
+        #[rstest]
         fn source() {
             let error = DomainError::Validation(ValidationError::empty_value("field"));
+            let source = error.source();
+            assert!(source.is_some());
+        }
+
+        #[rstest]
+        fn source_enemy_error() {
+            let error = DomainError::Enemy(EnemyError::enemy_not_found("abc-123"));
             let source = error.source();
             assert!(source.is_some());
         }
