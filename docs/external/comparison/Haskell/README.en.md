@@ -1036,6 +1036,8 @@ let triples: Vec<(i32, i32, i32)> = for_! {
 | `f >>> g` (Control.Arrow) | `compose!(g, f)`      | Left-to-right composition     |
 | `f <<< g` (Control.Arrow) | `compose!(f, g)`      | Same as `.`                   |
 | `x & f`                   | `pipe!(x, f)`         | Pipe operator                 |
+| `fmap f m`                | `pipe!(m, => f)`      | Lift pure function in monad   |
+| `m >>= f`                 | `pipe!(m, =>> f)`     | Bind monadic function         |
 | `f $ x`                   | `f(x)`                | Function application          |
 | `flip f`                  | `flip(f)`             | Flip arguments                |
 | `const x`                 | `constant(x)`         | Constant function             |

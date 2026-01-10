@@ -801,14 +801,16 @@ let recommendations: Vec<String> = for_! {
 
 ## 関数合成
 
-| Scala               | lambars             | 説明             |
-| ------------------- | ------------------- | ---------------- |
-| `f andThen g`       | `compose!(g, f)`    | 左から右         |
-| `f compose g`       | `compose!(f, g)`    | 右から左         |
-| `f.curried`         | `curry!(fn, arity)` | 関数をカリー化   |
-| `f.tupled`          | 手動実装            | タプルを受け取る |
-| `Function.const(x)` | `constant(x)`       | 定数関数         |
-| `identity`          | `identity`          | 恒等関数         |
+| Scala               | lambars             | 説明                         |
+| ------------------- | ------------------- | ---------------------------- |
+| `f andThen g`       | `compose!(g, f)`    | 左から右                     |
+| `f compose g`       | `compose!(f, g)`    | 右から左                     |
+| `m.map(f)`          | `pipe!(m, => f)`    | モナド内で純粋関数をリフト   |
+| `m.flatMap(f)`      | `pipe!(m, =>> f)`   | モナド関数をバインド         |
+| `f.curried`         | `curry!(fn, arity)` | 関数をカリー化               |
+| `f.tupled`          | 手動実装            | タプルを受け取る             |
+| `Function.const(x)` | `constant(x)`       | 定数関数                     |
+| `identity`          | `identity`          | 恒等関数                     |
 
 ### コード例
 

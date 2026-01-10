@@ -1032,17 +1032,19 @@ let triples: Vec<(i32, i32, i32)> = for_! {
 
 ## 関数合成
 
-| Haskell                   | lambars          | 説明             |
-| ------------------------- | ---------------- | ---------------- |
-| `f . g`                   | `compose!(f, g)` | 右から左への合成 |
-| `f >>> g` (Control.Arrow) | `compose!(g, f)` | 左から右への合成 |
-| `f <<< g` (Control.Arrow) | `compose!(f, g)` | `.` と同じ       |
-| `x & f`                   | `pipe!(x, f)`    | パイプ演算子     |
-| `f $ x`                   | `f(x)`           | 関数適用         |
-| `flip f`                  | `flip(f)`        | 引数の反転       |
-| `const x`                 | `constant(x)`    | 定数関数         |
-| `id`                      | `identity`       | 恒等関数         |
-| `on`                      | 手動実装         | 射影上の二項関数 |
+| Haskell                   | lambars          | 説明                         |
+| ------------------------- | ---------------- | ---------------------------- |
+| `f . g`                   | `compose!(f, g)` | 右から左への合成             |
+| `f >>> g` (Control.Arrow) | `compose!(g, f)` | 左から右への合成             |
+| `f <<< g` (Control.Arrow) | `compose!(f, g)` | `.` と同じ                   |
+| `x & f`                   | `pipe!(x, f)`    | パイプ演算子                 |
+| `fmap f m`                | `pipe!(m, => f)` | モナド内で純粋関数をリフト   |
+| `m >>= f`                 | `pipe!(m, =>> f)`| モナド関数をバインド         |
+| `f $ x`                   | `f(x)`           | 関数適用                     |
+| `flip f`                  | `flip(f)`        | 引数の反転                   |
+| `const x`                 | `constant(x)`    | 定数関数                     |
+| `id`                      | `identity`       | 恒等関数                     |
+| `on`                      | 手動実装         | 射影上の二項関数             |
 
 ### コード例
 
