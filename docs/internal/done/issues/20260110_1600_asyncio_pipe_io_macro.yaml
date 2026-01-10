@@ -102,8 +102,8 @@ deferred_features:
     # 参考情報
     references:
       - "Issue #135: pipe! マクロの IO/AsyncIO 対応"
-      - "/Users/lihs/workspace/lambars/docs/internal/requirements/20260110_1400_io_asyncio_typeclass_implementation.yaml"
-      - "/Users/lihs/workspace/lambars/src/effect/async_io.rs"
+      - "docs/internal/done/requirements/20260110_1400_io_asyncio_typeclass_implementation.yaml"
+      - "src/effect/async_io.rs"
 
     # 関連する要件・実装
     related:

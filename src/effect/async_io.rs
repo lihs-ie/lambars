@@ -1237,7 +1237,7 @@ impl<A> crate::typeclass::TypeConstructor for AsyncIO<A> {
 // 2. Creating AsyncFunctor/AsyncApplicative/AsyncMonad traits with Send bounds
 // 3. Using Higher-Kinded Type emulation that supports Send bounds
 //
-// See Issue #XXX for tracking this limitation.
+// See Issue #137 for tracking this limitation.
 
 // =============================================================================
 // AsyncIOLike Implementation
