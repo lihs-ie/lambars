@@ -807,6 +807,8 @@ let recommendations: Vec<String> = for_! {
 | `f compose g`       | `compose!(f, g)`    | 右から左                     |
 | `m.map(f)`          | `pipe!(m, => f)`    | モナド内で純粋関数をリフト   |
 | `m.flatMap(f)`      | `pipe!(m, =>> f)`   | モナド関数をバインド         |
+| `asyncIO.map(f)`    | `pipe_io!(m, => f)` | AsyncIO用リフト（インヒアレント）|
+| `asyncIO.flatMap(f)`| `pipe_io!(m, =>> f)`| AsyncIO用バインド（インヒアレント）|
 | `f.curried`         | `curry!(fn, arity)` | 関数をカリー化               |
 | `f.tupled`          | 手動実装            | タプルを受け取る             |
 | `Function.const(x)` | `constant(x)`       | 定数関数                     |

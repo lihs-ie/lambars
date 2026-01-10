@@ -507,6 +507,8 @@ let contents = io.run_unsafe();
 | `\|>` (pipe forward)    | `pipe!`                                           | Apply value to function     |
 | `\|> Option.map f`      | `pipe!(m, => f)`                                  | Lift pure function in monad |
 | `\|> Option.bind f`     | `pipe!(m, =>> f)`                                 | Bind monadic function       |
+| `asyncIO \|> map f`     | `pipe_io!(m, => f)`                               | Lift for AsyncIO (inherent) |
+| `asyncIO \|> bind f`    | `pipe_io!(m, =>> f)`                              | Bind for AsyncIO (inherent) |
 | `<\|` (pipe backward)   | Function call                                     | Apply function to value     |
 | `>>` (compose forward)  | `compose!` (reversed)                             | Compose left-to-right       |
 | `<<` (compose backward) | `compose!`                                        | Compose right-to-left       |
