@@ -192,73 +192,167 @@ domain_crate:
       //! domain events, and domain services. All logic is implemented as pure
       //! functions without side effects.
 
-      pub mod aggregates;
-      pub mod entities;
-      pub mod errors;
-      pub mod events;
-      pub mod services;
-      pub mod values;
+      pub mod combat;
+      pub mod command;
+      pub mod common;
+      pub mod enemy;
+      pub mod floor;
+      pub mod game_session;
+      pub mod item;
+      pub mod player;
+
+  # ---------------------------------------------------------------------------
+  # Directory Structure (Aggregate-based packaging)
+  # ---------------------------------------------------------------------------
+  # 集約ごとにディレクトリを分け、関連する値オブジェクト・エンティティ・
+  # エラー・イベントを同一パッケージ内に配置する。
+  # entities/ や values/ のような型種別によるディレクトリ分割は行わない。
+  #
+  # domain/src/
+  # ├── lib.rs
+  # ├── common/           # 複数集約で共通利用される値オブジェクト
+  # ├── game_session/     # GameSession 集約
+  # ├── player/           # Player 集約
+  # ├── enemy/            # Enemy 集約
+  # ├── floor/            # Floor 集約
+  # ├── item/             # Item 集約
+  # ├── combat/           # Combat ドメインサービス
+  # └── command/          # コマンド（プレイヤー入力）
+  # ---------------------------------------------------------------------------
 
   submodules:
-    - name: values
-      description: 値オブジェクト（Position, Health, Mana など）
+    # -------------------------------------------------------------------------
+    # common - 複数集約で共通利用される値オブジェクト
+    # -------------------------------------------------------------------------
+    # 定義元: docs/domains/common.yaml
+    - name: common
+      description: |
+        複数の集約で共通利用される値オブジェクト。
+        特定の集約に属さない汎用的な概念を定義する。
       files:
-        - values/mod.rs
-        - values/position.rs
-        - values/health.rs
-        - values/mana.rs
-        - values/experience.rs
-        - values/damage.rs
-        - values/seed.rs
+        - common/mod.rs
+        - common/coordinate.rs      # Position, Direction, Distance
+        - common/numeric.rs         # Health, Mana, Experience, Level, Attack, Defense, Speed, Damage, TurnCount, FloorLevel, Stat
+        - common/stats.rs           # CombatStats, BaseStats, DamageModifier
+        - common/status.rs          # StatusEffect, StatusEffectType
+        - common/rarity.rs          # Rarity
+        - common/errors.rs          # ValidationError, DomainError
 
-    - name: entities
-      description: エンティティ（Player, Enemy, Item, Tile など）
+    # -------------------------------------------------------------------------
+    # game_session - GameSession 集約（集約ルート）
+    # -------------------------------------------------------------------------
+    # 定義元: docs/domains/game_session.yaml
+    - name: game_session
+      description: |
+        ゲームセッション集約。ゲーム全体の状態を管理する集約ルート。
+        関連するエンティティ、値オブジェクト、エラー、イベントを含む。
       files:
-        - entities/mod.rs
-        - entities/player.rs
-        - entities/enemy.rs
-        - entities/item.rs
-        - entities/tile.rs
-        - entities/room.rs
+        - game_session/mod.rs           # 集約ルート（GameSession）
+        - game_session/identifier.rs    # GameIdentifier
+        - game_session/status.rs        # GameStatus, GameOutcome
+        - game_session/entity.rs        # Entity（Player|Enemy|Item の列挙型）
+        - game_session/seed.rs          # RandomSeed
+        - game_session/errors.rs        # GameSessionError
+        - game_session/events.rs        # GameStarted, GameEnded, TurnStarted, TurnEnded
 
-    - name: aggregates
-      description: 集約ルート（GameSession, Floor）
+    # -------------------------------------------------------------------------
+    # player - Player 集約
+    # -------------------------------------------------------------------------
+    # 定義元: docs/domains/player.yaml
+    - name: player
+      description: |
+        プレイヤー集約。プレイヤーキャラクターの状態を管理する。
+        HP、MP、経験値、インベントリなどの関連概念を含む。
       files:
-        - aggregates/mod.rs
-        - aggregates/game_session.rs
-        - aggregates/floor.rs
+        - player/mod.rs                 # 集約ルート（Player）
+        - player/identifier.rs          # PlayerIdentifier, PlayerName
+        - player/inventory.rs           # Inventory, ItemStack, EquipmentSlots, EquipmentSlot
+        - player/errors.rs              # PlayerError
+        - player/events.rs              # PlayerMoved, PlayerAttacked, PlayerDamaged, PlayerLeveledUp, PlayerDied, ExperienceGained
 
-    - name: events
-      description: ドメインイベント
+    # -------------------------------------------------------------------------
+    # enemy - Enemy 集約
+    # -------------------------------------------------------------------------
+    # 定義元: docs/domains/enemy.yaml
+    - name: enemy
+      description: |
+        敵集約。敵キャラクターの状態を管理する。
+        行動パターン、ドロップテーブルなどの関連概念を含む。
       files:
-        - events/mod.rs
-        - events/game_event.rs
-        - events/combat_event.rs
-        - events/movement_event.rs
-        - events/item_event.rs
+        - enemy/mod.rs                  # 集約ルート（Enemy）
+        - enemy/identifier.rs           # EntityIdentifier
+        - enemy/enemy_type.rs           # EnemyType（Goblin, Skeleton, ...）
+        - enemy/behavior.rs             # AiBehavior（Aggressive, Defensive, ...）
+        - enemy/loot.rs                 # LootTable, LootEntry
+        - enemy/pathfinding.rs          # PathfindingService
+        - enemy/errors.rs               # EnemyError
+        - enemy/events.rs               # EnemySpawned, EnemyMoved, EnemyAttacked, EnemyDied
 
-    - name: services
-      description: ドメインサービス（純粋関数）
+    # -------------------------------------------------------------------------
+    # floor - Floor 集約
+    # -------------------------------------------------------------------------
+    # 定義元: docs/domains/floor.yaml
+    - name: floor
+      description: |
+        フロア集約。ダンジョンの階層を管理する。
+        タイル、部屋、通路などの関連概念を含む。
       files:
-        - services/mod.rs
-        - services/combat.rs
-        - services/movement.rs
-        - services/floor_generation.rs
-        - services/pathfinding.rs
-        - services/field_of_view.rs
+        - floor/mod.rs                  # 集約ルート（Floor）
+        - floor/identifier.rs           # FloorIdentifier
+        - floor/tile.rs                 # Tile, TileKind, TrapType
+        - floor/room.rs                 # Room
+        - floor/corridor.rs             # Corridor
+        - floor/generation.rs           # DungeonGeneratorService
+        - floor/visibility.rs           # VisibilityService（Shadowcasting）
+        - floor/errors.rs               # FloorError
+        - floor/events.rs               # FloorEntered, TileExplored, TrapTriggered
 
-    - name: errors
-      description: ドメインエラー型
+    # -------------------------------------------------------------------------
+    # item - Item 集約
+    # -------------------------------------------------------------------------
+    # 定義元: docs/domains/item.yaml
+    - name: item
+      description: |
+        アイテム集約。ゲーム内アイテムを管理する。
+        武器、防具、消耗品などの関連概念を含む。
       files:
-        - errors/mod.rs
-        - errors/validation.rs
-        - errors/game_session.rs
-        - errors/player.rs
-        - errors/enemy.rs
-        - errors/floor.rs
-        - errors/combat.rs
-        - errors/item.rs
-        - errors/command.rs
+        - item/mod.rs                   # Item, DroppedItem エンティティ
+        - item/identifier.rs            # ItemIdentifier
+        - item/kind.rs                  # ItemKind（Weapon, Armor, Consumable, Material）
+        - item/weapon.rs                # WeaponData, WeaponType
+        - item/armor.rs                 # ArmorData, ArmorSlot
+        - item/consumable.rs            # ConsumableData, ConsumableEffect
+        - item/material.rs              # MaterialData
+        - item/effect.rs                # ItemEffect（使用時の効果）
+        - item/errors.rs                # ItemError
+        - item/events.rs                # ItemPickedUp, ItemDropped, ItemUsed, ItemEquipped, ItemUnequipped
+
+    # -------------------------------------------------------------------------
+    # combat - Combat ドメインサービス
+    # -------------------------------------------------------------------------
+    # 定義元: docs/domains/combat.yaml
+    - name: combat
+      description: |
+        戦闘ドメインサービス。戦闘計算を純粋関数として提供する。
+        ダメージ計算、ターン解決などの関連概念を含む。
+      files:
+        - combat/mod.rs                 # DamageCalculator, TurnResolver サービス
+        - combat/errors.rs              # CombatError
+
+    # -------------------------------------------------------------------------
+    # command - コマンド（プレイヤー入力）
+    # -------------------------------------------------------------------------
+    # 定義元: docs/domains/command.yaml
+    - name: command
+      description: |
+        プレイヤー入力コマンド。ターン制ゲームの行動を表現する。
+        移動、攻撃、アイテム使用などのコマンドを含む。
+      files:
+        - command/mod.rs                # Command 列挙型
+        - command/validated.rs          # ValidatedCommand
+        - command/validator.rs          # CommandValidator サービス
+        - command/executor.rs           # CommandExecutor サービス
+        - command/errors.rs             # CommandError
 
   lambars_usage:
     - feature: PersistentVector
