@@ -1040,6 +1040,8 @@ let triples: Vec<(i32, i32, i32)> = for_! {
 | `x & f`                   | `pipe!(x, f)`    | パイプ演算子                 |
 | `fmap f m`                | `pipe!(m, => f)` | モナド内で純粋関数をリフト   |
 | `m >>= f`                 | `pipe!(m, =>> f)`| モナド関数をバインド         |
+| `fmap f asyncIO`          | `pipe_io!(m, => f)` | AsyncIO用リフト（インヒアレント）|
+| `asyncIO >>= f`           | `pipe_io!(m, =>> f)`| AsyncIO用バインド（インヒアレント）|
 | `f $ x`                   | `f(x)`           | 関数適用                     |
 | `flip f`                  | `flip(f)`        | 引数の反転                   |
 | `const x`                 | `constant(x)`    | 定数関数                     |
