@@ -265,6 +265,38 @@ let result = pipe!(5, double, add_one);
 assert_eq!(result, 11); // add_one(double(5)) = 11
 ```
 
+##### Monadic Operators
+
+`pipe!` supports monadic operations with special operators:
+
+- `=>` (lift): Applies a pure function within a monadic context using `fmap`
+- `=>>` (bind): Applies a monadic function using `flat_map`
+
+```rust
+use lambars::pipe;
+use lambars::typeclass::{Functor, Monad};
+
+// Lift operator: applies pure function within monad
+let result = pipe!(Some(5), => |x| x * 2);
+assert_eq!(result, Some(10));
+
+// Bind operator: applies monadic function
+let result = pipe!(
+    Some(5),
+    =>> |x| if x > 0 { Some(x * 2) } else { None }
+);
+assert_eq!(result, Some(10));
+
+// Mixed operators: combine pure and monadic functions
+let result = pipe!(
+    Some(10),
+    => |x| x / 2,                                    // lift: Some(5)
+    =>> |x| if x > 0 { Some(x + 10) } else { None }, // bind: Some(15)
+    => |x| x * 2                                     // lift: Some(30)
+);
+assert_eq!(result, Some(30));
+```
+
 #### partial! (Partial Application)
 
 ```rust

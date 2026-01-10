@@ -267,6 +267,38 @@ let result = pipe!(5, double, add_one);
 assert_eq!(result, 11); // add_one(double(5)) = 11
 ```
 
+##### モナド演算子
+
+`pipe!` は特別な演算子でモナド操作をサポートします:
+
+- `=>` (リフト): `fmap` を使用してモナド文脈内で純粋関数を適用
+- `=>>` (バインド): `flat_map` を使用してモナド関数を適用
+
+```rust
+use lambars::pipe;
+use lambars::typeclass::{Functor, Monad};
+
+// リフト演算子: モナド内で純粋関数を適用
+let result = pipe!(Some(5), => |x| x * 2);
+assert_eq!(result, Some(10));
+
+// バインド演算子: モナド関数を適用
+let result = pipe!(
+    Some(5),
+    =>> |x| if x > 0 { Some(x * 2) } else { None }
+);
+assert_eq!(result, Some(10));
+
+// 混合演算子: 純粋関数とモナド関数を組み合わせ
+let result = pipe!(
+    Some(10),
+    => |x| x / 2,                                    // リフト: Some(5)
+    =>> |x| if x > 0 { Some(x + 10) } else { None }, // バインド: Some(15)
+    => |x| x * 2                                     // リフト: Some(30)
+);
+assert_eq!(result, Some(30));
+```
+
 #### partial!（部分適用）
 
 ```rust
