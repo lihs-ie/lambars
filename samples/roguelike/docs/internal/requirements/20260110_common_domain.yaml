@@ -1,0 +1,1352 @@
+# Common Domain 要件定義
+#
+# 概要:
+#   ローグライクゲームプロジェクトにおける共通ドメインモジュールの実装要件を定義する。
+#   座標、数値、文字列、複合型、ステータス効果、レアリティ、エラーの各値オブジェクトを
+#   関数型プログラミングの原則に従って実装する。
+#
+# 設計方針:
+#   1. 全ての値オブジェクトは newtype パターンで実装し、不正な値を型レベルで防ぐ
+#   2. 不変性を徹底し、全ての操作は新しい値を返す
+#   3. lambars ライブラリの型クラス（Semigroup, Monoid）を活用する
+#   4. Result 型を用いたエラーハンドリングで例外を使わない
+#   5. 全ての公開型は適切な derive マクロを使用する
+#
+# 参照:
+#   - docs/domains/common.yaml (設計ドキュメント)
+#   - lambars/src/typeclass/semigroup.rs (Semigroup 実装パターン)
+#   - lambars/src/typeclass/monoid.rs (Monoid 実装パターン)
+
+version: "1.0.0"
+name: "common_domain"
+description: |
+  ローグライクゲームの共通ドメインモジュール。
+  座標系（Position, Direction, Distance）、数値型（Health, Mana, Experience 等）、
+  文字列型（Description）、複合型（CombatStats, BaseStats, DamageModifier）、
+  ステータス効果（StatusEffect, StatusEffectType）、レアリティ（Rarity）、
+  エラー型（ValidationError, DomainError）を提供する。
+
+  全ての型は不変データとして設計され、関数型プログラミングのパラダイムに従う。
+  lambars ライブラリの Semigroup/Monoid を活用してダメージ修正値の合成を実現する。
+
+# 背景・動機
+background:
+  problem: |
+    ローグライクゲームでは多くのドメイン間で共通して使用される値オブジェクトがある。
+    これらを各ドメインで個別に定義すると、型の不整合やバリデーションロジックの重複が発生する。
+    また、不正な値（負の体力、範囲外のレベル等）がランタイムエラーを引き起こす可能性がある。
+  motivation: |
+    共通ドメインモジュールとして値オブジェクトを一元管理することで、
+    型安全性を向上させ、不正な状態を型レベルで防ぐ。
+    関数型プログラミングの原則（不変性、純粋関数、参照透過性）に従うことで、
+    テスト容易性と保守性を高める。
+  prior_art:
+    - name: "Haskell newtype"
+      description: |
+        Haskell の newtype パターンをRustに適用。
+        コンパイル時のオーバーヘッドなしに型安全性を実現する。
+    - name: "Rust std::num::NonZeroU32"
+      description: |
+        標準ライブラリの NonZero 型のように、
+        不正な値を型レベルで排除するパターン。
+    - name: "lambars Semigroup/Monoid"
+      description: |
+        DamageModifier の合成に lambars ライブラリの型クラスを活用。
+        複数のダメージ修正値を結合法則に従って合成できる。
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. 座標系（Coordinates）
+  # ======================================================================
+  - id: REQ-COMMON-COORD-001
+    name: "Position 値オブジェクト"
+    description: |
+      2D座標を表す不変の値オブジェクト。
+      x, y 座標はそれぞれ i32 型で、フロア境界内の任意の整数値を取る。
+      座標間の演算（加算、減算）と Direction による移動をサポートする。
+
+    methods:
+      - name: "new"
+        signature: "fn new(x: i32, y: i32) -> Self"
+        description: |
+          指定した x, y 座標で新しい Position を作成する。
+        examples:
+          - description: "原点を作成"
+            code: |
+              let position = Position::new(0, 0);
+              assert_eq!(position.x(), 0);
+              assert_eq!(position.y(), 0);
+
+      - name: "x"
+        signature: "fn x(&self) -> i32"
+        description: |
+          x 座標を取得する。
+        examples:
+          - description: "x 座標の取得"
+            code: |
+              let position = Position::new(5, 3);
+              assert_eq!(position.x(), 5);
+
+      - name: "y"
+        signature: "fn y(&self) -> i32"
+        description: |
+          y 座標を取得する。
+        examples:
+          - description: "y 座標の取得"
+            code: |
+              let position = Position::new(5, 3);
+              assert_eq!(position.y(), 3);
+
+      - name: "move_toward"
+        signature: "fn move_toward(&self, direction: Direction) -> Self"
+        description: |
+          指定した方向に1マス移動した新しい Position を返す。
+          Up: y - 1, Down: y + 1, Left: x - 1, Right: x + 1
+        examples:
+          - description: "上方向への移動"
+            code: |
+              let position = Position::new(5, 5);
+              let moved = position.move_toward(Direction::Up);
+              assert_eq!(moved, Position::new(5, 4));
+
+      - name: "distance_to"
+        signature: "fn distance_to(&self, other: &Self) -> Distance"
+        description: |
+          他の Position までのマンハッタン距離を計算する。
+        examples:
+          - description: "距離計算"
+            code: |
+              let from = Position::new(0, 0);
+              let to = Position::new(3, 4);
+              assert_eq!(from.distance_to(&to), Distance::new(7));
+
+      - name: "add"
+        signature: "fn add(&self, other: &Self) -> Self"
+        description: |
+          2つの Position を加算した新しい Position を返す。
+        examples:
+          - description: "座標の加算"
+            code: |
+              let position_a = Position::new(2, 3);
+              let position_b = Position::new(1, 2);
+              assert_eq!(position_a.add(&position_b), Position::new(3, 5));
+
+      - name: "subtract"
+        signature: "fn subtract(&self, other: &Self) -> Self"
+        description: |
+          Position から他の Position を減算した新しい Position を返す。
+        examples:
+          - description: "座標の減算"
+            code: |
+              let position_a = Position::new(5, 7);
+              let position_b = Position::new(2, 3);
+              assert_eq!(position_a.subtract(&position_b), Position::new(3, 4));
+
+    implementations:
+      - type: "Position"
+        description: |
+          derive: Clone, Copy, Debug, PartialEq, Eq, Hash
+          std::ops::Add, std::ops::Sub トレイトも実装する。
+          Display トレイトで "(x, y)" 形式の出力をサポート。
+
+  - id: REQ-COMMON-COORD-002
+    name: "Direction 列挙型"
+    description: |
+      4方向の移動方向を表す列挙型。
+      Up, Down, Left, Right の4つのバリアントを持つ。
+      反対方向の取得と、Direction から Position への変換をサポートする。
+
+    methods:
+      - name: "opposite"
+        signature: "fn opposite(&self) -> Self"
+        description: |
+          反対方向を返す。
+          Up <-> Down, Left <-> Right
+        examples:
+          - description: "反対方向の取得"
+            code: |
+              assert_eq!(Direction::Up.opposite(), Direction::Down);
+              assert_eq!(Direction::Left.opposite(), Direction::Right);
+
+      - name: "to_offset"
+        signature: "fn to_offset(&self) -> Position"
+        description: |
+          方向をオフセット座標に変換する。
+          Up: (0, -1), Down: (0, 1), Left: (-1, 0), Right: (1, 0)
+        examples:
+          - description: "オフセットへの変換"
+            code: |
+              assert_eq!(Direction::Up.to_offset(), Position::new(0, -1));
+              assert_eq!(Direction::Right.to_offset(), Position::new(1, 0));
+
+      - name: "all"
+        signature: "fn all() -> [Direction; 4]"
+        description: |
+          全ての方向を配列として返す。
+        examples:
+          - description: "全方向の取得"
+            code: |
+              let directions = Direction::all();
+              assert_eq!(directions.len(), 4);
+
+    implementations:
+      - type: "Direction"
+        description: |
+          derive: Clone, Copy, Debug, PartialEq, Eq, Hash
+          Display トレイトで方向名を出力。
+
+  - id: REQ-COMMON-COORD-003
+    name: "Distance 値オブジェクト"
+    description: |
+      距離を表す不変の値オブジェクト（newtype）。
+      u32 型のラッパーで、常に 0 以上の値を持つ。
+
+    methods:
+      - name: "new"
+        signature: "fn new(value: u32) -> Self"
+        description: |
+          指定した値で新しい Distance を作成する。
+        examples:
+          - description: "距離の作成"
+            code: |
+              let distance = Distance::new(10);
+              assert_eq!(distance.value(), 10);
+
+      - name: "value"
+        signature: "fn value(&self) -> u32"
+        description: |
+          距離の値を取得する。
+        examples:
+          - description: "値の取得"
+            code: |
+              let distance = Distance::new(5);
+              assert_eq!(distance.value(), 5);
+
+      - name: "zero"
+        signature: "fn zero() -> Self"
+        description: |
+          距離 0 を返す。
+        examples:
+          - description: "ゼロ距離"
+            code: |
+              assert_eq!(Distance::zero().value(), 0);
+
+    implementations:
+      - type: "Distance"
+        description: |
+          derive: Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord
+          Display トレイトで数値として出力。
+          std::ops::Add トレイトを実装。
+
+  # ======================================================================
+  # 2. 数値型（Numerics）
+  # ======================================================================
+  - id: REQ-COMMON-NUM-001
+    name: "Health 値オブジェクト"
+    description: |
+      体力値を表す不変の値オブジェクト。
+      0 <= value <= MAX_HEALTH (デフォルト: 9999) の範囲内の値を持つ。
+      バリデーション付きコンストラクタを提供する。
+
+    methods:
+      - name: "new"
+        signature: "fn new(value: u32) -> Result<Self, ValidationError>"
+        description: |
+          指定した値で新しい Health を作成する。
+          範囲外の場合は ValidationError を返す。
+        examples:
+          - description: "有効な体力値"
+            code: |
+              let health = Health::new(100).unwrap();
+              assert_eq!(health.value(), 100);
+          - description: "範囲外の体力値"
+            code: |
+              let result = Health::new(10000);
+              assert!(result.is_err());
+
+      - name: "value"
+        signature: "fn value(&self) -> u32"
+        description: |
+          体力値を取得する。
+        examples:
+          - description: "値の取得"
+            code: |
+              let health = Health::new(50).unwrap();
+              assert_eq!(health.value(), 50);
+
+      - name: "zero"
+        signature: "fn zero() -> Self"
+        description: |
+          体力 0 を返す。
+        examples:
+          - description: "ゼロ体力"
+            code: |
+              assert_eq!(Health::zero().value(), 0);
+
+      - name: "max"
+        signature: "fn max() -> Self"
+        description: |
+          最大体力を返す。
+        examples:
+          - description: "最大体力"
+            code: |
+              assert_eq!(Health::max().value(), Health::MAX_HEALTH);
+
+      - name: "saturating_add"
+        signature: "fn saturating_add(&self, amount: u32) -> Self"
+        description: |
+          体力を加算し、MAX_HEALTH で飽和する。
+        examples:
+          - description: "飽和加算"
+            code: |
+              let health = Health::new(9000).unwrap();
+              let healed = health.saturating_add(2000);
+              assert_eq!(healed.value(), Health::MAX_HEALTH);
+
+      - name: "saturating_sub"
+        signature: "fn saturating_sub(&self, amount: u32) -> Self"
+        description: |
+          体力を減算し、0 で飽和する。
+        examples:
+          - description: "飽和減算"
+            code: |
+              let health = Health::new(50).unwrap();
+              let damaged = health.saturating_sub(100);
+              assert_eq!(damaged.value(), 0);
+
+      - name: "is_zero"
+        signature: "fn is_zero(&self) -> bool"
+        description: |
+          体力が 0 かどうかを判定する。
+        examples:
+          - description: "ゼロ判定"
+            code: |
+              assert!(Health::zero().is_zero());
+              assert!(!Health::new(1).unwrap().is_zero());
+
+    implementations:
+      - type: "Health"
+        description: |
+          derive: Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord
+          Display トレイトで数値として出力。
+          MAX_HEALTH は定数として公開。
+
+  - id: REQ-COMMON-NUM-002
+    name: "Mana 値オブジェクト"
+    description: |
+      魔力値を表す不変の値オブジェクト。
+      0 <= value <= MAX_MANA (デフォルト: 999) の範囲内の値を持つ。
+      Health と同様のインターフェースを提供する。
+
+    methods:
+      - name: "new"
+        signature: "fn new(value: u32) -> Result<Self, ValidationError>"
+        description: |
+          指定した値で新しい Mana を作成する。
+        examples:
+          - description: "有効な魔力値"
+            code: |
+              let mana = Mana::new(100).unwrap();
+              assert_eq!(mana.value(), 100);
+
+      - name: "value"
+        signature: "fn value(&self) -> u32"
+        description: |
+          魔力値を取得する。
+
+      - name: "zero"
+        signature: "fn zero() -> Self"
+        description: |
+          魔力 0 を返す。
+
+      - name: "max"
+        signature: "fn max() -> Self"
+        description: |
+          最大魔力を返す。
+
+      - name: "saturating_add"
+        signature: "fn saturating_add(&self, amount: u32) -> Self"
+        description: |
+          魔力を加算し、MAX_MANA で飽和する。
+
+      - name: "saturating_sub"
+        signature: "fn saturating_sub(&self, amount: u32) -> Self"
+        description: |
+          魔力を減算し、0 で飽和する。
+
+    implementations:
+      - type: "Mana"
+        description: |
+          derive: Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord
+          Display トレイトで数値として出力。
+
+  - id: REQ-COMMON-NUM-003
+    name: "Experience 値オブジェクト"
+    description: |
+      経験値を表す不変の値オブジェクト。
+      u64 型で、0 以上の任意の値を取る。
+
+    methods:
+      - name: "new"
+        signature: "fn new(value: u64) -> Self"
+        description: |
+          指定した値で新しい Experience を作成する。
+          バリデーションは不要（常に有効）。
+        examples:
+          - description: "経験値の作成"
+            code: |
+              let experience = Experience::new(1000);
+              assert_eq!(experience.value(), 1000);
+
+      - name: "value"
+        signature: "fn value(&self) -> u64"
+        description: |
+          経験値を取得する。
+
+      - name: "zero"
+        signature: "fn zero() -> Self"
+        description: |
+          経験値 0 を返す。
+
+      - name: "add"
+        signature: "fn add(&self, amount: u64) -> Self"
+        description: |
+          経験値を加算した新しい Experience を返す。
+        examples:
+          - description: "経験値の加算"
+            code: |
+              let experience = Experience::new(100);
+              let gained = experience.add(50);
+              assert_eq!(gained.value(), 150);
+
+    implementations:
+      - type: "Experience"
+        description: |
+          derive: Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord
+          Display トレイトで数値として出力。
+          std::ops::Add トレイトを実装。
+
+  - id: REQ-COMMON-NUM-004
+    name: "Level 値オブジェクト"
+    description: |
+      キャラクターレベルを表す不変の値オブジェクト。
+      1 <= value <= 99 の範囲内の値を持つ。
+
+    methods:
+      - name: "new"
+        signature: "fn new(value: u8) -> Result<Self, ValidationError>"
+        description: |
+          指定した値で新しい Level を作成する。
+          範囲外の場合は ValidationError を返す。
+        examples:
+          - description: "有効なレベル"
+            code: |
+              let level = Level::new(1).unwrap();
+              assert_eq!(level.value(), 1);
+          - description: "範囲外のレベル"
+            code: |
+              assert!(Level::new(0).is_err());
+              assert!(Level::new(100).is_err());
+
+      - name: "value"
+        signature: "fn value(&self) -> u8"
+        description: |
+          レベル値を取得する。
+
+      - name: "one"
+        signature: "fn one() -> Self"
+        description: |
+          レベル 1 を返す。
+
+      - name: "max"
+        signature: "fn max() -> Self"
+        description: |
+          最大レベル（99）を返す。
+
+      - name: "level_up"
+        signature: "fn level_up(&self) -> Option<Self>"
+        description: |
+          レベルを 1 上げる。最大レベルの場合は None を返す。
+        examples:
+          - description: "レベルアップ"
+            code: |
+              let level = Level::new(50).unwrap();
+              let next = level.level_up().unwrap();
+              assert_eq!(next.value(), 51);
+          - description: "最大レベルでのレベルアップ"
+            code: |
+              let level = Level::max();
+              assert!(level.level_up().is_none());
+
+    implementations:
+      - type: "Level"
+        description: |
+          derive: Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord
+          Display トレイトで "Lv.X" 形式で出力。
+          MIN_LEVEL, MAX_LEVEL は定数として公開。
+
+  - id: REQ-COMMON-NUM-005
+    name: "Attack 値オブジェクト"
+    description: |
+      攻撃力を表す不変の値オブジェクト。
+      u32 型で、0 以上の任意の値を取る。
+
+    methods:
+      - name: "new"
+        signature: "fn new(value: u32) -> Self"
+        description: |
+          指定した値で新しい Attack を作成する。
+        examples:
+          - description: "攻撃力の作成"
+            code: |
+              let attack = Attack::new(50);
+              assert_eq!(attack.value(), 50);
+
+      - name: "value"
+        signature: "fn value(&self) -> u32"
+        description: |
+          攻撃力値を取得する。
+
+      - name: "zero"
+        signature: "fn zero() -> Self"
+        description: |
+          攻撃力 0 を返す。
+
+    implementations:
+      - type: "Attack"
+        description: |
+          derive: Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord
+          Display トレイトで数値として出力。
+          std::ops::Add トレイトを実装。
+
+  - id: REQ-COMMON-NUM-006
+    name: "Defense 値オブジェクト"
+    description: |
+      防御力を表す不変の値オブジェクト。
+      Attack と同様のインターフェースを提供する。
+
+    methods:
+      - name: "new"
+        signature: "fn new(value: u32) -> Self"
+        description: |
+          指定した値で新しい Defense を作成する。
+
+      - name: "value"
+        signature: "fn value(&self) -> u32"
+        description: |
+          防御力値を取得する。
+
+      - name: "zero"
+        signature: "fn zero() -> Self"
+        description: |
+          防御力 0 を返す。
+
+    implementations:
+      - type: "Defense"
+        description: |
+          derive: Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord
+          Display トレイトで数値として出力。
+
+  - id: REQ-COMMON-NUM-007
+    name: "Speed 値オブジェクト"
+    description: |
+      行動速度を表す不変の値オブジェクト。
+      Attack と同様のインターフェースを提供する。
+
+    methods:
+      - name: "new"
+        signature: "fn new(value: u32) -> Self"
+        description: |
+          指定した値で新しい Speed を作成する。
+
+      - name: "value"
+        signature: "fn value(&self) -> u32"
+        description: |
+          速度値を取得する。
+
+      - name: "zero"
+        signature: "fn zero() -> Self"
+        description: |
+          速度 0 を返す。
+
+    implementations:
+      - type: "Speed"
+        description: |
+          derive: Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord
+          Display トレイトで数値として出力。
+
+  - id: REQ-COMMON-NUM-008
+    name: "Damage 値オブジェクト"
+    description: |
+      ダメージ量を表す不変の値オブジェクト。
+      Attack と同様のインターフェースを提供する。
+
+    methods:
+      - name: "new"
+        signature: "fn new(value: u32) -> Self"
+        description: |
+          指定した値で新しい Damage を作成する。
+
+      - name: "value"
+        signature: "fn value(&self) -> u32"
+        description: |
+          ダメージ値を取得する。
+
+      - name: "zero"
+        signature: "fn zero() -> Self"
+        description: |
+          ダメージ 0 を返す。
+
+    implementations:
+      - type: "Damage"
+        description: |
+          derive: Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord
+          Display トレイトで数値として出力。
+          std::ops::Add トレイトを実装。
+
+  - id: REQ-COMMON-NUM-009
+    name: "TurnCount 値オブジェクト"
+    description: |
+      ゲームターン数を表す不変の値オブジェクト。
+      u64 型で、0 以上の任意の値を取る。
+
+    methods:
+      - name: "new"
+        signature: "fn new(value: u64) -> Self"
+        description: |
+          指定した値で新しい TurnCount を作成する。
+
+      - name: "value"
+        signature: "fn value(&self) -> u64"
+        description: |
+          ターン数を取得する。
+
+      - name: "zero"
+        signature: "fn zero() -> Self"
+        description: |
+          ターン 0 を返す。
+
+      - name: "next"
+        signature: "fn next(&self) -> Self"
+        description: |
+          次のターンを返す。
+        examples:
+          - description: "次のターン"
+            code: |
+              let turn = TurnCount::new(10);
+              assert_eq!(turn.next().value(), 11);
+
+    implementations:
+      - type: "TurnCount"
+        description: |
+          derive: Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord
+          Display トレイトで "Turn X" 形式で出力。
+
+  - id: REQ-COMMON-NUM-010
+    name: "FloorLevel 値オブジェクト"
+    description: |
+      ダンジョン階層を表す不変の値オブジェクト。
+      value >= 1 の制約を持つ。
+
+    methods:
+      - name: "new"
+        signature: "fn new(value: u32) -> Result<Self, ValidationError>"
+        description: |
+          指定した値で新しい FloorLevel を作成する。
+          0 の場合は ValidationError を返す。
+        examples:
+          - description: "有効な階層"
+            code: |
+              let floor = FloorLevel::new(1).unwrap();
+              assert_eq!(floor.value(), 1);
+          - description: "無効な階層"
+            code: |
+              assert!(FloorLevel::new(0).is_err());
+
+      - name: "value"
+        signature: "fn value(&self) -> u32"
+        description: |
+          階層値を取得する。
+
+      - name: "first"
+        signature: "fn first() -> Self"
+        description: |
+          1階を返す。
+
+      - name: "descend"
+        signature: "fn descend(&self) -> Self"
+        description: |
+          1階下の階層を返す。
+        examples:
+          - description: "階層を下る"
+            code: |
+              let floor = FloorLevel::new(5).unwrap();
+              assert_eq!(floor.descend().value(), 6);
+
+      - name: "ascend"
+        signature: "fn ascend(&self) -> Option<Self>"
+        description: |
+          1階上の階層を返す。1階の場合は None を返す。
+        examples:
+          - description: "階層を上る"
+            code: |
+              let floor = FloorLevel::new(5).unwrap();
+              assert_eq!(floor.ascend().unwrap().value(), 4);
+          - description: "1階での上昇"
+            code: |
+              let floor = FloorLevel::first();
+              assert!(floor.ascend().is_none());
+
+    implementations:
+      - type: "FloorLevel"
+        description: |
+          derive: Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord
+          Display トレイトで "B1F", "B2F" 形式で出力。
+
+  - id: REQ-COMMON-NUM-011
+    name: "Stat 値オブジェクト"
+    description: |
+      基礎能力値を表す不変の値オブジェクト。
+      1 <= value <= 99 の範囲内の値を持つ。
+
+    methods:
+      - name: "new"
+        signature: "fn new(value: u32) -> Result<Self, ValidationError>"
+        description: |
+          指定した値で新しい Stat を作成する。
+          範囲外の場合は ValidationError を返す。
+        examples:
+          - description: "有効な能力値"
+            code: |
+              let stat = Stat::new(10).unwrap();
+              assert_eq!(stat.value(), 10);
+
+      - name: "value"
+        signature: "fn value(&self) -> u32"
+        description: |
+          能力値を取得する。
+
+      - name: "min"
+        signature: "fn min() -> Self"
+        description: |
+          最小能力値（1）を返す。
+
+      - name: "max"
+        signature: "fn max() -> Self"
+        description: |
+          最大能力値（99）を返す。
+
+    implementations:
+      - type: "Stat"
+        description: |
+          derive: Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord
+          Display トレイトで数値として出力。
+          MIN_STAT, MAX_STAT は定数として公開。
+
+  # ======================================================================
+  # 3. 文字列型（Strings）
+  # ======================================================================
+  - id: REQ-COMMON-STR-001
+    name: "Description 値オブジェクト"
+    description: |
+      説明文を表す不変の値オブジェクト。
+      最大 500 文字の制約を持つ String ラッパー。
+
+    methods:
+      - name: "new"
+        signature: "fn new(value: impl Into<String>) -> Result<Self, ValidationError>"
+        description: |
+          指定した文字列で新しい Description を作成する。
+          500 文字を超える場合は ValidationError を返す。
+        examples:
+          - description: "有効な説明文"
+            code: |
+              let description = Description::new("これはアイテムの説明です。").unwrap();
+          - description: "長すぎる説明文"
+            code: |
+              let long_text = "a".repeat(501);
+              assert!(Description::new(long_text).is_err());
+
+      - name: "value"
+        signature: "fn value(&self) -> &str"
+        description: |
+          説明文を取得する。
+
+      - name: "empty"
+        signature: "fn empty() -> Self"
+        description: |
+          空の説明文を返す。
+
+      - name: "is_empty"
+        signature: "fn is_empty(&self) -> bool"
+        description: |
+          説明文が空かどうかを判定する。
+
+      - name: "len"
+        signature: "fn len(&self) -> usize"
+        description: |
+          説明文の文字数を返す。
+
+    implementations:
+      - type: "Description"
+        description: |
+          derive: Clone, Debug, PartialEq, Eq, Hash
+          Display トレイトで内容をそのまま出力。
+          MAX_LENGTH は定数として公開。
+
+  # ======================================================================
+  # 4. 複合型（Compounds）
+  # ======================================================================
+  - id: REQ-COMMON-COMP-001
+    name: "CombatStats 値オブジェクト"
+    description: |
+      戦闘能力値を表す不変の値オブジェクト。
+      health, max_health, mana, max_mana, attack, defense, speed を持つ。
+
+    methods:
+      - name: "new"
+        signature: |
+          fn new(
+              health: Health,
+              max_health: Health,
+              mana: Mana,
+              max_mana: Mana,
+              attack: Attack,
+              defense: Defense,
+              speed: Speed
+          ) -> Result<Self, ValidationError>
+        description: |
+          指定した値で新しい CombatStats を作成する。
+          health > max_health または mana > max_mana の場合はエラー。
+        examples:
+          - description: "戦闘能力値の作成"
+            code: |
+              let stats = CombatStats::new(
+                  Health::new(100).unwrap(),
+                  Health::new(100).unwrap(),
+                  Mana::new(50).unwrap(),
+                  Mana::new(50).unwrap(),
+                  Attack::new(20),
+                  Defense::new(15),
+                  Speed::new(10)
+              ).unwrap();
+
+      - name: "health"
+        signature: "fn health(&self) -> Health"
+        description: "現在の体力を取得する。"
+
+      - name: "max_health"
+        signature: "fn max_health(&self) -> Health"
+        description: "最大体力を取得する。"
+
+      - name: "mana"
+        signature: "fn mana(&self) -> Mana"
+        description: "現在の魔力を取得する。"
+
+      - name: "max_mana"
+        signature: "fn max_mana(&self) -> Mana"
+        description: "最大魔力を取得する。"
+
+      - name: "attack"
+        signature: "fn attack(&self) -> Attack"
+        description: "攻撃力を取得する。"
+
+      - name: "defense"
+        signature: "fn defense(&self) -> Defense"
+        description: "防御力を取得する。"
+
+      - name: "speed"
+        signature: "fn speed(&self) -> Speed"
+        description: "速度を取得する。"
+
+      - name: "with_health"
+        signature: "fn with_health(&self, health: Health) -> Result<Self, ValidationError>"
+        description: |
+          体力を変更した新しい CombatStats を返す。
+        examples:
+          - description: "体力の変更"
+            code: |
+              let stats = /* ... */;
+              let damaged = stats.with_health(Health::new(50).unwrap()).unwrap();
+
+      - name: "with_mana"
+        signature: "fn with_mana(&self, mana: Mana) -> Result<Self, ValidationError>"
+        description: |
+          魔力を変更した新しい CombatStats を返す。
+
+      - name: "is_alive"
+        signature: "fn is_alive(&self) -> bool"
+        description: |
+          体力が 0 より大きいかどうかを判定する。
+
+    implementations:
+      - type: "CombatStats"
+        description: |
+          derive: Clone, Copy, Debug, PartialEq, Eq, Hash
+
+  - id: REQ-COMMON-COMP-002
+    name: "BaseStats 値オブジェクト"
+    description: |
+      基礎能力値を表す不変の値オブジェクト。
+      strength, dexterity, intelligence, vitality を持つ。
+
+    methods:
+      - name: "new"
+        signature: |
+          fn new(
+              strength: Stat,
+              dexterity: Stat,
+              intelligence: Stat,
+              vitality: Stat
+          ) -> Self
+        description: |
+          指定した値で新しい BaseStats を作成する。
+
+      - name: "strength"
+        signature: "fn strength(&self) -> Stat"
+        description: "筋力を取得する。"
+
+      - name: "dexterity"
+        signature: "fn dexterity(&self) -> Stat"
+        description: "器用さを取得する。"
+
+      - name: "intelligence"
+        signature: "fn intelligence(&self) -> Stat"
+        description: "知力を取得する。"
+
+      - name: "vitality"
+        signature: "fn vitality(&self) -> Stat"
+        description: "体力（耐久力）を取得する。"
+
+      - name: "total"
+        signature: "fn total(&self) -> u32"
+        description: |
+          全能力値の合計を返す。
+        examples:
+          - description: "合計値の計算"
+            code: |
+              let stats = BaseStats::new(
+                  Stat::new(10).unwrap(),
+                  Stat::new(15).unwrap(),
+                  Stat::new(8).unwrap(),
+                  Stat::new(12).unwrap()
+              );
+              assert_eq!(stats.total(), 45);
+
+    implementations:
+      - type: "BaseStats"
+        description: |
+          derive: Clone, Copy, Debug, PartialEq, Eq, Hash
+
+  - id: REQ-COMMON-COMP-003
+    name: "RandomSeed 値オブジェクト"
+    description: |
+      乱数シードを表す不変の値オブジェクト。
+      ゲームの再現性を確保するために使用する。
+
+    methods:
+      - name: "new"
+        signature: "fn new(value: u64) -> Self"
+        description: |
+          指定した値で新しい RandomSeed を作成する。
+
+      - name: "value"
+        signature: "fn value(&self) -> u64"
+        description: |
+          シード値を取得する。
+
+      - name: "from_entropy"
+        signature: "fn from_entropy() -> Self"
+        description: |
+          エントロピーから新しいシードを生成する。
+          注: この関数は純粋ではないが、ゲーム開始時のシード生成に必要。
+
+    implementations:
+      - type: "RandomSeed"
+        description: |
+          derive: Clone, Copy, Debug, PartialEq, Eq, Hash
+          Display トレイトでシード値を16進数で出力。
+
+  - id: REQ-COMMON-COMP-004
+    name: "DamageModifier 値オブジェクト"
+    description: |
+      ダメージ修正値を表す不変の値オブジェクト。
+      multiplier (倍率: f32) と flat_bonus (固定ボーナス: i32) を持つ。
+      lambars の Semigroup/Monoid トレイトを実装し、複数の修正値を合成できる。
+
+    laws:
+      - name: "Semigroup 結合法則"
+        description: |
+          ダメージ修正値の合成は結合的である。
+        equation: "(a.combine(b)).combine(c) == a.combine(b.combine(c))"
+        property_test: |
+          proptest! {
+              #[test]
+              fn prop_damage_modifier_associativity(
+                  a_mult in -10.0f32..10.0f32,
+                  a_bonus in -1000i32..1000i32,
+                  b_mult in -10.0f32..10.0f32,
+                  b_bonus in -1000i32..1000i32,
+                  c_mult in -10.0f32..10.0f32,
+                  c_bonus in -1000i32..1000i32
+              ) {
+                  let a = DamageModifier::new(a_mult, a_bonus);
+                  let b = DamageModifier::new(b_mult, b_bonus);
+                  let c = DamageModifier::new(c_mult, c_bonus);
+
+                  let left = a.combine(b).combine(c);
+                  let right = a.combine(b.combine(c));
+
+                  // f32 の精度問題を考慮した比較
+                  prop_assert!((left.multiplier() - right.multiplier()).abs() < 1e-5);
+                  prop_assert_eq!(left.flat_bonus(), right.flat_bonus());
+              }
+          }
+
+      - name: "Monoid 単位元法則（左単位元）"
+        description: |
+          単位元との合成は元の値を変えない。
+        equation: "DamageModifier::empty().combine(a) == a"
+        property_test: |
+          proptest! {
+              #[test]
+              fn prop_damage_modifier_left_identity(
+                  mult in -10.0f32..10.0f32,
+                  bonus in -1000i32..1000i32
+              ) {
+                  let a = DamageModifier::new(mult, bonus);
+                  let result = DamageModifier::empty().combine(a);
+
+                  prop_assert!((result.multiplier() - a.multiplier()).abs() < 1e-5);
+                  prop_assert_eq!(result.flat_bonus(), a.flat_bonus());
+              }
+          }
+
+      - name: "Monoid 単位元法則（右単位元）"
+        description: |
+          単位元との合成は元の値を変えない。
+        equation: "a.combine(DamageModifier::empty()) == a"
+        property_test: |
+          proptest! {
+              #[test]
+              fn prop_damage_modifier_right_identity(
+                  mult in -10.0f32..10.0f32,
+                  bonus in -1000i32..1000i32
+              ) {
+                  let a = DamageModifier::new(mult, bonus);
+                  let result = a.combine(DamageModifier::empty());
+
+                  prop_assert!((result.multiplier() - a.multiplier()).abs() < 1e-5);
+                  prop_assert_eq!(result.flat_bonus(), a.flat_bonus());
+              }
+          }
+
+    methods:
+      - name: "new"
+        signature: "fn new(multiplier: f32, flat_bonus: i32) -> Self"
+        description: |
+          指定した値で新しい DamageModifier を作成する。
+        examples:
+          - description: "ダメージ修正値の作成"
+            code: |
+              let modifier = DamageModifier::new(1.5, 10);
+              assert_eq!(modifier.multiplier(), 1.5);
+              assert_eq!(modifier.flat_bonus(), 10);
+
+      - name: "multiplier"
+        signature: "fn multiplier(&self) -> f32"
+        description: |
+          倍率を取得する。
+
+      - name: "flat_bonus"
+        signature: "fn flat_bonus(&self) -> i32"
+        description: |
+          固定ボーナスを取得する。
+
+      - name: "apply"
+        signature: "fn apply(&self, base_damage: Damage) -> Damage"
+        description: |
+          基本ダメージに修正を適用する。
+          計算: (base_damage * multiplier) + flat_bonus
+          結果は 0 以上に丸められる。
+        examples:
+          - description: "ダメージ計算"
+            code: |
+              let modifier = DamageModifier::new(1.5, 10);
+              let base = Damage::new(100);
+              let result = modifier.apply(base);
+              assert_eq!(result.value(), 160); // 100 * 1.5 + 10 = 160
+
+    implementations:
+      - type: "DamageModifier"
+        description: |
+          derive: Clone, Copy, Debug
+          PartialEq は f32 の比較のため手動実装（epsilon 比較）。
+          Semigroup トレイトを実装: 倍率は乗算、固定ボーナスは加算。
+          Monoid トレイトを実装: 単位元は multiplier=1.0, flat_bonus=0。
+          Display トレイトで "x1.5 +10" 形式で出力。
+
+  # ======================================================================
+  # 5. ステータス効果（Status Effects）
+  # ======================================================================
+  - id: REQ-COMMON-STATUS-001
+    name: "StatusEffectType 列挙型"
+    description: |
+      状態異常の種類を表す列挙型。
+      Poison, Burn, Freeze, Stun, Haste, Shield, Regeneration の7種類。
+
+    methods:
+      - name: "is_debuff"
+        signature: "fn is_debuff(&self) -> bool"
+        description: |
+          デバフ（悪い効果）かどうかを判定する。
+          Poison, Burn, Freeze, Stun が true。
+        examples:
+          - description: "デバフ判定"
+            code: |
+              assert!(StatusEffectType::Poison.is_debuff());
+              assert!(!StatusEffectType::Haste.is_debuff());
+
+      - name: "is_buff"
+        signature: "fn is_buff(&self) -> bool"
+        description: |
+          バフ（良い効果）かどうかを判定する。
+          Haste, Shield, Regeneration が true。
+
+      - name: "can_stack"
+        signature: "fn can_stack(&self) -> bool"
+        description: |
+          効果が重複可能かどうかを判定する。
+
+    implementations:
+      - type: "StatusEffectType"
+        description: |
+          derive: Clone, Copy, Debug, PartialEq, Eq, Hash
+          Display トレイトで効果名を出力。
+
+  - id: REQ-COMMON-STATUS-002
+    name: "StatusEffect 値オブジェクト"
+    description: |
+      状態異常の効果を表す不変の値オブジェクト。
+      effect_type, remaining_turns, potency を持つ。
+
+    methods:
+      - name: "new"
+        signature: "fn new(effect_type: StatusEffectType, remaining_turns: u32, potency: u32) -> Self"
+        description: |
+          指定した値で新しい StatusEffect を作成する。
+        examples:
+          - description: "状態異常の作成"
+            code: |
+              let poison = StatusEffect::new(StatusEffectType::Poison, 3, 5);
+              assert_eq!(poison.remaining_turns(), 3);
+
+      - name: "effect_type"
+        signature: "fn effect_type(&self) -> StatusEffectType"
+        description: |
+          効果の種類を取得する。
+
+      - name: "remaining_turns"
+        signature: "fn remaining_turns(&self) -> u32"
+        description: |
+          残りターン数を取得する。
+
+      - name: "potency"
+        signature: "fn potency(&self) -> u32"
+        description: |
+          効果の強さを取得する。
+
+      - name: "tick"
+        signature: "fn tick(&self) -> Option<Self>"
+        description: |
+          ターンを1つ進める。残りターンが0になったら None を返す。
+        examples:
+          - description: "ターン経過"
+            code: |
+              let effect = StatusEffect::new(StatusEffectType::Poison, 2, 5);
+              let ticked = effect.tick().unwrap();
+              assert_eq!(ticked.remaining_turns(), 1);
+          - description: "効果終了"
+            code: |
+              let effect = StatusEffect::new(StatusEffectType::Poison, 1, 5);
+              assert!(effect.tick().is_none());
+
+      - name: "is_expired"
+        signature: "fn is_expired(&self) -> bool"
+        description: |
+          効果が終了しているかどうかを判定する。
+
+      - name: "with_potency"
+        signature: "fn with_potency(&self, potency: u32) -> Self"
+        description: |
+          効果の強さを変更した新しい StatusEffect を返す。
+
+    implementations:
+      - type: "StatusEffect"
+        description: |
+          derive: Clone, Copy, Debug, PartialEq, Eq, Hash
+          Display トレイトで "Poison (3 turns, potency: 5)" 形式で出力。
+
+  # ======================================================================
+  # 6. レアリティ（Rarity）
+  # ======================================================================
+  - id: REQ-COMMON-RARITY-001
+    name: "Rarity 列挙型"
+    description: |
+      アイテムのレアリティを表す列挙型。
+      Common, Uncommon, Rare, Epic, Legendary の5段階。
+
+    methods:
+      - name: "tier"
+        signature: "fn tier(&self) -> u8"
+        description: |
+          レアリティの数値表現を返す。
+          Common: 1, Uncommon: 2, Rare: 3, Epic: 4, Legendary: 5
+        examples:
+          - description: "ティアの取得"
+            code: |
+              assert_eq!(Rarity::Common.tier(), 1);
+              assert_eq!(Rarity::Legendary.tier(), 5);
+
+      - name: "drop_rate_multiplier"
+        signature: "fn drop_rate_multiplier(&self) -> f32"
+        description: |
+          ドロップ率の倍率を返す。
+          高レアリティほど低い値を返す。
+
+      - name: "is_at_least"
+        signature: "fn is_at_least(&self, other: &Self) -> bool"
+        description: |
+          指定したレアリティ以上かどうかを判定する。
+        examples:
+          - description: "レアリティ比較"
+            code: |
+              assert!(Rarity::Epic.is_at_least(&Rarity::Rare));
+              assert!(!Rarity::Common.is_at_least(&Rarity::Rare));
+
+    implementations:
+      - type: "Rarity"
+        description: |
+          derive: Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord
+          Display トレイトでレアリティ名を出力。
+
+  # ======================================================================
+  # 7. エラー型（Errors）
+  # ======================================================================
+  - id: REQ-COMMON-ERR-001
+    name: "ValidationError 列挙型"
+    description: |
+      共通のバリデーションエラーを表す列挙型。
+      EmptyValue, OutOfRange, InvalidFormat, ConstraintViolation の4種類。
+
+    methods:
+      - name: "field"
+        signature: "fn field(&self) -> &str"
+        description: |
+          エラーが発生したフィールド名を取得する。
+
+      - name: "message"
+        signature: "fn message(&self) -> String"
+        description: |
+          エラーメッセージを取得する。
+
+    implementations:
+      - type: "ValidationError"
+        description: |
+          derive: Clone, Debug, PartialEq, Eq
+          std::error::Error トレイトを実装。
+          Display トレイトでユーザーフレンドリーなメッセージを出力。
+
+          バリアント:
+          - EmptyValue { field: String }
+          - OutOfRange { field: String, min: String, max: String, actual: String }
+          - InvalidFormat { field: String, expected: String }
+          - ConstraintViolation { field: String, constraint: String }
+
+  - id: REQ-COMMON-ERR-002
+    name: "DomainError 列挙型"
+    description: |
+      ドメイン全体の統合エラーを表す列挙型。
+      各サブドメインのエラーを包含する。
+
+    methods:
+      - name: "is_validation_error"
+        signature: "fn is_validation_error(&self) -> bool"
+        description: |
+          バリデーションエラーかどうかを判定する。
+
+      - name: "is_recoverable"
+        signature: "fn is_recoverable(&self) -> bool"
+        description: |
+          回復可能なエラーかどうかを判定する。
+
+    implementations:
+      - type: "DomainError"
+        description: |
+          derive: Clone, Debug, PartialEq, Eq
+          std::error::Error トレイトを実装。
+          Display トレイトでエラーメッセージを出力。
+          From トレイトで各サブエラーからの変換を実装。
+
+          バリアント:
+          - Validation(ValidationError)
+          - GameSession(GameSessionError) - 将来の拡張
+          - Player(PlayerError) - 将来の拡張
+          - Enemy(EnemyError) - 将来の拡張
+          - Floor(FloorError) - 将来の拡張
+          - Combat(CombatError) - 将来の拡張
+          - Item(ItemError) - 将来の拡張
+          - Command(CommandError) - 将来の拡張
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - "全ての値オブジェクトは Copy 可能であること（Description を除く）"
+    - "バリデーション付きコンストラクタは O(1) で動作すること"
+    - "DamageModifier の combine 操作は O(1) であること"
+  compatibility:
+    - "Rust 1.92.0 以上で動作すること"
+    - "no_std 環境では動作しなくてよい（std 依存を許容）"
+    - "lambars ライブラリ 0.1.x 系と互換性を持つこと"
+  testing:
+    - "全てのパブリック API に対してユニットテストを作成すること"
+    - "rstest を使用してパラメタライズドテストを作成すること"
+    - "proptest を使用して Semigroup/Monoid 法則を検証すること"
+    - "テストカバレッジ 100% を目指すこと"
+    - "境界値テスト（最小値、最大値、境界の前後）を必ず含めること"
+
+# 将来の拡張
+future_extensions:
+  - id: EXT-COMMON-001
+    name: "8方向への拡張"
+    description: |
+      Direction を4方向から8方向（斜め方向を含む）に拡張する。
+    rationale: |
+      現時点では4方向で十分であり、8方向はゲーム仕様の拡張時に検討する。
+
+  - id: EXT-COMMON-002
+    name: "StatusEffect の Semigroup 実装"
+    description: |
+      同じ種類の StatusEffect を合成できるようにする。
+      例: 毒(3ターン, 威力5) + 毒(2ターン, 威力3) = 毒(5ターン, 威力8)
+    rationale: |
+      ゲームバランスの検討が必要であり、仕様が固まってから実装する。
+
+  - id: EXT-COMMON-003
+    name: "Serialize/Deserialize サポート"
+    description: |
+      serde を使用したシリアライズ/デシリアライズのサポート。
+      セーブデータやネットワーク通信に使用。
+    rationale: |
+      セーブ/ロード機能は別フェーズで実装予定。
+      必要になった時点で追加する。
+
+  - id: EXT-COMMON-004
+    name: "Arbitrary トレイト実装"
+    description: |
+      proptest の Arbitrary トレイトを全ての値オブジェクトに実装。
+      より強力なプロパティベーステストが可能になる。
+    rationale: |
+      初期実装では手動のストラテジーで十分。
+      テストが複雑化した場合に検討する。
