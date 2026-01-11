@@ -509,8 +509,8 @@ let contents = io.run_unsafe();
 | `\|>` (前方パイプ)    | `pipe!`                                           | 値を関数に適用             |
 | `\|> Option.map f`    | `pipe!(m, => f)`                                  | モナド内で純粋関数をリフト |
 | `\|> Option.bind f`   | `pipe!(m, =>> f)`                                 | モナド関数をバインド       |
-| `asyncIO \|> map f`   | `pipe_io!(m, => f)`                               | AsyncIO用リフト（インヒアレント）|
-| `asyncIO \|> bind f`  | `pipe_io!(m, =>> f)`                              | AsyncIO用バインド（インヒアレント）|
+| `asyncIO \|> map f`   | `pipe_async!(m, => f)`                               | AsyncIO用リフト（インヒアレント）|
+| `asyncIO \|> bind f`  | `pipe_async!(m, =>> f)`                              | AsyncIO用バインド（インヒアレント）|
 | `<\|` (後方パイプ)    | 関数呼び出し                                      | 関数を値に適用             |
 | `>>` (前方合成)       | `compose!` (逆順)                                 | 左から右へ合成             |
 | `<<` (後方合成)       | `compose!`                                        | 右から左へ合成             |

@@ -1038,8 +1038,8 @@ let triples: Vec<(i32, i32, i32)> = for_! {
 | `x & f`                   | `pipe!(x, f)`         | Pipe operator                 |
 | `fmap f m`                | `pipe!(m, => f)`      | Lift pure function in monad   |
 | `m >>= f`                 | `pipe!(m, =>> f)`     | Bind monadic function         |
-| `fmap f asyncIO`          | `pipe_io!(m, => f)`   | Lift for AsyncIO (inherent)   |
-| `asyncIO >>= f`           | `pipe_io!(m, =>> f)`  | Bind for AsyncIO (inherent)   |
+| `fmap f asyncIO`          | `pipe_async!(m, => f)`   | Lift for AsyncIO (inherent)   |
+| `asyncIO >>= f`           | `pipe_async!(m, =>> f)`  | Bind for AsyncIO (inherent)   |
 | `f $ x`                   | `f(x)`                | Function application          |
 | `flip f`                  | `flip(f)`             | Flip arguments                |
 | `const x`                 | `constant(x)`         | Constant function             |

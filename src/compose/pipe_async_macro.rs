@@ -1,6 +1,6 @@
-//! The `pipe_io!` macro for AsyncIO-specific left-to-right function application.
+//! The `pipe_async!` macro for AsyncIO-specific left-to-right function application.
 //!
-//! This module provides the [`pipe_io!`] macro which applies functions
+//! This module provides the [`pipe_async!`] macro which applies functions
 //! from left to right specifically for [`AsyncIO`](crate::effect::AsyncIO) values.
 //!
 //! # Background
@@ -10,7 +10,7 @@
 //! on closures and values, but the trait definitions do not include these bounds.
 //! As a result, `AsyncIO` cannot be used with the regular [`pipe!`](crate::pipe) macro.
 //!
-//! `pipe_io!` solves this by directly calling `AsyncIO`'s inherent methods
+//! `pipe_async!` solves this by directly calling `AsyncIO`'s inherent methods
 //! (`fmap` and `flat_map`) instead of trait methods.
 //!
 //! # Operators
@@ -24,16 +24,16 @@
 //!
 //! ```rust,ignore
 //! use lambars::effect::AsyncIO;
-//! use lambars::pipe_io;
+//! use lambars::pipe_async;
 //!
 //! #[tokio::main]
 //! async fn main() {
 //!     // Single lift operation
-//!     let result = pipe_io!(AsyncIO::pure(5), => |x| x * 2);
+//!     let result = pipe_async!(AsyncIO::pure(5), => |x| x * 2);
 //!     assert_eq!(result.run_async().await, 10);
 //!
 //!     // Single bind operation
-//!     let result = pipe_io!(
+//!     let result = pipe_async!(
 //!         AsyncIO::pure(5),
 //!         =>> |x| AsyncIO::pure(x * 2)
 //!     );
@@ -45,11 +45,11 @@
 //!
 //! ```rust,ignore
 //! use lambars::effect::AsyncIO;
-//! use lambars::pipe_io;
+//! use lambars::pipe_async;
 //!
 //! #[tokio::main]
 //! async fn main() {
-//!     let result = pipe_io!(
+//!     let result = pipe_async!(
 //!         AsyncIO::pure(10),
 //!         => |x| x / 2,                     // fmap: AsyncIO(5)
 //!         =>> |x| AsyncIO::pure(x + 10),    // flat_map: AsyncIO(15)
@@ -61,12 +61,12 @@
 //!
 //! ## Deferred execution
 //!
-//! `pipe_io!` preserves the lazy execution semantics of `AsyncIO`.
+//! `pipe_async!` preserves the lazy execution semantics of `AsyncIO`.
 //! Side effects are not executed until `run_async().await` is called.
 //!
 //! ```rust,ignore
 //! use lambars::effect::AsyncIO;
-//! use lambars::pipe_io;
+//! use lambars::pipe_async;
 //! use std::sync::Arc;
 //! use std::sync::atomic::{AtomicBool, Ordering};
 //!
@@ -75,7 +75,7 @@
 //!     let executed = Arc::new(AtomicBool::new(false));
 //!     let executed_clone = executed.clone();
 //!
-//!     let workflow = pipe_io!(
+//!     let workflow = pipe_async!(
 //!         AsyncIO::new(move || async move {
 //!             executed_clone.store(true, Ordering::SeqCst);
 //!             5
@@ -101,10 +101,10 @@
 ///
 /// # Syntax
 ///
-/// - `pipe_io!(async_io)` - Returns the `AsyncIO` unchanged
-/// - `pipe_io!(async_io, => f)` - Applies `f` using `fmap` (lift operator)
-/// - `pipe_io!(async_io, =>> f)` - Applies `f` using `flat_map` (bind operator)
-/// - `pipe_io!(async_io, => f, =>> g, => h, ...)` - Chain multiple operations
+/// - `pipe_async!(async_io)` - Returns the `AsyncIO` unchanged
+/// - `pipe_async!(async_io, => f)` - Applies `f` using `fmap` (lift operator)
+/// - `pipe_async!(async_io, =>> f)` - Applies `f` using `flat_map` (bind operator)
+/// - `pipe_async!(async_io, => f, =>> g, => h, ...)` - Chain multiple operations
 ///
 /// # Operators
 ///
@@ -114,7 +114,7 @@
 /// It expands to a call to `AsyncIO::fmap`.
 ///
 /// ```rust,ignore
-/// pipe_io!(m, => f) // expands to: m.fmap(f)
+/// pipe_async!(m, => f) // expands to: m.fmap(f)
 /// ```
 ///
 /// ## Bind Operator (`=>>`)
@@ -123,7 +123,7 @@
 /// It expands to a call to `AsyncIO::flat_map`.
 ///
 /// ```rust,ignore
-/// pipe_io!(m, =>> f) // expands to: m.flat_map(f)
+/// pipe_async!(m, =>> f) // expands to: m.flat_map(f)
 /// ```
 ///
 /// # Type Constraints
@@ -138,10 +138,10 @@
 ///
 /// ```rust,ignore
 /// use lambars::effect::AsyncIO;
-/// use lambars::pipe_io;
+/// use lambars::pipe_async;
 ///
 /// let async_io = AsyncIO::pure(42);
-/// let result = pipe_io!(async_io);
+/// let result = pipe_async!(async_io);
 /// // result is the same as async_io
 /// ```
 ///
@@ -149,9 +149,9 @@
 ///
 /// ```rust,ignore
 /// use lambars::effect::AsyncIO;
-/// use lambars::pipe_io;
+/// use lambars::pipe_async;
 ///
-/// let result = pipe_io!(AsyncIO::pure(5), => |x| x * 2);
+/// let result = pipe_async!(AsyncIO::pure(5), => |x| x * 2);
 /// assert_eq!(result.run_async().await, 10);
 /// ```
 ///
@@ -159,9 +159,9 @@
 ///
 /// ```rust,ignore
 /// use lambars::effect::AsyncIO;
-/// use lambars::pipe_io;
+/// use lambars::pipe_async;
 ///
-/// let result = pipe_io!(
+/// let result = pipe_async!(
 ///     AsyncIO::pure(5),
 ///     => |x| x + 1,
 ///     => |x| x * 2
@@ -173,12 +173,12 @@
 ///
 /// ```rust,ignore
 /// use lambars::effect::AsyncIO;
-/// use lambars::pipe_io;
+/// use lambars::pipe_async;
 ///
 /// fn double(x: i32) -> i32 { x * 2 }
 /// fn add_async(x: i32) -> AsyncIO<i32> { AsyncIO::pure(x + 10) }
 ///
-/// let result = pipe_io!(
+/// let result = pipe_async!(
 ///     AsyncIO::pure(5),
 ///     => double,      // fmap: AsyncIO(10)
 ///     =>> add_async   // flat_map: AsyncIO(20)
@@ -186,7 +186,7 @@
 /// assert_eq!(result.run_async().await, 20);
 /// ```
 #[macro_export]
-macro_rules! pipe_io {
+macro_rules! pipe_async {
     // Base case: value only
     ($value:expr) => {
         $value
@@ -199,8 +199,8 @@ macro_rules! pipe_io {
 
     // Lift operator with continuation
     ($value:expr, => $function:expr, $($rest:tt)+) => {{
-        let __pipe_io_intermediate = $value.fmap($function);
-        $crate::pipe_io!(__pipe_io_intermediate, $($rest)+)
+        let __pipe_async_intermediate = $value.fmap($function);
+        $crate::pipe_async!(__pipe_async_intermediate, $($rest)+)
     }};
 
     // Bind operator with optional trailing comma (terminal case)
@@ -210,8 +210,8 @@ macro_rules! pipe_io {
 
     // Bind operator with continuation
     ($value:expr, =>> $function:expr, $($rest:tt)+) => {{
-        let __pipe_io_intermediate = $value.flat_map($function);
-        $crate::pipe_io!(__pipe_io_intermediate, $($rest)+)
+        let __pipe_async_intermediate = $value.flat_map($function);
+        $crate::pipe_async!(__pipe_async_intermediate, $($rest)+)
     }};
 }
 
@@ -222,23 +222,23 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
-    async fn test_pipe_io_value_only() {
+    async fn test_pipe_async_value_only() {
         let async_io = AsyncIO::pure(42);
-        let result = pipe_io!(async_io);
+        let result = pipe_async!(async_io);
         assert_eq!(result.run_async().await, 42);
     }
 
     #[rstest]
     #[tokio::test]
-    async fn test_pipe_io_single_lift() {
-        let result = pipe_io!(AsyncIO::pure(5), => |x| x * 2);
+    async fn test_pipe_async_single_lift() {
+        let result = pipe_async!(AsyncIO::pure(5), => |x| x * 2);
         assert_eq!(result.run_async().await, 10);
     }
 
     #[rstest]
     #[tokio::test]
-    async fn test_pipe_io_multiple_lifts() {
-        let result = pipe_io!(
+    async fn test_pipe_async_multiple_lifts() {
+        let result = pipe_async!(
             AsyncIO::pure(5),
             => |x| x + 1,
             => |x| x * 2,
@@ -249,8 +249,8 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
-    async fn test_pipe_io_type_conversion() {
-        let result = pipe_io!(
+    async fn test_pipe_async_type_conversion() {
+        let result = pipe_async!(
             AsyncIO::pure(42),
             => |x: i32| x.to_string(),
             => |s: String| s.len()
@@ -260,8 +260,8 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
-    async fn test_pipe_io_single_bind() {
-        let result = pipe_io!(
+    async fn test_pipe_async_single_bind() {
+        let result = pipe_async!(
             AsyncIO::pure(5),
             =>> |x| AsyncIO::pure(x * 2)
         );
@@ -270,8 +270,8 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
-    async fn test_pipe_io_multiple_binds() {
-        let result = pipe_io!(
+    async fn test_pipe_async_multiple_binds() {
+        let result = pipe_async!(
             AsyncIO::pure(5),
             =>> |x| AsyncIO::pure(x + 1),
             =>> |x| AsyncIO::pure(x * 2),
@@ -282,8 +282,8 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
-    async fn test_pipe_io_mixed_operators() {
-        let result = pipe_io!(
+    async fn test_pipe_async_mixed_operators() {
+        let result = pipe_async!(
             AsyncIO::pure(10),
             => |x| x / 2,
             =>> |x| AsyncIO::pure(x + 10),
@@ -294,8 +294,8 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
-    async fn test_pipe_io_alternating_operators() {
-        let result = pipe_io!(
+    async fn test_pipe_async_alternating_operators() {
+        let result = pipe_async!(
             AsyncIO::pure(1),
             => |x| x + 1,
             =>> |x| AsyncIO::pure(x * 2),
@@ -307,7 +307,7 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
-    async fn test_pipe_io_with_named_functions() {
+    async fn test_pipe_async_with_named_functions() {
         fn double(x: i32) -> i32 {
             x * 2
         }
@@ -316,7 +316,7 @@ mod tests {
             AsyncIO::pure(x + 10)
         }
 
-        let result = pipe_io!(
+        let result = pipe_async!(
             AsyncIO::pure(5),
             => double,
             =>> add_async
@@ -326,8 +326,8 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
-    async fn test_pipe_io_trailing_comma() {
-        let result = pipe_io!(
+    async fn test_pipe_async_trailing_comma() {
+        let result = pipe_async!(
             AsyncIO::pure(5),
             => |x| x * 2,
         );
@@ -336,8 +336,8 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
-    async fn test_pipe_io_trailing_comma_bind() {
-        let result = pipe_io!(
+    async fn test_pipe_async_trailing_comma_bind() {
+        let result = pipe_async!(
             AsyncIO::pure(5),
             =>> |x| AsyncIO::pure(x * 2),
         );
@@ -346,14 +346,14 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
-    async fn test_pipe_io_preserves_lazy_execution() {
+    async fn test_pipe_async_preserves_lazy_execution() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
 
         let executed = Arc::new(AtomicBool::new(false));
         let executed_clone = executed.clone();
 
-        let async_io = pipe_io!(
+        let async_io = pipe_async!(
             AsyncIO::new(move || async move {
                 executed_clone.store(true, Ordering::SeqCst);
                 5
@@ -370,7 +370,7 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
-    async fn test_pipe_io_lazy_with_flat_map() {
+    async fn test_pipe_async_lazy_with_flat_map() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -378,7 +378,7 @@ mod tests {
         let counter1 = counter.clone();
         let counter2 = counter.clone();
 
-        let async_io = pipe_io!(
+        let async_io = pipe_async!(
             AsyncIO::new(move || async move {
                 counter1.fetch_add(1, Ordering::SeqCst);
                 5
@@ -401,8 +401,8 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
-    async fn test_pipe_io_complex_pipeline() {
-        let result = pipe_io!(
+    async fn test_pipe_async_complex_pipeline() {
+        let result = pipe_async!(
             AsyncIO::pure(100_i32),
             => |x| x / 10,
             => |x| x.to_string(),
@@ -415,7 +415,7 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
-    async fn test_pipe_io_with_struct_transformation() {
+    async fn test_pipe_async_with_struct_transformation() {
         #[derive(Debug, PartialEq)]
         struct User {
             id: i32,
@@ -428,7 +428,7 @@ mod tests {
             bio: String,
         }
 
-        let result = pipe_io!(
+        let result = pipe_async!(
             AsyncIO::pure(42),
             => |id| User { id, name: "Alice".to_string() },
             =>> |user: User| AsyncIO::pure(Profile {
@@ -444,8 +444,8 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
-    async fn test_pipe_io_many_operations() {
-        let result = pipe_io!(
+    async fn test_pipe_async_many_operations() {
+        let result = pipe_async!(
             AsyncIO::pure(0),
             => |x| x + 1,
             => |x| x + 1,
@@ -463,8 +463,8 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
-    async fn test_pipe_io_with_unit_type() {
-        let result = pipe_io!(
+    async fn test_pipe_async_with_unit_type() {
+        let result = pipe_async!(
             AsyncIO::pure(()),
             => |()| 42
         );
@@ -473,8 +473,8 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
-    async fn test_pipe_io_returning_unit() {
-        let result = pipe_io!(
+    async fn test_pipe_async_returning_unit() {
+        let result = pipe_async!(
             AsyncIO::pure(42),
             => |_| ()
         );

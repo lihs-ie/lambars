@@ -1,9 +1,9 @@
-# Issue: AsyncIO pipe_io macro
+# Issue: AsyncIO pipe_async macro
 # 実装時に発見された、将来対応が必要な項目
 
 deferred_features:
-  - id: asyncio_pipe_io_macro
-    name: "AsyncIO 対応の pipe_io! マクロ"
+  - id: asyncio_pipe_async_macro
+    name: "AsyncIO 対応の pipe_async! マクロ"
     discovered_date: "2026-01-10"
     priority: medium
     category: enhancement
@@ -49,16 +49,16 @@ deferred_features:
 
     # 解決策の提案
     solution:
-      approach: "AsyncIO のインヒアレントメソッドを使用する専用マクロ pipe_io! を作成"
+      approach: "AsyncIO のインヒアレントメソッドを使用する専用マクロ pipe_async! を作成"
       options:
-        - name: "pipe_io! マクロを作成"
+        - name: "pipe_async! マクロを作成"
           description: |
             AsyncIO のインヒアレントメソッド（fmap, flat_map）を使用する専用マクロを作成。
             pipe! マクロと同じ構文（=>、=>>）を使用可能。
 
             ```rust
             // 使用例
-            let result = pipe_io!(
+            let result = pipe_async!(
                 AsyncIO::pure(5),
                 => |x| x * 2,
                 =>> |x| AsyncIO::pure(x + 1)
@@ -96,7 +96,7 @@ deferred_features:
             - Send を実装しない型（Rc、RefCell 等）を含む場合に使用不可
             - シングルスレッド用途でも Send が必要になる
 
-      recommended: "pipe_io! マクロを作成"
+      recommended: "pipe_async! マクロを作成"
       estimated_complexity: medium
 
     # 参考情報

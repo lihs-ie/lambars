@@ -152,7 +152,7 @@ mod for_async_macro;
 mod for_macro;
 mod partial_macro;
 #[cfg(feature = "effect")]
-mod pipe_io_macro;
+mod pipe_async_macro;
 mod pipe_macro;
 mod utils;
 
@@ -165,7 +165,7 @@ pub use crate::for_;
 pub use crate::partial;
 pub use crate::pipe;
 #[cfg(feature = "effect")]
-pub use crate::pipe_io;
+pub use crate::pipe_async;
 
 // Re-export curry! macro from lambars-derive
 pub use lambars_derive::curry;

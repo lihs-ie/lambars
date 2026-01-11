@@ -11,7 +11,7 @@ lambars brings functional programming abstractions to Rust that are not provided
 ### Features
 
 - **Type Classes**: Functor, Applicative, Monad, Foldable, Traversable, Semigroup, Monoid
-- **Function Composition**: `compose!`, `pipe!`, `pipe_io!`, `partial!`, `curry!`, `eff!`, `for_!`, `for_async!` macros
+- **Function Composition**: `compose!`, `pipe!`, `pipe_async!`, `partial!`, `curry!`, `eff!`, `for_!`, `for_async!` macros
 - **Control Structures**: Lazy evaluation, Trampoline for stack-safe recursion, Continuation monad
 - **Persistent Data Structures**: Immutable Vector, HashMap, HashSet, TreeMap, List with structural sharing
 - **Optics**: Lens, Prism, Iso, Optional, Traversal for immutable data manipulation
