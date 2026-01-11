@@ -7,6 +7,7 @@
 //! - Associativity: m.flat_map(f).flat_map(g) == m.flat_map(|x| f(x).flat_map(g))
 
 use lambars::effect::IO;
+use lambars::typeclass::{Applicative, Functor, Monad};
 use proptest::prelude::*;
 
 // =============================================================================

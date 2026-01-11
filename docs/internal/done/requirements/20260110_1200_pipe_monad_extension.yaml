@@ -1,0 +1,308 @@
+# pipe! マクロのモナド対応拡張 要件定義
+#
+# 概要:
+#   pipe! マクロを拡張し、=> (lift) と =>> (bind) 演算子を追加することで、
+#   純粋関数とモナド関数を統一的に合成できるようにする。
+#   （Rust のマクロ構文制約により |> と >> は使用不可のため代替演算子を採用）
+#
+# 設計方針:
+#   1. 既存の pipe! マクロの後方互換性を維持
+#   2. 新しい演算子はモナド文脈での関数合成を可能にする
+#   3. Rust のマクロ構文制約を考慮した演算子設計
+#
+# 参照:
+#   - Haskell: >>= 演算子、do-notation
+#   - F#: |> 演算子、|> bind
+#   - Scala: for comprehensions
+
+version: "1.0.0"
+name: "pipe_monad_extension"
+description: |
+  現在の pipe! マクロは純粋関数の合成のみをサポートしており、
+  AsyncIO などのモナド型を扱う場合は手動で flat_map チェーンを
+  書く必要がある。
+
+  この拡張により、pipe! マクロ内で純粋関数とモナド関数を
+  混在させて記述できるようになり、コードの可読性が向上する。
+
+background:
+  problem: |
+    現在、モナド型（Option, Result, AsyncIO など）を扱うワークフローでは、
+    flat_map チェーンを手動で書く必要があり、コードが冗長になる。
+
+    例:
+    ```rust
+    seed_io.flat_map(|seed| {
+        let ids = create_identifiers(seed);
+        persist_session(ids).flat_map(|session| {
+            cache_session(session)
+        })
+    })
+    ```
+
+  motivation: |
+    pipe! マクロを拡張することで、以下のような簡潔な記述を可能にする:
+
+    ```rust
+    pipe!(
+        seed_io,
+        => create_identifiers,   // 純粋関数をリフト
+        =>> persist_session,     // モナド関数を適用
+        =>> cache_session
+    )
+    ```
+
+    これにより:
+    - コードの可読性が向上する
+    - 関数型プログラミングのパイプラインスタイルを維持できる
+    - 純粋関数とモナド関数を統一的に扱える
+
+  prior_art:
+    - name: "Haskell do-notation"
+      description: |
+        Haskell の do-notation は >>= 演算子の糖衣構文として機能し、
+        モナド計算を命令的なスタイルで記述できる。
+        本提案はこれをマクロで実現する。
+
+    - name: "F# パイプライン演算子"
+      description: |
+        F# の |> 演算子は値を関数に渡すが、
+        本提案ではモナド文脈でのリフト操作も含める。
+
+    - name: "Scala for comprehensions"
+      description: |
+        Scala の for 式は flatMap/map チェーンの糖衣構文として機能する。
+
+requirements:
+  # ======================================================================
+  # 1. 新しい演算子の導入
+  # ======================================================================
+  - id: pipe_lift_operator
+    name: "リフト演算子 (=>) の導入"
+    description: |
+      pipe! マクロに => 演算子を追加する。
+      この演算子は純粋関数を適用し、結果をモナドにリフトする。
+
+      意味論的等価表現:
+      ```rust
+      pipe!(m, => f) ≡ m.flat_map(|v| M::pure(f(v)))
+      ```
+
+      実装では型推論を簡潔にするため Functor::fmap を使用する:
+      ```rust
+      pipe!(m, => f) → m.fmap(f)
+      ```
+
+      （fmap と flat_map + pure は Functor/Monad 則により等価）
+
+    methods:
+      - name: "pipe! with lift operator"
+        signature: "pipe!(monad, => pure_function)"
+        description: |
+          モナド値に純粋関数を適用し、結果をリフトする。
+          意味論的には flat_map と pure の組み合わせと等価だが、
+          実装では Functor::fmap を使用（型推論がよりシンプル）。
+        examples:
+          - description: "Option に対する純粋関数のリフト"
+            code: |
+              let result = pipe!(
+                  Some(5),
+                  => |x| x * 2
+              );
+              assert_eq!(result, Some(10));
+
+          - description: "複数の純粋関数をチェーン"
+            code: |
+              let result = pipe!(
+                  Some(5),
+                  => |x| x + 1,
+                  => |x| x * 2
+              );
+              assert_eq!(result, Some(12));
+
+  - id: pipe_bind_operator
+    name: "バインド演算子 (=>>) の導入"
+    description: |
+      pipe! マクロに =>> 演算子を追加する。
+      この演算子はモナド関数を直接適用する（flat_map）。
+
+      展開結果:
+      ```rust
+      pipe!(m, =>> f) → m.flat_map(f)
+      ```
+
+    methods:
+      - name: "pipe! with bind operator"
+        signature: "pipe!(monad, =>> monadic_function)"
+        description: |
+          モナド値にモナド関数を適用する。
+          内部的には flat_map で実現する。
+        examples:
+          - description: "Option に対するモナド関数の適用"
+            code: |
+              let result = pipe!(
+                  Some(5),
+                  =>> |x| if x > 0 { Some(x * 2) } else { None }
+              );
+              assert_eq!(result, Some(10));
+
+          - description: "複数のモナド関数をチェーン"
+            code: |
+              let safe_div = |x: i32| if x != 0 { Some(100 / x) } else { None };
+              let safe_sqrt = |x: i32| if x >= 0 { Some((x as f64).sqrt() as i32) } else { None };
+
+              let result = pipe!(
+                  Some(4),
+                  =>> safe_div,
+                  =>> safe_sqrt
+              );
+              assert_eq!(result, Some(5)); // 100/4 = 25, sqrt(25) = 5
+
+  - id: pipe_mixed_operators
+    name: "演算子の混在使用"
+    description: |
+      同一の pipe! マクロ内で純粋関数適用（既存）、リフト演算子、
+      バインド演算子を混在して使用できる。
+
+    examples:
+      - description: "純粋関数とモナド関数の混在"
+        code: |
+          fn create_identifiers(seed: u64) -> Identifiers { ... }
+          fn persist_session(ids: Identifiers) -> AsyncIO<Session> { ... }
+          fn cache_session(session: Session) -> AsyncIO<()> { ... }
+
+          let workflow = pipe!(
+              seed_io,
+              => create_identifiers,   // 純粋関数をリフト
+              =>> persist_session,     // モナド関数を適用
+              =>> cache_session
+          );
+
+  # ======================================================================
+  # 2. Rust マクロ構文との整合性
+  # ======================================================================
+  - id: macro_syntax_constraints
+    name: "Rust マクロ構文の制約対応"
+    description: |
+      Rust の macro_rules! には以下の制約がある:
+      - | は or パターンとして解釈される
+      - >> はシフト演算子として解釈される可能性がある
+
+      これらの制約を回避するため、以下の代替演算子を検討する:
+
+      | 意図した演算子 | 代替案 | 選択理由 |
+      |---------------|--------|----------|
+      | \|>           | =>     | Rust で有効なトークン列 |
+      | >>            | =>>    | >> の前に = を付けて区別 |
+
+    methods:
+      - name: "代替演算子の設計"
+        signature: "N/A"
+        description: |
+          最終的な演算子設計:
+          - `=>` : 純粋関数をリフトして適用（既存の `,` とは異なる動作）
+          - `=>>` : モナド関数を直接適用（flat_map）
+
+          既存の `,` による純粋関数適用は後方互換性のため維持する。
+
+  # ======================================================================
+  # 3. 型制約
+  # ======================================================================
+  - id: type_constraints
+    name: "型制約の定義"
+    description: |
+      新しい演算子を使用する際の型制約を明確にする。
+
+    laws:
+      - name: "リフト演算子の型制約"
+        description: |
+          => 演算子を使用する場合、初期値はモナド型である必要がある。
+          また、Monad トレイトの flat_map と Applicative トレイトの pure が
+          利用可能である必要がある。
+        equation: |
+          M: Monad + Applicative
+          f: A -> B
+          pipe!(m: M<A>, => f) : M<B>
+
+      - name: "バインド演算子の型制約"
+        description: |
+          =>> 演算子を使用する場合、関数はモナド値を返す必要がある。
+        equation: |
+          M: Monad
+          f: A -> M<B>
+          pipe!(m: M<A>, =>> f) : M<B>
+
+  # ======================================================================
+  # 4. 実装対象の型
+  # ======================================================================
+  - id: supported_types
+    name: "サポート対象の型"
+    description: |
+      新しい演算子は Monad トレイトを実装しているすべての型で動作する。
+
+    implementations:
+      - type: "Option<T>"
+        description: |
+          Option 型に対するモナド演算子のサポート。
+          None の場合は早期リターンする。
+
+      - type: "Result<T, E>"
+        description: |
+          Result 型に対するモナド演算子のサポート。
+          Err の場合は早期リターンする。
+
+      - type: "Box<T>"
+        description: |
+          Box 型に対するモナド演算子のサポート。
+
+      - type: "Identity<T>"
+        description: |
+          Identity 型に対するモナド演算子のサポート。
+
+      - type: "AsyncIO<T>"
+        description: |
+          AsyncIO 型に対するモナド演算子のサポート。
+          これが本機能の主要なユースケースとなる。
+
+non_functional_requirements:
+  performance:
+    - "既存の pipe! マクロと同等のパフォーマンスを維持する"
+    - "コンパイル時に完全に展開され、実行時オーバーヘッドがない"
+
+  compatibility:
+    - "既存の pipe!(x, f, g) 構文は引き続き動作する（後方互換性）"
+    - "既存のテストが引き続きパスする"
+
+  testing:
+    - "各演算子の単体テストを追加"
+    - "演算子の混在使用のテストを追加"
+    - "各モナド型（Option, Result, Box, Identity）でのテストを追加"
+    - "コンパイルエラーケースのテストを追加（trybuild を使用）"
+
+future_extensions:
+  - id: async_await_integration
+    name: "async/await との統合"
+    description: |
+      将来的に async/await 構文との統合を検討する。
+      pipe! マクロ内で async 関数を扱えるようにする。
+    rationale: |
+      現時点では AsyncIO モナドでの対応に集中し、
+      async/await との直接統合は別途検討する。
+
+  - id: applicative_operators
+    name: "Applicative 演算子の追加"
+    description: |
+      Applicative の map2/map3 に対応する演算子を追加する。
+      複数の独立したモナド計算を並列に扱えるようにする。
+    rationale: |
+      モナド演算子の導入を優先し、
+      Applicative 演算子は次のイテレーションで検討する。
+
+  - id: do_notation_macro
+    name: "do! マクロの導入"
+    description: |
+      Haskell の do-notation により近い構文を提供する do! マクロを
+      別途導入する可能性がある。
+    rationale: |
+      pipe! マクロの拡張として対応可能な範囲で実装し、
+      より複雑な構文は別マクロとして検討する。

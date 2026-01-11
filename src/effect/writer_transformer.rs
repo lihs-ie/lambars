@@ -31,9 +31,8 @@
 
 #![forbid(unsafe_code)]
 
-use crate::typeclass::Monoid;
-
 use super::IO;
+use crate::typeclass::{Functor, Monad, Monoid};
 
 #[cfg(feature = "async")]
 use super::AsyncIO;

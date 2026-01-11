@@ -104,7 +104,8 @@ pub trait Functor: TypeConstructor {
     /// ```
     fn fmap<B, F>(self, function: F) -> Self::WithType<B>
     where
-        F: FnOnce(Self::Inner) -> B;
+        F: FnOnce(Self::Inner) -> B + 'static,
+        B: 'static;
 
     /// Applies a function to a reference of the value inside the functor.
     ///
@@ -131,7 +132,8 @@ pub trait Functor: TypeConstructor {
     /// ```
     fn fmap_ref<B, F>(&self, function: F) -> Self::WithType<B>
     where
-        F: FnOnce(&Self::Inner) -> B;
+        F: FnOnce(&Self::Inner) -> B + 'static,
+        B: 'static;
 
     /// Replaces the value inside the functor with a constant value.
     ///
@@ -160,6 +162,7 @@ pub trait Functor: TypeConstructor {
     fn replace<B>(self, value: B) -> Self::WithType<B>
     where
         Self: Sized,
+        B: 'static,
     {
         self.fmap(|_| value)
     }
@@ -657,7 +660,7 @@ mod tests {
         let function2 = |n: i32| n * 2;
 
         let left = some_value.fmap(function1).fmap(function2);
-        let right = some_value.fmap(|x| function2(function1(x)));
+        let right = some_value.fmap(move |x| function2(function1(x)));
 
         assert_eq!(left, right);
         assert_eq!(left, Some(12)); // (5 + 1) * 2 = 12
@@ -679,7 +682,7 @@ mod tests {
         let function2 = |n: i32| n * 2;
 
         let left = ok_value.fmap(function1).fmap(function2);
-        let right = ok_value.fmap(|x| function2(function1(x)));
+        let right = ok_value.fmap(move |x| function2(function1(x)));
 
         assert_eq!(left, right);
     }
@@ -698,7 +701,7 @@ mod tests {
         let function2 = |n: i32| n * 2;
 
         let left = Box::new(5).fmap(function1).fmap(function2);
-        let right = boxed.fmap(|x| function2(function1(x)));
+        let right = boxed.fmap(move |x| function2(function1(x)));
 
         assert_eq!(left, right);
     }
@@ -716,7 +719,7 @@ mod tests {
         let function2 = |n: i32| n * 2;
 
         let left = wrapped.fmap(function1).fmap(function2);
-        let right = wrapped.fmap(|x| function2(function1(x)));
+        let right = wrapped.fmap(move |x| function2(function1(x)));
 
         assert_eq!(left, right);
     }

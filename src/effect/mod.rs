@@ -32,8 +32,9 @@
 //!
 //! ```rust
 //! use lambars::effect::IO;
+//! use lambars::typeclass::{Functor, Monad};
 //!
-//! // Create and chain IO actions
+//! // Create and chain IO actions using Functor and Monad traits
 //! let io = IO::pure(10)
 //!     .fmap(|x| x * 2)
 //!     .flat_map(|x| IO::pure(x + 1));

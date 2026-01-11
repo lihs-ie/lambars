@@ -151,7 +151,9 @@ pub trait Applicative: Functor {
     /// let y: Result<String, ()> = <Result<(), ()>>::pure("hello".to_string());
     /// assert_eq!(y, Ok("hello".to_string()));
     /// ```
-    fn pure<B>(value: B) -> Self::WithType<B>;
+    fn pure<B>(value: B) -> Self::WithType<B>
+    where
+        B: 'static;
 
     /// Combines two applicative values using a binary function.
     ///
@@ -185,7 +187,9 @@ pub trait Applicative: Functor {
     /// ```
     fn map2<B, C, F>(self, other: Self::WithType<B>, function: F) -> Self::WithType<C>
     where
-        F: FnOnce(Self::Inner, B) -> C;
+        F: FnOnce(Self::Inner, B) -> C + 'static,
+        B: 'static,
+        C: 'static;
 
     /// Combines three applicative values using a ternary function.
     ///
@@ -219,7 +223,10 @@ pub trait Applicative: Functor {
         function: F,
     ) -> Self::WithType<D>
     where
-        F: FnOnce(Self::Inner, B, C) -> D;
+        F: FnOnce(Self::Inner, B, C) -> D + 'static,
+        B: 'static,
+        C: 'static,
+        D: 'static;
 
     /// Combines two applicative values into a tuple.
     ///
@@ -246,6 +253,8 @@ pub trait Applicative: Functor {
     fn product<B>(self, other: Self::WithType<B>) -> Self::WithType<(Self::Inner, B)>
     where
         Self: Sized,
+        Self::Inner: 'static,
+        B: 'static,
     {
         self.map2(other, |a, b| (a, b))
     }
@@ -281,6 +290,8 @@ pub trait Applicative: Functor {
     fn product_left<B>(self, other: Self::WithType<B>) -> Self::WithType<Self::Inner>
     where
         Self: Sized,
+        Self::Inner: 'static,
+        B: 'static,
     {
         self.map2(other, |a, _| a)
     }
@@ -316,6 +327,8 @@ pub trait Applicative: Functor {
     fn product_right<B>(self, other: Self::WithType<B>) -> Self::WithType<B>
     where
         Self: Sized,
+        Self::Inner: 'static,
+        B: 'static,
     {
         self.map2(other, |_, b| b)
     }
@@ -346,7 +359,9 @@ pub trait Applicative: Functor {
     fn apply<B, Output>(self, other: Self::WithType<B>) -> Self::WithType<Output>
     where
         Self: Sized,
-        Self::Inner: FnOnce(B) -> Output;
+        Self::Inner: FnOnce(B) -> Output + 'static,
+        B: 'static,
+        Output: 'static;
 }
 
 // =============================================================================

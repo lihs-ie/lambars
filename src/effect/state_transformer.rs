@@ -42,6 +42,7 @@ use std::rc::Rc;
 
 use super::IO;
 use super::error::{AlreadyConsumedError, EffectError, EffectType};
+use crate::typeclass::{Functor, Monad};
 
 // =============================================================================
 // Type Aliases for Type Complexity Reduction
