@@ -65,14 +65,133 @@ const BITS_PER_LEVEL: usize = 5;
 const MASK: usize = BRANCHING_FACTOR - 1;
 
 // =============================================================================
+// Helper Functions for RRB-Tree
+// =============================================================================
+
+/// Finds the child index in a `RelaxedBranch` using binary search on the size table.
+///
+/// The size table contains cumulative sizes, so we binary search for the first
+/// entry greater than the index.
+///
+/// # Arguments
+///
+/// * `size_table` - Cumulative size table
+/// * `index` - The index to search for
+///
+/// # Returns
+///
+/// The index of the child node containing the requested element
+fn find_child_index(size_table: &[usize], index: usize) -> usize {
+    match size_table.binary_search(&index) {
+        Ok(position) => {
+            if position + 1 < size_table.len() {
+                position + 1
+            } else {
+                position
+            }
+        }
+        Err(position) => position,
+    }
+}
+
+/// Gets an element from a node tree (supports both regular and relaxed nodes).
+///
+/// This is a unified implementation that handles `Branch`, `RelaxedBranch`, and `Leaf` nodes.
+fn get_from_node<T>(node: &ReferenceCounter<Node<T>>, index: usize, shift: usize) -> Option<&T> {
+    let mut current_node = node;
+    let mut current_index = index;
+    let mut current_shift = shift;
+
+    while current_shift > 0 {
+        match current_node.as_ref() {
+            Node::Branch(children) => {
+                let child_index = (current_index >> current_shift) & MASK;
+                match &children[child_index] {
+                    Some(child) => {
+                        current_node = child;
+                        current_shift -= BITS_PER_LEVEL;
+                    }
+                    None => return None,
+                }
+            }
+            Node::RelaxedBranch {
+                children,
+                size_table,
+            } => {
+                let child_index = find_child_index(size_table, current_index);
+                if child_index >= children.len() {
+                    return None;
+                }
+                current_index = if child_index == 0 {
+                    current_index
+                } else {
+                    current_index - size_table[child_index - 1]
+                };
+                current_node = &children[child_index];
+                current_shift -= BITS_PER_LEVEL;
+            }
+            Node::Leaf(_) => break,
+        }
+    }
+
+    match current_node.as_ref() {
+        Node::Leaf(elements) => elements.get(current_index & MASK),
+        Node::Branch(children) => {
+            let child_index = current_index & MASK;
+            children[child_index]
+                .as_ref()
+                .and_then(|child| match child.as_ref() {
+                    Node::Leaf(elements) => elements.first(),
+                    Node::Branch(_) | Node::RelaxedBranch { .. } => None,
+                })
+        }
+        Node::RelaxedBranch {
+            children,
+            size_table,
+        } => {
+            let child_index = find_child_index(size_table, current_index);
+            if child_index >= children.len() {
+                return None;
+            }
+            let local_index = if child_index == 0 {
+                current_index
+            } else {
+                current_index - size_table[child_index - 1]
+            };
+            match children[child_index].as_ref() {
+                Node::Leaf(elements) => elements.get(local_index),
+                _ => None,
+            }
+        }
+    }
+}
+
+// =============================================================================
 // Node Definition
 // =============================================================================
 
 /// Internal node structure for the radix balanced tree.
+///
+/// Supports both regular nodes (`Branch`, `Leaf`) and relaxed nodes (`RelaxedBranch`)
+/// for RRB-Tree based efficient concatenation.
 #[derive(Clone)]
 enum Node<T> {
-    /// Branch node containing child nodes
+    /// Branch node containing child nodes (regular structure)
     Branch(ReferenceCounter<[Option<ReferenceCounter<Self>>; BRANCHING_FACTOR]>),
+
+    /// Relaxed branch node for RRB-Tree concatenation support.
+    ///
+    /// Unlike regular `Branch` nodes, `RelaxedBranch` allows variable number of
+    /// children (1 to `BRANCHING_FACTOR`) and uses a size table for O(log n)
+    /// index calculation.
+    #[allow(dead_code)]
+    RelaxedBranch {
+        /// Child nodes (1 to `BRANCHING_FACTOR` children)
+        children: ReferenceCounter<[ReferenceCounter<Self>]>,
+        /// Cumulative size table: `size_table[i]` = total elements in `children[0..=i]`
+        size_table: ReferenceCounter<[usize]>,
+    },
+
     /// Leaf node containing actual elements
     Leaf(ReferenceCounter<[T]>),
 }
@@ -81,6 +200,71 @@ impl<T> Node<T> {
     /// Creates an empty branch node.
     fn empty_branch() -> Self {
         Self::Branch(ReferenceCounter::new(std::array::from_fn(|_| None)))
+    }
+
+    /// Returns whether this node is a regular (non-relaxed) node.
+    ///
+    /// Regular nodes are `Branch` and `Leaf` nodes that follow the standard
+    /// Radix Balanced Tree structure. `RelaxedBranch` nodes are not regular
+    /// because they may have variable numbers of children.
+    ///
+    /// # Returns
+    ///
+    /// `true` if this is a `Branch` or `Leaf` node, `false` for `RelaxedBranch`
+    #[allow(dead_code)]
+    const fn is_regular(&self) -> bool {
+        match self {
+            Self::Branch(_) | Self::Leaf(_) => true,
+            Self::RelaxedBranch { .. } => false,
+        }
+    }
+
+    /// Returns the number of child nodes.
+    ///
+    /// For `Branch` nodes, counts the non-None children.
+    /// For `RelaxedBranch` nodes, returns the length of the children array.
+    /// For `Leaf` nodes, returns 0 (leaves have no children).
+    ///
+    /// # Returns
+    ///
+    /// The number of child nodes
+    #[allow(dead_code)]
+    fn child_count(&self) -> usize {
+        match self {
+            Self::Branch(children) => children.iter().filter(|child| child.is_some()).count(),
+            Self::RelaxedBranch { children, .. } => children.len(),
+            Self::Leaf(_) => 0,
+        }
+    }
+
+    /// Creates a `RelaxedBranch` node from a vector of children and size table.
+    ///
+    /// # Arguments
+    ///
+    /// * `children` - Vector of child nodes (1 to `BRANCHING_FACTOR`)
+    /// * `size_table` - Cumulative sizes: `size_table[i]` = total elements in `children[0..=i]`
+    ///
+    /// # Returns
+    ///
+    /// A new `RelaxedBranch` node
+    ///
+    /// # Panics
+    ///
+    /// Panics if `children` and `size_table` have different lengths
+    #[allow(dead_code)]
+    fn relaxed_branch_from_children(
+        children: Vec<ReferenceCounter<Self>>,
+        size_table: Vec<usize>,
+    ) -> Self {
+        debug_assert_eq!(
+            children.len(),
+            size_table.len(),
+            "Children and size_table must have the same length"
+        );
+        Self::RelaxedBranch {
+            children: ReferenceCounter::from(children),
+            size_table: ReferenceCounter::from(size_table),
+        }
     }
 }
 
@@ -354,37 +538,7 @@ impl<T> PersistentVector<T> {
 
     /// Gets an element from the root tree.
     fn get_from_root(&self, index: usize) -> Option<&T> {
-        let mut node = &self.root;
-        let mut level = self.shift;
-
-        while level > 0 {
-            match node.as_ref() {
-                Node::Branch(children) => {
-                    let child_index = (index >> level) & MASK;
-                    match &children[child_index] {
-                        Some(child) => {
-                            node = child;
-                            level -= BITS_PER_LEVEL;
-                        }
-                        None => return None,
-                    }
-                }
-                Node::Leaf(_) => break,
-            }
-        }
-
-        match node.as_ref() {
-            Node::Leaf(elements) => elements.get(index & MASK),
-            Node::Branch(children) => {
-                let child_index = index & MASK;
-                children[child_index]
-                    .as_ref()
-                    .and_then(|child| match child.as_ref() {
-                        Node::Leaf(elements) => elements.first(),
-                        Node::Branch(_) => None,
-                    })
-            }
-        }
+        get_from_node(&self.root, index, self.shift)
     }
 
     /// Returns a reference to the first element.
@@ -717,6 +871,38 @@ impl<T: Clone> PersistentVector<T> {
 
                 Node::Branch(ReferenceCounter::new(new_children))
             }
+            Node::RelaxedBranch {
+                children,
+                size_table,
+            } => {
+                // For RelaxedBranch, we need to update the last child and size table
+                let last_index = children.len() - 1;
+                let mut new_children: Vec<_> = children.iter().cloned().collect();
+                let mut new_size_table: Vec<_> = size_table.iter().copied().collect();
+
+                if level == BITS_PER_LEVEL {
+                    new_children.push(ReferenceCounter::new(tail_node));
+                    let last_size = *size_table.last().unwrap_or(&0);
+                    new_size_table.push(last_size + BRANCHING_FACTOR);
+                } else {
+                    let child = Self::push_tail_into_node(
+                        &children[last_index],
+                        level - BITS_PER_LEVEL,
+                        tail_offset,
+                        tail_node,
+                    );
+                    new_children[last_index] = ReferenceCounter::new(child);
+                    // Update size table (add BRANCHING_FACTOR for the new tail)
+                    if let Some(last) = new_size_table.last_mut() {
+                        *last += BRANCHING_FACTOR;
+                    }
+                }
+
+                Node::RelaxedBranch {
+                    children: ReferenceCounter::from(new_children),
+                    size_table: ReferenceCounter::from(new_size_table),
+                }
+            }
             Node::Leaf(_) => {
                 // This shouldn't happen in a well-formed tree
                 tail_node
@@ -798,11 +984,12 @@ impl<T: Clone> PersistentVector<T> {
     fn get_leaf_at(&self, offset: usize) -> ReferenceCounter<[T]> {
         let mut node = &self.root;
         let mut level = self.shift;
+        let mut current_offset = offset;
 
         while level > 0 {
             match node.as_ref() {
                 Node::Branch(children) => {
-                    let child_index = (offset >> level) & MASK;
+                    let child_index = (current_offset >> level) & MASK;
                     if let Some(child) = &children[child_index] {
                         node = child;
                         level -= BITS_PER_LEVEL;
@@ -810,13 +997,29 @@ impl<T: Clone> PersistentVector<T> {
                         return ReferenceCounter::from([].as_slice());
                     }
                 }
+                Node::RelaxedBranch {
+                    children,
+                    size_table,
+                } => {
+                    let child_index = find_child_index(size_table, current_offset);
+                    if child_index >= children.len() {
+                        return ReferenceCounter::from([].as_slice());
+                    }
+                    current_offset = if child_index == 0 {
+                        current_offset
+                    } else {
+                        current_offset - size_table[child_index - 1]
+                    };
+                    node = &children[child_index];
+                    level -= BITS_PER_LEVEL;
+                }
                 Node::Leaf(_) => break,
             }
         }
 
         match node.as_ref() {
             Node::Leaf(elements) => elements.clone(),
-            Node::Branch(_) => ReferenceCounter::from([].as_slice()),
+            Node::Branch(_) | Node::RelaxedBranch { .. } => ReferenceCounter::from([].as_slice()),
         }
     }
 
@@ -836,6 +1039,12 @@ impl<T: Clone> PersistentVector<T> {
                     {
                         return (only_child.clone(), self.shift - BITS_PER_LEVEL);
                     }
+                }
+                (new_root, self.shift)
+            }
+            Node::RelaxedBranch { children, .. } => {
+                if self.shift > BITS_PER_LEVEL && children.len() == 1 {
+                    return (children[0].clone(), self.shift - BITS_PER_LEVEL);
                 }
                 (new_root, self.shift)
             }
@@ -881,6 +1090,66 @@ impl<T: Clone> PersistentVector<T> {
                     )
                 } else {
                     (node.clone(), false)
+                }
+            }
+            Node::RelaxedBranch {
+                children,
+                size_table,
+            } => {
+                let child_index = find_child_index(size_table, offset);
+                if child_index >= children.len() {
+                    return (node.clone(), false);
+                }
+
+                if level == BITS_PER_LEVEL {
+                    // At bottom level, remove the last child
+                    if children.len() == 1 {
+                        return (node.clone(), true);
+                    }
+                    let new_children: Vec<_> =
+                        children.iter().take(children.len() - 1).cloned().collect();
+                    let new_size_table: Vec<_> = size_table
+                        .iter()
+                        .take(size_table.len() - 1)
+                        .copied()
+                        .collect();
+                    let is_empty = new_children.is_empty();
+                    (
+                        ReferenceCounter::new(Node::RelaxedBranch {
+                            children: ReferenceCounter::from(new_children),
+                            size_table: ReferenceCounter::from(new_size_table),
+                        }),
+                        is_empty,
+                    )
+                } else {
+                    let local_offset = if child_index == 0 {
+                        offset
+                    } else {
+                        offset - size_table[child_index - 1]
+                    };
+                    let (new_child, is_empty) = Self::do_pop_tail(
+                        &children[child_index],
+                        level - BITS_PER_LEVEL,
+                        local_offset,
+                    );
+                    let mut new_children: Vec<_> = children.iter().cloned().collect();
+                    let mut new_size_table: Vec<_> = size_table.iter().copied().collect();
+
+                    if is_empty {
+                        new_children.pop();
+                        new_size_table.pop();
+                    } else {
+                        new_children[child_index] = new_child;
+                    }
+
+                    let all_empty = new_children.is_empty();
+                    (
+                        ReferenceCounter::new(Node::RelaxedBranch {
+                            children: ReferenceCounter::from(new_children),
+                            size_table: ReferenceCounter::from(new_size_table),
+                        }),
+                        all_empty,
+                    )
                 }
             }
             Node::Leaf(_) => (node.clone(), true),
@@ -1043,6 +1312,33 @@ impl<T: Clone> PersistentVector<T> {
                 }
 
                 Node::Branch(ReferenceCounter::new(new_children))
+            }
+            Node::RelaxedBranch {
+                children,
+                size_table,
+            } => {
+                let child_index = find_child_index(size_table, index);
+                if child_index >= children.len() {
+                    return node.as_ref().clone();
+                }
+                let local_index = if child_index == 0 {
+                    index
+                } else {
+                    index - size_table[child_index - 1]
+                };
+
+                let mut new_children: Vec<_> = children.iter().cloned().collect();
+                new_children[child_index] = ReferenceCounter::new(Self::update_in_root(
+                    &children[child_index],
+                    level - BITS_PER_LEVEL,
+                    local_index,
+                    element,
+                ));
+
+                Node::RelaxedBranch {
+                    children: ReferenceCounter::from(new_children),
+                    size_table: size_table.clone(),
+                }
             }
             Node::Leaf(elements) => {
                 let leaf_index = index & MASK;
@@ -1700,6 +1996,12 @@ impl<'a, T> PersistentVectorIterator<'a, T> {
                 });
                 self.descend_to_first_leaf();
             }
+            Node::RelaxedBranch { .. } => {
+                // RelaxedBranch iteration not yet implemented
+                // For now, fall back to index-based iteration via state change
+                self.state = IteratorState::ProcessingTail;
+                self.tail_index = 0;
+            }
             Node::Leaf(elements) => {
                 // Root is directly a leaf (unusual but handle for safety)
                 self.current_leaf = Some(elements.as_ref());
@@ -1737,6 +2039,9 @@ impl<'a, T> PersistentVectorIterator<'a, T> {
                         Node::Branch(child_children) => {
                             found_branch = Some(child_children.as_ref());
                             break;
+                        }
+                        Node::RelaxedBranch { .. } => {
+                            // Skip RelaxedBranch for now - will be handled by fallback
                         }
                         Node::Leaf(elements) => {
                             found_leaf = Some(elements.as_ref());
@@ -1925,6 +2230,11 @@ impl<T: Clone> PersistentVectorIntoIterator<T> {
                 });
                 self.descend_to_first_leaf();
             }
+            Node::RelaxedBranch { .. } => {
+                // RelaxedBranch iteration not yet implemented
+                self.state = IteratorState::ProcessingTail;
+                self.tail_index = 0;
+            }
             Node::Leaf(elements) => {
                 self.current_leaf = Some(elements.clone());
                 self.leaf_index = 0;
@@ -1944,7 +2254,7 @@ impl<T: Clone> PersistentVectorIntoIterator<T> {
 
             let children = match entry.node.as_ref() {
                 Node::Branch(c) => c,
-                Node::Leaf(_) => {
+                Node::RelaxedBranch { .. } | Node::Leaf(_) => {
                     self.traversal_stack.pop();
                     continue;
                 }
@@ -1962,6 +2272,9 @@ impl<T: Clone> PersistentVectorIntoIterator<T> {
                         Node::Branch(_) => {
                             found_branch = Some(child.clone());
                             break;
+                        }
+                        Node::RelaxedBranch { .. } => {
+                            // Skip RelaxedBranch for now
                         }
                         Node::Leaf(elements) => {
                             found_leaf = Some(elements.clone());
@@ -2512,37 +2825,7 @@ impl<T: Clone> TransientVector<T> {
 
     /// Gets an element from the root tree.
     fn get_from_root(&self, index: usize) -> Option<&T> {
-        let mut node = &self.root;
-        let mut level = self.shift;
-
-        while level > 0 {
-            match node.as_ref() {
-                Node::Branch(children) => {
-                    let child_index = (index >> level) & MASK;
-                    match &children[child_index] {
-                        Some(child) => {
-                            node = child;
-                            level -= BITS_PER_LEVEL;
-                        }
-                        None => return None,
-                    }
-                }
-                Node::Leaf(_) => break,
-            }
-        }
-
-        match node.as_ref() {
-            Node::Leaf(elements) => elements.get(index & MASK),
-            Node::Branch(children) => {
-                let child_index = index & MASK;
-                children[child_index]
-                    .as_ref()
-                    .and_then(|child| match child.as_ref() {
-                        Node::Leaf(elements) => elements.first(),
-                        Node::Branch(_) => None,
-                    })
-            }
-        }
+        get_from_node(&self.root, index, self.shift)
     }
 
     /// Appends an element to the back of the vector.
@@ -2665,6 +2948,11 @@ impl<T: Clone> TransientVector<T> {
                     }
                 }
             }
+            Node::RelaxedBranch { .. } => {
+                // RelaxedBranch should not appear in TransientVector
+                // Convert to regular push for now
+                *node = tail_node;
+            }
             Node::Leaf(_) => {
                 // This shouldn't happen in a well-formed tree
                 *node = tail_node;
@@ -2728,11 +3016,12 @@ impl<T: Clone> TransientVector<T> {
     fn get_leaf_at(&self, offset: usize) -> ReferenceCounter<[T]> {
         let mut node = &self.root;
         let mut level = self.shift;
+        let mut current_offset = offset;
 
         while level > 0 {
             match node.as_ref() {
                 Node::Branch(children) => {
-                    let child_index = (offset >> level) & MASK;
+                    let child_index = (current_offset >> level) & MASK;
                     if let Some(child) = &children[child_index] {
                         node = child;
                         level -= BITS_PER_LEVEL;
@@ -2740,13 +3029,29 @@ impl<T: Clone> TransientVector<T> {
                         return ReferenceCounter::from(Vec::<T>::new());
                     }
                 }
+                Node::RelaxedBranch {
+                    children,
+                    size_table,
+                } => {
+                    let child_index = find_child_index(size_table, current_offset);
+                    if child_index >= children.len() {
+                        return ReferenceCounter::from(Vec::<T>::new());
+                    }
+                    current_offset = if child_index == 0 {
+                        current_offset
+                    } else {
+                        current_offset - size_table[child_index - 1]
+                    };
+                    node = &children[child_index];
+                    level -= BITS_PER_LEVEL;
+                }
                 Node::Leaf(_) => break,
             }
         }
 
         match node.as_ref() {
             Node::Leaf(elements) => elements.clone(),
-            Node::Branch(_) => ReferenceCounter::from(Vec::<T>::new()),
+            Node::Branch(_) | Node::RelaxedBranch { .. } => ReferenceCounter::from(Vec::<T>::new()),
         }
     }
 
@@ -2767,6 +3072,12 @@ impl<T: Clone> TransientVector<T> {
                         && let Some(only_child) = &children[0]
                     {
                         self.root = only_child.clone();
+                        self.shift -= BITS_PER_LEVEL;
+                    }
+                }
+                Node::RelaxedBranch { children, .. } => {
+                    if children.len() == 1 {
+                        self.root = children[0].clone();
                         self.shift -= BITS_PER_LEVEL;
                     }
                 }
@@ -2799,6 +3110,11 @@ impl<T: Clone> TransientVector<T> {
                 } else {
                     false
                 }
+            }
+            Node::RelaxedBranch { .. } => {
+                // RelaxedBranch should not appear in TransientVector
+                // Return false to indicate not empty
+                false
             }
             Node::Leaf(_) => true,
         }
@@ -2871,6 +3187,14 @@ impl<T: Clone> TransientVector<T> {
                     );
                     element
                 }
+            }
+            Node::RelaxedBranch { .. } => {
+                // RelaxedBranch should not appear in TransientVector
+                debug_assert!(
+                    false,
+                    "TransientVector internal invariant violation: RelaxedBranch encountered"
+                );
+                element
             }
             Node::Leaf(elements) => {
                 let leaf_index = index & MASK;
@@ -2957,6 +3281,9 @@ impl<T: Clone> TransientVector<T> {
                         function,
                     );
                 }
+            }
+            Node::RelaxedBranch { .. } => {
+                // RelaxedBranch should not appear in TransientVector
             }
             Node::Leaf(elements) => {
                 let leaf_index = index & MASK;
@@ -4277,6 +4604,164 @@ mod serde_tests {
         assert_eq!(vector.len(), 2);
         assert_eq!(vector.get(0), Some(&"hello".to_string()));
         assert_eq!(vector.get(1), Some(&"world".to_string()));
+    }
+}
+
+// =============================================================================
+// Node Structure Extension Tests (RRB-Tree Support)
+// =============================================================================
+
+#[cfg(test)]
+mod node_tests {
+    use super::*;
+    use rstest::rstest;
+
+    #[rstest]
+    fn test_node_is_regular_with_branch() {
+        let branch: Node<i32> = Node::empty_branch();
+        assert!(branch.is_regular());
+    }
+
+    #[rstest]
+    fn test_node_is_regular_with_leaf() {
+        let leaf: Node<i32> = Node::Leaf(ReferenceCounter::from(vec![1, 2, 3]));
+        assert!(leaf.is_regular());
+    }
+
+    #[rstest]
+    fn test_node_is_regular_with_relaxed_branch() {
+        let child_a: Node<i32> = Node::Leaf(ReferenceCounter::from(vec![1, 2, 3]));
+        let child_b: Node<i32> = Node::Leaf(ReferenceCounter::from(vec![4, 5]));
+
+        let relaxed = Node::relaxed_branch_from_children(
+            vec![
+                ReferenceCounter::new(child_a),
+                ReferenceCounter::new(child_b),
+            ],
+            vec![3, 5],
+        );
+
+        assert!(!relaxed.is_regular());
+    }
+
+    #[rstest]
+    fn test_node_child_count_with_branch() {
+        let mut children: [Option<ReferenceCounter<Node<i32>>>; BRANCHING_FACTOR] =
+            std::array::from_fn(|_| None);
+
+        let child = Node::Leaf(ReferenceCounter::from(vec![1, 2, 3]));
+        children[0] = Some(ReferenceCounter::new(child.clone()));
+        children[1] = Some(ReferenceCounter::new(child.clone()));
+        children[2] = Some(ReferenceCounter::new(child));
+
+        let branch = Node::Branch(ReferenceCounter::new(children));
+        assert_eq!(branch.child_count(), 3);
+    }
+
+    #[rstest]
+    fn test_node_child_count_with_empty_branch() {
+        let branch: Node<i32> = Node::empty_branch();
+        assert_eq!(branch.child_count(), 0);
+    }
+
+    #[rstest]
+    fn test_node_child_count_with_relaxed_branch() {
+        let child_a: Node<i32> = Node::Leaf(ReferenceCounter::from(vec![1, 2, 3]));
+        let child_b: Node<i32> = Node::Leaf(ReferenceCounter::from(vec![4, 5]));
+        let child_c: Node<i32> = Node::Leaf(ReferenceCounter::from(vec![6, 7, 8, 9]));
+
+        let relaxed = Node::relaxed_branch_from_children(
+            vec![
+                ReferenceCounter::new(child_a),
+                ReferenceCounter::new(child_b),
+                ReferenceCounter::new(child_c),
+            ],
+            vec![3, 5, 9],
+        );
+
+        assert_eq!(relaxed.child_count(), 3);
+    }
+
+    #[rstest]
+    fn test_node_child_count_with_leaf() {
+        let leaf: Node<i32> = Node::Leaf(ReferenceCounter::from(vec![1, 2, 3, 4, 5]));
+        assert_eq!(leaf.child_count(), 0);
+    }
+
+    #[rstest]
+    fn test_relaxed_branch_from_children_basic() {
+        let child_a: Node<i32> = Node::Leaf(ReferenceCounter::from(vec![1, 2, 3]));
+        let child_b: Node<i32> = Node::Leaf(ReferenceCounter::from(vec![4, 5]));
+
+        let relaxed = Node::relaxed_branch_from_children(
+            vec![
+                ReferenceCounter::new(child_a),
+                ReferenceCounter::new(child_b),
+            ],
+            vec![3, 5],
+        );
+
+        match relaxed {
+            Node::RelaxedBranch {
+                children,
+                size_table,
+            } => {
+                assert_eq!(children.len(), 2);
+                assert_eq!(size_table.len(), 2);
+                assert_eq!(size_table[0], 3);
+                assert_eq!(size_table[1], 5);
+            }
+            _ => panic!("Expected RelaxedBranch variant"),
+        }
+    }
+
+    #[rstest]
+    fn test_relaxed_branch_from_children_single_child() {
+        let child: Node<i32> = Node::Leaf(ReferenceCounter::from(vec![1, 2, 3, 4, 5]));
+
+        let relaxed =
+            Node::relaxed_branch_from_children(vec![ReferenceCounter::new(child)], vec![5]);
+
+        match relaxed {
+            Node::RelaxedBranch {
+                children,
+                size_table,
+            } => {
+                assert_eq!(children.len(), 1);
+                assert_eq!(size_table.len(), 1);
+                assert_eq!(size_table[0], 5);
+            }
+            _ => panic!("Expected RelaxedBranch variant"),
+        }
+    }
+
+    #[rstest]
+    fn test_relaxed_branch_from_children_many_children() {
+        let mut child_nodes = Vec::new();
+        let mut cumulative_sizes = Vec::new();
+        let mut running_total = 0;
+
+        for index in 0..10 {
+            let elements: Vec<i32> = ((index * 3)..((index + 1) * 3)).collect();
+            let child = Node::Leaf(ReferenceCounter::from(elements));
+            child_nodes.push(ReferenceCounter::new(child));
+            running_total += 3;
+            cumulative_sizes.push(running_total);
+        }
+
+        let relaxed = Node::relaxed_branch_from_children(child_nodes, cumulative_sizes);
+
+        match relaxed {
+            Node::RelaxedBranch {
+                children,
+                size_table,
+            } => {
+                assert_eq!(children.len(), 10);
+                assert_eq!(size_table.len(), 10);
+                assert_eq!(size_table[9], 30);
+            }
+            _ => panic!("Expected RelaxedBranch variant"),
+        }
     }
 }
 
