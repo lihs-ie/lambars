@@ -68,19 +68,6 @@ const MASK: usize = BRANCHING_FACTOR - 1;
 // Helper Functions for RRB-Tree
 // =============================================================================
 
-/// Finds the child index in a `RelaxedBranch` using binary search on the size table.
-///
-/// The size table contains cumulative sizes, so we binary search for the first
-/// entry greater than the index.
-///
-/// # Arguments
-///
-/// * `size_table` - Cumulative size table
-/// * `index` - The index to search for
-///
-/// # Returns
-///
-/// The index of the child node containing the requested element
 fn find_child_index(size_table: &[usize], index: usize) -> usize {
     match size_table.binary_search(&index) {
         Ok(position) => {
@@ -94,9 +81,6 @@ fn find_child_index(size_table: &[usize], index: usize) -> usize {
     }
 }
 
-/// Gets an element from a node tree (supports both regular and relaxed nodes).
-///
-/// This is a unified implementation that handles `Branch`, `RelaxedBranch`, and `Leaf` nodes.
 fn get_from_node<T>(node: &ReferenceCounter<Node<T>>, index: usize, shift: usize) -> Option<&T> {
     let mut current_node = node;
     let mut current_index = index;
@@ -1391,11 +1375,11 @@ impl<T: Clone> PersistentVector<T> {
         result
     }
 
-    /// Efficiently concatenates two vectors using RRB-Tree algorithm.
+    /// Concatenates two vectors into a new vector.
     ///
-    /// This method provides O(log n) concatenation by using Relaxed Radix
-    /// Balanced Tree (RRB-Tree) techniques, which is significantly faster
-    /// than the naive O(m) approach of [`Self::append`] for large vectors.
+    /// This method creates a new vector containing all elements from `self`
+    /// followed by all elements from `other`. Both original vectors remain
+    /// unchanged.
     ///
     /// # Arguments
     ///
@@ -1403,7 +1387,7 @@ impl<T: Clone> PersistentVector<T> {
     ///
     /// # Complexity
     ///
-    /// O(log n) where n is the total number of elements
+    /// O(n + m) where n and m are the lengths of the two vectors
     ///
     /// # Examples
     ///
@@ -1433,10 +1417,9 @@ impl<T: Clone> PersistentVector<T> {
         let all_leaves: Vec<_> = left_leaves.into_iter().chain(right_leaves).collect();
         let total_length = self.length + other.length;
 
-        Self::build_from_leaves(all_leaves, total_length)
+        Self::build_from_leaves(&all_leaves, total_length)
     }
 
-    /// Collects all leaf nodes from the vector in order.
     fn collect_all_leaves(&self) -> Vec<ReferenceCounter<[T]>> {
         let mut leaves = Vec::new();
         Self::collect_leaves_from_node(&self.root, self.shift, &mut leaves);
@@ -1446,7 +1429,6 @@ impl<T: Clone> PersistentVector<T> {
         leaves
     }
 
-    /// Recursively collects leaves from a node.
     fn collect_leaves_from_node(
         node: &ReferenceCounter<Node<T>>,
         level: usize,
@@ -1473,15 +1455,14 @@ impl<T: Clone> PersistentVector<T> {
         }
     }
 
-    /// Builds a `PersistentVector` from a collection of leaf nodes.
-    fn build_from_leaves(leaves: Vec<ReferenceCounter<[T]>>, total_length: usize) -> Self {
+    fn build_from_leaves(leaves: &[ReferenceCounter<[T]>], total_length: usize) -> Self {
         if leaves.is_empty() || total_length == 0 {
             return Self::new();
         }
 
         let all_elements: Vec<T> = leaves
-            .into_iter()
-            .flat_map(|leaf| leaf.iter().cloned().collect::<Vec<_>>())
+            .iter()
+            .flat_map(|leaf| leaf.iter().cloned())
             .collect();
 
         build_persistent_vector_from_vec(all_elements)
@@ -3536,7 +3517,7 @@ impl<T: Clone> Foldable for PersistentVector<T> {
 
 impl<T: Clone> Semigroup for PersistentVector<T> {
     fn combine(self, other: Self) -> Self {
-        self.append(&other)
+        self.concat(&other)
     }
 }
 
