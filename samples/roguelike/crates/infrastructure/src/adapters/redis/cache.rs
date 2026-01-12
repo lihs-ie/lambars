@@ -164,7 +164,8 @@ impl RedisSessionCache {
     /// ```
     #[must_use]
     fn session_key(&self, identifier: &GameIdentifier) -> String {
-        self.connection.format_key(&format!("session:{}", identifier))
+        self.connection
+            .format_key(&format!("session:{}", identifier))
     }
 }
 
@@ -188,7 +189,8 @@ impl SessionCache for RedisSessionCache {
                 }
             };
 
-            let result: Result<Option<String>, redis::RedisError> = async_connection.get(&key).await;
+            let result: Result<Option<String>, redis::RedisError> =
+                async_connection.get(&key).await;
 
             match result {
                 Ok(Some(json)) => match serde_json::from_str::<CachedGameSession>(&json) {

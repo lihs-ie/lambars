@@ -7,6 +7,7 @@ use lambars::effect::AsyncIO;
 use roguelike_domain::game_session::{GameIdentifier, GameSession, GameStatus, RandomSeed};
 use roguelike_workflow::ports::GameSessionRepository;
 use sqlx::Row;
+use uuid::Uuid;
 
 use super::MySqlPool;
 
@@ -81,9 +82,18 @@ impl GameSessionRepository for MySqlGameSessionRepository {
 
     fn find_by_id(&self, identifier: &GameIdentifier) -> AsyncIO<Option<Self::GameSession>> {
         let pool = self.pool.clone();
-        let game_id = identifier.to_string();
+        let game_id_str = identifier.to_string();
 
         AsyncIO::new(move || async move {
+            // Parse the UUID string to get the binary bytes
+            let game_uuid = match Uuid::parse_str(&game_id_str) {
+                Ok(uuid) => uuid,
+                Err(error) => {
+                    tracing::error!("Failed to parse game identifier: {}", error);
+                    return None;
+                }
+            };
+
             let result = sqlx::query(
                 r#"
                 SELECT game_id, player_id, current_floor_level, turn_count, status, random_seed, event_sequence, created_at, updated_at
@@ -91,7 +101,7 @@ impl GameSessionRepository for MySqlGameSessionRepository {
                 WHERE game_id = ?
                 "#,
             )
-            .bind(&game_id)
+            .bind(game_uuid)
             .fetch_optional(pool.as_inner())
             .await;
 
@@ -114,6 +124,22 @@ impl GameSessionRepository for MySqlGameSessionRepository {
         let session = session.clone();
 
         AsyncIO::new(move || async move {
+            // Parse UUIDs from strings to get binary representation
+            let game_uuid = match Uuid::parse_str(&session.game_id) {
+                Ok(uuid) => uuid,
+                Err(error) => {
+                    tracing::error!("Failed to parse game_id: {}", error);
+                    return;
+                }
+            };
+            let player_uuid = match Uuid::parse_str(&session.player_id) {
+                Ok(uuid) => uuid,
+                Err(error) => {
+                    tracing::error!("Failed to parse player_id: {}", error);
+                    return;
+                }
+            };
+
             let result = sqlx::query(
                 r#"
                 INSERT INTO game_sessions (game_id, player_id, current_floor_level, turn_count, status, random_seed, event_sequence)
@@ -125,8 +151,8 @@ impl GameSessionRepository for MySqlGameSessionRepository {
                     event_sequence = VALUES(event_sequence)
                 "#,
             )
-            .bind(&session.game_id)
-            .bind(&session.player_id)
+            .bind(game_uuid)
+            .bind(player_uuid)
             .bind(session.current_floor_level)
             .bind(session.turn_count as i64)
             .bind(&session.status)
@@ -143,16 +169,25 @@ impl GameSessionRepository for MySqlGameSessionRepository {
 
     fn delete(&self, identifier: &GameIdentifier) -> AsyncIO<()> {
         let pool = self.pool.clone();
-        let game_id = identifier.to_string();
+        let game_id_str = identifier.to_string();
 
         AsyncIO::new(move || async move {
+            // Parse the UUID string to get the binary bytes
+            let game_uuid = match Uuid::parse_str(&game_id_str) {
+                Ok(uuid) => uuid,
+                Err(error) => {
+                    tracing::error!("Failed to parse game identifier: {}", error);
+                    return;
+                }
+            };
+
             let result = sqlx::query(
                 r#"
                 DELETE FROM game_sessions
                 WHERE game_id = ?
                 "#,
             )
-            .bind(&game_id)
+            .bind(game_uuid)
             .execute(pool.as_inner())
             .await;
 
@@ -180,8 +215,9 @@ impl GameSessionRepository for MySqlGameSessionRepository {
                 Ok(rows) => rows
                     .iter()
                     .filter_map(|row| {
-                        let game_id: String = row.get("game_id");
-                        game_id.parse().ok()
+                        // Read UUID from binary(16) column
+                        let game_uuid: Uuid = row.get("game_id");
+                        game_uuid.to_string().parse().ok()
                     })
                     .collect(),
                 Err(error) => {
@@ -255,14 +291,18 @@ impl GameSessionRecord {
 
     /// Creates a record from a database row.
     fn from_row(row: &sqlx::mysql::MySqlRow) -> Self {
+        // Read UUIDs from binary(16) columns
+        let game_uuid: Uuid = row.get("game_id");
+        let player_uuid: Uuid = row.get("player_id");
+
         Self {
-            game_id: row.get("game_id"),
-            player_id: row.get("player_id"),
-            current_floor_level: row.get("current_floor_level"),
-            turn_count: row.get::<i64, _>("turn_count") as u64,
+            game_id: game_uuid.to_string(),
+            player_id: player_uuid.to_string(),
+            current_floor_level: row.get::<u32, _>("current_floor_level") as i32,
+            turn_count: row.get::<u64, _>("turn_count"),
             status: row.get("status"),
-            random_seed: row.get::<i64, _>("random_seed") as u64,
-            event_sequence: row.get::<i64, _>("event_sequence") as u64,
+            random_seed: row.get::<u64, _>("random_seed"),
+            event_sequence: row.get::<u64, _>("event_sequence"),
         }
     }
 
@@ -516,10 +556,7 @@ mod tests {
         #[case(GameStatus::Victory, "victory")]
         #[case(GameStatus::Defeat, "defeat")]
         #[case(GameStatus::Paused, "paused")]
-        fn status_to_string_converts_correctly(
-            #[case] status: GameStatus,
-            #[case] expected: &str,
-        ) {
+        fn status_to_string_converts_correctly(#[case] status: GameStatus, #[case] expected: &str) {
             assert_eq!(status_to_string(&status), expected);
         }
 
@@ -528,10 +565,7 @@ mod tests {
         #[case("victory", GameStatus::Victory)]
         #[case("defeat", GameStatus::Defeat)]
         #[case("paused", GameStatus::Paused)]
-        fn string_to_status_converts_correctly(
-            #[case] input: &str,
-            #[case] expected: GameStatus,
-        ) {
+        fn string_to_status_converts_correctly(#[case] input: &str, #[case] expected: GameStatus) {
             assert_eq!(string_to_status(input), expected);
         }
 
