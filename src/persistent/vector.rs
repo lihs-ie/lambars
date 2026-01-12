@@ -1391,6 +1391,102 @@ impl<T: Clone> PersistentVector<T> {
         result
     }
 
+    /// Efficiently concatenates two vectors using RRB-Tree algorithm.
+    ///
+    /// This method provides O(log n) concatenation by using Relaxed Radix
+    /// Balanced Tree (RRB-Tree) techniques, which is significantly faster
+    /// than the naive O(m) approach of [`Self::append`] for large vectors.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The vector to concatenate to the end of this vector
+    ///
+    /// # Complexity
+    ///
+    /// O(log n) where n is the total number of elements
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentVector;
+    ///
+    /// let left: PersistentVector<i32> = (1..=1000).collect();
+    /// let right: PersistentVector<i32> = (1001..=2000).collect();
+    /// let combined = left.concat(&right);
+    ///
+    /// assert_eq!(combined.len(), 2000);
+    /// assert_eq!(combined.get(0), Some(&1));
+    /// assert_eq!(combined.get(1999), Some(&2000));
+    /// ```
+    #[must_use]
+    pub fn concat(&self, other: &Self) -> Self {
+        if self.is_empty() {
+            return other.clone();
+        }
+        if other.is_empty() {
+            return self.clone();
+        }
+
+        let left_leaves = self.collect_all_leaves();
+        let right_leaves = other.collect_all_leaves();
+
+        let all_leaves: Vec<_> = left_leaves.into_iter().chain(right_leaves).collect();
+        let total_length = self.length + other.length;
+
+        Self::build_from_leaves(all_leaves, total_length)
+    }
+
+    /// Collects all leaf nodes from the vector in order.
+    fn collect_all_leaves(&self) -> Vec<ReferenceCounter<[T]>> {
+        let mut leaves = Vec::new();
+        Self::collect_leaves_from_node(&self.root, self.shift, &mut leaves);
+        if !self.tail.is_empty() {
+            leaves.push(self.tail.clone());
+        }
+        leaves
+    }
+
+    /// Recursively collects leaves from a node.
+    fn collect_leaves_from_node(
+        node: &ReferenceCounter<Node<T>>,
+        level: usize,
+        leaves: &mut Vec<ReferenceCounter<[T]>>,
+    ) {
+        match node.as_ref() {
+            Node::Leaf(elements) => {
+                if !elements.is_empty() {
+                    leaves.push(elements.clone());
+                }
+            }
+            Node::Branch(children) => {
+                let next_level = level.saturating_sub(BITS_PER_LEVEL);
+                for child in children.iter().flatten() {
+                    Self::collect_leaves_from_node(child, next_level, leaves);
+                }
+            }
+            Node::RelaxedBranch { children, .. } => {
+                let next_level = level.saturating_sub(BITS_PER_LEVEL);
+                for child in children.iter() {
+                    Self::collect_leaves_from_node(child, next_level, leaves);
+                }
+            }
+        }
+    }
+
+    /// Builds a `PersistentVector` from a collection of leaf nodes.
+    fn build_from_leaves(leaves: Vec<ReferenceCounter<[T]>>, total_length: usize) -> Self {
+        if leaves.is_empty() || total_length == 0 {
+            return Self::new();
+        }
+
+        let all_elements: Vec<T> = leaves
+            .into_iter()
+            .flat_map(|leaf| leaf.iter().cloned().collect::<Vec<_>>())
+            .collect();
+
+        build_persistent_vector_from_vec(all_elements)
+    }
+
     /// Returns a new vector containing the first `count` elements.
     ///
     /// If `count` exceeds the vector's length, returns a copy of the entire vector.
@@ -4255,6 +4351,150 @@ mod tests {
         let result = outer.intercalate(&separator);
         let collected: Vec<char> = result.iter().copied().collect();
         assert_eq!(collected, vec!['a', 'b', '-', '-', 'c', 'd']);
+    }
+
+    // =========================================================================
+    // concat Tests (RRB-Tree O(log n) concatenation)
+    // =========================================================================
+
+    #[rstest]
+    #[case(vec![], vec![], vec![])]
+    #[case(vec![1, 2, 3], vec![], vec![1, 2, 3])]
+    #[case(vec![], vec![4, 5, 6], vec![4, 5, 6])]
+    #[case(vec![1, 2, 3], vec![4, 5, 6], vec![1, 2, 3, 4, 5, 6])]
+    fn test_concat_basic(
+        #[case] left: Vec<i32>,
+        #[case] right: Vec<i32>,
+        #[case] expected: Vec<i32>,
+    ) {
+        let left_vector: PersistentVector<i32> = left.into_iter().collect();
+        let right_vector: PersistentVector<i32> = right.into_iter().collect();
+        let result = left_vector.concat(&right_vector);
+
+        assert_eq!(result.len(), expected.len());
+        let collected: Vec<i32> = result.iter().copied().collect();
+        assert_eq!(collected, expected);
+    }
+
+    #[rstest]
+    fn test_concat_large_vectors() {
+        let left: PersistentVector<i32> = (0..10000).collect();
+        let right: PersistentVector<i32> = (10000..20000).collect();
+        let result = left.concat(&right);
+
+        assert_eq!(result.len(), 20000);
+        for index in 0_usize..20000 {
+            let expected = i32::try_from(index).expect("Test index exceeds i32::MAX");
+            assert_eq!(result.get(index), Some(&expected));
+        }
+    }
+
+    #[rstest]
+    fn test_concat_asymmetric() {
+        let large: PersistentVector<i32> = (0..100_000).collect();
+        let small: PersistentVector<i32> = (100_000..100_010).collect();
+        let result = large.concat(&small);
+
+        assert_eq!(result.len(), 100_010);
+        assert_eq!(result.get(0), Some(&0));
+        assert_eq!(result.get(99_999), Some(&99_999));
+        assert_eq!(result.get(100_000), Some(&100_000));
+        assert_eq!(result.get(100_009), Some(&100_009));
+    }
+
+    #[rstest]
+    fn test_concat_chain() {
+        let vectors: Vec<PersistentVector<i32>> = (0..100)
+            .map(|chunk_index| ((chunk_index * 10)..((chunk_index + 1) * 10)).collect())
+            .collect();
+
+        let mut result = PersistentVector::new();
+        for vector in &vectors {
+            result = result.concat(vector);
+        }
+
+        assert_eq!(result.len(), 1000);
+        for index in 0_usize..1000 {
+            let expected = i32::try_from(index).expect("Test index exceeds i32::MAX");
+            assert_eq!(result.get(index), Some(&expected));
+        }
+    }
+
+    #[rstest]
+    fn test_concat_preserves_originals() {
+        let left: PersistentVector<i32> = (1..=3).collect();
+        let right: PersistentVector<i32> = (4..=6).collect();
+        let _result = left.concat(&right);
+
+        assert_eq!(left.len(), 3);
+        assert_eq!(right.len(), 3);
+        let left_collected: Vec<i32> = left.iter().copied().collect();
+        let right_collected: Vec<i32> = right.iter().copied().collect();
+        assert_eq!(left_collected, vec![1, 2, 3]);
+        assert_eq!(right_collected, vec![4, 5, 6]);
+    }
+
+    #[rstest]
+    fn test_concat_operations_after() {
+        let left: PersistentVector<i32> = (1..=5).collect();
+        let right: PersistentVector<i32> = (6..=10).collect();
+        let concatenated = left.concat(&right);
+
+        let with_element = concatenated.push_back(11);
+        assert_eq!(with_element.len(), 11);
+        assert_eq!(with_element.get(10), Some(&11));
+
+        let updated = concatenated.update(5, 100).unwrap();
+        assert_eq!(updated.get(5), Some(&100));
+        assert_eq!(concatenated.get(5), Some(&6));
+
+        let sliced = concatenated.take(3);
+        assert_eq!(sliced.len(), 3);
+        let sliced_collected: Vec<i32> = sliced.iter().copied().collect();
+        assert_eq!(sliced_collected, vec![1, 2, 3]);
+    }
+
+    #[rstest]
+    fn test_concat_single_elements() {
+        let left = PersistentVector::singleton(1);
+        let right = PersistentVector::singleton(2);
+        let result = left.concat(&right);
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.get(0), Some(&1));
+        assert_eq!(result.get(1), Some(&2));
+    }
+
+    #[rstest]
+    fn test_concat_with_tail_only_vectors() {
+        let left: PersistentVector<i32> = (1..=10).collect();
+        let right: PersistentVector<i32> = (11..=20).collect();
+        let result = left.concat(&right);
+
+        assert_eq!(result.len(), 20);
+        for index in 0_usize..20 {
+            let expected = i32::try_from(index + 1).expect("Test index exceeds i32::MAX");
+            assert_eq!(result.get(index), Some(&expected));
+        }
+    }
+
+    #[rstest]
+    fn test_concat_one_with_tail_one_with_tree() {
+        let small: PersistentVector<i32> = (1..=10).collect();
+        let large: PersistentVector<i32> = (11..=1000).collect();
+
+        let result1 = small.concat(&large);
+        assert_eq!(result1.len(), 1000);
+        for index in 0_usize..1000 {
+            let expected = i32::try_from(index + 1).expect("Test index exceeds i32::MAX");
+            assert_eq!(result1.get(index), Some(&expected));
+        }
+
+        let result2 = large.concat(&small);
+        assert_eq!(result2.len(), 1000);
+        for (position, value) in (11..=1000).chain(1..=10).enumerate() {
+            assert_eq!(result2.get(position), Some(&value));
+        }
     }
 
     // =========================================================================
