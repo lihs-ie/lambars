@@ -1,0 +1,689 @@
+# RRB-Tree Concatenation 要件定義
+#
+# 概要:
+#   PersistentVector に O(log n) の効率的な concat 操作を実装する。
+#   RRB-Tree (Relaxed Radix Balanced Tree) を導入し、構造共有を維持しながら
+#   高速な連結を実現する。
+#
+# 設計方針:
+#   1. 既存の Branch/Leaf 構造を拡張し、RelaxedBranch を追加
+#   2. サイズテーブル（累積要素数）による O(log n) インデックスアクセス
+#   3. 純粋関数型の実装を維持（参照透過性、不変性）
+#   4. 後方互換性を保証（既存の API は変更しない）
+#
+# 参照:
+#   - Issue #141: PersistentVector 効率的な concat 実装
+#   - "RRB-Trees: Efficient Immutable Vectors" (Phil Bagwell, Tiark Rompf)
+#   - https://infoscience.epfl.ch/record/169879
+#   - Scala Vector 実装: references/scala3/library/src/scala/collection/immutable/Vector.scala
+#   - Clojure PersistentVector: https://github.com/clojure/clojure/blob/master/src/jvm/clojure/lang/PersistentVector.java
+
+version: "1.0.0"
+name: "RRB-Tree Concatenation"
+description: |
+  現在の PersistentVector::append() は O(n) の push_back ループを使用しており、
+  大量要素の結合時に非効率である。本要件では RRB-Tree (Relaxed Radix Balanced Tree)
+  を導入し、O(log n) の concat() メソッドを実装する。
+
+  RRB-Tree は通常の Radix Balanced Tree を拡張し、各ノードの子の数を
+  可変にすることで効率的な連結を可能にする。これにより:
+  - concat: O(n) -> O(log n) に改善
+  - 構造共有を維持してメモリ効率を保つ
+  - 既存の get/update/push_back/pop_back との互換性を維持
+
+background:
+  problem: |
+    現在の append() 実装は以下の問題を持つ:
+
+    ```rust
+    pub fn append(&self, other: &Self) -> Self {
+        let mut result = self.clone();
+        for element in other {
+            result = result.push_back(element.clone());
+        }
+        result
+    }
+    ```
+
+    1. 時間計算量: O(n) where n = other.len()
+    2. 各 push_back() で新しいノードが生成される
+    3. 大量の要素を持つベクター同士の結合時にパフォーマンスが低下
+
+    roguelike サンプルプロジェクトの LootTable.merge() で問題が顕在化:
+    - 敵20体 x ドロップ20エントリ = 最大400回の push_back 操作
+    - 推定レイテンシ: 約1-5us per merge
+
+  motivation: |
+    関数型プログラミングでは、不変データ構造の連結は頻繁に発生する操作である。
+    効率的な concat は以下のユースケースで重要:
+
+    1. リスト/ベクターのバッチ処理
+    2. 分割統治アルゴリズム（マージソートなど）
+    3. 並行処理での結果の統合
+    4. ストリーム処理でのバッファ結合
+
+    O(log n) の concat により、これらの操作を実用的な速度で実行可能になる。
+
+  prior_art:
+    - name: "Scala Vector (2.13+)"
+      description: |
+        Scala 2.13 で RRB-Tree ベースの Vector が導入された。
+        concat は O(log n) で、構造共有も維持される。
+        参考実装: scala/collection/immutable/Vector.scala
+
+    - name: "Clojure PersistentVector"
+      description: |
+        Clojure の PersistentVector は Radix Balanced Tree を使用。
+        concat は transient を使用してバッチ処理するが、計算量は O(n)。
+        本実装は RRB-Tree により Clojure を上回る性能を目指す。
+
+    - name: "im-rs (Rust)"
+      description: |
+        Rust の immutable data structures ライブラリ。
+        Vector は RRB-Tree ベースで O(log n) の concat をサポート。
+
+    - name: "rpds (Rust)"
+      description: |
+        Rust Persistent Data Structures ライブラリ。
+        Vector は RRB-Tree ベースの実装。
+
+requirements:
+  # ============================================================================
+  # 1. Node 構造の拡張
+  # ============================================================================
+  - id: node_structure_extension
+    name: "Node 構造の拡張"
+    description: |
+      既存の Node enum に RelaxedBranch バリアントを追加し、
+      可変長の子ノードとサイズテーブルを保持できるようにする。
+
+      RelaxedBranch は以下の特徴を持つ:
+      - 子ノードの数が 1 から BRANCHING_FACTOR (32) の間で可変
+      - サイズテーブル: 各子ノード以下の累積要素数を保持
+      - 通常の Branch と同様にツリーを構成
+
+    methods:
+      - name: "Node::RelaxedBranch"
+        signature: |
+          enum Node<T> {
+              Branch(ReferenceCounter<[Option<ReferenceCounter<Self>>; BRANCHING_FACTOR]>),
+              RelaxedBranch {
+                  children: ReferenceCounter<[ReferenceCounter<Node<T>>]>,
+                  size_table: ReferenceCounter<[usize]>,
+              },
+              Leaf(ReferenceCounter<[T]>),
+          }
+        description: |
+          RelaxedBranch は以下を保持:
+          - children: 1-32 の子ノード（Vec からスライスに変換）
+          - size_table: 累積サイズ（children[i] 以下の全要素数）
+
+          例: children = [A(10要素), B(15要素), C(20要素)]
+              size_table = [10, 25, 45]
+
+        examples:
+          - description: "RelaxedBranch の構築"
+            code: |
+              let child_a = Node::Leaf(ReferenceCounter::from(vec![1, 2, 3]));
+              let child_b = Node::Leaf(ReferenceCounter::from(vec![4, 5]));
+
+              let relaxed = Node::RelaxedBranch {
+                  children: ReferenceCounter::from(vec![
+                      ReferenceCounter::new(child_a),
+                      ReferenceCounter::new(child_b),
+                  ]),
+                  size_table: ReferenceCounter::from(vec![3, 5]),
+              };
+
+      - name: "Node::is_regular"
+        signature: "fn is_regular(&self) -> bool"
+        description: |
+          ノードが通常の Branch（すべての子が満杯）かどうかを判定する。
+          RelaxedBranch は false を返す。
+
+        examples:
+          - description: "Branch と RelaxedBranch の判定"
+            code: |
+              let branch = Node::Branch(/* 32個の子を持つ */);
+              assert!(branch.is_regular());
+
+              let relaxed = Node::RelaxedBranch { /* ... */ };
+              assert!(!relaxed.is_regular());
+
+      - name: "Node::child_count"
+        signature: "fn child_count(&self) -> usize"
+        description: |
+          ノードが持つ子の数を返す。
+          Branch は 0-32、RelaxedBranch は 1-32。
+
+      - name: "Node::cumulative_size"
+        signature: "fn cumulative_size(&self, child_index: usize) -> usize"
+        description: |
+          指定した子インデックスまでの累積要素数を返す。
+          Branch は child_index * (2^(5*level)) で計算。
+          RelaxedBranch は size_table[child_index] を返す。
+
+    implementations:
+      - type: "Node<T>"
+        description: |
+          Node enum の拡張実装。
+          既存の Branch/Leaf に加えて RelaxedBranch を追加。
+
+  # ============================================================================
+  # 2. インデックスアクセスの拡張
+  # ============================================================================
+  - id: relaxed_index_access
+    name: "RelaxedBranch でのインデックスアクセス"
+    description: |
+      RelaxedBranch ノードでのインデックスアクセスを実装する。
+      サイズテーブルを用いた二分探索により O(log n) でアクセス可能。
+
+    methods:
+      - name: "find_child_index"
+        signature: "fn find_child_index(size_table: &[usize], index: usize) -> usize"
+        description: |
+          サイズテーブルを二分探索し、指定インデックスを含む子ノードのインデックスを返す。
+
+          例: size_table = [10, 25, 45], index = 15
+              -> 1 (25 > 15 >= 10 なので children[1])
+
+        examples:
+          - description: "二分探索によるインデックス特定"
+            code: |
+              let size_table = vec![10, 25, 45];
+
+              assert_eq!(find_child_index(&size_table, 5), 0);   // 0-9
+              assert_eq!(find_child_index(&size_table, 10), 1);  // 10-24
+              assert_eq!(find_child_index(&size_table, 24), 1);  // 10-24
+              assert_eq!(find_child_index(&size_table, 25), 2);  // 25-44
+
+      - name: "get (拡張)"
+        signature: "pub fn get(&self, index: usize) -> Option<&T>"
+        description: |
+          既存の get メソッドを拡張し、RelaxedBranch ノードでも
+          正しくインデックスアクセスできるようにする。
+
+          実装戦略:
+          1. Branch の場合: 既存のビットシフトによるインデックス計算
+          2. RelaxedBranch の場合: size_table を二分探索
+
+      - name: "update (拡張)"
+        signature: "pub fn update(&self, index: usize, element: T) -> Option<Self>"
+        description: |
+          既存の update メソッドを拡張し、RelaxedBranch ノードでも
+          正しく要素を更新できるようにする。
+
+    laws:
+      - name: "Get-Consistency Law"
+        description: "concat 後も get は正しい要素を返す"
+        equation: |
+          let combined = left.concat(&right);
+          for i in 0..left.len() {
+              assert_eq!(combined.get(i), left.get(i));
+          }
+          for i in 0..right.len() {
+              assert_eq!(combined.get(left.len() + i), right.get(i));
+          }
+        property_test: |
+          #[rstest]
+          fn prop_get_consistency_after_concat(
+              #[strategy(any::<Vec<i32>>().prop_map(PersistentVector::from_iter))] left: PersistentVector<i32>,
+              #[strategy(any::<Vec<i32>>().prop_map(PersistentVector::from_iter))] right: PersistentVector<i32>,
+          ) {
+              let combined = left.concat(&right);
+              for i in 0..left.len() {
+                  assert_eq!(combined.get(i), left.get(i));
+              }
+              for i in 0..right.len() {
+                  assert_eq!(combined.get(left.len() + i), right.get(i));
+              }
+          }
+
+  # ============================================================================
+  # 3. concat アルゴリズム
+  # ============================================================================
+  - id: concat_algorithm
+    name: "concat アルゴリズム"
+    description: |
+      O(log n) の効率的な concat メソッドを実装する。
+
+      アルゴリズム概要:
+      1. 両ベクターの tail を処理（統合またはノードに昇格）
+      2. 高さの調整（浅い方を深い方に合わせる）
+      3. ノードのマージとリバランス
+      4. 新しいルートを構築
+
+    methods:
+      - name: "concat"
+        signature: "pub fn concat(&self, other: &Self) -> Self"
+        description: |
+          2つの PersistentVector を効率的に連結した新しいベクターを返す。
+
+          計算量: O(log n) where n = max(self.len(), other.len())
+          空間計算量: O(log n) の新規ノード
+
+          特殊ケース:
+          - self が空: other.clone() を返す
+          - other が空: self.clone() を返す
+          - 両方が tail のみ: 単純な結合
+
+        examples:
+          - description: "基本的な concat"
+            code: |
+              let left: PersistentVector<i32> = (0..1000).collect();
+              let right: PersistentVector<i32> = (1000..2000).collect();
+              let combined = left.concat(&right);
+
+              assert_eq!(combined.len(), 2000);
+              assert_eq!(combined.get(0), Some(&0));
+              assert_eq!(combined.get(999), Some(&999));
+              assert_eq!(combined.get(1000), Some(&1000));
+              assert_eq!(combined.get(1999), Some(&1999));
+
+          - description: "構造共有の検証"
+            code: |
+              let left: PersistentVector<i32> = (0..1000).collect();
+              let right: PersistentVector<i32> = (1000..2000).collect();
+              let combined = left.concat(&right);
+
+              // left と right は変更されない（不変性）
+              assert_eq!(left.len(), 1000);
+              assert_eq!(right.len(), 1000);
+
+              // combined は left と right の一部を構造共有
+              // （内部ノードの参照カウントで検証可能）
+
+      - name: "merge_tails"
+        signature: "fn merge_tails(left_tail: &[T], right: &Self) -> (ReferenceCounter<Node<T>>, ReferenceCounter<[T]>)"
+        description: |
+          左ベクターの tail と右ベクター全体をマージする。
+
+          ケース:
+          1. left_tail + right.tail が 32 以下: 新しい tail として統合
+          2. left_tail が満杯: left_tail を Leaf に昇格
+          3. それ以外: 部分的にマージ
+
+      - name: "adjust_height"
+        signature: "fn adjust_height(node: &Node<T>, current_shift: usize, target_shift: usize) -> Node<T>"
+        description: |
+          ノードの高さを調整する。
+          浅いツリーを深いツリーと同じ高さに持ち上げる。
+
+      - name: "merge_nodes"
+        signature: "fn merge_nodes(left: &Node<T>, right: &Node<T>, shift: usize) -> Node<T>"
+        description: |
+          同じ高さの2つのノードをマージする。
+
+          戦略:
+          1. 両方が Branch で合計 <= 32: 単一の RelaxedBranch に
+          2. リバランスが必要: 子ノードを再配置
+          3. 新しいルートが必要: 親ノードを作成
+
+      - name: "rebalance"
+        signature: "fn rebalance(nodes: Vec<Node<T>>, shift: usize) -> Vec<Node<T>>"
+        description: |
+          ノードの配列をリバランスする。
+
+          RRB-Tree のリバランス規則:
+          - 各ノードは最低 m 個の子を持つ（m = ceil(BRANCHING_FACTOR / 2) = 16）
+          - 子が少ないノードは隣接ノードとマージ
+
+    laws:
+      - name: "Concat Identity Law"
+        description: "空ベクターとの concat は恒等操作"
+        equation: |
+          vector.concat(&PersistentVector::new()) == vector
+          PersistentVector::new().concat(&vector) == vector
+
+      - name: "Concat Associativity Law"
+        description: "concat は結合法則を満たす"
+        equation: |
+          a.concat(&b).concat(&c) == a.concat(&b.concat(&c))
+        property_test: |
+          #[rstest]
+          fn prop_concat_associativity(
+              a: PersistentVector<i32>,
+              b: PersistentVector<i32>,
+              c: PersistentVector<i32>,
+          ) {
+              let left = a.concat(&b).concat(&c);
+              let right = a.concat(&b.concat(&c));
+              assert_eq!(left, right);
+          }
+
+      - name: "Concat Length Law"
+        description: "concat 後の長さは両者の和"
+        equation: |
+          left.concat(&right).len() == left.len() + right.len()
+
+      - name: "Concat Preservation Law"
+        description: "concat は元のベクターを変更しない（不変性）"
+        equation: |
+          let original_left = left.clone();
+          let original_right = right.clone();
+          let _ = left.concat(&right);
+          assert_eq!(left, original_left);
+          assert_eq!(right, original_right);
+
+  # ============================================================================
+  # 4. push_back / pop_back の拡張
+  # ============================================================================
+  - id: push_pop_extension
+    name: "push_back / pop_back の拡張"
+    description: |
+      RelaxedBranch ノードを含むツリーでも push_back / pop_back が
+      正しく動作するように拡張する。
+
+    methods:
+      - name: "push_back (拡張)"
+        signature: "pub fn push_back(&self, element: T) -> Self"
+        description: |
+          既存の push_back を拡張し、RelaxedBranch ノードを含む
+          ツリーでも正しく動作するようにする。
+
+          考慮事項:
+          - RelaxedBranch の最後の子に追加
+          - サイズテーブルの更新
+          - 必要に応じてノードの分割
+
+      - name: "pop_back (拡張)"
+        signature: "pub fn pop_back(&self) -> Option<(T, Self)>"
+        description: |
+          既存の pop_back を拡張し、RelaxedBranch ノードを含む
+          ツリーでも正しく動作するようにする。
+
+          考慮事項:
+          - RelaxedBranch の最後の子から削除
+          - サイズテーブルの更新
+          - 空になった子の削除
+
+    laws:
+      - name: "Push-Pop Law (Extended)"
+        description: "RelaxedBranch を含む場合も push-pop は逆操作"
+        equation: |
+          let after_concat = left.concat(&right);
+          let pushed = after_concat.push_back(x);
+          let (popped, remaining) = pushed.pop_back().unwrap();
+          assert_eq!(popped, x);
+          assert_eq!(remaining, after_concat);
+
+  # ============================================================================
+  # 5. TransientVector の整合性
+  # ============================================================================
+  - id: transient_vector_compatibility
+    name: "TransientVector の整合性"
+    description: |
+      TransientVector が RelaxedBranch ノードを含む PersistentVector から
+      変換された場合も正しく動作するようにする。
+
+    methods:
+      - name: "transient (拡張)"
+        signature: "pub fn transient(&self) -> TransientVector<T>"
+        description: |
+          RelaxedBranch を含む PersistentVector を TransientVector に変換する。
+
+      - name: "persistent (拡張)"
+        signature: "pub fn persistent(self) -> PersistentVector<T>"
+        description: |
+          TransientVector を PersistentVector に変換する。
+          RelaxedBranch ノードは維持される。
+
+    laws:
+      - name: "Transient Round-Trip Law"
+        description: "transient -> persistent は元と等しい"
+        equation: |
+          let after_concat = left.concat(&right);
+          let round_trip = after_concat.transient().persistent();
+          assert_eq!(round_trip, after_concat);
+
+  # ============================================================================
+  # 6. イテレータの拡張
+  # ============================================================================
+  - id: iterator_extension
+    name: "イテレータの拡張"
+    description: |
+      RelaxedBranch ノードを含むツリーでもイテレータが正しく動作するようにする。
+
+    methods:
+      - name: "iter (拡張)"
+        signature: "pub fn iter(&self) -> impl Iterator<Item = &T>"
+        description: |
+          RelaxedBranch ノードを正しくトラバースするイテレータ。
+
+    laws:
+      - name: "Iterator Completeness Law"
+        description: "イテレータはすべての要素を正しい順序で返す"
+        equation: |
+          let combined = left.concat(&right);
+          let from_iter: Vec<_> = combined.iter().cloned().collect();
+          let expected: Vec<_> = left.iter().cloned()
+              .chain(right.iter().cloned())
+              .collect();
+          assert_eq!(from_iter, expected);
+
+non_functional_requirements:
+  performance:
+    - requirement: "concat は O(log n) で動作すること"
+      description: |
+        n = max(self.len(), other.len()) として、
+        concat の時間計算量は O(log n) であること。
+      verification: |
+        ベンチマークで以下を確認:
+        - 1,000 要素の concat: < 1us
+        - 100,000 要素の concat: < 10us
+        - 10,000,000 要素の concat: < 100us
+
+    - requirement: "get/update は O(log n) を維持すること"
+      description: |
+        RelaxedBranch ノードを含むツリーでも、
+        get と update の計算量は O(log n) であること。
+
+    - requirement: "構造共有によりメモリ効率を維持すること"
+      description: |
+        concat 後のベクターは、元のベクターとノードを共有し、
+        O(log n) の追加メモリのみを使用すること。
+
+  compatibility:
+    - requirement: "既存の API は変更しないこと"
+      description: |
+        append(), get(), update(), push_back(), pop_back() などの
+        既存メソッドのシグネチャは変更しない。
+        concat() は新規メソッドとして追加する。
+
+    - requirement: "append() は concat() のエイリアスとして残すこと"
+      description: |
+        後方互換性のため append() は削除せず、
+        内部で concat() を呼び出すように変更する。
+
+    - requirement: "Semigroup trait の実装は concat() を使用すること"
+      description: |
+        PersistentVector の Semigroup::combine は concat() を使用する。
+
+  testing:
+    - requirement: "単体テストのカバレッジ 100%"
+      description: |
+        新規追加コードのすべての分岐をテストでカバーする。
+
+    - requirement: "プロパティベーステストによる法則検証"
+      description: |
+        上記の法則（Concat Identity, Associativity, Length, Preservation）を
+        proptest/rstest でランダムデータに対して検証する。
+
+    - requirement: "大規模データでの回帰テスト"
+      description: |
+        100万要素を超えるベクターでの concat と
+        その後の操作が正しく動作することを確認する。
+
+# 関数型プログラミングの観点
+functional_programming_principles:
+  referential_transparency:
+    description: |
+      concat は参照透過性を満たす:
+      - 同じ入力（left, right）に対して常に同じ出力を返す
+      - 外部状態（グローバル変数、時刻、乱数など）に依存しない
+      - concat(left, right) を「値」に置き換えても意味が変わらない
+
+    verification: |
+      #[rstest]
+      fn referential_transparency(
+          left: PersistentVector<i32>,
+          right: PersistentVector<i32>,
+      ) {
+          let result1 = left.concat(&right);
+          let result2 = left.concat(&right);
+          assert_eq!(result1, result2);
+      }
+
+  pure_function:
+    description: |
+      concat は純粋関数である:
+      - 副作用（I/O、DB、ログ、状態変更）が含まれない
+      - 「計算」と「実行」が分離されている
+      - テストが引数と戻り値だけで書ける
+
+    verification: |
+      // concat のテストは引数と戻り値のみで記述可能
+      #[rstest]
+      fn test_concat_pure() {
+          let left = PersistentVector::from_iter([1, 2, 3]);
+          let right = PersistentVector::from_iter([4, 5, 6]);
+          let result = left.concat(&right);
+
+          // 入力と出力のみで検証
+          assert_eq!(result.len(), 6);
+          assert_eq!(result.get(0), Some(&1));
+          assert_eq!(result.get(3), Some(&4));
+      }
+
+  immutability:
+    description: |
+      concat は不変性を維持する:
+      - 引数や既存のデータを直接変更しない
+      - 新しい値を返す設計
+      - ReferenceCounter による構造共有で効率性を確保
+
+    verification: |
+      #[rstest]
+      fn immutability_preserved() {
+          let left = PersistentVector::from_iter([1, 2, 3]);
+          let right = PersistentVector::from_iter([4, 5, 6]);
+
+          let left_clone = left.clone();
+          let right_clone = right.clone();
+
+          let _ = left.concat(&right);
+
+          // 元のベクターは変更されていない
+          assert_eq!(left, left_clone);
+          assert_eq!(right, right_clone);
+      }
+
+  error_handling:
+    description: |
+      concat はエラーを型で表現する必要がない:
+      - 空ベクターとの concat は有効な操作
+      - インデックス範囲外のような失敗ケースがない
+      - Result/Option は不要
+
+  higher_order_functions:
+    description: |
+      concat は Semigroup の combine として使用可能:
+      - 高階関数との組み合わせが自然
+      - fold_left による複数ベクターの結合が効率的に
+
+    example: |
+      // 複数のベクターを効率的に結合
+      let vectors: Vec<PersistentVector<i32>> = vec![
+          (0..100).collect(),
+          (100..200).collect(),
+          (200..300).collect(),
+      ];
+
+      let combined = vectors.into_iter()
+          .fold(PersistentVector::new(), |accumulator, vector| accumulator.concat(&vector));
+
+      assert_eq!(combined.len(), 300);
+
+# 将来の拡張
+future_extensions:
+  - id: slice_optimization
+    name: "スライス操作の最適化"
+    description: |
+      RRB-Tree の特性を活かして slice() も O(log n) に最適化する。
+      現在の O(n) から大幅に改善可能。
+    rationale: |
+      concat と同様のアルゴリズムで slice も効率化できるが、
+      実装の複雑さを考慮して別 Issue として分離する。
+
+  - id: parallel_concat
+    name: "並列 concat"
+    description: |
+      大規模ベクターの concat を並列化し、
+      マルチコア環境でのパフォーマンスを向上させる。
+    rationale: |
+      RRB-Tree のマージは独立した部分木に対して並列実行可能だが、
+      実装の複雑さと rayon 依存を考慮して後回しにする。
+
+  - id: concat_many
+    name: "concat_many"
+    description: |
+      複数のベクターを一度に結合する concat_many を実装する。
+      fold よりも効率的なバランスの取れたマージが可能。
+    rationale: |
+      単一の concat が完成してから、バッチ操作として実装する。
+
+# 実装フェーズ
+implementation_phases:
+  - phase: 1
+    name: "Node 構造の拡張"
+    tasks:
+      - "Node::RelaxedBranch バリアントの追加"
+      - "is_regular(), child_count(), cumulative_size() の実装"
+      - "単体テストの作成"
+    estimate: "2-3 days"
+
+  - phase: 2
+    name: "インデックスアクセスの拡張"
+    tasks:
+      - "find_child_index() の実装（二分探索）"
+      - "get() の RelaxedBranch 対応"
+      - "update() の RelaxedBranch 対応"
+      - "単体テストの作成"
+    estimate: "2-3 days"
+
+  - phase: 3
+    name: "concat アルゴリズムの実装"
+    tasks:
+      - "merge_tails() の実装"
+      - "adjust_height() の実装"
+      - "merge_nodes() の実装"
+      - "rebalance() の実装"
+      - "concat() の統合"
+      - "単体テスト・プロパティテストの作成"
+    estimate: "4-5 days"
+
+  - phase: 4
+    name: "push_back / pop_back の拡張"
+    tasks:
+      - "push_back の RelaxedBranch 対応"
+      - "pop_back の RelaxedBranch 対応"
+      - "単体テストの作成"
+    estimate: "2-3 days"
+
+  - phase: 5
+    name: "TransientVector・イテレータの整合性"
+    tasks:
+      - "transient() / persistent() の拡張"
+      - "イテレータの RelaxedBranch 対応"
+      - "単体テストの作成"
+    estimate: "2-3 days"
+
+  - phase: 6
+    name: "ベンチマーク・最適化"
+    tasks:
+      - "ベンチマークの作成と実行"
+      - "パフォーマンス目標の検証"
+      - "必要に応じて最適化"
+    estimate: "2-3 days"
+
+total_estimate: "14-20 days"
