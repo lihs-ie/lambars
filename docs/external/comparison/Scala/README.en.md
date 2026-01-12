@@ -799,14 +799,18 @@ let recommendations: Vec<String> = for_! {
 
 ## Function Composition
 
-| Scala               | lambars             | Description       |
-| ------------------- | ------------------- | ----------------- |
-| `f andThen g`       | `compose!(g, f)`    | Left-to-right     |
-| `f compose g`       | `compose!(f, g)`    | Right-to-left     |
-| `f.curried`         | `curry!(fn, arity)` | Curry function    |
-| `f.tupled`          | Manual              | Accept tuple      |
-| `Function.const(x)` | `constant(x)`       | Constant function |
-| `identity`          | `identity`          | Identity function |
+| Scala               | lambars             | Description                 |
+| ------------------- | ------------------- | --------------------------- |
+| `f andThen g`       | `compose!(g, f)`    | Left-to-right               |
+| `f compose g`       | `compose!(f, g)`    | Right-to-left               |
+| `m.map(f)`          | `pipe!(m, => f)`    | Lift pure function in monad |
+| `m.flatMap(f)`      | `pipe!(m, =>> f)`   | Bind monadic function       |
+| `asyncIO.map(f)`    | `pipe_async!(m, => f)` | Lift for AsyncIO (inherent) |
+| `asyncIO.flatMap(f)`| `pipe_async!(m, =>> f)`| Bind for AsyncIO (inherent) |
+| `f.curried`         | `curry!(fn, arity)` | Curry function              |
+| `f.tupled`          | Manual              | Accept tuple                |
+| `Function.const(x)` | `constant(x)`       | Constant function           |
+| `identity`          | `identity`          | Identity function           |
 
 ### Code Examples
 

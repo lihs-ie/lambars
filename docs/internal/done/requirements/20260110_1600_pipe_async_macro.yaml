@@ -1,0 +1,580 @@
+# pipe_async! マクロ - AsyncIO 専用パイプラインマクロ 要件定義
+#
+# 概要:
+#   AsyncIO 型を pipe スタイルで操作するための専用マクロを提供する。
+#   Rust の型システム制限により、AsyncIO は Functor/Monad トレイトを
+#   実装できないため、pipe! マクロでは使用できない。
+#   pipe_async! マクロは AsyncIO のインヒアレントメソッドを直接使用することで
+#   この制限を回避する。
+#
+# 設計方針:
+#   1. pipe! マクロと同じ演算子構文を提供（=> と =>>）
+#   2. AsyncIO のインヒアレントメソッド（fmap, flat_map）を使用
+#   3. 遅延実行の性質を維持
+#   4. 参照透過性を維持
+#
+# 参照:
+#   - Issue #137: AsyncIO 対応の pipe_async! マクロ
+#   - 既存の pipe! マクロ（src/compose/pipe_macro.rs）
+#   - AsyncIO の実装（src/effect/async_io.rs）
+
+version: "1.0.0"
+name: "pipe_async_macro"
+description: |
+  AsyncIO は Rust の型システム制限により Functor/Monad トレイトを実装できない。
+  具体的には、AsyncIO の内部実装では Send 境界が必要だが、
+  Functor/Monad トレイト定義には Send 境界が含まれていない。
+  Rust では impl ブロックでトレイト定義より厳しい境界を追加できないため、
+  AsyncIO に Functor/Monad を実装することは技術的に不可能である。
+
+  この制限を回避するため、AsyncIO 専用の pipe_async! マクロを提供する。
+  このマクロは pipe! マクロと同じ演算子構文を使用しながら、
+  トレイトメソッドではなく AsyncIO のインヒアレントメソッドを直接呼び出す。
+
+background:
+  problem: |
+    AsyncIO は非同期計算を表現するモナドであり、以下の制約がある:
+
+    1. 内部実装で Send 境界が必要:
+       ```rust
+       pub struct AsyncIO<A> {
+           run_async_io: Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = A> + Send>> + Send>,
+       }
+       ```
+
+    2. Functor/Monad トレイト定義には Send 境界がない:
+       ```rust
+       pub trait Functor: TypeConstructor {
+           fn fmap<B, F>(self, function: F) -> Self::WithType<B>
+           where
+               F: FnOnce(Self::Inner) -> B;
+       }
+       ```
+
+    3. Rust では impl ブロックでトレイト定義より厳しい境界を追加できない
+
+    結果として、以下のような pipe! マクロの使用はコンパイルエラーになる:
+    ```rust
+    // コンパイルエラー: AsyncIO does not implement Functor
+    let result = pipe!(
+        AsyncIO::pure(5),
+        => |x| x * 2
+    );
+    ```
+
+  motivation: |
+    AsyncIO は lambars の重要なコンポーネントであり、
+    関数型スタイルでの非同期プログラミングを可能にする。
+    pipe! マクロと同等の使いやすさを AsyncIO に提供することで、
+    開発者体験を向上させる。
+
+    期待される使用例:
+    ```rust
+    let workflow = pipe_async!(
+        AsyncIO::pure(seed),
+        => create_identifiers,       // fmap: 純粋関数を適用
+        =>> persist_session,         // flat_map: AsyncIO を返す関数を適用
+        =>> cache_session
+    );
+
+    let result = workflow.run_async().await;
+    ```
+
+  prior_art:
+    - name: "pipe! マクロ"
+      description: |
+        既存の pipe! マクロは Functor/Monad トレイトを使用して
+        => と =>> 演算子を実装している。
+        pipe_async! マクロはこの設計を継承しつつ、
+        インヒアレントメソッドを使用する点で異なる。
+
+    - name: "AsyncIO のインヒアレントメソッド"
+      description: |
+        AsyncIO は以下のインヒアレントメソッドを提供している:
+        - fmap<B, F>(self, function: F) -> AsyncIO<B>
+        - flat_map<B, F>(self, function: F) -> AsyncIO<B>
+        - and_then<B, F>(self, function: F) -> AsyncIO<B>（flat_map のエイリアス）
+        - pure(value: A) -> Self
+
+requirements:
+  # ======================================================================
+  # 1. 基本機能
+  # ======================================================================
+  - id: pipe_async_basic_syntax
+    name: "pipe_async! マクロの基本構文"
+    description: |
+      pipe_async! マクロは pipe! マクロと同じ基本構文を提供する。
+      値のみを渡した場合はその値をそのまま返す。
+
+    methods:
+      - name: "pipe_async! 値のみ"
+        signature: "pipe_async!(async_io_value)"
+        description: |
+          AsyncIO 値をそのまま返す。
+        examples:
+          - description: "値のみを渡す"
+            code: |
+              let async_io = AsyncIO::pure(42);
+              let result = pipe_async!(async_io);
+              assert_eq!(result.run_async().await, 42);
+
+  # ======================================================================
+  # 2. リフト演算子（=>）
+  # ======================================================================
+  - id: pipe_async_lift_operator
+    name: "リフト演算子 (=>) の実装"
+    description: |
+      => 演算子は純粋関数を AsyncIO のコンテキストで適用する。
+      内部的には AsyncIO::fmap インヒアレントメソッドを使用する。
+
+      展開結果:
+      ```rust
+      pipe_async!(m, => f) => m.fmap(f)
+      ```
+
+      これは pipe! マクロの => 演算子と同じ意味を持つが、
+      Functor トレイトではなくインヒアレントメソッドを使用する。
+
+    methods:
+      - name: "pipe_async! with lift operator"
+        signature: "pipe_async!(async_io, => pure_function)"
+        description: |
+          AsyncIO 値に純粋関数を適用し、新しい AsyncIO を返す。
+        examples:
+          - description: "単一の純粋関数をリフト"
+            code: |
+              let result = pipe_async!(
+                  AsyncIO::pure(5),
+                  => |x| x * 2
+              );
+              assert_eq!(result.run_async().await, 10);
+
+          - description: "複数の純粋関数をチェーン"
+            code: |
+              let result = pipe_async!(
+                  AsyncIO::pure(5),
+                  => |x| x + 1,
+                  => |x| x * 2
+              );
+              assert_eq!(result.run_async().await, 12);
+
+          - description: "型変換を含むリフト"
+            code: |
+              let result = pipe_async!(
+                  AsyncIO::pure(42),
+                  => |x: i32| x.to_string(),
+                  => |s: String| s.len()
+              );
+              assert_eq!(result.run_async().await, 2);
+
+  # ======================================================================
+  # 3. バインド演算子（=>>）
+  # ======================================================================
+  - id: pipe_async_bind_operator
+    name: "バインド演算子 (=>>) の実装"
+    description: |
+      =>> 演算子は AsyncIO を返す関数を適用する。
+      内部的には AsyncIO::flat_map インヒアレントメソッドを使用する。
+
+      展開結果:
+      ```rust
+      pipe_async!(m, =>> f) => m.flat_map(f)
+      ```
+
+      これは pipe! マクロの =>> 演算子と同じ意味を持つが、
+      Monad トレイトではなくインヒアレントメソッドを使用する。
+
+    methods:
+      - name: "pipe_async! with bind operator"
+        signature: "pipe_async!(async_io, =>> monadic_function)"
+        description: |
+          AsyncIO 値に AsyncIO を返す関数を適用し、新しい AsyncIO を返す。
+        examples:
+          - description: "単一のモナド関数を適用"
+            code: |
+              let result = pipe_async!(
+                  AsyncIO::pure(5),
+                  =>> |x| AsyncIO::pure(x * 2)
+              );
+              assert_eq!(result.run_async().await, 10);
+
+          - description: "複数のモナド関数をチェーン"
+            code: |
+              let result = pipe_async!(
+                  AsyncIO::pure(5),
+                  =>> |x| AsyncIO::pure(x + 1),
+                  =>> |x| AsyncIO::pure(x * 2)
+              );
+              assert_eq!(result.run_async().await, 12);
+
+          - description: "実際の非同期処理をチェーン"
+            code: |
+              async fn fetch_user(user_id: i32) -> AsyncIO<User> {
+                  AsyncIO::new(move || async move {
+                      // 実際の非同期処理
+                      User { id: user_id, name: "Alice".to_string() }
+                  })
+              }
+
+              async fn fetch_profile(user: User) -> AsyncIO<Profile> {
+                  AsyncIO::new(move || async move {
+                      Profile { user_id: user.id, bio: "..." }
+                  })
+              }
+
+              let workflow = pipe_async!(
+                  AsyncIO::pure(42),
+                  =>> fetch_user,
+                  =>> fetch_profile
+              );
+
+  # ======================================================================
+  # 4. 演算子の混在使用
+  # ======================================================================
+  - id: pipe_async_mixed_operators
+    name: "演算子の混在使用"
+    description: |
+      同一の pipe_async! マクロ内でリフト演算子（=>）と
+      バインド演算子（=>>）を混在して使用できる。
+
+    examples:
+      - description: "リフトとバインドの混在"
+        code: |
+          let result = pipe_async!(
+              AsyncIO::pure(10),
+              => |x| x / 2,                     // fmap: AsyncIO(5)
+              =>> |x| AsyncIO::pure(x + 10),    // flat_map: AsyncIO(15)
+              => |x| x * 2                      // fmap: AsyncIO(30)
+          );
+          assert_eq!(result.run_async().await, 30);
+
+      - description: "実際のワークフロー例"
+        code: |
+          fn create_identifiers(seed: u64) -> Identifiers { ... }
+          fn persist_session(ids: Identifiers) -> AsyncIO<Session> { ... }
+          fn cache_session(session: Session) -> AsyncIO<()> { ... }
+
+          let workflow = pipe_async!(
+              seed_io,                       // AsyncIO<u64>
+              => create_identifiers,         // fmap: AsyncIO<Identifiers>
+              =>> persist_session,           // flat_map: AsyncIO<Session>
+              =>> cache_session              // flat_map: AsyncIO<()>
+          );
+
+  # ======================================================================
+  # 5. 関数型プログラミングの原則
+  # ======================================================================
+  - id: functional_programming_principles
+    name: "関数型プログラミングの原則の遵守"
+    description: |
+      pipe_async! マクロは関数型プログラミングの原則を遵守する。
+
+    laws:
+      - name: "参照透過性の維持"
+        description: |
+          pipe_async! マクロは AsyncIO の遅延実行の性質を維持する。
+          マクロ展開時点では副作用は実行されず、
+          run_async().await が呼ばれた時点で初めて実行される。
+        equation: |
+          // 以下の2つは等価である
+          let workflow = pipe_async!(AsyncIO::pure(5), => |x| x * 2);
+          let workflow = AsyncIO::pure(5).fmap(|x| x * 2);
+
+          // 副作用は run_async().await まで遅延される
+          // workflow を構築しただけでは何も実行されない
+
+      - name: "純粋関数としての設計"
+        description: |
+          pipe_async! マクロ自体は純粋なマクロ展開である。
+          副作用を「記述」するが「実行」しない。
+        equation: |
+          pipe_async!(m, => f, =>> g) === m.fmap(f).flat_map(g)
+
+      - name: "不変性の保持"
+        description: |
+          pipe_async! マクロは AsyncIO を消費して新しい AsyncIO を生成する。
+          元の値を変更しない。
+
+  # ======================================================================
+  # 6. 型制約
+  # ======================================================================
+  - id: type_constraints
+    name: "型制約の定義"
+    description: |
+      pipe_async! マクロを使用する際の型制約を明確にする。
+
+    laws:
+      - name: "入力型の制約"
+        description: |
+          pipe_async! マクロの初期値は AsyncIO<A> 型である必要がある。
+        equation: |
+          pipe_async!(m: AsyncIO<A>, ...) : AsyncIO<...>
+
+      - name: "リフト演算子の型制約"
+        description: |
+          => 演算子の関数は A -> B の純粋関数である必要がある。
+          また、関数と戻り値は Send + 'static 境界を満たす必要がある。
+        equation: |
+          F: FnOnce(A) -> B + Send + 'static
+          B: 'static
+          pipe_async!(m: AsyncIO<A>, => f: F) : AsyncIO<B>
+
+      - name: "バインド演算子の型制約"
+        description: |
+          =>> 演算子の関数は A -> AsyncIO<B> を返す必要がある。
+          また、関数は Send + 'static 境界を満たす必要がある。
+        equation: |
+          F: FnOnce(A) -> AsyncIO<B> + Send + 'static
+          B: 'static
+          pipe_async!(m: AsyncIO<A>, =>> f: F) : AsyncIO<B>
+
+  # ======================================================================
+  # 7. マクロ実装
+  # ======================================================================
+  - id: macro_implementation
+    name: "マクロの実装"
+    description: |
+      pipe_async! マクロは macro_rules! を使用して実装する。
+      pipe! マクロと同様のパターンマッチングを使用するが、
+      トレイトメソッドではなくインヒアレントメソッドを呼び出す。
+
+    methods:
+      - name: "macro_rules! 定義"
+        signature: "macro_rules! pipe_async"
+        description: |
+          以下のパターンをサポートする:
+          1. 値のみ: pipe_async!(value)
+          2. リフト演算子: pipe_async!(value, => f)
+          3. バインド演算子: pipe_async!(value, =>> f)
+          4. チェーン: pipe_async!(value, => f, =>> g, => h, ...)
+        examples:
+          - description: "マクロ展開例"
+            code: |
+              // 入力
+              pipe_async!(
+                  AsyncIO::pure(5),
+                  => |x| x + 1,
+                  =>> |x| AsyncIO::pure(x * 2)
+              )
+
+              // 展開結果
+              {
+                  let __pipe_async_intermediate = AsyncIO::pure(5).fmap(|x| x + 1);
+                  __pipe_async_intermediate.flat_map(|x| AsyncIO::pure(x * 2))
+              }
+
+non_functional_requirements:
+  performance:
+    - "コンパイル時に完全に展開され、実行時オーバーヘッドがない"
+    - "AsyncIO のインヒアレントメソッド呼び出しと同等のパフォーマンス"
+
+  compatibility:
+    - "pipe! マクロと同じ演算子構文（=> と =>>）を使用"
+    - "既存の AsyncIO API との互換性を維持"
+
+  usability:
+    - "pipe! マクロを使い慣れたユーザーが容易に使用できる"
+    - "エラーメッセージが分かりやすい"
+
+  testing:
+    - "各演算子の単体テスト（rstest を使用）"
+    - "演算子の混在使用のテスト"
+    - "遅延実行の確認テスト"
+    - "型変換を含むパイプラインのテスト"
+    - "複数のチェーンを含む複合テスト"
+
+test_cases:
+  unit_tests:
+    - name: "test_pipe_async_value_only"
+      description: "値のみを渡すケース"
+      code: |
+        #[rstest]
+        #[tokio::test]
+        async fn test_pipe_async_value_only() {
+            let async_io = AsyncIO::pure(42);
+            let result = pipe_async!(async_io);
+            assert_eq!(result.run_async().await, 42);
+        }
+
+    - name: "test_pipe_async_single_lift"
+      description: "単一のリフト演算子"
+      code: |
+        #[rstest]
+        #[tokio::test]
+        async fn test_pipe_async_single_lift() {
+            let result = pipe_async!(AsyncIO::pure(5), => |x| x * 2);
+            assert_eq!(result.run_async().await, 10);
+        }
+
+    - name: "test_pipe_async_multiple_lifts"
+      description: "複数のリフト演算子"
+      code: |
+        #[rstest]
+        #[tokio::test]
+        async fn test_pipe_async_multiple_lifts() {
+            let result = pipe_async!(
+                AsyncIO::pure(5),
+                => |x| x + 1,
+                => |x| x * 2,
+                => |x| x + 3
+            );
+            assert_eq!(result.run_async().await, 15); // ((5 + 1) * 2) + 3
+        }
+
+    - name: "test_pipe_async_single_bind"
+      description: "単一のバインド演算子"
+      code: |
+        #[rstest]
+        #[tokio::test]
+        async fn test_pipe_async_single_bind() {
+            let result = pipe_async!(
+                AsyncIO::pure(5),
+                =>> |x| AsyncIO::pure(x * 2)
+            );
+            assert_eq!(result.run_async().await, 10);
+        }
+
+    - name: "test_pipe_async_multiple_binds"
+      description: "複数のバインド演算子"
+      code: |
+        #[rstest]
+        #[tokio::test]
+        async fn test_pipe_async_multiple_binds() {
+            let result = pipe_async!(
+                AsyncIO::pure(5),
+                =>> |x| AsyncIO::pure(x + 1),
+                =>> |x| AsyncIO::pure(x * 2),
+                =>> |x| AsyncIO::pure(x + 3)
+            );
+            assert_eq!(result.run_async().await, 15);
+        }
+
+    - name: "test_pipe_async_mixed_operators"
+      description: "演算子の混在使用"
+      code: |
+        #[rstest]
+        #[tokio::test]
+        async fn test_pipe_async_mixed_operators() {
+            let result = pipe_async!(
+                AsyncIO::pure(10),
+                => |x| x / 2,                     // fmap: 5
+                =>> |x| AsyncIO::pure(x + 10),    // flat_map: 15
+                => |x| x * 2                      // fmap: 30
+            );
+            assert_eq!(result.run_async().await, 30);
+        }
+
+    - name: "test_pipe_async_type_conversion"
+      description: "型変換を含むパイプライン"
+      code: |
+        #[rstest]
+        #[tokio::test]
+        async fn test_pipe_async_type_conversion() {
+            let result = pipe_async!(
+                AsyncIO::pure(42),
+                => |x: i32| x.to_string(),
+                => |s: String| s.len()
+            );
+            assert_eq!(result.run_async().await, 2);
+        }
+
+    - name: "test_pipe_async_preserves_lazy_execution"
+      description: "遅延実行の確認"
+      code: |
+        #[rstest]
+        #[tokio::test]
+        async fn test_pipe_async_preserves_lazy_execution() {
+            use std::sync::Arc;
+            use std::sync::atomic::{AtomicBool, Ordering};
+
+            let executed = Arc::new(AtomicBool::new(false));
+            let executed_clone = executed.clone();
+
+            let async_io = pipe_async!(
+                AsyncIO::new(move || async move {
+                    executed_clone.store(true, Ordering::SeqCst);
+                    5
+                }),
+                => |x| x * 2
+            );
+
+            // pipe_async! を構築しただけでは実行されない
+            assert!(!executed.load(Ordering::SeqCst));
+
+            // run_async().await で初めて実行される
+            let result = async_io.run_async().await;
+            assert!(executed.load(Ordering::SeqCst));
+            assert_eq!(result, 10);
+        }
+
+    - name: "test_pipe_async_with_named_functions"
+      description: "名前付き関数の使用"
+      code: |
+        #[rstest]
+        #[tokio::test]
+        async fn test_pipe_async_with_named_functions() {
+            fn double(x: i32) -> i32 {
+                x * 2
+            }
+
+            fn add_async(x: i32) -> AsyncIO<i32> {
+                AsyncIO::pure(x + 10)
+            }
+
+            let result = pipe_async!(
+                AsyncIO::pure(5),
+                => double,
+                =>> add_async
+            );
+            assert_eq!(result.run_async().await, 20);
+        }
+
+    - name: "test_pipe_async_trailing_comma"
+      description: "末尾カンマの許容"
+      code: |
+        #[rstest]
+        #[tokio::test]
+        async fn test_pipe_async_trailing_comma() {
+            let result = pipe_async!(
+                AsyncIO::pure(5),
+                => |x| x * 2,
+            );
+            assert_eq!(result.run_async().await, 10);
+        }
+
+future_extensions:
+  - id: other_async_types
+    name: "他の非同期型のサポート"
+    description: |
+      将来的に、Send 境界の問題を持つ他の型に対しても
+      同様の専用マクロを提供する可能性がある。
+    rationale: |
+      現時点では AsyncIO のみをサポートし、
+      他の型は必要に応じて検討する。
+
+  - id: pipe_macro_unification
+    name: "pipe! マクロとの統合"
+    description: |
+      将来的に Rust の型システムが改善された場合、
+      pipe! マクロと pipe_async! マクロを統合する可能性がある。
+    rationale: |
+      現時点では Rust の型システム制限により分離が必要だが、
+      将来的な統合を視野に入れて設計する。
+
+implementation_notes:
+  - |
+    マクロ定義は src/compose/pipe_async_macro.rs に配置する。
+    既存の pipe_macro.rs と同じディレクトリに置くことで、
+    関連性を明確にする。
+
+  - |
+    マクロは src/lib.rs で pub use し、
+    ライブラリのルートからアクセス可能にする。
+
+  - |
+    テストは同一ファイル内の #[cfg(test)] mod tests で定義する。
+    pipe! マクロのテストと同様の構成を使用する。
+
+  - |
+    ドキュメントコメントには使用例を豊富に含め、
+    pipe! マクロとの違いを明確にする。

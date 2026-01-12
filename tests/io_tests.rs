@@ -5,6 +5,7 @@
 //! that side effects are properly deferred until `run_unsafe` is called.
 
 use lambars::effect::IO;
+use lambars::typeclass::{Applicative, Functor, Monad};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 

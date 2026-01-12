@@ -11,7 +11,7 @@ lambars brings functional programming abstractions to Rust that are not provided
 ### Features
 
 - **Type Classes**: Functor, Applicative, Monad, Foldable, Traversable, Semigroup, Monoid
-- **Function Composition**: `compose!`, `pipe!`, `partial!`, `curry!`, `eff!`, `for_!`, `for_async!` macros
+- **Function Composition**: `compose!`, `pipe!`, `pipe_async!`, `partial!`, `curry!`, `eff!`, `for_!`, `for_async!` macros
 - **Control Structures**: Lazy evaluation, Trampoline for stack-safe recursion, Continuation monad
 - **Persistent Data Structures**: Immutable Vector, HashMap, HashSet, TreeMap, List with structural sharing
 - **Optics**: Lens, Prism, Iso, Optional, Traversal for immutable data manipulation
@@ -263,6 +263,48 @@ fn double(x: i32) -> i32 { x * 2 }
 // pipe!(x, f, g) = g(f(x))
 let result = pipe!(5, double, add_one);
 assert_eq!(result, 11); // add_one(double(5)) = 11
+```
+
+##### Monadic Operators
+
+`pipe!` supports monadic operations with special operators:
+
+- `=>` (lift): Applies a pure function within a monadic context using `fmap`
+- `=>>` (bind): Applies a monadic function using `flat_map`
+
+```rust
+use lambars::pipe;
+use lambars::typeclass::{Functor, Monad};
+
+// Lift operator: applies pure function within monad
+let result = pipe!(Some(5), => |x| x * 2);
+assert_eq!(result, Some(10));
+
+// Bind operator: applies monadic function
+let result = pipe!(
+    Some(5),
+    =>> |x| if x > 0 { Some(x * 2) } else { None }
+);
+assert_eq!(result, Some(10));
+
+// Mixed operators: combine pure and monadic functions
+let result = pipe!(
+    Some(10),
+    => |x| x / 2,                                    // lift: Some(5)
+    =>> |x| if x > 0 { Some(x + 10) } else { None }, // bind: Some(15)
+    => |x| x * 2                                     // lift: Some(30)
+);
+assert_eq!(result, Some(30));
+
+// IO monad with pipe!
+use lambars::effect::IO;
+
+let io_result = pipe!(
+    IO::pure(5),
+    => |x| x + 1,           // lift: IO(6)
+    =>> |x| IO::pure(x * 2) // bind: IO(12)
+).run_unsafe();
+assert_eq!(io_result, 12);
 ```
 
 #### partial! (Partial Application)

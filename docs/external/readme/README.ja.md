@@ -13,7 +13,7 @@ lambars は、Rust の標準ライブラリでは提供されていない関数�
 ### 機能
 
 - **型クラス**: Functor, Applicative, Monad, Foldable, Traversable, Semigroup, Monoid
-- **関数合成**: `compose!`, `pipe!`, `partial!`, `curry!`, `eff!`, `for_!`, `for_async!` マクロ
+- **関数合成**: `compose!`, `pipe!`, `pipe_async!`, `partial!`, `curry!`, `eff!`, `for_!`, `for_async!` マクロ
 - **制御構造**: 遅延評価、スタック安全な再帰のための Trampoline、継続モナド
 - **永続データ構造**: 構造共有による不変 Vector, HashMap, HashSet, TreeMap, List
 - **Optics**: 不変データ操作のための Lens, Prism, Iso, Optional, Traversal
@@ -265,6 +265,38 @@ fn double(x: i32) -> i32 { x * 2 }
 // pipe!(x, f, g) = g(f(x))
 let result = pipe!(5, double, add_one);
 assert_eq!(result, 11); // add_one(double(5)) = 11
+```
+
+##### モナド演算子
+
+`pipe!` は特別な演算子でモナド操作をサポートします:
+
+- `=>` (リフト): `fmap` を使用してモナド文脈内で純粋関数を適用
+- `=>>` (バインド): `flat_map` を使用してモナド関数を適用
+
+```rust
+use lambars::pipe;
+use lambars::typeclass::{Functor, Monad};
+
+// リフト演算子: モナド内で純粋関数を適用
+let result = pipe!(Some(5), => |x| x * 2);
+assert_eq!(result, Some(10));
+
+// バインド演算子: モナド関数を適用
+let result = pipe!(
+    Some(5),
+    =>> |x| if x > 0 { Some(x * 2) } else { None }
+);
+assert_eq!(result, Some(10));
+
+// 混合演算子: 純粋関数とモナド関数を組み合わせ
+let result = pipe!(
+    Some(10),
+    => |x| x / 2,                                    // リフト: Some(5)
+    =>> |x| if x > 0 { Some(x + 10) } else { None }, // バインド: Some(15)
+    => |x| x * 2                                     // リフト: Some(30)
+);
+assert_eq!(result, Some(30));
 ```
 
 #### partial!（部分適用）

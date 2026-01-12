@@ -1,0 +1,117 @@
+# Issue: AsyncIO pipe_async macro
+# 実装時に発見された、将来対応が必要な項目
+
+deferred_features:
+  - id: asyncio_pipe_async_macro
+    name: "AsyncIO 対応の pipe_async! マクロ"
+    discovered_date: "2026-01-10"
+    priority: medium
+    category: enhancement
+    labels:
+      - "effect"
+      - "compose"
+      - "macro"
+      - "async"
+
+    # 問題の説明
+    problem:
+      summary: "AsyncIO は Rust の型システム制限により pipe! マクロで使用できない"
+      details: |
+        Issue #135 で pipe! マクロに => (lift/fmap) と =>> (bind/flat_map) 演算子を追加した。
+        IO は Functor/Monad トレイトを実装しているため pipe! マクロで使用可能だが、
+        AsyncIO は Functor/Monad トレイトを実装できないため pipe! マクロでは使用不可。
+
+        AsyncIO を pipe スタイルで操作したい場合、専用のマクロが必要。
+
+      # Rust の制約による場合
+      rust_limitation: |
+        AsyncIO の内部実装では Send 境界が必要（非同期タスクのスレッド間移動のため）:
+
+        ```rust
+        pub struct AsyncIO<A> {
+            run_io: Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = A> + Send>> + Send>,
+        }
+        ```
+
+        しかし、Functor/Monad トレイト定義には Send 境界が含まれていない:
+
+        ```rust
+        pub trait Functor: TypeConstructor {
+            fn fmap<B, F>(self, function: F) -> Self::WithType<B>
+            where
+                F: FnOnce(Self::Inner) -> B + 'static,  // Send がない
+                B: 'static;
+        }
+        ```
+
+        Rust では impl ブロックでトレイト定義より厳しい境界を追加できないため、
+        AsyncIO に Functor/Monad を実装することは技術的に不可能。
+
+    # 解決策の提案
+    solution:
+      approach: "AsyncIO のインヒアレントメソッドを使用する専用マクロ pipe_async! を作成"
+      options:
+        - name: "pipe_async! マクロを作成"
+          description: |
+            AsyncIO のインヒアレントメソッド（fmap, flat_map）を使用する専用マクロを作成。
+            pipe! マクロと同じ構文（=>、=>>）を使用可能。
+
+            ```rust
+            // 使用例
+            let result = pipe_async!(
+                AsyncIO::pure(5),
+                => |x| x * 2,
+                =>> |x| AsyncIO::pure(x + 1)
+            ).run_async().await;
+            ```
+          pros:
+            - 破壊的変更なし
+            - 既存の Functor/Monad トレイトを変更不要
+            - AsyncIO のインヒアレントメソッドをそのまま活用
+            - pipe! マクロと同じ使い心地
+          cons:
+            - 新しいマクロの追加（API の複雑化）
+            - IO と AsyncIO で異なるマクロを使用する必要がある
+
+        - name: "effect_pipe! マクロを作成"
+          description: |
+            IO と AsyncIO の両方で使用可能な統一マクロを作成。
+            内部で型を判別してインヒアレントメソッドを呼び出す。
+          pros:
+            - 統一された API
+            - IO と AsyncIO で同じマクロを使用可能
+          cons:
+            - 実装が複雑（型判別のためのトレイト追加が必要）
+            - マクロの内部実装が複雑化
+
+        - name: "Functor/Monad トレイトに Send 境界を追加"
+          description: |
+            既存の Functor/Monad トレイト定義に Send 境界を追加し、
+            AsyncIO も Functor/Monad を実装可能にする。
+          pros:
+            - 統一された型クラス階層
+            - pipe! マクロがそのまま使用可能
+          cons:
+            - 破壊的変更
+            - Send を実装しない型（Rc、RefCell 等）を含む場合に使用不可
+            - シングルスレッド用途でも Send が必要になる
+
+      recommended: "pipe_async! マクロを作成"
+      estimated_complexity: medium
+
+    # 参考情報
+    references:
+      - "Issue #135: pipe! マクロの IO/AsyncIO 対応"
+      - "docs/internal/done/requirements/20260110_1400_io_asyncio_typeclass_implementation.yaml"
+      - "src/effect/async_io.rs"
+
+    # 関連する要件・実装
+    related:
+      requirement_id: "io_typeclass_implementation"
+      plan_id: null
+
+    # GitHub Issue 情報（作成後に追記）
+    github_issue:
+      number: 137
+      url: "https://github.com/lihs-ie/lambars/issues/137"
+      created: true

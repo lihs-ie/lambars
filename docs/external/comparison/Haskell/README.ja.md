@@ -1032,17 +1032,21 @@ let triples: Vec<(i32, i32, i32)> = for_! {
 
 ## 関数合成
 
-| Haskell                   | lambars          | 説明             |
-| ------------------------- | ---------------- | ---------------- |
-| `f . g`                   | `compose!(f, g)` | 右から左への合成 |
-| `f >>> g` (Control.Arrow) | `compose!(g, f)` | 左から右への合成 |
-| `f <<< g` (Control.Arrow) | `compose!(f, g)` | `.` と同じ       |
-| `x & f`                   | `pipe!(x, f)`    | パイプ演算子     |
-| `f $ x`                   | `f(x)`           | 関数適用         |
-| `flip f`                  | `flip(f)`        | 引数の反転       |
-| `const x`                 | `constant(x)`    | 定数関数         |
-| `id`                      | `identity`       | 恒等関数         |
-| `on`                      | 手動実装         | 射影上の二項関数 |
+| Haskell                   | lambars          | 説明                         |
+| ------------------------- | ---------------- | ---------------------------- |
+| `f . g`                   | `compose!(f, g)` | 右から左への合成             |
+| `f >>> g` (Control.Arrow) | `compose!(g, f)` | 左から右への合成             |
+| `f <<< g` (Control.Arrow) | `compose!(f, g)` | `.` と同じ                   |
+| `x & f`                   | `pipe!(x, f)`    | パイプ演算子                 |
+| `fmap f m`                | `pipe!(m, => f)` | モナド内で純粋関数をリフト   |
+| `m >>= f`                 | `pipe!(m, =>> f)`| モナド関数をバインド         |
+| `fmap f asyncIO`          | `pipe_async!(m, => f)` | AsyncIO用リフト（インヒアレント）|
+| `asyncIO >>= f`           | `pipe_async!(m, =>> f)`| AsyncIO用バインド（インヒアレント）|
+| `f $ x`                   | `f(x)`           | 関数適用                     |
+| `flip f`                  | `flip(f)`        | 引数の反転                   |
+| `const x`                 | `constant(x)`    | 定数関数                     |
+| `id`                      | `identity`       | 恒等関数                     |
+| `on`                      | 手動実装         | 射影上の二項関数             |
 
 ### コード例
 
@@ -1475,16 +1479,21 @@ let constructed: Shape = circle_prism.review(10.0);
 
 ### IO Monad
 
-| Haskell               | lambars          | 説明                    |
-| --------------------- | ---------------- | ----------------------- |
-| `pure a` / `return a` | `IO::pure`       | IO 内の純粋な値         |
-| `IO action`           | `IO::new`        | IO アクションの作成     |
-| `io >>= f`            | `IO::flat_map`   | IO アクションのバインド |
-| `io >> io2`           | `IO::then`       | 順序付け                |
-| `putStrLn s`          | `IO::print_line` | 行を出力                |
-| `getLine`             | `IO::read_line`  | 行を読み込み            |
-| `threadDelay n`       | `IO::delay`      | 実行を遅延              |
-| `catch io handler`    | `IO::catch`      | 例外を処理              |
+IO は `Functor`、`Applicative`、`Monad` トレイトを実装しており、`pipe!` マクロの演算子で使用できます。
+
+| Haskell               | lambars                  | 説明                    |
+| --------------------- | ------------------------ | ----------------------- |
+| `pure a` / `return a` | `IO::pure`               | IO 内の純粋な値         |
+| `IO action`           | `IO::new`                | IO アクションの作成     |
+| `fmap f io`           | `io.fmap(f)` (Functor)   | IO をマップ             |
+| `io >>= f`            | `io.flat_map(f)` (Monad) | IO アクションのバインド |
+| `io >> io2`           | `io.then(io2)` (Monad)   | 順序付け                |
+| `putStrLn s`          | `IO::print_line`         | 行を出力                |
+| `getLine`             | `IO::read_line`          | 行を読み込み            |
+| `threadDelay n`       | `IO::delay`              | 実行を遅延              |
+| `catch io handler`    | `IO::catch`              | 例外を処理              |
+
+> **注**: `fmap`、`flat_map`、`then` はトレイトのインポートが必要: `use lambars::typeclass::{Functor, Monad};`
 
 #### コード例
 
@@ -1521,6 +1530,7 @@ main = do
 ```rust
 // lambars
 use lambars::effect::IO;
+use lambars::typeclass::{Functor, Monad};
 
 let computation: IO<i32> = IO::new(|| {
     println!("Computing...");

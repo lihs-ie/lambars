@@ -1,0 +1,465 @@
+# IO Typeclass Implementation 要件定義
+#
+# 概要:
+#   IO に TypeConstructor, Functor, Applicative, Monad トレイトを実装し、
+#   pipe! マクロの => (lift) と =>> (bind) 演算子で使用可能にする。
+#   AsyncIO は Rust の型システム制限により Functor/Monad トレイトを実装しない。
+#
+# 設計方針:
+#   1. IO に既存の Functor/Monad トレイトを直接実装する
+#   2. IO の既存インヒアレントメソッド (fmap, flat_map, and_then) を削除してトレイト実装に統一（DRY原則）
+#   3. AsyncIO は Functor/Monad トレイトを実装しない（Send 境界の制約）
+#   4. AsyncIO はインヒアレントメソッドを維持し、pipe! マクロでは使用不可とする
+#   5. 関数型プログラミングの法則（Functor 則、Applicative 則、Monad 則）を満たす
+#
+# 参照:
+#   - Issue #135: pipe! マクロの IO/AsyncIO 対応
+
+version: "1.0.0"
+name: "io_typeclass_implementation"
+description: |
+  pipe! マクロの => (lift/fmap) と =>> (bind/flat_map) 演算子で IO を使用可能にするため、
+  IO に TypeConstructor, Functor, Applicative, Monad トレイトを実装する。
+
+  DRY 原則に従い、IO の既存インヒアレントメソッドを削除してトレイト実装に統一する。
+
+  AsyncIO については、Rust の型システム制限（Send 境界がトレイト定義に含まれていない）により
+  Functor/Monad トレイトを実装できない。そのため、AsyncIO はインヒアレントメソッドを維持し、
+  pipe! マクロでは使用不可とする。
+
+# 背景・動機
+background:
+  problem: |
+    現在、pipe! マクロは Functor::fmap と Monad::flat_map を使用しているが、
+    IO はこれらのトレイトを実装していない。
+    そのため `pipe!(IO::pure(5), => |x| x * 2)` はコンパイルエラーになる。
+
+    また、IO には fmap/flat_map のインヒアレントメソッドが存在し、
+    トレイト実装と重複する可能性がある（DRY 違反）。
+
+    AsyncIO については、内部実装で Send 境界が必要だが、Functor/Monad トレイト定義には
+    Send 境界が含まれていない。Rust では impl ブロックでトレイト定義より厳しい境界を
+    追加できないため、AsyncIO への Functor/Monad 実装は技術的に不可能である。
+  motivation: |
+    1. pipe! マクロで IO を他のモナド（Option, Result など）と統一的に扱えるようにする
+    2. 型クラス階層に従った設計により、ジェネリックなモナド操作を可能にする
+    3. DRY 原則を守り、コードの重複を排除する
+    4. AsyncIO は現時点ではインヒアレントメソッドで対応し、将来の拡張として検討する
+  prior_art:
+    - name: "Haskell IO Monad"
+      description: "Haskell の IO は Functor, Applicative, Monad インスタンスを持つ"
+    - name: "Scala Cats IO"
+      description: "Cats Effect の IO は Monad, Sync, Async などの型クラスを実装"
+    - name: "F# Async"
+      description: "F# の Async はコンピュテーション式でモナド操作をサポート"
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. IO TypeConstructor 実装
+  # ======================================================================
+  - id: io_type_constructor
+    name: "IO に TypeConstructor を実装"
+    status: completed
+    description: |
+      IO<A> に対して TypeConstructor トレイトを実装し、
+      高カインド型のエミュレーションを可能にする。
+
+    implementations:
+      - type: "IO<A>"
+        description: |
+          ```rust
+          impl<A> TypeConstructor for IO<A> {
+              type Inner = A;
+              type WithType<B> = IO<B>;
+          }
+          ```
+
+  # ======================================================================
+  # 2. IO Functor 実装
+  # ======================================================================
+  - id: io_functor
+    name: "IO に Functor を実装"
+    status: completed
+    description: |
+      IO<A> に対して Functor トレイトを実装し、fmap による値の変換を可能にする。
+      既存のインヒアレントメソッド fmap は削除する。
+
+    laws:
+      - name: "Identity Law (恒等則)"
+        description: |
+          fmap に恒等関数を適用しても値は変わらない
+        equation: "fmap(io, |x| x) == io"
+        property_test: |
+          let io = IO::pure(42);
+          let result = io.fmap(|x| x).run_unsafe();
+          assert_eq!(result, 42);
+
+      - name: "Composition Law (合成則)"
+        description: |
+          fmap の合成は関数の合成と等しい
+        equation: "fmap(fmap(io, f), g) == fmap(io, |x| g(f(x)))"
+        property_test: |
+          let f = |x: i32| x + 1;
+          let g = |x: i32| x * 2;
+          let io1 = IO::pure(5);
+          let io2 = IO::pure(5);
+          let result1 = io1.fmap(f).fmap(g).run_unsafe();
+          let result2 = io2.fmap(|x| g(f(x))).run_unsafe();
+          assert_eq!(result1, result2);
+
+    methods:
+      - name: "fmap"
+        signature: "fn fmap<B, F>(self, function: F) -> IO<B> where F: FnOnce(A) -> B + 'static, B: 'static"
+        description: |
+          IO 内の値に関数を適用し、新しい IO を返す。
+          副作用は遅延されたまま維持される。
+        examples:
+          - description: "基本的な使用例"
+            code: |
+              use lambars::effect::IO;
+              use lambars::typeclass::Functor;
+
+              let io = IO::pure(5);
+              let result = io.fmap(|x| x * 2).run_unsafe();
+              assert_eq!(result, 10);
+
+    implementations:
+      - type: "IO<A>"
+        description: |
+          ```rust
+          impl<A: 'static> Functor for IO<A> {
+              fn fmap<B, F>(self, function: F) -> Self::WithType<B>
+              where
+                  F: FnOnce(Self::Inner) -> B + 'static,
+                  B: 'static,
+              {
+                  IO::new(move || {
+                      let a = self.run_unsafe();
+                      function(a)
+                  })
+              }
+          }
+          ```
+
+  # ======================================================================
+  # 3. IO Applicative 実装
+  # ======================================================================
+  - id: io_applicative
+    name: "IO に Applicative を実装"
+    status: completed
+    description: |
+      IO<A> に対して Applicative トレイトを実装し、pure と map2 を提供する。
+
+    laws:
+      - name: "Identity Law (恒等則)"
+        description: |
+          pure(id).apply(v) == v
+        equation: "apply(pure(|x| x), v) == v"
+
+      - name: "Homomorphism Law (準同型則)"
+        description: |
+          pure(f).apply(pure(x)) == pure(f(x))
+        equation: "apply(pure(f), pure(x)) == pure(f(x))"
+
+      - name: "Interchange Law (交換則)"
+        description: |
+          u.apply(pure(y)) == pure(|f| f(y)).apply(u)
+        equation: "apply(u, pure(y)) == apply(pure(|f| f(y)), u)"
+
+      - name: "Composition Law (合成則)"
+        description: |
+          pure(compose).apply(u).apply(v).apply(w) == u.apply(v.apply(w))
+        equation: "apply(apply(apply(pure(compose), u), v), w) == apply(u, apply(v, w))"
+
+    methods:
+      - name: "pure"
+        signature: "fn pure<B>(value: B) -> IO<B> where B: 'static"
+        description: |
+          値を IO でラップする。
+        examples:
+          - description: "基本的な使用例"
+            code: |
+              use lambars::effect::IO;
+              use lambars::typeclass::Applicative;
+
+              let io: IO<i32> = Applicative::pure(42);
+              assert_eq!(io.run_unsafe(), 42);
+
+      - name: "map2"
+        signature: "fn map2<B, C, F>(self, other: IO<B>, f: F) -> IO<C>"
+        description: |
+          2つの IO の値に2引数関数を適用する。
+        examples:
+          - description: "2つの IO を結合"
+            code: |
+              use lambars::effect::IO;
+              use lambars::typeclass::Applicative;
+
+              let io1 = IO::pure(2);
+              let io2 = IO::pure(3);
+              let result = io1.map2(io2, |a, b| a + b).run_unsafe();
+              assert_eq!(result, 5);
+
+    implementations:
+      - type: "IO<A>"
+        description: |
+          ```rust
+          impl<A: 'static> Applicative for IO<A> {
+              fn pure<B>(value: B) -> Self::WithType<B>
+              where
+                  B: 'static,
+              {
+                  IO::new(move || value)
+              }
+
+              fn map2<B, C, F>(self, other: Self::WithType<B>, function: F) -> Self::WithType<C>
+              where
+                  F: FnOnce(A, B) -> C + 'static,
+                  B: 'static,
+                  C: 'static,
+              {
+                  IO::new(move || {
+                      let a = self.run_unsafe();
+                      let b = other.run_unsafe();
+                      function(a, b)
+                  })
+              }
+          }
+          ```
+
+  # ======================================================================
+  # 4. IO Monad 実装
+  # ======================================================================
+  - id: io_monad
+    name: "IO に Monad を実装"
+    status: completed
+    description: |
+      IO<A> に対して Monad トレイトを実装し、flat_map による
+      モナドの連鎖を可能にする。
+      既存のインヒアレントメソッド flat_map, and_then は削除する。
+
+    laws:
+      - name: "Left Identity (左単位元則)"
+        description: |
+          pure した値に flat_map を適用するのは、直接関数を適用するのと等しい
+        equation: "flat_map(pure(a), f) == f(a)"
+        property_test: |
+          let value = 5;
+          let f = |x: i32| IO::pure(x * 2);
+          let result1 = IO::pure(value).flat_map(f).run_unsafe();
+          let result2 = f(value).run_unsafe();
+          assert_eq!(result1, result2);
+
+      - name: "Right Identity (右単位元則)"
+        description: |
+          flat_map に pure を適用しても値は変わらない
+        equation: "flat_map(m, pure) == m"
+        property_test: |
+          let io = IO::pure(42);
+          let result = io.flat_map(|x| IO::pure(x)).run_unsafe();
+          assert_eq!(result, 42);
+
+      - name: "Associativity (結合則)"
+        description: |
+          flat_map のネストは結合的である
+        equation: "flat_map(flat_map(m, f), g) == flat_map(m, |x| flat_map(f(x), g))"
+        property_test: |
+          let f = |x: i32| IO::pure(x + 1);
+          let g = |x: i32| IO::pure(x * 2);
+          let io1 = IO::pure(5);
+          let io2 = IO::pure(5);
+          let result1 = io1.flat_map(f).flat_map(g).run_unsafe();
+          let result2 = io2.flat_map(|x| f(x).flat_map(g)).run_unsafe();
+          assert_eq!(result1, result2);
+
+    methods:
+      - name: "flat_map"
+        signature: "fn flat_map<B, F>(self, function: F) -> IO<B> where F: FnOnce(A) -> IO<B> + 'static, B: 'static"
+        description: |
+          IO 内の値に IO を返す関数を適用し、結果をフラット化する。
+        examples:
+          - description: "基本的な使用例"
+            code: |
+              use lambars::effect::IO;
+              use lambars::typeclass::Monad;
+
+              let io = IO::pure(5);
+              let result = io.flat_map(|x| IO::pure(x * 2)).run_unsafe();
+              assert_eq!(result, 10);
+
+    implementations:
+      - type: "IO<A>"
+        description: |
+          ```rust
+          impl<A: 'static> Monad for IO<A> {
+              fn flat_map<B, F>(self, function: F) -> Self::WithType<B>
+              where
+                  F: FnOnce(Self::Inner) -> Self::WithType<B> + 'static,
+                  B: 'static,
+              {
+                  IO::new(move || {
+                      let a = self.run_unsafe();
+                      let io_b = function(a);
+                      io_b.run_unsafe()
+                  })
+              }
+          }
+          ```
+
+  # ======================================================================
+  # 5. IO インヒアレントメソッド削除
+  # ======================================================================
+  - id: remove_io_inherent_methods
+    name: "IO のインヒアレントメソッド削除"
+    status: completed
+    description: |
+      DRY 原則に従い、トレイト実装と重複するインヒアレントメソッドを削除する。
+      利用者は `use lambars::typeclass::Functor;` 等でトレイトをインポートして使用する。
+
+    methods:
+      - name: "削除: fmap"
+        signature: "pub fn fmap<B, F>(self, function: F) -> IO<B>"
+        description: "Functor トレイトに移行"
+
+      - name: "削除: flat_map"
+        signature: "pub fn flat_map<B, F>(self, function: F) -> IO<B>"
+        description: "Monad トレイトに移行"
+
+      - name: "削除: and_then"
+        signature: "pub fn and_then<B, F>(self, function: F) -> IO<B>"
+        description: "Monad トレイトに移行（デフォルト実装あり）"
+
+      - name: "削除: then"
+        signature: "pub fn then<B>(self, next: IO<B>) -> IO<B>"
+        description: "Monad トレイトに移行（デフォルト実装あり）"
+
+      - name: "削除: map2"
+        signature: "pub fn map2<B, C, F>(self, other: IO<B>, function: F) -> IO<C>"
+        description: "Applicative トレイトに移行"
+
+      - name: "削除: product"
+        signature: "pub fn product<B>(self, other: IO<B>) -> IO<(A, B)>"
+        description: "Applicative トレイトに移行（デフォルト実装あり）"
+
+  # ======================================================================
+  # 6. AsyncIO の対応（トレイト実装なし）
+  # ======================================================================
+  - id: asyncio_no_trait_implementation
+    name: "AsyncIO は Functor/Monad トレイトを実装しない"
+    status: completed
+    description: |
+      AsyncIO は Rust の型システム制限により、Functor/Monad トレイトを実装できない。
+
+      **理由**:
+      - AsyncIO の内部実装では Send 境界が必要（非同期タスクのスレッド間移動のため）
+      - Functor/Monad トレイト定義には Send 境界が含まれていない
+      - Rust では impl ブロックでトレイト定義より厳しい境界を追加できない
+
+      **対応**:
+      - AsyncIO はインヒアレントメソッド（fmap, flat_map, and_then 等）を維持
+      - pipe! マクロでは AsyncIO は使用不可
+      - TypeConstructor のみ実装（高カインド型エミュレーション用）
+
+    note: |
+      将来の拡張として以下の選択肢がある：
+      1. Functor/Monad トレイトに Send 境界を追加（破壊的変更）
+      2. AsyncFunctor/AsyncMonad 専用トレイトを作成
+      3. IO/AsyncIO 専用の pipe マクロ（io_pipe!）を作成
+
+  # ======================================================================
+  # 7. pipe! マクロ統合テスト
+  # ======================================================================
+  - id: pipe_macro_integration
+    name: "pipe! マクロとの統合"
+    status: pending
+    description: |
+      IO が pipe! マクロの => と =>> 演算子で使用可能であることを確認する。
+      AsyncIO は pipe! マクロでは使用不可。
+
+    methods:
+      - name: "IO + lift (=>)"
+        signature: "pipe!(IO::pure(5), => |x| x * 2)"
+        description: |
+          IO に対して => 演算子（Functor::fmap）が使用可能
+        examples:
+          - description: "IO で lift 演算子を使用"
+            code: |
+              use lambars::effect::IO;
+              use lambars::compose::pipe;
+
+              let result = pipe!(IO::pure(5), => |x| x * 2).run_unsafe();
+              assert_eq!(result, 10);
+
+      - name: "IO + bind (=>>)"
+        signature: "pipe!(IO::pure(5), =>> |x| IO::pure(x * 2))"
+        description: |
+          IO に対して =>> 演算子（Monad::flat_map）が使用可能
+        examples:
+          - description: "IO で bind 演算子を使用"
+            code: |
+              use lambars::effect::IO;
+              use lambars::compose::pipe;
+
+              let result = pipe!(IO::pure(5), =>> |x| IO::pure(x * 2)).run_unsafe();
+              assert_eq!(result, 10);
+
+      - name: "IO + 純粋関数の混合"
+        signature: "pipe!(IO::pure(5), => |x| x + 1, =>> |x| IO::pure(x * 2))"
+        description: |
+          IO に対して純粋関数と IO を返す関数を混在させて使用可能
+        examples:
+          - description: "混合使用例"
+            code: |
+              use lambars::effect::IO;
+              use lambars::compose::pipe;
+
+              let result = pipe!(
+                  IO::pure(5),
+                  => |x| x + 1,      // lift: IO(6)
+                  =>> |x| IO::pure(x * 2),  // bind: IO(12)
+                  => |x| x.to_string()      // lift: IO("12")
+              ).run_unsafe();
+              assert_eq!(result, "12");
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - "IO のトレイト実装は既存のインヒアレントメソッドと同等のパフォーマンスを維持する"
+    - "追加の Box 化やクローンを行わない"
+  compatibility:
+    - "破壊的変更: IO の既存コードは `use lambars::typeclass::Functor;` 等のインポート追加が必要"
+    - "IO の API 使用方法は変わらない（メソッドチェーン形式）"
+    - "AsyncIO は変更なし（インヒアレントメソッドを維持）"
+  testing:
+    - "IO の全てのモナド則（Functor 則、Applicative 則、Monad 則）をテストで検証"
+    - "pipe! マクロとの統合テストを追加（IO のみ）"
+    - "既存テストが全て通過すること"
+
+# 将来の拡張
+future_extensions:
+  - id: asyncio_pipe_macro
+    name: "AsyncIO 対応の専用 pipe マクロ"
+    description: |
+      io_pipe! または effect_pipe! マクロを作成し、
+      AsyncIO のインヒアレントメソッドを使用した pipe 操作をサポートする。
+    rationale: |
+      現時点では IO の pipe! 対応に集中する。
+      AsyncIO 対応は別 Issue で検討予定。
+
+  - id: send_bound_traits
+    name: "Send 境界付きトレイトの検討"
+    description: |
+      Functor/Monad トレイトに Send 境界を追加するか、
+      AsyncFunctor/AsyncMonad 専用トレイトを作成する。
+    rationale: |
+      破壊的変更となるため、慎重な検討が必要。
+      コミュニティのフィードバックを待つ。
+
+  - id: monad_transformers
+    name: "Monad Transformer サポート"
+    description: |
+      IOT<M, A> のようなモナドトランスフォーマーの実装
+    rationale: |
+      現時点ではベースのモナド実装に集中する。
+      トランスフォーマーは複雑性が高く、別 Issue で対応予定。

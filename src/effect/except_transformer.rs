@@ -31,6 +31,7 @@
 #![forbid(unsafe_code)]
 
 use super::IO;
+use crate::typeclass::{Functor, Monad};
 
 /// A monad transformer that adds error handling capability.
 ///
