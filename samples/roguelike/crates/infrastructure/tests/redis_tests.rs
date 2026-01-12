@@ -1,11 +1,3 @@
-//! Redis integration tests.
-//!
-//! These tests verify the Redis adapters work correctly with a real Redis server.
-//!
-//! # Requirements
-//!
-//! A Redis container must be running at `localhost:6379`.
-
 use std::time::Duration;
 
 use redis::AsyncCommands;
@@ -17,14 +9,12 @@ use roguelike_workflow::ports::SessionCache;
 use rstest::rstest;
 use uuid::Uuid;
 
-/// The Redis URL for the test container.
 const REDIS_URL: &str = "redis://localhost:6379";
 
 // =============================================================================
 // Connection Tests
 // =============================================================================
 
-/// Tests that we can successfully connect to Redis and execute a PING command.
 #[rstest]
 #[tokio::test]
 async fn test_redis_connection() {
@@ -47,7 +37,6 @@ async fn test_redis_connection() {
     assert_eq!(pong, "PONG");
 }
 
-/// Tests that the connection factory correctly configures the key prefix.
 #[rstest]
 #[tokio::test]
 async fn test_redis_connection_key_prefix() {
@@ -65,7 +54,6 @@ async fn test_redis_connection_key_prefix() {
 // Session Cache Tests
 // =============================================================================
 
-/// Tests the complete cache cycle: set, get, and invalidate.
 #[rstest]
 #[tokio::test]
 async fn test_session_cache_set_get_invalidate() {
@@ -118,7 +106,6 @@ async fn test_session_cache_set_get_invalidate() {
     assert!(not_found.is_none());
 }
 
-/// Tests that getting a non-existent cache entry returns None.
 #[rstest]
 #[tokio::test]
 async fn test_session_cache_get_not_found() {
@@ -135,7 +122,6 @@ async fn test_session_cache_get_not_found() {
     assert!(result.is_none());
 }
 
-/// Tests that invalidating a non-existent cache entry does not cause an error.
 #[rstest]
 #[tokio::test]
 async fn test_session_cache_invalidate_nonexistent() {
@@ -152,7 +138,6 @@ async fn test_session_cache_invalidate_nonexistent() {
     cache.invalidate(&nonexistent_identifier).run_async().await;
 }
 
-/// Tests updating an existing cache entry.
 #[rstest]
 #[tokio::test]
 async fn test_session_cache_update() {
@@ -209,7 +194,6 @@ async fn test_session_cache_update() {
     cache.invalidate(&game_identifier).run_async().await;
 }
 
-/// Tests that TTL is properly set on cache entries.
 #[rstest]
 #[tokio::test]
 async fn test_session_cache_ttl() {
@@ -254,7 +238,6 @@ async fn test_session_cache_ttl() {
     cache.invalidate(&game_identifier).run_async().await;
 }
 
-/// Tests multiple independent cache entries.
 #[rstest]
 #[tokio::test]
 async fn test_session_cache_multiple_entries() {

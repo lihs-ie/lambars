@@ -1,7 +1,3 @@
-//! Domain events for item operations.
-//!
-//! This module provides domain events that represent
-//! significant occurrences in the item domain.
 
 use std::fmt;
 
@@ -14,33 +10,15 @@ use super::identifier::ItemIdentifier;
 // EquipmentSlot
 // =============================================================================
 
-/// Equipment slots where items can be equipped.
-///
-/// This enum represents the different equipment slots available to a character.
-/// Note: This type may be moved to the player module in the future.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::item::EquipmentSlot;
-///
-/// let slot = EquipmentSlot::Weapon;
-/// println!("Slot: {}", slot);
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EquipmentSlot {
-    /// The weapon slot for equipped weapons.
     Weapon,
-    /// The armor slot for body armor.
     Armor,
-    /// The helmet slot for head armor.
     Helmet,
-    /// The accessory slot for rings, amulets, etc.
     Accessory,
 }
 
 impl EquipmentSlot {
-    /// Returns an array of all equipment slots.
     #[must_use]
     pub const fn all() -> [Self; 4] {
         [Self::Weapon, Self::Armor, Self::Helmet, Self::Accessory]
@@ -63,29 +41,17 @@ impl fmt::Display for EquipmentSlot {
 // ItemPickedUp
 // =============================================================================
 
-/// Event emitted when an item is picked up.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::item::{ItemIdentifier, ItemPickedUp};
-///
-/// let identifier = ItemIdentifier::new();
-/// let event = ItemPickedUp::new(identifier);
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ItemPickedUp {
     item_identifier: ItemIdentifier,
 }
 
 impl ItemPickedUp {
-    /// Creates a new `ItemPickedUp` event.
     #[must_use]
     pub const fn new(item_identifier: ItemIdentifier) -> Self {
         Self { item_identifier }
     }
 
-    /// Returns the identifier of the picked up item.
     #[must_use]
     pub const fn item_identifier(&self) -> ItemIdentifier {
         self.item_identifier
@@ -102,18 +68,6 @@ impl fmt::Display for ItemPickedUp {
 // ItemDropped
 // =============================================================================
 
-/// Event emitted when an item is dropped.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::item::{ItemIdentifier, ItemDropped};
-/// use roguelike_domain::common::Position;
-///
-/// let identifier = ItemIdentifier::new();
-/// let position = Position::new(5, 10);
-/// let event = ItemDropped::new(identifier, position);
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ItemDropped {
     item_identifier: ItemIdentifier,
@@ -121,7 +75,6 @@ pub struct ItemDropped {
 }
 
 impl ItemDropped {
-    /// Creates a new `ItemDropped` event.
     #[must_use]
     pub const fn new(item_identifier: ItemIdentifier, position: Position) -> Self {
         Self {
@@ -130,13 +83,11 @@ impl ItemDropped {
         }
     }
 
-    /// Returns the identifier of the dropped item.
     #[must_use]
     pub const fn item_identifier(&self) -> ItemIdentifier {
         self.item_identifier
     }
 
-    /// Returns the position where the item was dropped.
     #[must_use]
     pub const fn position(&self) -> Position {
         self.position
@@ -157,17 +108,6 @@ impl fmt::Display for ItemDropped {
 // ItemUsed
 // =============================================================================
 
-/// Event emitted when an item is used.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::item::{ItemIdentifier, ItemUsed, ItemEffect};
-///
-/// let identifier = ItemIdentifier::new();
-/// let effect = ItemEffect::Healed { amount: 50 };
-/// let event = ItemUsed::new(identifier, effect);
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ItemUsed {
     item_identifier: ItemIdentifier,
@@ -175,7 +115,6 @@ pub struct ItemUsed {
 }
 
 impl ItemUsed {
-    /// Creates a new `ItemUsed` event.
     #[must_use]
     pub const fn new(item_identifier: ItemIdentifier, effect: ItemEffect) -> Self {
         Self {
@@ -184,13 +123,11 @@ impl ItemUsed {
         }
     }
 
-    /// Returns the identifier of the used item.
     #[must_use]
     pub const fn item_identifier(&self) -> ItemIdentifier {
         self.item_identifier
     }
 
-    /// Returns the effect produced by using the item.
     #[must_use]
     pub const fn effect(&self) -> ItemEffect {
         self.effect
@@ -211,16 +148,6 @@ impl fmt::Display for ItemUsed {
 // ItemEquipped
 // =============================================================================
 
-/// Event emitted when an item is equipped.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::item::{ItemIdentifier, ItemEquipped, EquipmentSlot};
-///
-/// let identifier = ItemIdentifier::new();
-/// let event = ItemEquipped::new(identifier, EquipmentSlot::Weapon);
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ItemEquipped {
     item_identifier: ItemIdentifier,
@@ -228,7 +155,6 @@ pub struct ItemEquipped {
 }
 
 impl ItemEquipped {
-    /// Creates a new `ItemEquipped` event.
     #[must_use]
     pub const fn new(item_identifier: ItemIdentifier, slot: EquipmentSlot) -> Self {
         Self {
@@ -237,13 +163,11 @@ impl ItemEquipped {
         }
     }
 
-    /// Returns the identifier of the equipped item.
     #[must_use]
     pub const fn item_identifier(&self) -> ItemIdentifier {
         self.item_identifier
     }
 
-    /// Returns the slot where the item was equipped.
     #[must_use]
     pub const fn slot(&self) -> EquipmentSlot {
         self.slot
@@ -264,28 +188,17 @@ impl fmt::Display for ItemEquipped {
 // ItemUnequipped
 // =============================================================================
 
-/// Event emitted when an item is unequipped.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::item::{ItemUnequipped, EquipmentSlot};
-///
-/// let event = ItemUnequipped::new(EquipmentSlot::Weapon);
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ItemUnequipped {
     slot: EquipmentSlot,
 }
 
 impl ItemUnequipped {
-    /// Creates a new `ItemUnequipped` event.
     #[must_use]
     pub const fn new(slot: EquipmentSlot) -> Self {
         Self { slot }
     }
 
-    /// Returns the slot that was unequipped.
     #[must_use]
     pub const fn slot(&self) -> EquipmentSlot {
         self.slot

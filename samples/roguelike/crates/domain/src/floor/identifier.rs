@@ -1,56 +1,18 @@
-//! Floor identifier value object.
-//!
-//! This module provides a unique identifier for dungeon floors.
-
 use std::fmt;
 
 // =============================================================================
 // FloorIdentifier
 // =============================================================================
 
-/// A unique identifier for a dungeon floor.
-///
-/// FloorIdentifier is an immutable newtype wrapper around u32 that provides
-/// type safety for floor identification. Unlike FloorLevel which represents
-/// the depth/progression, FloorIdentifier is used for unique identification.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::floor::FloorIdentifier;
-///
-/// let identifier = FloorIdentifier::new(1);
-/// assert_eq!(identifier.value(), 1);
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FloorIdentifier(u32);
 
 impl FloorIdentifier {
-    /// Creates a new FloorIdentifier with the given value.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::floor::FloorIdentifier;
-    ///
-    /// let identifier = FloorIdentifier::new(42);
-    /// assert_eq!(identifier.value(), 42);
-    /// ```
     #[must_use]
     pub const fn new(value: u32) -> Self {
         Self(value)
     }
 
-    /// Returns the identifier value.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::floor::FloorIdentifier;
-    ///
-    /// let identifier = FloorIdentifier::new(10);
-    /// assert_eq!(identifier.value(), 10);
-    /// ```
     #[must_use]
     pub const fn value(&self) -> u32 {
         self.0

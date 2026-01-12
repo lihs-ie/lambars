@@ -1,31 +1,3 @@
-//! ResumeGame workflow implementation.
-//!
-//! This module provides the workflow for resuming existing game sessions
-//! using the Event Sourcing pattern for state reconstruction.
-//!
-//! # Workflow Steps
-//!
-//! 1. [Pure] Extract game identifier from command
-//! 2. [IO] Get session from cache or load from snapshot/events
-//! 3. [IO] Validate session and update cache if needed
-//!
-//! # Event Sourcing
-//!
-//! The session state is reconstructed by:
-//! 1. Loading the latest snapshot (if available)
-//! 2. Loading events that occurred after the snapshot
-//! 3. Applying those events to the snapshot state using fold
-//!
-//! # Examples
-//!
-//! ```ignore
-//! use roguelike_workflow::workflows::game_session::{resume_game, ResumeGameCommand};
-//!
-//! let workflow = resume_game(&repository, &event_store, &snapshot_store, &cache);
-//! let command = ResumeGameCommand::new(game_identifier);
-//! let result = workflow(command).run_async().await;
-//! ```
-
 use std::time::Duration;
 
 use lambars::effect::AsyncIO;
@@ -42,24 +14,12 @@ use crate::ports::{
 // Workflow Configuration
 // =============================================================================
 
-/// Default cache time-to-live for game sessions.
 const DEFAULT_CACHE_TIME_TO_LIVE: Duration = Duration::from_secs(300); // 5 minutes
 
 // =============================================================================
 // Step 1: Extract Game Identifier [Pure]
 // =============================================================================
 
-/// Extracts the game identifier from the command.
-///
-/// This is a pure function that unwraps the command to get the identifier.
-///
-/// # Arguments
-///
-/// * `command` - The resume game command containing the game identifier.
-///
-/// # Returns
-///
-/// The game identifier extracted from the command.
 fn extract_game_identifier(command: ResumeGameCommand) -> GameIdentifier {
     *command.game_identifier()
 }
@@ -68,35 +28,8 @@ fn extract_game_identifier(command: ResumeGameCommand) -> GameIdentifier {
 // Step 2: Get From Cache Or Load [IO]
 // =============================================================================
 
-/// Session with cache hit status.
-///
-/// This type holds a session along with a flag indicating whether it was
-/// loaded from cache (true) or reconstructed from snapshot/events (false).
 type SessionWithCacheStatus<S> = (S, bool);
 
-/// Creates a function that retrieves a session from cache or loads it.
-///
-/// This function first checks the cache. If the session is not cached,
-/// it loads from snapshot and events, then reconstructs the state.
-///
-/// # Type Parameters
-///
-/// * `C` - Cache type implementing `SessionCache`
-/// * `S` - Snapshot store type implementing `SnapshotStore`
-/// * `E` - Event store type implementing `EventStore`
-/// * `R` - Repository type implementing `GameSessionRepository`
-///
-/// # Arguments
-///
-/// * `cache` - The session cache
-/// * `snapshot_store` - The snapshot store
-/// * `event_store` - The event store
-/// * `repository` - The game session repository
-///
-/// # Returns
-///
-/// A function that takes a `GameIdentifier` and returns an `AsyncIO`
-/// that produces an optional session with cache status.
 #[allow(clippy::type_complexity)]
 fn get_from_cache_or_load<C, S, E, R>(
     cache: C,
@@ -137,31 +70,6 @@ where
     }
 }
 
-/// Loads a session from snapshot and events.
-///
-/// This function implements the Event Sourcing reconstruction:
-/// 1. Load the latest snapshot
-/// 2. Load events since the snapshot
-/// 3. Reconstruct the state by applying events
-///
-/// # Type Parameters
-///
-/// * `S` - Snapshot store type
-/// * `E` - Event store type
-/// * `R` - Repository type
-/// * `Session` - The session type
-///
-/// # Arguments
-///
-/// * `snapshot_store` - The snapshot store
-/// * `event_store` - The event store
-/// * `repository` - The repository (fallback when no snapshot)
-/// * `game_identifier` - The game identifier to load
-///
-/// # Returns
-///
-/// An `AsyncIO` that produces an optional session with cache status false
-/// (indicating it was loaded, not cached).
 fn load_from_snapshot_and_events<S, E, R, Session>(
     snapshot_store: S,
     event_store: E,
@@ -191,10 +99,6 @@ where
         })
 }
 
-/// Reconstructs a session from snapshot and events.
-///
-/// This function handles the reconstruction strategy based on
-/// available snapshot and events.
 fn reconstruct_session<R, Session>(
     snapshot_option: Option<(Session, u64)>,
     events: Vec<GameSessionEvent>,
@@ -224,23 +128,6 @@ where
 // Step 3: Validate And Cache Session [IO]
 // =============================================================================
 
-/// Creates a function that validates and caches a session.
-///
-/// This function validates that the session is active and caches it
-/// if it was loaded (not already cached).
-///
-/// # Type Parameters
-///
-/// * `C` - Cache type implementing `SessionCache`
-///
-/// # Arguments
-///
-/// * `cache` - The session cache
-///
-/// # Returns
-///
-/// A function that takes an optional session with cache status and returns
-/// an `AsyncIO` that produces a `WorkflowResult` with the session.
 #[allow(clippy::type_complexity)]
 fn validate_and_cache_session<C>(
     cache: C,
@@ -287,60 +174,6 @@ where
 // ResumeGame Workflow
 // =============================================================================
 
-/// Creates a workflow function for resuming existing game sessions.
-///
-/// This function implements the Event Sourcing pattern:
-/// 1. First check the cache for a hot session
-/// 2. If not cached, load the latest snapshot
-/// 3. Load events since the snapshot
-/// 4. Reconstruct the current state by applying events to the snapshot
-/// 5. Validate the session is still active
-/// 6. Cache the reconstructed session
-///
-/// The workflow is composed using `pipe_async!` macro:
-///
-/// ```text
-/// pipe_async!(
-///     AsyncIO::pure(command),
-///     => extract_game_identifier,                                           // Pure
-///     =>> get_from_cache_or_load(cache, snapshot_store, event_store, repo), // IO
-///     =>> validate_and_cache_session(cache_for_set),                        // IO
-/// )
-/// ```
-///
-/// # Type Parameters
-///
-/// * `R` - Repository type implementing `GameSessionRepository`
-/// * `E` - Event store type implementing `EventStore`
-/// * `S` - Snapshot store type implementing `SnapshotStore`
-/// * `C` - Cache type implementing `SessionCache`
-///
-/// # Arguments
-///
-/// * `repository` - The game session repository
-/// * `event_store` - The event store for event sourcing
-/// * `snapshot_store` - The snapshot store for optimization
-/// * `cache` - The session cache for fast access
-///
-/// # Returns
-///
-/// A function that takes a `ResumeGameCommand` and returns an `AsyncIO`
-/// that produces the resumed game session or an error.
-///
-/// # Errors
-///
-/// - `WorkflowError::NotFound` - If the session doesn't exist
-/// - `WorkflowError::Domain` - If the session is not active (completed/abandoned)
-///
-/// # Examples
-///
-/// ```ignore
-/// use roguelike_workflow::workflows::game_session::{resume_game, ResumeGameCommand};
-///
-/// let workflow = resume_game(&repository, &event_store, &snapshot_store, &cache);
-/// let command = ResumeGameCommand::new(game_identifier);
-/// let session = workflow(command).run_async().await?;
-/// ```
 pub fn resume_game<'a, R, E, S, C>(
     repository: &'a R,
     event_store: &'a E,
@@ -375,25 +208,13 @@ where
 // Session State Accessor Trait
 // =============================================================================
 
-/// Trait for accessing game session state.
-///
-/// This trait abstracts over different game session implementations,
-/// allowing the workflow to work with any type that can provide
-/// status and event application.
 pub trait SessionStateAccessor: Clone + Send + Sync + 'static {
-    /// Returns the current game status.
     fn status(&self) -> GameStatus;
 
-    /// Returns the game identifier.
     fn identifier(&self) -> &GameIdentifier;
 
-    /// Returns the event sequence number.
     fn event_sequence(&self) -> u64;
 
-    /// Applies an event to produce a new session state.
-    ///
-    /// This is a pure function that returns a new session without
-    /// modifying the original.
     fn apply_event(&self, event: &GameSessionEvent) -> Self;
 }
 
@@ -401,29 +222,6 @@ pub trait SessionStateAccessor: Clone + Send + Sync + 'static {
 // Pure Functions
 // =============================================================================
 
-/// Reconstructs a game session from events.
-///
-/// This is a pure function that applies a sequence of events to a base state
-/// using a fold operation. It's the core of the Event Sourcing pattern.
-///
-/// # Type Parameters
-///
-/// * `S` - Session type implementing `SessionStateAccessor`
-///
-/// # Arguments
-///
-/// * `initial` - The initial state (from snapshot or empty)
-/// * `events` - The events to apply
-///
-/// # Returns
-///
-/// The reconstructed session state after applying all events.
-///
-/// # Examples
-///
-/// ```ignore
-/// let reconstructed = reconstruct_from_events(snapshot_state, &events);
-/// ```
 pub fn reconstruct_from_events<S>(initial: S, events: &[GameSessionEvent]) -> S
 where
     S: SessionStateAccessor,
@@ -431,7 +229,6 @@ where
     reconstruct_from_events_internal(initial, events)
 }
 
-/// Internal implementation of event reconstruction.
 fn reconstruct_from_events_internal<S>(initial: S, events: &[GameSessionEvent]) -> S
 where
     S: SessionStateAccessor,
@@ -441,23 +238,6 @@ where
         .fold(initial, |state, event| state.apply_event(event))
 }
 
-/// Validates that a session is active and can be resumed.
-///
-/// A session can only be resumed if it's in an active state
-/// (InProgress or Paused).
-///
-/// # Type Parameters
-///
-/// * `S` - Session type implementing `SessionStateAccessor`
-///
-/// # Arguments
-///
-/// * `session` - The session to validate
-///
-/// # Returns
-///
-/// - `Ok(())` if the session is active
-/// - `Err(WorkflowError::Domain)` if the session is completed
 fn validate_session_active<S>(session: &S) -> WorkflowResult<()>
 where
     S: SessionStateAccessor,

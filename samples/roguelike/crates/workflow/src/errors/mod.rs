@@ -1,31 +1,3 @@
-//! Error types for the workflow layer.
-//!
-//! This module provides error types specific to the application workflow layer,
-//! including domain error wrapping and infrastructure-related errors.
-//!
-//! # Error Categories
-//!
-//! - [`WorkflowError::Domain`]: Wraps domain layer errors
-//! - [`WorkflowError::NotFound`]: Entity not found in storage
-//! - [`WorkflowError::Conflict`]: State conflicts (e.g., concurrent updates)
-//! - [`WorkflowError::Repository`]: Repository operation failures
-//! - [`WorkflowError::Cache`]: Cache operation failures
-//! - [`WorkflowError::EventStore`]: Event store operation failures
-//!
-//! # Examples
-//!
-//! ```
-//! use roguelike_workflow::errors::WorkflowError;
-//!
-//! // Create a not found error
-//! let error = WorkflowError::not_found("GameSession", "abc-123");
-//! assert!(error.is_not_found());
-//!
-//! // Create a repository error
-//! let error = WorkflowError::repository("save", "connection timeout");
-//! assert!(error.is_repository());
-//! ```
-
 use roguelike_domain::common::DomainError;
 use std::error::Error;
 use std::fmt;
@@ -34,50 +6,31 @@ use std::fmt;
 // WorkflowError
 // =============================================================================
 
-/// Error types for workflow operations.
-///
-/// This enum represents all possible errors that can occur during workflow
-/// execution, including domain errors and infrastructure-related errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkflowError {
-    /// A domain error occurred during workflow execution.
     Domain(DomainError),
 
-    /// The requested entity was not found.
     NotFound {
-        /// The type of entity that was not found (e.g., "GameSession", "Player").
         entity_type: String,
-        /// The identifier used to look up the entity.
         identifier: String,
     },
 
-    /// A conflict occurred (e.g., concurrent modification, duplicate entry).
     Conflict {
-        /// The reason for the conflict.
         reason: String,
     },
 
-    /// A repository operation failed.
     Repository {
-        /// The operation that failed (e.g., "save", "find_by_id", "delete").
         operation: String,
-        /// Detailed error message.
         message: String,
     },
 
-    /// A cache operation failed.
     Cache {
-        /// The operation that failed (e.g., "get", "set", "invalidate").
         operation: String,
-        /// Detailed error message.
         message: String,
     },
 
-    /// An event store operation failed.
     EventStore {
-        /// The operation that failed (e.g., "append", "load_events").
         operation: String,
-        /// Detailed error message.
         message: String,
     },
 }
@@ -87,21 +40,6 @@ pub enum WorkflowError {
 // =============================================================================
 
 impl WorkflowError {
-    /// Creates a new `NotFound` error.
-    ///
-    /// # Arguments
-    ///
-    /// * `entity_type` - The type of entity that was not found.
-    /// * `identifier` - The identifier used to look up the entity.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_workflow::errors::WorkflowError;
-    ///
-    /// let error = WorkflowError::not_found("GameSession", "abc-123");
-    /// assert!(error.is_not_found());
-    /// ```
     #[must_use]
     pub fn not_found(entity_type: impl Into<String>, identifier: impl Into<String>) -> Self {
         Self::NotFound {
@@ -110,20 +48,6 @@ impl WorkflowError {
         }
     }
 
-    /// Creates a new `Conflict` error.
-    ///
-    /// # Arguments
-    ///
-    /// * `reason` - The reason for the conflict.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_workflow::errors::WorkflowError;
-    ///
-    /// let error = WorkflowError::conflict("Game session already exists");
-    /// assert!(error.is_conflict());
-    /// ```
     #[must_use]
     pub fn conflict(reason: impl Into<String>) -> Self {
         Self::Conflict {
@@ -131,21 +55,6 @@ impl WorkflowError {
         }
     }
 
-    /// Creates a new `Repository` error.
-    ///
-    /// # Arguments
-    ///
-    /// * `operation` - The operation that failed.
-    /// * `message` - Detailed error message.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_workflow::errors::WorkflowError;
-    ///
-    /// let error = WorkflowError::repository("save", "connection timeout");
-    /// assert!(error.is_repository());
-    /// ```
     #[must_use]
     pub fn repository(operation: impl Into<String>, message: impl Into<String>) -> Self {
         Self::Repository {
@@ -154,21 +63,6 @@ impl WorkflowError {
         }
     }
 
-    /// Creates a new `Cache` error.
-    ///
-    /// # Arguments
-    ///
-    /// * `operation` - The operation that failed.
-    /// * `message` - Detailed error message.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_workflow::errors::WorkflowError;
-    ///
-    /// let error = WorkflowError::cache("get", "cache miss");
-    /// assert!(error.is_cache());
-    /// ```
     #[must_use]
     pub fn cache(operation: impl Into<String>, message: impl Into<String>) -> Self {
         Self::Cache {
@@ -177,21 +71,6 @@ impl WorkflowError {
         }
     }
 
-    /// Creates a new `EventStore` error.
-    ///
-    /// # Arguments
-    ///
-    /// * `operation` - The operation that failed.
-    /// * `message` - Detailed error message.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_workflow::errors::WorkflowError;
-    ///
-    /// let error = WorkflowError::event_store("append", "event version conflict");
-    /// assert!(error.is_event_store());
-    /// ```
     #[must_use]
     pub fn event_store(operation: impl Into<String>, message: impl Into<String>) -> Self {
         Self::EventStore {
@@ -206,123 +85,36 @@ impl WorkflowError {
 // =============================================================================
 
 impl WorkflowError {
-    /// Returns `true` if this is a domain error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_workflow::errors::WorkflowError;
-    /// use roguelike_domain::common::{DomainError, ValidationError};
-    ///
-    /// let error = WorkflowError::Domain(
-    ///     DomainError::Validation(ValidationError::empty_value("field"))
-    /// );
-    /// assert!(error.is_domain());
-    /// ```
     #[must_use]
     pub const fn is_domain(&self) -> bool {
         matches!(self, Self::Domain(_))
     }
 
-    /// Returns `true` if this is a not found error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_workflow::errors::WorkflowError;
-    ///
-    /// let error = WorkflowError::not_found("GameSession", "abc-123");
-    /// assert!(error.is_not_found());
-    /// ```
     #[must_use]
     pub const fn is_not_found(&self) -> bool {
         matches!(self, Self::NotFound { .. })
     }
 
-    /// Returns `true` if this is a conflict error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_workflow::errors::WorkflowError;
-    ///
-    /// let error = WorkflowError::conflict("duplicate entry");
-    /// assert!(error.is_conflict());
-    /// ```
     #[must_use]
     pub const fn is_conflict(&self) -> bool {
         matches!(self, Self::Conflict { .. })
     }
 
-    /// Returns `true` if this is a repository error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_workflow::errors::WorkflowError;
-    ///
-    /// let error = WorkflowError::repository("save", "timeout");
-    /// assert!(error.is_repository());
-    /// ```
     #[must_use]
     pub const fn is_repository(&self) -> bool {
         matches!(self, Self::Repository { .. })
     }
 
-    /// Returns `true` if this is a cache error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_workflow::errors::WorkflowError;
-    ///
-    /// let error = WorkflowError::cache("get", "miss");
-    /// assert!(error.is_cache());
-    /// ```
     #[must_use]
     pub const fn is_cache(&self) -> bool {
         matches!(self, Self::Cache { .. })
     }
 
-    /// Returns `true` if this is an event store error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_workflow::errors::WorkflowError;
-    ///
-    /// let error = WorkflowError::event_store("append", "conflict");
-    /// assert!(error.is_event_store());
-    /// ```
     #[must_use]
     pub const fn is_event_store(&self) -> bool {
         matches!(self, Self::EventStore { .. })
     }
 
-    /// Returns `true` if this error is recoverable.
-    ///
-    /// Recoverable errors are those that might succeed on retry or with
-    /// user intervention:
-    /// - Domain validation errors (user can fix input)
-    /// - Not found errors (resource might appear later)
-    /// - Cache errors (non-critical for most operations)
-    ///
-    /// Non-recoverable errors:
-    /// - Repository errors (typically indicate infrastructure issues)
-    /// - Event store errors (may indicate data corruption)
-    /// - Conflict errors (require explicit resolution)
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_workflow::errors::WorkflowError;
-    ///
-    /// let not_found = WorkflowError::not_found("GameSession", "abc");
-    /// assert!(not_found.is_recoverable());
-    ///
-    /// let conflict = WorkflowError::conflict("duplicate");
-    /// assert!(!conflict.is_recoverable());
-    /// ```
     #[must_use]
     pub fn is_recoverable(&self) -> bool {
         match self {

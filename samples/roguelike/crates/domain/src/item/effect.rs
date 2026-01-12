@@ -1,7 +1,3 @@
-//! Item effect types for domain events.
-//!
-//! This module provides the `ItemEffect` enum that represents
-//! the effects produced when items are used.
 
 use std::fmt;
 
@@ -11,89 +7,33 @@ use crate::common::StatusEffectType;
 // ItemEffect
 // =============================================================================
 
-/// Effects produced when an item is used.
-///
-/// This enum is used in domain events to describe what happened
-/// when a consumable item was used.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::item::ItemEffect;
-///
-/// let effect = ItemEffect::Healed { amount: 50 };
-/// println!("Effect: {}", effect);
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ItemEffect {
-    /// Health was restored.
     Healed {
-        /// The amount of health restored.
         amount: u32,
     },
-    /// Mana was restored.
     ManaRestored {
-        /// The amount of mana restored.
         amount: u32,
     },
-    /// A status effect was applied.
     StatusApplied {
-        /// The type of status effect that was applied.
         effect: StatusEffectType,
     },
-    /// A status effect was removed.
     StatusRemoved {
-        /// The type of status effect that was removed.
         effect: StatusEffectType,
     },
 }
 
 impl ItemEffect {
-    /// Returns true if this effect restored health or mana.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::item::ItemEffect;
-    ///
-    /// assert!(ItemEffect::Healed { amount: 50 }.is_restoration());
-    /// assert!(ItemEffect::ManaRestored { amount: 30 }.is_restoration());
-    /// ```
     #[must_use]
     pub const fn is_restoration(&self) -> bool {
         matches!(self, Self::Healed { .. } | Self::ManaRestored { .. })
     }
 
-    /// Returns true if this effect modified a status effect.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::item::ItemEffect;
-    /// use roguelike_domain::common::StatusEffectType;
-    ///
-    /// let applied = ItemEffect::StatusApplied { effect: StatusEffectType::Haste };
-    /// assert!(applied.is_status_related());
-    /// ```
     #[must_use]
     pub const fn is_status_related(&self) -> bool {
         matches!(self, Self::StatusApplied { .. } | Self::StatusRemoved { .. })
     }
 
-    /// Returns true if this effect is generally positive.
-    ///
-    /// Healing and mana restoration are always positive.
-    /// Applying buffs and removing debuffs are positive.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::item::ItemEffect;
-    /// use roguelike_domain::common::StatusEffectType;
-    ///
-    /// assert!(ItemEffect::Healed { amount: 50 }.is_positive());
-    /// assert!(ItemEffect::StatusRemoved { effect: StatusEffectType::Poison }.is_positive());
-    /// ```
     #[must_use]
     pub const fn is_positive(&self) -> bool {
         match self {
@@ -103,16 +43,6 @@ impl ItemEffect {
         }
     }
 
-    /// Returns the amount if this is a restoration effect, None otherwise.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::item::ItemEffect;
-    ///
-    /// let heal = ItemEffect::Healed { amount: 50 };
-    /// assert_eq!(heal.restoration_amount(), Some(50));
-    /// ```
     #[must_use]
     pub const fn restoration_amount(&self) -> Option<u32> {
         match self {
@@ -121,17 +51,6 @@ impl ItemEffect {
         }
     }
 
-    /// Returns the status effect type if this is a status-related effect.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::item::ItemEffect;
-    /// use roguelike_domain::common::StatusEffectType;
-    ///
-    /// let applied = ItemEffect::StatusApplied { effect: StatusEffectType::Haste };
-    /// assert_eq!(applied.status_effect_type(), Some(StatusEffectType::Haste));
-    /// ```
     #[must_use]
     pub const fn status_effect_type(&self) -> Option<StatusEffectType> {
         match self {

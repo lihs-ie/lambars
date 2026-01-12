@@ -1,7 +1,3 @@
-//! Error types for the game session domain.
-//!
-//! This module provides error types specific to game session operations.
-
 use std::error::Error;
 use std::fmt;
 
@@ -11,214 +7,66 @@ use super::GameIdentifier;
 // GameSessionError
 // =============================================================================
 
-/// Error types for game session operations.
-///
-/// This enum represents all possible errors that can occur when
-/// working with game sessions.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::game_session::{GameSessionError, GameIdentifier};
-///
-/// let error = GameSessionError::session_not_found(GameIdentifier::new());
-/// assert!(error.is_not_found());
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GameSessionError {
-    /// The requested session was not found.
-    SessionNotFound {
-        /// The identifier of the session that was not found.
-        session_identifier: GameIdentifier,
-    },
-    /// A session with the given identifier already exists.
-    SessionAlreadyExists {
-        /// The identifier of the session that already exists.
-        session_identifier: GameIdentifier,
-    },
-    /// The session has already been completed and cannot be modified.
+    SessionNotFound { session_identifier: GameIdentifier },
+    SessionAlreadyExists { session_identifier: GameIdentifier },
     SessionAlreadyCompleted,
-    /// The random seed provided is invalid.
     InvalidSeed,
-    /// Events are out of sequence order.
-    EventSequenceOutOfOrder {
-        /// The expected sequence number.
-        expected: u64,
-        /// The actual sequence number received.
-        actual: u64,
-    },
+    EventSequenceOutOfOrder { expected: u64, actual: u64 },
 }
 
 impl GameSessionError {
-    /// Creates a session not found error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::{GameSessionError, GameIdentifier};
-    ///
-    /// let identifier = GameIdentifier::new();
-    /// let error = GameSessionError::session_not_found(identifier);
-    /// ```
     #[must_use]
     pub const fn session_not_found(session_identifier: GameIdentifier) -> Self {
         Self::SessionNotFound { session_identifier }
     }
 
-    /// Creates a session already exists error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::{GameSessionError, GameIdentifier};
-    ///
-    /// let identifier = GameIdentifier::new();
-    /// let error = GameSessionError::session_already_exists(identifier);
-    /// ```
     #[must_use]
     pub const fn session_already_exists(session_identifier: GameIdentifier) -> Self {
         Self::SessionAlreadyExists { session_identifier }
     }
 
-    /// Creates a session already completed error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::GameSessionError;
-    ///
-    /// let error = GameSessionError::session_already_completed();
-    /// ```
     #[must_use]
     pub const fn session_already_completed() -> Self {
         Self::SessionAlreadyCompleted
     }
 
-    /// Creates an invalid seed error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::GameSessionError;
-    ///
-    /// let error = GameSessionError::invalid_seed();
-    /// ```
     #[must_use]
     pub const fn invalid_seed() -> Self {
         Self::InvalidSeed
     }
 
-    /// Creates an event sequence out of order error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::GameSessionError;
-    ///
-    /// let error = GameSessionError::event_sequence_out_of_order(5, 3);
-    /// assert!(!error.is_not_found());
-    /// ```
     #[must_use]
     pub const fn event_sequence_out_of_order(expected: u64, actual: u64) -> Self {
         Self::EventSequenceOutOfOrder { expected, actual }
     }
 
-    /// Returns true if this is a not found error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::{GameSessionError, GameIdentifier};
-    ///
-    /// let not_found = GameSessionError::session_not_found(GameIdentifier::new());
-    /// assert!(not_found.is_not_found());
-    ///
-    /// let completed = GameSessionError::session_already_completed();
-    /// assert!(!completed.is_not_found());
-    /// ```
     #[must_use]
     pub const fn is_not_found(&self) -> bool {
         matches!(self, Self::SessionNotFound { .. })
     }
 
-    /// Returns true if this is an already exists error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::{GameSessionError, GameIdentifier};
-    ///
-    /// let exists = GameSessionError::session_already_exists(GameIdentifier::new());
-    /// assert!(exists.is_already_exists());
-    /// ```
     #[must_use]
     pub const fn is_already_exists(&self) -> bool {
         matches!(self, Self::SessionAlreadyExists { .. })
     }
 
-    /// Returns true if this is an already completed error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::GameSessionError;
-    ///
-    /// let completed = GameSessionError::session_already_completed();
-    /// assert!(completed.is_already_completed());
-    /// ```
     #[must_use]
     pub const fn is_already_completed(&self) -> bool {
         matches!(self, Self::SessionAlreadyCompleted)
     }
 
-    /// Returns true if this is an invalid seed error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::GameSessionError;
-    ///
-    /// let invalid = GameSessionError::invalid_seed();
-    /// assert!(invalid.is_invalid_seed());
-    /// ```
     #[must_use]
     pub const fn is_invalid_seed(&self) -> bool {
         matches!(self, Self::InvalidSeed)
     }
 
-    /// Returns true if this is an event sequence out of order error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::GameSessionError;
-    ///
-    /// let out_of_order = GameSessionError::event_sequence_out_of_order(5, 3);
-    /// assert!(out_of_order.is_event_sequence_out_of_order());
-    /// ```
     #[must_use]
     pub const fn is_event_sequence_out_of_order(&self) -> bool {
         matches!(self, Self::EventSequenceOutOfOrder { .. })
     }
 
-    /// Returns true if this error is recoverable.
-    ///
-    /// Most errors are recoverable through user action or retry.
-    /// Only fundamental invariant violations are non-recoverable.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::{GameSessionError, GameIdentifier};
-    ///
-    /// // Not found is recoverable (retry with correct identifier)
-    /// let not_found = GameSessionError::session_not_found(GameIdentifier::new());
-    /// assert!(not_found.is_recoverable());
-    ///
-    /// // Already completed is not recoverable (session state cannot change)
-    /// let completed = GameSessionError::session_already_completed();
-    /// assert!(!completed.is_recoverable());
-    /// ```
     #[must_use]
     pub const fn is_recoverable(&self) -> bool {
         match self {
@@ -230,16 +78,6 @@ impl GameSessionError {
         }
     }
 
-    /// Returns a human-readable error message.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::GameSessionError;
-    ///
-    /// let error = GameSessionError::session_already_completed();
-    /// assert!(error.message().contains("completed"));
-    /// ```
     #[must_use]
     pub fn message(&self) -> String {
         match self {

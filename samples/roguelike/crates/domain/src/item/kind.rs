@@ -1,7 +1,3 @@
-//! Item kind enumeration.
-//!
-//! This module provides the `ItemKind` enum that categorizes items
-//! into different types with their associated data.
 
 use std::fmt;
 
@@ -14,112 +10,30 @@ use super::weapon::WeaponData;
 // ItemKind
 // =============================================================================
 
-/// The kind of item with associated type-specific data.
-///
-/// Each variant contains the data specific to that item type.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::item::{ItemKind, WeaponData, WeaponType};
-/// use roguelike_domain::common::Attack;
-///
-/// let sword = ItemKind::Weapon(WeaponData::new(Attack::new(25), WeaponType::Sword, 1));
-/// assert!(sword.is_equipable());
-/// assert!(!sword.is_stackable());
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ItemKind {
-    /// A weapon that can be equipped for combat.
     Weapon(WeaponData),
-    /// Armor that can be equipped for defense.
     Armor(ArmorData),
-    /// A consumable item that can be used for effects.
     Consumable(ConsumableData),
-    /// A crafting material.
     Material(MaterialData),
 }
 
 impl ItemKind {
-    /// Returns true if this item can be equipped.
-    ///
-    /// Only weapons and armor are equipable.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::item::{ItemKind, WeaponData, WeaponType, ConsumableData, ConsumableEffect};
-    /// use roguelike_domain::common::Attack;
-    ///
-    /// let weapon = ItemKind::Weapon(WeaponData::new(Attack::new(10), WeaponType::Sword, 1));
-    /// let potion = ItemKind::Consumable(ConsumableData::new(ConsumableEffect::Heal { amount: 50 }, 10));
-    ///
-    /// assert!(weapon.is_equipable());
-    /// assert!(!potion.is_equipable());
-    /// ```
     #[must_use]
     pub const fn is_equipable(&self) -> bool {
         matches!(self, Self::Weapon(_) | Self::Armor(_))
     }
 
-    /// Returns true if this item can be used (consumed).
-    ///
-    /// Only consumables are usable.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::item::{ItemKind, ConsumableData, ConsumableEffect, MaterialData};
-    /// use roguelike_domain::common::Rarity;
-    ///
-    /// let potion = ItemKind::Consumable(ConsumableData::new(ConsumableEffect::Heal { amount: 50 }, 10));
-    /// let ore = ItemKind::Material(MaterialData::new(Rarity::Common, 99));
-    ///
-    /// assert!(potion.is_usable());
-    /// assert!(!ore.is_usable());
-    /// ```
     #[must_use]
     pub const fn is_usable(&self) -> bool {
         matches!(self, Self::Consumable(_))
     }
 
-    /// Returns true if this item can stack in inventory.
-    ///
-    /// Consumables and materials are stackable; weapons and armor are not.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::item::{ItemKind, MaterialData, ArmorData, ArmorSlot};
-    /// use roguelike_domain::common::{Rarity, Defense};
-    ///
-    /// let ore = ItemKind::Material(MaterialData::new(Rarity::Common, 99));
-    /// let armor = ItemKind::Armor(ArmorData::new(Defense::new(10), ArmorSlot::Body));
-    ///
-    /// assert!(ore.is_stackable());
-    /// assert!(!armor.is_stackable());
-    /// ```
     #[must_use]
     pub const fn is_stackable(&self) -> bool {
         matches!(self, Self::Consumable(_) | Self::Material(_))
     }
 
-    /// Returns the maximum stack size for this item kind.
-    ///
-    /// Returns 1 for non-stackable items (weapons and armor).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::item::{ItemKind, MaterialData, WeaponData, WeaponType};
-    /// use roguelike_domain::common::{Rarity, Attack};
-    ///
-    /// let ore = ItemKind::Material(MaterialData::new(Rarity::Common, 99));
-    /// let sword = ItemKind::Weapon(WeaponData::new(Attack::new(10), WeaponType::Sword, 1));
-    ///
-    /// assert_eq!(ore.max_stack(), 99);
-    /// assert_eq!(sword.max_stack(), 1);
-    /// ```
     #[must_use]
     pub const fn max_stack(&self) -> u32 {
         match self {
@@ -129,7 +43,6 @@ impl ItemKind {
         }
     }
 
-    /// Returns the weapon data if this is a weapon, None otherwise.
     #[must_use]
     pub const fn as_weapon(&self) -> Option<&WeaponData> {
         match self {
@@ -138,7 +51,6 @@ impl ItemKind {
         }
     }
 
-    /// Returns the armor data if this is armor, None otherwise.
     #[must_use]
     pub const fn as_armor(&self) -> Option<&ArmorData> {
         match self {
@@ -147,7 +59,6 @@ impl ItemKind {
         }
     }
 
-    /// Returns the consumable data if this is a consumable, None otherwise.
     #[must_use]
     pub const fn as_consumable(&self) -> Option<&ConsumableData> {
         match self {
@@ -156,7 +67,6 @@ impl ItemKind {
         }
     }
 
-    /// Returns the material data if this is a material, None otherwise.
     #[must_use]
     pub const fn as_material(&self) -> Option<&MaterialData> {
         match self {

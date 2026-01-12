@@ -1,12 +1,3 @@
-//! Player aggregate root.
-//!
-//! This module provides the `Player` aggregate which is the central entity
-//! representing a player in the game. The Player aggregate maintains
-//! consistency across all player-related operations.
-//!
-//! All operations are implemented as pure functions that return new Player
-//! instances, maintaining immutability throughout.
-
 use crate::common::{BaseStats, CombatStats, Damage, Experience, Level, Position, StatusEffect};
 use crate::player::{EquipmentSlots, Inventory, PlayerError, PlayerIdentifier, PlayerName};
 
@@ -14,51 +5,6 @@ use crate::player::{EquipmentSlots, Inventory, PlayerError, PlayerIdentifier, Pl
 // Player
 // =============================================================================
 
-/// The Player aggregate root.
-///
-/// `Player` represents a player character in the game, encapsulating all
-/// player-related state including identity, position, stats, equipment,
-/// inventory, and status effects.
-///
-/// # Invariants
-///
-/// - `stats.health() <= stats.max_health()`
-/// - `stats.mana() <= stats.max_mana()`
-/// - `1 <= level.value() <= 99`
-/// - `inventory.len() <= inventory.capacity()`
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::common::{
-///     Attack, BaseStats, CombatStats, Defense, Experience, Health, Level,
-///     Mana, Position, Speed, Stat,
-/// };
-/// use roguelike_domain::player::{Player, PlayerIdentifier, PlayerName};
-///
-/// let player = Player::new(
-///     PlayerIdentifier::new(),
-///     PlayerName::new("Hero").unwrap(),
-///     Position::new(0, 0),
-///     CombatStats::new(
-///         Health::new(100).unwrap(),
-///         Health::new(100).unwrap(),
-///         Mana::new(50).unwrap(),
-///         Mana::new(50).unwrap(),
-///         Attack::new(20),
-///         Defense::new(15),
-///         Speed::new(10),
-///     ).unwrap(),
-///     BaseStats::new(
-///         Stat::new(10).unwrap(),
-///         Stat::new(10).unwrap(),
-///         Stat::new(10).unwrap(),
-///         Stat::new(10).unwrap(),
-///     ),
-/// );
-///
-/// assert!(player.is_alive());
-/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct Player {
     identifier: PlayerIdentifier,
@@ -78,18 +24,6 @@ impl Player {
     // Constructor
     // =========================================================================
 
-    /// Creates a new `Player` with the given attributes.
-    ///
-    /// The player starts at level 1 with zero experience, empty equipment,
-    /// default inventory, and no status effects.
-    ///
-    /// # Arguments
-    ///
-    /// * `identifier` - Unique player identifier
-    /// * `name` - Player's display name
-    /// * `position` - Starting position on the map
-    /// * `stats` - Combat statistics (health, mana, attack, defense, speed)
-    /// * `base_stats` - Base attributes (strength, dexterity, intelligence, vitality)
     #[must_use]
     pub fn new(
         identifier: PlayerIdentifier,
@@ -116,61 +50,51 @@ impl Player {
     // Getters
     // =========================================================================
 
-    /// Returns a reference to the player's unique identifier.
     #[must_use]
     pub const fn identifier(&self) -> &PlayerIdentifier {
         &self.identifier
     }
 
-    /// Returns a reference to the player's name.
     #[must_use]
     pub const fn name(&self) -> &PlayerName {
         &self.name
     }
 
-    /// Returns a reference to the player's current position.
     #[must_use]
     pub const fn position(&self) -> &Position {
         &self.position
     }
 
-    /// Returns a reference to the player's combat stats.
     #[must_use]
     pub const fn stats(&self) -> &CombatStats {
         &self.stats
     }
 
-    /// Returns a reference to the player's base stats.
     #[must_use]
     pub const fn base_stats(&self) -> &BaseStats {
         &self.base_stats
     }
 
-    /// Returns the player's current level.
     #[must_use]
     pub const fn level(&self) -> Level {
         self.level
     }
 
-    /// Returns the player's current experience.
     #[must_use]
     pub const fn experience(&self) -> Experience {
         self.experience
     }
 
-    /// Returns a reference to the player's equipment slots.
     #[must_use]
     pub const fn equipment(&self) -> &EquipmentSlots {
         &self.equipment
     }
 
-    /// Returns a reference to the player's inventory.
     #[must_use]
     pub const fn inventory(&self) -> &Inventory {
         &self.inventory
     }
 
-    /// Returns a slice of the player's active status effects.
     #[must_use]
     pub fn status_effects(&self) -> &[StatusEffect] {
         &self.status_effects
@@ -180,50 +104,11 @@ impl Player {
     // Query Methods
     // =========================================================================
 
-    /// Returns true if the player is alive (health > 0).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::{
-    ///     Attack, BaseStats, CombatStats, Defense, Health, Mana, Position, Speed, Stat,
-    /// };
-    /// use roguelike_domain::player::{Player, PlayerIdentifier, PlayerName};
-    ///
-    /// let player = Player::new(
-    ///     PlayerIdentifier::new(),
-    ///     PlayerName::new("Hero").unwrap(),
-    ///     Position::new(0, 0),
-    ///     CombatStats::new(
-    ///         Health::new(100).unwrap(),
-    ///         Health::new(100).unwrap(),
-    ///         Mana::new(50).unwrap(),
-    ///         Mana::new(50).unwrap(),
-    ///         Attack::new(20),
-    ///         Defense::new(15),
-    ///         Speed::new(10),
-    ///     ).unwrap(),
-    ///     BaseStats::new(
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///     ),
-    /// );
-    ///
-    /// assert!(player.is_alive());
-    /// ```
     #[must_use]
     pub fn is_alive(&self) -> bool {
         self.stats.is_alive()
     }
 
-    /// Returns true if the player has enough experience to level up.
-    ///
-    /// The experience required for each level follows the formula:
-    /// `required_exp = level * 100`
-    ///
-    /// A player at max level (99) cannot level up.
     #[must_use]
     pub fn can_level_up(&self) -> bool {
         if self.level.value() >= Level::MAX_LEVEL {
@@ -233,7 +118,6 @@ impl Player {
         self.experience.value() >= required_experience
     }
 
-    /// Returns the experience required to reach the next level.
     #[must_use]
     fn experience_for_next_level(&self) -> u64 {
         u64::from(self.level.value()) * 100
@@ -243,42 +127,6 @@ impl Player {
     // Domain Methods (Pure Functions)
     // =========================================================================
 
-    /// Moves the player to a new position.
-    ///
-    /// This is an immutable operation that consumes self and returns a new Player.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::{
-    ///     Attack, BaseStats, CombatStats, Defense, Health, Mana, Position, Speed, Stat,
-    /// };
-    /// use roguelike_domain::player::{Player, PlayerIdentifier, PlayerName};
-    ///
-    /// let player = Player::new(
-    ///     PlayerIdentifier::new(),
-    ///     PlayerName::new("Hero").unwrap(),
-    ///     Position::new(0, 0),
-    ///     CombatStats::new(
-    ///         Health::new(100).unwrap(),
-    ///         Health::new(100).unwrap(),
-    ///         Mana::new(50).unwrap(),
-    ///         Mana::new(50).unwrap(),
-    ///         Attack::new(20),
-    ///         Defense::new(15),
-    ///         Speed::new(10),
-    ///     ).unwrap(),
-    ///     BaseStats::new(
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///     ),
-    /// );
-    ///
-    /// let moved = player.move_to(Position::new(5, 5));
-    /// assert_eq!(*moved.position(), Position::new(5, 5));
-    /// ```
     #[must_use]
     pub fn move_to(self, new_position: Position) -> Self {
         Self {
@@ -287,43 +135,6 @@ impl Player {
         }
     }
 
-    /// Applies damage to the player, reducing health.
-    ///
-    /// Health is saturated at 0 (cannot go negative).
-    /// This is an immutable operation that consumes self and returns a new Player.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::{
-    ///     Attack, BaseStats, CombatStats, Damage, Defense, Health, Mana, Position, Speed, Stat,
-    /// };
-    /// use roguelike_domain::player::{Player, PlayerIdentifier, PlayerName};
-    ///
-    /// let player = Player::new(
-    ///     PlayerIdentifier::new(),
-    ///     PlayerName::new("Hero").unwrap(),
-    ///     Position::new(0, 0),
-    ///     CombatStats::new(
-    ///         Health::new(100).unwrap(),
-    ///         Health::new(100).unwrap(),
-    ///         Mana::new(50).unwrap(),
-    ///         Mana::new(50).unwrap(),
-    ///         Attack::new(20),
-    ///         Defense::new(15),
-    ///         Speed::new(10),
-    ///     ).unwrap(),
-    ///     BaseStats::new(
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///     ),
-    /// );
-    ///
-    /// let damaged = player.take_damage(Damage::new(30));
-    /// assert_eq!(damaged.stats().health().value(), 70);
-    /// ```
     #[must_use]
     pub fn take_damage(self, damage: Damage) -> Self {
         let new_health = self.stats.health().saturating_sub(damage.value());
@@ -336,43 +147,6 @@ impl Player {
         }
     }
 
-    /// Heals the player, restoring health.
-    ///
-    /// Health is capped at max_health.
-    /// This is an immutable operation that consumes self and returns a new Player.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::{
-    ///     Attack, BaseStats, CombatStats, Damage, Defense, Health, Mana, Position, Speed, Stat,
-    /// };
-    /// use roguelike_domain::player::{Player, PlayerIdentifier, PlayerName};
-    ///
-    /// let player = Player::new(
-    ///     PlayerIdentifier::new(),
-    ///     PlayerName::new("Hero").unwrap(),
-    ///     Position::new(0, 0),
-    ///     CombatStats::new(
-    ///         Health::new(50).unwrap(),
-    ///         Health::new(100).unwrap(),
-    ///         Mana::new(50).unwrap(),
-    ///         Mana::new(50).unwrap(),
-    ///         Attack::new(20),
-    ///         Defense::new(15),
-    ///         Speed::new(10),
-    ///     ).unwrap(),
-    ///     BaseStats::new(
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///     ),
-    /// );
-    ///
-    /// let healed = player.heal(30);
-    /// assert_eq!(healed.stats().health().value(), 80);
-    /// ```
     #[must_use]
     pub fn heal(self, amount: u32) -> Self {
         let new_health = self.stats.health().saturating_add(amount);
@@ -390,42 +164,6 @@ impl Player {
         }
     }
 
-    /// Grants experience points to the player.
-    ///
-    /// This is an immutable operation that consumes self and returns a new Player.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::{
-    ///     Attack, BaseStats, CombatStats, Defense, Experience, Health, Mana, Position, Speed, Stat,
-    /// };
-    /// use roguelike_domain::player::{Player, PlayerIdentifier, PlayerName};
-    ///
-    /// let player = Player::new(
-    ///     PlayerIdentifier::new(),
-    ///     PlayerName::new("Hero").unwrap(),
-    ///     Position::new(0, 0),
-    ///     CombatStats::new(
-    ///         Health::new(100).unwrap(),
-    ///         Health::new(100).unwrap(),
-    ///         Mana::new(50).unwrap(),
-    ///         Mana::new(50).unwrap(),
-    ///         Attack::new(20),
-    ///         Defense::new(15),
-    ///         Speed::new(10),
-    ///     ).unwrap(),
-    ///     BaseStats::new(
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///     ),
-    /// );
-    ///
-    /// let experienced = player.gain_experience(Experience::new(50));
-    /// assert_eq!(experienced.experience().value(), 50);
-    /// ```
     #[must_use]
     pub fn gain_experience(self, amount: Experience) -> Self {
         Self {
@@ -434,54 +172,6 @@ impl Player {
         }
     }
 
-    /// Attempts to level up the player.
-    ///
-    /// The player must have sufficient experience to level up.
-    /// Level is capped at 99.
-    ///
-    /// This is an immutable operation that consumes self and returns a Result.
-    ///
-    /// # Errors
-    ///
-    /// Returns `PlayerError::LevelCapReached` if the player is at max level
-    /// or does not have enough experience.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::{
-    ///     Attack, BaseStats, CombatStats, Defense, Experience, Health, Mana, Position, Speed, Stat,
-    /// };
-    /// use roguelike_domain::player::{Player, PlayerIdentifier, PlayerName};
-    ///
-    /// let player = Player::new(
-    ///     PlayerIdentifier::new(),
-    ///     PlayerName::new("Hero").unwrap(),
-    ///     Position::new(0, 0),
-    ///     CombatStats::new(
-    ///         Health::new(100).unwrap(),
-    ///         Health::new(100).unwrap(),
-    ///         Mana::new(50).unwrap(),
-    ///         Mana::new(50).unwrap(),
-    ///         Attack::new(20),
-    ///         Defense::new(15),
-    ///         Speed::new(10),
-    ///     ).unwrap(),
-    ///     BaseStats::new(
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///     ),
-    /// );
-    ///
-    /// // Level 1 requires 100 exp to level up
-    /// let experienced = player.gain_experience(Experience::new(100));
-    /// assert!(experienced.can_level_up());
-    ///
-    /// let leveled = experienced.level_up().unwrap();
-    /// assert_eq!(leveled.level().value(), 2);
-    /// ```
     pub fn level_up(self) -> Result<Self, PlayerError> {
         if !self.can_level_up() {
             return Err(PlayerError::LevelCapReached);
@@ -495,47 +185,6 @@ impl Player {
         })
     }
 
-    /// Applies a status effect to the player.
-    ///
-    /// If a non-stackable effect of the same type already exists,
-    /// the new effect replaces it if it has a longer duration.
-    ///
-    /// This is an immutable operation that consumes self and returns a new Player.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::{
-    ///     Attack, BaseStats, CombatStats, Defense, Health, Mana, Position, Speed, Stat,
-    ///     StatusEffect, StatusEffectType,
-    /// };
-    /// use roguelike_domain::player::{Player, PlayerIdentifier, PlayerName};
-    ///
-    /// let player = Player::new(
-    ///     PlayerIdentifier::new(),
-    ///     PlayerName::new("Hero").unwrap(),
-    ///     Position::new(0, 0),
-    ///     CombatStats::new(
-    ///         Health::new(100).unwrap(),
-    ///         Health::new(100).unwrap(),
-    ///         Mana::new(50).unwrap(),
-    ///         Mana::new(50).unwrap(),
-    ///         Attack::new(20),
-    ///         Defense::new(15),
-    ///         Speed::new(10),
-    ///     ).unwrap(),
-    ///     BaseStats::new(
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///     ),
-    /// );
-    ///
-    /// let poison = StatusEffect::new(StatusEffectType::Poison, 3, 5);
-    /// let poisoned = player.apply_status_effect(poison);
-    /// assert_eq!(poisoned.status_effects().len(), 1);
-    /// ```
     #[must_use]
     pub fn apply_status_effect(self, effect: StatusEffect) -> Self {
         let mut new_effects = self.status_effects;
@@ -568,53 +217,6 @@ impl Player {
         }
     }
 
-    /// Advances all status effects by one turn.
-    ///
-    /// Expired effects (remaining_turns reaches 0) are removed.
-    ///
-    /// This is an immutable operation that consumes self and returns a new Player.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::{
-    ///     Attack, BaseStats, CombatStats, Defense, Health, Mana, Position, Speed, Stat,
-    ///     StatusEffect, StatusEffectType,
-    /// };
-    /// use roguelike_domain::player::{Player, PlayerIdentifier, PlayerName};
-    ///
-    /// let player = Player::new(
-    ///     PlayerIdentifier::new(),
-    ///     PlayerName::new("Hero").unwrap(),
-    ///     Position::new(0, 0),
-    ///     CombatStats::new(
-    ///         Health::new(100).unwrap(),
-    ///         Health::new(100).unwrap(),
-    ///         Mana::new(50).unwrap(),
-    ///         Mana::new(50).unwrap(),
-    ///         Attack::new(20),
-    ///         Defense::new(15),
-    ///         Speed::new(10),
-    ///     ).unwrap(),
-    ///     BaseStats::new(
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///     ),
-    /// );
-    ///
-    /// let poison = StatusEffect::new(StatusEffectType::Poison, 2, 5);
-    /// let poisoned = player.apply_status_effect(poison);
-    /// assert_eq!(poisoned.status_effects().len(), 1);
-    ///
-    /// let ticked = poisoned.tick_status_effects();
-    /// assert_eq!(ticked.status_effects().len(), 1);
-    /// assert_eq!(ticked.status_effects()[0].remaining_turns(), 1);
-    ///
-    /// let ticked_again = ticked.tick_status_effects();
-    /// assert_eq!(ticked_again.status_effects().len(), 0);
-    /// ```
     #[must_use]
     pub fn tick_status_effects(self) -> Self {
         let new_effects: Vec<StatusEffect> = self
@@ -629,17 +231,11 @@ impl Player {
         }
     }
 
-    /// Returns a new Player with the given inventory.
-    ///
-    /// This is useful for updating the inventory after add/remove operations.
     #[must_use]
     pub fn with_inventory(self, inventory: Inventory) -> Self {
         Self { inventory, ..self }
     }
 
-    /// Returns a new Player with the given equipment.
-    ///
-    /// This is useful for updating equipment after equip/unequip operations.
     #[must_use]
     pub fn with_equipment(self, equipment: EquipmentSlots) -> Self {
         Self { equipment, ..self }

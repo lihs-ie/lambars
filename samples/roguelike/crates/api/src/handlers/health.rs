@@ -1,9 +1,3 @@
-//! Health check handler.
-//!
-//! This module provides the health check endpoint for the API.
-//! Health checks are used by load balancers and monitoring systems
-//! to verify service availability.
-
 use axum::Json;
 use axum::extract::State;
 
@@ -17,37 +11,12 @@ use roguelike_workflow::ports::{EventStore, GameSessionRepository, RandomGenerat
 // Version Information
 // =============================================================================
 
-/// The application version from Cargo.toml.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // =============================================================================
 // Health Check Handler
 // =============================================================================
 
-/// Health check endpoint handler.
-///
-/// Returns the health status of the application and its components.
-///
-/// # Endpoint
-///
-/// `GET /api/v1/health`
-///
-/// # Response
-///
-/// - `200 OK` - Returns health status (even if degraded)
-///
-/// # Examples
-///
-/// ```json
-/// {
-///   "status": "healthy",
-///   "version": "0.1.0",
-///   "components": {
-///     "database": "up",
-///     "cache": "up"
-///   }
-/// }
-/// ```
 pub async fn health_check<Repository, Cache, Events, Random>(
     State(_state): State<AppState<Repository, Cache, Events, Random>>,
 ) -> Json<HealthResponse>

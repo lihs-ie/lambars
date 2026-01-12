@@ -1,12 +1,3 @@
-//! Player equipment and inventory types.
-//!
-//! This module provides types for managing player equipment and inventory:
-//!
-//! - **EquipmentSlot**: Enum representing equipment slot types
-//! - **EquipmentSlots**: Struct holding all equipment slots
-//! - **Inventory**: Container for player's item stacks
-//! - **ItemStack**: A stack of items with quantity
-
 use std::fmt;
 
 use crate::item::ItemIdentifier;
@@ -16,55 +7,20 @@ use crate::player::PlayerError;
 // EquipmentSlot
 // =============================================================================
 
-/// Represents the type of equipment slot.
-///
-/// Each slot type can hold a specific category of equipment item.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::player::EquipmentSlot;
-///
-/// let slot = EquipmentSlot::Weapon;
-/// println!("Equipping to: {}", slot);
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EquipmentSlot {
-    /// Weapon slot for swords, staffs, bows, etc.
     Weapon,
-    /// Armor slot for body armor.
     Armor,
-    /// Helmet slot for head protection.
     Helmet,
-    /// Accessory slot for rings, amulets, etc.
     Accessory,
 }
 
 impl EquipmentSlot {
-    /// Returns all equipment slot types.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::player::EquipmentSlot;
-    ///
-    /// let slots = EquipmentSlot::all();
-    /// assert_eq!(slots.len(), 4);
-    /// ```
     #[must_use]
     pub const fn all() -> [Self; 4] {
         [Self::Weapon, Self::Armor, Self::Helmet, Self::Accessory]
     }
 
-    /// Returns the slot name as a string.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::player::EquipmentSlot;
-    ///
-    /// assert_eq!(EquipmentSlot::Weapon.name(), "Weapon");
-    /// ```
     #[must_use]
     pub const fn name(&self) -> &'static str {
         match self {
@@ -86,41 +42,15 @@ impl fmt::Display for EquipmentSlot {
 // EquipmentSlots
 // =============================================================================
 
-/// Container for all equipment slots.
-///
-/// Each slot can optionally hold an item identifier.
-/// Note: Currently using placeholder type (`Option<String>`) as `Item` is not yet implemented.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::player::{EquipmentSlots, EquipmentSlot};
-///
-/// let equipment = EquipmentSlots::empty();
-/// assert!(equipment.is_slot_empty(EquipmentSlot::Weapon));
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EquipmentSlots {
-    /// The weapon slot.
     weapon: Option<String>, // TODO: Replace with Option<Item> when Item is implemented
-    /// The armor slot.
-    armor: Option<String>, // TODO: Replace with Option<Item> when Item is implemented
-    /// The helmet slot.
+    armor: Option<String>,  // TODO: Replace with Option<Item> when Item is implemented
     helmet: Option<String>, // TODO: Replace with Option<Item> when Item is implemented
-    /// The accessory slot.
     accessory: Option<String>, // TODO: Replace with Option<Item> when Item is implemented
 }
 
 impl EquipmentSlots {
-    /// Creates empty equipment slots.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::player::EquipmentSlots;
-    ///
-    /// let equipment = EquipmentSlots::empty();
-    /// ```
     #[must_use]
     pub const fn empty() -> Self {
         Self {
@@ -131,40 +61,26 @@ impl EquipmentSlots {
         }
     }
 
-    /// Returns a reference to the weapon slot.
     #[must_use]
     pub fn weapon(&self) -> Option<&str> {
         self.weapon.as_deref()
     }
 
-    /// Returns a reference to the armor slot.
     #[must_use]
     pub fn armor(&self) -> Option<&str> {
         self.armor.as_deref()
     }
 
-    /// Returns a reference to the helmet slot.
     #[must_use]
     pub fn helmet(&self) -> Option<&str> {
         self.helmet.as_deref()
     }
 
-    /// Returns a reference to the accessory slot.
     #[must_use]
     pub fn accessory(&self) -> Option<&str> {
         self.accessory.as_deref()
     }
 
-    /// Returns the item in the specified slot.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::player::{EquipmentSlots, EquipmentSlot};
-    ///
-    /// let equipment = EquipmentSlots::empty();
-    /// assert!(equipment.get(EquipmentSlot::Weapon).is_none());
-    /// ```
     #[must_use]
     pub fn get(&self, slot: EquipmentSlot) -> Option<&str> {
         match slot {
@@ -175,49 +91,16 @@ impl EquipmentSlots {
         }
     }
 
-    /// Checks if the specified slot is empty.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::player::{EquipmentSlots, EquipmentSlot};
-    ///
-    /// let equipment = EquipmentSlots::empty();
-    /// assert!(equipment.is_slot_empty(EquipmentSlot::Weapon));
-    /// ```
     #[must_use]
     pub fn is_slot_empty(&self, slot: EquipmentSlot) -> bool {
         self.get(slot).is_none()
     }
 
-    /// Checks if the specified slot is occupied.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::player::{EquipmentSlots, EquipmentSlot};
-    ///
-    /// let equipment = EquipmentSlots::empty();
-    /// assert!(!equipment.is_slot_occupied(EquipmentSlot::Weapon));
-    /// ```
     #[must_use]
     pub fn is_slot_occupied(&self, slot: EquipmentSlot) -> bool {
         self.get(slot).is_some()
     }
 
-    /// Equips an item to the specified slot, returning new `EquipmentSlots`.
-    ///
-    /// This is an immutable operation that returns a new instance.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::player::{EquipmentSlots, EquipmentSlot};
-    ///
-    /// let equipment = EquipmentSlots::empty();
-    /// let equipped = equipment.equip(EquipmentSlot::Weapon, "sword_01".to_string());
-    /// assert!(equipped.is_slot_occupied(EquipmentSlot::Weapon));
-    /// ```
     #[must_use]
     pub fn equip(&self, slot: EquipmentSlot, item: String) -> Self {
         let mut new_slots = self.clone();
@@ -230,20 +113,6 @@ impl EquipmentSlots {
         new_slots
     }
 
-    /// Unequips an item from the specified slot, returning new `EquipmentSlots`.
-    ///
-    /// This is an immutable operation that returns a new instance.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::player::{EquipmentSlots, EquipmentSlot};
-    ///
-    /// let equipment = EquipmentSlots::empty()
-    ///     .equip(EquipmentSlot::Weapon, "sword_01".to_string());
-    /// let unequipped = equipment.unequip(EquipmentSlot::Weapon);
-    /// assert!(unequipped.is_slot_empty(EquipmentSlot::Weapon));
-    /// ```
     #[must_use]
     pub fn unequip(&self, slot: EquipmentSlot) -> Self {
         let mut new_slots = self.clone();
@@ -256,18 +125,6 @@ impl EquipmentSlots {
         new_slots
     }
 
-    /// Returns the number of equipped items.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::player::{EquipmentSlots, EquipmentSlot};
-    ///
-    /// let equipment = EquipmentSlots::empty()
-    ///     .equip(EquipmentSlot::Weapon, "sword".to_string())
-    ///     .equip(EquipmentSlot::Armor, "plate".to_string());
-    /// assert_eq!(equipment.equipped_count(), 2);
-    /// ```
     #[must_use]
     pub fn equipped_count(&self) -> usize {
         EquipmentSlot::all()
@@ -276,35 +133,11 @@ impl EquipmentSlots {
             .count()
     }
 
-    /// Returns true if all slots are empty.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::player::EquipmentSlots;
-    ///
-    /// let equipment = EquipmentSlots::empty();
-    /// assert!(equipment.is_all_empty());
-    /// ```
     #[must_use]
     pub fn is_all_empty(&self) -> bool {
         self.equipped_count() == 0
     }
 
-    /// Returns true if all slots are occupied.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::player::{EquipmentSlots, EquipmentSlot};
-    ///
-    /// let equipment = EquipmentSlots::empty()
-    ///     .equip(EquipmentSlot::Weapon, "sword".to_string())
-    ///     .equip(EquipmentSlot::Armor, "plate".to_string())
-    ///     .equip(EquipmentSlot::Helmet, "helm".to_string())
-    ///     .equip(EquipmentSlot::Accessory, "ring".to_string());
-    /// assert!(equipment.is_fully_equipped());
-    /// ```
     #[must_use]
     pub fn is_fully_equipped(&self) -> bool {
         self.equipped_count() == EquipmentSlot::all().len()
@@ -315,20 +148,6 @@ impl EquipmentSlots {
 // ItemStack
 // =============================================================================
 
-/// A stack of items with an identifier and quantity.
-///
-/// `ItemStack` represents one or more identical items in the player's inventory.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::item::ItemIdentifier;
-/// use roguelike_domain::player::ItemStack;
-///
-/// let item_id = ItemIdentifier::new();
-/// let stack = ItemStack::new(item_id, 5);
-/// assert_eq!(stack.quantity(), 5);
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ItemStack {
     item_identifier: ItemIdentifier,
@@ -336,12 +155,6 @@ pub struct ItemStack {
 }
 
 impl ItemStack {
-    /// Creates a new `ItemStack` with the given item identifier and quantity.
-    ///
-    /// # Arguments
-    ///
-    /// * `item_identifier` - The unique identifier for this item type
-    /// * `quantity` - The number of items in this stack
     #[must_use]
     pub const fn new(item_identifier: ItemIdentifier, quantity: u32) -> Self {
         Self {
@@ -350,31 +163,16 @@ impl ItemStack {
         }
     }
 
-    /// Returns the item identifier.
     #[must_use]
     pub const fn item_identifier(&self) -> ItemIdentifier {
         self.item_identifier
     }
 
-    /// Returns the quantity of items in this stack.
     #[must_use]
     pub const fn quantity(&self) -> u32 {
         self.quantity
     }
 
-    /// Returns a new `ItemStack` with the quantity increased by the given amount.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::item::ItemIdentifier;
-    /// use roguelike_domain::player::ItemStack;
-    ///
-    /// let item_id = ItemIdentifier::new();
-    /// let stack = ItemStack::new(item_id, 5);
-    /// let increased = stack.add_quantity(3);
-    /// assert_eq!(increased.quantity(), 8);
-    /// ```
     #[must_use]
     pub const fn add_quantity(&self, amount: u32) -> Self {
         Self {
@@ -383,25 +181,6 @@ impl ItemStack {
         }
     }
 
-    /// Returns a new `ItemStack` with the quantity decreased by the given amount.
-    ///
-    /// Returns `None` if the quantity would become zero or negative.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::item::ItemIdentifier;
-    /// use roguelike_domain::player::ItemStack;
-    ///
-    /// let item_id = ItemIdentifier::new();
-    /// let stack = ItemStack::new(item_id, 5);
-    /// let decreased = stack.remove_quantity(3).unwrap();
-    /// assert_eq!(decreased.quantity(), 2);
-    ///
-    /// // Removing all items returns None
-    /// let empty = stack.remove_quantity(5);
-    /// assert!(empty.is_none());
-    /// ```
     #[must_use]
     pub const fn remove_quantity(&self, amount: u32) -> Option<Self> {
         if amount >= self.quantity {
@@ -425,28 +204,8 @@ impl fmt::Display for ItemStack {
 // Inventory
 // =============================================================================
 
-/// Default inventory capacity.
 const DEFAULT_INVENTORY_CAPACITY: u32 = 20;
 
-/// Container for player's item stacks.
-///
-/// `Inventory` holds multiple `ItemStack`s with a maximum capacity.
-/// Items with the same identifier are automatically stacked together.
-///
-/// # Invariants
-///
-/// - `items.len() <= capacity`
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::item::ItemIdentifier;
-/// use roguelike_domain::player::Inventory;
-///
-/// let inventory = Inventory::new(10);
-/// assert!(inventory.is_empty());
-/// assert_eq!(inventory.capacity(), 10);
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Inventory {
     items: Vec<ItemStack>,
@@ -454,16 +213,6 @@ pub struct Inventory {
 }
 
 impl Inventory {
-    /// Creates a new empty `Inventory` with the given capacity.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::player::Inventory;
-    ///
-    /// let inventory = Inventory::new(20);
-    /// assert_eq!(inventory.capacity(), 20);
-    /// ```
     #[must_use]
     pub fn new(capacity: u32) -> Self {
         Self {
@@ -472,45 +221,36 @@ impl Inventory {
         }
     }
 
-    /// Creates a new empty `Inventory` with the specified capacity.
-    ///
-    /// This is an alias for `new` to match common Rust naming conventions.
     #[must_use]
     pub fn with_capacity(capacity: u32) -> Self {
         Self::new(capacity)
     }
 
-    /// Returns the maximum number of different item stacks this inventory can hold.
     #[must_use]
     pub const fn capacity(&self) -> u32 {
         self.capacity
     }
 
-    /// Returns the number of different item stacks in the inventory.
     #[must_use]
     pub fn len(&self) -> usize {
         self.items.len()
     }
 
-    /// Returns true if the inventory has no items.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
 
-    /// Returns true if the inventory is at maximum capacity.
     #[must_use]
     pub fn is_full(&self) -> bool {
         self.items.len() >= self.capacity as usize
     }
 
-    /// Returns a slice of all item stacks in the inventory.
     #[must_use]
     pub fn items(&self) -> &[ItemStack] {
         &self.items
     }
 
-    /// Finds an item stack by its identifier.
     #[must_use]
     pub fn find(&self, item_identifier: &ItemIdentifier) -> Option<&ItemStack> {
         self.items
@@ -518,7 +258,6 @@ impl Inventory {
             .find(|stack| &stack.item_identifier == item_identifier)
     }
 
-    /// Returns the total quantity of items with the given identifier.
     #[must_use]
     pub fn quantity_of(&self, item_identifier: &ItemIdentifier) -> u32 {
         self.find(item_identifier)
@@ -526,29 +265,6 @@ impl Inventory {
             .unwrap_or(0)
     }
 
-    /// Adds items to the inventory.
-    ///
-    /// If an item with the same identifier already exists, the quantities are combined.
-    /// If the inventory is full and the item is new, returns an error.
-    ///
-    /// This is an immutable operation that returns a new `Inventory`.
-    ///
-    /// # Errors
-    ///
-    /// Returns `PlayerError::InventoryFull` if the inventory is at capacity
-    /// and a new item type is being added.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::item::ItemIdentifier;
-    /// use roguelike_domain::player::Inventory;
-    ///
-    /// let inventory = Inventory::new(10);
-    /// let item_id = ItemIdentifier::new();
-    /// let updated = inventory.add_item(item_id, 5).unwrap();
-    /// assert_eq!(updated.len(), 1);
-    /// ```
     pub fn add_item(
         self,
         item_identifier: ItemIdentifier,
@@ -585,31 +301,6 @@ impl Inventory {
         }
     }
 
-    /// Removes items from the inventory.
-    ///
-    /// If the quantity to remove equals the stack quantity, the stack is removed.
-    /// If the quantity to remove is greater than available, returns an error.
-    ///
-    /// This is an immutable operation that returns a new `Inventory`.
-    ///
-    /// # Errors
-    ///
-    /// Returns `PlayerError::ItemNotInInventory` if the item is not found
-    /// or if the quantity to remove exceeds the available quantity.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::item::ItemIdentifier;
-    /// use roguelike_domain::player::Inventory;
-    ///
-    /// let item_id = ItemIdentifier::new();
-    /// let inventory = Inventory::new(10)
-    ///     .add_item(item_id, 5)
-    ///     .unwrap();
-    /// let updated = inventory.remove_item(&item_id, 3).unwrap();
-    /// assert_eq!(updated.quantity_of(&item_id), 2);
-    /// ```
     pub fn remove_item(
         self,
         item_identifier: &ItemIdentifier,

@@ -1,8 +1,3 @@
-//! Server module for the roguelike API.
-//!
-//! This module provides server startup, configuration, and graceful shutdown
-//! functionality for the API server.
-
 use axum::Router;
 use tokio::net::TcpListener;
 use tokio::signal;
@@ -11,23 +6,14 @@ use tokio::signal;
 // Configuration
 // =============================================================================
 
-/// Server configuration.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
-    /// The host address to bind to.
     pub host: String,
 
-    /// The port to listen on.
     pub port: u16,
 }
 
 impl ServerConfig {
-    /// Creates a new server configuration.
-    ///
-    /// # Arguments
-    ///
-    /// * `host` - The host address to bind to
-    /// * `port` - The port to listen on
     #[must_use]
     pub fn new(host: impl Into<String>, port: u16) -> Self {
         Self {
@@ -36,7 +22,6 @@ impl ServerConfig {
         }
     }
 
-    /// Returns the socket address for this configuration.
     #[must_use]
     pub fn socket_addr(&self) -> String {
         format!("{}:{}", self.host, self.port)
@@ -56,59 +41,21 @@ impl Default for ServerConfig {
 // Server
 // =============================================================================
 
-/// HTTP server for the roguelike API.
 pub struct Server {
     config: ServerConfig,
 }
 
 impl Server {
-    /// Creates a new server with the given configuration.
-    ///
-    /// # Arguments
-    ///
-    /// * `config` - Server configuration
     #[must_use]
     pub fn new(config: ServerConfig) -> Self {
         Self { config }
     }
 
-    /// Creates a new server with default configuration.
     #[must_use]
     pub fn with_defaults() -> Self {
         Self::new(ServerConfig::default())
     }
 
-    /// Runs the server with the given router.
-    ///
-    /// This method will block until the server is shut down via a signal
-    /// (SIGINT or SIGTERM on Unix, Ctrl+C on all platforms).
-    ///
-    /// # Arguments
-    ///
-    /// * `router` - The Axum router to serve
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the server fails to bind to the address or
-    /// if an error occurs while serving requests.
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// use roguelike_api::server::{Server, ServerConfig};
-    /// use roguelike_api::routes::create_router;
-    /// use roguelike_api::state::AppState;
-    ///
-    /// #[tokio::main]
-    /// async fn main() -> anyhow::Result<()> {
-    ///     let state = AppState::new(repository, cache, event_store, random);
-    ///     let router = create_router(state);
-    ///
-    ///     let config = ServerConfig::new("0.0.0.0", 3000);
-    ///     let server = Server::new(config);
-    ///     server.run(router).await
-    /// }
-    /// ```
     pub async fn run(self, router: Router) -> anyhow::Result<()> {
         let address = self.config.socket_addr();
 
@@ -127,7 +74,6 @@ impl Server {
         Ok(())
     }
 
-    /// Returns the server configuration.
     #[must_use]
     pub fn config(&self) -> &ServerConfig {
         &self.config
@@ -138,10 +84,6 @@ impl Server {
 // Shutdown Signal
 // =============================================================================
 
-/// Waits for a shutdown signal.
-///
-/// On Unix, this listens for SIGINT (Ctrl+C) or SIGTERM.
-/// On other platforms, this only listens for Ctrl+C.
 async fn shutdown_signal() {
     let ctrl_c = async {
         signal::ctrl_c()

@@ -1,8 +1,3 @@
-//! Command types for player workflows.
-//!
-//! This module defines the input command types for player operations.
-//! Commands are immutable value objects that represent user intent.
-
 use roguelike_domain::common::{Damage, Direction};
 use roguelike_domain::enemy::EntityIdentifier;
 use roguelike_domain::game_session::GameIdentifier;
@@ -12,48 +7,13 @@ use roguelike_domain::item::ItemIdentifier;
 // MovePlayerCommand
 // =============================================================================
 
-/// Command for moving the player in a direction.
-///
-/// # Fields
-///
-/// - `game_identifier`: The game session identifier
-/// - `direction`: The direction to move
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::player::MovePlayerCommand;
-/// use roguelike_domain::game_session::GameIdentifier;
-/// use roguelike_domain::common::Direction;
-///
-/// let identifier = GameIdentifier::new();
-/// let command = MovePlayerCommand::new(identifier, Direction::Up);
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MovePlayerCommand {
-    /// The game session identifier.
     game_identifier: GameIdentifier,
-    /// The direction to move.
     direction: Direction,
 }
 
 impl MovePlayerCommand {
-    /// Creates a new move player command.
-    ///
-    /// # Arguments
-    ///
-    /// * `game_identifier` - The game session identifier.
-    /// * `direction` - The direction to move.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_workflow::workflows::player::MovePlayerCommand;
-    /// use roguelike_domain::game_session::GameIdentifier;
-    /// use roguelike_domain::common::Direction;
-    ///
-    /// let command = MovePlayerCommand::new(GameIdentifier::new(), Direction::Up);
-    /// ```
     #[must_use]
     pub const fn new(game_identifier: GameIdentifier, direction: Direction) -> Self {
         Self {
@@ -62,13 +22,11 @@ impl MovePlayerCommand {
         }
     }
 
-    /// Returns the game identifier.
     #[must_use]
     pub const fn game_identifier(&self) -> &GameIdentifier {
         &self.game_identifier
     }
 
-    /// Returns the direction.
     #[must_use]
     pub const fn direction(&self) -> Direction {
         self.direction
@@ -79,49 +37,13 @@ impl MovePlayerCommand {
 // AttackEnemyCommand
 // =============================================================================
 
-/// Command for attacking an enemy.
-///
-/// # Fields
-///
-/// - `game_identifier`: The game session identifier
-/// - `target`: The identifier of the enemy to attack
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::player::AttackEnemyCommand;
-/// use roguelike_domain::game_session::GameIdentifier;
-/// use roguelike_domain::enemy::EntityIdentifier;
-///
-/// let identifier = GameIdentifier::new();
-/// let target = EntityIdentifier::new();
-/// let command = AttackEnemyCommand::new(identifier, target);
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttackEnemyCommand {
-    /// The game session identifier.
     game_identifier: GameIdentifier,
-    /// The target enemy identifier.
     target: EntityIdentifier,
 }
 
 impl AttackEnemyCommand {
-    /// Creates a new attack enemy command.
-    ///
-    /// # Arguments
-    ///
-    /// * `game_identifier` - The game session identifier.
-    /// * `target` - The identifier of the enemy to attack.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_workflow::workflows::player::AttackEnemyCommand;
-    /// use roguelike_domain::game_session::GameIdentifier;
-    /// use roguelike_domain::enemy::EntityIdentifier;
-    ///
-    /// let command = AttackEnemyCommand::new(GameIdentifier::new(), EntityIdentifier::new());
-    /// ```
     #[must_use]
     pub const fn new(game_identifier: GameIdentifier, target: EntityIdentifier) -> Self {
         Self {
@@ -130,13 +52,11 @@ impl AttackEnemyCommand {
         }
     }
 
-    /// Returns the game identifier.
     #[must_use]
     pub const fn game_identifier(&self) -> &GameIdentifier {
         &self.game_identifier
     }
 
-    /// Returns the target enemy identifier.
     #[must_use]
     pub const fn target(&self) -> &EntityIdentifier {
         &self.target
@@ -147,49 +67,13 @@ impl AttackEnemyCommand {
 // UseItemCommand
 // =============================================================================
 
-/// Command for using an item from inventory.
-///
-/// # Fields
-///
-/// - `game_identifier`: The game session identifier
-/// - `item_identifier`: The identifier of the item to use
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::player::UseItemCommand;
-/// use roguelike_domain::game_session::GameIdentifier;
-/// use roguelike_domain::item::ItemIdentifier;
-///
-/// let identifier = GameIdentifier::new();
-/// let item = ItemIdentifier::new();
-/// let command = UseItemCommand::new(identifier, item);
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UseItemCommand {
-    /// The game session identifier.
     game_identifier: GameIdentifier,
-    /// The item identifier.
     item_identifier: ItemIdentifier,
 }
 
 impl UseItemCommand {
-    /// Creates a new use item command.
-    ///
-    /// # Arguments
-    ///
-    /// * `game_identifier` - The game session identifier.
-    /// * `item_identifier` - The identifier of the item to use.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_workflow::workflows::player::UseItemCommand;
-    /// use roguelike_domain::game_session::GameIdentifier;
-    /// use roguelike_domain::item::ItemIdentifier;
-    ///
-    /// let command = UseItemCommand::new(GameIdentifier::new(), ItemIdentifier::new());
-    /// ```
     #[must_use]
     pub const fn new(game_identifier: GameIdentifier, item_identifier: ItemIdentifier) -> Self {
         Self {
@@ -198,13 +82,11 @@ impl UseItemCommand {
         }
     }
 
-    /// Returns the game identifier.
     #[must_use]
     pub const fn game_identifier(&self) -> &GameIdentifier {
         &self.game_identifier
     }
 
-    /// Returns the item identifier.
     #[must_use]
     pub const fn item_identifier(&self) -> &ItemIdentifier {
         &self.item_identifier
@@ -215,49 +97,13 @@ impl UseItemCommand {
 // PickUpItemCommand
 // =============================================================================
 
-/// Command for picking up an item from the floor.
-///
-/// # Fields
-///
-/// - `game_identifier`: The game session identifier
-/// - `item_identifier`: The identifier of the item to pick up
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::player::PickUpItemCommand;
-/// use roguelike_domain::game_session::GameIdentifier;
-/// use roguelike_domain::item::ItemIdentifier;
-///
-/// let identifier = GameIdentifier::new();
-/// let item = ItemIdentifier::new();
-/// let command = PickUpItemCommand::new(identifier, item);
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PickUpItemCommand {
-    /// The game session identifier.
     game_identifier: GameIdentifier,
-    /// The item identifier.
     item_identifier: ItemIdentifier,
 }
 
 impl PickUpItemCommand {
-    /// Creates a new pick up item command.
-    ///
-    /// # Arguments
-    ///
-    /// * `game_identifier` - The game session identifier.
-    /// * `item_identifier` - The identifier of the item to pick up.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_workflow::workflows::player::PickUpItemCommand;
-    /// use roguelike_domain::game_session::GameIdentifier;
-    /// use roguelike_domain::item::ItemIdentifier;
-    ///
-    /// let command = PickUpItemCommand::new(GameIdentifier::new(), ItemIdentifier::new());
-    /// ```
     #[must_use]
     pub const fn new(game_identifier: GameIdentifier, item_identifier: ItemIdentifier) -> Self {
         Self {
@@ -266,13 +112,11 @@ impl PickUpItemCommand {
         }
     }
 
-    /// Returns the game identifier.
     #[must_use]
     pub const fn game_identifier(&self) -> &GameIdentifier {
         &self.game_identifier
     }
 
-    /// Returns the item identifier.
     #[must_use]
     pub const fn item_identifier(&self) -> &ItemIdentifier {
         &self.item_identifier
@@ -283,49 +127,13 @@ impl PickUpItemCommand {
 // EquipItemCommand
 // =============================================================================
 
-/// Command for equipping an item from inventory.
-///
-/// # Fields
-///
-/// - `game_identifier`: The game session identifier
-/// - `item_identifier`: The identifier of the item to equip
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::player::EquipItemCommand;
-/// use roguelike_domain::game_session::GameIdentifier;
-/// use roguelike_domain::item::ItemIdentifier;
-///
-/// let identifier = GameIdentifier::new();
-/// let item = ItemIdentifier::new();
-/// let command = EquipItemCommand::new(identifier, item);
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EquipItemCommand {
-    /// The game session identifier.
     game_identifier: GameIdentifier,
-    /// The item identifier.
     item_identifier: ItemIdentifier,
 }
 
 impl EquipItemCommand {
-    /// Creates a new equip item command.
-    ///
-    /// # Arguments
-    ///
-    /// * `game_identifier` - The game session identifier.
-    /// * `item_identifier` - The identifier of the item to equip.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_workflow::workflows::player::EquipItemCommand;
-    /// use roguelike_domain::game_session::GameIdentifier;
-    /// use roguelike_domain::item::ItemIdentifier;
-    ///
-    /// let command = EquipItemCommand::new(GameIdentifier::new(), ItemIdentifier::new());
-    /// ```
     #[must_use]
     pub const fn new(game_identifier: GameIdentifier, item_identifier: ItemIdentifier) -> Self {
         Self {
@@ -334,13 +142,11 @@ impl EquipItemCommand {
         }
     }
 
-    /// Returns the game identifier.
     #[must_use]
     pub const fn game_identifier(&self) -> &GameIdentifier {
         &self.game_identifier
     }
 
-    /// Returns the item identifier.
     #[must_use]
     pub const fn item_identifier(&self) -> &ItemIdentifier {
         &self.item_identifier
@@ -351,59 +157,14 @@ impl EquipItemCommand {
 // TakeDamageCommand
 // =============================================================================
 
-/// Command for the player taking damage.
-///
-/// # Fields
-///
-/// - `game_identifier`: The game session identifier
-/// - `source`: The identifier of the entity causing the damage
-/// - `base_damage`: The base damage amount before reductions
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::player::TakeDamageCommand;
-/// use roguelike_domain::game_session::GameIdentifier;
-/// use roguelike_domain::enemy::EntityIdentifier;
-/// use roguelike_domain::common::Damage;
-///
-/// let identifier = GameIdentifier::new();
-/// let source = EntityIdentifier::new();
-/// let command = TakeDamageCommand::new(identifier, source, Damage::new(10));
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TakeDamageCommand {
-    /// The game session identifier.
     game_identifier: GameIdentifier,
-    /// The source entity identifier.
     source: EntityIdentifier,
-    /// The base damage amount.
     base_damage: Damage,
 }
 
 impl TakeDamageCommand {
-    /// Creates a new take damage command.
-    ///
-    /// # Arguments
-    ///
-    /// * `game_identifier` - The game session identifier.
-    /// * `source` - The identifier of the entity causing the damage.
-    /// * `base_damage` - The base damage amount.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_workflow::workflows::player::TakeDamageCommand;
-    /// use roguelike_domain::game_session::GameIdentifier;
-    /// use roguelike_domain::enemy::EntityIdentifier;
-    /// use roguelike_domain::common::Damage;
-    ///
-    /// let command = TakeDamageCommand::new(
-    ///     GameIdentifier::new(),
-    ///     EntityIdentifier::new(),
-    ///     Damage::new(10)
-    /// );
-    /// ```
     #[must_use]
     pub const fn new(
         game_identifier: GameIdentifier,
@@ -417,19 +178,16 @@ impl TakeDamageCommand {
         }
     }
 
-    /// Returns the game identifier.
     #[must_use]
     pub const fn game_identifier(&self) -> &GameIdentifier {
         &self.game_identifier
     }
 
-    /// Returns the source entity identifier.
     #[must_use]
     pub const fn source(&self) -> &EntityIdentifier {
         &self.source
     }
 
-    /// Returns the base damage amount.
     #[must_use]
     pub const fn base_damage(&self) -> Damage {
         self.base_damage

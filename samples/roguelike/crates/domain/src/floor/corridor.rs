@@ -1,8 +1,3 @@
-//! Corridor value object for dungeon floors.
-//!
-//! This module provides the Corridor type representing a passage
-//! between two positions in the dungeon.
-
 use std::fmt;
 
 use crate::common::{Distance, Position};
@@ -11,21 +6,6 @@ use crate::common::{Distance, Position};
 // Corridor
 // =============================================================================
 
-/// A corridor connecting two positions in the dungeon.
-///
-/// Corridors are used to connect rooms and provide passageways.
-/// They are defined by their start and end positions.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::common::Position;
-/// use roguelike_domain::floor::Corridor;
-///
-/// let corridor = Corridor::new(Position::new(5, 5), Position::new(15, 5));
-/// assert_eq!(corridor.start(), Position::new(5, 5));
-/// assert_eq!(corridor.end(), Position::new(15, 5));
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Corridor {
     start: Position,
@@ -33,139 +13,46 @@ pub struct Corridor {
 }
 
 impl Corridor {
-    /// Creates a new Corridor between the given positions.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::Position;
-    /// use roguelike_domain::floor::Corridor;
-    ///
-    /// let corridor = Corridor::new(Position::new(0, 0), Position::new(10, 0));
-    /// assert_eq!(corridor.start(), Position::new(0, 0));
-    /// assert_eq!(corridor.end(), Position::new(10, 0));
-    /// ```
     #[must_use]
     pub const fn new(start: Position, end: Position) -> Self {
         Self { start, end }
     }
 
-    /// Returns the start position of the corridor.
     #[must_use]
     pub const fn start(&self) -> Position {
         self.start
     }
 
-    /// Returns the end position of the corridor.
     #[must_use]
     pub const fn end(&self) -> Position {
         self.end
     }
 
-    /// Returns the Manhattan distance of the corridor.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::{Position, Distance};
-    /// use roguelike_domain::floor::Corridor;
-    ///
-    /// let corridor = Corridor::new(Position::new(0, 0), Position::new(5, 3));
-    /// assert_eq!(corridor.length(), Distance::new(8));
-    /// ```
     #[must_use]
     pub fn length(&self) -> Distance {
         self.start.distance_to(&self.end)
     }
 
-    /// Returns true if this corridor is horizontal (same y coordinates).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::Position;
-    /// use roguelike_domain::floor::Corridor;
-    ///
-    /// let horizontal = Corridor::new(Position::new(0, 5), Position::new(10, 5));
-    /// assert!(horizontal.is_horizontal());
-    ///
-    /// let vertical = Corridor::new(Position::new(5, 0), Position::new(5, 10));
-    /// assert!(!vertical.is_horizontal());
-    /// ```
     #[must_use]
     pub const fn is_horizontal(&self) -> bool {
         self.start.y() == self.end.y()
     }
 
-    /// Returns true if this corridor is vertical (same x coordinates).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::Position;
-    /// use roguelike_domain::floor::Corridor;
-    ///
-    /// let vertical = Corridor::new(Position::new(5, 0), Position::new(5, 10));
-    /// assert!(vertical.is_vertical());
-    ///
-    /// let horizontal = Corridor::new(Position::new(0, 5), Position::new(10, 5));
-    /// assert!(!horizontal.is_vertical());
-    /// ```
     #[must_use]
     pub const fn is_vertical(&self) -> bool {
         self.start.x() == self.end.x()
     }
 
-    /// Returns true if this is a straight corridor (horizontal or vertical).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::Position;
-    /// use roguelike_domain::floor::Corridor;
-    ///
-    /// let straight = Corridor::new(Position::new(0, 5), Position::new(10, 5));
-    /// assert!(straight.is_straight());
-    ///
-    /// let diagonal = Corridor::new(Position::new(0, 0), Position::new(5, 5));
-    /// assert!(!diagonal.is_straight());
-    /// ```
     #[must_use]
     pub const fn is_straight(&self) -> bool {
         self.is_horizontal() || self.is_vertical()
     }
 
-    /// Returns a reversed corridor (start and end swapped).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::Position;
-    /// use roguelike_domain::floor::Corridor;
-    ///
-    /// let corridor = Corridor::new(Position::new(0, 0), Position::new(10, 10));
-    /// let reversed = corridor.reverse();
-    /// assert_eq!(reversed.start(), Position::new(10, 10));
-    /// assert_eq!(reversed.end(), Position::new(0, 0));
-    /// ```
     #[must_use]
     pub const fn reverse(&self) -> Self {
         Self::new(self.end, self.start)
     }
 
-    /// Returns the midpoint of the corridor.
-    ///
-    /// For corridors with even length, the midpoint is biased toward the start.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::Position;
-    /// use roguelike_domain::floor::Corridor;
-    ///
-    /// let corridor = Corridor::new(Position::new(0, 0), Position::new(10, 0));
-    /// assert_eq!(corridor.midpoint(), Position::new(5, 0));
-    /// ```
     #[must_use]
     pub fn midpoint(&self) -> Position {
         Position::new(
@@ -174,24 +61,6 @@ impl Corridor {
         )
     }
 
-    /// Returns true if the given position is on this corridor.
-    ///
-    /// This only works correctly for straight (horizontal or vertical) corridors.
-    /// For non-straight corridors, this checks if the position lies on the line
-    /// segment between start and end.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::Position;
-    /// use roguelike_domain::floor::Corridor;
-    ///
-    /// let corridor = Corridor::new(Position::new(0, 5), Position::new(10, 5));
-    /// assert!(corridor.contains(Position::new(5, 5)));
-    /// assert!(corridor.contains(Position::new(0, 5)));
-    /// assert!(corridor.contains(Position::new(10, 5)));
-    /// assert!(!corridor.contains(Position::new(5, 6)));
-    /// ```
     #[must_use]
     pub fn contains(&self, position: Position) -> bool {
         if self.is_horizontal() {

@@ -1,8 +1,3 @@
-//! Error conversion implementations.
-//!
-//! This module provides `From` implementations for converting domain
-//! and workflow errors to API errors.
-
 use roguelike_domain::common::DomainError;
 use roguelike_workflow::errors::WorkflowError;
 

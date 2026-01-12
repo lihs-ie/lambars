@@ -1,7 +1,3 @@
-//! Leaderboard handler.
-//!
-//! This module provides the HTTP handler for retrieving the game leaderboard.
-
 use axum::Json;
 use axum::extract::{Query, State};
 
@@ -15,48 +11,14 @@ use roguelike_workflow::ports::{EventStore, GameSessionRepository, RandomGenerat
 // Constants
 // =============================================================================
 
-/// Default number of leaderboard entries to return.
 const DEFAULT_LEADERBOARD_LIMIT: u32 = 10;
 
-/// Maximum number of leaderboard entries that can be returned.
 const MAX_LEADERBOARD_LIMIT: u32 = 100;
 
 // =============================================================================
 // Get Leaderboard Handler
 // =============================================================================
 
-/// Retrieves the game leaderboard.
-///
-/// # Endpoint
-///
-/// `GET /api/v1/leaderboard`
-///
-/// # Query Parameters
-///
-/// - `type` - The type of leaderboard (global, daily, weekly). Default: global
-/// - `limit` - Maximum number of entries to return (default: 10, max: 100)
-///
-/// # Response
-///
-/// - `200 OK` - Returns leaderboard entries
-///
-/// # Examples
-///
-/// ```json
-/// {
-///   "type": "global",
-///   "entries": [
-///     {
-///       "rank": 1,
-///       "player_name": "Champion",
-///       "score": 50000,
-///       "dungeon_depth": 10,
-///       "outcome": "victory",
-///       "completed_at": "2026-01-08T15:30:00Z"
-///     }
-///   ]
-/// }
-/// ```
 pub async fn get_leaderboard<Repository, Cache, Events, Random>(
     State(_state): State<AppState<Repository, Cache, Events, Random>>,
     Query(params): Query<GetLeaderboardParams>,

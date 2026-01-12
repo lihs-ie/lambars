@@ -1,9 +1,3 @@
-//! Floor handlers.
-//!
-//! This module provides HTTP handlers for floor-related operations:
-//! - Getting full floor information
-//! - Getting visible area around the player
-
 use axum::Json;
 use axum::extract::{Path, Query, State};
 
@@ -17,39 +11,6 @@ use roguelike_workflow::ports::{EventStore, GameSessionRepository, RandomGenerat
 // Get Floor Handler
 // =============================================================================
 
-/// Retrieves the full floor information for a game session.
-///
-/// # Endpoint
-///
-/// `GET /api/v1/games/{game_id}/floor`
-///
-/// # Path Parameters
-///
-/// - `game_id` - The unique identifier of the game session (UUID format)
-///
-/// # Query Parameters
-///
-/// - `include_fog` - Whether to include fog of war (default: true)
-///
-/// # Response
-///
-/// - `200 OK` - Returns floor information with tile map
-/// - `404 Not Found` - Game session not found
-///
-/// # Examples
-///
-/// ```json
-/// {
-///   "level": 2,
-///   "width": 50,
-///   "height": 40,
-///   "tiles": [[{ "kind": "floor", "is_explored": true, "is_visible": true }, ...]],
-///   "visible_enemies": [{ "enemy_id": "...", "enemy_type": "goblin", ... }],
-///   "visible_items": [{ "item_id": "...", "name": "Gold Coin", "position": { "x": 10, "y": 5 } }],
-///   "stairs_up": { "x": 25, "y": 30 },
-///   "stairs_down": null
-/// }
-/// ```
 pub async fn get_floor<Repository, Cache, Events, Random>(
     State(_state): State<AppState<Repository, Cache, Events, Random>>,
     Path(game_id): Path<String>,
@@ -78,36 +39,6 @@ where
 // Get Visible Area Handler
 // =============================================================================
 
-/// Retrieves the visible area around the player.
-///
-/// This is a lightweight endpoint that only returns tiles and entities
-/// currently visible to the player, useful for incremental updates.
-///
-/// # Endpoint
-///
-/// `GET /api/v1/games/{game_id}/floor/visible`
-///
-/// # Path Parameters
-///
-/// - `game_id` - The unique identifier of the game session (UUID format)
-///
-/// # Response
-///
-/// - `200 OK` - Returns visible area information
-/// - `404 Not Found` - Game session not found
-///
-/// # Examples
-///
-/// ```json
-/// {
-///   "player_position": { "x": 5, "y": 5 },
-///   "visible_tiles": [
-///     { "position": { "x": 4, "y": 5 }, "tile": { "kind": "floor", "is_explored": true, "is_visible": true } }
-///   ],
-///   "visible_enemies": [],
-///   "visible_items": []
-/// }
-/// ```
 pub async fn get_visible_area<Repository, Cache, Events, Random>(
     State(_state): State<AppState<Repository, Cache, Events, Random>>,
     Path(game_id): Path<String>,

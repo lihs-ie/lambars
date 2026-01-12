@@ -1,79 +1,21 @@
-//! Command types for game session workflows.
-//!
-//! This module defines the input command types for game session operations.
-//! Commands are immutable value objects that represent user intent.
-
 use roguelike_domain::game_session::{GameIdentifier, GameOutcome, RandomSeed};
 
 // =============================================================================
 // CreateGameCommand
 // =============================================================================
 
-/// Command for creating a new game session.
-///
-/// # Fields
-///
-/// - `player_name`: The name of the player starting the game
-/// - `seed`: Optional random seed for deterministic gameplay
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::game_session::CreateGameCommand;
-/// use roguelike_domain::game_session::RandomSeed;
-///
-/// // Create with random seed
-/// let command = CreateGameCommand::new("Hero".to_string(), None);
-///
-/// // Create with specific seed for reproducibility
-/// let command = CreateGameCommand::with_seed("Hero".to_string(), RandomSeed::new(12345));
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateGameCommand {
-    /// The name of the player.
     player_name: String,
-    /// Optional random seed for deterministic game generation.
     seed: Option<RandomSeed>,
 }
 
 impl CreateGameCommand {
-    /// Creates a new create game command.
-    ///
-    /// # Arguments
-    ///
-    /// * `player_name` - The name of the player.
-    /// * `seed` - Optional random seed.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_workflow::workflows::game_session::CreateGameCommand;
-    ///
-    /// let command = CreateGameCommand::new("Hero".to_string(), None);
-    /// assert_eq!(command.player_name(), "Hero");
-    /// assert!(command.seed().is_none());
-    /// ```
     #[must_use]
     pub const fn new(player_name: String, seed: Option<RandomSeed>) -> Self {
         Self { player_name, seed }
     }
 
-    /// Creates a new create game command with a specific seed.
-    ///
-    /// # Arguments
-    ///
-    /// * `player_name` - The name of the player.
-    /// * `seed` - The random seed for deterministic generation.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_workflow::workflows::game_session::CreateGameCommand;
-    /// use roguelike_domain::game_session::RandomSeed;
-    ///
-    /// let command = CreateGameCommand::with_seed("Hero".to_string(), RandomSeed::new(42));
-    /// assert!(command.seed().is_some());
-    /// ```
     #[must_use]
     pub const fn with_seed(player_name: String, seed: RandomSeed) -> Self {
         Self {
@@ -82,13 +24,11 @@ impl CreateGameCommand {
         }
     }
 
-    /// Returns the player name.
     #[must_use]
     pub fn player_name(&self) -> &str {
         &self.player_name
     }
 
-    /// Returns the optional seed.
     #[must_use]
     pub const fn seed(&self) -> Option<RandomSeed> {
         self.seed
@@ -99,50 +39,17 @@ impl CreateGameCommand {
 // ResumeGameCommand
 // =============================================================================
 
-/// Command for resuming an existing game session.
-///
-/// # Fields
-///
-/// - `game_identifier`: The unique identifier of the game to resume
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::game_session::ResumeGameCommand;
-/// use roguelike_domain::game_session::GameIdentifier;
-///
-/// let identifier = GameIdentifier::new();
-/// let command = ResumeGameCommand::new(identifier);
-/// assert_eq!(command.game_identifier(), &identifier);
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResumeGameCommand {
-    /// The identifier of the game session to resume.
     game_identifier: GameIdentifier,
 }
 
 impl ResumeGameCommand {
-    /// Creates a new resume game command.
-    ///
-    /// # Arguments
-    ///
-    /// * `game_identifier` - The unique identifier of the game to resume.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_workflow::workflows::game_session::ResumeGameCommand;
-    /// use roguelike_domain::game_session::GameIdentifier;
-    ///
-    /// let identifier = GameIdentifier::new();
-    /// let command = ResumeGameCommand::new(identifier);
-    /// ```
     #[must_use]
     pub const fn new(game_identifier: GameIdentifier) -> Self {
         Self { game_identifier }
     }
 
-    /// Returns the game identifier.
     #[must_use]
     pub const fn game_identifier(&self) -> &GameIdentifier {
         &self.game_identifier
@@ -153,46 +60,13 @@ impl ResumeGameCommand {
 // EndGameCommand
 // =============================================================================
 
-/// Command for ending a game session.
-///
-/// # Fields
-///
-/// - `game_identifier`: The unique identifier of the game to end
-/// - `outcome`: The outcome of the game (Victory, Defeat, Abandoned)
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::game_session::EndGameCommand;
-/// use roguelike_domain::game_session::{GameIdentifier, GameOutcome};
-///
-/// let identifier = GameIdentifier::new();
-/// let command = EndGameCommand::new(identifier, GameOutcome::Victory);
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EndGameCommand {
-    /// The identifier of the game session to end.
     game_identifier: GameIdentifier,
-    /// The outcome of the game.
     outcome: GameOutcome,
 }
 
 impl EndGameCommand {
-    /// Creates a new end game command.
-    ///
-    /// # Arguments
-    ///
-    /// * `game_identifier` - The unique identifier of the game to end.
-    /// * `outcome` - The outcome of the game.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_workflow::workflows::game_session::EndGameCommand;
-    /// use roguelike_domain::game_session::{GameIdentifier, GameOutcome};
-    ///
-    /// let command = EndGameCommand::new(GameIdentifier::new(), GameOutcome::Defeat);
-    /// ```
     #[must_use]
     pub const fn new(game_identifier: GameIdentifier, outcome: GameOutcome) -> Self {
         Self {
@@ -201,73 +75,26 @@ impl EndGameCommand {
         }
     }
 
-    /// Creates an end game command for victory.
-    ///
-    /// # Arguments
-    ///
-    /// * `game_identifier` - The unique identifier of the game.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_workflow::workflows::game_session::EndGameCommand;
-    /// use roguelike_domain::game_session::{GameIdentifier, GameOutcome};
-    ///
-    /// let command = EndGameCommand::victory(GameIdentifier::new());
-    /// assert_eq!(command.outcome(), &GameOutcome::Victory);
-    /// ```
     #[must_use]
     pub const fn victory(game_identifier: GameIdentifier) -> Self {
         Self::new(game_identifier, GameOutcome::Victory)
     }
 
-    /// Creates an end game command for defeat.
-    ///
-    /// # Arguments
-    ///
-    /// * `game_identifier` - The unique identifier of the game.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_workflow::workflows::game_session::EndGameCommand;
-    /// use roguelike_domain::game_session::{GameIdentifier, GameOutcome};
-    ///
-    /// let command = EndGameCommand::defeat(GameIdentifier::new());
-    /// assert_eq!(command.outcome(), &GameOutcome::Defeat);
-    /// ```
     #[must_use]
     pub const fn defeat(game_identifier: GameIdentifier) -> Self {
         Self::new(game_identifier, GameOutcome::Defeat)
     }
 
-    /// Creates an end game command for abandoned.
-    ///
-    /// # Arguments
-    ///
-    /// * `game_identifier` - The unique identifier of the game.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_workflow::workflows::game_session::EndGameCommand;
-    /// use roguelike_domain::game_session::{GameIdentifier, GameOutcome};
-    ///
-    /// let command = EndGameCommand::abandoned(GameIdentifier::new());
-    /// assert_eq!(command.outcome(), &GameOutcome::Abandoned);
-    /// ```
     #[must_use]
     pub const fn abandoned(game_identifier: GameIdentifier) -> Self {
         Self::new(game_identifier, GameOutcome::Abandoned)
     }
 
-    /// Returns the game identifier.
     #[must_use]
     pub const fn game_identifier(&self) -> &GameIdentifier {
         &self.game_identifier
     }
 
-    /// Returns the game outcome.
     #[must_use]
     pub const fn outcome(&self) -> &GameOutcome {
         &self.outcome
@@ -278,48 +105,17 @@ impl EndGameCommand {
 // CreateSnapshotCommand
 // =============================================================================
 
-/// Command for creating a snapshot of a game session.
-///
-/// # Fields
-///
-/// - `game_identifier`: The unique identifier of the game to snapshot
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::game_session::CreateSnapshotCommand;
-/// use roguelike_domain::game_session::GameIdentifier;
-///
-/// let identifier = GameIdentifier::new();
-/// let command = CreateSnapshotCommand::new(identifier);
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateSnapshotCommand {
-    /// The identifier of the game session to snapshot.
     game_identifier: GameIdentifier,
 }
 
 impl CreateSnapshotCommand {
-    /// Creates a new create snapshot command.
-    ///
-    /// # Arguments
-    ///
-    /// * `game_identifier` - The unique identifier of the game to snapshot.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_workflow::workflows::game_session::CreateSnapshotCommand;
-    /// use roguelike_domain::game_session::GameIdentifier;
-    ///
-    /// let command = CreateSnapshotCommand::new(GameIdentifier::new());
-    /// ```
     #[must_use]
     pub const fn new(game_identifier: GameIdentifier) -> Self {
         Self { game_identifier }
     }
 
-    /// Returns the game identifier.
     #[must_use]
     pub const fn game_identifier(&self) -> &GameIdentifier {
         &self.game_identifier

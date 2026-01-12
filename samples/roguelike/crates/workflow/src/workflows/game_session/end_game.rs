@@ -1,25 +1,3 @@
-//! EndGame workflow implementation.
-//!
-//! This module provides the workflow for ending game sessions.
-//! It handles session termination, event generation, and final snapshot creation.
-//!
-//! # Workflow Steps
-//!
-//! 1. [Pure] Extract parameters from command
-//! 2. [IO] Load session from cache or repository
-//! 3. [Pure] Validate session can be ended and update status
-//! 4. [IO] Persist to repository, event store, snapshot, and invalidate cache
-//!
-//! # Examples
-//!
-//! ```ignore
-//! use roguelike_workflow::workflows::game_session::{end_game, EndGameCommand};
-//!
-//! let workflow = end_game(&repository, &event_store, &snapshot_store, &cache);
-//! let command = EndGameCommand::victory(game_identifier);
-//! let result = workflow(command).run_async().await;
-//! ```
-
 use lambars::effect::AsyncIO;
 use lambars::pipe_async;
 use roguelike_domain::game_session::{GameEnded, GameIdentifier, GameOutcome, GameSessionEvent};
@@ -35,18 +13,6 @@ use crate::ports::{
 // Step 1: Extract End Game Parameters [Pure]
 // =============================================================================
 
-/// Extracts parameters from the end game command.
-///
-/// This is a pure function that extracts the game identifier and outcome
-/// from the command.
-///
-/// # Arguments
-///
-/// * `command` - The end game command containing the game identifier and outcome.
-///
-/// # Returns
-///
-/// A tuple of (GameIdentifier, GameOutcome) extracted from the command.
 fn extract_end_game_params(command: EndGameCommand) -> (GameIdentifier, GameOutcome) {
     (*command.game_identifier(), *command.outcome())
 }
@@ -55,25 +21,6 @@ fn extract_end_game_params(command: EndGameCommand) -> (GameIdentifier, GameOutc
 // Step 2: Load Session [IO]
 // =============================================================================
 
-/// Creates a function that loads a session from cache or repository.
-///
-/// This function first checks the cache. If the session is not cached,
-/// it falls back to the repository.
-///
-/// # Type Parameters
-///
-/// * `C` - Cache type implementing `SessionCache`
-/// * `R` - Repository type implementing `GameSessionRepository`
-///
-/// # Arguments
-///
-/// * `cache` - The session cache
-/// * `repository` - The game session repository
-///
-/// # Returns
-///
-/// A function that takes a tuple of (GameIdentifier, GameOutcome) and returns an `AsyncIO`
-/// that produces a Result containing either the session with outcome or a WorkflowError.
 #[allow(clippy::type_complexity)]
 fn load_session<C, R>(
     cache: C,
@@ -109,25 +56,6 @@ where
 // Step 3: Validate and Update Session [Pure]
 // =============================================================================
 
-/// Validates a session and updates its status based on the outcome.
-///
-/// This is a pure function that:
-/// 1. Validates the session can be ended (is in active state)
-/// 2. Updates the session status based on the outcome
-/// 3. Generates the GameEnded event
-///
-/// # Type Parameters
-///
-/// * `S` - Session type implementing `SessionStateAccessor` and `SessionStatusUpdater`
-///
-/// # Arguments
-///
-/// * `result` - Result containing the session and outcome, or an error.
-///
-/// # Returns
-///
-/// A Result containing either a tuple of (updated session, game identifier, events)
-/// or a WorkflowError.
 #[allow(clippy::type_complexity)]
 fn validate_and_update_session<S>(
     result: Result<(S, GameOutcome), WorkflowError>,
@@ -153,31 +81,6 @@ where
 // Step 4: Persist End Game [IO]
 // =============================================================================
 
-/// Creates a function that persists the end game state.
-///
-/// This function handles:
-/// - Saving the updated session to the repository
-/// - Appending events to the event store
-/// - Creating a final snapshot
-/// - Invalidating the cache
-///
-/// # Type Parameters
-///
-/// * `R` - Repository type implementing `GameSessionRepository`
-/// * `E` - Event store type implementing `EventStore`
-/// * `S` - Snapshot store type implementing `SnapshotStore`
-/// * `C` - Cache type implementing `SessionCache`
-///
-/// # Arguments
-///
-/// * `repository` - The game session repository
-/// * `event_store` - The event store
-/// * `snapshot_store` - The snapshot store
-/// * `cache` - The session cache
-///
-/// # Returns
-///
-/// A function that takes a Result and returns an AsyncIO producing a WorkflowResult.
 #[allow(clippy::type_complexity)]
 fn persist_end_game<R, E, SS, C>(
     repository: R,
@@ -226,61 +129,6 @@ where
 // EndGame Workflow
 // =============================================================================
 
-/// Creates a workflow function for ending game sessions.
-///
-/// This function handles the termination of a game session, including:
-/// - Loading the current session state
-/// - Validating the session can be ended
-/// - Generating the GameEnded event
-/// - Persisting the final state
-/// - Creating a final snapshot for archival
-/// - Invalidating the cache
-///
-/// The workflow is composed using `pipe_async!` macro:
-///
-/// ```text
-/// pipe_async!(
-///     AsyncIO::pure(command),
-///     => extract_end_game_params,                                           // Pure
-///     =>> load_session(cache, repository),                                  // IO
-///     => validate_and_update_session,                                       // Pure
-///     =>> persist_end_game(repository, event_store, snapshot_store, cache), // IO
-/// )
-/// ```
-///
-/// # Type Parameters
-///
-/// * `R` - Repository type implementing `GameSessionRepository`
-/// * `E` - Event store type implementing `EventStore`
-/// * `S` - Snapshot store type implementing `SnapshotStore`
-/// * `C` - Cache type implementing `SessionCache`
-///
-/// # Arguments
-///
-/// * `repository` - The game session repository for persistence
-/// * `event_store` - The event store for event sourcing
-/// * `snapshot_store` - The snapshot store for optimization
-/// * `cache` - The session cache
-///
-/// # Returns
-///
-/// A function that takes an `EndGameCommand` and returns an `AsyncIO`
-/// that produces the ended game session or an error.
-///
-/// # Errors
-///
-/// - `WorkflowError::NotFound` - If the session doesn't exist
-/// - `WorkflowError::Domain` - If the session is already completed
-///
-/// # Examples
-///
-/// ```ignore
-/// use roguelike_workflow::workflows::game_session::{end_game, EndGameCommand};
-///
-/// let workflow = end_game(&repository, &event_store, &snapshot_store, &cache);
-/// let command = EndGameCommand::victory(game_identifier);
-/// let session = workflow(command).run_async().await?;
-/// ```
 pub fn end_game<'a, R, E, S, C>(
     repository: &'a R,
     event_store: &'a E,
@@ -317,14 +165,7 @@ where
 // Session Status Updater Trait
 // =============================================================================
 
-/// Trait for updating game session status.
-///
-/// This trait abstracts over different game session implementations,
-/// allowing the workflow to update status immutably.
 pub trait SessionStatusUpdater: Clone + Send + Sync + 'static {
-    /// Updates the session status based on the outcome.
-    ///
-    /// This is a pure function that returns a new session with updated status.
     fn with_outcome(&self, outcome: GameOutcome) -> Self;
 }
 
@@ -332,51 +173,16 @@ pub trait SessionStatusUpdater: Clone + Send + Sync + 'static {
 // Pure Functions
 // =============================================================================
 
-/// Creates a GameEnded event.
-///
-/// This is a pure function that creates the event without any side effects.
-///
-/// # Arguments
-///
-/// * `outcome` - The outcome of the game
-///
-/// # Returns
-///
-/// A `GameEnded` event capturing the game termination.
 #[must_use]
 fn create_game_ended_event(outcome: GameOutcome) -> GameEnded {
     GameEnded::new(outcome)
 }
 
-/// Wraps a GameEnded event into a vector of GameSessionEvents.
-///
-/// This is a pure function that converts a GameEnded event
-/// into a vector of GameSessionEvent suitable for event store persistence.
-///
-/// # Arguments
-///
-/// * `event` - The GameEnded event to wrap
-///
-/// # Returns
-///
-/// A `Vec<GameSessionEvent>` containing the wrapped event.
 #[must_use]
 fn wrap_game_ended_event(event: GameEnded) -> Vec<GameSessionEvent> {
     vec![GameSessionEvent::from(event)]
 }
 
-/// Validates that a session can be ended.
-///
-/// A session can only be ended if it's in an active state.
-///
-/// # Arguments
-///
-/// * `session` - The session to validate
-///
-/// # Returns
-///
-/// - `Ok(())` if the session can be ended
-/// - `Err(WorkflowError::Domain)` if the session is already completed
 fn validate_can_end<S>(session: &S) -> WorkflowResult<()>
 where
     S: SessionStateAccessor,
@@ -393,18 +199,6 @@ where
     }
 }
 
-/// Updates the session status based on the game outcome.
-///
-/// This is a pure function that returns a new session with updated status.
-///
-/// # Arguments
-///
-/// * `session` - The current session
-/// * `outcome` - The game outcome
-///
-/// # Returns
-///
-/// A new session with the status updated to reflect the outcome.
 fn update_session_status<S>(session: &S, outcome: GameOutcome) -> S
 where
     S: SessionStatusUpdater,

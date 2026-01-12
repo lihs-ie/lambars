@@ -1,6 +1,3 @@
-//! Error types for the item domain.
-//!
-//! This module provides error types specific to item operations.
 
 use std::error::Error;
 use std::fmt;
@@ -9,71 +6,52 @@ use std::fmt;
 // ItemError
 // =============================================================================
 
-/// Error types for item domain operations.
-///
-/// These errors represent failures that can occur during item-related operations
-/// such as picking up, dropping, using, or equipping items.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ItemError {
-    /// The specified item was not found.
     ItemNotFound {
-        /// The identifier of the item that was not found.
         item_identifier: String,
     },
-    /// The item cannot be used (e.g., trying to use a weapon).
     ItemNotUsable {
-        /// The identifier of the item that cannot be used.
         item_identifier: String,
     },
-    /// The item cannot be equipped (e.g., trying to equip a consumable).
     ItemNotEquippable {
-        /// The identifier of the item that cannot be equipped.
         item_identifier: String,
     },
-    /// Adding items would exceed the maximum stack size.
     StackOverflow {
-        /// The maximum allowed stack size.
         max_stack: u32,
     },
-    /// The item quantity is invalid (e.g., zero or negative).
     InvalidItemQuantity,
 }
 
 impl ItemError {
-    /// Creates a new `ItemNotFound` error.
     pub fn item_not_found(item_identifier: impl Into<String>) -> Self {
         Self::ItemNotFound {
             item_identifier: item_identifier.into(),
         }
     }
 
-    /// Creates a new `ItemNotUsable` error.
     pub fn item_not_usable(item_identifier: impl Into<String>) -> Self {
         Self::ItemNotUsable {
             item_identifier: item_identifier.into(),
         }
     }
 
-    /// Creates a new `ItemNotEquippable` error.
     pub fn item_not_equippable(item_identifier: impl Into<String>) -> Self {
         Self::ItemNotEquippable {
             item_identifier: item_identifier.into(),
         }
     }
 
-    /// Creates a new `StackOverflow` error.
     #[must_use]
     pub const fn stack_overflow(max_stack: u32) -> Self {
         Self::StackOverflow { max_stack }
     }
 
-    /// Creates a new `InvalidItemQuantity` error.
     #[must_use]
     pub const fn invalid_item_quantity() -> Self {
         Self::InvalidItemQuantity
     }
 
-    /// Returns a human-readable error message.
     pub fn message(&self) -> String {
         match self {
             Self::ItemNotFound { item_identifier } => {
@@ -92,19 +70,16 @@ impl ItemError {
         }
     }
 
-    /// Returns true if this error indicates an item was not found.
     #[must_use]
     pub const fn is_not_found(&self) -> bool {
         matches!(self, Self::ItemNotFound { .. })
     }
 
-    /// Returns true if this error is related to item usage.
     #[must_use]
     pub const fn is_usage_error(&self) -> bool {
         matches!(self, Self::ItemNotUsable { .. } | Self::ItemNotEquippable { .. })
     }
 
-    /// Returns true if this error is related to item quantities.
     #[must_use]
     pub const fn is_quantity_error(&self) -> bool {
         matches!(self, Self::StackOverflow { .. } | Self::InvalidItemQuantity)

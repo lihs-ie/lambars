@@ -1,8 +1,3 @@
-//! Command execution handler.
-//!
-//! This module provides the HTTP handler for executing game commands
-//! during a player's turn.
-
 use axum::Json;
 use axum::extract::{Path, State};
 
@@ -19,57 +14,6 @@ use roguelike_workflow::ports::{EventStore, GameSessionRepository, RandomGenerat
 // Execute Command Handler
 // =============================================================================
 
-/// Executes a game command for the current turn.
-///
-/// # Endpoint
-///
-/// `POST /api/v1/games/{game_id}/commands`
-///
-/// # Path Parameters
-///
-/// - `game_id` - The unique identifier of the game session (UUID format)
-///
-/// # Request Body
-///
-/// ```json
-/// {
-///   "command": {
-///     "type": "move",
-///     "direction": "north"
-///   }
-/// }
-/// ```
-///
-/// # Response
-///
-/// - `200 OK` - Command executed successfully
-/// - `400 Bad Request` - Invalid command or validation error
-/// - `404 Not Found` - Game session not found
-/// - `409 Conflict` - Game session has already ended
-///
-/// # Examples
-///
-/// ```json
-/// {
-///   "game": {
-///     "game_id": "550e8400-e29b-41d4-a716-446655440000",
-///     "player": { ... },
-///     "floor": { ... },
-///     "turn_count": 43,
-///     "status": "in_progress"
-///   },
-///   "turn_events": [
-///     {
-///       "sequence": 100,
-///       "type": "PlayerMoved",
-///       "data": { "direction": "north" },
-///       "occurred_at": "2026-01-12T12:00:00Z"
-///     }
-///   ],
-///   "game_over": false,
-///   "game_over_reason": null
-/// }
-/// ```
 pub async fn execute_command<Repository, Cache, Events, Random>(
     State(_state): State<AppState<Repository, Cache, Events, Random>>,
     Path(game_id): Path<String>,

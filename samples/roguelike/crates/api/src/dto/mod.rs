@@ -1,11 +1,3 @@
-//! Data Transfer Objects for the API layer.
-//!
-//! This module provides all DTOs for request/response handling:
-//!
-//! - [`request`]: Request DTOs for API endpoints
-//! - [`response`]: Response DTOs for API endpoints
-//! - [`command`]: Command DTOs for game actions
-
 pub mod command;
 pub mod request;
 pub mod response;

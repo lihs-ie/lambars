@@ -1,8 +1,3 @@
-//! Response time logging middleware.
-//!
-//! This module provides middleware to measure and log response times
-//! for all HTTP requests.
-
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -11,39 +6,18 @@ use axum::http::{HeaderValue, Request, Response};
 use futures::future::BoxFuture;
 use tower::{Layer, Service};
 
-/// The header name for response time (in milliseconds).
 pub static RESPONSE_TIME_HEADER: HeaderName = HeaderName::from_static("x-response-time");
 
 // =============================================================================
 // ResponseTimeLayer
 // =============================================================================
 
-/// Layer that measures and logs response times.
-///
-/// This layer will:
-/// 1. Record the start time of each request
-/// 2. Measure the total processing time
-/// 3. Add an `X-Response-Time` header to the response
-/// 4. Log the response time using tracing
-///
-/// # Examples
-///
-/// ```ignore
-/// use roguelike_api::middleware::ResponseTimeLayer;
-/// use axum::Router;
-///
-/// let app = Router::new()
-///     .route("/api/games", get(list_games))
-///     .layer(ResponseTimeLayer::new());
-/// ```
 #[derive(Debug, Clone, Default)]
 pub struct ResponseTimeLayer {
-    /// Minimum duration to log (for filtering out fast requests).
     min_duration_to_log: Option<Duration>,
 }
 
 impl ResponseTimeLayer {
-    /// Creates a new `ResponseTimeLayer` that logs all requests.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -51,22 +25,6 @@ impl ResponseTimeLayer {
         }
     }
 
-    /// Creates a new `ResponseTimeLayer` that only logs requests
-    /// taking longer than the specified duration.
-    ///
-    /// # Arguments
-    ///
-    /// * `min_duration` - Minimum duration for a request to be logged
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// use std::time::Duration;
-    /// use roguelike_api::middleware::ResponseTimeLayer;
-    ///
-    /// // Only log requests taking more than 100ms
-    /// let layer = ResponseTimeLayer::with_min_duration(Duration::from_millis(100));
-    /// ```
     #[must_use]
     pub fn with_min_duration(min_duration: Duration) -> Self {
         Self {
@@ -74,7 +32,6 @@ impl ResponseTimeLayer {
         }
     }
 
-    /// Returns the minimum duration configured for logging.
     #[must_use]
     pub fn min_duration_to_log(&self) -> Option<Duration> {
         self.min_duration_to_log
@@ -96,7 +53,6 @@ impl<InnerService> Layer<InnerService> for ResponseTimeLayer {
 // ResponseTimeService
 // =============================================================================
 
-/// Service that handles response time measurement.
 #[derive(Debug, Clone)]
 pub struct ResponseTimeService<InnerService> {
     inner: InnerService,
@@ -161,38 +117,30 @@ where
 // ResponseTime Value Type
 // =============================================================================
 
-/// Response time measurement.
-///
-/// This type can be used to represent and format response times.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ResponseTime(Duration);
 
 impl ResponseTime {
-    /// Creates a new `ResponseTime` from a `Duration`.
     #[must_use]
     pub fn new(duration: Duration) -> Self {
         Self(duration)
     }
 
-    /// Returns the duration.
     #[must_use]
     pub fn duration(&self) -> Duration {
         self.0
     }
 
-    /// Returns the duration in milliseconds.
     #[must_use]
     pub fn as_millis(&self) -> f64 {
         self.0.as_secs_f64() * 1000.0
     }
 
-    /// Returns the duration in seconds.
     #[must_use]
     pub fn as_secs(&self) -> f64 {
         self.0.as_secs_f64()
     }
 
-    /// Returns true if the response time exceeds the given threshold.
     #[must_use]
     pub fn is_slow(&self, threshold: Duration) -> bool {
         self.0 >= threshold

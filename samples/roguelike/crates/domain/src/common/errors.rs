@@ -1,8 +1,3 @@
-//! Error types for the common domain module.
-//!
-//! This module provides validation and domain error types used across
-//! all subdomains in the roguelike game.
-
 use std::error::Error;
 use std::fmt;
 
@@ -10,46 +5,28 @@ use std::fmt;
 // ValidationError
 // =============================================================================
 
-/// Validation error variants for domain value objects.
-///
-/// This enum represents common validation failures that can occur when
-/// constructing value objects with constraints.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidationError {
-    /// A required field was empty.
     EmptyValue {
-        /// The name of the field that was empty.
         field: String,
     },
-    /// A value was outside the valid range.
     OutOfRange {
-        /// The name of the field that was out of range.
         field: String,
-        /// The minimum allowed value (as string for flexibility).
         min: String,
-        /// The maximum allowed value (as string for flexibility).
         max: String,
-        /// The actual value that was provided (as string).
         actual: String,
     },
-    /// A value had an invalid format.
     InvalidFormat {
-        /// The name of the field with invalid format.
         field: String,
-        /// Description of the expected format.
         expected: String,
     },
-    /// A constraint was violated.
     ConstraintViolation {
-        /// The name of the field that violated the constraint.
         field: String,
-        /// Description of the constraint that was violated.
         constraint: String,
     },
 }
 
 impl ValidationError {
-    /// Returns the name of the field that caused the error.
     pub fn field(&self) -> &str {
         match self {
             Self::EmptyValue { field }
@@ -59,7 +36,6 @@ impl ValidationError {
         }
     }
 
-    /// Returns a human-readable error message.
     pub fn message(&self) -> String {
         match self {
             Self::EmptyValue { field } => {
@@ -85,14 +61,12 @@ impl ValidationError {
         }
     }
 
-    /// Creates an empty value error.
     pub fn empty_value(field: impl Into<String>) -> Self {
         Self::EmptyValue {
             field: field.into(),
         }
     }
 
-    /// Creates an out of range error.
     pub fn out_of_range(
         field: impl Into<String>,
         min: impl ToString,
@@ -107,7 +81,6 @@ impl ValidationError {
         }
     }
 
-    /// Creates an invalid format error.
     pub fn invalid_format(field: impl Into<String>, expected: impl Into<String>) -> Self {
         Self::InvalidFormat {
             field: field.into(),
@@ -115,7 +88,6 @@ impl ValidationError {
         }
     }
 
-    /// Creates a constraint violation error.
     pub fn constraint_violation(field: impl Into<String>, constraint: impl Into<String>) -> Self {
         Self::ConstraintViolation {
             field: field.into(),
@@ -136,19 +108,11 @@ impl Error for ValidationError {}
 // DomainError
 // =============================================================================
 
-/// Domain-level error types.
-///
-/// This enum wraps all subdomain errors and provides a unified error type
-/// for the domain layer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DomainError {
-    /// A validation error occurred.
     Validation(ValidationError),
-    /// A game session error occurred.
     GameSession(crate::game_session::GameSessionError),
-    /// An enemy error occurred.
     Enemy(crate::enemy::EnemyError),
-    /// A floor error occurred.
     Floor(crate::floor::FloorError),
     // Future subdomain errors will be added here:
     // Player(PlayerError),
@@ -158,30 +122,22 @@ pub enum DomainError {
 }
 
 impl DomainError {
-    /// Returns true if this is a validation error.
     pub fn is_validation_error(&self) -> bool {
         matches!(self, Self::Validation(_))
     }
 
-    /// Returns true if this is a game session error.
     pub fn is_game_session_error(&self) -> bool {
         matches!(self, Self::GameSession(_))
     }
 
-    /// Returns true if this is an enemy error.
     pub fn is_enemy_error(&self) -> bool {
         matches!(self, Self::Enemy(_))
     }
 
-    /// Returns true if this is a floor error.
     pub fn is_floor_error(&self) -> bool {
         matches!(self, Self::Floor(_))
     }
 
-    /// Returns true if this error is recoverable.
-    ///
-    /// Validation errors are generally recoverable as they indicate
-    /// invalid input that can be corrected by the user.
     pub fn is_recoverable(&self) -> bool {
         match self {
             Self::Validation(_) => true,

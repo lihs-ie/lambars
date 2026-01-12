@@ -1,31 +1,3 @@
-//! DescendFloor workflow implementation.
-//!
-//! This module provides the workflow for descending to the next floor
-//! when the player reaches the down staircase.
-//!
-//! # Workflow Steps
-//!
-//! 1. [IO] Load session from cache
-//! 2. [Pure] Validate player is at down stairs
-//! 3. [Pure] Calculate next floor level
-//! 4. [Pure] Generate new floor data
-//! 5. [Pure] Set player at spawn point (up stairs)
-//! 6. [Pure] Spawn enemies for the new floor
-//! 7. [Pure] Update session for floor change
-//! 8. [Pure] Generate PlayerDescended event
-//! 9. [IO] Update cache
-//! 10. [IO] Append events to event store
-//!
-//! # Examples
-//!
-//! ```ignore
-//! use roguelike_workflow::workflows::floor::{descend_floor, DescendFloorCommand};
-//!
-//! let workflow = descend_floor(&cache, &event_store, cache_ttl);
-//! let command = DescendFloorCommand::new(game_identifier);
-//! let result = workflow(command).run_async().await;
-//! ```
-
 use std::time::Duration;
 
 use lambars::effect::AsyncIO;
@@ -41,26 +13,20 @@ use crate::ports::{EventStore, SessionCache, WorkflowResult};
 // Workflow Configuration
 // =============================================================================
 
-/// Default cache time-to-live for game sessions.
 const DEFAULT_CACHE_TIME_TO_LIVE: Duration = Duration::from_secs(300); // 5 minutes
 
 // =============================================================================
 // EnemySpawnInfo
 // =============================================================================
 
-/// Information about an enemy to be spawned on the floor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnemySpawnInfo {
-    /// Position where the enemy will spawn.
     position: Position,
-    /// Type of enemy to spawn.
     enemy_type: String,
-    /// Level of the enemy.
     level: u32,
 }
 
 impl EnemySpawnInfo {
-    /// Creates a new enemy spawn info.
     #[must_use]
     pub fn new(position: Position, enemy_type: impl Into<String>, level: u32) -> Self {
         Self {
@@ -70,19 +36,16 @@ impl EnemySpawnInfo {
         }
     }
 
-    /// Returns the spawn position.
     #[must_use]
     pub const fn position(&self) -> Position {
         self.position
     }
 
-    /// Returns the enemy type.
     #[must_use]
     pub fn enemy_type(&self) -> &str {
         &self.enemy_type
     }
 
-    /// Returns the enemy level.
     #[must_use]
     pub const fn level(&self) -> u32 {
         self.level
@@ -93,27 +56,6 @@ impl EnemySpawnInfo {
 // DescendFloor Workflow
 // =============================================================================
 
-/// Creates a workflow function for descending to the next floor.
-///
-/// This function returns a closure that handles the player descending
-/// to the next dungeon floor. It validates that the player is at a
-/// down staircase, generates the new floor, and updates all state.
-///
-/// # Type Parameters
-///
-/// * `C` - Cache type implementing `SessionCache`
-/// * `E` - Event store type implementing `EventStore`
-///
-/// # Arguments
-///
-/// * `cache` - The session cache for fast access
-/// * `event_store` - The event store for event sourcing
-/// * `cache_ttl` - Time-to-live for cached sessions
-///
-/// # Returns
-///
-/// A function that takes a `DescendFloorCommand` and returns an `AsyncIO`
-/// that produces the updated game session or an error.
 pub fn descend_floor<'a, C, E>(
     cache: &'a C,
     event_store: &'a E,
@@ -161,7 +103,6 @@ where
     }
 }
 
-/// Creates a workflow function with default cache TTL.
 pub fn descend_floor_with_default_ttl<'a, C, E>(
     cache: &'a C,
     event_store: &'a E,
@@ -177,7 +118,6 @@ where
 // Pure Functions
 // =============================================================================
 
-/// Pure function that performs the entire floor descent logic.
 fn descend_floor_pure<S: Clone>(_session: &S) -> Result<(S, Vec<GameSessionEvent>), WorkflowError> {
     // Placeholder implementation
     Err(WorkflowError::repository(
@@ -186,34 +126,6 @@ fn descend_floor_pure<S: Clone>(_session: &S) -> Result<(S, Vec<GameSessionEvent
     ))
 }
 
-/// Validates that the player is at a down staircase.
-///
-/// This is a pure function that checks if the player's current position
-/// contains a down staircase.
-///
-/// # Arguments
-///
-/// * `player_position` - The player's current position
-/// * `down_stairs_position` - The position of the down stairs on the current floor
-///
-/// # Returns
-///
-/// `Ok(())` if the player is at the down stairs, `Err(FloorError)` otherwise.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::floor::validate_at_down_stairs;
-/// use roguelike_domain::common::Position;
-///
-/// let player = Position::new(20, 20);
-/// let stairs = Position::new(20, 20);
-///
-/// assert!(validate_at_down_stairs(player, stairs).is_ok());
-///
-/// let player_away = Position::new(5, 5);
-/// assert!(validate_at_down_stairs(player_away, stairs).is_err());
-/// ```
 pub fn validate_at_down_stairs(
     player_position: Position,
     down_stairs_position: Position,
@@ -225,83 +137,16 @@ pub fn validate_at_down_stairs(
     }
 }
 
-/// Calculates the next floor level.
-///
-/// This is a pure function that computes the floor level after descending.
-///
-/// # Arguments
-///
-/// * `current_floor_level` - The current floor level
-///
-/// # Returns
-///
-/// The next floor level.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::floor::calculate_next_floor_level;
-///
-/// assert_eq!(calculate_next_floor_level(1), 2);
-/// assert_eq!(calculate_next_floor_level(5), 6);
-/// ```
 #[must_use]
 pub const fn calculate_next_floor_level(current_floor_level: u32) -> u32 {
     current_floor_level.saturating_add(1)
 }
 
-/// Sets the player at the spawn point (up stairs) of the new floor.
-///
-/// This is a pure function that returns the new player position.
-///
-/// # Arguments
-///
-/// * `up_stairs_position` - The position of the up stairs on the new floor
-///
-/// # Returns
-///
-/// The position where the player should spawn.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::floor::set_player_at_spawn_point;
-/// use roguelike_domain::common::Position;
-///
-/// let stairs = Position::new(10, 10);
-/// let spawn = set_player_at_spawn_point(stairs);
-/// assert_eq!(spawn, stairs);
-/// ```
 #[must_use]
 pub const fn set_player_at_spawn_point(up_stairs_position: Position) -> Position {
     up_stairs_position
 }
 
-/// Spawns enemies for the new floor.
-///
-/// This is a pure function that determines which enemies to spawn
-/// based on the floor level.
-///
-/// # Arguments
-///
-/// * `floor_level` - The floor level
-/// * `valid_positions` - Valid positions where enemies can spawn
-/// * `seed` - Random seed for reproducible spawning
-///
-/// # Returns
-///
-/// A vector of enemy spawn information.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::floor::spawn_floor_enemies;
-/// use roguelike_domain::common::Position;
-///
-/// let positions = vec![Position::new(5, 5), Position::new(10, 10), Position::new(15, 15)];
-/// let enemies = spawn_floor_enemies(3, &positions, 12345);
-/// assert!(!enemies.is_empty());
-/// ```
 #[must_use]
 pub fn spawn_floor_enemies(
     floor_level: u32,
@@ -352,14 +197,12 @@ pub fn spawn_floor_enemies(
     enemies
 }
 
-/// Calculates the number of enemies to spawn based on floor level.
 fn calculate_enemy_count(floor_level: u32) -> u32 {
     let base_count = 3;
     let level_bonus = floor_level / 3;
     (base_count + level_bonus).min(15)
 }
 
-/// Gets available enemy types for a floor level.
 fn get_enemy_types_for_floor(floor_level: u32) -> Vec<String> {
     let mut types = vec!["Rat".to_string(), "Slime".to_string()];
 
@@ -387,27 +230,6 @@ fn get_enemy_types_for_floor(floor_level: u32) -> Vec<String> {
     types
 }
 
-/// Updates the session for a floor change.
-///
-/// This is a pure function that immutably updates the session with
-/// new floor data and returns the updated session along with events.
-///
-/// # Type Parameters
-///
-/// * `S` - The session type
-/// * `F` - Function to update the session
-///
-/// # Arguments
-///
-/// * `session` - The current game session
-/// * `new_floor_level` - The new floor level
-/// * `player_position` - The new player position
-/// * `enemies` - The enemies to spawn
-/// * `update_fn` - Function that updates the session
-///
-/// # Returns
-///
-/// A tuple of (updated_session, generated_events).
 pub fn update_session_for_floor_change<S, F>(
     session: &S,
     new_floor_level: u32,
@@ -429,7 +251,6 @@ where
     (updated_session, events)
 }
 
-/// Simple LCG for deterministic random numbers.
 fn next_seed(seed: u64) -> u64 {
     seed.wrapping_mul(6364136223846793005).wrapping_add(1)
 }

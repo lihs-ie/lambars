@@ -1,8 +1,3 @@
-//! Events handler.
-//!
-//! This module provides the HTTP handler for retrieving game events
-//! with pagination support.
-
 use axum::Json;
 use axum::extract::{Path, Query, State};
 
@@ -16,55 +11,14 @@ use roguelike_workflow::ports::{EventStore, GameSessionRepository, RandomGenerat
 // Constants
 // =============================================================================
 
-/// Default number of events to return.
 const DEFAULT_EVENTS_LIMIT: u32 = 100;
 
-/// Maximum number of events that can be returned in a single request.
 const MAX_EVENTS_LIMIT: u32 = 1000;
 
 // =============================================================================
 // Get Events Handler
 // =============================================================================
 
-/// Retrieves game events for a session with pagination.
-///
-/// Events are returned in chronological order, starting from the
-/// specified sequence number (exclusive).
-///
-/// # Endpoint
-///
-/// `GET /api/v1/games/{game_id}/events`
-///
-/// # Path Parameters
-///
-/// - `game_id` - The unique identifier of the game session (UUID format)
-///
-/// # Query Parameters
-///
-/// - `since` - The sequence number to start from (exclusive). If not provided, starts from the beginning.
-/// - `limit` - Maximum number of events to return (default: 100, max: 1000)
-///
-/// # Response
-///
-/// - `200 OK` - Returns events with pagination info
-/// - `404 Not Found` - Game session not found
-///
-/// # Examples
-///
-/// ```json
-/// {
-///   "events": [
-///     {
-///       "sequence": 11,
-///       "type": "PlayerMoved",
-///       "data": { "direction": "north" },
-///       "occurred_at": "2026-01-12T12:00:00Z"
-///     }
-///   ],
-///   "next_sequence": 12,
-///   "has_more": false
-/// }
-/// ```
 pub async fn get_events<Repository, Cache, Events, Random>(
     State(_state): State<AppState<Repository, Cache, Events, Random>>,
     Path(game_id): Path<String>,

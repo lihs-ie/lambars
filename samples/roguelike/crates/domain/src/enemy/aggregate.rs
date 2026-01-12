@@ -1,8 +1,3 @@
-//! Enemy aggregate for the enemy domain.
-//!
-//! This module provides the Enemy aggregate root that represents
-//! an enemy entity in the game world with all its associated state.
-
 use crate::common::{CombatStats, Damage, Health, Position, StatusEffect};
 
 use super::behavior::AiBehavior;
@@ -14,44 +9,6 @@ use super::loot::LootTable;
 // Enemy
 // =============================================================================
 
-/// An enemy entity in the game world.
-///
-/// Enemy is an aggregate root that encapsulates all enemy-related state
-/// including position, combat statistics, behavior patterns, and status effects.
-///
-/// All operations on Enemy are pure functions that return new instances,
-/// following functional programming principles.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::enemy::{Enemy, EntityIdentifier, EnemyType, AiBehavior, LootTable};
-/// use roguelike_domain::common::{Position, CombatStats, Health, Mana, Attack, Defense, Speed};
-///
-/// let identifier = EntityIdentifier::new();
-/// let position = Position::new(5, 10);
-/// let stats = CombatStats::new(
-///     Health::new(100).unwrap(),
-///     Health::new(100).unwrap(),
-///     Mana::new(0).unwrap(),
-///     Mana::new(0).unwrap(),
-///     Attack::new(15),
-///     Defense::new(5),
-///     Speed::new(10),
-/// ).unwrap();
-///
-/// let enemy = Enemy::new(
-///     identifier,
-///     EnemyType::Goblin,
-///     position,
-///     stats,
-///     AiBehavior::Aggressive,
-///     LootTable::empty(),
-/// );
-///
-/// assert!(enemy.is_alive());
-/// assert_eq!(enemy.position(), &Position::new(5, 10));
-/// ```
 #[derive(Debug, Clone)]
 pub struct Enemy {
     identifier: EntityIdentifier,
@@ -68,42 +25,6 @@ impl Enemy {
     // Constructors
     // =========================================================================
 
-    /// Creates a new Enemy with the specified parameters.
-    ///
-    /// The enemy starts with no status effects applied.
-    ///
-    /// # Arguments
-    ///
-    /// * `identifier` - Unique identifier for this enemy
-    /// * `enemy_type` - The type of enemy (Goblin, Skeleton, etc.)
-    /// * `position` - Initial position in the game world
-    /// * `stats` - Combat statistics
-    /// * `behavior` - AI behavior pattern
-    /// * `loot_table` - Potential item drops
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::{Enemy, EntityIdentifier, EnemyType, AiBehavior, LootTable};
-    /// use roguelike_domain::common::{Position, CombatStats, Health, Mana, Attack, Defense, Speed};
-    ///
-    /// let enemy = Enemy::new(
-    ///     EntityIdentifier::new(),
-    ///     EnemyType::Skeleton,
-    ///     Position::new(0, 0),
-    ///     CombatStats::new(
-    ///         Health::new(50).unwrap(),
-    ///         Health::new(50).unwrap(),
-    ///         Mana::zero(),
-    ///         Mana::zero(),
-    ///         Attack::new(10),
-    ///         Defense::new(3),
-    ///         Speed::new(8),
-    ///     ).unwrap(),
-    ///     AiBehavior::Patrol,
-    ///     LootTable::empty(),
-    /// );
-    /// ```
     #[must_use]
     pub fn new(
         identifier: EntityIdentifier,
@@ -128,43 +49,36 @@ impl Enemy {
     // Getters
     // =========================================================================
 
-    /// Returns the unique identifier for this enemy.
     #[must_use]
     pub const fn identifier(&self) -> &EntityIdentifier {
         &self.identifier
     }
 
-    /// Returns the type of this enemy.
     #[must_use]
     pub const fn enemy_type(&self) -> &EnemyType {
         &self.enemy_type
     }
 
-    /// Returns the current position of this enemy.
     #[must_use]
     pub const fn position(&self) -> &Position {
         &self.position
     }
 
-    /// Returns the combat statistics of this enemy.
     #[must_use]
     pub const fn stats(&self) -> &CombatStats {
         &self.stats
     }
 
-    /// Returns the AI behavior pattern of this enemy.
     #[must_use]
     pub const fn behavior(&self) -> &AiBehavior {
         &self.behavior
     }
 
-    /// Returns the loot table for this enemy.
     #[must_use]
     pub const fn loot_table(&self) -> &LootTable {
         &self.loot_table
     }
 
-    /// Returns the active status effects on this enemy.
     #[must_use]
     pub fn status_effects(&self) -> &[StatusEffect] {
         &self.status_effects
@@ -174,65 +88,11 @@ impl Enemy {
     // Query Methods
     // =========================================================================
 
-    /// Returns true if the enemy is alive (health > 0).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::{Enemy, EntityIdentifier, EnemyType, AiBehavior, LootTable};
-    /// use roguelike_domain::common::{Position, CombatStats, Health, Mana, Attack, Defense, Speed};
-    ///
-    /// let enemy = Enemy::new(
-    ///     EntityIdentifier::new(),
-    ///     EnemyType::Goblin,
-    ///     Position::new(0, 0),
-    ///     CombatStats::new(
-    ///         Health::new(100).unwrap(),
-    ///         Health::new(100).unwrap(),
-    ///         Mana::zero(),
-    ///         Mana::zero(),
-    ///         Attack::new(10),
-    ///         Defense::new(5),
-    ///         Speed::new(10),
-    ///     ).unwrap(),
-    ///     AiBehavior::Aggressive,
-    ///     LootTable::empty(),
-    /// );
-    ///
-    /// assert!(enemy.is_alive());
-    /// ```
     #[must_use]
     pub fn is_alive(&self) -> bool {
         self.stats.is_alive()
     }
 
-    /// Returns the current health of this enemy.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::{Enemy, EntityIdentifier, EnemyType, AiBehavior, LootTable};
-    /// use roguelike_domain::common::{Position, CombatStats, Health, Mana, Attack, Defense, Speed};
-    ///
-    /// let enemy = Enemy::new(
-    ///     EntityIdentifier::new(),
-    ///     EnemyType::Goblin,
-    ///     Position::new(0, 0),
-    ///     CombatStats::new(
-    ///         Health::new(75).unwrap(),
-    ///         Health::new(100).unwrap(),
-    ///         Mana::zero(),
-    ///         Mana::zero(),
-    ///         Attack::new(10),
-    ///         Defense::new(5),
-    ///         Speed::new(10),
-    ///     ).unwrap(),
-    ///     AiBehavior::Aggressive,
-    ///     LootTable::empty(),
-    /// );
-    ///
-    /// assert_eq!(enemy.health().value(), 75);
-    /// ```
     #[must_use]
     pub fn health(&self) -> Health {
         self.stats.health()
@@ -242,40 +102,6 @@ impl Enemy {
     // Domain Methods (Pure Functions)
     // =========================================================================
 
-    /// Moves the enemy to a new position.
-    ///
-    /// This is a pure function that returns a new Enemy instance.
-    ///
-    /// # Arguments
-    ///
-    /// * `new_position` - The target position
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::{Enemy, EntityIdentifier, EnemyType, AiBehavior, LootTable};
-    /// use roguelike_domain::common::{Position, CombatStats, Health, Mana, Attack, Defense, Speed};
-    ///
-    /// let enemy = Enemy::new(
-    ///     EntityIdentifier::new(),
-    ///     EnemyType::Goblin,
-    ///     Position::new(5, 5),
-    ///     CombatStats::new(
-    ///         Health::new(100).unwrap(),
-    ///         Health::new(100).unwrap(),
-    ///         Mana::zero(),
-    ///         Mana::zero(),
-    ///         Attack::new(10),
-    ///         Defense::new(5),
-    ///         Speed::new(10),
-    ///     ).unwrap(),
-    ///     AiBehavior::Aggressive,
-    ///     LootTable::empty(),
-    /// );
-    ///
-    /// let moved_enemy = enemy.move_to(Position::new(6, 5));
-    /// assert_eq!(moved_enemy.position(), &Position::new(6, 5));
-    /// ```
     #[must_use]
     pub fn move_to(self, new_position: Position) -> Self {
         Self {
@@ -284,41 +110,6 @@ impl Enemy {
         }
     }
 
-    /// Applies damage to the enemy.
-    ///
-    /// Health is reduced by the damage amount, saturating at 0.
-    /// This is a pure function that returns a new Enemy instance.
-    ///
-    /// # Arguments
-    ///
-    /// * `damage` - The amount of damage to apply
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::{Enemy, EntityIdentifier, EnemyType, AiBehavior, LootTable};
-    /// use roguelike_domain::common::{Position, CombatStats, Health, Mana, Attack, Defense, Speed, Damage};
-    ///
-    /// let enemy = Enemy::new(
-    ///     EntityIdentifier::new(),
-    ///     EnemyType::Goblin,
-    ///     Position::new(0, 0),
-    ///     CombatStats::new(
-    ///         Health::new(100).unwrap(),
-    ///         Health::new(100).unwrap(),
-    ///         Mana::zero(),
-    ///         Mana::zero(),
-    ///         Attack::new(10),
-    ///         Defense::new(5),
-    ///         Speed::new(10),
-    ///     ).unwrap(),
-    ///     AiBehavior::Aggressive,
-    ///     LootTable::empty(),
-    /// );
-    ///
-    /// let damaged_enemy = enemy.take_damage(Damage::new(30));
-    /// assert_eq!(damaged_enemy.health().value(), 70);
-    /// ```
     #[must_use]
     pub fn take_damage(self, damage: Damage) -> Self {
         let new_health = self.stats.health().saturating_sub(damage.value());
@@ -333,41 +124,6 @@ impl Enemy {
         }
     }
 
-    /// Heals the enemy by the specified amount.
-    ///
-    /// Health is increased by the amount, saturating at max_health.
-    /// This is a pure function that returns a new Enemy instance.
-    ///
-    /// # Arguments
-    ///
-    /// * `amount` - The amount of health to restore
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::{Enemy, EntityIdentifier, EnemyType, AiBehavior, LootTable};
-    /// use roguelike_domain::common::{Position, CombatStats, Health, Mana, Attack, Defense, Speed, Damage};
-    ///
-    /// let enemy = Enemy::new(
-    ///     EntityIdentifier::new(),
-    ///     EnemyType::Goblin,
-    ///     Position::new(0, 0),
-    ///     CombatStats::new(
-    ///         Health::new(50).unwrap(),
-    ///         Health::new(100).unwrap(),
-    ///         Mana::zero(),
-    ///         Mana::zero(),
-    ///         Attack::new(10),
-    ///         Defense::new(5),
-    ///         Speed::new(10),
-    ///     ).unwrap(),
-    ///     AiBehavior::Aggressive,
-    ///     LootTable::empty(),
-    /// );
-    ///
-    /// let healed_enemy = enemy.heal(30);
-    /// assert_eq!(healed_enemy.health().value(), 80);
-    /// ```
     #[must_use]
     pub fn heal(self, amount: u32) -> Self {
         let new_health = self.stats.health().saturating_add(amount);
@@ -388,45 +144,6 @@ impl Enemy {
         }
     }
 
-    /// Applies a status effect to the enemy.
-    ///
-    /// The effect is added to the enemy's active status effects.
-    /// This is a pure function that returns a new Enemy instance.
-    ///
-    /// # Arguments
-    ///
-    /// * `effect` - The status effect to apply
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::{Enemy, EntityIdentifier, EnemyType, AiBehavior, LootTable};
-    /// use roguelike_domain::common::{
-    ///     Position, CombatStats, Health, Mana, Attack, Defense, Speed,
-    ///     StatusEffect, StatusEffectType
-    /// };
-    ///
-    /// let enemy = Enemy::new(
-    ///     EntityIdentifier::new(),
-    ///     EnemyType::Goblin,
-    ///     Position::new(0, 0),
-    ///     CombatStats::new(
-    ///         Health::new(100).unwrap(),
-    ///         Health::new(100).unwrap(),
-    ///         Mana::zero(),
-    ///         Mana::zero(),
-    ///         Attack::new(10),
-    ///         Defense::new(5),
-    ///         Speed::new(10),
-    ///     ).unwrap(),
-    ///     AiBehavior::Aggressive,
-    ///     LootTable::empty(),
-    /// );
-    ///
-    /// let poison = StatusEffect::new(StatusEffectType::Poison, 3, 5);
-    /// let poisoned_enemy = enemy.apply_status_effect(poison);
-    /// assert_eq!(poisoned_enemy.status_effects().len(), 1);
-    /// ```
     #[must_use]
     pub fn apply_status_effect(self, effect: StatusEffect) -> Self {
         let mut new_effects = self.status_effects;
@@ -437,50 +154,6 @@ impl Enemy {
         }
     }
 
-    /// Ticks all status effects, removing expired ones.
-    ///
-    /// Each effect's duration is decreased by one turn.
-    /// Effects that expire (remaining_turns reaches 0) are removed.
-    /// This is a pure function that returns a new Enemy instance.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::{Enemy, EntityIdentifier, EnemyType, AiBehavior, LootTable};
-    /// use roguelike_domain::common::{
-    ///     Position, CombatStats, Health, Mana, Attack, Defense, Speed,
-    ///     StatusEffect, StatusEffectType
-    /// };
-    ///
-    /// let enemy = Enemy::new(
-    ///     EntityIdentifier::new(),
-    ///     EnemyType::Goblin,
-    ///     Position::new(0, 0),
-    ///     CombatStats::new(
-    ///         Health::new(100).unwrap(),
-    ///         Health::new(100).unwrap(),
-    ///         Mana::zero(),
-    ///         Mana::zero(),
-    ///         Attack::new(10),
-    ///         Defense::new(5),
-    ///         Speed::new(10),
-    ///     ).unwrap(),
-    ///     AiBehavior::Aggressive,
-    ///     LootTable::empty(),
-    /// );
-    ///
-    /// let poison = StatusEffect::new(StatusEffectType::Poison, 2, 5);
-    /// let enemy_with_effect = enemy.apply_status_effect(poison);
-    ///
-    /// // First tick: effect remains with 1 turn left
-    /// let after_first_tick = enemy_with_effect.tick_status_effects();
-    /// assert_eq!(after_first_tick.status_effects().len(), 1);
-    /// assert_eq!(after_first_tick.status_effects()[0].remaining_turns(), 1);
-    ///
-    /// // Second tick: effect expires
-    /// let after_second_tick = after_first_tick.tick_status_effects();
-    /// assert_eq!(after_second_tick.status_effects().len(), 0);
-    /// ```
     #[must_use]
     pub fn tick_status_effects(self) -> Self {
         let new_effects = self
@@ -495,41 +168,6 @@ impl Enemy {
         }
     }
 
-    /// Returns a new Enemy with a different behavior pattern.
-    ///
-    /// This is a pure function that returns a new Enemy instance.
-    ///
-    /// # Arguments
-    ///
-    /// * `behavior` - The new AI behavior pattern
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::{Enemy, EntityIdentifier, EnemyType, AiBehavior, LootTable};
-    /// use roguelike_domain::common::{Position, CombatStats, Health, Mana, Attack, Defense, Speed};
-    ///
-    /// let enemy = Enemy::new(
-    ///     EntityIdentifier::new(),
-    ///     EnemyType::Goblin,
-    ///     Position::new(0, 0),
-    ///     CombatStats::new(
-    ///         Health::new(100).unwrap(),
-    ///         Health::new(100).unwrap(),
-    ///         Mana::zero(),
-    ///         Mana::zero(),
-    ///         Attack::new(10),
-    ///         Defense::new(5),
-    ///         Speed::new(10),
-    ///     ).unwrap(),
-    ///     AiBehavior::Aggressive,
-    ///     LootTable::empty(),
-    /// );
-    ///
-    /// // Enemy flees when health is low
-    /// let fleeing_enemy = enemy.with_behavior(AiBehavior::Flee);
-    /// assert_eq!(fleeing_enemy.behavior(), &AiBehavior::Flee);
-    /// ```
     #[must_use]
     pub fn with_behavior(self, behavior: AiBehavior) -> Self {
         Self { behavior, ..self }

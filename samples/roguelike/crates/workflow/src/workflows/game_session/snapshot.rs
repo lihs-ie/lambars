@@ -1,31 +1,3 @@
-//! CreateSnapshot workflow implementation.
-//!
-//! This module provides the workflow for creating periodic snapshots
-//! of game sessions to optimize Event Sourcing reconstruction.
-//!
-//! # Workflow Steps
-//!
-//! 1. [IO] Load session from cache
-//! 2. [IO] Load latest snapshot
-//! 3. [Pure] Check if snapshot is needed (interval-based)
-//! 4. [IO] Save snapshot if needed
-//!
-//! # Snapshot Strategy
-//!
-//! Snapshots are created when the number of events since the last
-//! snapshot exceeds a configured threshold. This balances storage
-//! cost against reconstruction time.
-//!
-//! # Examples
-//!
-//! ```ignore
-//! use roguelike_workflow::workflows::game_session::{create_snapshot, CreateSnapshotCommand};
-//!
-//! let workflow = create_snapshot(&cache, &snapshot_store, 100);
-//! let command = CreateSnapshotCommand::new(game_identifier);
-//! let result = workflow(command).run_async().await;
-//! ```
-
 use lambars::effect::AsyncIO;
 
 use super::CreateSnapshotCommand;
@@ -37,52 +9,12 @@ use crate::ports::{SessionCache, SnapshotStore, WorkflowResult};
 // Default Configuration
 // =============================================================================
 
-/// Default interval between snapshots (number of events).
 pub const DEFAULT_SNAPSHOT_INTERVAL: u64 = 100;
 
 // =============================================================================
 // CreateSnapshot Workflow
 // =============================================================================
 
-/// Creates a workflow function for creating game session snapshots.
-///
-/// Snapshots are created to optimize Event Sourcing reconstruction.
-/// Instead of replaying all events from the beginning, reconstruction
-/// can start from the latest snapshot.
-///
-/// This workflow checks if a snapshot is needed based on the number
-/// of events since the last snapshot, and creates one if necessary.
-///
-/// # Type Parameters
-///
-/// * `C` - Cache type implementing `SessionCache`
-/// * `S` - Snapshot store type implementing `SnapshotStore`
-///
-/// # Arguments
-///
-/// * `cache` - The session cache for loading the current state
-/// * `snapshot_store` - The snapshot store for persisting snapshots
-/// * `interval` - Number of events between snapshots
-///
-/// # Returns
-///
-/// A function that takes a `CreateSnapshotCommand` and returns an `AsyncIO`
-/// that produces `()` on success or an error.
-///
-/// # Errors
-///
-/// - `WorkflowError::NotFound` - If the session doesn't exist
-///
-/// # Examples
-///
-/// ```ignore
-/// use roguelike_workflow::workflows::game_session::{create_snapshot, CreateSnapshotCommand};
-///
-/// // Create workflow with custom interval
-/// let workflow = create_snapshot(&cache, &snapshot_store, 50);
-/// let command = CreateSnapshotCommand::new(game_identifier);
-/// workflow(command).run_async().await?;
-/// ```
 pub fn create_snapshot<'a, C, S>(
     cache: &'a C,
     snapshot_store: &'a S,
@@ -138,23 +70,6 @@ where
     }
 }
 
-/// Creates a workflow function for creating snapshots with default interval.
-///
-/// This is a convenience function that uses the default snapshot interval.
-///
-/// # Type Parameters
-///
-/// * `C` - Cache type implementing `SessionCache`
-/// * `S` - Snapshot store type implementing `SnapshotStore`
-///
-/// # Arguments
-///
-/// * `cache` - The session cache for loading the current state
-/// * `snapshot_store` - The snapshot store for persisting snapshots
-///
-/// # Returns
-///
-/// A function that creates snapshots using the default interval.
 pub fn create_snapshot_with_default_interval<'a, C, S>(
     cache: &'a C,
     snapshot_store: &'a S,
@@ -171,27 +86,6 @@ where
 // Pure Functions
 // =============================================================================
 
-/// Determines if a snapshot should be created.
-///
-/// This is a pure function that checks if the number of events
-/// since the last snapshot exceeds the configured interval.
-///
-/// # Arguments
-///
-/// * `events_since_snapshot` - Number of events since the last snapshot
-/// * `interval` - The configured snapshot interval
-///
-/// # Returns
-///
-/// `true` if a snapshot should be created, `false` otherwise.
-///
-/// # Examples
-///
-/// ```ignore
-/// assert!(should_create_snapshot(100, 100));  // At interval
-/// assert!(should_create_snapshot(150, 100));  // Past interval
-/// assert!(!should_create_snapshot(50, 100));  // Before interval
-/// ```
 #[must_use]
 pub fn should_create_snapshot(events_since_snapshot: u64, interval: u64) -> bool {
     events_since_snapshot >= interval

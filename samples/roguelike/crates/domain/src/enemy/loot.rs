@@ -1,8 +1,3 @@
-//! Loot table types for the enemy domain.
-//!
-//! This module provides types for defining and managing item drops
-//! from defeated enemies.
-
 use std::fmt;
 
 use lambars::persistent::PersistentVector;
@@ -14,27 +9,6 @@ use crate::item::ItemIdentifier;
 // LootEntry
 // =============================================================================
 
-/// A single entry in a loot table representing a potential item drop.
-///
-/// LootEntry defines the probability and quantity range for an item
-/// that may drop when an enemy is defeated.
-///
-/// # Invariants
-///
-/// - `drop_rate` must be between 0.0 and 1.0 (inclusive)
-/// - `min_quantity` must be less than or equal to `max_quantity`
-/// - `min_quantity` must be at least 1
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::enemy::LootEntry;
-/// use roguelike_domain::item::ItemIdentifier;
-///
-/// let item_identifier = ItemIdentifier::new();
-/// let entry = LootEntry::new(item_identifier, 0.5, 1, 3).unwrap();
-/// assert_eq!(entry.drop_rate(), 0.5);
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LootEntry {
     item_identifier: ItemIdentifier,
@@ -44,31 +18,6 @@ pub struct LootEntry {
 }
 
 impl LootEntry {
-    /// Creates a new LootEntry with the specified parameters.
-    ///
-    /// # Arguments
-    ///
-    /// * `item_identifier` - The identifier of the item that may drop
-    /// * `drop_rate` - The probability (0.0 to 1.0) of this item dropping
-    /// * `min_quantity` - The minimum number of items that can drop
-    /// * `max_quantity` - The maximum number of items that can drop
-    ///
-    /// # Errors
-    ///
-    /// Returns a `ValidationError` if:
-    /// - `drop_rate` is not between 0.0 and 1.0
-    /// - `min_quantity` is 0
-    /// - `min_quantity` is greater than `max_quantity`
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::LootEntry;
-    /// use roguelike_domain::item::ItemIdentifier;
-    ///
-    /// let item_identifier = ItemIdentifier::new();
-    /// let entry = LootEntry::new(item_identifier, 0.25, 1, 5).unwrap();
-    /// ```
     pub fn new(
         item_identifier: ItemIdentifier,
         drop_rate: f32,
@@ -106,69 +55,36 @@ impl LootEntry {
         })
     }
 
-    /// Returns the item identifier for this loot entry.
     #[must_use]
     pub const fn item_identifier(&self) -> ItemIdentifier {
         self.item_identifier
     }
 
-    /// Returns the drop rate (0.0 to 1.0).
     #[must_use]
     pub const fn drop_rate(&self) -> f32 {
         self.drop_rate
     }
 
-    /// Returns the minimum quantity that can drop.
     #[must_use]
     pub const fn min_quantity(&self) -> u32 {
         self.min_quantity
     }
 
-    /// Returns the maximum quantity that can drop.
     #[must_use]
     pub const fn max_quantity(&self) -> u32 {
         self.max_quantity
     }
 
-    /// Returns true if this entry has a guaranteed drop (100% drop rate).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::LootEntry;
-    /// use roguelike_domain::item::ItemIdentifier;
-    ///
-    /// let item_identifier = ItemIdentifier::new();
-    /// let guaranteed = LootEntry::new(item_identifier, 1.0, 1, 1).unwrap();
-    /// assert!(guaranteed.is_guaranteed());
-    /// ```
     #[must_use]
     pub fn is_guaranteed(&self) -> bool {
         (self.drop_rate - 1.0).abs() < f32::EPSILON
     }
 
-    /// Returns true if this entry has a fixed quantity (min equals max).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::LootEntry;
-    /// use roguelike_domain::item::ItemIdentifier;
-    ///
-    /// let item_identifier = ItemIdentifier::new();
-    /// let fixed = LootEntry::new(item_identifier, 0.5, 3, 3).unwrap();
-    /// assert!(fixed.has_fixed_quantity());
-    /// ```
     #[must_use]
     pub const fn has_fixed_quantity(&self) -> bool {
         self.min_quantity == self.max_quantity
     }
 
-    /// Creates a new LootEntry with updated drop rate.
-    ///
-    /// # Errors
-    ///
-    /// Returns a `ValidationError` if the new drop rate is not between 0.0 and 1.0.
     pub fn with_drop_rate(&self, drop_rate: f32) -> Result<Self, ValidationError> {
         Self::new(
             self.item_identifier,
@@ -206,55 +122,17 @@ impl fmt::Display for LootEntry {
 // LootTable
 // =============================================================================
 
-/// A collection of potential item drops from an enemy.
-///
-/// LootTable contains multiple `LootEntry` values that define
-/// all possible items an enemy can drop when defeated.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::enemy::{LootTable, LootEntry};
-/// use roguelike_domain::item::ItemIdentifier;
-///
-/// let table = LootTable::empty();
-/// assert!(table.is_empty());
-/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct LootTable {
     entries: PersistentVector<LootEntry>,
 }
 
 impl LootTable {
-    /// Creates a new LootTable from a vector of entries.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::{LootTable, LootEntry};
-    /// use roguelike_domain::item::ItemIdentifier;
-    /// use lambars::persistent::PersistentVector;
-    ///
-    /// let item_identifier = ItemIdentifier::new();
-    /// let entry = LootEntry::new(item_identifier, 0.5, 1, 1).unwrap();
-    /// let entries = PersistentVector::from_iter([entry]);
-    /// let table = LootTable::new(entries);
-    /// ```
     #[must_use]
     pub const fn new(entries: PersistentVector<LootEntry>) -> Self {
         Self { entries }
     }
 
-    /// Creates an empty LootTable.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::LootTable;
-    ///
-    /// let table = LootTable::empty();
-    /// assert!(table.is_empty());
-    /// ```
     #[must_use]
     pub fn empty() -> Self {
         Self {
@@ -262,58 +140,21 @@ impl LootTable {
         }
     }
 
-    /// Returns the entries in this loot table.
     #[must_use]
     pub const fn entries(&self) -> &PersistentVector<LootEntry> {
         &self.entries
     }
 
-    /// Returns the number of entries in this loot table.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::LootTable;
-    ///
-    /// let table = LootTable::empty();
-    /// assert_eq!(table.len(), 0);
-    /// ```
     #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
-    /// Returns true if this loot table has no entries.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::LootTable;
-    ///
-    /// let table = LootTable::empty();
-    /// assert!(table.is_empty());
-    /// ```
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
-    /// Returns a new LootTable with an additional entry.
-    ///
-    /// This operation is immutable and returns a new LootTable.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::{LootTable, LootEntry};
-    /// use roguelike_domain::item::ItemIdentifier;
-    ///
-    /// let table = LootTable::empty();
-    /// let item_identifier = ItemIdentifier::new();
-    /// let entry = LootEntry::new(item_identifier, 0.5, 1, 1).unwrap();
-    /// let new_table = table.with_entry(entry);
-    /// assert_eq!(new_table.len(), 1);
-    /// ```
     #[must_use]
     pub fn with_entry(&self, entry: LootEntry) -> Self {
         Self {
@@ -321,24 +162,6 @@ impl LootTable {
         }
     }
 
-    /// Returns a new LootTable with entries appended from another table.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::{LootTable, LootEntry};
-    /// use roguelike_domain::item::ItemIdentifier;
-    ///
-    /// let item1 = ItemIdentifier::new();
-    /// let item2 = ItemIdentifier::new();
-    /// let entry1 = LootEntry::new(item1, 0.5, 1, 1).unwrap();
-    /// let entry2 = LootEntry::new(item2, 0.3, 1, 2).unwrap();
-    ///
-    /// let table1 = LootTable::empty().with_entry(entry1);
-    /// let table2 = LootTable::empty().with_entry(entry2);
-    /// let combined = table1.merge(&table2);
-    /// assert_eq!(combined.len(), 2);
-    /// ```
     #[must_use]
     pub fn merge(&self, other: &Self) -> Self {
         let mut entries = self.entries.clone();
@@ -348,44 +171,10 @@ impl LootTable {
         Self { entries }
     }
 
-    /// Returns an iterator over the loot entries.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::{LootTable, LootEntry};
-    /// use roguelike_domain::item::ItemIdentifier;
-    ///
-    /// let item_identifier = ItemIdentifier::new();
-    /// let entry = LootEntry::new(item_identifier, 0.5, 1, 1).unwrap();
-    /// let table = LootTable::empty().with_entry(entry);
-    ///
-    /// for loot_entry in table.iter() {
-    ///     println!("Item: {}", loot_entry.item_identifier());
-    /// }
-    /// ```
     pub fn iter(&self) -> impl Iterator<Item = &LootEntry> {
         self.entries.iter()
     }
 
-    /// Returns the sum of all drop rates in the table.
-    ///
-    /// This can be useful for validating that a table's probabilities
-    /// are reasonable.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::{LootTable, LootEntry};
-    /// use roguelike_domain::item::ItemIdentifier;
-    ///
-    /// let item1 = ItemIdentifier::new();
-    /// let item2 = ItemIdentifier::new();
-    /// let entry1 = LootEntry::new(item1, 0.5, 1, 1).unwrap();
-    /// let entry2 = LootEntry::new(item2, 0.3, 1, 1).unwrap();
-    /// let table = LootTable::empty().with_entry(entry1).with_entry(entry2);
-    /// assert!((table.total_drop_rate() - 0.8).abs() < 0.01);
-    /// ```
     #[must_use]
     pub fn total_drop_rate(&self) -> f32 {
         self.entries

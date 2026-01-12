@@ -1,10 +1,3 @@
-//! Player identifier value objects.
-//!
-//! This module provides type-safe identifiers for players:
-//!
-//! - **PlayerIdentifier**: UUID-based unique player identifier
-//! - **PlayerName**: Validated player name with length constraints
-
 use std::fmt;
 use std::str::FromStr;
 
@@ -16,63 +9,20 @@ use crate::common::ValidationError;
 // PlayerIdentifier
 // =============================================================================
 
-/// Unique identifier for a player.
-///
-/// `PlayerIdentifier` wraps a UUID to provide type safety and prevent
-/// accidental mixing with other UUID-based identifiers in the domain.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::player::PlayerIdentifier;
-///
-/// let identifier = PlayerIdentifier::new();
-/// println!("Player ID: {}", identifier);
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PlayerIdentifier(Uuid);
 
 impl PlayerIdentifier {
-    /// Creates a new random `PlayerIdentifier`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::player::PlayerIdentifier;
-    ///
-    /// let identifier = PlayerIdentifier::new();
-    /// ```
     #[must_use]
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
 
-    /// Creates a `PlayerIdentifier` from a UUID.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::player::PlayerIdentifier;
-    /// use uuid::Uuid;
-    ///
-    /// let uuid = Uuid::new_v4();
-    /// let identifier = PlayerIdentifier::from_uuid(uuid);
-    /// ```
     #[must_use]
     pub const fn from_uuid(uuid: Uuid) -> Self {
         Self(uuid)
     }
 
-    /// Returns the inner UUID value.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::player::PlayerIdentifier;
-    ///
-    /// let identifier = PlayerIdentifier::new();
-    /// let uuid = identifier.value();
-    /// ```
     #[must_use]
     pub const fn value(&self) -> Uuid {
         self.0
@@ -111,48 +61,13 @@ impl From<Uuid> for PlayerIdentifier {
 // PlayerName
 // =============================================================================
 
-/// Player name with validation constraints.
-///
-/// `PlayerName` ensures that player names meet the following requirements:
-/// - Non-empty (at least 1 character)
-/// - Maximum 50 characters
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::player::PlayerName;
-///
-/// let name = PlayerName::new("Hero").unwrap();
-/// assert_eq!(name.value(), "Hero");
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PlayerName(String);
 
 impl PlayerName {
-    /// Minimum length for a player name.
     pub const MIN_LENGTH: usize = 1;
-    /// Maximum length for a player name.
     pub const MAX_LENGTH: usize = 50;
 
-    /// Creates a new `PlayerName` with the given value.
-    ///
-    /// Returns an error if the name is empty or exceeds 50 characters.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::player::PlayerName;
-    ///
-    /// let name = PlayerName::new("Hero").unwrap();
-    /// assert_eq!(name.value(), "Hero");
-    ///
-    /// // Empty names are rejected
-    /// assert!(PlayerName::new("").is_err());
-    ///
-    /// // Names exceeding 50 characters are rejected
-    /// let long_name = "a".repeat(51);
-    /// assert!(PlayerName::new(&long_name).is_err());
-    /// ```
     pub fn new(value: impl Into<String>) -> Result<Self, ValidationError> {
         let value = value.into();
         let trimmed = value.trim();
@@ -173,40 +88,16 @@ impl PlayerName {
         Ok(Self(trimmed.to_string()))
     }
 
-    /// Returns the player name as a string slice.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::player::PlayerName;
-    ///
-    /// let name = PlayerName::new("Hero").unwrap();
-    /// assert_eq!(name.value(), "Hero");
-    /// ```
     #[must_use]
     pub fn value(&self) -> &str {
         &self.0
     }
 
-    /// Returns the length of the player name.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::player::PlayerName;
-    ///
-    /// let name = PlayerName::new("Hero").unwrap();
-    /// assert_eq!(name.len(), 4);
-    /// ```
     #[must_use]
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
-    /// Returns true if the player name is empty.
-    ///
-    /// Note: This should always return false for a valid `PlayerName`,
-    /// as empty names are rejected during construction.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()

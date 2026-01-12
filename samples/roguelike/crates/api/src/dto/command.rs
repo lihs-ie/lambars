@@ -1,98 +1,47 @@
-//! Command DTOs for game actions.
-//!
-//! This module provides command data structures for player actions.
-//! Commands use serde's tagged union pattern for type discrimination.
-
 use serde::{Deserialize, Serialize};
 
 // =============================================================================
 // CommandRequest
 // =============================================================================
 
-/// All possible game commands that a player can execute.
-///
-/// Uses serde's internally tagged representation with the "type" field.
-///
-/// # Examples
-///
-/// Move command:
-/// ```json
-/// {
-///   "type": "move",
-///   "direction": "north"
-/// }
-/// ```
-///
-/// Attack command:
-/// ```json
-/// {
-///   "type": "attack",
-///   "target_id": "550e8400-e29b-41d4-a716-446655440000"
-/// }
-/// ```
-///
-/// Wait command:
-/// ```json
-/// {
-///   "type": "wait"
-/// }
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CommandRequest {
-    /// Move the player in a direction.
     Move {
-        /// The direction to move.
         direction: DirectionRequest,
     },
 
-    /// Attack a specific entity.
     Attack {
-        /// The UUID of the target entity.
         target_id: String,
     },
 
-    /// Use an item from the player's inventory.
     UseItem {
-        /// The UUID of the item to use.
         item_id: String,
 
-        /// Optional target entity for the item effect.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target_id: Option<String>,
     },
 
-    /// Pick up an item from the ground.
     PickUp {
-        /// The UUID of the item to pick up.
         item_id: String,
     },
 
-    /// Drop an item from the player's inventory.
     Drop {
-        /// The UUID of the item to drop.
         item_id: String,
     },
 
-    /// Equip an item from the player's inventory.
     Equip {
-        /// The UUID of the item to equip.
         item_id: String,
     },
 
-    /// Unequip an item from a specific equipment slot.
     Unequip {
-        /// The equipment slot to unequip.
         slot: EquipmentSlotRequest,
     },
 
-    /// Wait and skip the current turn.
     Wait,
 
-    /// Descend to the next floor.
     Descend,
 
-    /// Ascend to the previous floor.
     Ascend,
 }
 
@@ -100,17 +49,12 @@ pub enum CommandRequest {
 // DirectionRequest
 // =============================================================================
 
-/// The four cardinal directions for movement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DirectionRequest {
-    /// Move up (negative y direction).
     North,
-    /// Move down (positive y direction).
     South,
-    /// Move right (positive x direction).
     East,
-    /// Move left (negative x direction).
     West,
 }
 
@@ -118,17 +62,12 @@ pub enum DirectionRequest {
 // EquipmentSlotRequest
 // =============================================================================
 
-/// Equipment slot types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EquipmentSlotRequest {
-    /// Weapon slot for swords, staffs, bows, etc.
     Weapon,
-    /// Armor slot for body armor.
     Armor,
-    /// Helmet slot for head protection.
     Helmet,
-    /// Accessory slot for rings, amulets, etc.
     Accessory,
 }
 

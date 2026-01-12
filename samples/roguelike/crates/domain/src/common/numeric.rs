@@ -1,8 +1,3 @@
-//! Numeric value objects for game mechanics.
-//!
-//! This module provides type-safe numeric types with validation
-//! for health, mana, experience, level, and combat statistics.
-
 use std::fmt;
 use std::ops::Add;
 
@@ -12,39 +7,12 @@ use super::errors::ValidationError;
 // Health
 // =============================================================================
 
-/// Health points for characters and entities.
-///
-/// Health values are constrained to 0 <= value <= MAX_HEALTH (9999).
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::common::Health;
-///
-/// let health = Health::new(100).unwrap();
-/// assert_eq!(health.value(), 100);
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Health(u32);
 
 impl Health {
-    /// The maximum allowed health value.
     pub const MAX_HEALTH: u32 = 9999;
 
-    /// Creates a new Health with the given value.
-    ///
-    /// Returns an error if the value exceeds MAX_HEALTH.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::Health;
-    ///
-    /// let health = Health::new(100).unwrap();
-    /// assert_eq!(health.value(), 100);
-    ///
-    /// assert!(Health::new(10000).is_err());
-    /// ```
     pub fn new(value: u32) -> Result<Self, ValidationError> {
         if value > Self::MAX_HEALTH {
             return Err(ValidationError::out_of_range(
@@ -57,35 +25,21 @@ impl Health {
         Ok(Self(value))
     }
 
-    /// Returns the health value.
     #[must_use]
     pub const fn value(&self) -> u32 {
         self.0
     }
 
-    /// Returns zero health.
     #[must_use]
     pub const fn zero() -> Self {
         Self(0)
     }
 
-    /// Returns maximum health.
     #[must_use]
     pub const fn max() -> Self {
         Self(Self::MAX_HEALTH)
     }
 
-    /// Adds health, saturating at MAX_HEALTH.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::Health;
-    ///
-    /// let health = Health::new(9000).unwrap();
-    /// let healed = health.saturating_add(2000);
-    /// assert_eq!(healed.value(), Health::MAX_HEALTH);
-    /// ```
     #[must_use]
     pub const fn saturating_add(&self, amount: u32) -> Self {
         let new_value = self.0.saturating_add(amount);
@@ -96,23 +50,11 @@ impl Health {
         }
     }
 
-    /// Subtracts health, saturating at 0.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::Health;
-    ///
-    /// let health = Health::new(50).unwrap();
-    /// let damaged = health.saturating_sub(100);
-    /// assert_eq!(damaged.value(), 0);
-    /// ```
     #[must_use]
     pub const fn saturating_sub(&self, amount: u32) -> Self {
         Self(self.0.saturating_sub(amount))
     }
 
-    /// Returns true if health is zero.
     #[must_use]
     pub const fn is_zero(&self) -> bool {
         self.0 == 0
@@ -129,19 +71,12 @@ impl fmt::Display for Health {
 // Mana
 // =============================================================================
 
-/// Mana points for magic abilities.
-///
-/// Mana values are constrained to 0 <= value <= MAX_MANA (999).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Mana(u32);
 
 impl Mana {
-    /// The maximum allowed mana value.
     pub const MAX_MANA: u32 = 999;
 
-    /// Creates a new Mana with the given value.
-    ///
-    /// Returns an error if the value exceeds MAX_MANA.
     pub fn new(value: u32) -> Result<Self, ValidationError> {
         if value > Self::MAX_MANA {
             return Err(ValidationError::out_of_range(
@@ -154,25 +89,21 @@ impl Mana {
         Ok(Self(value))
     }
 
-    /// Returns the mana value.
     #[must_use]
     pub const fn value(&self) -> u32 {
         self.0
     }
 
-    /// Returns zero mana.
     #[must_use]
     pub const fn zero() -> Self {
         Self(0)
     }
 
-    /// Returns maximum mana.
     #[must_use]
     pub const fn max() -> Self {
         Self(Self::MAX_MANA)
     }
 
-    /// Adds mana, saturating at MAX_MANA.
     #[must_use]
     pub const fn saturating_add(&self, amount: u32) -> Self {
         let new_value = self.0.saturating_add(amount);
@@ -183,13 +114,11 @@ impl Mana {
         }
     }
 
-    /// Subtracts mana, saturating at 0.
     #[must_use]
     pub const fn saturating_sub(&self, amount: u32) -> Self {
         Self(self.0.saturating_sub(amount))
     }
 
-    /// Returns true if mana is zero.
     #[must_use]
     pub const fn is_zero(&self) -> bool {
         self.0 == 0
@@ -206,42 +135,25 @@ impl fmt::Display for Mana {
 // Experience
 // =============================================================================
 
-/// Experience points for character progression.
-///
-/// Experience has no upper limit and uses u64 for large values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Experience(u64);
 
 impl Experience {
-    /// Creates a new Experience with the given value.
     #[must_use]
     pub const fn new(value: u64) -> Self {
         Self(value)
     }
 
-    /// Returns the experience value.
     #[must_use]
     pub const fn value(&self) -> u64 {
         self.0
     }
 
-    /// Returns zero experience.
     #[must_use]
     pub const fn zero() -> Self {
         Self(0)
     }
 
-    /// Adds experience and returns a new Experience.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::Experience;
-    ///
-    /// let experience = Experience::new(100);
-    /// let gained = experience.add(50);
-    /// assert_eq!(gained.value(), 150);
-    /// ```
     #[must_use]
     pub const fn add(&self, amount: u64) -> Self {
         Self(self.0.saturating_add(amount))
@@ -266,33 +178,13 @@ impl fmt::Display for Experience {
 // Level
 // =============================================================================
 
-/// Character level.
-///
-/// Level values are constrained to MIN_LEVEL (1) <= value <= MAX_LEVEL (99).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Level(u8);
 
 impl Level {
-    /// The minimum level value.
     pub const MIN_LEVEL: u8 = 1;
-    /// The maximum level value.
     pub const MAX_LEVEL: u8 = 99;
 
-    /// Creates a new Level with the given value.
-    ///
-    /// Returns an error if the value is outside the valid range.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::Level;
-    ///
-    /// let level = Level::new(1).unwrap();
-    /// assert_eq!(level.value(), 1);
-    ///
-    /// assert!(Level::new(0).is_err());
-    /// assert!(Level::new(100).is_err());
-    /// ```
     pub fn new(value: u8) -> Result<Self, ValidationError> {
         if !(Self::MIN_LEVEL..=Self::MAX_LEVEL).contains(&value) {
             return Err(ValidationError::out_of_range(
@@ -305,40 +197,21 @@ impl Level {
         Ok(Self(value))
     }
 
-    /// Returns the level value.
     #[must_use]
     pub const fn value(&self) -> u8 {
         self.0
     }
 
-    /// Returns level 1.
     #[must_use]
     pub const fn one() -> Self {
         Self(Self::MIN_LEVEL)
     }
 
-    /// Returns the maximum level.
     #[must_use]
     pub const fn max() -> Self {
         Self(Self::MAX_LEVEL)
     }
 
-    /// Increases the level by 1.
-    ///
-    /// Returns None if already at max level.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::Level;
-    ///
-    /// let level = Level::new(50).unwrap();
-    /// let next = level.level_up().unwrap();
-    /// assert_eq!(next.value(), 51);
-    ///
-    /// let max = Level::max();
-    /// assert!(max.level_up().is_none());
-    /// ```
     #[must_use]
     pub const fn level_up(&self) -> Option<Self> {
         if self.0 >= Self::MAX_LEVEL {
@@ -359,26 +232,20 @@ impl fmt::Display for Level {
 // Attack
 // =============================================================================
 
-/// Attack power value.
-///
-/// Attack has no validation constraints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Attack(u32);
 
 impl Attack {
-    /// Creates a new Attack with the given value.
     #[must_use]
     pub const fn new(value: u32) -> Self {
         Self(value)
     }
 
-    /// Returns the attack value.
     #[must_use]
     pub const fn value(&self) -> u32 {
         self.0
     }
 
-    /// Returns zero attack.
     #[must_use]
     pub const fn zero() -> Self {
         Self(0)
@@ -403,26 +270,20 @@ impl fmt::Display for Attack {
 // Defense
 // =============================================================================
 
-/// Defense power value.
-///
-/// Defense has no validation constraints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Defense(u32);
 
 impl Defense {
-    /// Creates a new Defense with the given value.
     #[must_use]
     pub const fn new(value: u32) -> Self {
         Self(value)
     }
 
-    /// Returns the defense value.
     #[must_use]
     pub const fn value(&self) -> u32 {
         self.0
     }
 
-    /// Returns zero defense.
     #[must_use]
     pub const fn zero() -> Self {
         Self(0)
@@ -447,26 +308,20 @@ impl fmt::Display for Defense {
 // Speed
 // =============================================================================
 
-/// Speed value for action order.
-///
-/// Speed has no validation constraints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Speed(u32);
 
 impl Speed {
-    /// Creates a new Speed with the given value.
     #[must_use]
     pub const fn new(value: u32) -> Self {
         Self(value)
     }
 
-    /// Returns the speed value.
     #[must_use]
     pub const fn value(&self) -> u32 {
         self.0
     }
 
-    /// Returns zero speed.
     #[must_use]
     pub const fn zero() -> Self {
         Self(0)
@@ -491,26 +346,20 @@ impl fmt::Display for Speed {
 // Damage
 // =============================================================================
 
-/// Damage value for combat calculations.
-///
-/// Damage has no validation constraints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Damage(u32);
 
 impl Damage {
-    /// Creates a new Damage with the given value.
     #[must_use]
     pub const fn new(value: u32) -> Self {
         Self(value)
     }
 
-    /// Returns the damage value.
     #[must_use]
     pub const fn value(&self) -> u32 {
         self.0
     }
 
-    /// Returns zero damage.
     #[must_use]
     pub const fn zero() -> Self {
         Self(0)
@@ -535,41 +384,25 @@ impl fmt::Display for Damage {
 // TurnCount
 // =============================================================================
 
-/// Game turn counter.
-///
-/// TurnCount has no upper limit and uses u64.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TurnCount(u64);
 
 impl TurnCount {
-    /// Creates a new TurnCount with the given value.
     #[must_use]
     pub const fn new(value: u64) -> Self {
         Self(value)
     }
 
-    /// Returns the turn count value.
     #[must_use]
     pub const fn value(&self) -> u64 {
         self.0
     }
 
-    /// Returns turn zero.
     #[must_use]
     pub const fn zero() -> Self {
         Self(0)
     }
 
-    /// Returns the next turn.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::TurnCount;
-    ///
-    /// let turn = TurnCount::new(10);
-    /// assert_eq!(turn.next().value(), 11);
-    /// ```
     #[must_use]
     pub const fn next(&self) -> Self {
         Self(self.0.saturating_add(1))
@@ -586,27 +419,10 @@ impl fmt::Display for TurnCount {
 // FloorLevel
 // =============================================================================
 
-/// Dungeon floor level.
-///
-/// FloorLevel must be >= 1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FloorLevel(u32);
 
 impl FloorLevel {
-    /// Creates a new FloorLevel with the given value.
-    ///
-    /// Returns an error if the value is 0.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::FloorLevel;
-    ///
-    /// let floor = FloorLevel::new(1).unwrap();
-    /// assert_eq!(floor.value(), 1);
-    ///
-    /// assert!(FloorLevel::new(0).is_err());
-    /// ```
     pub fn new(value: u32) -> Result<Self, ValidationError> {
         if value == 0 {
             return Err(ValidationError::out_of_range(
@@ -619,48 +435,21 @@ impl FloorLevel {
         Ok(Self(value))
     }
 
-    /// Returns the floor level value.
     #[must_use]
     pub const fn value(&self) -> u32 {
         self.0
     }
 
-    /// Returns the first floor (B1F).
     #[must_use]
     pub const fn first() -> Self {
         Self(1)
     }
 
-    /// Descends to the next floor.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::FloorLevel;
-    ///
-    /// let floor = FloorLevel::new(5).unwrap();
-    /// assert_eq!(floor.descend().value(), 6);
-    /// ```
     #[must_use]
     pub const fn descend(&self) -> Self {
         Self(self.0.saturating_add(1))
     }
 
-    /// Ascends to the previous floor.
-    ///
-    /// Returns None if already on the first floor.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::FloorLevel;
-    ///
-    /// let floor = FloorLevel::new(5).unwrap();
-    /// assert_eq!(floor.ascend().unwrap().value(), 4);
-    ///
-    /// let first = FloorLevel::first();
-    /// assert!(first.ascend().is_none());
-    /// ```
     #[must_use]
     pub const fn ascend(&self) -> Option<Self> {
         if self.0 <= 1 {
@@ -681,30 +470,13 @@ impl fmt::Display for FloorLevel {
 // Stat
 // =============================================================================
 
-/// Base stat value (e.g., strength, dexterity).
-///
-/// Stat values are constrained to MIN_STAT (1) <= value <= MAX_STAT (99).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Stat(u32);
 
 impl Stat {
-    /// The minimum stat value.
     pub const MIN_STAT: u32 = 1;
-    /// The maximum stat value.
     pub const MAX_STAT: u32 = 99;
 
-    /// Creates a new Stat with the given value.
-    ///
-    /// Returns an error if the value is outside the valid range.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::Stat;
-    ///
-    /// let stat = Stat::new(10).unwrap();
-    /// assert_eq!(stat.value(), 10);
-    /// ```
     pub fn new(value: u32) -> Result<Self, ValidationError> {
         if !(Self::MIN_STAT..=Self::MAX_STAT).contains(&value) {
             return Err(ValidationError::out_of_range(
@@ -717,19 +489,16 @@ impl Stat {
         Ok(Self(value))
     }
 
-    /// Returns the stat value.
     #[must_use]
     pub const fn value(&self) -> u32 {
         self.0
     }
 
-    /// Returns the minimum stat.
     #[must_use]
     pub const fn min() -> Self {
         Self(Self::MIN_STAT)
     }
 
-    /// Returns the maximum stat.
     #[must_use]
     pub const fn max() -> Self {
         Self(Self::MAX_STAT)

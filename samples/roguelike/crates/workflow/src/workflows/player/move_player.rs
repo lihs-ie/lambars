@@ -1,30 +1,3 @@
-//! MovePlayer workflow implementation.
-//!
-//! This module provides the workflow for moving the player in the dungeon.
-//! It follows the "IO at the Edges" pattern, separating pure domain logic
-//! from IO operations.
-//!
-//! # Workflow Steps
-//!
-//! 1. [IO] Load session from cache
-//! 2. [Pure] Calculate new position
-//! 3. [Pure] Validate movement (bounds, walkability)
-//! 4. [Pure] Update player position
-//! 5. [Pure] Generate PlayerMoved event
-//! 6. [IO] Update cache
-//! 7. [IO] Append events to event store
-//!
-//! # Examples
-//!
-//! ```ignore
-//! use roguelike_workflow::workflows::player::{move_player, MovePlayerCommand};
-//! use roguelike_domain::common::Direction;
-//!
-//! let workflow = move_player(&cache, &event_store);
-//! let command = MovePlayerCommand::new(game_identifier, Direction::Up);
-//! let result = workflow(command).run_async().await;
-//! ```
-
 use std::time::Duration;
 
 use lambars::effect::AsyncIO;
@@ -42,44 +15,12 @@ use crate::ports::{EventStore, SessionCache, WorkflowResult};
 // Workflow Configuration
 // =============================================================================
 
-/// Default cache time-to-live for game sessions.
 const DEFAULT_CACHE_TIME_TO_LIVE: Duration = Duration::from_secs(300); // 5 minutes
 
 // =============================================================================
 // MovePlayer Workflow
 // =============================================================================
 
-/// Creates a workflow function for moving the player.
-///
-/// This function returns a closure that moves the player in a direction.
-/// It uses higher-order functions to inject dependencies, enabling pure
-/// functional composition and easy testing.
-///
-/// # Type Parameters
-///
-/// * `C` - Cache type implementing `SessionCache`
-/// * `E` - Event store type implementing `EventStore`
-///
-/// # Arguments
-///
-/// * `cache` - The session cache for fast access
-/// * `event_store` - The event store for event sourcing
-///
-/// # Returns
-///
-/// A function that takes a `MovePlayerCommand` and returns an `AsyncIO`
-/// that produces the updated game session or an error.
-///
-/// # Examples
-///
-/// ```ignore
-/// use roguelike_workflow::workflows::player::{move_player, MovePlayerCommand};
-/// use roguelike_domain::common::Direction;
-///
-/// let workflow = move_player(&cache, &event_store);
-/// let command = MovePlayerCommand::new(game_identifier, Direction::Up);
-/// let result = workflow(command).run_async().await;
-/// ```
 pub fn move_player<'a, C, E>(
     cache: &'a C,
     event_store: &'a E,
@@ -135,26 +76,6 @@ where
 // Pure Functions
 // =============================================================================
 
-/// Pure function that performs the move player logic.
-///
-/// This function encapsulates all pure domain logic for moving the player:
-/// - Calculates new position
-/// - Validates movement
-/// - Updates player position
-/// - Generates events
-///
-/// Note: This is a placeholder implementation. The actual implementation
-/// depends on the GameSession structure which is defined by the
-/// repository/cache implementation.
-///
-/// # Arguments
-///
-/// * `session` - The current game session (must implement position access)
-/// * `direction` - The direction to move
-///
-/// # Returns
-///
-/// A result containing the updated session and events, or an error.
 fn move_player_pure<S: Clone>(
     _session: &S,
     _direction: Direction,
@@ -178,32 +99,6 @@ fn move_player_pure<S: Clone>(
     ))
 }
 
-/// Movement calculation pipeline using `pipe!` macro.
-///
-/// This is a pure function that demonstrates how to compose movement logic
-/// with the `pipe!` macro. It calculates and validates a new position.
-///
-/// # Arguments
-///
-/// * `current_position` - The current position
-/// * `direction` - The direction to move
-/// * `floor_bounds` - The floor dimensions (width, height)
-/// * `is_walkable` - A function that checks if a position is walkable
-///
-/// # Returns
-///
-/// `Ok((from, to))` if movement is valid, or an error.
-///
-/// # Example
-///
-/// ```ignore
-/// let result = calculate_movement_pipeline(
-///     current_pos,
-///     Direction::Up,
-///     (80, 40),
-///     |pos| floor.is_walkable(pos),
-/// );
-/// ```
 pub fn calculate_movement_pipeline<F>(
     current_position: Position,
     direction: Direction,
@@ -226,38 +121,11 @@ where
     )
 }
 
-/// Calculates the new position after moving in a direction.
-///
-/// This is a pure function that determines the target position.
-///
-/// # Arguments
-///
-/// * `current` - The current position
-/// * `direction` - The direction to move
-///
-/// # Returns
-///
-/// The new position after moving one step in the given direction.
 #[must_use]
 pub fn calculate_new_position(current: Position, direction: Direction) -> Position {
     current.move_toward(direction)
 }
 
-/// Validates that a movement is legal.
-///
-/// This is a pure function that checks:
-/// - The target position is within floor bounds
-/// - The target tile is walkable
-///
-/// # Arguments
-///
-/// * `floor_bounds` - The floor dimensions (width, height)
-/// * `target` - The target position to move to
-/// * `is_walkable` - A function that checks if a position is walkable
-///
-/// # Returns
-///
-/// `Ok(())` if the movement is valid, or an appropriate `FloorError`.
 pub fn validate_movement<F>(
     floor_bounds: (u32, u32),
     target: Position,
@@ -289,18 +157,6 @@ where
     Ok(())
 }
 
-/// Creates a PlayerMoved event.
-///
-/// This is a pure function that generates the domain event.
-///
-/// # Arguments
-///
-/// * `from` - The position moved from
-/// * `to` - The position moved to
-///
-/// # Returns
-///
-/// A `PlayerMoved` event.
 #[must_use]
 pub fn create_player_moved_event(from: Position, to: Position) -> PlayerMoved {
     PlayerMoved::new(from, to)

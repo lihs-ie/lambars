@@ -1,8 +1,3 @@
-//! API error type with HTTP response conversion.
-//!
-//! This module provides the main error type for API handlers with
-//! automatic conversion to HTTP responses via Axum's `IntoResponse`.
-
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -14,60 +9,28 @@ use crate::dto::response::ErrorResponse;
 // ApiError
 // =============================================================================
 
-/// API error type for HTTP handlers.
-///
-/// This enum represents all possible errors that can occur in API handlers.
-/// Each variant maps to a specific HTTP status code and error response format.
-///
-/// # Examples
-///
-/// ```ignore
-/// use roguelike_api::errors::ApiError;
-///
-/// fn get_game(id: &str) -> Result<Game, ApiError> {
-///     Err(ApiError::not_found("GameSession", id))
-/// }
-/// ```
 #[derive(Debug, Error)]
 pub enum ApiError {
-    /// The requested resource was not found.
     #[error("{entity_type} with identifier '{identifier}' not found")]
     NotFound {
-        /// The type of entity that was not found.
         entity_type: String,
-        /// The identifier used to look up the entity.
         identifier: String,
     },
 
-    /// Validation error for request data.
     #[error("Validation error: {message}")]
     ValidationError {
-        /// The validation error message.
         message: String,
-        /// The field that failed validation, if applicable.
         field: Option<String>,
     },
 
-    /// The command or action is invalid.
     #[error("Invalid command: {reason}")]
-    InvalidCommand {
-        /// The reason the command is invalid.
-        reason: String,
-    },
+    InvalidCommand { reason: String },
 
-    /// A conflict occurred (e.g., resource already exists, invalid state).
     #[error("Conflict: {reason}")]
-    Conflict {
-        /// The reason for the conflict.
-        reason: String,
-    },
+    Conflict { reason: String },
 
-    /// An internal server error occurred.
     #[error("Internal server error: {message}")]
-    InternalError {
-        /// The error message.
-        message: String,
-    },
+    InternalError { message: String },
 }
 
 // =============================================================================
@@ -75,13 +38,6 @@ pub enum ApiError {
 // =============================================================================
 
 impl ApiError {
-    /// Creates a new `NotFound` error.
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// let error = ApiError::not_found("GameSession", "abc-123");
-    /// ```
     #[must_use]
     pub fn not_found(entity_type: impl Into<String>, identifier: impl Into<String>) -> Self {
         Self::NotFound {
@@ -90,13 +46,6 @@ impl ApiError {
         }
     }
 
-    /// Creates a new `ValidationError`.
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// let error = ApiError::validation("Player name must not be empty");
-    /// ```
     #[must_use]
     pub fn validation(message: impl Into<String>) -> Self {
         Self::ValidationError {
@@ -105,13 +54,6 @@ impl ApiError {
         }
     }
 
-    /// Creates a new `ValidationError` with a field name.
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// let error = ApiError::validation_field("player_name", "must not be empty");
-    /// ```
     #[must_use]
     pub fn validation_field(field: impl Into<String>, message: impl Into<String>) -> Self {
         Self::ValidationError {
@@ -120,13 +62,6 @@ impl ApiError {
         }
     }
 
-    /// Creates a new `InvalidCommand` error.
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// let error = ApiError::invalid_command("Cannot move through walls");
-    /// ```
     #[must_use]
     pub fn invalid_command(reason: impl Into<String>) -> Self {
         Self::InvalidCommand {
@@ -134,13 +69,6 @@ impl ApiError {
         }
     }
 
-    /// Creates a new `Conflict` error.
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// let error = ApiError::conflict("Game session has already ended");
-    /// ```
     #[must_use]
     pub fn conflict(reason: impl Into<String>) -> Self {
         Self::Conflict {
@@ -148,13 +76,6 @@ impl ApiError {
         }
     }
 
-    /// Creates a new `InternalError`.
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// let error = ApiError::internal("Database connection failed");
-    /// ```
     #[must_use]
     pub fn internal(message: impl Into<String>) -> Self {
         Self::InternalError {
@@ -168,7 +89,6 @@ impl ApiError {
 // =============================================================================
 
 impl ApiError {
-    /// Returns the HTTP status code for this error.
     #[must_use]
     pub fn status_code(&self) -> StatusCode {
         match self {
@@ -180,7 +100,6 @@ impl ApiError {
         }
     }
 
-    /// Returns the error code string for this error.
     #[must_use]
     pub fn error_code(&self) -> String {
         match self {
@@ -194,13 +113,11 @@ impl ApiError {
         }
     }
 
-    /// Returns true if this error is a client error (4xx).
     #[must_use]
     pub fn is_client_error(&self) -> bool {
         self.status_code().is_client_error()
     }
 
-    /// Returns true if this error is a server error (5xx).
     #[must_use]
     pub fn is_server_error(&self) -> bool {
         self.status_code().is_server_error()

@@ -1,7 +1,3 @@
-//! Armor types and data structures.
-//!
-//! This module provides types for representing armor in the game,
-//! including armor slots and armor-specific data.
 
 use std::fmt;
 
@@ -11,40 +7,14 @@ use crate::common::Defense;
 // ArmorSlot
 // =============================================================================
 
-/// Slots where armor can be equipped.
-///
-/// Each armor piece can only be equipped in its designated slot.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::item::ArmorSlot;
-///
-/// let slot = ArmorSlot::Body;
-/// println!("Equipping to: {}", slot);
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ArmorSlot {
-    /// Main body armor slot (chest, torso).
     Body,
-    /// Head armor slot (helmets, hats).
     Head,
-    /// Accessory slot (rings, amulets).
     Accessory,
 }
 
 impl ArmorSlot {
-    /// Returns the defense multiplier for this slot.
-    ///
-    /// Body armor provides the most defense, followed by head, then accessories.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::item::ArmorSlot;
-    ///
-    /// assert!(ArmorSlot::Body.defense_multiplier() > ArmorSlot::Accessory.defense_multiplier());
-    /// ```
     #[must_use]
     pub const fn defense_multiplier(&self) -> f32 {
         match self {
@@ -54,7 +24,6 @@ impl ArmorSlot {
         }
     }
 
-    /// Returns an array of all armor slots.
     #[must_use]
     pub const fn all() -> [Self; 3] {
         [Self::Body, Self::Head, Self::Accessory]
@@ -76,20 +45,6 @@ impl fmt::Display for ArmorSlot {
 // ArmorData
 // =============================================================================
 
-/// Data specific to armor items.
-///
-/// Contains the defense bonus and the armor slot this item occupies.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::item::{ArmorData, ArmorSlot};
-/// use roguelike_domain::common::Defense;
-///
-/// let armor = ArmorData::new(Defense::new(15), ArmorSlot::Body);
-/// assert_eq!(armor.defense_bonus().value(), 15);
-/// assert_eq!(armor.armor_slot(), ArmorSlot::Body);
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ArmorData {
     defense_bonus: Defense,
@@ -97,12 +52,6 @@ pub struct ArmorData {
 }
 
 impl ArmorData {
-    /// Creates a new `ArmorData`.
-    ///
-    /// # Arguments
-    ///
-    /// * `defense_bonus` - The defense bonus provided by the armor
-    /// * `armor_slot` - The slot this armor occupies
     #[must_use]
     pub const fn new(defense_bonus: Defense, armor_slot: ArmorSlot) -> Self {
         Self {
@@ -111,32 +60,16 @@ impl ArmorData {
         }
     }
 
-    /// Returns the defense bonus provided by the armor.
     #[must_use]
     pub const fn defense_bonus(&self) -> Defense {
         self.defense_bonus
     }
 
-    /// Returns the slot this armor occupies.
     #[must_use]
     pub const fn armor_slot(&self) -> ArmorSlot {
         self.armor_slot
     }
 
-    /// Calculates the effective defense after applying the slot multiplier.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::item::{ArmorData, ArmorSlot};
-    /// use roguelike_domain::common::Defense;
-    ///
-    /// let body_armor = ArmorData::new(Defense::new(100), ArmorSlot::Body);
-    /// let accessory = ArmorData::new(Defense::new(100), ArmorSlot::Accessory);
-    ///
-    /// // Body armor has higher effective defense
-    /// assert!(body_armor.effective_defense() > accessory.effective_defense());
-    /// ```
     #[must_use]
     pub fn effective_defense(&self) -> u32 {
         let base = self.defense_bonus.value() as f32;
@@ -144,7 +77,6 @@ impl ArmorData {
         (base * multiplier) as u32
     }
 
-    /// Returns a new `ArmorData` with the given defense bonus.
     #[must_use]
     pub const fn with_defense_bonus(&self, defense_bonus: Defense) -> Self {
         Self {

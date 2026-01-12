@@ -1,6 +1,3 @@
-//! Item identifier value object.
-//!
-//! This module provides the `ItemIdentifier` type, a unique identifier for items.
 
 use std::fmt;
 
@@ -10,63 +7,20 @@ use uuid::Uuid;
 // ItemIdentifier
 // =============================================================================
 
-/// A unique identifier for an item.
-///
-/// `ItemIdentifier` is a newtype wrapper around UUID that provides
-/// type safety for item identification.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::item::ItemIdentifier;
-///
-/// let identifier = ItemIdentifier::new();
-/// println!("Item ID: {}", identifier);
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ItemIdentifier(Uuid);
 
 impl ItemIdentifier {
-    /// Creates a new random `ItemIdentifier`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::item::ItemIdentifier;
-    ///
-    /// let identifier = ItemIdentifier::new();
-    /// ```
     #[must_use]
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
 
-    /// Creates an `ItemIdentifier` from an existing UUID.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::item::ItemIdentifier;
-    /// use uuid::Uuid;
-    ///
-    /// let uuid = Uuid::new_v4();
-    /// let identifier = ItemIdentifier::from_uuid(uuid);
-    /// ```
     #[must_use]
     pub const fn from_uuid(uuid: Uuid) -> Self {
         Self(uuid)
     }
 
-    /// Returns the underlying UUID.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::item::ItemIdentifier;
-    ///
-    /// let identifier = ItemIdentifier::new();
-    /// let uuid = identifier.as_uuid();
-    /// ```
     #[must_use]
     pub const fn as_uuid(&self) -> &Uuid {
         &self.0

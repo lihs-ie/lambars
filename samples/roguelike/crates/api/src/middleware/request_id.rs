@@ -1,8 +1,3 @@
-//! Request ID middleware for request tracing.
-//!
-//! This module provides middleware to extract or generate request IDs
-//! from the `X-Request-ID` header for distributed tracing.
-
 use std::task::{Context, Poll};
 
 use axum::extract::FromRequestParts;
@@ -13,69 +8,31 @@ use futures::future::BoxFuture;
 use tower::{Layer, Service};
 use uuid::Uuid;
 
-/// The header name for request IDs.
 pub static REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
 
 // =============================================================================
 // RequestId
 // =============================================================================
 
-/// A unique identifier for a request.
-///
-/// This type can be extracted from handlers to access the current request's ID.
-///
-/// # Examples
-///
-/// ```ignore
-/// use roguelike_api::middleware::RequestId;
-/// use axum::extract::Extension;
-///
-/// async fn handler(Extension(request_id): Extension<RequestId>) -> String {
-///     format!("Request ID: {}", request_id.as_str())
-/// }
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RequestId(String);
 
 impl RequestId {
-    /// Creates a new `RequestId` from a string.
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// let id = RequestId::new("abc-123");
-    /// ```
     #[must_use]
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
 
-    /// Generates a new random `RequestId` using UUID v4.
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// let id = RequestId::generate();
-    /// ```
     #[must_use]
     pub fn generate() -> Self {
         Self(Uuid::new_v4().to_string())
     }
 
-    /// Returns the request ID as a string slice.
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// let id = RequestId::new("abc-123");
-    /// assert_eq!(id.as_str(), "abc-123");
-    /// ```
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
-    /// Consumes the `RequestId` and returns the inner string.
     #[must_use]
     pub fn into_string(self) -> String {
         self.0
@@ -131,28 +88,10 @@ where
 // RequestIdLayer
 // =============================================================================
 
-/// Layer that adds request ID propagation to requests.
-///
-/// This layer will:
-/// 1. Extract an existing `X-Request-ID` header if present
-/// 2. Generate a new UUID v4 if no header exists
-/// 3. Add the request ID to the response headers
-///
-/// # Examples
-///
-/// ```ignore
-/// use roguelike_api::middleware::RequestIdLayer;
-/// use axum::Router;
-///
-/// let app = Router::new()
-///     .route("/api/games", get(list_games))
-///     .layer(RequestIdLayer::new());
-/// ```
 #[derive(Debug, Clone, Default)]
 pub struct RequestIdLayer;
 
 impl RequestIdLayer {
-    /// Creates a new `RequestIdLayer`.
     #[must_use]
     pub fn new() -> Self {
         Self
@@ -171,7 +110,6 @@ impl<Service> Layer<Service> for RequestIdLayer {
 // RequestIdService
 // =============================================================================
 
-/// Service that handles request ID propagation.
 #[derive(Debug, Clone)]
 pub struct RequestIdService<Service> {
     inner: Service,

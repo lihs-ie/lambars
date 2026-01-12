@@ -1,10 +1,3 @@
-//! Test helpers for API integration tests.
-//!
-//! This module provides mock implementations and test utilities
-//! for testing API handlers and routes.
-//!
-//! Note: Some helper methods are prepared for future use in integration tests.
-
 #![allow(dead_code)]
 
 use std::collections::HashMap;
@@ -23,24 +16,18 @@ use roguelike_api::state::AppState;
 // Mock GameSession
 // =============================================================================
 
-/// A simple mock game session for testing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MockGameSession {
-    /// The unique identifier for this game session.
     pub identifier: GameIdentifier,
 
-    /// The player's name.
     pub player_name: String,
 
-    /// The current turn count.
     pub turn_count: u32,
 
-    /// Whether the game is active.
     pub is_active: bool,
 }
 
 impl MockGameSession {
-    /// Creates a new mock game session.
     #[must_use]
     pub fn new(identifier: GameIdentifier, player_name: impl Into<String>) -> Self {
         Self {
@@ -51,19 +38,16 @@ impl MockGameSession {
         }
     }
 
-    /// Returns the game session identifier.
     #[must_use]
     pub fn identifier(&self) -> &GameIdentifier {
         &self.identifier
     }
 
-    /// Returns a new session with incremented turn count.
     #[must_use]
     pub fn with_turn_count(self, turn_count: u32) -> Self {
         Self { turn_count, ..self }
     }
 
-    /// Returns a new session with ended state.
     #[must_use]
     pub fn ended(self) -> Self {
         Self {
@@ -77,14 +61,12 @@ impl MockGameSession {
 // MockGameSessionRepository
 // =============================================================================
 
-/// Mock implementation of `GameSessionRepository` for testing.
 #[derive(Clone)]
 pub struct MockGameSessionRepository {
     sessions: Arc<RwLock<HashMap<GameIdentifier, MockGameSession>>>,
 }
 
 impl MockGameSessionRepository {
-    /// Creates a new empty mock repository.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -92,7 +74,6 @@ impl MockGameSessionRepository {
         }
     }
 
-    /// Creates a mock repository with pre-populated sessions.
     #[must_use]
     pub fn with_sessions(sessions: Vec<MockGameSession>) -> Self {
         let map = sessions.into_iter().map(|s| (s.identifier, s)).collect();
@@ -101,7 +82,6 @@ impl MockGameSessionRepository {
         }
     }
 
-    /// Adds a session to the repository (for test setup).
     pub fn add_session(&self, session: MockGameSession) {
         self.sessions
             .write()
@@ -109,13 +89,11 @@ impl MockGameSessionRepository {
             .insert(session.identifier, session);
     }
 
-    /// Gets all sessions (for test assertions).
     #[must_use]
     pub fn get_all_sessions(&self) -> Vec<MockGameSession> {
         self.sessions.read().unwrap().values().cloned().collect()
     }
 
-    /// Returns the number of sessions (for test assertions).
     #[must_use]
     pub fn count(&self) -> usize {
         self.sessions.read().unwrap().len()
@@ -174,14 +152,12 @@ impl GameSessionRepository for MockGameSessionRepository {
 // MockSessionCache
 // =============================================================================
 
-/// Mock implementation of `SessionCache` for testing.
 #[derive(Clone)]
 pub struct MockSessionCache {
     cache: Arc<RwLock<HashMap<GameIdentifier, MockGameSession>>>,
 }
 
 impl MockSessionCache {
-    /// Creates a new empty mock cache.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -189,13 +165,11 @@ impl MockSessionCache {
         }
     }
 
-    /// Returns the number of cached sessions.
     #[must_use]
     pub fn count(&self) -> usize {
         self.cache.read().unwrap().len()
     }
 
-    /// Checks if a session is cached.
     #[must_use]
     pub fn contains(&self, identifier: &GameIdentifier) -> bool {
         self.cache.read().unwrap().contains_key(identifier)
@@ -244,14 +218,12 @@ impl SessionCache for MockSessionCache {
 // MockEventStore
 // =============================================================================
 
-/// Mock implementation of `EventStore` for testing.
 #[derive(Clone)]
 pub struct MockEventStore {
     events: Arc<RwLock<HashMap<GameIdentifier, Vec<GameSessionEvent>>>>,
 }
 
 impl MockEventStore {
-    /// Creates a new empty mock event store.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -259,7 +231,6 @@ impl MockEventStore {
         }
     }
 
-    /// Returns all events for a session (for test assertions).
     #[must_use]
     pub fn get_events(&self, session_identifier: &GameIdentifier) -> Vec<GameSessionEvent> {
         self.events
@@ -270,7 +241,6 @@ impl MockEventStore {
             .unwrap_or_default()
     }
 
-    /// Returns the total number of events across all sessions.
     #[must_use]
     pub fn total_event_count(&self) -> usize {
         self.events.read().unwrap().values().map(|v| v.len()).sum()
@@ -337,16 +307,12 @@ impl EventStore for MockEventStore {
 // MockRandomGenerator
 // =============================================================================
 
-/// Mock implementation of `RandomGenerator` for testing.
-///
-/// Generates deterministic sequences for reproducible tests.
 #[derive(Clone)]
 pub struct MockRandomGenerator {
     seed_counter: Arc<AtomicU64>,
 }
 
 impl MockRandomGenerator {
-    /// Creates a new mock random generator with the default seed.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -354,7 +320,6 @@ impl MockRandomGenerator {
         }
     }
 
-    /// Creates a mock random generator starting from a specific seed.
     #[must_use]
     pub fn with_seed(initial_seed: u64) -> Self {
         Self {
@@ -362,7 +327,6 @@ impl MockRandomGenerator {
         }
     }
 
-    /// Returns the current seed counter value.
     #[must_use]
     pub fn current_seed(&self) -> u64 {
         self.seed_counter.load(Ordering::SeqCst)
@@ -396,7 +360,6 @@ impl RandomGenerator for MockRandomGenerator {
 // TestAppBuilder
 // =============================================================================
 
-/// Builder for creating test application routers with mock dependencies.
 pub struct TestAppBuilder {
     repository: MockGameSessionRepository,
     cache: MockSessionCache,
@@ -405,7 +368,6 @@ pub struct TestAppBuilder {
 }
 
 impl TestAppBuilder {
-    /// Creates a new test app builder with default mocks.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -416,42 +378,36 @@ impl TestAppBuilder {
         }
     }
 
-    /// Sets the mock repository.
     #[must_use]
     pub fn with_repository(mut self, repository: MockGameSessionRepository) -> Self {
         self.repository = repository;
         self
     }
 
-    /// Sets the mock cache.
     #[must_use]
     pub fn with_cache(mut self, cache: MockSessionCache) -> Self {
         self.cache = cache;
         self
     }
 
-    /// Sets the mock event store.
     #[must_use]
     pub fn with_event_store(mut self, event_store: MockEventStore) -> Self {
         self.event_store = event_store;
         self
     }
 
-    /// Sets the mock random generator.
     #[must_use]
     pub fn with_random(mut self, random: MockRandomGenerator) -> Self {
         self.random = random;
         self
     }
 
-    /// Adds a pre-existing game session to the repository.
     #[must_use]
     pub fn with_session(self, session: MockGameSession) -> Self {
         self.repository.add_session(session);
         self
     }
 
-    /// Builds the test app state.
     #[must_use]
     pub fn build_state(
         self,
@@ -460,11 +416,6 @@ impl TestAppBuilder {
         AppState::new(self.repository, self.cache, self.event_store, self.random)
     }
 
-    /// Builds a test router with the configured state.
-    ///
-    /// Note: This returns an empty router. The actual routes should be
-    /// configured separately using `routes::create_router()` when
-    /// the handlers are implemented.
     pub fn build_router(self) -> Router {
         let state = self.build_state();
         Router::new().with_state(state)
@@ -481,19 +432,16 @@ impl Default for TestAppBuilder {
 // Test Fixtures
 // =============================================================================
 
-/// Creates a test game session with default values.
 #[must_use]
 pub fn create_test_session() -> MockGameSession {
     MockGameSession::new(GameIdentifier::new(), "TestPlayer")
 }
 
-/// Creates a test game session with a specific name.
 #[must_use]
 pub fn create_test_session_with_name(name: impl Into<String>) -> MockGameSession {
     MockGameSession::new(GameIdentifier::new(), name)
 }
 
-/// Creates a test game session with a specific identifier.
 #[must_use]
 pub fn create_test_session_with_id(
     identifier: GameIdentifier,
@@ -502,7 +450,6 @@ pub fn create_test_session_with_id(
     MockGameSession::new(identifier, name)
 }
 
-/// Creates multiple test sessions.
 #[must_use]
 pub fn create_test_sessions(count: usize) -> Vec<MockGameSession> {
     (0..count)

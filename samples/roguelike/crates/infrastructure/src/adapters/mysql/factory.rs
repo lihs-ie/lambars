@@ -1,8 +1,3 @@
-//! MySQL connection pool factory.
-//!
-//! This module provides the [`MySqlPoolFactory`] for creating MySQL connection pools
-//! with support for both synchronous and asynchronous creation patterns.
-
 use lambars::effect::AsyncIO;
 use sqlx::mysql::MySqlPoolOptions;
 
@@ -13,25 +8,6 @@ use crate::errors::InfraError;
 // MySqlPoolFactory
 // =============================================================================
 
-/// Factory for creating MySQL connection pools.
-///
-/// This struct provides static methods for creating MySQL connection pools
-/// using configurations defined in [`MySqlPoolConfig`]. It supports both
-/// synchronous and asynchronous pool creation patterns.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// use roguelike_infrastructure::adapters::mysql::{MySqlPoolConfig, MySqlPoolFactory};
-///
-/// // Create a pool synchronously (for use outside async context)
-/// let config = MySqlPoolConfig::with_url("mysql://localhost/db");
-/// let pool = MySqlPoolFactory::create_pool(&config)?;
-///
-/// // Create a pool asynchronously using AsyncIO
-/// let async_pool = MySqlPoolFactory::create_pool_async(&config);
-/// let pool = async_pool.run_async().await?;
-/// ```
 #[derive(Debug, Clone, Copy)]
 pub struct MySqlPoolFactory;
 
@@ -40,39 +16,6 @@ pub struct MySqlPoolFactory;
 // =============================================================================
 
 impl MySqlPoolFactory {
-    /// Creates a MySQL connection pool synchronously.
-    ///
-    /// This method blocks the current thread until the pool is created.
-    /// It should be used outside of async contexts (e.g., during application startup).
-    ///
-    /// # Arguments
-    ///
-    /// * `config` - The pool configuration.
-    ///
-    /// # Returns
-    ///
-    /// A `Result` containing the created pool or an infrastructure error.
-    ///
-    /// # Errors
-    ///
-    /// Returns `InfraError::Connection` if the connection to the database fails.
-    ///
-    /// # Panics
-    ///
-    /// Panics if called from within an async runtime context, as this creates
-    /// a nested runtime which is not allowed by tokio.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// use roguelike_infrastructure::adapters::mysql::{MySqlPoolConfig, MySqlPoolFactory};
-    ///
-    /// fn main() -> Result<(), Box<dyn std::error::Error>> {
-    ///     let config = MySqlPoolConfig::with_url("mysql://localhost/db");
-    ///     let pool = MySqlPoolFactory::create_pool(&config)?;
-    ///     Ok(())
-    /// }
-    /// ```
     pub fn create_pool(config: &MySqlPoolConfig) -> Result<MySqlPool, InfraError> {
         let runtime = tokio::runtime::Runtime::new().map_err(|error| {
             InfraError::database_connection(format!("failed to create tokio runtime: {}", error))
@@ -81,39 +24,6 @@ impl MySqlPoolFactory {
         runtime.block_on(Self::create_pool_internal(config))
     }
 
-    /// Creates an `AsyncIO` action that, when executed, creates a MySQL connection pool.
-    ///
-    /// This method returns an `AsyncIO` that describes the pool creation operation
-    /// without executing it. The actual connection is established only when
-    /// `run_async().await` is called.
-    ///
-    /// # Arguments
-    ///
-    /// * `config` - The pool configuration.
-    ///
-    /// # Returns
-    ///
-    /// An `AsyncIO<Result<MySqlPool, InfraError>>` that can be composed with other
-    /// async operations before execution.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// use roguelike_infrastructure::adapters::mysql::{MySqlPoolConfig, MySqlPoolFactory};
-    ///
-    /// #[tokio::main]
-    /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    ///     let config = MySqlPoolConfig::with_url("mysql://localhost/db");
-    ///
-    ///     // Create the AsyncIO action (no connection yet)
-    ///     let create_pool_action = MySqlPoolFactory::create_pool_async(&config);
-    ///
-    ///     // Execute the action to create the pool
-    ///     let pool = create_pool_action.run_async().await?;
-    ///
-    ///     Ok(())
-    /// }
-    /// ```
     #[must_use]
     pub fn create_pool_async(config: &MySqlPoolConfig) -> AsyncIO<Result<MySqlPool, InfraError>> {
         let url = config.url.clone();
@@ -134,9 +44,6 @@ impl MySqlPoolFactory {
         })
     }
 
-    /// Internal helper method to create a pool asynchronously.
-    ///
-    /// This is used by both `create_pool` and `create_pool_async`.
     async fn create_pool_internal(config: &MySqlPoolConfig) -> Result<MySqlPool, InfraError> {
         let mut pool_options = MySqlPoolOptions::new()
             .max_connections(config.max_connections)
@@ -249,8 +156,6 @@ mod tests {
     mod error_handling_tests {
         use super::*;
 
-        /// Note: Actual connection error tests should be in integration tests
-        /// with proper database setup. This test validates the error type.
         #[rstest]
         fn invalid_url_produces_connection_error() {
             let config = MySqlPoolConfig::with_url("mysql://invalid:host:port/db");

@@ -1,7 +1,3 @@
-//! Game session identifier value object.
-//!
-//! This module provides a type-safe identifier for game sessions.
-
 use std::fmt;
 use std::str::FromStr;
 
@@ -13,57 +9,15 @@ use crate::common::ValidationError;
 // GameIdentifier
 // =============================================================================
 
-/// Unique identifier for a game session.
-///
-/// This is a newtype wrapper around UUID that provides type safety
-/// and prevents mixing game identifiers with other UUID-based identifiers.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::game_session::GameIdentifier;
-///
-/// // Generate a new unique identifier
-/// let identifier = GameIdentifier::new();
-///
-/// // Parse from a string
-/// let parsed = "550e8400-e29b-41d4-a716-446655440000".parse::<GameIdentifier>();
-/// assert!(parsed.is_ok());
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GameIdentifier(Uuid);
 
 impl GameIdentifier {
-    /// Creates a new unique game identifier.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::GameIdentifier;
-    ///
-    /// let identifier1 = GameIdentifier::new();
-    /// let identifier2 = GameIdentifier::new();
-    /// assert_ne!(identifier1, identifier2);
-    /// ```
     #[must_use]
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
 
-    /// Creates a game identifier from an existing UUID.
-    ///
-    /// Returns an error if the UUID is nil (all zeros).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::GameIdentifier;
-    /// use uuid::Uuid;
-    ///
-    /// let uuid = Uuid::new_v4();
-    /// let identifier = GameIdentifier::from_uuid(uuid).unwrap();
-    /// assert_eq!(identifier.as_uuid(), &uuid);
-    /// ```
     pub fn from_uuid(uuid: Uuid) -> Result<Self, ValidationError> {
         if uuid.is_nil() {
             return Err(ValidationError::empty_value("game_identifier"));
@@ -71,33 +25,11 @@ impl GameIdentifier {
         Ok(Self(uuid))
     }
 
-    /// Returns a reference to the underlying UUID.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::GameIdentifier;
-    ///
-    /// let identifier = GameIdentifier::new();
-    /// let uuid = identifier.as_uuid();
-    /// assert!(!uuid.is_nil());
-    /// ```
     #[must_use]
     pub const fn as_uuid(&self) -> &Uuid {
         &self.0
     }
 
-    /// Converts the identifier to a hyphenated string representation.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::GameIdentifier;
-    ///
-    /// let identifier = GameIdentifier::new();
-    /// let string = identifier.to_string();
-    /// assert_eq!(string.len(), 36); // UUID hyphenated format
-    /// ```
     #[must_use]
     pub fn to_hyphenated_string(&self) -> String {
         self.0.hyphenated().to_string()

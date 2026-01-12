@@ -1,70 +1,31 @@
-//! Status effect types for character buffs and debuffs.
-//!
-//! This module provides types for representing temporary effects
-//! that can be applied to characters during gameplay.
-
 use std::fmt;
 
 // =============================================================================
 // StatusEffectType
 // =============================================================================
 
-/// Types of status effects that can be applied to entities.
-///
-/// Status effects are divided into debuffs (negative effects) and
-/// buffs (positive effects).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StatusEffectType {
-    /// Deals damage over time.
     Poison,
-    /// Deals fire damage over time.
     Burn,
-    /// Prevents movement and reduces defense.
     Freeze,
-    /// Prevents all actions.
     Stun,
-    /// Increases action speed.
     Haste,
-    /// Reduces incoming damage.
     Shield,
-    /// Restores health over time.
     Regeneration,
 }
 
 impl StatusEffectType {
-    /// Returns true if this is a negative effect (debuff).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::StatusEffectType;
-    ///
-    /// assert!(StatusEffectType::Poison.is_debuff());
-    /// assert!(!StatusEffectType::Haste.is_debuff());
-    /// ```
     #[must_use]
     pub const fn is_debuff(&self) -> bool {
         matches!(self, Self::Poison | Self::Burn | Self::Freeze | Self::Stun)
     }
 
-    /// Returns true if this is a positive effect (buff).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::StatusEffectType;
-    ///
-    /// assert!(StatusEffectType::Haste.is_buff());
-    /// assert!(!StatusEffectType::Poison.is_buff());
-    /// ```
     #[must_use]
     pub const fn is_buff(&self) -> bool {
         matches!(self, Self::Haste | Self::Shield | Self::Regeneration)
     }
 
-    /// Returns true if multiple instances of this effect can stack.
-    ///
-    /// Currently, Shield is the only stackable effect.
     #[must_use]
     pub const fn can_stack(&self) -> bool {
         matches!(self, Self::Shield)
@@ -90,20 +51,6 @@ impl fmt::Display for StatusEffectType {
 // StatusEffect
 // =============================================================================
 
-/// An active status effect with duration and potency.
-///
-/// Status effects have a type, remaining duration in turns,
-/// and a potency value that determines the effect strength.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::common::{StatusEffect, StatusEffectType};
-///
-/// let poison = StatusEffect::new(StatusEffectType::Poison, 3, 5);
-/// assert_eq!(poison.remaining_turns(), 3);
-/// assert_eq!(poison.potency(), 5);
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StatusEffect {
     effect_type: StatusEffectType,
@@ -112,13 +59,6 @@ pub struct StatusEffect {
 }
 
 impl StatusEffect {
-    /// Creates a new status effect.
-    ///
-    /// # Arguments
-    ///
-    /// * `effect_type` - The type of effect
-    /// * `remaining_turns` - Duration in turns
-    /// * `potency` - Effect strength
     #[must_use]
     pub const fn new(effect_type: StatusEffectType, remaining_turns: u32, potency: u32) -> Self {
         Self {
@@ -128,40 +68,21 @@ impl StatusEffect {
         }
     }
 
-    /// Returns the type of this effect.
     #[must_use]
     pub const fn effect_type(&self) -> StatusEffectType {
         self.effect_type
     }
 
-    /// Returns the remaining duration in turns.
     #[must_use]
     pub const fn remaining_turns(&self) -> u32 {
         self.remaining_turns
     }
 
-    /// Returns the effect potency.
     #[must_use]
     pub const fn potency(&self) -> u32 {
         self.potency
     }
 
-    /// Advances the effect by one turn.
-    ///
-    /// Returns None if the effect has expired (remaining_turns reaches 0).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::{StatusEffect, StatusEffectType};
-    ///
-    /// let effect = StatusEffect::new(StatusEffectType::Poison, 2, 5);
-    /// let ticked = effect.tick().unwrap();
-    /// assert_eq!(ticked.remaining_turns(), 1);
-    ///
-    /// let expired = ticked.tick();
-    /// assert!(expired.is_none());
-    /// ```
     #[must_use]
     pub const fn tick(&self) -> Option<Self> {
         if self.remaining_turns <= 1 {
@@ -175,13 +96,11 @@ impl StatusEffect {
         }
     }
 
-    /// Returns true if the effect has expired.
     #[must_use]
     pub const fn is_expired(&self) -> bool {
         self.remaining_turns == 0
     }
 
-    /// Returns a new effect with the given potency.
     #[must_use]
     pub const fn with_potency(&self, potency: u32) -> Self {
         Self {

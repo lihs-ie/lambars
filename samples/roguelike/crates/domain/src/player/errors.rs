@@ -1,9 +1,3 @@
-//! Player domain error types.
-//!
-//! This module provides error types specific to the player domain:
-//!
-//! - **PlayerError**: All possible player-related errors
-
 use std::error::Error;
 use std::fmt;
 
@@ -13,78 +7,40 @@ use super::inventory::EquipmentSlot;
 // PlayerError
 // =============================================================================
 
-/// Errors that can occur within the Player domain.
-///
-/// This enum represents all possible error conditions related to player
-/// operations such as movement, combat, inventory management, and leveling.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::player::PlayerError;
-///
-/// let error = PlayerError::HealthExhausted;
-/// println!("Error: {}", error);
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlayerError {
-    /// The specified player was not found.
     PlayerNotFound {
-        /// The identifier of the player that was not found.
         player_identifier: String,
     },
 
-    /// The player's health has been exhausted (HP is 0).
     HealthExhausted,
 
-    /// The player does not have enough mana for the action.
     ManaInsufficient {
-        /// The amount of mana required.
         required: u32,
-        /// The amount of mana currently available.
         available: u32,
     },
 
-    /// The player's inventory is full.
     InventoryFull {
-        /// The maximum capacity of the inventory.
         capacity: u32,
     },
 
-    /// The specified item was not found in the player's inventory.
     ItemNotInInventory {
-        /// The identifier of the item that was not found.
         item_identifier: String,
     },
 
-    /// The equipment slot is already occupied.
     EquipmentSlotOccupied {
-        /// The slot that is occupied.
         slot: EquipmentSlot,
     },
 
-    /// The item type cannot be equipped in the specified slot.
     CannotEquipItemType {
-        /// The type of the item that cannot be equipped.
         item_type: String,
-        /// The slot where the item was attempted to be equipped.
         slot: EquipmentSlot,
     },
 
-    /// The player has reached the maximum level.
     LevelCapReached,
 }
 
 impl PlayerError {
-    /// Creates a `PlayerNotFound` error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::player::PlayerError;
-    ///
-    /// let error = PlayerError::player_not_found("player-123");
-    /// ```
     #[must_use]
     pub fn player_not_found(player_identifier: impl Into<String>) -> Self {
         Self::PlayerNotFound {
@@ -92,16 +48,6 @@ impl PlayerError {
         }
     }
 
-    /// Creates a `ManaInsufficient` error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::player::PlayerError;
-    ///
-    /// let error = PlayerError::mana_insufficient(50, 30);
-    /// assert!(matches!(error, PlayerError::ManaInsufficient { required: 50, available: 30 }));
-    /// ```
     #[must_use]
     pub const fn mana_insufficient(required: u32, available: u32) -> Self {
         Self::ManaInsufficient {
@@ -110,29 +56,11 @@ impl PlayerError {
         }
     }
 
-    /// Creates an `InventoryFull` error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::player::PlayerError;
-    ///
-    /// let error = PlayerError::inventory_full(20);
-    /// ```
     #[must_use]
     pub const fn inventory_full(capacity: u32) -> Self {
         Self::InventoryFull { capacity }
     }
 
-    /// Creates an `ItemNotInInventory` error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::player::PlayerError;
-    ///
-    /// let error = PlayerError::item_not_in_inventory("potion-001");
-    /// ```
     #[must_use]
     pub fn item_not_in_inventory(item_identifier: impl Into<String>) -> Self {
         Self::ItemNotInInventory {
@@ -140,29 +68,11 @@ impl PlayerError {
         }
     }
 
-    /// Creates an `EquipmentSlotOccupied` error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::player::{PlayerError, EquipmentSlot};
-    ///
-    /// let error = PlayerError::equipment_slot_occupied(EquipmentSlot::Weapon);
-    /// ```
     #[must_use]
     pub const fn equipment_slot_occupied(slot: EquipmentSlot) -> Self {
         Self::EquipmentSlotOccupied { slot }
     }
 
-    /// Creates a `CannotEquipItemType` error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::player::{PlayerError, EquipmentSlot};
-    ///
-    /// let error = PlayerError::cannot_equip_item_type("Potion", EquipmentSlot::Weapon);
-    /// ```
     #[must_use]
     pub fn cannot_equip_item_type(item_type: impl Into<String>, slot: EquipmentSlot) -> Self {
         Self::CannotEquipItemType {
@@ -171,31 +81,11 @@ impl PlayerError {
         }
     }
 
-    /// Returns true if this error indicates the player is dead.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::player::PlayerError;
-    ///
-    /// assert!(PlayerError::HealthExhausted.is_death_related());
-    /// assert!(!PlayerError::LevelCapReached.is_death_related());
-    /// ```
     #[must_use]
     pub const fn is_death_related(&self) -> bool {
         matches!(self, Self::HealthExhausted)
     }
 
-    /// Returns true if this error is related to inventory management.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::player::PlayerError;
-    ///
-    /// assert!(PlayerError::inventory_full(20).is_inventory_related());
-    /// assert!(!PlayerError::HealthExhausted.is_inventory_related());
-    /// ```
     #[must_use]
     pub const fn is_inventory_related(&self) -> bool {
         matches!(
@@ -204,17 +94,6 @@ impl PlayerError {
         )
     }
 
-    /// Returns true if this error is related to equipment management.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::player::{PlayerError, EquipmentSlot};
-    ///
-    /// let error = PlayerError::equipment_slot_occupied(EquipmentSlot::Weapon);
-    /// assert!(error.is_equipment_related());
-    /// assert!(!PlayerError::HealthExhausted.is_equipment_related());
-    /// ```
     #[must_use]
     pub const fn is_equipment_related(&self) -> bool {
         matches!(
@@ -223,19 +102,6 @@ impl PlayerError {
         )
     }
 
-    /// Returns true if this error is recoverable.
-    ///
-    /// Recoverable errors are those that don't permanently prevent gameplay,
-    /// such as full inventory or insufficient mana.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::player::PlayerError;
-    ///
-    /// assert!(PlayerError::inventory_full(20).is_recoverable());
-    /// assert!(!PlayerError::HealthExhausted.is_recoverable());
-    /// ```
     #[must_use]
     pub const fn is_recoverable(&self) -> bool {
         match self {

@@ -1,8 +1,3 @@
-//! Coordinate types for 2D positioning.
-//!
-//! This module provides types for representing positions, directions,
-//! and distances in a 2D grid-based game world.
-
 use std::fmt;
 use std::ops::{Add, Sub};
 
@@ -10,20 +5,6 @@ use std::ops::{Add, Sub};
 // Position
 // =============================================================================
 
-/// A 2D coordinate position on the game grid.
-///
-/// Position is immutable and all operations return new Position values.
-/// Supports addition and subtraction via operator overloading.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::common::Position;
-///
-/// let position = Position::new(5, 3);
-/// assert_eq!(position.x(), 5);
-/// assert_eq!(position.y(), 3);
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Position {
     x: i32,
@@ -31,62 +12,27 @@ pub struct Position {
 }
 
 impl Position {
-    /// Creates a new Position with the given x and y coordinates.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::Position;
-    ///
-    /// let origin = Position::new(0, 0);
-    /// assert_eq!(origin.x(), 0);
-    /// assert_eq!(origin.y(), 0);
-    /// ```
     #[must_use]
     pub const fn new(x: i32, y: i32) -> Self {
         Self { x, y }
     }
 
-    /// Returns the x coordinate.
     #[must_use]
     pub const fn x(&self) -> i32 {
         self.x
     }
 
-    /// Returns the y coordinate.
     #[must_use]
     pub const fn y(&self) -> i32 {
         self.y
     }
 
-    /// Returns a new Position moved one step in the given direction.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::{Position, Direction};
-    ///
-    /// let position = Position::new(5, 5);
-    /// let moved = position.move_toward(Direction::Up);
-    /// assert_eq!(moved, Position::new(5, 4));
-    /// ```
     #[must_use]
     pub const fn move_toward(&self, direction: Direction) -> Self {
         let offset = direction.to_offset();
         Self::new(self.x + offset.x, self.y + offset.y)
     }
 
-    /// Calculates the Manhattan distance to another Position.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::{Position, Distance};
-    ///
-    /// let from = Position::new(0, 0);
-    /// let to = Position::new(3, 4);
-    /// assert_eq!(from.distance_to(&to), Distance::new(7));
-    /// ```
     #[must_use]
     pub fn distance_to(&self, other: &Self) -> Distance {
         let dx = (self.x - other.x).unsigned_abs();
@@ -94,33 +40,11 @@ impl Position {
         Distance::new(dx + dy)
     }
 
-    /// Adds two Positions together.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::Position;
-    ///
-    /// let position_a = Position::new(2, 3);
-    /// let position_b = Position::new(1, 2);
-    /// assert_eq!(position_a.add(&position_b), Position::new(3, 5));
-    /// ```
     #[must_use]
     pub const fn add(&self, other: &Self) -> Self {
         Self::new(self.x + other.x, self.y + other.y)
     }
 
-    /// Subtracts another Position from this one.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::Position;
-    ///
-    /// let position_a = Position::new(5, 7);
-    /// let position_b = Position::new(2, 3);
-    /// assert_eq!(position_a.subtract(&position_b), Position::new(3, 4));
-    /// ```
     #[must_use]
     pub const fn subtract(&self, other: &Self) -> Self {
         Self::new(self.x - other.x, self.y - other.y)
@@ -153,41 +77,15 @@ impl fmt::Display for Position {
 // Direction
 // =============================================================================
 
-/// The four cardinal directions.
-///
-/// Directions are used for movement and orientation in the game world.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::common::Direction;
-///
-/// let direction = Direction::Up;
-/// assert_eq!(direction.opposite(), Direction::Down);
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Direction {
-    /// Upward direction (negative y).
     Up,
-    /// Downward direction (positive y).
     Down,
-    /// Leftward direction (negative x).
     Left,
-    /// Rightward direction (positive x).
     Right,
 }
 
 impl Direction {
-    /// Returns the opposite direction.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::Direction;
-    ///
-    /// assert_eq!(Direction::Up.opposite(), Direction::Down);
-    /// assert_eq!(Direction::Left.opposite(), Direction::Right);
-    /// ```
     #[must_use]
     pub const fn opposite(&self) -> Self {
         match self {
@@ -198,16 +96,6 @@ impl Direction {
         }
     }
 
-    /// Converts the direction to an offset Position.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::{Direction, Position};
-    ///
-    /// assert_eq!(Direction::Up.to_offset(), Position::new(0, -1));
-    /// assert_eq!(Direction::Right.to_offset(), Position::new(1, 0));
-    /// ```
     #[must_use]
     pub const fn to_offset(&self) -> Position {
         match self {
@@ -218,16 +106,6 @@ impl Direction {
         }
     }
 
-    /// Returns an array containing all four directions.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::Direction;
-    ///
-    /// let directions = Direction::all();
-    /// assert_eq!(directions.len(), 4);
-    /// ```
     #[must_use]
     pub const fn all() -> [Self; 4] {
         [Self::Up, Self::Down, Self::Left, Self::Right]
@@ -250,36 +128,20 @@ impl fmt::Display for Direction {
 // Distance
 // =============================================================================
 
-/// A non-negative distance value.
-///
-/// Distance is a newtype wrapper around u32 that represents
-/// the distance between two positions.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::common::Distance;
-///
-/// let distance = Distance::new(10);
-/// assert_eq!(distance.value(), 10);
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Distance(u32);
 
 impl Distance {
-    /// Creates a new Distance with the given value.
     #[must_use]
     pub const fn new(value: u32) -> Self {
         Self(value)
     }
 
-    /// Returns the distance value.
     #[must_use]
     pub const fn value(&self) -> u32 {
         self.0
     }
 
-    /// Returns a zero distance.
     #[must_use]
     pub const fn zero() -> Self {
         Self(0)

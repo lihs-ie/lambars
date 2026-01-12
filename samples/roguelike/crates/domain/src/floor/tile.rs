@@ -1,51 +1,18 @@
-//! Tile types for dungeon floors.
-//!
-//! This module provides types for representing tiles in the dungeon:
-//! - `Tile`: A single tile with its kind and visibility state
-//! - `TileKind`: The type of tile (floor, wall, door, stairs, trap)
-//! - `TrapType`: The type of trap
-
 use std::fmt;
 
 // =============================================================================
 // TrapType
 // =============================================================================
 
-/// The type of trap on a tile.
-///
-/// Traps cause various effects when triggered by a player or enemy.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::floor::TrapType;
-///
-/// let trap = TrapType::Spike;
-/// assert_eq!(format!("{}", trap), "Spike Trap");
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TrapType {
-    /// A spike trap that deals physical damage.
     Spike,
-    /// A poison trap that applies poison status.
     Poison,
-    /// A teleport trap that moves the target to a random location.
     Teleport,
-    /// An alarm trap that alerts nearby enemies.
     Alarm,
 }
 
 impl TrapType {
-    /// Returns all trap types.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::floor::TrapType;
-    ///
-    /// let types = TrapType::all();
-    /// assert_eq!(types.len(), 4);
-    /// ```
     #[must_use]
     pub const fn all() -> [Self; 4] {
         [Self::Spike, Self::Poison, Self::Teleport, Self::Alarm]
@@ -68,58 +35,17 @@ impl fmt::Display for TrapType {
 // TileKind
 // =============================================================================
 
-/// The kind of tile on the dungeon floor.
-///
-/// Each tile kind has different properties for movement and interaction.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::floor::TileKind;
-///
-/// let floor = TileKind::Floor;
-/// assert!(floor.is_walkable());
-///
-/// let wall = TileKind::Wall;
-/// assert!(!wall.is_walkable());
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TileKind {
-    /// A walkable floor tile.
     Floor,
-    /// A solid wall that blocks movement.
     Wall,
-    /// A door that can be opened or closed.
-    Door {
-        /// Whether the door is currently open.
-        is_open: bool,
-    },
-    /// Stairs leading up to the previous floor.
+    Door { is_open: bool },
     StairsUp,
-    /// Stairs leading down to the next floor.
     StairsDown,
-    /// A trap tile with a specific trap type.
-    Trap {
-        /// The type of trap.
-        trap_type: TrapType,
-    },
+    Trap { trap_type: TrapType },
 }
 
 impl TileKind {
-    /// Returns true if this tile can be walked on.
-    ///
-    /// Walls and closed doors are not walkable.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::floor::TileKind;
-    ///
-    /// assert!(TileKind::Floor.is_walkable());
-    /// assert!(!TileKind::Wall.is_walkable());
-    /// assert!(TileKind::Door { is_open: true }.is_walkable());
-    /// assert!(!TileKind::Door { is_open: false }.is_walkable());
-    /// ```
     #[must_use]
     pub const fn is_walkable(&self) -> bool {
         match self {
@@ -129,19 +55,6 @@ impl TileKind {
         }
     }
 
-    /// Returns true if this tile blocks line of sight.
-    ///
-    /// Walls and closed doors block visibility.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::floor::TileKind;
-    ///
-    /// assert!(TileKind::Wall.blocks_sight());
-    /// assert!(TileKind::Door { is_open: false }.blocks_sight());
-    /// assert!(!TileKind::Floor.blocks_sight());
-    /// ```
     #[must_use]
     pub const fn blocks_sight(&self) -> bool {
         match self {
@@ -151,64 +64,21 @@ impl TileKind {
         }
     }
 
-    /// Returns true if this tile is a door.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::floor::TileKind;
-    ///
-    /// assert!(TileKind::Door { is_open: true }.is_door());
-    /// assert!(!TileKind::Floor.is_door());
-    /// ```
     #[must_use]
     pub const fn is_door(&self) -> bool {
         matches!(self, Self::Door { .. })
     }
 
-    /// Returns true if this tile is stairs (up or down).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::floor::TileKind;
-    ///
-    /// assert!(TileKind::StairsUp.is_stairs());
-    /// assert!(TileKind::StairsDown.is_stairs());
-    /// assert!(!TileKind::Floor.is_stairs());
-    /// ```
     #[must_use]
     pub const fn is_stairs(&self) -> bool {
         matches!(self, Self::StairsUp | Self::StairsDown)
     }
 
-    /// Returns true if this tile is a trap.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::floor::{TileKind, TrapType};
-    ///
-    /// let trap = TileKind::Trap { trap_type: TrapType::Spike };
-    /// assert!(trap.is_trap());
-    /// assert!(!TileKind::Floor.is_trap());
-    /// ```
     #[must_use]
     pub const fn is_trap(&self) -> bool {
         matches!(self, Self::Trap { .. })
     }
 
-    /// Returns the trap type if this tile is a trap.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::floor::{TileKind, TrapType};
-    ///
-    /// let trap = TileKind::Trap { trap_type: TrapType::Poison };
-    /// assert_eq!(trap.trap_type(), Some(TrapType::Poison));
-    /// assert_eq!(TileKind::Floor.trap_type(), None);
-    /// ```
     #[must_use]
     pub const fn trap_type(&self) -> Option<TrapType> {
         match self {
@@ -217,34 +87,11 @@ impl TileKind {
         }
     }
 
-    /// Creates a new door tile.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::floor::TileKind;
-    ///
-    /// let closed_door = TileKind::door(false);
-    /// assert!(!closed_door.is_walkable());
-    ///
-    /// let open_door = TileKind::door(true);
-    /// assert!(open_door.is_walkable());
-    /// ```
     #[must_use]
     pub const fn door(is_open: bool) -> Self {
         Self::Door { is_open }
     }
 
-    /// Creates a new trap tile.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::floor::{TileKind, TrapType};
-    ///
-    /// let trap = TileKind::trap(TrapType::Teleport);
-    /// assert_eq!(trap.trap_type(), Some(TrapType::Teleport));
-    /// ```
     #[must_use]
     pub const fn trap(trap_type: TrapType) -> Self {
         Self::Trap { trap_type }
@@ -275,24 +122,6 @@ impl fmt::Display for TileKind {
 // Tile
 // =============================================================================
 
-/// A single tile on the dungeon floor.
-///
-/// A tile has a kind and tracks its visibility state (explored and visible).
-/// - `is_explored`: The tile has been seen at least once
-/// - `is_visible`: The tile is currently in the player's field of view
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::floor::{Tile, TileKind};
-///
-/// let tile = Tile::new(TileKind::Floor);
-/// assert!(!tile.is_explored());
-/// assert!(!tile.is_visible());
-///
-/// let explored = tile.mark_explored();
-/// assert!(explored.is_explored());
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Tile {
     kind: TileKind,
@@ -301,20 +130,6 @@ pub struct Tile {
 }
 
 impl Tile {
-    /// Creates a new tile with the given kind.
-    ///
-    /// The tile is initially unexplored and not visible.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::floor::{Tile, TileKind};
-    ///
-    /// let tile = Tile::new(TileKind::Wall);
-    /// assert_eq!(tile.kind(), TileKind::Wall);
-    /// assert!(!tile.is_explored());
-    /// assert!(!tile.is_visible());
-    /// ```
     #[must_use]
     pub const fn new(kind: TileKind) -> Self {
         Self {
@@ -324,17 +139,6 @@ impl Tile {
         }
     }
 
-    /// Creates a tile with full state specification.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::floor::{Tile, TileKind};
-    ///
-    /// let tile = Tile::with_state(TileKind::Floor, true, true);
-    /// assert!(tile.is_explored());
-    /// assert!(tile.is_visible());
-    /// ```
     #[must_use]
     pub const fn with_state(kind: TileKind, is_explored: bool, is_visible: bool) -> Self {
         Self {
@@ -344,47 +148,31 @@ impl Tile {
         }
     }
 
-    /// Returns the kind of this tile.
     #[must_use]
     pub const fn kind(&self) -> TileKind {
         self.kind
     }
 
-    /// Returns true if this tile has been explored.
     #[must_use]
     pub const fn is_explored(&self) -> bool {
         self.is_explored
     }
 
-    /// Returns true if this tile is currently visible.
     #[must_use]
     pub const fn is_visible(&self) -> bool {
         self.is_visible
     }
 
-    /// Returns true if this tile can be walked on.
     #[must_use]
     pub const fn is_walkable(&self) -> bool {
         self.kind.is_walkable()
     }
 
-    /// Returns true if this tile blocks line of sight.
     #[must_use]
     pub const fn blocks_sight(&self) -> bool {
         self.kind.blocks_sight()
     }
 
-    /// Returns a new tile marked as explored.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::floor::{Tile, TileKind};
-    ///
-    /// let tile = Tile::new(TileKind::Floor);
-    /// let explored = tile.mark_explored();
-    /// assert!(explored.is_explored());
-    /// ```
     #[must_use]
     pub const fn mark_explored(self) -> Self {
         Self {
@@ -393,20 +181,6 @@ impl Tile {
         }
     }
 
-    /// Returns a new tile with the given visibility state.
-    ///
-    /// When a tile becomes visible, it is also marked as explored.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::floor::{Tile, TileKind};
-    ///
-    /// let tile = Tile::new(TileKind::Floor);
-    /// let visible = tile.set_visible(true);
-    /// assert!(visible.is_visible());
-    /// assert!(visible.is_explored()); // Also marked as explored
-    /// ```
     #[must_use]
     pub const fn set_visible(self, is_visible: bool) -> Self {
         Self {
@@ -416,17 +190,6 @@ impl Tile {
         }
     }
 
-    /// Returns a new tile with a different kind.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::floor::{Tile, TileKind};
-    ///
-    /// let floor_tile = Tile::new(TileKind::Floor);
-    /// let door_tile = floor_tile.with_kind(TileKind::Door { is_open: false });
-    /// assert_eq!(door_tile.kind(), TileKind::Door { is_open: false });
-    /// ```
     #[must_use]
     pub const fn with_kind(self, kind: TileKind) -> Self {
         Self { kind, ..self }

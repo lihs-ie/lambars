@@ -1,30 +1,3 @@
-//! ProcessEnemyTurn workflow implementation.
-//!
-//! This module provides the workflow for processing an enemy's turn.
-//! It follows the "IO at the Edges" pattern, separating pure domain logic
-//! from IO operations.
-//!
-//! # Workflow Steps
-//!
-//! 1. [IO] Load session from cache
-//! 2. [Pure] Find enemy by identifier
-//! 3. [Pure] Validate enemy is active (alive)
-//! 4. [Pure] Decide enemy action based on AI behavior
-//! 5. [Pure] Execute the decided action
-//! 6. [Pure] Generate enemy events
-//! 7. [IO] Update cache
-//! 8. [IO] Append events to event store
-//!
-//! # Examples
-//!
-//! ```ignore
-//! use roguelike_workflow::workflows::enemy::{process_enemy_turn, ProcessEnemyTurnCommand};
-//!
-//! let workflow = process_enemy_turn(&cache, &event_store, cache_ttl);
-//! let command = ProcessEnemyTurnCommand::new(game_identifier, entity_identifier);
-//! let result = workflow(command).run_async().await;
-//! ```
-
 use std::time::Duration;
 
 use lambars::effect::AsyncIO;
@@ -42,53 +15,30 @@ use crate::ports::{EventStore, SessionCache, WorkflowResult};
 // Workflow Configuration
 // =============================================================================
 
-/// Default cache time-to-live for game sessions.
 const DEFAULT_CACHE_TIME_TO_LIVE: Duration = Duration::from_secs(300); // 5 minutes
 
 // =============================================================================
 // EnemyAction
 // =============================================================================
 
-/// Represents an action that an enemy can perform during its turn.
-///
-/// This enum is used by the AI decision-making system to determine
-/// what action an enemy should take.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::enemy::EnemyAction;
-/// use roguelike_domain::common::Direction;
-/// use roguelike_domain::enemy::EntityIdentifier;
-///
-/// let move_action = EnemyAction::Move(Direction::Up);
-/// let attack_action = EnemyAction::Attack(EntityIdentifier::new());
-/// let wait_action = EnemyAction::Wait;
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnemyAction {
-    /// Move in a direction.
     Move(Direction),
-    /// Attack a target entity.
     Attack(EntityIdentifier),
-    /// Wait (skip turn).
     Wait,
 }
 
 impl EnemyAction {
-    /// Returns true if this is a move action.
     #[must_use]
     pub const fn is_move(&self) -> bool {
         matches!(self, Self::Move(_))
     }
 
-    /// Returns true if this is an attack action.
     #[must_use]
     pub const fn is_attack(&self) -> bool {
         matches!(self, Self::Attack(_))
     }
 
-    /// Returns true if this is a wait action.
     #[must_use]
     pub const fn is_wait(&self) -> bool {
         matches!(self, Self::Wait)
@@ -99,37 +49,6 @@ impl EnemyAction {
 // ProcessEnemyTurn Workflow
 // =============================================================================
 
-/// Creates a workflow function for processing an enemy's turn.
-///
-/// This function returns a closure that processes an enemy's AI decision
-/// and executes the resulting action. It uses higher-order functions to
-/// inject dependencies, enabling pure functional composition and easy testing.
-///
-/// # Type Parameters
-///
-/// * `C` - Cache type implementing `SessionCache`
-/// * `E` - Event store type implementing `EventStore`
-///
-/// # Arguments
-///
-/// * `cache` - The session cache for fast access
-/// * `event_store` - The event store for event sourcing
-/// * `cache_ttl` - Time-to-live for cached sessions
-///
-/// # Returns
-///
-/// A function that takes a `ProcessEnemyTurnCommand` and returns an `AsyncIO`
-/// that produces the updated game session or an error.
-///
-/// # Examples
-///
-/// ```ignore
-/// use roguelike_workflow::workflows::enemy::{process_enemy_turn, ProcessEnemyTurnCommand};
-///
-/// let workflow = process_enemy_turn(&cache, &event_store, Duration::from_secs(300));
-/// let command = ProcessEnemyTurnCommand::new(game_identifier, entity_identifier);
-/// let result = workflow(command).run_async().await;
-/// ```
 pub fn process_enemy_turn<'a, C, E>(
     cache: &'a C,
     event_store: &'a E,
@@ -178,24 +97,6 @@ where
     }
 }
 
-/// Creates a workflow function with default cache TTL.
-///
-/// This is a convenience function that uses the default cache time-to-live.
-///
-/// # Type Parameters
-///
-/// * `C` - Cache type implementing `SessionCache`
-/// * `E` - Event store type implementing `EventStore`
-///
-/// # Arguments
-///
-/// * `cache` - The session cache for fast access
-/// * `event_store` - The event store for event sourcing
-///
-/// # Returns
-///
-/// A function that takes a `ProcessEnemyTurnCommand` and returns an `AsyncIO`
-/// that produces the updated game session or an error.
 pub fn process_enemy_turn_with_default_ttl<'a, C, E>(
     cache: &'a C,
     event_store: &'a E,
@@ -211,23 +112,6 @@ where
 // Pure Functions
 // =============================================================================
 
-/// Pure function that performs the entire enemy turn processing logic.
-///
-/// This function encapsulates all pure domain logic for processing an enemy turn:
-/// - Find enemy by identifier
-/// - Validate enemy is active
-/// - Decide action using AI
-/// - Execute action
-/// - Generate events
-///
-/// # Arguments
-///
-/// * `session` - The current game session
-/// * `entity_identifier` - The identifier of the enemy to process
-///
-/// # Returns
-///
-/// A result containing the updated session and events, or an error.
 fn process_enemy_turn_pure<S: Clone>(
     _session: &S,
     _entity_identifier: EntityIdentifier,
@@ -250,33 +134,6 @@ fn process_enemy_turn_pure<S: Clone>(
     ))
 }
 
-/// Finds an enemy by its identifier in the game state.
-///
-/// This is a pure function that searches for an enemy in the session.
-///
-/// # Type Parameters
-///
-/// * `S` - The session type (must provide enemy access)
-/// * `Enemy` - The enemy type
-///
-/// # Arguments
-///
-/// * `session` - The current game session
-/// * `entity_identifier` - The identifier of the enemy to find
-///
-/// # Returns
-///
-/// `Some(enemy)` if found, `None` otherwise.
-///
-/// # Examples
-///
-/// ```ignore
-/// let enemy = find_enemy_by_id(&session, entity_identifier);
-/// match enemy {
-///     Some(e) => println!("Found enemy at {:?}", e.position()),
-///     None => println!("Enemy not found"),
-/// }
-/// ```
 #[must_use]
 pub fn find_enemy_by_id<S, Enemy>(
     _session: &S,
@@ -290,33 +147,6 @@ where
     None
 }
 
-/// Validates that an enemy is active (alive).
-///
-/// This is a pure function that checks if an enemy can take actions.
-///
-/// # Arguments
-///
-/// * `enemy_identifier` - The identifier of the enemy
-/// * `is_alive` - Whether the enemy is alive
-///
-/// # Returns
-///
-/// `Ok(())` if the enemy is active, `Err(EnemyError)` if dead.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::enemy::validate_enemy_active;
-/// use roguelike_domain::enemy::EntityIdentifier;
-///
-/// let identifier = EntityIdentifier::new();
-///
-/// // Alive enemy passes validation
-/// assert!(validate_enemy_active(identifier, true).is_ok());
-///
-/// // Dead enemy fails validation
-/// assert!(validate_enemy_active(identifier, false).is_err());
-/// ```
 pub fn validate_enemy_active(
     enemy_identifier: EntityIdentifier,
     is_alive: bool,
@@ -328,47 +158,6 @@ pub fn validate_enemy_active(
     }
 }
 
-/// Decides what action an enemy should take based on its AI behavior.
-///
-/// This is a pure function that implements the AI decision-making logic.
-/// The decision is based on:
-/// - The enemy's behavior pattern
-/// - The distance and direction to the player
-/// - Whether the enemy can attack
-///
-/// # Arguments
-///
-/// * `behavior` - The AI behavior pattern of the enemy
-/// * `enemy_position` - The current position of the enemy
-/// * `player_position` - The current position of the player
-/// * `can_attack` - Whether the enemy is adjacent to the player
-/// * `player_entity_identifier` - The player's entity identifier (for attack target)
-///
-/// # Returns
-///
-/// The action the enemy should take.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::enemy::{decide_enemy_action, EnemyAction};
-/// use roguelike_domain::enemy::{AiBehavior, EntityIdentifier};
-/// use roguelike_domain::common::Position;
-///
-/// let enemy_position = Position::new(5, 5);
-/// let player_position = Position::new(7, 5);
-/// let player_id = EntityIdentifier::new();
-///
-/// // Aggressive enemy moves toward player
-/// let action = decide_enemy_action(
-///     AiBehavior::Aggressive,
-///     enemy_position,
-///     player_position,
-///     false,
-///     player_id,
-/// );
-/// assert!(action.is_move());
-/// ```
 #[must_use]
 pub fn decide_enemy_action(
     behavior: AiBehavior,
@@ -391,17 +180,6 @@ pub fn decide_enemy_action(
     }
 }
 
-/// Calculates the movement direction based on behavior and positions.
-///
-/// # Arguments
-///
-/// * `behavior` - The AI behavior pattern
-/// * `enemy_position` - The enemy's current position
-/// * `player_position` - The player's current position
-///
-/// # Returns
-///
-/// `Some(Direction)` if the enemy should move, `None` if it should wait.
 fn calculate_movement_direction(
     behavior: AiBehavior,
     enemy_position: Position,
@@ -434,9 +212,6 @@ fn calculate_movement_direction(
     }
 }
 
-/// Determines a single direction to move based on delta coordinates.
-///
-/// Prioritizes horizontal movement over vertical.
 fn direction_toward(delta_x: i32, delta_y: i32) -> Option<Direction> {
     if delta_x > 0 {
         Some(Direction::Right)
@@ -451,35 +226,6 @@ fn direction_toward(delta_x: i32, delta_y: i32) -> Option<Direction> {
     }
 }
 
-/// Executes an enemy action and returns the result.
-///
-/// This is a pure function that applies an action to the game state.
-///
-/// # Type Parameters
-///
-/// * `S` - The session type
-///
-/// # Arguments
-///
-/// * `session` - The current game session
-/// * `enemy_identifier` - The identifier of the acting enemy
-/// * `enemy_position` - The current position of the enemy
-/// * `action` - The action to execute
-///
-/// # Returns
-///
-/// A result containing the updated session and generated events.
-///
-/// # Examples
-///
-/// ```ignore
-/// let (updated_session, events) = execute_enemy_action(
-///     &session,
-///     enemy_identifier,
-///     enemy_position,
-///     EnemyAction::Move(Direction::Up),
-/// )?;
-/// ```
 pub fn execute_enemy_action<S: Clone>(
     session: &S,
     enemy_identifier: EntityIdentifier,
@@ -498,7 +244,6 @@ pub fn execute_enemy_action<S: Clone>(
     }
 }
 
-/// Executes a move action.
 fn execute_move<S: Clone>(
     session: &S,
     enemy_identifier: EntityIdentifier,
@@ -519,7 +264,6 @@ fn execute_move<S: Clone>(
     Ok((session.clone(), vec![GameSessionEvent::EnemyMoved(event)]))
 }
 
-/// Executes an attack action.
 fn execute_attack<S: Clone>(
     session: &S,
     enemy_identifier: EntityIdentifier,

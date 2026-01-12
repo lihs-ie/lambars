@@ -1,57 +1,19 @@
-//! Item rarity types.
-//!
-//! This module provides the Rarity enum for categorizing item quality.
-
 use std::fmt;
 
 // =============================================================================
 // Rarity
 // =============================================================================
 
-/// Item rarity tiers from most common to rarest.
-///
-/// Rarity affects drop rates and item quality.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::common::Rarity;
-///
-/// assert_eq!(Rarity::Common.tier(), 1);
-/// assert_eq!(Rarity::Legendary.tier(), 5);
-/// assert!(Rarity::Epic.is_at_least(&Rarity::Rare));
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Rarity {
-    /// Most common items.
     Common,
-    /// Slightly uncommon items.
     Uncommon,
-    /// Rare items with better stats.
     Rare,
-    /// Very rare epic items.
     Epic,
-    /// Extremely rare legendary items.
     Legendary,
 }
 
 impl Rarity {
-    /// Returns the numeric tier (1-5) for this rarity.
-    ///
-    /// - Common: 1
-    /// - Uncommon: 2
-    /// - Rare: 3
-    /// - Epic: 4
-    /// - Legendary: 5
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::Rarity;
-    ///
-    /// assert_eq!(Rarity::Common.tier(), 1);
-    /// assert_eq!(Rarity::Legendary.tier(), 5);
-    /// ```
     #[must_use]
     pub const fn tier(&self) -> u8 {
         match self {
@@ -63,15 +25,6 @@ impl Rarity {
         }
     }
 
-    /// Returns the drop rate multiplier for this rarity.
-    ///
-    /// Higher rarity items have lower drop rates.
-    ///
-    /// - Common: 1.0
-    /// - Uncommon: 0.5
-    /// - Rare: 0.2
-    /// - Epic: 0.05
-    /// - Legendary: 0.01
     #[must_use]
     pub const fn drop_rate_multiplier(&self) -> f32 {
         match self {
@@ -83,23 +36,11 @@ impl Rarity {
         }
     }
 
-    /// Returns true if this rarity is at least as high as the given rarity.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::Rarity;
-    ///
-    /// assert!(Rarity::Epic.is_at_least(&Rarity::Rare));
-    /// assert!(Rarity::Rare.is_at_least(&Rarity::Rare));
-    /// assert!(!Rarity::Common.is_at_least(&Rarity::Rare));
-    /// ```
     #[must_use]
     pub fn is_at_least(&self, other: &Self) -> bool {
         self >= other
     }
 
-    /// Returns an array of all rarity variants in order.
     #[must_use]
     pub const fn all() -> [Self; 5] {
         [

@@ -1,9 +1,3 @@
-//! Command types for floor workflows.
-//!
-//! This module defines the input command types for floor operations.
-//! Commands are immutable value objects that represent intent to perform
-//! floor-related actions.
-
 use roguelike_domain::common::Position;
 use roguelike_domain::enemy::EntityIdentifier;
 use roguelike_domain::game_session::GameIdentifier;
@@ -12,51 +6,13 @@ use roguelike_domain::game_session::GameIdentifier;
 // GenerateFloorCommand
 // =============================================================================
 
-/// Command for generating a new floor.
-///
-/// This command triggers floor generation including rooms, corridors,
-/// stairs, items, and traps based on the floor level.
-///
-/// # Fields
-///
-/// - `game_identifier`: The game session identifier
-/// - `floor_level`: The level of the floor to generate (1-indexed)
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::floor::GenerateFloorCommand;
-/// use roguelike_domain::game_session::GameIdentifier;
-///
-/// let identifier = GameIdentifier::new();
-/// let command = GenerateFloorCommand::new(identifier, 1);
-/// assert_eq!(command.floor_level(), 1);
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GenerateFloorCommand {
-    /// The game session identifier.
     game_identifier: GameIdentifier,
-    /// The floor level to generate.
     floor_level: u32,
 }
 
 impl GenerateFloorCommand {
-    /// Creates a new generate floor command.
-    ///
-    /// # Arguments
-    ///
-    /// * `game_identifier` - The game session identifier.
-    /// * `floor_level` - The floor level to generate.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_workflow::workflows::floor::GenerateFloorCommand;
-    /// use roguelike_domain::game_session::GameIdentifier;
-    ///
-    /// let command = GenerateFloorCommand::new(GameIdentifier::new(), 5);
-    /// assert_eq!(command.floor_level(), 5);
-    /// ```
     #[must_use]
     pub const fn new(game_identifier: GameIdentifier, floor_level: u32) -> Self {
         Self {
@@ -65,13 +21,11 @@ impl GenerateFloorCommand {
         }
     }
 
-    /// Returns the game identifier.
     #[must_use]
     pub const fn game_identifier(&self) -> &GameIdentifier {
         &self.game_identifier
     }
 
-    /// Returns the floor level.
     #[must_use]
     pub const fn floor_level(&self) -> u32 {
         self.floor_level
@@ -82,51 +36,17 @@ impl GenerateFloorCommand {
 // DescendFloorCommand
 // =============================================================================
 
-/// Command for descending to the next floor.
-///
-/// This command handles player movement to the next floor, including
-/// validation that the player is at a down staircase.
-///
-/// # Fields
-///
-/// - `game_identifier`: The game session identifier
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::floor::DescendFloorCommand;
-/// use roguelike_domain::game_session::GameIdentifier;
-///
-/// let identifier = GameIdentifier::new();
-/// let command = DescendFloorCommand::new(identifier);
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescendFloorCommand {
-    /// The game session identifier.
     game_identifier: GameIdentifier,
 }
 
 impl DescendFloorCommand {
-    /// Creates a new descend floor command.
-    ///
-    /// # Arguments
-    ///
-    /// * `game_identifier` - The game session identifier.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_workflow::workflows::floor::DescendFloorCommand;
-    /// use roguelike_domain::game_session::GameIdentifier;
-    ///
-    /// let command = DescendFloorCommand::new(GameIdentifier::new());
-    /// ```
     #[must_use]
     pub const fn new(game_identifier: GameIdentifier) -> Self {
         Self { game_identifier }
     }
 
-    /// Returns the game identifier.
     #[must_use]
     pub const fn game_identifier(&self) -> &GameIdentifier {
         &self.game_identifier
@@ -137,51 +57,17 @@ impl DescendFloorCommand {
 // UpdateVisibilityCommand
 // =============================================================================
 
-/// Command for updating tile visibility.
-///
-/// This command recalculates the player's field of view and updates
-/// which tiles are visible and explored.
-///
-/// # Fields
-///
-/// - `game_identifier`: The game session identifier
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::floor::UpdateVisibilityCommand;
-/// use roguelike_domain::game_session::GameIdentifier;
-///
-/// let identifier = GameIdentifier::new();
-/// let command = UpdateVisibilityCommand::new(identifier);
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateVisibilityCommand {
-    /// The game session identifier.
     game_identifier: GameIdentifier,
 }
 
 impl UpdateVisibilityCommand {
-    /// Creates a new update visibility command.
-    ///
-    /// # Arguments
-    ///
-    /// * `game_identifier` - The game session identifier.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_workflow::workflows::floor::UpdateVisibilityCommand;
-    /// use roguelike_domain::game_session::GameIdentifier;
-    ///
-    /// let command = UpdateVisibilityCommand::new(GameIdentifier::new());
-    /// ```
     #[must_use]
     pub const fn new(game_identifier: GameIdentifier) -> Self {
         Self { game_identifier }
     }
 
-    /// Returns the game identifier.
     #[must_use]
     pub const fn game_identifier(&self) -> &GameIdentifier {
         &self.game_identifier
@@ -192,62 +78,14 @@ impl UpdateVisibilityCommand {
 // TriggerTrapCommand
 // =============================================================================
 
-/// Command for triggering a trap at a position.
-///
-/// This command processes trap activation when an entity steps on a trap tile.
-///
-/// # Fields
-///
-/// - `game_identifier`: The game session identifier
-/// - `position`: The position of the trap
-/// - `target`: The entity that triggered the trap
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::floor::TriggerTrapCommand;
-/// use roguelike_domain::game_session::GameIdentifier;
-/// use roguelike_domain::enemy::EntityIdentifier;
-/// use roguelike_domain::common::Position;
-///
-/// let identifier = GameIdentifier::new();
-/// let target = EntityIdentifier::new();
-/// let position = Position::new(10, 10);
-/// let command = TriggerTrapCommand::new(identifier, position, target);
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TriggerTrapCommand {
-    /// The game session identifier.
     game_identifier: GameIdentifier,
-    /// The position of the trap.
     position: Position,
-    /// The entity that triggered the trap.
     target: EntityIdentifier,
 }
 
 impl TriggerTrapCommand {
-    /// Creates a new trigger trap command.
-    ///
-    /// # Arguments
-    ///
-    /// * `game_identifier` - The game session identifier.
-    /// * `position` - The position of the trap.
-    /// * `target` - The entity that triggered the trap.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_workflow::workflows::floor::TriggerTrapCommand;
-    /// use roguelike_domain::game_session::GameIdentifier;
-    /// use roguelike_domain::enemy::EntityIdentifier;
-    /// use roguelike_domain::common::Position;
-    ///
-    /// let command = TriggerTrapCommand::new(
-    ///     GameIdentifier::new(),
-    ///     Position::new(5, 5),
-    ///     EntityIdentifier::new(),
-    /// );
-    /// ```
     #[must_use]
     pub const fn new(
         game_identifier: GameIdentifier,
@@ -261,19 +99,16 @@ impl TriggerTrapCommand {
         }
     }
 
-    /// Returns the game identifier.
     #[must_use]
     pub const fn game_identifier(&self) -> &GameIdentifier {
         &self.game_identifier
     }
 
-    /// Returns the trap position.
     #[must_use]
     pub const fn position(&self) -> Position {
         self.position
     }
 
-    /// Returns the target entity identifier.
     #[must_use]
     pub const fn target(&self) -> EntityIdentifier {
         self.target

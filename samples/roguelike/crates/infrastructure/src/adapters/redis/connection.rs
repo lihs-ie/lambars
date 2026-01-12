@@ -1,8 +1,3 @@
-//! Redis connection wrapper.
-//!
-//! This module provides the [`RedisConnection`] struct, a wrapper around
-//! `redis::Client` that provides Arc-based sharing and key prefix management.
-
 use std::sync::Arc;
 
 use redis::aio::MultiplexedConnection;
@@ -14,35 +9,9 @@ use crate::errors::InfraError;
 // RedisConnection
 // =============================================================================
 
-/// A Redis connection wrapper with Arc-based sharing.
-///
-/// This struct wraps `redis::Client` and its configuration in `Arc`, enabling
-/// cheap cloning and sharing across multiple tasks or threads. It also provides
-/// key prefix management for environment isolation.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// use roguelike_infrastructure::adapters::redis::{RedisConfig, RedisConnectionFactory};
-///
-/// let config = RedisConfig::with_url("redis://localhost:6379");
-/// let connection = RedisConnectionFactory::create_client(&config)?;
-///
-/// // Clone is cheap - shares the same underlying client
-/// let connection_clone = connection.clone();
-///
-/// // Format a key with the configured prefix
-/// let key = connection.format_key("session:abc-123");
-/// assert_eq!(key, "dev:roguelike:session:abc-123");
-///
-/// // Get an async connection for Redis operations
-/// let mut async_conn = connection.get_async_connection().await?;
-/// ```
 #[derive(Clone)]
 pub struct RedisConnection {
-    /// The underlying Redis client wrapped in Arc.
     client: Arc<redis::Client>,
-    /// The configuration wrapped in Arc.
     config: Arc<RedisConfig>,
 }
 
@@ -51,23 +20,6 @@ pub struct RedisConnection {
 // =============================================================================
 
 impl RedisConnection {
-    /// Creates a new `RedisConnection` from an existing `redis::Client` and configuration.
-    ///
-    /// # Arguments
-    ///
-    /// * `client` - The Redis client to wrap.
-    /// * `config` - The Redis configuration.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// use redis::Client;
-    /// use roguelike_infrastructure::adapters::redis::{RedisConfig, RedisConnection};
-    ///
-    /// let client = Client::open("redis://localhost:6379")?;
-    /// let config = RedisConfig::with_url("redis://localhost:6379");
-    /// let connection = RedisConnection::new(client, config);
-    /// ```
     #[must_use]
     pub fn new(client: redis::Client, config: RedisConfig) -> Self {
         Self {
@@ -82,26 +34,6 @@ impl RedisConnection {
 // =============================================================================
 
 impl RedisConnection {
-    /// Gets an async multiplexed connection to Redis.
-    ///
-    /// This returns a multiplexed connection that can handle multiple
-    /// concurrent requests efficiently.
-    ///
-    /// # Errors
-    ///
-    /// Returns `InfraError::Connection` if the connection to Redis fails.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// use redis::AsyncCommands;
-    ///
-    /// let connection = RedisConnectionFactory::create_client(&config)?;
-    /// let mut async_conn = connection.get_async_connection().await?;
-    ///
-    /// // Now you can use async_conn for Redis operations
-    /// async_conn.set("key", "value").await?;
-    /// ```
     pub async fn get_async_connection(&self) -> Result<MultiplexedConnection, InfraError> {
         self.client
             .get_multiplexed_async_connection()
@@ -109,59 +41,16 @@ impl RedisConnection {
             .map_err(InfraError::from)
     }
 
-    /// Formats a key with the configured prefix.
-    ///
-    /// This method prepends the configured key prefix to the given suffix,
-    /// ensuring consistent key naming across the application.
-    ///
-    /// # Arguments
-    ///
-    /// * `suffix` - The key suffix to append to the prefix.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let connection = RedisConnectionFactory::create_client(&config)?;
-    ///
-    /// // With default prefix "dev:roguelike:"
-    /// let key = connection.format_key("session:abc-123");
-    /// assert_eq!(key, "dev:roguelike:session:abc-123");
-    ///
-    /// let key = connection.format_key("player:player-1");
-    /// assert_eq!(key, "dev:roguelike:player:player-1");
-    /// ```
     #[must_use]
     pub fn format_key(&self, suffix: &str) -> String {
         format!("{}{}", self.config.key_prefix, suffix)
     }
 
-    /// Returns a reference to the underlying Redis client.
-    ///
-    /// This is useful when you need to access the client directly for
-    /// operations not exposed by this wrapper.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let connection = RedisConnectionFactory::create_client(&config)?;
-    /// let client = connection.as_client();
-    /// ```
     #[must_use]
     pub fn as_client(&self) -> &redis::Client {
         &self.client
     }
 
-    /// Returns a reference to the configuration.
-    ///
-    /// This is useful when you need to access configuration values
-    /// such as the default TTL.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let connection = RedisConnectionFactory::create_client(&config)?;
-    /// let ttl = connection.config().default_ttl;
-    /// ```
     #[must_use]
     pub fn config(&self) -> &RedisConfig {
         &self.config

@@ -1,151 +1,49 @@
-//! Game status and outcome enums.
-//!
-//! This module provides enums for tracking game session state and outcomes.
-
 use std::fmt;
 
 // =============================================================================
 // GameStatus
 // =============================================================================
 
-/// Current status of a game session.
-///
-/// Represents the current state of an ongoing game session.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::game_session::GameStatus;
-///
-/// let status = GameStatus::InProgress;
-/// assert!(status.is_active());
-/// assert!(!status.is_terminal());
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum GameStatus {
-    /// Game is currently being played.
     #[default]
     InProgress,
-    /// Player has achieved victory.
     Victory,
-    /// Player has been defeated.
     Defeat,
-    /// Game is temporarily paused.
     Paused,
 }
 
 impl GameStatus {
-    /// Returns true if the game is in an active state (can be played).
-    ///
-    /// Active states are `InProgress` and `Paused`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::GameStatus;
-    ///
-    /// assert!(GameStatus::InProgress.is_active());
-    /// assert!(GameStatus::Paused.is_active());
-    /// assert!(!GameStatus::Victory.is_active());
-    /// assert!(!GameStatus::Defeat.is_active());
-    /// ```
     #[must_use]
     pub const fn is_active(&self) -> bool {
         matches!(self, Self::InProgress | Self::Paused)
     }
 
-    /// Returns true if the game has reached a terminal state.
-    ///
-    /// Terminal states are `Victory` and `Defeat`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::GameStatus;
-    ///
-    /// assert!(GameStatus::Victory.is_terminal());
-    /// assert!(GameStatus::Defeat.is_terminal());
-    /// assert!(!GameStatus::InProgress.is_terminal());
-    /// assert!(!GameStatus::Paused.is_terminal());
-    /// ```
     #[must_use]
     pub const fn is_terminal(&self) -> bool {
         matches!(self, Self::Victory | Self::Defeat)
     }
 
-    /// Returns true if the game is in progress.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::GameStatus;
-    ///
-    /// assert!(GameStatus::InProgress.is_in_progress());
-    /// assert!(!GameStatus::Paused.is_in_progress());
-    /// ```
     #[must_use]
     pub const fn is_in_progress(&self) -> bool {
         matches!(self, Self::InProgress)
     }
 
-    /// Returns true if the game is paused.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::GameStatus;
-    ///
-    /// assert!(GameStatus::Paused.is_paused());
-    /// assert!(!GameStatus::InProgress.is_paused());
-    /// ```
     #[must_use]
     pub const fn is_paused(&self) -> bool {
         matches!(self, Self::Paused)
     }
 
-    /// Returns true if the game ended in victory.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::GameStatus;
-    ///
-    /// assert!(GameStatus::Victory.is_victory());
-    /// assert!(!GameStatus::Defeat.is_victory());
-    /// ```
     #[must_use]
     pub const fn is_victory(&self) -> bool {
         matches!(self, Self::Victory)
     }
 
-    /// Returns true if the game ended in defeat.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::GameStatus;
-    ///
-    /// assert!(GameStatus::Defeat.is_defeat());
-    /// assert!(!GameStatus::Victory.is_defeat());
-    /// ```
     #[must_use]
     pub const fn is_defeat(&self) -> bool {
         matches!(self, Self::Defeat)
     }
 
-    /// Converts to a game outcome if the status is terminal.
-    ///
-    /// Returns `None` for non-terminal states.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::{GameStatus, GameOutcome};
-    ///
-    /// assert_eq!(GameStatus::Victory.to_outcome(), Some(GameOutcome::Victory));
-    /// assert_eq!(GameStatus::Defeat.to_outcome(), Some(GameOutcome::Defeat));
-    /// assert_eq!(GameStatus::InProgress.to_outcome(), None);
-    /// ```
     #[must_use]
     pub const fn to_outcome(&self) -> Option<GameOutcome> {
         match self {
@@ -172,91 +70,29 @@ impl fmt::Display for GameStatus {
 // GameOutcome
 // =============================================================================
 
-/// Final outcome of a completed game session.
-///
-/// Represents how a game session ended.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::game_session::GameOutcome;
-///
-/// let outcome = GameOutcome::Victory;
-/// assert!(outcome.is_success());
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GameOutcome {
-    /// Player achieved victory by completing the objective.
     Victory,
-    /// Player was defeated (e.g., health reached zero).
     Defeat,
-    /// Player abandoned the game session.
     Abandoned,
 }
 
 impl GameOutcome {
-    /// Returns true if the outcome represents a successful completion.
-    ///
-    /// Only `Victory` is considered a success.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::GameOutcome;
-    ///
-    /// assert!(GameOutcome::Victory.is_success());
-    /// assert!(!GameOutcome::Defeat.is_success());
-    /// assert!(!GameOutcome::Abandoned.is_success());
-    /// ```
     #[must_use]
     pub const fn is_success(&self) -> bool {
         matches!(self, Self::Victory)
     }
 
-    /// Returns true if the outcome represents a failure.
-    ///
-    /// Both `Defeat` and `Abandoned` are considered failures.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::GameOutcome;
-    ///
-    /// assert!(GameOutcome::Defeat.is_failure());
-    /// assert!(GameOutcome::Abandoned.is_failure());
-    /// assert!(!GameOutcome::Victory.is_failure());
-    /// ```
     #[must_use]
     pub const fn is_failure(&self) -> bool {
         matches!(self, Self::Defeat | Self::Abandoned)
     }
 
-    /// Returns true if the game was abandoned.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::GameOutcome;
-    ///
-    /// assert!(GameOutcome::Abandoned.is_abandoned());
-    /// assert!(!GameOutcome::Victory.is_abandoned());
-    /// ```
     #[must_use]
     pub const fn is_abandoned(&self) -> bool {
         matches!(self, Self::Abandoned)
     }
 
-    /// Converts to a game status.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::{GameOutcome, GameStatus};
-    ///
-    /// assert_eq!(GameOutcome::Victory.to_status(), GameStatus::Victory);
-    /// assert_eq!(GameOutcome::Defeat.to_status(), GameStatus::Defeat);
-    /// assert_eq!(GameOutcome::Abandoned.to_status(), GameStatus::Defeat);
-    /// ```
     #[must_use]
     pub const fn to_status(&self) -> GameStatus {
         match self {

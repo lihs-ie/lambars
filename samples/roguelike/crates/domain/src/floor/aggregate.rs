@@ -1,8 +1,3 @@
-//! Floor aggregate for dungeon structure.
-//!
-//! This module provides the Floor aggregate representing a single level
-//! of the dungeon with tiles, rooms, corridors, and navigation points.
-
 use std::fmt;
 
 use crate::common::{FloorLevel, Position};
@@ -13,34 +8,6 @@ use super::{Corridor, FloorError, FloorIdentifier, Room, Tile, TileKind};
 // Floor Aggregate
 // =============================================================================
 
-/// A dungeon floor containing tiles, rooms, and corridors.
-///
-/// Floor is the aggregate root for a single level of the dungeon. It contains:
-/// - A 2D grid of tiles representing the dungeon layout
-/// - Rooms that define open areas
-/// - Corridors connecting rooms
-/// - Spawn points for entities
-/// - Stairs for navigation between floors
-///
-/// All operations on Floor are immutable - modifying methods return new Floor
-/// instances while preserving the original.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::common::{FloorLevel, Position};
-/// use roguelike_domain::floor::{Floor, FloorIdentifier, Tile, TileKind};
-///
-/// let floor = Floor::new(
-///     FloorIdentifier::new(1),
-///     FloorLevel::new(1).unwrap(),
-///     10,
-///     10,
-/// );
-///
-/// assert_eq!(floor.width(), 10);
-/// assert_eq!(floor.height(), 10);
-/// ```
 #[derive(Debug, Clone)]
 pub struct Floor {
     identifier: FloorIdentifier,
@@ -58,27 +25,6 @@ impl Floor {
     // Constructor
     // =========================================================================
 
-    /// Creates a new Floor with the given dimensions.
-    ///
-    /// The floor is initialized with Wall tiles. Use builder methods to
-    /// customize the floor layout.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::FloorLevel;
-    /// use roguelike_domain::floor::{Floor, FloorIdentifier};
-    ///
-    /// let floor = Floor::new(
-    ///     FloorIdentifier::new(1),
-    ///     FloorLevel::new(1).unwrap(),
-    ///     80,
-    ///     40,
-    /// );
-    ///
-    /// assert_eq!(floor.width(), 80);
-    /// assert_eq!(floor.height(), 40);
-    /// ```
     #[must_use]
     pub fn new(identifier: FloorIdentifier, level: FloorLevel, width: u32, height: u32) -> Self {
         let tiles = (0..height)
@@ -101,157 +47,36 @@ impl Floor {
     // Builder Methods
     // =========================================================================
 
-    /// Returns a new Floor with the specified tiles.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::FloorLevel;
-    /// use roguelike_domain::floor::{Floor, FloorIdentifier, Tile, TileKind};
-    ///
-    /// let tiles = vec![
-    ///     vec![Tile::new(TileKind::Wall), Tile::new(TileKind::Floor)],
-    ///     vec![Tile::new(TileKind::Floor), Tile::new(TileKind::Wall)],
-    /// ];
-    ///
-    /// let floor = Floor::new(
-    ///     FloorIdentifier::new(1),
-    ///     FloorLevel::new(1).unwrap(),
-    ///     2,
-    ///     2,
-    /// ).with_tiles(tiles);
-    ///
-    /// assert_eq!(floor.width(), 2);
-    /// assert_eq!(floor.height(), 2);
-    /// ```
     #[must_use]
     pub fn with_tiles(mut self, tiles: Vec<Vec<Tile>>) -> Self {
         self.tiles = tiles;
         self
     }
 
-    /// Returns a new Floor with the specified rooms.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::{FloorLevel, Position};
-    /// use roguelike_domain::floor::{Floor, FloorIdentifier, Room};
-    ///
-    /// let rooms = vec![
-    ///     Room::new(Position::new(1, 1), 5, 5).unwrap(),
-    /// ];
-    ///
-    /// let floor = Floor::new(
-    ///     FloorIdentifier::new(1),
-    ///     FloorLevel::new(1).unwrap(),
-    ///     20,
-    ///     20,
-    /// ).with_rooms(rooms.clone());
-    ///
-    /// assert_eq!(floor.rooms().len(), 1);
-    /// ```
     #[must_use]
     pub fn with_rooms(mut self, rooms: Vec<Room>) -> Self {
         self.rooms = rooms;
         self
     }
 
-    /// Returns a new Floor with the specified corridors.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::{FloorLevel, Position};
-    /// use roguelike_domain::floor::{Floor, FloorIdentifier, Corridor};
-    ///
-    /// let corridors = vec![
-    ///     Corridor::new(Position::new(5, 3), Position::new(10, 3)),
-    /// ];
-    ///
-    /// let floor = Floor::new(
-    ///     FloorIdentifier::new(1),
-    ///     FloorLevel::new(1).unwrap(),
-    ///     20,
-    ///     20,
-    /// ).with_corridors(corridors.clone());
-    ///
-    /// assert_eq!(floor.corridors().len(), 1);
-    /// ```
     #[must_use]
     pub fn with_corridors(mut self, corridors: Vec<Corridor>) -> Self {
         self.corridors = corridors;
         self
     }
 
-    /// Returns a new Floor with the specified spawn points.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::{FloorLevel, Position};
-    /// use roguelike_domain::floor::{Floor, FloorIdentifier};
-    ///
-    /// let spawn_points = vec![
-    ///     Position::new(5, 5),
-    ///     Position::new(10, 10),
-    /// ];
-    ///
-    /// let floor = Floor::new(
-    ///     FloorIdentifier::new(1),
-    ///     FloorLevel::new(1).unwrap(),
-    ///     20,
-    ///     20,
-    /// ).with_spawn_points(spawn_points.clone());
-    ///
-    /// assert_eq!(floor.spawn_points().len(), 2);
-    /// ```
     #[must_use]
     pub fn with_spawn_points(mut self, spawn_points: Vec<Position>) -> Self {
         self.spawn_points = spawn_points;
         self
     }
 
-    /// Returns a new Floor with stairs up at the specified position.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::{FloorLevel, Position};
-    /// use roguelike_domain::floor::{Floor, FloorIdentifier};
-    ///
-    /// let floor = Floor::new(
-    ///     FloorIdentifier::new(1),
-    ///     FloorLevel::new(1).unwrap(),
-    ///     20,
-    ///     20,
-    /// ).with_stairs_up(Position::new(3, 3));
-    ///
-    /// assert_eq!(floor.stairs_up(), Some(&Position::new(3, 3)));
-    /// ```
     #[must_use]
     pub fn with_stairs_up(mut self, position: Position) -> Self {
         self.stairs_up = Some(position);
         self
     }
 
-    /// Returns a new Floor with stairs down at the specified position.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::{FloorLevel, Position};
-    /// use roguelike_domain::floor::{Floor, FloorIdentifier};
-    ///
-    /// let floor = Floor::new(
-    ///     FloorIdentifier::new(1),
-    ///     FloorLevel::new(1).unwrap(),
-    ///     20,
-    ///     20,
-    /// ).with_stairs_down(Position::new(15, 15));
-    ///
-    /// assert_eq!(floor.stairs_down(), Some(&Position::new(15, 15)));
-    /// ```
     #[must_use]
     pub fn with_stairs_down(mut self, position: Position) -> Self {
         self.stairs_down = Some(position);
@@ -262,61 +87,51 @@ impl Floor {
     // Getters
     // =========================================================================
 
-    /// Returns a reference to the floor identifier.
     #[must_use]
     pub const fn identifier(&self) -> &FloorIdentifier {
         &self.identifier
     }
 
-    /// Returns the floor level.
     #[must_use]
     pub const fn level(&self) -> FloorLevel {
         self.level
     }
 
-    /// Returns the width of the floor.
     #[must_use]
     pub fn width(&self) -> u32 {
         self.tiles.first().map_or(0, |row| row.len() as u32)
     }
 
-    /// Returns the height of the floor.
     #[must_use]
     pub fn height(&self) -> u32 {
         self.tiles.len() as u32
     }
 
-    /// Returns a reference to the tiles.
     #[must_use]
     pub const fn tiles(&self) -> &Vec<Vec<Tile>> {
         &self.tiles
     }
 
-    /// Returns a slice of rooms.
     #[must_use]
     pub fn rooms(&self) -> &[Room] {
         &self.rooms
     }
 
-    /// Returns a slice of corridors.
     #[must_use]
     pub fn corridors(&self) -> &[Corridor] {
         &self.corridors
     }
 
-    /// Returns a slice of spawn points.
     #[must_use]
     pub fn spawn_points(&self) -> &[Position] {
         &self.spawn_points
     }
 
-    /// Returns a reference to the stairs up position, if present.
     #[must_use]
     pub const fn stairs_up(&self) -> Option<&Position> {
         self.stairs_up.as_ref()
     }
 
-    /// Returns a reference to the stairs down position, if present.
     #[must_use]
     pub const fn stairs_down(&self) -> Option<&Position> {
         self.stairs_down.as_ref()
@@ -326,28 +141,6 @@ impl Floor {
     // Query Methods
     // =========================================================================
 
-    /// Returns the tile at the given position, if within bounds.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::{FloorLevel, Position};
-    /// use roguelike_domain::floor::{Floor, FloorIdentifier, TileKind};
-    ///
-    /// let floor = Floor::new(
-    ///     FloorIdentifier::new(1),
-    ///     FloorLevel::new(1).unwrap(),
-    ///     10,
-    ///     10,
-    /// );
-    ///
-    /// let tile = floor.get_tile(&Position::new(5, 5));
-    /// assert!(tile.is_some());
-    /// assert_eq!(tile.unwrap().kind(), TileKind::Wall);
-    ///
-    /// let out_of_bounds = floor.get_tile(&Position::new(100, 100));
-    /// assert!(out_of_bounds.is_none());
-    /// ```
     #[must_use]
     pub fn get_tile(&self, position: &Position) -> Option<&Tile> {
         if !self.is_in_bounds(position) {
@@ -360,59 +153,12 @@ impl Floor {
         self.tiles.get(y).and_then(|row| row.get(x))
     }
 
-    /// Returns true if the given position can be walked on.
-    ///
-    /// A position is walkable if it is within bounds and the tile at that
-    /// position has a walkable tile kind.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::{FloorLevel, Position};
-    /// use roguelike_domain::floor::{Floor, FloorIdentifier, Tile, TileKind};
-    ///
-    /// let tiles = vec![
-    ///     vec![Tile::new(TileKind::Wall), Tile::new(TileKind::Floor)],
-    ///     vec![Tile::new(TileKind::Floor), Tile::new(TileKind::Wall)],
-    /// ];
-    ///
-    /// let floor = Floor::new(
-    ///     FloorIdentifier::new(1),
-    ///     FloorLevel::new(1).unwrap(),
-    ///     2,
-    ///     2,
-    /// ).with_tiles(tiles);
-    ///
-    /// assert!(!floor.is_walkable(&Position::new(0, 0))); // Wall
-    /// assert!(floor.is_walkable(&Position::new(1, 0)));  // Floor
-    /// assert!(!floor.is_walkable(&Position::new(5, 5))); // Out of bounds
-    /// ```
     #[must_use]
     pub fn is_walkable(&self, position: &Position) -> bool {
         self.get_tile(position)
             .is_some_and(|tile| tile.is_walkable())
     }
 
-    /// Returns true if the given position is within the floor bounds.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::{FloorLevel, Position};
-    /// use roguelike_domain::floor::{Floor, FloorIdentifier};
-    ///
-    /// let floor = Floor::new(
-    ///     FloorIdentifier::new(1),
-    ///     FloorLevel::new(1).unwrap(),
-    ///     10,
-    ///     10,
-    /// );
-    ///
-    /// assert!(floor.is_in_bounds(&Position::new(0, 0)));
-    /// assert!(floor.is_in_bounds(&Position::new(9, 9)));
-    /// assert!(!floor.is_in_bounds(&Position::new(10, 10)));
-    /// assert!(!floor.is_in_bounds(&Position::new(-1, 0)));
-    /// ```
     #[must_use]
     pub fn is_in_bounds(&self, position: &Position) -> bool {
         let x = position.x();
@@ -425,33 +171,6 @@ impl Floor {
     // Domain Methods (Pure Functions)
     // =========================================================================
 
-    /// Returns a new Floor with the tile at the given position replaced.
-    ///
-    /// Returns an error if the position is out of bounds.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::{FloorLevel, Position};
-    /// use roguelike_domain::floor::{Floor, FloorIdentifier, Tile, TileKind};
-    ///
-    /// let floor = Floor::new(
-    ///     FloorIdentifier::new(1),
-    ///     FloorLevel::new(1).unwrap(),
-    ///     10,
-    ///     10,
-    /// );
-    ///
-    /// let new_floor = floor.set_tile(
-    ///     Position::new(5, 5),
-    ///     Tile::new(TileKind::Floor),
-    /// ).unwrap();
-    ///
-    /// assert_eq!(
-    ///     new_floor.get_tile(&Position::new(5, 5)).unwrap().kind(),
-    ///     TileKind::Floor
-    /// );
-    /// ```
     pub fn set_tile(self, position: Position, tile: Tile) -> Result<Self, FloorError> {
         if !self.is_in_bounds(&position) {
             return Err(FloorError::position_out_of_bounds(
@@ -472,26 +191,6 @@ impl Floor {
         })
     }
 
-    /// Returns a new Floor with the tile at the given position marked as explored.
-    ///
-    /// Returns an error if the position is out of bounds.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::{FloorLevel, Position};
-    /// use roguelike_domain::floor::{Floor, FloorIdentifier};
-    ///
-    /// let floor = Floor::new(
-    ///     FloorIdentifier::new(1),
-    ///     FloorLevel::new(1).unwrap(),
-    ///     10,
-    ///     10,
-    /// );
-    ///
-    /// let explored_floor = floor.explore_tile(Position::new(5, 5)).unwrap();
-    /// assert!(explored_floor.get_tile(&Position::new(5, 5)).unwrap().is_explored());
-    /// ```
     pub fn explore_tile(self, position: Position) -> Result<Self, FloorError> {
         if !self.is_in_bounds(&position) {
             return Err(FloorError::position_out_of_bounds(
@@ -512,28 +211,6 @@ impl Floor {
         })
     }
 
-    /// Returns a new Floor with the tile visibility at the given position updated.
-    ///
-    /// Returns an error if the position is out of bounds.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::{FloorLevel, Position};
-    /// use roguelike_domain::floor::{Floor, FloorIdentifier};
-    ///
-    /// let floor = Floor::new(
-    ///     FloorIdentifier::new(1),
-    ///     FloorLevel::new(1).unwrap(),
-    ///     10,
-    ///     10,
-    /// );
-    ///
-    /// let visible_floor = floor.set_tile_visibility(Position::new(5, 5), true).unwrap();
-    /// let tile = visible_floor.get_tile(&Position::new(5, 5)).unwrap();
-    /// assert!(tile.is_visible());
-    /// assert!(tile.is_explored()); // Setting visible also marks as explored
-    /// ```
     pub fn set_tile_visibility(
         self,
         position: Position,

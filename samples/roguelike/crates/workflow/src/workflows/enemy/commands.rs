@@ -1,9 +1,3 @@
-//! Command types for enemy workflows.
-//!
-//! This module defines the input command types for enemy operations.
-//! Commands are immutable value objects that represent intent to perform
-//! enemy-related actions.
-
 use roguelike_domain::enemy::EntityIdentifier;
 use roguelike_domain::game_session::GameIdentifier;
 
@@ -11,52 +5,13 @@ use roguelike_domain::game_session::GameIdentifier;
 // ProcessEnemyTurnCommand
 // =============================================================================
 
-/// Command for processing an enemy's turn.
-///
-/// This command triggers the AI decision-making and action execution
-/// for a specific enemy.
-///
-/// # Fields
-///
-/// - `game_identifier`: The game session identifier
-/// - `entity_identifier`: The identifier of the enemy to process
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::enemy::ProcessEnemyTurnCommand;
-/// use roguelike_domain::game_session::GameIdentifier;
-/// use roguelike_domain::enemy::EntityIdentifier;
-///
-/// let identifier = GameIdentifier::new();
-/// let entity = EntityIdentifier::new();
-/// let command = ProcessEnemyTurnCommand::new(identifier, entity);
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessEnemyTurnCommand {
-    /// The game session identifier.
     game_identifier: GameIdentifier,
-    /// The enemy entity identifier.
     entity_identifier: EntityIdentifier,
 }
 
 impl ProcessEnemyTurnCommand {
-    /// Creates a new process enemy turn command.
-    ///
-    /// # Arguments
-    ///
-    /// * `game_identifier` - The game session identifier.
-    /// * `entity_identifier` - The identifier of the enemy to process.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_workflow::workflows::enemy::ProcessEnemyTurnCommand;
-    /// use roguelike_domain::game_session::GameIdentifier;
-    /// use roguelike_domain::enemy::EntityIdentifier;
-    ///
-    /// let command = ProcessEnemyTurnCommand::new(GameIdentifier::new(), EntityIdentifier::new());
-    /// ```
     #[must_use]
     pub const fn new(game_identifier: GameIdentifier, entity_identifier: EntityIdentifier) -> Self {
         Self {
@@ -65,13 +20,11 @@ impl ProcessEnemyTurnCommand {
         }
     }
 
-    /// Returns the game identifier.
     #[must_use]
     pub const fn game_identifier(&self) -> &GameIdentifier {
         &self.game_identifier
     }
 
-    /// Returns the entity identifier.
     #[must_use]
     pub const fn entity_identifier(&self) -> &EntityIdentifier {
         &self.entity_identifier
@@ -82,48 +35,13 @@ impl ProcessEnemyTurnCommand {
 // SpawnEnemiesCommand
 // =============================================================================
 
-/// Command for spawning enemies on a floor.
-///
-/// This command triggers enemy generation based on floor level configuration.
-///
-/// # Fields
-///
-/// - `game_identifier`: The game session identifier
-/// - `floor_level`: The floor level determining spawn configuration
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::enemy::SpawnEnemiesCommand;
-/// use roguelike_domain::game_session::GameIdentifier;
-///
-/// let identifier = GameIdentifier::new();
-/// let command = SpawnEnemiesCommand::new(identifier, 5);
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpawnEnemiesCommand {
-    /// The game session identifier.
     game_identifier: GameIdentifier,
-    /// The floor level for spawn configuration.
     floor_level: u32,
 }
 
 impl SpawnEnemiesCommand {
-    /// Creates a new spawn enemies command.
-    ///
-    /// # Arguments
-    ///
-    /// * `game_identifier` - The game session identifier.
-    /// * `floor_level` - The floor level determining spawn configuration.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_workflow::workflows::enemy::SpawnEnemiesCommand;
-    /// use roguelike_domain::game_session::GameIdentifier;
-    ///
-    /// let command = SpawnEnemiesCommand::new(GameIdentifier::new(), 3);
-    /// ```
     #[must_use]
     pub const fn new(game_identifier: GameIdentifier, floor_level: u32) -> Self {
         Self {
@@ -132,13 +50,11 @@ impl SpawnEnemiesCommand {
         }
     }
 
-    /// Returns the game identifier.
     #[must_use]
     pub const fn game_identifier(&self) -> &GameIdentifier {
         &self.game_identifier
     }
 
-    /// Returns the floor level.
     #[must_use]
     pub const fn floor_level(&self) -> u32 {
         self.floor_level
@@ -149,51 +65,13 @@ impl SpawnEnemiesCommand {
 // ProcessEnemyDeathCommand
 // =============================================================================
 
-/// Command for processing an enemy's death.
-///
-/// This command handles loot generation and enemy removal from the session.
-///
-/// # Fields
-///
-/// - `game_identifier`: The game session identifier
-/// - `entity_identifier`: The identifier of the dead enemy
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::enemy::ProcessEnemyDeathCommand;
-/// use roguelike_domain::game_session::GameIdentifier;
-/// use roguelike_domain::enemy::EntityIdentifier;
-///
-/// let identifier = GameIdentifier::new();
-/// let entity = EntityIdentifier::new();
-/// let command = ProcessEnemyDeathCommand::new(identifier, entity);
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessEnemyDeathCommand {
-    /// The game session identifier.
     game_identifier: GameIdentifier,
-    /// The dead enemy entity identifier.
     entity_identifier: EntityIdentifier,
 }
 
 impl ProcessEnemyDeathCommand {
-    /// Creates a new process enemy death command.
-    ///
-    /// # Arguments
-    ///
-    /// * `game_identifier` - The game session identifier.
-    /// * `entity_identifier` - The identifier of the dead enemy.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_workflow::workflows::enemy::ProcessEnemyDeathCommand;
-    /// use roguelike_domain::game_session::GameIdentifier;
-    /// use roguelike_domain::enemy::EntityIdentifier;
-    ///
-    /// let command = ProcessEnemyDeathCommand::new(GameIdentifier::new(), EntityIdentifier::new());
-    /// ```
     #[must_use]
     pub const fn new(game_identifier: GameIdentifier, entity_identifier: EntityIdentifier) -> Self {
         Self {
@@ -202,13 +80,11 @@ impl ProcessEnemyDeathCommand {
         }
     }
 
-    /// Returns the game identifier.
     #[must_use]
     pub const fn game_identifier(&self) -> &GameIdentifier {
         &self.game_identifier
     }
 
-    /// Returns the entity identifier.
     #[must_use]
     pub const fn entity_identifier(&self) -> &EntityIdentifier {
         &self.entity_identifier

@@ -1,7 +1,3 @@
-//! Consumable item types and data structures.
-//!
-//! This module provides types for representing consumable items in the game,
-//! including the effects they produce when used.
 
 use std::fmt;
 
@@ -11,56 +7,24 @@ use crate::common::StatusEffectType;
 // ConsumableEffect
 // =============================================================================
 
-/// Effects that consumable items can produce when used.
-///
-/// Each effect has specific parameters that determine its strength.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::item::ConsumableEffect;
-///
-/// let heal = ConsumableEffect::Heal { amount: 50 };
-/// println!("Using: {}", heal);
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConsumableEffect {
-    /// Restores health points.
     Heal {
-        /// The amount of health to restore.
         amount: u32,
     },
-    /// Restores mana points.
     RestoreMana {
-        /// The amount of mana to restore.
         amount: u32,
     },
-    /// Applies a status effect to the target.
     ApplyStatus {
-        /// The type of status effect to apply.
         effect: StatusEffectType,
-        /// The duration in turns.
         duration: u32,
     },
-    /// Removes a status effect from the target.
     RemoveStatus {
-        /// The type of status effect to remove.
         effect: StatusEffectType,
     },
 }
 
 impl ConsumableEffect {
-    /// Returns true if this effect is beneficial (buff-like).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::item::ConsumableEffect;
-    /// use roguelike_domain::common::StatusEffectType;
-    ///
-    /// assert!(ConsumableEffect::Heal { amount: 50 }.is_beneficial());
-    /// assert!(ConsumableEffect::RemoveStatus { effect: StatusEffectType::Poison }.is_beneficial());
-    /// ```
     #[must_use]
     pub const fn is_beneficial(&self) -> bool {
         match self {
@@ -69,35 +33,11 @@ impl ConsumableEffect {
         }
     }
 
-    /// Returns true if this effect targets health or mana.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::item::ConsumableEffect;
-    ///
-    /// assert!(ConsumableEffect::Heal { amount: 50 }.is_restoration());
-    /// assert!(ConsumableEffect::RestoreMana { amount: 30 }.is_restoration());
-    /// ```
     #[must_use]
     pub const fn is_restoration(&self) -> bool {
         matches!(self, Self::Heal { .. } | Self::RestoreMana { .. })
     }
 
-    /// Returns true if this effect involves status effects.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::item::ConsumableEffect;
-    /// use roguelike_domain::common::StatusEffectType;
-    ///
-    /// let apply = ConsumableEffect::ApplyStatus {
-    ///     effect: StatusEffectType::Haste,
-    ///     duration: 5,
-    /// };
-    /// assert!(apply.is_status_related());
-    /// ```
     #[must_use]
     pub const fn is_status_related(&self) -> bool {
         matches!(self, Self::ApplyStatus { .. } | Self::RemoveStatus { .. })
@@ -121,18 +61,6 @@ impl fmt::Display for ConsumableEffect {
 // ConsumableData
 // =============================================================================
 
-/// Data specific to consumable items.
-///
-/// Contains the effect produced when used and the maximum stack size.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::item::{ConsumableData, ConsumableEffect};
-///
-/// let potion = ConsumableData::new(ConsumableEffect::Heal { amount: 50 }, 10);
-/// assert_eq!(potion.max_stack(), 10);
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ConsumableData {
     effect: ConsumableEffect,
@@ -140,30 +68,21 @@ pub struct ConsumableData {
 }
 
 impl ConsumableData {
-    /// Creates a new `ConsumableData`.
-    ///
-    /// # Arguments
-    ///
-    /// * `effect` - The effect produced when the item is used
-    /// * `max_stack` - The maximum number of items that can stack in one slot
     #[must_use]
     pub const fn new(effect: ConsumableEffect, max_stack: u32) -> Self {
         Self { effect, max_stack }
     }
 
-    /// Returns the effect of this consumable.
     #[must_use]
     pub const fn effect(&self) -> ConsumableEffect {
         self.effect
     }
 
-    /// Returns the maximum stack size.
     #[must_use]
     pub const fn max_stack(&self) -> u32 {
         self.max_stack
     }
 
-    /// Returns a new `ConsumableData` with the given max stack.
     #[must_use]
     pub const fn with_max_stack(&self, max_stack: u32) -> Self {
         Self {

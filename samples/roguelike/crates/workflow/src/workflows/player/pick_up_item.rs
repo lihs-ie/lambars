@@ -1,30 +1,3 @@
-//! PickUpItem workflow implementation.
-//!
-//! This module provides the workflow for picking up an item from the floor.
-//! It follows the "IO at the Edges" pattern, separating pure domain logic
-//! from IO operations.
-//!
-//! # Workflow Steps
-//!
-//! 1. [IO] Load session from cache
-//! 2. [Pure] Find item on floor at player's position
-//! 3. [Pure] Validate inventory has space
-//! 4. [Pure] Remove item from floor
-//! 5. [Pure] Add item to inventory
-//! 6. [Pure] Generate ItemPickedUp event
-//! 7. [IO] Update cache
-//! 8. [IO] Append events to event store
-//!
-//! # Examples
-//!
-//! ```ignore
-//! use roguelike_workflow::workflows::player::{pick_up_item, PickUpItemCommand};
-//!
-//! let workflow = pick_up_item(&cache, &event_store);
-//! let command = PickUpItemCommand::new(game_identifier, item_identifier);
-//! let result = workflow(command).run_async().await;
-//! ```
-
 use std::time::Duration;
 
 use lambars::effect::AsyncIO;
@@ -42,43 +15,12 @@ use crate::ports::{EventStore, SessionCache, WorkflowResult};
 // Workflow Configuration
 // =============================================================================
 
-/// Default cache time-to-live for game sessions.
 const DEFAULT_CACHE_TIME_TO_LIVE: Duration = Duration::from_secs(300); // 5 minutes
 
 // =============================================================================
 // PickUpItem Workflow
 // =============================================================================
 
-/// Creates a workflow function for picking up an item.
-///
-/// This function returns a closure that picks up an item from the floor
-/// and adds it to the player's inventory. It uses higher-order functions
-/// to inject dependencies, enabling pure functional composition and easy testing.
-///
-/// # Type Parameters
-///
-/// * `C` - Cache type implementing `SessionCache`
-/// * `E` - Event store type implementing `EventStore`
-///
-/// # Arguments
-///
-/// * `cache` - The session cache for fast access
-/// * `event_store` - The event store for event sourcing
-///
-/// # Returns
-///
-/// A function that takes a `PickUpItemCommand` and returns an `AsyncIO`
-/// that produces the updated game session or an error.
-///
-/// # Examples
-///
-/// ```ignore
-/// use roguelike_workflow::workflows::player::{pick_up_item, PickUpItemCommand};
-///
-/// let workflow = pick_up_item(&cache, &event_store);
-/// let command = PickUpItemCommand::new(game_identifier, item_identifier);
-/// let result = workflow(command).run_async().await;
-/// ```
 pub fn pick_up_item<'a, C, E>(
     cache: &'a C,
     event_store: &'a E,
@@ -149,51 +91,6 @@ where
 // Pure Functions
 // =============================================================================
 
-/// Pure function that performs the pick up item logic using `pipe!` macro.
-///
-/// This function encapsulates all pure domain logic for picking up an item:
-/// - Finds item on floor at player position
-/// - Validates inventory space
-/// - Removes item from floor
-/// - Adds item to inventory
-/// - Generates events
-///
-/// # Type Parameters
-///
-/// * `S` - Session type (must implement Clone)
-/// * `I` - Item type (must implement Clone)
-///
-/// # Arguments
-///
-/// * `session` - The current game session
-/// * `floor_items` - Items on the floor
-/// * `item_identifier` - The item to pick up
-/// * `player_position` - The player's current position
-/// * `current_inventory_count` - Current number of items in inventory
-/// * `max_inventory_capacity` - Maximum inventory capacity
-/// * `get_identifier` - A function to extract the identifier from an item
-///
-/// # Returns
-///
-/// A result containing:
-/// - The updated session
-/// - Generated events
-/// - Updated floor items list
-/// - The picked up item
-///
-/// # Example
-///
-/// ```ignore
-/// let result = pick_up_item_pure(
-///     session,
-///     &floor_items,
-///     &item_id,
-///     player_pos,
-///     inventory.len() as u32,
-///     MAX_INVENTORY,
-///     |item| &item.identifier,
-/// );
-/// ```
 #[allow(clippy::type_complexity)]
 pub fn pick_up_item_pure<S, I, F>(
     session: S,
@@ -239,9 +136,6 @@ where
     )
 }
 
-/// Simplified version of pick_up_item_pure that uses ItemIdentifier directly.
-///
-/// This avoids lifetime issues with closures by using ItemIdentifier's PartialEq implementation.
 #[allow(clippy::type_complexity)]
 fn pick_up_item_pure_simplified<S>(
     session: S,
@@ -285,59 +179,34 @@ where
     })
 }
 
-/// Represents an item on the floor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FloorItem<I> {
-    /// The item itself.
     item: I,
-    /// The position on the floor.
     position: Position,
 }
 
 impl<I> FloorItem<I> {
-    /// Creates a new floor item.
     #[must_use]
     pub const fn new(item: I, position: Position) -> Self {
         Self { item, position }
     }
 
-    /// Returns a reference to the item.
     #[must_use]
     pub const fn item(&self) -> &I {
         &self.item
     }
 
-    /// Returns the position.
     #[must_use]
     pub const fn position(&self) -> Position {
         self.position
     }
 
-    /// Consumes the floor item and returns the inner item.
     #[must_use]
     pub fn into_item(self) -> I {
         self.item
     }
 }
 
-/// Finds an item on the floor at a specific position.
-///
-/// This is a pure function that searches for an item at the player's position.
-///
-/// # Type Parameters
-///
-/// * `I` - Item type
-///
-/// # Arguments
-///
-/// * `floor_items` - A slice of items on the floor
-/// * `item_identifier` - The identifier of the item to find
-/// * `player_position` - The player's current position
-/// * `get_identifier` - A function to extract the identifier from an item
-///
-/// # Returns
-///
-/// `Ok(item_index)` if found at player's position, or an appropriate error.
 pub fn find_item_on_floor<I, F>(
     floor_items: &[FloorItem<I>],
     item_identifier: &ItemIdentifier,
@@ -356,18 +225,6 @@ where
         .ok_or_else(|| PlayerError::item_not_in_inventory(item_identifier.to_string()))
 }
 
-/// Validates that the inventory has space for a new item.
-///
-/// This is a pure function that checks inventory capacity.
-///
-/// # Arguments
-///
-/// * `current_count` - The current number of items in inventory
-/// * `max_capacity` - The maximum inventory capacity
-///
-/// # Returns
-///
-/// `Ok(())` if there's space, or `Err(PlayerError::InventoryFull)`.
 pub fn validate_inventory_space(current_count: u32, max_capacity: u32) -> Result<(), PlayerError> {
     if current_count >= max_capacity {
         Err(PlayerError::inventory_full(max_capacity))
@@ -376,22 +233,6 @@ pub fn validate_inventory_space(current_count: u32, max_capacity: u32) -> Result
     }
 }
 
-/// Removes an item from a list at the given index.
-///
-/// This is a pure function that returns a new list without the item.
-///
-/// # Type Parameters
-///
-/// * `T` - Item type (must implement Clone)
-///
-/// # Arguments
-///
-/// * `items` - The original list of items
-/// * `index` - The index of the item to remove
-///
-/// # Returns
-///
-/// A new vector without the item at the given index.
 #[must_use]
 pub fn remove_item_at_index<T: Clone>(items: &[T], index: usize) -> Vec<T> {
     items
@@ -402,22 +243,6 @@ pub fn remove_item_at_index<T: Clone>(items: &[T], index: usize) -> Vec<T> {
         .collect()
 }
 
-/// Adds an item to a list.
-///
-/// This is a pure function that returns a new list with the item added.
-///
-/// # Type Parameters
-///
-/// * `T` - Item type (must implement Clone)
-///
-/// # Arguments
-///
-/// * `items` - The original list of items
-/// * `new_item` - The item to add
-///
-/// # Returns
-///
-/// A new vector with the item added.
 #[must_use]
 pub fn add_item_to_list<T: Clone>(items: &[T], new_item: T) -> Vec<T> {
     let mut new_items: Vec<T> = items.to_vec();

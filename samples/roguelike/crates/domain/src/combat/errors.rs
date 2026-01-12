@@ -1,9 +1,3 @@
-//! Error types for the combat domain module.
-//!
-//! This module provides combat-specific error types for handling
-//! combat calculation failures, targeting issues, and other
-//! combat-related error conditions.
-
 use std::error::Error;
 use std::fmt;
 
@@ -11,80 +5,24 @@ use std::fmt;
 // CombatError
 // =============================================================================
 
-/// Combat error variants for the combat domain.
-///
-/// This enum represents errors that can occur during combat operations
-/// such as damage calculation, target validation, and turn resolution.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::combat::CombatError;
-///
-/// // Target out of range
-/// let error = CombatError::TargetNotInRange {
-///     attacker: (0, 0),
-///     target: (10, 10),
-///     range: 3,
-/// };
-/// assert!(error.to_string().contains("range"));
-///
-/// // Target not attackable
-/// let error = CombatError::TargetNotAttackable {
-///     target_identifier: "wall-01".to_string(),
-/// };
-/// assert!(error.to_string().contains("wall-01"));
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CombatError {
-    /// The target is not within attack range.
-    ///
-    /// This error occurs when an entity attempts to attack a target
-    /// that is too far away given the attack's range.
     TargetNotInRange {
-        /// The position of the attacking entity.
         attacker: (i32, i32),
-        /// The position of the target entity.
         target: (i32, i32),
-        /// The maximum attack range.
         range: u32,
     },
 
-    /// The target cannot be attacked.
-    ///
-    /// This error occurs when attempting to attack an entity that
-    /// is immune to attacks or otherwise not a valid attack target
-    /// (e.g., walls, friendly units, invulnerable entities).
     TargetNotAttackable {
-        /// The identifier of the non-attackable target.
         target_identifier: String,
     },
 
-    /// No valid target was found.
-    ///
-    /// This error occurs when an attack or ability requires a target
-    /// but none is available or specified.
     NoValidTarget,
 
-    /// The damage calculation produced an invalid result.
-    ///
-    /// This error occurs when the damage calculation pipeline
-    /// produces an invalid or unexpected result, such as when
-    /// damage modifiers conflict or produce impossible values.
     InvalidDamageCalculation,
 }
 
 impl CombatError {
-    /// Returns a human-readable error message.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::combat::CombatError;
-    ///
-    /// let error = CombatError::NoValidTarget;
-    /// assert_eq!(error.message(), "No valid target available for attack");
-    /// ```
     pub fn message(&self) -> String {
         match self {
             Self::TargetNotInRange {
@@ -107,29 +45,6 @@ impl CombatError {
         }
     }
 
-    /// Returns true if this error is recoverable.
-    ///
-    /// Recoverable errors typically indicate issues that can be
-    /// resolved by the player taking different actions (e.g.,
-    /// moving closer to a target or selecting a different target).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::combat::CombatError;
-    ///
-    /// // Player can move closer to the target
-    /// let error = CombatError::TargetNotInRange {
-    ///     attacker: (0, 0),
-    ///     target: (10, 10),
-    ///     range: 3,
-    /// };
-    /// assert!(error.is_recoverable());
-    ///
-    /// // Invalid calculation is not recoverable by player action
-    /// let error = CombatError::InvalidDamageCalculation;
-    /// assert!(!error.is_recoverable());
-    /// ```
     pub fn is_recoverable(&self) -> bool {
         match self {
             Self::TargetNotInRange { .. } => true,
@@ -139,22 +54,6 @@ impl CombatError {
         }
     }
 
-    /// Creates a target not in range error.
-    ///
-    /// # Arguments
-    ///
-    /// * `attacker` - The position of the attacking entity
-    /// * `target` - The position of the target entity
-    /// * `range` - The maximum attack range
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::combat::CombatError;
-    ///
-    /// let error = CombatError::target_not_in_range((0, 0), (5, 5), 2);
-    /// assert!(matches!(error, CombatError::TargetNotInRange { .. }));
-    /// ```
     pub fn target_not_in_range(attacker: (i32, i32), target: (i32, i32), range: u32) -> Self {
         Self::TargetNotInRange {
             attacker,
@@ -163,50 +62,16 @@ impl CombatError {
         }
     }
 
-    /// Creates a target not attackable error.
-    ///
-    /// # Arguments
-    ///
-    /// * `target_identifier` - The identifier of the non-attackable target
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::combat::CombatError;
-    ///
-    /// let error = CombatError::target_not_attackable("wall-01");
-    /// assert!(matches!(error, CombatError::TargetNotAttackable { .. }));
-    /// ```
     pub fn target_not_attackable(target_identifier: impl Into<String>) -> Self {
         Self::TargetNotAttackable {
             target_identifier: target_identifier.into(),
         }
     }
 
-    /// Creates a no valid target error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::combat::CombatError;
-    ///
-    /// let error = CombatError::no_valid_target();
-    /// assert!(matches!(error, CombatError::NoValidTarget));
-    /// ```
     pub fn no_valid_target() -> Self {
         Self::NoValidTarget
     }
 
-    /// Creates an invalid damage calculation error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::combat::CombatError;
-    ///
-    /// let error = CombatError::invalid_damage_calculation();
-    /// assert!(matches!(error, CombatError::InvalidDamageCalculation));
-    /// ```
     pub fn invalid_damage_calculation() -> Self {
         Self::InvalidDamageCalculation
     }

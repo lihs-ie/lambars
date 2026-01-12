@@ -1,15 +1,3 @@
-//! HTTP handlers for the roguelike API.
-//!
-//! This module provides all HTTP request handlers organized by domain:
-//!
-//! - [`command`]: Game command execution
-//! - [`events`]: Game event retrieval
-//! - [`floor`]: Floor information retrieval
-//! - [`game`]: Game session management
-//! - [`health`]: Health check endpoint
-//! - [`leaderboard`]: Leaderboard retrieval
-//! - [`player`]: Player information and inventory
-
 pub mod command;
 pub mod events;
 pub mod floor;

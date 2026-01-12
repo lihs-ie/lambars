@@ -1,73 +1,21 @@
-//! Command domain errors.
-//!
-//! This module provides error types for command validation and execution.
-
 use std::fmt;
 
 // =============================================================================
 // CommandError
 // =============================================================================
 
-/// Errors that can occur during command processing.
-///
-/// CommandError represents failures during command validation or execution.
-/// Each variant provides context about what went wrong.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::command::CommandError;
-///
-/// let error = CommandError::InvalidCommand {
-///     reason: "Unknown command type".to_string(),
-/// };
-/// println!("{}", error);
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandError {
-    /// The command is invalid for some reason.
-    ///
-    /// This variant is used when a command cannot be parsed or
-    /// is malformed in some way.
-    InvalidCommand {
-        /// A description of why the command is invalid.
-        reason: String,
-    },
+    InvalidCommand { reason: String },
 
-    /// The command is not allowed in the current game state.
-    ///
-    /// This variant is used when a valid command cannot be executed
-    /// due to game state constraints.
-    CommandNotAllowed {
-        /// The command that was attempted (as a string representation).
-        command: String,
-        /// A description of why the command is not allowed.
-        reason: String,
-    },
+    CommandNotAllowed { command: String, reason: String },
 
-    /// The command requires a target but none was provided.
-    ///
-    /// This variant is used for commands like Attack that require
-    /// a target entity to be specified.
     TargetRequired,
 
-    /// The command requires a direction but none was provided.
-    ///
-    /// This variant is used for commands like Move that require
-    /// a direction to be specified.
     DirectionRequired,
 }
 
 impl CommandError {
-    /// Creates a new InvalidCommand error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::command::CommandError;
-    ///
-    /// let error = CommandError::invalid_command("Unknown command");
-    /// ```
     #[must_use]
     pub fn invalid_command(reason: impl Into<String>) -> Self {
         Self::InvalidCommand {
@@ -75,15 +23,6 @@ impl CommandError {
         }
     }
 
-    /// Creates a new CommandNotAllowed error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::command::CommandError;
-    ///
-    /// let error = CommandError::command_not_allowed("Move", "Wall blocking");
-    /// ```
     #[must_use]
     pub fn command_not_allowed(command: impl Into<String>, reason: impl Into<String>) -> Self {
         Self::CommandNotAllowed {
@@ -92,29 +31,11 @@ impl CommandError {
         }
     }
 
-    /// Creates a new TargetRequired error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::command::CommandError;
-    ///
-    /// let error = CommandError::target_required();
-    /// ```
     #[must_use]
     pub const fn target_required() -> Self {
         Self::TargetRequired
     }
 
-    /// Creates a new DirectionRequired error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::command::CommandError;
-    ///
-    /// let error = CommandError::direction_required();
-    /// ```
     #[must_use]
     pub const fn direction_required() -> Self {
         Self::DirectionRequired

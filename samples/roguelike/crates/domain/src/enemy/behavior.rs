@@ -1,8 +1,3 @@
-//! AI behavior patterns for the enemy domain.
-//!
-//! This module defines the different behavior patterns that enemies
-//! can exhibit during gameplay.
-
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -11,63 +6,20 @@ use serde::{Deserialize, Serialize};
 // AiBehavior
 // =============================================================================
 
-/// The AI behavior pattern that determines how an enemy acts.
-///
-/// Different behaviors affect movement, combat decisions, and
-/// reactions to the player's actions.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::enemy::AiBehavior;
-///
-/// let behavior = AiBehavior::Aggressive;
-/// println!("Behavior: {}", behavior);
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AiBehavior {
-    /// Actively pursues and attacks the player.
-    ///
-    /// Aggressive enemies will move toward the player whenever possible
-    /// and prioritize attacking over other actions.
     Aggressive,
 
-    /// Prioritizes defense and counterattacks.
-    ///
-    /// Defensive enemies wait for the player to approach and focus
-    /// on maintaining their position while defending.
     Defensive,
 
-    /// Does not engage unless provoked.
-    ///
-    /// Passive enemies will not attack the player unless attacked first
-    /// or until certain conditions are met.
     Passive,
 
-    /// Moves along a set path.
-    ///
-    /// Patrol enemies follow a predetermined route and only engage
-    /// when the player enters their detection range.
     Patrol,
 
-    /// Attempts to escape from the player.
-    ///
-    /// Flee behavior causes the enemy to move away from the player,
-    /// typically activated when health is low.
     Flee,
 }
 
 impl AiBehavior {
-    /// Returns an array containing all behavior patterns.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::AiBehavior;
-    ///
-    /// let behaviors = AiBehavior::all();
-    /// assert_eq!(behaviors.len(), 5);
-    /// ```
     #[must_use]
     pub const fn all() -> [Self; 5] {
         [
@@ -79,15 +31,6 @@ impl AiBehavior {
         ]
     }
 
-    /// Returns the display name of the behavior.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::AiBehavior;
-    ///
-    /// assert_eq!(AiBehavior::Aggressive.name(), "Aggressive");
-    /// ```
     #[must_use]
     pub const fn name(&self) -> &'static str {
         match self {
@@ -99,62 +42,21 @@ impl AiBehavior {
         }
     }
 
-    /// Returns true if this behavior causes the enemy to actively seek the player.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::AiBehavior;
-    ///
-    /// assert!(AiBehavior::Aggressive.seeks_player());
-    /// assert!(!AiBehavior::Passive.seeks_player());
-    /// ```
     #[must_use]
     pub const fn seeks_player(&self) -> bool {
         matches!(self, Self::Aggressive)
     }
 
-    /// Returns true if this behavior causes the enemy to avoid the player.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::AiBehavior;
-    ///
-    /// assert!(AiBehavior::Flee.avoids_player());
-    /// assert!(!AiBehavior::Aggressive.avoids_player());
-    /// ```
     #[must_use]
     pub const fn avoids_player(&self) -> bool {
         matches!(self, Self::Flee)
     }
 
-    /// Returns true if this behavior initiates combat proactively.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::AiBehavior;
-    ///
-    /// assert!(AiBehavior::Aggressive.initiates_combat());
-    /// assert!(!AiBehavior::Passive.initiates_combat());
-    /// ```
     #[must_use]
     pub const fn initiates_combat(&self) -> bool {
         matches!(self, Self::Aggressive | Self::Patrol)
     }
 
-    /// Returns the priority value for this behavior (higher = more aggressive).
-    ///
-    /// This can be used to determine action order or behavior weighting.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::AiBehavior;
-    ///
-    /// assert!(AiBehavior::Aggressive.priority() > AiBehavior::Passive.priority());
-    /// ```
     #[must_use]
     pub const fn priority(&self) -> u8 {
         match self {

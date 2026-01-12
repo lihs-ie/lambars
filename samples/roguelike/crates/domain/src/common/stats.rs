@@ -1,8 +1,3 @@
-//! Composite stat types for combat and character attributes.
-//!
-//! This module provides compound types that combine multiple numeric values
-//! for combat statistics, base attributes, and damage modification.
-
 use std::fmt;
 
 use lambars::typeclass::{Monoid, Semigroup};
@@ -14,15 +9,6 @@ use super::numeric::{Attack, Damage, Defense, Health, Mana, Speed, Stat};
 // CombatStats
 // =============================================================================
 
-/// Combat statistics for a character or entity.
-///
-/// Contains current and maximum values for health and mana,
-/// as well as attack, defense, and speed values.
-///
-/// # Invariants
-///
-/// - health <= max_health
-/// - mana <= max_mana
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CombatStats {
     health: Health,
@@ -35,11 +21,6 @@ pub struct CombatStats {
 }
 
 impl CombatStats {
-    /// Creates new combat stats with the given values.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if health > max_health or mana > max_mana.
     pub fn new(
         health: Health,
         max_health: Health,
@@ -72,53 +53,41 @@ impl CombatStats {
         })
     }
 
-    /// Returns the current health.
     #[must_use]
     pub const fn health(&self) -> Health {
         self.health
     }
 
-    /// Returns the maximum health.
     #[must_use]
     pub const fn max_health(&self) -> Health {
         self.max_health
     }
 
-    /// Returns the current mana.
     #[must_use]
     pub const fn mana(&self) -> Mana {
         self.mana
     }
 
-    /// Returns the maximum mana.
     #[must_use]
     pub const fn max_mana(&self) -> Mana {
         self.max_mana
     }
 
-    /// Returns the attack value.
     #[must_use]
     pub const fn attack(&self) -> Attack {
         self.attack
     }
 
-    /// Returns the defense value.
     #[must_use]
     pub const fn defense(&self) -> Defense {
         self.defense
     }
 
-    /// Returns the speed value.
     #[must_use]
     pub const fn speed(&self) -> Speed {
         self.speed
     }
 
-    /// Returns a new CombatStats with the given health.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the new health exceeds max_health.
     pub fn with_health(&self, health: Health) -> Result<Self, ValidationError> {
         Self::new(
             health,
@@ -131,11 +100,6 @@ impl CombatStats {
         )
     }
 
-    /// Returns a new CombatStats with the given mana.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the new mana exceeds max_mana.
     pub fn with_mana(&self, mana: Mana) -> Result<Self, ValidationError> {
         Self::new(
             self.health,
@@ -148,7 +112,6 @@ impl CombatStats {
         )
     }
 
-    /// Returns true if health is greater than zero.
     #[must_use]
     pub fn is_alive(&self) -> bool {
         !self.health.is_zero()
@@ -159,10 +122,6 @@ impl CombatStats {
 // BaseStats
 // =============================================================================
 
-/// Base attribute statistics for a character.
-///
-/// Contains the four primary attributes: strength, dexterity,
-/// intelligence, and vitality.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BaseStats {
     strength: Stat,
@@ -172,7 +131,6 @@ pub struct BaseStats {
 }
 
 impl BaseStats {
-    /// Creates new base stats with the given values.
     #[must_use]
     pub const fn new(strength: Stat, dexterity: Stat, intelligence: Stat, vitality: Stat) -> Self {
         Self {
@@ -183,31 +141,26 @@ impl BaseStats {
         }
     }
 
-    /// Returns the strength value.
     #[must_use]
     pub const fn strength(&self) -> Stat {
         self.strength
     }
 
-    /// Returns the dexterity value.
     #[must_use]
     pub const fn dexterity(&self) -> Stat {
         self.dexterity
     }
 
-    /// Returns the intelligence value.
     #[must_use]
     pub const fn intelligence(&self) -> Stat {
         self.intelligence
     }
 
-    /// Returns the vitality value.
     #[must_use]
     pub const fn vitality(&self) -> Stat {
         self.vitality
     }
 
-    /// Returns the sum of all stat values.
     #[must_use]
     pub fn total(&self) -> u32 {
         self.strength.value()
@@ -221,35 +174,6 @@ impl BaseStats {
 // DamageModifier
 // =============================================================================
 
-/// A damage modifier that combines a multiplier and flat bonus.
-///
-/// When applying damage modification:
-/// - First, the base damage is multiplied by the multiplier
-/// - Then, the flat bonus is added
-/// - The result is clamped to non-negative values
-///
-/// DamageModifier implements Semigroup and Monoid from lambars:
-/// - Semigroup: combine multiplies multipliers and adds flat bonuses
-/// - Monoid: identity is multiplier=1.0, flat_bonus=0
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::common::{DamageModifier, Damage};
-/// use lambars::typeclass::{Semigroup, Monoid};
-///
-/// let modifier = DamageModifier::new(1.5, 10);
-/// let base = Damage::new(100);
-/// let result = modifier.apply(base);
-/// assert_eq!(result.value(), 160); // 100 * 1.5 + 10 = 160
-///
-/// // Semigroup combination
-/// let mod1 = DamageModifier::new(1.5, 10);
-/// let mod2 = DamageModifier::new(2.0, 5);
-/// let combined = mod1.combine(mod2);
-/// assert_eq!(combined.multiplier(), 3.0);  // 1.5 * 2.0
-/// assert_eq!(combined.flat_bonus(), 15);    // 10 + 5
-/// ```
 #[derive(Debug, Clone, Copy)]
 pub struct DamageModifier {
     multiplier: f32,
@@ -257,7 +181,6 @@ pub struct DamageModifier {
 }
 
 impl DamageModifier {
-    /// Creates a new DamageModifier with the given multiplier and flat bonus.
     #[must_use]
     pub const fn new(multiplier: f32, flat_bonus: i32) -> Self {
         Self {
@@ -266,22 +189,16 @@ impl DamageModifier {
         }
     }
 
-    /// Returns the damage multiplier.
     #[must_use]
     pub const fn multiplier(&self) -> f32 {
         self.multiplier
     }
 
-    /// Returns the flat damage bonus.
     #[must_use]
     pub const fn flat_bonus(&self) -> i32 {
         self.flat_bonus
     }
 
-    /// Applies the modifier to base damage.
-    ///
-    /// Calculation: (base_damage * multiplier) + flat_bonus
-    /// Result is clamped to 0 if negative.
     #[must_use]
     pub fn apply(&self, base_damage: Damage) -> Damage {
         let base = base_damage.value() as f32;
@@ -299,12 +216,6 @@ impl PartialEq for DamageModifier {
 }
 
 impl Semigroup for DamageModifier {
-    /// Combines two damage modifiers.
-    ///
-    /// - Multipliers are multiplied together
-    /// - Flat bonuses are added
-    ///
-    /// This operation is associative.
     fn combine(self, other: Self) -> Self {
         Self {
             multiplier: self.multiplier * other.multiplier,
@@ -314,9 +225,6 @@ impl Semigroup for DamageModifier {
 }
 
 impl Monoid for DamageModifier {
-    /// Returns the identity modifier (multiplier=1.0, flat_bonus=0).
-    ///
-    /// Combining any modifier with the identity returns the original modifier.
     fn empty() -> Self {
         Self {
             multiplier: 1.0,
@@ -718,8 +626,6 @@ mod property_tests {
     use proptest::prelude::*;
 
     proptest! {
-        /// Semigroup associativity law:
-        /// (a.combine(b)).combine(c) == a.combine(b.combine(c))
         #[test]
         fn prop_damage_modifier_associativity(
             a_mult in -10.0f32..10.0f32,
@@ -741,8 +647,6 @@ mod property_tests {
             prop_assert_eq!(left.flat_bonus(), right.flat_bonus());
         }
 
-        /// Monoid left identity law:
-        /// DamageModifier::empty().combine(a) == a
         #[test]
         fn prop_damage_modifier_left_identity(
             mult in -10.0f32..10.0f32,
@@ -755,8 +659,6 @@ mod property_tests {
             prop_assert_eq!(result.flat_bonus(), a.flat_bonus());
         }
 
-        /// Monoid right identity law:
-        /// a.combine(DamageModifier::empty()) == a
         #[test]
         fn prop_damage_modifier_right_identity(
             mult in -10.0f32..10.0f32,

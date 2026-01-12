@@ -1,18 +1,3 @@
-//! Application state management.
-//!
-//! This module provides the application state that is shared across
-//! all API handlers via Axum's state extraction.
-//!
-//! # Design
-//!
-//! The application state holds references to:
-//! - Repository ports for persistence
-//! - Cache ports for caching
-//! - Event store ports for event sourcing
-//! - Random generator port for deterministic gameplay
-//!
-//! All ports are wrapped in `Arc` for thread-safe sharing across async handlers.
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,23 +9,6 @@ use roguelike_workflow::ports::{EventStore, GameSessionRepository, RandomGenerat
 // AppState
 // =============================================================================
 
-/// Application state shared across all handlers.
-///
-/// This struct holds all dependencies needed by API handlers.
-/// It is cloneable and uses `Arc` internally for efficient sharing.
-///
-/// # Examples
-///
-/// ```ignore
-/// use roguelike_api::state::AppState;
-///
-/// let state = AppState::new(repository, cache, event_store, random);
-///
-/// // Use with Axum router
-/// let app = Router::new()
-///     .route("/api/v1/games", post(create_game))
-///     .with_state(state);
-/// ```
 #[derive(Clone)]
 pub struct AppState<Repository, Cache, Events, Random>
 where
@@ -49,16 +17,12 @@ where
     Events: EventStore,
     Random: RandomGenerator,
 {
-    /// Repository for game session persistence.
     pub repository: Arc<Repository>,
 
-    /// Cache for game session caching.
     pub cache: Arc<Cache>,
 
-    /// Event store for event sourcing.
     pub event_store: Arc<Events>,
 
-    /// Random generator for deterministic gameplay.
     pub random: Arc<Random>,
 }
 
@@ -69,20 +33,6 @@ where
     Events: EventStore,
     Random: RandomGenerator,
 {
-    /// Creates a new `AppState` with the given dependencies.
-    ///
-    /// # Arguments
-    ///
-    /// * `repository` - Game session repository implementation
-    /// * `cache` - Session cache implementation
-    /// * `event_store` - Event store implementation
-    /// * `random` - Random generator implementation
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// let state = AppState::new(repository, cache, event_store, random);
-    /// ```
     #[must_use]
     pub fn new(repository: Repository, cache: Cache, event_store: Events, random: Random) -> Self {
         Self {
@@ -93,10 +43,6 @@ where
         }
     }
 
-    /// Creates a new `AppState` from pre-wrapped Arc dependencies.
-    ///
-    /// This is useful when dependencies are already wrapped in Arc,
-    /// such as when sharing dependencies across multiple components.
     #[must_use]
     pub fn from_arc(
         repository: Arc<Repository>,
@@ -120,64 +66,39 @@ where
 // Note: The following type aliases are prepared for future dynamic dispatch usage.
 // They use trait objects which require dyn-compatible traits.
 
-/// Type alias for a boxed event store.
 pub type BoxedEventStore = Arc<dyn EventStore + Send + Sync>;
 
-/// Type alias for a boxed random generator.
 pub type BoxedRandomGenerator = Arc<dyn RandomGenerator + Send + Sync>;
 
 // =============================================================================
 // DynamicAppState - For runtime polymorphism
 // =============================================================================
 
-/// Application state using trait objects for runtime polymorphism.
-///
-/// This is useful when the concrete types of dependencies are not known
-/// at compile time, or when you need to swap implementations at runtime.
-///
-/// # Trade-offs
-///
-/// Using trait objects incurs a small runtime cost due to dynamic dispatch,
-/// but provides flexibility for dependency injection and testing.
-///
-/// Note: This struct is prepared for future use and not yet fully implemented.
 #[derive(Clone)]
 #[allow(dead_code)]
 pub struct DynamicAppState {
-    /// Repository for game session persistence (type-erased).
     repository_inner: Arc<dyn DynamicRepository>,
 
-    /// Cache for game session caching (type-erased).
     cache_inner: Arc<dyn DynamicCache>,
 
-    /// Event store for event sourcing.
     pub event_store: Arc<dyn DynamicEventStore>,
 
-    /// Random generator for deterministic gameplay.
     pub random: Arc<dyn DynamicRandom>,
 }
 
-/// Type-erased repository trait for dynamic dispatch.
 pub trait DynamicRepository: Send + Sync + 'static {
-    /// Finds a game session by its identifier.
     fn find_by_id_dynamic(&self, identifier: &GameIdentifier) -> AsyncIO<Option<Vec<u8>>>;
 
-    /// Saves a game session.
     fn save_dynamic(&self, identifier: &GameIdentifier, data: &[u8]) -> AsyncIO<()>;
 
-    /// Deletes a game session by its identifier.
     fn delete_dynamic(&self, identifier: &GameIdentifier) -> AsyncIO<()>;
 
-    /// Lists all active game session identifiers.
     fn list_active_dynamic(&self) -> AsyncIO<Vec<GameIdentifier>>;
 }
 
-/// Type-erased cache trait for dynamic dispatch.
 pub trait DynamicCache: Send + Sync + 'static {
-    /// Gets a game session from the cache.
     fn get_dynamic(&self, identifier: &GameIdentifier) -> AsyncIO<Option<Vec<u8>>>;
 
-    /// Sets a game session in the cache with a TTL.
     fn set_dynamic(
         &self,
         identifier: &GameIdentifier,
@@ -185,26 +106,21 @@ pub trait DynamicCache: Send + Sync + 'static {
         time_to_live: Duration,
     ) -> AsyncIO<()>;
 
-    /// Invalidates a cache entry.
     fn invalidate_dynamic(&self, identifier: &GameIdentifier) -> AsyncIO<()>;
 }
 
-/// Type-erased event store trait for dynamic dispatch.
 pub trait DynamicEventStore: Send + Sync + 'static {
-    /// Appends events to the event store.
     fn append_dynamic(
         &self,
         session_identifier: &GameIdentifier,
         events: &[GameSessionEvent],
     ) -> AsyncIO<()>;
 
-    /// Loads all events for a game session.
     fn load_events_dynamic(
         &self,
         session_identifier: &GameIdentifier,
     ) -> AsyncIO<Vec<GameSessionEvent>>;
 
-    /// Loads events since a specific sequence number.
     fn load_events_since_dynamic(
         &self,
         session_identifier: &GameIdentifier,
@@ -212,12 +128,9 @@ pub trait DynamicEventStore: Send + Sync + 'static {
     ) -> AsyncIO<Vec<GameSessionEvent>>;
 }
 
-/// Type-erased random generator trait for dynamic dispatch.
 pub trait DynamicRandom: Send + Sync + 'static {
-    /// Generates a new random seed.
     fn generate_seed_dynamic(&self) -> AsyncIO<RandomSeed>;
 
-    /// Generates the next random u32 value from a seed.
     fn next_u32_dynamic(&self, seed: &RandomSeed) -> (u32, RandomSeed);
 }
 

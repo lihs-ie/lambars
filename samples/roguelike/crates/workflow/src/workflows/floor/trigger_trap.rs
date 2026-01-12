@@ -1,37 +1,3 @@
-//! TriggerTrap workflow implementation.
-//!
-//! This module provides the workflow for triggering traps when an entity
-//! steps on a trap tile. It handles damage calculation, status effects,
-//! and trap disarming.
-//!
-//! # Workflow Steps
-//!
-//! 1. [IO] Load session from cache
-//! 2. [Pure] Find trap at position
-//! 3. [Pure] Calculate trap effect
-//! 4. [Pure] Apply trap effect to target
-//! 5. [Pure] Disarm trap (if one-time trap)
-//! 6. [Pure] Generate TrapTriggered event
-//! 7. [IO] Update cache
-//! 8. [IO] Append events to event store
-//!
-//! # Trap Types
-//!
-//! - **Spike**: Deals physical damage (one-time use)
-//! - **Poison**: Applies poison status effect (reusable)
-//! - **Teleport**: Teleports target to random location (reusable)
-//! - **Alarm**: Alerts nearby enemies (reusable)
-//!
-//! # Examples
-//!
-//! ```ignore
-//! use roguelike_workflow::workflows::floor::{trigger_trap, TriggerTrapCommand};
-//!
-//! let workflow = trigger_trap(&cache, &event_store, cache_ttl);
-//! let command = TriggerTrapCommand::new(game_identifier, position, target);
-//! let result = workflow(command).run_async().await;
-//! ```
-
 use std::time::Duration;
 
 use lambars::effect::AsyncIO;
@@ -47,30 +13,22 @@ use crate::ports::{EventStore, SessionCache, WorkflowResult};
 // Workflow Configuration
 // =============================================================================
 
-/// Default cache time-to-live for game sessions.
 const DEFAULT_CACHE_TIME_TO_LIVE: Duration = Duration::from_secs(300); // 5 minutes
 
 // =============================================================================
 // TrapEffect
 // =============================================================================
 
-/// Represents the effect of a triggered trap.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrapEffect {
-    /// Direct damage dealt by the trap.
     damage: Damage,
-    /// Status effect applied by the trap.
     status_effect: Option<StatusEffect>,
-    /// Whether the trap teleports the target.
     teleport_destination: Option<Position>,
-    /// Whether the trap alerts nearby enemies.
     alerts_enemies: bool,
-    /// Whether the trap should be disarmed after triggering.
     should_disarm: bool,
 }
 
 impl TrapEffect {
-    /// Creates a new trap effect.
     #[must_use]
     pub const fn new(
         damage: Damage,
@@ -88,7 +46,6 @@ impl TrapEffect {
         }
     }
 
-    /// Creates a damage-only trap effect.
     #[must_use]
     pub const fn damage_only(damage: Damage, should_disarm: bool) -> Self {
         Self {
@@ -100,7 +57,6 @@ impl TrapEffect {
         }
     }
 
-    /// Creates a status effect trap.
     #[must_use]
     pub const fn with_status(status_effect: StatusEffect, should_disarm: bool) -> Self {
         Self {
@@ -112,7 +68,6 @@ impl TrapEffect {
         }
     }
 
-    /// Creates a teleport trap effect.
     #[must_use]
     pub const fn teleport(destination: Position, should_disarm: bool) -> Self {
         Self {
@@ -124,7 +79,6 @@ impl TrapEffect {
         }
     }
 
-    /// Creates an alarm trap effect.
     #[must_use]
     pub const fn alarm(should_disarm: bool) -> Self {
         Self {
@@ -136,31 +90,26 @@ impl TrapEffect {
         }
     }
 
-    /// Returns the damage dealt.
     #[must_use]
     pub const fn damage(&self) -> Damage {
         self.damage
     }
 
-    /// Returns the status effect.
     #[must_use]
     pub const fn status_effect(&self) -> Option<StatusEffect> {
         self.status_effect
     }
 
-    /// Returns the teleport destination.
     #[must_use]
     pub const fn teleport_destination(&self) -> Option<Position> {
         self.teleport_destination
     }
 
-    /// Returns whether the trap alerts enemies.
     #[must_use]
     pub const fn alerts_enemies(&self) -> bool {
         self.alerts_enemies
     }
 
-    /// Returns whether the trap should be disarmed.
     #[must_use]
     pub const fn should_disarm(&self) -> bool {
         self.should_disarm
@@ -171,21 +120,15 @@ impl TrapEffect {
 // TrapInfo
 // =============================================================================
 
-/// Information about a trap at a position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TrapInfo {
-    /// Position of the trap.
     position: Position,
-    /// Type of the trap.
     trap_type: TrapType,
-    /// Whether the trap is hidden.
     is_hidden: bool,
-    /// Whether the trap is active (not disarmed).
     is_active: bool,
 }
 
 impl TrapInfo {
-    /// Creates a new trap info.
     #[must_use]
     pub const fn new(
         position: Position,
@@ -201,25 +144,21 @@ impl TrapInfo {
         }
     }
 
-    /// Returns the trap position.
     #[must_use]
     pub const fn position(&self) -> Position {
         self.position
     }
 
-    /// Returns the trap type.
     #[must_use]
     pub const fn trap_type(&self) -> TrapType {
         self.trap_type
     }
 
-    /// Returns whether the trap is hidden.
     #[must_use]
     pub const fn is_hidden(&self) -> bool {
         self.is_hidden
     }
 
-    /// Returns whether the trap is active.
     #[must_use]
     pub const fn is_active(&self) -> bool {
         self.is_active
@@ -230,26 +169,6 @@ impl TrapInfo {
 // TriggerTrap Workflow
 // =============================================================================
 
-/// Creates a workflow function for triggering a trap.
-///
-/// This function returns a closure that handles trap activation when
-/// an entity steps on a trap tile.
-///
-/// # Type Parameters
-///
-/// * `C` - Cache type implementing `SessionCache`
-/// * `E` - Event store type implementing `EventStore`
-///
-/// # Arguments
-///
-/// * `cache` - The session cache for fast access
-/// * `event_store` - The event store for event sourcing
-/// * `cache_ttl` - Time-to-live for cached sessions
-///
-/// # Returns
-///
-/// A function that takes a `TriggerTrapCommand` and returns an `AsyncIO`
-/// that produces the updated game session or an error.
 pub fn trigger_trap<'a, C, E>(
     cache: &'a C,
     event_store: &'a E,
@@ -297,7 +216,6 @@ where
     }
 }
 
-/// Creates a workflow function with default cache TTL.
 pub fn trigger_trap_with_default_ttl<'a, C, E>(
     cache: &'a C,
     event_store: &'a E,
@@ -313,7 +231,6 @@ where
 // Pure Functions
 // =============================================================================
 
-/// Pure function that performs the entire trap triggering logic.
 fn trigger_trap_pure<S: Clone>(
     _session: &S,
     _position: Position,
@@ -326,39 +243,6 @@ fn trigger_trap_pure<S: Clone>(
     ))
 }
 
-/// Finds a trap at the given position.
-///
-/// This is a pure function that looks up a trap at a position.
-///
-/// # Type Parameters
-///
-/// * `F` - Function to get trap info from session
-///
-/// # Arguments
-///
-/// * `position` - The position to check
-/// * `get_trap_fn` - Function that retrieves trap info
-///
-/// # Returns
-///
-/// `Ok(TrapInfo)` if an active trap exists, `Err(FloorError)` otherwise.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::floor::{find_trap_at_position, TrapInfo};
-/// use roguelike_domain::common::Position;
-/// use roguelike_domain::floor::TrapType;
-///
-/// let trap = TrapInfo::new(Position::new(10, 10), TrapType::Spike, false, true);
-///
-/// let result = find_trap_at_position(
-///     Position::new(10, 10),
-///     |pos| if pos == Position::new(10, 10) { Some(trap) } else { None },
-/// );
-///
-/// assert!(result.is_ok());
-/// ```
 pub fn find_trap_at_position<F>(position: Position, get_trap_fn: F) -> Result<TrapInfo, FloorError>
 where
     F: Fn(Position) -> Option<TrapInfo>,
@@ -370,33 +254,6 @@ where
     }
 }
 
-/// Calculates the effect of a trap.
-///
-/// This is a pure function that determines what happens when a trap is triggered.
-///
-/// # Arguments
-///
-/// * `trap` - The trap information
-/// * `floor_level` - The current floor level (affects damage scaling)
-/// * `teleport_destination` - Optional random destination for teleport traps
-///
-/// # Returns
-///
-/// The effect of the triggered trap.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::floor::{calculate_trap_effect, TrapInfo};
-/// use roguelike_domain::common::Position;
-/// use roguelike_domain::floor::TrapType;
-///
-/// let trap = TrapInfo::new(Position::new(10, 10), TrapType::Spike, false, true);
-/// let effect = calculate_trap_effect(&trap, 5, None);
-///
-/// assert!(effect.damage().value() > 0);
-/// assert!(effect.should_disarm());
-/// ```
 #[must_use]
 pub fn calculate_trap_effect(
     trap: &TrapInfo,
@@ -423,25 +280,6 @@ pub fn calculate_trap_effect(
     }
 }
 
-/// Applies a trap effect to a target.
-///
-/// This is a pure function that applies trap effects.
-///
-/// # Type Parameters
-///
-/// * `S` - The session type
-/// * `F` - Function to apply the effect
-///
-/// # Arguments
-///
-/// * `session` - The current game session
-/// * `target_id` - The ID of the entity to affect
-/// * `effect` - The trap effect to apply
-/// * `apply_fn` - Function that applies the effect
-///
-/// # Returns
-///
-/// The updated session with effects applied.
 pub fn apply_trap_effect<S, F>(
     session: &S,
     target_id: roguelike_domain::enemy::EntityIdentifier,
@@ -455,46 +293,6 @@ where
     apply_fn(session, target_id, effect)
 }
 
-/// Disarms a trap if it should be disarmed.
-///
-/// This is a pure function that marks a trap as inactive.
-///
-/// # Type Parameters
-///
-/// * `S` - The session type
-/// * `F` - Function to disarm the trap
-///
-/// # Arguments
-///
-/// * `session` - The current game session
-/// * `trap_position` - The position of the trap
-/// * `should_disarm` - Whether the trap should be disarmed
-/// * `disarm_fn` - Function that disarms the trap
-///
-/// # Returns
-///
-/// A tuple of (updated_session, was_disarmed).
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::floor::disarm_trap;
-/// use roguelike_domain::common::Position;
-///
-/// #[derive(Clone)]
-/// struct MockSession { trap_disarmed: bool }
-/// let session = MockSession { trap_disarmed: false };
-///
-/// let (updated, was_disarmed) = disarm_trap(
-///     &session,
-///     Position::new(10, 10),
-///     true,
-///     |_, _| MockSession { trap_disarmed: true },
-/// );
-///
-/// assert!(was_disarmed);
-/// assert!(updated.trap_disarmed);
-/// ```
 pub fn disarm_trap<S, F>(
     session: &S,
     trap_position: Position,

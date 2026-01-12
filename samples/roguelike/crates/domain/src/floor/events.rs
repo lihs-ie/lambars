@@ -1,8 +1,3 @@
-//! Domain events for the floor module.
-//!
-//! This module provides domain events related to floor operations
-//! such as entering floors, exploring tiles, and triggering traps.
-
 use std::fmt;
 
 use crate::common::{FloorLevel, Position};
@@ -13,43 +8,17 @@ use super::tile::TrapType;
 // FloorEntered
 // =============================================================================
 
-/// Event emitted when a player enters a floor.
-///
-/// This event is raised when the player descends or ascends to a new floor.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::common::FloorLevel;
-/// use roguelike_domain::floor::FloorEntered;
-///
-/// let floor_level = FloorLevel::new(5).unwrap();
-/// let event = FloorEntered::new(floor_level);
-/// assert_eq!(event.floor_level(), floor_level);
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FloorEntered {
     floor_level: FloorLevel,
 }
 
 impl FloorEntered {
-    /// Creates a new FloorEntered event.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::FloorLevel;
-    /// use roguelike_domain::floor::FloorEntered;
-    ///
-    /// let event = FloorEntered::new(FloorLevel::first());
-    /// assert_eq!(event.floor_level().value(), 1);
-    /// ```
     #[must_use]
     pub const fn new(floor_level: FloorLevel) -> Self {
         Self { floor_level }
     }
 
-    /// Returns the level of the floor that was entered.
     #[must_use]
     pub const fn floor_level(&self) -> FloorLevel {
         self.floor_level
@@ -66,43 +35,17 @@ impl fmt::Display for FloorEntered {
 // TileExplored
 // =============================================================================
 
-/// Event emitted when a tile is explored (seen for the first time).
-///
-/// This event is raised when a tile enters the player's field of view
-/// for the first time.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::common::Position;
-/// use roguelike_domain::floor::TileExplored;
-///
-/// let event = TileExplored::new(Position::new(10, 15));
-/// assert_eq!(event.position(), Position::new(10, 15));
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TileExplored {
     position: Position,
 }
 
 impl TileExplored {
-    /// Creates a new TileExplored event.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::Position;
-    /// use roguelike_domain::floor::TileExplored;
-    ///
-    /// let event = TileExplored::new(Position::new(5, 5));
-    /// assert_eq!(event.position(), Position::new(5, 5));
-    /// ```
     #[must_use]
     pub const fn new(position: Position) -> Self {
         Self { position }
     }
 
-    /// Returns the position of the explored tile.
     #[must_use]
     pub const fn position(&self) -> Position {
         self.position
@@ -119,20 +62,6 @@ impl fmt::Display for TileExplored {
 // TrapTriggered
 // =============================================================================
 
-/// Event emitted when a trap is triggered.
-///
-/// This event is raised when an entity steps on a trap tile.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::common::Position;
-/// use roguelike_domain::floor::{TrapTriggered, TrapType};
-///
-/// let event = TrapTriggered::new(Position::new(10, 10), TrapType::Spike);
-/// assert_eq!(event.position(), Position::new(10, 10));
-/// assert_eq!(event.trap_type(), TrapType::Spike);
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TrapTriggered {
     position: Position,
@@ -140,17 +69,6 @@ pub struct TrapTriggered {
 }
 
 impl TrapTriggered {
-    /// Creates a new TrapTriggered event.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::Position;
-    /// use roguelike_domain::floor::{TrapTriggered, TrapType};
-    ///
-    /// let event = TrapTriggered::new(Position::new(5, 5), TrapType::Poison);
-    /// assert_eq!(event.trap_type(), TrapType::Poison);
-    /// ```
     #[must_use]
     pub const fn new(position: Position, trap_type: TrapType) -> Self {
         Self {
@@ -159,13 +77,11 @@ impl TrapTriggered {
         }
     }
 
-    /// Returns the position where the trap was triggered.
     #[must_use]
     pub const fn position(&self) -> Position {
         self.position
     }
 
-    /// Returns the type of trap that was triggered.
     #[must_use]
     pub const fn trap_type(&self) -> TrapType {
         self.trap_type

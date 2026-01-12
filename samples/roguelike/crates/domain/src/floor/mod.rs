@@ -1,20 +1,3 @@
-//! Floor domain module for dungeon structures.
-//!
-//! This module provides types for representing and manipulating dungeon floors:
-//!
-//! - **Aggregates**: `Floor` as the aggregate root for a dungeon level
-//! - **Identifiers**: `FloorIdentifier` for unique floor identification
-//! - **Tiles**: `Tile`, `TileKind`, `TrapType` for floor tiles
-//! - **Rooms**: `Room` for rectangular rooms with validation
-//! - **Corridors**: `Corridor` for passages between rooms
-//! - **Errors**: `FloorError` for floor-related errors
-//! - **Events**: Domain events for floor operations
-//!
-//! All types follow functional programming principles:
-//! - Immutability: All operations return new values
-//! - Validation: Constructors return Result for constrained types
-//! - Type safety: Newtype pattern for identifiers
-
 mod aggregate;
 mod corridor;
 mod errors;

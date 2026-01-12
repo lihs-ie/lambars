@@ -1,8 +1,3 @@
-//! Entity identifier for the enemy domain.
-//!
-//! This module provides a UUID-based identifier for uniquely identifying
-//! entities in the game world, such as enemies and dropped items.
-
 use std::fmt;
 use std::str::FromStr;
 
@@ -13,80 +8,25 @@ use uuid::Uuid;
 // EntityIdentifier
 // =============================================================================
 
-/// A unique identifier for entities in the game world.
-///
-/// EntityIdentifier is a newtype wrapper around UUID that provides
-/// type-safe identification of game entities such as enemies and items.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::enemy::EntityIdentifier;
-///
-/// let identifier = EntityIdentifier::new();
-/// println!("Entity ID: {}", identifier);
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EntityIdentifier(Uuid);
 
 impl EntityIdentifier {
-    /// Creates a new random EntityIdentifier.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::EntityIdentifier;
-    ///
-    /// let identifier = EntityIdentifier::new();
-    /// assert!(!identifier.to_string().is_empty());
-    /// ```
     #[must_use]
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
 
-    /// Creates an EntityIdentifier from an existing UUID.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::EntityIdentifier;
-    /// use uuid::Uuid;
-    ///
-    /// let uuid = Uuid::new_v4();
-    /// let identifier = EntityIdentifier::from_uuid(uuid);
-    /// ```
     #[must_use]
     pub const fn from_uuid(uuid: Uuid) -> Self {
         Self(uuid)
     }
 
-    /// Returns the underlying UUID.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::EntityIdentifier;
-    ///
-    /// let identifier = EntityIdentifier::new();
-    /// let _uuid = identifier.as_uuid();
-    /// ```
     #[must_use]
     pub const fn as_uuid(&self) -> &Uuid {
         &self.0
     }
 
-    /// Converts the EntityIdentifier to a hyphenated string.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::EntityIdentifier;
-    ///
-    /// let identifier = EntityIdentifier::new();
-    /// let string = identifier.to_hyphenated_string();
-    /// assert_eq!(string.len(), 36); // UUID format: 8-4-4-4-12
-    /// ```
     #[must_use]
     pub fn to_hyphenated_string(&self) -> String {
         self.0.to_string()

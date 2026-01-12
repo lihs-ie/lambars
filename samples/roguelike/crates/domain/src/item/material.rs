@@ -1,7 +1,3 @@
-//! Material item types and data structures.
-//!
-//! This module provides types for representing crafting materials
-//! and other non-equipment, non-consumable items.
 
 use std::fmt;
 
@@ -11,21 +7,6 @@ use crate::common::Rarity;
 // MaterialData
 // =============================================================================
 
-/// Data specific to material items.
-///
-/// Materials are items used for crafting and upgrading equipment.
-/// They have a rarity that affects their value and usefulness.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::item::MaterialData;
-/// use roguelike_domain::common::Rarity;
-///
-/// let material = MaterialData::new(Rarity::Rare, 20);
-/// assert_eq!(material.rarity(), Rarity::Rare);
-/// assert_eq!(material.max_stack(), 20);
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MaterialData {
     rarity: Rarity,
@@ -33,44 +14,21 @@ pub struct MaterialData {
 }
 
 impl MaterialData {
-    /// Creates a new `MaterialData`.
-    ///
-    /// # Arguments
-    ///
-    /// * `rarity` - The rarity of the material
-    /// * `max_stack` - The maximum number of items that can stack in one slot
     #[must_use]
     pub const fn new(rarity: Rarity, max_stack: u32) -> Self {
         Self { rarity, max_stack }
     }
 
-    /// Returns the rarity of this material.
     #[must_use]
     pub const fn rarity(&self) -> Rarity {
         self.rarity
     }
 
-    /// Returns the maximum stack size.
     #[must_use]
     pub const fn max_stack(&self) -> u32 {
         self.max_stack
     }
 
-    /// Returns the base value multiplier based on rarity.
-    ///
-    /// Higher rarity materials are worth more.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::item::MaterialData;
-    /// use roguelike_domain::common::Rarity;
-    ///
-    /// let common = MaterialData::new(Rarity::Common, 99);
-    /// let legendary = MaterialData::new(Rarity::Legendary, 10);
-    ///
-    /// assert!(legendary.value_multiplier() > common.value_multiplier());
-    /// ```
     #[must_use]
     pub fn value_multiplier(&self) -> f32 {
         match self.rarity {
@@ -82,7 +40,6 @@ impl MaterialData {
         }
     }
 
-    /// Returns a new `MaterialData` with the given max stack.
     #[must_use]
     pub const fn with_max_stack(&self, max_stack: u32) -> Self {
         Self {
@@ -91,7 +48,6 @@ impl MaterialData {
         }
     }
 
-    /// Returns a new `MaterialData` with the given rarity.
     #[must_use]
     pub const fn with_rarity(&self, rarity: Rarity) -> Self {
         Self {

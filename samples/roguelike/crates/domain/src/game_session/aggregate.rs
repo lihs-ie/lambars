@@ -1,13 +1,3 @@
-//! GameSession aggregate root.
-//!
-//! This module provides the `GameSession` aggregate which represents a single
-//! playthrough of the game from start to finish. It maintains consistency
-//! across all game-related state including player, floor, enemies, and
-//! session metadata.
-//!
-//! All operations are implemented as pure functions that return new GameSession
-//! instances, maintaining immutability throughout.
-
 use crate::common::TurnCount;
 use crate::enemy::{Enemy, EntityIdentifier};
 use crate::floor::Floor;
@@ -22,77 +12,6 @@ use super::status::{GameOutcome, GameStatus};
 // GameSession
 // =============================================================================
 
-/// The GameSession aggregate root.
-///
-/// `GameSession` represents a complete game session, encapsulating all
-/// game-related state including:
-///
-/// - Session identity and metadata
-/// - Player state
-/// - Current floor state
-/// - Enemy states
-/// - Turn tracking
-/// - Game status (in progress, paused, victory, defeat)
-///
-/// # Invariants
-///
-/// - `turn_count` is always >= 0
-/// - `event_sequence` is monotonically increasing
-/// - Once status is terminal (Victory/Defeat), it cannot change
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::common::{
-///     Attack, BaseStats, CombatStats, Defense, FloorLevel, Health,
-///     Mana, Position, Speed, Stat, TurnCount,
-/// };
-/// use roguelike_domain::player::{Player, PlayerIdentifier, PlayerName};
-/// use roguelike_domain::floor::{Floor, FloorIdentifier};
-/// use roguelike_domain::game_session::{GameSession, GameIdentifier, RandomSeed};
-///
-/// // Create player
-/// let player = Player::new(
-///     PlayerIdentifier::new(),
-///     PlayerName::new("Hero").unwrap(),
-///     Position::new(5, 5),
-///     CombatStats::new(
-///         Health::new(100).unwrap(),
-///         Health::new(100).unwrap(),
-///         Mana::new(50).unwrap(),
-///         Mana::new(50).unwrap(),
-///         Attack::new(20),
-///         Defense::new(15),
-///         Speed::new(10),
-///     ).unwrap(),
-///     BaseStats::new(
-///         Stat::new(10).unwrap(),
-///         Stat::new(10).unwrap(),
-///         Stat::new(10).unwrap(),
-///         Stat::new(10).unwrap(),
-///     ),
-/// );
-///
-/// // Create floor
-/// let floor = Floor::new(
-///     FloorIdentifier::new(1),
-///     FloorLevel::new(1).unwrap(),
-///     80,
-///     40,
-/// );
-///
-/// // Create game session
-/// let session = GameSession::new(
-///     GameIdentifier::new(),
-///     player,
-///     floor,
-///     RandomSeed::new(12345),
-/// );
-///
-/// assert!(session.is_active());
-/// assert!(!session.is_terminal());
-/// assert_eq!(session.turn_count().value(), 0);
-/// ```
 #[derive(Debug, Clone)]
 pub struct GameSession {
     identifier: GameIdentifier,
@@ -110,69 +29,6 @@ impl GameSession {
     // Constructor
     // =========================================================================
 
-    /// Creates a new `GameSession` with the given parameters.
-    ///
-    /// The session starts with:
-    /// - Turn count at 0
-    /// - Status as InProgress
-    /// - No enemies
-    /// - Event sequence at 0
-    ///
-    /// # Arguments
-    ///
-    /// * `identifier` - Unique game session identifier
-    /// * `player` - Initial player state
-    /// * `current_floor` - Initial floor state
-    /// * `seed` - Random seed for reproducibility
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::{
-    ///     Attack, BaseStats, CombatStats, Defense, FloorLevel, Health,
-    ///     Mana, Position, Speed, Stat,
-    /// };
-    /// use roguelike_domain::player::{Player, PlayerIdentifier, PlayerName};
-    /// use roguelike_domain::floor::{Floor, FloorIdentifier};
-    /// use roguelike_domain::game_session::{GameSession, GameIdentifier, RandomSeed};
-    ///
-    /// let player = Player::new(
-    ///     PlayerIdentifier::new(),
-    ///     PlayerName::new("Hero").unwrap(),
-    ///     Position::new(0, 0),
-    ///     CombatStats::new(
-    ///         Health::new(100).unwrap(),
-    ///         Health::new(100).unwrap(),
-    ///         Mana::new(50).unwrap(),
-    ///         Mana::new(50).unwrap(),
-    ///         Attack::new(20),
-    ///         Defense::new(15),
-    ///         Speed::new(10),
-    ///     ).unwrap(),
-    ///     BaseStats::new(
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///     ),
-    /// );
-    ///
-    /// let floor = Floor::new(
-    ///     FloorIdentifier::new(1),
-    ///     FloorLevel::new(1).unwrap(),
-    ///     80,
-    ///     40,
-    /// );
-    ///
-    /// let session = GameSession::new(
-    ///     GameIdentifier::new(),
-    ///     player,
-    ///     floor,
-    ///     RandomSeed::new(42),
-    /// );
-    ///
-    /// assert!(session.is_active());
-    /// ```
     #[must_use]
     pub fn new(
         identifier: GameIdentifier,
@@ -196,49 +52,41 @@ impl GameSession {
     // Getters
     // =========================================================================
 
-    /// Returns a reference to the game session identifier.
     #[must_use]
     pub const fn identifier(&self) -> &GameIdentifier {
         &self.identifier
     }
 
-    /// Returns a reference to the player.
     #[must_use]
     pub const fn player(&self) -> &Player {
         &self.player
     }
 
-    /// Returns a reference to the current floor.
     #[must_use]
     pub const fn current_floor(&self) -> &Floor {
         &self.current_floor
     }
 
-    /// Returns a slice of enemies on the current floor.
     #[must_use]
     pub fn enemies(&self) -> &[Enemy] {
         &self.enemies
     }
 
-    /// Returns the current turn count.
     #[must_use]
     pub const fn turn_count(&self) -> TurnCount {
         self.turn_count
     }
 
-    /// Returns a reference to the current game status.
     #[must_use]
     pub const fn status(&self) -> &GameStatus {
         &self.status
     }
 
-    /// Returns a reference to the random seed.
     #[must_use]
     pub const fn seed(&self) -> &RandomSeed {
         &self.seed
     }
 
-    /// Returns the current event sequence number.
     #[must_use]
     pub const fn event_sequence(&self) -> u64 {
         self.event_sequence
@@ -248,118 +96,11 @@ impl GameSession {
     // Query Methods
     // =========================================================================
 
-    /// Returns true if the game session is in an active state.
-    ///
-    /// A session is active if it is either InProgress or Paused.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::{
-    ///     Attack, BaseStats, CombatStats, Defense, FloorLevel, Health,
-    ///     Mana, Position, Speed, Stat,
-    /// };
-    /// use roguelike_domain::player::{Player, PlayerIdentifier, PlayerName};
-    /// use roguelike_domain::floor::{Floor, FloorIdentifier};
-    /// use roguelike_domain::game_session::{GameSession, GameIdentifier, RandomSeed};
-    ///
-    /// let player = Player::new(
-    ///     PlayerIdentifier::new(),
-    ///     PlayerName::new("Hero").unwrap(),
-    ///     Position::new(0, 0),
-    ///     CombatStats::new(
-    ///         Health::new(100).unwrap(),
-    ///         Health::new(100).unwrap(),
-    ///         Mana::new(50).unwrap(),
-    ///         Mana::new(50).unwrap(),
-    ///         Attack::new(20),
-    ///         Defense::new(15),
-    ///         Speed::new(10),
-    ///     ).unwrap(),
-    ///     BaseStats::new(
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///     ),
-    /// );
-    ///
-    /// let floor = Floor::new(
-    ///     FloorIdentifier::new(1),
-    ///     FloorLevel::new(1).unwrap(),
-    ///     80,
-    ///     40,
-    /// );
-    ///
-    /// let session = GameSession::new(
-    ///     GameIdentifier::new(),
-    ///     player,
-    ///     floor,
-    ///     RandomSeed::new(42),
-    /// );
-    ///
-    /// assert!(session.is_active());
-    /// ```
     #[must_use]
     pub const fn is_active(&self) -> bool {
         self.status.is_active()
     }
 
-    /// Returns true if the game session has reached a terminal state.
-    ///
-    /// A session is terminal if it ended in Victory or Defeat.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::{
-    ///     Attack, BaseStats, CombatStats, Defense, FloorLevel, Health,
-    ///     Mana, Position, Speed, Stat,
-    /// };
-    /// use roguelike_domain::player::{Player, PlayerIdentifier, PlayerName};
-    /// use roguelike_domain::floor::{Floor, FloorIdentifier};
-    /// use roguelike_domain::game_session::{GameSession, GameIdentifier, GameOutcome, RandomSeed};
-    ///
-    /// let player = Player::new(
-    ///     PlayerIdentifier::new(),
-    ///     PlayerName::new("Hero").unwrap(),
-    ///     Position::new(0, 0),
-    ///     CombatStats::new(
-    ///         Health::new(100).unwrap(),
-    ///         Health::new(100).unwrap(),
-    ///         Mana::new(50).unwrap(),
-    ///         Mana::new(50).unwrap(),
-    ///         Attack::new(20),
-    ///         Defense::new(15),
-    ///         Speed::new(10),
-    ///     ).unwrap(),
-    ///     BaseStats::new(
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///     ),
-    /// );
-    ///
-    /// let floor = Floor::new(
-    ///     FloorIdentifier::new(1),
-    ///     FloorLevel::new(1).unwrap(),
-    ///     80,
-    ///     40,
-    /// );
-    ///
-    /// let session = GameSession::new(
-    ///     GameIdentifier::new(),
-    ///     player,
-    ///     floor,
-    ///     RandomSeed::new(42),
-    /// );
-    ///
-    /// assert!(!session.is_terminal());
-    ///
-    /// let ended_session = session.end_game(GameOutcome::Victory);
-    /// assert!(ended_session.is_terminal());
-    /// ```
     #[must_use]
     pub const fn is_terminal(&self) -> bool {
         self.status.is_terminal()
@@ -369,25 +110,11 @@ impl GameSession {
     // Domain Methods (Pure Functions)
     // =========================================================================
 
-    /// Returns a new GameSession with the updated player state.
-    ///
-    /// This is an immutable operation that consumes self and returns a new GameSession.
-    ///
-    /// # Arguments
-    ///
-    /// * `player` - The new player state
     #[must_use]
     pub fn with_player(self, player: Player) -> Self {
         Self { player, ..self }
     }
 
-    /// Returns a new GameSession with the updated floor state.
-    ///
-    /// This is an immutable operation that consumes self and returns a new GameSession.
-    ///
-    /// # Arguments
-    ///
-    /// * `floor` - The new floor state
     #[must_use]
     pub fn with_floor(self, floor: Floor) -> Self {
         Self {
@@ -396,95 +123,11 @@ impl GameSession {
         }
     }
 
-    /// Returns a new GameSession with the updated enemies list.
-    ///
-    /// This is an immutable operation that consumes self and returns a new GameSession.
-    ///
-    /// # Arguments
-    ///
-    /// * `enemies` - The new enemies list
     #[must_use]
     pub fn with_enemies(self, enemies: Vec<Enemy>) -> Self {
         Self { enemies, ..self }
     }
 
-    /// Returns a new GameSession with an additional enemy.
-    ///
-    /// This is an immutable operation that consumes self and returns a new GameSession.
-    ///
-    /// # Arguments
-    ///
-    /// * `enemy` - The enemy to add
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::{
-    ///     Attack, BaseStats, CombatStats, Defense, FloorLevel, Health,
-    ///     Mana, Position, Speed, Stat,
-    /// };
-    /// use roguelike_domain::player::{Player, PlayerIdentifier, PlayerName};
-    /// use roguelike_domain::floor::{Floor, FloorIdentifier};
-    /// use roguelike_domain::enemy::{Enemy, EntityIdentifier, EnemyType, AiBehavior, LootTable};
-    /// use roguelike_domain::game_session::{GameSession, GameIdentifier, RandomSeed};
-    ///
-    /// let player = Player::new(
-    ///     PlayerIdentifier::new(),
-    ///     PlayerName::new("Hero").unwrap(),
-    ///     Position::new(0, 0),
-    ///     CombatStats::new(
-    ///         Health::new(100).unwrap(),
-    ///         Health::new(100).unwrap(),
-    ///         Mana::new(50).unwrap(),
-    ///         Mana::new(50).unwrap(),
-    ///         Attack::new(20),
-    ///         Defense::new(15),
-    ///         Speed::new(10),
-    ///     ).unwrap(),
-    ///     BaseStats::new(
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///     ),
-    /// );
-    ///
-    /// let floor = Floor::new(
-    ///     FloorIdentifier::new(1),
-    ///     FloorLevel::new(1).unwrap(),
-    ///     80,
-    ///     40,
-    /// );
-    ///
-    /// let enemy = Enemy::new(
-    ///     EntityIdentifier::new(),
-    ///     EnemyType::Goblin,
-    ///     Position::new(10, 10),
-    ///     CombatStats::new(
-    ///         Health::new(50).unwrap(),
-    ///         Health::new(50).unwrap(),
-    ///         Mana::zero(),
-    ///         Mana::zero(),
-    ///         Attack::new(10),
-    ///         Defense::new(5),
-    ///         Speed::new(8),
-    ///     ).unwrap(),
-    ///     AiBehavior::Aggressive,
-    ///     LootTable::empty(),
-    /// );
-    ///
-    /// let session = GameSession::new(
-    ///     GameIdentifier::new(),
-    ///     player,
-    ///     floor,
-    ///     RandomSeed::new(42),
-    /// );
-    ///
-    /// assert_eq!(session.enemies().len(), 0);
-    ///
-    /// let session_with_enemy = session.add_enemy(enemy);
-    /// assert_eq!(session_with_enemy.enemies().len(), 1);
-    /// ```
     #[must_use]
     pub fn add_enemy(self, enemy: Enemy) -> Self {
         let mut new_enemies = self.enemies;
@@ -495,15 +138,6 @@ impl GameSession {
         }
     }
 
-    /// Returns a new GameSession with the specified enemy removed.
-    ///
-    /// If no enemy with the given identifier exists, returns the session unchanged.
-    ///
-    /// This is an immutable operation that consumes self and returns a new GameSession.
-    ///
-    /// # Arguments
-    ///
-    /// * `enemy_identifier` - The identifier of the enemy to remove
     #[must_use]
     pub fn remove_enemy(self, enemy_identifier: &EntityIdentifier) -> Self {
         let new_enemies = self
@@ -518,90 +152,6 @@ impl GameSession {
         }
     }
 
-    /// Returns a new GameSession with the specified enemy updated.
-    ///
-    /// Applies the provided function to the enemy with the given identifier.
-    /// If no enemy with the given identifier exists, returns the session unchanged.
-    ///
-    /// This is an immutable operation that consumes self and returns a new GameSession.
-    ///
-    /// # Arguments
-    ///
-    /// * `enemy_identifier` - The identifier of the enemy to update
-    /// * `update_function` - Function to apply to the enemy
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::{
-    ///     Attack, BaseStats, CombatStats, Damage, Defense, FloorLevel, Health,
-    ///     Mana, Position, Speed, Stat,
-    /// };
-    /// use roguelike_domain::player::{Player, PlayerIdentifier, PlayerName};
-    /// use roguelike_domain::floor::{Floor, FloorIdentifier};
-    /// use roguelike_domain::enemy::{Enemy, EntityIdentifier, EnemyType, AiBehavior, LootTable};
-    /// use roguelike_domain::game_session::{GameSession, GameIdentifier, RandomSeed};
-    ///
-    /// let player = Player::new(
-    ///     PlayerIdentifier::new(),
-    ///     PlayerName::new("Hero").unwrap(),
-    ///     Position::new(0, 0),
-    ///     CombatStats::new(
-    ///         Health::new(100).unwrap(),
-    ///         Health::new(100).unwrap(),
-    ///         Mana::new(50).unwrap(),
-    ///         Mana::new(50).unwrap(),
-    ///         Attack::new(20),
-    ///         Defense::new(15),
-    ///         Speed::new(10),
-    ///     ).unwrap(),
-    ///     BaseStats::new(
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///     ),
-    /// );
-    ///
-    /// let floor = Floor::new(
-    ///     FloorIdentifier::new(1),
-    ///     FloorLevel::new(1).unwrap(),
-    ///     80,
-    ///     40,
-    /// );
-    ///
-    /// let enemy_identifier = EntityIdentifier::new();
-    /// let enemy = Enemy::new(
-    ///     enemy_identifier,
-    ///     EnemyType::Goblin,
-    ///     Position::new(10, 10),
-    ///     CombatStats::new(
-    ///         Health::new(50).unwrap(),
-    ///         Health::new(50).unwrap(),
-    ///         Mana::zero(),
-    ///         Mana::zero(),
-    ///         Attack::new(10),
-    ///         Defense::new(5),
-    ///         Speed::new(8),
-    ///     ).unwrap(),
-    ///     AiBehavior::Aggressive,
-    ///     LootTable::empty(),
-    /// );
-    ///
-    /// let session = GameSession::new(
-    ///     GameIdentifier::new(),
-    ///     player,
-    ///     floor,
-    ///     RandomSeed::new(42),
-    /// ).add_enemy(enemy);
-    ///
-    /// // Apply damage to the enemy
-    /// let updated_session = session.update_enemy(&enemy_identifier, |e| {
-    ///     e.take_damage(Damage::new(20))
-    /// });
-    ///
-    /// assert_eq!(updated_session.enemies()[0].health().value(), 30);
-    /// ```
     #[must_use]
     pub fn update_enemy<F>(self, enemy_identifier: &EntityIdentifier, update_function: F) -> Self
     where
@@ -629,64 +179,6 @@ impl GameSession {
         }
     }
 
-    /// Returns a new GameSession with the turn count incremented.
-    ///
-    /// This is an immutable operation that consumes self and returns a new GameSession.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::{
-    ///     Attack, BaseStats, CombatStats, Defense, FloorLevel, Health,
-    ///     Mana, Position, Speed, Stat,
-    /// };
-    /// use roguelike_domain::player::{Player, PlayerIdentifier, PlayerName};
-    /// use roguelike_domain::floor::{Floor, FloorIdentifier};
-    /// use roguelike_domain::game_session::{GameSession, GameIdentifier, RandomSeed};
-    ///
-    /// let player = Player::new(
-    ///     PlayerIdentifier::new(),
-    ///     PlayerName::new("Hero").unwrap(),
-    ///     Position::new(0, 0),
-    ///     CombatStats::new(
-    ///         Health::new(100).unwrap(),
-    ///         Health::new(100).unwrap(),
-    ///         Mana::new(50).unwrap(),
-    ///         Mana::new(50).unwrap(),
-    ///         Attack::new(20),
-    ///         Defense::new(15),
-    ///         Speed::new(10),
-    ///     ).unwrap(),
-    ///     BaseStats::new(
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///     ),
-    /// );
-    ///
-    /// let floor = Floor::new(
-    ///     FloorIdentifier::new(1),
-    ///     FloorLevel::new(1).unwrap(),
-    ///     80,
-    ///     40,
-    /// );
-    ///
-    /// let session = GameSession::new(
-    ///     GameIdentifier::new(),
-    ///     player,
-    ///     floor,
-    ///     RandomSeed::new(42),
-    /// );
-    ///
-    /// assert_eq!(session.turn_count().value(), 0);
-    ///
-    /// let next_turn = session.increment_turn();
-    /// assert_eq!(next_turn.turn_count().value(), 1);
-    ///
-    /// let another_turn = next_turn.increment_turn();
-    /// assert_eq!(another_turn.turn_count().value(), 2);
-    /// ```
     #[must_use]
     pub fn increment_turn(self) -> Self {
         Self {
@@ -695,66 +187,6 @@ impl GameSession {
         }
     }
 
-    /// Ends the game with the specified outcome.
-    ///
-    /// This transitions the game status to a terminal state based on the outcome.
-    ///
-    /// This is an immutable operation that consumes self and returns a new GameSession.
-    ///
-    /// # Arguments
-    ///
-    /// * `outcome` - The outcome of the game (Victory, Defeat, or Abandoned)
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::{
-    ///     Attack, BaseStats, CombatStats, Defense, FloorLevel, Health,
-    ///     Mana, Position, Speed, Stat,
-    /// };
-    /// use roguelike_domain::player::{Player, PlayerIdentifier, PlayerName};
-    /// use roguelike_domain::floor::{Floor, FloorIdentifier};
-    /// use roguelike_domain::game_session::{GameSession, GameIdentifier, GameOutcome, GameStatus, RandomSeed};
-    ///
-    /// let player = Player::new(
-    ///     PlayerIdentifier::new(),
-    ///     PlayerName::new("Hero").unwrap(),
-    ///     Position::new(0, 0),
-    ///     CombatStats::new(
-    ///         Health::new(100).unwrap(),
-    ///         Health::new(100).unwrap(),
-    ///         Mana::new(50).unwrap(),
-    ///         Mana::new(50).unwrap(),
-    ///         Attack::new(20),
-    ///         Defense::new(15),
-    ///         Speed::new(10),
-    ///     ).unwrap(),
-    ///     BaseStats::new(
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///     ),
-    /// );
-    ///
-    /// let floor = Floor::new(
-    ///     FloorIdentifier::new(1),
-    ///     FloorLevel::new(1).unwrap(),
-    ///     80,
-    ///     40,
-    /// );
-    ///
-    /// let session = GameSession::new(
-    ///     GameIdentifier::new(),
-    ///     player,
-    ///     floor,
-    ///     RandomSeed::new(42),
-    /// );
-    ///
-    /// let victory_session = session.end_game(GameOutcome::Victory);
-    /// assert_eq!(victory_session.status(), &GameStatus::Victory);
-    /// assert!(victory_session.is_terminal());
-    /// ```
     #[must_use]
     pub fn end_game(self, outcome: GameOutcome) -> Self {
         Self {
@@ -763,62 +195,6 @@ impl GameSession {
         }
     }
 
-    /// Pauses the game session.
-    ///
-    /// This transitions the game status to Paused.
-    ///
-    /// This is an immutable operation that consumes self and returns a new GameSession.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::{
-    ///     Attack, BaseStats, CombatStats, Defense, FloorLevel, Health,
-    ///     Mana, Position, Speed, Stat,
-    /// };
-    /// use roguelike_domain::player::{Player, PlayerIdentifier, PlayerName};
-    /// use roguelike_domain::floor::{Floor, FloorIdentifier};
-    /// use roguelike_domain::game_session::{GameSession, GameIdentifier, GameStatus, RandomSeed};
-    ///
-    /// let player = Player::new(
-    ///     PlayerIdentifier::new(),
-    ///     PlayerName::new("Hero").unwrap(),
-    ///     Position::new(0, 0),
-    ///     CombatStats::new(
-    ///         Health::new(100).unwrap(),
-    ///         Health::new(100).unwrap(),
-    ///         Mana::new(50).unwrap(),
-    ///         Mana::new(50).unwrap(),
-    ///         Attack::new(20),
-    ///         Defense::new(15),
-    ///         Speed::new(10),
-    ///     ).unwrap(),
-    ///     BaseStats::new(
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///     ),
-    /// );
-    ///
-    /// let floor = Floor::new(
-    ///     FloorIdentifier::new(1),
-    ///     FloorLevel::new(1).unwrap(),
-    ///     80,
-    ///     40,
-    /// );
-    ///
-    /// let session = GameSession::new(
-    ///     GameIdentifier::new(),
-    ///     player,
-    ///     floor,
-    ///     RandomSeed::new(42),
-    /// );
-    ///
-    /// let paused_session = session.pause();
-    /// assert_eq!(paused_session.status(), &GameStatus::Paused);
-    /// assert!(paused_session.is_active());
-    /// ```
     #[must_use]
     pub fn pause(self) -> Self {
         Self {
@@ -827,65 +203,6 @@ impl GameSession {
         }
     }
 
-    /// Resumes a paused game session.
-    ///
-    /// This transitions the game status from Paused back to InProgress.
-    ///
-    /// # Errors
-    ///
-    /// Returns `GameSessionError::SessionAlreadyCompleted` if the game is in a
-    /// terminal state or if the session is not paused.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::{
-    ///     Attack, BaseStats, CombatStats, Defense, FloorLevel, Health,
-    ///     Mana, Position, Speed, Stat,
-    /// };
-    /// use roguelike_domain::player::{Player, PlayerIdentifier, PlayerName};
-    /// use roguelike_domain::floor::{Floor, FloorIdentifier};
-    /// use roguelike_domain::game_session::{GameSession, GameIdentifier, GameStatus, RandomSeed};
-    ///
-    /// let player = Player::new(
-    ///     PlayerIdentifier::new(),
-    ///     PlayerName::new("Hero").unwrap(),
-    ///     Position::new(0, 0),
-    ///     CombatStats::new(
-    ///         Health::new(100).unwrap(),
-    ///         Health::new(100).unwrap(),
-    ///         Mana::new(50).unwrap(),
-    ///         Mana::new(50).unwrap(),
-    ///         Attack::new(20),
-    ///         Defense::new(15),
-    ///         Speed::new(10),
-    ///     ).unwrap(),
-    ///     BaseStats::new(
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///     ),
-    /// );
-    ///
-    /// let floor = Floor::new(
-    ///     FloorIdentifier::new(1),
-    ///     FloorLevel::new(1).unwrap(),
-    ///     80,
-    ///     40,
-    /// );
-    ///
-    /// let session = GameSession::new(
-    ///     GameIdentifier::new(),
-    ///     player,
-    ///     floor,
-    ///     RandomSeed::new(42),
-    /// );
-    ///
-    /// let paused_session = session.pause();
-    /// let resumed_session = paused_session.resume().unwrap();
-    /// assert_eq!(resumed_session.status(), &GameStatus::InProgress);
-    /// ```
     pub fn resume(self) -> Result<Self, GameSessionError> {
         if !self.status.is_paused() {
             return Err(GameSessionError::session_already_completed());
@@ -897,63 +214,6 @@ impl GameSession {
         })
     }
 
-    /// Returns a new GameSession with the event sequence incremented.
-    ///
-    /// This is used for event ordering and optimistic concurrency.
-    ///
-    /// This is an immutable operation that consumes self and returns a new GameSession.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::{
-    ///     Attack, BaseStats, CombatStats, Defense, FloorLevel, Health,
-    ///     Mana, Position, Speed, Stat,
-    /// };
-    /// use roguelike_domain::player::{Player, PlayerIdentifier, PlayerName};
-    /// use roguelike_domain::floor::{Floor, FloorIdentifier};
-    /// use roguelike_domain::game_session::{GameSession, GameIdentifier, RandomSeed};
-    ///
-    /// let player = Player::new(
-    ///     PlayerIdentifier::new(),
-    ///     PlayerName::new("Hero").unwrap(),
-    ///     Position::new(0, 0),
-    ///     CombatStats::new(
-    ///         Health::new(100).unwrap(),
-    ///         Health::new(100).unwrap(),
-    ///         Mana::new(50).unwrap(),
-    ///         Mana::new(50).unwrap(),
-    ///         Attack::new(20),
-    ///         Defense::new(15),
-    ///         Speed::new(10),
-    ///     ).unwrap(),
-    ///     BaseStats::new(
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///         Stat::new(10).unwrap(),
-    ///     ),
-    /// );
-    ///
-    /// let floor = Floor::new(
-    ///     FloorIdentifier::new(1),
-    ///     FloorLevel::new(1).unwrap(),
-    ///     80,
-    ///     40,
-    /// );
-    ///
-    /// let session = GameSession::new(
-    ///     GameIdentifier::new(),
-    ///     player,
-    ///     floor,
-    ///     RandomSeed::new(42),
-    /// );
-    ///
-    /// assert_eq!(session.event_sequence(), 0);
-    ///
-    /// let next = session.increment_event_sequence();
-    /// assert_eq!(next.event_sequence(), 1);
-    /// ```
     #[must_use]
     pub fn increment_event_sequence(self) -> Self {
         Self {

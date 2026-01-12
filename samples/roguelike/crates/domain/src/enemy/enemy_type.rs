@@ -1,8 +1,3 @@
-//! Enemy type enumeration for the enemy domain.
-//!
-//! This module defines the different types of enemies that can appear
-//! in the game world, each with distinct characteristics and behaviors.
-
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -11,63 +6,30 @@ use serde::{Deserialize, Serialize};
 // EnemyType
 // =============================================================================
 
-/// The type of enemy in the game world.
-///
-/// Each enemy type has distinct characteristics that affect combat,
-/// behavior, and loot drops.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::enemy::EnemyType;
-///
-/// let enemy_type = EnemyType::Goblin;
-/// println!("Fighting a {}", enemy_type);
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EnemyType {
-    /// A small, cunning creature that attacks in groups.
     Goblin,
 
-    /// An undead creature risen from the grave.
     Skeleton,
 
-    /// A large, brutish humanoid with high attack power.
     Orc,
 
-    /// A gelatinous creature that splits when damaged.
     Slime,
 
-    /// A flying creature that moves erratically.
     Bat,
 
-    /// An eight-legged predator that can poison targets.
     Spider,
 
-    /// A shambling undead creature, slow but resilient.
     Zombie,
 
-    /// An ethereal spirit that can pass through walls.
     Ghost,
 
-    /// A powerful half-bull creature guarding labyrinths.
     Minotaur,
 
-    /// The most powerful creature, breathing fire and terror.
     Dragon,
 }
 
 impl EnemyType {
-    /// Returns an array containing all enemy types.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::EnemyType;
-    ///
-    /// let types = EnemyType::all();
-    /// assert_eq!(types.len(), 10);
-    /// ```
     #[must_use]
     pub const fn all() -> [Self; 10] {
         [
@@ -84,16 +46,6 @@ impl EnemyType {
         ]
     }
 
-    /// Returns the display name of the enemy type.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::EnemyType;
-    ///
-    /// assert_eq!(EnemyType::Goblin.name(), "Goblin");
-    /// assert_eq!(EnemyType::Dragon.name(), "Dragon");
-    /// ```
     #[must_use]
     pub const fn name(&self) -> &'static str {
         match self {
@@ -110,73 +62,21 @@ impl EnemyType {
         }
     }
 
-    /// Returns true if this is a boss-type enemy.
-    ///
-    /// Boss enemies are typically more powerful and appear less frequently.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::EnemyType;
-    ///
-    /// assert!(EnemyType::Dragon.is_boss());
-    /// assert!(EnemyType::Minotaur.is_boss());
-    /// assert!(!EnemyType::Goblin.is_boss());
-    /// ```
     #[must_use]
     pub const fn is_boss(&self) -> bool {
         matches!(self, Self::Minotaur | Self::Dragon)
     }
 
-    /// Returns true if this enemy type is undead.
-    ///
-    /// Undead enemies may have special interactions with certain abilities.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::EnemyType;
-    ///
-    /// assert!(EnemyType::Skeleton.is_undead());
-    /// assert!(EnemyType::Zombie.is_undead());
-    /// assert!(EnemyType::Ghost.is_undead());
-    /// assert!(!EnemyType::Goblin.is_undead());
-    /// ```
     #[must_use]
     pub const fn is_undead(&self) -> bool {
         matches!(self, Self::Skeleton | Self::Zombie | Self::Ghost)
     }
 
-    /// Returns true if this enemy type can fly.
-    ///
-    /// Flying enemies may have special movement patterns.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::EnemyType;
-    ///
-    /// assert!(EnemyType::Bat.is_flying());
-    /// assert!(EnemyType::Ghost.is_flying());
-    /// assert!(EnemyType::Dragon.is_flying());
-    /// assert!(!EnemyType::Goblin.is_flying());
-    /// ```
     #[must_use]
     pub const fn is_flying(&self) -> bool {
         matches!(self, Self::Bat | Self::Ghost | Self::Dragon)
     }
 
-    /// Returns the base experience value for defeating this enemy type.
-    ///
-    /// This is a multiplier that can be adjusted by floor level and modifiers.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::EnemyType;
-    ///
-    /// assert!(EnemyType::Dragon.base_experience() > EnemyType::Goblin.base_experience());
-    /// ```
     #[must_use]
     pub const fn base_experience(&self) -> u32 {
         match self {

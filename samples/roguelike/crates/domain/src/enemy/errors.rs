@@ -1,7 +1,3 @@
-//! Error types for the enemy domain.
-//!
-//! This module provides error types specific to enemy-related operations.
-
 use std::error::Error;
 use std::fmt;
 
@@ -11,57 +7,16 @@ use serde::{Deserialize, Serialize};
 // EnemyError
 // =============================================================================
 
-/// Error types for enemy domain operations.
-///
-/// This enum represents failures that can occur when working with
-/// enemy entities in the game.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::enemy::EnemyError;
-///
-/// let error = EnemyError::enemy_not_found("abc-123");
-/// println!("Error: {}", error);
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EnemyError {
-    /// The specified enemy was not found.
-    ///
-    /// This error occurs when attempting to access or modify an enemy
-    /// that does not exist in the current game state.
-    EnemyNotFound {
-        /// The identifier of the enemy that was not found.
-        enemy_identifier: String,
-    },
+    EnemyNotFound { enemy_identifier: String },
 
-    /// The specified enemy is already dead.
-    ///
-    /// This error occurs when attempting to perform an action on an enemy
-    /// that has already been defeated (health = 0).
-    EnemyAlreadyDead {
-        /// The identifier of the dead enemy.
-        enemy_identifier: String,
-    },
+    EnemyAlreadyDead { enemy_identifier: String },
 
-    /// The behavior pattern is invalid or cannot be applied.
-    ///
-    /// This error occurs when an enemy's behavior cannot be set or
-    /// executed due to invalid configuration.
     InvalidBehaviorPattern,
 }
 
 impl EnemyError {
-    /// Creates an `EnemyNotFound` error with the given identifier.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::EnemyError;
-    ///
-    /// let error = EnemyError::enemy_not_found("abc-123");
-    /// assert!(matches!(error, EnemyError::EnemyNotFound { .. }));
-    /// ```
     #[must_use]
     pub fn enemy_not_found(enemy_identifier: impl Into<String>) -> Self {
         Self::EnemyNotFound {
@@ -69,16 +24,6 @@ impl EnemyError {
         }
     }
 
-    /// Creates an `EnemyAlreadyDead` error with the given identifier.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::EnemyError;
-    ///
-    /// let error = EnemyError::enemy_already_dead("abc-123");
-    /// assert!(matches!(error, EnemyError::EnemyAlreadyDead { .. }));
-    /// ```
     #[must_use]
     pub fn enemy_already_dead(enemy_identifier: impl Into<String>) -> Self {
         Self::EnemyAlreadyDead {
@@ -86,79 +31,26 @@ impl EnemyError {
         }
     }
 
-    /// Creates an `InvalidBehaviorPattern` error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::EnemyError;
-    ///
-    /// let error = EnemyError::invalid_behavior_pattern();
-    /// assert!(matches!(error, EnemyError::InvalidBehaviorPattern));
-    /// ```
     #[must_use]
     pub const fn invalid_behavior_pattern() -> Self {
         Self::InvalidBehaviorPattern
     }
 
-    /// Returns true if this is an `EnemyNotFound` error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::EnemyError;
-    ///
-    /// let error = EnemyError::enemy_not_found("abc-123");
-    /// assert!(error.is_not_found());
-    /// ```
     #[must_use]
     pub const fn is_not_found(&self) -> bool {
         matches!(self, Self::EnemyNotFound { .. })
     }
 
-    /// Returns true if this is an `EnemyAlreadyDead` error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::EnemyError;
-    ///
-    /// let error = EnemyError::enemy_already_dead("abc-123");
-    /// assert!(error.is_already_dead());
-    /// ```
     #[must_use]
     pub const fn is_already_dead(&self) -> bool {
         matches!(self, Self::EnemyAlreadyDead { .. })
     }
 
-    /// Returns true if this is an `InvalidBehaviorPattern` error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::EnemyError;
-    ///
-    /// let error = EnemyError::invalid_behavior_pattern();
-    /// assert!(error.is_invalid_behavior());
-    /// ```
     #[must_use]
     pub const fn is_invalid_behavior(&self) -> bool {
         matches!(self, Self::InvalidBehaviorPattern)
     }
 
-    /// Returns the enemy identifier if this error contains one.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::EnemyError;
-    ///
-    /// let error = EnemyError::enemy_not_found("abc-123");
-    /// assert_eq!(error.enemy_identifier(), Some("abc-123"));
-    ///
-    /// let error = EnemyError::invalid_behavior_pattern();
-    /// assert_eq!(error.enemy_identifier(), None);
-    /// ```
     #[must_use]
     pub fn enemy_identifier(&self) -> Option<&str> {
         match self {
@@ -168,16 +60,6 @@ impl EnemyError {
         }
     }
 
-    /// Returns a human-readable error message.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::EnemyError;
-    ///
-    /// let error = EnemyError::enemy_not_found("abc-123");
-    /// assert!(error.message().contains("abc-123"));
-    /// ```
     #[must_use]
     pub fn message(&self) -> String {
         match self {
@@ -191,24 +73,6 @@ impl EnemyError {
         }
     }
 
-    /// Returns true if this error is recoverable.
-    ///
-    /// Recoverable errors indicate conditions that can potentially be
-    /// handled by the caller or retried.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::EnemyError;
-    ///
-    /// // Not found errors are not recoverable
-    /// let error = EnemyError::enemy_not_found("abc-123");
-    /// assert!(!error.is_recoverable());
-    ///
-    /// // Already dead errors are not recoverable
-    /// let error = EnemyError::enemy_already_dead("abc-123");
-    /// assert!(!error.is_recoverable());
-    /// ```
     #[must_use]
     pub const fn is_recoverable(&self) -> bool {
         matches!(self, Self::InvalidBehaviorPattern)

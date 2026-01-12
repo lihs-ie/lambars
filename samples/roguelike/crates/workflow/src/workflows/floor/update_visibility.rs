@@ -1,36 +1,3 @@
-//! UpdateVisibility workflow implementation.
-//!
-//! This module provides the workflow for updating tile visibility based on
-//! the player's field of view. It uses an iterative approach for
-//! calculating visible tiles.
-//!
-//! # Workflow Steps
-//!
-//! 1. [IO] Load session from cache
-//! 2. [Pure] Get player position
-//! 3. [Pure] Calculate field of view (visible tiles)
-//! 4. [Pure] Update explored tiles
-//! 5. [Pure] Update session visibility
-//! 6. [Pure] Generate TileExplored events
-//! 7. [IO] Update cache
-//! 8. [IO] Append events to event store
-//!
-//! # Field of View Algorithm
-//!
-//! This implementation uses a simple ray-casting algorithm for visibility.
-//! For each tile within the player's view radius, it traces a line from
-//! the player to the tile and checks for obstructions.
-//!
-//! # Examples
-//!
-//! ```ignore
-//! use roguelike_workflow::workflows::floor::{update_visibility, UpdateVisibilityCommand};
-//!
-//! let workflow = update_visibility(&cache, &event_store, cache_ttl);
-//! let command = UpdateVisibilityCommand::new(game_identifier);
-//! let result = workflow(command).run_async().await;
-//! ```
-
 use std::collections::HashSet;
 use std::time::Duration;
 
@@ -46,27 +13,21 @@ use crate::ports::{EventStore, SessionCache, WorkflowResult};
 // Workflow Configuration
 // =============================================================================
 
-/// Default cache time-to-live for game sessions.
 const DEFAULT_CACHE_TIME_TO_LIVE: Duration = Duration::from_secs(300); // 5 minutes
 
-/// Default view radius for the player.
 const DEFAULT_VIEW_RADIUS: i32 = 8;
 
 // =============================================================================
 // VisibilityResult
 // =============================================================================
 
-/// Result of a visibility calculation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VisibilityResult {
-    /// Tiles currently visible to the player.
     visible_tiles: HashSet<Position>,
-    /// Tiles newly explored (first time visible).
     newly_explored_tiles: HashSet<Position>,
 }
 
 impl VisibilityResult {
-    /// Creates a new visibility result.
     #[must_use]
     pub fn new(visible_tiles: HashSet<Position>, newly_explored_tiles: HashSet<Position>) -> Self {
         Self {
@@ -75,13 +36,11 @@ impl VisibilityResult {
         }
     }
 
-    /// Returns the visible tiles.
     #[must_use]
     pub fn visible_tiles(&self) -> &HashSet<Position> {
         &self.visible_tiles
     }
 
-    /// Returns the newly explored tiles.
     #[must_use]
     pub fn newly_explored_tiles(&self) -> &HashSet<Position> {
         &self.newly_explored_tiles
@@ -92,26 +51,6 @@ impl VisibilityResult {
 // UpdateVisibility Workflow
 // =============================================================================
 
-/// Creates a workflow function for updating tile visibility.
-///
-/// This function returns a closure that recalculates the player's field of view
-/// and updates which tiles are visible and explored.
-///
-/// # Type Parameters
-///
-/// * `C` - Cache type implementing `SessionCache`
-/// * `E` - Event store type implementing `EventStore`
-///
-/// # Arguments
-///
-/// * `cache` - The session cache for fast access
-/// * `event_store` - The event store for event sourcing
-/// * `cache_ttl` - Time-to-live for cached sessions
-///
-/// # Returns
-///
-/// A function that takes an `UpdateVisibilityCommand` and returns an `AsyncIO`
-/// that produces the updated game session or an error.
 pub fn update_visibility<'a, C, E>(
     cache: &'a C,
     event_store: &'a E,
@@ -159,7 +98,6 @@ where
     }
 }
 
-/// Creates a workflow function with default cache TTL.
 pub fn update_visibility_with_default_ttl<'a, C, E>(
     cache: &'a C,
     event_store: &'a E,
@@ -175,7 +113,6 @@ where
 // Pure Functions
 // =============================================================================
 
-/// Pure function that performs the entire visibility update logic.
 fn update_visibility_pure<S: Clone>(
     _session: &S,
 ) -> Result<(S, Vec<GameSessionEvent>), WorkflowError> {
@@ -186,36 +123,6 @@ fn update_visibility_pure<S: Clone>(
     ))
 }
 
-/// Gets the player position from the session.
-///
-/// This is a pure function that extracts the player's position from
-/// the game session.
-///
-/// # Type Parameters
-///
-/// * `S` - The session type
-/// * `F` - Function to extract player position
-///
-/// # Arguments
-///
-/// * `session` - The game session
-/// * `extract_fn` - Function that extracts the position
-///
-/// # Returns
-///
-/// The player's current position.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::floor::get_player_position;
-/// use roguelike_domain::common::Position;
-///
-/// struct MockSession { position: Position }
-/// let session = MockSession { position: Position::new(10, 20) };
-/// let position = get_player_position(&session, |s| s.position);
-/// assert_eq!(position, Position::new(10, 20));
-/// ```
 pub fn get_player_position<S, F>(session: &S, extract_fn: F) -> Position
 where
     F: Fn(&S) -> Position,
@@ -223,37 +130,6 @@ where
     extract_fn(session)
 }
 
-/// Calculates the field of view for a given position.
-///
-/// This is a pure function that determines which tiles are visible from
-/// the player's position, using a simple ray-casting algorithm.
-///
-/// # Arguments
-///
-/// * `origin` - The position to calculate FOV from
-/// * `view_radius` - The maximum view distance
-/// * `is_blocking` - Function that returns true if a tile blocks vision
-///
-/// # Returns
-///
-/// A set of positions that are visible from the origin.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::floor::calculate_field_of_view;
-/// use roguelike_domain::common::Position;
-///
-/// let visible = calculate_field_of_view(
-///     Position::new(10, 10),
-///     3,
-///     |_| false, // No blocking tiles
-/// );
-///
-/// assert!(visible.contains(&Position::new(10, 10)));
-/// assert!(visible.contains(&Position::new(11, 10)));
-/// assert!(visible.contains(&Position::new(10, 11)));
-/// ```
 #[must_use]
 pub fn calculate_field_of_view<F>(
     origin: Position,
@@ -293,7 +169,6 @@ where
     visible
 }
 
-/// Calculates field of view with default radius.
 #[must_use]
 pub fn calculate_field_of_view_default<F>(origin: Position, is_blocking: F) -> HashSet<Position>
 where
@@ -302,9 +177,6 @@ where
     calculate_field_of_view(origin, DEFAULT_VIEW_RADIUS, is_blocking)
 }
 
-/// Checks if a target position is visible from the origin.
-///
-/// Uses Bresenham's line algorithm to trace a ray from origin to target.
 fn is_visible_from_origin<F>(origin: Position, target: Position, is_blocking: &F) -> bool
 where
     F: Fn(Position) -> bool,
@@ -347,41 +219,6 @@ where
     }
 }
 
-/// Updates the set of explored tiles.
-///
-/// This is a pure function that combines previously explored tiles with
-/// newly visible tiles to create the updated explored set.
-///
-/// # Arguments
-///
-/// * `previously_explored` - The set of tiles that were already explored
-/// * `currently_visible` - The set of tiles currently visible
-///
-/// # Returns
-///
-/// A tuple of (updated_explored_tiles, newly_explored_tiles).
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::floor::update_explored_tiles;
-/// use roguelike_domain::common::Position;
-/// use std::collections::HashSet;
-///
-/// let mut explored = HashSet::new();
-/// explored.insert(Position::new(5, 5));
-/// explored.insert(Position::new(6, 5));
-///
-/// let mut visible = HashSet::new();
-/// visible.insert(Position::new(6, 5));
-/// visible.insert(Position::new(7, 5));
-///
-/// let (updated, newly_explored) = update_explored_tiles(&explored, &visible);
-///
-/// assert_eq!(updated.len(), 3);
-/// assert_eq!(newly_explored.len(), 1);
-/// assert!(newly_explored.contains(&Position::new(7, 5)));
-/// ```
 #[must_use]
 pub fn update_explored_tiles(
     previously_explored: &HashSet<Position>,
@@ -402,25 +239,6 @@ pub fn update_explored_tiles(
     (updated_explored, newly_explored)
 }
 
-/// Updates the session with new visibility information.
-///
-/// This is a pure function that immutably updates the session with
-/// visibility data and returns the updated session along with events.
-///
-/// # Type Parameters
-///
-/// * `S` - The session type
-/// * `F` - Function to update the session
-///
-/// # Arguments
-///
-/// * `session` - The current game session
-/// * `visibility_result` - The visibility calculation result
-/// * `update_fn` - Function that updates the session
-///
-/// # Returns
-///
-/// A tuple of (updated_session, generated_events).
 pub fn update_session_visibility<S, F>(
     session: &S,
     visibility_result: &VisibilityResult,

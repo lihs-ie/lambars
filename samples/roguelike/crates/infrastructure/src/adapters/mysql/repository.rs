@@ -1,8 +1,3 @@
-//! MySQL implementation of GameSessionRepository.
-//!
-//! This module provides a MySQL-backed implementation of the
-//! [`GameSessionRepository`] trait for persistent game session storage.
-
 use lambars::effect::AsyncIO;
 use roguelike_domain::game_session::{GameIdentifier, GameSession, GameStatus, RandomSeed};
 use roguelike_workflow::ports::GameSessionRepository;
@@ -15,28 +10,6 @@ use super::MySqlPool;
 // MySqlGameSessionRepository
 // =============================================================================
 
-/// MySQL-backed game session repository.
-///
-/// This struct provides persistent storage for game sessions using MySQL.
-/// It implements the [`GameSessionRepository`] trait from the workflow layer.
-///
-/// # Note
-///
-/// The current implementation stores only session metadata (identifiers, status,
-/// turn count, etc.). Full game session reconstruction with player, floor, and
-/// enemy data requires additional repository implementations or a more complex
-/// serialization strategy.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// use roguelike_infrastructure::adapters::mysql::{MySqlPool, MySqlPoolFactory, MySqlPoolConfig};
-/// use roguelike_infrastructure::adapters::mysql::MySqlGameSessionRepository;
-///
-/// let config = MySqlPoolConfig::with_url("mysql://localhost/roguelike");
-/// let pool = MySqlPoolFactory::create_pool(&config)?;
-/// let repository = MySqlGameSessionRepository::new(pool);
-/// ```
 #[derive(Clone)]
 pub struct MySqlGameSessionRepository {
     pool: MySqlPool,
@@ -47,26 +20,11 @@ pub struct MySqlGameSessionRepository {
 // =============================================================================
 
 impl MySqlGameSessionRepository {
-    /// Creates a new MySQL game session repository.
-    ///
-    /// # Arguments
-    ///
-    /// * `pool` - The MySQL connection pool to use for database operations.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// use roguelike_infrastructure::adapters::mysql::{MySqlPool, MySqlGameSessionRepository};
-    ///
-    /// let pool = // ... obtain pool
-    /// let repository = MySqlGameSessionRepository::new(pool);
-    /// ```
     #[must_use]
     pub const fn new(pool: MySqlPool) -> Self {
         Self { pool }
     }
 
-    /// Returns a reference to the underlying connection pool.
     #[must_use]
     pub const fn pool(&self) -> &MySqlPool {
         &self.pool
@@ -233,41 +191,18 @@ impl GameSessionRepository for MySqlGameSessionRepository {
 // GameSessionRecord
 // =============================================================================
 
-/// A simplified record type for game session persistence.
-///
-/// This struct represents the database row structure for game sessions.
-/// It contains only the metadata needed for basic game session tracking.
-///
-/// # Note
-///
-/// Full game session reconstruction with all domain objects (Player, Floor,
-/// Enemies, etc.) would require either:
-/// - Separate repositories for each entity type
-/// - JSON/binary serialization of the full GameSession
-/// - Event sourcing to reconstruct state from events
-///
-/// The current implementation uses this simplified record for basic CRUD
-/// operations while the full persistence strategy is being developed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GameSessionRecord {
-    /// The unique game identifier (UUID string).
     pub game_id: String,
-    /// The player identifier (UUID string).
     pub player_id: String,
-    /// Current floor level.
     pub current_floor_level: i32,
-    /// Current turn count.
     pub turn_count: u64,
-    /// Game status as a string.
     pub status: String,
-    /// Random seed for game reproducibility.
     pub random_seed: u64,
-    /// Event sequence number.
     pub event_sequence: u64,
 }
 
 impl GameSessionRecord {
-    /// Creates a new game session record.
     #[must_use]
     pub fn new(
         game_id: String,
@@ -289,7 +224,6 @@ impl GameSessionRecord {
         }
     }
 
-    /// Creates a record from a database row.
     fn from_row(row: &sqlx::mysql::MySqlRow) -> Self {
         // Read UUIDs from binary(16) columns
         let game_uuid: Uuid = row.get("game_id");
@@ -306,10 +240,6 @@ impl GameSessionRecord {
         }
     }
 
-    /// Creates a record from a full GameSession.
-    ///
-    /// This extracts the metadata needed for persistence from the full
-    /// domain object.
     #[must_use]
     pub fn from_game_session(session: &GameSession, player_id: &str) -> Self {
         Self {
@@ -323,23 +253,16 @@ impl GameSessionRecord {
         }
     }
 
-    /// Returns the game identifier parsed from the stored string.
-    ///
-    /// # Errors
-    ///
-    /// Returns `None` if the stored game_id is not a valid UUID.
     #[must_use]
     pub fn game_identifier(&self) -> Option<GameIdentifier> {
         self.game_id.parse().ok()
     }
 
-    /// Returns the random seed as a domain type.
     #[must_use]
     pub fn random_seed_value(&self) -> RandomSeed {
         RandomSeed::new(self.random_seed)
     }
 
-    /// Returns whether the session is active (in_progress or paused).
     #[must_use]
     pub fn is_active(&self) -> bool {
         self.status == "in_progress" || self.status == "paused"
@@ -350,7 +273,6 @@ impl GameSessionRecord {
 // Helper Functions
 // =============================================================================
 
-/// Converts a GameStatus to its string representation for database storage.
 fn status_to_string(status: &GameStatus) -> String {
     match status {
         GameStatus::InProgress => "in_progress".to_string(),
@@ -360,7 +282,6 @@ fn status_to_string(status: &GameStatus) -> String {
     }
 }
 
-/// Converts a string from the database to a GameStatus.
 #[allow(dead_code)]
 fn string_to_status(status: &str) -> GameStatus {
     match status {

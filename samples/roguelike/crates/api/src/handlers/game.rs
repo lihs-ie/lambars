@@ -1,10 +1,3 @@
-//! Game session handlers.
-//!
-//! This module provides HTTP handlers for game session operations:
-//! - Creating new game sessions
-//! - Retrieving game session state
-//! - Ending game sessions
-
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -22,37 +15,6 @@ use roguelike_workflow::ports::{EventStore, GameSessionRepository, RandomGenerat
 // Create Game Handler
 // =============================================================================
 
-/// Creates a new game session.
-///
-/// # Endpoint
-///
-/// `POST /api/v1/games`
-///
-/// # Request Body
-///
-/// ```json
-/// {
-///   "player_name": "Hero",
-///   "seed": 12345  // optional
-/// }
-/// ```
-///
-/// # Response
-///
-/// - `201 Created` - Game session created successfully
-/// - `400 Bad Request` - Invalid request body
-///
-/// # Examples
-///
-/// ```json
-/// {
-///   "game_id": "550e8400-e29b-41d4-a716-446655440000",
-///   "player": { ... },
-///   "floor": { ... },
-///   "turn_count": 0,
-///   "status": "in_progress"
-/// }
-/// ```
 pub async fn create_game<Repository, Cache, Events, Random>(
     State(_state): State<AppState<Repository, Cache, Events, Random>>,
     Json(request): Json<CreateGameRequest>,
@@ -116,32 +78,6 @@ where
 // Get Game Handler
 // =============================================================================
 
-/// Retrieves the current state of a game session.
-///
-/// # Endpoint
-///
-/// `GET /api/v1/games/{game_id}`
-///
-/// # Path Parameters
-///
-/// - `game_id` - The unique identifier of the game session (UUID format)
-///
-/// # Response
-///
-/// - `200 OK` - Returns the game session state
-/// - `404 Not Found` - Game session not found
-///
-/// # Examples
-///
-/// ```json
-/// {
-///   "game_id": "550e8400-e29b-41d4-a716-446655440000",
-///   "player": { ... },
-///   "floor": { ... },
-///   "turn_count": 42,
-///   "status": "in_progress"
-/// }
-/// ```
 pub async fn get_game<Repository, Cache, Events, Random>(
     State(_state): State<AppState<Repository, Cache, Events, Random>>,
     Path(game_id): Path<String>,
@@ -169,42 +105,6 @@ where
 // End Game Handler
 // =============================================================================
 
-/// Ends a game session.
-///
-/// # Endpoint
-///
-/// `POST /api/v1/games/{game_id}/end`
-///
-/// # Path Parameters
-///
-/// - `game_id` - The unique identifier of the game session (UUID format)
-///
-/// # Request Body
-///
-/// ```json
-/// {
-///   "outcome": "abandon"
-/// }
-/// ```
-///
-/// # Response
-///
-/// - `200 OK` - Game ended successfully
-/// - `404 Not Found` - Game session not found
-/// - `409 Conflict` - Game session has already ended
-///
-/// # Examples
-///
-/// ```json
-/// {
-///   "game_id": "550e8400-e29b-41d4-a716-446655440000",
-///   "final_score": 12500,
-///   "dungeon_depth": 5,
-///   "turns_survived": 142,
-///   "enemies_defeated": 23,
-///   "outcome": "abandon"
-/// }
-/// ```
 pub async fn end_game<Repository, Cache, Events, Random>(
     State(_state): State<AppState<Repository, Cache, Events, Random>>,
     Path(game_id): Path<String>,

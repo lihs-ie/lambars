@@ -1,8 +1,3 @@
-//! Domain events for the enemy domain.
-//!
-//! This module provides domain events that represent significant
-//! occurrences in the enemy lifecycle.
-
 use crate::common::{Damage, Position};
 
 use super::enemy_type::EnemyType;
@@ -13,24 +8,6 @@ use super::loot::LootTable;
 // EnemySpawned
 // =============================================================================
 
-/// Event emitted when a new enemy spawns in the game world.
-///
-/// This event captures the initial state of an enemy when it first
-/// appears on a floor.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::enemy::{EnemySpawned, EntityIdentifier, EnemyType};
-/// use roguelike_domain::common::Position;
-///
-/// let event = EnemySpawned::new(
-///     EntityIdentifier::new(),
-///     EnemyType::Goblin,
-///     Position::new(5, 10),
-/// );
-/// println!("Enemy spawned: {}", event.enemy_type());
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnemySpawned {
     enemy_identifier: EntityIdentifier,
@@ -39,13 +16,6 @@ pub struct EnemySpawned {
 }
 
 impl EnemySpawned {
-    /// Creates a new EnemySpawned event.
-    ///
-    /// # Arguments
-    ///
-    /// * `enemy_identifier` - The unique identifier of the spawned enemy
-    /// * `enemy_type` - The type of enemy that spawned
-    /// * `position` - The position where the enemy spawned
     #[must_use]
     pub const fn new(
         enemy_identifier: EntityIdentifier,
@@ -59,19 +29,16 @@ impl EnemySpawned {
         }
     }
 
-    /// Returns the enemy identifier.
     #[must_use]
     pub const fn enemy_identifier(&self) -> EntityIdentifier {
         self.enemy_identifier
     }
 
-    /// Returns the enemy type.
     #[must_use]
     pub const fn enemy_type(&self) -> EnemyType {
         self.enemy_type
     }
 
-    /// Returns the spawn position.
     #[must_use]
     pub const fn position(&self) -> Position {
         self.position
@@ -82,23 +49,6 @@ impl EnemySpawned {
 // EnemyMoved
 // =============================================================================
 
-/// Event emitted when an enemy moves to a new position.
-///
-/// This event captures both the origin and destination of a movement.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::enemy::{EnemyMoved, EntityIdentifier};
-/// use roguelike_domain::common::Position;
-///
-/// let event = EnemyMoved::new(
-///     EntityIdentifier::new(),
-///     Position::new(5, 10),
-///     Position::new(6, 10),
-/// );
-/// println!("Enemy moved from {} to {}", event.from(), event.to());
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnemyMoved {
     enemy_identifier: EntityIdentifier,
@@ -107,13 +57,6 @@ pub struct EnemyMoved {
 }
 
 impl EnemyMoved {
-    /// Creates a new EnemyMoved event.
-    ///
-    /// # Arguments
-    ///
-    /// * `enemy_identifier` - The unique identifier of the enemy that moved
-    /// * `from` - The position the enemy moved from
-    /// * `to` - The position the enemy moved to
     #[must_use]
     pub const fn new(enemy_identifier: EntityIdentifier, from: Position, to: Position) -> Self {
         Self {
@@ -123,39 +66,21 @@ impl EnemyMoved {
         }
     }
 
-    /// Returns the enemy identifier.
     #[must_use]
     pub const fn enemy_identifier(&self) -> EntityIdentifier {
         self.enemy_identifier
     }
 
-    /// Returns the origin position.
     #[must_use]
     pub const fn from(&self) -> Position {
         self.from
     }
 
-    /// Returns the destination position.
     #[must_use]
     pub const fn to(&self) -> Position {
         self.to
     }
 
-    /// Returns the distance moved (Manhattan distance).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::enemy::{EnemyMoved, EntityIdentifier};
-    /// use roguelike_domain::common::{Position, Distance};
-    ///
-    /// let event = EnemyMoved::new(
-    ///     EntityIdentifier::new(),
-    ///     Position::new(0, 0),
-    ///     Position::new(3, 4),
-    /// );
-    /// assert_eq!(event.distance().value(), 7);
-    /// ```
     #[must_use]
     pub fn distance(&self) -> crate::common::Distance {
         self.from.distance_to(&self.to)
@@ -166,23 +91,6 @@ impl EnemyMoved {
 // EnemyAttacked
 // =============================================================================
 
-/// Event emitted when an enemy receives damage.
-///
-/// This event captures the damage dealt to an enemy without
-/// specifying the source of the damage.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::enemy::{EnemyAttacked, EntityIdentifier};
-/// use roguelike_domain::common::Damage;
-///
-/// let event = EnemyAttacked::new(
-///     EntityIdentifier::new(),
-///     Damage::new(50),
-/// );
-/// println!("Enemy took {} damage", event.damage().value());
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnemyAttacked {
     enemy_identifier: EntityIdentifier,
@@ -190,12 +98,6 @@ pub struct EnemyAttacked {
 }
 
 impl EnemyAttacked {
-    /// Creates a new EnemyAttacked event.
-    ///
-    /// # Arguments
-    ///
-    /// * `enemy_identifier` - The unique identifier of the attacked enemy
-    /// * `damage` - The amount of damage dealt
     #[must_use]
     pub const fn new(enemy_identifier: EntityIdentifier, damage: Damage) -> Self {
         Self {
@@ -204,19 +106,16 @@ impl EnemyAttacked {
         }
     }
 
-    /// Returns the enemy identifier.
     #[must_use]
     pub const fn enemy_identifier(&self) -> EntityIdentifier {
         self.enemy_identifier
     }
 
-    /// Returns the damage dealt.
     #[must_use]
     pub const fn damage(&self) -> Damage {
         self.damage
     }
 
-    /// Returns true if the damage was zero (blocked or absorbed).
     #[must_use]
     pub fn was_blocked(&self) -> bool {
         self.damage.value() == 0
@@ -227,25 +126,6 @@ impl EnemyAttacked {
 // EnemyDied
 // =============================================================================
 
-/// Event emitted when an enemy dies.
-///
-/// This event captures the enemy's death and metadata about the loot
-/// that was dropped. The actual loot items are handled separately
-/// as part of the game state.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::enemy::{EnemyDied, EntityIdentifier};
-/// use roguelike_domain::common::Position;
-///
-/// let event = EnemyDied::new(
-///     EntityIdentifier::new(),
-///     Position::new(10, 20),
-///     3,  // 3 loot entries
-/// );
-/// println!("Enemy died with {} loot entries", event.loot_entry_count());
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnemyDied {
     enemy_identifier: EntityIdentifier,
@@ -254,13 +134,6 @@ pub struct EnemyDied {
 }
 
 impl EnemyDied {
-    /// Creates a new EnemyDied event.
-    ///
-    /// # Arguments
-    ///
-    /// * `enemy_identifier` - The unique identifier of the dead enemy
-    /// * `death_position` - The position where the enemy died
-    /// * `loot_entry_count` - The number of loot entries dropped
     #[must_use]
     pub const fn new(
         enemy_identifier: EntityIdentifier,
@@ -274,15 +147,6 @@ impl EnemyDied {
         }
     }
 
-    /// Creates an EnemyDied event from a loot table.
-    ///
-    /// This is a convenience method that extracts the loot count from a table.
-    ///
-    /// # Arguments
-    ///
-    /// * `enemy_identifier` - The unique identifier of the dead enemy
-    /// * `death_position` - The position where the enemy died
-    /// * `loot` - The loot table (used only to extract count)
     #[must_use]
     pub fn from_loot_table(
         enemy_identifier: EntityIdentifier,
@@ -292,25 +156,21 @@ impl EnemyDied {
         Self::new(enemy_identifier, death_position, loot.len())
     }
 
-    /// Returns the enemy identifier.
     #[must_use]
     pub const fn enemy_identifier(&self) -> EntityIdentifier {
         self.enemy_identifier
     }
 
-    /// Returns the position where the enemy died.
     #[must_use]
     pub const fn death_position(&self) -> Position {
         self.death_position
     }
 
-    /// Returns the number of loot entries.
     #[must_use]
     pub const fn loot_entry_count(&self) -> usize {
         self.loot_entry_count
     }
 
-    /// Returns true if the enemy dropped any loot.
     #[must_use]
     pub const fn has_loot(&self) -> bool {
         self.loot_entry_count > 0
@@ -321,47 +181,18 @@ impl EnemyDied {
 // EnemyEvent
 // =============================================================================
 
-/// A unified enum for all enemy-related domain events.
-///
-/// This enum allows handling any enemy event through pattern matching.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::enemy::{
-///     EnemyEvent, EnemySpawned, EntityIdentifier, EnemyType
-/// };
-/// use roguelike_domain::common::Position;
-///
-/// let spawned = EnemySpawned::new(
-///     EntityIdentifier::new(),
-///     EnemyType::Goblin,
-///     Position::new(5, 10),
-/// );
-/// let event = EnemyEvent::Spawned(spawned);
-///
-/// match event {
-///     EnemyEvent::Spawned(e) => println!("Enemy spawned: {}", e.enemy_type()),
-///     _ => {}
-/// }
-/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub enum EnemyEvent {
-    /// An enemy has spawned.
     Spawned(EnemySpawned),
 
-    /// An enemy has moved.
     Moved(EnemyMoved),
 
-    /// An enemy has been attacked.
     Attacked(EnemyAttacked),
 
-    /// An enemy has died.
     Died(EnemyDied),
 }
 
 impl EnemyEvent {
-    /// Returns the enemy identifier associated with this event.
     #[must_use]
     pub const fn enemy_identifier(&self) -> EntityIdentifier {
         match self {
@@ -372,25 +203,21 @@ impl EnemyEvent {
         }
     }
 
-    /// Returns true if this is a spawn event.
     #[must_use]
     pub const fn is_spawn(&self) -> bool {
         matches!(self, Self::Spawned(_))
     }
 
-    /// Returns true if this is a movement event.
     #[must_use]
     pub const fn is_movement(&self) -> bool {
         matches!(self, Self::Moved(_))
     }
 
-    /// Returns true if this is an attack event.
     #[must_use]
     pub const fn is_attack(&self) -> bool {
         matches!(self, Self::Attacked(_))
     }
 
-    /// Returns true if this is a death event.
     #[must_use]
     pub const fn is_death(&self) -> bool {
         matches!(self, Self::Died(_))

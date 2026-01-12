@@ -1,14 +1,3 @@
-//! Player domain events.
-//!
-//! This module provides domain events for the player aggregate:
-//!
-//! - **PlayerMoved**: Player moved from one position to another
-//! - **PlayerAttacked**: Player attacked an entity
-//! - **PlayerDamaged**: Player received damage
-//! - **PlayerLeveledUp**: Player gained a level
-//! - **PlayerDied**: Player died
-//! - **ExperienceGained**: Player gained experience points
-
 use std::fmt;
 
 use crate::common::{Damage, Experience, Level, Position};
@@ -17,39 +6,15 @@ use crate::common::{Damage, Experience, Level, Position};
 // EntityIdentifier
 // =============================================================================
 
-/// Identifier for any entity in the game (player, enemy, etc.).
-///
-/// This is a placeholder type for now. In a full implementation,
-/// this would be a proper sum type that can identify different entity types.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::player::EntityIdentifier;
-///
-/// let entity = EntityIdentifier::new("enemy-001");
-/// println!("Entity: {}", entity);
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EntityIdentifier(String);
 
 impl EntityIdentifier {
-    /// Creates a new entity identifier.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::player::EntityIdentifier;
-    ///
-    /// let entity = EntityIdentifier::new("player-001");
-    /// assert_eq!(entity.value(), "player-001");
-    /// ```
     #[must_use]
     pub fn new(identifier: impl Into<String>) -> Self {
         Self(identifier.into())
     }
 
-    /// Returns the identifier value.
     #[must_use]
     pub fn value(&self) -> &str {
         &self.0
@@ -78,48 +43,28 @@ impl From<&str> for EntityIdentifier {
 // PlayerMoved
 // =============================================================================
 
-/// Event emitted when a player moves from one position to another.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::common::Position;
-/// use roguelike_domain::player::PlayerMoved;
-///
-/// let event = PlayerMoved::new(
-///     Position::new(0, 0),
-///     Position::new(1, 0),
-/// );
-/// println!("Player moved: {}", event);
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlayerMoved {
-    /// The position the player moved from.
     from: Position,
-    /// The position the player moved to.
     to: Position,
 }
 
 impl PlayerMoved {
-    /// Creates a new `PlayerMoved` event.
     #[must_use]
     pub const fn new(from: Position, to: Position) -> Self {
         Self { from, to }
     }
 
-    /// Returns the starting position.
     #[must_use]
     pub const fn from(&self) -> Position {
         self.from
     }
 
-    /// Returns the ending position.
     #[must_use]
     pub const fn to(&self) -> Position {
         self.to
     }
 
-    /// Returns the distance moved (Manhattan distance).
     #[must_use]
     pub fn distance(&self) -> u32 {
         self.from.distance_to(&self.to).value()
@@ -136,42 +81,23 @@ impl fmt::Display for PlayerMoved {
 // PlayerAttacked
 // =============================================================================
 
-/// Event emitted when a player attacks an entity.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::common::Damage;
-/// use roguelike_domain::player::{PlayerAttacked, EntityIdentifier};
-///
-/// let event = PlayerAttacked::new(
-///     EntityIdentifier::new("enemy-001"),
-///     Damage::new(50),
-/// );
-/// println!("{}", event);
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlayerAttacked {
-    /// The entity that was attacked.
     target: EntityIdentifier,
-    /// The amount of damage dealt.
     damage: Damage,
 }
 
 impl PlayerAttacked {
-    /// Creates a new `PlayerAttacked` event.
     #[must_use]
     pub const fn new(target: EntityIdentifier, damage: Damage) -> Self {
         Self { target, damage }
     }
 
-    /// Returns the target of the attack.
     #[must_use]
     pub fn target(&self) -> &EntityIdentifier {
         &self.target
     }
 
-    /// Returns the damage dealt.
     #[must_use]
     pub const fn damage(&self) -> Damage {
         self.damage
@@ -192,42 +118,23 @@ impl fmt::Display for PlayerAttacked {
 // PlayerDamaged
 // =============================================================================
 
-/// Event emitted when a player receives damage.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::common::Damage;
-/// use roguelike_domain::player::{PlayerDamaged, EntityIdentifier};
-///
-/// let event = PlayerDamaged::new(
-///     EntityIdentifier::new("enemy-001"),
-///     Damage::new(30),
-/// );
-/// println!("{}", event);
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlayerDamaged {
-    /// The entity that dealt the damage.
     source: EntityIdentifier,
-    /// The amount of damage received.
     damage: Damage,
 }
 
 impl PlayerDamaged {
-    /// Creates a new `PlayerDamaged` event.
     #[must_use]
     pub const fn new(source: EntityIdentifier, damage: Damage) -> Self {
         Self { source, damage }
     }
 
-    /// Returns the source of the damage.
     #[must_use]
     pub fn source(&self) -> &EntityIdentifier {
         &self.source
     }
 
-    /// Returns the damage received.
     #[must_use]
     pub const fn damage(&self) -> Damage {
         self.damage
@@ -248,31 +155,17 @@ impl fmt::Display for PlayerDamaged {
 // PlayerLeveledUp
 // =============================================================================
 
-/// Event emitted when a player gains a level.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::common::Level;
-/// use roguelike_domain::player::PlayerLeveledUp;
-///
-/// let event = PlayerLeveledUp::new(Level::new(10).unwrap());
-/// println!("{}", event);
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlayerLeveledUp {
-    /// The new level after leveling up.
     new_level: Level,
 }
 
 impl PlayerLeveledUp {
-    /// Creates a new `PlayerLeveledUp` event.
     #[must_use]
     pub const fn new(new_level: Level) -> Self {
         Self { new_level }
     }
 
-    /// Returns the new level.
     #[must_use]
     pub const fn new_level(&self) -> Level {
         self.new_level
@@ -289,21 +182,10 @@ impl fmt::Display for PlayerLeveledUp {
 // PlayerDied
 // =============================================================================
 
-/// Event emitted when a player dies.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::player::PlayerDied;
-///
-/// let event = PlayerDied::new();
-/// println!("{}", event);
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PlayerDied;
 
 impl PlayerDied {
-    /// Creates a new `PlayerDied` event.
     #[must_use]
     pub const fn new() -> Self {
         Self
@@ -320,42 +202,23 @@ impl fmt::Display for PlayerDied {
 // ExperienceGained
 // =============================================================================
 
-/// Event emitted when a player gains experience points.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::common::Experience;
-/// use roguelike_domain::player::ExperienceGained;
-///
-/// let event = ExperienceGained::new(
-///     Experience::new(100),
-///     Experience::new(1500),
-/// );
-/// println!("{}", event);
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExperienceGained {
-    /// The amount of experience gained.
     amount: Experience,
-    /// The total experience after gaining.
     total: Experience,
 }
 
 impl ExperienceGained {
-    /// Creates a new `ExperienceGained` event.
     #[must_use]
     pub const fn new(amount: Experience, total: Experience) -> Self {
         Self { amount, total }
     }
 
-    /// Returns the amount of experience gained.
     #[must_use]
     pub const fn amount(&self) -> Experience {
         self.amount
     }
 
-    /// Returns the total experience after gaining.
     #[must_use]
     pub const fn total(&self) -> Experience {
         self.total
@@ -376,49 +239,27 @@ impl fmt::Display for ExperienceGained {
 // PlayerEvent
 // =============================================================================
 
-/// Sum type for all player domain events.
-///
-/// This enum wraps all specific player events into a single type
-/// for easier handling and storage.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::player::{PlayerEvent, PlayerDied};
-///
-/// let event = PlayerEvent::Died(PlayerDied::new());
-/// println!("{}", event);
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlayerEvent {
-    /// Player moved to a new position.
     Moved(PlayerMoved),
-    /// Player attacked an entity.
     Attacked(PlayerAttacked),
-    /// Player received damage.
     Damaged(PlayerDamaged),
-    /// Player leveled up.
     LeveledUp(PlayerLeveledUp),
-    /// Player died.
     Died(PlayerDied),
-    /// Player gained experience.
     ExperienceGained(ExperienceGained),
 }
 
 impl PlayerEvent {
-    /// Returns true if this is a movement event.
     #[must_use]
     pub const fn is_movement(&self) -> bool {
         matches!(self, Self::Moved(_))
     }
 
-    /// Returns true if this is a combat-related event.
     #[must_use]
     pub const fn is_combat(&self) -> bool {
         matches!(self, Self::Attacked(_) | Self::Damaged(_) | Self::Died(_))
     }
 
-    /// Returns true if this is a progression-related event.
     #[must_use]
     pub const fn is_progression(&self) -> bool {
         matches!(self, Self::LeveledUp(_) | Self::ExperienceGained(_))

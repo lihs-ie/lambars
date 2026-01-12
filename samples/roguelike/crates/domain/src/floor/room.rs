@@ -1,8 +1,3 @@
-//! Room value object for dungeon floors.
-//!
-//! This module provides the Room type representing a rectangular room
-//! in the dungeon with validation constraints.
-
 use std::fmt;
 
 use crate::common::{Position, ValidationError};
@@ -11,22 +6,6 @@ use crate::common::{Position, ValidationError};
 // Room
 // =============================================================================
 
-/// A rectangular room in the dungeon.
-///
-/// Rooms are defined by their top-left corner position and dimensions.
-/// Both width and height must be at least 3 to form a valid room
-/// (walls on all sides with at least one interior tile).
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::common::Position;
-/// use roguelike_domain::floor::Room;
-///
-/// let room = Room::new(Position::new(5, 5), 10, 8).unwrap();
-/// assert_eq!(room.width(), 10);
-/// assert_eq!(room.height(), 8);
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Room {
     top_left: Position,
@@ -35,32 +14,10 @@ pub struct Room {
 }
 
 impl Room {
-    /// The minimum width for a room.
     pub const MIN_WIDTH: u32 = 3;
 
-    /// The minimum height for a room.
     pub const MIN_HEIGHT: u32 = 3;
 
-    /// Creates a new Room with the given position and dimensions.
-    ///
-    /// Returns an error if width or height is less than the minimum (3).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::Position;
-    /// use roguelike_domain::floor::Room;
-    ///
-    /// // Valid room
-    /// let room = Room::new(Position::new(0, 0), 5, 5).unwrap();
-    /// assert_eq!(room.width(), 5);
-    ///
-    /// // Invalid room - width too small
-    /// assert!(Room::new(Position::new(0, 0), 2, 5).is_err());
-    ///
-    /// // Invalid room - height too small
-    /// assert!(Room::new(Position::new(0, 0), 5, 2).is_err());
-    /// ```
     pub fn new(top_left: Position, width: u32, height: u32) -> Result<Self, ValidationError> {
         if width < Self::MIN_WIDTH {
             return Err(ValidationError::out_of_range(
@@ -85,35 +42,21 @@ impl Room {
         })
     }
 
-    /// Returns the top-left corner position of the room.
     #[must_use]
     pub const fn top_left(&self) -> Position {
         self.top_left
     }
 
-    /// Returns the width of the room.
     #[must_use]
     pub const fn width(&self) -> u32 {
         self.width
     }
 
-    /// Returns the height of the room.
     #[must_use]
     pub const fn height(&self) -> u32 {
         self.height
     }
 
-    /// Returns the bottom-right corner position of the room.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::Position;
-    /// use roguelike_domain::floor::Room;
-    ///
-    /// let room = Room::new(Position::new(5, 5), 10, 8).unwrap();
-    /// assert_eq!(room.bottom_right(), Position::new(14, 12));
-    /// ```
     #[must_use]
     pub fn bottom_right(&self) -> Position {
         Position::new(
@@ -122,19 +65,6 @@ impl Room {
         )
     }
 
-    /// Returns the center position of the room.
-    ///
-    /// For even-sized rooms, the center is biased toward the top-left.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::Position;
-    /// use roguelike_domain::floor::Room;
-    ///
-    /// let room = Room::new(Position::new(0, 0), 5, 5).unwrap();
-    /// assert_eq!(room.center(), Position::new(2, 2));
-    /// ```
     #[must_use]
     pub fn center(&self) -> Position {
         Position::new(
@@ -143,52 +73,16 @@ impl Room {
         )
     }
 
-    /// Returns the area of the room in tiles.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::Position;
-    /// use roguelike_domain::floor::Room;
-    ///
-    /// let room = Room::new(Position::new(0, 0), 5, 4).unwrap();
-    /// assert_eq!(room.area(), 20);
-    /// ```
     #[must_use]
     pub const fn area(&self) -> u32 {
         self.width * self.height
     }
 
-    /// Returns the interior area of the room (excluding walls).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::Position;
-    /// use roguelike_domain::floor::Room;
-    ///
-    /// let room = Room::new(Position::new(0, 0), 5, 4).unwrap();
-    /// // Interior is (5-2) * (4-2) = 3 * 2 = 6
-    /// assert_eq!(room.interior_area(), 6);
-    /// ```
     #[must_use]
     pub const fn interior_area(&self) -> u32 {
         (self.width - 2) * (self.height - 2)
     }
 
-    /// Returns true if the given position is inside this room (including walls).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::Position;
-    /// use roguelike_domain::floor::Room;
-    ///
-    /// let room = Room::new(Position::new(5, 5), 10, 8).unwrap();
-    /// assert!(room.contains(Position::new(5, 5)));   // Top-left corner
-    /// assert!(room.contains(Position::new(10, 10))); // Interior
-    /// assert!(!room.contains(Position::new(4, 5)));  // Outside
-    /// ```
     #[must_use]
     pub fn contains(&self, position: Position) -> bool {
         let bottom_right = self.bottom_right();
@@ -198,19 +92,6 @@ impl Room {
             && position.y() <= bottom_right.y()
     }
 
-    /// Returns true if the given position is in the interior of this room
-    /// (excluding walls).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::Position;
-    /// use roguelike_domain::floor::Room;
-    ///
-    /// let room = Room::new(Position::new(5, 5), 10, 8).unwrap();
-    /// assert!(!room.is_interior(Position::new(5, 5)));   // Wall (top-left)
-    /// assert!(room.is_interior(Position::new(10, 10))); // Interior
-    /// ```
     #[must_use]
     pub fn is_interior(&self, position: Position) -> bool {
         let interior_top_left = Position::new(self.top_left.x() + 1, self.top_left.y() + 1);
@@ -225,39 +106,11 @@ impl Room {
             && position.y() <= interior_bottom_right.y()
     }
 
-    /// Returns true if the given position is on the wall of this room.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::Position;
-    /// use roguelike_domain::floor::Room;
-    ///
-    /// let room = Room::new(Position::new(5, 5), 10, 8).unwrap();
-    /// assert!(room.is_wall(Position::new(5, 5)));   // Corner wall
-    /// assert!(room.is_wall(Position::new(10, 5))); // Top wall
-    /// assert!(!room.is_wall(Position::new(10, 10))); // Interior
-    /// ```
     #[must_use]
     pub fn is_wall(&self, position: Position) -> bool {
         self.contains(position) && !self.is_interior(position)
     }
 
-    /// Returns true if this room overlaps with another room.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::common::Position;
-    /// use roguelike_domain::floor::Room;
-    ///
-    /// let room1 = Room::new(Position::new(0, 0), 10, 10).unwrap();
-    /// let room2 = Room::new(Position::new(5, 5), 10, 10).unwrap();
-    /// let room3 = Room::new(Position::new(20, 20), 5, 5).unwrap();
-    ///
-    /// assert!(room1.overlaps(&room2));
-    /// assert!(!room1.overlaps(&room3));
-    /// ```
     #[must_use]
     pub fn overlaps(&self, other: &Room) -> bool {
         let self_bottom_right = self.bottom_right();

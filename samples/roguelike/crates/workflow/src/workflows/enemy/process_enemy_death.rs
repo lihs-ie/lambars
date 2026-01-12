@@ -1,30 +1,3 @@
-//! ProcessEnemyDeath workflow implementation.
-//!
-//! This module provides the workflow for processing an enemy's death.
-//! It follows the "IO at the Edges" pattern, separating pure domain logic
-//! from IO operations.
-//!
-//! # Workflow Steps
-//!
-//! 1. [IO] Load session from cache
-//! 2. [Pure] Find enemy by identifier
-//! 3. [Pure] Calculate loot based on enemy type
-//! 4. [Pure] Drop items at enemy position
-//! 5. [Pure] Remove enemy from session
-//! 6. [Pure] Generate EnemyDied event
-//! 7. [IO] Update cache
-//! 8. [IO] Append events to event store
-//!
-//! # Examples
-//!
-//! ```ignore
-//! use roguelike_workflow::workflows::enemy::{process_enemy_death, ProcessEnemyDeathCommand};
-//!
-//! let workflow = process_enemy_death(&cache, &event_store, cache_ttl);
-//! let command = ProcessEnemyDeathCommand::new(game_identifier, entity_identifier);
-//! let result = workflow(command).run_async().await;
-//! ```
-
 use std::time::Duration;
 
 use lambars::effect::AsyncIO;
@@ -41,29 +14,20 @@ use crate::ports::{EventStore, SessionCache, WorkflowResult};
 // Workflow Configuration
 // =============================================================================
 
-/// Default cache time-to-live for game sessions.
 const DEFAULT_CACHE_TIME_TO_LIVE: Duration = Duration::from_secs(300); // 5 minutes
 
 // =============================================================================
 // DroppedItem
 // =============================================================================
 
-/// Represents an item dropped on the floor.
-///
-/// This structure contains information about an item that was
-/// dropped when an enemy died.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DroppedItem {
-    /// The item identifier.
     item_identifier: ItemIdentifier,
-    /// The position where the item was dropped.
     position: Position,
-    /// The quantity of items dropped.
     quantity: u32,
 }
 
 impl DroppedItem {
-    /// Creates a new dropped item.
     #[must_use]
     pub const fn new(item_identifier: ItemIdentifier, position: Position, quantity: u32) -> Self {
         Self {
@@ -73,19 +37,16 @@ impl DroppedItem {
         }
     }
 
-    /// Returns the item identifier.
     #[must_use]
     pub const fn item_identifier(&self) -> ItemIdentifier {
         self.item_identifier
     }
 
-    /// Returns the drop position.
     #[must_use]
     pub const fn position(&self) -> Position {
         self.position
     }
 
-    /// Returns the quantity.
     #[must_use]
     pub const fn quantity(&self) -> u32 {
         self.quantity
@@ -96,27 +57,6 @@ impl DroppedItem {
 // ProcessEnemyDeath Workflow
 // =============================================================================
 
-/// Creates a workflow function for processing an enemy's death.
-///
-/// This function returns a closure that handles loot generation and
-/// enemy removal. It uses higher-order functions to inject dependencies,
-/// enabling pure functional composition and easy testing.
-///
-/// # Type Parameters
-///
-/// * `C` - Cache type implementing `SessionCache`
-/// * `E` - Event store type implementing `EventStore`
-///
-/// # Arguments
-///
-/// * `cache` - The session cache for fast access
-/// * `event_store` - The event store for event sourcing
-/// * `cache_ttl` - Time-to-live for cached sessions
-///
-/// # Returns
-///
-/// A function that takes a `ProcessEnemyDeathCommand` and returns an `AsyncIO`
-/// that produces the updated game session or an error.
 pub fn process_enemy_death<'a, C, E>(
     cache: &'a C,
     event_store: &'a E,
@@ -165,7 +105,6 @@ where
     }
 }
 
-/// Creates a workflow function with default cache TTL.
 pub fn process_enemy_death_with_default_ttl<'a, C, E>(
     cache: &'a C,
     event_store: &'a E,
@@ -181,7 +120,6 @@ where
 // Pure Functions
 // =============================================================================
 
-/// Pure function that performs the entire enemy death processing logic.
 fn process_enemy_death_pure<S: Clone>(
     _session: &S,
     _entity_identifier: EntityIdentifier,
@@ -193,29 +131,6 @@ fn process_enemy_death_pure<S: Clone>(
     ))
 }
 
-/// Calculates the loot table for a defeated enemy.
-///
-/// This is a pure function that determines what items an enemy
-/// may drop based on its type.
-///
-/// # Arguments
-///
-/// * `enemy_type` - The type of the defeated enemy
-/// * `seed` - Random seed for loot determination
-///
-/// # Returns
-///
-/// A loot table containing potential drops.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::enemy::calculate_loot;
-/// use roguelike_domain::enemy::EnemyType;
-///
-/// let loot_table = calculate_loot(EnemyType::Goblin, 12345);
-/// // Goblins may drop items
-/// ```
 #[must_use]
 pub fn calculate_loot(enemy_type: EnemyType, seed: u64) -> LootTable {
     let base_loot = get_base_loot_table(enemy_type);
@@ -224,7 +139,6 @@ pub fn calculate_loot(enemy_type: EnemyType, seed: u64) -> LootTable {
     filter_loot_by_chance(&base_loot, seed)
 }
 
-/// Gets the base loot table for an enemy type.
 fn get_base_loot_table(enemy_type: EnemyType) -> LootTable {
     match enemy_type {
         EnemyType::Slime => create_loot_table(&[
@@ -246,7 +160,6 @@ fn get_base_loot_table(enemy_type: EnemyType) -> LootTable {
     }
 }
 
-/// Creates a loot table from drop specifications.
 fn create_loot_table(specs: &[(f32, u32, u32)]) -> LootTable {
     specs
         .iter()
@@ -261,7 +174,6 @@ fn create_loot_table(specs: &[(f32, u32, u32)]) -> LootTable {
         })
 }
 
-/// Filters a loot table based on drop chances using a seed.
 fn filter_loot_by_chance(loot_table: &LootTable, seed: u64) -> LootTable {
     let mut current_seed = seed;
 
@@ -280,31 +192,6 @@ fn filter_loot_by_chance(loot_table: &LootTable, seed: u64) -> LootTable {
     })
 }
 
-/// Drops items at a specific position on the floor.
-///
-/// This is a pure function that creates dropped item instances
-/// from a loot table.
-///
-/// # Arguments
-///
-/// * `loot_table` - The loot table containing items to drop
-/// * `position` - The position where items should be dropped
-/// * `seed` - Random seed for quantity determination
-///
-/// # Returns
-///
-/// A vector of dropped items.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::enemy::{calculate_loot, drop_items_at_position};
-/// use roguelike_domain::enemy::EnemyType;
-/// use roguelike_domain::common::Position;
-///
-/// let loot_table = calculate_loot(EnemyType::Goblin, 12345);
-/// let dropped = drop_items_at_position(&loot_table, Position::new(10, 10), 54321);
-/// ```
 #[must_use]
 pub fn drop_items_at_position(
     loot_table: &LootTable,
@@ -333,39 +220,6 @@ pub fn drop_items_at_position(
         .collect()
 }
 
-/// Removes an enemy from the session.
-///
-/// This is a pure function that creates an updated session
-/// without the specified enemy.
-///
-/// # Type Parameters
-///
-/// * `S` - The session type
-/// * `F` - Function to remove an enemy from the session
-///
-/// # Arguments
-///
-/// * `session` - The current game session
-/// * `entity_identifier` - The identifier of the enemy to remove
-/// * `death_position` - The position where the enemy died
-/// * `loot_table` - The loot table for the enemy
-/// * `remove_enemy` - Function that removes an enemy from the session
-///
-/// # Returns
-///
-/// A tuple of (updated_session, death_event).
-///
-/// # Examples
-///
-/// ```ignore
-/// let (updated_session, event) = remove_enemy_from_session(
-///     &session,
-///     entity_identifier,
-///     Position::new(10, 20),
-///     loot_table,
-///     |s, id| s.without_enemy(id),
-/// );
-/// ```
 pub fn remove_enemy_from_session<S, F>(
     session: &S,
     entity_identifier: EntityIdentifier,

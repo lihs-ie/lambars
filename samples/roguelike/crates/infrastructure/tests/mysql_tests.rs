@@ -1,14 +1,3 @@
-//! MySQL integration tests.
-//!
-//! These tests verify the MySQL adapters work correctly with a real database.
-//!
-//! # Requirements
-//!
-//! A MySQL container must be running at `localhost:3306` with:
-//! - Database: `roguelike`
-//! - User: `roguelike`
-//! - Password: `roguelikepassword`
-
 use roguelike_domain::game_session::GameIdentifier;
 use roguelike_infrastructure::adapters::mysql::{
     GameSessionRecord, MySqlGameSessionRepository, MySqlPoolConfig, MySqlPoolFactory,
@@ -17,14 +6,12 @@ use roguelike_workflow::ports::GameSessionRepository;
 use rstest::rstest;
 use uuid::Uuid;
 
-/// The database URL for the test MySQL container.
 const DATABASE_URL: &str = "mysql://roguelike:roguelikepassword@localhost:3306/roguelike";
 
 // =============================================================================
 // Connection Tests
 // =============================================================================
 
-/// Tests that we can successfully connect to the MySQL database.
 #[rstest]
 #[tokio::test]
 async fn test_mysql_connection() {
@@ -38,7 +25,6 @@ async fn test_mysql_connection() {
     assert!(!pool.is_closed());
 }
 
-/// Tests that the pool can execute a simple query.
 #[rstest]
 #[tokio::test]
 async fn test_mysql_pool_query() {
@@ -61,7 +47,6 @@ async fn test_mysql_pool_query() {
 // Repository Tests
 // =============================================================================
 
-/// Tests the complete CRUD cycle for game session records.
 #[rstest]
 #[tokio::test]
 async fn test_game_session_repository_save_and_find() {
@@ -110,7 +95,6 @@ async fn test_game_session_repository_save_and_find() {
     assert!(not_found.is_none());
 }
 
-/// Tests that finding a non-existent record returns None.
 #[rstest]
 #[tokio::test]
 async fn test_game_session_repository_find_not_found() {
@@ -127,7 +111,6 @@ async fn test_game_session_repository_find_not_found() {
     assert!(result.is_none());
 }
 
-/// Tests updating an existing game session record.
 #[rstest]
 #[tokio::test]
 async fn test_game_session_repository_update() {
@@ -183,7 +166,6 @@ async fn test_game_session_repository_update() {
     repository.delete(&game_identifier).run_async().await;
 }
 
-/// Tests listing active game sessions.
 #[rstest]
 #[tokio::test]
 async fn test_game_session_repository_list_active() {
@@ -240,7 +222,6 @@ async fn test_game_session_repository_list_active() {
     repository.delete(&game_identifier2).run_async().await;
 }
 
-/// Tests deleting a non-existent record does not cause an error.
 #[rstest]
 #[tokio::test]
 async fn test_game_session_repository_delete_nonexistent() {

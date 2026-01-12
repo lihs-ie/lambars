@@ -1,9 +1,3 @@
-//! Player handlers.
-//!
-//! This module provides HTTP handlers for player-related operations:
-//! - Getting player details
-//! - Getting player inventory
-
 use axum::Json;
 use axum::extract::{Path, State};
 
@@ -16,39 +10,6 @@ use roguelike_workflow::ports::{EventStore, GameSessionRepository, RandomGenerat
 // Get Player Handler
 // =============================================================================
 
-/// Retrieves detailed player information for a game session.
-///
-/// # Endpoint
-///
-/// `GET /api/v1/games/{game_id}/player`
-///
-/// # Path Parameters
-///
-/// - `game_id` - The unique identifier of the game session (UUID format)
-///
-/// # Response
-///
-/// - `200 OK` - Returns detailed player information
-/// - `404 Not Found` - Game session not found
-///
-/// # Examples
-///
-/// ```json
-/// {
-///   "player_id": "550e8400-e29b-41d4-a716-446655440000",
-///   "name": "Hero",
-///   "position": { "x": 5, "y": 5 },
-///   "health": { "current": 80, "max": 100 },
-///   "mana": { "current": 30, "max": 50 },
-///   "level": 3,
-///   "experience": 1500,
-///   "experience_to_next_level": 500,
-///   "base_stats": { "strength": 12, "dexterity": 10, "intelligence": 8, "vitality": 14 },
-///   "combat_stats": { "attack": 25, "defense": 15, "speed": 10 },
-///   "equipment": { "weapon": { ... }, "armor": null, ... },
-///   "status_effects": []
-/// }
-/// ```
 pub async fn get_player<Repository, Cache, Events, Random>(
     State(_state): State<AppState<Repository, Cache, Events, Random>>,
     Path(game_id): Path<String>,
@@ -76,41 +37,6 @@ where
 // Get Inventory Handler
 // =============================================================================
 
-/// Retrieves the player's inventory for a game session.
-///
-/// # Endpoint
-///
-/// `GET /api/v1/games/{game_id}/inventory`
-///
-/// # Path Parameters
-///
-/// - `game_id` - The unique identifier of the game session (UUID format)
-///
-/// # Response
-///
-/// - `200 OK` - Returns inventory information
-/// - `404 Not Found` - Game session not found
-///
-/// # Examples
-///
-/// ```json
-/// {
-///   "capacity": 20,
-///   "used_slots": 5,
-///   "items": [
-///     {
-///       "item": {
-///         "item_id": "...",
-///         "name": "Health Potion",
-///         "kind": "consumable",
-///         "description": "Restores 50 HP",
-///         "rarity": "common"
-///       },
-///       "quantity": 3
-///     }
-///   ]
-/// }
-/// ```
 pub async fn get_inventory<Repository, Cache, Events, Random>(
     State(_state): State<AppState<Repository, Cache, Events, Random>>,
     Path(game_id): Path<String>,

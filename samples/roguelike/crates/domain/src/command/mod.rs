@@ -1,35 +1,3 @@
-//! Command domain module.
-//!
-//! This module contains command-related domain types for the roguelike game:
-//!
-//! - **Command**: All possible game commands (move, attack, use item, etc.)
-//! - **ValidatedCommand**: A command that has passed validation
-//! - **CommandError**: Errors that can occur during command processing
-//!
-//! # Command Processing Pipeline
-//!
-//! Commands follow a pure functional processing pipeline:
-//!
-//! 1. Raw input is parsed into a `Command` enum
-//! 2. `CommandValidator` validates the command against game state, producing `Either<CommandError, ValidatedCommand>`
-//! 3. `CommandExecutor` executes validated commands using `State` monad
-//!
-//! # Examples
-//!
-//! ```
-//! use roguelike_domain::command::{Command, ValidatedCommand, CommandError};
-//! use roguelike_domain::common::{Direction, TurnCount};
-//!
-//! // Create a move command
-//! let command = Command::Move(Direction::Up);
-//!
-//! // Create a validated command (normally done by CommandValidator)
-//! let validated = ValidatedCommand::new(command, TurnCount::new(1));
-//!
-//! // Access the inner command
-//! assert!(matches!(validated.command(), Command::Move(_)));
-//! ```
-
 mod errors;
 mod validated;
 
@@ -47,211 +15,40 @@ pub use validated::ValidatedCommand;
 // Command
 // =============================================================================
 
-/// All possible game commands that a player can execute.
-///
-/// Commands represent player intentions in the game. Each command
-/// variant may carry data needed for execution (e.g., direction for Move,
-/// target for Attack).
-///
-/// # Variants
-///
-/// - `Move(Direction)`: Move in a direction
-/// - `Attack(EntityIdentifier)`: Attack a specific entity
-/// - `UseItem(ItemIdentifier)`: Use an item from inventory
-/// - `PickUp(ItemIdentifier)`: Pick up an item from the ground
-/// - `Drop(ItemIdentifier)`: Drop an item from inventory
-/// - `Equip(ItemIdentifier)`: Equip an item from inventory
-/// - `Unequip(EquipmentSlot)`: Unequip from a specific slot
-/// - `Wait`: Skip the current turn
-/// - `Descend`: Go down to the next floor
-/// - `Ascend`: Go up to the previous floor
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::command::Command;
-/// use roguelike_domain::common::Direction;
-///
-/// let move_command = Command::Move(Direction::Up);
-/// let wait_command = Command::Wait;
-///
-/// // Commands can be pattern matched
-/// match move_command {
-///     Command::Move(direction) => println!("Moving {:?}", direction),
-///     _ => println!("Other command"),
-/// }
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    /// Move the player in a direction.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::command::Command;
-    /// use roguelike_domain::common::Direction;
-    ///
-    /// let command = Command::Move(Direction::Up);
-    /// ```
     Move(Direction),
 
-    /// Attack a specific entity.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::command::Command;
-    /// use roguelike_domain::enemy::EntityIdentifier;
-    ///
-    /// let target = EntityIdentifier::new();
-    /// let command = Command::Attack(target);
-    /// ```
     Attack(EntityIdentifier),
 
-    /// Use an item from the player's inventory.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::command::Command;
-    /// use roguelike_domain::item::ItemIdentifier;
-    ///
-    /// let item = ItemIdentifier::new();
-    /// let command = Command::UseItem(item);
-    /// ```
     UseItem(ItemIdentifier),
 
-    /// Pick up an item from the ground.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::command::Command;
-    /// use roguelike_domain::item::ItemIdentifier;
-    ///
-    /// let item = ItemIdentifier::new();
-    /// let command = Command::PickUp(item);
-    /// ```
     PickUp(ItemIdentifier),
 
-    /// Drop an item from the player's inventory.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::command::Command;
-    /// use roguelike_domain::item::ItemIdentifier;
-    ///
-    /// let item = ItemIdentifier::new();
-    /// let command = Command::Drop(item);
-    /// ```
     Drop(ItemIdentifier),
 
-    /// Equip an item from the player's inventory.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::command::Command;
-    /// use roguelike_domain::item::ItemIdentifier;
-    ///
-    /// let item = ItemIdentifier::new();
-    /// let command = Command::Equip(item);
-    /// ```
     Equip(ItemIdentifier),
 
-    /// Unequip an item from a specific equipment slot.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::command::Command;
-    /// use roguelike_domain::player::EquipmentSlot;
-    ///
-    /// let command = Command::Unequip(EquipmentSlot::Weapon);
-    /// ```
     Unequip(EquipmentSlot),
 
-    /// Wait and skip the current turn.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::command::Command;
-    ///
-    /// let command = Command::Wait;
-    /// ```
     Wait,
 
-    /// Descend to the next floor.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::command::Command;
-    ///
-    /// let command = Command::Descend;
-    /// ```
     Descend,
 
-    /// Ascend to the previous floor.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::command::Command;
-    ///
-    /// let command = Command::Ascend;
-    /// ```
     Ascend,
 }
 
 impl Command {
-    /// Returns true if this command is a movement command.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::command::Command;
-    /// use roguelike_domain::common::Direction;
-    ///
-    /// assert!(Command::Move(Direction::Up).is_movement());
-    /// assert!(!Command::Wait.is_movement());
-    /// ```
     #[must_use]
     pub const fn is_movement(&self) -> bool {
         matches!(self, Self::Move(_))
     }
 
-    /// Returns true if this command is a combat command.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::command::Command;
-    /// use roguelike_domain::enemy::EntityIdentifier;
-    ///
-    /// let target = EntityIdentifier::new();
-    /// assert!(Command::Attack(target).is_combat());
-    /// assert!(!Command::Wait.is_combat());
-    /// ```
     #[must_use]
     pub const fn is_combat(&self) -> bool {
         matches!(self, Self::Attack(_))
     }
 
-    /// Returns true if this command is an item-related command.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::command::Command;
-    /// use roguelike_domain::item::ItemIdentifier;
-    ///
-    /// let item = ItemIdentifier::new();
-    /// assert!(Command::UseItem(item).is_item_command());
-    /// assert!(!Command::Wait.is_item_command());
-    /// ```
     #[must_use]
     pub const fn is_item_command(&self) -> bool {
         matches!(
@@ -260,32 +57,11 @@ impl Command {
         )
     }
 
-    /// Returns true if this command is a floor transition command.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::command::Command;
-    ///
-    /// assert!(Command::Descend.is_floor_transition());
-    /// assert!(Command::Ascend.is_floor_transition());
-    /// assert!(!Command::Wait.is_floor_transition());
-    /// ```
     #[must_use]
     pub const fn is_floor_transition(&self) -> bool {
         matches!(self, Self::Descend | Self::Ascend)
     }
 
-    /// Returns the name of the command as a string.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::command::Command;
-    ///
-    /// assert_eq!(Command::Wait.name(), "Wait");
-    /// assert_eq!(Command::Descend.name(), "Descend");
-    /// ```
     #[must_use]
     pub const fn name(&self) -> &'static str {
         match self {

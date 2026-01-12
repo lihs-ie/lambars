@@ -1,32 +1,3 @@
-//! GenerateFloor workflow implementation.
-//!
-//! This module provides the workflow for generating new dungeon floors.
-//! It follows the "IO at the Edges" pattern, separating pure domain logic
-//! from IO operations.
-//!
-//! # Workflow Steps
-//!
-//! 1. [IO] Load session from cache
-//! 2. [Pure] Get floor configuration based on floor level
-//! 3. [Pure] Generate rooms and corridors (using lazy evaluation)
-//! 4. [Pure] Place stairs (up and down)
-//! 5. [Pure] Place items on the floor
-//! 6. [Pure] Place traps on the floor
-//! 7. [Pure] Update session with new floor
-//! 8. [Pure] Generate FloorGenerated event
-//! 9. [IO] Update cache
-//! 10. [IO] Append events to event store
-//!
-//! # Examples
-//!
-//! ```ignore
-//! use roguelike_workflow::workflows::floor::{generate_floor, GenerateFloorCommand};
-//!
-//! let workflow = generate_floor(&cache, &event_store, cache_ttl);
-//! let command = GenerateFloorCommand::new(game_identifier, 1);
-//! let result = workflow(command).run_async().await;
-//! ```
-
 use std::time::Duration;
 
 use lambars::effect::AsyncIO;
@@ -42,35 +13,23 @@ use crate::ports::{EventStore, SessionCache, WorkflowResult};
 // Workflow Configuration
 // =============================================================================
 
-/// Default cache time-to-live for game sessions.
 const DEFAULT_CACHE_TIME_TO_LIVE: Duration = Duration::from_secs(300); // 5 minutes
 
 // =============================================================================
 // FloorGenerationConfiguration
 // =============================================================================
 
-/// Configuration for floor generation.
-///
-/// This structure defines the parameters for generating a dungeon floor
-/// based on the floor level.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FloorGenerationConfiguration {
-    /// Minimum number of rooms to generate.
     min_rooms: u32,
-    /// Maximum number of rooms to generate.
     max_rooms: u32,
-    /// Minimum room size (width and height).
     min_room_size: u32,
-    /// Maximum room size (width and height).
     max_room_size: u32,
-    /// Number of items to place on the floor.
     item_count: u32,
-    /// Number of traps to place on the floor.
     trap_count: u32,
 }
 
 impl FloorGenerationConfiguration {
-    /// Creates a new floor generation configuration.
     #[must_use]
     pub const fn new(
         min_rooms: u32,
@@ -90,37 +49,31 @@ impl FloorGenerationConfiguration {
         }
     }
 
-    /// Returns the minimum number of rooms.
     #[must_use]
     pub const fn min_rooms(&self) -> u32 {
         self.min_rooms
     }
 
-    /// Returns the maximum number of rooms.
     #[must_use]
     pub const fn max_rooms(&self) -> u32 {
         self.max_rooms
     }
 
-    /// Returns the minimum room size.
     #[must_use]
     pub const fn min_room_size(&self) -> u32 {
         self.min_room_size
     }
 
-    /// Returns the maximum room size.
     #[must_use]
     pub const fn max_room_size(&self) -> u32 {
         self.max_room_size
     }
 
-    /// Returns the number of items to place.
     #[must_use]
     pub const fn item_count(&self) -> u32 {
         self.item_count
     }
 
-    /// Returns the number of traps to place.
     #[must_use]
     pub const fn trap_count(&self) -> u32 {
         self.trap_count
@@ -131,17 +84,13 @@ impl FloorGenerationConfiguration {
 // StairsPlacement
 // =============================================================================
 
-/// Represents the placement of stairs on a floor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StairsPlacement {
-    /// Position of the up stairs (entry point).
     up_stairs: Position,
-    /// Position of the down stairs (exit point). None for the final floor.
     down_stairs: Option<Position>,
 }
 
 impl StairsPlacement {
-    /// Creates a new stairs placement.
     #[must_use]
     pub const fn new(up_stairs: Position, down_stairs: Option<Position>) -> Self {
         Self {
@@ -150,13 +99,11 @@ impl StairsPlacement {
         }
     }
 
-    /// Returns the position of the up stairs.
     #[must_use]
     pub const fn up_stairs(&self) -> Position {
         self.up_stairs
     }
 
-    /// Returns the position of the down stairs.
     #[must_use]
     pub const fn down_stairs(&self) -> Option<Position> {
         self.down_stairs
@@ -167,17 +114,13 @@ impl StairsPlacement {
 // ItemPlacement
 // =============================================================================
 
-/// Represents an item placement on the floor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ItemPlacement {
-    /// Position of the item.
     position: Position,
-    /// Type or identifier of the item (simplified).
     item_type: String,
 }
 
 impl ItemPlacement {
-    /// Creates a new item placement.
     #[must_use]
     pub fn new(position: Position, item_type: impl Into<String>) -> Self {
         Self {
@@ -186,13 +129,11 @@ impl ItemPlacement {
         }
     }
 
-    /// Returns the item position.
     #[must_use]
     pub const fn position(&self) -> Position {
         self.position
     }
 
-    /// Returns the item type.
     #[must_use]
     pub fn item_type(&self) -> &str {
         &self.item_type
@@ -203,17 +144,13 @@ impl ItemPlacement {
 // TrapPlacement
 // =============================================================================
 
-/// Represents a trap placement on the floor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TrapPlacement {
-    /// Position of the trap.
     position: Position,
-    /// Type of trap.
     trap_type: TrapType,
 }
 
 impl TrapPlacement {
-    /// Creates a new trap placement.
     #[must_use]
     pub const fn new(position: Position, trap_type: TrapType) -> Self {
         Self {
@@ -222,13 +159,11 @@ impl TrapPlacement {
         }
     }
 
-    /// Returns the trap position.
     #[must_use]
     pub const fn position(&self) -> Position {
         self.position
     }
 
-    /// Returns the trap type.
     #[must_use]
     pub const fn trap_type(&self) -> TrapType {
         self.trap_type
@@ -239,27 +174,6 @@ impl TrapPlacement {
 // GenerateFloor Workflow
 // =============================================================================
 
-/// Creates a workflow function for generating a new floor.
-///
-/// This function returns a closure that generates a dungeon floor based on
-/// floor level configuration. It uses higher-order functions to inject
-/// dependencies, enabling pure functional composition and easy testing.
-///
-/// # Type Parameters
-///
-/// * `C` - Cache type implementing `SessionCache`
-/// * `E` - Event store type implementing `EventStore`
-///
-/// # Arguments
-///
-/// * `cache` - The session cache for fast access
-/// * `event_store` - The event store for event sourcing
-/// * `cache_ttl` - Time-to-live for cached sessions
-///
-/// # Returns
-///
-/// A function that takes a `GenerateFloorCommand` and returns an `AsyncIO`
-/// that produces the updated game session or an error.
 pub fn generate_floor<'a, C, E>(
     cache: &'a C,
     event_store: &'a E,
@@ -308,7 +222,6 @@ where
     }
 }
 
-/// Creates a workflow function with default cache TTL.
 pub fn generate_floor_with_default_ttl<'a, C, E>(
     cache: &'a C,
     event_store: &'a E,
@@ -324,7 +237,6 @@ where
 // Pure Functions
 // =============================================================================
 
-/// Pure function that performs the entire floor generation logic.
 fn generate_floor_pure<S: Clone>(
     _session: &S,
     _floor_level: u32,
@@ -336,28 +248,6 @@ fn generate_floor_pure<S: Clone>(
     ))
 }
 
-/// Gets the floor generation configuration for a given floor level.
-///
-/// This is a pure function that determines floor generation parameters
-/// based on the floor level.
-///
-/// # Arguments
-///
-/// * `floor_level` - The floor level (1-indexed)
-///
-/// # Returns
-///
-/// The floor generation configuration for the given floor level.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::floor::get_floor_configuration;
-///
-/// let config = get_floor_configuration(1);
-/// assert!(config.min_rooms() >= 3);
-/// assert!(config.trap_count() <= 3);
-/// ```
 #[must_use]
 pub fn get_floor_configuration(floor_level: u32) -> FloorGenerationConfiguration {
     let (min_rooms, max_rooms) = calculate_room_count_range(floor_level);
@@ -375,7 +265,6 @@ pub fn get_floor_configuration(floor_level: u32) -> FloorGenerationConfiguration
     )
 }
 
-/// Calculates room count range based on floor level.
 fn calculate_room_count_range(floor_level: u32) -> (u32, u32) {
     let base_min = 3;
     let base_max = 6;
@@ -384,7 +273,6 @@ fn calculate_room_count_range(floor_level: u32) -> (u32, u32) {
     (base_min + level_bonus, base_max + level_bonus * 2)
 }
 
-/// Calculates room size range based on floor level.
 fn calculate_room_size_range(floor_level: u32) -> (u32, u32) {
     // Larger rooms on later floors
     let base_min = 4;
@@ -394,7 +282,6 @@ fn calculate_room_size_range(floor_level: u32) -> (u32, u32) {
     (base_min + level_bonus, base_max + level_bonus * 2)
 }
 
-/// Calculates item count based on floor level.
 fn calculate_item_count(floor_level: u32) -> u32 {
     // More items on earlier floors, fewer on deeper floors
     let base_count: u32 = 5;
@@ -402,7 +289,6 @@ fn calculate_item_count(floor_level: u32) -> u32 {
     base_count.saturating_sub(reduction).max(2)
 }
 
-/// Calculates trap count based on floor level.
 fn calculate_trap_count(floor_level: u32) -> u32 {
     // More traps on deeper floors
     let base_count = 1;
@@ -410,30 +296,6 @@ fn calculate_trap_count(floor_level: u32) -> u32 {
     (base_count + increase).min(10)
 }
 
-/// Places stairs on the floor.
-///
-/// This is a pure function that determines stair positions.
-///
-/// # Arguments
-///
-/// * `floor_level` - The floor level
-/// * `valid_positions` - Valid positions where stairs can be placed
-/// * `seed` - Random seed for reproducible placement
-///
-/// # Returns
-///
-/// The stairs placement for the floor.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::floor::place_stairs;
-/// use roguelike_domain::common::Position;
-///
-/// let positions = vec![Position::new(5, 5), Position::new(20, 20)];
-/// let stairs = place_stairs(1, &positions, 12345);
-/// assert!(stairs.down_stairs().is_some());
-/// ```
 #[must_use]
 pub fn place_stairs(floor_level: u32, valid_positions: &[Position], seed: u64) -> StairsPlacement {
     if valid_positions.is_empty() {
@@ -465,31 +327,6 @@ pub fn place_stairs(floor_level: u32, valid_positions: &[Position], seed: u64) -
     StairsPlacement::new(up_stairs, down_stairs)
 }
 
-/// Places items on the floor.
-///
-/// This is a pure function that determines item positions.
-///
-/// # Arguments
-///
-/// * `configuration` - Floor generation configuration
-/// * `valid_positions` - Valid positions where items can be placed
-/// * `floor_level` - The floor level (affects item types)
-/// * `seed` - Random seed for reproducible placement
-///
-/// # Returns
-///
-/// A vector of item placements.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::floor::{place_items, get_floor_configuration};
-/// use roguelike_domain::common::Position;
-///
-/// let config = get_floor_configuration(5);
-/// let positions = vec![Position::new(10, 10), Position::new(20, 20), Position::new(30, 30)];
-/// let items = place_items(&config, &positions, 5, 12345);
-/// ```
 #[must_use]
 pub fn place_items(
     configuration: &FloorGenerationConfiguration,
@@ -535,7 +372,6 @@ pub fn place_items(
     items
 }
 
-/// Gets available item types for a floor level.
 fn get_item_types_for_floor(floor_level: u32) -> Vec<String> {
     let mut types = vec![
         "Health Potion".to_string(),
@@ -563,31 +399,6 @@ fn get_item_types_for_floor(floor_level: u32) -> Vec<String> {
     types
 }
 
-/// Places traps on the floor.
-///
-/// This is a pure function that determines trap positions and types.
-///
-/// # Arguments
-///
-/// * `configuration` - Floor generation configuration
-/// * `valid_positions` - Valid positions where traps can be placed
-/// * `floor_level` - The floor level (affects trap types)
-/// * `seed` - Random seed for reproducible placement
-///
-/// # Returns
-///
-/// A vector of trap placements.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::floor::{place_traps, get_floor_configuration};
-/// use roguelike_domain::common::Position;
-///
-/// let config = get_floor_configuration(5);
-/// let positions = vec![Position::new(10, 10), Position::new(20, 20)];
-/// let traps = place_traps(&config, &positions, 5, 12345);
-/// ```
 #[must_use]
 pub fn place_traps(
     configuration: &FloorGenerationConfiguration,
@@ -633,7 +444,6 @@ pub fn place_traps(
     traps
 }
 
-/// Gets available trap types for a floor level.
 fn get_trap_types_for_floor(floor_level: u32) -> Vec<TrapType> {
     let mut types = vec![TrapType::Spike];
 
@@ -652,27 +462,6 @@ fn get_trap_types_for_floor(floor_level: u32) -> Vec<TrapType> {
     types
 }
 
-/// Updates the session with the generated floor.
-///
-/// This is a pure function that immutably updates the session with floor data.
-///
-/// # Type Parameters
-///
-/// * `S` - The session type
-/// * `F` - Function to update the session with floor data
-///
-/// # Arguments
-///
-/// * `session` - The current game session
-/// * `floor_level` - The generated floor level
-/// * `stairs` - The stairs placement
-/// * `items` - The item placements
-/// * `traps` - The trap placements
-/// * `update_fn` - Function that updates the session with floor data
-///
-/// # Returns
-///
-/// A tuple of (updated_session, generated_events).
 pub fn update_session_floor<S, F>(
     session: &S,
     floor_level: u32,
@@ -695,7 +484,6 @@ where
     (updated_session, events)
 }
 
-/// Simple LCG for deterministic random numbers.
 fn next_seed(seed: u64) -> u64 {
     seed.wrapping_mul(6364136223846793005).wrapping_add(1)
 }

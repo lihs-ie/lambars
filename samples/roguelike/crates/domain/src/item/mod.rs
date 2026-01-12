@@ -1,8 +1,3 @@
-//! Item domain module.
-//!
-//! This module contains item-related domain types including:
-//! - ItemIdentifier: Unique identifier for items
-
 use std::fmt;
 use uuid::Uuid;
 
@@ -10,63 +5,20 @@ use uuid::Uuid;
 // ItemIdentifier
 // =============================================================================
 
-/// A unique identifier for items in the game.
-///
-/// ItemIdentifier wraps a UUID to provide type-safe item identification.
-/// This is used for all items including weapons, armor, consumables, and materials.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::item::ItemIdentifier;
-///
-/// let identifier = ItemIdentifier::new();
-/// println!("Item: {}", identifier);
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ItemIdentifier(Uuid);
 
 impl ItemIdentifier {
-    /// Creates a new ItemIdentifier with a randomly generated UUID.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::item::ItemIdentifier;
-    ///
-    /// let identifier = ItemIdentifier::new();
-    /// ```
     #[must_use]
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
 
-    /// Creates an ItemIdentifier from an existing UUID.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::item::ItemIdentifier;
-    /// use uuid::Uuid;
-    ///
-    /// let uuid = Uuid::new_v4();
-    /// let identifier = ItemIdentifier::from_uuid(uuid);
-    /// ```
     #[must_use]
     pub const fn from_uuid(uuid: Uuid) -> Self {
         Self(uuid)
     }
 
-    /// Returns the underlying UUID.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::item::ItemIdentifier;
-    ///
-    /// let identifier = ItemIdentifier::new();
-    /// let uuid = identifier.as_uuid();
-    /// ```
     #[must_use]
     pub const fn as_uuid(&self) -> &Uuid {
         &self.0

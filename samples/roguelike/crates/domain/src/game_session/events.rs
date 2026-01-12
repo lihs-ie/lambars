@@ -1,8 +1,3 @@
-//! Domain events for game sessions.
-//!
-//! This module provides domain events that represent significant
-//! state changes in game sessions.
-
 use std::fmt;
 
 use crate::common::TurnCount;
@@ -13,65 +8,20 @@ use super::{GameIdentifier, GameOutcome};
 // RandomSeed
 // =============================================================================
 
-/// Random seed for game reproducibility.
-///
-/// This is a newtype wrapper around `u64` that provides type safety
-/// for random seeds used in game generation.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::game_session::RandomSeed;
-///
-/// let seed = RandomSeed::new(12345);
-/// assert_eq!(seed.value(), 12345);
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RandomSeed(u64);
 
 impl RandomSeed {
-    /// Creates a new random seed with the given value.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::RandomSeed;
-    ///
-    /// let seed = RandomSeed::new(42);
-    /// assert_eq!(seed.value(), 42);
-    /// ```
     #[must_use]
     pub const fn new(value: u64) -> Self {
         Self(value)
     }
 
-    /// Returns the seed value.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::RandomSeed;
-    ///
-    /// let seed = RandomSeed::new(12345);
-    /// assert_eq!(seed.value(), 12345);
-    /// ```
     #[must_use]
     pub const fn value(&self) -> u64 {
         self.0
     }
 
-    /// Creates a seed from the current system time.
-    ///
-    /// This is useful for creating non-deterministic game sessions.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::RandomSeed;
-    ///
-    /// let seed = RandomSeed::from_current_time();
-    /// // Each call will likely produce a different value
-    /// ```
     #[must_use]
     pub fn from_current_time() -> Self {
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -110,41 +60,13 @@ impl From<RandomSeed> for u64 {
 // GameStarted Event
 // =============================================================================
 
-/// Event emitted when a new game session starts.
-///
-/// This event captures the initial state of a new game, including
-/// the unique identifier and random seed for reproducibility.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::game_session::{GameStarted, GameIdentifier, RandomSeed};
-///
-/// let event = GameStarted::new(GameIdentifier::new(), RandomSeed::new(12345));
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GameStarted {
-    /// The unique identifier for this game session.
     game_identifier: GameIdentifier,
-    /// The random seed used for game generation.
     seed: RandomSeed,
 }
 
 impl GameStarted {
-    /// Creates a new game started event.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::{GameStarted, GameIdentifier, RandomSeed};
-    ///
-    /// let identifier = GameIdentifier::new();
-    /// let seed = RandomSeed::new(42);
-    /// let event = GameStarted::new(identifier, seed);
-    ///
-    /// assert_eq!(event.game_identifier(), &identifier);
-    /// assert_eq!(event.seed(), &seed);
-    /// ```
     #[must_use]
     pub const fn new(game_identifier: GameIdentifier, seed: RandomSeed) -> Self {
         Self {
@@ -153,13 +75,11 @@ impl GameStarted {
         }
     }
 
-    /// Returns the game identifier.
     #[must_use]
     pub const fn game_identifier(&self) -> &GameIdentifier {
         &self.game_identifier
     }
 
-    /// Returns the random seed.
     #[must_use]
     pub const fn seed(&self) -> &RandomSeed {
         &self.seed
@@ -180,86 +100,32 @@ impl fmt::Display for GameStarted {
 // GameEnded Event
 // =============================================================================
 
-/// Event emitted when a game session ends.
-///
-/// This event captures the final outcome of the game.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::game_session::{GameEnded, GameOutcome};
-///
-/// let event = GameEnded::new(GameOutcome::Victory);
-/// assert!(event.outcome().is_success());
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GameEnded {
-    /// The outcome of the game.
     outcome: GameOutcome,
 }
 
 impl GameEnded {
-    /// Creates a new game ended event.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::{GameEnded, GameOutcome};
-    ///
-    /// let event = GameEnded::new(GameOutcome::Defeat);
-    /// assert_eq!(event.outcome(), &GameOutcome::Defeat);
-    /// ```
     #[must_use]
     pub const fn new(outcome: GameOutcome) -> Self {
         Self { outcome }
     }
 
-    /// Returns the game outcome.
     #[must_use]
     pub const fn outcome(&self) -> &GameOutcome {
         &self.outcome
     }
 
-    /// Creates a victory event.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::{GameEnded, GameOutcome};
-    ///
-    /// let event = GameEnded::victory();
-    /// assert_eq!(event.outcome(), &GameOutcome::Victory);
-    /// ```
     #[must_use]
     pub const fn victory() -> Self {
         Self::new(GameOutcome::Victory)
     }
 
-    /// Creates a defeat event.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::{GameEnded, GameOutcome};
-    ///
-    /// let event = GameEnded::defeat();
-    /// assert_eq!(event.outcome(), &GameOutcome::Defeat);
-    /// ```
     #[must_use]
     pub const fn defeat() -> Self {
         Self::new(GameOutcome::Defeat)
     }
 
-    /// Creates an abandoned event.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::{GameEnded, GameOutcome};
-    ///
-    /// let event = GameEnded::abandoned();
-    /// assert_eq!(event.outcome(), &GameOutcome::Abandoned);
-    /// ```
     #[must_use]
     pub const fn abandoned() -> Self {
         Self::new(GameOutcome::Abandoned)
@@ -276,59 +142,22 @@ impl fmt::Display for GameEnded {
 // TurnStarted Event
 // =============================================================================
 
-/// Event emitted when a new turn begins.
-///
-/// This event marks the beginning of a turn cycle.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::game_session::TurnStarted;
-/// use roguelike_domain::common::TurnCount;
-///
-/// let event = TurnStarted::new(TurnCount::new(1));
-/// assert_eq!(event.turn().value(), 1);
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TurnStarted {
-    /// The turn number that is starting.
     turn: TurnCount,
 }
 
 impl TurnStarted {
-    /// Creates a new turn started event.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::TurnStarted;
-    /// use roguelike_domain::common::TurnCount;
-    ///
-    /// let turn = TurnCount::new(5);
-    /// let event = TurnStarted::new(turn);
-    /// assert_eq!(event.turn(), &turn);
-    /// ```
     #[must_use]
     pub const fn new(turn: TurnCount) -> Self {
         Self { turn }
     }
 
-    /// Returns the turn count.
     #[must_use]
     pub const fn turn(&self) -> &TurnCount {
         &self.turn
     }
 
-    /// Creates an event for the first turn.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::TurnStarted;
-    ///
-    /// let event = TurnStarted::first();
-    /// assert_eq!(event.turn().value(), 1);
-    /// ```
     #[must_use]
     pub const fn first() -> Self {
         Self::new(TurnCount::new(1))
@@ -345,44 +174,17 @@ impl fmt::Display for TurnStarted {
 // TurnEnded Event
 // =============================================================================
 
-/// Event emitted when a turn ends.
-///
-/// This event marks the completion of a turn cycle.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::game_session::TurnEnded;
-/// use roguelike_domain::common::TurnCount;
-///
-/// let event = TurnEnded::new(TurnCount::new(1));
-/// assert_eq!(event.turn().value(), 1);
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TurnEnded {
-    /// The turn number that is ending.
     turn: TurnCount,
 }
 
 impl TurnEnded {
-    /// Creates a new turn ended event.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::game_session::TurnEnded;
-    /// use roguelike_domain::common::TurnCount;
-    ///
-    /// let turn = TurnCount::new(10);
-    /// let event = TurnEnded::new(turn);
-    /// assert_eq!(event.turn(), &turn);
-    /// ```
     #[must_use]
     pub const fn new(turn: TurnCount) -> Self {
         Self { turn }
     }
 
-    /// Returns the turn count.
     #[must_use]
     pub const fn turn(&self) -> &TurnCount {
         &self.turn
@@ -399,101 +201,62 @@ impl fmt::Display for TurnEnded {
 // GameSessionEvent Enum
 // =============================================================================
 
-/// Unified enum for all game session domain events.
-///
-/// This enum provides a unified type for all game session events,
-/// making it easier to store and process them uniformly.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::game_session::{
-///     GameSessionEvent, GameStarted, GameEnded, GameIdentifier, RandomSeed, GameOutcome
-/// };
-///
-/// let started = GameSessionEvent::from(GameStarted::new(
-///     GameIdentifier::new(),
-///     RandomSeed::new(42)
-/// ));
-///
-/// assert!(started.is_game_started());
-/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub enum GameSessionEvent {
-    /// A new game session has started.
     Started(GameStarted),
-    /// A game session has ended.
     Ended(GameEnded),
-    /// A new turn has started.
     TurnStarted(TurnStarted),
-    /// A turn has ended.
     TurnEnded(TurnEnded),
-    /// An enemy has spawned.
     EnemySpawned(crate::enemy::EnemySpawned),
-    /// An enemy has moved.
     EnemyMoved(crate::enemy::EnemyMoved),
-    /// An enemy has been attacked.
     EnemyAttacked(crate::enemy::EnemyAttacked),
-    /// An enemy has died.
     EnemyDied(crate::enemy::EnemyDied),
-    /// A floor has been entered.
     FloorEntered(crate::floor::FloorEntered),
-    /// A tile has been explored.
     TileExplored(crate::floor::TileExplored),
-    /// A trap has been triggered.
     TrapTriggered(crate::floor::TrapTriggered),
 }
 
 impl GameSessionEvent {
-    /// Returns true if this is a game started event.
     #[must_use]
     pub const fn is_game_started(&self) -> bool {
         matches!(self, Self::Started(_))
     }
 
-    /// Returns true if this is a game ended event.
     #[must_use]
     pub const fn is_game_ended(&self) -> bool {
         matches!(self, Self::Ended(_))
     }
 
-    /// Returns true if this is a turn started event.
     #[must_use]
     pub const fn is_turn_started(&self) -> bool {
         matches!(self, Self::TurnStarted(_))
     }
 
-    /// Returns true if this is a turn ended event.
     #[must_use]
     pub const fn is_turn_ended(&self) -> bool {
         matches!(self, Self::TurnEnded(_))
     }
 
-    /// Returns true if this is an enemy spawned event.
     #[must_use]
     pub const fn is_enemy_spawned(&self) -> bool {
         matches!(self, Self::EnemySpawned(_))
     }
 
-    /// Returns true if this is an enemy moved event.
     #[must_use]
     pub const fn is_enemy_moved(&self) -> bool {
         matches!(self, Self::EnemyMoved(_))
     }
 
-    /// Returns true if this is an enemy attacked event.
     #[must_use]
     pub const fn is_enemy_attacked(&self) -> bool {
         matches!(self, Self::EnemyAttacked(_))
     }
 
-    /// Returns true if this is an enemy died event.
     #[must_use]
     pub const fn is_enemy_died(&self) -> bool {
         matches!(self, Self::EnemyDied(_))
     }
 
-    /// Returns true if this is any enemy-related event.
     #[must_use]
     pub const fn is_enemy_event(&self) -> bool {
         matches!(
@@ -505,25 +268,21 @@ impl GameSessionEvent {
         )
     }
 
-    /// Returns true if this is a floor entered event.
     #[must_use]
     pub const fn is_floor_entered(&self) -> bool {
         matches!(self, Self::FloorEntered(_))
     }
 
-    /// Returns true if this is a tile explored event.
     #[must_use]
     pub const fn is_tile_explored(&self) -> bool {
         matches!(self, Self::TileExplored(_))
     }
 
-    /// Returns true if this is a trap triggered event.
     #[must_use]
     pub const fn is_trap_triggered(&self) -> bool {
         matches!(self, Self::TrapTriggered(_))
     }
 
-    /// Returns true if this is any floor-related event.
     #[must_use]
     pub const fn is_floor_event(&self) -> bool {
         matches!(
@@ -532,7 +291,6 @@ impl GameSessionEvent {
         )
     }
 
-    /// Attempts to extract the game started event.
     #[must_use]
     pub const fn as_game_started(&self) -> Option<&GameStarted> {
         match self {
@@ -541,7 +299,6 @@ impl GameSessionEvent {
         }
     }
 
-    /// Attempts to extract the game ended event.
     #[must_use]
     pub const fn as_game_ended(&self) -> Option<&GameEnded> {
         match self {
@@ -550,7 +307,6 @@ impl GameSessionEvent {
         }
     }
 
-    /// Attempts to extract the turn started event.
     #[must_use]
     pub const fn as_turn_started(&self) -> Option<&TurnStarted> {
         match self {
@@ -559,7 +315,6 @@ impl GameSessionEvent {
         }
     }
 
-    /// Attempts to extract the turn ended event.
     #[must_use]
     pub const fn as_turn_ended(&self) -> Option<&TurnEnded> {
         match self {
@@ -568,7 +323,6 @@ impl GameSessionEvent {
         }
     }
 
-    /// Attempts to extract the enemy spawned event.
     #[must_use]
     pub const fn as_enemy_spawned(&self) -> Option<&crate::enemy::EnemySpawned> {
         match self {
@@ -577,7 +331,6 @@ impl GameSessionEvent {
         }
     }
 
-    /// Attempts to extract the enemy moved event.
     #[must_use]
     pub const fn as_enemy_moved(&self) -> Option<&crate::enemy::EnemyMoved> {
         match self {
@@ -586,7 +339,6 @@ impl GameSessionEvent {
         }
     }
 
-    /// Attempts to extract the enemy attacked event.
     #[must_use]
     pub const fn as_enemy_attacked(&self) -> Option<&crate::enemy::EnemyAttacked> {
         match self {
@@ -595,7 +347,6 @@ impl GameSessionEvent {
         }
     }
 
-    /// Attempts to extract the enemy died event.
     #[must_use]
     pub const fn as_enemy_died(&self) -> Option<&crate::enemy::EnemyDied> {
         match self {
@@ -604,7 +355,6 @@ impl GameSessionEvent {
         }
     }
 
-    /// Attempts to extract the floor entered event.
     #[must_use]
     pub const fn as_floor_entered(&self) -> Option<&crate::floor::FloorEntered> {
         match self {
@@ -613,7 +363,6 @@ impl GameSessionEvent {
         }
     }
 
-    /// Attempts to extract the tile explored event.
     #[must_use]
     pub const fn as_tile_explored(&self) -> Option<&crate::floor::TileExplored> {
         match self {
@@ -622,7 +371,6 @@ impl GameSessionEvent {
         }
     }
 
-    /// Attempts to extract the trap triggered event.
     #[must_use]
     pub const fn as_trap_triggered(&self) -> Option<&crate::floor::TrapTriggered> {
         match self {

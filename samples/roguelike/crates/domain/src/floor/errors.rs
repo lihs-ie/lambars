@@ -1,7 +1,3 @@
-//! Error types for the floor domain module.
-//!
-//! This module provides error types specific to floor and dungeon operations.
-
 use std::error::Error;
 use std::fmt;
 
@@ -9,121 +5,56 @@ use std::fmt;
 // FloorError
 // =============================================================================
 
-/// Error types for floor operations.
-///
-/// This enum represents various errors that can occur when working with
-/// dungeon floors, rooms, corridors, and tiles.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::floor::FloorError;
-///
-/// let error = FloorError::floor_not_found(42);
-/// assert!(format!("{}", error).contains("42"));
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FloorError {
-    /// The requested floor was not found.
     FloorNotFound {
-        /// The identifier of the floor that was not found.
         floor_identifier: u32,
     },
 
-    /// A position was outside the floor bounds.
     PositionOutOfBounds {
-        /// The position that was out of bounds.
         position: (i32, i32),
-        /// The floor bounds (width, height).
         bounds: (u32, u32),
     },
 
-    /// A tile is not walkable.
     TileNotWalkable {
-        /// The position of the non-walkable tile.
         position: (i32, i32),
-        /// The type of tile that blocked movement.
         tile_type: String,
     },
 
-    /// No stairs exist at the given position.
     NoStairsAtPosition {
-        /// The position where stairs were expected.
         position: (i32, i32),
     },
 
-    /// Rooms are not connected.
     RoomsNotConnected,
 
-    /// Invalid floor generation parameters or result.
     InvalidFloorGeneration {
-        /// The reason for the invalid generation.
         reason: String,
     },
 
-    /// Player is not at stairs position.
     NotAtStairs {
-        /// The player's current position.
         player_position: (i32, i32),
     },
 
-    /// No trap exists at the position.
     NoTrapAtPosition {
-        /// The position where a trap was expected.
         position: (i32, i32),
     },
 
-    /// Trap has already been disarmed.
     TrapAlreadyDisarmed {
-        /// The position of the disarmed trap.
         position: (i32, i32),
     },
 }
 
 impl FloorError {
-    /// Creates a FloorNotFound error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::floor::FloorError;
-    ///
-    /// let error = FloorError::floor_not_found(5);
-    /// assert!(matches!(error, FloorError::FloorNotFound { floor_identifier: 5 }));
-    /// ```
     #[must_use]
     pub const fn floor_not_found(floor_identifier: u32) -> Self {
         Self::FloorNotFound { floor_identifier }
     }
 
-    /// Creates a PositionOutOfBounds error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::floor::FloorError;
-    ///
-    /// let error = FloorError::position_out_of_bounds((100, 50), (80, 40));
-    /// assert!(matches!(
-    ///     error,
-    ///     FloorError::PositionOutOfBounds { position: (100, 50), bounds: (80, 40) }
-    /// ));
-    /// ```
     #[must_use]
     pub const fn position_out_of_bounds(position: (i32, i32), bounds: (u32, u32)) -> Self {
         Self::PositionOutOfBounds { position, bounds }
     }
 
-    /// Creates a TileNotWalkable error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::floor::FloorError;
-    ///
-    /// let error = FloorError::tile_not_walkable((5, 5), "Wall");
-    /// assert!(matches!(error, FloorError::TileNotWalkable { .. }));
-    /// ```
     #[must_use]
     pub fn tile_not_walkable(position: (i32, i32), tile_type: impl Into<String>) -> Self {
         Self::TileNotWalkable {
@@ -132,46 +63,16 @@ impl FloorError {
         }
     }
 
-    /// Creates a NoStairsAtPosition error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::floor::FloorError;
-    ///
-    /// let error = FloorError::no_stairs_at_position((10, 10));
-    /// assert!(matches!(error, FloorError::NoStairsAtPosition { position: (10, 10) }));
-    /// ```
     #[must_use]
     pub const fn no_stairs_at_position(position: (i32, i32)) -> Self {
         Self::NoStairsAtPosition { position }
     }
 
-    /// Creates a RoomsNotConnected error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::floor::FloorError;
-    ///
-    /// let error = FloorError::rooms_not_connected();
-    /// assert!(matches!(error, FloorError::RoomsNotConnected));
-    /// ```
     #[must_use]
     pub const fn rooms_not_connected() -> Self {
         Self::RoomsNotConnected
     }
 
-    /// Creates an InvalidFloorGeneration error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::floor::FloorError;
-    ///
-    /// let error = FloorError::invalid_floor_generation("Floor too small");
-    /// assert!(matches!(error, FloorError::InvalidFloorGeneration { .. }));
-    /// ```
     #[must_use]
     pub fn invalid_floor_generation(reason: impl Into<String>) -> Self {
         Self::InvalidFloorGeneration {
@@ -179,17 +80,6 @@ impl FloorError {
         }
     }
 
-    /// Creates a NotAtStairs error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::floor::FloorError;
-    /// use roguelike_domain::common::Position;
-    ///
-    /// let error = FloorError::not_at_stairs(Position::new(5, 5));
-    /// assert!(matches!(error, FloorError::NotAtStairs { .. }));
-    /// ```
     #[must_use]
     pub fn not_at_stairs(position: crate::common::Position) -> Self {
         Self::NotAtStairs {
@@ -197,17 +87,6 @@ impl FloorError {
         }
     }
 
-    /// Creates a NoTrapAtPosition error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::floor::FloorError;
-    /// use roguelike_domain::common::Position;
-    ///
-    /// let error = FloorError::no_trap_at_position(Position::new(10, 10));
-    /// assert!(matches!(error, FloorError::NoTrapAtPosition { .. }));
-    /// ```
     #[must_use]
     pub fn no_trap_at_position(position: crate::common::Position) -> Self {
         Self::NoTrapAtPosition {
@@ -215,17 +94,6 @@ impl FloorError {
         }
     }
 
-    /// Creates a TrapAlreadyDisarmed error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::floor::FloorError;
-    /// use roguelike_domain::common::Position;
-    ///
-    /// let error = FloorError::trap_already_disarmed(Position::new(15, 15));
-    /// assert!(matches!(error, FloorError::TrapAlreadyDisarmed { .. }));
-    /// ```
     #[must_use]
     pub fn trap_already_disarmed(position: crate::common::Position) -> Self {
         Self::TrapAlreadyDisarmed {
@@ -233,10 +101,6 @@ impl FloorError {
         }
     }
 
-    /// Returns true if this is a recoverable error.
-    ///
-    /// Position-related errors are generally recoverable as they indicate
-    /// invalid user input that can be corrected.
     #[must_use]
     pub const fn is_recoverable(&self) -> bool {
         match self {
@@ -252,7 +116,6 @@ impl FloorError {
         }
     }
 
-    /// Returns true if this is a position-related error.
     #[must_use]
     pub const fn is_position_error(&self) -> bool {
         matches!(
@@ -266,7 +129,6 @@ impl FloorError {
         )
     }
 
-    /// Returns true if this is a generation-related error.
     #[must_use]
     pub const fn is_generation_error(&self) -> bool {
         matches!(

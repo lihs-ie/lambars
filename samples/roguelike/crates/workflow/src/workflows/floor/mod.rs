@@ -1,38 +1,3 @@
-//! Floor workflow module.
-//!
-//! This module provides workflow implementations for managing dungeon floors
-//! using functional programming patterns with `AsyncIO`.
-//!
-//! # Overview
-//!
-//! The floor workflow handles:
-//! - Generating new floors (rooms, corridors, stairs, items, traps)
-//! - Descending to the next floor
-//! - Updating tile visibility based on field of view
-//! - Triggering and processing trap effects
-//!
-//! # Architecture
-//!
-//! All workflows follow the "IO at the Edges" pattern:
-//! - Pure domain logic is isolated in dedicated functions
-//! - IO operations (cache, event store) are deferred via `AsyncIO`
-//! - Dependencies are injected via higher-order functions
-//!
-//! # Examples
-//!
-//! ```ignore
-//! use roguelike_workflow::workflows::floor::{
-//!     generate_floor, GenerateFloorCommand,
-//! };
-//!
-//! // Create the workflow function with dependencies
-//! let workflow = generate_floor(&cache, &event_store, cache_ttl);
-//!
-//! // Execute the workflow
-//! let command = GenerateFloorCommand::new(game_identifier, 1);
-//! let result = workflow(command).run_async().await;
-//! ```
-
 mod commands;
 mod descend_floor;
 mod generate_floor;

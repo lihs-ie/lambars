@@ -1,30 +1,3 @@
-//! SpawnEnemies workflow implementation.
-//!
-//! This module provides the workflow for spawning enemies on a floor.
-//! It follows the "IO at the Edges" pattern, separating pure domain logic
-//! from IO operations.
-//!
-//! # Workflow Steps
-//!
-//! 1. [IO] Load session from cache
-//! 2. [Pure] Get spawn configuration for floor level
-//! 3. [Pure] Find valid spawn points on the floor
-//! 4. [Pure] Generate enemy instances
-//! 5. [Pure] Add enemies to session using fold
-//! 6. [Pure] Generate EnemySpawned events
-//! 7. [IO] Update cache
-//! 8. [IO] Append events to event store
-//!
-//! # Examples
-//!
-//! ```ignore
-//! use roguelike_workflow::workflows::enemy::{spawn_enemies, SpawnEnemiesCommand};
-//!
-//! let workflow = spawn_enemies(&cache, &event_store, cache_ttl);
-//! let command = SpawnEnemiesCommand::new(game_identifier, 5);
-//! let result = workflow(command).run_async().await;
-//! ```
-
 use std::time::Duration;
 
 use lambars::effect::AsyncIO;
@@ -40,31 +13,21 @@ use crate::ports::{EventStore, SessionCache, WorkflowResult};
 // Workflow Configuration
 // =============================================================================
 
-/// Default cache time-to-live for game sessions.
 const DEFAULT_CACHE_TIME_TO_LIVE: Duration = Duration::from_secs(300); // 5 minutes
 
 // =============================================================================
 // SpawnConfiguration
 // =============================================================================
 
-/// Configuration for enemy spawning on a floor.
-///
-/// This structure defines the parameters for generating enemies
-/// based on the floor level.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpawnConfiguration {
-    /// Minimum number of enemies to spawn.
     min_enemies: u32,
-    /// Maximum number of enemies to spawn.
     max_enemies: u32,
-    /// Enemy types that can spawn on this floor.
     allowed_types: Vec<EnemyType>,
-    /// Whether boss enemies can spawn.
     allow_bosses: bool,
 }
 
 impl SpawnConfiguration {
-    /// Creates a new spawn configuration.
     #[must_use]
     pub const fn new(
         min_enemies: u32,
@@ -80,25 +43,21 @@ impl SpawnConfiguration {
         }
     }
 
-    /// Returns the minimum number of enemies.
     #[must_use]
     pub const fn min_enemies(&self) -> u32 {
         self.min_enemies
     }
 
-    /// Returns the maximum number of enemies.
     #[must_use]
     pub const fn max_enemies(&self) -> u32 {
         self.max_enemies
     }
 
-    /// Returns the allowed enemy types.
     #[must_use]
     pub fn allowed_types(&self) -> &[EnemyType] {
         &self.allowed_types
     }
 
-    /// Returns whether bosses can spawn.
     #[must_use]
     pub const fn allow_bosses(&self) -> bool {
         self.allow_bosses
@@ -109,24 +68,15 @@ impl SpawnConfiguration {
 // EnemyInstance
 // =============================================================================
 
-/// A spawned enemy instance with all its properties.
-///
-/// This structure represents a fully configured enemy ready to be
-/// added to the game session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnemyInstance {
-    /// The unique identifier for this enemy.
     identifier: EntityIdentifier,
-    /// The type of enemy.
     enemy_type: EnemyType,
-    /// The AI behavior pattern.
     behavior: AiBehavior,
-    /// The spawn position.
     position: Position,
 }
 
 impl EnemyInstance {
-    /// Creates a new enemy instance.
     #[must_use]
     pub const fn new(
         identifier: EntityIdentifier,
@@ -142,25 +92,21 @@ impl EnemyInstance {
         }
     }
 
-    /// Returns the enemy identifier.
     #[must_use]
     pub const fn identifier(&self) -> EntityIdentifier {
         self.identifier
     }
 
-    /// Returns the enemy type.
     #[must_use]
     pub const fn enemy_type(&self) -> EnemyType {
         self.enemy_type
     }
 
-    /// Returns the AI behavior.
     #[must_use]
     pub const fn behavior(&self) -> AiBehavior {
         self.behavior
     }
 
-    /// Returns the spawn position.
     #[must_use]
     pub const fn position(&self) -> Position {
         self.position
@@ -171,27 +117,6 @@ impl EnemyInstance {
 // SpawnEnemies Workflow
 // =============================================================================
 
-/// Creates a workflow function for spawning enemies on a floor.
-///
-/// This function returns a closure that spawns enemies based on floor level
-/// configuration. It uses higher-order functions to inject dependencies,
-/// enabling pure functional composition and easy testing.
-///
-/// # Type Parameters
-///
-/// * `C` - Cache type implementing `SessionCache`
-/// * `E` - Event store type implementing `EventStore`
-///
-/// # Arguments
-///
-/// * `cache` - The session cache for fast access
-/// * `event_store` - The event store for event sourcing
-/// * `cache_ttl` - Time-to-live for cached sessions
-///
-/// # Returns
-///
-/// A function that takes a `SpawnEnemiesCommand` and returns an `AsyncIO`
-/// that produces the updated game session or an error.
 pub fn spawn_enemies<'a, C, E>(
     cache: &'a C,
     event_store: &'a E,
@@ -240,7 +165,6 @@ where
     }
 }
 
-/// Creates a workflow function with default cache TTL.
 pub fn spawn_enemies_with_default_ttl<'a, C, E>(
     cache: &'a C,
     event_store: &'a E,
@@ -256,7 +180,6 @@ where
 // Pure Functions
 // =============================================================================
 
-/// Pure function that performs the entire enemy spawning logic.
 fn spawn_enemies_pure<S: Clone>(
     _session: &S,
     _floor_level: u32,
@@ -268,28 +191,6 @@ fn spawn_enemies_pure<S: Clone>(
     ))
 }
 
-/// Gets the spawn configuration for a given floor level.
-///
-/// This is a pure function that determines what enemies can spawn
-/// based on the floor level.
-///
-/// # Arguments
-///
-/// * `floor_level` - The current floor level (1-indexed)
-///
-/// # Returns
-///
-/// The spawn configuration for the given floor level.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::enemy::get_spawn_configuration;
-///
-/// let config = get_spawn_configuration(1);
-/// assert!(config.min_enemies() >= 1);
-/// assert!(!config.allow_bosses()); // No bosses on floor 1
-/// ```
 #[must_use]
 pub fn get_spawn_configuration(floor_level: u32) -> SpawnConfiguration {
     let (min_enemies, max_enemies) = calculate_enemy_count_range(floor_level);
@@ -299,7 +200,6 @@ pub fn get_spawn_configuration(floor_level: u32) -> SpawnConfiguration {
     SpawnConfiguration::new(min_enemies, max_enemies, allowed_types, allow_bosses)
 }
 
-/// Calculates the min/max enemy count based on floor level.
 fn calculate_enemy_count_range(floor_level: u32) -> (u32, u32) {
     let base_min = 2;
     let base_max = 5;
@@ -308,7 +208,6 @@ fn calculate_enemy_count_range(floor_level: u32) -> (u32, u32) {
     (base_min + level_bonus, base_max + level_bonus * 2)
 }
 
-/// Determines which enemy types can spawn on a floor.
 fn determine_allowed_enemy_types(floor_level: u32) -> Vec<EnemyType> {
     match floor_level {
         1..=3 => vec![EnemyType::Slime, EnemyType::Bat, EnemyType::Goblin],
@@ -342,40 +241,6 @@ fn determine_allowed_enemy_types(floor_level: u32) -> Vec<EnemyType> {
     }
 }
 
-/// Finds valid spawn points on a floor.
-///
-/// This is a pure function that identifies positions where enemies
-/// can be spawned.
-///
-/// # Type Parameters
-///
-/// * `F` - A function that checks if a position is valid for spawning
-///
-/// # Arguments
-///
-/// * `floor_bounds` - The floor dimensions (width, height)
-/// * `count` - The number of spawn points to find
-/// * `is_valid_spawn` - Function to check if a position is valid
-/// * `seed` - Random seed for reproducible spawning
-///
-/// # Returns
-///
-/// A vector of valid spawn positions.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::enemy::find_valid_spawn_points;
-/// use roguelike_domain::common::Position;
-///
-/// let spawn_points = find_valid_spawn_points(
-///     (80, 40),
-///     5,
-///     |pos| pos.x() > 5 && pos.y() > 5,
-///     12345,
-/// );
-/// assert!(spawn_points.len() <= 5);
-/// ```
 #[must_use]
 pub fn find_valid_spawn_points<F>(
     floor_bounds: (u32, u32),
@@ -417,30 +282,6 @@ where
     positions
 }
 
-/// Generates enemy instances based on configuration and spawn points.
-///
-/// This is a pure function that creates fully configured enemy instances.
-///
-/// # Arguments
-///
-/// * `configuration` - The spawn configuration
-/// * `spawn_points` - Available spawn positions
-/// * `seed` - Random seed for reproducible generation
-///
-/// # Returns
-///
-/// A vector of enemy instances ready to be added to the session.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_workflow::workflows::enemy::{generate_enemies, get_spawn_configuration};
-/// use roguelike_domain::common::Position;
-///
-/// let config = get_spawn_configuration(5);
-/// let spawn_points = vec![Position::new(10, 10), Position::new(20, 20)];
-/// let enemies = generate_enemies(&config, &spawn_points, 12345);
-/// ```
 #[must_use]
 pub fn generate_enemies(
     configuration: &SpawnConfiguration,
@@ -474,7 +315,6 @@ pub fn generate_enemies(
     enemies
 }
 
-/// Determines the default AI behavior for an enemy type.
 fn determine_default_behavior(enemy_type: EnemyType) -> AiBehavior {
     match enemy_type {
         EnemyType::Goblin | EnemyType::Orc | EnemyType::Dragon => AiBehavior::Aggressive,
@@ -485,35 +325,6 @@ fn determine_default_behavior(enemy_type: EnemyType) -> AiBehavior {
     }
 }
 
-/// Adds enemies to a session using fold.
-///
-/// This is a pure function that immutably updates the session
-/// with new enemies.
-///
-/// # Type Parameters
-///
-/// * `S` - The session type
-/// * `F` - Function to add a single enemy to the session
-///
-/// # Arguments
-///
-/// * `session` - The current game session
-/// * `enemies` - The enemies to add
-/// * `add_enemy` - Function that adds a single enemy to the session
-///
-/// # Returns
-///
-/// A tuple of (updated_session, generated_events).
-///
-/// # Examples
-///
-/// ```ignore
-/// let (updated_session, events) = add_enemies_to_session(
-///     &session,
-///     &enemies,
-///     |s, e| s.with_enemy(e),
-/// );
-/// ```
 pub fn add_enemies_to_session<S, F>(
     session: &S,
     enemies: &[EnemyInstance],

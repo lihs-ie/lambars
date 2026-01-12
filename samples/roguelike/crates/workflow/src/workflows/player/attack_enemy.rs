@@ -1,32 +1,3 @@
-//! AttackEnemy workflow implementation.
-//!
-//! This module provides the workflow for attacking an enemy.
-//! It follows the "IO at the Edges" pattern, separating pure domain logic
-//! from IO operations.
-//!
-//! # Workflow Steps
-//!
-//! 1. [IO] Load session from cache
-//! 2. [Pure] Validate target is in range and attackable
-//! 3. [Pure] Calculate damage (using Semigroup for modifiers)
-//! 4. [Pure] Apply damage to enemy
-//! 5. [Pure] Check if enemy died
-//! 6. [Pure] Award experience if killed
-//! 7. [Pure] Check for level up
-//! 8. [Pure] Generate events (PlayerAttacked, EnemyDamaged, EnemyDied, etc.)
-//! 9. [IO] Update cache
-//! 10. [IO] Append events to event store
-//!
-//! # Examples
-//!
-//! ```ignore
-//! use roguelike_workflow::workflows::player::{attack_enemy, AttackEnemyCommand};
-//!
-//! let workflow = attack_enemy(&cache, &event_store);
-//! let command = AttackEnemyCommand::new(game_identifier, target);
-//! let result = workflow(command).run_async().await;
-//! ```
-
 use std::time::Duration;
 
 use lambars::effect::AsyncIO;
@@ -46,46 +17,14 @@ use crate::ports::{EventStore, SessionCache, WorkflowResult};
 // Workflow Configuration
 // =============================================================================
 
-/// Default cache time-to-live for game sessions.
 const DEFAULT_CACHE_TIME_TO_LIVE: Duration = Duration::from_secs(300); // 5 minutes
 
-/// Default attack range for melee attacks.
 const DEFAULT_MELEE_RANGE: u32 = 1;
 
 // =============================================================================
 // AttackEnemy Workflow
 // =============================================================================
 
-/// Creates a workflow function for attacking an enemy.
-///
-/// This function returns a closure that executes an attack against an enemy.
-/// It uses higher-order functions to inject dependencies, enabling pure
-/// functional composition and easy testing.
-///
-/// # Type Parameters
-///
-/// * `C` - Cache type implementing `SessionCache`
-/// * `E` - Event store type implementing `EventStore`
-///
-/// # Arguments
-///
-/// * `cache` - The session cache for fast access
-/// * `event_store` - The event store for event sourcing
-///
-/// # Returns
-///
-/// A function that takes an `AttackEnemyCommand` and returns an `AsyncIO`
-/// that produces the updated game session or an error.
-///
-/// # Examples
-///
-/// ```ignore
-/// use roguelike_workflow::workflows::player::{attack_enemy, AttackEnemyCommand};
-///
-/// let workflow = attack_enemy(&cache, &event_store);
-/// let command = AttackEnemyCommand::new(game_identifier, target);
-/// let result = workflow(command).run_async().await;
-/// ```
 pub fn attack_enemy<'a, C, E>(
     cache: &'a C,
     event_store: &'a E,
@@ -162,12 +101,10 @@ where
 // Step Functions (Pure)
 // =============================================================================
 
-/// Extracts attack and defense stats for damage calculation.
 fn extract_combat_stats(attack: Attack, defense: Defense) -> (Attack, Defense) {
     (attack, defense)
 }
 
-/// Validates attack range and returns combat stats if valid.
 fn validate_and_get_stats(
     attacker_position: (i32, i32),
     target_position: (i32, i32),
@@ -179,13 +116,11 @@ fn validate_and_get_stats(
         .map_err(|error| WorkflowError::repository("attack_validation", error.to_string()))
 }
 
-/// Calculates damage from combat stats.
 fn calculate_damage_from_stats(stats: (Attack, Defense), modifiers: &[DamageModifier]) -> Damage {
     let (attack, defense) = stats;
     calculate_damage(attack, defense, modifiers)
 }
 
-/// Creates attack result with damage and events.
 fn create_attack_result<S: Clone>(
     session: S,
     target: &EntityIdentifier,
@@ -198,42 +133,6 @@ fn create_attack_result<S: Clone>(
     (session, events, damage)
 }
 
-/// Pure function that performs the attack enemy logic using `pipe!` macro.
-///
-/// This function encapsulates all pure domain logic for attacking:
-/// - Validates target is in range
-/// - Calculates damage (using Monoid for damage modifiers)
-/// - Applies damage to enemy
-/// - Checks for death
-/// - Generates events
-///
-/// # Arguments
-///
-/// * `session` - The current game session
-/// * `attacker_position` - The attacker's position
-/// * `target_position` - The target's position
-/// * `base_attack` - The attacker's attack stat
-/// * `target_defense` - The target's defense stat
-/// * `modifiers` - Damage modifiers to apply
-/// * `target` - The target enemy identifier
-///
-/// # Returns
-///
-/// A result containing the updated session and events, or an error.
-///
-/// # Example
-///
-/// ```ignore
-/// let result = attack_enemy_pure(
-///     session,
-///     player_pos,
-///     enemy_pos,
-///     player_attack,
-///     enemy_defense,
-///     &modifiers,
-///     &target_id,
-/// );
-/// ```
 pub fn attack_enemy_pure<S>(
     session: S,
     attacker_position: (i32, i32),
@@ -271,19 +170,6 @@ where
     )
 }
 
-/// Validates that a target is attackable.
-///
-/// This is a pure function that checks if the target can be attacked.
-///
-/// # Arguments
-///
-/// * `attacker_position` - The attacker's position
-/// * `target_position` - The target's position
-/// * `attack_range` - The maximum attack range
-///
-/// # Returns
-///
-/// `Ok(())` if the target is in range, or a `CombatError`.
 pub fn validate_attack_target(
     attacker_position: (i32, i32),
     target_position: (i32, i32),
@@ -302,16 +188,6 @@ pub fn validate_attack_target(
     Ok(())
 }
 
-/// Calculates the Manhattan distance between two positions.
-///
-/// # Arguments
-///
-/// * `from` - The starting position
-/// * `to` - The ending position
-///
-/// # Returns
-///
-/// The Manhattan distance as a u32.
 #[must_use]
 pub fn calculate_manhattan_distance(from: (i32, i32), to: (i32, i32)) -> u32 {
     let dx = (from.0 - to.0).unsigned_abs();
@@ -319,20 +195,6 @@ pub fn calculate_manhattan_distance(from: (i32, i32), to: (i32, i32)) -> u32 {
     dx + dy
 }
 
-/// Calculates damage dealt to an enemy.
-///
-/// Uses Semigroup semantics to combine damage modifiers.
-/// The base damage formula is: `attack - defense` (minimum 1).
-///
-/// # Arguments
-///
-/// * `base_attack` - The attacker's attack stat
-/// * `target_defense` - The target's defense stat
-/// * `modifiers` - A slice of damage modifiers to apply
-///
-/// # Returns
-///
-/// The final damage amount.
 #[must_use]
 pub fn calculate_damage(
     base_attack: Attack,
@@ -355,46 +217,16 @@ pub fn calculate_damage(
     }
 }
 
-/// Combines multiple damage modifiers using Monoid semantics.
-///
-/// This creates a single modifier that applies all effects in sequence.
-///
-/// # Arguments
-///
-/// * `modifiers` - A slice of damage modifiers to combine
-///
-/// # Returns
-///
-/// A combined damage modifier (identity if slice is empty).
 #[must_use]
 pub fn combine_damage_modifiers(modifiers: &[DamageModifier]) -> DamageModifier {
     DamageModifier::combine_all(modifiers.iter().copied())
 }
 
-/// Checks if an entity is dead based on their health.
-///
-/// # Arguments
-///
-/// * `health` - The entity's current health
-///
-/// # Returns
-///
-/// `true` if health is 0, `false` otherwise.
 #[must_use]
 pub const fn is_entity_dead(health: u32) -> bool {
     health == 0
 }
 
-/// Creates a PlayerAttacked event.
-///
-/// # Arguments
-///
-/// * `target` - The target entity identifier
-/// * `damage` - The damage dealt
-///
-/// # Returns
-///
-/// A `PlayerAttacked` event.
 #[must_use]
 pub fn create_player_attacked_event(target: &EntityIdentifier, damage: Damage) -> PlayerAttacked {
     PlayerAttacked::new(PlayerEntityIdentifier::new(target.to_string()), damage)

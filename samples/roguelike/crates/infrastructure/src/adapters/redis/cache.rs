@@ -1,33 +1,3 @@
-//! Redis session cache implementation.
-//!
-//! This module provides a Redis-based implementation of the [`SessionCache`] port,
-//! using JSON serialization for game session data.
-//!
-//! # Examples
-//!
-//! ```rust,ignore
-//! use roguelike_infrastructure::adapters::redis::{RedisConfig, RedisConnectionFactory, RedisSessionCache};
-//! use roguelike_workflow::ports::SessionCache;
-//! use std::time::Duration;
-//!
-//! let config = RedisConfig::with_url("redis://localhost:6379")
-//!     .with_key_prefix("dev:roguelike:");
-//! let connection = RedisConnectionFactory::create_client(&config)?;
-//! let cache = RedisSessionCache::new(connection);
-//!
-//! // Set a session with TTL
-//! let session = CachedGameSession { /* ... */ };
-//! cache.set(&identifier, &session, Duration::from_secs(300)).run_async().await;
-//!
-//! // Get a session
-//! if let Some(session) = cache.get(&identifier).run_async().await {
-//!     // Use the session
-//! }
-//!
-//! // Invalidate a session
-//! cache.invalidate(&identifier).run_async().await;
-//! ```
-
 use std::time::Duration;
 
 use lambars::effect::AsyncIO;
@@ -42,50 +12,20 @@ use super::RedisConnection;
 // CachedGameSession
 // =============================================================================
 
-/// A serializable representation of a game session for caching.
-///
-/// This structure contains the essential data needed to restore a game session
-/// from cache. It is designed to be lightweight and serializable using JSON.
-///
-/// # Examples
-///
-/// ```rust
-/// use roguelike_infrastructure::adapters::redis::CachedGameSession;
-///
-/// let session = CachedGameSession {
-///     game_identifier: "550e8400-e29b-41d4-a716-446655440000".to_string(),
-///     player_identifier: "player-123".to_string(),
-///     current_floor_level: 5,
-///     turn_count: 150,
-///     status: "InProgress".to_string(),
-///     random_seed: 42,
-///     event_sequence: 75,
-/// };
-///
-/// // Serialize to JSON
-/// let json = serde_json::to_string(&session).unwrap();
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CachedGameSession {
-    /// The unique identifier of the game session.
     pub game_identifier: String,
 
-    /// The unique identifier of the player.
     pub player_identifier: String,
 
-    /// The current floor level the player is on.
     pub current_floor_level: u32,
 
-    /// The total number of turns elapsed in the game.
     pub turn_count: u64,
 
-    /// The current status of the game session (e.g., "InProgress", "Completed").
     pub status: String,
 
-    /// The random seed used for deterministic game generation.
     pub random_seed: u64,
 
-    /// The current event sequence number for event sourcing.
     pub event_sequence: u64,
 }
 
@@ -93,34 +33,8 @@ pub struct CachedGameSession {
 // RedisSessionCache
 // =============================================================================
 
-/// A Redis-based implementation of the [`SessionCache`] port.
-///
-/// This cache stores game sessions in Redis using JSON serialization.
-/// Keys are formatted as `{prefix}session:{game_identifier}`.
-///
-/// # Thread Safety
-///
-/// `RedisSessionCache` is `Clone`, `Send`, and `Sync`, allowing it to be shared
-/// safely across multiple async tasks.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// use roguelike_infrastructure::adapters::redis::{RedisConfig, RedisConnectionFactory, RedisSessionCache};
-/// use roguelike_workflow::ports::SessionCache;
-/// use std::time::Duration;
-///
-/// let config = RedisConfig::with_url("redis://localhost:6379");
-/// let connection = RedisConnectionFactory::create_client(&config)?;
-/// let cache = RedisSessionCache::new(connection);
-///
-/// // Use the cache
-/// let identifier = GameIdentifier::new();
-/// cache.invalidate(&identifier).run_async().await;
-/// ```
 #[derive(Clone, Debug)]
 pub struct RedisSessionCache {
-    /// The Redis connection used for cache operations.
     connection: RedisConnection,
 }
 
@@ -129,39 +43,11 @@ pub struct RedisSessionCache {
 // =============================================================================
 
 impl RedisSessionCache {
-    /// Creates a new `RedisSessionCache` with the given connection.
-    ///
-    /// # Arguments
-    ///
-    /// * `connection` - The Redis connection to use for cache operations.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// use roguelike_infrastructure::adapters::redis::{RedisConnection, RedisSessionCache};
-    ///
-    /// let connection = /* create connection */;
-    /// let cache = RedisSessionCache::new(connection);
-    /// ```
     #[must_use]
     pub fn new(connection: RedisConnection) -> Self {
         Self { connection }
     }
 
-    /// Formats a Redis key for the given game identifier.
-    ///
-    /// The key format is `{prefix}session:{game_identifier}`.
-    ///
-    /// # Arguments
-    ///
-    /// * `identifier` - The game session identifier.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let key = cache.session_key(&identifier);
-    /// // e.g., "dev:roguelike:session:550e8400-e29b-41d4-a716-446655440000"
-    /// ```
     #[must_use]
     fn session_key(&self, identifier: &GameIdentifier) -> String {
         self.connection

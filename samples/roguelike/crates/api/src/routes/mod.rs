@@ -1,8 +1,3 @@
-//! Routing definitions for the roguelike API.
-//!
-//! This module defines all API routes and configures the Axum router
-//! with handlers, middleware, and state.
-
 use axum::Router;
 use axum::routing::{get, post};
 use tower_http::cors::{Any, CorsLayer};
@@ -17,36 +12,6 @@ use roguelike_workflow::ports::{EventStore, GameSessionRepository, RandomGenerat
 // Router Creation
 // =============================================================================
 
-/// Creates the main API router with all routes and middleware.
-///
-/// # Type Parameters
-///
-/// - `Repository` - Game session repository implementation
-/// - `Cache` - Session cache implementation
-/// - `Events` - Event store implementation
-/// - `Random` - Random generator implementation
-///
-/// # Arguments
-///
-/// * `state` - Application state containing all dependencies
-///
-/// # Returns
-///
-/// A configured Axum router ready to serve requests.
-///
-/// # Examples
-///
-/// ```ignore
-/// use roguelike_api::routes::create_router;
-/// use roguelike_api::state::AppState;
-///
-/// let state = AppState::new(repository, cache, event_store, random);
-/// let router = create_router(state);
-///
-/// // Serve on port 3000
-/// let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
-/// axum::serve(listener, router).await?;
-/// ```
 pub fn create_router<Repository, Cache, Events, Random>(
     state: AppState<Repository, Cache, Events, Random>,
 ) -> Router
@@ -120,10 +85,6 @@ where
         .with_state(state)
 }
 
-/// Creates the CORS layer configuration.
-///
-/// This configures Cross-Origin Resource Sharing for the API.
-/// In production, you should restrict origins to specific domains.
 fn create_cors_layer() -> CorsLayer {
     CorsLayer::new()
         .allow_origin(Any)

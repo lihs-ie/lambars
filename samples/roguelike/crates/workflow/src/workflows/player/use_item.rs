@@ -1,30 +1,3 @@
-//! UseItem workflow implementation.
-//!
-//! This module provides the workflow for using an item from inventory.
-//! It follows the "IO at the Edges" pattern, separating pure domain logic
-//! from IO operations.
-//!
-//! # Workflow Steps
-//!
-//! 1. [IO] Load session from cache
-//! 2. [Pure] Find item in inventory
-//! 3. [Pure] Validate item is usable
-//! 4. [Pure] Apply item effect
-//! 5. [Pure] Remove consumable from inventory (if applicable)
-//! 6. [Pure] Generate ItemUsed event
-//! 7. [IO] Update cache
-//! 8. [IO] Append events to event store
-//!
-//! # Examples
-//!
-//! ```ignore
-//! use roguelike_workflow::workflows::player::{use_item, UseItemCommand};
-//!
-//! let workflow = use_item(&cache, &event_store);
-//! let command = UseItemCommand::new(game_identifier, item_identifier);
-//! let result = workflow(command).run_async().await;
-//! ```
-
 use std::time::Duration;
 
 use lambars::effect::AsyncIO;
@@ -41,60 +14,25 @@ use crate::ports::{EventStore, SessionCache, WorkflowResult};
 // Workflow Configuration
 // =============================================================================
 
-/// Default cache time-to-live for game sessions.
 const DEFAULT_CACHE_TIME_TO_LIVE: Duration = Duration::from_secs(300); // 5 minutes
 
 // =============================================================================
 // UseItem Workflow
 // =============================================================================
 
-/// Test item structure for use in workflows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InventoryItem {
-    /// Item identifier.
     identifier: ItemIdentifier,
-    /// Item effect when used.
     effect: ItemEffect,
 }
 
 impl InventoryItem {
-    /// Creates a new inventory item.
     #[cfg(test)]
     fn new(identifier: ItemIdentifier, effect: ItemEffect) -> Self {
         Self { identifier, effect }
     }
 }
 
-/// Creates a workflow function for using an item.
-///
-/// This function returns a closure that uses an item from the player's
-/// inventory. It uses higher-order functions to inject dependencies,
-/// enabling pure functional composition and easy testing.
-///
-/// # Type Parameters
-///
-/// * `C` - Cache type implementing `SessionCache`
-/// * `E` - Event store type implementing `EventStore`
-///
-/// # Arguments
-///
-/// * `cache` - The session cache for fast access
-/// * `event_store` - The event store for event sourcing
-///
-/// # Returns
-///
-/// A function that takes a `UseItemCommand` and returns an `AsyncIO`
-/// that produces the updated game session or an error.
-///
-/// # Examples
-///
-/// ```ignore
-/// use roguelike_workflow::workflows::player::{use_item, UseItemCommand};
-///
-/// let workflow = use_item(&cache, &event_store);
-/// let command = UseItemCommand::new(game_identifier, item_identifier);
-/// let result = workflow(command).run_async().await;
-/// ```
 pub fn use_item<'a, C, E>(
     cache: &'a C,
     event_store: &'a E,
@@ -162,47 +100,6 @@ where
 // Pure Functions
 // =============================================================================
 
-/// Pure function that performs the use item logic using `pipe!` macro.
-///
-/// This function encapsulates all pure domain logic for using an item:
-/// - Finds item in inventory
-/// - Validates item is usable
-/// - Applies item effect
-/// - Removes consumable if applicable
-/// - Generates events
-///
-/// # Type Parameters
-///
-/// * `S` - Session type (must implement Clone)
-/// * `I` - Item type
-///
-/// # Arguments
-///
-/// * `session` - The current game session
-/// * `inventory` - The player's inventory items
-/// * `item_identifier` - The item to use
-/// * `get_identifier` - A function to extract the identifier from an item
-/// * `get_effect` - A function to extract the effect from an item
-/// * `current_health` - The current health value
-/// * `max_health` - The maximum health value
-///
-/// # Returns
-///
-/// A result containing the updated session and events, or an error.
-///
-/// # Example
-///
-/// ```ignore
-/// let result = use_item_pure(
-///     session,
-///     &inventory,
-///     &item_id,
-///     |item| &item.identifier,
-///     |item| item.effect.clone(),
-///     current_health,
-///     max_health,
-/// );
-/// ```
 pub fn use_item_pure<S, I, F, G>(
     session: S,
     inventory: &[I],
@@ -249,9 +146,6 @@ where
     )
 }
 
-/// Simplified version of use_item_pure that uses InventoryItem directly.
-///
-/// This avoids lifetime issues with closures by using concrete types.
 fn use_item_pure_simplified<S>(
     session: S,
     inventory: &[InventoryItem],
@@ -283,23 +177,6 @@ where
     })
 }
 
-/// Validates that an item exists in the inventory.
-///
-/// This is a pure function that checks if the item is in the player's inventory.
-///
-/// # Type Parameters
-///
-/// * `I` - Item type
-///
-/// # Arguments
-///
-/// * `inventory` - A slice of items in the inventory
-/// * `item_identifier` - The identifier of the item to find
-/// * `get_identifier` - A function to extract the identifier from an item
-///
-/// # Returns
-///
-/// `Ok(item_index)` if found, or `Err(PlayerError::ItemNotInInventory)`.
 pub fn find_item_in_inventory<I, F>(
     inventory: &[I],
     item_identifier: &ItemIdentifier,
@@ -314,34 +191,23 @@ where
         .ok_or_else(|| PlayerError::item_not_in_inventory(item_identifier.to_string()))
 }
 
-/// Represents the type of item effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemEffectType {
-    /// Restores health points.
     HealHealth,
-    /// Restores mana points.
     HealMana,
-    /// Temporarily boosts attack.
     BuffAttack,
-    /// Temporarily boosts defense.
     BuffDefense,
-    /// Removes a status ailment.
     CureStatus,
 }
 
-/// Represents an item effect to be applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ItemEffect {
-    /// The type of effect.
     effect_type: ItemEffectType,
-    /// The magnitude of the effect.
     value: u32,
-    /// Duration in turns (0 for instant effects).
     duration: u32,
 }
 
 impl ItemEffect {
-    /// Creates a new item effect.
     #[must_use]
     pub const fn new(effect_type: ItemEffectType, value: u32, duration: u32) -> Self {
         Self {
@@ -351,68 +217,47 @@ impl ItemEffect {
         }
     }
 
-    /// Creates a healing effect.
     #[must_use]
     pub const fn heal_health(amount: u32) -> Self {
         Self::new(ItemEffectType::HealHealth, amount, 0)
     }
 
-    /// Creates a mana restoration effect.
     #[must_use]
     pub const fn heal_mana(amount: u32) -> Self {
         Self::new(ItemEffectType::HealMana, amount, 0)
     }
 
-    /// Creates an attack buff effect.
     #[must_use]
     pub const fn buff_attack(amount: u32, duration: u32) -> Self {
         Self::new(ItemEffectType::BuffAttack, amount, duration)
     }
 
-    /// Creates a defense buff effect.
     #[must_use]
     pub const fn buff_defense(amount: u32, duration: u32) -> Self {
         Self::new(ItemEffectType::BuffDefense, amount, duration)
     }
 
-    /// Returns the effect type.
     #[must_use]
     pub const fn effect_type(&self) -> ItemEffectType {
         self.effect_type
     }
 
-    /// Returns the effect value.
     #[must_use]
     pub const fn value(&self) -> u32 {
         self.value
     }
 
-    /// Returns the effect duration.
     #[must_use]
     pub const fn duration(&self) -> u32 {
         self.duration
     }
 
-    /// Returns true if this is an instant effect.
     #[must_use]
     pub const fn is_instant(&self) -> bool {
         self.duration == 0
     }
 }
 
-/// Applies a healing effect to health.
-///
-/// This is a pure function that calculates the new health value.
-///
-/// # Arguments
-///
-/// * `current_health` - The current health value
-/// * `max_health` - The maximum health value
-/// * `heal_amount` - The amount to heal
-///
-/// # Returns
-///
-/// The new health value (capped at max_health).
 #[must_use]
 pub const fn apply_heal_health(current_health: u32, max_health: u32, heal_amount: u32) -> u32 {
     let new_health = current_health.saturating_add(heal_amount);
@@ -423,19 +268,6 @@ pub const fn apply_heal_health(current_health: u32, max_health: u32, heal_amount
     }
 }
 
-/// Applies a healing effect to mana.
-///
-/// This is a pure function that calculates the new mana value.
-///
-/// # Arguments
-///
-/// * `current_mana` - The current mana value
-/// * `max_mana` - The maximum mana value
-/// * `heal_amount` - The amount to restore
-///
-/// # Returns
-///
-/// The new mana value (capped at max_mana).
 #[must_use]
 pub const fn apply_heal_mana(current_mana: u32, max_mana: u32, heal_amount: u32) -> u32 {
     let new_mana = current_mana.saturating_add(heal_amount);

@@ -1,38 +1,3 @@
-//! Abstract port definitions for the workflow layer.
-//!
-//! This module defines the abstract interfaces (ports) that the workflow layer
-//! depends on. Concrete implementations (adapters) are provided by the
-//! infrastructure layer.
-//!
-//! # Port Categories
-//!
-//! - **Repositories**: Persistent storage for aggregates
-//! - **Event Stores**: Event sourcing storage
-//! - **Caches**: Transient storage for performance optimization
-//! - **External Services**: Third-party integrations (e.g., random generation)
-//!
-//! # Design Principles
-//!
-//! All ports return `AsyncIO<T>` to defer side effects until the workflow's edge.
-//! This maintains referential transparency within the pure workflow logic.
-//!
-//! # Examples
-//!
-//! ```ignore
-//! use roguelike_workflow::ports::GameSessionRepository;
-//! use lambars::effect::AsyncIO;
-//!
-//! // Workflows receive ports as dependencies
-//! fn create_game_workflow<R: GameSessionRepository>(
-//!     repository: R,
-//! ) -> impl Fn(CreateGameCommand) -> AsyncIO<Result<GameSession, WorkflowError>> {
-//!     move |command| {
-//!         // Implementation uses repository.save(), etc.
-//!         // ...
-//!     }
-//! }
-//! ```
-
 use std::time::Duration;
 
 use lambars::effect::AsyncIO;
@@ -42,96 +7,21 @@ use roguelike_domain::game_session::{GameIdentifier, GameSessionEvent, RandomSee
 // Type Aliases for Workflow Results
 // =============================================================================
 
-/// Result type for workflow operations.
 pub type WorkflowResult<T> = Result<T, crate::errors::WorkflowError>;
 
 // =============================================================================
 // GameSessionRepository
 // =============================================================================
 
-/// Repository port for game session persistence.
-///
-/// This trait defines the interface for storing and retrieving game sessions.
-/// Implementations should handle the actual I/O operations (database, file system, etc.).
-///
-/// # Type Requirements
-///
-/// All trait bounds are required for thread-safe async execution:
-/// - `Clone`: Allows sharing the repository across async tasks
-/// - `Send + Sync`: Required for cross-thread access
-/// - `'static`: Required for async lifetime bounds
-///
-/// # Examples
-///
-/// ```ignore
-/// use roguelike_workflow::ports::GameSessionRepository;
-/// use lambars::effect::AsyncIO;
-///
-/// struct InMemoryGameSessionRepository {
-///     // ... implementation details
-/// }
-///
-/// impl GameSessionRepository for InMemoryGameSessionRepository {
-///     type GameSession = GameSession;
-///
-///     fn find_by_id(&self, id: &GameIdentifier) -> AsyncIO<Option<Self::GameSession>> {
-///         // ... implementation
-///     }
-///     // ... other methods
-/// }
-/// ```
 pub trait GameSessionRepository: Clone + Send + Sync + 'static {
-    /// The game session type returned by this repository.
-    ///
-    /// This associated type allows different repository implementations
-    /// to work with different game session representations.
     type GameSession: Clone + Send + Sync + 'static;
 
-    /// Finds a game session by its identifier.
-    ///
-    /// # Arguments
-    ///
-    /// * `identifier` - The unique identifier of the game session.
-    ///
-    /// # Returns
-    ///
-    /// An `AsyncIO` that resolves to `Some(GameSession)` if found, `None` otherwise.
     fn find_by_id(&self, identifier: &GameIdentifier) -> AsyncIO<Option<Self::GameSession>>;
 
-    /// Saves a game session.
-    ///
-    /// If a session with the same identifier exists, it will be updated.
-    /// Otherwise, a new session will be created.
-    ///
-    /// # Arguments
-    ///
-    /// * `session` - The game session to save.
-    ///
-    /// # Returns
-    ///
-    /// An `AsyncIO` that resolves to `()` on success.
     fn save(&self, session: &Self::GameSession) -> AsyncIO<()>;
 
-    /// Deletes a game session by its identifier.
-    ///
-    /// # Arguments
-    ///
-    /// * `identifier` - The unique identifier of the game session to delete.
-    ///
-    /// # Returns
-    ///
-    /// An `AsyncIO` that resolves to `()` on success.
-    /// No error is raised if the session does not exist.
     fn delete(&self, identifier: &GameIdentifier) -> AsyncIO<()>;
 
-    /// Lists all active game session identifiers.
-    ///
-    /// Active sessions are those that are currently in progress
-    /// (not completed, abandoned, or expired).
-    ///
-    /// # Returns
-    ///
-    /// An `AsyncIO` that resolves to a vector of game identifiers.
     fn list_active(&self) -> AsyncIO<Vec<GameIdentifier>>;
 }
 
@@ -139,75 +29,15 @@ pub trait GameSessionRepository: Clone + Send + Sync + 'static {
 // EventStore
 // =============================================================================
 
-/// Event store port for event sourcing.
-///
-/// This trait defines the interface for storing and retrieving domain events.
-/// Events are immutable and append-only, providing a complete audit trail
-/// of all state changes.
-///
-/// # Event Sourcing
-///
-/// Instead of storing the current state, event sourcing stores all events
-/// that led to the current state. The current state can be reconstructed
-/// by replaying all events from the beginning.
-///
-/// # Examples
-///
-/// ```ignore
-/// use roguelike_workflow::ports::EventStore;
-/// use lambars::effect::AsyncIO;
-///
-/// // Append events after a command is processed
-/// let events = vec![GameStarted::new(...).into()];
-/// let append_io = event_store.append(&session_id, &events);
-///
-/// // Load events to reconstruct state
-/// let load_io = event_store.load_events(&session_id);
-/// ```
 pub trait EventStore: Clone + Send + Sync + 'static {
-    /// Appends events to the event store.
-    ///
-    /// Events are stored in order and assigned sequence numbers automatically.
-    ///
-    /// # Arguments
-    ///
-    /// * `session_identifier` - The game session these events belong to.
-    /// * `events` - The events to append.
-    ///
-    /// # Returns
-    ///
-    /// An `AsyncIO` that resolves to `()` on success.
     fn append(
         &self,
         session_identifier: &GameIdentifier,
         events: &[GameSessionEvent],
     ) -> AsyncIO<()>;
 
-    /// Loads all events for a game session.
-    ///
-    /// Events are returned in the order they were appended.
-    ///
-    /// # Arguments
-    ///
-    /// * `session_identifier` - The game session to load events for.
-    ///
-    /// # Returns
-    ///
-    /// An `AsyncIO` that resolves to a vector of events.
     fn load_events(&self, session_identifier: &GameIdentifier) -> AsyncIO<Vec<GameSessionEvent>>;
 
-    /// Loads events for a game session since a specific sequence number.
-    ///
-    /// This is useful for incremental event loading when using snapshots.
-    ///
-    /// # Arguments
-    ///
-    /// * `session_identifier` - The game session to load events for.
-    /// * `sequence` - The sequence number to start from (exclusive).
-    ///
-    /// # Returns
-    ///
-    /// An `AsyncIO` that resolves to a vector of events with sequence > `sequence`.
     fn load_events_since(
         &self,
         session_identifier: &GameIdentifier,
@@ -219,33 +49,9 @@ pub trait EventStore: Clone + Send + Sync + 'static {
 // SnapshotStore
 // =============================================================================
 
-/// Snapshot store port for event sourcing optimization.
-///
-/// Snapshots are periodic captures of the aggregate state that allow
-/// faster reconstruction without replaying all events from the beginning.
-///
-/// # Usage Pattern
-///
-/// 1. Load the latest snapshot for a session
-/// 2. If a snapshot exists, start from that state
-/// 3. Load events since the snapshot's sequence number
-/// 4. Apply those events to get the current state
-/// 5. Periodically save new snapshots (e.g., every N events)
 pub trait SnapshotStore: Clone + Send + Sync + 'static {
-    /// The game session type stored in snapshots.
     type GameSession: Clone + Send + Sync + 'static;
 
-    /// Saves a snapshot of the game session state.
-    ///
-    /// # Arguments
-    ///
-    /// * `session_identifier` - The game session identifier.
-    /// * `state` - The current state of the game session.
-    /// * `sequence` - The event sequence number this snapshot represents.
-    ///
-    /// # Returns
-    ///
-    /// An `AsyncIO` that resolves to `()` on success.
     fn save_snapshot(
         &self,
         session_identifier: &GameIdentifier,
@@ -253,16 +59,6 @@ pub trait SnapshotStore: Clone + Send + Sync + 'static {
         sequence: u64,
     ) -> AsyncIO<()>;
 
-    /// Loads the latest snapshot for a game session.
-    ///
-    /// # Arguments
-    ///
-    /// * `session_identifier` - The game session to load the snapshot for.
-    ///
-    /// # Returns
-    ///
-    /// An `AsyncIO` that resolves to `Some((state, sequence))` if a snapshot exists,
-    /// `None` otherwise.
     fn load_latest_snapshot(
         &self,
         session_identifier: &GameIdentifier,
@@ -273,54 +69,11 @@ pub trait SnapshotStore: Clone + Send + Sync + 'static {
 // SessionCache
 // =============================================================================
 
-/// Cache port for game session caching.
-///
-/// Caching provides fast access to frequently used game sessions,
-/// reducing database load and improving response times.
-///
-/// # Cache Semantics
-///
-/// - Entries have a TTL (time-to-live) and will be automatically evicted
-/// - Cache misses are not errors; the workflow should fall back to the repository
-/// - Cache invalidation should be performed when the session state changes
-///
-/// # Examples
-///
-/// ```ignore
-/// use roguelike_workflow::ports::SessionCache;
-/// use std::time::Duration;
-///
-/// // Try cache first, fall back to repository
-/// let cached = cache.get(&session_id);
-/// // If None, load from repository and cache it
-/// cache.set(&session_id, &session, Duration::from_secs(300));
-/// ```
 pub trait SessionCache: Clone + Send + Sync + 'static {
-    /// The game session type stored in the cache.
     type GameSession: Clone + Send + Sync + 'static;
 
-    /// Gets a game session from the cache.
-    ///
-    /// # Arguments
-    ///
-    /// * `identifier` - The game session identifier.
-    ///
-    /// # Returns
-    ///
-    /// An `AsyncIO` that resolves to `Some(GameSession)` if found, `None` otherwise.
     fn get(&self, identifier: &GameIdentifier) -> AsyncIO<Option<Self::GameSession>>;
 
-    /// Sets a game session in the cache with a TTL.
-    ///
-    /// # Arguments
-    ///
-    /// * `identifier` - The game session identifier.
-    /// * `session` - The game session to cache.
-    /// * `time_to_live` - How long the entry should remain in the cache.
-    ///
-    /// # Returns
-    ///
-    /// An `AsyncIO` that resolves to `()` on success.
     fn set(
         &self,
         identifier: &GameIdentifier,
@@ -328,16 +81,6 @@ pub trait SessionCache: Clone + Send + Sync + 'static {
         time_to_live: Duration,
     ) -> AsyncIO<()>;
 
-    /// Invalidates a cache entry.
-    ///
-    /// # Arguments
-    ///
-    /// * `identifier` - The game session identifier to invalidate.
-    ///
-    /// # Returns
-    ///
-    /// An `AsyncIO` that resolves to `()` on success.
-    /// No error is raised if the entry does not exist.
     fn invalidate(&self, identifier: &GameIdentifier) -> AsyncIO<()>;
 }
 
@@ -345,53 +88,9 @@ pub trait SessionCache: Clone + Send + Sync + 'static {
 // RandomGenerator
 // =============================================================================
 
-/// Random generator port for deterministic game generation.
-///
-/// This trait abstracts random number generation to enable:
-/// - Reproducible game sessions using the same seed
-/// - Testability by providing deterministic implementations
-/// - Separation of pure game logic from random I/O
-///
-/// # Deterministic Randomness
-///
-/// Once a seed is generated (which involves I/O), all subsequent random
-/// operations using that seed are pure functions. This allows game logic
-/// to remain deterministic and reproducible.
-///
-/// # Examples
-///
-/// ```ignore
-/// use roguelike_workflow::ports::RandomGenerator;
-///
-/// // Generate a seed (I/O operation)
-/// let seed = generator.generate_seed();
-///
-/// // Use seed for deterministic random numbers (pure)
-/// let (value, next_seed) = generator.next_u32(&seed);
-/// ```
 pub trait RandomGenerator: Clone + Send + Sync + 'static {
-    /// Generates a new random seed.
-    ///
-    /// This is an I/O operation that typically uses system entropy.
-    /// The returned seed can be stored for reproducibility.
-    ///
-    /// # Returns
-    ///
-    /// An `AsyncIO` that resolves to a new random seed.
     fn generate_seed(&self) -> AsyncIO<RandomSeed>;
 
-    /// Generates the next random u32 value from a seed.
-    ///
-    /// This is a pure function that deterministically produces the next
-    /// random value and the next seed state.
-    ///
-    /// # Arguments
-    ///
-    /// * `seed` - The current random seed.
-    ///
-    /// # Returns
-    ///
-    /// A tuple of (random_value, next_seed).
     fn next_u32(&self, seed: &RandomSeed) -> (u32, RandomSeed);
 }
 
@@ -410,7 +109,6 @@ mod tests {
     // Mock Implementations for Testing
     // =========================================================================
 
-    /// A simple mock game session for testing.
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct MockGameSession {
         identifier: GameIdentifier,
@@ -430,7 +128,6 @@ mod tests {
         }
     }
 
-    /// Mock implementation of GameSessionRepository.
     #[derive(Clone)]
     struct MockGameSessionRepository {
         sessions:
@@ -479,7 +176,6 @@ mod tests {
         }
     }
 
-    /// Mock implementation of EventStore.
     #[derive(Clone)]
     struct MockEventStore {
         events: Arc<
@@ -548,7 +244,6 @@ mod tests {
         }
     }
 
-    /// Mock implementation of SessionCache.
     #[derive(Clone)]
     struct MockSessionCache {
         cache: Arc<std::sync::RwLock<std::collections::HashMap<GameIdentifier, MockGameSession>>>,
@@ -594,7 +289,6 @@ mod tests {
         }
     }
 
-    /// Mock implementation of RandomGenerator.
     #[derive(Clone)]
     struct MockRandomGenerator {
         counter: Arc<AtomicU64>,

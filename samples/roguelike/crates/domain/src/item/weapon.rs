@@ -1,7 +1,3 @@
-//! Weapon types and data structures.
-//!
-//! This module provides types for representing weapons in the game,
-//! including weapon types and weapon-specific data.
 
 use std::fmt;
 
@@ -11,45 +7,17 @@ use crate::common::Attack;
 // WeaponType
 // =============================================================================
 
-/// Types of weapons available in the game.
-///
-/// Each weapon type has different characteristics and use cases.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::item::WeaponType;
-///
-/// let weapon_type = WeaponType::Sword;
-/// assert!(weapon_type.is_melee());
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WeaponType {
-    /// A balanced melee weapon.
     Sword,
-    /// A heavy melee weapon with high damage.
     Axe,
-    /// A long melee weapon with extended reach.
     Spear,
-    /// A ranged weapon for attacking from a distance.
     Bow,
-    /// A magical weapon for spellcasters.
     Staff,
-    /// A fast melee weapon with low damage.
     Dagger,
 }
 
 impl WeaponType {
-    /// Returns true if this is a melee weapon.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::item::WeaponType;
-    ///
-    /// assert!(WeaponType::Sword.is_melee());
-    /// assert!(!WeaponType::Bow.is_melee());
-    /// ```
     #[must_use]
     pub const fn is_melee(&self) -> bool {
         matches!(
@@ -58,47 +26,16 @@ impl WeaponType {
         )
     }
 
-    /// Returns true if this is a ranged weapon.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::item::WeaponType;
-    ///
-    /// assert!(WeaponType::Bow.is_ranged());
-    /// assert!(!WeaponType::Sword.is_ranged());
-    /// ```
     #[must_use]
     pub const fn is_ranged(&self) -> bool {
         matches!(self, Self::Bow)
     }
 
-    /// Returns true if this is a magical weapon.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::item::WeaponType;
-    ///
-    /// assert!(WeaponType::Staff.is_magical());
-    /// assert!(!WeaponType::Sword.is_magical());
-    /// ```
     #[must_use]
     pub const fn is_magical(&self) -> bool {
         matches!(self, Self::Staff)
     }
 
-    /// Returns the base attack speed modifier for this weapon type.
-    ///
-    /// Higher values indicate faster attack speeds.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_domain::item::WeaponType;
-    ///
-    /// assert!(WeaponType::Dagger.attack_speed_modifier() > WeaponType::Axe.attack_speed_modifier());
-    /// ```
     #[must_use]
     pub const fn attack_speed_modifier(&self) -> f32 {
         match self {
@@ -111,7 +48,6 @@ impl WeaponType {
         }
     }
 
-    /// Returns an array of all weapon types.
     #[must_use]
     pub const fn all() -> [Self; 6] {
         [
@@ -143,21 +79,6 @@ impl fmt::Display for WeaponType {
 // WeaponData
 // =============================================================================
 
-/// Data specific to weapon items.
-///
-/// Contains the attack bonus, weapon type, and attack range.
-///
-/// # Examples
-///
-/// ```
-/// use roguelike_domain::item::{WeaponData, WeaponType};
-/// use roguelike_domain::common::Attack;
-///
-/// let weapon = WeaponData::new(Attack::new(25), WeaponType::Sword, 1);
-/// assert_eq!(weapon.attack_bonus().value(), 25);
-/// assert_eq!(weapon.weapon_type(), WeaponType::Sword);
-/// assert_eq!(weapon.range(), 1);
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WeaponData {
     attack_bonus: Attack,
@@ -166,13 +87,6 @@ pub struct WeaponData {
 }
 
 impl WeaponData {
-    /// Creates a new `WeaponData`.
-    ///
-    /// # Arguments
-    ///
-    /// * `attack_bonus` - The attack bonus provided by the weapon
-    /// * `weapon_type` - The type of weapon
-    /// * `range` - The attack range in tiles
     #[must_use]
     pub const fn new(attack_bonus: Attack, weapon_type: WeaponType, range: u32) -> Self {
         Self {
@@ -182,25 +96,21 @@ impl WeaponData {
         }
     }
 
-    /// Returns the attack bonus provided by the weapon.
     #[must_use]
     pub const fn attack_bonus(&self) -> Attack {
         self.attack_bonus
     }
 
-    /// Returns the type of weapon.
     #[must_use]
     pub const fn weapon_type(&self) -> WeaponType {
         self.weapon_type
     }
 
-    /// Returns the attack range in tiles.
     #[must_use]
     pub const fn range(&self) -> u32 {
         self.range
     }
 
-    /// Returns a new `WeaponData` with the given attack bonus.
     #[must_use]
     pub const fn with_attack_bonus(&self, attack_bonus: Attack) -> Self {
         Self {

@@ -1,31 +1,3 @@
-//! TakeDamage workflow implementation.
-//!
-//! This module provides the workflow for the player taking damage.
-//! It follows the "IO at the Edges" pattern, separating pure domain logic
-//! from IO operations.
-//!
-//! # Workflow Steps
-//!
-//! 1. [IO] Load session from cache
-//! 2. [Pure] Calculate damage reduction (using Semigroup for modifiers)
-//! 3. [Pure] Apply damage to player health
-//! 4. [Pure] Check if player died
-//! 5. [Pure] Generate PlayerDamaged event
-//! 6. [Pure] Generate PlayerDied event if applicable
-//! 7. [IO] Update cache
-//! 8. [IO] Append events to event store
-//!
-//! # Examples
-//!
-//! ```ignore
-//! use roguelike_workflow::workflows::player::{take_damage, TakeDamageCommand};
-//! use roguelike_domain::common::Damage;
-//!
-//! let workflow = take_damage(&cache, &event_store);
-//! let command = TakeDamageCommand::new(game_identifier, source, Damage::new(10));
-//! let result = workflow(command).run_async().await;
-//! ```
-
 use std::time::Duration;
 
 use lambars::effect::AsyncIO;
@@ -44,44 +16,12 @@ use crate::ports::{EventStore, SessionCache, WorkflowResult};
 // Workflow Configuration
 // =============================================================================
 
-/// Default cache time-to-live for game sessions.
 const DEFAULT_CACHE_TIME_TO_LIVE: Duration = Duration::from_secs(300); // 5 minutes
 
 // =============================================================================
 // TakeDamage Workflow
 // =============================================================================
 
-/// Creates a workflow function for taking damage.
-///
-/// This function returns a closure that applies damage to the player.
-/// It uses higher-order functions to inject dependencies, enabling pure
-/// functional composition and easy testing.
-///
-/// # Type Parameters
-///
-/// * `C` - Cache type implementing `SessionCache`
-/// * `E` - Event store type implementing `EventStore`
-///
-/// # Arguments
-///
-/// * `cache` - The session cache for fast access
-/// * `event_store` - The event store for event sourcing
-///
-/// # Returns
-///
-/// A function that takes a `TakeDamageCommand` and returns an `AsyncIO`
-/// that produces the updated game session or an error.
-///
-/// # Examples
-///
-/// ```ignore
-/// use roguelike_workflow::workflows::player::{take_damage, TakeDamageCommand};
-/// use roguelike_domain::common::Damage;
-///
-/// let workflow = take_damage(&cache, &event_store);
-/// let command = TakeDamageCommand::new(game_identifier, source, Damage::new(10));
-/// let result = workflow(command).run_async().await;
-/// ```
 pub fn take_damage<'a, C, E>(
     cache: &'a C,
     event_store: &'a E,
@@ -150,39 +90,6 @@ where
 // Pure Functions
 // =============================================================================
 
-/// Pure function that performs the take damage logic using `pipe!` macro.
-///
-/// This function encapsulates all pure domain logic for taking damage:
-/// - Calculates damage reduction (using Monoid for defense modifiers)
-/// - Applies damage to health
-/// - Checks for death
-/// - Generates events
-///
-/// # Arguments
-///
-/// * `session` - The current game session
-/// * `source` - The source of the damage
-/// * `base_damage` - The base damage amount
-/// * `defense` - The player's defense stat
-/// * `modifiers` - Damage reduction modifiers
-/// * `current_health` - The player's current health
-///
-/// # Returns
-///
-/// A result containing the updated session, events, and take damage result.
-///
-/// # Example
-///
-/// ```ignore
-/// let result = take_damage_pure(
-///     session,
-///     &source_id,
-///     Damage::new(20),
-///     Defense::new(5),
-///     &modifiers,
-///     100,
-/// );
-/// ```
 pub fn take_damage_pure<S>(
     session: S,
     source: &EntityIdentifier,
@@ -220,20 +127,6 @@ where
     Ok((session, events, result))
 }
 
-/// Calculates the final damage after defense and modifiers.
-///
-/// Uses Monoid semantics to combine damage reduction modifiers.
-/// The formula is: `base_damage - defense` (minimum 0), then apply modifiers.
-///
-/// # Arguments
-///
-/// * `base_damage` - The incoming damage amount
-/// * `defense` - The player's defense stat
-/// * `modifiers` - A slice of damage modifiers (e.g., armor, buffs)
-///
-/// # Returns
-///
-/// The final damage amount after all reductions.
 #[must_use]
 pub fn calculate_damage_taken(
     base_damage: Damage,
@@ -248,64 +141,29 @@ pub fn calculate_damage_taken(
     combined_modifier.apply(Damage::new(after_defense))
 }
 
-/// Combines multiple damage reduction modifiers using Monoid semantics.
-///
-/// # Arguments
-///
-/// * `modifiers` - A slice of damage modifiers to combine
-///
-/// # Returns
-///
-/// A combined damage modifier (identity if slice is empty).
 #[must_use]
 pub fn combine_damage_reduction_modifiers(modifiers: &[DamageModifier]) -> DamageModifier {
     DamageModifier::combine_all(modifiers.iter().copied())
 }
 
-/// Applies damage to the player's health.
-///
-/// This is a pure function that calculates the new health value.
-///
-/// # Arguments
-///
-/// * `current_health` - The player's current health
-/// * `damage` - The damage to apply
-///
-/// # Returns
-///
-/// The new health value (minimum 0).
 #[must_use]
 pub fn apply_damage_to_health(current_health: u32, damage: Damage) -> u32 {
     current_health.saturating_sub(damage.value())
 }
 
-/// Checks if the player has died (health is 0).
-///
-/// # Arguments
-///
-/// * `health` - The player's current health
-///
-/// # Returns
-///
-/// `true` if health is 0, `false` otherwise.
 #[must_use]
 pub const fn is_player_dead(health: u32) -> bool {
     health == 0
 }
 
-/// Represents the result of taking damage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TakeDamageResult {
-    /// The damage that was actually taken (after reductions).
     damage_taken: Damage,
-    /// The player's health after taking damage.
     remaining_health: u32,
-    /// Whether the player died from this damage.
     player_died: bool,
 }
 
 impl TakeDamageResult {
-    /// Creates a new take damage result.
     #[must_use]
     pub const fn new(damage_taken: Damage, remaining_health: u32, player_died: bool) -> Self {
         Self {
@@ -315,39 +173,22 @@ impl TakeDamageResult {
         }
     }
 
-    /// Returns the damage that was taken.
     #[must_use]
     pub const fn damage_taken(&self) -> Damage {
         self.damage_taken
     }
 
-    /// Returns the remaining health.
     #[must_use]
     pub const fn remaining_health(&self) -> u32 {
         self.remaining_health
     }
 
-    /// Returns whether the player died.
     #[must_use]
     pub const fn player_died(&self) -> bool {
         self.player_died
     }
 }
 
-/// Performs the full damage calculation and application.
-///
-/// This is a pure function that combines all damage logic.
-///
-/// # Arguments
-///
-/// * `current_health` - The player's current health
-/// * `base_damage` - The incoming damage
-/// * `defense` - The player's defense stat
-/// * `modifiers` - Damage reduction modifiers
-///
-/// # Returns
-///
-/// A `TakeDamageResult` with all the damage details.
 #[must_use]
 pub fn perform_take_damage(
     current_health: u32,
@@ -362,16 +203,6 @@ pub fn perform_take_damage(
     TakeDamageResult::new(final_damage, new_health, died)
 }
 
-/// Creates a PlayerDamaged event.
-///
-/// # Arguments
-///
-/// * `source` - The entity that caused the damage
-/// * `damage` - The damage amount
-///
-/// # Returns
-///
-/// A `PlayerDamaged` event.
 #[must_use]
 pub fn create_player_damaged_event(source: &EntityIdentifier, damage: Damage) -> PlayerDamaged {
     PlayerDamaged::new(PlayerEntityIdentifier::new(source.to_string()), damage)

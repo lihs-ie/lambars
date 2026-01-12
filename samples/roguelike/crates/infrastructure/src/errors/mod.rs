@@ -1,46 +1,12 @@
-//! Infrastructure error types.
-//!
-//! This module provides error types specific to the infrastructure layer,
-//! including database, cache, serialization, and configuration errors.
-//!
-//! # Error Categories
-//!
-//! - [`InfraError::Database`]: SQLx database operation failures
-//! - [`InfraError::Cache`]: Redis cache operation failures
-//! - [`InfraError::Serialization`]: bincode/JSON serialization failures
-//! - [`InfraError::NotFound`]: Entity not found in storage
-//! - [`InfraError::Connection`]: Database or cache connection failures
-//! - [`InfraError::Timeout`]: Operation timeout errors
-//! - [`InfraError::Configuration`]: Configuration errors
-//!
-//! # Examples
-//!
-//! ```
-//! use roguelike_infrastructure::errors::InfraError;
-//!
-//! // Create a not found error
-//! let error = InfraError::not_found("GameSession", "abc-123");
-//! assert!(error.is_not_found());
-//!
-//! // Create a database error
-//! let error = InfraError::database("connection refused");
-//! assert!(error.is_database());
-//! ```
-
 use thiserror::Error;
 
 // =============================================================================
 // ConnectionTarget
 // =============================================================================
 
-/// Target system for connection errors.
-///
-/// Represents which external system failed to connect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionTarget {
-    /// Database connection (MySQL/PostgreSQL).
     Database,
-    /// Cache connection (Redis).
     Cache,
 }
 
@@ -57,65 +23,34 @@ impl std::fmt::Display for ConnectionTarget {
 // InfraError
 // =============================================================================
 
-/// Error types for infrastructure operations.
-///
-/// This enum represents all possible errors that can occur during
-/// infrastructure layer operations, including database access, caching,
-/// serialization, and configuration.
 #[derive(Debug, Clone, Error)]
 pub enum InfraError {
-    /// A database operation failed.
     #[error("Database error: {message}")]
-    Database {
-        /// Detailed error message.
-        message: String,
-    },
+    Database { message: String },
 
-    /// A cache operation failed.
     #[error("Cache error: {message}")]
-    Cache {
-        /// Detailed error message.
-        message: String,
-    },
+    Cache { message: String },
 
-    /// Serialization or deserialization failed.
     #[error("Serialization error: {message}")]
-    Serialization {
-        /// Detailed error message.
-        message: String,
-    },
+    Serialization { message: String },
 
-    /// The requested entity was not found.
     #[error("{entity_type} with identifier '{identifier}' not found")]
     NotFound {
-        /// The type of entity that was not found (e.g., "GameSession", "Player").
         entity_type: String,
-        /// The identifier used to look up the entity.
         identifier: String,
     },
 
-    /// A connection to an external system failed.
     #[error("Connection to {target} failed: {message}")]
     Connection {
-        /// The target system that failed to connect.
         target: ConnectionTarget,
-        /// Detailed error message.
         message: String,
     },
 
-    /// An operation timed out.
     #[error("Operation timed out: {message}")]
-    Timeout {
-        /// Detailed error message.
-        message: String,
-    },
+    Timeout { message: String },
 
-    /// A configuration error occurred.
     #[error("Configuration error: {message}")]
-    Configuration {
-        /// Detailed error message.
-        message: String,
-    },
+    Configuration { message: String },
 }
 
 // =============================================================================
@@ -123,20 +58,6 @@ pub enum InfraError {
 // =============================================================================
 
 impl InfraError {
-    /// Creates a new `Database` error.
-    ///
-    /// # Arguments
-    ///
-    /// * `message` - Detailed error message.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_infrastructure::errors::InfraError;
-    ///
-    /// let error = InfraError::database("connection refused");
-    /// assert!(error.is_database());
-    /// ```
     #[must_use]
     pub fn database(message: impl Into<String>) -> Self {
         Self::Database {
@@ -144,20 +65,6 @@ impl InfraError {
         }
     }
 
-    /// Creates a new `Cache` error.
-    ///
-    /// # Arguments
-    ///
-    /// * `message` - Detailed error message.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_infrastructure::errors::InfraError;
-    ///
-    /// let error = InfraError::cache("cache miss");
-    /// assert!(error.is_cache());
-    /// ```
     #[must_use]
     pub fn cache(message: impl Into<String>) -> Self {
         Self::Cache {
@@ -165,20 +72,6 @@ impl InfraError {
         }
     }
 
-    /// Creates a new `Serialization` error.
-    ///
-    /// # Arguments
-    ///
-    /// * `message` - Detailed error message.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_infrastructure::errors::InfraError;
-    ///
-    /// let error = InfraError::serialization("invalid JSON format");
-    /// assert!(error.is_serialization());
-    /// ```
     #[must_use]
     pub fn serialization(message: impl Into<String>) -> Self {
         Self::Serialization {
@@ -186,21 +79,6 @@ impl InfraError {
         }
     }
 
-    /// Creates a new `NotFound` error.
-    ///
-    /// # Arguments
-    ///
-    /// * `entity_type` - The type of entity that was not found.
-    /// * `identifier` - The identifier used to look up the entity.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_infrastructure::errors::InfraError;
-    ///
-    /// let error = InfraError::not_found("GameSession", "abc-123");
-    /// assert!(error.is_not_found());
-    /// ```
     #[must_use]
     pub fn not_found(entity_type: impl Into<String>, identifier: impl Into<String>) -> Self {
         Self::NotFound {
@@ -209,20 +87,6 @@ impl InfraError {
         }
     }
 
-    /// Creates a new `Connection` error for database.
-    ///
-    /// # Arguments
-    ///
-    /// * `message` - Detailed error message.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_infrastructure::errors::InfraError;
-    ///
-    /// let error = InfraError::database_connection("connection refused");
-    /// assert!(error.is_connection());
-    /// ```
     #[must_use]
     pub fn database_connection(message: impl Into<String>) -> Self {
         Self::Connection {
@@ -231,20 +95,6 @@ impl InfraError {
         }
     }
 
-    /// Creates a new `Connection` error for cache.
-    ///
-    /// # Arguments
-    ///
-    /// * `message` - Detailed error message.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_infrastructure::errors::InfraError;
-    ///
-    /// let error = InfraError::cache_connection("connection refused");
-    /// assert!(error.is_connection());
-    /// ```
     #[must_use]
     pub fn cache_connection(message: impl Into<String>) -> Self {
         Self::Connection {
@@ -253,20 +103,6 @@ impl InfraError {
         }
     }
 
-    /// Creates a new `Timeout` error.
-    ///
-    /// # Arguments
-    ///
-    /// * `message` - Detailed error message.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_infrastructure::errors::InfraError;
-    ///
-    /// let error = InfraError::timeout("query exceeded 30 seconds");
-    /// assert!(error.is_timeout());
-    /// ```
     #[must_use]
     pub fn timeout(message: impl Into<String>) -> Self {
         Self::Timeout {
@@ -274,20 +110,6 @@ impl InfraError {
         }
     }
 
-    /// Creates a new `Configuration` error.
-    ///
-    /// # Arguments
-    ///
-    /// * `message` - Detailed error message.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_infrastructure::errors::InfraError;
-    ///
-    /// let error = InfraError::configuration("missing DATABASE_URL");
-    /// assert!(error.is_configuration());
-    /// ```
     #[must_use]
     pub fn configuration(message: impl Into<String>) -> Self {
         Self::Configuration {
@@ -301,135 +123,41 @@ impl InfraError {
 // =============================================================================
 
 impl InfraError {
-    /// Returns `true` if this is a database error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_infrastructure::errors::InfraError;
-    ///
-    /// let error = InfraError::database("connection refused");
-    /// assert!(error.is_database());
-    /// ```
     #[must_use]
     pub const fn is_database(&self) -> bool {
         matches!(self, Self::Database { .. })
     }
 
-    /// Returns `true` if this is a cache error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_infrastructure::errors::InfraError;
-    ///
-    /// let error = InfraError::cache("cache miss");
-    /// assert!(error.is_cache());
-    /// ```
     #[must_use]
     pub const fn is_cache(&self) -> bool {
         matches!(self, Self::Cache { .. })
     }
 
-    /// Returns `true` if this is a serialization error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_infrastructure::errors::InfraError;
-    ///
-    /// let error = InfraError::serialization("invalid JSON");
-    /// assert!(error.is_serialization());
-    /// ```
     #[must_use]
     pub const fn is_serialization(&self) -> bool {
         matches!(self, Self::Serialization { .. })
     }
 
-    /// Returns `true` if this is a not found error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_infrastructure::errors::InfraError;
-    ///
-    /// let error = InfraError::not_found("GameSession", "abc-123");
-    /// assert!(error.is_not_found());
-    /// ```
     #[must_use]
     pub const fn is_not_found(&self) -> bool {
         matches!(self, Self::NotFound { .. })
     }
 
-    /// Returns `true` if this is a connection error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_infrastructure::errors::InfraError;
-    ///
-    /// let error = InfraError::database_connection("connection refused");
-    /// assert!(error.is_connection());
-    /// ```
     #[must_use]
     pub const fn is_connection(&self) -> bool {
         matches!(self, Self::Connection { .. })
     }
 
-    /// Returns `true` if this is a timeout error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_infrastructure::errors::InfraError;
-    ///
-    /// let error = InfraError::timeout("query exceeded 30 seconds");
-    /// assert!(error.is_timeout());
-    /// ```
     #[must_use]
     pub const fn is_timeout(&self) -> bool {
         matches!(self, Self::Timeout { .. })
     }
 
-    /// Returns `true` if this is a configuration error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_infrastructure::errors::InfraError;
-    ///
-    /// let error = InfraError::configuration("missing DATABASE_URL");
-    /// assert!(error.is_configuration());
-    /// ```
     #[must_use]
     pub const fn is_configuration(&self) -> bool {
         matches!(self, Self::Configuration { .. })
     }
 
-    /// Returns `true` if this error is recoverable.
-    ///
-    /// Recoverable errors are those that might succeed on retry:
-    /// - Timeout errors (network issues may resolve)
-    /// - Cache errors (non-critical for most operations)
-    /// - Not found errors (resource might appear later)
-    ///
-    /// Non-recoverable errors:
-    /// - Database errors (may indicate data corruption or schema issues)
-    /// - Serialization errors (likely a programming error)
-    /// - Connection errors (require infrastructure fix)
-    /// - Configuration errors (require code or config fix)
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_infrastructure::errors::InfraError;
-    ///
-    /// let timeout = InfraError::timeout("query exceeded 30 seconds");
-    /// assert!(timeout.is_recoverable());
-    ///
-    /// let config = InfraError::configuration("missing DATABASE_URL");
-    /// assert!(!config.is_recoverable());
-    /// ```
     #[must_use]
     pub const fn is_recoverable(&self) -> bool {
         matches!(
@@ -438,22 +166,6 @@ impl InfraError {
         )
     }
 
-    /// Returns the connection target if this is a connection error.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use roguelike_infrastructure::errors::{InfraError, ConnectionTarget};
-    ///
-    /// let error = InfraError::database_connection("connection refused");
-    /// assert_eq!(error.connection_target(), Some(ConnectionTarget::Database));
-    ///
-    /// let error = InfraError::cache_connection("connection refused");
-    /// assert_eq!(error.connection_target(), Some(ConnectionTarget::Cache));
-    ///
-    /// let error = InfraError::database("query failed");
-    /// assert_eq!(error.connection_target(), None);
-    /// ```
     #[must_use]
     pub const fn connection_target(&self) -> Option<ConnectionTarget> {
         match self {

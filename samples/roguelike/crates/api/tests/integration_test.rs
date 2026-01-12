@@ -1,7 +1,3 @@
-//! Integration tests for the API layer.
-//!
-//! These tests verify the API endpoints work correctly with mock dependencies.
-
 mod api_test_helpers;
 
 use api_test_helpers::{

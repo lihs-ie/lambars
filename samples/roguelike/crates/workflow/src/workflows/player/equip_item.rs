@@ -1,30 +1,3 @@
-//! EquipItem workflow implementation.
-//!
-//! This module provides the workflow for equipping an item from inventory.
-//! It follows the "IO at the Edges" pattern, separating pure domain logic
-//! from IO operations.
-//!
-//! # Workflow Steps
-//!
-//! 1. [IO] Load session from cache
-//! 2. [Pure] Find item in inventory
-//! 3. [Pure] Determine target equipment slot
-//! 4. [Pure] Check if slot is occupied (and unequip if needed)
-//! 5. [Pure] Equip the new item
-//! 6. [Pure] Generate ItemEquipped (and ItemUnequipped) events
-//! 7. [IO] Update cache
-//! 8. [IO] Append events to event store
-//!
-//! # Examples
-//!
-//! ```ignore
-//! use roguelike_workflow::workflows::player::{equip_item, EquipItemCommand};
-//!
-//! let workflow = equip_item(&cache, &event_store);
-//! let command = EquipItemCommand::new(game_identifier, item_identifier);
-//! let result = workflow(command).run_async().await;
-//! ```
-
 use std::time::Duration;
 
 use lambars::effect::AsyncIO;
@@ -41,43 +14,12 @@ use crate::ports::{EventStore, SessionCache, WorkflowResult};
 // Workflow Configuration
 // =============================================================================
 
-/// Default cache time-to-live for game sessions.
 const DEFAULT_CACHE_TIME_TO_LIVE: Duration = Duration::from_secs(300); // 5 minutes
 
 // =============================================================================
 // EquipItem Workflow
 // =============================================================================
 
-/// Creates a workflow function for equipping an item.
-///
-/// This function returns a closure that equips an item from the player's
-/// inventory to an equipment slot. It uses higher-order functions to inject
-/// dependencies, enabling pure functional composition and easy testing.
-///
-/// # Type Parameters
-///
-/// * `C` - Cache type implementing `SessionCache`
-/// * `E` - Event store type implementing `EventStore`
-///
-/// # Arguments
-///
-/// * `cache` - The session cache for fast access
-/// * `event_store` - The event store for event sourcing
-///
-/// # Returns
-///
-/// A function that takes an `EquipItemCommand` and returns an `AsyncIO`
-/// that produces the updated game session or an error.
-///
-/// # Examples
-///
-/// ```ignore
-/// use roguelike_workflow::workflows::player::{equip_item, EquipItemCommand};
-///
-/// let workflow = equip_item(&cache, &event_store);
-/// let command = EquipItemCommand::new(game_identifier, item_identifier);
-/// let result = workflow(command).run_async().await;
-/// ```
 pub fn equip_item<'a, C, E>(
     cache: &'a C,
     event_store: &'a E,
@@ -143,35 +85,6 @@ where
 // Pure Functions
 // =============================================================================
 
-/// Pure function that performs the equip item logic using `pipe!` macro.
-///
-/// This function encapsulates all pure domain logic for equipping an item:
-/// - Determines target slot from item type
-/// - Validates equip compatibility
-/// - Performs equip operation (with potential swap)
-/// - Generates events
-///
-/// # Arguments
-///
-/// * `session` - The current game session
-/// * `item_identifier` - The item to equip
-/// * `item_type` - The type of item being equipped
-/// * `current_equipment` - The item currently in the target slot (if any)
-///
-/// # Returns
-///
-/// A result containing the updated session, events, and equip result.
-///
-/// # Example
-///
-/// ```ignore
-/// let result = equip_item_pure(
-///     session,
-///     item_id,
-///     EquippableItemType::Weapon,
-///     current_weapon,
-/// );
-/// ```
 pub fn equip_item_pure<S>(
     session: S,
     item_identifier: ItemIdentifier,
@@ -206,21 +119,15 @@ where
     )
 }
 
-/// Represents an item type that can be equipped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EquippableItemType {
-    /// A weapon item.
     Weapon,
-    /// An armor item.
     Armor,
-    /// A helmet item.
     Helmet,
-    /// An accessory item.
     Accessory,
 }
 
 impl EquippableItemType {
-    /// Returns the equipment slot this item type goes into.
     #[must_use]
     pub const fn equipment_slot(self) -> EquipmentSlot {
         match self {
@@ -232,34 +139,11 @@ impl EquippableItemType {
     }
 }
 
-/// Determines which equipment slot an item should be equipped to.
-///
-/// This is a pure function that maps item type to slot.
-///
-/// # Arguments
-///
-/// * `item_type` - The type of the item to equip
-///
-/// # Returns
-///
-/// The equipment slot for the item type.
 #[must_use]
 pub const fn determine_equipment_slot(item_type: EquippableItemType) -> EquipmentSlot {
     item_type.equipment_slot()
 }
 
-/// Validates that an item can be equipped to a slot.
-///
-/// This is a pure function that checks compatibility.
-///
-/// # Arguments
-///
-/// * `item_type` - The type of the item
-/// * `target_slot` - The target equipment slot
-///
-/// # Returns
-///
-/// `Ok(())` if compatible, or an error.
 pub fn validate_equip_compatibility(
     item_type: EquippableItemType,
     target_slot: EquipmentSlot,
@@ -275,19 +159,14 @@ pub fn validate_equip_compatibility(
     }
 }
 
-/// Represents the result of an equip operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EquipResult {
-    /// The item that was equipped.
     equipped_item: ItemIdentifier,
-    /// The item that was unequipped (if any).
     unequipped_item: Option<ItemIdentifier>,
-    /// The slot that was modified.
     slot: EquipmentSlot,
 }
 
 impl EquipResult {
-    /// Creates a new equip result without an unequipped item.
     #[must_use]
     pub const fn new(equipped_item: ItemIdentifier, slot: EquipmentSlot) -> Self {
         Self {
@@ -297,7 +176,6 @@ impl EquipResult {
         }
     }
 
-    /// Creates a new equip result with an unequipped item.
     #[must_use]
     pub const fn with_swap(
         equipped_item: ItemIdentifier,
@@ -311,49 +189,27 @@ impl EquipResult {
         }
     }
 
-    /// Returns the equipped item identifier.
     #[must_use]
     pub const fn equipped_item(&self) -> &ItemIdentifier {
         &self.equipped_item
     }
 
-    /// Returns the unequipped item identifier if any.
     #[must_use]
     pub const fn unequipped_item(&self) -> Option<&ItemIdentifier> {
         self.unequipped_item.as_ref()
     }
 
-    /// Returns the slot that was modified.
     #[must_use]
     pub const fn slot(&self) -> EquipmentSlot {
         self.slot
     }
 
-    /// Returns true if this was a swap operation.
     #[must_use]
     pub const fn is_swap(&self) -> bool {
         self.unequipped_item.is_some()
     }
 }
 
-/// Performs an equipment slot operation.
-///
-/// This is a pure function that handles the equip logic.
-/// If the slot is already occupied, the old item is returned to inventory.
-///
-/// # Type Parameters
-///
-/// * `T` - Equipment state type
-///
-/// # Arguments
-///
-/// * `current_equipment` - Current item in the slot (if any)
-/// * `new_item` - The item to equip
-/// * `slot` - The target slot
-///
-/// # Returns
-///
-/// An `EquipResult` describing what happened.
 #[must_use]
 pub fn perform_equip(
     current_equipment: Option<ItemIdentifier>,

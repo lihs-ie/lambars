@@ -1,10 +1,3 @@
-//! Dungeon of Pure Functions - Game Server
-//!
-//! Entry point for the roguelike game server.
-//!
-//! This server provides a REST API for playing a roguelike game,
-//! built with functional programming principles using the lambars library.
-
 use std::collections::HashMap;
 use std::env;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -260,7 +253,6 @@ async fn main() -> anyhow::Result<()> {
     server.run(router).await
 }
 
-/// Initializes the tracing subscriber for logging.
 fn init_tracing() {
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("roguelike_api=debug,tower_http=debug,info"));
@@ -271,7 +263,6 @@ fn init_tracing() {
         .init();
 }
 
-/// Loads server configuration from environment variables.
 fn load_config() -> ServerConfig {
     let host = env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
     let port: u16 = env::var("PORT")
