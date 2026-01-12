@@ -1411,6 +1411,8 @@ dependencies = [
  "anyhow",
  "axum",
  "chrono",
+ "futures",
+ "http-body-util",
  "lambars",
  "roguelike-domain",
  "roguelike-infrastructure",

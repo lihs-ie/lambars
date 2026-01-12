@@ -62,6 +62,7 @@ anyhow = "1.0"
 # Testing
 rstest = "0.26"
 proptest = "1.5"
+http-body-util = "0.1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
