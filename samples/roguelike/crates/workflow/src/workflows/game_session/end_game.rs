@@ -5,9 +5,9 @@
 //!
 //! # Workflow Steps
 //!
-//! 1. [IO] Load session from cache or repository
-//! 2. [Pure] Validate session can be ended
-//! 3. [Pure] Generate GameEnded event and update session
+//! 1. [Pure] Extract parameters from command
+//! 2. [IO] Load session from cache or repository
+//! 3. [Pure] Validate session can be ended and update status
 //! 4. [IO] Persist to repository, event store, snapshot, and invalidate cache
 //!
 //! # Examples
@@ -21,7 +21,8 @@
 //! ```
 
 use lambars::effect::AsyncIO;
-use roguelike_domain::game_session::{GameEnded, GameOutcome, GameSessionEvent};
+use lambars::pipe_async;
+use roguelike_domain::game_session::{GameEnded, GameIdentifier, GameOutcome, GameSessionEvent};
 
 use super::EndGameCommand;
 use super::resume_game::SessionStateAccessor;
@@ -29,6 +30,197 @@ use crate::errors::WorkflowError;
 use crate::ports::{
     EventStore, GameSessionRepository, SessionCache, SnapshotStore, WorkflowResult,
 };
+
+// =============================================================================
+// Step 1: Extract End Game Parameters [Pure]
+// =============================================================================
+
+/// Extracts parameters from the end game command.
+///
+/// This is a pure function that extracts the game identifier and outcome
+/// from the command.
+///
+/// # Arguments
+///
+/// * `command` - The end game command containing the game identifier and outcome.
+///
+/// # Returns
+///
+/// A tuple of (GameIdentifier, GameOutcome) extracted from the command.
+fn extract_end_game_params(command: EndGameCommand) -> (GameIdentifier, GameOutcome) {
+    (*command.game_identifier(), *command.outcome())
+}
+
+// =============================================================================
+// Step 2: Load Session [IO]
+// =============================================================================
+
+/// Creates a function that loads a session from cache or repository.
+///
+/// This function first checks the cache. If the session is not cached,
+/// it falls back to the repository.
+///
+/// # Type Parameters
+///
+/// * `C` - Cache type implementing `SessionCache`
+/// * `R` - Repository type implementing `GameSessionRepository`
+///
+/// # Arguments
+///
+/// * `cache` - The session cache
+/// * `repository` - The game session repository
+///
+/// # Returns
+///
+/// A function that takes a tuple of (GameIdentifier, GameOutcome) and returns an `AsyncIO`
+/// that produces a Result containing either the session with outcome or a WorkflowError.
+#[allow(clippy::type_complexity)]
+fn load_session<C, R>(
+    cache: C,
+    repository: R,
+) -> impl Fn(
+    (GameIdentifier, GameOutcome),
+) -> AsyncIO<Result<(C::GameSession, GameOutcome), WorkflowError>>
+where
+    C: SessionCache,
+    R: GameSessionRepository<GameSession = C::GameSession>,
+{
+    move |(game_identifier, outcome)| {
+        let cache = cache.clone();
+        let repository = repository.clone();
+
+        cache.get(&game_identifier).flat_map(move |cached| {
+            match cached {
+                Some(session) => AsyncIO::pure(Ok((session, outcome))),
+                None => {
+                    // Cache miss - load from repository
+                    repository.find_by_id(&game_identifier).fmap(move |opt| {
+                        opt.map(|session| (session, outcome)).ok_or_else(|| {
+                            WorkflowError::not_found("GameSession", game_identifier.to_string())
+                        })
+                    })
+                }
+            }
+        })
+    }
+}
+
+// =============================================================================
+// Step 3: Validate and Update Session [Pure]
+// =============================================================================
+
+/// Validates a session and updates its status based on the outcome.
+///
+/// This is a pure function that:
+/// 1. Validates the session can be ended (is in active state)
+/// 2. Updates the session status based on the outcome
+/// 3. Generates the GameEnded event
+///
+/// # Type Parameters
+///
+/// * `S` - Session type implementing `SessionStateAccessor` and `SessionStatusUpdater`
+///
+/// # Arguments
+///
+/// * `result` - Result containing the session and outcome, or an error.
+///
+/// # Returns
+///
+/// A Result containing either a tuple of (updated session, game identifier, events)
+/// or a WorkflowError.
+#[allow(clippy::type_complexity)]
+fn validate_and_update_session<S>(
+    result: Result<(S, GameOutcome), WorkflowError>,
+) -> Result<(S, GameIdentifier, Vec<GameSessionEvent>), WorkflowError>
+where
+    S: SessionStateAccessor + SessionStatusUpdater,
+{
+    let (session, outcome) = result?;
+
+    // Validate session can be ended
+    validate_can_end(&session)?;
+
+    // Generate event and update session
+    let game_ended_event = create_game_ended_event(outcome);
+    let events = wrap_game_ended_event(game_ended_event);
+    let updated_session = update_session_status(&session, outcome);
+    let game_identifier = *session.identifier();
+
+    Ok((updated_session, game_identifier, events))
+}
+
+// =============================================================================
+// Step 4: Persist End Game [IO]
+// =============================================================================
+
+/// Creates a function that persists the end game state.
+///
+/// This function handles:
+/// - Saving the updated session to the repository
+/// - Appending events to the event store
+/// - Creating a final snapshot
+/// - Invalidating the cache
+///
+/// # Type Parameters
+///
+/// * `R` - Repository type implementing `GameSessionRepository`
+/// * `E` - Event store type implementing `EventStore`
+/// * `S` - Snapshot store type implementing `SnapshotStore`
+/// * `C` - Cache type implementing `SessionCache`
+///
+/// # Arguments
+///
+/// * `repository` - The game session repository
+/// * `event_store` - The event store
+/// * `snapshot_store` - The snapshot store
+/// * `cache` - The session cache
+///
+/// # Returns
+///
+/// A function that takes a Result and returns an AsyncIO producing a WorkflowResult.
+#[allow(clippy::type_complexity)]
+fn persist_end_game<R, E, SS, C>(
+    repository: R,
+    event_store: E,
+    snapshot_store: SS,
+    cache: C,
+) -> impl Fn(
+    Result<(C::GameSession, GameIdentifier, Vec<GameSessionEvent>), WorkflowError>,
+) -> AsyncIO<WorkflowResult<C::GameSession>>
+where
+    R: GameSessionRepository<GameSession = C::GameSession>,
+    E: EventStore,
+    SS: SnapshotStore<GameSession = C::GameSession>,
+    C: SessionCache,
+    C::GameSession: SessionStateAccessor,
+{
+    move |result| match result {
+        Err(error) => AsyncIO::pure(Err(error)),
+        Ok((updated_session, game_identifier, events)) => {
+            let repository = repository.clone();
+            let event_store = event_store.clone();
+            let snapshot_store = snapshot_store.clone();
+            let cache = cache.clone();
+
+            let event_sequence = updated_session.event_sequence();
+            let final_session = updated_session.clone();
+            let session_for_snapshot = updated_session.clone();
+
+            repository
+                .save(&updated_session)
+                .flat_map(move |()| event_store.append(&game_identifier, &events))
+                .flat_map(move |()| {
+                    snapshot_store.save_snapshot(
+                        &game_identifier,
+                        &session_for_snapshot,
+                        event_sequence,
+                    )
+                })
+                .flat_map(move |()| cache.invalidate(&game_identifier))
+                .fmap(move |()| Ok(final_session))
+        }
+    }
+}
 
 // =============================================================================
 // EndGame Workflow
@@ -43,6 +235,18 @@ use crate::ports::{
 /// - Persisting the final state
 /// - Creating a final snapshot for archival
 /// - Invalidating the cache
+///
+/// The workflow is composed using `pipe_async!` macro:
+///
+/// ```text
+/// pipe_async!(
+///     AsyncIO::pure(command),
+///     => extract_end_game_params,                                           // Pure
+///     =>> load_session(cache, repository),                                  // IO
+///     => validate_and_update_session,                                       // Pure
+///     =>> persist_end_game(repository, event_store, snapshot_store, cache), // IO
+/// )
+/// ```
 ///
 /// # Type Parameters
 ///
@@ -91,68 +295,21 @@ where
     C::GameSession: SessionStateAccessor + SessionStatusUpdater,
 {
     move |command| {
+        // Clone dependencies for use in AsyncIO closures (they require 'static)
         let repository = repository.clone();
+        let repository_for_save = repository.clone();
         let event_store = event_store.clone();
         let snapshot_store = snapshot_store.clone();
         let cache = cache.clone();
-        let game_identifier = *command.game_identifier();
-        let outcome = *command.outcome();
+        let cache_for_invalidate = cache.clone();
 
-        // Step 1: [IO] Load session from cache or repository
-        cache
-            .get(&game_identifier)
-            .flat_map({
-                let repository = repository.clone();
-                move |cached| match cached {
-                    Some(session) => AsyncIO::pure(Some(session)),
-                    None => repository.find_by_id(&game_identifier),
-                }
-            })
-            .flat_map(move |session_option| {
-                match session_option {
-                    None => {
-                        // Session not found
-                        AsyncIO::pure(Err(WorkflowError::not_found(
-                            "GameSession",
-                            game_identifier.to_string(),
-                        )))
-                    }
-                    Some(session) => {
-                        // Step 2: [Pure] Validate session can be ended
-                        let validation_result = validate_can_end(&session);
-
-                        match validation_result {
-                            Err(error) => AsyncIO::pure(Err(error)),
-                            Ok(()) => {
-                                // Step 3: [Pure] Generate event and update session
-                                let game_ended_event = create_game_ended_event(outcome);
-                                let events = wrap_game_ended_event(game_ended_event);
-                                let updated_session = update_session_status(&session, outcome);
-
-                                // Step 4: [IO] Persist changes
-                                let event_sequence = updated_session.event_sequence();
-                                let final_session = updated_session.clone();
-                                let session_for_snapshot = updated_session.clone();
-
-                                repository
-                                    .save(&updated_session)
-                                    .flat_map(move |()| {
-                                        event_store.append(&game_identifier, &events)
-                                    })
-                                    .flat_map(move |()| {
-                                        snapshot_store.save_snapshot(
-                                            &game_identifier,
-                                            &session_for_snapshot,
-                                            event_sequence,
-                                        )
-                                    })
-                                    .flat_map(move |()| cache.invalidate(&game_identifier))
-                                    .fmap(move |()| Ok(final_session))
-                            }
-                        }
-                    }
-                }
-            })
+        pipe_async!(
+            AsyncIO::pure(command),
+            => extract_end_game_params,                                                          // Pure: Command -> (GameId, Outcome)
+            =>> load_session(cache, repository),                                                 // IO: (GameId, Outcome) -> AsyncIO<Result<(Session, Outcome), Error>>
+            => validate_and_update_session,                                                      // Pure: Result<(Session, Outcome), Error> -> Result<(Session, GameId, Events), Error>
+            =>> persist_end_game(repository_for_save, event_store, snapshot_store, cache_for_invalidate), // IO: Result -> AsyncIO<WorkflowResult<Session>>
+        )
     }
 }
 
@@ -561,6 +718,30 @@ mod tests {
         use super::*;
 
         #[rstest]
+        fn extract_end_game_params_extracts_correctly() {
+            let identifier = GameIdentifier::new();
+            let command = EndGameCommand::victory(identifier);
+
+            let (extracted_id, extracted_outcome) = extract_end_game_params(command);
+
+            assert_eq!(extracted_id, identifier);
+            assert_eq!(extracted_outcome, GameOutcome::Victory);
+        }
+
+        #[rstest]
+        #[case(GameOutcome::Victory)]
+        #[case(GameOutcome::Defeat)]
+        #[case(GameOutcome::Abandoned)]
+        fn extract_end_game_params_extracts_all_outcomes(#[case] outcome: GameOutcome) {
+            let identifier = GameIdentifier::new();
+            let command = EndGameCommand::new(identifier, outcome);
+
+            let (_, extracted_outcome) = extract_end_game_params(command);
+
+            assert_eq!(extracted_outcome, outcome);
+        }
+
+        #[rstest]
         #[case(GameOutcome::Victory)]
         #[case(GameOutcome::Defeat)]
         #[case(GameOutcome::Abandoned)]
@@ -633,6 +814,43 @@ mod tests {
             let updated = update_session_status(&session, GameOutcome::Defeat);
 
             assert_eq!(updated.status, GameStatus::Defeat);
+        }
+
+        #[rstest]
+        fn validate_and_update_session_with_valid_session() {
+            let identifier = GameIdentifier::new();
+            let seed = RandomSeed::new(42);
+            let session = MockGameSession::new(identifier, seed);
+
+            let result = validate_and_update_session(Ok((session, GameOutcome::Victory)));
+
+            assert!(result.is_ok());
+            let (updated_session, game_id, events) = result.unwrap();
+            assert_eq!(updated_session.status, GameStatus::Victory);
+            assert_eq!(game_id, identifier);
+            assert_eq!(events.len(), 1);
+            assert!(events[0].is_game_ended());
+        }
+
+        #[rstest]
+        fn validate_and_update_session_with_completed_session() {
+            let identifier = GameIdentifier::new();
+            let seed = RandomSeed::new(42);
+            let session = MockGameSession::with_status(identifier, seed, GameStatus::Victory);
+
+            let result = validate_and_update_session(Ok((session, GameOutcome::Defeat)));
+
+            assert!(result.is_err());
+        }
+
+        #[rstest]
+        fn validate_and_update_session_propagates_error() {
+            let error = WorkflowError::not_found("GameSession", "test".to_string());
+            let result: Result<(MockGameSession, GameIdentifier, Vec<GameSessionEvent>), _> =
+                validate_and_update_session(Err(error));
+
+            assert!(result.is_err());
+            assert!(result.unwrap_err().is_not_found());
         }
     }
 

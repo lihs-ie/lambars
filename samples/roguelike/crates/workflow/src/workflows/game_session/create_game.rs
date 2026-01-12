@@ -1,19 +1,22 @@
 //! CreateGame workflow implementation.
 //!
 //! This module provides the workflow for creating new game sessions.
-//! The workflow is composed using `pipe!` macro with independent named functions.
+//! The workflow is composed using `pipe_async!` macro with independent named functions.
 //!
 //! # Workflow Steps (from design document)
 //!
-//! 1. [IO] Generate Seed - シードが指定されていない場合、乱数シードを生成
-//! 2. [Pure] Create Identifiers - ゲームとプレイヤーの識別子を生成
-//! 3. [Pure] Generate Initial Floor - 最初のダンジョンフロアを生成
-//! 4. [Pure] Create Player - 初期プレイヤーを作成
-//! 5. [Pure] Create GameSession - ゲームセッションを作成
-//! 6. [Pure] Generate Events - GameStarted イベントを生成
-//! 7. [IO] Persist Session - セッションをリポジトリに保存
-//! 8. [IO] Append Events - イベントをイベントストアに追加
-//! 9. [IO] Cache Session - セッションをキャッシュに保存
+//! 1. [Pure] Extract Seed - コマンドからシードを抽出
+//! 2. [IO] Generate Seed - シードが指定されていない場合、乱数シードを生成
+//! 3. [Pure] Create Identifiers - ゲームとプレイヤーの識別子を生成
+//! 4. [Pure] Generate Initial Floor - 最初のダンジョンフロアを生成
+//! 5. [Pure] Create Player - 初期プレイヤーを作成
+//! 6. [Pure] Create GameSession - ゲームセッションを作成
+//! 7. [Pure] Generate Events - GameStarted イベントを生成
+//! 8. [Pure] Wrap Event - イベントをリストにラップ
+//! 9. [IO] Check No Existing Session - 既存セッションがないことを確認
+//! 10. [IO] Append Events - イベントをイベントストアに追加
+//! 11. [IO] Load Created Session - 作成されたセッションをロード
+//! 12. [IO] Cache Session - セッションをキャッシュに保存
 //!
 //! # Examples
 //!
@@ -28,7 +31,7 @@
 use std::time::Duration;
 
 use lambars::effect::AsyncIO;
-use lambars::pipe;
+use lambars::pipe_async;
 use roguelike_domain::game_session::{GameIdentifier, GameSessionEvent, GameStarted, RandomSeed};
 
 use super::CreateGameCommand;
@@ -46,25 +49,37 @@ use crate::ports::{
 const DEFAULT_CACHE_TIME_TO_LIVE: Duration = Duration::from_secs(300); // 5 minutes
 
 // =============================================================================
-// Step 1: Generate Seed [IO]
+// Step 1: Extract Seed [Pure]
 // =============================================================================
 
-/// Generates or uses provided seed.
+/// Extracts the optional seed from the command.
 ///
-/// This is the first step of the workflow that returns an AsyncIO
-/// containing the random seed.
-fn generate_seed<G: RandomGenerator>(
-    random: &G,
-    provided_seed: Option<RandomSeed>,
-) -> AsyncIO<RandomSeed> {
-    match provided_seed {
+/// Input: CreateGameCommand
+/// Output: Option<RandomSeed>
+fn extract_seed(command: CreateGameCommand) -> Option<RandomSeed> {
+    command.seed()
+}
+
+// =============================================================================
+// Step 2: Generate Seed [IO]
+// =============================================================================
+
+/// Creates a function that generates or uses provided seed.
+///
+/// Takes ownership of the random generator to satisfy 'static lifetime requirements.
+/// Returns a function suitable for use in pipe_async! that transforms
+/// Option<RandomSeed> to AsyncIO<RandomSeed>.
+fn generate_seed_io<G: RandomGenerator>(
+    random: G,
+) -> impl Fn(Option<RandomSeed>) -> AsyncIO<RandomSeed> {
+    move |provided_seed| match provided_seed {
         Some(seed) => AsyncIO::pure(seed),
         None => random.generate_seed(),
     }
 }
 
 // =============================================================================
-// Step 2: Create Identifiers [Pure]
+// Step 3: Create Identifiers [Pure]
 // =============================================================================
 
 /// Creates game and player identifiers from seed.
@@ -77,7 +92,7 @@ fn create_identifiers(seed: RandomSeed) -> (GameIdentifier, RandomSeed) {
 }
 
 // =============================================================================
-// Step 3-5: Create GameSession [Pure]
+// Step 4-6: Create GameSession [Pure]
 // Note: Floor/Player creation is simplified for current domain model
 // =============================================================================
 
@@ -92,7 +107,7 @@ fn create_session_data(input: (GameIdentifier, RandomSeed)) -> (GameIdentifier, 
 }
 
 // =============================================================================
-// Step 6: Generate Events [Pure]
+// Step 7: Generate Events [Pure]
 // =============================================================================
 
 /// Generates GameStarted event from session data.
@@ -107,6 +122,10 @@ fn generate_game_started_event(
     (game_identifier, event)
 }
 
+// =============================================================================
+// Step 8: Wrap Event [Pure]
+// =============================================================================
+
 /// Wraps event into event list for persistence.
 ///
 /// Input: (GameIdentifier, GameStarted)
@@ -119,99 +138,109 @@ fn wrap_event_in_list(
 }
 
 // =============================================================================
-// Step 7: Persist Session [IO]
+// Step 9: Check No Existing Session [IO]
 // =============================================================================
 
 /// Creates a function that checks for existing session.
 ///
-/// Returns a function suitable for use in pipe! that transforms
-/// AsyncIO<(GameIdentifier, Vec<GameSessionEvent>)> to AsyncIO<...>
-fn check_no_existing_session<R: GameSessionRepository>(
-    repository: &R,
+/// Takes ownership of the repository to satisfy 'static lifetime requirements.
+/// Returns a function suitable for use in pipe_async! that transforms
+/// (GameIdentifier, Vec<GameSessionEvent>) to AsyncIO<Result<(GameIdentifier, Vec<GameSessionEvent>), WorkflowError>>
+#[allow(clippy::type_complexity)]
+fn check_no_existing_session_io<R: GameSessionRepository>(
+    repository: R,
 ) -> impl Fn(
     (GameIdentifier, Vec<GameSessionEvent>),
-) -> AsyncIO<Result<(GameIdentifier, Vec<GameSessionEvent>), WorkflowError>>
-       + '_ {
+) -> AsyncIO<Result<(GameIdentifier, Vec<GameSessionEvent>), WorkflowError>> {
     move |(game_identifier, events)| {
         let events_clone = events.clone();
-        repository.find_by_id(&game_identifier).fmap(move |existing| {
-            if existing.is_some() {
-                Err(WorkflowError::conflict(
-                    "Game session with this identifier already exists",
-                ))
-            } else {
-                Ok((game_identifier, events_clone))
-            }
-        })
+        repository
+            .find_by_id(&game_identifier)
+            .fmap(move |existing| {
+                if existing.is_some() {
+                    Err(WorkflowError::conflict(
+                        "Game session with this identifier already exists",
+                    ))
+                } else {
+                    Ok((game_identifier, events_clone))
+                }
+            })
     }
 }
 
 // =============================================================================
-// Step 8: Append Events [IO]
+// Step 10: Append Events [IO]
 // =============================================================================
 
 /// Creates a function that appends events to event store.
-fn append_events<E: EventStore>(
-    event_store: &E,
+///
+/// Takes ownership of the event store to satisfy 'static lifetime requirements.
+/// Returns a function suitable for use in pipe_async! that transforms
+/// Result<(GameIdentifier, Vec<GameSessionEvent>), WorkflowError> to AsyncIO<Result<GameIdentifier, WorkflowError>>
+#[allow(clippy::type_complexity)]
+fn append_events_io<E: EventStore>(
+    event_store: E,
 ) -> impl Fn(
-    AsyncIO<Result<(GameIdentifier, Vec<GameSessionEvent>), WorkflowError>>,
-) -> AsyncIO<Result<GameIdentifier, WorkflowError>>
-       + '_ {
-    move |io| {
-        let event_store = event_store.clone();
-        io.flat_map(move |result| match result {
-            Err(e) => AsyncIO::pure(Err(e)),
-            Ok((game_identifier, events)) => event_store
-                .append(&game_identifier, &events)
-                .fmap(move |()| Ok(game_identifier)),
-        })
+    Result<(GameIdentifier, Vec<GameSessionEvent>), WorkflowError>,
+) -> AsyncIO<Result<GameIdentifier, WorkflowError>> {
+    move |result| match result {
+        Err(error) => AsyncIO::pure(Err(error)),
+        Ok((game_identifier, events)) => event_store
+            .append(&game_identifier, &events)
+            .fmap(move |()| Ok(game_identifier)),
     }
 }
 
 // =============================================================================
-// Step 9: Load and Cache Session [IO]
+// Step 11: Load Created Session [IO]
 // =============================================================================
 
 /// Creates a function that loads created session from repository.
-fn load_created_session<R: GameSessionRepository>(
-    repository: &R,
+///
+/// Takes ownership of the repository to satisfy 'static lifetime requirements.
+/// Returns a function suitable for use in pipe_async! that transforms
+/// Result<GameIdentifier, WorkflowError> to AsyncIO<Result<(GameIdentifier, Session), WorkflowError>>
+#[allow(clippy::type_complexity)]
+fn load_created_session_io<R: GameSessionRepository>(
+    repository: R,
 ) -> impl Fn(
-    AsyncIO<Result<GameIdentifier, WorkflowError>>,
-) -> AsyncIO<Result<(GameIdentifier, R::GameSession), WorkflowError>>
-       + '_ {
-    move |io| {
-        let repository = repository.clone();
-        io.flat_map(move |result| match result {
-            Err(e) => AsyncIO::pure(Err(e)),
-            Ok(game_identifier) => repository.find_by_id(&game_identifier).fmap(move |opt| {
-                opt.map(|session| (game_identifier, session))
-                    .ok_or_else(|| {
-                        WorkflowError::repository("save", "Failed to create game session from events")
-                    })
-            }),
-        })
+    Result<GameIdentifier, WorkflowError>,
+) -> AsyncIO<Result<(GameIdentifier, R::GameSession), WorkflowError>> {
+    move |result| match result {
+        Err(error) => AsyncIO::pure(Err(error)),
+        Ok(game_identifier) => repository.find_by_id(&game_identifier).fmap(move |opt| {
+            opt.map(|session| (game_identifier, session))
+                .ok_or_else(|| {
+                    WorkflowError::repository("save", "Failed to create game session from events")
+                })
+        }),
     }
 }
 
+// =============================================================================
+// Step 12: Cache Session [IO]
+// =============================================================================
+
 /// Creates a function that caches the session.
-fn cache_session<C: SessionCache>(
-    cache: &C,
-    ttl: Duration,
+///
+/// Takes ownership of the cache to satisfy 'static lifetime requirements.
+/// Returns a function suitable for use in pipe_async! that transforms
+/// Result<(GameIdentifier, Session), WorkflowError> to AsyncIO<WorkflowResult<Session>>
+#[allow(clippy::type_complexity)]
+fn cache_session_io<C: SessionCache>(
+    cache: C,
+    time_to_live: Duration,
 ) -> impl Fn(
-    AsyncIO<Result<(GameIdentifier, C::GameSession), WorkflowError>>,
-) -> AsyncIO<WorkflowResult<C::GameSession>>
-       + '_ {
-    move |io| {
-        let cache = cache.clone();
-        io.flat_map(move |result| match result {
-            Err(e) => AsyncIO::pure(Err(e)),
-            Ok((game_identifier, session)) => {
-                let session_clone = session.clone();
-                cache
-                    .set(&game_identifier, &session, ttl)
-                    .fmap(move |()| Ok(session_clone))
-            }
-        })
+    Result<(GameIdentifier, C::GameSession), WorkflowError>,
+) -> AsyncIO<WorkflowResult<C::GameSession>> {
+    move |result| match result {
+        Err(error) => AsyncIO::pure(Err(error)),
+        Ok((game_identifier, session)) => {
+            let session_clone = session.clone();
+            cache
+                .set(&game_identifier, &session, time_to_live)
+                .fmap(move |()| Ok(session_clone))
+        }
     }
 }
 
@@ -221,20 +250,21 @@ fn cache_session<C: SessionCache>(
 
 /// Creates a workflow function for creating new game sessions.
 ///
-/// The workflow is composed using `pipe!` macro with independent named functions:
+/// The workflow is composed using `pipe_async!` macro with independent named functions:
 ///
 /// ```text
-/// pipe!(
-///     command,
-///     generate_seed,
-///     create_identifiers,
-///     create_session_data,
-///     generate_game_started_event,
-///     wrap_event_in_list,
-///     check_no_existing_session,
-///     append_events,
-///     load_created_session,
-///     cache_session
+/// pipe_async!(
+///     AsyncIO::pure(command),
+///     => extract_seed,                              // Pure: Command -> Option<Seed>
+///     =>> generate_seed_io(random),                 // IO: Option<Seed> -> AsyncIO<Seed>
+///     => create_identifiers,                        // Pure: Seed -> (GameId, RandomSeed)
+///     => create_session_data,                       // Pure
+///     => generate_game_started_event,               // Pure
+///     => wrap_event_in_list,                        // Pure
+///     =>> check_no_existing_session_io(repository), // IO
+///     =>> append_events_io(event_store),            // IO
+///     =>> load_created_session_io(repository),      // IO
+///     =>> cache_session_io(cache),                  // IO
 /// )
 /// ```
 ///
@@ -270,33 +300,26 @@ where
     G: RandomGenerator,
 {
     move |command| {
-        // Clone dependencies for use in closures
+        // Clone dependencies for use in AsyncIO closures (they require 'static)
         let repository = repository.clone();
+        let repository_for_load = repository.clone();
         let event_store = event_store.clone();
         let cache = cache.clone();
+        let random = random.clone();
 
-        // Step 1: [IO] Generate seed
-        let seed_io = generate_seed(random, command.seed());
-
-        // Steps 2-9: Composed using pipe!
-        seed_io.flat_map(move |seed| {
-            // [Pure] Steps 2-6: Domain logic pipeline
-            let (game_identifier, events) = pipe!(
-                seed,
-                create_identifiers,
-                create_session_data,
-                generate_game_started_event,
-                wrap_event_in_list
-            );
-
-            // [IO] Steps 7-9: Persistence pipeline
-            pipe!(
-                check_no_existing_session(&repository)((game_identifier, events)),
-                append_events(&event_store),
-                load_created_session(&repository),
-                cache_session(&cache, DEFAULT_CACHE_TIME_TO_LIVE)
-            )
-        })
+        pipe_async!(
+            AsyncIO::pure(command),
+            => extract_seed,                                         // Pure: Command -> Option<Seed>
+            =>> generate_seed_io(random),                            // IO: Option<Seed> -> AsyncIO<Seed>
+            => create_identifiers,                                   // Pure: Seed -> (GameId, RandomSeed)
+            => create_session_data,                                  // Pure
+            => generate_game_started_event,                          // Pure
+            => wrap_event_in_list,                                   // Pure
+            =>> check_no_existing_session_io(repository),            // IO
+            =>> append_events_io(event_store),                       // IO
+            =>> load_created_session_io(repository_for_load),        // IO
+            =>> cache_session_io(cache, DEFAULT_CACHE_TIME_TO_LIVE), // IO
+        )
     }
 }
 
@@ -593,6 +616,7 @@ mod tests {
 
         #[rstest]
         fn pipe_composes_pure_functions() {
+            use lambars::pipe;
             let seed = RandomSeed::new(42);
             let (game_id, events) = pipe!(
                 seed,

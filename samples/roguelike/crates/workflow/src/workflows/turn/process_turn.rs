@@ -6,18 +6,24 @@
 //!
 //! # Workflow Steps
 //!
-//! 1. [IO] Load session from cache
-//! 2. [Pure] Start turn - increment turn counter
-//! 3. [Pure] Validate player command
-//! 4. [Pure] Execute player command
-//! 5. [Pure] Resolve turn order for enemies
-//! 6. [Pure] Process all enemy turns (fold)
-//! 7. [Pure] Process status effects
-//! 8. [Pure] End turn
-//! 9. [Pure] Check game over conditions
-//! 10. [Pure] Generate turn events
-//! 11. [IO] Update cache
-//! 12. [IO] Append events to event store
+//! 1. [Pure] Extract turn parameters from command
+//! 2. [IO] Load session from cache
+//! 3. [Pure] Process turn (validate, execute, generate events)
+//! 4. [IO] Persist results (update cache, append events)
+//!
+//! # Architecture
+//!
+//! The workflow is composed using `pipe_async!` macro with independent named functions:
+//!
+//! ```text
+//! pipe_async!(
+//!     AsyncIO::pure(command),
+//!     => extract_turn_params,              // Pure: Command -> (GameId, PlayerCommand)
+//!     =>> load_session_from_cache(cache),  // IO: -> AsyncIO<Result<(Session, PlayerCommand, GameId), Error>>
+//!     => process_turn_result,              // Pure: -> Result<(TurnResult, Events, GameId), Error>
+//!     =>> persist_turn_result(cache, event_store, cache_ttl), // IO
+//! )
+//! ```
 //!
 //! # Examples
 //!
@@ -36,9 +42,12 @@
 use std::time::Duration;
 
 use lambars::effect::AsyncIO;
+use lambars::pipe_async;
 use roguelike_domain::common::{Speed, StatusEffect, StatusEffectType, TurnCount};
 use roguelike_domain::enemy::EntityIdentifier;
-use roguelike_domain::game_session::{GameOutcome, GameSessionEvent, TurnEnded, TurnStarted};
+use roguelike_domain::game_session::{
+    GameIdentifier, GameOutcome, GameSessionEvent, TurnEnded, TurnStarted,
+};
 
 use super::commands::{PlayerCommand, ProcessTurnCommand};
 use crate::errors::WorkflowError;
@@ -148,6 +157,98 @@ impl EntityTurnOrder {
 }
 
 // =============================================================================
+// Step 1: Extract Turn Parameters [Pure]
+// =============================================================================
+
+/// Extracts the game identifier and player command from the command.
+///
+/// Input: ProcessTurnCommand
+/// Output: (GameIdentifier, PlayerCommand)
+fn extract_turn_params(command: ProcessTurnCommand) -> (GameIdentifier, PlayerCommand) {
+    (*command.game_identifier(), command.player_command())
+}
+
+// =============================================================================
+// Step 2: Load Session from Cache [IO]
+// =============================================================================
+
+/// Creates a function that loads session from cache.
+///
+/// Takes ownership of the cache to satisfy 'static lifetime requirements.
+/// Returns a function suitable for use in pipe_async! that transforms
+/// (GameIdentifier, PlayerCommand) to AsyncIO<Result<(Session, PlayerCommand, GameIdentifier), WorkflowError>>
+#[allow(clippy::type_complexity)]
+fn load_session_from_cache<C: SessionCache>(
+    cache: C,
+) -> impl Fn(
+    (GameIdentifier, PlayerCommand),
+) -> AsyncIO<Result<(C::GameSession, PlayerCommand, GameIdentifier), WorkflowError>> {
+    move |(game_identifier, player_command)| {
+        cache.get(&game_identifier).fmap(move |session_option| {
+            session_option
+                .map(|session| (session, player_command, game_identifier))
+                .ok_or_else(|| {
+                    WorkflowError::not_found("GameSession", game_identifier.to_string())
+                })
+        })
+    }
+}
+
+// =============================================================================
+// Step 3: Process Turn Result [Pure]
+// =============================================================================
+
+/// Processes the turn and generates results.
+///
+/// Input: Result<(Session, PlayerCommand, GameIdentifier), WorkflowError>
+/// Output: Result<(TurnResult<Session>, Vec<GameSessionEvent>, GameIdentifier), WorkflowError>
+#[allow(clippy::type_complexity)]
+fn process_turn_result<S: Clone>(
+    result: Result<(S, PlayerCommand, GameIdentifier), WorkflowError>,
+) -> Result<(TurnResult<S>, Vec<GameSessionEvent>, GameIdentifier), WorkflowError> {
+    result.and_then(|(session, player_command, game_identifier)| {
+        process_turn_pure(&session, player_command)
+            .map(|(turn_result, events)| (turn_result, events, game_identifier))
+    })
+}
+
+// =============================================================================
+// Step 4: Persist Turn Result [IO]
+// =============================================================================
+
+/// Creates a function that persists the turn result.
+///
+/// Takes ownership of the cache and event store to satisfy 'static lifetime requirements.
+/// Returns a function suitable for use in pipe_async! that transforms
+/// Result<(TurnResult<Session>, Vec<GameSessionEvent>, GameIdentifier), WorkflowError>
+/// to AsyncIO<WorkflowResult<TurnResult<Session>>>
+#[allow(clippy::type_complexity)]
+fn persist_turn_result<C: SessionCache, E: EventStore>(
+    cache: C,
+    event_store: E,
+    cache_ttl: Duration,
+) -> impl Fn(
+    Result<(TurnResult<C::GameSession>, Vec<GameSessionEvent>, GameIdentifier), WorkflowError>,
+) -> AsyncIO<WorkflowResult<TurnResult<C::GameSession>>> {
+    move |result| match result {
+        Err(error) => AsyncIO::pure(Err(error)),
+        Ok((turn_result, events, game_identifier)) => {
+            let turn_result_clone = turn_result.clone();
+            let cache_for_set = cache.clone();
+            let event_store_for_append = event_store.clone();
+
+            cache_for_set
+                .set(&game_identifier, &turn_result.session, cache_ttl)
+                .flat_map(move |()| {
+                    event_store_for_append
+                        .append(&game_identifier, &events)
+                        .fmap(move |()| Ok(turn_result_clone))
+                })
+        }
+    }
+}
+
+// =============================================================================
 // ProcessTurn Workflow
 // =============================================================================
 
@@ -158,6 +259,18 @@ impl EntityTurnOrder {
 /// - All enemy actions (in speed order)
 /// - Status effect processing
 /// - Game over condition checking
+///
+/// The workflow is composed using `pipe_async!` macro with independent named functions:
+///
+/// ```text
+/// pipe_async!(
+///     AsyncIO::pure(command),
+///     => extract_turn_params,              // Pure: Command -> (GameId, PlayerCommand)
+///     =>> load_session_from_cache(cache),  // IO: -> AsyncIO<Result<(Session, PlayerCommand, GameId), Error>>
+///     => process_turn_result,              // Pure: -> Result<(TurnResult, Events, GameId), Error>
+///     =>> persist_turn_result(cache, event_store, cache_ttl), // IO
+/// )
+/// ```
 ///
 /// # Type Parameters
 ///
@@ -189,41 +302,18 @@ where
     S: SnapshotStore,
 {
     move |command| {
+        // Clone dependencies for use in AsyncIO closures (they require 'static)
         let cache = cache.clone();
+        let cache_for_persist = cache.clone();
         let event_store = event_store.clone();
-        let game_identifier = *command.game_identifier();
-        let player_command = command.player_command();
 
-        // Step 1: [IO] Load session from cache
-        cache.get(&game_identifier).flat_map(move |session_option| {
-            match session_option {
-                Some(session) => {
-                    // Steps 2-10: [Pure] Process turn
-                    let result = process_turn_pure(&session, player_command);
-
-                    match result {
-                        Ok((turn_result, events)) => {
-                            // Steps 11-12: [IO] Update cache and append events
-                            let game_identifier_clone = game_identifier;
-                            let turn_result_clone = turn_result.clone();
-
-                            cache
-                                .set(&game_identifier_clone, &turn_result.session, cache_ttl)
-                                .flat_map(move |()| {
-                                    event_store
-                                        .append(&game_identifier_clone, &events)
-                                        .fmap(move |()| Ok(turn_result_clone))
-                                })
-                        }
-                        Err(error) => AsyncIO::pure(Err(error)),
-                    }
-                }
-                None => AsyncIO::pure(Err(WorkflowError::not_found(
-                    "GameSession",
-                    game_identifier.to_string(),
-                ))),
-            }
-        })
+        pipe_async!(
+            AsyncIO::pure(command),
+            => extract_turn_params,                                    // Pure: Command -> (GameId, PlayerCommand)
+            =>> load_session_from_cache(cache),                        // IO: -> AsyncIO<Result<(Session, PlayerCommand, GameId), Error>>
+            => process_turn_result,                                    // Pure: -> Result<(TurnResult, Events, GameId), Error>
+            =>> persist_turn_result(cache_for_persist, event_store, cache_ttl), // IO
+        )
     }
 }
 

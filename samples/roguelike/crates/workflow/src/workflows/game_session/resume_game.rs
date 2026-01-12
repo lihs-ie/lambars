@@ -5,11 +5,9 @@
 //!
 //! # Workflow Steps
 //!
-//! 1. [IO] Check cache for session
-//! 2. [IO] If cache miss, load latest snapshot and events (composed with pipe!)
-//! 3. [Pure] Reconstruct state from events (fold)
-//! 4. [Pure] Validate session is active
-//! 5. [IO] Update cache
+//! 1. [Pure] Extract game identifier from command
+//! 2. [IO] Get session from cache or load from snapshot/events
+//! 3. [IO] Validate session and update cache if needed
 //!
 //! # Event Sourcing
 //!
@@ -31,6 +29,7 @@
 use std::time::Duration;
 
 use lambars::effect::AsyncIO;
+use lambars::pipe_async;
 use roguelike_domain::game_session::{GameIdentifier, GameSessionEvent, GameStatus};
 
 use super::ResumeGameCommand;
@@ -47,6 +46,244 @@ use crate::ports::{
 const DEFAULT_CACHE_TIME_TO_LIVE: Duration = Duration::from_secs(300); // 5 minutes
 
 // =============================================================================
+// Step 1: Extract Game Identifier [Pure]
+// =============================================================================
+
+/// Extracts the game identifier from the command.
+///
+/// This is a pure function that unwraps the command to get the identifier.
+///
+/// # Arguments
+///
+/// * `command` - The resume game command containing the game identifier.
+///
+/// # Returns
+///
+/// The game identifier extracted from the command.
+fn extract_game_identifier(command: ResumeGameCommand) -> GameIdentifier {
+    *command.game_identifier()
+}
+
+// =============================================================================
+// Step 2: Get From Cache Or Load [IO]
+// =============================================================================
+
+/// Session with cache hit status.
+///
+/// This type holds a session along with a flag indicating whether it was
+/// loaded from cache (true) or reconstructed from snapshot/events (false).
+type SessionWithCacheStatus<S> = (S, bool);
+
+/// Creates a function that retrieves a session from cache or loads it.
+///
+/// This function first checks the cache. If the session is not cached,
+/// it loads from snapshot and events, then reconstructs the state.
+///
+/// # Type Parameters
+///
+/// * `C` - Cache type implementing `SessionCache`
+/// * `S` - Snapshot store type implementing `SnapshotStore`
+/// * `E` - Event store type implementing `EventStore`
+/// * `R` - Repository type implementing `GameSessionRepository`
+///
+/// # Arguments
+///
+/// * `cache` - The session cache
+/// * `snapshot_store` - The snapshot store
+/// * `event_store` - The event store
+/// * `repository` - The game session repository
+///
+/// # Returns
+///
+/// A function that takes a `GameIdentifier` and returns an `AsyncIO`
+/// that produces an optional session with cache status.
+#[allow(clippy::type_complexity)]
+fn get_from_cache_or_load<C, S, E, R>(
+    cache: C,
+    snapshot_store: S,
+    event_store: E,
+    repository: R,
+) -> impl Fn(GameIdentifier) -> AsyncIO<Option<SessionWithCacheStatus<C::GameSession>>>
+where
+    C: SessionCache,
+    S: SnapshotStore<GameSession = C::GameSession>,
+    E: EventStore,
+    R: GameSessionRepository<GameSession = C::GameSession>,
+    C::GameSession: SessionStateAccessor,
+{
+    move |game_identifier| {
+        let cache = cache.clone();
+        let snapshot_store = snapshot_store.clone();
+        let event_store = event_store.clone();
+        let repository = repository.clone();
+
+        cache.get(&game_identifier).flat_map(move |cached| {
+            match cached {
+                Some(session) => {
+                    // Cache hit - return with cache status true
+                    AsyncIO::pure(Some((session, true)))
+                }
+                None => {
+                    // Cache miss - load from snapshot and events
+                    load_from_snapshot_and_events(
+                        snapshot_store,
+                        event_store,
+                        repository,
+                        game_identifier,
+                    )
+                }
+            }
+        })
+    }
+}
+
+/// Loads a session from snapshot and events.
+///
+/// This function implements the Event Sourcing reconstruction:
+/// 1. Load the latest snapshot
+/// 2. Load events since the snapshot
+/// 3. Reconstruct the state by applying events
+///
+/// # Type Parameters
+///
+/// * `S` - Snapshot store type
+/// * `E` - Event store type
+/// * `R` - Repository type
+/// * `Session` - The session type
+///
+/// # Arguments
+///
+/// * `snapshot_store` - The snapshot store
+/// * `event_store` - The event store
+/// * `repository` - The repository (fallback when no snapshot)
+/// * `game_identifier` - The game identifier to load
+///
+/// # Returns
+///
+/// An `AsyncIO` that produces an optional session with cache status false
+/// (indicating it was loaded, not cached).
+fn load_from_snapshot_and_events<S, E, R, Session>(
+    snapshot_store: S,
+    event_store: E,
+    repository: R,
+    game_identifier: GameIdentifier,
+) -> AsyncIO<Option<SessionWithCacheStatus<Session>>>
+where
+    S: SnapshotStore<GameSession = Session>,
+    E: EventStore,
+    R: GameSessionRepository<GameSession = Session>,
+    Session: SessionStateAccessor,
+{
+    snapshot_store
+        .load_latest_snapshot(&game_identifier)
+        .flat_map(move |snapshot_option| {
+            let event_store = event_store.clone();
+            let repository = repository.clone();
+
+            // Get sequence number for event loading
+            let since_sequence = snapshot_option.as_ref().map(|(_, seq)| *seq).unwrap_or(0);
+
+            event_store
+                .load_events_since(&game_identifier, since_sequence)
+                .flat_map(move |events| {
+                    reconstruct_session(snapshot_option, events, game_identifier, repository)
+                })
+        })
+}
+
+/// Reconstructs a session from snapshot and events.
+///
+/// This function handles the reconstruction strategy based on
+/// available snapshot and events.
+fn reconstruct_session<R, Session>(
+    snapshot_option: Option<(Session, u64)>,
+    events: Vec<GameSessionEvent>,
+    game_identifier: GameIdentifier,
+    repository: R,
+) -> AsyncIO<Option<SessionWithCacheStatus<Session>>>
+where
+    R: GameSessionRepository<GameSession = Session>,
+    Session: SessionStateAccessor,
+{
+    if let Some((base_state, _sequence)) = snapshot_option {
+        // Reconstruct from snapshot + events
+        let reconstructed = reconstruct_from_events_internal(base_state, &events);
+        AsyncIO::pure(Some((reconstructed, false)))
+    } else if !events.is_empty() {
+        // No snapshot but we have events - try to get from repository
+        repository
+            .find_by_id(&game_identifier)
+            .fmap(move |opt| opt.map(|session| (session, false)))
+    } else {
+        // No snapshot and no events - session doesn't exist
+        AsyncIO::pure(None)
+    }
+}
+
+// =============================================================================
+// Step 3: Validate And Cache Session [IO]
+// =============================================================================
+
+/// Creates a function that validates and caches a session.
+///
+/// This function validates that the session is active and caches it
+/// if it was loaded (not already cached).
+///
+/// # Type Parameters
+///
+/// * `C` - Cache type implementing `SessionCache`
+///
+/// # Arguments
+///
+/// * `cache` - The session cache
+///
+/// # Returns
+///
+/// A function that takes an optional session with cache status and returns
+/// an `AsyncIO` that produces a `WorkflowResult` with the session.
+#[allow(clippy::type_complexity)]
+fn validate_and_cache_session<C>(
+    cache: C,
+) -> impl Fn(Option<SessionWithCacheStatus<C::GameSession>>) -> AsyncIO<WorkflowResult<C::GameSession>>
+where
+    C: SessionCache,
+    C::GameSession: SessionStateAccessor,
+{
+    move |session_option| {
+        let cache = cache.clone();
+
+        match session_option {
+            Some((session, was_cached)) => {
+                // Validate session is active
+                match validate_session_active(&session) {
+                    Ok(()) => {
+                        if was_cached {
+                            // Already cached, just return
+                            AsyncIO::pure(Ok(session))
+                        } else {
+                            // Not cached, cache it first
+                            let session_clone = session.clone();
+                            let game_identifier = *session.identifier();
+                            cache
+                                .set(&game_identifier, &session, DEFAULT_CACHE_TIME_TO_LIVE)
+                                .fmap(move |()| Ok(session_clone))
+                        }
+                    }
+                    Err(error) => AsyncIO::pure(Err(error)),
+                }
+            }
+            None => {
+                // Session not found
+                AsyncIO::pure(Err(WorkflowError::not_found(
+                    "GameSession",
+                    "unknown".to_string(),
+                )))
+            }
+        }
+    }
+}
+
+// =============================================================================
 // ResumeGame Workflow
 // =============================================================================
 
@@ -59,6 +296,17 @@ const DEFAULT_CACHE_TIME_TO_LIVE: Duration = Duration::from_secs(300); // 5 minu
 /// 4. Reconstruct the current state by applying events to the snapshot
 /// 5. Validate the session is still active
 /// 6. Cache the reconstructed session
+///
+/// The workflow is composed using `pipe_async!` macro:
+///
+/// ```text
+/// pipe_async!(
+///     AsyncIO::pure(command),
+///     => extract_game_identifier,                                           // Pure
+///     =>> get_from_cache_or_load(cache, snapshot_store, event_store, repo), // IO
+///     =>> validate_and_cache_session(cache_for_set),                        // IO
+/// )
+/// ```
 ///
 /// # Type Parameters
 ///
@@ -107,111 +355,19 @@ where
     C::GameSession: SessionStateAccessor,
 {
     move |command| {
+        // Clone dependencies for use in AsyncIO closures (they require 'static)
         let repository = repository.clone();
         let event_store = event_store.clone();
         let snapshot_store = snapshot_store.clone();
         let cache = cache.clone();
-        let game_identifier = *command.game_identifier();
+        let cache_for_set = cache.clone();
 
-        // Step 1: [IO] Check cache first
-        cache.get(&game_identifier).flat_map(move |cached| {
-            match cached {
-                Some(session) => {
-                    // [Pure] Session found in cache, validate and return
-                    let validation_result = validate_session_active(&session);
-                    AsyncIO::pure(validation_result.map(|()| session))
-                }
-                None => {
-                    // Step 2: [IO] Cache miss - load snapshot
-                    let repository_clone = repository.clone();
-                    let event_store_clone = event_store.clone();
-                    let cache_clone = cache.clone();
-
-                    snapshot_store
-                        .load_latest_snapshot(&game_identifier)
-                        .flat_map(move |snapshot_option| {
-                            // [Pure] Get sequence number for event loading
-                            let since_sequence =
-                                snapshot_option.as_ref().map(|(_, seq)| *seq).unwrap_or(0);
-
-                            // Step 3: [IO] Load events since snapshot
-                            event_store_clone
-                                .load_events_since(&game_identifier, since_sequence)
-                                .flat_map(move |events| {
-                                    // Step 4: [Pure/IO] Reconstruct and cache session
-                                    reconstruct_and_cache_session(
-                                        snapshot_option,
-                                        events,
-                                        game_identifier,
-                                        repository_clone,
-                                        cache_clone,
-                                    )
-                                })
-                        })
-                }
-            }
-        })
-    }
-}
-
-/// Reconstructs session from snapshot/events and caches it.
-///
-/// This helper function handles the reconstruction strategy based on
-/// available snapshot and events.
-fn reconstruct_and_cache_session<R, C>(
-    snapshot_option: Option<(C::GameSession, u64)>,
-    events: Vec<GameSessionEvent>,
-    game_identifier: GameIdentifier,
-    repository: R,
-    cache: C,
-) -> AsyncIO<WorkflowResult<C::GameSession>>
-where
-    R: GameSessionRepository<GameSession = C::GameSession>,
-    C: SessionCache,
-    C::GameSession: SessionStateAccessor,
-{
-    if let Some((base_state, _sequence)) = snapshot_option {
-        // [Pure] Reconstruct from snapshot + events
-        let reconstructed = reconstruct_from_events_internal(base_state, &events);
-
-        // [Pure] Validate session is active, then [IO] cache
-        match validate_session_active(&reconstructed) {
-            Ok(()) => {
-                let session_clone = reconstructed.clone();
-                cache
-                    .set(&game_identifier, &reconstructed, DEFAULT_CACHE_TIME_TO_LIVE)
-                    .fmap(move |()| Ok(session_clone))
-            }
-            Err(error) => AsyncIO::pure(Err(error)),
-        }
-    } else if !events.is_empty() {
-        // No snapshot but we have events - try to get from repository
-        repository
-            .find_by_id(&game_identifier)
-            .flat_map(move |session_option| match session_option {
-                Some(session) => {
-                    // [Pure] Validate session, then [IO] cache
-                    match validate_session_active(&session) {
-                        Ok(()) => {
-                            let session_clone = session.clone();
-                            cache
-                                .set(&game_identifier, &session, DEFAULT_CACHE_TIME_TO_LIVE)
-                                .fmap(move |()| Ok(session_clone))
-                        }
-                        Err(error) => AsyncIO::pure(Err(error)),
-                    }
-                }
-                None => AsyncIO::pure(Err(WorkflowError::not_found(
-                    "GameSession",
-                    game_identifier.to_string(),
-                ))),
-            })
-    } else {
-        // No snapshot and no events - session doesn't exist
-        AsyncIO::pure(Err(WorkflowError::not_found(
-            "GameSession",
-            game_identifier.to_string(),
-        )))
+        pipe_async!(
+            AsyncIO::pure(command),
+            => extract_game_identifier,                                                  // Pure
+            =>> get_from_cache_or_load(cache, snapshot_store, event_store, repository),  // IO
+            =>> validate_and_cache_session(cache_for_set),                               // IO
+        )
     }
 }
 
@@ -633,6 +789,16 @@ mod tests {
 
     mod pure_functions {
         use super::*;
+
+        #[rstest]
+        fn extract_game_identifier_returns_identifier() {
+            let identifier = GameIdentifier::new();
+            let command = ResumeGameCommand::new(identifier);
+
+            let result = extract_game_identifier(command);
+
+            assert_eq!(result, identifier);
+        }
 
         #[rstest]
         fn reconstruct_from_events_with_no_events() {
