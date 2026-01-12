@@ -6,6 +6,7 @@ use tower_http::trace::TraceLayer;
 use crate::handlers;
 use crate::middleware::{RequestIdLayer, ResponseTimeLayer};
 use crate::state::AppState;
+use roguelike_workflow::SessionStateAccessor;
 use roguelike_workflow::ports::{EventStore, GameSessionRepository, RandomGenerator, SessionCache};
 
 // =============================================================================
@@ -17,6 +18,7 @@ pub fn create_router<Repository, Cache, Events, Random>(
 ) -> Router
 where
     Repository: GameSessionRepository + Send + Sync + 'static,
+    Repository::GameSession: SessionStateAccessor,
     Cache: SessionCache<GameSession = Repository::GameSession> + Send + Sync + 'static,
     Events: EventStore + Send + Sync + 'static,
     Random: RandomGenerator + Send + Sync + 'static,
@@ -104,7 +106,9 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use http_body_util::BodyExt;
     use lambars::effect::AsyncIO;
-    use roguelike_domain::game_session::{GameIdentifier, GameSessionEvent, RandomSeed};
+    use roguelike_domain::game_session::{
+        GameIdentifier, GameSessionEvent, GameStatus, RandomSeed,
+    };
     use roguelike_workflow::ports::{
         EventStore, GameSessionRepository, RandomGenerator, SessionCache,
     };
@@ -125,20 +129,49 @@ mod tests {
     }
 
     impl MockGameSession {
+        fn new(identifier: GameIdentifier) -> Self {
+            Self { identifier }
+        }
+    }
+
+    impl SessionStateAccessor for MockGameSession {
+        fn status(&self) -> GameStatus {
+            GameStatus::InProgress
+        }
+
         fn identifier(&self) -> &GameIdentifier {
             &self.identifier
+        }
+
+        fn event_sequence(&self) -> u64 {
+            0
+        }
+
+        fn apply_event(&self, _event: &GameSessionEvent) -> Self {
+            self.clone()
         }
     }
 
     #[derive(Clone)]
     struct MockRepository {
         sessions: Arc<RwLock<HashMap<GameIdentifier, MockGameSession>>>,
+        events: Arc<RwLock<HashMap<GameIdentifier, Vec<GameSessionEvent>>>>,
     }
 
     impl MockRepository {
         fn new() -> Self {
             Self {
                 sessions: Arc::new(RwLock::new(HashMap::new())),
+                events: Arc::new(RwLock::new(HashMap::new())),
+            }
+        }
+
+        fn with_events(
+            events: Arc<RwLock<HashMap<GameIdentifier, Vec<GameSessionEvent>>>>,
+        ) -> Self {
+            Self {
+                sessions: Arc::new(RwLock::new(HashMap::new())),
+                events,
             }
         }
     }
@@ -148,8 +181,17 @@ mod tests {
 
         fn find_by_id(&self, identifier: &GameIdentifier) -> AsyncIO<Option<Self::GameSession>> {
             let sessions = Arc::clone(&self.sessions);
+            let events = Arc::clone(&self.events);
             let identifier = *identifier;
-            AsyncIO::new(move || async move { sessions.read().unwrap().get(&identifier).cloned() })
+            AsyncIO::new(move || async move {
+                if let Some(session) = sessions.read().unwrap().get(&identifier).cloned() {
+                    return Some(session);
+                }
+                if events.read().unwrap().contains_key(&identifier) {
+                    return Some(MockGameSession::new(identifier));
+                }
+                None
+            })
         }
 
         fn save(&self, session: &Self::GameSession) -> AsyncIO<()> {
@@ -159,7 +201,7 @@ mod tests {
                 sessions
                     .write()
                     .unwrap()
-                    .insert(*session.identifier(), session);
+                    .insert(session.identifier, session);
             })
         }
 
@@ -232,6 +274,10 @@ mod tests {
             Self {
                 events: Arc::new(RwLock::new(HashMap::new())),
             }
+        }
+
+        fn events_arc(&self) -> Arc<RwLock<HashMap<GameIdentifier, Vec<GameSessionEvent>>>> {
+            Arc::clone(&self.events)
         }
     }
 
@@ -318,12 +364,9 @@ mod tests {
     }
 
     fn create_test_app() -> Router {
-        let state = AppState::new(
-            MockRepository::new(),
-            MockCache::new(),
-            MockEventStore::new(),
-            MockRandom::new(),
-        );
+        let event_store = MockEventStore::new();
+        let repository = MockRepository::with_events(event_store.events_arc());
+        let state = AppState::new(repository, MockCache::new(), event_store, MockRandom::new());
         create_router(state)
     }
 

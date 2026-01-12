@@ -11,8 +11,9 @@ pub use ports::{
 
 // Re-export workflow types
 pub use workflows::game_session::{
-    CreateGameCommand, CreateSnapshotCommand, EndGameCommand, ResumeGameCommand, create_game,
-    create_snapshot, end_game, reconstruct_from_events, resume_game,
+    CreateGameCommand, CreateSnapshotCommand, EndGameCommand, ResumeGameCommand,
+    SessionStateAccessor, create_game, create_snapshot, end_game, reconstruct_from_events,
+    resume_game,
 };
 
 // Re-export player workflow types

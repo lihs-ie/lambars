@@ -1,3 +1,4 @@
+use std::marker::PhantomData;
 use std::time::Duration;
 
 use lambars::effect::AsyncIO;
@@ -7,10 +8,6 @@ use roguelike_workflow::ports::SessionCache;
 use serde::{Deserialize, Serialize};
 
 use super::RedisConnection;
-
-// =============================================================================
-// CachedGameSession
-// =============================================================================
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CachedGameSession {
@@ -29,23 +26,19 @@ pub struct CachedGameSession {
     pub event_sequence: u64,
 }
 
-// =============================================================================
-// RedisSessionCache
-// =============================================================================
-
 #[derive(Clone, Debug)]
-pub struct RedisSessionCache {
+pub struct RedisSessionCache<S = CachedGameSession> {
     connection: RedisConnection,
+    _phantom: PhantomData<S>,
 }
 
-// =============================================================================
-// Constructors
-// =============================================================================
-
-impl RedisSessionCache {
+impl<S> RedisSessionCache<S> {
     #[must_use]
     pub fn new(connection: RedisConnection) -> Self {
-        Self { connection }
+        Self {
+            connection,
+            _phantom: PhantomData,
+        }
     }
 
     #[must_use]
@@ -55,12 +48,11 @@ impl RedisSessionCache {
     }
 }
 
-// =============================================================================
-// SessionCache Implementation
-// =============================================================================
-
-impl SessionCache for RedisSessionCache {
-    type GameSession = CachedGameSession;
+impl<S> SessionCache for RedisSessionCache<S>
+where
+    S: Clone + Send + Sync + 'static + for<'de> Deserialize<'de> + Serialize,
+{
+    type GameSession = S;
 
     fn get(&self, identifier: &GameIdentifier) -> AsyncIO<Option<Self::GameSession>> {
         let connection = self.connection.clone();
@@ -79,7 +71,7 @@ impl SessionCache for RedisSessionCache {
                 async_connection.get(&key).await;
 
             match result {
-                Ok(Some(json)) => match serde_json::from_str::<CachedGameSession>(&json) {
+                Ok(Some(json)) => match serde_json::from_str::<S>(&json) {
                     Ok(session) => Some(session),
                     Err(error) => {
                         tracing::warn!(
@@ -167,18 +159,10 @@ impl SessionCache for RedisSessionCache {
     }
 }
 
-// =============================================================================
-// Tests
-// =============================================================================
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use rstest::rstest;
-
-    // =========================================================================
-    // CachedGameSession Tests
-    // =========================================================================
 
     mod cached_game_session {
         use super::*;
@@ -320,10 +304,6 @@ mod tests {
             assert_ne!(session1, session3);
         }
     }
-
-    // =========================================================================
-    // RedisSessionCache Tests
-    // =========================================================================
 
     mod redis_session_cache {
         use super::*;

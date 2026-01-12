@@ -1,6 +1,8 @@
 use lambars::effect::AsyncIO;
-use roguelike_domain::game_session::{GameIdentifier, GameSession, GameStatus, RandomSeed};
+use roguelike_domain::game_session::{GameIdentifier, GameSession, GameSessionEvent, GameStatus, RandomSeed};
 use roguelike_workflow::ports::GameSessionRepository;
+use roguelike_workflow::SessionStateAccessor;
+use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -191,15 +193,45 @@ impl GameSessionRepository for MySqlGameSessionRepository {
 // GameSessionRecord
 // =============================================================================
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "GameSessionRecordRaw")]
 pub struct GameSessionRecord {
     pub game_id: String,
+    #[serde(skip)]
+    game_identifier: GameIdentifier,
     pub player_id: String,
     pub current_floor_level: i32,
     pub turn_count: u64,
     pub status: String,
     pub random_seed: u64,
     pub event_sequence: u64,
+}
+
+#[derive(Deserialize)]
+struct GameSessionRecordRaw {
+    game_id: String,
+    player_id: String,
+    current_floor_level: i32,
+    turn_count: u64,
+    status: String,
+    random_seed: u64,
+    event_sequence: u64,
+}
+
+impl From<GameSessionRecordRaw> for GameSessionRecord {
+    fn from(raw: GameSessionRecordRaw) -> Self {
+        let game_identifier = raw.game_id.parse().unwrap_or_else(|_| GameIdentifier::new());
+        Self {
+            game_id: raw.game_id,
+            game_identifier,
+            player_id: raw.player_id,
+            current_floor_level: raw.current_floor_level,
+            turn_count: raw.turn_count,
+            status: raw.status,
+            random_seed: raw.random_seed,
+            event_sequence: raw.event_sequence,
+        }
+    }
 }
 
 impl GameSessionRecord {
@@ -213,8 +245,10 @@ impl GameSessionRecord {
         random_seed: u64,
         event_sequence: u64,
     ) -> Self {
+        let game_identifier = game_id.parse().unwrap_or_else(|_| GameIdentifier::new());
         Self {
             game_id,
+            game_identifier,
             player_id,
             current_floor_level,
             turn_count,
@@ -225,12 +259,14 @@ impl GameSessionRecord {
     }
 
     fn from_row(row: &sqlx::mysql::MySqlRow) -> Self {
-        // Read UUIDs from binary(16) columns
         let game_uuid: Uuid = row.get("game_id");
         let player_uuid: Uuid = row.get("player_id");
+        let game_id = game_uuid.to_string();
+        let game_identifier = game_id.parse().unwrap_or_else(|_| GameIdentifier::new());
 
         Self {
-            game_id: game_uuid.to_string(),
+            game_id,
+            game_identifier,
             player_id: player_uuid.to_string(),
             current_floor_level: row.get::<u32, _>("current_floor_level") as i32,
             turn_count: row.get::<u64, _>("turn_count"),
@@ -244,6 +280,7 @@ impl GameSessionRecord {
     pub fn from_game_session(session: &GameSession, player_id: &str) -> Self {
         Self {
             game_id: session.identifier().to_string(),
+            game_identifier: *session.identifier(),
             player_id: player_id.to_string(),
             current_floor_level: session.current_floor().level().value() as i32,
             turn_count: session.turn_count().value(),
@@ -266,6 +303,28 @@ impl GameSessionRecord {
     #[must_use]
     pub fn is_active(&self) -> bool {
         self.status == "in_progress" || self.status == "paused"
+    }
+}
+
+// =============================================================================
+// SessionStateAccessor Implementation
+// =============================================================================
+
+impl SessionStateAccessor for GameSessionRecord {
+    fn status(&self) -> GameStatus {
+        string_to_status(&self.status)
+    }
+
+    fn identifier(&self) -> &GameIdentifier {
+        &self.game_identifier
+    }
+
+    fn event_sequence(&self) -> u64 {
+        self.event_sequence
+    }
+
+    fn apply_event(&self, _event: &GameSessionEvent) -> Self {
+        self.clone()
     }
 }
 

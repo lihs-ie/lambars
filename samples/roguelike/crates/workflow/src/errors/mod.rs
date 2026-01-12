@@ -33,6 +33,10 @@ pub enum WorkflowError {
         operation: String,
         message: String,
     },
+
+    NotImplemented {
+        feature: String,
+    },
 }
 
 // =============================================================================
@@ -78,6 +82,13 @@ impl WorkflowError {
             message: message.into(),
         }
     }
+
+    #[must_use]
+    pub fn not_implemented(feature: impl Into<String>) -> Self {
+        Self::NotImplemented {
+            feature: feature.into(),
+        }
+    }
 }
 
 // =============================================================================
@@ -116,6 +127,11 @@ impl WorkflowError {
     }
 
     #[must_use]
+    pub const fn is_not_implemented(&self) -> bool {
+        matches!(self, Self::NotImplemented { .. })
+    }
+
+    #[must_use]
     pub fn is_recoverable(&self) -> bool {
         match self {
             Self::Domain(domain_error) => domain_error.is_recoverable(),
@@ -124,6 +140,7 @@ impl WorkflowError {
             Self::Conflict { .. } => false,
             Self::Repository { .. } => false,
             Self::EventStore { .. } => false,
+            Self::NotImplemented { .. } => false,
         }
     }
 }
@@ -157,6 +174,9 @@ impl fmt::Display for WorkflowError {
             }
             Self::EventStore { operation, message } => {
                 write!(formatter, "EventStore {} failed: {}", operation, message)
+            }
+            Self::NotImplemented { feature } => {
+                write!(formatter, "Not implemented: {}", feature)
             }
         }
     }

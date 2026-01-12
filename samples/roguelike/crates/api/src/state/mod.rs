@@ -3,6 +3,8 @@ use std::time::Duration;
 
 use lambars::effect::AsyncIO;
 use roguelike_domain::game_session::{GameIdentifier, GameSessionEvent, RandomSeed};
+use roguelike_providers::GameSessionProvider;
+use roguelike_workflow::SessionStateAccessor;
 use roguelike_workflow::ports::{EventStore, GameSessionRepository, RandomGenerator, SessionCache};
 
 // =============================================================================
@@ -13,6 +15,7 @@ use roguelike_workflow::ports::{EventStore, GameSessionRepository, RandomGenerat
 pub struct AppState<Repository, Cache, Events, Random>
 where
     Repository: GameSessionRepository,
+    Repository::GameSession: SessionStateAccessor,
     Cache: SessionCache<GameSession = Repository::GameSession>,
     Events: EventStore,
     Random: RandomGenerator,
@@ -24,22 +27,38 @@ where
     pub event_store: Arc<Events>,
 
     pub random: Arc<Random>,
+
+    pub game_session_provider: GameSessionProvider<Repository, Events, Cache, Random>,
 }
 
 impl<Repository, Cache, Events, Random> AppState<Repository, Cache, Events, Random>
 where
     Repository: GameSessionRepository,
+    Repository::GameSession: SessionStateAccessor,
     Cache: SessionCache<GameSession = Repository::GameSession>,
     Events: EventStore,
     Random: RandomGenerator,
 {
     #[must_use]
     pub fn new(repository: Repository, cache: Cache, event_store: Events, random: Random) -> Self {
+        let repository = Arc::new(repository);
+        let cache = Arc::new(cache);
+        let event_store = Arc::new(event_store);
+        let random = Arc::new(random);
+
+        let game_session_provider = GameSessionProvider::new(
+            Arc::clone(&repository),
+            Arc::clone(&event_store),
+            Arc::clone(&cache),
+            Arc::clone(&random),
+        );
+
         Self {
-            repository: Arc::new(repository),
-            cache: Arc::new(cache),
-            event_store: Arc::new(event_store),
-            random: Arc::new(random),
+            repository,
+            cache,
+            event_store,
+            random,
+            game_session_provider,
         }
     }
 
@@ -50,11 +69,19 @@ where
         event_store: Arc<Events>,
         random: Arc<Random>,
     ) -> Self {
+        let game_session_provider = GameSessionProvider::new(
+            Arc::clone(&repository),
+            Arc::clone(&event_store),
+            Arc::clone(&cache),
+            Arc::clone(&random),
+        );
+
         Self {
             repository,
             cache,
             event_store,
             random,
+            game_session_provider,
         }
     }
 }
@@ -141,6 +168,7 @@ pub trait DynamicRandom: Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use roguelike_domain::game_session::GameStatus;
     use rstest::rstest;
     use std::collections::HashMap;
     use std::sync::RwLock;
@@ -163,21 +191,46 @@ mod tests {
                 turn: 0,
             }
         }
+    }
+
+    impl SessionStateAccessor for MockGameSession {
+        fn status(&self) -> GameStatus {
+            GameStatus::InProgress
+        }
 
         fn identifier(&self) -> &GameIdentifier {
             &self.identifier
+        }
+
+        fn event_sequence(&self) -> u64 {
+            0
+        }
+
+        fn apply_event(&self, _event: &GameSessionEvent) -> Self {
+            self.clone()
         }
     }
 
     #[derive(Clone)]
     struct MockRepository {
         sessions: Arc<RwLock<HashMap<GameIdentifier, MockGameSession>>>,
+        events: Arc<RwLock<HashMap<GameIdentifier, Vec<GameSessionEvent>>>>,
     }
 
     impl MockRepository {
         fn new() -> Self {
             Self {
                 sessions: Arc::new(RwLock::new(HashMap::new())),
+                events: Arc::new(RwLock::new(HashMap::new())),
+            }
+        }
+
+        fn with_events(
+            events: Arc<RwLock<HashMap<GameIdentifier, Vec<GameSessionEvent>>>>,
+        ) -> Self {
+            Self {
+                sessions: Arc::new(RwLock::new(HashMap::new())),
+                events,
             }
         }
     }
@@ -187,8 +240,17 @@ mod tests {
 
         fn find_by_id(&self, identifier: &GameIdentifier) -> AsyncIO<Option<Self::GameSession>> {
             let sessions = Arc::clone(&self.sessions);
+            let events = Arc::clone(&self.events);
             let identifier = *identifier;
-            AsyncIO::new(move || async move { sessions.read().unwrap().get(&identifier).cloned() })
+            AsyncIO::new(move || async move {
+                if let Some(session) = sessions.read().unwrap().get(&identifier).cloned() {
+                    return Some(session);
+                }
+                if events.read().unwrap().contains_key(&identifier) {
+                    return Some(MockGameSession::new(identifier));
+                }
+                None
+            })
         }
 
         fn save(&self, session: &Self::GameSession) -> AsyncIO<()> {
@@ -198,7 +260,7 @@ mod tests {
                 sessions
                     .write()
                     .unwrap()
-                    .insert(*session.identifier(), session);
+                    .insert(session.identifier, session);
             })
         }
 
@@ -271,6 +333,10 @@ mod tests {
             Self {
                 events: Arc::new(RwLock::new(HashMap::new())),
             }
+        }
+
+        fn events_arc(&self) -> Arc<RwLock<HashMap<GameIdentifier, Vec<GameSessionEvent>>>> {
+            Arc::clone(&self.events)
         }
     }
 
@@ -373,10 +439,11 @@ mod tests {
             let state = AppState::new(repository, cache, event_store, random);
 
             // Verify Arc wrapped correctly by checking reference count
-            assert_eq!(Arc::strong_count(&state.repository), 1);
-            assert_eq!(Arc::strong_count(&state.cache), 1);
-            assert_eq!(Arc::strong_count(&state.event_store), 1);
-            assert_eq!(Arc::strong_count(&state.random), 1);
+            // Note: counts are 2 because GameSessionProvider also holds references
+            assert_eq!(Arc::strong_count(&state.repository), 2);
+            assert_eq!(Arc::strong_count(&state.cache), 2);
+            assert_eq!(Arc::strong_count(&state.event_store), 2);
+            assert_eq!(Arc::strong_count(&state.random), 2);
         }
 
         #[rstest]
@@ -390,8 +457,9 @@ mod tests {
             let state2 = state1.clone();
 
             // Both states should share the same Arc references
-            assert_eq!(Arc::strong_count(&state1.repository), 2);
-            assert_eq!(Arc::strong_count(&state2.repository), 2);
+            // Note: counts are 4 because 2 states + 2 providers (each state has its own provider clone)
+            assert_eq!(Arc::strong_count(&state1.repository), 4);
+            assert_eq!(Arc::strong_count(&state2.repository), 4);
             assert!(Arc::ptr_eq(&state1.repository, &state2.repository));
         }
 

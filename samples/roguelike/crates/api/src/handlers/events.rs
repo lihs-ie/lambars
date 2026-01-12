@@ -1,11 +1,13 @@
 use axum::Json;
 use axum::extract::{Path, Query, State};
+use roguelike_domain::game_session::{GameIdentifier, GameSessionEvent};
+use roguelike_workflow::SessionStateAccessor;
+use roguelike_workflow::ports::{EventStore, GameSessionRepository, RandomGenerator, SessionCache};
 
 use crate::dto::request::GetEventsParams;
-use crate::dto::response::EventsResponse;
+use crate::dto::response::{EventsResponse, GameEventResponse};
 use crate::errors::ApiError;
 use crate::state::AppState;
-use roguelike_workflow::ports::{EventStore, GameSessionRepository, RandomGenerator, SessionCache};
 
 // =============================================================================
 // Constants
@@ -20,25 +22,21 @@ const MAX_EVENTS_LIMIT: u32 = 1000;
 // =============================================================================
 
 pub async fn get_events<Repository, Cache, Events, Random>(
-    State(_state): State<AppState<Repository, Cache, Events, Random>>,
+    State(state): State<AppState<Repository, Cache, Events, Random>>,
     Path(game_id): Path<String>,
     Query(params): Query<GetEventsParams>,
 ) -> Result<Json<EventsResponse>, ApiError>
 where
     Repository: GameSessionRepository,
+    Repository::GameSession: SessionStateAccessor,
     Cache: SessionCache<GameSession = Repository::GameSession>,
     Events: EventStore,
     Random: RandomGenerator,
 {
-    // Validate game_id format
-    if uuid::Uuid::parse_str(&game_id).is_err() {
-        return Err(ApiError::validation_field(
-            "game_id",
-            "must be a valid UUID",
-        ));
-    }
+    let identifier: GameIdentifier = game_id
+        .parse()
+        .map_err(|_| ApiError::validation_field("game_id", "must be a valid UUID"))?;
 
-    // Validate and normalize limit
     let limit = params.limit.unwrap_or(DEFAULT_EVENTS_LIMIT);
     if limit > MAX_EVENTS_LIMIT {
         return Err(ApiError::validation_field(
@@ -47,12 +45,77 @@ where
         ));
     }
 
-    let _since = params.since.unwrap_or(0);
-    let _limit = limit;
+    let since = params.since.unwrap_or(0);
 
-    // TODO: Implement actual event retrieval from event store
-    // For now, return not found
-    Err(ApiError::not_found("GameSession", &game_id))
+    let events = if since > 0 {
+        state
+            .game_session_provider
+            .get_events_since(&identifier, since)
+            .run_async()
+            .await?
+    } else {
+        state
+            .game_session_provider
+            .get_events(&identifier)
+            .run_async()
+            .await?
+    };
+
+    let total_events = events.len();
+    let events: Vec<GameEventResponse> = events
+        .into_iter()
+        .take(limit as usize)
+        .enumerate()
+        .map(|(index, event)| event_to_response(since + index as u64, event))
+        .collect();
+
+    let has_more = total_events > limit as usize;
+    let next_sequence = since + events.len() as u64;
+
+    let response = EventsResponse {
+        events,
+        next_sequence,
+        has_more,
+    };
+    Ok(Json(response))
+}
+
+fn event_to_response(sequence: u64, event: GameSessionEvent) -> GameEventResponse {
+    let (event_type, data) = match &event {
+        GameSessionEvent::Started(started) => (
+            "GameStarted",
+            serde_json::json!({
+                "game_identifier": started.game_identifier().to_string(),
+                "seed": started.seed().value()
+            }),
+        ),
+        GameSessionEvent::Ended(ended) => (
+            "GameEnded",
+            serde_json::json!({
+                "outcome": format!("{:?}", ended.outcome())
+            }),
+        ),
+        GameSessionEvent::TurnStarted(turn_event) => (
+            "TurnStarted",
+            serde_json::json!({
+                "turn": turn_event.turn().value()
+            }),
+        ),
+        GameSessionEvent::TurnEnded(turn_event) => (
+            "TurnEnded",
+            serde_json::json!({
+                "turn": turn_event.turn().value()
+            }),
+        ),
+        _ => ("Unknown", serde_json::Value::Null),
+    };
+
+    GameEventResponse {
+        sequence,
+        event_type: event_type.to_string(),
+        data,
+        occurred_at: chrono::Utc::now(),
+    }
 }
 
 // =============================================================================
@@ -65,7 +128,9 @@ mod tests {
     use crate::state::AppState;
     use axum::http::StatusCode;
     use lambars::effect::AsyncIO;
-    use roguelike_domain::game_session::{GameIdentifier, GameSessionEvent, RandomSeed};
+    use roguelike_domain::game_session::{
+        GameIdentifier, GameSessionEvent, GameStatus, RandomSeed,
+    };
     use roguelike_workflow::ports::{
         EventStore, GameSessionRepository, RandomGenerator, SessionCache,
     };
@@ -85,20 +150,49 @@ mod tests {
     }
 
     impl MockGameSession {
+        fn new(identifier: GameIdentifier) -> Self {
+            Self { identifier }
+        }
+    }
+
+    impl SessionStateAccessor for MockGameSession {
+        fn status(&self) -> GameStatus {
+            GameStatus::InProgress
+        }
+
         fn identifier(&self) -> &GameIdentifier {
             &self.identifier
+        }
+
+        fn event_sequence(&self) -> u64 {
+            0
+        }
+
+        fn apply_event(&self, _event: &GameSessionEvent) -> Self {
+            self.clone()
         }
     }
 
     #[derive(Clone)]
     struct MockRepository {
         sessions: Arc<RwLock<HashMap<GameIdentifier, MockGameSession>>>,
+        events: Arc<RwLock<HashMap<GameIdentifier, Vec<GameSessionEvent>>>>,
     }
 
     impl MockRepository {
         fn new() -> Self {
             Self {
                 sessions: Arc::new(RwLock::new(HashMap::new())),
+                events: Arc::new(RwLock::new(HashMap::new())),
+            }
+        }
+
+        fn with_events(
+            events: Arc<RwLock<HashMap<GameIdentifier, Vec<GameSessionEvent>>>>,
+        ) -> Self {
+            Self {
+                sessions: Arc::new(RwLock::new(HashMap::new())),
+                events,
             }
         }
     }
@@ -108,8 +202,17 @@ mod tests {
 
         fn find_by_id(&self, identifier: &GameIdentifier) -> AsyncIO<Option<Self::GameSession>> {
             let sessions = Arc::clone(&self.sessions);
+            let events = Arc::clone(&self.events);
             let identifier = *identifier;
-            AsyncIO::new(move || async move { sessions.read().unwrap().get(&identifier).cloned() })
+            AsyncIO::new(move || async move {
+                if let Some(session) = sessions.read().unwrap().get(&identifier).cloned() {
+                    return Some(session);
+                }
+                if events.read().unwrap().contains_key(&identifier) {
+                    return Some(MockGameSession::new(identifier));
+                }
+                None
+            })
         }
 
         fn save(&self, session: &Self::GameSession) -> AsyncIO<()> {
@@ -119,7 +222,7 @@ mod tests {
                 sessions
                     .write()
                     .unwrap()
-                    .insert(*session.identifier(), session);
+                    .insert(session.identifier, session);
             })
         }
 
@@ -192,6 +295,10 @@ mod tests {
             Self {
                 events: Arc::new(RwLock::new(HashMap::new())),
             }
+        }
+
+        fn events_arc(&self) -> Arc<RwLock<HashMap<GameIdentifier, Vec<GameSessionEvent>>>> {
+            Arc::clone(&self.events)
         }
     }
 
@@ -278,12 +385,9 @@ mod tests {
     }
 
     fn create_test_state() -> AppState<MockRepository, MockCache, MockEventStore, MockRandom> {
-        AppState::new(
-            MockRepository::new(),
-            MockCache::new(),
-            MockEventStore::new(),
-            MockRandom::new(),
-        )
+        let event_store = MockEventStore::new();
+        let repository = MockRepository::with_events(event_store.events_arc());
+        AppState::new(repository, MockCache::new(), event_store, MockRandom::new())
     }
 
     // =========================================================================
@@ -295,16 +399,17 @@ mod tests {
 
         #[rstest]
         #[tokio::test]
-        async fn returns_not_found_for_missing_game() {
+        async fn returns_empty_events_for_missing_game() {
             let state = create_test_state();
             let game_id = uuid::Uuid::new_v4().to_string();
             let params = GetEventsParams::default();
 
             let result = get_events(State(state), Path(game_id), Query(params)).await;
 
-            assert!(result.is_err());
-            let error = result.unwrap_err();
-            assert_eq!(error.status_code(), StatusCode::NOT_FOUND);
+            assert!(result.is_ok());
+            let Json(response) = result.unwrap();
+            assert!(response.events.is_empty());
+            assert!(!response.has_more);
         }
 
         #[rstest]
@@ -354,10 +459,10 @@ mod tests {
 
             let result = get_events(State(state), Path(game_id), Query(params)).await;
 
-            // Should return not found (game doesn't exist) rather than validation error
-            assert!(result.is_err());
-            let error = result.unwrap_err();
-            assert_eq!(error.status_code(), StatusCode::NOT_FOUND);
+            // Should return empty events (game doesn't exist) rather than validation error
+            assert!(result.is_ok());
+            let Json(response) = result.unwrap();
+            assert!(response.events.is_empty());
         }
     }
 }

@@ -1,58 +1,58 @@
 use axum::Json;
 use axum::extract::{Path, State};
+use roguelike_domain::game_session::{GameIdentifier, GameStatus};
+use roguelike_workflow::SessionStateAccessor;
+use roguelike_workflow::ports::{EventStore, GameSessionRepository, RandomGenerator, SessionCache};
 
 use crate::dto::request::ExecuteCommandRequest;
 use crate::dto::response::{
-    FloorSummaryResponse, GameEventResponse, GameSessionResponse, GameStatusResponse,
-    PlayerResponse, PositionResponse, ResourceResponse, TurnResultResponse,
+    FloorSummaryResponse, GameSessionResponse, GameStatusResponse, PlayerResponse,
+    PositionResponse, ResourceResponse, TurnResultResponse,
 };
 use crate::errors::ApiError;
 use crate::state::AppState;
-use roguelike_workflow::ports::{EventStore, GameSessionRepository, RandomGenerator, SessionCache};
 
 // =============================================================================
 // Execute Command Handler
 // =============================================================================
 
 pub async fn execute_command<Repository, Cache, Events, Random>(
-    State(_state): State<AppState<Repository, Cache, Events, Random>>,
+    State(state): State<AppState<Repository, Cache, Events, Random>>,
     Path(game_id): Path<String>,
     Json(request): Json<ExecuteCommandRequest>,
 ) -> Result<Json<TurnResultResponse>, ApiError>
 where
     Repository: GameSessionRepository,
+    Repository::GameSession: SessionStateAccessor,
     Cache: SessionCache<GameSession = Repository::GameSession>,
     Events: EventStore,
     Random: RandomGenerator,
 {
-    // Validate game_id format
-    if uuid::Uuid::parse_str(&game_id).is_err() {
-        return Err(ApiError::validation_field(
-            "game_id",
-            "must be a valid UUID",
-        ));
-    }
+    let identifier: GameIdentifier = game_id
+        .parse()
+        .map_err(|_| ApiError::validation_field("game_id", "must be a valid UUID"))?;
 
-    // TODO: Implement actual command execution workflow
-    // This involves:
-    // 1. Load game session from cache/repository
-    // 2. Validate command against current game state
-    // 3. Execute the command via workflow
-    // 4. Process enemy turns
-    // 5. Update game state
-    // 6. Store events
-    // 7. Update cache
+    let command_string = format!("{:?}", request.command);
+    let session = state
+        .game_session_provider
+        .execute_command(&identifier, &command_string)
+        .run_async()
+        .await?;
 
-    // For now, return a mock response
-    let _command = &request.command;
+    let status = match session.status() {
+        GameStatus::InProgress => GameStatusResponse::InProgress,
+        GameStatus::Victory => GameStatusResponse::Victory,
+        GameStatus::Defeat => GameStatusResponse::Defeat,
+        GameStatus::Paused => GameStatusResponse::Paused,
+    };
 
     let response = TurnResultResponse {
         game: GameSessionResponse {
-            game_id: game_id.clone(),
+            game_id: session.identifier().to_string(),
             player: PlayerResponse {
                 player_id: uuid::Uuid::new_v4().to_string(),
-                name: "Hero".to_string(),
-                position: PositionResponse { x: 5, y: 4 },
+                name: "Player".to_string(),
+                position: PositionResponse { x: 5, y: 5 },
                 health: ResourceResponse {
                     current: 100,
                     max: 100,
@@ -68,19 +68,12 @@ where
                 level: 1,
                 width: 50,
                 height: 40,
-                explored_percentage: 2.5,
+                explored_percentage: 0.0,
             },
-            turn_count: 1,
-            status: GameStatusResponse::InProgress,
+            turn_count: 0,
+            status,
         },
-        turn_events: vec![GameEventResponse {
-            sequence: 1,
-            event_type: "PlayerMoved".to_string(),
-            data: serde_json::json!({
-                "direction": "north"
-            }),
-            occurred_at: chrono::Utc::now(),
-        }],
+        turn_events: vec![],
         game_over: false,
         game_over_reason: None,
     };
@@ -118,20 +111,49 @@ mod tests {
     }
 
     impl MockGameSession {
+        fn new(identifier: GameIdentifier) -> Self {
+            Self { identifier }
+        }
+    }
+
+    impl SessionStateAccessor for MockGameSession {
+        fn status(&self) -> GameStatus {
+            GameStatus::InProgress
+        }
+
         fn identifier(&self) -> &GameIdentifier {
             &self.identifier
+        }
+
+        fn event_sequence(&self) -> u64 {
+            0
+        }
+
+        fn apply_event(&self, _event: &GameSessionEvent) -> Self {
+            self.clone()
         }
     }
 
     #[derive(Clone)]
     struct MockRepository {
         sessions: Arc<RwLock<HashMap<GameIdentifier, MockGameSession>>>,
+        events: Arc<RwLock<HashMap<GameIdentifier, Vec<GameSessionEvent>>>>,
     }
 
     impl MockRepository {
         fn new() -> Self {
             Self {
                 sessions: Arc::new(RwLock::new(HashMap::new())),
+                events: Arc::new(RwLock::new(HashMap::new())),
+            }
+        }
+
+        fn with_events(
+            events: Arc<RwLock<HashMap<GameIdentifier, Vec<GameSessionEvent>>>>,
+        ) -> Self {
+            Self {
+                sessions: Arc::new(RwLock::new(HashMap::new())),
+                events,
             }
         }
     }
@@ -141,8 +163,17 @@ mod tests {
 
         fn find_by_id(&self, identifier: &GameIdentifier) -> AsyncIO<Option<Self::GameSession>> {
             let sessions = Arc::clone(&self.sessions);
+            let events = Arc::clone(&self.events);
             let identifier = *identifier;
-            AsyncIO::new(move || async move { sessions.read().unwrap().get(&identifier).cloned() })
+            AsyncIO::new(move || async move {
+                if let Some(session) = sessions.read().unwrap().get(&identifier).cloned() {
+                    return Some(session);
+                }
+                if events.read().unwrap().contains_key(&identifier) {
+                    return Some(MockGameSession::new(identifier));
+                }
+                None
+            })
         }
 
         fn save(&self, session: &Self::GameSession) -> AsyncIO<()> {
@@ -152,7 +183,7 @@ mod tests {
                 sessions
                     .write()
                     .unwrap()
-                    .insert(*session.identifier(), session);
+                    .insert(session.identifier, session);
             })
         }
 
@@ -225,6 +256,10 @@ mod tests {
             Self {
                 events: Arc::new(RwLock::new(HashMap::new())),
             }
+        }
+
+        fn events_arc(&self) -> Arc<RwLock<HashMap<GameIdentifier, Vec<GameSessionEvent>>>> {
+            Arc::clone(&self.events)
         }
     }
 
@@ -311,12 +346,9 @@ mod tests {
     }
 
     fn create_test_state() -> AppState<MockRepository, MockCache, MockEventStore, MockRandom> {
-        AppState::new(
-            MockRepository::new(),
-            MockCache::new(),
-            MockEventStore::new(),
-            MockRandom::new(),
-        )
+        let event_store = MockEventStore::new();
+        let repository = MockRepository::with_events(event_store.events_arc());
+        AppState::new(repository, MockCache::new(), event_store, MockRandom::new())
     }
 
     // =========================================================================
@@ -328,7 +360,7 @@ mod tests {
 
         #[rstest]
         #[tokio::test]
-        async fn executes_move_command() {
+        async fn returns_not_implemented_for_move_command() {
             let state = create_test_state();
             let game_id = uuid::Uuid::new_v4().to_string();
             let request = ExecuteCommandRequest {
@@ -337,17 +369,16 @@ mod tests {
                 },
             };
 
-            let result = execute_command(State(state), Path(game_id.clone()), Json(request)).await;
+            let result = execute_command(State(state), Path(game_id), Json(request)).await;
 
-            assert!(result.is_ok());
-            let Json(response) = result.unwrap();
-            assert_eq!(response.game.game_id, game_id);
-            assert!(!response.game_over);
+            assert!(result.is_err());
+            let error = result.unwrap_err();
+            assert_eq!(error.status_code(), axum::http::StatusCode::NOT_IMPLEMENTED);
         }
 
         #[rstest]
         #[tokio::test]
-        async fn executes_wait_command() {
+        async fn returns_not_implemented_for_wait_command() {
             let state = create_test_state();
             let game_id = uuid::Uuid::new_v4().to_string();
             let request = ExecuteCommandRequest {
@@ -356,12 +387,14 @@ mod tests {
 
             let result = execute_command(State(state), Path(game_id), Json(request)).await;
 
-            assert!(result.is_ok());
+            assert!(result.is_err());
+            let error = result.unwrap_err();
+            assert_eq!(error.status_code(), axum::http::StatusCode::NOT_IMPLEMENTED);
         }
 
         #[rstest]
         #[tokio::test]
-        async fn executes_attack_command() {
+        async fn returns_not_implemented_for_attack_command() {
             let state = create_test_state();
             let game_id = uuid::Uuid::new_v4().to_string();
             let target_id = uuid::Uuid::new_v4().to_string();
@@ -371,7 +404,9 @@ mod tests {
 
             let result = execute_command(State(state), Path(game_id), Json(request)).await;
 
-            assert!(result.is_ok());
+            assert!(result.is_err());
+            let error = result.unwrap_err();
+            assert_eq!(error.status_code(), axum::http::StatusCode::NOT_IMPLEMENTED);
         }
 
         #[rstest]

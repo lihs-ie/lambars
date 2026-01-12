@@ -32,6 +32,9 @@ impl From<WorkflowError> for ApiError {
             WorkflowError::EventStore { operation, message } => ApiError::InternalError {
                 message: format!("EventStore {} failed: {}", operation, message),
             },
+            WorkflowError::NotImplemented { feature } => ApiError::InternalError {
+                message: format!("Not implemented: {}", feature),
+            },
         }
     }
 }

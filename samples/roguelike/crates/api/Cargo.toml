@@ -16,6 +16,7 @@ path = "src/main.rs"
 roguelike-domain.workspace = true
 roguelike-workflow.workspace = true
 roguelike-infrastructure.workspace = true
+roguelike-providers.workspace = true
 lambars.workspace = true
 tokio.workspace = true
 axum.workspace = true
@@ -34,6 +35,9 @@ futures.workspace = true
 [dev-dependencies]
 rstest.workspace = true
 http-body-util.workspace = true
+reqwest.workspace = true
+sqlx.workspace = true
+redis.workspace = true
 
 [lints]
 workspace = true

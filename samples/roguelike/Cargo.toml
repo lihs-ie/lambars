@@ -4,6 +4,7 @@ members = [
     "crates/domain",
     "crates/workflow",
     "crates/infrastructure",
+    "crates/providers",
     "crates/api",
 ]
 
@@ -20,6 +21,7 @@ repository = "https://github.com/lihs-ie/lambars"
 roguelike-domain = { path = "crates/domain" }
 roguelike-workflow = { path = "crates/workflow" }
 roguelike-infrastructure = { path = "crates/infrastructure" }
+roguelike-providers = { path = "crates/providers" }
 roguelike-api = { path = "crates/api" }
 
 # lambars
@@ -63,6 +65,7 @@ anyhow = "1.0"
 rstest = "0.26"
 proptest = "1.5"
 http-body-util = "0.1"
+reqwest = { version = "0.12", features = ["json"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

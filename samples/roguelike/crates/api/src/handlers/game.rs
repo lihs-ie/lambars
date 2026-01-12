@@ -1,6 +1,10 @@
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use roguelike_domain::game_session::{GameIdentifier, GameStatus, RandomSeed};
+use roguelike_workflow::CreateGameCommand;
+use roguelike_workflow::SessionStateAccessor;
+use roguelike_workflow::ports::{EventStore, GameSessionRepository, RandomGenerator, SessionCache};
 
 use crate::dto::request::{CreateGameRequest, EndGameRequest, GameOutcomeRequest};
 use crate::dto::response::{
@@ -9,23 +13,22 @@ use crate::dto::response::{
 };
 use crate::errors::ApiError;
 use crate::state::AppState;
-use roguelike_workflow::ports::{EventStore, GameSessionRepository, RandomGenerator, SessionCache};
 
 // =============================================================================
 // Create Game Handler
 // =============================================================================
 
 pub async fn create_game<Repository, Cache, Events, Random>(
-    State(_state): State<AppState<Repository, Cache, Events, Random>>,
+    State(state): State<AppState<Repository, Cache, Events, Random>>,
     Json(request): Json<CreateGameRequest>,
 ) -> Result<(StatusCode, Json<GameSessionResponse>), ApiError>
 where
     Repository: GameSessionRepository,
+    Repository::GameSession: SessionStateAccessor,
     Cache: SessionCache<GameSession = Repository::GameSession>,
     Events: EventStore,
     Random: RandomGenerator,
 {
-    // Validate request
     if request.player_name.is_empty() {
         return Err(ApiError::validation_field(
             "player_name",
@@ -40,15 +43,35 @@ where
         ));
     }
 
-    // TODO: Implement actual game creation workflow
-    // For now, return a mock response
-    let game_id = uuid::Uuid::new_v4().to_string();
+    let seed = request.seed.map(RandomSeed::new);
+    let command = CreateGameCommand::new(request.player_name.clone(), seed);
 
-    let response = GameSessionResponse {
-        game_id: game_id.clone(),
+    let session = state
+        .game_session_provider
+        .create_game(command)
+        .run_async()
+        .await?;
+
+    let response = session_to_response(&session, &request.player_name);
+    Ok((StatusCode::CREATED, Json(response)))
+}
+
+fn session_to_response<S: SessionStateAccessor>(
+    session: &S,
+    player_name: &str,
+) -> GameSessionResponse {
+    let status = match session.status() {
+        GameStatus::InProgress => GameStatusResponse::InProgress,
+        GameStatus::Victory => GameStatusResponse::Victory,
+        GameStatus::Defeat => GameStatusResponse::Defeat,
+        GameStatus::Paused => GameStatusResponse::Paused,
+    };
+
+    GameSessionResponse {
+        game_id: session.identifier().to_string(),
         player: PlayerResponse {
             player_id: uuid::Uuid::new_v4().to_string(),
-            name: request.player_name,
+            name: player_name.to_string(),
             position: PositionResponse { x: 5, y: 5 },
             health: ResourceResponse {
                 current: 100,
@@ -68,10 +91,8 @@ where
             explored_percentage: 0.0,
         },
         turn_count: 0,
-        status: GameStatusResponse::InProgress,
-    };
-
-    Ok((StatusCode::CREATED, Json(response)))
+        status,
+    }
 }
 
 // =============================================================================
@@ -79,26 +100,28 @@ where
 // =============================================================================
 
 pub async fn get_game<Repository, Cache, Events, Random>(
-    State(_state): State<AppState<Repository, Cache, Events, Random>>,
+    State(state): State<AppState<Repository, Cache, Events, Random>>,
     Path(game_id): Path<String>,
 ) -> Result<Json<GameSessionResponse>, ApiError>
 where
     Repository: GameSessionRepository,
+    Repository::GameSession: SessionStateAccessor,
     Cache: SessionCache<GameSession = Repository::GameSession>,
     Events: EventStore,
     Random: RandomGenerator,
 {
-    // Validate game_id format
-    if uuid::Uuid::parse_str(&game_id).is_err() {
-        return Err(ApiError::validation_field(
-            "game_id",
-            "must be a valid UUID",
-        ));
-    }
+    let identifier: GameIdentifier = game_id
+        .parse()
+        .map_err(|_| ApiError::validation_field("game_id", "must be a valid UUID"))?;
 
-    // TODO: Implement actual game retrieval from repository/cache
-    // For now, return not found
-    Err(ApiError::not_found("GameSession", &game_id))
+    let session = state
+        .game_session_provider
+        .get_game_with_cache(&identifier)
+        .run_async()
+        .await?;
+
+    let response = session_to_response(&session, "Player");
+    Ok(Json(response))
 }
 
 // =============================================================================
@@ -106,26 +129,27 @@ where
 // =============================================================================
 
 pub async fn end_game<Repository, Cache, Events, Random>(
-    State(_state): State<AppState<Repository, Cache, Events, Random>>,
+    State(state): State<AppState<Repository, Cache, Events, Random>>,
     Path(game_id): Path<String>,
     Json(request): Json<EndGameRequest>,
 ) -> Result<Json<GameEndResponse>, ApiError>
 where
     Repository: GameSessionRepository,
+    Repository::GameSession: SessionStateAccessor,
     Cache: SessionCache<GameSession = Repository::GameSession>,
     Events: EventStore,
     Random: RandomGenerator,
 {
-    // Validate game_id format
-    if uuid::Uuid::parse_str(&game_id).is_err() {
-        return Err(ApiError::validation_field(
-            "game_id",
-            "must be a valid UUID",
-        ));
-    }
+    let identifier: GameIdentifier = game_id
+        .parse()
+        .map_err(|_| ApiError::validation_field("game_id", "must be a valid UUID"))?;
 
-    // TODO: Implement actual game ending workflow
-    // For now, return a mock response
+    state
+        .game_session_provider
+        .end_game(&identifier)
+        .run_async()
+        .await?;
+
     let outcome_string = match request.outcome {
         GameOutcomeRequest::Victory => "victory",
         GameOutcomeRequest::Defeat => "defeat",
@@ -133,7 +157,7 @@ where
     };
 
     let response = GameEndResponse {
-        game_id,
+        game_id: identifier.to_string(),
         final_score: 0,
         dungeon_depth: 1,
         turns_survived: 0,
@@ -173,20 +197,49 @@ mod tests {
     }
 
     impl MockGameSession {
+        fn new(identifier: GameIdentifier) -> Self {
+            Self { identifier }
+        }
+    }
+
+    impl SessionStateAccessor for MockGameSession {
+        fn status(&self) -> GameStatus {
+            GameStatus::InProgress
+        }
+
         fn identifier(&self) -> &GameIdentifier {
             &self.identifier
+        }
+
+        fn event_sequence(&self) -> u64 {
+            0
+        }
+
+        fn apply_event(&self, _event: &GameSessionEvent) -> Self {
+            self.clone()
         }
     }
 
     #[derive(Clone)]
     struct MockRepository {
         sessions: Arc<RwLock<HashMap<GameIdentifier, MockGameSession>>>,
+        events: Arc<RwLock<HashMap<GameIdentifier, Vec<GameSessionEvent>>>>,
     }
 
     impl MockRepository {
         fn new() -> Self {
             Self {
                 sessions: Arc::new(RwLock::new(HashMap::new())),
+                events: Arc::new(RwLock::new(HashMap::new())),
+            }
+        }
+
+        fn with_events(
+            events: Arc<RwLock<HashMap<GameIdentifier, Vec<GameSessionEvent>>>>,
+        ) -> Self {
+            Self {
+                sessions: Arc::new(RwLock::new(HashMap::new())),
+                events,
             }
         }
     }
@@ -196,8 +249,17 @@ mod tests {
 
         fn find_by_id(&self, identifier: &GameIdentifier) -> AsyncIO<Option<Self::GameSession>> {
             let sessions = Arc::clone(&self.sessions);
+            let events = Arc::clone(&self.events);
             let identifier = *identifier;
-            AsyncIO::new(move || async move { sessions.read().unwrap().get(&identifier).cloned() })
+            AsyncIO::new(move || async move {
+                if let Some(session) = sessions.read().unwrap().get(&identifier).cloned() {
+                    return Some(session);
+                }
+                if events.read().unwrap().contains_key(&identifier) {
+                    return Some(MockGameSession::new(identifier));
+                }
+                None
+            })
         }
 
         fn save(&self, session: &Self::GameSession) -> AsyncIO<()> {
@@ -207,7 +269,7 @@ mod tests {
                 sessions
                     .write()
                     .unwrap()
-                    .insert(*session.identifier(), session);
+                    .insert(session.identifier, session);
             })
         }
 
@@ -280,6 +342,10 @@ mod tests {
             Self {
                 events: Arc::new(RwLock::new(HashMap::new())),
             }
+        }
+
+        fn events_arc(&self) -> Arc<RwLock<HashMap<GameIdentifier, Vec<GameSessionEvent>>>> {
+            Arc::clone(&self.events)
         }
     }
 
@@ -366,12 +432,9 @@ mod tests {
     }
 
     fn create_test_state() -> AppState<MockRepository, MockCache, MockEventStore, MockRandom> {
-        AppState::new(
-            MockRepository::new(),
-            MockCache::new(),
-            MockEventStore::new(),
-            MockRandom::new(),
-        )
+        let event_store = MockEventStore::new();
+        let repository = MockRepository::with_events(event_store.events_arc());
+        AppState::new(repository, MockCache::new(), event_store, MockRandom::new())
     }
 
     // =========================================================================
@@ -489,25 +552,23 @@ mod tests {
 
         #[rstest]
         #[tokio::test]
-        async fn ends_game_with_abandon() {
+        async fn returns_not_implemented_for_abandon() {
             let state = create_test_state();
             let game_id = uuid::Uuid::new_v4().to_string();
             let request = EndGameRequest {
                 outcome: GameOutcomeRequest::Abandon,
             };
 
-            let result = end_game(State(state), Path(game_id.clone()), Json(request)).await;
+            let result = end_game(State(state), Path(game_id), Json(request)).await;
 
-            // TODO: This should return not found once actual implementation is done
-            assert!(result.is_ok());
-            let Json(response) = result.unwrap();
-            assert_eq!(response.game_id, game_id);
-            assert_eq!(response.outcome, "abandon");
+            assert!(result.is_err());
+            let error = result.unwrap_err();
+            assert_eq!(error.status_code(), StatusCode::NOT_IMPLEMENTED);
         }
 
         #[rstest]
         #[tokio::test]
-        async fn ends_game_with_victory() {
+        async fn returns_not_implemented_for_victory() {
             let state = create_test_state();
             let game_id = uuid::Uuid::new_v4().to_string();
             let request = EndGameRequest {
@@ -516,14 +577,14 @@ mod tests {
 
             let result = end_game(State(state), Path(game_id), Json(request)).await;
 
-            assert!(result.is_ok());
-            let Json(response) = result.unwrap();
-            assert_eq!(response.outcome, "victory");
+            assert!(result.is_err());
+            let error = result.unwrap_err();
+            assert_eq!(error.status_code(), StatusCode::NOT_IMPLEMENTED);
         }
 
         #[rstest]
         #[tokio::test]
-        async fn ends_game_with_defeat() {
+        async fn returns_not_implemented_for_defeat() {
             let state = create_test_state();
             let game_id = uuid::Uuid::new_v4().to_string();
             let request = EndGameRequest {
@@ -532,9 +593,9 @@ mod tests {
 
             let result = end_game(State(state), Path(game_id), Json(request)).await;
 
-            assert!(result.is_ok());
-            let Json(response) = result.unwrap();
-            assert_eq!(response.outcome, "defeat");
+            assert!(result.is_err());
+            let error = result.unwrap_err();
+            assert_eq!(error.status_code(), StatusCode::NOT_IMPLEMENTED);
         }
 
         #[rstest]

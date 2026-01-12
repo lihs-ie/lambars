@@ -10,7 +10,7 @@ pub use commands::{CreateGameCommand, CreateSnapshotCommand, EndGameCommand, Res
 // Re-export workflow functions
 pub use create_game::create_game;
 pub use end_game::end_game;
-pub use resume_game::{reconstruct_from_events, resume_game};
+pub use resume_game::{SessionStateAccessor, reconstruct_from_events, resume_game};
 pub use snapshot::{
     DEFAULT_SNAPSHOT_INTERVAL, create_snapshot, create_snapshot_with_default_interval,
 };
