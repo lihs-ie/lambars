@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use sqlx::{MySqlPool, Row};
 
 const DATABASE_URL: &str = "mysql://roguelike:roguelikepassword@localhost:3306/roguelike";

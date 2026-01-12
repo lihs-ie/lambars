@@ -45,6 +45,38 @@ pub enum CommandRequest {
     Ascend,
 }
 
+impl CommandRequest {
+    pub fn to_command_string(&self) -> String {
+        match self {
+            CommandRequest::Move { direction } => {
+                format!("move {}", direction.as_str())
+            }
+            CommandRequest::Attack { target_id } => {
+                format!("attack {}", target_id)
+            }
+            CommandRequest::UseItem { item_id, target_id } => match target_id {
+                Some(target) => format!("use_item {} {}", item_id, target),
+                None => format!("use_item {}", item_id),
+            },
+            CommandRequest::PickUp { item_id } => {
+                format!("pick_up {}", item_id)
+            }
+            CommandRequest::Drop { item_id } => {
+                format!("drop {}", item_id)
+            }
+            CommandRequest::Equip { item_id } => {
+                format!("equip {}", item_id)
+            }
+            CommandRequest::Unequip { slot } => {
+                format!("unequip {}", slot.as_str())
+            }
+            CommandRequest::Wait => "wait".to_string(),
+            CommandRequest::Descend => "descend".to_string(),
+            CommandRequest::Ascend => "ascend".to_string(),
+        }
+    }
+}
+
 // =============================================================================
 // DirectionRequest
 // =============================================================================
@@ -58,6 +90,17 @@ pub enum DirectionRequest {
     West,
 }
 
+impl DirectionRequest {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DirectionRequest::North => "north",
+            DirectionRequest::South => "south",
+            DirectionRequest::East => "east",
+            DirectionRequest::West => "west",
+        }
+    }
+}
+
 // =============================================================================
 // EquipmentSlotRequest
 // =============================================================================
@@ -69,6 +112,17 @@ pub enum EquipmentSlotRequest {
     Armor,
     Helmet,
     Accessory,
+}
+
+impl EquipmentSlotRequest {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EquipmentSlotRequest::Weapon => "weapon",
+            EquipmentSlotRequest::Armor => "armor",
+            EquipmentSlotRequest::Helmet => "helmet",
+            EquipmentSlotRequest::Accessory => "accessory",
+        }
+    }
 }
 
 // =============================================================================

@@ -114,7 +114,7 @@ async fn test_session_cache_get_not_found() {
 
     let connection =
         RedisConnectionFactory::create_client(&config).expect("Failed to create Redis client");
-    let cache = RedisSessionCache::new(connection);
+    let cache: RedisSessionCache<CachedGameSession> = RedisSessionCache::new(connection);
 
     let nonexistent_identifier = GameIdentifier::new();
     let result = cache.get(&nonexistent_identifier).run_async().await;
@@ -130,7 +130,7 @@ async fn test_session_cache_invalidate_nonexistent() {
 
     let connection =
         RedisConnectionFactory::create_client(&config).expect("Failed to create Redis client");
-    let cache = RedisSessionCache::new(connection);
+    let cache: RedisSessionCache<CachedGameSession> = RedisSessionCache::new(connection);
 
     let nonexistent_identifier = GameIdentifier::new();
 

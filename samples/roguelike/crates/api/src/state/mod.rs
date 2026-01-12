@@ -168,7 +168,11 @@ pub trait DynamicRandom: Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roguelike_domain::game_session::GameStatus;
+    use roguelike_domain::common::TurnCount;
+    use roguelike_domain::enemy::Enemy;
+    use roguelike_domain::floor::Floor;
+    use roguelike_domain::game_session::{GameOutcome, GameStatus, RandomSeed};
+    use roguelike_domain::player::Player;
     use rstest::rstest;
     use std::collections::HashMap;
     use std::sync::RwLock;
@@ -182,6 +186,7 @@ mod tests {
     struct MockGameSession {
         identifier: GameIdentifier,
         turn: u32,
+        seed: RandomSeed,
     }
 
     impl MockGameSession {
@@ -189,6 +194,7 @@ mod tests {
             Self {
                 identifier,
                 turn: 0,
+                seed: RandomSeed::new(42),
             }
         }
     }
@@ -207,6 +213,49 @@ mod tests {
         }
 
         fn apply_event(&self, _event: &GameSessionEvent) -> Self {
+            self.clone()
+        }
+
+        fn player(&self) -> &Player {
+            unimplemented!("MockGameSession does not contain Player")
+        }
+
+        fn current_floor(&self) -> &Floor {
+            unimplemented!("MockGameSession does not contain Floor")
+        }
+
+        fn enemies(&self) -> &[Enemy] {
+            unimplemented!("MockGameSession does not contain Enemies")
+        }
+
+        fn turn_count(&self) -> TurnCount {
+            TurnCount::new(self.turn as u64)
+        }
+
+        fn seed(&self) -> &RandomSeed {
+            &self.seed
+        }
+
+        fn with_player(&self, _player: Player) -> Self {
+            self.clone()
+        }
+
+        fn with_floor(&self, _floor: Floor) -> Self {
+            self.clone()
+        }
+
+        fn with_enemies(&self, _enemies: Vec<Enemy>) -> Self {
+            self.clone()
+        }
+
+        fn increment_turn(&self) -> Self {
+            Self {
+                turn: self.turn + 1,
+                ..self.clone()
+            }
+        }
+
+        fn end_game(&self, _outcome: GameOutcome) -> Self {
             self.clone()
         }
     }

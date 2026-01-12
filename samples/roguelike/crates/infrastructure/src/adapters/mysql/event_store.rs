@@ -43,17 +43,13 @@ impl EventStore for MySqlEventStore {
             };
 
             for (sequence, event) in events.iter().enumerate() {
-                if let GameSessionEvent::Started(started) = event {
-                    if let Err(error) = create_session_record(
-                        pool.as_inner(),
-                        game_uuid,
-                        started.seed().value(),
-                    )
-                    .await
-                    {
-                        tracing::error!("Failed to create game session record: {}", error);
-                        return;
-                    }
+                if let GameSessionEvent::Started(started) = event
+                    && let Err(error) =
+                        create_session_record(pool.as_inner(), game_uuid, started.seed().value())
+                            .await
+                {
+                    tracing::error!("Failed to create game session record: {}", error);
+                    return;
                 }
 
                 let (event_type, event_data) = serialize_event(event);
@@ -63,11 +59,11 @@ impl EventStore for MySqlEventStore {
                 let result = sqlx::query(
                     r#"
                     INSERT INTO game_events (event_id, game_id, sequence_number, event_type, event_data)
-                    VALUES (?, ?, ?, ?, ?)
+                    VALUES (UUID_TO_BIN(?), UUID_TO_BIN(?), ?, ?, ?)
                     "#,
                 )
-                .bind(event_id)
-                .bind(game_uuid)
+                .bind(event_id.to_string())
+                .bind(game_uuid.to_string())
                 .bind(sequence as i64)
                 .bind(event_type)
                 .bind(event_data)
@@ -98,11 +94,11 @@ impl EventStore for MySqlEventStore {
                 r#"
                 SELECT sequence_number, event_type, event_data
                 FROM game_events
-                WHERE game_id = ?
+                WHERE game_id = UUID_TO_BIN(?)
                 ORDER BY sequence_number
                 "#,
             )
-            .bind(game_uuid)
+            .bind(game_uuid.to_string())
             .fetch_all(pool.as_inner())
             .await;
 
@@ -147,11 +143,11 @@ impl EventStore for MySqlEventStore {
                 r#"
                 SELECT sequence_number, event_type, event_data
                 FROM game_events
-                WHERE game_id = ? AND sequence_number >= ?
+                WHERE game_id = UUID_TO_BIN(?) AND sequence_number >= ?
                 ORDER BY sequence_number
                 "#,
             )
-            .bind(game_uuid)
+            .bind(game_uuid.to_string())
             .bind(sequence as i64)
             .fetch_all(pool.as_inner())
             .await;
@@ -169,7 +165,11 @@ impl EventStore for MySqlEventStore {
                     })
                     .collect(),
                 Err(error) => {
-                    tracing::error!("Failed to load events since sequence {}: {}", sequence, error);
+                    tracing::error!(
+                        "Failed to load events since sequence {}: {}",
+                        sequence,
+                        error
+                    );
                     Vec::new()
                 }
             }
@@ -187,11 +187,11 @@ async fn create_session_record(
     sqlx::query(
         r#"
         INSERT INTO game_sessions (game_id, player_id, current_floor_level, turn_count, status, random_seed, event_sequence)
-        VALUES (?, ?, 1, 0, 'in_progress', ?, 0)
+        VALUES (UUID_TO_BIN(?), UUID_TO_BIN(?), 1, 0, 'in_progress', ?, 0)
         "#,
     )
-    .bind(game_uuid)
-    .bind(player_uuid)
+    .bind(game_uuid.to_string())
+    .bind(player_uuid.to_string())
     .bind(seed as i64)
     .execute(pool)
     .await?;
@@ -212,7 +212,12 @@ fn serialize_event(event: &GameSessionEvent) -> (&'static str, String) {
     }
 }
 
-fn parse_event(game_id: &str, _sequence: u64, event_type: &str, event_data: &str) -> Option<GameSessionEvent> {
+fn parse_event(
+    game_id: &str,
+    _sequence: u64,
+    event_type: &str,
+    event_data: &str,
+) -> Option<GameSessionEvent> {
     match event_type {
         "Started" => {
             let data: serde_json::Value = serde_json::from_str(event_data).ok()?;
@@ -239,7 +244,8 @@ mod tests {
     #[rstest]
     fn parse_started_event() {
         let game_id = "550e8400-e29b-41d4-a716-446655440000";
-        let event_data = r#"{"game_identifier": "550e8400-e29b-41d4-a716-446655440000", "seed": 42}"#;
+        let event_data =
+            r#"{"game_identifier": "550e8400-e29b-41d4-a716-446655440000", "seed": 42}"#;
         let event = parse_event(game_id, 0, "Started", event_data);
 
         assert!(event.is_some());

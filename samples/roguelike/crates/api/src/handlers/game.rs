@@ -1,16 +1,14 @@
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use roguelike_domain::game_session::{GameIdentifier, GameStatus, RandomSeed};
+use roguelike_domain::game_session::{GameIdentifier, GameOutcome, RandomSeed};
 use roguelike_workflow::CreateGameCommand;
 use roguelike_workflow::SessionStateAccessor;
 use roguelike_workflow::ports::{EventStore, GameSessionRepository, RandomGenerator, SessionCache};
 
+use crate::dto::converters::session_to_game_response;
 use crate::dto::request::{CreateGameRequest, EndGameRequest, GameOutcomeRequest};
-use crate::dto::response::{
-    FloorSummaryResponse, GameEndResponse, GameSessionResponse, GameStatusResponse, PlayerResponse,
-    PositionResponse, ResourceResponse,
-};
+use crate::dto::response::{GameEndResponse, GameSessionResponse};
 use crate::errors::ApiError;
 use crate::state::AppState;
 
@@ -52,47 +50,8 @@ where
         .run_async()
         .await?;
 
-    let response = session_to_response(&session, &request.player_name);
+    let response = session_to_game_response(&session, &request.player_name);
     Ok((StatusCode::CREATED, Json(response)))
-}
-
-fn session_to_response<S: SessionStateAccessor>(
-    session: &S,
-    player_name: &str,
-) -> GameSessionResponse {
-    let status = match session.status() {
-        GameStatus::InProgress => GameStatusResponse::InProgress,
-        GameStatus::Victory => GameStatusResponse::Victory,
-        GameStatus::Defeat => GameStatusResponse::Defeat,
-        GameStatus::Paused => GameStatusResponse::Paused,
-    };
-
-    GameSessionResponse {
-        game_id: session.identifier().to_string(),
-        player: PlayerResponse {
-            player_id: uuid::Uuid::new_v4().to_string(),
-            name: player_name.to_string(),
-            position: PositionResponse { x: 5, y: 5 },
-            health: ResourceResponse {
-                current: 100,
-                max: 100,
-            },
-            mana: ResourceResponse {
-                current: 50,
-                max: 50,
-            },
-            level: 1,
-            experience: 0,
-        },
-        floor: FloorSummaryResponse {
-            level: 1,
-            width: 50,
-            height: 40,
-            explored_percentage: 0.0,
-        },
-        turn_count: 0,
-        status,
-    }
 }
 
 // =============================================================================
@@ -120,7 +79,7 @@ where
         .run_async()
         .await?;
 
-    let response = session_to_response(&session, "Player");
+    let response = session_to_game_response(&session, "Player");
     Ok(Json(response))
 }
 
@@ -144,17 +103,17 @@ where
         .parse()
         .map_err(|_| ApiError::validation_field("game_id", "must be a valid UUID"))?;
 
+    let (outcome, outcome_string) = match request.outcome {
+        GameOutcomeRequest::Victory => (GameOutcome::Victory, "victory"),
+        GameOutcomeRequest::Defeat => (GameOutcome::Defeat, "defeat"),
+        GameOutcomeRequest::Abandon => (GameOutcome::Abandoned, "abandon"),
+    };
+
     state
         .game_session_provider
-        .end_game(&identifier)
+        .end_game(&identifier, outcome)
         .run_async()
         .await?;
-
-    let outcome_string = match request.outcome {
-        GameOutcomeRequest::Victory => "victory",
-        GameOutcomeRequest::Defeat => "defeat",
-        GameOutcomeRequest::Abandon => "abandon",
-    };
 
     let response = GameEndResponse {
         game_id: identifier.to_string(),
@@ -175,9 +134,16 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dto::response::GameStatusResponse;
     use crate::state::AppState;
     use lambars::effect::AsyncIO;
-    use roguelike_domain::game_session::{GameIdentifier, GameSessionEvent, RandomSeed};
+    use roguelike_domain::common::TurnCount;
+    use roguelike_domain::enemy::Enemy;
+    use roguelike_domain::floor::Floor;
+    use roguelike_domain::game_session::{
+        GameIdentifier, GameOutcome, GameSessionEvent, GameStatus, RandomSeed,
+    };
+    use roguelike_domain::player::Player;
     use roguelike_workflow::ports::{
         EventStore, GameSessionRepository, RandomGenerator, SessionCache,
     };
@@ -194,11 +160,15 @@ mod tests {
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct MockGameSession {
         identifier: GameIdentifier,
+        seed: RandomSeed,
     }
 
     impl MockGameSession {
         fn new(identifier: GameIdentifier) -> Self {
-            Self { identifier }
+            Self {
+                identifier,
+                seed: RandomSeed::new(42),
+            }
         }
     }
 
@@ -216,6 +186,46 @@ mod tests {
         }
 
         fn apply_event(&self, _event: &GameSessionEvent) -> Self {
+            self.clone()
+        }
+
+        fn player(&self) -> &Player {
+            unimplemented!("MockGameSession does not contain Player")
+        }
+
+        fn current_floor(&self) -> &Floor {
+            unimplemented!("MockGameSession does not contain Floor")
+        }
+
+        fn enemies(&self) -> &[Enemy] {
+            unimplemented!("MockGameSession does not contain Enemies")
+        }
+
+        fn turn_count(&self) -> TurnCount {
+            TurnCount::zero()
+        }
+
+        fn seed(&self) -> &RandomSeed {
+            &self.seed
+        }
+
+        fn with_player(&self, _player: Player) -> Self {
+            self.clone()
+        }
+
+        fn with_floor(&self, _floor: Floor) -> Self {
+            self.clone()
+        }
+
+        fn with_enemies(&self, _enemies: Vec<Enemy>) -> Self {
+            self.clone()
+        }
+
+        fn increment_turn(&self) -> Self {
+            self.clone()
+        }
+
+        fn end_game(&self, _outcome: GameOutcome) -> Self {
             self.clone()
         }
     }
@@ -552,7 +562,7 @@ mod tests {
 
         #[rstest]
         #[tokio::test]
-        async fn returns_not_implemented_for_abandon() {
+        async fn returns_not_found_for_missing_game_with_abandon() {
             let state = create_test_state();
             let game_id = uuid::Uuid::new_v4().to_string();
             let request = EndGameRequest {
@@ -563,12 +573,12 @@ mod tests {
 
             assert!(result.is_err());
             let error = result.unwrap_err();
-            assert_eq!(error.status_code(), StatusCode::NOT_IMPLEMENTED);
+            assert_eq!(error.status_code(), StatusCode::NOT_FOUND);
         }
 
         #[rstest]
         #[tokio::test]
-        async fn returns_not_implemented_for_victory() {
+        async fn returns_not_found_for_missing_game_with_victory() {
             let state = create_test_state();
             let game_id = uuid::Uuid::new_v4().to_string();
             let request = EndGameRequest {
@@ -579,12 +589,12 @@ mod tests {
 
             assert!(result.is_err());
             let error = result.unwrap_err();
-            assert_eq!(error.status_code(), StatusCode::NOT_IMPLEMENTED);
+            assert_eq!(error.status_code(), StatusCode::NOT_FOUND);
         }
 
         #[rstest]
         #[tokio::test]
-        async fn returns_not_implemented_for_defeat() {
+        async fn returns_not_found_for_missing_game_with_defeat() {
             let state = create_test_state();
             let game_id = uuid::Uuid::new_v4().to_string();
             let request = EndGameRequest {
@@ -595,7 +605,91 @@ mod tests {
 
             assert!(result.is_err());
             let error = result.unwrap_err();
-            assert_eq!(error.status_code(), StatusCode::NOT_IMPLEMENTED);
+            assert_eq!(error.status_code(), StatusCode::NOT_FOUND);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn ends_existing_game_with_abandon() {
+            let state = create_test_state();
+            let create_request = CreateGameRequest {
+                player_name: "Hero".to_string(),
+                seed: None,
+            };
+            let (_, Json(created_game)) = create_game(State(state.clone()), Json(create_request))
+                .await
+                .unwrap();
+
+            let end_request = EndGameRequest {
+                outcome: GameOutcomeRequest::Abandon,
+            };
+            let result = end_game(
+                State(state),
+                Path(created_game.game_id.clone()),
+                Json(end_request),
+            )
+            .await;
+
+            assert!(result.is_ok());
+            let Json(response) = result.unwrap();
+            assert_eq!(response.game_id, created_game.game_id);
+            assert_eq!(response.outcome, "abandon");
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn ends_existing_game_with_victory() {
+            let state = create_test_state();
+            let create_request = CreateGameRequest {
+                player_name: "Hero".to_string(),
+                seed: None,
+            };
+            let (_, Json(created_game)) = create_game(State(state.clone()), Json(create_request))
+                .await
+                .unwrap();
+
+            let end_request = EndGameRequest {
+                outcome: GameOutcomeRequest::Victory,
+            };
+            let result = end_game(
+                State(state),
+                Path(created_game.game_id.clone()),
+                Json(end_request),
+            )
+            .await;
+
+            assert!(result.is_ok());
+            let Json(response) = result.unwrap();
+            assert_eq!(response.game_id, created_game.game_id);
+            assert_eq!(response.outcome, "victory");
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn ends_existing_game_with_defeat() {
+            let state = create_test_state();
+            let create_request = CreateGameRequest {
+                player_name: "Hero".to_string(),
+                seed: None,
+            };
+            let (_, Json(created_game)) = create_game(State(state.clone()), Json(create_request))
+                .await
+                .unwrap();
+
+            let end_request = EndGameRequest {
+                outcome: GameOutcomeRequest::Defeat,
+            };
+            let result = end_game(
+                State(state),
+                Path(created_game.game_id.clone()),
+                Json(end_request),
+            )
+            .await;
+
+            assert!(result.is_ok());
+            let Json(response) = result.unwrap();
+            assert_eq!(response.game_id, created_game.game_id);
+            assert_eq!(response.outcome, "defeat");
         }
 
         #[rstest]

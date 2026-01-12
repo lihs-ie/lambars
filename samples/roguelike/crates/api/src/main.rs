@@ -3,6 +3,7 @@ use std::env;
 use roguelike_api::routes::create_router;
 use roguelike_api::server::{Server, ServerConfig};
 use roguelike_api::state::AppState;
+use roguelike_infrastructure::adapters::SystemRandomGenerator;
 use roguelike_infrastructure::adapters::mysql::{
     GameSessionRecord, MySqlEventStore, MySqlGameSessionRepository, MySqlPool, MySqlPoolConfig,
     MySqlPoolFactory,
@@ -10,7 +11,6 @@ use roguelike_infrastructure::adapters::mysql::{
 use roguelike_infrastructure::adapters::redis::{
     RedisConfig, RedisConnectionFactory, RedisSessionCache,
 };
-use roguelike_infrastructure::adapters::SystemRandomGenerator;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, fmt};
@@ -60,8 +60,9 @@ fn load_config() -> ServerConfig {
 }
 
 async fn create_mysql_pool() -> anyhow::Result<MySqlPool> {
-    let database_url = env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "mysql://roguelike:roguelikepassword@localhost:3306/roguelike".to_string());
+    let database_url = env::var("DATABASE_URL").unwrap_or_else(|_| {
+        "mysql://roguelike:roguelikepassword@localhost:3306/roguelike".to_string()
+    });
 
     let config = MySqlPoolConfig::with_url(&database_url);
 
@@ -71,9 +72,9 @@ async fn create_mysql_pool() -> anyhow::Result<MySqlPool> {
         .map_err(|e| anyhow::anyhow!("Failed to create MySQL pool: {}", e))
 }
 
-fn create_redis_connection() -> anyhow::Result<roguelike_infrastructure::adapters::redis::RedisConnection> {
-    let redis_url = env::var("REDIS_URL")
-        .unwrap_or_else(|_| "redis://localhost:6379".to_string());
+fn create_redis_connection()
+-> anyhow::Result<roguelike_infrastructure::adapters::redis::RedisConnection> {
+    let redis_url = env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
 
     let config = RedisConfig::with_url(&redis_url);
 

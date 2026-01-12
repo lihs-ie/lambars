@@ -213,7 +213,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use roguelike_domain::common::TurnCount;
+    use roguelike_domain::enemy::Enemy;
+    use roguelike_domain::floor::Floor;
     use roguelike_domain::game_session::{GameIdentifier, GameStatus, RandomSeed};
+    use roguelike_domain::player::Player;
     use rstest::rstest;
     use std::collections::HashMap;
     use std::sync::{Arc, RwLock};
@@ -270,6 +274,49 @@ mod tests {
                 new_session.status = ended.outcome().to_status();
             }
             new_session
+        }
+
+        fn player(&self) -> &Player {
+            unimplemented!("MockGameSession does not contain Player")
+        }
+
+        fn current_floor(&self) -> &Floor {
+            unimplemented!("MockGameSession does not contain Floor")
+        }
+
+        fn enemies(&self) -> &[Enemy] {
+            unimplemented!("MockGameSession does not contain Enemies")
+        }
+
+        fn turn_count(&self) -> TurnCount {
+            TurnCount::zero()
+        }
+
+        fn seed(&self) -> &RandomSeed {
+            &self.seed
+        }
+
+        fn with_player(&self, _player: Player) -> Self {
+            self.clone()
+        }
+
+        fn with_floor(&self, _floor: Floor) -> Self {
+            self.clone()
+        }
+
+        fn with_enemies(&self, _enemies: Vec<Enemy>) -> Self {
+            self.clone()
+        }
+
+        fn increment_turn(&self) -> Self {
+            self.clone()
+        }
+
+        fn end_game(&self, outcome: GameOutcome) -> Self {
+            Self {
+                status: outcome.to_status(),
+                ..self.clone()
+            }
         }
     }
 

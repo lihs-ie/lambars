@@ -114,7 +114,7 @@ async fn s5_error_handling_comprehensive() {
 }
 
 // =============================================================================
-// S6: Not Implemented Endpoints
+// S6: Partially Implemented Endpoints
 // =============================================================================
 
 #[rstest]
@@ -125,7 +125,7 @@ async fn s6_not_implemented_endpoints() {
 
     let game_id = context.create_game("NotImplementedHero").await;
 
-    // Test End Game
+    // Test End Game - Now implemented, returns 200
     let end_request = serde_json::json!({
         "outcome": "abandon"
     });
@@ -133,11 +133,15 @@ async fn s6_not_implemented_endpoints() {
         .client
         .post(&format!("/api/v1/games/{}/end", game_id), &end_request)
         .await;
-    assert!(
-        response.status_code() == 500 || response.status_code() == 501,
-        "Expected 500 or 501, got {}",
+    assert_eq!(
+        response.status_code(),
+        200,
+        "Expected 200, got {}",
         response.status_code()
     );
+
+    // Create a new game since the previous one was ended
+    let game_id = context.create_game("NotImplementedHero2").await;
 
     // Test Execute Command
     // Note: Returns 422 if command format validation fails, 500/501 if workflow not implemented
@@ -152,7 +156,9 @@ async fn s6_not_implemented_endpoints() {
         )
         .await;
     assert!(
-        response.status_code() == 422 || response.status_code() == 500 || response.status_code() == 501,
+        response.status_code() == 422
+            || response.status_code() == 500
+            || response.status_code() == 501,
         "Expected 422, 500, or 501, got {}",
         response.status_code()
     );

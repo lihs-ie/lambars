@@ -90,7 +90,8 @@ async fn s2_event_sourcing_api_matches_database() {
         // API may transform event type (e.g., "Started" -> "GameStarted")
         // Check that the core type name is contained
         assert!(
-            api_type.contains("Started") || mysql_event.event_type.contains("Started")
+            api_type.contains("Started")
+                || mysql_event.event_type.contains("Started")
                 || api_type == mysql_event.event_type,
             "Event types should be related: API='{}', MySQL='{}'",
             api_type,

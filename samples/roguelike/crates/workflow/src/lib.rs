@@ -16,6 +16,9 @@ pub use workflows::game_session::{
     resume_game,
 };
 
+// Re-export turn workflow types
+pub use workflows::turn::{PlayerCommand, ProcessTurnCommand, TurnResult, process_turn};
+
 // Re-export player workflow types
 pub use workflows::player::{
     AttackEnemyCommand, EquipItemCommand, MovePlayerCommand, PickUpItemCommand, TakeDamageCommand,

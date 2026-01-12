@@ -339,7 +339,9 @@ async fn c16_command_invalid_type_returns_400() {
 
     // Accept 400, 422, or 500 for invalid command type
     assert!(
-        response.status_code() == 400 || response.status_code() == 422 || response.status_code() == 500,
+        response.status_code() == 400
+            || response.status_code() == 422
+            || response.status_code() == 500,
         "Expected 400, 422, or 500, got {}",
         response.status_code()
     );

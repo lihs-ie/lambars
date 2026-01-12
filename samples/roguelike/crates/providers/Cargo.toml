@@ -11,6 +11,7 @@ repository.workspace = true
 roguelike-domain = { workspace = true }
 roguelike-workflow = { workspace = true }
 lambars = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 rstest = { workspace = true }

@@ -2,13 +2,56 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lambars::effect::AsyncIO;
-use roguelike_domain::game_session::{GameIdentifier, GameSessionEvent};
+use roguelike_domain::common::{Direction, DomainError, ValidationError};
+use roguelike_domain::enemy::EntityIdentifier;
+use roguelike_domain::game_session::{GameIdentifier, GameOutcome, GameSessionEvent};
+use roguelike_domain::item::ItemIdentifier;
+use roguelike_workflow::ports::SnapshotStore;
 use roguelike_workflow::{
-    CreateGameCommand, EventStore, GameSessionRepository, RandomGenerator, SessionCache,
-    SessionStateAccessor, WorkflowError, WorkflowResult, create_game,
+    CreateGameCommand, EventStore, GameSessionRepository, PlayerCommand, ProcessTurnCommand,
+    RandomGenerator, SessionCache, SessionStateAccessor, TurnResult, WorkflowError, WorkflowResult,
+    create_game, process_turn,
 };
+use uuid::Uuid;
 
 const DEFAULT_CACHE_TIME_TO_LIVE: Duration = Duration::from_secs(300);
+
+// =============================================================================
+// NoOpSnapshotStore
+// =============================================================================
+
+#[derive(Clone)]
+pub struct NoOpSnapshotStore<S> {
+    _phantom: std::marker::PhantomData<S>,
+}
+
+impl<S> Default for NoOpSnapshotStore<S> {
+    fn default() -> Self {
+        Self {
+            _phantom: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<S: Clone + Send + Sync + 'static> SnapshotStore for NoOpSnapshotStore<S> {
+    type GameSession = S;
+
+    fn save_snapshot(
+        &self,
+        _session_identifier: &GameIdentifier,
+        _session: &Self::GameSession,
+        _sequence: u64,
+    ) -> AsyncIO<()> {
+        AsyncIO::pure(())
+    }
+
+    fn load_latest_snapshot(
+        &self,
+        _session_identifier: &GameIdentifier,
+    ) -> AsyncIO<Option<(Self::GameSession, u64)>> {
+        AsyncIO::pure(None)
+    }
+}
 
 pub struct GameSessionProvider<Repository, Events, Cache, Random>
 where
@@ -125,22 +168,79 @@ where
         })
     }
 
-    pub fn end_game(&self, identifier: &GameIdentifier) -> AsyncIO<WorkflowResult<()>> {
-        let identifier_string = identifier.to_string();
-        AsyncIO::pure(Err(WorkflowError::not_implemented(format!(
-            "end_game workflow for session {}",
-            identifier_string
-        ))))
+    pub fn end_game(
+        &self,
+        identifier: &GameIdentifier,
+        outcome: GameOutcome,
+    ) -> AsyncIO<WorkflowResult<Repository::GameSession>> {
+        let cache = Arc::clone(&self.cache);
+        let event_store = Arc::clone(&self.event_store);
+        let repository = Arc::clone(&self.repository);
+        let identifier = *identifier;
+
+        AsyncIO::new(move || async move {
+            // Get current session
+            let session = if let Some(session) = cache.get(&identifier).run_async().await {
+                session
+            } else {
+                repository
+                    .find_by_id(&identifier)
+                    .run_async()
+                    .await
+                    .ok_or_else(|| {
+                        WorkflowError::not_found("GameSession", identifier.to_string())
+                    })?
+            };
+
+            // End the game
+            let ended_session = session.end_game(outcome);
+
+            // Create event and persist
+            let event = roguelike_domain::game_session::GameEnded::new(outcome);
+            event_store
+                .append(&identifier, &[GameSessionEvent::Ended(event)])
+                .run_async()
+                .await;
+
+            // Invalidate cache
+            cache.invalidate(&identifier).run_async().await;
+
+            Ok(ended_session)
+        })
     }
 
     pub fn execute_command(
         &self,
-        _identifier: &GameIdentifier,
-        _command: &str,
+        identifier: &GameIdentifier,
+        command: &str,
     ) -> AsyncIO<WorkflowResult<Repository::GameSession>> {
-        AsyncIO::pure(Err(WorkflowError::not_implemented(
-            "execute_command workflow",
-        )))
+        let cache = Arc::clone(&self.cache);
+        let event_store = Arc::clone(&self.event_store);
+        let identifier = *identifier;
+        let command = command.to_string();
+
+        AsyncIO::new(move || async move {
+            // Parse command string to PlayerCommand
+            let player_command = parse_command(&command)?;
+
+            // Create ProcessTurnCommand
+            let process_command = ProcessTurnCommand::new(identifier, player_command);
+
+            // Create NoOpSnapshotStore for process_turn
+            let snapshot_store = NoOpSnapshotStore::<Cache::GameSession>::default();
+
+            // Execute process_turn workflow (dereference Arc to get references to traits)
+            let workflow = process_turn(
+                &*cache,
+                &*event_store,
+                &snapshot_store,
+                DEFAULT_CACHE_TIME_TO_LIVE,
+            );
+            let result: TurnResult<Cache::GameSession> =
+                workflow(process_command).run_async().await?;
+
+            Ok(result.session)
+        })
     }
 
     pub fn get_events(
@@ -186,14 +286,143 @@ where
     }
 }
 
+// =============================================================================
+// Command Parsing
+// =============================================================================
+
+fn validation_error(field: &str, message: &str) -> WorkflowError {
+    WorkflowError::Domain(DomainError::Validation(
+        ValidationError::constraint_violation(field.to_string(), message.to_string()),
+    ))
+}
+
+fn parse_command(command: &str) -> WorkflowResult<PlayerCommand> {
+    let parts: Vec<&str> = command.split_whitespace().collect();
+    if parts.is_empty() {
+        return Err(validation_error("command", "Command cannot be empty"));
+    }
+
+    match parts[0].to_lowercase().as_str() {
+        "move" => parse_move_command(&parts),
+        "attack" => parse_attack_command(&parts),
+        "wait" => Ok(PlayerCommand::Wait),
+        "use" => parse_use_item_command(&parts),
+        "pickup" | "pick" => parse_pickup_item_command(&parts),
+        "equip" => parse_equip_item_command(&parts),
+        _ => Err(validation_error(
+            "command",
+            &format!("Unknown command: {}", parts[0]),
+        )),
+    }
+}
+
+fn parse_move_command(parts: &[&str]) -> WorkflowResult<PlayerCommand> {
+    if parts.len() < 2 {
+        return Err(validation_error(
+            "command",
+            "Move command requires a direction (north, south, east, west, up, down, left, right)",
+        ));
+    }
+
+    let direction = match parts[1].to_lowercase().as_str() {
+        "north" | "up" | "n" => Direction::Up,
+        "south" | "down" | "s" => Direction::Down,
+        "east" | "right" | "e" => Direction::Right,
+        "west" | "left" | "w" => Direction::Left,
+        _ => {
+            return Err(validation_error(
+                "direction",
+                &format!("Invalid direction: {}", parts[1]),
+            ));
+        }
+    };
+
+    Ok(PlayerCommand::Move(direction))
+}
+
+fn parse_attack_command(parts: &[&str]) -> WorkflowResult<PlayerCommand> {
+    if parts.len() < 2 {
+        return Err(validation_error(
+            "command",
+            "Attack command requires a target ID",
+        ));
+    }
+
+    let uuid: Uuid = parts[1]
+        .parse()
+        .map_err(|_| validation_error("target_id", "Invalid target ID format (must be UUID)"))?;
+    let target_id = EntityIdentifier::from_uuid(uuid);
+
+    Ok(PlayerCommand::Attack(target_id))
+}
+
+fn parse_use_item_command(parts: &[&str]) -> WorkflowResult<PlayerCommand> {
+    if parts.len() < 2 {
+        return Err(validation_error(
+            "command",
+            "Use command requires an item ID",
+        ));
+    }
+
+    let uuid: Uuid = parts[1]
+        .parse()
+        .map_err(|_| validation_error("item_id", "Invalid item ID format (must be UUID)"))?;
+    let item_id = ItemIdentifier::from_uuid(uuid);
+
+    Ok(PlayerCommand::UseItem(item_id))
+}
+
+fn parse_pickup_item_command(parts: &[&str]) -> WorkflowResult<PlayerCommand> {
+    // Handle both "pickup <id>" and "pick up <id>"
+    let item_part = if parts.len() >= 3 && parts[1].to_lowercase() == "up" {
+        parts.get(2)
+    } else {
+        parts.get(1)
+    };
+
+    match item_part {
+        Some(id) => {
+            let uuid: Uuid = id.parse().map_err(|_| {
+                validation_error("item_id", "Invalid item ID format (must be UUID)")
+            })?;
+            let item_id = ItemIdentifier::from_uuid(uuid);
+            Ok(PlayerCommand::PickUpItem(item_id))
+        }
+        None => Err(validation_error(
+            "command",
+            "Pickup command requires an item ID",
+        )),
+    }
+}
+
+fn parse_equip_item_command(parts: &[&str]) -> WorkflowResult<PlayerCommand> {
+    if parts.len() < 2 {
+        return Err(validation_error(
+            "command",
+            "Equip command requires an item ID",
+        ));
+    }
+
+    let uuid: Uuid = parts[1]
+        .parse()
+        .map_err(|_| validation_error("item_id", "Invalid item ID format (must be UUID)"))?;
+    let item_id = ItemIdentifier::from_uuid(uuid);
+
+    Ok(PlayerCommand::EquipItem(item_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roguelike_domain::game_session::{GameStatus, RandomSeed};
+    use roguelike_domain::common::TurnCount;
+    use roguelike_domain::enemy::Enemy;
+    use roguelike_domain::floor::Floor;
+    use roguelike_domain::game_session::{GameOutcome, GameStatus, RandomSeed};
+    use roguelike_domain::player::Player;
     use rstest::rstest;
     use std::collections::HashMap;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::RwLock;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct MockGameSession {
@@ -223,6 +452,46 @@ mod tests {
         fn apply_event(&self, _event: &GameSessionEvent) -> Self {
             self.clone()
         }
+
+        fn player(&self) -> &Player {
+            unimplemented!("MockGameSession does not contain Player")
+        }
+
+        fn current_floor(&self) -> &Floor {
+            unimplemented!("MockGameSession does not contain Floor")
+        }
+
+        fn enemies(&self) -> &[Enemy] {
+            unimplemented!("MockGameSession does not contain Enemies")
+        }
+
+        fn turn_count(&self) -> TurnCount {
+            TurnCount::zero()
+        }
+
+        fn seed(&self) -> &RandomSeed {
+            &self.seed
+        }
+
+        fn with_player(&self, _player: Player) -> Self {
+            self.clone()
+        }
+
+        fn with_floor(&self, _floor: Floor) -> Self {
+            self.clone()
+        }
+
+        fn with_enemies(&self, _enemies: Vec<Enemy>) -> Self {
+            self.clone()
+        }
+
+        fn increment_turn(&self) -> Self {
+            self.clone()
+        }
+
+        fn end_game(&self, _outcome: GameOutcome) -> Self {
+            self.clone()
+        }
     }
 
     #[derive(Clone)]
@@ -239,7 +508,9 @@ mod tests {
             }
         }
 
-        fn with_events(events: Arc<RwLock<HashMap<GameIdentifier, Vec<GameSessionEvent>>>>) -> Self {
+        fn with_events(
+            events: Arc<RwLock<HashMap<GameIdentifier, Vec<GameSessionEvent>>>>,
+        ) -> Self {
             Self {
                 sessions: Arc::new(RwLock::new(HashMap::new())),
                 events,
@@ -273,7 +544,10 @@ mod tests {
             let sessions = Arc::clone(&self.sessions);
             let session = session.clone();
             AsyncIO::new(move || async move {
-                sessions.write().unwrap().insert(session.identifier, session);
+                sessions
+                    .write()
+                    .unwrap()
+                    .insert(session.identifier, session);
             })
         }
 
@@ -533,10 +807,12 @@ mod tests {
             );
 
             let identifier = GameIdentifier::new();
-            let result = provider.end_game(&identifier).run_async().await;
+            let result = provider
+                .end_game(&identifier, GameOutcome::Abandoned)
+                .run_async()
+                .await;
 
             assert!(result.is_err());
-            assert!(result.unwrap_err().is_not_implemented());
         }
     }
 
@@ -545,7 +821,7 @@ mod tests {
 
         #[rstest]
         #[tokio::test]
-        async fn returns_not_implemented() {
+        async fn returns_error_for_missing_game() {
             let event_store = MockEventStore::new();
             let repository = MockRepository::new();
             let cache = MockCache::new();
@@ -565,7 +841,6 @@ mod tests {
                 .await;
 
             assert!(result.is_err());
-            assert!(result.unwrap_err().is_not_implemented());
         }
     }
 }

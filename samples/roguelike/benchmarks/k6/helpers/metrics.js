@@ -1,0 +1,21 @@
+import { Counter, Rate, Trend } from 'k6/metrics';
+
+export const healthLatency = new Trend('roguelike_health_latency', true);
+export const createGameLatency = new Trend('roguelike_create_game_latency', true);
+export const getGameLatency = new Trend('roguelike_get_game_latency', true);
+export const endGameLatency = new Trend('roguelike_end_game_latency', true);
+export const commandMoveLatency = new Trend('roguelike_command_move_latency', true);
+export const commandAttackLatency = new Trend('roguelike_command_attack_latency', true);
+export const commandWaitLatency = new Trend('roguelike_command_wait_latency', true);
+export const commandLatency = new Trend('roguelike_command_latency', true);
+export const getPlayerLatency = new Trend('roguelike_get_player_latency', true);
+export const getInventoryLatency = new Trend('roguelike_get_inventory_latency', true);
+export const getFloorLatency = new Trend('roguelike_get_floor_latency', true);
+export const getVisibleAreaLatency = new Trend('roguelike_get_visible_area_latency', true);
+export const getEventsLatency = new Trend('roguelike_get_events_latency', true);
+export const getLeaderboardLatency = new Trend('roguelike_get_leaderboard_latency', true);
+export const gameLifecycleLatency = new Trend('roguelike_game_lifecycle_latency', true);
+export const errorRate = new Rate('roguelike_errors');
+export const gamesCreated = new Counter('roguelike_games_created');
+export const commandsExecuted = new Counter('roguelike_commands_executed');
+export const errors = new Counter('roguelike_error_count');

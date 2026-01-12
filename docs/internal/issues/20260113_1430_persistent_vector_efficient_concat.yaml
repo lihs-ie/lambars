@@ -1,0 +1,172 @@
+---
+# Issue: PersistentVector 効率的な concat 実装
+# 実装時に発見された、将来対応が必要な項目
+
+deferred_features:
+  - id: persistent_vector_efficient_concat
+    name: "PersistentVector 効率的な concat 実装"
+    discovered_date: "2026-01-13"
+    priority: medium
+    category: enhancement
+    labels:
+      - "persistent"
+      - "performance"
+      - "enhancement"
+
+    # 問題の説明
+    problem:
+      summary: >-
+        PersistentVector::append() が O(n) の push_back ループを
+        使用しており、大量要素の結合時に非効率
+      details: |
+        現在の PersistentVector::append() 実装は、
+        内部で push_back() を繰り返し呼び出している。
+        これにより以下の問題が発生する：
+
+        - 時間計算量: O(n) where n = other.len()
+        - 各 push_back() で新しいノードが生成される
+        - 大量の要素を持つベクター同士の結合時にパフォーマンスが低下
+
+        roguelike サンプルプロジェクトでの LootTable.merge() で顕在化：
+        - 敵20体 × ドロップ20エントリ = 最大400回の push_back 操作
+        - 推定レイテンシ: ~1-5µs per merge（小規模）
+
+      current_implementation: |
+        ```rust
+        // src/persistent/vector.rs:1083
+        pub fn append(&self, other: &Self) -> Self {
+            if self.is_empty() {
+                return other.clone();
+            }
+            if other.is_empty() {
+                return self.clone();
+            }
+            let mut result = self.clone();
+            for element in other {
+                result = result.push_back(element.clone());
+            }
+            result
+        }
+        ```
+
+    # 解決策の提案
+    solution:
+      approach: >-
+        Radix Balanced Tree (RRB-Tree) の構造を活かした
+        効率的な結合アルゴリズムを実装
+      options:
+        - name: "RRB-Tree Concatenation"
+          description: |
+            Relaxed Radix Balanced Tree (RRB-Tree) の
+            結合アルゴリズムを実装する。
+            RRB-Tree は Clojure の PersistentVector や
+            Scala の Vector で使用されているデータ構造で、
+            効率的な結合操作をサポートする。
+
+            主な特徴：
+            - 結合時に両方のツリーの構造を維持
+            - 必要な箇所のみ新しいノードを生成
+            - 償却計算量 O(log n)
+          pros:
+            - 大幅なパフォーマンス改善（O(n) → O(log n)）
+            - 構造共有による省メモリ
+            - 学術的に確立されたアルゴリズム
+          cons:
+            - 実装が複雑
+            - 現在の RBT 実装からの大幅な変更が必要
+            - サイズ不変条件の緩和が必要（Relaxed）
+
+        - name: "Batch Push with Transient"
+          description: |
+            一時的に可変なトランジェント構造を使用して
+            バッチ push を行い、最後に永続構造に変換する方式。
+
+            ```rust
+            pub fn concat(&self, other: &Self) -> Self {
+                let mut transient = self.to_transient();
+                for element in other {
+                    transient.push_back_mut(element.clone());
+                }
+                transient.to_persistent()
+            }
+            ```
+          pros:
+            - 現在の実装からの変更が比較的小さい
+            - 内部的な最適化として実装可能
+            - 中間ノード生成を削減
+          cons:
+            - 計算量は O(n) のまま（定数倍改善）
+            - Transient 構造の追加実装が必要
+
+        - name: "Lazy Concatenation"
+          description: |
+            結合を遅延評価し、実際にアクセスされるまで
+            結合処理を行わない方式。
+            内部的に複数のベクターへの参照を保持する。
+
+            ```rust
+            enum VectorNode<T> {
+                Leaf(Vec<T>),
+                Concat(
+                    Arc<PersistentVector<T>>,
+                    Arc<PersistentVector<T>>
+                ),
+            }
+            ```
+          pros:
+            - 結合操作自体は O(1)
+            - 全要素にアクセスしない場合に効率的
+          cons:
+            - インデックスアクセスが O(log k) where k = concat 回数
+            - 深くネストした場合のスタック使用量
+            - 実装の複雑化
+
+      recommended: "Batch Push with Transient"
+      estimated_complexity: medium
+      rationale: |
+        短期的には Batch Push with Transient が現実的な選択。
+        将来的に RRB-Tree への移行を検討することで、
+        O(log n) の結合を実現可能。
+
+    # ベンチマーク要件
+    benchmark:
+      scenarios:
+        - name: "Small vectors (10 elements each)"
+          expected_improvement: "10-20%"
+        - name: "Medium vectors (1000 elements each)"
+          expected_improvement: "50-70%"
+        - name: "Large vectors (100000 elements each)"
+          expected_improvement: "80-90%"
+
+    # 参考情報
+    references:
+      - >-
+        RRB-Trees: Efficient Immutable Vectors
+        (Phil Bagwell, Tiark Rompf)
+      - "https://hypirion.com/musings/understanding-persistent-vector-pt-1"
+      - >-
+        https://github.com/clojure/clojure/blob/master/
+        src/jvm/clojure/lang/PersistentVector.java
+      - >-
+        Scala Vector implementation:
+        https://github.com/scala/scala/blob/v2.13.x/
+        src/library/scala/collection/immutable/Vector.scala
+
+    # 関連する要件・実装
+    related:
+      requirement_id: null
+      plan_id: null
+      affected_files:
+        - "src/persistent/vector.rs"
+      discovered_in:
+        project: "samples/roguelike"
+        file: "crates/domain/src/enemy/loot.rs"
+        analysis: >-
+          docs/internal/issues/
+          20260113_lambars_performance_analysis.yaml
+
+    # GitHub Issue 情報（作成後に追記）
+    github_issue:
+      number: 141
+      url: "https://github.com/lihs-ie/lambars/issues/141"
+      created: true

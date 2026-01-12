@@ -73,7 +73,13 @@ mod tests {
     use crate::state::AppState;
     use axum::http::StatusCode;
     use lambars::effect::AsyncIO;
-    use roguelike_domain::game_session::{GameIdentifier, GameSessionEvent, RandomSeed};
+    use roguelike_domain::common::TurnCount;
+    use roguelike_domain::enemy::Enemy;
+    use roguelike_domain::floor::Floor;
+    use roguelike_domain::game_session::{
+        GameIdentifier, GameOutcome, GameSessionEvent, GameStatus, RandomSeed,
+    };
+    use roguelike_domain::player::Player;
     use roguelike_workflow::ports::{
         EventStore, GameSessionRepository, RandomGenerator, SessionCache,
     };
@@ -83,8 +89,6 @@ mod tests {
     use std::sync::{Arc, RwLock};
     use std::time::Duration;
 
-    use roguelike_domain::game_session::GameStatus;
-
     // =========================================================================
     // Mock Implementations
     // =========================================================================
@@ -92,11 +96,15 @@ mod tests {
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct MockGameSession {
         identifier: GameIdentifier,
+        seed: RandomSeed,
     }
 
     impl MockGameSession {
         fn new(identifier: GameIdentifier) -> Self {
-            Self { identifier }
+            Self {
+                identifier,
+                seed: RandomSeed::new(42),
+            }
         }
     }
 
@@ -114,6 +122,46 @@ mod tests {
         }
 
         fn apply_event(&self, _event: &GameSessionEvent) -> Self {
+            self.clone()
+        }
+
+        fn player(&self) -> &Player {
+            unimplemented!("MockGameSession does not contain Player")
+        }
+
+        fn current_floor(&self) -> &Floor {
+            unimplemented!("MockGameSession does not contain Floor")
+        }
+
+        fn enemies(&self) -> &[Enemy] {
+            unimplemented!("MockGameSession does not contain Enemies")
+        }
+
+        fn turn_count(&self) -> TurnCount {
+            TurnCount::zero()
+        }
+
+        fn seed(&self) -> &RandomSeed {
+            &self.seed
+        }
+
+        fn with_player(&self, _player: Player) -> Self {
+            self.clone()
+        }
+
+        fn with_floor(&self, _floor: Floor) -> Self {
+            self.clone()
+        }
+
+        fn with_enemies(&self, _enemies: Vec<Enemy>) -> Self {
+            self.clone()
+        }
+
+        fn increment_turn(&self) -> Self {
+            self.clone()
+        }
+
+        fn end_game(&self, _outcome: GameOutcome) -> Self {
             self.clone()
         }
     }

@@ -1,0 +1,471 @@
+---
+title: lambars パフォーマンス分析
+date: 2026-01-13
+description: >-
+  roguelike プロジェクトでの lambars ライブラリ使用における
+  パフォーマンス改善点・ボトルネック分析
+
+# =============================================================================
+# 使用統計
+# =============================================================================
+usage_statistics:
+  total_rust_files: 154
+  lambars_references: 1076
+  async_io_usage: 532
+  run_async_calls: 140
+  pipe_async_usage: 10
+  fmap_usage: 26
+
+# =============================================================================
+# 使用モジュール
+# =============================================================================
+modules_used:
+  - module: effect::AsyncIO
+    description: 非同期処理のラッピング
+    usage_count: 532
+    primary_locations:
+      - crates/infrastructure/src/adapters/redis/cache.rs
+      - crates/infrastructure/src/adapters/mysql/repository.rs
+      - crates/infrastructure/src/adapters/mysql/event_store.rs
+      - crates/providers/src/workflows/game_session.rs
+      - crates/workflow/src/workflows/game_session/create_game.rs
+
+  - module: persistent::PersistentVector
+    description: 永続データ構造（イミュータブルベクター）
+    usage_count: 1
+    primary_locations:
+      - crates/domain/src/enemy/loot.rs
+
+  - module: compose::pipe_async!
+    description: 非同期パイプライン合成マクロ
+    usage_count: 10
+    primary_locations:
+      - crates/workflow/src/workflows/game_session/create_game.rs
+      - crates/workflow/src/workflows/turn/process_turn.rs
+
+  - module: typeclass::Monoid/Semigroup
+    description: 型クラス（代数的構造）
+    usage_count: 0
+    note: インポートのみで未使用
+
+# =============================================================================
+# ボトルネック
+# =============================================================================
+bottlenecks:
+  - id: BN-001
+    severity: high
+    category: io_overhead
+    location: crates/infrastructure/src/adapters/redis/cache.rs
+    line: 61
+    is_lambars_issue: false
+    root_cause: |
+      roguelike プロジェクトの実装問題。
+      AsyncIO は単なる非同期処理のラッパーであり、接続管理には関与しない。
+      roguelike の RedisSessionCache 実装が毎回 get_async_connection() を
+      呼び出す設計になっている。
+    description: |
+      Redis キャッシュアクセス時に毎回 get_async_connection() を呼び出している。
+      ゲーム1ターンあたり3-5回のキャッシュアクセスが発生し、その都度接続を取得している。
+    code_snippet: |
+      let mut async_connection = match connection.get_async_connection().await {
+          Ok(connection) => connection,
+          Err(error) => { ... }
+      };
+    impact:
+      latency_increase: ~1-2ms per cache operation
+      operations_per_turn: 3-5
+      total_overhead_per_turn: 3-10ms
+    recommendation: |
+      接続プールを使用するか、永続接続を維持して再利用する。
+      redis::aio::ConnectionManager の使用を検討。
+    estimated_improvement: 50-70% latency reduction for cache operations
+
+  - id: BN-002
+    severity: high
+    category: memory_allocation
+    location: crates/workflow/src/workflows/game_session/create_game.rs
+    line: 196-208
+    is_lambars_issue: false
+    root_cause: |
+      roguelike プロジェクトの実装問題。
+      pipe_async! マクロ自体はクローンを行わない。単純に .fmap() と .flat_map() への
+      展開を行うだけ。クローンが発生しているのは roguelike の各ステップ関数
+      （append_events_io, cache_session_io 等）内部での明示的な .clone() 呼び出し。
+      lambars の pipe_async! マクロのコード:
+      ```rust
+      ($value:expr, => $function:expr) => {{ $value.fmap($function) }};
+      ($value:expr, =>> $function:expr) => {{ $value.flat_map($function) }};
+      ```
+    description: |
+      pipe_async! マクロ内で各ステップごとに Vec<GameSessionEvent> と
+      GameSession のクローンが発生している。10段階のパイプラインで
+      中間値がすべてコピーされる。
+    code_snippet: |
+      pipe_async!(
+          AsyncIO::pure(command),
+          => extract_seed,                          // Pure
+          =>> generate_seed_io(random),             // IO
+          => create_identifiers,                    // Pure
+          => create_session_data,                   // Pure
+          => generate_game_started_event,           // Pure
+          => wrap_event_in_list,                    // Pure
+          =>> check_no_existing_session_io(repo),   // IO
+          =>> append_events_io(event_store),        // IO - events.clone()
+          =>> load_created_session_io(repo),        // IO
+          =>> cache_session_io(cache, TTL),         // IO - session.clone()
+      )
+    impact:
+      clones_per_game_creation: 3-5
+      estimated_allocation: ~2-4KB per game creation
+    recommendation: |
+      参照渡しを活用するか、Arc<GameSession> でラップして共有所有権を使用。
+      または、最終ステップまで所有権を移動し続ける設計に変更。
+    estimated_improvement: 30-50% memory reduction in hot path
+
+  - id: BN-003
+    severity: high
+    category: database_io
+    location: crates/infrastructure/src/adapters/mysql/event_store.rs
+    is_lambars_issue: false
+    root_cause: |
+      roguelike プロジェクトのインフラ設計の問題。
+      lambars の AsyncIO は SQL 操作をラップしているだけで、バッチ処理の設計には
+      関与しない。roguelike の MysqlEventStore 実装が単一イベントごとに
+      INSERT を実行する設計になっている。
+    description: |
+      イベントストアへの追加がイベントごとに個別の SQL INSERT を実行している。
+      ゲーム作成時に1イベント、ターンごとに1-3イベントが発生。
+    impact:
+      sql_executions_per_turn: 1-3
+      latency_per_insert: ~2-5ms
+    recommendation: |
+      バッチ INSERT を実装し、複数イベントを1回のクエリで挿入する。
+      トランザクションで囲んで整合性を保証。
+    estimated_improvement: 60-80% latency reduction for multi-event operations
+
+  - id: BN-004
+    severity: medium
+    category: data_structure
+    location: crates/domain/src/enemy/loot.rs
+    line: 166-172
+    is_lambars_issue: partial
+    root_cause: |
+      lambars と roguelike 両方に改善の余地がある。
+
+      【lambars 側の問題】
+      PersistentVector::append() メソッドが存在するが、内部実装は同様の O(n) ループ:
+      ```rust
+      pub fn append(&self, other: &Self) -> Self {
+          let mut result = self.clone();
+          for element in other {
+              result = result.push_back(element.clone());
+          }
+          result
+      }
+      ```
+      理想的には Radix Balanced Tree の構造を活かした O(log n) の結合が可能だが
+      現在は実装されていない。
+
+      【roguelike 側の問題】
+      既存の append() メソッドを使用せず、独自に merge() を実装している。
+      append() を使用するだけで若干の改善は可能。
+    description: |
+      PersistentVector の merge() メソッドが O(n) の push_back() を
+      繰り返し呼び出している。戦闘終了時のドロップ計算で複数の
+      LootTable を合成する際にパフォーマンス低下が発生。
+    code_snippet: |
+      pub fn merge(&self, other: &Self) -> Self {
+          let mut entries = self.entries.clone();  // 全エントリ深コピー
+          for entry in other.entries.iter() {      // O(n)反復
+              entries = entries.push_back(*entry); // 各イテレーションで新ノード生成
+          }
+          Self { entries }
+      }
+    impact:
+      complexity: O(n*m) where n = self.entries, m = other.entries
+      estimated_latency: ~1-5µs per merge (小規模)
+      worst_case: 敵20体 × ドロップ20エントリ = 400回の永続操作
+    recommendation: |
+      【短期】roguelike の merge() を PersistentVector::append() に置き換える。
+      【中期】lambars 本体に効率的な concat() メソッドを追加し、
+      Radix Balanced Tree の構造を活かした O(log n) 結合を実装。
+    estimated_improvement: O(n+m) に改善可能（現状）、O(log n) に改善可能（lambars改修後）
+
+  - id: BN-005
+    severity: medium
+    category: serialization
+    location: crates/infrastructure/src/adapters/redis/cache.rs
+    is_lambars_issue: false
+    root_cause: |
+      roguelike プロジェクトの技術選定の問題。
+      lambars はシリアライゼーション形式に関与しない。
+      roguelike が serde_json を選択しており、JSON 形式のオーバーヘッドが発生している。
+    description: |
+      キャッシュ操作のたびに GameSession の JSON シリアライズ/デシリアライズが発生。
+      セッションが複雑な場合（多くの敵、アイテム）は処理時間が増加。
+    impact:
+      serialization_time: ~10-50µs (セッションサイズ依存)
+      operations_per_turn: 2-4
+    recommendation: |
+      バイナリフォーマット（bincode, MessagePack）の使用を検討。
+      または、差分更新でキャッシュを部分的に更新。
+    estimated_improvement: 50-80% serialization time reduction
+
+  - id: BN-006
+    severity: low
+    category: concurrency
+    location: crates/workflow/src/workflows/game_session/create_game.rs
+    is_lambars_issue: false
+    root_cause: |
+      roguelike プロジェクトのワークフロー設計の問題。
+      lambars の AsyncIO は並列実行メソッド .par() と .par3() を提供済み:
+      ```rust
+      pub fn par<B>(self, other: AsyncIO<B>)
+          -> AsyncIO<(A, B)>
+      pub fn par3<B, C>(self, b: AsyncIO<B>, c: AsyncIO<C>)
+          -> AsyncIO<(A, B, C)>
+      ```
+      roguelike のワークフローがこれらを使用せず、全て sequential に
+      実行する設計になっている。
+    description: |
+      pipe_async! パイプラインが全て sequential に実行されている。
+      一部の独立した IO 操作（キャッシュ書き込みとイベントストア書き込み）は
+      並列実行が可能。
+    impact:
+      potential_parallelization: 2-3 operations
+      estimated_latency_saving: ~5-10ms
+    recommendation: |
+      lambars の AsyncIO::par() メソッドを使用して独立した IO 操作を並列化。
+      または、tokio::join! や futures::join! を使用。
+    estimated_improvement: 10-20% latency reduction for game creation
+
+# =============================================================================
+# ベンチマーク結果
+# =============================================================================
+benchmark_results:
+  environment:
+    date: 2026-01-13
+    rust_version: 1.92.0
+    os: macOS Darwin 23.4.0
+
+  request_parsing:
+    CreateGameRequest_with_seed: 76.3ns
+    CreateGameRequest_minimal: 58.6ns
+    EndGameRequest: 26.9ns
+    ExecuteCommandRequest_move: 136.8ns
+    ExecuteCommandRequest_attack: 159.6ns
+    ExecuteCommandRequest_use_item: 191.6ns
+    ExecuteCommandRequest_wait: 79.4ns
+    ExecuteCommandRequest_equip: 148.6ns
+    ExecuteCommandRequest_unequip: 133.8ns
+
+  command_serialization:
+    move_command: 62.3ns
+    attack_command: 69.9ns
+    wait_command: 45.6ns
+    use_item_command: 82.1ns
+    pick_up_command: 47.8ns
+    drop_command: 49.7ns
+    equip_command: 49.4ns
+    unequip_command: ~50ns
+
+  uuid_operations:
+    uuid_parse: 45.4ns
+    uuid_new_v4: 47.8ns
+    uuid_to_string: 49.7ns
+
+  dto_serialization:
+    GameSessionResponse: 457ns
+    PlayerDetailResponse: 828ns
+    HealthResponse: 102ns
+    FloorResponse_10x10: 6.16µs
+    FloorResponse_25x25: 32.4µs
+    FloorResponse_50x50: 155µs
+    TurnResultResponse_10_events: 3.14µs
+    TurnResultResponse_50_events: 12.9µs
+    TurnResultResponse_100_events: 28.6µs
+    LeaderboardResponse_10_entries: 2.24µs
+    LeaderboardResponse_50_entries: 10.2µs
+    LeaderboardResponse_100_entries: 20.0µs
+
+  dto_deserialization:
+    GameSessionResponse: 529ns
+    HealthResponse: 118ns
+    FloorResponse_10x10: 9.33µs
+    FloorResponse_25x25: 47.8µs
+    FloorResponse_50x50: 173µs
+
+# =============================================================================
+# 改善提案
+# =============================================================================
+improvements:
+  - id: IMP-001
+    priority: high
+    title: Redis 接続プール/永続接続の導入
+    target_bottleneck: BN-001
+    estimated_effort: 2-4 hours
+    implementation: |
+      redis::aio::ConnectionManager を使用して接続を再利用する。
+      ```rust
+      pub struct RedisSessionCache<T> {
+          connection_manager: redis::aio::ConnectionManager,
+          // ...
+      }
+
+      impl<T> RedisSessionCache<T> {
+          pub async fn new(url: &str) -> Self {
+              let client = redis::Client::open(url).unwrap();
+              let manager = redis::aio::ConnectionManager
+                  ::new(client).await.unwrap();
+              Self { connection_manager: manager, ... }
+          }
+      }
+      ```
+    files_to_modify:
+      - crates/infrastructure/src/adapters/redis/cache.rs
+      - crates/infrastructure/src/adapters/redis/factory.rs
+
+  - id: IMP-002
+    priority: high
+    title: イベントストアのバッチ INSERT 実装
+    target_bottleneck: BN-003
+    estimated_effort: 3-5 hours
+    implementation: |
+      複数イベントを1回の INSERT 文で挿入する。
+      ```rust
+      fn append_batch(
+          &self,
+          events: &[(GameIdentifier, GameSessionEvent)]
+      ) -> AsyncIO<()> {
+          // INSERT INTO game_events (...)
+          // VALUES (...), (...), (...)
+      }
+      ```
+    files_to_modify:
+      - crates/infrastructure/src/adapters/mysql/event_store.rs
+      - crates/workflow/src/ports/mod.rs
+
+  - id: IMP-003
+    priority: medium
+    title: PersistentVector concat メソッド追加
+    target_bottleneck: BN-004
+    estimated_effort: 2-3 hours
+    implementation: |
+      lambars 本体に PersistentVector::concat() を追加し、
+      O(n+m) で2つのベクターを結合できるようにする。
+    files_to_modify:
+      - src/persistent/vector.rs (lambars本体)
+      - crates/domain/src/enemy/loot.rs
+
+  - id: IMP-004
+    priority: medium
+    title: キャッシュシリアライゼーションのバイナリ化
+    target_bottleneck: BN-005
+    estimated_effort: 2-4 hours
+    implementation: |
+      serde_json の代わりに bincode を使用してシリアライズ。
+      ```rust
+      let bytes = bincode::serialize(&session).unwrap();
+      let session: GameSession = bincode::deserialize(&bytes).unwrap();
+      ```
+    files_to_modify:
+      - crates/infrastructure/src/adapters/redis/cache.rs
+      - Cargo.toml (bincode依存追加)
+
+  - id: IMP-005
+    priority: low
+    title: pipe_async! での並列 IO 実行
+    target_bottleneck: BN-006
+    estimated_effort: 4-6 hours
+    implementation: |
+      独立した IO 操作を tokio::join! で並列実行。
+      create_game ワークフローでキャッシュとイベントストアへの
+      書き込みを並列化。
+    files_to_modify:
+      - crates/workflow/src/workflows/game_session/create_game.rs
+
+  - id: IMP-006
+    priority: low
+    title: 未使用の typeclass インポート削除
+    target_bottleneck: null
+    estimated_effort: 0.5 hours
+    implementation: |
+      stats.rs から未使用の Monoid/Semigroup インポートを削除し、
+      コードをクリーンアップ。
+    files_to_modify:
+      - crates/domain/src/common/stats.rs
+
+# =============================================================================
+# 総合評価
+# =============================================================================
+evaluation:
+  overall_assessment: 良好
+  lambars_usage_maturity: 成熟
+  main_concerns:
+    - Redis 接続管理のオーバーヘッド
+    - パイプラインでのメモリアロケーション
+    - イベントストアの非効率な単一挿入
+
+  # ---------------------------------------------------------------------------
+  # 根本原因分析サマリー
+  # ---------------------------------------------------------------------------
+  root_cause_analysis:
+    conclusion: |
+      特定された6つのボトルネックのうち、lambars ライブラリ自体が原因となっているのは
+      BN-004（PersistentVector の append 効率）のみ。他の5つは roguelike プロジェクトの
+      設計・実装に起因する問題である。
+
+    lambars_issues:
+      - id: BN-004
+        status: partial
+        description: PersistentVector::append() が O(n) ループを使用
+        action_required: lambars 本体に効率的な concat() メソッドを追加
+
+    roguelike_issues:
+      - id: BN-001
+        description: Redis 接続を毎回取得（ConnectionManager 未使用）
+      - id: BN-002
+        description: ワークフロー関数内で明示的にクローン（pipe_async! は無関係）
+      - id: BN-003
+        description: イベントストアがバッチ INSERT 未対応
+      - id: BN-005
+        description: JSON シリアライゼーションの選択（バイナリ形式が有効）
+      - id: BN-006
+        description: AsyncIO::par() 未使用（lambars は並列実行 API を提供済み）
+
+  performance_rating:
+    request_parsing: 優秀 (< 200ns)
+    command_serialization: 優秀 (< 100ns)
+    uuid_operations: 優秀 (< 50ns)
+    dto_serialization: 良好
+    dto_deserialization: 良好
+
+  recommended_priority:
+    - IMP-001 (Redis接続プール) - 即座に実施
+    - IMP-002 (バッチINSERT) - 次に実施
+    - IMP-003 (PersistentVector改善) - lambars本体への貢献として検討
+    - IMP-004 (バイナリシリアライズ) - パフォーマンス要求に応じて
+    - IMP-005 (並列IO) - 将来の最適化として
+    - IMP-006 (未使用コード削除) - コードクリーンアップ時に
+
+# =============================================================================
+# 関連情報
+# =============================================================================
+related_files:
+  critical:
+    - crates/infrastructure/src/adapters/redis/cache.rs
+    - crates/infrastructure/src/adapters/mysql/event_store.rs
+    - crates/workflow/src/workflows/game_session/create_game.rs
+    - crates/domain/src/enemy/loot.rs
+    - crates/providers/src/workflows/game_session.rs
+
+  benchmark:
+    - benchmarks/results/BENCHMARK_REPORT.md
+    - crates/api/benches/api_bench.rs
+    - crates/api/benches/serialization_bench.rs
+
+github_issue:
+  persistent_vector_concat:
+    number: 141
+    url: "https://github.com/lihs-ie/lambars/issues/141"
+    title: "feat(persistent): PersistentVector 効率的な concat 実装"

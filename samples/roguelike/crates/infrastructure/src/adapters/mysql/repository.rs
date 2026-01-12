@@ -1,7 +1,13 @@
 use lambars::effect::AsyncIO;
-use roguelike_domain::game_session::{GameIdentifier, GameSession, GameSessionEvent, GameStatus, RandomSeed};
-use roguelike_workflow::ports::GameSessionRepository;
+use roguelike_domain::common::TurnCount;
+use roguelike_domain::enemy::Enemy;
+use roguelike_domain::floor::Floor;
+use roguelike_domain::game_session::{
+    GameIdentifier, GameOutcome, GameSession, GameSessionEvent, GameStatus, RandomSeed,
+};
+use roguelike_domain::player::Player;
 use roguelike_workflow::SessionStateAccessor;
+use roguelike_workflow::ports::GameSessionRepository;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use uuid::Uuid;
@@ -56,18 +62,27 @@ impl GameSessionRepository for MySqlGameSessionRepository {
 
             let result = sqlx::query(
                 r#"
-                SELECT game_id, player_id, current_floor_level, turn_count, status, random_seed, event_sequence, created_at, updated_at
+                SELECT
+                    BIN_TO_UUID(game_id) as game_id,
+                    BIN_TO_UUID(player_id) as player_id,
+                    current_floor_level,
+                    turn_count,
+                    status,
+                    random_seed,
+                    event_sequence,
+                    created_at,
+                    updated_at
                 FROM game_sessions
-                WHERE game_id = ?
+                WHERE game_id = UUID_TO_BIN(?)
                 "#,
             )
-            .bind(game_uuid)
+            .bind(game_uuid.to_string())
             .fetch_optional(pool.as_inner())
             .await;
 
             match result {
                 Ok(Some(row)) => {
-                    let record = GameSessionRecord::from_row(&row);
+                    let record = GameSessionRecord::from_row_with_string_uuid(&row);
                     Some(record)
                 }
                 Ok(None) => None,
@@ -103,7 +118,7 @@ impl GameSessionRepository for MySqlGameSessionRepository {
             let result = sqlx::query(
                 r#"
                 INSERT INTO game_sessions (game_id, player_id, current_floor_level, turn_count, status, random_seed, event_sequence)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (UUID_TO_BIN(?), UUID_TO_BIN(?), ?, ?, ?, ?, ?)
                 ON DUPLICATE KEY UPDATE
                     current_floor_level = VALUES(current_floor_level),
                     turn_count = VALUES(turn_count),
@@ -111,8 +126,8 @@ impl GameSessionRepository for MySqlGameSessionRepository {
                     event_sequence = VALUES(event_sequence)
                 "#,
             )
-            .bind(game_uuid)
-            .bind(player_uuid)
+            .bind(game_uuid.to_string())
+            .bind(player_uuid.to_string())
             .bind(session.current_floor_level)
             .bind(session.turn_count as i64)
             .bind(&session.status)
@@ -144,10 +159,10 @@ impl GameSessionRepository for MySqlGameSessionRepository {
             let result = sqlx::query(
                 r#"
                 DELETE FROM game_sessions
-                WHERE game_id = ?
+                WHERE game_id = UUID_TO_BIN(?)
                 "#,
             )
-            .bind(game_uuid)
+            .bind(game_uuid.to_string())
             .execute(pool.as_inner())
             .await;
 
@@ -163,7 +178,7 @@ impl GameSessionRepository for MySqlGameSessionRepository {
         AsyncIO::new(move || async move {
             let result = sqlx::query(
                 r#"
-                SELECT game_id
+                SELECT BIN_TO_UUID(game_id) as game_id
                 FROM game_sessions
                 WHERE status = 'in_progress'
                 "#,
@@ -175,9 +190,8 @@ impl GameSessionRepository for MySqlGameSessionRepository {
                 Ok(rows) => rows
                     .iter()
                     .filter_map(|row| {
-                        // Read UUID from binary(16) column
-                        let game_uuid: Uuid = row.get("game_id");
-                        game_uuid.to_string().parse().ok()
+                        let game_id: String = row.get("game_id");
+                        game_id.parse().ok()
                     })
                     .collect(),
                 Err(error) => {
@@ -220,7 +234,10 @@ struct GameSessionRecordRaw {
 
 impl From<GameSessionRecordRaw> for GameSessionRecord {
     fn from(raw: GameSessionRecordRaw) -> Self {
-        let game_identifier = raw.game_id.parse().unwrap_or_else(|_| GameIdentifier::new());
+        let game_identifier = raw
+            .game_id
+            .parse()
+            .unwrap_or_else(|_| GameIdentifier::new());
         Self {
             game_id: raw.game_id,
             game_identifier,
@@ -258,16 +275,15 @@ impl GameSessionRecord {
         }
     }
 
-    fn from_row(row: &sqlx::mysql::MySqlRow) -> Self {
-        let game_uuid: Uuid = row.get("game_id");
-        let player_uuid: Uuid = row.get("player_id");
-        let game_id = game_uuid.to_string();
+    fn from_row_with_string_uuid(row: &sqlx::mysql::MySqlRow) -> Self {
+        let game_id: String = row.get("game_id");
+        let player_id: String = row.get("player_id");
         let game_identifier = game_id.parse().unwrap_or_else(|_| GameIdentifier::new());
 
         Self {
             game_id,
             game_identifier,
-            player_id: player_uuid.to_string(),
+            player_id,
             current_floor_level: row.get::<u32, _>("current_floor_level") as i32,
             turn_count: row.get::<u64, _>("turn_count"),
             status: row.get("status"),
@@ -325,6 +341,69 @@ impl SessionStateAccessor for GameSessionRecord {
 
     fn apply_event(&self, _event: &GameSessionEvent) -> Self {
         self.clone()
+    }
+
+    fn player(&self) -> &Player {
+        unimplemented!(
+            "GameSessionRecord does not contain full Player data; use GameSession domain object instead"
+        )
+    }
+
+    fn current_floor(&self) -> &Floor {
+        unimplemented!(
+            "GameSessionRecord does not contain full Floor data; use GameSession domain object instead"
+        )
+    }
+
+    fn enemies(&self) -> &[Enemy] {
+        unimplemented!(
+            "GameSessionRecord does not contain Enemy data; use GameSession domain object instead"
+        )
+    }
+
+    fn turn_count(&self) -> TurnCount {
+        TurnCount::new(self.turn_count)
+    }
+
+    fn seed(&self) -> &RandomSeed {
+        unimplemented!(
+            "GameSessionRecord does not store RandomSeed by reference; use random_seed_value() method instead"
+        )
+    }
+
+    fn with_player(&self, _player: Player) -> Self {
+        unimplemented!(
+            "GameSessionRecord is a database record; use GameSession domain object for mutations"
+        )
+    }
+
+    fn with_floor(&self, _floor: Floor) -> Self {
+        unimplemented!(
+            "GameSessionRecord is a database record; use GameSession domain object for mutations"
+        )
+    }
+
+    fn with_enemies(&self, _enemies: Vec<Enemy>) -> Self {
+        unimplemented!(
+            "GameSessionRecord is a database record; use GameSession domain object for mutations"
+        )
+    }
+
+    fn increment_turn(&self) -> Self {
+        Self {
+            turn_count: self.turn_count + 1,
+            ..self.clone()
+        }
+    }
+
+    fn end_game(&self, outcome: GameOutcome) -> Self {
+        Self {
+            status: match outcome {
+                GameOutcome::Victory => "victory".to_string(),
+                GameOutcome::Defeat | GameOutcome::Abandoned => "defeat".to_string(),
+            },
+            ..self.clone()
+        }
     }
 }
 

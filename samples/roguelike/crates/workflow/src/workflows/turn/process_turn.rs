@@ -9,6 +9,7 @@ use roguelike_domain::game_session::{
 };
 
 use super::commands::{PlayerCommand, ProcessTurnCommand};
+use crate::SessionStateAccessor;
 use crate::errors::WorkflowError;
 use crate::ports::{EventStore, SessionCache, SnapshotStore, WorkflowResult};
 
@@ -115,7 +116,7 @@ fn load_session_from_cache<C: SessionCache>(
 // =============================================================================
 
 #[allow(clippy::type_complexity)]
-fn process_turn_result<S: Clone>(
+fn process_turn_result<S: SessionStateAccessor>(
     result: Result<(S, PlayerCommand, GameIdentifier), WorkflowError>,
 ) -> Result<(TurnResult<S>, Vec<GameSessionEvent>, GameIdentifier), WorkflowError> {
     result.and_then(|(session, player_command, game_identifier)| {
@@ -173,6 +174,7 @@ pub fn process_turn<'a, C, E, S>(
 ) -> impl Fn(ProcessTurnCommand) -> AsyncIO<WorkflowResult<TurnResult<C::GameSession>>> + 'a
 where
     C: SessionCache,
+    C::GameSession: SessionStateAccessor,
     E: EventStore,
     S: SnapshotStore,
 {
@@ -199,6 +201,7 @@ pub fn process_turn_with_default_ttl<'a, C, E, S>(
 ) -> impl Fn(ProcessTurnCommand) -> AsyncIO<WorkflowResult<TurnResult<C::GameSession>>> + 'a
 where
     C: SessionCache,
+    C::GameSession: SessionStateAccessor,
     E: EventStore,
     S: SnapshotStore,
 {
@@ -214,15 +217,108 @@ where
 // Pure Functions
 // =============================================================================
 
-fn process_turn_pure<S: Clone>(
-    _session: &S,
-    _player_command: PlayerCommand,
+fn process_turn_pure<S: SessionStateAccessor>(
+    session: &S,
+    player_command: PlayerCommand,
 ) -> Result<(TurnResult<S>, Vec<GameSessionEvent>), WorkflowError> {
-    // Placeholder implementation
-    Err(WorkflowError::repository(
-        "process_turn",
-        "GameSession structure not yet connected",
-    ))
+    let mut events = Vec::new();
+    let current_turn = session.turn_count();
+
+    // Step 1: Start Turn
+    let (session_after_start, turn_started_event) =
+        start_turn(session, current_turn, |s, _turn| s.increment_turn());
+    events.push(GameSessionEvent::TurnStarted(turn_started_event));
+
+    // Step 2: Execute Player Command
+    let (session_after_command, command_events) =
+        execute_player_command(&session_after_start, player_command, |s, cmd| {
+            execute_command_on_session(s, cmd)
+        });
+    events.extend(command_events);
+
+    // Step 3: Process Enemy Turns
+    let enemy_order = collect_enemy_turn_order(&session_after_command);
+    let (session_after_enemies, enemy_events) =
+        process_all_enemy_turns(&session_after_command, &enemy_order, |s, _enemy_id| {
+            // Simplified enemy turn processing - just return session unchanged
+            (s.clone(), vec![])
+        });
+    events.extend(enemy_events);
+
+    // Step 4: End Turn
+    let next_turn = session_after_enemies.turn_count();
+    let (final_session, turn_ended_event) =
+        end_turn(&session_after_enemies, next_turn, |s| s.clone());
+    events.push(GameSessionEvent::TurnEnded(turn_ended_event));
+
+    // Step 5: Check Game Over
+    let game_over = check_game_over(&final_session, |s| check_game_over_condition(s));
+
+    let turn_result = match game_over {
+        Some(outcome) => {
+            let ended_session = final_session.end_game(outcome);
+            TurnResult::game_ended(ended_session, outcome)
+        }
+        None => TurnResult::continuing(final_session),
+    };
+
+    Ok((turn_result, events))
+}
+
+fn execute_command_on_session<S: SessionStateAccessor>(
+    session: &S,
+    command: PlayerCommand,
+) -> (S, Vec<GameSessionEvent>) {
+    match command {
+        PlayerCommand::Move(_direction) => {
+            // TODO: Implement actual movement logic with floor collision detection
+            (session.clone(), vec![])
+        }
+        PlayerCommand::Attack(_target) => {
+            // TODO: Implement actual combat logic
+            (session.clone(), vec![])
+        }
+        PlayerCommand::UseItem(_item_id) => {
+            // TODO: Implement item usage
+            (session.clone(), vec![])
+        }
+        PlayerCommand::PickUpItem(_item_id) => {
+            // TODO: Implement item pickup
+            (session.clone(), vec![])
+        }
+        PlayerCommand::EquipItem(_item_id) => {
+            // TODO: Implement item equipping
+            (session.clone(), vec![])
+        }
+        PlayerCommand::Wait => {
+            // Wait does nothing but still consumes a turn
+            (session.clone(), vec![])
+        }
+    }
+}
+
+fn collect_enemy_turn_order<S: SessionStateAccessor>(session: &S) -> Vec<EntityTurnOrder> {
+    session
+        .enemies()
+        .iter()
+        .map(|enemy| EntityTurnOrder::new(*enemy.identifier(), enemy.stats().speed()))
+        .collect()
+}
+
+fn check_game_over_condition<S: SessionStateAccessor>(session: &S) -> Option<GameOutcome> {
+    let player = session.player();
+
+    // Defeat: Player health is zero
+    if player.stats().health().value() == 0 {
+        return Some(GameOutcome::Defeat);
+    }
+
+    // Victory: All enemies defeated (for now)
+    if session.enemies().is_empty() {
+        return Some(GameOutcome::Victory);
+    }
+
+    None
 }
 
 pub fn start_turn<S, F>(session: &S, current_turn: TurnCount, update_fn: F) -> (S, TurnStarted)

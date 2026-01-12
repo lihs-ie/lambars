@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use serde_json::Value as JsonValue;
 
 pub fn assert_json_has_key(json: &JsonValue, key: &str) {

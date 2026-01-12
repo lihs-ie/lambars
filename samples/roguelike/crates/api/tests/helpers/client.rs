@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use reqwest::{Client, Response, StatusCode};
 use serde::Serialize;
 use serde::de::DeserializeOwned;

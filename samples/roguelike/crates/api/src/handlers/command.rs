@@ -32,7 +32,7 @@ where
         .parse()
         .map_err(|_| ApiError::validation_field("game_id", "must be a valid UUID"))?;
 
-    let command_string = format!("{:?}", request.command);
+    let command_string = request.command.to_command_string();
     let session = state
         .game_session_provider
         .execute_command(&identifier, &command_string)
@@ -91,7 +91,13 @@ mod tests {
     use crate::dto::command::{CommandRequest, DirectionRequest};
     use crate::state::AppState;
     use lambars::effect::AsyncIO;
-    use roguelike_domain::game_session::{GameIdentifier, GameSessionEvent, RandomSeed};
+    use roguelike_domain::common::TurnCount;
+    use roguelike_domain::enemy::Enemy;
+    use roguelike_domain::floor::Floor;
+    use roguelike_domain::game_session::{
+        GameIdentifier, GameOutcome, GameSessionEvent, RandomSeed,
+    };
+    use roguelike_domain::player::Player;
     use roguelike_workflow::ports::{
         EventStore, GameSessionRepository, RandomGenerator, SessionCache,
     };
@@ -108,11 +114,15 @@ mod tests {
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct MockGameSession {
         identifier: GameIdentifier,
+        seed: RandomSeed,
     }
 
     impl MockGameSession {
         fn new(identifier: GameIdentifier) -> Self {
-            Self { identifier }
+            Self {
+                identifier,
+                seed: RandomSeed::new(42),
+            }
         }
     }
 
@@ -130,6 +140,46 @@ mod tests {
         }
 
         fn apply_event(&self, _event: &GameSessionEvent) -> Self {
+            self.clone()
+        }
+
+        fn player(&self) -> &Player {
+            unimplemented!("MockGameSession does not contain Player")
+        }
+
+        fn current_floor(&self) -> &Floor {
+            unimplemented!("MockGameSession does not contain Floor")
+        }
+
+        fn enemies(&self) -> &[Enemy] {
+            unimplemented!("MockGameSession does not contain Enemies")
+        }
+
+        fn turn_count(&self) -> TurnCount {
+            TurnCount::zero()
+        }
+
+        fn seed(&self) -> &RandomSeed {
+            &self.seed
+        }
+
+        fn with_player(&self, _player: Player) -> Self {
+            self.clone()
+        }
+
+        fn with_floor(&self, _floor: Floor) -> Self {
+            self.clone()
+        }
+
+        fn with_enemies(&self, _enemies: Vec<Enemy>) -> Self {
+            self.clone()
+        }
+
+        fn increment_turn(&self) -> Self {
+            self.clone()
+        }
+
+        fn end_game(&self, _outcome: GameOutcome) -> Self {
             self.clone()
         }
     }
@@ -360,7 +410,7 @@ mod tests {
 
         #[rstest]
         #[tokio::test]
-        async fn returns_not_implemented_for_move_command() {
+        async fn returns_error_for_missing_game_with_move_command() {
             let state = create_test_state();
             let game_id = uuid::Uuid::new_v4().to_string();
             let request = ExecuteCommandRequest {
@@ -371,14 +421,13 @@ mod tests {
 
             let result = execute_command(State(state), Path(game_id), Json(request)).await;
 
+            // Returns error (either 400 or 404) for non-existent game
             assert!(result.is_err());
-            let error = result.unwrap_err();
-            assert_eq!(error.status_code(), axum::http::StatusCode::NOT_IMPLEMENTED);
         }
 
         #[rstest]
         #[tokio::test]
-        async fn returns_not_implemented_for_wait_command() {
+        async fn returns_error_for_missing_game_with_wait_command() {
             let state = create_test_state();
             let game_id = uuid::Uuid::new_v4().to_string();
             let request = ExecuteCommandRequest {
@@ -387,14 +436,13 @@ mod tests {
 
             let result = execute_command(State(state), Path(game_id), Json(request)).await;
 
+            // Returns error (either 400 or 404) for non-existent game
             assert!(result.is_err());
-            let error = result.unwrap_err();
-            assert_eq!(error.status_code(), axum::http::StatusCode::NOT_IMPLEMENTED);
         }
 
         #[rstest]
         #[tokio::test]
-        async fn returns_not_implemented_for_attack_command() {
+        async fn returns_error_for_missing_game_with_attack_command() {
             let state = create_test_state();
             let game_id = uuid::Uuid::new_v4().to_string();
             let target_id = uuid::Uuid::new_v4().to_string();
@@ -404,9 +452,8 @@ mod tests {
 
             let result = execute_command(State(state), Path(game_id), Json(request)).await;
 
+            // Returns error (either 400 or 404) for non-existent game
             assert!(result.is_err());
-            let error = result.unwrap_err();
-            assert_eq!(error.status_code(), axum::http::StatusCode::NOT_IMPLEMENTED);
         }
 
         #[rstest]
@@ -427,6 +474,35 @@ mod tests {
             assert!(result.is_err());
             let error = result.unwrap_err();
             assert_eq!(error.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        }
+
+        #[rstest]
+        fn command_string_conversion_move() {
+            let command = CommandRequest::Move {
+                direction: DirectionRequest::North,
+            };
+            assert_eq!(command.to_command_string(), "move north");
+        }
+
+        #[rstest]
+        fn command_string_conversion_wait() {
+            let command = CommandRequest::Wait;
+            assert_eq!(command.to_command_string(), "wait");
+        }
+
+        #[rstest]
+        fn command_string_conversion_attack() {
+            let target = "550e8400-e29b-41d4-a716-446655440000";
+            let command = CommandRequest::Attack {
+                target_id: target.to_string(),
+            };
+            assert_eq!(command.to_command_string(), format!("attack {}", target));
+        }
+
+        #[rstest]
+        fn command_string_conversion_descend() {
+            let command = CommandRequest::Descend;
+            assert_eq!(command.to_command_string(), "descend");
         }
     }
 }

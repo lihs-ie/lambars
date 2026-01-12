@@ -2,7 +2,13 @@ use std::time::Duration;
 
 use lambars::effect::AsyncIO;
 use lambars::pipe_async;
-use roguelike_domain::game_session::{GameIdentifier, GameSessionEvent, GameStatus};
+use roguelike_domain::common::TurnCount;
+use roguelike_domain::enemy::Enemy;
+use roguelike_domain::floor::Floor;
+use roguelike_domain::game_session::{
+    GameIdentifier, GameOutcome, GameSessionEvent, GameStatus, RandomSeed,
+};
+use roguelike_domain::player::Player;
 
 use super::ResumeGameCommand;
 use crate::errors::WorkflowError;
@@ -216,6 +222,26 @@ pub trait SessionStateAccessor: Clone + Send + Sync + 'static {
     fn event_sequence(&self) -> u64;
 
     fn apply_event(&self, event: &GameSessionEvent) -> Self;
+
+    fn player(&self) -> &Player;
+
+    fn current_floor(&self) -> &Floor;
+
+    fn enemies(&self) -> &[Enemy];
+
+    fn turn_count(&self) -> TurnCount;
+
+    fn seed(&self) -> &RandomSeed;
+
+    fn with_player(&self, player: Player) -> Self;
+
+    fn with_floor(&self, floor: Floor) -> Self;
+
+    fn with_enemies(&self, enemies: Vec<Enemy>) -> Self;
+
+    fn increment_turn(&self) -> Self;
+
+    fn end_game(&self, outcome: GameOutcome) -> Self;
 }
 
 // =============================================================================
@@ -318,6 +344,49 @@ mod tests {
                 new_session.status = ended.outcome().to_status();
             }
             new_session
+        }
+
+        fn player(&self) -> &Player {
+            unimplemented!("MockGameSession does not contain Player")
+        }
+
+        fn current_floor(&self) -> &Floor {
+            unimplemented!("MockGameSession does not contain Floor")
+        }
+
+        fn enemies(&self) -> &[Enemy] {
+            unimplemented!("MockGameSession does not contain Enemies")
+        }
+
+        fn turn_count(&self) -> TurnCount {
+            TurnCount::zero()
+        }
+
+        fn seed(&self) -> &RandomSeed {
+            &self.seed
+        }
+
+        fn with_player(&self, _player: Player) -> Self {
+            self.clone()
+        }
+
+        fn with_floor(&self, _floor: Floor) -> Self {
+            self.clone()
+        }
+
+        fn with_enemies(&self, _enemies: Vec<Enemy>) -> Self {
+            self.clone()
+        }
+
+        fn increment_turn(&self) -> Self {
+            self.clone()
+        }
+
+        fn end_game(&self, outcome: GameOutcome) -> Self {
+            Self {
+                status: outcome.to_status(),
+                ..self.clone()
+            }
         }
     }
 

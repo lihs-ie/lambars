@@ -368,12 +368,12 @@ async fn g13_get_game_twice_uses_cache() {
 }
 
 // =============================================================================
-// G14-G16: End Game Returns 501 (Not Implemented)
+// G14-G16: End Game Returns 200 (Success)
 // =============================================================================
 
 #[rstest]
 #[tokio::test]
-async fn g14_end_game_victory_returns_501() {
+async fn g14_end_game_victory_returns_200() {
     let mut context = IntegrationTestContext::new().await;
     context.cleanup_all().await;
 
@@ -388,18 +388,21 @@ async fn g14_end_game_victory_returns_501() {
         .post(&format!("/api/v1/games/{}/end", game_id), &request)
         .await;
 
-    // Note: Currently returns 500 because end_game workflow is not fully implemented
-    // Should return 501 when properly implemented
-    assert!(
-        response.status_code() == 500 || response.status_code() == 501,
-        "Expected 500 or 501, got {}",
+    assert_eq!(
+        response.status_code(),
+        200,
+        "Expected 200, got {}",
         response.status_code()
     );
+
+    assert_json_has_key(&response.body, "game_id");
+    assert_json_has_key(&response.body, "outcome");
+    assert_json_string_eq(&response.body, "outcome", "victory");
 }
 
 #[rstest]
 #[tokio::test]
-async fn g15_end_game_defeat_returns_501() {
+async fn g15_end_game_defeat_returns_200() {
     let mut context = IntegrationTestContext::new().await;
     context.cleanup_all().await;
 
@@ -414,17 +417,21 @@ async fn g15_end_game_defeat_returns_501() {
         .post(&format!("/api/v1/games/{}/end", game_id), &request)
         .await;
 
-    // Note: Currently returns 500 because end_game workflow is not fully implemented
-    assert!(
-        response.status_code() == 500 || response.status_code() == 501,
-        "Expected 500 or 501, got {}",
+    assert_eq!(
+        response.status_code(),
+        200,
+        "Expected 200, got {}",
         response.status_code()
     );
+
+    assert_json_has_key(&response.body, "game_id");
+    assert_json_has_key(&response.body, "outcome");
+    assert_json_string_eq(&response.body, "outcome", "defeat");
 }
 
 #[rstest]
 #[tokio::test]
-async fn g16_end_game_abandon_returns_501() {
+async fn g16_end_game_abandon_returns_200() {
     let mut context = IntegrationTestContext::new().await;
     context.cleanup_all().await;
 
@@ -439,12 +446,16 @@ async fn g16_end_game_abandon_returns_501() {
         .post(&format!("/api/v1/games/{}/end", game_id), &request)
         .await;
 
-    // Note: Currently returns 500 because end_game workflow is not fully implemented
-    assert!(
-        response.status_code() == 500 || response.status_code() == 501,
-        "Expected 500 or 501, got {}",
+    assert_eq!(
+        response.status_code(),
+        200,
+        "Expected 200, got {}",
         response.status_code()
     );
+
+    assert_json_has_key(&response.body, "game_id");
+    assert_json_has_key(&response.body, "outcome");
+    assert_json_string_eq(&response.body, "outcome", "abandon");
 }
 
 // =============================================================================
