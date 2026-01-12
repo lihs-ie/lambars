@@ -187,9 +187,7 @@ fn load_session_from_cache<C: SessionCache>(
         cache.get(&game_identifier).fmap(move |session_option| {
             session_option
                 .map(|session| (session, player_command, game_identifier))
-                .ok_or_else(|| {
-                    WorkflowError::not_found("GameSession", game_identifier.to_string())
-                })
+                .ok_or_else(|| WorkflowError::not_found("GameSession", game_identifier.to_string()))
         })
     }
 }
@@ -228,7 +226,14 @@ fn persist_turn_result<C: SessionCache, E: EventStore>(
     event_store: E,
     cache_ttl: Duration,
 ) -> impl Fn(
-    Result<(TurnResult<C::GameSession>, Vec<GameSessionEvent>, GameIdentifier), WorkflowError>,
+    Result<
+        (
+            TurnResult<C::GameSession>,
+            Vec<GameSessionEvent>,
+            GameIdentifier,
+        ),
+        WorkflowError,
+    >,
 ) -> AsyncIO<WorkflowResult<TurnResult<C::GameSession>>> {
     move |result| match result {
         Err(error) => AsyncIO::pure(Err(error)),

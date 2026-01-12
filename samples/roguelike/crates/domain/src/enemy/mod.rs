@@ -2,6 +2,7 @@
 //!
 //! This module contains all enemy-related domain types including:
 //!
+//! - **Aggregate**: [`Enemy`] aggregate root for enemy entities
 //! - **Identifiers**: [`EntityIdentifier`] for uniquely identifying enemies
 //! - **Types**: [`EnemyType`] for different enemy species
 //! - **Behaviors**: [`AiBehavior`] for AI behavior patterns
@@ -13,32 +14,47 @@
 //!
 //! ```
 //! use roguelike_domain::enemy::{
-//!     EntityIdentifier, EnemyType, AiBehavior, LootTable, LootEntry
+//!     Enemy, EntityIdentifier, EnemyType, AiBehavior, LootTable, LootEntry
 //! };
+//! use roguelike_domain::common::{Position, CombatStats, Health, Mana, Attack, Defense, Speed};
 //! use roguelike_domain::item::ItemIdentifier;
 //!
-//! // Create an enemy identifier
+//! // Create an enemy
 //! let enemy_id = EntityIdentifier::new();
+//! let position = Position::new(5, 10);
+//! let stats = CombatStats::new(
+//!     Health::new(100).unwrap(),
+//!     Health::new(100).unwrap(),
+//!     Mana::zero(),
+//!     Mana::zero(),
+//!     Attack::new(15),
+//!     Defense::new(5),
+//!     Speed::new(10),
+//! ).unwrap();
 //!
-//! // Define enemy type and behavior
-//! let enemy_type = EnemyType::Goblin;
-//! let behavior = AiBehavior::Aggressive;
+//! let enemy = Enemy::new(
+//!     enemy_id,
+//!     EnemyType::Goblin,
+//!     position,
+//!     stats,
+//!     AiBehavior::Aggressive,
+//!     LootTable::empty(),
+//! );
 //!
-//! // Create a loot table
-//! let item_id = ItemIdentifier::new();
-//! let entry = LootEntry::new(item_id, 0.5, 1, 3).unwrap();
-//! let loot_table = LootTable::empty().with_entry(entry);
-//!
-//! println!("Enemy: {} ({}) with {} loot entries",
-//!     enemy_type, behavior, loot_table.len());
+//! println!("Enemy: {} at {} (alive: {})",
+//!     enemy.enemy_type(), enemy.position(), enemy.is_alive());
 //! ```
 
+mod aggregate;
 mod behavior;
 mod enemy_type;
 mod errors;
 mod events;
 mod identifier;
 mod loot;
+
+// Re-export aggregate
+pub use aggregate::Enemy;
 
 // Re-export identifier types
 pub use identifier::EntityIdentifier;

@@ -1,14 +1,16 @@
 //! Player equipment and inventory types.
 //!
-//! This module provides types for managing player equipment:
+//! This module provides types for managing player equipment and inventory:
 //!
 //! - **EquipmentSlot**: Enum representing equipment slot types
 //! - **EquipmentSlots**: Struct holding all equipment slots
-//!
-//! Note: `Inventory` and `ItemStack` are not implemented yet as they depend
-//! on the `Item` type which is not yet available.
+//! - **Inventory**: Container for player's item stacks
+//! - **ItemStack**: A stack of items with quantity
 
 use std::fmt;
+
+use crate::item::ItemIdentifier;
+use crate::player::PlayerError;
 
 // =============================================================================
 // EquipmentSlot
@@ -306,6 +308,349 @@ impl EquipmentSlots {
     #[must_use]
     pub fn is_fully_equipped(&self) -> bool {
         self.equipped_count() == EquipmentSlot::all().len()
+    }
+}
+
+// =============================================================================
+// ItemStack
+// =============================================================================
+
+/// A stack of items with an identifier and quantity.
+///
+/// `ItemStack` represents one or more identical items in the player's inventory.
+///
+/// # Examples
+///
+/// ```
+/// use roguelike_domain::item::ItemIdentifier;
+/// use roguelike_domain::player::ItemStack;
+///
+/// let item_id = ItemIdentifier::new();
+/// let stack = ItemStack::new(item_id, 5);
+/// assert_eq!(stack.quantity(), 5);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ItemStack {
+    item_identifier: ItemIdentifier,
+    quantity: u32,
+}
+
+impl ItemStack {
+    /// Creates a new `ItemStack` with the given item identifier and quantity.
+    ///
+    /// # Arguments
+    ///
+    /// * `item_identifier` - The unique identifier for this item type
+    /// * `quantity` - The number of items in this stack
+    #[must_use]
+    pub const fn new(item_identifier: ItemIdentifier, quantity: u32) -> Self {
+        Self {
+            item_identifier,
+            quantity,
+        }
+    }
+
+    /// Returns the item identifier.
+    #[must_use]
+    pub const fn item_identifier(&self) -> ItemIdentifier {
+        self.item_identifier
+    }
+
+    /// Returns the quantity of items in this stack.
+    #[must_use]
+    pub const fn quantity(&self) -> u32 {
+        self.quantity
+    }
+
+    /// Returns a new `ItemStack` with the quantity increased by the given amount.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use roguelike_domain::item::ItemIdentifier;
+    /// use roguelike_domain::player::ItemStack;
+    ///
+    /// let item_id = ItemIdentifier::new();
+    /// let stack = ItemStack::new(item_id, 5);
+    /// let increased = stack.add_quantity(3);
+    /// assert_eq!(increased.quantity(), 8);
+    /// ```
+    #[must_use]
+    pub const fn add_quantity(&self, amount: u32) -> Self {
+        Self {
+            item_identifier: self.item_identifier,
+            quantity: self.quantity.saturating_add(amount),
+        }
+    }
+
+    /// Returns a new `ItemStack` with the quantity decreased by the given amount.
+    ///
+    /// Returns `None` if the quantity would become zero or negative.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use roguelike_domain::item::ItemIdentifier;
+    /// use roguelike_domain::player::ItemStack;
+    ///
+    /// let item_id = ItemIdentifier::new();
+    /// let stack = ItemStack::new(item_id, 5);
+    /// let decreased = stack.remove_quantity(3).unwrap();
+    /// assert_eq!(decreased.quantity(), 2);
+    ///
+    /// // Removing all items returns None
+    /// let empty = stack.remove_quantity(5);
+    /// assert!(empty.is_none());
+    /// ```
+    #[must_use]
+    pub const fn remove_quantity(&self, amount: u32) -> Option<Self> {
+        if amount >= self.quantity {
+            None
+        } else {
+            Some(Self {
+                item_identifier: self.item_identifier,
+                quantity: self.quantity - amount,
+            })
+        }
+    }
+}
+
+impl fmt::Display for ItemStack {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{} x{}", self.item_identifier, self.quantity)
+    }
+}
+
+// =============================================================================
+// Inventory
+// =============================================================================
+
+/// Default inventory capacity.
+const DEFAULT_INVENTORY_CAPACITY: u32 = 20;
+
+/// Container for player's item stacks.
+///
+/// `Inventory` holds multiple `ItemStack`s with a maximum capacity.
+/// Items with the same identifier are automatically stacked together.
+///
+/// # Invariants
+///
+/// - `items.len() <= capacity`
+///
+/// # Examples
+///
+/// ```
+/// use roguelike_domain::item::ItemIdentifier;
+/// use roguelike_domain::player::Inventory;
+///
+/// let inventory = Inventory::new(10);
+/// assert!(inventory.is_empty());
+/// assert_eq!(inventory.capacity(), 10);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Inventory {
+    items: Vec<ItemStack>,
+    capacity: u32,
+}
+
+impl Inventory {
+    /// Creates a new empty `Inventory` with the given capacity.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use roguelike_domain::player::Inventory;
+    ///
+    /// let inventory = Inventory::new(20);
+    /// assert_eq!(inventory.capacity(), 20);
+    /// ```
+    #[must_use]
+    pub fn new(capacity: u32) -> Self {
+        Self {
+            items: Vec::new(),
+            capacity,
+        }
+    }
+
+    /// Creates a new empty `Inventory` with the specified capacity.
+    ///
+    /// This is an alias for `new` to match common Rust naming conventions.
+    #[must_use]
+    pub fn with_capacity(capacity: u32) -> Self {
+        Self::new(capacity)
+    }
+
+    /// Returns the maximum number of different item stacks this inventory can hold.
+    #[must_use]
+    pub const fn capacity(&self) -> u32 {
+        self.capacity
+    }
+
+    /// Returns the number of different item stacks in the inventory.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    /// Returns true if the inventory has no items.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    /// Returns true if the inventory is at maximum capacity.
+    #[must_use]
+    pub fn is_full(&self) -> bool {
+        self.items.len() >= self.capacity as usize
+    }
+
+    /// Returns a slice of all item stacks in the inventory.
+    #[must_use]
+    pub fn items(&self) -> &[ItemStack] {
+        &self.items
+    }
+
+    /// Finds an item stack by its identifier.
+    #[must_use]
+    pub fn find(&self, item_identifier: &ItemIdentifier) -> Option<&ItemStack> {
+        self.items
+            .iter()
+            .find(|stack| &stack.item_identifier == item_identifier)
+    }
+
+    /// Returns the total quantity of items with the given identifier.
+    #[must_use]
+    pub fn quantity_of(&self, item_identifier: &ItemIdentifier) -> u32 {
+        self.find(item_identifier)
+            .map(|stack| stack.quantity())
+            .unwrap_or(0)
+    }
+
+    /// Adds items to the inventory.
+    ///
+    /// If an item with the same identifier already exists, the quantities are combined.
+    /// If the inventory is full and the item is new, returns an error.
+    ///
+    /// This is an immutable operation that returns a new `Inventory`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `PlayerError::InventoryFull` if the inventory is at capacity
+    /// and a new item type is being added.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use roguelike_domain::item::ItemIdentifier;
+    /// use roguelike_domain::player::Inventory;
+    ///
+    /// let inventory = Inventory::new(10);
+    /// let item_id = ItemIdentifier::new();
+    /// let updated = inventory.add_item(item_id, 5).unwrap();
+    /// assert_eq!(updated.len(), 1);
+    /// ```
+    pub fn add_item(
+        self,
+        item_identifier: ItemIdentifier,
+        quantity: u32,
+    ) -> Result<Self, PlayerError> {
+        // Check if item already exists
+        let existing_index = self
+            .items
+            .iter()
+            .position(|stack| stack.item_identifier == item_identifier);
+
+        match existing_index {
+            Some(index) => {
+                // Item exists, increase quantity
+                let mut new_items = self.items;
+                new_items[index] = new_items[index].add_quantity(quantity);
+                Ok(Self {
+                    items: new_items,
+                    capacity: self.capacity,
+                })
+            }
+            None => {
+                // New item, check capacity
+                if self.is_full() {
+                    return Err(PlayerError::inventory_full(self.capacity));
+                }
+                let mut new_items = self.items;
+                new_items.push(ItemStack::new(item_identifier, quantity));
+                Ok(Self {
+                    items: new_items,
+                    capacity: self.capacity,
+                })
+            }
+        }
+    }
+
+    /// Removes items from the inventory.
+    ///
+    /// If the quantity to remove equals the stack quantity, the stack is removed.
+    /// If the quantity to remove is greater than available, returns an error.
+    ///
+    /// This is an immutable operation that returns a new `Inventory`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `PlayerError::ItemNotInInventory` if the item is not found
+    /// or if the quantity to remove exceeds the available quantity.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use roguelike_domain::item::ItemIdentifier;
+    /// use roguelike_domain::player::Inventory;
+    ///
+    /// let item_id = ItemIdentifier::new();
+    /// let inventory = Inventory::new(10)
+    ///     .add_item(item_id, 5)
+    ///     .unwrap();
+    /// let updated = inventory.remove_item(&item_id, 3).unwrap();
+    /// assert_eq!(updated.quantity_of(&item_id), 2);
+    /// ```
+    pub fn remove_item(
+        self,
+        item_identifier: &ItemIdentifier,
+        quantity: u32,
+    ) -> Result<Self, PlayerError> {
+        let existing_index = self
+            .items
+            .iter()
+            .position(|stack| &stack.item_identifier == item_identifier);
+
+        match existing_index {
+            Some(index) => {
+                let stack = &self.items[index];
+                if quantity > stack.quantity() {
+                    return Err(PlayerError::item_not_in_inventory(
+                        item_identifier.to_string(),
+                    ));
+                }
+
+                let mut new_items = self.items;
+                if let Some(new_stack) = new_items[index].remove_quantity(quantity) {
+                    new_items[index] = new_stack;
+                } else {
+                    new_items.remove(index);
+                }
+
+                Ok(Self {
+                    items: new_items,
+                    capacity: self.capacity,
+                })
+            }
+            None => Err(PlayerError::item_not_in_inventory(
+                item_identifier.to_string(),
+            )),
+        }
+    }
+}
+
+impl Default for Inventory {
+    fn default() -> Self {
+        Self::new(DEFAULT_INVENTORY_CAPACITY)
     }
 }
 
@@ -668,6 +1013,318 @@ mod tests {
             assert_eq!(equipment.armor(), Some("plate"));
             assert_eq!(equipment.helmet(), Some("helm"));
             assert_eq!(equipment.accessory(), Some("ring"));
+        }
+    }
+
+    // =========================================================================
+    // ItemStack Tests
+    // =========================================================================
+
+    mod item_stack {
+        use super::*;
+        use crate::item::ItemIdentifier;
+
+        #[rstest]
+        fn new_creates_item_stack() {
+            let item_id = ItemIdentifier::new();
+            let stack = ItemStack::new(item_id, 5);
+            assert_eq!(stack.item_identifier(), item_id);
+            assert_eq!(stack.quantity(), 5);
+        }
+
+        #[rstest]
+        fn new_with_zero_quantity() {
+            let item_id = ItemIdentifier::new();
+            let stack = ItemStack::new(item_id, 0);
+            assert_eq!(stack.quantity(), 0);
+        }
+
+        #[rstest]
+        fn add_quantity_increases_quantity() {
+            let item_id = ItemIdentifier::new();
+            let stack = ItemStack::new(item_id, 5);
+            let increased = stack.add_quantity(3);
+            assert_eq!(increased.quantity(), 8);
+            assert_eq!(increased.item_identifier(), item_id);
+        }
+
+        #[rstest]
+        fn add_quantity_saturates() {
+            let item_id = ItemIdentifier::new();
+            let stack = ItemStack::new(item_id, u32::MAX - 1);
+            let increased = stack.add_quantity(10);
+            assert_eq!(increased.quantity(), u32::MAX);
+        }
+
+        #[rstest]
+        fn remove_quantity_decreases_quantity() {
+            let item_id = ItemIdentifier::new();
+            let stack = ItemStack::new(item_id, 5);
+            let decreased = stack.remove_quantity(3).unwrap();
+            assert_eq!(decreased.quantity(), 2);
+        }
+
+        #[rstest]
+        fn remove_quantity_returns_none_when_equal() {
+            let item_id = ItemIdentifier::new();
+            let stack = ItemStack::new(item_id, 5);
+            let result = stack.remove_quantity(5);
+            assert!(result.is_none());
+        }
+
+        #[rstest]
+        fn remove_quantity_returns_none_when_exceeds() {
+            let item_id = ItemIdentifier::new();
+            let stack = ItemStack::new(item_id, 5);
+            let result = stack.remove_quantity(10);
+            assert!(result.is_none());
+        }
+
+        #[rstest]
+        fn display_format() {
+            let item_id = ItemIdentifier::new();
+            let stack = ItemStack::new(item_id, 5);
+            let display = format!("{}", stack);
+            assert!(display.contains("x5"));
+        }
+
+        #[rstest]
+        fn equality() {
+            let item_id = ItemIdentifier::new();
+            let stack1 = ItemStack::new(item_id, 5);
+            let stack2 = ItemStack::new(item_id, 5);
+            let stack3 = ItemStack::new(item_id, 3);
+            let stack4 = ItemStack::new(ItemIdentifier::new(), 5);
+
+            assert_eq!(stack1, stack2);
+            assert_ne!(stack1, stack3);
+            assert_ne!(stack1, stack4);
+        }
+
+        #[rstest]
+        fn clone() {
+            let item_id = ItemIdentifier::new();
+            let stack = ItemStack::new(item_id, 5);
+            let cloned = stack.clone();
+            assert_eq!(stack, cloned);
+        }
+
+        #[rstest]
+        fn hash_consistency() {
+            use std::collections::HashSet;
+
+            let item_id = ItemIdentifier::new();
+            let stack1 = ItemStack::new(item_id, 5);
+            let stack2 = ItemStack::new(item_id, 5);
+            let stack3 = ItemStack::new(item_id, 3);
+
+            let mut set = HashSet::new();
+            set.insert(stack1.clone());
+
+            assert!(set.contains(&stack2));
+            assert!(!set.contains(&stack3));
+        }
+    }
+
+    // =========================================================================
+    // Inventory Tests
+    // =========================================================================
+
+    mod inventory {
+        use super::*;
+        use crate::item::ItemIdentifier;
+
+        #[rstest]
+        fn new_creates_empty_inventory() {
+            let inventory = Inventory::new(10);
+            assert!(inventory.is_empty());
+            assert_eq!(inventory.capacity(), 10);
+            assert_eq!(inventory.len(), 0);
+        }
+
+        #[rstest]
+        fn with_capacity_creates_empty_inventory() {
+            let inventory = Inventory::with_capacity(15);
+            assert!(inventory.is_empty());
+            assert_eq!(inventory.capacity(), 15);
+        }
+
+        #[rstest]
+        fn default_creates_inventory_with_default_capacity() {
+            let inventory = Inventory::default();
+            assert!(inventory.is_empty());
+            assert_eq!(inventory.capacity(), 20);
+        }
+
+        #[rstest]
+        fn is_full_when_at_capacity() {
+            let item_id1 = ItemIdentifier::new();
+            let item_id2 = ItemIdentifier::new();
+            let inventory = Inventory::new(2)
+                .add_item(item_id1, 1)
+                .unwrap()
+                .add_item(item_id2, 1)
+                .unwrap();
+            assert!(inventory.is_full());
+        }
+
+        #[rstest]
+        fn is_full_when_not_at_capacity() {
+            let item_id = ItemIdentifier::new();
+            let inventory = Inventory::new(10).add_item(item_id, 1).unwrap();
+            assert!(!inventory.is_full());
+        }
+
+        #[rstest]
+        fn add_item_creates_new_stack() {
+            let item_id = ItemIdentifier::new();
+            let inventory = Inventory::new(10).add_item(item_id, 5).unwrap();
+            assert_eq!(inventory.len(), 1);
+            assert_eq!(inventory.quantity_of(&item_id), 5);
+        }
+
+        #[rstest]
+        fn add_item_stacks_existing_items() {
+            let item_id = ItemIdentifier::new();
+            let inventory = Inventory::new(10)
+                .add_item(item_id, 5)
+                .unwrap()
+                .add_item(item_id, 3)
+                .unwrap();
+            assert_eq!(inventory.len(), 1);
+            assert_eq!(inventory.quantity_of(&item_id), 8);
+        }
+
+        #[rstest]
+        fn add_item_different_items_create_separate_stacks() {
+            let item_id1 = ItemIdentifier::new();
+            let item_id2 = ItemIdentifier::new();
+            let inventory = Inventory::new(10)
+                .add_item(item_id1, 5)
+                .unwrap()
+                .add_item(item_id2, 3)
+                .unwrap();
+            assert_eq!(inventory.len(), 2);
+            assert_eq!(inventory.quantity_of(&item_id1), 5);
+            assert_eq!(inventory.quantity_of(&item_id2), 3);
+        }
+
+        #[rstest]
+        fn add_item_fails_when_full() {
+            let item_id1 = ItemIdentifier::new();
+            let item_id2 = ItemIdentifier::new();
+            let inventory = Inventory::new(1).add_item(item_id1, 1).unwrap();
+            let result = inventory.add_item(item_id2, 1);
+            assert!(result.is_err());
+            assert!(matches!(
+                result.unwrap_err(),
+                PlayerError::InventoryFull { capacity: 1 }
+            ));
+        }
+
+        #[rstest]
+        fn add_item_succeeds_when_full_but_stacking() {
+            let item_id = ItemIdentifier::new();
+            let inventory = Inventory::new(1).add_item(item_id, 1).unwrap();
+            let result = inventory.add_item(item_id, 1);
+            assert!(result.is_ok());
+            assert_eq!(result.unwrap().quantity_of(&item_id), 2);
+        }
+
+        #[rstest]
+        fn remove_item_decreases_quantity() {
+            let item_id = ItemIdentifier::new();
+            let inventory = Inventory::new(10).add_item(item_id, 5).unwrap();
+            let updated = inventory.remove_item(&item_id, 3).unwrap();
+            assert_eq!(updated.quantity_of(&item_id), 2);
+        }
+
+        #[rstest]
+        fn remove_item_removes_stack_when_quantity_equals() {
+            let item_id = ItemIdentifier::new();
+            let inventory = Inventory::new(10).add_item(item_id, 5).unwrap();
+            let updated = inventory.remove_item(&item_id, 5).unwrap();
+            assert_eq!(updated.len(), 0);
+            assert_eq!(updated.quantity_of(&item_id), 0);
+        }
+
+        #[rstest]
+        fn remove_item_fails_when_quantity_exceeds() {
+            let item_id = ItemIdentifier::new();
+            let inventory = Inventory::new(10).add_item(item_id, 5).unwrap();
+            let result = inventory.remove_item(&item_id, 10);
+            assert!(result.is_err());
+        }
+
+        #[rstest]
+        fn remove_item_fails_when_item_not_found() {
+            let item_id = ItemIdentifier::new();
+            let other_id = ItemIdentifier::new();
+            let inventory = Inventory::new(10).add_item(item_id, 5).unwrap();
+            let result = inventory.remove_item(&other_id, 1);
+            assert!(result.is_err());
+        }
+
+        #[rstest]
+        fn find_returns_item_stack() {
+            let item_id = ItemIdentifier::new();
+            let inventory = Inventory::new(10).add_item(item_id, 5).unwrap();
+            let found = inventory.find(&item_id);
+            assert!(found.is_some());
+            assert_eq!(found.unwrap().quantity(), 5);
+        }
+
+        #[rstest]
+        fn find_returns_none_when_not_found() {
+            let item_id = ItemIdentifier::new();
+            let inventory = Inventory::new(10);
+            let found = inventory.find(&item_id);
+            assert!(found.is_none());
+        }
+
+        #[rstest]
+        fn items_returns_all_stacks() {
+            let item_id1 = ItemIdentifier::new();
+            let item_id2 = ItemIdentifier::new();
+            let inventory = Inventory::new(10)
+                .add_item(item_id1, 5)
+                .unwrap()
+                .add_item(item_id2, 3)
+                .unwrap();
+            let items = inventory.items();
+            assert_eq!(items.len(), 2);
+        }
+
+        #[rstest]
+        fn equality() {
+            let item_id = ItemIdentifier::new();
+            let inventory1 = Inventory::new(10).add_item(item_id, 5).unwrap();
+            let inventory2 = Inventory::new(10).add_item(item_id, 5).unwrap();
+            assert_eq!(inventory1, inventory2);
+        }
+
+        #[rstest]
+        fn inequality_different_items() {
+            let item_id1 = ItemIdentifier::new();
+            let item_id2 = ItemIdentifier::new();
+            let inventory1 = Inventory::new(10).add_item(item_id1, 5).unwrap();
+            let inventory2 = Inventory::new(10).add_item(item_id2, 5).unwrap();
+            assert_ne!(inventory1, inventory2);
+        }
+
+        #[rstest]
+        fn inequality_different_capacity() {
+            let inventory1 = Inventory::new(10);
+            let inventory2 = Inventory::new(20);
+            assert_ne!(inventory1, inventory2);
+        }
+
+        #[rstest]
+        fn clone() {
+            let item_id = ItemIdentifier::new();
+            let inventory = Inventory::new(10).add_item(item_id, 5).unwrap();
+            let cloned = inventory.clone();
+            assert_eq!(inventory, cloned);
         }
     }
 }

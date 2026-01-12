@@ -2,6 +2,7 @@
 //!
 //! This module provides types for representing and manipulating dungeon floors:
 //!
+//! - **Aggregates**: `Floor` as the aggregate root for a dungeon level
 //! - **Identifiers**: `FloorIdentifier` for unique floor identification
 //! - **Tiles**: `Tile`, `TileKind`, `TrapType` for floor tiles
 //! - **Rooms**: `Room` for rectangular rooms with validation
@@ -14,12 +15,16 @@
 //! - Validation: Constructors return Result for constrained types
 //! - Type safety: Newtype pattern for identifiers
 
+mod aggregate;
 mod corridor;
 mod errors;
 mod events;
 mod identifier;
 mod room;
 mod tile;
+
+// Re-export aggregate types
+pub use aggregate::Floor;
 
 // Re-export identifier types
 pub use identifier::FloorIdentifier;
