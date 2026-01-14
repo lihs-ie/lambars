@@ -2220,6 +2220,26 @@ fn log_computation() -> Eff<LogEffect, i32> {
 | `S.intersection` | `intersection` メソッド | 積集合         |
 | `S.difference`   | `difference` メソッド   | 差集合         |
 
+### デック（Finger Tree）
+
+| Haskell              | lambars                        | 説明                        |
+| -------------------- | ------------------------------ | --------------------------- |
+| `Data.Sequence`      | `PersistentDeque<A>`           | 両端キュー                  |
+| `Seq.empty`          | `PersistentDeque::new`         | 空のデック                  |
+| `Seq.singleton x`    | `PersistentDeque::singleton`   | 単一要素                    |
+| `x <| xs`            | `push_front` メソッド          | 先頭に追加                  |
+| `xs |> x`            | `push_back` メソッド           | 末尾に追加                  |
+| `Seq.viewl xs`       | `pop_front` メソッド           | 先頭から取り出し            |
+| `Seq.viewr xs`       | `pop_back` メソッド            | 末尾から取り出し            |
+| `Seq.length xs`      | `len` メソッド                 | 長さ                        |
+| `Seq.null xs`        | `is_empty` メソッド            | 空かどうか                  |
+| `xs <> ys`           | `concat` メソッド              | 連結 (O(log min))           |
+| `Seq.index xs i`     | `get` メソッド                 | インデックスアクセス        |
+| `Seq.update i x xs`  | (未実装)                       | インデックスで更新          |
+| `Seq.take n xs`      | (未実装)                       | 先頭 n 要素を取得           |
+| `Seq.drop n xs`      | (未実装)                       | 先頭 n 要素を削除           |
+| `Seq.splitAt n xs`   | (未実装)                       | インデックスで分割          |
+
 ### コード例
 
 ```haskell

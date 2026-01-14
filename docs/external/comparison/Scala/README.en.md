@@ -1630,6 +1630,7 @@ Available AsyncIO methods:
 | `SortedMap[K, V]` | `PersistentTreeMap<K, V>` | Immutable sorted map |
 | `Set[A]`          | `PersistentHashSet<A>`    | Immutable set        |
 | `Set[A].view`     | `HashSetView<A>`          | Lazy view over set   |
+| `Queue[A]`        | `PersistentDeque<A>`      | Immutable deque      |
 
 ### List/Vector Operations
 

@@ -1176,6 +1176,7 @@ fn add<T: Semigroup>(a: T, b: T) -> T {
 | `Map<'K, 'V>` | `PersistentTreeMap<K, V>` | Immutable ordered map            |
 | `Set<'T>`     | `PersistentHashSet<T>`    | Immutable set                    |
 | -             | `PersistentVector<T>`     | Immutable vector (Clojure-style) |
+| -             | `PersistentDeque<T>`      | Immutable deque (Finger Tree)    |
 | -             | `PersistentHashMap<K, V>` | Immutable hash map (HAMT)        |
 
 ### Map Operations

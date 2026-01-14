@@ -1,0 +1,67 @@
+# Issue: PersistentDeque split 操作の実装
+# PersistentDeque の将来拡張として発見された項目
+
+deferred_features:
+  - id: split_operation
+    name: "PersistentDeque split 操作"
+    discovered_date: "2026-01-14"
+    priority: low
+    category: enhancement
+    labels:
+      - "persistent"
+      - "api"
+      - "enhancement"
+      - "priority: low"
+
+    problem:
+      summary: "指定位置で Deque を2つに分割する操作がない"
+      details: |
+        現在の PersistentDeque には split 操作がない。Finger Tree は
+        効率的な split 操作（O(log n)）をサポートしており、これを
+        実装することで以下のユースケースに対応できる。
+
+        - テキストエディタのロープデータ構造
+        - 範囲ベースの操作
+        - 効率的なスライス
+
+        現時点では Deque としての基本 API（push/pop/front/back）に
+        集中したため、実装していない。
+
+    solution:
+      approach: "Finger Tree の split 操作を PersistentDeque に公開"
+      options:
+        - name: "split_at メソッドの追加"
+          description: |
+            split_at(index) -> (PersistentDeque, PersistentDeque) を実装。
+            Finger Tree の split 操作を内部的に使用。
+          pros:
+            - PersistentVector/PersistentList と一貫した API
+            - O(log n) の計算量
+          cons:
+            - 現在の type-erased spine では効率的な実装が困難
+            - 実装の複雑さ
+
+        - name: "Measured Finger Tree と同時に実装"
+          description: |
+            Measured Finger Tree の実装時に split も実装する。
+            測定値を使った split が本来の Finger Tree の設計。
+          pros:
+            - 正しい設計に基づく実装
+            - 他の機能との相乗効果
+          cons:
+            - Measured Finger Tree の実装が前提
+
+      recommended: "Measured Finger Tree と同時に実装"
+      estimated_complexity: medium
+
+    references:
+      - "Hinze & Paterson, 'Finger Trees: A Simple General-purpose Data Structure' (2006), Section 4"
+
+    related:
+      requirement_id: "20260114_1700_persistent_deque"
+      plan_id: null
+
+    github_issue:
+      number: 149
+      url: "https://github.com/lihs-ie/lambars/issues/149"
+      created: true

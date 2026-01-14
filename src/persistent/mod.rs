@@ -5,6 +5,7 @@
 //!
 //! - [`PersistentList`]: Persistent singly-linked list
 //! - [`PersistentVector`]: Persistent vector (Radix Balanced Tree)
+//! - [`PersistentDeque`]: Persistent double-ended queue (Finger Tree)
 //! - [`PersistentHashMap`]: Persistent hash map (HAMT)
 //! - [`PersistentHashSet`]: Persistent hash set (based on HAMT)
 //! - [`PersistentTreeMap`]: Persistent ordered map (Red-Black Tree)
@@ -127,12 +128,14 @@ pub(crate) type ReferenceCounter<T> = std::sync::Arc<T>;
 #[cfg(not(feature = "arc"))]
 pub(crate) type ReferenceCounter<T> = std::rc::Rc<T>;
 
+mod deque;
 mod hashmap;
 mod hashset;
 mod list;
 mod treemap;
 mod vector;
 
+pub use deque::PersistentDeque;
 pub use hashmap::PersistentHashMap;
 pub use hashmap::PersistentHashMapIntoIterator;
 pub use hashmap::PersistentHashMapIterator;

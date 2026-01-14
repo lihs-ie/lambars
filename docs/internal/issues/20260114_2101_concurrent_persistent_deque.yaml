@@ -1,0 +1,68 @@
+# Issue: ConcurrentPersistentDeque の実装
+# PersistentDeque の将来拡張として発見された項目
+
+deferred_features:
+  - id: concurrent_deque
+    name: "ConcurrentPersistentDeque"
+    discovered_date: "2026-01-14"
+    priority: medium
+    category: enhancement
+    labels:
+      - "persistent"
+      - "concurrency"
+      - "enhancement"
+      - "priority: medium"
+
+    problem:
+      summary: "現在の PersistentDeque は Rc ベースでスレッドセーフではない"
+      details: |
+        現在の PersistentDeque は ReferenceCounter（デフォルトで Rc）を使用しており、
+        スレッド間で共有することができない。マルチスレッド環境での使用には
+        Arc ベースの実装が必要。
+
+        - Rc は Send / Sync を実装していない
+        - マルチスレッド環境での共有ができない
+        - 並行処理でのイミュータブルデータ構造の利点を活かせない
+
+    solution:
+      approach: "arc feature フラグによる Arc ベース実装の有効化"
+      options:
+        - name: "既存の arc feature を活用"
+          description: |
+            lambars では既に arc feature フラグが存在し、ReferenceCounter の
+            型エイリアスを Rc から Arc に切り替える仕組みがある。
+            PersistentDeque がこの仕組みを正しく活用していることを確認し、
+            必要に応じてテストを追加する。
+          pros:
+            - 既存の仕組みを活用できる
+            - コード変更が最小限
+            - 他の永続データ構造と一貫性がある
+          cons:
+            - Arc のオーバーヘッドがある
+            - feature フラグによる条件分岐が必要
+
+        - name: "ConcurrentPersistentDeque として別実装"
+          description: |
+            スレッドセーフ版を別の型として実装する。
+          pros:
+            - 明示的な型区別
+            - 非スレッドセーフ版のパフォーマンスを維持
+          cons:
+            - コードの重複
+            - メンテナンスコストの増加
+
+      recommended: "既存の arc feature を活用"
+      estimated_complexity: low
+
+    references:
+      - "Rust std::sync::Arc documentation"
+      - "lambars arc feature implementation"
+
+    related:
+      requirement_id: "20260114_1700_persistent_deque"
+      plan_id: null
+
+    github_issue:
+      number: 147
+      url: "https://github.com/lihs-ie/lambars/issues/147"
+      created: true

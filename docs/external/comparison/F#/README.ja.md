@@ -1178,6 +1178,7 @@ fn add<T: Semigroup>(a: T, b: T) -> T {
 | `Map<'K, 'V>` | `PersistentTreeMap<K, V>` | 不変の順序付きマップ          |
 | `Set<'T>`     | `PersistentHashSet<T>`    | 不変の集合                    |
 | -             | `PersistentVector<T>`     | 不変ベクタ (Clojure スタイル) |
+| -             | `PersistentDeque<T>`      | 不変両端キュー (Finger Tree)  |
 | -             | `PersistentHashMap<K, V>` | 不変ハッシュマップ (HAMT)     |
 
 ### Map 操作
