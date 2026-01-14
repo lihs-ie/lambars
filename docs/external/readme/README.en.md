@@ -477,6 +477,30 @@ let pushed = vector.push_back(100);
 assert_eq!(pushed.len(), 101);
 ```
 
+#### PersistentDeque
+
+Double-ended queue (Finger Tree inspired) with O(1) front/back access.
+
+```rust
+use lambars::persistent::PersistentDeque;
+
+let deque = PersistentDeque::new()
+    .push_back(1)
+    .push_back(2)
+    .push_back(3);
+assert_eq!(deque.front(), Some(&1));
+assert_eq!(deque.back(), Some(&3));
+
+// Structural sharing preserves the original
+let extended = deque.push_back(4);
+assert_eq!(deque.len(), 3);     // Original unchanged
+assert_eq!(extended.len(), 4);  // New deque
+
+// Pop from both ends
+let (rest, first) = deque.pop_front().unwrap();
+assert_eq!(first, 1);
+```
+
 #### PersistentHashMap
 
 Hash map with O(log32 N) operations using HAMT (Hash Array Mapped Trie).
