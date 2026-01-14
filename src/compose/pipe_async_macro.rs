@@ -93,7 +93,7 @@
 //! }
 //! ```
 
-/// Pipes an `AsyncIO` value through a series of transformations.
+/// Pipes a value through a series of transformations within the `AsyncIO` context.
 ///
 /// This macro is specifically designed for `AsyncIO` values because `AsyncIO`
 /// cannot implement the `Functor` and `Monad` traits due to Rust's type system
@@ -101,20 +101,36 @@
 ///
 /// # Syntax
 ///
-/// - `pipe_async!(async_io)` - Returns the `AsyncIO` unchanged
-/// - `pipe_async!(async_io, => f)` - Applies `f` using `fmap` (lift operator)
-/// - `pipe_async!(async_io, =>> f)` - Applies `f` using `flat_map` (bind operator)
-/// - `pipe_async!(async_io, => f, =>> g, => h, ...)` - Chain multiple operations
+/// - `pipe_async!(value)` - Converts value to `AsyncIO` using `IntoPipeAsync`
+/// - `pipe_async!(value, f)` - Applies `f` using `fmap` (comma syntax)
+/// - `pipe_async!(value, => f)` - Applies `f` using `fmap` (explicit lift operator)
+/// - `pipe_async!(value, =>> f)` - Applies `f` using `flat_map` (bind operator)
+/// - `pipe_async!(value, f, => g, =>> h, ...)` - Chain multiple operations
+///
+/// # Initial Value
+///
+/// The initial value is converted to `AsyncIO` using the `IntoPipeAsync` trait:
+/// - `AsyncIO<A>` is returned unchanged
+/// - Primitive types (`i32`, `String`, `bool`, etc.) are wrapped with `AsyncIO::pure`
+/// - User-defined types can be wrapped with `Pure<A>` to enable conversion
 ///
 /// # Operators
+///
+/// ## Comma Syntax (Implicit fmap)
+///
+/// A comma-separated function is applied as `fmap`:
+///
+/// ```rust,ignore
+/// pipe_async!(x, f) // expands to: x.into_pipe_async().fmap(f)
+/// ```
 ///
 /// ## Lift Operator (`=>`)
 ///
 /// The lift operator applies a pure function `A -> B` within the `AsyncIO` context.
-/// It expands to a call to `AsyncIO::fmap`.
+/// It is equivalent to the comma syntax.
 ///
 /// ```rust,ignore
-/// pipe_async!(m, => f) // expands to: m.fmap(f)
+/// pipe_async!(m, => f) // expands to: m.into_pipe_async().fmap(f)
 /// ```
 ///
 /// ## Bind Operator (`=>>`)
@@ -123,48 +139,44 @@
 /// It expands to a call to `AsyncIO::flat_map`.
 ///
 /// ```rust,ignore
-/// pipe_async!(m, =>> f) // expands to: m.flat_map(f)
+/// pipe_async!(m, =>> f) // expands to: m.into_pipe_async().flat_map(f)
 /// ```
 ///
 /// # Type Constraints
 ///
-/// - The initial value must be of type `AsyncIO<A>`
-/// - For `=>`: The function must be `FnOnce(A) -> B + Send + 'static`, and `B: 'static`
+/// - The initial value must implement `IntoPipeAsync`
+/// - For `=>` and comma: The function must be `FnOnce(A) -> B + Send + 'static`, and `B: 'static`
 /// - For `=>>`: The function must be `FnOnce(A) -> AsyncIO<B> + Send + 'static`, and `B: 'static`
 ///
 /// # Examples
 ///
-/// ## Value only
+/// ## Value only (primitive type)
 ///
 /// ```rust,ignore
-/// use lambars::effect::AsyncIO;
 /// use lambars::pipe_async;
 ///
-/// let async_io = AsyncIO::pure(42);
-/// let result = pipe_async!(async_io);
-/// // result is the same as async_io
+/// let result = pipe_async!(42);
+/// assert_eq!(result.run_async().await, 42);
 /// ```
 ///
-/// ## Single lift
+/// ## Comma syntax (implicit fmap)
 ///
 /// ```rust,ignore
-/// use lambars::effect::AsyncIO;
 /// use lambars::pipe_async;
 ///
-/// let result = pipe_async!(AsyncIO::pure(5), => |x| x * 2);
+/// let result = pipe_async!(5, |x| x * 2);
 /// assert_eq!(result.run_async().await, 10);
 /// ```
 ///
-/// ## Multiple lifts
+/// ## Multiple fmaps with comma syntax
 ///
 /// ```rust,ignore
-/// use lambars::effect::AsyncIO;
 /// use lambars::pipe_async;
 ///
 /// let result = pipe_async!(
-///     AsyncIO::pure(5),
-///     => |x| x + 1,
-///     => |x| x * 2
+///     5,
+///     |x| x + 1,
+///     |x| x * 2
 /// );
 /// assert_eq!(result.run_async().await, 12); // (5 + 1) * 2
 /// ```
@@ -175,42 +187,63 @@
 /// use lambars::effect::AsyncIO;
 /// use lambars::pipe_async;
 ///
-/// fn double(x: i32) -> i32 { x * 2 }
-/// fn add_async(x: i32) -> AsyncIO<i32> { AsyncIO::pure(x + 10) }
-///
 /// let result = pipe_async!(
-///     AsyncIO::pure(5),
-///     => double,      // fmap: AsyncIO(10)
-///     =>> add_async   // flat_map: AsyncIO(20)
+///     5,
+///     |x| x + 1,              // comma (fmap): 6
+///     => |x| x * 2,           // explicit fmap: 12
+///     =>> |x| AsyncIO::pure(x + 3)  // flat_map: 15
 /// );
-/// assert_eq!(result.run_async().await, 20);
+/// assert_eq!(result.run_async().await, 15);
+/// ```
+///
+/// ## User-defined types with Pure wrapper
+///
+/// ```rust,ignore
+/// use lambars::effect::Pure;
+/// use lambars::pipe_async;
+///
+/// struct MyData { value: i32 }
+///
+/// let result = pipe_async!(Pure(MyData { value: 42 }), |d| d.value * 2);
+/// assert_eq!(result.run_async().await, 84);
 /// ```
 #[macro_export]
 macro_rules! pipe_async {
-    // Base case: value only
-    ($value:expr) => {
-        $value
-    };
+    // Base case: value only - convert to AsyncIO
+    ($value:expr) => {{
+        $crate::effect::IntoPipeAsync::into_pipe_async($value)
+    }};
+
+    // Bind operator with optional trailing comma (terminal case) - highest priority
+    ($value:expr, =>> $function:expr $(,)?) => {{
+        $crate::effect::IntoPipeAsync::into_pipe_async($value).flat_map($function)
+    }};
+
+    // Bind operator with continuation - second priority
+    ($value:expr, =>> $function:expr, $($rest:tt)+) => {{
+        let __pipe_async_intermediate = $crate::effect::IntoPipeAsync::into_pipe_async($value).flat_map($function);
+        $crate::pipe_async!(__pipe_async_intermediate, $($rest)+)
+    }};
 
     // Lift operator with optional trailing comma (terminal case)
     ($value:expr, => $function:expr $(,)?) => {{
-        $value.fmap($function)
+        $crate::effect::IntoPipeAsync::into_pipe_async($value).fmap($function)
     }};
 
     // Lift operator with continuation
     ($value:expr, => $function:expr, $($rest:tt)+) => {{
-        let __pipe_async_intermediate = $value.fmap($function);
+        let __pipe_async_intermediate = $crate::effect::IntoPipeAsync::into_pipe_async($value).fmap($function);
         $crate::pipe_async!(__pipe_async_intermediate, $($rest)+)
     }};
 
-    // Bind operator with optional trailing comma (terminal case)
-    ($value:expr, =>> $function:expr $(,)?) => {{
-        $value.flat_map($function)
+    // Comma syntax (implicit fmap) with optional trailing comma (terminal case)
+    ($value:expr, $function:expr $(,)?) => {{
+        $crate::effect::IntoPipeAsync::into_pipe_async($value).fmap($function)
     }};
 
-    // Bind operator with continuation
-    ($value:expr, =>> $function:expr, $($rest:tt)+) => {{
-        let __pipe_async_intermediate = $value.flat_map($function);
+    // Comma syntax (implicit fmap) with continuation
+    ($value:expr, $function:expr, $($rest:tt)+) => {{
+        let __pipe_async_intermediate = $crate::effect::IntoPipeAsync::into_pipe_async($value).fmap($function);
         $crate::pipe_async!(__pipe_async_intermediate, $($rest)+)
     }};
 }
@@ -479,5 +512,227 @@ mod tests {
             => |_| ()
         );
         assert_eq!(result.run_async().await, ());
+    }
+
+    // =========================================================================
+    // pipe_async! Extension Tests (comma syntax, IntoPipeAsync, Pure)
+    // =========================================================================
+
+    mod extension_tests {
+        use crate::effect::{AsyncIO, Pure};
+        use rstest::rstest;
+
+        // =====================================================================
+        // Comma Equals Lift Law
+        // =====================================================================
+
+        #[rstest]
+        #[case(1)]
+        #[case(42)]
+        #[case(-100)]
+        #[tokio::test]
+        async fn comma_equals_lift(#[case] value: i32) {
+            let add_one = |x: i32| x + 1;
+            let result_comma = pipe_async!(value, add_one);
+            let result_lift = pipe_async!(value, => add_one);
+            assert_eq!(
+                result_comma.run_async().await,
+                result_lift.run_async().await
+            );
+        }
+
+        // =====================================================================
+        // Functor Composition Law
+        // =====================================================================
+
+        #[rstest]
+        #[case(1)]
+        #[case(5)]
+        #[case(10)]
+        #[tokio::test]
+        async fn functor_composition(#[case] value: i32) {
+            let add_one = |x: i32| x + 1;
+            let double = |x: i32| x * 2;
+            let result_chain = pipe_async!(value, add_one, double);
+            let result_composed = pipe_async!(value, move |v| double(add_one(v)));
+            assert_eq!(
+                result_chain.run_async().await,
+                result_composed.run_async().await
+            );
+        }
+
+        // =====================================================================
+        // Backward Compatibility Tests
+        // =====================================================================
+
+        #[rstest]
+        #[tokio::test]
+        async fn backward_compatibility_lift() {
+            let result = pipe_async!(AsyncIO::pure(5), => |x| x * 2);
+            assert_eq!(result.run_async().await, 10);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn backward_compatibility_bind() {
+            let result = pipe_async!(AsyncIO::pure(5), =>> |x| AsyncIO::pure(x * 2));
+            assert_eq!(result.run_async().await, 10);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn backward_compatibility_mixed() {
+            let result = pipe_async!(
+                AsyncIO::pure(5),
+                => |x| x * 2,
+                =>> |x| AsyncIO::pure(x + 1)
+            );
+            assert_eq!(result.run_async().await, 11);
+        }
+
+        // =====================================================================
+        // Pure Wrapper Tests
+        // =====================================================================
+
+        #[rstest]
+        #[tokio::test]
+        async fn test_pipe_async_with_pure_wrapper() {
+            #[derive(Debug)]
+            struct MyData {
+                value: i32,
+            }
+
+            let wrapped = Pure(MyData { value: 42 });
+            let result = pipe_async!(wrapped, |d| d.value * 2);
+            assert_eq!(result.run_async().await, 84);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn test_pipe_async_with_pure_wrapper_chained() {
+            #[derive(Debug)]
+            struct MyData {
+                value: i32,
+            }
+
+            let result = pipe_async!(Pure(MyData { value: 10 }), |d| d.value, |v| v + 5, |v| v
+                * 2);
+            assert_eq!(result.run_async().await, 30);
+        }
+
+        // =====================================================================
+        // Unit Type Tests
+        // =====================================================================
+
+        #[rstest]
+        #[tokio::test]
+        async fn test_pipe_async_unit_type() {
+            let result = pipe_async!((), |()| 42);
+            assert_eq!(result.run_async().await, 42);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn test_pipe_async_unit_type_to_unit() {
+            let result = pipe_async!(42, |_| ());
+            assert_eq!(result.run_async().await, ());
+        }
+
+        // =====================================================================
+        // Primitive Value Initial Tests
+        // =====================================================================
+
+        #[rstest]
+        #[tokio::test]
+        async fn test_pipe_async_primitive_i32() {
+            let result = pipe_async!(42);
+            assert_eq!(result.run_async().await, 42);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn test_pipe_async_primitive_string() {
+            let result = pipe_async!(String::from("hello"), |s: String| s.len());
+            assert_eq!(result.run_async().await, 5);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn test_pipe_async_primitive_bool() {
+            let result = pipe_async!(true, |b: bool| i32::from(b));
+            assert_eq!(result.run_async().await, 1);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn test_pipe_async_static_str() {
+            let result = pipe_async!("hello", |s: &str| s.len());
+            assert_eq!(result.run_async().await, 5);
+        }
+
+        // =====================================================================
+        // Mixed Operator Tests with Comma
+        // =====================================================================
+
+        #[rstest]
+        #[tokio::test]
+        async fn test_pipe_async_comma_then_bind() {
+            let result = pipe_async!(
+                5,
+                |x| x + 1,
+                =>> |x| AsyncIO::pure(x * 2)
+            );
+            assert_eq!(result.run_async().await, 12);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn test_pipe_async_bind_then_comma() {
+            let result = pipe_async!(
+                AsyncIO::pure(5),
+                =>> |x| AsyncIO::pure(x + 1),
+                |x| x * 2
+            );
+            assert_eq!(result.run_async().await, 12);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn test_pipe_async_all_operators_mixed() {
+            let result = pipe_async!(
+                5,
+                |x| x + 1,                      // comma (implicit fmap): 6
+                => |x: i32| x * 2,              // explicit fmap: 12
+                =>> |x| AsyncIO::pure(x + 3),   // flat_map: 15
+                |x: i32| x.to_string()          // comma (implicit fmap): "15"
+            );
+            assert_eq!(result.run_async().await, "15");
+        }
+
+        // =====================================================================
+        // Laziness Tests with New Syntax
+        // =====================================================================
+
+        #[rstest]
+        #[tokio::test]
+        async fn test_pipe_async_comma_preserves_lazy_execution() {
+            use std::sync::Arc;
+            use std::sync::atomic::{AtomicBool, Ordering};
+
+            let executed = Arc::new(AtomicBool::new(false));
+            let executed_clone = executed.clone();
+
+            let async_io = pipe_async!(42, move |x| {
+                executed_clone.store(true, Ordering::SeqCst);
+                x * 2
+            });
+
+            // Not executed yet
+            assert!(!executed.load(Ordering::SeqCst));
+
+            let result = async_io.run_async().await;
+            assert!(executed.load(Ordering::SeqCst));
+            assert_eq!(result, 84);
+        }
     }
 }

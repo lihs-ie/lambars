@@ -1,0 +1,387 @@
+# pipe_async! マクロ 純粋関数直接適用サポート 要件定義
+#
+# 概要:
+#   pipe_async! マクロを拡張し、生の値からの自動 AsyncIO 変換と
+#   コンマ区切りによる fmap チェーンをサポートする
+#
+# 設計方針:
+#   1. IntoPipeAsync トレイトによる型ベースの自動変換
+#   2. コンマ区切り関数は fmap として解釈（AsyncIO 文脈内適用）
+#   3. 既存の => / =>> 演算子との後方互換性を維持
+#
+# 参照:
+#   - issue #140: pipe_async! マクロに純粋関数の直接適用をサポートする
+#   - src/compose/pipe_async_macro.rs: 既存実装
+#   - src/compose/pipe_macro.rs: pipe! マクロの設計参考
+
+version: "1.0.0"
+name: "pipe_async_direct_application"
+description: |
+  pipe_async! マクロに以下の機能を追加する：
+  1. 生の値（プリミティブ型等）を自動的に AsyncIO に変換
+  2. コンマ区切りの関数を fmap として解釈
+  3. Pure<A> ラッパーによるユーザー定義型のサポート
+
+background:
+  problem: |
+    現在の pipe_async! マクロは以下の演算子のみをサポートしている：
+    - => (Lift/fmap): 純粋関数をモナド文脈内で適用
+    - =>> (Bind/flat_map): モナド関数を適用
+
+    しかし、pipe! マクロがサポートしている「純粋関数の直接適用」（コンマ区切り）は
+    pipe_async! にはない。また、初期値は必ず AsyncIO::pure(value) でラップする
+    必要があり、冗長なコードになっている。
+
+  motivation: |
+    ワークフローを pipe_async! で構成する際の記述を簡潔にし、
+    関数型プログラミングの利便性を向上させる。
+
+    変更前:
+    ```rust
+    pipe_async!(
+        AsyncIO::pure(command),
+        => extract_seed,
+        =>> generate_seed_io,
+    )
+    ```
+
+    変更後:
+    ```rust
+    pipe_async!(
+        command,
+        extract_seed,
+        =>> generate_seed_io,
+    )
+    ```
+
+  prior_art:
+    - name: "pipe! マクロ"
+      description: |
+        lambars の既存 pipe! マクロはコンマ区切りで純粋関数の直接適用をサポート。
+        pipe_async! でも同様の記法を提供することで一貫性を高める。
+    - name: "Haskell do-notation"
+      description: |
+        Haskell の do-notation では純粋な式とモナディックな式を混在可能。
+        pure 関数の自動リフティングにより簡潔な記述が可能。
+
+requirements:
+  # ======================================================================
+  # 1. IntoPipeAsync トレイト
+  # ======================================================================
+  - id: into_pipe_async_trait
+    name: "IntoPipeAsync トレイト"
+    description: |
+      pipe_async! マクロで使用される値を AsyncIO に変換するためのトレイト。
+      AsyncIO<A> はそのまま返し、その他の型は AsyncIO::pure でラップする。
+
+    laws:
+      - name: "Identity for AsyncIO"
+        description: |
+          AsyncIO<A> に対して into_pipe_async を呼び出すと、元の値がそのまま返される。
+        equation: "async_io.into_pipe_async() == async_io"
+        property_test: |
+          #[rstest]
+          #[tokio::test]
+          async fn into_pipe_async_identity_for_async_io(#[values(1, 42, -100)] value: i32) {
+              let async_io = AsyncIO::pure(value);
+              let result = async_io.into_pipe_async();
+              assert_eq!(result.run_async().await, value);
+          }
+
+      - name: "Pure wrapping for primitives"
+        description: |
+          プリミティブ型に対して into_pipe_async を呼び出すと、
+          AsyncIO::pure でラップされた値が返される。
+        equation: "value.into_pipe_async() == AsyncIO::pure(value)"
+        property_test: |
+          #[rstest]
+          #[tokio::test]
+          async fn into_pipe_async_wraps_primitives(#[values(1, 42, -100)] value: i32) {
+              let result = value.into_pipe_async();
+              assert_eq!(result.run_async().await, value);
+          }
+
+    trait_definition: |
+      pub trait IntoPipeAsync {
+          /// 変換後の AsyncIO の内部型
+          type Output;
+
+          /// 値を AsyncIO に変換する
+          fn into_pipe_async(self) -> AsyncIO<Self::Output>;
+      }
+
+    methods:
+      - name: "into_pipe_async"
+        signature: "fn into_pipe_async(self) -> AsyncIO<Self::Output>"
+        description: |
+          値を AsyncIO に変換する。AsyncIO はそのまま、その他は AsyncIO::pure でラップ。
+          注意: fmap で使用する関数は FnOnce(A) -> B + Send + 'static, B: 'static を満たす必要がある。
+        examples:
+          - description: "プリミティブ型の変換"
+            code: |
+              let result = 42.into_pipe_async();
+              assert_eq!(result.run_async().await, 42);
+          - description: "AsyncIO の変換（identity）"
+            code: |
+              let async_io = AsyncIO::pure(42);
+              let result = async_io.into_pipe_async();
+              assert_eq!(result.run_async().await, 42);
+
+    implementations:
+      - type: "AsyncIO<A>"
+        description: |
+          そのまま self を返す（identity）。
+      - type: "プリミティブ型 (i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize, f32, f64, bool, char, (), String, &'static str)"
+        description: |
+          AsyncIO::pure(self) を返す。
+          制約: AsyncIO は Send + 'static を要求するため、非 'static なライフタイムを持つ参照型は
+          直接サポートしない。&str は &'static str のみがサポートされる。
+          非 'static な値は所有権を持つ型（String など）に変換するか、Pure<A> でもサポート不可。
+
+    nested_async_io_behavior: |
+      AsyncIO<AsyncIO<A>> のようなネストした型に対する into_pipe_async の挙動：
+      - 外側の AsyncIO がそのまま返される（flatten されない）
+      - 例: AsyncIO<AsyncIO<i32>>.into_pipe_async() は AsyncIO<AsyncIO<i32>> を返す
+      - flatten が必要な場合は明示的に flat_map(|x| x) を使用する
+
+  # ======================================================================
+  # 2. Pure<A> ラッパー型
+  # ======================================================================
+  - id: pure_wrapper
+    name: "Pure<A> ラッパー型"
+    description: |
+      ユーザー定義型を pipe_async! で使用するためのラッパー型。
+      IntoPipeAsync を実装していない型をラップすることで、
+      AsyncIO への変換を可能にする。
+
+    methods:
+      - name: "Pure::new / Pure(value)"
+        signature: "pub struct Pure<A>(pub A)"
+        description: |
+          任意の Send + 'static 型をラップする。
+        examples:
+          - description: "ユーザー定義型のラップ"
+            code: |
+              struct MyData { value: i32 }
+              let wrapped = Pure(MyData { value: 42 });
+              let result = pipe_async!(wrapped, |d| d.value * 2);
+              assert_eq!(result.run_async().await, 84);
+
+    implementations:
+      - type: "Pure<A> where A: Send + 'static"
+        description: |
+          IntoPipeAsync を実装し、内部の値を AsyncIO::pure でラップして返す。
+
+  # ======================================================================
+  # 3. pipe_async! マクロ拡張
+  # ======================================================================
+  - id: pipe_async_comma_syntax
+    name: "pipe_async! コンマ区切り構文"
+    description: |
+      コンマ区切りの関数を fmap として解釈する。
+      これにより、=> を省略した簡潔な記法が可能になる。
+
+      注意: pipe! マクロとのセマンティクスの違い
+      - pipe!(x, f) は f(x) として直接関数適用
+      - pipe_async!(x, f) は x.into_pipe_async().fmap(f) として AsyncIO 文脈内で適用
+      結果は同じだが、pipe_async! は常に AsyncIO 文脈で動作する点が異なる。
+
+    expansion_rules:
+      - pattern: "pipe_async!($value:expr)"
+        expansion: "{ $crate::effect::IntoPipeAsync::into_pipe_async($value) }"
+        note: "値のみの場合は AsyncIO に変換。ブロックで包む。"
+
+      - pattern: "pipe_async!($value:expr, $f:expr)"
+        expansion: "{{ $crate::effect::IntoPipeAsync::into_pipe_async($value).fmap($f) }}"
+        note: "コンマ区切りは fmap として解釈。二重ブロックで式として使用可能に。"
+
+      - pattern: "pipe_async!($value:expr, $f:expr, $($rest:tt)+)"
+        expansion: |
+          {{
+              let __pipe_async_intermediate = $crate::effect::IntoPipeAsync::into_pipe_async($value).fmap($f);
+              $crate::pipe_async!(__pipe_async_intermediate, $($rest)+)
+          }}
+        note: "再帰的に展開。二重ブロックで式位置で使用可能。$rest は => / =>> / コンマ区切りのいずれでも可"
+
+      - pattern: "pipe_async!($value:expr, => $f:expr)"
+        expansion: "{{ $crate::effect::IntoPipeAsync::into_pipe_async($value).fmap($f) }}"
+        note: "明示的 => はコンマと同等"
+
+      - pattern: "pipe_async!($value:expr, =>> $f:expr)"
+        expansion: "{{ $crate::effect::IntoPipeAsync::into_pipe_async($value).flat_map($f) }}"
+        note: "=>> は flat_map として解釈"
+
+    type_constraints: |
+      fmap で使用する関数の制約（AsyncIO::fmap の制約に準拠）：
+      - F: FnOnce(A) -> B + Send + 'static
+      - B: 'static
+      flat_map で使用する関数の制約（AsyncIO::flat_map の制約に準拠）：
+      - F: FnOnce(A) -> AsyncIO<B> + Send + 'static
+      - B: 'static
+
+    parse_priority: |
+      マクロのパース優先順位：
+      1. =>> で始まる場合: flat_map パターンとしてマッチ
+      2. => で始まる場合: 明示的 fmap パターンとしてマッチ
+      3. その他: コンマ区切り fmap パターンとしてマッチ
+
+      混在例：
+      - pipe_async!(x, f, => g) は有効: f は暗黙的 fmap、g は明示的 fmap
+      - pipe_async!(x, => f, g) は有効: f は明示的 fmap、g は暗黙的 fmap
+      - pipe_async!(x, f, =>> g, h) は有効: f と h は fmap、g は flat_map
+
+    laws:
+      - name: "Comma equals lift"
+        description: |
+          コンマ区切りと => は同じ結果を返す。
+        equation: "pipe_async!(x, f) == pipe_async!(x, => f)"
+        property_test: |
+          #[rstest]
+          #[tokio::test]
+          async fn comma_equals_lift(#[values(1, 42, -100)] value: i32) {
+              let add_one = |x: i32| x + 1;
+              let result_comma = pipe_async!(value, add_one);
+              let result_lift = pipe_async!(value, => add_one);
+              assert_eq!(
+                  result_comma.run_async().await,
+                  result_lift.run_async().await
+              );
+          }
+
+      - name: "Functor composition"
+        description: |
+          複数の fmap は合成可能。
+        equation: "pipe_async!(x, f, g) == pipe_async!(x, |v| g(f(v)))"
+        property_test: |
+          #[rstest]
+          #[tokio::test]
+          async fn functor_composition(#[values(1, 5, 10)] value: i32) {
+              let add_one = |x: i32| x + 1;
+              let double = |x: i32| x * 2;
+              let result_chain = pipe_async!(value, add_one, double);
+              let result_composed = pipe_async!(value, |v| double(add_one(v)));
+              assert_eq!(
+                  result_chain.run_async().await,
+                  result_composed.run_async().await
+              );
+          }
+
+    methods:
+      - name: "pipe_async! (value only)"
+        signature: "pipe_async!($value:expr)"
+        description: |
+          値のみを渡すと、IntoPipeAsync::into_pipe_async で AsyncIO に変換。
+        examples:
+          - description: "プリミティブ値"
+            code: |
+              let result = pipe_async!(42);
+              assert_eq!(result.run_async().await, 42);
+
+      - name: "pipe_async! (comma-separated fmap)"
+        signature: "pipe_async!($value:expr, $function:expr, ...)"
+        description: |
+          コンマ区切りの関数は fmap として適用される。
+        examples:
+          - description: "複数の fmap チェーン"
+            code: |
+              let result = pipe_async!(5, |x| x + 1, |x| x * 2);
+              assert_eq!(result.run_async().await, 12);
+
+      - name: "pipe_async! (mixed operators)"
+        signature: "pipe_async!($value:expr, $function:expr, =>> $bind_fn:expr, ...)"
+        description: |
+          コンマ（fmap）と =>>（flat_map）を混在可能。
+        examples:
+          - description: "fmap と flat_map の混在"
+            code: |
+              let result = pipe_async!(
+                  5,
+                  |x| x + 1,
+                  =>> |x| AsyncIO::pure(x * 2),
+                  |x| x + 3
+              );
+              assert_eq!(result.run_async().await, 15);
+
+  # ======================================================================
+  # 4. 後方互換性
+  # ======================================================================
+  - id: backward_compatibility
+    name: "後方互換性"
+    description: |
+      既存の pipe_async! 使用法との後方互換性を維持する。
+      => と =>> 演算子は引き続き動作する。
+
+    laws:
+      - name: "Existing syntax unchanged"
+        description: |
+          既存の => / =>> 構文は同じ動作を維持する。
+        equation: "既存コードは変更なしで動作"
+        property_test: |
+          #[rstest]
+          #[tokio::test]
+          async fn backward_compatibility_lift() {
+              let result = pipe_async!(AsyncIO::pure(5), => |x| x * 2);
+              assert_eq!(result.run_async().await, 10);
+          }
+
+          #[rstest]
+          #[tokio::test]
+          async fn backward_compatibility_bind() {
+              let result = pipe_async!(AsyncIO::pure(5), =>> |x| AsyncIO::pure(x * 2));
+              assert_eq!(result.run_async().await, 10);
+          }
+
+          #[rstest]
+          #[tokio::test]
+          async fn backward_compatibility_mixed() {
+              let result = pipe_async!(
+                  AsyncIO::pure(5),
+                  => |x| x * 2,
+                  =>> |x| AsyncIO::pure(x + 1)
+              );
+              assert_eq!(result.run_async().await, 11);
+          }
+
+non_functional_requirements:
+  performance:
+    - "IntoPipeAsync の呼び出しはゼロコスト抽象化であること"
+    - "既存の pipe_async! と同等のパフォーマンスを維持"
+    - "遅延評価（run_async() まで実行されない）を維持"
+  compatibility:
+    - "既存の pipe_async! 使用コードは変更なしで動作"
+    - "Rust 1.92.0 以上をサポート"
+    - "no_std 環境でのコンパイル互換性は考慮外（AsyncIO は std 依存）"
+  testing:
+    - "rstest を使用したプロパティベーステスト"
+    - "各演算子パターンの組み合わせテスト"
+    - "型変換チェーンのテスト"
+    - "遅延実行の検証テスト"
+
+future_extensions:
+  - id: derive_into_pipe_async
+    name: "IntoPipeAsync derive マクロ"
+    description: |
+      ユーザー定義型に対して IntoPipeAsync を自動実装する derive マクロ。
+      Pure<A> ラッパーなしで直接使用可能にする。
+    rationale: |
+      現時点では Pure<A> ラッパーで対応可能であり、
+      derive マクロの実装は lambars-derive クレートの拡張が必要。
+      需要を見極めてから実装を検討する。
+
+  - id: auto_lift_detection
+    name: "自動 lift/bind 検出"
+    description: |
+      関数の戻り値型を見て、自動的に fmap か flat_map かを選択する機能。
+    rationale: |
+      Rust のマクロは型情報を持たないため、コンパイル時の型推論に依存する
+      複雑な実装が必要。現時点では明示的な =>> 演算子で対応する。
+
+  - id: pipe_async_from_macro
+    name: "pipe_async_from! マクロ"
+    description: |
+      生の値から開始することを明示する専用マクロ。
+      型エラーのメッセージをより分かりやすくする。
+    rationale: |
+      IntoPipeAsync トレイトにより自動変換が行われるため、
+      専用マクロの必要性は低い。エラーメッセージの改善は
+      トレイトのドキュメントで対応可能。
