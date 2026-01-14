@@ -139,6 +139,12 @@ mod async_io;
 pub use async_io::AsyncIO;
 
 #[cfg(feature = "async")]
+pub use async_io::IntoPipeAsync;
+
+#[cfg(feature = "async")]
+pub use async_io::Pure;
+
+#[cfg(feature = "async")]
 pub use async_io::TimeoutError;
 
 // =============================================================================
