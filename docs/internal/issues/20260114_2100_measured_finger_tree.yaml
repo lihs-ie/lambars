@@ -1,0 +1,69 @@
+# Issue: Measured Finger Tree の実装
+# PersistentDeque の将来拡張として発見された項目
+
+deferred_features:
+  - id: measured_finger_tree
+    name: "Measured Finger Tree"
+    discovered_date: "2026-01-14"
+    priority: low
+    category: enhancement
+    labels:
+      - "persistent"
+      - "advanced"
+      - "enhancement"
+      - "priority: low"
+
+    problem:
+      summary: "現在の PersistentDeque は要素数のみをキャッシュしており、汎用的な測定機能がない"
+      details: |
+        現在の PersistentDeque は Finger Tree をベースにしているが、要素数（length）のみを
+        キャッシュしている。Finger Tree の本来の設計では任意のモノイド値を測定値として
+        持つことができ、これにより様々な効率的な操作が可能になる。
+
+        - 範囲クエリ（O(log n)）
+        - 優先度キューとしての使用
+        - インターバルツリーの実装
+        - 順序統計量の計算
+
+        現時点では Deque としての基本機能に集中したため、この機能は実装していない。
+
+    solution:
+      approach: "Monoid トレイトを活用した汎用 Measured Finger Tree の実装"
+      options:
+        - name: "MeasuredFingerTree<T, M> の新規実装"
+          description: |
+            測定値の型パラメータ M を持つ汎用 Finger Tree を新規に実装する。
+            PersistentDeque は MeasuredFingerTree<T, Size> として再実装可能。
+          pros:
+            - 最も柔軟な設計
+            - 様々なデータ構造に応用可能
+            - Hinze & Paterson の論文に忠実
+          cons:
+            - 実装が複雑
+            - 既存の PersistentDeque との互換性を考慮する必要がある
+
+        - name: "PersistentDeque の拡張"
+          description: |
+            既存の PersistentDeque に測定機能をオプションで追加する。
+          pros:
+            - 既存コードとの互換性が高い
+            - 段階的な実装が可能
+          cons:
+            - 設計が複雑になる可能性
+            - 汎用性が低い
+
+      recommended: "MeasuredFingerTree<T, M> の新規実装"
+      estimated_complexity: high
+
+    references:
+      - "Hinze & Paterson, 'Finger Trees: A Simple General-purpose Data Structure' (2006)"
+      - "Okasaki, 'Purely Functional Data Structures' (1998)"
+
+    related:
+      requirement_id: "20260114_1700_persistent_deque"
+      plan_id: null
+
+    github_issue:
+      number: 146
+      url: "https://github.com/lihs-ie/lambars/issues/146"
+      created: true
