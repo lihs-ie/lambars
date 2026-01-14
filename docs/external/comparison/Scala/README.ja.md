@@ -1628,6 +1628,7 @@ async fn example() {
 | ----------------- | ------------------------- | ------------------------------ |
 | `List[A]`         | `PersistentList<A>`       | イミュータブルリスト           |
 | `Vector[A]`       | `PersistentVector<A>`     | イミュータブルベクター         |
+| `Queue[A]`        | `PersistentDeque<A>`      | イミュータブル両端キュー       |
 | `Map[K, V]`       | `PersistentHashMap<K, V>` | イミュータブルハッシュマップ   |
 | `SortedMap[K, V]` | `PersistentTreeMap<K, V>` | イミュータブルソート済みマップ |
 | `Set[A]`          | `PersistentHashSet<A>`    | イミュータブルセット           |

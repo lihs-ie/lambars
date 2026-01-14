@@ -2218,6 +2218,26 @@ fn log_computation() -> Eff<LogEffect, i32> {
 | `S.intersection` | `intersection` method  | Intersection |
 | `S.difference`   | `difference` method    | Difference   |
 
+### Deques (Finger Tree)
+
+| Haskell              | lambars                        | Description                 |
+| -------------------- | ------------------------------ | --------------------------- |
+| `Data.Sequence`      | `PersistentDeque<A>`           | Double-ended queue          |
+| `Seq.empty`          | `PersistentDeque::new`         | Empty deque                 |
+| `Seq.singleton x`    | `PersistentDeque::singleton`   | Single element              |
+| `x <| xs`            | `push_front` method            | Prepend element             |
+| `xs |> x`            | `push_back` method             | Append element              |
+| `Seq.viewl xs`       | `pop_front` method             | View from left              |
+| `Seq.viewr xs`       | `pop_back` method              | View from right             |
+| `Seq.length xs`      | `len` method                   | Length                      |
+| `Seq.null xs`        | `is_empty` method              | Check if empty              |
+| `xs <> ys`           | `concat` method                | Concatenate (O(log min))    |
+| `Seq.index xs i`     | `get` method                   | Index access                |
+| `Seq.update i x xs`  | (not yet implemented)          | Update at index             |
+| `Seq.take n xs`      | (not yet implemented)          | Take first n                |
+| `Seq.drop n xs`      | (not yet implemented)          | Drop first n                |
+| `Seq.splitAt n xs`   | (not yet implemented)          | Split at index              |
+
 ### Code Examples
 
 ```haskell
