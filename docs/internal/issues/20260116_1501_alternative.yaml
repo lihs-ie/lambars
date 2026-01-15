@@ -1,0 +1,79 @@
+# Issue: Alternative 型クラス
+# 選択と空を持つ Applicative の拡張
+
+deferred_features:
+  - id: alternative
+    name: "Alternative 型クラス"
+    discovered_date: "2026-01-16"
+    priority: high
+    category: enhancement
+    labels:
+      - "typeclass"
+      - "enhancement"
+      - "priority: high"
+
+    problem:
+      summary: "パーサーコンビネータ等で選択演算子 (<|>) と empty が使えない"
+      details: |
+        Alternative は Applicative を拡張し、選択（orElse）と
+        空の値（empty）を提供する型クラス。
+        パーサーコンビネータや非決定的計算で頻繁に使用される。
+
+        - 何が問題なのか: 選択を表す統一的な抽象がない
+        - なぜ発生するのか: Applicative の拡張として Alternative が未実装
+        - どのような影響があるか: nom や combine との連携が困難
+
+      rust_limitation: |
+        ```rust
+        // 現状: 各型で個別に or_else を実装
+        let opt1: Option<i32> = None;
+        let opt2: Option<i32> = Some(42);
+        let result = opt1.or(opt2);  // Option 固有
+
+        // 理想: Alternative トレイトで統一
+        fn try_parsers<F: Alternative>(p1: F, p2: F) -> F {
+            p1.or_else(p2)  // または p1 <|> p2 相当
+        }
+        ```
+
+    solution:
+      approach: "Alternative トレイトを Applicative の拡張として定義"
+      options:
+        - name: "Applicative 拡張としての Alternative"
+          description: |
+            Applicative を要求し、empty と or_else を追加。
+            Option, Vec, Result に実装。
+          pros:
+            - "型クラス階層の一貫性"
+            - "パーサーコンビネータとの相性が良い"
+            - "Haskell/Scala との互換性"
+          cons:
+            - "Applicative の実装が前提"
+            - "HKT の制約がある"
+
+        - name: "独立した Alternative トレイト"
+          description: |
+            Applicative に依存せず empty と or_else のみ定義。
+          pros:
+            - "シンプルな実装"
+            - "部分的な採用が可能"
+          cons:
+            - "型クラス階層との整合性がない"
+
+      recommended: "Applicative 拡張としての Alternative"
+      estimated_complexity: medium
+
+    references:
+      - "Haskell Control.Applicative (Alternative)"
+      - "Scala cats Alternative"
+      - "nom パーサーコンビネータ"
+      - "docs/internal/requirements/20250101_0000_typeclass.yaml"
+
+    related:
+      requirement_id: "typeclass"
+      plan_id: null
+
+    github_issue:
+      number: 171
+      url: "https://github.com/lihs-ie/lambars/issues/171"
+      created: true

@@ -1,0 +1,85 @@
+# Issue: Freer モナド
+# Free モナドの最適化版、HKT 制約を回避
+
+deferred_features:
+  - id: freer_monad
+    name: "Freer モナド"
+    discovered_date: "2026-01-16"
+    priority: high
+    category: enhancement
+    labels:
+      - "control"
+      - "enhancement"
+      - "priority: high"
+
+    problem:
+      summary: "DSL 構築の基盤となる Freer モナドが未実装"
+      details: |
+        Freer モナドは Free モナドの最適化版で、Functor の代わりに
+        型レベルのリストを使用する。Rust では HKT の制約を回避できるため、
+        Free モナドより実装しやすい。
+
+        - 何が問題なのか: DSL を構築するための標準的な手段がない
+        - なぜ発生するのか: Freer モナドが未実装
+        - どのような影響があるか: 効果システムの拡張性が制限される
+
+      rust_limitation: |
+        ```rust
+        // Freer の基本構造
+        pub enum Freer<F, A> {
+            Pure(A),
+            Impure(F, Box<dyn FnOnce(?) -> Freer<F, A>>),
+        }
+
+        // 型レベルリストで効果を積み重ねる
+        // type Effects = Cons<State<i32>, Cons<Reader<Config>, Nil>>;
+        ```
+
+    solution:
+      approach: "型レベルリストを使用した Freer モナドを実装"
+      options:
+        - name: "frunk ベースの型レベルリスト"
+          description: |
+            frunk クレートの HList を使用して効果を積み重ねる。
+          pros:
+            - "既存のエコシステムを活用"
+            - "型安全"
+          cons:
+            - "外部依存が増える"
+            - "コンパイル時間への影響"
+
+        - name: "独自の型レベルリスト実装"
+          description: |
+            lambars 独自の型レベルリストを実装。
+          pros:
+            - "外部依存なし"
+            - "カスタマイズ可能"
+          cons:
+            - "実装コストが高い"
+
+        - name: "マクロベースの DSL"
+          description: |
+            proc-macro で DSL を生成。
+          pros:
+            - "柔軟性が高い"
+            - "エルゴノミクス重視"
+          cons:
+            - "型クラスとしての一貫性がない"
+
+      recommended: "独自の型レベルリスト実装"
+      estimated_complexity: high
+
+    references:
+      - "Freer Monads, More Extensible Effects (Oleg Kiselyov)"
+      - "extensible-effects (Haskell)"
+      - "cats-effect (Scala)"
+      - "docs/internal/requirements/20250101_0200_control.yaml"
+
+    related:
+      requirement_id: "control"
+      plan_id: null
+
+    github_issue:
+      number: 172
+      url: "https://github.com/lihs-ie/lambars/issues/172"
+      created: true
