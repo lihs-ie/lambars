@@ -1,0 +1,964 @@
+# PersistentTreeMap B-Tree 移行 要件定義
+#
+# 概要:
+#   PersistentTreeMap を Red-Black Tree から B-Tree に移行し、
+#   パフォーマンスを大幅に改善する。
+#
+# 設計方針:
+#   1. 不変性の維持 - 全ての操作で新しいノードを返す（パス・コピー方式）
+#   2. 参照透過性 - 同じ入力に対して常に同じ出力
+#   3. 副作用なし - I/O、状態変更を含まない純粋関数
+#   4. 既存 API との完全互換性
+#   5. パフォーマンス改善（insert: 50倍以上、get: 15倍以上）
+#   6. B-Tree（B+Tree ではない）: 内部ノードにもキー・値を保持
+#
+# 参照:
+#   - Issue #163: PersistentTreeMap パフォーマンス改善
+#   - docs/internal/issues/20260115_1400_persistent_treemap_performance.yaml
+#   - 現在の実装: src/persistent/treemap.rs
+#   - "Introduction to Algorithms" (Cormen et al.) - B-Tree chapter
+#   - Clojure PersistentTreeMap
+#   - Scala immutable.TreeMap
+
+version: "1.0.0"
+name: "persistent_treemap_btree_migration"
+description: |
+  PersistentTreeMap を Red-Black Tree から B-Tree に移行する。
+
+  現在の Red-Black Tree 実装では、rotate 処理で過度な clone が発生し、
+  標準 BTreeMap の 2,100 倍遅いという深刻なパフォーマンス問題がある。
+
+  B-Tree は以下の理由で永続データ構造に適している:
+  - n-way branching により木の高さが低い（log_B N vs log_2 N）
+  - ノード分割は局所的で、影響範囲が限定される
+  - キャッシュ効率が良い（ノード内のキーは連続メモリ）
+  - 範囲クエリが効率的
+
+# =============================================================================
+# 背景・動機
+# =============================================================================
+background:
+  problem: |
+    現在の PersistentTreeMap (Red-Black Tree ベース) には深刻なパフォーマンス問題がある。
+
+    **測定結果 (10,000 件):**
+    - insert: 1.02秒 (BTreeMap: 465us, 2,100倍遅い)
+    - get: 74ms
+
+    **根本原因:**
+    Red-Black Tree の rotate 処理で過度な clone が発生している。
+
+    ```rust
+    // 現在の実装 - 1回の rotate_right で最大 6 回の clone
+    fn rotate_right(node: Node<K, V>) -> Node<K, V> {
+        if let Some(left) = node.left {
+            let new_node = Node {
+                key: node.key,           // move
+                value: node.value,       // move
+                left: left.right.clone(), // clone 1
+                right: node.right,       // move
+            };
+            Node {
+                key: left.key.clone(),   // clone 2
+                value: left.value.clone(), // clone 3
+                left: left.left.clone(), // clone 4
+                right: Some(Rc::new(new_node)),
+            }
+        }
+    }
+    ```
+
+    加えて、balance 処理は毎回の insert で複数回呼ばれる可能性があり、
+    N 個の要素を挿入する場合、最悪 O(N * log N) 回の rotate が発生する。
+
+  motivation: |
+    関数型プログラミングの永続データ構造として、PersistentTreeMap は
+    以下の要件を満たす必要がある:
+
+    1. **不変性**: 全ての操作が元のデータを変更しない
+    2. **効率性**: 構造共有により、更新コストを最小化
+    3. **実用性**: 標準ライブラリと同程度のパフォーマンス
+
+    現在の実装は 1 と 2 を満たしているが、3 が大幅に不足している。
+    B-Tree への移行により、永続性を維持しながらパフォーマンスを
+    大幅に改善することを目指す（insert: 50倍以上、get: 15倍以上）。
+
+  prior_art:
+    - name: "Rust std::collections::BTreeMap"
+      description: |
+        標準ライブラリの可変 BTreeMap。B=6 (最小 6 キー/ノード) を使用。
+        参考にするがそのまま使用できない（可変構造のため）。
+
+    - name: "Clojure PersistentTreeMap"
+      description: |
+        Red-Black Tree ベース。Clojure は GC があるため clone コストが
+        異なる。参考にはなるが、Rust では異なるアプローチが必要。
+
+    - name: "Scala immutable.TreeMap"
+      description: |
+        Red-Black Tree ベース。Scala も GC があるため同様。
+
+    - name: "Persistent B-Tree (学術論文)"
+      description: |
+        "Making Data Structures Persistent" (Driscoll et al., 1989)
+        パス・コピー方式の永続 B-Tree の理論的基礎。
+
+# =============================================================================
+# 要件一覧
+# =============================================================================
+requirements:
+  # ---------------------------------------------------------------------------
+  # 1. BTreeNode 構造体の定義
+  # ---------------------------------------------------------------------------
+  - id: REQ-BTREE-001
+    name: "BTreeNode 構造体の定義"
+    priority: critical
+    description: |
+      B-Tree のノード構造を定義する。
+
+      **設計:**
+      - 分岐係数 B = 16 (各ノードに 15-31 個のキー)
+      - 内部ノード: キー配列 + 子ノード配列
+      - 葉ノード: キー・値ペア配列
+      - `Option<ReferenceCounter<BTreeNode>>` による構造共有
+
+    internal_structure: |
+      ```rust
+      // 分岐係数はベンチマーク結果に基づいて調整可能
+      // 永続構造では Vec 複製コストを考慮して小さめの値も検討
+      const BRANCHING_FACTOR: usize = 16;
+      const MIN_KEYS: usize = BRANCHING_FACTOR - 1;  // 15
+      const MAX_KEYS: usize = 2 * BRANCHING_FACTOR - 1;  // 31
+
+      /// B-Tree のノード (B+Tree ではなく B-Tree: 内部ノードにも値を保持)
+      enum BTreeNode<K, V> {
+          /// 葉ノード: キー・値ペアを格納
+          Leaf {
+              entries: Vec<(K, V)>,
+          },
+          /// 内部ノード: キー・値ペアと子ノードへの参照を格納
+          /// entries.len() == children.len() - 1
+          Internal {
+              entries: Vec<(K, V)>,  // キー・値ペア
+              children: Vec<ReferenceCounter<BTreeNode<K, V>>>,  // 子ノード
+          },
+      }
+
+      // 注意: ルートノードは MIN_KEYS の制約を免除される
+      // - 空の木: root = None
+      // - 要素が少ない木: root.entries.len() は 1 以上であれば良い
+      // - 通常ノード: MIN_KEYS <= entries.len() <= MAX_KEYS
+      ```
+
+    functional_programming_compliance:
+      immutability: |
+        - BTreeNode は Clone を実装
+        - 全てのフィールドは不変
+        - 更新時は新しいノードを作成
+      referential_transparency: |
+        - ノードの作成は純粋関数
+        - 同じ入力（キー・値・子）から同じノードが生成される
+      no_side_effects: |
+        - ノード定義に副作用なし
+
+    tests:
+      - name: "ノード作成テスト"
+        description: "葉ノードと内部ノードの作成を検証"
+      - name: "ノードサイズ制約テスト"
+        description: |
+          - ルートノード: 1 <= entries.len() <= MAX_KEYS（MIN_KEYS 制約なし）
+          - 非ルートノード: MIN_KEYS <= entries.len() <= MAX_KEYS
+
+  # ---------------------------------------------------------------------------
+  # 2. get 操作
+  # ---------------------------------------------------------------------------
+  - id: REQ-BTREE-002
+    name: "get 操作 (O(log N) での検索)"
+    priority: critical
+    description: |
+      キーに対応する値を O(log N) で検索する。
+
+      **アルゴリズム:**
+      1. ルートノードから開始
+      2. 現在のノードがLeafなら、二分探索でキーを検索
+      3. 現在のノードがInternalなら:
+         a. 二分探索でキーの位置を特定
+         b. 該当する子ノードに再帰
+      4. 見つからなければ None を返す
+
+    api: |
+      ```rust
+      impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
+          /// キーに対応する値への参照を返す
+          ///
+          /// # Complexity
+          /// O(log N)
+          pub fn get<Q>(&self, key: &Q) -> Option<&V>
+          where
+              K: Borrow<Q>,
+              Q: Ord + ?Sized;
+      }
+      ```
+
+    functional_programming_compliance:
+      immutability: |
+        - 参照のみを返す（データを変更しない）
+      referential_transparency: |
+        - 同じキーに対して常に同じ結果
+      no_side_effects: |
+        - 読み取り専用操作
+
+    tests:
+      - name: "存在するキーの検索"
+        description: "挿入したキーが正しく取得できることを検証"
+      - name: "存在しないキーの検索"
+        description: "存在しないキーで None が返ることを検証"
+      - name: "境界キーの検索"
+        description: "最小・最大キーが正しく取得できることを検証"
+      - name: "大量データでの検索"
+        description: "10,000 件での検索が O(log N) であることを検証"
+
+  # ---------------------------------------------------------------------------
+  # 3. insert 操作
+  # ---------------------------------------------------------------------------
+  - id: REQ-BTREE-003
+    name: "insert 操作 (ノード分割含む)"
+    priority: critical
+    description: |
+      キー・値ペアを挿入し、新しいマップを返す。
+
+      **アルゴリズム (パス・コピー方式):**
+      1. 適切な葉ノードを見つける
+      2. 葉ノードにエントリを挿入（ソート順を維持）
+      3. ノードが満杯 (MAX_KEYS) になったら分割:
+         a. 中央のキーを親に昇格
+         b. 左右の子ノードを作成
+      4. 変更されたパス上の全ノードを新規作成（構造共有）
+      5. 分割が root まで伝播したら、新しい root を作成
+
+      **パス・コピーの例:**
+      ```
+      元の木:           挿入後 (key=25):
+           [20]              [20,30]*
+          /    \            /   |   \
+       [10]   [30,40]    [10] [25]* [40]*
+
+      * = 新規作成されたノード
+      [10] は共有される
+      ```
+
+    api: |
+      ```rust
+      impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
+          /// キー・値ペアを挿入した新しいマップを返す
+          ///
+          /// キーが既に存在する場合は値を置き換える。
+          ///
+          /// # Complexity
+          /// O(log N)
+          pub fn insert(&self, key: K, value: V) -> Self;
+      }
+      ```
+
+    functional_programming_compliance:
+      immutability: |
+        - 元のマップは変更されない
+        - 新しいマップを返す
+      referential_transparency: |
+        - 同じ (map, key, value) から同じ結果
+      no_side_effects: |
+        - 純粋な計算のみ
+
+    implementation_details:
+      node_split: |
+        ```rust
+        /// ノード分割の結果
+        enum InsertResult<K, V> {
+            /// 分割なし - 更新されたノードを返す
+            Done(BTreeNode<K, V>),
+            /// 分割あり - (左子, 昇格エントリ, 右子) を返す
+            /// B-Tree では内部ノードにも値を保持するため、
+            /// 分割時には median のキー・値ペアが親に昇格する
+            Split {
+                left: BTreeNode<K, V>,
+                median_entry: (K, V),  // B-Tree: キーと値の両方が昇格
+                right: BTreeNode<K, V>,
+            },
+        }
+        ```
+
+      path_copying: |
+        変更されたパス上のノードのみを新規作成し、
+        それ以外のノードは ReferenceCounter で共有する。
+
+        ```rust
+        fn insert_into_node(
+            node: &BTreeNode<K, V>,
+            key: K,
+            value: V,
+        ) -> InsertResult<K, V> {
+            match node {
+                BTreeNode::Leaf { entries } => {
+                    // 二分探索で挿入位置を特定
+                    // エントリを追加して新しい Leaf を作成
+                    // MAX_KEYS を超えたら Split
+                }
+                BTreeNode::Internal { entries, children } => {
+                    // entries から適切な子を選択（二分探索）
+                    // 再帰的に挿入
+                    // 子が Split したら、エントリを挿入して新しい Internal を作成
+                    // MAX_KEYS を超えたら Split
+                }
+            }
+        }
+        ```
+
+    tests:
+      - name: "空マップへの挿入"
+        description: "空マップへの挿入でシングルトンが作成されることを検証"
+      - name: "キーの昇順挿入"
+        description: "昇順挿入でバランスが維持されることを検証"
+      - name: "キーの降順挿入"
+        description: "降順挿入でバランスが維持されることを検証"
+      - name: "ランダム挿入"
+        description: "ランダム挿入でバランスが維持されることを検証"
+      - name: "重複キーの挿入"
+        description: "既存キーへの挿入で値が更新されることを検証"
+      - name: "ノード分割テスト"
+        description: "MAX_KEYS + 1 個の挿入で分割が発生することを検証"
+      - name: "構造共有テスト"
+        description: "挿入後に元のマップが変更されていないことを検証"
+      - name: "パフォーマンステスト"
+        description: "10,000 件挿入が 20ms 以内であることを検証"
+
+  # ---------------------------------------------------------------------------
+  # 4. remove 操作
+  # ---------------------------------------------------------------------------
+  - id: REQ-BTREE-004
+    name: "remove 操作 (borrow/merge 含む)"
+    priority: critical
+    description: |
+      キーを削除し、新しいマップを返す。
+
+      **アルゴリズム (パス・コピー方式):**
+      1. 削除するキーを見つける
+      2. 葉ノードの場合: エントリを削除
+      3. 内部ノードの場合: 後続（または先行）キーで置換
+      4. ノードがアンダーフロー (MIN_KEYS 未満) になったら:
+         a. 兄弟からキーを借りる (borrow)
+         b. 借りられない場合は兄弟とマージ (merge)
+      5. 変更されたパス上の全ノードを新規作成
+
+      **borrow と merge:**
+      ```
+      borrow (左兄弟から):
+           [30]             [20]
+          /    \    ->     /    \
+       [10,20] [40]      [10]  [30,40]
+
+      merge:
+            [30]            []
+           /    \    ->     |
+        [10]   [40]      [10,30,40]
+      ```
+
+    api: |
+      ```rust
+      impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
+          /// キーを削除した新しいマップを返す
+          ///
+          /// キーが存在しない場合は元のマップと同等のマップを返す。
+          ///
+          /// # Complexity
+          /// O(log N)
+          pub fn remove<Q>(&self, key: &Q) -> Self
+          where
+              K: Borrow<Q>,
+              Q: Ord + ?Sized;
+      }
+      ```
+
+    functional_programming_compliance:
+      immutability: |
+        - 元のマップは変更されない
+        - 新しいマップを返す
+      referential_transparency: |
+        - 同じ (map, key) から同じ結果
+      no_side_effects: |
+        - 純粋な計算のみ
+
+    implementation_details:
+      remove_result: |
+        ```rust
+        /// 削除操作の結果
+        enum RemoveResult<K, V> {
+            /// 削除成功 - 更新されたノード
+            Done(Option<BTreeNode<K, V>>),
+            /// アンダーフロー - 親での処理が必要
+            Underflow(BTreeNode<K, V>),
+        }
+        ```
+
+    tests:
+      - name: "存在するキーの削除"
+        description: "削除後にキーが存在しないことを検証"
+      - name: "存在しないキーの削除"
+        description: "存在しないキーの削除で変更がないことを検証"
+      - name: "最小キーの削除"
+        description: "最小キーの削除が正しく動作することを検証"
+      - name: "最大キーの削除"
+        description: "最大キーの削除が正しく動作することを検証"
+      - name: "borrow テスト"
+        description: "アンダーフロー時に borrow が発生することを検証"
+      - name: "merge テスト"
+        description: "borrow できない場合に merge が発生することを検証"
+      - name: "連続削除テスト"
+        description: "全要素の削除で空マップになることを検証"
+      - name: "構造共有テスト"
+        description: "削除後に元のマップが変更されていないことを検証"
+
+  # ---------------------------------------------------------------------------
+  # 5. イテレータ
+  # ---------------------------------------------------------------------------
+  - id: REQ-BTREE-005
+    name: "イテレータ (in-order traversal)"
+    priority: high
+    description: |
+      キーの昇順でエントリを走査するイテレータを提供する。
+
+      **アルゴリズム:**
+      - スタックベースの in-order traversal
+      - 遅延評価（必要な分だけ走査）
+      - 早期終了をサポート
+
+    api: |
+      ```rust
+      impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
+          /// キー順でエントリを返すイテレータ
+          pub fn iter(&self) -> Iter<'_, K, V>;
+
+          /// キーのイテレータ
+          pub fn keys(&self) -> Keys<'_, K, V>;
+
+          /// 値のイテレータ
+          pub fn values(&self) -> Values<'_, K, V>;
+
+          /// エントリのイテレータ (参照版)
+          pub fn entries(&self) -> impl Iterator<Item = (&K, &V)>;
+
+          /// 指定範囲のエントリを返すイテレータ
+          /// Q: 借用型（既存 API との互換性維持）
+          pub fn range<R, Q>(&self, range: R) -> Range<'_, K, V>
+          where
+              R: RangeBounds<Q>,
+              K: Borrow<Q>,
+              Q: Ord + ?Sized;
+      }
+      ```
+
+    functional_programming_compliance:
+      immutability: |
+        - イテレータは元のデータを変更しない
+      referential_transparency: |
+        - 同じマップから同じ順序のイテレータ
+      no_side_effects: |
+        - 読み取り専用
+
+    implementation_details:
+      lazy_iterator: |
+        ```rust
+        /// 遅延評価イテレータ
+        pub struct Iter<'a, K, V> {
+            /// スタック: (ノード参照, インデックス) のペア
+            stack: Vec<(&'a BTreeNode<K, V>, usize)>,
+        }
+
+        impl<'a, K, V> Iterator for Iter<'a, K, V> {
+            type Item = (&'a K, &'a V);
+
+            fn next(&mut self) -> Option<Self::Item> {
+                // スタックベースの in-order traversal
+            }
+        }
+        ```
+
+    tests:
+      - name: "空マップのイテレーション"
+        description: "空マップで即座に None が返ることを検証"
+      - name: "昇順イテレーション"
+        description: "キーが昇順で返されることを検証"
+      - name: "早期終了"
+        description: "take(n) で n 個だけ走査されることを検証"
+      - name: "range イテレーション"
+        description: "指定範囲のみが返されることを検証"
+      - name: "keys/values イテレーション"
+        description: "キーのみ/値のみが返されることを検証"
+
+  # ---------------------------------------------------------------------------
+  # 6. 各種トレイト実装
+  # ---------------------------------------------------------------------------
+  - id: REQ-BTREE-006
+    name: "各種トレイト実装"
+    priority: high
+    description: |
+      既存の全てのトレイト実装を維持する。
+
+    traits:
+      - name: Clone
+        description: "構造共有による効率的なクローン"
+        implementation: |
+          ```rust
+          impl<K: Clone, V: Clone> Clone for PersistentTreeMap<K, V> {
+              fn clone(&self) -> Self {
+                  Self {
+                      root: self.root.clone(),  // Rc/Arc のクローン
+                      length: self.length,
+                  }
+              }
+          }
+          ```
+
+      - name: Default
+        description: "空マップを返す"
+        implementation: |
+          ```rust
+          impl<K, V> Default for PersistentTreeMap<K, V> {
+              fn default() -> Self {
+                  Self::new()
+              }
+          }
+          ```
+
+      - name: FromIterator
+        description: "イテレータからマップを構築"
+        implementation: |
+          ```rust
+          impl<K: Clone + Ord, V: Clone> FromIterator<(K, V)> for PersistentTreeMap<K, V> {
+              fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+                  iter.into_iter()
+                      .fold(Self::new(), |map, (key, value)| map.insert(key, value))
+              }
+          }
+          ```
+
+      - name: IntoIterator
+        description: "所有権を持つイテレータを返す"
+
+      - name: PartialEq / Eq
+        description: "エントリの等価性比較"
+
+      - name: Hash
+        description: "全エントリのハッシュ"
+
+      - name: Debug / Display
+        description: "デバッグ出力とフォーマット"
+
+      - name: TypeConstructor
+        description: "型クラスとしての型コンストラクタ"
+
+      - name: Foldable
+        description: "fold_left / fold_right 操作"
+
+      - name: Serialize / Deserialize
+        description: "serde による直列化"
+
+      - name: IntoParallelIterator / FromParallelIterator
+        description: "rayon による並列処理"
+
+    tests:
+      - name: "Clone の検証"
+        description: "クローンが元のマップと等価であることを検証"
+      - name: "FromIterator の検証"
+        description: "イテレータからの構築が正しいことを検証"
+      - name: "PartialEq の検証"
+        description: "等価性比較が正しいことを検証"
+      - name: "Hash の検証"
+        description: "等価なマップが同じハッシュ値を持つことを検証"
+      - name: "Serialize/Deserialize の検証"
+        description: "直列化と復元が正しいことを検証"
+
+  # ---------------------------------------------------------------------------
+  # 7. 高階関数操作
+  # ---------------------------------------------------------------------------
+  - id: REQ-BTREE-007
+    name: "高階関数操作"
+    priority: high
+    description: |
+      既存の高階関数操作を全て維持する。
+
+    api: |
+      ```rust
+      impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
+          /// 値を変換した新しいマップを返す
+          pub fn map_values<U, F>(&self, function: F) -> PersistentTreeMap<K, U>
+          where
+              U: Clone,
+              F: FnMut(&V) -> U;
+
+          /// キーを変換した新しいマップを返す
+          pub fn map_keys<L, F>(&self, function: F) -> PersistentTreeMap<L, V>
+          where
+              L: Clone + Ord,
+              F: FnMut(&K) -> L;
+
+          /// フィルタと変換を同時に行う
+          pub fn filter_map<U, F>(&self, function: F) -> PersistentTreeMap<K, U>
+          where
+              U: Clone,
+              F: FnMut(&K, &V) -> Option<U>;
+
+          /// 2つのマップをマージ
+          pub fn merge(&self, other: &Self) -> Self;
+
+          /// カスタムマージ関数を使用してマージ
+          pub fn merge_with<F>(&self, other: &Self, function: F) -> Self
+          where
+              F: FnMut(&K, &V, &V) -> V;
+
+          /// 条件を満たすエントリを削除
+          pub fn delete_if<F>(&self, predicate: F) -> Self
+          where
+              F: FnMut(&K, &V) -> bool;
+
+          /// 条件を満たすエントリのみを保持
+          pub fn keep_if<F>(&self, predicate: F) -> Self
+          where
+              F: FnMut(&K, &V) -> bool;
+
+          /// 条件でパーティション
+          pub fn partition<F>(&self, predicate: F) -> (Self, Self)
+          where
+              F: FnMut(&K, &V) -> bool;
+      }
+      ```
+
+    functional_programming_compliance:
+      immutability: |
+        - 全ての操作で新しいマップを返す
+      referential_transparency: |
+        - 同じ入力から同じ結果
+      no_side_effects: |
+        - 渡された関数が純粋であれば、全体も純粋
+
+    tests:
+      - name: "map_values テスト"
+        description: "値の変換が正しく適用されることを検証"
+      - name: "map_keys テスト"
+        description: "キーの変換が正しく適用されることを検証"
+      - name: "filter_map テスト"
+        description: "フィルタと変換が正しく適用されることを検証"
+      - name: "merge テスト"
+        description: "2つのマップのマージが正しいことを検証"
+      - name: "merge_with テスト"
+        description: "カスタムマージが正しいことを検証"
+      - name: "partition テスト"
+        description: "パーティションが正しいことを検証"
+
+  # ---------------------------------------------------------------------------
+  # 8. 補助操作
+  # ---------------------------------------------------------------------------
+  - id: REQ-BTREE-008
+    name: "補助操作"
+    priority: medium
+    description: |
+      min, max, singleton などの補助操作を維持する。
+
+    api: |
+      ```rust
+      impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
+          /// 単一エントリのマップを作成
+          pub fn singleton(key: K, value: V) -> Self;
+
+          /// 最小キーのエントリを返す
+          pub fn min(&self) -> Option<(&K, &V)>;
+
+          /// 最大キーのエントリを返す
+          pub fn max(&self) -> Option<(&K, &V)>;
+      }
+      ```
+
+    functional_programming_compliance:
+      immutability: |
+        - singleton は新しいマップを作成
+        - min/max は参照のみを返す
+      referential_transparency: |
+        - 同じ入力から同じ結果
+      no_side_effects: |
+        - 純粋な操作
+
+    tests:
+      - name: "singleton テスト"
+        description: "単一エントリのマップが正しく作成されることを検証"
+      - name: "min テスト"
+        description: "最小キーが正しく返されることを検証"
+      - name: "max テスト"
+        description: "最大キーが正しく返されることを検証"
+
+# =============================================================================
+# 非機能要件
+# =============================================================================
+non_functional_requirements:
+  # ---------------------------------------------------------------------------
+  # パフォーマンス要件
+  # ---------------------------------------------------------------------------
+  - id: NFR-PERF-001
+    name: "パフォーマンス改善"
+    priority: critical
+    description: |
+      標準 BTreeMap と比較して、許容可能なパフォーマンスを達成する。
+
+    metrics:
+      - operation: "insert (10,000 件)"
+        current: "1.02 秒"
+        target: "20ms 以下"
+        improvement: "50倍以上"
+        comparison: "BTreeMap: 465us (目標の 43 倍以内)"
+
+      - operation: "get (10,000 件)"
+        current: "74ms"
+        target: "5ms 以下"
+        improvement: "15倍以上"
+        comparison: "BTreeMap と同等の計算量"
+
+      - operation: "range (50% の範囲)"
+        current: "未測定"
+        target: "BTreeMap の 10 倍以内"
+
+      - operation: "iteration (全件)"
+        current: "未測定"
+        target: "BTreeMap の 5 倍以内"
+
+    benchmark_requirements: |
+      - 既存のベンチマーク (benches/persistent_treemap_bench.rs) を維持
+      - 全てのベンチマークで目標性能を達成すること
+      - CI でパフォーマンス回帰を検出すること
+
+  # ---------------------------------------------------------------------------
+  # API 互換性要件
+  # ---------------------------------------------------------------------------
+  - id: NFR-COMPAT-001
+    name: "API 互換性"
+    priority: critical
+    description: |
+      既存の全ての公開 API を維持する。
+
+    maintained_apis:
+      basic_operations:
+        - "new()"
+        - "singleton(key, value)"
+        - "len()"
+        - "is_empty()"
+        - "get(key)"
+        - "contains_key(key)"
+        - "insert(key, value)"
+        - "remove(key)"
+        - "min()"
+        - "max()"
+
+      iterators:
+        - "iter()"
+        - "keys()"
+        - "values()"
+        - "entries()"
+        - "range(range)"
+
+      transformations:
+        - "map_values(function)"
+        - "map_keys(function)"
+        - "filter_map(function)"
+        - "merge(other)"
+        - "merge_with(other, function)"
+        - "delete_if(predicate)"
+        - "keep_if(predicate)"
+        - "partition(predicate)"
+
+      traits:
+        - "Clone"
+        - "Default"
+        - "FromIterator"
+        - "IntoIterator"
+        - "PartialEq"
+        - "Eq"
+        - "Hash"
+        - "Debug"
+        - "Display"
+        - "TypeConstructor"
+        - "Foldable"
+        - "Serialize (feature = serde)"
+        - "Deserialize (feature = serde)"
+        - "IntoParallelIterator (feature = rayon)"
+        - "FromParallelIterator (feature = rayon)"
+        - "par_iter() (feature = rayon)"
+
+  # ---------------------------------------------------------------------------
+  # テスト要件
+  # ---------------------------------------------------------------------------
+  - id: NFR-TEST-001
+    name: "テスト要件"
+    priority: critical
+    description: |
+      既存の全てのテストをパスし、追加のテストを実装する。
+
+    requirements:
+      - description: "既存の 92 件のテストが全てパスすること"
+        verification: "cargo test --features persistent"
+
+      - description: "新規テストによるカバレッジ 100%"
+        verification: "cargo llvm-cov"
+
+      - description: "プロパティベーステスト"
+        verification: |
+          - B-Tree の不変条件 (MIN_KEYS <= n <= MAX_KEYS)
+          - 永続性 (元のマップが変更されないこと)
+          - 構造共有の正確性
+
+      - description: "パフォーマンステスト"
+        verification: "cargo bench --bench persistent_treemap_bench"
+
+# =============================================================================
+# 将来の拡張
+# =============================================================================
+future_extensions:
+  - id: FE-001
+    name: "Transient (一時的可変版)"
+    description: |
+      バッチ更新のための一時的可変版を提供する。
+      Clojure の transient!/persistent! に相当。
+
+      ```rust
+      let map = PersistentTreeMap::new();
+      let transient = map.to_transient();
+      for (key, value) in data {
+          transient.insert(key, value);
+      }
+      let persistent = transient.to_persistent();
+      ```
+
+  - id: FE-002
+    name: "B+ Tree への移行"
+    description: |
+      さらなる最適化として B+ Tree への移行を検討。
+      - 葉ノード間のリンク
+      - より効率的な range query
+      - より効率的なイテレーション
+
+  - id: FE-003
+    name: "並列 bulk 操作"
+    description: |
+      rayon を使用した並列 bulk insert/remove。
+
+# =============================================================================
+# 実装計画
+# =============================================================================
+implementation_plan:
+  phases:
+    - phase: 1
+      name: "BTreeNode 定義とテスト"
+      duration: "1 日"
+      tasks:
+        - "BTreeNode enum の定義"
+        - "ノード作成ヘルパー関数"
+        - "基本的な単体テスト"
+
+    - phase: 2
+      name: "get 操作の実装"
+      duration: "0.5 日"
+      tasks:
+        - "二分探索による検索"
+        - "再帰的なノード探索"
+        - "テスト"
+
+    - phase: 3
+      name: "insert 操作の実装"
+      duration: "2 日"
+      tasks:
+        - "葉ノードへの挿入"
+        - "ノード分割ロジック"
+        - "パス・コピー"
+        - "テスト"
+
+    - phase: 4
+      name: "remove 操作の実装"
+      duration: "2 日"
+      tasks:
+        - "葉ノードからの削除"
+        - "borrow/merge ロジック"
+        - "テスト"
+
+    - phase: 5
+      name: "イテレータの実装"
+      duration: "1 日"
+      tasks:
+        - "Iter 構造体"
+        - "range イテレータ"
+        - "keys/values イテレータ"
+        - "テスト"
+
+    - phase: 6
+      name: "トレイト実装"
+      duration: "1 日"
+      tasks:
+        - "全トレイトの実装"
+        - "テスト"
+
+    - phase: 7
+      name: "高階関数操作"
+      duration: "1 日"
+      tasks:
+        - "map_values, map_keys, filter_map"
+        - "merge, merge_with"
+        - "delete_if, keep_if, partition"
+        - "テスト"
+
+    - phase: 8
+      name: "パフォーマンス検証と最適化"
+      duration: "1 日"
+      tasks:
+        - "ベンチマーク実行"
+        - "ボトルネック特定"
+        - "最適化"
+
+  total_duration: "9-10 日"
+
+# =============================================================================
+# リスクと対策
+# =============================================================================
+risks:
+  - risk: "パフォーマンス目標未達"
+    probability: "中"
+    impact: "高"
+    mitigation: |
+      - 段階的なベンチマーク
+      - プロファイリングによるボトルネック特定
+      - B-Tree の分岐係数 (B) の調整
+
+  - risk: "既存テストの失敗"
+    probability: "低"
+    impact: "高"
+    mitigation: |
+      - 既存テストを最初に実行可能にする
+      - 段階的な移行
+
+  - risk: "remove 操作の複雑性"
+    probability: "高"
+    impact: "中"
+    mitigation: |
+      - 詳細な設計ドキュメント
+      - 段階的な実装とテスト
+      - エッジケースの徹底的なテスト
+
+  - risk: "大きい K/V の clone コスト"
+    probability: "中"
+    impact: "中"
+    mitigation: |
+      - 小さなキー型の使用を推奨
+      - 大きな値は Box<V> や Arc<V> でラップすることを推奨
+      - ドキュメントでパフォーマンス特性を明記
+
+  - risk: "ノード内 Vec の再割り当てによるメモリ増大"
+    probability: "中"
+    impact: "低"
+    mitigation: |
+      - Vec::with_capacity で事前割り当て
+      - 分岐係数 B の調整で複製コストを最適化
+      - ベンチマークでメモリ使用量を監視

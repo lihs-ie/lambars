@@ -550,7 +550,7 @@ assert!(result.contains(&30));  // 3 * 10
 
 #### PersistentTreeMap
 
-赤黒木を使用した O(log N) 操作の順序付きマップ。
+B-Tree を使用した O(log N) 操作の順序付きマップ。
 
 ```rust
 use lambars::persistent::PersistentTreeMap;

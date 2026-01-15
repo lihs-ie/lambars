@@ -8,7 +8,7 @@
 //! - [`PersistentDeque`]: Persistent double-ended queue (Finger Tree)
 //! - [`PersistentHashMap`]: Persistent hash map (HAMT)
 //! - [`PersistentHashSet`]: Persistent hash set (based on HAMT)
-//! - [`PersistentTreeMap`]: Persistent ordered map (Red-Black Tree)
+//! - [`PersistentTreeMap`]: Persistent ordered map (B-Tree)
 //!
 //! # Structural Sharing
 //!
