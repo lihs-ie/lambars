@@ -2046,6 +2046,43 @@ mod serde_impl {
         }
     }
 
+    struct PersistentTreeMapVisitor<K, V> {
+        key_marker: std::marker::PhantomData<K>,
+        value_marker: std::marker::PhantomData<V>,
+    }
+
+    impl<K, V> PersistentTreeMapVisitor<K, V> {
+        const fn new() -> Self {
+            Self {
+                key_marker: std::marker::PhantomData,
+                value_marker: std::marker::PhantomData,
+            }
+        }
+    }
+
+    impl<'de, K, V> serde::de::Visitor<'de> for PersistentTreeMapVisitor<K, V>
+    where
+        K: Clone + Ord + Deserialize<'de>,
+        V: Clone + Deserialize<'de>,
+    {
+        type Value = PersistentTreeMap<K, V>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a map")
+        }
+
+        fn visit_map<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::MapAccess<'de>,
+        {
+            let mut map = PersistentTreeMap::new();
+            while let Some((key, value)) = access.next_entry()? {
+                map = map.insert(key, value);
+            }
+            Ok(map)
+        }
+    }
+
     impl<'de, K, V> Deserialize<'de> for PersistentTreeMap<K, V>
     where
         K: Clone + Ord + Deserialize<'de>,
@@ -2055,8 +2092,7 @@ mod serde_impl {
         where
             D: Deserializer<'de>,
         {
-            let entries: Vec<(K, V)> = Vec::deserialize(deserializer)?;
-            Ok(entries.into_iter().collect())
+            deserializer.deserialize_map(PersistentTreeMapVisitor::new())
         }
     }
 }
