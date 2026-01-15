@@ -1,0 +1,799 @@
+# ConcurrentLazy<T, F> - スレッドセーフな遅延評価 要件定義
+#
+# 概要:
+#   既存の Lazy<T, F> はシングルスレッド専用（RefCell ベース）であるため、
+#   マルチスレッド環境で使用可能なスレッドセーフ版を提供する。
+#
+# 設計方針:
+#   1. OnceLock<T> + Mutex<Option<F>> パターンで実装
+#   2. Send + Sync を実装し、スレッド間で安全に共有可能
+#   3. 既存 Lazy との API 整合性を保ちつつ、スレッド安全性に必要な差分を明確化
+#   4. 関数型プログラミングの原則（純粋性、参照透過性）を維持
+#      ただし、法則は純粋関数が与えられる前提でのみ成立する
+#
+# 参照:
+#   - src/control/lazy.rs - 既存の Lazy 実装
+#   - tests/lazy_tests.rs - テストパターン
+#   - tests/lazy_laws.rs - プロパティテスト
+
+version: "1.0.0"
+name: "concurrent_lazy"
+description: |
+  ConcurrentLazy<T, F> はスレッドセーフな遅延評価を実現する型である。
+
+  既存の Lazy<T, F> は RefCell ベースの実装であり、!Sync（スレッド間で共有不可）
+  という制約がある。ConcurrentLazy はこの制約を解消し、複数のスレッドから
+  安全にアクセス可能な遅延評価値を提供する。
+
+  内部構造:
+  - OnceLock<T>: 一度だけ初期化される値を保持（初期化済みの値を保持）
+  - Mutex<Option<F>>: 初期化関数を保持（初期化後は None）
+
+  この設計により:
+  - 複数スレッドからの同時 force() 呼び出しでも初期化は一度だけ行われる
+  - 初期化済みの値へのアクセスはロックフリー（OnceLock::get）
+  - 初期化関数の取得時のみ Mutex ロックが必要
+
+background:
+  problem: |
+    既存の Lazy<T, F> の制約:
+    1. RefCell を使用しているため !Sync
+    2. マルチスレッド環境では Arc<Mutex<Lazy<T>>> のようなラッピングが必要
+    3. そのようなラッピングは API が煩雑になり、型システムの恩恵を受けにくい
+
+    マルチスレッド環境での遅延評価のユースケース:
+    - 設定値の遅延初期化（グローバル設定）
+    - キャッシュの遅延計算
+    - 並行処理パイプラインでの共有リソース
+
+  motivation: |
+    スレッドセーフな遅延評価を型レベルで保証することで:
+    1. API 利用者がスレッド安全性を意識する必要がなくなる
+    2. 並行プログラミングにおける純粋関数型パターンを実現
+    3. 遅延評価の参照透過性がマルチスレッド環境でも維持される
+
+  prior_art:
+    - name: "std::sync::LazyLock"
+      description: |
+        Rust 1.80 で安定化されたスレッドセーフな遅延初期化型。
+        OnceLock ベースの実装で、初期化関数は型パラメータとして保持。
+        ConcurrentLazy はこれを参考にしつつ、map/flat_map などの
+        関数型操作を追加で提供する。
+
+    - name: "once_cell::sync::Lazy"
+      description: |
+        once_cell クレートのスレッドセーフ版 Lazy。
+        広く使用されており、実装の参考になる。
+
+    - name: "cats.effect.Sync (Scala)"
+      description: |
+        Scala の cats-effect における遅延評価の抽象化。
+        純粋関数型プログラミングにおける参照透過な遅延評価の参考実装。
+
+theoretical_background:
+  thread_safe_lazy_evaluation:
+    description: |
+      スレッドセーフな遅延評価において重要な性質:
+
+      1. 初期化の一度きり保証（Exactly-Once Initialization）
+         複数スレッドから同時に force() が呼び出されても、
+         初期化関数は必ず一度だけ実行される。
+
+      2. 参照透過性の維持（Referential Transparency）
+         遅延評価の結果は、どのスレッドがいつアクセスしても同じ。
+         これは関数型プログラミングの基本原則。
+
+      3. データ競合の回避（Data Race Freedom）
+         Rust の型システムにより、Send + Sync の実装が正しければ
+         データ競合は発生しない。
+
+  design_tradeoffs:
+    description: |
+      ConcurrentLazy の設計におけるトレードオフ:
+
+      1. force_mut() の非提供
+         - OnceLock は一度初期化されると可変参照を返せない
+         - これは意図的な設計で、並行安全性を保証する
+         - 可変性が必要な場合は内部に Mutex<T> を持たせる
+
+      2. 毒状態（Poisoned State）の挙動
+         - OnceLock 自体は毒状態を持たない
+         - ただし Mutex<Option<F>> がパニック時に毒状態になる可能性がある
+         - force() は unwrap_or_else で毒状態から復旧を試みる
+         - 初期化関数がパニックした場合、OnceLock は未初期化のまま
+         - 次回 force() 時に initializer が None で再度パニック
+         - これは既存 Lazy の「再初期化不可」と同様の挙動
+
+      3. map/flat_map の消費型設計
+         - 既存 Lazy と同様に self を消費して新しい ConcurrentLazy を返す
+         - これにより Functor/Monad 法則を自然に満たせる
+         - 複数回の変換が必要な場合は Arc<ConcurrentLazy> を使用
+
+  internal_mutability_note:
+    description: |
+      ConcurrentLazy<Mutex<T>> など、内部可変性を持つ型を使用する場合:
+
+      - T が Mutex, RwLock, AtomicXxx などの場合、外部からは不変に見えるが
+        内部状態は変更可能
+      - この場合、参照透過性は「初期化された値への参照が常に同じ」という
+        意味でのみ成立する
+      - 値自体の内容が変更される可能性があるため、純粋関数型の法則は
+        適用できない場合がある
+      - これは ConcurrentLazy の制約ではなく、Rust の型システムの特性
+
+requirements:
+  # ============================================================================
+  # 1. ConcurrentLazy<T, F> - 基本構造
+  # ============================================================================
+  - id: concurrent_lazy_structure
+    name: "ConcurrentLazy<T, F> 基本構造"
+    priority: critical
+    description: |
+      スレッドセーフな遅延評価を実現する型の基本構造を定義する。
+
+    internal_structure:
+      description: |
+        ConcurrentLazy の内部構造:
+
+        ```rust
+        use std::sync::{Mutex, OnceLock};
+
+        pub struct ConcurrentLazy<T, F = fn() -> T> {
+            /// 初期化済みの値を保持
+            value: OnceLock<T>,
+            /// 初期化関数を保持（初期化後は None）
+            initializer: Mutex<Option<F>>,
+        }
+        ```
+
+        この設計の利点:
+        - OnceLock により初期化済みの値へのアクセスはロックフリー
+        - Mutex<Option<F>> により初期化関数は一度だけ取り出される
+        - Option を使うことで初期化後は関数をドロップできる
+
+    thread_safety:
+      description: |
+        Send/Sync 境界:
+        - Send: T: Send + F: Send の場合に Send
+        - Sync: T: Sync + Send + F: Send の場合に Sync
+
+        これにより ConcurrentLazy を Arc で包んで複数スレッドで共有可能。
+
+    laws:
+      - name: "Initialization Exactly-Once"
+        description: |
+          複数スレッドから同時に force() を呼び出しても、
+          初期化関数は必ず一度だけ実行される。
+        equation: |
+          let lazy = ConcurrentLazy::new(|| counter.fetch_add(1, Ordering::SeqCst));
+          let handles: Vec<_> = (0..10).map(|_| {
+              let lazy_ref = &lazy;
+              thread::spawn(move || lazy_ref.force())
+          }).collect();
+          for h in handles { h.join().unwrap(); }
+          assert_eq!(counter.load(Ordering::SeqCst), 1);
+
+      - name: "Referential Transparency"
+        description: |
+          どのスレッドがいつアクセスしても、同じ値が返される。
+        equation: |
+          let lazy = ConcurrentLazy::new(|| 42);
+          // 任意のスレッドから
+          assert_eq!(*lazy.force(), 42);
+          // 任意の時点で
+          assert_eq!(*lazy.force(), 42);
+
+  # ============================================================================
+  # 2. 基本メソッド
+  # ============================================================================
+  - id: concurrent_lazy_basic_methods
+    name: "基本メソッド"
+    priority: critical
+    description: |
+      ConcurrentLazy の基本的な操作メソッドを定義する。
+
+    methods:
+      - name: new
+        signature: "pub fn new(initializer: F) -> Self where F: FnOnce() -> T"
+        description: |
+          新しいスレッドセーフな遅延値を作成する。
+          初期化関数は force() が呼ばれるまで実行されない。
+        examples:
+          - description: "基本的な使用例"
+            code: |
+              use lambars::control::ConcurrentLazy;
+              use std::sync::Arc;
+              use std::thread;
+
+              let lazy = Arc::new(ConcurrentLazy::new(|| {
+                  println!("Initializing...");
+                  expensive_computation()
+              }));
+
+              let lazy_clone = Arc::clone(&lazy);
+              let handle = thread::spawn(move || {
+                  *lazy_clone.force()
+              });
+
+              let result = handle.join().unwrap();
+
+      - name: new_with_value
+        signature: "pub fn new_with_value(value: T) -> ConcurrentLazy<T, fn() -> T>"
+        description: |
+          既に計算済みの値で ConcurrentLazy を作成する。
+          force() を呼んでも追加の計算は行われない。
+        examples:
+          - description: "即時値での初期化"
+            code: |
+              let lazy = ConcurrentLazy::new_with_value(42);
+              assert!(lazy.is_initialized());
+              assert_eq!(*lazy.force(), 42);
+
+      - name: force
+        signature: "pub fn force(&self) -> &T where F: FnOnce() -> T"
+        description: |
+          値を強制的に評価し、参照を返す。
+
+          実装の詳細:
+          OnceLock::get_or_init のクロージャ内で Mutex<Option<F>> を取り出す。
+          これにより、複数スレッドが同時に force() を呼び出しても、
+          OnceLock が排他制御を行い、最初のスレッドのみが初期化を実行する。
+
+          ```rust
+          pub fn force(&self) -> &T {
+              self.value.get_or_init(|| {
+                  let mut guard = self.initializer.lock()
+                      .unwrap_or_else(|poisoned| poisoned.into_inner());
+                  let initializer = guard.take()
+                      .expect("ConcurrentLazy: initializer already consumed");
+                  initializer()
+              })
+          }
+          ```
+
+          初期化済みの場合:
+          OnceLock::get_or_init は即座に値を返す（ロックフリー）。
+
+          # Panics
+
+          以下の場合にパニックする:
+          - 初期化関数が既に消費されている（プログラムのバグ）
+          - 初期化関数がパニックした場合
+
+          Mutex が毒状態の場合でも、unwrap_or_else で復旧を試みる。
+          これは初期化関数のパニック後に別スレッドが force() を
+          呼び出した場合に発生する可能性がある。
+        examples:
+          - description: "スレッドセーフな遅延評価"
+            code: |
+              use std::sync::Arc;
+              use std::thread;
+
+              let lazy = Arc::new(ConcurrentLazy::new(|| 42));
+              let handles: Vec<_> = (0..10).map(|_| {
+                  let lazy = Arc::clone(&lazy);
+                  thread::spawn(move || *lazy.force())
+              }).collect();
+
+              for handle in handles {
+                  assert_eq!(handle.join().unwrap(), 42);
+              }
+
+      - name: get
+        signature: "pub fn get(&self) -> Option<&T>"
+        description: |
+          初期化済みの場合は Some(&value) を返し、
+          未初期化の場合は None を返す。
+          この操作は値を評価しない。ロックも取得しない。
+        examples:
+          - description: "初期化状態の確認"
+            code: |
+              let lazy = ConcurrentLazy::new(|| 42);
+              assert!(lazy.get().is_none()); // 未初期化
+              lazy.force();
+              assert_eq!(lazy.get(), Some(&42)); // 初期化済み
+
+      - name: is_initialized
+        signature: "pub fn is_initialized(&self) -> bool"
+        description: |
+          値が初期化済みかどうかを返す。
+          ロックを取得しない軽量な操作。
+        examples:
+          - description: "初期化状態のチェック"
+            code: |
+              let lazy = ConcurrentLazy::new(|| 42);
+              assert!(!lazy.is_initialized());
+              lazy.force();
+              assert!(lazy.is_initialized());
+
+      - name: into_inner
+        signature: "pub fn into_inner(self) -> Result<T, ConcurrentLazyPoisonedError> where F: FnOnce() -> T"
+        description: |
+          ConcurrentLazy を消費し、内部の値を返す。
+
+          - 初期化済み: Ok(value)
+          - 未初期化: 初期化を実行して Ok(value)
+          - Mutex がポイズンされている、または初期化関数が消費済み:
+            Err(ConcurrentLazyPoisonedError)
+        examples:
+          - description: "内部値の取得"
+            code: |
+              let lazy = ConcurrentLazy::new(|| 42);
+              assert_eq!(lazy.into_inner().unwrap(), 42);
+
+      - name: pure
+        signature: "pub fn pure(value: T) -> ConcurrentLazy<T, fn() -> T>"
+        description: |
+          純粋な値を ConcurrentLazy コンテキストに持ち上げる。
+          new_with_value と同等だが、Applicative の pure に対応。
+        examples:
+          - description: "値を ConcurrentLazy に持ち上げる"
+            code: |
+              let lazy = ConcurrentLazy::pure(42);
+              assert_eq!(*lazy.force(), 42);
+
+  # ============================================================================
+  # 3. Functor 操作
+  # ============================================================================
+  - id: concurrent_lazy_functor
+    name: "Functor 操作（map）"
+    priority: critical
+    description: |
+      ConcurrentLazy に対する Functor 操作を定義する。
+      map は消費型で、新しい ConcurrentLazy を返す。
+
+    preconditions: |
+      以下の法則は、初期化関数および変換関数が純粋関数（副作用なし、決定的）
+      であることを前提とする。副作用を持つ関数を使用した場合、これらの法則は
+      保証されない。
+
+      純粋関数の定義:
+      - 同じ入力に対して常に同じ出力を返す（決定性）
+      - 外部状態を変更しない（副作用なし）
+      - 外部状態に依存しない（参照透過性）
+
+    laws:
+      - name: "Functor Identity Law"
+        description: |
+          恒等関数で map しても値は変わらない。
+        equation: "lazy.map(|x| x).force() == lazy.force()"
+        property_test: |
+          fn prop_functor_identity(value: i32) -> bool {
+              let lazy = ConcurrentLazy::new(move || value);
+              let mapped = ConcurrentLazy::new(move || value).map(|x| x);
+              *lazy.force() == *mapped.force()
+          }
+
+      - name: "Functor Composition Law"
+        description: |
+          map の連鎖は関数の合成と等価である。
+        equation: "lazy.map(f).map(g).force() == lazy.map(|x| g(f(x))).force()"
+        property_test: |
+          fn prop_functor_composition(value: i32) -> bool {
+              let f = |n: i32| n.wrapping_add(1);
+              let g = |n: i32| n.wrapping_mul(2);
+
+              let lazy1 = ConcurrentLazy::new(move || value);
+              let lazy2 = ConcurrentLazy::new(move || value);
+
+              let left = lazy1.map(f).map(g);
+              let right = lazy2.map(|x| g(f(x)));
+
+              *left.force() == *right.force()
+          }
+
+    methods:
+      - name: map
+        signature: "pub fn map<U, G>(self, function: G) -> ConcurrentLazy<U, impl FnOnce() -> U> where G: FnOnce(T) -> U, F: FnOnce() -> T"
+        description: |
+          遅延値に関数を適用する。
+          結果は新しい ConcurrentLazy であり、元の値も結果も評価されない。
+          force() が呼ばれた時に、元の値の評価と関数の適用が行われる。
+
+          self を消費するため、元の ConcurrentLazy は使用不可になる。
+        examples:
+          - description: "遅延値の変換"
+            code: |
+              let lazy_int = ConcurrentLazy::new(|| 42);
+              let lazy_string = lazy_int.map(|n| n.to_string());
+              assert_eq!(lazy_string.force(), "42");
+
+  # ============================================================================
+  # 4. Monad 操作
+  # ============================================================================
+  - id: concurrent_lazy_monad
+    name: "Monad 操作（flat_map）"
+    priority: critical
+    description: |
+      ConcurrentLazy に対する Monad 操作を定義する。
+      flat_map は消費型で、新しい ConcurrentLazy を返す。
+
+    preconditions: |
+      以下の法則は、初期化関数および変換関数が純粋関数（副作用なし、決定的）
+      であることを前提とする。副作用を持つ関数を使用した場合、これらの法則は
+      保証されない。
+
+    laws:
+      - name: "Monad Left Identity"
+        description: |
+          pure した値を flat_map するのは、関数を直接適用するのと同じ。
+        equation: "ConcurrentLazy::pure(a).flat_map(f).force() == f(a).force()"
+        property_test: |
+          fn prop_monad_left_identity(value: i32) -> bool {
+              let f = |x: i32| ConcurrentLazy::new(move || x.wrapping_mul(2));
+
+              let left = ConcurrentLazy::pure(value).flat_map(f);
+              let right = f(value);
+
+              *left.force() == *right.force()
+          }
+
+      - name: "Monad Right Identity"
+        description: |
+          ConcurrentLazy を pure で flat_map するのは、元の ConcurrentLazy と同じ。
+        equation: "lazy.flat_map(ConcurrentLazy::pure).force() == lazy.force()"
+        property_test: |
+          fn prop_monad_right_identity(value: i32) -> bool {
+              let lazy = ConcurrentLazy::new(move || value);
+              let flat_mapped = ConcurrentLazy::new(move || value)
+                  .flat_map(ConcurrentLazy::new_with_value);
+
+              *lazy.force() == *flat_mapped.force()
+          }
+
+      - name: "Monad Associativity"
+        description: |
+          flat_map の連鎖は結合的である。
+        equation: "lazy.flat_map(f).flat_map(g) == lazy.flat_map(|x| f(x).flat_map(g))"
+        property_test: |
+          fn prop_monad_associativity(value: i32) -> bool {
+              let f = |x: i32| ConcurrentLazy::new(move || x.wrapping_add(1));
+              let g = |x: i32| ConcurrentLazy::new(move || x.wrapping_mul(2));
+
+              let lazy1 = ConcurrentLazy::new(move || value);
+              let lazy2 = ConcurrentLazy::new(move || value);
+
+              let left = lazy1.flat_map(f).flat_map(g);
+              let right = lazy2.flat_map(|x| f(x).flat_map(g));
+
+              *left.force() == *right.force()
+          }
+
+    methods:
+      - name: flat_map
+        signature: "pub fn flat_map<U, ResultFunction, G>(self, function: G) -> ConcurrentLazy<U, impl FnOnce() -> U> where ResultFunction: FnOnce() -> U, G: FnOnce(T) -> ConcurrentLazy<U, ResultFunction>, F: FnOnce() -> T"
+        description: |
+          遅延値に ConcurrentLazy を返す関数を適用し、結果を平坦化する。
+          連鎖的な遅延計算を表現できる。
+
+          self を消費するため、元の ConcurrentLazy は使用不可になる。
+        examples:
+          - description: "遅延計算の連鎖"
+            code: |
+              let lazy_x = ConcurrentLazy::new(|| 10);
+              let lazy_result = lazy_x.flat_map(|x| ConcurrentLazy::new(move || x * 2));
+              assert_eq!(*lazy_result.force(), 20);
+
+  # ============================================================================
+  # 5. Applicative 操作（zip, zip_with）
+  # ============================================================================
+  - id: concurrent_lazy_applicative
+    name: "Applicative 操作（zip, zip_with）"
+    priority: high
+    description: |
+      ConcurrentLazy に対する Applicative 操作を定義する。
+
+    methods:
+      - name: zip
+        signature: "pub fn zip<U, OtherFunction>(self, other: ConcurrentLazy<U, OtherFunction>) -> ConcurrentLazy<(T, U), impl FnOnce() -> (T, U)> where OtherFunction: FnOnce() -> U, F: FnOnce() -> T"
+        description: |
+          二つの遅延値を組み合わせてタプルを返す ConcurrentLazy を作成する。
+          両方の値は force() 時に評価される。
+
+          評価順序:
+          - 最初に self の値が評価される
+          - 次に other の値が評価される
+          - これは逐次的であり、並列評価ではない
+        examples:
+          - description: "遅延値の組み合わせ"
+            code: |
+              let lazy_a = ConcurrentLazy::new(|| 1);
+              let lazy_b = ConcurrentLazy::new(|| "hello");
+              let lazy_pair = lazy_a.zip(lazy_b);
+              assert_eq!(*lazy_pair.force(), (1, "hello"));
+
+      - name: zip_with
+        signature: "pub fn zip_with<U, V, OtherFunction, CombineFunction>(self, other: ConcurrentLazy<U, OtherFunction>, function: CombineFunction) -> ConcurrentLazy<V, impl FnOnce() -> V> where OtherFunction: FnOnce() -> U, CombineFunction: FnOnce(T, U) -> V, F: FnOnce() -> T"
+        description: |
+          二つの遅延値を関数で組み合わせる。
+          map2 と同等の操作。
+        examples:
+          - description: "遅延値の結合"
+            code: |
+              let lazy_a = ConcurrentLazy::new(|| 10);
+              let lazy_b = ConcurrentLazy::new(|| 20);
+              let lazy_sum = lazy_a.zip_with(lazy_b, |a, b| a + b);
+              assert_eq!(*lazy_sum.force(), 30);
+
+  # ============================================================================
+  # 6. エラー型
+  # ============================================================================
+  - id: concurrent_lazy_error
+    name: "ConcurrentLazyError エラー型"
+    priority: high
+    description: |
+      ConcurrentLazy の into_inner 操作で発生しうるエラーを表す型を定義する。
+      force() はパニックするため Result を返さない（既存 Lazy と同様）。
+
+    structure:
+      description: |
+        ```rust
+        /// ConcurrentLazy の操作で発生しうるエラー
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub struct ConcurrentLazyPoisonedError;
+
+        impl fmt::Display for ConcurrentLazyPoisonedError {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "ConcurrentLazy initialization failed or mutex was poisoned")
+            }
+        }
+
+        impl std::error::Error for ConcurrentLazyPoisonedError {}
+        ```
+
+    design_rationale: |
+      エラー型を簡素化した理由:
+      1. force() はパニックするため、エラー型は into_inner() 専用
+      2. F を保持しても、既に消費済み（None）の場合があり得る
+      3. シンプルなユニット構造体で十分な情報を提供
+      4. 既存の LazyPoisonedError と同様の設計
+
+    panic_vs_result: |
+      force() がパニックする設計の理由:
+      1. 既存の Lazy との API 互換性
+      2. 遅延評価は「必ず成功する」前提で使用されることが多い
+      3. エラーハンドリングが必要な場合は into_inner() を使用
+
+      代替: try_force() -> Result<&T, Error> は将来の拡張として検討
+
+    notes: |
+      OnceLock 自体は毒状態を持たないが、Mutex<Option<F>> は
+      ロック保持中にパニックすると毒状態になる可能性がある。
+
+      force() の実装では unwrap_or_else で毒状態から復旧を試みる。
+      into_inner() は Mutex 毒状態時に Err を返す。
+
+  # ============================================================================
+  # 7. 既存 Lazy との差分
+  # ============================================================================
+  - id: concurrent_lazy_differences
+    name: "既存 Lazy との差分"
+    priority: high
+    description: |
+      ConcurrentLazy が提供しないメソッドと、その理由を明確にする。
+
+    not_provided:
+      - method: force_mut
+        signature: "fn force_mut(&mut self) -> &mut T"
+        reason: |
+          OnceLock は一度初期化されると可変参照を返せない。
+          これはスレッド安全性を保証するための意図的な設計。
+
+          可変性が必要な場合の代替手段:
+          1. ConcurrentLazy<Mutex<T>> を使用
+          2. ConcurrentLazy<RwLock<T>> を使用
+          3. ConcurrentLazy<AtomicXxx> を使用（プリミティブ型の場合）
+
+      - method: get_mut
+        signature: "fn get_mut(&mut self) -> Option<&mut T>"
+        reason: |
+          force_mut と同様、OnceLock の制約により実装不可。
+
+      - method: is_poisoned
+        signature: "fn is_poisoned(&self) -> bool"
+        reason: |
+          OnceLock 自体は毒状態を持たないが、ConcurrentLazy の設計上、
+          初期化関数がパニックすると再初期化は不可能。
+
+          理由: 初期化関数は get_or_init のクロージャ内で消費（take）される。
+          パニック後は initializer が None になっているため、次回 force() では
+          「initializer already consumed」でパニックする。
+
+          この挙動は既存 Lazy の「毒状態で再利用不可」と実質的に同等。
+          ただし、明示的な毒状態フラグを持たないため is_poisoned() は提供しない。
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - description: "初期化済みの force() 呼び出しはロックフリー"
+      rationale: "OnceLock::get() を使用するため"
+    - description: "初期化時のみ Mutex ロックが必要"
+      rationale: "初期化関数の取り出しに使用"
+    - description: "複数スレッドからの同時 force() は最初の1つのみが初期化を実行"
+      rationale: "OnceLock::get_or_init の保証"
+
+  memory:
+    - description: "初期化後は初期化関数がドロップされる"
+      rationale: "Mutex<Option<F>> の Option を None にすることで実現"
+
+  thread_safety:
+    - description: "T: Send + F: Send の場合に Send"
+    - description: "T: Sync + Send + F: Send の場合に Sync"
+    - description: "データ競合が発生しないことを型システムで保証"
+
+# テスト戦略
+testing_strategy:
+  property_based_testing:
+    description: |
+      各法則をプロパティベーステストで検証する。
+      proptest クレートを使用。
+    test_cases:
+      - "冪等律: force() を複数回呼び出しても同じ値"
+      - "遅延性: 作成時点では初期化関数が実行されない"
+      - "メモ化: 初期化関数は最大1回のみ実行"
+      - "Functor Identity Law"
+      - "Functor Composition Law"
+      - "Monad Left Identity"
+      - "Monad Right Identity"
+      - "Monad Associativity"
+
+  concurrency_tests:
+    description: |
+      並行性に関するテストを実施する。
+    test_cases:
+      - name: "Initialization Exactly-Once (multiple threads)"
+        description: |
+          複数スレッドから同時に force() を呼び出しても、
+          初期化関数は一度だけ実行される。
+        code: |
+          #[rstest]
+          fn test_concurrent_initialization_exactly_once() {
+              use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+              use std::thread;
+
+              let counter = Arc::new(AtomicUsize::new(0));
+              let counter_clone = Arc::clone(&counter);
+              let lazy = Arc::new(ConcurrentLazy::new(move || {
+                  counter_clone.fetch_add(1, Ordering::SeqCst);
+                  42
+              }));
+
+              let handles: Vec<_> = (0..100).map(|_| {
+                  let lazy = Arc::clone(&lazy);
+                  thread::spawn(move || *lazy.force())
+              }).collect();
+
+              for handle in handles {
+                  assert_eq!(handle.join().unwrap(), 42);
+              }
+
+              assert_eq!(counter.load(Ordering::SeqCst), 1);
+          }
+
+      - name: "Concurrent force() returns same value"
+        description: |
+          複数スレッドからの force() は全て同じ値を返す。
+        code: |
+          #[rstest]
+          fn test_concurrent_force_same_value() {
+              use std::sync::Arc;
+              use std::thread;
+
+              let lazy = Arc::new(ConcurrentLazy::new(|| 42));
+
+              let handles: Vec<_> = (0..100).map(|_| {
+                  let lazy = Arc::clone(&lazy);
+                  thread::spawn(move || *lazy.force())
+              }).collect();
+
+              let results: Vec<_> = handles.into_iter()
+                  .map(|h| h.join().unwrap())
+                  .collect();
+
+              assert!(results.iter().all(|&x| x == 42));
+          }
+
+      - name: "is_initialized is eventually consistent"
+        description: |
+          初期化後は is_initialized() が true を返す。
+        code: |
+          #[rstest]
+          fn test_is_initialized_after_force() {
+              use std::sync::Arc;
+              use std::thread;
+
+              let lazy = Arc::new(ConcurrentLazy::new(|| 42));
+
+              let lazy_clone = Arc::clone(&lazy);
+              let handle = thread::spawn(move || {
+                  lazy_clone.force();
+              });
+
+              handle.join().unwrap();
+              assert!(lazy.is_initialized());
+          }
+
+  unit_tests:
+    description: |
+      各メソッドの基本的な動作を確認する。
+    test_cases:
+      - "new: 未初期化状態で作成される"
+      - "new_with_value: 初期化済み状態で作成される"
+      - "force: 値を評価して参照を返す"
+      - "get: 未初期化なら None、初期化済みなら Some"
+      - "is_initialized: 状態を正しく返す"
+      - "into_inner: 値を消費して返す"
+      - "pure: new_with_value と同等"
+      - "map: 関数を遅延適用する"
+      - "flat_map: 連鎖的な遅延計算"
+      - "zip: 二つの遅延値をタプルに"
+      - "zip_with: 二つの遅延値を関数で結合"
+
+# トレイト実装
+trait_implementations:
+  - trait: Send
+    condition: "T: Send + F: Send"
+    description: |
+      値と初期化関数が Send の場合、ConcurrentLazy も Send。
+
+  - trait: Sync
+    condition: "T: Sync + Send + F: Send"
+    description: |
+      値が Sync + Send で初期化関数が Send の場合、ConcurrentLazy も Sync。
+
+  - trait: Default
+    condition: "T: Default"
+    description: |
+      T: Default の場合、ConcurrentLazy<T> も Default を実装。
+      ConcurrentLazy::new(T::default) と同等。
+
+  - trait: Debug
+    condition: "T: Debug"
+    description: |
+      Debug を実装する。
+      初期化済みの場合は値を、未初期化の場合は "<uninit>" を表示。
+
+  - trait: Display
+    condition: "T: Display"
+    description: |
+      Display を実装する。
+      初期化済みの場合は値を、未初期化の場合は "<uninit>" を表示。
+
+# 設計ノート
+design_notes:
+  - id: why_not_lazylock
+    description: |
+      std::sync::LazyLock を使用しない理由:
+
+      1. LazyLock は初期化関数を型パラメータとして保持するが、
+         型シグネチャが複雑になる
+      2. map/flat_map などの関数型操作を追加で実装する必要がある
+      3. 独自実装により、ライブラリの設計意図を明確に表現できる
+
+      ただし、内部実装は LazyLock を参考にしている。
+
+  - id: consuming_map_design
+    description: |
+      map/flat_map が self を消費する設計の理由:
+
+      1. Functor/Monad 法則を自然に満たせる
+      2. 複数回の map を許可すると、初期化関数の呼び出し順序が
+         不定になる可能性がある
+      3. 既存の Lazy と一貫した API を提供
+
+      共有が必要な場合は Arc<ConcurrentLazy> を使用する。
+
+# 将来の拡張
+future_extensions:
+  - id: parallel_zip
+    name: "並列 zip"
+    description: |
+      zip/zip_with で両方の値を並列に評価するオプション。
+      現在の実装は逐次評価だが、rayon などを使用して
+      並列評価するバリアントを提供できる。
+
+  - id: try_force
+    name: "try_force メソッド"
+    description: |
+      パニックせずに Result を返す force のバリアント。
+      Mutex の毒状態を安全に処理できる。

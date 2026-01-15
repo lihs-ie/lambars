@@ -394,6 +394,32 @@ let value2 = lazy.force();
 assert_eq!(*value2, 42);
 ```
 
+#### Thread-Safe Lazy Evaluation
+
+`ConcurrentLazy` provides thread-safe lazy evaluation that can be safely shared between threads.
+
+```rust
+use lambars::control::ConcurrentLazy;
+use std::sync::Arc;
+use std::thread;
+
+let lazy = Arc::new(ConcurrentLazy::new(|| {
+    println!("Computing...");
+    42
+}));
+
+// Spawn multiple threads that access the lazy value
+let handles: Vec<_> = (0..10).map(|_| {
+    let lazy = Arc::clone(&lazy);
+    thread::spawn(move || *lazy.force())
+}).collect();
+
+// All threads get the same value, and initialization happens only once
+for handle in handles {
+    assert_eq!(handle.join().unwrap(), 42);
+}
+```
+
 #### Trampoline (Stack-Safe Recursion)
 
 Enables deep recursion without stack overflow.
