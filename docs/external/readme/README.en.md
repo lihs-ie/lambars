@@ -584,7 +584,7 @@ assert!(result.contains(&30));  // 3 * 10
 
 #### PersistentTreeMap
 
-Ordered map with O(log N) operations using Red-Black Tree.
+Ordered map with O(log N) operations using B-Tree.
 
 ```rust
 use lambars::persistent::PersistentTreeMap;
