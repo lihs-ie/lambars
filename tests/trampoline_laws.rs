@@ -1,18 +1,7 @@
 #![cfg(feature = "control")]
-//! Property-based tests for Trampoline<A> laws.
-//!
-//! This module verifies that Trampoline implementations satisfy:
-//!
-//! - **Stack Safety**: Deep recursion does not overflow the stack
-//! - **Functor Laws**: identity and composition
-//! - **Monad Laws**: left identity, right identity, associativity
 
 use lambars::control::Trampoline;
 use proptest::prelude::*;
-
-// =============================================================================
-// Stack Safety
-// =============================================================================
 
 proptest! {
     /// Stack safety: deep recursion using suspend does not overflow
@@ -75,10 +64,6 @@ proptest! {
     }
 }
 
-// =============================================================================
-// Functor Laws
-// =============================================================================
-
 proptest! {
     /// Functor Identity Law: trampoline.map(|x| x).run() == trampoline.run()
     #[test]
@@ -132,10 +117,6 @@ proptest! {
         prop_assert_eq!(left.run(), right.run());
     }
 }
-
-// =============================================================================
-// Monad Laws
-// =============================================================================
 
 proptest! {
     /// Monad Left Identity: Trampoline::done(a).flat_map(f).run() == f(a).run()
@@ -221,10 +202,6 @@ proptest! {
     }
 }
 
-// =============================================================================
-// pure / done equivalence
-// =============================================================================
-
 proptest! {
     /// pure and done produce identical results
     #[test]
@@ -235,10 +212,6 @@ proptest! {
         prop_assert_eq!(from_done.run(), from_pure.run());
     }
 }
-
-// =============================================================================
-// and_then / flat_map equivalence
-// =============================================================================
 
 proptest! {
     /// and_then is an alias for flat_map
@@ -253,10 +226,6 @@ proptest! {
     }
 }
 
-// =============================================================================
-// map via flat_map
-// =============================================================================
-
 proptest! {
     /// map(f) == flat_map(|x| done(f(x)))
     #[test]
@@ -269,10 +238,6 @@ proptest! {
         prop_assert_eq!(mapped.run(), flat_mapped.run());
     }
 }
-
-// =============================================================================
-// then behavior
-// =============================================================================
 
 proptest! {
     /// then discards the first value
@@ -288,10 +253,6 @@ proptest! {
         prop_assert_eq!(result.run(), value2);
     }
 }
-
-// =============================================================================
-// Recursive computations
-// =============================================================================
 
 proptest! {
     /// Factorial produces correct results
@@ -342,10 +303,6 @@ proptest! {
         prop_assert_eq!(result, expected);
     }
 }
-
-// =============================================================================
-// resume behavior
-// =============================================================================
 
 proptest! {
     /// resume on done returns Right

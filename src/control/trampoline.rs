@@ -60,20 +60,10 @@
 
 use super::either::Either;
 
-/// Internal trait for type erasure in `FlatMap` continuations.
-///
-/// This trait allows us to store continuations with different intermediate
-/// types in the same `Trampoline` enum variant, enabling proper monadic
-/// composition without knowing all types at compile time.
 trait TrampolineContinuation<A> {
-    /// Execute one step of the continuation, returning the next trampoline state.
     fn step(self: Box<Self>) -> Trampoline<A>;
 }
 
-/// A wrapper type to hide the internal trait from the public API.
-///
-/// This is used to avoid exposing the `TrampolineContinuation` trait
-/// in the public enum variant.
 #[doc(hidden)]
 pub struct ContinuationBox<A>(Box<dyn TrampolineContinuation<A>>);
 
@@ -260,144 +250,6 @@ impl<A: 'static> Trampoline<A> {
         }
     }
 
-    /// Default batch size for `run_batched()`.
-    const DEFAULT_BATCH_SIZE: usize = 16;
-
-    /// Batch size for processing consecutive `FlatMapInternal` chains in `run_optimized()`.
-    const FLATMAP_CHAIN_BATCH_SIZE: usize = 16;
-
-    /// Runs the trampoline to completion using batch processing.
-    ///
-    /// This method processes multiple steps in each iteration of the main loop,
-    /// reducing loop overhead for computations with many steps.
-    ///
-    /// # Performance
-    ///
-    /// Batch processing amortizes the loop overhead across multiple steps.
-    /// The default batch size (16) provides a good balance between reduced
-    /// overhead and responsiveness.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use lambars::control::Trampoline;
-    ///
-    /// fn count_down(n: u64) -> Trampoline<u64> {
-    ///     if n == 0 {
-    ///         Trampoline::done(0)
-    ///     } else {
-    ///         Trampoline::suspend(move || count_down(n - 1))
-    ///     }
-    /// }
-    ///
-    /// let result = count_down(10000).run_batched();
-    /// assert_eq!(result, 0);
-    /// ```
-    #[inline]
-    pub fn run_batched(self) -> A {
-        self.run_with_batch_size(Self::DEFAULT_BATCH_SIZE)
-    }
-
-    /// Runs the trampoline to completion using the specified batch size.
-    ///
-    /// # Arguments
-    ///
-    /// * `batch_size` - The number of steps to process in each batch.
-    ///   Must be greater than 0.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `batch_size` is 0.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use lambars::control::Trampoline;
-    ///
-    /// fn count_down(n: u64) -> Trampoline<u64> {
-    ///     if n == 0 {
-    ///         Trampoline::done(0)
-    ///     } else {
-    ///         Trampoline::suspend(move || count_down(n - 1))
-    ///     }
-    /// }
-    ///
-    /// // Use a larger batch size for deeper recursion
-    /// let result = count_down(100000).run_with_batch_size(32);
-    /// assert_eq!(result, 0);
-    /// ```
-    #[inline]
-    pub fn run_with_batch_size(self, batch_size: usize) -> A {
-        assert!(batch_size > 0, "batch_size must be greater than 0");
-
-        let mut current = self;
-
-        loop {
-            for _ in 0..batch_size {
-                match current {
-                    Self::Done(value) => return value,
-                    Self::Suspend(thunk) => current = thunk(),
-                    Self::FlatMapInternal(continuation) => current = continuation.step(),
-                }
-            }
-        }
-    }
-
-    /// Runs the trampoline to completion using an optimized strategy.
-    ///
-    /// This method combines early return for `Done` state and batch processing
-    /// of `FlatMapInternal` chains for better performance with deep `flat_map` chains.
-    ///
-    /// # When to Use
-    ///
-    /// - Use [`run()`](Self::run) for general cases or shallow recursion
-    /// - Use `run_optimized()` when you have deep `flat_map` chains (100+ levels)
-    /// - Use [`run_batched()`](Self::run_batched) for deep `Suspend` chains
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use lambars::control::Trampoline;
-    ///
-    /// fn count_down(n: u64) -> Trampoline<u64> {
-    ///     if n == 0 {
-    ///         Trampoline::done(0)
-    ///     } else {
-    ///         Trampoline::suspend(move || count_down(n - 1))
-    ///     }
-    /// }
-    ///
-    /// let result = count_down(100000).run_optimized();
-    /// assert_eq!(result, 0);
-    /// ```
-    #[inline]
-    pub fn run_optimized(self) -> A {
-        if let Self::Done(value) = self {
-            return value;
-        }
-
-        let mut current = self;
-
-        loop {
-            current = match current {
-                Self::Done(value) => return value,
-                Self::Suspend(thunk) => thunk(),
-                Self::FlatMapInternal(continuation) => {
-                    let mut inner = continuation.step();
-                    for _ in 0..Self::FLATMAP_CHAIN_BATCH_SIZE {
-                        match inner {
-                            Self::FlatMapInternal(next_continuation) => {
-                                inner = next_continuation.step();
-                            }
-                            _ => break,
-                        }
-                    }
-                    inner
-                }
-            };
-        }
-    }
-
     /// Takes one step of the trampoline computation.
     ///
     /// Returns either:
@@ -547,10 +399,6 @@ impl<A: 'static> Trampoline<A> {
     }
 }
 
-/// Internal structure for `flat_map` continuation.
-///
-/// This struct captures the current trampoline state and the continuation
-/// function to apply when the current state reaches `Done`.
 struct FlatMapContinuation<A, B, F>
 where
     F: FnOnce(A) -> Trampoline<B>,
@@ -578,10 +426,6 @@ where
         }
     }
 }
-
-// =============================================================================
-// Debug Implementation
-// =============================================================================
 
 impl<A: std::fmt::Debug> std::fmt::Debug for Trampoline<A> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -611,10 +455,6 @@ mod tests {
     use super::*;
     use rstest::rstest;
 
-    // =========================================================================
-    // Display Tests
-    // =========================================================================
-
     #[rstest]
     fn test_display_done() {
         let trampoline = Trampoline::done(42);
@@ -633,10 +473,6 @@ mod tests {
             .flat_map(|value| Trampoline::done(value * 2));
         assert_eq!(format!("{trampoline}"), "<FlatMap>");
     }
-
-    // =========================================================================
-    // Original Tests
-    // =========================================================================
 
     #[rstest]
     fn test_trampoline_done() {
@@ -710,10 +546,6 @@ mod tests {
         assert!(!is_odd(100).run());
     }
 
-    // =========================================================================
-    // flat_map Done eager evaluation tests
-    // =========================================================================
-
     #[rstest]
     fn test_flat_map_done_eager_evaluation() {
         let trampoline = Trampoline::done(42);
@@ -763,10 +595,6 @@ mod tests {
         assert_eq!(result.run(), 14);
     }
 
-    // =========================================================================
-    // FlatMap chain optimization tests
-    // =========================================================================
-
     #[rstest]
     fn test_deep_flatmap_chain_from_suspend() {
         let trampoline: Trampoline<i32> = Trampoline::suspend(|| Trampoline::done(0));
@@ -802,10 +630,6 @@ mod tests {
         assert_eq!(trampoline.run(), expected);
     }
 
-    // =========================================================================
-    // run() early return tests
-    // =========================================================================
-
     #[rstest]
     fn test_done_early_return() {
         let trampoline = Trampoline::done(42);
@@ -823,10 +647,6 @@ mod tests {
         let trampoline = Trampoline::suspend(|| Trampoline::done(100));
         assert_eq!(trampoline.run(), 100);
     }
-
-    // =========================================================================
-    // map Done eager evaluation tests
-    // =========================================================================
 
     #[rstest]
     fn test_map_done_eager_evaluation() {
@@ -863,136 +683,5 @@ mod tests {
             "Expected Done(14), got {result:?}"
         );
         assert_eq!(result.run(), 14);
-    }
-
-    // =========================================================================
-    // Batch processing tests
-    // =========================================================================
-
-    #[rstest]
-    fn test_run_batched_same_as_run() {
-        fn count_down(n: u64) -> Trampoline<u64> {
-            if n == 0 {
-                Trampoline::done(0)
-            } else {
-                Trampoline::suspend(move || count_down(n - 1))
-            }
-        }
-
-        let result_run = count_down(100).run();
-        let result_batched = count_down(100).run_batched();
-
-        assert_eq!(result_run, result_batched);
-    }
-
-    #[rstest]
-    #[case(1)]
-    #[case(4)]
-    #[case(16)]
-    #[case(64)]
-    fn test_run_with_batch_size(#[case] batch_size: usize) {
-        fn sum_to(n: u64) -> Trampoline<u64> {
-            sum_to_helper(n, 0)
-        }
-
-        fn sum_to_helper(n: u64, accumulator: u64) -> Trampoline<u64> {
-            if n == 0 {
-                Trampoline::done(accumulator)
-            } else {
-                Trampoline::suspend(move || sum_to_helper(n - 1, accumulator + n))
-            }
-        }
-
-        let result = sum_to(100).run_with_batch_size(batch_size);
-        let expected = 100 * 101 / 2;
-        assert_eq!(result, expected);
-    }
-
-    #[rstest]
-    #[should_panic(expected = "batch_size must be greater than 0")]
-    fn test_batch_size_zero_panics() {
-        Trampoline::done(42).run_with_batch_size(0);
-    }
-
-    #[rstest]
-    fn test_run_batched_done() {
-        let trampoline = Trampoline::done(42);
-        assert_eq!(trampoline.run_batched(), 42);
-    }
-
-    #[rstest]
-    fn test_run_batched_flatmap_chain() {
-        let trampoline: Trampoline<i32> = Trampoline::suspend(|| Trampoline::done(0));
-        let result = (0..50).fold(trampoline, |accumulator, _| {
-            accumulator.flat_map(|x| Trampoline::done(x + 1))
-        });
-
-        assert_eq!(result.run_batched(), 50);
-    }
-
-    // =========================================================================
-    // run_optimized tests
-    // =========================================================================
-
-    #[rstest]
-    fn test_run_optimized_same_as_run() {
-        fn count_down(n: u64) -> Trampoline<u64> {
-            if n == 0 {
-                Trampoline::done(0)
-            } else {
-                Trampoline::suspend(move || count_down(n - 1))
-            }
-        }
-
-        let result_run = count_down(100).run();
-        let result_optimized = count_down(100).run_optimized();
-
-        assert_eq!(result_run, result_optimized);
-    }
-
-    #[rstest]
-    fn test_run_optimized_done() {
-        let trampoline = Trampoline::done(42);
-        assert_eq!(trampoline.run_optimized(), 42);
-    }
-
-    #[rstest]
-    fn test_run_optimized_flatmap_chain() {
-        let trampoline: Trampoline<i32> = Trampoline::suspend(|| Trampoline::done(0));
-        let result = (0..100).fold(trampoline, |accumulator, _| {
-            accumulator.flat_map(|x| Trampoline::done(x + 1))
-        });
-
-        assert_eq!(result.run_optimized(), 100);
-    }
-
-    #[rstest]
-    fn test_run_optimized_nested() {
-        let trampoline: Trampoline<i32> = Trampoline::suspend(|| Trampoline::done(1));
-        let result = trampoline.flat_map(|x| {
-            Trampoline::suspend(move || Trampoline::done(x * 2))
-                .flat_map(|y| Trampoline::done(y + 10))
-        });
-
-        assert_eq!(result.run_optimized(), 12);
-    }
-
-    #[rstest]
-    fn test_run_optimized_sum() {
-        fn sum_to(n: u64) -> Trampoline<u64> {
-            sum_to_helper(n, 0)
-        }
-
-        fn sum_to_helper(n: u64, accumulator: u64) -> Trampoline<u64> {
-            if n == 0 {
-                Trampoline::done(accumulator)
-            } else {
-                Trampoline::suspend(move || sum_to_helper(n - 1, accumulator + n))
-            }
-        }
-
-        let result = sum_to(100).run_optimized();
-        let expected = 100 * 101 / 2;
-        assert_eq!(result, expected);
     }
 }
