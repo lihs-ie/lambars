@@ -1,0 +1,75 @@
+# Issue: Bifunctor 型クラス
+# 二つの型パラメータを持つ型に対する Functor
+
+deferred_features:
+  - id: bifunctor
+    name: "Bifunctor 型クラス"
+    discovered_date: "2026-01-16"
+    priority: high
+    category: enhancement
+    labels:
+      - "typeclass"
+      - "enhancement"
+      - "priority: high"
+
+    problem:
+      summary: "Either/Result など二つの型パラメータを持つ型で bimap が使えない"
+      details: |
+        現在の lambars には Bifunctor 型クラスが存在しない。
+        Either<L, R> や Result<T, E> などの二項型で両方の型パラメータに
+        関数を適用する統一的な方法がない。
+
+        - 何が問題なのか: 二項型で両方の型を同時に変換する標準的な方法がない
+        - なぜ発生するのか: Functor は単一の型パラメータのみ対象
+        - どのような影響があるか: エラー処理パイプラインの構築が煩雑になる
+
+      rust_limitation: |
+        ```rust
+        // 現状: 手動で両方を変換する必要がある
+        let result: Either<String, i32> = either.map_left(|l| l.to_string())
+                                                 .map(|r| r + 1);
+
+        // 理想: bimap で一度に変換
+        let result = either.bimap(|l| l.to_string(), |r| r + 1);
+        ```
+
+    solution:
+      approach: "Bifunctor トレイトを定義し、Either, Result, Tuple に実装"
+      options:
+        - name: "標準的な Bifunctor トレイト"
+          description: |
+            Haskell/Scala 標準の Bifunctor を実装。
+            bimap, first, second メソッドを提供。
+          pros:
+            - "標準的な関数型言語との互換性"
+            - "エラー処理の簡潔化"
+            - "型クラス階層の拡充"
+          cons:
+            - "HKT の制約により Rust での表現が複雑になる可能性"
+
+        - name: "マクロベースの bimap"
+          description: |
+            トレイトではなくマクロで bimap を提供。
+          pros:
+            - "HKT の制約を回避"
+            - "実装が簡単"
+          cons:
+            - "型クラスとしての一貫性がない"
+            - "ジェネリックなコードで使いにくい"
+
+      recommended: "標準的な Bifunctor トレイト"
+      estimated_complexity: medium
+
+    references:
+      - "Haskell Data.Bifunctor"
+      - "Scala cats Bifunctor"
+      - "docs/internal/requirements/20250101_0000_typeclass.yaml"
+
+    related:
+      requirement_id: "typeclass"
+      plan_id: null
+
+    github_issue:
+      number: 170
+      url: "https://github.com/lihs-ie/lambars/issues/170"
+      created: true

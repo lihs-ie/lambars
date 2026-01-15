@@ -1,0 +1,82 @@
+# Issue: ContT（Continuation Transformer）
+# 継続効果を追加するモナド変換子
+
+deferred_features:
+  - id: cont_transformer
+    name: "ContT（Continuation Transformer）"
+    discovered_date: "2026-01-16"
+    priority: medium
+    category: enhancement
+    labels:
+      - "effect"
+      - "control"
+      - "enhancement"
+      - "priority: medium"
+
+    problem:
+      summary: "継続効果を既存のモナドスタックに追加できない"
+      details: |
+        ContT は継続ベースの計算を他のモナドと組み合わせるための変換子。
+        callCC（call with current continuation）などの制御演算子を提供し、
+        高度な制御フロー（早期リターン、コルーチンなど）を実現する。
+
+        - 何が問題なのか: 継続を使った制御フローの抽象化がない
+        - なぜ発生するのか: Continuation モナドの変換子版が未実装
+        - どのような影響があるか: 複雑な制御フローの表現が困難
+
+        TrampolineT, ContinuationT もこの実装に統合予定。
+
+      rust_limitation: |
+        ```rust
+        // ContT の基本構造
+        pub struct ContT<R, M, A> {
+            run_cont: Box<dyn FnOnce(Box<dyn FnOnce(A) -> M<R>>) -> M<R>>,
+        }
+
+        // callCC: 現在の継続を取得
+        fn call_cc<R, M, A, B>(
+            f: impl FnOnce(Box<dyn FnOnce(A) -> ContT<R, M, B>>) -> ContT<R, M, A>
+        ) -> ContT<R, M, A>;
+        ```
+
+    solution:
+      approach: "既存の Continuation モナドをベースに変換子版を実装"
+      options:
+        - name: "Continuation ベースの ContT"
+          description: |
+            src/control/continuation.rs を拡張し、
+            変換子版を追加。MonadTrans トレイトを実装。
+          pros:
+            - "既存実装の活用"
+            - "型クラス階層との整合性"
+          cons:
+            - "HKT の制約で型が複雑になる"
+            - "ライフタイム管理が難しい"
+
+        - name: "単純化された ContT"
+          description: |
+            callCC のみサポートする簡易版。
+          pros:
+            - "実装が比較的簡単"
+            - "主要なユースケースをカバー"
+          cons:
+            - "完全な ContT の機能は提供しない"
+
+      recommended: "Continuation ベースの ContT"
+      estimated_complexity: high
+
+    references:
+      - "Haskell Control.Monad.Trans.Cont"
+      - "Scala cats ContT"
+      - "docs/internal/requirements/20250101_0500_effect.yaml"
+      - "docs/internal/requirements/20250101_0200_control.yaml"
+      - "src/control/continuation.rs"
+
+    related:
+      requirement_id: "effect"
+      plan_id: null
+
+    github_issue:
+      number: 173
+      url: "https://github.com/lihs-ie/lambars/issues/173"
+      created: true

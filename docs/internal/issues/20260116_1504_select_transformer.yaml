@@ -1,0 +1,79 @@
+# Issue: SelectT（Selection Transformer）
+# 非決定的選択を扱うモナド変換子
+
+deferred_features:
+  - id: select_transformer
+    name: "SelectT（Selection Transformer）"
+    discovered_date: "2026-01-16"
+    priority: medium
+    category: enhancement
+    labels:
+      - "effect"
+      - "enhancement"
+      - "priority: medium"
+
+    problem:
+      summary: "バックトラッキングや非決定的選択の抽象化がない"
+      details: |
+        SelectT は非決定的選択（選択関数）を扱う変換子。
+        バックトラッキング、ゲーム木探索、AI アルゴリズムなどで有用。
+        select 操作で「最適な」選択を表現できる。
+
+        - 何が問題なのか: 非決定的選択を抽象化する手段がない
+        - なぜ発生するのか: SelectT モナド変換子が未実装
+        - どのような影響があるか: 探索アルゴリズムの表現が冗長になる
+
+      rust_limitation: |
+        ```rust
+        // SelectT の基本構造
+        pub struct SelectT<R, M, A> {
+            run_select: Box<dyn FnOnce(Box<dyn Fn(A) -> R>) -> M<A>>,
+        }
+
+        // select: 評価関数を使って最適な値を選択
+        fn select<R, M, A>(
+            sel: impl Fn(Box<dyn Fn(A) -> R>) -> A
+        ) -> SelectT<R, M, A>;
+        ```
+
+    solution:
+      approach: "ContT の実装後、SelectT を ContT をベースに構築"
+      options:
+        - name: "ContT ベースの SelectT"
+          description: |
+            ContT を内部で使用し SelectT を実装。
+            MonadTrans トレイトを実装。
+          pros:
+            - "ContT の再利用"
+            - "理論的な基盤がしっかり"
+          cons:
+            - "ContT への依存"
+            - "複雑な型シグネチャ"
+
+        - name: "独立した SelectT 実装"
+          description: |
+            ContT に依存せず独自に実装。
+          pros:
+            - "依存関係がシンプル"
+          cons:
+            - "コードの重複"
+            - "理論的整合性が低い"
+
+      recommended: "ContT ベースの SelectT"
+      estimated_complexity: high
+
+    references:
+      - "Haskell Control.Monad.Trans.Select"
+      - "Selection Functions, Bar Recursion and Backward Induction"
+      - "docs/internal/requirements/20250101_0500_effect.yaml"
+
+    related:
+      requirement_id: "effect"
+      plan_id: null
+    dependencies:
+      - "cont_transformer"  # FW-005: ContT の実装が前提
+
+    github_issue:
+      number: 174
+      url: "https://github.com/lihs-ie/lambars/issues/174"
+      created: true
