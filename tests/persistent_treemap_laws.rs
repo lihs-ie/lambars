@@ -380,10 +380,10 @@ proptest! {
 }
 
 // =============================================================================
-// Red-Black Tree Invariants
+// B-Tree Invariants
 // =============================================================================
 
-// Note: These tests verify the internal red-black tree properties.
+// Note: These tests verify the internal B-Tree properties.
 // In a production implementation, we would expose a method to validate invariants.
 // For now, we verify observable behavior that depends on balanced tree properties.
 
