@@ -1,21 +1,7 @@
 #![cfg(feature = "control")]
-//! Unit tests for Trampoline<A> type.
-//!
-//! Tests cover:
-//! - Basic trampoline operations (done, suspend)
-//! - Recursive computations (factorial, fibonacci)
-//! - Mutual recursion (is_even, is_odd)
-//! - Stack safety with deep recursion
-//! - map and flat_map operations
-//! - resume for step-by-step evaluation
-//! - Tree traversal patterns
 
 use lambars::control::{Either, Trampoline};
 use rstest::rstest;
-
-// =============================================================================
-// Basic Construction
-// =============================================================================
 
 #[rstest]
 fn trampoline_done_returns_value() {
@@ -49,10 +35,6 @@ fn trampoline_nested_suspend() {
     assert_eq!(trampoline.run(), 42);
 }
 
-// =============================================================================
-// Factorial (Simple Recursion)
-// =============================================================================
-
 fn factorial(n: u64) -> Trampoline<u64> {
     factorial_helper(n, 1)
 }
@@ -78,10 +60,6 @@ fn trampoline_factorial(#[case] input: u64, #[case] expected: u64) {
     assert_eq!(factorial(input).run(), expected);
 }
 
-// =============================================================================
-// Fibonacci (Tail Recursive Version)
-// =============================================================================
-
 fn fibonacci(n: u64) -> Trampoline<u64> {
     fibonacci_helper(n, 0, 1)
 }
@@ -106,10 +84,6 @@ fn fibonacci_helper(n: u64, a: u64, b: u64) -> Trampoline<u64> {
 fn trampoline_fibonacci(#[case] input: u64, #[case] expected: u64) {
     assert_eq!(fibonacci(input).run(), expected);
 }
-
-// =============================================================================
-// Mutual Recursion (is_even, is_odd)
-// =============================================================================
 
 fn is_even(n: u64) -> Trampoline<bool> {
     if n == 0 {
@@ -148,10 +122,6 @@ fn trampoline_is_even(#[case] input: u64, #[case] expected: bool) {
 fn trampoline_is_odd(#[case] input: u64, #[case] expected: bool) {
     assert_eq!(is_odd(input).run(), expected);
 }
-
-// =============================================================================
-// Stack Safety
-// =============================================================================
 
 #[rstest]
 fn trampoline_stack_safety_100000() {
@@ -192,10 +162,6 @@ fn trampoline_stack_safety_with_flat_map() {
     assert_eq!(result, 1_000);
 }
 
-// =============================================================================
-// map
-// =============================================================================
-
 #[rstest]
 fn trampoline_map_on_done() {
     let trampoline = Trampoline::done(21);
@@ -224,10 +190,6 @@ fn trampoline_map_type_change() {
     let stringified = trampoline.map(|x| x.to_string());
     assert_eq!(stringified.run(), "42");
 }
-
-// =============================================================================
-// flat_map / and_then
-// =============================================================================
 
 #[rstest]
 fn trampoline_flat_map_on_done() {
@@ -270,10 +232,6 @@ fn trampoline_and_then_is_alias_for_flat_map() {
     assert_eq!(result.run(), 42);
 }
 
-// =============================================================================
-// then
-// =============================================================================
-
 #[rstest]
 fn trampoline_then_discards_first_result() {
     let first = Trampoline::done("ignored");
@@ -289,10 +247,6 @@ fn trampoline_then_with_suspend() {
     let result = first.then(second);
     assert_eq!(result.run(), 42);
 }
-
-// =============================================================================
-// resume
-// =============================================================================
 
 #[rstest]
 fn trampoline_resume_done_returns_right() {
@@ -337,10 +291,6 @@ fn trampoline_resume_step_by_step() {
         Either::Left(_) => panic!("Expected Right on third resume"),
     }
 }
-
-// =============================================================================
-// Tree Traversal
-// =============================================================================
 
 #[derive(Debug, Clone)]
 enum Tree<T> {
@@ -410,10 +360,6 @@ fn trampoline_tree_count() {
     assert_eq!(tree_count(tree).run(), 5);
 }
 
-// =============================================================================
-// Debug
-// =============================================================================
-
 #[rstest]
 fn trampoline_debug_done() {
     let trampoline = Trampoline::done(42);
@@ -428,10 +374,6 @@ fn trampoline_debug_suspend() {
     let debug_str = format!("{:?}", trampoline);
     assert!(debug_str.contains("Suspend"));
 }
-
-// =============================================================================
-// Complex Scenarios
-// =============================================================================
 
 #[rstest]
 fn trampoline_complex_computation() {

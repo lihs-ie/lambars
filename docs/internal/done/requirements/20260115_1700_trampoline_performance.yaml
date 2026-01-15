@@ -1,0 +1,945 @@
+# Trampoline パフォーマンス改善 要件定義
+#
+# 概要:
+#   Trampoline の深い再帰におけるパフォーマンスを改善する。
+#   外部クレートを追加せず、既存の公開 API を維持しながら、
+#   内部実装の最適化により 50% 以上の改善を目指す。
+#
+# 設計方針:
+#   1. 参照透過性の維持 - 同じ入力に対して常に同じ出力
+#   2. 純粋関数としての特性 - 副作用なし
+#   3. 不変性の維持 - Trampoline は変更不可
+#   4. Monad 則の維持 - 左単位則、右単位則、結合則
+#   5. 既存 API との完全互換性
+#   6. unsafe コード禁止（unsafe_code = "forbid"）
+#   7. 外部クレート（bumpalo等）を追加しない
+#
+# 参照:
+#   - Issue #164: Trampoline 深い再帰のパフォーマンス改善
+#   - docs/internal/issues/20260115_1405_trampoline_performance.yaml
+#   - 現在の実装: src/control/trampoline.rs
+#   - ベンチマーク: benches/control_bench.rs
+#   - Monad 則テスト: tests/trampoline_laws.rs
+
+version: "1.0.0"
+name: "trampoline_performance_improvement"
+description: |
+  Trampoline が深い再帰で直接実装の 1,935 倍遅い問題を解決する。
+
+  現在の実装では以下のオーバーヘッドが発生している:
+  - 毎ステップでの Box<dyn FnOnce()> ヒープアロケーション（40-50%）
+  - FlatMapInternal での vtable lookup（20-30%）
+  - パターンマッチング（15-20%）
+  - キャッシュミス（10-15%）
+
+  外部依存を追加せず、純粋な Rust の最適化テクニックで改善を図る。
+
+# =============================================================================
+# 背景・動機
+# =============================================================================
+background:
+  problem: |
+    現在の Trampoline 実装には深刻なパフォーマンス問題がある。
+
+    **測定結果:**
+    - 100回再帰: 13.7us（直列: 1us、13.7倍遅い）
+    - 1,000回再帰: 6.2秒
+    - 100,000回再帰: 直列実装の 1,935倍遅い
+
+    **根本原因の分析:**
+    1. **ヒープアロケーション（40-50%）**:
+       ```rust
+       // 各ステップで Box が生成される
+       Suspend(Box<dyn FnOnce() -> Self + 'static>)
+       ```
+
+    2. **動的ディスパッチ（20-30%）**:
+       ```rust
+       // TrampolineContinuation トレイトの vtable lookup
+       trait TrampolineContinuation<A> {
+           fn step(self: Box<Self>) -> Trampoline<A>;
+       }
+       ```
+
+    3. **パターンマッチング（15-20%）**:
+       ```rust
+       // 毎ステップで 3 パターンをチェック
+       match current {
+           Self::Done(value) => return value,
+           Self::Suspend(thunk) => { ... }
+           Self::FlatMapInternal(continuation) => { ... }
+       }
+       ```
+
+    4. **キャッシュミス（10-15%）**:
+       - 動的アロケーションによるメモリの非局所性
+       - 継続のチェーンが分散している
+
+  motivation: |
+    Trampoline は関数型プログラミングにおける基本的な制御構造である。
+    Rust では末尾呼び出し最適化（TCO）が保証されないため、
+    深い再帰処理にはトランポリンが必要不可欠。
+
+    しかし、現在の実装ではオーバーヘッドが大きすぎて実用に耐えない。
+    スタック安全性を維持しながら、許容可能なパフォーマンスを達成する必要がある。
+
+    **目標:**
+    - 深い再帰でのオーバーヘッドを 50% 以上削減
+    - 直接実装との比率を 1,935 倍 → 100 倍以下に改善
+
+  prior_art:
+    - name: "Scala cats-effect IO"
+      description: |
+        トランポリンベースの IO モナド。
+        継続スタックを明示的に管理し、ヒープアロケーションを最小化。
+        参考になるが、Rust の所有権モデルとは異なる最適化が必要。
+
+    - name: "Haskell Free Monad"
+      description: |
+        Free モナドのトランポリン実装。
+        遅延評価と組み合わせて効率的な実行を実現。
+        Rust では厳格評価のため、異なるアプローチが必要。
+
+    - name: "Rust itertools"
+      description: |
+        インライン化と特殊化を駆使した効率的なイテレータ。
+        #[inline(always)] の戦略的配置が参考になる。
+
+# =============================================================================
+# 制約条件
+# =============================================================================
+constraints:
+  - id: CON-001
+    name: "外部クレート禁止"
+    description: |
+      bumpalo 等のアリーナアロケータを含む外部クレートを追加しない。
+      標準ライブラリと既存の依存関係のみを使用する。
+    rationale: |
+      依存関係の最小化はライブラリの採用障壁を下げる。
+      外部アロケータへの依存は API の複雑化を招く。
+
+  - id: CON-002
+    name: "公開 API 維持"
+    description: |
+      既存の公開 API を変更しない。新しいメソッドの追加は可。
+      - done(value)
+      - suspend(thunk)
+      - pure(value)
+      - run()
+      - resume()
+      - map(function)
+      - flat_map(function)
+      - and_then(function)
+      - then(next)
+    rationale: |
+      後方互換性の維持。既存のユーザーコードを壊さない。
+
+  - id: CON-003
+    name: "unsafe コード禁止"
+    description: |
+      プロジェクト全体で unsafe_code = "forbid" が設定されている。
+      unsafe ブロックの使用は禁止。
+    rationale: |
+      メモリ安全性の保証。Rust の安全性保証を維持する。
+
+  - id: CON-004
+    name: "Monad 則維持"
+    description: |
+      Trampoline は以下の Monad 則を満たし続ける必要がある:
+      - 左単位則: Trampoline::done(a).flat_map(f).run() == f(a).run()
+      - 右単位則: m.flat_map(Trampoline::done).run() == m.run()
+      - 結合則: m.flat_map(f).flat_map(g).run() == m.flat_map(|x| f(x).flat_map(g)).run()
+    rationale: |
+      関数型プログラミングの基本的な代数的性質を維持する。
+      tests/trampoline_laws.rs のプロパティテストが全てパスすること。
+
+  - id: CON-005
+    name: "評価タイミングの設計方針"
+    description: |
+      Trampoline は「最終結果の同一性」を保証するが、
+      「遅延評価」は保証しない設計とする。
+
+      **設計方針:**
+      - Rust は厳格評価（strict evaluation）が基本
+      - Trampoline の主目的はスタックオーバーフロー防止
+      - Monad 則は「run() 後の最終結果」について述べる
+      - 中間の評価タイミングは最適化の対象となりうる
+
+      **影響:**
+      - Phase 2, 5 の即時評価最適化は許容される
+      - 純粋でない function を渡すユーザーは影響を受ける可能性がある
+      - ドキュメントで純粋関数の使用を推奨する
+    rationale: |
+      Haskell の Free Monad は遅延評価を前提としているが、
+      Rust の Trampoline は厳格評価環境でのスタック安全性が主目的。
+      パフォーマンス最適化のため、評価タイミングの変更を許容する。
+
+# =============================================================================
+# 要件一覧
+# =============================================================================
+requirements:
+  # ---------------------------------------------------------------------------
+  # Phase 1: インライン化の強化
+  # ---------------------------------------------------------------------------
+  - id: REQ-TRAMP-001
+    name: "インライン化の強化"
+    priority: high
+    phase: 1
+    expected_improvement: "5-15%"
+    description: |
+      ホットパスに #[inline(always)] を戦略的に配置し、
+      コンパイラによる最適化を促進する。
+
+    implementation: |
+      ```rust
+      impl<A: 'static> Trampoline<A> {
+          /// run() メソッドのインライン化
+          #[inline(always)]
+          pub fn run(self) -> A {
+              let mut current = self;
+              loop {
+                  match current {
+                      Self::Done(value) => return value,
+                      Self::Suspend(thunk) => {
+                          current = thunk();
+                      }
+                      Self::FlatMapInternal(continuation) => {
+                          current = continuation.step();
+                      }
+                  }
+              }
+          }
+      }
+
+      impl<A> ContinuationBox<A> {
+          #[inline(always)]
+          fn step(self) -> Trampoline<A> {
+              self.0.step()
+          }
+      }
+      ```
+
+    functional_programming_compliance:
+      referential_transparency: |
+        - インライン化は実行時の動作を変えない
+        - 同じ入力に対して同じ出力を返す
+      purity: |
+        - 純粋関数の性質を維持
+        - 副作用は追加されない
+      immutability: |
+        - Trampoline の不変性は維持される
+
+    monad_laws_verification: |
+      - 左単位則: コード生成が変わるだけで、評価結果は同一 -> 維持
+      - 右単位則: 同上 -> 維持
+      - 結合則: 同上 -> 維持
+
+    tests:
+      - name: "Monad 則テスト"
+        description: "tests/trampoline_laws.rs の全テストがパスすること"
+      - name: "パフォーマンス回帰テスト"
+        description: "ベンチマークで改善または同等であること"
+
+  # ---------------------------------------------------------------------------
+  # Phase 2: flat_map の Done 即時評価
+  # ---------------------------------------------------------------------------
+  #
+  # 【Codex レビューによる注意事項】
+  # この変更は評価タイミングを変更する。function が純粋でない場合、
+  # 挙動の違いが観測される可能性がある。
+  # ただし、Trampoline は純粋関数を前提としているため、
+  # 純粋でない function の使用は非推奨であることをドキュメントで明記する。
+  #
+  - id: REQ-TRAMP-002
+    name: "flat_map の Done 即時評価"
+    priority: high
+    phase: 2
+    expected_improvement: "10-20%"
+    description: |
+      flat_map の引数が Done 状態の場合、FlatMapInternal を作成せずに
+      即座に関数を適用する。
+
+      **現在の動作:**
+      ```rust
+      Trampoline::done(42).flat_map(f)
+      // -> FlatMapInternal(ContinuationBox(...))
+      // -> run() で f(42) が評価される
+      ```
+
+      **改善後:**
+      ```rust
+      Trampoline::done(42).flat_map(f)
+      // -> f(42) が即座に返される
+      ```
+
+      **重要な注意事項:**
+      この変更により、function の評価タイミングが変わる。
+      function が純粋関数であれば結果は同一だが、
+      副作用を持つ function を使用している場合は挙動が変わる可能性がある。
+
+      Trampoline は関数型プログラミングの制御構造であり、
+      渡される function は純粋関数であることを前提としている。
+      この前提はドキュメントで明記する。
+
+    implementation: |
+      ```rust
+      impl<A: 'static> Trampoline<A> {
+          #[inline]
+          pub fn flat_map<B, F>(self, function: F) -> Trampoline<B>
+          where
+              F: FnOnce(A) -> Trampoline<B> + 'static,
+              B: 'static,
+          {
+              // Done 状態なら即座に function を適用
+              match self {
+                  Self::Done(value) => function(value),
+                  _ => Trampoline::FlatMapInternal(ContinuationBox::new(
+                      FlatMapContinuation {
+                          trampoline: self,
+                          function,
+                      }
+                  )),
+              }
+          }
+      }
+      ```
+
+    functional_programming_compliance:
+      referential_transparency: |
+        - 同じ (trampoline, function) から同じ結果を返す
+        - 評価タイミングは異なるが、最終結果は同一
+      purity: |
+        - 純粋関数の性質を維持
+        - function が純粋である限り、全体も純粋
+      immutability: |
+        - self を消費して新しい Trampoline を返す
+        - 元のデータは変更されない
+
+    monad_laws_verification: |
+      **左単位則の検証:**
+      - 現在: done(a).flat_map(f) -> FlatMapInternal -> run() で f(a)
+      - 改善後: done(a).flat_map(f) -> f(a) を直接返す
+      - f(a).run() の結果は同一 -> **維持**
+
+      **右単位則の検証:**
+      - m.flat_map(done) について:
+        - m が Done(v) なら: done(v) を返す（同一）
+        - m が Suspend/FlatMap なら: FlatMapInternal（現状と同じ）
+      - 最終結果は同一 -> **維持**
+
+      **結合則の検証:**
+      - m.flat_map(f).flat_map(g) と m.flat_map(|x| f(x).flat_map(g))
+      - 中間状態の構造は異なるが、run() の結果は同一 -> **維持**
+
+      **重要:**
+      Monad 則は「run() 後の最終結果」について述べている。
+      中間表現の構造が異なっても、参照透過性が保たれる限り則は維持される。
+
+    tests:
+      - name: "Done 即時評価テスト"
+        description: |
+          ```rust
+          #[rstest]
+          fn test_flat_map_done_eager_evaluation() {
+              let trampoline = Trampoline::done(42);
+              let result = trampoline.flat_map(|x| Trampoline::done(x * 2));
+              // Done 状態なら FlatMapInternal ではなく Done が返る
+              assert!(matches!(result, Trampoline::Done(84)));
+          }
+          ```
+      - name: "Monad 則テスト"
+        description: "tests/trampoline_laws.rs の全テストがパスすること"
+      - name: "パフォーマンステスト"
+        description: "flat_map チェーンでの改善を確認"
+
+  # ---------------------------------------------------------------------------
+  # Phase 3: FlatMap チェーンの最適化
+  # ---------------------------------------------------------------------------
+  - id: REQ-TRAMP-003
+    name: "FlatMap チェーンの最適化"
+    priority: high
+    phase: 3
+    expected_improvement: "15-25%"
+    description: |
+      連続する FlatMap をループアンローリングで一度に処理し、
+      パターンマッチングのオーバーヘッドを削減する。
+
+    implementation: |
+      ```rust
+      impl<A: 'static> Trampoline<A> {
+          pub fn run(self) -> A {
+              let mut current = self;
+
+              loop {
+                  // ループアンローリング: 複数ステップを一度に処理
+                  current = match current {
+                      Self::Done(value) => return value,
+
+                      Self::Suspend(thunk) => thunk(),
+
+                      Self::FlatMapInternal(continuation) => {
+                          // 内部で FlatMap チェーンを展開
+                          let mut inner = continuation.step();
+
+                          // 連続する FlatMapInternal を処理
+                          while let Self::FlatMapInternal(next_continuation) = inner {
+                              inner = next_continuation.step();
+                          }
+                          inner
+                      }
+                  };
+              }
+          }
+      }
+      ```
+
+    functional_programming_compliance:
+      referential_transparency: |
+        - ループ構造の変更のみ
+        - 評価結果は同一
+      purity: |
+        - 純粋関数の性質を維持
+      immutability: |
+        - 内部の可変変数 (inner) はローカルスコープに限定
+        - 外部からは不変に見える
+
+    monad_laws_verification: |
+      - 評価順序は同一（FlatMap を順次処理）
+      - 最終結果も同一
+      - 全ての則が維持される
+
+    tests:
+      - name: "深い FlatMap チェーンテスト"
+        description: "100+ の flat_map チェーンが正しく動作すること"
+      - name: "Monad 則テスト"
+        description: "tests/trampoline_laws.rs の全テストがパスすること"
+
+  # ---------------------------------------------------------------------------
+  # Phase 4: run() ループの微最適化
+  # ---------------------------------------------------------------------------
+  - id: REQ-TRAMP-004
+    name: "run() ループの微最適化"
+    priority: medium
+    phase: 4
+    expected_improvement: "3-5%"
+    description: |
+      Done 状態の早期チェックでブランチ予測を改善し、
+      ループオーバーヘッドを削減する。
+
+    implementation: |
+      ```rust
+      impl<A: 'static> Trampoline<A> {
+          #[inline(always)]
+          pub fn run(self) -> A {
+              // 早期チェック: Done 状態なら即座に返す
+              if let Self::Done(value) = self {
+                  return value;
+              }
+
+              let mut current = self;
+              loop {
+                  current = match current {
+                      Self::Done(value) => return value,
+                      Self::Suspend(thunk) => thunk(),
+                      Self::FlatMapInternal(continuation) => continuation.step(),
+                  };
+              }
+          }
+      }
+      ```
+
+    functional_programming_compliance:
+      referential_transparency: |
+        - 制御フローの最適化のみ
+        - 評価結果は同一
+      purity: |
+        - 純粋関数の性質を維持
+      immutability: |
+        - 変更なし
+
+    monad_laws_verification: |
+      - 評価結果に影響なし
+      - 全ての則が維持される
+
+    tests:
+      - name: "Done 早期リターンテスト"
+        description: "Trampoline::done(v).run() が効率的に動作すること"
+
+  # ---------------------------------------------------------------------------
+  # Phase 5: map の Done 即時評価最適化
+  # ---------------------------------------------------------------------------
+  #
+  # 【Codex レビューによる設計変更】
+  # 当初の SuspendPure バリアント追加案は、public enum への変更が
+  # 下流コードの網羅的 match を破壊するため、API 互換性要件と衝突。
+  # 代替として、既存バリアント内での最適化のみを行う方針に変更。
+  #
+  - id: REQ-TRAMP-005
+    name: "map の Done 即時評価最適化"
+    priority: medium
+    phase: 5
+    expected_improvement: "5-10%"
+    description: |
+      map メソッドで Done 状態の場合、flat_map を経由せずに
+      直接 Done を返すことでオーバーヘッドを削減する。
+
+      **変更点:**
+      - enum バリアントの追加は行わない（API 互換性維持）
+      - map の実装を最適化するのみ
+
+      **Phase 2 との関係:**
+      Phase 2 で flat_map の Done 即時評価が実装されれば、
+      map も自動的に恩恵を受ける。Phase 5 は追加の最適化として、
+      map で flat_map を経由しない直接パスを追加する。
+
+    implementation: |
+      ```rust
+      impl<A: 'static> Trampoline<A> {
+          /// map の最適化版
+          /// Done 状態なら flat_map を経由せずに直接変換
+          #[inline]
+          pub fn map<B, F>(self, function: F) -> Trampoline<B>
+          where
+              F: FnOnce(A) -> B + 'static,
+              B: 'static,
+          {
+              match self {
+                  // Done なら直接 Done を返す（flat_map 経由なし）
+                  Self::Done(value) => Trampoline::Done(function(value)),
+                  // その他は従来通り flat_map を使用
+                  _ => self.flat_map(move |a| Trampoline::done(function(a))),
+              }
+          }
+      }
+      ```
+
+    functional_programming_compliance:
+      referential_transparency: |
+        - 同じ入力に対して同じ出力を返す
+        - 評価タイミングは異なるが、最終結果は同一
+      purity: |
+        - function が純粋である限り、全体も純粋
+        - 副作用は追加されない
+      immutability: |
+        - 変更なし
+
+    monad_laws_verification: |
+      **Functor 則の検証:**
+      - 恒等則: trampoline.map(|x| x).run() == trampoline.run()
+        - Done(v).map(id) -> Done(v) -> v -> **維持**
+      - 合成則: trampoline.map(f).map(g).run() == trampoline.map(|x| g(f(x))).run()
+        - Done(v).map(f).map(g) -> Done(f(v)).map(g) -> Done(g(f(v)))
+        - Done(v).map(|x| g(f(x))) -> Done(g(f(v)))
+        - 最終結果は同一 -> **維持**
+
+    tests:
+      - name: "map Done 即時評価テスト"
+        description: |
+          ```rust
+          #[rstest]
+          fn test_map_done_eager_evaluation() {
+              let trampoline = Trampoline::done(42);
+              let result = trampoline.map(|x| x * 2);
+              // Done 状態なら Done が直接返る
+              assert!(matches!(result, Trampoline::Done(84)));
+          }
+          ```
+      - name: "Functor 則テスト"
+        description: "map 操作が Functor 則を満たすこと"
+
+  # ---------------------------------------------------------------------------
+  # Phase 6: バッチ処理の導入
+  # ---------------------------------------------------------------------------
+  #
+  # 【Codex レビューによる設計修正】
+  # batch_size == 0 で無限ループになる問題を修正。
+  # バリデーションを追加し、最小値を 1 とする。
+  #
+  - id: REQ-TRAMP-006
+    name: "バッチ処理の導入"
+    priority: medium
+    phase: 6
+    expected_improvement: "10-15%"
+    description: |
+      複数ステップを一度に処理し、ループオーバーヘッドを削減する。
+      run_batched() として新しいメソッドを追加（既存 API は維持）。
+
+      **前提条件:**
+      - batch_size >= 1（0 の場合はパニックまたはデフォルト値を使用）
+
+    implementation: |
+      ```rust
+      impl<A: 'static> Trampoline<A> {
+          /// デフォルトのバッチサイズ
+          const DEFAULT_BATCH_SIZE: usize = 16;
+
+          /// バッチ処理で実行（デフォルトのバッチサイズ）
+          #[inline]
+          pub fn run_batched(self) -> A {
+              self.run_with_batch_size(Self::DEFAULT_BATCH_SIZE)
+          }
+
+          /// 指定したバッチサイズで実行
+          ///
+          /// # Panics
+          /// batch_size が 0 の場合はパニックする
+          pub fn run_with_batch_size(self, batch_size: usize) -> A {
+              assert!(batch_size > 0, "batch_size must be greater than 0");
+
+              let mut current = self;
+
+              loop {
+                  // バッチ処理: batch_size ステップを一度に処理
+                  for _ in 0..batch_size {
+                      match current {
+                          Self::Done(value) => return value,
+                          Self::Suspend(thunk) => current = thunk(),
+                          Self::FlatMapInternal(continuation) => {
+                              current = continuation.step();
+                          }
+                      }
+                  }
+              }
+          }
+      }
+      ```
+
+    functional_programming_compliance:
+      referential_transparency: |
+        - run_batched() == run()（同じ結果を返す）
+        - 最終結果は同一
+      purity: |
+        - 純粋関数の性質を維持
+        - assert はプログラミングエラーの検出用（例外ではない）
+      immutability: |
+        - 変更なし
+
+    monad_laws_verification: |
+      - run_batched は run と同じ結果を返す
+      - 全ての則が維持される
+
+    tests:
+      - name: "バッチ処理結果テスト"
+        description: "run_batched() と run() が同じ結果を返すこと"
+      - name: "異なるバッチサイズテスト"
+        description: "バッチサイズに関わらず正しい結果を返すこと"
+      - name: "batch_size == 0 パニックテスト"
+        description: |
+          ```rust
+          #[rstest]
+          #[should_panic(expected = "batch_size must be greater than 0")]
+          fn test_batch_size_zero_panics() {
+              Trampoline::done(42).run_with_batch_size(0);
+          }
+          ```
+
+  # ---------------------------------------------------------------------------
+  # Phase 7: 継続スタックの明示管理
+  # ---------------------------------------------------------------------------
+  - id: REQ-TRAMP-007
+    name: "継続スタックの明示管理"
+    priority: medium
+    phase: 7
+    expected_improvement: "15-20%"
+    description: |
+      FlatMap チェーンを Vec ベースのスタックで管理し、
+      動的ディスパッチのオーバーヘッドを削減する。
+
+      **注意:** この実装は複雑であり、慎重な設計が必要。
+      Any を使用するため、型安全性への影響を最小限に抑える必要がある。
+
+    implementation: |
+      ```rust
+      use std::any::Any;
+
+      /// 継続を保持するための型消去されたボックス
+      struct ErasedContinuation(Box<dyn FnOnce(Box<dyn Any>) -> Trampoline<Box<dyn Any>>>);
+
+      impl<A: 'static> Trampoline<A> {
+          /// 継続スタックを使用した最適化された run
+          pub fn run_optimized(self) -> A {
+              let mut continuations: Vec<ErasedContinuation> = Vec::new();
+              let mut current: Trampoline<Box<dyn Any>> = self.map_any();
+
+              loop {
+                  match current {
+                      Trampoline::Done(value) => {
+                          if let Some(continuation) = continuations.pop() {
+                              current = (continuation.0)(value);
+                          } else {
+                              // 最終結果をダウンキャスト
+                              return *value.downcast::<A>().expect("type mismatch");
+                          }
+                      }
+                      Trampoline::Suspend(thunk) => {
+                          current = thunk();
+                      }
+                      Trampoline::FlatMapInternal(continuation) => {
+                          // 継続をスタックに積む
+                          // ... 実装の詳細は設計フェーズで決定
+                      }
+                  }
+              }
+          }
+      }
+      ```
+
+    implementation_considerations: |
+      **型安全性への影響:**
+      - Any の使用により、コンパイル時の型チェックが弱まる
+      - downcast の失敗は panic を引き起こす
+      - 内部実装に限定し、公開 API では型安全性を維持
+
+      **複雑性のトレードオフ:**
+      - 実装が複雑になり、保守性が低下する可能性
+      - バグの発見が困難になる可能性
+      - 十分なテストカバレッジが必要
+
+      **代替案:**
+      - Phase 1-6 の改善で十分な効果が得られる場合は、
+        Phase 7 は実装しない選択肢も検討
+
+    functional_programming_compliance:
+      referential_transparency: |
+        - 内部実装の変更のみ
+        - 評価結果は同一
+      purity: |
+        - 純粋関数の性質を維持
+        - 継続スタックはローカル状態
+      immutability: |
+        - Vec は内部状態として使用
+        - 外部からは不変に見える
+
+    monad_laws_verification: |
+      - 評価結果に影響なし
+      - 全ての則が維持される
+
+    tests:
+      - name: "継続スタック動作テスト"
+        description: "run_optimized() が正しい結果を返すこと"
+      - name: "深い FlatMap チェーンテスト"
+        description: "1000+ の flat_map チェーンが正しく動作すること"
+      - name: "型安全性テスト"
+        description: "downcast が正しく動作すること"
+      - name: "Monad 則テスト"
+        description: "tests/trampoline_laws.rs の全テストがパスすること"
+
+# =============================================================================
+# 非機能要件
+# =============================================================================
+non_functional_requirements:
+  # ---------------------------------------------------------------------------
+  # パフォーマンス要件
+  # ---------------------------------------------------------------------------
+  - id: NFR-PERF-001
+    name: "パフォーマンス改善目標"
+    priority: critical
+    description: |
+      深い再帰でのパフォーマンスを大幅に改善する。
+
+    metrics:
+      - operation: "100回再帰"
+        current: "13.7us"
+        target: "7us 以下"
+        improvement: "50% 以上"
+
+      - operation: "10,000回再帰（deep）"
+        current: "未測定（推定 1.37ms）"
+        target: "0.7ms 以下"
+        improvement: "50% 以上"
+
+      - operation: "100,000回再帰（very_deep）"
+        current: "直列実装の 1,935倍"
+        target: "直列実装の 100倍以下"
+        improvement: "95% 以上"
+
+    benchmark_requirements: |
+      - benches/control_bench.rs のベンチマークで測定
+      - 各 Phase 完了後にベンチマークを実行
+      - 改善率を記録し、目標達成を確認
+
+  # ---------------------------------------------------------------------------
+  # API 互換性要件
+  # ---------------------------------------------------------------------------
+  - id: NFR-COMPAT-001
+    name: "API 互換性"
+    priority: critical
+    description: |
+      既存の全ての公開 API を維持する。
+
+    maintained_apis:
+      constructors:
+        - "done(value)"
+        - "suspend(thunk)"
+        - "pure(value)"
+
+      methods:
+        - "run()"
+        - "resume()"
+        - "map(function)"
+        - "flat_map(function)"
+        - "and_then(function)"
+        - "then(next)"
+
+      traits:
+        - "Debug"
+        - "Display"
+
+    new_apis:
+      - name: "run_batched()"
+        description: "バッチ処理で実行（オプション）"
+      - name: "run_with_batch_size(batch_size)"
+        description: "指定バッチサイズで実行（オプション）"
+      - name: "run_optimized()"
+        description: "継続スタック最適化版（Phase 7、オプション）"
+
+  # ---------------------------------------------------------------------------
+  # テスト要件
+  # ---------------------------------------------------------------------------
+  - id: NFR-TEST-001
+    name: "テスト要件"
+    priority: critical
+    description: |
+      既存の全てのテストをパスし、追加のテストを実装する。
+
+    requirements:
+      - description: "既存の Monad 則テストが全てパスすること"
+        verification: "cargo test --test trampoline_laws"
+
+      - description: "既存の単体テストが全てパスすること"
+        verification: "cargo test trampoline"
+
+      - description: "新規テストによるカバレッジ 100%"
+        verification: "cargo llvm-cov"
+
+      - description: "パフォーマンステスト"
+        verification: "cargo bench --bench control_bench"
+
+# =============================================================================
+# 実装計画
+# =============================================================================
+implementation_plan:
+  phases:
+    - phase: 1
+      name: "インライン化の強化"
+      duration: "0.5 日"
+      tasks:
+        - "#[inline(always)] の追加"
+        - "ベンチマーク測定"
+        - "テスト実行"
+
+    - phase: 2
+      name: "flat_map の Done 即時評価"
+      duration: "0.5 日"
+      tasks:
+        - "flat_map の条件分岐追加"
+        - "Monad 則テスト"
+        - "ベンチマーク測定"
+
+    - phase: 3
+      name: "FlatMap チェーンの最適化"
+      duration: "1 日"
+      tasks:
+        - "run() ループのアンローリング"
+        - "テスト追加"
+        - "ベンチマーク測定"
+
+    - phase: 4
+      name: "run() ループの微最適化"
+      duration: "0.5 日"
+      tasks:
+        - "早期チェックの追加"
+        - "テスト実行"
+        - "ベンチマーク測定"
+
+    - phase: 5
+      name: "map の Done 即時評価最適化"
+      duration: "0.5 日"
+      tasks:
+        - "map の条件分岐追加"
+        - "Functor 則テスト"
+        - "ベンチマーク測定"
+
+    - phase: 6
+      name: "バッチ処理の導入"
+      duration: "0.5 日"
+      tasks:
+        - "run_batched() 実装"
+        - "テスト追加"
+        - "ベンチマーク測定"
+
+    - phase: 7
+      name: "継続スタックの明示管理"
+      duration: "2 日"
+      tasks:
+        - "ErasedContinuation 設計"
+        - "run_optimized() 実装"
+        - "型安全性テスト"
+        - "Monad 則テスト"
+        - "ベンチマーク測定"
+      optional: true
+      note: |
+        Phase 1-6 で十分な改善が得られた場合は、
+        複雑性とのトレードオフを考慮してスキップ可能。
+
+  total_duration: "4-6 日"
+
+# =============================================================================
+# リスクと対策
+# =============================================================================
+risks:
+  - risk: "Monad 則の違反"
+    probability: "低"
+    impact: "高"
+    mitigation: |
+      - 各 Phase 完了後に tests/trampoline_laws.rs を実行
+      - プロパティベーステストで網羅的に検証
+      - 数学的証明に基づく設計
+
+  - risk: "パフォーマンス目標未達"
+    probability: "中"
+    impact: "中"
+    mitigation: |
+      - 各 Phase でベンチマークを測定
+      - 効果が薄い Phase はスキップ
+      - 外部クレート導入を再検討（ユーザーへの影響を評価）
+
+  - risk: "Phase 7 の型安全性問題"
+    probability: "中"
+    impact: "高"
+    mitigation: |
+      - Any の使用を最小限に
+      - 十分なテストカバレッジ
+      - Phase 1-6 で目標達成なら Phase 7 はスキップ
+
+  - risk: "コードの複雑化"
+    probability: "高"
+    impact: "中"
+    mitigation: |
+      - 各 Phase を独立したコミットに
+      - 十分なドキュメント
+      - 複雑な最適化は optional として実装
+
+# =============================================================================
+# 成功基準
+# =============================================================================
+success_criteria:
+  - id: SC-001
+    name: "パフォーマンス改善"
+    description: |
+      100,000回再帰で直列実装の 100倍以下のオーバーヘッドを達成
+
+  - id: SC-002
+    name: "Monad 則維持"
+    description: |
+      tests/trampoline_laws.rs の全テストがパス
+
+  - id: SC-003
+    name: "API 互換性"
+    description: |
+      既存の公開 API に変更なし
+
+  - id: SC-004
+    name: "テストカバレッジ"
+    description: |
+      新規コードのカバレッジ 100%
