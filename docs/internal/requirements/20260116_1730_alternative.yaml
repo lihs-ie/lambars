@@ -1,0 +1,437 @@
+# Alternative 型クラス 要件定義
+#
+# 概要:
+#   Applicative ファンクタ上のモノイド構造を提供する型クラス。
+#   失敗可能な計算の選択・組み合わせを可能にする。
+#
+# 設計方針:
+#   1. Applicative を継承し、empty と or_else を提供
+#   2. Applicative 上のモノイド則を満たす
+#   3. パーサーコンビネータ・非決定的計算での実用性を重視
+#   4. Rust の型システム制約を考慮した現実的な設計
+#
+# 参照:
+#   - Haskell Control.Applicative (Alternative)
+#   - Scala cats Alternative
+#   - https://wiki.haskell.org/Typeclassopedia
+#   - https://en.wikibooks.org/wiki/Haskell/Alternative_and_MonadPlus
+
+version: "1.0.0"
+name: "Alternative"
+description: |
+  Alternative 型クラスは、Applicative ファンクタ上にモノイド構造を追加する。
+
+  これにより以下が可能になる:
+  - 失敗を表現する単位元 (empty)
+  - 計算の選択・フォールバック (or_else / <|>)
+  - 複数の計算候補からの選択
+
+  典型的な使用例:
+  - パーサーコンビネータ: 複数のパースルールを試行
+  - 非決定的計算: 複数の可能性の探索
+  - フォールバック処理: 失敗時の代替値提供
+
+# 背景・動機
+background:
+  problem: |
+    Rust の標準ライブラリには、Applicative ファンクタ上の選択演算子がない。
+
+    現状の課題:
+    - Option::or() や Result::or() は存在するが、統一的なインターフェースがない
+    - パーサーコンビネータで頻繁に使用される <|> 演算子相当が型クラスとして抽象化されていない
+    - 非決定的計算での選択操作を一般化できない
+    - Applicative の文脈での「失敗」と「選択」の概念が統一されていない
+
+  motivation: |
+    Alternative 型クラスを導入することで:
+    - 失敗可能な計算の統一的な抽象化が可能
+    - パーサーコンビネータライブラリの基盤として活用可能
+    - 関数型プログラミングにおける重要な抽象化パターンを Rust で利用可能
+    - Applicative の上位互換として型クラス階層を完成させる
+
+  prior_art:
+    - name: "Haskell Control.Applicative (Alternative)"
+      description: |
+        class Applicative f => Alternative f where
+          empty :: f a
+          (<|>) :: f a -> f a -> f a
+          some :: f a -> f [a]  -- 1回以上
+          many :: f a -> f [a]  -- 0回以上
+
+        Alternative のインスタンスは Applicative 上のモノイド構造を形成する。
+        empty は <|> の単位元として機能する。
+
+    - name: "Scala cats Alternative"
+      description: |
+        trait Alternative[F[_]] extends Applicative[F] with MonoidK[F]
+
+        def empty[A]: F[A]
+        def combineK[A](x: F[A], y: F[A]): F[A]
+
+        Alternative は Applicative と MonoidK を統合した型クラス。
+        MonoidK は型コンストラクタレベルのモノイドを表現する。
+
+    - name: "Rust std Option::or / Result::or"
+      description: |
+        標準ライブラリの or() メソッドは Alternative の or_else に相当する操作を提供するが、
+        トレイトとして抽象化されていない。
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. コア定義
+  # ======================================================================
+  - id: alt_001
+    name: "Alternative トレイト定義"
+    description: |
+      Applicative を継承する Alternative トレイトを定義する。
+
+      Rust の型システム制約により、以下の設計選択を行う:
+      - TypeConstructor による HKT エミュレーション
+      - Applicative トレイトの継承
+      - empty は関連関数として定義（Self::WithType<A> を返す）
+      - or_else はメソッドとして定義
+
+    methods:
+      - name: "empty"
+        signature: "fn empty<A>() -> Self::WithType<A> where A: 'static"
+        description: |
+          or_else 演算の単位元（失敗を表す値）を返す。
+
+          - Option では None
+          - Vec では空のベクター
+          - Result<T, E> では汎用的な実装は不可（エラー値を生成できないため）
+
+          注: A: 'static 制約は HKT エミュレーション（TypeConstructor）の
+          設計上必要となる。この制約により、empty の利用は 'static な型に
+          限定される。
+        examples:
+          - description: "Option の empty"
+            code: |
+              let empty: Option<i32> = <Option<()>>::empty();
+              assert_eq!(empty, None);
+          - description: "Vec の empty"
+            code: |
+              let empty: Vec<i32> = <Vec<()>>::empty();
+              assert!(empty.is_empty());
+
+      - name: "or_else"
+        signature: "fn or_else(self, alternative: Self) -> Self"
+        description: |
+          2つの計算を結合する選択演算子。
+          self が「成功」なら self を返し、「失敗」なら alternative を返す。
+
+          Haskell の <|> に相当。
+          - Option: self が Some なら self、None なら alternative
+          - Vec: 2つのベクターを連結（非決定的計算の和集合）
+        examples:
+          - description: "Option での選択"
+            code: |
+              let first: Option<i32> = None;
+              let second: Option<i32> = Some(42);
+              assert_eq!(first.or_else(second), Some(42));
+
+              let first = Some(1);
+              let second = Some(2);
+              assert_eq!(first.or_else(second), Some(1));
+          - description: "Vec での結合"
+            code: |
+              let first = vec![1, 2];
+              let second = vec![3, 4];
+              assert_eq!(first.or_else(second), vec![1, 2, 3, 4]);
+
+    implementations:
+      - type: "Option<A>"
+        description: |
+          Option は最も基本的な Alternative インスタンス。
+          - empty: None
+          - or_else: self が Some なら self、None なら alternative
+
+      - type: "Vec<A>"
+        description: |
+          Vec は非決定的計算を表現する Alternative インスタンス。
+          - empty: 空のベクター
+          - or_else: 2つのベクターを連結
+
+          注: Vec の Applicative 実装同様、Clone が必要な場合がある。
+          Vec 専用の AlternativeVec トレイトとして提供する可能性を検討。
+
+    laws:
+      - name: "左単位元則 (Left Identity)"
+        description: |
+          empty と任意の値を or_else で結合すると、その値が返る。
+        equation: "empty.or_else(x) == x"
+        property_test: |
+          proptest! {
+              #[test]
+              fn prop_alternative_left_identity(value in any::<Option<i32>>()) {
+                  let empty: Option<i32> = <Option<()>>::empty();
+                  prop_assert_eq!(empty.or_else(value), value);
+              }
+          }
+
+      - name: "右単位元則 (Right Identity)"
+        description: |
+          任意の値と empty を or_else で結合すると、その値が返る。
+        equation: "x.or_else(empty) == x"
+        property_test: |
+          proptest! {
+              #[test]
+              fn prop_alternative_right_identity(value in any::<Option<i32>>()) {
+                  let empty: Option<i32> = <Option<()>>::empty();
+                  prop_assert_eq!(value.or_else(empty), value);
+              }
+          }
+
+      - name: "結合則 (Associativity)"
+        description: |
+          or_else 演算は結合的である。
+        equation: "(x.or_else(y)).or_else(z) == x.or_else(y.or_else(z))"
+        property_test: |
+          proptest! {
+              #[test]
+              fn prop_alternative_associativity(
+                  x in any::<Option<i32>>(),
+                  y in any::<Option<i32>>(),
+                  z in any::<Option<i32>>()
+              ) {
+                  let left = x.or_else(y).or_else(z);
+                  let right = x.or_else(y.or_else(z));
+                  prop_assert_eq!(left, right);
+              }
+          }
+
+  # ======================================================================
+  # 2. 派生メソッド
+  # ======================================================================
+  - id: alt_002
+    name: "派生メソッド"
+    description: |
+      Alternative の基本操作から派生するユーティリティメソッド。
+
+    methods:
+      - name: "guard"
+        signature: "fn guard(condition: bool) -> Self::WithType<()> where Self: Sized"
+        description: |
+          条件が true なら pure(()) を、false なら empty を返す。
+          フィルタリングや条件分岐に使用。
+        examples:
+          - description: "条件付きフィルタリング"
+            code: |
+              fn filter_positive(n: i32) -> Option<i32> {
+                  <Option<()>>::guard(n > 0).map(|_| n)
+              }
+              assert_eq!(filter_positive(5), Some(5));
+              assert_eq!(filter_positive(-3), None);
+
+      - name: "optional"
+        signature: "fn optional(self) -> Self::WithType<Option<Self::Inner>> where Self: Sized, Self::Inner: 'static"
+        description: |
+          計算を Option でラップし、失敗を None として扱う。
+          Haskell の optional に相当。
+
+          optional(p) = p.fmap(Some).or_else(pure(None))
+
+          注: Self::Inner: 'static は pure(None) の型推論に必要。
+        examples:
+          - description: "オプショナルなパース"
+            code: |
+              // パースが失敗しても None として成功扱い
+              let result = parse_digit("x").optional();
+              // parse_digit が失敗しても Some(None) として成功
+
+      - name: "choice"
+        signature: "fn choice<I>(alternatives: I) -> Self where I: IntoIterator<Item = Self>, Self: Sized"
+        description: |
+          複数の選択肢から最初に成功するものを選択。
+          asum に相当（Alternative のモノイドとしての fold）。
+        examples:
+          - description: "複数のパーサーから選択"
+            code: |
+              let parsers = vec![
+                  parse_keyword("if"),
+                  parse_keyword("else"),
+                  parse_keyword("while"),
+              ];
+              let result = Option::choice(parsers);
+
+  # ======================================================================
+  # 3. Alternative と Applicative の相互作用
+  # ======================================================================
+  - id: alt_003
+    name: "Alternative と Applicative の相互作用に関する法則"
+    description: |
+      Alternative は Applicative の拡張であり、両者の操作には特定の関係がある。
+
+      注: これらの法則は全てのインスタンスで成り立つわけではなく、
+      特定のセマンティクスを持つインスタンスに対して推奨される追加の法則である。
+
+    laws:
+      - name: "左吸収則 (Left Absorption / Left Zero)"
+        description: |
+          empty から始まる計算は常に empty になる。
+
+          これは empty が「失敗」を表すことを意味し、
+          失敗した計算に対してどんな関数を適用しても失敗のままである。
+          Option や Vec では自然に成り立つ。
+        equation: "empty.apply(x) == empty"
+        property_test: |
+          proptest! {
+              #[test]
+              fn prop_alternative_left_absorption(value in any::<Option<i32>>()) {
+                  let empty: Option<fn(i32) -> i32> = <Option<()>>::empty();
+                  let result: Option<i32> = empty.apply(value);
+                  prop_assert_eq!(result, None);
+              }
+          }
+
+      - name: "右吸収則 (Right Absorption / Right Zero)"
+        description: |
+          empty に関数を適用しても empty のままである。
+
+          注: この法則は「empty が失敗を表す」というセマンティクスと整合する。
+          Option や Vec では自然に成り立つ。
+        equation: "ff.apply(empty) == empty"
+        property_test: |
+          proptest! {
+              #[test]
+              fn prop_alternative_right_absorption(value in any::<Option<i32>>()) {
+                  let function: Option<fn(i32) -> i32> = Some(|x| x * 2);
+                  let empty: Option<i32> = <Option<()>>::empty();
+                  let result: Option<i32> = function.apply(empty);
+                  prop_assert_eq!(result, None);
+              }
+          }
+
+      - name: "左分配則 (Left Distributivity)"
+        description: |
+          fmap は or_else に対して左から分配する。
+
+          これは or_else が構造を保存することを意味する。
+        equation: "(fa.or_else(fb)).fmap(f) == fa.fmap(f).or_else(fb.fmap(f))"
+        property_test: |
+          proptest! {
+              #[test]
+              fn prop_alternative_left_distributivity(
+                  fa in any::<Option<i32>>(),
+                  fb in any::<Option<i32>>()
+              ) {
+                  let function = |n: i32| n.wrapping_mul(2);
+                  let left = fa.or_else(fb).fmap(function);
+                  let right = fa.fmap(function).or_else(fb.fmap(function));
+                  prop_assert_eq!(left, right);
+              }
+          }
+
+  # ======================================================================
+  # 4. 実装制約と設計決定
+  # ======================================================================
+  - id: alt_004
+    name: "Result<T, E> の Alternative 実装について"
+    description: |
+      Result<T, E> は汎用的な Alternative を実装しない。
+
+      理由:
+      1. empty を実装するにはエラー値 E を生成する必要があるが、
+         任意の E に対してデフォルトのエラー値を生成することはできない
+      2. E: Default や E: Monoid を要求することは制約が強すぎる
+
+      注: Haskell では Either e は Monoid e 制約付きで Alternative を実装できる。
+      同様に Rust でも E: Default や E: Monoid の制約付きで実装可能だが、
+      汎用的な Alternative トレイトには含めない。
+
+      代替案:
+      - Result<T, E> where E: Default の場合のみ実装する拡張トレイト
+      - 将来的に ResultAlternative<E> のような専用トレイトを検討
+      - 詳細は fut_004 を参照
+
+  - id: alt_005
+    name: "Vec<A> の Alternative 実装"
+    description: |
+      Vec の Alternative 実装は、ApplicativeVec と同様に別トレイトとして提供する。
+
+      理由:
+      - Vec の Applicative 実装は Clone を必要とする
+      - 統一的なインターフェースを維持しつつ、Vec 固有の制約を表現
+
+      設計:
+      - AlternativeVec トレイトとして提供
+      - or_else は Vec の連結（extend）として実装
+
+      Vec の Alternative セマンティクス:
+      - Vec の Alternative は「成功/失敗の選択」ではなく「候補の結合（非決定的計算の和集合）」
+      - empty は候補なし（空集合）
+      - or_else は両方の候補を結合（和集合）
+      - これは Option の「最初の成功を取る」セマンティクスとは異なる点に注意
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - "or_else は遅延評価でない点に注意（Rust の性質上、引数は事前に評価される）"
+    - "Vec の or_else は O(n + m) の時間計算量（連結操作）"
+    - "Option の or_else は O(1) の時間計算量"
+
+  compatibility:
+    - "既存の Applicative トレイトとの互換性を維持"
+    - "Option::or, Vec::extend などの標準ライブラリメソッドと一貫した動作"
+    - "将来的なパーサーコンビネータライブラリへの拡張を考慮"
+
+  testing:
+    - "全ての法則に対するプロパティベーステスト"
+    - "各実装型に対する単体テスト"
+    - "境界条件（empty との組み合わせ）のテスト"
+    - "rstest を使用したパラメータ化テスト"
+
+# 将来の拡張
+future_extensions:
+  - id: fut_001
+    name: "some / many メソッド"
+    description: |
+      Haskell の some / many に相当するメソッド。
+      - some: 1回以上の繰り返し
+      - many: 0回以上の繰り返し
+
+      パーサーコンビネータでの使用を想定。
+    rationale: |
+      some/many の実装には再帰的な定義が必要であり、
+      Rust での効率的な実装には追加の検討が必要。
+
+      注意事項:
+      1. スタック安全性の観点からトランポリンとの統合を検討する必要がある
+      2. empty を受理するパーサー（常に成功するパーサー）に対して many を
+         適用すると無限ループ/発散する可能性がある
+      3. many1（1回以上）のような安全なバリアントの提供を検討する必要がある
+
+  - id: fut_002
+    name: "遅延評価版 or_else_lazy"
+    description: |
+      or_else の遅延評価版。代替値を遅延評価するクロージャとして受け取る。
+
+      fn or_else_lazy<F>(self, f: F) -> Self where F: FnOnce() -> Self
+    rationale: |
+      パフォーマンス最適化のための将来の拡張として検討。
+      現時点では標準的な or_else を優先して実装。
+
+  - id: fut_003
+    name: "MonadPlus との統合"
+    description: |
+      Monad と Alternative を組み合わせた MonadPlus 型クラスの導入。
+
+      追加の法則:
+      - Left Zero: empty.flat_map(f) == empty
+      - Left Distribution または Left Catch
+    rationale: |
+      MonadPlus の法則には複数の流派があり（Left Distribution vs Left Catch）、
+      どの法則を採用するかの検討が必要。
+      Alternative の安定後に検討する。
+
+  - id: fut_004
+    name: "Result<T, E> への条件付き Alternative"
+    description: |
+      Result<T, E> where E: Default または E: Monoid に対する Alternative 実装。
+
+      - empty: Err(E::default()) または Err(E::empty())
+      - or_else: 最初の成功を返す、エラーは結合
+    rationale: |
+      E に対する制約が強すぎるため、汎用的な Alternative としては不適切。
+      別トレイト（ResultAlternative など）として提供を検討。
