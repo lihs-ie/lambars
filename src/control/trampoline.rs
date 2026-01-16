@@ -60,20 +60,10 @@
 
 use super::either::Either;
 
-/// Internal trait for type erasure in `FlatMap` continuations.
-///
-/// This trait allows us to store continuations with different intermediate
-/// types in the same `Trampoline` enum variant, enabling proper monadic
-/// composition without knowing all types at compile time.
 trait TrampolineContinuation<A> {
-    /// Execute one step of the continuation, returning the next trampoline state.
     fn step(self: Box<Self>) -> Trampoline<A>;
 }
 
-/// A wrapper type to hide the internal trait from the public API.
-///
-/// This is used to avoid exposing the `TrampolineContinuation` trait
-/// in the public enum variant.
 #[doc(hidden)]
 pub struct ContinuationBox<A>(Box<dyn TrampolineContinuation<A>>);
 
@@ -82,6 +72,7 @@ impl<A> ContinuationBox<A> {
         Self(Box::new(continuation))
     }
 
+    #[inline]
     fn step(self) -> Trampoline<A> {
         self.0.step()
     }
@@ -236,19 +227,26 @@ impl<A: 'static> Trampoline<A> {
     /// let result = count_down(100_000).run();
     /// assert_eq!(result, 0);
     /// ```
+    #[inline]
     pub fn run(self) -> A {
+        if let Self::Done(value) = self {
+            return value;
+        }
+
         let mut current = self;
 
         loop {
-            match current {
+            current = match current {
                 Self::Done(value) => return value,
-                Self::Suspend(thunk) => {
-                    current = thunk();
-                }
+                Self::Suspend(thunk) => thunk(),
                 Self::FlatMapInternal(continuation) => {
-                    current = continuation.step();
+                    let mut inner = continuation.step();
+                    while let Self::FlatMapInternal(next_continuation) = inner {
+                        inner = next_continuation.step();
+                    }
+                    inner
                 }
-            }
+            };
         }
     }
 
@@ -286,10 +284,7 @@ impl<A: 'static> Trampoline<A> {
             match current {
                 Self::Done(value) => return Either::Right(value),
                 Self::Suspend(thunk) => return Either::Left(thunk),
-                Self::FlatMapInternal(continuation) => {
-                    // Unwrap FlatMapInternal and continue the loop
-                    current = continuation.step();
-                }
+                Self::FlatMapInternal(continuation) => current = continuation.step(),
             }
         }
     }
@@ -298,9 +293,12 @@ impl<A: 'static> Trampoline<A> {
     ///
     /// This is the functor `map` operation.
     ///
-    /// # Arguments
+    /// # Note on Evaluation Timing
     ///
-    /// * `function` - A function to apply to the final value
+    /// When the source `Trampoline` is in the `Done` state, the function is applied
+    /// immediately without creating intermediate structures. This optimization assumes
+    /// that `function` is a pure function (no side effects). If you pass a function
+    /// with side effects, the timing of those effects may differ from other implementations.
     ///
     /// # Examples
     ///
@@ -311,21 +309,29 @@ impl<A: 'static> Trampoline<A> {
     /// let doubled = trampoline.map(|x| x * 2);
     /// assert_eq!(doubled.run(), 42);
     /// ```
+    #[inline]
     pub fn map<B, F>(self, function: F) -> Trampoline<B>
     where
         F: FnOnce(A) -> B + 'static,
         B: 'static,
     {
-        self.flat_map(move |a| Trampoline::done(function(a)))
+        match self {
+            Self::Done(value) => Trampoline::Done(function(value)),
+            _ => self.flat_map(move |a| Trampoline::done(function(a))),
+        }
     }
 
     /// Applies a function that returns a trampoline to the result.
     ///
     /// This is the monadic `bind` (>>=) operation.
     ///
-    /// # Arguments
+    /// # Note on Evaluation Timing
     ///
-    /// * `function` - A function that takes the result and returns a new trampoline
+    /// When the source `Trampoline` is in the `Done` state, the function is applied
+    /// immediately without creating an intermediate `FlatMapInternal` wrapper. This
+    /// optimization assumes that `function` is a pure function (no side effects).
+    /// If you pass a function with side effects, the timing of those effects may
+    /// differ from other implementations.
     ///
     /// # Examples
     ///
@@ -336,15 +342,19 @@ impl<A: 'static> Trampoline<A> {
     /// let result = trampoline.flat_map(|x| Trampoline::done(x * 2));
     /// assert_eq!(result.run(), 42);
     /// ```
+    #[inline]
     pub fn flat_map<B, F>(self, function: F) -> Trampoline<B>
     where
         F: FnOnce(A) -> Trampoline<B> + 'static,
         B: 'static,
     {
-        Trampoline::FlatMapInternal(ContinuationBox::new(FlatMapContinuation {
-            trampoline: self,
-            function,
-        }))
+        match self {
+            Self::Done(value) => function(value),
+            _ => Trampoline::FlatMapInternal(ContinuationBox::new(FlatMapContinuation {
+                trampoline: self,
+                function,
+            })),
+        }
     }
 
     /// Alias for `flat_map`.
@@ -389,10 +399,6 @@ impl<A: 'static> Trampoline<A> {
     }
 }
 
-/// Internal structure for `flat_map` continuation.
-///
-/// This struct captures the current trampoline state and the continuation
-/// function to apply when the current state reaches `Done`.
 struct FlatMapContinuation<A, B, F>
 where
     F: FnOnce(A) -> Trampoline<B>,
@@ -420,10 +426,6 @@ where
         }
     }
 }
-
-// =============================================================================
-// Debug Implementation
-// =============================================================================
 
 impl<A: std::fmt::Debug> std::fmt::Debug for Trampoline<A> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -453,10 +455,6 @@ mod tests {
     use super::*;
     use rstest::rstest;
 
-    // =========================================================================
-    // Display Tests
-    // =========================================================================
-
     #[rstest]
     fn test_display_done() {
         let trampoline = Trampoline::done(42);
@@ -471,13 +469,10 @@ mod tests {
 
     #[rstest]
     fn test_display_flatmap_internal() {
-        let trampoline = Trampoline::done(21).flat_map(|value| Trampoline::done(value * 2));
+        let trampoline: Trampoline<i32> = Trampoline::suspend(|| Trampoline::done(21))
+            .flat_map(|value| Trampoline::done(value * 2));
         assert_eq!(format!("{trampoline}"), "<FlatMap>");
     }
-
-    // =========================================================================
-    // Original Tests
-    // =========================================================================
 
     #[rstest]
     fn test_trampoline_done() {
@@ -549,5 +544,144 @@ mod tests {
         assert!(is_odd(1).run());
         assert!(is_even(100).run());
         assert!(!is_odd(100).run());
+    }
+
+    #[rstest]
+    fn test_flat_map_done_eager_evaluation() {
+        let trampoline = Trampoline::done(42);
+        let result = trampoline.flat_map(|x| Trampoline::done(x * 2));
+
+        assert!(
+            matches!(result, Trampoline::Done(84)),
+            "Expected Done(84), got {result:?}"
+        );
+    }
+
+    #[rstest]
+    fn test_flat_map_done_to_suspend() {
+        let trampoline = Trampoline::done(42);
+        let result = trampoline.flat_map(|x| Trampoline::suspend(move || Trampoline::done(x * 2)));
+
+        assert!(
+            matches!(result, Trampoline::Suspend(_)),
+            "Expected Suspend, got {result:?}"
+        );
+        assert_eq!(result.run(), 84);
+    }
+
+    #[rstest]
+    fn test_flat_map_suspend_creates_flatmap_internal() {
+        let trampoline: Trampoline<i32> = Trampoline::suspend(|| Trampoline::done(42));
+        let result = trampoline.flat_map(|x| Trampoline::done(x * 2));
+
+        assert!(
+            matches!(result, Trampoline::FlatMapInternal(_)),
+            "Expected FlatMapInternal, got {result:?}"
+        );
+        assert_eq!(result.run(), 84);
+    }
+
+    #[rstest]
+    fn test_flat_map_done_chain() {
+        let result = Trampoline::done(1)
+            .flat_map(|x| Trampoline::done(x + 1))
+            .flat_map(|x| Trampoline::done(x * 2))
+            .flat_map(|x| Trampoline::done(x + 10));
+
+        assert!(
+            matches!(result, Trampoline::Done(14)),
+            "Expected Done(14), got {result:?}"
+        );
+        assert_eq!(result.run(), 14);
+    }
+
+    #[rstest]
+    fn test_deep_flatmap_chain_from_suspend() {
+        let trampoline: Trampoline<i32> = Trampoline::suspend(|| Trampoline::done(0));
+        let result = (0..100).fold(trampoline, |accumulator, _| {
+            accumulator.flat_map(|x| Trampoline::done(x + 1))
+        });
+
+        assert_eq!(result.run(), 100);
+    }
+
+    #[rstest]
+    fn test_nested_flatmap() {
+        let trampoline: Trampoline<i32> = Trampoline::suspend(|| Trampoline::done(1));
+        let result = trampoline.flat_map(|x| {
+            Trampoline::suspend(move || Trampoline::done(x * 2))
+                .flat_map(|y| Trampoline::done(y + 10))
+        });
+
+        assert_eq!(result.run(), 12);
+    }
+
+    #[rstest]
+    fn test_long_flatmap_chain_correctness() {
+        let depth = 100;
+        let mut trampoline = Trampoline::suspend(|| Trampoline::done(0u64));
+
+        for index in 1..=depth {
+            let index_copy = index;
+            trampoline = trampoline.flat_map(move |x| Trampoline::done(x + index_copy));
+        }
+
+        let expected = (depth * (depth + 1)) / 2;
+        assert_eq!(trampoline.run(), expected);
+    }
+
+    #[rstest]
+    fn test_done_early_return() {
+        let trampoline = Trampoline::done(42);
+        assert_eq!(trampoline.run(), 42);
+    }
+
+    #[rstest]
+    fn test_done_early_return_string() {
+        let trampoline = Trampoline::done("hello".to_string());
+        assert_eq!(trampoline.run(), "hello");
+    }
+
+    #[rstest]
+    fn test_suspend_works_after_early_check() {
+        let trampoline = Trampoline::suspend(|| Trampoline::done(100));
+        assert_eq!(trampoline.run(), 100);
+    }
+
+    #[rstest]
+    fn test_map_done_eager_evaluation() {
+        let trampoline = Trampoline::done(42);
+        let result = trampoline.map(|x| x * 2);
+
+        assert!(
+            matches!(result, Trampoline::Done(84)),
+            "Expected Done(84), got {result:?}"
+        );
+    }
+
+    #[rstest]
+    fn test_map_suspend_creates_flatmap_internal() {
+        let trampoline: Trampoline<i32> = Trampoline::suspend(|| Trampoline::done(42));
+        let result = trampoline.map(|x| x * 2);
+
+        assert!(
+            matches!(result, Trampoline::FlatMapInternal(_)),
+            "Expected FlatMapInternal, got {result:?}"
+        );
+        assert_eq!(result.run(), 84);
+    }
+
+    #[rstest]
+    fn test_map_done_chain() {
+        let result = Trampoline::done(1)
+            .map(|x| x + 1)
+            .map(|x| x * 2)
+            .map(|x| x + 10);
+
+        assert!(
+            matches!(result, Trampoline::Done(14)),
+            "Expected Done(14), got {result:?}"
+        );
+        assert_eq!(result.run(), 14);
     }
 }

@@ -1254,6 +1254,157 @@ impl<A: 'static> crate::typeclass::AsyncIOLike for AsyncIO<A> {
     }
 }
 
+// =============================================================================
+// IntoPipeAsync Trait
+// =============================================================================
+
+/// A trait for converting values into `AsyncIO` for use in `pipe_async!` macro.
+///
+/// This trait enables automatic conversion of values to `AsyncIO` when used
+/// as the initial value in `pipe_async!`. `AsyncIO<A>` is returned unchanged,
+/// while other types are wrapped with `AsyncIO::pure`.
+///
+/// # Laws
+///
+/// ## Identity for `AsyncIO`
+///
+/// `AsyncIO<A>` returns itself unchanged:
+/// ```text
+/// async_io.into_pipe_async() == async_io
+/// ```
+///
+/// ## Pure wrapping for primitives
+///
+/// Primitive types are wrapped with `AsyncIO::pure`:
+/// ```text
+/// value.into_pipe_async() == AsyncIO::pure(value)
+/// ```
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// use lambars::effect::{AsyncIO, IntoPipeAsync};
+///
+/// #[tokio::main]
+/// async fn main() {
+///     // Primitive type conversion
+///     let result = 42.into_pipe_async();
+///     assert_eq!(result.run_async().await, 42);
+///
+///     // AsyncIO identity conversion
+///     let async_io = AsyncIO::pure(42);
+///     let result = async_io.into_pipe_async();
+///     assert_eq!(result.run_async().await, 42);
+/// }
+/// ```
+pub trait IntoPipeAsync {
+    /// The output type of the `AsyncIO` after conversion.
+    type Output;
+
+    /// Converts the value into an `AsyncIO`.
+    ///
+    /// For `AsyncIO<A>`, this returns `self` unchanged.
+    /// For other types, this wraps the value with `AsyncIO::pure`.
+    fn into_pipe_async(self) -> AsyncIO<Self::Output>;
+}
+
+// AsyncIO<A> implementation - identity
+impl<A: 'static> IntoPipeAsync for AsyncIO<A> {
+    type Output = A;
+
+    fn into_pipe_async(self) -> Self {
+        self
+    }
+}
+
+// Primitive type implementations using macro
+macro_rules! impl_into_pipe_async_for_primitives {
+    ($($ty:ty),*) => {
+        $(
+            impl IntoPipeAsync for $ty {
+                type Output = $ty;
+
+                fn into_pipe_async(self) -> AsyncIO<$ty> {
+                    AsyncIO::pure(self)
+                }
+            }
+        )*
+    };
+}
+
+impl_into_pipe_async_for_primitives!(
+    i8,
+    i16,
+    i32,
+    i64,
+    i128,
+    isize,
+    u8,
+    u16,
+    u32,
+    u64,
+    u128,
+    usize,
+    f32,
+    f64,
+    bool,
+    char,
+    (),
+    String,
+    &'static str
+);
+
+// =============================================================================
+// Pure<A> Wrapper Type
+// =============================================================================
+
+/// A wrapper type for enabling user-defined types in `pipe_async!` macro.
+///
+/// `Pure<A>` wraps any `Send + 'static` type to make it convertible to `AsyncIO`
+/// via the `IntoPipeAsync` trait. This is useful for types that don't have
+/// `IntoPipeAsync` implemented directly.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// use lambars::effect::{AsyncIO, Pure};
+/// use lambars::pipe_async;
+///
+/// #[derive(Debug, PartialEq)]
+/// struct MyData { value: i32 }
+///
+/// #[tokio::main]
+/// async fn main() {
+///     let wrapped = Pure(MyData { value: 42 });
+///     let result = pipe_async!(wrapped, |d| d.value * 2);
+///     assert_eq!(result.run_async().await, 84);
+/// }
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Pure<A>(pub A);
+
+impl<A> Pure<A> {
+    /// Creates a new `Pure` wrapper around the given value.
+    ///
+    /// This is equivalent to `Pure(value)`.
+    pub const fn new(value: A) -> Self {
+        Self(value)
+    }
+
+    /// Unwraps and returns the inner value.
+    pub fn into_inner(self) -> A {
+        self.0
+    }
+}
+
+impl<A: Send + 'static> IntoPipeAsync for Pure<A> {
+    type Output = A;
+
+    fn into_pipe_async(self) -> AsyncIO<A> {
+        AsyncIO::pure(self.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2093,6 +2244,224 @@ mod tests {
             let result = combined.run_async().await;
             assert_eq!(counter.load(Ordering::SeqCst), 2);
             assert_eq!(result, 30);
+        }
+    }
+
+    // =========================================================================
+    // IntoPipeAsync Tests
+    // =========================================================================
+
+    mod into_pipe_async_tests {
+        use super::*;
+        use rstest::rstest;
+
+        // =====================================================================
+        // Identity Law for AsyncIO
+        // =====================================================================
+
+        #[rstest]
+        #[case(1)]
+        #[case(42)]
+        #[case(-100)]
+        #[tokio::test]
+        async fn into_pipe_async_identity_for_async_io(#[case] value: i32) {
+            let async_io = AsyncIO::pure(value);
+            let result = async_io.into_pipe_async();
+            assert_eq!(result.run_async().await, value);
+        }
+
+        // =====================================================================
+        // Pure Wrapping for Primitives
+        // =====================================================================
+
+        #[rstest]
+        #[case(1)]
+        #[case(42)]
+        #[case(-100)]
+        #[tokio::test]
+        async fn into_pipe_async_wraps_primitives(#[case] value: i32) {
+            let result = value.into_pipe_async();
+            assert_eq!(result.run_async().await, value);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn into_pipe_async_wraps_i8() {
+            let value: i8 = 42;
+            let result = value.into_pipe_async();
+            assert_eq!(result.run_async().await, 42_i8);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn into_pipe_async_wraps_i16() {
+            let value: i16 = 1000;
+            let result = value.into_pipe_async();
+            assert_eq!(result.run_async().await, 1000_i16);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn into_pipe_async_wraps_i64() {
+            let value: i64 = 1_000_000;
+            let result = value.into_pipe_async();
+            assert_eq!(result.run_async().await, 1_000_000_i64);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn into_pipe_async_wraps_u32() {
+            let value: u32 = 100;
+            let result = value.into_pipe_async();
+            assert_eq!(result.run_async().await, 100_u32);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn into_pipe_async_wraps_f64() {
+            let value: f64 = 1.234;
+            let result = value.into_pipe_async();
+            assert!((result.run_async().await - 1.234).abs() < f64::EPSILON);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn into_pipe_async_wraps_bool() {
+            let value = true;
+            let result = value.into_pipe_async();
+            assert!(result.run_async().await);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn into_pipe_async_wraps_char() {
+            let value = 'a';
+            let result = value.into_pipe_async();
+            assert_eq!(result.run_async().await, 'a');
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn into_pipe_async_wraps_unit() {
+            let value = ();
+            let result = value.into_pipe_async();
+            assert_eq!(result.run_async().await, ());
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn into_pipe_async_wraps_string() {
+            let value = String::from("hello");
+            let result = value.into_pipe_async();
+            assert_eq!(result.run_async().await, "hello");
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn into_pipe_async_wraps_static_str() {
+            let value: &'static str = "hello";
+            let result = value.into_pipe_async();
+            assert_eq!(result.run_async().await, "hello");
+        }
+
+        // =====================================================================
+        // Nested AsyncIO Behavior
+        // =====================================================================
+
+        #[rstest]
+        #[tokio::test]
+        async fn into_pipe_async_does_not_flatten_nested_async_io() {
+            let inner = AsyncIO::pure(42);
+            let nested: AsyncIO<AsyncIO<i32>> = AsyncIO::pure(inner);
+            let result = nested.into_pipe_async();
+            // Result should be AsyncIO<AsyncIO<i32>>, not flattened
+            let inner_async_io = result.run_async().await;
+            assert_eq!(inner_async_io.run_async().await, 42);
+        }
+    }
+
+    // =========================================================================
+    // Pure<A> Tests
+    // =========================================================================
+
+    mod pure_wrapper_tests {
+        use super::*;
+        use rstest::rstest;
+
+        #[rstest]
+        #[tokio::test]
+        async fn pure_wrapper_converts_to_async_io() {
+            let wrapped = Pure(42);
+            let result = wrapped.into_pipe_async();
+            assert_eq!(result.run_async().await, 42);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn pure_wrapper_with_user_defined_type() {
+            #[derive(Debug, PartialEq)]
+            struct MyData {
+                value: i32,
+            }
+
+            let wrapped = Pure(MyData { value: 42 });
+            let result = wrapped.into_pipe_async().fmap(|d| d.value * 2);
+            assert_eq!(result.run_async().await, 84);
+        }
+
+        #[rstest]
+        fn pure_new_creates_wrapper() {
+            let wrapped = Pure::new(42);
+            assert_eq!(wrapped.0, 42);
+        }
+
+        #[rstest]
+        fn pure_into_inner_returns_value() {
+            let wrapped = Pure(42);
+            assert_eq!(wrapped.into_inner(), 42);
+        }
+
+        #[rstest]
+        fn pure_derives_debug() {
+            let wrapped = Pure(42);
+            let debug_str = format!("{wrapped:?}");
+            assert!(debug_str.contains("Pure"));
+            assert!(debug_str.contains("42"));
+        }
+
+        #[rstest]
+        fn pure_derives_clone() {
+            // Use String (non-Copy type) to test Clone explicitly
+            let wrapped = Pure(String::from("hello"));
+            let cloned = wrapped.clone();
+            assert_eq!(wrapped, cloned);
+        }
+
+        #[rstest]
+        fn pure_derives_copy() {
+            let wrapped = Pure(42);
+            let copied = wrapped;
+            // wrapped is still usable because Pure<i32> is Copy
+            assert_eq!(wrapped.0, 42);
+            assert_eq!(copied.0, 42);
+        }
+
+        #[rstest]
+        fn pure_derives_eq() {
+            let wrapped1 = Pure(42);
+            let wrapped2 = Pure(42);
+            let wrapped3 = Pure(100);
+            assert_eq!(wrapped1, wrapped2);
+            assert_ne!(wrapped1, wrapped3);
+        }
+
+        #[rstest]
+        fn pure_derives_hash() {
+            use std::collections::HashSet;
+            let mut set = HashSet::new();
+            set.insert(Pure(42));
+            set.insert(Pure(42));
+            assert_eq!(set.len(), 1);
         }
     }
 }

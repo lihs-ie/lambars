@@ -62,7 +62,10 @@ fn test_trampoline_suspend_display() {
 
 #[test]
 fn test_trampoline_flatmap_display() {
-    let trampoline = Trampoline::done(21).flat_map(|value| Trampoline::done(value * 2));
+    // Note: flat_map on Done now evaluates eagerly (performance optimization),
+    // so we use Suspend to create a FlatMapInternal state
+    let trampoline: Trampoline<i32> =
+        Trampoline::suspend(|| Trampoline::done(21)).flat_map(|value| Trampoline::done(value * 2));
     assert_eq!(format!("{}", trampoline), "<FlatMap>");
 }
 

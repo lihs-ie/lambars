@@ -1,0 +1,1175 @@
+# Freer Monad O(n^2) 性能改善 要件定義
+#
+# 概要:
+#   Freer モナドの継続チェーンにおける O(n^2) 性能問題を解決する。
+#   "Reflection without Remorse" (van der Ploeg & Kiselyov, 2014) の
+#   型消去バージョンを採用し、O(1) append / O(1) dequeue を実現する。
+#
+# 設計方針:
+#   1. 継続のネスト構造をキュー構造（ContinuationQueue）に置き換え
+#   2. 型消去アローで異なる型の継続を統一的に扱う
+#   3. 公開 API を変更せず内部実装のみ改善
+#   4. スタック安全性と Monad 則を維持
+#
+# 参照:
+#   - "Reflection without Remorse" (Atze van der Ploeg, Oleg Kiselyov, 2014)
+#   - https://okmij.org/ftp/Haskell/zseq.pdf
+#   - docs/internal/done/requirements/20260116_1700_freer_monad.yaml
+#   - src/control/freer.rs
+
+version: "1.0.0"
+name: "Freer Monad O(n^2) 性能改善"
+description: |
+  現在の Freer モナド実装では、`FlatMapContinuation::step` の `Impure` 処理において
+  継続が毎回再ラップされるため、n 個の命令に対して継続構築コストが O(n^2) になっている。
+
+  ## 問題の詳細
+
+  問題のコード（freer.rs:315-328）:
+  ```rust
+  Freer::Impure {
+      instruction,
+      continuation,
+  } => {
+      let function = self.function;
+      Freer::Impure {
+          instruction,
+          continuation: Box::new(move |result| {
+              Freer::FlatMapInternal(ContinuationBox::new(FlatMapContinuation {
+                  freer: continuation(result),  // <- ここで新しいクロージャを作成
+                  function,
+              }))
+          }),
+      }
+  }
+  ```
+
+  この実装では:
+  1. 各 `flat_map` で新しい `FlatMapContinuation` が作成される
+  2. `step` 実行時に継続が再ラップされる
+  3. n 回の `flat_map` で累積的にネストが深くなり O(n^2) のコストが発生
+
+  ## 性能影響
+
+  ベンチマーク結果（deep_flat_map_with_instructions）:
+  - 深度 100:  6.77 ms
+  - 深度 500:  836 ms  （線形なら約 33.5 ms になるはず）
+  - 深度 1000: 6.72 s  （線形なら約 67.7 ms になるはず）
+
+  深度 500 と 1000 の比較:
+  - 実測比: 6720 ms / 836 ms ≈ 8.04x
+  - O(n^2) の場合の理論比: (1000/500)^2 = 4x
+  - O(n) の場合の理論比: 1000/500 = 2x
+
+  実測値が O(n^2) を上回っているのは、各ステップでの Box 割り当てやクロージャ生成の
+  オーバーヘッドが累積するためと考えられる。
+
+  ## 解決策
+
+  "Reflection without Remorse" パターンを採用:
+  - 継続をキュー構造（ContinuationQueue）で管理
+  - O(1) append（継続の追加）
+  - O(1) amortized dequeue（継続の取り出し）
+  - 型消去アロー（TypeErasedArrow）で異なる型の継続を統一
+
+background:
+  problem: |
+    ## 現行実装の問題点
+
+    ### 継続の再ラップ問題
+
+    `FlatMapContinuation::step` が `Impure` バリアントを処理する際、
+    既存の継続を新しいクロージャでラップしている:
+
+    ```
+    step 1: continuation_0
+    step 2: |r| FlatMapInternal(continuation_0(r), f1)
+    step 3: |r| FlatMapInternal(|r'| FlatMapInternal(continuation_0(r'), f1), f2)
+    ...
+    ```
+
+    これにより、継続のネストが線形に増加し、実行時に全てのラッパーを
+    展開する必要があるため O(n^2) のコストが発生する。
+
+    ### ComposedContinuation の限界
+
+    現在の `ComposedContinuation` は `FlatMapInternal` 同士の合成には
+    対応しているが、`Impure` バリアントの継続再構築問題は解決できない:
+
+    ```rust
+    Freer::FlatMapInternal(inner) => {
+        Freer::FlatMapInternal(ContinuationBox::new(ComposedContinuation {
+            first: inner,
+            second: self.function,
+        }))
+    }
+    ```
+
+  motivation: |
+    ## 改善の動機
+
+    1. **DSL の実用性**:
+       - 実際の DSL では数百〜数千の命令を連鎖させることがある
+       - 現状では 500 命令で約 1 秒、1000 命令で約 7 秒かかり実用的でない
+       - 目標: 1000 命令で約 70ms（現状の 1/100）
+
+    2. **Haskell/Scala との互換性**:
+       - freer-simple（Haskell）は Reflection without Remorse を採用
+       - Scala の cats-free も同様の最適化を持つ
+       - lambars の Freer も同等の性能を提供すべき
+
+    3. **理論的正当性**:
+       - Monad 則を維持しながら性能を改善
+       - 純粋関数型プログラミングのパラダイムを崩さない
+
+  prior_art:
+    - name: "Reflection without Remorse (van der Ploeg & Kiselyov, 2014)"
+      description: |
+        継続チェーンの効率的な表現に関する論文。
+        Cayley representation を使用して O(1) の継続合成を実現する。
+
+        主なアイデア:
+        1. 継続を差分リスト（difference list）として表現
+        2. 合成を O(1) で実行
+        3. 最終的な評価時にのみリストを構築
+
+        Haskell での実装例:
+        ```haskell
+        data FTCQueue m a b where
+          Leaf :: (a -> m b) -> FTCQueue m a b
+          Node :: FTCQueue m a x -> FTCQueue m x b -> FTCQueue m a b
+        ```
+
+    - name: "freer-simple (Haskell)"
+      description: |
+        Reflection without Remorse を採用した Haskell の Freer モナド実装。
+        https://hackage.haskell.org/package/freer-simple
+
+    - name: "cats-free (Scala)"
+      description: |
+        Scala の Free モナド実装。同様の最適化を含む。
+        https://typelevel.org/cats/datatypes/freemonad.html
+
+    - name: "現在の lambars Trampoline 実装"
+      description: |
+        src/control/trampoline.rs の FlatMapInternal パターンを参考にするが、
+        継続キューによる O(1) 合成を追加する。
+
+# 理論的背景
+theoretical_background:
+  reflection_without_remorse:
+    description: |
+      ## Reflection without Remorse の原理
+
+      ### 問題: 左結合的な bind のコスト
+
+      ```haskell
+      ((m >>= f) >>= g) >>= h
+      ```
+
+      これを実行すると、各 bind で継続が再構築され O(n^2) になる。
+
+      ### 解決: Cayley representation
+
+      モノイドの Cayley representation を使用:
+      - 元の表現: リスト `[a]` の連結 `(++)` は O(n)
+      - Cayley 表現: 関数 `[a] -> [a]` の合成 `(.)` は O(1)
+
+      継続に適用:
+      - 元の表現: `a -> m b` の連鎖（ネスト構造）
+      - Cayley 表現: `FTCQueue m a b`（型消去キュー）
+
+      ### FTCQueue（Fast Type-aligned Continuation Queue）
+
+      ```haskell
+      data FTCQueue m a b where
+        Leaf :: (a -> m b) -> FTCQueue m a b
+        Node :: FTCQueue m a x -> FTCQueue m x b -> FTCQueue m a b
+      ```
+
+      操作:
+      - `snoc` (append): O(1) - 右端に追加
+      - `uncons` (dequeue): O(1) amortized - 左端から取り出し
+
+  rust_adaptation:
+    description: |
+      ## Rust への適応
+
+      ### 型消去アロー（Type-Erased Arrow）
+
+      Rust では GAT でも `FTCQueue m a b` を直接表現するのが困難。
+      代わりに型消去を使用:
+
+      ```rust
+      /// 型消去された継続
+      /// 入力は常に Box<dyn Any>、出力は Freer<I, Box<dyn Any>>
+      trait TypeErasedArrow<I> {
+          fn apply(self: Box<Self>, input: Box<dyn Any>) -> Freer<I, Box<dyn Any>>;
+      }
+
+      /// 型付きアロー（A -> Freer<I, B>）を TypeErasedArrow に変換
+      /// 内部で downcast を行う
+      struct Arrow<I, A, B, F>
+      where
+          F: FnOnce(A) -> Freer<I, B>,
+      {
+          function: F,
+          _phantom: PhantomData<fn(A) -> (I, B)>,
+      }
+
+      impl<I: 'static, A: 'static, B: 'static, F> TypeErasedArrow<I> for Arrow<I, A, B, F>
+      where
+          F: FnOnce(A) -> Freer<I, B> + 'static,
+      {
+          fn apply(self: Box<Self>, input: Box<dyn Any>) -> Freer<I, Box<dyn Any>> {
+              let value = *input.downcast::<A>().expect("Type mismatch in arrow");
+              (self.function)(value).map(|b| Box::new(b) as Box<dyn Any>)
+          }
+      }
+
+      /// Box<dyn Any> を直接受け取るアロー（lift_instruction 用）
+      /// extract 関数を直接ラップ
+      struct ExtractArrow<R, E>
+      where
+          E: FnOnce(Box<dyn Any>) -> R,
+      {
+          extract: E,
+          _phantom: PhantomData<R>,
+      }
+
+      impl<I: 'static, R: 'static, E> TypeErasedArrow<I> for ExtractArrow<R, E>
+      where
+          E: FnOnce(Box<dyn Any>) -> R + 'static,
+      {
+          fn apply(self: Box<Self>, input: Box<dyn Any>) -> Freer<I, Box<dyn Any>> {
+              let result = (self.extract)(input);
+              Freer::Pure(Box::new(result) as Box<dyn Any>)
+          }
+      }
+      ```
+
+      ### ContinuationQueue
+
+      ```rust
+      /// O(1) append / O(1) amortized dequeue の継続キュー
+      struct ContinuationQueue<I> {
+          /// 継続のリスト（前から後ろへ実行）
+          arrows: VecDeque<Box<dyn TypeErasedArrow<I>>>,
+      }
+      ```
+
+      注意: 純粋な関数型データ構造ではなく、内部可変性を許容する。
+      これは Rust の制約上の妥協点だが、外部から見た挙動は純粋関数的。
+
+      ### 参照透過性の維持
+
+      ContinuationQueue の実装は内部で VecDeque を使用するが:
+      1. 外部 API は不変（push_front/pop_back などの破壊的操作は公開しない）
+      2. Freer の公開メソッドは全て所有権を取り、新しい値を返す
+      3. interpret 内でのみ ContinuationQueue を消費的に使用
+
+# 設計原則
+design_principles:
+  continuation_queue_design:
+    description: |
+      ## ContinuationQueue の設計
+
+      ### データ構造
+
+      ```rust
+      /// 型消去された単一の継続（アロー）
+      /// A -> Freer<I, B> を Any -> Freer<I, Any> に変換
+      struct Arrow<I, A, B, F>
+      where
+          F: FnOnce(A) -> Freer<I, B>,
+      {
+          function: F,
+          _phantom: PhantomData<fn(A) -> (I, B)>,
+      }
+
+      impl<I: 'static, A: 'static, B: 'static, F> TypeErasedArrow<I> for Arrow<I, A, B, F>
+      where
+          F: FnOnce(A) -> Freer<I, B> + 'static,
+      {
+          fn apply(self: Box<Self>, input: Box<dyn Any>) -> Freer<I, Box<dyn Any>> {
+              let value = *input.downcast::<A>().expect("Type mismatch in arrow application");
+              (self.function)(value).map(|b| Box::new(b) as Box<dyn Any>)
+          }
+      }
+
+      /// 継続キュー - O(1) append, O(1) amortized dequeue
+      struct ContinuationQueue<I> {
+          arrows: VecDeque<Box<dyn TypeErasedArrow<I>>>,
+      }
+
+      impl<I> ContinuationQueue<I> {
+          fn new() -> Self {
+              Self { arrows: VecDeque::new() }
+          }
+
+          /// O(1) で継続を追加
+          fn push<A: 'static, B: 'static, F>(mut self, arrow: F) -> Self
+          where
+              F: FnOnce(A) -> Freer<I, B> + 'static,
+              I: 'static,
+          {
+              self.arrows.push_back(Box::new(Arrow {
+                  function: arrow,
+                  _phantom: PhantomData,
+              }));
+              self
+          }
+
+          /// O(1) で先頭の継続を取り出し
+          fn pop(&mut self) -> Option<Box<dyn TypeErasedArrow<I>>> {
+              self.arrows.pop_front()
+          }
+
+          fn is_empty(&self) -> bool {
+              self.arrows.is_empty()
+          }
+
+          /// 2つのキューを結合（O(n) where n is length of other）
+          fn concat(mut self, mut other: Self) -> Self {
+              self.arrows.append(&mut other.arrows);
+              self
+          }
+      }
+      ```
+
+  freer_structure_modification:
+    description: |
+      ## Freer 構造の変更
+
+      ### 変更前
+
+      ```rust
+      pub enum Freer<I, A> {
+          Pure(A),
+          Impure {
+              instruction: I,
+              continuation: TypeErasedContinuation<I, A>,
+          },
+          FlatMapInternal(ContinuationBox<I, A>),
+      }
+      ```
+
+      ### 変更後
+
+      ```rust
+      pub enum Freer<I, A> {
+          Pure(A),
+          Impure {
+              instruction: I,
+              /// 型消去された継続キュー
+              queue: ContinuationQueue<I>,
+              /// 最終結果の型情報（型消去のため PhantomData で保持）
+              _result: PhantomData<A>,
+          },
+          // FlatMapInternal は削除（ContinuationQueue が代替）
+      }
+      ```
+
+      注意: `FlatMapInternal` バリアントは削除する。
+      ContinuationQueue がその役割を完全に代替するため。
+
+  flat_map_optimization:
+    description: |
+      ## flat_map の最適化
+
+      ### 変更前（O(n^2)）
+
+      ```rust
+      pub fn flat_map<B: 'static, F>(self, function: F) -> Freer<I, B>
+      where
+          F: FnOnce(A) -> Freer<I, B> + 'static,
+      {
+          match self {
+              Self::Pure(a) => function(a),
+              _ => Freer::FlatMapInternal(ContinuationBox::new(FlatMapContinuation {
+                  freer: self,
+                  function,
+              })),
+          }
+      }
+      ```
+
+      ### 変更後（O(1)）
+
+      ```rust
+      pub fn flat_map<B: 'static, F>(self, function: F) -> Freer<I, B>
+      where
+          F: FnOnce(A) -> Freer<I, B> + 'static,
+      {
+          match self {
+              Self::Pure(a) => function(a),
+              Self::Impure { instruction, queue, .. } => {
+                  // キューに継続を追加（O(1)）
+                  Freer::Impure {
+                      instruction,
+                      queue: queue.push(function),
+                      _result: PhantomData,
+                  }
+              }
+          }
+      }
+      ```
+
+  interpret_optimization:
+    description: |
+      ## interpret の最適化
+
+      QueueStack を使用し、concat を使わない設計で O(n) を保証する。
+      詳細な実装は「7. interpret の最適化」要件を参照。
+
+# 要件一覧
+requirements:
+  # ============================================================================
+  # 1. TypeErasedArrow トレイト
+  # ============================================================================
+  - id: type_erased_arrow
+    name: "TypeErasedArrow トレイト"
+    priority: critical
+    description: |
+      型消去された継続を表すトレイト。
+      異なる入力型・出力型を持つ継続を統一的に扱う。
+
+    internal_structure:
+      description: |
+        ```rust
+        /// 型消去されたアロー（継続）
+        ///
+        /// `A -> Freer<I, B>` を `Box<dyn Any> -> Freer<I, Box<dyn Any>>` に変換する。
+        /// 注意: Send 境界は追加しない（現行 Freer と互換性を維持）
+        trait TypeErasedArrow<I> {
+            /// 型消去された入力を受け取り、型消去された出力を返す
+            fn apply(self: Box<Self>, input: Box<dyn Any>) -> Freer<I, Box<dyn Any>>;
+        }
+
+        /// 型付きアロー（flat_map 用）
+        struct Arrow<I, A, B, F>
+        where
+            F: FnOnce(A) -> Freer<I, B>,
+        {
+            function: F,
+            _phantom: PhantomData<fn(A) -> (I, B)>,
+        }
+
+        /// 抽出アロー（lift_instruction 用）
+        struct ExtractArrow<R, E>
+        where
+            E: FnOnce(Box<dyn Any>) -> R,
+        {
+            extract: E,
+            _phantom: PhantomData<R>,
+        }
+        ```
+
+    tests:
+      - category: "TypeErasedArrow テスト"
+        cases:
+          - name: "Arrow の apply が正しく型変換を行う"
+            test: |
+              let arrow = Arrow {
+                  function: |x: i32| Freer::<(), i32>::pure(x * 2),
+                  _phantom: PhantomData,
+              };
+              let boxed_arrow: Box<dyn TypeErasedArrow<()>> = Box::new(arrow);
+              let result = boxed_arrow.apply(Box::new(21i32));
+              // result は Freer<(), Box<dyn Any>> で、中身は 42
+
+  # ============================================================================
+  # 2. ContinuationQueue 型
+  # ============================================================================
+  - id: continuation_queue
+    name: "ContinuationQueue 型"
+    priority: critical
+    description: |
+      O(1) append / O(1) amortized dequeue を提供する継続キュー。
+
+    internal_structure:
+      description: |
+        ```rust
+        /// 継続キュー - 型消去されたアローのシーケンス
+        ///
+        /// # 計算量
+        /// - push: O(1)
+        /// - pop: O(1) amortized
+        /// - concat: O(n) where n is the length of other（interpret では使用しない）
+        /// - is_empty: O(1)
+        struct ContinuationQueue<I> {
+            arrows: VecDeque<Box<dyn TypeErasedArrow<I>>>,
+        }
+        ```
+
+    methods:
+      - name: new
+        signature: "fn new() -> Self"
+        description: "空のキューを作成"
+        complexity: "O(1)"
+
+      - name: push
+        signature: |
+          fn push<A: 'static, B: 'static, F>(self, arrow: F) -> Self
+          where F: FnOnce(A) -> Freer<I, B> + 'static
+        description: "継続をキューの末尾に追加"
+        complexity: "O(1)"
+
+      - name: pop
+        signature: "fn pop(&mut self) -> Option<Box<dyn TypeErasedArrow<I>>>"
+        description: |
+          キューの先頭から継続を取り出し。
+          注意: &mut self を取るが、このメソッドは Freer 内部実装でのみ使用され
+          外部に公開されないため、参照透過性は維持される。
+        visibility: "private (interpret 内部でのみ使用)"
+        complexity: "O(1) amortized"
+
+      - name: is_empty
+        signature: "fn is_empty(&self) -> bool"
+        description: "キューが空かどうか"
+        complexity: "O(1)"
+
+      - name: concat
+        signature: "fn concat(self, other: Self) -> Self"
+        description: |
+          2つのキューを結合（VecDeque::append は other の全要素を移動）。
+          注意: interpret では QueueStack を使用するため concat は使わない。
+          このメソッドは将来の拡張用に提供。
+        complexity: "O(n) where n is the length of other"
+
+    tests:
+      - category: "ContinuationQueue テスト"
+        cases:
+          - name: "new で空のキューを作成"
+            test: |
+              let queue: ContinuationQueue<()> = ContinuationQueue::new();
+              assert!(queue.is_empty());
+
+          - name: "push と pop の動作"
+            test: |
+              let queue: ContinuationQueue<()> = ContinuationQueue::new()
+                  .push(|x: i32| Freer::<(), i32>::pure(x + 1))
+                  .push(|x: i32| Freer::<(), i32>::pure(x * 2));
+              assert!(!queue.is_empty());
+              // pop で FIFO 順に取り出せる
+
+          - name: "concat の動作"
+            test: |
+              let queue1 = ContinuationQueue::new().push(|x: i32| Freer::pure(x + 1));
+              let queue2 = ContinuationQueue::new().push(|x: i32| Freer::pure(x * 2));
+              let combined = queue1.concat(queue2);
+              // combined は 2 つの継続を持つ
+
+  # ============================================================================
+  # 3. QueueStack 型
+  # ============================================================================
+  - id: queue_stack
+    name: "QueueStack 型"
+    priority: critical
+    description: |
+      interpret 時に使用するキューのスタック。
+      concat を使わず O(n) の計算量を保証する。
+
+    internal_structure:
+      description: |
+        ```rust
+        /// 継続キューのスタック（O(n²) 回避用）
+        struct QueueStack<I> {
+            /// 現在処理中のキュー
+            current: ContinuationQueue<I>,
+            /// 処理待ちのキュー（スタック）
+            /// Vec を使用（push/pop のみなので VecDeque は不要）
+            pending: Vec<ContinuationQueue<I>>,
+        }
+
+        impl<I> QueueStack<I> {
+            fn new(initial: ContinuationQueue<I>) -> Self {
+                Self {
+                    current: initial,
+                    pending: Vec::new(),
+                }
+            }
+
+            /// 新しいキューをスタックにプッシュ（O(1)）
+            fn push_queue(&mut self, queue: ContinuationQueue<I>) {
+                let old = std::mem::replace(&mut self.current, queue);
+                if !old.is_empty() {
+                    self.pending.push(old);
+                }
+            }
+
+            /// 次のアローを取得（O(1) amortized）
+            fn pop(&mut self) -> Option<Box<dyn TypeErasedArrow<I>>> {
+                loop {
+                    if let Some(arrow) = self.current.pop() {
+                        return Some(arrow);
+                    }
+                    self.current = self.pending.pop()?;
+                }
+            }
+        }
+        ```
+
+    methods:
+      - name: new
+        signature: "fn new(initial: ContinuationQueue<I>) -> Self"
+        description: "初期キューからスタックを作成"
+        complexity: "O(1)"
+
+      - name: push_queue
+        signature: "fn push_queue(&mut self, queue: ContinuationQueue<I>)"
+        description: "新しいキューをスタックにプッシュ"
+        complexity: "O(1)"
+
+      - name: pop
+        signature: "fn pop(&mut self) -> Option<Box<dyn TypeErasedArrow<I>>>"
+        description: "次のアローを取得（キューが空なら次のキューに移動）"
+        complexity: "O(1) amortized"
+
+    tests:
+      - category: "QueueStack テスト"
+        cases:
+          - name: "単一キューからの pop"
+            test: |
+              let queue = ContinuationQueue::new()
+                  .push(|x: i32| Freer::<(), i32>::pure(x + 1));
+              let mut stack = QueueStack::new(queue);
+              assert!(stack.pop().is_some());
+              assert!(stack.pop().is_none());
+
+          - name: "複数キューの処理順序"
+            test: |
+              // 最初のキュー
+              let queue1 = ContinuationQueue::new()
+                  .push(|x: i32| Freer::<(), i32>::pure(x + 1));
+              let mut stack = QueueStack::new(queue1);
+
+              // 新しいキューをプッシュ
+              let queue2 = ContinuationQueue::new()
+                  .push(|x: i32| Freer::<(), i32>::pure(x * 2));
+              stack.push_queue(queue2);
+
+              // queue2 から pop、次に queue1 から pop
+              // (スタック順序で処理)
+
+  # ============================================================================
+  # 4. Freer 構造の修正
+  # ============================================================================
+  - id: freer_structure_modification
+    name: "Freer 構造の修正"
+    priority: critical
+    description: |
+      Freer 型を ContinuationQueue を使用する形式に変更する。
+
+    internal_structure:
+      description: |
+        ### 変更前
+        ```rust
+        pub enum Freer<I, A> {
+            Pure(A),
+            Impure {
+                instruction: I,
+                continuation: TypeErasedContinuation<I, A>,
+            },
+            FlatMapInternal(ContinuationBox<I, A>),
+        }
+        ```
+
+        ### 変更後
+        ```rust
+        pub enum Freer<I, A> {
+            Pure(A),
+            Impure {
+                instruction: I,
+                queue: ContinuationQueue<I>,
+                /// 最終結果の型情報（PhantomData）
+                _result: PhantomData<A>,
+            },
+        }
+        ```
+
+        注意: `FlatMapInternal` バリアントは削除する。
+        ContinuationQueue がその役割を完全に代替する。
+
+    considerations:
+      - name: "後方互換性"
+        description: |
+          公開 API（pure, lift_instruction, map, flat_map, interpret など）は
+          変更しない。内部実装のみの変更とする。
+
+      - name: "Debug/Display トレイト"
+        description: |
+          Debug と Display の実装を更新する。
+          FlatMapInternal が削除されるため、対応するケースも削除。
+
+      - name: "既存テストの修正"
+        description: |
+          FlatMapInternal を削除するため、以下のテストを修正する:
+          - test_map_impure_creates_flatmap_internal
+          - test_flat_map_impure_creates_flatmap_internal
+          - test_debug_flat_map_internal
+          - test_display_flat_map_internal
+
+          これらのテストは FlatMapInternal の存在を前提としているため、
+          新しい Impure { queue } 構造に合わせて修正する。
+
+  # ============================================================================
+  # 5. lift_instruction の修正
+  # ============================================================================
+  - id: lift_instruction_modification
+    name: "lift_instruction の修正"
+    priority: critical
+    description: |
+      lift_instruction を ContinuationQueue を使用する形式に変更する。
+
+    implementation:
+      description: |
+        ```rust
+        pub fn lift_instruction<R: 'static>(
+            instruction: I,
+            extract: impl FnOnce(Box<dyn Any>) -> R + 'static,
+        ) -> Freer<I, R> {
+            Freer::Impure {
+                instruction,
+                queue: ContinuationQueue::new().push_extract(extract),
+                _result: PhantomData,
+            }
+        }
+        ```
+
+        ContinuationQueue に `push_extract` メソッドを追加:
+        ```rust
+        impl<I: 'static> ContinuationQueue<I> {
+            /// ExtractArrow を追加（lift_instruction 用）
+            fn push_extract<R: 'static, E>(mut self, extract: E) -> Self
+            where
+                E: FnOnce(Box<dyn Any>) -> R + 'static,
+            {
+                self.arrows.push_back(Box::new(ExtractArrow {
+                    extract,
+                    _phantom: PhantomData,
+                }));
+                self
+            }
+        }
+        ```
+
+  # ============================================================================
+  # 6. flat_map の最適化
+  # ============================================================================
+  - id: flat_map_optimization
+    name: "flat_map の最適化"
+    priority: critical
+    description: |
+      flat_map を O(1) で実行できるように最適化する。
+
+    implementation:
+      description: |
+        ```rust
+        pub fn flat_map<B: 'static, F>(self, function: F) -> Freer<I, B>
+        where
+            F: FnOnce(A) -> Freer<I, B> + 'static,
+        {
+            match self {
+                Self::Pure(a) => function(a),
+                Self::Impure { instruction, queue, .. } => {
+                    Freer::Impure {
+                        instruction,
+                        queue: queue.push(function),
+                        _result: PhantomData,
+                    }
+                }
+            }
+        }
+        ```
+
+    complexity: "O(1)"
+
+    tests:
+      - category: "flat_map 最適化テスト"
+        cases:
+          - name: "Pure に対する flat_map"
+            test: |
+              let result = Freer::<(), i32>::pure(21).flat_map(|x| Freer::pure(x * 2));
+              // Pure(42) になる
+
+          - name: "Impure に対する flat_map（O(1) 確認）"
+            test: |
+              // 深い flat_map チェーンでも構築時間が線形であることを確認
+              let start = Instant::now();
+              let mut freer = test_get();
+              for _ in 0..1000 {
+                  freer = freer.flat_map(|x| Freer::pure(x + 1));
+              }
+              let construction_time = start.elapsed();
+              // 構築時間は O(n) であるべき（O(n^2) ではない）
+
+  # ============================================================================
+  # 7. interpret の最適化
+  # ============================================================================
+  - id: interpret_optimization
+    name: "interpret の最適化"
+    priority: critical
+    description: |
+      interpret を ContinuationQueue を使用する形式に変更する。
+
+    implementation:
+      description: |
+        ```rust
+        pub fn interpret<Handler>(self, mut handler: Handler) -> A
+        where
+            Handler: FnMut(I) -> Box<dyn Any>,
+        {
+            enum LoopState<I> {
+                /// 命令を実行する状態
+                ExecuteInstruction {
+                    instruction: I,
+                    queue_stack: QueueStack<I>,
+                },
+                /// 継続を適用する状態
+                ApplyContinuation {
+                    value: Box<dyn Any>,
+                    queue_stack: QueueStack<I>,
+                },
+            }
+
+            // 初期状態の構築
+            let mut state = match self {
+                Freer::Pure(a) => return a,
+                Freer::Impure { instruction, queue, .. } => {
+                    LoopState::ExecuteInstruction {
+                        instruction,
+                        queue_stack: QueueStack::new(queue),
+                    }
+                }
+            };
+
+            loop {
+                state = match state {
+                    LoopState::ExecuteInstruction { instruction, queue_stack } => {
+                        let result = handler(instruction);
+                        LoopState::ApplyContinuation { value: result, queue_stack }
+                    }
+                    LoopState::ApplyContinuation { value, mut queue_stack } => {
+                        match queue_stack.pop() {
+                            None => {
+                                // 全ての継続を処理完了
+                                return *value.downcast::<A>()
+                                    .expect("Final result type mismatch");
+                            }
+                            Some(arrow) => {
+                                let next = arrow.apply(value);
+                                match next {
+                                    Freer::Pure(boxed) => {
+                                        // Pure なら次の継続を適用
+                                        LoopState::ApplyContinuation {
+                                            value: boxed,
+                                            queue_stack,
+                                        }
+                                    }
+                                    Freer::Impure { instruction, queue, .. } => {
+                                        // Impure なら新しいキューをスタックにプッシュ
+                                        // concat は使わない（O(n²) 回避）
+                                        queue_stack.push_queue(queue);
+                                        LoopState::ExecuteInstruction {
+                                            instruction,
+                                            queue_stack,
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                };
+            }
+        }
+        ```
+
+    tests:
+      - category: "interpret 最適化テスト"
+        cases:
+          - name: "深い flat_map チェーンの実行時間"
+            test: |
+              // 1000 深度で約 70ms 以内に完了することを確認
+              let mut freer = test_get();
+              for _ in 0..1000 {
+                  freer = freer.flat_map(|x| test_put(x + 1).then(test_get()));
+              }
+              let start = Instant::now();
+              let (result, state) = run_state_program(freer, 0);
+              let elapsed = start.elapsed();
+              assert!(elapsed < Duration::from_millis(100));
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - requirement: "flat_map の構築コスト"
+      description: |
+        n 回の flat_map 呼び出しで O(n) のコスト（現行 O(n^2) から改善）。
+        各 flat_map は O(1) で完了する。
+
+    - requirement: "interpret の実行コスト"
+      description: |
+        n 個の命令を持つプログラムの interpret は O(n) で完了。
+        目標: 1000 命令で約 70ms（現行 6.72s の 1/100）。
+
+    - requirement: "メモリ使用量"
+      description: |
+        継続キューのメモリ使用量は O(n)（n は継続の数）。
+        Box<dyn TypeErasedArrow> のオーバーヘッドがあるが、
+        ネストしたクロージャよりも効率的。
+
+  compatibility:
+    - requirement: "公開 API の互換性"
+      description: |
+        以下の公開 API は変更しない:
+        - Freer::pure
+        - Freer::lift_instruction
+        - Freer::map
+        - Freer::flat_map
+        - Freer::and_then
+        - Freer::then
+        - Freer::interpret
+
+    - requirement: "Monad 則の維持"
+      description: |
+        改善後も Monad 則を満たすことを確認:
+        - Left Identity: Freer::pure(a).flat_map(f) == f(a)
+        - Right Identity: m.flat_map(Freer::pure) == m
+        - Associativity: m.flat_map(f).flat_map(g) == m.flat_map(|x| f(x).flat_map(g))
+
+    - requirement: "スタック安全性の維持"
+      description: |
+        深い flat_map チェーン（10,000+ レベル）でも
+        スタックオーバーフローしないことを維持。
+
+  testing:
+    - requirement: "既存テストのパス"
+      description: |
+        src/control/freer.rs 内の全既存テストがパスすること。
+
+    - requirement: "性能ベンチマーク"
+      description: |
+        benches/freer_bench.rs の deep_flat_map_with_instructions ベンチマークで
+        改善を確認:
+        - 深度 100: < 1ms
+        - 深度 500: < 10ms
+        - 深度 1000: < 100ms
+
+    - requirement: "Monad 則のプロパティテスト"
+      description: |
+        proptest を使用して Monad 則が維持されていることを確認。
+
+# 設計上の考慮事項
+design_considerations:
+  - id: type_safety_tradeoff
+    name: "型安全性のトレードオフ"
+    description: |
+      TypeErasedArrow は Box<dyn Any> を使用するため、
+      コンパイル時の型安全性は限定的。
+      これは現行の Freer 実装と同様のトレードオフであり、
+      Rust の HKT 欠如による制約。
+      DSL 設計者が型の整合性を保証する責任を持つ。
+
+  - id: panic_on_type_mismatch
+    name: "型不一致時の panic の正当化"
+    description: |
+      TypeErasedArrow::apply で downcast が失敗した場合は panic する。
+      これは以下の理由から意図的な設計:
+
+      1. 型不一致は DSL 設計者のバグを示す
+      2. 回復不可能なエラーであり、Result を返しても意味がない
+      3. lift_instruction の extract 関数も同様に panic する設計
+      4. 現行の Freer 実装と一貫した挙動
+
+      将来的に interpret_result: Result<A, FreerError> の提供を検討する可能性はある。
+
+  - id: internal_mutability_justification
+    name: "内部可変性の正当化"
+    description: |
+      ContinuationQueue は内部で VecDeque を使用するが、
+      これは以下の点で関数型プログラミングの原則と両立する:
+
+      1. 外部 API は不変: push(self) -> Self で新しい値を返す
+      2. 副作用なし: 外部から観測可能な状態変更はない
+      3. 参照透過性: 同じ入力に対して常に同じ出力を返す
+
+      これは Haskell の ST モナドや Clojure の transient と
+      同様のアプローチ。
+
+  - id: type_erasure_overhead
+    name: "型消去のオーバーヘッド"
+    description: |
+      TypeErasedArrow は Box<dyn Any> を使用するため、
+      各継続適用時に downcast のオーバーヘッドがある。
+
+      しかし、このオーバーヘッドは O(n) であり、
+      現行の O(n^2) と比較すると無視できるレベル。
+
+  - id: vecdeque_vs_functional_queue
+    name: "VecDeque vs 純粋関数型キュー"
+    description: |
+      ContinuationQueue の内部実装として VecDeque を使用する。
+      純粋関数型のキュー（例: Okasaki's banker's queue）も検討したが、
+      以下の理由から VecDeque を選択:
+
+      1. Rust の標準ライブラリで提供されており信頼性が高い
+      2. O(1) amortized の push_back/pop_front を提供
+      3. 実装の複雑さを避けられる
+
+      外部から見た挙動は純粋関数的に保つ（所有権を取り新しい値を返す）。
+
+  - id: queue_stack_design
+    name: "キュースタック設計（O(n²) 回避）"
+    description: |
+      ## 問題
+
+      interpret ループ内で `inner_queue.concat(queue)` を呼び出すと、
+      同じ要素が複数回移動され O(n²) になる。
+
+      例:
+      ```
+      instruction1.flat_map(|_| instruction2).flat_map(|_| instruction3)
+      ```
+      この場合、arrow3 は step 4 と step 10 で2回移動される。
+
+      ## 解決策: キュースタック
+
+      concat を使わず、キューのスタックを保持する:
+
+      ```rust
+      struct QueueStack<I> {
+          /// 現在のキューと、処理待ちのキューのスタック
+          current: ContinuationQueue<I>,
+          pending: Vec<ContinuationQueue<I>>,
+      }
+
+      impl<I> QueueStack<I> {
+          /// 新しいキューをスタックにプッシュ
+          fn push_queue(&mut self, queue: ContinuationQueue<I>) {
+              let old = std::mem::replace(&mut self.current, queue);
+              if !old.is_empty() {
+                  self.pending.push(old);
+              }
+          }
+
+          /// 次のアローを取得（現在のキューが空なら次のキューに移動）
+          fn pop(&mut self) -> Option<Box<dyn TypeErasedArrow<I>>> {
+              loop {
+                  if let Some(arrow) = self.current.pop() {
+                      return Some(arrow);
+                  }
+                  // 現在のキューが空なら、スタックから次のキューを取得
+                  self.current = self.pending.pop()?;
+              }
+          }
+      }
+      ```
+
+      ## 計算量
+
+      - push_queue: O(1)
+      - pop: O(1) amortized（各キューは一度だけ処理される）
+      - 全体: O(n) where n = 継続の総数
+
+      concat は不要になり、各要素は一度だけ処理される。
+
+  - id: phantom_data_usage
+    name: "PhantomData の使用"
+    description: |
+      Freer::Impure に PhantomData<A> を追加する理由:
+      - ContinuationQueue は型消去されているため、最終結果型 A の情報が失われる
+      - PhantomData で A の型情報を保持し、interpret 時の型安全性を確保
+
+  - id: send_bound
+    name: "Send 境界の考慮"
+    description: |
+      TypeErasedArrow に Send 境界は追加しない。
+      現行の Freer は Send を要求していないため、
+      互換性を維持する。
+
+      将来、非同期サポート時に Send 版を別途提供する可能性はあるが、
+      本改善のスコープ外とする。
+
+# 実装順序
+implementation_order:
+  - phase: "1"
+    name: "TypeErasedArrow と ContinuationQueue の実装"
+    description: |
+      基本的なデータ構造を実装し、単体テストを作成。
+    duration_estimate: "1-2 days"
+    deliverables:
+      - TypeErasedArrow トレイトと Arrow 構造体
+      - ContinuationQueue 構造体
+      - 単体テスト
+
+  - phase: "2"
+    name: "Freer 構造の修正"
+    description: |
+      Freer 型を ContinuationQueue ベースに変更。
+      FlatMapInternal を削除し、Impure を修正。
+    duration_estimate: "1 day"
+    deliverables:
+      - Freer 型の新構造
+      - lift_instruction の修正
+      - flat_map の修正
+
+  - phase: "3"
+    name: "interpret の最適化"
+    description: |
+      interpret を新しい ContinuationQueue ベースで実装。
+    duration_estimate: "1-2 days"
+    deliverables:
+      - interpret の新実装
+      - map, and_then, then の調整
+
+  - phase: "4"
+    name: "テストと性能検証"
+    description: |
+      既存テストのパス確認、性能ベンチマーク、Monad 則検証。
+    duration_estimate: "1 day"
+    deliverables:
+      - 全既存テストのパス
+      - 性能ベンチマーク結果
+      - Monad 則のプロパティテスト
+
+# 将来の拡張
+future_extensions:
+  - id: further_optimization
+    name: "さらなる最適化"
+    description: |
+      - Small Arrow Optimization: 小さな継続はインラインに保持
+      - Arena Allocation: 継続の割り当てをアリーナで管理
+    rationale: |
+      現時点では ContinuationQueue で十分な性能改善が見込めるため、
+      これらの最適化は将来のベンチマーク結果に基づいて検討。
+
+  - id: parallel_interpretation
+    name: "並列インタープリテーション"
+    description: |
+      独立した命令を並列に実行する機能。
+    rationale: |
+      現時点ではシーケンシャルな実行のみをサポート。
+      並列化は Extensible Effects との統合時に検討。
+
+# 参考文献
+references:
+  - title: "Reflection without Remorse: Revealing a hidden sequence to speed up monadic reflection"
+    authors: "Atze van der Ploeg, Oleg Kiselyov"
+    url: "https://okmij.org/ftp/Haskell/zseq.pdf"
+    year: 2014
+    description: |
+      継続チェーンの効率的な表現に関する論文。
+      Cayley representation を使用して O(1) の継続合成を実現する方法を説明。
+
+  - title: "freer-simple: A friendly effect system for Haskell"
+    url: "https://hackage.haskell.org/package/freer-simple"
+    description: |
+      Reflection without Remorse を採用した Haskell の Freer モナド実装。
+
+  - title: "Purely Functional Data Structures"
+    authors: "Chris Okasaki"
+    year: 1998
+    description: |
+      純粋関数型キューの実装パターン。
+      本実装では VecDeque を使用するが、理論的背景として参照。

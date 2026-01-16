@@ -51,7 +51,7 @@
 | `Option.filter`       | `Option::filter` (std)                       | 述語でフィルタ             |
 | `Option.defaultValue` | `Option::unwrap_or` (std)                    | デフォルト値を提供         |
 | `Option.defaultWith`  | `Option::unwrap_or_else` (std)               | 遅延デフォルト             |
-| `Option.orElse`       | `Option::or` (std)                           | 代替 Option                |
+| `Option.orElse`       | `Alternative::alt`                           | 代替 Option                |
 | `Option.orElseWith`   | `Option::or_else` (std)                      | 遅延代替                   |
 | `Option.isSome`       | `Option::is_some` (std)                      | Some かチェック            |
 | `Option.isNone`       | `Option::is_none` (std)                      | None かチェック            |
@@ -1178,6 +1178,7 @@ fn add<T: Semigroup>(a: T, b: T) -> T {
 | `Map<'K, 'V>` | `PersistentTreeMap<K, V>` | 不変の順序付きマップ          |
 | `Set<'T>`     | `PersistentHashSet<T>`    | 不変の集合                    |
 | -             | `PersistentVector<T>`     | 不変ベクタ (Clojure スタイル) |
+| -             | `PersistentDeque<T>`      | 不変両端キュー (Finger Tree)  |
 | -             | `PersistentHashMap<K, V>` | 不変ハッシュマップ (HAMT)     |
 
 ### Map 操作

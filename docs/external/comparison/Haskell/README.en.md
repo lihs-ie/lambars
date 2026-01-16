@@ -69,6 +69,7 @@ This document provides a comprehensive comparison between Haskell functional pro
 | Effect membership        | `Member e r`                     | `Member<E, Index>` trait                   |
 | Lazy                     | Default (thunks)                 | `Lazy<A>` type                             |
 | Trampoline               | Trampolining                     | `Trampoline<A>` type                       |
+| Freer Monad              | `Free f a` / `Freer f a`         | `Freer<I, A>` type                         |
 
 ---
 
@@ -704,8 +705,8 @@ let contents = io.run_unsafe();
 | `maybeToList ma` | `Option::into_iter`                  | To list                |
 | `catMaybes xs`   | `Iterator::flatten`                  | Filter Nothings        |
 | `mapMaybe f xs`  | `Iterator::filter_map`               | Map and filter         |
-| `ma <\|> mb`     | `Option::or`                         | Alternative            |
-| `guard cond`     | `if cond { Some(()) } else { None }` | Guard in monad         |
+| `ma <\|> mb`     | `Alternative::alt`                   | Alternative            |
+| `guard cond`     | `Alternative::guard`                 | Guard in monad         |
 
 ### Either / Result
 
@@ -715,7 +716,7 @@ let contents = io.run_unsafe();
 | `Left e`           | `Err(e)`                              | Construct Left/Err   |
 | `fmap f ea`        | `Functor::fmap` / `Result::map`       | Map over Right       |
 | `first f ea`       | `Result::map_err`                     | Map over Left        |
-| `bimap f g ea`     | Manual                                | Map both sides       |
+| `bimap f g ea`     | `Bifunctor::bimap`                    | Map both sides       |
 | `ea >>= f`         | `Monad::flat_map`                     | Bind                 |
 | `either f g ea`    | `Result::map_or_else`                 | Fold Either          |
 | `isRight ea`       | `Result::is_ok`                       | Test for Right       |
@@ -758,7 +759,7 @@ biMapped = bimap length show (Right 42)
 
 ```rust
 // lambars / std
-use lambars::typeclass::{Functor, Monad};
+use lambars::typeclass::{Bifunctor, Functor, Monad};
 
 // Option operations
 let doubled: Option<i32> = Some(21).fmap(|x| x * 2);
@@ -774,11 +775,9 @@ let mapped: Result<i32, String> = Ok(21).fmap(|x| x * 2);
 let left_mapped: Result<i32, usize> = Err("error".to_string()).map_err(|e| e.len());
 // left_mapped = Err(5)
 
-// bimap equivalent
+// Bifunctor::bimap (first = error transform, second = success transform)
 let result: Result<i32, String> = Ok(42);
-let bi_mapped: Result<String, usize> = result
-    .map(|x| x.to_string())
-    .map_err(|e| e.len());
+let bi_mapped: Result<String, usize> = result.bimap(|e| e.len(), |x| x.to_string());
 // bi_mapped = Ok("42")
 ```
 
@@ -2217,6 +2216,26 @@ fn log_computation() -> Eff<LogEffect, i32> {
 | `S.union s1 s2`  | `union` method         | Union        |
 | `S.intersection` | `intersection` method  | Intersection |
 | `S.difference`   | `difference` method    | Difference   |
+
+### Deques (Finger Tree)
+
+| Haskell              | lambars                        | Description                 |
+| -------------------- | ------------------------------ | --------------------------- |
+| `Data.Sequence`      | `PersistentDeque<A>`           | Double-ended queue          |
+| `Seq.empty`          | `PersistentDeque::new`         | Empty deque                 |
+| `Seq.singleton x`    | `PersistentDeque::singleton`   | Single element              |
+| `x <| xs`            | `push_front` method            | Prepend element             |
+| `xs |> x`            | `push_back` method             | Append element              |
+| `Seq.viewl xs`       | `pop_front` method             | View from left              |
+| `Seq.viewr xs`       | `pop_back` method              | View from right             |
+| `Seq.length xs`      | `len` method                   | Length                      |
+| `Seq.null xs`        | `is_empty` method              | Check if empty              |
+| `xs <> ys`           | `concat` method                | Concatenate (O(log min))    |
+| `Seq.index xs i`     | `get` method                   | Index access                |
+| `Seq.update i x xs`  | (not yet implemented)          | Update at index             |
+| `Seq.take n xs`      | (not yet implemented)          | Take first n                |
+| `Seq.drop n xs`      | (not yet implemented)          | Drop first n                |
+| `Seq.splitAt n xs`   | (not yet implemented)          | Split at index              |
 
 ### Code Examples
 

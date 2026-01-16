@@ -49,7 +49,7 @@ This document provides a comprehensive comparison between F# functional programm
 | `Option.filter`       | `Option::filter` (std)                       | Filter based on predicate |
 | `Option.defaultValue` | `Option::unwrap_or` (std)                    | Provide default           |
 | `Option.defaultWith`  | `Option::unwrap_or_else` (std)               | Lazy default              |
-| `Option.orElse`       | `Option::or` (std)                           | Alternative option        |
+| `Option.orElse`       | `Alternative::alt`                           | Alternative option        |
 | `Option.orElseWith`   | `Option::or_else` (std)                      | Lazy alternative          |
 | `Option.isSome`       | `Option::is_some` (std)                      | Check if Some             |
 | `Option.isNone`       | `Option::is_none` (std)                      | Check if None             |
@@ -1176,6 +1176,7 @@ fn add<T: Semigroup>(a: T, b: T) -> T {
 | `Map<'K, 'V>` | `PersistentTreeMap<K, V>` | Immutable ordered map            |
 | `Set<'T>`     | `PersistentHashSet<T>`    | Immutable set                    |
 | -             | `PersistentVector<T>`     | Immutable vector (Clojure-style) |
+| -             | `PersistentDeque<T>`      | Immutable deque (Finger Tree)    |
 | -             | `PersistentHashMap<K, V>` | Immutable hash map (HAMT)        |
 
 ### Map Operations

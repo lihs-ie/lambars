@@ -4,9 +4,11 @@
 //! programming patterns:
 //!
 //! - [`Either`]: A value that can be one of two types (used by Trampoline)
-//! - [`Lazy`]: Lazy evaluation with memoization
+//! - [`Lazy`]: Lazy evaluation with memoization (single-threaded)
+//! - [`ConcurrentLazy`]: Thread-safe lazy evaluation with memoization
 //! - [`Trampoline`]: Stack-safe recursion
 //! - [`Continuation`]: Continuation monad for CPS
+//! - [`Freer`]: Freer monad for DSL construction
 //!
 //! # Examples
 //!
@@ -24,6 +26,25 @@
 //! let value = lazy.force();
 //! // Now "Computing..." is printed and value is 42
 //! assert_eq!(*value, 42);
+//! ```
+//!
+//! ## Thread-Safe Lazy Evaluation
+//!
+//! ```rust
+//! use lambars::control::ConcurrentLazy;
+//! use std::sync::Arc;
+//! use std::thread;
+//!
+//! let lazy = Arc::new(ConcurrentLazy::new(|| 42));
+//!
+//! let handles: Vec<_> = (0..10).map(|_| {
+//!     let lazy = Arc::clone(&lazy);
+//!     thread::spawn(move || *lazy.force())
+//! }).collect();
+//!
+//! for handle in handles {
+//!     assert_eq!(handle.join().unwrap(), 42);
+//! }
 //! ```
 //!
 //! ## Stack-Safe Recursion
@@ -47,12 +68,16 @@
 //! assert_eq!(result, 3628800);
 //! ```
 
+mod concurrent_lazy;
 mod continuation;
 mod either;
+mod freer;
 mod lazy;
 mod trampoline;
 
+pub use concurrent_lazy::{ConcurrentLazy, ConcurrentLazyPoisonedError};
 pub use continuation::Continuation;
 pub use either::Either;
+pub use freer::Freer;
 pub use lazy::{Lazy, LazyPoisonedError, LazyState};
 pub use trampoline::Trampoline;

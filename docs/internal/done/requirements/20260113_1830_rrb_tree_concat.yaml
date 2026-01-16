@@ -1,0 +1,658 @@
+# RRB-Tree Concatenation 要件定義
+#
+# 概要:
+#   PersistentVector の concat 操作を真の RRB-Tree マージアルゴリズムで
+#   O(log n) の計算量で実装する。
+#
+# 設計方針:
+#   1. 参照透過性: 全ての関数は純粋関数として実装し、副作用を持たない
+#   2. 不変性: 既存のノードを変更せず、新しいノードを生成して返す
+#   3. 効率性: ツリーの高さに比例した O(log n) の計算量を保証する
+#   4. 構造共有: 変更のないサブツリーは共有し、メモリ効率を最大化する
+#
+# 参照:
+#   - Bagwell & Rompf, "RRB-Trees: Efficient Immutable Vectors" (2011)
+#     https://infoscience.epfl.ch/record/169879/files/RMTrees.pdf
+#   - Stucki et al., "RRB Vector: A Practical General Purpose Immutable Sequence" (2015)
+#   - Hypirion, "Improving RRB-Tree Performance through Transience"
+#     https://hypirion.com/thesis.pdf
+#   - Clojure core.rrb-vector implementation notes
+#     https://github.com/clojure/core.rrb-vector/blob/master/doc/rrb-tree-notes.md
+
+version: "1.0.0"
+name: "rrb_tree_concat"
+description: |
+  PersistentVector の concat 操作を RRB-Tree（Relaxed Radix Balanced Tree）の
+  マージアルゴリズムを用いて O(log n) で実装する。
+
+  現在の実装には以下の問題がある:
+  - node_height が O(n) で全ノードを走査している
+  - rebalance_children が空の実装（何もしない）
+  - node_size の計算が Branch ノードで非効率
+  - shift からの高さ計算が行われていない
+
+  RRB-Tree の核となる不変式（Search Step Invariant）を満たすリバランス
+  アルゴリズムを実装し、効率的な連結操作を実現する。
+
+# 背景・動機
+background:
+  problem: |
+    現在の PersistentVector::concat() 実装は以下の問題を抱えている:
+
+    1. 計算量の問題:
+       - node_height が再帰的に全ノードを走査 -> O(n)
+       - これにより concat 全体が O(n) になってしまう
+
+    2. リバランスの欠如:
+       - rebalance_children が空の実装
+       - 連続した concat で不均衡なツリーが生成される
+       - 検索ステップ数が増加し、get/update の性能が劣化
+
+    3. サイズ計算の非効率:
+       - node_size が毎回サブツリーを走査
+       - キャッシュや shift からの計算を行っていない
+
+  motivation: |
+    関数型プログラミングにおいて、永続データ構造の連結操作は頻繁に使用される。
+    Haskell の (++) 演算子、Scala の ++、Clojure の concat などが例である。
+
+    効率的な concat は以下のユースケースで重要:
+    - 分割統治法による並列処理結果のマージ
+    - ストリーミングデータの蓄積
+    - イミュータブルなビルダーパターン
+
+    O(log n) の concat を実現することで、これらのユースケースを
+    実用的な性能で処理できるようになる。
+
+  prior_art:
+    - name: "Clojure PersistentVector / core.rrb-vector"
+      description: |
+        Clojure の標準 PersistentVector は RB-Tree ベースで concat が O(n)。
+        core.rrb-vector ライブラリが RRB-Tree を実装し O(log n) を達成。
+        リバランス戦略として Search Step Invariant を採用。
+
+    - name: "Scala Vector (scala.collection.immutable.Vector)"
+      description: |
+        Scala 2.13 以降の Vector は RRB-Tree ベースの実装。
+        appendedAll メソッドが O(log n) で動作。
+        Transient 最適化も含む。
+
+    - name: "immer (C++)"
+      description: |
+        C++ の永続データ構造ライブラリ。
+        RRB-Tree ベースの flex_vector が concat を O(log n) で実装。
+        構造共有と CoW (Copy-on-Write) を組み合わせた最適化。
+
+    - name: "im-rs (Rust)"
+      description: |
+        Rust の永続データ構造ライブラリ。
+        RRB-Tree ベースの Vector 実装を提供。
+        参照カウントと Arc を使用した構造共有。
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. 高さ計算の効率化
+  # ======================================================================
+  - id: height_calculation
+    name: "shift からのツリー高さ計算"
+    description: |
+      現在の node_height は再帰的に全ノードを走査するため O(n) である。
+      これを shift 値から O(1) で計算する方式に変更する。
+
+      高さの定義:
+      - Leaf ノード: 高さ 1
+      - Branch/RelaxedBranch ノード: 1 + 子の最大高さ
+
+      shift との関係:
+      - shift = (height - 1) * BITS_PER_LEVEL
+      - height = shift / BITS_PER_LEVEL + 1
+
+      注意: flush_tail 後の height は常に shift から計算可能。
+      RelaxedBranch が混在する場合も同様（マージ時に高さを揃えるため）。
+
+    methods:
+      - name: "tree_height"
+        signature: "fn tree_height(&self) -> usize"
+        description: |
+          PersistentVector の shift 値からツリーの高さを計算する。
+          計算量: O(1)
+        examples:
+          - description: "shift = 0 (Leaf のみ) -> height = 1"
+            code: |
+              let vector: PersistentVector<i32> = (0..32).collect();
+              // shift = 5 (BITS_PER_LEVEL), height = 2
+              assert_eq!(vector.tree_height(), 2);
+          - description: "shift = 10 -> height = 3"
+            code: |
+              let vector: PersistentVector<i32> = (0..1024).collect();
+              // shift = 10, height = 3
+              assert_eq!(vector.tree_height(), 3);
+
+    implementations:
+      - type: "PersistentVector<T>"
+        description: |
+          shift / BITS_PER_LEVEL + 1 で高さを計算。
+          ただし、空のベクタや tail のみのベクタでは特別な処理が必要。
+
+  # ======================================================================
+  # 2. ノードサイズ計算の効率化
+  # ======================================================================
+  - id: node_size_calculation
+    name: "ノードサイズの効率的な計算"
+    description: |
+      各ノードが保持する要素数を効率的に計算する。
+
+      現状の問題:
+      - Branch ノードで子ノードを再帰走査 -> O(n)
+      - RelaxedBranch はサイズテーブルで O(1) だが Branch は非効率
+
+      改善策:
+      - 正規の Branch ノード: shift と子の数から計算
+        - 最下層 Branch の各子は最大 32 要素
+        - n 層目の各子は最大 32^n 要素
+      - RelaxedBranch: サイズテーブルの最後の値を使用
+
+    methods:
+      - name: "node_size"
+        signature: "fn node_size(node: &ReferenceCounter<Node<T>>, height: usize) -> usize"
+        description: |
+          ノードが保持する要素の総数を返す。
+          計算量: O(log n) - 各レベルで O(1) の計算
+        examples:
+          - description: "Leaf ノード"
+            code: |
+              // Leaf は elements.len() を返す
+              let leaf = Node::Leaf(ReferenceCounter::from(vec![1, 2, 3]));
+              assert_eq!(node_size(&leaf, 1), 3);
+          - description: "RelaxedBranch ノード"
+            code: |
+              // RelaxedBranch は size_table.last() を返す
+              // size_table = [10, 25, 40] -> 40
+
+    implementations:
+      - type: "Node<T>"
+        description: |
+          パターンマッチで各ノード種別に対応:
+          - Leaf: elements.len()
+          - RelaxedBranch: size_table.last().copied().unwrap_or(0)
+          - Branch: 正確なサイズ計算（後述）
+
+  # ======================================================================
+  # 3. tail フラッシュ
+  # ======================================================================
+  - id: flush_tail
+    name: "tail のツリーへの統合"
+    description: |
+      concat 操作の前処理として、tail バッファをツリーに統合する。
+      これにより、2つのツリーのみをマージすれば良くなる。
+
+      現在の実装は正しく動作しているが、結果の tail が空であることを
+      保証する必要がある。
+
+    methods:
+      - name: "flush_tail"
+        signature: "fn flush_tail(&self) -> Self"
+        description: |
+          tail をツリーに統合し、空の tail を持つ新しいベクタを返す。
+          計算量: O(log n)
+        examples:
+          - description: "tail が空の場合"
+            code: |
+              let vector = PersistentVector::new();
+              let flushed = vector.flush_tail();
+              assert!(flushed.tail.is_empty());
+          - description: "tail に要素がある場合"
+            code: |
+              let vector: PersistentVector<i32> = (0..40).collect();
+              // 32要素がツリーに、8要素が tail に
+              let flushed = vector.flush_tail();
+              assert!(flushed.tail.is_empty());
+              assert_eq!(flushed.len(), 40);
+
+    implementations:
+      - type: "PersistentVector<T>"
+        description: |
+          1. tail が空なら self.clone() を返す
+          2. tail から Leaf ノードを作成
+          3. push_tail_into_node を使用してツリーに統合
+          4. 必要に応じて root overflow を処理
+          5. 空の tail を持つ新しいベクタを返す
+
+  # ======================================================================
+  # 4. ノードラップ（高さ調整）
+  # ======================================================================
+  - id: wrap_node
+    name: "ノードの高さ調整"
+    description: |
+      2つのツリーをマージする前に、高さを揃える必要がある。
+      低い方のツリーの root を Branch ノードでラップして高さを増やす。
+
+    methods:
+      - name: "wrap_node"
+        signature: |
+          fn wrap_node(
+              node: &ReferenceCounter<Node<T>>,
+              current_height: usize,
+              target_height: usize,
+          ) -> ReferenceCounter<Node<T>>
+        description: |
+          ノードを target_height まで Branch ノードでラップする。
+          計算量: O(target_height - current_height) = O(log n)
+        examples:
+          - description: "高さが同じ場合"
+            code: |
+              let node = /* height 2 */;
+              let wrapped = wrap_node(&node, 2, 2);
+              // そのまま返される
+          - description: "高さを増やす場合"
+            code: |
+              let node = /* height 1 (Leaf) */;
+              let wrapped = wrap_node(&node, 1, 3);
+              // Branch(Branch(node)) の構造になる
+
+    implementations:
+      - type: "PersistentVector<T>"
+        description: |
+          current_height >= target_height なら node.clone()
+          そうでなければ、差分の回数だけ Branch でラップ
+
+  # ======================================================================
+  # 5. ノードマージ
+  # ======================================================================
+  - id: merge_nodes
+    name: "ノードのマージ"
+    description: |
+      同じ高さの2つのノードをマージして新しいノードを生成する。
+      これが RRB-Tree concat の核心部分。
+
+      アルゴリズム:
+      1. 高さ 1（Leaf レベル）: 2つの Leaf を RelaxedBranch にまとめる
+      2. 高さ > 1:
+         a. 左ノードの最右子と右ノードの最左子を再帰的にマージ
+         b. 左ノードの残りの子 + マージ結果 + 右ノードの残りの子を結合
+         c. リバランスを適用
+         d. RelaxedBranch として構築
+
+    methods:
+      - name: "merge_nodes"
+        signature: |
+          fn merge_nodes(
+              left: &ReferenceCounter<Node<T>>,
+              right: &ReferenceCounter<Node<T>>,
+              height: usize,
+          ) -> Node<T>
+        description: |
+          同じ高さの2つのノードをマージする。
+          計算量: O(log n) - 各レベルで O(1) のマージ
+        examples:
+          - description: "Leaf レベルのマージ"
+            code: |
+              let left = Node::Leaf(vec![1, 2, 3].into());
+              let right = Node::Leaf(vec![4, 5].into());
+              let merged = merge_nodes(&left, &right, 1);
+              // RelaxedBranch { children: [left, right], size_table: [3, 5] }
+          - description: "Branch レベルのマージ"
+            code: |
+              // 左右の境界子ノードを再帰的にマージ
+              // 結果をリバランスして RelaxedBranch を生成
+
+    laws:
+      - name: "要素保存則"
+        description: |
+          マージ後のノードは、元の2つのノードの全要素を順序を保って含む
+        equation: "node_size(merged) = node_size(left) + node_size(right)"
+        property_test: |
+          fn prop_merge_preserves_elements(left: Node<T>, right: Node<T>) {
+              let merged = merge_nodes(&left, &right, height);
+              assert_eq!(
+                  node_size(&merged, height),
+                  node_size(&left, height) + node_size(&right, height)
+              );
+          }
+
+      - name: "高さ保存則"
+        description: |
+          マージ結果の高さは入力と同じか、最大で1増える
+        equation: "height(merged) <= height(left) + 1"
+        property_test: |
+          fn prop_merge_height_bounded(left: Node<T>, right: Node<T>) {
+              let merged = merge_nodes(&left, &right, height);
+              assert!(node_height(&merged) <= height + 1);
+          }
+
+    implementations:
+      - type: "PersistentVector<T>"
+        description: |
+          再帰的にマージを行う。
+          各レベルで:
+          1. 左の最右子と右の最左子を取得
+          2. 再帰的にマージ
+          3. 他の子と結合してリバランス
+          4. RelaxedBranch として返す
+
+  # ======================================================================
+  # 6. リバランス
+  # ======================================================================
+  - id: rebalance_children
+    name: "子ノードのリバランス"
+    description: |
+      RRB-Tree の Search Step Invariant を維持するためのリバランス。
+
+      不変式: S <= ceil(P / M) + E
+      - S: 使用スロット数
+      - P: 含まれるノード数（要素数ではなく子ノード数）
+      - M: 分岐係数 (32)
+      - E: 許容される追加検索ステップ数 (通常 1 または 2)
+
+      この不変式が満たされていれば、検索操作の追加ステップは E 以内に収まる。
+
+    methods:
+      - name: "rebalance_children"
+        signature: |
+          fn rebalance_children(
+              children: Vec<ReferenceCounter<Node<T>>>,
+              height: usize,
+          ) -> Vec<ReferenceCounter<Node<T>>>
+        description: |
+          子ノードをリバランスして Search Step Invariant を満たすようにする。
+          計算量: O(子ノード数) = O(M) = O(1)
+        examples:
+          - description: "リバランス不要の場合"
+            code: |
+              // 全ての子が M-E 以上の子を持つ場合
+              // そのまま返される
+          - description: "リバランスが必要な場合"
+            code: |
+              // 子の数が少ないノードがある場合
+              // 隣接ノードから要素を移動して均等化
+
+    laws:
+      - name: "Search Step Invariant"
+        description: |
+          リバランス後の子ノード群は Search Step Invariant を満たす
+        equation: "S <= ceil(P / M) + E"
+        property_test: |
+          fn prop_rebalance_satisfies_invariant(children: Vec<Node<T>>) {
+              let rebalanced = rebalance_children(children, height);
+              let total_children = rebalanced.iter()
+                  .map(|n| n.children_count())
+                  .sum();
+              let slots = rebalanced.len();
+              assert!(slots <= (total_children + M - 1) / M + E);
+          }
+
+    implementations:
+      - type: "PersistentVector<T>"
+        description: |
+          1. 各子ノードの子の数を計算
+          2. M - E 未満の子を持つノードを特定
+          3. 隣接ノードから子を再分配
+          4. 不変式を満たすまで繰り返す
+
+          実装の簡略化として、E = 1 の場合:
+          - 隣接する2つの小さいノードをマージ
+          - 結果が M を超えたら分割
+
+  # ======================================================================
+  # 7. サイズテーブル構築
+  # ======================================================================
+  - id: build_size_table
+    name: "サイズテーブルの構築"
+    description: |
+      RelaxedBranch ノードのサイズテーブルを構築する。
+      サイズテーブルは累積サイズを格納: size_table[i] = 子[0..=i]の要素数の合計
+
+    methods:
+      - name: "build_size_table"
+        signature: |
+          fn build_size_table(
+              children: &[ReferenceCounter<Node<T>>],
+              height: usize,
+          ) -> Vec<usize>
+        description: |
+          子ノード群から累積サイズテーブルを構築する。
+          計算量: O(子ノード数) = O(M) = O(1)
+        examples:
+          - description: "Leaf の子を持つ場合"
+            code: |
+              // children: [Leaf(3要素), Leaf(5要素), Leaf(2要素)]
+              // size_table: [3, 8, 10]
+          - description: "Branch の子を持つ場合"
+            code: |
+              // 各子の node_size を計算して累積
+
+    implementations:
+      - type: "PersistentVector<T>"
+        description: |
+          children をイテレートし、各子の node_size を累積加算
+
+  # ======================================================================
+  # 8. concat 本体
+  # ======================================================================
+  - id: concat_main
+    name: "concat 操作本体"
+    description: |
+      2つの PersistentVector を連結して新しいベクタを返す。
+
+      アルゴリズム:
+      1. 空チェック: どちらかが空なら他方を返す
+      2. tail フラッシュ: 両方の tail をツリーに統合
+      3. 高さ調整: 低い方のツリーをラップして高さを揃える
+      4. ノードマージ: merge_nodes で2つの root をマージ
+      5. 結果構築: 新しい length, shift, root, tail で構築
+
+    methods:
+      - name: "concat"
+        signature: "pub fn concat(&self, other: &Self) -> Self"
+        description: |
+          2つのベクタを連結する。
+          計算量: O(log n) where n = max(self.len(), other.len())
+        examples:
+          - description: "基本的な連結"
+            code: |
+              let left: PersistentVector<i32> = (0..1000).collect();
+              let right: PersistentVector<i32> = (1000..2000).collect();
+              let combined = left.concat(&right);
+              assert_eq!(combined.len(), 2000);
+          - description: "空のベクタとの連結"
+            code: |
+              let vector: PersistentVector<i32> = (0..100).collect();
+              let empty = PersistentVector::new();
+              assert_eq!(vector.concat(&empty).len(), 100);
+              assert_eq!(empty.concat(&vector).len(), 100);
+
+    laws:
+      - name: "長さの保存"
+        description: |
+          連結後の長さは元の2つのベクタの長さの和
+        equation: "concat(a, b).len() = a.len() + b.len()"
+        property_test: |
+          fn prop_concat_length(a: PersistentVector<i32>, b: PersistentVector<i32>) {
+              assert_eq!(a.concat(&b).len(), a.len() + b.len());
+          }
+
+      - name: "要素の順序保存"
+        description: |
+          連結後のベクタは、左のベクタの全要素の後に右のベクタの全要素が続く
+        equation: "concat(a, b)[i] = if i < a.len() then a[i] else b[i - a.len()]"
+        property_test: |
+          fn prop_concat_order(a: PersistentVector<i32>, b: PersistentVector<i32>) {
+              let combined = a.concat(&b);
+              for i in 0..a.len() {
+                  assert_eq!(combined.get(i), a.get(i));
+              }
+              for i in 0..b.len() {
+                  assert_eq!(combined.get(a.len() + i), b.get(i));
+              }
+          }
+
+      - name: "結合律"
+        description: |
+          concat は結合的である
+        equation: "concat(concat(a, b), c) = concat(a, concat(b, c))"
+        property_test: |
+          fn prop_concat_associative(
+              a: PersistentVector<i32>,
+              b: PersistentVector<i32>,
+              c: PersistentVector<i32>,
+          ) {
+              let left = a.concat(&b).concat(&c);
+              let right = a.concat(&b.concat(&c));
+              assert_eq!(left.len(), right.len());
+              for i in 0..left.len() {
+                  assert_eq!(left.get(i), right.get(i));
+              }
+          }
+
+      - name: "単位元"
+        description: |
+          空のベクタは concat の単位元
+        equation: "concat(empty, a) = a = concat(a, empty)"
+        property_test: |
+          fn prop_concat_identity(a: PersistentVector<i32>) {
+              let empty = PersistentVector::new();
+              assert!(a.concat(&empty).iter().eq(a.iter()));
+              assert!(empty.concat(&a).iter().eq(a.iter()));
+          }
+
+    implementations:
+      - type: "PersistentVector<T>"
+        description: |
+          1. 空チェック
+          2. flush_tail で両方の tail を統合
+          3. shift から高さを計算（O(1)）
+          4. wrap_node で高さを揃える
+          5. merge_nodes でマージ
+          6. 結果の shift を計算（高さが増えた場合に対応）
+          7. 新しい PersistentVector を構築
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - description: "concat の計算量は O(log n)"
+      metric: "n = max(left.len(), right.len())"
+      rationale: |
+        ツリーの各レベルで O(1) の処理を行い、
+        レベル数は O(log n) なので、全体で O(log n)
+
+    - description: "tree_height の計算量は O(1)"
+      metric: "shift からの計算のみ"
+      rationale: |
+        shift / BITS_PER_LEVEL + 1 の計算のみで完結
+
+    - description: "構造共有により追加メモリは O(log n)"
+      metric: "新規に作成されるノード数"
+      rationale: |
+        変更のないサブツリーは共有され、
+        新規作成は各レベルで定数個のノードのみ
+
+  compatibility:
+    - description: "既存の API との互換性を維持"
+      details: |
+        - concat のシグネチャは変更しない
+        - 返り値の振る舞いは同じ（要素の順序、長さ）
+        - get, update, push_back, pop_back 等が正しく動作
+
+    - description: "RelaxedBranch を含むツリーでの動作保証"
+      details: |
+        - concat 後のツリーには RelaxedBranch が含まれる
+        - get, update, iterate 等が RelaxedBranch を正しく処理
+        - これは既に実装済み（Phase 1-2 で対応）
+
+  testing:
+    - description: "プロパティベーステスト"
+      details: |
+        - 長さの保存
+        - 要素順序の保存
+        - 結合律
+        - 単位元
+
+    - description: "パフォーマンステスト"
+      details: |
+        - 10倍のサイズでも計算時間が大きく増えないことを確認
+        - 1000 + 1000 と 100000 + 100000 の比較
+
+    - description: "エッジケーステスト"
+      details: |
+        - 空のベクタとの連結
+        - 単一要素のベクタの連結
+        - tail のみのベクタの連結
+        - 非対称なサイズのベクタの連結
+        - 連続した concat（チェーン）
+
+    - description: "連結後の操作テスト"
+      details: |
+        - concat 後の get
+        - concat 後の update
+        - concat 後の push_back / pop_back
+        - concat 後の iterate
+
+# 関数型プログラミング妥当性
+functional_programming_compliance:
+  referential_transparency:
+    status: "compliant"
+    description: |
+      全ての関数は純粋関数として実装される。
+      - 同じ入力に対して常に同じ出力を返す
+      - 外部状態（グローバル変数、時刻、乱数など）に依存しない
+      - 関数呼び出しを「値」に置き換えても意味が変わらない
+
+  pure_functions:
+    status: "compliant"
+    description: |
+      全ての関数は副作用を持たない。
+      - I/O、DB、ログ、状態変更なし
+      - 「計算」と「実行」が分離されている
+      - テストが引数と戻り値だけで書ける
+
+  immutability:
+    status: "compliant"
+    description: |
+      全ての操作は不変性を維持する。
+      - 引数や既存のデータを直接変更しない
+      - 破壊的操作は使用しない
+      - 新しい値を返す設計
+
+  error_handling:
+    status: "compliant"
+    description: |
+      例外は制御フローに使用しない。
+      - concat は常に成功する（Result は不要）
+      - パニックは発生しない（境界チェック済み）
+      - 空のベクタも正しく処理
+
+  higher_order_functions:
+    status: "compliant"
+    description: |
+      高階関数とコレクション操作を活用。
+      - iter(), map(), filter() 等を使用
+      - 手続き的なループを避ける
+      - パイプライン形式で処理を記述
+
+# 将来の拡張
+future_extensions:
+  - id: transient_concat
+    name: "Transient 最適化された concat"
+    description: |
+      バッチ操作時に一時的な可変構造を使用して、
+      さらなる性能向上を図る。
+    rationale: |
+      現時点では永続構造のみで十分な性能が得られる。
+      将来的にパフォーマンス要件が厳しくなった場合に検討。
+
+  - id: parallel_concat
+    name: "並列 concat"
+    description: |
+      大きなベクタの concat を並列化して実行する。
+    rationale: |
+      現時点では単一スレッドで O(log n) が達成されている。
+      将来的に並列処理の需要が高まった場合に検討。
+
+  - id: slice_concat
+    name: "slice との効率的な連結"
+    description: |
+      &[T] から直接 concat できる効率的な実装。
+    rationale: |
+      現在は FromIterator を経由するため O(n)。
+      将来的に需要があれば専用の実装を検討。

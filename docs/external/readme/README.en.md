@@ -10,9 +10,9 @@ lambars brings functional programming abstractions to Rust that are not provided
 
 ### Features
 
-- **Type Classes**: Functor, Applicative, Monad, Foldable, Traversable, Semigroup, Monoid
+- **Type Classes**: Functor, Applicative, Alternative, Monad, Foldable, Traversable, Semigroup, Monoid
 - **Function Composition**: `compose!`, `pipe!`, `pipe_async!`, `partial!`, `curry!`, `eff!`, `for_!`, `for_async!` macros
-- **Control Structures**: Lazy evaluation, Trampoline for stack-safe recursion, Continuation monad
+- **Control Structures**: Lazy evaluation, Trampoline for stack-safe recursion, Continuation monad, Freer monad for DSL construction
 - **Persistent Data Structures**: Immutable Vector, HashMap, HashSet, TreeMap, List with structural sharing
 - **Optics**: Lens, Prism, Iso, Optional, Traversal for immutable data manipulation
 - **Effect System**: Reader, Writer, State monads, IO/AsyncIO monads, and monad transformers
@@ -394,6 +394,32 @@ let value2 = lazy.force();
 assert_eq!(*value2, 42);
 ```
 
+#### Thread-Safe Lazy Evaluation
+
+`ConcurrentLazy` provides thread-safe lazy evaluation that can be safely shared between threads.
+
+```rust
+use lambars::control::ConcurrentLazy;
+use std::sync::Arc;
+use std::thread;
+
+let lazy = Arc::new(ConcurrentLazy::new(|| {
+    println!("Computing...");
+    42
+}));
+
+// Spawn multiple threads that access the lazy value
+let handles: Vec<_> = (0..10).map(|_| {
+    let lazy = Arc::clone(&lazy);
+    thread::spawn(move || *lazy.force())
+}).collect();
+
+// All threads get the same value, and initialization happens only once
+for handle in handles {
+    assert_eq!(handle.join().unwrap(), 42);
+}
+```
+
 #### Trampoline (Stack-Safe Recursion)
 
 Enables deep recursion without stack overflow.
@@ -437,6 +463,45 @@ let result = cont.run(|x| x);
 assert_eq!(result, 21);
 ```
 
+#### Freer Monad
+
+For building domain-specific languages (DSLs) with stack-safe interpretation.
+
+```rust
+use lambars::control::Freer;
+use std::any::Any;
+
+// Define instruction types for your DSL
+#[derive(Debug)]
+enum Console {
+    ReadLine,
+    PrintLine(String),
+}
+
+// Build computations using instructions
+let program = Freer::lift_instruction(
+    Console::PrintLine("Enter name:".to_string()),
+    |_| (),
+)
+.then(Freer::lift_instruction(
+    Console::ReadLine,
+    |result: Box<dyn Any>| *result.downcast::<String>().unwrap(),
+))
+.map(|name| format!("Hello, {}!", name));
+
+// Interpret with a handler
+let result = program.interpret(|instruction| -> Box<dyn Any> {
+    match instruction {
+        Console::ReadLine => Box::new("Alice".to_string()),
+        Console::PrintLine(msg) => {
+            println!("{}", msg);
+            Box::new(())
+        }
+    }
+});
+assert_eq!(result, "Hello, Alice!");
+```
+
 ### Persistent Data Structures (`persistent`)
 
 Immutable data structures with structural sharing for efficient updates.
@@ -475,6 +540,30 @@ assert_eq!(updated.get(50), Some(&999));   // New version
 // Push operations
 let pushed = vector.push_back(100);
 assert_eq!(pushed.len(), 101);
+```
+
+#### PersistentDeque
+
+Double-ended queue (Finger Tree inspired) with O(1) front/back access.
+
+```rust
+use lambars::persistent::PersistentDeque;
+
+let deque = PersistentDeque::new()
+    .push_back(1)
+    .push_back(2)
+    .push_back(3);
+assert_eq!(deque.front(), Some(&1));
+assert_eq!(deque.back(), Some(&3));
+
+// Structural sharing preserves the original
+let extended = deque.push_back(4);
+assert_eq!(deque.len(), 3);     // Original unchanged
+assert_eq!(extended.len(), 4);  // New deque
+
+// Pop from both ends
+let (rest, first) = deque.pop_front().unwrap();
+assert_eq!(first, 1);
 ```
 
 #### PersistentHashMap
@@ -534,7 +623,7 @@ assert!(result.contains(&30));  // 3 * 10
 
 #### PersistentTreeMap
 
-Ordered map with O(log N) operations using Red-Black Tree.
+Ordered map with O(log N) operations using B-Tree.
 
 ```rust
 use lambars::persistent::PersistentTreeMap;

@@ -12,10 +12,10 @@ lambars は、Rust の標準ライブラリでは提供されていない関数�
 
 ### 機能
 
-- **型クラス**: Functor, Applicative, Monad, Foldable, Traversable, Semigroup, Monoid
+- **型クラス**: Functor, Applicative, Alternative, Monad, Foldable, Traversable, Semigroup, Monoid
 - **関数合成**: `compose!`, `pipe!`, `pipe_async!`, `partial!`, `curry!`, `eff!`, `for_!`, `for_async!` マクロ
-- **制御構造**: 遅延評価、スタック安全な再帰のための Trampoline、継続モナド
-- **永続データ構造**: 構造共有による不変 Vector, HashMap, HashSet, TreeMap, List
+- **制御構造**: 遅延評価、スタック安全な再帰のための Trampoline、継続モナド、DSL 構築のための Freer モナド
+- **永続データ構造**: 構造共有による不変 Vector, HashMap, HashSet, TreeMap, List, Deque
 - **Optics**: 不変データ操作のための Lens, Prism, Iso, Optional, Traversal
 - **エフェクトシステム**: Reader, Writer, State モナド、IO/AsyncIO モナド、モナド変換子
 
@@ -429,6 +429,45 @@ let result = cont.run(|x| x);
 assert_eq!(result, 21);
 ```
 
+#### Freer モナド
+
+スタック安全な解釈を持つドメイン固有言語 (DSL) 構築用。
+
+```rust
+use lambars::control::Freer;
+use std::any::Any;
+
+// DSL の命令型を定義
+#[derive(Debug)]
+enum Console {
+    ReadLine,
+    PrintLine(String),
+}
+
+// 命令を使用して計算を構築
+let program = Freer::lift_instruction(
+    Console::PrintLine("Enter name:".to_string()),
+    |_| (),
+)
+.then(Freer::lift_instruction(
+    Console::ReadLine,
+    |result: Box<dyn Any>| *result.downcast::<String>().unwrap(),
+))
+.map(|name| format!("Hello, {}!", name));
+
+// ハンドラで解釈を実行
+let result = program.interpret(|instruction| -> Box<dyn Any> {
+    match instruction {
+        Console::ReadLine => Box::new("Alice".to_string()),
+        Console::PrintLine(msg) => {
+            println!("{}", msg);
+            Box::new(())
+        }
+    }
+});
+assert_eq!(result, "Hello, Alice!");
+```
+
 ### 永続データ構造 (`persistent`)
 
 構造共有による効率的な更新を持つ不変データ構造。
@@ -467,6 +506,30 @@ assert_eq!(updated.get(50), Some(&999));   // 新しいバージョン
 // プッシュ操作
 let pushed = vector.push_back(100);
 assert_eq!(pushed.len(), 101);
+```
+
+#### PersistentDeque
+
+O(1) の先頭/末尾アクセスを持つ両端キュー（Finger Tree ベース）。
+
+```rust
+use lambars::persistent::PersistentDeque;
+
+let deque = PersistentDeque::new()
+    .push_back(1)
+    .push_back(2)
+    .push_back(3);
+assert_eq!(deque.front(), Some(&1));
+assert_eq!(deque.back(), Some(&3));
+
+// 構造共有で元を保持
+let extended = deque.push_back(4);
+assert_eq!(deque.len(), 3);     // 元は変更されない
+assert_eq!(extended.len(), 4);  // 新しい Deque
+
+// 両端から取り出し
+let (rest, first) = deque.pop_front().unwrap();
+assert_eq!(first, 1);
 ```
 
 #### PersistentHashMap
@@ -526,7 +589,7 @@ assert!(result.contains(&30));  // 3 * 10
 
 #### PersistentTreeMap
 
-赤黒木を使用した O(log N) 操作の順序付きマップ。
+B-Tree を使用した O(log N) 操作の順序付きマップ。
 
 ```rust
 use lambars::persistent::PersistentTreeMap;

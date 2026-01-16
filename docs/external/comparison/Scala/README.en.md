@@ -53,6 +53,7 @@ This document provides a comprehensive comparison between Scala functional progr
 | ReaderT                   | `cats.data.ReaderT`           | `ReaderT` type       |
 | WriterT                   | `cats.data.WriterT`           | `WriterT` type       |
 | EitherT                   | `cats.data.EitherT`           | `ExceptT` type       |
+| Free Monad                | `cats.free.Free[F, A]`        | `Freer<I, A>` type   |
 
 ---
 
@@ -474,7 +475,7 @@ let contents = io.run_unsafe();
 | `opt.map(f)`             | `Functor::fmap`           | Transform value     |
 | `opt.flatMap(f)`         | `Monad::flat_map`         | Chain computation   |
 | `opt.getOrElse(default)` | `Option::unwrap_or`       | Default value       |
-| `opt.orElse(alt)`        | `Option::or`              | Alternative         |
+| `opt.orElse(alt)`        | `Alternative::alt`        | Alternative         |
 | `opt.fold(ifEmpty)(f)`   | `Option::map_or`          | Fold with default   |
 | `opt.filter(p)`          | `Option::filter`          | Filter by predicate |
 | `opt.filterNot(p)`       | `filter(\|x\| !p(x))`     | Filter inverse      |
@@ -1630,6 +1631,7 @@ Available AsyncIO methods:
 | `SortedMap[K, V]` | `PersistentTreeMap<K, V>` | Immutable sorted map |
 | `Set[A]`          | `PersistentHashSet<A>`    | Immutable set        |
 | `Set[A].view`     | `HashSetView<A>`          | Lazy view over set   |
+| `Queue[A]`        | `PersistentDeque<A>`      | Immutable deque      |
 
 ### List/Vector Operations
 

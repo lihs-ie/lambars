@@ -71,6 +71,7 @@
 | エフェクトメンバーシップ | `Member e r`                     | `Member<E, Index>` trait                   |
 | 遅延評価                 | デフォルト (サンク)              | `Lazy<A>` 型                               |
 | トランポリン             | トランポリン処理                 | `Trampoline<A>` 型                         |
+| Freer モナド             | `Free f a` / `Freer f a`         | `Freer<I, A>` 型                           |
 
 ---
 
@@ -706,8 +707,8 @@ let contents = io.run_unsafe();
 | `maybeToList ma` | `Option::into_iter`                  | リストへ            |
 | `catMaybes xs`   | `Iterator::flatten`                  | Nothing をフィルタ  |
 | `mapMaybe f xs`  | `Iterator::filter_map`               | マップとフィルタ    |
-| `ma <\|> mb`     | `Option::or`                         | 代替                |
-| `guard cond`     | `if cond { Some(()) } else { None }` | Monad でのガード    |
+| `ma <\|> mb`     | `Alternative::alt`                   | 代替                |
+| `guard cond`     | `Alternative::guard`                 | Monad でのガード    |
 
 ### Either / Result
 
@@ -717,7 +718,7 @@ let contents = io.run_unsafe();
 | `Left e`           | `Err(e)`                              | Left/Err の構築    |
 | `fmap f ea`        | `Functor::fmap` / `Result::map`       | Right 上でマップ   |
 | `first f ea`       | `Result::map_err`                     | Left 上でマップ    |
-| `bimap f g ea`     | 手動                                  | 両側をマップ       |
+| `bimap f g ea`     | `Bifunctor::bimap`                    | 両側をマップ       |
 | `ea >>= f`         | `Monad::flat_map`                     | バインド           |
 | `either f g ea`    | `Result::map_or_else`                 | Either を畳み込み  |
 | `isRight ea`       | `Result::is_ok`                       | Right のテスト     |
@@ -776,11 +777,10 @@ let mapped: Result<i32, String> = Ok(21).fmap(|x| x * 2);
 let left_mapped: Result<i32, usize> = Err("error".to_string()).map_err(|e| e.len());
 // left_mapped = Err(5)
 
-// bimap 相当
+// Bifunctor::bimap (first = エラー変換, second = 成功変換)
+use lambars::typeclass::Bifunctor;
 let result: Result<i32, String> = Ok(42);
-let bi_mapped: Result<String, usize> = result
-    .map(|x| x.to_string())
-    .map_err(|e| e.len());
+let bi_mapped: Result<String, usize> = result.bimap(|e| e.len(), |x| x.to_string());
 // bi_mapped = Ok("42")
 ```
 
@@ -2219,6 +2219,26 @@ fn log_computation() -> Eff<LogEffect, i32> {
 | `S.union s1 s2`  | `union` メソッド        | 和集合         |
 | `S.intersection` | `intersection` メソッド | 積集合         |
 | `S.difference`   | `difference` メソッド   | 差集合         |
+
+### デック（Finger Tree）
+
+| Haskell              | lambars                        | 説明                        |
+| -------------------- | ------------------------------ | --------------------------- |
+| `Data.Sequence`      | `PersistentDeque<A>`           | 両端キュー                  |
+| `Seq.empty`          | `PersistentDeque::new`         | 空のデック                  |
+| `Seq.singleton x`    | `PersistentDeque::singleton`   | 単一要素                    |
+| `x <| xs`            | `push_front` メソッド          | 先頭に追加                  |
+| `xs |> x`            | `push_back` メソッド           | 末尾に追加                  |
+| `Seq.viewl xs`       | `pop_front` メソッド           | 先頭から取り出し            |
+| `Seq.viewr xs`       | `pop_back` メソッド            | 末尾から取り出し            |
+| `Seq.length xs`      | `len` メソッド                 | 長さ                        |
+| `Seq.null xs`        | `is_empty` メソッド            | 空かどうか                  |
+| `xs <> ys`           | `concat` メソッド              | 連結 (O(log min))           |
+| `Seq.index xs i`     | `get` メソッド                 | インデックスアクセス        |
+| `Seq.update i x xs`  | (未実装)                       | インデックスで更新          |
+| `Seq.take n xs`      | (未実装)                       | 先頭 n 要素を取得           |
+| `Seq.drop n xs`      | (未実装)                       | 先頭 n 要素を削除           |
+| `Seq.splitAt n xs`   | (未実装)                       | インデックスで分割          |
 
 ### コード例
 

@@ -1,0 +1,69 @@
+# Issue: TransientDeque の実装
+# PersistentDeque の将来拡張として発見された項目
+
+deferred_features:
+  - id: transient_deque
+    name: "TransientDeque"
+    discovered_date: "2026-01-14"
+    priority: medium
+    category: enhancement
+    labels:
+      - "persistent"
+      - "performance"
+      - "enhancement"
+      - "priority: medium"
+
+    problem:
+      summary: "バッチ操作時に毎回新しい構造を作成するオーバーヘッドがある"
+      details: |
+        現在の PersistentDeque は完全に永続的（persistent）であり、各操作が
+        新しいデータ構造を返す。これは不変性を保証するが、多数の連続した
+        操作を行う場合にオーバーヘッドが発生する。
+
+        例えば、1000個の要素を追加する場合：
+        - 現在: 1000回の push_back、各回で構造共有のための参照カウント操作
+        - Transient: 一時的に可変にし、最後に永続版に変換
+
+        Clojure の transient! / persistent! パターンがこの問題を解決する。
+
+    solution:
+      approach: "Clojure スタイルの transient! / persistent! パターンの実装"
+      options:
+        - name: "TransientDeque 型の実装"
+          description: |
+            PersistentDeque から TransientDeque を作成し、
+            バッチ操作後に persistent() で PersistentDeque に戻す。
+            TransientVector と同様のパターン。
+          pros:
+            - Clojure との親和性
+            - バッチ操作のパフォーマンス向上
+            - 既存の TransientVector/TransientHashMap と一貫性
+          cons:
+            - 追加の型が必要
+            - 安全性の考慮が必要（transient を再利用しない）
+
+        - name: "Builder パターン"
+          description: |
+            DequeBuilder を使って構築し、build() で PersistentDeque を作成。
+          pros:
+            - Rust らしい API
+            - 安全性が高い
+          cons:
+            - 既存の永続データ構造との一貫性が低い
+
+      recommended: "TransientDeque 型の実装"
+      estimated_complexity: medium
+
+    references:
+      - "Clojure transients documentation"
+      - "lambars TransientVector implementation"
+      - "lambars TransientHashMap implementation"
+
+    related:
+      requirement_id: "20260114_1700_persistent_deque"
+      plan_id: null
+
+    github_issue:
+      number: 148
+      url: "https://github.com/lihs-ie/lambars/issues/148"
+      created: true

@@ -1,0 +1,309 @@
+# lambars Future Work 優先度一覧
+# 生成日: 2026-01-16
+# 要件定義ファイルの future_work/future_extensions から未対応項目を洗い出し
+# 優先度を付けてまとめたもの
+
+metadata:
+  total_items: 16
+  implemented_items: 14
+  last_updated: "2026-01-16"
+  codex_reviewed: true
+  review_notes: |
+    - Free/Freer の優先度を調整（Freer を P1、Free を P2 へ）
+    - ContinuationT を ContT に統合（重複解消）
+    - Alternative を P1 に引き上げ（パーサー等の即効性考慮）
+    - SelectT に ContT への依存を明示
+  source_files:
+    - docs/internal/requirements/20250101_0000_typeclass.yaml
+    - docs/internal/requirements/20250101_0100_compose.yaml
+    - docs/internal/requirements/20250101_0200_control.yaml
+    - docs/internal/requirements/20250101_0300_persistent.yaml
+    - docs/internal/requirements/20250101_0400_optics.yaml
+    - docs/internal/requirements/20250101_0500_effect.yaml
+    - docs/internal/requirements/phase_10_1_for_macro.yaml
+
+implemented_items:
+  description: "既に実装済みのため、本リストから除外した項目"
+  items:
+    - name: MonadError
+      location: src/effect/monad_error.rs
+      original_source: typeclass
+    - name: 可変長 curry
+      location: lambars-derive/src/curry.rs
+      original_source: compose
+    - name: LazyLock (ConcurrentLazy)
+      location: src/control/concurrent_lazy.rs
+      original_source: control
+    - name: IO モナド
+      location: src/effect/io.rs
+      original_source: control
+    - name: スレッドセーフ版 persistent
+      location: arc feature + ReferenceCounter
+      original_source: persistent
+    - name: Transient（一時的可変版）
+      location: TransientVector, TransientHashMap, TransientHashSet
+      original_source: persistent
+    - name: Persistent Deque
+      location: src/persistent/deque.rs (Finger Tree)
+      original_source: persistent
+    - name: Getter / Setter
+      location: Lens の get/set メソッド
+      original_source: optics
+    - name: At / Index
+      location: src/optics/at.rs, src/optics/ixed.rs
+      original_source: optics
+    - name: Each / Filtered
+      location: src/optics/each.rs, src/optics/filtered.rs
+      original_source: optics
+    - name: Algebraic Effects
+      location: src/effect/algebraic/
+      original_source: effect
+    - name: Async Effect Integration
+      location: AsyncIO + effect 統合
+      original_source: effect
+    - name: ガード条件（if句）
+      location: for_! マクロで if condition; サポート
+      original_source: compose
+    - name: async for_comprehension
+      location: for_async! マクロ
+      original_source: compose
+
+priorities:
+  P1_high:
+    description: "すぐに取り組むべき - FP の基盤として重要"
+    items:
+      - id: FW-001
+        name: Bifunctor
+        module: typeclass
+        complexity: medium
+        rationale: |
+          Either/Result など二つの型パラメータを持つ型で必須。
+          Haskell, cats-core で基本型クラスとして提供されている。
+        github_issue: null
+        references:
+          - docs/internal/requirements/20250101_0000_typeclass.yaml
+
+      - id: FW-002
+        name: Alternative
+        module: typeclass
+        complexity: medium
+        rationale: |
+          パーサーコンビネータ等で即効性が高い。
+          nom や combine との連携で価値がある。
+          empty と orElse (|) を持つ Applicative の拡張。
+        github_issue: null
+        references:
+          - docs/internal/requirements/20250101_0000_typeclass.yaml
+
+      - id: FW-003
+        name: Freer モナド
+        module: control
+        complexity: high
+        rationale: |
+          Free モナドの最適化版。
+          Functor の代わりに型レベルのリストを使用。
+          Rust では HKT 制約を回避できるため、Free より実装しやすい。
+          DSL 構築の基盤として重要。
+        github_issue: null
+        references:
+          - docs/internal/requirements/20250101_0200_control.yaml
+
+  P2_medium:
+    description: "次のマイルストーンで検討 - 有用だが優先度は中程度"
+    items:
+      - id: FW-004
+        name: Free モナド
+        module: control
+        complexity: high
+        rationale: |
+          DSL 構築の基盤として重要。
+          効果システムの拡張にも必要。
+          Rust の HKT 制約により実装が困難だが、価値が高い。
+          Freer モナド（P1）の後に検討。
+        github_issue: 29
+        dependencies: [FW-003]
+        references:
+          - docs/internal/requirements/20250101_0200_control.yaml
+
+      - id: FW-005
+        name: ContT（Continuation Transformer）
+        module: effect
+        complexity: high
+        rationale: |
+          継続効果を追加する Transformer。
+          Phase 3 の Continuation との統合。
+          高度な制御フローに必要。
+          TrampolineT, ContinuationT もこの実装に統合。
+        github_issue: null
+        references:
+          - docs/internal/requirements/20250101_0500_effect.yaml
+          - docs/internal/requirements/20250101_0200_control.yaml
+
+      - id: FW-006
+        name: SelectT（Selection Transformer）
+        module: effect
+        complexity: high
+        rationale: |
+          非決定的選択を扱う Transformer。
+          バックトラッキングの実装に有用。
+          AI/探索アルゴリズム向け。
+        github_issue: null
+        dependencies: [FW-005]
+        note: ContT/MonadTrans 基盤に依存
+        references:
+          - docs/internal/requirements/20250101_0500_effect.yaml
+
+      - id: FW-007
+        name: Lens/Prism と永続データ構造の統合強化
+        module: optics/persistent
+        complexity: medium
+        rationale: |
+          既存の optics と persistent の連携強化。
+          persistent_optics.rs が存在するため拡張が容易。
+          深いネストへの効率的なアクセスと不変更新の簡略化。
+        github_issue: null
+        references:
+          - docs/internal/requirements/20250101_0300_persistent.yaml
+
+  P3_low:
+    description: "余裕があれば対応 - あると便利だが優先度は低い"
+    items:
+      - id: FW-008
+        name: Contravariant
+        module: typeclass
+        complexity: medium
+        rationale: |
+          反変ファンクター。入力の型に対して contramap を持つ。
+          Predicate<A>: contramap(f: B -> A) -> Predicate<B>
+          使用頻度は低めだが、型理論的には重要。
+        github_issue: null
+        references:
+          - docs/internal/requirements/20250101_0000_typeclass.yaml
+
+      - id: FW-009
+        name: async 関数の合成（async_compose!）
+        module: compose
+        complexity: medium
+        rationale: |
+          async 関数を compose するためのマクロ。
+          for_async! で部分的に対応済み。
+          追加の async_compose! の需要は限定的。
+        github_issue: null
+        references:
+          - docs/internal/requirements/20250101_0100_compose.yaml
+
+      - id: FW-010
+        name: パイプライン演算子のカスタム構文
+        module: compose
+        complexity: low
+        rationale: |
+          proc-macro で |> 演算子風の構文を提供する可能性の検討。
+          Rust の構文制約により限定的。
+          現在のマクロで十分な用途をカバー。
+        github_issue: null
+        references:
+          - docs/internal/requirements/20250101_0100_compose.yaml
+
+      - id: FW-011
+        name: Persistent TreeSet
+        module: persistent
+        complexity: low
+        rationale: |
+          PersistentTreeMap<T, ()> のラッパー。
+          順序付きセット、範囲クエリのサポート。
+          HashSet で代替可能な場合が多い。
+        github_issue: null
+        references:
+          - docs/internal/requirements/20250101_0300_persistent.yaml
+
+      - id: FW-012
+        name: 遅延イテレータ版 for_iter!
+        module: compose
+        complexity: medium
+        rationale: |
+          Vec ではなくイテレータを返すバージョン。
+          大量のデータを処理する場合に有用。
+          現在の Vec 版で多くの用途をカバー。
+        github_issue: null
+        references:
+          - docs/internal/requirements/phase_10_1_for_macro.yaml
+
+  P4_future:
+    description: "現時点では実装を見送り - 技術的制約や需要の問題"
+    items:
+      - id: FW-013
+        name: 限定継続（shift/reset）
+        module: control
+        complexity: very_high
+        rationale: |
+          Continuation モナドの限定継続サポート。
+          継続の範囲を区切る機能を提供。
+          Rust の所有権システムと相性が悪く、実装が非常に困難。
+        github_issue: 30
+        references:
+          - docs/internal/requirements/20250101_0200_control.yaml
+
+      - id: FW-014
+        name: 自動カリー化 #[curry] attribute macro
+        module: compose
+        complexity: high
+        rationale: |
+          #[curry] attribute macro で関数を自動的にカリー化形式に変換。
+          proc-macro の複雑化を招く。
+          curry! マクロで十分な用途をカバー。
+        github_issue: 120
+        references:
+          - docs/internal/requirements/20250101_0100_compose.yaml
+
+      - id: FW-015
+        name: Async Optics
+        module: optics
+        complexity: high
+        rationale: |
+          非同期コンテキストでの Optics 操作。
+          async/await との統合。
+          需要が限定的で、AsyncIO との統合で代替可能。
+        github_issue: null
+        references:
+          - docs/internal/requirements/20250101_0400_optics.yaml
+
+      - id: FW-016
+        name: Effect Inference（効果の自動推論）
+        module: effect
+        complexity: very_high
+        rationale: |
+          効果の自動推論（可能な範囲で）。
+          型注釈の削減とユーザビリティ向上。
+          Rust の型システムでは自動推論が困難。
+        github_issue: 100
+        references:
+          - docs/internal/requirements/20250101_0500_effect.yaml
+
+implementation_phases:
+  phase_a:
+    name: "基盤型クラスの拡充"
+    items: [FW-001, FW-002, FW-008]
+    description: |
+      Bifunctor, Alternative, Contravariant など
+      FP の基本型クラスを追加
+
+  phase_b:
+    name: "高度な制御構造"
+    items: [FW-003, FW-004, FW-005, FW-006]
+    description: |
+      Freer/Free モナド、モナド変換子、ContT, SelectT など
+      高度な制御フローを実現する機能
+
+  phase_c:
+    name: "データ構造の拡充"
+    items: [FW-007, FW-011]
+    description: |
+      永続データ構造と Optics の統合強化
+      TreeSet など追加のデータ構造
+
+  phase_d:
+    name: "便利機能"
+    items: [FW-009, FW-010, FW-012]
+    description: |
+      async 関数合成、パイプライン演算子、遅延イテレータなど
+      開発者体験を向上させる機能

@@ -102,3 +102,16 @@ harness = false
 name = "rayon_bench"
 harness = false
 required-features = ["rayon"]
+
+[[bench]]
+name = "freer_bench"
+harness = false
+
+[[bench]]
+name = "bifunctor_bench"
+harness = false
+
+[[bench]]
+name = "alternative_bench"
+harness = false
+required-features = ["typeclass"]

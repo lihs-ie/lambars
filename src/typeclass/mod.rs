@@ -5,7 +5,9 @@
 //!
 //! - [`Functor`]: Mapping over container values
 //! - [`FunctorMut`]: Mapping with mutable functions for multi-element containers
+//! - [`Bifunctor`]: Mapping over two type parameters
 //! - [`Applicative`]: Applying functions within containers
+//! - [`Alternative`]: Monoid structure on Applicative functors
 //! - [`Monad`]: Sequencing computations with dependency
 //! - [`Flatten`]: Flattening nested monadic structures
 //! - [`Foldable`]: Folding over structures to produce summary values
@@ -80,8 +82,32 @@
 //! let sum = a.map2(b, |x, y| x + y);
 //! assert_eq!(sum, Some(3));
 //! ```
+//!
+//! ## Using Alternative
+//!
+//! ```rust
+//! use lambars::typeclass::{Alternative, Functor};
+//!
+//! // Using empty as a failure value
+//! let empty: Option<i32> = <Option<()>>::empty();
+//! assert_eq!(empty, None);
+//!
+//! // Using alt for fallback
+//! let first: Option<i32> = None;
+//! let second: Option<i32> = Some(42);
+//! assert_eq!(first.alt(second), Some(42));
+//!
+//! // Using guard for conditional filtering
+//! fn filter_positive(n: i32) -> Option<i32> {
+//!     <Option<()>>::guard(n > 0).fmap(move |_| n)
+//! }
+//! assert_eq!(filter_positive(5), Some(5));
+//! assert_eq!(filter_positive(-3), None);
+//! ```
 
+mod alternative;
 mod applicative;
+mod bifunctor;
 mod foldable;
 mod functor;
 mod higher;
@@ -92,7 +118,9 @@ mod semigroup;
 mod traversable;
 mod wrappers;
 
+pub use alternative::{Alternative, AlternativeVec};
 pub use applicative::{Applicative, ApplicativeVec};
+pub use bifunctor::Bifunctor;
 pub use foldable::Foldable;
 pub use functor::{Functor, FunctorMut};
 pub use higher::TypeConstructor;

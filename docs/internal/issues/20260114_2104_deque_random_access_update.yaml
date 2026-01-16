@@ -1,0 +1,63 @@
+# Issue: PersistentDeque インデックス指定の更新操作の実装
+# PersistentDeque の将来拡張として発見された項目
+
+deferred_features:
+  - id: random_access_update
+    name: "PersistentDeque インデックス指定の更新"
+    discovered_date: "2026-01-14"
+    priority: low
+    category: enhancement
+    labels:
+      - "persistent"
+      - "api"
+      - "enhancement"
+      - "priority: low"
+
+    problem:
+      summary: "インデックスを指定して要素を更新する操作がない"
+      details: |
+        現在の PersistentDeque には get(index) はあるが、update(index, element)
+        がない。Finger Tree は効率的なインデックスアクセスと更新（O(log n)）を
+        サポートしているが、Deque としての主要ユースケースは両端操作であるため、
+        現時点では実装していない。
+
+        PersistentVector には update があり、一貫性のために追加を検討する価値がある。
+
+    solution:
+      approach: "update(index, element) メソッドの追加"
+      options:
+        - name: "単純な update メソッドの追加"
+          description: |
+            update(index: usize, element: T) -> Option<Self> を実装。
+            指定インデックスの要素を新しい値で置き換えた新しい Deque を返す。
+          pros:
+            - PersistentVector と一貫した API
+            - 直感的な使い方
+          cons:
+            - 現在の type-erased spine では効率的な実装が困難
+            - O(n) になる可能性がある
+
+        - name: "Measured Finger Tree と同時に実装"
+          description: |
+            Measured Finger Tree の実装時に効率的な update も実装する。
+          pros:
+            - O(log n) の計算量を保証できる
+            - 正しい設計に基づく実装
+          cons:
+            - Measured Finger Tree の実装が前提
+
+      recommended: "単純な update メソッドの追加"
+      estimated_complexity: medium
+
+    references:
+      - "Hinze & Paterson, 'Finger Trees: A Simple General-purpose Data Structure' (2006)"
+      - "lambars PersistentVector::update implementation"
+
+    related:
+      requirement_id: "20260114_1700_persistent_deque"
+      plan_id: null
+
+    github_issue:
+      number: 150
+      url: "https://github.com/lihs-ie/lambars/issues/150"
+      created: true

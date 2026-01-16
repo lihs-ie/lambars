@@ -1,0 +1,560 @@
+# Trampoline API 整理 要件定義
+#
+# 概要:
+#   PR #168 で追加されたパフォーマンス改善 API のうち、
+#   ベンチマークで効果が実証できなかったものを削除する。
+#
+# 設計方針:
+#   1. 効果が実証されない API は削除し、コードベースをシンプルに保つ
+#   2. 効果が実証された最適化（Phase 2-4）は維持する
+#   3. API サーフェスを最小限に保ち、学習・保守コストを削減する
+#
+# 参照:
+#   - PR #168: perf(control): Trampoline 深い再帰のパフォーマンス改善
+#   - Issue #164: Trampoline 深い再帰のパフォーマンス改善
+#   - Codex レビュー結果
+#   - docs/internal/done/requirements/20260115_1700_trampoline_performance.yaml
+
+version: "1.0.0"
+name: "trampoline_api_cleanup"
+description: |
+  PR #168 で Trampoline のパフォーマンス改善を実装したが、
+  ベンチマーク結果で一部の API は効果がほぼなく（計測誤差の範囲内）、
+  Codex レビューで以下の指摘があった:
+
+  1. `run_optimized()` は `run()` より遅くなる可能性があり、削除推奨
+  2. `run_batched()` / `run_with_batch_size()` は効果が実証できないため削除推奨
+  3. API 追加でメンテナンス・学習・ドキュメントコストが上がっている
+
+  これらの指摘に基づき、効果が実証できない API を削除し、
+  効果が確認された内部最適化のみを残す。
+
+# =============================================================================
+# 背景・動機
+# =============================================================================
+background:
+  problem: |
+    PR #168 で以下の API を追加したが、ベンチマークで効果が実証できなかった:
+
+    **追加された API:**
+    - `run_optimized()`: FlatMap チェーンのバッチ処理版
+    - `run_batched()`: デフォルトバッチサイズ(16)での実行
+    - `run_with_batch_size(batch_size)`: 指定バッチサイズでの実行
+    - `DEFAULT_BATCH_SIZE`: 定数
+    - `FLATMAP_CHAIN_BATCH_SIZE`: 定数
+
+    **Codex レビューの指摘:**
+    1. `run_optimized()` について:
+       - for ループ (0..FLATMAP_CHAIN_BATCH_SIZE) の導入で分岐が増え、
+         逆に遅くなる可能性がある
+       - 実測でも効果が見られない
+
+    2. `run_batched()` / `run_with_batch_size()` について:
+       - バッチ処理のループオーバーヘッド削減効果が、
+         実際の FlatMap チェーン処理コストに対して微小
+       - 効果が計測誤差の範囲内
+
+    3. API 肥大化の問題:
+       - 3つの実行メソッド (run, run_batched, run_optimized) は
+         ユーザーにとって選択の負担
+       - ドキュメント・テスト・保守コストの増加
+       - 効果が不明確な API は混乱を招く
+
+  motivation: |
+    **「少ない API で大きな価値」の原則:**
+
+    効果が実証できない API を残すことは:
+    - ユーザーの学習コストを増加させる
+    - 間違った API 選択による混乱を招く
+    - コードベースの保守性を下げる
+    - ドキュメントの肥大化を招く
+
+    一方、PR #168 で実装された以下の内部最適化は効果的:
+    - `#[inline]` 属性の追加（Phase 1）
+    - `map` / `flat_map` の Done 即時評価（Phase 2, 5）
+    - `run()` 内の FlatMap チェーン連続処理（Phase 3, 4）
+
+    これらの内部最適化は API を増やさずにパフォーマンスを改善しており、
+    維持すべきである。
+
+  prior_art:
+    - name: "Rust 標準ライブラリの設計哲学"
+      description: |
+        Rust 標準ライブラリは「一つの方法で十分」の原則に従い、
+        複数の実行方法を提供するよりも、デフォルトの方法を最適化する。
+        例: Iterator::collect() は一つだけで、バッチサイズ指定版はない。
+
+    - name: "効果測定に基づく最適化の取捨選択"
+      description: |
+        ベンチマークで効果が実証できない最適化は、
+        コードの複雑性を増すだけでメリットがない。
+        「測定なくして最適化なし」の原則に従う。
+
+# =============================================================================
+# 要件一覧
+# =============================================================================
+requirements:
+  # ---------------------------------------------------------------------------
+  # 1. 削除対象の定義
+  # ---------------------------------------------------------------------------
+  - id: REQ-CLEANUP-001
+    name: "効果未実証 API の削除"
+    priority: high
+    description: |
+      以下の API を削除する:
+
+      **メソッド:**
+      - `run_optimized()`: FlatMap チェーンのバッチ処理版
+      - `run_batched()`: デフォルトバッチサイズでの実行
+      - `run_with_batch_size(batch_size: usize)`: 指定バッチサイズでの実行
+
+      **定数:**
+      - `DEFAULT_BATCH_SIZE: usize = 16`
+      - `FLATMAP_CHAIN_BATCH_SIZE: usize = 16`
+
+    deletion_targets:
+      file: "src/control/trampoline.rs"
+      methods:
+        - name: "Trampoline::run_optimized"
+          signature: "pub fn run_optimized(self) -> A"
+          reason: |
+            for ループの追加で分岐が増え、逆に遅くなる可能性がある。
+            ベンチマークで効果が実証されていない。
+
+        - name: "Trampoline::run_batched"
+          signature: "pub fn run_batched(self) -> A"
+          reason: |
+            run_with_batch_size(DEFAULT_BATCH_SIZE) のラッパーに過ぎない。
+            効果が計測誤差の範囲内。
+
+        - name: "Trampoline::run_with_batch_size"
+          signature: "pub fn run_with_batch_size(self, batch_size: usize) -> A"
+          reason: |
+            バッチ処理のループオーバーヘッド削減効果が微小。
+            効果が計測誤差の範囲内。
+
+      constants:
+        - name: "Trampoline::DEFAULT_BATCH_SIZE"
+          type: "const usize"
+          reason: "run_batched() 削除に伴い不要"
+
+        - name: "Trampoline::FLATMAP_CHAIN_BATCH_SIZE"
+          type: "const usize"
+          reason: "run_optimized() 削除に伴い不要"
+
+    functional_programming_compliance:
+      referential_transparency: |
+        - 削除による機能的影響なし
+        - run() は引き続き同じ結果を返す
+      purity: |
+        - 純粋性に影響なし
+      immutability: |
+        - 不変性に影響なし
+
+  # ---------------------------------------------------------------------------
+  # 2. 関連テストの削除
+  # ---------------------------------------------------------------------------
+  - id: REQ-CLEANUP-002
+    name: "関連テストの削除"
+    priority: high
+    description: |
+      削除する API に対応するテストを削除する。
+
+    deletion_targets:
+      file: "src/control/trampoline.rs"
+      module: "tests"
+      unit_tests:
+        - name: "test_run_batched_same_as_run"
+          reason: "run_batched() 削除に伴い不要"
+
+        - name: "test_run_with_batch_size (case_1, case_2, case_3, case_4)"
+          reason: "run_with_batch_size() 削除に伴い不要"
+
+        - name: "test_batch_size_zero_panics"
+          reason: "run_with_batch_size() 削除に伴い不要"
+
+        - name: "test_run_batched_done"
+          reason: "run_batched() 削除に伴い不要"
+
+        - name: "test_run_batched_flatmap_chain"
+          reason: "run_batched() 削除に伴い不要"
+
+        - name: "test_run_optimized_same_as_run"
+          reason: "run_optimized() 削除に伴い不要"
+
+        - name: "test_run_optimized_done"
+          reason: "run_optimized() 削除に伴い不要"
+
+        - name: "test_run_optimized_flatmap_chain"
+          reason: "run_optimized() 削除に伴い不要"
+
+        - name: "test_run_optimized_nested"
+          reason: "run_optimized() 削除に伴い不要"
+
+        - name: "test_run_optimized_sum"
+          reason: "run_optimized() 削除に伴い不要"
+
+      test_sections:
+        - name: "Batch processing tests"
+          reason: "関連テストが全て削除されるため、セクションコメントも削除"
+
+        - name: "run_optimized tests"
+          reason: "関連テストが全て削除されるため、セクションコメントも削除"
+
+    external_references_check:
+      description: |
+        削除対象 API が他のファイルで参照されていないことを確認済み:
+        - benches/control_bench.rs: 参照なし
+        - README.md: 参照なし
+        - samples/: 参照なし
+        - docs/external/: 参照なし（.md ファイルのみ存在）
+        - tests/: trampoline_laws.rs は run() のみ使用
+
+      confirmed_file_types:
+        - "docs/external/ には .md ファイルのみ存在"
+        - "samples/ には .rs と Cargo.toml のみ存在"
+
+      verification_command: |
+        # 全ファイルタイプを対象に検索（target, .git, node_modules を除外）
+        grep -r "run_optimized\|run_batched\|run_with_batch_size" \
+          --exclude-dir=target \
+          --exclude-dir=.git \
+          --exclude-dir=node_modules \
+          --exclude="trampoline.rs" \
+          --exclude="*.yaml" \
+          .
+
+        # 結果が空（または要件定義ファイルのみ）であること
+
+  # ---------------------------------------------------------------------------
+  # 3. 維持すべき変更
+  # ---------------------------------------------------------------------------
+  - id: REQ-CLEANUP-003
+    name: "効果実証済み最適化の維持"
+    priority: high
+    description: |
+      以下の内部最適化は効果が実証されているため、維持する:
+
+      **Phase 1: インライン化の強化**
+      - `#[inline]` 属性の追加
+      - コンパイラによる最適化を促進
+
+      **Phase 2: flat_map の Done 即時評価**
+      - Done 状態なら即座に function を適用
+      - FlatMapInternal 作成のオーバーヘッドを削減
+
+      **Phase 3: FlatMap チェーンの連続処理**
+      - run() 内で連続する FlatMapInternal を while ループで処理
+      - パターンマッチングのオーバーヘッドを削減
+
+      **Phase 4: run() の Done 早期チェック**
+      - run() 開始時に Done 状態をチェック
+      - ループ開始のオーバーヘッドを削減
+
+      **Phase 5: map の Done 即時評価**
+      - Done 状態なら flat_map を経由せずに直接変換
+      - Phase 2 と同様の効果
+
+    preserved_optimizations:
+      - symbol: "Trampoline::run"
+        signature: "pub fn run(self) -> A"
+        optimization: "Done 早期チェック + FlatMapInternal while ループ"
+        key_features:
+          - "run() 開始時に Done 状態を早期チェックして即座に return"
+          - "FlatMapInternal の連続処理を while ループで実行"
+
+      - symbol: "Trampoline::map"
+        signature: "pub fn map<B, F>(self, function: F) -> Trampoline<B>"
+        optimization: "Done 即時評価"
+        key_features:
+          - "Done 状態なら flat_map を経由せずに直接 Done を返す"
+
+      - symbol: "Trampoline::flat_map"
+        signature: "pub fn flat_map<B, F>(self, function: F) -> Trampoline<B>"
+        optimization: "Done 即時評価"
+        key_features:
+          - "Done 状態なら FlatMapInternal を作成せずに即座に function を適用"
+
+      - symbol: "#[inline] 属性"
+        target_methods:
+          - "Trampoline::done"
+          - "Trampoline::suspend"
+          - "Trampoline::pure"
+          - "Trampoline::run"
+          - "Trampoline::map"
+          - "Trampoline::flat_map"
+          - "Trampoline::and_then"
+          - "Trampoline::then"
+          - "ContinuationBox::step"
+
+  # ---------------------------------------------------------------------------
+  # 4. ドキュメント更新
+  # ---------------------------------------------------------------------------
+  - id: REQ-CLEANUP-004
+    name: "ドキュメントの維持"
+    priority: medium
+    description: |
+      map() / flat_map() の評価タイミングに関する注記は維持する。
+
+      これらのドキュメントは、Done 即時評価の最適化について
+      ユーザーに重要な情報を提供している。
+
+    preserved_documentation:
+      - location: "map() の doc comment"
+        content: |
+          /// # Note on Evaluation Timing
+          ///
+          /// When the source `Trampoline` is in the `Done` state, the function is applied
+          /// immediately without creating intermediate structures. This optimization assumes
+          /// that `function` is a pure function (no side effects). If you pass a function
+          /// with side effects, the timing of those effects may differ from other implementations.
+
+      - location: "flat_map() の doc comment"
+        content: |
+          /// # Note on Evaluation Timing
+          ///
+          /// When the source `Trampoline` is in the `Done` state, the function is applied
+          /// immediately without creating an intermediate `FlatMapInternal` wrapper. This
+          /// optimization assumes that `function` is a pure function (no side effects).
+          /// If you pass a function with side effects, the timing of those effects may
+          /// differ from other implementations.
+
+# =============================================================================
+# 非機能要件
+# =============================================================================
+non_functional_requirements:
+  performance:
+    - id: NFR-PERF-001
+      description: |
+        削除後も既存のパフォーマンス改善（Phase 2-5）は維持される。
+        run() の実行速度は削除前と同等以上であること。
+
+      verification:
+        benchmark_command: "cargo bench --bench control_bench -- trampoline"
+        metrics:
+          - name: "trampoline_shallow/Trampoline"
+            condition: "削除前と比較して 10% 以上遅くならないこと"
+
+          - name: "trampoline_deep/Trampoline"
+            condition: "削除前と比較して 10% 以上遅くならないこと"
+
+          - name: "trampoline_very_deep/Trampoline"
+            condition: "削除前と比較して 10% 以上遅くならないこと"
+
+        baseline:
+          description: "API 削除直前の同一ブランチでの測定結果"
+          rationale: |
+            コミット 9eead9a（PR #168 マージ後）の最適化が維持されていることを確認するため、
+            削除前後で同一環境・同一条件で比較する。
+            target/criterion/ は gitignore 対象のため、コミットハッシュではなく
+            同一セッション内での連続測定で比較を行う。
+
+        comparison_procedure: |
+          以下の手順で削除前後のパフォーマンスを比較する:
+
+          **準備:**
+          - 同一マシン・同一環境で実行すること
+          - バックグラウンドプロセスを最小限にすること
+
+          **手順:**
+          1. API 削除前のコード（変更適用前）でベースラインを測定
+             ```
+             cargo bench --bench control_bench -- trampoline
+             ```
+             - criterion が target/criterion/ にベースラインを保存
+
+          2. API を削除する変更を適用
+
+          3. 削除後に再度ベンチマークを実行
+             ```
+             cargo bench --bench control_bench -- trampoline
+             ```
+             - criterion が自動的に手順1の結果と比較し、変化率を出力
+
+          4. criterion の出力を確認:
+             - "No change in performance detected" または改善 → OK
+             - "Change within noise threshold" → OK
+             - "Performance has regressed" かつ回帰率 10% 以上 → NG
+
+          **重要:**
+          - 手順1〜4は同一セッション内で連続して実行すること
+          - 別セッションで実行する場合は、手順1からやり直すこと
+          - criterion の比較機能が正しく動作するよう、target/criterion/ を削除しないこと
+
+        measurement_conditions:
+          tool: "criterion 0.5.x"
+          sample_size: "100 (criterion デフォルト)"
+          warm_up: "3 秒 (criterion デフォルト)"
+          statistical_method: "criterion の統計的比較機能を使用"
+          environment_note: |
+            ベンチマークは同一マシン・同一条件で実行すること。
+            CI 環境ではノイズが大きいため、ローカル環境での確認を推奨。
+
+        tolerance_rationale: |
+          許容差 10% の根拠:
+          - criterion のデフォルトノイズ閾値は 5%
+          - コード削除による間接的な影響（コンパイラ最適化の変化等）を考慮
+          - 実際には変化がないことが期待される（削除対象は別コードパス）
+
+          判定方法:
+          - criterion の出力で "regressed" と表示されないこと
+          - または、回帰率が 10% 未満であること
+
+  compatibility:
+    - id: NFR-COMPAT-001
+      description: |
+        **破壊的変更:**
+        - run_optimized(), run_batched(), run_with_batch_size() は削除される
+        - これらを使用しているユーザーコードは壊れる
+
+        **対応:**
+        - これらは PR #168 でのみ追加された新 API
+        - まだリリースされていないため、影響は最小限
+        - CHANGELOG.md に記載は不要（未リリース機能の削除）
+
+      external_documentation:
+        - file: "README.md"
+          status: "更新不要（削除対象 API の参照なし）"
+
+        - file: "docs/external/"
+          status: "更新不要（削除対象 API の参照なし）"
+
+        - file: "benches/control_bench.rs"
+          status: "更新不要（削除対象 API の参照なし）"
+
+        - file: "samples/"
+          status: "更新不要（削除対象 API の参照なし）"
+
+  testing:
+    - id: NFR-TEST-001
+      description: |
+        削除後も以下のテストが全てパスすること:
+        - tests/trampoline_laws.rs（Monad 則）
+        - src/control/trampoline.rs 内の残りのテスト
+        - cargo clippy --all-features --all-targets -- -D warnings
+        - cargo fmt -- --check
+
+      verification_commands:
+        - command: "cargo test --lib control::trampoline"
+          description: "Trampoline 単体テストの実行"
+
+        - command: "cargo test --test trampoline_laws"
+          description: "Monad 則プロパティテストの実行"
+
+        - command: "cargo clippy --all-features --all-targets -- -D warnings"
+          description: "Clippy lint チェック"
+
+        - command: "cargo fmt -- --check"
+          description: "フォーマットチェック"
+
+  code_quality:
+    - id: NFR-QUAL-001
+      description: |
+        削除により以下が改善される:
+        - API サーフェスの縮小（実行メソッド: run, run_batched, run_optimized → run のみ）
+        - テストコードの削減（約 100 行）
+        - ドキュメントの簡素化（3 メソッドの doc comment 削除）
+        - 保守性の向上（複数の実行パスの管理が不要に）
+
+# =============================================================================
+# 実装手順
+# =============================================================================
+implementation_steps:
+  - step: 1
+    description: "定数の削除"
+    details: |
+      - DEFAULT_BATCH_SIZE 定数を削除
+      - FLATMAP_CHAIN_BATCH_SIZE 定数を削除
+
+  - step: 2
+    description: "メソッドの削除"
+    details: |
+      - run_optimized() メソッドを削除
+      - run_batched() メソッドを削除
+      - run_with_batch_size() メソッドを削除
+
+  - step: 3
+    description: "テストの削除"
+    details: |
+      - 削除した API に対応するテストを全て削除
+      - テストセクションのコメント "Batch processing tests" を削除
+      - テストセクションのコメント "run_optimized tests" を削除
+
+  - step: 4
+    description: "検証"
+    details: |
+      - cargo test 実行
+      - cargo clippy 実行
+      - cargo fmt 実行
+      - tests/trampoline_laws.rs が全てパスすることを確認
+
+# =============================================================================
+# 成功基準
+# =============================================================================
+success_criteria:
+  - id: SC-001
+    name: "API の削除完了（実装ファイル）"
+    description: |
+      src/control/trampoline.rs から以下が削除されている:
+      - run_optimized(), run_batched(), run_with_batch_size()
+      - DEFAULT_BATCH_SIZE, FLATMAP_CHAIN_BATCH_SIZE
+    verification: |
+      grep -c "run_optimized\|run_batched\|run_with_batch_size\|DEFAULT_BATCH_SIZE\|FLATMAP_CHAIN_BATCH_SIZE" \
+        src/control/trampoline.rs
+      # 結果が 0 であること
+
+  - id: SC-001b
+    name: "API の削除完了（リポジトリ全体）"
+    description: |
+      リポジトリ全体で削除対象 API への参照が存在しないこと
+    verification: |
+      grep -r "run_optimized\|run_batched\|run_with_batch_size" \
+        --exclude-dir=target \
+        --exclude-dir=.git \
+        --exclude-dir=node_modules \
+        --exclude="*.yaml" \
+        .
+      # 結果が空であること
+
+  - id: SC-002
+    name: "テストの削除完了"
+    description: |
+      削除した API に対応するテストが全て削除されている
+    verification: |
+      grep -c "test_run_batched\|test_run_optimized\|test_batch_size_zero" \
+        src/control/trampoline.rs
+      # 結果が 0 であること
+
+  - id: SC-003
+    name: "既存テストのパス"
+    description: |
+      cargo test が全てパスする
+    verification: "cargo test"
+
+  - id: SC-004
+    name: "Monad 則の維持"
+    description: |
+      tests/trampoline_laws.rs の全テストがパスする
+    verification: "cargo test --test trampoline_laws"
+
+  - id: SC-005
+    name: "コード品質"
+    description: |
+      cargo clippy と cargo fmt がパスする
+    verification: |
+      cargo clippy --all-features --all-targets -- -D warnings
+      cargo fmt -- --check
+
+  - id: SC-006
+    name: "パフォーマンス維持"
+    description: |
+      削除前と比較して run() のパフォーマンスが 10% 以上低下していないこと
+    verification: |
+      NFR-PERF-001 の comparison_procedure に従い、同一セッション内で
+      削除前後のベンチマークを連続実行して比較する。
+
+      criterion の出力が以下のいずれかであること:
+      - "No change in performance detected"
+      - "Change within noise threshold"
+      - 改善を示す出力
+      - 回帰率が 10% 未満

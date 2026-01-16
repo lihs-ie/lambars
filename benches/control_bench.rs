@@ -1,10 +1,12 @@
-//! Benchmark for control structures: Lazy and Trampoline.
+//! Benchmark for control structures: Lazy, ConcurrentLazy, and Trampoline.
 //!
 //! Measures the performance of lambars' control flow abstractions.
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use lambars::control::{Lazy, Trampoline};
+use lambars::control::{ConcurrentLazy, Lazy, Trampoline};
 use std::hint::black_box;
+use std::sync::{Arc, LazyLock};
+use std::thread;
 
 // =============================================================================
 // Lazy Benchmarks
@@ -107,6 +109,417 @@ fn benchmark_lazy_chain(criterion: &mut Criterion) {
             },
         );
     }
+
+    group.finish();
+}
+
+// =============================================================================
+// ConcurrentLazy Benchmarks
+// =============================================================================
+
+/// Benchmark comparing initial evaluation overhead between Lazy and ConcurrentLazy
+fn benchmark_concurrent_lazy_vs_lazy_initial(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("concurrent_lazy_vs_lazy_initial");
+
+    group.bench_function("Lazy", |bencher| {
+        bencher.iter(|| {
+            let lazy = Lazy::new(|| {
+                let mut sum = 0;
+                for index in 0..100 {
+                    sum += index;
+                }
+                sum
+            });
+            let value = lazy.force();
+            black_box(*value)
+        });
+    });
+
+    group.bench_function("ConcurrentLazy", |bencher| {
+        bencher.iter(|| {
+            let lazy = ConcurrentLazy::new(|| {
+                let mut sum = 0;
+                for index in 0..100 {
+                    sum += index;
+                }
+                sum
+            });
+            let value = lazy.force();
+            black_box(*value)
+        });
+    });
+
+    group.finish();
+}
+
+/// Benchmark comparing cached access overhead between Lazy and ConcurrentLazy
+fn benchmark_concurrent_lazy_vs_lazy_cached(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("concurrent_lazy_vs_lazy_cached");
+
+    let lazy = Lazy::new(|| {
+        let mut sum = 0;
+        for index in 0..1000 {
+            sum += index;
+        }
+        sum
+    });
+    let _ = lazy.force();
+
+    group.bench_function("Lazy", |bencher| {
+        bencher.iter(|| {
+            let value = lazy.force();
+            black_box(*value)
+        });
+    });
+
+    let concurrent_lazy = ConcurrentLazy::new(|| {
+        let mut sum = 0;
+        for index in 0..1000 {
+            sum += index;
+        }
+        sum
+    });
+    let _ = concurrent_lazy.force();
+
+    group.bench_function("ConcurrentLazy", |bencher| {
+        bencher.iter(|| {
+            let value = concurrent_lazy.force();
+            black_box(*value)
+        });
+    });
+
+    group.finish();
+}
+
+/// Benchmark ConcurrentLazy with different computation sizes
+fn benchmark_concurrent_lazy_computation_size(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("concurrent_lazy_computation_size");
+
+    for size in [10, 100, 1000] {
+        group.bench_with_input(
+            BenchmarkId::new("computation_size", size),
+            &size,
+            |bencher, &size| {
+                bencher.iter(|| {
+                    let lazy = ConcurrentLazy::new(move || {
+                        let mut sum = 0;
+                        for index in 0..size {
+                            sum += index;
+                        }
+                        sum
+                    });
+                    let value = lazy.force();
+                    black_box(*value)
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Benchmark initialization contention when multiple threads try to initialize simultaneously
+fn benchmark_concurrent_lazy_init_contention(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("concurrent_lazy_init_contention");
+
+    for thread_count in [2, 4, 8, 16] {
+        group.bench_with_input(
+            BenchmarkId::new("thread_count", thread_count),
+            &thread_count,
+            |bencher, &thread_count| {
+                bencher.iter(|| {
+                    let lazy = Arc::new(ConcurrentLazy::new(|| {
+                        let mut sum = 0;
+                        for index in 0..100 {
+                            sum += index;
+                        }
+                        sum
+                    }));
+
+                    let handles: Vec<_> = (0..thread_count)
+                        .map(|_| {
+                            let lazy = Arc::clone(&lazy);
+                            thread::spawn(move || *lazy.force())
+                        })
+                        .collect();
+
+                    for handle in handles {
+                        black_box(handle.join().unwrap());
+                    }
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Benchmark cached access from multiple threads (should be lock-free)
+fn benchmark_concurrent_lazy_cached_access(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("concurrent_lazy_cached_access");
+
+    for thread_count in [2, 4, 8, 16] {
+        group.bench_with_input(
+            BenchmarkId::new("thread_count", thread_count),
+            &thread_count,
+            |bencher, &thread_count| {
+                let lazy = Arc::new(ConcurrentLazy::new(|| {
+                    let mut sum = 0;
+                    for index in 0..1000 {
+                        sum += index;
+                    }
+                    sum
+                }));
+                // Pre-initialize
+                let _ = lazy.force();
+
+                bencher.iter(|| {
+                    let handles: Vec<_> = (0..thread_count)
+                        .map(|_| {
+                            let lazy = Arc::clone(&lazy);
+                            thread::spawn(move || *lazy.force())
+                        })
+                        .collect();
+
+                    for handle in handles {
+                        black_box(handle.join().unwrap());
+                    }
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Benchmark thread scalability with increasing thread counts
+fn benchmark_concurrent_lazy_thread_scalability(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("concurrent_lazy_thread_scalability");
+
+    for thread_count in [2, 4, 8, 16] {
+        group.bench_with_input(
+            BenchmarkId::new("thread_count", thread_count),
+            &thread_count,
+            |bencher, &thread_count| {
+                bencher.iter(|| {
+                    // Each thread gets its own lazy value to measure pure scaling
+                    let handles: Vec<_> = (0..thread_count)
+                        .map(|_| {
+                            thread::spawn(|| {
+                                let lazy = ConcurrentLazy::new(|| {
+                                    let mut sum = 0;
+                                    for index in 0..100 {
+                                        sum += index;
+                                    }
+                                    sum
+                                });
+                                *lazy.force()
+                            })
+                        })
+                        .collect();
+
+                    for handle in handles {
+                        black_box(handle.join().unwrap());
+                    }
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Benchmark map chain overhead
+fn benchmark_concurrent_lazy_map_chain(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("concurrent_lazy_map_chain");
+
+    // Chain length 2
+    group.bench_function("chain_length_2", |bencher| {
+        bencher.iter(|| {
+            let lazy = ConcurrentLazy::new(|| 1).map(|x| x * 2).map(|x| x * 2);
+            let value = lazy.force();
+            black_box(*value)
+        });
+    });
+
+    // Chain length 5
+    group.bench_function("chain_length_5", |bencher| {
+        bencher.iter(|| {
+            let lazy = ConcurrentLazy::new(|| 1)
+                .map(|x| x * 2)
+                .map(|x| x * 2)
+                .map(|x| x * 2)
+                .map(|x| x * 2)
+                .map(|x| x * 2);
+            let value = lazy.force();
+            black_box(*value)
+        });
+    });
+
+    // Chain length 10
+    group.bench_function("chain_length_10", |bencher| {
+        bencher.iter(|| {
+            let lazy = ConcurrentLazy::new(|| 1)
+                .map(|x| x * 2)
+                .map(|x| x * 2)
+                .map(|x| x * 2)
+                .map(|x| x * 2)
+                .map(|x| x * 2)
+                .map(|x| x * 2)
+                .map(|x| x * 2)
+                .map(|x| x * 2)
+                .map(|x| x * 2)
+                .map(|x| x * 2);
+            let value = lazy.force();
+            black_box(*value)
+        });
+    });
+
+    group.finish();
+}
+
+/// Benchmark flat_map chain overhead
+fn benchmark_concurrent_lazy_flat_map_chain(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("concurrent_lazy_flat_map_chain");
+
+    // Chain length 2
+    group.bench_function("chain_length_2", |bencher| {
+        bencher.iter(|| {
+            let lazy = ConcurrentLazy::new(|| 1)
+                .flat_map(|x| ConcurrentLazy::new(move || x * 2))
+                .flat_map(|x| ConcurrentLazy::new(move || x * 2));
+            let value = lazy.force();
+            black_box(*value)
+        });
+    });
+
+    // Chain length 5
+    group.bench_function("chain_length_5", |bencher| {
+        bencher.iter(|| {
+            let lazy = ConcurrentLazy::new(|| 1)
+                .flat_map(|x| ConcurrentLazy::new(move || x * 2))
+                .flat_map(|x| ConcurrentLazy::new(move || x * 2))
+                .flat_map(|x| ConcurrentLazy::new(move || x * 2))
+                .flat_map(|x| ConcurrentLazy::new(move || x * 2))
+                .flat_map(|x| ConcurrentLazy::new(move || x * 2));
+            let value = lazy.force();
+            black_box(*value)
+        });
+    });
+
+    // Chain length 10
+    group.bench_function("chain_length_10", |bencher| {
+        bencher.iter(|| {
+            let lazy = ConcurrentLazy::new(|| 1)
+                .flat_map(|x| ConcurrentLazy::new(move || x * 2))
+                .flat_map(|x| ConcurrentLazy::new(move || x * 2))
+                .flat_map(|x| ConcurrentLazy::new(move || x * 2))
+                .flat_map(|x| ConcurrentLazy::new(move || x * 2))
+                .flat_map(|x| ConcurrentLazy::new(move || x * 2))
+                .flat_map(|x| ConcurrentLazy::new(move || x * 2))
+                .flat_map(|x| ConcurrentLazy::new(move || x * 2))
+                .flat_map(|x| ConcurrentLazy::new(move || x * 2))
+                .flat_map(|x| ConcurrentLazy::new(move || x * 2))
+                .flat_map(|x| ConcurrentLazy::new(move || x * 2));
+            let value = lazy.force();
+            black_box(*value)
+        });
+    });
+
+    group.finish();
+}
+
+/// Benchmark zip and zip_with operations
+fn benchmark_concurrent_lazy_zip_operations(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("concurrent_lazy_zip_operations");
+
+    group.bench_function("zip", |bencher| {
+        bencher.iter(|| {
+            let lazy1 = ConcurrentLazy::new(|| 21);
+            let lazy2 = ConcurrentLazy::new(|| 21);
+            let zipped = lazy1.zip(lazy2);
+            let value = zipped.force();
+            black_box(*value)
+        });
+    });
+
+    group.bench_function("zip_with", |bencher| {
+        bencher.iter(|| {
+            let lazy1 = ConcurrentLazy::new(|| 21);
+            let lazy2 = ConcurrentLazy::new(|| 21);
+            let combined = lazy1.zip_with(lazy2, |a, b| a + b);
+            let value = combined.force();
+            black_box(*value)
+        });
+    });
+
+    group.finish();
+}
+
+/// Benchmark comparing ConcurrentLazy with std::sync::LazyLock
+fn benchmark_concurrent_lazy_vs_lazylock(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("concurrent_lazy_vs_lazylock");
+
+    // Initial evaluation comparison
+    group.bench_function("ConcurrentLazy_init", |bencher| {
+        bencher.iter(|| {
+            let lazy = ConcurrentLazy::new(|| {
+                let mut sum = 0;
+                for index in 0..100 {
+                    sum += index;
+                }
+                sum
+            });
+            let value = lazy.force();
+            black_box(*value)
+        });
+    });
+
+    // LazyLock requires static initialization, so we use a local LazyLock for fair comparison
+    group.bench_function("LazyLock_init", |bencher| {
+        bencher.iter(|| {
+            let lazy: LazyLock<i32> = LazyLock::new(|| {
+                let mut sum = 0;
+                for index in 0..100 {
+                    sum += index;
+                }
+                sum
+            });
+            black_box(*lazy)
+        });
+    });
+
+    // Cached access comparison (using static for LazyLock)
+    static CACHED_LAZYLOCK: LazyLock<i32> = LazyLock::new(|| {
+        let mut sum = 0;
+        for index in 0..1000 {
+            sum += index;
+        }
+        sum
+    });
+
+    // Initialize the static LazyLock
+    let _ = *CACHED_LAZYLOCK;
+
+    let cached_concurrent_lazy = ConcurrentLazy::new(|| {
+        let mut sum = 0;
+        for index in 0..1000 {
+            sum += index;
+        }
+        sum
+    });
+    let _ = cached_concurrent_lazy.force();
+
+    group.bench_function("ConcurrentLazy_cached", |bencher| {
+        bencher.iter(|| {
+            let value = cached_concurrent_lazy.force();
+            black_box(*value)
+        });
+    });
+
+    group.bench_function("LazyLock_cached", |bencher| {
+        bencher.iter(|| black_box(*CACHED_LAZYLOCK));
+    });
 
     group.finish();
 }
@@ -292,9 +705,22 @@ fn benchmark_trampoline_map_flatmap(criterion: &mut Criterion) {
 
 criterion_group!(
     benches,
+    // Lazy benchmarks
     benchmark_lazy_force,
     benchmark_lazy_cached,
     benchmark_lazy_chain,
+    // ConcurrentLazy benchmarks
+    benchmark_concurrent_lazy_vs_lazy_initial,
+    benchmark_concurrent_lazy_vs_lazy_cached,
+    benchmark_concurrent_lazy_computation_size,
+    benchmark_concurrent_lazy_init_contention,
+    benchmark_concurrent_lazy_cached_access,
+    benchmark_concurrent_lazy_thread_scalability,
+    benchmark_concurrent_lazy_map_chain,
+    benchmark_concurrent_lazy_flat_map_chain,
+    benchmark_concurrent_lazy_zip_operations,
+    benchmark_concurrent_lazy_vs_lazylock,
+    // Trampoline benchmarks
     benchmark_trampoline_shallow,
     benchmark_trampoline_deep,
     benchmark_trampoline_very_deep,

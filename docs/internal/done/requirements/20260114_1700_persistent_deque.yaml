@@ -1,0 +1,1315 @@
+# PersistentDeque (Finger Tree) 要件定義
+#
+# 概要:
+#   Finger Tree ベースの永続的両端キュー（Deque）を実装する。
+#   両端からの O(1) 償却操作と O(log min(n, m)) の連結操作を提供する。
+#
+# 設計方針:
+#   1. 参照透過性: 全ての関数は純粋関数として実装し、副作用を持たない
+#   2. 不変性: 既存のノードを変更せず、新しいノードを生成して返す
+#   3. 効率性: Finger Tree の理論的保証を維持する
+#   4. 構造共有: 変更のないサブツリーは共有し、メモリ効率を最大化する
+#
+# 参照:
+#   - Okasaki, "Purely Functional Data Structures" (1998)
+#   - Hinze & Paterson, "Finger Trees: A Simple General-purpose Data Structure" (2006)
+#     https://www.staff.city.ac.uk/~ross/papers/FingerTree.pdf
+#   - Haskell Data.Sequence (finger tree based)
+#   - Scala scala.collection.immutable.Queue
+
+version: "1.0.0"
+name: "persistent_deque"
+description: |
+  PersistentDeque は Finger Tree（2-3 フィンガーツリー）をベースとした
+  永続的両端キュー（Double-Ended Queue）である。
+
+  Finger Tree は Hinze & Paterson (2006) が提案したデータ構造で、
+  以下の特徴を持つ:
+
+  - 両端からの追加・削除: O(1) 償却時間
+  - 先頭・末尾要素へのアクセス: O(1)
+  - 2つの Deque の連結: O(log min(n, m))
+  - ランダムアクセス: O(log n) (サイズ情報を使用)
+
+  Rust が標準で提供しない永続データ構造として、関数型プログラミングの
+  パターンを可能にする重要なコレクションである。
+
+# 背景・動機
+background:
+  problem: |
+    現在の PersistentDeque はスタブ実装のみで、実際の機能を提供していない。
+    関数型プログラミングにおいて、効率的な両端キューは以下の場面で必要:
+
+    1. キューベースのアルゴリズム（BFS など）
+    2. ストリーム処理でのバッファリング
+    3. 分割統治法での中間結果のマージ
+    4. 状態管理での履歴保持
+
+    標準ライブラリの VecDeque は可変であり、永続性を持たない。
+    PersistentList は末尾操作が O(n) であり、両端操作には不向き。
+    PersistentVector は両端操作が O(log n) だが、O(1) ではない。
+
+  motivation: |
+    Finger Tree は Okasaki の著書で紹介され、Haskell の Data.Sequence や
+    多くの関数型言語で採用されている汎用データ構造である。
+
+    Finger Tree の「フィンガー」は両端へのアクセスを O(1) にする仕組みで、
+    これにより Deque としての効率的な操作を実現する。
+
+    lambars ライブラリの永続データ構造ファミリーに追加することで、
+    より多くの関数型プログラミングパターンをサポートする。
+
+  prior_art:
+    - name: "Haskell Data.Sequence"
+      description: |
+        Haskell の標準ライブラリに含まれる Finger Tree ベースのシーケンス。
+        snoc, unsnoc, cons, uncons が O(1) 償却。
+        append が O(log min(n, m))。
+        Data.Sequence は Measured を使用したモノイド拡張もサポート。
+
+    - name: "Scala scala.collection.immutable.Queue"
+      description: |
+        Scala の不変 Queue は2つのリストを使用した実装。
+        Finger Tree ほど効率的ではないが、永続性を持つ。
+        dequeue が O(1) 償却（リストの反転を含む）。
+
+    - name: "Clojure finger-tree library"
+      description: |
+        Clojure のサードパーティライブラリ。
+        Hinze & Paterson の論文に基づく実装。
+        Measured プロトコルによる汎用的なモノイド拡張。
+
+    - name: "im-rs (Rust)"
+      description: |
+        Rust の永続データ構造ライブラリ。
+        RRB-Tree ベースの Vector を提供するが、Finger Tree は未実装。
+
+# Finger Tree の理論的背景
+theoretical_background:
+  finger_tree_structure:
+    description: |
+      Finger Tree は以下の構造を持つ:
+
+      ```
+      FingerTree<T> = Empty
+                    | Single(T)
+                    | Deep(Digit<T>, FingerTree<Node<T>>, Digit<T>)
+      ```
+
+      - Empty: 空のツリー
+      - Single: 単一要素
+      - Deep: 左のフィンガー + 中間のスパイン + 右のフィンガー
+
+      Digit は 1-4 要素の配列:
+      ```
+      Digit<T> = One(T) | Two(T, T) | Three(T, T, T) | Four(T, T, T, T)
+      ```
+
+      Node は 2-3 要素のグループ（スパインの再帰に使用）:
+      ```
+      Node<T> = Node2(T, T) | Node3(T, T, T)
+      ```
+
+  size_caching:
+    description: |
+      O(log n) のランダムアクセスを実現するため、サイズ情報をキャッシュする:
+
+      - Node<T>: 内部にサイズ（含まれる要素の総数）を保持
+        - 葉レベル（T が直接要素）: Node2 -> size = 2, Node3 -> size = 3
+        - 中間レベル（T が Node<U>）: 子ノードの size の合計
+        - 例: Node2(Node3(a,b,c), Node2(d,e)) の size = 3 + 2 = 5
+
+      - Digit<T>: 含まれる要素の総数を計算可能
+        - 葉レベル: One -> 1, Two -> 2, Three -> 3, Four -> 4
+        - 中間レベル: 各要素の size の合計
+
+      - FingerTree<T> の length: T が何であっても、最終的な要素（葉要素）の総数
+        - Empty -> 0
+        - Single(x) -> x が Node なら x.size、そうでなければ 1
+        - Deep { left, middle, right, length } -> length は left + middle + right の要素総数
+        - 重要: FingerTree<Node<T>> の length は「ノード数」ではなく「要素数」
+
+      これにより、get(index) では累積サイズを使って O(log n) でナビゲート可能。
+
+  amortized_analysis:
+    description: |
+      Finger Tree の償却時間計算量は以下の方法で保証される:
+
+      1. Digit の容量（1-4要素）により、オーバーフロー/アンダーフローの
+         伝播が償却 O(1) に抑えられる
+
+      2. スパインへの操作は再帰的だが、各レベルで定数時間の操作のみ
+
+      3. 連結操作では、両端のフィンガーを結合し、中間部分を再帰的にマージ
+         高さの差に比例する O(log min(n, m))
+
+  structural_sharing:
+    description: |
+      永続性は ReferenceCounter（Rc/Arc）による構造共有で実現:
+
+      - 変更されないサブツリーは複数バージョンで共有
+      - スパインの変更はパスコピーで O(log n) のメモリ使用
+      - Node/Digit は不変なので共有に適している
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. 基本データ構造
+  # ======================================================================
+  - id: core_data_structures
+    name: "基本データ構造の定義"
+    description: |
+      Finger Tree を構成する基本的なデータ型を定義する。
+      全ての型は不変であり、Clone と構造共有をサポートする。
+
+      サイズ情報をキャッシュして O(log n) のランダムアクセスを実現する。
+
+    methods:
+      - name: "Node<T>"
+        signature: |
+          enum Node<T> {
+              Node2 {
+                  first: ReferenceCounter<T>,
+                  second: ReferenceCounter<T>,
+                  size: usize,
+              },
+              Node3 {
+                  first: ReferenceCounter<T>,
+                  second: ReferenceCounter<T>,
+                  third: ReferenceCounter<T>,
+                  size: usize,
+              },
+          }
+        description: |
+          2-3 要素を持つノード。スパインの再帰で使用される。
+          要素は ReferenceCounter でラップし、構造共有を可能にする。
+          size フィールドで累積サイズを保持し、O(log n) のナビゲートを可能にする。
+
+          サイズ計算:
+          - 葉レベル（T が直接要素）: Node2 -> 2, Node3 -> 3
+          - 中間レベル（T が Node）: 子ノードのサイズの合計
+
+      - name: "Digit<T>"
+        signature: |
+          enum Digit<T> {
+              One(ReferenceCounter<T>),
+              Two(ReferenceCounter<T>, ReferenceCounter<T>),
+              Three(ReferenceCounter<T>, ReferenceCounter<T>, ReferenceCounter<T>),
+              Four(ReferenceCounter<T>, ReferenceCounter<T>, ReferenceCounter<T>, ReferenceCounter<T>),
+          }
+        description: |
+          1-4 要素を持つフィンガー（指）。
+          両端へのアクセスを O(1) にするための構造。
+
+          Digit のサイズは要素数から計算可能:
+          - One -> 1, Two -> 2, Three -> 3, Four -> 4
+          - 中間レベルでは子ノードのサイズの合計
+
+      - name: "FingerTree<T>"
+        signature: |
+          enum FingerTree<T> {
+              Empty,
+              Single(ReferenceCounter<T>),
+              Deep {
+                  left: Digit<T>,
+                  middle: ReferenceCounter<FingerTree<Node<T>>>,
+                  right: Digit<T>,
+                  length: usize,
+              },
+          }
+        description: |
+          Finger Tree 本体。
+          - Empty: 空のツリー（length = 0）
+          - Single: 単一要素（length = 1）
+          - Deep: 左フィンガー + 中間スパイン + 右フィンガー
+          length フィールドで O(1) のサイズ取得を可能にする。
+
+      - name: "PersistentDeque<T>"
+        signature: |
+          pub struct PersistentDeque<T> {
+              tree: FingerTree<T>,
+          }
+        description: |
+          公開 API を提供するラッパー構造体。
+          内部の FingerTree を隠蔽し、使いやすいインターフェースを提供。
+
+    implementations:
+      - type: "Node<T>, Digit<T>, FingerTree<T>, PersistentDeque<T>"
+        description: |
+          全ての型に以下を実装:
+          - Clone: ReferenceCounter による効率的なクローン
+          - Debug: デバッグ出力
+          - PartialEq/Eq: 構造的等価性（T: Eq の場合）
+
+          Node と Digit には以下のヘルパーメソッドを実装:
+          - size(&self) -> usize: 含まれる要素の総数を返す
+
+  # ======================================================================
+  # 2. 生成・構築
+  # ======================================================================
+  - id: constructors
+    name: "生成・構築メソッド"
+    description: |
+      PersistentDeque を作成するための各種コンストラクタ。
+      全て純粋関数であり、副作用を持たない。
+
+    methods:
+      - name: "new"
+        signature: "pub const fn new() -> Self"
+        description: |
+          空の Deque を作成する。
+          計算量: O(1)
+        examples:
+          - description: "空の Deque を作成"
+            code: |
+              let deque: PersistentDeque<i32> = PersistentDeque::new();
+              assert!(deque.is_empty());
+              assert_eq!(deque.len(), 0);
+
+      - name: "singleton"
+        signature: "pub fn singleton(element: T) -> Self"
+        description: |
+          単一要素を含む Deque を作成する。
+          計算量: O(1)
+        examples:
+          - description: "単一要素の Deque を作成"
+            code: |
+              let deque = PersistentDeque::singleton(42);
+              assert_eq!(deque.len(), 1);
+              assert_eq!(deque.front(), Some(&42));
+              assert_eq!(deque.back(), Some(&42));
+
+      - name: "from_iter"
+        signature: "fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self"
+        description: |
+          イテレータから Deque を構築する。
+          計算量: O(n)
+        examples:
+          - description: "Range から構築"
+            code: |
+              let deque: PersistentDeque<i32> = (1..=5).collect();
+              assert_eq!(deque.len(), 5);
+              assert_eq!(deque.front(), Some(&1));
+              assert_eq!(deque.back(), Some(&5));
+
+    implementations:
+      - type: "PersistentDeque<T>"
+        description: |
+          - new: FingerTree::Empty をラップ
+          - singleton: FingerTree::Single をラップ
+          - from_iter: 繰り返し push_back を使用
+
+  # ======================================================================
+  # 3. 先頭操作
+  # ======================================================================
+  - id: front_operations
+    name: "先頭操作"
+    description: |
+      Deque の先頭に対する操作。
+      全て O(1) 償却時間で実行される。
+
+    methods:
+      - name: "push_front"
+        signature: "pub fn push_front(&self, element: T) -> Self"
+        description: |
+          先頭に要素を追加した新しい Deque を返す。
+          元の Deque は変更されない（永続性）。
+          計算量: O(1) 償却
+        examples:
+          - description: "先頭に追加"
+            code: |
+              let deque = PersistentDeque::new()
+                  .push_front(3)
+                  .push_front(2)
+                  .push_front(1);
+              // deque: [1, 2, 3]
+              assert_eq!(deque.front(), Some(&1));
+              assert_eq!(deque.back(), Some(&3));
+
+      - name: "pop_front"
+        signature: "pub fn pop_front(&self) -> Option<(Self, T)> where T: Clone"
+        description: |
+          先頭要素を取り出し、(残りの Deque, 要素) を返す。
+          空の Deque の場合は None を返す。
+          計算量: O(1) 償却
+
+          注: PersistentVector との一貫性のため、戻り値の順序は (Self, T)。
+          T: Clone を要求し、ReferenceCounter から要素をクローンして返す。
+        examples:
+          - description: "先頭から取り出し"
+            code: |
+              let deque: PersistentDeque<i32> = (1..=3).collect();
+              if let Some((rest, head)) = deque.pop_front() {
+                  assert_eq!(head, 1);
+                  assert_eq!(rest.len(), 2);
+                  assert_eq!(rest.front(), Some(&2));
+              }
+          - description: "空の Deque から取り出し"
+            code: |
+              let empty: PersistentDeque<i32> = PersistentDeque::new();
+              assert_eq!(empty.pop_front(), None);
+
+      - name: "front"
+        signature: "pub fn front(&self) -> Option<&T>"
+        description: |
+          先頭要素への参照を返す。
+          空の Deque の場合は None を返す。
+          計算量: O(1)
+        examples:
+          - description: "先頭要素を参照"
+            code: |
+              let deque: PersistentDeque<i32> = (1..=3).collect();
+              assert_eq!(deque.front(), Some(&1));
+
+    laws:
+      - name: "Push-Pop Front Law"
+        description: |
+          push_front した要素は pop_front で取り出せる
+        equation: "deque.push_front(x).pop_front() == Some((deque, x))"
+        property_test: |
+          fn prop_push_pop_front_identity(deque: PersistentDeque<i32>, element: i32) {
+              let pushed = deque.clone().push_front(element);
+              let Some((rest, popped)) = pushed.pop_front() else {
+                  panic!("push_front should make pop_front succeed");
+              };
+              prop_assert_eq!(popped, element);
+              prop_assert_eq!(rest, deque);
+          }
+
+      - name: "Push-Front Law"
+        description: |
+          push_front した要素は front で取得できる
+        equation: "deque.push_front(x).front() == Some(&x)"
+        property_test: |
+          fn prop_push_front_gives_front(deque: PersistentDeque<i32>, element: i32) {
+              let pushed = deque.push_front(element);
+              prop_assert_eq!(pushed.front(), Some(&element));
+          }
+
+    implementations:
+      - type: "PersistentDeque<T>"
+        description: |
+          Finger Tree の構造を活用:
+
+          push_front:
+          1. Empty -> Single(element)
+          2. Single(x) -> Deep { left: One(element), middle: Empty, right: One(x), length: 2 }
+          3. Deep { left: Four(a,b,c,d), middle, right, length } -> 左 Digit がオーバーフロー
+             a. left を Two(element, a) に置換（新要素と元の先頭を保持）
+             b. 残りの3要素 (b,c,d) を Node3(b,c,d) に変換
+             c. Node3 を middle に再帰的に push_front
+             d. length を +1
+             e. 結果: Deep { left: Two(element, a), middle: middle.push_front(Node3(b,c,d)), right, length: length + 1 }
+          4. Deep { left: digit, ... } -> 左 Digit に要素を先頭追加
+             a. One(a) -> Two(element, a)
+             b. Two(a,b) -> Three(element, a, b)
+             c. Three(a,b,c) -> Four(element, a, b, c)
+             d. length を +1
+
+          pop_front:
+          1. Empty -> None
+          2. Single(x) -> Some((Empty, x.clone()))
+          3. Deep { left: One(x), middle: Empty, right } -> x を取り出し、right の状態に応じて縮退
+             a. right が One -> Single(right の要素)
+             b. right が Two/Three/Four -> Deep { left: right から構築, middle: Empty, right: 残り }
+          4. Deep { left: One(x), middle: non-empty, right } -> x を取り出し、middle から補充
+             a. middle から pop_front して Node を取得
+             b. Node を Digit に変換して新しい left に
+          5. Deep { left: digit (Two/Three/Four), ... } -> 左 Digit から要素を取り出し
+
+  # ======================================================================
+  # 4. 末尾操作
+  # ======================================================================
+  - id: back_operations
+    name: "末尾操作"
+    description: |
+      Deque の末尾に対する操作。
+      全て O(1) 償却時間で実行される。
+
+    methods:
+      - name: "push_back"
+        signature: "pub fn push_back(&self, element: T) -> Self"
+        description: |
+          末尾に要素を追加した新しい Deque を返す。
+          元の Deque は変更されない（永続性）。
+          計算量: O(1) 償却
+        examples:
+          - description: "末尾に追加"
+            code: |
+              let deque = PersistentDeque::new()
+                  .push_back(1)
+                  .push_back(2)
+                  .push_back(3);
+              // deque: [1, 2, 3]
+              assert_eq!(deque.front(), Some(&1));
+              assert_eq!(deque.back(), Some(&3));
+
+      - name: "pop_back"
+        signature: "pub fn pop_back(&self) -> Option<(Self, T)> where T: Clone"
+        description: |
+          末尾要素を取り出し、(残りの Deque, 要素) を返す。
+          空の Deque の場合は None を返す。
+          計算量: O(1) 償却
+
+          注: PersistentVector との一貫性のため、戻り値の順序は (Self, T)。
+          T: Clone を要求し、ReferenceCounter から要素をクローンして返す。
+        examples:
+          - description: "末尾から取り出し"
+            code: |
+              let deque: PersistentDeque<i32> = (1..=3).collect();
+              if let Some((rest, last)) = deque.pop_back() {
+                  assert_eq!(last, 3);
+                  assert_eq!(rest.len(), 2);
+                  assert_eq!(rest.back(), Some(&2));
+              }
+          - description: "空の Deque から取り出し"
+            code: |
+              let empty: PersistentDeque<i32> = PersistentDeque::new();
+              assert_eq!(empty.pop_back(), None);
+
+      - name: "back"
+        signature: "pub fn back(&self) -> Option<&T>"
+        description: |
+          末尾要素への参照を返す。
+          空の Deque の場合は None を返す。
+          計算量: O(1)
+        examples:
+          - description: "末尾要素を参照"
+            code: |
+              let deque: PersistentDeque<i32> = (1..=3).collect();
+              assert_eq!(deque.back(), Some(&3));
+
+    laws:
+      - name: "Push-Pop Back Law"
+        description: |
+          push_back した要素は pop_back で取り出せる
+        equation: "deque.push_back(x).pop_back() == Some((deque, x))"
+        property_test: |
+          fn prop_push_pop_back_identity(deque: PersistentDeque<i32>, element: i32) {
+              let pushed = deque.clone().push_back(element);
+              let Some((rest, popped)) = pushed.pop_back() else {
+                  panic!("push_back should make pop_back succeed");
+              };
+              prop_assert_eq!(popped, element);
+              prop_assert_eq!(rest, deque);
+          }
+
+      - name: "Push-Back Law"
+        description: |
+          push_back した要素は back で取得できる
+        equation: "deque.push_back(x).back() == Some(&x)"
+        property_test: |
+          fn prop_push_back_gives_back(deque: PersistentDeque<i32>, element: i32) {
+              let pushed = deque.push_back(element);
+              prop_assert_eq!(pushed.back(), Some(&element));
+          }
+
+    implementations:
+      - type: "PersistentDeque<T>"
+        description: |
+          push_front/pop_front の対称的な実装:
+
+          push_back:
+          1. Empty -> Single(element)
+          2. Single(x) -> Deep { left: One(x), middle: Empty, right: One(element), length: 2 }
+          3. Deep { left, middle, right: Four(a,b,c,d), length } -> 右 Digit がオーバーフロー
+             a. right を Two(d, element) に置換（元の末尾と新要素を保持）
+             b. 先頭3要素 (a,b,c) を Node3(a,b,c) に変換
+             c. Node3 を middle に再帰的に push_back
+             d. length を +1
+             e. 結果: Deep { left, middle: middle.push_back(Node3(a,b,c)), right: Two(d, element), length: length + 1 }
+          4. Deep { right: digit, ... } -> 右 Digit に要素を末尾追加
+             a. One(a) -> Two(a, element)
+             b. Two(a,b) -> Three(a, b, element)
+             c. Three(a,b,c) -> Four(a, b, c, element)
+             d. length を +1
+
+          pop_back:
+          1. Empty -> None
+          2. Single(x) -> Some((Empty, x.clone()))
+          3. Deep { left, middle: Empty, right: One(x) } -> x を取り出し、left の状態に応じて縮退
+             a. left が One -> Single(left の要素)
+             b. left が Two/Three/Four -> Deep { left: 残り, middle: Empty, right: left から構築 }
+          4. Deep { left, middle: non-empty, right: One(x) } -> x を取り出し、middle から補充
+             a. middle から pop_back して Node を取得
+             b. Node を Digit に変換して新しい right に
+          5. Deep { right: digit (Two/Three/Four), ... } -> 右 Digit から要素を取り出し
+
+  # ======================================================================
+  # 5. 連結操作
+  # ======================================================================
+  - id: concat_operation
+    name: "連結操作"
+    description: |
+      2つの Deque を連結する。
+      Finger Tree の効率的な連結アルゴリズムを使用。
+
+    methods:
+      - name: "concat"
+        signature: "pub fn concat(&self, other: &Self) -> Self"
+        description: |
+          2つの Deque を連結した新しい Deque を返す。
+          self の全要素の後に other の全要素が続く。
+          計算量: O(log min(n, m))
+        examples:
+          - description: "2つの Deque を連結"
+            code: |
+              let left: PersistentDeque<i32> = (1..=3).collect();
+              let right: PersistentDeque<i32> = (4..=6).collect();
+              let combined = left.concat(&right);
+              assert_eq!(combined.len(), 6);
+              assert_eq!(combined.front(), Some(&1));
+              assert_eq!(combined.back(), Some(&6));
+          - description: "空の Deque との連結"
+            code: |
+              let deque: PersistentDeque<i32> = (1..=3).collect();
+              let empty = PersistentDeque::new();
+              assert!(deque.concat(&empty).iter().eq(deque.iter()));
+              assert!(empty.concat(&deque).iter().eq(deque.iter()));
+
+    laws:
+      - name: "Concat Length Law"
+        description: |
+          連結後の長さは元の2つの Deque の長さの和
+        equation: "concat(a, b).len() == a.len() + b.len()"
+        property_test: |
+          fn prop_concat_length(a: PersistentDeque<i32>, b: PersistentDeque<i32>) {
+              prop_assert_eq!(a.concat(&b).len(), a.len() + b.len());
+          }
+
+      - name: "Concat Order Law"
+        description: |
+          連結後の Deque は、左の全要素の後に右の全要素が続く
+        equation: |
+          concat(a, b)[i] = if i < a.len() then a[i] else b[i - a.len()]
+        property_test: |
+          fn prop_concat_order(a: PersistentDeque<i32>, b: PersistentDeque<i32>) {
+              let combined = a.concat(&b);
+              let a_elements: Vec<_> = a.iter().collect();
+              let b_elements: Vec<_> = b.iter().collect();
+              let combined_elements: Vec<_> = combined.iter().collect();
+              prop_assert_eq!(
+                  combined_elements,
+                  a_elements.into_iter().chain(b_elements).collect::<Vec<_>>()
+              );
+          }
+
+      - name: "Concat Associativity Law"
+        description: |
+          連結は結合的である
+        equation: "concat(concat(a, b), c) == concat(a, concat(b, c))"
+        property_test: |
+          fn prop_concat_associative(
+              a: PersistentDeque<i32>,
+              b: PersistentDeque<i32>,
+              c: PersistentDeque<i32>,
+          ) {
+              let left = a.concat(&b).concat(&c);
+              let right = a.concat(&b.concat(&c));
+              prop_assert!(left.iter().eq(right.iter()));
+          }
+
+      - name: "Concat Identity Law"
+        description: |
+          空の Deque は連結の単位元
+        equation: |
+          concat(empty, a) == a
+          concat(a, empty) == a
+        property_test: |
+          fn prop_concat_identity(a: PersistentDeque<i32>) {
+              let empty = PersistentDeque::new();
+              prop_assert!(a.concat(&empty).iter().eq(a.iter()));
+              prop_assert!(empty.concat(&a).iter().eq(a.iter()));
+          }
+
+    implementations:
+      - type: "PersistentDeque<T>"
+        description: |
+          Finger Tree の連結アルゴリズム:
+
+          concat(tree1, tree2):
+          1. tree1 が Empty -> tree2 を返す
+          2. tree2 が Empty -> tree1 を返す
+          3. tree1 が Single(x) -> x を tree2 の先頭に push
+          4. tree2 が Single(x) -> x を tree1 の末尾に push
+          5. 両方が Deep:
+             a. tree1 の右 Digit と tree2 の左 Digit を結合して Node 列に変換
+             b. concat_with_middle(tree1.middle, nodes, tree2.middle) で中間スパインをマージ
+             c. tree1.left, merged_middle, tree2.right で新しい Deep を構築
+             d. length は tree1.length + tree2.length
+
+          concat_with_middle(m1, nodes, m2):
+          中間要素列 nodes を Node2/Node3 に分割し、両スパインをマージする。
+
+          Node 分割規則（要素数に応じた分割方法）:
+          - 2要素: [a,b] -> [Node2(a,b)]
+          - 3要素: [a,b,c] -> [Node3(a,b,c)]
+          - 4要素: [a,b,c,d] -> [Node2(a,b), Node2(c,d)]
+          - 5要素: [a,b,c,d,e] -> [Node3(a,b,c), Node2(d,e)]
+          - 6要素: [a,b,c,d,e,f] -> [Node3(a,b,c), Node3(d,e,f)]
+          - 7要素: [a,b,c,d,e,f,g] -> [Node3(a,b,c), Node2(d,e), Node2(f,g)]
+          - 8要素: [a,b,c,d,e,f,g,h] -> [Node3(a,b,c), Node3(d,e,f), Node2(g,h)]
+          - 一般: 先頭から可能な限り Node3 を優先し、残りを Node2 で埋める
+
+          size 計算規則:
+          - Node2(a,b) の size = a.size() + b.size()
+            （葉レベルでは a.size() = b.size() = 1 なので size = 2）
+          - Node3(a,b,c) の size = a.size() + b.size() + c.size()
+            （葉レベルでは size = 3）
+          - 中間レベルでは子 Node の size を合計
+
+          アルゴリズム:
+          1. nodes が空なら concat(m1, m2) を返す
+          2. nodes を上記規則で Node2/Node3 列に変換
+          3. 各 Node を m1 に順次 push_back
+          4. 結果と m2 を再帰的に concat
+
+  # ======================================================================
+  # 6. ユーティリティ操作
+  # ======================================================================
+  - id: utility_operations
+    name: "ユーティリティ操作"
+    description: |
+      サイズ取得、空チェック、イテレーションなどのユーティリティ。
+
+    methods:
+      - name: "len"
+        signature: "pub fn len(&self) -> usize"
+        description: |
+          Deque の要素数を返す。
+          Deep ノードに length フィールドを持たせることで O(1) を実現。
+          計算量: O(1)
+        examples:
+          - description: "要素数を取得"
+            code: |
+              let deque: PersistentDeque<i32> = (1..=100).collect();
+              assert_eq!(deque.len(), 100);
+
+      - name: "is_empty"
+        signature: "pub fn is_empty(&self) -> bool"
+        description: |
+          Deque が空かどうかを返す。
+          計算量: O(1)
+        examples:
+          - description: "空チェック"
+            code: |
+              let empty: PersistentDeque<i32> = PersistentDeque::new();
+              assert!(empty.is_empty());
+
+              let non_empty = PersistentDeque::singleton(42);
+              assert!(!non_empty.is_empty());
+
+      - name: "iter"
+        signature: "pub fn iter(&self) -> impl Iterator<Item = &T> + DoubleEndedIterator"
+        description: |
+          要素を先頭から末尾の順で返すイテレータを提供。
+          DoubleEndedIterator も実装し、逆順走査を可能にする。
+          計算量: イテレータ作成 O(1)、全走査 O(n)
+        examples:
+          - description: "イテレーション"
+            code: |
+              let deque: PersistentDeque<i32> = (1..=5).collect();
+              let sum: i32 = deque.iter().sum();
+              assert_eq!(sum, 15);
+          - description: "逆順イテレーション"
+            code: |
+              let deque: PersistentDeque<i32> = (1..=5).collect();
+              let reversed: Vec<_> = deque.iter().rev().cloned().collect();
+              assert_eq!(reversed, vec![5, 4, 3, 2, 1]);
+
+      - name: "get"
+        signature: "pub fn get(&self, index: usize) -> Option<&T>"
+        description: |
+          指定インデックスの要素への参照を返す。
+          Node と Digit のサイズ情報を使用して効率的にナビゲート。
+          計算量: O(log n)
+
+          アルゴリズム:
+          1. index >= len なら None
+          2. Deep の場合:
+             a. left の合計サイズと比較し、left 内なら left からナビゲート
+             b. middle の合計サイズと比較し、middle 内なら middle を再帰的にナビゲート
+             c. それ以外は right からナビゲート
+          3. Node のサイズ情報を使って O(log n) で分岐
+        examples:
+          - description: "インデックスアクセス"
+            code: |
+              let deque: PersistentDeque<i32> = (0..10).collect();
+              assert_eq!(deque.get(0), Some(&0));
+              assert_eq!(deque.get(5), Some(&5));
+              assert_eq!(deque.get(9), Some(&9));
+              assert_eq!(deque.get(10), None);
+
+      - name: "reverse"
+        signature: "pub fn reverse(&self) -> Self where T: Clone"
+        description: |
+          要素を逆順にした新しい Deque を返す。
+          T: Clone を要求する。
+          計算量: O(n)
+
+          実装: iter().rev().cloned().collect() を使用。
+          iter() が DoubleEndedIterator を実装しているため効率的。
+        examples:
+          - description: "逆順"
+            code: |
+              let deque: PersistentDeque<i32> = (1..=3).collect();
+              let reversed = deque.reverse();
+              assert_eq!(reversed.front(), Some(&3));
+              assert_eq!(reversed.back(), Some(&1));
+
+    laws:
+      - name: "Length Law"
+        description: |
+          push 操作は長さを1増やし、pop 操作は長さを1減らす
+        equation: |
+          deque.push_front(x).len() == deque.len() + 1
+          deque.push_back(x).len() == deque.len() + 1
+          deque.pop_front().map(|(rest, _)| rest.len()) == Some(deque.len() - 1) if !deque.is_empty()
+          deque.pop_back().map(|(rest, _)| rest.len()) == Some(deque.len() - 1) if !deque.is_empty()
+        property_test: |
+          fn prop_length_invariants(deque: PersistentDeque<i32>, element: i32) {
+              let original_len = deque.len();
+
+              // push_front increases length by 1
+              prop_assert_eq!(deque.push_front(element).len(), original_len + 1);
+
+              // push_back increases length by 1
+              prop_assert_eq!(deque.push_back(element).len(), original_len + 1);
+
+              // pop_front decreases length by 1 (if non-empty)
+              if let Some((rest, _)) = deque.pop_front() {
+                  prop_assert_eq!(rest.len(), original_len - 1);
+              }
+
+              // pop_back decreases length by 1 (if non-empty)
+              if let Some((rest, _)) = deque.pop_back() {
+                  prop_assert_eq!(rest.len(), original_len - 1);
+              }
+          }
+
+      - name: "Reverse Involution Law"
+        description: |
+          reverse を2回適用すると元に戻る
+        equation: "deque.reverse().reverse() == deque"
+        property_test: |
+          fn prop_reverse_involution(deque: PersistentDeque<i32>) {
+              let twice_reversed = deque.reverse().reverse();
+              prop_assert!(deque.iter().eq(twice_reversed.iter()));
+          }
+
+      - name: "Get-Iter Consistency Law"
+        description: |
+          get と iter は同じ順序で要素を返す
+        equation: "deque.iter().nth(i) == deque.get(i)"
+        property_test: |
+          fn prop_get_iter_consistent(deque: PersistentDeque<i32>) {
+              for (index, element) in deque.iter().enumerate() {
+                  prop_assert_eq!(deque.get(index), Some(element));
+              }
+          }
+
+    implementations:
+      - type: "PersistentDeque<T>"
+        description: |
+          - len: Deep.length フィールドを返す、または Empty -> 0, Single -> 1
+          - is_empty: FingerTree::Empty かどうかをチェック
+          - iter: DequeIterator を実装（DoubleEndedIterator をサポート）
+          - get: Node/Digit のサイズ情報を使用してナビゲート
+          - reverse: iter().rev().cloned().collect() で実装
+
+  # ======================================================================
+  # 7. 型クラス実装
+  # ======================================================================
+  - id: typeclass_implementations
+    name: "型クラス実装"
+    description: |
+      lambars の型クラスフレームワークとの統合。
+      PersistentDeque は Functor, Foldable, Monad, Semigroup, Monoid を実装する。
+      PersistentVector, PersistentList との API 一貫性を維持する。
+
+    methods:
+      - name: "TypeConstructor"
+        signature: |
+          impl<T> TypeConstructor for PersistentDeque<T> {
+              type Inner = T;
+              type WithType<U> = PersistentDeque<U>;
+          }
+        description: |
+          型コンストラクタとしての実装。
+          PersistentDeque<T> -> PersistentDeque<U> の変換を可能にする。
+
+      - name: "Functor"
+        signature: |
+          impl<T> Functor for PersistentDeque<T> {
+              fn fmap<B, F>(self, function: F) -> PersistentDeque<B>
+              where
+                  F: FnOnce(Self::Inner) -> B + 'static,
+                  B: 'static;
+
+              fn fmap_ref<B, F>(&self, function: F) -> PersistentDeque<B>
+              where
+                  F: FnOnce(&Self::Inner) -> B + 'static,
+                  B: 'static;
+          }
+        description: |
+          Functor トレイトの実装。
+          - fmap: FnOnce のため単一要素 Deque でのみ意味がある
+          - fmap_ref: 参照に対する map 操作、self を消費しない
+
+      - name: "FunctorMut"
+        signature: |
+          impl<T> FunctorMut for PersistentDeque<T> {
+              fn fmap_mut<B, F>(self, function: F) -> PersistentDeque<B>
+              where
+                  F: FnMut(Self::Inner) -> B;
+
+              fn fmap_ref_mut<B, F>(&self, function: F) -> PersistentDeque<B>
+              where
+                  F: FnMut(&Self::Inner) -> B;
+          }
+        description: |
+          FunctorMut トレイトの実装。
+          - fmap_mut: 複数要素に対する map 操作、全要素に関数を適用
+          - fmap_ref_mut: 参照に対する map 操作、複数要素に適用可能
+
+      - name: "Foldable"
+        signature: |
+          impl<T: Clone> Foldable for PersistentDeque<T> {
+              fn fold_left<B, F>(self, init: B, f: F) -> B
+              where
+                  F: FnMut(B, T) -> B;
+
+              fn fold_right<B, F>(self, init: B, f: F) -> B
+              where
+                  F: FnMut(T, B) -> B;
+          }
+        description: |
+          左畳み込みと右畳み込み。
+          into_iter() を使用して実装。
+          fold_right は into_iter() を使用し、要素を消費して畳み込む。
+          T: Clone は into_iter() の実装に必要。
+
+      - name: "Applicative"
+        signature: |
+          impl<F> Applicative for PersistentDeque<F> {
+              fn pure(value: F) -> Self;
+              fn apply<B, Output>(self, other: PersistentDeque<B>) -> PersistentDeque<Output>
+              where
+                  F: FnMut(B) -> Output;
+          }
+        description: |
+          pure は singleton と同等。
+          apply は self（関数の Deque）を other（値の Deque）に適用。
+          全ての関数と全ての値の組み合わせを適用する。
+          lambars の Applicative 規約に従い、self が関数、other が値。
+
+      - name: "Monad"
+        signature: |
+          impl<T> Monad for PersistentDeque<T> {
+              fn flat_map<B, F>(self, f: F) -> PersistentDeque<B>
+              where
+                  F: FnMut(T) -> PersistentDeque<B>;
+          }
+        description: |
+          各要素に関数を適用し、結果を連結する。
+
+      - name: "Semigroup"
+        signature: |
+          impl<T> Semigroup for PersistentDeque<T> {
+              fn combine(self, other: Self) -> Self;
+          }
+        description: |
+          concat と同等。
+          結合律を満たす。
+
+      - name: "Monoid"
+        signature: |
+          impl<T> Monoid for PersistentDeque<T> {
+              fn empty() -> Self;
+          }
+        description: |
+          new と同等。
+          Semigroup::combine の単位元。
+
+    laws:
+      - name: "Functor Identity Law"
+        description: |
+          恒等関数での map は恒等操作
+        equation: "deque.fmap_mut(|x| x) == deque"
+        property_test: |
+          fn prop_functor_identity(deque: PersistentDeque<i32>) {
+              let mapped = deque.clone().fmap_mut(|x| x);
+              prop_assert!(deque.iter().eq(mapped.iter()));
+          }
+
+      - name: "Functor Composition Law"
+        description: |
+          2つの map は合成できる
+        equation: "deque.fmap_mut(f).fmap_mut(g) == deque.fmap_mut(|x| g(f(x)))"
+        property_test: |
+          fn prop_functor_composition(deque: PersistentDeque<i32>) {
+              let f = |x: i32| x + 1;
+              let g = |x: i32| x * 2;
+              let left = deque.clone().fmap_mut(f).fmap_mut(g);
+              let right = deque.fmap_mut(|x| g(f(x)));
+              prop_assert!(left.iter().eq(right.iter()));
+          }
+
+      - name: "Applicative Identity Law"
+        description: |
+          pure id <*> v = v
+          lambars の apply は self が関数、other が値の形式。
+        equation: "PersistentDeque::pure(|x| x).apply(v) == v"
+        property_test: |
+          fn prop_applicative_identity(deque: PersistentDeque<i32>) {
+              let id_funcs: PersistentDeque<fn(i32) -> i32> = PersistentDeque::pure(|x: i32| x);
+              let result = id_funcs.apply(deque.clone());
+              prop_assert!(deque.iter().eq(result.iter()));
+          }
+
+      - name: "Applicative Homomorphism Law"
+        description: |
+          pure f <*> pure x = pure (f x)
+          lambars の apply は self が関数、other が値の形式。
+        equation: "PersistentDeque::pure(f).apply(PersistentDeque::pure(x)) == PersistentDeque::pure(f(x))"
+        property_test: |
+          fn prop_applicative_homomorphism(x: i32) {
+              let f = |n: i32| n * 2;
+              let func_deque: PersistentDeque<fn(i32) -> i32> = PersistentDeque::pure(f);
+              let left = func_deque.apply(PersistentDeque::pure(x));
+              let right = PersistentDeque::pure(f(x));
+              prop_assert!(left.iter().eq(right.iter()));
+          }
+
+      - name: "Monad Left Identity Law"
+        description: |
+          pure と flat_map の組み合わせ
+        equation: "PersistentDeque::pure(x).flat_map(f) == f(x)"
+        property_test: |
+          fn prop_monad_left_identity(x: i32) {
+              let f = |n: i32| PersistentDeque::from_iter(0..n.abs().min(10));
+              let left = PersistentDeque::pure(x).flat_map(f);
+              let right = f(x);
+              prop_assert!(left.iter().eq(right.iter()));
+          }
+
+      - name: "Monad Right Identity Law"
+        description: |
+          flat_map(pure) は恒等操作
+        equation: "deque.flat_map(PersistentDeque::pure) == deque"
+        property_test: |
+          fn prop_monad_right_identity(deque: PersistentDeque<i32>) {
+              let result = deque.clone().flat_map(PersistentDeque::pure);
+              prop_assert!(deque.iter().eq(result.iter()));
+          }
+
+      - name: "Monad Associativity Law"
+        description: |
+          flat_map は結合的
+        equation: "deque.flat_map(f).flat_map(g) == deque.flat_map(|x| f(x).flat_map(g))"
+        property_test: |
+          fn prop_monad_associativity(deque: PersistentDeque<i32>) {
+              let f = |n: i32| PersistentDeque::from_iter(0..n.abs().min(5));
+              let g = |n: i32| PersistentDeque::from_iter(vec![n, n + 1]);
+              let left = deque.clone().flat_map(f).flat_map(g);
+              let right = deque.flat_map(|x| f(x).flat_map(g));
+              prop_assert!(left.iter().eq(right.iter()));
+          }
+
+      - name: "Monoid Identity Law"
+        description: |
+          empty は combine の単位元
+        equation: |
+          Monoid::empty().combine(deque) == deque
+          deque.combine(Monoid::empty()) == deque
+        property_test: |
+          fn prop_monoid_identity(deque: PersistentDeque<i32>) {
+              let empty = PersistentDeque::empty();
+              prop_assert!(empty.clone().combine(deque.clone()).iter().eq(deque.iter()));
+              prop_assert!(deque.clone().combine(empty).iter().eq(deque.iter()));
+          }
+
+      - name: "Monoid Associativity Law"
+        description: |
+          combine は結合的
+        equation: "(a.combine(b)).combine(c) == a.combine(b.combine(c))"
+        property_test: |
+          fn prop_monoid_associativity(
+              a: PersistentDeque<i32>,
+              b: PersistentDeque<i32>,
+              c: PersistentDeque<i32>,
+          ) {
+              let left = a.clone().combine(b.clone()).combine(c.clone());
+              let right = a.combine(b.combine(c));
+              prop_assert!(left.iter().eq(right.iter()));
+          }
+
+    implementations:
+      - type: "PersistentDeque<T>"
+        description: |
+          全ての型クラス実装は iter() と from_iter() を基盤とする。
+
+          - fmap_mut: into_iter().map(f).collect()
+          - fmap_ref_mut: iter().map(f).collect()
+          - fold_left: into_iter().fold(init, f)
+          - fold_right: iter().rev().fold(init, |acc, x| f(x.clone(), acc))
+          - flat_map: into_iter().flat_map(f).collect()
+          - combine: self.concat(&other)
+          - empty: PersistentDeque::new()
+
+  # ======================================================================
+  # 8. 標準トレイト実装
+  # ======================================================================
+  - id: standard_trait_implementations
+    name: "標準トレイト実装"
+    description: |
+      Rust の標準トレイトを実装し、エコシステムとの互換性を確保。
+
+    methods:
+      - name: "Default"
+        signature: |
+          impl<T> Default for PersistentDeque<T> {
+              fn default() -> Self { Self::new() }
+          }
+        description: |
+          Default トレイトの実装。new() と同等。
+
+      - name: "FromIterator"
+        signature: |
+          impl<T> FromIterator<T> for PersistentDeque<T> {
+              fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self;
+          }
+        description: |
+          イテレータから Deque を構築。
+
+      - name: "IntoIterator"
+        signature: |
+          impl<T: Clone> IntoIterator for PersistentDeque<T> {
+              type Item = T;
+              type IntoIter = IntoIter<T>;
+              fn into_iter(self) -> Self::IntoIter;
+          }
+        description: |
+          Deque を消費してイテレータを生成。
+          T: Clone を要求（ReferenceCounter から値を取り出すため）。
+
+      - name: "IntoIterator for &PersistentDeque"
+        signature: |
+          impl<'a, T> IntoIterator for &'a PersistentDeque<T> {
+              type Item = &'a T;
+              type IntoIter = Iter<'a, T>;
+              fn into_iter(self) -> Self::IntoIter;
+          }
+        description: |
+          参照からイテレータを生成。
+
+      - name: "PartialEq/Eq"
+        signature: |
+          impl<T: PartialEq> PartialEq for PersistentDeque<T> { ... }
+          impl<T: Eq> Eq for PersistentDeque<T> { }
+        description: |
+          構造的等価性。iter() で比較。
+
+      - name: "Debug"
+        signature: |
+          impl<T: Debug> Debug for PersistentDeque<T> {
+              fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result;
+          }
+        description: |
+          デバッグ出力。要素を列挙して表示。
+
+      - name: "Clone"
+        signature: |
+          impl<T> Clone for PersistentDeque<T> {
+              fn clone(&self) -> Self;
+          }
+        description: |
+          ReferenceCounter による効率的なクローン。
+          O(1) の時間と空間。
+
+      - name: "Hash"
+        signature: |
+          impl<T: Hash> Hash for PersistentDeque<T> {
+              fn hash<H: Hasher>(&self, state: &mut H);
+          }
+        description: |
+          ハッシュ計算。全要素をハッシュ。
+
+    implementations:
+      - type: "PersistentDeque<T>"
+        description: |
+          標準トレイトの実装により、以下が可能になる:
+
+          - collect::<PersistentDeque<_>>() でイテレータから構築
+          - for 文での反復
+          - HashMap/HashSet のキーとして使用（T: Hash + Eq の場合）
+          - assert_eq! でのデバッグ比較
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - description: "push_front, push_back, pop_front, pop_back は O(1) 償却"
+      metric: "Digit のオーバーフロー/アンダーフロー伝播が償却で定数"
+      rationale: |
+        Finger Tree の理論的保証。
+        Digit の容量（1-4）により、スパインへの伝播は償却 O(1) に抑えられる。
+
+    - description: "front, back は O(1)"
+      metric: "Digit の先頭/末尾要素への直接アクセス"
+      rationale: |
+        Deep 構造の left.head() と right.last() で即座にアクセス可能。
+
+    - description: "concat は O(log min(n, m))"
+      metric: "スパインの深さに比例"
+      rationale: |
+        Finger Tree の連結アルゴリズム。
+        各レベルで O(1) の処理を行い、レベル数は O(log min(n, m))。
+
+    - description: "get は O(log n)"
+      metric: "Node のサイズ情報を使用したナビゲーション"
+      rationale: |
+        Node に size フィールドを持たせ、累積サイズで分岐することで
+        各レベルで O(1) の判定を行い、全体で O(log n)。
+
+    - description: "len は O(1)"
+      metric: "キャッシュされた length フィールド"
+      rationale: |
+        Deep ノードに length を保持することで、毎回の計算を避ける。
+
+    - description: "構造共有によりメモリ効率が高い"
+      metric: "更新操作で追加されるノード数は O(log n)"
+      rationale: |
+        ReferenceCounter による共有。変更されないサブツリーは共有される。
+
+  compatibility:
+    - description: "既存の永続データ構造 API との一貫性"
+      details: |
+        - PersistentList, PersistentVector と同様の命名規則
+        - 同じ型クラス（Functor, Foldable, Monad, Semigroup, Monoid）を実装
+        - iter(), from_iter() パターンを使用
+        - pop_front, pop_back の戻り値は (Self, T) の順序（PersistentVector と一致）
+        - fmap_ref, fmap_ref_mut を実装（PersistentVector, PersistentList と一致）
+
+    - description: "スレッドセーフ版への拡張性"
+      details: |
+        - ReferenceCounter は Rc または Arc を切り替え可能
+        - 将来的に ConcurrentPersistentDeque を提供可能
+
+  testing:
+    - description: "単体テスト"
+      details: |
+        - 全メソッドの正常系・異常系テスト
+        - エッジケース（空、単一要素、大量要素）
+        - rstest のパラメータ化テスト
+
+    - description: "プロパティベーステスト"
+      details: |
+        - proptest を使用
+        - 型クラス法則（Functor laws, Applicative laws, Monad laws, Monoid laws）
+        - データ構造固有の法則（Push-Pop laws, Concat laws）
+        - 永続性の検証（操作後も元のデータが保持される）
+
+    - description: "パフォーマンステスト"
+      details: |
+        - 大量要素での各操作の時間計測
+        - 計算量が理論通りであることの検証
+        - ベンチマークの追加
+
+    - description: "統合テスト"
+      details: |
+        - 他の永続データ構造との相互変換
+        - 型クラス操作のチェーン
+        - for! マクロとの統合
+
+# 関数型プログラミング妥当性
+functional_programming_compliance:
+  referential_transparency:
+    status: "compliant"
+    description: |
+      全ての関数は純粋関数として実装される。
+      - 同じ入力に対して常に同じ出力を返す
+      - 外部状態（グローバル変数、時刻、乱数など）に依存しない
+      - 関数呼び出しを「値」に置き換えても意味が変わらない
+
+  pure_functions:
+    status: "compliant"
+    description: |
+      全ての操作は副作用を持たない。
+      - I/O、DB、ログ、状態変更なし
+      - 「計算」と「実行」が分離されている
+      - テストが引数と戻り値だけで書ける
+
+  immutability:
+    status: "compliant"
+    description: |
+      全ての操作は不変性を維持する。
+      - 引数や既存のデータを直接変更しない
+      - 破壊的操作（push, pop など可変版の概念）は新しい値を返す設計
+      - 元の Deque は操作後も完全に保持される
+
+  error_handling:
+    status: "compliant"
+    description: |
+      例外は制御フローに使用しない。
+      - pop_front/pop_back は Option<(Self, T)> を返す
+      - get は Option<&T> を返す
+      - パニックは発生しない
+
+  higher_order_functions:
+    status: "compliant"
+    description: |
+      高階関数とコレクション操作を活用。
+      - Functor::fmap, Functor::fmap_ref
+      - FunctorMut::fmap_mut, FunctorMut::fmap_ref_mut
+      - Foldable::fold_left/right
+      - Monad::flat_map
+      - iter().map().filter().collect() パターン
+      - 手続き的なループを避け、宣言的な処理を記述
+
+# 将来の拡張
+future_extensions:
+  - id: measured_finger_tree
+    name: "Measured Finger Tree"
+    description: |
+      モノイドによる汎用的な測定機能を持つ Finger Tree。
+      要素にモノイド値を関連付け、範囲クエリなどを効率的に実行。
+    rationale: |
+      現時点では Deque としての基本機能に集中する。
+      将来的にインターバルツリーや優先度キューなどの用途で需要があれば検討。
+
+  - id: concurrent_deque
+    name: "ConcurrentPersistentDeque"
+    description: |
+      Arc ベースのスレッドセーフ版 Deque。
+      マルチスレッド環境での共有に対応。
+    rationale: |
+      ReferenceCounter を Arc に切り替えるだけで対応可能だが、
+      現時点ではシングルスレッド版に集中する。
+
+  - id: transient_deque
+    name: "TransientDeque"
+    description: |
+      バッチ操作のための一時的可変版。
+      複数の操作を効率的に実行後、永続版に変換。
+    rationale: |
+      Clojure の transient! / persistent! パターン。
+      現時点では永続版の実装を優先する。
+
+  - id: split_operation
+    name: "split 操作"
+    description: |
+      指定位置で Deque を2つに分割する操作。
+      計算量: O(log n)
+    rationale: |
+      Finger Tree は効率的な split をサポートするが、
+      Deque としての基本 API では優先度が低い。
+      将来的に需要があれば追加。
+
+  - id: random_access_update
+    name: "インデックス指定の更新"
+    description: |
+      update(index, element) で指定位置の要素を更新。
+      計算量: O(log n)
+    rationale: |
+      get は実装するが、update は Deque の主要ユースケースではない。
+      将来的に需要があれば追加。
