@@ -1,0 +1,60 @@
+[package]
+name = "bank"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92.0"
+description = "Bank sample application demonstrating lambars library with Event Sourcing/CQRS"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+lambars = { path = "../..", features = ["full"] }
+lambars-derive = { path = "../../lambars-derive" }
+
+# Web Framework
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Database (PostgreSQL)
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono", "json"] }
+
+# Cache (Redis)
+redis = { version = "0.27", features = ["tokio-comp", "json"] }
+
+# AWS SDK (SQS via LocalStack)
+aws-config = { version = "1.5", features = ["behavior-version-latest"] }
+aws-sdk-sqs = "1.50"
+
+# Utilities
+uuid = { version = "1.11", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+rust_decimal = { version = "1.36", features = ["serde-with-str"] }
+thiserror = "2"
+dotenvy = "0.15"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+[dev-dependencies]
+rstest = "0.24"
+proptest = "1.5"
+tokio-test = "0.4"
+
+[[bin]]
+name = "bank"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
