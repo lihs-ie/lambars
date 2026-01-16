@@ -718,7 +718,7 @@ let contents = io.run_unsafe();
 | `Left e`           | `Err(e)`                              | Left/Err の構築    |
 | `fmap f ea`        | `Functor::fmap` / `Result::map`       | Right 上でマップ   |
 | `first f ea`       | `Result::map_err`                     | Left 上でマップ    |
-| `bimap f g ea`     | 手動                                  | 両側をマップ       |
+| `bimap f g ea`     | `Bifunctor::bimap`                    | 両側をマップ       |
 | `ea >>= f`         | `Monad::flat_map`                     | バインド           |
 | `either f g ea`    | `Result::map_or_else`                 | Either を畳み込み  |
 | `isRight ea`       | `Result::is_ok`                       | Right のテスト     |
@@ -777,11 +777,10 @@ let mapped: Result<i32, String> = Ok(21).fmap(|x| x * 2);
 let left_mapped: Result<i32, usize> = Err("error".to_string()).map_err(|e| e.len());
 // left_mapped = Err(5)
 
-// bimap 相当
+// Bifunctor::bimap (first = エラー変換, second = 成功変換)
+use lambars::typeclass::Bifunctor;
 let result: Result<i32, String> = Ok(42);
-let bi_mapped: Result<String, usize> = result
-    .map(|x| x.to_string())
-    .map_err(|e| e.len());
+let bi_mapped: Result<String, usize> = result.bimap(|e| e.len(), |x| x.to_string());
 // bi_mapped = Ok("42")
 ```
 

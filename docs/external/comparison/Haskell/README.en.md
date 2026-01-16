@@ -716,7 +716,7 @@ let contents = io.run_unsafe();
 | `Left e`           | `Err(e)`                              | Construct Left/Err   |
 | `fmap f ea`        | `Functor::fmap` / `Result::map`       | Map over Right       |
 | `first f ea`       | `Result::map_err`                     | Map over Left        |
-| `bimap f g ea`     | Manual                                | Map both sides       |
+| `bimap f g ea`     | `Bifunctor::bimap`                    | Map both sides       |
 | `ea >>= f`         | `Monad::flat_map`                     | Bind                 |
 | `either f g ea`    | `Result::map_or_else`                 | Fold Either          |
 | `isRight ea`       | `Result::is_ok`                       | Test for Right       |
@@ -759,7 +759,7 @@ biMapped = bimap length show (Right 42)
 
 ```rust
 // lambars / std
-use lambars::typeclass::{Functor, Monad};
+use lambars::typeclass::{Bifunctor, Functor, Monad};
 
 // Option operations
 let doubled: Option<i32> = Some(21).fmap(|x| x * 2);
@@ -775,11 +775,9 @@ let mapped: Result<i32, String> = Ok(21).fmap(|x| x * 2);
 let left_mapped: Result<i32, usize> = Err("error".to_string()).map_err(|e| e.len());
 // left_mapped = Err(5)
 
-// bimap equivalent
+// Bifunctor::bimap (first = error transform, second = success transform)
 let result: Result<i32, String> = Ok(42);
-let bi_mapped: Result<String, usize> = result
-    .map(|x| x.to_string())
-    .map_err(|e| e.len());
+let bi_mapped: Result<String, usize> = result.bimap(|e| e.len(), |x| x.to_string());
 // bi_mapped = Ok("42")
 ```
 
