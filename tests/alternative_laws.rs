@@ -1,3 +1,4 @@
+#![cfg(feature = "typeclass")]
 //! Property-based tests for Alternative type class laws.
 //!
 //! This module tests the fundamental laws that all Alternative implementations must satisfy:
