@@ -69,6 +69,7 @@ This document provides a comprehensive comparison between Haskell functional pro
 | Effect membership        | `Member e r`                     | `Member<E, Index>` trait                   |
 | Lazy                     | Default (thunks)                 | `Lazy<A>` type                             |
 | Trampoline               | Trampolining                     | `Trampoline<A>` type                       |
+| Freer Monad              | `Free f a` / `Freer f a`         | `Freer<I, A>` type                         |
 
 ---
 

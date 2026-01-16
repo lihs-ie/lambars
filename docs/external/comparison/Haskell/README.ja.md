@@ -71,6 +71,7 @@
 | エフェクトメンバーシップ | `Member e r`                     | `Member<E, Index>` trait                   |
 | 遅延評価                 | デフォルト (サンク)              | `Lazy<A>` 型                               |
 | トランポリン             | トランポリン処理                 | `Trampoline<A>` 型                         |
+| Freer モナド             | `Free f a` / `Freer f a`         | `Freer<I, A>` 型                           |
 
 ---
 
