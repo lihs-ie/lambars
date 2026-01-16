@@ -1,9 +1,10 @@
+#![cfg(feature = "typeclass")]
 //! Benchmark for Bifunctor type class operations.
 //!
 //! Compares Bifunctor methods against manual alternatives to evaluate
 //! the performance overhead (if any) of the abstraction.
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use lambars::control::Either;
 use lambars::typeclass::Bifunctor;
 use std::hint::black_box;
@@ -270,7 +271,7 @@ fn benchmark_chained_operations(criterion: &mut Criterion) {
 }
 
 // =============================================================================
-// Throughput Benchmarks (larger data)
+// Throughput Benchmarks (larger data with mixed Ok/Err)
 // =============================================================================
 
 fn benchmark_throughput(criterion: &mut Criterion) {
@@ -279,36 +280,97 @@ fn benchmark_throughput(criterion: &mut Criterion) {
     for size in [100, 1000, 10000] {
         group.throughput(Throughput::Elements(size as u64));
 
+        // Mixed data: 70% Ok, 30% Err to exercise both branches
+        let setup_mixed = move || -> Vec<Result<i32, String>> {
+            (0..size)
+                .map(|i| {
+                    if i % 10 < 7 {
+                        Ok(i)
+                    } else {
+                        Err(format!("error_{}", i))
+                    }
+                })
+                .collect()
+        };
+
         group.bench_with_input(
-            BenchmarkId::new("bifunctor_iter", size),
+            BenchmarkId::new("bifunctor_mixed", size),
             &size,
-            |bencher, &size| {
-                let items: Vec<Result<i32, String>> = (0..size).map(Ok).collect();
-                bencher.iter(|| {
-                    let results: Vec<_> = items
-                        .iter()
-                        .map(|r| r.clone().bimap(|e| e.len(), |x| x * 2))
-                        .collect();
-                    black_box(results)
-                });
+            |bencher, _| {
+                bencher.iter_batched(
+                    setup_mixed,
+                    |items| {
+                        let results: Vec<_> = items
+                            .into_iter()
+                            .map(|r| r.bimap(|e| e.len(), |x| x * 2))
+                            .collect();
+                        black_box(results)
+                    },
+                    BatchSize::SmallInput,
+                );
             },
         );
 
         group.bench_with_input(
-            BenchmarkId::new("manual_iter", size),
+            BenchmarkId::new("manual_mixed", size),
             &size,
-            |bencher, &size| {
-                let items: Vec<Result<i32, String>> = (0..size).map(Ok).collect();
-                bencher.iter(|| {
-                    let results: Vec<_> = items
-                        .iter()
-                        .map(|r| match r.clone() {
-                            Ok(value) => Ok(value * 2),
-                            Err(error) => Err(error.len()),
-                        })
-                        .collect();
-                    black_box(results)
-                });
+            |bencher, _| {
+                bencher.iter_batched(
+                    setup_mixed,
+                    |items| {
+                        let results: Vec<_> = items
+                            .into_iter()
+                            .map(|r| match r {
+                                Ok(value) => Ok(value * 2),
+                                Err(error) => Err(error.len()),
+                            })
+                            .collect();
+                        black_box(results)
+                    },
+                    BatchSize::SmallInput,
+                );
+            },
+        );
+
+        // All Ok case for comparison
+        let setup_ok = move || -> Vec<Result<i32, String>> { (0..size).map(Ok).collect() };
+
+        group.bench_with_input(
+            BenchmarkId::new("bifunctor_all_ok", size),
+            &size,
+            |bencher, _| {
+                bencher.iter_batched(
+                    setup_ok,
+                    |items| {
+                        let results: Vec<_> = items
+                            .into_iter()
+                            .map(|r| r.bimap(|e| e.len(), |x| x * 2))
+                            .collect();
+                        black_box(results)
+                    },
+                    BatchSize::SmallInput,
+                );
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("manual_all_ok", size),
+            &size,
+            |bencher, _| {
+                bencher.iter_batched(
+                    setup_ok,
+                    |items| {
+                        let results: Vec<_> = items
+                            .into_iter()
+                            .map(|r| match r {
+                                Ok(value) => Ok(value * 2),
+                                Err(error) => Err(error.len()),
+                            })
+                            .collect();
+                        black_box(results)
+                    },
+                    BatchSize::SmallInput,
+                );
             },
         );
     }
@@ -323,45 +385,78 @@ fn benchmark_throughput(criterion: &mut Criterion) {
 fn benchmark_complex_transforms(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("complex_transforms");
 
-    // String parsing and error handling
+    // String parsing and error handling - use iter_batched to separate allocation
     group.bench_function("bifunctor_parse_transform", |bencher| {
-        bencher.iter(|| {
-            let result: Result<&str, &str> = Ok("42");
-            black_box(result.bimap(
-                |e| format!("Error: {}", e),
-                |s| s.parse::<i32>().unwrap_or(0) * 2,
-            ))
-        });
+        bencher.iter_batched(
+            || Ok::<&str, &str>("42"),
+            |result| {
+                black_box(result.bimap(
+                    |e| format!("Error: {}", e),
+                    |s| s.parse::<i32>().unwrap_or(0) * 2,
+                ))
+            },
+            BatchSize::SmallInput,
+        );
     });
 
     group.bench_function("manual_parse_transform", |bencher| {
-        bencher.iter(|| {
-            let result: Result<&str, &str> = Ok("42");
-            let mapped: Result<i32, String> = match result {
-                Ok(value) => Ok(value.parse::<i32>().unwrap_or(0) * 2),
-                Err(error) => Err(format!("Error: {}", error)),
-            };
-            black_box(mapped)
-        });
+        bencher.iter_batched(
+            || Ok::<&str, &str>("42"),
+            |result| {
+                let mapped: Result<i32, String> = match result {
+                    Ok(value) => Ok(value.parse::<i32>().unwrap_or(0) * 2),
+                    Err(error) => Err(format!("Error: {}", error)),
+                };
+                black_box(mapped)
+            },
+            BatchSize::SmallInput,
+        );
     });
 
-    // Nested structure transformation
+    // Nested structure transformation - use iter_batched
     group.bench_function("bifunctor_nested", |bencher| {
-        bencher.iter(|| {
-            let outer: Result<(i32, String), (String, i32)> = Ok((42, "hello".to_string()));
-            black_box(outer.bimap(|e| (e.0.len(), e.1 * 2), |ok| (ok.0 * 2, ok.1.len())))
-        });
+        bencher.iter_batched(
+            || Ok::<(i32, String), (String, i32)>((42, "hello".to_string())),
+            |outer| black_box(outer.bimap(|e| (e.0.len(), e.1 * 2), |ok| (ok.0 * 2, ok.1.len()))),
+            BatchSize::SmallInput,
+        );
     });
 
     group.bench_function("manual_nested", |bencher| {
-        bencher.iter(|| {
-            let outer: Result<(i32, String), (String, i32)> = Ok((42, "hello".to_string()));
-            let mapped: Result<(i32, usize), (usize, i32)> = match outer {
-                Ok((num, text)) => Ok((num * 2, text.len())),
-                Err((text, num)) => Err((text.len(), num * 2)),
-            };
-            black_box(mapped)
-        });
+        bencher.iter_batched(
+            || Ok::<(i32, String), (String, i32)>((42, "hello".to_string())),
+            |outer| {
+                let mapped: Result<(i32, usize), (usize, i32)> = match outer {
+                    Ok((num, text)) => Ok((num * 2, text.len())),
+                    Err((text, num)) => Err((text.len(), num * 2)),
+                };
+                black_box(mapped)
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    // Test Err path for nested
+    group.bench_function("bifunctor_nested_err", |bencher| {
+        bencher.iter_batched(
+            || Err::<(i32, String), (String, i32)>(("error".to_string(), 42)),
+            |outer| black_box(outer.bimap(|e| (e.0.len(), e.1 * 2), |ok| (ok.0 * 2, ok.1.len()))),
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.bench_function("manual_nested_err", |bencher| {
+        bencher.iter_batched(
+            || Err::<(i32, String), (String, i32)>(("error".to_string(), 42)),
+            |outer| {
+                let mapped: Result<(i32, usize), (usize, i32)> = match outer {
+                    Ok((num, text)) => Ok((num * 2, text.len())),
+                    Err((text, num)) => Err((text.len(), num * 2)),
+                };
+                black_box(mapped)
+            },
+            BatchSize::SmallInput,
+        );
     });
 
     group.finish();
