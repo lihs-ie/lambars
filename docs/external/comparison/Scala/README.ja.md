@@ -55,6 +55,7 @@
 | ReaderT                   | `cats.data.ReaderT`           | `ReaderT` type       |
 | WriterT                   | `cats.data.WriterT`           | `WriterT` type       |
 | EitherT                   | `cats.data.EitherT`           | `ExceptT` type       |
+| Free モナド               | `cats.free.Free[F, A]`        | `Freer<I, A>` type   |
 
 ---
 

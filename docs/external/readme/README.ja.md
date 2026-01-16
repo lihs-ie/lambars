@@ -445,7 +445,7 @@ enum Console {
 }
 
 // 命令を使用して計算を構築
-let program: Freer<Console, String> = Freer::lift_instruction(
+let program = Freer::lift_instruction(
     Console::PrintLine("Enter name:".to_string()),
     |_| (),
 )

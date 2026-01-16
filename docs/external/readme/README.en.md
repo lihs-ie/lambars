@@ -479,7 +479,7 @@ enum Console {
 }
 
 // Build computations using instructions
-let program: Freer<Console, String> = Freer::lift_instruction(
+let program = Freer::lift_instruction(
     Console::PrintLine("Enter name:".to_string()),
     |_| (),
 )
