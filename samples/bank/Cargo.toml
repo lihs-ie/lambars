@@ -30,7 +30,7 @@ aws-config = { version = "1.5", features = ["behavior-version-latest"] }
 aws-sdk-sqs = "1.50"
 
 # Utilities
-uuid = { version = "1.11", features = ["v4", "serde"] }
+uuid = { version = "1.11", features = ["v4", "v5", "v7", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 rust_decimal = { version = "1.36", features = ["serde-with-str"] }
 thiserror = "2"
