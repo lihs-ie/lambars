@@ -49,7 +49,7 @@ This document provides a comprehensive comparison between F# functional programm
 | `Option.filter`       | `Option::filter` (std)                       | Filter based on predicate |
 | `Option.defaultValue` | `Option::unwrap_or` (std)                    | Provide default           |
 | `Option.defaultWith`  | `Option::unwrap_or_else` (std)               | Lazy default              |
-| `Option.orElse`       | `Option::or` (std)                           | Alternative option        |
+| `Option.orElse`       | `Alternative::alt`                           | Alternative option        |
 | `Option.orElseWith`   | `Option::or_else` (std)                      | Lazy alternative          |
 | `Option.isSome`       | `Option::is_some` (std)                      | Check if Some             |
 | `Option.isNone`       | `Option::is_none` (std)                      | Check if None             |

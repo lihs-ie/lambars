@@ -705,8 +705,8 @@ let contents = io.run_unsafe();
 | `maybeToList ma` | `Option::into_iter`                  | To list                |
 | `catMaybes xs`   | `Iterator::flatten`                  | Filter Nothings        |
 | `mapMaybe f xs`  | `Iterator::filter_map`               | Map and filter         |
-| `ma <\|> mb`     | `Option::or`                         | Alternative            |
-| `guard cond`     | `if cond { Some(()) } else { None }` | Guard in monad         |
+| `ma <\|> mb`     | `Alternative::alt`                   | Alternative            |
+| `guard cond`     | `Alternative::guard`                 | Guard in monad         |
 
 ### Either / Result
 
