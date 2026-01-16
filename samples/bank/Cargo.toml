@@ -11,7 +11,7 @@ lambars = { path = "../..", features = ["full"] }
 lambars-derive = { path = "../../lambars-derive" }
 
 # Web Framework
-axum = "0.8"
+axum = { version = "0.8", features = ["macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 

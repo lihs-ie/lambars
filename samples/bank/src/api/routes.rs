@@ -32,7 +32,9 @@ use axum::{Json, Router};
 use serde::Serialize;
 
 use crate::api::handlers::account::{create_account, get_account, get_balance};
-use crate::api::handlers::transaction::{deposit, get_transactions, transfer, withdraw};
+use crate::api::handlers::transaction::{
+    deposit_handler, get_transactions, transfer_handler, withdraw_handler,
+};
 use crate::infrastructure::AppDependencies;
 
 /// Health check response.
@@ -122,9 +124,9 @@ pub fn create_router(dependencies: AppDependencies) -> Router {
         .route("/accounts/{id}", get(get_account))
         .route("/accounts/{id}/balance", get(get_balance))
         // Transaction routes
-        .route("/accounts/{id}/deposit", post(deposit))
-        .route("/accounts/{id}/withdraw", post(withdraw))
-        .route("/accounts/{id}/transfer", post(transfer))
+        .route("/accounts/{id}/deposit", post(deposit_handler))
+        .route("/accounts/{id}/withdraw", post(withdraw_handler))
+        .route("/accounts/{id}/transfer", post(transfer_handler))
         .route("/accounts/{id}/transactions", get(get_transactions))
         // Health check
         .route("/health", get(health_check))

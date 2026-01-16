@@ -66,10 +66,14 @@ services:
       - DATABASE_URL=postgres://bank:bank_password@postgres:5432/bank_events
       - REDIS_URL=redis://redis:6379
       - SQS_ENDPOINT=http://localstack:4566
+      - SQS_EVENTS_QUEUE_URL=http://localstack:4566/000000000000/bank-events
+      - SQS_PROJECTIONS_QUEUE_URL=http://localstack:4566/000000000000/bank-projections
       - AWS_REGION=us-east-1
       - AWS_ACCESS_KEY_ID=test
       - AWS_SECRET_ACCESS_KEY=test
       - RUST_LOG=info,bank=debug
+      - APP_HOST=0.0.0.0
+      - APP_PORT=8080
     ports:
       - "8081:8080"
     depends_on:
