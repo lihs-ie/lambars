@@ -8,6 +8,7 @@
 //! - [`ConcurrentLazy`]: Thread-safe lazy evaluation with memoization
 //! - [`Trampoline`]: Stack-safe recursion
 //! - [`Continuation`]: Continuation monad for CPS
+//! - [`Freer`]: Freer monad for DSL construction
 //!
 //! # Examples
 //!
@@ -70,11 +71,13 @@
 mod concurrent_lazy;
 mod continuation;
 mod either;
+mod freer;
 mod lazy;
 mod trampoline;
 
 pub use concurrent_lazy::{ConcurrentLazy, ConcurrentLazyPoisonedError};
 pub use continuation::Continuation;
 pub use either::Either;
+pub use freer::Freer;
 pub use lazy::{Lazy, LazyPoisonedError, LazyState};
 pub use trampoline::Trampoline;

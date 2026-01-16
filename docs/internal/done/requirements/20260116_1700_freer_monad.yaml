@@ -1,0 +1,1401 @@
+# Freer Monad 要件定義
+#
+# 概要:
+#   Free モナドの最適化版である Freer モナドを実装する。
+#   DSL（ドメイン固有言語）構築の基盤として、Functor 制約なしで
+#   任意の命令セットから Monad を構築する機能を提供する。
+#
+# 設計方針:
+#   1. Functor 制約を排除し、純粋な命令セット（enum）から Monad を構築
+#   2. 既存の Continuation, Trampoline との設計一貫性を維持
+#   3. 型消去ベースの柔軟な設計（Box<dyn Any> による命令結果の抽象化）
+#   4. スタック安全な interpret 実行（FlatMapInternal パターン）
+#   5. DSL 構築のためのヘルパー関数（lift_instruction）を提供
+#
+# 参照:
+#   - Freer Monads, More Extensible Effects (Oleg Kiselyov & Hiromi Ishii)
+#   - extensible-effects (Haskell)
+#   - src/control/continuation.rs: CPS スタイル、'static 制約パターン
+#   - src/control/trampoline.rs: FlatMapInternal によるスタック安全な再帰パターン
+#   - docs/internal/issues/20250101_0200_control_future_work.yaml: Free モナドの課題
+
+version: "1.2.0"
+name: "Freer Monad"
+description: |
+  Freer モナドは、任意の命令セット（Instruction）から Monad を構築する手法である。
+  Free モナドの最適化版として、Functor 制約を排除することで実装を簡素化する。
+
+  ## Free モナドとの違い
+
+  Free モナドは Functor F から Monad を構築するが、Rust では HKT の制約により
+  F<Free<F, A>> という自己参照型の表現が困難である。
+
+  Freer モナドは Functor の代わりに「命令」と「継続」を分離することで、
+  この問題を回避する:
+
+  ```
+  Free モナド:
+    Pure(A)
+    Suspend(F<Free<F, A>>)  -- Functor F が必要
+
+  Freer モナド:
+    Pure(A)
+    Impure(Instruction, Continuation)  -- Functor 不要
+    FlatMapInternal(ContinuationBox)   -- スタック安全性のための内部状態
+  ```
+
+  ## 用途
+
+  - DSL（ドメイン固有言語）の構築
+  - インタープリタパターンの実装
+  - 効果の記述と解釈の分離
+  - テスト可能な副作用の抽象化
+
+  ## 既存コードとの関係
+
+  - `Continuation`: CPS スタイルと 'static 制約パターンを参考
+  - `Trampoline`: FlatMapInternal によるスタック安全な再帰パターンを参考
+  - `Effect System`: 将来的な代数的効果との統合を考慮
+
+# 背景・動機
+background:
+  problem: |
+    ## Rust での Free モナド実装の課題
+
+    Free モナドは関数型プログラミングにおいて DSL 構築の強力な手法だが、
+    Rust では以下の問題により実装が困難:
+
+    1. **HKT の不在**:
+       ```rust
+       // 理想的な定義（Rust では書けない）
+       pub enum Free<F: Functor, A> {
+           Pure(A),
+           Suspend(F::WithType<Free<F, A>>),  // F<Free<F, A>> に相当
+       }
+       ```
+
+    2. **GAT の制約**:
+       `F::WithType<Free<F, A>>` の構築時に循環参照が発生
+
+    3. **型消去の必要性**:
+       `Box<dyn ...>` を使うと Functor の具体型が失われる
+
+    ## Freer モナドによる解決
+
+    Freer モナドは Functor 制約を排除することでこれらの問題を回避:
+
+    ```rust
+    pub enum Freer<Instruction, A> {
+        Pure(A),
+        Impure {
+            instruction: Instruction,
+            continuation: TypeErasedContinuation<Instruction, A>,
+        },
+        // スタック安全性のための内部状態
+        FlatMapInternal(ContinuationBox<Instruction, A>),
+    }
+    ```
+
+    命令の「結果型」を型消去することで、HKT なしで実装可能になる。
+    さらに FlatMapInternal により深い flat_map チェーンでもスタック安全を保つ。
+
+  motivation: |
+    ## 動機
+
+    1. **DSL 構築の基盤**:
+       - コンソール DSL、KV ストア DSL などの構築が容易に
+       - ビジネスロジックの記述と実行の分離
+
+    2. **テスタビリティ**:
+       - 同じ DSL コードに異なるインタープリタを適用
+       - 本番用とテスト用のインタープリタを切り替え
+
+    3. **将来の拡張性**:
+       - Extensible Effects への発展
+       - 代数的効果システムとの統合
+
+    4. **プロジェクトの完成度**:
+       - lambars の control モジュールの機能拡充
+       - 関数型プログラミングパターンの網羅
+
+  prior_art:
+    - name: "freer-simple (Haskell)"
+      description: |
+        Freer モナドの Haskell 実装。
+        Eff 型による Extensible Effects を提供。
+        型レベルリストでエフェクト行を表現。
+
+    - name: "extensible-effects (Haskell)"
+      description: |
+        Oleg Kiselyov による元祖 Extensible Effects 実装。
+        Freer モナドの理論的基盤を提供。
+
+    - name: "frunk (Rust)"
+      description: |
+        Rust での関数型プログラミングライブラリ。
+        HList による型レベルプログラミングを提供。
+        Freer の直接的な実装はないが、参考になるパターンがある。
+
+    - name: "既存の lambars 実装"
+      description: |
+        - Continuation: CPS と 'static 制約のパターン
+        - Trampoline: FlatMapInternal によるスタック安全な再帰
+        - Effect System: MTL スタイルと Monad Transformer
+
+# 理論的背景
+theoretical_background:
+  freer_monad_theory:
+    description: |
+      ## Freer モナドの理論
+
+      Freer モナド（Operational Monad とも呼ばれる）は、
+      Free モナドから Functor 制約を取り除いた構造である。
+
+      ### 構造
+
+      ```haskell
+      data Freer f a where
+          Pure   :: a -> Freer f a
+          Impure :: f x -> (x -> Freer f a) -> Freer f a
+      ```
+
+      ここで重要なのは、`x` が存在量化されていることである。
+      これにより、異なる結果型を持つ命令を同一の列に含められる。
+
+      ### Monad インスタンス
+
+      ```haskell
+      instance Monad (Freer f) where
+          return = Pure
+          Pure a   >>= k = k a
+          Impure f g >>= k = Impure f (\x -> g x >>= k)
+      ```
+
+      ### インタープリタ
+
+      ```haskell
+      interpret :: Monad m => (forall x. f x -> m x) -> Freer f a -> m a
+      interpret _ (Pure a)     = return a
+      interpret handler (Impure f k) = handler f >>= \x -> interpret handler (k x)
+      ```
+
+  rust_adaptation:
+    description: |
+      ## Rust への適応
+
+      Rust では存在量化型（existential types）を直接表現できないため、
+      型消去（`Box<dyn Any>`）を使用して実現する。
+
+      ### 設計選択
+
+      1. **型消去ベースのアプローチ**:
+         命令の結果型は `Box<dyn Any>` で型消去される。
+         `lift_instruction` の `extract` 関数でダウンキャストして具体型を復元:
+         ```rust
+         fn lift_instruction<R: 'static>(
+             instruction: I,
+             extract: impl FnOnce(Box<dyn Any>) -> R + 'static
+         ) -> Freer<I, R>
+         ```
+
+         **型安全性について**:
+         - コンパイル時の型安全性は限定的（ダウンキャスト失敗時は panic）
+         - DSL 設計者が命令とハンドラの型の整合性を保証する責任を持つ
+         - これは Rust での現実的なトレードオフ（HKT がないため）
+
+      2. **型消去された継続**:
+         `FreerContinuation` トレイトを使用して継続を隠蔽:
+         ```rust
+         trait FreerContinuation<I, A> {
+             fn step(self: Box<Self>) -> Freer<I, A>;
+         }
+         ```
+
+      3. **'static 制約の範囲**:
+         `flat_map`, `map`, `interpret` など特定のメソッドの impl ブロックでのみ
+         `A: 'static` を要求。`pure`, `lift_instruction` 自体は制約を課さない。
+
+      4. **FlatMapInternal による中間状態**:
+         Trampoline と同様に、継続チェーンを段階的に評価するための内部状態を保持。
+
+      ### Continuation/Trampoline との比較
+
+      | 特徴 | Continuation | Trampoline | Freer |
+      |------|-------------|-----------|-------|
+      | 目的 | CPS による制御フロー | スタック安全な再帰 | DSL 構築 |
+      | 継続の型 | `Box<dyn FnOnce(A) -> R>` | `Box<dyn FnOnce() -> Self>` | `FreerContinuation<I, A>` |
+      | 実行方法 | run(continuation) | run() | interpret(handler) |
+      | 内部状態 | なし | FlatMapInternal | FlatMapInternal |
+      | 'static 制約 | impl ブロック単位 | impl ブロック単位 | impl ブロック単位 |
+
+# 設計原則
+design_principles:
+  type_erasure_based_instruction_handling:
+    description: |
+      ## 型消去ベースの命令ハンドリング
+
+      Rust の制約（HKT の不在）により、コンパイル時の完全な型安全性ではなく、
+      `Box<dyn Any>` を使用した型消去ベースのアプローチを採用する。
+
+      ### アプローチ
+
+      1. **型消去と実行時ダウンキャスト**:
+         各命令の結果型は `Box<dyn Any>` で型消去される。
+         `extract` 関数で実行時にダウンキャストして具体型を復元:
+
+         ```rust
+         // 命令の定義例
+         enum Console {
+             PrintLine(String),  // 結果: ()
+             ReadLine,           // 結果: String
+         }
+
+         // ヘルパー関数で型を明示
+         fn print_line(message: String) -> Freer<Console, ()> {
+             Freer::lift_instruction(
+                 Console::PrintLine(message),
+                 |_| ()  // PrintLine は結果を使わない
+             )
+         }
+
+         fn read_line() -> Freer<Console, String> {
+             Freer::lift_instruction(
+                 Console::ReadLine,
+                 |result| *result.downcast::<String>()
+                     .expect("ReadLine must return String")
+             )
+         }
+         ```
+
+      2. **lift_instruction のシグネチャ**:
+         extract 関数で型変換を明示的に行う:
+
+         ```rust
+         fn lift_instruction<R: 'static>(
+             instruction: I,
+             extract: impl FnOnce(Box<dyn Any>) -> R + 'static
+         ) -> Freer<I, R>
+         ```
+
+         **重要**: `extract` 関数は純粋関数であること。
+         副作用を持つ extract は参照透過性を破壊する。
+
+      3. **型安全性の限界と責任**:
+         - コンパイル時の型安全性は保証されない
+         - DSL 設計者が命令とハンドラの型の整合性を保証する責任を持つ
+         - downcast 失敗時は panic（DSL 設計のバグを示す）
+         - ドキュメントでこの制約と挙動を明記する
+
+      4. **なぜこのアプローチか**:
+         - Rust には HKT がなく、`forall x. f x -> m x` のような型を表現できない
+         - GAT でも命令ごとに異なる結果型を持つ設計は困難
+         - 型消去 + 実行時ダウンキャストは現実的なトレードオフ
+         - Haskell の存在量化型の代替として妥当
+
+  stack_safety:
+    description: |
+      ## スタック安全性
+
+      deep な flat_map チェーンでスタックオーバーフローを防ぐため、
+      Trampoline と同様の FlatMapInternal アプローチを採用。
+
+      ### 設計
+
+      1. **FlatMapInternal バリアント**:
+         ```rust
+         pub enum Freer<I, A> {
+             Pure(A),
+             Impure {
+                 instruction: I,
+                 continuation: TypeErasedContinuation<I, A>,
+             },
+             /// flat_map 合成のための内部状態
+             /// Trampoline の FlatMapInternal に相当
+             #[doc(hidden)]
+             FlatMapInternal(ContinuationBox<I, A>),
+         }
+         ```
+
+      2. **ContinuationBox**:
+         ```rust
+         /// 型消去された継続を保持するボックス
+         pub struct ContinuationBox<I, A>(Box<dyn FreerContinuation<I, A>>);
+         ```
+
+      3. **FreerContinuation トレイト**:
+         ```rust
+         trait FreerContinuation<I, A> {
+             fn step(self: Box<Self>) -> Freer<I, A>;
+         }
+         ```
+
+      4. **interpret のループベース実装**:
+         ```rust
+         pub fn interpret<Handler>(self, mut handler: Handler) -> A
+         where
+             Handler: FnMut(I) -> Box<dyn Any>,
+         {
+             let mut current = self;
+
+             loop {
+                 current = match current {
+                     Freer::Pure(a) => return a,
+                     Freer::Impure { instruction, continuation } => {
+                         let result = handler(instruction);
+                         continuation(result)
+                     }
+                     Freer::FlatMapInternal(continuation_box) => {
+                         let mut inner = continuation_box.step();
+                         // FlatMapInternal を展開
+                         while let Freer::FlatMapInternal(next) = inner {
+                             inner = next.step();
+                         }
+                         inner
+                     }
+                 };
+             }
+         }
+         ```
+
+  static_constraint_policy:
+    description: |
+      ## 'static 制約ポリシー
+
+      Continuation/Trampoline と同様に、必要な箇所のみ 'static を課す。
+
+      ### ポリシー
+
+      1. **制約を課さないメソッド**:
+         - `pure(value: A)` - 型パラメータに制約なし
+         - 基本的な構築子
+
+      2. **制約を課すメソッド**（impl ブロック単位）:
+         - `map`, `flat_map`, `and_then`, `then` - `A: 'static` が必要
+         - `interpret` - `A: 'static` が必要
+         - `lift_instruction` - 結果型 `R: 'static` が必要
+
+      3. **理由**:
+         - `Box<dyn FnOnce...>` を使用するため 'static が必要
+         - 全型パラメータに一律 'static を課すのは過度な制限
+         - Continuation/Trampoline と同じアプローチを採用
+
+      ### 実装例
+
+      ```rust
+      impl<I, A> Freer<I, A> {
+          // 'static 不要
+          pub fn pure(value: A) -> Self {
+              Self::Pure(value)
+          }
+      }
+
+      impl<I: 'static, A: 'static> Freer<I, A> {
+          // 'static 必要なメソッド群
+          pub fn map<B: 'static, F>(self, function: F) -> Freer<I, B>
+          where F: FnOnce(A) -> B + 'static { ... }
+
+          pub fn flat_map<B: 'static, F>(self, function: F) -> Freer<I, B>
+          where F: FnOnce(A) -> Freer<I, B> + 'static { ... }
+
+          pub fn interpret<Handler>(self, handler: Handler) -> A
+          where Handler: FnMut(I) -> Box<dyn Any> { ... }
+      }
+      ```
+
+  naming_convention:
+    description: |
+      ## 命名規則
+
+      既存の control モジュールとの整合性を維持。
+
+      ### interpret vs run の使い分け
+
+      | メソッド | 型 | 意味 |
+      |----------|------|------|
+      | `run` | Trampoline | 計算を実行し最終値を得る（ハンドラ不要） |
+      | `run(k)` | Continuation | 継続 k を適用して実行 |
+      | `interpret(handler)` | Freer | ハンドラで命令を解釈して実行 |
+
+      **補足**:
+      - `interpret` は「解釈」を意味し、DSL 文脈で標準的な命名
+      - 各命令をハンドラで処理するという動作を明示
+      - `run` は単純な実行、`interpret` は解釈を伴う実行
+
+# 要件一覧
+requirements:
+  # ============================================================================
+  # 1. Freer<I, A> 型
+  # ============================================================================
+  - id: freer_type
+    name: "Freer<I, A> 型"
+    priority: critical
+    description: |
+      Freer モナドの核となる型。
+      命令セット I から Monad を構築する。
+
+      ## 型パラメータ
+
+      - `I`: 命令を表す型（通常は enum）
+      - `A`: 計算の結果型
+
+      ## バリアント
+
+      - `Pure(A)`: 純粋な値
+      - `Impure { instruction, continuation }`: 命令と継続
+      - `FlatMapInternal(ContinuationBox)`: スタック安全性のための内部状態
+
+    internal_structure:
+      description: |
+        ```rust
+        use std::any::Any;
+
+        /// 型消去された継続（Impure バリアント用）
+        type TypeErasedContinuation<I, A> = Box<dyn FnOnce(Box<dyn Any>) -> Freer<I, A>>;
+
+        /// FreerContinuation トレイト（FlatMapInternal 用）
+        /// Trampoline の TrampolineContinuation に相当
+        trait FreerContinuation<I, A> {
+            fn step(self: Box<Self>) -> Freer<I, A>;
+        }
+
+        /// 型消去された継続ボックス
+        #[doc(hidden)]
+        pub struct ContinuationBox<I, A>(Box<dyn FreerContinuation<I, A>>);
+
+        impl<I, A> ContinuationBox<I, A> {
+            fn new<T: FreerContinuation<I, A> + 'static>(continuation: T) -> Self {
+                Self(Box::new(continuation))
+            }
+
+            #[inline]
+            fn step(self) -> Freer<I, A> {
+                self.0.step()
+            }
+        }
+
+        /// Freer モナド: 任意の命令セットから Monad を構築
+        ///
+        /// # Type Parameters
+        ///
+        /// * `I` - 命令を表す型（通常は enum）
+        /// * `A` - 計算の結果型
+        ///
+        /// # Laws
+        ///
+        /// Freer は Monad 法則を満たす:
+        ///
+        /// - **Left Identity**: `Freer::pure(a).flat_map(f) == f(a)`
+        /// - **Right Identity**: `m.flat_map(Freer::pure) == m`
+        /// - **Associativity**: `m.flat_map(f).flat_map(g) == m.flat_map(|x| f(x).flat_map(g))`
+        ///
+        /// # Examples
+        ///
+        /// ```rust
+        /// use lambars::control::Freer;
+        ///
+        /// // コンソール命令の定義
+        /// enum Console {
+        ///     PrintLine(String),
+        ///     ReadLine,
+        /// }
+        ///
+        /// // DSL の構築
+        /// fn greet(name: &str) -> Freer<Console, ()> {
+        ///     Freer::lift_instruction(
+        ///         Console::PrintLine(format!("Hello, {}!", name)),
+        ///         |_| ()
+        ///     )
+        /// }
+        /// ```
+        pub enum Freer<I, A> {
+            /// 純粋な値
+            Pure(A),
+            /// 命令と継続
+            Impure {
+                /// 実行する命令
+                instruction: I,
+                /// 命令の結果を受け取る継続（型消去済み）
+                continuation: TypeErasedContinuation<I, A>,
+            },
+            /// flat_map 合成のための内部状態
+            /// Trampoline の FlatMapInternal に相当
+            #[doc(hidden)]
+            FlatMapInternal(ContinuationBox<I, A>),
+        }
+        ```
+
+    laws:
+      - name: "Left Identity（左単位元律）"
+        description: |
+          pure で持ち上げた値に flat_map を適用すると、関数を直接適用したのと同じ
+        equation: "Freer::pure(a).flat_map(f) == f(a)"
+        property_test: |
+          // Left Identity: Pure のみを使用するテスト（命令を含まない）
+          // 命令を含まない Pure 値の場合、ハンドラは呼ばれないため interpret の結果で比較可能
+          fn property_left_identity<A: Clone + PartialEq + 'static, B: PartialEq + 'static>(
+              value: A,
+              function: impl Fn(A) -> Freer<(), B> + Clone,
+          ) -> bool {
+              let left = Freer::pure(value.clone()).flat_map(function.clone());
+              let right = function(value);
+              // Pure 値の場合、空のハンドラで interpret 可能
+              left.interpret(|_: ()| Box::new(())) == right.interpret(|_: ()| Box::new(()))
+          }
+
+          // 命令を含む場合のテスト例（具体的な DSL を使用）
+          // ハンドラを共有するため RefCell を使用
+          fn property_left_identity_with_instructions() -> bool {
+              use std::cell::RefCell;
+              use std::rc::Rc;
+
+              enum Cmd { Inc }
+              let counter = Rc::new(RefCell::new(0));
+
+              let function = |x: i32| -> Freer<Cmd, i32> {
+                  Freer::lift_instruction(Cmd::Inc, move |_| x + 1)
+              };
+
+              let left = Freer::pure(10).flat_map(function);
+              let right = function(10);
+
+              let counter_left = counter.clone();
+              let result_left: i32 = left.interpret(move |_| {
+                  *counter_left.borrow_mut() += 1;
+                  Box::new(())
+              });
+
+              let counter_right = counter.clone();
+              let result_right: i32 = right.interpret(move |_| {
+                  *counter_right.borrow_mut() += 1;
+                  Box::new(())
+              });
+
+              result_left == result_right
+          }
+
+      - name: "Right Identity（右単位元律）"
+        description: |
+          flat_map に pure を渡すと元の計算と同じ
+        equation: "m.flat_map(Freer::pure) == m"
+
+      - name: "Associativity（結合律）"
+        description: |
+          flat_map の連鎖は結合的
+        equation: "m.flat_map(f).flat_map(g) == m.flat_map(|x| f(x).flat_map(g))"
+
+    tests:
+      - category: "構造テスト"
+        cases:
+          - name: "Pure の構築"
+            test: |
+              let freer: Freer<(), i32> = Freer::pure(42);
+              assert!(matches!(freer, Freer::Pure(42)));
+
+          - name: "Impure の構築"
+            test: |
+              enum Cmd { Get }
+              let freer: Freer<Cmd, i32> = Freer::lift_instruction(Cmd::Get, |x| {
+                  *x.downcast::<i32>().expect("expected i32")
+              });
+              assert!(matches!(freer, Freer::Impure { .. }));
+
+  # ============================================================================
+  # 2. 基本コンストラクタ
+  # ============================================================================
+  - id: freer_constructors
+    name: "基本コンストラクタ"
+    priority: critical
+    description: |
+      Freer モナドを構築するための基本関数群。
+
+    methods:
+      - name: pure
+        signature: "fn pure(value: A) -> Self"
+        description: |
+          純粋な値を Freer に持ち上げる。
+          Applicative の pure / Monad の return に相当。
+
+          **注意**: このメソッドは 'static 制約を課さない。
+        complexity: "O(1)"
+        examples:
+          - description: "整数値を持ち上げる"
+            code: |
+              let freer: Freer<(), i32> = Freer::pure(42);
+
+      - name: lift_instruction
+        signature: |
+          fn lift_instruction<R: 'static>(
+              instruction: I,
+              extract: impl FnOnce(Box<dyn Any>) -> R + 'static
+          ) -> Freer<I, R>
+        description: |
+          命令を Freer に持ち上げる。
+
+          ## extract 関数
+
+          `extract` は型消去された結果を適切な型に変換する純粋関数。
+
+          **重要な制約**:
+          - `extract` は純粋関数（参照透過）であること
+          - 副作用（I/O、状態変更、ログ出力など）を含んではならない
+          - `downcast` 失敗時は panic する（DSL 設計バグを示す）
+
+          ## 使用パターン
+
+          通常は DSL 定義時にヘルパー関数を作成して使用:
+
+          ```rust
+          enum Console {
+              PrintLine(String),
+              ReadLine,
+          }
+
+          fn print_line(message: String) -> Freer<Console, ()> {
+              Freer::lift_instruction(
+                  Console::PrintLine(message),
+                  |_| ()  // PrintLine は () を返す
+              )
+          }
+
+          fn read_line() -> Freer<Console, String> {
+              Freer::lift_instruction(
+                  Console::ReadLine,
+                  |result| {
+                      *result.downcast::<String>()
+                          .expect("ReadLine must return String")
+                  }
+              )
+          }
+          ```
+
+          ## エラーハンドリング
+
+          `downcast` が失敗した場合は panic する。
+          これは interpret 時にハンドラが誤った型を返したことを示す。
+          DSL とハンドラの型が一致していることはプログラマの責任。
+        complexity: "O(1)"
+        examples:
+          - description: "命令を持ち上げる"
+            code: |
+              enum Cmd { Get, Put(i32) }
+
+              fn get() -> Freer<Cmd, i32> {
+                  Freer::lift_instruction(
+                      Cmd::Get,
+                      |r| *r.downcast::<i32>().expect("Get must return i32")
+                  )
+              }
+
+              fn put(value: i32) -> Freer<Cmd, ()> {
+                  Freer::lift_instruction(Cmd::Put(value), |_| ())
+              }
+
+    tests:
+      - category: "コンストラクタテスト"
+        cases:
+          - name: "pure で Pure バリアントを構築"
+            test: |
+              let freer: Freer<(), i32> = Freer::pure(42);
+              assert!(matches!(freer, Freer::Pure(42)));
+
+          - name: "lift_instruction で Impure バリアントを構築"
+            test: |
+              enum Cmd { Ping }
+              let freer: Freer<Cmd, String> = Freer::lift_instruction(
+                  Cmd::Ping,
+                  |r| *r.downcast::<String>().expect("expected String")
+              );
+              assert!(matches!(freer, Freer::Impure { .. }));
+
+  # ============================================================================
+  # 3. Functor 操作（map）
+  # ============================================================================
+  - id: freer_functor
+    name: "Functor 操作"
+    priority: critical
+    description: |
+      Freer に対する Functor 操作（map）を提供。
+      'static 制約は impl ブロック単位で適用。
+
+    methods:
+      - name: map
+        signature: |
+          impl<I: 'static, A: 'static> Freer<I, A> {
+              fn map<B: 'static, F>(self, function: F) -> Freer<I, B>
+              where
+                  F: FnOnce(A) -> B + 'static
+          }
+        description: |
+          計算の結果に関数を適用する。
+          Functor の fmap に相当。
+
+          ## 実装
+
+          ```rust
+          pub fn map<B: 'static, F>(self, function: F) -> Freer<I, B>
+          where
+              F: FnOnce(A) -> B + 'static,
+          {
+              // Pure の場合は即座に適用（最適化）
+              match self {
+                  Freer::Pure(a) => Freer::Pure(function(a)),
+                  _ => self.flat_map(|a| Freer::pure(function(a))),
+              }
+          }
+          ```
+        complexity: "O(1)"
+        examples:
+          - description: "結果を変換"
+            code: |
+              let freer: Freer<(), i32> = Freer::pure(21);
+              let doubled = freer.map(|x| x * 2);
+              // interpret すると 42 が得られる
+
+    laws:
+      - name: "Identity Law（恒等律）"
+        description: "恒等関数で map しても変わらない"
+        equation: "m.map(|x| x) == m"
+
+      - name: "Composition Law（合成律）"
+        description: "map の連続は関数合成と同じ"
+        equation: "m.map(f).map(g) == m.map(|x| g(f(x)))"
+
+    tests:
+      - category: "Functor テスト"
+        cases:
+          - name: "Pure に対する map"
+            test: |
+              let freer: Freer<(), i32> = Freer::pure(21);
+              let result = freer.map(|x| x * 2);
+              // Pure(42) になる
+
+          - name: "map の連鎖"
+            test: |
+              let freer: Freer<(), i32> = Freer::pure(10);
+              let result = freer.map(|x| x + 5).map(|x| x * 2);
+              // Pure(30) になる
+
+  # ============================================================================
+  # 4. Monad 操作（flat_map, and_then, then）
+  # ============================================================================
+  - id: freer_monad
+    name: "Monad 操作"
+    priority: critical
+    description: |
+      Freer に対する Monad 操作を提供。
+      'static 制約は impl ブロック単位で適用。
+
+    methods:
+      - name: flat_map
+        signature: |
+          impl<I: 'static, A: 'static> Freer<I, A> {
+              fn flat_map<B: 'static, F>(self, function: F) -> Freer<I, B>
+              where
+                  F: FnOnce(A) -> Freer<I, B> + 'static
+          }
+        description: |
+          計算を連鎖させる。Monad の bind (>>=) に相当。
+
+          ## 実装（FlatMapInternal を使用）
+
+          ```rust
+          pub fn flat_map<B: 'static, F>(self, function: F) -> Freer<I, B>
+          where
+              F: FnOnce(A) -> Freer<I, B> + 'static,
+          {
+              match self {
+                  // Pure の場合は即座に適用（最適化）
+                  Freer::Pure(a) => function(a),
+                  // それ以外は FlatMapInternal で遅延
+                  _ => Freer::FlatMapInternal(ContinuationBox::new(
+                      FlatMapContinuation {
+                          freer: self,
+                          function,
+                      }
+                  )),
+              }
+          }
+          ```
+
+          `FlatMapContinuation` は `FreerContinuation` を実装:
+
+          ```rust
+          struct FlatMapContinuation<I, A, B, F>
+          where
+              F: FnOnce(A) -> Freer<I, B>,
+          {
+              freer: Freer<I, A>,
+              function: F,
+          }
+
+          impl<I: 'static, A: 'static, B: 'static, F> FreerContinuation<I, B>
+              for FlatMapContinuation<I, A, B, F>
+          where
+              F: FnOnce(A) -> Freer<I, B> + 'static,
+          {
+              fn step(self: Box<Self>) -> Freer<I, B> {
+                  match self.freer {
+                      Freer::Pure(a) => (self.function)(a),
+                      Freer::Impure { instruction, continuation } => {
+                          let function = self.function;
+                          Freer::Impure {
+                              instruction,
+                              continuation: Box::new(move |result| {
+                                  continuation(result).flat_map(function)
+                              }),
+                          }
+                      }
+                      Freer::FlatMapInternal(inner) => {
+                          // 結合律を使用: (m >>= f) >>= g == m >>= (\x -> f x >>= g)
+                          let function = self.function;
+                          inner.step().flat_map(function)
+                      }
+                  }
+              }
+          }
+          ```
+        complexity: "O(1)"
+        examples:
+          - description: "計算を連鎖"
+            code: |
+              fn increment() -> Freer<StateCmd, i32> {
+                  get().flat_map(|x| put(x + 1).then(get()))
+              }
+
+      - name: and_then
+        signature: |
+          fn and_then<B: 'static, F>(self, function: F) -> Freer<I, B>
+          where
+              F: FnOnce(A) -> Freer<I, B> + 'static
+        description: |
+          flat_map のエイリアス。
+        complexity: "O(1)"
+
+      - name: then
+        signature: |
+          fn then<B: 'static>(self, next: Freer<I, B>) -> Freer<I, B>
+        description: |
+          最初の計算の結果を捨てて次の計算を実行。
+          Haskell の (>>) に相当。
+        complexity: "O(1)"
+        examples:
+          - description: "結果を無視して連鎖"
+            code: |
+              print_line("Hello".to_string())
+                  .then(print_line("World".to_string()))
+
+    tests:
+      - category: "Monad テスト"
+        cases:
+          - name: "Pure に対する flat_map"
+            test: |
+              let freer: Freer<(), i32> = Freer::pure(21);
+              let result = freer.flat_map(|x| Freer::pure(x * 2));
+              // Pure(42) になる
+
+          - name: "flat_map の連鎖"
+            test: |
+              let freer: Freer<(), i32> = Freer::pure(10);
+              let result = freer
+                  .flat_map(|x| Freer::pure(x + 5))
+                  .flat_map(|x| Freer::pure(x * 2));
+              // Pure(30) になる
+
+          - name: "then による順序付け"
+            test: |
+              let first: Freer<(), ()> = Freer::pure(());
+              let second: Freer<(), i32> = Freer::pure(42);
+              let result = first.then(second);
+              // Pure(42) になる
+
+  # ============================================================================
+  # 5. interpret 関数
+  # ============================================================================
+  - id: freer_interpret
+    name: "interpret 関数"
+    priority: critical
+    description: |
+      Freer モナドを解釈（実行）する関数。
+      各命令をハンドラ関数で処理し、最終的な結果 A を得る。
+
+      **重要**: interpret は `A` を直接返す。他のモナド `M` への変換は行わない。
+      これにより、型設計がシンプルになり、`Pure(a)` と戻り値の整合性が保たれる。
+
+    methods:
+      - name: interpret
+        signature: |
+          impl<I: 'static, A: 'static> Freer<I, A> {
+              fn interpret<Handler>(self, handler: Handler) -> A
+              where
+                  Handler: FnMut(I) -> Box<dyn Any>
+          }
+        description: |
+          Freer モナドを解釈し、最終値 A を返す。
+
+          ## 動作
+
+          1. `Pure(a)` の場合: `a` を直接返す
+          2. `Impure { instruction, continuation }` の場合:
+             - handler で instruction を処理
+             - 結果を continuation に渡す
+             - ループで繰り返し evaluate
+          3. `FlatMapInternal(continuation_box)` の場合:
+             - continuation_box.step() で展開
+             - ループで繰り返し
+
+          ## スタック安全性
+
+          ループベースの実装でスタックオーバーフローを防ぐ。
+          FlatMapInternal により深い flat_map チェーンも安全に処理。
+
+          ## 実装
+
+          ```rust
+          pub fn interpret<Handler>(self, mut handler: Handler) -> A
+          where
+              Handler: FnMut(I) -> Box<dyn Any>,
+          {
+              let mut current = self;
+
+              loop {
+                  current = match current {
+                      Freer::Pure(a) => return a,
+                      Freer::Impure { instruction, continuation } => {
+                          let result = handler(instruction);
+                          continuation(result)
+                      }
+                      Freer::FlatMapInternal(continuation_box) => {
+                          // FlatMapInternal をステップ実行
+                          let mut inner = continuation_box.step();
+                          // 連続する FlatMapInternal を展開
+                          while let Freer::FlatMapInternal(next) = inner {
+                              inner = next.step();
+                          }
+                          inner
+                      }
+                  };
+              }
+          }
+          ```
+
+          ## 使用例
+
+          ```rust
+          enum Console {
+              PrintLine(String),
+              ReadLine,
+          }
+
+          let program = print_line("What's your name?".to_string())
+              .then(read_line())
+              .flat_map(|name| print_line(format!("Hello, {}!", name)));
+
+          // 本番用インタープリタ
+          let result: () = program.interpret(|cmd| match cmd {
+              Console::PrintLine(msg) => {
+                  println!("{}", msg);
+                  Box::new(())
+              }
+              Console::ReadLine => {
+                  let mut buffer = String::new();
+                  std::io::stdin().read_line(&mut buffer).unwrap();
+                  Box::new(buffer.trim().to_string())
+              }
+          });
+          ```
+        complexity: "O(n) where n is the number of instructions"
+        examples:
+          - description: "State DSL の解釈"
+            code: |
+              enum StateCmd {
+                  Get,
+                  Put(i32),
+              }
+
+              fn get() -> Freer<StateCmd, i32> {
+                  Freer::lift_instruction(
+                      StateCmd::Get,
+                      |r| *r.downcast::<i32>().expect("Get must return i32")
+                  )
+              }
+
+              fn put(value: i32) -> Freer<StateCmd, ()> {
+                  Freer::lift_instruction(StateCmd::Put(value), |_| ())
+              }
+
+              let program = get()
+                  .flat_map(|x| put(x + 1))
+                  .then(get());
+
+              let mut state = 10;
+              let result: i32 = program.interpret(|cmd| match cmd {
+                  StateCmd::Get => Box::new(state),
+                  StateCmd::Put(v) => {
+                      state = v;
+                      Box::new(())
+                  }
+              });
+
+              assert_eq!(result, 11);
+              assert_eq!(state, 11);
+
+      - name: interpret_with
+        signature: |
+          fn interpret_with<M, F, Pure>(
+              self,
+              handler: F,
+              pure_lift: Pure
+          ) -> M
+          where
+              M: 'static,
+              F: FnMut(I, Box<dyn FnOnce(Box<dyn Any>) -> M>) -> M,
+              Pure: FnOnce(A) -> M
+        description: |
+          他のモナド M へ変換しながら解釈する高度なバージョン。
+
+          `pure_lift` で `A -> M` の変換を提供することで、
+          任意の結果モナドへの変換が可能。
+
+          **注意**: このメソッドは将来の拡張用。
+          基本的なユースケースでは `interpret` で十分。
+
+          **所有権に関する注意**:
+          `pure_lift: FnOnce(A) -> M` は一度しか呼べないため、
+          ループベースの実装では直接使用できない。
+          実装時は以下のいずれかの方法で対処する必要がある:
+          - `pure_lift` を `Fn` または `FnMut` に変更する
+          - `Option<Pure>` でラップして一度だけ消費する
+          - 再帰的な実装を使用する（スタック安全性とのトレードオフ）
+
+          初期実装では `interpret` のみを提供し、
+          `interpret_with` は具体的なユースケースが明確になってから追加する。
+        complexity: "O(n)"
+        status: "将来拡張（初期実装では未実装）"
+
+    tests:
+      - category: "interpret テスト"
+        cases:
+          - name: "Pure のみの interpret"
+            test: |
+              let freer: Freer<(), i32> = Freer::pure(42);
+              let result: i32 = freer.interpret(|_: ()| Box::new(()));
+              assert_eq!(result, 42);
+
+          - name: "State DSL の interpret"
+            test: |
+              enum Cmd { Get, Put(i32) }
+              let program = get().flat_map(|x| put(x + 10)).then(get());
+              let mut state = 5;
+              let result: i32 = program.interpret(|cmd| match cmd {
+                  Cmd::Get => Box::new(state),
+                  Cmd::Put(v) => { state = v; Box::new(()) }
+              });
+              assert_eq!(result, 15);
+
+          - name: "深い flat_map チェーンのスタック安全性"
+            test: |
+              let mut freer: Freer<(), i32> = Freer::pure(0);
+              for _ in 0..10000 {
+                  freer = freer.flat_map(|x| Freer::pure(x + 1));
+              }
+              let result: i32 = freer.interpret(|_: ()| Box::new(()));
+              assert_eq!(result, 10000);
+
+  # ============================================================================
+  # 6. Debug / Display 実装
+  # ============================================================================
+  - id: freer_debug_display
+    name: "Debug / Display 実装"
+    priority: medium
+    description: |
+      Freer に対する Debug と Display トレイトの実装。
+
+    implementations:
+      - type: "Debug"
+        description: |
+          ```rust
+          impl<I: Debug, A: Debug> Debug for Freer<I, A> {
+              fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+                  match self {
+                      Freer::Pure(a) => f.debug_tuple("Pure").field(a).finish(),
+                      Freer::Impure { instruction, .. } => f
+                          .debug_struct("Impure")
+                          .field("instruction", instruction)
+                          .field("continuation", &"<continuation>")
+                          .finish(),
+                      Freer::FlatMapInternal(_) => f
+                          .debug_tuple("FlatMapInternal")
+                          .field(&"<continuation>")
+                          .finish(),
+                  }
+              }
+          }
+          ```
+
+      - type: "Display"
+        description: |
+          ```rust
+          impl<I: Display, A: Display> Display for Freer<I, A> {
+              fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+                  match self {
+                      Freer::Pure(a) => write!(f, "Pure({})", a),
+                      Freer::Impure { instruction, .. } => {
+                          write!(f, "Impure({})", instruction)
+                      }
+                      Freer::FlatMapInternal(_) => write!(f, "<FlatMap>"),
+                  }
+              }
+          }
+          ```
+
+    tests:
+      - category: "Debug/Display テスト"
+        cases:
+          - name: "Debug 出力"
+            test: |
+              let freer: Freer<(), i32> = Freer::pure(42);
+              assert_eq!(format!("{:?}", freer), "Pure(42)");
+
+          - name: "Display 出力"
+            test: |
+              let freer: Freer<(), i32> = Freer::pure(42);
+              assert_eq!(format!("{}", freer), "Pure(42)");
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - requirement: "flat_map チェーンのスタック安全性"
+      description: |
+        深い flat_map チェーン（10,000 以上）でもスタックオーバーフローしない。
+        FlatMapInternal バリアントとループベースの interpret で実現。
+
+    - requirement: "interpret のメモリ効率"
+      description: |
+        interpret 中に不必要なメモリ割り当てを避ける。
+        継続は必要になるまで評価しない。
+
+  compatibility:
+    - requirement: "既存の control モジュールとの一貫性"
+      description: |
+        Continuation, Trampoline と同様の API スタイルを維持。
+        - pure/map/flat_map/and_then/then メソッド
+        - 'static 制約は impl ブロック単位で適用
+        - ドキュメント形式
+
+    - requirement: "TypeConstructor トレイトとの関係"
+      description: |
+        Freer は TypeConstructor を実装しない。
+        理由: 'static 制約が TypeConstructor の定義と合わない。
+        （Trampoline, Continuation と同様のアプローチ）
+
+  testing:
+    - requirement: "Monad 法則のプロパティテスト"
+      description: |
+        proptest を使用して Monad 法則を検証。
+        任意の命令セットに対して法則が成り立つことを確認。
+
+    - requirement: "スタック安全性のストレステスト"
+      description: |
+        深い再帰（10,000 レベル以上）でのスタック安全性を検証。
+
+    - requirement: "DSL サンプルの統合テスト"
+      description: |
+        Console DSL, State DSL などの実用的な例をテスト。
+
+# 実装順序
+implementation_order:
+  - phase: "1"
+    name: "基本構造の実装"
+    description: |
+      Freer<I, A> 型、ContinuationBox、FreerContinuation トレイト、
+      および基本コンストラクタ（pure, lift_instruction）を実装。
+    duration_estimate: "2-3 days"
+    deliverables:
+      - src/control/freer.rs（基本構造）
+      - tests/freer_basic_tests.rs
+
+  - phase: "2"
+    name: "Functor/Monad 操作の実装"
+    description: |
+      map, flat_map, and_then, then を実装。
+      FlatMapContinuation による FlatMapInternal の step を実装。
+    duration_estimate: "1-2 days"
+    deliverables:
+      - src/control/freer.rs（操作追加）
+      - tests/freer_monad_tests.rs
+
+  - phase: "3"
+    name: "interpret 関数の実装"
+    description: |
+      ループベースのスタック安全な interpret を実装。
+    duration_estimate: "2-3 days"
+    deliverables:
+      - src/control/freer.rs（interpret 追加）
+      - tests/freer_interpret_tests.rs
+
+  - phase: "4"
+    name: "Debug/Display と統合テスト"
+    description: |
+      Debug/Display の実装、DSL サンプルの統合テスト。
+    duration_estimate: "1-2 days"
+    deliverables:
+      - src/control/freer.rs（完成）
+      - tests/freer_integration_tests.rs
+
+# 将来の拡張
+future_extensions:
+  - id: extensible_effects
+    name: "Extensible Effects への拡張"
+    description: |
+      複数のエフェクトを組み合わせる Extensible Effects パターン。
+      型レベルリストでエフェクト行を表現。
+    rationale: |
+      現時点では単一の命令セットのみをサポート。
+      Extensible Effects は代数的効果システムとの統合時に検討。
+
+  - id: optimized_continuation
+    name: "最適化された継続表現"
+    description: |
+      継続チェーンの効率的な表現（Reflection without Remorse パターン）。
+      深い flat_map チェーンのパフォーマンス改善。
+    rationale: |
+      現時点では FlatMapInternal + ContinuationBox で実装。
+      パフォーマンス問題が発生した場合に最適化を検討。
+
+  - id: async_freer
+    name: "非同期 Freer"
+    description: |
+      async/await と統合した非同期 Freer モナド。
+      AsyncFreer<I, A> として別途実装。
+    rationale: |
+      まず同期版を安定させてから非同期版を設計。
+
+# 他言語との対応表
+language_correspondence:
+  haskell:
+    - haskell: "data Freer f a = Pure a | Impure (f x) (x -> Freer f a)"
+      rust: "enum Freer<I, A> { Pure(A), Impure { instruction: I, continuation: ... }, FlatMapInternal(...) }"
+      notes: "Haskell の存在量化型を型消去で代替。FlatMapInternal はスタック安全性のための Rust 固有の拡張"
+
+    - haskell: "return = Pure"
+      rust: "Freer::pure"
+      notes: "同等"
+
+    - haskell: "(>>=)"
+      rust: "flat_map"
+      notes: "Rust の命名規則に従う"
+
+    - haskell: "interpret :: Monad m => (forall x. f x -> m x) -> Freer f a -> m a"
+      rust: "fn interpret<Handler>(self, handler: Handler) -> A"
+      notes: "Rust 版は A を直接返す。M への変換が必要な場合は interpret_with を使用"
+
+  scala:
+    - scala: "sealed trait Free[F[_], A]"
+      rust: "enum Freer<I, A>"
+      notes: "Scala の HKT を型消去で代替"
+
+    - scala: "final case class Pure[F[_], A](a: A)"
+      rust: "Freer::Pure(A)"
+      notes: "同等"
+
+    - scala: "final case class Suspend[F[_], A](s: F[Free[F, A]])"
+      rust: "Freer::Impure { instruction, continuation }"
+      notes: "Freer は Suspend を分解した形式"
+
+# 参考文献
+references:
+  - title: "Freer Monads, More Extensible Effects"
+    authors: "Oleg Kiselyov, Hiromi Ishii"
+    url: "https://okmij.org/ftp/Haskell/extensible/more.pdf"
+    description: "Freer モナドの理論的基盤"
+
+  - title: "Reflection without Remorse"
+    authors: "Atze van der Ploeg, Oleg Kiselyov"
+    url: "https://okmij.org/ftp/Haskell/zseq.pdf"
+    description: "継続チェーンの効率的な表現"
+
+  - title: "freer-simple (Haskell library)"
+    url: "https://hackage.haskell.org/package/freer-simple"
+    description: "Haskell での Freer モナド実装"
+
+  - title: "extensible-effects (Haskell library)"
+    url: "https://hackage.haskell.org/package/extensible-effects"
+    description: "元祖 Extensible Effects 実装"
+
+# レビュー対応履歴
+review_history:
+  - version: "1.2.0"
+    date: "2026-01-16"
+    reviewer: "Codex（再レビュー）"
+    changes:
+      - category: "高"
+        issue: "InstructionResult トレイトと実際の型付けの不整合"
+        resolution: |
+          InstructionResult トレイトを削除し、Box<dyn Any> ベースの設計を明確化。
+          - 設計原則セクションを「型消去ベースの命令ハンドリング」に変更
+          - 型安全性の限界と責任を明記
+          - Rust の制約（HKT の不在）による現実的なトレードオフであることを説明
+
+      - category: "中"
+        issue: "Console の例が不整合（type Result = () だが ReadLine は String を返す）"
+        resolution: |
+          InstructionResult トレイトの例を削除。
+          代わりに、ヘルパー関数で各命令の結果型を明示する例に変更。
+
+      - category: "中"
+        issue: "interpret_with の pure_lift: FnOnce(A) -> M の所有権問題"
+        resolution: |
+          所有権の問題を注記として追加。
+          - FnOnce は一度しか呼べないためループベース実装と整合しない
+          - 解決策の選択肢を記載（Fn/FnMut への変更、Option でラップ、再帰的実装）
+          - 初期実装では interpret のみを提供し、interpret_with は将来拡張として保留
+
+      - category: "低"
+        issue: "プロパティテストの handler.clone() 問題（FnMut は Clone を実装しない）"
+        resolution: |
+          テスト例を修正。
+          - Pure のみを使用するテスト（命令を含まない場合）
+          - 命令を含む場合は RefCell と Rc を使用してハンドラを共有する例に変更
+
+  - version: "1.1.0"
+    date: "2026-01-16"
+    reviewer: "Codex"
+    changes:
+      - category: "重大"
+        issue: "interpret の戻り値 M と Pure(a) の不整合"
+        resolution: |
+          interpret は A を直接返す設計に変更。
+          M への変換が必要な場合は interpret_with を将来拡張として追加。
+
+      - category: "重大"
+        issue: "型消去の安全性が未定義"
+        resolution: |
+          - downcast 失敗時は panic（DSL 設計バグを示す）
+          - ドキュメントでこの挙動を明記
+          - extract 関数は純粋関数であることを要件に追加
+
+      - category: "重大"
+        issue: "スタック安全性の達成手段が不十分"
+        resolution: |
+          - FlatMapInternal バリアントを追加
+          - FreerContinuation トレイトと ContinuationBox を追加
+          - Trampoline と同様のパターンを採用
+          - interpret をループベースで実装
+
+      - category: "高"
+        issue: "'static 制約の適用範囲"
+        resolution: |
+          - pure は 'static 制約なし
+          - map, flat_map, interpret は impl<I: 'static, A: 'static> ブロックで定義
+          - Continuation/Trampoline と同じアプローチを採用
+
+      - category: "中"
+        issue: "interpret vs run の命名整合性"
+        resolution: |
+          命名規則セクションを追加し、interpret が DSL 文脈で標準的であることを説明
+
+      - category: "中"
+        issue: "lift_instruction の参照透過性"
+        resolution: |
+          extract 関数は純粋関数であることを要件に明記。
+          副作用を含んではならないことを警告として追加。

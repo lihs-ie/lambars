@@ -53,6 +53,7 @@ This document provides a comprehensive comparison between Scala functional progr
 | ReaderT                   | `cats.data.ReaderT`           | `ReaderT` type       |
 | WriterT                   | `cats.data.WriterT`           | `WriterT` type       |
 | EitherT                   | `cats.data.EitherT`           | `ExceptT` type       |
+| Free Monad                | `cats.free.Free[F, A]`        | `Freer<I, A>` type   |
 
 ---
 

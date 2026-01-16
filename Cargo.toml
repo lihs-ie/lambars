@@ -102,3 +102,7 @@ harness = false
 name = "rayon_bench"
 harness = false
 required-features = ["rayon"]
+
+[[bench]]
+name = "freer_bench"
+harness = false
