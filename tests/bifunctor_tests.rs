@@ -1,3 +1,4 @@
+#![cfg(feature = "typeclass")]
 //! Integration tests for Bifunctor type class.
 
 use lambars::control::Either;
