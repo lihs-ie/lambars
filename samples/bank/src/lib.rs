@@ -36,6 +36,7 @@
 //! - No side effects in core logic
 //! - I/O is isolated at the boundaries
 
+pub mod api;
 pub mod application;
 pub mod domain;
 pub mod infrastructure;
