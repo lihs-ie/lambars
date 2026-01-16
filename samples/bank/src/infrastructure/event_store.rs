@@ -337,6 +337,89 @@ impl EventStore for PostgresEventStore {
     }
 }
 
+/// In-memory event store implementation for testing and demonstration.
+///
+/// This implementation stores events in memory using thread-safe collections.
+/// Useful for:
+/// - Unit testing
+/// - Integration testing without database
+/// - Demo/development environments
+///
+/// **Note**: Data is lost when the application restarts.
+#[derive(Debug, Default)]
+pub struct InMemoryEventStore {
+    events: std::sync::RwLock<std::collections::HashMap<AccountId, Vec<AccountEvent>>>,
+}
+
+impl InMemoryEventStore {
+    /// Creates a new empty in-memory event store.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            events: std::sync::RwLock::new(std::collections::HashMap::new()),
+        }
+    }
+}
+
+impl EventStore for InMemoryEventStore {
+    fn append_events(
+        &self,
+        aggregate_id: &AccountId,
+        expected_version: u64,
+        events: Vec<AccountEvent>,
+    ) -> AsyncIO<Result<(), EventStoreError>> {
+        let id = *aggregate_id;
+        let store = self.events.read().unwrap();
+        let actual_version = store.get(&id).map_or(0, |e| e.len() as u64);
+        drop(store);
+
+        if actual_version != expected_version {
+            return AsyncIO::new(move || async move {
+                Err(EventStoreError::ConcurrencyConflict {
+                    expected: expected_version,
+                    actual: actual_version,
+                })
+            });
+        }
+
+        let mut guard = self.events.write().unwrap();
+        guard.entry(id).or_default().extend(events);
+        drop(guard);
+
+        AsyncIO::new(|| async { Ok(()) })
+    }
+
+    fn load_events(
+        &self,
+        aggregate_id: &AccountId,
+    ) -> AsyncIO<Result<PersistentList<AccountEvent>, EventStoreError>> {
+        let guard = self.events.read().unwrap();
+        let events: Vec<_> = guard.get(aggregate_id).cloned().unwrap_or_default();
+        drop(guard);
+
+        AsyncIO::new(move || async move { Ok(events.into_iter().collect::<PersistentList<_>>()) })
+    }
+
+    fn load_events_from_version(
+        &self,
+        aggregate_id: &AccountId,
+        from_version: u64,
+    ) -> AsyncIO<Result<PersistentList<AccountEvent>, EventStoreError>> {
+        let guard = self.events.read().unwrap();
+        let skip_count = usize::try_from(from_version).unwrap_or(usize::MAX);
+        let events: Vec<_> = guard
+            .get(aggregate_id)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .skip(skip_count)
+            .collect();
+        drop(guard);
+
+        AsyncIO::new(move || async move { Ok(events.into_iter().collect::<PersistentList<_>>()) })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

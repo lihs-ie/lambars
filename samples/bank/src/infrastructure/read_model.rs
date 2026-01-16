@@ -217,6 +217,56 @@ pub trait ReadModelCache: Send + Sync {
     fn invalidate(&self, account_id: &AccountId) -> AsyncIO<Result<(), ReadModelError>>;
 }
 
+/// In-memory read model cache implementation for testing and demonstration.
+///
+/// This implementation stores cached balances in memory using thread-safe collections.
+/// Useful for:
+/// - Unit testing
+/// - Integration testing without Redis
+/// - Demo/development environments
+///
+/// **Note**: Data is lost when the application restarts.
+#[derive(Debug, Default)]
+pub struct InMemoryReadModelCache {
+    cache: std::sync::RwLock<std::collections::HashMap<AccountId, CachedBalance>>,
+}
+
+impl InMemoryReadModelCache {
+    /// Creates a new empty in-memory cache.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            cache: std::sync::RwLock::new(std::collections::HashMap::new()),
+        }
+    }
+}
+
+impl ReadModelCache for InMemoryReadModelCache {
+    fn get_balance(
+        &self,
+        account_id: &AccountId,
+    ) -> AsyncIO<Result<Option<CachedBalance>, ReadModelError>> {
+        let cached = self.cache.read().unwrap().get(account_id).cloned();
+        AsyncIO::pure(Ok(cached))
+    }
+
+    fn set_balance(
+        &self,
+        account_id: &AccountId,
+        balance: &Money,
+        version: u64,
+    ) -> AsyncIO<Result<(), ReadModelError>> {
+        let cached = CachedBalance::now(balance.clone(), version);
+        self.cache.write().unwrap().insert(*account_id, cached);
+        AsyncIO::pure(Ok(()))
+    }
+
+    fn invalidate(&self, account_id: &AccountId) -> AsyncIO<Result<(), ReadModelError>> {
+        self.cache.write().unwrap().remove(account_id);
+        AsyncIO::pure(Ok(()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
