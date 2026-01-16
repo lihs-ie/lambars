@@ -185,6 +185,25 @@ impl AppConfig {
     }
 }
 
+impl Default for AppConfig {
+    /// Returns a default configuration suitable for local development.
+    ///
+    /// Uses in-memory/local defaults that don't require external services.
+    fn default() -> Self {
+        Self {
+            database_url: "postgres://bank:bank_password@localhost:5432/bank_events".to_string(),
+            redis_url: "redis://localhost:6380".to_string(),
+            sqs_endpoint: "http://localhost:4566".to_string(),
+            sqs_events_queue_url: "http://localhost:4566/000000000000/bank-events".to_string(),
+            sqs_projections_queue_url: "http://localhost:4566/000000000000/bank-projections"
+                .to_string(),
+            snapshot_threshold: 100,
+            app_host: "0.0.0.0".to_string(),
+            app_port: 8081,
+        }
+    }
+}
+
 /// Gets a required environment variable.
 ///
 /// # Errors

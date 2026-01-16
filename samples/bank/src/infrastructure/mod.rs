@@ -35,6 +35,6 @@ mod read_model;
 
 pub use config::{AppConfig, ConfigError};
 pub use dependencies::AppDependencies;
-pub use event_store::{EventStore, EventStoreError, PostgresEventStore};
+pub use event_store::{EventStore, EventStoreError, InMemoryEventStore, PostgresEventStore};
 pub use messaging::{EventMessage, event_to_message, events_to_messages};
-pub use read_model::{CachedBalance, ReadModelCache, ReadModelError};
+pub use read_model::{CachedBalance, InMemoryReadModelCache, ReadModelCache, ReadModelError};

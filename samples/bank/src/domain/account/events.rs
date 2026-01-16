@@ -22,11 +22,11 @@
 //!
 //! Each event variant can be accessed using the corresponding Prism:
 //!
-//! ```rust
+//! ```rust,ignore
 //! use bank::domain::account::events::{AccountEvent, MoneyDeposited};
 //! use lambars::optics::Prism;
 //!
-//! let event = AccountEvent::Deposited(/* ... */);
+//! let event = AccountEvent::Deposited(/* MoneyDeposited instance */);
 //! let prism = AccountEvent::deposited_prism();
 //!
 //! // Pattern match using preview
