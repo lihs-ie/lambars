@@ -12,7 +12,7 @@ lambars は、Rust の標準ライブラリでは提供されていない関数�
 
 ### 機能
 
-- **型クラス**: Functor, Applicative, Monad, Foldable, Traversable, Semigroup, Monoid
+- **型クラス**: Functor, Applicative, Alternative, Monad, Foldable, Traversable, Semigroup, Monoid
 - **関数合成**: `compose!`, `pipe!`, `pipe_async!`, `partial!`, `curry!`, `eff!`, `for_!`, `for_async!` マクロ
 - **制御構造**: 遅延評価、スタック安全な再帰のための Trampoline、継続モナド、DSL 構築のための Freer モナド
 - **永続データ構造**: 構造共有による不変 Vector, HashMap, HashSet, TreeMap, List, Deque

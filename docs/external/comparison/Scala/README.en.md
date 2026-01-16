@@ -475,7 +475,7 @@ let contents = io.run_unsafe();
 | `opt.map(f)`             | `Functor::fmap`           | Transform value     |
 | `opt.flatMap(f)`         | `Monad::flat_map`         | Chain computation   |
 | `opt.getOrElse(default)` | `Option::unwrap_or`       | Default value       |
-| `opt.orElse(alt)`        | `Option::or`              | Alternative         |
+| `opt.orElse(alt)`        | `Alternative::alt`        | Alternative         |
 | `opt.fold(ifEmpty)(f)`   | `Option::map_or`          | Fold with default   |
 | `opt.filter(p)`          | `Option::filter`          | Filter by predicate |
 | `opt.filterNot(p)`       | `filter(\|x\| !p(x))`     | Filter inverse      |

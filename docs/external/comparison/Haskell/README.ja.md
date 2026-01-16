@@ -707,8 +707,8 @@ let contents = io.run_unsafe();
 | `maybeToList ma` | `Option::into_iter`                  | リストへ            |
 | `catMaybes xs`   | `Iterator::flatten`                  | Nothing をフィルタ  |
 | `mapMaybe f xs`  | `Iterator::filter_map`               | マップとフィルタ    |
-| `ma <\|> mb`     | `Option::or`                         | 代替                |
-| `guard cond`     | `if cond { Some(()) } else { None }` | Monad でのガード    |
+| `ma <\|> mb`     | `Alternative::alt`                   | 代替                |
+| `guard cond`     | `Alternative::guard`                 | Monad でのガード    |
 
 ### Either / Result
 

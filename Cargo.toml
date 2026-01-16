@@ -110,3 +110,8 @@ harness = false
 [[bench]]
 name = "bifunctor_bench"
 harness = false
+
+[[bench]]
+name = "alternative_bench"
+harness = false
+required-features = ["typeclass"]
