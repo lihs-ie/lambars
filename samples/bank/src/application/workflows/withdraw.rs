@@ -46,7 +46,7 @@
 //!
 //! let funding_priority = vec![FundingSourceType::Balance];
 //! let timestamp = Timestamp::now();
-//! let result = withdraw(command, &account, &funding_priority, timestamp);
+//! let result = withdraw(&command, &account, &funding_priority, timestamp);
 //! // result is Either<DomainError, MoneyWithdrawn>
 //! ```
 
@@ -228,6 +228,7 @@ impl ValidatedWithdraw {
 /// - Amount must be positive (greater than zero)
 /// - Account must be active (not closed or frozen)
 /// - Account must have sufficient balance
+#[allow(dead_code)]
 pub(crate) fn validate_withdraw(
     command: &WithdrawCommand,
     account: &Account,
@@ -412,17 +413,17 @@ pub(crate) fn create_withdraw_event(
 ///
 /// let funding_priority = vec![FundingSourceType::Balance];
 /// let timestamp = Timestamp::now();
-/// let result = withdraw(command, &account, &funding_priority, timestamp);
+/// let result = withdraw(&command, &account, &funding_priority, timestamp);
 ///
 /// assert!(result.is_right());
 /// ```
 pub fn withdraw(
-    command: WithdrawCommand,
+    command: &WithdrawCommand,
     account: &Account,
     funding_priority: &[FundingSourceType],
     timestamp: Timestamp,
 ) -> DomainResult<MoneyWithdrawn> {
-    validate_withdraw_with_priority(&command, account, funding_priority)
+    validate_withdraw_with_priority(command, account, funding_priority)
         .map_right(|validated| create_withdraw_event(validated, timestamp))
 }
 
@@ -809,7 +810,7 @@ mod tests {
         let timestamp = Timestamp::now();
 
         // When: we execute the workflow
-        let result = withdraw(command, &account, &funding_priority, timestamp);
+        let result = withdraw(&command, &account, &funding_priority, timestamp);
 
         // Then: we get a MoneyWithdrawn event
         assert!(result.is_right());
@@ -829,7 +830,7 @@ mod tests {
         let timestamp = Timestamp::now();
 
         // When: we execute the workflow
-        let result = withdraw(command, &account, &funding_priority, timestamp);
+        let result = withdraw(&command, &account, &funding_priority, timestamp);
 
         // Then: we get an error
         assert!(result.is_left());
@@ -846,7 +847,7 @@ mod tests {
         let timestamp = Timestamp::now();
 
         // When: we execute the workflow
-        let result = withdraw(command, &account, &funding_priority, timestamp);
+        let result = withdraw(&command, &account, &funding_priority, timestamp);
 
         // Then: we get an error
         assert!(result.is_left());
@@ -864,7 +865,7 @@ mod tests {
         let timestamp = Timestamp::now();
 
         // When: we execute the workflow
-        let result = withdraw(command, &account, &funding_priority, timestamp);
+        let result = withdraw(&command, &account, &funding_priority, timestamp);
 
         // Then: we get an error
         assert!(result.is_left());
@@ -882,7 +883,7 @@ mod tests {
         let timestamp = Timestamp::now();
 
         // When: we execute the workflow
-        let result = withdraw(command, &account, &funding_priority, timestamp);
+        let result = withdraw(&command, &account, &funding_priority, timestamp);
 
         // Then: we get an error
         assert!(result.is_left());
@@ -899,7 +900,7 @@ mod tests {
         let timestamp = Timestamp::now();
 
         // When: we execute the workflow
-        let result = withdraw(command, &account, &funding_priority, timestamp);
+        let result = withdraw(&command, &account, &funding_priority, timestamp);
 
         // Then: we get a MoneyWithdrawn event with zero balance
         assert!(result.is_right());
@@ -916,8 +917,8 @@ mod tests {
         let timestamp = Timestamp::now();
 
         // When: we execute the workflow twice with the same inputs
-        let result1 = withdraw(command.clone(), &account, &funding_priority, timestamp);
-        let result2 = withdraw(command, &account, &funding_priority, timestamp);
+        let result1 = withdraw(&command, &account, &funding_priority, timestamp);
+        let result2 = withdraw(&command, &account, &funding_priority, timestamp);
 
         // Then: both results are structurally equal (except event_id)
         assert!(result1.is_right());

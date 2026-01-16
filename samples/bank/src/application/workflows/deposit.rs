@@ -33,7 +33,7 @@
 //! );
 //!
 //! let timestamp = Timestamp::now();
-//! let result = deposit(command, &account, timestamp);
+//! let result = deposit(&command, &account, timestamp);
 //! // result is Either<DomainError, MoneyDeposited>
 //! ```
 
@@ -206,16 +206,16 @@ pub(crate) fn create_deposit_event(
 /// );
 ///
 /// let timestamp = Timestamp::now();
-/// let result = deposit(command, &account, timestamp);
+/// let result = deposit(&command, &account, timestamp);
 ///
 /// assert!(result.is_right());
 /// ```
 pub fn deposit(
-    command: DepositCommand,
+    command: &DepositCommand,
     account: &Account,
     timestamp: Timestamp,
 ) -> DomainResult<MoneyDeposited> {
-    validate_deposit(&command, account)
+    validate_deposit(command, account)
         .map_right(|validated| create_deposit_event(validated, timestamp))
 }
 
@@ -483,7 +483,7 @@ mod tests {
         let timestamp = Timestamp::now();
 
         // When: we execute the workflow
-        let result = deposit(command, &account, timestamp);
+        let result = deposit(&command, &account, timestamp);
 
         // Then: we get a MoneyDeposited event
         assert!(result.is_right());
@@ -502,7 +502,7 @@ mod tests {
         let timestamp = Timestamp::now();
 
         // When: we execute the workflow
-        let result = deposit(command, &account, timestamp);
+        let result = deposit(&command, &account, timestamp);
 
         // Then: we get an error
         assert!(result.is_left());
@@ -518,7 +518,7 @@ mod tests {
         let timestamp = Timestamp::now();
 
         // When: we execute the workflow
-        let result = deposit(command, &account, timestamp);
+        let result = deposit(&command, &account, timestamp);
 
         // Then: we get an error
         assert!(result.is_left());
@@ -535,7 +535,7 @@ mod tests {
         let timestamp = Timestamp::now();
 
         // When: we execute the workflow
-        let result = deposit(command, &account, timestamp);
+        let result = deposit(&command, &account, timestamp);
 
         // Then: we get an error
         assert!(result.is_left());
@@ -552,7 +552,7 @@ mod tests {
         let timestamp = Timestamp::now();
 
         // When: we execute the workflow
-        let result = deposit(command, &account, timestamp);
+        let result = deposit(&command, &account, timestamp);
 
         // Then: we get a MoneyDeposited event
         assert!(result.is_right());
@@ -566,8 +566,8 @@ mod tests {
         let timestamp = Timestamp::now();
 
         // When: we execute the workflow twice with the same inputs
-        let result1 = deposit(command.clone(), &account, timestamp);
-        let result2 = deposit(command, &account, timestamp);
+        let result1 = deposit(&command, &account, timestamp);
+        let result2 = deposit(&command, &account, timestamp);
 
         // Then: both results are structurally equal (except event_id)
         assert!(result1.is_right());
