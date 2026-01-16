@@ -4,7 +4,7 @@
 //!
 //! - `POST /accounts/{id}/deposit` - Deposit money
 //! - `POST /accounts/{id}/withdraw` - Withdraw money
-//! - `POST /transfers` - Transfer money between accounts
+//! - `POST /accounts/{id}/transfer` - Transfer money between accounts
 //! - `GET /accounts/{id}/transactions` - Get transaction history
 //!
 //! # Functional Design
@@ -12,78 +12,35 @@
 //! Handlers follow a pipeline pattern similar to account handlers.
 //! Idempotency is handled via transaction IDs derived from idempotency keys.
 
-use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use axum::Json;
 
 use crate::api::dto::requests::{
     DepositRequest, PaginationParams, TransferRequest, WithdrawRequest,
 };
 use crate::api::dto::responses::{
-    TransactionHistoryResponse, TransactionResponse, TransferResponse,
+    MoneyResponseDto, TransactionHistoryResponse, TransactionResponse, TransferResponse,
 };
 use crate::api::dto::transformers::dto_to_money;
 use crate::api::middleware::error_handler::{
-    ApiError, ApiErrorResponse, account_id_error_to_api_error, transformation_error_to_api_error,
+    ApiError, ApiErrorResponse, account_id_error_to_api_error, domain_error_to_api_error,
+    transformation_error_to_api_error,
 };
-use crate::domain::value_objects::{AccountId, TransactionId};
+use crate::application::queries::{build_transaction_history, GetHistoryQuery};
+use crate::application::workflows::{FundingSourceType, deposit, transfer, withdraw};
+use crate::domain::account::aggregate::Account;
+use crate::domain::account::commands::{DepositCommand, TransferCommand, WithdrawCommand};
+use crate::domain::account::events::AccountEvent;
+use crate::domain::value_objects::{AccountId, Timestamp, TransactionId};
 use crate::infrastructure::AppDependencies;
 
 /// POST /accounts/{id}/deposit - Deposit money into an account.
 ///
 /// Deposits the specified amount into the account.
 /// The idempotency key ensures duplicate requests are handled safely.
-///
-/// # Path Parameters
-///
-/// - `id` - The account UUID
-///
-/// # Request Body
-///
-/// ```json
-/// {
-///     "amount": {
-///         "amount": "5000",
-///         "currency": "JPY"
-///     },
-///     "idempotency_key": "deposit-123-abc"
-/// }
-/// ```
-///
-/// # Errors
-///
-/// Returns `ApiErrorResponse` if:
-/// - The account ID is not a valid UUID
-/// - The amount or currency is invalid
-/// - The account is not found
-/// - The account is closed
-///
-/// # Response
-///
-/// - `201 Created` - Deposit successful
-/// - `400 Bad Request` - Invalid request data
-/// - `404 Not Found` - Account not found
-/// - `409 Conflict` - Account is closed
-///
-/// # Example Response
-///
-/// ```json
-/// {
-///     "transaction_id": "...",
-///     "amount": {
-///         "amount": "5000",
-///         "currency": "JPY"
-///     },
-///     "balance_after": {
-///         "amount": "15000",
-///         "currency": "JPY"
-///     },
-///     "timestamp": "2024-01-15T10:30:00Z"
-/// }
-/// ```
-#[allow(clippy::unused_async)]
-pub async fn deposit(
-    State(_dependencies): State<AppDependencies>,
+pub async fn deposit_handler(
+    State(dependencies): State<AppDependencies>,
     Path(account_id_string): Path<String>,
     Json(request): Json<DepositRequest>,
 ) -> Result<(StatusCode, Json<TransactionResponse>), ApiErrorResponse> {
@@ -112,79 +69,107 @@ pub async fn deposit(
     // Step 3: Create transaction ID from idempotency key (pure function)
     let transaction_id = TransactionId::from_idempotency_key(&request.idempotency_key);
 
-    // Step 4: Execute workflow via AsyncIO (would be implemented with dependencies)
-    // For now, return a not found error as we don't have the account loaded
+    // Step 4: Load account from event store and rebuild (IO + pure)
+    // Note: We immediately extract the Account from events to ensure the non-Send
+    // PersistentList is dropped before any subsequent await points.
+    let account = match dependencies
+        .event_store()
+        .load_events(&account_id)
+        .run_async()
+        .await
+    {
+        Ok(events) => match Account::from_events(&events) {
+            Some(account) => account,
+            None => {
+                return Err(ApiErrorResponse::new(
+                    StatusCode::NOT_FOUND,
+                    ApiError::with_details(
+                        "ACCOUNT_NOT_FOUND",
+                        "The specified account was not found",
+                        serde_json::json!({ "account_id": account_id_string }),
+                    ),
+                ));
+            }
+        },
+        Err(store_error) => {
+            return Err(ApiErrorResponse::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ApiError::with_details(
+                    "EVENT_STORE_ERROR",
+                    "Failed to load account events",
+                    serde_json::json!({ "error": store_error.to_string() }),
+                ),
+            ));
+        }
+    };
 
-    // Mock: Return not found for demonstration
-    let _ = (account_id, amount, transaction_id);
-    Err(ApiErrorResponse::new(
-        StatusCode::NOT_FOUND,
-        ApiError::with_details(
-            "ACCOUNT_NOT_FOUND",
-            "The specified account was not found",
-            serde_json::json!({
-                "account_id": account_id_string
-            }),
-        ),
-    ))
+    // Step 5: Create domain command (pure function)
+    let command = DepositCommand::new(account_id, amount, transaction_id);
+
+    // Step 7: Execute workflow (pure function)
+    let timestamp = Timestamp::now();
+    let event_result = deposit(&command, &account, timestamp);
+
+    let event = match event_result {
+        lambars::control::Either::Right(event) => event,
+        lambars::control::Either::Left(error) => {
+            let (status, api_error) = domain_error_to_api_error(error);
+            return Err(ApiErrorResponse::new(status, api_error));
+        }
+    };
+
+    // Step 8: Persist event to event store (IO)
+    let persist_result = dependencies
+        .event_store()
+        .append_events(
+            &account_id,
+            account.version,
+            vec![AccountEvent::Deposited(event.clone())],
+        )
+        .run_async()
+        .await;
+
+    if let Err(store_error) = persist_result {
+        return Err(ApiErrorResponse::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ApiError::with_details(
+                "EVENT_STORE_ERROR",
+                "Failed to persist deposit event",
+                serde_json::json!({ "error": store_error.to_string() }),
+            ),
+        ));
+    }
+
+    // Step 9: Invalidate cache (IO)
+    let _ = dependencies
+        .read_model()
+        .invalidate(&account_id)
+        .run_async()
+        .await;
+
+    // Step 10: Transform result to response DTO (pure function)
+    let response = TransactionResponse {
+        transaction_id: event.transaction_id.to_string(),
+        amount: MoneyResponseDto {
+            amount: event.amount.amount().to_string(),
+            currency: event.amount.currency().to_string(),
+        },
+        balance_after: MoneyResponseDto {
+            amount: event.balance_after.amount().to_string(),
+            currency: event.balance_after.currency().to_string(),
+        },
+        timestamp: event.deposited_at.to_iso_string(),
+    };
+
+    Ok((StatusCode::CREATED, Json(response)))
 }
 
 /// POST /accounts/{id}/withdraw - Withdraw money from an account.
 ///
 /// Withdraws the specified amount from the account.
 /// The idempotency key ensures duplicate requests are handled safely.
-///
-/// # Path Parameters
-///
-/// - `id` - The account UUID
-///
-/// # Request Body
-///
-/// ```json
-/// {
-///     "amount": {
-///         "amount": "3000",
-///         "currency": "JPY"
-///     },
-///     "idempotency_key": "withdraw-456-def"
-/// }
-/// ```
-///
-/// # Errors
-///
-/// Returns `ApiErrorResponse` if:
-/// - The account ID is not a valid UUID
-/// - The amount or currency is invalid
-/// - The account is not found
-/// - The account has insufficient balance
-/// - The account is closed or frozen
-///
-/// # Response
-///
-/// - `201 Created` - Withdrawal successful
-/// - `400 Bad Request` - Invalid request data or insufficient balance
-/// - `404 Not Found` - Account not found
-/// - `409 Conflict` - Account is closed or frozen
-///
-/// # Example Response
-///
-/// ```json
-/// {
-///     "transaction_id": "...",
-///     "amount": {
-///         "amount": "3000",
-///         "currency": "JPY"
-///     },
-///     "balance_after": {
-///         "amount": "7000",
-///         "currency": "JPY"
-///     },
-///     "timestamp": "2024-01-15T10:30:00Z"
-/// }
-/// ```
-#[allow(clippy::unused_async)]
-pub async fn withdraw(
-    State(_dependencies): State<AppDependencies>,
+pub async fn withdraw_handler(
+    State(dependencies): State<AppDependencies>,
     Path(account_id_string): Path<String>,
     Json(request): Json<WithdrawRequest>,
 ) -> Result<(StatusCode, Json<TransactionResponse>), ApiErrorResponse> {
@@ -213,82 +198,110 @@ pub async fn withdraw(
     // Step 3: Create transaction ID from idempotency key (pure function)
     let transaction_id = TransactionId::from_idempotency_key(&request.idempotency_key);
 
-    // Step 4: Execute workflow via AsyncIO (would be implemented with dependencies)
-    // For now, return a not found error as we don't have the account loaded
+    // Step 4: Load account from event store and rebuild (IO + pure)
+    // Note: We immediately extract the Account from events to ensure the non-Send
+    // PersistentList is dropped before any subsequent await points.
+    let account = match dependencies
+        .event_store()
+        .load_events(&account_id)
+        .run_async()
+        .await
+    {
+        Ok(events) => match Account::from_events(&events) {
+            Some(account) => account,
+            None => {
+                return Err(ApiErrorResponse::new(
+                    StatusCode::NOT_FOUND,
+                    ApiError::with_details(
+                        "ACCOUNT_NOT_FOUND",
+                        "The specified account was not found",
+                        serde_json::json!({ "account_id": account_id_string }),
+                    ),
+                ));
+            }
+        },
+        Err(store_error) => {
+            return Err(ApiErrorResponse::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ApiError::with_details(
+                    "EVENT_STORE_ERROR",
+                    "Failed to load account events",
+                    serde_json::json!({ "error": store_error.to_string() }),
+                ),
+            ));
+        }
+    };
 
-    // Mock: Return not found for demonstration
-    let _ = (account_id, amount, transaction_id);
-    Err(ApiErrorResponse::new(
-        StatusCode::NOT_FOUND,
-        ApiError::with_details(
-            "ACCOUNT_NOT_FOUND",
-            "The specified account was not found",
-            serde_json::json!({
-                "account_id": account_id_string
-            }),
-        ),
-    ))
+    // Step 5: Create domain command (pure function)
+    let command = WithdrawCommand::new(account_id, amount, transaction_id);
+
+    // Step 6: Define funding sources (configuration)
+    let funding_sources = vec![FundingSourceType::Balance];
+
+    // Step 8: Execute workflow (pure function)
+    let timestamp = Timestamp::now();
+    let event_result = withdraw(&command, &account, &funding_sources, timestamp);
+
+    let event = match event_result {
+        lambars::control::Either::Right(event) => event,
+        lambars::control::Either::Left(error) => {
+            let (status, api_error) = domain_error_to_api_error(error);
+            return Err(ApiErrorResponse::new(status, api_error));
+        }
+    };
+
+    // Step 9: Persist event to event store (IO)
+    let persist_result = dependencies
+        .event_store()
+        .append_events(
+            &account_id,
+            account.version,
+            vec![AccountEvent::Withdrawn(event.clone())],
+        )
+        .run_async()
+        .await;
+
+    if let Err(store_error) = persist_result {
+        return Err(ApiErrorResponse::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ApiError::with_details(
+                "EVENT_STORE_ERROR",
+                "Failed to persist withdrawal event",
+                serde_json::json!({ "error": store_error.to_string() }),
+            ),
+        ));
+    }
+
+    // Step 10: Invalidate cache (IO)
+    let _ = dependencies
+        .read_model()
+        .invalidate(&account_id)
+        .run_async()
+        .await;
+
+    // Step 11: Transform result to response DTO (pure function)
+    let response = TransactionResponse {
+        transaction_id: event.transaction_id.to_string(),
+        amount: MoneyResponseDto {
+            amount: event.amount.amount().to_string(),
+            currency: event.amount.currency().to_string(),
+        },
+        balance_after: MoneyResponseDto {
+            amount: event.balance_after.amount().to_string(),
+            currency: event.balance_after.currency().to_string(),
+        },
+        timestamp: event.withdrawn_at.to_iso_string(),
+    };
+
+    Ok((StatusCode::CREATED, Json(response)))
 }
 
-/// POST /transfers - Transfer money between accounts.
+/// POST /accounts/{id}/transfer - Transfer money between accounts.
 ///
 /// Transfers the specified amount from one account to another.
 /// The idempotency key ensures duplicate requests are handled safely.
-///
-/// # Request Body
-///
-/// ```json
-/// {
-///     "to_account_id": "01234567-89ab-cdef-0123-456789abcdef",
-///     "amount": {
-///         "amount": "2000",
-///         "currency": "JPY"
-///     },
-///     "idempotency_key": "transfer-789-ghi"
-/// }
-/// ```
-///
-/// Note: The source account is identified from the request path in the full implementation.
-/// For this endpoint, we expect it to be passed as a header or derived from authentication.
-///
-/// # Errors
-///
-/// Returns `ApiErrorResponse` if:
-/// - The account IDs are not valid UUIDs
-/// - The amount or currency is invalid
-/// - The source and destination accounts are the same
-/// - The source or destination account is not found
-/// - The source account has insufficient balance
-/// - The source account is closed or frozen
-///
-/// # Response
-///
-/// - `201 Created` - Transfer successful
-/// - `400 Bad Request` - Invalid request data or insufficient balance
-/// - `404 Not Found` - Source or destination account not found
-/// - `409 Conflict` - Source account is closed or frozen
-///
-/// # Example Response
-///
-/// ```json
-/// {
-///     "transfer_id": "...",
-///     "from_account_id": "...",
-///     "to_account_id": "...",
-///     "amount": {
-///         "amount": "2000",
-///         "currency": "JPY"
-///     },
-///     "from_balance_after": {
-///         "amount": "8000",
-///         "currency": "JPY"
-///     },
-///     "timestamp": "2024-01-15T10:30:00Z"
-/// }
-/// ```
-#[allow(clippy::unused_async)]
-pub async fn transfer(
-    State(_dependencies): State<AppDependencies>,
+pub async fn transfer_handler(
+    State(dependencies): State<AppDependencies>,
     Path(from_account_id_string): Path<String>,
     Json(request): Json<TransferRequest>,
 ) -> Result<(StatusCode, Json<TransferResponse>), ApiErrorResponse> {
@@ -324,10 +337,7 @@ pub async fn transfer(
         lambars::control::Either::Left(error) => return Err(error),
     };
 
-    // Step 3: Create transaction ID from idempotency key (pure function)
-    let transaction_id = TransactionId::from_idempotency_key(&request.idempotency_key);
-
-    // Step 4: Validate that source and destination are different
+    // Step 3: Validate that source and destination are different
     if from_account_id == to_account_id {
         return Err(ApiErrorResponse::new(
             StatusCode::BAD_REQUEST,
@@ -342,71 +352,170 @@ pub async fn transfer(
         ));
     }
 
-    // Step 5: Execute workflow via AsyncIO (would be implemented with dependencies)
-    // For now, return a not found error as we don't have the accounts loaded
+    // Step 4: Create transaction ID from idempotency key (pure function)
+    let transaction_id = TransactionId::from_idempotency_key(&request.idempotency_key);
 
-    // Mock: Return not found for demonstration
-    let _ = (from_account_id, to_account_id, amount, transaction_id);
-    Err(ApiErrorResponse::new(
-        StatusCode::NOT_FOUND,
-        ApiError::with_details(
-            "ACCOUNT_NOT_FOUND",
-            "The source account was not found",
-            serde_json::json!({
-                "account_id": from_account_id_string
-            }),
-        ),
-    ))
+    // Step 5: Load source account from event store and rebuild (IO + pure)
+    // Note: We immediately extract the Account from events to ensure the non-Send
+    // PersistentList is dropped before any subsequent await points.
+    let from_account = match dependencies
+        .event_store()
+        .load_events(&from_account_id)
+        .run_async()
+        .await
+    {
+        Ok(events) => match Account::from_events(&events) {
+            Some(account) => account,
+            None => {
+                return Err(ApiErrorResponse::new(
+                    StatusCode::NOT_FOUND,
+                    ApiError::with_details(
+                        "ACCOUNT_NOT_FOUND",
+                        "The source account was not found",
+                        serde_json::json!({ "account_id": from_account_id_string }),
+                    ),
+                ));
+            }
+        },
+        Err(store_error) => {
+            return Err(ApiErrorResponse::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ApiError::with_details(
+                    "EVENT_STORE_ERROR",
+                    "Failed to load source account events",
+                    serde_json::json!({ "error": store_error.to_string() }),
+                ),
+            ));
+        }
+    };
+
+    // Step 6: Load destination account from event store and rebuild (IO + pure)
+    let to_account = match dependencies
+        .event_store()
+        .load_events(&to_account_id)
+        .run_async()
+        .await
+    {
+        Ok(events) => match Account::from_events(&events) {
+            Some(account) => account,
+            None => {
+                return Err(ApiErrorResponse::new(
+                    StatusCode::NOT_FOUND,
+                    ApiError::with_details(
+                        "ACCOUNT_NOT_FOUND",
+                        "The destination account was not found",
+                        serde_json::json!({ "account_id": request.to_account_id }),
+                    ),
+                ));
+            }
+        },
+        Err(store_error) => {
+            return Err(ApiErrorResponse::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ApiError::with_details(
+                    "EVENT_STORE_ERROR",
+                    "Failed to load destination account events",
+                    serde_json::json!({ "error": store_error.to_string() }),
+                ),
+            ));
+        }
+    };
+
+    // Step 7: Create domain command (pure function)
+    let command = TransferCommand::new(from_account_id, to_account_id, amount, transaction_id);
+
+    // Step 8: Execute workflow (pure function)
+    let timestamp = Timestamp::now();
+    let events_result = transfer(&command, &from_account, &to_account, timestamp);
+
+    let (sent_event, received_event) = match events_result {
+        lambars::control::Either::Right(events) => events,
+        lambars::control::Either::Left(error) => {
+            let (status, api_error) = domain_error_to_api_error(error);
+            return Err(ApiErrorResponse::new(status, api_error));
+        }
+    };
+
+    // Step 9: Persist events to event store (IO)
+    // Note: In a real implementation, this should be transactional
+    let from_persist_result = dependencies
+        .event_store()
+        .append_events(
+            &from_account_id,
+            from_account.version,
+            vec![AccountEvent::TransferSent(sent_event.clone())],
+        )
+        .run_async()
+        .await;
+
+    if let Err(store_error) = from_persist_result {
+        return Err(ApiErrorResponse::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ApiError::with_details(
+                "EVENT_STORE_ERROR",
+                "Failed to persist transfer sent event",
+                serde_json::json!({ "error": store_error.to_string() }),
+            ),
+        ));
+    }
+
+    let to_persist_result = dependencies
+        .event_store()
+        .append_events(
+            &to_account_id,
+            to_account.version,
+            vec![AccountEvent::TransferReceived(received_event.clone())],
+        )
+        .run_async()
+        .await;
+
+    if let Err(store_error) = to_persist_result {
+        return Err(ApiErrorResponse::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ApiError::with_details(
+                "EVENT_STORE_ERROR",
+                "Failed to persist transfer received event",
+                serde_json::json!({ "error": store_error.to_string() }),
+            ),
+        ));
+    }
+
+    // Step 10: Invalidate cache for both accounts (IO)
+    let _ = dependencies
+        .read_model()
+        .invalidate(&from_account_id)
+        .run_async()
+        .await;
+    let _ = dependencies
+        .read_model()
+        .invalidate(&to_account_id)
+        .run_async()
+        .await;
+
+    // Step 11: Transform result to response DTO (pure function)
+    let response = TransferResponse {
+        transfer_id: sent_event.transaction_id.to_string(),
+        from_account_id: sent_event.account_id.to_string(),
+        to_account_id: sent_event.to_account_id.to_string(),
+        amount: MoneyResponseDto {
+            amount: sent_event.amount.amount().to_string(),
+            currency: sent_event.amount.currency().to_string(),
+        },
+        from_balance_after: MoneyResponseDto {
+            amount: sent_event.balance_after.amount().to_string(),
+            currency: sent_event.balance_after.currency().to_string(),
+        },
+        timestamp: sent_event.sent_at.to_iso_string(),
+    };
+
+    Ok((StatusCode::CREATED, Json(response)))
 }
 
 /// GET /accounts/{id}/transactions - Get transaction history.
 ///
 /// Retrieves the transaction history for an account with pagination.
-///
-/// # Path Parameters
-///
-/// - `id` - The account UUID
-///
-/// # Query Parameters
-///
-/// - `page` - Page number (default: 1)
-/// - `page_size` - Items per page (default: 20)
-///
-/// # Errors
-///
-/// Returns `ApiErrorResponse` if:
-/// - The account ID is not a valid UUID
-/// - The account is not found
-///
-/// # Response
-///
-/// - `200 OK` - History retrieved
-/// - `400 Bad Request` - Invalid account ID format
-/// - `404 Not Found` - Account not found
-///
-/// # Example Response
-///
-/// ```json
-/// {
-///     "account_id": "...",
-///     "transactions": [
-///         {
-///             "transaction_id": "...",
-///             "transaction_type": "Deposit",
-///             "amount": {...},
-///             "balance_after": {...},
-///             "counterparty_account_id": null,
-///             "timestamp": "2024-01-15T10:30:00Z"
-///         }
-///     ],
-///     "total": 100,
-///     "page": 1,
-///     "page_size": 20
-/// }
-/// ```
-#[allow(clippy::unused_async)]
 pub async fn get_transactions(
-    State(_dependencies): State<AppDependencies>,
+    State(dependencies): State<AppDependencies>,
     Path(account_id_string): Path<String>,
     Query(params): Query<PaginationParams>,
 ) -> Result<Json<TransactionHistoryResponse>, ApiErrorResponse> {
@@ -425,21 +534,76 @@ pub async fn get_transactions(
     let page = if params.page == 0 { 1 } else { params.page };
     let page_size = params.page_size.clamp(1, 100);
 
-    // Step 3: Query transaction history via AsyncIO (would be implemented with dependencies)
-    // For now, return a not found error as we don't have the account loaded
+    // Step 3: Load events from event store (IO)
+    let events_result = dependencies
+        .event_store()
+        .load_events(&account_id)
+        .run_async()
+        .await;
 
-    // Mock: Return not found for demonstration
-    let _ = (account_id, page, page_size);
-    Err(ApiErrorResponse::new(
-        StatusCode::NOT_FOUND,
-        ApiError::with_details(
-            "ACCOUNT_NOT_FOUND",
-            "The specified account was not found",
-            serde_json::json!({
-                "account_id": account_id_string
-            }),
-        ),
-    ))
+    let events = match events_result {
+        Ok(events) => events,
+        Err(store_error) => {
+            return Err(ApiErrorResponse::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ApiError::with_details(
+                    "EVENT_STORE_ERROR",
+                    "Failed to load account events",
+                    serde_json::json!({ "error": store_error.to_string() }),
+                ),
+            ));
+        }
+    };
+
+    // Step 4: Check if account exists
+    if Account::from_events(&events).is_none() {
+        return Err(ApiErrorResponse::new(
+            StatusCode::NOT_FOUND,
+            ApiError::with_details(
+                "ACCOUNT_NOT_FOUND",
+                "The specified account was not found",
+                serde_json::json!({ "account_id": account_id_string }),
+            ),
+        ));
+    }
+
+    // Step 5: Build transaction history (pure function)
+    // Convert page/page_size to offset/limit for the query
+    let offset = (page - 1) * page_size;
+    let limit = page_size;
+    let query = GetHistoryQuery::new(account_id, offset, limit);
+
+    let history = build_transaction_history(account_id, &events, &query);
+
+    // Step 6: Transform to response DTO (pure function)
+    let transactions: Vec<_> = history
+        .transactions
+        .iter()
+        .map(|record| {
+            crate::api::dto::responses::TransactionRecordDto {
+                transaction_id: record.transaction_id.to_string(),
+                transaction_type: format!("{:?}", record.transaction_type),
+                amount: MoneyResponseDto {
+                    amount: record.amount.amount().to_string(),
+                    currency: record.amount.currency().to_string(),
+                },
+                balance_after: MoneyResponseDto {
+                    amount: record.balance_after.amount().to_string(),
+                    currency: record.balance_after.currency().to_string(),
+                },
+                counterparty_account_id: record.counterparty.map(|id| id.to_string()),
+                timestamp: record.timestamp.to_iso_string(),
+            }
+        })
+        .collect();
+
+    Ok(Json(TransactionHistoryResponse {
+        account_id: account_id.to_string(),
+        transactions,
+        total: history.total,
+        page,
+        page_size,
+    }))
 }
 
 // =============================================================================
@@ -451,7 +615,11 @@ pub async fn get_transactions(
 /// Returns 1 if the input is 0 or negative.
 #[allow(dead_code)]
 const fn normalize_page(page: usize) -> usize {
-    if page == 0 { 1 } else { page }
+    if page == 0 {
+        1
+    } else {
+        page
+    }
 }
 
 /// Clamps the page size to a reasonable range.

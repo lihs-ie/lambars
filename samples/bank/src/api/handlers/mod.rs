@@ -22,4 +22,4 @@ pub mod account;
 pub mod transaction;
 
 pub use account::{create_account, get_account, get_balance};
-pub use transaction::{deposit, get_transactions, transfer, withdraw};
+pub use transaction::{deposit_handler, get_transactions, transfer_handler, withdraw_handler};
