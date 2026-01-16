@@ -27,14 +27,14 @@
 //! enum StateCommand { Get, Put(i32) }
 //!
 //! fn get() -> Freer<StateCommand, i32> {
-//!     Freer::lift_instruction(
+//!     Freer::<StateCommand, ()>::lift_instruction(
 //!         StateCommand::Get,
 //!         |result| *result.downcast::<i32>().expect("Get must return i32")
 //!     )
 //! }
 //!
 //! fn put(value: i32) -> Freer<StateCommand, ()> {
-//!     Freer::lift_instruction(StateCommand::Put(value), |_| ())
+//!     Freer::<StateCommand, ()>::lift_instruction(StateCommand::Put(value), |_| ())
 //! }
 //!
 //! let program = get().flat_map(|x| put(x + 1)).then(get());
@@ -146,14 +146,14 @@ impl<I: 'static, A: 'static> Freer<I, A> {
     /// enum Command { GetValue, SetValue(i32) }
     ///
     /// fn get_value() -> Freer<Command, i32> {
-    ///     Freer::lift_instruction(
+    ///     Freer::<Command, ()>::lift_instruction(
     ///         Command::GetValue,
     ///         |result| *result.downcast::<i32>().expect("GetValue must return i32")
     ///     )
     /// }
     ///
     /// fn set_value(value: i32) -> Freer<Command, ()> {
-    ///     Freer::lift_instruction(Command::SetValue(value), |_| ())
+    ///     Freer::<Command, ()>::lift_instruction(Command::SetValue(value), |_| ())
     /// }
     /// ```
     pub fn lift_instruction<R: 'static>(
@@ -258,7 +258,7 @@ impl<I: 'static, A: 'static> Freer<I, A> {
     /// enum Command { Inc, Dec }
     ///
     /// fn inc() -> Freer<Command, i32> {
-    ///     Freer::lift_instruction(Command::Inc, |r| *r.downcast::<i32>().unwrap())
+    ///     Freer::<Command, ()>::lift_instruction(Command::Inc, |r| *r.downcast::<i32>().unwrap())
     /// }
     ///
     /// let program = inc().flat_map(|x| Freer::pure(x * 2));

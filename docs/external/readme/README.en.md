@@ -12,7 +12,7 @@ lambars brings functional programming abstractions to Rust that are not provided
 
 - **Type Classes**: Functor, Applicative, Monad, Foldable, Traversable, Semigroup, Monoid
 - **Function Composition**: `compose!`, `pipe!`, `pipe_async!`, `partial!`, `curry!`, `eff!`, `for_!`, `for_async!` macros
-- **Control Structures**: Lazy evaluation, Trampoline for stack-safe recursion, Continuation monad
+- **Control Structures**: Lazy evaluation, Trampoline for stack-safe recursion, Continuation monad, Freer monad for DSL construction
 - **Persistent Data Structures**: Immutable Vector, HashMap, HashSet, TreeMap, List with structural sharing
 - **Optics**: Lens, Prism, Iso, Optional, Traversal for immutable data manipulation
 - **Effect System**: Reader, Writer, State monads, IO/AsyncIO monads, and monad transformers
@@ -461,6 +461,45 @@ let cont = Continuation::pure(10)
 
 let result = cont.run(|x| x);
 assert_eq!(result, 21);
+```
+
+#### Freer Monad
+
+For building domain-specific languages (DSLs) with stack-safe interpretation.
+
+```rust
+use lambars::control::Freer;
+use std::any::Any;
+
+// Define instruction types for your DSL
+#[derive(Debug)]
+enum Console {
+    ReadLine,
+    PrintLine(String),
+}
+
+// Build computations using instructions
+let program: Freer<Console, String> = Freer::lift_instruction(
+    Console::PrintLine("Enter name:".to_string()),
+    |_| (),
+)
+.then(Freer::lift_instruction(
+    Console::ReadLine,
+    |result: Box<dyn Any>| *result.downcast::<String>().unwrap(),
+))
+.map(|name| format!("Hello, {}!", name));
+
+// Interpret with a handler
+let result = program.interpret(|instruction| -> Box<dyn Any> {
+    match instruction {
+        Console::ReadLine => Box::new("Alice".to_string()),
+        Console::PrintLine(msg) => {
+            println!("{}", msg);
+            Box::new(())
+        }
+    }
+});
+assert_eq!(result, "Hello, Alice!");
 ```
 
 ### Persistent Data Structures (`persistent`)

@@ -14,7 +14,7 @@ lambars は、Rust の標準ライブラリでは提供されていない関数�
 
 - **型クラス**: Functor, Applicative, Monad, Foldable, Traversable, Semigroup, Monoid
 - **関数合成**: `compose!`, `pipe!`, `pipe_async!`, `partial!`, `curry!`, `eff!`, `for_!`, `for_async!` マクロ
-- **制御構造**: 遅延評価、スタック安全な再帰のための Trampoline、継続モナド
+- **制御構造**: 遅延評価、スタック安全な再帰のための Trampoline、継続モナド、DSL 構築のための Freer モナド
 - **永続データ構造**: 構造共有による不変 Vector, HashMap, HashSet, TreeMap, List, Deque
 - **Optics**: 不変データ操作のための Lens, Prism, Iso, Optional, Traversal
 - **エフェクトシステム**: Reader, Writer, State モナド、IO/AsyncIO モナド、モナド変換子
@@ -427,6 +427,45 @@ let cont = Continuation::pure(10)
 
 let result = cont.run(|x| x);
 assert_eq!(result, 21);
+```
+
+#### Freer モナド
+
+スタック安全な解釈を持つドメイン固有言語 (DSL) 構築用。
+
+```rust
+use lambars::control::Freer;
+use std::any::Any;
+
+// DSL の命令型を定義
+#[derive(Debug)]
+enum Console {
+    ReadLine,
+    PrintLine(String),
+}
+
+// 命令を使用して計算を構築
+let program: Freer<Console, String> = Freer::lift_instruction(
+    Console::PrintLine("Enter name:".to_string()),
+    |_| (),
+)
+.then(Freer::lift_instruction(
+    Console::ReadLine,
+    |result: Box<dyn Any>| *result.downcast::<String>().unwrap(),
+))
+.map(|name| format!("Hello, {}!", name));
+
+// ハンドラで解釈を実行
+let result = program.interpret(|instruction| -> Box<dyn Any> {
+    match instruction {
+        Console::ReadLine => Box::new("Alice".to_string()),
+        Console::PrintLine(msg) => {
+            println!("{}", msg);
+            Box::new(())
+        }
+    }
+});
+assert_eq!(result, "Hello, Alice!");
 ```
 
 ### 永続データ構造 (`persistent`)
