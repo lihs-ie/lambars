@@ -57,9 +57,9 @@ fn benchmark_option_alt_vs_or(criterion: &mut Criterion) {
             |bencher, &length| {
                 bencher.iter(|| {
                     let mut result: Option<i32> = None;
-                    for index in 0..length {
-                        result = result.alt(if index == length - 1 {
-                            Some(index)
+                    for iteration in 0..length {
+                        result = result.alt(if iteration == length - 1 {
+                            Some(iteration)
                         } else {
                             None
                         });
@@ -75,9 +75,9 @@ fn benchmark_option_alt_vs_or(criterion: &mut Criterion) {
             |bencher, &length| {
                 bencher.iter(|| {
                     let mut result: Option<i32> = None;
-                    for index in 0..length {
-                        result = result.or(if index == length - 1 {
-                            Some(index)
+                    for iteration in 0..length {
+                        result = result.or(if iteration == length - 1 {
+                            Some(iteration)
                         } else {
                             None
                         });
@@ -293,7 +293,7 @@ fn benchmark_guard(criterion: &mut Criterion) {
             |bencher, &size| {
                 bencher.iter(|| {
                     let results: Vec<Option<i32>> = (0..size)
-                        .map(|index| <Option<()>>::guard(index % 2 == 0).fmap(move |()| index))
+                        .map(|number| <Option<()>>::guard(number % 2 == 0).fmap(move |()| number))
                         .collect();
                     black_box(results)
                 });
@@ -306,7 +306,7 @@ fn benchmark_guard(criterion: &mut Criterion) {
             |bencher, &size| {
                 bencher.iter(|| {
                     let results: Vec<Option<i32>> = (0..size)
-                        .map(|index| if index % 2 == 0 { Some(index) } else { None })
+                        .map(|number| if number % 2 == 0 { Some(number) } else { None })
                         .collect();
                     black_box(results)
                 });
@@ -451,7 +451,7 @@ fn benchmark_parser_simulation(criterion: &mut Criterion) {
     // Scaling test with more keywords
     for keyword_count in [10, 50, 100] {
         let keywords: Vec<String> = (0..keyword_count)
-            .map(|index| format!("kw{}", index))
+            .map(|keyword_number| format!("kw{}", keyword_number))
             .collect();
         let input = "kw50 rest"; // Middle keyword
 

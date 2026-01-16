@@ -5,7 +5,7 @@
 #   失敗可能な計算の選択・組み合わせを可能にする。
 #
 # 設計方針:
-#   1. Applicative を継承し、empty と or_else を提供
+#   1. Applicative を継承し、empty と alt を提供
 #   2. Applicative 上のモノイド則を満たす
 #   3. パーサーコンビネータ・非決定的計算での実用性を重視
 #   4. Rust の型システム制約を考慮した現実的な設計
@@ -23,7 +23,7 @@ description: |
 
   これにより以下が可能になる:
   - 失敗を表現する単位元 (empty)
-  - 計算の選択・フォールバック (or_else / <|>)
+  - 計算の選択・フォールバック (alt / <|>)
   - 複数の計算候補からの選択
 
   典型的な使用例:
@@ -73,7 +73,7 @@ background:
 
     - name: "Rust std Option::or / Result::or"
       description: |
-        標準ライブラリの or() メソッドは Alternative の or_else に相当する操作を提供するが、
+        標準ライブラリの or() メソッドは Alternative の alt に相当する操作を提供するが、
         トレイトとして抽象化されていない。
 
 # 要件一覧
@@ -90,13 +90,13 @@ requirements:
       - TypeConstructor による HKT エミュレーション
       - Applicative トレイトの継承
       - empty は関連関数として定義（Self::WithType<A> を返す）
-      - or_else はメソッドとして定義
+      - alt はメソッドとして定義
 
     methods:
       - name: "empty"
         signature: "fn empty<A>() -> Self::WithType<A> where A: 'static"
         description: |
-          or_else 演算の単位元（失敗を表す値）を返す。
+          alt 演算の単位元（失敗を表す値）を返す。
 
           - Option では None
           - Vec では空のベクター
@@ -115,8 +115,8 @@ requirements:
               let empty: Vec<i32> = <Vec<()>>::empty();
               assert!(empty.is_empty());
 
-      - name: "or_else"
-        signature: "fn or_else(self, alternative: Self) -> Self"
+      - name: "alt"
+        signature: "fn alt(self, alternative: Self) -> Self"
         description: |
           2つの計算を結合する選択演算子。
           self が「成功」なら self を返し、「失敗」なら alternative を返す。
@@ -129,29 +129,29 @@ requirements:
             code: |
               let first: Option<i32> = None;
               let second: Option<i32> = Some(42);
-              assert_eq!(first.or_else(second), Some(42));
+              assert_eq!(first.alt(second), Some(42));
 
               let first = Some(1);
               let second = Some(2);
-              assert_eq!(first.or_else(second), Some(1));
+              assert_eq!(first.alt(second), Some(1));
           - description: "Vec での結合"
             code: |
               let first = vec![1, 2];
               let second = vec![3, 4];
-              assert_eq!(first.or_else(second), vec![1, 2, 3, 4]);
+              assert_eq!(first.alt(second), vec![1, 2, 3, 4]);
 
     implementations:
       - type: "Option<A>"
         description: |
           Option は最も基本的な Alternative インスタンス。
           - empty: None
-          - or_else: self が Some なら self、None なら alternative
+          - alt: self が Some なら self、None なら alternative
 
       - type: "Vec<A>"
         description: |
           Vec は非決定的計算を表現する Alternative インスタンス。
           - empty: 空のベクター
-          - or_else: 2つのベクターを連結
+          - alt: 2つのベクターを連結
 
           注: Vec の Applicative 実装同様、Clone が必要な場合がある。
           Vec 専用の AlternativeVec トレイトとして提供する可能性を検討。
@@ -159,34 +159,34 @@ requirements:
     laws:
       - name: "左単位元則 (Left Identity)"
         description: |
-          empty と任意の値を or_else で結合すると、その値が返る。
-        equation: "empty.or_else(x) == x"
+          empty と任意の値を alt で結合すると、その値が返る。
+        equation: "empty.alt(x) == x"
         property_test: |
           proptest! {
               #[test]
               fn prop_alternative_left_identity(value in any::<Option<i32>>()) {
                   let empty: Option<i32> = <Option<()>>::empty();
-                  prop_assert_eq!(empty.or_else(value), value);
+                  prop_assert_eq!(empty.alt(value), value);
               }
           }
 
       - name: "右単位元則 (Right Identity)"
         description: |
-          任意の値と empty を or_else で結合すると、その値が返る。
-        equation: "x.or_else(empty) == x"
+          任意の値と empty を alt で結合すると、その値が返る。
+        equation: "x.alt(empty) == x"
         property_test: |
           proptest! {
               #[test]
               fn prop_alternative_right_identity(value in any::<Option<i32>>()) {
                   let empty: Option<i32> = <Option<()>>::empty();
-                  prop_assert_eq!(value.or_else(empty), value);
+                  prop_assert_eq!(value.alt(empty), value);
               }
           }
 
       - name: "結合則 (Associativity)"
         description: |
-          or_else 演算は結合的である。
-        equation: "(x.or_else(y)).or_else(z) == x.or_else(y.or_else(z))"
+          alt 演算は結合的である。
+        equation: "(x.alt(y)).alt(z) == x.alt(y.alt(z))"
         property_test: |
           proptest! {
               #[test]
@@ -195,8 +195,8 @@ requirements:
                   y in any::<Option<i32>>(),
                   z in any::<Option<i32>>()
               ) {
-                  let left = x.or_else(y).or_else(z);
-                  let right = x.or_else(y.or_else(z));
+                  let left = x.alt(y).alt(z);
+                  let right = x.alt(y.alt(z));
                   prop_assert_eq!(left, right);
               }
           }
@@ -230,7 +230,7 @@ requirements:
           計算を Option でラップし、失敗を None として扱う。
           Haskell の optional に相当。
 
-          optional(p) = p.fmap(Some).or_else(pure(None))
+          optional(p) = p.fmap(Some).alt(pure(None))
 
           注: Self::Inner: 'static は pure(None) の型推論に必要。
         examples:
@@ -305,10 +305,10 @@ requirements:
 
       - name: "左分配則 (Left Distributivity)"
         description: |
-          fmap は or_else に対して左から分配する。
+          fmap は alt に対して左から分配する。
 
-          これは or_else が構造を保存することを意味する。
-        equation: "(fa.or_else(fb)).fmap(f) == fa.fmap(f).or_else(fb.fmap(f))"
+          これは alt が構造を保存することを意味する。
+        equation: "(fa.alt(fb)).fmap(f) == fa.fmap(f).alt(fb.fmap(f))"
         property_test: |
           proptest! {
               #[test]
@@ -317,8 +317,8 @@ requirements:
                   fb in any::<Option<i32>>()
               ) {
                   let function = |n: i32| n.wrapping_mul(2);
-                  let left = fa.or_else(fb).fmap(function);
-                  let right = fa.fmap(function).or_else(fb.fmap(function));
+                  let left = fa.alt(fb).fmap(function);
+                  let right = fa.fmap(function).alt(fb.fmap(function));
                   prop_assert_eq!(left, right);
               }
           }
@@ -356,20 +356,20 @@ requirements:
 
       設計:
       - AlternativeVec トレイトとして提供
-      - or_else は Vec の連結（extend）として実装
+      - alt は Vec の連結（extend）として実装
 
       Vec の Alternative セマンティクス:
       - Vec の Alternative は「成功/失敗の選択」ではなく「候補の結合（非決定的計算の和集合）」
       - empty は候補なし（空集合）
-      - or_else は両方の候補を結合（和集合）
+      - alt は両方の候補を結合（和集合）
       - これは Option の「最初の成功を取る」セマンティクスとは異なる点に注意
 
 # 非機能要件
 non_functional_requirements:
   performance:
-    - "or_else は遅延評価でない点に注意（Rust の性質上、引数は事前に評価される）"
-    - "Vec の or_else は O(n + m) の時間計算量（連結操作）"
-    - "Option の or_else は O(1) の時間計算量"
+    - "alt は遅延評価でない点に注意（Rust の性質上、引数は事前に評価される）"
+    - "Vec の alt は O(n + m) の時間計算量（連結操作）"
+    - "Option の alt は O(1) の時間計算量"
 
   compatibility:
     - "既存の Applicative トレイトとの互換性を維持"
@@ -403,14 +403,14 @@ future_extensions:
       3. many1（1回以上）のような安全なバリアントの提供を検討する必要がある
 
   - id: fut_002
-    name: "遅延評価版 or_else_lazy"
+    name: "遅延評価版 alt_lazy"
     description: |
-      or_else の遅延評価版。代替値を遅延評価するクロージャとして受け取る。
+      alt の遅延評価版。代替値を遅延評価するクロージャとして受け取る。
 
-      fn or_else_lazy<F>(self, f: F) -> Self where F: FnOnce() -> Self
+      fn alt_lazy<F>(self, f: F) -> Self where F: FnOnce() -> Self
     rationale: |
       パフォーマンス最適化のための将来の拡張として検討。
-      現時点では標準的な or_else を優先して実装。
+      現時点では標準的な alt を優先して実装。
 
   - id: fut_003
     name: "MonadPlus との統合"
@@ -431,7 +431,7 @@ future_extensions:
       Result<T, E> where E: Default または E: Monoid に対する Alternative 実装。
 
       - empty: Err(E::default()) または Err(E::empty())
-      - or_else: 最初の成功を返す、エラーは結合
+      - alt: 最初の成功を返す、エラーは結合
     rationale: |
       E に対する制約が強すぎるため、汎用的な Alternative としては不適切。
       別トレイト（ResultAlternative など）として提供を検討。
