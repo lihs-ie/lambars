@@ -23,7 +23,7 @@
 //!
 //! let account_id = AccountId::generate();
 //! let timestamp = Timestamp::now();
-//! let result = open_account(command, account_id, timestamp);
+//! let result = open_account(&command, account_id, timestamp);
 //! // result is Either<DomainError, AccountOpened>
 //! ```
 
@@ -181,16 +181,16 @@ pub(crate) fn create_account_opened_event(
 ///
 /// let account_id = AccountId::generate();
 /// let timestamp = Timestamp::now();
-/// let result = open_account(command, account_id, timestamp);
+/// let result = open_account(&command, account_id, timestamp);
 ///
 /// assert!(result.is_right());
 /// ```
 pub fn open_account(
-    command: OpenAccountCommand,
+    command: &OpenAccountCommand,
     account_id: AccountId,
     timestamp: Timestamp,
 ) -> DomainResult<AccountOpened> {
-    validate_open_account(&command)
+    validate_open_account(command)
         .map_right(|validated| create_account_opened_event(validated, account_id, timestamp))
 }
 
@@ -417,7 +417,7 @@ mod tests {
         let timestamp = Timestamp::now();
 
         // When: we execute the workflow
-        let result = open_account(command, account_id, timestamp);
+        let result = open_account(&command, account_id, timestamp);
 
         // Then: we get an AccountOpened event
         assert!(result.is_right());
@@ -436,7 +436,7 @@ mod tests {
         let timestamp = Timestamp::now();
 
         // When: we execute the workflow
-        let result = open_account(command, account_id, timestamp);
+        let result = open_account(&command, account_id, timestamp);
 
         // Then: we get an error
         assert!(result.is_left());
@@ -452,7 +452,7 @@ mod tests {
         let timestamp = Timestamp::now();
 
         // When: we execute the workflow
-        let result = open_account(command, account_id, timestamp);
+        let result = open_account(&command, account_id, timestamp);
 
         // Then: we get an error
         assert!(result.is_left());
@@ -468,7 +468,7 @@ mod tests {
         let timestamp = Timestamp::now();
 
         // When: we execute the workflow
-        let result = open_account(command, account_id, timestamp);
+        let result = open_account(&command, account_id, timestamp);
 
         // Then: we get an AccountOpened event
         assert!(result.is_right());
@@ -485,8 +485,8 @@ mod tests {
         let timestamp = Timestamp::now();
 
         // When: we execute the workflow twice with the same inputs
-        let result1 = open_account(command.clone(), account_id, timestamp);
-        let result2 = open_account(command, account_id, timestamp);
+        let result1 = open_account(&command, account_id, timestamp);
+        let result2 = open_account(&command, account_id, timestamp);
 
         // Then: both results are structurally equal (except event_id which is always unique)
         assert!(result1.is_right());

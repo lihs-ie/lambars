@@ -43,7 +43,7 @@
 //! );
 //!
 //! let timestamp = Timestamp::now();
-//! let result = transfer(command, &from_account, &to_account, timestamp);
+//! let result = transfer(&command, &from_account, &to_account, timestamp);
 //! // result is Either<DomainError, (TransferSent, TransferReceived)>
 //! ```
 
@@ -283,17 +283,17 @@ pub(crate) fn create_transfer_events(
 /// );
 ///
 /// let timestamp = Timestamp::now();
-/// let result = transfer(command, &from_account, &to_account, timestamp);
+/// let result = transfer(&command, &from_account, &to_account, timestamp);
 ///
 /// assert!(result.is_right());
 /// ```
 pub fn transfer(
-    command: TransferCommand,
+    command: &TransferCommand,
     from_account: &Account,
     to_account: &Account,
     timestamp: Timestamp,
 ) -> DomainResult<(TransferSent, TransferReceived)> {
-    validate_transfer(&command, from_account, to_account)
+    validate_transfer(command, from_account, to_account)
         .map_right(|validated| create_transfer_events(validated, timestamp))
 }
 
@@ -746,7 +746,7 @@ mod tests {
         let timestamp = Timestamp::now();
 
         // When: we execute the workflow
-        let result = transfer(command, &from_account, &to_account, timestamp);
+        let result = transfer(&command, &from_account, &to_account, timestamp);
 
         // Then: we get both events
         assert!(result.is_right());
@@ -776,7 +776,7 @@ mod tests {
         let timestamp = Timestamp::now();
 
         // When: we execute the workflow
-        let result = transfer(command, &account, &account, timestamp);
+        let result = transfer(&command, &account, &account, timestamp);
 
         // Then: we get an error
         assert!(result.is_left());
@@ -794,7 +794,7 @@ mod tests {
         let timestamp = Timestamp::now();
 
         // When: we execute the workflow
-        let result = transfer(command, &from_account, &to_account, timestamp);
+        let result = transfer(&command, &from_account, &to_account, timestamp);
 
         // Then: we get an error
         assert!(result.is_left());
@@ -815,7 +815,7 @@ mod tests {
         let timestamp = Timestamp::now();
 
         // When: we execute the workflow
-        let result = transfer(command, &from_account, &to_account, timestamp);
+        let result = transfer(&command, &from_account, &to_account, timestamp);
 
         // Then: we get an error
         assert!(result.is_left());
@@ -837,7 +837,7 @@ mod tests {
         let timestamp = Timestamp::now();
 
         // When: we execute the workflow
-        let result = transfer(command, &from_account, &to_account, timestamp);
+        let result = transfer(&command, &from_account, &to_account, timestamp);
 
         // Then: we get an error
         assert!(result.is_left());
@@ -859,7 +859,7 @@ mod tests {
         let timestamp = Timestamp::now();
 
         // When: we execute the workflow
-        let result = transfer(command, &from_account, &to_account, timestamp);
+        let result = transfer(&command, &from_account, &to_account, timestamp);
 
         // Then: we get an error
         assert!(result.is_left());
@@ -881,7 +881,7 @@ mod tests {
         let timestamp = Timestamp::now();
 
         // When: we execute the workflow
-        let result = transfer(command, &from_account, &to_account, timestamp);
+        let result = transfer(&command, &from_account, &to_account, timestamp);
 
         // Then: we get an error
         assert!(result.is_left());
@@ -903,7 +903,7 @@ mod tests {
         let timestamp = Timestamp::now();
 
         // When: we execute the workflow
-        let result = transfer(command, &from_account, &to_account, timestamp);
+        let result = transfer(&command, &from_account, &to_account, timestamp);
 
         // Then: we get both events
         assert!(result.is_right());
@@ -922,7 +922,7 @@ mod tests {
         let timestamp = Timestamp::now();
 
         // When: we execute the workflow
-        let result = transfer(command, &from_account, &to_account, timestamp);
+        let result = transfer(&command, &from_account, &to_account, timestamp);
 
         // Then: we get both events with correct balances
         assert!(result.is_right());
@@ -944,7 +944,7 @@ mod tests {
         let timestamp = Timestamp::now();
 
         // When: we execute the workflow
-        let result = transfer(command, &from_account, &to_account, timestamp);
+        let result = transfer(&command, &from_account, &to_account, timestamp);
 
         // Then: both events share the same transaction ID
         assert!(result.is_right());
@@ -965,8 +965,8 @@ mod tests {
         let timestamp = Timestamp::now();
 
         // When: we execute the workflow twice with the same inputs
-        let result1 = transfer(command.clone(), &from_account, &to_account, timestamp);
-        let result2 = transfer(command, &from_account, &to_account, timestamp);
+        let result1 = transfer(&command, &from_account, &to_account, timestamp);
+        let result2 = transfer(&command, &from_account, &to_account, timestamp);
 
         // Then: both results are structurally equal (except event_ids)
         assert!(result1.is_right());

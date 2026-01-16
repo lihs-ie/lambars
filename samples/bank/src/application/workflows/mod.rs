@@ -33,7 +33,7 @@ pub mod withdraw;
 pub use deposit::deposit;
 pub use open_account::open_account;
 pub use transfer::transfer;
-pub use withdraw::{withdraw, FundingSourceType};
+pub use withdraw::{FundingSourceType, withdraw};
 
 // Re-export validated types for advanced use cases
 pub use deposit::ValidatedDeposit;
