@@ -18,6 +18,23 @@
 //!
 //! - `Either` for error handling
 //! - `Semigroup` and `Monoid` for composing values (Money)
+//! - `Trampoline` for stack-safe event replay
+//! - `PersistentList` for immutable event sequences
 //! - Smart constructors for validation
+//!
+//! # Workflow Pattern
+//!
+//! Workflows are pure functions that compose validation, business logic,
+//! and event generation:
+//!
+//! ```text
+//! Command → Validate → Transform → Event
+//! ```
+//!
+//! Each step is a pure function:
+//! - Errors propagate using `Either<DomainError, T>`
+//! - No side effects in core logic
+//! - I/O is isolated at the boundaries
 
+pub mod application;
 pub mod domain;
