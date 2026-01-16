@@ -5,6 +5,7 @@
 //!
 //! - [`Functor`]: Mapping over container values
 //! - [`FunctorMut`]: Mapping with mutable functions for multi-element containers
+//! - [`Bifunctor`]: Mapping over two type parameters
 //! - [`Applicative`]: Applying functions within containers
 //! - [`Monad`]: Sequencing computations with dependency
 //! - [`Flatten`]: Flattening nested monadic structures
@@ -82,6 +83,7 @@
 //! ```
 
 mod applicative;
+mod bifunctor;
 mod foldable;
 mod functor;
 mod higher;
@@ -93,6 +95,7 @@ mod traversable;
 mod wrappers;
 
 pub use applicative::{Applicative, ApplicativeVec};
+pub use bifunctor::Bifunctor;
 pub use foldable::Foldable;
 pub use functor::{Functor, FunctorMut};
 pub use higher::TypeConstructor;

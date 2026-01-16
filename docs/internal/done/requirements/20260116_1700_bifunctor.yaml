@@ -1,0 +1,1515 @@
+# Bifunctor 型クラス要件定義
+#
+# 概要:
+#   2つの型パラメータを持つ型コンストラクタに対する Functor の一般化。
+#   両方の型パラメータを個別または同時に変換するための型クラスを提供する。
+#
+# 設計方針:
+#   1. Haskell Data.Bifunctor および Scala cats Bifunctor との整合性を維持
+#   2. 既存の Functor トレイトとの設計一貫性を確保
+#   3. Either<L, R>、Result<T, E>、タプル (A, B) への実装を提供
+#   4. Bifunctor 則（Identity、Composition）を満たすことを保証
+#
+# 参照:
+#   - Haskell Data.Bifunctor: https://hackage.haskell.org/package/base/docs/Data-Bifunctor.html
+#   - Scala cats Bifunctor: https://typelevel.org/cats/typeclasses/bifunctor.html
+#   - src/typeclass/functor.rs: Functor トレイトの設計パターン
+#   - src/control/either.rs: Either の bimap メソッド（既存実装）
+
+version: "1.0.0"
+name: "Bifunctor"
+description: |
+  Bifunctor は、2つの型パラメータを持つ型コンストラクタに対する Functor の一般化である。
+
+  ## 概念
+
+  Functor が単一の型パラメータ `F<A>` に対して `fmap: (A -> B) -> F<A> -> F<B>` を提供するのに対し、
+  Bifunctor は2つの型パラメータ `F<A, B>` に対して以下を提供する:
+
+  - `bimap`: 両方の型パラメータを同時に変換
+  - `first`: 最初の型パラメータのみを変換
+  - `second`: 2番目の型パラメータのみを変換
+
+  ## 用途
+
+  - エラー型と成功型を両方変換できる Result/Either の操作
+  - タプルの両要素を変換
+  - 2つの異なる型を保持するデータ構造の汎用的な変換
+
+  ## 既存コードとの関係
+
+  - `Either<L, R>`: 既に `bimap`, `map_left`, `map_right` メソッドを実装済み
+  - `Result<T, E>`: Functor は成功値（T）のみを対象とするが、Bifunctor により E も変換可能に
+  - `Functor`: Bifunctor の `second` は Functor の `fmap` と同等（Right-biased な型の場合）
+
+# 背景・動機
+background:
+  problem: |
+    ## 現状の課題
+
+    1. **Result<T, E> のエラー型変換が不便**:
+       現在の Functor 実装は Result の成功値（T）のみを対象とする。
+       エラー型（E）を変換するには `map_err` を使う必要があるが、
+       これは型クラスベースの抽象化ではない。
+
+       ```rust
+       // 現在: 特定の型に依存した操作
+       let result: Result<i32, String> = Ok(42);
+       let mapped_err = result.map_err(|e| e.len());
+
+       // 理想: 型クラスベースの統一された操作
+       // Note: Result<T, E> は Bifunctor<E, T> として実装
+       //       first = エラー変換, second = 成功変換
+       let mapped = result.bimap(|e| e.len(), |x| x * 2);
+       ```
+
+    2. **Either<L, R> の bimap が型クラスとして抽象化されていない**:
+       Either には bimap メソッドが実装済みだが、トレイトとして定義されていないため、
+       ジェネリックなコードで Bifunctor として扱えない。
+
+    3. **タプルの両要素変換が統一されていない**:
+       (A, B) の両方の型を変換する統一的な方法がない。
+
+  motivation: |
+    ## 動機
+
+    1. **型クラスベースの抽象化**:
+       - 異なる Bifunctor インスタンス間で統一された操作を提供
+       - ジェネリックプログラミングにおける柔軟性向上
+
+    2. **関数型プログラミングパターンの完成度**:
+       - Haskell / Scala の標準ライブラリとの対応
+       - lambars の typeclass モジュールの機能拡充
+
+    3. **エラー処理の改善**:
+       - Result/Either のエラー型変換を型クラスとして表現
+       - map と map_err を統一的に扱う
+
+  prior_art:
+    - name: "Data.Bifunctor (Haskell)"
+      description: |
+        Haskell 標準ライブラリの Bifunctor 型クラス。
+        - class Bifunctor p where
+            bimap :: (a -> b) -> (c -> d) -> p a c -> p b d
+            first :: (a -> b) -> p a c -> p b c
+            second :: (b -> c) -> p a b -> p a c
+        - インスタンス: Either, (,), Const, Tagged など
+
+    - name: "cats Bifunctor (Scala)"
+      description: |
+        Scala cats ライブラリの Bifunctor 型クラス。
+        - trait Bifunctor[F[_, _]] {
+            def bimap[A, B, C, D](fab: F[A, B])(f: A => C, g: B => D): F[C, D]
+            def leftMap[A, B, C](fab: F[A, B])(f: A => C): F[C, B]
+            def rightMap[A, B, C](fab: F[A, B])(g: B => C): F[A, C]
+          }
+        - インスタンス: Either, Tuple2, Validated など
+
+    - name: "既存の lambars 実装"
+      description: |
+        - Either<L, R>: bimap, map_left, map_right メソッド（src/control/either.rs）
+        - Functor: fmap, fmap_ref, replace, void（src/typeclass/functor.rs）
+
+# 理論的背景
+theoretical_background:
+  bifunctor_theory:
+    description: |
+      ## Bifunctor の理論
+
+      Bifunctor は圏論における二変関手（bifunctor）の概念に基づく。
+      積圏 C x D から圏 E への関手であり、両方の引数に対して共変である。
+
+      ### 定義
+
+      型クラスとしての Bifunctor は以下のメソッドを持つ:
+
+      ```
+      bimap  :: (a -> b) -> (c -> d) -> p a c -> p b d
+      first  :: (a -> b) -> p a c -> p b c
+      second :: (c -> d) -> p a c -> p a d
+      ```
+
+      ### 最小定義
+
+      bimap のみ、または first と second の両方を定義すればよい:
+
+      - bimap を定義した場合:
+        - first f = bimap f id
+        - second g = bimap id g
+
+      - first と second を定義した場合:
+        - bimap f g = first f . second g
+
+  bifunctor_laws:
+    description: |
+      ## Bifunctor 法則
+
+      全ての Bifunctor インスタンスは以下の法則を満たす必要がある。
+
+      ### 前提条件: 同型コンテナ制約
+
+      法則の検証には、変換後も同じコンテナ型であること（`Target<A, B> = Self`）が前提となる。
+      これは、恒等関数での変換結果が元の値と比較可能である必要があるためである。
+
+      ```rust
+      // 制約: Target<A, B> が Self と同型であること
+      where Self: Bifunctor<A, B, Target<A, B> = Self>
+      ```
+
+      この制約は実装上暗黙に満たされる（Either<A, B> の Target<A, B> = Either<A, B>）。
+
+      ### 1. Identity 法則（恒等法則）
+
+      恒等関数で bimap しても値は変わらない:
+
+      ```
+      bimap id id == id
+      ```
+
+      これは以下と同等:
+      ```
+      first id == id
+      second id == id
+      ```
+
+      ### 2. Composition 法則（合成法則）
+
+      関数合成と bimap は交換可能:
+
+      ```
+      bimap (f . g) (h . i) == bimap f h . bimap g i
+      ```
+
+      これは以下と同等:
+      ```
+      first (f . g) == first f . first g
+      second (f . g) == second f . second g
+      ```
+
+      ### 3. first/second 整合性法則
+
+      bimap は first と second の合成と等価:
+
+      ```
+      bimap f g == first f . second g
+      bimap f g == second g . first f
+      ```
+
+      ### 法則の意義
+
+      - **参照透過性の保証**: 同じ入力に対して常に同じ出力
+      - **最適化の可能性**: 法則に基づいた等価変換が可能
+      - **予測可能な動作**: ユーザーの期待通りの振る舞い
+
+# 設計原則
+design_principles:
+  trait_design:
+    description: |
+      ## トレイト設計
+
+      既存の Functor トレイトとの設計一貫性を維持しつつ、
+      2つの型パラメータに対応した設計とする。
+
+      ### アプローチ
+
+      1. **TypeConstructor2 トレイトは導入しない**:
+         HKT エミュレーションの複雑さを避けるため、
+         Bifunctor は独立したトレイトとして定義する。
+         将来的に必要になった場合に TypeConstructor2 を検討する。
+
+      2. **メソッドシグネチャ**:
+         Functor と同様に、所有権を取得して新しい値を返す設計:
+
+         ```rust
+         pub trait Bifunctor<A, B> {
+             type Target<C, D>;
+
+             fn bimap<C, D, F, G>(self, f: F, g: G) -> Self::Target<C, D>
+             where
+                 F: FnOnce(A) -> C,
+                 G: FnOnce(B) -> D;
+
+             fn first<C, F>(self, f: F) -> Self::Target<C, B>
+             where
+                 F: FnOnce(A) -> C,
+                 Self: Sized,
+             {
+                 self.bimap(f, |b| b)
+             }
+
+             fn second<D, G>(self, g: G) -> Self::Target<A, D>
+             where
+                 G: FnOnce(B) -> D,
+                 Self: Sized,
+             {
+                 self.bimap(|a| a, g)
+             }
+         }
+         ```
+
+      3. **参照版メソッド**:
+         Functor の fmap_ref と同様に、参照を取るバージョンも提供:
+
+         ```rust
+         fn bimap_ref<C, D, F, G>(&self, f: F, g: G) -> Self::Target<C, D>
+         where
+             F: FnOnce(&A) -> C,
+             G: FnOnce(&B) -> D;
+
+         fn first_ref<C, F>(&self, f: F) -> Self::Target<C, B>
+         where
+             B: Clone,
+             F: FnOnce(&A) -> C;
+
+         fn second_ref<D, G>(&self, g: G) -> Self::Target<A, D>
+         where
+             A: Clone,
+             G: FnOnce(&B) -> D;
+         ```
+
+  gat_limitations:
+    description: |
+      ## GAT（Generic Associated Types）によるトレイトオブジェクト不可の制約
+
+      ### 設計の背景
+
+      Bifunctor トレイトは `Target<C, D>` という GAT を使用している:
+
+      ```rust
+      pub trait Bifunctor<A, B> {
+          type Target<C, D>;  // GAT
+          // ...
+      }
+      ```
+
+      ### 制約: トレイトオブジェクト化不可
+
+      GAT を持つトレイトは object-safe ではないため、
+      `dyn Bifunctor<A, B>` としてトレイトオブジェクト化できない。
+
+      ```rust
+      // コンパイルエラー: the trait `Bifunctor` cannot be made into an object
+      fn process(bf: &dyn Bifunctor<i32, String>) { ... }
+
+      // OK: ジェネリクスを使用
+      fn process<F: Bifunctor<i32, String>>(bf: F) { ... }
+      ```
+
+      ### 既存 Functor との使い分け
+
+      | 観点                   | Functor                          | Bifunctor                        |
+      |------------------------|----------------------------------|----------------------------------|
+      | 型パラメータ数         | 1つ (`F<A>`)                     | 2つ (`F<A, B>`)                  |
+      | GAT 使用               | あり (`WithType<B>`)             | あり (`Target<C, D>`)            |
+      | トレイトオブジェクト   | 不可                             | 不可                             |
+      | 主な用途               | コンテナの値変換                 | 2つの型を持つ構造体の両方を変換  |
+      | 対象型の例             | `Option<A>`, `Vec<A>`, `Box<A>`  | `Either<L, R>`, `Result<T, E>`, `(A, B)` |
+
+      ### 使い分けのガイドライン
+
+      1. **単一の型パラメータのみ変換する場合**: Functor を使用
+         ```rust
+         // Result の成功値のみを変換
+         result.fmap(|x| x * 2)
+         ```
+
+      2. **両方の型パラメータを変換する可能性がある場合**: Bifunctor を使用
+         ```rust
+         // Result のエラー型と成功型の両方を変換
+         result.bimap(|e| e.to_string(), |x| x * 2)
+         ```
+
+      3. **ジェネリックなコードでの抽象化**:
+         - Functor: 単一の「中身」を持つコンテナの抽象化
+         - Bifunctor: 2つの異なる「中身」を持つ構造体の抽象化
+
+      ### 影響と対処
+
+      トレイトオブジェクト化できない制約は、以下の場面で影響する:
+
+      1. **動的ディスパッチが必要な場合**:
+         - 列挙型（enum）でラップして型消去
+         - `Box<dyn Fn(...)>` でコールバックをラップ
+
+      2. **コレクションに異なる Bifunctor を格納する場合**:
+         - `Vec<dyn Bifunctor<...>>` は不可
+         - 代替: `enum` で具体的な型を列挙
+
+      この制約は Rust の型システムの限界であり、
+      型安全性と引き換えに動的な柔軟性を犠牲にしている。
+      関数型プログラミングでは静的な型安全性を優先するため、
+      この設計は妥当である。
+
+  naming_convention:
+    description: |
+      ## 命名規則
+
+      ### メソッド名
+
+      | メソッド     | 説明                                   | Haskell 対応 |
+      |-------------|----------------------------------------|-------------|
+      | `bimap`     | 両方の型パラメータを変換                | `bimap`     |
+      | `first`     | 最初の型パラメータのみを変換            | `first`     |
+      | `second`    | 2番目の型パラメータのみを変換           | `second`    |
+      | `bimap_ref` | 参照版 bimap                           | -           |
+      | `first_ref` | 参照版 first                           | -           |
+      | `second_ref`| 参照版 second                          | -           |
+
+      ### 設計判断: map_left/map_right vs first/second
+
+      Haskell の命名（first/second）を採用する。
+      理由:
+      - Haskell/Scala の標準に準拠
+      - Either の既存メソッド（map_left/map_right）とは異なる抽象レベル
+      - first/second は位置ベースで、left/right は意味ベース
+
+      **注意**: Either の既存メソッド map_left/map_right は維持する。
+      これらは Bifunctor トレイトのデフォルト実装から呼び出される形にするか、
+      または両方を提供して相互運用可能にする。
+
+  implementation_targets:
+    description: |
+      ## 実装対象の型
+
+      ### 1. Either<L, R>
+
+      既存の bimap, map_left, map_right メソッドを Bifunctor トレイト実装に統合。
+
+      ```rust
+      impl<L, R> Bifunctor<L, R> for Either<L, R> {
+          type Target<C, D> = Either<C, D>;
+
+          fn bimap<C, D, F, G>(self, f: F, g: G) -> Either<C, D>
+          where
+              F: FnOnce(L) -> C,
+              G: FnOnce(R) -> D,
+          {
+              match self {
+                  Either::Left(l) => Either::Left(f(l)),
+                  Either::Right(r) => Either::Right(g(r)),
+              }
+          }
+      }
+      ```
+
+      #### 既存メソッドとの関係および相互呼び出し方針
+
+      **設計判断**: パフォーマンス観点から直接実装を採用する。
+
+      **理由**:
+
+      1. **インライン化の保証**:
+         既存メソッドを呼び出す間接層を挟むと、インライン化が保証されない。
+         直接 `match` 式で実装することで、最適化が確実に適用される。
+
+      2. **デフォルト実装の回避**:
+         `first`/`second` はデフォルト実装（`bimap` 経由）を使用せず、
+         直接実装することでクロージャのオーバーヘッドを削減する。
+
+      **実装方針**:
+
+      ```rust
+      // 推奨: 直接実装
+      impl<L, R> Bifunctor<L, R> for Either<L, R> {
+          type Target<C, D> = Either<C, D>;
+
+          #[inline]
+          fn bimap<C, D, F, G>(self, f: F, g: G) -> Either<C, D>
+          where
+              F: FnOnce(L) -> C,
+              G: FnOnce(R) -> D,
+          {
+              match self {
+                  Either::Left(l) => Either::Left(f(l)),
+                  Either::Right(r) => Either::Right(g(r)),
+              }
+          }
+
+          // first/second もデフォルト実装を使わず直接実装
+          #[inline]
+          fn first<C, F>(self, f: F) -> Either<C, R>
+          where
+              F: FnOnce(L) -> C,
+          {
+              match self {
+                  Either::Left(l) => Either::Left(f(l)),
+                  Either::Right(r) => Either::Right(r),
+              }
+          }
+
+          #[inline]
+          fn second<D, G>(self, g: G) -> Either<L, D>
+          where
+              G: FnOnce(R) -> D,
+          {
+              match self {
+                  Either::Left(l) => Either::Left(l),
+                  Either::Right(r) => Either::Right(g(r)),
+              }
+          }
+      }
+      ```
+
+      ```rust
+      // 非推奨: 既存メソッド経由（間接呼び出し）
+      impl<L, R> Bifunctor<L, R> for Either<L, R> {
+          fn bimap<C, D, F, G>(self, f: F, g: G) -> Either<C, D> {
+              // 既存の bimap メソッドを呼び出し - 非推奨
+              Either::bimap(self, f, g)
+          }
+      }
+      ```
+
+      **既存メソッドとの共存**:
+
+      - `Either` の既存メソッド（`bimap`, `map_left`, `map_right`）は維持
+      - Bifunctor トレイト実装は追加のインターフェースとして提供
+      - 両方のAPIが利用可能で、後方互換性を損なわない
+
+      **使い分け**:
+
+      | API                      | 用途                                   |
+      |--------------------------|----------------------------------------|
+      | `either.bimap(...)`      | Either 固有のメソッド（既存）          |
+      | `either.map_left(...)`   | Either 固有のメソッド（既存）          |
+      | `either.map_right(...)`  | Either 固有のメソッド（既存）          |
+      | `Bifunctor::bimap(...)`  | ジェネリックな Bifunctor として使用    |
+      | `Bifunctor::first(...)`  | ジェネリックな Bifunctor として使用    |
+      | `Bifunctor::second(...)` | ジェネリックな Bifunctor として使用    |
+
+      ### 2. Result<T, E>
+
+      Result は Rust 標準ライブラリの型であるため、
+      orphan rule に注意しつつ実装する。
+
+      ```rust
+      impl<T, E> Bifunctor<E, T> for Result<T, E> {
+          type Target<C, D> = Result<D, C>;
+
+          fn bimap<C, D, F, G>(self, f: F, g: G) -> Result<D, C>
+          where
+              F: FnOnce(E) -> C,
+              G: FnOnce(T) -> D,
+          {
+              match self {
+                  Ok(t) => Ok(g(t)),
+                  Err(e) => Err(f(e)),
+              }
+          }
+      }
+      ```
+
+      #### Result<T, E> の型パラメータ順序設計
+
+      **設計判断**: `Result<T, E>` を `Bifunctor<E, T>` として実装する。
+
+      **根拠**:
+
+      1. **Functor との整合性**:
+         - 既存の `Functor for Result<T, E>` は成功値（T）に対して `fmap` を適用
+         - Bifunctor において `second` は Functor の `fmap` と同等であるべき
+         - したがって T を second 位置（2番目の型パラメータ）に配置
+
+      2. **Either との対称性**:
+         - `Either<L, R>`: `first` = Left（L）, `second` = Right（R）
+         - `Result<T, E>`: `first` = Err（E）, `second` = Ok（T）
+         - Either::Right と Result::Ok が対応し、「成功」側が常に `second`
+
+      3. **Haskell との対応**:
+         - Haskell の `Either e a` は Right-biased であり、`fmap` は Right に作用
+         - `bimap f g (Left x) = Left (f x)`, `bimap f g (Right y) = Right (g y)`
+         - Result を `Either E T` と見なすと自然な対応
+
+      #### API 利用例
+
+      ```rust
+      use lambars::typeclass::Bifunctor;
+
+      // エラー型の変換（map_err に相当）
+      let result: Result<i32, &str> = Err("not found");
+      let mapped: Result<i32, String> = result.first(|e| format!("Error: {}", e));
+      assert_eq!(mapped, Err("Error: not found".to_string()));
+
+      // 成功型の変換（map に相当）
+      let result: Result<i32, String> = Ok(42);
+      let mapped: Result<String, String> = result.second(|x| x.to_string());
+      assert_eq!(mapped, Ok("42".to_string()));
+
+      // 両方を同時に変換
+      let result: Result<i32, &str> = Ok(42);
+      let mapped = result.bimap(
+          |e| format!("Error: {}", e),  // エラー型の変換（first）
+          |x| x * 2                      // 成功型の変換（second）
+      );
+      assert_eq!(mapped, Ok(84));
+
+      // Functor::fmap と Bifunctor::second の等価性
+      use lambars::typeclass::Functor;
+      let result: Result<i32, String> = Ok(42);
+      let by_fmap = result.clone().fmap(|x| x * 2);
+      let by_second = result.second(|x| x * 2);
+      assert_eq!(by_fmap, by_second);  // 両者は等価
+      ```
+
+      **注意点**:
+
+      型パラメータの順序が `Result<T, E>` と `Bifunctor<E, T>` で異なるため、
+      `bimap` の引数順序に注意が必要:
+
+      ```rust
+      // bimap(first関数, second関数) = bimap(エラー変換, 成功変換)
+      result.bimap(error_transform, success_transform)
+      ```
+
+      この設計は直感に反する可能性があるが、Functor との整合性を優先した。
+
+      ### 3. タプル (A, B)
+
+      2要素タプルに対する Bifunctor 実装。
+
+      ```rust
+      impl<A, B> Bifunctor<A, B> for (A, B) {
+          type Target<C, D> = (C, D);
+
+          fn bimap<C, D, F, G>(self, f: F, g: G) -> (C, D)
+          where
+              F: FnOnce(A) -> C,
+              G: FnOnce(B) -> D,
+          {
+              (f(self.0), g(self.1))
+          }
+      }
+      ```
+
+# 要件一覧
+requirements:
+  # ============================================================================
+  # 1. Bifunctor トレイト
+  # ============================================================================
+  - id: bifunctor_trait
+    name: "Bifunctor トレイト"
+    priority: critical
+    description: |
+      2つの型パラメータを持つ型コンストラクタに対する Functor の一般化。
+
+      ## 型パラメータ
+
+      - `A`: 最初の型パラメータ（first で変換）
+      - `B`: 2番目の型パラメータ（second で変換）
+
+      ## 関連型
+
+      - `Target<C, D>`: 変換後の型
+
+    signature: |
+      pub trait Bifunctor<A, B> {
+          /// 変換後の型コンストラクタ
+          type Target<C, D>;
+
+          /// 両方の型パラメータを同時に変換する
+          fn bimap<C, D, F, G>(self, f: F, g: G) -> Self::Target<C, D>
+          where
+              F: FnOnce(A) -> C,
+              G: FnOnce(B) -> D;
+
+          /// 最初の型パラメータのみを変換する
+          ///
+          /// デフォルト実装は `bimap(f, |b| b)` として定義される。
+          /// クロージャ `|b| b` は単に所有権を移動するだけであり、
+          /// 'static 制約は不要である。
+          fn first<C, F>(self, f: F) -> Self::Target<C, B>
+          where
+              F: FnOnce(A) -> C,
+              Self: Sized,
+          {
+              self.bimap(f, |b| b)
+          }
+
+          /// 2番目の型パラメータのみを変換する
+          ///
+          /// デフォルト実装は `bimap(|a| a, g)` として定義される。
+          /// クロージャ `|a| a` は単に所有権を移動するだけであり、
+          /// 'static 制約は不要である。
+          fn second<D, G>(self, g: G) -> Self::Target<A, D>
+          where
+              G: FnOnce(B) -> D,
+              Self: Sized,
+          {
+              self.bimap(|a| a, g)
+          }
+      }
+
+    laws:
+      - name: "Identity 法則（恒等法則）"
+        description: |
+          恒等関数で bimap しても値は変わらない
+        equation: "bimap(|x| x, |y| y) == |self| self"
+        property_test: |
+          /// Identity 法則のプロパティテスト
+          ///
+          /// 制約の説明:
+          /// - `F: Bifunctor<A, B, Target<A, B> = F>`: 同型コンテナ制約
+          ///   恒等関数での変換結果が元の型と一致することを保証
+          /// - `F: Clone`: 比較のため値をクローン
+          /// - `F: PartialEq`: 変換結果と元の値の比較
+          ///
+          /// 注意: 'static 制約は不要。bimap のクロージャは所有権移動のみ。
+          fn property_identity<F, A, B>(value: F) -> bool
+          where
+              F: Bifunctor<A, B, Target<A, B> = F> + PartialEq + Clone,
+          {
+              value.clone().bimap(|a: A| a, |b: B| b) == value
+          }
+
+      - name: "Composition 法則（合成法則）"
+        description: |
+          関数合成と bimap は交換可能
+        equation: "bimap(f . g, h . i) == bimap(f, h) . bimap(g, i)"
+        property_test: |
+          /// Composition 法則のプロパティテスト
+          ///
+          /// 制約の説明:
+          /// - `F: Bifunctor<A, B> + Clone`: テスト対象の型（複数回使用のためClone）
+          /// - `F::Target<C, D>: Bifunctor<C, D, ...>`: 中間結果もBifunctor
+          /// - `F::Target<E, G>: PartialEq`: 最終結果の比較
+          /// - 関数は `Fn` + `Clone`: 複数回使用可能
+          ///
+          /// 関数生成戦略（proptest での実装時）:
+          /// - proptest では任意関数の自動生成は非自明なため、以下の戦略を使用:
+          ///   1. 固定関数セット: 算術演算（+1, *2）、文字列操作（len, to_uppercase）
+          ///   2. 具体的な型で複数の関数組み合わせをテスト
+          ///   3. 入力値のみを proptest で生成し、関数は固定
+          ///
+          /// 例:
+          /// ```rust
+          /// proptest! {
+          ///     #[test]
+          ///     fn composition_either(value in either_strategy()) {
+          ///         let f1 = |x: i32| x + 1;
+          ///         let f2 = |x: i32| x * 2;
+          ///         let g1 = |s: String| s.len();
+          ///         let g2 = |n: usize| n + 10;
+          ///         prop_assert!(property_composition(value, f1, f2, g1, g2));
+          ///     }
+          /// }
+          /// ```
+          ///
+          /// 注意: 'static 制約は不要。
+          fn property_composition<F, A, B, C, D, E, G>(
+              value: F,
+              f1: impl Fn(A) -> C + Clone,
+              f2: impl Fn(C) -> E + Clone,
+              g1: impl Fn(B) -> D + Clone,
+              g2: impl Fn(D) -> G + Clone,
+          ) -> bool
+          where
+              F: Bifunctor<A, B> + Clone,
+              F::Target<C, D>: Bifunctor<C, D, Target<E, G> = F::Target<E, G>>,
+              F::Target<E, G>: PartialEq,
+          {
+              let left = value.clone().bimap(
+                  move |a| f2(f1(a)),
+                  move |b| g2(g1(b))
+              );
+              let right = value.bimap(f1.clone(), g1.clone()).bimap(f2.clone(), g2.clone());
+              left == right
+          }
+
+      - name: "first/second 整合性法則"
+        description: |
+          bimap は first と second の合成と等価
+        equation: "bimap(f, g) == first(f).second(g) == second(g).first(f)"
+        property_test: |
+          /// first/second 整合性法則のプロパティテスト
+          ///
+          /// 制約の説明:
+          /// - `F: Bifunctor<A, B, Target<A, D> = ..., Target<C, B> = ..., Target<C, D> = ...>`
+          ///   中間結果と最終結果の型が一致することを保証
+          /// - 関数 f, g は固定の算術/文字列操作を使用（proptest での関数生成は非自明なため）
+          ///
+          /// 注意: このテストは固定関数セットで検証する。
+          fn property_first_second_consistency<F, A, B, C, D>(value: F) -> bool
+          where
+              F: Bifunctor<A, B, Target<C, D> = F::Target<C, D>> + Clone,
+              F::Target<A, D>: Bifunctor<A, D, Target<C, D> = F::Target<C, D>>,
+              F::Target<C, B>: Bifunctor<C, B, Target<C, D> = F::Target<C, D>>,
+              F::Target<C, D>: PartialEq,
+              A: Clone,
+              B: Clone,
+          {
+              // 固定関数を使用
+              let f = |a: A| -> C { /* 固定変換 */ };
+              let g = |b: B| -> D { /* 固定変換 */ };
+
+              let by_bimap = value.clone().bimap(f.clone(), g.clone());
+              let by_first_second = value.clone().first(f.clone()).second(g.clone());
+              let by_second_first = value.second(g).first(f);
+
+              by_bimap == by_first_second && by_first_second == by_second_first
+          }
+
+          /// 固定関数セット（実装時に使用）:
+          /// - 算術演算: |x: i32| x * 2, |x: i32| x + 1
+          /// - 文字列操作: |s: String| s.len(), |s: String| s.to_uppercase()
+          ///
+          /// 適用型と関数の組み合わせ:
+          /// - Either<i32, String>: f = |x| x * 2, g = |s| s.len()
+          /// - Result<i32, String>: f = |e| e.len(), g = |x| x * 2
+          /// - (i32, String): f = |x| x * 2, g = |s| s.len()
+          ///
+          /// 例:
+          /// ```rust
+          /// proptest! {
+          ///     #[test]
+          ///     fn first_second_consistency_either(value in either_strategy()) {
+          ///         let f = |x: i32| x * 2;
+          ///         let g = |s: String| s.len();
+          ///         prop_assert!(property_first_second_consistency(value, f, g));
+          ///     }
+          /// }
+          /// ```
+
+    tests:
+      - category: "トレイト定義テスト"
+        cases:
+          - name: "bimap の基本動作"
+            test: |
+              let either: Either<i32, String> = Either::Left(42);
+              let result = either.bimap(|x| x * 2, |s| s.len());
+              assert_eq!(result, Either::Left(84));
+
+          - name: "first の基本動作"
+            test: |
+              let either: Either<i32, String> = Either::Left(42);
+              let result = either.first(|x| x.to_string());
+              assert_eq!(result, Either::Left("42".to_string()));
+
+          - name: "second の基本動作"
+            test: |
+              let either: Either<i32, String> = Either::Right("hello".to_string());
+              let result = either.second(|s| s.len());
+              assert_eq!(result, Either::Right(5));
+
+  # ============================================================================
+  # 2. Bifunctor 参照版メソッド
+  # ============================================================================
+  - id: bifunctor_ref_methods
+    name: "Bifunctor 参照版メソッド"
+    priority: high
+    description: |
+      Functor の fmap_ref と同様に、参照を取るバージョンを提供。
+      元の値を消費せずに変換したい場合に使用。
+
+    signature: |
+      /// 参照から両方の型パラメータを同時に変換する
+      fn bimap_ref<C, D, F, G>(&self, f: F, g: G) -> Self::Target<C, D>
+      where
+          F: FnOnce(&A) -> C,
+          G: FnOnce(&B) -> D;
+
+      /// 参照から最初の型パラメータのみを変換する
+      fn first_ref<C, F>(&self, f: F) -> Self::Target<C, B>
+      where
+          B: Clone,
+          F: FnOnce(&A) -> C,
+          Self: Sized,
+      {
+          self.bimap_ref(f, |b| b.clone())
+      }
+
+      /// 参照から2番目の型パラメータのみを変換する
+      fn second_ref<D, G>(&self, g: G) -> Self::Target<A, D>
+      where
+          A: Clone,
+          G: FnOnce(&B) -> D,
+          Self: Sized,
+      {
+          self.bimap_ref(|a| a.clone(), g)
+      }
+
+    tests:
+      - category: "参照版メソッドテスト"
+        cases:
+          - name: "bimap_ref で元の値を保持"
+            test: |
+              let either: Either<String, i32> = Either::Left("hello".to_string());
+              let result = either.bimap_ref(|s| s.len(), |n| n * 2);
+              // either はまだ使用可能
+              assert!(either.is_left());
+              assert_eq!(result, Either::Left(5));
+
+  # ============================================================================
+  # 3. Either<L, R> の Bifunctor 実装
+  # ============================================================================
+  - id: either_bifunctor
+    name: "Either<L, R> の Bifunctor 実装"
+    priority: critical
+    description: |
+      Either<L, R> に対する Bifunctor 実装。
+
+      ## 設計判断
+
+      - 既存の `bimap`, `map_left`, `map_right` メソッドは維持（後方互換性）
+      - Bifunctor トレイト実装は独立して追加
+      - 両方のAPIが利用可能
+      - **パフォーマンス観点から直接実装を採用**（デフォルト実装を使用しない）
+
+    implementation: |
+      impl<L, R> Bifunctor<L, R> for Either<L, R> {
+          type Target<C, D> = Either<C, D>;
+
+          #[inline]
+          fn bimap<C, D, F, G>(self, f: F, g: G) -> Either<C, D>
+          where
+              F: FnOnce(L) -> C,
+              G: FnOnce(R) -> D,
+          {
+              match self {
+                  Either::Left(l) => Either::Left(f(l)),
+                  Either::Right(r) => Either::Right(g(r)),
+              }
+          }
+
+          // デフォルト実装を使用せず直接実装（パフォーマンス最適化）
+          #[inline]
+          fn first<C, F>(self, f: F) -> Either<C, R>
+          where
+              F: FnOnce(L) -> C,
+          {
+              match self {
+                  Either::Left(l) => Either::Left(f(l)),
+                  Either::Right(r) => Either::Right(r),
+              }
+          }
+
+          // デフォルト実装を使用せず直接実装（パフォーマンス最適化）
+          #[inline]
+          fn second<D, G>(self, g: G) -> Either<L, D>
+          where
+              G: FnOnce(R) -> D,
+          {
+              match self {
+                  Either::Left(l) => Either::Left(l),
+                  Either::Right(r) => Either::Right(g(r)),
+              }
+          }
+
+          #[inline]
+          fn bimap_ref<C, D, F, G>(&self, f: F, g: G) -> Either<C, D>
+          where
+              F: FnOnce(&L) -> C,
+              G: FnOnce(&R) -> D,
+          {
+              match self {
+                  Either::Left(l) => Either::Left(f(l)),
+                  Either::Right(r) => Either::Right(g(r)),
+              }
+          }
+
+          // デフォルト実装を使用せず直接実装（パフォーマンス最適化）
+          #[inline]
+          fn first_ref<C, F>(&self, f: F) -> Either<C, R>
+          where
+              R: Clone,
+              F: FnOnce(&L) -> C,
+          {
+              match self {
+                  Either::Left(l) => Either::Left(f(l)),
+                  Either::Right(r) => Either::Right(r.clone()),
+              }
+          }
+
+          // デフォルト実装を使用せず直接実装（パフォーマンス最適化）
+          #[inline]
+          fn second_ref<D, G>(&self, g: G) -> Either<L, D>
+          where
+              L: Clone,
+              G: FnOnce(&R) -> D,
+          {
+              match self {
+                  Either::Left(l) => Either::Left(l.clone()),
+                  Either::Right(r) => Either::Right(g(r)),
+              }
+          }
+      }
+
+    tests:
+      - category: "Either Bifunctor テスト"
+        cases:
+          - name: "Left に対する bimap"
+            test: |
+              let either: Either<i32, String> = Either::Left(42);
+              let result = either.bimap(|x| x * 2, |s| s.len());
+              assert_eq!(result, Either::Left(84));
+
+          - name: "Right に対する bimap"
+            test: |
+              let either: Either<i32, String> = Either::Right("hello".to_string());
+              let result = either.bimap(|x| x * 2, |s| s.len());
+              assert_eq!(result, Either::Right(5));
+
+          - name: "first で Left を変換"
+            test: |
+              let either: Either<i32, String> = Either::Left(42);
+              let result = either.first(|x| format!("value: {}", x));
+              assert_eq!(result, Either::Left("value: 42".to_string()));
+
+          - name: "first で Right は変換されない"
+            test: |
+              let either: Either<i32, String> = Either::Right("hello".to_string());
+              let result = either.first(|x: i32| format!("value: {}", x));
+              assert_eq!(result, Either::Right("hello".to_string()));
+
+          - name: "second で Right を変換"
+            test: |
+              let either: Either<i32, String> = Either::Right("hello".to_string());
+              let result = either.second(|s| s.len());
+              assert_eq!(result, Either::Right(5));
+
+          - name: "second で Left は変換されない"
+            test: |
+              let either: Either<i32, String> = Either::Left(42);
+              let result = either.second(|s: String| s.len());
+              assert_eq!(result, Either::Left(42));
+
+  # ============================================================================
+  # 4. Result<T, E> の Bifunctor 実装
+  # ============================================================================
+  - id: result_bifunctor
+    name: "Result<T, E> の Bifunctor 実装"
+    priority: critical
+    description: |
+      Result<T, E> に対する Bifunctor 実装。
+
+      ## 型パラメータの順序
+
+      Result<T, E> を Bifunctor<E, T> として実装:
+      - `first`: エラー型（E）を変換（map_err に相当）
+      - `second`: 成功型（T）を変換（map に相当）
+
+      この順序により、既存の Functor（成功値に対する fmap）と整合する。
+      **パフォーマンス観点から直接実装を採用**（デフォルト実装を使用しない）
+
+    implementation: |
+      impl<T, E> Bifunctor<E, T> for Result<T, E> {
+          type Target<C, D> = Result<D, C>;
+
+          #[inline]
+          fn bimap<C, D, F, G>(self, f: F, g: G) -> Result<D, C>
+          where
+              F: FnOnce(E) -> C,
+              G: FnOnce(T) -> D,
+          {
+              match self {
+                  Ok(t) => Ok(g(t)),
+                  Err(e) => Err(f(e)),
+              }
+          }
+
+          // デフォルト実装を使用せず直接実装（パフォーマンス最適化）
+          #[inline]
+          fn first<C, F>(self, f: F) -> Result<T, C>
+          where
+              F: FnOnce(E) -> C,
+          {
+              match self {
+                  Ok(t) => Ok(t),
+                  Err(e) => Err(f(e)),
+              }
+          }
+
+          // デフォルト実装を使用せず直接実装（パフォーマンス最適化）
+          #[inline]
+          fn second<D, G>(self, g: G) -> Result<D, E>
+          where
+              G: FnOnce(T) -> D,
+          {
+              match self {
+                  Ok(t) => Ok(g(t)),
+                  Err(e) => Err(e),
+              }
+          }
+
+          #[inline]
+          fn bimap_ref<C, D, F, G>(&self, f: F, g: G) -> Result<D, C>
+          where
+              F: FnOnce(&E) -> C,
+              G: FnOnce(&T) -> D,
+          {
+              match self {
+                  Ok(t) => Ok(g(t)),
+                  Err(e) => Err(f(e)),
+              }
+          }
+
+          // デフォルト実装を使用せず直接実装（パフォーマンス最適化）
+          #[inline]
+          fn first_ref<C, F>(&self, f: F) -> Result<T, C>
+          where
+              T: Clone,
+              F: FnOnce(&E) -> C,
+          {
+              match self {
+                  Ok(t) => Ok(t.clone()),
+                  Err(e) => Err(f(e)),
+              }
+          }
+
+          // デフォルト実装を使用せず直接実装（パフォーマンス最適化）
+          #[inline]
+          fn second_ref<D, G>(&self, g: G) -> Result<D, E>
+          where
+              E: Clone,
+              G: FnOnce(&T) -> D,
+          {
+              match self {
+                  Ok(t) => Ok(g(t)),
+                  Err(e) => Err(e.clone()),
+              }
+          }
+      }
+
+    tests:
+      - category: "Result Bifunctor テスト"
+        cases:
+          - name: "Ok に対する bimap"
+            test: |
+              let result: Result<i32, String> = Ok(42);
+              let mapped = result.bimap(|e| e.len(), |x| x * 2);
+              assert_eq!(mapped, Ok(84));
+
+          - name: "Err に対する bimap"
+            test: |
+              let result: Result<i32, String> = Err("error".to_string());
+              let mapped = result.bimap(|e| e.len(), |x| x * 2);
+              assert_eq!(mapped, Err(5));
+
+          - name: "first でエラー型を変換"
+            test: |
+              let result: Result<i32, String> = Err("error".to_string());
+              let mapped = result.first(|e| e.len());
+              assert_eq!(mapped, Err(5));
+
+          - name: "second で成功型を変換"
+            test: |
+              let result: Result<i32, String> = Ok(42);
+              let mapped = result.second(|x| x.to_string());
+              assert_eq!(mapped, Ok("42".to_string()));
+
+          - name: "second は既存の Functor::fmap と同等"
+            test: |
+              use lambars::typeclass::Functor;
+              let result: Result<i32, String> = Ok(42);
+              let by_second = result.clone().second(|x| x * 2);
+              let by_fmap = result.fmap(|x| x * 2);
+              assert_eq!(by_second, by_fmap);
+
+  # ============================================================================
+  # 5. タプル (A, B) の Bifunctor 実装
+  # ============================================================================
+  - id: tuple_bifunctor
+    name: "タプル (A, B) の Bifunctor 実装"
+    priority: high
+    description: |
+      2要素タプル (A, B) に対する Bifunctor 実装。
+      タプルの両要素を同時に変換可能にする。
+      **パフォーマンス観点から直接実装を採用**（デフォルト実装を使用しない）
+
+    implementation: |
+      impl<A, B> Bifunctor<A, B> for (A, B) {
+          type Target<C, D> = (C, D);
+
+          #[inline]
+          fn bimap<C, D, F, G>(self, f: F, g: G) -> (C, D)
+          where
+              F: FnOnce(A) -> C,
+              G: FnOnce(B) -> D,
+          {
+              (f(self.0), g(self.1))
+          }
+
+          // デフォルト実装を使用せず直接実装（パフォーマンス最適化）
+          #[inline]
+          fn first<C, F>(self, f: F) -> (C, B)
+          where
+              F: FnOnce(A) -> C,
+          {
+              (f(self.0), self.1)
+          }
+
+          // デフォルト実装を使用せず直接実装（パフォーマンス最適化）
+          #[inline]
+          fn second<D, G>(self, g: G) -> (A, D)
+          where
+              G: FnOnce(B) -> D,
+          {
+              (self.0, g(self.1))
+          }
+
+          #[inline]
+          fn bimap_ref<C, D, F, G>(&self, f: F, g: G) -> (C, D)
+          where
+              F: FnOnce(&A) -> C,
+              G: FnOnce(&B) -> D,
+          {
+              (f(&self.0), g(&self.1))
+          }
+
+          // デフォルト実装を使用せず直接実装（パフォーマンス最適化）
+          #[inline]
+          fn first_ref<C, F>(&self, f: F) -> (C, B)
+          where
+              B: Clone,
+              F: FnOnce(&A) -> C,
+          {
+              (f(&self.0), self.1.clone())
+          }
+
+          // デフォルト実装を使用せず直接実装（パフォーマンス最適化）
+          #[inline]
+          fn second_ref<D, G>(&self, g: G) -> (A, D)
+          where
+              A: Clone,
+              G: FnOnce(&B) -> D,
+          {
+              (self.0.clone(), g(&self.1))
+          }
+      }
+
+    tests:
+      - category: "タプル Bifunctor テスト"
+        cases:
+          - name: "bimap で両要素を変換"
+            test: |
+              let tuple = (42, "hello".to_string());
+              let result = tuple.bimap(|x| x * 2, |s| s.len());
+              assert_eq!(result, (84, 5));
+
+          - name: "first で最初の要素のみ変換"
+            test: |
+              let tuple = (42, "hello".to_string());
+              let result = tuple.first(|x| x.to_string());
+              assert_eq!(result, ("42".to_string(), "hello".to_string()));
+
+          - name: "second で2番目の要素のみ変換"
+            test: |
+              let tuple = (42, "hello".to_string());
+              let result = tuple.second(|s| s.len());
+              assert_eq!(result, (42, 5));
+
+          - name: "bimap_ref で元のタプルを保持"
+            test: |
+              let tuple = (42, "hello".to_string());
+              let result = tuple.bimap_ref(|x| x * 2, |s| s.len());
+              // tuple はまだ使用可能
+              assert_eq!(tuple.0, 42);
+              assert_eq!(result, (84, 5));
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - requirement: "ゼロコスト抽象化"
+      description: |
+        Bifunctor のメソッド呼び出しは、直接 match 式で記述した場合と
+        同等のパフォーマンスを持つ。
+        #[inline] アノテーションにより最適化を促進する。
+
+    - requirement: "メモリ効率"
+      description: |
+        bimap は所有権を取得し、不要なクローンを避ける。
+        参照版（bimap_ref）は Clone 制約が必要な場合のみクローンを行う。
+
+  compatibility:
+    - requirement: "既存の Either メソッドとの共存"
+      description: |
+        Either の既存メソッド（bimap, map_left, map_right）は維持。
+        Bifunctor トレイトは追加のインターフェースとして提供。
+        両方のAPIが利用可能で、後方互換性を損なわない。
+
+    - requirement: "Functor との整合性"
+      description: |
+        Right-biased な型（Either, Result）において、
+        Bifunctor::second は Functor::fmap と同等の動作をする。
+
+  testing:
+    - requirement: "Bifunctor 法則のプロパティテスト"
+      description: |
+        proptest を使用して全ての実装に対して
+        Bifunctor 法則（Identity, Composition）を検証。
+
+    - requirement: "既存機能との回帰テスト"
+      description: |
+        Either の既存メソッドが影響を受けないことを確認。
+        Result の Functor 実装が正常に動作することを確認。
+
+# 実装順序
+implementation_order:
+  - phase: "1"
+    name: "Bifunctor トレイト定義"
+    description: |
+      Bifunctor トレイトを src/typeclass/bifunctor.rs に定義。
+      bimap, first, second, bimap_ref, first_ref, second_ref メソッドを定義。
+    duration_estimate: "1 day"
+    deliverables:
+      - src/typeclass/bifunctor.rs（トレイト定義）
+      - tests/bifunctor_trait_tests.rs
+
+  - phase: "2"
+    name: "Either<L, R> の実装"
+    description: |
+      Either に対する Bifunctor 実装を追加。
+      既存の bimap メソッドとの整合性を確認。
+    duration_estimate: "1 day"
+    deliverables:
+      - src/typeclass/bifunctor.rs（Either 実装追加）
+      - tests/bifunctor_either_tests.rs
+
+  - phase: "3"
+    name: "Result<T, E> の実装"
+    description: |
+      Result に対する Bifunctor 実装を追加。
+      Functor との整合性を確認。
+    duration_estimate: "1 day"
+    deliverables:
+      - src/typeclass/bifunctor.rs（Result 実装追加）
+      - tests/bifunctor_result_tests.rs
+
+  - phase: "4"
+    name: "タプル (A, B) の実装"
+    description: |
+      2要素タプルに対する Bifunctor 実装を追加。
+    duration_estimate: "0.5 day"
+    deliverables:
+      - src/typeclass/bifunctor.rs（タプル実装追加）
+      - tests/bifunctor_tuple_tests.rs
+
+  - phase: "5"
+    name: "プロパティテストと法則検証"
+    description: |
+      proptest を使用して全実装の Bifunctor 法則を検証。
+      回帰テストを実行。
+    duration_estimate: "1 day"
+    deliverables:
+      - tests/bifunctor_laws.rs
+      - tests/bifunctor_integration_tests.rs
+
+  - phase: "6"
+    name: "ドキュメントと公開"
+    description: |
+      ドキュメントを整備し、src/typeclass/mod.rs からエクスポート。
+      README と比較表を更新。
+    duration_estimate: "0.5 day"
+    deliverables:
+      - src/typeclass/mod.rs（エクスポート追加）
+      - docs/external/comparison 更新
+
+# 将来の拡張
+future_extensions:
+  - id: profunctor
+    name: "Profunctor トレイト"
+    description: |
+      最初の引数に反変、2番目の引数に共変な二変関手。
+      dimap: (a -> b) -> (c -> d) -> p b c -> p a d
+    rationale: |
+      Bifunctor の一般化として、反変性を扱う場合に必要。
+      Arrow 型クラスの基盤となる。
+
+  - id: bitraversable
+    name: "Bitraversable トレイト"
+    description: |
+      Bifunctor + Traversable の組み合わせ。
+      bitraverse: (Applicative f) => (a -> f c) -> (b -> f d) -> t a b -> f (t c d)
+    rationale: |
+      Either や タプルの要素を effectful な方法で traverse する場合に必要。
+
+  - id: bifoldable
+    name: "Bifoldable トレイト"
+    description: |
+      Bifunctor + Foldable の組み合わせ。
+      bifold: (Monoid m) => (a -> m) -> (b -> m) -> t a b -> m
+    rationale: |
+      Either やタプルの両要素を fold する場合に必要。
+
+# 他言語との対応表
+language_correspondence:
+  haskell:
+    - haskell: "class Bifunctor p where"
+      rust: "trait Bifunctor<A, B>"
+      notes: "Haskell は kind (* -> * -> *) を直接表現できるが、Rust は GAT を使用"
+
+    - haskell: "bimap :: (a -> b) -> (c -> d) -> p a c -> p b d"
+      rust: "fn bimap<C, D, F, G>(self, f: F, g: G) -> Self::Target<C, D>"
+      notes: "同等の機能"
+
+    - haskell: "first :: (a -> b) -> p a c -> p b c"
+      rust: "fn first<C, F>(self, f: F) -> Self::Target<C, B>"
+      notes: "同等の機能"
+
+    - haskell: "second :: (b -> c) -> p a b -> p a c"
+      rust: "fn second<D, G>(self, g: G) -> Self::Target<A, D>"
+      notes: "同等の機能"
+
+  scala:
+    - scala: "trait Bifunctor[F[_, _]]"
+      rust: "trait Bifunctor<A, B>"
+      notes: "Scala は HKT、Rust は GAT を使用"
+
+    - scala: "def bimap[A, B, C, D](fab: F[A, B])(f: A => C, g: B => D): F[C, D]"
+      rust: "fn bimap<C, D, F, G>(self, f: F, g: G) -> Self::Target<C, D>"
+      notes: "同等の機能"
+
+    - scala: "def leftMap[A, B, C](fab: F[A, B])(f: A => C): F[C, B]"
+      rust: "fn first<C, F>(self, f: F) -> Self::Target<C, B>"
+      notes: "Scala の leftMap は Rust の first に対応"
+
+    - scala: "def rightMap[A, B, C](fab: F[A, B])(g: B => C): F[A, C]"
+      rust: "fn second<D, G>(self, g: G) -> Self::Target<A, D>"
+      notes: "Scala の rightMap は Rust の second に対応"
+
+# 参考文献
+references:
+  - title: "Data.Bifunctor (Haskell)"
+    url: "https://hackage.haskell.org/package/base/docs/Data-Bifunctor.html"
+    description: "Haskell 標準ライブラリの Bifunctor 型クラス"
+
+  - title: "cats Bifunctor (Scala)"
+    url: "https://typelevel.org/cats/typeclasses/bifunctor.html"
+    description: "Scala cats ライブラリの Bifunctor 型クラス"
+
+  - title: "Bifunctor - Wikipedia"
+    url: "https://en.wikipedia.org/wiki/Functor#Bifunctors_and_multifunctors"
+    description: "圏論における二変関手の概念"
+
+# 設計上の考慮事項
+design_considerations:
+  - id: static_constraint
+    title: "'static 制約が不要である理由"
+    description: |
+      ### 結論
+
+      `first` と `second` のデフォルト実装において、`'static` 制約は **不要** である。
+
+      ### 理由
+
+      デフォルト実装のクロージャは所有権の移動のみを行う:
+
+      ```rust
+      // first のデフォルト実装
+      fn first<C, F>(self, f: F) -> Self::Target<C, B>
+      where
+          F: FnOnce(A) -> C,
+          Self: Sized,
+      {
+          self.bimap(f, |b| b)  // |b| b は所有権移動のみ
+      }
+      ```
+
+      `|b| b` というクロージャは:
+      - 参照をキャプチャしない
+      - 環境を借用しない
+      - 単に引数を返すだけの恒等関数
+
+      したがって、`B` の型にライフタイム制約は不要である。
+
+      ### 以前の設計との違い
+
+      以前の設計では過度に `'static` を要求していた:
+
+      ```rust
+      // 旧設計（過剰な制約）
+      fn first<C, F>(self, f: F) -> Self::Target<C, B>
+      where
+          F: FnOnce(A) -> C,
+          B: 'static,  // ← 不要
+          Self: Sized,
+      ```
+
+      ### 推奨: 直接実装
+
+      パフォーマンス観点からも、各型で `first`/`second` を直接実装することを推奨する。
+      これにより:
+      1. `bimap` 経由のオーバーヘッドを回避
+      2. 恒等クロージャの生成を回避
+      3. インライン化が確実に適用
+
+  - id: orphan_rule
+    title: "Result の orphan rule への対処"
+    description: |
+      Result は std の型であり、Bifunctor は lambars のトレイトであるため、
+      orphan rule に抵触しない。
+
+      しかし、将来的にユーザーが独自の型に Bifunctor を実装する際は、
+      その型がユーザーのクレートで定義されている必要がある。
+
+  - id: result_type_order
+    title: "Result<T, E> の型パラメータ順序"
+    description: |
+      Result<T, E> を Bifunctor<E, T> として実装することで:
+      - `first` = エラー型の変換（map_err に相当）
+      - `second` = 成功型の変換（map に相当）
+
+      この順序により Functor::fmap（成功値に対する操作）と
+      Bifunctor::second が一致する。
+
+      **注意**: この順序は直感に反する可能性がある。
+      - タプル (A, B) では `first` が最初の要素
+      - Result<T, E> では `first` がエラー型（2番目の型パラメータ）
+
+      ドキュメントでこの設計判断を明確に説明する必要がある。
+
+  - id: either_vs_result_consistency
+    title: "Either と Result の一貫性"
+    description: |
+      Either<L, R> では:
+      - `first` = Left（L）の変換
+      - `second` = Right（R）の変換
+
+      Result<T, E> では:
+      - `first` = Err（E）の変換
+      - `second` = Ok（T）の変換
+
+      Either::Right と Result::Ok が対応するため、
+      `second` が「成功」側の変換となり一貫性がある。
+
+# 変更履歴
+changelog:
+  - version: "1.5.0"
+    date: "2026-01-16"
+    description: |
+      Codex レビュー指摘対応（第5回）:
+      1. first/second整合性法則のプロパティテストに固定関数セットと適用型の具体例を明記
+
+  - version: "1.4.0"
+    date: "2026-01-16"
+    description: |
+      Codex レビュー指摘対応（第4回）:
+      1. first/second整合性法則にプロパティテストを追加
+      2. Composition法則のプロパティテストに関数生成戦略（固定関数セット使用）を明記
+
+  - version: "1.3.0"
+    date: "2026-01-16"
+    description: |
+      Codex レビュー指摘対応（第3回）:
+      1. Identity法則のプロパティテストに同型コンテナ制約を明記（F: Bifunctor<A, B, Target<A, B> = F>）
+
+  - version: "1.2.0"
+    date: "2026-01-16"
+    description: |
+      Codex レビュー指摘対応（第2回）:
+      1. 背景セクションの Result bimap 例を正しい引数順序に修正（first=エラー, second=成功）
+      2. Bifunctor 法則に同型コンテナ制約（Target<A, B> = Self）を明記
+
+  - version: "1.1.0"
+    date: "2026-01-16"
+    description: |
+      Codex レビュー指摘対応:
+      1. first/second デフォルト実装から 'static 制約を削除
+      2. Result<T, E> の型パラメータ順序設計の根拠とAPI利用例を追加
+      3. GAT によるトレイトオブジェクト不可の影響と Functor との使い分けを明記
+      4. プロパティテストの制約を最小限に整理（'static 制約削除）
+      5. Either 既存メソッドとの相互呼び出し方針を明確化（直接実装推奨）
+      6. 全実装で first/second/first_ref/second_ref の直接実装を追加
+
+  - version: "1.0.0"
+    date: "2026-01-16"
+    description: "初版作成"
