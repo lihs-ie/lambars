@@ -160,6 +160,7 @@ impl<E: Effect, A: 'static> Eff<E, A> {
     ///
     /// This method converts `FlatMap` variants to `Pure` or `Impure`,
     /// using an iterative approach for stack safety.
+    #[inline]
     pub(crate) fn normalize(self) -> Self {
         match self.inner {
             EffInner::Pure(_) | EffInner::Impure(_) => self,
@@ -167,6 +168,7 @@ impl<E: Effect, A: 'static> Eff<E, A> {
         }
     }
 
+    #[inline]
     fn normalize_iteratively(initial_flat_map: EffFlatMap<E, A>) -> Self {
         let mut current_result = (initial_flat_map.transform)(initial_flat_map.source);
 
@@ -195,6 +197,7 @@ impl<E: Effect, A: 'static> Eff<E, A> {
     /// let result = PureHandler.run(computation);
     /// assert_eq!(result, 42);
     /// ```
+    #[inline]
     pub fn fmap<B: 'static, F>(self, function: F) -> Eff<E, B>
     where
         F: FnOnce(A) -> B + 'static,
@@ -225,6 +228,7 @@ impl<E: Effect, A: 'static> Eff<E, A> {
     /// let result = PureHandler.run(computation);
     /// assert_eq!(result, 15);
     /// ```
+    #[inline]
     pub fn flat_map<B: 'static, F>(self, function: F) -> Eff<E, B>
     where
         F: FnOnce(A) -> Eff<E, B> + 'static,

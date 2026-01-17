@@ -187,6 +187,7 @@ impl<R: Clone + 'static> ReaderHandler<R> {
     /// Runs the computation with a specific environment (internal).
     ///
     /// Uses an iterative approach for stack safety.
+    #[inline]
     fn run_with_environment<A: 'static>(computation: Eff<ReaderEffect<R>, A>, environment: R) -> A {
         let mut current_computation = computation;
 
