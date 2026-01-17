@@ -1,0 +1,415 @@
+# ExceptT AsyncIO サポート要件定義
+#
+# 概要:
+#   ExceptT モナドトランスフォーマーに AsyncIO サポートを追加し、
+#   eff_async! マクロとの連携を実現する
+#
+# 設計方針:
+#   1. 既存の ExceptT 実装パターン（Option/Result/IO 用）に準拠
+#   2. AsyncIO の Send + 'static 制約を適切に処理
+#   3. eff_async! マクロとの互換性を確保（flat_map メソッド名）
+#   4. 既存トランスフォーマー（ReaderT, StateT, WriterT）との命名規則の整合性
+#      - 他のトランスフォーマーは flat_map_async_io を使用するが、
+#        eff_async! マクロは flat_map を直接呼び出すため、ExceptT では両方を提供
+#
+# 参照:
+#   - docs/internal/issues/20260117_1800_exceptt_asyncio_support.yaml
+#   - src/effect/except_transformer.rs
+#   - src/effect/async_io.rs
+
+version: "1.0.0"
+name: "exceptt_asyncio_support"
+description: |
+  ExceptT<E, AsyncIO<Result<A, E>>> 型に対するモナド演算サポートを追加する。
+  これにより、非同期エラーハンドリングで eff_async! マクロを活用した
+  do-notation スタイルのプログラミングが可能になる。
+
+background:
+  problem: |
+    現在の ExceptT は Option, Result, IO に対応しているが、AsyncIO に対応していない。
+    これにより、非同期エラーハンドリングで eff_async! マクロを活用できず、
+    .run_async().await? パターンを使用する必要がある。
+  motivation: |
+    AsyncIO と ExceptT を組み合わせることで、非同期計算におけるエラーハンドリングを
+    宣言的に記述できるようになる。これにより bank sample などの実用的なコードで
+    do-notation スタイルの記述が可能になる。
+  prior_art:
+    - name: "ExceptT<E, IO<Result<A, E>>>"
+      description: |
+        同期 IO に対する ExceptT 実装。flat_map_io, catch_io などを提供。
+        AsyncIO 実装はこのパターンに準拠する。
+    - name: "StateT<S, AsyncIO<(A, S)>>"
+      description: |
+        StateT の AsyncIO 対応実装。Send + Sync + 'static 制約の扱い方の参考。
+    - name: "ReaderT<R, AsyncIO<A>>"
+      description: |
+        ReaderT の AsyncIO 対応実装。flat_map_async_io メソッドの実装パターンの参考。
+
+requirements:
+  # ======================================================================
+  # 1. 値の構築
+  # ======================================================================
+  - id: pure_async_io
+    name: "純粋値のリフト"
+    description: |
+      成功値を ExceptT<E, AsyncIO<Result<A, E>>> にリフトする。
+      AsyncIO::pure(Ok(value)) をラップした ExceptT を返す。
+
+    methods:
+      - name: "pure_async_io"
+        signature: "fn pure_async_io(value: A) -> Self"
+        description: |
+          値を AsyncIO<Ok(A)> にリフトする。
+          型制約: A: Send + 'static, E: Send + 'static（Result<A, E> 全体が Send を満たす必要があるため）
+        examples:
+          - description: "整数値をリフト"
+            code: |
+              let except: ExceptT<String, AsyncIO<Result<i32, String>>> =
+                  ExceptT::pure_async_io(42);
+              assert_eq!(except.run().run_async().await, Ok(42));
+
+    implementations:
+      - type: "ExceptT<E, AsyncIO<Result<A, E>>>"
+        description: |
+          Send + 'static 制約を満たす任意の値型 A に対して実装する。
+
+  - id: throw_async_io
+    name: "エラーのリフト"
+    description: |
+      エラー値を ExceptT<E, AsyncIO<Result<A, E>>> にリフトする。
+      AsyncIO::pure(Err(error)) をラップした ExceptT を返す。
+
+    methods:
+      - name: "throw_async_io"
+        signature: "fn throw_async_io(error: E) -> Self"
+        description: |
+          エラーを AsyncIO<Err(E)> にリフトする。
+          型制約: E: Send + 'static
+        examples:
+          - description: "エラーをリフト"
+            code: |
+              let except: ExceptT<String, AsyncIO<Result<i32, String>>> =
+                  ExceptT::throw_async_io("error".to_string());
+              assert_eq!(except.run().run_async().await, Err("error".to_string()));
+
+    implementations:
+      - type: "ExceptT<E, AsyncIO<Result<A, E>>>"
+        description: |
+          Send + 'static 制約を満たす任意のエラー型 E に対して実装する。
+
+  - id: lift_async_io
+    name: "AsyncIO のリフト"
+    description: |
+      AsyncIO<A> を ExceptT<E, AsyncIO<Result<A, E>>> にリフトする。
+      内部の値を Ok でラップする。
+
+    methods:
+      - name: "lift_async_io"
+        signature: "fn lift_async_io(inner: AsyncIO<A>) -> Self"
+        description: |
+          AsyncIO<A> を ExceptT にリフトする。
+          inner.fmap(Ok) を適用して Result でラップする。
+          型制約: A: Send + 'static
+        examples:
+          - description: "AsyncIO をリフト"
+            code: |
+              let async_io = AsyncIO::pure(42);
+              let except: ExceptT<String, AsyncIO<Result<i32, String>>> =
+                  ExceptT::lift_async_io(async_io);
+              assert_eq!(except.run().run_async().await, Ok(42));
+
+    implementations:
+      - type: "ExceptT<E, AsyncIO<Result<A, E>>>"
+        description: |
+          AsyncIO<A> から ExceptT への変換を提供する。
+
+  - id: from_result
+    name: "Result からの構築"
+    description: |
+      Result<A, E> を ExceptT<E, AsyncIO<Result<A, E>>> に変換する。
+      同期的な Result を非同期コンテキストにリフトする。
+
+    methods:
+      - name: "from_result"
+        signature: "fn from_result(result: Result<A, E>) -> Self"
+        description: |
+          Result<A, E> を AsyncIO<Result<A, E>> でラップして ExceptT を構築する。
+          型制約: A: Send + 'static, E: Send + 'static
+        examples:
+          - description: "Ok をリフト"
+            code: |
+              let except: ExceptT<String, AsyncIO<Result<i32, String>>> =
+                  ExceptT::from_result(Ok(42));
+              assert_eq!(except.run().run_async().await, Ok(42));
+          - description: "Err をリフト"
+            code: |
+              let except: ExceptT<String, AsyncIO<Result<i32, String>>> =
+                  ExceptT::from_result(Err("error".to_string()));
+              assert_eq!(except.run().run_async().await, Err("error".to_string()));
+
+    implementations:
+      - type: "ExceptT<E, AsyncIO<Result<A, E>>>"
+        description: |
+          同期的な Result を非同期コンテキストにリフトする便利メソッド。
+
+  # ======================================================================
+  # 2. Functor 演算
+  # ======================================================================
+  - id: fmap_async_io
+    name: "関数適用（Functor）"
+    description: |
+      成功値に対して関数を適用する。
+      エラーの場合はエラーをそのまま伝播する。
+
+    laws:
+      - name: "Identity"
+        description: |
+          恒等関数を適用しても値は変わらない。
+        equation: "fmap_async_io(id) == id"
+        property_test: |
+          // AsyncIO は Clone ではないが、pure_async_io は参照透過であるため
+          // 同じ値から構築すれば意味的に同一の計算が得られる
+          let except1 = ExceptT::<String, _>::pure_async_io(value);
+          let except2 = ExceptT::<String, _>::pure_async_io(value);
+          assert_eq!(
+              except1.fmap_async_io(|x| x).run().run_async().await,
+              except2.run().run_async().await
+          );
+
+      - name: "Composition"
+        description: |
+          関数合成と fmap の順序は交換可能。
+        equation: "fmap_async_io(f . g) == fmap_async_io(f) . fmap_async_io(g)"
+        property_test: |
+          // AsyncIO は Clone ではないが、pure_async_io は参照透過であるため
+          // 同じ値から構築すれば意味的に同一の計算が得られる
+          let except1 = ExceptT::<String, _>::pure_async_io(value);
+          let except2 = ExceptT::<String, _>::pure_async_io(value);
+          let left = except1.fmap_async_io(|x| g(f(x))).run().run_async().await;
+          let right = except2.fmap_async_io(f).fmap_async_io(g).run().run_async().await;
+          assert_eq!(left, right);
+
+    methods:
+      - name: "fmap_async_io"
+        signature: "fn fmap_async_io<B, F>(self, function: F) -> ExceptT<E, AsyncIO<Result<B, E>>>"
+        description: |
+          成功値を変換する関数を適用する。
+          型制約: F: FnOnce(A) -> B + Send + 'static, B: Send + 'static
+        examples:
+          - description: "成功値を変換"
+            code: |
+              let except = ExceptT::pure_async_io(10);
+              let mapped = except.fmap_async_io(|x| x * 2);
+              assert_eq!(mapped.run().run_async().await, Ok(20));
+          - description: "エラーは伝播"
+            code: |
+              let except: ExceptT<String, AsyncIO<Result<i32, String>>> =
+                  ExceptT::throw_async_io("error".to_string());
+              let mapped = except.fmap_async_io(|x| x * 2);
+              assert_eq!(mapped.run().run_async().await, Err("error".to_string()));
+
+    implementations:
+      - type: "ExceptT<E, AsyncIO<Result<A, E>>>"
+        description: |
+          内部の AsyncIO に対して fmap を適用し、
+          Result::map で成功値を変換する。
+
+  # ======================================================================
+  # 3. Monad 演算
+  # ======================================================================
+  - id: flat_map
+    name: "モナドバインド（eff_async! マクロ用）"
+    description: |
+      成功値に対してモナド演算を連鎖させる。
+      エラーの場合は短絡評価でエラーを伝播する。
+      このメソッドは eff_async! マクロが直接呼び出すため、名前は flat_map 固定。
+
+    laws:
+      - name: "Left Identity"
+        description: |
+          pure(a).flat_map(f) == f(a)
+        equation: "pure_async_io(a).flat_map(f) == f(a)"
+        property_test: |
+          let f = |x: i32| ExceptT::pure_async_io(x * 2);
+          let left = ExceptT::pure_async_io(value).flat_map(f).run().run_async().await;
+          let right = f(value).run().run_async().await;
+          assert_eq!(left, right);
+
+      - name: "Right Identity"
+        description: |
+          m.flat_map(pure) == m
+        equation: "m.flat_map(pure_async_io) == m"
+        property_test: |
+          // AsyncIO は Clone ではないが、pure_async_io は参照透過であるため
+          // 同じ値から構築すれば意味的に同一の計算が得られる
+          let except1 = ExceptT::<String, _>::pure_async_io(value);
+          let except2 = ExceptT::<String, _>::pure_async_io(value);
+          let result = except1.flat_map(ExceptT::pure_async_io).run().run_async().await;
+          assert_eq!(result, except2.run().run_async().await);
+
+      - name: "Associativity"
+        description: |
+          m.flat_map(f).flat_map(g) == m.flat_map(|x| f(x).flat_map(g))
+        equation: "m.flat_map(f).flat_map(g) == m.flat_map(|x| f(x).flat_map(g))"
+        property_test: |
+          let f = |x: i32| ExceptT::pure_async_io(x + 1);
+          let g = |x: i32| ExceptT::pure_async_io(x * 2);
+          let except1 = ExceptT::pure_async_io(value);
+          let except2 = ExceptT::pure_async_io(value);
+          let left = except1.flat_map(f).flat_map(g).run().run_async().await;
+          let right = except2.flat_map(|x| f(x).flat_map(g)).run().run_async().await;
+          assert_eq!(left, right);
+
+    methods:
+      - name: "flat_map"
+        signature: "fn flat_map<B, F>(self, function: F) -> ExceptT<E, AsyncIO<Result<B, E>>>"
+        description: |
+          eff_async! マクロが呼び出すメソッド。
+          成功値に対して関数を適用し、結果の ExceptT を返す。
+          エラーの場合は短絡評価でエラーを伝播する。
+          型制約: F: FnOnce(A) -> ExceptT<E, AsyncIO<Result<B, E>>> + Send + 'static, B: Send + 'static, E: Send + 'static
+        examples:
+          - description: "成功の連鎖"
+            code: |
+              let except = ExceptT::pure_async_io(10);
+              let chained = except.flat_map(|v| ExceptT::pure_async_io(v * 2));
+              assert_eq!(chained.run().run_async().await, Ok(20));
+          - description: "エラーで短絡"
+            code: |
+              let except: ExceptT<String, AsyncIO<Result<i32, String>>> =
+                  ExceptT::throw_async_io("error".to_string());
+              let chained = except.flat_map(|v| ExceptT::pure_async_io(v * 2));
+              assert_eq!(chained.run().run_async().await, Err("error".to_string()));
+          - description: "eff_async! マクロとの連携"
+            code: |
+              let result = eff_async! {
+                  x <= ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(5);
+                  y <= ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(10);
+                  let z = x + y;
+                  ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(z * 2)
+              };
+              assert_eq!(result.run().run_async().await, Ok(30));
+
+    implementations:
+      - type: "ExceptT<E, AsyncIO<Result<A, E>>>"
+        description: |
+          内部の AsyncIO に対して flat_map を適用する。
+          成功値の場合は関数を適用し、エラーの場合は AsyncIO::pure(Err(error)) を返す。
+
+  - id: flat_map_async_io
+    name: "明示的な AsyncIO 用 flat_map"
+    description: |
+      flat_map のエイリアス。明示的に AsyncIO 用であることを示す場合に使用。
+
+    methods:
+      - name: "flat_map_async_io"
+        signature: "fn flat_map_async_io<B, F>(self, function: F) -> ExceptT<E, AsyncIO<Result<B, E>>>"
+        description: |
+          flat_map のエイリアス。他のトランスフォーマー（ReaderT, StateT）との
+          命名一貫性のために提供する。
+        examples:
+          - description: "flat_map と同じ動作"
+            code: |
+              let except = ExceptT::pure_async_io(10);
+              let chained = except.flat_map_async_io(|v| ExceptT::pure_async_io(v * 2));
+              assert_eq!(chained.run().run_async().await, Ok(20));
+
+    implementations:
+      - type: "ExceptT<E, AsyncIO<Result<A, E>>>"
+        description: |
+          内部で flat_map を呼び出す。
+
+  # ======================================================================
+  # 4. エラーハンドリング
+  # ======================================================================
+  - id: catch_async_io
+    name: "エラーリカバリ"
+    description: |
+      エラーをキャッチして別の計算に置き換える。
+      成功の場合はそのまま通過する。
+
+    methods:
+      - name: "catch_async_io"
+        signature: "fn catch_async_io<F>(computation: Self, handler: F) -> Self"
+        description: |
+          エラーをキャッチしてリカバリ計算を実行する。
+          成功の場合は何もしない。
+          型制約: F: FnOnce(E) -> Self + Send + 'static
+        examples:
+          - description: "エラーからリカバリ"
+            code: |
+              let failing: ExceptT<String, AsyncIO<Result<i32, String>>> =
+                  ExceptT::throw_async_io("error".to_string());
+              let recovered = ExceptT::catch_async_io(failing, |e| {
+                  ExceptT::pure_async_io(e.len() as i32)
+              });
+              assert_eq!(recovered.run().run_async().await, Ok(5));
+          - description: "成功はそのまま通過"
+            code: |
+              let success: ExceptT<String, AsyncIO<Result<i32, String>>> =
+                  ExceptT::pure_async_io(42);
+              let unchanged = ExceptT::catch_async_io(success, |_| {
+                  ExceptT::pure_async_io(0)
+              });
+              assert_eq!(unchanged.run().run_async().await, Ok(42));
+
+    implementations:
+      - type: "ExceptT<E, AsyncIO<Result<A, E>>>"
+        description: |
+          内部の AsyncIO に対して flat_map を適用し、
+          エラーの場合はハンドラを呼び出す。
+
+  # ======================================================================
+  # 5. 実行
+  # ======================================================================
+  - id: run_async
+    name: "非同期実行"
+    description: |
+      ExceptT を実行して Result<A, E> を取得する。
+      内部の AsyncIO を await する。
+
+    methods:
+      - name: "run_async"
+        signature: "async fn run_async(self) -> Result<A, E>"
+        description: |
+          ExceptT を実行して結果を取得するショートカット。
+          self.run().run_async().await と同等。
+        examples:
+          - description: "実行して結果を取得"
+            code: |
+              let except = ExceptT::pure_async_io(42);
+              let result = except.run_async().await;
+              assert_eq!(result, Ok(42));
+
+    implementations:
+      - type: "ExceptT<E, AsyncIO<Result<A, E>>>"
+        description: |
+          内部の run() を呼び出して AsyncIO を取得し、run_async().await で実行する。
+
+non_functional_requirements:
+  performance:
+    - "AsyncIO の遅延評価を維持し、不必要な計算を行わない"
+    - "flat_map のチェーンでスタックオーバーフローを起こさない（AsyncIO が保証）"
+  compatibility:
+    - "eff_async! マクロと互換性を持つ（flat_map メソッド名を使用）"
+    - "既存の ExceptT API（Option/Result/IO 用）と一貫性を持つ"
+    - "Send + 'static 制約を適切に処理し、マルチスレッド環境で安全に使用可能"
+  testing:
+    - "rstest を使用したユニットテスト"
+    - "tokio::test を使用した非同期テスト"
+    - "モナド則のプロパティテスト"
+    - "eff_async! マクロとの連携テスト"
+
+future_extensions:
+  - id: map_error_async_io
+    name: "エラー型の変換"
+    description: |
+      エラー型を別の型に変換する map_error_async_io メソッド。
+    rationale: |
+      まずは基本的なモナド演算を実装し、エラー型変換は後から追加する。
+  - id: traverse_async_io
+    name: "Traversable 対応"
+    description: |
+      コレクションに対する traverse/sequence 操作。
+    rationale: |
+      基本的なモナド演算が安定してから Traversable 対応を検討する。
