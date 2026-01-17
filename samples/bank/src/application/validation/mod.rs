@@ -10,6 +10,10 @@
 //! - **Referential Transparency**: Same input always produces same output
 //! - **Composability**: Validators can be combined using Applicative patterns
 //!
+//! # Submodules
+//!
+//! - [`validated_validators`] - Validators returning `Validated` for parallel error accumulation
+//!
 //! # Examples
 //!
 //! ```rust
@@ -23,6 +27,8 @@
 //! let amount_result = validate_amount(&amount);
 //! assert!(amount_result.is_right());
 //! ```
+
+pub mod validated_validators;
 
 use crate::domain::account::errors::{DomainError, DomainResult};
 use crate::domain::value_objects::Money;
