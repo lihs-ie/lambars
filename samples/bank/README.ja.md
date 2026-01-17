@@ -67,52 +67,104 @@ src/
     └── config.rs           # 設定
 ```
 
-## 使用している lambars の機能
+## ユースケース別 lambars 機能の使用例
 
-このサンプルは、さまざまな [lambars](../../docs/external/readme/README.ja.md) 機能の実践的な使用を示しています：
+このサンプルでは、一般的なユースケースごとに整理した [lambars](../../docs/external/readme/README.ja.md) 機能の実践的な使用を示しています：
 
-### Phase 1: コア関数型パターン
+### ドメインロジックでのエラーハンドリング
 
-| 機能 | 用途 | 例 |
-|------|------|-----|
-| `Either<L, R>` | ドメインロジックでのエラーハンドリング | `Either<DomainError, Account>` |
-| `Semigroup` | Money 値の合成 | `money1.combine(money2)` |
-| `Monoid` | Money 操作の単位元 | `Money::empty()` |
-| [`Trampoline`](../../docs/external/readme/README.ja.md#trampolineスタック安全な再帰) | スタック安全なイベントリプレイ | `replay_events(events)` |
-| [`PersistentList`](../../docs/external/readme/README.ja.md#persistentlist) | 不変イベントシーケンス | イベントストレージ |
-
-### Phase 2: パイプラインユーティリティ
+特定のエラー型で失敗する可能性のある計算を表現するために [`Either<L, R>`](../../docs/external/readme/README.ja.md) を使用します。
 
 ```rust
-use bank::api::handlers::pipeline::*;
+use lambars::typeclass::Either;
 
-// 非同期パイプライン合成
-let result = async_pipe!(
-    validate_input(request),
-    build_command,
-    execute_workflow
-)?;
+// ドメイン関数は Result ではなく Either を返す
+pub fn deposit(
+    command: &DepositCommand,
+    account: &Account,
+    timestamp: Timestamp,
+) -> Either<DomainError, MoneyDeposited> {
+    if account.is_frozen() {
+        Either::Left(DomainError::AccountFrozen)
+    } else {
+        Either::Right(MoneyDeposited::new(command.amount(), timestamp))
+    }
+}
 
-// 並列バリデーション
-let validated = parallel_validate!(
-    validate_name(name),
-    validate_amount(amount),
-    validate_currency(currency)
-)?;
+// API 境界で Result に変換
+let result = deposit(&command, &account, timestamp);
+match result {
+    Either::Right(event) => Ok(event),
+    Either::Left(error) => Err(ApiError::from(error)),
+}
 ```
 
-### Phase 3: ExceptT を使った eff_async! マクロ
+### 金額の合成
 
-このサンプルでは、非同期ハンドラーを記述するための2つのスタイルを提供しています：
-
-#### 従来のスタイル（? 演算子）
+型安全な値の合成のために [`Semigroup`](../../docs/external/readme/README.ja.md#semigroup-と-monoid) と [`Monoid`](../../docs/external/readme/README.ja.md#semigroup-と-monoid) を使用します。
 
 ```rust
-pub async fn deposit_handler(
-    State(deps): State<AppDependencies>,
-    Path(id): Path<String>,
-    Json(request): Json<DepositRequest>,
-) -> Result<Json<Response>, ApiError> {
+use lambars::typeclass::{Semigroup, Monoid};
+
+// Money は値を結合するために Semigroup を実装
+let total = deposit1.amount().combine(deposit2.amount());
+
+// Monoid は単位元を提供
+let zero = Money::empty();  // 金額 0 の Money
+
+// 複数の値を結合
+let balance = transactions
+    .iter()
+    .fold(Money::empty(), |acc, tx| acc.combine(tx.amount()));
+```
+
+### スタック安全なイベントリプレイ
+
+スタックオーバーフローなしで大量のイベントシーケンスを処理するために [`Trampoline`](../../docs/external/readme/README.ja.md#trampolineスタック安全な再帰) を使用します。
+
+```rust
+use lambars::control::Trampoline;
+
+// 何千ものイベントを安全にリプレイ
+fn replay_events(events: &[AccountEvent], account: Account) -> Trampoline<Account> {
+    if events.is_empty() {
+        Trampoline::done(account)
+    } else {
+        let updated = account.apply(&events[0]);
+        Trampoline::suspend(move || replay_events(&events[1..], updated))
+    }
+}
+
+// スタックオーバーフローなしで実行
+let account = replay_events(&events, Account::default()).run();
+```
+
+### 不変イベントストレージ
+
+構造共有による効率的な不変イベントシーケンスのために [`PersistentList`](../../docs/external/readme/README.ja.md#persistentlist) を使用します。
+
+```rust
+use lambars::persistent::PersistentList;
+
+// イベントは不変リストに保存される
+let events: PersistentList<AccountEvent> = event_store.load_events(&account_id);
+
+// 新しいイベントを追加すると新しいリストが作成される（元は変更されない）
+let new_events = events.cons(new_event);
+
+// 構造共有によりメモリオーバーヘッドは最小限
+assert_eq!(events.len(), original_count);      // 元は変更されない
+assert_eq!(new_events.len(), original_count + 1);
+```
+
+### do 記法による非同期ワークフロー合成
+
+クリーンな非同期ワークフロー合成のために [`eff_async!`](../../docs/external/readme/README.ja.md#eff_async-マクロ) と [`ExceptT`](../../docs/external/readme/README.ja.md#モナド変換子) を使用します。
+
+**従来のスタイル（? 演算子）：**
+
+```rust
+pub async fn deposit_handler(...) -> Result<Json<Response>, ApiError> {
     let events = deps.event_store()
         .load_events(&id)
         .run_async()
@@ -122,7 +174,7 @@ pub async fn deposit_handler(
     let account = Account::from_events(&events)
         .ok_or_else(|| not_found_error())?;
 
-    let event = deposit(&command, &account, timestamp)
+    let event = either_to_result(deposit(&command, &account, timestamp))
         .map_err(|e| domain_error(&e))?;
 
     deps.event_store()
@@ -135,22 +187,21 @@ pub async fn deposit_handler(
 }
 ```
 
-#### eff_async! スタイル（do 記法）
+**eff_async! スタイル（do 記法）：**
 
 ```rust
 use lambars::eff_async;
-use bank::api::handlers::workflow_eff::*;
+use lambars::effect::ExceptT;
 
-async fn execute_workflow(
-    command: &DepositCommand,
-    account: &Account,
-    event_store: &EventStore,
-    timestamp: Timestamp,
-) -> Result<MoneyDeposited, ApiError> {
+// WorkflowResult は ExceptT をラップしてエラーハンドリングをクリーンに
+type WorkflowResult<A> = ExceptT<ApiError, AsyncIO<Result<A, ApiError>>>;
+
+async fn execute_workflow(...) -> Result<MoneyDeposited, ApiError> {
     let workflow: WorkflowResult<MoneyDeposited> = eff_async! {
-        event <= from_result(deposit(command, account, timestamp).map_err(domain_error));
+        // 各ステップは自動的にエラーを伝播
+        event <= from_result(deposit(&command, &account, timestamp).map_err(domain_error));
         _ <= lift_async_result(event_store.append_events(&id, vec![event.clone()]), event_store_error);
-        _ <= lift_async_result(read_model.invalidate(&id).fmap(Ok::<_, ()>), |_| internal_error());
+        _ <= lift_async_result(read_model.invalidate(&id), cache_error);
         pure_async(event)
     };
 
@@ -158,41 +209,60 @@ async fn execute_workflow(
 }
 ```
 
-### Phase 5: 並列バリデーションのための Validated
+### エラー蓄積による並列バリデーション
+
+最初のエラーで失敗するのではなく、すべてのバリデーションエラーを収集するために `Validated`（Applicative ベースのバリデーション）を使用します。
 
 ```rust
 use bank::domain::validation::Validated;
 
-// フェイルファストではなく、すべてのバリデーションエラーを蓄積
+// 各バリデータは Validated<Vec<Error>, T> を返す
 let result: Validated<Vec<ValidationError>, Account> = Validated::map3(
-    validate_owner_name(name),
-    validate_initial_balance(balance),
-    validate_currency(currency),
+    validate_owner_name(name),      // Invalid(vec![NameTooLong]) を返す可能性
+    validate_initial_balance(balance), // Invalid(vec![NegativeBalance]) を返す可能性
+    validate_currency(currency),    // Invalid(vec![UnsupportedCurrency]) を返す可能性
     |name, balance, currency| Account::new(name, balance, currency)
 );
 
+// すべてのエラーが蓄積される（最初のエラーだけでなく）
 match result {
     Validated::Valid(account) => Ok(account),
-    Validated::Invalid(errors) => Err(ValidationErrors(errors)),
+    Validated::Invalid(errors) => {
+        // errors にはすべてのバリデーション失敗が含まれる
+        Err(ValidationErrors(errors))
+    }
 }
 ```
 
-### Phase 6: 監査ログのための Writer モナド
+### Writer モナドによる監査ログ
+
+計算結果と一緒に監査ログを蓄積するために [`Writer`](../../docs/external/readme/README.ja.md#writer-モナド) を使用します。
 
 ```rust
 use lambars::effect::Writer;
-use bank::application::workflows::audited::*;
+use bank::domain::audit::AuditEntry;
 
-// 監査ログを蓄積するワークフロー
-let audited_workflow: Writer<Vec<AuditEntry>, MoneyDeposited> =
-    audited_deposit(&command, &account, timestamp);
+// 結果と監査証跡の両方を生成するワークフロー
+fn audited_deposit(
+    command: &DepositCommand,
+    account: &Account,
+    timestamp: Timestamp,
+) -> Writer<Vec<AuditEntry>, MoneyDeposited> {
+    Writer::tell(vec![AuditEntry::operation_started("deposit", timestamp)])
+        .then(Writer::pure(deposit_logic(command, account)))
+        .flat_map(|event| {
+            Writer::tell(vec![AuditEntry::operation_completed("deposit", &event)])
+                .then(Writer::pure(event))
+        })
+}
 
-let (event, audit_logs) = audited_workflow.run();
+// 実行して結果とログの両方を取得
+let (event, audit_logs) = audited_deposit(&command, &account, timestamp).run();
 
-// 監査ログには以下が含まれます：
-// - タイムスタンプ
-// - 操作タイプ
+// audit_logs には完全な監査証跡が含まれる：
+// - 操作開始時刻
 // - アクター情報
+// - 操作結果
 // - 変更前/変更後の状態
 ```
 
@@ -204,9 +274,9 @@ let (event, audit_logs) = audited_workflow.run();
 | `GET` | `/accounts/:id` | アカウント情報を取得 |
 | `GET` | `/accounts/:id/balance` | アカウント残高を取得 |
 | `POST` | `/accounts/:id/deposit` | 入金（従来のスタイル） |
-| `POST` | `/accounts/:id/deposit-eff` | 入金（eff_async!） |
+| `POST` | `/accounts/:id/deposit-eff` | 入金（eff_async! スタイル） |
 | `POST` | `/accounts/:id/withdraw` | 出金（従来のスタイル） |
-| `POST` | `/accounts/:id/withdraw-eff` | 出金（eff_async!） |
+| `POST` | `/accounts/:id/withdraw-eff` | 出金（eff_async! スタイル） |
 | `POST` | `/accounts/:id/transfer` | アカウント間の送金 |
 | `GET` | `/accounts/:id/transactions` | 取引履歴を取得 |
 | `GET` | `/health` | ヘルスチェック |
