@@ -13,8 +13,13 @@
 //!
 //! Due to Rust's lack of Higher-Kinded Types (HKT), we cannot write a single
 //! generic implementation that works for all monads. Instead, we provide
-//! specific methods for common monads (Option, Result, IO) using the naming
-//! convention `method_option`, `method_result`, `method_io`.
+//! specific methods for common monads (Option, Result, IO, `AsyncIO`) using the naming
+//! convention `method_option`, `method_result`, `method_io`, `method_async_io`.
+//!
+//! **`AsyncIO` Exception**: For `eff_async!` macro compatibility, the `AsyncIO`
+//! implementation provides both `flat_map` (for macro use) and `flat_map_async_io`
+//! (for naming consistency). The `flat_map` method is required because the
+//! `eff_async!` macro directly calls `.flat_map()` on monad values.
 //!
 //! # Examples
 //!
@@ -406,6 +411,93 @@ where
     }
 }
 
+// =============================================================================
+// AsyncIO-specific Methods (requires async feature)
+// =============================================================================
+
+#[cfg(feature = "async")]
+impl<E, A> ExceptT<E, super::AsyncIO<Result<A, E>>>
+where
+    E: Send + 'static,
+    A: Send + 'static,
+{
+    /// Creates an `ExceptT` that returns a constant value.
+    pub fn pure_async_io(value: A) -> Self {
+        Self::new(super::AsyncIO::pure(Ok(value)))
+    }
+
+    /// Creates an `ExceptT` that throws an error.
+    pub fn throw_async_io(error: E) -> Self {
+        Self::new(super::AsyncIO::pure(Err(error)))
+    }
+
+    /// Lifts an `AsyncIO` into `ExceptT`.
+    pub fn lift_async_io(inner: super::AsyncIO<A>) -> Self {
+        Self::new(inner.fmap(Ok))
+    }
+
+    /// Creates an `ExceptT` from a `Result`.
+    pub fn from_result(result: Result<A, E>) -> Self {
+        Self::new(super::AsyncIO::pure(result))
+    }
+
+    /// Maps a function over the value inside the `ExceptT`.
+    pub fn fmap_async_io<B, F>(self, function: F) -> ExceptT<E, super::AsyncIO<Result<B, E>>>
+    where
+        F: FnOnce(A) -> B + Send + 'static,
+        B: Send + 'static,
+    {
+        ExceptT::new(self.inner.fmap(move |result| result.map(function)))
+    }
+
+    /// Chains `ExceptT` computations with `AsyncIO`.
+    pub fn flat_map<B, F>(self, function: F) -> ExceptT<E, super::AsyncIO<Result<B, E>>>
+    where
+        F: FnOnce(A) -> ExceptT<E, super::AsyncIO<Result<B, E>>> + Send + 'static,
+        B: Send + 'static,
+    {
+        ExceptT::new(self.inner.flat_map(move |result| match result {
+            Ok(value) => function(value).inner,
+            Err(error) => super::AsyncIO::pure(Err(error)),
+        }))
+    }
+
+    /// Alias for `flat_map` with `_async_io` suffix for consistency with other transformers.
+    pub fn flat_map_async_io<B, F>(self, function: F) -> ExceptT<E, super::AsyncIO<Result<B, E>>>
+    where
+        F: FnOnce(A) -> ExceptT<E, super::AsyncIO<Result<B, E>>> + Send + 'static,
+        B: Send + 'static,
+    {
+        self.flat_map(function)
+    }
+
+    /// Catches an error and potentially recovers.
+    pub fn catch_async_io<F>(computation: Self, handler: F) -> Self
+    where
+        F: FnOnce(E) -> Self + Send + 'static,
+    {
+        Self::new(computation.inner.flat_map(move |result| match result {
+            Ok(value) => super::AsyncIO::pure(Ok(value)),
+            Err(error) => handler(error).inner,
+        }))
+    }
+
+    /// Runs the `ExceptT` computation, returning the inner `AsyncIO`.
+    #[must_use]
+    pub fn run_async_io(self) -> super::AsyncIO<Result<A, E>> {
+        self.inner
+    }
+
+    /// Executes the `ExceptT` computation and returns the result.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(E)` if the computation failed with an error of type `E`.
+    pub async fn run_async(self) -> Result<A, E> {
+        self.inner.run_async().await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,5 +534,346 @@ mod tests {
         let except: ExceptT<String, Option<Result<i32, String>>> = ExceptT::new(Some(Ok(10)));
         let chained = except.flat_map_option(|v| ExceptT::new(Some(Ok(v * 2))));
         assert_eq!(chained.run(), Some(Ok(20)));
+    }
+}
+
+#[cfg(all(test, feature = "async"))]
+mod async_io_tests {
+    use super::*;
+    use crate::effect::AsyncIO;
+    use rstest::rstest;
+
+    #[tokio::test]
+    async fn pure_async_io_returns_success_value() {
+        let except: ExceptT<String, AsyncIO<Result<i32, String>>> = ExceptT::pure_async_io(42);
+        assert_eq!(except.run().run_async().await, Ok(42));
+    }
+
+    #[tokio::test]
+    async fn throw_async_io_returns_error_value() {
+        let except: ExceptT<String, AsyncIO<Result<i32, String>>> =
+            ExceptT::throw_async_io("error".to_string());
+        assert_eq!(except.run().run_async().await, Err("error".to_string()));
+    }
+
+    #[tokio::test]
+    async fn lift_async_io_wraps_success_in_ok() {
+        let async_io = AsyncIO::pure(42);
+        let except: ExceptT<String, AsyncIO<Result<i32, String>>> =
+            ExceptT::lift_async_io(async_io);
+        assert_eq!(except.run().run_async().await, Ok(42));
+    }
+
+    #[tokio::test]
+    async fn from_result_lifts_ok_value() {
+        let except: ExceptT<String, AsyncIO<Result<i32, String>>> = ExceptT::from_result(Ok(42));
+        assert_eq!(except.run().run_async().await, Ok(42));
+    }
+
+    #[tokio::test]
+    async fn from_result_lifts_err_value() {
+        let except: ExceptT<String, AsyncIO<Result<i32, String>>> =
+            ExceptT::from_result(Err("error".to_string()));
+        assert_eq!(except.run().run_async().await, Err("error".to_string()));
+    }
+
+    #[tokio::test]
+    async fn fmap_async_io_transforms_success_value() {
+        let except: ExceptT<String, AsyncIO<Result<i32, String>>> = ExceptT::pure_async_io(10);
+        let mapped = except.fmap_async_io(|x| x * 2);
+        assert_eq!(mapped.run().run_async().await, Ok(20));
+    }
+
+    #[tokio::test]
+    async fn fmap_async_io_propagates_error() {
+        let except: ExceptT<String, AsyncIO<Result<i32, String>>> =
+            ExceptT::throw_async_io("error".to_string());
+        let mapped = except.fmap_async_io(|x| x * 2);
+        assert_eq!(mapped.run().run_async().await, Err("error".to_string()));
+    }
+
+    #[tokio::test]
+    async fn flat_map_chains_success_computations() {
+        let except: ExceptT<String, AsyncIO<Result<i32, String>>> = ExceptT::pure_async_io(10);
+        let chained = except.flat_map(|v| ExceptT::pure_async_io(v * 2));
+        assert_eq!(chained.run().run_async().await, Ok(20));
+    }
+
+    #[tokio::test]
+    async fn flat_map_short_circuits_on_error() {
+        let except: ExceptT<String, AsyncIO<Result<i32, String>>> =
+            ExceptT::throw_async_io("error".to_string());
+        let chained = except.flat_map(|v| ExceptT::pure_async_io(v * 2));
+        assert_eq!(chained.run().run_async().await, Err("error".to_string()));
+    }
+
+    #[tokio::test]
+    async fn flat_map_propagates_error_from_chained_computation() {
+        let except: ExceptT<String, AsyncIO<Result<i32, String>>> = ExceptT::pure_async_io(10);
+        let chained = except.flat_map(|_v| {
+            ExceptT::<String, AsyncIO<Result<i32, String>>>::throw_async_io(
+                "chained error".to_string(),
+            )
+        });
+        assert_eq!(
+            chained.run().run_async().await,
+            Err("chained error".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn flat_map_chains_multiple_computations() {
+        let except: ExceptT<String, AsyncIO<Result<i32, String>>> = ExceptT::pure_async_io(5);
+        let chained = except
+            .flat_map(|x| ExceptT::pure_async_io(x + 1))
+            .flat_map(|x| ExceptT::pure_async_io(x * 2))
+            .flat_map(|x| ExceptT::pure_async_io(x + 10));
+        assert_eq!(chained.run().run_async().await, Ok(22));
+    }
+
+    #[tokio::test]
+    async fn flat_map_async_io_is_alias_for_flat_map() {
+        let except: ExceptT<String, AsyncIO<Result<i32, String>>> = ExceptT::pure_async_io(10);
+        let chained = except.flat_map_async_io(|v| ExceptT::pure_async_io(v * 2));
+        assert_eq!(chained.run().run_async().await, Ok(20));
+    }
+
+    #[tokio::test]
+    async fn catch_async_io_recovers_from_error() {
+        let failing: ExceptT<String, AsyncIO<Result<i32, String>>> =
+            ExceptT::throw_async_io("error".to_string());
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let recovered =
+            ExceptT::catch_async_io(failing, |e| ExceptT::pure_async_io(e.len() as i32));
+        assert_eq!(recovered.run().run_async().await, Ok(5));
+    }
+
+    #[tokio::test]
+    async fn catch_async_io_passes_through_success() {
+        let success: ExceptT<String, AsyncIO<Result<i32, String>>> = ExceptT::pure_async_io(42);
+        let unchanged = ExceptT::catch_async_io(success, |_| ExceptT::pure_async_io(0));
+        assert_eq!(unchanged.run().run_async().await, Ok(42));
+    }
+
+    #[tokio::test]
+    async fn catch_async_io_can_re_throw_error() {
+        let failing: ExceptT<String, AsyncIO<Result<i32, String>>> =
+            ExceptT::throw_async_io("original".to_string());
+        let re_thrown =
+            ExceptT::catch_async_io(failing, |e| ExceptT::throw_async_io(format!("caught: {e}")));
+        assert_eq!(
+            re_thrown.run().run_async().await,
+            Err("caught: original".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn run_async_is_shortcut_for_run_then_run_async() {
+        let except: ExceptT<String, AsyncIO<Result<i32, String>>> = ExceptT::pure_async_io(42);
+        assert_eq!(except.run_async().await, Ok(42));
+    }
+
+    #[tokio::test]
+    async fn run_async_returns_error() {
+        let except: ExceptT<String, AsyncIO<Result<i32, String>>> =
+            ExceptT::throw_async_io("error".to_string());
+        assert_eq!(except.run_async().await, Err("error".to_string()));
+    }
+
+    // Monad Laws
+
+    #[rstest]
+    #[case(0)]
+    #[case(42)]
+    #[case(-100)]
+    #[tokio::test]
+    async fn monad_left_identity_law(#[case] value: i32) {
+        let f = |x: i32| ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(x * 2);
+
+        let left = ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(value)
+            .flat_map(f)
+            .run_async()
+            .await;
+        let right = f(value).run_async().await;
+
+        assert_eq!(left, right);
+    }
+
+    #[rstest]
+    #[case(0)]
+    #[case(42)]
+    #[case(-100)]
+    #[tokio::test]
+    async fn monad_right_identity_law(#[case] value: i32) {
+        let left = ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(value)
+            .flat_map(ExceptT::pure_async_io)
+            .run_async()
+            .await;
+        let right = ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(value)
+            .run_async()
+            .await;
+
+        assert_eq!(left, right);
+    }
+
+    #[rstest]
+    #[case(0)]
+    #[case(5)]
+    #[case(-10)]
+    #[tokio::test]
+    async fn monad_associativity_law(#[case] value: i32) {
+        fn f(x: i32) -> ExceptT<String, AsyncIO<Result<i32, String>>> {
+            ExceptT::pure_async_io(x + 1)
+        }
+        fn g(x: i32) -> ExceptT<String, AsyncIO<Result<i32, String>>> {
+            ExceptT::pure_async_io(x * 2)
+        }
+
+        let left = ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(value)
+            .flat_map(f)
+            .flat_map(g)
+            .run_async()
+            .await;
+        let right = ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(value)
+            .flat_map(|x| f(x).flat_map(g))
+            .run_async()
+            .await;
+
+        assert_eq!(left, right);
+    }
+
+    // Functor Laws
+
+    #[rstest]
+    #[case(42)]
+    #[case(0)]
+    #[case(-100)]
+    #[tokio::test]
+    async fn functor_identity_law(#[case] value: i32) {
+        let left = ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(value)
+            .fmap_async_io(|x| x)
+            .run_async()
+            .await;
+        let right = ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(value)
+            .run_async()
+            .await;
+
+        assert_eq!(left, right);
+    }
+
+    #[rstest]
+    #[case(5)]
+    #[case(0)]
+    #[case(-10)]
+    #[tokio::test]
+    async fn functor_composition_law(#[case] value: i32) {
+        fn f(x: i32) -> i32 {
+            x + 1
+        }
+        fn g(x: i32) -> i32 {
+            x * 2
+        }
+
+        let left = ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(value)
+            .fmap_async_io(|x| g(f(x)))
+            .run_async()
+            .await;
+        let right = ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(value)
+            .fmap_async_io(f)
+            .fmap_async_io(g)
+            .run_async()
+            .await;
+
+        assert_eq!(left, right);
+    }
+
+    // eff_async! Macro Compatibility
+
+    #[tokio::test]
+    async fn eff_async_macro_with_exceptt_single_bind() {
+        let result = crate::eff_async! {
+            x <= ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(5);
+            ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(x * 2)
+        };
+        assert_eq!(result.run_async().await, Ok(10));
+    }
+
+    #[tokio::test]
+    async fn eff_async_macro_with_exceptt_multiple_binds() {
+        let result = crate::eff_async! {
+            x <= ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(5);
+            y <= ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(10);
+            let z = x + y;
+            ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(z * 2)
+        };
+        assert_eq!(result.run_async().await, Ok(30));
+    }
+
+    #[tokio::test]
+    async fn eff_async_macro_with_exceptt_error_short_circuit() {
+        let result = crate::eff_async! {
+            x <= ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(5);
+            _ <= ExceptT::<String, AsyncIO<Result<i32, String>>>::throw_async_io("error".to_string());
+            ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(x * 2)
+        };
+        assert_eq!(result.run_async().await, Err("error".to_string()));
+    }
+
+    #[tokio::test]
+    async fn eff_async_macro_with_exceptt_conditional_error() {
+        fn divide(a: i32, b: i32) -> ExceptT<String, AsyncIO<Result<i32, String>>> {
+            if b == 0 {
+                ExceptT::throw_async_io("Division by zero".to_string())
+            } else {
+                ExceptT::pure_async_io(a / b)
+            }
+        }
+
+        let result = crate::eff_async! {
+            x <= ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(10);
+            y <= divide(x, 2);
+            z <= divide(y, 0);
+            ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(z)
+        };
+        assert_eq!(
+            result.run_async().await,
+            Err("Division by zero".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn eff_async_macro_with_exceptt_successful_chain() {
+        fn add_one(x: i32) -> ExceptT<String, AsyncIO<Result<i32, String>>> {
+            ExceptT::pure_async_io(x + 1)
+        }
+        fn double(x: i32) -> ExceptT<String, AsyncIO<Result<i32, String>>> {
+            ExceptT::pure_async_io(x * 2)
+        }
+
+        let result = crate::eff_async! {
+            x <= ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(5);
+            y <= add_one(x);
+            z <= double(y);
+            ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(z + 10)
+        };
+        assert_eq!(result.run_async().await, Ok(22));
+    }
+
+    #[tokio::test]
+    async fn eff_async_macro_with_exceptt_wildcard_pattern() {
+        let result = crate::eff_async! {
+            _ <= ExceptT::<String, AsyncIO<Result<&str, String>>>::pure_async_io("ignored");
+            ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(42)
+        };
+        assert_eq!(result.run_async().await, Ok(42));
+    }
+
+    #[tokio::test]
+    async fn eff_async_macro_with_exceptt_tuple_pattern() {
+        let result = crate::eff_async! {
+            (a, b) <= ExceptT::<String, AsyncIO<Result<(i32, i32), String>>>::pure_async_io((10, 20));
+            ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(a + b)
+        };
+        assert_eq!(result.run_async().await, Ok(30));
     }
 }
