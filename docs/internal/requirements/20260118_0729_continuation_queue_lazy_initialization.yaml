@@ -1,0 +1,311 @@
+# ContinuationQueue Lazy Initialization 要件定義
+#
+# 概要:
+#   ContinuationQueue に遅延初期化パターンを導入し、
+#   Reader.ask() 等の単純操作のパフォーマンスを最適化する
+#
+# 設計方針:
+#   1. Empty/Single/Multi の3状態 enum で VecDeque アロケーションを遅延
+#   2. QueueStack.pending を Option<Vec> に変更し不要なアロケーションを削減
+#   3. 既存 API を維持し、内部実装のみを変更
+#   4. 分岐を最小化し、チェーン操作のパフォーマンス劣化を防ぐ
+#   5. FIFO 順序を維持（push_arrow は末尾追加、pop は先頭取り出し）
+#
+# 参照:
+#   - GitHub Issue #191: Reader Effect 単純操作パフォーマンス最適化
+#   - "Reflection without Remorse" Pattern
+#   - Haskell freer-simple パフォーマンス分析
+
+version: "1.0.0"
+name: "continuation_queue_lazy_initialization"
+description: |
+  Phase 1 で導入した ContinuationQueue は、継続の追加・取り出しを O(1) で実現するために
+  VecDeque を使用している。しかし、Reader.ask() のような単純操作では継続が1つしかないにも
+  関わらず VecDeque のアロケーションが発生し、パフォーマンスが劣化している。
+
+  本要件では、ContinuationQueue に遅延初期化パターンを導入し、単純操作での不要な
+  アロケーションを削減することで、従来実装の2倍以内のパフォーマンスを目指す。
+
+# 背景・動機
+background:
+  problem: |
+    Phase 1 で「Reflection without Remorse」パターンを導入し、チェーン操作
+    （flat_map連鎖）は -93%〜-98% と大幅改善された。
+
+    しかし、単純操作は劣化した:
+    - Reader.ask(): 従来実装 63ns に対して Eff 版 277ns（約4.3倍）
+    - State.get(): 従来実装 98ns に対して Eff 版 289ns（約2.9倍）
+
+    原因:
+    1. ContinuationQueue::new() で常に VecDeque が作成される
+    2. 単純操作では継続が1つしかないのに VecDeque を使用
+    3. QueueStack の pending が常に Vec::new() で初期化される
+
+  motivation: |
+    Algebraic Effect の利便性を享受しつつ、単純操作でも実用的なパフォーマンスを
+    維持することで、ライブラリの適用範囲を広げる。
+
+    目標:
+    - 単純操作: 従来実装の2倍以内（現状4.3倍 → 2倍以内）
+    - チェーン操作: Phase 1 の改善を維持（5%以内の劣化許容）
+
+  prior_art:
+    - name: "Haskell freer-simple"
+      description: |
+        型消去キューを使用した Freer Monad 実装。
+        Lazy evaluation により不要なアロケーションを回避。
+    - name: "Scala ZIO"
+      description: |
+        FiberRef を使用した状態管理で、単純操作の最適化を実現。
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. ContinuationQueue の3状態 enum 化
+  # ======================================================================
+  - id: continuation_queue_three_state_enum
+    name: "ContinuationQueue 3状態 enum"
+    description: |
+      ContinuationQueue の内部構造を3状態の enum に変更し、
+      継続の数に応じて最適なデータ構造を使用する。
+
+      - Empty: 継続なし（アロケーションなし）
+      - Single: 継続1つ（Box のみ、VecDeque なし）
+      - Multi: 継続2つ以上（VecDeque 使用）
+
+      不変条件:
+      - Multi は常に2要素以上を持つ（1要素の Multi は許容されない）
+      - Empty は0要素、Single は1要素を保持
+      - FIFO 順序: push_arrow は末尾追加、pop は先頭取り出し
+
+      実装指針:
+      - 状態遷移は単一の match 式で完結させ、分岐を最小化する
+      - ホットパス（pop の Empty/Single ケース）は可能な限り早期リターン
+      - debug_assert! で不変条件を検証（Multi の長さ >= 2）
+
+    laws:
+      - name: "状態遷移の一貫性"
+        description: |
+          push 操作は Empty → Single → Multi の順に遷移し、
+          pop 操作は Multi → Single → Empty の順に遷移する。
+        equation: |
+          push(Empty, a) = Single(a)
+          push(Single(a), b) = Multi([a, b])
+          push(Multi(xs), a) = Multi(xs ++ [a])
+
+          pop(Empty) = (None, Empty)
+          pop(Single(a)) = (Some(a), Empty)
+          pop(Multi([a, b])) = (Some(a), Single(b))      -- 2要素 → Single に遷移
+          pop(Multi([a, b, c, ...xs])) = (Some(a), Multi([b, c, ...xs]))
+
+          -- 不変条件: Multi は常に2要素以上を持つ
+          -- 1要素の Multi は許容されない（Single を使用）
+        property_test: |
+          // 任意の操作列に対して、状態遷移が一貫していることを検証
+          proptest! {
+              #[test]
+              fn state_transition_consistency(ops in vec(any::<Op>(), 0..100)) {
+                  let mut queue = ContinuationQueue::new();
+                  for op in ops {
+                      match op {
+                          Op::Push(arrow) => queue.push_arrow(arrow),
+                          Op::Pop => { queue.pop(); }
+                      }
+                  }
+                  // 操作後も有効な状態であることを確認
+                  prop_assert!(queue.is_valid_state());
+              }
+          }
+
+      - name: "観測等価性"
+        description: |
+          最適化前（VecDeque のみ）と最適化後（3状態 enum）の実装が
+          同じ操作列に対して同じ結果を返すことを保証する。
+        equation: |
+          ∀ ops: [Op], run_vecdeque(ops) = run_three_state(ops)
+        property_test: |
+          proptest! {
+              #[test]
+              fn observational_equivalence(ops in vec(any::<Op>(), 0..100)) {
+                  // 同じ操作列に対して、両実装が同じ結果を返すことを検証
+                  let old_results = run_with_vecdeque(ops.clone());
+                  let new_results = run_with_three_state(ops);
+                  prop_assert_eq!(old_results, new_results);
+              }
+          }
+
+    methods:
+      - name: "new"
+        signature: "pub fn new() -> Self"
+        description: |
+          空の ContinuationQueue を作成する。
+          内部状態は Empty で、アロケーションは発生しない。
+        examples:
+          - description: "空のキューを作成"
+            code: |
+              let queue: ContinuationQueue<M> = ContinuationQueue::new();
+              assert!(queue.is_empty());
+
+      - name: "push_arrow"
+        signature: "pub fn push_arrow(&mut self, arrow: Box<dyn TypeErasedArrow<M>>)"
+        description: |
+          継続をキューの末尾に追加する。
+          状態に応じて Empty → Single → Multi に遷移する。
+        examples:
+          - description: "Empty → Single への遷移"
+            code: |
+              let mut queue = ContinuationQueue::new();
+              queue.push_arrow(make_arrow());
+              // 内部状態は Single
+
+      - name: "pop"
+        signature: "pub fn pop(&mut self) -> Option<Box<dyn TypeErasedArrow<M>>>"
+        description: |
+          キューの先頭から継続を取り出す。
+          状態に応じて Multi → Single → Empty に遷移する。
+        examples:
+          - description: "Single → Empty への遷移"
+            code: |
+              let mut queue = ContinuationQueue::new();
+              queue.push_arrow(make_arrow());
+              let arrow = queue.pop();  // Some(arrow), 状態は Empty に遷移
+              assert!(queue.is_empty());
+
+      - name: "is_empty"
+        signature: "pub fn is_empty(&self) -> bool"
+        description: |
+          キューが空かどうかを判定する。
+          Empty 状態の場合に true を返す。
+
+    implementations:
+      - type: "ContinuationQueue<M>"
+        description: |
+          内部に ContinuationQueueInner enum を持ち、
+          Empty/Single/Multi の3状態を管理する。
+
+  # ======================================================================
+  # 2. QueueStack の Option<Vec> 化
+  # ======================================================================
+  - id: queue_stack_optional_pending
+    name: "QueueStack pending の Option 化"
+    status: "見送り"
+    description: |
+      QueueStack の pending フィールドを Option<Vec<...>> に変更し、
+      単純操作での不要なアロケーションを削減する予定だった。
+
+      単純操作（継続が1つ）では pending は None のままで、
+      ネストした操作でのみ Some(Vec::new()) が初期化される構想だったが、
+      ベンチマーク検証の結果、チェーン操作で5%以上の劣化が確認されたため、
+      フォールバック戦略に従い見送りとした。
+
+      **見送り理由:**
+      - Option<Vec> 導入後のベンチマークでチェーン操作が劣化
+        - writer_effect_tell_chain/100: +8%
+        - freer_then/then_chain/10: +10%
+        - state_effect_modify/10: +17%
+      - Vec::new() は実際にはヒープアロケーションを行わない（長さ0で容量0）
+      - 単純操作の改善効果に対して、チェーン操作の劣化リスクが大きい
+
+      **現在の実装:**
+      pending は Vec<ContinuationQueue<M>> のまま維持。
+
+    methods:
+      - name: "new"
+        signature: "pub const fn new(initial: ContinuationQueue<M>) -> Self"
+        description: |
+          初期キューを受け取り、QueueStack を作成する。
+          pending は None で初期化される。
+
+      - name: "push_queue"
+        signature: "pub fn push_queue(&mut self, queue: ContinuationQueue<M>)"
+        description: |
+          新しいキューをスタックにプッシュする。
+          現在のキューが空でない場合、pending を初期化して追加する。
+
+      - name: "pop"
+        signature: "pub fn pop(&mut self) -> Option<Box<dyn TypeErasedArrow<M>>>"
+        description: |
+          次の継続を取り出す。
+          current が空の場合、pending から次のキューを取得する。
+
+    implementations:
+      - type: "QueueStack<M>"
+        description: |
+          pending フィールドを Option<Vec<ContinuationQueue<M>>> に変更。
+
+  # ======================================================================
+  # 3. API 互換性の維持
+  # ======================================================================
+  - id: api_compatibility
+    name: "API 互換性"
+    description: |
+      内部実装の変更は、外部 API に影響を与えてはならない。
+      既存のテストがすべて通過することを確認する。
+
+    methods:
+      - name: "既存メソッドのシグネチャ維持"
+        signature: "N/A"
+        description: |
+          以下のメソッドのシグネチャは変更しない:
+          - ContinuationQueue::new()
+          - ContinuationQueue::push_arrow()
+          - ContinuationQueue::pop()
+          - ContinuationQueue::is_empty()
+          - QueueStack::new()
+          - QueueStack::push_queue()
+          - QueueStack::pop()
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    # 優先順位（トレードオフ発生時の判断基準）:
+    # 1. チェーン操作のパフォーマンス維持（Phase 1 の改善を失わない）
+    # 2. 単純操作のパフォーマンス改善（従来実装の2倍以内）
+    # 理由: チェーン操作の O(n^2) → O(n) 改善は本ライブラリの主要な価値であり、
+    #       単純操作の改善のためにこれを犠牲にすべきではない
+    targets:
+      - "単純操作（Reader.ask, State.get 等）: 従来実装の2倍以内"
+      - "チェーン操作（flat_map連鎖）: Phase 1 からの劣化を5%以内に抑える"
+      - "Freer Monad の interpret: Phase 1 からの劣化を5%以内に抑える"
+      - "スタック安全性: 深い flat_map チェーン（10,000+）でもスタックオーバーフローしない"
+    fallback:
+      - "チェーン操作が5%以上劣化する場合は、QueueStack.pending の Option 化を見送る"
+      - "単純操作の改善が不十分な場合は、SmallVec 等の追加最適化を検討"
+    benchmarks:
+      - "単純操作: reader_comparison, state_comparison, writer_comparison"
+      - "チェーン操作: reader_effect_flat_map_chain, state_effect_modify, writer_effect_tell_chain"
+      - "混在パターン: 単純操作とチェーン操作の組み合わせ（新規追加を検討）"
+
+  compatibility:
+    - "既存の公開 API を維持（シグネチャの変更なし）"
+    - "既存のテストがすべて通過する"
+    - "Freer Monad との互換性を維持"
+    - "Algebraic Effect との互換性を維持"
+
+  testing:
+    - "状態遷移の単体テスト（Empty/Single/Multi の各遷移）"
+    - "境界条件のテスト（空キュー、1要素、多要素）"
+    - "プロパティテスト（任意の操作列に対する一貫性）"
+    - "ベンチマークによるパフォーマンス検証"
+    - "回帰テスト（既存テストの全通過）"
+
+# 将来の拡張
+future_extensions:
+  - id: small_vec_optimization
+    name: "SmallVec 最適化"
+    description: |
+      Multi 状態で VecDeque の代わりに SmallVec を使用し、
+      小規模なチェーン操作でのヒープアロケーションを削減する。
+    rationale: |
+      本要件では3状態 enum による最適化を優先する。
+      SmallVec の導入は追加の依存関係が必要となるため、
+      パフォーマンス測定後に検討する。
+
+  - id: direct_handler_path
+    name: "Direct Handler Path"
+    description: |
+      単一エフェクト用の最適化されたハンドラーパスを提供し、
+      type erasure と downcast のオーバーヘッドを削減する。
+    rationale: |
+      本要件ではキュー構造の最適化を優先する。
+      ハンドラーの最適化は別の要件として切り出す。

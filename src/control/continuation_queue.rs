@@ -14,17 +14,39 @@
 //! ## Key Components
 //!
 //! - [`TypeErasedArrow`]: Trait for type-erased continuations
-//! - [`ContinuationQueue`]: VecDeque-based queue for O(1) push/pop
+//! - [`ContinuationQueue`]: Lazy-initialized queue with 3-state enum for O(1) push/pop
 //! - [`QueueStack`]: Stack of queues to avoid O(n^2) concatenation
 //!
 //! # Invariants
 //!
 //! - **FIFO Order**: Continuations are processed in first-in-first-out order
 //! - **LIFO Queue Stack**: When nested effects occur, queues are stacked in LIFO order
-//! - **Ownership-based Immutability**: All operations consume `self` and return new values
+//! - **Mutable Operations**: Operations use `&mut self` for in-place state transitions
 
 use std::any::Any;
 use std::collections::VecDeque;
+
+/// Internal representation of a continuation queue with three states.
+///
+/// This enum enables lazy initialization and optimal memory usage:
+/// - `Empty`: No continuations, no allocations
+/// - `Single`: One continuation, only a Box allocation
+/// - `Multi`: Two or more continuations, uses `VecDeque`
+///
+/// # Invariants
+///
+/// - `Multi` always contains at least 2 elements
+/// - FIFO order is maintained across all states
+#[derive(Default)]
+enum ContinuationQueueInner<M> {
+    /// No continuations (zero allocation)
+    #[default]
+    Empty,
+    /// Exactly one continuation (Box only, no `VecDeque`)
+    Single(Box<dyn TypeErasedArrow<M>>),
+    /// Two or more continuations (`VecDeque` for efficient FIFO)
+    Multi(VecDeque<Box<dyn TypeErasedArrow<M>>>),
+}
 
 /// Type-erased arrow (continuation).
 ///
@@ -58,9 +80,12 @@ pub trait TypeErasedArrow<M> {
     fn apply(self: Box<Self>, input: Box<dyn Any>) -> M;
 }
 
-/// Continuation queue (VecDeque-based).
+/// Continuation queue with lazy initialization.
 ///
-/// Stores type-erased continuations for O(1) push and O(1) pop.
+/// Stores type-erased continuations with optimal memory usage:
+/// - Empty state: no allocations
+/// - Single element: only Box allocation
+/// - Multiple elements: `VecDeque` for O(1) push/pop
 ///
 /// # Type Parameters
 ///
@@ -70,51 +95,103 @@ pub trait TypeErasedArrow<M> {
 ///
 /// - Continuations are processed in FIFO order
 /// - `pop` returns `None` when empty
+/// - Internal `Multi` state always has 2+ elements
 ///
 /// # Note
 ///
 /// This type does NOT implement `Clone`. Ownership semantics ensure
 /// that each queue has exactly one owner, providing logical immutability.
 pub struct ContinuationQueue<M> {
-    arrows: VecDeque<Box<dyn TypeErasedArrow<M>>>,
+    inner: ContinuationQueueInner<M>,
 }
 
 impl<M> ContinuationQueue<M> {
     /// Creates a new empty continuation queue.
+    ///
+    /// This operation is zero-cost: no heap allocations occur.
     #[inline]
-    pub(crate) fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
-            arrows: VecDeque::new(),
+            inner: ContinuationQueueInner::Empty,
         }
     }
 
     /// Returns `true` if the queue is empty.
     #[inline]
-    pub(crate) fn is_empty(&self) -> bool {
-        self.arrows.is_empty()
+    pub(crate) const fn is_empty(&self) -> bool {
+        matches!(self.inner, ContinuationQueueInner::Empty)
     }
 
     /// Removes and returns the first continuation from the queue.
     ///
     /// Returns `None` if the queue is empty.
+    ///
+    /// # State Transitions
+    ///
+    /// - `Empty` -> `Empty` (returns `None`)
+    /// - `Single(a)` -> `Empty` (returns `Some(a)`)
+    /// - `Multi([a, b])` -> `Single(b)` (returns `Some(a)`)
+    /// - `Multi([a, b, c, ...])` -> `Multi([b, c, ...])` (returns `Some(a)`)
     #[inline]
     pub(crate) fn pop(&mut self) -> Option<Box<dyn TypeErasedArrow<M>>> {
-        self.arrows.pop_front()
+        let inner = std::mem::take(&mut self.inner);
+
+        match inner {
+            ContinuationQueueInner::Empty => None,
+            ContinuationQueueInner::Single(arrow) => Some(arrow),
+            ContinuationQueueInner::Multi(mut deque) => {
+                let arrow = deque
+                    .pop_front()
+                    .expect("Multi invariant: at least 2 elements");
+
+                self.inner = if deque.len() == 1 {
+                    ContinuationQueueInner::Single(deque.pop_front().expect("checked len == 1"))
+                } else {
+                    debug_assert!(deque.len() >= 2, "Multi invariant: at least 2 elements");
+                    ContinuationQueueInner::Multi(deque)
+                };
+                Some(arrow)
+            }
+        }
     }
 
     /// Adds a continuation to the end of the queue.
     ///
     /// This is an O(1) amortized operation.
+    ///
+    /// # State Transitions
+    ///
+    /// - `Empty` -> `Single(a)`
+    /// - `Single(a)` -> `Multi([a, b])`
+    /// - `Multi(xs)` -> `Multi(xs ++ [a])`
     #[inline]
     pub(crate) fn push_arrow(&mut self, arrow: Box<dyn TypeErasedArrow<M>>) {
-        self.arrows.push_back(arrow);
+        let inner = std::mem::take(&mut self.inner);
+
+        self.inner = match inner {
+            ContinuationQueueInner::Empty => ContinuationQueueInner::Single(arrow),
+            ContinuationQueueInner::Single(existing) => {
+                let mut deque = VecDeque::with_capacity(4);
+                deque.push_back(existing);
+                deque.push_back(arrow);
+                ContinuationQueueInner::Multi(deque)
+            }
+            ContinuationQueueInner::Multi(mut deque) => {
+                deque.push_back(arrow);
+                ContinuationQueueInner::Multi(deque)
+            }
+        };
     }
 
     /// Returns the number of continuations in the queue.
     #[inline]
     #[allow(dead_code)]
     pub(crate) fn len(&self) -> usize {
-        self.arrows.len()
+        match &self.inner {
+            ContinuationQueueInner::Empty => 0,
+            ContinuationQueueInner::Single(_) => 1,
+            ContinuationQueueInner::Multi(deque) => deque.len(),
+        }
     }
 }
 
@@ -190,7 +267,7 @@ impl<M> QueueStack<M> {
     /// Returns `true` if all queues are exhausted.
     #[inline]
     #[allow(dead_code)]
-    pub(crate) fn is_exhausted(&self) -> bool {
+    pub(crate) const fn is_exhausted(&self) -> bool {
         self.current.is_empty() && self.pending.is_empty()
     }
 }
@@ -414,6 +491,190 @@ mod tests {
         assert!(stack.is_exhausted());
     }
 
+    // ==========================================================================
+    // ContinuationQueue State Transition Tests (3-state enum)
+    // ==========================================================================
+
+    #[rstest]
+    fn continuation_queue_state_empty_to_single() {
+        // Empty -> Single transition on first push
+        let mut queue: ContinuationQueue<Box<dyn Any>> = ContinuationQueue::new();
+        assert!(queue.is_empty());
+        assert_eq!(queue.len(), 0);
+
+        queue.push_arrow(make_add_one_arrow());
+        assert!(!queue.is_empty());
+        assert_eq!(queue.len(), 1);
+    }
+
+    #[rstest]
+    fn continuation_queue_state_single_to_multi() {
+        // Single -> Multi transition on second push
+        let mut queue: ContinuationQueue<Box<dyn Any>> = ContinuationQueue::new();
+        queue.push_arrow(make_add_one_arrow());
+        assert_eq!(queue.len(), 1);
+
+        queue.push_arrow(make_multiply_two_arrow());
+        assert_eq!(queue.len(), 2);
+        assert!(!queue.is_empty());
+    }
+
+    #[rstest]
+    fn continuation_queue_state_multi_grows() {
+        // Multi state grows with more pushes
+        let mut queue: ContinuationQueue<Box<dyn Any>> = ContinuationQueue::new();
+        queue.push_arrow(make_add_one_arrow());
+        queue.push_arrow(make_multiply_two_arrow());
+        queue.push_arrow(make_add_one_arrow());
+        assert_eq!(queue.len(), 3);
+
+        queue.push_arrow(make_multiply_two_arrow());
+        assert_eq!(queue.len(), 4);
+    }
+
+    #[rstest]
+    fn continuation_queue_state_single_to_empty() {
+        // Single -> Empty transition on pop
+        let mut queue: ContinuationQueue<Box<dyn Any>> = ContinuationQueue::new();
+        queue.push_arrow(make_add_one_arrow());
+        assert_eq!(queue.len(), 1);
+
+        let arrow = queue.pop();
+        assert!(arrow.is_some());
+        assert!(queue.is_empty());
+        assert_eq!(queue.len(), 0);
+    }
+
+    #[rstest]
+    fn continuation_queue_state_multi_to_single() {
+        // Multi (2 elements) -> Single transition on pop
+        let mut queue: ContinuationQueue<Box<dyn Any>> = ContinuationQueue::new();
+        queue.push_arrow(make_add_one_arrow());
+        queue.push_arrow(make_multiply_two_arrow());
+        assert_eq!(queue.len(), 2);
+
+        let arrow = queue.pop();
+        assert!(arrow.is_some());
+        assert_eq!(queue.len(), 1);
+        assert!(!queue.is_empty());
+    }
+
+    #[rstest]
+    fn continuation_queue_state_multi_shrinks() {
+        // Multi (3+ elements) -> Multi (2+ elements) on pop
+        let mut queue: ContinuationQueue<Box<dyn Any>> = ContinuationQueue::new();
+        queue.push_arrow(make_add_one_arrow());
+        queue.push_arrow(make_multiply_two_arrow());
+        queue.push_arrow(make_add_one_arrow());
+        assert_eq!(queue.len(), 3);
+
+        let arrow = queue.pop();
+        assert!(arrow.is_some());
+        assert_eq!(queue.len(), 2);
+    }
+
+    #[rstest]
+    fn continuation_queue_state_multi_to_single_to_empty() {
+        // Full cycle: Multi -> Single -> Empty
+        let mut queue: ContinuationQueue<Box<dyn Any>> = ContinuationQueue::new();
+        queue.push_arrow(make_add_one_arrow());
+        queue.push_arrow(make_multiply_two_arrow());
+        assert_eq!(queue.len(), 2);
+
+        queue.pop(); // Multi -> Single
+        assert_eq!(queue.len(), 1);
+
+        queue.pop(); // Single -> Empty
+        assert!(queue.is_empty());
+        assert_eq!(queue.len(), 0);
+    }
+
+    #[rstest]
+    fn continuation_queue_fifo_order_with_three_elements() {
+        // Verify FIFO order: first pushed is first popped
+        let mut queue: ContinuationQueue<Box<dyn Any>> = ContinuationQueue::new();
+
+        // Push: +1, *2, +1 (in this order)
+        queue.push_arrow(Box::new(SimpleArrow::new(|input: Box<dyn Any>| {
+            let value = *input.downcast::<i32>().expect("expected i32");
+            Box::new(value + 1) as Box<dyn Any>
+        })));
+        queue.push_arrow(Box::new(SimpleArrow::new(|input: Box<dyn Any>| {
+            let value = *input.downcast::<i32>().expect("expected i32");
+            Box::new(value * 2) as Box<dyn Any>
+        })));
+        queue.push_arrow(Box::new(SimpleArrow::new(|input: Box<dyn Any>| {
+            let value = *input.downcast::<i32>().expect("expected i32");
+            Box::new(value + 100) as Box<dyn Any>
+        })));
+
+        // Pop order should be: +1, *2, +100
+        let result1 = queue.pop().unwrap().apply(Box::new(10i32));
+        assert_eq!(*result1.downcast::<i32>().unwrap(), 11); // 10 + 1
+
+        let result2 = queue.pop().unwrap().apply(Box::new(10i32));
+        assert_eq!(*result2.downcast::<i32>().unwrap(), 20); // 10 * 2
+
+        let result3 = queue.pop().unwrap().apply(Box::new(10i32));
+        assert_eq!(*result3.downcast::<i32>().unwrap(), 110); // 10 + 100
+
+        assert!(queue.is_empty());
+    }
+
+    #[rstest]
+    fn continuation_queue_interleaved_push_pop() {
+        // Test interleaved push and pop operations
+        let mut queue: ContinuationQueue<Box<dyn Any>> = ContinuationQueue::new();
+
+        // Push +1, then pop
+        queue.push_arrow(Box::new(SimpleArrow::new(|input: Box<dyn Any>| {
+            let value = *input.downcast::<i32>().expect("expected i32");
+            Box::new(value + 1) as Box<dyn Any>
+        })));
+        let r1 = queue.pop().unwrap().apply(Box::new(10i32));
+        assert_eq!(*r1.downcast::<i32>().unwrap(), 11);
+        assert!(queue.is_empty());
+
+        // Push *2 and +100, then pop both
+        queue.push_arrow(Box::new(SimpleArrow::new(|input: Box<dyn Any>| {
+            let value = *input.downcast::<i32>().expect("expected i32");
+            Box::new(value * 2) as Box<dyn Any>
+        })));
+        queue.push_arrow(Box::new(SimpleArrow::new(|input: Box<dyn Any>| {
+            let value = *input.downcast::<i32>().expect("expected i32");
+            Box::new(value + 100) as Box<dyn Any>
+        })));
+        assert_eq!(queue.len(), 2);
+
+        let r2 = queue.pop().unwrap().apply(Box::new(10i32));
+        assert_eq!(*r2.downcast::<i32>().unwrap(), 20); // *2
+
+        let r3 = queue.pop().unwrap().apply(Box::new(10i32));
+        assert_eq!(*r3.downcast::<i32>().unwrap(), 110); // +100
+
+        assert!(queue.is_empty());
+    }
+
+    // ==========================================================================
+    // QueueStack Tests (single queue path)
+    // ==========================================================================
+
+    #[rstest]
+    fn queue_stack_single_queue_simple_path() {
+        // When only using a single queue, no entries in pending
+        let mut queue: ContinuationQueue<Box<dyn Any>> = ContinuationQueue::new();
+        queue.push_arrow(make_add_one_arrow());
+        let mut stack = QueueStack::new(queue);
+
+        // Pop all from single queue
+        let arrow = stack.pop().expect("should have arrow");
+        let result = arrow.apply(Box::new(5i32));
+        assert_eq!(*result.downcast::<i32>().unwrap(), 6);
+
+        assert!(stack.is_exhausted());
+        assert!(stack.pop().is_none());
+    }
+
     #[rstest]
     fn queue_stack_fifo_within_queue_lifo_between_queues() {
         // Test that within a queue, arrows are processed FIFO
@@ -472,5 +733,41 @@ mod tests {
         assert_eq!(r4, "q1_second"); // FIFO within queue1
 
         assert!(stack.is_exhausted());
+    }
+
+    #[rstest]
+    fn continuation_queue_state_multi_single_multi_roundtrip() {
+        // Test roundtrip: Multi -> Single -> Multi -> Single -> Empty
+        let mut queue: ContinuationQueue<Box<dyn Any>> = ContinuationQueue::new();
+
+        // Build up to Multi (3 elements)
+        queue.push_arrow(make_add_one_arrow());
+        queue.push_arrow(make_multiply_two_arrow());
+        queue.push_arrow(make_add_one_arrow());
+        assert_eq!(queue.len(), 3);
+
+        // Multi -> Multi (3 -> 2)
+        queue.pop();
+        assert_eq!(queue.len(), 2);
+
+        // Multi -> Single (2 -> 1)
+        queue.pop();
+        assert_eq!(queue.len(), 1);
+        assert!(!queue.is_empty());
+
+        // Single -> Multi (1 -> 2): add two more
+        queue.push_arrow(make_multiply_two_arrow());
+        assert_eq!(queue.len(), 2);
+        queue.push_arrow(make_add_one_arrow());
+        assert_eq!(queue.len(), 3);
+
+        // Multi -> Single -> Empty
+        queue.pop();
+        assert_eq!(queue.len(), 2);
+        queue.pop();
+        assert_eq!(queue.len(), 1);
+        queue.pop();
+        assert!(queue.is_empty());
+        assert_eq!(queue.len(), 0);
     }
 }
