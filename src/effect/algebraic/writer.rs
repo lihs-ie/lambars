@@ -125,10 +125,14 @@ impl<W: Monoid + Clone + 'static> WriterHandler<W> {
         Self(PhantomData)
     }
 
-    /// Runs the computation with a mutable log cell (internal).
+    /// Runs the computation with a mutable buffer.
     ///
-    /// Uses an iterative approach for stack safety.
-    fn run_with_log<A: 'static>(computation: Eff<WriterEffect<W>, A>, log: &RefCell<W>) -> A {
+    /// Uses `Vec<W>` to accumulate outputs, achieving O(n) time complexity
+    /// instead of O(n^2) with the naive approach.
+    fn run_with_buffer<A: 'static>(
+        computation: Eff<WriterEffect<W>, A>,
+        buffer: &RefCell<Vec<W>>,
+    ) -> A {
         let mut current_computation = computation;
 
         loop {
@@ -142,10 +146,8 @@ impl<W: Monoid + Clone + 'static> WriterHandler<W> {
                             .arguments
                             .downcast::<W>()
                             .expect("Type mismatch in Writer::tell");
-                        let current = log.borrow().clone();
-                        *log.borrow_mut() = current.combine(output);
-                        let continuation = operation.continuation;
-                        current_computation = continuation(Box::new(()));
+                        buffer.borrow_mut().push(output);
+                        current_computation = (operation.continuation)(Box::new(()));
                     }
                     _ => panic!("Unknown Writer operation: {:?}", operation.operation_tag),
                 },
@@ -161,9 +163,9 @@ impl<W: Monoid + Clone + 'static> Handler<WriterEffect<W>> for WriterHandler<W> 
     type Output<A> = (A, W);
 
     fn run<A: 'static>(self, computation: Eff<WriterEffect<W>, A>) -> (A, W) {
-        let log = RefCell::new(W::empty());
-        let result = Self::run_with_log(computation, &log);
-        (result, log.into_inner())
+        let buffer = RefCell::new(Vec::new());
+        let result = Self::run_with_buffer(computation, &buffer);
+        (result, W::combine_all(buffer.into_inner()))
     }
 }
 
@@ -477,5 +479,67 @@ mod tests {
         assert_eq!(log1, "ab");
         assert_eq!(log2, "ba");
         assert_ne!(log1, log2);
+    }
+
+    #[rstest]
+    fn writer_tell_1000_times_preserves_order() {
+        let handler = WriterHandler::<Vec<i32>>::new();
+        let computation = (0..1000).fold(Eff::pure(()), |computation, index| {
+            computation.then(WriterEffect::tell(vec![index]))
+        });
+        let ((), log) = handler.run(computation);
+
+        let expected: Vec<i32> = (0..1000).collect();
+        assert_eq!(log, expected);
+    }
+
+    #[rstest]
+    fn writer_tell_order_preserved_with_string() {
+        let handler = WriterHandler::<String>::new();
+        let computation = WriterEffect::tell("first".to_string())
+            .then(WriterEffect::tell("-".to_string()))
+            .then(WriterEffect::tell("second".to_string()))
+            .then(WriterEffect::tell("-".to_string()))
+            .then(WriterEffect::tell("third".to_string()));
+        let ((), log) = handler.run(computation);
+        assert_eq!(log, "first-second-third");
+    }
+}
+
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// Verifies that tell operations preserve order, which is essential
+        /// for Monoid law compliance (associativity).
+        #[test]
+        fn prop_tell_order_preserved(tells in prop::collection::vec(any::<i32>(), 0..100)) {
+            let handler = WriterHandler::<Vec<i32>>::new();
+            let computation = tells.iter().fold(
+                Eff::pure(()),
+                |computation, &value| computation.then(WriterEffect::tell(vec![value]))
+            );
+            let ((), log) = handler.run(computation);
+            prop_assert_eq!(log, tells);
+        }
+
+        /// Verifies that Vec buffer + combine_all produces the same result
+        /// as sequential combine.
+        #[test]
+        fn prop_result_equivalence_with_string(
+            parts in prop::collection::vec("[a-z]{1,5}", 0..50)
+        ) {
+            let handler = WriterHandler::<String>::new();
+            let computation = parts.iter().fold(
+                Eff::pure(()),
+                |computation, part| computation.then(WriterEffect::tell(part.clone()))
+            );
+            let ((), log) = handler.run(computation);
+
+            let expected = String::combine_all(parts);
+            prop_assert_eq!(log, expected);
+        }
     }
 }
