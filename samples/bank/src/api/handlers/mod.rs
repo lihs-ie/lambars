@@ -22,10 +22,20 @@
 //!
 //! The [`pipeline`] module provides utilities for composing handler operations
 //! using functional patterns. See [`pipeline`] for details.
+//!
+//! # Workflow Composition with eff_async!
+//!
+//! The [`workflow_eff`] module provides utilities for composing async workflows
+//! using the `ExceptT` monad transformer with `eff_async!` macro for do-notation
+//! style error handling.
 
 pub mod account;
 pub mod pipeline;
 pub mod transaction;
+pub mod workflow_eff;
 
 pub use account::{create_account, get_account, get_balance};
-pub use transaction::{deposit_handler, get_transactions, transfer_handler, withdraw_handler};
+pub use transaction::{
+    deposit_handler, deposit_handler_eff, get_transactions, transfer_handler, withdraw_handler,
+    withdraw_handler_eff,
+};
