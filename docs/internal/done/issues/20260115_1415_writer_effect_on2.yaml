@@ -1,0 +1,100 @@
+# Issue: Writer Effect の O(n²) 計算量改善
+# ベンチマーク分析で特定されたパフォーマンスボトルネック
+
+deferred_features:
+  - id: writer_effect_on2
+    name: "Writer Effect の O(n²) 計算量改善"
+    discovered_date: "2026-01-15"
+    priority: high
+    category: bug
+    labels:
+      - "effect"
+      - "performance"
+      - "priority: high"
+
+    problem:
+      summary: "Writer Effect の tell チェーンが O(n²) の計算量"
+      details: |
+        ベンチマーク分析で Writer Effect の tell チェーンが深さに対して
+        二次関数的に遅くなることが判明。
+
+        **測定結果:**
+        - writer_effect_tell_chain[10]: 8.9μs
+        - writer_effect_tell_chain[100]: 6.6ms
+        - 深さ 10 → 100 で 740倍の増加（線形なら 10倍のはず）
+
+        **影響:**
+        - ログ出力が多い処理で深刻なパフォーマンス劣化
+        - 100回の tell で 6.6ms は実用上問題がある
+
+      rust_limitation: |
+        ```rust
+        // 現在の実装（run_with_log 内）
+        // src/effect/algebraic/writer.rs:140-146
+        writer_operations::TELL => {
+            let output = *operation.arguments.downcast::<W>().expect(...);
+            let current = log.borrow().clone();  // ← 毎回全体をクローン O(n)
+            *log.borrow_mut() = current.combine(output);  // ← String 結合
+        }
+
+        // n 回の tell で:
+        // 1回目: clone 0 items, combine 1 item
+        // 2回目: clone 1 item, combine 1 item
+        // ...
+        // n回目: clone (n-1) items, combine 1 item
+        // 合計: 0 + 1 + 2 + ... + (n-1) = n(n-1)/2 = O(n²)
+        ```
+
+    solution:
+      approach: "Vec<W> 蓄積パターンへの変更で O(n) に改善"
+      options:
+        - name: "Vec<W> 蓄積パターン"
+          description: |
+            各 tell で出力を Vec に push し、最後にまとめて combine する。
+            これにより O(n²) → O(n) に改善。
+          pros:
+            - "計算量が O(n²) → O(n) に改善"
+            - "実装変更が比較的シンプル"
+            - "期待改善: 深さ100で 6.6ms → 数百μs（約10-20倍）"
+          cons:
+            - "最終結合時に一度に処理が必要"
+            - "メモリ使用量が若干増加"
+
+        - name: "Rope データ構造の使用"
+          description: |
+            String の結合に Rope データ構造を使用し、
+            効率的な連結を実現する。
+          pros:
+            - "String 結合に特化した最適化"
+            - "大きな文字列でも効率的"
+          cons:
+            - "外部依存が増える"
+            - "Writer<String, A> 以外には適用困難"
+
+        - name: "遅延評価の導入"
+          description: |
+            tell の結果を遅延評価し、実際に値が必要になるまで
+            結合を遅延させる。
+          pros:
+            - "不要な結合を回避"
+          cons:
+            - "実装が複雑"
+            - "メモリ使用パターンが変わる"
+
+      recommended: "Vec<W> 蓄積パターン"
+      estimated_complexity: low
+
+    references:
+      - "ベンチマーク: benches/effect_bench.rs (writer_effect_tell_chain)"
+      - "Writer Effect 実装: src/effect/algebraic/writer.rs"
+      - "Semigroup combine: src/typeclass/semigroup.rs"
+      - "Haskell Writer Monad の効率的な実装"
+
+    related:
+      requirement_id: null
+      plan_id: null
+
+    github_issue:
+      number: 166
+      url: "https://github.com/lihs-ie/lambars/issues/166"
+      created: true

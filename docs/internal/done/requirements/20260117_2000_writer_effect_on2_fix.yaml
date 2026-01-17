@@ -1,0 +1,718 @@
+# Writer Effect O(n^2) パフォーマンス問題修正 要件定義
+#
+# 概要:
+#   Writer Effect の tell 操作チェーンにおける O(n^2) 計算量問題を
+#   O(n) に改善する。Vec<W> 蓄積パターンを採用し、
+#   各 tell で O(1) の push を行い、最後にまとめて combine する。
+#
+# 設計方針:
+#   1. 関数型プログラミング原則の維持（不変性、参照透過性、副作用の分離）
+#   2. API 互換性の完全維持（既存コードの変更不要）
+#   3. 内部実装のみの変更（リファクタリング）
+#   4. Monoid 則との整合性を保証
+#
+# 参照:
+#   - GitHub Issue #166
+#   - Issue ファイル: docs/internal/issues/20260115_1415_writer_effect_on2.yaml
+#   - ベンチマーク: benches/algebraic_effect_bench.rs
+#   - 対象ファイル: src/effect/algebraic/writer.rs
+
+version: "1.0.0"
+name: "Writer Effect O(n^2) Performance Fix"
+description: |
+  Writer Effect の tell チェーンにおける O(n^2) 計算量問題を修正する。
+
+  現在の実装では、各 tell 操作で累積ログ全体を clone してから combine しており、
+  n 回の tell で O(n^2) のクローン操作が発生している。
+
+  本修正では、Vec<W> 蓄積パターンを採用し、各 tell で O(1) の push を行い、
+  最後にまとめて Monoid::combine_all で結合することで O(n) に改善する。
+
+  重要: この修正は内部実装のみの変更であり、外部 API は完全に互換性を維持する。
+  ユーザーから見た振る舞いは全く同じでなければならない。
+
+# 背景・動機
+background:
+  problem: |
+    ベンチマーク分析で、Writer Effect の tell チェーンが深さに対して
+    二次関数的に遅くなることが判明した。
+
+    **測定結果:**
+    - writer_effect_tell_chain[10]: 8.9us
+    - writer_effect_tell_chain[100]: 6.6ms
+    - 深さ 10 -> 100 で 740 倍の増加（線形なら 10 倍のはず）
+
+    **問題のコード (src/effect/algebraic/writer.rs:140-146):**
+    ```rust
+    writer_operations::TELL => {
+        let output = *operation.arguments.downcast::<W>().expect(...);
+        let current = log.borrow().clone();  // <- 毎回 O(n) クローン
+        *log.borrow_mut() = current.combine(output);  // <- 結合
+    }
+    ```
+
+    **計算量分析:**
+    - n 回の tell で:
+      - 1回目: clone 0 items, combine 1 item
+      - 2回目: clone 1 item, combine 1 item
+      - ...
+      - n回目: clone (n-1) items, combine 1 item
+    - 合計: 0 + 1 + 2 + ... + (n-1) = n(n-1)/2 = O(n^2)
+
+    **影響:**
+    - ログ出力が多い処理で深刻なパフォーマンス劣化
+    - 100 回の tell で 6.6ms は実用上問題がある
+    - 1000 回の tell では理論上 660ms 以上かかる
+
+  motivation: |
+    関数型プログラミングにおいて、Writer モナドは最も基本的なパターンの一つであり、
+    ログ出力、監査証跡、メトリクス収集などで広く使用される。
+
+    O(n^2) の計算量は、実用的なアプリケーションでは許容できない。
+    特に以下のユースケースで問題となる:
+
+    1. **ロギング**: 各関数呼び出しでログを出力するパターン
+    2. **監査証跡**: 全ての操作を記録するパターン
+    3. **メトリクス収集**: 計測値を蓄積するパターン
+    4. **デバッグトレース**: 実行経路を追跡するパターン
+
+    これらのパターンでは、tell の呼び出し回数が数百〜数千になることが珍しくなく、
+    O(n^2) の計算量では実用に耐えない。
+
+  prior_art:
+    - name: "Haskell Writer Monad (mtl)"
+      description: |
+        Haskell の Writer モナドは遅延評価を活用して効率的に動作する。
+        ただし、厳密評価言語では別のアプローチが必要。
+
+        Haskell でも Strict Writer モナドが提供されており、
+        差分リストや Seq を使用して効率化している。
+
+    - name: "Scala cats Writer"
+      description: |
+        Scala の cats ライブラリの Writer は Chain データ構造を使用して
+        効率的な追加操作を実現している。
+        Chain は O(1) で追加でき、最後に O(n) で連結する。
+
+    - name: "Difference List パターン"
+      description: |
+        関数合成を使用して効率的なリスト構築を行うパターン。
+        各 tell で関数を合成し、最後に適用することで O(n) を達成。
+        ただし、Rust では関数の動的合成が難しい。
+
+    - name: "Vec<W> 蓄積パターン"
+      description: |
+        各 tell で要素を Vec に push し、最後にまとめて combine する。
+        Rust の Vec は amortized O(1) で push できるため、
+        全体で O(n) を達成できる。
+
+        このパターンは実装がシンプルで、Rust の所有権モデルとも相性が良い。
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. 内部データ構造の変更
+  # ======================================================================
+  - id: internal_buffer_change
+    name: "内部バッファを Vec<W> に変更"
+    description: |
+      WriterHandler の run_with_log 関数を run_with_buffer に変更し、
+      累積ログを RefCell<W> から RefCell<Vec<W>> に変更する。
+
+      この変更により、各 tell 操作で O(1) の push が可能になる。
+
+    functional_programming_principles:
+      immutability: |
+        RefCell による内部可変性は Effect ハンドラの実装詳細であり、
+        外部から見た振る舞いは純粋関数として維持される。
+
+        重要: 関数型プログラミングにおける「不変性」は、
+        外部に観測可能な副作用がないことを指す。
+        内部実装で可変性を使用しても、外部から見て参照透過性が
+        保たれていれば、関数型プログラミングの原則に違反しない。
+
+        この変更は RefCell<W> を RefCell<Vec<W>> に置き換えるだけであり、
+        可変性の使用範囲は変わらない。
+
+      referential_transparency: |
+        Writer Effect の振る舞いは完全に決定的であり、
+        同じ computation に対して常に同じ (result, log) を返す。
+
+        バッファの蓄積順序と最終的な combine 結果は、
+        現在の実装と完全に一致することを保証する。
+
+        証明:
+        - 現在: log = W::empty().combine(w1).combine(w2)...combine(wn)
+        - 修正後: log = [w1, w2, ..., wn].fold(W::empty(), combine)
+        - Monoid の結合律により、これらは等価
+
+      no_side_effects: |
+        Writer Effect 自体が「ログ出力」という副作用を表現するものであり、
+        その副作用を Handler が解釈する設計は維持される。
+
+        本修正は副作用の表現方法を変更するものではなく、
+        Handler 内部での効率的な蓄積方法を改善するのみ。
+
+    methods:
+      - name: "run_with_buffer (新規)"
+        signature: |
+          fn run_with_buffer<A: 'static>(
+              computation: Eff<WriterEffect<W>, A>,
+              buffer: &RefCell<Vec<W>>
+          ) -> A
+        description: |
+          computation を実行し、各 tell の出力を buffer に push する。
+          これは内部ヘルパー関数であり、公開 API ではない。
+
+      - name: "run_with_log (削除または非公開化)"
+        description: |
+          既存の run_with_log は run_with_buffer に置き換えられる。
+          この関数は非公開であるため、削除しても API 互換性に影響しない。
+
+    implementations:
+      - type: "WriterHandler<W>"
+        description: |
+          WriterHandler の内部実装を変更する。
+
+          変更前:
+          ```rust
+          fn run_with_log<A: 'static>(
+              computation: Eff<WriterEffect<W>, A>,
+              log: &RefCell<W>
+          ) -> A {
+              // ...
+              writer_operations::TELL => {
+                  let output = *operation.arguments.downcast::<W>().expect(...);
+                  let current = log.borrow().clone();  // O(n) クローン
+                  *log.borrow_mut() = current.combine(output);
+              }
+          }
+          ```
+
+          変更後:
+          ```rust
+          fn run_with_buffer<A: 'static>(
+              computation: Eff<WriterEffect<W>, A>,
+              buffer: &RefCell<Vec<W>>
+          ) -> A {
+              // ...
+              writer_operations::TELL => {
+                  let output = *operation.arguments.downcast::<W>().expect(...);
+                  buffer.borrow_mut().push(output);  // O(1) push
+              }
+          }
+          ```
+
+    examples:
+      - description: "バッファ蓄積の動作例"
+        code: |
+          // tell("a"), tell("b"), tell("c") の場合
+          //
+          // 変更前の動作:
+          //   log = ""
+          //   log = "".combine("a") = "a"      // clone "" (0 chars)
+          //   log = "a".combine("b") = "ab"    // clone "a" (1 char)
+          //   log = "ab".combine("c") = "abc"  // clone "ab" (2 chars)
+          //   合計: 0 + 1 + 2 = 3 chars cloned
+          //
+          // 変更後の動作:
+          //   buffer = []
+          //   buffer.push("a") -> ["a"]        // O(1)
+          //   buffer.push("b") -> ["a", "b"]   // O(1)
+          //   buffer.push("c") -> ["a", "b", "c"]  // O(1)
+          //   最後に: ["a", "b", "c"].fold(empty, combine) = "abc"  // O(n)
+          //   合計: O(n)
+
+  # ======================================================================
+  # 2. Handler::run の変更
+  # ======================================================================
+  - id: handler_run_change
+    name: "Handler::run の実装変更"
+    description: |
+      Handler トレイトの run メソッド実装を変更し、
+      Vec<W> バッファを使用して効率的にログを蓄積する。
+
+    functional_programming_principles:
+      composition: |
+        Handler::run の結果 (A, W) は変更されない。
+        Eff の合成可能性（then, flat_map など）も影響を受けない。
+
+        外部から見た Handler の振る舞いは完全に同一であり、
+        内部実装の変更のみ。
+
+      algebraic_data_types: |
+        WriterEffect<W> の型パラメータ W は Monoid 制約を持つ。
+        この制約は変更されない。
+
+        Vec<W> を使用するのは内部実装の詳細であり、
+        外部 API に露出しない。
+
+    methods:
+      - name: "Handler::run (実装変更)"
+        signature: |
+          fn run<A: 'static>(self, computation: Eff<WriterEffect<W>, A>) -> (A, W)
+        description: |
+          変更前:
+          ```rust
+          fn run<A: 'static>(self, computation: Eff<WriterEffect<W>, A>) -> (A, W) {
+              let log = RefCell::new(W::empty());
+              let result = Self::run_with_log(computation, &log);
+              (result, log.into_inner())
+          }
+          ```
+
+          変更後:
+          ```rust
+          fn run<A: 'static>(self, computation: Eff<WriterEffect<W>, A>) -> (A, W) {
+              let buffer = RefCell::new(Vec::new());
+              let result = Self::run_with_buffer(computation, &buffer);
+              let log = W::combine_all(buffer.into_inner());
+              (result, log)
+          }
+          ```
+
+    implementations:
+      - type: "WriterHandler<W>"
+        description: |
+          Handler トレイト実装の run メソッドを変更する。
+
+          重要: Monoid::combine_all を使用することで、
+          結合の順序が保証される（左から右への fold）。
+
+    examples:
+      - description: "run メソッドの動作"
+        code: |
+          let handler = WriterHandler::<String>::new();
+          let computation = WriterEffect::tell("a".to_string())
+              .then(WriterEffect::tell("b".to_string()))
+              .then(WriterEffect::tell("c".to_string()))
+              .then(Eff::pure(42));
+
+          // run の内部動作:
+          // 1. buffer = []
+          // 2. tell("a") -> buffer = ["a"]
+          // 3. tell("b") -> buffer = ["a", "b"]
+          // 4. tell("c") -> buffer = ["a", "b", "c"]
+          // 5. pure(42) -> result = 42
+          // 6. log = String::combine_all(["a", "b", "c"])
+          //        = "".combine("a").combine("b").combine("c")
+          //        = "abc"
+          // 7. return (42, "abc")
+
+          let (result, log) = handler.run(computation);
+          assert_eq!(result, 42);
+          assert_eq!(log, "abc");
+
+  # ======================================================================
+  # 3. listen 関数の互換性維持
+  # ======================================================================
+  - id: listen_compatibility
+    name: "listen 関数の互換性維持"
+    description: |
+      listen 関数は内部で WriterHandler を使用しているため、
+      本修正の恩恵を自動的に受ける。
+
+      ただし、listen の振る舞いが変更されないことを確認する必要がある。
+
+    functional_programming_principles:
+      referential_transparency: |
+        listen の振る舞い:
+        - inner computation を実行し、そのログを captured_log として返す
+        - captured_log を外側のコンテキストにも tell する
+        - 結果は ((result, captured_log), total_log)
+
+        この振る舞いは内部実装の変更に影響されない。
+
+    methods:
+      - name: "listen (変更なし)"
+        signature: |
+          pub fn listen<W, A>(computation: Eff<WriterEffect<W>, A>) -> Eff<WriterEffect<W>, (A, W)>
+          where
+              W: Monoid + Clone + Send + Sync + 'static,
+              A: 'static,
+        description: |
+          listen 関数の実装は変更不要。
+          内部で WriterHandler::new().run() を呼び出しているため、
+          自動的に O(n) の恩恵を受ける。
+
+    examples:
+      - description: "listen の互換性確認"
+        code: |
+          let handler = WriterHandler::<String>::new();
+          let computation = listen(
+              WriterEffect::tell("inner".to_string())
+                  .then(Eff::pure(42))
+          );
+
+          let ((result, inner_log), total_log) = handler.run(computation);
+          assert_eq!(result, 42);
+          assert_eq!(inner_log, "inner");
+          assert_eq!(total_log, "inner");
+
+          // この動作は修正前後で完全に同一
+
+  # ======================================================================
+  # 4. API 互換性の保証
+  # ======================================================================
+  - id: api_compatibility
+    name: "API 互換性の完全保証"
+    description: |
+      本修正は内部実装のリファクタリングであり、
+      外部 API は一切変更しない。
+
+      以下の項目が変更されないことを保証する:
+      - WriterEffect<W> 型とそのメソッド (tell)
+      - WriterHandler<W> 型とそのメソッド (new, run)
+      - listen 関数
+      - 型シグネチャ
+      - トレイト制約
+      - 振る舞い（結果の値）
+
+    functional_programming_principles:
+      backward_compatibility: |
+        関数型プログラミングの原則として、純粋関数は
+        同じ入力に対して同じ出力を返す。
+
+        本修正後も、全ての入力に対して同じ出力を返すことを保証する。
+        これにより、既存のユーザーコードは一切変更なく動作する。
+
+    methods:
+      - name: "公開 API 一覧（変更なし）"
+        description: |
+          以下の公開 API は変更なし:
+
+          1. WriterEffect<W>
+             - tell(output: W) -> Eff<Self, ()>
+
+          2. WriterHandler<W>
+             - new() -> Self
+             - run<A>(self, computation: Eff<WriterEffect<W>, A>) -> (A, W)
+
+          3. listen<W, A>(computation) -> Eff<WriterEffect<W>, (A, W)>
+
+          型シグネチャ、トレイト境界、全て同一。
+
+  # ======================================================================
+  # 5. Monoid 則との整合性
+  # ======================================================================
+  - id: monoid_law_compliance
+    name: "Monoid 則との整合性保証"
+    description: |
+      Vec<W> 蓄積パターンが Monoid 則に従った結果を生成することを保証する。
+
+      Monoid 則:
+      1. 左単位元: empty.combine(a) == a
+      2. 右単位元: a.combine(empty) == a
+      3. 結合律: (a.combine(b)).combine(c) == a.combine(b.combine(c))
+
+    functional_programming_principles:
+      mathematical_correctness: |
+        変更前の実装:
+        ```
+        log = W::empty()
+        for each tell(w):
+            log = log.combine(w)
+        ```
+
+        これは数学的に:
+        log = (...((empty.combine(w1)).combine(w2))...).combine(wn)
+
+        変更後の実装:
+        ```
+        buffer = []
+        for each tell(w):
+            buffer.push(w)
+        log = W::combine_all(buffer)
+        ```
+
+        combine_all の定義 (Monoid トレイト):
+        ```rust
+        fn combine_all<I>(iterator: I) -> Self
+        where I: IntoIterator<Item = Self>
+        {
+            iterator.into_iter().fold(Self::empty(), |acc, elem| acc.combine(elem))
+        }
+        ```
+
+        これは数学的に:
+        log = (...((empty.combine(w1)).combine(w2))...).combine(wn)
+
+        結合律により、これらは等価である。
+
+    examples:
+      - description: "Monoid 則による等価性証明"
+        code: |
+          // String に対する例:
+          //
+          // 変更前:
+          //   log = "".combine("a") = "a"
+          //   log = "a".combine("b") = "ab"
+          //   log = "ab".combine("c") = "abc"
+          //   結果: "abc"
+          //
+          // 変更後:
+          //   buffer = ["a", "b", "c"]
+          //   log = String::combine_all(["a", "b", "c"])
+          //       = "".fold(|acc, x| acc.combine(x), ["a", "b", "c"])
+          //       = "".combine("a").combine("b").combine("c")
+          //       = "abc"
+          //   結果: "abc"
+          //
+          // 両者は完全に等価
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    target: |
+      計算量を O(n^2) から O(n) に改善する。
+
+      定量的目標:
+      - depth 100: 6.6ms -> ~100us（約 60-70 倍改善）
+      - depth 10 -> 100 の増加率: 740x -> ~10x（線形スケーリング）
+
+      許容範囲:
+      - O(n) スケーリングが達成されること
+      - 定数倍のオーバーヘッドは許容（Vec の確保、combine_all の呼び出し）
+
+    measurement: |
+      既存のベンチマーク writer_effect_tell_chain を使用して測定:
+
+      ```bash
+      cargo bench --bench algebraic_effect_bench -- writer_effect_tell_chain
+      ```
+
+      以下を確認:
+      1. depth 100 の絶対時間が大幅に改善されていること
+      2. depth 10 -> 100 の増加率が約 10 倍であること（線形）
+
+    memory: |
+      メモリ使用量に関する考慮:
+
+      - Vec<W> は W の要素を個別に保持するため、
+        一時的に W 型の値が複数存在する
+      - 最終的な combine_all で 1 つの W に統合される
+      - メモリ使用量は O(n * size_of(W))
+
+      これは許容範囲内と判断する理由:
+      - W は通常 String や Vec など、すでにヒープを使用
+      - 一時的なメモリ増加は実行時間の大幅改善と相殺
+      - 必要であれば、将来的に Chunk ベースの最適化も可能
+
+  compatibility:
+    api_stability: |
+      公開 API は一切変更しない:
+      - 型シグネチャ同一
+      - トレイト制約同一
+      - 戻り値同一
+      - 振る舞い同一
+
+      CHANGELOG.md には「パフォーマンス改善」として記載し、
+      破壊的変更なしとする。
+
+    behavioral_equivalence: |
+      全ての既存テストがパスすること。
+      これにより、振る舞いの等価性が保証される。
+
+    refcell_borrow_safety: |
+      RefCell の借用スコープに関する安全性:
+
+      - 変更前: RefCell<W> の borrow()/borrow_mut()
+      - 変更後: RefCell<Vec<W>> の borrow_mut()（push のみ）
+
+      借用範囲は同等または縮小されるため、
+      再入（ネストした handler など）での借用パニックリスクは増加しない。
+
+      **確認事項**:
+      - borrow_mut() の範囲が push 操作のみに限定されていること
+      - 既存の RefCell<W> での borrow().clone() + borrow_mut() の
+        2回の借用が、borrow_mut().push() の1回に削減されること
+      - ネストした WriterHandler のテストが既存と同様にパスすること
+
+  testing:
+    existing_tests: |
+      既存のテスト全てがパスすること:
+
+      ```bash
+      cargo test --lib writer
+      ```
+
+      以下のテストが特に重要:
+      - writer_tell_appends_to_log
+      - writer_tell_multiple_times
+      - writer_tell_with_vec
+      - writer_listen_captures_inner_log
+      - writer_deep_chain_is_stack_safe
+      - writer_deep_flat_map_is_stack_safe
+      - writer_tell_order_matters
+
+    new_tests: |
+      以下の新規テストを追加:
+
+      **重要**: 性能検証はベンチマーク（cargo bench）のみで行い、
+      ユニットテストでは時間計測を行わない（環境依存で不安定なため）。
+      ユニットテストでは機能等価性・順序保存のみを確認する。
+
+      1. **結果等価性テスト**
+         - 大量の tell に対して、結果が期待通りであることを確認
+         - 1000 回の tell でログが正しく蓄積されることを検証
+
+      2. **順序保存テスト**
+         - tell の呼び出し順序がログに正しく反映されることを確認
+
+    property_tests: |
+      プロパティテストを追加（必須）:
+
+      1. **結合律の検証（必須）**
+         - 任意の tell シーケンスに対して、結果が Monoid 則に従うことを確認
+
+      2. **順序保存の検証（必須）**
+         - tell の呼び出し順序がログに正しく反映されることを確認
+         - combine_all が左畳み込み（左から順序保持）であることを暗黙に検証
+
+      **注**: combine_all の実装が左畳み込みであることは、
+      src/typeclass/monoid.rs の実装と一致することを確認すること。
+
+      ```rust
+      proptest! {
+          #[test]
+          fn prop_tell_order_preserved(tells in prop::collection::vec(any::<i32>(), 0..100)) {
+              let handler = WriterHandler::<Vec<i32>>::new();
+              // 関数型スタイル: fold を使用して computation を構築
+              let computation = tells.iter().fold(
+                  Eff::pure(()),
+                  |comp, &value| comp.then(WriterEffect::tell(vec![value]))
+              );
+              let ((), log) = handler.run(computation);
+              prop_assert_eq!(log, tells);
+          }
+      }
+      ```
+
+    benchmark_verification: |
+      ベンチマークで O(n) スケーリングを確認:
+
+      ```bash
+      # 修正前の結果を保存
+      cargo bench --bench algebraic_effect_bench -- writer_effect_tell_chain > before.txt
+
+      # 修正を適用
+
+      # 修正後の結果を取得
+      cargo bench --bench algebraic_effect_bench -- writer_effect_tell_chain > after.txt
+
+      # 結果を比較
+      ```
+
+      期待される結果:
+      - writer_effect_tell_chain[10]: ~10us（ほぼ同じ）
+      - writer_effect_tell_chain[100]: ~100us（60-70 倍改善）
+
+  documentation:
+    code_comments: |
+      変更箇所にコメントを追加し、なぜこの実装を選択したかを説明:
+
+      ```rust
+      /// Runs the computation with a mutable buffer (internal).
+      ///
+      /// Uses Vec<W> to accumulate outputs, achieving O(n) time complexity
+      /// instead of O(n^2) with the naive approach. Each tell() is O(1) push,
+      /// and the final combine_all() is O(n).
+      ///
+      /// This is an internal implementation detail; the public API and
+      /// behavior remain unchanged.
+      fn run_with_buffer<A: 'static>(computation: Eff<WriterEffect<W>, A>, buffer: &RefCell<Vec<W>>) -> A
+      ```
+
+    changelog: |
+      CHANGELOG.md に以下を追加:
+
+      ```markdown
+      ### Performance
+
+      - **effect**: Improve Writer Effect tell chain from O(n^2) to O(n) (#166)
+        - Each tell() is now O(1) instead of O(n)
+        - Depth 100: 6.6ms -> ~100us (60-70x improvement)
+        - No API changes; existing code works without modification
+      ```
+
+# 実装の優先順位
+implementation_priority:
+  - order: 1
+    id: internal_buffer_change
+    reason: "コア実装の変更。他の全てはこれに依存する。"
+
+  - order: 2
+    id: handler_run_change
+    reason: "内部バッファ変更と同時に実装する。"
+
+  - order: 3
+    id: listen_compatibility
+    reason: "listen は Handler を使用しているため、自動的に恩恵を受けるが、テストで確認。"
+
+  - order: 4
+    id: api_compatibility
+    reason: "全ての既存テストを実行して互換性を確認。"
+
+  - order: 5
+    id: monoid_law_compliance
+    reason: "プロパティテストを追加して Monoid 則との整合性を検証。"
+
+# 将来の拡張
+future_extensions:
+  - id: chunk_based_buffer
+    name: "チャンクベースのバッファ"
+    description: |
+      非常に大量の tell がある場合、中間でチャンクごとに combine することで
+      メモリ使用量を抑えることができる。
+
+      例: 1000 要素ごとに中間 combine を行う
+
+      ```rust
+      const CHUNK_SIZE: usize = 1000;
+
+      if buffer.len() >= CHUNK_SIZE {
+          let chunk = buffer.drain(..).collect::<Vec<_>>();
+          let combined = W::combine_all(chunk);
+          buffer.push(combined);
+      }
+      ```
+    rationale: |
+      現時点では不要だが、メモリ制約が厳しい環境や
+      非常に大量の tell がある場合に有用。
+
+      ただし、これにより実装が複雑になるため、
+      明確な必要性が出てから検討する。
+
+  - id: lazy_combining
+    name: "遅延結合"
+    description: |
+      結合を遅延させ、実際に値が必要になるまで実行しない。
+      差分リストのような概念を Rust で実現する。
+    rationale: |
+      Haskell の遅延評価に近い最適化。
+      ただし、Rust の厳密評価モデルでは実装が複雑になる。
+      現時点の Vec 蓄積パターンで十分な性能が得られるため、
+      将来の検討事項とする。
+
+  - id: custom_monoid_optimization
+    name: "特定 Monoid への最適化"
+    description: |
+      String や Vec など、頻繁に使用される Monoid に対して
+      特化した最適化を提供する。
+
+      例: String の場合、capacity を事前に確保するなど。
+    rationale: |
+      現時点では汎用的な実装で十分。
+      ベンチマークで特定の型がボトルネックになった場合に検討。
+
+# 関連情報
+related:
+  github_issue:
+    number: 166
+    url: "https://github.com/lihs-ie/lambars/issues/166"
+
+  issue_file: "docs/internal/issues/20260115_1415_writer_effect_on2.yaml"
+
+  benchmark_file: "benches/algebraic_effect_bench.rs"
+
+  target_file: "src/effect/algebraic/writer.rs"
