@@ -1,0 +1,305 @@
+# Effect System Performance 要件定義
+#
+# 概要:
+#   Algebraic Effect (Eff) システムのパフォーマンスを改善し、
+#   従来の Reader/State/Writer 実装との差を縮小する。
+#
+# 設計方針:
+#   1. 参照透過性・純粋関数・不変性を維持する
+#   2. Box 割り当てを最小化する
+#   3. 型消去のオーバーヘッドを削減する
+#   4. モナド則を保持する
+#
+# 参照:
+#   - GitHub Issue #165
+#   - docs/internal/issues/20260115_1410_effect_system_performance.yaml
+#   - Freer Monad (src/control/freer.rs) の最適化パターン
+
+version: "1.0.0"
+name: "effect_system_performance"
+description: |
+  Algebraic Effect (Eff) システムが従来の Reader/State/Writer 実装より
+  大幅に遅い問題を改善する。
+
+  現在のパフォーマンス:
+    - Reader: 63ns (従来) vs 350ns (Eff) - 5.5倍遅い
+    - State: 102ns (従来) vs 458ns (Eff) - 4.5倍遅い
+    - Writer: 168ns (従来) vs 488ns (Eff) - 2.9倍遅い
+
+  目標:
+    - 30%以上のパフォーマンス改善
+    - 従来実装との差を 3 倍以内に縮小
+
+background:
+  problem: |
+    Algebraic Effect システムが従来のモナド実装より大幅に遅い。
+    主な原因は以下の3点:
+    1. flat_map 呼び出しごとに 3-4 個の Box が生成される
+    2. Box<dyn Any> の downcast 操作（15-25ns/回）
+    3. normalize() のホットパスコスト（FlatMap チェーンの線形トラバーサル）
+
+  motivation: |
+    Algebraic Effect は関数型プログラミングにおいて強力な抽象化を提供するが、
+    パフォーマンス上のオーバーヘッドが大きいと実用性が低下する。
+    従来実装に近いパフォーマンスを達成することで、Algebraic Effect の
+    柔軟性と実用性を両立させる。
+
+  prior_art:
+    - name: "Freer Monad (lambars)"
+      description: |
+        VecDeque ベースの継続キューを使用した "Reflection without Remorse" パターン。
+        O(1) の append/pop で FlatMap チェーンのオーバーヘッドを回避。
+    - name: "Haskell freer-simple"
+      description: |
+        高速な Free Monad 実装。型クラスを使用した最適化。
+    - name: "Scala ZIO"
+      description: |
+        Fiber ベースの Effect システム。継続の効率的な管理。
+
+requirements:
+  # ======================================================================
+  # 1. インライン化
+  # ======================================================================
+  - id: perf_inline_hot_paths
+    name: "ホットパスのインライン化"
+    description: |
+      頻繁に呼び出される関数に #[inline] を追加し、
+      コンパイラの最適化を支援する。
+
+      Note: インライン化される関数は全て純粋関数であり、
+      呼び出し箇所が増えても観測可能な副作用は変わらない。
+      これにより参照透過性が維持される。
+
+      設計判断: #[inline(always)] はコードサイズ増加により逆効果になる
+      可能性があるため、まず #[inline] のみで計測し、必要な箇所だけ
+      inline(always) を採用する。
+
+    methods:
+      - name: "normalize"
+        signature: "fn normalize(self) -> Self"
+        description: |
+          #[inline] を追加。ハンドラ実行時に毎回呼び出されるホットパス。
+        examples:
+          - description: "インライン化"
+            code: |
+              #[inline]
+              pub(crate) fn normalize(self) -> Self { ... }
+
+      - name: "normalize_iteratively"
+        signature: "fn normalize_iteratively(flat_map: EffFlatMap<E, A>) -> Self"
+        description: |
+          #[inline] を追加。normalize から呼び出される。
+        examples:
+          - description: "インライン化"
+            code: |
+              #[inline]
+              fn normalize_iteratively(initial_flat_map: EffFlatMap<E, A>) -> Self { ... }
+
+    implementations:
+      - type: "Eff<E, A>"
+        description: |
+          normalize, normalize_iteratively にインライン属性を追加。
+          pure は既に #[inline] が付与されているため変更不要。
+
+  # ======================================================================
+  # 2. Impure ケースの継続合成削減
+  # ======================================================================
+  - id: perf_impure_continuation_reduction
+    name: "Impure ケースの継続合成削減"
+    description: |
+      flat_map の Impure ケースで生成される Box 割り当てを削減する。
+      現在の実装では各 flat_map 呼び出しで 3-4 個の Box が生成される。
+
+      注意: fmap の Pure 値最適化は flat_map が既に Pure を即時適用
+      しているため効果がない（flat_map の 232-233 行目参照）。
+      代わりに Impure/FlatMap ケースの Box 削減に注力する。
+
+    methods:
+      - name: "flat_map (最適化版)"
+        signature: "fn flat_map<B, F>(self, function: F) -> Eff<E, B>"
+        description: |
+          Impure ケースで生成される Box 数を削減する。
+          現在: continuation Box + FlatMap Box + source Box + transform Box = 4 個
+          目標: 可能な限り Box 数を削減。
+
+          Note: 参照透過性を維持するため、最適化後も同じ入力に対して
+          同じ出力を返すことを保証する。
+        examples:
+          - description: "現在の Impure ケース（最適化対象）"
+            code: |
+              // 現在の実装（eff.rs 234-252 行目）
+              // 4 つの Box が生成される
+              EffInner::Impure(operation) => Eff {
+                  inner: EffInner::Impure(EffOperation {
+                      continuation: Box::new(move |result| {  // Box 1
+                          let next = (operation.continuation)(result);
+                          Eff {
+                              inner: EffInner::FlatMap(Box::new(EffFlatMap {  // Box 2
+                                  source: Box::new(next),  // Box 3
+                                  transform: Box::new(move |source| { ... }),  // Box 4
+                              })),
+                          }
+                      }),
+                  }),
+              }
+
+    implementations:
+      - type: "Eff<E, A>"
+        description: |
+          Impure ケースの継続合成を最適化し、Box 割り当て数を削減。
+
+  # ======================================================================
+  # 3. 継続キュー構造（将来の拡張 - 破壊的変更）
+  # ======================================================================
+  - id: perf_continuation_queue
+    name: "継続キュー構造の導入"
+    description: |
+      ネストされた FlatMap 構造の代わりに VecDeque ベースの継続キューを導入。
+      Freer Monad の "Reflection without Remorse" パターンを参考にする。
+
+      **重要: この変更は破壊的変更（API Breaking Change）です。**
+
+      理由: `EffOperation`/`EffInner` は `pub` で公開されており、
+      フィールドも公開されているため、継続キュー化は既存コードとの
+      互換性を破壊します。
+
+      対応策（いずれかを選択）:
+      1. 仕様側で「破壊的変更可」へ更新する
+      2. 先に内部構造を非公開化（`pub(crate)`）または `#[non_exhaustive]` 化
+         して互換性を確保してから実施する
+
+      設計方針: Rust の所有権システムにより「論理的な不変性」を達成する。
+      push は self を消費して新しいキューを返す設計とし、
+      既存のデータを直接変更しない。
+
+    methods:
+      - name: "flat_map (継続キュー版)"
+        signature: "fn flat_map<B, F>(self, function: F) -> Eff<E, B>"
+        description: |
+          継続を VecDeque に O(1) で追加。
+          所有権の移動により不変性を維持する（self を消費して新しい Eff を返す）。
+        examples:
+          - description: "継続キューへの追加（不変スタイル）"
+            code: |
+              match self.inner {
+                  EffInner::Pure(value) => function(value),
+                  EffInner::Impure(operation) => {
+                      // operation を消費して新しい継続キューを生成
+                      // push は self を消費して新しいキューを返す設計
+                      let new_continuations = operation.continuations.push(function);
+                      Eff {
+                          inner: EffInner::Impure(EffOperation {
+                              operation_tag: operation.operation_tag,
+                              arguments: operation.arguments,
+                              continuations: new_continuations,
+                              ..
+                          })
+                      }
+                  }
+              }
+            note: |
+              Rust では所有権移動により「論理的な不変性」を達成できる。
+              呼び出し元から見ると、元の operation は消費され、
+              新しい Eff が返される。これは関数型プログラミングの
+              「新しい値を返す」原則に適合する。
+
+    implementations:
+      - type: "EffOperation<E, A>"
+        description: |
+          ContinuationQueue フィールドを追加し、単一の継続から
+          継続キューに変更。push メソッドは self を消費して
+          新しいキューを返す設計とする。
+
+  # ======================================================================
+  # 4. ハンドラループ最適化
+  # ======================================================================
+  - id: perf_handler_loop_optimization
+    name: "ハンドラ実行ループの最適化"
+    description: |
+      ハンドラの run ループ内で冗長な処理を削減する。
+
+      **重要: この最適化は継続キュー構造（perf_continuation_queue）の
+      導入後にのみ適用可能です。**
+
+      理由: 現在の各 handler は `normalize()` を前提としており、
+      `FlatMap` バリアントを `unreachable!` として扱っています
+      （reader.rs:190, state.rs:201, writer.rs:132 参照）。
+      継続キュー導入なしで normalize を削除すると、FlatMap が
+      ハンドラに到達して panic します。
+
+      Invariant: ハンドラは参照透過的に動作する。
+      environment.clone() の呼び出し回数に依存せず、
+      同じ入力に対して常に同じ computation を返す。
+
+    methods:
+      - name: "run_with_environment (Reader)"
+        signature: "fn run_with_environment<A>(computation: Eff<ReaderEffect<R>, A>, environment: R) -> A"
+        description: |
+          **継続キュー導入後に適用可能。**
+
+          継続キュー導入後は normalize() 呼び出しが不要になる。
+          また、Box 割り当ての再利用を検討。
+
+          参照透過性の保証: environment は読み取り専用であり、
+          ループの各イテレーションで同じ値が使用される。
+          clone() は値のコピーを作成するのみで、副作用を持たない。
+        examples:
+          - description: "最適化されたループ（継続キュー導入後）"
+            code: |
+              // Invariant: このループは参照透過的
+              // - environment は不変（clone で値コピーを取得）
+              // - apply_next は純粋関数（副作用なし）
+              // 注意: 継続キュー導入により FlatMap バリアントが不要になる
+              loop {
+                  match current_computation.inner {
+                      EffInner::Pure(value) => return value,
+                      EffInner::Impure(operation) => {
+                          // 継続キューから次の継続を取り出して適用
+                          current_computation = operation.apply_next(environment.clone());
+                      }
+                  }
+              }
+
+    implementations:
+      - type: "ReaderHandler"
+        description: "Reader 効果のハンドラループ最適化"
+      - type: "StateHandler"
+        description: "State 効果のハンドラループ最適化"
+      - type: "WriterHandler"
+        description: "Writer 効果のハンドラループ最適化"
+
+non_functional_requirements:
+  performance:
+    - "30%以上のパフォーマンス改善を達成する"
+    - "従来の Reader/State/Writer 実装との差を 3 倍以内に縮小する"
+    - "チェーン深度 100 での指数的増加を回避する"
+  compatibility:
+    - "Phase 1（インライン化、継続合成削減）では既存の公開 API に破壊的変更を加えない"
+    - "継続キュー構造の導入は破壊的変更となるため、別途 breaking change として扱う"
+    - "すべての既存テストがパスすること"
+    - "モナド則（左単位元、右単位元、結合律）を維持する"
+  testing:
+    - "改善前後のベンチマーク比較を実施する"
+    - "各最適化の効果を個別に計測し、効果の裏付けを取る"
+    - "プロパティテストでモナド則を検証する"
+    - "チェーン深度 5, 10, 50, 100 でのスケーリングを検証する"
+  measurement:
+    - "Phase 1 の最適化効果をベンチマークで検証してから Phase 2 に進む"
+    - "目標未達の場合は、型付き継続や型消去削減を検討する"
+
+future_extensions:
+  - id: typed_continuation
+    name: "型付き継続の特化版"
+    description: |
+      共通パターン（identity continuation など）に対して
+      型消去を避ける特化版継続を提供する。
+    rationale: |
+      Phase 2/3 の最適化で目標を達成できる可能性があるため、
+      まずは基本的な最適化を優先する。
+
+  - id: effect_fusion
+    name: "エフェクト融合"
+    description: |
+      連続する同種の効果操作を融合して、継続呼び出しの回数を削減する。
+    rationale: |
+      実装の複雑さが増すため、基本的な最適化の効果を確認してから検討する。
