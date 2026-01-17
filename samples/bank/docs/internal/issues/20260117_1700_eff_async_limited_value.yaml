@@ -109,3 +109,11 @@ related:
   - "docs/internal/plans/20260117_1500_lambars_full_utilization_roadmap.yaml"
   - "src/api/handlers/transaction.rs"
   - "src/infrastructure/event_store.rs"
+
+# 解決策の提案
+resolution_proposal:
+  issue: "docs/internal/issues/20260117_1800_exceptt_asyncio_support.yaml"
+  description: |
+    ExceptT に AsyncIO サポートを追加することで、この問題を解決できる可能性がある。
+    ExceptT<E, AsyncIO<Result<A, E>>> の flat_map が実装されれば、
+    eff_async! マクロで透過的なエラーハンドリングが可能になる。
