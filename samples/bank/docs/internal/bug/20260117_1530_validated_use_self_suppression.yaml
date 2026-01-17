@@ -1,0 +1,57 @@
+# Validated型のApplicative実装におけるclippy警告抑制
+#
+# 概要:
+#   Validated<A>のApplicative実装でclippy::use_self警告を#[allow]で抑制している
+#
+# 発見日: 2026-01-17
+# 発見者: Claude Code
+
+type: warning_suppression
+severity: low
+status: open
+
+title: "Validated型のApplicative実装でclippy::use_self警告を抑制"
+
+description: |
+  Validated<A>のApplicative実装において、map2やmap3のパターンマッチで
+  異なる型パラメータを持つValidated（例：Validated<B>, Validated<C>）を
+  使用する必要があるため、Self使用の一貫性を保つことができない。
+
+  このため、#[allow(clippy::use_self)]を追加して警告を抑制している。
+
+location:
+  file: "src/domain/validation/validated.rs"
+  line: 281
+  code: |
+    #[allow(clippy::use_self)]
+    impl<A: 'static> Applicative for Validated<A> {
+
+reason: |
+  Applicative::map2の実装では、selfはValidated<A>型だが、
+  otherはValidated<B>型であり、戻り値はValidated<C>型となる。
+
+  パターンマッチでは:
+  - self部分はSelf::Valid/Self::Invalidを使用可能
+  - other部分はValidated::Valid/Validated::Invalidを使用する必要がある
+  - 戻り値もValidated::Valid/Validated::Invalidを使用する必要がある
+
+  clippyはすべてにSelfを使用するよう警告するが、
+  型パラメータが異なるため不可能。
+
+impact: |
+  - コードの一貫性がやや低下
+  - 将来のlint警告を見逃す可能性は低い（スコープが限定的）
+
+potential_fixes:
+  - description: "現状維持"
+    rationale: |
+      Rustの型システムの制約であり、lambarsライブラリ本体でも
+      同様のパターンが使われている可能性がある。
+
+  - description: "lambarsでValidatedのApplicative実装を提供"
+    rationale: |
+      ライブラリ側で汎用的なValidated型を提供することで、
+      各アプリケーションでの重複実装を避けられる。
+
+related_files:
+  - "src/domain/validation/validated.rs"

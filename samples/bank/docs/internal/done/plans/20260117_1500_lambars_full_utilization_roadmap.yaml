@@ -1,0 +1,635 @@
+# lambars機能フル活用ロードマップ
+#
+# 概要:
+#   Bank Sampleにおけるlambarsライブラリの機能活用率を40%から100%に引き上げる
+#   関数型プログラミングのベストプラクティスを全面的に適用
+#
+# 現状:
+#   - 活用済み: Monoid, Foldable, Semigroup, Lens, AsyncIO, PersistentList
+#   - 未活用: pipe!, compose!, Reader, Applicative (並列検証), Writer, eff!
+#
+# 目標:
+#   - 全ての推奨機能を統合
+#   - コードの宣言性・テスト容易性・保守性を向上
+
+version: "1.0.0"
+name: "lambars_full_utilization"
+description: |
+  Bank Sampleにおけるlambarsライブラリのフル活用を実現する実装計画。
+  6つのフェーズに分けて段階的に機能を統合する。
+
+# ==============================================================================
+# フェーズ概要
+# ==============================================================================
+phases:
+  - id: phase_1
+    name: "Applicative並列検証"
+    priority: 1
+    difficulty: medium
+    impact: high
+    description: |
+      複数の独立した検証を並列実行し、全てのエラーを一度に集約する。
+      ユーザーエクスペリエンスの向上とエラーハンドリングの一貫性を実現。
+
+  - id: phase_2
+    name: "pipe!/compose!によるパイプライン化"
+    priority: 1
+    difficulty: medium
+    impact: medium
+    description: |
+      ハンドラーとワークフローのデータフローを明示的なパイプラインに変換。
+      コードの可読性と保守性を向上。
+
+  - id: phase_3
+    name: "eff!マクロによるワークフロー記述"
+    priority: 2
+    difficulty: high
+    impact: high
+    description: |
+      do-notationスタイルでAsyncIO操作を記述。
+      複雑な非同期ワークフローを宣言的に表現。
+
+  - id: phase_4
+    name: "Readerモナドによる依存性注入"
+    priority: 2
+    difficulty: high
+    impact: medium
+    description: |
+      依存関係を環境として抽象化し、テスト容易性を向上。
+      ハンドラー関数をReader値として表現。
+
+  - id: phase_5
+    name: "Writerモナドによる監査ログ"
+    priority: 3
+    difficulty: high
+    impact: medium
+    description: |
+      ワークフロー実行中のアクションを自動的にログとして蓄積。
+      監査証跡の完全性を保証。
+
+  - id: phase_6
+    name: "統合テスト・ドキュメント更新"
+    priority: 3
+    difficulty: low
+    impact: low
+    description: |
+      全フェーズの統合テストとドキュメント更新。
+      lambars機能活用のベストプラクティス文書化。
+
+# ==============================================================================
+# フェーズ1: Applicative並列検証
+# ==============================================================================
+phase_1_applicative:
+  name: "Applicative並列検証"
+
+  goals:
+    - 複数の独立した検証を並列実行
+    - 全てのエラーを一度に集約してユーザーに返す
+    - 逐次エラー処理パターンの排除
+
+  target_files:
+    - path: "src/api/handlers/transaction.rs"
+      lines: "413-432"
+      current_pattern: |
+        // 現在: 逐次検証（最初のエラーで中断）
+        let from_account_id = AccountId::create(&from_account_id_string).map_left(...);
+        let from_account_id = match from_account_id { ... };
+        let to_account_id = AccountId::create(&request.to_account_id).map_left(...);
+        let to_account_id = match to_account_id { ... };
+      improved_pattern: |
+        // 改善: Applicativeで並列検証
+        let validated = validate_account_id(&from_account_id_string)
+            .map2(
+                validate_account_id(&request.to_account_id),
+                |from_id, to_id| (from_id, to_id)
+            );
+
+    - path: "src/application/workflows/open_account.rs"
+      lines: "89-108"
+      current_pattern: |
+        // 現在: タプルマッチング（最初のエラーのみ返す）
+        match (validated_name, validated_balance) {
+            (Either::Right(name), Either::Right(balance)) => ...
+            (Either::Left(error), _) | (_, Either::Left(error)) => Either::Left(error),
+        }
+      improved_pattern: |
+        // 改善: Applicativeで全エラー集約
+        validated_name.map2(validated_balance, |name, balance| {
+            ValidatedOpenAccount::new(name, balance)
+        })
+
+    - path: "src/api/handlers/transaction.rs"
+      lines: "61-80"
+      description: "deposit_handlerのaccount_idとamountの検証"
+
+    - path: "src/api/handlers/transaction.rs"
+      lines: "165-185"
+      description: "withdraw_handlerのaccount_idとamountの検証"
+
+  implementation_steps:
+    - step: 1
+      description: "ValidationError型の導入（複数エラー対応）"
+      details: |
+        複数のエラーを保持できるValidationError型を作成。
+        NonEmptyVec<DomainError>またはVec<DomainError>を内部に持つ。
+
+    - step: 2
+      description: "Validated型エイリアスの定義"
+      details: |
+        type Validated<A> = Either<ValidationError, A>;
+        Applicativeインスタンスでエラーを集約。
+
+    - step: 3
+      description: "検証関数の統一"
+      details: |
+        validate_account_id, validate_amount, validate_owner_name等を
+        Validated<A>を返すように統一。
+
+    - step: 4
+      description: "ハンドラーでのApplicative適用"
+      details: |
+        map2, map3を使用して複数の検証を並列実行。
+        全エラーをユーザーに一度に返す。
+
+    - step: 5
+      description: "テスト追加"
+      details: |
+        複数エラーが同時に返されることを検証するテストを追加。
+
+  new_files:
+    - path: "src/domain/validation/validated.rs"
+      description: "Validated型とValidationError型の定義"
+
+  modified_files:
+    - "src/api/handlers/transaction.rs"
+    - "src/api/handlers/account.rs"
+    - "src/application/workflows/open_account.rs"
+    - "src/application/workflows/deposit.rs"
+    - "src/application/workflows/withdraw.rs"
+    - "src/application/workflows/transfer.rs"
+
+# ==============================================================================
+# フェーズ2: pipe!/compose!によるパイプライン化
+# ==============================================================================
+phase_2_pipe_compose:
+  name: "pipe!/compose!によるパイプライン化"
+
+  goals:
+    - ハンドラーのデータフローを明示的なパイプラインに変換
+    - ネストしたmatch式の削減
+    - 関数合成による再利用可能な変換関数の作成
+
+  lambars_features:
+    pipe_macro:
+      location: "lambars::compose::pipe!"
+      syntax: |
+        pipe!(value, f, g, h)  // = h(g(f(value)))
+        pipe!(m, => f)         // Functor::fmap (lift)
+        pipe!(m, =>> f)        // Monad::flat_map (bind)
+
+    compose_macro:
+      location: "lambars::compose::compose!"
+      syntax: |
+        compose!(f, g, h)(x)   // = f(g(h(x)))
+        let pipeline = compose!(validate, transform, serialize);
+
+  target_files:
+    - path: "src/api/handlers/account.rs"
+      lines: "63-128"
+      current_pattern: |
+        // 現在: 手動でステップを順序付け
+        let initial_balance = dto_to_money(...)?;
+        let command = OpenAccountCommand::new(...)?;
+        let account_id = AccountId::generate();
+        let result = workflow.execute()?;
+        // ...
+      improved_pattern: |
+        // 改善: pipe!でパイプライン化
+        pipe!(
+            request,
+            =>> |req| validate_request(req),
+            =>> |validated| create_command(validated),
+            =>> |cmd| execute_workflow(cmd, &dependencies),
+            => |result| create_response(result)
+        )
+
+    - path: "src/api/handlers/transaction.rs"
+      lines: "55-130"
+      description: "deposit_handlerのパイプライン化"
+
+    - path: "src/api/handlers/transaction.rs"
+      lines: "140-230"
+      description: "withdraw_handlerのパイプライン化"
+
+    - path: "src/api/handlers/transaction.rs"
+      lines: "380-520"
+      description: "transfer_handlerのパイプライン化"
+
+  implementation_steps:
+    - step: 1
+      description: "ハンドラーの各ステップを独立関数に抽出"
+      details: |
+        validate_request, create_command, execute_workflow等を
+        純粋関数として抽出。
+
+    - step: 2
+      description: "pipe!マクロの導入"
+      details: |
+        ハンドラー本体をpipe!マクロで記述。
+        =>> (bind)と=> (fmap)を適切に使い分け。
+
+    - step: 3
+      description: "compose!による再利用可能なパイプライン作成"
+      details: |
+        共通の変換パイプラインをcompose!で定義。
+        例: dto_to_domain_pipeline = compose!(validate_dto, transform, to_domain)
+
+    - step: 4
+      description: "エラー変換の統一"
+      details: |
+        map_left, map_right を使用したエラー変換をパイプラインに統合。
+
+  modified_files:
+    - "src/api/handlers/account.rs"
+    - "src/api/handlers/transaction.rs"
+    - "src/api/handlers/balance.rs"
+
+# ==============================================================================
+# フェーズ3: eff!マクロによるワークフロー記述
+# ==============================================================================
+phase_3_eff_macro:
+  name: "eff!マクロによるワークフロー記述"
+
+  goals:
+    - do-notationスタイルでモナディック操作を記述
+    - AsyncIO操作の宣言的な合成
+    - 複雑なワークフローの可読性向上
+
+  lambars_features:
+    eff_macro:
+      location: "lambars::effect::eff!"
+      syntax: |
+        eff! {
+            x <= Some(5);           // Bind: モナドから値を抽出
+            y <= Some(10);          // 複数のbindをチェーン
+            let z = x + y;          // 純粋なlet束縛
+            Some(z * 2)             // 最終式（モナドを返す）
+        }
+
+  target_files:
+    - path: "src/infrastructure/event_store.rs"
+      lines: "210-275"
+      current_pattern: |
+        // 現在: 手動でasync操作をシーケンス
+        AsyncIO::new(move || {
+            async move {
+                let mut transaction = pool.begin().await?;
+                let current_version = sqlx::query_scalar(...).await?;
+                // ...
+            }
+        })
+      improved_pattern: |
+        // 改善: eff!で宣言的に記述
+        eff! {
+            tx <= begin_transaction(&pool);
+            version <= get_current_version(&tx, &id);
+            _ <= verify_version(version, expected_version);
+            _ <= insert_events(&tx, &events);
+            _ <= commit_transaction(tx);
+            AsyncIO::pure(Ok(()))
+        }
+
+    - path: "src/infrastructure/read_model.rs"
+      lines: "150-200"
+      description: "read model更新のAsyncIO合成"
+
+  implementation_steps:
+    - step: 1
+      description: "AsyncIO操作の細分化"
+      details: |
+        大きなAsyncIO操作を小さな再利用可能な関数に分割。
+        begin_transaction, commit_transaction, insert_event等。
+
+    - step: 2
+      description: "eff!マクロの導入"
+      details: |
+        分割した操作をeff!マクロで合成。
+        do-notationスタイルで可読性を向上。
+
+    - step: 3
+      description: "エラーハンドリングの統合"
+      details: |
+        eff!内でのエラー伝播を整理。
+        Result型との組み合わせ。
+
+  new_files:
+    - path: "src/infrastructure/event_store/operations.rs"
+      description: "細分化されたAsyncIO操作"
+
+  modified_files:
+    - "src/infrastructure/event_store.rs"
+    - "src/infrastructure/read_model.rs"
+
+# ==============================================================================
+# フェーズ4: Readerモナドによる依存性注入
+# ==============================================================================
+phase_4_reader_monad:
+  name: "Readerモナドによる依存性注入"
+
+  goals:
+    - 依存関係を環境として抽象化
+    - ハンドラー関数をReader値として表現
+    - テスト容易性の大幅な向上
+
+  lambars_features:
+    reader_monad:
+      location: "lambars::effect::Reader"
+      api: |
+        Reader::new(|env| ...)      // 環境を受け取る関数をラップ
+        Reader::ask()               // 環境自体を取得
+        Reader::asks(|env| ...)     // 環境から値を射影
+        Reader::local(f, reader)    // サブ計算で環境を変更
+        reader.run(env)             // 環境を与えて実行
+        reader.flat_map(f)          // モナディック合成
+
+  target_files:
+    - path: "src/infrastructure/dependencies.rs"
+      lines: "55-62"
+      current_pattern: |
+        // 現在: 構造体として依存関係を保持
+        #[derive(Clone)]
+        pub struct AppDependencies {
+            config: AppConfig,
+            event_store: Arc<dyn EventStore>,
+            read_model: Arc<dyn ReadModelCache>,
+        }
+      improved_pattern: |
+        // 改善: Reader型エイリアスを定義
+        pub type AppReader<A> = Reader<AppDependencies, A>;
+
+        // ヘルパー関数
+        pub fn with_event_store<A, F>(f: F) -> AppReader<A>
+        where F: Fn(&dyn EventStore) -> A
+        {
+            Reader::asks(|deps: &AppDependencies| f(deps.event_store()))
+        }
+
+    - path: "src/api/handlers/account.rs"
+      description: "ハンドラーをReader値として再定義"
+
+  implementation_steps:
+    - step: 1
+      description: "AppReader型エイリアスの定義"
+      details: |
+        type AppReader<A> = Reader<AppDependencies, A>;
+        依存関係を環境として抽象化。
+
+    - step: 2
+      description: "ヘルパー関数の作成"
+      details: |
+        with_event_store, with_read_model, with_config等の
+        ヘルパー関数を作成。
+
+    - step: 3
+      description: "ワークフローのReader化"
+      details: |
+        ワークフロー関数をAppReader<Result<A, E>>を返すように変更。
+        flat_mapで依存関係を自動的に伝播。
+
+    - step: 4
+      description: "ハンドラーの変換"
+      details: |
+        ハンドラー関数をReader値を構築し、
+        最後にrun(dependencies)で実行するパターンに変更。
+
+    - step: 5
+      description: "テスト用モック環境の作成"
+      details: |
+        MockAppDependenciesを作成し、
+        テスト時に簡単に差し替え可能に。
+
+  new_files:
+    - path: "src/application/reader.rs"
+      description: "AppReader型とヘルパー関数"
+    - path: "tests/common/mock_dependencies.rs"
+      description: "テスト用モック依存関係"
+
+  modified_files:
+    - "src/infrastructure/dependencies.rs"
+    - "src/api/handlers/account.rs"
+    - "src/api/handlers/transaction.rs"
+    - "src/api/handlers/balance.rs"
+    - "src/application/workflows/*.rs"
+
+# ==============================================================================
+# フェーズ5: Writerモナドによる監査ログ
+# ==============================================================================
+phase_5_writer_monad:
+  name: "Writerモナドによる監査ログ"
+
+  goals:
+    - ワークフロー実行中のアクションを自動的にログ蓄積
+    - 監査証跡の完全性保証
+    - ログ収集ロジックのビジネスロジックからの分離
+
+  lambars_features:
+    writer_monad:
+      location: "lambars::effect::Writer"
+      api: |
+        Writer::new(result, output)      // 結果とログを持つWriter
+        Writer::tell(log)                // ログのみ追加
+        writer.run()                     // (result, logs) を取得
+        writer.eval()                    // resultのみ取得
+        writer.exec()                    // logsのみ取得
+        writer.flat_map(f)               // モナディック合成（ログは自動マージ）
+
+  target_files:
+    - path: "src/application/workflows/withdraw.rs"
+      lines: "420-428"
+      current_pattern: |
+        // 現在: ログなし
+        pub fn execute_withdraw(command: &WithdrawCommand, account: &Account)
+            -> DomainResult<MoneyWithdrawn>
+        {
+            // 資金源選択、検証、イベント生成
+            // ログは一切記録されていない
+        }
+      improved_pattern: |
+        // 改善: Writerで監査ログを蓄積
+        pub fn execute_withdraw_with_audit(command: &WithdrawCommand, account: &Account)
+            -> Writer<Vec<AuditLog>, DomainResult<MoneyWithdrawn>>
+        {
+            Writer::tell(vec![AuditLog::withdrawal_initiated(command)])
+                .flat_map(|_| {
+                    let validation = validate_withdraw(command, account);
+                    Writer::new(validation, vec![AuditLog::validation_complete()])
+                })
+                .flat_map(|validated| {
+                    let event = create_withdraw_event(validated);
+                    Writer::new(event, vec![AuditLog::event_created()])
+                })
+        }
+
+    - path: "src/application/workflows/transfer.rs"
+      description: "送金ワークフローの監査ログ"
+
+    - path: "src/application/workflows/deposit.rs"
+      description: "入金ワークフローの監査ログ"
+
+  implementation_steps:
+    - step: 1
+      description: "AuditLog型の定義"
+      details: |
+        監査ログエントリを表す型を定義。
+        タイムスタンプ、アクション種別、詳細情報を含む。
+
+    - step: 2
+      description: "AuditLogにMonoidインスタンス実装"
+      details: |
+        Vec<AuditLog>はMonoidなので自動的に動作。
+        必要に応じてカスタムMonoid実装。
+
+    - step: 3
+      description: "ワークフローのWriter化"
+      details: |
+        各ワークフロー関数をWriter<Vec<AuditLog>, Result<A, E>>を
+        返すように変更。
+
+    - step: 4
+      description: "ハンドラーでのログ抽出"
+      details: |
+        ハンドラーでwriter.run()を呼び出し、
+        (result, logs)を取得。logsをログサービスに送信。
+
+    - step: 5
+      description: "ログ永続化の統合"
+      details: |
+        イベント保存と同時に監査ログも永続化。
+        トランザクション内で一貫性を保証。
+
+  new_files:
+    - path: "src/domain/audit/mod.rs"
+      description: "AuditLog型とMonoidインスタンス"
+    - path: "src/infrastructure/audit_store.rs"
+      description: "監査ログの永続化"
+
+  modified_files:
+    - "src/application/workflows/deposit.rs"
+    - "src/application/workflows/withdraw.rs"
+    - "src/application/workflows/transfer.rs"
+    - "src/api/handlers/transaction.rs"
+
+# ==============================================================================
+# フェーズ6: 統合テスト・ドキュメント更新
+# ==============================================================================
+phase_6_integration:
+  name: "統合テスト・ドキュメント更新"
+
+  goals:
+    - 全フェーズの統合テスト
+    - lambars機能活用のベストプラクティス文書化
+    - README更新
+
+  implementation_steps:
+    - step: 1
+      description: "統合テストの追加"
+      details: |
+        各フェーズで追加した機能の統合テスト。
+        Applicative検証、pipe!パイプライン、eff!ワークフロー、
+        Reader DI、Writer監査ログの動作確認。
+
+    - step: 2
+      description: "パフォーマンステスト"
+      details: |
+        新しい実装のパフォーマンス影響を測定。
+        ベンチマーク追加。
+
+    - step: 3
+      description: "ドキュメント更新"
+      details: |
+        - samples/bank/README.md: lambars機能活用の説明追加
+        - docs/external/comparison/: 他言語との比較表更新
+
+    - step: 4
+      description: "要件定義のdone移動"
+      details: |
+        完了した要件定義をdocs/internal/done/に移動。
+
+  modified_files:
+    - "samples/bank/README.md"
+    - "docs/external/comparison/haskell/README.md"
+    - "tests/api/*.rs"
+
+# ==============================================================================
+# 実装順序と依存関係
+# ==============================================================================
+implementation_order:
+  description: |
+    フェーズ間の依存関係と推奨実装順序。
+    フェーズ1, 2は独立して並行実装可能。
+    フェーズ3, 4, 5はそれぞれ独立だが、1, 2の完了後が望ましい。
+
+  dependencies:
+    phase_1: []
+    phase_2: []
+    phase_3: [phase_1, phase_2]
+    phase_4: [phase_1, phase_2]
+    phase_5: [phase_1, phase_2]
+    phase_6: [phase_1, phase_2, phase_3, phase_4, phase_5]
+
+  parallel_execution:
+    batch_1: [phase_1, phase_2]
+    batch_2: [phase_3, phase_4, phase_5]
+    batch_3: [phase_6]
+
+# ==============================================================================
+# 検証方法
+# ==============================================================================
+verification:
+  unit_tests:
+    - "cargo test --lib"
+    - "cargo test --lib applicative"
+    - "cargo test --lib reader"
+    - "cargo test --lib writer"
+
+  integration_tests:
+    - "cargo test --test integration_tests"
+
+  lint_and_format:
+    - "cargo fmt"
+    - "cargo clippy --all-features --all-targets -- -D warnings"
+
+  documentation:
+    - "cargo doc --no-deps"
+
+# ==============================================================================
+# 成功基準
+# ==============================================================================
+success_criteria:
+  - id: sc_1
+    description: "全ての検証エラーが一度に返されること"
+    phase: phase_1
+
+  - id: sc_2
+    description: "ハンドラーがpipe!でパイプライン化されていること"
+    phase: phase_2
+
+  - id: sc_3
+    description: "AsyncIO操作がeff!で記述されていること"
+    phase: phase_3
+
+  - id: sc_4
+    description: "依存関係がReader経由で注入されていること"
+    phase: phase_4
+
+  - id: sc_5
+    description: "ワークフローが監査ログを自動生成すること"
+    phase: phase_5
+
+  - id: sc_6
+    description: "全テストがパスすること"
+    phase: phase_6
+
+  - id: sc_7
+    description: "lambars機能活用率が100%に到達すること"
+    phase: phase_6
