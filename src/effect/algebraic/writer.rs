@@ -129,6 +129,7 @@ impl<W: Monoid + Clone + 'static> WriterHandler<W> {
     ///
     /// Uses `Vec<W>` to accumulate outputs, achieving O(n) time complexity
     /// instead of O(n^2) with the naive approach.
+    #[inline]
     fn run_with_buffer<A: 'static>(
         computation: Eff<WriterEffect<W>, A>,
         buffer: &RefCell<Vec<W>>,

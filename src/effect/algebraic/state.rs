@@ -198,6 +198,7 @@ impl<S: Clone + 'static> StateHandler<S> {
     /// Runs the computation with a mutable state cell (internal).
     ///
     /// Uses an iterative approach for stack safety.
+    #[inline]
     fn run_with_state<A: 'static>(computation: Eff<StateEffect<S>, A>, state: &RefCell<S>) -> A {
         let mut current_computation = computation;
 
