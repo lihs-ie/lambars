@@ -309,6 +309,21 @@ impl AccountEvent {
         }
     }
 
+    /// Returns the transaction ID if this event has one.
+    ///
+    /// Only transaction events (`Deposited`, `Withdrawn`, `TransferSent`, `TransferReceived`)
+    /// have transaction IDs. `AccountOpened` and `AccountClosed` do not have transaction IDs.
+    #[must_use]
+    pub const fn transaction_id(&self) -> Option<&TransactionId> {
+        match self {
+            Self::Deposited(event) => Some(&event.transaction_id),
+            Self::Withdrawn(event) => Some(&event.transaction_id),
+            Self::TransferSent(event) => Some(&event.transaction_id),
+            Self::TransferReceived(event) => Some(&event.transaction_id),
+            Self::Opened(_) | Self::Closed(_) => None,
+        }
+    }
+
     /// Creates a Prism for the `Opened` variant.
     ///
     /// # Example
