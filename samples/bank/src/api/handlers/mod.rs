@@ -9,7 +9,7 @@
 //!
 //! # Functional Approach
 //!
-//! Handlers follow a pipeline pattern:
+//! Handlers follow a pipeline pattern using lambars pipe!/compose! macros:
 //!
 //! ```text
 //! Request → Extract → Validate → Transform → Execute → Transform → Response
@@ -17,8 +17,14 @@
 //!
 //! Each step is a pure function except for the Execute step which
 //! runs the `AsyncIO` computation.
+//!
+//! # Pipeline Utilities
+//!
+//! The [`pipeline`] module provides utilities for composing handler operations
+//! using functional patterns. See [`pipeline`] for details.
 
 pub mod account;
+pub mod pipeline;
 pub mod transaction;
 
 pub use account::{create_account, get_account, get_balance};

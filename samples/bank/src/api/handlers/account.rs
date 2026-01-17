@@ -23,10 +23,13 @@ use axum::http::StatusCode;
 
 use crate::api::dto::requests::OpenAccountRequest;
 use crate::api::dto::responses::{AccountResponse, BalanceResponse, MoneyResponseDto};
-use crate::api::dto::transformers::{account_to_response, dto_to_money};
+use crate::api::dto::transformers::account_to_response;
+use crate::api::handlers::pipeline::{
+    parse_account_id_for_api, parse_money_for_api, event_store_error_response,
+    account_not_found_response,
+};
 use crate::api::middleware::error_handler::{
-    ApiError, ApiErrorResponse, account_id_error_to_api_error, domain_error_to_api_error,
-    transformation_error_to_api_error,
+    ApiError, ApiErrorResponse, domain_error_to_api_error,
 };
 use crate::application::workflows::open_account;
 use crate::domain::account::aggregate::Account;
@@ -64,16 +67,8 @@ pub async fn create_account(
     State(dependencies): State<AppDependencies>,
     Json(request): Json<OpenAccountRequest>,
 ) -> Result<(StatusCode, Json<AccountResponse>), ApiErrorResponse> {
-    // Step 1: Transform DTO to domain types (pure function)
-    let initial_balance = dto_to_money(&request.initial_balance).map_left(|error| {
-        let (status, api_error) = transformation_error_to_api_error(error);
-        ApiErrorResponse::new(status, api_error)
-    });
-
-    let initial_balance = match initial_balance {
-        lambars::control::Either::Right(balance) => balance,
-        lambars::control::Either::Left(error) => return Err(error),
-    };
+    // Step 1: Transform DTO to domain types using pipeline (pure function)
+    let initial_balance = parse_money_for_api(&request.initial_balance)?;
 
     // Step 2: Create domain command (pure function)
     let command = OpenAccountCommand::new(request.owner_name.clone(), initial_balance.clone());
@@ -82,36 +77,31 @@ pub async fn create_account(
     let account_id = AccountId::generate();
     let timestamp = Timestamp::now();
 
-    // Step 4: Execute workflow (pure function)
-    let event_result = open_account(&command, account_id, timestamp);
-
-    let event = match event_result {
-        lambars::control::Either::Right(event) => event,
-        lambars::control::Either::Left(error) => {
+    // Step 4: Execute workflow and convert Either to Result for pipeline compatibility
+    let event = crate::api::handlers::pipeline::either_to_result(
+        open_account(&command, account_id, timestamp),
+    )
+        .map_err(|error| {
             let (status, api_error) = domain_error_to_api_error(error);
-            return Err(ApiErrorResponse::new(status, api_error));
-        }
-    };
+            ApiErrorResponse::new(status, api_error)
+        })?;
 
     // Step 5: Persist event to event store (IO)
-    let persist_result = dependencies
+    dependencies
         .event_store()
         .append_events(&account_id, 0, vec![AccountEvent::Opened(event.clone())])
         .run_async()
-        .await;
-
-    if let Err(store_error) = persist_result {
-        return Err(ApiErrorResponse::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ApiError::with_details(
-                "EVENT_STORE_ERROR",
-                "Failed to persist account creation event",
-                serde_json::json!({
-                    "error": store_error.to_string()
-                }),
-            ),
-        ));
-    }
+        .await
+        .map_err(|store_error| {
+            ApiErrorResponse::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ApiError::with_details(
+                    "EVENT_STORE_ERROR",
+                    "Failed to persist account creation event",
+                    serde_json::json!({ "error": store_error.to_string() }),
+                ),
+            )
+        })?;
 
     // Step 6: Transform result to response DTO (pure function)
     let response = AccountResponse {
@@ -150,57 +140,23 @@ pub async fn get_account(
     State(dependencies): State<AppDependencies>,
     Path(account_id_string): Path<String>,
 ) -> Result<Json<AccountResponse>, ApiErrorResponse> {
-    // Step 1: Validate and parse account ID (pure function)
-    let account_id = AccountId::create(&account_id_string).map_left(|error| {
-        let (status, api_error) = account_id_error_to_api_error(error);
-        ApiErrorResponse::new(status, api_error)
-    });
-
-    let account_id = match account_id {
-        lambars::control::Either::Right(id) => id,
-        lambars::control::Either::Left(error) => return Err(error),
-    };
+    // Step 1: Validate and parse account ID using pipeline (pure function)
+    let account_id = parse_account_id_for_api(&account_id_string)?;
 
     // Step 2: Load events from event store (IO)
-    let events_result = dependencies
+    let events = dependencies
         .event_store()
         .load_events(&account_id)
         .run_async()
-        .await;
-
-    let events = match events_result {
-        Ok(events) => events,
-        Err(store_error) => {
-            return Err(ApiErrorResponse::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ApiError::with_details(
-                    "EVENT_STORE_ERROR",
-                    "Failed to load account events",
-                    serde_json::json!({
-                        "error": store_error.to_string()
-                    }),
-                ),
-            ));
-        }
-    };
+        .await
+        .map_err(|e| event_store_error_response(&e))?;
 
     // Step 3: Rebuild account from events (pure function)
     let account = Account::from_events(&events);
 
     // Step 4: Transform to response DTO (pure function)
     account.map_or_else(
-        || {
-            Err(ApiErrorResponse::new(
-                StatusCode::NOT_FOUND,
-                ApiError::with_details(
-                    "ACCOUNT_NOT_FOUND",
-                    "The specified account was not found",
-                    serde_json::json!({
-                        "account_id": account_id.to_string()
-                    }),
-                ),
-            ))
-        },
+        || Err(account_not_found_response(&account_id.to_string())),
         |acc| Ok(Json(account_to_response(&acc))),
     )
 }
@@ -229,16 +185,8 @@ pub async fn get_balance(
     State(dependencies): State<AppDependencies>,
     Path(account_id_string): Path<String>,
 ) -> Result<Json<BalanceResponse>, ApiErrorResponse> {
-    // Step 1: Validate and parse account ID (pure function)
-    let account_id = AccountId::create(&account_id_string).map_left(|error| {
-        let (status, api_error) = account_id_error_to_api_error(error);
-        ApiErrorResponse::new(status, api_error)
-    });
-
-    let account_id = match account_id {
-        lambars::control::Either::Right(id) => id,
-        lambars::control::Either::Left(error) => return Err(error),
-    };
+    // Step 1: Validate and parse account ID using pipeline (pure function)
+    let account_id = parse_account_id_for_api(&account_id_string)?;
 
     // Step 2: Try to get from cache first (IO)
     let cached_result = dependencies
@@ -261,26 +209,13 @@ pub async fn get_balance(
     // Step 3: Cache miss - load events from event store and rebuild account (IO + pure)
     // Note: We immediately extract the Account from events to ensure the non-Send
     // PersistentList is dropped before any subsequent await points.
-    let account = match dependencies
+    let account = dependencies
         .event_store()
         .load_events(&account_id)
         .run_async()
         .await
-    {
-        Ok(events) => Account::from_events(&events),
-        Err(store_error) => {
-            return Err(ApiErrorResponse::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ApiError::with_details(
-                    "EVENT_STORE_ERROR",
-                    "Failed to load account events",
-                    serde_json::json!({
-                        "error": store_error.to_string()
-                    }),
-                ),
-            ));
-        }
-    };
+        .map_err(|e| event_store_error_response(&e))
+        .map(|events| Account::from_events(&events))?;
 
     match account {
         Some(account) => {
@@ -300,16 +235,7 @@ pub async fn get_balance(
                 },
             }))
         }
-        None => Err(ApiErrorResponse::new(
-            StatusCode::NOT_FOUND,
-            ApiError::with_details(
-                "ACCOUNT_NOT_FOUND",
-                "The specified account was not found",
-                serde_json::json!({
-                    "account_id": account_id.to_string()
-                }),
-            ),
-        )),
+        None => Err(account_not_found_response(&account_id.to_string())),
     }
 }
 
@@ -346,6 +272,7 @@ fn to_balance_response(
 mod tests {
     use super::*;
     use crate::api::dto::requests::MoneyDto;
+    use crate::api::dto::transformers::dto_to_money;
     use crate::domain::account::aggregate::AccountStatus;
     use crate::domain::value_objects::{Currency, Money};
     use rstest::rstest;
