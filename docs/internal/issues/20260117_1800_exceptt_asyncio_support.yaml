@@ -1,0 +1,140 @@
+# ExceptT の AsyncIO サポート不足
+#
+# 概要:
+#   ExceptT モナドトランスフォーマーが AsyncIO をサポートしていないため、
+#   eff_async! マクロを使った do-notation スタイルのエラーハンドリングが困難
+#
+# 影響:
+#   - bank sample で eff_async! を活用できない
+#   - AsyncIO<Result<T, E>> パターンで do-notation が使えない
+
+version: "1.0.0"
+name: "exceptt_asyncio_support"
+status: "open"
+created_at: "2026-01-17T18:00:00+09:00"
+priority: "medium"
+category: "feature_request"
+
+# 問題の説明
+problem:
+  summary: |
+    ExceptT モナドトランスフォーマーは Option、Result、IO に対応しているが、
+    AsyncIO に対応していない。これにより、非同期エラーハンドリングで
+    eff_async! マクロを活用できない。
+
+  current_state: |
+    src/effect/except_transformer.rs で以下のみ実装:
+    - ExceptT<E, Option<Result<A, E>>>
+    - ExceptT<E, Result<Result<A, E>, E2>>
+    - ExceptT<E, IO<Result<A, E>>>
+
+  missing: |
+    - ExceptT<E, AsyncIO<Result<A, E>>>
+    - flat_map メソッド（eff_async! が呼び出す）
+
+# 影響範囲
+impact:
+  affected_code:
+    - "samples/bank/src/infrastructure/event_store.rs"
+    - "samples/bank/src/api/handlers/*.rs"
+
+  workaround: |
+    現在は .run_async().await? パターンを使用。
+    これは Rust イディオマティックだが、do-notation の宣言性を失う。
+
+  example_current: |
+    // 現在のパターン（冗長だが動作する）
+    let events = dependencies.event_store()
+        .load_events(&account_id)
+        .run_async().await
+        .map_err(|e| event_store_error_response(&e))?;
+
+    let account = Account::from_events(&events)
+        .map_err(|e| domain_error_to_api_error(e))?;
+
+  example_desired: |
+    // ExceptT + eff_async! があれば可能なパターン
+    eff_async! {
+        events <= ExceptT::lift_async(load_events(&account_id));
+        account <= ExceptT::from_result(Account::from_events(&events));
+        event <= ExceptT::from_result(deposit(&command, &account, timestamp));
+        ExceptT::pure_async(event)
+    }
+
+# 提案する解決策
+proposed_solution:
+  description: |
+    ExceptT に AsyncIO 対応メソッドを追加する。
+
+  implementation:
+    file: "src/effect/except_transformer.rs"
+    methods:
+      - name: "pure_async"
+        signature: "fn pure_async(value: A) -> ExceptT<E, AsyncIO<Result<A, E>>>"
+        description: "値を AsyncIO<Ok(A)> にリフト"
+
+      - name: "throw_async"
+        signature: "fn throw_async(error: E) -> ExceptT<E, AsyncIO<Result<A, E>>>"
+        description: "エラーを AsyncIO<Err(E)> にリフト"
+
+      - name: "lift_async"
+        signature: "fn lift_async(inner: AsyncIO<A>) -> ExceptT<E, AsyncIO<Result<A, E>>>"
+        description: "AsyncIO<A> を ExceptT にリフト"
+
+      - name: "flat_map"
+        signature: "fn flat_map<B, F>(self, f: F) -> ExceptT<E, AsyncIO<Result<B, E>>>"
+        description: "eff_async! マクロが呼び出すメソッド"
+
+      - name: "flat_map_async"
+        signature: "fn flat_map_async<B, F>(self, f: F) -> ExceptT<E, AsyncIO<Result<B, E>>>"
+        description: "明示的な AsyncIO 用 flat_map"
+
+      - name: "catch_async"
+        signature: "fn catch_async<F>(computation: Self, handler: F) -> Self"
+        description: "エラーハンドリング"
+
+  code_example: |
+    impl<E, A> ExceptT<E, AsyncIO<Result<A, E>>>
+    where
+        E: Clone + Send + Sync + 'static,
+        A: Send + Sync + 'static,
+    {
+        pub fn pure_async(value: A) -> Self {
+            Self::new(AsyncIO::pure(Ok(value)))
+        }
+
+        pub fn throw_async(error: E) -> Self {
+            Self::new(AsyncIO::pure(Err(error)))
+        }
+
+        pub fn lift_async(inner: AsyncIO<A>) -> Self {
+            Self::new(inner.fmap(Ok))
+        }
+
+        pub fn flat_map<B, F>(self, function: F) -> ExceptT<E, AsyncIO<Result<B, E>>>
+        where
+            F: FnOnce(A) -> ExceptT<E, AsyncIO<Result<B, E>>> + Send + Sync + 'static,
+            B: Send + Sync + 'static,
+        {
+            ExceptT::new(self.inner.flat_map(move |result| match result {
+                Ok(value) => function(value).inner,
+                Err(error) => AsyncIO::pure(Err(error)),
+            }))
+        }
+    }
+
+# 関連
+related:
+  - "src/effect/except_transformer.rs"
+  - "src/effect/eff_async_macro.rs"
+  - "samples/bank/docs/internal/issues/20260117_1700_eff_async_limited_value.yaml"
+
+# 備考
+notes:
+  - |
+    flat_map メソッドは eff_async! マクロが直接呼び出すため必須。
+    flat_map_async は明示的に AsyncIO を扱う場合の代替名。
+  - |
+    Send + Sync 制約が必要（AsyncIO のマルチスレッド対応のため）。
+  - |
+    この実装により、bank sample の Phase 3 (eff! マクロ) が再検討可能になる。
