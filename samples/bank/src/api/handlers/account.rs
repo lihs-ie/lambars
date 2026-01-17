@@ -25,8 +25,8 @@ use crate::api::dto::requests::OpenAccountRequest;
 use crate::api::dto::responses::{AccountResponse, BalanceResponse, MoneyResponseDto};
 use crate::api::dto::transformers::account_to_response;
 use crate::api::handlers::pipeline::{
-    parse_account_id_for_api, parse_money_for_api, event_store_error_response,
-    account_not_found_response,
+    account_not_found_response, event_store_error_response, parse_account_id_for_api,
+    parse_money_for_api,
 };
 use crate::api::middleware::error_handler::{
     ApiError, ApiErrorResponse, domain_error_to_api_error,
@@ -78,13 +78,13 @@ pub async fn create_account(
     let timestamp = Timestamp::now();
 
     // Step 4: Execute workflow and convert Either to Result for pipeline compatibility
-    let event = crate::api::handlers::pipeline::either_to_result(
-        open_account(&command, account_id, timestamp),
-    )
-        .map_err(|error| {
-            let (status, api_error) = domain_error_to_api_error(error);
-            ApiErrorResponse::new(status, api_error)
-        })?;
+    let event = crate::api::handlers::pipeline::either_to_result(open_account(
+        &command, account_id, timestamp,
+    ))
+    .map_err(|error| {
+        let (status, api_error) = domain_error_to_api_error(error);
+        ApiErrorResponse::new(status, api_error)
+    })?;
 
     // Step 5: Persist event to event store (IO)
     dependencies

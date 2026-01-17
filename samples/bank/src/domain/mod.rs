@@ -9,7 +9,7 @@
 //! - [`value_objects`] - Immutable values that describe domain concepts
 //! - [`account`] - Account aggregate and related types
 //! - [`validation`] - Validation types for parallel error accumulation
-//! - `dsl` - Domain-specific language for banking operations (to be implemented)
+//! - [`audit`] - Audit logging types for financial operations
 //!
 //! # Design Principles
 //!
@@ -20,9 +20,11 @@
 //! - **Immutability**: Data structures are never modified in place
 
 pub mod account;
+pub mod audit;
 pub mod validation;
 pub mod value_objects;
 
 pub use account::*;
+pub use audit::*;
 pub use validation::*;
 pub use value_objects::*;

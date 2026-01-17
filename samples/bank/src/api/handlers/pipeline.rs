@@ -371,10 +371,7 @@ mod tests {
             => |id| id.to_string()
         );
         assert!(result.is_ok());
-        assert_eq!(
-            result.unwrap(),
-            "550e8400-e29b-41d4-a716-446655440000"
-        );
+        assert_eq!(result.unwrap(), "550e8400-e29b-41d4-a716-446655440000");
     }
 
     #[rstest]
