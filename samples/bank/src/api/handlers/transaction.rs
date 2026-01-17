@@ -11,10 +11,17 @@
 //!
 //! Handlers follow a pipeline pattern similar to account handlers.
 //! Idempotency is handled via transaction IDs derived from idempotency keys.
+//!
+//! # eff_async! Workflow Pattern
+//!
+//! Some handlers use the `eff_async!` macro with `ExceptT` monad transformer
+//! for do-notation style async workflow composition. See `deposit_handler_eff`
+//! for an example.
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use lambars::eff_async;
 
 use crate::api::dto::requests::{
     DepositRequest, PaginationParams, TransferRequest, WithdrawRequest,
@@ -26,6 +33,9 @@ use crate::api::handlers::pipeline::{
     account_not_found_response, either_to_result, event_store_error_response,
     parse_account_id_for_api, parse_money_for_api,
 };
+use crate::api::handlers::workflow_eff::{
+    WorkflowResult, from_result, lift_async_result, pure_async,
+};
 use crate::api::middleware::error_handler::{
     ApiError, ApiErrorResponse, domain_error_to_api_error,
 };
@@ -36,7 +46,7 @@ use crate::application::services::idempotency::{
 use crate::application::workflows::{FundingSourceType, deposit, transfer, withdraw};
 use crate::domain::account::aggregate::Account;
 use crate::domain::account::commands::{DepositCommand, TransferCommand, WithdrawCommand};
-use crate::domain::account::events::AccountEvent;
+use crate::domain::account::events::{AccountEvent, MoneyDeposited};
 use crate::domain::value_objects::{Timestamp, TransactionId};
 use crate::infrastructure::AppDependencies;
 
@@ -166,6 +176,177 @@ pub async fn deposit_handler(
     };
 
     Ok((StatusCode::CREATED, Json(response)))
+}
+
+/// POST /accounts/{id}/deposit - Deposit money (eff_async! version).
+///
+/// This handler demonstrates the `eff_async!` macro with `ExceptT` monad
+/// transformer for do-notation style async workflow composition.
+///
+/// # Comparison with `deposit_handler`
+///
+/// The original `deposit_handler` uses the traditional `?` operator pattern:
+/// ```rust,ignore
+/// let events = event_store.load_events(&id).run_async().await.map_err(...)?;
+/// let account = Account::from_events(&events).ok_or(...)?;
+/// ```
+///
+/// This version uses `eff_async!` with declarative error handling:
+/// ```rust,ignore
+/// eff_async! {
+///     events <= load_events_eff(&event_store, &account_id);
+///     account <= from_option(Account::from_events(&events), not_found);
+///     ...
+/// }
+/// ```
+///
+/// Both approaches are valid. The `eff_async!` pattern provides:
+/// - More declarative composition
+/// - Automatic error propagation through ExceptT
+/// - Haskell-like do-notation familiarity
+///
+/// While the `?` operator pattern provides:
+/// - Rust idiomatic style
+/// - Familiar to Rust developers
+/// - No additional abstraction layer
+#[allow(clippy::too_many_lines)]
+#[axum::debug_handler]
+pub async fn deposit_handler_eff(
+    State(dependencies): State<AppDependencies>,
+    Path(account_id_string): Path<String>,
+    Json(request): Json<DepositRequest>,
+) -> Result<(StatusCode, Json<TransactionResponse>), ApiErrorResponse> {
+    // Step 1: Validate and parse inputs (pure functions)
+    let account_id = parse_account_id_for_api(&account_id_string)?;
+    let amount = parse_money_for_api(&request.amount)?;
+    let transaction_id = TransactionId::from_idempotency_key(&request.idempotency_key);
+
+    // Step 2-4: Load events, check idempotency, and build account
+    // All in a single block to ensure PersistentList is dropped before any subsequent await
+    let (command, account) = {
+        let events = dependencies
+            .event_store()
+            .load_events(&account_id)
+            .run_async()
+            .await
+            .map_err(|e| event_store_error_response(&e))?;
+
+        // Check idempotency (early success return if already processed)
+        match check_transaction_idempotency(&events, &transaction_id) {
+            IdempotencyCheckResult::AlreadyProcessed(AccountEvent::Deposited(existing)) => {
+                return Ok((StatusCode::OK, Json(deposit_response(&existing))));
+            }
+            IdempotencyCheckResult::AlreadyProcessed(_) => {
+                return Err(idempotency_conflict_response(&transaction_id));
+            }
+            IdempotencyCheckResult::NotFound => {}
+        }
+
+        // Build account from events
+        let account = Account::from_events(&events).ok_or_else(|| {
+            account_not_found_response(&account_id_string)
+        })?;
+
+        let command = DepositCommand::new(account_id, amount, transaction_id);
+        (command, account)
+    };
+
+    // Step 5: Execute deposit workflow using eff_async! pattern
+    let timestamp = Timestamp::now();
+
+    let event = execute_deposit_workflow_eff(
+        &dependencies,
+        &account_id_string,
+        &command,
+        &account,
+        timestamp,
+    )
+    .await?;
+
+    Ok((StatusCode::CREATED, Json(deposit_response(&event))))
+}
+
+/// Execute deposit workflow using eff_async! macro.
+///
+/// This function demonstrates the eff_async! pattern for composing
+/// async operations with automatic error propagation.
+async fn execute_deposit_workflow_eff(
+    dependencies: &AppDependencies,
+    _account_id_string: &str,
+    command: &DepositCommand,
+    account: &Account,
+    timestamp: Timestamp,
+) -> Result<MoneyDeposited, ApiErrorResponse> {
+    // Clone values needed for the async workflow
+    let account_id = command.account_id;
+    let version = account.version;
+    let event_store = dependencies.event_store().clone();
+    let read_model = dependencies.read_model().clone();
+
+    // Execute workflow using eff_async! with ExceptT
+    let workflow: WorkflowResult<MoneyDeposited> = eff_async! {
+        // Step 1: Execute domain workflow (pure function lifted to WorkflowResult)
+        event <= from_result(
+            either_to_result(deposit(command, account, timestamp))
+                .map_err(|e| {
+                    let (status, api_error) = domain_error_to_api_error(e);
+                    ApiErrorResponse::new(status, api_error)
+                })
+        );
+
+        // Step 2: Persist event to event store
+        _ <= lift_async_result(
+            event_store.append_events(
+                &account_id,
+                version,
+                vec![AccountEvent::Deposited(event.clone())],
+            ),
+            |e| event_store_error_response(&e)
+        );
+
+        // Step 3: Invalidate cache (ignore errors)
+        _ <= lift_async_result(
+            read_model.invalidate(&account_id).fmap(Ok::<_, ()>),
+            |_| ApiErrorResponse::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ApiError::new("CACHE_ERROR", "Cache invalidation failed")
+            )
+        );
+
+        // Return the event
+        pure_async(event)
+    };
+
+    // Run the workflow
+    workflow.run_async_io().run_async().await
+}
+
+/// Create a deposit transaction response from an event.
+fn deposit_response(event: &MoneyDeposited) -> TransactionResponse {
+    TransactionResponse {
+        transaction_id: event.transaction_id.to_string(),
+        amount: MoneyResponseDto {
+            amount: event.amount.amount().to_string(),
+            currency: event.amount.currency().to_string(),
+        },
+        balance_after: MoneyResponseDto {
+            amount: event.balance_after.amount().to_string(),
+            currency: event.balance_after.currency().to_string(),
+        },
+        timestamp: event.deposited_at.to_iso_string(),
+    }
+}
+
+/// Create an idempotency conflict error response.
+fn idempotency_conflict_response(transaction_id: &TransactionId) -> ApiErrorResponse {
+    ApiErrorResponse::new(
+        StatusCode::CONFLICT,
+        ApiError::with_details(
+            "IDEMPOTENCY_CONFLICT",
+            "Transaction ID already used for a different operation type",
+            serde_json::json!({ "transaction_id": transaction_id.to_string() }),
+        ),
+    )
 }
 
 /// POST /accounts/{id}/withdraw - Withdraw money from an account.
@@ -299,6 +480,134 @@ pub async fn withdraw_handler(
     };
 
     Ok((StatusCode::CREATED, Json(response)))
+}
+
+/// POST /accounts/{id}/withdraw - Withdraw money (eff_async! version).
+///
+/// This handler demonstrates the `eff_async!` macro pattern for withdrawals.
+/// See `deposit_handler_eff` for detailed documentation on the pattern.
+#[allow(clippy::too_many_lines)]
+#[axum::debug_handler]
+pub async fn withdraw_handler_eff(
+    State(dependencies): State<AppDependencies>,
+    Path(account_id_string): Path<String>,
+    Json(request): Json<WithdrawRequest>,
+) -> Result<(StatusCode, Json<TransactionResponse>), ApiErrorResponse> {
+    // Step 1: Validate and parse inputs (pure functions)
+    let account_id = parse_account_id_for_api(&account_id_string)?;
+    let amount = parse_money_for_api(&request.amount)?;
+    let transaction_id = TransactionId::from_idempotency_key(&request.idempotency_key);
+
+    // Step 2-4: Load events, check idempotency, and build account
+    // All in a single block to ensure PersistentList is dropped before any subsequent await
+    let (command, account) = {
+        let events = dependencies
+            .event_store()
+            .load_events(&account_id)
+            .run_async()
+            .await
+            .map_err(|e| event_store_error_response(&e))?;
+
+        // Check idempotency (early success return if already processed)
+        match check_transaction_idempotency(&events, &transaction_id) {
+            IdempotencyCheckResult::AlreadyProcessed(AccountEvent::Withdrawn(existing)) => {
+                return Ok((StatusCode::OK, Json(withdraw_response(&existing))));
+            }
+            IdempotencyCheckResult::AlreadyProcessed(_) => {
+                return Err(idempotency_conflict_response(&transaction_id));
+            }
+            IdempotencyCheckResult::NotFound => {}
+        }
+
+        // Build account from events
+        let account = Account::from_events(&events).ok_or_else(|| {
+            account_not_found_response(&account_id_string)
+        })?;
+
+        let command = WithdrawCommand::new(account_id, amount, transaction_id);
+        (command, account)
+    };
+
+    // Step 5: Execute withdraw workflow using eff_async! pattern
+    let funding_sources = vec![FundingSourceType::Balance];
+    let timestamp = Timestamp::now();
+
+    let event = execute_withdraw_workflow_eff(
+        &dependencies,
+        &command,
+        &account,
+        &funding_sources,
+        timestamp,
+    )
+    .await?;
+
+    Ok((StatusCode::CREATED, Json(withdraw_response(&event))))
+}
+
+/// Execute withdraw workflow using eff_async! macro.
+async fn execute_withdraw_workflow_eff(
+    dependencies: &AppDependencies,
+    command: &WithdrawCommand,
+    account: &Account,
+    funding_sources: &[FundingSourceType],
+    timestamp: Timestamp,
+) -> Result<crate::domain::account::events::MoneyWithdrawn, ApiErrorResponse> {
+    use crate::domain::account::events::MoneyWithdrawn;
+
+    let account_id = command.account_id;
+    let version = account.version;
+    let event_store = dependencies.event_store().clone();
+    let read_model = dependencies.read_model().clone();
+
+    let workflow: WorkflowResult<MoneyWithdrawn> = eff_async! {
+        // Step 1: Execute domain workflow
+        event <= from_result(
+            either_to_result(withdraw(command, account, funding_sources, timestamp))
+                .map_err(|e| {
+                    let (status, api_error) = domain_error_to_api_error(e);
+                    ApiErrorResponse::new(status, api_error)
+                })
+        );
+
+        // Step 2: Persist event to event store
+        _ <= lift_async_result(
+            event_store.append_events(
+                &account_id,
+                version,
+                vec![AccountEvent::Withdrawn(event.clone())],
+            ),
+            |e| event_store_error_response(&e)
+        );
+
+        // Step 3: Invalidate cache
+        _ <= lift_async_result(
+            read_model.invalidate(&account_id).fmap(Ok::<_, ()>),
+            |_| ApiErrorResponse::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ApiError::new("CACHE_ERROR", "Cache invalidation failed")
+            )
+        );
+
+        pure_async(event)
+    };
+
+    workflow.run_async_io().run_async().await
+}
+
+/// Create a withdraw transaction response from an event.
+fn withdraw_response(event: &crate::domain::account::events::MoneyWithdrawn) -> TransactionResponse {
+    TransactionResponse {
+        transaction_id: event.transaction_id.to_string(),
+        amount: MoneyResponseDto {
+            amount: event.amount.amount().to_string(),
+            currency: event.amount.currency().to_string(),
+        },
+        balance_after: MoneyResponseDto {
+            amount: event.balance_after.amount().to_string(),
+            currency: event.balance_after.currency().to_string(),
+        },
+        timestamp: event.withdrawn_at.to_iso_string(),
+    }
 }
 
 /// POST /accounts/{id}/transfer - Transfer money between accounts.

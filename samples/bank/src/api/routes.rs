@@ -33,7 +33,8 @@ use serde::Serialize;
 
 use crate::api::handlers::account::{create_account, get_account, get_balance};
 use crate::api::handlers::transaction::{
-    deposit_handler, get_transactions, transfer_handler, withdraw_handler,
+    deposit_handler, deposit_handler_eff, get_transactions, transfer_handler, withdraw_handler,
+    withdraw_handler_eff,
 };
 use crate::infrastructure::AppDependencies;
 
@@ -125,7 +126,9 @@ pub fn create_router(dependencies: AppDependencies) -> Router {
         .route("/accounts/{id}/balance", get(get_balance))
         // Transaction routes
         .route("/accounts/{id}/deposit", post(deposit_handler))
+        .route("/accounts/{id}/deposit-eff", post(deposit_handler_eff))
         .route("/accounts/{id}/withdraw", post(withdraw_handler))
+        .route("/accounts/{id}/withdraw-eff", post(withdraw_handler_eff))
         .route("/accounts/{id}/transfer", post(transfer_handler))
         .route("/accounts/{id}/transactions", get(get_transactions))
         // Health check
