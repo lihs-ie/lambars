@@ -27,12 +27,17 @@
 //! // result is Either<DomainError, AccountOpened>
 //! ```
 
+use crate::application::validation::validated_validators::{
+    validated_initial_balance, validated_owner_name,
+};
 use crate::application::validation::{validate_initial_balance, validate_owner_name};
 use crate::domain::account::commands::OpenAccountCommand;
 use crate::domain::account::errors::DomainResult;
 use crate::domain::account::events::{AccountOpened, EventId};
+use crate::domain::validation::Validated;
 use crate::domain::value_objects::{AccountId, Money, Timestamp};
 use lambars::control::Either;
+use lambars::typeclass::Applicative;
 
 /// Validated open account data.
 ///
@@ -105,6 +110,47 @@ pub(crate) fn validate_open_account(
         }
         (Either::Left(error), _) | (_, Either::Left(error)) => Either::Left(error),
     }
+}
+
+/// Validates an open account command with parallel error accumulation.
+///
+/// Unlike `validate_open_account`, this function uses `Validated` type
+/// to accumulate ALL validation errors instead of failing fast.
+///
+/// # Arguments
+///
+/// * `command` - The open account command to validate
+///
+/// # Returns
+///
+/// * `Validated::Valid(ValidatedOpenAccount)` - If all validations pass
+/// * `Validated::Invalid(ValidationErrors)` - With all accumulated errors
+///
+/// # Examples
+///
+/// ```rust
+/// use bank::application::workflows::open_account::validate_open_account_parallel;
+/// use bank::domain::account::commands::OpenAccountCommand;
+/// use bank::domain::value_objects::{Money, Currency};
+///
+/// // Both name and balance are invalid - all errors are accumulated
+/// let command = OpenAccountCommand::new(
+///     "".to_string(),
+///     Money::new(-100, Currency::JPY),
+/// );
+/// let result = validate_open_account_parallel(&command);
+/// assert!(result.is_invalid());
+/// assert_eq!(result.errors().len(), 2); // Both errors collected
+/// ```
+#[must_use]
+pub fn validate_open_account_parallel(
+    command: &OpenAccountCommand,
+) -> Validated<ValidatedOpenAccount> {
+    let validated_name = validated_owner_name(&command.owner_name);
+    let validated_balance = validated_initial_balance(&command.initial_balance);
+
+    // Use Applicative map2 for parallel error accumulation
+    validated_name.map2(validated_balance, ValidatedOpenAccount::new)
 }
 
 /// Creates an `AccountOpened` event from validated data.
@@ -498,5 +544,80 @@ mod tests {
         assert_eq!(event1.initial_balance, event2.initial_balance);
         assert_eq!(event1.opened_at, event2.opened_at);
         // Note: event_id is unique per call, so it won't match
+    }
+
+    // =========================================================================
+    // validate_open_account_parallel Tests (Applicative Error Accumulation)
+    // =========================================================================
+
+    #[rstest]
+    fn validate_open_account_parallel_valid_command_returns_valid() {
+        let command =
+            OpenAccountCommand::new("Alice".to_string(), Money::new(10000, Currency::JPY));
+
+        let result = validate_open_account_parallel(&command);
+
+        assert!(result.is_valid());
+        let validated = result.unwrap();
+        assert_eq!(validated.owner_name, "Alice");
+        assert_eq!(validated.initial_balance, Money::new(10000, Currency::JPY));
+    }
+
+    #[rstest]
+    fn validate_open_account_parallel_empty_name_returns_invalid() {
+        let command = OpenAccountCommand::new(String::new(), Money::new(10000, Currency::JPY));
+
+        let result = validate_open_account_parallel(&command);
+
+        assert!(result.is_invalid());
+        assert_eq!(result.errors().len(), 1);
+    }
+
+    #[rstest]
+    fn validate_open_account_parallel_negative_balance_returns_invalid() {
+        let command = OpenAccountCommand::new("Alice".to_string(), Money::new(-100, Currency::JPY));
+
+        let result = validate_open_account_parallel(&command);
+
+        assert!(result.is_invalid());
+        assert_eq!(result.errors().len(), 1);
+    }
+
+    #[rstest]
+    fn validate_open_account_parallel_both_invalid_accumulates_all_errors() {
+        // Given: both name and balance are invalid
+        let command = OpenAccountCommand::new(String::new(), Money::new(-100, Currency::JPY));
+
+        // When: we validate in parallel
+        let result = validate_open_account_parallel(&command);
+
+        // Then: both errors are accumulated
+        assert!(result.is_invalid());
+        assert_eq!(result.errors().len(), 2);
+
+        // Verify both error codes are present
+        let codes: Vec<&str> = result.errors().iter().map(|e| e.code.as_str()).collect();
+        assert!(codes.contains(&"INVALID_OWNER_NAME"));
+        assert!(codes.contains(&"INVALID_AMOUNT"));
+    }
+
+    #[rstest]
+    fn validate_open_account_parallel_zero_balance_returns_valid() {
+        let command = OpenAccountCommand::new("Alice".to_string(), Money::zero(Currency::JPY));
+
+        let result = validate_open_account_parallel(&command);
+
+        assert!(result.is_valid());
+    }
+
+    #[rstest]
+    fn validate_open_account_parallel_trims_owner_name() {
+        let command =
+            OpenAccountCommand::new("  Alice  ".to_string(), Money::new(10000, Currency::JPY));
+
+        let result = validate_open_account_parallel(&command);
+
+        assert!(result.is_valid());
+        assert_eq!(result.unwrap().owner_name, "Alice");
     }
 }
