@@ -161,9 +161,10 @@ pub fn validated_account_id(id_string: &str) -> Validated<AccountId> {
 #[must_use]
 fn account_id_error_to_message(error: AccountIdValidationError) -> (&'static str, String) {
     match error {
-        AccountIdValidationError::InvalidUuidFormat(value) => {
-            ("INVALID_ACCOUNT_ID", format!("Invalid UUID format: {value}"))
-        }
+        AccountIdValidationError::InvalidUuidFormat(value) => (
+            "INVALID_ACCOUNT_ID",
+            format!("Invalid UUID format: {value}"),
+        ),
     }
 }
 
@@ -180,7 +181,10 @@ pub fn domain_error_to_validation_error(error: DomainError) -> ValidationError {
         DomainError::AccountFrozen(id) => {
             ValidationError::new("ACCOUNT_FROZEN", format!("Account is frozen: {id}"))
         }
-        DomainError::InsufficientBalance { required, available } => ValidationError::new(
+        DomainError::InsufficientBalance {
+            required,
+            available,
+        } => ValidationError::new(
             "INSUFFICIENT_BALANCE",
             format!("Insufficient balance: required={required}, available={available}"),
         ),

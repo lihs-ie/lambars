@@ -26,7 +26,9 @@ use crate::api::handlers::pipeline::{
     account_not_found_response, either_to_result, event_store_error_response,
     parse_account_id_for_api, parse_money_for_api,
 };
-use crate::api::middleware::error_handler::{ApiError, ApiErrorResponse, domain_error_to_api_error};
+use crate::api::middleware::error_handler::{
+    ApiError, ApiErrorResponse, domain_error_to_api_error,
+};
 use crate::application::queries::{GetHistoryQuery, build_transaction_history};
 use crate::application::services::idempotency::{
     IdempotencyCheckResult, check_transaction_idempotency,

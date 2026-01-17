@@ -332,9 +332,7 @@ impl<A: 'static> Applicative for Validated<A> {
             }
             (Self::Invalid(e), Validated::Valid(_), Validated::Valid(_))
             | (Self::Valid(_), Validated::Invalid(e), Validated::Valid(_))
-            | (Self::Valid(_), Validated::Valid(_), Validated::Invalid(e)) => {
-                Validated::Invalid(e)
-            }
+            | (Self::Valid(_), Validated::Valid(_), Validated::Invalid(e)) => Validated::Invalid(e),
         }
     }
 
