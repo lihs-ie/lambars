@@ -67,52 +67,104 @@ src/
     └── config.rs           # Configuration
 ```
 
-## lambars Features Used
+## lambars Features by Use Case
 
-This sample demonstrates the practical use of various [lambars](../../README.md) features:
+This sample demonstrates practical use of [lambars](../../README.md) features organized by common use cases:
 
-### Phase 1: Core Functional Patterns
+### Error Handling in Domain Logic
 
-| Feature | Usage | Example |
-|---------|-------|---------|
-| `Either<L, R>` | Error handling in domain logic | `Either<DomainError, Account>` |
-| `Semigroup` | Composing Money values | `money1.combine(money2)` |
-| `Monoid` | Identity for Money operations | `Money::empty()` |
-| [`Trampoline`](../../README.md#trampoline-stack-safe-recursion) | Stack-safe event replay | `replay_events(events)` |
-| [`PersistentList`](../../README.md#persistentlist) | Immutable event sequences | Event storage |
-
-### Phase 2: Pipeline Utilities
+Use [`Either<L, R>`](../../README.md) for representing computations that may fail with a specific error type.
 
 ```rust
-use bank::api::handlers::pipeline::*;
+use lambars::typeclass::Either;
 
-// Async pipeline composition
-let result = async_pipe!(
-    validate_input(request),
-    build_command,
-    execute_workflow
-)?;
+// Domain function returns Either instead of Result
+pub fn deposit(
+    command: &DepositCommand,
+    account: &Account,
+    timestamp: Timestamp,
+) -> Either<DomainError, MoneyDeposited> {
+    if account.is_frozen() {
+        Either::Left(DomainError::AccountFrozen)
+    } else {
+        Either::Right(MoneyDeposited::new(command.amount(), timestamp))
+    }
+}
 
-// Parallel validation
-let validated = parallel_validate!(
-    validate_name(name),
-    validate_amount(amount),
-    validate_currency(currency)
-)?;
+// Convert to Result at API boundary
+let result = deposit(&command, &account, timestamp);
+match result {
+    Either::Right(event) => Ok(event),
+    Either::Left(error) => Err(ApiError::from(error)),
+}
 ```
 
-### Phase 3: eff_async! Macro with ExceptT
+### Composing Monetary Values
 
-The sample provides two styles for writing async handlers:
-
-#### Traditional Style (? operator)
+Use [`Semigroup`](../../README.md#semigroup-and-monoid) and [`Monoid`](../../README.md#semigroup-and-monoid) for type-safe value composition.
 
 ```rust
-pub async fn deposit_handler(
-    State(deps): State<AppDependencies>,
-    Path(id): Path<String>,
-    Json(request): Json<DepositRequest>,
-) -> Result<Json<Response>, ApiError> {
+use lambars::typeclass::{Semigroup, Monoid};
+
+// Money implements Semigroup for combining values
+let total = deposit1.amount().combine(deposit2.amount());
+
+// Monoid provides identity element
+let zero = Money::empty();  // Money with 0 amount
+
+// Combine multiple values
+let balance = transactions
+    .iter()
+    .fold(Money::empty(), |acc, tx| acc.combine(tx.amount()));
+```
+
+### Stack-Safe Event Replay
+
+Use [`Trampoline`](../../README.md#trampoline-stack-safe-recursion) for processing large event sequences without stack overflow.
+
+```rust
+use lambars::control::Trampoline;
+
+// Replay thousands of events safely
+fn replay_events(events: &[AccountEvent], account: Account) -> Trampoline<Account> {
+    if events.is_empty() {
+        Trampoline::done(account)
+    } else {
+        let updated = account.apply(&events[0]);
+        Trampoline::suspend(move || replay_events(&events[1..], updated))
+    }
+}
+
+// Execute without stack overflow
+let account = replay_events(&events, Account::default()).run();
+```
+
+### Immutable Event Storage
+
+Use [`PersistentList`](../../README.md#persistentlist) for efficient immutable event sequences with structural sharing.
+
+```rust
+use lambars::persistent::PersistentList;
+
+// Events are stored in an immutable list
+let events: PersistentList<AccountEvent> = event_store.load_events(&account_id);
+
+// Adding new events creates a new list (original unchanged)
+let new_events = events.cons(new_event);
+
+// Structural sharing means minimal memory overhead
+assert_eq!(events.len(), original_count);      // Original unchanged
+assert_eq!(new_events.len(), original_count + 1);
+```
+
+### Async Workflow Composition with Do-Notation
+
+Use [`eff_async!`](../../README.md#eff_async-macro) with [`ExceptT`](../../README.md#monad-transformers) for clean async workflow composition.
+
+**Traditional Style (? operator):**
+
+```rust
+pub async fn deposit_handler(...) -> Result<Json<Response>, ApiError> {
     let events = deps.event_store()
         .load_events(&id)
         .run_async()
@@ -122,7 +174,7 @@ pub async fn deposit_handler(
     let account = Account::from_events(&events)
         .ok_or_else(|| not_found_error())?;
 
-    let event = deposit(&command, &account, timestamp)
+    let event = either_to_result(deposit(&command, &account, timestamp))
         .map_err(|e| domain_error(&e))?;
 
     deps.event_store()
@@ -135,22 +187,21 @@ pub async fn deposit_handler(
 }
 ```
 
-#### eff_async! Style (Do-notation)
+**eff_async! Style (Do-notation):**
 
 ```rust
 use lambars::eff_async;
-use bank::api::handlers::workflow_eff::*;
+use lambars::effect::ExceptT;
 
-async fn execute_workflow(
-    command: &DepositCommand,
-    account: &Account,
-    event_store: &EventStore,
-    timestamp: Timestamp,
-) -> Result<MoneyDeposited, ApiError> {
+// WorkflowResult wraps ExceptT for cleaner error handling
+type WorkflowResult<A> = ExceptT<ApiError, AsyncIO<Result<A, ApiError>>>;
+
+async fn execute_workflow(...) -> Result<MoneyDeposited, ApiError> {
     let workflow: WorkflowResult<MoneyDeposited> = eff_async! {
-        event <= from_result(deposit(command, account, timestamp).map_err(domain_error));
+        // Each step automatically propagates errors
+        event <= from_result(deposit(&command, &account, timestamp).map_err(domain_error));
         _ <= lift_async_result(event_store.append_events(&id, vec![event.clone()]), event_store_error);
-        _ <= lift_async_result(read_model.invalidate(&id).fmap(Ok::<_, ()>), |_| internal_error());
+        _ <= lift_async_result(read_model.invalidate(&id), cache_error);
         pure_async(event)
     };
 
@@ -158,42 +209,61 @@ async fn execute_workflow(
 }
 ```
 
-### Phase 5: Validated for Parallel Validation
+### Parallel Validation with Error Accumulation
+
+Use `Validated` (Applicative-based validation) to collect all validation errors instead of failing on the first one.
 
 ```rust
 use bank::domain::validation::Validated;
 
-// Accumulate all validation errors instead of failing fast
+// Each validator returns Validated<Vec<Error>, T>
 let result: Validated<Vec<ValidationError>, Account> = Validated::map3(
-    validate_owner_name(name),
-    validate_initial_balance(balance),
-    validate_currency(currency),
+    validate_owner_name(name),      // May return Invalid(vec![NameTooLong])
+    validate_initial_balance(balance), // May return Invalid(vec![NegativeBalance])
+    validate_currency(currency),    // May return Invalid(vec![UnsupportedCurrency])
     |name, balance, currency| Account::new(name, balance, currency)
 );
 
+// All errors are accumulated, not just the first one
 match result {
     Validated::Valid(account) => Ok(account),
-    Validated::Invalid(errors) => Err(ValidationErrors(errors)),
+    Validated::Invalid(errors) => {
+        // errors contains ALL validation failures
+        Err(ValidationErrors(errors))
+    }
 }
 ```
 
-### Phase 6: Writer Monad for Audit Logging
+### Audit Logging with Writer Monad
+
+Use [`Writer`](../../README.md#writer-monad) to accumulate audit logs alongside computation results.
 
 ```rust
 use lambars::effect::Writer;
-use bank::application::workflows::audited::*;
+use bank::domain::audit::AuditEntry;
 
-// Workflows that accumulate audit logs
-let audited_workflow: Writer<Vec<AuditEntry>, MoneyDeposited> =
-    audited_deposit(&command, &account, timestamp);
+// Workflow that produces both result and audit trail
+fn audited_deposit(
+    command: &DepositCommand,
+    account: &Account,
+    timestamp: Timestamp,
+) -> Writer<Vec<AuditEntry>, MoneyDeposited> {
+    Writer::tell(vec![AuditEntry::operation_started("deposit", timestamp)])
+        .then(Writer::pure(deposit_logic(command, account)))
+        .flat_map(|event| {
+            Writer::tell(vec![AuditEntry::operation_completed("deposit", &event)])
+                .then(Writer::pure(event))
+        })
+}
 
-let (event, audit_logs) = audited_workflow.run();
+// Execute and get both result and logs
+let (event, audit_logs) = audited_deposit(&command, &account, timestamp).run();
 
-// Audit logs contain:
-// - Timestamp
-// - Operation type
+// audit_logs contains full audit trail:
+// - Operation start time
 // - Actor information
-// - Before/after state
+// - Operation result
+// - Before/after state changes
 ```
 
 ## API Endpoints
@@ -203,10 +273,10 @@ let (event, audit_logs) = audited_workflow.run();
 | `POST` | `/accounts` | Create a new account |
 | `GET` | `/accounts/:id` | Get account information |
 | `GET` | `/accounts/:id/balance` | Get account balance |
-| `POST` | `/accounts/:id/deposit` | Deposit money (traditional) |
-| `POST` | `/accounts/:id/deposit-eff` | Deposit money (eff_async!) |
-| `POST` | `/accounts/:id/withdraw` | Withdraw money (traditional) |
-| `POST` | `/accounts/:id/withdraw-eff` | Withdraw money (eff_async!) |
+| `POST` | `/accounts/:id/deposit` | Deposit money (traditional style) |
+| `POST` | `/accounts/:id/deposit-eff` | Deposit money (eff_async! style) |
+| `POST` | `/accounts/:id/withdraw` | Withdraw money (traditional style) |
+| `POST` | `/accounts/:id/withdraw-eff` | Withdraw money (eff_async! style) |
 | `POST` | `/accounts/:id/transfer` | Transfer money between accounts |
 | `GET` | `/accounts/:id/transactions` | Get transaction history |
 | `GET` | `/health` | Health check |
