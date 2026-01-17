@@ -12,9 +12,9 @@
 //! Handlers follow a pipeline pattern similar to account handlers.
 //! Idempotency is handled via transaction IDs derived from idempotency keys.
 
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::Json;
 
 use crate::api::dto::requests::{
     DepositRequest, PaginationParams, TransferRequest, WithdrawRequest,
@@ -27,7 +27,10 @@ use crate::api::middleware::error_handler::{
     ApiError, ApiErrorResponse, account_id_error_to_api_error, domain_error_to_api_error,
     transformation_error_to_api_error,
 };
-use crate::application::queries::{build_transaction_history, GetHistoryQuery};
+use crate::application::queries::{GetHistoryQuery, build_transaction_history};
+use crate::application::services::idempotency::{
+    IdempotencyCheckResult, check_transaction_idempotency,
+};
 use crate::application::workflows::{FundingSourceType, deposit, transfer, withdraw};
 use crate::domain::account::aggregate::Account;
 use crate::domain::account::commands::{DepositCommand, TransferCommand, WithdrawCommand};
@@ -39,6 +42,16 @@ use crate::infrastructure::AppDependencies;
 ///
 /// Deposits the specified amount into the account.
 /// The idempotency key ensures duplicate requests are handled safely.
+///
+/// # Errors
+///
+/// Returns `ApiErrorResponse` if:
+/// - The account ID is invalid
+/// - The amount or currency is invalid
+/// - The account is not found
+/// - The account is closed
+/// - Event store operation fails
+#[allow(clippy::too_many_lines)]
 pub async fn deposit_handler(
     State(dependencies): State<AppDependencies>,
     Path(account_id_string): Path<String>,
@@ -69,28 +82,62 @@ pub async fn deposit_handler(
     // Step 3: Create transaction ID from idempotency key (pure function)
     let transaction_id = TransactionId::from_idempotency_key(&request.idempotency_key);
 
-    // Step 4: Load account from event store and rebuild (IO + pure)
-    // Note: We immediately extract the Account from events to ensure the non-Send
-    // PersistentList is dropped before any subsequent await points.
+    // Step 4: Load events and process in a single block to ensure PersistentList is dropped
+    // before any subsequent await points (PersistentList is not Send)
     let account = match dependencies
         .event_store()
         .load_events(&account_id)
         .run_async()
         .await
     {
-        Ok(events) => match Account::from_events(&events) {
-            Some(account) => account,
-            None => {
-                return Err(ApiErrorResponse::new(
-                    StatusCode::NOT_FOUND,
-                    ApiError::with_details(
-                        "ACCOUNT_NOT_FOUND",
-                        "The specified account was not found",
-                        serde_json::json!({ "account_id": account_id_string }),
-                    ),
-                ));
+        Ok(events) => {
+            // Step 4.5: Check idempotency (pure function)
+            match check_transaction_idempotency(&events, &transaction_id) {
+                IdempotencyCheckResult::AlreadyProcessed(AccountEvent::Deposited(existing)) => {
+                    return Ok((
+                        StatusCode::OK,
+                        Json(TransactionResponse {
+                            transaction_id: existing.transaction_id.to_string(),
+                            amount: MoneyResponseDto {
+                                amount: existing.amount.amount().to_string(),
+                                currency: existing.amount.currency().to_string(),
+                            },
+                            balance_after: MoneyResponseDto {
+                                amount: existing.balance_after.amount().to_string(),
+                                currency: existing.balance_after.currency().to_string(),
+                            },
+                            timestamp: existing.deposited_at.to_iso_string(),
+                        }),
+                    ));
+                }
+                IdempotencyCheckResult::AlreadyProcessed(_) => {
+                    return Err(ApiErrorResponse::new(
+                        StatusCode::CONFLICT,
+                        ApiError::with_details(
+                            "IDEMPOTENCY_CONFLICT",
+                            "Transaction ID already used for a different operation type",
+                            serde_json::json!({ "transaction_id": transaction_id.to_string() }),
+                        ),
+                    ));
+                }
+                IdempotencyCheckResult::NotFound => {}
             }
-        },
+
+            // Step 4.6: Rebuild account from events (pure function)
+            match Account::from_events(&events) {
+                Some(account) => account,
+                None => {
+                    return Err(ApiErrorResponse::new(
+                        StatusCode::NOT_FOUND,
+                        ApiError::with_details(
+                            "ACCOUNT_NOT_FOUND",
+                            "The specified account was not found",
+                            serde_json::json!({ "account_id": account_id_string }),
+                        ),
+                    ));
+                }
+            }
+        }
         Err(store_error) => {
             return Err(ApiErrorResponse::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -168,6 +215,17 @@ pub async fn deposit_handler(
 ///
 /// Withdraws the specified amount from the account.
 /// The idempotency key ensures duplicate requests are handled safely.
+///
+/// # Errors
+///
+/// Returns `ApiErrorResponse` if:
+/// - The account ID is invalid
+/// - The amount or currency is invalid
+/// - The account is not found
+/// - The account is closed or frozen
+/// - Insufficient balance
+/// - Event store operation fails
+#[allow(clippy::too_many_lines)]
 pub async fn withdraw_handler(
     State(dependencies): State<AppDependencies>,
     Path(account_id_string): Path<String>,
@@ -198,28 +256,62 @@ pub async fn withdraw_handler(
     // Step 3: Create transaction ID from idempotency key (pure function)
     let transaction_id = TransactionId::from_idempotency_key(&request.idempotency_key);
 
-    // Step 4: Load account from event store and rebuild (IO + pure)
-    // Note: We immediately extract the Account from events to ensure the non-Send
-    // PersistentList is dropped before any subsequent await points.
+    // Step 4: Load events and process in a single block to ensure PersistentList is dropped
+    // before any subsequent await points (PersistentList is not Send)
     let account = match dependencies
         .event_store()
         .load_events(&account_id)
         .run_async()
         .await
     {
-        Ok(events) => match Account::from_events(&events) {
-            Some(account) => account,
-            None => {
-                return Err(ApiErrorResponse::new(
-                    StatusCode::NOT_FOUND,
-                    ApiError::with_details(
-                        "ACCOUNT_NOT_FOUND",
-                        "The specified account was not found",
-                        serde_json::json!({ "account_id": account_id_string }),
-                    ),
-                ));
+        Ok(events) => {
+            // Step 4.5: Check idempotency (pure function)
+            match check_transaction_idempotency(&events, &transaction_id) {
+                IdempotencyCheckResult::AlreadyProcessed(AccountEvent::Withdrawn(existing)) => {
+                    return Ok((
+                        StatusCode::OK,
+                        Json(TransactionResponse {
+                            transaction_id: existing.transaction_id.to_string(),
+                            amount: MoneyResponseDto {
+                                amount: existing.amount.amount().to_string(),
+                                currency: existing.amount.currency().to_string(),
+                            },
+                            balance_after: MoneyResponseDto {
+                                amount: existing.balance_after.amount().to_string(),
+                                currency: existing.balance_after.currency().to_string(),
+                            },
+                            timestamp: existing.withdrawn_at.to_iso_string(),
+                        }),
+                    ));
+                }
+                IdempotencyCheckResult::AlreadyProcessed(_) => {
+                    return Err(ApiErrorResponse::new(
+                        StatusCode::CONFLICT,
+                        ApiError::with_details(
+                            "IDEMPOTENCY_CONFLICT",
+                            "Transaction ID already used for a different operation type",
+                            serde_json::json!({ "transaction_id": transaction_id.to_string() }),
+                        ),
+                    ));
+                }
+                IdempotencyCheckResult::NotFound => {}
             }
-        },
+
+            // Step 4.6: Rebuild account from events (pure function)
+            match Account::from_events(&events) {
+                Some(account) => account,
+                None => {
+                    return Err(ApiErrorResponse::new(
+                        StatusCode::NOT_FOUND,
+                        ApiError::with_details(
+                            "ACCOUNT_NOT_FOUND",
+                            "The specified account was not found",
+                            serde_json::json!({ "account_id": account_id_string }),
+                        ),
+                    ));
+                }
+            }
+        }
         Err(store_error) => {
             return Err(ApiErrorResponse::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -300,6 +392,19 @@ pub async fn withdraw_handler(
 ///
 /// Transfers the specified amount from one account to another.
 /// The idempotency key ensures duplicate requests are handled safely.
+///
+/// # Errors
+///
+/// Returns `ApiErrorResponse` if:
+/// - Either account ID is invalid
+/// - The amount or currency is invalid
+/// - Either account is not found
+/// - The source account is closed or frozen
+/// - The destination account is closed
+/// - Transferring to the same account
+/// - Insufficient balance
+/// - Event store operation fails
+#[allow(clippy::too_many_lines)]
 pub async fn transfer_handler(
     State(dependencies): State<AppDependencies>,
     Path(from_account_id_string): Path<String>,
@@ -355,28 +460,64 @@ pub async fn transfer_handler(
     // Step 4: Create transaction ID from idempotency key (pure function)
     let transaction_id = TransactionId::from_idempotency_key(&request.idempotency_key);
 
-    // Step 5: Load source account from event store and rebuild (IO + pure)
-    // Note: We immediately extract the Account from events to ensure the non-Send
-    // PersistentList is dropped before any subsequent await points.
+    // Step 5: Load source account events and process in a single block to ensure PersistentList
+    // is dropped before any subsequent await points (PersistentList is not Send)
     let from_account = match dependencies
         .event_store()
         .load_events(&from_account_id)
         .run_async()
         .await
     {
-        Ok(events) => match Account::from_events(&events) {
-            Some(account) => account,
-            None => {
-                return Err(ApiErrorResponse::new(
-                    StatusCode::NOT_FOUND,
-                    ApiError::with_details(
-                        "ACCOUNT_NOT_FOUND",
-                        "The source account was not found",
-                        serde_json::json!({ "account_id": from_account_id_string }),
-                    ),
-                ));
+        Ok(events) => {
+            // Step 5.5: Check idempotency on source account (pure function)
+            match check_transaction_idempotency(&events, &transaction_id) {
+                IdempotencyCheckResult::AlreadyProcessed(AccountEvent::TransferSent(existing)) => {
+                    return Ok((
+                        StatusCode::OK,
+                        Json(TransferResponse {
+                            transfer_id: existing.transaction_id.to_string(),
+                            from_account_id: existing.account_id.to_string(),
+                            to_account_id: existing.to_account_id.to_string(),
+                            amount: MoneyResponseDto {
+                                amount: existing.amount.amount().to_string(),
+                                currency: existing.amount.currency().to_string(),
+                            },
+                            from_balance_after: MoneyResponseDto {
+                                amount: existing.balance_after.amount().to_string(),
+                                currency: existing.balance_after.currency().to_string(),
+                            },
+                            timestamp: existing.sent_at.to_iso_string(),
+                        }),
+                    ));
+                }
+                IdempotencyCheckResult::AlreadyProcessed(_) => {
+                    return Err(ApiErrorResponse::new(
+                        StatusCode::CONFLICT,
+                        ApiError::with_details(
+                            "IDEMPOTENCY_CONFLICT",
+                            "Transaction ID already used for a different operation type",
+                            serde_json::json!({ "transaction_id": transaction_id.to_string() }),
+                        ),
+                    ));
+                }
+                IdempotencyCheckResult::NotFound => {}
             }
-        },
+
+            // Step 5.6: Rebuild source account from events (pure function)
+            match Account::from_events(&events) {
+                Some(account) => account,
+                None => {
+                    return Err(ApiErrorResponse::new(
+                        StatusCode::NOT_FOUND,
+                        ApiError::with_details(
+                            "ACCOUNT_NOT_FOUND",
+                            "The source account was not found",
+                            serde_json::json!({ "account_id": from_account_id_string }),
+                        ),
+                    ));
+                }
+            }
+        }
         Err(store_error) => {
             return Err(ApiErrorResponse::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -514,6 +655,13 @@ pub async fn transfer_handler(
 /// GET /accounts/{id}/transactions - Get transaction history.
 ///
 /// Retrieves the transaction history for an account with pagination.
+///
+/// # Errors
+///
+/// Returns `ApiErrorResponse` if:
+/// - The account ID is invalid
+/// - The account is not found
+/// - Event store operation fails
 pub async fn get_transactions(
     State(dependencies): State<AppDependencies>,
     Path(account_id_string): Path<String>,
@@ -579,21 +727,19 @@ pub async fn get_transactions(
     let transactions: Vec<_> = history
         .transactions
         .iter()
-        .map(|record| {
-            crate::api::dto::responses::TransactionRecordDto {
-                transaction_id: record.transaction_id.to_string(),
-                transaction_type: format!("{:?}", record.transaction_type),
-                amount: MoneyResponseDto {
-                    amount: record.amount.amount().to_string(),
-                    currency: record.amount.currency().to_string(),
-                },
-                balance_after: MoneyResponseDto {
-                    amount: record.balance_after.amount().to_string(),
-                    currency: record.balance_after.currency().to_string(),
-                },
-                counterparty_account_id: record.counterparty.map(|id| id.to_string()),
-                timestamp: record.timestamp.to_iso_string(),
-            }
+        .map(|record| crate::api::dto::responses::TransactionRecordDto {
+            transaction_id: record.transaction_id.to_string(),
+            transaction_type: format!("{:?}", record.transaction_type),
+            amount: MoneyResponseDto {
+                amount: record.amount.amount().to_string(),
+                currency: record.amount.currency().to_string(),
+            },
+            balance_after: MoneyResponseDto {
+                amount: record.balance_after.amount().to_string(),
+                currency: record.balance_after.currency().to_string(),
+            },
+            counterparty_account_id: record.counterparty.map(|id| id.to_string()),
+            timestamp: record.timestamp.to_iso_string(),
         })
         .collect();
 
@@ -615,11 +761,7 @@ pub async fn get_transactions(
 /// Returns 1 if the input is 0 or negative.
 #[allow(dead_code)]
 const fn normalize_page(page: usize) -> usize {
-    if page == 0 {
-        1
-    } else {
-        page
-    }
+    if page == 0 { 1 } else { page }
 }
 
 /// Clamps the page size to a reasonable range.

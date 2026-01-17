@@ -17,9 +17,9 @@
 //! Each step is a pure function except for the Execute step which
 //! runs the `AsyncIO` computation.
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::Json;
 
 use crate::api::dto::requests::OpenAccountRequest;
 use crate::api::dto::responses::{AccountResponse, BalanceResponse, MoneyResponseDto};
@@ -187,23 +187,22 @@ pub async fn get_account(
     // Step 3: Rebuild account from events (pure function)
     let account = Account::from_events(&events);
 
-    match account {
-        Some(account) => {
-            // Step 4: Transform to response DTO (pure function)
-            let response = account_to_response(&account);
-            Ok(Json(response))
-        }
-        None => Err(ApiErrorResponse::new(
-            StatusCode::NOT_FOUND,
-            ApiError::with_details(
-                "ACCOUNT_NOT_FOUND",
-                "The specified account was not found",
-                serde_json::json!({
-                    "account_id": account_id.to_string()
-                }),
-            ),
-        )),
-    }
+    // Step 4: Transform to response DTO (pure function)
+    account.map_or_else(
+        || {
+            Err(ApiErrorResponse::new(
+                StatusCode::NOT_FOUND,
+                ApiError::with_details(
+                    "ACCOUNT_NOT_FOUND",
+                    "The specified account was not found",
+                    serde_json::json!({
+                        "account_id": account_id.to_string()
+                    }),
+                ),
+            ))
+        },
+        |acc| Ok(Json(account_to_response(&acc))),
+    )
 }
 
 /// GET /accounts/{id}/balance - Get account balance.
