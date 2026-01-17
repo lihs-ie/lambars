@@ -22,11 +22,11 @@ use crate::api::dto::requests::{
 use crate::api::dto::responses::{
     MoneyResponseDto, TransactionHistoryResponse, TransactionResponse, TransferResponse,
 };
-use crate::api::dto::transformers::dto_to_money;
-use crate::api::middleware::error_handler::{
-    ApiError, ApiErrorResponse, account_id_error_to_api_error, domain_error_to_api_error,
-    transformation_error_to_api_error,
+use crate::api::handlers::pipeline::{
+    account_not_found_response, either_to_result, event_store_error_response,
+    parse_account_id_for_api, parse_money_for_api,
 };
+use crate::api::middleware::error_handler::{ApiError, ApiErrorResponse, domain_error_to_api_error};
 use crate::application::queries::{GetHistoryQuery, build_transaction_history};
 use crate::application::services::idempotency::{
     IdempotencyCheckResult, check_transaction_idempotency,
@@ -35,7 +35,7 @@ use crate::application::workflows::{FundingSourceType, deposit, transfer, withdr
 use crate::domain::account::aggregate::Account;
 use crate::domain::account::commands::{DepositCommand, TransferCommand, WithdrawCommand};
 use crate::domain::account::events::AccountEvent;
-use crate::domain::value_objects::{AccountId, Timestamp, TransactionId};
+use crate::domain::value_objects::{Timestamp, TransactionId};
 use crate::infrastructure::AppDependencies;
 
 /// POST /accounts/{id}/deposit - Deposit money into an account.
@@ -57,27 +57,11 @@ pub async fn deposit_handler(
     Path(account_id_string): Path<String>,
     Json(request): Json<DepositRequest>,
 ) -> Result<(StatusCode, Json<TransactionResponse>), ApiErrorResponse> {
-    // Step 1: Validate and parse account ID (pure function)
-    let account_id = AccountId::create(&account_id_string).map_left(|error| {
-        let (status, api_error) = account_id_error_to_api_error(error);
-        ApiErrorResponse::new(status, api_error)
-    });
+    // Step 1: Validate and parse account ID using pipeline (pure function)
+    let account_id = parse_account_id_for_api(&account_id_string)?;
 
-    let account_id = match account_id {
-        lambars::control::Either::Right(id) => id,
-        lambars::control::Either::Left(error) => return Err(error),
-    };
-
-    // Step 2: Transform DTO to domain types (pure function)
-    let amount = dto_to_money(&request.amount).map_left(|error| {
-        let (status, api_error) = transformation_error_to_api_error(error);
-        ApiErrorResponse::new(status, api_error)
-    });
-
-    let amount = match amount {
-        lambars::control::Either::Right(amount) => amount,
-        lambars::control::Either::Left(error) => return Err(error),
-    };
+    // Step 2: Transform DTO to domain types using pipeline (pure function)
+    let amount = parse_money_for_api(&request.amount)?;
 
     // Step 3: Create transaction ID from idempotency key (pure function)
     let transaction_id = TransactionId::from_idempotency_key(&request.idempotency_key);
@@ -127,46 +111,27 @@ pub async fn deposit_handler(
             match Account::from_events(&events) {
                 Some(account) => account,
                 None => {
-                    return Err(ApiErrorResponse::new(
-                        StatusCode::NOT_FOUND,
-                        ApiError::with_details(
-                            "ACCOUNT_NOT_FOUND",
-                            "The specified account was not found",
-                            serde_json::json!({ "account_id": account_id_string }),
-                        ),
-                    ));
+                    return Err(account_not_found_response(&account_id_string));
                 }
             }
         }
         Err(store_error) => {
-            return Err(ApiErrorResponse::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ApiError::with_details(
-                    "EVENT_STORE_ERROR",
-                    "Failed to load account events",
-                    serde_json::json!({ "error": store_error.to_string() }),
-                ),
-            ));
+            return Err(event_store_error_response(&store_error));
         }
     };
 
     // Step 5: Create domain command (pure function)
     let command = DepositCommand::new(account_id, amount, transaction_id);
 
-    // Step 7: Execute workflow (pure function)
+    // Step 6: Execute workflow and convert Either to Result (pure function)
     let timestamp = Timestamp::now();
-    let event_result = deposit(&command, &account, timestamp);
+    let event = either_to_result(deposit(&command, &account, timestamp)).map_err(|error| {
+        let (status, api_error) = domain_error_to_api_error(error);
+        ApiErrorResponse::new(status, api_error)
+    })?;
 
-    let event = match event_result {
-        lambars::control::Either::Right(event) => event,
-        lambars::control::Either::Left(error) => {
-            let (status, api_error) = domain_error_to_api_error(error);
-            return Err(ApiErrorResponse::new(status, api_error));
-        }
-    };
-
-    // Step 8: Persist event to event store (IO)
-    let persist_result = dependencies
+    // Step 7: Persist event to event store (IO)
+    dependencies
         .event_store()
         .append_events(
             &account_id,
@@ -174,27 +139,17 @@ pub async fn deposit_handler(
             vec![AccountEvent::Deposited(event.clone())],
         )
         .run_async()
-        .await;
+        .await
+        .map_err(|e| event_store_error_response(&e))?;
 
-    if let Err(store_error) = persist_result {
-        return Err(ApiErrorResponse::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ApiError::with_details(
-                "EVENT_STORE_ERROR",
-                "Failed to persist deposit event",
-                serde_json::json!({ "error": store_error.to_string() }),
-            ),
-        ));
-    }
-
-    // Step 9: Invalidate cache (IO)
+    // Step 8: Invalidate cache (IO)
     let _ = dependencies
         .read_model()
         .invalidate(&account_id)
         .run_async()
         .await;
 
-    // Step 10: Transform result to response DTO (pure function)
+    // Step 9: Transform result to response DTO (pure function)
     let response = TransactionResponse {
         transaction_id: event.transaction_id.to_string(),
         amount: MoneyResponseDto {
@@ -231,27 +186,11 @@ pub async fn withdraw_handler(
     Path(account_id_string): Path<String>,
     Json(request): Json<WithdrawRequest>,
 ) -> Result<(StatusCode, Json<TransactionResponse>), ApiErrorResponse> {
-    // Step 1: Validate and parse account ID (pure function)
-    let account_id = AccountId::create(&account_id_string).map_left(|error| {
-        let (status, api_error) = account_id_error_to_api_error(error);
-        ApiErrorResponse::new(status, api_error)
-    });
+    // Step 1: Validate and parse account ID using pipeline (pure function)
+    let account_id = parse_account_id_for_api(&account_id_string)?;
 
-    let account_id = match account_id {
-        lambars::control::Either::Right(id) => id,
-        lambars::control::Either::Left(error) => return Err(error),
-    };
-
-    // Step 2: Transform DTO to domain types (pure function)
-    let amount = dto_to_money(&request.amount).map_left(|error| {
-        let (status, api_error) = transformation_error_to_api_error(error);
-        ApiErrorResponse::new(status, api_error)
-    });
-
-    let amount = match amount {
-        lambars::control::Either::Right(amount) => amount,
-        lambars::control::Either::Left(error) => return Err(error),
-    };
+    // Step 2: Transform DTO to domain types using pipeline (pure function)
+    let amount = parse_money_for_api(&request.amount)?;
 
     // Step 3: Create transaction ID from idempotency key (pure function)
     let transaction_id = TransactionId::from_idempotency_key(&request.idempotency_key);
@@ -301,26 +240,12 @@ pub async fn withdraw_handler(
             match Account::from_events(&events) {
                 Some(account) => account,
                 None => {
-                    return Err(ApiErrorResponse::new(
-                        StatusCode::NOT_FOUND,
-                        ApiError::with_details(
-                            "ACCOUNT_NOT_FOUND",
-                            "The specified account was not found",
-                            serde_json::json!({ "account_id": account_id_string }),
-                        ),
-                    ));
+                    return Err(account_not_found_response(&account_id_string));
                 }
             }
         }
         Err(store_error) => {
-            return Err(ApiErrorResponse::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ApiError::with_details(
-                    "EVENT_STORE_ERROR",
-                    "Failed to load account events",
-                    serde_json::json!({ "error": store_error.to_string() }),
-                ),
-            ));
+            return Err(event_store_error_response(&store_error));
         }
     };
 
@@ -330,20 +255,16 @@ pub async fn withdraw_handler(
     // Step 6: Define funding sources (configuration)
     let funding_sources = vec![FundingSourceType::Balance];
 
-    // Step 8: Execute workflow (pure function)
+    // Step 7: Execute workflow and convert Either to Result (pure function)
     let timestamp = Timestamp::now();
-    let event_result = withdraw(&command, &account, &funding_sources, timestamp);
-
-    let event = match event_result {
-        lambars::control::Either::Right(event) => event,
-        lambars::control::Either::Left(error) => {
+    let event = either_to_result(withdraw(&command, &account, &funding_sources, timestamp))
+        .map_err(|error| {
             let (status, api_error) = domain_error_to_api_error(error);
-            return Err(ApiErrorResponse::new(status, api_error));
-        }
-    };
+            ApiErrorResponse::new(status, api_error)
+        })?;
 
-    // Step 9: Persist event to event store (IO)
-    let persist_result = dependencies
+    // Step 8: Persist event to event store (IO)
+    dependencies
         .event_store()
         .append_events(
             &account_id,
@@ -351,27 +272,17 @@ pub async fn withdraw_handler(
             vec![AccountEvent::Withdrawn(event.clone())],
         )
         .run_async()
-        .await;
+        .await
+        .map_err(|e| event_store_error_response(&e))?;
 
-    if let Err(store_error) = persist_result {
-        return Err(ApiErrorResponse::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ApiError::with_details(
-                "EVENT_STORE_ERROR",
-                "Failed to persist withdrawal event",
-                serde_json::json!({ "error": store_error.to_string() }),
-            ),
-        ));
-    }
-
-    // Step 10: Invalidate cache (IO)
+    // Step 9: Invalidate cache (IO)
     let _ = dependencies
         .read_model()
         .invalidate(&account_id)
         .run_async()
         .await;
 
-    // Step 11: Transform result to response DTO (pure function)
+    // Step 10: Transform result to response DTO (pure function)
     let response = TransactionResponse {
         transaction_id: event.transaction_id.to_string(),
         amount: MoneyResponseDto {
@@ -410,37 +321,12 @@ pub async fn transfer_handler(
     Path(from_account_id_string): Path<String>,
     Json(request): Json<TransferRequest>,
 ) -> Result<(StatusCode, Json<TransferResponse>), ApiErrorResponse> {
-    // Step 1: Validate and parse account IDs (pure functions)
-    let from_account_id = AccountId::create(&from_account_id_string).map_left(|error| {
-        let (status, api_error) = account_id_error_to_api_error(error);
-        ApiErrorResponse::new(status, api_error)
-    });
+    // Step 1: Validate and parse account IDs using pipeline (pure functions)
+    let from_account_id = parse_account_id_for_api(&from_account_id_string)?;
+    let to_account_id = parse_account_id_for_api(&request.to_account_id)?;
 
-    let from_account_id = match from_account_id {
-        lambars::control::Either::Right(id) => id,
-        lambars::control::Either::Left(error) => return Err(error),
-    };
-
-    let to_account_id = AccountId::create(&request.to_account_id).map_left(|error| {
-        let (status, api_error) = account_id_error_to_api_error(error);
-        ApiErrorResponse::new(status, api_error)
-    });
-
-    let to_account_id = match to_account_id {
-        lambars::control::Either::Right(id) => id,
-        lambars::control::Either::Left(error) => return Err(error),
-    };
-
-    // Step 2: Transform DTO to domain types (pure function)
-    let amount = dto_to_money(&request.amount).map_left(|error| {
-        let (status, api_error) = transformation_error_to_api_error(error);
-        ApiErrorResponse::new(status, api_error)
-    });
-
-    let amount = match amount {
-        lambars::control::Either::Right(amount) => amount,
-        lambars::control::Either::Left(error) => return Err(error),
-    };
+    // Step 2: Transform DTO to domain types using pipeline (pure function)
+    let amount = parse_money_for_api(&request.amount)?;
 
     // Step 3: Validate that source and destination are different
     if from_account_id == to_account_id {
@@ -507,26 +393,12 @@ pub async fn transfer_handler(
             match Account::from_events(&events) {
                 Some(account) => account,
                 None => {
-                    return Err(ApiErrorResponse::new(
-                        StatusCode::NOT_FOUND,
-                        ApiError::with_details(
-                            "ACCOUNT_NOT_FOUND",
-                            "The source account was not found",
-                            serde_json::json!({ "account_id": from_account_id_string }),
-                        ),
-                    ));
+                    return Err(account_not_found_response(&from_account_id_string));
                 }
             }
         }
         Err(store_error) => {
-            return Err(ApiErrorResponse::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ApiError::with_details(
-                    "EVENT_STORE_ERROR",
-                    "Failed to load source account events",
-                    serde_json::json!({ "error": store_error.to_string() }),
-                ),
-            ));
+            return Err(event_store_error_response(&store_error));
         }
     };
 
@@ -540,46 +412,30 @@ pub async fn transfer_handler(
         Ok(events) => match Account::from_events(&events) {
             Some(account) => account,
             None => {
-                return Err(ApiErrorResponse::new(
-                    StatusCode::NOT_FOUND,
-                    ApiError::with_details(
-                        "ACCOUNT_NOT_FOUND",
-                        "The destination account was not found",
-                        serde_json::json!({ "account_id": request.to_account_id }),
-                    ),
-                ));
+                return Err(account_not_found_response(&request.to_account_id));
             }
         },
         Err(store_error) => {
-            return Err(ApiErrorResponse::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ApiError::with_details(
-                    "EVENT_STORE_ERROR",
-                    "Failed to load destination account events",
-                    serde_json::json!({ "error": store_error.to_string() }),
-                ),
-            ));
+            return Err(event_store_error_response(&store_error));
         }
     };
 
     // Step 7: Create domain command (pure function)
     let command = TransferCommand::new(from_account_id, to_account_id, amount, transaction_id);
 
-    // Step 8: Execute workflow (pure function)
+    // Step 8: Execute workflow and convert Either to Result (pure function)
     let timestamp = Timestamp::now();
-    let events_result = transfer(&command, &from_account, &to_account, timestamp);
-
-    let (sent_event, received_event) = match events_result {
-        lambars::control::Either::Right(events) => events,
-        lambars::control::Either::Left(error) => {
-            let (status, api_error) = domain_error_to_api_error(error);
-            return Err(ApiErrorResponse::new(status, api_error));
-        }
-    };
+    let (sent_event, received_event) =
+        either_to_result(transfer(&command, &from_account, &to_account, timestamp)).map_err(
+            |error| {
+                let (status, api_error) = domain_error_to_api_error(error);
+                ApiErrorResponse::new(status, api_error)
+            },
+        )?;
 
     // Step 9: Persist events to event store (IO)
     // Note: In a real implementation, this should be transactional
-    let from_persist_result = dependencies
+    dependencies
         .event_store()
         .append_events(
             &from_account_id,
@@ -587,20 +443,10 @@ pub async fn transfer_handler(
             vec![AccountEvent::TransferSent(sent_event.clone())],
         )
         .run_async()
-        .await;
+        .await
+        .map_err(|e| event_store_error_response(&e))?;
 
-    if let Err(store_error) = from_persist_result {
-        return Err(ApiErrorResponse::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ApiError::with_details(
-                "EVENT_STORE_ERROR",
-                "Failed to persist transfer sent event",
-                serde_json::json!({ "error": store_error.to_string() }),
-            ),
-        ));
-    }
-
-    let to_persist_result = dependencies
+    dependencies
         .event_store()
         .append_events(
             &to_account_id,
@@ -608,18 +454,8 @@ pub async fn transfer_handler(
             vec![AccountEvent::TransferReceived(received_event.clone())],
         )
         .run_async()
-        .await;
-
-    if let Err(store_error) = to_persist_result {
-        return Err(ApiErrorResponse::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ApiError::with_details(
-                "EVENT_STORE_ERROR",
-                "Failed to persist transfer received event",
-                serde_json::json!({ "error": store_error.to_string() }),
-            ),
-        ));
-    }
+        .await
+        .map_err(|e| event_store_error_response(&e))?;
 
     // Step 10: Invalidate cache for both accounts (IO)
     let _ = dependencies
@@ -667,52 +503,24 @@ pub async fn get_transactions(
     Path(account_id_string): Path<String>,
     Query(params): Query<PaginationParams>,
 ) -> Result<Json<TransactionHistoryResponse>, ApiErrorResponse> {
-    // Step 1: Validate and parse account ID (pure function)
-    let account_id = AccountId::create(&account_id_string).map_left(|error| {
-        let (status, api_error) = account_id_error_to_api_error(error);
-        ApiErrorResponse::new(status, api_error)
-    });
-
-    let account_id = match account_id {
-        lambars::control::Either::Right(id) => id,
-        lambars::control::Either::Left(error) => return Err(error),
-    };
+    // Step 1: Validate and parse account ID using pipeline (pure function)
+    let account_id = parse_account_id_for_api(&account_id_string)?;
 
     // Step 2: Validate pagination parameters
     let page = if params.page == 0 { 1 } else { params.page };
     let page_size = params.page_size.clamp(1, 100);
 
     // Step 3: Load events from event store (IO)
-    let events_result = dependencies
+    let events = dependencies
         .event_store()
         .load_events(&account_id)
         .run_async()
-        .await;
-
-    let events = match events_result {
-        Ok(events) => events,
-        Err(store_error) => {
-            return Err(ApiErrorResponse::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ApiError::with_details(
-                    "EVENT_STORE_ERROR",
-                    "Failed to load account events",
-                    serde_json::json!({ "error": store_error.to_string() }),
-                ),
-            ));
-        }
-    };
+        .await
+        .map_err(|e| event_store_error_response(&e))?;
 
     // Step 4: Check if account exists
     if Account::from_events(&events).is_none() {
-        return Err(ApiErrorResponse::new(
-            StatusCode::NOT_FOUND,
-            ApiError::with_details(
-                "ACCOUNT_NOT_FOUND",
-                "The specified account was not found",
-                serde_json::json!({ "account_id": account_id_string }),
-            ),
-        ));
+        return Err(account_not_found_response(&account_id_string));
     }
 
     // Step 5: Build transaction history (pure function)
@@ -776,6 +584,8 @@ fn clamp_page_size(page_size: usize) -> usize {
 mod tests {
     use super::*;
     use crate::api::dto::requests::MoneyDto;
+    use crate::api::dto::transformers::dto_to_money;
+    use crate::domain::value_objects::AccountId;
     use rstest::rstest;
 
     // =========================================================================
