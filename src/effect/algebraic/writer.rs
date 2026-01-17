@@ -23,10 +23,11 @@
 //! assert_eq!(log, "Hello World");
 //! ```
 
-use super::eff::{Eff, EffInner, OperationTag};
+use super::eff::{Eff, EffInner, EffQueueStack, OperationTag};
 use super::effect::Effect;
 use super::handler::Handler;
 use crate::typeclass::Monoid;
+use std::any::Any;
 use std::cell::RefCell;
 use std::marker::PhantomData;
 
@@ -129,33 +130,76 @@ impl<W: Monoid + Clone + 'static> WriterHandler<W> {
     ///
     /// Uses `Vec<W>` to accumulate outputs, achieving O(n) time complexity
     /// instead of O(n^2) with the naive approach.
+    /// Uses QueueStack-based interpretation for stack safety.
     #[inline]
     fn run_with_buffer<A: 'static>(
         computation: Eff<WriterEffect<W>, A>,
         buffer: &RefCell<Vec<W>>,
     ) -> A {
-        let mut current_computation = computation;
+        enum LoopState<W: Monoid + Clone + 'static> {
+            ExecuteOperation {
+                operation_tag: OperationTag,
+                arguments: Box<dyn Any + Send + Sync>,
+                queue_stack: EffQueueStack<WriterEffect<W>>,
+            },
+            ApplyContinuation {
+                value: Box<dyn Any>,
+                queue_stack: EffQueueStack<WriterEffect<W>>,
+            },
+        }
+
+        let mut loop_state = match computation.inner {
+            EffInner::Pure(a) => return a,
+            EffInner::Impure(operation) => LoopState::ExecuteOperation {
+                operation_tag: operation.operation_tag,
+                arguments: operation.arguments,
+                queue_stack: EffQueueStack::new(operation.queue),
+            },
+        };
 
         loop {
-            let normalized = current_computation.normalize();
-
-            match normalized.inner {
-                EffInner::Pure(value) => return value,
-                EffInner::Impure(operation) => match operation.operation_tag {
-                    writer_operations::TELL => {
-                        let output = *operation
-                            .arguments
-                            .downcast::<W>()
-                            .expect("Type mismatch in Writer::tell");
-                        buffer.borrow_mut().push(output);
-                        current_computation = (operation.continuation)(Box::new(()));
+            loop_state = match loop_state {
+                LoopState::ExecuteOperation {
+                    operation_tag,
+                    arguments,
+                    queue_stack,
+                } => {
+                    let result: Box<dyn Any> = match operation_tag {
+                        writer_operations::TELL => {
+                            let output = *arguments
+                                .downcast::<W>()
+                                .expect("Type mismatch in Writer::tell");
+                            buffer.borrow_mut().push(output);
+                            Box::new(())
+                        }
+                        _ => panic!("Unknown Writer operation: {operation_tag:?}"),
+                    };
+                    LoopState::ApplyContinuation {
+                        value: result,
+                        queue_stack,
                     }
-                    _ => panic!("Unknown Writer operation: {:?}", operation.operation_tag),
-                },
-                EffInner::FlatMap(_) => {
-                    unreachable!("FlatMap should be normalized by normalize()")
                 }
-            }
+                LoopState::ApplyContinuation {
+                    value,
+                    mut queue_stack,
+                } => match queue_stack.pop() {
+                    None => return *value.downcast::<A>().expect("Final result type mismatch"),
+                    Some(arrow) => match arrow.apply(value).inner {
+                        EffInner::Pure(boxed) => LoopState::ApplyContinuation {
+                            value: boxed,
+                            queue_stack,
+                        },
+                        EffInner::Impure(operation) => {
+                            queue_stack.push_queue(operation.queue);
+                            LoopState::ExecuteOperation {
+                                operation_tag: operation.operation_tag,
+                                arguments: operation.arguments,
+                                queue_stack,
+                            }
+                        }
+                    },
+                },
+            };
         }
     }
 }
@@ -541,6 +585,72 @@ mod property_tests {
 
             let expected = String::combine_all(parts);
             prop_assert_eq!(log, expected);
+        }
+
+        #[test]
+        fn prop_writer_monad_left_identity(value in any::<i32>()) {
+            fn f(x: i32) -> Eff<WriterEffect<Vec<i32>>, i32> {
+                WriterEffect::tell(vec![x]).fmap(move |()| x.wrapping_mul(2))
+            }
+
+            let left = Eff::<WriterEffect<Vec<i32>>, i32>::pure(value).flat_map(f);
+            let right = f(value);
+
+            let handler_left = WriterHandler::<Vec<i32>>::new();
+            let handler_right = WriterHandler::<Vec<i32>>::new();
+            prop_assert_eq!(handler_left.run(left), handler_right.run(right));
+        }
+
+        #[test]
+        fn prop_writer_monad_right_identity(value in any::<i32>()) {
+            let result = Eff::<WriterEffect<Vec<i32>>, i32>::pure(value).flat_map(Eff::pure);
+            let handler = WriterHandler::<Vec<i32>>::new();
+            let (result_value, log) = handler.run(result);
+            prop_assert_eq!(result_value, value);
+            prop_assert!(log.is_empty());
+        }
+
+        #[test]
+        fn prop_writer_monad_associativity(value in any::<i32>()) {
+            fn f(x: i32) -> Eff<WriterEffect<Vec<i32>>, i32> {
+                WriterEffect::tell(vec![x]).fmap(move |()| x.wrapping_add(10))
+            }
+            fn g(x: i32) -> Eff<WriterEffect<Vec<i32>>, i32> {
+                WriterEffect::tell(vec![x]).fmap(move |()| x.wrapping_mul(2))
+            }
+
+            let left = Eff::<WriterEffect<Vec<i32>>, i32>::pure(value).flat_map(f).flat_map(g);
+            let right = Eff::<WriterEffect<Vec<i32>>, i32>::pure(value).flat_map(|x| f(x).flat_map(g));
+
+            let handler_left = WriterHandler::<Vec<i32>>::new();
+            let handler_right = WriterHandler::<Vec<i32>>::new();
+            prop_assert_eq!(handler_left.run(left), handler_right.run(right));
+        }
+
+        #[test]
+        fn prop_writer_functor_identity(value in any::<i32>()) {
+            let computation = WriterEffect::<Vec<i32>>::tell(vec![value]).fmap(|x| x);
+            let handler = WriterHandler::<Vec<i32>>::new();
+            let (result, log) = handler.run(computation);
+            prop_assert_eq!(result, ());
+            prop_assert_eq!(log, vec![value]);
+        }
+
+        #[test]
+        fn prop_writer_functor_composition(value in any::<i32>()) {
+            fn f(x: i32) -> i32 {
+                x.wrapping_add(10)
+            }
+            fn g(x: i32) -> i32 {
+                x.wrapping_mul(2)
+            }
+
+            let left = Eff::<WriterEffect<Vec<i32>>, i32>::pure(value).fmap(f).fmap(g);
+            let right = Eff::<WriterEffect<Vec<i32>>, i32>::pure(value).fmap(|x| g(f(x)));
+
+            let handler_left = WriterHandler::<Vec<i32>>::new();
+            let handler_right = WriterHandler::<Vec<i32>>::new();
+            prop_assert_eq!(handler_left.run(left), handler_right.run(right));
         }
     }
 }

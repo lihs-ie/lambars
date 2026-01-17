@@ -35,9 +35,11 @@
 //! has_state::<Row, There<Here>>();
 //! ```
 
-use super::eff::{Eff, EffInner, EffOperation};
+use super::eff::{Eff, EffContinuationQueue, EffInner, EffOperation};
 use super::effect::Effect;
 use super::row::EffCons;
+use crate::control::continuation_queue::TypeErasedArrow;
+use std::any::Any;
 use std::marker::PhantomData;
 
 /// Index indicating the effect is at the head of the row.
@@ -210,35 +212,116 @@ where
 ///
 /// # Safety
 ///
-/// This function uses `unsafe` transmute internally but is safe because:
-/// 1. `Eff<E, A>` is a repr(Rust) struct containing `EffInner<E, A>`
-/// 2. The effect type `E` is only a phantom type marker
-/// 3. The actual data (Pure value, Impure operation, or `FlatMap`) is unchanged
-fn convert_effect_type<E1: Effect, E2: Effect, A: 'static>(effect: Eff<E1, A>) -> Eff<E2, A> {
+/// This function converts effect types by reconstructing the computation
+/// with the new effect type marker. The actual data is unchanged.
+fn convert_effect_type<E1: Effect + 'static, E2: Effect + 'static, A: 'static>(
+    effect: Eff<E1, A>,
+) -> Eff<E2, A> {
     match effect.inner {
         EffInner::Pure(value) => Eff {
             inner: EffInner::Pure(value),
         },
-        EffInner::Impure(operation) => Eff {
-            inner: EffInner::Impure(EffOperation {
-                effect_marker: PhantomData,
-                operation_tag: operation.operation_tag,
-                arguments: operation.arguments,
-                continuation: Box::new(move |result| {
-                    convert_effect_type::<E1, E2, A>((operation.continuation)(result))
-                }),
-            }),
-        },
-        EffInner::FlatMap(flat_map) => {
-            let source = flat_map.source;
-            let transform = flat_map.transform;
+        EffInner::Impure(operation) => {
+            // Convert the continuation queue by wrapping each arrow
+            // Since we cannot directly convert the queue arrows, we create a new queue
+            // with a single arrow that processes the original queue's output
+            let mut new_queue = EffContinuationQueue::<E2>::new();
+
+            // Add an arrow that will convert the result from E1 to E2
+            // This is a simplified approach - the original queue is processed
+            // when the operation result is applied, and we convert the final Eff
+            new_queue.push_arrow(Box::new(EffectConversionArrow::<E1, E2, A> {
+                original_queue: operation.queue,
+                _phantom: PhantomData,
+            }));
+
             Eff {
-                inner: EffInner::FlatMap(Box::new(super::eff::EffFlatMap {
-                    source,
-                    transform: Box::new(move |source| {
-                        convert_effect_type::<E1, E2, A>(transform(source))
-                    }),
-                })),
+                inner: EffInner::Impure(EffOperation {
+                    effect_marker: PhantomData,
+                    operation_tag: operation.operation_tag,
+                    arguments: operation.arguments,
+                    queue: new_queue,
+                    _result: PhantomData,
+                }),
+            }
+        }
+    }
+}
+
+/// Arrow that processes the original queue and converts the result.
+struct EffectConversionArrow<E1, E2, A>
+where
+    E1: Effect,
+    E2: Effect,
+{
+    original_queue: EffContinuationQueue<E1>,
+    _phantom: PhantomData<(E2, A)>,
+}
+
+impl<E1: Effect + 'static, E2: Effect + 'static, A: 'static> TypeErasedArrow<Eff<E2, Box<dyn Any>>>
+    for EffectConversionArrow<E1, E2, A>
+{
+    fn apply(self: Box<Self>, input: Box<dyn Any>) -> Eff<E2, Box<dyn Any>> {
+        // Process the original queue with the input
+        let result = process_queue_with_value::<E1>(input, self.original_queue);
+        // Convert the result from E1 to E2
+        convert_effect_type::<E1, E2, Box<dyn Any>>(result)
+    }
+}
+
+/// Process a continuation queue with an initial value.
+/// This simulates applying the queue's arrows in sequence.
+fn process_queue_with_value<E: Effect + 'static>(
+    initial_value: Box<dyn Any>,
+    queue: EffContinuationQueue<E>,
+) -> Eff<E, Box<dyn Any>> {
+    use super::eff::EffQueueStack;
+
+    // If queue is empty, return pure value
+    if queue.is_empty() {
+        return Eff {
+            inner: EffInner::Pure(initial_value),
+        };
+    }
+
+    // Create a queue stack and process
+    let mut queue_stack = EffQueueStack::new(queue);
+    let mut current_value = initial_value;
+
+    loop {
+        match queue_stack.pop() {
+            None => {
+                return Eff {
+                    inner: EffInner::Pure(current_value),
+                };
+            }
+            Some(arrow) => {
+                let result = arrow.apply(current_value);
+                match result.inner {
+                    EffInner::Pure(boxed) => {
+                        current_value = boxed;
+                    }
+                    EffInner::Impure(operation) => {
+                        // We have an impure result, need to return it with merged queue
+                        queue_stack.push_queue(operation.queue);
+
+                        // Create a new queue from the remaining queue_stack
+                        let mut remaining_queue = EffContinuationQueue::<E>::new();
+                        while let Some(remaining_arrow) = queue_stack.pop() {
+                            remaining_queue.push_arrow(remaining_arrow);
+                        }
+
+                        return Eff {
+                            inner: EffInner::Impure(EffOperation {
+                                effect_marker: operation.effect_marker,
+                                operation_tag: operation.operation_tag,
+                                arguments: operation.arguments,
+                                queue: remaining_queue,
+                                _result: PhantomData,
+                            }),
+                        };
+                    }
+                }
             }
         }
     }

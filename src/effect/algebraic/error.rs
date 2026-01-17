@@ -21,9 +21,10 @@
 //! assert_eq!(result, Err("error occurred".to_string()));
 //! ```
 
-use super::eff::{Eff, EffInner, OperationTag};
+use super::eff::{Eff, EffInner, EffQueueStack, OperationTag};
 use super::effect::Effect;
 use super::handler::Handler;
+use std::any::Any;
 use std::marker::PhantomData;
 
 mod error_operations {
@@ -121,25 +122,68 @@ impl<E: Clone + 'static> ErrorHandler<E> {
 
     /// Runs the computation and returns a Result (internal).
     ///
-    /// Uses an iterative approach for stack safety.
+    /// Uses a QueueStack-based iterative approach for stack safety.
+    /// Error effect short-circuits on the first error.
     fn run_internal<A: 'static>(computation: Eff<ErrorEffect<E>, A>) -> Result<A, E> {
-        let normalized = computation.normalize();
-
-        match normalized.inner {
-            EffInner::Pure(value) => Ok(value),
-            EffInner::Impure(operation) => match operation.operation_tag {
-                error_operations::THROW => {
-                    let error = *operation
-                        .arguments
-                        .downcast::<E>()
-                        .expect("Type mismatch in Error::throw");
-                    Err(error)
-                }
-                _ => panic!("Unknown Error operation: {:?}", operation.operation_tag),
+        enum LoopState<E: Clone + 'static> {
+            ExecuteOperation {
+                operation_tag: OperationTag,
+                arguments: Box<dyn Any + Send + Sync>,
+                #[allow(dead_code)]
+                queue_stack: EffQueueStack<ErrorEffect<E>>,
             },
-            EffInner::FlatMap(_) => {
-                unreachable!("FlatMap should be normalized by normalize()")
-            }
+            #[allow(dead_code)]
+            ApplyContinuation {
+                value: Box<dyn Any>,
+                queue_stack: EffQueueStack<ErrorEffect<E>>,
+            },
+        }
+
+        let mut loop_state = match computation.inner {
+            EffInner::Pure(a) => return Ok(a),
+            EffInner::Impure(operation) => LoopState::ExecuteOperation {
+                operation_tag: operation.operation_tag,
+                arguments: operation.arguments,
+                queue_stack: EffQueueStack::new(operation.queue),
+            },
+        };
+
+        loop {
+            loop_state = match loop_state {
+                LoopState::ExecuteOperation {
+                    operation_tag,
+                    arguments,
+                    queue_stack: _,
+                } => match operation_tag {
+                    error_operations::THROW => {
+                        let error = *arguments
+                            .downcast::<E>()
+                            .expect("Type mismatch in Error::throw");
+                        return Err(error);
+                    }
+                    _ => panic!("Unknown Error operation: {operation_tag:?}"),
+                },
+                LoopState::ApplyContinuation {
+                    value,
+                    mut queue_stack,
+                } => match queue_stack.pop() {
+                    None => return Ok(*value.downcast::<A>().expect("Final result type mismatch")),
+                    Some(arrow) => match arrow.apply(value).inner {
+                        EffInner::Pure(boxed) => LoopState::ApplyContinuation {
+                            value: boxed,
+                            queue_stack,
+                        },
+                        EffInner::Impure(operation) => {
+                            queue_stack.push_queue(operation.queue);
+                            LoopState::ExecuteOperation {
+                                operation_tag: operation.operation_tag,
+                                arguments: operation.arguments,
+                                queue_stack,
+                            }
+                        }
+                    },
+                },
+            };
         }
     }
 }

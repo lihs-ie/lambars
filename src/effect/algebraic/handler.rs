@@ -108,16 +108,10 @@ impl Handler<NoEffect> for PureHandler {
     type Output<A> = A;
 
     fn run<A: 'static>(self, computation: Eff<NoEffect, A>) -> A {
-        // Normalize to handle FlatMap chains
-        let normalized = computation.normalize();
-
-        match normalized.inner {
+        match computation.inner {
             EffInner::Pure(value) => value,
             EffInner::Impure(_) => {
                 panic!("NoEffect computation should not have Impure operations")
-            }
-            EffInner::FlatMap(_) => {
-                unreachable!("FlatMap should be normalized by normalize()")
             }
         }
     }

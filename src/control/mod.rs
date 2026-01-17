@@ -70,6 +70,7 @@
 
 mod concurrent_lazy;
 mod continuation;
+pub(crate) mod continuation_queue;
 mod either;
 mod freer;
 mod lazy;

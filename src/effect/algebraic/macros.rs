@@ -550,42 +550,81 @@ mod tests {
             &self,
             computation: crate::effect::algebraic::Eff<TestableCounterEffect, A>,
         ) -> A {
-            use crate::effect::algebraic::eff::EffInner;
+            use crate::effect::algebraic::eff::{EffInner, EffQueueStack, OperationTag};
+            use std::any::Any;
 
-            let normalized = computation.normalize();
+            enum LoopState {
+                ExecuteOperation {
+                    operation_tag: OperationTag,
+                    arguments: Box<dyn Any + Send + Sync>,
+                    queue_stack: EffQueueStack<TestableCounterEffect>,
+                },
+                ApplyContinuation {
+                    value: Box<dyn Any>,
+                    queue_stack: EffQueueStack<TestableCounterEffect>,
+                },
+            }
 
-            match normalized.inner {
-                EffInner::Pure(value) => value,
-                EffInner::Impure(operation) => {
-                    // Dispatch based on operation tag
-                    if operation.operation_tag == *__testable_counter_operations::INCREMENT_TAG {
-                        *self.counter.borrow_mut() += 1;
-                        let next = (operation.continuation)(Box::new(()));
-                        self.run(next)
-                    } else if operation.operation_tag
-                        == *__testable_counter_operations::DECREMENT_TAG
-                    {
-                        *self.counter.borrow_mut() -= 1;
-                        let next = (operation.continuation)(Box::new(()));
-                        self.run(next)
-                    } else if operation.operation_tag
-                        == *__testable_counter_operations::GET_VALUE_TAG
-                    {
-                        let value = *self.counter.borrow();
-                        let next = (operation.continuation)(Box::new(value));
-                        self.run(next)
-                    } else if operation.operation_tag == *__testable_counter_operations::RESET_TAG {
-                        let new_value = *operation.arguments.downcast::<(i32,)>().unwrap();
-                        *self.counter.borrow_mut() = new_value.0;
-                        let next = (operation.continuation)(Box::new(()));
-                        self.run(next)
-                    } else {
-                        panic!("Unknown TestableCounter operation");
+            let mut loop_state = match computation.inner {
+                EffInner::Pure(a) => return a,
+                EffInner::Impure(operation) => LoopState::ExecuteOperation {
+                    operation_tag: operation.operation_tag,
+                    arguments: operation.arguments,
+                    queue_stack: EffQueueStack::new(operation.queue),
+                },
+            };
+
+            loop {
+                loop_state = match loop_state {
+                    LoopState::ExecuteOperation {
+                        operation_tag,
+                        arguments,
+                        queue_stack,
+                    } => {
+                        let result: Box<dyn Any> = if operation_tag
+                            == *__testable_counter_operations::INCREMENT_TAG
+                        {
+                            *self.counter.borrow_mut() += 1;
+                            Box::new(())
+                        } else if operation_tag == *__testable_counter_operations::DECREMENT_TAG {
+                            *self.counter.borrow_mut() -= 1;
+                            Box::new(())
+                        } else if operation_tag == *__testable_counter_operations::GET_VALUE_TAG {
+                            let value = *self.counter.borrow();
+                            Box::new(value)
+                        } else if operation_tag == *__testable_counter_operations::RESET_TAG {
+                            let new_value = *arguments.downcast::<(i32,)>().unwrap();
+                            *self.counter.borrow_mut() = new_value.0;
+                            Box::new(())
+                        } else {
+                            panic!("Unknown TestableCounter operation");
+                        };
+                        LoopState::ApplyContinuation {
+                            value: result,
+                            queue_stack,
+                        }
                     }
-                }
-                EffInner::FlatMap(_) => {
-                    unreachable!("FlatMap should be normalized")
-                }
+                    LoopState::ApplyContinuation {
+                        value,
+                        mut queue_stack,
+                    } => match queue_stack.pop() {
+                        None => return *value.downcast::<A>().expect("Final result type mismatch"),
+                        Some(arrow) => match arrow.apply(value).inner {
+                            EffInner::Pure(boxed) => LoopState::ApplyContinuation {
+                                value: boxed,
+                                queue_stack,
+                            },
+                            EffInner::Impure(operation) => {
+                                queue_stack.push_queue(operation.queue);
+                                LoopState::ExecuteOperation {
+                                    operation_tag: operation.operation_tag,
+                                    arguments: operation.arguments,
+                                    queue_stack,
+                                }
+                            }
+                        },
+                    },
+                };
             }
         }
 

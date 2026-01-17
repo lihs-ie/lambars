@@ -5,10 +5,17 @@
 //!
 //! # Stack Safety
 //!
-//! The implementation uses a `FlatMap` variant internally
+//! The implementation uses a continuation queue internally
 //! to ensure deep `flat_map` chains do not overflow the stack.
+//! This is the "Reflection without Remorse" pattern.
+//!
+//! # Performance
+//!
+//! - `flat_map`: O(1) - appends to continuation queue
+//! - Handler interpretation: O(n) - processes n continuations in linear time
 
 use super::effect::Effect;
+use crate::control::continuation_queue::{ContinuationQueue, QueueStack, TypeErasedArrow};
 use std::any::Any;
 use std::marker::PhantomData;
 
@@ -28,28 +35,28 @@ impl OperationTag {
     }
 }
 
-/// Type alias for type-erased continuation functions.
-type Continuation<E, A> = Box<dyn FnOnce(Box<dyn Any>) -> Eff<E, A> + 'static>;
+/// Eff-specific monadic type alias for type-erased continuations.
+type EffMonad<E> = Eff<E, Box<dyn Any>>;
+
+/// Type alias for continuation queue specialized for Eff.
+pub type EffContinuationQueue<E> = ContinuationQueue<EffMonad<E>>;
+
+/// Type alias for queue stack specialized for Eff.
+pub type EffQueueStack<E> = QueueStack<EffMonad<E>>;
 
 /// Internal structure representing an effect operation.
 pub struct EffOperation<E: Effect, A: 'static> {
     pub effect_marker: PhantomData<E>,
     pub operation_tag: OperationTag,
     pub arguments: Box<dyn Any + Send + Sync>,
-    pub continuation: Continuation<E, A>,
-}
-
-/// Internal structure for deferred `flat_map` (stack safety).
-pub struct EffFlatMap<E: Effect, A: 'static> {
-    pub source: Box<dyn Any + 'static>,
-    pub transform: Continuation<E, A>,
+    pub(crate) queue: EffContinuationQueue<E>,
+    pub(crate) _result: PhantomData<A>,
 }
 
 /// Internal representation of an effectful computation.
 pub enum EffInner<E: Effect, A: 'static> {
     Pure(A),
     Impure(EffOperation<E, A>),
-    FlatMap(Box<EffFlatMap<E, A>>),
 }
 
 /// An effectful computation.
@@ -73,8 +80,14 @@ pub enum EffInner<E: Effect, A: 'static> {
 ///
 /// # Stack Safety
 ///
-/// Deep `flat_map` chains are handled using a deferred evaluation strategy
-/// combined with iterative execution, preventing stack overflow.
+/// Deep `flat_map` chains are handled using a continuation queue
+/// with loop-based interpretation, preventing stack overflow.
+///
+/// # Performance
+///
+/// Uses "Reflection without Remorse" pattern:
+/// - `flat_map`: O(1) - appends to continuation queue
+/// - Handler interpretation: O(n) - processes n continuations in linear time
 ///
 /// # Examples
 ///
@@ -90,6 +103,110 @@ pub enum EffInner<E: Effect, A: 'static> {
 pub struct Eff<E: Effect, A: 'static> {
     pub(super) inner: EffInner<E, A>,
 }
+
+// =============================================================================
+// Arrow implementations for Eff
+// =============================================================================
+
+/// Eff-specific arrow that applies a function and boxes the result.
+struct EffArrow<E, A, B, F>
+where
+    E: Effect,
+    B: 'static,
+    F: FnOnce(A) -> Eff<E, B>,
+{
+    function: F,
+    _phantom: PhantomData<fn(A) -> (E, B)>,
+}
+
+impl<E: Effect + 'static, A: 'static, B: 'static, F> TypeErasedArrow<EffMonad<E>>
+    for EffArrow<E, A, B, F>
+where
+    F: FnOnce(A) -> Eff<E, B> + 'static,
+{
+    fn apply(self: Box<Self>, input: Box<dyn Any>) -> EffMonad<E> {
+        let value = *input
+            .downcast::<A>()
+            .expect("Type mismatch in EffArrow application");
+
+        match (self.function)(value).inner {
+            EffInner::Pure(b) => Eff::pure(Box::new(b) as Box<dyn Any>),
+            EffInner::Impure(mut op) => {
+                op.queue
+                    .push_arrow(Box::new(EffBoxingArrow::<E, B>(PhantomData)));
+                Eff {
+                    inner: EffInner::Impure(EffOperation {
+                        effect_marker: op.effect_marker,
+                        operation_tag: op.operation_tag,
+                        arguments: op.arguments,
+                        queue: op.queue,
+                        _result: PhantomData,
+                    }),
+                }
+            }
+        }
+    }
+}
+
+/// Boxing arrow that wraps the result in Box<dyn Any>.
+struct EffBoxingArrow<E: Effect, T>(PhantomData<(E, T)>);
+
+impl<E: Effect + 'static, T: 'static> TypeErasedArrow<EffMonad<E>> for EffBoxingArrow<E, T> {
+    fn apply(self: Box<Self>, input: Box<dyn Any>) -> EffMonad<E> {
+        Eff::pure(input)
+    }
+}
+
+/// Extract arrow for initial continuation from `perform_raw`.
+struct EffExtractArrow<E, R, F>
+where
+    E: Effect,
+    F: FnOnce(Box<dyn Any>) -> R,
+{
+    extract: F,
+    _phantom: PhantomData<(E, R)>,
+}
+
+impl<E: Effect + 'static, R: 'static, F> TypeErasedArrow<EffMonad<E>> for EffExtractArrow<E, R, F>
+where
+    F: FnOnce(Box<dyn Any>) -> R + 'static,
+{
+    fn apply(self: Box<Self>, input: Box<dyn Any>) -> EffMonad<E> {
+        Eff::pure(Box::new((self.extract)(input)) as Box<dyn Any>)
+    }
+}
+
+// =============================================================================
+// Helper functions for Eff-specific operations
+// =============================================================================
+
+fn push_arrow_function<E: Effect + 'static, A: 'static, B: 'static, F>(
+    queue: &mut EffContinuationQueue<E>,
+    function: F,
+) where
+    F: FnOnce(A) -> Eff<E, B> + 'static,
+{
+    queue.push_arrow(Box::new(EffArrow {
+        function,
+        _phantom: PhantomData,
+    }));
+}
+
+fn push_extract_arrow<E: Effect + 'static, R: 'static, F>(
+    queue: &mut EffContinuationQueue<E>,
+    extract: F,
+) where
+    F: FnOnce(Box<dyn Any>) -> R + 'static,
+{
+    queue.push_arrow(Box::new(EffExtractArrow {
+        extract,
+        _phantom: PhantomData,
+    }));
+}
+
+// =============================================================================
+// Eff implementation
+// =============================================================================
 
 impl<E: Effect, A: 'static> Eff<E, A> {
     /// Creates a pure computation that immediately returns the given value.
@@ -113,15 +230,14 @@ impl<E: Effect, A: 'static> Eff<E, A> {
     }
 
     /// Checks if this computation is a pure value (no pending effects).
-    ///
-    /// Note: This only checks the immediate structure. A computation
-    /// may appear pure but have effects in nested `flat_map` chains.
     #[must_use]
     #[inline]
     pub const fn is_pure(&self) -> bool {
         matches!(&self.inner, EffInner::Pure(_))
     }
+}
 
+impl<E: Effect + 'static, A: 'static> Eff<E, A> {
     /// Creates an effect operation.
     ///
     /// This function is used by effect definitions to create operations.
@@ -141,44 +257,21 @@ impl<E: Effect, A: 'static> Eff<E, A> {
         operation_tag: OperationTag,
         arguments: impl Any + Send + Sync + 'static,
     ) -> Eff<E, R> {
+        let mut queue = EffContinuationQueue::<E>::new();
+        push_extract_arrow(&mut queue, |result| {
+            *result
+                .downcast::<R>()
+                .expect("Type mismatch in Eff::perform_raw")
+        });
+
         Eff {
             inner: EffInner::Impure(EffOperation {
                 effect_marker: PhantomData,
                 operation_tag,
                 arguments: Box::new(arguments),
-                continuation: Box::new(|result| {
-                    let value = *result
-                        .downcast::<R>()
-                        .expect("Type mismatch in Eff::perform_raw");
-                    Eff::pure(value)
-                }),
+                queue,
+                _result: PhantomData,
             }),
-        }
-    }
-
-    /// Normalizes the computation by evaluating `FlatMap` chains.
-    ///
-    /// This method converts `FlatMap` variants to `Pure` or `Impure`,
-    /// using an iterative approach for stack safety.
-    #[inline]
-    pub(crate) fn normalize(self) -> Self {
-        match self.inner {
-            EffInner::Pure(_) | EffInner::Impure(_) => self,
-            EffInner::FlatMap(flat_map) => Self::normalize_iteratively(*flat_map),
-        }
-    }
-
-    #[inline]
-    fn normalize_iteratively(initial_flat_map: EffFlatMap<E, A>) -> Self {
-        let mut current_result = (initial_flat_map.transform)(initial_flat_map.source);
-
-        loop {
-            match current_result.inner {
-                EffInner::Pure(_) | EffInner::Impure(_) => return current_result,
-                EffInner::FlatMap(next_flat_map) => {
-                    current_result = (next_flat_map.transform)(next_flat_map.source);
-                }
-            }
         }
     }
 
@@ -209,7 +302,7 @@ impl<E: Effect, A: 'static> Eff<E, A> {
     ///
     /// This is the `bind` / `>>=` operation (Monad).
     ///
-    /// Uses deferred evaluation for stack safety.
+    /// Uses O(1) continuation queue append for stack safety.
     ///
     /// # Panics
     ///
@@ -235,35 +328,16 @@ impl<E: Effect, A: 'static> Eff<E, A> {
     {
         match self.inner {
             EffInner::Pure(value) => function(value),
-            EffInner::Impure(operation) => Eff {
-                inner: EffInner::Impure(EffOperation {
-                    effect_marker: operation.effect_marker,
-                    operation_tag: operation.operation_tag,
-                    arguments: operation.arguments,
-                    continuation: Box::new(move |result| {
-                        let next = (operation.continuation)(result);
-                        Eff {
-                            inner: EffInner::FlatMap(Box::new(EffFlatMap {
-                                source: Box::new(next),
-                                transform: Box::new(move |source| {
-                                    let eff = *source.downcast::<Self>().unwrap();
-                                    eff.flat_map(function)
-                                }),
-                            })),
-                        }
-                    }),
-                }),
-            },
-            EffInner::FlatMap(flat_map) => {
-                let EffFlatMap { source, transform } = *flat_map;
+            EffInner::Impure(mut op) => {
+                push_arrow_function(&mut op.queue, function);
                 Eff {
-                    inner: EffInner::FlatMap(Box::new(EffFlatMap {
-                        source,
-                        transform: Box::new(move |src| {
-                            let next = transform(src);
-                            next.flat_map(function)
-                        }),
-                    })),
+                    inner: EffInner::Impure(EffOperation {
+                        effect_marker: op.effect_marker,
+                        operation_tag: op.operation_tag,
+                        arguments: op.arguments,
+                        queue: op.queue,
+                        _result: PhantomData,
+                    }),
                 }
             }
         }
@@ -457,5 +531,66 @@ mod tests {
         let tag = OperationTag::new(42);
         let copied = tag;
         assert_eq!(tag, copied);
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::effect::algebraic::{Handler, NoEffect, PureHandler};
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn prop_monad_left_identity(value in any::<i32>()) {
+            let f = |x: i32| Eff::<NoEffect, i32>::pure(x.wrapping_mul(2));
+
+            let left = Eff::<NoEffect, i32>::pure(value).flat_map(f);
+            let right = f(value);
+
+            prop_assert_eq!(PureHandler.run(left), PureHandler.run(right));
+        }
+
+        #[test]
+        fn prop_monad_right_identity(value in any::<i32>()) {
+            let result = Eff::<NoEffect, i32>::pure(value).flat_map(Eff::pure);
+            prop_assert_eq!(PureHandler.run(result), value);
+        }
+
+        #[test]
+        fn prop_monad_associativity(value in any::<i32>()) {
+            fn f(x: i32) -> Eff<NoEffect, i32> {
+                Eff::pure(x.wrapping_add(10))
+            }
+            fn g(x: i32) -> Eff<NoEffect, i32> {
+                Eff::pure(x.wrapping_mul(2))
+            }
+
+            let left = Eff::<NoEffect, i32>::pure(value).flat_map(f).flat_map(g);
+            let right = Eff::<NoEffect, i32>::pure(value).flat_map(|x| f(x).flat_map(g));
+
+            prop_assert_eq!(PureHandler.run(left), PureHandler.run(right));
+        }
+
+        #[test]
+        fn prop_functor_identity(value in any::<i32>()) {
+            let result = Eff::<NoEffect, i32>::pure(value).fmap(|x| x);
+            prop_assert_eq!(PureHandler.run(result), value);
+        }
+
+        #[test]
+        fn prop_functor_composition(value in any::<i32>()) {
+            fn f(x: i32) -> i32 {
+                x.wrapping_add(10)
+            }
+            fn g(x: i32) -> i32 {
+                x.wrapping_mul(2)
+            }
+
+            let left = Eff::<NoEffect, i32>::pure(value).fmap(f).fmap(g);
+            let right = Eff::<NoEffect, i32>::pure(value).fmap(|x| g(f(x)));
+
+            prop_assert_eq!(PureHandler.run(left), PureHandler.run(right));
+        }
     }
 }

@@ -172,6 +172,77 @@ requirements:
       push は self を消費して新しいキューを返す設計とし、
       既存のデータを直接変更しない。
 
+      ## Codex レビュー対応（2026-01-17）
+
+      ### Clone/共有の方針
+      `ContinuationQueue`, `QueueStack`, `Eff`, `EffOperation` には Clone を
+      実装しない。所有権の一意性により不変性を保証する。Freer Monad と同様の設計。
+
+      ### VecDeque の内部 mut 操作について
+      `ContinuationQueue` は内部で `VecDeque` を使用し、`push_back`/`pop_front` で
+      内部状態を変更するが、これは「実装詳細としての mutation」であり、
+      API レベルでは所有権の移動により不変性が保証される。
+
+      具体的には:
+      - `push(self, ...)` は `self` を消費するため、呼び出し元は元のキューにアクセスできない
+      - Clone を実装しないため、キューの共有が発生しない
+      - 結果として、外部から観測可能な意味論は純粋関数と同等
+
+      これは Rust における「所有権ベースの不変性」の標準的なパターンであり、
+      Haskell の永続データ構造とは異なるが、参照透過性は維持される。
+
+      ### ダウンキャスト失敗時の扱い
+      パニック前提。ダウンキャスト失敗は DSL 設計のバグを示すため、
+      型安全性は DSL 設計者の責任とする。Freer Monad と同じ方針。
+      これは Rust の標準的なパターン（unwrap/expect）に従う。
+
+      **API 契約**: `EffOperation`/`EffInner` は `pub` で公開されているが、
+      ユーザーが直接構築することは想定していない。`Eff::perform_raw` または
+      `define_effect!` マクロを通じて構築されることを前提とする。
+      前提違反（不正な型での構築）は panic となる。
+
+      ### キュー連結の規則
+      - 継続は FIFO 順序で処理される（先に追加された継続が先に適用）
+      - `QueueStack` は LIFO でキューを管理（nested effect の処理）
+      - 結合律: `(a.flat_map(f)).flat_map(g) == a.flat_map(|x| f(x).flat_map(g))`
+        - キューへの追加順序が一致することで保証
+        - プロパティテストで検証する
+
+      ### モナド結合律の保証メカニズム
+      結合律: `(a.flat_map(f)).flat_map(g) == a.flat_map(|x| f(x).flat_map(g))`
+
+      左辺の継続キュー状態:
+        operation.queue = [... existing ...] -> push(f) -> push(g)
+        処理順序: existing -> f -> g
+
+      右辺の継続キュー状態:
+        a の operation.queue = [... existing ...] -> push(composed_fg)
+        composed_fg は f(x).flat_map(g) を表す
+
+        f(x) が Impure を返した場合:
+          - f の結果の queue に g が push される
+          - QueueStack により、f の queue が処理された後に元の queue に戻る
+
+        最終的な処理順序: existing -> f の内部処理 -> g
+
+      両辺とも継続の適用順序が一致するため、結合律が成立する。
+      QueueStack の LIFO 構造が nested effect の正しい処理順序を保証する。
+
+      #### QueueStack の遷移規則
+      1. 初期状態: `current = operation.queue`, `pending = []`
+      2. 継続適用時:
+         - `current.pop()` で継続を取得
+         - 結果が `Impure` の場合: `current` を `pending` に push し、
+           新しい `operation.queue` を `current` にセット
+         - 結果が `Pure` の場合: 次の継続を適用
+      3. `current` が空の場合: `pending.pop()` で次のキューを取得
+      4. `current` と `pending` の両方が空の場合: 処理完了
+
+      ### 性能測定の計画
+      - flat_map 呼び出し回数と Box 割り当て回数の相関を測定
+      - downcast のオーバーヘッド（15-25ns/回）は維持される前提
+      - キュー導入後も alloc/dispatch コストを個別に測定
+
     methods:
       - name: "flat_map (継続キュー版)"
         signature: "fn flat_map<B, F>(self, function: F) -> Eff<E, B>"
@@ -281,8 +352,11 @@ non_functional_requirements:
   testing:
     - "改善前後のベンチマーク比較を実施する"
     - "各最適化の効果を個別に計測し、効果の裏付けを取る"
-    - "プロパティテストでモナド則を検証する"
+    - "プロパティテストでモナド則を検証する（proptest フレームワーク使用、既存と同様）"
     - "チェーン深度 5, 10, 50, 100 でのスケーリングを検証する"
+    - "継続キューの FIFO 順序を検証するテストを追加する"
+    - "QueueStack の LIFO 動作を検証するテストを追加する"
+    - "proptest の設定: デフォルトケース数（256回）を使用"
   measurement:
     - "Phase 1 の最適化効果をベンチマークで検証してから Phase 2 に進む"
     - "目標未達の場合は、型付き継続や型消去削減を検討する"

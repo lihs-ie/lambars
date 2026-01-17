@@ -50,18 +50,13 @@
 //! assert_eq!(state, 11);
 //! ```
 
+use super::continuation_queue::{ContinuationQueue, QueueStack, TypeErasedArrow};
 use std::any::Any;
-use std::collections::VecDeque;
 use std::fmt::{self, Debug, Display, Formatter};
 use std::marker::PhantomData;
 
-/// Type-erased arrow (continuation).
-///
-/// Converts `A -> Freer<I, B>` to `Box<dyn Any> -> Freer<I, Box<dyn Any>>`.
-/// This enables storing heterogeneous continuations in a single queue.
-trait TypeErasedArrow<I> {
-    fn apply(self: Box<Self>, input: Box<dyn Any>) -> Freer<I, Box<dyn Any>>;
-}
+/// Freer-specific monadic type alias for type-erased continuations.
+type FreerMonad<I> = Freer<I, Box<dyn Any>>;
 
 struct Arrow<I, A, B, F>
 where
@@ -71,11 +66,11 @@ where
     _phantom: PhantomData<fn(A) -> (I, B)>,
 }
 
-impl<I: 'static, A: 'static, B: 'static, F> TypeErasedArrow<I> for Arrow<I, A, B, F>
+impl<I: 'static, A: 'static, B: 'static, F> TypeErasedArrow<FreerMonad<I>> for Arrow<I, A, B, F>
 where
     F: FnOnce(A) -> Freer<I, B> + 'static,
 {
-    fn apply(self: Box<Self>, input: Box<dyn Any>) -> Freer<I, Box<dyn Any>> {
+    fn apply(self: Box<Self>, input: Box<dyn Any>) -> FreerMonad<I> {
         let value = *input
             .downcast::<A>()
             .expect("Type mismatch in arrow application");
@@ -87,9 +82,7 @@ where
                 mut queue,
                 ..
             } => {
-                queue
-                    .arrows
-                    .push_back(Box::new(BoxingArrow::<B>(PhantomData)));
+                queue.push_arrow(Box::new(BoxingArrow::<I, B>(PhantomData)));
                 Freer::Impure {
                     instruction,
                     queue,
@@ -100,117 +93,58 @@ where
     }
 }
 
-struct BoxingArrow<T>(PhantomData<T>);
+struct BoxingArrow<I, T>(PhantomData<(I, T)>);
 
-impl<I: 'static, T: 'static> TypeErasedArrow<I> for BoxingArrow<T> {
-    fn apply(self: Box<Self>, input: Box<dyn Any>) -> Freer<I, Box<dyn Any>> {
+impl<I: 'static, T: 'static> TypeErasedArrow<FreerMonad<I>> for BoxingArrow<I, T> {
+    fn apply(self: Box<Self>, input: Box<dyn Any>) -> FreerMonad<I> {
         Freer::Pure(input)
     }
 }
 
-struct ExtractArrow<R, E>
+struct ExtractArrow<I, R, E>
 where
     E: FnOnce(Box<dyn Any>) -> R,
 {
     extract: E,
-    _phantom: PhantomData<R>,
+    _phantom: PhantomData<(I, R)>,
 }
 
-impl<I: 'static, R: 'static, E> TypeErasedArrow<I> for ExtractArrow<R, E>
+impl<I: 'static, R: 'static, E> TypeErasedArrow<FreerMonad<I>> for ExtractArrow<I, R, E>
 where
     E: FnOnce(Box<dyn Any>) -> R + 'static,
 {
-    fn apply(self: Box<Self>, input: Box<dyn Any>) -> Freer<I, Box<dyn Any>> {
+    fn apply(self: Box<Self>, input: Box<dyn Any>) -> FreerMonad<I> {
         Freer::Pure(Box::new((self.extract)(input)) as Box<dyn Any>)
     }
 }
 
-#[doc(hidden)]
-pub struct ContinuationQueue<I> {
-    arrows: VecDeque<Box<dyn TypeErasedArrow<I>>>,
+/// Type alias for continuation queue specialized for Freer.
+type FreerContinuationQueue<I> = ContinuationQueue<FreerMonad<I>>;
+
+/// Type alias for queue stack specialized for Freer.
+type FreerQueueStack<I> = QueueStack<FreerMonad<I>>;
+
+/// Extension functions for Freer-specific continuation queue operations.
+fn push_arrow_function<I: 'static, A: 'static, B: 'static, F>(
+    queue: &mut FreerContinuationQueue<I>,
+    function: F,
+) where
+    F: FnOnce(A) -> Freer<I, B> + 'static,
+{
+    queue.push_arrow(Box::new(Arrow {
+        function,
+        _phantom: PhantomData,
+    }));
 }
 
-impl<I> ContinuationQueue<I> {
-    fn new() -> Self {
-        Self {
-            arrows: VecDeque::new(),
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.arrows.is_empty()
-    }
-
-    fn pop(&mut self) -> Option<Box<dyn TypeErasedArrow<I>>> {
-        self.arrows.pop_front()
-    }
-}
-
-impl<I: 'static> ContinuationQueue<I> {
-    fn push<A: 'static, B: 'static, F>(mut self, function: F) -> Self
-    where
-        F: FnOnce(A) -> Freer<I, B> + 'static,
-    {
-        self.arrows.push_back(Box::new(Arrow {
-            function,
-            _phantom: PhantomData,
-        }));
-        self
-    }
-
-    fn push_extract<R: 'static, E>(mut self, extract: E) -> Self
-    where
-        E: FnOnce(Box<dyn Any>) -> R + 'static,
-    {
-        self.arrows.push_back(Box::new(ExtractArrow {
-            extract,
-            _phantom: PhantomData,
-        }));
-        self
-    }
-
-    /// Note: Provided for future extensions.
-    /// The interpret function uses `QueueStack` instead to avoid O(n^2).
-    #[allow(dead_code)]
-    fn concat(mut self, mut other: Self) -> Self {
-        self.arrows.append(&mut other.arrows);
-        self
-    }
-}
-
-/// A stack of continuation queues.
-///
-/// Used during interpretation to avoid O(n^2) from repeated queue concatenation.
-/// Instead of merging queues, we maintain a stack of queues and process them
-/// in LIFO order.
-struct QueueStack<I> {
-    current: ContinuationQueue<I>,
-    pending: Vec<ContinuationQueue<I>>,
-}
-
-impl<I> QueueStack<I> {
-    const fn new(initial: ContinuationQueue<I>) -> Self {
-        Self {
-            current: initial,
-            pending: Vec::new(),
-        }
-    }
-
-    fn push_queue(&mut self, queue: ContinuationQueue<I>) {
-        let old = std::mem::replace(&mut self.current, queue);
-        if !old.is_empty() {
-            self.pending.push(old);
-        }
-    }
-
-    fn pop(&mut self) -> Option<Box<dyn TypeErasedArrow<I>>> {
-        loop {
-            if let Some(arrow) = self.current.pop() {
-                return Some(arrow);
-            }
-            self.current = self.pending.pop()?;
-        }
-    }
+fn push_extract_arrow<I: 'static, R: 'static, E>(queue: &mut FreerContinuationQueue<I>, extract: E)
+where
+    E: FnOnce(Box<dyn Any>) -> R + 'static,
+{
+    queue.push_arrow(Box::new(ExtractArrow {
+        extract,
+        _phantom: PhantomData,
+    }));
 }
 
 /// Freer monad: constructs a Monad from any instruction set without Functor constraint.
@@ -252,7 +186,7 @@ pub enum Freer<I, A> {
         /// The instruction to execute.
         instruction: I,
         /// The queue of continuations to apply after executing the instruction.
-        queue: ContinuationQueue<I>,
+        queue: FreerContinuationQueue<I>,
         /// Phantom data to preserve the result type A.
         _result: PhantomData<A>,
     },
@@ -305,9 +239,11 @@ impl<I: 'static, A: 'static> Freer<I, A> {
         instruction: I,
         extract: impl FnOnce(Box<dyn Any>) -> R + 'static,
     ) -> Freer<I, R> {
+        let mut queue = FreerContinuationQueue::<I>::new();
+        push_extract_arrow(&mut queue, extract);
         Freer::Impure {
             instruction,
-            queue: ContinuationQueue::new().push_extract(extract),
+            queue,
             _result: PhantomData,
         }
     }
@@ -358,12 +294,17 @@ impl<I: 'static, A: 'static> Freer<I, A> {
         match self {
             Self::Pure(a) => function(a),
             Self::Impure {
-                instruction, queue, ..
-            } => Freer::Impure {
                 instruction,
-                queue: queue.push(function),
-                _result: PhantomData,
-            },
+                mut queue,
+                ..
+            } => {
+                push_arrow_function(&mut queue, function);
+                Freer::Impure {
+                    instruction,
+                    queue,
+                    _result: PhantomData,
+                }
+            }
         }
     }
 
@@ -428,14 +369,14 @@ impl<I: 'static, A: 'static> Freer<I, A> {
     where
         Handler: FnMut(I) -> Box<dyn Any>,
     {
-        enum LoopState<I> {
+        enum LoopState<I: 'static> {
             ExecuteInstruction {
                 instruction: I,
-                queue_stack: QueueStack<I>,
+                queue_stack: FreerQueueStack<I>,
             },
             ApplyContinuation {
                 value: Box<dyn Any>,
-                queue_stack: QueueStack<I>,
+                queue_stack: FreerQueueStack<I>,
             },
         }
 
@@ -445,7 +386,7 @@ impl<I: 'static, A: 'static> Freer<I, A> {
                 instruction, queue, ..
             } => LoopState::ExecuteInstruction {
                 instruction,
-                queue_stack: QueueStack::new(queue),
+                queue_stack: FreerQueueStack::new(queue),
             },
         };
 
@@ -800,96 +741,9 @@ mod tests {
     }
 
     // =========================================================================
-    // Internal structure tests (ContinuationQueue, QueueStack)
+    // Internal structure tests (Arrow, ExtractArrow)
     // =========================================================================
-
-    #[rstest]
-    fn test_continuation_queue_new_is_empty() {
-        let queue: ContinuationQueue<()> = ContinuationQueue::new();
-        assert!(queue.is_empty());
-    }
-
-    #[rstest]
-    fn test_continuation_queue_push_not_empty() {
-        let queue: ContinuationQueue<()> =
-            ContinuationQueue::new().push(|x: i32| Freer::<(), i32>::pure(x + 1));
-        assert!(!queue.is_empty());
-    }
-
-    #[rstest]
-    fn test_continuation_queue_push_extract() {
-        let queue: ContinuationQueue<()> = ContinuationQueue::new().push_extract(|_| 42i32);
-        assert!(!queue.is_empty());
-    }
-
-    #[rstest]
-    fn test_continuation_queue_pop_fifo_order() {
-        let mut queue: ContinuationQueue<()> = ContinuationQueue::new()
-            .push(|x: i32| Freer::<(), i32>::pure(x + 1))
-            .push(|x: i32| Freer::<(), i32>::pure(x * 2));
-
-        // First pop should give us the +1 arrow
-        let arrow1 = queue.pop().expect("Should have first arrow");
-        let result1 = arrow1.apply(Box::new(10i32));
-        if let Freer::Pure(boxed) = result1 {
-            let value = *boxed.downcast::<i32>().unwrap();
-            assert_eq!(value, 11); // 10 + 1
-        } else {
-            panic!("Expected Pure");
-        }
-
-        // Second pop should give us the *2 arrow
-        let arrow2 = queue.pop().expect("Should have second arrow");
-        let result2 = arrow2.apply(Box::new(10i32));
-        if let Freer::Pure(boxed) = result2 {
-            let value = *boxed.downcast::<i32>().unwrap();
-            assert_eq!(value, 20); // 10 * 2
-        } else {
-            panic!("Expected Pure");
-        }
-
-        // Queue should be empty now
-        assert!(queue.pop().is_none());
-    }
-
-    #[rstest]
-    fn test_queue_stack_single_queue() {
-        let queue = ContinuationQueue::new().push(|x: i32| Freer::<(), i32>::pure(x + 1));
-        let mut stack = QueueStack::new(queue);
-
-        assert!(stack.pop().is_some());
-        assert!(stack.pop().is_none());
-    }
-
-    #[rstest]
-    fn test_queue_stack_multiple_queues() {
-        let queue1 = ContinuationQueue::new().push(|x: i32| Freer::<(), i32>::pure(x + 1));
-        let queue2 = ContinuationQueue::new().push(|x: i32| Freer::<(), i32>::pure(x * 2));
-
-        let mut stack = QueueStack::new(queue1);
-        stack.push_queue(queue2);
-
-        // queue2 should be processed first (LIFO), then queue1
-        let arrow1 = stack.pop().expect("Should have arrow from queue2");
-        let result1 = arrow1.apply(Box::new(5i32));
-        if let Freer::Pure(boxed) = result1 {
-            let value = *boxed.downcast::<i32>().unwrap();
-            assert_eq!(value, 10); // 5 * 2
-        } else {
-            panic!("Expected Pure");
-        }
-
-        let arrow2 = stack.pop().expect("Should have arrow from queue1");
-        let result2 = arrow2.apply(Box::new(5i32));
-        if let Freer::Pure(boxed) = result2 {
-            let value = *boxed.downcast::<i32>().unwrap();
-            assert_eq!(value, 6); // 5 + 1
-        } else {
-            panic!("Expected Pure");
-        }
-
-        assert!(stack.pop().is_none());
-    }
+    // Note: ContinuationQueue and QueueStack tests are in continuation_queue.rs
 
     #[rstest]
     fn test_arrow_apply_type_conversion() {
@@ -897,7 +751,7 @@ mod tests {
             function: |x: i32| Freer::<(), i32>::pure(x * 2),
             _phantom: PhantomData,
         };
-        let boxed_arrow: Box<dyn TypeErasedArrow<()>> = Box::new(arrow);
+        let boxed_arrow: Box<dyn TypeErasedArrow<FreerMonad<()>>> = Box::new(arrow);
         let result = boxed_arrow.apply(Box::new(21i32));
 
         if let Freer::Pure(boxed) = result {
@@ -910,11 +764,11 @@ mod tests {
 
     #[rstest]
     fn test_extract_arrow_apply() {
-        let arrow = ExtractArrow::<i32, _> {
+        let arrow = ExtractArrow::<(), i32, _> {
             extract: |boxed: Box<dyn Any>| *boxed.downcast::<i32>().unwrap() + 1,
             _phantom: PhantomData,
         };
-        let boxed_arrow: Box<dyn TypeErasedArrow<()>> = Box::new(arrow);
+        let boxed_arrow: Box<dyn TypeErasedArrow<FreerMonad<()>>> = Box::new(arrow);
         let result = boxed_arrow.apply(Box::new(41i32));
 
         if let Freer::Pure(boxed) = result {

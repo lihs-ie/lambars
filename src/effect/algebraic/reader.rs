@@ -30,9 +30,10 @@
 //! assert_eq!(result, 3);
 //! ```
 
-use super::eff::{Eff, EffInner, OperationTag};
+use super::eff::{Eff, EffInner, EffQueueStack, OperationTag};
 use super::effect::Effect;
 use super::handler::Handler;
+use std::any::Any;
 use std::marker::PhantomData;
 
 mod reader_operations {
@@ -186,27 +187,63 @@ impl<R: Clone + 'static> ReaderHandler<R> {
 
     /// Runs the computation with a specific environment (internal).
     ///
-    /// Uses an iterative approach for stack safety.
+    /// Uses a QueueStack-based iterative approach for stack safety and O(n) interpretation.
     #[inline]
     fn run_with_environment<A: 'static>(computation: Eff<ReaderEffect<R>, A>, environment: R) -> A {
-        let mut current_computation = computation;
+        enum LoopState<R: Clone + 'static> {
+            ExecuteOperation {
+                operation_tag: OperationTag,
+                queue_stack: EffQueueStack<ReaderEffect<R>>,
+            },
+            ApplyContinuation {
+                value: Box<dyn Any>,
+                queue_stack: EffQueueStack<ReaderEffect<R>>,
+            },
+        }
+
+        let mut state = match computation.inner {
+            EffInner::Pure(a) => return a,
+            EffInner::Impure(operation) => LoopState::ExecuteOperation {
+                operation_tag: operation.operation_tag,
+                queue_stack: EffQueueStack::new(operation.queue),
+            },
+        };
 
         loop {
-            let normalized = current_computation.normalize();
-
-            match normalized.inner {
-                EffInner::Pure(value) => return value,
-                EffInner::Impure(operation) => match operation.operation_tag {
-                    reader_operations::ASK => {
-                        let continuation = operation.continuation;
-                        current_computation = continuation(Box::new(environment.clone()));
+            state = match state {
+                LoopState::ExecuteOperation {
+                    operation_tag,
+                    queue_stack,
+                } => {
+                    let result: Box<dyn Any> = match operation_tag {
+                        reader_operations::ASK => Box::new(environment.clone()),
+                        _ => panic!("Unknown Reader operation: {operation_tag:?}"),
+                    };
+                    LoopState::ApplyContinuation {
+                        value: result,
+                        queue_stack,
                     }
-                    _ => panic!("Unknown Reader operation: {:?}", operation.operation_tag),
-                },
-                EffInner::FlatMap(_) => {
-                    unreachable!("FlatMap should be normalized by normalize()")
                 }
-            }
+                LoopState::ApplyContinuation {
+                    value,
+                    mut queue_stack,
+                } => match queue_stack.pop() {
+                    None => return *value.downcast::<A>().expect("Final result type mismatch"),
+                    Some(arrow) => match arrow.apply(value).inner {
+                        EffInner::Pure(boxed) => LoopState::ApplyContinuation {
+                            value: boxed,
+                            queue_stack,
+                        },
+                        EffInner::Impure(operation) => {
+                            queue_stack.push_queue(operation.queue);
+                            LoopState::ExecuteOperation {
+                                operation_tag: operation.operation_tag,
+                                queue_stack,
+                            }
+                        }
+                    },
+                },
+            };
         }
     }
 }
@@ -549,5 +586,73 @@ mod tests {
 
         let result = handler.run(computation);
         assert_eq!(result, 25); // 5 * 3 + 10
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::effect::algebraic::Handler;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn prop_reader_monad_left_identity(env in any::<i32>(), value in any::<i32>()) {
+            fn f(x: i32) -> Eff<ReaderEffect<i32>, i32> {
+                ReaderEffect::ask().fmap(move |e| x.wrapping_add(e))
+            }
+
+            let left = Eff::<ReaderEffect<i32>, i32>::pure(value).flat_map(f);
+            let right = f(value);
+
+            let handler = ReaderHandler::new(env);
+            prop_assert_eq!(handler.clone().run(left), handler.run(right));
+        }
+
+        #[test]
+        fn prop_reader_monad_right_identity(env in any::<i32>(), value in any::<i32>()) {
+            let result = Eff::<ReaderEffect<i32>, i32>::pure(value).flat_map(Eff::pure);
+            let handler = ReaderHandler::new(env);
+            prop_assert_eq!(handler.run(result), value);
+        }
+
+        #[test]
+        fn prop_reader_monad_associativity(env in any::<i32>(), value in any::<i32>()) {
+            fn f(x: i32) -> Eff<ReaderEffect<i32>, i32> {
+                ReaderEffect::ask().fmap(move |e| x.wrapping_add(e))
+            }
+            fn g(x: i32) -> Eff<ReaderEffect<i32>, i32> {
+                ReaderEffect::ask().fmap(move |e| x.wrapping_mul(e))
+            }
+
+            let left = Eff::<ReaderEffect<i32>, i32>::pure(value).flat_map(f).flat_map(g);
+            let right = Eff::<ReaderEffect<i32>, i32>::pure(value).flat_map(|x| f(x).flat_map(g));
+
+            let handler = ReaderHandler::new(env);
+            prop_assert_eq!(handler.clone().run(left), handler.run(right));
+        }
+
+        #[test]
+        fn prop_reader_functor_identity(env in any::<i32>()) {
+            let computation = ReaderEffect::<i32>::ask().fmap(|x| x);
+            let handler = ReaderHandler::new(env);
+            prop_assert_eq!(handler.run(computation), env);
+        }
+
+        #[test]
+        fn prop_reader_functor_composition(env in any::<i32>()) {
+            fn f(x: i32) -> i32 {
+                x.wrapping_add(10)
+            }
+            fn g(x: i32) -> i32 {
+                x.wrapping_mul(2)
+            }
+
+            let left = ReaderEffect::<i32>::ask().fmap(f).fmap(g);
+            let right = ReaderEffect::<i32>::ask().fmap(|x| g(f(x)));
+
+            let handler = ReaderHandler::new(env);
+            prop_assert_eq!(handler.clone().run(left), handler.run(right));
+        }
     }
 }

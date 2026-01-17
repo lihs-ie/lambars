@@ -25,9 +25,10 @@
 //! assert_eq!(final_state, 1);
 //! ```
 
-use super::eff::{Eff, EffInner, OperationTag};
+use super::eff::{Eff, EffInner, EffQueueStack, OperationTag};
 use super::effect::Effect;
 use super::handler::Handler;
+use std::any::Any;
 use std::cell::RefCell;
 use std::marker::PhantomData;
 
@@ -197,37 +198,77 @@ impl<S: Clone + 'static> StateHandler<S> {
 
     /// Runs the computation with a mutable state cell (internal).
     ///
-    /// Uses an iterative approach for stack safety.
+    /// Uses a QueueStack-based iterative approach for stack safety and O(n) interpretation.
     #[inline]
     fn run_with_state<A: 'static>(computation: Eff<StateEffect<S>, A>, state: &RefCell<S>) -> A {
-        let mut current_computation = computation;
+        enum LoopState<S: Clone + 'static> {
+            ExecuteOperation {
+                operation_tag: OperationTag,
+                arguments: Box<dyn Any + Send + Sync>,
+                queue_stack: EffQueueStack<StateEffect<S>>,
+            },
+            ApplyContinuation {
+                value: Box<dyn Any>,
+                queue_stack: EffQueueStack<StateEffect<S>>,
+            },
+        }
+
+        let mut loop_state = match computation.inner {
+            EffInner::Pure(a) => return a,
+            EffInner::Impure(operation) => LoopState::ExecuteOperation {
+                operation_tag: operation.operation_tag,
+                arguments: operation.arguments,
+                queue_stack: EffQueueStack::new(operation.queue),
+            },
+        };
 
         loop {
-            let normalized = current_computation.normalize();
-
-            match normalized.inner {
-                EffInner::Pure(value) => return value,
-                EffInner::Impure(operation) => match operation.operation_tag {
-                    state_operations::GET => {
-                        let current = state.borrow().clone();
-                        let continuation = operation.continuation;
-                        current_computation = continuation(Box::new(current));
+            loop_state = match loop_state {
+                LoopState::ExecuteOperation {
+                    operation_tag,
+                    arguments,
+                    queue_stack,
+                } => {
+                    let result: Box<dyn Any> = match operation_tag {
+                        state_operations::GET => {
+                            let current = state.borrow().clone();
+                            Box::new(current)
+                        }
+                        state_operations::PUT => {
+                            let new_state = *arguments
+                                .downcast::<S>()
+                                .expect("Type mismatch in State::put");
+                            *state.borrow_mut() = new_state;
+                            Box::new(())
+                        }
+                        _ => panic!("Unknown State operation: {operation_tag:?}"),
+                    };
+                    LoopState::ApplyContinuation {
+                        value: result,
+                        queue_stack,
                     }
-                    state_operations::PUT => {
-                        let new_state = *operation
-                            .arguments
-                            .downcast::<S>()
-                            .expect("Type mismatch in State::put");
-                        *state.borrow_mut() = new_state;
-                        let continuation = operation.continuation;
-                        current_computation = continuation(Box::new(()));
-                    }
-                    _ => panic!("Unknown State operation: {:?}", operation.operation_tag),
-                },
-                EffInner::FlatMap(_) => {
-                    unreachable!("FlatMap should be normalized by normalize()")
                 }
-            }
+                LoopState::ApplyContinuation {
+                    value,
+                    mut queue_stack,
+                } => match queue_stack.pop() {
+                    None => return *value.downcast::<A>().expect("Final result type mismatch"),
+                    Some(arrow) => match arrow.apply(value).inner {
+                        EffInner::Pure(boxed) => LoopState::ApplyContinuation {
+                            value: boxed,
+                            queue_stack,
+                        },
+                        EffInner::Impure(operation) => {
+                            queue_stack.push_queue(operation.queue);
+                            LoopState::ExecuteOperation {
+                                operation_tag: operation.operation_tag,
+                                arguments: operation.arguments,
+                                queue_stack,
+                            }
+                        }
+                    },
+                },
+            };
         }
     }
 }
@@ -546,5 +587,82 @@ mod tests {
         assert_eq!(popped, Some(3));
         assert_eq!(remaining_stack, vec![1, 2]);
         assert_eq!(final_state, vec![1, 2]);
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::effect::algebraic::Handler;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn prop_state_monad_left_identity(initial_state in any::<i32>(), value in any::<i32>()) {
+            fn f(x: i32) -> Eff<StateEffect<i32>, i32> {
+                StateEffect::get().fmap(move |s| x.wrapping_add(s))
+            }
+
+            let left = Eff::<StateEffect<i32>, i32>::pure(value).flat_map(f);
+            let right = f(value);
+
+            let handler_left = StateHandler::new(initial_state);
+            let handler_right = StateHandler::new(initial_state);
+            prop_assert_eq!(handler_left.run(left), handler_right.run(right));
+        }
+
+        #[test]
+        fn prop_state_monad_right_identity(initial_state in any::<i32>(), value in any::<i32>()) {
+            let result = Eff::<StateEffect<i32>, i32>::pure(value).flat_map(Eff::pure);
+            let handler = StateHandler::new(initial_state);
+            let (result_value, final_state) = handler.run(result);
+            prop_assert_eq!(result_value, value);
+            prop_assert_eq!(final_state, initial_state);
+        }
+
+        #[test]
+        fn prop_state_monad_associativity(initial_state in any::<i32>(), value in any::<i32>()) {
+            fn f(x: i32) -> Eff<StateEffect<i32>, i32> {
+                StateEffect::get().fmap(move |s| x.wrapping_add(s))
+            }
+            fn g(x: i32) -> Eff<StateEffect<i32>, i32> {
+                StateEffect::modify(|s: i32| s.wrapping_add(1))
+                    .then(StateEffect::get())
+                    .fmap(move |s| x.wrapping_mul(s))
+            }
+
+            let left = Eff::<StateEffect<i32>, i32>::pure(value).flat_map(f).flat_map(g);
+            let right = Eff::<StateEffect<i32>, i32>::pure(value).flat_map(|x| f(x).flat_map(g));
+
+            let handler_left = StateHandler::new(initial_state);
+            let handler_right = StateHandler::new(initial_state);
+            prop_assert_eq!(handler_left.run(left), handler_right.run(right));
+        }
+
+        #[test]
+        fn prop_state_functor_identity(initial_state in any::<i32>()) {
+            let computation = StateEffect::<i32>::get().fmap(|x| x);
+            let handler = StateHandler::new(initial_state);
+            let (result, final_state) = handler.run(computation);
+            prop_assert_eq!(result, initial_state);
+            prop_assert_eq!(final_state, initial_state);
+        }
+
+        #[test]
+        fn prop_state_functor_composition(initial_state in any::<i32>()) {
+            fn f(x: i32) -> i32 {
+                x.wrapping_add(10)
+            }
+            fn g(x: i32) -> i32 {
+                x.wrapping_mul(2)
+            }
+
+            let left = StateEffect::<i32>::get().fmap(f).fmap(g);
+            let right = StateEffect::<i32>::get().fmap(|x| g(f(x)));
+
+            let handler_left = StateHandler::new(initial_state);
+            let handler_right = StateHandler::new(initial_state);
+            prop_assert_eq!(handler_left.run(left), handler_right.run(right));
+        }
     }
 }
