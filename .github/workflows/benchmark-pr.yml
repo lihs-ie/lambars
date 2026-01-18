@@ -76,7 +76,18 @@ jobs:
         with:
           ref: main
 
+      - name: Check if iai benchmarks exist in main
+        id: check-benchmarks
+        run: |
+          if [ -f "benches/iai/persistent_vector_iai.rs" ]; then
+            echo "benchmarks_exist=true" >> $GITHUB_OUTPUT
+          else
+            echo "benchmarks_exist=false" >> $GITHUB_OUTPUT
+            echo "::notice::Iai benchmarks not found in main branch. Skipping baseline comparison."
+          fi
+
       - name: Run baseline benchmarks (main branch)
+        if: steps.check-benchmarks.outputs.benchmarks_exist == 'true'
         run: |
           set -eo pipefail
           cargo bench --bench persistent_vector_iai -- --save-baseline=main 2>&1 | tee baseline_output.txt
@@ -89,11 +100,20 @@ jobs:
           clean: false
 
       - name: Run PR benchmarks with baseline comparison
+        if: steps.check-benchmarks.outputs.benchmarks_exist == 'true'
         run: |
           set -eo pipefail
           cargo bench --bench persistent_vector_iai -- --baseline=main 2>&1 | tee benchmark_output.txt
           cargo bench --bench effect_iai -- --baseline=main 2>&1 | tee -a benchmark_output.txt
           cargo bench --bench scenario_iai -- --baseline=main 2>&1 | tee -a benchmark_output.txt
+
+      - name: Run PR benchmarks without baseline (new benchmarks)
+        if: steps.check-benchmarks.outputs.benchmarks_exist == 'false'
+        run: |
+          set -eo pipefail
+          cargo bench --bench persistent_vector_iai 2>&1 | tee benchmark_output.txt
+          cargo bench --bench effect_iai 2>&1 | tee -a benchmark_output.txt
+          cargo bench --bench scenario_iai 2>&1 | tee -a benchmark_output.txt
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@v4
@@ -107,6 +127,16 @@ jobs:
       - name: Check for regressions
         id: check-regression
         run: |
+          # Skip regression check if no baseline exists
+          if [ "${{ steps.check-benchmarks.outputs.benchmarks_exist }}" == "false" ]; then
+            echo "regression_detected=false" >> $GITHUB_OUTPUT
+            echo "no_baseline=true" >> $GITHUB_OUTPUT
+            echo "No baseline to compare against (new benchmarks)"
+            exit 0
+          fi
+
+          echo "no_baseline=false" >> $GITHUB_OUTPUT
+
           # Parse benchmark output and check for regressions > 10%
           # Iai-Callgrind outputs changes like "+12.34%" or "-5.67%"
           # Match any increase of 10% or more (with or without decimal)
@@ -131,7 +161,16 @@ jobs:
             const relevantLines = lines.slice(-100).join('\n');
 
             const regressionDetected = '${{ steps.check-regression.outputs.regression_detected }}' === 'true';
-            const status = regressionDetected ? ':warning: Performance Regression Detected' : ':white_check_mark: No Performance Regression';
+            const noBaseline = '${{ steps.check-regression.outputs.no_baseline }}' === 'true';
+
+            let status;
+            if (noBaseline) {
+              status = ':information_source: New Benchmarks (no baseline to compare)';
+            } else if (regressionDetected) {
+              status = ':warning: Performance Regression Detected';
+            } else {
+              status = ':white_check_mark: No Performance Regression';
+            }
 
             const body = `## Benchmark Results
 
