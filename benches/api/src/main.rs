@@ -27,13 +27,15 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use task_management_benchmark_api::api::{
     AppState, add_subtask, add_tag, async_pipeline, bulk_create_tasks, bulk_update_tasks,
     count_by_priority, create_project_handler, create_task, create_task_eff,
-    execute_state_workflow, execute_workflow, get_project_handler, get_project_progress_handler,
-    get_project_stats_handler, get_task_history, health_check, lazy_compute, list_tasks,
-    search_tasks, transform_task, update_status, update_task, update_with_optics,
+    execute_state_workflow, execute_workflow, flatten_demo, functor_mut_demo, get_project_handler,
+    get_project_progress_handler, get_project_stats_handler, get_task_history, health_check,
+    identity_demo, lazy_compute, list_tasks, monad_error_demo, monad_transformers, search_tasks,
+    transform_task, update_status, update_task, update_with_optics,
 };
 use task_management_benchmark_api::infrastructure::{RepositoryConfig, RepositoryFactory};
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() {
     // Load .env file if present (for development)
     dotenvy::dotenv().ok();
@@ -119,6 +121,12 @@ async fn main() {
         .route("/tasks/workflow", post(execute_workflow))
         .route("/tasks/{id}/optics", put(update_with_optics))
         .route("/tasks/state-workflow", post(execute_state_workflow))
+        // Type class demonstrations
+        .route("/tasks/monad-transformers", post(monad_transformers))
+        .route("/tasks/functor-mut", post(functor_mut_demo))
+        .route("/tasks/flatten", post(flatten_demo))
+        .route("/tasks/monad-error", post(monad_error_demo))
+        .route("/tasks/identity-type", post(identity_demo))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(application_state);

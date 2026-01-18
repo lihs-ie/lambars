@@ -11,12 +11,13 @@ pub mod handlers;
 pub mod project;
 pub mod query;
 pub mod transaction;
+pub mod typeclass;
 pub mod workflow_eff;
 
 pub use advanced::{async_pipeline, get_task_history, lazy_compute, transform_task};
-pub use effects::{execute_state_workflow, execute_workflow, update_with_optics};
 pub use bulk::{bulk_create_tasks, bulk_update_tasks};
 pub use dto::{CreateTaskRequest, TaskResponse, UpdateTaskRequest};
+pub use effects::{execute_state_workflow, execute_workflow, update_with_optics};
 pub use error::{ApiError, ApiErrorResponse, FieldError, ValidationError};
 pub use handlers::{AppConfig, AppState, HealthResponse, create_task, health_check};
 pub use project::{
@@ -25,4 +26,7 @@ pub use project::{
 };
 pub use query::{count_by_priority, list_tasks, search_tasks};
 pub use transaction::{add_subtask, add_tag, update_status, update_task};
+pub use typeclass::{
+    flatten_demo, functor_mut_demo, identity_demo, monad_error_demo, monad_transformers,
+};
 pub use workflow_eff::create_task_eff;
