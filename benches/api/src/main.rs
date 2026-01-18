@@ -25,8 +25,8 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use task_management_benchmark_api::api::{
-    AppState, add_subtask, add_tag, create_task, create_task_eff, health_check, update_status,
-    update_task,
+    AppState, add_subtask, add_tag, count_by_priority, create_task, create_task_eff, health_check,
+    list_tasks, search_tasks, update_status, update_task,
 };
 use task_management_benchmark_api::infrastructure::{RepositoryConfig, RepositoryFactory};
 
@@ -87,7 +87,11 @@ async fn main() {
     let application = Router::new()
         .route("/health", get(health_check))
         // Task CRUD
-        .route("/tasks", post(create_task))
+        // Task queries
+        .route("/tasks", get(list_tasks).post(create_task))
+        .route("/tasks/search", get(search_tasks))
+        .route("/tasks/by-priority", get(count_by_priority))
+        // Task mutations
         .route("/tasks-eff", post(create_task_eff))
         .route("/tasks/{id}", put(update_task))
         .route("/tasks/{id}/status", patch(update_status))
