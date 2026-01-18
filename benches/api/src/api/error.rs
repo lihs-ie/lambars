@@ -133,6 +133,15 @@ impl ApiErrorResponse {
             ApiError::new("INTERNAL_ERROR", message),
         )
     }
+
+    /// Creates a 503 Service Unavailable response.
+    #[must_use]
+    pub fn service_unavailable(message: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ApiError::new("SERVICE_UNAVAILABLE", message),
+        )
+    }
 }
 
 impl IntoResponse for ApiErrorResponse {
@@ -283,6 +292,13 @@ mod tests {
         let response = ApiErrorResponse::internal_error("Database error");
         assert_eq!(response.status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(response.error.code, "INTERNAL_ERROR");
+    }
+
+    #[rstest]
+    fn test_api_error_response_service_unavailable() {
+        let response = ApiErrorResponse::service_unavailable("All sources failed");
+        assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.error.code, "SERVICE_UNAVAILABLE");
     }
 
     #[rstest]
