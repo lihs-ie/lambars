@@ -26,9 +26,10 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use task_management_benchmark_api::api::{
     AppState, add_subtask, add_tag, async_pipeline, bulk_create_tasks, bulk_update_tasks,
-    count_by_priority, create_project_handler, create_task, create_task_eff, get_project_handler,
-    get_project_progress_handler, get_project_stats_handler, get_task_history, health_check,
-    lazy_compute, list_tasks, search_tasks, transform_task, update_status, update_task,
+    count_by_priority, create_project_handler, create_task, create_task_eff,
+    execute_state_workflow, execute_workflow, get_project_handler, get_project_progress_handler,
+    get_project_stats_handler, get_task_history, health_check, lazy_compute, list_tasks,
+    search_tasks, transform_task, update_status, update_task, update_with_optics,
 };
 use task_management_benchmark_api::infrastructure::{RepositoryConfig, RepositoryFactory};
 
@@ -114,6 +115,10 @@ async fn main() {
         .route("/tasks/transform", post(transform_task))
         .route("/tasks/async-pipeline", post(async_pipeline))
         .route("/tasks/lazy-compute", post(lazy_compute))
+        // Effects and optics operations
+        .route("/tasks/workflow", post(execute_workflow))
+        .route("/tasks/{id}/optics", put(update_with_optics))
+        .route("/tasks/state-workflow", post(execute_state_workflow))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(application_state);

@@ -5,6 +5,7 @@
 pub mod advanced;
 pub mod bulk;
 pub mod dto;
+pub mod effects;
 pub mod error;
 pub mod handlers;
 pub mod project;
@@ -13,6 +14,7 @@ pub mod transaction;
 pub mod workflow_eff;
 
 pub use advanced::{async_pipeline, get_task_history, lazy_compute, transform_task};
+pub use effects::{execute_state_workflow, execute_workflow, update_with_optics};
 pub use bulk::{bulk_create_tasks, bulk_update_tasks};
 pub use dto::{CreateTaskRequest, TaskResponse, UpdateTaskRequest};
 pub use error::{ApiError, ApiErrorResponse, FieldError, ValidationError};
