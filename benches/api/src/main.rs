@@ -25,12 +25,13 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use task_management_benchmark_api::api::{
-    AppState, add_subtask, add_tag, async_pipeline, bulk_create_tasks, bulk_update_tasks,
-    count_by_priority, create_project_handler, create_task, create_task_eff,
-    execute_state_workflow, execute_workflow, flatten_demo, functor_mut_demo, get_project_handler,
-    get_project_progress_handler, get_project_stats_handler, get_task_history, health_check,
-    identity_demo, lazy_compute, list_tasks, monad_error_demo, monad_transformers, search_tasks,
-    transform_task, update_status, update_task, update_with_optics,
+    AppState, add_subtask, add_tag, aggregate_tree, async_pipeline, bulk_create_tasks,
+    bulk_update_tasks, count_by_priority, create_project_handler, create_task, create_task_eff,
+    execute_state_workflow, execute_workflow, flatten_demo, flatten_subtasks, functor_mut_demo,
+    get_project_handler, get_project_progress_handler, get_project_stats_handler, get_task_history,
+    health_check, identity_demo, lazy_compute, list_tasks, monad_error_demo, monad_transformers,
+    resolve_dependencies, search_tasks, transform_task, update_status, update_task,
+    update_with_optics,
 };
 use task_management_benchmark_api::infrastructure::{RepositoryConfig, RepositoryFactory};
 
@@ -127,6 +128,10 @@ async fn main() {
         .route("/tasks/flatten", post(flatten_demo))
         .route("/tasks/monad-error", post(monad_error_demo))
         .route("/tasks/identity-type", post(identity_demo))
+        // Recursive operations (Trampoline demonstrations)
+        .route("/tasks/{id}/flatten-subtasks", get(flatten_subtasks))
+        .route("/tasks/resolve-dependencies", post(resolve_dependencies))
+        .route("/projects/{id}/aggregate-tree", get(aggregate_tree))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(application_state);
