@@ -25,8 +25,9 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use task_management_benchmark_api::api::{
-    AppState, add_subtask, add_tag, count_by_priority, create_task, create_task_eff, health_check,
-    list_tasks, search_tasks, update_status, update_task,
+    AppState, add_subtask, add_tag, bulk_create_tasks, bulk_update_tasks, count_by_priority,
+    create_task, create_task_eff, health_check, list_tasks, search_tasks, update_status,
+    update_task,
 };
 use task_management_benchmark_api::infrastructure::{RepositoryConfig, RepositoryFactory};
 
@@ -97,6 +98,11 @@ async fn main() {
         .route("/tasks/{id}/status", patch(update_status))
         .route("/tasks/{id}/subtasks", post(add_subtask))
         .route("/tasks/{id}/tags", post(add_tag))
+        // Bulk operations
+        .route(
+            "/tasks/bulk",
+            post(bulk_create_tasks).put(bulk_update_tasks),
+        )
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(application_state);
