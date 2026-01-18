@@ -20,6 +20,8 @@ use axum::{
     extract::{Path, Query, State},
 };
 use lambars::control::{Continuation, Lazy};
+use lambars::effect::AsyncIO;
+use lambars::for_async;
 use lambars::persistent::PersistentList;
 use lambars::{compose, pipe};
 use serde::{Deserialize, Serialize};
@@ -154,7 +156,7 @@ pub struct AsyncPipelineRequest {
 }
 
 /// Result for a single task in the pipeline.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PipelineTaskResult {
     /// Task ID.
     pub task_id: String,
@@ -405,12 +407,25 @@ fn resolve_transformation(name: &str) -> Option<fn(Task) -> Task> {
 ///
 /// Returns `Ok(transformed_task)` or `Err(unknown_transformation_name)`.
 ///
-/// For preset pipelines, uses `pipe!` macro directly for compile-time composition.
+/// For preset pipelines, uses `pipe!` or `compose!` macro directly for compile-time composition.
 /// For custom transformation lists, resolves and applies functions sequentially.
+///
+/// # Preset Pipelines using `pipe!` (left-to-right)
+///
+/// - `standard_cleanup`: `pipe!(task, normalize_title, title_case)`
+/// - `priority_bump_pipeline`: `pipe!(task, normalize_title, bump_priority, add_processed_tag)`
+///
+/// # Preset Pipelines using `compose!` (right-to-left)
+///
+/// - `compose_pipeline`: `compose!(add_processed_tag, bump_priority, normalize_title)(task)`
+///   Executes: `normalize_title` → `bump_priority` → `add_processed_tag`
+/// - `reverse_priority_pipeline`: `compose!(add_reviewed_tag, lower_priority, normalize_title)(task)`
+///   Executes: `normalize_title` → `lower_priority` → `add_reviewed_tag`
 fn apply_transformations(task: Task, transformations: &[String]) -> Result<Task, String> {
-    // Check for preset pipelines that use pipe! macro
+    // Check for preset pipelines that use pipe! or compose! macro
     if transformations.len() == 1 {
         match transformations[0].as_str() {
+            // pipe! presets (left-to-right composition)
             "standard_cleanup" => {
                 // Use pipe! macro for compile-time composition
                 return Ok(pipe!(task, normalize_title, title_case));
@@ -423,6 +438,20 @@ fn apply_transformations(task: Task, transformations: &[String]) -> Result<Task,
                     bump_priority,
                     add_processed_tag
                 ));
+            }
+            // compose! presets (right-to-left composition)
+            "compose_pipeline" => {
+                // Use compose! macro for right-to-left composition
+                // compose!(f, g, h)(x) = f(g(h(x)))
+                // Execution order: normalize_title → bump_priority → add_processed_tag
+                let composed = compose!(add_processed_tag, bump_priority, normalize_title);
+                return Ok(composed(task));
+            }
+            "reverse_priority_pipeline" => {
+                // Use compose! macro for right-to-left composition
+                // Execution order: normalize_title → lower_priority → add_reviewed_tag
+                let composed = compose!(add_reviewed_tag, lower_priority, normalize_title);
+                return Ok(composed(task));
             }
             _ => {}
         }
@@ -467,6 +496,7 @@ fn demonstrate_pipe(task: Task) -> Task {
 // =============================================================================
 
 /// Pure: Validates a task and returns a score (0-100).
+#[allow(dead_code)]
 fn validate_task_score(task: &Task) -> u32 {
     let mut score = 50u32;
 
@@ -779,16 +809,15 @@ pub async fn transform_task(
 /// Processes tasks through an async validation and enrichment pipeline.
 ///
 /// This handler demonstrates:
+/// - **`for_async!`**: Async list comprehension for batch validation score computation
 /// - Sequential async processing with pure validation/enrichment functions
 /// - Batch processing with size limits for controlled resource usage
 ///
-/// Note: For `pipe_async!` and `for_async!` macro usage, see the effects module
-/// which demonstrates these patterns with `AsyncIO` computations.
-///
 /// # Pipeline Steps
 ///
-/// 1. Validate: Check task completeness (score 0-100)
-/// 2. Enrich: Add computed metadata (complexity, suggestions)
+/// 1. Fetch all valid tasks from repository
+/// 2. Use `for_async!` to compute batch validation scores
+/// 3. Enrich each task with computed metadata
 ///
 /// # Request Body
 ///
@@ -823,19 +852,97 @@ pub async fn async_pipeline(
         ));
     }
 
-    let mut results = Vec::with_capacity(request.task_ids.len());
-    let mut successful = 0;
-    let mut failed = 0;
+    // First, fetch all tasks and separate valid/invalid ones
+    let mut valid_tasks: Vec<Task> = Vec::new();
+    let mut failed_results: Vec<PipelineTaskResult> = Vec::new();
 
-    // Process each task (sequential for simplicity, could be concurrent with semaphore)
     for task_id_str in &request.task_ids {
-        let result = process_single_task(&state, task_id_str).await;
-        match &result {
-            r if r.success => successful += 1,
-            _ => failed += 1,
+        let task_id = if let Ok(uuid) = Uuid::parse_str(task_id_str) {
+            TaskId::from_uuid(uuid)
+        } else {
+            failed_results.push(PipelineTaskResult {
+                task_id: task_id_str.clone(),
+                success: false,
+                validation_score: None,
+                enrichment: None,
+                error: Some("Invalid task ID format".to_string()),
+            });
+            continue;
+        };
+
+        match state.task_repository.find_by_id(&task_id).run_async().await {
+            Ok(Some(task)) => valid_tasks.push(task),
+            Ok(None) => {
+                failed_results.push(PipelineTaskResult {
+                    task_id: task_id_str.clone(),
+                    success: false,
+                    validation_score: None,
+                    enrichment: None,
+                    error: Some("Task not found".to_string()),
+                });
+            }
+            Err(e) => {
+                failed_results.push(PipelineTaskResult {
+                    task_id: task_id_str.clone(),
+                    success: false,
+                    validation_score: None,
+                    enrichment: None,
+                    error: Some(format!("Repository error: {e}")),
+                });
+            }
         }
-        results.push(result);
     }
+
+    // Extract Send-safe validation inputs from tasks (Task contains Rc-based types, not Send)
+    let validation_inputs: Vec<TaskValidationInput> = valid_tasks
+        .iter()
+        .map(TaskValidationInput::from_task)
+        .collect();
+
+    // Use for_async! to compute batch validation scores (demonstrates async list comprehension)
+    // for_async! generates AsyncIO<Vec<T>> which is a deferred computation
+    // This demonstrates the declarative batch processing pattern with async comprehension
+    let scores_async = compute_batch_validation_scores_async(validation_inputs);
+
+    // Execute the AsyncIO computation
+    // Note: Since we're using AsyncIO::pure internally, this is effectively synchronous,
+    // but demonstrates the proper for_async! pattern that would work with real async operations
+    let batch_scores: Vec<(String, u32)> = scores_async.run_async().await;
+
+    // Build successful results from batch computation
+    let mut results: Vec<PipelineTaskResult> = Vec::with_capacity(request.task_ids.len());
+
+    // Create lookup maps for scores and enrichments
+    let score_map: std::collections::HashMap<String, u32> = batch_scores.into_iter().collect();
+    // Compute enrichments and build HashMap directly (avoids intermediate Vec)
+    let enrichment_map: std::collections::HashMap<String, TaskEnrichment> = valid_tasks
+        .iter()
+        .map(|task| (task.task_id.to_string(), enrich_task(task)))
+        .collect();
+
+    // Preserve original order from request
+    for task_id_str in &request.task_ids {
+        if let (Some(&score), Some(enrichment)) = (
+            score_map.get(task_id_str),
+            enrichment_map.get(task_id_str).cloned(),
+        ) {
+            results.push(PipelineTaskResult {
+                task_id: task_id_str.clone(),
+                success: true,
+                validation_score: Some(score),
+                enrichment: Some(enrichment),
+                error: None,
+            });
+        } else {
+            // Find the failed result for this task_id
+            if let Some(failed) = failed_results.iter().find(|r| &r.task_id == task_id_str) {
+                results.push(failed.clone());
+            }
+        }
+    }
+
+    let successful = results.iter().filter(|r| r.success).count();
+    let failed = results.len() - successful;
 
     Ok(Json(AsyncPipelineResponse {
         results,
@@ -846,6 +953,7 @@ pub async fn async_pipeline(
 }
 
 /// Processes a single task through the pipeline.
+#[allow(dead_code)]
 async fn process_single_task(state: &AppState, task_id_str: &str) -> PipelineTaskResult {
     // Parse task ID
     let task_id = match Uuid::parse_str(task_id_str) {
@@ -897,6 +1005,93 @@ async fn process_single_task(state: &AppState, task_id_str: &str) -> PipelineTas
         validation_score: Some(validation_score),
         enrichment: Some(enrichment),
         error: None,
+    }
+}
+
+/// Holds extracted task information for batch processing.
+///
+/// This struct contains only Send-safe data extracted from Task,
+/// allowing it to be used across await boundaries with `for_async!`.
+#[derive(Debug, Clone)]
+struct TaskValidationInput {
+    task_id: String,
+    title_length: usize,
+    has_description: bool,
+    tags_count: usize,
+}
+
+impl TaskValidationInput {
+    /// Extracts validation-relevant information from a Task.
+    fn from_task(task: &Task) -> Self {
+        Self {
+            task_id: task.task_id.to_string(),
+            title_length: task.title.len(),
+            has_description: task.description.is_some(),
+            tags_count: task.tags.len(),
+        }
+    }
+
+    /// Computes validation score from extracted data.
+    fn compute_score(&self) -> u32 {
+        let mut score = 50u32;
+
+        // Title length check
+        if self.title_length >= 5 {
+            score += 10;
+        }
+        if self.title_length >= 20 {
+            score += 10;
+        }
+
+        // Description check
+        if self.has_description {
+            score += 15;
+        }
+
+        // Tags check
+        if self.tags_count > 0 {
+            score += 10;
+        }
+        if self.tags_count >= 3 {
+            score += 5;
+        }
+
+        score.min(100)
+    }
+}
+
+/// Computes batch validation scores using `for_async!` macro.
+///
+/// This function demonstrates `for_async!` for async list comprehension,
+/// processing a collection of task validation inputs and computing scores.
+///
+/// # Arguments
+///
+/// * `inputs` - Vector of `TaskValidationInput` (Send-safe task data)
+///
+/// # Returns
+///
+/// `AsyncIO<Vec<(String, u32)>>` - Task IDs with their validation scores
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let inputs = tasks.iter().map(TaskValidationInput::from_task).collect();
+/// let scores_async = compute_batch_validation_scores_async(inputs);
+/// let scores = scores_async.run_async().await;
+/// ```
+fn compute_batch_validation_scores_async(
+    inputs: Vec<TaskValidationInput>,
+) -> AsyncIO<Vec<(String, u32)>> {
+    for_async! {
+        input <= inputs;
+        // Compute validation score from extracted data
+        let score = input.compute_score();
+        // Wrap in AsyncIO to demonstrate async comprehension pattern
+        // In a real scenario, this could be an async validation service call
+        validated_score <~ AsyncIO::pure(score);
+        // Yield task ID with its validation score
+        yield (input.task_id.clone(), validated_score)
     }
 }
 
@@ -1250,6 +1445,118 @@ mod tests {
         assert_eq!(result.title, "test task");
         assert_eq!(result.priority, Priority::Medium);
         assert!(result.tags.contains(&Tag::new("processed")));
+    }
+
+    #[rstest]
+    fn test_apply_transformations_compose_pipeline() {
+        let task = Task::new(
+            TaskId::generate(),
+            "  test  task  ".to_string(),
+            Timestamp::now(),
+        )
+        .with_priority(Priority::Low);
+
+        let result = apply_transformations(task, &["compose_pipeline".to_string()]);
+
+        assert!(result.is_ok());
+        let transformed = result.unwrap();
+        // compose!(add_processed_tag, bump_priority, normalize_title)
+        // Execution order: normalize_title → bump_priority → add_processed_tag
+        assert_eq!(transformed.title, "test task");
+        assert_eq!(transformed.priority, Priority::Medium);
+        assert!(transformed.tags.contains(&Tag::new("processed")));
+    }
+
+    #[rstest]
+    fn test_apply_transformations_reverse_priority_pipeline() {
+        let task = Task::new(
+            TaskId::generate(),
+            "  test  task  ".to_string(),
+            Timestamp::now(),
+        )
+        .with_priority(Priority::High);
+
+        let result = apply_transformations(task, &["reverse_priority_pipeline".to_string()]);
+
+        assert!(result.is_ok());
+        let transformed = result.unwrap();
+        // compose!(add_reviewed_tag, lower_priority, normalize_title)
+        // Execution order: normalize_title → lower_priority → add_reviewed_tag
+        assert_eq!(transformed.title, "test task");
+        assert_eq!(transformed.priority, Priority::Medium);
+        assert!(transformed.tags.contains(&Tag::new("reviewed")));
+    }
+
+    // -------------------------------------------------------------------------
+    // for_async! Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_task_validation_input_from_task() {
+        let task = Task::new(
+            TaskId::generate(),
+            "This is a test task title".to_string(),
+            Timestamp::now(),
+        )
+        .with_description("A description".to_string())
+        .add_tag(Tag::new("tag1"))
+        .add_tag(Tag::new("tag2"));
+
+        let input = TaskValidationInput::from_task(&task);
+
+        assert_eq!(input.title_length, 25);
+        assert!(input.has_description);
+        assert_eq!(input.tags_count, 2);
+    }
+
+    #[rstest]
+    fn test_task_validation_input_compute_score() {
+        // Minimal task: score should be 50
+        let minimal_input = TaskValidationInput {
+            task_id: "test-id".to_string(),
+            title_length: 3,
+            has_description: false,
+            tags_count: 0,
+        };
+        assert_eq!(minimal_input.compute_score(), 50);
+
+        // Complete task: score should be high
+        let complete_input = TaskValidationInput {
+            task_id: "test-id".to_string(),
+            title_length: 25,
+            has_description: true,
+            tags_count: 3,
+        };
+        // 50 base + 10 (title >= 5) + 10 (title >= 20) + 15 (description) + 10 (tags > 0) + 5 (tags >= 3)
+        assert_eq!(complete_input.compute_score(), 100);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_compute_batch_validation_scores_async() {
+        let inputs = vec![
+            TaskValidationInput {
+                task_id: "task-1".to_string(),
+                title_length: 10,
+                has_description: true,
+                tags_count: 2,
+            },
+            TaskValidationInput {
+                task_id: "task-2".to_string(),
+                title_length: 3,
+                has_description: false,
+                tags_count: 0,
+            },
+        ];
+
+        let scores_async = compute_batch_validation_scores_async(inputs);
+        let scores: Vec<(String, u32)> = scores_async.run_async().await;
+
+        assert_eq!(scores.len(), 2);
+        assert_eq!(scores[0].0, "task-1");
+        assert!(scores[0].1 > 70); // Should have high score
+        assert_eq!(scores[1].0, "task-2");
+        assert_eq!(scores[1].1, 50); // Minimal score
     }
 
     // -------------------------------------------------------------------------

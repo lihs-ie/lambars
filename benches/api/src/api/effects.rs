@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use lambars::define_effect;
+use lambars::eff;
 use lambars::effect::algebraic::{Eff, Handler, NoEffect, PureHandler};
 use lambars::effect::{RWS, State as StateMonad, Writer};
 use lambars::optics::{Iso, Lens, Prism};
@@ -256,9 +257,12 @@ fn create_validation_workflow(request: &WorkflowRequest) -> Eff<NoEffect, bool> 
     let priority_valid =
         ["low", "medium", "high", "critical"].contains(&request.priority.to_lowercase().as_str());
 
-    // Build computation using Eff monad operations
-    Eff::pure(title_valid)
-        .flat_map(move |t_valid| Eff::pure(priority_valid).fmap(move |p_valid| t_valid && p_valid))
+    // Build computation using eff! macro for do-notation style
+    eff! {
+        t_valid <= Eff::pure(title_valid);
+        p_valid <= Eff::pure(priority_valid);
+        Eff::pure(t_valid && p_valid)
+    }
 }
 
 // =============================================================================
@@ -515,6 +519,117 @@ fn apply_optics_update(
                 new,
                 "lens!(Task, status) + iso!(TaskStatus, String)".to_string(),
             ))
+        }
+
+        "description_prism" => {
+            // Demonstrate prism! for conditional access to Option<String>
+            // prism!(Option<String>, Some) creates a prism focusing on the Some variant
+            let description_prism = prism!(Option<String>, Some);
+            let description_lens = lens!(Task, description);
+
+            let current_description = task.description.clone();
+            let previous = serde_json::json!(&current_description);
+
+            let (new_description, optics_info) = match request.transform.as_deref() {
+                Some("uppercase") => {
+                    // Transform existing value to uppercase using prism's modify_option
+                    let transformed =
+                        description_prism.modify_option(current_description, |s| s.to_uppercase());
+                    transformed.map_or(
+                        (
+                            None,
+                            "prism!(Option<String>, Some) -> None (no modification)",
+                        ),
+                        |desc| {
+                            (
+                                desc,
+                                "prism!(Option<String>, Some) + modify_option -> uppercase",
+                            )
+                        },
+                    )
+                }
+                Some("lowercase") => {
+                    // Transform existing value to lowercase using prism's modify_option
+                    let transformed =
+                        description_prism.modify_option(current_description, |s| s.to_lowercase());
+                    transformed.map_or(
+                        (
+                            None,
+                            "prism!(Option<String>, Some) -> None (no modification)",
+                        ),
+                        |desc| {
+                            (
+                                desc,
+                                "prism!(Option<String>, Some) + modify_option -> lowercase",
+                            )
+                        },
+                    )
+                }
+                Some("set_if_exists") => {
+                    // Set new value only if current value exists (using prism's preview)
+                    // value must be a string or null; validate type first
+                    let is_null = request.value.is_null();
+                    let new_value_str = request.value.as_str().map(ToString::to_string);
+
+                    // Type validation: value must be string or null
+                    if !is_null && new_value_str.is_none() {
+                        return Err(ApiErrorResponse::validation_error(
+                            "Validation failed",
+                            vec![FieldError::new(
+                                "value",
+                                "Value must be a string or null for set_if_exists transform",
+                            )],
+                        ));
+                    }
+
+                    let preview_result = description_prism.preview(&current_description);
+                    if preview_result.is_none() {
+                        // Current value is None, do not set (regardless of value)
+                        (
+                            current_description,
+                            "prism!(Option<String>, Some) -> None (not set)",
+                        )
+                    } else if is_null {
+                        // null means "no change" - keep current value
+                        (
+                            current_description,
+                            "prism!(Option<String>, Some) + preview -> unchanged (null value)",
+                        )
+                    } else {
+                        // Use prism's review to construct Some variant
+                        let constructed =
+                            description_prism.review(new_value_str.expect("validated above"));
+                        (
+                            constructed,
+                            "prism!(Option<String>, Some) + preview + review",
+                        )
+                    }
+                }
+                _ => {
+                    // Default behavior: set value directly using prism's review
+                    if let Some(new_val) = request.value.as_str() {
+                        (
+                            description_prism.review(new_val.to_string()),
+                            "prism!(Option<String>, Some) + review",
+                        )
+                    } else if request.value.is_null() {
+                        (None, "prism!(Option<String>, Some) -> None")
+                    } else {
+                        return Err(ApiErrorResponse::validation_error(
+                            "Validation failed",
+                            vec![FieldError::new(
+                                "value",
+                                "Description must be a string or null",
+                            )],
+                        ));
+                    }
+                }
+            };
+
+            let new = serde_json::json!(&new_description);
+            let updated = description_lens.set(task, new_description);
+
+            Ok((updated, previous, new, optics_info.to_string()))
         }
 
         _ => Err(ApiErrorResponse::validation_error(
@@ -1102,6 +1217,199 @@ mod tests {
         };
 
         let result = apply_optics_update(task, &request);
+        assert!(result.is_err());
+    }
+
+    // -------------------------------------------------------------------------
+    // Description Prism Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_apply_optics_update_description_prism_uppercase() {
+        let mut task = create_test_task();
+        task = task.with_description("hello world".to_string());
+
+        let request = OpticsRequest {
+            field: "description_prism".to_string(),
+            value: serde_json::Value::Null,
+            transform: Some("uppercase".to_string()),
+        };
+
+        let result = apply_optics_update(task, &request);
+        assert!(result.is_ok());
+
+        let (updated, _, new_value, optics_used) = result.unwrap();
+        assert_eq!(updated.description, Some("HELLO WORLD".to_string()));
+        assert_eq!(new_value, serde_json::json!("HELLO WORLD"));
+        assert!(optics_used.contains("prism!"));
+        assert!(optics_used.contains("uppercase"));
+    }
+
+    #[rstest]
+    fn test_apply_optics_update_description_prism_uppercase_none() {
+        let task = create_test_task(); // description is None
+
+        let request = OpticsRequest {
+            field: "description_prism".to_string(),
+            value: serde_json::Value::Null,
+            transform: Some("uppercase".to_string()),
+        };
+
+        let result = apply_optics_update(task, &request);
+        assert!(result.is_ok());
+
+        let (updated, _, _, optics_used) = result.unwrap();
+        assert_eq!(updated.description, None);
+        assert!(optics_used.contains("None"));
+    }
+
+    #[rstest]
+    fn test_apply_optics_update_description_prism_lowercase() {
+        let mut task = create_test_task();
+        task = task.with_description("HELLO WORLD".to_string());
+
+        let request = OpticsRequest {
+            field: "description_prism".to_string(),
+            value: serde_json::Value::Null,
+            transform: Some("lowercase".to_string()),
+        };
+
+        let result = apply_optics_update(task, &request);
+        assert!(result.is_ok());
+
+        let (updated, _, new_value, optics_used) = result.unwrap();
+        assert_eq!(updated.description, Some("hello world".to_string()));
+        assert_eq!(new_value, serde_json::json!("hello world"));
+        assert!(optics_used.contains("prism!"));
+        assert!(optics_used.contains("lowercase"));
+    }
+
+    #[rstest]
+    fn test_apply_optics_update_description_prism_set_if_exists() {
+        let mut task = create_test_task();
+        task = task.with_description("old description".to_string());
+
+        let request = OpticsRequest {
+            field: "description_prism".to_string(),
+            value: serde_json::json!("new description"),
+            transform: Some("set_if_exists".to_string()),
+        };
+
+        let result = apply_optics_update(task, &request);
+        assert!(result.is_ok());
+
+        let (updated, _, new_value, optics_used) = result.unwrap();
+        assert_eq!(updated.description, Some("new description".to_string()));
+        assert_eq!(new_value, serde_json::json!("new description"));
+        assert!(optics_used.contains("prism!"));
+        assert!(optics_used.contains("preview"));
+        assert!(optics_used.contains("review"));
+    }
+
+    #[rstest]
+    fn test_apply_optics_update_description_prism_set_if_exists_none() {
+        let task = create_test_task(); // description is None
+
+        let request = OpticsRequest {
+            field: "description_prism".to_string(),
+            value: serde_json::json!("new description"),
+            transform: Some("set_if_exists".to_string()),
+        };
+
+        let result = apply_optics_update(task, &request);
+        assert!(result.is_ok());
+
+        let (updated, _, _, optics_used) = result.unwrap();
+        assert_eq!(updated.description, None); // Should not set because original is None
+        assert!(optics_used.contains("not set"));
+    }
+
+    #[rstest]
+    fn test_apply_optics_update_description_prism_default() {
+        let task = create_test_task();
+
+        let request = OpticsRequest {
+            field: "description_prism".to_string(),
+            value: serde_json::json!("new value"),
+            transform: None,
+        };
+
+        let result = apply_optics_update(task, &request);
+        assert!(result.is_ok());
+
+        let (updated, _, new_value, optics_used) = result.unwrap();
+        assert_eq!(updated.description, Some("new value".to_string()));
+        assert_eq!(new_value, serde_json::json!("new value"));
+        assert!(optics_used.contains("prism!"));
+        assert!(optics_used.contains("review"));
+    }
+
+    #[rstest]
+    fn test_apply_optics_update_description_prism_default_null() {
+        let mut task = create_test_task();
+        task = task.with_description("old description".to_string());
+
+        let request = OpticsRequest {
+            field: "description_prism".to_string(),
+            value: serde_json::Value::Null,
+            transform: None,
+        };
+
+        let result = apply_optics_update(task, &request);
+        assert!(result.is_ok());
+
+        let (updated, _, _, optics_used) = result.unwrap();
+        assert_eq!(updated.description, None);
+        assert!(optics_used.contains("None"));
+    }
+
+    #[rstest]
+    fn test_apply_optics_update_description_prism_set_if_exists_null_keeps_current() {
+        let mut task = create_test_task();
+        task = task.with_description("keep this".to_string());
+
+        let request = OpticsRequest {
+            field: "description_prism".to_string(),
+            value: serde_json::Value::Null,
+            transform: Some("set_if_exists".to_string()),
+        };
+
+        let result = apply_optics_update(task, &request);
+        assert!(result.is_ok());
+
+        let (updated, _, _, optics_used) = result.unwrap();
+        // null value means "no change" - should keep current value
+        assert_eq!(updated.description, Some("keep this".to_string()));
+        assert!(optics_used.contains("unchanged"));
+    }
+
+    #[rstest]
+    fn test_apply_optics_update_description_prism_set_if_exists_invalid_type() {
+        let mut task = create_test_task();
+        task = task.with_description("old description".to_string());
+
+        let request = OpticsRequest {
+            field: "description_prism".to_string(),
+            value: serde_json::json!(123), // Number instead of string
+            transform: Some("set_if_exists".to_string()),
+        };
+
+        let result = apply_optics_update(task, &request);
+        assert!(result.is_err()); // Should fail validation
+    }
+
+    #[rstest]
+    fn test_apply_optics_update_description_prism_set_if_exists_invalid_type_none_description() {
+        let task = create_test_task(); // description is None
+
+        let request = OpticsRequest {
+            field: "description_prism".to_string(),
+            value: serde_json::json!(123), // Number instead of string
+            transform: Some("set_if_exists".to_string()),
+        };
+
+        let result = apply_optics_update(task, &request);
+        // Type validation happens before preview check, so should fail even when description is None
         assert!(result.is_err());
     }
 }

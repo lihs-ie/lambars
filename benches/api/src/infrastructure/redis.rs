@@ -218,7 +218,8 @@ impl TaskRepository for RedisTaskRepository {
 
             match result[0] {
                 0 => Ok(()),
-                1 => {
+                1 =>
+                {
                     #[allow(clippy::cast_sign_loss)]
                     Err(RepositoryError::VersionConflict {
                         expected: result[1] as u64,
@@ -527,7 +528,8 @@ impl ProjectRepository for RedisProjectRepository {
 
             match result[0] {
                 0 => Ok(()),
-                1 => {
+                1 =>
+                {
                     #[allow(clippy::cast_sign_loss)]
                     Err(RepositoryError::VersionConflict {
                         expected: result[1] as u64,

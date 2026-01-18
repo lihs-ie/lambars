@@ -29,6 +29,7 @@ use super::handlers::AppState;
 use crate::domain::{Priority, Tag, Task, TaskId, TaskStatus, Timestamp};
 use crate::infrastructure::TaskRepository;
 use lambars::control::Either;
+use lambars::for_;
 use lambars::persistent::PersistentHashSet;
 
 // =============================================================================
@@ -337,11 +338,16 @@ fn check_bulk_limit(count: usize) -> Result<(), ApiErrorResponse> {
     }
 }
 
-/// Validates all create requests (pure function).
+/// Validates all create requests using `for_!` macro (pure function).
+///
+/// Demonstrates lambars' `for_!` macro for list comprehension style iteration.
 fn validate_create_requests(
     requests: &[CreateTaskRequest],
 ) -> Vec<Either<ItemError, ValidatedCreate>> {
-    requests.iter().map(validate_single_create).collect()
+    for_! {
+        request <= requests.iter();
+        yield validate_single_create(request)
+    }
 }
 
 /// Validates a single create request (pure function).
