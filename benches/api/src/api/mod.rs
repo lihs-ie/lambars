@@ -13,6 +13,7 @@ pub mod project;
 pub mod query;
 pub mod recursive;
 pub mod transaction;
+pub mod traversable;
 pub mod typeclass;
 pub mod workflow_eff;
 
@@ -30,6 +31,9 @@ pub use project::{
 pub use query::{count_by_priority, list_tasks, search_tasks};
 pub use recursive::{aggregate_tree, flatten_subtasks, resolve_dependencies};
 pub use transaction::{add_subtask, add_tag, update_status, update_task};
+pub use traversable::{
+    collect_optional, enrich_batch, execute_sequential, fetch_batch, validate_batch,
+};
 pub use typeclass::{
     flatten_demo, functor_mut_demo, identity_demo, monad_error_demo, monad_transformers,
 };

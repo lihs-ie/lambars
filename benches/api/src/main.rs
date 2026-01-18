@@ -26,12 +26,13 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use task_management_benchmark_api::api::{
     AppState, add_subtask, add_tag, aggregate_tree, async_pipeline, bulk_create_tasks,
-    bulk_update_tasks, count_by_priority, create_project_handler, create_task, create_task_eff,
-    execute_state_workflow, execute_workflow, flatten_demo, flatten_subtasks, functor_mut_demo,
-    get_project_handler, get_project_progress_handler, get_project_stats_handler, get_task_history,
-    health_check, identity_demo, lazy_compute, list_tasks, monad_error_demo, monad_transformers,
+    bulk_update_tasks, collect_optional, count_by_priority, create_project_handler, create_task,
+    create_task_eff, enrich_batch, execute_sequential, execute_state_workflow, execute_workflow,
+    fetch_batch, flatten_demo, flatten_subtasks, functor_mut_demo, get_project_handler,
+    get_project_progress_handler, get_project_stats_handler, get_task_history, health_check,
+    identity_demo, lazy_compute, list_tasks, monad_error_demo, monad_transformers,
     projects_leaderboard, resolve_dependencies, search_tasks, tasks_by_deadline, tasks_timeline,
-    transform_task, update_status, update_task, update_with_optics,
+    transform_task, update_status, update_task, update_with_optics, validate_batch,
 };
 use task_management_benchmark_api::infrastructure::{RepositoryConfig, RepositoryFactory};
 
@@ -136,6 +137,12 @@ async fn main() {
         .route("/tasks/by-deadline", get(tasks_by_deadline))
         .route("/tasks/timeline", get(tasks_timeline))
         .route("/projects/leaderboard", get(projects_leaderboard))
+        // Traversable operations (batch processing demonstrations)
+        .route("/tasks/validate-batch", post(validate_batch))
+        .route("/tasks/fetch-batch", post(fetch_batch))
+        .route("/tasks/collect-optional", post(collect_optional))
+        .route("/tasks/execute-sequential", post(execute_sequential))
+        .route("/tasks/enrich-batch", post(enrich_batch))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(application_state);
