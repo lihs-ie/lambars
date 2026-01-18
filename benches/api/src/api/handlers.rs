@@ -27,6 +27,36 @@ use crate::domain::{Priority, Tag, Task, TaskId, Timestamp};
 use crate::infrastructure::{EventStore, ProjectRepository, Repositories, TaskRepository};
 
 // =============================================================================
+// Application Configuration
+// =============================================================================
+
+/// Application configuration for runtime settings.
+///
+/// This struct is used with `Reader` monad to demonstrate dependency injection
+/// patterns in functional programming.
+///
+/// # lambars Features
+///
+/// - `Reader`: Configuration is accessed via `Reader<AppConfig, A>` for
+///   composable dependency injection
+#[derive(Clone, Debug)]
+pub struct AppConfig {
+    /// Maximum number of tasks allowed per project.
+    pub max_tasks_per_project: usize,
+    /// Default page size for pagination.
+    pub default_page_size: u32,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            max_tasks_per_project: 100,
+            default_page_size: 20,
+        }
+    }
+}
+
+// =============================================================================
 // Application State
 // =============================================================================
 
@@ -43,6 +73,8 @@ pub struct AppState {
     pub project_repository: Arc<dyn ProjectRepository + Send + Sync>,
     /// Event store for event sourcing.
     pub event_store: Arc<dyn EventStore + Send + Sync>,
+    /// Application configuration.
+    pub config: AppConfig,
 }
 
 impl AppState {
@@ -56,6 +88,18 @@ impl AppState {
             task_repository: repositories.task_repository,
             project_repository: repositories.project_repository,
             event_store: repositories.event_store,
+            config: AppConfig::default(),
+        }
+    }
+
+    /// Creates a new `AppState` from repositories and custom configuration.
+    #[must_use]
+    pub fn with_config(repositories: Repositories, config: AppConfig) -> Self {
+        Self {
+            task_repository: repositories.task_repository,
+            project_repository: repositories.project_repository,
+            event_store: repositories.event_store,
+            config,
         }
     }
 }

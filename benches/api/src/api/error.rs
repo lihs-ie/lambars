@@ -1,12 +1,18 @@
 //! API error handling.
 //!
 //! This module provides error types and response formatting for the API.
+//!
+//! # lambars Features
+//!
+//! - `Semigroup`: Accumulating multiple `ValidationError`s
+//! - `Monoid`: Empty `ValidationError` for fold operations
 
 use axum::{
     Json,
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use lambars::typeclass::{Monoid, Semigroup};
 use serde::{Deserialize, Serialize};
 
 use crate::infrastructure::RepositoryError;
@@ -188,6 +194,36 @@ impl From<ValidationError> for ApiErrorResponse {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Semigroup and Monoid for ValidationError
+// -----------------------------------------------------------------------------
+
+/// `Semigroup` implementation allows accumulating multiple validation errors.
+///
+/// This enables collecting all field errors rather than stopping at the first one.
+///
+/// # Example
+///
+/// ```ignore
+/// let e1 = ValidationError::single("name", "Name is required");
+/// let e2 = ValidationError::single("email", "Invalid email");
+/// let combined = e1.combine(e2);
+/// assert_eq!(combined.errors.len(), 2);
+/// ```
+impl Semigroup for ValidationError {
+    fn combine(mut self, other: Self) -> Self {
+        self.errors.extend(other.errors);
+        self
+    }
+}
+
+/// `Monoid` implementation provides an empty `ValidationError` for fold operations.
+impl Monoid for ValidationError {
+    fn empty() -> Self {
+        Self::new(vec![])
+    }
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -273,5 +309,69 @@ mod tests {
         let response: ApiErrorResponse = error.into();
         assert_eq!(response.status, StatusCode::BAD_REQUEST);
         assert_eq!(response.error.code, "VALIDATION_ERROR");
+    }
+
+    // -------------------------------------------------------------------------
+    // Semigroup/Monoid Tests for ValidationError
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_validation_error_semigroup_combine() {
+        let e1 = ValidationError::single("name", "Name is required");
+        let e2 = ValidationError::single("email", "Invalid email");
+        let combined = e1.combine(e2);
+
+        assert_eq!(combined.errors.len(), 2);
+        assert_eq!(combined.errors[0].field, "name");
+        assert_eq!(combined.errors[1].field, "email");
+    }
+
+    #[rstest]
+    fn test_validation_error_semigroup_combine_multiple() {
+        let e1 = ValidationError::new(vec![
+            FieldError::new("a", "Error A"),
+            FieldError::new("b", "Error B"),
+        ]);
+        let e2 = ValidationError::single("c", "Error C");
+        let combined = e1.combine(e2);
+
+        assert_eq!(combined.errors.len(), 3);
+    }
+
+    #[rstest]
+    fn test_validation_error_monoid_empty() {
+        let empty = ValidationError::empty();
+        assert!(empty.is_empty());
+        assert_eq!(empty.errors.len(), 0);
+    }
+
+    #[rstest]
+    fn test_validation_error_monoid_identity() {
+        let error = ValidationError::single("field", "Error message");
+        let empty = ValidationError::empty();
+
+        // Left identity: empty.combine(error) == error
+        let left = ValidationError::empty().combine(error.clone());
+        assert_eq!(left.errors.len(), 1);
+        assert_eq!(left.errors[0].field, "field");
+
+        // Right identity: error.combine(empty) == error
+        let right = error.combine(empty);
+        assert_eq!(right.errors.len(), 1);
+        assert_eq!(right.errors[0].field, "field");
+    }
+
+    #[rstest]
+    fn test_validation_error_semigroup_associativity() {
+        let a = ValidationError::single("a", "A");
+        let b = ValidationError::single("b", "B");
+        let c = ValidationError::single("c", "C");
+
+        // (a.combine(b)).combine(c) == a.combine(b.combine(c))
+        let left = a.clone().combine(b.clone()).combine(c.clone());
+        let right = a.combine(b.combine(c));
+
+        assert_eq!(left.errors.len(), right.errors.len());
+        assert_eq!(left.errors.len(), 3);
     }
 }

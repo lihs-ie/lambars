@@ -309,7 +309,11 @@ fn filter_tasks(
 }
 
 /// Paginates a vector of tasks (pure function).
-fn paginate_tasks(tasks: &PersistentVector<Task>, page: u32, limit: u32) -> PaginatedResponse<TaskResponse> {
+fn paginate_tasks(
+    tasks: &PersistentVector<Task>,
+    page: u32,
+    limit: u32,
+) -> PaginatedResponse<TaskResponse> {
     // Clamp inputs to valid ranges
     let page = page.max(1);
     let limit = limit.clamp(1, 100);
@@ -519,7 +523,8 @@ mod tests {
 
     fn create_test_task_with_tags(title: &str, priority: Priority, tags: &[&str]) -> Task {
         let base = create_test_task(title, priority);
-        tags.iter().fold(base, |task, tag| task.add_tag(Tag::new(*tag)))
+        tags.iter()
+            .fold(base, |task, tag| task.add_tag(Tag::new(*tag)))
     }
 
     // -------------------------------------------------------------------------
@@ -668,10 +673,11 @@ mod tests {
         let task1 = create_test_task("Task 1", Priority::Low);
         let task2 = create_test_task("Task 2", Priority::High);
         let task1_clone = task1.clone();
+        let task2_clone = task2.clone();
 
-        let result1 =
-            SearchResult::from_tasks(vec![task1.clone(), task2.clone()].into_iter().collect());
-        let result2 = SearchResult::from_tasks(vec![task1_clone, task2].into_iter().collect());
+        let result1 = SearchResult::from_tasks(vec![task1, task2].into_iter().collect());
+        let result2 =
+            SearchResult::from_tasks(vec![task1_clone, task2_clone].into_iter().collect());
 
         let combined = result1.combine(result2);
 
@@ -696,10 +702,13 @@ mod tests {
 
     #[rstest]
     fn test_search_by_tags_case_insensitive() {
-        let tasks: PersistentVector<Task> =
-            vec![create_test_task_with_tags("Task 1", Priority::Low, &["URGENT"])]
-                .into_iter()
-                .collect();
+        let tasks: PersistentVector<Task> = vec![create_test_task_with_tags(
+            "Task 1",
+            Priority::Low,
+            &["URGENT"],
+        )]
+        .into_iter()
+        .collect();
 
         let result = search_by_tags(&tasks, "urgent");
 
@@ -713,8 +722,7 @@ mod tests {
         // Task with "important" in tag
         let tag_match = create_test_task_with_tags("Regular task", Priority::Low, &["important"]);
 
-        let tasks: PersistentVector<Task> =
-            vec![tag_match.clone(), title_match.clone()].into_iter().collect();
+        let tasks: PersistentVector<Task> = vec![tag_match, title_match].into_iter().collect();
 
         let result = search_with_scope(&tasks, "important", SearchScope::All);
 
