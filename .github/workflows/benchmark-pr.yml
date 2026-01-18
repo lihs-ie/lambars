@@ -111,9 +111,9 @@ jobs:
         if: steps.check-benchmarks.outputs.benchmarks_exist == 'false'
         run: |
           set -eo pipefail
-          cargo bench --bench persistent_vector_iai 2>&1 | tee benchmark_output.txt
-          cargo bench --bench effect_iai 2>&1 | tee -a benchmark_output.txt
-          cargo bench --bench scenario_iai 2>&1 | tee -a benchmark_output.txt
+          cargo bench --bench persistent_vector_iai -- --save-baseline=pr 2>&1 | tee benchmark_output.txt
+          cargo bench --bench effect_iai -- --save-baseline=pr 2>&1 | tee -a benchmark_output.txt
+          cargo bench --bench scenario_iai -- --save-baseline=pr 2>&1 | tee -a benchmark_output.txt
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@v4
