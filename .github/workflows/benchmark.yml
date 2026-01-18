@@ -1,0 +1,91 @@
+# Continuous Benchmarking for main branch
+#
+# This workflow runs Iai-Callgrind benchmarks on every push to main
+# and uploads results to Bencher for tracking performance over time.
+#
+# Iai-Callgrind uses CPU instruction counts for deterministic measurements,
+# making it ideal for CI environments where wall-clock time varies.
+#
+# Requirements:
+#   - BENCHER_API_TOKEN secret must be set in repository settings
+#   - Valgrind must be installed (handled by this workflow)
+
+name: Benchmark
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  benchmark:
+    name: Run Iai-Callgrind Benchmarks
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly-2025-12-15
+
+      - name: Install Valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y valgrind
+
+      - name: Cache cargo bin
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin
+          key: ${{ runner.os }}-cargo-bin-iai-callgrind-runner-0.14.0
+
+      - name: Install iai-callgrind-runner
+        run: |
+          if ! command -v iai-callgrind-runner &> /dev/null; then
+            cargo install iai-callgrind-runner --version 0.14.0
+          fi
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-bench-
+            ${{ runner.os }}-cargo-
+
+      - name: Run Iai-Callgrind benchmarks
+        run: |
+          cargo bench --bench persistent_vector_iai -- --save-baseline=main 2>&1 | tee benchmark_output.txt
+          cargo bench --bench effect_iai -- --save-baseline=main 2>&1 | tee -a benchmark_output.txt
+          cargo bench --bench scenario_iai -- --save-baseline=main 2>&1 | tee -a benchmark_output.txt
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: benchmark_output.txt
+          retention-days: 90
+
+      - name: Upload to Bencher
+        uses: bencherdev/bencher@v0.4.20
+        continue-on-error: true
+        with:
+          command: bencher run
+          project: lambars
+          branch: main
+          testbed: ubuntu-22.04
+          adapter: rust_iai_callgrind
+          file: benchmark_output.txt
+        env:
+          BENCHER_API_TOKEN: ${{ secrets.BENCHER_API_TOKEN }}
