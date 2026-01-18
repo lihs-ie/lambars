@@ -53,12 +53,12 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin
-          key: ${{ runner.os }}-cargo-bin-iai-callgrind-runner-0.14.0
+          key: ${{ runner.os }}-cargo-bin-iai-callgrind-runner-0.14.2
 
       - name: Install iai-callgrind-runner
         run: |
           if ! command -v iai-callgrind-runner &> /dev/null; then
-            cargo install iai-callgrind-runner --version 0.14.0
+            cargo install iai-callgrind-runner --version 0.14.2
           fi
 
       - name: Cache cargo registry
@@ -78,6 +78,7 @@ jobs:
 
       - name: Run baseline benchmarks (main branch)
         run: |
+          set -eo pipefail
           cargo bench --bench persistent_vector_iai -- --save-baseline=main 2>&1 | tee baseline_output.txt
           cargo bench --bench effect_iai -- --save-baseline=main 2>&1 | tee -a baseline_output.txt
           cargo bench --bench scenario_iai -- --save-baseline=main 2>&1 | tee -a baseline_output.txt
@@ -89,6 +90,7 @@ jobs:
 
       - name: Run PR benchmarks with baseline comparison
         run: |
+          set -eo pipefail
           cargo bench --bench persistent_vector_iai -- --baseline=main 2>&1 | tee benchmark_output.txt
           cargo bench --bench effect_iai -- --baseline=main 2>&1 | tee -a benchmark_output.txt
           cargo bench --bench scenario_iai -- --baseline=main 2>&1 | tee -a benchmark_output.txt
