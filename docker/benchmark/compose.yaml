@@ -1,0 +1,56 @@
+# Docker Compose for Iai-Callgrind benchmarks
+#
+# This configuration runs CPU instruction-count benchmarks using
+# Valgrind/Callgrind in a containerized environment.
+#
+# Usage:
+#   # Build the benchmark image
+#   docker compose build
+#
+#   # Run all Iai-Callgrind benchmarks
+#   docker compose run --rm benchmark cargo bench --bench persistent_vector_iai
+#   docker compose run --rm benchmark cargo bench --bench effect_iai
+#   docker compose run --rm benchmark cargo bench --bench scenario_iai
+#
+#   # Run with specific filter
+#   docker compose run --rm benchmark cargo bench --bench persistent_vector_iai -- push
+#
+# Requirements:
+#   - Docker with compose v2
+#   - Sufficient disk space for Rust target directory
+
+services:
+  benchmark:
+    build:
+      context: ../..
+      dockerfile: docker/benchmark/Dockerfile
+    # Required for Valgrind to trace processes
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp=unconfined
+    volumes:
+      # Mount source code (read-only for safety)
+      - ../..:/workspace:ro
+      # Use named volume for target directory to persist builds
+      - benchmark-target:/workspace/target
+      # Use named volume for cargo registry cache
+      - benchmark-cargo-registry:/usr/local/cargo/registry
+      # Use named volume for cargo git cache
+      - benchmark-cargo-git:/usr/local/cargo/git
+    working_dir: /workspace
+    environment:
+      # Enable colored output
+      - CARGO_TERM_COLOR=always
+      # Set Rust backtrace for debugging
+      - RUST_BACKTRACE=1
+    # Default command shows help
+    command: ["cargo", "bench", "--help"]
+
+volumes:
+  benchmark-target:
+    name: lambars-benchmark-target
+  benchmark-cargo-registry:
+    name: lambars-benchmark-cargo-registry
+  benchmark-cargo-git:
+    name: lambars-benchmark-cargo-git
