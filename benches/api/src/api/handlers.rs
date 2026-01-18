@@ -24,22 +24,38 @@ use super::dto::{
 };
 use super::error::ApiErrorResponse;
 use crate::domain::{Priority, Tag, Task, TaskId, Timestamp};
-use crate::infrastructure::TaskRepository;
+use crate::infrastructure::{EventStore, ProjectRepository, Repositories, TaskRepository};
 
 // =============================================================================
 // Application State
 // =============================================================================
 
 /// Shared application dependencies.
-pub struct AppState<R: TaskRepository> {
+///
+/// Uses trait objects (`dyn`) instead of generics to work seamlessly with
+/// the `RepositoryFactory` which returns trait objects. This design allows
+/// runtime selection of repository backends (in-memory, `PostgreSQL`, Redis).
+#[derive(Clone)]
+pub struct AppState {
     /// Task repository for persistence.
-    pub task_repository: Arc<R>,
+    pub task_repository: Arc<dyn TaskRepository + Send + Sync>,
+    /// Project repository for project operations.
+    pub project_repository: Arc<dyn ProjectRepository + Send + Sync>,
+    /// Event store for event sourcing.
+    pub event_store: Arc<dyn EventStore + Send + Sync>,
 }
 
-impl<R: TaskRepository> Clone for AppState<R> {
-    fn clone(&self) -> Self {
+impl AppState {
+    /// Creates a new `AppState` from initialized repositories.
+    ///
+    /// This constructor takes ownership of the `Repositories` struct returned
+    /// by `RepositoryFactory::create()`.
+    #[must_use]
+    pub fn from_repositories(repositories: Repositories) -> Self {
         Self {
-            task_repository: Arc::clone(&self.task_repository),
+            task_repository: repositories.task_repository,
+            project_repository: repositories.project_repository,
+            event_store: repositories.event_store,
         }
     }
 }
@@ -87,8 +103,8 @@ impl<R: TaskRepository> Clone for AppState<R> {
 /// 2. Converting to `TaskResponse` before the async boundary
 /// 3. Executing the repository save in a separate async block
 #[allow(clippy::future_not_send)]
-pub async fn create_task<R: TaskRepository + 'static>(
-    State(state): State<AppState<R>>,
+pub async fn create_task(
+    State(state): State<AppState>,
     Json(request): Json<CreateTaskRequest>,
 ) -> Result<(StatusCode, Json<TaskResponse>), ApiErrorResponse> {
     // Step 1: Validate using Either (demonstrates Monad chaining)
@@ -194,6 +210,42 @@ fn build_task(ids: TaskIds, validated: ValidatedCreateTask) -> Task {
     }
 
     task
+}
+
+// =============================================================================
+// GET /health Handler
+// =============================================================================
+
+/// Health check response body.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HealthResponse {
+    /// Service status.
+    pub status: &'static str,
+    /// Service version.
+    pub version: &'static str,
+}
+
+/// Health check endpoint.
+///
+/// Returns a simple JSON response indicating the service is running.
+/// This endpoint can be used by load balancers and orchestration systems
+/// to verify service availability.
+///
+/// # Response
+///
+/// - **200 OK**: Service is healthy
+///
+/// ```json
+/// {
+///   "status": "healthy",
+///   "version": "0.1.0"
+/// }
+/// ```
+pub async fn health_check() -> Json<HealthResponse> {
+    Json(HealthResponse {
+        status: "healthy",
+        version: env!("CARGO_PKG_VERSION"),
+    })
 }
 
 // =============================================================================
