@@ -507,23 +507,27 @@ requirements:
 
           入力:
             - 初期値: Ok(1)
-            - 測定対象: pure -> flat_map(+1) -> flat_map(*2) ... を10回チェーン
+            - 測定対象: pure_option -> flat_map_option(+1) -> flat_map_option(*2) ... を10回チェーン
             - エラーパス: 測定対象外（純粋な成功パスのみ測定）
 
           返却値: Result<i32, String>（black_box化）
+
+          実装上の制約:
+            lambarsのExceptTはIdentityベースのメソッドを持たないため、
+            Optionベースで実装し、最終的にexpect()でアンラップする。
         examples:
           - description: "ExceptTチェーン測定"
             code: |
-              type Except<A> = ExceptT<Identity, String, A>;
-
               #[library_benchmark]
               fn exceptt_chain_10() -> Result<i32, String> {
-                  let exceptt: Except<i32> = ExceptT::pure(black_box(1))
-                      .flat_map(|x| ExceptT::pure(x + 1))
-                      .flat_map(|x| ExceptT::pure(x * 2))
-                      // ... 10段階
-                      .flat_map(|x| ExceptT::pure(x + 10));
-                  black_box(exceptt.run().run_identity())
+                  let initial = black_box(1);
+                  let exceptt: ExceptT<String, Option<Result<i32, String>>> =
+                      ExceptT::pure_option(initial)
+                          .flat_map_option(|x| ExceptT::pure_option(x + 1))
+                          .flat_map_option(|x| ExceptT::pure_option(x * 2))
+                          // ... 10段階
+                          .flat_map_option(|x| ExceptT::pure_option(x + 10));
+                  black_box(exceptt.run().expect("Option should be Some"))
               }
 
       - name: "eff_macro"

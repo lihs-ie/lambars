@@ -25,6 +25,7 @@ proptest = "1.5"
 lambars-derive = { path = "lambars-derive" }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "sync", "macros", "test-util"] }
 criterion = { version = "0.8", features = ["html_reports"] }
+iai-callgrind = "0.14"
 serde_json = "1.0"
 trybuild = "1.0"
 
@@ -115,3 +116,22 @@ harness = false
 name = "alternative_bench"
 harness = false
 required-features = ["typeclass"]
+
+# Iai-Callgrind benchmarks
+[[bench]]
+name = "persistent_vector_iai"
+harness = false
+path = "benches/iai/persistent_vector_iai.rs"
+
+[[bench]]
+name = "effect_iai"
+harness = false
+path = "benches/iai/effect_iai.rs"
+
+[[bench]]
+name = "scenario_iai"
+harness = false
+path = "benches/iai/scenario_iai.rs"
+
+[profile.bench]
+debug = true  # Required for Iai-Callgrind
