@@ -28,8 +28,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY . .
 
 # Build the API binary in release mode
-WORKDIR /build/benches/api
-RUN cargo build --release --bin task-management-benchmark-api
+RUN cargo build --release \
+    --manifest-path benches/api/Cargo.toml \
+    --bin task-management-benchmark-api
 
 # =============================================================================
 # Runtime Stage
@@ -48,7 +49,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN useradd -m -s /bin/bash appuser
 
 # Copy the binary from builder
-COPY --from=builder /build/target/release/task-management-benchmark-api /usr/local/bin/
+# Note: target directory is relative to the manifest location
+COPY --from=builder /build/benches/api/target/release/task-management-benchmark-api /usr/local/bin/
 
 # Set ownership
 RUN chown appuser:appuser /usr/local/bin/task-management-benchmark-api
