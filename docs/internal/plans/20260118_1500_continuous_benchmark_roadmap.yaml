@@ -1,0 +1,332 @@
+title: "継続的ベンチマークシステム ロードマップ"
+created_at: 2026-01-18
+status: draft
+
+overview:
+  description: |
+    lambarsライブラリに対する高精度な継続的ベンチマークシステムを構築する。
+    CI/CDとローカルDocker環境の両方で実行可能な構成を実現し、
+    パフォーマンス回帰を自動検出できる体制を整える。
+
+  goals:
+    - 高精度なベンチマーク（Iai-Callgrind）によるCI回帰検出
+    - lambars全機能を網羅するAPIベンチマークアプリケーション
+    - ローカルDocker環境での再現可能なベンチマーク実行
+    - GitHub Actions + Bencherによる継続的トラッキング
+
+  components:
+    - name: Iai-Callgrindベンチマーク
+      location: benches/iai/
+      tool: iai-callgrind
+      purpose: CPU命令数ベースの高精度ベンチマーク
+      ci_role: PR回帰検出の主要ツール（安定測定）
+
+    - name: Criterionベンチマーク
+      location: benches/
+      tool: criterion
+      purpose: 既存のマイクロベンチマーク
+      ci_role: ローカル開発時の確認用（CIでは回帰検出対象外）
+      policy: |
+        - 既存ベンチマークは維持し、新規追加は行わない
+        - Iai-Callgrindに移行可能なものは段階的に移行
+        - Bencher連携は行わない（ノイズが大きいため）
+
+    - name: タスク管理ベンチマークAPI
+      location: benches/api/
+      tool: wrk + Lua
+      purpose: lambars全機能を使用するHTTP APIベンチマーク
+      ci_role: |
+        - CIでの回帰検出は行わない（DB/Redis依存でノイズが大きい）
+        - 手動実行または夜間スケジュールジョブで実行
+        - ローカルDocker環境での再現性確認が主目的
+
+  ci_strategy:
+    stable_regression_detection:
+      tool: iai-callgrind
+      trigger: PR、mainブランチpush
+      threshold: 10%
+      bencher_integration: true
+
+    noisy_measurements:
+      tool: wrk + Lua
+      trigger: 手動、schedule（週次）
+      threshold: なし（参考値として記録）
+      bencher_integration: false
+
+feature_coverage:
+  description: |
+    lambarsの全モジュール/主要型に対するベンチマーク対象を明示する。
+    Iai-Callgrindはライブラリレベル、APIベンチはHTTPエンドポイントレベルで測定。
+
+  typeclass:
+    - feature: Functor
+      iai_bench: scenario_iai.rs
+      api_endpoint: POST /tasks
+    - feature: Applicative
+      iai_bench: scenario_iai.rs
+      api_endpoint: POST /projects, PUT /tasks/bulk
+    - feature: Monad
+      iai_bench: effect_iai.rs
+      api_endpoint: POST /tasks, POST /tasks-eff
+    - feature: Foldable
+      iai_bench: scenario_iai.rs
+      api_endpoint: GET /projects/{id}/progress, GET /tasks/by-priority, GET /projects/{id}/stats
+    - feature: Traversable
+      iai_bench: scenario_iai.rs
+      api_endpoint: GET /tasks
+    - feature: Bifunctor
+      iai_bench: scenario_iai.rs
+      api_endpoint: PUT /tasks/{id}, POST /tasks/bulk
+    - feature: Alternative
+      iai_bench: scenario_iai.rs
+      api_endpoint: GET /tasks/search, POST /tasks/bulk
+    - feature: Monoid/Semigroup
+      iai_bench: scenario_iai.rs
+      api_endpoint: GET /projects/{id}/progress, POST /tasks/{id}/tags
+    - feature: Sum/Product
+      iai_bench: scenario_iai.rs
+      api_endpoint: GET /projects/{id}/stats
+    - feature: Validated
+      iai_bench: scenario_iai.rs
+      api_endpoint: POST /projects
+
+  compose:
+    - feature: for_!
+      iai_bench: scenario_iai.rs
+      api_endpoint: POST /tasks/bulk
+    - feature: compose!
+      iai_bench: scenario_iai.rs
+      api_endpoint: 内部パイプライン
+    - feature: pipe!
+      iai_bench: scenario_iai.rs
+      api_endpoint: 内部パイプライン
+    - feature: partial!
+      iai_bench: scenario_iai.rs
+      api_endpoint: 設定適用
+    - feature: curry!
+      iai_bench: scenario_iai.rs
+      api_endpoint: 設定適用
+
+  control:
+    - feature: Lazy
+      iai_bench: scenario_iai.rs
+      api_endpoint: 設定読み込み
+    - feature: Trampoline
+      iai_bench: scenario_iai.rs
+      api_endpoint: POST /tasks/{id}/subtasks, GET /projects/{id}/progress
+    - feature: Continuation
+      iai_bench: scenario_iai.rs
+      api_endpoint: GET /tasks/{id}/history
+    - feature: Either
+      iai_bench: effect_iai.rs
+      api_endpoint: POST /tasks, PATCH /tasks/{id}/status
+
+  persistent:
+    - feature: PersistentVector
+      iai_bench: persistent_vector_iai.rs
+      api_endpoint: GET /tasks
+    - feature: PersistentHashMap
+      iai_bench: persistent_vector_iai.rs（追加予定）
+      api_endpoint: GET /projects/{id}
+    - feature: PersistentHashSet
+      iai_bench: persistent_vector_iai.rs（追加予定）
+      api_endpoint: POST /tasks/{id}/tags
+    - feature: PersistentTreeMap
+      iai_bench: persistent_vector_iai.rs（追加予定）
+      api_endpoint: GET /tasks/search, GET /tasks/by-priority
+    - feature: PersistentList
+      iai_bench: persistent_vector_iai.rs（追加予定）
+      api_endpoint: POST /tasks/{id}/subtasks, GET /tasks/{id}/history
+
+  optics:
+    - feature: Lens
+      iai_bench: scenario_iai.rs
+      api_endpoint: PUT /tasks/{id}
+    - feature: Prism
+      iai_bench: scenario_iai.rs
+      api_endpoint: PATCH /tasks/{id}/status
+    - feature: Optional
+      iai_bench: scenario_iai.rs
+      api_endpoint: PUT /tasks/{id}
+    - feature: Iso
+      iai_bench: scenario_iai.rs
+      api_endpoint: DTO変換
+    - feature: Traversal
+      iai_bench: scenario_iai.rs
+      api_endpoint: PUT /tasks/bulk
+
+  effect:
+    - feature: IO
+      iai_bench: effect_iai.rs
+      api_endpoint: 同期処理
+    - feature: AsyncIO
+      iai_bench: effect_iai.rs
+      api_endpoint: POST /tasks-eff
+    - feature: Reader
+      iai_bench: effect_iai.rs
+      api_endpoint: 依存性注入
+    - feature: State
+      iai_bench: effect_iai.rs
+      api_endpoint: 状態追跡
+    - feature: Writer
+      iai_bench: effect_iai.rs
+      api_endpoint: 監査ログ
+    - feature: ExceptT
+      iai_bench: effect_iai.rs
+      api_endpoint: POST /tasks-eff
+    - feature: eff!/eff_async!
+      iai_bench: effect_iai.rs
+      api_endpoint: POST /tasks, POST /tasks-eff
+
+phases:
+  - phase: 0
+    name: ロードマップ作成
+    status: completed
+    description: 全体計画の策定とCodexレビュー
+    deliverables:
+      - docs/internal/plans/20260118_1500_continuous_benchmark_roadmap.yaml
+
+  - phase: 1
+    name: Iai-Callgrindベンチマーク
+    status: pending
+    description: 高精度ベンチマーク基盤の構築
+    requirement_file: docs/internal/requirements/20260118_1510_iai_callgrind_benchmark.yaml
+    scope:
+      - Cargo.toml設定（iai-callgrind依存関係追加）
+      - profile.bench設定（debug = true）
+      - persistent_vector_iai.rs
+      - effect_iai.rs
+      - scenario_iai.rs
+    deliverables:
+      - benches/iai/persistent_vector_iai.rs
+      - benches/iai/effect_iai.rs
+      - benches/iai/scenario_iai.rs
+      - Cargo.toml更新
+
+  - phase: 2
+    name: タスク管理ベンチマークAPI
+    status: pending
+    description: lambars全機能を網羅するAPIアプリケーション
+    requirement_file: docs/internal/requirements/20260118_1520_task_management_benchmark_api.yaml
+    scope:
+      domain:
+        - Task（ID, タイトル, ステータス, 優先度, タグ, サブタスク）
+        - Project（複数タスクのコンテナ）
+        - History（イベントソーシング）
+      endpoints:
+        - path: POST /tasks
+          lambars_features: [Functor, Monad, Either, eff_async!]
+        - path: POST /tasks-eff
+          lambars_features: [Monad, ExceptT, AsyncIO, eff_async!]
+        - path: PUT /tasks/{id}
+          lambars_features: [Lens, Optional, Bifunctor]
+        - path: PATCH /tasks/{id}/status
+          lambars_features: [Prism, Either]
+        - path: POST /tasks/{id}/subtasks
+          lambars_features: [PersistentList, Trampoline]
+        - path: POST /tasks/{id}/tags
+          lambars_features: [PersistentHashSet, Monoid]
+        - path: GET /tasks
+          lambars_features: [PersistentVector, Traversable]
+        - path: GET /tasks/search
+          lambars_features: [PersistentTreeMap, Alternative]
+        - path: GET /tasks/by-priority
+          lambars_features: [PersistentTreeMap, Foldable]
+        - path: POST /tasks/bulk
+          lambars_features: [Alternative, Bifunctor, for_!]
+        - path: PUT /tasks/bulk
+          lambars_features: [Traversal, Applicative]
+        - path: POST /projects
+          lambars_features: [Applicative, Validated]
+        - path: GET /projects/{id}
+          lambars_features: [PersistentHashMap, Reader]
+        - path: GET /projects/{id}/progress
+          lambars_features: [Foldable, Trampoline, Monoid]
+        - path: GET /projects/{id}/stats
+          lambars_features: [Foldable, Sum, Product]
+        - path: GET /tasks/{id}/history
+          lambars_features: [PersistentList, Continuation]
+    deliverables:
+      - benches/api/Cargo.toml
+      - benches/api/src/**/*.rs
+      - benches/api/benchmarks/run_benchmark.sh
+      - benches/api/benchmarks/scripts/*.lua
+
+  - phase: 3
+    name: Docker環境
+    status: pending
+    description: ベンチマーク実行用Docker環境の構築
+    requirement_file: docs/internal/requirements/20260118_1530_benchmark_docker_environment.yaml
+    scope:
+      iai_callgrind:
+        - docker/benchmark/Dockerfile（Valgrind + Rust環境）
+        - docker/benchmark/compose.yaml
+      api:
+        - benches/api/docker/Dockerfile
+        - benches/api/docker/compose.yaml（PostgreSQL, Redis, app）
+    deliverables:
+      - docker/benchmark/Dockerfile
+      - docker/benchmark/compose.yaml
+      - benches/api/docker/Dockerfile
+      - benches/api/docker/compose.yaml
+
+  - phase: 4
+    name: CI/CD統合
+    status: pending
+    description: GitHub Actions + Bencherによる継続的ベンチマーク
+    requirement_file: docs/internal/requirements/20260118_1540_benchmark_ci_integration.yaml
+    scope:
+      - benchmark.yml（mainブランチ継続ベンチマーク）
+      - benchmark-pr.yml（PR回帰検出）
+      - Bencher連携設定
+      - 回帰検出閾値設定（10%）
+    deliverables:
+      - .github/workflows/benchmark.yml
+      - .github/workflows/benchmark-pr.yml
+
+  - phase: 5
+    name: ドキュメント整備
+    status: pending
+    description: 実行方法と結果解釈のドキュメント
+    deliverables:
+      - benches/README.md
+      - benches/api/README.md
+
+technical_requirements:
+  iai_callgrind:
+    version: "0.14"
+    runner_version: "0.14.0"
+    valgrind_required: true
+    macos_support: Docker経由のみ
+
+  bencher:
+    adapter: rust_iai_callgrind
+    threshold: 10%
+    api_token_secret: BENCHER_API_TOKEN
+
+  docker:
+    rust_version: MSRV追従（Cargo.toml rust-version参照）
+    postgres_version: "16-alpine"
+    redis_version: "7-alpine"
+    valgrind_requirements: |
+      Valgrind/CallgrindをDocker内で実行するには以下の設定が必要:
+      - cap_add: SYS_PTRACE
+      - security_opt: seccomp=unconfined
+      これらがないとValgrindがプロセスをトレースできず失敗する。
+    compose_example: |
+      services:
+        benchmark:
+          cap_add:
+            - SYS_PTRACE
+          security_opt:
+            - seccomp=unconfined
+
+references:
+  - name: Iai-Callgrind Guide
+    url: https://iai-callgrind.github.io/iai-callgrind/latest/html/index.html
+  - name: Bencher GitHub Actions連携
+    url: https://bencher.dev/docs/how-to/github-actions/
+  - name: Bencher Iai-Callgrindアダプタ
+    url: https://bencher.dev/rust/iai-callgrind/
+  - name: rustls継続的ベンチマーク事例
+    url: https://ochagavia.nl/blog/continuous-benchmarking-for-rustls/
