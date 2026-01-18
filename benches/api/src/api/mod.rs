@@ -5,9 +5,11 @@
 pub mod dto;
 pub mod error;
 pub mod handlers;
+pub mod transaction;
 pub mod workflow_eff;
 
 pub use dto::{CreateTaskRequest, TaskResponse, UpdateTaskRequest};
 pub use error::{ApiError, ApiErrorResponse, FieldError, ValidationError};
 pub use handlers::{AppState, HealthResponse, create_task, health_check};
+pub use transaction::{add_subtask, add_tag, update_status, update_task};
 pub use workflow_eff::create_task_eff;

@@ -17,14 +17,17 @@ use std::env;
 use std::net::SocketAddr;
 
 use axum::Router;
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post, put};
 use tokio::net::TcpListener;
 use tokio::signal;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use task_management_benchmark_api::api::{AppState, create_task, create_task_eff, health_check};
+use task_management_benchmark_api::api::{
+    AppState, add_subtask, add_tag, create_task, create_task_eff, health_check, update_status,
+    update_task,
+};
 use task_management_benchmark_api::infrastructure::{RepositoryConfig, RepositoryFactory};
 
 #[tokio::main]
@@ -83,8 +86,13 @@ async fn main() {
     // Build the application router
     let application = Router::new()
         .route("/health", get(health_check))
+        // Task CRUD
         .route("/tasks", post(create_task))
         .route("/tasks-eff", post(create_task_eff))
+        .route("/tasks/{id}", put(update_task))
+        .route("/tasks/{id}/status", patch(update_status))
+        .route("/tasks/{id}/subtasks", post(add_subtask))
+        .route("/tasks/{id}/tags", post(add_tag))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(application_state);
