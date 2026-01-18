@@ -272,7 +272,7 @@ phases:
 
   - phase: 4
     name: CI/CD統合
-    status: pending
+    status: completed
     description: GitHub Actions + Bencherによる継続的ベンチマーク
     requirement_file: docs/internal/requirements/20260118_1540_benchmark_ci_integration.yaml
     scope:
@@ -286,7 +286,7 @@ phases:
 
   - phase: 5
     name: ドキュメント整備
-    status: pending
+    status: completed
     description: 実行方法と結果解釈のドキュメント
     deliverables:
       - benches/README.md
@@ -295,7 +295,7 @@ phases:
 technical_requirements:
   iai_callgrind:
     version: "0.14"
-    runner_version: "0.14.0"
+    runner_version: "0.14.2"
     valgrind_required: true
     macos_support: Docker経由のみ
 
