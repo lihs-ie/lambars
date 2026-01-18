@@ -146,9 +146,7 @@ impl From<RepositoryError> for ApiErrorResponse {
             // In production, log the error details: tracing::error!(%error, "Internal error");
             RepositoryError::DatabaseError(_)
             | RepositoryError::SerializationError(_)
-            | RepositoryError::CacheError(_) => {
-                Self::internal_error("An internal error occurred")
-            }
+            | RepositoryError::CacheError(_) => Self::internal_error("An internal error occurred"),
         }
     }
 }
