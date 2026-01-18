@@ -12,14 +12,14 @@
 //! - **Optics**: Type-safe, composable access to nested data structures
 //! - **Monad Transformers**: State, Writer, and RWS for complex workflows
 
-use axum::extract::{Path, State};
 use axum::Json;
+use axum::extract::{Path, State};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use lambars::define_effect;
 use lambars::effect::algebraic::{Eff, Handler, NoEffect, PureHandler};
-use lambars::effect::{State as StateMonad, Writer, RWS};
+use lambars::effect::{RWS, State as StateMonad, Writer};
 use lambars::optics::{Iso, Lens, Prism};
 use lambars::{iso, lens, prism};
 
@@ -257,9 +257,8 @@ fn create_validation_workflow(request: &WorkflowRequest) -> Eff<NoEffect, bool> 
         ["low", "medium", "high", "critical"].contains(&request.priority.to_lowercase().as_str());
 
     // Build computation using Eff monad operations
-    Eff::pure(title_valid).flat_map(move |t_valid| {
-        Eff::pure(priority_valid).fmap(move |p_valid| t_valid && p_valid)
-    })
+    Eff::pure(title_valid)
+        .flat_map(move |t_valid| Eff::pure(priority_valid).fmap(move |p_valid| t_valid && p_valid))
 }
 
 // =============================================================================
@@ -307,9 +306,7 @@ pub async fn update_with_optics(
 ) -> Result<Json<OpticsResponse>, ApiErrorResponse> {
     let task_id = Uuid::parse_str(&id)
         .map(TaskId::from_uuid)
-        .map_err(|_| {
-            ApiErrorResponse::bad_request("INVALID_TASK_ID", "Invalid task ID format")
-        })?;
+        .map_err(|_| ApiErrorResponse::bad_request("INVALID_TASK_ID", "Invalid task ID format"))?;
 
     let task = state
         .task_repository
@@ -400,8 +397,11 @@ fn apply_optics_update(
                 _ => {
                     return Err(ApiErrorResponse::validation_error(
                         "Validation failed",
-                        vec![FieldError::new("value", format!("Invalid priority: {priority_str}"))],
-                    ))
+                        vec![FieldError::new(
+                            "value",
+                            format!("Invalid priority: {priority_str}"),
+                        )],
+                    ));
                 }
             };
 
@@ -412,12 +412,7 @@ fn apply_optics_update(
             let priority_lens = lens!(Task, priority);
             let updated = priority_lens.set(task, new_priority);
 
-            Ok((
-                updated,
-                previous,
-                new,
-                "lens!(Task, priority)".to_string(),
-            ))
+            Ok((updated, previous, new, "lens!(Task, priority)".to_string()))
         }
 
         "description" => {
@@ -431,7 +426,10 @@ fn apply_optics_update(
                         .ok_or_else(|| {
                             ApiErrorResponse::validation_error(
                                 "Validation failed",
-                                vec![FieldError::new("value", "Description must be a string or null")],
+                                vec![FieldError::new(
+                                    "value",
+                                    "Description must be a string or null",
+                                )],
                             )
                         })?
                         .to_string(),
@@ -475,8 +473,11 @@ fn apply_optics_update(
                 _ => {
                     return Err(ApiErrorResponse::validation_error(
                         "Validation failed",
-                        vec![FieldError::new("value", format!("Invalid status: {status_str}"))],
-                    ))
+                        vec![FieldError::new(
+                            "value",
+                            format!("Invalid status: {status_str}"),
+                        )],
+                    ));
                 }
             };
 
@@ -518,7 +519,10 @@ fn apply_optics_update(
 
         _ => Err(ApiErrorResponse::validation_error(
             "Validation failed",
-            vec![FieldError::new("field", format!("Unknown field: {}", request.field))],
+            vec![FieldError::new(
+                "field",
+                format!("Unknown field: {}", request.field),
+            )],
         )),
     }
 }
@@ -701,26 +705,20 @@ fn create_rws_workflow(
 }
 
 /// Creates an RWS operation.
-fn create_rws_operation(
-    op: StateOperation,
-) -> RWS<WorkflowEnv, Vec<String>, WorkflowState, ()> {
+fn create_rws_operation(op: StateOperation) -> RWS<WorkflowEnv, Vec<String>, WorkflowState, ()> {
     match op {
-        StateOperation::Increment => {
-            RWS::modify(|mut s: WorkflowState| {
-                s.count += 1;
-                s.history.push(s.count);
-                s
-            })
-            .then(RWS::tell(vec!["Incremented".to_string()]))
-        }
-        StateOperation::Decrement => {
-            RWS::modify(|mut s: WorkflowState| {
-                s.count -= 1;
-                s.history.push(s.count);
-                s
-            })
-            .then(RWS::tell(vec!["Decremented".to_string()]))
-        }
+        StateOperation::Increment => RWS::modify(|mut s: WorkflowState| {
+            s.count += 1;
+            s.history.push(s.count);
+            s
+        })
+        .then(RWS::tell(vec!["Incremented".to_string()])),
+        StateOperation::Decrement => RWS::modify(|mut s: WorkflowState| {
+            s.count -= 1;
+            s.history.push(s.count);
+            s
+        })
+        .then(RWS::tell(vec!["Decremented".to_string()])),
         StateOperation::Multiply { factor } => {
             // Demonstrate Reader: check environment limit
             RWS::ask().flat_map(move |env: WorkflowEnv| {
@@ -737,14 +735,12 @@ fn create_rws_operation(
                 .then(RWS::tell(vec![format!("Multiplied by {}", actual_factor)]))
             })
         }
-        StateOperation::Add { value } => {
-            RWS::modify(move |mut s: WorkflowState| {
-                s.count += value;
-                s.history.push(s.count);
-                s
-            })
-            .then(RWS::tell(vec![format!("Added {}", value)]))
-        }
+        StateOperation::Add { value } => RWS::modify(move |mut s: WorkflowState| {
+            s.count += value;
+            s.history.push(s.count);
+            s
+        })
+        .then(RWS::tell(vec![format!("Added {}", value)])),
         StateOperation::Log { message } => RWS::tell(vec![format!("Log: {}", message)]),
     }
 }
@@ -920,7 +916,9 @@ mod tests {
 
     #[rstest]
     fn test_iso_bidirectional() {
-        let int_string_iso = iso!(|n: i32| n.to_string(), |s: String| s.parse::<i32>().unwrap());
+        let int_string_iso = iso!(|n: i32| n.to_string(), |s: String| s
+            .parse::<i32>()
+            .unwrap());
 
         let original = 42;
         let converted = int_string_iso.get(original);
@@ -931,7 +929,9 @@ mod tests {
 
     #[rstest]
     fn test_iso_modify() {
-        let int_string_iso = iso!(|n: i32| n.to_string(), |s: String| s.parse::<i32>().unwrap());
+        let int_string_iso = iso!(|n: i32| n.to_string(), |s: String| s
+            .parse::<i32>()
+            .unwrap());
 
         let result = int_string_iso.modify(42, |s| format!("{s}0")); // "42" -> "420"
 
@@ -944,7 +944,11 @@ mod tests {
 
     fn create_test_task() -> Task {
         use crate::domain::Timestamp;
-        Task::new(TaskId::generate(), "Test Task".to_string(), Timestamp::now())
+        Task::new(
+            TaskId::generate(),
+            "Test Task".to_string(),
+            Timestamp::now(),
+        )
     }
 
     #[rstest]

@@ -144,7 +144,7 @@ impl RepositoryConfig {
             Err(env::VarError::NotUnicode(_)) => {
                 return Err(ConfigurationError::InvalidStorageMode(
                     "<non-UTF-8 value>".to_string(),
-                ))
+                ));
             }
         };
 
@@ -154,7 +154,7 @@ impl RepositoryConfig {
             Err(env::VarError::NotUnicode(_)) => {
                 return Err(ConfigurationError::InvalidCacheMode(
                     "<non-UTF-8 value>".to_string(),
-                ))
+                ));
             }
         };
 

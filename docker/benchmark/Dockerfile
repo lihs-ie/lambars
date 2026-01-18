@@ -25,7 +25,7 @@ WORKDIR /workspace
 
 # Install iai-callgrind-runner (must match iai-callgrind version in Cargo.toml)
 # This is the runner binary that iai-callgrind benchmarks use
-RUN cargo install iai-callgrind-runner --version 0.14.0
+RUN cargo install iai-callgrind-runner --version 0.14.2
 
 # Copy the project files (done at build time or via volume mount)
 # For development, use volume mounts in compose.yaml
