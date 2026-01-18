@@ -25,10 +25,10 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use task_management_benchmark_api::api::{
-    AppState, add_subtask, add_tag, bulk_create_tasks, bulk_update_tasks, count_by_priority,
-    create_project_handler, create_task, create_task_eff, get_project_handler,
-    get_project_progress_handler, get_project_stats_handler, health_check, list_tasks,
-    search_tasks, update_status, update_task,
+    AppState, add_subtask, add_tag, async_pipeline, bulk_create_tasks, bulk_update_tasks,
+    count_by_priority, create_project_handler, create_task, create_task_eff, get_project_handler,
+    get_project_progress_handler, get_project_stats_handler, get_task_history, health_check,
+    lazy_compute, list_tasks, search_tasks, transform_task, update_status, update_task,
 };
 use task_management_benchmark_api::infrastructure::{RepositoryConfig, RepositoryFactory};
 
@@ -109,6 +109,11 @@ async fn main() {
         .route("/projects/{id}", get(get_project_handler))
         .route("/projects/{id}/progress", get(get_project_progress_handler))
         .route("/projects/{id}/stats", get(get_project_stats_handler))
+        // Advanced operations
+        .route("/tasks/{id}/history", get(get_task_history))
+        .route("/tasks/transform", post(transform_task))
+        .route("/tasks/async-pipeline", post(async_pipeline))
+        .route("/tasks/lazy-compute", post(lazy_compute))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(application_state);
