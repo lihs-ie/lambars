@@ -36,7 +36,8 @@ services:
       - postgres-data:/var/lib/postgresql/data
       - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     ports:
-      - "5432:5432"
+      # Use non-default ports to avoid conflicts with other projects
+      - "5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U benchmark -d benchmark"]
       interval: 10s
@@ -55,7 +56,8 @@ services:
     volumes:
       - redis-data:/data
     ports:
-      - "6379:6379"
+      # Use non-default port to avoid conflicts with other projects
+      - "6380:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -83,7 +85,8 @@ services:
       # Logging
       RUST_LOG: info,task_management_benchmark_api=debug,tower_http=debug
     ports:
-      - "3000:3000"
+      # Use 3002 to avoid conflicts with local development servers
+      - "3002:3000"
     depends_on:
       postgres:
         condition: service_healthy
