@@ -24,7 +24,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use task_management_benchmark_api::api::{AppState, create_task, health_check};
+use task_management_benchmark_api::api::{AppState, create_task, create_task_eff, health_check};
 use task_management_benchmark_api::infrastructure::{RepositoryConfig, RepositoryFactory};
 
 #[tokio::main]
@@ -84,6 +84,7 @@ async fn main() {
     let application = Router::new()
         .route("/health", get(health_check))
         .route("/tasks", post(create_task))
+        .route("/tasks-eff", post(create_task_eff))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(application_state);
