@@ -1,0 +1,184 @@
+# PR Benchmark Regression Detection
+#
+# This workflow runs Iai-Callgrind benchmarks on pull requests
+# and compares results against the main branch baseline to detect
+# performance regressions.
+#
+# Regression Threshold: 10% increase in CPU instructions
+#
+# The workflow:
+#   - Checks out main branch first to establish baseline
+#   - Runs benchmarks on main and saves baseline
+#   - Checks out PR branch and runs benchmarks comparing to baseline
+#   - Posts results as PR comment
+
+name: Benchmark PR
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      # Only run benchmarks when relevant code changes
+      - 'src/**'
+      - 'lambars-derive/**'
+      - 'benches/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Use shared target directory for baseline comparison
+  CARGO_TARGET_DIR: /tmp/benchmark-target
+
+jobs:
+  benchmark-pr:
+    name: Benchmark Regression Check
+    runs-on: ubuntu-22.04
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly-2025-12-15
+
+      - name: Install Valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y valgrind
+
+      - name: Cache cargo bin
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin
+          key: ${{ runner.os }}-cargo-bin-iai-callgrind-runner-0.14.0
+
+      - name: Install iai-callgrind-runner
+        run: |
+          if ! command -v iai-callgrind-runner &> /dev/null; then
+            cargo install iai-callgrind-runner --version 0.14.0
+          fi
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Checkout main branch for baseline
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Run baseline benchmarks (main branch)
+        run: |
+          cargo bench --bench persistent_vector_iai -- --save-baseline=main 2>&1 | tee baseline_output.txt
+          cargo bench --bench effect_iai -- --save-baseline=main 2>&1 | tee -a baseline_output.txt
+          cargo bench --bench scenario_iai -- --save-baseline=main 2>&1 | tee -a baseline_output.txt
+
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          clean: false
+
+      - name: Run PR benchmarks with baseline comparison
+        run: |
+          cargo bench --bench persistent_vector_iai -- --baseline=main 2>&1 | tee benchmark_output.txt
+          cargo bench --bench effect_iai -- --baseline=main 2>&1 | tee -a benchmark_output.txt
+          cargo bench --bench scenario_iai -- --baseline=main 2>&1 | tee -a benchmark_output.txt
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-pr-results
+          path: |
+            baseline_output.txt
+            benchmark_output.txt
+          retention-days: 30
+
+      - name: Check for regressions
+        id: check-regression
+        run: |
+          # Parse benchmark output and check for regressions > 10%
+          # Iai-Callgrind outputs changes like "+12.34%" or "-5.67%"
+          # Match any increase of 10% or more (with or without decimal)
+          if grep -E '\+1[0-9](\.[0-9]+)?%|\+[2-9][0-9](\.[0-9]+)?%|\+[0-9]{3,}(\.[0-9]+)?%' benchmark_output.txt; then
+            echo "regression_detected=true" >> $GITHUB_OUTPUT
+            echo "::warning::Performance regression detected (>10% increase in instructions)"
+          else
+            echo "regression_detected=false" >> $GITHUB_OUTPUT
+            echo "No significant performance regression detected"
+          fi
+
+      - name: Post benchmark results as PR comment
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const benchmarkOutput = fs.readFileSync('benchmark_output.txt', 'utf8');
+
+            // Extract relevant benchmark results (last 100 lines to avoid huge comments)
+            const lines = benchmarkOutput.split('\n');
+            const relevantLines = lines.slice(-100).join('\n');
+
+            const regressionDetected = '${{ steps.check-regression.outputs.regression_detected }}' === 'true';
+            const status = regressionDetected ? ':warning: Performance Regression Detected' : ':white_check_mark: No Performance Regression';
+
+            const body = `## Benchmark Results
+
+            ${status}
+
+            <details>
+            <summary>Iai-Callgrind Benchmark Output</summary>
+
+            \`\`\`
+            ${relevantLines}
+            \`\`\`
+
+            </details>
+
+            > Threshold: 10% increase in CPU instructions
+            > Benchmarks: persistent_vector_iai, effect_iai, scenario_iai
+            `;
+
+            // Find existing comment or create new one
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.find(comment =>
+              comment.user.type === 'Bot' &&
+              comment.body.includes('## Benchmark Results')
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body
+              });
+            }
+
+      - name: Fail on regression (optional - enable when ready)
+        if: steps.check-regression.outputs.regression_detected == 'true'
+        run: |
+          echo "::error::Performance regression detected. Review the benchmark results above."
+          # Uncomment the next line to fail the workflow on regression
+          # exit 1
