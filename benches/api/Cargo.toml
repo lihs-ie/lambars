@@ -7,7 +7,7 @@ description = "Task management benchmark API demonstrating lambars library"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-lambars = { path = "../../", features = ["full"] }
+lambars = { path = "../../", features = ["full", "arc"] }
 lambars-derive = { path = "../../lambars-derive" }
 
 # Web Framework
