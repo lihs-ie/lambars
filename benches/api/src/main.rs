@@ -30,8 +30,8 @@ use task_management_benchmark_api::api::{
     execute_state_workflow, execute_workflow, flatten_demo, flatten_subtasks, functor_mut_demo,
     get_project_handler, get_project_progress_handler, get_project_stats_handler, get_task_history,
     health_check, identity_demo, lazy_compute, list_tasks, monad_error_demo, monad_transformers,
-    resolve_dependencies, search_tasks, transform_task, update_status, update_task,
-    update_with_optics,
+    projects_leaderboard, resolve_dependencies, search_tasks, tasks_by_deadline, tasks_timeline,
+    transform_task, update_status, update_task, update_with_optics,
 };
 use task_management_benchmark_api::infrastructure::{RepositoryConfig, RepositoryFactory};
 
@@ -132,6 +132,10 @@ async fn main() {
         .route("/tasks/{id}/flatten-subtasks", get(flatten_subtasks))
         .route("/tasks/resolve-dependencies", post(resolve_dependencies))
         .route("/projects/{id}/aggregate-tree", get(aggregate_tree))
+        // Ordered operations (PersistentTreeMap demonstrations)
+        .route("/tasks/by-deadline", get(tasks_by_deadline))
+        .route("/tasks/timeline", get(tasks_timeline))
+        .route("/projects/leaderboard", get(projects_leaderboard))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(application_state);
