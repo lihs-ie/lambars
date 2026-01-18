@@ -133,5 +133,11 @@ name = "scenario_iai"
 harness = false
 path = "benches/iai/scenario_iai.rs"
 
+# Integration tests with feature requirements
+[[test]]
+name = "iai_benchmark_validation"
+path = "tests/iai_benchmark_validation.rs"
+required-features = ["typeclass", "control", "persistent", "optics", "effect", "compose"]
+
 [profile.bench]
 debug = true  # Required for Iai-Callgrind
