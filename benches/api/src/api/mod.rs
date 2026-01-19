@@ -12,6 +12,7 @@ pub mod dto;
 pub mod effects;
 pub mod error;
 pub mod handlers;
+pub mod misc;
 pub mod optics_advanced;
 pub mod ordered;
 pub mod project;
@@ -39,6 +40,9 @@ pub use dto::{CreateTaskRequest, TaskResponse, UpdateTaskRequest};
 pub use effects::{execute_state_workflow, execute_workflow, update_with_optics};
 pub use error::{ApiError, ApiErrorResponse, FieldError, ValidationError};
 pub use handlers::{AppConfig, AppState, HealthResponse, create_task, health_check};
+pub use misc::{
+    aggregate_numeric, concurrent_lazy, deque_operations, freer_workflow, partial_apply,
+};
 pub use optics_advanced::{
     batch_update_field, nested_access, update_filtered, update_metadata_key, update_optional,
 };
