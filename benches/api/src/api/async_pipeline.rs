@@ -251,7 +251,10 @@ fn normalize_title(task: Task) -> Task {
     } else {
         title
     };
-    Task { title: normalized, ..task }
+    Task {
+        title: normalized,
+        ..task
+    }
 }
 
 /// Pure: Bumps task priority by one level.
@@ -388,14 +391,20 @@ pub async fn transform_async(
     if request.transforms.is_empty() {
         return Err(ApiErrorResponse::validation_error(
             "Validation failed",
-            vec![FieldError::new("transforms", "transforms list cannot be empty")],
+            vec![FieldError::new(
+                "transforms",
+                "transforms list cannot be empty",
+            )],
         ));
     }
 
     if request.transforms.len() > 10 {
         return Err(ApiErrorResponse::validation_error(
             "Validation failed",
-            vec![FieldError::new("transforms", "transforms list cannot exceed 10 items")],
+            vec![FieldError::new(
+                "transforms",
+                "transforms list cannot exceed 10 items",
+            )],
         ));
     }
 
@@ -469,7 +478,9 @@ fn fetch_task_async(
             .run_async()
             .await
             .map_err(|e| PipelineError::InternalError(format!("Repository error: {e}")))?
-            .ok_or_else(|| PipelineError::NotFound(format!("Task not found: {}", task_id.as_uuid())))
+            .ok_or_else(|| {
+                PipelineError::NotFound(format!("Task not found: {}", task_id.as_uuid()))
+            })
     })
 }
 
@@ -512,7 +523,10 @@ pub async fn workflow_async(
     if request.title.len() > 200 {
         return Err(ApiErrorResponse::validation_error(
             "Validation failed",
-            vec![FieldError::new("title", "title cannot exceed 200 characters")],
+            vec![FieldError::new(
+                "title",
+                "title cannot exceed 200 characters",
+            )],
         ));
     }
 
@@ -604,8 +618,7 @@ fn create_task_step(
         let step_start = Instant::now();
 
         let task_id = TaskId::generate();
-        let mut task = Task::new(task_id, title, Timestamp::now())
-            .with_priority(priority);
+        let mut task = Task::new(task_id, title, Timestamp::now()).with_priority(priority);
 
         if let Some(desc) = description {
             task = task.with_description(desc);
@@ -658,14 +671,20 @@ pub async fn batch_process_async(
     if request.task_ids.len() > 50 {
         return Err(ApiErrorResponse::validation_error(
             "Validation failed",
-            vec![FieldError::new("task_ids", "task_ids list cannot exceed 50 items")],
+            vec![FieldError::new(
+                "task_ids",
+                "task_ids list cannot exceed 50 items",
+            )],
         ));
     }
 
     if request.processing_steps.is_empty() {
         return Err(ApiErrorResponse::validation_error(
             "Validation failed",
-            vec![FieldError::new("processing_steps", "processing_steps list cannot be empty")],
+            vec![FieldError::new(
+                "processing_steps",
+                "processing_steps list cannot be empty",
+            )],
         ));
     }
 
@@ -915,7 +934,11 @@ mod tests {
 
     #[rstest]
     fn test_normalize_title() {
-        let task = Task::new(TaskId::generate(), "  hello world  ".to_string(), Timestamp::now());
+        let task = Task::new(
+            TaskId::generate(),
+            "  hello world  ".to_string(),
+            Timestamp::now(),
+        );
         let result = normalize_title(task);
         assert_eq!(result.title, "Hello world");
     }
@@ -980,7 +1003,9 @@ mod tests {
         let transforms = vec![
             TransformType::NormalizeTitle,
             TransformType::BumpPriority,
-            TransformType::AddTag { tag: "processed".to_string() },
+            TransformType::AddTag {
+                tag: "processed".to_string(),
+            },
         ];
         let result = apply_transforms(task, &transforms);
         assert_eq!(result.title, "Test");
@@ -994,7 +1019,11 @@ mod tests {
 
     #[rstest]
     fn test_validate_task_success() {
-        let task = Task::new(TaskId::generate(), "Valid title".to_string(), Timestamp::now());
+        let task = Task::new(
+            TaskId::generate(),
+            "Valid title".to_string(),
+            Timestamp::now(),
+        );
         assert!(validate_task(&task).is_ok());
     }
 
@@ -1191,7 +1220,11 @@ mod tests {
 
     #[rstest]
     fn test_validate_task_pipeline_success() {
-        let task = Task::new(TaskId::generate(), "Valid title".to_string(), Timestamp::now());
+        let task = Task::new(
+            TaskId::generate(),
+            "Valid title".to_string(),
+            Timestamp::now(),
+        );
         assert!(validate_task_pipeline(&task).is_ok());
     }
 
@@ -1301,7 +1334,7 @@ mod tests {
     #[rstest]
     fn test_batch_fetch_result_found() {
         let task = Task::new(TaskId::generate(), "Test".to_string(), Timestamp::now());
-        let result = BatchFetchResult::Found(task.clone());
+        let result = BatchFetchResult::Found(task);
         assert!(matches!(result, BatchFetchResult::Found(_)));
     }
 

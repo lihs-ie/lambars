@@ -5,6 +5,7 @@
 pub mod advanced;
 pub mod alternative;
 pub mod async_pipeline;
+pub mod bifunctor;
 pub mod bulk;
 pub mod dto;
 pub mod effects;
@@ -25,6 +26,10 @@ pub use alternative::{
 };
 pub use async_pipeline::{
     batch_process_async, conditional_pipeline, transform_async, workflow_async,
+};
+pub use bifunctor::{
+    batch_transform_results, convert_error_domain, enrich_error, process_with_error_transform,
+    transform_pair,
 };
 pub use bulk::{bulk_create_tasks, bulk_update_tasks};
 pub use dto::{CreateTaskRequest, TaskResponse, UpdateTaskRequest};

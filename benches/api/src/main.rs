@@ -26,15 +26,17 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use task_management_benchmark_api::api::{
     AppState, add_subtask, add_tag, aggregate_sources, aggregate_tree, async_pipeline,
-    batch_process_async, bulk_create_tasks, bulk_update_tasks, collect_optional,
-    conditional_pipeline, count_by_priority, create_project_handler, create_task, create_task_eff,
-    enrich_batch, execute_sequential, execute_state_workflow, execute_workflow, fetch_batch,
-    filter_conditional, first_available, flatten_demo, flatten_subtasks, functor_mut_demo,
-    get_project_handler, get_project_progress_handler, get_project_stats_handler, get_task_history,
-    health_check, identity_demo, lazy_compute, list_tasks, monad_error_demo, monad_transformers,
-    projects_leaderboard, resolve_config, resolve_dependencies, search_fallback, search_tasks,
-    tasks_by_deadline, tasks_timeline, transform_async, transform_task, update_status, update_task,
-    update_with_optics, validate_batch, workflow_async,
+    batch_process_async, batch_transform_results, bulk_create_tasks, bulk_update_tasks,
+    collect_optional, conditional_pipeline, convert_error_domain, count_by_priority,
+    create_project_handler, create_task, create_task_eff, enrich_batch, enrich_error,
+    execute_sequential, execute_state_workflow, execute_workflow, fetch_batch, filter_conditional,
+    first_available, flatten_demo, flatten_subtasks, functor_mut_demo, get_project_handler,
+    get_project_progress_handler, get_project_stats_handler, get_task_history, health_check,
+    identity_demo, lazy_compute, list_tasks, monad_error_demo, monad_transformers,
+    process_with_error_transform, projects_leaderboard, resolve_config, resolve_dependencies,
+    search_fallback, search_tasks, tasks_by_deadline, tasks_timeline, transform_async,
+    transform_pair, transform_task, update_status, update_task, update_with_optics, validate_batch,
+    workflow_async,
 };
 use task_management_benchmark_api::infrastructure::{RepositoryConfig, RepositoryFactory};
 
@@ -155,7 +157,22 @@ async fn main() {
         .route("/tasks/{id}/transform-async", post(transform_async))
         .route("/tasks/workflow-async", post(workflow_async))
         .route("/tasks/batch-process-async", post(batch_process_async))
-        .route("/tasks/{id}/conditional-pipeline", post(conditional_pipeline))
+        .route(
+            "/tasks/{id}/conditional-pipeline",
+            post(conditional_pipeline),
+        )
+        // Bifunctor operations (two-parameter type transformations)
+        .route(
+            "/tasks/process-with-error-transform",
+            post(process_with_error_transform),
+        )
+        .route("/tasks/transform-pair", post(transform_pair))
+        .route("/tasks/enrich-error", post(enrich_error))
+        .route("/tasks/convert-error-domain", post(convert_error_domain))
+        .route(
+            "/tasks/batch-transform-results",
+            post(batch_transform_results),
+        )
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(application_state);
