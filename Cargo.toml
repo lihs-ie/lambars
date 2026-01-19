@@ -16,10 +16,9 @@ tokio = { version = "^1.49", features = ["rt", "rt-multi-thread", "time", "sync"
 futures = { version = "^0.3", optional = true }
 serde = { version = "1.0", features = ["derive"], optional = true }
 rayon = { version = "1.10", optional = true }
-smallvec = { version = "1.13", optional = true }
+smallvec = { version = "1.13", optional = true, features = ["const_generics"] }
 paste = "1.0"
 static_assertions = "1.1"
-smallvec = { version = "1.13", features = ["const_generics"] }
 
 [dev-dependencies]
 rstest = "^0.26"
