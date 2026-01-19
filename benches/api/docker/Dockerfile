@@ -51,9 +51,10 @@ COPY lambars-derive/src/ lambars-derive/src/
 COPY benches/api/src/ benches/api/src/
 
 # Build the binary with cargo registry cache
+# Use CARGO_TARGET_DIR to ensure consistent output location
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    cargo build --release \
+    CARGO_TARGET_DIR=/build/target cargo build --release \
     --manifest-path benches/api/Cargo.toml \
     --bin task-management-benchmark-api
 
