@@ -75,6 +75,13 @@ use crate::control::Either;
 ///
 /// - `A`: The type of the value produced by the async IO action.
 ///
+/// # Variants
+///
+/// - `Pure(A)` - A pure value that requires no computation. This variant avoids
+///   Box allocation for pure values.
+/// - `Deferred(...)` - A deferred async computation. This is the traditional lazy
+///   evaluation path.
+///
 /// # Monad Laws
 ///
 /// `AsyncIO` satisfies the monad laws:
@@ -95,9 +102,14 @@ use crate::control::Either;
 ///     assert_eq!(result, 42);
 /// }
 /// ```
-pub struct AsyncIO<A> {
-    /// The wrapped async computation that produces a value of type `A`.
-    run_async_io: Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = A> + Send>> + Send>,
+pub enum AsyncIO<A> {
+    /// A pure value that requires no computation.
+    /// This variant avoids Box allocation for pure values.
+    Pure(A),
+
+    /// A deferred async computation.
+    /// This is the traditional lazy evaluation path.
+    Deferred(Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = A> + Send>> + Send>),
 }
 
 // =============================================================================
@@ -108,6 +120,7 @@ impl<A: 'static> AsyncIO<A> {
     /// Creates a new `AsyncIO` action from an async closure.
     ///
     /// The closure will not be executed until `run_async` is called.
+    /// This creates a `Deferred` variant.
     ///
     /// # Arguments
     ///
@@ -134,14 +147,13 @@ impl<A: 'static> AsyncIO<A> {
         F: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = A> + Send + 'static,
     {
-        Self {
-            run_async_io: Box::new(move || Box::pin(action())),
-        }
+        Self::Deferred(Box::new(move || Box::pin(action())))
     }
 
     /// Creates an `AsyncIO` from an existing Future.
     ///
     /// The Future should not have been polled yet.
+    /// This creates a `Deferred` variant.
     ///
     /// # Arguments
     ///
@@ -160,9 +172,7 @@ impl<A: 'static> AsyncIO<A> {
     where
         Fut: Future<Output = A> + Send + 'static,
     {
-        Self {
-            run_async_io: Box::new(move || Box::pin(future)),
-        }
+        Self::Deferred(Box::new(move || Box::pin(future)))
     }
 }
 
@@ -170,7 +180,7 @@ impl<A: Send + 'static> AsyncIO<A> {
     /// Wraps a pure value in an `AsyncIO` action.
     ///
     /// This creates an `AsyncIO` action that returns the given value without
-    /// performing any side effects.
+    /// performing any side effects. Uses the `Pure` variant to avoid Box allocation.
     ///
     /// # Arguments
     ///
@@ -184,11 +194,10 @@ impl<A: Send + 'static> AsyncIO<A> {
     /// let async_io = AsyncIO::pure(42);
     /// // run_async().await will immediately return 42
     /// ```
-    #[inline]
-    pub fn pure(value: A) -> Self {
-        Self {
-            run_async_io: Box::new(move || Box::pin(async move { value })),
-        }
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
+    pub const fn pure(value: A) -> Self {
+        Self::Pure(value)
     }
 }
 
@@ -202,6 +211,10 @@ impl<A: 'static> AsyncIO<A> {
     /// This is the only way to extract a value from an `AsyncIO` action.
     /// It should be called at the program's "edge" (e.g., in async handlers
     /// or the main function).
+    ///
+    /// For `Pure` variants, the value is returned immediately without any
+    /// Future polling. For `Deferred` variants, the thunk is executed and
+    /// the resulting Future is awaited.
     ///
     /// # Safety Note
     ///
@@ -220,9 +233,13 @@ impl<A: 'static> AsyncIO<A> {
     ///     assert_eq!(result, 42);
     /// }
     /// ```
-    #[inline]
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     pub async fn run_async(self) -> A {
-        (self.run_async_io)().await
+        match self {
+            Self::Pure(value) => value,
+            Self::Deferred(thunk) => thunk().await,
+        }
     }
 
     /// Converts the `AsyncIO` into a Future.
@@ -251,10 +268,14 @@ impl<A: 'static> AsyncIO<A> {
 // Functor Operations
 // =============================================================================
 
-impl<A: 'static> AsyncIO<A> {
+impl<A: Send + 'static> AsyncIO<A> {
     /// Transforms the result of an `AsyncIO` action using a function.
     ///
     /// This is the `fmap` operation from Functor.
+    ///
+    /// Note: To maintain lazy evaluation semantics, even `Pure` values are
+    /// wrapped in `Deferred`. The function is not applied until `run_async`
+    /// is called.
     ///
     /// # Arguments
     ///
@@ -279,10 +300,15 @@ impl<A: 'static> AsyncIO<A> {
         F: FnOnce(A) -> B + Send + 'static,
         B: 'static,
     {
-        AsyncIO::new(move || async move {
-            let value = self.run_async().await;
-            function(value)
-        })
+        match self {
+            Self::Pure(value) => {
+                // Maintain lazy evaluation - wrap in Deferred
+                AsyncIO::Deferred(Box::new(move || Box::pin(async move { function(value) })))
+            }
+            Self::Deferred(thunk) => AsyncIO::Deferred(Box::new(move || {
+                Box::pin(async move { function(thunk().await) })
+            })),
+        }
     }
 }
 
@@ -290,7 +316,7 @@ impl<A: 'static> AsyncIO<A> {
 // Applicative Operations
 // =============================================================================
 
-impl<A: 'static> AsyncIO<A> {
+impl<A: Send + 'static> AsyncIO<A> {
     /// Applies an AsyncIO-wrapped function to this `AsyncIO` value.
     ///
     /// # Arguments
@@ -355,7 +381,6 @@ impl<A: 'static> AsyncIO<A> {
     #[inline]
     pub fn map2<B, C, F>(self, other: AsyncIO<B>, function: F) -> AsyncIO<C>
     where
-        A: Send,
         F: FnOnce(A, B) -> C + Send + 'static,
         B: Send + 'static,
         C: 'static,
@@ -366,9 +391,7 @@ impl<A: 'static> AsyncIO<A> {
             function(value_a, value_b)
         })
     }
-}
 
-impl<A: Send + 'static> AsyncIO<A> {
     /// Combines two `AsyncIO` actions into a tuple.
     ///
     /// # Arguments
@@ -403,11 +426,15 @@ impl<A: Send + 'static> AsyncIO<A> {
 // Monad Operations
 // =============================================================================
 
-impl<A: 'static> AsyncIO<A> {
+impl<A: Send + 'static> AsyncIO<A> {
     /// Chains `AsyncIO` actions, passing the result of the first to a function
     /// that produces the second.
     ///
     /// This is the `bind` operation from Monad.
+    ///
+    /// Note: To maintain lazy evaluation semantics, even `Pure` values are
+    /// wrapped in `Deferred`. The function is not called until `run_async`
+    /// is called.
     ///
     /// # Arguments
     ///
@@ -430,13 +457,22 @@ impl<A: 'static> AsyncIO<A> {
     pub fn flat_map<B, F>(self, function: F) -> AsyncIO<B>
     where
         F: FnOnce(A) -> AsyncIO<B> + Send + 'static,
-        B: 'static,
+        B: Send + 'static,
     {
-        AsyncIO::new(move || async move {
-            let value_a = self.run_async().await;
-            let async_io_b = function(value_a);
-            async_io_b.run_async().await
-        })
+        match self {
+            Self::Pure(value) => {
+                // Maintain lazy evaluation - wrap in Deferred
+                AsyncIO::Deferred(Box::new(move || {
+                    Box::pin(async move { function(value).run_async().await })
+                }))
+            }
+            Self::Deferred(thunk) => AsyncIO::Deferred(Box::new(move || {
+                Box::pin(async move {
+                    let value_a = thunk().await;
+                    function(value_a).run_async().await
+                })
+            })),
+        }
     }
 
     /// Alias for `flat_map`.
@@ -455,7 +491,7 @@ impl<A: 'static> AsyncIO<A> {
     pub fn and_then<B, F>(self, function: F) -> AsyncIO<B>
     where
         F: FnOnce(A) -> AsyncIO<B> + Send + 'static,
-        B: 'static,
+        B: Send + 'static,
     {
         self.flat_map(function)
     }
@@ -484,7 +520,7 @@ impl<A: 'static> AsyncIO<A> {
     #[must_use]
     pub fn then<B>(self, next: AsyncIO<B>) -> AsyncIO<B>
     where
-        B: 'static,
+        B: Send + 'static,
     {
         self.flat_map(move |_| next)
     }

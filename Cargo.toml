@@ -118,6 +118,11 @@ name = "alternative_bench"
 harness = false
 required-features = ["typeclass"]
 
+[[bench]]
+name = "eff_async_macro_bench"
+harness = false
+required-features = ["async"]
+
 # Iai-Callgrind benchmarks
 [[bench]]
 name = "persistent_vector_iai"
