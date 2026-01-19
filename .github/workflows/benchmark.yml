@@ -79,7 +79,7 @@ jobs:
           retention-days: 90
 
       - name: Upload to Bencher
-        uses: bencherdev/bencher@v0.4.20
+        uses: bencherdev/bencher@v0.5.10
         continue-on-error: true
         with:
           command: bencher run
