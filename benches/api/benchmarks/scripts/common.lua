@@ -89,19 +89,27 @@ function M.track_response(status)
 end
 
 -- Print status summary (call from done())
-function M.print_summary(script_name)
+-- NOTE: wrk runs multiple threads with separate Lua interpreters.
+-- The response() callback runs in worker threads, but done() runs in main thread.
+-- Therefore, M.total_requests counted in response() is NOT available in done().
+-- Use the summary parameter provided by wrk instead.
+function M.print_summary(script_name, summary)
     io.write("\n--- " .. script_name .. " Status Summary ---\n")
-    io.write(string.format("Total requests: %d\n", M.total_requests))
-    for status, count in pairs(M.status_counts) do
-        if count > 0 then
-            local pct = (count / M.total_requests) * 100
-            io.write(string.format("  %s: %d (%.1f%%)\n", tostring(status), count, pct))
-        end
+
+    -- Use wrk's summary for accurate counts (thread-safe)
+    local total = summary and summary.requests or M.total_requests
+    local errors = summary and (summary.errors.connect + summary.errors.read +
+                                summary.errors.write + summary.errors.timeout +
+                                summary.errors.status) or 0
+
+    io.write(string.format("Total requests: %d\n", total))
+
+    if total > 0 then
+        local error_rate = (errors / total) * 100
+        io.write(string.format("Errors: %d (%.1f%%)\n", errors, error_rate))
+    else
+        io.write("Errors: 0 (0.0%)\n")
     end
-    local error_count = M.status_counts[400] + M.status_counts[404] +
-                        M.status_counts[422] + M.status_counts[500] + M.status_counts.other
-    local error_rate = (error_count / M.total_requests) * 100
-    io.write(string.format("Error rate: %.1f%%\n", error_rate))
 end
 
 -- Initialize random seed (with optional SEED environment variable for reproducibility)

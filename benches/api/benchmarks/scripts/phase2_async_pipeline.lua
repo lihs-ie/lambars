@@ -83,5 +83,5 @@ function response(status, headers, body)
 end
 
 function done(summary, latency, requests)
-    common.print_summary("phase2_async_pipeline")
+    common.print_summary("phase2_async_pipeline", summary)
 end

@@ -86,5 +86,5 @@ function response(status, headers, body)
 end
 
 function done(summary, latency, requests)
-    common.print_summary("phase2_alternative")
+    common.print_summary("phase2_alternative", summary)
 end

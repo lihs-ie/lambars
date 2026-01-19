@@ -65,5 +65,5 @@ function response(status, headers, body)
 end
 
 function done(summary, latency, requests)
-    common.print_summary("phase2_recursive")
+    common.print_summary("phase2_recursive", summary)
 end
