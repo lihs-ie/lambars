@@ -1,5 +1,5 @@
--- Phase 2.10: Misc (partial!, ConcurrentLazy, PersistentDeque, Sum/Product, Freer) benchmarks
--- benches/api/benchmarks/scripts/phase2_misc.lua
+-- Misc (partial!, ConcurrentLazy, PersistentDeque, Sum/Product, Freer) benchmarks
+-- benches/api/benchmarks/scripts/misc.lua
 --
 -- Endpoints:
 --   POST /tasks/partial-apply
@@ -104,5 +104,5 @@ function response(status, headers, body)
 end
 
 function done(summary, latency, requests)
-    common.print_summary("phase2_misc", summary)
+    common.print_summary("misc", summary)
 end

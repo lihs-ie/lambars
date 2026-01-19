@@ -1,5 +1,5 @@
--- Phase 2.3: PersistentTreeMap (Ordered data operations) benchmarks
--- benches/api/benchmarks/scripts/phase2_ordered.lua
+-- PersistentTreeMap (Ordered data operations) benchmarks
+-- benches/api/benchmarks/scripts/ordered.lua
 --
 -- Endpoints:
 --   GET /tasks/by-deadline
@@ -63,5 +63,5 @@ function response(status, headers, body)
 end
 
 function done(summary, latency, requests)
-    common.print_summary("phase2_ordered", summary)
+    common.print_summary("ordered", summary)
 end

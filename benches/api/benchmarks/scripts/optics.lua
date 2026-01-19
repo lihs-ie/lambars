@@ -1,5 +1,5 @@
--- Phase 2.9: Advanced Optics (Traversal, At, Filtered) benchmarks
--- benches/api/benchmarks/scripts/phase2_optics.lua
+-- Advanced Optics (Traversal, At, Filtered) benchmarks
+-- benches/api/benchmarks/scripts/optics.lua
 --
 -- Endpoints:
 --   PUT  /tasks/batch-update-field
@@ -106,5 +106,5 @@ function response(status, headers, body)
 end
 
 function done(summary, latency, requests)
-    common.print_summary("phase2_optics", summary)
+    common.print_summary("optics", summary)
 end

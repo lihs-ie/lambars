@@ -1,5 +1,5 @@
--- Phase 2.8: Applicative (Independent computation combining) benchmarks
--- benches/api/benchmarks/scripts/phase2_applicative.lua
+-- Applicative (Independent computation combining) benchmarks
+-- benches/api/benchmarks/scripts/applicative.lua
 --
 -- Endpoints:
 --   POST /tasks/validate-collect-all
@@ -84,5 +84,5 @@ function response(status, headers, body)
 end
 
 function done(summary, latency, requests)
-    common.print_summary("phase2_applicative", summary)
+    common.print_summary("applicative", summary)
 end

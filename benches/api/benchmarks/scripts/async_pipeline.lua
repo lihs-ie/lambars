@@ -1,5 +1,5 @@
--- Phase 2.6: pipe_async! (Async pipeline) benchmarks
--- benches/api/benchmarks/scripts/phase2_async_pipeline.lua
+-- pipe_async! (Async pipeline) benchmarks
+-- benches/api/benchmarks/scripts/async_pipeline.lua
 --
 -- Endpoints:
 --   POST /tasks/{id}/transform-async
@@ -83,5 +83,5 @@ function response(status, headers, body)
 end
 
 function done(summary, latency, requests)
-    common.print_summary("phase2_async_pipeline", summary)
+    common.print_summary("async_pipeline", summary)
 end

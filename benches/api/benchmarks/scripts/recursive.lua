@@ -1,5 +1,5 @@
--- Phase 2.2: Trampoline (Stack-safe recursion) benchmarks
--- benches/api/benchmarks/scripts/phase2_recursive.lua
+-- Trampoline (Stack-safe recursion) benchmarks
+-- benches/api/benchmarks/scripts/recursive.lua
 --
 -- Endpoints:
 --   GET  /tasks/{id}/flatten-subtasks
@@ -65,5 +65,5 @@ function response(status, headers, body)
 end
 
 function done(summary, latency, requests)
-    common.print_summary("phase2_recursive", summary)
+    common.print_summary("recursive", summary)
 end

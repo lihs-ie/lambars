@@ -1,5 +1,5 @@
--- Phase 2.7: Bifunctor (Two-parameter type transformations) benchmarks
--- benches/api/benchmarks/scripts/phase2_bifunctor.lua
+-- Bifunctor (Two-parameter type transformations) benchmarks
+-- benches/api/benchmarks/scripts/bifunctor.lua
 --
 -- Endpoints:
 --   POST /tasks/process-with-error-transform
@@ -101,5 +101,5 @@ function response(status, headers, body)
 end
 
 function done(summary, latency, requests)
-    common.print_summary("phase2_bifunctor", summary)
+    common.print_summary("bifunctor", summary)
 end

@@ -1,5 +1,5 @@
--- Phase 2.5: Alternative (Fallback and choice) benchmarks
--- benches/api/benchmarks/scripts/phase2_alternative.lua
+-- Alternative (Fallback and choice) benchmarks
+-- benches/api/benchmarks/scripts/alternative.lua
 --
 -- Endpoints:
 --   GET  /tasks/search-fallback
@@ -86,5 +86,5 @@ function response(status, headers, body)
 end
 
 function done(summary, latency, requests)
-    common.print_summary("phase2_alternative", summary)
+    common.print_summary("alternative", summary)
 end

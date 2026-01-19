@@ -1,11 +1,11 @@
 #!/bin/bash
 # benches/api/benchmarks/run_benchmark.sh
 #
-# Run wrk benchmarks for Phase 2 API endpoints
+# Run wrk benchmarks for API endpoints
 #
 # Usage:
 #   ./run_benchmark.sh                    # Run all benchmarks
-#   ./run_benchmark.sh phase2_misc        # Run specific benchmark
+#   ./run_benchmark.sh misc               # Run specific benchmark
 #   ./run_benchmark.sh --quick            # Quick test (5s duration)
 
 set -euo pipefail
@@ -43,7 +43,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 echo "=============================================="
-echo "  API Workload Benchmark - Phase 2 Endpoints"
+echo "  API Workload Benchmark"
 echo "=============================================="
 echo ""
 echo "Configuration:"
@@ -131,15 +131,15 @@ if [[ -n "${SPECIFIC_SCRIPT}" ]]; then
     SCRIPTS=("${SPECIFIC_SCRIPT}")
 else
     SCRIPTS=(
-        "phase2_recursive"
-        "phase2_ordered"
-        "phase2_traversable"
-        "phase2_alternative"
-        "phase2_async_pipeline"
-        "phase2_bifunctor"
-        "phase2_applicative"
-        "phase2_optics"
-        "phase2_misc"
+        "recursive"
+        "ordered"
+        "traversable"
+        "alternative"
+        "async_pipeline"
+        "bifunctor"
+        "applicative"
+        "optics"
+        "misc"
     )
 fi
 

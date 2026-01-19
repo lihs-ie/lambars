@@ -1,5 +1,5 @@
--- Phase 2.4: Traversable (Batch processing) benchmarks
--- benches/api/benchmarks/scripts/phase2_traversable.lua
+-- Traversable (Batch processing) benchmarks
+-- benches/api/benchmarks/scripts/traversable.lua
 --
 -- Endpoints:
 --   POST /tasks/validate-batch
@@ -81,5 +81,5 @@ function response(status, headers, body)
 end
 
 function done(summary, latency, requests)
-    common.print_summary("phase2_traversable", summary)
+    common.print_summary("traversable", summary)
 end
