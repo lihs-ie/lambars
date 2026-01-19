@@ -101,10 +101,6 @@ impl<K, V> BTreeNode<K, V> {
         }
     }
 
-    /// プレースホルダー用の空ノード
-    ///
-    /// Copy-on-Writeパターンで子ノードを一時的に取り出す際に使用する。
-    /// この関数は`take_or_clone_child`でのみ使用される。
     fn empty_placeholder() -> Self {
         Self::Leaf {
             entries: SmallVec::new(),
@@ -113,45 +109,30 @@ impl<K, V> BTreeNode<K, V> {
 }
 
 impl<K: Clone, V: Clone> BTreeNode<K, V> {
-    /// Copy-on-Writeパターンで子ノードを取得する。
-    ///
-    /// 参照カウントが1の場合は所有権を取得し、そうでなければクローンする。
-    ///
-    /// # 重要
-    ///
-    /// この関数は`self`を消費するメソッド内でのみ使用する:
-    /// - `insert(self, ...)` -> OK
-    /// - `remove(self, ...)` -> OK
-    /// - `get(&self, ...)` -> 使用禁止
-    ///
-    /// # Arguments
-    ///
-    /// * `children` - 子ノードの配列（所有権を持つ）
-    /// * `index` - 取得する子ノードのインデックス
-    ///
-    /// # Returns
-    ///
-    /// 取得した子ノード（所有権を移動またはクローン）
     fn take_or_clone_child(children: &mut ChildArray<K, V>, index: usize) -> Self {
-        // 配列から取り出し（所有権を移動）
-        // 一時的に空のプレースホルダーを入れる
         let reference = std::mem::replace(
             &mut children[index],
             ReferenceCounter::new(Self::empty_placeholder()),
         );
 
-        // try_unwrapで所有権取得を試みる
         match ReferenceCounter::try_unwrap(reference) {
-            Ok(node) => {
-                // 唯一の参照だったので所有権を取得
-                // 処理後に新しいノードがchildren[index]に入る
-                node
-            }
+            Ok(node) => node,
             Err(reference_counter) => {
-                // 他に参照があるのでクローン
                 let cloned = (*reference_counter).clone();
-                // 元の参照を戻す（構造共有を維持）
                 children[index] = reference_counter;
+                cloned
+            }
+        }
+    }
+
+    fn take_or_clone_child_ref(child_ref: &mut ReferenceCounter<Self>) -> Self {
+        let placeholder = ReferenceCounter::new(Self::empty_placeholder());
+        let reference = std::mem::replace(child_ref, placeholder);
+        match ReferenceCounter::try_unwrap(reference) {
+            Ok(node) => node,
+            Err(reference_counter) => {
+                let cloned = (*reference_counter).clone();
+                *child_ref = reference_counter;
                 cloned
             }
         }
@@ -241,7 +222,6 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
                     }
                 }
                 Err(index) => {
-                    // CoWパターン: 参照カウント==1なら所有権を取得、そうでなければクローン
                     let child = Self::take_or_clone_child(&mut children, index);
                     match child.insert(key, value) {
                         InsertResult::Done { node, added } => {
@@ -278,7 +258,6 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
 
     fn split_leaf(mut entries: EntryArray<K, V>) -> InsertResult<K, V> {
         let mid = entries.len() / 2;
-        // SmallVecにはsplit_offがないためdrainを使用
         let right_entries: EntryArray<K, V> = entries.drain(mid + 1..).collect();
         let median = entries.pop().unwrap();
 
@@ -298,7 +277,6 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
         added: bool,
     ) -> InsertResult<K, V> {
         let mid = entries.len() / 2;
-        // SmallVecにはsplit_offがないためdrainを使用
         let right_entries: EntryArray<K, V> = entries.drain(mid + 1..).collect();
         let median = entries.pop().unwrap();
         let right_children: ChildArray<K, V> = children.split_off(mid + 1);
@@ -380,19 +358,12 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
                         Self::remove_max_from_child(&mut children[index]);
                     let old_value = std::mem::replace(&mut entries[index], replacement).1;
 
-                    // Handle underflow/empty from remove_max_from_child
                     match max_result {
                         RemoveMaxResult::Done => {
                             Self::rebalance_after_remove(entries, children, old_value)
                         }
                         RemoveMaxResult::Empty => {
-                            // In a valid B-Tree, non-root nodes have at least MIN_KEYS entries.
-                            // Removing one entry leaves MIN_KEYS - 1 entries, which is never empty.
-                            // Since remove_max_from_child operates on child nodes (not root),
-                            // Empty should never occur in a properly maintained B-Tree.
-                            unreachable!(
-                                "RemoveMaxResult::Empty should not occur for non-root nodes in a valid B-Tree"
-                            )
+                            unreachable!("Empty should not occur for non-root nodes")
                         }
                         RemoveMaxResult::Underflow(underflowed) => {
                             children[index] = ReferenceCounter::new(underflowed);
@@ -401,7 +372,6 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
                     }
                 }
                 Err(index) => {
-                    // CoWパターン: 参照カウント==1なら所有権を取得、そうでなければクローン
                     let child = Self::take_or_clone_child(&mut children, index);
                     match child.remove(key) {
                         RemoveResult::NotFound => RemoveResult::NotFound,
@@ -458,35 +428,20 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
         }
     }
 
-    /// Removes the maximum entry from the subtree rooted at `child_ref`.
-    /// Returns the removed (key, value) pair and the result of the removal.
     fn remove_max_from_child(
         child_ref: &mut ReferenceCounter<Self>,
     ) -> ((K, V), RemoveMaxResult<K, V>) {
-        // CoWパターン: 参照カウント==1なら所有権を取得、そうでなければクローン
-        let placeholder = ReferenceCounter::new(Self::empty_placeholder());
-        let reference = std::mem::replace(child_ref, placeholder);
-        let child = match ReferenceCounter::try_unwrap(reference) {
-            Ok(node) => node,
-            Err(reference_counter) => {
-                let cloned = (*reference_counter).clone();
-                *child_ref = reference_counter;
-                cloned
-            }
-        };
+        let child = Self::take_or_clone_child_ref(child_ref);
         match child {
             Self::Leaf { mut entries } => {
                 let (max_key, max_value) = entries.pop().unwrap();
                 if entries.is_empty() {
-                    // Leaf became empty
                     ((max_key, max_value), RemoveMaxResult::Empty)
                 } else if entries.len() < MIN_KEYS {
-                    // Leaf is underflowed
                     let node = Self::Leaf { entries };
                     *child_ref = ReferenceCounter::new(node.clone());
                     ((max_key, max_value), RemoveMaxResult::Underflow(node))
                 } else {
-                    // Normal case
                     *child_ref = ReferenceCounter::new(Self::Leaf { entries });
                     ((max_key, max_value), RemoveMaxResult::Done)
                 }
@@ -499,24 +454,16 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
                 let (replacement, result) =
                     Self::remove_max_from_child(children.last_mut().unwrap());
 
-                // Handle underflow/empty in the rightmost child
                 match result {
                     RemoveMaxResult::Done => {
                         *child_ref = ReferenceCounter::new(Self::Internal { entries, children });
                         (replacement, RemoveMaxResult::Done)
                     }
                     RemoveMaxResult::Empty => {
-                        // In a valid B-Tree, non-root nodes have at least MIN_KEYS entries.
-                        // Removing one entry leaves MIN_KEYS - 1 entries, which is never empty.
-                        // This recursive call operates on child nodes (not root),
-                        // so Empty should never occur in a properly maintained B-Tree.
-                        unreachable!(
-                            "RemoveMaxResult::Empty should not occur for non-root nodes in a valid B-Tree"
-                        )
+                        unreachable!("Empty should not occur for non-root nodes")
                     }
                     RemoveMaxResult::Underflow(underflowed_node) => {
                         children[last_child_index] = ReferenceCounter::new(underflowed_node);
-                        // Apply underflow handling to the last child
                         let result = Self::handle_underflow_for_remove_max(
                             entries,
                             children,
@@ -539,22 +486,17 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
         }
     }
 
-    /// Handle underflow specifically for `remove_max_from_child`.
-    /// This is similar to `handle_underflow` but we don't have a `removed_value` to propagate.
     fn handle_underflow_for_remove_max(
         entries: EntryArray<K, V>,
         children: ChildArray<K, V>,
         index: usize,
     ) -> UnderflowHandleResult<K, V> {
-        // Check if we can borrow from left sibling
         if index > 0 && children[index - 1].entry_count() > MIN_KEYS {
             return Self::borrow_from_left_no_value(entries, children, index);
         }
-        // Check if we can borrow from right sibling
         if index < children.len() - 1 && children[index + 1].entry_count() > MIN_KEYS {
             return Self::borrow_from_right_no_value(entries, children, index);
         }
-        // Must merge
         if index > 0 {
             Self::merge_with_left_no_value(entries, children, index)
         } else {
@@ -563,11 +505,67 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
     }
 
     fn borrow_from_left_no_value(
+        entries: EntryArray<K, V>,
+        children: ChildArray<K, V>,
+        index: usize,
+    ) -> UnderflowHandleResult<K, V> {
+        let node = Self::borrow_from_left_core(entries, children, index);
+        Self::make_underflow_result(Some(node))
+    }
+
+    fn borrow_from_right_no_value(
+        entries: EntryArray<K, V>,
+        children: ChildArray<K, V>,
+        index: usize,
+    ) -> UnderflowHandleResult<K, V> {
+        let node = Self::borrow_from_right_core(entries, children, index);
+        Self::make_underflow_result(Some(node))
+    }
+
+    fn merge_with_left_no_value(
+        entries: EntryArray<K, V>,
+        children: ChildArray<K, V>,
+        index: usize,
+    ) -> UnderflowHandleResult<K, V> {
+        Self::finalize_merge_core(Self::merge_with_left_core(entries, children, index))
+    }
+
+    fn merge_with_right_no_value(
+        entries: EntryArray<K, V>,
+        children: ChildArray<K, V>,
+        index: usize,
+    ) -> UnderflowHandleResult<K, V> {
+        Self::finalize_merge_core(Self::merge_with_right_core(entries, children, index))
+    }
+
+    fn finalize_merge_core(
+        (entries, children): (EntryArray<K, V>, ChildArray<K, V>),
+    ) -> UnderflowHandleResult<K, V> {
+        if entries.is_empty() {
+            children
+                .into_iter()
+                .next()
+                .map_or(UnderflowHandleResult::Empty, |child| {
+                    Self::make_underflow_result(Some((*child).clone()))
+                })
+        } else {
+            Self::make_underflow_result(Some(Self::Internal { entries, children }))
+        }
+    }
+
+    fn make_underflow_result(node: Option<Self>) -> UnderflowHandleResult<K, V> {
+        match node {
+            Some(n) if n.entry_count() < MIN_KEYS => UnderflowHandleResult::Underflow(n),
+            Some(n) => UnderflowHandleResult::Done(n),
+            None => UnderflowHandleResult::Empty,
+        }
+    }
+
+    fn borrow_from_left_core(
         mut entries: EntryArray<K, V>,
         mut children: ChildArray<K, V>,
         index: usize,
-    ) -> UnderflowHandleResult<K, V> {
-        // CoWパターン: 参照カウント==1なら所有権を取得、そうでなければクローン
+    ) -> Self {
         let left = Self::take_or_clone_child(&mut children, index - 1);
         let current = Self::take_or_clone_child(&mut children, index);
 
@@ -590,8 +588,7 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
                 children[index] = ReferenceCounter::new(Self::Leaf {
                     entries: current_entries,
                 });
-
-                Self::make_underflow_result(Some(Self::Internal { entries, children }))
+                Self::Internal { entries, children }
             }
             (
                 Self::Internal {
@@ -618,19 +615,17 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
                     entries: current_entries,
                     children: current_children,
                 });
-
-                Self::make_underflow_result(Some(Self::Internal { entries, children }))
+                Self::Internal { entries, children }
             }
             _ => unreachable!("Sibling nodes must be of the same type"),
         }
     }
 
-    fn borrow_from_right_no_value(
+    fn borrow_from_right_core(
         mut entries: EntryArray<K, V>,
         mut children: ChildArray<K, V>,
         index: usize,
-    ) -> UnderflowHandleResult<K, V> {
-        // CoWパターン: 参照カウント==1なら所有権を取得、そうでなければクローン
+    ) -> Self {
         let current = Self::take_or_clone_child(&mut children, index);
         let right = Self::take_or_clone_child(&mut children, index + 1);
 
@@ -653,8 +648,7 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
                 children[index + 1] = ReferenceCounter::new(Self::Leaf {
                     entries: right_entries,
                 });
-
-                Self::make_underflow_result(Some(Self::Internal { entries, children }))
+                Self::Internal { entries, children }
             }
             (
                 Self::Internal {
@@ -681,19 +675,17 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
                     entries: right_entries,
                     children: right_children,
                 });
-
-                Self::make_underflow_result(Some(Self::Internal { entries, children }))
+                Self::Internal { entries, children }
             }
             _ => unreachable!("Sibling nodes must be of the same type"),
         }
     }
 
-    fn merge_with_left_no_value(
+    fn merge_with_left_core(
         mut entries: EntryArray<K, V>,
         mut children: ChildArray<K, V>,
         index: usize,
-    ) -> UnderflowHandleResult<K, V> {
-        // CoWパターン: 参照カウント==1なら所有権を取得、そうでなければクローン
+    ) -> (EntryArray<K, V>, ChildArray<K, V>) {
         let left = Self::take_or_clone_child(&mut children, index - 1);
         let current = Self::take_or_clone_child(&mut children, index);
         let separator = entries.remove(index - 1);
@@ -701,16 +693,14 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
 
         children.remove(index);
         children[index - 1] = ReferenceCounter::new(merged);
-
-        Self::finalize_merge_no_value(entries, children)
+        (entries, children)
     }
 
-    fn merge_with_right_no_value(
+    fn merge_with_right_core(
         mut entries: EntryArray<K, V>,
         mut children: ChildArray<K, V>,
         index: usize,
-    ) -> UnderflowHandleResult<K, V> {
-        // CoWパターン: 参照カウント==1なら所有権を取得、そうでなければクローン
+    ) -> (EntryArray<K, V>, ChildArray<K, V>) {
         let current = Self::take_or_clone_child(&mut children, index);
         let right = Self::take_or_clone_child(&mut children, index + 1);
         let separator = entries.remove(index);
@@ -718,34 +708,7 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
 
         children.remove(index + 1);
         children[index] = ReferenceCounter::new(merged);
-
-        Self::finalize_merge_no_value(entries, children)
-    }
-
-    fn finalize_merge_no_value(
-        entries: EntryArray<K, V>,
-        children: ChildArray<K, V>,
-    ) -> UnderflowHandleResult<K, V> {
-        if entries.is_empty() {
-            children
-                .into_iter()
-                .next()
-                .map_or(UnderflowHandleResult::Empty, |child| {
-                    let node = (*child).clone();
-                    Self::make_underflow_result(Some(node))
-                })
-        } else {
-            Self::make_underflow_result(Some(Self::Internal { entries, children }))
-        }
-    }
-
-    /// Creates an `UnderflowHandleResult` based on the node's entry count.
-    fn make_underflow_result(node: Option<Self>) -> UnderflowHandleResult<K, V> {
-        match node {
-            Some(n) if n.entry_count() < MIN_KEYS => UnderflowHandleResult::Underflow(n),
-            Some(n) => UnderflowHandleResult::Done(n),
-            None => UnderflowHandleResult::Empty,
-        }
+        (entries, children)
     }
 
     fn rebalance_after_remove(
@@ -783,143 +746,28 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
     }
 
     fn borrow_from_left(
-        mut entries: EntryArray<K, V>,
-        mut children: ChildArray<K, V>,
+        entries: EntryArray<K, V>,
+        children: ChildArray<K, V>,
         index: usize,
         removed_value: V,
     ) -> RemoveResult<K, V> {
-        // CoWパターン: 参照カウント==1なら所有権を取得、そうでなければクローン
-        let left = Self::take_or_clone_child(&mut children, index - 1);
-        let current = Self::take_or_clone_child(&mut children, index);
-
-        match (left, current) {
-            (
-                Self::Leaf {
-                    entries: mut left_entries,
-                },
-                Self::Leaf {
-                    entries: mut current_entries,
-                },
-            ) => {
-                let borrowed = left_entries.pop().unwrap();
-                let separator = std::mem::replace(&mut entries[index - 1], borrowed);
-                current_entries.insert(0, separator);
-
-                children[index - 1] = ReferenceCounter::new(Self::Leaf {
-                    entries: left_entries,
-                });
-                children[index] = ReferenceCounter::new(Self::Leaf {
-                    entries: current_entries,
-                });
-
-                RemoveResult::Done {
-                    node: Some(Self::Internal { entries, children }),
-                    removed_value,
-                }
-            }
-            (
-                Self::Internal {
-                    entries: mut left_entries,
-                    children: mut left_children,
-                },
-                Self::Internal {
-                    entries: mut current_entries,
-                    children: mut current_children,
-                },
-            ) => {
-                let borrowed_entry = left_entries.pop().unwrap();
-                let borrowed_child = left_children.pop().unwrap();
-
-                let separator = std::mem::replace(&mut entries[index - 1], borrowed_entry);
-                current_entries.insert(0, separator);
-                current_children.insert(0, borrowed_child);
-
-                children[index - 1] = ReferenceCounter::new(Self::Internal {
-                    entries: left_entries,
-                    children: left_children,
-                });
-                children[index] = ReferenceCounter::new(Self::Internal {
-                    entries: current_entries,
-                    children: current_children,
-                });
-
-                RemoveResult::Done {
-                    node: Some(Self::Internal { entries, children }),
-                    removed_value,
-                }
-            }
-            _ => unreachable!("Sibling nodes must be of the same type"),
+        let node = Self::borrow_from_left_core(entries, children, index);
+        RemoveResult::Done {
+            node: Some(node),
+            removed_value,
         }
     }
 
-    /// Borrows an entry from the right sibling.
     fn borrow_from_right(
-        mut entries: EntryArray<K, V>,
-        mut children: ChildArray<K, V>,
+        entries: EntryArray<K, V>,
+        children: ChildArray<K, V>,
         index: usize,
         removed_value: V,
     ) -> RemoveResult<K, V> {
-        // CoWパターン: 参照カウント==1なら所有権を取得、そうでなければクローン
-        let current = Self::take_or_clone_child(&mut children, index);
-        let right = Self::take_or_clone_child(&mut children, index + 1);
-
-        match (current, right) {
-            (
-                Self::Leaf {
-                    entries: mut current_entries,
-                },
-                Self::Leaf {
-                    entries: mut right_entries,
-                },
-            ) => {
-                let borrowed = right_entries.remove(0);
-                let separator = std::mem::replace(&mut entries[index], borrowed);
-                current_entries.push(separator);
-
-                children[index] = ReferenceCounter::new(Self::Leaf {
-                    entries: current_entries,
-                });
-                children[index + 1] = ReferenceCounter::new(Self::Leaf {
-                    entries: right_entries,
-                });
-
-                RemoveResult::Done {
-                    node: Some(Self::Internal { entries, children }),
-                    removed_value,
-                }
-            }
-            (
-                Self::Internal {
-                    entries: mut current_entries,
-                    children: mut current_children,
-                },
-                Self::Internal {
-                    entries: mut right_entries,
-                    children: mut right_children,
-                },
-            ) => {
-                let borrowed_entry = right_entries.remove(0);
-                let borrowed_child = right_children.remove(0);
-
-                let separator = std::mem::replace(&mut entries[index], borrowed_entry);
-                current_entries.push(separator);
-                current_children.push(borrowed_child);
-
-                children[index] = ReferenceCounter::new(Self::Internal {
-                    entries: current_entries,
-                    children: current_children,
-                });
-                children[index + 1] = ReferenceCounter::new(Self::Internal {
-                    entries: right_entries,
-                    children: right_children,
-                });
-
-                RemoveResult::Done {
-                    node: Some(Self::Internal { entries, children }),
-                    removed_value,
-                }
-            }
-            _ => unreachable!("Sibling nodes must be of the same type"),
+        let node = Self::borrow_from_right_core(entries, children, index);
+        RemoveResult::Done {
+            node: Some(node),
+            removed_value,
         }
     }
 
@@ -962,8 +810,7 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
     }
 
     fn finalize_merge(
-        entries: EntryArray<K, V>,
-        children: ChildArray<K, V>,
+        (entries, children): (EntryArray<K, V>, ChildArray<K, V>),
         removed_value: V,
     ) -> RemoveResult<K, V> {
         if entries.is_empty() {
@@ -977,39 +824,27 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
     }
 
     fn merge_with_left(
-        mut entries: EntryArray<K, V>,
-        mut children: ChildArray<K, V>,
+        entries: EntryArray<K, V>,
+        children: ChildArray<K, V>,
         index: usize,
         removed_value: V,
     ) -> RemoveResult<K, V> {
-        // CoWパターン: 参照カウント==1なら所有権を取得、そうでなければクローン
-        let left = Self::take_or_clone_child(&mut children, index - 1);
-        let current = Self::take_or_clone_child(&mut children, index);
-        let separator = entries.remove(index - 1);
-        let merged = Self::merge_nodes(left, separator, current);
-
-        children.remove(index);
-        children[index - 1] = ReferenceCounter::new(merged);
-
-        Self::finalize_merge(entries, children, removed_value)
+        Self::finalize_merge(
+            Self::merge_with_left_core(entries, children, index),
+            removed_value,
+        )
     }
 
     fn merge_with_right(
-        mut entries: EntryArray<K, V>,
-        mut children: ChildArray<K, V>,
+        entries: EntryArray<K, V>,
+        children: ChildArray<K, V>,
         index: usize,
         removed_value: V,
     ) -> RemoveResult<K, V> {
-        // CoWパターン: 参照カウント==1なら所有権を取得、そうでなければクローン
-        let current = Self::take_or_clone_child(&mut children, index);
-        let right = Self::take_or_clone_child(&mut children, index + 1);
-        let separator = entries.remove(index);
-        let merged = Self::merge_nodes(current, separator, right);
-
-        children.remove(index + 1);
-        children[index] = ReferenceCounter::new(merged);
-
-        Self::finalize_merge(entries, children, removed_value)
+        Self::finalize_merge(
+            Self::merge_with_right_core(entries, children, index),
+            removed_value,
+        )
     }
 }
 
