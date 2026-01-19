@@ -1,14 +1,18 @@
+# syntax=docker/dockerfile:1.4
 # Dockerfile for Task Management Benchmark API
 #
-# Multi-stage build for optimized production image.
+# Multi-stage build with BuildKit cache optimization.
 #
 # Build stages:
-#   1. builder: Compile the Rust application
+#   1. builder: Compile the Rust application with cached dependencies
 #   2. runtime: Minimal runtime image with only the binary
 #
 # Usage:
 #   docker compose build api
 #   docker compose up -d
+#
+# For CI with GitHub Actions cache:
+#   docker buildx build --cache-from type=gha --cache-to type=gha,mode=max .
 
 # =============================================================================
 # Builder Stage
@@ -24,13 +28,39 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the entire workspace (needed for lambars dependency)
-COPY . .
+# Step 1: Copy only Cargo files for dependency caching
+COPY Cargo.toml Cargo.lock ./
+COPY lambars-derive/Cargo.toml lambars-derive/Cargo.toml
+COPY benches/api/Cargo.toml benches/api/Cargo.toml
 
-# Build the API binary in release mode
-RUN cargo build --release \
+# Step 2: Create dummy source files to build dependencies
+RUN mkdir -p src lambars-derive/src benches/api/src && \
+    echo "fn main() {}" > benches/api/src/main.rs && \
+    echo "" > src/lib.rs && \
+    echo "" > lambars-derive/src/lib.rs
+
+# Step 3: Build dependencies only with cache mount
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/build/target \
+    cargo build --release \
     --manifest-path benches/api/Cargo.toml \
-    --bin task-management-benchmark-api
+    --bin task-management-benchmark-api 2>/dev/null || true
+
+# Step 4: Remove dummy files and copy real source
+RUN rm -rf src lambars-derive/src benches/api/src
+COPY src/ src/
+COPY lambars-derive/src/ lambars-derive/src/
+COPY benches/api/src/ benches/api/src/
+
+# Step 5: Build the actual binary with cache mount
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/build/target \
+    cargo build --release \
+    --manifest-path benches/api/Cargo.toml \
+    --bin task-management-benchmark-api && \
+    cp /build/target/release/task-management-benchmark-api /tmp/app
 
 # =============================================================================
 # Runtime Stage
@@ -49,8 +79,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN useradd -m -s /bin/bash appuser
 
 # Copy the binary from builder
-# Note: target directory is relative to the manifest location
-COPY --from=builder /build/benches/api/target/release/task-management-benchmark-api /usr/local/bin/
+COPY --from=builder /tmp/app /usr/local/bin/task-management-benchmark-api
 
 # Set ownership
 RUN chown appuser:appuser /usr/local/bin/task-management-benchmark-api
