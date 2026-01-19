@@ -233,7 +233,10 @@ fn validate_title(title: &str) -> Validation<ApplicativeValidationError, String>
 
     if trimmed.len() > 200 {
         errors.push(ApplicativeValidationError::InvalidTitle {
-            reason: format!("Title exceeds maximum length of 200 (got {})", trimmed.len()),
+            reason: format!(
+                "Title exceeds maximum length of 200 (got {})",
+                trimmed.len()
+            ),
             field: "title".to_string(),
         });
     }
@@ -260,7 +263,9 @@ fn validate_priority(priority: i32) -> Validation<ApplicativeValidationError, Pr
 }
 
 /// Pure: Validates a deadline field.
-fn validate_deadline(deadline: Option<&str>) -> Validation<ApplicativeValidationError, Option<String>> {
+fn validate_deadline(
+    deadline: Option<&str>,
+) -> Validation<ApplicativeValidationError, Option<String>> {
     match deadline {
         None | Some("") => Ok(None),
         Some(d) => {
@@ -282,7 +287,10 @@ fn validate_description(
     match description {
         None | Some("") => Ok(None),
         Some(d) if d.len() > 2000 => Err(vec![ApplicativeValidationError::InvalidDescription {
-            reason: format!("Description exceeds maximum length of 2000 (got {})", d.len()),
+            reason: format!(
+                "Description exceeds maximum length of 2000 (got {})",
+                d.len()
+            ),
         }]),
         Some(d) => Ok(Some(d.to_string())),
     }
@@ -353,13 +361,7 @@ where
         (Ok(title), Ok(priority), Ok(deadline), Ok(description), Ok(tags)) => {
             Ok(combiner(title, priority, deadline, description, tags))
         }
-        (
-            title_result,
-            priority_result,
-            deadline_result,
-            description_result,
-            tags_result,
-        ) => {
+        (title_result, priority_result, deadline_result, description_result, tags_result) => {
             let mut errors = Vec::new();
             if let Err(es) = title_result {
                 errors.extend(es);
@@ -382,7 +384,9 @@ where
 }
 
 /// Pure: Validates all task fields and collects all errors.
-fn validate_task_all_errors(request: &ValidateCollectAllRequest) -> Validation<ApplicativeValidationError, ValidatedTaskDto> {
+fn validate_task_all_errors(
+    request: &ValidateCollectAllRequest,
+) -> Validation<ApplicativeValidationError, ValidatedTaskDto> {
     let title_result = validate_title(&request.title);
     let priority_result = validate_priority(request.priority);
     let deadline_result = validate_deadline(request.deadline.as_deref());
@@ -463,7 +467,12 @@ fn combine_dashboard_data(
     tasks_result: Result<Vec<TaskSummaryDto>, DashboardComponentError>,
     projects_result: Result<Vec<ProjectSummaryDto>, DashboardComponentError>,
     stats_result: Result<StatsDto, DashboardComponentError>,
-) -> (Vec<TaskSummaryDto>, Vec<ProjectSummaryDto>, StatsDto, Vec<DashboardComponentError>) {
+) -> (
+    Vec<TaskSummaryDto>,
+    Vec<ProjectSummaryDto>,
+    StatsDto,
+    Vec<DashboardComponentError>,
+) {
     let mut errors = Vec::new();
 
     let tasks = match tasks_result {
@@ -581,7 +590,10 @@ fn build_task_from_parts(
 #[allow(clippy::cast_precision_loss)]
 fn compute_complexity(task: &Task) -> ComputationResult {
     let base_score = task.title.len() as f64 / 10.0;
-    let description_score = task.description.as_ref().map_or(0.0, |d| d.len() as f64 / 100.0);
+    let description_score = task
+        .description
+        .as_ref()
+        .map_or(0.0, |d| d.len() as f64 / 100.0);
     let tag_score = task.tags.len() as f64 * 0.5;
     let priority_score = match task.priority {
         Priority::Low => 1.0,
@@ -892,7 +904,8 @@ pub async fn build_from_parts(
     Json(request): Json<BuildFromPartsRequest>,
 ) -> Json<BuildFromPartsResponse> {
     let title = resolve_title_template(request.title_template_id.as_deref(), request.use_defaults);
-    let priority = resolve_priority_preset(request.priority_preset.as_deref(), request.use_defaults);
+    let priority =
+        resolve_priority_preset(request.priority_preset.as_deref(), request.use_defaults);
     let project_id = resolve_project_id(request.project_id.as_deref(), request.use_defaults);
 
     // Generate ID and timestamp at system boundary (effect boundary)
@@ -1267,16 +1280,16 @@ mod tests {
 
     #[rstest]
     fn test_resolve_priority_preset() {
-        assert_eq!(resolve_priority_preset(Some("low"), false), Some(Priority::Low));
+        assert_eq!(
+            resolve_priority_preset(Some("low"), false),
+            Some(Priority::Low)
+        );
         assert_eq!(
             resolve_priority_preset(Some("critical"), false),
             Some(Priority::Critical)
         );
         assert_eq!(resolve_priority_preset(None, false), None);
-        assert_eq!(
-            resolve_priority_preset(None, true),
-            Some(Priority::Medium)
-        );
+        assert_eq!(resolve_priority_preset(None, true), Some(Priority::Medium));
     }
 
     #[rstest]
@@ -1333,8 +1346,12 @@ mod tests {
 
     #[rstest]
     fn test_compute_complexity() {
-        let task = Task::new(TaskId::generate(), "Test Task".to_string(), Timestamp::now())
-            .with_priority(Priority::High);
+        let task = Task::new(
+            TaskId::generate(),
+            "Test Task".to_string(),
+            Timestamp::now(),
+        )
+        .with_priority(Priority::High);
         let result = compute_complexity(&task);
         assert_eq!(result.computation_type, "complexity");
         assert!(result.confidence > 0.0);
@@ -1351,8 +1368,7 @@ mod tests {
     #[rstest]
     fn test_compute_dependencies() {
         let task = Task::new(TaskId::generate(), "Parent".to_string(), Timestamp::now());
-        let task =
-            task.prepend_subtask(SubTask::new(SubTaskId::generate(), "Subtask".to_string()));
+        let task = task.prepend_subtask(SubTask::new(SubTaskId::generate(), "Subtask".to_string()));
         let result = compute_dependencies(&task);
         assert_eq!(result.computation_type, "dependencies");
     }
