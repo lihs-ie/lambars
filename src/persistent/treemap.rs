@@ -49,6 +49,7 @@
 //! These invariants ensure the tree height is O(log B N).
 
 use super::ReferenceCounter;
+use smallvec::{SmallVec, smallvec};
 use std::borrow::Borrow;
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -61,31 +62,98 @@ const BRANCHING_FACTOR: usize = 16;
 const MIN_KEYS: usize = BRANCHING_FACTOR - 1;
 const MAX_KEYS: usize = 2 * BRANCHING_FACTOR - 1;
 
+/// エントリ配列の型エイリアス。
+/// `MAX_KEYS` + 1 = 32 要素までスタック上に配置。
+type EntryArray<K, V> = SmallVec<[(K, V); 32]>;
+
+/// 子ノード配列の型エイリアス。
+/// SmallVecは32要素までしかサポートしないため、子ノード配列は
+/// 通常のVecを使用する。これにより、ノード当たり1回のヒープ
+/// 割り当ては発生するが、エントリ配列のスタック配置による
+/// 改善は得られる。
+type ChildArray<K, V> = Vec<ReferenceCounter<BTreeNode<K, V>>>;
+
 /// Internal node structure for the B-Tree.
 ///
 /// This is a B-Tree (not B+Tree), so internal nodes also store key-value pairs.
 #[derive(Clone)]
 enum BTreeNode<K, V> {
     Leaf {
-        entries: Vec<(K, V)>,
+        entries: EntryArray<K, V>,
     },
     Internal {
         /// entries[i] is between children[i] and children[i+1].
-        entries: Vec<(K, V)>,
-        children: Vec<ReferenceCounter<Self>>,
+        entries: EntryArray<K, V>,
+        children: ChildArray<K, V>,
     },
 }
 
 impl<K, V> BTreeNode<K, V> {
     fn new_leaf(key: K, value: V) -> Self {
         Self::Leaf {
-            entries: vec![(key, value)],
+            entries: smallvec![(key, value)],
         }
     }
 
-    const fn entry_count(&self) -> usize {
+    fn entry_count(&self) -> usize {
         match self {
             Self::Leaf { entries } | Self::Internal { entries, .. } => entries.len(),
+        }
+    }
+
+    /// プレースホルダー用の空ノード
+    ///
+    /// Copy-on-Writeパターンで子ノードを一時的に取り出す際に使用する。
+    /// この関数は`take_or_clone_child`でのみ使用される。
+    fn empty_placeholder() -> Self {
+        Self::Leaf {
+            entries: SmallVec::new(),
+        }
+    }
+}
+
+impl<K: Clone, V: Clone> BTreeNode<K, V> {
+    /// Copy-on-Writeパターンで子ノードを取得する。
+    ///
+    /// 参照カウントが1の場合は所有権を取得し、そうでなければクローンする。
+    ///
+    /// # 重要
+    ///
+    /// この関数は`self`を消費するメソッド内でのみ使用する:
+    /// - `insert(self, ...)` -> OK
+    /// - `remove(self, ...)` -> OK
+    /// - `get(&self, ...)` -> 使用禁止
+    ///
+    /// # Arguments
+    ///
+    /// * `children` - 子ノードの配列（所有権を持つ）
+    /// * `index` - 取得する子ノードのインデックス
+    ///
+    /// # Returns
+    ///
+    /// 取得した子ノード（所有権を移動またはクローン）
+    fn take_or_clone_child(children: &mut ChildArray<K, V>, index: usize) -> Self {
+        // 配列から取り出し（所有権を移動）
+        // 一時的に空のプレースホルダーを入れる
+        let reference = std::mem::replace(
+            &mut children[index],
+            ReferenceCounter::new(Self::empty_placeholder()),
+        );
+
+        // try_unwrapで所有権取得を試みる
+        match ReferenceCounter::try_unwrap(reference) {
+            Ok(node) => {
+                // 唯一の参照だったので所有権を取得
+                // 処理後に新しいノードがchildren[index]に入る
+                node
+            }
+            Err(reference_counter) => {
+                // 他に参照があるのでクローン
+                let cloned = (*reference_counter).clone();
+                // 元の参照を戻す（構造共有を維持）
+                children[index] = reference_counter;
+                cloned
+            }
         }
     }
 }
@@ -173,7 +241,8 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
                     }
                 }
                 Err(index) => {
-                    let child = (*children[index]).clone();
+                    // CoWパターン: 参照カウント==1なら所有権を取得、そうでなければクローン
+                    let child = Self::take_or_clone_child(&mut children, index);
                     match child.insert(key, value) {
                         InsertResult::Done { node, added } => {
                             children[index] = ReferenceCounter::new(node);
@@ -207,9 +276,10 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
         }
     }
 
-    fn split_leaf(mut entries: Vec<(K, V)>) -> InsertResult<K, V> {
+    fn split_leaf(mut entries: EntryArray<K, V>) -> InsertResult<K, V> {
         let mid = entries.len() / 2;
-        let right_entries = entries.split_off(mid + 1);
+        // SmallVecにはsplit_offがないためdrainを使用
+        let right_entries: EntryArray<K, V> = entries.drain(mid + 1..).collect();
         let median = entries.pop().unwrap();
 
         InsertResult::Split {
@@ -223,14 +293,15 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
     }
 
     fn split_internal(
-        mut entries: Vec<(K, V)>,
-        mut children: Vec<ReferenceCounter<Self>>,
+        mut entries: EntryArray<K, V>,
+        mut children: ChildArray<K, V>,
         added: bool,
     ) -> InsertResult<K, V> {
         let mid = entries.len() / 2;
-        let right_entries = entries.split_off(mid + 1);
+        // SmallVecにはsplit_offがないためdrainを使用
+        let right_entries: EntryArray<K, V> = entries.drain(mid + 1..).collect();
         let median = entries.pop().unwrap();
-        let right_children = children.split_off(mid + 1);
+        let right_children: ChildArray<K, V> = children.split_off(mid + 1);
 
         InsertResult::Split {
             left: Self::Internal { entries, children },
@@ -330,7 +401,8 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
                     }
                 }
                 Err(index) => {
-                    let child = (*children[index]).clone();
+                    // CoWパターン: 参照カウント==1なら所有権を取得、そうでなければクローン
+                    let child = Self::take_or_clone_child(&mut children, index);
                     match child.remove(key) {
                         RemoveResult::NotFound => RemoveResult::NotFound,
                         RemoveResult::Done {
@@ -373,7 +445,7 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
         }
     }
 
-    const fn make_remove_result(node: Option<Self>, removed_value: V) -> RemoveResult<K, V> {
+    fn make_remove_result(node: Option<Self>, removed_value: V) -> RemoveResult<K, V> {
         match &node {
             Some(n) if n.entry_count() < MIN_KEYS => RemoveResult::Underflow {
                 node: node.unwrap(),
@@ -391,7 +463,17 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
     fn remove_max_from_child(
         child_ref: &mut ReferenceCounter<Self>,
     ) -> ((K, V), RemoveMaxResult<K, V>) {
-        let child = (**child_ref).clone();
+        // CoWパターン: 参照カウント==1なら所有権を取得、そうでなければクローン
+        let placeholder = ReferenceCounter::new(Self::empty_placeholder());
+        let reference = std::mem::replace(child_ref, placeholder);
+        let child = match ReferenceCounter::try_unwrap(reference) {
+            Ok(node) => node,
+            Err(reference_counter) => {
+                let cloned = (*reference_counter).clone();
+                *child_ref = reference_counter;
+                cloned
+            }
+        };
         match child {
             Self::Leaf { mut entries } => {
                 let (max_key, max_value) = entries.pop().unwrap();
@@ -460,8 +542,8 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
     /// Handle underflow specifically for `remove_max_from_child`.
     /// This is similar to `handle_underflow` but we don't have a `removed_value` to propagate.
     fn handle_underflow_for_remove_max(
-        entries: Vec<(K, V)>,
-        children: Vec<ReferenceCounter<Self>>,
+        entries: EntryArray<K, V>,
+        children: ChildArray<K, V>,
         index: usize,
     ) -> UnderflowHandleResult<K, V> {
         // Check if we can borrow from left sibling
@@ -481,12 +563,13 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
     }
 
     fn borrow_from_left_no_value(
-        mut entries: Vec<(K, V)>,
-        mut children: Vec<ReferenceCounter<Self>>,
+        mut entries: EntryArray<K, V>,
+        mut children: ChildArray<K, V>,
         index: usize,
     ) -> UnderflowHandleResult<K, V> {
-        let left = (*children[index - 1]).clone();
-        let current = (*children[index]).clone();
+        // CoWパターン: 参照カウント==1なら所有権を取得、そうでなければクローン
+        let left = Self::take_or_clone_child(&mut children, index - 1);
+        let current = Self::take_or_clone_child(&mut children, index);
 
         match (left, current) {
             (
@@ -543,12 +626,13 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
     }
 
     fn borrow_from_right_no_value(
-        mut entries: Vec<(K, V)>,
-        mut children: Vec<ReferenceCounter<Self>>,
+        mut entries: EntryArray<K, V>,
+        mut children: ChildArray<K, V>,
         index: usize,
     ) -> UnderflowHandleResult<K, V> {
-        let right = (*children[index + 1]).clone();
-        let current = (*children[index]).clone();
+        // CoWパターン: 参照カウント==1なら所有権を取得、そうでなければクローン
+        let current = Self::take_or_clone_child(&mut children, index);
+        let right = Self::take_or_clone_child(&mut children, index + 1);
 
         match (current, right) {
             (
@@ -605,12 +689,13 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
     }
 
     fn merge_with_left_no_value(
-        mut entries: Vec<(K, V)>,
-        mut children: Vec<ReferenceCounter<Self>>,
+        mut entries: EntryArray<K, V>,
+        mut children: ChildArray<K, V>,
         index: usize,
     ) -> UnderflowHandleResult<K, V> {
-        let left = (*children[index - 1]).clone();
-        let current = (*children[index]).clone();
+        // CoWパターン: 参照カウント==1なら所有権を取得、そうでなければクローン
+        let left = Self::take_or_clone_child(&mut children, index - 1);
+        let current = Self::take_or_clone_child(&mut children, index);
         let separator = entries.remove(index - 1);
         let merged = Self::merge_nodes(left, separator, current);
 
@@ -621,12 +706,13 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
     }
 
     fn merge_with_right_no_value(
-        mut entries: Vec<(K, V)>,
-        mut children: Vec<ReferenceCounter<Self>>,
+        mut entries: EntryArray<K, V>,
+        mut children: ChildArray<K, V>,
         index: usize,
     ) -> UnderflowHandleResult<K, V> {
-        let current = (*children[index]).clone();
-        let right = (*children[index + 1]).clone();
+        // CoWパターン: 参照カウント==1なら所有権を取得、そうでなければクローン
+        let current = Self::take_or_clone_child(&mut children, index);
+        let right = Self::take_or_clone_child(&mut children, index + 1);
         let separator = entries.remove(index);
         let merged = Self::merge_nodes(current, separator, right);
 
@@ -637,8 +723,8 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
     }
 
     fn finalize_merge_no_value(
-        entries: Vec<(K, V)>,
-        children: Vec<ReferenceCounter<Self>>,
+        entries: EntryArray<K, V>,
+        children: ChildArray<K, V>,
     ) -> UnderflowHandleResult<K, V> {
         if entries.is_empty() {
             children
@@ -663,8 +749,8 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
     }
 
     fn rebalance_after_remove(
-        entries: Vec<(K, V)>,
-        children: Vec<ReferenceCounter<Self>>,
+        entries: EntryArray<K, V>,
+        children: ChildArray<K, V>,
         removed_value: V,
     ) -> RemoveResult<K, V> {
         if entries.is_empty() {
@@ -678,8 +764,8 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
     }
 
     fn handle_underflow(
-        entries: Vec<(K, V)>,
-        children: Vec<ReferenceCounter<Self>>,
+        entries: EntryArray<K, V>,
+        children: ChildArray<K, V>,
         index: usize,
         removed_value: V,
     ) -> RemoveResult<K, V> {
@@ -697,13 +783,14 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
     }
 
     fn borrow_from_left(
-        mut entries: Vec<(K, V)>,
-        mut children: Vec<ReferenceCounter<Self>>,
+        mut entries: EntryArray<K, V>,
+        mut children: ChildArray<K, V>,
         index: usize,
         removed_value: V,
     ) -> RemoveResult<K, V> {
-        let left = (*children[index - 1]).clone();
-        let current = (*children[index]).clone();
+        // CoWパターン: 参照カウント==1なら所有権を取得、そうでなければクローン
+        let left = Self::take_or_clone_child(&mut children, index - 1);
+        let current = Self::take_or_clone_child(&mut children, index);
 
         match (left, current) {
             (
@@ -767,13 +854,14 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
 
     /// Borrows an entry from the right sibling.
     fn borrow_from_right(
-        mut entries: Vec<(K, V)>,
-        mut children: Vec<ReferenceCounter<Self>>,
+        mut entries: EntryArray<K, V>,
+        mut children: ChildArray<K, V>,
         index: usize,
         removed_value: V,
     ) -> RemoveResult<K, V> {
-        let right = (*children[index + 1]).clone();
-        let current = (*children[index]).clone();
+        // CoWパターン: 参照カウント==1なら所有権を取得、そうでなければクローン
+        let current = Self::take_or_clone_child(&mut children, index);
+        let right = Self::take_or_clone_child(&mut children, index + 1);
 
         match (current, right) {
             (
@@ -874,8 +962,8 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
     }
 
     fn finalize_merge(
-        entries: Vec<(K, V)>,
-        children: Vec<ReferenceCounter<Self>>,
+        entries: EntryArray<K, V>,
+        children: ChildArray<K, V>,
         removed_value: V,
     ) -> RemoveResult<K, V> {
         if entries.is_empty() {
@@ -889,13 +977,14 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
     }
 
     fn merge_with_left(
-        mut entries: Vec<(K, V)>,
-        mut children: Vec<ReferenceCounter<Self>>,
+        mut entries: EntryArray<K, V>,
+        mut children: ChildArray<K, V>,
         index: usize,
         removed_value: V,
     ) -> RemoveResult<K, V> {
-        let left = (*children[index - 1]).clone();
-        let current = (*children[index]).clone();
+        // CoWパターン: 参照カウント==1なら所有権を取得、そうでなければクローン
+        let left = Self::take_or_clone_child(&mut children, index - 1);
+        let current = Self::take_or_clone_child(&mut children, index);
         let separator = entries.remove(index - 1);
         let merged = Self::merge_nodes(left, separator, current);
 
@@ -906,13 +995,14 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
     }
 
     fn merge_with_right(
-        mut entries: Vec<(K, V)>,
-        mut children: Vec<ReferenceCounter<Self>>,
+        mut entries: EntryArray<K, V>,
+        mut children: ChildArray<K, V>,
         index: usize,
         removed_value: V,
     ) -> RemoveResult<K, V> {
-        let current = (*children[index]).clone();
-        let right = (*children[index + 1]).clone();
+        // CoWパターン: 参照カウント==1なら所有権を取得、そうでなければクローン
+        let current = Self::take_or_clone_child(&mut children, index);
+        let right = Self::take_or_clone_child(&mut children, index + 1);
         let separator = entries.remove(index);
         let merged = Self::merge_nodes(current, separator, right);
 
@@ -1141,7 +1231,7 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
                         added,
                     } => Self {
                         root: Some(ReferenceCounter::new(BTreeNode::Internal {
-                            entries: vec![median],
+                            entries: smallvec![median],
                             children: vec![
                                 ReferenceCounter::new(left),
                                 ReferenceCounter::new(right),
@@ -1588,8 +1678,8 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
 enum IntoIterState<K, V> {
     /// A node with entries to process, starting from the given index.
     Node {
-        entries: Vec<(K, V)>,
-        children: Option<Vec<ReferenceCounter<BTreeNode<K, V>>>>,
+        entries: EntryArray<K, V>,
+        children: Option<ChildArray<K, V>>,
         entry_index: usize,
     },
 }
@@ -2300,6 +2390,135 @@ mod tests {
         assert_eq!(map.len(), 1000);
         for i in 0..1000 {
             assert_eq!(map.get(&i), Some(&(i * 2)));
+        }
+    }
+
+    /// Copy-on-Write正当性テスト: insert後も結果が正しいことを検証
+    #[test]
+    fn test_cow_insert_correctness() {
+        let map1 = PersistentTreeMap::new()
+            .insert(1, "a")
+            .insert(2, "b")
+            .insert(3, "c");
+
+        let map2 = map1.clone().insert(4, "d");
+        let map3 = map1.clone().insert(2, "B");
+
+        // map1は変更されていない
+        assert_eq!(map1.len(), 3);
+        assert_eq!(map1.get(&1), Some(&"a"));
+        assert_eq!(map1.get(&2), Some(&"b"));
+        assert_eq!(map1.get(&3), Some(&"c"));
+        assert_eq!(map1.get(&4), None);
+
+        // map2は新しいエントリを含む
+        assert_eq!(map2.len(), 4);
+        assert_eq!(map2.get(&4), Some(&"d"));
+
+        // map3は更新されたエントリを含む
+        assert_eq!(map3.len(), 3);
+        assert_eq!(map3.get(&2), Some(&"B"));
+    }
+
+    /// Copy-on-Write正当性テスト: remove後も結果が正しいことを検証
+    #[test]
+    fn test_cow_remove_correctness() {
+        let map1 = PersistentTreeMap::new()
+            .insert(1, "a")
+            .insert(2, "b")
+            .insert(3, "c");
+
+        let map2 = map1.clone().remove(&2);
+        let map3 = map1.clone().remove(&99);
+
+        // map1は変更されていない
+        assert_eq!(map1.len(), 3);
+        assert_eq!(map1.get(&2), Some(&"b"));
+
+        // map2は削除されたエントリを含まない
+        assert_eq!(map2.len(), 2);
+        assert_eq!(map2.get(&2), None);
+        assert_eq!(map2.get(&1), Some(&"a"));
+        assert_eq!(map2.get(&3), Some(&"c"));
+
+        // map3は変更されていない（存在しないキーの削除）
+        assert_eq!(map3.len(), 3);
+    }
+
+    /// 構造共有テスト: clone後の操作で元のマップが変更されないことを検証
+    #[test]
+    fn test_structural_sharing_after_clone() {
+        let map1 = PersistentTreeMap::new().insert(1, "a").insert(2, "b");
+        let map1_clone = map1.clone();
+        let _map2 = map1.insert(3, "c");
+
+        // map1_cloneは変更されていない
+        assert_eq!(map1_clone.len(), 2);
+        assert_eq!(map1_clone.get(&3), None);
+        assert_eq!(map1_clone.get(&1), Some(&"a"));
+        assert_eq!(map1_clone.get(&2), Some(&"b"));
+    }
+
+    /// 大量データでのCopy-on-Write正当性テスト
+    #[test]
+    fn test_cow_large_data() {
+        let mut map = PersistentTreeMap::new();
+        for i in 0..500 {
+            map = map.insert(i, i * 2);
+        }
+
+        // cloneしてから操作
+        let map_clone = map.clone();
+        let mut map2 = map;
+        for i in 500..1000 {
+            map2 = map2.insert(i, i * 2);
+        }
+
+        // map_cloneは500件のまま
+        assert_eq!(map_clone.len(), 500);
+        for i in 0..500 {
+            assert_eq!(map_clone.get(&i), Some(&(i * 2)));
+        }
+        for i in 500..1000 {
+            assert_eq!(map_clone.get(&i), None);
+        }
+
+        // map2は1000件
+        assert_eq!(map2.len(), 1000);
+        for i in 0..1000 {
+            assert_eq!(map2.get(&i), Some(&(i * 2)));
+        }
+    }
+
+    /// 大量データでのremove Copy-on-Write正当性テスト
+    #[test]
+    fn test_cow_remove_large_data() {
+        let mut map = PersistentTreeMap::new();
+        for i in 0..500 {
+            map = map.insert(i, i * 2);
+        }
+
+        let map_clone = map.clone();
+        let mut map2 = map;
+
+        // 偶数キーを削除
+        for i in (0..500).step_by(2) {
+            map2 = map2.remove(&i);
+        }
+
+        // map_cloneは500件のまま
+        assert_eq!(map_clone.len(), 500);
+        for i in 0..500 {
+            assert_eq!(map_clone.get(&i), Some(&(i * 2)));
+        }
+
+        // map2は250件（奇数のみ）
+        assert_eq!(map2.len(), 250);
+        for i in (0..500).step_by(2) {
+            assert_eq!(map2.get(&i), None);
+        }
+        for i in (1..500).step_by(2) {
+            assert_eq!(map2.get(&i), Some(&(i * 2)));
         }
     }
 }
