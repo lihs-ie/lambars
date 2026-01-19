@@ -26,18 +26,18 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use task_management_benchmark_api::api::{
     AppState, add_subtask, add_tag, aggregate_sources, aggregate_tree, async_pipeline,
-    batch_process_async, batch_transform_results, build_from_parts, bulk_create_tasks,
-    bulk_update_tasks, collect_optional, compute_parallel, conditional_pipeline,
+    batch_process_async, batch_transform_results, batch_update_field, build_from_parts,
+    bulk_create_tasks, bulk_update_tasks, collect_optional, compute_parallel, conditional_pipeline,
     convert_error_domain, count_by_priority, create_project_handler, create_task, create_task_eff,
     dashboard, enrich_batch, enrich_error, execute_sequential, execute_state_workflow,
     execute_workflow, fetch_batch, filter_conditional, first_available, flatten_demo,
     flatten_subtasks, functor_mut_demo, get_project_handler, get_project_progress_handler,
     get_project_stats_handler, get_task_history, health_check, identity_demo, lazy_compute,
-    list_tasks, monad_error_demo, monad_transformers, process_with_error_transform,
+    list_tasks, monad_error_demo, monad_transformers, nested_access, process_with_error_transform,
     projects_leaderboard, resolve_config, resolve_dependencies, search_fallback, search_tasks,
     tasks_by_deadline, tasks_timeline, transform_async, transform_pair, transform_task,
-    update_status, update_task, update_with_optics, validate_batch, validate_collect_all,
-    workflow_async,
+    update_filtered, update_metadata_key, update_optional, update_status, update_task,
+    update_with_optics, validate_batch, validate_collect_all, workflow_async,
 };
 use task_management_benchmark_api::infrastructure::{RepositoryConfig, RepositoryFactory};
 
@@ -179,6 +179,12 @@ async fn main() {
         .route("/dashboard", get(dashboard))
         .route("/tasks/build-from-parts", post(build_from_parts))
         .route("/tasks/compute-parallel", post(compute_parallel))
+        // Advanced Optics operations (Traversal, At, Filtered)
+        .route("/tasks/batch-update-field", put(batch_update_field))
+        .route("/tasks/{id}/update-optional", put(update_optional))
+        .route("/projects/{id}/metadata/{key}", put(update_metadata_key))
+        .route("/tasks/update-filtered", put(update_filtered))
+        .route("/tasks/nested-access", get(nested_access))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(application_state);
