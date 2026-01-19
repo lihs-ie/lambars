@@ -25,27 +25,74 @@ jobs:
   benchmark:
     name: API Workload Benchmark
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       pull-requests: write
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Install wrk
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wrk
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
+      # ============================================
+      # Baseline (main branch) - only for PRs
+      # ============================================
+      - name: Checkout main branch for baseline
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Build and start services (main)
+        if: github.event_name == 'pull_request'
+        working-directory: benches/api/docker
+        run: |
+          docker compose -f compose.ci.yaml up -d --build --wait
+          docker compose -f compose.ci.yaml ps
+
+      - name: Setup test data (main)
+        if: github.event_name == 'pull_request'
+        working-directory: benches/api/benchmarks
+        run: |
+          chmod +x setup_test_data.sh
+          API_URL=http://localhost:3002 ./setup_test_data.sh
+
+      - name: Run baseline benchmarks (main)
+        if: github.event_name == 'pull_request'
+        working-directory: benches/api/benchmarks
+        run: |
+          chmod +x run_benchmark.sh
+          API_URL=http://localhost:3002 DURATION=10s THREADS=2 CONNECTIONS=10 ./run_benchmark.sh --quick
+          # Save baseline results
+          BASELINE_DIR=$(ls -td results/*/ 2>/dev/null | head -1)
+          if [ -n "$BASELINE_DIR" ]; then
+            cp "$BASELINE_DIR/summary.txt" /tmp/baseline_summary.txt
+            echo "Baseline results saved"
+            cat /tmp/baseline_summary.txt
+          fi
+
+      - name: Stop services (main)
+        if: github.event_name == 'pull_request'
+        working-directory: benches/api/docker
+        run: docker compose -f compose.ci.yaml down -v
+
+      # ============================================
+      # PR branch benchmarks
+      # ============================================
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          clean: false
 
       - name: Build and start services
         working-directory: benches/api/docker
         run: |
           docker compose -f compose.ci.yaml up -d --build --wait
           docker compose -f compose.ci.yaml ps
-
-      - name: Install wrk
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y wrk
 
       - name: Setup test data
         working-directory: benches/api/benchmarks
@@ -125,6 +172,39 @@ jobs:
             const fs = require('fs');
             const path = require('path');
 
+            // Helper function to parse summary file
+            function parseSummary(content) {
+              const results = new Map();
+              const lines = content.split('\n');
+              let currentBenchmark = null;
+              let reqsPerSec = null;
+              let avgLatency = null;
+
+              for (const line of lines) {
+                const benchMatch = line.match(/^(\w+):$/);
+                if (benchMatch) {
+                  if (currentBenchmark && reqsPerSec !== null) {
+                    results.set(currentBenchmark, { reqsPerSec, avgLatency });
+                  }
+                  currentBenchmark = benchMatch[1];
+                  reqsPerSec = null;
+                  avgLatency = null;
+                }
+                const reqsMatch = line.match(/Requests\/sec:\s*([\d.]+)/);
+                if (reqsMatch) {
+                  reqsPerSec = parseFloat(reqsMatch[1]);
+                }
+                const latencyMatch = line.match(/Avg Latency:\s*([\d.]+\w+)/);
+                if (latencyMatch) {
+                  avgLatency = latencyMatch[1];
+                }
+              }
+              if (currentBenchmark && reqsPerSec !== null) {
+                results.set(currentBenchmark, { reqsPerSec, avgLatency });
+              }
+              return results;
+            }
+
             // Find the most recent results directory
             const resultsBase = 'benches/api/benchmarks/results';
             const dirs = fs.readdirSync(resultsBase)
@@ -145,59 +225,95 @@ jobs:
               return;
             }
 
-            // Parse summary file to extract metrics
-            const summary = fs.readFileSync(summaryFile, 'utf8');
-            const lines = summary.split('\n');
+            // Parse PR results
+            const prSummary = fs.readFileSync(summaryFile, 'utf8');
+            const prResults = parseSummary(prSummary);
 
-            // Build results table
-            const results = [];
-            let currentBenchmark = null;
-            let reqsPerSec = null;
-            let avgLatency = null;
-
-            for (const line of lines) {
-              const benchMatch = line.match(/^(\w+):$/);
-              if (benchMatch) {
-                if (currentBenchmark && reqsPerSec) {
-                  results.push({ name: currentBenchmark, reqsPerSec, avgLatency });
-                }
-                currentBenchmark = benchMatch[1];
-                reqsPerSec = null;
-                avgLatency = null;
-              }
-              const reqsMatch = line.match(/Requests\/sec:\s*([\d.]+)/);
-              if (reqsMatch) {
-                reqsPerSec = parseFloat(reqsMatch[1]);
-              }
-              const latencyMatch = line.match(/Avg Latency:\s*([\d.]+\w+)/);
-              if (latencyMatch) {
-                avgLatency = latencyMatch[1];
-              }
-            }
-            // Don't forget the last one
-            if (currentBenchmark && reqsPerSec) {
-              results.push({ name: currentBenchmark, reqsPerSec, avgLatency });
+            // Parse baseline results (if available)
+            let baselineResults = null;
+            const baselineFile = '/tmp/baseline_summary.txt';
+            if (fs.existsSync(baselineFile)) {
+              const baselineSummary = fs.readFileSync(baselineFile, 'utf8');
+              baselineResults = parseSummary(baselineSummary);
             }
 
-            if (results.length === 0) {
+            if (prResults.size === 0) {
               console.log('No benchmark results parsed');
               return;
             }
 
-            // Calculate total and average
-            const totalReqs = results.reduce((sum, r) => sum + r.reqsPerSec, 0);
-            const avgReqs = totalReqs / results.length;
+            // Build comparison table
+            let table = '| Endpoint | PR (white_check_mark:) | main | Change |\n';
+            table += '|----------|-------------:|-------------:|-------:|\n';
 
-            // Build markdown table
-            let table = '| Endpoint | Requests/sec | Avg Latency |\n';
-            table += '|----------|-------------:|------------:|\n';
-            for (const r of results) {
-              table += `| ${r.name} | ${r.reqsPerSec.toLocaleString('en-US', {maximumFractionDigits: 2})} | ${r.avgLatency || 'N/A'} |\n`;
+            let totalPr = 0;
+            let totalMain = 0;
+            let count = 0;
+
+            for (const [name, pr] of prResults) {
+              const prReqs = pr.reqsPerSec;
+              totalPr += prReqs;
+              count++;
+
+              let mainReqs = '-';
+              let change = '-';
+
+              if (baselineResults && baselineResults.has(name)) {
+                const baseline = baselineResults.get(name);
+                mainReqs = baseline.reqsPerSec.toLocaleString('en-US', {maximumFractionDigits: 2});
+                totalMain += baseline.reqsPerSec;
+
+                const diff = ((prReqs - baseline.reqsPerSec) / baseline.reqsPerSec) * 100;
+                if (diff > 0) {
+                  change = `+${diff.toFixed(2)}% :arrow_up:`;
+                } else if (diff < 0) {
+                  change = `${diff.toFixed(2)}% :arrow_down:`;
+                } else {
+                  change = '0%';
+                }
+              }
+
+              table += `| ${name} | ${prReqs.toLocaleString('en-US', {maximumFractionDigits: 2})} | ${mainReqs} | ${change} |\n`;
             }
-            table += `| **Average** | **${avgReqs.toLocaleString('en-US', {maximumFractionDigits: 2})}** | - |\n`;
+
+            // Add average row
+            const avgPr = totalPr / count;
+            let avgMain = '-';
+            let avgChange = '-';
+
+            if (baselineResults && totalMain > 0) {
+              avgMain = (totalMain / count).toLocaleString('en-US', {maximumFractionDigits: 2});
+              const avgMainNum = totalMain / count;
+              const diff = ((avgPr - avgMainNum) / avgMainNum) * 100;
+              if (diff > 0) {
+                avgChange = `+${diff.toFixed(2)}% :arrow_up:`;
+              } else if (diff < 0) {
+                avgChange = `${diff.toFixed(2)}% :arrow_down:`;
+              } else {
+                avgChange = '0%';
+              }
+            }
+
+            table += `| **Average** | **${avgPr.toLocaleString('en-US', {maximumFractionDigits: 2})}** | **${avgMain}** | **${avgChange}** |\n`;
+
+            // Determine overall status
+            let status = ':white_check_mark: Benchmark completed';
+            if (baselineResults) {
+              const avgMainNum = totalMain / count;
+              const overallDiff = ((avgPr - avgMainNum) / avgMainNum) * 100;
+              if (overallDiff < -5) {
+                status = ':warning: Performance regression detected (>' + Math.abs(overallDiff).toFixed(1) + '% slower)';
+              } else if (overallDiff > 5) {
+                status = ':rocket: Performance improvement detected (+' + overallDiff.toFixed(1) + '% faster)';
+              } else {
+                status = ':white_check_mark: No significant performance change';
+              }
+            }
 
             const body = [
-              '## 🚀 API Workload Benchmark Results',
+              '## :rocket: API Workload Benchmark Results',
+              '',
+              status,
               '',
               table,
               '<details>',
@@ -222,7 +338,7 @@ jobs:
 
             const botComment = comments.find(comment =>
               comment.user.type === 'Bot' &&
-              comment.body.includes('## 🚀 API Workload Benchmark Results')
+              comment.body.includes('## :rocket: API Workload Benchmark Results')
             );
 
             if (botComment) {
