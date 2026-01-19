@@ -128,6 +128,7 @@ impl<A: 'static> AsyncIO<A> {
     ///     42
     /// });
     /// ```
+    #[inline]
     pub fn new<F, Fut>(action: F) -> Self
     where
         F: FnOnce() -> Fut + Send + 'static,
@@ -154,6 +155,7 @@ impl<A: 'static> AsyncIO<A> {
     /// let future = async { 42 };
     /// let async_io = AsyncIO::from_future(future);
     /// ```
+    #[inline]
     pub fn from_future<Fut>(future: Fut) -> Self
     where
         Fut: Future<Output = A> + Send + 'static,
@@ -182,6 +184,7 @@ impl<A: Send + 'static> AsyncIO<A> {
     /// let async_io = AsyncIO::pure(42);
     /// // run_async().await will immediately return 42
     /// ```
+    #[inline]
     pub fn pure(value: A) -> Self {
         Self {
             run_async_io: Box::new(move || Box::pin(async move { value })),
@@ -217,6 +220,7 @@ impl<A: 'static> AsyncIO<A> {
     ///     assert_eq!(result, 42);
     /// }
     /// ```
+    #[inline]
     pub async fn run_async(self) -> A {
         (self.run_async_io)().await
     }
@@ -269,6 +273,7 @@ impl<A: 'static> AsyncIO<A> {
     /// let async_io = AsyncIO::pure(21).fmap(|x| x * 2);
     /// assert_eq!(async_io.run_async().await, 42);
     /// ```
+    #[inline]
     pub fn fmap<B, F>(self, function: F) -> AsyncIO<B>
     where
         F: FnOnce(A) -> B + Send + 'static,
@@ -307,6 +312,7 @@ impl<A: 'static> AsyncIO<A> {
     /// let result = value_io.apply(function_io).run_async().await;
     /// assert_eq!(result, 42);
     /// ```
+    #[inline]
     #[must_use]
     pub fn apply<B, F>(self, function_async_io: AsyncIO<F>) -> AsyncIO<B>
     where
@@ -346,6 +352,7 @@ impl<A: 'static> AsyncIO<A> {
     /// let combined = io1.map2(io2, |a, b| a + b);
     /// assert_eq!(combined.run_async().await, 30);
     /// ```
+    #[inline]
     pub fn map2<B, C, F>(self, other: AsyncIO<B>, function: F) -> AsyncIO<C>
     where
         A: Send,
@@ -382,6 +389,7 @@ impl<A: Send + 'static> AsyncIO<A> {
     /// let result = io1.product(io2).run_async().await;
     /// assert_eq!(result, (10, 20));
     /// ```
+    #[inline]
     #[must_use]
     pub fn product<B>(self, other: AsyncIO<B>) -> AsyncIO<(A, B)>
     where
@@ -418,6 +426,7 @@ impl<A: 'static> AsyncIO<A> {
     /// let async_io = AsyncIO::pure(10).flat_map(|x| AsyncIO::pure(x * 2));
     /// assert_eq!(async_io.run_async().await, 20);
     /// ```
+    #[inline]
     pub fn flat_map<B, F>(self, function: F) -> AsyncIO<B>
     where
         F: FnOnce(A) -> AsyncIO<B> + Send + 'static,
@@ -442,6 +451,7 @@ impl<A: 'static> AsyncIO<A> {
     /// let async_io = AsyncIO::pure(10).and_then(|x| AsyncIO::pure(x + 5));
     /// assert_eq!(async_io.run_async().await, 15);
     /// ```
+    #[inline]
     pub fn and_then<B, F>(self, function: F) -> AsyncIO<B>
     where
         F: FnOnce(A) -> AsyncIO<B> + Send + 'static,
@@ -470,6 +480,7 @@ impl<A: 'static> AsyncIO<A> {
     /// let async_io = AsyncIO::pure(10).then(AsyncIO::pure(20));
     /// assert_eq!(async_io.run_async().await, 20);
     /// ```
+    #[inline]
     #[must_use]
     pub fn then<B>(self, next: AsyncIO<B>) -> AsyncIO<B>
     where
