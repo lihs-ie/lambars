@@ -34,10 +34,20 @@ COPY lambars-derive/Cargo.toml lambars-derive/Cargo.toml
 COPY benches/api/Cargo.toml benches/api/Cargo.toml
 
 # Step 2: Create dummy source files to build dependencies
-RUN mkdir -p src lambars-derive/src benches/api/src && \
+# Also create dummy bench files to satisfy Cargo.toml bench declarations
+RUN mkdir -p src lambars-derive/src benches/api/src benches/iai && \
     echo "fn main() {}" > benches/api/src/main.rs && \
     echo "" > src/lib.rs && \
-    echo "" > lambars-derive/src/lib.rs
+    echo "" > lambars-derive/src/lib.rs && \
+    for bench in persistent_vector_bench persistent_hashmap_bench persistent_treemap_bench \
+                 persistent_list_bench control_bench effect_bench for_macro_bench \
+                 for_async_macro_bench algebraic_effect_bench serde_bench transient_bench \
+                 rayon_bench freer_bench bifunctor_bench alternative_bench; do \
+        echo "fn main() {}" > benches/$bench.rs; \
+    done && \
+    for bench in persistent_vector_iai effect_iai scenario_iai; do \
+        echo "fn main() {}" > benches/iai/$bench.rs; \
+    done
 
 # Step 3: Build dependencies only with cache mount
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
