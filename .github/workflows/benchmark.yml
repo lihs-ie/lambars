@@ -72,7 +72,7 @@ jobs:
           cargo bench --bench scenario_iai -- --save-baseline=main 2>&1 | tee -a benchmark_output.txt
 
       - name: Upload benchmark results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: benchmark-results
           path: benchmark_output.txt
