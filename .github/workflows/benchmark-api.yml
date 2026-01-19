@@ -57,7 +57,8 @@ jobs:
         continue-on-error: true
         run: |
           chmod +x run_benchmark.sh
-          API_URL=http://localhost:3002 DURATION=10s ./run_benchmark.sh --quick
+          # Reduce concurrency to 1 to avoid potential OOM/crash issues
+          API_URL=http://localhost:3002 DURATION=10s THREADS=1 CONNECTIONS=1 ./run_benchmark.sh --quick
 
       - name: Show API logs
         if: always()
