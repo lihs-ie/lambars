@@ -19,6 +19,7 @@ rayon = { version = "1.10", optional = true }
 smallvec = { version = "1.13", optional = true }
 paste = "1.0"
 static_assertions = "1.1"
+smallvec = { version = "1.13", features = ["const_generics"] }
 
 [dev-dependencies]
 rstest = "^0.26"
@@ -140,5 +141,11 @@ name = "iai_benchmark_validation"
 path = "tests/iai_benchmark_validation.rs"
 required-features = ["typeclass", "control", "persistent", "optics", "effect", "compose"]
 
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+
 [profile.bench]
+inherits = "release"
 debug = true  # Required for Iai-Callgrind
