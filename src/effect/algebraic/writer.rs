@@ -134,6 +134,11 @@ impl<W: Monoid + Clone + 'static> WriterHandler<W> {
         computation: Eff<WriterEffect<W>, A>,
         buffer: &RefCell<Vec<W>>,
     ) -> A {
+        // Early return for Pure case (avoids normalize() overhead)
+        if let EffInner::Pure(value) = computation.inner {
+            return value;
+        }
+
         let mut current_computation = computation;
 
         loop {

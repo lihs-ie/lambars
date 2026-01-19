@@ -108,7 +108,11 @@ impl Handler<NoEffect> for PureHandler {
     type Output<A> = A;
 
     fn run<A: 'static>(self, computation: Eff<NoEffect, A>) -> A {
-        // Normalize to handle FlatMap chains
+        // Early return for Pure case (avoids normalize() overhead)
+        if let EffInner::Pure(value) = computation.inner {
+            return value;
+        }
+
         let normalized = computation.normalize();
 
         match normalized.inner {
