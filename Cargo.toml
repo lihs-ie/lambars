@@ -25,7 +25,7 @@ proptest = "1.5"
 lambars-derive = { path = "lambars-derive" }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "sync", "macros", "test-util"] }
 criterion = { version = "0.8", features = ["html_reports"] }
-iai-callgrind = "0.14"
+iai-callgrind = "0.16"
 serde_json = "1.0"
 trybuild = "1.0"
 
