@@ -1,0 +1,1026 @@
+# Iai-Callgrind ベンチマーク 要件定義
+#
+# 概要:
+#   CPU命令数ベースの高精度ベンチマークをIai-Callgrindで実装し、
+#   CIでのパフォーマンス回帰検出を可能にする。
+#
+# 設計方針:
+#   1. 既存Criterionベンチマークと共存可能な構成
+#   2. lambarsの主要機能を網羅的にカバー
+#   3. CI環境でのノイズ影響を受けない測定
+#   4. 測定区間では外部状態・I/Oを行わない（純粋計算のみ）
+#   5. setupと計測を分離し、計測対象を明確化
+#
+# 参照:
+#   - docs/internal/plans/20260118_1500_continuous_benchmark_roadmap.yaml
+#   - https://iai-callgrind.github.io/iai-callgrind/latest/html/index.html
+
+version: "1.0.0"
+name: "iai_callgrind_benchmark"
+description: |
+  lambarsライブラリに対するIai-Callgrindベースの高精度ベンチマークを実装する。
+  CPU命令数をカウントすることで、CI環境でも再現性の高い測定を実現し、
+  PRごとのパフォーマンス回帰を自動検出できる体制を整える。
+
+background:
+  problem: |
+    現在のCriterionベンチマークは壁時計時間ベースのため、
+    CI環境（仮想化・共有ランナー）ではノイズが大きく、
+    回帰検出の信頼性が低い。
+  motivation: |
+    Iai-CallgrindはValgrind/Callgrindを使用してCPU命令数をカウントするため、
+    環境ノイズの影響を受けず、微小な最適化・回帰も検出可能。
+    Bencherとの統合により、継続的なパフォーマンストラッキングが可能。
+  prior_art:
+    - name: "rustls continuous benchmarking"
+      description: "ISRGが資金提供したrustlsの継続的ベンチマークプロジェクト"
+    - name: "Rust compiler benchmarks"
+      description: "Rustコンパイラのパフォーマンス測定基盤"
+
+requirements:
+  # ======================================================================
+  # 1. プロジェクト設定
+  # ======================================================================
+  - id: REQ-IAI-001
+    name: "Cargo.toml設定"
+    description: |
+      iai-callgrindをdev-dependenciesに追加し、
+      ベンチマーク用のプロファイル設定を行う。
+
+    methods:
+      - name: "dev-dependencies追加"
+        signature: "iai-callgrind = \"0.14\""
+        description: |
+          Iai-Callgrindクレートを開発依存関係として追加する。
+        examples:
+          - description: "Cargo.toml設定例"
+            code: |
+              [dev-dependencies]
+              iai-callgrind = "0.14"
+
+              [profile.bench]
+              debug = true  # Iai-Callgrind必須
+
+      - name: "ベンチマーク定義"
+        signature: "[[bench]] name = \"*_iai\" harness = false"
+        description: |
+          各Iai-Callgrindベンチマークファイルをベンチマークとして登録する。
+        examples:
+          - description: "ベンチマーク登録例"
+            code: |
+              [[bench]]
+              name = "persistent_vector_iai"
+              harness = false
+              path = "benches/iai/persistent_vector_iai.rs"
+
+      - name: "CI実行環境の前提条件"
+        signature: "valgrind + iai-callgrind-runner"
+        description: |
+          Iai-Callgrindの実行にはValgrindとiai-callgrind-runnerが必要。
+          CI環境（GitHub Actions）では以下の手順でインストールする。
+
+          iai-callgrind-runnerはCargoが自動検出するため、
+          PATHにインストールされていれば追加設定は不要。
+          cargo installで~/.cargo/binにインストールされ、
+          GitHub Actionsではデフォルトでこのパスがincludeされる。
+        examples:
+          - description: "CI環境でのセットアップ例"
+            code: |
+              # GitHub Actions ワークフロー例
+              - name: Install Valgrind
+                run: sudo apt-get update && sudo apt-get install -y valgrind
+
+              - name: Install iai-callgrind-runner
+                run: |
+                  cargo install iai-callgrind-runner --version 0.14.0 --locked
+
+              # ベンチマーク実行（iai-callgrind-runnerはPATHから自動検出）
+              - name: Run Iai-Callgrind Benchmarks
+                run: cargo bench --bench persistent_vector_iai
+
+          - description: "ローカル（macOS）でのDocker経由実行"
+            code: |
+              # macOSではValgrindがネイティブ動作しないためDocker経由
+              docker compose -f docker/benchmark/compose.yaml run --rm benchmark \
+                cargo bench --bench persistent_vector_iai
+
+          - description: "ローカル（Linux）での直接実行"
+            code: |
+              # Valgrindインストール済みの場合
+              sudo apt-get install valgrind
+              cargo install iai-callgrind-runner --version 0.14.0 --locked
+              cargo bench --bench persistent_vector_iai
+
+      - name: "ベンチマークファイル最小雛形"
+        signature: "benches/iai/*_iai.rs"
+        description: |
+          Iai-Callgrindベンチマークファイルの必須構成を定義する。
+        examples:
+          - description: "最小雛形"
+            code: |
+              use iai_callgrind::{library_benchmark, library_benchmark_group, main};
+              use std::hint::black_box;
+              use lambars::persistent::PersistentVector;
+
+              // セットアップ関数（計測対象外）
+              fn setup_vector() -> PersistentVector<i32> {
+                  (0..1000).collect()
+              }
+
+              // ベンチマーク関数（計測対象）
+              #[library_benchmark]
+              #[bench::with_setup(setup_vector())]
+              fn get_sequential(vector: PersistentVector<i32>) -> i32 {
+                  let mut sum = 0;
+                  for i in 0..1000 {
+                      if let Some(&v) = vector.get(black_box(i)) {
+                          sum += v;
+                      }
+                  }
+                  black_box(sum)
+              }
+
+              // グループ定義
+              library_benchmark_group!(
+                  name = persistent_vector_group;
+                  benchmarks = get_sequential
+              );
+
+              // メインエントリ
+              main!(library_benchmark_groups = persistent_vector_group);
+
+  # ======================================================================
+  # 1.1 回帰検出設定
+  # ======================================================================
+  - id: REQ-IAI-001-1
+    name: "回帰検出閾値設定"
+    description: |
+      パフォーマンス回帰を検出するための閾値と判定方法を定義する。
+
+    methods:
+      - name: "閾値計算"
+        signature: "threshold = 10%"
+        description: |
+          命令数の変化率が±10%を超えた場合に回帰/改善としてアラートする。
+
+          計算式:
+            change_rate = (new_instructions - baseline_instructions) / baseline_instructions * 100
+
+          判定:
+            - change_rate > +10%: 回帰（パフォーマンス低下）
+            - change_rate < -10%: 改善（パフォーマンス向上）
+            - -10% <= change_rate <= +10%: 許容範囲（ノイズとして扱う）
+
+          ベースライン:
+            - mainブランチの最新コミットの測定値
+            - Bencherに保存された履歴データ
+
+      - name: "ノイズ要因"
+        signature: "noise_factors"
+        description: |
+          Iai-Callgrindは命令数ベースで決定的だが、以下の要因で変動し得る:
+            - Rustコンパイラバージョンの変更
+            - 依存クレートの更新
+            - コード構造の変更（インライン展開の変化など）
+
+          対策:
+            - コンパイラバージョンをCI設定で固定（nightly-2025-12-15）
+            - Cargo.lockをコミットして依存バージョンを固定
+            - 大きな変動時は手動で原因調査
+
+  # ======================================================================
+  # 1.2 Bencher統合設定
+  # ======================================================================
+  - id: REQ-IAI-001-2
+    name: "Bencher統合"
+    description: |
+      Bencherを使用した継続的ベンチマークトラッキングの設定。
+      CI環境での結果送信、ベースライン管理、回帰判定を定義する。
+
+    methods:
+      - name: "Bencher CLI導入"
+        signature: "cargo install bencher_cli"
+        description: |
+          Bencher CLIをCIジョブにインストールする。
+        examples:
+          - description: "CI環境でのBencher CLI導入"
+            code: |
+              - name: Install Bencher CLI
+                run: cargo install bencher_cli --locked
+
+      - name: "rust_iai_callgrindアダプタ"
+        signature: "bencher run --adapter rust_iai_callgrind"
+        description: |
+          Iai-Callgrindの出力をBencherに送信する際に使用するアダプタ。
+          Iai-Callgrindの標準出力を解析し、命令数をBencherに記録する。
+
+          注意: このコマンドはmainブランチへのpush時に使用する。
+          PRでの回帰検出には後述の「PR用標準コマンド」を使用すること。
+        examples:
+          - description: "mainブランチへのpush時（ベースライン更新）"
+            code: |
+              - name: Run Benchmarks (Baseline Update)
+                if: github.ref == 'refs/heads/main'
+                env:
+                  BENCHER_API_TOKEN: ${{ secrets.BENCHER_API_TOKEN }}
+                run: |
+                  bencher run \
+                    --project lambars \
+                    --branch main \
+                    --testbed github-actions \
+                    --adapter rust_iai_callgrind \
+                    cargo bench --bench persistent_vector_iai
+
+      - name: "ベースライン管理"
+        signature: "bencher threshold"
+        description: |
+          mainブランチの測定値をベースラインとして使用する。
+          PRブランチはmainブランチの最新測定値と比較される。
+
+          ベースライン更新:
+            - mainブランチへのpush時に自動更新
+            - 手動でのリセットは `bencher archive` で過去データを参照
+
+          ベースライン取得:
+            - PRジョブでは自動的にmainブランチの最新値を参照
+            - Bencherのhistorical thresholdを使用
+
+      - name: "PR用標準コマンド（必須）"
+        signature: "bencher run --start-point --err --threshold-*"
+        description: |
+          PRでの回帰検出時に必須となるコマンド。
+          以下のフラグは全て必須であり、省略不可。
+
+          必須フラグ:
+            - --start-point ${{ github.base_ref }}: ベースブランチを指定
+            - --start-point-reset: ベースポイントから新しくベンチマーク履歴を開始
+            - --err: 閾値超過時にnon-zero exitを返す
+            - --threshold-measure instructions: 命令数を閾値判定の対象とする
+            - --threshold-upper-boundary 0.10: +10%を回帰判定の閾値とする
+
+          成功条件:
+            - 全ベンチマークが±10%以内の変動
+            - または改善（-10%超の削減）
+
+          失敗条件:
+            - いずれかのベンチマークが+10%超の増加
+            - `--err` フラグにより回帰時にnon-zero exitで失敗
+
+          警告（失敗ではない）:
+            - 改善が検出された場合はPRコメントで通知
+        examples:
+          - description: "PR用標準ベンチマークコマンド（必須形式）"
+            code: |
+              # このコマンド形式はPRで必須
+              - name: Run Benchmarks (PR Regression Detection)
+                if: github.event_name == 'pull_request'
+                env:
+                  BENCHER_API_TOKEN: ${{ secrets.BENCHER_API_TOKEN }}
+                run: |
+                  bencher run \
+                    --project lambars \
+                    --branch ${{ github.head_ref }} \
+                    --start-point ${{ github.base_ref }} \
+                    --start-point-reset \
+                    --testbed github-actions \
+                    --adapter rust_iai_callgrind \
+                    --err \
+                    --threshold-measure instructions \
+                    --threshold-upper-boundary 0.10 \
+                    cargo bench --bench persistent_vector_iai
+
+      - name: "運用フロー"
+        signature: "main vs PR workflow"
+        description: |
+          mainブランチとPRブランチでの運用フローを定義する。
+
+          mainブランチへのpush時:
+            1. ベンチマーク実行
+            2. 結果をBencherに送信（ベースライン更新）
+            3. 閾値判定なし（常に成功）
+
+          PRブランチ:
+            1. ベンチマーク実行
+            2. mainブランチの最新ベースラインと比較
+            3. +10%超の回帰があればCI失敗
+            4. 改善があればPRコメントで通知
+
+  # ======================================================================
+  # 2. 永続データ構造ベンチマーク
+  # ======================================================================
+  - id: REQ-IAI-002
+    name: "persistent_vector_iai.rs"
+    description: |
+      PersistentVectorおよび関連する永続データ構造の
+      基本操作パフォーマンスを測定する。
+
+    methods:
+      - name: "push_back"
+        signature: "fn push_back_1000() -> PersistentVector<i32>"
+        description: |
+          1000件のpush_back操作のCPU命令数を測定する。
+        examples:
+          - description: "push_back測定"
+            code: |
+              #[library_benchmark]
+              fn push_back_1000() -> PersistentVector<i32> {
+                  let mut vector = PersistentVector::new();
+                  for i in 0..1000 {
+                      vector = vector.push_back(black_box(i));
+                  }
+                  black_box(vector)
+              }
+
+      - name: "get_sequential"
+        signature: "fn get_sequential_1000() -> i32"
+        description: |
+          1000件の順次get操作のCPU命令数を測定する。
+        examples:
+          - description: "get測定"
+            code: |
+              fn setup_vector() -> PersistentVector<i32> {
+                  (0..1000).collect()
+              }
+
+              #[library_benchmark]
+              #[bench::with_setup(setup_vector())]
+              fn get_sequential_1000(vector: PersistentVector<i32>) -> i32 {
+                  let vector = black_box(vector);  // 入力をblack_box化
+                  let mut sum = 0;
+                  for i in 0..1000 {
+                      if let Some(&v) = vector.get(black_box(i)) {
+                          sum += v;
+                      }
+                  }
+                  black_box(sum)
+              }
+
+      - name: "update"
+        signature: "fn update_1000() -> PersistentVector<i32>"
+        description: |
+          1000件のupdate操作のCPU命令数を測定する。
+
+          入力:
+            - setup: (0..1000).collect() で1000要素のベクタを事前生成
+            - 測定対象: 各インデックスに対してupdate(i, i * 2)を実行
+
+          返却値: 最終状態のベクタ（black_box化）
+        examples:
+          - description: "update測定"
+            code: |
+              fn setup_vector() -> PersistentVector<i32> {
+                  (0..1000).collect()
+              }
+
+              #[library_benchmark]
+              #[bench::with_setup(setup_vector())]
+              fn update_1000(vector: PersistentVector<i32>) -> PersistentVector<i32> {
+                  let mut vector = black_box(vector);  // 入力をblack_box化
+                  for i in 0..1000 {
+                      vector = vector.update(black_box(i), black_box(i as i32 * 2));
+                  }
+                  black_box(vector)
+              }
+
+      - name: "iter"
+        signature: "fn iter_1000() -> i32"
+        description: |
+          イテレーション操作のCPU命令数を測定する。
+
+          入力:
+            - setup: (0..1000).collect() で1000要素のベクタを事前生成
+            - 測定対象: iter().sum() による全要素の合計
+
+          返却値: 合計値（black_box化）
+        examples:
+          - description: "iter測定"
+            code: |
+              fn setup_vector() -> PersistentVector<i32> {
+                  (0..1000).collect()
+              }
+
+              #[library_benchmark]
+              #[bench::with_setup(setup_vector())]
+              fn iter_1000(vector: PersistentVector<i32>) -> i32 {
+                  let vector = black_box(vector);  // 入力をblack_box化
+                  black_box(vector.iter().sum())
+              }
+
+    implementations:
+      - type: "PersistentVector<T>"
+        description: |
+          Radix Balanced Treeベースの永続ベクタ。
+          push_back: O(log32 N), get: O(log32 N)
+      - type: "PersistentHashMap<K, V>"
+        description: |
+          HAMTベースの永続ハッシュマップ。
+          insert/get: O(log32 N)
+      - type: "PersistentTreeMap<K, V>"
+        description: |
+          Red-Black Treeベースの永続順序マップ。
+          insert/get: O(log N)
+      - type: "PersistentList<T>"
+        description: |
+          単方向リンクリスト。
+          cons: O(1), head: O(1)
+      - type: "PersistentHashSet<T>"
+        description: |
+          HAMTベースの永続セット。
+
+  # ======================================================================
+  # 3. エフェクトシステムベンチマーク
+  # ======================================================================
+  - id: REQ-IAI-003
+    name: "effect_iai.rs"
+    description: |
+      エフェクトシステム（IO, AsyncIO, Reader, State, ExceptT等）の
+      パフォーマンスを測定する。
+
+    methods:
+      - name: "io_pure_chain"
+        signature: "fn io_pure_chain_10() -> i32"
+        description: |
+          IO::pureとflat_mapチェーンのCPU命令数を測定する。
+        examples:
+          - description: "IOチェーン測定"
+            code: |
+              #[library_benchmark]
+              fn io_pure_chain_10() -> i32 {
+                  let initial = black_box(1);  // 定数をblack_box化
+                  let io = IO::pure(initial)
+                      .flat_map(|x| IO::pure(x + 1))
+                      .flat_map(|x| IO::pure(x * 2))
+                      // ... 10段階
+                  black_box(io.run_unsafe())
+              }
+
+      - name: "reader_chain"
+        signature: "fn reader_chain_10() -> i32"
+        description: |
+          Reader::askとflat_mapチェーンのCPU命令数を測定する。
+
+          入力:
+            - 環境値: 10（i32）
+            - 測定対象: ask -> flat_map(+1) -> flat_map(*2) ... を10回チェーン
+
+          返却値: 計算結果（black_box化）
+        examples:
+          - description: "Readerチェーン測定"
+            code: |
+              #[library_benchmark]
+              fn reader_chain_10() -> i32 {
+                  let reader = Reader::ask()
+                      .flat_map(|x: i32| Reader::pure(x + 1))
+                      .flat_map(|x| Reader::pure(x * 2))
+                      // ... 10段階
+                      .flat_map(|x| Reader::pure(x + 10));
+                  black_box(reader.run(black_box(10)))
+              }
+
+      - name: "state_chain"
+        signature: "fn state_chain_10() -> (i32, i32)"
+        description: |
+          State::get/putとflat_mapチェーンのCPU命令数を測定する。
+
+          入力:
+            - 初期状態: 0（i32）
+            - 測定対象: get -> put(s+1) -> get -> put(s*2) ... を10回チェーン
+
+          返却値: (最終結果, 最終状態)（black_box化）
+        examples:
+          - description: "Stateチェーン測定"
+            code: |
+              #[library_benchmark]
+              fn state_chain_10() -> (i32, i32) {
+                  let state = State::get()
+                      .flat_map(|s: i32| State::put(s + 1).then(State::get()))
+                      .flat_map(|s| State::put(s * 2).then(State::get()))
+                      // ... 10段階
+                      .flat_map(|s| State::pure(s));
+                  black_box(state.run(black_box(0)))
+              }
+
+      - name: "exceptt_chain"
+        signature: "fn exceptt_chain_10() -> Result<i32, String>"
+        description: |
+          ExceptTモナドスタックのCPU命令数を測定する。
+
+          入力:
+            - 初期値: Ok(1)
+            - 測定対象: pure_option -> flat_map_option(+1) -> flat_map_option(*2) ... を10回チェーン
+            - エラーパス: 測定対象外（純粋な成功パスのみ測定）
+
+          返却値: Result<i32, String>（black_box化）
+
+          実装上の制約:
+            lambarsのExceptTはIdentityベースのメソッドを持たないため、
+            Optionベースで実装し、最終的にexpect()でアンラップする。
+        examples:
+          - description: "ExceptTチェーン測定"
+            code: |
+              #[library_benchmark]
+              fn exceptt_chain_10() -> Result<i32, String> {
+                  let initial = black_box(1);
+                  let exceptt: ExceptT<String, Option<Result<i32, String>>> =
+                      ExceptT::pure_option(initial)
+                          .flat_map_option(|x| ExceptT::pure_option(x + 1))
+                          .flat_map_option(|x| ExceptT::pure_option(x * 2))
+                          // ... 10段階
+                          .flat_map_option(|x| ExceptT::pure_option(x + 10));
+                  black_box(exceptt.run().expect("Option should be Some"))
+              }
+
+      - name: "eff_macro"
+        signature: "fn eff_macro_10() -> i32"
+        description: |
+          eff!マクロのオーバーヘッドを測定する。
+
+          入力:
+            - 測定対象: eff! { x <= IO::pure(1); y <= IO::pure(x+1); ... } を10段階
+            - 比較対象: 手書きflat_mapチェーン
+
+          返却値: 計算結果（black_box化）
+
+          副作用方針:
+            IO::run_unsafeを使用するが、内部は純粋計算のみ（外部I/O禁止）
+        examples:
+          - description: "eff!マクロ測定"
+            code: |
+              #[library_benchmark]
+              fn eff_macro_10() -> i32 {
+                  let initial = black_box(1);
+                  let io = eff! {
+                      x <= IO::pure(initial);
+                      y <= IO::pure(x + 1);
+                      z <= IO::pure(y * 2);
+                      // ... 10段階
+                      w <= IO::pure(z + 10);
+                      IO::pure(w)
+                  };
+                  black_box(io.run_unsafe())
+              }
+
+    implementations:
+      - type: "IO<A>"
+        description: |
+          遅延副作用モナド。run_unsafeで実行。
+      - type: "Reader<R, A>"
+        description: |
+          環境依存計算モナド。
+      - type: "State<S, A>"
+        description: |
+          状態付き計算モナド。
+      - type: "ExceptT<M, E, A>"
+        description: |
+          エラーハンドリングモナドトランスフォーマー。
+
+  # ======================================================================
+  # 4. シナリオベンチマーク
+  # ======================================================================
+  - id: REQ-IAI-004
+    name: "scenario_iai.rs"
+    description: |
+      実務的なユースケースを想定したシナリオベンチマーク。
+      複数のlambars機能を組み合わせた複合的な操作を測定する。
+
+    methods:
+      - name: "monad_transformer_chain"
+        signature: "fn monad_transformer_chain() -> i32"
+        description: |
+          Reader -> State -> IO のモナドトランスフォーマー合成を測定する。
+        examples:
+          - description: "モナド合成シナリオ"
+            code: |
+              #[library_benchmark]
+              fn monad_transformer_chain() -> i32 {
+                  let reader: Reader<i32, i32> = Reader::ask()
+                      .flat_map(|env| Reader::pure(env * 2));
+
+                  let state = State::get()
+                      .flat_map(|s| State::put(s + reader.run(black_box(10))))
+                      .then(State::get());
+
+                  let io = IO::pure(state.run(black_box(0)))
+                      .fmap(|(result, _)| result);
+
+                  black_box(io.run_unsafe())
+              }
+
+      - name: "persistent_data_pipeline"
+        signature: "fn persistent_data_pipeline() -> Option<i32>"
+        description: |
+          永続データ構造の連続操作パイプラインを測定する。
+
+          入力:
+            - setup: (0..100).collect() で100要素のPersistentVectorを事前生成
+            - 測定対象: update -> push_back -> HashMap変換 -> get
+
+          返却値: 取得した値（black_box化）
+        examples:
+          - description: "永続データ構造パイプライン"
+            code: |
+              fn setup_vector() -> PersistentVector<i32> {
+                  (0..100).collect()
+              }
+
+              #[library_benchmark]
+              #[bench::with_setup(setup_vector())]
+              fn persistent_data_pipeline(vector: PersistentVector<i32>) -> Option<i32> {
+                  let vector = black_box(vector);  // 入力をblack_box化
+                  let updated = vector
+                      .update(black_box(50), black_box(999))
+                      .push_back(black_box(100))
+                      .push_back(black_box(101));
+
+                  let map: PersistentHashMap<i32, i32> =
+                      updated.iter().enumerate()
+                          .map(|(i, &v)| (i as i32, v))
+                          .collect();
+
+                  black_box(map.get(&black_box(50)).copied())
+              }
+
+      - name: "for_macro_pipeline"
+        signature: "fn for_macro_pipeline() -> Vec<i32>"
+        description: |
+          for_!マクロを使用したパイプライン処理を測定する。
+
+          入力:
+            - setup: (0..100).collect() で100要素のベクタを事前生成
+            - 測定対象: for_! { x <- vec; y <- Some(x * 2); pure(y + 1) }
+
+          返却値: 変換後のVec（black_box化）
+        examples:
+          - description: "for_!パイプライン測定"
+            code: |
+              fn setup_data() -> Vec<i32> {
+                  (0..100).collect()
+              }
+
+              #[library_benchmark]
+              #[bench::with_setup(setup_data())]
+              fn for_macro_pipeline(data: Vec<i32>) -> Vec<i32> {
+                  let data = black_box(data);  // 入力をblack_box化
+                  let result = for_! {
+                      x <- data.into_iter();
+                      y <- std::iter::once(x * 2);
+                      z <- std::iter::once(y + 1);
+                      pure(z)
+                  }.collect();
+                  black_box(result)
+              }
+
+      - name: "optics_update"
+        signature: "fn optics_update() -> Task"
+        description: |
+          Lens/Opticsを使用したネストデータ更新を測定する。
+
+          入力:
+            - setup: Task { id: 1, title: "Test", status: Todo, metadata: Metadata { ... } }
+            - 測定対象: task_title_lens.set() と task_status_lens.set() を連続適用
+
+          返却値: 更新後のTask（black_box化）
+        examples:
+          - description: "Lens更新測定"
+            code: |
+              #[derive(Clone)]
+              struct Task {
+                  id: u64,
+                  title: String,
+                  status: TaskStatus,
+              }
+
+              fn setup_task() -> Task {
+                  Task { id: 1, title: "Test".to_string(), status: TaskStatus::Todo }
+              }
+
+              #[library_benchmark]
+              #[bench::with_setup(setup_task())]
+              fn optics_update(task: Task) -> Task {
+                  let task = black_box(task);  // 入力をblack_box化
+                  let title_lens = lens!(Task, title);
+                  let status_lens = lens!(Task, status);
+
+                  let updated = pipe!(
+                      task,
+                      |t| title_lens.set(t, "Updated".to_string()),
+                      |t| status_lens.set(t, TaskStatus::Done)
+                  );
+                  black_box(updated)
+              }
+
+      - name: "trampoline_recursion"
+        signature: "fn trampoline_recursion_1000() -> i32"
+        description: |
+          Trampolineによるスタック安全再帰を測定する。
+
+          入力:
+            - 再帰深さ: 1000回
+            - 測定対象: sum(0..1000) をTrampolineで実装
+
+          返却値: 合計値（black_box化）
+        examples:
+          - description: "Trampoline再帰測定"
+            code: |
+              fn sum_trampoline(n: i32, acc: i32) -> Trampoline<i32> {
+                  if n <= 0 {
+                      Trampoline::done(acc)
+                  } else {
+                      Trampoline::suspend(move || sum_trampoline(n - 1, acc + n))
+                  }
+              }
+
+              #[library_benchmark]
+              fn trampoline_recursion_1000() -> i32 {
+                  let n = black_box(1000);  // 定数をblack_box化
+                  let acc = black_box(0);   // 定数をblack_box化
+                  black_box(sum_trampoline(n, acc).run())
+              }
+
+      - name: "foldable_aggregation"
+        signature: "fn foldable_aggregation() -> i32"
+        description: |
+          Foldableによる集計操作を測定する。
+
+          入力:
+            - setup: (0..1000).collect() で1000要素のPersistentVectorを事前生成
+            - 測定対象: fold_left(0, |acc, x| acc + x)
+
+          返却値: 合計値（black_box化）
+        examples:
+          - description: "Foldable集計測定"
+            code: |
+              fn setup_vector() -> PersistentVector<i32> {
+                  (0..1000).collect()
+              }
+
+              #[library_benchmark]
+              #[bench::with_setup(setup_vector())]
+              fn foldable_aggregation(vector: PersistentVector<i32>) -> i32 {
+                  let vector = black_box(vector);  // 入力をblack_box化
+                  let initial = black_box(0);       // 初期値をblack_box化
+                  black_box(vector.fold_left(initial, |acc, x| acc + x))
+              }
+
+    implementations:
+      - type: "複合シナリオ"
+        description: |
+          以下のlambars機能を組み合わせて測定:
+          - typeclass: Functor, Monad, Foldable, Traversable
+          - compose: for_!, compose!, pipe!
+          - control: Trampoline, Lazy
+          - persistent: PersistentVector, PersistentHashMap
+          - optics: Lens, Prism
+          - effect: IO, Reader, State
+
+# ベンチマーク対象範囲
+scope:
+  included:
+    description: |
+      Phase 1で対象とするlambarsモジュール・機能を定義する。
+      主要な同期処理・純粋計算を優先し、非同期・並列処理は将来フェーズで対応。
+
+      対象は「Phase 1 初期実装」と「Phase 1 追加実装」に分類される。
+      初期実装は本要件定義で詳細が定義済み、追加実装は別途要件定義を作成する。
+
+    phase1_initial:
+      description: |
+        本要件定義（REQ-IAI-002〜REQ-IAI-004）で詳細が定義済みのモジュール。
+        これらは本Phase 1の実装スコープに含まれる。
+
+      persistent_vector_iai:
+        file: "benches/iai/persistent_vector_iai.rs"
+        modules:
+          - name: "PersistentVector"
+            functions:
+              - push_back_1000
+              - get_sequential_1000
+              - update_1000
+              - iter_1000
+
+      effect_iai:
+        file: "benches/iai/effect_iai.rs"
+        modules:
+          - name: "IO"
+            functions:
+              - io_pure_chain_10
+          - name: "Reader"
+            functions:
+              - reader_chain_10
+          - name: "State"
+            functions:
+              - state_chain_10
+          - name: "ExceptT"
+            functions:
+              - exceptt_chain_10
+          - name: "eff!マクロ"
+            functions:
+              - eff_macro_10
+
+      scenario_iai:
+        file: "benches/iai/scenario_iai.rs"
+        modules:
+          - name: "複合シナリオ"
+            functions:
+              - monad_transformer_chain
+              - persistent_data_pipeline
+              - for_macro_pipeline
+              - optics_update
+              - trampoline_recursion_1000
+              - foldable_aggregation
+
+    phase1_additional:
+      description: |
+        Phase 1の範囲内だが、本要件定義では詳細を定義していないモジュール。
+        これらは初期実装完了後に追加の要件定義を作成して実装する。
+
+      persistent:
+        - name: "PersistentHashMap"
+          target_file: "benches/iai/persistent_vector_iai.rs（追加）"
+          planned_functions:
+            - insert_1000
+            - get_1000
+            - update_1000
+        - name: "PersistentTreeMap"
+          target_file: "benches/iai/persistent_vector_iai.rs（追加）"
+          planned_functions:
+            - insert_1000
+            - get_1000
+            - range_query
+        - name: "PersistentList"
+          target_file: "benches/iai/persistent_vector_iai.rs（追加）"
+          planned_functions:
+            - cons_1000
+            - head_tail_1000
+        - name: "PersistentHashSet"
+          target_file: "benches/iai/persistent_vector_iai.rs（追加）"
+          planned_functions:
+            - insert_1000
+            - contains_1000
+      control:
+        - name: "Lazy"
+          target_file: "benches/iai/scenario_iai.rs（追加）"
+          planned_functions:
+            - lazy_evaluation
+            - lazy_chain
+        - name: "Either"
+          target_file: "benches/iai/effect_iai.rs（追加）"
+          planned_functions:
+            - either_map_chain
+            - either_flat_map_chain
+      compose:
+        - name: "compose!"
+          target_file: "benches/iai/scenario_iai.rs（追加）"
+          planned_functions:
+            - compose_chain
+      optics:
+        - name: "Prism"
+          target_file: "benches/iai/scenario_iai.rs（追加）"
+          planned_functions:
+            - prism_get_option
+            - prism_modify
+      typeclass:
+        - name: "Functor/Monad/Foldable"
+          note: |
+            これらは各モナド・データ構造の実装に含まれるため、
+            明示的なベンチマークではなく、既存ベンチマーク内で測定される。
+
+  excluded:
+    description: |
+      Phase 1では対象外とするモジュール・機能と除外理由を定義する。
+
+    items:
+      - module: "persistent/deque (PersistentDeque)"
+        reason: |
+          Finger Treeベースの複雑な実装であり、
+          基本的な永続データ構造のベンチマークを確立後に追加。
+      - module: "control/concurrent_lazy (ConcurrentLazy)"
+        reason: |
+          スレッド安全な遅延評価は並列処理の文脈で測定すべき。
+          Iai-Callgrindでのマルチスレッド測定精度を検証後に追加。
+      - module: "control/continuation (Continuation)"
+        reason: |
+          継続モナドは高度なユースケース向け。
+          基本的なモナドのベンチマークを確立後に追加。
+      - module: "control/freer (Freer)"
+        reason: |
+          Freerモナドはメタプログラミング的用途が多く、
+          典型的なユースケースのベンチマーク設計が必要。
+      - module: "effect/algebraic"
+        reason: |
+          代数的エフェクトは高度な機能であり、
+          基本的なエフェクトシステムのベンチマークを確立後に追加。
+      - module: "effect/async_io (AsyncIO)"
+        reason: |
+          Iai-Callgrindは同期処理向けに最適化されており、
+          Tokioランタイムとの統合が必要。future_extensionsで対応。
+      - module: "effect/writer (Writer)"
+        reason: |
+          Writer/RWSはReader/Stateと構造が類似。
+          基本ベンチマークで傾向を把握後に追加。
+      - module: "effect/rws (RWS)"
+        reason: |
+          Reader + Writer + Stateの複合モナド。
+          個別モナドのベンチマーク確立後に追加。
+      - module: "compose/for_async!, pipe_async!"
+        reason: |
+          非同期マクロはAsyncIOと同様、同期処理確立後に追加。
+      - module: "compose/partial!, curry!"
+        reason: |
+          関数合成ユーティリティは単独ベンチマークより、
+          シナリオベンチマーク内で複合的に測定。
+      - module: "typeclass/alternative (Alternative)"
+        reason: |
+          Alternativeは既存Criterionベンチマークでカバー済み。
+          Iai-Callgrind移行時に追加検討。
+      - module: "typeclass/applicative (Applicative)"
+        reason: |
+          Applicativeは各モナド実装に含まれるため、
+          明示的なベンチマークより実装内で測定。
+
+non_functional_requirements:
+  performance:
+    - "CI環境（GitHub Actions ubuntu-latest）で全ベンチマークが5分以内に完了すること"
+    - "回帰検出閾値: ±10%（REQ-IAI-001-1参照）"
+  compatibility:
+    - "既存のCriterionベンチマークと共存可能であること"
+    - "Bencherのrust_iai_callgrindアダプタと互換性があること"
+    - "iai-callgrind 0.14とiai-callgrind-runner 0.14.0のバージョンが一致すること"
+  testing:
+    - "全ベンチマークがcargo bench --bench <name>_iai（例: cargo bench --bench persistent_vector_iai）で個別実行可能であること"
+    - "Docker環境でも同一の傾向・閾値内で再現可能であること（固定ツールチェーン・イメージを前提）"
+  purity:
+    description: |
+      測定区間での純粋性を担保するためのルール。
+      Iai-Callgrindの測定結果の再現性と正確性を確保するために必須。
+
+    rules:
+      - "測定区間では外部状態・I/Oを行わない（純粋計算のみ）"
+      - "IO::run_unsafeを使用する場合も、内部は純粋計算に限定する"
+      - "セットアップと計測を分離し、セットアップは#[bench::with_setup]で実行する"
+      - "ベンチ関数冒頭で入力をblack_box化する（例: let input = black_box(input);）"
+
+    prohibited_in_measurement:
+      - "ファイルシステム操作（std::fs::*, std::io::*）"
+      - "ネットワーク操作（std::net::*, reqwest, hyper等）"
+      - "時刻取得（std::time::Instant::now, SystemTime等）"
+      - "乱数生成（rand::*, 非決定的な値）"
+      - "グローバル状態の読み書き（static mut, AtomicU64等）"
+      - "ログ出力（println!, eprintln!, log::*, tracing::*）"
+      - "スレッド生成（std::thread::spawn）"
+      - "外部プロセス実行（std::process::Command）"
+
+    allowed_io_constructors:
+      - "IO::pure - 純粋な値をラップ"
+      - "IO::delay - 遅延評価のラップ（内部が純粋な場合のみ）"
+      - "IO::fmap - 純粋な関数でのマッピング"
+      - "IO::flat_map - 純粋なIO間のチェーン"
+
+    input_black_box_policy:
+      description: |
+        コンパイラの最適化による測定結果の歪みを防ぐため、
+        入力値は必ずblack_box化する。
+      examples:
+        - description: "setupからの入力をblack_box化"
+          code: |
+            #[library_benchmark]
+            #[bench::with_setup(setup_vector())]
+            fn benchmark(input: PersistentVector<i32>) -> i32 {
+                let input = black_box(input);  // 入力をblack_box化
+                let result = input.fold_left(0, |acc, x| acc + x);
+                black_box(result)  // 出力もblack_box化
+            }
+        - description: "定数入力もblack_box化"
+          code: |
+            #[library_benchmark]
+            fn benchmark() -> i32 {
+                let initial = black_box(0);  // 定数もblack_box化
+                let io = IO::pure(black_box(1)).flat_map(|x| IO::pure(x + 1));
+                black_box(io.run_unsafe())
+            }
+
+future_extensions:
+  - id: EXT-IAI-001
+    name: "async_io_iai.rs"
+    description: |
+      AsyncIOのベンチマークを追加する。
+      Tokioランタイムとの統合が必要。
+    rationale: |
+      Iai-Callgrindは同期処理向けに最適化されており、
+      非同期処理のベンチマークは追加検討が必要。
+
+  - id: EXT-IAI-002
+    name: "rayon_iai.rs"
+    description: |
+      Rayon並列処理のベンチマークを追加する。
+    rationale: |
+      並列処理のベンチマークはノイズが大きくなる可能性があり、
+      Iai-Callgrindでの測定精度を検証後に追加。
+
+  - id: EXT-IAI-003
+    name: "memory_profiling"
+    description: |
+      DhatやMassifを使用したメモリプロファイリングを追加する。
+    rationale: |
+      まずは命令数ベースのベンチマークを確立し、
+      メモリプロファイリングは次フェーズで対応。

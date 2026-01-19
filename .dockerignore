@@ -1,0 +1,54 @@
+# Docker ignore file for lambars
+# This file reduces the build context from ~4.5GB to ~50MB
+
+# Build artifacts (largest impact)
+target/
+**/target/
+benches/api/target/
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Documentation (not needed for build)
+*.md
+docs/
+README.md
+CHANGELOG.md
+LICENSE
+
+# Tests (not needed for Docker build)
+tests/
+**/tests/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# CI/CD configuration
+.github/
+
+# Benchmark results and temporary files
+benchmarks/results/
+benches/api/benchmarks/results/
+*.log
+*.tmp
+
+# Sample projects (not needed for API build)
+samples/
+
+# Development files
+Makefile
+justfile
+.env
+.env.*
+
+# Proptest regressions
+*.proptest-regressions
+
+# Cargo artifacts outside target
+Cargo.lock.bak

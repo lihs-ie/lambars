@@ -1,0 +1,61 @@
+[package]
+name = "task-management-benchmark-api"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92.0"
+description = "Task management benchmark API demonstrating lambars library"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+lambars = { path = "../../", features = ["full", "arc"] }
+lambars-derive = { path = "../../lambars-derive" }
+
+# Web Framework
+axum = { version = "0.8", features = ["macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Database (PostgreSQL)
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono", "json"] }
+
+# Cache (Redis)
+deadpool-redis = { version = "0.18", features = ["rt_tokio_1"] }
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+
+# Utilities
+uuid = { version = "1.11", features = ["v4", "v7", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+dotenvy = "0.15"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+[dev-dependencies]
+rstest = "0.24"
+proptest = "1.5"
+tokio-test = "0.4"
+reqwest = { version = "0.12", features = ["json"] }
+
+[lib]
+name = "task_management_benchmark_api"
+path = "src/lib.rs"
+
+[[bin]]
+name = "task-management-benchmark-api"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"

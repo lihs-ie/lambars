@@ -1,0 +1,76 @@
+# Docker Compose configuration for CI environments
+#
+# Optimized for:
+#   - Fast startup (reduced healthcheck intervals)
+#   - Minimal logging (RUST_LOG=warn)
+#   - GitHub Actions cache integration
+#
+# Usage:
+#   docker compose -f compose.ci.yaml up -d --build --wait
+#   # Run tests/benchmarks
+#   docker compose -f compose.ci.yaml down -v
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: benchmark-ci-postgres
+    environment:
+      POSTGRES_USER: benchmark
+      POSTGRES_PASSWORD: benchmark
+      POSTGRES_DB: benchmark
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U benchmark -d benchmark"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 5s
+    tmpfs:
+      - /var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: benchmark-ci-redis
+    command: redis-server --appendonly no --save ""
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+    tmpfs:
+      - /data
+
+  api:
+    build:
+      context: ../../..
+      dockerfile: benches/api/docker/Dockerfile
+    container_name: benchmark-ci-api
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "3000"
+      STORAGE_MODE: postgres
+      CACHE_MODE: redis
+      DATABASE_URL: postgres://benchmark:benchmark@postgres:5432/benchmark
+      REDIS_URL: redis://redis:6379
+      RUST_LOG: info,task_management_benchmark_api=debug,tower_http=debug
+      RUST_BACKTRACE: "1"
+    ports:
+      - "3002:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+networks:
+  default:
+    name: benchmark-ci-network

@@ -1,0 +1,682 @@
+# Phase 2.6: pipe_async! 詳細API設計
+#
+# 概要:
+#   pipe_async!マクロを使用した非同期パイプライン処理のベンチマークAPI設計
+#   AsyncIO特化の左から右への関数適用パターンを検証
+#
+# 設計方針:
+#   1. pipe_async! で非同期処理のパイプライン構築
+#   2. => (fmap) と =>> (flat_map) の使い分け
+#   3. 遅延実行の保持と明示的な実行タイミング制御
+#   4. Send + 'static 制約への対応
+#
+# 参照:
+#   - lambars compose/pipe_async_macro.rs
+#   - docs/internal/plans/20260119_1400_benchmark_api_phase2_roadmap.yaml
+
+version: "1.0.0"
+phase_id: "phase_2_6"
+name: "pipe_async! ベンチマークAPI"
+
+overview:
+  description: |
+    pipe_async!マクロは、AsyncIO値に対する左から右への関数適用を提供する。
+    Rustの型システム制約により、AsyncIOは標準のFunctor/Monadトレイトを実装できない
+    （Send境界の問題）ため、このマクロが専用の構文を提供する。
+
+    主な用途：
+    - 非同期処理のパイプライン構築
+    - 複数の非同期操作の連鎖
+    - 純粋関数と非同期関数の混合パイプライン
+
+  lambars_features:
+    - "pipe_async! マクロ"
+    - "=> (fmap) オペレータ"
+    - "=>> (flat_map) オペレータ"
+    - "IntoPipeAsync トレイト"
+    - "AsyncIO::pure, AsyncIO::suspend"
+
+  priority: high
+
+  operators:
+    - symbol: "=>"
+      name: "Lift operator"
+      description: "純粋関数 A -> B を fmap で適用"
+      expansion: "m.into_pipe_async().fmap(f)"
+
+    - symbol: "=>>"
+      name: "Bind operator"
+      description: "モナディック関数 A -> AsyncIO<B> を flat_map で適用"
+      expansion: "m.into_pipe_async().flat_map(f)"
+
+# ==============================================================================
+# エンドポイント定義
+# ==============================================================================
+endpoints:
+  # ============================================================================
+  # 1. POST /tasks/{id}/transform-async - 非同期変換パイプライン
+  # ============================================================================
+  - id: transform_async
+    method: POST
+    path: "/tasks/{id}/transform-async"
+
+    use_case:
+      description: |
+        タスクを非同期に取得し、複数の変換をパイプラインで適用する。
+        pipe_async!を使用して、fmap（純粋変換）とflat_map（非同期処理）を
+        組み合わせたワークフローを構築。
+
+      scenarios:
+        - タスク取得成功、全変換成功 → 変換後のタスクを返却
+        - タスク取得失敗 → NotFoundエラー
+        - 変換中にエラー → TransformError
+
+    lambars_usage:
+      features:
+        - feature: "pipe_async! with => and =>>"
+          purpose: "非同期取得と純粋変換の組み合わせ"
+          code_example: |
+            ```rust
+            fn transform_task_pipeline(
+                repository: Arc<dyn TaskRepository>,
+                task_id: TaskId,
+                transforms: Vec<TransformType>,
+            ) -> AsyncIO<Task> {
+                pipe_async!(
+                    fetch_task(repository.clone(), task_id),
+                    =>> |task| validate_task(task),              // flat_map: 非同期検証
+                    => |task| apply_transforms(&task, &transforms), // fmap: 純粋変換
+                    =>> |task| enrich_task(repository, task)     // flat_map: 非同期エンリッチ
+                )
+            }
+
+            fn fetch_task(repository: Arc<dyn TaskRepository>, id: TaskId) -> AsyncIO<Task> {
+                AsyncIO::suspend(async move {
+                    repository.find_by_id(&id).await?
+                        .ok_or_else(|| FetchError::NotFound(id))
+                })
+            }
+            ```
+
+      data_flow: |
+        1. POSTリクエスト受信（タスクID + 変換リスト）
+        2. pipe_async!でパイプライン構築（遅延）
+        3. run_async()で実行
+        4. 結果を返却
+
+    infrastructure:
+      repositories:
+        - name: TaskRepository
+          methods:
+            - find_by_id
+            - save
+
+      dto:
+        request:
+          name: TransformAsyncRequest
+          fields:
+            - name: transforms
+              type: "Vec<TransformType>"
+              validation: "1-10個の変換"
+            - name: options
+              type: "Option<TransformOptions>"
+
+        response:
+          name: TransformAsyncResponse
+          fields:
+            - name: task
+              type: "TaskDto"
+            - name: applied_transforms
+              type: "Vec<String>"
+            - name: execution_time_ms
+              type: "u64"
+
+      error_handling:
+        - code: "NOT_FOUND"
+          status: 404
+          condition: "タスクが存在しない場合"
+        - code: "TRANSFORM_ERROR"
+          status: 422
+          condition: "変換処理に失敗した場合"
+
+    pure_functions:
+      - name: apply_transforms
+        signature: "fn apply_transforms(task: &Task, transforms: &[TransformType]) -> Task"
+        description: "純粋な変換関数（fmapで使用）"
+
+      - name: build_transform_pipeline
+        signature: "fn build_transform_pipeline(repository: Arc<dyn TaskRepository>, id: TaskId, transforms: Vec<TransformType>) -> AsyncIO<Task>"
+        description: "pipe_async!を使用してパイプラインを構築"
+
+  # ============================================================================
+  # 2. POST /tasks/workflow-async - 複数ステップの非同期ワークフロー
+  # ============================================================================
+  - id: workflow_async
+    method: POST
+    path: "/tasks/workflow-async"
+
+    use_case:
+      description: |
+        複数の非同期ステップからなるワークフローを実行する。
+        各ステップは前のステップの結果に依存し、pipe_async!で
+        シーケンシャルに連結する。
+
+      scenarios:
+        - 全ステップ成功 → 最終結果を返却
+        - いずれかのステップで失敗 → エラーで停止
+
+    lambars_usage:
+      features:
+        - feature: "pipe_async! chain"
+          purpose: "依存関係のある非同期ステップの連鎖"
+          code_example: |
+            ```rust
+            fn execute_workflow(
+                task_repo: Arc<dyn TaskRepository>,
+                project_repo: Arc<dyn ProjectRepository>,
+                notification_service: Arc<dyn NotificationService>,
+                workflow: WorkflowRequest,
+            ) -> AsyncIO<WorkflowResult> {
+                pipe_async!(
+                    // Step 1: タスク作成
+                    create_task(task_repo.clone(), &workflow.task_data),
+                    =>> |task| {
+                        // Step 2: プロジェクトに関連付け
+                        let project_repo = project_repo.clone();
+                        AsyncIO::suspend(async move {
+                            project_repo.add_task(&workflow.project_id, &task.id).await?;
+                            Ok(task)
+                        })
+                    },
+                    =>> |task| {
+                        // Step 3: 通知送信
+                        let notification_service = notification_service.clone();
+                        AsyncIO::suspend(async move {
+                            notification_service.notify_task_created(&task).await?;
+                            Ok(task)
+                        })
+                    },
+                    => |task| WorkflowResult::success(task)
+                )
+            }
+            ```
+
+      data_flow: |
+        1. POSTリクエスト受信（ワークフロー定義）
+        2. pipe_async!でステップを連鎖
+        3. 各ステップを順番に実行
+        4. 最終結果を返却
+
+    infrastructure:
+      repositories:
+        - name: TaskRepository
+          methods:
+            - create
+            - find_by_id
+        - name: ProjectRepository
+          methods:
+            - add_task
+        - name: NotificationService
+          methods:
+            - notify_task_created
+
+      dto:
+        request:
+          name: WorkflowAsyncRequest
+          fields:
+            - name: project_id
+              type: "ProjectId"
+            - name: task_data
+              type: "CreateTaskRequest"
+            - name: notify
+              type: "bool"
+              validation: "通知を送信するか"
+
+        response:
+          name: WorkflowAsyncResponse
+          fields:
+            - name: task
+              type: "TaskDto"
+            - name: steps_executed
+              type: "Vec<StepResult>"
+            - name: total_time_ms
+              type: "u64"
+
+      error_handling:
+        - code: "WORKFLOW_STEP_FAILED"
+          status: 500
+          condition: "いずれかのステップが失敗した場合"
+        - code: "PROJECT_NOT_FOUND"
+          status: 404
+          condition: "プロジェクトが存在しない場合"
+
+    pure_functions:
+      - name: build_workflow_steps
+        signature: "fn build_workflow_steps(config: &WorkflowConfig) -> Vec<WorkflowStep>"
+        description: "ワークフローステップの構築（純粋関数）"
+
+  # ============================================================================
+  # 3. POST /tasks/batch-process-async - 非同期バッチ処理パイプライン
+  # ============================================================================
+  - id: batch_process_async
+    method: POST
+    path: "/tasks/batch-process-async"
+
+    use_case:
+      description: |
+        複数のタスクに対して、同じ処理パイプラインを適用する。
+        各タスクの処理はpipe_async!でパイプラインを構築し、
+        traverse_async_io_parallelで並列実行する。
+
+      scenarios:
+        - 全タスク処理成功 → 処理結果のリストを返却
+        - 一部失敗 → 最初のエラーを返却
+
+    lambars_usage:
+      features:
+        - feature: "pipe_async! + traverse_async_io_parallel"
+          purpose: "パイプラインをバッチ処理に適用"
+          code_example: |
+            ```rust
+            fn batch_process_tasks(
+                repository: Arc<dyn TaskRepository>,
+                task_ids: Vec<TaskId>,
+                processing_steps: Vec<ProcessingStep>,
+            ) -> AsyncIO<Vec<ProcessedTask>> {
+                task_ids.traverse_async_io_parallel(|task_id| {
+                    let repository = repository.clone();
+                    let steps = processing_steps.clone();
+
+                    // 各タスクにpipe_async!パイプラインを適用
+                    pipe_async!(
+                        fetch_task(repository.clone(), task_id),
+                        => |task| preprocess(&task),
+                        =>> |task| process_steps(repository.clone(), task, &steps),
+                        => |task| postprocess(&task)
+                    )
+                })
+            }
+            ```
+
+      data_flow: |
+        1. POSTリクエスト受信（タスクIDリスト + 処理ステップ）
+        2. 各タスクにpipe_async!パイプラインを適用
+        3. traverse_async_io_parallelで並列実行
+        4. 処理結果リストを返却
+
+    infrastructure:
+      repositories:
+        - name: TaskRepository
+          methods:
+            - find_by_id
+            - save
+
+      dto:
+        request:
+          name: BatchProcessAsyncRequest
+          fields:
+            - name: task_ids
+              type: "Vec<TaskId>"
+              validation: "1-50件"
+            - name: processing_steps
+              type: "Vec<ProcessingStep>"
+              validation: "1-5ステップ"
+
+        response:
+          name: BatchProcessAsyncResponse
+          fields:
+            - name: results
+              type: "Vec<ProcessedTaskDto>"
+            - name: success_count
+              type: "usize"
+            - name: total_time_ms
+              type: "u64"
+
+      error_handling:
+        - code: "PROCESSING_FAILED"
+          status: 500
+          condition: "処理に失敗した場合"
+        - code: "PARTIAL_FAILURE"
+          status: 207
+          condition: "一部のタスクで失敗した場合"
+
+    pure_functions:
+      - name: preprocess
+        signature: "fn preprocess(task: &Task) -> Task"
+        description: "前処理（純粋関数）"
+
+      - name: postprocess
+        signature: "fn postprocess(task: &Task) -> ProcessedTask"
+        description: "後処理（純粋関数）"
+
+  # ============================================================================
+  # 4. POST /tasks/conditional-pipeline - 条件分岐パイプライン
+  # ============================================================================
+  - id: conditional_pipeline
+    method: POST
+    path: "/tasks/conditional-pipeline"
+
+    use_case:
+      description: |
+        条件によって異なる処理を適用するパイプラインを構築する。
+        pipe_async!の中で条件分岐を行い、動的なワークフローを実現。
+
+      scenarios:
+        - 条件Aを満たす → パイプラインAを実行
+        - 条件Bを満たす → パイプラインBを実行
+        - どの条件も満たさない → デフォルトパイプラインを実行
+
+    lambars_usage:
+      features:
+        - feature: "pipe_async! with conditional flat_map"
+          purpose: "条件分岐を含むパイプライン"
+          code_example: |
+            ```rust
+            fn conditional_pipeline(
+                repository: Arc<dyn TaskRepository>,
+                task_id: TaskId,
+                conditions: PipelineConditions,
+            ) -> AsyncIO<Task> {
+                pipe_async!(
+                    fetch_task(repository.clone(), task_id),
+                    =>> |task| {
+                        if task.priority.is_high() {
+                            // 高優先度: 追加の検証と即時通知
+                            pipe_async!(
+                                AsyncIO::pure(task),
+                                =>> |t| validate_high_priority(t),
+                                =>> |t| notify_immediately(t)
+                            )
+                        } else if task.is_overdue() {
+                            // 期限超過: エスカレーション処理
+                            escalate_task(repository.clone(), task)
+                        } else {
+                            // 通常: 標準処理
+                            AsyncIO::pure(task)
+                        }
+                    },
+                    => |task| finalize(&task)
+                )
+            }
+            ```
+
+      data_flow: |
+        1. POSTリクエスト受信（タスクID + 条件設定）
+        2. タスクを取得
+        3. 条件に応じてパイプラインを選択
+        4. 選択されたパイプラインを実行
+        5. 結果を返却
+
+    infrastructure:
+      repositories:
+        - name: TaskRepository
+          methods:
+            - find_by_id
+            - save
+
+      dto:
+        request:
+          name: ConditionalPipelineRequest
+          fields:
+            - name: conditions
+              type: "PipelineConditions"
+            - name: fallback_action
+              type: "Option<FallbackAction>"
+
+        response:
+          name: ConditionalPipelineResponse
+          fields:
+            - name: task
+              type: "TaskDto"
+            - name: pipeline_used
+              type: "String"
+            - name: conditions_evaluated
+              type: "Vec<ConditionResult>"
+
+      error_handling:
+        - code: "NOT_FOUND"
+          status: 404
+          condition: "タスクが存在しない場合"
+        - code: "PIPELINE_ERROR"
+          status: 500
+          condition: "パイプライン実行に失敗した場合"
+
+    pure_functions:
+      - name: select_pipeline
+        signature: "fn select_pipeline(task: &Task, conditions: &PipelineConditions) -> PipelineType"
+        description: "条件に応じてパイプラインを選択（純粋関数）"
+
+      - name: finalize
+        signature: "fn finalize(task: &Task) -> Task"
+        description: "最終処理（純粋関数）"
+
+# ==============================================================================
+# 追加の型定義
+# ==============================================================================
+types:
+  - name: TransformType
+    description: "適用可能な変換の種類"
+    variants:
+      - name: NormalizeTitle
+        description: "タイトルの正規化"
+      - name: BumpPriority
+        description: "優先度を上げる"
+      - name: SetDeadline
+        fields: ["deadline: NaiveDate"]
+      - name: AddTag
+        fields: ["tag: String"]
+      - name: Custom
+        fields: ["transform_fn: String"]
+
+  - name: ProcessingStep
+    description: "処理ステップの定義"
+    fields:
+      - name: name
+        type: "String"
+      - name: step_type
+        type: "ProcessingStepType"
+      - name: config
+        type: "Option<serde_json::Value>"
+
+  - name: ProcessingStepType
+    description: "処理ステップの種類"
+    variants:
+      - name: Validate
+        description: "検証処理"
+      - name: Transform
+        description: "変換処理"
+      - name: Enrich
+        description: "エンリッチ処理"
+      - name: Notify
+        description: "通知処理"
+
+  - name: PipelineConditions
+    description: "パイプライン選択条件"
+    fields:
+      - name: high_priority_threshold
+        type: "Option<Priority>"
+      - name: overdue_action
+        type: "Option<OverdueAction>"
+      - name: custom_conditions
+        type: "Vec<CustomCondition>"
+
+  - name: PipelineType
+    description: "パイプラインの種類"
+    variants:
+      - name: HighPriority
+        description: "高優先度パイプライン"
+      - name: Escalation
+        description: "エスカレーションパイプライン"
+      - name: Standard
+        description: "標準パイプライン"
+
+  - name: WorkflowResult
+    description: "ワークフロー実行結果"
+    fields:
+      - name: success
+        type: "bool"
+      - name: task
+        type: "Option<Task>"
+      - name: error
+        type: "Option<String>"
+      - name: steps_completed
+        type: "usize"
+
+  - name: StepResult
+    description: "ステップ実行結果"
+    fields:
+      - name: step_name
+        type: "String"
+      - name: success
+        type: "bool"
+      - name: duration_ms
+        type: "u64"
+      - name: output
+        type: "Option<String>"
+
+# ==============================================================================
+# テスト戦略
+# ==============================================================================
+testing:
+  unit_tests:
+    - name: "pipe_async_single_fmap"
+      description: "単一のfmap操作"
+      expected: "値が正しく変換される"
+
+    - name: "pipe_async_single_flat_map"
+      description: "単一のflat_map操作"
+      expected: "AsyncIOが正しくフラット化される"
+
+    - name: "pipe_async_mixed_operations"
+      description: "fmapとflat_mapの混合"
+      expected: "正しい順序で適用される"
+
+    - name: "pipe_async_deferred_execution"
+      description: "遅延実行の確認"
+      expected: "run_async()を呼ぶまで副作用が発生しない"
+
+    - name: "pipe_async_error_propagation"
+      description: "エラーの伝播"
+      expected: "エラーが正しく伝播される"
+
+    - name: "pipe_async_with_closure_capture"
+      description: "クロージャでの値キャプチャ"
+      expected: "Send + 'static制約を満たす"
+
+  integration_tests:
+    - "POST /tasks/{id}/transform-async with valid transforms"
+    - "POST /tasks/{id}/transform-async with invalid task"
+    - "POST /tasks/workflow-async full workflow"
+    - "POST /tasks/workflow-async with step failure"
+    - "POST /tasks/batch-process-async parallel processing"
+    - "POST /tasks/conditional-pipeline high priority"
+    - "POST /tasks/conditional-pipeline standard path"
+
+  benchmark_tests:
+    - name: "pipe_async_vs_manual_chaining"
+      description: "pipe_async!と手動チェーンの性能比較"
+      metrics:
+        - "latency comparison"
+        - "memory allocation"
+
+    - name: "pipeline_complexity_scaling"
+      description: "パイプラインの複雑さに対するスケーリング"
+      metrics:
+        - "latency vs step count"
+        - "memory vs step count"
+
+    - name: "batch_pipeline_throughput"
+      description: "バッチパイプライン処理のスループット"
+      metrics:
+        - "tasks/sec"
+        - "parallelization efficiency"
+
+# ==============================================================================
+# 実装時の注意点
+# ==============================================================================
+implementation_notes:
+  - title: "Send + 'static 制約"
+    description: |
+      pipe_async!のクロージャはSend + 'staticを要求する。
+      ローカル参照をキャプチャする場合は、clone()してmoveするか、
+      Arc<T>を使用する。
+      ```rust
+      let repository = repository.clone();
+      pipe_async!(
+          value,
+          =>> move |x| {
+              let repo = repository.clone();
+              AsyncIO::suspend(async move { ... })
+          }
+      )
+      ```
+
+  - title: "遅延実行の理解"
+    description: |
+      pipe_async!は即座に実行されない。AsyncIO<T>を返し、
+      run_async().awaitを呼ぶまで副作用は発生しない。
+      これにより、パイプラインの構築と実行を分離できる。
+
+  - title: "エラーハンドリング"
+    description: |
+      AsyncIO内でのエラーはResult<T, E>で表現する。
+      flat_mapでエラーを伝播させる場合は、?演算子を使用できる。
+      ```rust
+      pipe_async!(
+          value,
+          =>> |x| AsyncIO::suspend(async move {
+              let result = fallible_operation(x).await?;
+              Ok(result)
+          })
+      )
+      ```
+
+  - title: "条件分岐のパターン"
+    description: |
+      pipe_async!内での条件分岐は、flat_mapの中でif-elseを使用する。
+      各分岐はAsyncIO<T>を返す必要がある。
+      ```rust
+      pipe_async!(
+          value,
+          =>> |x| if condition { branch_a(x) } else { branch_b(x) }
+      )
+      ```
+
+  - title: "traverseとの組み合わせ"
+    description: |
+      バッチ処理では、traverse_async_io_parallelと組み合わせて使用する。
+      各要素に対してpipe_async!パイプラインを適用することで、
+      並列実行と個別のパイプライン処理を両立できる。
+
+# ==============================================================================
+# ファイル構成
+# ==============================================================================
+file_structure:
+  new_files:
+    - path: "benches/api/src/api/async_pipeline.rs"
+      description: "pipe_async!系エンドポイントのハンドラー"
+
+  modified_files:
+    - path: "benches/api/src/api/mod.rs"
+      changes: "async_pipelineモジュールを追加"
+
+    - path: "benches/api/src/api/dto.rs"
+      changes: "パイプライン系のDTO追加"
+
+    - path: "benches/api/src/main.rs"
+      changes: "パイプライン系ルートを追加"
+
+# ==============================================================================
+# 依存関係
+# ==============================================================================
+dependencies:
+  lambars_imports:
+    - "use lambars::pipe_async;"
+    - "use lambars::effect::async_io::AsyncIO;"
+    - "use lambars::typeclass::traversable::TraversableAsyncIO;"
+
+  external_crates: []
+
+  internal_modules:
+    - "crate::domain::task::Task"
+    - "crate::infrastructure::repository::TaskRepository"

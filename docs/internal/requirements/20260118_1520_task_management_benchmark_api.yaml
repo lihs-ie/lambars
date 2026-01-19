@@ -1,0 +1,1677 @@
+# タスク管理ベンチマークAPI 要件定義
+#
+# 概要:
+#   lambars全機能を網羅するHTTP APIベンチマークアプリケーション
+#
+# 設計方針:
+#   1. 各エンドポイントが特定のlambars機能を使用する
+#   2. wrk + Luaによる負荷テストに対応
+#   3. Docker環境での再現可能な実行
+#
+# 参照:
+#   - docs/internal/plans/20260118_1500_continuous_benchmark_roadmap.yaml
+
+version: "1.0.0"
+name: "task_management_benchmark_api"
+description: |
+  lambarsライブラリの全機能を網羅的に使用するタスク管理APIアプリケーション。
+  各エンドポイントが特定のlambars機能（型クラス、永続データ構造、エフェクトシステム、Optics）を
+  意図的に使用することで、ライブラリ全体のパフォーマンス特性を測定可能にする。
+
+background:
+  problem: |
+    lambarsライブラリの各機能（Functor, Monad, PersistentVector, Lens, ExceptT, eff_async!等）が
+    実際のHTTP APIアプリケーションでどのようなパフォーマンス特性を持つかを継続的に測定する手段がない。
+    単体ベンチマーク（Iai-Callgrind）では測定できない、実際のI/Oを伴うシナリオでの性能を
+    把握する必要がある。
+
+  motivation: |
+    1. ライブラリ変更によるパフォーマンス回帰を早期に検出する
+    2. 各lambars機能の実用的なパフォーマンス特性を文書化する
+    3. ユーザーが機能選択時の参考にできるベンチマークデータを提供する
+    4. bankサンプルとは異なるドメインで、より多くのlambars機能を網羅する
+
+requirements:
+  # =============================================================================
+  # ドメインモデル要件
+  # =============================================================================
+  - id: REQ-DOMAIN-001
+    name: "Taskドメインモデル"
+    description: |
+      タスクエンティティの定義。IDベースの識別、状態遷移、優先度、タグ、サブタスク階層を持つ。
+    acceptance_criteria:
+      - TaskId（UUID）による一意識別
+      - title, descriptionのテキストフィールド
+      - TaskStatus（Pending, InProgress, Completed, Cancelled）の状態管理
+      - Priority（Low, Medium, High, Critical）の優先度管理
+      - PersistentHashSet<Tag>によるタグ管理
+      - PersistentList<SubTask>によるサブタスク階層管理
+      - created_at, updated_atのタイムスタンプ
+      - version（楽観的ロック用）
+    lambars_features:
+      - PersistentHashSet: タグ管理
+      - PersistentList: サブタスク階層
+    code_example: |
+      use lambars::persistent::{PersistentHashSet, PersistentList};
+
+      #[derive(Clone, Debug)]
+      pub struct Task {
+          pub task_id: TaskId,
+          pub title: String,
+          pub description: Option<String>,
+          pub status: TaskStatus,
+          pub priority: Priority,
+          pub tags: PersistentHashSet<Tag>,
+          pub subtasks: PersistentList<SubTask>,
+          pub project_id: Option<ProjectId>,
+          pub created_at: Timestamp,
+          pub updated_at: Timestamp,
+          pub version: u64,
+      }
+
+      #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+      pub struct Tag(pub String);
+
+      #[derive(Clone, Debug)]
+      pub struct SubTask {
+          pub subtask_id: SubTaskId,
+          pub title: String,
+          pub completed: bool,
+      }
+
+  - id: REQ-DOMAIN-002
+    name: "Projectドメインモデル"
+    description: |
+      プロジェクトエンティティの定義。複数タスクのコンテナとして機能する。
+    acceptance_criteria:
+      - ProjectId（UUID）による一意識別
+      - name, descriptionのテキストフィールド
+      - PersistentHashMap<TaskId, TaskSummary>によるタスク参照管理
+      - created_at, updated_atのタイムスタンプ
+      - version（楽観的ロック用）
+    lambars_features:
+      - PersistentHashMap: タスク参照管理
+    code_example: |
+      use lambars::persistent::PersistentHashMap;
+
+      #[derive(Clone, Debug)]
+      pub struct Project {
+          pub project_id: ProjectId,
+          pub name: String,
+          pub description: Option<String>,
+          pub tasks: PersistentHashMap<TaskId, TaskSummary>,
+          pub created_at: Timestamp,
+          pub updated_at: Timestamp,
+          pub version: u64,
+      }
+
+      #[derive(Clone, Debug)]
+      pub struct TaskSummary {
+          pub task_id: TaskId,
+          pub title: String,
+          pub status: TaskStatus,
+          pub priority: Priority,
+      }
+
+  - id: REQ-DOMAIN-003
+    name: "Historyドメインモデル（イベントソーシング）"
+    description: |
+      タスクの変更履歴をイベントとして記録する。継続モナドを使用した非同期読み込みを実現。
+    acceptance_criteria:
+      - TaskEvent（Created, Updated, StatusChanged, TagAdded, SubTaskAdded等）の定義
+      - PersistentList<TaskEvent>による履歴管理
+      - Continuationモナドによる遅延読み込み
+    lambars_features:
+      - PersistentList: イベント履歴
+      - Continuation: 遅延読み込み
+    code_example: |
+      use lambars::persistent::PersistentList;
+      use lambars::control::Continuation;
+
+      #[derive(Clone, Debug)]
+      pub enum TaskEvent {
+          Created(TaskCreated),
+          Updated(TaskUpdated),
+          StatusChanged(StatusChanged),
+          TagAdded(TagAdded),
+          TagRemoved(TagRemoved),
+          SubTaskAdded(SubTaskAdded),
+          SubTaskCompleted(SubTaskCompleted),
+      }
+
+      pub type TaskHistory = PersistentList<TaskEvent>;
+
+      /// Continuationを使用した履歴の遅延読み込み
+      /// Continuation::new は (A -> R) -> R 形式の関数を受け取る
+      pub fn load_history<R>(
+          task_id: &TaskId,
+          callback: impl FnOnce(TaskHistory) -> R + 'static,
+      ) -> Continuation<R, TaskHistory> {
+          // Continuation::new takes |(A -> R) -> R|
+          Continuation::new(move |k: Box<dyn FnOnce(TaskHistory) -> R>| {
+              let history = load_from_database(task_id); // 副作用
+              k(history)
+          })
+      }
+
+  # =============================================================================
+  # APIエンドポイント要件
+  # =============================================================================
+  - id: REQ-API-001
+    name: "POST /tasks - タスク作成"
+    description: |
+      新規タスクを作成する。Functor, Monad, Either, eff_async!マクロを使用した
+      パイプライン処理を実装する。
+    acceptance_criteria:
+      - リクエストボディからタスク情報を取得
+      - バリデーション（Either型での結果表現）
+      - eff_async!マクロによるモナディック処理
+      - 作成されたタスクをレスポンスとして返却
+    lambars_features:
+      - Functor: DTOからドメインモデルへの変換（fmap）
+      - Monad: バリデーション結果の連鎖（flat_map）
+      - Either: 成功/失敗の表現
+      - eff_async!: do記法スタイルの非同期処理
+    code_example: |
+      use lambars::typeclass::{Functor, Monad};
+      use lambars::control::Either;
+      use lambars::effect::AsyncIO;
+
+      pub async fn create_task_handler(
+          State(dependencies): State<AppDependencies>,
+          Json(request): Json<CreateTaskRequest>,
+      ) -> Result<Json<TaskResponse>, ApiError> {
+          // Step 1: DTO to domain conversion using Functor
+          let title = request.title.clone();
+
+          // Step 2: Validation using Either, then convert to Result
+          let validated_title: Result<String, ApiError> = validate_title(&title)
+              .map_left(|e| ApiError::validation(format!("{:?}", e)))
+              .into();  // Either -> Result変換
+          let validated_title = validated_title?;
+
+          // Step 3: Workflow using AsyncIO chaining
+          // AsyncIO::new で副作用を効果境界に隔離
+          let workflow: AsyncIO<Result<Task, ApiError>> = AsyncIO::new(|| async {
+              let task_id = TaskId::new();
+              let timestamp = Timestamp::now();
+              let task = Task::new(task_id, validated_title, timestamp);
+              dependencies.task_repository()
+                  .save(&task)
+                  .await
+                  .map(|_| task)
+                  .map_err(ApiError::from_repository_error)
+          });
+
+          let task = workflow.run_async().await?;
+
+          // Step 4: Domain to DTO conversion using Functor
+          Ok(Json(TaskResponse::from_domain(&task)))
+      }
+
+      fn validate_title(title: &str) -> Either<ValidationError, String> {
+          if title.is_empty() {
+              Either::Left(ValidationError::EmptyTitle)
+          } else if title.len() > 200 {
+              Either::Left(ValidationError::TitleTooLong)
+          } else {
+              Either::Right(title.to_string())
+          }
+      }
+
+  - id: REQ-API-002
+    name: "POST /tasks-eff - タスク作成（ExceptT版）"
+    description: |
+      ExceptT + AsyncIO + eff_async!パターンを使用したタスク作成。
+      bankサンプルのworkflow_eff.rsパターンを踏襲。
+    acceptance_criteria:
+      - ExceptT<ApiError, AsyncIO<Result<A, ApiError>>>型の使用
+      - eff_async!マクロによる宣言的なエラーハンドリング
+      - bankサンプルと同様のヘルパー関数を定義して使用
+    lambars_features:
+      - Monad: flat_mapによる処理連鎖
+      - ExceptT: エラーハンドリングモナド変換子
+      - AsyncIO: 非同期IO抽象化
+      - eff_async!: do記法マクロ
+    code_example: |
+      use lambars::eff_async;
+      use lambars::effect::{AsyncIO, ExceptT};
+
+      // ヘルパー関数（bankサンプルのworkflow_eff.rsと同様）
+      pub type WorkflowResult<A> = ExceptT<ApiError, AsyncIO<Result<A, ApiError>>>;
+
+      pub fn pure_async<A: Send + 'static>(value: A) -> WorkflowResult<A> {
+          WorkflowResult::pure_async_io(value)
+      }
+
+      pub fn from_result<A: Send + 'static>(result: Result<A, ApiError>) -> WorkflowResult<A> {
+          WorkflowResult::from_result(result)
+      }
+
+      pub fn lift_async_result<A, E, F>(
+          async_io: AsyncIO<Result<A, E>>,
+          map_error: F,
+      ) -> WorkflowResult<A>
+      where
+          A: Send + 'static,
+          E: Send + 'static,
+          F: FnOnce(E) -> ApiError + Send + 'static,
+      {
+          WorkflowResult::new(async_io.fmap(move |result| result.map_err(map_error)))
+      }
+
+      pub async fn create_task_eff_handler(
+          State(dependencies): State<AppDependencies>,
+          Json(request): Json<CreateTaskRequest>,
+      ) -> Result<Json<TaskResponse>, ApiError> {
+          // 注意: TaskId::new(), Timestamp::now() は副作用を持つため
+          // AsyncIO::new の中で呼び出す方がより純粋な設計
+          let workflow: WorkflowResult<Task> = eff_async! {
+              // Validation
+              validated <= from_result(validate_request(&request));
+
+              // Create task (副作用をAsyncIO境界に含める)
+              task <= lift_async_result(
+                  AsyncIO::new(|| async {
+                      let task_id = TaskId::new();
+                      let timestamp = Timestamp::now();
+                      Ok(Task::from_validated(task_id, validated, timestamp))
+                  }),
+                  |e: std::convert::Infallible| match e {}
+              );
+
+              // Persist
+              _ <= lift_async_result(
+                  dependencies.task_repository().save(&task),
+                  ApiError::from_repository_error
+              );
+
+              pure_async(task)
+          };
+
+          let task = workflow.run_async_io().run_async().await?;
+          Ok(Json(TaskResponse::from_domain(&task)))
+      }
+
+  - id: REQ-API-003
+    name: "PUT /tasks/{id} - タスク更新"
+    description: |
+      タスクの詳細情報を更新する。Lens, Optional, Bifunctorを使用した
+      イミュータブルデータの更新を実装。
+    acceptance_criteria:
+      - パスパラメータからタスクIDを取得
+      - Lensによるネストしたフィールドの更新
+      - Optionalによる存在しない可能性のあるフィールドの安全な更新
+      - Bifunctorによるエラー型の変換
+    lambars_features:
+      - Lens: 構造体フィールドの更新
+      - Optional: Option型フィールドの安全なアクセス
+      - Bifunctor: Result型のエラー変換（first/bimap）
+    code_example: |
+      use lambars::optics::{Lens, FunctionLens, Optional, LensComposeExtension};
+      use lambars::typeclass::Bifunctor;
+      use lambars::lens;
+
+      // Lens definitions
+      let task_title_lens = lens!(Task, title);
+      let task_description_lens = lens!(Task, description);
+      let task_priority_lens = lens!(Task, priority);
+
+      pub async fn update_task_handler(
+          State(dependencies): State<AppDependencies>,
+          Path(task_id): Path<String>,
+          Json(request): Json<UpdateTaskRequest>,
+      ) -> Result<Json<TaskResponse>, ApiError> {
+          // Parse task ID using Bifunctor for error transformation
+          let task_id = TaskId::parse(&task_id)
+              .first(|e| ApiError::validation(format!("Invalid task ID: {}", e)))?;
+
+          // Load existing task
+          let task = dependencies.task_repository()
+              .find_by_id(&task_id)
+              .run_async()
+              .await
+              .first(ApiError::from_repository_error)?  // Bifunctor::first
+              .ok_or(ApiError::not_found("Task not found"))?;
+
+          // Update using Lens
+          let updated_task = if let Some(title) = &request.title {
+              task_title_lens.set(task, title.clone())
+          } else {
+              task
+          };
+
+          let updated_task = if let Some(desc) = &request.description {
+              task_description_lens.set(updated_task, Some(desc.clone()))
+          } else {
+              updated_task
+          };
+
+          let updated_task = if let Some(priority) = &request.priority {
+              task_priority_lens.set(updated_task, priority.clone())
+          } else {
+              updated_task
+          };
+
+          // Persist with version check using Bifunctor::bimap for error handling
+          let saved = dependencies.task_repository()
+              .update(&updated_task)
+              .run_async()
+              .await
+              .bimap(
+                  |e| ApiError::from_repository_error(e),
+                  |t| t
+              )?;
+
+          Ok(Json(TaskResponse::from_domain(&saved)))
+      }
+
+  - id: REQ-API-004
+    name: "PATCH /tasks/{id}/status - ステータス変更"
+    description: |
+      タスクのステータスを変更する。Prism, Eitherを使用した
+      状態遷移の安全な実装。
+    acceptance_criteria:
+      - Prismによる状態遷移の検証（不正な遷移の検出）
+      - Eitherによる成功/失敗の表現
+      - 状態遷移ルールの実装（例: Cancelled -> InProgress は不可）
+    lambars_features:
+      - Prism: enum variantへの安全なアクセス
+      - Either: 状態遷移結果の表現
+    code_example: |
+      use lambars::optics::{Prism, FunctionPrism};
+      use lambars::control::Either;
+      use lambars::prism;
+
+      // Prism for TaskStatus variants
+      let pending_prism = prism!(TaskStatus, Pending);
+      let in_progress_prism = prism!(TaskStatus, InProgress);
+      let completed_prism = prism!(TaskStatus, Completed);
+      let cancelled_prism = prism!(TaskStatus, Cancelled);
+
+      /// Validate status transition using Prism and Either
+      fn validate_transition(
+          current: &TaskStatus,
+          target: &TaskStatus,
+      ) -> Either<TransitionError, TaskStatus> {
+          match (current, target) {
+              // Cancelled tasks cannot transition to any other status
+              (TaskStatus::Cancelled, _) => {
+                  Either::Left(TransitionError::CannotTransitionFromCancelled)
+              }
+              // Completed tasks can only be cancelled
+              (TaskStatus::Completed, TaskStatus::Cancelled) => {
+                  Either::Right(TaskStatus::Cancelled)
+              }
+              (TaskStatus::Completed, _) => {
+                  Either::Left(TransitionError::CompletedCanOnlyBeCancelled)
+              }
+              // Other transitions are allowed
+              _ => Either::Right(target.clone()),
+          }
+      }
+
+      pub async fn change_status_handler(
+          State(dependencies): State<AppDependencies>,
+          Path(task_id): Path<String>,
+          Json(request): Json<ChangeStatusRequest>,
+      ) -> Result<Json<TaskResponse>, ApiError> {
+          let task_id = TaskId::parse(&task_id)?;
+
+          let task = dependencies.task_repository()
+              .find_by_id(&task_id)
+              .run_async()
+              .await?
+              .ok_or(ApiError::not_found("Task not found"))?;
+
+          // Validate transition using Either, then convert to Result
+          let new_status: Result<TaskStatus, ApiError> = validate_transition(&task.status, &request.status)
+              .map_left(|e| ApiError::validation(format!("{:?}", e)))
+              .into();  // Either<E, A> -> Result<A, E>
+          let new_status = new_status?;
+
+          // Use Prism to verify the target status is as expected
+          if completed_prism.preview(&new_status).is_some() {
+              // Additional validation for completion
+              if !task.subtasks.iter().all(|s| s.completed) {
+                  return Err(ApiError::validation(
+                      "Cannot complete task with incomplete subtasks"
+                  ));
+              }
+          }
+
+          let updated_task = Task {
+              status: new_status,
+              updated_at: Timestamp::now(),
+              version: task.version + 1,
+              ..task
+          };
+
+          let saved = dependencies.task_repository()
+              .update(&updated_task)
+              .run_async()
+              .await?;
+
+          Ok(Json(TaskResponse::from_domain(&saved)))
+      }
+
+  - id: REQ-API-005
+    name: "POST /tasks/{id}/subtasks - サブタスク追加"
+    description: |
+      タスクにサブタスクを追加する。PersistentList, Trampolineを使用した
+      スタック安全な階層処理。
+    acceptance_criteria:
+      - PersistentListへのcons操作による効率的な追加
+      - Trampolineによる深いネストのサブタスク処理のスタック安全性確保
+      - サブタスク数の制限チェック
+    lambars_features:
+      - PersistentList: イミュータブルリストへの追加
+      - Trampoline: スタック安全な再帰処理
+    code_example: |
+      use lambars::persistent::PersistentList;
+      use lambars::control::Trampoline;
+
+      /// Count total subtasks recursively using Trampoline for stack safety
+      fn count_subtasks_trampoline(
+          subtasks: &PersistentList<SubTask>,
+          count: usize,
+      ) -> Trampoline<usize> {
+          match subtasks.head() {
+              None => Trampoline::done(count),
+              Some(_) => {
+                  let tail = subtasks.tail();
+                  Trampoline::suspend(move || {
+                      count_subtasks_trampoline(&tail, count + 1)
+                  })
+              }
+          }
+      }
+
+      pub async fn add_subtask_handler(
+          State(dependencies): State<AppDependencies>,
+          Path(task_id): Path<String>,
+          Json(request): Json<AddSubTaskRequest>,
+      ) -> Result<Json<SubTaskResponse>, ApiError> {
+          let task_id = TaskId::parse(&task_id)?;
+
+          let task = dependencies.task_repository()
+              .find_by_id(&task_id)
+              .run_async()
+              .await?
+              .ok_or(ApiError::not_found("Task not found"))?;
+
+          // Use Trampoline to safely count existing subtasks
+          let current_count = count_subtasks_trampoline(&task.subtasks, 0).run();
+
+          if current_count >= 100 {
+              return Err(ApiError::validation("Maximum 100 subtasks allowed"));
+          }
+
+          // Create new subtask
+          let subtask = SubTask {
+              subtask_id: SubTaskId::new(),
+              title: request.title.clone(),
+              completed: false,
+          };
+
+          // Add to PersistentList using cons (O(1) prepend)
+          let updated_subtasks = task.subtasks.cons(subtask.clone());
+
+          let updated_task = Task {
+              subtasks: updated_subtasks,
+              updated_at: Timestamp::now(),
+              version: task.version + 1,
+              ..task
+          };
+
+          let saved = dependencies.task_repository()
+              .update(&updated_task)
+              .run_async()
+              .await?;
+
+          Ok(Json(SubTaskResponse::from_domain(&subtask)))
+      }
+
+  - id: REQ-API-006
+    name: "POST /tasks/{id}/tags - タグ追加"
+    description: |
+      タスクにタグを追加する。PersistentHashSetのunionメソッドを使用した
+      集合操作。
+      注: PersistentHashSetはSemigroup/Monoidを実装していないため、
+      unionメソッドを直接使用する。
+    acceptance_criteria:
+      - PersistentHashSetへのinsert操作
+      - unionメソッドによる複数タグの一括追加
+      - 重複タグの自動排除
+    lambars_features:
+      - PersistentHashSet: イミュータブル集合、insert/union操作
+    code_example: |
+      use lambars::persistent::PersistentHashSet;
+
+      pub async fn add_tags_handler(
+          State(dependencies): State<AppDependencies>,
+          Path(task_id): Path<String>,
+          Json(request): Json<AddTagsRequest>,
+      ) -> Result<Json<TaskResponse>, ApiError> {
+          let task_id = TaskId::parse(&task_id)?;
+
+          let task = dependencies.task_repository()
+              .find_by_id(&task_id)
+              .run_async()
+              .await?
+              .ok_or(ApiError::not_found("Task not found"))?;
+
+          // Convert request tags to PersistentHashSet
+          let new_tags: PersistentHashSet<Tag> = request.tags
+              .iter()
+              .map(|t| Tag(t.clone()))
+              .collect();
+
+          // Merge using PersistentHashSet::union
+          let merged_tags = task.tags.union(&new_tags);
+
+          // Alternatively, add tags one by one
+          // let mut updated_tags = task.tags.clone();
+          // for tag in &request.tags {
+          //     updated_tags = updated_tags.insert(Tag(tag.clone()));
+          // }
+
+          let updated_task = Task {
+              tags: merged_tags,
+              updated_at: Timestamp::now(),
+              version: task.version + 1,
+              ..task
+          };
+
+          let saved = dependencies.task_repository()
+              .update(&updated_task)
+              .run_async()
+              .await?;
+
+          Ok(Json(TaskResponse::from_domain(&saved)))
+      }
+
+  - id: REQ-API-007
+    name: "GET /tasks - タスク一覧取得"
+    description: |
+      全タスクを取得する。PersistentVectorを使用した効率的なコレクション操作。
+      注: lambarsのPersistentVectorはTraversable未実装のため、
+      Vecに変換してからIteratorトレイトメソッドを使用する。
+    acceptance_criteria:
+      - PersistentVectorでのタスク一覧保持
+      - iter()によるVecへの変換とマッピング
+      - ページネーション対応
+    lambars_features:
+      - PersistentVector: 効率的なランダムアクセス、iter()によるイテレータ取得
+    code_example: |
+      use lambars::persistent::PersistentVector;
+
+      pub async fn list_tasks_handler(
+          State(dependencies): State<AppDependencies>,
+          Query(params): Query<PaginationParams>,
+      ) -> Result<Json<TaskListResponse>, ApiError> {
+          // Load tasks as PersistentVector
+          let tasks: PersistentVector<Task> = dependencies.task_repository()
+              .find_all(params.offset, params.limit)
+              .run_async()
+              .await?;
+
+          // Transform using iter() and map
+          let task_responses: Vec<TaskResponse> = tasks
+              .iter()
+              .map(TaskResponse::from_domain)
+              .collect();
+
+          // Example of using collect::<Option<_>>() for validation
+          // (validate each task and collect all results, short-circuit on None)
+          // let validated: Option<Vec<ValidatedTask>> = tasks
+          //     .iter()
+          //     .map(validate_task)
+          //     .collect::<Option<Vec<_>>>();
+
+          let total = dependencies.task_repository()
+              .count()
+              .run_async()
+              .await?;
+
+          Ok(Json(TaskListResponse {
+              tasks: task_responses,
+              total,
+              offset: params.offset,
+              limit: params.limit,
+          }))
+      }
+
+  - id: REQ-API-008
+    name: "GET /tasks/search - タスク検索"
+    description: |
+      条件に基づいてタスクを検索する。PersistentTreeMap, Alternativeを使用した
+      インデックス検索とフォールバック。
+    acceptance_criteria:
+      - PersistentTreeMapによる優先度/日付インデックス
+      - Alternativeのalt/choiceによる複数検索条件のフォールバック
+      - 範囲検索（range query）のサポート
+    lambars_features:
+      - PersistentTreeMap: ソート済みマップでの範囲検索
+      - Alternative: alt/choiceによる検索戦略のフォールバック
+    code_example: |
+      use lambars::persistent::PersistentTreeMap;
+      use lambars::typeclass::Alternative;
+
+      pub async fn search_tasks_handler(
+          State(dependencies): State<AppDependencies>,
+          Query(params): Query<SearchParams>,
+      ) -> Result<Json<TaskListResponse>, ApiError> {
+          // Build search index as PersistentTreeMap<Priority, Vec<TaskId>>
+          let priority_index: PersistentTreeMap<Priority, Vec<TaskId>> =
+              dependencies.task_index()
+                  .get_priority_index()
+                  .run_async()
+                  .await?;
+
+          // Search by priority (sync operation using in-memory index)
+          let search_by_priority: Option<Vec<TaskId>> =
+              params.priority.as_ref().and_then(|p| {
+                  priority_index.get(p).cloned()
+              });
+
+          // Search by keyword (async operation)
+          let search_by_keyword: Option<Vec<TaskId>> = match &params.keyword {
+              Some(keyword) => dependencies.task_index()
+                  .search_by_keyword(keyword)
+                  .run_async()
+                  .await
+                  .ok(),
+              None => None,
+          };
+
+          // Fallback: get all task ids (async operation)
+          let search_all: Option<Vec<TaskId>> = Some(
+              dependencies.task_repository()
+                  .find_all_ids()
+                  .run_async()
+                  .await?
+          );
+
+          // Use Alternative::choice to select first Some result
+          let task_ids: Vec<TaskId> = Option::choice(vec![
+              search_by_priority,
+              search_by_keyword,
+              search_all,
+          ]).unwrap_or_default();
+
+          // Range query using PersistentTreeMap
+          let filtered_by_priority_range = if let (Some(min), Some(max)) =
+              (&params.min_priority, &params.max_priority)
+          {
+              priority_index
+                  .range(min.clone()..=max.clone())
+                  .flat_map(|(_, ids)| ids.clone())
+                  .collect()
+          } else {
+              task_ids
+          };
+
+          let tasks = dependencies.task_repository()
+              .find_by_ids(&filtered_by_priority_range)
+              .run_async()
+              .await?;
+
+          Ok(Json(TaskListResponse::from_tasks(tasks)))
+      }
+
+  - id: REQ-API-009
+    name: "GET /tasks/by-priority - 優先度別タスク取得"
+    description: |
+      優先度でグループ化されたタスクを取得する。PersistentTreeMap, Foldableを使用した
+      集約処理。
+    acceptance_criteria:
+      - PersistentTreeMapによる優先度順のソート
+      - Foldableのfold_left/fold_mapによる集計
+      - 優先度ごとのタスク数カウント
+    lambars_features:
+      - PersistentTreeMap: 優先度をキーとしたソート済みマップ
+      - Foldable: fold_left/fold_mapによる集約
+    code_example: |
+      use lambars::persistent::PersistentTreeMap;
+      use lambars::typeclass::{Foldable, Sum};
+
+      pub async fn tasks_by_priority_handler(
+          State(dependencies): State<AppDependencies>,
+      ) -> Result<Json<TasksByPriorityResponse>, ApiError> {
+          // Get all tasks grouped by priority as PersistentTreeMap
+          let tasks_by_priority: PersistentTreeMap<Priority, Vec<Task>> =
+              dependencies.task_repository()
+                  .find_all_grouped_by_priority()
+                  .run_async()
+                  .await?;
+
+          // Use Foldable to compute statistics
+          let priority_stats: Vec<PriorityStat> = tasks_by_priority
+              .iter()
+              .map(|(priority, tasks)| {
+                  // fold_left to count tasks
+                  let count = tasks.len();
+
+                  // fold_map with Sum to calculate total estimated hours
+                  let total_hours: Sum<u32> = tasks.clone().fold_map(|t| {
+                      Sum(t.estimated_hours.unwrap_or(0))
+                  });
+
+                  PriorityStat {
+                      priority: priority.clone(),
+                      count,
+                      total_estimated_hours: total_hours.0,
+                  }
+              })
+              .collect();
+
+          // Total across all priorities using Foldable
+          let total_tasks: usize = tasks_by_priority
+              .values()
+              .fold_left(0, |acc, tasks| acc + tasks.len());
+
+          Ok(Json(TasksByPriorityResponse {
+              by_priority: priority_stats,
+              total_tasks,
+          }))
+      }
+
+  - id: REQ-API-010
+    name: "POST /tasks/bulk - 一括タスク作成"
+    description: |
+      複数タスクを一括作成する。Alternative, Bifunctor, for_!マクロを使用した
+      バッチ処理。
+    acceptance_criteria:
+      - for_!マクロによるイテレータ操作
+      - Alternativeのchoiceによるエラーハンドリング戦略
+      - Bifunctorによるエラー情報の付加
+      - 部分的成功のサポート（一部失敗しても他は成功）
+    lambars_features:
+      - Alternative: choiceによる複数バリデーションのいずれかを適用
+      - Bifunctor: bimap/firstによるエラー情報の拡充
+      - for_!: イテレータのfor-comprehension
+    code_example: |
+      use lambars::for_;
+      use lambars::typeclass::{Alternative, Bifunctor};
+      use lambars::control::Either;
+
+      pub async fn bulk_create_tasks_handler(
+          State(dependencies): State<AppDependencies>,
+          Json(request): Json<BulkCreateTasksRequest>,
+      ) -> Result<Json<BulkCreateResponse>, ApiError> {
+          // Use for_! for iterator comprehension
+          let validated_tasks: Vec<Either<ValidationError, ValidatedTask>> = for_! {
+              req <- request.tasks.iter();
+              let validated = validate_task_request(req);
+              // Add index information using Bifunctor::first
+              yield validated.first(|e| ValidationError::with_index(req.index, e))
+          };
+
+          // Separate successes and failures
+          let (failures, successes): (Vec<_>, Vec<_>) = validated_tasks
+              .into_iter()
+              .enumerate()
+              .partition(|(_, result)| result.is_left());
+
+          // Alternative::choice for validation strategy selection
+          let validation_strategies = vec![
+              validate_strict,
+              validate_lenient,
+          ];
+          // Use the first strategy that succeeds for ambiguous cases
+          // (Not directly applicable here, but shows the pattern)
+
+          // Create successful tasks
+          let created_tasks: Vec<TaskId> = Vec::new();
+          for (_, validated) in successes {
+              if let Either::Right(task_data) = validated {
+                  let task = Task::from_validated(TaskId::new(), task_data, Timestamp::now());
+                  dependencies.task_repository()
+                      .save(&task)
+                      .run_async()
+                      .await?;
+                  // created_tasks.push(task.task_id);
+              }
+          }
+
+          // Collect errors with Bifunctor transformations
+          let errors: Vec<BulkError> = failures
+              .into_iter()
+              .filter_map(|(index, result)| {
+                  result.left().map(|e| BulkError {
+                      index,
+                      error: format!("{:?}", e),
+                  })
+              })
+              .collect();
+
+          Ok(Json(BulkCreateResponse {
+              created: created_tasks.len(),
+              failed: errors.len(),
+              errors,
+          }))
+      }
+
+  - id: REQ-API-011
+    name: "PUT /tasks/bulk - 一括タスク更新"
+    description: |
+      複数タスクを一括更新する。Traversal, Applicativeを使用した
+      バッチ更新処理。
+    acceptance_criteria:
+      - Traversalによる複数フィールドの一括更新
+      - Applicativeのmap2/map3による複数ソースの結合
+      - 楽観的ロックによる競合検出
+    lambars_features:
+      - Traversal: 複数要素への一括アクセス
+      - Applicative: map2/map3による結合
+    code_example: |
+      use lambars::optics::{Traversal, VecTraversal};
+      use lambars::typeclass::Applicative;
+
+      pub async fn bulk_update_tasks_handler(
+          State(dependencies): State<AppDependencies>,
+          Json(request): Json<BulkUpdateRequest>,
+      ) -> Result<Json<BulkUpdateResponse>, ApiError> {
+          // Load all tasks to update
+          let task_ids: Vec<TaskId> = request.updates
+              .iter()
+              .filter_map(|u| TaskId::parse(&u.task_id).ok())
+              .collect();
+
+          let tasks = dependencies.task_repository()
+              .find_by_ids(&task_ids)
+              .run_async()
+              .await?;
+
+          // Use VecTraversal to apply updates to all tasks
+          let vec_traversal = VecTraversal::new();
+
+          // Apply updates using Traversal
+          let updated_tasks: Vec<Task> = vec_traversal.modify_all(
+              tasks,
+              |task| {
+                  // Find matching update request
+                  request.updates
+                      .iter()
+                      .find(|u| u.task_id == task.task_id.to_string())
+                      .map(|update| {
+                          // Use Applicative::map2 to combine task and update
+                          let new_priority = update.priority.clone()
+                              .unwrap_or(task.priority.clone());
+                          let new_status = update.status.clone()
+                              .unwrap_or(task.status.clone());
+
+                          Task {
+                              priority: new_priority,
+                              status: new_status,
+                              updated_at: Timestamp::now(),
+                              version: task.version + 1,
+                              ..task.clone()
+                          }
+                      })
+                      .unwrap_or(task)
+              }
+          );
+
+          // Batch save
+          let saved_count = dependencies.task_repository()
+              .save_batch(&updated_tasks)
+              .run_async()
+              .await?;
+
+          Ok(Json(BulkUpdateResponse {
+              updated: saved_count,
+              total: request.updates.len(),
+          }))
+      }
+
+  - id: REQ-API-012
+    name: "POST /projects - プロジェクト作成"
+    description: |
+      新規プロジェクトを作成する。Applicative, Validatedを使用した
+      バリデーションと作成処理。
+    acceptance_criteria:
+      - Applicativeのmap2/map3による複数フィールドの結合バリデーション
+      - Validated型による全エラーの収集（短絡しない）
+      - 作成されたプロジェクトをレスポンスとして返却
+    lambars_features:
+      - Applicative: map2による結合
+      - Validated: エラー収集型バリデーション
+    code_example: |
+      use lambars::typeclass::Applicative;
+
+      /// Validated type - collects all errors instead of short-circuiting
+      pub enum Validated<E, A> {
+          Valid(A),
+          Invalid(Vec<E>),
+      }
+
+      impl<E, A> Validated<E, A> {
+          pub fn map2<B, C, F>(self, other: Validated<E, B>, f: F) -> Validated<E, C>
+          where
+              F: FnOnce(A, B) -> C,
+          {
+              match (self, other) {
+                  (Validated::Valid(a), Validated::Valid(b)) => {
+                      Validated::Valid(f(a, b))
+                  }
+                  (Validated::Invalid(e1), Validated::Invalid(e2)) => {
+                      Validated::Invalid([e1, e2].concat())
+                  }
+                  (Validated::Invalid(e), _) | (_, Validated::Invalid(e)) => {
+                      Validated::Invalid(e)
+                  }
+              }
+          }
+      }
+
+      pub async fn create_project_handler(
+          State(dependencies): State<AppDependencies>,
+          Json(request): Json<CreateProjectRequest>,
+      ) -> Result<Json<ProjectResponse>, ApiError> {
+          // Validate each field independently
+          let name_valid = validate_project_name(&request.name);
+          let desc_valid = validate_description(&request.description);
+
+          // Combine validations using Applicative-like map2
+          // This collects ALL validation errors, not just the first one
+          let validated = name_valid.map2(desc_valid, |name, desc| {
+              (name, desc)
+          });
+
+          match validated {
+              Validated::Valid((name, description)) => {
+                  let project = Project {
+                      project_id: ProjectId::new(),
+                      name,
+                      description,
+                      tasks: PersistentHashMap::new(),
+                      created_at: Timestamp::now(),
+                      updated_at: Timestamp::now(),
+                      version: 0,
+                  };
+
+                  let saved = dependencies.project_repository()
+                      .save(&project)
+                      .run_async()
+                      .await?;
+
+                  Ok(Json(ProjectResponse::from_domain(&saved)))
+              }
+              Validated::Invalid(errors) => {
+                  Err(ApiError::validation_errors(errors))
+              }
+          }
+      }
+
+  - id: REQ-API-013
+    name: "GET /projects/{id} - プロジェクト取得"
+    description: |
+      プロジェクトの詳細を取得する。PersistentHashMap, Readerを使用した
+      依存性注入と設定アクセス。
+    acceptance_criteria:
+      - PersistentHashMapからのタスク参照解決
+      - Readerモナドによる設定・依存性の読み取り
+      - タスクサマリー情報の取得
+    lambars_features:
+      - PersistentHashMap: タスク参照の管理
+      - Reader: 依存性/設定の読み取り
+    code_example: |
+      use lambars::persistent::PersistentHashMap;
+      use lambars::effect::Reader;
+
+      pub async fn get_project_handler(
+          State(dependencies): State<AppDependencies>,
+          Path(project_id): Path<String>,
+      ) -> Result<Json<ProjectDetailResponse>, ApiError> {
+          let project_id = ProjectId::parse(&project_id)?;
+
+          let project = dependencies.project_repository()
+              .find_by_id(&project_id)
+              .run_async()
+              .await?
+              .ok_or(ApiError::not_found("Project not found"))?;
+
+          // Use Reader to access configuration
+          let config_reader: Reader<AppConfig, usize> = Reader::new(|config: AppConfig| {
+              config.max_tasks_per_project
+          });
+
+          let max_tasks = config_reader.run(dependencies.config().clone());
+
+          // Access tasks from PersistentHashMap
+          let task_summaries: Vec<TaskSummaryResponse> = project.tasks
+              .iter()
+              .map(|(_, summary)| TaskSummaryResponse {
+                  task_id: summary.task_id.to_string(),
+                  title: summary.title.clone(),
+                  status: summary.status.to_string(),
+                  priority: summary.priority.to_string(),
+              })
+              .collect();
+
+          // Get task count from PersistentHashMap
+          let task_count = project.tasks.len();
+
+          Ok(Json(ProjectDetailResponse {
+              project_id: project.project_id.to_string(),
+              name: project.name.clone(),
+              description: project.description.clone(),
+              tasks: task_summaries,
+              task_count,
+              max_tasks,
+              created_at: project.created_at.to_iso_string(),
+              updated_at: project.updated_at.to_iso_string(),
+          }))
+      }
+
+  - id: REQ-API-014
+    name: "GET /projects/{id}/progress - プロジェクト進捗取得"
+    description: |
+      プロジェクトの進捗状況を計算する。Foldable, Trampoline, Monoidを使用した
+      スタック安全な集計処理。
+    acceptance_criteria:
+      - Foldableのfold_mapによるタスク完了率計算
+      - Trampolineによる深いネストの安全な処理
+      - Monoidのcombine_allによる集計
+    lambars_features:
+      - Foldable: fold_map/fold_leftによる集計
+      - Trampoline: スタック安全な再帰
+      - Monoid: combine_allによるマージ
+    code_example: |
+      use lambars::typeclass::{Foldable, Semigroup, Monoid, Sum};
+      use lambars::control::Trampoline;
+
+      /// Progress statistics with Monoid instance
+      #[derive(Clone, Default)]
+      pub struct ProgressStats {
+          pub total_tasks: usize,
+          pub completed_tasks: usize,
+          pub total_subtasks: usize,
+          pub completed_subtasks: usize,
+      }
+
+      impl Semigroup for ProgressStats {
+          fn combine(self, other: Self) -> Self {
+              ProgressStats {
+                  total_tasks: self.total_tasks + other.total_tasks,
+                  completed_tasks: self.completed_tasks + other.completed_tasks,
+                  total_subtasks: self.total_subtasks + other.total_subtasks,
+                  completed_subtasks: self.completed_subtasks + other.completed_subtasks,
+              }
+          }
+      }
+
+      impl Monoid for ProgressStats {
+          fn empty() -> Self {
+              ProgressStats::default()
+          }
+      }
+
+      /// Calculate progress for a single task using Trampoline
+      fn calculate_task_progress_trampoline(
+          task: &Task,
+      ) -> Trampoline<ProgressStats> {
+          let subtask_count = count_subtasks_trampoline(&task.subtasks, 0);
+
+          subtask_count.flat_map(move |total_subtasks| {
+              let completed_subtasks = task.subtasks
+                  .iter()
+                  .filter(|s| s.completed)
+                  .count();
+
+              Trampoline::done(ProgressStats {
+                  total_tasks: 1,
+                  completed_tasks: if task.status == TaskStatus::Completed { 1 } else { 0 },
+                  total_subtasks,
+                  completed_subtasks,
+              })
+          })
+      }
+
+      pub async fn get_project_progress_handler(
+          State(dependencies): State<AppDependencies>,
+          Path(project_id): Path<String>,
+      ) -> Result<Json<ProjectProgressResponse>, ApiError> {
+          let project_id = ProjectId::parse(&project_id)?;
+
+          let task_ids: Vec<TaskId> = dependencies.project_repository()
+              .get_task_ids(&project_id)
+              .run_async()
+              .await?;
+
+          let tasks = dependencies.task_repository()
+              .find_by_ids(&task_ids)
+              .run_async()
+              .await?;
+
+          // Use Foldable::fold_map with Monoid to aggregate progress
+          let progress: ProgressStats = tasks.fold_map(|task| {
+              calculate_task_progress_trampoline(&task).run()
+          });
+
+          // Alternative: use Monoid::combine_all
+          // let stats_list: Vec<ProgressStats> = tasks
+          //     .iter()
+          //     .map(|t| calculate_task_progress_trampoline(t).run())
+          //     .collect();
+          // let progress = ProgressStats::combine_all(stats_list);
+
+          let completion_percentage = if progress.total_tasks > 0 {
+              (progress.completed_tasks as f64 / progress.total_tasks as f64) * 100.0
+          } else {
+              0.0
+          };
+
+          Ok(Json(ProjectProgressResponse {
+              project_id: project_id.to_string(),
+              total_tasks: progress.total_tasks,
+              completed_tasks: progress.completed_tasks,
+              total_subtasks: progress.total_subtasks,
+              completed_subtasks: progress.completed_subtasks,
+              completion_percentage,
+          }))
+      }
+
+  - id: REQ-API-015
+    name: "GET /projects/{id}/stats - プロジェクト統計取得"
+    description: |
+      プロジェクトの統計情報を取得する。Foldable, Sum, Productを使用した
+      数値集計。
+    acceptance_criteria:
+      - Foldableのfold_mapによる集計
+      - Sum wrapperによる加算集計
+      - Product wrapperによる乗算集計（該当する場合）
+    lambars_features:
+      - Foldable: fold_mapによる集計
+      - Sum: 加算Monoid
+      - Product: 乗算Monoid
+    code_example: |
+      use lambars::typeclass::{Foldable, Sum, Product};
+
+      pub async fn get_project_stats_handler(
+          State(dependencies): State<AppDependencies>,
+          Path(project_id): Path<String>,
+      ) -> Result<Json<ProjectStatsResponse>, ApiError> {
+          let project_id = ProjectId::parse(&project_id)?;
+
+          let tasks = dependencies.project_repository()
+              .get_tasks(&project_id)
+              .run_async()
+              .await?;
+
+          // Use Sum for additive statistics
+          let total_estimated_hours: Sum<u32> = tasks.clone().fold_map(|task| {
+              Sum(task.estimated_hours.unwrap_or(0))
+          });
+
+          let total_actual_hours: Sum<u32> = tasks.clone().fold_map(|task| {
+              Sum(task.actual_hours.unwrap_or(0))
+          });
+
+          // Count by status using fold_left
+          let status_counts = tasks.clone().fold_left(
+              StatusCounts::default(),
+              |mut counts, task| {
+                  match task.status {
+                      TaskStatus::Pending => counts.pending += 1,
+                      TaskStatus::InProgress => counts.in_progress += 1,
+                      TaskStatus::Completed => counts.completed += 1,
+                      TaskStatus::Cancelled => counts.cancelled += 1,
+                  }
+                  counts
+              }
+          );
+
+          // Count by priority using fold_map with Sum
+          let priority_counts: Vec<(Priority, usize)> = vec![
+              Priority::Low,
+              Priority::Medium,
+              Priority::High,
+              Priority::Critical,
+          ].into_iter().map(|p| {
+              let count: Sum<usize> = tasks.clone().fold_map(|task| {
+                  if task.priority == p { Sum(1) } else { Sum(0) }
+              });
+              (p, count.0)
+          }).collect();
+
+          // Example of Product (not directly applicable, but for demonstration)
+          // let complexity_product: Product<u32> = tasks.fold_map(|task| {
+          //     Product(task.complexity_factor.unwrap_or(1))
+          // });
+
+          Ok(Json(ProjectStatsResponse {
+              project_id: project_id.to_string(),
+              total_tasks: tasks.len(),
+              total_estimated_hours: total_estimated_hours.0,
+              total_actual_hours: total_actual_hours.0,
+              status_counts,
+              priority_counts,
+          }))
+      }
+
+  - id: REQ-API-016
+    name: "GET /tasks/{id}/history - タスク履歴取得"
+    description: |
+      タスクの変更履歴を取得する。PersistentList, Continuationを使用した
+      イベント履歴の読み込みと変換。
+    acceptance_criteria:
+      - PersistentListによるイベント履歴管理
+      - Continuationモナドによる遅延処理
+      - ページネーション対応
+    lambars_features:
+      - PersistentList: イベント履歴の保持
+      - Continuation: 遅延評価・継続渡しスタイル
+    code_example: |
+      use lambars::persistent::PersistentList;
+      use lambars::control::Continuation;
+
+      /// Process history with continuation for lazy evaluation
+      fn process_history_with_continuation<R>(
+          history: &PersistentList<TaskEvent>,
+          processor: impl FnOnce(Vec<HistoryEntry>) -> R,
+      ) -> Continuation<Vec<HistoryEntry>, R> {
+          Continuation::new(move |k| {
+              // Convert PersistentList to Vec of HistoryEntry
+              let entries: Vec<HistoryEntry> = history
+                  .iter()
+                  .map(|event| HistoryEntry::from_event(event))
+                  .collect();
+              k(entries)
+          })
+      }
+
+      pub async fn get_task_history_handler(
+          State(dependencies): State<AppDependencies>,
+          Path(task_id): Path<String>,
+          Query(params): Query<PaginationParams>,
+      ) -> Result<Json<TaskHistoryResponse>, ApiError> {
+          let task_id = TaskId::parse(&task_id)?;
+
+          // Load history as PersistentList
+          let history: PersistentList<TaskEvent> = dependencies.event_store()
+              .load_task_events(&task_id)
+              .run_async()
+              .await?;
+
+          // Check if task exists (history should have at least Created event)
+          if history.is_empty() {
+              return Err(ApiError::not_found("Task not found"));
+          }
+
+          // Use Continuation for processing
+          let continuation = process_history_with_continuation(&history, |entries| {
+              // Apply pagination
+              let start = params.offset;
+              let end = (params.offset + params.limit).min(entries.len());
+
+              HistoryPage {
+                  entries: entries[start..end].to_vec(),
+                  total: entries.len(),
+              }
+          });
+
+          // Run the continuation
+          let page = continuation.run(|x| x);
+
+          Ok(Json(TaskHistoryResponse {
+              task_id: task_id.to_string(),
+              history: page.entries.into_iter().map(|e| HistoryEntryResponse {
+                  event_type: e.event_type,
+                  timestamp: e.timestamp.to_iso_string(),
+                  details: e.details,
+              }).collect(),
+              total: page.total,
+              offset: params.offset,
+              limit: params.limit,
+          }))
+      }
+
+# =============================================================================
+# 非機能要件
+# =============================================================================
+non_functional_requirements:
+  performance:
+    - id: NFR-PERF-001
+      description: |
+        各エンドポイントは、標準的なローカルDocker環境で以下の応答時間を目標とする:
+        - P50: 50ms以下
+        - P95: 200ms以下
+        - P99: 500ms以下
+      measurement: wrk + Luaスクリプトによる負荷テスト
+
+    - id: NFR-PERF-002
+      description: |
+        ベンチマーク測定は再現可能であること。Docker Compose環境での
+        deterministic な実行を保証する。
+
+  scalability:
+    - id: NFR-SCALE-001
+      description: |
+        タスク数10,000件、プロジェクト数100件の規模で動作すること。
+        これはベンチマーク用のテストデータサイズとして適切。
+
+  maintainability:
+    - id: NFR-MAINT-001
+      description: |
+        各エンドポイントは、使用するlambars機能を明確にドキュメント化すること。
+        コード内のコメントとREADMEの両方で説明する。
+
+  referential_transparency:
+    - id: NFR-RT-001
+      description: |
+        参照透過性を維持するため、以下の副作用を持つ操作はAsyncIO境界内で実行する:
+        - TaskId::new(), ProjectId::new() (UUID生成)
+        - Timestamp::now() (現在時刻取得)
+        - データベース操作
+
+        注: 本要件定義のコード例では簡略化のため一部の副作用がAsyncIO外に
+        記載されている箇所があるが、実装時は必ずAsyncIO境界内で扱うこと。
+      example: |
+        // 悪い例: 副作用がAsyncIO外
+        let task_id = TaskId::new();  // 副作用
+        let workflow = eff_async! {
+            task <= pure_async(Task::new(task_id, ...));
+            ...
+        };
+
+        // 良い例: 副作用がAsyncIO境界内
+        let workflow = eff_async! {
+            task <= lift_async_result(
+                AsyncIO::new(|| async {
+                    let task_id = TaskId::new();  // 副作用はAsyncIO内
+                    let timestamp = Timestamp::now();
+                    Ok(Task::new(task_id, ...))
+                }),
+                |e| ApiError::from(e)
+            );
+            ...
+        };
+
+# =============================================================================
+# アーキテクチャ要件
+# =============================================================================
+architecture:
+  effect_types:
+    description: |
+      全リポジトリメソッドはAsyncIO<Result<T, RepositoryError>>を返す。
+      これにより、eff_async!マクロでのチェーンが可能になる。
+    example: |
+      pub trait TaskRepository {
+          fn save(&self, task: &Task) -> AsyncIO<Result<Task, RepositoryError>>;
+          fn find_by_id(&self, id: &TaskId) -> AsyncIO<Result<Option<Task>, RepositoryError>>;
+          fn find_all(&self, offset: usize, limit: usize) -> AsyncIO<Result<PersistentVector<Task>, RepositoryError>>;
+          fn count(&self) -> AsyncIO<Result<usize, RepositoryError>>;
+      }
+
+  optimistic_locking:
+    description: |
+      楽観ロックはversion列で実装する。
+    rules:
+      - 更新リクエストは現在のversionを含む
+      - 更新時にversion不一致の場合は409 Conflictを返す
+      - 成功時はversion + 1で更新
+    response_on_conflict: |
+      HTTP 409 Conflict
+      {
+        "error": "CONFLICT",
+        "message": "Task was modified by another request. Please retry.",
+        "current_version": 5
+      }
+
+  pagination:
+    description: |
+      一覧系エンドポイントはoffset/limitベースのページネーションを使用する。
+    rules:
+      - デフォルトlimit: 20
+      - 最大limit: 100
+      - offsetは0以上の整数
+    response_format: |
+      {
+        "data": [...],
+        "total": 1000,
+        "offset": 0,
+        "limit": 20
+      }
+
+# =============================================================================
+# インフラストラクチャ要件
+# =============================================================================
+infrastructure:
+  database:
+    type: PostgreSQL
+    version: "16-alpine"
+    usage: |
+      タスク・プロジェクトの永続化。イベントソーシング用のイベントテーブル。
+    schema: |
+      -- Tasks table
+      CREATE TABLE tasks (
+          id UUID PRIMARY KEY,
+          title VARCHAR(200) NOT NULL,
+          description TEXT,
+          status VARCHAR(20) NOT NULL DEFAULT 'pending',
+          priority INTEGER NOT NULL DEFAULT 0,
+          version INTEGER NOT NULL DEFAULT 0,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      -- Task tags (PersistentHashSet storage)
+      CREATE TABLE task_tags (
+          task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          tag VARCHAR(50) NOT NULL,
+          PRIMARY KEY (task_id, tag)
+      );
+
+      -- Subtasks (PersistentList storage)
+      CREATE TABLE subtasks (
+          id UUID PRIMARY KEY,
+          parent_task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          title VARCHAR(200) NOT NULL,
+          completed BOOLEAN NOT NULL DEFAULT FALSE,
+          position INTEGER NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      -- Task events (event sourcing)
+      CREATE TABLE task_events (
+          id BIGSERIAL PRIMARY KEY,
+          task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          event_type VARCHAR(50) NOT NULL,
+          event_data JSONB NOT NULL,
+          occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      -- Projects table
+      CREATE TABLE projects (
+          id UUID PRIMARY KEY,
+          name VARCHAR(100) NOT NULL,
+          description TEXT,
+          version INTEGER NOT NULL DEFAULT 0,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      -- Project-Task relationship
+      CREATE TABLE project_tasks (
+          project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          PRIMARY KEY (project_id, task_id)
+      );
+
+      -- Indexes for efficient queries
+      CREATE INDEX idx_tasks_status ON tasks(status);
+      CREATE INDEX idx_tasks_priority ON tasks(priority);
+      CREATE INDEX idx_tasks_created_at ON tasks(created_at);
+      CREATE INDEX idx_task_events_task_id ON task_events(task_id);
+
+  index_strategy:
+    description: |
+      PersistentTreeMapインデックスはアプリケーション起動時にDBから構築する。
+      更新時はインメモリインデックスも更新（write-through）。
+    implementation: |
+      - 起動時: DBから全タスクを読み込みインデックス構築
+      - 更新時: DB更新成功後にインメモリインデックスを更新
+      - インデックス種類:
+        - priority_index: PersistentTreeMap<Priority, Vec<TaskId>>
+        - status_index: PersistentHashMap<TaskStatus, Vec<TaskId>>
+
+  cache:
+    type: Redis
+    version: "7-alpine"
+    usage: |
+      検索インデックスのキャッシュ。本番環境に近いベンチマークを実現するため、
+      インメモリキャッシュとRedisキャッシュの両方のシナリオをサポートする。
+    scenarios:
+      in_memory:
+        description: |
+          インメモリキャッシュ（Arc<RwLock<PersistentTreeMap>>）を使用。
+          最も高速だが、スケールアウト時に課題あり。
+        use_case: 開発時のベースライン測定、シングルインスタンス運用
+      redis:
+        description: |
+          Redisをキャッシュとして使用。本番環境に近い構成。
+          ネットワーク遅延を含むため、インメモリより遅いが現実的。
+        use_case: 本番環境シミュレーション、スケールアウト検証
+        implementation: |
+          - 優先度インデックス: Redis Sorted Set（ZADD/ZRANGEBYSCORE）
+          - ステータスインデックス: Redis Set（SADD/SMEMBERS）
+          - タスクキャッシュ: Redis Hash（HSET/HGET）
+          - TTL: 5分（invalidation on write）
+
+  application:
+    framework: axum
+    rust_version: MSRV追従（Cargo.toml rust-version参照）
+
+# =============================================================================
+# ベンチマーク設定
+# =============================================================================
+benchmark:
+  tool: wrk
+  scripts_location: benches/api/benchmarks/scripts/
+
+  # キャッシュ戦略の切り替え
+  cache_modes:
+    - mode: in_memory
+      env_var: CACHE_MODE=in_memory
+      description: インメモリキャッシュ（ベースライン測定用）
+    - mode: redis
+      env_var: CACHE_MODE=redis
+      description: Redisキャッシュ（本番環境シミュレーション用）
+
+  # 各シナリオは両方のキャッシュモードで実行される
+  scenarios:
+    - name: create_task
+      endpoint: POST /tasks
+      script: create_task.lua
+      connections: 10
+      threads: 2
+      duration: 30s
+
+    - name: create_task_eff
+      endpoint: POST /tasks-eff
+      script: create_task_eff.lua
+      connections: 10
+      threads: 2
+      duration: 30s
+
+    - name: update_task
+      endpoint: PUT /tasks/{id}
+      script: update_task.lua
+      connections: 10
+      threads: 2
+      duration: 30s
+
+    - name: list_tasks
+      endpoint: GET /tasks
+      script: list_tasks.lua
+      connections: 50
+      threads: 4
+      duration: 30s
+
+    - name: search_tasks
+      endpoint: GET /tasks/search
+      script: search_tasks.lua
+      connections: 20
+      threads: 2
+      duration: 30s
+
+    - name: search_tasks_redis
+      endpoint: GET /tasks/search
+      script: search_tasks.lua
+      connections: 20
+      threads: 2
+      duration: 30s
+      cache_mode: redis
+      note: Redisでの検索性能比較（インデックスキャッシュの効果測定）
+
+    - name: project_progress
+      endpoint: GET /projects/{id}/progress
+      script: project_progress.lua
+      connections: 20
+      threads: 2
+      duration: 30s
+
+  run_script: |
+    #!/bin/bash
+    # 両方のキャッシュモードでベンチマークを実行
+    for MODE in in_memory redis; do
+      echo "Running benchmarks with CACHE_MODE=$MODE"
+      export CACHE_MODE=$MODE
+      ./run_benchmark.sh
+    done
+
+# =============================================================================
+# 成果物
+# =============================================================================
+deliverables:
+  - path: benches/api/Cargo.toml
+    description: APIベンチマークプロジェクトの設定
+
+  - path: benches/api/src/main.rs
+    description: アプリケーションエントリポイント
+
+  - path: benches/api/src/domain/
+    description: ドメインモデル（Task, Project, History）
+
+  - path: benches/api/src/api/
+    description: HTTPハンドラとルーティング
+
+  - path: benches/api/src/infrastructure/
+    description: リポジトリ実装、DB接続
+
+  - path: benches/api/benchmarks/run_benchmark.sh
+    description: ベンチマーク実行スクリプト
+
+  - path: benches/api/benchmarks/scripts/*.lua
+    description: wrk用Luaスクリプト
+
+  - path: benches/api/docker/compose.yaml
+    description: Docker Compose設定
+
+  - path: benches/api/README.md
+    description: 使用方法とlambars機能マッピングの説明
+
+# =============================================================================
+# 将来の拡張
+# =============================================================================
+future_extensions:
+  - id: EXT-001
+    name: "WebSocket対応"
+    description: |
+      リアルタイム更新通知のためのWebSocketエンドポイント追加。
+      lambarsのAsyncIOとの統合をデモンストレーション。
+
+  - id: EXT-002
+    name: "GraphQL API"
+    description: |
+      GraphQLエンドポイントの追加。Traversableの活用例として
+      ネストしたデータの効率的な解決をデモンストレーション。
+
+  - id: EXT-003
+    name: "バッチ処理ジョブ"
+    description: |
+      定期的な集計ジョブの追加。Foldable, Monoidの大規模データ
+      処理での活用例をデモンストレーション。

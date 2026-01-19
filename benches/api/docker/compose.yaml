@@ -1,0 +1,152 @@
+# Docker Compose for Task Management Benchmark API
+#
+# This configuration provides:
+#   - PostgreSQL database for persistent storage
+#   - Redis cache for high-performance caching
+#   - API service with lambars features
+#
+# Usage:
+#   # Start all services
+#   docker compose up -d
+#
+#   # Run benchmarks with wrk
+#   ./benchmarks/run_benchmark.sh
+#
+#   # View logs
+#   docker compose logs -f api
+#
+#   # Stop all services
+#   docker compose down
+#
+#   # Stop and remove volumes (clean state)
+#   docker compose down -v
+
+services:
+  # ==========================================================================
+  # PostgreSQL Database
+  # ==========================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: benchmark-postgres
+    environment:
+      POSTGRES_USER: benchmark
+      POSTGRES_PASSWORD: benchmark
+      POSTGRES_DB: benchmark
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      # Use non-default ports to avoid conflicts with other projects
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U benchmark -d benchmark"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # ==========================================================================
+  # Redis Cache
+  # ==========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: benchmark-redis
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    ports:
+      # Use non-default port to avoid conflicts with other projects
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ==========================================================================
+  # Task Management API
+  # ==========================================================================
+  api:
+    build:
+      context: ../../..
+      dockerfile: benches/api/docker/Dockerfile
+    container_name: benchmark-api
+    environment:
+      # Server configuration
+      HOST: "0.0.0.0"
+      PORT: "3000"
+      # Repository configuration
+      STORAGE_MODE: postgres
+      CACHE_MODE: redis
+      DATABASE_URL: postgres://benchmark:benchmark@postgres:5432/benchmark
+      REDIS_URL: redis://redis:6379
+      # Logging
+      RUST_LOG: info,task_management_benchmark_api=debug,tower_http=debug
+    ports:
+      # Use 3002 to avoid conflicts with local development servers
+      - "3002:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  # ==========================================================================
+  # Development API (with hot reload via volume mount)
+  # ==========================================================================
+  api-dev:
+    build:
+      context: ../../..
+      dockerfile: benches/api/docker/Dockerfile
+      target: builder
+    container_name: benchmark-api-dev
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "3000"
+      STORAGE_MODE: postgres
+      CACHE_MODE: redis
+      DATABASE_URL: postgres://benchmark:benchmark@postgres:5432/benchmark
+      REDIS_URL: redis://redis:6379
+      RUST_LOG: debug,task_management_benchmark_api=trace,tower_http=debug
+      CARGO_TERM_COLOR: always
+    volumes:
+      - ../../..:/workspace:ro
+      - api-target:/workspace/target
+      - api-cargo-registry:/usr/local/cargo/registry
+      - api-cargo-git:/usr/local/cargo/git
+    working_dir: /workspace/benches/api
+    command: cargo run
+    ports:
+      - "3001:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    profiles:
+      - dev
+
+volumes:
+  postgres-data:
+    name: benchmark-postgres-data
+  redis-data:
+    name: benchmark-redis-data
+  api-target:
+    name: benchmark-api-target
+  api-cargo-registry:
+    name: benchmark-api-cargo-registry
+  api-cargo-git:
+    name: benchmark-api-cargo-git
+
+networks:
+  default:
+    name: benchmark-network

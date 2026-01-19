@@ -1,0 +1,763 @@
+# Phase 2.7: Bifunctor 詳細API設計
+#
+# 概要:
+#   Bifunctor型クラスを使用した二項型の両側変換ベンチマークAPI設計
+#   Either、Result、Tupleの両方の型パラメータに同時に関数を適用するパターンを検証
+#
+# 設計方針:
+#   1. bimap で Either/Result の両側を同時に変換
+#   2. first で左側（エラー側）のみを変換
+#   3. second で右側（成功側）のみを変換
+#   4. エラー型の変換とリッチ化に活用
+#
+# 参照:
+#   - lambars typeclass/bifunctor.rs
+#   - docs/internal/plans/20260119_1400_benchmark_api_phase2_roadmap.yaml
+
+version: "1.0.0"
+phase_id: "phase_2_7"
+name: "Bifunctor ベンチマークAPI"
+
+overview:
+  description: |
+    Bifunctorは2つの型パラメータを持つ型（Either<L, R>、Result<T, E>、(A, B)など）に対して、
+    両方の型パラメータに関数を適用できる型クラス。Functorが1つの型パラメータに対する
+    fmapを提供するのに対し、Bifunctorはbimapで両方同時に、firstで左側のみ、secondで
+    右側のみに関数を適用できる。
+
+    主な用途：
+    - エラー型の変換・エンリッチ（APIエラー → ユーザー向けエラー）
+    - Result/Eitherの両側を異なる形式に変換
+    - ペアデータの両要素の同時変換
+
+  lambars_features:
+    - bimap (両方の型パラメータに同時に関数を適用)
+    - first (左側/エラー側のみに関数を適用)
+    - second (右側/成功側のみに関数を適用)
+    - bimap_ref, first_ref, second_ref (参照版)
+
+  priority: high
+
+  laws:
+    - name: "Identity"
+      equation: "bimap(id, id) == id"
+      description: "両側に恒等関数を適用すると元の値と等しい"
+
+    - name: "Composition"
+      equation: "bimap(f1 . f2, g1 . g2) == bimap(f1, g1) . bimap(f2, g2)"
+      description: "合成した関数のbimapは、bimapの合成と等しい"
+
+    - name: "first/second consistency"
+      equation: "bimap(f, g) == first(f) . second(g) == second(g) . first(f)"
+      description: "bimapはfirstとsecondの組み合わせと等価"
+
+# ==============================================================================
+# エンドポイント定義
+# ==============================================================================
+endpoints:
+  # ============================================================================
+  # 1. POST /tasks/process-with-error-transform - エラー変換付き処理
+  # ============================================================================
+  - id: process_with_error_transform
+    method: POST
+    path: "/tasks/process-with-error-transform"
+
+    use_case:
+      description: |
+        タスク処理を実行し、成功時は結果を変換、失敗時はエラーを
+        ユーザーフレンドリーな形式に変換する。bimapで両方のケースを
+        同時に処理。
+
+      scenarios:
+        - 処理成功 → 結果をDTOに変換して返却
+        - 処理失敗 → エラーをユーザー向けメッセージに変換して返却
+
+    lambars_usage:
+      features:
+        - feature: "bimap"
+          purpose: "成功と失敗の両方を同時に変換"
+          code_example: |
+            ```rust
+            fn process_and_transform(
+                result: Result<Task, ProcessingError>,
+            ) -> Result<TaskDto, UserFriendlyError> {
+                result.bimap(
+                    |error| UserFriendlyError::from_processing_error(&error),
+                    |task| TaskDto::from(&task)
+                )
+            }
+            ```
+
+        - feature: "Either + bimap"
+          purpose: "Eitherの両側を変換"
+          code_example: |
+            ```rust
+            fn transform_either_result(
+                result: Either<ValidationError, Task>,
+            ) -> Either<ErrorResponse, TaskResponse> {
+                result.bimap(
+                    |validation_error| ErrorResponse::from_validation(&validation_error),
+                    |task| TaskResponse::from(&task)
+                )
+            }
+            ```
+
+      data_flow: |
+        1. POSTリクエスト受信（処理対象データ）
+        2. 処理実行 → Result<Task, ProcessingError>
+        3. bimap で両側を変換
+        4. 成功/失敗に応じたレスポンスを返却
+
+    infrastructure:
+      repositories:
+        - name: TaskRepository
+          methods:
+            - find_by_id
+            - process
+
+      dto:
+        request:
+          name: ProcessWithErrorTransformRequest
+          fields:
+            - name: task_id
+              type: "TaskId"
+            - name: processing_options
+              type: "ProcessingOptions"
+
+        response:
+          name: ProcessWithErrorTransformResponse
+          fields:
+            - name: result
+              type: "Either<UserFriendlyError, TaskDto>"
+            - name: processing_time_ms
+              type: "u64"
+
+      error_handling:
+        - code: "PROCESSING_FAILED"
+          status: 422
+          condition: "処理に失敗した場合（変換されたエラー）"
+        - code: "NOT_FOUND"
+          status: 404
+          condition: "タスクが存在しない場合"
+
+    pure_functions:
+      - name: transform_processing_result
+        signature: "fn transform_processing_result(result: Result<Task, ProcessingError>) -> Result<TaskDto, UserFriendlyError>"
+        description: "bimapで処理結果の両側を変換"
+
+      - name: to_user_friendly_error
+        signature: "fn to_user_friendly_error(error: &ProcessingError) -> UserFriendlyError"
+        description: "内部エラーをユーザー向けエラーに変換"
+
+  # ============================================================================
+  # 2. POST /tasks/transform-pair - ペアデータの変換
+  # ============================================================================
+  - id: transform_pair
+    method: POST
+    path: "/tasks/transform-pair"
+
+    use_case:
+      description: |
+        タプル形式のペアデータ（タスクとメタデータなど）の両要素を
+        同時に変換する。bimapでタプルの両側に異なる変換を適用。
+
+      scenarios:
+        - ペアデータを受け取り、両要素を変換して返却
+        - 片方のみ変換が必要な場合はfirst/secondを使用
+
+    lambars_usage:
+      features:
+        - feature: "bimap on tuple"
+          purpose: "タプルの両要素を同時に変換"
+          code_example: |
+            ```rust
+            fn transform_task_with_metadata(
+                pair: (Task, RawMetadata),
+            ) -> (TaskDto, ProcessedMetadata) {
+                pair.bimap(
+                    |task| TaskDto::from(&task),
+                    |metadata| ProcessedMetadata::process(&metadata)
+                )
+            }
+            ```
+
+        - feature: "first on tuple"
+          purpose: "タプルの最初の要素のみを変換"
+          code_example: |
+            ```rust
+            fn transform_task_only(
+                pair: (Task, Metadata),
+            ) -> (TaskDto, Metadata) {
+                pair.first(|task| TaskDto::from(&task))
+            }
+            ```
+
+        - feature: "second on tuple"
+          purpose: "タプルの2番目の要素のみを変換"
+          code_example: |
+            ```rust
+            fn transform_metadata_only(
+                pair: (Task, RawMetadata),
+            ) -> (Task, ProcessedMetadata) {
+                pair.second(|metadata| ProcessedMetadata::process(&metadata))
+            }
+            ```
+
+      data_flow: |
+        1. POSTリクエスト受信（ペアデータ）
+        2. bimap/first/secondで変換
+        3. 変換後のペアを返却
+
+    infrastructure:
+      repositories:
+        - name: TaskRepository
+          methods:
+            - find_by_id_with_metadata
+
+      dto:
+        request:
+          name: TransformPairRequest
+          fields:
+            - name: task_id
+              type: "TaskId"
+            - name: transform_options
+              type: "PairTransformOptions"
+              description: "both | first_only | second_only"
+
+        response:
+          name: TransformPairResponse
+          fields:
+            - name: task
+              type: "TaskDto"
+            - name: metadata
+              type: "ProcessedMetadataDto"
+            - name: transform_applied
+              type: "String"
+
+      error_handling:
+        - code: "NOT_FOUND"
+          status: 404
+          condition: "タスクが存在しない場合"
+
+    pure_functions:
+      - name: transform_pair_both
+        signature: "fn transform_pair_both(pair: (Task, Metadata)) -> (TaskDto, MetadataDto)"
+        description: "bimapで両側を変換"
+
+      - name: transform_pair_first
+        signature: "fn transform_pair_first(pair: (Task, Metadata)) -> (TaskDto, Metadata)"
+        description: "firstで最初の要素のみ変換"
+
+      - name: transform_pair_second
+        signature: "fn transform_pair_second(pair: (Task, Metadata)) -> (Task, MetadataDto)"
+        description: "secondで2番目の要素のみ変換"
+
+  # ============================================================================
+  # 3. POST /tasks/enrich-error - エラーエンリッチメント
+  # ============================================================================
+  - id: enrich_error
+    method: POST
+    path: "/tasks/enrich-error"
+
+    use_case:
+      description: |
+        処理結果のエラー側にコンテキスト情報を付加する。
+        firstを使用してエラー側のみを変換し、成功側はそのまま保持。
+
+      scenarios:
+        - 処理失敗 → エラーにコンテキスト（タイムスタンプ、リクエストID等）を付加
+        - 処理成功 → 結果をそのまま返却
+
+    lambars_usage:
+      features:
+        - feature: "first for error enrichment"
+          purpose: "エラーにコンテキスト情報を付加"
+          code_example: |
+            ```rust
+            fn enrich_error_with_context(
+                result: Result<Task, ProcessingError>,
+                context: &RequestContext,
+            ) -> Result<Task, EnrichedError> {
+                result.first(|error| EnrichedError {
+                    original: error,
+                    request_id: context.request_id.clone(),
+                    timestamp: Utc::now(),
+                    trace_id: context.trace_id.clone(),
+                })
+            }
+            ```
+
+        - feature: "first_ref for non-consuming enrichment"
+          purpose: "所有権を移動せずにエラーをエンリッチ"
+          code_example: |
+            ```rust
+            fn enrich_error_ref(
+                result: &Result<Task, ProcessingError>,
+                context: &RequestContext,
+            ) -> Result<Task, EnrichedError>
+            where
+                Task: Clone,
+            {
+                result.first_ref(|error| EnrichedError::from_processing(error, context))
+            }
+            ```
+
+      data_flow: |
+        1. POSTリクエスト受信（処理対象 + コンテキスト情報）
+        2. 処理実行
+        3. firstでエラー側にコンテキストを付加
+        4. 結果を返却
+
+    infrastructure:
+      repositories:
+        - name: TaskRepository
+          methods:
+            - process
+
+      dto:
+        request:
+          name: EnrichErrorRequest
+          fields:
+            - name: task_id
+              type: "TaskId"
+            - name: include_trace
+              type: "bool"
+            - name: include_metadata
+              type: "bool"
+
+        response:
+          name: EnrichErrorResponse
+          fields:
+            - name: result
+              type: "Either<EnrichedErrorDto, TaskDto>"
+            - name: enrichment_applied
+              type: "bool"
+
+      error_handling:
+        - code: "ENRICHED_ERROR"
+          status: 422
+          condition: "エンリッチされたエラー情報を含む"
+
+    pure_functions:
+      - name: enrich_with_context
+        signature: "fn enrich_with_context(error: ProcessingError, context: &RequestContext) -> EnrichedError"
+        description: "エラーにコンテキスト情報を付加"
+
+      - name: apply_error_enrichment
+        signature: "fn apply_error_enrichment<T>(result: Result<T, ProcessingError>, context: &RequestContext) -> Result<T, EnrichedError>"
+        description: "firstを使用してエラーエンリッチメントを適用"
+
+  # ============================================================================
+  # 4. POST /tasks/convert-error-domain - エラードメイン変換
+  # ============================================================================
+  - id: convert_error_domain
+    method: POST
+    path: "/tasks/convert-error-domain"
+
+    use_case:
+      description: |
+        内部ドメインのエラー型をAPI層のエラー型に変換する。
+        firstを使用してエラー型のみを変換し、ドメイン層とAPI層の
+        責務を分離。
+
+      scenarios:
+        - ドメインエラー → APIエラーに変換
+        - 複数のドメインエラーを統一的なAPIエラーにマッピング
+
+    lambars_usage:
+      features:
+        - feature: "first for domain error conversion"
+          purpose: "ドメインエラーをAPIエラーに変換"
+          code_example: |
+            ```rust
+            fn convert_to_api_error(
+                result: Result<Task, DomainError>,
+            ) -> Result<Task, ApiError> {
+                result.first(|domain_error| match domain_error {
+                    DomainError::NotFound(id) => ApiError::NotFound {
+                        resource: "task",
+                        id: id.to_string(),
+                    },
+                    DomainError::ValidationFailed(msg) => ApiError::BadRequest {
+                        message: msg.clone(),
+                        code: "VALIDATION_ERROR",
+                    },
+                    DomainError::Conflict(reason) => ApiError::Conflict {
+                        message: reason.clone(),
+                    },
+                    _ => ApiError::Internal {
+                        message: "An unexpected error occurred".to_string(),
+                    },
+                })
+            }
+            ```
+
+      data_flow: |
+        1. POSTリクエスト受信
+        2. ドメイン層で処理実行 → Result<Task, DomainError>
+        3. firstでDomainError → ApiErrorに変換
+        4. APIレスポンスとして返却
+
+    infrastructure:
+      repositories:
+        - name: TaskRepository
+          methods:
+            - create
+            - update
+
+      dto:
+        request:
+          name: ConvertErrorDomainRequest
+          fields:
+            - name: operation
+              type: "TaskOperation"
+            - name: data
+              type: "TaskData"
+
+        response:
+          name: ConvertErrorDomainResponse
+          fields:
+            - name: result
+              type: "Either<ApiErrorDto, TaskDto>"
+            - name: original_error_type
+              type: "Option<String>"
+              description: "デバッグ用：元のエラー型名"
+
+      error_handling:
+        - code: "NOT_FOUND"
+          status: 404
+          condition: "DomainError::NotFoundから変換"
+        - code: "VALIDATION_ERROR"
+          status: 400
+          condition: "DomainError::ValidationFailedから変換"
+        - code: "CONFLICT"
+          status: 409
+          condition: "DomainError::Conflictから変換"
+
+    pure_functions:
+      - name: domain_to_api_error
+        signature: "fn domain_to_api_error(error: DomainError) -> ApiError"
+        description: "ドメインエラーからAPIエラーへの変換（純粋関数）"
+
+      - name: convert_result_error
+        signature: "fn convert_result_error<T>(result: Result<T, DomainError>) -> Result<T, ApiError>"
+        description: "firstを使用してResult全体のエラー型を変換"
+
+  # ============================================================================
+  # 5. POST /tasks/batch-transform-results - バッチ結果変換
+  # ============================================================================
+  - id: batch_transform_results
+    method: POST
+    path: "/tasks/batch-transform-results"
+
+    use_case:
+      description: |
+        複数の処理結果（Result/Eitherのリスト）に対して、
+        それぞれの成功/失敗を同時に変換する。
+        traverseとbimapを組み合わせて効率的に変換。
+
+      scenarios:
+        - 複数の結果を受け取り、全ての成功/失敗を変換
+        - 変換後の結果をまとめて返却
+
+    lambars_usage:
+      features:
+        - feature: "bimap + map on Vec"
+          purpose: "複数の結果を一括変換"
+          code_example: |
+            ```rust
+            fn batch_transform_results(
+                results: Vec<Result<Task, ProcessingError>>,
+            ) -> Vec<Result<TaskDto, ApiError>> {
+                results
+                    .into_iter()
+                    .map(|result| {
+                        result.bimap(
+                            |error| ApiError::from(&error),
+                            |task| TaskDto::from(&task)
+                        )
+                    })
+                    .collect()
+            }
+            ```
+
+        - feature: "partition + bimap"
+          purpose: "成功と失敗を分離してから変換"
+          code_example: |
+            ```rust
+            fn partition_and_transform(
+                results: Vec<Result<Task, ProcessingError>>,
+            ) -> (Vec<TaskDto>, Vec<ApiError>) {
+                let (successes, failures): (Vec<_>, Vec<_>) = results
+                    .into_iter()
+                    .partition(Result::is_ok);
+
+                let success_dtos: Vec<TaskDto> = successes
+                    .into_iter()
+                    .filter_map(Result::ok)
+                    .map(|task| TaskDto::from(&task))
+                    .collect();
+
+                let error_dtos: Vec<ApiError> = failures
+                    .into_iter()
+                    .filter_map(Result::err)
+                    .map(|error| ApiError::from(&error))
+                    .collect();
+
+                (success_dtos, error_dtos)
+            }
+            ```
+
+      data_flow: |
+        1. POSTリクエスト受信（処理対象リスト）
+        2. 各要素を処理 → Vec<Result<Task, Error>>
+        3. 各Resultにbimapを適用
+        4. 変換後の結果リストを返却
+
+    infrastructure:
+      repositories:
+        - name: TaskRepository
+          methods:
+            - find_by_ids
+            - process_batch
+
+      dto:
+        request:
+          name: BatchTransformResultsRequest
+          fields:
+            - name: task_ids
+              type: "Vec<TaskId>"
+              validation: "1-50件"
+            - name: transform_config
+              type: "TransformConfig"
+
+        response:
+          name: BatchTransformResultsResponse
+          fields:
+            - name: results
+              type: "Vec<Either<ApiErrorDto, TaskDto>>"
+            - name: success_count
+              type: "usize"
+            - name: failure_count
+              type: "usize"
+
+      error_handling:
+        - code: "BATCH_PARTIAL_FAILURE"
+          status: 207
+          condition: "一部の処理が失敗した場合"
+
+    pure_functions:
+      - name: transform_single_result
+        signature: "fn transform_single_result(result: Result<Task, ProcessingError>) -> Result<TaskDto, ApiError>"
+        description: "単一のResultをbimapで変換"
+
+      - name: transform_all_results
+        signature: "fn transform_all_results(results: Vec<Result<Task, ProcessingError>>) -> Vec<Result<TaskDto, ApiError>>"
+        description: "複数のResultを一括で変換"
+
+# ==============================================================================
+# 追加の型定義
+# ==============================================================================
+types:
+  - name: UserFriendlyError
+    description: "ユーザー向けのエラー情報"
+    fields:
+      - name: code
+        type: "String"
+      - name: message
+        type: "String"
+      - name: suggestion
+        type: "Option<String>"
+      - name: details
+        type: "Option<HashMap<String, String>>"
+
+  - name: EnrichedError
+    description: "コンテキスト情報が付加されたエラー"
+    fields:
+      - name: original_message
+        type: "String"
+      - name: error_code
+        type: "String"
+      - name: request_id
+        type: "String"
+      - name: timestamp
+        type: "DateTime<Utc>"
+      - name: trace_id
+        type: "Option<String>"
+      - name: stack_trace
+        type: "Option<Vec<String>>"
+
+  - name: DomainError
+    description: "ドメイン層のエラー"
+    variants:
+      - name: NotFound
+        fields: ["id: String"]
+      - name: ValidationFailed
+        fields: ["message: String"]
+      - name: Conflict
+        fields: ["reason: String"]
+      - name: Unauthorized
+        fields: ["reason: String"]
+      - name: Internal
+        fields: ["message: String"]
+
+  - name: ApiError
+    description: "API層のエラー"
+    variants:
+      - name: NotFound
+        fields: ["resource: String", "id: String"]
+      - name: BadRequest
+        fields: ["message: String", "code: String"]
+      - name: Conflict
+        fields: ["message: String"]
+      - name: Internal
+        fields: ["message: String"]
+
+  - name: ProcessedMetadata
+    description: "処理済みメタデータ"
+    fields:
+      - name: processed_at
+        type: "DateTime<Utc>"
+      - name: source
+        type: "String"
+      - name: attributes
+        type: "HashMap<String, serde_json::Value>"
+
+  - name: PairTransformOptions
+    description: "ペア変換のオプション"
+    variants:
+      - name: Both
+        description: "両方を変換"
+      - name: FirstOnly
+        description: "最初の要素のみ変換"
+      - name: SecondOnly
+        description: "2番目の要素のみ変換"
+
+# ==============================================================================
+# テスト戦略
+# ==============================================================================
+testing:
+  unit_tests:
+    - name: "bimap_identity_law"
+      description: "bimap(id, id) == id を検証"
+      expected: "法則を満たす"
+
+    - name: "bimap_composition_law"
+      description: "bimap(f1 . f2, g1 . g2) == bimap(f1, g1) . bimap(f2, g2) を検証"
+      expected: "法則を満たす"
+
+    - name: "first_second_consistency"
+      description: "bimap(f, g) == first(f) . second(g) を検証"
+      expected: "法則を満たす"
+
+    - name: "result_bimap_ok"
+      description: "Result::Okに対するbimap"
+      expected: "second関数が適用される"
+
+    - name: "result_bimap_err"
+      description: "Result::Errに対するbimap"
+      expected: "first関数が適用される"
+
+    - name: "either_bimap_left"
+      description: "Either::Leftに対するbimap"
+      expected: "first関数が適用される"
+
+    - name: "either_bimap_right"
+      description: "Either::Rightに対するbimap"
+      expected: "second関数が適用される"
+
+    - name: "tuple_bimap"
+      description: "タプルに対するbimap"
+      expected: "両要素に関数が適用される"
+
+  integration_tests:
+    - "POST /tasks/process-with-error-transform success case"
+    - "POST /tasks/process-with-error-transform failure case"
+    - "POST /tasks/transform-pair both transform"
+    - "POST /tasks/transform-pair first only"
+    - "POST /tasks/transform-pair second only"
+    - "POST /tasks/enrich-error with context"
+    - "POST /tasks/convert-error-domain various errors"
+    - "POST /tasks/batch-transform-results mixed results"
+
+  benchmark_tests:
+    - name: "bimap_vs_match"
+      description: "bimapとmatch式の性能比較"
+      metrics:
+        - "latency comparison"
+        - "code generation size"
+
+    - name: "batch_bimap_throughput"
+      description: "バッチbimap処理のスループット"
+      metrics:
+        - "transformations/sec"
+        - "memory allocation"
+
+# ==============================================================================
+# 実装時の注意点
+# ==============================================================================
+implementation_notes:
+  - title: "ResultのBifunctor実装"
+    description: |
+      ResultのBifunctorでは、firstがエラー側（E）、secondが成功側（T）に対応する。
+      これは直感と逆に感じるかもしれないが、Result<T, E>の型パラメータ順序に従っている。
+      ```rust
+      // Result<T, E>: first = E, second = T
+      result.first(transform_error)   // エラーを変換
+      result.second(transform_value)  // 成功値を変換
+      ```
+
+  - title: "EitherのBifunctor実装"
+    description: |
+      EitherのBifunctorでは、firstがLeft側、secondがRight側に対応する。
+      ```rust
+      // Either<L, R>: first = L, second = R
+      either.first(transform_left)    // Leftを変換
+      either.second(transform_right)  // Rightを変換
+      ```
+
+  - title: "bimap vs map_err + map"
+    description: |
+      標準ライブラリのResultにはmap_errとmapがあるが、bimapは両方を1回の呼び出しで
+      適用できる。コードの意図が明確になり、関数型スタイルとの一貫性が保たれる。
+
+  - title: "_ref バリアント"
+    description: |
+      bimap_ref, first_ref, second_refは参照から新しい値を生成する。
+      所有権を移動させたくない場合や、元の値を保持したい場合に使用する。
+
+# ==============================================================================
+# ファイル構成
+# ==============================================================================
+file_structure:
+  new_files:
+    - path: "benches/api/src/api/bifunctor.rs"
+      description: "Bifunctor系エンドポイントのハンドラー"
+
+    - path: "benches/api/src/domain/error_types.rs"
+      description: "エラー型の定義（DomainError, ApiError等）"
+
+  modified_files:
+    - path: "benches/api/src/api/mod.rs"
+      changes: "bifunctorモジュールを追加"
+
+    - path: "benches/api/src/api/dto.rs"
+      changes: "Bifunctor系のDTO追加"
+
+    - path: "benches/api/src/main.rs"
+      changes: "bifunctor系ルートを追加"
+
+# ==============================================================================
+# 依存関係
+# ==============================================================================
+dependencies:
+  lambars_imports:
+    - "use lambars::typeclass::bifunctor::Bifunctor;"
+    - "use lambars::data::either::Either;"
+
+  external_crates: []
+
+  internal_modules:
+    - "crate::domain::task::Task"
+    - "crate::domain::error::*"
+    - "crate::infrastructure::repository::TaskRepository"

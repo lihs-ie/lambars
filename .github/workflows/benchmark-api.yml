@@ -1,0 +1,129 @@
+name: API Workload Benchmark
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'benches/api/**'
+      - 'src/**'
+      - 'lambars-derive/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  pull_request:
+    paths:
+      - 'benches/api/**'
+      - 'src/**'
+      - 'lambars-derive/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    name: API Workload Benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and start services
+        working-directory: benches/api/docker
+        run: |
+          docker compose -f compose.ci.yaml up -d --build --wait
+          docker compose -f compose.ci.yaml ps
+
+      - name: Install wrk
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wrk
+
+      - name: Setup test data
+        working-directory: benches/api/benchmarks
+        run: |
+          chmod +x setup_test_data.sh
+          API_URL=http://localhost:3002 ./setup_test_data.sh
+
+      - name: Run benchmarks
+        id: benchmark
+        working-directory: benches/api/benchmarks
+        continue-on-error: true
+        run: |
+          chmod +x run_benchmark.sh
+          API_URL=http://localhost:3002 DURATION=10s THREADS=2 CONNECTIONS=10 ./run_benchmark.sh --quick
+
+      - name: Show API logs on failure
+        if: failure()
+        working-directory: benches/api/docker
+        run: |
+          echo "=== API Container Logs ==="
+          docker compose -f compose.ci.yaml logs api --tail=100
+          echo ""
+          echo "=== Container Status ==="
+          docker compose -f compose.ci.yaml ps -a
+
+      - name: Check benchmark results
+        working-directory: benches/api/benchmarks
+        run: |
+          # Find the most recent results directory
+          RESULTS_DIR=$(ls -td results/*/ 2>/dev/null | head -1)
+          if [ -z "$RESULTS_DIR" ]; then
+            echo "No benchmark results found!"
+            exit 1
+          fi
+
+          echo "Checking results in: $RESULTS_DIR"
+          echo ""
+
+          # Count successful benchmarks (those with actual requests)
+          TOTAL=0
+          PASSED=0
+          FAILED_BENCHMARKS=""
+
+          for result_file in "$RESULTS_DIR"/*.txt; do
+            if [ -f "$result_file" ] && [ "$(basename "$result_file")" != "summary.txt" ]; then
+              TOTAL=$((TOTAL + 1))
+              BENCHMARK_NAME=$(basename "$result_file" .txt)
+
+              # Check if requests were made (not 0 requests)
+              REQUESTS=$(grep -o '[0-9]* requests in' "$result_file" | head -1 | awk '{print $1}')
+              if [ -n "$REQUESTS" ] && [ "$REQUESTS" -gt 0 ]; then
+                PASSED=$((PASSED + 1))
+                echo "  $BENCHMARK_NAME: PASSED ($REQUESTS requests)"
+              else
+                FAILED_BENCHMARKS="$FAILED_BENCHMARKS $BENCHMARK_NAME"
+                echo "  $BENCHMARK_NAME: FAILED (0 requests)"
+              fi
+            fi
+          done
+
+          echo ""
+          echo "Summary: $PASSED/$TOTAL benchmarks passed"
+
+          if [ "$PASSED" -lt "$TOTAL" ]; then
+            echo ""
+            echo "Failed benchmarks:$FAILED_BENCHMARKS"
+            echo ""
+            echo "This may indicate API issues. Check the API logs above."
+            exit 1
+          fi
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-results-${{ github.sha }}
+          path: benches/api/benchmarks/results/
+          retention-days: 30
+
+      - name: Cleanup
+        if: always()
+        working-directory: benches/api/docker
+        run: docker compose -f compose.ci.yaml down -v
