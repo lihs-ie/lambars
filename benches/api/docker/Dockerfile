@@ -1,18 +1,15 @@
 # syntax=docker/dockerfile:1.4
 # Dockerfile for Task Management Benchmark API
 #
-# Multi-stage build with BuildKit cache optimization.
+# Multi-stage build optimized for CI environments.
 #
 # Build stages:
-#   1. builder: Compile the Rust application with cached dependencies
+#   1. builder: Compile the Rust application
 #   2. runtime: Minimal runtime image with only the binary
 #
 # Usage:
 #   docker compose build api
 #   docker compose up -d
-#
-# For CI with GitHub Actions cache:
-#   docker buildx build --cache-from type=gha --cache-to type=gha,mode=max .
 
 # =============================================================================
 # Builder Stage
@@ -28,17 +25,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Step 1: Copy only Cargo files for dependency caching
+# Copy Cargo files first for better caching
 COPY Cargo.toml Cargo.lock ./
 COPY lambars-derive/Cargo.toml lambars-derive/Cargo.toml
 COPY benches/api/Cargo.toml benches/api/Cargo.toml
 
-# Step 2: Create dummy source files to build dependencies
-# Also create dummy bench files to satisfy Cargo.toml bench declarations
-RUN mkdir -p src lambars-derive/src benches/api/src benches/iai && \
-    echo "fn main() {}" > benches/api/src/main.rs && \
-    echo "" > src/lib.rs && \
-    echo "" > lambars-derive/src/lib.rs && \
+# Create directories for Cargo
+RUN mkdir -p src lambars-derive/src benches/api/src
+
+# Create dummy bench files to satisfy Cargo.toml bench declarations
+RUN mkdir -p benches/iai && \
     for bench in persistent_vector_bench persistent_hashmap_bench persistent_treemap_bench \
                  persistent_list_bench control_bench effect_bench for_macro_bench \
                  for_async_macro_bench algebraic_effect_bench serde_bench transient_bench \
@@ -49,28 +45,17 @@ RUN mkdir -p src lambars-derive/src benches/api/src benches/iai && \
         echo "fn main() {}" > benches/iai/$bench.rs; \
     done
 
-# Step 3: Build dependencies only with cache mount
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/build/target \
-    cargo build --release \
-    --manifest-path benches/api/Cargo.toml \
-    --bin task-management-benchmark-api 2>/dev/null || true
-
-# Step 4: Remove dummy files and copy real source
-RUN rm -rf src lambars-derive/src benches/api/src
+# Copy all source files
 COPY src/ src/
 COPY lambars-derive/src/ lambars-derive/src/
 COPY benches/api/src/ benches/api/src/
 
-# Step 5: Build the actual binary with cache mount
+# Build the binary with cargo registry cache
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/build/target \
     cargo build --release \
     --manifest-path benches/api/Cargo.toml \
-    --bin task-management-benchmark-api && \
-    cp /build/target/release/task-management-benchmark-api /tmp/app
+    --bin task-management-benchmark-api
 
 # =============================================================================
 # Runtime Stage
@@ -89,7 +74,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN useradd -m -s /bin/bash appuser
 
 # Copy the binary from builder
-COPY --from=builder /tmp/app /usr/local/bin/task-management-benchmark-api
+COPY --from=builder /build/target/release/task-management-benchmark-api /usr/local/bin/task-management-benchmark-api
 
 # Set ownership
 RUN chown appuser:appuser /usr/local/bin/task-management-benchmark-api
