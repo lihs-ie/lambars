@@ -175,20 +175,23 @@ jobs:
             // Helper function to parse summary file
             function parseSummary(content) {
               const results = new Map();
+              const bottleneck = { slowest: null, highestP99: null };
               const lines = content.split('\n');
               let currentBenchmark = null;
               let reqsPerSec = null;
               let avgLatency = null;
+              let p50 = null, p75 = null, p90 = null, p99 = null;
 
               for (const line of lines) {
                 const benchMatch = line.match(/^(\w+):$/);
                 if (benchMatch) {
                   if (currentBenchmark && reqsPerSec !== null) {
-                    results.set(currentBenchmark, { reqsPerSec, avgLatency });
+                    results.set(currentBenchmark, { reqsPerSec, avgLatency, p50, p75, p90, p99 });
                   }
                   currentBenchmark = benchMatch[1];
                   reqsPerSec = null;
                   avgLatency = null;
+                  p50 = null; p75 = null; p90 = null; p99 = null;
                 }
                 const reqsMatch = line.match(/Requests\/sec:\s*([\d.]+)/);
                 if (reqsMatch) {
@@ -198,11 +201,30 @@ jobs:
                 if (latencyMatch) {
                   avgLatency = latencyMatch[1];
                 }
+                // Parse latency percentiles
+                const p50Match = line.match(/P50:\s*([\d.]+\w+)/);
+                if (p50Match) p50 = p50Match[1];
+                const p75Match = line.match(/P75:\s*([\d.]+\w+)/);
+                if (p75Match) p75 = p75Match[1];
+                const p90Match = line.match(/P90:\s*([\d.]+\w+)/);
+                if (p90Match) p90 = p90Match[1];
+                const p99Match = line.match(/P99:\s*([\d.]+\w+)/);
+                if (p99Match) p99 = p99Match[1];
+
+                // Parse bottleneck analysis
+                const slowestMatch = line.match(/Slowest endpoint:\s*(\w+)\s*\(([\d.]+)\s*req\/s\)/);
+                if (slowestMatch) {
+                  bottleneck.slowest = { name: slowestMatch[1], rps: parseFloat(slowestMatch[2]) };
+                }
+                const highestP99Match = line.match(/Highest P99 latency:\s*(\w+)\s*\(([\d.]+\w+)\)/);
+                if (highestP99Match) {
+                  bottleneck.highestP99 = { name: highestP99Match[1], latency: highestP99Match[2] };
+                }
               }
               if (currentBenchmark && reqsPerSec !== null) {
-                results.set(currentBenchmark, { reqsPerSec, avgLatency });
+                results.set(currentBenchmark, { reqsPerSec, avgLatency, p50, p75, p90, p99 });
               }
-              return results;
+              return { results, bottleneck };
             }
 
             // Find the most recent results directory
@@ -227,14 +249,17 @@ jobs:
 
             // Parse PR results
             const prSummary = fs.readFileSync(summaryFile, 'utf8');
-            const prResults = parseSummary(prSummary);
+            const { results: prResults, bottleneck: prBottleneck } = parseSummary(prSummary);
 
             // Parse baseline results (if available)
             let baselineResults = null;
+            let baselineBottleneck = null;
             const baselineFile = '/tmp/baseline_summary.txt';
             if (fs.existsSync(baselineFile)) {
               const baselineSummary = fs.readFileSync(baselineFile, 'utf8');
-              baselineResults = parseSummary(baselineSummary);
+              const parsed = parseSummary(baselineSummary);
+              baselineResults = parsed.results;
+              baselineBottleneck = parsed.bottleneck;
             }
 
             if (prResults.size === 0) {
@@ -242,9 +267,9 @@ jobs:
               return;
             }
 
-            // Build comparison table
-            let table = '| Endpoint | PR (white_check_mark:) | main | Change |\n';
-            table += '|----------|-------------:|-------------:|-------:|\n';
+            // Build comparison table with P99 latency
+            let table = '| Endpoint | Req/s (PR) | Req/s (main) | Change | P99 (PR) |\n';
+            table += '|----------|----------:|------------:|-------:|--------:|\n';
 
             let totalPr = 0;
             let totalMain = 0;
@@ -257,6 +282,7 @@ jobs:
 
               let mainReqs = '-';
               let change = '-';
+              const p99 = pr.p99 || '-';
 
               if (baselineResults && baselineResults.has(name)) {
                 const baseline = baselineResults.get(name);
@@ -273,7 +299,7 @@ jobs:
                 }
               }
 
-              table += `| ${name} | ${prReqs.toLocaleString('en-US', {maximumFractionDigits: 2})} | ${mainReqs} | ${change} |\n`;
+              table += `| ${name} | ${prReqs.toLocaleString('en-US', {maximumFractionDigits: 2})} | ${mainReqs} | ${change} | ${p99} |\n`;
             }
 
             // Add average row
@@ -294,7 +320,19 @@ jobs:
               }
             }
 
-            table += `| **Average** | **${avgPr.toLocaleString('en-US', {maximumFractionDigits: 2})}** | **${avgMain}** | **${avgChange}** |\n`;
+            table += `| **Average** | **${avgPr.toLocaleString('en-US', {maximumFractionDigits: 2})}** | **${avgMain}** | **${avgChange}** | - |\n`;
+
+            // Build bottleneck analysis section
+            let bottleneckSection = '';
+            if (prBottleneck.slowest || prBottleneck.highestP99) {
+              bottleneckSection = '\n### :mag: Bottleneck Analysis\n\n';
+              if (prBottleneck.slowest) {
+                bottleneckSection += `- **Slowest endpoint**: \`${prBottleneck.slowest.name}\` (${prBottleneck.slowest.rps.toLocaleString('en-US', {maximumFractionDigits: 2})} req/s)\n`;
+              }
+              if (prBottleneck.highestP99) {
+                bottleneckSection += `- **Highest P99 latency**: \`${prBottleneck.highestP99.name}\` (${prBottleneck.highestP99.latency})\n`;
+              }
+            }
 
             // Determine overall status
             let status = ':white_check_mark: Benchmark completed';
@@ -316,6 +354,7 @@ jobs:
               status,
               '',
               table,
+              bottleneckSection,
               '<details>',
               '<summary>Configuration</summary>',
               '',

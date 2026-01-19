@@ -104,9 +104,10 @@ run_benchmark() {
 
     local result_file="${RESULTS_DIR}/${script_name}.txt"
 
-    # Run wrk and capture output
+    # Run wrk and capture output (with --latency for percentile stats)
     cd "${SCRIPT_DIR}"
     if wrk -t"${THREADS}" -c"${CONNECTIONS}" -d"${DURATION}" \
+        --latency \
         --script="scripts/${script_name}.lua" \
         "${API_URL}" 2>&1 | tee "${result_file}"; then
 
@@ -114,10 +115,20 @@ run_benchmark() {
         local reqs_sec=$(grep "Requests/sec:" "${result_file}" | awk '{print $2}')
         local avg_latency=$(grep "Latency" "${result_file}" | head -1 | awk '{print $2}')
 
+        # Extract latency percentiles (P50, P75, P90, P99)
+        local p50=$(grep "50%" "${result_file}" | awk '{print $2}')
+        local p75=$(grep "75%" "${result_file}" | awk '{print $2}')
+        local p90=$(grep "90%" "${result_file}" | awk '{print $2}')
+        local p99=$(grep "99%" "${result_file}" | awk '{print $2}')
+
         echo "" >> "${SUMMARY_FILE}"
         echo "${script_name}:" >> "${SUMMARY_FILE}"
         echo "  Requests/sec: ${reqs_sec:-N/A}" >> "${SUMMARY_FILE}"
         echo "  Avg Latency:  ${avg_latency:-N/A}" >> "${SUMMARY_FILE}"
+        echo "  P50: ${p50:-N/A}" >> "${SUMMARY_FILE}"
+        echo "  P75: ${p75:-N/A}" >> "${SUMMARY_FILE}"
+        echo "  P90: ${p90:-N/A}" >> "${SUMMARY_FILE}"
+        echo "  P99: ${p99:-N/A}" >> "${SUMMARY_FILE}"
 
         echo -e "${GREEN}Completed${NC}"
     else
@@ -157,3 +168,68 @@ echo "Results saved to: ${RESULTS_DIR}"
 echo ""
 echo "Summary:"
 cat "${SUMMARY_FILE}"
+
+# Generate bottleneck analysis
+echo ""
+echo "=============================================="
+echo "  Bottleneck Analysis"
+echo "=============================================="
+echo "" >> "${SUMMARY_FILE}"
+echo "--- Bottleneck Analysis ---" >> "${SUMMARY_FILE}"
+
+# Find slowest endpoint (lowest Requests/sec)
+slowest_endpoint=""
+slowest_rps=999999999
+highest_p99=""
+highest_p99_endpoint=""
+
+for result_file in "${RESULTS_DIR}"/*.txt; do
+    if [ -f "$result_file" ] && [ "$(basename "$result_file")" != "summary.txt" ]; then
+        endpoint=$(basename "$result_file" .txt)
+        rps=$(grep "Requests/sec:" "$result_file" 2>/dev/null | awk '{print $2}' | sed 's/[^0-9.]//g')
+        p99=$(grep "99%" "$result_file" 2>/dev/null | awk '{print $2}')
+
+        if [ -n "$rps" ]; then
+            # Compare as integers (multiply by 100 to handle decimals)
+            rps_int=$(echo "$rps" | awk '{printf "%.0f", $1 * 100}')
+            slowest_int=$(echo "$slowest_rps" | awk '{printf "%.0f", $1 * 100}')
+
+            if [ "$rps_int" -lt "$slowest_int" ]; then
+                slowest_rps="$rps"
+                slowest_endpoint="$endpoint"
+            fi
+        fi
+
+        # Track highest P99 latency
+        if [ -n "$p99" ]; then
+            # Extract numeric value (remove units like 'ms', 's')
+            p99_num=$(echo "$p99" | sed 's/[^0-9.]//g')
+            p99_unit=$(echo "$p99" | sed 's/[0-9.]//g')
+
+            # Convert to microseconds for comparison
+            case "$p99_unit" in
+                us) p99_us="$p99_num" ;;
+                ms) p99_us=$(echo "$p99_num" | awk '{printf "%.0f", $1 * 1000}') ;;
+                s)  p99_us=$(echo "$p99_num" | awk '{printf "%.0f", $1 * 1000000}') ;;
+                *)  p99_us="$p99_num" ;;
+            esac
+
+            if [ -z "$highest_p99" ] || [ "$p99_us" -gt "$highest_p99" ]; then
+                highest_p99="$p99_us"
+                highest_p99_endpoint="$endpoint ($p99)"
+            fi
+        fi
+    fi
+done
+
+if [ -n "$slowest_endpoint" ]; then
+    echo -e "${YELLOW}Slowest endpoint: ${slowest_endpoint} (${slowest_rps} req/s)${NC}"
+    echo "Slowest endpoint: ${slowest_endpoint} (${slowest_rps} req/s)" >> "${SUMMARY_FILE}"
+fi
+
+if [ -n "$highest_p99_endpoint" ]; then
+    echo -e "${YELLOW}Highest P99 latency: ${highest_p99_endpoint}${NC}"
+    echo "Highest P99 latency: ${highest_p99_endpoint}" >> "${SUMMARY_FILE}"
+fi
+
+echo ""
