@@ -51,7 +51,8 @@ services:
       CACHE_MODE: redis
       DATABASE_URL: postgres://benchmark:benchmark@postgres:5432/benchmark
       REDIS_URL: redis://redis:6379
-      RUST_LOG: warn,task_management_benchmark_api=info
+      RUST_LOG: info,task_management_benchmark_api=debug,tower_http=debug
+      RUST_BACKTRACE: "1"
     ports:
       - "3002:3000"
     depends_on:
@@ -65,6 +66,10 @@ services:
       timeout: 2s
       retries: 20
       start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 1G
 
 networks:
   default:
