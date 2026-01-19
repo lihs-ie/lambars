@@ -4,6 +4,7 @@
 
 pub mod advanced;
 pub mod alternative;
+pub mod applicative;
 pub mod async_pipeline;
 pub mod bifunctor;
 pub mod bulk;
@@ -24,6 +25,7 @@ pub use advanced::{async_pipeline, get_task_history, lazy_compute, transform_tas
 pub use alternative::{
     aggregate_sources, filter_conditional, first_available, resolve_config, search_fallback,
 };
+pub use applicative::{build_from_parts, compute_parallel, dashboard, validate_collect_all};
 pub use async_pipeline::{
     batch_process_async, conditional_pipeline, transform_async, workflow_async,
 };
