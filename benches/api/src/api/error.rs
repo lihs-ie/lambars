@@ -110,6 +110,15 @@ impl ApiErrorResponse {
         )
     }
 
+    /// Creates a 422 Unprocessable Entity response for pipeline/processing validation failures.
+    #[must_use]
+    pub fn unprocessable_entity(message: impl Into<String>, details: Vec<FieldError>) -> Self {
+        Self::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ApiError::validation(message, details),
+        )
+    }
+
     /// Creates a 404 Not Found response.
     #[must_use]
     pub fn not_found(message: impl Into<String>) -> Self {
@@ -292,6 +301,15 @@ mod tests {
         let response = ApiErrorResponse::internal_error("Database error");
         assert_eq!(response.status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(response.error.code, "INTERNAL_ERROR");
+    }
+
+    #[rstest]
+    fn test_api_error_response_unprocessable_entity() {
+        let details = vec![FieldError::new("field", "Error message")];
+        let response = ApiErrorResponse::unprocessable_entity("Processing failed", details);
+        assert_eq!(response.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(response.error.code, "VALIDATION_ERROR");
+        assert!(response.error.details.is_some());
     }
 
     #[rstest]

@@ -4,6 +4,7 @@
 
 pub mod advanced;
 pub mod alternative;
+pub mod async_pipeline;
 pub mod bulk;
 pub mod dto;
 pub mod effects;
@@ -21,6 +22,9 @@ pub mod workflow_eff;
 pub use advanced::{async_pipeline, get_task_history, lazy_compute, transform_task};
 pub use alternative::{
     aggregate_sources, filter_conditional, first_available, resolve_config, search_fallback,
+};
+pub use async_pipeline::{
+    batch_process_async, conditional_pipeline, transform_async, workflow_async,
 };
 pub use bulk::{bulk_create_tasks, bulk_update_tasks};
 pub use dto::{CreateTaskRequest, TaskResponse, UpdateTaskRequest};
