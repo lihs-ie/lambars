@@ -238,9 +238,9 @@ pub async fn flatten_subtasks(
 
     // Generate simulated nested structure for demonstration
     // In production, this would be actual nested subtasks
-    // Use a reasonable depth for simulation (up to 50 for demo purposes)
-    // Breadth of 2 keeps total nodes manageable while demonstrating recursion
-    let simulated_depth = query.max_depth.min(50);
+    // Use a reasonable depth for simulation (up to 15 for demo purposes)
+    // Breadth of 2 with depth 15 = 2^15 - 1 = 32,767 nodes (manageable)
+    let simulated_depth = query.max_depth.min(15);
     let simulated_breadth = 2;
     let simulated_subtasks = SimulatedSubTask::generate_tree(
         simulated_depth,
