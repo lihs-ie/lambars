@@ -43,13 +43,17 @@ const fn default_max_depth() -> usize {
     100
 }
 
+/// Maximum number of nodes to return in response (prevents huge payloads).
+const MAX_RESPONSE_NODES: usize = 1000;
+
 /// A flattened subtask with depth information.
 #[derive(Debug, Clone, Serialize)]
 pub struct FlattenedSubTask {
     pub id: String,
     pub title: String,
     pub depth: usize,
-    pub parent_path: Vec<String>,
+    /// Direct parent ID only (not full path) for smaller response size.
+    pub parent_id: Option<String>,
 }
 
 /// Response for flatten-subtasks endpoint.
@@ -238,9 +242,9 @@ pub async fn flatten_subtasks(
 
     // Generate simulated nested structure for demonstration
     // In production, this would be actual nested subtasks
-    // Use a reasonable depth for simulation (up to 15 for demo purposes)
-    // Breadth of 2 with depth 15 = 2^15 - 1 = 32,767 nodes (manageable)
-    let simulated_depth = query.max_depth.min(15);
+    // Use a reasonable depth for simulation (up to 8 for demo purposes)
+    // Breadth of 2 with depth 8 = 2^8 - 1 = 255 nodes (fast response)
+    let simulated_depth = query.max_depth.min(8);
     let simulated_breadth = 2;
     let simulated_subtasks = SimulatedSubTask::generate_tree(
         simulated_depth,
@@ -269,13 +273,13 @@ fn flatten_subtasks_trampoline(
     subtasks: &[SimulatedSubTask],
     max_depth: usize,
 ) -> (Vec<FlattenedSubTask>, usize, usize) {
-    // Work queue item: (subtask owned, depth, parent_path)
+    // Work queue item: (subtask owned, depth, parent_id)
     // We clone subtasks to own them, as Trampoline requires 'static lifetime
     #[derive(Clone)]
     struct WorkItem {
         subtask: SimulatedSubTask,
         depth: usize,
-        parent_path: Vec<String>,
+        parent_id: Option<String>,
     }
 
     fn process_work(
@@ -297,29 +301,29 @@ fn flatten_subtasks_trampoline(
             let mut current_max_depth = max_depth_seen;
 
             for item in work {
-                if item.depth > max_depth {
+                // Skip if max depth exceeded or max nodes reached
+                if item.depth > max_depth || acc.len() >= MAX_RESPONSE_NODES {
                     continue;
                 }
 
                 current_max_depth = current_max_depth.max(item.depth);
 
+                let current_id = item.subtask.id.clone();
+
                 // Add current subtask to result
                 acc.push(FlattenedSubTask {
-                    id: item.subtask.id.clone(),
+                    id: current_id.clone(),
                     title: item.subtask.title.clone(),
                     depth: item.depth,
-                    parent_path: item.parent_path.clone(),
+                    parent_id: item.parent_id,
                 });
 
-                // Queue children for processing
-                let mut child_path = item.parent_path;
-                child_path.push(item.subtask.id.clone());
-
+                // Queue children for processing (with current node as their parent)
                 for child in item.subtask.children {
                     next_work.push(WorkItem {
                         subtask: child,
                         depth: item.depth + 1,
-                        parent_path: child_path.clone(),
+                        parent_id: Some(current_id.clone()),
                     });
                 }
             }
@@ -334,7 +338,7 @@ fn flatten_subtasks_trampoline(
         .map(|s| WorkItem {
             subtask: s.clone(),
             depth: 0,
-            parent_path: Vec::new(),
+            parent_id: None,
         })
         .collect();
 

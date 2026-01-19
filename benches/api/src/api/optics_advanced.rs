@@ -103,7 +103,8 @@ pub struct BatchUpdateFieldRequest {
 #[derive(Debug, Serialize)]
 pub struct BatchUpdateFieldResponse {
     pub updated_count: usize,
-    pub tasks: Vec<TaskResponse>,
+    /// IDs of updated tasks (not full task data for smaller response).
+    pub updated_ids: Vec<String>,
     pub field_updated: String,
 }
 
@@ -166,7 +167,8 @@ pub struct UpdateFilteredResponse {
     pub matched_count: usize,
     /// Number of tasks that were actually modified (matched and had changes).
     pub modified_count: usize,
-    pub tasks: Vec<TaskResponse>,
+    /// IDs of modified tasks (not full task data for smaller response).
+    pub modified_ids: Vec<String>,
 }
 
 // -----------------------------------------------------------------------------
@@ -621,7 +623,10 @@ pub async fn batch_update_field(
 
     Ok(Json(BatchUpdateFieldResponse {
         updated_count,
-        tasks: updated_tasks.iter().map(TaskResponse::from).collect(),
+        updated_ids: updated_tasks
+            .iter()
+            .map(|t| t.task_id.to_string())
+            .collect(),
         field_updated: field_name,
     }))
 }
@@ -790,7 +795,10 @@ pub async fn update_filtered(
     Ok(Json(UpdateFilteredResponse {
         matched_count,
         modified_count,
-        tasks: updated_tasks.iter().map(TaskResponse::from).collect(),
+        modified_ids: updated_tasks
+            .iter()
+            .map(|t| t.task_id.to_string())
+            .collect(),
     }))
 }
 

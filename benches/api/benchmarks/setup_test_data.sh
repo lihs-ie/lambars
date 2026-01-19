@@ -38,6 +38,21 @@ for i in {1..10}; do
     fi
 done
 
+# Create tasks with search keywords for phase2_alternative benchmark
+echo "Creating search keyword tasks..."
+SEARCH_KEYWORDS=("auth" "database" "api" "cache" "test")
+for keyword in "${SEARCH_KEYWORDS[@]}"; do
+    RESPONSE=$(curl -sf -X POST "${API_URL}/tasks" \
+        -H "Content-Type: application/json" \
+        -d "{\"title\":\"Implement ${keyword} system\",\"description\":\"Task for ${keyword} functionality\",\"priority\":\"medium\",\"tags\":[\"${keyword}\",\"benchmark\"]}")
+
+    TASK_ID=$(echo "$RESPONSE" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+    if [[ -n "$TASK_ID" ]]; then
+        TASK_IDS+=("$TASK_ID")
+        echo "  Created search task: $TASK_ID (keyword: ${keyword})"
+    fi
+done
+
 # Create projects and collect IDs
 echo "Creating test projects..."
 PROJECT_IDS=()

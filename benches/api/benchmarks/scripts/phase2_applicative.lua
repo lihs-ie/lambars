@@ -10,6 +10,22 @@
 package.path = package.path .. ";scripts/?.lua"
 local common = require("common")
 
+-- Try to load generated test IDs
+local test_ids
+local ok, ids = pcall(require, "test_ids")
+if ok then
+    test_ids = ids
+else
+    test_ids = {
+        task_ids = {
+            "a1b2c3d4-e5f6-4789-abcd-ef0123456789",
+            "b2c3d4e5-f6a7-4890-bcde-f01234567890",
+            "c3d4e5f6-a7b8-4901-cdef-012345678901"
+        },
+        get_task_id = function(index) return test_ids.task_ids[((index - 1) % #test_ids.task_ids) + 1] end
+    }
+end
+
 local counter = 0
 local request_types = {"validate", "dashboard", "build", "compute"}
 
@@ -50,7 +66,7 @@ function request()
         -- POST /tasks/compute-parallel
         local computation_types = {"complexity", "progress", "dependencies", "estimate"}
         local body = common.json_encode({
-            task_id = "a1b2c3d4-e5f6-4789-abcd-ef0123456789",
+            task_id = test_ids.get_task_id(counter),
             computations = {
                 computation_types[(counter % #computation_types) + 1],
                 computation_types[((counter + 1) % #computation_types) + 1]
