@@ -57,15 +57,14 @@ jobs:
         continue-on-error: true
         run: |
           chmod +x run_benchmark.sh
-          # Reduce concurrency to 1 to avoid potential OOM/crash issues
-          API_URL=http://localhost:3002 DURATION=10s THREADS=1 CONNECTIONS=1 ./run_benchmark.sh --quick
+          API_URL=http://localhost:3002 DURATION=10s THREADS=2 CONNECTIONS=10 ./run_benchmark.sh --quick
 
-      - name: Show API logs
-        if: always()
+      - name: Show API logs on failure
+        if: failure()
         working-directory: benches/api/docker
         run: |
           echo "=== API Container Logs ==="
-          docker compose -f compose.ci.yaml logs api --tail=200
+          docker compose -f compose.ci.yaml logs api --tail=100
           echo ""
           echo "=== Container Status ==="
           docker compose -f compose.ci.yaml ps -a
