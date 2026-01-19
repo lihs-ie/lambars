@@ -415,6 +415,22 @@ where
 // AsyncIO-specific Methods (requires async feature)
 // =============================================================================
 
+/// Helper function for error path in `flat_map` (cold path optimization).
+///
+/// This function is marked as `#[cold]` and `#[inline(never)]` to hint the compiler
+/// that this is an unlikely execution path, allowing better optimization of the
+/// success path.
+#[cfg(feature = "async")]
+#[cold]
+#[inline(never)]
+const fn error_async_io<E, A>(error: E) -> super::AsyncIO<Result<A, E>>
+where
+    E: Send + 'static,
+    A: Send + 'static,
+{
+    super::AsyncIO::pure(Err(error))
+}
+
 #[cfg(feature = "async")]
 impl<E, A> ExceptT<E, super::AsyncIO<Result<A, E>>>
 where
@@ -422,14 +438,16 @@ where
     A: Send + 'static,
 {
     /// Creates an `ExceptT` that returns a constant value.
-    #[inline]
-    pub fn pure_async_io(value: A) -> Self {
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
+    pub const fn pure_async_io(value: A) -> Self {
         Self::new(super::AsyncIO::pure(Ok(value)))
     }
 
     /// Creates an `ExceptT` that throws an error.
-    #[inline]
-    pub fn throw_async_io(error: E) -> Self {
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
+    pub const fn throw_async_io(error: E) -> Self {
         Self::new(super::AsyncIO::pure(Err(error)))
     }
 
@@ -441,7 +459,7 @@ where
 
     /// Creates an `ExceptT` from a `Result`.
     #[inline]
-    pub fn from_result(result: Result<A, E>) -> Self {
+    pub const fn from_result(result: Result<A, E>) -> Self {
         Self::new(super::AsyncIO::pure(result))
     }
 
@@ -464,7 +482,7 @@ where
     {
         ExceptT::new(self.inner.flat_map(move |result| match result {
             Ok(value) => function(value).inner,
-            Err(error) => super::AsyncIO::pure(Err(error)),
+            Err(error) => error_async_io(error),
         }))
     }
 
@@ -502,7 +520,8 @@ where
     /// # Errors
     ///
     /// Returns `Err(E)` if the computation failed with an error of type `E`.
-    #[inline]
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     pub async fn run_async(self) -> Result<A, E> {
         self.inner.run_async().await
     }
