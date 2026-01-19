@@ -26,6 +26,8 @@ jobs:
     name: API Workload Benchmark
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      pull-requests: write
 
     steps:
       - name: Checkout repository
@@ -114,6 +116,130 @@ jobs:
             echo "This may indicate API issues. Check the API logs above."
             exit 1
           fi
+
+      - name: Post benchmark results as PR comment
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            // Find the most recent results directory
+            const resultsBase = 'benches/api/benchmarks/results';
+            const dirs = fs.readdirSync(resultsBase)
+              .filter(d => fs.statSync(path.join(resultsBase, d)).isDirectory())
+              .sort()
+              .reverse();
+
+            if (dirs.length === 0) {
+              console.log('No benchmark results found');
+              return;
+            }
+
+            const latestDir = path.join(resultsBase, dirs[0]);
+            const summaryFile = path.join(latestDir, 'summary.txt');
+
+            if (!fs.existsSync(summaryFile)) {
+              console.log('Summary file not found');
+              return;
+            }
+
+            // Parse summary file to extract metrics
+            const summary = fs.readFileSync(summaryFile, 'utf8');
+            const lines = summary.split('\n');
+
+            // Build results table
+            const results = [];
+            let currentBenchmark = null;
+            let reqsPerSec = null;
+            let avgLatency = null;
+
+            for (const line of lines) {
+              const benchMatch = line.match(/^(\w+):$/);
+              if (benchMatch) {
+                if (currentBenchmark && reqsPerSec) {
+                  results.push({ name: currentBenchmark, reqsPerSec, avgLatency });
+                }
+                currentBenchmark = benchMatch[1];
+                reqsPerSec = null;
+                avgLatency = null;
+              }
+              const reqsMatch = line.match(/Requests\/sec:\s*([\d.]+)/);
+              if (reqsMatch) {
+                reqsPerSec = parseFloat(reqsMatch[1]);
+              }
+              const latencyMatch = line.match(/Avg Latency:\s*([\d.]+\w+)/);
+              if (latencyMatch) {
+                avgLatency = latencyMatch[1];
+              }
+            }
+            // Don't forget the last one
+            if (currentBenchmark && reqsPerSec) {
+              results.push({ name: currentBenchmark, reqsPerSec, avgLatency });
+            }
+
+            if (results.length === 0) {
+              console.log('No benchmark results parsed');
+              return;
+            }
+
+            // Calculate total and average
+            const totalReqs = results.reduce((sum, r) => sum + r.reqsPerSec, 0);
+            const avgReqs = totalReqs / results.length;
+
+            // Build markdown table
+            let table = '| Endpoint | Requests/sec | Avg Latency |\n';
+            table += '|----------|-------------:|------------:|\n';
+            for (const r of results) {
+              table += `| ${r.name} | ${r.reqsPerSec.toLocaleString('en-US', {maximumFractionDigits: 2})} | ${r.avgLatency || 'N/A'} |\n`;
+            }
+            table += `| **Average** | **${avgReqs.toLocaleString('en-US', {maximumFractionDigits: 2})}** | - |\n`;
+
+            const body = [
+              '## 🚀 API Workload Benchmark Results',
+              '',
+              table,
+              '<details>',
+              '<summary>Configuration</summary>',
+              '',
+              '- **Duration**: 10s',
+              '- **Threads**: 2',
+              '- **Connections**: 10',
+              '- **Mode**: Quick test',
+              '',
+              '</details>',
+              '',
+              `> Benchmark run at: ${new Date().toISOString()}`
+            ].join('\n');
+
+            // Find existing comment or create new one
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.find(comment =>
+              comment.user.type === 'Bot' &&
+              comment.body.includes('## 🚀 API Workload Benchmark Results')
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body
+              });
+            }
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@v6
