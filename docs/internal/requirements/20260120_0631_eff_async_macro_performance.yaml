@@ -1,0 +1,950 @@
+# eff_async! マクロパフォーマンス最適化 要件定義
+#
+# 概要:
+#   eff_async! マクロを使用した ExceptT + AsyncIO パターンのパフォーマンスを
+#   改善する。Traditional スタイル比で約3倍のオーバーヘッドを削減する。
+#
+# 設計方針:
+#   1. unsafe コードは使用しない
+#   2. API 互換性を維持する
+#   3. 関数型プログラミング原則（参照透過性、純粋関数、不変性、Monad 法則）を遵守
+#   4. 段階的な最適化により、効果を測定しながら進める
+#   5. 過去の最適化結果（Trampoline, Effect）の教訓を活用
+#
+# 参照:
+#   - GitHub Issue #195: eff_async! マクロのパフォーマンス改善検討
+#   - docs/internal/issues/20260118_0905_eff_async_macro_performance.yaml
+#   - docs/internal/done/requirements/20260119_1600_asyncio_performance.yaml
+#   - Codex レビュー結果
+
+version: "1.0.0"
+name: "eff_async_macro_performance_optimization"
+description: |
+  eff_async! マクロを使用した ExceptT + AsyncIO パターンのパフォーマンスを最適化する。
+
+  現在の問題:
+  - eff_async! マクロが Traditional スタイル比で約3倍遅い（5段階バインディング）
+  - I/O操作が支配的な場合でも約1.2倍のオーバーヘッド
+
+  根本原因:
+  1. AsyncIO の二重 Box アロケーション
+     - `Box<dyn FnOnce() -> Pin<Box<dyn Future>>>` という構造
+     - 各 flat_map で新しい Box アロケーションが発生
+  2. クロージャネスティング
+     - n 段階のバインディング = n-1 回のクロージャネスティング
+     - 変数キャプチャのオーバーヘッドが蓄積
+  3. 動的ディスパッチ
+     - `dyn FnOnce` と `dyn Future` の二重の動的ディスパッチ
+  4. ExceptT::flat_map のオーバーヘッド
+     - エラー時に `AsyncIO::pure(Err(error))` という追加のアロケーション
+
+  Codex レビュー結果:
+  - Pure 混在率が高い場合: 20-30% の改善見込み
+  - 全て Deferred の場合: 5-15% の改善見込み
+  - `A` が大きい場合のリスク: Pure で値を直接保持するため、スタックサイズ増加の可能性
+  - `#[inline(always)]` の濫用: コードサイズ増加・命令キャッシュ圧迫で逆効果の可能性
+
+# 背景・動機
+background:
+  problem: |
+    eff_async! マクロは do 記法スタイルの記述を可能にする強力な機能だが、
+    内部でクロージャのネスティングが発生し、パフォーマンスオーバーヘッドを生む。
+
+    測定結果（5段階バインディング）:
+    - Traditional スタイル比で約3倍のオーバーヘッド
+    - I/O 操作が支配的な場合でも約1.2倍のオーバーヘッド
+
+    マクロ展開の構造:
+    ```rust
+    // ユーザーコード
+    eff_async! {
+        a <= ExceptT::pure_async_io(1);
+        b <= ExceptT::pure_async_io(a + 1);
+        c <= ExceptT::pure_async_io(b + 1);
+        ExceptT::pure_async_io(c)
+    }
+
+    // 展開後（クロージャネスティング）
+    ExceptT::pure_async_io(1).flat_map(move |a| {
+        ExceptT::pure_async_io(a + 1).flat_map(move |b| {
+            ExceptT::pure_async_io(b + 1).flat_map(move |c| {
+                ExceptT::pure_async_io(c)
+            })
+        })
+    })
+    ```
+
+    各 flat_map で発生するオーバーヘッド:
+    1. クロージャオブジェクトの生成と変数キャプチャ
+    2. AsyncIO::new() 内での Box<dyn FnOnce()> アロケーション
+    3. async ブロック実行時の Pin<Box<dyn Future>> アロケーション
+    4. エラー時の追加 AsyncIO::pure(Err(error)) アロケーション
+
+  motivation: |
+    関数型プログラミングの利点（do 記法スタイル、エラーハンドリングの合成、
+    参照透過性）を維持しつつ、パフォーマンスのトレードオフを最小化する。
+
+    改善により:
+    - パフォーマンスクリティカルな場面でも eff_async! を採用しやすくなる
+    - 関数型プログラミングスタイルの普及が促進される
+    - Traditional スタイルとの選択時の障壁が下がる
+
+  prior_art:
+    - name: "ExceptT + AsyncIO パフォーマンス最適化"
+      description: |
+        インライン化強化により 10-15% の改善を目標とした。
+        Box アロケーション削減は unsafe なしでは根本的な解決が困難。
+    - name: "Trampoline パフォーマンス最適化"
+      description: |
+        #[inline(always)] と早期リターンの組み合わせで 5-15% の改善を達成。
+        Box アロケーション削減は根本的な設計変更が必要と判断。
+    - name: "Effect システムパフォーマンス改善"
+      description: |
+        Pure 早期リターンにより 0-5% の改善を見込む。
+        継続キューベース実装が将来の大幅改善に必要。
+    - name: "Scala ZIO / cats-effect"
+      description: |
+        fiber-based runtime と継続キューベースの実装で高性能を実現。
+        Rust では所有権システムの制約により同様の最適化が困難。
+    - name: "Haskell do 記法"
+      description: |
+        GHC の最適化パスにより、do 記法は手書きの bind チェーンと
+        同等のパフォーマンスを達成。Rust のマクロでは同等の最適化が困難。
+
+# 関数型プログラミング原則の検証
+functional_programming_principles:
+  referential_transparency:
+    description: |
+      参照透過性を維持すること:
+      - 同じ入力に対して常に同じ出力を返す
+      - 最適化後も計算結果は変わらない
+    verification: |
+      - AsyncIO::pure(x).flat_map(f) と f(x) が同じ結果を返すことを確認
+      - 最適化前後で Monad 法則のテストが全て通過することを確認
+
+  purity:
+    description: |
+      純粋関数の原則を維持すること:
+      - 副作用（I/O、状態変更）は AsyncIO 内に閉じ込められている
+      - 「計算の記述」と「実行」の分離が維持される
+    verification: |
+      - run_async() を呼ぶまで副作用が発生しないことを確認
+      - テストは入力と出力のみで記述可能であることを確認
+
+  immutability:
+    description: |
+      不変性を維持すること:
+      - AsyncIO, ExceptT の値は不変
+      - 内部での一時的な可変状態は外部から観測不可能
+    verification: |
+      - 既存のデータ構造を破壊的に変更しないことを確認
+      - Clone 可能な場合、元の値が変更されないことを確認
+
+  monad_laws:
+    description: |
+      AsyncIO と ExceptT が Monad 法則を満たし続けること:
+      1. Left Identity: pure(a).flat_map(f) == f(a)
+      2. Right Identity: m.flat_map(pure) == m
+      3. Associativity: m.flat_map(f).flat_map(g) == m.flat_map(|x| f(x).flat_map(g))
+    verification: |
+      - 既存の Monad 法則テストが全て通過すること
+      - 最適化後も同じ入力に対して同じ出力が得られること
+
+  # Codex レビュー指摘事項への対応
+  execution_boundary:
+    description: |
+      **実行境界の明確化** (Codex レビュー指摘対応)
+
+      `run_async()` を唯一の実行境界として定義する:
+      - `run_async()` を呼ぶまで、いかなる副作用も発生しない
+      - `Pure` と `Deferred` の違いは内部実装の詳細であり、外部から観測不可能
+      - `flat_map` 内での `run_async().await` は「遅延計算の記述」であり、
+        外側の `run_async()` が呼ばれるまで実行されない
+
+      設計図:
+      ```
+      [計算の記述層]
+          AsyncIO::pure(x)      → Pure(x) を生成（即時）
+          AsyncIO::new(f)       → Deferred(f) を生成（遅延）
+          m.flat_map(f)         → 新しい AsyncIO を生成（遅延）
+          m.fmap(f)             → 新しい AsyncIO を生成（遅延）
+
+      [実行境界] ← 唯一の副作用発生ポイント
+          m.run_async().await   → 計算を実行し、結果を返す
+      ```
+    verification: |
+      - `flat_map` の呼び出しだけでは副作用が発生しないことを確認
+      - `run_async()` を呼ぶまで Future がポーリングされないことを確認
+
+  pure_variant_constraints:
+    description: |
+      **Pure バリアントの設計制約** (Codex レビュー指摘対応)
+
+      `AsyncIO::Pure(A)` に入る値の制約:
+      1. **純粋値のみ**: 副作用を持つ型、外部状態に依存する値は禁止
+      2. **即時評価済み**: `Pure` に格納される値は既に評価が完了している
+      3. **観測不可能性**: `Pure(x)` と `Deferred(|| async { x })` は
+         外部から観測した場合に同じ結果を返す
+
+      禁止事項:
+      - `AsyncIO::Pure(side_effect_function())` のような使用
+      - 外部状態（グローバル変数、時刻、乱数）に依存する値の直接格納
+
+      許可される使用:
+      - `AsyncIO::pure(42)` - 純粋なリテラル値
+      - `AsyncIO::pure(x + y)` - 純粋な計算結果
+      - `AsyncIO::pure(result)` - 既に評価済みの純粋値
+    verification: |
+      - 型システムで強制できない制約のため、ドキュメントで明記
+      - テストケースで正しい使用パターンを示す
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # フェーズ 1: マイクロベンチマーク追加
+  # ======================================================================
+  - id: REQ-EFF-ASYNC-PERF-001
+    name: "eff_async! マクロ マイクロベンチマーク追加"
+    description: |
+      eff_async! マクロの詳細なベンチマークを追加し、
+      ボトルネックを正確に特定・計測できるようにする。
+
+      ベンチマーク項目:
+      1. チェーン深度別オーバーヘッド（depth 1, 5, 10, 20）
+      2. Pure 混在率別計測（0%, 50%, 100%）
+      3. エラーハンドリングパス計測（success, early_error, late_error）
+      4. Traditional スタイルとの比較
+
+      **FP 原則との関係:**
+      ベンチマークコードは計測目的のため、不変性原則の例外として
+      命令的スタイル（for ループ、可変変数）を許容する。
+      ライブラリ本体のコードは引き続き FP 原則を厳守する。
+
+    methods:
+      - name: "チェーン深度別ベンチマーク"
+        signature: "fn eff_async_chain_depth_benchmark(criterion: &mut Criterion)"
+        description: |
+          深度 1, 5, 10, 20 でのオーバーヘッドを計測し、
+          スケーリング特性を把握する。
+        examples:
+          - description: "チェーン深度別計測"
+            code: |
+              fn eff_async_chain_depth_benchmark(criterion: &mut Criterion) {
+                  let runtime = tokio::runtime::Runtime::new().unwrap();
+                  let mut group = criterion.benchmark_group("eff_async_chain_depth");
+
+                  for depth in [1, 5, 10, 20] {
+                      group.bench_with_input(
+                          BenchmarkId::new("depth", depth),
+                          &depth,
+                          |bencher, &depth| {
+                              bencher.to_async(&runtime).iter(|| async {
+                                  let mut result = ExceptT::<String, _>::pure_async_io(0);
+                                  for _ in 0..depth {
+                                      result = result.flat_map(|x| ExceptT::pure_async_io(x + 1));
+                                  }
+                                  std::hint::black_box(result.run_async().await)
+                              });
+                          },
+                      );
+                  }
+                  group.finish();
+              }
+
+      - name: "Pure 混在率別ベンチマーク"
+        signature: "fn eff_async_pure_ratio_benchmark(criterion: &mut Criterion)"
+        description: |
+          Pure のみ、Pure と Deferred 混在、Deferred のみの
+          3パターンで計測し、最適化効果の見積もりを改善する。
+        examples:
+          - description: "Pure 混在率別計測"
+            code: |
+              fn eff_async_pure_ratio_benchmark(criterion: &mut Criterion) {
+                  let runtime = tokio::runtime::Runtime::new().unwrap();
+                  let mut group = criterion.benchmark_group("eff_async_pure_ratio");
+
+                  // 100% Pure
+                  group.bench_function("pure_100_percent", |bencher| {
+                      bencher.to_async(&runtime).iter(|| async {
+                          eff_async! {
+                              a <= ExceptT::<String, _>::pure_async_io(1);
+                              b <= ExceptT::pure_async_io(a + 1);
+                              c <= ExceptT::pure_async_io(b + 1);
+                              ExceptT::pure_async_io(c)
+                          }.run_async().await
+                      });
+                  });
+
+                  // 50% Pure (Deferred 混在)
+                  group.bench_function("pure_50_percent", |bencher| {
+                      bencher.to_async(&runtime).iter(|| async {
+                          eff_async! {
+                              a <= ExceptT::<String, _>::lift_async_io(
+                                  AsyncIO::new(|| async { 1 })
+                              );
+                              b <= ExceptT::pure_async_io(a + 1);
+                              c <= ExceptT::lift_async_io(
+                                  AsyncIO::new(|| async { b + 1 })
+                              );
+                              ExceptT::pure_async_io(c)
+                          }.run_async().await
+                      });
+                  });
+
+                  // 0% Pure (全て Deferred)
+                  group.bench_function("pure_0_percent", |bencher| {
+                      bencher.to_async(&runtime).iter(|| async {
+                          eff_async! {
+                              a <= ExceptT::<String, _>::lift_async_io(
+                                  AsyncIO::new(|| async { 1 })
+                              );
+                              b <= ExceptT::lift_async_io(
+                                  AsyncIO::new(move || async move { a + 1 })
+                              );
+                              c <= ExceptT::lift_async_io(
+                                  AsyncIO::new(move || async move { b + 1 })
+                              );
+                              ExceptT::lift_async_io(
+                                  AsyncIO::new(move || async move { c })
+                              )
+                          }.run_async().await
+                      });
+                  });
+
+                  group.finish();
+              }
+
+      - name: "エラーハンドリングパス計測"
+        signature: "fn eff_async_error_path_benchmark(criterion: &mut Criterion)"
+        description: |
+          成功パス、早期エラー、遅延エラーの3パターンで計測し、
+          エラー時のオーバーヘッドを把握する。
+        examples:
+          - description: "エラーパス別計測"
+            code: |
+              fn eff_async_error_path_benchmark(criterion: &mut Criterion) {
+                  let runtime = tokio::runtime::Runtime::new().unwrap();
+                  let mut group = criterion.benchmark_group("eff_async_error_path");
+
+                  // 成功パス
+                  group.bench_function("success_path", |bencher| {
+                      bencher.to_async(&runtime).iter(|| async {
+                          eff_async! {
+                              a <= ExceptT::<String, _>::pure_async_io(1);
+                              b <= ExceptT::pure_async_io(a + 1);
+                              c <= ExceptT::pure_async_io(b + 1);
+                              ExceptT::pure_async_io(c)
+                          }.run_async().await
+                      });
+                  });
+
+                  // 早期エラー（最初のステップでエラー）
+                  group.bench_function("early_error", |bencher| {
+                      bencher.to_async(&runtime).iter(|| async {
+                          eff_async! {
+                              _ <= ExceptT::<String, _>::throw_async_io("error".to_string());
+                              b <= ExceptT::pure_async_io(2);
+                              c <= ExceptT::pure_async_io(b + 1);
+                              ExceptT::pure_async_io(c)
+                          }.run_async().await
+                      });
+                  });
+
+                  // 遅延エラー（最後のステップでエラー）
+                  group.bench_function("late_error", |bencher| {
+                      bencher.to_async(&runtime).iter(|| async {
+                          eff_async! {
+                              a <= ExceptT::<String, _>::pure_async_io(1);
+                              b <= ExceptT::pure_async_io(a + 1);
+                              _ <= ExceptT::throw_async_io("error".to_string());
+                              ExceptT::pure_async_io(b)
+                          }.run_async().await
+                      });
+                  });
+
+                  group.finish();
+              }
+
+    implementations:
+      - type: "benches/eff_async_macro_bench.rs"
+        description: |
+          新規ベンチマークファイルを作成し、以下の計測を実施:
+          - チェーン深度による性能変化
+          - Pure 混在率による性能変化
+          - エラーパスと成功パスの性能差
+          - Traditional スタイルとの直接比較
+
+          ベンチマーク再現性のための設定:
+          - tokio runtime は benchmark group 外で1回生成
+          - criterion のデフォルト設定を使用（warmup 3s, measurement 5s）
+          - black_box で最適化ノイズを防止
+
+  # ======================================================================
+  # フェーズ 2: インライン化の最適化（期待改善: 10-15%）
+  # ======================================================================
+  - id: REQ-EFF-ASYNC-PERF-002
+    name: "ホットパスのインライン化最適化"
+    description: |
+      AsyncIO と ExceptT のホットパス（flat_map, fmap, run_async）の
+      インライン化属性を最適化する。
+
+      Codex レビュー結果を踏まえた方針:
+      - ホットパス（短い関数）のみに `#[inline(always)]` を限定適用
+      - エラー経路に `#[cold]` + `#[inline(never)]` を適用
+      - バイナリサイズとコンパイル時間への影響を監視
+
+      対象メソッド:
+      1. AsyncIO::pure() - 既に #[inline] あり、効果測定後に昇格検討
+      2. AsyncIO::flat_map() - 既に #[inline] あり、効果測定後に昇格検討
+      3. AsyncIO::fmap() - 既に #[inline] あり、効果測定後に昇格検討
+      4. AsyncIO::run_async() - 既に #[inline] あり、効果測定後に昇格検討
+      5. ExceptT::flat_map() - 既に #[inline] あり、効果測定後に昇格検討
+      6. ExceptT::pure_async_io() - 既に #[inline] あり、効果測定後に昇格検討
+
+      期待効果: 10-15%
+
+    methods:
+      - name: "#[inline(always)] の限定適用"
+        signature: |
+          #[inline(always)]
+          pub fn pure(value: A) -> Self
+
+          #[inline(always)]
+          pub fn flat_map<B, F>(self, function: F) -> AsyncIO<B>
+        description: |
+          短い関数（5行以下程度）にのみ #[inline(always)] を適用。
+          効果は Phase 1 のベンチマークで測定し、
+          明確な改善が確認された場合のみ適用を維持。
+
+      - name: "エラー経路の最適化"
+        signature: |
+          #[cold]
+          #[inline(never)]
+          fn handle_error<E>(error: E) -> AsyncIO<Result<A, E>>
+        description: |
+          エラー経路に `#[cold]` と `#[inline(never)]` を適用し、
+          成功パスのコード配置を最適化する。
+
+          ExceptT::flat_map 内のエラー処理:
+          ```rust
+          ExceptT::new(self.inner.flat_map(move |result| match result {
+              Ok(value) => function(value).inner,
+              Err(error) => handle_error(error),  // cold path
+          }))
+          ```
+        examples:
+          - description: "エラー経路の分離"
+            code: |
+              impl<E, A> ExceptT<E, AsyncIO<Result<A, E>>>
+              where
+                  E: Send + 'static,
+                  A: Send + 'static,
+              {
+                  #[cold]
+                  #[inline(never)]
+                  fn wrap_error(error: E) -> AsyncIO<Result<A, E>> {
+                      AsyncIO::pure(Err(error))
+                  }
+
+                  #[inline(always)]
+                  pub fn flat_map<B, F>(self, function: F) -> ExceptT<E, AsyncIO<Result<B, E>>>
+                  where
+                      F: FnOnce(A) -> ExceptT<E, AsyncIO<Result<B, E>>> + Send + 'static,
+                      B: Send + 'static,
+                  {
+                      ExceptT::new(self.inner.flat_map(move |result| match result {
+                          Ok(value) => function(value).inner,
+                          Err(error) => Self::wrap_error(error),
+                      }))
+                  }
+              }
+
+    implementations:
+      - type: "AsyncIO<A>"
+        file: "src/effect/async_io.rs"
+        description: |
+          以下のメソッドで効果測定後に #[inline(always)] への昇格を検討:
+          - pure()
+          - flat_map()
+          - fmap()
+          - run_async()
+          - new()
+
+      - type: "ExceptT<E, AsyncIO<Result<A, E>>>"
+        file: "src/effect/except_transformer.rs"
+        description: |
+          以下のメソッドで効果測定後に #[inline(always)] への昇格を検討:
+          - flat_map()
+          - flat_map_async_io()
+          - pure_async_io()
+          - run_async()
+
+          エラー経路に #[cold] + #[inline(never)] を適用。
+
+  # ======================================================================
+  # フェーズ 3: AsyncIO の enum 化（期待改善: 20-30%）
+  # ======================================================================
+  - id: REQ-EFF-ASYNC-PERF-003
+    name: "AsyncIO の Pure/Deferred enum 化"
+    description: |
+      AsyncIO を Pure と Deferred の enum 型に変更し、
+      Pure ケースで Box アロケーションをスキップする。
+
+      現在の構造:
+      ```rust
+      pub struct AsyncIO<A> {
+          run_async_io: Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = A> + Send>> + Send>,
+      }
+      ```
+
+      最適化後の構造:
+      ```rust
+      pub enum AsyncIO<A> {
+          Pure(A),
+          Deferred(Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = A> + Send>> + Send>),
+      }
+      ```
+
+      最適化のポイント:
+      1. AsyncIO::pure(x) で Box アロケーションを回避
+      2. Pure ケースの run_async() で即座に値を返す（Future ポーリング不要）
+
+      **FP specialist レビュー指摘対応:**
+      - flat_map() と fmap() では遅延評価セマンティクスを維持
+      - 直接評価は run_async() でのみ行う
+      - これにより `run_async()` が唯一の実行境界という原則を維持
+
+      Codex レビューの指摘への対応:
+      - `A` が大きい場合のスタックサイズ増加リスク:
+        - ドキュメントに注意事項を記載
+        - 大きな値（推奨閾値: sizeof::<A>() >= 128 bytes）は Box でラップすることを推奨
+      - Pure 混在率が低い場合の効果減少:
+        - Phase 1 のベンチマークで Pure 混在率を計測し、効果を見積もる
+
+      期待効果: 10-20%（pure() アロケーション回避 + run_async() 最適化）
+      **注意**: flat_map で直接評価しないため、当初見積もりより効果は控えめ
+
+      **最適化の適用範囲に関する注意事項** (FP specialist 指摘対応):
+
+      Pure バリアントの最適化恩恵は以下のケースに限定される:
+      1. `AsyncIO::pure(x)` の直後に `run_async()` を呼ぶ場合
+      2. チェーンの途中で Pure が生成されても、次の操作で Deferred に変換される
+
+      例:
+      ```rust
+      // 最適化あり: Pure のまま実行
+      AsyncIO::pure(42).run_async().await  // Pure(42) → 即座に 42 を返す
+
+      // 最適化なし: flat_map で Deferred に変換される
+      AsyncIO::pure(42).flat_map(f).run_async().await  // Pure(42) → Deferred → 実行
+      ```
+
+      したがって、ExceptT::flat_map でエラー時に `AsyncIO::Pure(Err(error))` を使用する最適化は、
+      エラー後に後続の処理がない場合（ショートサーキット）に効果がある。
+
+    methods:
+      - name: "enum 型への変更"
+        signature: |
+          pub enum AsyncIO<A> {
+              Pure(A),
+              Deferred(Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = A> + Send>> + Send>),
+          }
+        description: |
+          AsyncIO を enum 型に変更し、Pure ケースでは値を直接保持する。
+          これにより pure() 呼び出し時の Box アロケーションを回避。
+
+      - name: "pure() の最適化"
+        signature: "pub fn pure(value: A) -> Self"
+        description: |
+          Pure バリアントを直接生成し、Box アロケーションを回避。
+        examples:
+          - description: "最適化された pure()"
+            code: |
+              #[inline(always)]
+              pub fn pure(value: A) -> Self {
+                  AsyncIO::Pure(value)
+              }
+
+      - name: "fmap() の遅延評価維持"
+        signature: "pub fn fmap<B, F>(self, function: F) -> AsyncIO<B>"
+        description: |
+          **FP specialist レビュー指摘対応:**
+          flat_map と同様に、遅延評価セマンティクスを維持するため Deferred でラップする。
+        examples:
+          - description: "遅延評価を維持する fmap()"
+            code: |
+              #[inline]
+              pub fn fmap<B, F>(self, function: F) -> AsyncIO<B>
+              where
+                  F: FnOnce(A) -> B + Send + 'static,
+                  B: Send + 'static,
+              {
+                  match self {
+                      AsyncIO::Pure(value) => {
+                          // 遅延評価を維持するため Deferred でラップ
+                          AsyncIO::Deferred(Box::new(move || {
+                              Box::pin(async move {
+                                  function(value)
+                              })
+                          }))
+                      }
+                      AsyncIO::Deferred(thunk) => AsyncIO::Deferred(Box::new(move || {
+                          Box::pin(async move {
+                              function(thunk().await)
+                          })
+                      })),
+                  }
+              }
+
+      - name: "flat_map() の遅延評価維持"
+        signature: "pub fn flat_map<B, F>(self, function: F) -> AsyncIO<B>"
+        description: |
+          **FP specialist レビュー指摘対応:**
+          遅延評価セマンティクスを維持するため、Pure ケースでも Deferred でラップする。
+          直接評価は `run_async()` のみで行う。
+
+          これにより:
+          - `run_async()` が唯一の実行境界という原則を維持
+          - Pure と Deferred で観測可能な動作の違いが生じない
+          - スタックオーバーフローリスクを回避
+        examples:
+          - description: "遅延評価を維持する flat_map()"
+            code: |
+              #[inline]
+              pub fn flat_map<B, F>(self, function: F) -> AsyncIO<B>
+              where
+                  F: FnOnce(A) -> AsyncIO<B> + Send + 'static,
+                  B: Send + 'static,
+              {
+                  match self {
+                      AsyncIO::Pure(value) => {
+                          // 遅延評価を維持するため Deferred でラップ
+                          AsyncIO::Deferred(Box::new(move || {
+                              Box::pin(async move {
+                                  function(value).run_async().await
+                              })
+                          }))
+                      }
+                      AsyncIO::Deferred(thunk) => AsyncIO::Deferred(Box::new(move || {
+                          Box::pin(async move {
+                              let value_a = thunk().await;
+                              function(value_a).run_async().await
+                          })
+                      })),
+                  }
+              }
+
+      - name: "run_async() の最適化"
+        signature: "pub async fn run_async(self) -> A"
+        description: |
+          Pure ケースで即座に値を返し、Future のポーリングを回避。
+        examples:
+          - description: "最適化された run_async()"
+            code: |
+              #[inline(always)]
+              pub async fn run_async(self) -> A {
+                  match self {
+                      AsyncIO::Pure(value) => value,  // 即座に返す
+                      AsyncIO::Deferred(thunk) => thunk().await,
+                  }
+              }
+
+    implementations:
+      - type: "AsyncIO<A>"
+        file: "src/effect/async_io.rs"
+        description: |
+          AsyncIO を enum 型に変更:
+          - Pure(A): 値を直接保持
+          - Deferred(...): 従来の遅延計算
+
+          全てのメソッドを enum に対応させる:
+          - new() → Deferred を生成
+          - from_future() → Deferred を生成
+          - pure() → Pure を生成（Box アロケーション回避）
+          - fmap() → 遅延評価を維持（Deferred でラップ）
+          - flat_map() → 遅延評価を維持（Deferred でラップ）
+          - run_async() → **Pure は即座に値を返す（主な最適化ポイント）**
+
+          **FP specialist レビュー指摘対応:**
+          `flat_map` と `fmap` では遅延評価セマンティクスを維持。
+          最適化は `run_async()` でのみ行う。
+
+    verification:
+      monad_laws: |
+        enum 化後も Monad 法則を満たすことを確認:
+
+        **重要**: AsyncIO の等価性は `run_async()` の結果で定義される
+
+        1. Left Identity: AsyncIO::pure(a).flat_map(f).run_async() == f(a).run_async()
+           - Pure(a).flat_map(f) → Deferred(|| f(a).run_async())
+           - 実行結果は f(a).run_async() と等価
+           - **注意**: 中間表現は異なるが、run_async() の結果が等価であれば法則を満たす
+        2. Right Identity: m.flat_map(AsyncIO::pure).run_async() == m.run_async()
+           - Pure(a).flat_map(pure) → Deferred(|| pure(a).run_async()) → run_async で a
+           - Deferred(t).flat_map(pure) → run_async で t().await
+        3. Associativity: m.flat_map(f).flat_map(g).run_async() == m.flat_map(|x| f(x).flat_map(g)).run_async()
+           - 変換の順序に関わらず同じ実行結果
+
+      referential_transparency: |
+        参照透過性を維持:
+        - Pure(x) と Deferred(|| async { x }) は `run_async()` の結果が同じ
+        - 最適化は観測可能な動作に影響しない
+        - **重要**: `run_async()` が唯一の実行境界として維持される
+        - 純粋関数であれば、評価タイミングの違いは観測不可能
+
+  # ======================================================================
+  # フェーズ 4: ExceptT 最適化（期待改善: 5-10%）
+  # ======================================================================
+  - id: REQ-EFF-ASYNC-PERF-004
+    name: "ExceptT エラー時の最適化"
+    description: |
+      ExceptT::flat_map でエラー時に AsyncIO::Pure(Err(error)) を使用し、
+      不要な Box アロケーションを回避する。
+
+      現在の実装:
+      ```rust
+      ExceptT::new(self.inner.flat_map(move |result| match result {
+          Ok(value) => function(value).inner,
+          Err(error) => AsyncIO::pure(Err(error)),  // ← Box アロケーション
+      }))
+      ```
+
+      最適化後（フェーズ 3 の enum 化後）:
+      ```rust
+      ExceptT::new(self.inner.flat_map(move |result| match result {
+          Ok(value) => function(value).inner,
+          Err(error) => AsyncIO::Pure(Err(error)),  // ← Box なし
+      }))
+      ```
+
+      期待効果: 5-10%
+
+      **注意:** この最適化はフェーズ 3 の AsyncIO enum 化に依存する。
+
+    methods:
+      - name: "エラー時の Pure 使用"
+        signature: "pub fn flat_map<B, F>(self, function: F) -> ExceptT<E, AsyncIO<Result<B, E>>>"
+        description: |
+          エラー時に AsyncIO::Pure(Err(error)) を直接使用し、
+          Box アロケーションを回避する。
+        examples:
+          - description: "最適化された flat_map"
+            code: |
+              #[inline(always)]
+              pub fn flat_map<B, F>(self, function: F) -> ExceptT<E, AsyncIO<Result<B, E>>>
+              where
+                  F: FnOnce(A) -> ExceptT<E, AsyncIO<Result<B, E>>> + Send + 'static,
+                  B: Send + 'static,
+              {
+                  ExceptT::new(self.inner.flat_map(move |result| match result {
+                      Ok(value) => function(value).inner,
+                      Err(error) => AsyncIO::Pure(Err(error)),  // Pure を直接使用
+                  }))
+              }
+
+    implementations:
+      - type: "ExceptT<E, AsyncIO<Result<A, E>>>"
+        file: "src/effect/except_transformer.rs"
+        description: |
+          flat_map, flat_map_async_io でエラー時に
+          AsyncIO::Pure(Err(error)) を使用。
+
+          この最適化はフェーズ 3 の AsyncIO enum 化に依存するため、
+          フェーズ 4 として実施する。
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    improvement_targets:
+      - phase: 1
+        name: "マイクロベンチマーク追加"
+        target: "N/A（計測のみ）"
+      - phase: 2
+        name: "インライン化最適化"
+        target: "10-15%"
+      - phase: 3
+        name: "AsyncIO enum 化"
+        target: "10-20%（FP specialist 指摘対応後の見積もり）"
+      - phase: 4
+        name: "ExceptT 最適化"
+        target: "5-10%"
+    total_target: "25-45%（楽観的見積もり）"
+    realistic_expectation: |
+      Codex + FP specialist レビュー結果を踏まえると:
+      - Pure 混在率が高い場合: 25-35% の改善
+      - Pure 混在率が低い場合: 10-20% の改善
+      - 全て Deferred の場合: 5-15% の改善
+
+      **FP specialist 指摘対応による見積もり修正:**
+      遅延評価セマンティクスを維持するため、flat_map での直接評価を行わない。
+      主な最適化は pure() アロケーション回避と run_async() での Pure 即座返却に限定。
+
+    # Codex レビュー指摘対応: Pure 混在率の仮定根拠
+    pure_ratio_assumptions: |
+      **典型的な Pure 混在率の仮定** (Codex レビュー指摘対応)
+
+      1. **高 Pure 混在率のケース (50-80%)**
+         - ビジネスロジック中心のワークフロー
+         - 検証、計算、変換が主体で I/O が少ない
+         - 例: eff_async! {
+             validated <= ExceptT::pure_async_io(validate(input));  // Pure
+             calculated <= ExceptT::pure_async_io(calculate(validated));  // Pure
+             saved <= repository.save(calculated);  // Deferred
+             ExceptT::pure_async_io(saved)  // Pure
+           }
+         - 期待改善: 30-40%
+
+      2. **中 Pure 混在率のケース (20-50%)**
+         - 典型的な CRUD 操作
+         - I/O と計算が混在
+         - 期待改善: 15-25%
+
+      3. **低 Pure 混在率のケース (0-20%)**
+         - I/O 操作が支配的
+         - DB アクセス、API 呼び出しが主体
+         - 期待改善: 5-15%
+
+      **仮定の根拠:**
+      - Bank サンプルの分析: Deposit 操作は Pure 約 40%、Withdraw は Pure 約 20%
+      - 一般的なアプリケーションパターンの調査
+      - I/O 操作はオーバーヘッドが既に大きいため、最適化効果が相対的に小さい
+
+  compatibility:
+    - "API 互換性: 既存の public API は変更しない"
+    - "動作互換性: 既存のテストが全て通過すること"
+    - "Rust 1.92.0 以降での動作を保証"
+    - "既存の eff_async! マクロのコードは修正不要"
+
+  testing:
+    - "既存の単体テストが全て通過すること"
+    - "Monad 法則のテスト（Left Identity, Right Identity, Associativity）が通過すること"
+    - "Functor 法則のテスト（Identity, Composition）が通過すること"
+    - "新規ベンチマークが追加され、CI で実行されること"
+
+  constraints:
+    - "unsafe コードは使用しない（#![forbid(unsafe_code)] を維持）"
+    - "外部依存の追加は最小限に抑える"
+    - "関数型プログラミング原則（参照透過性、純粋関数、不変性、Monad 法則）を維持"
+    - "バイナリサイズの増加は 10% 以内に抑える"
+
+# 将来の拡張
+future_extensions:
+  - id: EXT-EFF-ASYNC-001
+    name: "継続キューベース実装"
+    description: |
+      クロージャネスティングの代わりに、継続をキューとして管理し、
+      ループで順次実行する方式に変更する。
+
+      これにより:
+      - ネスティングオーバーヘッドを排除
+      - Box アロケーションを大幅に削減
+      - 期待改善: 40-50%
+    rationale: |
+      実装が複雑でマクロの大幅な書き換えが必要なため、
+      本要件では対象外とし、将来の大規模リファクタリングで対応する。
+    priority: high
+
+  - id: EXT-EFF-ASYNC-002
+    name: "eff_async_fast! 特化マクロ"
+    description: |
+      ExceptT<E, AsyncIO<Result<A, E>>> 専用の最適化されたマクロを提供。
+      通常の eff_async! とは別に提供することで、
+      既存 API との互換性を維持しつつパフォーマンスを向上。
+    rationale: |
+      API の増加によりユーザーの混乱を招く可能性があるため、
+      継続キューベース実装を優先して検討する。
+    priority: medium
+
+  - id: EXT-EFF-ASYNC-003
+    name: "コンパイル時最適化"
+    description: |
+      proc-macro で flat_map チェーンを解析し、
+      最適化されたコードを生成する。
+    rationale: |
+      proc-macro の複雑化とコンパイル時間増加のトレードオフがあるため、
+      効果が明確に見込める場合にのみ検討する。
+    priority: low
+
+# 実装計画概要
+implementation_summary:
+  phase_1:
+    name: "マイクロベンチマーク追加"
+    estimated_effort: "2-3時間"
+    requirements:
+      - REQ-EFF-ASYNC-PERF-001
+    tasks:
+      - "benches/eff_async_macro_bench.rs の作成"
+      - "チェーン深度別オーバーヘッド計測"
+      - "Pure 混在率別計測"
+      - "エラーハンドリングパス計測"
+      - "Traditional スタイルとの比較"
+      - "CI への統合"
+    notes: |
+      ベンチマークは計測目的のため、命令的スタイルを許容。
+      tokio runtime は benchmark group 外で1回生成し再利用。
+
+  phase_2:
+    name: "インライン化最適化"
+    estimated_effort: "2-3時間"
+    requirements:
+      - REQ-EFF-ASYNC-PERF-002
+    tasks:
+      - "AsyncIO のホットパスに #[inline(always)] 適用"
+      - "ExceptT のホットパスに #[inline(always)] 適用"
+      - "エラー経路に #[cold] + #[inline(never)] 適用"
+      - "Phase 1 のベンチマークで効果を測定"
+      - "バイナリサイズとコンパイル時間への影響を確認"
+    expected_improvement: "10-15%"
+
+  phase_3:
+    name: "AsyncIO enum 化"
+    estimated_effort: "4-6時間"
+    requirements:
+      - REQ-EFF-ASYNC-PERF-003
+    tasks:
+      - "AsyncIO を enum 型に変更"
+      - "全メソッドを enum に対応させる（遅延評価セマンティクス維持）"
+      - "Monad 法則テストの実行"
+      - "Phase 1 のベンチマークで効果を測定"
+      - "ドキュメントの更新（大きな値の注意事項、遅延評価の説明）"
+    expected_improvement: "10-20%（FP specialist 指摘対応後）"
+
+  phase_4:
+    name: "ExceptT 最適化"
+    estimated_effort: "1-2時間"
+    requirements:
+      - REQ-EFF-ASYNC-PERF-004
+    tasks:
+      - "ExceptT::flat_map でエラー時に AsyncIO::Pure を使用"
+      - "Phase 1 のベンチマークで効果を測定"
+    expected_improvement: "5-10%"
+    dependencies:
+      - "phase_3（AsyncIO enum 化）の完了"
+
+  total_estimated_effort: "9-14時間"
+  target_improvement:
+    optimistic: "25-45%"
+    realistic: "15-25%"
+    pessimistic: "10-15%"
+    note: |
+      FP specialist レビュー指摘により flat_map での直接評価を行わないため、
+      当初見積もりより効果は控えめ。ただし遅延評価セマンティクスを維持することで
+      関数型プログラミングの原則との整合性を確保。
+
+# 関連情報
+related:
+  github_issues:
+    - number: 195
+      title: "eff_async! マクロのパフォーマンス改善検討"
+      url: "https://github.com/lihs-ie/lambars/issues/195"
+
+  internal_documents:
+    - "docs/internal/issues/20260118_0905_eff_async_macro_performance.yaml"
+    - "docs/internal/done/requirements/20260119_1600_asyncio_performance.yaml"
+    - "docs/internal/done/requirements/20260119_1800_effect_system_performance.yaml"
+    - "docs/internal/done/requirements/20260119_1630_trampoline_performance.yaml"
+
+  source_files:
+    - "src/effect/async_io.rs"
+    - "src/effect/except_transformer.rs"
+    - "src/effect/eff_async_macro.rs"
