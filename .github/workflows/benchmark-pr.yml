@@ -156,9 +156,15 @@ jobs:
             const fs = require('fs');
             const benchmarkOutput = fs.readFileSync('benchmark_output.txt', 'utf8');
 
+            // Strip ANSI escape codes (handles both real escape sequences and ^[[ notation)
+            const stripAnsi = (str) => str
+              .replace(/\x1b\[[0-9;]*m/g, '')  // Real ANSI escape sequences
+              .replace(/\^\[\[[0-9;]*m/g, '')  // ^[[ notation
+              .replace(/\033\[[0-9;]*m/g, ''); // Octal notation
+
             // Extract relevant benchmark results (last 100 lines to avoid huge comments)
             const lines = benchmarkOutput.split('\n');
-            const relevantLines = lines.slice(-100).join('\n');
+            const relevantLines = stripAnsi(lines.slice(-100).join('\n'));
 
             const regressionDetected = '${{ steps.check-regression.outputs.regression_detected }}' === 'true';
             const noBaseline = '${{ steps.check-regression.outputs.no_baseline }}' === 'true';
