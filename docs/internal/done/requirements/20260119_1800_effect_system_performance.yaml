@@ -1,0 +1,670 @@
+# Effect システムパフォーマンス最適化 要件定義
+#
+# 概要:
+#   Algebraic Effect (Eff) システムのパフォーマンスを改善する。
+#   Trampoline 最適化の教訓を踏まえ、unsafe を使用せず API 互換性を維持しながら
+#   限定的な改善（0-5%、楽観的でも10%）を目標とする。
+#   効果が出ない場合（0%）も妥当な結果として受け入れ、将来の拡張への指針を示す。
+#
+# 設計方針:
+#   1. unsafe を使用しない安全な最適化のみを採用
+#   2. 既存 API との完全な互換性を維持
+#   3. 関数型プログラミングの原則（純粋性、参照透過性、不変性）を遵守
+#   4. Trampoline 最適化の教訓を活用（Box 割り当て削減は unsafe なしでは限定的）
+#   5. 現実的な改善目標を設定し、達成できない場合の対応を明確化
+#
+# 参照:
+#   - Issue: docs/internal/issues/20260115_1410_effect_system_performance.yaml
+#   - GitHub Issue: https://github.com/lihs-ie/lambars/issues/165
+#   - 現在の実装:
+#     - src/effect/algebraic/eff.rs
+#     - src/effect/algebraic/handler.rs (PureHandler)
+#     - src/effect/algebraic/reader.rs (ReaderHandler)
+#     - src/effect/algebraic/state.rs (StateHandler)
+#     - src/effect/algebraic/writer.rs (WriterHandler)
+#     - src/effect/algebraic/error.rs (ErrorHandler)
+#   - ベンチマーク: benches/algebraic_effect_bench.rs
+#   - Trampoline 最適化結果: docs/internal/done/requirements/20260119_1630_trampoline_performance.yaml
+
+version: "1.1.0"
+name: "effect_system_performance"
+description: |
+  Algebraic Effect (Eff) システムのパフォーマンスを最適化する。
+
+  現在のベンチマーク結果（従来実装との比較）:
+  - Reader: 従来型 63ns vs Eff 350ns（5.5倍遅い）
+  - State: 従来型 102ns vs Eff 458ns（4.5倍遅い）
+  - Writer: 従来型 168ns vs Eff 488ns（2.9倍遅い）
+  - state_effect_modify[100]: 13ms（指数的増加の兆候）
+
+  主なボトルネック:
+  1. クロージャの過度な割り当て（flat_map ごとに最大 3 つの Box）
+  2. 型消去継続（downcast オーバーヘッド 15-25ns）
+  3. 深いチェーンでの指数的増加傾向
+
+  Trampoline 最適化の教訓:
+  - #[inline(always)] は動的ディスパッチ経由の呼び出しには効果が限定的
+  - loop + match 変換はコンパイラ最適化により元コードと同等になる可能性が高い
+  - Box 割り当てと動的ディスパッチは unsafe なしでは根本的に解決できない
+  - 現実的な改善は誤差範囲内（Trampoline では効果なし）
+
+  重要な認識:
+  - 本要件で提案する最適化は効果が限定的である可能性が高い
+  - state_effect_modify[100] の指数的増加は normalize() の繰り返し展開が原因であり、
+    本要件の施策では根本的な改善は困難
+  - 15% 以上の改善を達成できない可能性を前提として進める
+
+# 背景・動機
+background:
+  problem: |
+    Algebraic Effect は柔軟なエフェクト合成を可能にするが、現在の実装では
+    従来の Reader/State/Writer 実装と比較して 2.9-5.5 倍のパフォーマンス低下がある。
+
+    具体的な問題点:
+    1. flat_map ごとに複数の Box 割り当てが発生
+       ```rust
+       continuation: Box::new(move |result| {  // Box 1
+           let next = (operation.continuation)(result);
+           Eff {
+               inner: EffInner::FlatMap(Box::new(EffFlatMap {  // Box 2
+                   source: Box::new(next),  // Box 3
+                   transform: Box::new(move |source| { ... }),  // Box 4
+               })),
+           }
+       }),
+       ```
+
+    2. 型消去による downcast オーバーヘッド
+       ```rust
+       let eff = *source.downcast::<Self>().unwrap();
+       ```
+
+    3. normalize() での反復的な FlatMap 展開
+       深いチェーンでは同じ処理が繰り返される
+       → state_effect_modify[100] の指数的増加の主因
+
+  motivation: |
+    Algebraic Effect は関数型プログラミングにおいて重要な抽象化であり、
+    複数のエフェクトを型安全に合成できる強力な機能を提供する。
+
+    パフォーマンスを改善することで:
+    - 実用的なアプリケーションでの Algebraic Effect 採用が促進される
+    - 従来の Reader/State/Writer との選択時の障壁が下がる
+    - ライブラリ全体の実用性が向上する
+
+    ただし、Trampoline の教訓から、unsafe を使用せずに達成できる改善は限定的であり、
+    本要件はその限界を確認し、将来の拡張への道筋を示すことを目的とする。
+
+  prior_art:
+    - name: "Scala ZIO"
+      description: |
+        ZIO は内部的に Fiber ベースの実行モデルを使用し、
+        エフェクトの合成を効率的に処理する。
+        flatMap チェーンは内部的にトランポリン化されている。
+
+    - name: "Haskell freer-simple"
+      description: |
+        freer-simple は Free モナドベースのエフェクトシステム。
+        継続キューを使用してパフォーマンスを改善している。
+        ただし、型消去のオーバーヘッドは残る。
+
+    - name: "Koka"
+      description: |
+        Koka は言語レベルで Algebraic Effect をサポートし、
+        コンパイラによる最適化（continuation passing style 変換）で
+        高いパフォーマンスを実現している。
+
+    - name: "lambars Trampoline 最適化"
+      description: |
+        Trampoline 最適化で得られた教訓:
+        - #[inline(always)] は動的ディスパッチ経由では効果がない
+        - Box 割り当ては unsafe なしでは根本的に解決できない
+        - 提案した最適化（inline強化、loop+match、パターン順序）は全て効果なし
+        - 結論: 現実的な改善は誤差範囲内
+
+# 前提条件
+prerequisites:
+  pure_function_assumption: |
+    Eff に渡される関数（flat_map のクロージャ、perform_raw の継続）は
+    純粋関数（副作用を持たない）であることを前提とする。
+
+    重要: この前提は Eff の純粋関数部分（flat_map, fmap のクロージャ）に限定される。
+    State/Writer エフェクトの状態更新順序は意味を持つため、
+    評価順序の変更は Eff 内部のスケジューリングにのみ適用される。
+
+  api_compatibility: |
+    API 互換性の範囲:
+    - 公開型: Eff<E, A>, OperationTag
+    - 公開メソッド: pure, is_pure, perform_raw, normalize, fmap, flat_map, and_then, then, map2, product
+    - 公開トレイト: Handler trait
+    - ハンドラー: PureHandler, ReaderHandler, StateHandler, WriterHandler, ErrorHandler
+
+    内部構造（EffOperation, EffFlatMap, EffInner, Continuation）は非公開であり、変更可能。
+
+  trampoline_lessons: |
+    Trampoline パフォーマンス最適化から得られた教訓を前提とする:
+    1. #[inline(always)] は動的ディスパッチ経由の呼び出しには効果がない
+       - vtable lookup はインライン化できない
+    2. while let → loop + match 変換は効果がない
+       - コンパイラは同等のコードを生成する
+    3. パターン判定順序の変更も効果がない
+       - コンパイラは分岐予測を自動最適化する
+    4. Box 割り当てと動的ディスパッチは unsafe なしでは根本的に解決できない
+
+  source_files: |
+    各ハンドラーの実装ファイル:
+    - PureHandler: src/effect/algebraic/handler.rs
+    - ReaderHandler: src/effect/algebraic/reader.rs
+    - StateHandler: src/effect/algebraic/state.rs
+    - WriterHandler: src/effect/algebraic/writer.rs
+    - ErrorHandler: src/effect/algebraic/error.rs
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. normalize() アルゴリズム確認
+  # ======================================================================
+  - id: REQ-EFF-PERF-001
+    name: "normalize() の実装確認"
+    description: |
+      normalize() メソッドの現在の実装を確認し、最適化の余地を調査する。
+
+      現在の実装（src/effect/algebraic/eff.rs）:
+      ```rust
+      pub(crate) fn normalize(self) -> Self {
+          match self.inner {
+              EffInner::Pure(_) | EffInner::Impure(_) => self,
+              EffInner::FlatMap(flat_map) => Self::normalize_iteratively(*flat_map),
+          }
+      }
+
+      fn normalize_iteratively(initial_flat_map: EffFlatMap<E, A>) -> Self {
+          let mut current_result = (initial_flat_map.transform)(initial_flat_map.source);
+          loop {
+              match current_result.inner {
+                  EffInner::Pure(_) | EffInner::Impure(_) => return current_result,
+                  EffInner::FlatMap(next_flat_map) => {
+                      current_result = (next_flat_map.transform)(next_flat_map.source);
+                  }
+              }
+          }
+      }
+      ```
+
+      調査結果:
+      - 現在の実装は既に Pure/Impure の早期リターンを行っている
+      - Trampoline の教訓から、ループ構造の変更は効果がないと予想
+      - 本要件では変更を行わず、現状維持とする
+
+      期待効果: 0%（変更なし）
+
+    methods:
+      - name: "normalize"
+        signature: "pub(crate) fn normalize(self) -> Self"
+        description: |
+          現在の実装を確認するのみ。変更は行わない。
+
+    implementations:
+      - type: "Eff<E, A>"
+        description: |
+          normalize() の実装確認。変更なし。
+
+  # ======================================================================
+  # 2. flat_map の Pure ケース確認
+  # ======================================================================
+  - id: REQ-EFF-PERF-002
+    name: "flat_map の Pure ケース最適化確認"
+    description: |
+      flat_map で Pure ケースの場合、中間構造を生成せずに
+      直接 function(value) を呼び出していることを確認する。
+
+      現在の実装（src/effect/algebraic/eff.rs）:
+      ```rust
+      pub fn flat_map<B: 'static, F>(self, function: F) -> Eff<E, B> {
+          match self.inner {
+              EffInner::Pure(value) => function(value),  // 既に最適化済み
+              // ...
+          }
+      }
+      ```
+
+      確認結果:
+      - Pure ケースで既に直接評価を行っている
+      - 追加の最適化余地なし
+
+      期待効果: 0%（既に実装済み）
+
+    implementations:
+      - type: "Eff<E, A>"
+        description: |
+          flat_map の Pure ケース最適化は既に実装済み。確認のみ。
+
+  # ======================================================================
+  # 3. Handler run() メソッドの Pure 早期リターン
+  # ======================================================================
+  - id: REQ-EFF-PERF-003
+    name: "Handler run() メソッドの Pure 早期リターン"
+    description: |
+      各 Handler の run() メソッドにおいて、
+      normalize() を呼ぶ前に Pure チェックを行い、
+      Pure の場合は normalize() をスキップする。
+
+      対象ファイル:
+      - src/effect/algebraic/handler.rs (PureHandler)
+      - src/effect/algebraic/reader.rs (ReaderHandler)
+      - src/effect/algebraic/state.rs (StateHandler)
+      - src/effect/algebraic/writer.rs (WriterHandler)
+      - src/effect/algebraic/error.rs (ErrorHandler)
+
+      現在の実装例（StateHandler::run_with_state）:
+      ```rust
+      fn run_with_state<A: 'static>(computation: Eff<StateEffect<S>, A>, state: &RefCell<S>) -> A {
+          let mut current_computation = computation;
+          loop {
+              let normalized = current_computation.normalize();  // 毎回呼び出し
+              match normalized.inner {
+                  EffInner::Pure(value) => return value,
+                  // ...
+              }
+          }
+      }
+      ```
+
+      最適化案:
+      ```rust
+      fn run_with_state<A: 'static>(computation: Eff<StateEffect<S>, A>, state: &RefCell<S>) -> A {
+          // 入口で Pure チェック（RefCell 初期化前に即座にリターン可能なケース）
+          if let EffInner::Pure(value) = computation.inner {
+              return value;
+          }
+
+          let mut current_computation = computation;
+          loop {
+              let normalized = current_computation.normalize();
+              match normalized.inner {
+                  EffInner::Pure(value) => return value,
+                  // ...
+              }
+          }
+      }
+      ```
+
+      効果の見込み:
+      - ベンチマークは主にエフェクト操作を測定しており、
+        「最初から Pure」のケースは少ない
+      - 効果は「最初から Pure の計算を Handler に渡すケース」に限定される
+      - Reader/State/Writer のベンチマークでは効果がほぼ出ない可能性が高い
+
+      期待効果: 0-3%（Pure が多いワークロードでのみ効果あり）
+
+    methods:
+      - name: "Handler::run 系メソッド"
+        signature: "fn run<A: 'static>(self, computation: Eff<E, A>) -> Self::Output<A>"
+        description: |
+          normalize() 前に Pure チェックを追加し、
+          Pure の場合は即座にリターンする。
+        examples:
+          - description: "Pure ケースの早期リターン（StateHandler の例）"
+            code: |
+              fn run_with_state<A: 'static>(computation: Eff<StateEffect<S>, A>, state: &RefCell<S>) -> A {
+                  // 入口で Pure チェック
+                  if let EffInner::Pure(value) = computation.inner {
+                      return value;
+                  }
+
+                  let mut current_computation = computation;
+                  loop {
+                      let normalized = current_computation.normalize();
+                      match normalized.inner {
+                          EffInner::Pure(value) => return value,
+                          EffInner::Impure(operation) => {
+                              // エフェクト処理
+                          }
+                          EffInner::FlatMap(_) => unreachable!(),
+                      }
+                  }
+              }
+
+    implementations:
+      - type: "PureHandler"
+        file: "src/effect/algebraic/handler.rs"
+        description: |
+          run() メソッドに Pure 早期リターンを追加
+
+      - type: "ReaderHandler<R>"
+        file: "src/effect/algebraic/reader.rs"
+        description: |
+          run_with_environment() メソッドに Pure 早期リターンを追加
+
+      - type: "StateHandler<S>"
+        file: "src/effect/algebraic/state.rs"
+        description: |
+          run_with_state() メソッドに Pure 早期リターンを追加
+
+      - type: "WriterHandler<W>"
+        file: "src/effect/algebraic/writer.rs"
+        description: |
+          run_with_buffer() メソッドに Pure 早期リターンを追加
+
+      - type: "ErrorHandler<Err>"
+        file: "src/effect/algebraic/error.rs"
+        description: |
+          run_internal() メソッドは既に normalize() → Pure チェックの構造。
+          入口での早期リターンを検討。
+
+  # ======================================================================
+  # 4. インライン化属性の確認
+  # ======================================================================
+  - id: REQ-EFF-PERF-004
+    name: "インライン化属性の確認"
+    description: |
+      頻繁に呼び出されるメソッドの #[inline] 属性を確認する。
+
+      Trampoline の教訓:
+      - #[inline(always)] は動的ディスパッチ経由では効果がない
+      - 効果は限定的だが、副作用がないため確認する
+
+      確認対象:
+      - Eff::pure() - 既に #[inline] あり
+      - Eff::is_pure() - 既に #[inline] あり
+      - Eff::normalize() - 既に #[inline] あり
+      - Eff::fmap() - 既に #[inline] あり
+      - Eff::flat_map() - 既に #[inline] あり
+      - OperationTag::new() - 既に #[inline] あり
+
+      結論:
+      - 既存の #[inline] 属性は適切に配置されている
+      - 追加の変更は不要
+
+      期待効果: 0%（変更なし）
+
+    implementations:
+      - type: "Eff<E, A>"
+        description: |
+          既存の #[inline] 属性を確認。追加変更なし。
+
+  # ======================================================================
+  # 5. 検証用ベンチマーク
+  # ======================================================================
+  - id: REQ-EFF-PERF-005
+    name: "パフォーマンス改善の検証"
+    description: |
+      最適化後にベンチマークを実行し、効果を定量的に検証する。
+
+      測定対象:
+      - reader_comparison/eff_reader_effect
+      - state_comparison/eff_state_effect
+      - writer_comparison/eff_writer_effect
+      - state_effect_modify[100]（参考値、改善困難）
+
+      重要な注意:
+      - state_effect_modify[100] の指数的増加は normalize() の繰り返し展開が原因
+      - 本要件の施策（Pure 早期リターン）では改善困難
+      - この問題は将来の拡張（継続キュー）で対処すべき
+
+    methods:
+      - name: "ベンチマーク実行"
+        signature: "cargo bench --bench algebraic_effect_bench"
+        description: |
+          以下のベンチマークで効果を検証:
+          - reader_comparison
+          - state_comparison
+          - writer_comparison
+          - state_effect_modify（参考値）
+        examples:
+          - description: "ベンチマーク実行コマンド"
+            code: |
+              # 最適化前のベースライン取得
+              cargo bench --bench algebraic_effect_bench > baseline.txt
+
+              # 最適化後の測定
+              cargo bench --bench algebraic_effect_bench > after.txt
+
+              # 比較: 改善率 = (baseline - after) / baseline * 100
+
+    implementations:
+      - type: "ベンチマーク"
+        description: |
+          既存の benches/algebraic_effect_bench.rs を使用して検証
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    target_metric: "reader_comparison, state_comparison, writer_comparison の実行時間改善率"
+    target_improvement:
+      optimistic: "10%（楽観的目標）"
+      realistic: "0-5%（現実的期待値）"
+      minimum_acceptable: "効果確認（0%でも可、Trampoline の教訓を裏付ける）"
+    improvement_calculation:
+      formula: "改善率 = (baseline - after) / baseline * 100 [%]"
+      baseline: "最適化前の測定結果"
+      after: "最適化後の測定結果"
+    individual_targets:
+      - "reader_comparison/eff_reader_effect: 改善または回帰なし"
+      - "state_comparison/eff_state_effect: 改善または回帰なし"
+      - "writer_comparison/eff_writer_effect: 改善または回帰なし"
+      - "state_effect_modify[100]: 参考値（改善困難、将来の拡張で対処）"
+    note: |
+      Trampoline 最適化の教訓を踏まえ、以下の点を認識する:
+      - Box 割り当てと動的ディスパッチは unsafe なしでは根本的に解決できない
+      - 提案する最適化（Pure 早期リターン）の効果は限定的
+      - 0% の改善（効果なし）も妥当な結果として受け入れる
+      - 本要件の主目的は Trampoline と同様の検証を行い、将来の拡張への指針を示すこと
+
+  measurement_conditions:
+    environment:
+      - "リリースビルド（--release）で測定"
+      - "同一マシンで最適化前後を連続して測定"
+      - "他のプロセスによる干渉を最小化"
+      - "測定は最低3回実行し、結果の一貫性を確認"
+    criterion_settings:
+      description: "Criterion ベンチマークの設定"
+      settings:
+        - "sample_size: 100（デフォルト値）"
+        - "warm_up_time: 3秒（デフォルト値）"
+        - "measurement_time: 5秒（デフォルト値）"
+
+  compatibility:
+    - "既存の公開 API に変更を加えないこと"
+    - "既存のテストがすべて通過すること"
+    - "セマンティックバージョニングにおいて patch バージョンアップで対応可能なこと"
+
+  testing:
+    - "既存の単体テストがすべて通過すること"
+    - "ベンチマーク結果を記録し、効果を定量的に示すこと"
+    - "モナド則のテストが引き続き通過すること"
+
+  constraints:
+    - "unsafe コードを使用しないこと"
+    - "外部クレートへの新規依存を追加しないこと"
+    - "コンパイル時間への影響を最小限に抑えること"
+
+  functional_programming_principles:
+    referential_transparency: |
+      参照透過性を維持すること:
+      - 同じ入力に対して常に同じ出力を返す
+      - 最適化により評価順序が変わっても結果は同一
+    purity: |
+      純粋性を維持すること:
+      - 副作用を導入しない
+      - エフェクトの実行タイミングを変更しない（ハンドラーでの実行は保持）
+
+      注: 「評価順序変更が影響しない」という前提は、Eff 内部の純粋関数部分
+      （flat_map, fmap のクロージャ）に限定される。
+      State/Writer の状態更新順序は意味を持つため、これらの評価順序は変更しない。
+    immutability: |
+      不変性を維持すること:
+      - 既存データを破壊的に変更しない
+      - 内部ループ変数の更新は外部から観測不可能
+
+# 将来の拡張
+future_extensions:
+  - id: EXT-EFF-PERF-001
+    name: "継続キューの導入"
+    description: |
+      freer-simple スタイルの継続キューを導入し、
+      FlatMap チェーンの処理を効率化する。
+      継続を Vec として管理し、normalize() の繰り返し展開を防ぐ。
+
+      これにより state_effect_modify[100] の指数的増加を解決できる可能性がある。
+    rationale: |
+      型消去の仕組みを大幅に変更する必要があり、実装が複雑。
+      API 互換性の維持が困難な可能性がある。
+    expected_improvement: "30-50%（楽観的見積もり、型消去の影響で頭打ちの可能性）"
+    priority: high
+    note: |
+      state_effect_modify[100] の指数的増加に対処するには、
+      この拡張または類似のアプローチが必要。
+
+  - id: EXT-EFF-PERF-002
+    name: "アリーナアロケータの導入"
+    description: |
+      bumpalo などのアリーナアロケータを導入し、
+      Box 割り当てのオーバーヘッドを削減する。
+    rationale: |
+      外部依存の追加が必要（現在のプロジェクト方針「外部依存追加なし」に反する）。
+      ライフタイム管理が複雑になる可能性がある。
+      方針変更が許容される場合にのみ検討可能。
+    expected_improvement: "20-30%（楽観的見積もり、型消去の影響で頭打ちの可能性あり）"
+    priority: medium
+
+  - id: EXT-EFF-PERF-003
+    name: "特化型ハンドラーの提供"
+    description: |
+      単一エフェクト用の最適化されたハンドラーを別途提供。
+      Eff の柔軟性と直接実装のパフォーマンスを選択可能にする。
+    rationale: |
+      API が複雑になる。
+      メンテナンス負荷が増加する。
+    expected_improvement: "従来実装と同等のパフォーマンス（楽観的見積もり、実装の複雑さにより達成困難な可能性あり）"
+    priority: low
+
+  - id: EXT-EFF-PERF-004
+    name: "unsafe を使用した Box 割り当て削減"
+    description: |
+      unsafe を使用して Box 割り当てを削減する。
+      手動メモリ管理により、ヒープアロケーションを最小化する。
+    rationale: |
+      unsafe の使用は現在のプロジェクトポリシーに反する。
+      安全性の証明が困難。
+      将来的に unsafe が許容される場合に検討。
+    expected_improvement: "40-60%（楽観的見積もり）"
+    priority: low
+
+# 実装計画
+implementation_plan:
+  phases:
+    - phase: 1
+      name: "現状調査と既存最適化の確認"
+      requirements:
+        - REQ-EFF-PERF-001
+        - REQ-EFF-PERF-002
+        - REQ-EFF-PERF-004
+      estimated_effort: "1時間"
+      expected_improvement: "N/A（調査のみ）"
+      tasks:
+        - "normalize() の実装確認"
+        - "flat_map の Pure 直接評価が実装済みか確認"
+        - "既存の #[inline] 属性を確認"
+
+    - phase: 2
+      name: "Handler run() の Pure 早期リターン"
+      requirements:
+        - REQ-EFF-PERF-003
+      estimated_effort: "2-3時間"
+      expected_improvement: "0-3%"
+      tasks:
+        - "PureHandler の run() に Pure 早期リターンを追加"
+        - "ReaderHandler の run_with_environment() に Pure 早期リターンを追加"
+        - "StateHandler の run_with_state() に Pure 早期リターンを追加"
+        - "WriterHandler の run_with_buffer() に Pure 早期リターンを追加"
+        - "ErrorHandler の run_internal() を確認"
+      files:
+        - "src/effect/algebraic/handler.rs"
+        - "src/effect/algebraic/reader.rs"
+        - "src/effect/algebraic/state.rs"
+        - "src/effect/algebraic/writer.rs"
+        - "src/effect/algebraic/error.rs"
+
+    - phase: 3
+      name: "検証とドキュメント"
+      requirements:
+        - REQ-EFF-PERF-005
+      estimated_effort: "1-2時間"
+      expected_improvement: "N/A"
+      tasks:
+        - "ベンチマーク実行と結果記録"
+        - "効果の分析（Trampoline との比較）"
+        - "ドキュメント更新"
+
+  total_estimated_effort: "4-6時間"
+  target_improvement:
+    optimistic: "10%"
+    realistic: "0-5%"
+    pessimistic: "0%（Trampoline と同様の結果）"
+    note: |
+      Trampoline 最適化の教訓を踏まえ、以下を認識する:
+      - Box 割り当てと動的ディスパッチは unsafe なしでは根本的に解決できない
+      - 0% の改善（効果なし）も妥当な結果として受け入れる
+      - 本要件の主目的は Trampoline と同様の検証を行い、将来の拡張への指針を示すこと
+
+  success_criteria:
+    primary:
+      - "実装が完了し、全テストが通過すること"
+      - "ベンチマーク結果が記録され、分析が完了すること"
+    secondary:
+      - "改善が確認できた場合、その値を記録"
+      - "効果がなかった場合、Trampoline と同様の結論を文書化"
+    verification:
+      - "全テストが通過すること"
+      - "回帰がないこと（パフォーマンスが悪化しないこと）"
+    acceptance_criteria: |
+      以下のいずれかを満たした場合に「完了」とする:
+
+      1. 改善が確認できた場合:
+         - 改善率を記録し、効果のあった最適化を特定
+         - 将来の拡張への参考情報として文書化
+
+      2. 効果がなかった場合（Trampoline と同様）:
+         - Trampoline と同様の結論を文書化
+         - 「Box 割り当てと動的ディスパッチが根本原因」であることを確認
+         - 将来の拡張（EXT-EFF-PERF-001〜004）の必要性を明記
+         - 現状のパフォーマンスを Algebraic Effect の柔軟性との
+           トレードオフとして許容する判断を記録
+
+# 関連情報
+related:
+  issue_file: "docs/internal/issues/20260115_1410_effect_system_performance.yaml"
+  github_issue:
+    number: 165
+    url: "https://github.com/lihs-ie/lambars/issues/165"
+  trampoline_reference:
+    requirement_file: "docs/internal/done/requirements/20260119_1630_trampoline_performance.yaml"
+    lessons_learned: |
+      1. #[inline(always)] は動的ディスパッチ経由では効果がない
+      2. loop + match 変換は効果がない
+      3. パターン判定順序の変更も効果がない
+      4. Box 割り当てと動的ディスパッチは unsafe なしでは根本的に解決できない
+      5. 提案した最適化は全て誤差範囲内で効果なし
+
+# 補足: state_effect_modify[100] の指数的増加について
+state_effect_modify_analysis:
+  problem: |
+    state_effect_modify[100] で 13ms という異常に長い実行時間が観測されている。
+    これは modify 回数に対して指数的に増加する傾向がある。
+
+  root_cause: |
+    modify() は内部で get().flat_map(|s| put(modifier(s))) として実装されている。
+    これにより、100回の modify は 200回以上の FlatMap チェーンを生成する。
+
+    各 normalize() 呼び出しで FlatMap チェーン全体を展開するため、
+    深いチェーンでは処理量が指数的に増加する。
+
+  current_requirement_limitation: |
+    本要件の施策（Pure 早期リターン）は、「最初から Pure」のケースにのみ効果があり、
+    state_effect_modify のような深いエフェクトチェーンには効果がない。
+
+  future_solution: |
+    この問題を解決するには、将来の拡張 EXT-EFF-PERF-001（継続キュー）が必要。
+    継続キューにより、FlatMap チェーンを毎回展開するのではなく、
+    キューとして効率的に管理できる。
