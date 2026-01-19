@@ -123,6 +123,11 @@ impl<E: Clone + 'static> ErrorHandler<E> {
     ///
     /// Uses an iterative approach for stack safety.
     fn run_internal<A: 'static>(computation: Eff<ErrorEffect<E>, A>) -> Result<A, E> {
+        // Early return for Pure case (avoids normalize() overhead)
+        if let EffInner::Pure(value) = computation.inner {
+            return Ok(value);
+        }
+
         let normalized = computation.normalize();
 
         match normalized.inner {
