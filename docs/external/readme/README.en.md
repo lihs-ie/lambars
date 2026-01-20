@@ -804,6 +804,31 @@ let result = async_io.run_async().await;
 assert_eq!(result, 42);
 ```
 
+##### Synchronous Execution
+
+AsyncIO can be executed synchronously from non-async contexts:
+
+```rust
+use lambars::effect::AsyncIO;
+
+let async_io = AsyncIO::pure(42).fmap(|x| x * 2);
+
+// Lightweight sync execution (uses futures::executor, no Tokio features)
+let result = async_io.clone().run_sync_lightweight();
+assert_eq!(result, 84);
+
+// Standard sync execution (uses thread-local Tokio runtime)
+let result = async_io.run_sync();
+assert_eq!(result, 84);
+
+// Convert to IO for composition with other sync operations
+let io = AsyncIO::pure(10).to_sync();
+assert_eq!(io.run_unsafe(), 10);
+```
+
+Note: `run_sync_lightweight` cannot use Tokio-specific features like `tokio::time::sleep`.
+Use `run_sync` when Tokio features are needed.
+
 #### eff_async! Macro
 
 Do-notation for AsyncIO computations.
