@@ -15,10 +15,7 @@ use std::hint::black_box;
 fn benchmark_insert(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("insert");
 
-    // Extended sizes for optimized insert performance verification
-    // As per Phase 8.2 requirements (PR-001): 1,000 / 10,000 / 100,000 elements
     for size in [1_000, 10_000, 100_000] {
-        // PersistentHashMap insert
         group.bench_with_input(
             BenchmarkId::new("PersistentHashMap", size),
             &size,
@@ -361,6 +358,137 @@ fn benchmark_iteration_find(criterion: &mut Criterion) {
 }
 
 // =============================================================================
+// insert_large_scale Benchmark (Phase 5: Issue #221)
+// =============================================================================
+
+#[allow(clippy::single_element_loop)]
+fn benchmark_insert_large_scale(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("insert_large_scale");
+
+    // Large scale benchmarks require reduced sampling to avoid timeout
+    group.sample_size(10);
+
+    // Note: Using a loop for extensibility - additional scales can be added here
+    for size in [1_000_000] {
+        // PersistentHashMap insert
+        group.bench_with_input(
+            BenchmarkId::new("PersistentHashMap", size),
+            &size,
+            |bencher, &size| {
+                bencher.iter(|| {
+                    let mut map = PersistentHashMap::new();
+                    for index in 0..size {
+                        map = map.insert(black_box(index), black_box(index * 2));
+                    }
+                    black_box(map)
+                });
+            },
+        );
+
+        // Standard HashMap insert
+        group.bench_with_input(
+            BenchmarkId::new("HashMap", size),
+            &size,
+            |bencher, &size| {
+                bencher.iter(|| {
+                    let mut map = HashMap::new();
+                    for index in 0..size {
+                        map.insert(black_box(index), black_box(index * 2));
+                    }
+                    black_box(map)
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// =============================================================================
+// collect Benchmark (Phase 5: Issue #221)
+// =============================================================================
+
+fn benchmark_collect(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("collect");
+
+    for size in [1_000, 10_000, 100_000] {
+        // PersistentHashMap collect (FromIterator)
+        group.bench_with_input(
+            BenchmarkId::new("PersistentHashMap", size),
+            &size,
+            |bencher, &size| {
+                bencher.iter(|| {
+                    let map: PersistentHashMap<i32, i32> =
+                        (0..size).map(|index| (index, index * 2)).collect();
+                    black_box(map)
+                });
+            },
+        );
+
+        // Standard HashMap collect (FromIterator)
+        group.bench_with_input(
+            BenchmarkId::new("HashMap", size),
+            &size,
+            |bencher, &size| {
+                bencher.iter(|| {
+                    let map: HashMap<i32, i32> =
+                        (0..size).map(|index| (index, index * 2)).collect();
+                    black_box(map)
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// =============================================================================
+// transient_build Benchmark (Phase 5: Issue #221)
+// =============================================================================
+
+fn benchmark_transient_build(criterion: &mut Criterion) {
+    use lambars::persistent::TransientHashMap;
+
+    let mut group = criterion.benchmark_group("transient_build");
+
+    for size in [1_000, 10_000, 100_000] {
+        // TransientHashMap batch insert and convert to persistent
+        group.bench_with_input(
+            BenchmarkId::new("TransientHashMap", size),
+            &size,
+            |bencher, &size| {
+                bencher.iter(|| {
+                    let mut transient: TransientHashMap<i32, i32> =
+                        TransientHashMap::with_capacity_hint(size as usize);
+                    for index in 0..size {
+                        transient.insert(black_box(index), black_box(index * 2));
+                    }
+                    let persistent = transient.persistent();
+                    black_box(persistent)
+                });
+            },
+        );
+
+        // Standard HashMap with_capacity for comparison
+        group.bench_with_input(
+            BenchmarkId::new("HashMap_with_capacity", size),
+            &size,
+            |bencher, &size| {
+                bencher.iter(|| {
+                    let mut map: HashMap<i32, i32> = HashMap::with_capacity(size as usize);
+                    for index in 0..size {
+                        map.insert(black_box(index), black_box(index * 2));
+                    }
+                    black_box(map)
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// =============================================================================
 // Criterion Group and Main
 // =============================================================================
 
@@ -373,7 +501,10 @@ criterion_group!(
     benchmark_iteration_early_exit,
     benchmark_iteration_first,
     benchmark_iteration_create,
-    benchmark_iteration_find
+    benchmark_iteration_find,
+    benchmark_insert_large_scale,
+    benchmark_collect,
+    benchmark_transient_build
 );
 
 criterion_main!(benches);
