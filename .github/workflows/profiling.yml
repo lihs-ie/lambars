@@ -135,7 +135,11 @@ jobs:
           sudo apt-get install -y valgrind
 
       - name: Install iai-callgrind-runner
-        run: cargo install iai-callgrind-runner --version 0.14.0
+        run: |
+          # Get iai-callgrind version from Cargo.lock to ensure version match
+          IAI_VERSION=$(grep -A1 'name = "iai-callgrind"' Cargo.lock | grep version | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "Installing iai-callgrind-runner version $IAI_VERSION"
+          cargo install iai-callgrind-runner --version "$IAI_VERSION"
 
       - name: Cache cargo registry
         uses: actions/cache@v4
