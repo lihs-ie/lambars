@@ -2001,8 +2001,9 @@ impl<T: Clone> PersistentVector<T> {
     where
         P: Fn(&T) -> bool,
     {
-        let mut pass = Vec::new();
-        let mut fail = Vec::new();
+        let estimated_capacity = self.length / 2 + 1;
+        let mut pass = Vec::with_capacity(estimated_capacity);
+        let mut fail = Vec::with_capacity(estimated_capacity);
 
         for element in self {
             if predicate(element) {
