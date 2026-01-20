@@ -1,0 +1,73 @@
+# Issue: iai-callgrind-runner バージョン不一致の修正
+# CIで発生しているエラーの修正
+
+deferred_features:
+  - id: iai_callgrind_version_mismatch
+    name: "iai-callgrind-runner バージョン不一致の修正"
+    discovered_date: "2026-01-20"
+    priority: high
+    category: bug
+    labels:
+      - "bug"
+      - "performance"
+
+    problem:
+      summary: "iai-callgrind-runner (0.14.0) と iai-callgrind (0.14.2) のバージョン不一致でベンチマークが実行されない"
+      details: |
+        GitHub Actions run #21154282399 のプロファイリングワークフローで、
+        iai-callgrind ベンチマークがバージョン不一致エラーで実行されていない。
+
+        ## エラー内容
+        ```
+        iai_callgrind_runner: Error: iai-callgrind-runner (0.14.0) is older than
+        iai-callgrind (0.14.2). Please update iai-callgrind-runner by calling
+        'cargo install --version 0.14.2 iai-callgrind-runner'
+        ```
+
+        ## 影響を受けるベンチマーク
+        - effect_iai
+        - persistent_vector_iai
+        - scenario_iai
+
+        ## 影響
+        iai-callgrindベンチマークが実行されないため、
+        命令数レベルでの詳細なパフォーマンス分析ができない。
+
+    solution:
+      approach: "CI設定でiai-callgrind-runnerのバージョンを明示的に指定"
+      options:
+        - name: "固定バージョン指定"
+          description: |
+            CI設定で `cargo install --version 0.14.2 iai-callgrind-runner` を実行
+          pros:
+            - シンプルで確実
+            - 即座に修正可能
+          cons:
+            - ライブラリ更新時に手動でCIも更新が必要
+
+        - name: "動的バージョン取得"
+          description: |
+            cargo metadataからiai-callgrindのバージョンを取得し、
+            同じバージョンのrunnerをインストール
+          pros:
+            - ライブラリ更新時に自動追従
+            - メンテナンスフリー
+          cons:
+            - 実装が複雑
+            - jqなどの追加ツールが必要
+
+      recommended: "動的バージョン取得"
+      estimated_complexity: low
+
+    references:
+      - "https://github.com/lihs-ie/lambars/actions/runs/21154282399"
+      - "https://github.com/iai-callgrind/iai-callgrind"
+
+    related:
+      requirement_id: null
+      plan_id: null
+
+    github_issue:
+      number: 212
+      url: "https://github.com/lihs-ie/lambars/issues/212"
+      created: true
