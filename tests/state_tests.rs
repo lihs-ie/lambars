@@ -432,9 +432,9 @@ fn state_with_vector_state() {
 }
 
 #[rstest]
-fn state_run_can_be_called_multiple_times() {
+fn state_run_cloned_can_be_called_multiple_times() {
     let state: State<i32, i32> = State::get();
-    assert_eq!(state.run(1), (1, 1));
-    assert_eq!(state.run(2), (2, 2));
-    assert_eq!(state.run(3), (3, 3));
+    assert_eq!(state.run_cloned(1), (1, 1));
+    assert_eq!(state.run_cloned(2), (2, 2));
+    assert_eq!(state.run_cloned(3), (3, 3));
 }

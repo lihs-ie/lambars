@@ -1,0 +1,1165 @@
+# Rc<T>::drop_slow オーバーヘッド最適化 要件定義
+#
+# 概要:
+#   Effect系ベンチマークでRc<T>::drop_slowが7.12%を占めるボトルネックを
+#   Pure/Deferred パターンの導入により最適化する。
+#
+# 設計方針:
+#   1. AsyncIOで既に採用されているPure/Deferredパターンを State/Reader に適用
+#   2. モナド則（Identity法則、結合法則）を維持
+#   3. 参照透過性・不変性の維持
+#   4. API互換性の維持
+#   5. unsafe を使用しない安全な最適化
+#
+# 参照:
+#   - Issue: docs/internal/issues/20260120_0905_rc_drop_slow_optimization.yaml
+#   - GitHub Issue: https://github.com/lihs-ie/lambars/issues/209
+#   - 現在の実装:
+#     - src/effect/state.rs
+#     - src/effect/reader.rs
+#     - src/effect/state_transformer.rs
+#     - src/effect/reader_transformer.rs
+#   - 参照実装: src/effect/async_io.rs（Pure/Deferred パターン）
+
+version: "1.0.0"
+name: "rc_drop_slow_optimization"
+description: |
+  State/Reader モナドにおける Rc<T>::drop_slow オーバーヘッドを最適化する。
+
+  現在のベンチマーク結果（GitHub Actions run #21154282399）:
+  - Rc<T,A>::drop_slow (1回目): 4.65%
+  - Rc<T,A>::drop_slow (2回目): 2.47%
+  - 合計: 7.12%
+
+  主な原因:
+  - State/Reader で `Rc<dyn Fn>` を使用
+  - flat_map/fmap のチェーンにより Rc が頻繁に生成・破棄される
+  - pure 値に対しても常に Rc アロケーションが発生
+
+  採用アプローチ:
+  AsyncIO で既に採用されている Pure/Deferred パターンを State/Reader に適用。
+  Pure バリアントは即値を保持し、Rc アロケーションをゼロにする。
+
+# 背景・動機
+background:
+  problem: |
+    State/Reader モナドは内部で `Rc<dyn Fn>` を使用している:
+
+    ```rust
+    // State (現在の実装)
+    pub struct State<S, A> {
+        run_function: Rc<dyn Fn(S) -> (A, S)>,
+    }
+
+    // Reader (現在の実装)
+    pub struct Reader<R, A> {
+        run_function: Rc<dyn Fn(R) -> A>,
+    }
+    ```
+
+    この設計により、以下の問題が発生:
+    1. `pure(value)` でも Rc アロケーションが発生
+    2. flat_map チェーンで多数の Rc が生成・破棄される
+    3. `Rc::drop_slow` がベンチマークの 7.12% を占める
+
+    Box への置き換えは `dyn Fn` の複数回呼び出し設計のため不可能。
+    （Box<dyn Fn> は FnOnce と同様に所有権を移動させるため、
+    Reader の複数回実行ができなくなる）
+
+  motivation: |
+    State/Reader は関数型プログラミングの基本的な構成要素であり、
+    パフォーマンスの改善は実用的なアプリケーションでの採用を促進する。
+
+    AsyncIO で既に Pure/Deferred パターンが成功しており、
+    同様のアプローチを State/Reader に適用することで:
+    - pure 値に対するゼロコスト抽象化を実現
+    - Rc::drop_slow のオーバーヘッドを削減
+    - API 互換性を維持しながら最適化
+
+  prior_art:
+    - name: "lambars AsyncIO"
+      description: |
+        AsyncIO は Pure/Deferred パターンを既に採用:
+        ```rust
+        pub enum AsyncIO<A> {
+            Pure(A),
+            Deferred(Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = A> + Send>> + Send>),
+        }
+        ```
+        Pure バリアントは Box アロケーションをゼロにする。
+
+    - name: "Haskell State Monad"
+      description: |
+        Haskell の State モナドは遅延評価言語であるため、
+        newtype による追加コストがゼロ。
+        正格評価の Rust では Pure バリアントで同様の効果を得る。
+
+    - name: "Scala Cats Effect IO"
+      description: |
+        Cats Effect の IO も Pure/Delay パターンを採用。
+        pure 値は即座に返される。
+
+# 前提条件
+prerequisites:
+  pure_function_assumption: |
+    State/Reader に渡される関数（flat_map のクロージャなど）は
+    **純粋かつ全域な関数（pure total function）**であることを前提とする。
+
+    純粋関数の前提により:
+    - 同じ入力に対して常に同じ出力を返す
+    - 評価順序の変更は観測可能な差異を生じない
+    - Pure バリアントでの即時評価は意味論的に等価
+
+    **重要: 副作用禁止・外部状態依存禁止**
+    以下の関数を渡した場合、参照透過性と純粋性の保証は無効となる:
+    - I/O 操作を含む関数
+    - グローバル変数や外部状態に依存する関数
+    - 乱数生成や時刻取得を含む関数
+    - 内部可変性（RefCell, Mutex 等）を通じて状態を変更する関数
+
+    **重要: 全域関数（total function）の要件**
+    渡される関数は全域関数（すべての入力に対して正常に値を返す関数）である
+    ことを前提とする。以下の関数を渡した場合、評価タイミングの変更により
+    従来と異なる動作が発生する可能性がある:
+    - panic! や unreachable! を含む関数
+    - 無限ループに陥る可能性のある関数
+    - スタックオーバーフローを引き起こす深い再帰を含む関数
+
+    **評価タイミングの変更に関する破壊的変更**:
+    Pure バリアントに対する `fmap`/`flat_map` は即時評価（eager evaluation）になる。
+    従来の実装では `run()` 呼び出し時まで評価が遅延されていたが、
+    新設計では Pure の場合に限り `fmap`/`flat_map` 呼び出し時点で評価される。
+
+    これは純粋かつ全域な関数では意味論的に等価だが、以下のケースで
+    観測可能な差異が生じる:
+
+    1. panic を含む関数:
+       ```rust
+       // 従来: run() 呼び出し時に panic
+       // 新設計: fmap() 呼び出し時に panic（Pure の場合）
+       let state = State::pure(0).fmap(|x| {
+           if x == 0 { panic!("zero!"); }
+           x
+       });
+       // 従来: この時点では panic しない
+       // 新設計: Pure の場合、この時点で panic する
+       ```
+
+    2. 非停止（無限ループ）を含む関数:
+       ```rust
+       // 従来: run() 呼び出し時に停止しない
+       // 新設計: fmap() 呼び出し時に停止しない（Pure の場合）
+       let state = State::pure(42).fmap(|_| loop {});
+       ```
+
+    これらの関数の使用は非推奨であり、
+    停止性や例外安全性が必要な場合は IO や Effect システムを使用すべきである。
+
+    この前提に違反した場合の動作は未定義（undefined behavior ではなく、
+    結果が予測不能）であり、ライブラリは正しい結果を保証しない。
+    この制約は API ドキュメントに明記し、利用者に警告する。
+
+  internal_mutability_warning: |
+    内部可変性を持つ型（RefCell<T>, Mutex<T> 等）を State の状態型 S や
+    Reader の環境型 R として使用した場合、不変性の保証は適用されない。
+
+    設計上の推奨:
+    - State/Reader では不変な型を使用することを推奨
+    - 内部可変性が必要な場合は IO や Effect システムの使用を検討
+
+  api_compatibility: |
+    API 互換性の範囲:
+
+    **型の変更（破壊的）**:
+    - State<S, A>: struct から enum に変更
+    - Reader<R, A>: struct から enum に変更
+    - #[non_exhaustive] 属性を付与し、将来のバリアント追加に備える
+
+    State:
+    - 公開メソッド: new, from_transition, run, eval, exec, pure, fmap, flat_map,
+                   and_then, then, map2, product, get, put, modify, gets
+
+    Reader:
+    - 公開メソッド: new, run, pure, fmap, flat_map, and_then, then, map2, map3,
+                   product, apply, ask, asks, local
+
+    StateT/ReaderT:
+    - モナドトランスフォーマーは当初のスコープ外
+    - 効果が確認できた場合に追加検討
+
+    **追加トレイト境界の詳細（全て破壊的変更）**:
+
+    Pure/Deferred パターン導入により、以下のメソッドでトレイト境界が追加される:
+
+    State:
+    | メソッド     | 追加境界    | 理由                          |
+    |-------------|------------|-------------------------------|
+    | run         | A: Clone   | Pure の値を返すため            |
+    | eval        | A: Clone   | 内部で run を使用              |
+    | exec        | A: Clone   | 内部で run を使用              |
+    | clone       | A: Clone   | Pure の値をクローンするため    |
+
+    Reader:
+    | メソッド     | 追加境界    | 理由                          |
+    |-------------|------------|-------------------------------|
+    | run         | A: Clone   | Pure の値を返すため            |
+    | clone       | A: Clone   | Pure の値をクローンするため    |
+
+    **then メソッドについて**:
+    当初の設計では then メソッドに B: Clone 境界を追加する予定だったが、
+    Codex レビューの指摘を受けて Rc 生成を回避する実装に変更した結果、
+    B: Clone 境界は不要となった。これにより、then メソッドは破壊的変更なしで
+    最適化される。
+
+    **pure メソッドの A: Clone 境界**:
+    pure メソッドは元々 A: Clone を要求している。
+    新設計では Pure バリアントを直接生成するため、技術的には Clone 不要だが、
+    API 互換性のため既存の境界を維持する（意図的な設計判断）。
+
+    **代替設計の検討（不採用）**:
+    破壊的変更を避けるための代替案を検討したが、以下の理由で不採用:
+    1. Pure バリアントを Box<A> で包む: Rc 削減の効果が相殺される
+    2. run で Cow<A> を返す: API が複雑になり使い勝手が悪化
+    3. run_owned と run_ref を分離: API が複雑になる
+
+    本要件では、パフォーマンス最適化の効果を優先し、
+    破壊的変更を許容する方針とする。
+
+  referential_transparency: |
+    参照透過性の維持:
+    - Pure バリアントは即値を保持するが、run() の結果は同一
+    - Deferred バリアントは従来通り遅延評価
+    - 関数呼び出しを「値」に置き換えても意味が変わらない
+
+  source_files: |
+    変更対象ファイル:
+    - src/effect/state.rs
+    - src/effect/reader.rs
+
+    参照ファイル:
+    - src/effect/async_io.rs (Pure/Deferred パターンの参照実装)
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. State モナドの Pure/Deferred パターン導入
+  # ======================================================================
+  - id: REQ-RC-OPT-001
+    name: "State モナドの Pure/Deferred パターン導入"
+    description: |
+      State<S, A> を struct から enum に変更し、Pure/Deferred バリアントを導入する。
+
+      現在の実装:
+      ```rust
+      pub struct State<S, A> {
+          run_function: Rc<dyn Fn(S) -> (A, S)>,
+      }
+      ```
+
+      最適化後:
+      ```rust
+      /// #[non_exhaustive] により将来のバリアント追加に備える
+      #[non_exhaustive]
+      pub enum State<S, A> {
+          /// 純粋な値を保持。Rc アロケーションなし。
+          Pure { value: A },
+
+          /// 遅延評価される状態遷移関数。
+          Deferred { run_function: Rc<dyn Fn(S) -> (A, S)> },
+      }
+      ```
+
+      設計判断 - fmap での評価タイミング:
+      State/Reader は同期的であり、渡される関数は純粋関数の前提があるため、
+      fmap で Pure の場合に即時評価（eager evaluation）を採用する。
+      これは参照透過性を維持しつつ、Rc アロケーションを削減する最適化である。
+      AsyncIO では遅延評価を維持しているが、State/Reader では即時評価で問題なし。
+
+    methods:
+      - name: "State::pure"
+        signature: "pub fn pure(value: A) -> Self where A: Clone"
+        description: |
+          Pure バリアントを直接生成する。Rc アロケーションなし。
+          ```rust
+          pub fn pure(value: A) -> Self
+          where
+              A: Clone,
+          {
+              Self::Pure { value }
+          }
+          ```
+        rationale: |
+          pure 値に対して Rc アロケーションをゼロにする。
+          Clone 境界は既存の実装と同一。
+
+      - name: "State::new"
+        signature: "pub fn new<F>(function: F) -> Self where F: Fn(S) -> (A, S) + 'static"
+        description: |
+          Deferred バリアントを生成する。
+          ```rust
+          pub fn new<F>(function: F) -> Self
+          where
+              F: Fn(S) -> (A, S) + 'static,
+          {
+              Self::Deferred {
+                  run_function: Rc::new(function),
+              }
+          }
+          ```
+        rationale: |
+          既存の new メソッドのセマンティクスを維持。
+
+      - name: "State::run"
+        signature: "pub fn run(&self, initial_state: S) -> (A, S)"
+        description: |
+          Pure/Deferred に応じて適切に実行する。
+          ```rust
+          pub fn run(&self, initial_state: S) -> (A, S)
+          where
+              A: Clone,
+          {
+              match self {
+                  Self::Pure { value } => (value.clone(), initial_state),
+                  Self::Deferred { run_function } => run_function(initial_state),
+              }
+          }
+          ```
+        rationale: |
+          Pure の場合、状態は変更されず値がそのまま返される。
+          これは `State::pure(v).run(s) == (v, s)` のセマンティクスと一致。
+
+      - name: "State::fmap"
+        signature: "pub fn fmap<B, F>(self, function: F) -> State<S, B>"
+        description: |
+          Pure の場合は関数を適用した Pure を返す。
+          Deferred の場合は従来通り。
+          ```rust
+          pub fn fmap<B, F>(self, function: F) -> State<S, B>
+          where
+              F: Fn(A) -> B + 'static,
+              B: 'static,
+          {
+              match self {
+                  Self::Pure { value } => State::Pure { value: function(value) },
+                  Self::Deferred { run_function } => State::Deferred {
+                      run_function: Rc::new(move |state| {
+                          let (result, new_state) = run_function(state);
+                          (function(result), new_state)
+                      }),
+                  },
+              }
+          }
+          ```
+        rationale: |
+          Pure の場合は新しい Rc アロケーションなしで fmap を実行。
+          参照透過性: pure(v).fmap(f) == pure(f(v))
+
+      - name: "State::flat_map"
+        signature: "pub fn flat_map<B, F>(self, function: F) -> State<S, B>"
+        description: |
+          Pure の場合は関数を直接適用。
+          Deferred の場合は新しい Deferred を生成（run を内部で呼ばない）。
+
+          **重要な設計判断**:
+          Deferred の実装では `next_state.run(...)` を呼ばない。
+          代わりに、内部で Pure/Deferred の判定を行い、適切に処理する。
+          これにより、B: Clone 境界を追加せずに実装できる。
+
+          ```rust
+          pub fn flat_map<B, F>(self, function: F) -> State<S, B>
+          where
+              F: Fn(A) -> State<S, B> + 'static,
+              B: 'static,
+          {
+              match self {
+                  Self::Pure { value } => function(value),
+                  Self::Deferred { run_function } => State::Deferred {
+                      run_function: Rc::new(move |state| {
+                          let (result, intermediate_state) = run_function(state);
+                          let next_state = function(result);
+                          // next_state が Pure か Deferred かに応じて処理
+                          match next_state {
+                              State::Pure { value } => (value, intermediate_state),
+                              State::Deferred { run_function: next_run } => {
+                                  next_run(intermediate_state)
+                              }
+                          }
+                      }),
+                  },
+              }
+          }
+          ```
+
+          注: この実装では Pure の value を移動させるため、B: Clone は不要。
+        rationale: |
+          Left Identity 法則: pure(a).flat_map(f) == f(a)
+          Pure の場合、関数を直接適用することでこの法則を満たす。
+          B: Clone 境界を追加しない設計により、API 互換性を維持。
+
+      - name: "State::then"
+        signature: "pub fn then<B>(self, next: State<S, B>) -> State<S, B> where B: Clone + 'static"
+        description: |
+          Pure の場合、状態変更がないため次の計算を直接返す。
+          Deferred の場合は内部で next を消費して処理する。
+
+          **設計判断（Rc 生成を回避する実装）**:
+          Codex レビューでの指摘を受け、Deferred 経路で `Rc::new(next)` を
+          生成しない実装に変更する。これにより、最適化の目的（Rc 削減）と
+          矛盾しない設計となる。
+
+          **実装方針**:
+          next が Pure か Deferred かで分岐し、それぞれ専用のクロージャを生成する。
+
+          ```rust
+          pub fn then<B>(self, next: State<S, B>) -> State<S, B>
+          where
+              B: Clone + 'static,
+          {
+              match self {
+                  Self::Pure { .. } => next,  // Pure は状態変更なし、next を消費
+                  Self::Deferred { run_function } => {
+                      // next の Pure/Deferred に応じて別のクロージャを生成
+                      // Rc::new(next) を避けることで Rc 生成を削減
+                      match next {
+                          State::Pure { value } => State::Deferred {
+                              run_function: Rc::new(move |state| {
+                                  let (_, intermediate_state) = run_function(state);
+                                  (value.clone(), intermediate_state)
+                              }),
+                          },
+                          State::Deferred { run_function: next_run } => State::Deferred {
+                              run_function: Rc::new(move |state| {
+                                  let (_, intermediate_state) = run_function(state);
+                                  next_run(intermediate_state)
+                              }),
+                          },
+                      }
+                  }
+              }
+          }
+          ```
+
+          **B: Clone 境界が必要な理由**:
+          - クロージャは `Fn` トレイト（複数回呼び出し可能）を実装する必要がある
+          - Pure の value を move キャプチャした場合、複数回呼び出しに対応するため clone() が必要
+          - これは `Rc::new(next)` を避けるためのトレードオフ
+
+          **注意: 複数回 run を呼ぶケースへの対応**:
+          State<S, A> の run が複数回呼ばれる可能性がある場合は、
+          呼び出し側で clone() してから run を呼ぶことを推奨する。
+          ```rust
+          let state = state1.then(state2);
+          let result1 = state.clone().run(s1);  // clone してから run
+          let result2 = state.run(s2);
+          ```
+        rationale: |
+          Pure の場合、状態変更がないため next をそのまま返す。
+          Deferred の場合、next を分解して move キャプチャすることで
+          Rc::new(next) を回避し、Rc 生成のオーバーヘッドを削減する。
+          B: Clone 境界は Fn トレイトの制約上必要（破壊的変更）。
+
+    implementations:
+      - type: "State<S, A>"
+        file: "src/effect/state.rs"
+        description: |
+          State を enum に変更し、Pure/Deferred バリアントを導入。
+          全ての既存メソッドを新しい構造に適合させる。
+
+  # ======================================================================
+  # 2. Reader モナドの Pure/Deferred パターン導入
+  # ======================================================================
+  - id: REQ-RC-OPT-002
+    name: "Reader モナドの Pure/Deferred パターン導入"
+    description: |
+      Reader<R, A> を struct から enum に変更し、Pure/Deferred バリアントを導入する。
+
+      現在の実装:
+      ```rust
+      pub struct Reader<R, A> {
+          run_function: Rc<dyn Fn(R) -> A>,
+      }
+      ```
+
+      最適化後:
+      ```rust
+      /// #[non_exhaustive] により将来のバリアント追加に備える
+      #[non_exhaustive]
+      pub enum Reader<R, A> {
+          /// 純粋な値を保持。Rc アロケーションなし。
+          Pure { value: A },
+
+          /// 遅延評価される環境読み取り関数。
+          Deferred { run_function: Rc<dyn Fn(R) -> A> },
+      }
+      ```
+
+    methods:
+      - name: "Reader::pure"
+        signature: "pub fn pure(value: A) -> Self where A: Clone"
+        description: |
+          Pure バリアントを直接生成する。
+          ```rust
+          pub fn pure(value: A) -> Self
+          where
+              A: Clone,
+          {
+              Self::Pure { value }
+          }
+          ```
+
+      - name: "Reader::new"
+        signature: "pub fn new<F>(function: F) -> Self where F: Fn(R) -> A + 'static"
+        description: |
+          Deferred バリアントを生成する。
+          ```rust
+          pub fn new<F>(function: F) -> Self
+          where
+              F: Fn(R) -> A + 'static,
+          {
+              Self::Deferred {
+                  run_function: Rc::new(function),
+              }
+          }
+          ```
+
+      - name: "Reader::run"
+        signature: "pub fn run(&self, environment: R) -> A"
+        description: |
+          Pure/Deferred に応じて適切に実行する。
+          ```rust
+          pub fn run(&self, environment: R) -> A
+          where
+              A: Clone,
+          {
+              match self {
+                  Self::Pure { value } => value.clone(),
+                  Self::Deferred { run_function } => run_function(environment),
+              }
+          }
+          ```
+        rationale: |
+          Pure の場合、環境は無視され値がそのまま返される。
+          これは Reader.pure のセマンティクス（環境を無視して定数を返す）と一致。
+
+      - name: "Reader::fmap"
+        signature: "pub fn fmap<B, F>(self, function: F) -> Reader<R, B>"
+        description: |
+          Pure の場合は関数を適用した Pure を返す。
+          ```rust
+          pub fn fmap<B, F>(self, function: F) -> Reader<R, B>
+          where
+              F: Fn(A) -> B + 'static,
+              B: 'static,
+          {
+              match self {
+                  Self::Pure { value } => Reader::Pure { value: function(value) },
+                  Self::Deferred { run_function } => Reader::Deferred {
+                      run_function: Rc::new(move |environment| {
+                          function(run_function(environment))
+                      }),
+                  },
+              }
+          }
+          ```
+
+      - name: "Reader::flat_map"
+        signature: "pub fn flat_map<B, F>(self, function: F) -> Reader<R, B>"
+        description: |
+          Pure の場合は関数を直接適用。
+          Deferred の場合は新しい Deferred を生成（run を内部で呼ばない）。
+
+          **重要**: R: Clone 境界は既存 API で既に要求されているため、
+          この変更による追加の境界はなし。
+
+          ```rust
+          pub fn flat_map<B, F>(self, function: F) -> Reader<R, B>
+          where
+              F: Fn(A) -> Reader<R, B> + 'static,
+              B: 'static,
+              R: Clone,
+          {
+              match self {
+                  Self::Pure { value } => function(value),
+                  Self::Deferred { run_function } => Reader::Deferred {
+                      run_function: Rc::new(move |environment: R| {
+                          let a = run_function(environment.clone());
+                          let next_reader = function(a);
+                          // next_reader が Pure か Deferred かに応じて処理
+                          match next_reader {
+                              Reader::Pure { value } => value,
+                              Reader::Deferred { run_function: next_run } => {
+                                  next_run(environment)
+                              }
+                          }
+                      }),
+                  },
+              }
+          }
+          ```
+
+      - name: "Reader::then"
+        signature: "pub fn then<B>(self, next: Reader<R, B>) -> Reader<R, B> where B: Clone + 'static, R: Clone"
+        description: |
+          Pure の場合、環境アクセスがないため次の計算を直接返す。
+          Deferred の場合は State::then と同様の設計（Rc 生成を回避）。
+
+          **設計判断（Rc 生成を回避する実装）**:
+          State::then と同様に、Deferred 経路で `Rc::new(next)` を
+          生成しない実装に変更する。
+
+          ```rust
+          pub fn then<B>(self, next: Reader<R, B>) -> Reader<R, B>
+          where
+              B: Clone + 'static,
+              R: Clone,
+          {
+              match self {
+                  Self::Pure { .. } => next,  // Pure は環境アクセスなし
+                  Self::Deferred { run_function } => {
+                      // next の Pure/Deferred に応じて別のクロージャを生成
+                      match next {
+                          Reader::Pure { value } => Reader::Deferred {
+                              run_function: Rc::new(move |environment: R| {
+                                  let _ = run_function(environment);
+                                  value.clone()
+                              }),
+                          },
+                          Reader::Deferred { run_function: next_run } => Reader::Deferred {
+                              run_function: Rc::new(move |environment: R| {
+                                  let _ = run_function(environment.clone());
+                                  next_run(environment)
+                              }),
+                          },
+                      }
+                  }
+              }
+          }
+          ```
+
+          **B: Clone 境界が必要な理由**:
+          State::then と同様に、`Fn` トレイトの制約上 clone() が必要。
+
+          **注意: 複数回 run を呼ぶケースへの対応**:
+          State::then と同様に、複数回 run を呼ぶ場合は clone() を推奨。
+        rationale: |
+          Pure の場合、環境アクセスがないため next をそのまま返す。
+          Deferred の場合、next を分解して move キャプチャすることで
+          Rc::new(next) を回避し、Rc 生成のオーバーヘッドを削減する。
+          B: Clone 境界は Fn トレイトの制約上必要（破壊的変更）。
+
+    implementations:
+      - type: "Reader<R, A>"
+        file: "src/effect/reader.rs"
+        description: |
+          Reader を enum に変更し、Pure/Deferred バリアントを導入。
+          全ての既存メソッドを新しい構造に適合させる。
+
+  # ======================================================================
+  # 3. Clone 実装の更新
+  # ======================================================================
+  - id: REQ-RC-OPT-003
+    name: "Clone 実装の更新"
+    description: |
+      Pure/Deferred パターン導入に伴い、Clone 実装を更新する。
+
+      State の Clone:
+      ```rust
+      impl<S, A> Clone for State<S, A>
+      where
+          S: 'static,
+          A: Clone + 'static,
+      {
+          fn clone(&self) -> Self {
+              match self {
+                  Self::Pure { value } => Self::Pure { value: value.clone() },
+                  Self::Deferred { run_function } => Self::Deferred {
+                      run_function: run_function.clone(),
+                  },
+              }
+          }
+      }
+      ```
+
+      Reader の Clone:
+      ```rust
+      impl<R, A> Clone for Reader<R, A>
+      where
+          R: 'static,
+          A: Clone + 'static,
+      {
+          fn clone(&self) -> Self {
+              match self {
+                  Self::Pure { value } => Self::Pure { value: value.clone() },
+                  Self::Deferred { run_function } => Self::Deferred {
+                      run_function: run_function.clone(),
+                  },
+              }
+          }
+      }
+      ```
+
+    rationale: |
+      Pure バリアントの Clone は値のコピーのみで Rc 操作なし。
+      Deferred バリアントは従来通り Rc::clone で参照カウントを増加。
+
+    implementations:
+      - type: "State<S, A>"
+        file: "src/effect/state.rs"
+        description: |
+          Clone 実装を Pure/Deferred に対応させる。
+          Clone 境界を A に追加。
+
+      - type: "Reader<R, A>"
+        file: "src/effect/reader.rs"
+        description: |
+          Clone 実装を Pure/Deferred に対応させる。
+          Clone 境界を A に追加。
+
+  # ======================================================================
+  # 4. MonadState 操作の最適化
+  # ======================================================================
+  - id: REQ-RC-OPT-004
+    name: "MonadState 操作の最適化"
+    description: |
+      State モナドの get/put/modify 操作を Pure/Deferred パターンに最適化する。
+
+      get:
+      ```rust
+      pub fn get() -> Self
+      where
+          S: Clone,
+          A: From<S>,
+      {
+          // get は状態に依存するため Deferred
+          Self::Deferred {
+              run_function: Rc::new(|state: S| (A::from(state.clone()), state)),
+          }
+      }
+      ```
+
+      put:
+      ```rust
+      pub fn put(new_state: S) -> State<S, ()>
+      where
+          S: Clone,
+      {
+          // put は状態を変更するため Deferred
+          State::Deferred {
+              run_function: Rc::new(move |_| ((), new_state.clone())),
+          }
+      }
+      ```
+
+      modify:
+      ```rust
+      pub fn modify<F>(modifier: F) -> State<S, ()>
+      where
+          F: Fn(S) -> S + 'static,
+      {
+          // modify は状態を変更するため Deferred
+          State::Deferred {
+              run_function: Rc::new(move |state| ((), modifier(state))),
+          }
+      }
+      ```
+
+    rationale: |
+      get/put/modify は状態に依存または状態を変更するため、
+      Pure バリアントは使用できない。
+      これらは Deferred のままだが、flat_map チェーンでの
+      Pure との組み合わせで全体的な Rc アロケーションを削減。
+
+    implementations:
+      - type: "State<S, ()>"
+        file: "src/effect/state.rs"
+        description: |
+          get/put/modify は Deferred を使用。
+          意味論的に正しく、Pure 最適化の恩恵は受けない。
+
+  # ======================================================================
+  # 5. MonadReader 操作の最適化
+  # ======================================================================
+  - id: REQ-RC-OPT-005
+    name: "MonadReader 操作の最適化"
+    description: |
+      Reader モナドの ask/asks/local 操作を Pure/Deferred パターンに最適化する。
+
+      ask:
+      ```rust
+      pub fn ask() -> Self
+      where
+          R: Clone,
+          A: From<R>,
+      {
+          // ask は環境に依存するため Deferred
+          Self::Deferred {
+              run_function: Rc::new(|environment| A::from(environment)),
+          }
+      }
+      ```
+
+      asks:
+      ```rust
+      pub fn asks<F>(projection: F) -> Self
+      where
+          F: Fn(R) -> A + 'static,
+      {
+          // asks は環境に依存するため Deferred
+          Self::Deferred {
+              run_function: Rc::new(projection),
+          }
+      }
+      ```
+
+      local:
+      ```rust
+      pub fn local<F>(modifier: F, computation: Self) -> Self
+      where
+          F: Fn(R) -> R + 'static,
+      {
+          match computation {
+              Self::Pure { value } => Self::Pure { value },
+              Self::Deferred { run_function } => Self::Deferred {
+                  run_function: Rc::new(move |environment| {
+                      run_function(modifier(environment))
+                  }),
+              },
+          }
+      }
+      ```
+
+    rationale: |
+      ask/asks は環境に依存するため Deferred。
+      local は Pure の場合は環境変更が不要なため Pure を維持。
+
+    implementations:
+      - type: "Reader<R, A>"
+        file: "src/effect/reader.rs"
+        description: |
+          ask/asks は Deferred を使用。
+          local は Pure を維持し、Deferred の場合のみ変換。
+
+  # ======================================================================
+  # 6. モナド則のテスト
+  # ======================================================================
+  - id: REQ-RC-OPT-006
+    name: "モナド則の検証テスト"
+    description: |
+      Pure/Deferred パターン導入後もモナド則が満たされることを検証する。
+
+      **等価性の定義**:
+      モナド則における等価性（==）は `run` メソッドの結果の一致として定義する。
+      Pure/Deferred の内部表現の違いは等価性に影響しない。
+      - State: lhs.run(s) == rhs.run(s) for all s
+      - Reader: lhs.run(r) == rhs.run(r) for all r
+
+      この定義により、観測可能な動作（run の結果）のみを比較し、
+      内部の実装詳細（Pure vs Deferred）は無視する。
+
+      **厳格性（strictness）に関する注意**:
+      モナド則の等価性判定において、**厳格性（評価タイミング）は考慮しない**。
+      すなわち、以下の2つの式が同じ結果を返す場合、等価とみなす:
+      - 即時評価（eager evaluation）される式
+      - 遅延評価（lazy evaluation）される式
+
+      具体例:
+      ```rust
+      // 左辺: Pure の場合、fmap 時点で f が評価される（即時評価）
+      State::pure(a).fmap(f)
+
+      // 右辺: 新しい Deferred が生成され、run 時に f が評価される（遅延評価）
+      State::new(|s| (f(a), s))
+      ```
+
+      これらは厳格性が異なるが、`run(s)` の結果は同一であるため、
+      モナド則の観点では等価とみなす。
+
+      **この設計判断の根拠**:
+      1. 純粋関数の前提: 評価タイミングが異なっても結果は同一
+      2. 実用性: 厳格性を等価性に含めると、最適化の余地がなくなる
+      3. 他言語の慣例: Haskell 等でも strictness は通常 monad laws に含めない
+
+      **注意**: 非純粋関数や非全域関数を渡した場合、厳格性の違いにより
+      異なる動作（panic のタイミング等）が観測される可能性がある。
+      これは前提条件違反であり、ライブラリの保証外である。
+
+      State モナド則:
+      1. Left Identity: State::pure(a).flat_map(f).run(s) == f(a).run(s)
+      2. Right Identity: m.flat_map(State::pure).run(s) == m.run(s)
+      3. Associativity: m.flat_map(f).flat_map(g).run(s) == m.flat_map(|x| f(x).flat_map(g)).run(s)
+
+      Reader モナド則:
+      1. Left Identity: Reader::pure(a).flat_map(f).run(r) == f(a).run(r)
+      2. Right Identity: m.flat_map(Reader::pure).run(r) == m.run(r)
+      3. Associativity: m.flat_map(f).flat_map(g).run(r) == m.flat_map(|x| f(x).flat_map(g)).run(r)
+
+      MonadState 則:
+      1. Get Put: get().flat_map(|s| put(s)).run(s) == pure(()).run(s)
+      2. Put Get: put(s).then(get()).run(_) returns s
+      3. Put Put: put(s1).then(put(s2)).run(_) == put(s2).run(_)
+
+      MonadReader 則:
+      1. Ask Local Identity: local(|r| r, m).run(r) == m.run(r)
+      2. Ask Retrieval: ask().run(r) == r
+
+    implementations:
+      - type: "テスト"
+        file: "src/effect/state.rs"
+        description: |
+          既存のモナド則テストを Pure/Deferred の両方で実行。
+          Pure のみ、Deferred のみ、混合のケースをテスト。
+
+      - type: "テスト"
+        file: "src/effect/reader.rs"
+        description: |
+          既存のモナド則テストを Pure/Deferred の両方で実行。
+
+  # ======================================================================
+  # 7. パフォーマンス検証
+  # ======================================================================
+  - id: REQ-RC-OPT-007
+    name: "パフォーマンス改善の検証"
+    description: |
+      最適化後にベンチマークを実行し、効果を定量的に検証する。
+
+      測定対象:
+      - Effect 系ベンチマーク全体
+      - 特に Rc::drop_slow のプロファイリング結果
+
+      目標:
+      - Rc::drop_slow: 7% -> 3% 以下（50% 以上の削減）
+
+    methods:
+      - name: "ベンチマーク実行"
+        signature: "cargo bench"
+        description: |
+          ベンチマーク実行コマンド:
+          ```bash
+          # 最適化前のベースライン取得
+          cargo bench > baseline.txt
+
+          # 最適化後の測定
+          cargo bench > after.txt
+
+          # プロファイリング
+          cargo bench --bench effect_bench -- --profile-time 5
+          ```
+
+    implementations:
+      - type: "ベンチマーク"
+        description: |
+          既存のベンチマークを使用して検証。
+          プロファイリングで Rc::drop_slow の削減を確認。
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    target_metric: "Rc::drop_slow のプロファイリング結果"
+    target_improvement:
+      optimistic: "7% -> 2% (70% 削減)"
+      realistic: "7% -> 3% (50% 削減)"
+      minimum_acceptable: "7% -> 5% (30% 削減)"
+    improvement_calculation:
+      formula: "削減率 = (baseline - after) / baseline * 100 [%]"
+      baseline: "最適化前の Rc::drop_slow パーセンテージ"
+      after: "最適化後の Rc::drop_slow パーセンテージ"
+
+  compatibility:
+    - "既存の公開 API のメソッドシグネチャを可能な限り維持すること"
+    - "既存のテストがすべて通過すること"
+    - "セマンティックバージョニングにおいて **major** バージョンアップで対応"
+    - |
+      **破壊的変更の詳細**:
+
+      1. State/Reader の run メソッド:
+         - 変更前: A: Clone 境界なし
+         - 変更後: A: Clone 境界あり
+         - 影響: State::new/Reader::new で A が Clone でない型を使用し、
+           run を呼び出すコードがコンパイルエラーになる
+
+      2. State/Reader の Clone 実装:
+         - 変更前: A: Clone 境界なし（Rc::clone のみ）
+         - 変更後: A: Clone 境界あり（Pure の値をクローン）
+         - 影響: State<S, NonCloneType> を clone() するコードがコンパイルエラーになる
+
+      3. 評価タイミングの変更（厳格性の変更）:
+         - 変更前: fmap/flat_map は常に遅延評価（run 時に評価）
+         - 変更後: Pure に対する fmap/flat_map は即時評価
+         - 影響: 純粋かつ全域な関数では観測不能だが、panic や無限ループを
+           含む関数では評価タイミングが変わる
+         - 注意: これは前提条件（純粋かつ全域な関数）違反のケースであり、
+           ライブラリの保証外
+
+      注: then メソッドは当初 B: Clone 境界の追加を予定していたが、
+      Rc 生成を回避する実装に変更したため、破壊的変更なしで最適化される。
+
+      **影響範囲の分析**:
+      - pure を使用するコードは既に A: Clone を満たしているため影響なし
+      - new のみを使用し、Clone でない型を扱うコードが影響を受ける
+      - このパターンは少数と予想されるが、ライブラリとしては破壊的変更
+
+      **移行ガイド**:
+      影響を受けるコードの対処法:
+
+      1. 型に Clone を derive する（推奨）:
+         ```rust
+         // Before
+         struct MyType { /* ... */ }
+
+         // After
+         #[derive(Clone)]
+         struct MyType { /* ... */ }
+         ```
+
+      2. Rc<T> や Arc<T> でラップして Clone 可能にする:
+         ```rust
+         // Before
+         let state: State<S, NonCloneType> = State::new(|s| (expensive_create(), s));
+
+         // After
+         let state: State<S, Rc<NonCloneType>> = State::new(|s| (Rc::new(expensive_create()), s));
+         ```
+
+      **評価タイミングの変更に関する注意**:
+      Pure バリアントに対する fmap/flat_map は即時評価（eager evaluation）になる。
+      これは純粋関数の前提では問題ないが、以下のような不純な関数を渡した場合、
+      従来と異なるタイミングで副作用が発生する:
+
+      ```rust
+      // 従来: run() 呼び出し時に println! が実行される
+      // 新設計: fmap() 呼び出し時に println! が実行される（Pure の場合）
+      let reader = Reader::pure(42).fmap(|x| {
+          println!("evaluated!");  // 副作用 - 非推奨
+          x * 2
+      });
+      ```
+
+      このような不純な関数の使用は非推奨であり、
+      評価タイミングに依存するコードは IO や Effect システムを使用すべき。
+
+      - CHANGELOG と移行ガイドで詳細を提供する
+
+  testing:
+    - "既存の単体テストがすべて通過すること"
+    - "モナド則テストが Pure/Deferred 両方で通過すること"
+    - "ベンチマーク結果を記録し、効果を定量的に示すこと"
+
+  constraints:
+    - "unsafe コードを使用しないこと"
+    - "外部クレートへの新規依存を追加しないこと"
+    - "コンパイル時間への影響を最小限に抑えること"
+
+  functional_programming_principles:
+    referential_transparency: |
+      参照透過性を維持すること:
+      - Pure バリアントは即値を保持するが、run() の結果は同一
+      - 同じ入力に対して常に同じ出力を返す
+      - 関数呼び出しを「値」に置き換えても意味が変わらない
+
+      具体例:
+      - State::pure(42).run(s) は常に (42, s) を返す
+      - Reader::pure(42).run(r) は常に 42 を返す
+
+    purity: |
+      純粋性を維持すること:
+      - 副作用を導入しない
+      - Pure バリアントでの即時評価は純粋関数では問題なし
+      - 「計算」と「実行」の分離を維持
+
+    immutability: |
+      不変性を維持すること:
+      - Pure バリアントの値は不変
+      - Deferred バリアントの Rc は共有参照のみ
+      - 既存データを破壊的に変更しない
+
+# 将来の拡張
+future_extensions:
+  - id: EXT-RC-OPT-001
+    name: "StateT/ReaderT への Pure/Deferred パターン適用"
+    description: |
+      State/Reader の最適化効果が確認できた場合、
+      StateT/ReaderT にも同様のパターンを適用する。
+    rationale: |
+      モナドトランスフォーマーは構造が複雑であり、
+      まず基本型での効果を確認してから適用する。
+    priority: medium
+
+  - id: EXT-RC-OPT-002
+    name: "Writer モナドへの Pure/Deferred パターン適用"
+    description: |
+      Writer モナドにも Pure/Deferred パターンを適用可能か検討する。
+    rationale: |
+      Writer は出力の蓄積があるため、Pure バリアントの
+      適用可能性を慎重に検討する必要がある。
+    priority: low
+
+# 実装計画
+implementation_plan:
+  phases:
+    - phase: 1
+      name: "State モナドの Pure/Deferred パターン導入"
+      requirements:
+        - REQ-RC-OPT-001
+        - REQ-RC-OPT-003
+        - REQ-RC-OPT-004
+      estimated_effort: "2-3時間"
+      tasks:
+        - "State を enum に変更（#[non_exhaustive] 属性を付与）"
+        - "pure, new, run メソッドの更新"
+        - "fmap, flat_map, then メソッドの最適化"
+        - "get, put, modify メソッドの更新"
+        - "Clone 実装の更新"
+        - "既存テストの修正・追加"
+
+    - phase: 2
+      name: "Reader モナドの Pure/Deferred パターン導入"
+      requirements:
+        - REQ-RC-OPT-002
+        - REQ-RC-OPT-003
+        - REQ-RC-OPT-005
+      estimated_effort: "2-3時間"
+      tasks:
+        - "Reader を enum に変更（#[non_exhaustive] 属性を付与）"
+        - "pure, new, run メソッドの更新"
+        - "fmap, flat_map, then メソッドの最適化"
+        - "ask, asks, local メソッドの更新"
+        - "Clone 実装の更新"
+        - "既存テストの修正・追加"
+
+    - phase: 3
+      name: "モナド則テストとパフォーマンス検証"
+      requirements:
+        - REQ-RC-OPT-006
+        - REQ-RC-OPT-007
+      estimated_effort: "1-2時間"
+      tasks:
+        - "モナド則テストの拡充（Pure/Deferred 両方）"
+        - "ベンチマーク実行"
+        - "プロファイリング結果の分析"
+        - "ドキュメント更新"
+
+  total_estimated_effort: "5-8時間"
+
+  success_criteria:
+    primary:
+      - "全テストが通過すること"
+      - "Rc::drop_slow が 7% から 5% 以下に削減されること"
+    secondary:
+      - "モナド則が全て満たされること"
+      - "API 互換性が維持されること"
+    verification:
+      - "cargo test --all-features"
+      - "cargo bench"
+      - "プロファイリングによる Rc::drop_slow の削減確認"
+
+# 関連情報
+related:
+  issue_file: "docs/internal/issues/20260120_0905_rc_drop_slow_optimization.yaml"
+  github_issue:
+    number: 209
+    url: "https://github.com/lihs-ie/lambars/issues/209"
+  async_io_reference:
+    file: "src/effect/async_io.rs"
+    description: |
+      AsyncIO の Pure/Deferred パターンを参照実装として活用。
+      Pure バリアントで Box アロケーションをゼロにする設計を採用済み。
