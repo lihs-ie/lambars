@@ -56,7 +56,7 @@ jobs:
       - name: Install perf and flamegraph tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y linux-tools-common linux-tools-generic linux-tools-$(uname -r) || true
+          sudo apt-get install -y linux-tools-common linux-tools-generic linux-tools-$(uname -r) gawk || true
           # Allow perf for non-root users
           echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid
           echo '0' | sudo tee /proc/sys/kernel/kptr_restrict
@@ -93,7 +93,7 @@ jobs:
                     inferno-flamegraph > profiling-results/criterion/${bench}_flamegraph.svg 2>/dev/null || true
 
                   # Generate top functions summary (overhead by function)
-                  awk -F';' '{
+                  gawk -F';' '{
                     n=split($NF, parts, " ")
                     func=parts[1]
                     for(i=2; i<n; i++) func=func" "parts[i]
@@ -232,7 +232,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y wrk linux-tools-common linux-tools-generic || true
+          sudo apt-get install -y wrk linux-tools-common linux-tools-generic gawk || true
           # Install inferno for flamegraph generation
           cargo install inferno
 
@@ -303,7 +303,7 @@ jobs:
                 cat stacks.folded | inferno-flamegraph --reverse > flamegraph-reverse.svg 2>/dev/null || true
 
                 # Generate top functions summary (overhead by function)
-                awk -F';' '{
+                gawk -F';' '{
                   n=split($NF, parts, " ")
                   func=parts[1]
                   for(i=2; i<n; i++) func=func" "parts[i]
