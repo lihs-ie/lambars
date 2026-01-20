@@ -1,0 +1,145 @@
+# Issue: Freer モナド系が map/flat_map/lift_instruction で大幅退行
+# プロファイリング結果に基づくゼロアロケ状態機械化
+# 作成: 2026-01-20
+
+deferred_features:
+  - id: freer_monad_regression
+    name: "Freer モナド実行系の高速化"
+    discovered_date: "2026-01-20"
+    priority: high
+    category: performance
+    labels:
+      - "performance"
+      - "functional"
+      - "priority: high"
+
+    problem:
+      summary: "map/flat_map/lift_instruction が 4-15x 以上退行し、深いケースで秒オーダー"
+      details: |
+        ベンチ (freer_bench_result.txt):
+        - freer_map_*: +441-531% 退行
+        - freer_flat_map_*: +70-950% 退行
+        - lift_instruction: +810% 退行
+        - interpret_single_instruction: +243% 退行
+        - deep_flat_map_with_instructions/1000: ~6.7s
+
+        短いチェーンでも ns → 数 ns、長いチェーンでは µs → 秒に膨張。
+
+      rust_limitation: |
+        - Bind 連鎖を Box/trait object で蓄積し、インタープリタがヒープ依存
+        - Pure ケースでも Box 経路を通り、inlining を阻害
+        - 深さ対策の trampolining がヒープ allocate を伴い、計算と実行が分離できていない
+
+    solution:
+      approach: "Freer を非再帰 state machine + SmallVec accumulation に再設計し、Pure/Map をゼロアロケ化"
+
+      algorithm:
+        name: "Stacked Freer Interpreter"
+        description: |
+          - Freer<F, A> を enum { Pure(A), Suspend(F), Bind(Inner, Cont) } から、
+            `struct Prog<F, A> { stack: SmallVec<Op<F>>, result: Option<A> }` に変換
+          - Bind は SmallVec<Cont> に積み、ループで解釈 (再帰禁止)
+          - Pure/Map は専用バリアントで inlined し、Box/trait object を排除
+        implementation_strategies:
+          - name: "構造の刷新"
+            description: |
+              - SmallVec<[Cont<F, _>; 8]> を既定にし、深い場合のみ Box に逃がす
+              - Cont は fn(X)->Prog<F, A> を enum で保持し、vtable を排除
+          - name: "Interpreter のループ化"
+            description: |
+              - while let Some(op) = stack.pop() { ... } で評価し、tail を潰す
+              - trampolining を不要にし、alloc と再帰を除去
+          - name: "Pure/Map fast-path"
+            description: |
+              - Pure/Map はその場で値を書き換え、Bind stack を触らない
+              - 小さな map は #[inline(always)] で inlined
+          - name: "Arena (bumpalo) オプション"
+            description: |
+              - 必要に応じて Arena バックエンドを feature で用意し、長いプログラムでも一括解放
+
+        performance_characteristics:
+          - "map/flat_map/lift_instruction を 元の ns オーダーに回復 (3-10x 改善)"
+          - "deep_flat_map_with_instructions/1000 を 秒 → <1ms 目標"
+          - "alloc をほぼゼロまたは arena のみで集約"
+
+      options:
+        - name: "SmallVec ベース state machine (推奨)"
+          pros:
+            - "最速かつ GC 無し"
+          cons:
+            - "SmallVec しきい値の調整が必要"
+        - name: "Arena バックエンド"
+          pros:
+            - "長大チェーンでも安定"
+          cons:
+            - "arena ライフタイム管理が必要"
+
+      recommended: "SmallVec state machine + optional arena"
+      estimated_complexity: medium
+      breaking_changes:
+        api_compatibility: true  # 型は維持、内部表現のみ変更
+        internal_implementation: true
+        behavioral_changes: false
+        details: |
+          - 表示やデバッグ出力が簡素化される可能性はある
+
+    implementation_phases:
+      - phase: 1
+        name: "State machine 基盤"
+        tasks:
+          - "Freer 構造を SmallVec stack ベースに再実装"
+          - "Bind/Map/Pure の fast-path を実装"
+        expected_improvement: "短いチェーン 3-5x"
+        estimated_effort: "1-2日"
+      - phase: 2
+        name: "Interpreter ループ化と trampolining 除去"
+        tasks:
+          - "再帰を排し while ループで解釈"
+          - "深さベンチ (100/1000) を再計測"
+        expected_improvement: "深いチェーンを秒→ms"
+        estimated_effort: "1日"
+      - phase: 3
+        name: "Arena オプションとテスト"
+        tasks:
+          - "feature=bump_freer で arena バックエンドを追加"
+          - "深さ 10k の stack safety ベンチを追加"
+        expected_improvement: "極端な深さでも安定"
+        estimated_effort: "1日"
+
+    success_metrics:
+      - metric: "freer_map/map_pure"
+        current: "+441-531%"
+        target: "元の ns 近傍 (退行解消)"
+      - metric: "freer_flat_map/flat_map_chain/10"
+        current: "+70-950%"
+        target: "元の ns 近傍"
+      - metric: "freer_lift_instruction/single_instruction"
+        current: "+810%"
+        target: "元の ns 近傍"
+      - metric: "deep_flat_map_with_instructions/1000"
+        current: "~6.7s"
+        target: "<=1ms"
+
+    references:
+      - name: "freer_bench_result.txt"
+        url: "repo:freer_bench_result.txt"
+        description: "各退行の詳細数値を参照"
+
+    target_files:
+      - path: "src/effect/freer.rs"
+        action: "大幅更新"
+        description: "state machine 化, SmallVec stack, arena オプション"
+      - path: "benches/freer_bench.rs"
+        action: "更新"
+        description: "退行ベンチ再計測"
+
+    related:
+      requirement_id: null
+      plan_id: null
+      related_issues:
+        - "AsyncIO/トランポリン系との整合性確認"
+
+    github_issue:
+      number: 226
+      url: "https://github.com/lihs-ie/lambars/issues/226"
+      created: true
