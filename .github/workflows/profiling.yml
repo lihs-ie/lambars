@@ -81,11 +81,30 @@ jobs:
               sudo perf record -F 99 -g -o profiling-results/criterion/${bench}.perf.data \
                 "$BENCH_BIN" --bench --profile-time 5 2>&1 | tee profiling-results/criterion/${bench}.log || true
 
-              # Generate flamegraph if perf data exists
+              # Generate flamegraph and text analysis if perf data exists
               if [ -f "profiling-results/criterion/${bench}.perf.data" ]; then
+                # Generate folded stacks (intermediate format for analysis)
                 sudo perf script -i profiling-results/criterion/${bench}.perf.data 2>/dev/null | \
-                  inferno-collapse-perf 2>/dev/null | \
-                  inferno-flamegraph > profiling-results/criterion/${bench}_flamegraph.svg 2>/dev/null || true
+                  inferno-collapse-perf 2>/dev/null > profiling-results/criterion/${bench}.folded || true
+
+                # Generate flamegraph from folded stacks
+                if [ -f "profiling-results/criterion/${bench}.folded" ]; then
+                  cat profiling-results/criterion/${bench}.folded | \
+                    inferno-flamegraph > profiling-results/criterion/${bench}_flamegraph.svg 2>/dev/null || true
+
+                  # Generate top functions summary (overhead by function)
+                  awk -F';' '{
+                    n=split($NF, parts, " ")
+                    func=parts[1]
+                    for(i=2; i<n; i++) func=func" "parts[i]
+                    samples=parts[n]
+                    sum[func]+=samples
+                    total+=samples
+                  } END {
+                    for(f in sum) printf "%d %s\n", sum[f], f
+                  }' profiling-results/criterion/${bench}.folded | \
+                    sort -rn | head -50 > profiling-results/criterion/${bench}_top_functions.txt || true
+                fi
 
                 # Cleanup large perf data
                 rm -f profiling-results/criterion/${bench}.perf.data
@@ -273,14 +292,31 @@ jobs:
             sudo perf script -i perf.data > perf.script 2>/dev/null || true
 
             if [ -f "perf.script" ]; then
-              cat perf.script | inferno-collapse-perf > perf.folded 2>/dev/null || true
-              cat perf.folded | inferno-flamegraph > flamegraph.svg 2>/dev/null || true
+              # Generate folded stacks (keep for analysis)
+              cat perf.script | inferno-collapse-perf > stacks.folded 2>/dev/null || true
 
-              # Generate reverse flamegraph (icicle graph)
-              cat perf.folded | inferno-flamegraph --reverse > flamegraph-reverse.svg 2>/dev/null || true
+              if [ -f "stacks.folded" ]; then
+                # Generate flamegraph
+                cat stacks.folded | inferno-flamegraph > flamegraph.svg 2>/dev/null || true
 
-              # Cleanup large intermediate files
-              rm -f perf.data perf.script perf.folded 2>/dev/null || true
+                # Generate reverse flamegraph (icicle graph)
+                cat stacks.folded | inferno-flamegraph --reverse > flamegraph-reverse.svg 2>/dev/null || true
+
+                # Generate top functions summary (overhead by function)
+                awk -F';' '{
+                  n=split($NF, parts, " ")
+                  func=parts[1]
+                  for(i=2; i<n; i++) func=func" "parts[i]
+                  samples=parts[n]
+                  sum[func]+=samples
+                  total+=samples
+                } END {
+                  for(f in sum) printf "%d %s\n", sum[f], f
+                }' stacks.folded | sort -rn | head -50 > top_functions.txt || true
+              fi
+
+              # Cleanup large intermediate files (keep folded for analysis)
+              rm -f perf.data perf.script 2>/dev/null || true
             fi
           fi
 
