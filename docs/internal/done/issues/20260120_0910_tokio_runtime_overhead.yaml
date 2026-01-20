@@ -1,0 +1,86 @@
+# Issue: Tokioランタイムオーバーヘッドの最適化
+# プロファイリング結果から特定されたパフォーマンスボトルネック
+
+deferred_features:
+  - id: tokio_runtime_overhead_optimization
+    name: "Tokioランタイムオーバーヘッドの最適化"
+    discovered_date: "2026-01-20"
+    priority: medium
+    category: enhancement
+    labels:
+      - "performance"
+      - "effect-system"
+      - "async"
+
+    problem:
+      summary: "AsyncIOベンチマークでTokioランタイムのオーバーヘッドが約6%を占める"
+      details: |
+        プロファイリング結果（GitHub Actions run #21154282399）の分析により、
+        AsyncIOベンチマークでTokioランタイムのコンテキスト切り替えが
+        大きなオーバーヘッドになっていることが判明。
+
+        ## Effect Benchmark (195B samples)
+        - `Runtime::block_on`: 2.31%
+        - `context::set_current`: 2.05%
+        - `SetCurrentGuard::drop`: 1.58%
+        - 合計: 約6%
+
+        ## 関連する関数
+        - `AsyncIO<A>::run_async` クロージャ: 3.15%
+        - `tokio::runtime::park::wake`: 2.11%
+        - `tokio::util::rand::rt::RngSeedGenerator::next_seed`: 1.34%
+
+        ## 原因
+        `Runtime::block_on` が呼ばれる度に以下の処理が実行される：
+        1. コンテキストの設定 (set_current)
+        2. ガードの生成 (SetCurrentGuard)
+        3. 処理完了後のガード破棄とコンテキスト復元
+
+    solution:
+      approach: "Runtime::block_on の呼び出し回数削減"
+      options:
+        - name: "バッチ実行"
+          description: |
+            複数のAsyncIO操作をバッチ化して1回のblock_onで実行
+          pros:
+            - コンテキスト切り替え回数を大幅に削減
+            - 既存APIとの互換性を維持可能
+          cons:
+            - 実装が複雑
+            - 一部のユースケースで適用困難
+
+        - name: "enterガード再利用"
+          description: |
+            Runtime::enter() でガードを取得し、複数の操作で再利用
+          pros:
+            - 比較的シンプルな実装
+            - 効果が明確
+          cons:
+            - API変更が必要な可能性
+            - スコープ管理が複雑
+
+        - name: "完全非同期モデル"
+          description: |
+            block_onを使わず、完全に非同期な実行モデルに移行
+          pros:
+            - 最も効率的
+            - Rustの非同期エコシステムと親和性が高い
+          cons:
+            - 大規模なAPI変更が必要
+            - 同期コードとの統合が困難
+
+      recommended: "バッチ実行"
+      estimated_complexity: high
+
+    references:
+      - "https://github.com/lihs-ie/lambars/actions/runs/21154282399"
+      - "https://docs.rs/tokio/latest/tokio/runtime/struct.Runtime.html"
+
+    related:
+      requirement_id: null
+      plan_id: null
+
+    github_issue:
+      number: 210
+      url: "https://github.com/lihs-ie/lambars/issues/210"
+      created: true
