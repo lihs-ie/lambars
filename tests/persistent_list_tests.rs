@@ -490,13 +490,12 @@ fn test_reverse_single_element() {
 // =============================================================================
 
 #[rstest]
-fn test_iter_size_hint_returns_unknown() {
+fn test_iter_size_hint_returns_accurate_count() {
     let list: PersistentList<i32> = (1..=5).collect();
     let iter = list.iter();
     let (lower, upper) = iter.size_hint();
-    // size_hint returns (0, None) for the reference iterator
-    assert_eq!(lower, 0);
-    assert!(upper.is_none());
+    assert_eq!(lower, 5);
+    assert_eq!(upper, Some(5));
 }
 
 #[rstest]

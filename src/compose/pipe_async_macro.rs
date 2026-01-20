@@ -713,9 +713,17 @@ mod tests {
         // Laziness Tests with New Syntax
         // =====================================================================
 
+        /// Tests that fmap on Pure values applies the function immediately (eager evaluation).
+        ///
+        /// This is an intentional optimization: since fmap expects pure functions,
+        /// the evaluation timing is not observable in terms of the result value
+        /// (referential transparency). For Pure values, we apply the function
+        /// immediately to avoid Box allocation.
+        ///
+        /// If lazy evaluation is needed (e.g., for side effects), use `flat_map` instead.
         #[rstest]
         #[tokio::test]
-        async fn test_pipe_async_comma_preserves_lazy_execution() {
+        async fn test_pipe_async_comma_pure_value_eager_evaluation() {
             use std::sync::Arc;
             use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -727,11 +735,45 @@ mod tests {
                 x * 2
             });
 
-            // Not executed yet
-            assert!(!executed.load(Ordering::SeqCst));
+            assert!(executed.load(Ordering::SeqCst));
 
             let result = async_io.run_async().await;
-            assert!(executed.load(Ordering::SeqCst));
+            assert_eq!(result, 84);
+        }
+
+        /// Tests that fmap on Deferred values maintains lazy evaluation.
+        ///
+        /// When starting from a Deferred value (created by `AsyncIO::new`),
+        /// the transformation function is not executed until `run_async()` is called.
+        #[rstest]
+        #[tokio::test]
+        async fn test_pipe_async_deferred_preserves_lazy_execution() {
+            use std::sync::Arc;
+            use std::sync::atomic::{AtomicBool, Ordering};
+
+            let thunk_executed = Arc::new(AtomicBool::new(false));
+            let function_executed = Arc::new(AtomicBool::new(false));
+            let thunk_executed_clone = thunk_executed.clone();
+            let function_executed_clone = function_executed.clone();
+
+            let async_io = AsyncIO::new(move || {
+                let flag = thunk_executed_clone;
+                async move {
+                    flag.store(true, Ordering::SeqCst);
+                    42
+                }
+            })
+            .fmap(move |x| {
+                function_executed_clone.store(true, Ordering::SeqCst);
+                x * 2
+            });
+
+            assert!(!thunk_executed.load(Ordering::SeqCst));
+            assert!(!function_executed.load(Ordering::SeqCst));
+
+            let result = async_io.run_async().await;
+            assert!(thunk_executed.load(Ordering::SeqCst));
+            assert!(function_executed.load(Ordering::SeqCst));
             assert_eq!(result, 84);
         }
     }

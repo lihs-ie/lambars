@@ -269,21 +269,45 @@ impl<A: 'static> AsyncIO<A> {
 // =============================================================================
 
 impl<A: Send + 'static> AsyncIO<A> {
-    /// Transforms the result of an `AsyncIO` action using a function.
+    /// Transforms the result of an `AsyncIO` action using a pure function.
     ///
     /// This is the `fmap` operation from Functor.
     ///
-    /// Note: To maintain lazy evaluation semantics, even `Pure` values are
-    /// wrapped in `Deferred`. The function is not applied until `run_async`
-    /// is called.
+    /// # Pure Function Requirement
+    ///
+    /// **Important**: The function passed to `fmap` must be a pure function
+    /// (no side effects). This is a fundamental assumption in functional
+    /// programming that enables this optimization.
+    ///
+    /// For `Pure` values, the function is applied immediately (eager evaluation)
+    /// as an optimization to avoid Box allocation. Since the function is pure,
+    /// this evaluation timing difference is not observable in terms of the
+    /// result value (referential transparency).
+    ///
+    /// For `Deferred` values, the function is applied when `run_async` is called.
+    ///
+    /// # When to Use `flat_map` Instead
+    ///
+    /// If your function:
+    /// - Performs I/O operations
+    /// - Logs output
+    /// - Modifies external state
+    /// - Depends on current time or random values
+    /// - May panic
+    /// - Has high computational cost and you want to defer it
+    ///
+    /// Use `flat_map` instead, which maintains lazy evaluation semantics:
+    /// ```rust,ignore
+    /// async_io.flat_map(|x| AsyncIO::new(|| async move { side_effect(x) }))
+    /// ```
     ///
     /// # Arguments
     ///
-    /// * `function` - A function to apply to the result.
+    /// * `function` - A pure function to apply to the result.
     ///
     /// # Type Parameters
     ///
-    /// * `B` - The return type of the function.
+    /// * `B` - The return type of the function. Must be `Send + 'static`.
     /// * `F` - The type of the function.
     ///
     /// # Examples
@@ -298,13 +322,10 @@ impl<A: Send + 'static> AsyncIO<A> {
     pub fn fmap<B, F>(self, function: F) -> AsyncIO<B>
     where
         F: FnOnce(A) -> B + Send + 'static,
-        B: 'static,
+        B: Send + 'static,
     {
         match self {
-            Self::Pure(value) => {
-                // Maintain lazy evaluation - wrap in Deferred
-                AsyncIO::Deferred(Box::new(move || Box::pin(async move { function(value) })))
-            }
+            Self::Pure(value) => AsyncIO::Pure(function(value)),
             Self::Deferred(thunk) => AsyncIO::Deferred(Box::new(move || {
                 Box::pin(async move { function(thunk().await) })
             })),
@@ -2291,6 +2312,90 @@ mod tests {
             let result = combined.run_async().await;
             assert_eq!(counter.load(Ordering::SeqCst), 2);
             assert_eq!(result, 30);
+        }
+
+        // =====================================================================
+        // Pure->Pure Optimization Tests
+        // =====================================================================
+
+        #[rstest]
+        #[tokio::test]
+        async fn asyncio_fmap_pure_to_pure_optimization_returns_pure_variant() {
+            // Pure(21).fmap(|x| x * 2) should return Pure(42), not Deferred
+            let async_io = AsyncIO::pure(21);
+            let mapped = async_io.fmap(|x| x * 2);
+
+            // Verify the result is correct
+            let result = mapped.run_async().await;
+            assert_eq!(result, 42);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn asyncio_fmap_pure_to_pure_function_applied_immediately() {
+            use std::sync::Arc;
+            use std::sync::atomic::{AtomicBool, Ordering};
+
+            // Test that Pure value fmap applies function immediately (eager evaluation)
+            let function_called = Arc::new(AtomicBool::new(false));
+            let function_called_clone = function_called.clone();
+
+            let async_io = AsyncIO::pure(21);
+            let _mapped = async_io.fmap(move |x| {
+                function_called_clone.store(true, Ordering::SeqCst);
+                x * 2
+            });
+
+            // With Pure->Pure optimization, function should be called immediately
+            assert!(function_called.load(Ordering::SeqCst));
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn asyncio_fmap_deferred_remains_lazy() {
+            use std::sync::Arc;
+            use std::sync::atomic::{AtomicBool, Ordering};
+
+            // Test that Deferred values still use lazy evaluation
+            let thunk_executed = Arc::new(AtomicBool::new(false));
+            let function_called = Arc::new(AtomicBool::new(false));
+            let thunk_executed_clone = thunk_executed.clone();
+            let function_called_clone = function_called.clone();
+
+            let async_io = AsyncIO::new(move || {
+                let flag = thunk_executed_clone;
+                async move {
+                    flag.store(true, Ordering::SeqCst);
+                    21
+                }
+            });
+            let mapped = async_io.fmap(move |x| {
+                function_called_clone.store(true, Ordering::SeqCst);
+                x * 2
+            });
+
+            // Neither thunk nor function should be executed yet
+            assert!(!thunk_executed.load(Ordering::SeqCst));
+            assert!(!function_called.load(Ordering::SeqCst));
+
+            // Execute and verify result
+            let result = mapped.run_async().await;
+            assert_eq!(result, 42);
+            assert!(thunk_executed.load(Ordering::SeqCst));
+            assert!(function_called.load(Ordering::SeqCst));
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn asyncio_fmap_pure_chain_optimization() {
+            // Multiple fmap on Pure should all be applied eagerly
+            let result = AsyncIO::pure(1)
+                .fmap(|x| x + 1) // Pure(2)
+                .fmap(|x| x * 2) // Pure(4)
+                .fmap(|x| x + 10) // Pure(14)
+                .run_async()
+                .await;
+            assert_eq!(result, 14);
         }
     }
 
