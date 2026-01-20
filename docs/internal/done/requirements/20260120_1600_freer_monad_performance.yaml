@@ -1,0 +1,1141 @@
+# Freer モナド実行系の高速化 要件定義
+#
+# 概要:
+#   Freer モナドの map/flat_map/lift_instruction/interpret の性能退行を解消し、
+#   深いチェーンでも実用的な性能を実現する。
+#
+# 設計方針（Issue #226 に準拠）:
+#   1. SmallVec ベースの state machine 化（中核）
+#   2. Interpreter のループ化（再帰排除）
+#   3. Pure/Map fast-path
+#   4. Arena はオプション（feature フラグ）
+#
+# 参照:
+#   - GitHub Issue #226: Freer モナド実行系の高速化
+#   - docs/internal/issues/20260120_1606_freer_monad.yaml
+
+version: "11.0.0"
+name: "Freer モナド実行系の高速化"
+description: |
+  Freer モナドの map/flat_map/lift_instruction が **4-15倍以上退行** し、
+  深いケースで秒オーダーに膨張している問題を解決する。
+
+  ## 現状のベースライン（実測値）
+
+  **根拠**: freer_bench_result.txt（Before/After 比較）
+
+  ### 短いチェーン（退行）
+  ※ Before: 行1-206、After: 行209-512
+
+  - freer_map/map_pure: 562ps → 3.77ns (+441-531%) [行16, 236]
+  - freer_flat_map/flat_map_pure_to_pure: 552ps → 5.68ns (+853-950%) [行33, 257]
+  - freer_lift_instruction/single_instruction: 4.0ns → 36.8ns (+810%) [行8, 219]
+  - freer_interpret/interpret_single_instruction: 17ns → 60.5ns (+243%) [行79, 317]
+
+  ### 深いチェーン（最重要）
+  - deep_flat_map_with_instructions/1000: **6.7s** [行119]
+
+  **注**: 行371-376 に 149ms の記録があるが、これは暫定改善後の After 計測値。
+
+  ## 問題の根本原因（Issue より）
+
+  1. **Bind 連鎖の Box/trait object 蓄積**: インタープリタがヒープ依存
+  2. **Pure ケースでも Box 経路**: inlining 阻害
+  3. **trampolining のヒープ allocate**: 計算と実行が分離できていない
+
+  ## 解決策（Issue に準拠）
+
+  **「SmallVec ベースの state machine + 非再帰 Interpreter」** を中核とする。
+  Arena はオプション（feature フラグ）で提供。
+
+# 設計原則
+design_principles:
+  issue_alignment:
+    description: |
+      ## Issue #226 との整合性
+
+      Issue の主眼: "Freer を非再帰 state machine + SmallVec accumulation に再設計し、
+      Pure/Map をゼロアロケ化"
+
+      以下の優先順位で実装する:
+      1. SmallVec ベースの state machine（必須・中核）
+      2. Interpreter のループ化（必須・中核）
+      3. Pure/Map fast-path（必須）
+      4. Arena オプション（オプション・feature フラグ）
+
+  functional_programming_preservation:
+    description: |
+      ## 関数型プログラミングの原則維持
+
+      1. **参照透過性**: 同じ入力に対して常に同じ出力
+      2. **純粋関数**: map, flat_map, pure は副作用なし
+      3. **不変性**: Freer<I, A> は不変
+      4. **Monad 則**: Left Identity, Right Identity, Associativity
+
+  api_compatibility:
+    description: |
+      ## API 互換性の維持
+
+      公開 API は変更しない。内部実装のみの変更。
+      ただし ContinuationQueue は pub(crate) に変更可能（#[doc(hidden)] 付き）。
+      interpret_with_arena を新規追加（feature フラグ）。
+
+# 要件一覧
+requirements:
+  # ============================================================================
+  # 1. SmallVec ベースの state machine（中核・必須）
+  # ============================================================================
+  - id: smallvec_state_machine
+    name: "SmallVec ベースの state machine"
+    priority: critical
+    description: |
+      Issue の中核方針: Freer を SmallVec stack ベースの state machine に再設計する。
+
+      **設計**:
+      - SmallVec<[Cont; 8]> を既定とし、深い場合のみヒープに逃がす
+      - Cont は fn(X)->Freer<I, Y> を enum で保持し、vtable を排除
+      - Bind は SmallVec に積み、ループで解釈
+
+    implementation:
+      description: |
+        ```rust
+        use smallvec::SmallVec;
+
+        /// 継続のスタック（SmallVec ベース）
+        ///
+        /// 8 要素までは inline で格納し、ヒープアロケーションを回避。
+        /// 深いチェーンの場合のみヒープに逃がす。
+        pub(crate) struct ContinuationStack<I> {
+            stack: SmallVec<[TypeErasedCont<I>; 8]>,
+        }
+
+        /// 型消去された継続
+        ///
+        /// vtable を排除するため、fn ポインタ + 環境ポインタで表現。
+        ///
+        /// ## 安全性不変条件
+        ///
+        /// 1. `env_ptr` は Some の場合、`apply_fn` と `drop_fn` が期待する型の有効なポインタ
+        /// 2. `apply` は一度だけ呼び出し可能（呼び出し後は `env_ptr` が None になる）
+        /// 3. `apply` されなかった場合は `Drop` で `drop_fn` + `dealloc` を呼び出す
+        ///
+        /// ## 解放責務
+        ///
+        /// - **apply 経路**: `apply_fn` 内で環境を read し、`apply_fn` 内で dealloc する
+        /// - **drop 経路**: `Drop::drop` で `drop_fn` + `dealloc` を呼び出す
+        /// - **二重解放防止**: `apply` 後は `env_ptr` を None にして Drop では何もしない
+        struct TypeErasedCont<I> {
+            apply_fn: unsafe fn(NonNull<u8>, ErasedValue) -> Freer<I, ErasedValue>,
+            drop_fn: unsafe fn(NonNull<u8>),
+            /// 環境ポインタ（apply 後は None）
+            /// NonNull を使用して null 安全性を保証（ZST も安全に扱える）
+            env_ptr: Option<NonNull<u8>>,
+            env_layout: Layout,
+        }
+
+        impl<I> TypeErasedCont<I> {
+            /// 継続を適用（環境を消費、self を消費して二重呼び出しを防止）
+            ///
+            /// **注**: self を消費するため、二重呼び出しは型システムで防止される
+            ///
+            /// ## 戻り値
+            ///
+            /// - `Ok(Freer<I, ErasedValue>)`: 正常に継続を適用
+            /// - `Err(InterpretError::TypeMismatch)`: 継続内で型不一致が発生
+            #[inline]
+            fn apply(mut self, input: ErasedValue) -> Result<Freer<I, ErasedValue>, InterpretError> {
+                // env_ptr を取り出し、None に設定（Drop での解放を防止）
+                // 型システムにより apply は 1 回だけ呼び出される（self 消費）
+                // 構築時に env_ptr は必ず Some なので、ここでの None は内部バグ
+                let env_ptr = match self.env_ptr.take() {
+                    Some(ptr) => ptr,
+                    None => {
+                        // 内部バグ: env_ptr が None になることはない
+                        // debug_assert で開発時に検出し、リリースでは安全なエラーを返す
+                        debug_assert!(false, "Internal error: env_ptr is None");
+                        // リリースビルドではメモリリークを避けるため、
+                        // 継続を適用せずにエラーを返す
+                        return Err(InterpretError::TypeMismatch {
+                            expected: TypeId::of::<()>(),
+                            actual: TypeId::of::<()>(),
+                        });
+                    }
+                };
+
+                let apply_fn = self.apply_fn;
+
+                // Drop を呼ばないようにする（apply_fn 内で解放される）
+                std::mem::forget(self);
+
+                // SAFETY: env_ptr は有効なポインタ（不変条件による）
+                // 解放責務は apply_fn 内にある
+                Ok(unsafe { apply_fn(env_ptr, input) })
+            }
+        }
+
+        impl<I> Drop for TypeErasedCont<I> {
+            fn drop(&mut self) {
+                // apply で消費済みの場合は何もしない
+                let Some(env_ptr) = self.env_ptr.take() else {
+                    return;
+                };
+                // SAFETY: env_ptr は有効なポインタ
+                unsafe {
+                    (self.drop_fn)(env_ptr);
+                    if self.env_layout.size() > 0 {
+                        std::alloc::dealloc(env_ptr.as_ptr(), self.env_layout);
+                    }
+                }
+            }
+        }
+
+        impl<I> ContinuationStack<I> {
+            #[inline]
+            fn new() -> Self {
+                Self {
+                    stack: SmallVec::new(),
+                }
+            }
+
+            #[inline]
+            fn push(&mut self, cont: TypeErasedCont<I>) {
+                self.stack.push(cont);
+            }
+
+            #[inline]
+            fn pop(&mut self) -> Option<TypeErasedCont<I>> {
+                self.stack.pop()
+            }
+
+            #[inline]
+            fn is_empty(&self) -> bool {
+                self.stack.is_empty()
+            }
+
+            /// ContinuationQueue から継続を移動（FIFO 順序維持）
+            ///
+            /// ## FIFO 順序維持のアルゴリズム
+            ///
+            /// ContinuationQueue は FIFO（先入れ先出し）:
+            /// ```text
+            /// Queue: [f1, f2, f3] → pop: f1, f2, f3 の順
+            /// ```
+            ///
+            /// ContinuationStack は LIFO（後入れ先出し）:
+            /// ```text
+            /// Stack: [f1, f2, f3] → pop: f3, f2, f1 の順
+            /// ```
+            ///
+            /// FIFO 順序を維持するため、Queue の要素を**逆順**で Stack に push:
+            /// ```text
+            /// Queue: [f1, f2, f3]
+            /// 逆順: [f3, f2, f1]
+            /// Stack push: f3, f2, f1
+            /// Stack: [f3, f2, f1]
+            /// Stack pop: f1, f2, f3 → FIFO 順序維持 ✓
+            /// ```
+            #[inline]
+            fn extend_from_queue(&mut self, queue: ContinuationQueue<I>) {
+                // Queue から Vec に変換し、逆順でイテレート
+                let continuations: Vec<_> = queue.into_iter().collect();
+                for cont in continuations.into_iter().rev() {
+                    self.push(cont);
+                }
+            }
+        }
+        ```
+
+    rationale: |
+      ## 設計根拠（Issue より）
+
+      1. **SmallVec による inline 格納**:
+         - 短いチェーン（8 要素以下）はヒープアロケーションなし
+         - 深いチェーンでもヒープへの逃避は一度だけ
+
+      2. **vtable 排除**:
+         - fn ポインタ + 環境ポインタで trait object を排除
+         - 直接呼び出しで dispatch コスト削減
+
+    tests:
+      - category: "ContinuationStack テスト"
+        cases:
+          - name: "8 要素以下は inline"
+            test: |
+              let mut stack = ContinuationStack::new();
+              for _ in 0..8 {
+                  stack.push(make_cont(|x| Freer::pure(x)));
+              }
+              // SmallVec は 8 要素まで inline
+
+          - name: "9 要素以上はヒープ"
+            test: |
+              let mut stack = ContinuationStack::new();
+              for _ in 0..9 {
+                  stack.push(make_cont(|x| Freer::pure(x)));
+              }
+              // SmallVec は 9 要素以上でヒープ
+
+  # ============================================================================
+  # 2. Interpreter のループ化（中核・必須）
+  # ============================================================================
+  - id: interpreter_loop
+    name: "Interpreter のループ化"
+    priority: critical
+    description: |
+      Issue の中核方針: 再帰を排し while ループで解釈する。
+
+      **設計**:
+      - while let Some(op) = stack.pop() { ... } で評価
+      - trampolining を不要にし、alloc と再帰を除去
+
+    implementation:
+      description: |
+        ```rust
+        /// interpret のエラー型
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub enum InterpretError {
+            /// Handler が期待と異なる型を返した
+            TypeMismatch {
+                expected: TypeId,
+                actual: TypeId,
+            },
+        }
+
+        impl<I: 'static, A: 'static> Freer<I, A> {
+            /// interpret を非再帰ループで実装
+            ///
+            /// **重要**: 再帰を使わず、ContinuationStack をループで処理する。
+            /// これにより深い flat_map チェーンでもスタックオーバーフローしない。
+            ///
+            /// ## Handler の型
+            ///
+            /// - 公開 API: `Handler: FnMut(I) -> ErasedValue`（推奨、高性能）
+            /// - 後方互換: `interpret_boxed` で `Box<dyn Any>` を受け付ける
+            ///
+            /// ## 型安全性
+            ///
+            /// downcast で型チェックを行い、失敗時は `InterpretError::TypeMismatch` を返す。
+            /// Handler が正しい型を返す限り、常に Ok(A) を返す。
+            /// panic は使用しない（関数型プログラミングの原則）。
+            ///
+            /// ## 戻り値
+            ///
+            /// - `Ok(A)`: 正常終了
+            /// - `Err(InterpretError::TypeMismatch)`: Handler が不正な型を返した
+            pub fn interpret<Handler>(self, mut handler: Handler) -> Result<A, InterpretError>
+            where
+                Handler: FnMut(I) -> ErasedValue,
+            {
+                let mut current: Freer<I, ErasedValue> = self.erase_result_type();
+                let mut stack = ContinuationStack::new();
+
+                loop {
+                    match current {
+                        Freer::Pure(value) => {
+                            // スタックから継続を pop して適用
+                            match stack.pop() {
+                                Some(cont) => {
+                                    current = cont.apply(value)?;
+                                }
+                                None => {
+                                    // スタックが空 = 完了
+                                    return value.downcast::<A>().map_err(|v| {
+                                        InterpretError::TypeMismatch {
+                                            expected: TypeId::of::<A>(),
+                                            actual: v.type_id(),
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                        Freer::Impure { instruction, continuation_queue, .. } => {
+                            // ハンドラで命令を処理
+                            let result = handler(instruction);
+
+                            // 継続キューをスタックに移動（FIFO 順序維持のため逆順 push）
+                            stack.extend_from_queue(continuation_queue);
+
+                            // 最初の継続を適用
+                            match stack.pop() {
+                                Some(cont) => {
+                                    current = cont.apply(result)?;
+                                }
+                                None => {
+                                    // 継続がない場合
+                                    return result.downcast::<A>().map_err(|v| {
+                                        InterpretError::TypeMismatch {
+                                            expected: TypeId::of::<A>(),
+                                            actual: v.type_id(),
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            /// 後方互換: Box<dyn Any> を受け付ける interpret
+            pub fn interpret_boxed<Handler>(self, mut handler: Handler) -> Result<A, InterpretError>
+            where
+                Handler: FnMut(I) -> Box<dyn Any>,
+            {
+                // Box<dyn Any> を ErasedValue に変換するラッパー
+                // 注: 変換コストがかかるため、高性能が必要な場合は interpret を使用
+                self.interpret(move |instruction| {
+                    ErasedValue::from_box_any(handler(instruction))
+                })
+            }
+        }
+        ```
+
+    rationale: |
+      ## 設計根拠（Issue より）
+
+      1. **再帰排除**:
+         - 深さ 10,000 以上でもスタックオーバーフローしない
+         - trampolining による間接コストを排除
+
+      2. **ループによる評価**:
+         - 継続スタックを明示的に管理
+         - while ループで tail call を模倣
+
+    tests:
+      - category: "Interpreter ループテスト"
+        cases:
+          - name: "深い flat_map チェーン"
+            test: |
+              let program = (0..10000).fold(Freer::pure(0i32), |acc, _| {
+                  acc.flat_map(|x| Freer::pure(x + 1))
+              });
+              let result = program.interpret(|_| ErasedValue::new(()));
+              assert_eq!(result, Ok(10000));
+
+          - name: "型不一致時のエラー"
+            test: |
+              // Handler が誤った型を返した場合
+              let program: Freer<i32, String> = Freer::lift_instruction(42);
+              let result = program.interpret(|_| ErasedValue::new(123i32)); // i32 を返す（String ではない）
+              assert!(matches!(result, Err(InterpretError::TypeMismatch { .. })));
+
+  # ============================================================================
+  # 3. Pure/Map fast-path（必須）
+  # ============================================================================
+  - id: pure_map_fast_path
+    name: "Pure/Map fast-path"
+    priority: critical
+    description: |
+      Issue の方針: Pure/Map はその場で値を書き換え、Bind stack を触らない。
+
+      **設計**:
+      - Pure は即座に値を返す（継続スタック不要）
+      - Map は専用の軽量継続で処理
+      - 小さな map は #[inline(always)] で inlined
+
+    implementation:
+      description: |
+        ```rust
+        impl<I: 'static, A: 'static> Freer<I, A> {
+            /// Pure に対する map（fast-path）
+            ///
+            /// Pure の場合は継続スタックを使わず直接変換。
+            #[inline(always)]
+            pub fn map<B, F>(self, f: F) -> Freer<I, B>
+            where
+                F: FnOnce(A) -> B + 'static,
+                B: 'static,
+            {
+                match self {
+                    Freer::Pure(a) => {
+                        // fast-path: 継続スタック不要
+                        Freer::Pure(f(a))
+                    }
+                    Freer::Impure { instruction, continuation_queue, .. } => {
+                        // 継続キューに map 継続を追加
+                        Freer::Impure {
+                            instruction,
+                            continuation_queue: continuation_queue.push_map(f),
+                            _result: PhantomData,
+                        }
+                    }
+                }
+            }
+
+            /// flat_map（継続を追加）
+            #[inline]
+            pub fn flat_map<B, F>(self, f: F) -> Freer<I, B>
+            where
+                F: FnOnce(A) -> Freer<I, B> + 'static,
+                B: 'static,
+            {
+                match self {
+                    Freer::Pure(a) => {
+                        // Pure の場合は直接適用
+                        f(a)
+                    }
+                    Freer::Impure { instruction, continuation_queue, .. } => {
+                        // 継続キューに flat_map 継続を追加
+                        Freer::Impure {
+                            instruction,
+                            continuation_queue: continuation_queue.push_flat_map(f),
+                            _result: PhantomData,
+                        }
+                    }
+                }
+            }
+        }
+        ```
+
+    rationale: |
+      ## 設計根拠（Issue より）
+
+      1. **Pure の最適化**:
+         - Pure に対する map/flat_map は継続スタックを触らない
+         - inlining により関数呼び出しオーバーヘッド排除
+
+      2. **Map 専用継続**:
+         - flat_map 継続より軽量
+         - 常に Pure を返すため分岐予測しやすい
+
+  # ============================================================================
+  # 4. 型消去値（ErasedValue）
+  # ============================================================================
+  - id: erased_value
+    name: "型消去値（ErasedValue）"
+    priority: high
+    description: |
+      継続間で値を受け渡すための型消去コンテナ。
+
+      **設計**:
+      - 16 バイト以下かつ align <= 8 の値は inline 格納
+      - それ以外は Box 格納
+      - TypeId でリリースでも型チェック
+
+    implementation:
+      description: |
+        ```rust
+        /// アライン保証付きの inline ストレージ
+        #[repr(C, align(8))]
+        struct AlignedInline {
+            bytes: [MaybeUninit<u8>; 16],
+        }
+
+        /// 型消去された値
+        struct ErasedValue {
+            type_id: TypeId,
+            data: ErasedData,
+        }
+
+        enum ErasedData {
+            Inline { storage: AlignedInline, drop_fn: unsafe fn(*mut u8) },
+            Boxed { ptr: *mut u8, layout: Layout, drop_fn: unsafe fn(*mut u8) },
+        }
+
+        impl ErasedValue {
+            #[inline]
+            fn new<T: 'static>(value: T) -> Self {
+                // 16 バイト以下かつ align <= 8 なら inline
+                // それ以外は Box
+            }
+
+            /// downcast（リリースでも TypeId チェック）
+            ///
+            /// 型不一致時は Err(self) を返す（関数型プログラミングの原則に従い panic しない）。
+            #[inline]
+            fn downcast<T: 'static>(self) -> Result<T, Self> {
+                if self.type_id != TypeId::of::<T>() {
+                    return Err(self);
+                }
+                // ... 型変換
+                Ok(/* value */)
+            }
+
+            /// downcast（不一致時は None）
+            #[inline]
+            fn try_downcast<T: 'static>(self) -> Option<T> {
+                self.downcast().ok()
+            }
+
+            /// downcast（型チェックなし、内部用）
+            ///
+            /// # Safety
+            ///
+            /// 呼び出し元が型システムにより T への downcast が必ず成功することを保証する必要がある。
+            #[inline]
+            unsafe fn downcast_unchecked<T: 'static>(self) -> T {
+                debug_assert_eq!(self.type_id, TypeId::of::<T>());
+                // ... 型変換（チェックなし）
+            }
+
+            /// Box<dyn Any> から ErasedValue を作成
+            ///
+            /// 後方互換用。変換コストがかかるため、高性能が必要な場合は
+            /// ErasedValue::new を直接使用すること。
+            fn from_box_any(boxed: Box<dyn Any>) -> Self {
+                // Box<dyn Any> を ErasedValue に変換
+                // 注: 内部で downcast を試みる必要がある
+                // ...
+            }
+        }
+        ```
+
+    rationale: |
+      ## 設計根拠
+
+      1. **inline 格納**:
+         - i32, i64, bool などは Box なしで格納
+         - アロケーションコスト削減
+
+      2. **型安全性**:
+         - リリースでも TypeId チェック
+         - 型不一致時は Result::Err を返す（panic しない）
+         - 関数型プログラミングの原則に従い、エラーは値として表現
+
+  # ============================================================================
+  # 5. Arena オプション（feature フラグ）
+  # ============================================================================
+  - id: arena_option
+    name: "Arena オプション"
+    priority: medium
+    description: |
+      Issue の方針: "必要に応じて Arena バックエンドを feature で用意"
+
+      **設計**:
+      - feature = "arena" で有効化
+      - interpret_with_arena メソッドを追加
+      - 長大チェーンでの一括解放に対応
+
+      **重要**: Arena と std::alloc の解放経路は完全に分離する。
+      Arena で確保したメモリは Arena のみで解放し、std::alloc::dealloc を呼ばない。
+
+    implementation:
+      description: |
+        ```rust
+        #[cfg(feature = "arena")]
+        mod arena {
+            use bumpalo::Bump;
+            use std::cell::RefCell;
+
+            /// interpret 実行中に使用する Arena
+            ///
+            /// **安全性不変条件**:
+            /// - Arena から確保した参照は Arena のライフタイム内でのみ有効
+            /// - reset() 後に Arena 参照を使用してはならない
+            /// - Drop は LIFO 順で実行される
+            pub struct InterpretArena {
+                bump: Bump,
+                /// drop リスト（RefCell で &self からの更新を許可）
+                drop_list: RefCell<Vec<(*mut u8, unsafe fn(*mut u8))>>,
+            }
+
+            impl InterpretArena {
+                pub fn new() -> Self {
+                    Self {
+                        bump: Bump::new(),
+                        drop_list: RefCell::new(Vec::new()),
+                    }
+                }
+
+                /// Arena からメモリを確保
+                ///
+                /// **注**: &self で呼び出し可能（内部で RefCell 使用）
+                pub fn alloc<T: 'static>(&self, value: T) -> *mut T {
+                    let ptr = self.bump.alloc(value) as *mut T;
+
+                    if std::mem::needs_drop::<T>() {
+                        unsafe fn drop_fn<T>(ptr: *mut u8) {
+                            std::ptr::drop_in_place(ptr.cast::<T>());
+                        }
+                        self.drop_list.borrow_mut().push((ptr.cast(), drop_fn::<T>));
+                    }
+
+                    ptr
+                }
+
+                /// Arena のリセット（LIFO 順で drop）
+                pub fn reset(&mut self) {
+                    while let Some((ptr, drop_fn)) = self.drop_list.borrow_mut().pop() {
+                        unsafe { drop_fn(ptr) };
+                    }
+                    self.bump.reset();
+                }
+            }
+
+            impl Drop for InterpretArena {
+                fn drop(&mut self) {
+                    self.reset();
+                }
+            }
+
+            /// アロケーション起源（解放経路の分離用）
+            ///
+            /// TypeErasedCont が std::alloc で確保されたか Arena で確保されたかを追跡。
+            /// Drop 時の解放経路を正しく選択するために使用。
+            #[derive(Clone, Copy)]
+            pub(crate) enum AllocationOrigin {
+                /// std::alloc で確保（Drop で std::alloc::dealloc を呼ぶ）
+                System(Layout),
+                /// Arena で確保（Drop では何もしない、Arena が一括解放）
+                Arena,
+            }
+
+            /// Arena 対応の型消去継続
+            ///
+            /// TypeErasedCont との違い:
+            /// - allocation_origin で解放経路を追跡
+            /// - Arena 経由の場合は Drop で dealloc しない
+            struct ArenaTypeErasedCont<I> {
+                apply_fn: unsafe fn(NonNull<u8>, ErasedValue) -> Freer<I, ErasedValue>,
+                drop_fn: unsafe fn(NonNull<u8>),
+                env_ptr: Option<NonNull<u8>>,
+                allocation_origin: AllocationOrigin,
+            }
+
+            impl<I> Drop for ArenaTypeErasedCont<I> {
+                fn drop(&mut self) {
+                    let Some(env_ptr) = self.env_ptr.take() else {
+                        return;
+                    };
+                    unsafe {
+                        // drop_fn は常に呼ぶ（値の Drop）
+                        (self.drop_fn)(env_ptr);
+
+                        // dealloc は System 経由の場合のみ
+                        match self.allocation_origin {
+                            AllocationOrigin::System(layout) if layout.size() > 0 => {
+                                std::alloc::dealloc(env_ptr.as_ptr(), layout);
+                            }
+                            AllocationOrigin::Arena | AllocationOrigin::System(_) => {
+                                // Arena 経由または ZST の場合は何もしない
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        #[cfg(feature = "arena")]
+        impl<I: 'static, A: 'static> Freer<I, A> {
+            /// Arena を使用して interpret を実行
+            ///
+            /// 継続の環境を Arena から確保し、interpret 終了時に一括解放する。
+            /// 極端に深いチェーンで有効。
+            pub fn interpret_with_arena<Handler>(self, handler: Handler) -> Result<A, InterpretError>
+            where
+                Handler: FnMut(I) -> ErasedValue,
+            {
+                let arena = InterpretArena::new();
+                // arena を使用した interpret
+                // ArenaTypeErasedCont を使用し、AllocationOrigin::Arena を設定
+            }
+        }
+        ```
+
+    rationale: |
+      ## 設計根拠（Issue より）
+
+      1. **オプション**:
+         - 基本は SmallVec で十分
+         - 極端に長いチェーンのみ Arena を使用
+
+      2. **feature フラグ**:
+         - デフォルトでは依存追加なし
+         - 必要なユーザーのみ有効化
+
+      3. **解放経路の分離**:
+         - AllocationOrigin で確保元を追跡
+         - Arena 経由のメモリは Arena が一括解放
+         - System 経由のメモリは std::alloc::dealloc で解放
+         - 二重解放/リークを防止
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    measurement_methodology:
+      description: |
+        ## ベンチマーク計測方法
+
+        **計測環境**:
+        - criterion ベンチマークフレームワークを使用
+        - `cargo bench` で実行（--release ビルド）
+        - black_box で最適化抑制
+
+        **統計指標**:
+        - **median**（中央値）を主要指標として使用
+        - 環境ノイズの影響を考慮
+
+        **許容誤差**:
+        - ns オーダーの目標: ±50% の範囲で達成とみなす
+        - ms オーダーの目標: ±20% の範囲で達成とみなす
+
+        **補助計測**:
+        - iai-callgrind による命令数計測（可能であれば）
+        - プロファイリングでボトルネック特定
+
+    targets:
+      - requirement: "短いチェーンの退行解消"
+        description: |
+          ## ベースライン → 目標（Issue より）
+
+          | メトリクス | ベースライン | 退行後 | 目標 |
+          |-----------|-------------|--------|------|
+          | map_pure | 562ps | 3.77ns | 元の ns 近傍 |
+          | flat_map_pure_to_pure | 552ps | 5.68ns | 元の ns 近傍 |
+          | lift_instruction/single | 4.0ns | 36.8ns | 元の ns 近傍 |
+          | interpret_single | 17ns | 60.5ns | 元の ns 近傍 |
+
+      - requirement: "深いチェーンの性能目標（最重要）"
+        description: |
+          ## deep_flat_map_with_instructions/1000
+
+          - **ベースライン**: 6.7s（実測）
+          - **目標**: 1ms 以下（99.985% 削減）
+
+          **注**: ベンチ結果に 149ms の記録があるが、これは暫定改善後の値。
+          要件定義のベースラインは Issue と整合させて 6.7s とする。
+
+      - requirement: "計算量の保証"
+        description: |
+          - flat_map: O(1)
+          - interpret: O(n)
+          - ContinuationStack::push/pop: O(1)
+
+  compatibility:
+    - requirement: "API 互換性"
+      description: |
+        **公開 API**:
+        - Freer, pure, map, flat_map は維持
+        - interpret: `Handler: FnMut(I) -> ErasedValue` + `Result<A, InterpretError>` 戻り値
+        - interpret_boxed: `Handler: FnMut(I) -> Box<dyn Any>` + `Result<A, InterpretError>` 戻り値
+        - interpret_with_arena: 新規追加（feature = "arena"）、`Result<A, InterpretError>` 戻り値
+
+        **破壊的変更**:
+        - interpret の戻り値が `A` から `Result<A, InterpretError>` に変更
+        - Handler が誤った型を返した場合、panic ではなく Err を返す
+        - 呼び出し側で `.unwrap()` または `?` での対応が必要
+
+        **内部 API（ContinuationQueue）**:
+        - 現状は `#[doc(hidden)] pub` だが、外部使用は非推奨
+        - 本バージョンでは既存シグネチャを維持
+        - 内部実装を ContinuationStack に置き換え
+        - 次のメジャーバージョンで `pub(crate)` 化を予定
+
+    - requirement: "継続適用順序の保証"
+      description: |
+        **重要**: 継続は FIFO 順序で適用される（Monad 則の associativity と整合）。
+
+        flat_map の連鎖:
+        ```
+        program.flat_map(f1).flat_map(f2).flat_map(f3)
+        ```
+
+        interpret 実行時の適用順序:
+        1. 命令の結果に f1 を適用
+        2. その結果に f2 を適用
+        3. その結果に f3 を適用
+
+        **ContinuationStack への移行**:
+        - ContinuationQueue（FIFO）から ContinuationStack（LIFO）への移行では、
+          継続を逆順で push することで FIFO 順序を維持
+        - `extend_from_queue` メソッドで順序変換を行う
+
+    - requirement: "Monad 則の維持"
+      description: |
+        最適化後も Monad 則を満たす。
+        - Left Identity: `pure(a).flat_map(f) == f(a)`
+        - Right Identity: `m.flat_map(pure) == m`
+        - Associativity: `m.flat_map(f).flat_map(g) == m.flat_map(|x| f(x).flat_map(g))`
+
+    - requirement: "スタック安全性の維持"
+      description: |
+        10,000 レベル以上の深い flat_map チェーンでもスタックオーバーフローしない。
+
+  testing:
+    - requirement: "既存テストの通過"
+      description: |
+        src/control/freer.rs 内の全テストがパスすること。
+
+    - requirement: "性能ベンチマーク"
+      description: |
+        benches/freer_bench.rs で性能改善を確認。
+
+    - requirement: "Monad 則のプロパティテスト"
+      description: |
+        proptest で Monad 則が維持されていることを確認。
+
+# 実装順序（Issue に準拠）
+implementation_order:
+  - phase: "1"
+    name: "State machine 基盤"
+    description: |
+      Issue Phase 1: Freer 構造を SmallVec stack ベースに再実装
+    tasks:
+      - "ContinuationStack（SmallVec ベース）の実装"
+      - "TypeErasedCont（fn ポインタベース）の実装"
+      - "ErasedValue の実装"
+    deliverables:
+      - ContinuationStack 構造体
+      - TypeErasedCont 構造体
+      - ErasedValue 構造体
+      - 単体テスト
+    expected_improvement: "短いチェーン 3-5x"
+
+  - phase: "2"
+    name: "Interpreter ループ化と trampolining 除去"
+    description: |
+      Issue Phase 2: 再帰を排し while ループで解釈
+    tasks:
+      - "interpret を非再帰ループで再実装"
+      - "map/flat_map の fast-path 実装"
+      - "深さベンチ (100/1000) を再計測"
+    deliverables:
+      - interpret の非再帰実装
+      - map/flat_map の最適化
+      - ベンチマーク結果
+    expected_improvement: "深いチェーンを 6.7s → 1ms 以下"
+
+  - phase: "3"
+    name: "Arena オプション"
+    description: |
+      Issue Phase 3: feature=arena で arena バックエンドを追加
+    tasks:
+      - "InterpretArena の実装"
+      - "interpret_with_arena メソッドの追加"
+      - "Cargo.toml への bumpalo 依存追加（feature フラグ）"
+      - "深さ 10k の stack safety ベンチを追加"
+    deliverables:
+      - InterpretArena 構造体
+      - interpret_with_arena メソッド
+      - feature = "arena"
+    expected_improvement: "極端な深さでも安定"
+
+# 成功指標（Issue に準拠）
+success_metrics:
+  - metric: "freer_map/map_pure"
+    baseline: "562ps → 3.77ns（+441-531% 退行）"
+    target: "元の ns 近傍（退行解消）"
+
+  - metric: "freer_flat_map/flat_map_pure_to_pure"
+    baseline: "552ps → 5.68ns（+853-950% 退行）"
+    target: "元の ns 近傍（退行解消）"
+
+  - metric: "freer_lift_instruction/single_instruction"
+    baseline: "4.0ns → 36.8ns（+810% 退行）"
+    target: "元の ns 近傍（退行解消）"
+
+  - metric: "deep_flat_map_with_instructions/1000"
+    baseline: "6.7s"
+    target: "1ms 以下（99.985% 削減）"
+
+# 依存パッケージ
+dependencies:
+  - name: "smallvec"
+    version: "1"
+    purpose: "継続スタックの inline 格納"
+    required: true
+
+  - name: "bumpalo"
+    version: "3"
+    purpose: "Arena Allocation（オプション）"
+    required: false
+    feature: "arena"
+
+# 型不一致時の振る舞い
+error_handling:
+  type_mismatch:
+    description: |
+      ## 型不一致の扱い（関数型プログラミングの原則）
+
+      ErasedValue::downcast で型が一致しない場合は **Result::Err** を返す。
+      panic は使用しない（関数型プログラミングの原則に従い、エラーは値として表現）。
+
+      **設計**:
+      - `downcast<T>() -> Result<T, Self>`: 型不一致時は Err(self) を返す
+      - `try_downcast<T>() -> Option<T>`: 型不一致時は None を返す
+
+      **interpret 内での扱い**:
+      - interpret 内では安全な `downcast` を使用（`downcast_unchecked` は使用しない）
+      - downcast 失敗時は `InterpretError::TypeMismatch` を返す
+      - Handler が正しい型を返す限り、常に `Ok(A)` を返す
+
+      **downcast_unchecked の用途**:
+      - `downcast_unchecked` は内部ユーティリティとして提供するが、interpret では使用しない
+      - 呼び出し元が型安全性を完全に保証できる特殊なケースでのみ使用可能
+      - 通常のユーザーコードでは `downcast` または `try_downcast` を使用すべき
+
+      **根拠**:
+      - 関数型プログラミングでは例外/panic ではなく値でエラーを表現
+      - 呼び出し側が Result/Option を適切に処理可能
+      - Handler のバグ（誤った型を返す）も安全にエラーとして報告
+
+# 参考文献
+references:
+  - title: "GitHub Issue #226: Freer モナド実行系の高速化"
+    url: "https://github.com/lihs-ie/lambars/issues/226"
+
+  - title: "docs/internal/issues/20260120_1606_freer_monad.yaml"
+    description: "Issue の詳細設計"
+
+  - title: "Reflection without Remorse"
+    authors: "Atze van der Ploeg, Oleg Kiselyov"
+    url: "https://okmij.org/ftp/Haskell/zseq.pdf"
+    year: 2014
+
+  - title: "smallvec - Small vector optimization"
+    url: "https://docs.rs/smallvec"
+
+  - title: "bumpalo - A fast bump allocation arena"
+    url: "https://docs.rs/bumpalo"
+
+# レビュー対応履歴
+review_history:
+  - version: "11.0.0"
+    date: "2026-01-20"
+    reviewer: "Codex"
+    changes:
+      - category: "critical"
+        issue: "interpret の downcast_unchecked が型安全性を実行時契約に委ねている"
+        resolution: |
+          interpret の戻り値を Result<A, InterpretError> に変更。
+          downcast で型チェックを行い、失敗時は Err を返す。
+          downcast_unchecked を排除。
+
+      - category: "high"
+        issue: "FIFO 順序維持のアルゴリズムが具体化されていない"
+        resolution: |
+          extend_from_queue の具体的なアルゴリズムを追加。
+          Queue の要素を逆順で Stack に push することで FIFO 順序を維持。
+          コード例とコメントで説明を追加。
+
+      - category: "high"
+        issue: "Arena と TypeErasedCont の解放経路が混在し二重解放の危険"
+        resolution: |
+          AllocationOrigin enum を導入（System/Arena）。
+          ArenaTypeErasedCont で解放経路を分岐。
+          Arena 経由のメモリは Arena が一括解放。
+
+      - category: "medium"
+        issue: "TypeErasedCont::apply が expect で panic する"
+        resolution: |
+          expect を match 式に変更。
+          None の場合は debug_assert + Err 返却。
+          リリースビルドでは安全にエラーを返す。
+
+  - version: "10.0.0"
+    date: "2026-01-20"
+    reviewer: "Codex / User"
+    changes:
+      - category: "critical"
+        issue: "interpret で unreachable!（panic）を使用"
+        resolution: |
+          downcast_unchecked を使用に変更。
+          型システムにより downcast は必ず成功することを SAFETY コメントで明記。
+
+      - category: "critical"
+        issue: "TypeErasedCont::apply が &mut self で二重呼び出し可能"
+        resolution: |
+          apply が self を消費するように変更。
+          型システムで二重呼び出しを防止。
+
+      - category: "high"
+        issue: "env_ptr の null 表現が ZST で問題"
+        resolution: |
+          env_ptr を Option<NonNull<u8>> に変更。
+          ZST も安全に扱える設計に。
+
+      - category: "high"
+        issue: "Handler 型が混在（ErasedValue と Box<dyn Any>）"
+        resolution: |
+          interpret（ErasedValue）と interpret_boxed（Box<dyn Any>）に分離。
+          interpret が高性能、interpret_boxed が後方互換。
+
+      - category: "high"
+        issue: "継続の適用順序（FIFO/LIFO）が不明確"
+        resolution: |
+          FIFO 順序を維持することを明記。
+          ContinuationStack（LIFO）に移行時は逆順 push で FIFO 維持。
+
+      - category: "medium"
+        issue: "ContinuationQueue の互換性方針が不明確"
+        resolution: |
+          API 互換性セクションで詳細化。
+          現バージョンでシグネチャ維持、次メジャーで pub(crate) 化。
+
+  - version: "9.0.0"
+    date: "2026-01-20"
+    reviewer: "Codex / User"
+    changes:
+      - category: "critical"
+        issue: "関数型プログラミングの原則違反（panic 使用）"
+        resolution: |
+          ErasedValue::downcast を Result 返却に変更。
+          panic ではなく値でエラーを表現。
+
+      - category: "high"
+        issue: "TypeErasedCont の安全性不変条件が未定義"
+        resolution: |
+          安全性不変条件を明文化。
+          apply/Drop の実装と規約を追加。
+
+      - category: "high"
+        issue: "InterpretArena::alloc が &self で drop_list 更新不可"
+        resolution: |
+          drop_list を RefCell でラップ。
+
+      - category: "high"
+        issue: "ContinuationQueue の互換性方針が不明確"
+        resolution: |
+          内部で Stack に委譲しつつシグネチャ維持。
+          pub(crate) 化は次メジャーバージョンで検討。
+
+      - category: "medium"
+        issue: "ベンチマーク数値の根拠が不明"
+        resolution: |
+          freer_bench_result.txt の行番号を明記。
+
+  - version: "8.0.0"
+    date: "2026-01-20"
+    reviewer: "Codex / User"
+    changes:
+      - category: "critical"
+        issue: "ベースライン誤り（149ms vs 6.7s）"
+        resolution: |
+          ベースラインを実測値の 6.7s に修正。
+          149ms は暫定改善後の値として注記。
+
+      - category: "critical"
+        issue: "設計の優先順位が Issue と不整合"
+        resolution: |
+          SmallVec + state machine を中核に再構成。
+          Arena はオプション（feature フラグ）に降格。
+          vtable 排除/ErasedValue は手段として位置付け。
+
+      - category: "high"
+        issue: "成功指標の整合性"
+        resolution: |
+          Issue の記載に合わせて成功指標を再設定。
+
+  - version: "7.0.0"
+    date: "2026-01-20"
+    reviewer: "Codex"
+    changes:
+      - category: "high"
+        issue: "interpret_with_arena の借用衝突"
+        resolution: |
+          defer を削除し、Drop 実装に委任。
+
+      - category: "high"
+        issue: "Arena と ErasedContinuation の解放方式の矛盾"
+        resolution: |
+          Arena 使用時は Arena から確保、非使用時は std::alloc を使用。
+          経路を分離して明確化。
+
+      - category: "medium"
+        issue: "panic の位置付け"
+        resolution: |
+          型不一致は契約違反（バグ）として panic する方針を明記。
+
+      - category: "medium"
+        issue: "ContinuationQueue の互換性"
+        resolution: |
+          pub(crate) 化を許容する方針を明記。
