@@ -1,0 +1,79 @@
+# Issue: Rc<T>::drop_slow オーバーヘッドの最適化
+# プロファイリング結果から特定されたパフォーマンスボトルネック
+
+deferred_features:
+  - id: rc_drop_slow_optimization
+    name: "Rc<T>::drop_slow オーバーヘッドの最適化"
+    discovered_date: "2026-01-20"
+    priority: high
+    category: enhancement
+    labels:
+      - "performance"
+      - "effect-system"
+
+    problem:
+      summary: "Effect系ベンチマークでRc<T>::drop_slowが7%以上を占める"
+      details: |
+        プロファイリング結果（GitHub Actions run #21154282399）の分析により、
+        Effect系ベンチマークで参照カウント管理のオーバーヘッドが大きいことが判明。
+
+        ## Effect Benchmark (195B samples)
+        - `Rc<T,A>::drop_slow` (1回目): 4.65%
+        - `Rc<T,A>::drop_slow` (2回目): 2.47%
+        - 合計: 7.12%
+
+        ## 影響を受けるモジュール
+        - AsyncIO
+        - State
+        - Reader
+
+        ## 原因
+        `Rc::drop_slow` は参照カウントが0になった時に呼ばれるスローパスで、
+        内部データのドロップとメモリの解放を行う。
+        頻繁な Rc の生成・破棄がボトルネックになっている。
+
+    solution:
+      approach: "Boxで十分な箇所の特定と参照ライフタイムの活用"
+      options:
+        - name: "Box置き換え"
+          description: |
+            共有が不要な箇所をRcからBoxに置き換える
+          pros:
+            - 参照カウントのオーバーヘッドが完全に消える
+            - シンプルな変更
+          cons:
+            - 共有が必要な箇所では使用不可
+            - 所有権の移動が必要
+
+        - name: "参照ライフタイム活用"
+          description: |
+            Rcを使わず、参照とライフタイムで表現する
+          pros:
+            - ヒープアロケーションも削減
+            - ゼロコスト抽象化
+          cons:
+            - API変更が必要
+            - ライフタイム管理が複雑
+
+        - name: "Arc→Rcの統一"
+          description: |
+            スレッド間共有が不要な箇所をArcからRcに統一
+          pros:
+            - アトミック操作のオーバーヘッドを削減
+          cons:
+            - 既にRcを使用しているため効果限定的
+
+      recommended: "Box置き換え"
+      estimated_complexity: medium
+
+    references:
+      - "https://github.com/lihs-ie/lambars/actions/runs/21154282399"
+
+    related:
+      requirement_id: null
+      plan_id: null
+
+    github_issue:
+      number: 209
+      url: "https://github.com/lihs-ie/lambars/issues/209"
+      created: true
