@@ -89,9 +89,96 @@ fn eff_macro_10() -> i32 {
     black_box(io.run_unsafe())
 }
 
+// =============================================================================
+// AsyncIO Sync Execution Benchmarks
+// =============================================================================
+
+#[library_benchmark]
+fn async_io_run_sync_lightweight() -> i32 {
+    use lambars::effect::AsyncIO;
+
+    let initial = black_box(1);
+    let async_io = AsyncIO::pure(initial)
+        .flat_map(|x| AsyncIO::pure(x + 1))
+        .flat_map(|x| AsyncIO::pure(x * 2))
+        .flat_map(|x| AsyncIO::pure(x + 1))
+        .flat_map(|x| AsyncIO::pure(x * 2))
+        .flat_map(|x| AsyncIO::pure(x + 1))
+        .flat_map(|x| AsyncIO::pure(x * 2))
+        .flat_map(|x| AsyncIO::pure(x + 1))
+        .flat_map(|x| AsyncIO::pure(x * 2))
+        .flat_map(|x| AsyncIO::pure(x + 1))
+        .flat_map(|x| AsyncIO::pure(x + 10));
+    black_box(async_io.run_sync_lightweight())
+}
+
+#[library_benchmark]
+fn async_io_run_sync() -> i32 {
+    use lambars::effect::AsyncIO;
+
+    let initial = black_box(1);
+    let async_io = AsyncIO::pure(initial)
+        .flat_map(|x| AsyncIO::pure(x + 1))
+        .flat_map(|x| AsyncIO::pure(x * 2))
+        .flat_map(|x| AsyncIO::pure(x + 1))
+        .flat_map(|x| AsyncIO::pure(x * 2))
+        .flat_map(|x| AsyncIO::pure(x + 1))
+        .flat_map(|x| AsyncIO::pure(x * 2))
+        .flat_map(|x| AsyncIO::pure(x + 1))
+        .flat_map(|x| AsyncIO::pure(x * 2))
+        .flat_map(|x| AsyncIO::pure(x + 1))
+        .flat_map(|x| AsyncIO::pure(x + 10));
+    black_box(async_io.run_sync())
+}
+
+#[library_benchmark]
+fn async_io_to_sync_lightweight() -> i32 {
+    use lambars::effect::AsyncIO;
+
+    let initial = black_box(1);
+    let async_io = AsyncIO::pure(initial)
+        .flat_map(|x| AsyncIO::pure(x + 1))
+        .flat_map(|x| AsyncIO::pure(x * 2))
+        .flat_map(|x| AsyncIO::pure(x + 1))
+        .flat_map(|x| AsyncIO::pure(x * 2))
+        .flat_map(|x| AsyncIO::pure(x + 1))
+        .flat_map(|x| AsyncIO::pure(x * 2))
+        .flat_map(|x| AsyncIO::pure(x + 1))
+        .flat_map(|x| AsyncIO::pure(x * 2))
+        .flat_map(|x| AsyncIO::pure(x + 1))
+        .flat_map(|x| AsyncIO::pure(x + 10));
+    let io = async_io.to_sync_lightweight();
+    black_box(io.run_unsafe())
+}
+
+#[library_benchmark]
+fn async_io_to_sync() -> i32 {
+    use lambars::effect::AsyncIO;
+
+    let initial = black_box(1);
+    let async_io = AsyncIO::pure(initial)
+        .flat_map(|x| AsyncIO::pure(x + 1))
+        .flat_map(|x| AsyncIO::pure(x * 2))
+        .flat_map(|x| AsyncIO::pure(x + 1))
+        .flat_map(|x| AsyncIO::pure(x * 2))
+        .flat_map(|x| AsyncIO::pure(x + 1))
+        .flat_map(|x| AsyncIO::pure(x * 2))
+        .flat_map(|x| AsyncIO::pure(x + 1))
+        .flat_map(|x| AsyncIO::pure(x * 2))
+        .flat_map(|x| AsyncIO::pure(x + 1))
+        .flat_map(|x| AsyncIO::pure(x + 10));
+    let io = async_io.to_sync();
+    black_box(io.run_unsafe())
+}
+
 library_benchmark_group!(
     name = effect_group;
     benchmarks = io_pure_chain_10, reader_chain_10, state_chain_10, exceptt_chain_10, eff_macro_10
 );
 
-main!(library_benchmark_groups = effect_group);
+library_benchmark_group!(
+    name = async_io_sync_group;
+    benchmarks = async_io_run_sync_lightweight, async_io_run_sync, async_io_to_sync_lightweight, async_io_to_sync
+);
+
+main!(library_benchmark_groups = effect_group, async_io_sync_group);

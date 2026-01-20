@@ -59,11 +59,43 @@
 //! }
 //! ```
 
+use std::cell::OnceCell;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
 use crate::control::Either;
+use tokio::runtime::Runtime;
+
+// =============================================================================
+// Thread-Local Runtime
+// =============================================================================
+
+thread_local! {
+    /// Thread-local Tokio runtime for synchronous execution.
+    /// Lazily initialized per thread, reused for subsequent calls.
+    static THREAD_LOCAL_RUNTIME: OnceCell<Runtime> = const { OnceCell::new() };
+}
+
+/// Executes a function with the thread-local Tokio runtime.
+///
+/// # Panics
+///
+/// Panics if the runtime cannot be created or if called from within an async context.
+fn with_thread_local_runtime<F, R>(function: F) -> R
+where
+    F: FnOnce(&Runtime) -> R,
+{
+    THREAD_LOCAL_RUNTIME.with(|runtime_cell| {
+        let runtime = runtime_cell.get_or_init(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to create thread-local tokio runtime")
+        });
+        function(runtime)
+    })
+}
 
 /// A monad representing deferred asynchronous side effects.
 ///
@@ -1193,44 +1225,84 @@ impl<A: Send + 'static> AsyncIO<A> {
 }
 
 // =============================================================================
-// Conversion to/from IO
+// Synchronous Execution Methods
 // =============================================================================
 
 impl<A: Send + 'static> AsyncIO<A> {
-    /// Converts an `AsyncIO` to a synchronous IO.
+    /// Executes the `AsyncIO` synchronously using `futures::executor::block_on`.
     ///
-    /// This creates a new tokio runtime to execute the async computation
-    /// synchronously.
+    /// Fastest option for synchronous execution, but does not support Tokio-specific
+    /// features (timers, spawning, I/O). Use [`run_sync`](Self::run_sync) if you need them.
     ///
     /// # Warning
     ///
-    /// This method cannot be used within an async context as it creates
-    /// a new runtime. Using it inside an async function will cause a
-    /// "nested runtime" panic.
+    /// Using this method with `AsyncIO` that depends on Tokio features (e.g., `tokio::time::sleep`,
+    /// `tokio::spawn`) will result in a panic at runtime due to missing Tokio context.
     ///
-    /// # Examples
+    /// Calling this from within an async context will block the current thread, which may cause
+    /// deadlocks or performance issues.
+    #[must_use]
+    pub fn run_sync_lightweight(self) -> A {
+        futures::executor::block_on(self.run_async())
+    }
+
+    /// Executes the `AsyncIO` synchronously using a thread-local Tokio runtime.
     ///
-    /// ```rust,ignore
-    /// use lambars::effect::{AsyncIO, IO};
+    /// Supports all Tokio features. The runtime is lazily created per thread and reused.
     ///
-    /// fn main() {
-    ///     let async_io = AsyncIO::pure(42);
-    ///     let io = async_io.to_sync();
-    ///     let result = io.run_unsafe();
-    ///     assert_eq!(result, 42);
-    /// }
-    /// ```
+    /// # Warning
+    ///
+    /// Tasks spawned via `tokio::spawn` within this `AsyncIO` will remain in the thread-local
+    /// runtime after this method returns. They may continue running during subsequent `run_sync`
+    /// calls on the same thread. This is a change from previous behavior where each call used
+    /// a fresh runtime.
     ///
     /// # Panics
     ///
-    /// Panics if creating the tokio runtime fails.
+    /// Panics if the runtime cannot be created or if called from within an async context
+    /// ("Cannot start a runtime from within a runtime").
+    #[must_use]
+    pub fn run_sync(self) -> A {
+        with_thread_local_runtime(|runtime| runtime.block_on(self.run_async()))
+    }
+
+    /// Executes the `AsyncIO` synchronously using the specified Tokio runtime.
+    ///
+    /// Use this when you need a custom runtime configuration (e.g., multi-threaded).
+    ///
+    /// # Panics
+    ///
+    /// Panics if called from within an async context (nested runtime).
+    #[must_use]
+    pub fn run_sync_with(self, runtime: &tokio::runtime::Runtime) -> A {
+        runtime.block_on(self.run_async())
+    }
+
+    /// Converts to a synchronous `IO` using `futures::executor::block_on`.
+    ///
+    /// The resulting `IO` does not support Tokio-specific features.
+    /// Use [`to_sync`](Self::to_sync) if you need them.
+    #[must_use]
+    pub fn to_sync_lightweight(self) -> super::IO<A> {
+        super::IO::new(move || self.run_sync_lightweight())
+    }
+
+    /// Converts to a synchronous `IO` using a thread-local Tokio runtime.
+    ///
+    /// Supports all Tokio features including timers and async I/O.
+    ///
+    /// # Warning
+    ///
+    /// This method's internal implementation has changed. It now uses a thread-local runtime
+    /// that persists for the thread's lifetime. Tasks spawned via `tokio::spawn` will remain
+    /// in the runtime after execution.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the runtime cannot be created or if called from within an async context.
     #[must_use]
     pub fn to_sync(self) -> super::IO<A> {
-        super::IO::new(move || {
-            let runtime =
-                tokio::runtime::Runtime::new().expect("Failed to create tokio runtime for to_sync");
-            runtime.block_on(self.run_async())
-        })
+        super::IO::new(move || self.run_sync())
     }
 }
 
@@ -2428,6 +2500,305 @@ mod tests {
     }
 
     // =========================================================================
+    // Sync Execution Tests
+    // =========================================================================
+
+    mod sync_execution_tests {
+        use super::*;
+        use rstest::rstest;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::thread;
+
+        // =====================================================================
+        // run_sync_lightweight Tests
+        // =====================================================================
+
+        #[rstest]
+        fn run_sync_lightweight_basic() {
+            let async_io = AsyncIO::pure(42);
+            let result = async_io.run_sync_lightweight();
+            assert_eq!(result, 42);
+        }
+
+        #[rstest]
+        fn run_sync_lightweight_with_fmap() {
+            let async_io = AsyncIO::pure(21).fmap(|x| x * 2);
+            let result = async_io.run_sync_lightweight();
+            assert_eq!(result, 42);
+        }
+
+        #[rstest]
+        fn run_sync_lightweight_with_flat_map_chain() {
+            let async_io = AsyncIO::pure(1)
+                .flat_map(|x| AsyncIO::pure(x + 1))
+                .flat_map(|x| AsyncIO::pure(x * 2));
+            let result = async_io.run_sync_lightweight();
+            assert_eq!(result, 4);
+        }
+
+        #[rstest]
+        fn run_sync_lightweight_with_deferred() {
+            let async_io = AsyncIO::new(|| async { 10 + 20 });
+            let result = async_io.run_sync_lightweight();
+            assert_eq!(result, 30);
+        }
+
+        // =====================================================================
+        // run_sync Tests
+        // =====================================================================
+
+        #[rstest]
+        fn run_sync_basic() {
+            let async_io = AsyncIO::pure(42);
+            let result = async_io.run_sync();
+            assert_eq!(result, 42);
+        }
+
+        #[rstest]
+        fn run_sync_with_fmap() {
+            let async_io = AsyncIO::pure(21).fmap(|x| x * 2);
+            let result = async_io.run_sync();
+            assert_eq!(result, 42);
+        }
+
+        #[rstest]
+        fn run_sync_with_flat_map_chain() {
+            let async_io = AsyncIO::pure(1)
+                .flat_map(|x| AsyncIO::pure(x + 1))
+                .flat_map(|x| AsyncIO::pure(x * 2));
+            let result = async_io.run_sync();
+            assert_eq!(result, 4);
+        }
+
+        #[rstest]
+        fn run_sync_with_deferred() {
+            let async_io = AsyncIO::new(|| async { 10 + 20 });
+            let result = async_io.run_sync();
+            assert_eq!(result, 30);
+        }
+
+        #[rstest]
+        fn run_sync_with_tokio_delay() {
+            let async_io = AsyncIO::delay_async(Duration::from_millis(10)).fmap(|()| 42);
+            let result = async_io.run_sync();
+            assert_eq!(result, 42);
+        }
+
+        #[rstest]
+        fn run_sync_reuses_runtime_in_same_thread() {
+            for expected in 1..=10 {
+                let async_io = AsyncIO::pure(expected);
+                let result = async_io.run_sync();
+                assert_eq!(result, expected);
+            }
+        }
+
+        // =====================================================================
+        // run_sync_with Tests
+        // =====================================================================
+
+        #[rstest]
+        fn run_sync_with_basic() {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+
+            let async_io = AsyncIO::pure(42);
+            let result = async_io.run_sync_with(&runtime);
+            assert_eq!(result, 42);
+        }
+
+        #[rstest]
+        fn run_sync_with_multi_thread_runtime() {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap();
+
+            let async_io = AsyncIO::pure(42);
+            let result = async_io.run_sync_with(&runtime);
+            assert_eq!(result, 42);
+        }
+
+        #[rstest]
+        fn run_sync_with_uses_tokio_delay() {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+
+            let async_io = AsyncIO::delay_async(Duration::from_millis(10)).fmap(|()| 42);
+            let result = async_io.run_sync_with(&runtime);
+            assert_eq!(result, 42);
+        }
+
+        #[rstest]
+        fn run_sync_with_uses_flat_map_chain() {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+
+            let async_io = AsyncIO::pure(1)
+                .flat_map(|x| AsyncIO::pure(x + 1))
+                .flat_map(|x| AsyncIO::pure(x * 2));
+            let result = async_io.run_sync_with(&runtime);
+            assert_eq!(result, 4);
+        }
+
+        // =====================================================================
+        // to_sync_lightweight Tests
+        // =====================================================================
+
+        #[rstest]
+        fn to_sync_lightweight_basic() {
+            let async_io = AsyncIO::pure(42);
+            let io = async_io.to_sync_lightweight();
+            let result = io.run_unsafe();
+            assert_eq!(result, 42);
+        }
+
+        #[rstest]
+        fn to_sync_lightweight_with_fmap() {
+            let async_io = AsyncIO::pure(21).fmap(|x| x * 2);
+            let io = async_io.to_sync_lightweight();
+            let result = io.run_unsafe();
+            assert_eq!(result, 42);
+        }
+
+        #[rstest]
+        fn to_sync_lightweight_with_flat_map_chain() {
+            let async_io = AsyncIO::pure(1)
+                .flat_map(|x| AsyncIO::pure(x + 1))
+                .flat_map(|x| AsyncIO::pure(x * 2));
+            let io = async_io.to_sync_lightweight();
+            let result = io.run_unsafe();
+            assert_eq!(result, 4);
+        }
+
+        // =====================================================================
+        // to_sync Tests
+        // =====================================================================
+
+        #[rstest]
+        fn to_sync_basic() {
+            let async_io = AsyncIO::pure(42);
+            let io = async_io.to_sync();
+            let result = io.run_unsafe();
+            assert_eq!(result, 42);
+        }
+
+        #[rstest]
+        fn to_sync_with_fmap() {
+            let async_io = AsyncIO::pure(21).fmap(|x| x * 2);
+            let io = async_io.to_sync();
+            let result = io.run_unsafe();
+            assert_eq!(result, 42);
+        }
+
+        #[rstest]
+        fn to_sync_with_flat_map_chain() {
+            let async_io = AsyncIO::pure(1)
+                .flat_map(|x| AsyncIO::pure(x + 1))
+                .flat_map(|x| AsyncIO::pure(x * 2));
+            let io = async_io.to_sync();
+            let result = io.run_unsafe();
+            assert_eq!(result, 4);
+        }
+
+        #[rstest]
+        fn to_sync_uses_tokio_delay() {
+            let async_io = AsyncIO::delay_async(Duration::from_millis(10)).fmap(|()| 42);
+            let io = async_io.to_sync();
+            let result = io.run_unsafe();
+            assert_eq!(result, 42);
+        }
+
+        // =====================================================================
+        // Multi-threaded Concurrent Calls Tests
+        // =====================================================================
+
+        #[rstest]
+        fn run_sync_from_multiple_threads() {
+            let counter = Arc::new(AtomicUsize::new(0));
+            let handles: Vec<_> = (0..4)
+                .map(|thread_id| {
+                    let counter = counter.clone();
+                    thread::spawn(move || {
+                        for iteration in 0..10 {
+                            let expected = thread_id * 100 + iteration;
+                            let async_io = AsyncIO::pure(expected);
+                            let result = async_io.run_sync();
+                            assert_eq!(result, expected);
+                            counter.fetch_add(1, Ordering::SeqCst);
+                        }
+                    })
+                })
+                .collect();
+
+            for handle in handles {
+                handle.join().expect("Thread should not panic");
+            }
+
+            assert_eq!(counter.load(Ordering::SeqCst), 40);
+        }
+
+        #[rstest]
+        fn run_sync_lightweight_from_multiple_threads() {
+            let counter = Arc::new(AtomicUsize::new(0));
+            let handles: Vec<_> = (0..4)
+                .map(|thread_id| {
+                    let counter = counter.clone();
+                    thread::spawn(move || {
+                        for iteration in 0..10 {
+                            let expected = thread_id * 100 + iteration;
+                            let async_io = AsyncIO::pure(expected);
+                            let result = async_io.run_sync_lightweight();
+                            assert_eq!(result, expected);
+                            counter.fetch_add(1, Ordering::SeqCst);
+                        }
+                    })
+                })
+                .collect();
+
+            for handle in handles {
+                handle.join().expect("Thread should not panic");
+            }
+
+            assert_eq!(counter.load(Ordering::SeqCst), 40);
+        }
+
+        // =====================================================================
+        // Referential Transparency Tests
+        // =====================================================================
+
+        #[rstest]
+        #[case(0)]
+        #[case(42)]
+        #[case(-100)]
+        #[case(i32::MAX)]
+        #[case(i32::MIN)]
+        fn run_sync_lightweight_referential_transparency(#[case] value: i32) {
+            let async_io = AsyncIO::pure(value);
+            assert_eq!(async_io.run_sync_lightweight(), value);
+        }
+
+        #[rstest]
+        #[case(0)]
+        #[case(42)]
+        #[case(-100)]
+        #[case(i32::MAX)]
+        #[case(i32::MIN)]
+        fn run_sync_referential_transparency(#[case] value: i32) {
+            let async_io = AsyncIO::pure(value);
+            assert_eq!(async_io.run_sync(), value);
+        }
+    }
+
+    // =========================================================================
     // Pure<A> Tests
     // =========================================================================
 
@@ -2478,7 +2849,6 @@ mod tests {
 
         #[rstest]
         fn pure_derives_clone() {
-            // Use String (non-Copy type) to test Clone explicitly
             let wrapped = Pure(String::from("hello"));
             let cloned = wrapped.clone();
             assert_eq!(wrapped, cloned);
@@ -2488,7 +2858,6 @@ mod tests {
         fn pure_derives_copy() {
             let wrapped = Pure(42);
             let copied = wrapped;
-            // wrapped is still usable because Pure<i32> is Copy
             assert_eq!(wrapped.0, 42);
             assert_eq!(copied.0, 42);
         }

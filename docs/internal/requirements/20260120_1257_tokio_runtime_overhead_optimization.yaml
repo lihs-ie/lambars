@@ -1,0 +1,398 @@
+# Tokioランタイムオーバーヘッド最適化 要件定義
+#
+# 概要:
+#   AsyncIOベンチマークでTokioランタイムのコンテキスト切り替えが約6%の
+#   オーバーヘッドを占める問題を解決するための最適化API設計
+#
+# 設計方針:
+#   1. 参照透過性を維持しつつ、実行時のオーバーヘッドを最小化
+#   2. ユーザーが用途に応じて最適な実行戦略を選択可能にする
+#   3. 破壊的変更を許容し、to_syncの内部実装を変更する
+#
+# 参照:
+#   - GitHub Issue #210: https://github.com/lihs-ie/lambars/issues/210
+#   - Tokio Runtime documentation: https://docs.rs/tokio/latest/tokio/runtime/struct.Runtime.html
+#   - プロファイリング結果: https://github.com/lihs-ie/lambars/actions/runs/21154282399
+
+version: "2.0.0"
+name: "tokio_runtime_overhead_optimization"
+description: |
+  AsyncIOの同期実行APIにおけるTokioランタイムのオーバーヘッドを削減する。
+  プロファイリング結果から、Runtime::block_on呼び出し毎にコンテキスト設定・
+  ガード生成・破棄が発生し、約6%のオーバーヘッドとなっていることが判明。
+
+  本要件では、以下の2段階の最適化を実施する：
+  1. スレッドローカルランタイムの導入（ランタイム作成コストの削減）
+  2. 軽量エグゼキュータの提供（Tokio機能不要な場合の完全なオーバーヘッド排除）
+
+background:
+  problem: |
+    AsyncIOベンチマークにおいて、Tokioランタイムのコンテキスト切り替えが
+    約6%のオーバーヘッドを占めている。内訳は以下の通り：
+    - Runtime::block_on: 2.31%
+    - context::set_current: 2.05%（TLSアクセス）
+    - SetCurrentGuard::drop: 1.58%（ガード破棄・復元）
+
+    現在の to_sync メソッドは呼び出し毎に新しいランタイムを作成しており、
+    これが主要なオーバーヘッドの原因となっている。
+  motivation: |
+    関数型プログラミングライブラリとして、純粋性と参照透過性を維持しながら
+    実用的なパフォーマンスを提供することが重要。AsyncIOは非同期処理を
+    型安全に扱うための中核コンポーネントであり、そのオーバーヘッドは
+    ライブラリ全体の性能に影響する。
+  prior_art:
+    - name: "Cats Effect (Scala)"
+      description: |
+        IOの同期実行にはunsafeRunSync()を提供し、ランタイムの再利用を
+        ユーザーに委ねている。
+    - name: "ZIO (Scala)"
+      description: |
+        Runtime.unsafeRun()でグローバルランタイムを使用するオプションを提供。
+    - name: "futures::executor (Rust)"
+      description: |
+        軽量なblock_on実装を提供。Tokioの機能（タイマー、I/O）は不要な場合に最適。
+
+requirements:
+  # ======================================================================
+  # 1. スレッドローカルランタイムの導入
+  # ======================================================================
+  - id: thread_local_runtime
+    name: "スレッドローカルランタイムの導入"
+    description: |
+      thread_local!を使用して各スレッドに専用のTokioランタイムを作成し、
+      ランタイム作成のオーバーヘッドを1スレッドにつき1回のみに削減する。
+      これにより、毎回のランタイム作成オーバーヘッドを排除する。
+
+      グローバルランタイムではなくスレッドローカルランタイムを採用する理由：
+      1. current_threadランタイムは複数スレッドからの同時アクセスに対応していない
+      2. スレッドローカルなら各スレッドが独立したランタイムを持ち、競合が発生しない
+      3. run_sync_withとの互換性を維持できる（enterガードをリークしないため）
+
+    methods:
+      - name: "THREAD_LOCAL_RUNTIME"
+        signature: "thread_local! { static THREAD_LOCAL_RUNTIME: OnceCell<Runtime> }"
+        description: |
+          スレッド毎に専用のTokioランタイムを保持。初回アクセス時に
+          current_threadランタイムを作成し、以降は再利用する。
+          OnceCellを使用することで、借用を保持せずに参照を返せる。
+        examples:
+          - description: "スレッドローカルランタイムの定義"
+            code: |
+              use std::cell::OnceCell;
+              use tokio::runtime::Runtime;
+
+              thread_local! {
+                  static THREAD_LOCAL_RUNTIME: OnceCell<Runtime> = const { OnceCell::new() };
+              }
+
+      - name: "with_thread_local_runtime"
+        signature: "fn with_thread_local_runtime<F, R>(f: F) -> R where F: FnOnce(&Runtime) -> R"
+        description: |
+          スレッドローカルランタイムを取得または作成し、コールバックに渡す。
+          ランタイムが存在しない場合は新規作成する。
+
+          注意: OnceCellを使用しているため借用の問題は発生しないが、
+          block_on内で再度run_syncを呼び出すとnested runtime問題で
+          panic（"Cannot start a runtime from within a runtime"）する。
+          これはTokioの制約であり、run_sync系メソッドは同期コンテキスト
+          からのみ呼び出すこと。
+        examples:
+          - description: "スレッドローカルランタイムの使用（OnceCell版）"
+            code: |
+              use std::cell::OnceCell;
+              use tokio::runtime::Runtime;
+
+              thread_local! {
+                  static THREAD_LOCAL_RUNTIME: OnceCell<Runtime> = const { OnceCell::new() };
+              }
+
+              fn with_thread_local_runtime<F, R>(f: F) -> R
+              where
+                  F: FnOnce(&Runtime) -> R,
+              {
+                  THREAD_LOCAL_RUNTIME.with(|runtime_cell| {
+                      let runtime = runtime_cell.get_or_init(|| {
+                          tokio::runtime::Builder::new_current_thread()
+                              .enable_all()
+                              .build()
+                              .expect("Failed to create thread-local tokio runtime")
+                      });
+                      f(runtime)
+                  })
+              }
+
+    implementations:
+      - type: "OnceCell<Runtime>"
+        description: |
+          スレッドローカルなためOnceCellを使用。
+          OnceCellは借用を保持しないため、RefCellの借用問題は発生しない。
+          初回アクセス時のみランタイムを作成し、以降は参照を返す。
+          （ただしnested runtime問題は別途存在する）
+
+  # ======================================================================
+  # 2. 軽量同期実行API
+  # ======================================================================
+  - id: run_sync_lightweight
+    name: "軽量同期実行API"
+    description: |
+      futures::executor::block_onを使用した最軽量の同期実行。
+      Tokioランタイムを完全にバイパスし、オーバーヘッドを最小化。
+      ただし、tokio::time::sleepやtokio::spawnなどTokio固有機能は使用不可。
+
+    laws:
+      - name: "参照透過性"
+        description: |
+          run_sync_lightweightは、run_asyncと同じ結果を返す（Tokio機能未使用時）。
+        equation: "async_io.run_sync_lightweight() == futures::executor::block_on(async_io.run_async())"
+        property_test: |
+          #[rstest]
+          fn prop_run_sync_lightweight_referential_transparency(value: i32) {
+              let async_io = AsyncIO::pure(value);
+              assert_eq!(async_io.clone().run_sync_lightweight(), value);
+          }
+
+    methods:
+      - name: "run_sync_lightweight"
+        signature: "pub fn run_sync_lightweight(self) -> A"
+        description: |
+          futures::executor::block_onを使用した軽量な同期実行。
+          Tokio機能（タイマー、spawn等）は使用不可。
+        examples:
+          - description: "基本的な使用法"
+            code: |
+              let async_io = AsyncIO::pure(42);
+              let result = async_io.run_sync_lightweight();
+              assert_eq!(result, 42);
+          - description: "flat_mapチェーン"
+            code: |
+              let async_io = AsyncIO::pure(1)
+                  .flat_map(|x| AsyncIO::pure(x + 1))
+                  .flat_map(|x| AsyncIO::pure(x * 2));
+              let result = async_io.run_sync_lightweight();
+              assert_eq!(result, 4);
+
+      - name: "to_sync_lightweight"
+        signature: "pub fn to_sync_lightweight(self) -> super::IO<A>"
+        description: |
+          軽量同期実行をIOにラップして返す。
+        examples:
+          - description: "IO変換"
+            code: |
+              let async_io = AsyncIO::pure(42);
+              let io = async_io.to_sync_lightweight();
+              let result = io.run();
+              assert_eq!(result, 42);
+
+    implementations:
+      - type: "AsyncIO<A>"
+        description: |
+          Aは Send + 'static を満たす必要がある。
+
+  # ======================================================================
+  # 3. 標準同期実行API（破壊的変更）
+  # ======================================================================
+  - id: run_sync
+    name: "標準同期実行API"
+    description: |
+      スレッドローカルランタイムを使用した標準的な同期実行。
+      Tokio機能（タイマー、spawn等）を使用するAsyncIOに対応。
+
+      既存のto_syncとの違い：
+      - 旧: 毎回新しいランタイムを作成
+      - 新: スレッドローカルランタイムを再利用
+
+    laws:
+      - name: "参照透過性"
+        description: |
+          run_syncは、run_asyncと同じ結果を返す。
+        equation: "async_io.run_sync() == with_thread_local_runtime(|rt| rt.block_on(async_io.run_async()))"
+        property_test: |
+          #[rstest]
+          fn prop_run_sync_referential_transparency(value: i32) {
+              let async_io = AsyncIO::pure(value);
+              assert_eq!(async_io.clone().run_sync(), value);
+          }
+
+    methods:
+      - name: "run_sync"
+        signature: "pub fn run_sync(self) -> A"
+        description: |
+          スレッドローカルランタイムで同期実行。
+        examples:
+          - description: "基本的な使用法"
+            code: |
+              let async_io = AsyncIO::pure(42);
+              let result = async_io.run_sync();
+              assert_eq!(result, 42);
+          - description: "Tokio機能を使用する場合"
+            code: |
+              let async_io = AsyncIO::delay(Duration::from_millis(10), 42);
+              let result = async_io.run_sync();
+              assert_eq!(result, 42);
+
+      - name: "to_sync"
+        signature: "pub fn to_sync(self) -> super::IO<A>"
+        description: |
+          標準同期実行をIOにラップして返す。既存APIの内部実装を変更。
+        examples:
+          - description: "IO変換"
+            code: |
+              let async_io = AsyncIO::pure(42);
+              let io = async_io.to_sync();
+              let result = io.run();
+              assert_eq!(result, 42);
+
+    implementations:
+      - type: "AsyncIO<A>"
+        description: |
+          Aは Send + 'static を満たす必要がある。
+
+  # ======================================================================
+  # 4. 明示的ランタイム指定API
+  # ======================================================================
+  - id: run_sync_with
+    name: "明示的ランタイム指定API"
+    description: |
+      ユーザーが指定したランタイムで同期実行。既存のランタイムを
+      再利用したい場合や、特定の設定のランタイムを使用したい場合に使用。
+
+      スレッドローカルランタイムはenterガードをリークしないため、
+      run_sync_withは他のAPIの状態に影響されない。
+
+      注意: run_sync_withも他のrun_sync系と同様に、asyncコンテキスト内から
+      呼び出すとpanicする可能性がある（nested runtime問題）。
+
+    methods:
+      - name: "run_sync_with"
+        signature: "pub fn run_sync_with(self, runtime: &tokio::runtime::Runtime) -> A"
+        description: |
+          指定されたランタイムで同期実行。
+        examples:
+          - description: "カスタムランタイムの使用"
+            code: |
+              let runtime = tokio::runtime::Builder::new_multi_thread()
+                  .worker_threads(4)
+                  .build()
+                  .unwrap();
+
+              let async_io = AsyncIO::pure(42);
+              let result = async_io.run_sync_with(&runtime);
+              assert_eq!(result, 42);
+
+    implementations:
+      - type: "AsyncIO<A>"
+        description: |
+          Aは Send + 'static を満たす必要がある。
+
+non_functional_requirements:
+  performance:
+    - "run_sync_lightweightのオーバーヘッドは1%未満であること"
+    - "run_syncのオーバーヘッドは4%未満であること（現行の6%から削減）"
+    - "1スレッドにつき1回のみランタイム作成コストが発生すること"
+  compatibility:
+    - "既存のto_sync APIのシグネチャは変更しない（内部実装のみ変更）"
+    - "run_asyncは変更なしで動作すること"
+    - "Tokio 1.x系との互換性を維持すること"
+    - "run_sync_withは他のAPIの状態に影響されないこと（ただしnested runtime制約は適用）"
+  testing:
+    - "各メソッドに対するユニットテストを作成すること"
+    - "Tokio機能（sleep、spawn）との互換性テストを作成すること"
+    - "スレッドセーフティテストを作成すること"
+    - "ベンチマークでオーバーヘッド削減を検証すること"
+  thread_safety:
+    - "複数スレッドから同時にrun_syncを呼び出しても正しく動作すること"
+    - "各スレッドが独立したランタイムを持ち、干渉しないこと"
+    - "run_sync_withが常に指定されたランタイムを使用すること"
+
+# 設計根拠
+design_rationale:
+  thread_local_runtime: |
+    スレッドローカルランタイムを採用する理由：
+    1. current_threadランタイムは複数スレッドからの同時アクセスに対応していない
+    2. グローバルランタイムでenterガードをリークすると、run_sync_withと競合する
+    3. スレッドローカルなら各スレッドが独立したランタイムを持ち、競合が発生しない
+    4. ランタイム作成は1スレッドにつき1回のみで、十分なオーバーヘッド削減が可能
+
+  no_enter_guard_leak: |
+    enterガードのリークを採用しない理由：
+    1. リークしたガードはスレッド終了まで維持され、他のランタイムとの競合を引き起こす
+    2. run_sync_withで別のランタイムを使用する際にpanicする可能性がある
+    3. block_onのコンテキスト切り替えオーバーヘッドは残存するが、許容範囲内
+
+  referential_transparency: |
+    参照透過性について：
+    1. スレッドローカルランタイムは実行時のインフラであり、計算の意味論には影響しない
+    2. 同じAsyncIO値に対して、同じスレッド内では常に同じ結果が返る
+    3. 異なるスレッドでも、ランタイムの違いは結果に影響しない（正常動作する限り）
+
+    制限事項:
+    - tokio::spawnを使用するAsyncIOでは、spawnしたタスクがスレッドローカルランタイムに
+      残留するため、厳密な参照透過性は保証されない（リソース消費が呼び出し履歴に依存）
+    - 純粋な計算（tokio固有機能未使用）のみで構成されるAsyncIOでは参照透過性が保証される
+
+# 制約事項
+constraints:
+  nested_runtime_tokio: |
+    run_sync / run_sync_with は非同期コンテキスト内から呼び出すと
+    panicする（"Cannot start a runtime from within a runtime"）。
+    これはTokioの設計上の制約であり、非同期コンテキストでは run_async を使用すべき。
+
+  nested_runtime_lightweight: |
+    run_sync_lightweight は futures::executor を使用するため、Tokioの
+    nested runtime問題は発生しない。ただし、非同期コンテキスト内で
+    ブロッキング呼び出しを行うとスレッドをブロックするため、
+    パフォーマンス上の問題が発生する可能性がある。
+    非同期コンテキストでは run_async を使用すべき。
+
+  lightweight_tokio_features: |
+    run_sync_lightweight は futures::executor を使用するため、
+    tokio::time::sleep, tokio::spawn 等のTokio固有機能は動作しない。
+    Tokio機能を使用する場合は run_sync を使用すること。
+
+  spawn_task_lifetime: |
+    run_sync内でtokio::spawnしたタスクは、そのスレッドのランタイムに
+    紐づく。スレッド終了時にランタイムが破棄されるため、
+    長寿命のタスクをspawnする場合は注意が必要。
+
+# 破壊的変更
+breaking_changes:
+  to_sync_behavior: |
+    to_syncの内部実装が変更される：
+    - 旧: 毎回新しいランタイムを作成
+    - 新: スレッドローカルランタイムを再利用
+
+    この変更により、以下の挙動が変わる可能性がある：
+    1. spawnしたタスクがスレッドのランタイムに残留する
+    2. メモリ使用量のパターンが変化（ランタイムがスレッド終了まで維持）
+
+    移行ガイド：
+    - 基本的な使用法は変更不要
+    - spawnしたタスクの寿命に依存するコードは見直しが必要
+
+future_extensions:
+  - id: async_scope_api
+    name: "AsyncScope API"
+    description: |
+      複数のAsyncIO操作をスコープ内でバッチ実行するためのAPI。
+      より明示的なリソース管理を提供。
+    rationale: |
+      スレッドローカルランタイムで十分なオーバーヘッド削減が得られるため、
+      より複雑なスコープベースAPIは将来の拡張として保留。
+
+  - id: custom_executor_support
+    name: "カスタムエグゼキュータサポート"
+    description: |
+      Tokio以外のエグゼキュータ（smol、async-std等）への対応。
+    rationale: |
+      現時点ではTokioが最も広く使用されているため、
+      他のエグゼキュータへの対応は需要に応じて検討。
+
+  - id: fallible_sync_api
+    name: "Fallible同期実行API"
+    description: |
+      RuntimeError を返す try_run_sync 系メソッド。
+      Result<A, RuntimeError> を返し、panic を回避。
+    rationale: |
+      現時点ではランタイム初期化失敗は稀であり、
+      既存APIとの一貫性を保つためpanicを使用。
+      将来的に需要があれば fallible APIを追加検討。

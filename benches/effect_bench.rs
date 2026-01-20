@@ -601,6 +601,125 @@ fn benchmark_async_io_overhead_comparison(criterion: &mut Criterion) {
 }
 
 // =============================================================================
+// AsyncIO Sync Execution Benchmarks
+// =============================================================================
+
+fn benchmark_async_io_sync_execution(criterion: &mut Criterion) {
+    use lambars::effect::AsyncIO;
+
+    let mut group = criterion.benchmark_group("async_io_sync_execution");
+
+    // run_sync_lightweight: Uses futures::executor (no Tokio runtime)
+    group.bench_function("run_sync_lightweight", |bencher| {
+        bencher.iter(|| {
+            let async_io = AsyncIO::pure(black_box(42));
+            black_box(async_io.run_sync_lightweight())
+        });
+    });
+
+    // run_sync: Uses thread-local Tokio runtime
+    group.bench_function("run_sync", |bencher| {
+        bencher.iter(|| {
+            let async_io = AsyncIO::pure(black_box(42));
+            black_box(async_io.run_sync())
+        });
+    });
+
+    // run_sync_with: Uses provided runtime (baseline comparison)
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    group.bench_function("run_sync_with", |bencher| {
+        bencher.iter(|| {
+            let async_io = AsyncIO::pure(black_box(42));
+            black_box(async_io.run_sync_with(&runtime))
+        });
+    });
+
+    // run_async with block_on: Traditional approach (for comparison)
+    group.bench_function("run_async_block_on", |bencher| {
+        bencher.iter(|| {
+            let async_io = AsyncIO::pure(black_box(42));
+            black_box(runtime.block_on(async_io.run_async()))
+        });
+    });
+
+    group.finish();
+}
+
+fn benchmark_async_io_sync_chain(criterion: &mut Criterion) {
+    use lambars::effect::AsyncIO;
+
+    let mut group = criterion.benchmark_group("async_io_sync_chain");
+
+    // Chain of 5 flat_maps with run_sync_lightweight
+    group.bench_function("flat_map_5_lightweight", |bencher| {
+        bencher.iter(|| {
+            let async_io = AsyncIO::pure(1)
+                .flat_map(|x| AsyncIO::pure(x + 1))
+                .flat_map(|x| AsyncIO::pure(x * 2))
+                .flat_map(|x| AsyncIO::pure(x + 3))
+                .flat_map(|x| AsyncIO::pure(x * 4))
+                .flat_map(|x| AsyncIO::pure(x + 5));
+            black_box(async_io.run_sync_lightweight())
+        });
+    });
+
+    // Chain of 5 flat_maps with run_sync
+    group.bench_function("flat_map_5_run_sync", |bencher| {
+        bencher.iter(|| {
+            let async_io = AsyncIO::pure(1)
+                .flat_map(|x| AsyncIO::pure(x + 1))
+                .flat_map(|x| AsyncIO::pure(x * 2))
+                .flat_map(|x| AsyncIO::pure(x + 3))
+                .flat_map(|x| AsyncIO::pure(x * 4))
+                .flat_map(|x| AsyncIO::pure(x + 5));
+            black_box(async_io.run_sync())
+        });
+    });
+
+    // Chain of 5 flat_maps with traditional block_on (for comparison)
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    group.bench_function("flat_map_5_block_on", |bencher| {
+        bencher.iter(|| {
+            let async_io = AsyncIO::pure(1)
+                .flat_map(|x| AsyncIO::pure(x + 1))
+                .flat_map(|x| AsyncIO::pure(x * 2))
+                .flat_map(|x| AsyncIO::pure(x + 3))
+                .flat_map(|x| AsyncIO::pure(x * 4))
+                .flat_map(|x| AsyncIO::pure(x + 5));
+            black_box(runtime.block_on(async_io.run_async()))
+        });
+    });
+
+    group.finish();
+}
+
+fn benchmark_async_io_to_sync_conversion(criterion: &mut Criterion) {
+    use lambars::effect::AsyncIO;
+
+    let mut group = criterion.benchmark_group("async_io_to_sync_conversion");
+
+    // to_sync_lightweight: Converts to IO using futures::executor
+    group.bench_function("to_sync_lightweight", |bencher| {
+        bencher.iter(|| {
+            let async_io = AsyncIO::pure(black_box(42));
+            let io = async_io.to_sync_lightweight();
+            black_box(io.run_unsafe())
+        });
+    });
+
+    // to_sync: Converts to IO using thread-local runtime
+    group.bench_function("to_sync", |bencher| {
+        bencher.iter(|| {
+            let async_io = AsyncIO::pure(black_box(42));
+            let io = async_io.to_sync();
+            black_box(io.run_unsafe())
+        });
+    });
+
+    group.finish();
+}
+
+// =============================================================================
 // Criterion Group and Main
 // =============================================================================
 
@@ -620,7 +739,10 @@ criterion_group!(
     benchmark_async_io_par,
     benchmark_async_io_bracket,
     benchmark_async_io_timeout,
-    benchmark_async_io_overhead_comparison
+    benchmark_async_io_overhead_comparison,
+    benchmark_async_io_sync_execution,
+    benchmark_async_io_sync_chain,
+    benchmark_async_io_to_sync_conversion
 );
 
 criterion_main!(benches);
