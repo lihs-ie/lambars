@@ -39,6 +39,15 @@ jobs:
     permissions:
       pull-requests: write
     steps:
+      - name: Checkout PR branch first (to get Cargo.lock)
+        uses: actions/checkout@v4
+
+      - name: Get iai-callgrind version
+        id: iai-version
+        run: |
+          IAI_VERSION=$(grep -A1 'name = "iai-callgrind"' Cargo.lock | grep version | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "version=$IAI_VERSION" >> $GITHUB_OUTPUT
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -53,12 +62,12 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin
-          key: ${{ runner.os }}-cargo-bin-iai-callgrind-runner-0.14.2
+          key: ${{ runner.os }}-cargo-bin-iai-callgrind-runner-${{ steps.iai-version.outputs.version }}
 
       - name: Install iai-callgrind-runner
         run: |
           if ! command -v iai-callgrind-runner &> /dev/null; then
-            cargo install iai-callgrind-runner --version 0.14.2
+            cargo install iai-callgrind-runner --version ${{ steps.iai-version.outputs.version }}
           fi
 
       - name: Cache cargo registry
