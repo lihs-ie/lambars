@@ -99,6 +99,22 @@ jobs:
         with:
           clean: false
 
+      - name: Update iai-callgrind-runner for PR branch if needed
+        run: |
+          # Get iai-callgrind version from PR branch's Cargo.lock
+          PR_IAI_VERSION=$(grep -A1 'name = "iai-callgrind"' Cargo.lock | grep version | head -1 | sed 's/.*"\(.*\)"/\1/')
+          INSTALLED_VERSION=$(iai-callgrind-runner --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "none")
+
+          echo "PR branch iai-callgrind version: $PR_IAI_VERSION"
+          echo "Installed runner version: $INSTALLED_VERSION"
+
+          if [ "$PR_IAI_VERSION" != "$INSTALLED_VERSION" ]; then
+            echo "Version mismatch detected. Installing iai-callgrind-runner $PR_IAI_VERSION"
+            cargo install iai-callgrind-runner --version "$PR_IAI_VERSION" --force
+          else
+            echo "Runner version matches, no update needed"
+          fi
+
       - name: Run PR benchmarks with baseline comparison
         if: steps.check-benchmarks.outputs.benchmarks_exist == 'true'
         run: |
