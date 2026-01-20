@@ -4,6 +4,8 @@
 //! `fxhash` and `ahash` feature flags, ensuring referential transparency
 //! and correct behavior.
 
+#![cfg(feature = "persistent")]
+
 use lambars::persistent::{PersistentHashMap, PersistentHashSet};
 use rstest::rstest;
 
