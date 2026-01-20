@@ -14,7 +14,7 @@ fn monad_transformer_chain() -> i32 {
     let reader: Reader<i32, i32> = Reader::ask().flat_map(|env| Reader::pure(env * 2));
 
     let state: State<i32, i32> = State::get()
-        .flat_map(move |s| State::put(s + reader.run(black_box(10))).then(State::get()));
+        .flat_map(move |s| State::put(s + reader.run_cloned(black_box(10))).then(State::get()));
 
     let io = IO::pure(state.run(black_box(0))).fmap(|(result, _)| result);
 
