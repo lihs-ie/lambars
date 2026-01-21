@@ -3170,7 +3170,12 @@ impl<T> Default for PersistentVector<T> {
 
 impl<T: Clone> FromIterator<T> for PersistentVector<T> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        let elements: Vec<T> = iter.into_iter().collect();
+        let iter = iter.into_iter();
+        let (lower_bound, upper_bound) = iter.size_hint();
+        // Use upper bound if available, otherwise fall back to lower bound
+        let capacity_hint = upper_bound.unwrap_or(lower_bound);
+        let mut elements = Vec::with_capacity(capacity_hint);
+        elements.extend(iter);
         build_persistent_vector_from_vec(elements)
     }
 }
@@ -3437,8 +3442,11 @@ fn build_root_from_elements<T>(elements: Vec<T>) -> (ReferenceCounter<Node<T>>, 
         return (ReferenceCounter::new(Node::empty_branch()), BITS_PER_LEVEL);
     }
 
-    // Split into chunks of BRANCHING_FACTOR
-    let mut leaves: Vec<ReferenceCounter<Node<T>>> = Vec::new();
+    // Pre-calculate the number of leaf nodes needed
+    let leaf_count = elements.len().div_ceil(BRANCHING_FACTOR);
+
+    // Split into chunks of BRANCHING_FACTOR with pre-allocated capacity
+    let mut leaves: Vec<ReferenceCounter<Node<T>>> = Vec::with_capacity(leaf_count);
     let mut iter = elements.into_iter();
 
     loop {
@@ -3467,7 +3475,9 @@ fn build_root_from_elements<T>(elements: Vec<T>) -> (ReferenceCounter<Node<T>>, 
     let mut shift = BITS_PER_LEVEL;
 
     while current_level.len() > BRANCHING_FACTOR {
-        let mut next_level: Vec<ReferenceCounter<Node<T>>> = Vec::new();
+        // Pre-calculate the number of nodes needed for next level
+        let next_level_count = current_level.len().div_ceil(BRANCHING_FACTOR);
+        let mut next_level: Vec<ReferenceCounter<Node<T>>> = Vec::with_capacity(next_level_count);
 
         for chunk in current_level.chunks(BRANCHING_FACTOR) {
             let mut children: [Option<ReferenceCounter<Node<T>>>; BRANCHING_FACTOR] =
