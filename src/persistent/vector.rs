@@ -675,6 +675,44 @@ impl<T: Clone> Node<T> {
     fn leaf_from_tail_chunk(tail_chunk: &TailChunk<T>) -> Self {
         Self::Leaf(ReferenceCounter::from(tail_chunk.to_vec()))
     }
+
+    /// Converts a `RelaxedBranch` node to a regular `Branch` node recursively.
+    ///
+    /// This is used when converting a `PersistentVector` to a `TransientVector`,
+    /// as `TransientVector` does not support `RelaxedBranch` nodes.
+    ///
+    /// `Branch` and `Leaf` nodes are returned unchanged (only cloning the reference).
+    ///
+    /// # Returns
+    ///
+    /// A new node tree where all `RelaxedBranch` nodes have been converted to `Branch` nodes.
+    fn regularize(node: &ReferenceCounter<Self>) -> ReferenceCounter<Self> {
+        match node.as_ref() {
+            Self::Branch(children) => {
+                // Recursively regularize children
+                let new_children: [Option<ReferenceCounter<Self>>; BRANCHING_FACTOR] =
+                    std::array::from_fn(|i| {
+                        children[i].as_ref().map(|child| Self::regularize(child))
+                    });
+                ReferenceCounter::new(Self::Branch(ReferenceCounter::new(new_children)))
+            }
+            Self::RelaxedBranch { children, .. } => {
+                // Convert RelaxedBranch to Branch by placing children in their positions
+                let mut new_children: [Option<ReferenceCounter<Self>>; BRANCHING_FACTOR] =
+                    std::array::from_fn(|_| None);
+                for (index, child) in children.iter().enumerate() {
+                    if index < BRANCHING_FACTOR {
+                        new_children[index] = Some(Self::regularize(child));
+                    }
+                }
+                ReferenceCounter::new(Self::Branch(ReferenceCounter::new(new_children)))
+            }
+            Self::Leaf(_) => {
+                // Leaf nodes don't need regularization, just clone the reference
+                node.clone()
+            }
+        }
+    }
 }
 
 // =============================================================================
@@ -1116,29 +1154,25 @@ impl<T: Clone> PersistentVector<T> {
         I: IntoIterator<Item = T>,
     {
         let iter = iter.into_iter();
-        let (lower_bound, _) = iter.size_hint();
+        let (lower_bound, upper_bound) = iter.size_hint();
 
-        // For small additions (<=4 elements expected), use individual push_back
-        // This avoids the overhead of transient conversion for small cases
-        if lower_bound <= 4 {
-            let new_elements: Vec<T> = iter.collect();
-            if new_elements.is_empty() {
+        // For small additions where both bounds are known and small,
+        // use individual push_back to avoid transient conversion overhead
+        if lower_bound <= 4 && upper_bound == Some(lower_bound) {
+            let mut result = self.clone();
+            let mut count = 0;
+            for element in iter {
+                result = result.push_back(element);
+                count += 1;
+            }
+            if count == 0 {
                 return self.clone();
             }
-            if new_elements.len() <= 4 {
-                let mut result = self.clone();
-                for element in new_elements {
-                    result = result.push_back(element);
-                }
-                return result;
-            }
-            // If actual size was larger than hint, use transient path
-            let mut transient = self.clone().transient();
-            transient.push_back_many(new_elements);
-            return transient.persistent();
+            return result;
         }
 
-        // For larger additions, use TransientVector for efficient batch insert
+        // For all other cases, use TransientVector for efficient streaming batch insert.
+        // This avoids collecting elements into a temporary Vec.
         let mut transient = self.clone().transient();
         transient.push_back_many(iter);
         transient.persistent()
@@ -1274,10 +1308,16 @@ impl<T: Clone> PersistentVector<T> {
                 let mut new_children: Vec<_> = children.iter().cloned().collect();
                 let mut new_size_table: Vec<_> = size_table.iter().copied().collect();
 
+                // Calculate the actual size of the tail node (may be less than BRANCHING_FACTOR)
+                let tail_size = match &tail_node {
+                    Node::Leaf(elements) => elements.len(),
+                    _ => BRANCHING_FACTOR, // Fallback for non-leaf (shouldn't happen at this level)
+                };
+
                 if level == BITS_PER_LEVEL {
                     new_children.push(ReferenceCounter::new(tail_node));
                     let last_size = *size_table.last().unwrap_or(&0);
-                    new_size_table.push(last_size + BRANCHING_FACTOR);
+                    new_size_table.push(last_size + tail_size);
                 } else {
                     let child = Self::push_tail_into_node(
                         &children[last_index],
@@ -1286,9 +1326,9 @@ impl<T: Clone> PersistentVector<T> {
                         tail_node,
                     );
                     new_children[last_index] = ReferenceCounter::new(child);
-                    // Update size table (add BRANCHING_FACTOR for the new tail)
+                    // Update size table with actual tail size
                     if let Some(last) = new_size_table.last_mut() {
-                        *last += BRANCHING_FACTOR;
+                        *last += tail_size;
                     }
                 }
 
@@ -4245,8 +4285,11 @@ impl<T: Clone> PersistentVector<T> {
     /// ```
     #[must_use]
     pub fn transient(self) -> TransientVector<T> {
+        // Regularize the root to convert any RelaxedBranch nodes to Branch nodes.
+        // TransientVector does not support RelaxedBranch nodes.
+        let regularized_root = Node::regularize(&self.root);
         TransientVector {
-            root: self.root,
+            root: regularized_root,
             tail: self.tail.as_ref().clone(),
             length: self.length,
             shift: self.shift,
