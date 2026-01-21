@@ -655,8 +655,25 @@ impl<T: Clone> Node<T> {
     ///
     /// A new Leaf node that shares the underlying storage
     #[inline]
+    #[allow(dead_code)]
     const fn leaf_from_reference_counter(elements: ReferenceCounter<[T]>) -> Self {
         Self::Leaf(elements)
+    }
+
+    /// Creates a leaf node from a `TailChunk`.
+    ///
+    /// Converts the `TailChunk`'s elements into a `ReferenceCounter<[T]>`.
+    ///
+    /// # Arguments
+    ///
+    /// * `tail_chunk` - The `TailChunk` to convert
+    ///
+    /// # Returns
+    ///
+    /// A new Leaf node containing the `TailChunk`'s elements
+    #[inline]
+    fn leaf_from_tail_chunk(tail_chunk: &TailChunk<T>) -> Self {
+        Self::Leaf(ReferenceCounter::from(tail_chunk.to_vec()))
     }
 }
 
@@ -770,8 +787,11 @@ pub struct PersistentVector<T> {
     shift: usize,
     /// Root node of the trie
     root: ReferenceCounter<Node<T>>,
-    /// Tail buffer for efficient append (up to 32 elements)
-    tail: ReferenceCounter<[T]>,
+    /// Tail buffer for efficient append (up to 32 elements).
+    ///
+    /// Uses `TailChunk` internally for fixed-capacity storage,
+    /// avoiding heap reallocation during push operations.
+    tail: ReferenceCounter<TailChunk<T>>,
 }
 
 impl<T> PersistentVector<T> {
@@ -792,7 +812,7 @@ impl<T> PersistentVector<T> {
             length: 0,
             shift: BITS_PER_LEVEL,
             root: ReferenceCounter::new(Node::empty_branch()),
-            tail: ReferenceCounter::from(Vec::<T>::new()),
+            tail: ReferenceCounter::new(TailChunk::new()),
         }
     }
 
@@ -818,7 +838,7 @@ impl<T> PersistentVector<T> {
             length: 1,
             shift: BITS_PER_LEVEL,
             root: ReferenceCounter::new(Node::empty_branch()),
-            tail: ReferenceCounter::from(vec![element]),
+            tail: ReferenceCounter::new(TailChunk::singleton(element)),
         }
     }
 
@@ -1043,20 +1063,20 @@ impl<T: Clone> PersistentVector<T> {
     /// ```
     #[must_use]
     pub fn push_back(&self, element: T) -> Self {
-        if self.tail.len() < BRANCHING_FACTOR {
+        if self.tail.is_full() {
+            // Tail is full, push tail to root and create new tail
+            self.push_tail_to_root(element)
+        } else {
             // Tail has space, just add to tail
-            let mut new_tail = self.tail.to_vec();
+            let mut new_tail = self.tail.as_ref().clone();
             new_tail.push(element);
 
             Self {
                 length: self.length + 1,
                 shift: self.shift,
                 root: self.root.clone(),
-                tail: ReferenceCounter::from(new_tail.as_slice()),
+                tail: ReferenceCounter::new(new_tail),
             }
-        } else {
-            // Tail is full, push tail to root and create new tail
-            self.push_tail_to_root(element)
         }
     }
 
@@ -1161,8 +1181,8 @@ impl<T: Clone> PersistentVector<T> {
 
     /// Pushes the current tail into the root and creates a new tail with the element.
     fn push_tail_to_root(&self, element: T) -> Self {
-        // Use leaf_from_reference_counter to avoid copying elements - only increments reference count O(1)
-        let tail_leaf = Node::leaf_from_reference_counter(self.tail.clone());
+        // Convert TailChunk to Leaf node
+        let tail_leaf = Node::leaf_from_tail_chunk(self.tail.as_ref());
         let tail_offset = self.tail_offset();
 
         // Check if we need to increase the tree depth
@@ -1182,7 +1202,7 @@ impl<T: Clone> PersistentVector<T> {
                 length: self.length + 1,
                 shift: self.shift + BITS_PER_LEVEL,
                 root: ReferenceCounter::new(Node::Branch(ReferenceCounter::new(new_root_children))),
-                tail: ReferenceCounter::from([element].as_slice()),
+                tail: ReferenceCounter::new(TailChunk::singleton(element)),
             }
         } else {
             // Push tail into existing root
@@ -1193,7 +1213,7 @@ impl<T: Clone> PersistentVector<T> {
                 length: self.length + 1,
                 shift: self.shift,
                 root: ReferenceCounter::new(new_root),
-                tail: ReferenceCounter::from([element].as_slice()),
+                tail: ReferenceCounter::new(TailChunk::singleton(element)),
             }
         }
     }
@@ -1316,25 +1336,26 @@ impl<T: Clone> PersistentVector<T> {
         }
 
         if self.length == 1 {
-            return Some((Self::new(), self.tail[0].clone()));
+            return Some((Self::new(), self.tail.get(0).unwrap().clone()));
         }
 
         if self.tail.len() > 1 {
             // Just remove from tail
             let element = self.tail.last().unwrap().clone();
-            let new_tail: Vec<T> = self.tail[..self.tail.len() - 1].to_vec();
+            let mut new_tail = self.tail.as_ref().clone();
+            new_tail.pop();
 
             let new_vector = Self {
                 length: self.length - 1,
                 shift: self.shift,
                 root: self.root.clone(),
-                tail: ReferenceCounter::from(new_tail.as_slice()),
+                tail: ReferenceCounter::new(new_tail),
             };
 
             Some((new_vector, element))
         } else {
             // Tail has only 1 element, need to pop from root
-            let element = self.tail[0].clone();
+            let element = self.tail.get(0).unwrap().clone();
             let new_tail_offset = self.length - BRANCHING_FACTOR - 1;
 
             // Get the new tail from the root
@@ -1354,8 +1375,8 @@ impl<T: Clone> PersistentVector<T> {
         }
     }
 
-    /// Gets the leaf at the given offset.
-    fn get_leaf_at(&self, offset: usize) -> ReferenceCounter<[T]> {
+    /// Gets the leaf at the given offset and converts it to a `TailChunk`.
+    fn get_leaf_at(&self, offset: usize) -> ReferenceCounter<TailChunk<T>> {
         let mut node = &self.root;
         let mut level = self.shift;
         let mut current_offset = offset;
@@ -1368,7 +1389,7 @@ impl<T: Clone> PersistentVector<T> {
                         node = child;
                         level -= BITS_PER_LEVEL;
                     } else {
-                        return ReferenceCounter::from([].as_slice());
+                        return ReferenceCounter::new(TailChunk::new());
                     }
                 }
                 Node::RelaxedBranch {
@@ -1377,7 +1398,7 @@ impl<T: Clone> PersistentVector<T> {
                 } => {
                     let child_index = find_child_index(size_table, current_offset);
                     if child_index >= children.len() {
-                        return ReferenceCounter::from([].as_slice());
+                        return ReferenceCounter::new(TailChunk::new());
                     }
                     current_offset = if child_index == 0 {
                         current_offset
@@ -1392,8 +1413,8 @@ impl<T: Clone> PersistentVector<T> {
         }
 
         match node.as_ref() {
-            Node::Leaf(elements) => elements.clone(),
-            Node::Branch(_) | Node::RelaxedBranch { .. } => ReferenceCounter::from([].as_slice()),
+            Node::Leaf(elements) => ReferenceCounter::new(TailChunk::from_slice(elements)),
+            Node::Branch(_) | Node::RelaxedBranch { .. } => ReferenceCounter::new(TailChunk::new()),
         }
     }
 
@@ -1636,14 +1657,13 @@ impl<T: Clone> PersistentVector<T> {
             let actual_tail_offset = self.length - tail_len;
             if index >= actual_tail_offset {
                 let tail_index = index - actual_tail_offset;
-                let mut new_tail = self.tail.to_vec();
-                new_tail[tail_index] = element;
+                let new_tail = self.tail.update(tail_index, element);
 
                 return Some(Self {
                     length: self.length,
                     shift: self.shift,
                     root: self.root.clone(),
-                    tail: ReferenceCounter::from(new_tail.as_slice()),
+                    tail: ReferenceCounter::new(new_tail),
                 });
             }
         }
@@ -1818,7 +1838,7 @@ impl<T: Clone> PersistentVector<T> {
                 length: self.length + other.length,
                 shift: BITS_PER_LEVEL,
                 root: ReferenceCounter::new(merged_root),
-                tail: ReferenceCounter::from([].as_slice()),
+                tail: ReferenceCounter::new(TailChunk::new()),
             };
         }
 
@@ -1835,7 +1855,7 @@ impl<T: Clone> PersistentVector<T> {
             length: total_length,
             shift: new_shift.max(BITS_PER_LEVEL),
             root: merged_ref,
-            tail: ReferenceCounter::from([].as_slice()),
+            tail: ReferenceCounter::new(TailChunk::new()),
         }
     }
 
@@ -1859,7 +1879,7 @@ impl<T: Clone> PersistentVector<T> {
             return self.clone();
         }
 
-        let tail_leaf = Node::leaf_from_reference_counter(self.tail.clone());
+        let tail_leaf = Node::leaf_from_tail_chunk(self.tail.as_ref());
         let tail_offset = self.tail_offset();
 
         let root_overflow = tail_offset > 0 && (tail_offset >> self.shift) >= BRANCHING_FACTOR;
@@ -1875,14 +1895,14 @@ impl<T: Clone> PersistentVector<T> {
                 length: self.length,
                 shift: self.shift + BITS_PER_LEVEL,
                 root: ReferenceCounter::new(Node::Branch(ReferenceCounter::new(new_root_children))),
-                tail: ReferenceCounter::from([].as_slice()),
+                tail: ReferenceCounter::new(TailChunk::new()),
             }
         } else if tail_offset == 0 {
             Self {
                 length: self.length,
                 shift: BITS_PER_LEVEL,
                 root: ReferenceCounter::new(tail_leaf),
-                tail: ReferenceCounter::from([].as_slice()),
+                tail: ReferenceCounter::new(TailChunk::new()),
             }
         } else {
             let new_root =
@@ -1892,7 +1912,7 @@ impl<T: Clone> PersistentVector<T> {
                 length: self.length,
                 shift: self.shift,
                 root: ReferenceCounter::new(new_root),
-                tail: ReferenceCounter::from([].as_slice()),
+                tail: ReferenceCounter::new(TailChunk::new()),
             }
         }
     }
@@ -2857,8 +2877,7 @@ impl<'a, T> Iterator for PersistentVectorIterator<'a, T> {
                     self.tail_index = 0;
                 }
                 IteratorState::ProcessingTail => {
-                    if self.tail_index < self.vector.tail.len() {
-                        let element = &self.vector.tail[self.tail_index];
+                    if let Some(element) = self.vector.tail.get(self.tail_index) {
                         self.tail_index += 1;
                         self.elements_returned += 1;
                         return Some(element);
@@ -3093,11 +3112,10 @@ impl<T: Clone> Iterator for PersistentVectorIntoIterator<T> {
                     self.tail_index = 0;
                 }
                 IteratorState::ProcessingTail => {
-                    if self.tail_index < self.vector.tail.len() {
-                        let element = self.vector.tail[self.tail_index].clone();
+                    if let Some(element) = self.vector.tail.get(self.tail_index) {
                         self.tail_index += 1;
                         self.elements_returned += 1;
-                        return Some(element);
+                        return Some(element.clone());
                     }
                     self.state = IteratorState::Exhausted;
                     return None;
@@ -3360,11 +3378,12 @@ fn build_persistent_vector_from_vec<T>(elements: Vec<T>) -> PersistentVector<T> 
 
     // For small vectors, just put everything in the tail
     if length <= BRANCHING_FACTOR {
+        let tail_chunk: TailChunk<T> = elements.into_iter().collect();
         return PersistentVector {
             length,
             shift: BITS_PER_LEVEL,
             root: ReferenceCounter::new(Node::empty_branch()),
-            tail: ReferenceCounter::from(elements),
+            tail: ReferenceCounter::new(tail_chunk),
         };
     }
 
@@ -3385,11 +3404,12 @@ fn build_persistent_vector_from_vec<T>(elements: Vec<T>) -> PersistentVector<T> 
     // Build the root tree
     let (root, shift) = build_root_from_elements(root_elements);
 
+    let tail_chunk: TailChunk<T> = tail_elements.into_iter().collect();
     PersistentVector {
         length,
         shift,
         root,
-        tail: ReferenceCounter::from(tail_elements),
+        tail: ReferenceCounter::new(tail_chunk),
     }
 }
 
@@ -4093,11 +4113,12 @@ impl<T: Clone> TransientVector<T> {
     /// ```
     #[must_use]
     pub fn persistent(self) -> PersistentVector<T> {
+        let tail_chunk: TailChunk<T> = self.tail.into_iter().collect();
         PersistentVector {
             length: self.length,
             shift: self.shift,
             root: self.root,
-            tail: ReferenceCounter::from(self.tail),
+            tail: ReferenceCounter::new(tail_chunk),
         }
     }
 }
