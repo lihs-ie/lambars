@@ -717,31 +717,36 @@ impl<T: Clone> PersistentVector<T> {
     where
         I: IntoIterator<Item = T>,
     {
-        let new_elements: Vec<T> = iter.into_iter().collect();
+        let mut iter = iter.into_iter();
 
-        if new_elements.is_empty() {
+        // Early return for empty iterator without allocating Vec
+        let Some(first) = iter.next() else {
             return self.clone();
-        }
+        };
+
+        // Collect remaining elements
+        let remaining: Vec<T> = iter.collect();
+        let total_new = 1 + remaining.len();
 
         // For small additions (<=4 elements), use individual push_back
-        // This avoids the overhead of collecting all elements for small cases
-        if new_elements.len() <= 4 {
-            let mut result = self.clone();
-            for element in new_elements {
+        if total_new <= 4 {
+            let mut result = self.push_back(first);
+            for element in remaining {
                 result = result.push_back(element);
             }
             return result;
         }
 
         // For larger additions, collect all elements and rebuild
-        let total_length = self.length + new_elements.len();
+        let total_length = self.length + total_new;
         let mut all_elements: Vec<T> = Vec::with_capacity(total_length);
 
         // Collect existing elements via efficient O(N) iterator
         for element in self {
             all_elements.push(element.clone());
         }
-        all_elements.extend(new_elements);
+        all_elements.push(first);
+        all_elements.extend(remaining);
 
         // Rebuild using the efficient batch construction
         build_persistent_vector_from_vec(all_elements)

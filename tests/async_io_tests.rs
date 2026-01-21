@@ -444,6 +444,7 @@ mod conversion_tests {
     }
 
     #[rstest]
+    #[allow(deprecated)]
     fn test_async_io_to_sync_basic() {
         // AsyncIO を IO に変換（同期コンテキストで実行）
         let async_io = AsyncIO::pure(42);
@@ -453,6 +454,7 @@ mod conversion_tests {
     }
 
     #[rstest]
+    #[allow(deprecated)]
     fn test_async_io_to_sync_preserves_value() {
         // 変換後も値が保持される
         let async_io = AsyncIO::pure("hello".to_string());
@@ -462,6 +464,7 @@ mod conversion_tests {
     }
 
     #[rstest]
+    #[allow(deprecated)]
     fn test_io_to_async_to_sync_roundtrip() {
         // IO -> AsyncIO -> IO のラウンドトリップ
         let original = 42;
@@ -473,6 +476,7 @@ mod conversion_tests {
     }
 
     #[rstest]
+    #[allow(deprecated)]
     fn test_async_io_to_sync_is_lazy() {
         // AsyncIO::to_sync で変換された IO は遅延評価を維持
         let counter = Arc::new(AtomicUsize::new(0));

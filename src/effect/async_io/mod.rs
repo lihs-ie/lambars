@@ -1668,14 +1668,18 @@ impl<A: Send + 'static> AsyncIO<A> {
 impl<A: Send + 'static> AsyncIO<A> {
     /// Converts an `AsyncIO` to a synchronous IO.
     ///
-    /// This creates a new tokio runtime to execute the async computation
-    /// synchronously.
+    /// # Deprecation
+    ///
+    /// This method is deprecated since version 0.2.0.
+    /// Use [`runtime::run_blocking`] to execute async computations synchronously,
+    /// or `.await` in async contexts.
     ///
     /// # Warning
     ///
-    /// This method cannot be used within an async context as it creates
-    /// a new runtime. Using it inside an async function will cause a
-    /// "nested runtime" panic.
+    /// This method uses [`runtime::run_blocking`] internally, which cannot
+    /// be called from within a current-thread runtime (e.g., `#[tokio::test]`
+    /// with `flavor = "current_thread"`). Calling this from a current-thread
+    /// runtime will panic.
     ///
     /// # Examples
     ///
@@ -1690,16 +1694,33 @@ impl<A: Send + 'static> AsyncIO<A> {
     /// }
     /// ```
     ///
+    /// # Recommended Alternatives
+    ///
+    /// ```rust,ignore
+    /// use lambars::effect::async_io::runtime;
+    /// use lambars::effect::AsyncIO;
+    ///
+    /// // Alternative 1: Use runtime::run_blocking
+    /// let async_io = AsyncIO::pure(42);
+    /// let result = runtime::run_blocking(async_io.run_async());
+    ///
+    /// // Alternative 2: Use await in async context
+    /// async fn example() {
+    ///     let async_io = AsyncIO::pure(42);
+    ///     let result = async_io.run_async().await;
+    /// }
+    /// ```
+    ///
     /// # Panics
     ///
-    /// Panics if creating the tokio runtime fails.
+    /// Panics if called from within a current-thread runtime.
     #[must_use]
+    #[deprecated(
+        since = "0.2.0",
+        note = "Use `runtime::run_blocking` or await in async context"
+    )]
     pub fn to_sync(self) -> super::IO<A> {
-        super::IO::new(move || {
-            let runtime =
-                tokio::runtime::Runtime::new().expect("Failed to create tokio runtime for to_sync");
-            runtime.block_on(self.run_async())
-        })
+        super::IO::new(move || runtime::run_blocking(self.run_async()))
     }
 }
 
