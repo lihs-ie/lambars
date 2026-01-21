@@ -478,52 +478,40 @@ fn get_from_node<T>(node: &ReferenceCounter<Node<T>>, index: usize, shift: usize
 
     while current_shift > 0 {
         match current_node.as_ref() {
-            Node::Branch(children) => {
-                let child_index = (current_index >> current_shift) & MASK;
+            Node::Branch {
+                children,
+                size_table,
+            } => {
+                // Use size_table for index lookup (supports both regular and relaxed)
+                let child_index = find_child_index(size_table.as_slice(), current_index);
+                if child_index >= children.len() {
+                    return None;
+                }
                 match &children[child_index] {
                     Some(child) => {
+                        // Adjust index for the child's local coordinate
+                        current_index = if child_index == 0 {
+                            current_index
+                        } else {
+                            current_index - size_table[child_index - 1]
+                        };
                         current_node = child;
                         current_shift -= BITS_PER_LEVEL;
                     }
                     None => return None,
                 }
             }
-            Node::RelaxedBranch {
-                children,
-                size_table,
-            } => {
-                let child_index = find_child_index(size_table, current_index);
-                if child_index >= children.len() {
-                    return None;
-                }
-                current_index = if child_index == 0 {
-                    current_index
-                } else {
-                    current_index - size_table[child_index - 1]
-                };
-                current_node = &children[child_index];
-                current_shift -= BITS_PER_LEVEL;
-            }
             Node::Leaf(_) => break,
         }
     }
 
     match current_node.as_ref() {
-        Node::Leaf(elements) => elements.get(current_index & MASK),
-        Node::Branch(children) => {
-            let child_index = current_index & MASK;
-            children[child_index]
-                .as_ref()
-                .and_then(|child| match child.as_ref() {
-                    Node::Leaf(elements) => elements.first(),
-                    Node::Branch(_) | Node::RelaxedBranch { .. } => None,
-                })
-        }
-        Node::RelaxedBranch {
+        Node::Leaf(chunk) => chunk.get(current_index),
+        Node::Branch {
             children,
             size_table,
         } => {
-            let child_index = find_child_index(size_table, current_index);
+            let child_index = find_child_index(size_table.as_slice(), current_index);
             if child_index >= children.len() {
                 return None;
             }
@@ -532,10 +520,12 @@ fn get_from_node<T>(node: &ReferenceCounter<Node<T>>, index: usize, shift: usize
             } else {
                 current_index - size_table[child_index - 1]
             };
-            match children[child_index].as_ref() {
-                Node::Leaf(elements) => elements.get(local_index),
-                _ => None,
-            }
+            children[child_index]
+                .as_ref()
+                .and_then(|child| match child.as_ref() {
+                    Node::Leaf(chunk) => chunk.get(local_index),
+                    Node::Branch { .. } => None,
+                })
         }
     }
 }
@@ -546,142 +536,152 @@ fn get_from_node<T>(node: &ReferenceCounter<Node<T>>, index: usize, shift: usize
 
 /// Internal node structure for the radix balanced tree.
 ///
-/// Supports both regular nodes (`Branch`, `Leaf`) and relaxed nodes (`RelaxedBranch`)
-/// for RRB-Tree based efficient concatenation.
+/// All branch nodes have a size table for unified index calculation,
+/// which enables efficient RRB-Tree operations after concatenation.
 #[derive(Clone)]
 enum Node<T> {
-    /// Branch node containing child nodes (regular structure)
-    Branch(ReferenceCounter<[Option<ReferenceCounter<Self>>; BRANCHING_FACTOR]>),
-
-    /// Relaxed branch node for RRB-Tree concatenation support.
+    /// Branch node containing child nodes with size table.
     ///
-    /// Unlike regular `Branch` nodes, `RelaxedBranch` allows variable number of
-    /// children (1 to `BRANCHING_FACTOR`) and uses a size table for O(log n)
-    /// index calculation.
-    #[allow(dead_code)]
-    RelaxedBranch {
-        /// Child nodes (1 to `BRANCHING_FACTOR` children)
-        children: ReferenceCounter<[ReferenceCounter<Self>]>,
-        /// Cumulative size table: `size_table[i]` = total elements in `children[0..=i]`
-        size_table: ReferenceCounter<[usize]>,
+    /// The size table stores cumulative sizes for O(log n) index lookup.
+    /// `size_table[i]` = total elements in `children[0..=i]`.
+    /// Invariant: `children.len() == size_table.len()`.
+    Branch {
+        /// Child nodes (up to `BRANCHING_FACTOR` children).
+        /// Sparse slots are represented with `None`.
+        children: ReferenceCounter<ArrayVec<Option<ReferenceCounter<Self>>, BRANCHING_FACTOR>>,
+        /// Cumulative size table for index calculation.
+        size_table: ReferenceCounter<ArrayVec<usize, BRANCHING_FACTOR>>,
     },
 
-    /// Leaf node containing actual elements
-    Leaf(ReferenceCounter<[T]>),
+    /// Leaf node containing actual elements.
+    ///
+    /// Uses `LeafChunk` for fixed-capacity storage without heap reallocation.
+    Leaf(ReferenceCounter<LeafChunk<T>>),
 }
 
 impl<T> Node<T> {
     /// Creates an empty branch node.
+    ///
+    /// The branch has empty children and `size_table` arrays.
     fn empty_branch() -> Self {
-        Self::Branch(ReferenceCounter::new(std::array::from_fn(|_| None)))
-    }
-
-    /// Returns whether this node is a regular (non-relaxed) node.
-    ///
-    /// Regular nodes are `Branch` and `Leaf` nodes that follow the standard
-    /// Radix Balanced Tree structure. `RelaxedBranch` nodes are not regular
-    /// because they may have variable numbers of children.
-    ///
-    /// # Returns
-    ///
-    /// `true` if this is a `Branch` or `Leaf` node, `false` for `RelaxedBranch`
-    #[allow(dead_code)]
-    const fn is_regular(&self) -> bool {
-        match self {
-            Self::Branch(_) | Self::Leaf(_) => true,
-            Self::RelaxedBranch { .. } => false,
+        Self::Branch {
+            children: ReferenceCounter::new(ArrayVec::new()),
+            size_table: ReferenceCounter::new(ArrayVec::new()),
         }
     }
 
-    /// Returns the number of child nodes.
-    ///
-    /// For `Branch` nodes, counts the non-None children.
-    /// For `RelaxedBranch` nodes, returns the length of the children array.
-    /// For `Leaf` nodes, returns 0 (leaves have no children).
-    ///
-    /// # Returns
-    ///
-    /// The number of child nodes
-    #[allow(dead_code)]
-    fn child_count(&self) -> usize {
-        match self {
-            Self::Branch(children) => children.iter().filter(|child| child.is_some()).count(),
-            Self::RelaxedBranch { children, .. } => children.len(),
-            Self::Leaf(_) => 0,
-        }
-    }
-
-    /// Creates a `RelaxedBranch` node from a vector of children and size table.
+    /// Creates a branch node with the given children and size table.
     ///
     /// # Arguments
     ///
-    /// * `children` - Vector of child nodes (1 to `BRANCHING_FACTOR`)
+    /// * `children` - Child nodes (up to `BRANCHING_FACTOR`)
     /// * `size_table` - Cumulative sizes: `size_table[i]` = total elements in `children[0..=i]`
-    ///
-    /// # Returns
-    ///
-    /// A new `RelaxedBranch` node
     ///
     /// # Panics
     ///
-    /// Panics if `children` and `size_table` have different lengths
+    /// Debug panics if `children` and `size_table` have different lengths.
     #[allow(dead_code)]
-    fn relaxed_branch_from_children(
-        children: Vec<ReferenceCounter<Self>>,
-        size_table: Vec<usize>,
+    fn branch_with_size_table(
+        children: ArrayVec<Option<ReferenceCounter<Self>>, BRANCHING_FACTOR>,
+        size_table: ArrayVec<usize, BRANCHING_FACTOR>,
     ) -> Self {
         debug_assert_eq!(
             children.len(),
             size_table.len(),
             "Children and size_table must have the same length"
         );
-        Self::RelaxedBranch {
-            children: ReferenceCounter::from(children),
-            size_table: ReferenceCounter::from(size_table),
+        Self::Branch {
+            children: ReferenceCounter::new(children),
+            size_table: ReferenceCounter::new(size_table),
         }
     }
 
-    /// Returns `true` if this node or any of its descendants is a `RelaxedBranch`.
+    /// Returns the number of child slots in the branch.
     ///
-    /// This method is used to determine whether a tree needs to be regularized
-    /// before conversion to `TransientVector`.
+    /// For `Branch` nodes, returns the length of the children array.
+    /// For `Leaf` nodes, returns 0 (leaves have no children).
     ///
     /// # Returns
     ///
-    /// `true` if any `RelaxedBranch` node exists in the subtree, `false` otherwise
-    fn contains_relaxed_branch(&self) -> bool {
+    /// The number of child slots
+    #[allow(dead_code)]
+    fn child_count(&self) -> usize {
         match self {
-            Self::Branch(children) => children
-                .iter()
-                .flatten()
-                .any(|child| child.contains_relaxed_branch()),
-            Self::RelaxedBranch { .. } => true,
+            Self::Branch { children, .. } => {
+                children.iter().filter(|child| child.is_some()).count()
+            }
+            Self::Leaf(_) => 0,
+        }
+    }
+
+    /// Returns the total number of elements in this subtree.
+    ///
+    /// For `Branch` nodes, returns the last value in the size table (total cumulative size).
+    /// For `Leaf` nodes, returns the number of elements in the leaf.
+    fn subtree_size(&self) -> usize {
+        match self {
+            Self::Branch { size_table, .. } => size_table.last().copied().unwrap_or(0),
+            Self::Leaf(chunk) => chunk.len(),
+        }
+    }
+
+    /// Returns whether this node is a relaxed branch (has non-uniform subtree sizes).
+    ///
+    /// A branch is considered "relaxed" if its children have varying sizes that
+    /// don't follow the regular radix pattern. This affects index lookup strategy.
+    ///
+    /// # Returns
+    ///
+    /// `true` if this is a relaxed branch, `false` otherwise
+    #[allow(dead_code)]
+    fn is_relaxed(&self) -> bool {
+        match self {
+            Self::Branch { children, .. } => {
+                // A branch is relaxed if any non-None child has a size different from expected
+                // For a regular branch, cumulative sizes follow a pattern based on level
+                if children.is_empty() {
+                    return false;
+                }
+                // Check if we have sparse slots (None in the middle)
+                let mut found_none = false;
+                for child in children.iter() {
+                    if child.is_none() {
+                        found_none = true;
+                    } else if found_none {
+                        // Found Some after None - this is relaxed
+                        return true;
+                    }
+                }
+                // Also check if sizes are non-uniform (can't determine without level info)
+                // For now, consider it relaxed if there are any None slots in use
+                children.iter().any(|c| c.is_none()) && !children.is_empty()
+            }
             Self::Leaf(_) => false,
         }
     }
 }
 
 impl<T: Clone> Node<T> {
-    /// Creates a leaf node by reusing an existing `ReferenceCounter<[T]>`.
+    /// Creates a leaf node by reusing an existing `ReferenceCounter<LeafChunk<T>>`.
     ///
     /// This avoids copying the elements and only increments the reference count.
     ///
     /// # Arguments
     ///
-    /// * `elements` - An existing `ReferenceCounter<[T]>` to reuse
+    /// * `chunk` - An existing `ReferenceCounter<LeafChunk<T>>` to reuse
     ///
     /// # Returns
     ///
     /// A new Leaf node that shares the underlying storage
     #[inline]
     #[allow(dead_code)]
-    const fn leaf_from_reference_counter(elements: ReferenceCounter<[T]>) -> Self {
-        Self::Leaf(elements)
+    const fn leaf_from_reference_counter(chunk: ReferenceCounter<LeafChunk<T>>) -> Self {
+        Self::Leaf(chunk)
     }
 
     /// Creates a leaf node from a `TailChunk`.
     ///
-    /// Converts the `TailChunk`'s elements into a `ReferenceCounter<[T]>`.
+    /// Converts the `TailChunk`'s elements into a `LeafChunk`.
     ///
     /// # Arguments
     ///
@@ -692,7 +692,38 @@ impl<T: Clone> Node<T> {
     /// A new Leaf node containing the `TailChunk`'s elements
     #[inline]
     fn leaf_from_tail_chunk(tail_chunk: &TailChunk<T>) -> Self {
-        Self::Leaf(ReferenceCounter::from(tail_chunk.to_vec()))
+        Self::Leaf(ReferenceCounter::new(LeafChunk::from_slice(
+            tail_chunk.as_slice(),
+        )))
+    }
+
+    /// Creates a leaf node from a slice.
+    ///
+    /// # Arguments
+    ///
+    /// * `slice` - The slice to create the leaf from
+    ///
+    /// # Returns
+    ///
+    /// A new Leaf node containing the elements
+    #[inline]
+    #[allow(dead_code)]
+    fn leaf_from_slice(slice: &[T]) -> Self {
+        Self::Leaf(ReferenceCounter::new(LeafChunk::from_slice(slice)))
+    }
+
+    /// Creates a leaf node from a `LeafChunk`.
+    ///
+    /// # Arguments
+    ///
+    /// * `chunk` - The `LeafChunk` to wrap
+    ///
+    /// # Returns
+    ///
+    /// A new Leaf node containing the chunk
+    #[inline]
+    fn leaf_from_chunk(chunk: LeafChunk<T>) -> Self {
+        Self::Leaf(ReferenceCounter::new(chunk))
     }
 }
 
@@ -1199,6 +1230,7 @@ impl<T: Clone> PersistentVector<T> {
         // Convert TailChunk to Leaf node
         let tail_leaf = Node::leaf_from_tail_chunk(self.tail.as_ref());
         let tail_offset = self.tail_offset();
+        let tail_size = self.tail.len();
 
         // Check if we need to increase the tree depth
         // The tree can hold up to BRANCHING_FACTOR^(shift/BITS_PER_LEVEL + 1) elements in root
@@ -1206,23 +1238,38 @@ impl<T: Clone> PersistentVector<T> {
         let root_overflow = (tail_offset >> self.shift) >= BRANCHING_FACTOR;
 
         if root_overflow {
-            // Create a new root level
-            let mut new_root_children: [Option<ReferenceCounter<Node<T>>>; BRANCHING_FACTOR] =
-                std::array::from_fn(|_| None);
-            new_root_children[0] = Some(self.root.clone());
-            new_root_children[1] =
-                Some(ReferenceCounter::new(Self::new_path(self.shift, tail_leaf)));
+            // Create a new root level with two children: old root and new path
+            let old_root_size = self.root.subtree_size();
+            let new_path_node = Self::new_path(self.shift, tail_leaf);
+            let new_path_size = new_path_node.subtree_size();
+
+            let mut new_children: ArrayVec<Option<ReferenceCounter<Node<T>>>, BRANCHING_FACTOR> =
+                ArrayVec::new();
+            new_children.push(Some(self.root.clone()));
+            new_children.push(Some(ReferenceCounter::new(new_path_node)));
+
+            let mut new_size_table: ArrayVec<usize, BRANCHING_FACTOR> = ArrayVec::new();
+            new_size_table.push(old_root_size);
+            new_size_table.push(old_root_size + new_path_size);
 
             Self {
                 length: self.length + 1,
                 shift: self.shift + BITS_PER_LEVEL,
-                root: ReferenceCounter::new(Node::Branch(ReferenceCounter::new(new_root_children))),
+                root: ReferenceCounter::new(Node::Branch {
+                    children: ReferenceCounter::new(new_children),
+                    size_table: ReferenceCounter::new(new_size_table),
+                }),
                 tail: ReferenceCounter::new(TailChunk::singleton(element)),
             }
         } else {
             // Push tail into existing root
-            let new_root =
-                Self::push_tail_into_node(&self.root, self.shift, tail_offset, tail_leaf);
+            let new_root = Self::push_tail_into_node(
+                &self.root,
+                self.shift,
+                tail_offset,
+                tail_leaf,
+                tail_size,
+            );
 
             Self {
                 length: self.length + 1,
@@ -1238,13 +1285,19 @@ impl<T: Clone> PersistentVector<T> {
         if level == 0 {
             node
         } else {
-            let mut children: [Option<ReferenceCounter<Node<T>>>; BRANCHING_FACTOR] =
-                std::array::from_fn(|_| None);
-            children[0] = Some(ReferenceCounter::new(Self::new_path(
+            let child_size = node.subtree_size();
+            let mut children: ArrayVec<Option<ReferenceCounter<Node<T>>>, BRANCHING_FACTOR> =
+                ArrayVec::new();
+            children.push(Some(ReferenceCounter::new(Self::new_path(
                 level - BITS_PER_LEVEL,
                 node,
-            )));
-            Node::Branch(ReferenceCounter::new(children))
+            ))));
+            let mut size_table: ArrayVec<usize, BRANCHING_FACTOR> = ArrayVec::new();
+            size_table.push(child_size);
+            Node::Branch {
+                children: ReferenceCounter::new(children),
+                size_table: ReferenceCounter::new(size_table),
+            }
         }
     }
 
@@ -1254,68 +1307,71 @@ impl<T: Clone> PersistentVector<T> {
         level: usize,
         tail_offset: usize,
         tail_node: Node<T>,
+        tail_size: usize,
     ) -> Node<T> {
         let subindex = (tail_offset >> level) & MASK;
 
         match node.as_ref() {
-            Node::Branch(children) => {
-                let mut new_children = children.as_ref().clone();
-
-                if level == BITS_PER_LEVEL {
-                    // We're at the bottom branch level, insert the tail leaf
-                    new_children[subindex] = Some(ReferenceCounter::new(tail_node));
-                } else {
-                    // Recurse down
-                    let child = match &children[subindex] {
-                        Some(c) => Self::push_tail_into_node(
-                            c,
-                            level - BITS_PER_LEVEL,
-                            tail_offset,
-                            tail_node,
-                        ),
-                        None => Self::new_path(level - BITS_PER_LEVEL, tail_node),
-                    };
-                    new_children[subindex] = Some(ReferenceCounter::new(child));
-                }
-
-                Node::Branch(ReferenceCounter::new(new_children))
-            }
-            Node::RelaxedBranch {
+            Node::Branch {
                 children,
                 size_table,
             } => {
-                // For RelaxedBranch, we need to update the last child and size table
-                let last_index = children.len() - 1;
-                let mut new_children: Vec<_> = children.iter().cloned().collect();
-                let mut new_size_table: Vec<_> = size_table.iter().copied().collect();
-
-                // Calculate the actual size of the tail node (may be less than BRANCHING_FACTOR)
-                let tail_size = match &tail_node {
-                    Node::Leaf(elements) => elements.len(),
-                    _ => BRANCHING_FACTOR, // Fallback for non-leaf (shouldn't happen at this level)
-                };
+                let mut new_children = children.as_ref().clone();
+                let mut new_size_table = size_table.as_ref().clone();
 
                 if level == BITS_PER_LEVEL {
-                    new_children.push(ReferenceCounter::new(tail_node));
-                    let last_size = *size_table.last().unwrap_or(&0);
-                    new_size_table.push(last_size + tail_size);
-                } else {
-                    let child = Self::push_tail_into_node(
-                        &children[last_index],
-                        level - BITS_PER_LEVEL,
-                        tail_offset,
-                        tail_node,
-                    );
-                    new_children[last_index] = ReferenceCounter::new(child);
-                    // Update size table with actual tail size
-                    if let Some(last) = new_size_table.last_mut() {
-                        *last += tail_size;
+                    // We're at the bottom branch level, insert the tail leaf
+                    // Extend children array if needed
+                    while new_children.len() <= subindex {
+                        new_children.push(None);
+                        let prev_size = new_size_table.last().copied().unwrap_or(0);
+                        new_size_table.push(prev_size);
                     }
+                    new_children[subindex] = Some(ReferenceCounter::new(tail_node));
+                    // Update size table: cumulative size at subindex = prev_size + tail_size
+                    let prev_size = if subindex > 0 {
+                        new_size_table[subindex - 1]
+                    } else {
+                        0
+                    };
+                    new_size_table[subindex] = prev_size + tail_size;
+                } else {
+                    // Recurse down
+                    let new_child = if subindex < children.len() {
+                        match &children[subindex] {
+                            Some(c) => Self::push_tail_into_node(
+                                c,
+                                level - BITS_PER_LEVEL,
+                                tail_offset,
+                                tail_node,
+                                tail_size,
+                            ),
+                            None => Self::new_path(level - BITS_PER_LEVEL, tail_node),
+                        }
+                    } else {
+                        Self::new_path(level - BITS_PER_LEVEL, tail_node)
+                    };
+                    let new_child_size = new_child.subtree_size();
+
+                    // Extend children array if needed
+                    while new_children.len() <= subindex {
+                        new_children.push(None);
+                        let prev_size = new_size_table.last().copied().unwrap_or(0);
+                        new_size_table.push(prev_size);
+                    }
+                    new_children[subindex] = Some(ReferenceCounter::new(new_child));
+                    // Update size table: cumulative size at subindex = prev_size + new_child_size
+                    let prev_size = if subindex > 0 {
+                        new_size_table[subindex - 1]
+                    } else {
+                        0
+                    };
+                    new_size_table[subindex] = prev_size + new_child_size;
                 }
 
-                Node::RelaxedBranch {
-                    children: ReferenceCounter::from(new_children),
-                    size_table: ReferenceCounter::from(new_size_table),
+                Node::Branch {
+                    children: ReferenceCounter::new(new_children),
+                    size_table: ReferenceCounter::new(new_size_table),
                 }
             }
             Node::Leaf(_) => {
@@ -1404,38 +1460,33 @@ impl<T: Clone> PersistentVector<T> {
 
         while level > 0 {
             match node.as_ref() {
-                Node::Branch(children) => {
-                    let child_index = (current_offset >> level) & MASK;
+                Node::Branch {
+                    children,
+                    size_table,
+                } => {
+                    let child_index = find_child_index(size_table.as_slice(), current_offset);
+                    if child_index >= children.len() {
+                        return ReferenceCounter::new(TailChunk::new());
+                    }
                     if let Some(child) = &children[child_index] {
+                        current_offset = if child_index == 0 {
+                            current_offset
+                        } else {
+                            current_offset - size_table[child_index - 1]
+                        };
                         node = child;
                         level -= BITS_PER_LEVEL;
                     } else {
                         return ReferenceCounter::new(TailChunk::new());
                     }
                 }
-                Node::RelaxedBranch {
-                    children,
-                    size_table,
-                } => {
-                    let child_index = find_child_index(size_table, current_offset);
-                    if child_index >= children.len() {
-                        return ReferenceCounter::new(TailChunk::new());
-                    }
-                    current_offset = if child_index == 0 {
-                        current_offset
-                    } else {
-                        current_offset - size_table[child_index - 1]
-                    };
-                    node = &children[child_index];
-                    level -= BITS_PER_LEVEL;
-                }
                 Node::Leaf(_) => break,
             }
         }
 
         match node.as_ref() {
-            Node::Leaf(elements) => ReferenceCounter::new(TailChunk::from_slice(elements)),
-            Node::Branch(_) | Node::RelaxedBranch { .. } => ReferenceCounter::new(TailChunk::new()),
+            Node::Leaf(chunk) => ReferenceCounter::new(TailChunk::from_slice(chunk.as_slice())),
+            Node::Branch { .. } => ReferenceCounter::new(TailChunk::new()),
         }
     }
 
@@ -1446,7 +1497,7 @@ impl<T: Clone> PersistentVector<T> {
 
         // Check if we should reduce tree depth
         match new_root.as_ref() {
-            Node::Branch(children) => {
+            Node::Branch { children, .. } => {
                 if self.shift > BITS_PER_LEVEL {
                     // Count non-None children
                     let non_none_count = children.iter().filter(|c| c.is_some()).count();
@@ -1455,12 +1506,6 @@ impl<T: Clone> PersistentVector<T> {
                     {
                         return (only_child.clone(), self.shift - BITS_PER_LEVEL);
                     }
-                }
-                (new_root, self.shift)
-            }
-            Node::RelaxedBranch { children, .. } => {
-                if self.shift > BITS_PER_LEVEL && children.len() == 1 {
-                    return (children[0].clone(), self.shift - BITS_PER_LEVEL);
                 }
                 (new_root, self.shift)
             }
@@ -1474,98 +1519,88 @@ impl<T: Clone> PersistentVector<T> {
         level: usize,
         offset: usize,
     ) -> (ReferenceCounter<Node<T>>, bool) {
-        let subindex = (offset >> level) & MASK;
-
         match node.as_ref() {
-            Node::Branch(children) => {
-                if level == BITS_PER_LEVEL {
-                    // At bottom level, remove the child
-                    let mut new_children = children.as_ref().clone();
-                    new_children[subindex] = None;
-
-                    let all_none = new_children.iter().all(|c| c.is_none());
-                    (
-                        ReferenceCounter::new(Node::Branch(ReferenceCounter::new(new_children))),
-                        all_none,
-                    )
-                } else if let Some(child) = &children[subindex] {
-                    let (new_child, is_empty) =
-                        Self::do_pop_tail(child, level - BITS_PER_LEVEL, offset);
-                    let mut new_children = children.as_ref().clone();
-
-                    if is_empty {
-                        new_children[subindex] = None;
-                    } else {
-                        new_children[subindex] = Some(new_child);
-                    }
-
-                    let all_none = new_children.iter().all(|c| c.is_none());
-                    (
-                        ReferenceCounter::new(Node::Branch(ReferenceCounter::new(new_children))),
-                        all_none,
-                    )
-                } else {
-                    (node.clone(), false)
-                }
-            }
-            Node::RelaxedBranch {
+            Node::Branch {
                 children,
                 size_table,
             } => {
-                let child_index = find_child_index(size_table, offset);
+                let child_index = find_child_index(size_table.as_slice(), offset);
                 if child_index >= children.len() {
                     return (node.clone(), false);
                 }
+
+                let local_offset = if child_index == 0 {
+                    offset
+                } else {
+                    offset - size_table[child_index - 1]
+                };
 
                 if level == BITS_PER_LEVEL {
                     // At bottom level, remove the last child
                     if children.len() == 1 {
                         return (node.clone(), true);
                     }
-                    let new_children: Vec<_> =
-                        children.iter().take(children.len() - 1).cloned().collect();
-                    let new_size_table: Vec<_> = size_table
-                        .iter()
-                        .take(size_table.len() - 1)
-                        .copied()
-                        .collect();
+                    let mut new_children: ArrayVec<
+                        Option<ReferenceCounter<Node<T>>>,
+                        BRANCHING_FACTOR,
+                    > = ArrayVec::new();
+                    let mut new_size_table: ArrayVec<usize, BRANCHING_FACTOR> = ArrayVec::new();
+                    for (i, child) in children.iter().take(children.len() - 1).enumerate() {
+                        new_children.push(child.clone());
+                        new_size_table.push(size_table[i]);
+                    }
                     let is_empty = new_children.is_empty();
                     (
-                        ReferenceCounter::new(Node::RelaxedBranch {
-                            children: ReferenceCounter::from(new_children),
-                            size_table: ReferenceCounter::from(new_size_table),
+                        ReferenceCounter::new(Node::Branch {
+                            children: ReferenceCounter::new(new_children),
+                            size_table: ReferenceCounter::new(new_size_table),
                         }),
                         is_empty,
                     )
-                } else {
-                    let local_offset = if child_index == 0 {
-                        offset
-                    } else {
-                        offset - size_table[child_index - 1]
-                    };
-                    let (new_child, is_empty) = Self::do_pop_tail(
-                        &children[child_index],
-                        level - BITS_PER_LEVEL,
-                        local_offset,
-                    );
-                    let mut new_children: Vec<_> = children.iter().cloned().collect();
-                    let mut new_size_table: Vec<_> = size_table.iter().copied().collect();
+                } else if let Some(child) = &children[child_index] {
+                    let (new_child, is_empty) =
+                        Self::do_pop_tail(child, level - BITS_PER_LEVEL, local_offset);
+
+                    let mut new_children: ArrayVec<
+                        Option<ReferenceCounter<Node<T>>>,
+                        BRANCHING_FACTOR,
+                    > = ArrayVec::new();
+                    let mut new_size_table: ArrayVec<usize, BRANCHING_FACTOR> = ArrayVec::new();
 
                     if is_empty {
-                        new_children.pop();
-                        new_size_table.pop();
+                        // Remove the child
+                        for (i, c) in children.iter().enumerate() {
+                            if i < child_index {
+                                new_children.push(c.clone());
+                                new_size_table.push(size_table[i]);
+                            }
+                        }
                     } else {
-                        new_children[child_index] = new_child;
+                        // Update the child
+                        for (i, c) in children.iter().enumerate() {
+                            if i == child_index {
+                                new_children.push(Some(new_child.clone()));
+                                // Recalculate size for this position
+                                let child_size = new_child.subtree_size();
+                                let prev_size = if i > 0 { new_size_table[i - 1] } else { 0 };
+                                new_size_table.push(prev_size + child_size);
+                            } else {
+                                new_children.push(c.clone());
+                                new_size_table.push(size_table[i]);
+                            }
+                        }
                     }
 
                     let all_empty = new_children.is_empty();
                     (
-                        ReferenceCounter::new(Node::RelaxedBranch {
-                            children: ReferenceCounter::from(new_children),
-                            size_table: ReferenceCounter::from(new_size_table),
+                        ReferenceCounter::new(Node::Branch {
+                            children: ReferenceCounter::new(new_children),
+                            size_table: ReferenceCounter::new(new_size_table),
                         }),
                         all_empty,
                     )
+                } else {
+                    (node.clone(), false)
                 }
             }
             Node::Leaf(_) => (node.clone(), true),
@@ -1700,6 +1735,7 @@ impl<T: Clone> PersistentVector<T> {
     }
 
     /// Updates an element in the root tree.
+    #[allow(clippy::only_used_in_recursion)]
     fn update_in_root(
         node: &ReferenceCounter<Node<T>>,
         level: usize,
@@ -1707,32 +1743,11 @@ impl<T: Clone> PersistentVector<T> {
         element: T,
     ) -> Node<T> {
         match node.as_ref() {
-            Node::Branch(children) => {
-                let subindex = (index >> level) & MASK;
-                let mut new_children = children.as_ref().clone();
-
-                if level > 0 {
-                    if let Some(child) = &children[subindex] {
-                        new_children[subindex] = Some(ReferenceCounter::new(Self::update_in_root(
-                            child,
-                            level - BITS_PER_LEVEL,
-                            index,
-                            element,
-                        )));
-                    }
-                } else if let Some(child) = &children[subindex] {
-                    new_children[subindex] = Some(ReferenceCounter::new(Self::update_in_root(
-                        child, 0, index, element,
-                    )));
-                }
-
-                Node::Branch(ReferenceCounter::new(new_children))
-            }
-            Node::RelaxedBranch {
+            Node::Branch {
                 children,
                 size_table,
             } => {
-                let child_index = find_child_index(size_table, index);
+                let child_index = find_child_index(size_table.as_slice(), index);
                 if child_index >= children.len() {
                     return node.as_ref().clone();
                 }
@@ -1742,26 +1757,25 @@ impl<T: Clone> PersistentVector<T> {
                     index - size_table[child_index - 1]
                 };
 
-                let mut new_children: Vec<_> = children.iter().cloned().collect();
-                new_children[child_index] = ReferenceCounter::new(Self::update_in_root(
-                    &children[child_index],
-                    level - BITS_PER_LEVEL,
-                    local_index,
-                    element,
-                ));
+                let mut new_children = children.as_ref().clone();
 
-                Node::RelaxedBranch {
-                    children: ReferenceCounter::from(new_children),
+                if let Some(child) = &children[child_index] {
+                    new_children[child_index] = Some(ReferenceCounter::new(Self::update_in_root(
+                        child,
+                        level - BITS_PER_LEVEL,
+                        local_index,
+                        element,
+                    )));
+                }
+
+                Node::Branch {
+                    children: ReferenceCounter::new(new_children),
                     size_table: size_table.clone(),
                 }
             }
-            Node::Leaf(elements) => {
-                let leaf_index = index & MASK;
-                let mut new_elements = elements.to_vec();
-                if leaf_index < new_elements.len() {
-                    new_elements[leaf_index] = element;
-                }
-                Node::Leaf(ReferenceCounter::from(new_elements.as_slice()))
+            Node::Leaf(chunk) => {
+                let new_chunk = chunk.update(index, element);
+                Node::Leaf(ReferenceCounter::new(new_chunk))
             }
         }
     }
@@ -1849,11 +1863,19 @@ impl<T: Clone> PersistentVector<T> {
         let target_height = left_height.max(right_height);
 
         if target_height == 1 {
-            let children = vec![left_flushed.root, right_flushed.root];
-            let size_table = Self::build_size_table(&children, 1);
-            let merged_root = Node::RelaxedBranch {
-                children: ReferenceCounter::from(children),
-                size_table: ReferenceCounter::from(size_table),
+            // Both are leaves, create a Branch with two children
+            let left_size = left_flushed.root.subtree_size();
+            let right_size = right_flushed.root.subtree_size();
+            let mut children: ArrayVec<Option<ReferenceCounter<Node<T>>>, BRANCHING_FACTOR> =
+                ArrayVec::new();
+            children.push(Some(left_flushed.root));
+            children.push(Some(right_flushed.root));
+            let mut size_table: ArrayVec<usize, BRANCHING_FACTOR> = ArrayVec::new();
+            size_table.push(left_size);
+            size_table.push(left_size + right_size);
+            let merged_root = Node::Branch {
+                children: ReferenceCounter::new(children),
+                size_table: ReferenceCounter::new(size_table),
             };
             return Self {
                 length: self.length + other.length,
@@ -1902,20 +1924,31 @@ impl<T: Clone> PersistentVector<T> {
 
         let tail_leaf = Node::leaf_from_tail_chunk(self.tail.as_ref());
         let tail_offset = self.tail_offset();
+        let tail_size = self.tail.len();
 
         let root_overflow = tail_offset > 0 && (tail_offset >> self.shift) >= BRANCHING_FACTOR;
 
         if root_overflow {
-            let mut new_root_children: [Option<ReferenceCounter<Node<T>>>; BRANCHING_FACTOR] =
-                std::array::from_fn(|_| None);
-            new_root_children[0] = Some(self.root.clone());
-            new_root_children[1] =
-                Some(ReferenceCounter::new(Self::new_path(self.shift, tail_leaf)));
+            let old_root_size = self.root.subtree_size();
+            let new_path_node = Self::new_path(self.shift, tail_leaf);
+            let new_path_size = new_path_node.subtree_size();
+
+            let mut new_children: ArrayVec<Option<ReferenceCounter<Node<T>>>, BRANCHING_FACTOR> =
+                ArrayVec::new();
+            new_children.push(Some(self.root.clone()));
+            new_children.push(Some(ReferenceCounter::new(new_path_node)));
+
+            let mut new_size_table: ArrayVec<usize, BRANCHING_FACTOR> = ArrayVec::new();
+            new_size_table.push(old_root_size);
+            new_size_table.push(old_root_size + new_path_size);
 
             Self {
                 length: self.length,
                 shift: self.shift + BITS_PER_LEVEL,
-                root: ReferenceCounter::new(Node::Branch(ReferenceCounter::new(new_root_children))),
+                root: ReferenceCounter::new(Node::Branch {
+                    children: ReferenceCounter::new(new_children),
+                    size_table: ReferenceCounter::new(new_size_table),
+                }),
                 tail: ReferenceCounter::new(TailChunk::new()),
             }
         } else if tail_offset == 0 {
@@ -1926,8 +1959,13 @@ impl<T: Clone> PersistentVector<T> {
                 tail: ReferenceCounter::new(TailChunk::new()),
             }
         } else {
-            let new_root =
-                Self::push_tail_into_node(&self.root, self.shift, tail_offset, tail_leaf);
+            let new_root = Self::push_tail_into_node(
+                &self.root,
+                self.shift,
+                tail_offset,
+                tail_leaf,
+                tail_size,
+            );
 
             Self {
                 length: self.length,
@@ -1949,10 +1987,16 @@ impl<T: Clone> PersistentVector<T> {
 
         let mut wrapped = node.clone();
         for _ in current_height..target_height {
-            let mut children: [Option<ReferenceCounter<Node<T>>>; BRANCHING_FACTOR] =
-                std::array::from_fn(|_| None);
-            children[0] = Some(wrapped);
-            wrapped = ReferenceCounter::new(Node::Branch(ReferenceCounter::new(children)));
+            let child_size = wrapped.subtree_size();
+            let mut children: ArrayVec<Option<ReferenceCounter<Node<T>>>, BRANCHING_FACTOR> =
+                ArrayVec::new();
+            children.push(Some(wrapped));
+            let mut size_table: ArrayVec<usize, BRANCHING_FACTOR> = ArrayVec::new();
+            size_table.push(child_size);
+            wrapped = ReferenceCounter::new(Node::Branch {
+                children: ReferenceCounter::new(children),
+                size_table: ReferenceCounter::new(size_table),
+            });
         }
         wrapped
     }
@@ -2005,9 +2049,20 @@ impl<T: Clone> PersistentVector<T> {
         let mut result = Vec::with_capacity(result_capacity);
         for chunk in all_children.chunks(BRANCHING_FACTOR) {
             let size_table = Self::build_size_table(chunk, height - 1);
-            result.push(ReferenceCounter::new(Node::RelaxedBranch {
-                children: ReferenceCounter::from(chunk.to_vec()),
-                size_table: ReferenceCounter::from(size_table),
+            let mut children_arrayvec: ArrayVec<
+                Option<ReferenceCounter<Node<T>>>,
+                BRANCHING_FACTOR,
+            > = ArrayVec::new();
+            for child in chunk {
+                children_arrayvec.push(Some(child.clone()));
+            }
+            let mut size_table_arrayvec: ArrayVec<usize, BRANCHING_FACTOR> = ArrayVec::new();
+            for size in size_table {
+                size_table_arrayvec.push(size);
+            }
+            result.push(ReferenceCounter::new(Node::Branch {
+                children: ReferenceCounter::new(children_arrayvec),
+                size_table: ReferenceCounter::new(size_table_arrayvec),
             }));
         }
         result
@@ -2030,10 +2085,21 @@ impl<T: Clone> PersistentVector<T> {
             )
         } else {
             let size_table = Self::build_size_table(&merged_list, height);
+            let mut children_arrayvec: ArrayVec<
+                Option<ReferenceCounter<Node<T>>>,
+                BRANCHING_FACTOR,
+            > = ArrayVec::new();
+            for child in merged_list {
+                children_arrayvec.push(Some(child));
+            }
+            let mut size_table_arrayvec: ArrayVec<usize, BRANCHING_FACTOR> = ArrayVec::new();
+            for size in size_table {
+                size_table_arrayvec.push(size);
+            }
             (
-                Node::RelaxedBranch {
-                    children: ReferenceCounter::from(merged_list),
-                    size_table: ReferenceCounter::from(size_table),
+                Node::Branch {
+                    children: ReferenceCounter::new(children_arrayvec),
+                    size_table: ReferenceCounter::new(size_table_arrayvec),
                 },
                 height + 1,
             )
@@ -2042,17 +2108,12 @@ impl<T: Clone> PersistentVector<T> {
 
     fn get_children(node: &ReferenceCounter<Node<T>>) -> Vec<ReferenceCounter<Node<T>>> {
         match node.as_ref() {
-            Node::Branch(children) => {
+            Node::Branch { children, .. } => {
                 // Pre-allocate with worst-case capacity
                 let mut result = Vec::with_capacity(BRANCHING_FACTOR);
                 for child in children.iter().flatten() {
                     result.push(child.clone());
                 }
-                result
-            }
-            Node::RelaxedBranch { children, .. } => {
-                let mut result = Vec::with_capacity(children.len());
-                result.extend(children.iter().cloned());
                 result
             }
             Node::Leaf(_) => vec![node.clone()],
@@ -2140,9 +2201,20 @@ impl<T: Clone> PersistentVector<T> {
 
             if !parent_children.is_empty() {
                 let size_table = Self::build_size_table(&parent_children, height - 1);
-                result.push(ReferenceCounter::new(Node::RelaxedBranch {
-                    children: ReferenceCounter::from(parent_children),
-                    size_table: ReferenceCounter::from(size_table),
+                let mut children_arrayvec: ArrayVec<
+                    Option<ReferenceCounter<Node<T>>>,
+                    BRANCHING_FACTOR,
+                > = ArrayVec::new();
+                for child in parent_children {
+                    children_arrayvec.push(Some(child));
+                }
+                let mut size_table_arrayvec: ArrayVec<usize, BRANCHING_FACTOR> = ArrayVec::new();
+                for size in size_table {
+                    size_table_arrayvec.push(size);
+                }
+                result.push(ReferenceCounter::new(Node::Branch {
+                    children: ReferenceCounter::new(children_arrayvec),
+                    size_table: ReferenceCounter::new(size_table_arrayvec),
                 }));
             }
         }
@@ -2153,8 +2225,7 @@ impl<T: Clone> PersistentVector<T> {
     /// Returns the number of children in a node.
     fn child_count(node: &ReferenceCounter<Node<T>>) -> usize {
         match node.as_ref() {
-            Node::Branch(children) => children.iter().filter(|c| c.is_some()).count(),
-            Node::RelaxedBranch { children, .. } => children.len(),
+            Node::Branch { children, .. } => children.iter().filter(|c| c.is_some()).count(),
             Node::Leaf(_) => 0, // Leaves don't have children
         }
     }
@@ -2169,22 +2240,9 @@ impl<T: Clone> PersistentVector<T> {
         size_table
     }
 
-    fn node_size(node: &ReferenceCounter<Node<T>>, height: usize) -> usize {
-        match node.as_ref() {
-            Node::Leaf(elements) => elements.len(),
-            Node::Branch(children) => {
-                if height <= 1 {
-                    children.iter().filter_map(|child| child.as_ref()).count() * BRANCHING_FACTOR
-                } else {
-                    children
-                        .iter()
-                        .filter_map(|child| child.as_ref())
-                        .map(|child| Self::node_size(child, height - 1))
-                        .sum()
-                }
-            }
-            Node::RelaxedBranch { size_table, .. } => *size_table.last().unwrap_or(&0),
-        }
+    fn node_size(node: &ReferenceCounter<Node<T>>, _height: usize) -> usize {
+        // Use the size_table for efficient size calculation
+        node.subtree_size()
     }
 
     /// Returns a new vector containing the first `count` elements.
@@ -2709,6 +2767,7 @@ enum IteratorState {
 /// Holds a reference to a branch node's children array and tracks
 /// which child index to process next. This enables depth-first traversal
 /// with efficient backtracking.
+#[allow(dead_code)]
 struct TraversalStackEntry<'a, T> {
     /// Reference to the branch node's children array
     children: &'a [Option<ReferenceCounter<Node<T>>>; BRANCHING_FACTOR],
@@ -2725,6 +2784,7 @@ pub struct PersistentVectorIterator<'a, T> {
     /// Reference to the original vector (for lifetime and metadata)
     vector: &'a PersistentVector<T>,
     /// Stack for tree traversal (maximum depth is 7 for practical sizes)
+    #[allow(dead_code)]
     traversal_stack: Vec<TraversalStackEntry<'a, T>>,
     /// Currently cached leaf node elements
     current_leaf: Option<&'a [T]>,
@@ -2783,18 +2843,12 @@ impl<'a, T> PersistentVectorIterator<'a, T> {
     /// Initializes the iterator from the root node.
     fn initialize_from_root(&mut self) {
         match self.vector.root.as_ref() {
-            Node::Branch(children) => {
-                self.traversal_stack.push(TraversalStackEntry {
-                    children: children.as_ref(),
-                    child_index: 0,
-                });
-                self.descend_to_first_leaf();
-            }
-            Node::RelaxedBranch { .. } => {
+            Node::Branch { .. } => {
+                // Use index-based iteration for new Branch structure
                 self.state = IteratorState::IndexBased { current_index: 0 };
             }
-            Node::Leaf(elements) => {
-                self.current_leaf = Some(elements.as_ref());
+            Node::Leaf(chunk) => {
+                self.current_leaf = Some(chunk.as_slice());
                 self.leaf_index = 0;
             }
         }
@@ -2802,62 +2856,14 @@ impl<'a, T> PersistentVectorIterator<'a, T> {
 
     /// Descends from the current stack top to the first leaf node.
     ///
-    /// Traverses the tree depth-first, skipping None children, until
-    /// a leaf node is found.
+    /// Note: With the new Branch structure, we use index-based iteration,
+    /// so this method is a no-op placeholder.
+    #[allow(clippy::unused_self)]
+    #[allow(clippy::missing_const_for_fn)]
+    #[allow(clippy::needless_pass_by_ref_mut)]
     fn descend_to_first_leaf(&mut self) {
-        loop {
-            let stack_len = self.traversal_stack.len();
-            if stack_len == 0 {
-                break;
-            }
-
-            // Get current entry information
-            let entry = &mut self.traversal_stack[stack_len - 1];
-
-            // Find the first valid child in the current branch
-            let mut found_branch: Option<
-                &'a [Option<ReferenceCounter<Node<T>>>; BRANCHING_FACTOR],
-            > = None;
-            let mut found_leaf: Option<&'a [T]> = None;
-
-            while entry.child_index < BRANCHING_FACTOR {
-                let index = entry.child_index;
-                entry.child_index += 1;
-
-                if let Some(child) = &entry.children[index] {
-                    match child.as_ref() {
-                        Node::Branch(child_children) => {
-                            found_branch = Some(child_children.as_ref());
-                            break;
-                        }
-                        Node::RelaxedBranch { .. } => {
-                            // Skip RelaxedBranch for now - will be handled by fallback
-                        }
-                        Node::Leaf(elements) => {
-                            found_leaf = Some(elements.as_ref());
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if let Some(leaf) = found_leaf {
-                self.current_leaf = Some(leaf);
-                self.leaf_index = 0;
-                return;
-            }
-
-            if let Some(branch) = found_branch {
-                self.traversal_stack.push(TraversalStackEntry {
-                    children: branch,
-                    child_index: 0,
-                });
-                continue;
-            }
-
-            // All children processed, pop this entry
-            self.traversal_stack.pop();
-        }
+        // With the new unified Branch structure, we use index-based iteration
+        // This method is kept for backwards compatibility but does nothing
     }
 
     /// Advances to the next leaf node.
@@ -2946,6 +2952,7 @@ impl<T> ExactSizeIterator for PersistentVectorIterator<'_, T> {
 ///
 /// Unlike `TraversalStackEntry`, this holds an `ReferenceCounter<Node<T>>` directly
 /// to avoid lifetime issues with owned data.
+#[allow(dead_code)]
 struct IntoIteratorStackEntry<T> {
     /// The branch node (held via reference counting)
     node: ReferenceCounter<Node<T>>,
@@ -2962,9 +2969,10 @@ pub struct PersistentVectorIntoIterator<T> {
     /// The original vector (for accessing the tail)
     vector: PersistentVector<T>,
     /// Stack for tree traversal
+    #[allow(dead_code)]
     traversal_stack: Vec<IntoIteratorStackEntry<T>>,
     /// Currently cached leaf node (held via reference counting)
-    current_leaf: Option<ReferenceCounter<[T]>>,
+    current_leaf: Option<ReferenceCounter<LeafChunk<T>>>,
     /// Current position within the cached leaf
     leaf_index: usize,
     /// Current processing state
@@ -3003,7 +3011,6 @@ impl<T: Clone> PersistentVectorIntoIterator<T> {
                 elements_returned: 0,
             }
         } else {
-            let root_clone = vector.root.clone();
             let mut iterator = Self {
                 vector,
                 traversal_stack: Vec::with_capacity(7),
@@ -3013,90 +3020,35 @@ impl<T: Clone> PersistentVectorIntoIterator<T> {
                 tail_index: 0,
                 elements_returned: 0,
             };
-            iterator.initialize_from_root(root_clone);
+            iterator.initialize_from_root();
             iterator
         }
     }
 
     /// Initializes the iterator from the root node.
-    fn initialize_from_root(&mut self, root: ReferenceCounter<Node<T>>) {
-        match root.as_ref() {
-            Node::Branch(_) => {
-                self.traversal_stack.push(IntoIteratorStackEntry {
-                    node: root,
-                    child_index: 0,
-                });
-                self.descend_to_first_leaf();
-            }
-            Node::RelaxedBranch { .. } => {
+    fn initialize_from_root(&mut self) {
+        match self.vector.root.as_ref() {
+            Node::Branch { .. } => {
+                // Use index-based iteration for new Branch structure
                 self.state = IteratorState::IndexBased { current_index: 0 };
             }
-            Node::Leaf(elements) => {
-                self.current_leaf = Some(elements.clone());
+            Node::Leaf(chunk) => {
+                self.current_leaf = Some(chunk.clone());
                 self.leaf_index = 0;
             }
         }
     }
 
     /// Descends from the current stack top to the first leaf node.
+    ///
+    /// Note: With the new Branch structure, we use index-based iteration,
+    /// so this method is a no-op placeholder.
+    #[allow(clippy::unused_self)]
+    #[allow(clippy::missing_const_for_fn)]
+    #[allow(clippy::needless_pass_by_ref_mut)]
     fn descend_to_first_leaf(&mut self) {
-        loop {
-            let stack_len = self.traversal_stack.len();
-            if stack_len == 0 {
-                break;
-            }
-
-            let entry = &mut self.traversal_stack[stack_len - 1];
-
-            let children = match entry.node.as_ref() {
-                Node::Branch(c) => c,
-                Node::RelaxedBranch { .. } | Node::Leaf(_) => {
-                    self.traversal_stack.pop();
-                    continue;
-                }
-            };
-
-            let mut found_branch: Option<ReferenceCounter<Node<T>>> = None;
-            let mut found_leaf: Option<ReferenceCounter<[T]>> = None;
-
-            while entry.child_index < BRANCHING_FACTOR {
-                let index = entry.child_index;
-                entry.child_index += 1;
-
-                if let Some(child) = &children[index] {
-                    match child.as_ref() {
-                        Node::Branch(_) => {
-                            found_branch = Some(child.clone());
-                            break;
-                        }
-                        Node::RelaxedBranch { .. } => {
-                            // Skip RelaxedBranch for now
-                        }
-                        Node::Leaf(elements) => {
-                            found_leaf = Some(elements.clone());
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if let Some(leaf) = found_leaf {
-                self.current_leaf = Some(leaf);
-                self.leaf_index = 0;
-                return;
-            }
-
-            if let Some(branch) = found_branch {
-                self.traversal_stack.push(IntoIteratorStackEntry {
-                    node: branch,
-                    child_index: 0,
-                });
-                continue;
-            }
-
-            // All children processed, pop this entry
-            self.traversal_stack.pop();
-        }
+        // With the new unified Branch structure, we use index-based iteration
+        // This method is kept for backwards compatibility but does nothing
     }
 
     /// Advances to the next leaf node.
@@ -3123,8 +3075,8 @@ impl<T: Clone> Iterator for PersistentVectorIntoIterator<T> {
             match self.state {
                 IteratorState::TraversingTree => {
                     if let Some(ref leaf) = self.current_leaf {
-                        if self.leaf_index < leaf.len() {
-                            let element = leaf[self.leaf_index].clone();
+                        if let Some(element) = leaf.get(self.leaf_index) {
+                            let element = element.clone();
                             self.leaf_index += 1;
                             self.elements_returned += 1;
                             return Some(element);
@@ -3408,19 +3360,26 @@ impl<T: Clone> FunctorMut for PersistentVector<T> {
     where
         F: FnMut(T) -> B,
     {
-        build_persistent_vector_from_iter(self.into_iter().map(function))
+        // Build a new vector using the helper that works without Clone on B
+        let mut function = function;
+        let elements: Vec<B> = self.into_iter().map(&mut function).collect();
+        build_persistent_vector_from_vec_no_clone(elements)
     }
 
     fn fmap_ref_mut<B, F>(&self, function: F) -> PersistentVector<B>
     where
         F: FnMut(&T) -> B,
     {
-        build_persistent_vector_from_iter(self.iter().map(function))
+        // Build a new vector using the helper that works without Clone on B
+        let mut function = function;
+        let elements: Vec<B> = self.iter().map(&mut function).collect();
+        build_persistent_vector_from_vec_no_clone(elements)
     }
 }
 
-/// Helper function to build a `PersistentVector` from an iterator without requiring Clone.
-fn build_persistent_vector_from_iter<T, I>(iter: I) -> PersistentVector<T>
+/// Helper function to build a `PersistentVector` from an iterator.
+#[allow(dead_code)]
+fn build_persistent_vector_from_iter<T: Clone, I>(iter: I) -> PersistentVector<T>
 where
     I: Iterator<Item = T>,
 {
@@ -3428,8 +3387,8 @@ where
     build_persistent_vector_from_vec(elements)
 }
 
-/// Helper function to build a `PersistentVector` from a Vec without requiring Clone.
-fn build_persistent_vector_from_vec<T>(elements: Vec<T>) -> PersistentVector<T> {
+/// Helper function to build a `PersistentVector` from a Vec.
+fn build_persistent_vector_from_vec<T: Clone>(elements: Vec<T>) -> PersistentVector<T> {
     if elements.is_empty() {
         return PersistentVector::new();
     }
@@ -3474,7 +3433,7 @@ fn build_persistent_vector_from_vec<T>(elements: Vec<T>) -> PersistentVector<T> 
 }
 
 /// Build the root tree from a vector of elements.
-fn build_root_from_elements<T>(elements: Vec<T>) -> (ReferenceCounter<Node<T>>, usize) {
+fn build_root_from_elements<T: Clone>(elements: Vec<T>) -> (ReferenceCounter<Node<T>>, usize) {
     if elements.is_empty() {
         return (ReferenceCounter::new(Node::empty_branch()), BITS_PER_LEVEL);
     }
@@ -3491,18 +3450,26 @@ fn build_root_from_elements<T>(elements: Vec<T>) -> (ReferenceCounter<Node<T>>, 
         if chunk.is_empty() {
             break;
         }
-        leaves.push(ReferenceCounter::new(Node::Leaf(ReferenceCounter::from(
-            chunk,
+        let leaf_chunk: LeafChunk<T> = chunk.into_iter().collect();
+        leaves.push(ReferenceCounter::new(Node::Leaf(ReferenceCounter::new(
+            leaf_chunk,
         ))));
     }
 
     // If there's only one leaf, wrap it in a branch
     if leaves.len() == 1 {
-        let mut children: [Option<ReferenceCounter<Node<T>>>; BRANCHING_FACTOR] =
-            std::array::from_fn(|_| None);
-        children[0] = Some(leaves.remove(0));
+        let leaf = leaves.remove(0);
+        let leaf_size = leaf.subtree_size();
+        let mut children: ArrayVec<Option<ReferenceCounter<Node<T>>>, BRANCHING_FACTOR> =
+            ArrayVec::new();
+        children.push(Some(leaf));
+        let mut size_table: ArrayVec<usize, BRANCHING_FACTOR> = ArrayVec::new();
+        size_table.push(leaf_size);
         return (
-            ReferenceCounter::new(Node::Branch(ReferenceCounter::new(children))),
+            ReferenceCounter::new(Node::Branch {
+                children: ReferenceCounter::new(children),
+                size_table: ReferenceCounter::new(size_table),
+            }),
             BITS_PER_LEVEL,
         );
     }
@@ -3517,14 +3484,20 @@ fn build_root_from_elements<T>(elements: Vec<T>) -> (ReferenceCounter<Node<T>>, 
         let mut next_level: Vec<ReferenceCounter<Node<T>>> = Vec::with_capacity(next_level_count);
 
         for chunk in current_level.chunks(BRANCHING_FACTOR) {
-            let mut children: [Option<ReferenceCounter<Node<T>>>; BRANCHING_FACTOR] =
-                std::array::from_fn(|_| None);
-            for (index, node) in chunk.iter().enumerate() {
-                children[index] = Some(node.clone());
+            let mut children: ArrayVec<Option<ReferenceCounter<Node<T>>>, BRANCHING_FACTOR> =
+                ArrayVec::new();
+            let mut size_table: ArrayVec<usize, BRANCHING_FACTOR> = ArrayVec::new();
+            let mut cumulative_size = 0;
+            for node in chunk {
+                let node_size = node.subtree_size();
+                children.push(Some(node.clone()));
+                cumulative_size += node_size;
+                size_table.push(cumulative_size);
             }
-            next_level.push(ReferenceCounter::new(Node::Branch(ReferenceCounter::new(
-                children,
-            ))));
+            next_level.push(ReferenceCounter::new(Node::Branch {
+                children: ReferenceCounter::new(children),
+                size_table: ReferenceCounter::new(size_table),
+            }));
         }
 
         current_level = next_level;
@@ -3532,14 +3505,170 @@ fn build_root_from_elements<T>(elements: Vec<T>) -> (ReferenceCounter<Node<T>>, 
     }
 
     // Wrap the remaining nodes in the root branch
-    let mut root_children: [Option<ReferenceCounter<Node<T>>>; BRANCHING_FACTOR] =
-        std::array::from_fn(|_| None);
-    for (index, node) in current_level.into_iter().enumerate() {
-        root_children[index] = Some(node);
+    let mut root_children: ArrayVec<Option<ReferenceCounter<Node<T>>>, BRANCHING_FACTOR> =
+        ArrayVec::new();
+    let mut root_size_table: ArrayVec<usize, BRANCHING_FACTOR> = ArrayVec::new();
+    let mut cumulative_size = 0;
+    for node in current_level {
+        let node_size = node.subtree_size();
+        root_children.push(Some(node));
+        cumulative_size += node_size;
+        root_size_table.push(cumulative_size);
     }
 
     (
-        ReferenceCounter::new(Node::Branch(ReferenceCounter::new(root_children))),
+        ReferenceCounter::new(Node::Branch {
+            children: ReferenceCounter::new(root_children),
+            size_table: ReferenceCounter::new(root_size_table),
+        }),
+        shift,
+    )
+}
+
+/// Helper function to build a `PersistentVector` from a Vec without requiring Clone.
+///
+/// This is used for fmap operations where the output type doesn't implement Clone.
+fn build_persistent_vector_from_vec_no_clone<T>(elements: Vec<T>) -> PersistentVector<T> {
+    if elements.is_empty() {
+        return PersistentVector {
+            length: 0,
+            shift: BITS_PER_LEVEL,
+            root: ReferenceCounter::new(Node::empty_branch()),
+            tail: ReferenceCounter::new(TailChunk::new()),
+        };
+    }
+
+    let length = elements.len();
+
+    // For small vectors, just put everything in the tail
+    if length <= BRANCHING_FACTOR {
+        let tail_chunk: TailChunk<T> = elements.into_iter().collect();
+        return PersistentVector {
+            length,
+            shift: BITS_PER_LEVEL,
+            root: ReferenceCounter::new(Node::empty_branch()),
+            tail: ReferenceCounter::new(tail_chunk),
+        };
+    }
+
+    // Calculate how many elements go in the tail
+    let tail_size = length % BRANCHING_FACTOR;
+    let tail_size = if tail_size == 0 {
+        BRANCHING_FACTOR
+    } else {
+        tail_size
+    };
+    let root_size = length - tail_size;
+
+    // Split elements into root and tail portions
+    let mut elements = elements;
+    let tail_elements = elements.split_off(root_size);
+    let root_elements = elements;
+
+    // Build the root tree
+    let (root, shift) = build_root_from_elements_no_clone(root_elements);
+
+    let tail_chunk: TailChunk<T> = tail_elements.into_iter().collect();
+    PersistentVector {
+        length,
+        shift,
+        root,
+        tail: ReferenceCounter::new(tail_chunk),
+    }
+}
+
+/// Build the root tree from a vector of elements without requiring Clone.
+fn build_root_from_elements_no_clone<T>(elements: Vec<T>) -> (ReferenceCounter<Node<T>>, usize) {
+    if elements.is_empty() {
+        return (ReferenceCounter::new(Node::empty_branch()), BITS_PER_LEVEL);
+    }
+
+    // Pre-calculate the number of leaf nodes needed
+    let leaf_count = elements.len().div_ceil(BRANCHING_FACTOR);
+
+    // Split into chunks of BRANCHING_FACTOR with pre-allocated capacity
+    let mut leaves: Vec<ReferenceCounter<Node<T>>> = Vec::with_capacity(leaf_count);
+    let mut iter = elements.into_iter();
+
+    loop {
+        let chunk: Vec<T> = iter.by_ref().take(BRANCHING_FACTOR).collect();
+        if chunk.is_empty() {
+            break;
+        }
+        let leaf_size = chunk.len();
+        let leaf_chunk: LeafChunk<T> = chunk.into_iter().collect();
+        leaves.push(ReferenceCounter::new(Node::Leaf(ReferenceCounter::new(
+            leaf_chunk,
+        ))));
+        // Store size for later use (we'll rebuild size tables)
+        let _ = leaf_size;
+    }
+
+    // If there's only one leaf, wrap it in a branch
+    if leaves.len() == 1 {
+        let leaf = leaves.remove(0);
+        let leaf_size = leaf.subtree_size();
+        let mut children: ArrayVec<Option<ReferenceCounter<Node<T>>>, BRANCHING_FACTOR> =
+            ArrayVec::new();
+        children.push(Some(leaf));
+        let mut size_table: ArrayVec<usize, BRANCHING_FACTOR> = ArrayVec::new();
+        size_table.push(leaf_size);
+        return (
+            ReferenceCounter::new(Node::Branch {
+                children: ReferenceCounter::new(children),
+                size_table: ReferenceCounter::new(size_table),
+            }),
+            BITS_PER_LEVEL,
+        );
+    }
+
+    // Build tree bottom-up
+    let mut current_level = leaves;
+    let mut shift = BITS_PER_LEVEL;
+
+    while current_level.len() > BRANCHING_FACTOR {
+        // Pre-calculate the number of nodes needed for next level
+        let next_level_count = current_level.len().div_ceil(BRANCHING_FACTOR);
+        let mut next_level: Vec<ReferenceCounter<Node<T>>> = Vec::with_capacity(next_level_count);
+
+        for chunk in current_level.chunks(BRANCHING_FACTOR) {
+            let mut children: ArrayVec<Option<ReferenceCounter<Node<T>>>, BRANCHING_FACTOR> =
+                ArrayVec::new();
+            let mut size_table: ArrayVec<usize, BRANCHING_FACTOR> = ArrayVec::new();
+            let mut cumulative_size = 0;
+            for node in chunk {
+                let node_size = node.subtree_size();
+                children.push(Some(node.clone()));
+                cumulative_size += node_size;
+                size_table.push(cumulative_size);
+            }
+            next_level.push(ReferenceCounter::new(Node::Branch {
+                children: ReferenceCounter::new(children),
+                size_table: ReferenceCounter::new(size_table),
+            }));
+        }
+
+        current_level = next_level;
+        shift += BITS_PER_LEVEL;
+    }
+
+    // Wrap the remaining nodes in the root branch
+    let mut root_children: ArrayVec<Option<ReferenceCounter<Node<T>>>, BRANCHING_FACTOR> =
+        ArrayVec::new();
+    let mut root_size_table: ArrayVec<usize, BRANCHING_FACTOR> = ArrayVec::new();
+    let mut cumulative_size = 0;
+    for node in current_level {
+        let node_size = node.subtree_size();
+        root_children.push(Some(node));
+        cumulative_size += node_size;
+        root_size_table.push(cumulative_size);
+    }
+
+    (
+        ReferenceCounter::new(Node::Branch {
+            children: ReferenceCounter::new(root_children),
+            size_table: ReferenceCounter::new(root_size_table),
+        }),
         shift,
     )
 }
@@ -3737,7 +3866,7 @@ impl<T: Clone> TransientVector<T> {
     /// Pushes the current tail into the root tree.
     fn push_tail_to_root(&mut self) {
         let old_tail = std::mem::replace(&mut self.tail, TailChunk::new());
-        let tail_leaf = Node::Leaf(ReferenceCounter::from(old_tail.to_vec()));
+        let tail_leaf = Node::leaf_from_chunk(LeafChunk::from_slice(old_tail.as_slice()));
         let tail_offset = self.tail_offset();
 
         // Check if we need to increase the tree depth
@@ -3745,14 +3874,23 @@ impl<T: Clone> TransientVector<T> {
 
         if root_overflow {
             // Create a new root level
-            let mut new_root_children: [Option<ReferenceCounter<Node<T>>>; BRANCHING_FACTOR] =
-                std::array::from_fn(|_| None);
-            new_root_children[0] = Some(self.root.clone());
-            new_root_children[1] =
-                Some(ReferenceCounter::new(Self::new_path(self.shift, tail_leaf)));
+            let old_root_size = self.root.subtree_size();
+            let new_path_node = Self::new_path(self.shift, tail_leaf);
+            let new_path_size = new_path_node.subtree_size();
 
-            self.root =
-                ReferenceCounter::new(Node::Branch(ReferenceCounter::new(new_root_children)));
+            let mut new_children: ArrayVec<Option<ReferenceCounter<Node<T>>>, BRANCHING_FACTOR> =
+                ArrayVec::new();
+            new_children.push(Some(self.root.clone()));
+            new_children.push(Some(ReferenceCounter::new(new_path_node)));
+
+            let mut new_size_table: ArrayVec<usize, BRANCHING_FACTOR> = ArrayVec::new();
+            new_size_table.push(old_root_size);
+            new_size_table.push(old_root_size + new_path_size);
+
+            self.root = ReferenceCounter::new(Node::Branch {
+                children: ReferenceCounter::new(new_children),
+                size_table: ReferenceCounter::new(new_size_table),
+            });
             self.shift += BITS_PER_LEVEL;
         } else {
             // Push tail into existing root using COW
@@ -3765,13 +3903,19 @@ impl<T: Clone> TransientVector<T> {
         if level == 0 {
             node
         } else {
-            let mut children: [Option<ReferenceCounter<Node<T>>>; BRANCHING_FACTOR] =
-                std::array::from_fn(|_| None);
-            children[0] = Some(ReferenceCounter::new(Self::new_path(
+            let child_size = node.subtree_size();
+            let mut children: ArrayVec<Option<ReferenceCounter<Node<T>>>, BRANCHING_FACTOR> =
+                ArrayVec::new();
+            children.push(Some(ReferenceCounter::new(Self::new_path(
                 level - BITS_PER_LEVEL,
                 node,
-            )));
-            Node::Branch(ReferenceCounter::new(children))
+            ))));
+            let mut size_table: ArrayVec<usize, BRANCHING_FACTOR> = ArrayVec::new();
+            size_table.push(child_size);
+            Node::Branch {
+                children: ReferenceCounter::new(children),
+                size_table: ReferenceCounter::new(size_table),
+            }
         }
     }
 
@@ -3783,25 +3927,66 @@ impl<T: Clone> TransientVector<T> {
     }
 
     /// Recursively pushes a tail node into the tree with COW.
+    ///
+    /// Uses `size_table` to find the appropriate position for insertion,
+    /// supporting both regular and relaxed (concat-produced) tree structures.
+    #[allow(clippy::only_used_in_recursion)]
     fn push_tail_into_node_cow(
         node: &mut Node<T>,
         level: usize,
         tail_offset: usize,
         tail_node: Node<T>,
     ) {
-        let subindex = (tail_offset >> level) & MASK;
-
         match node {
-            Node::Branch(children) => {
+            Node::Branch {
+                children,
+                size_table,
+            } => {
                 let children_mut = ReferenceCounter::make_mut(children);
+                let size_table_mut = ReferenceCounter::make_mut(size_table);
+
+                // Determine insertion point based on current tree state
+                // For append operations, we want to insert at the end of the last child
+                // or create a new child if the last is full
 
                 if level == BITS_PER_LEVEL {
                     // We're at the bottom branch level, insert the tail leaf
-                    children_mut[subindex] = Some(ReferenceCounter::new(tail_node));
+                    // Append to the end
+                    let tail_size = tail_node.subtree_size();
+                    let prev_size = size_table_mut.last().copied().unwrap_or(0);
+                    children_mut.push(Some(ReferenceCounter::new(tail_node)));
+                    size_table_mut.push(prev_size + tail_size);
                 } else {
-                    // Recurse down
-                    match &mut children_mut[subindex] {
-                        Some(child) => {
+                    // Recurse down to the last child
+                    let last_index = children_mut.len().saturating_sub(1);
+
+                    // Check if we can push into the last child or need a new one
+                    // We need a new child if: there's no child, or last child is full
+                    let last_child_size = if children_mut.is_empty() {
+                        0
+                    } else {
+                        children_mut[last_index]
+                            .as_ref()
+                            .map_or(0, |child| child.subtree_size())
+                    };
+
+                    // Max size for a subtree at (level - BITS_PER_LEVEL)
+                    #[allow(clippy::cast_possible_truncation)]
+                    let max_subtree_size = BRANCHING_FACTOR.pow((level / BITS_PER_LEVEL) as u32);
+
+                    if children_mut.is_empty()
+                        || last_child_size >= max_subtree_size
+                        || children_mut[last_index].is_none()
+                    {
+                        // Need a new child
+                        let new_path = Self::new_path(level - BITS_PER_LEVEL, tail_node);
+                        let new_path_size = new_path.subtree_size();
+                        let prev_size = size_table_mut.last().copied().unwrap_or(0);
+                        children_mut.push(Some(ReferenceCounter::new(new_path)));
+                        size_table_mut.push(prev_size + new_path_size);
+                    } else {
+                        // Push into last child
+                        if let Some(child) = &mut children_mut[last_index] {
                             let child_mut = ReferenceCounter::make_mut(child);
                             Self::push_tail_into_node_cow(
                                 child_mut,
@@ -3809,20 +3994,17 @@ impl<T: Clone> TransientVector<T> {
                                 tail_offset,
                                 tail_node,
                             );
-                        }
-                        None => {
-                            children_mut[subindex] = Some(ReferenceCounter::new(Self::new_path(
-                                level - BITS_PER_LEVEL,
-                                tail_node,
-                            )));
+                            // Update size table for this child
+                            let child_size = child_mut.subtree_size();
+                            let prev_size = if last_index > 0 {
+                                size_table_mut[last_index - 1]
+                            } else {
+                                0
+                            };
+                            size_table_mut[last_index] = prev_size + child_size;
                         }
                     }
                 }
-            }
-            Node::RelaxedBranch { .. } => {
-                // RelaxedBranch should not appear in TransientVector
-                // Convert to regular push for now
-                *node = tail_node;
             }
             Node::Leaf(_) => {
                 // This shouldn't happen in a well-formed tree
@@ -3891,38 +4073,33 @@ impl<T: Clone> TransientVector<T> {
 
         while level > 0 {
             match node.as_ref() {
-                Node::Branch(children) => {
-                    let child_index = (current_offset >> level) & MASK;
+                Node::Branch {
+                    children,
+                    size_table,
+                } => {
+                    let child_index = find_child_index(size_table.as_slice(), current_offset);
+                    if child_index >= children.len() {
+                        return TailChunk::new();
+                    }
                     if let Some(child) = &children[child_index] {
+                        current_offset = if child_index == 0 {
+                            current_offset
+                        } else {
+                            current_offset - size_table[child_index - 1]
+                        };
                         node = child;
                         level -= BITS_PER_LEVEL;
                     } else {
                         return TailChunk::new();
                     }
                 }
-                Node::RelaxedBranch {
-                    children,
-                    size_table,
-                } => {
-                    let child_index = find_child_index(size_table, current_offset);
-                    if child_index >= children.len() {
-                        return TailChunk::new();
-                    }
-                    current_offset = if child_index == 0 {
-                        current_offset
-                    } else {
-                        current_offset - size_table[child_index - 1]
-                    };
-                    node = &children[child_index];
-                    level -= BITS_PER_LEVEL;
-                }
                 Node::Leaf(_) => break,
             }
         }
 
         match node.as_ref() {
-            Node::Leaf(elements) => TailChunk::from_slice(elements),
-            Node::Branch(_) | Node::RelaxedBranch { .. } => TailChunk::new(),
+            Node::Leaf(chunk) => TailChunk::from_slice(chunk.as_slice()),
+            Node::Branch { .. } => TailChunk::new(),
         }
     }
 
@@ -3937,18 +4114,12 @@ impl<T: Clone> TransientVector<T> {
         // Check if we should reduce tree depth
         if is_empty && self.shift > BITS_PER_LEVEL {
             match &*self.root {
-                Node::Branch(children) => {
+                Node::Branch { children, .. } => {
                     let non_none_count = children.iter().filter(|c| c.is_some()).count();
                     if non_none_count == 1
                         && let Some(only_child) = &children[0]
                     {
                         self.root = only_child.clone();
-                        self.shift -= BITS_PER_LEVEL;
-                    }
-                }
-                Node::RelaxedBranch { children, .. } => {
-                    if children.len() == 1 {
-                        self.root = children[0].clone();
                         self.shift -= BITS_PER_LEVEL;
                     }
                 }
@@ -3959,33 +4130,53 @@ impl<T: Clone> TransientVector<T> {
 
     /// Recursively pops the tail from the tree with COW.
     fn do_pop_tail_cow(node: &mut Node<T>, level: usize, offset: usize) -> bool {
-        let subindex = (offset >> level) & MASK;
-
         match node {
-            Node::Branch(children) => {
+            Node::Branch {
+                children,
+                size_table,
+            } => {
                 let children_mut = ReferenceCounter::make_mut(children);
+                let size_table_mut = ReferenceCounter::make_mut(size_table);
+
+                let child_index = find_child_index(size_table_mut.as_slice(), offset);
+                if child_index >= children_mut.len() {
+                    return false;
+                }
+
+                let local_offset = if child_index == 0 {
+                    offset
+                } else {
+                    offset - size_table_mut[child_index - 1]
+                };
 
                 if level == BITS_PER_LEVEL {
-                    // At bottom level, remove the child
-                    children_mut[subindex] = None;
-                    children_mut.iter().all(|c| c.is_none())
-                } else if let Some(child) = &mut children_mut[subindex] {
+                    // At bottom level, remove the last child
+                    children_mut.pop();
+                    size_table_mut.pop();
+                    children_mut.is_empty()
+                } else if let Some(child) = &mut children_mut[child_index] {
                     let child_mut = ReferenceCounter::make_mut(child);
-                    let is_empty = Self::do_pop_tail_cow(child_mut, level - BITS_PER_LEVEL, offset);
+                    let is_empty =
+                        Self::do_pop_tail_cow(child_mut, level - BITS_PER_LEVEL, local_offset);
 
                     if is_empty {
-                        children_mut[subindex] = None;
+                        children_mut.pop();
+                        size_table_mut.pop();
+                    } else {
+                        // Update size table
+                        let child_size = child_mut.subtree_size();
+                        let prev_size = if child_index > 0 {
+                            size_table_mut[child_index - 1]
+                        } else {
+                            0
+                        };
+                        size_table_mut[child_index] = prev_size + child_size;
                     }
 
-                    children_mut.iter().all(|c| c.is_none())
+                    children_mut.is_empty()
                 } else {
                     false
                 }
-            }
-            Node::RelaxedBranch { .. } => {
-                // RelaxedBranch should not appear in TransientVector
-                // Return false to indicate not empty
-                false
             }
             Node::Leaf(_) => true,
         }
@@ -4046,13 +4237,27 @@ impl<T: Clone> TransientVector<T> {
     /// Recursively updates an element in the tree with COW.
     fn do_update_in_root_cow(node: &mut Node<T>, level: usize, index: usize, element: T) -> T {
         match node {
-            Node::Branch(children) => {
-                let subindex = (index >> level) & MASK;
+            Node::Branch {
+                children,
+                size_table,
+            } => {
                 let children_mut = ReferenceCounter::make_mut(children);
+                let size_table_ref = size_table.as_ref();
+                let child_index = find_child_index(size_table_ref.as_slice(), index);
+                let local_index = if child_index == 0 {
+                    index
+                } else {
+                    index - size_table_ref[child_index - 1]
+                };
 
-                if let Some(child) = &mut children_mut[subindex] {
+                if let Some(child) = &mut children_mut[child_index] {
                     let child_mut = ReferenceCounter::make_mut(child);
-                    Self::do_update_in_root_cow(child_mut, level - BITS_PER_LEVEL, index, element)
+                    Self::do_update_in_root_cow(
+                        child_mut,
+                        level - BITS_PER_LEVEL,
+                        local_index,
+                        element,
+                    )
                 } else {
                     debug_assert!(
                         false,
@@ -4061,18 +4266,13 @@ impl<T: Clone> TransientVector<T> {
                     element
                 }
             }
-            Node::RelaxedBranch { .. } => {
-                // RelaxedBranch should not appear in TransientVector
-                debug_assert!(
-                    false,
-                    "TransientVector internal invariant violation: RelaxedBranch encountered"
-                );
-                element
-            }
-            Node::Leaf(elements) => {
-                let leaf_index = index & MASK;
-                let elements_mut = ReferenceCounter::make_mut(elements);
-                std::mem::replace(&mut elements_mut[leaf_index], element)
+            Node::Leaf(chunk) => {
+                let chunk_mut = ReferenceCounter::make_mut(chunk);
+                if let Some(slot) = chunk_mut.get_mut(index) {
+                    std::mem::replace(slot, element)
+                } else {
+                    element
+                }
             }
         }
     }
@@ -4138,34 +4338,41 @@ impl<T: Clone> TransientVector<T> {
     }
 
     /// Recursively updates an element in the tree using a function with COW.
+    #[allow(clippy::only_used_in_recursion)]
     fn do_update_with_in_root_cow<F>(node: &mut Node<T>, level: usize, index: usize, function: F)
     where
         F: FnOnce(T) -> T,
     {
         match node {
-            Node::Branch(children) => {
-                let subindex = (index >> level) & MASK;
+            Node::Branch {
+                children,
+                size_table,
+            } => {
                 let children_mut = ReferenceCounter::make_mut(children);
+                let size_table_ref = size_table.as_ref();
+                let child_index = find_child_index(size_table_ref.as_slice(), index);
+                let local_index = if child_index == 0 {
+                    index
+                } else {
+                    index - size_table_ref[child_index - 1]
+                };
 
-                if let Some(child) = &mut children_mut[subindex] {
+                if let Some(child) = &mut children_mut[child_index] {
                     let child_mut = ReferenceCounter::make_mut(child);
                     Self::do_update_with_in_root_cow(
                         child_mut,
                         level - BITS_PER_LEVEL,
-                        index,
+                        local_index,
                         function,
                     );
                 }
             }
-            Node::RelaxedBranch { .. } => {
-                // RelaxedBranch should not appear in TransientVector
-            }
-            Node::Leaf(elements) => {
-                let leaf_index = index & MASK;
-                let elements_mut = ReferenceCounter::make_mut(elements);
-                // Use clone to get the old value since T: Clone is already required
-                let old = elements_mut[leaf_index].clone();
-                elements_mut[leaf_index] = function(old);
+            Node::Leaf(chunk) => {
+                let chunk_mut = ReferenceCounter::make_mut(chunk);
+                if let Some(slot) = chunk_mut.get_mut(index) {
+                    let old = slot.clone();
+                    *slot = function(old);
+                }
             }
         }
     }
@@ -4268,29 +4475,14 @@ impl<T: Clone> PersistentVector<T> {
     /// ```
     #[must_use]
     pub fn transient(self) -> TransientVector<T> {
-        // Check if the tree contains any RelaxedBranch nodes.
-        // If not, we can skip regularization and maintain O(1) complexity.
-        if self.root.contains_relaxed_branch() {
-            // RelaxedBranch nodes are present, need to rebuild the tree.
-            // This is necessary because TransientVector uses bit-based indexing
-            // which requires a proper Radix Balanced Tree structure.
-            //
-            // We rebuild by collecting all elements and constructing a new
-            // TransientVector, which ensures correct shift values and tree structure.
-            let mut transient = TransientVector::new();
-            for element in self {
-                transient.push_back(element);
-            }
-            transient
-        } else {
-            // No RelaxedBranch nodes, O(1) conversion by just moving the root.
-            TransientVector {
-                root: self.root,
-                tail: self.tail.as_ref().clone(),
-                length: self.length,
-                shift: self.shift,
-                _marker: PhantomData,
-            }
+        // With the unified Branch structure, all nodes use size_table for indexing,
+        // so O(1) conversion is always possible by just moving the root.
+        TransientVector {
+            root: self.root,
+            tail: self.tail.as_ref().clone(),
+            length: self.length,
+            shift: self.shift,
+            _marker: PhantomData,
         }
     }
 }
@@ -5655,44 +5847,58 @@ mod node_tests {
     use rstest::rstest;
 
     #[rstest]
-    fn test_node_is_regular_with_branch() {
+    fn test_node_is_regular_with_empty_branch() {
         let branch: Node<i32> = Node::empty_branch();
-        assert!(branch.is_regular());
+        // All Branch nodes are now considered "regular" since RelaxedBranch is merged
+        assert!(!branch.is_relaxed());
     }
 
     #[rstest]
     fn test_node_is_regular_with_leaf() {
-        let leaf: Node<i32> = Node::Leaf(ReferenceCounter::from(vec![1, 2, 3]));
-        assert!(leaf.is_regular());
+        let leaf: Node<i32> = Node::leaf_from_chunk(LeafChunk::from_slice(&[1, 2, 3]));
+        assert!(!leaf.is_relaxed());
     }
 
     #[rstest]
-    fn test_node_is_regular_with_relaxed_branch() {
-        let child_a: Node<i32> = Node::Leaf(ReferenceCounter::from(vec![1, 2, 3]));
-        let child_b: Node<i32> = Node::Leaf(ReferenceCounter::from(vec![4, 5]));
+    fn test_node_subtree_size_with_branch() {
+        let mut children: ArrayVec<Option<ReferenceCounter<Node<i32>>>, BRANCHING_FACTOR> =
+            ArrayVec::new();
+        let mut size_table: ArrayVec<usize, BRANCHING_FACTOR> = ArrayVec::new();
 
-        let relaxed = Node::relaxed_branch_from_children(
-            vec![
-                ReferenceCounter::new(child_a),
-                ReferenceCounter::new(child_b),
-            ],
-            vec![3, 5],
-        );
+        let child_a = Node::leaf_from_chunk(LeafChunk::from_slice(&[1, 2, 3]));
+        let child_b = Node::leaf_from_chunk(LeafChunk::from_slice(&[4, 5]));
 
-        assert!(!relaxed.is_regular());
+        children.push(Some(ReferenceCounter::new(child_a)));
+        children.push(Some(ReferenceCounter::new(child_b)));
+        size_table.push(3);
+        size_table.push(5); // cumulative: 3 + 2 = 5
+
+        let branch = Node::Branch {
+            children: ReferenceCounter::new(children),
+            size_table: ReferenceCounter::new(size_table),
+        };
+
+        assert_eq!(branch.subtree_size(), 5);
     }
 
     #[rstest]
     fn test_node_child_count_with_branch() {
-        let mut children: [Option<ReferenceCounter<Node<i32>>>; BRANCHING_FACTOR] =
-            std::array::from_fn(|_| None);
+        let mut children: ArrayVec<Option<ReferenceCounter<Node<i32>>>, BRANCHING_FACTOR> =
+            ArrayVec::new();
+        let mut size_table: ArrayVec<usize, BRANCHING_FACTOR> = ArrayVec::new();
 
-        let child = Node::Leaf(ReferenceCounter::from(vec![1, 2, 3]));
-        children[0] = Some(ReferenceCounter::new(child.clone()));
-        children[1] = Some(ReferenceCounter::new(child.clone()));
-        children[2] = Some(ReferenceCounter::new(child));
+        let child = Node::leaf_from_chunk(LeafChunk::from_slice(&[1, 2, 3]));
+        children.push(Some(ReferenceCounter::new(child.clone())));
+        children.push(Some(ReferenceCounter::new(child.clone())));
+        children.push(Some(ReferenceCounter::new(child)));
+        size_table.push(3);
+        size_table.push(6);
+        size_table.push(9);
 
-        let branch = Node::Branch(ReferenceCounter::new(children));
+        let branch = Node::Branch {
+            children: ReferenceCounter::new(children),
+            size_table: ReferenceCounter::new(size_table),
+        };
         assert_eq!(branch.child_count(), 3);
     }
 
@@ -5703,44 +5909,29 @@ mod node_tests {
     }
 
     #[rstest]
-    fn test_node_child_count_with_relaxed_branch() {
-        let child_a: Node<i32> = Node::Leaf(ReferenceCounter::from(vec![1, 2, 3]));
-        let child_b: Node<i32> = Node::Leaf(ReferenceCounter::from(vec![4, 5]));
-        let child_c: Node<i32> = Node::Leaf(ReferenceCounter::from(vec![6, 7, 8, 9]));
-
-        let relaxed = Node::relaxed_branch_from_children(
-            vec![
-                ReferenceCounter::new(child_a),
-                ReferenceCounter::new(child_b),
-                ReferenceCounter::new(child_c),
-            ],
-            vec![3, 5, 9],
-        );
-
-        assert_eq!(relaxed.child_count(), 3);
-    }
-
-    #[rstest]
     fn test_node_child_count_with_leaf() {
-        let leaf: Node<i32> = Node::Leaf(ReferenceCounter::from(vec![1, 2, 3, 4, 5]));
+        let leaf: Node<i32> = Node::leaf_from_chunk(LeafChunk::from_slice(&[1, 2, 3, 4, 5]));
         assert_eq!(leaf.child_count(), 0);
     }
 
     #[rstest]
-    fn test_relaxed_branch_from_children_basic() {
-        let child_a: Node<i32> = Node::Leaf(ReferenceCounter::from(vec![1, 2, 3]));
-        let child_b: Node<i32> = Node::Leaf(ReferenceCounter::from(vec![4, 5]));
+    fn test_branch_with_size_table_basic() {
+        let mut children: ArrayVec<Option<ReferenceCounter<Node<i32>>>, BRANCHING_FACTOR> =
+            ArrayVec::new();
+        let mut size_table: ArrayVec<usize, BRANCHING_FACTOR> = ArrayVec::new();
 
-        let relaxed = Node::relaxed_branch_from_children(
-            vec![
-                ReferenceCounter::new(child_a),
-                ReferenceCounter::new(child_b),
-            ],
-            vec![3, 5],
-        );
+        let child_a = Node::leaf_from_chunk(LeafChunk::from_slice(&[1, 2, 3]));
+        let child_b = Node::leaf_from_chunk(LeafChunk::from_slice(&[4, 5]));
 
-        match relaxed {
-            Node::RelaxedBranch {
+        children.push(Some(ReferenceCounter::new(child_a)));
+        children.push(Some(ReferenceCounter::new(child_b)));
+        size_table.push(3);
+        size_table.push(5);
+
+        let branch = Node::branch_with_size_table(children, size_table);
+
+        match branch {
+            Node::Branch {
                 children,
                 size_table,
             } => {
@@ -5749,19 +5940,24 @@ mod node_tests {
                 assert_eq!(size_table[0], 3);
                 assert_eq!(size_table[1], 5);
             }
-            _ => panic!("Expected RelaxedBranch variant"),
+            Node::Leaf(_) => panic!("Expected Branch variant"),
         }
     }
 
     #[rstest]
-    fn test_relaxed_branch_from_children_single_child() {
-        let child: Node<i32> = Node::Leaf(ReferenceCounter::from(vec![1, 2, 3, 4, 5]));
+    fn test_branch_with_size_table_single_child() {
+        let mut children: ArrayVec<Option<ReferenceCounter<Node<i32>>>, BRANCHING_FACTOR> =
+            ArrayVec::new();
+        let mut size_table: ArrayVec<usize, BRANCHING_FACTOR> = ArrayVec::new();
 
-        let relaxed =
-            Node::relaxed_branch_from_children(vec![ReferenceCounter::new(child)], vec![5]);
+        let child = Node::leaf_from_chunk(LeafChunk::from_slice(&[1, 2, 3, 4, 5]));
+        children.push(Some(ReferenceCounter::new(child)));
+        size_table.push(5);
 
-        match relaxed {
-            Node::RelaxedBranch {
+        let branch = Node::branch_with_size_table(children, size_table);
+
+        match branch {
+            Node::Branch {
                 children,
                 size_table,
             } => {
@@ -5769,28 +5965,29 @@ mod node_tests {
                 assert_eq!(size_table.len(), 1);
                 assert_eq!(size_table[0], 5);
             }
-            _ => panic!("Expected RelaxedBranch variant"),
+            Node::Leaf(_) => panic!("Expected Branch variant"),
         }
     }
 
     #[rstest]
-    fn test_relaxed_branch_from_children_many_children() {
-        let mut child_nodes = Vec::new();
-        let mut cumulative_sizes = Vec::new();
+    fn test_branch_with_size_table_many_children() {
+        let mut children: ArrayVec<Option<ReferenceCounter<Node<i32>>>, BRANCHING_FACTOR> =
+            ArrayVec::new();
+        let mut size_table: ArrayVec<usize, BRANCHING_FACTOR> = ArrayVec::new();
         let mut running_total = 0;
 
         for index in 0..10 {
             let elements: Vec<i32> = ((index * 3)..((index + 1) * 3)).collect();
-            let child = Node::Leaf(ReferenceCounter::from(elements));
-            child_nodes.push(ReferenceCounter::new(child));
+            let child = Node::leaf_from_chunk(LeafChunk::from_slice(&elements));
+            children.push(Some(ReferenceCounter::new(child)));
             running_total += 3;
-            cumulative_sizes.push(running_total);
+            size_table.push(running_total);
         }
 
-        let relaxed = Node::relaxed_branch_from_children(child_nodes, cumulative_sizes);
+        let branch = Node::branch_with_size_table(children, size_table);
 
-        match relaxed {
-            Node::RelaxedBranch {
+        match branch {
+            Node::Branch {
                 children,
                 size_table,
             } => {
@@ -5798,8 +5995,14 @@ mod node_tests {
                 assert_eq!(size_table.len(), 10);
                 assert_eq!(size_table[9], 30);
             }
-            _ => panic!("Expected RelaxedBranch variant"),
+            Node::Leaf(_) => panic!("Expected Branch variant"),
         }
+    }
+
+    #[rstest]
+    fn test_leaf_subtree_size() {
+        let leaf: Node<i32> = Node::leaf_from_chunk(LeafChunk::from_slice(&[1, 2, 3, 4, 5]));
+        assert_eq!(leaf.subtree_size(), 5);
     }
 }
 
