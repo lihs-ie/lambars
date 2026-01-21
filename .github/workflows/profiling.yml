@@ -1,0 +1,450 @@
+name: Profiling Analysis
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'benches/**'
+      - 'lambars-derive/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  workflow_dispatch:
+    inputs:
+      profile_type:
+        description: 'Profile type to run'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - criterion
+          - iai
+          - api
+
+concurrency:
+  group: profiling-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ==========================================================================
+  # Criterion Benchmarks with Flamegraph
+  # ==========================================================================
+  criterion-profiling:
+    name: Criterion + Flamegraph
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.profile_type == 'all' || github.event.inputs.profile_type == 'criterion' || github.event_name == 'pull_request' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-profiling-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install perf and flamegraph tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y linux-tools-common linux-tools-generic linux-tools-$(uname -r) gawk || true
+          # Allow perf for non-root users
+          echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid
+          echo '0' | sudo tee /proc/sys/kernel/kptr_restrict
+          # Install inferno for flamegraph generation
+          cargo install inferno
+
+      - name: Run Criterion benchmarks with profiling
+        run: |
+          mkdir -p profiling-results/criterion
+
+          # Build benchmarks in release mode
+          cargo build --release --benches
+
+          # Profile key benchmarks using perf
+          for bench in effect_bench for_macro_bench control_bench; do
+            echo "=== Profiling $bench ==="
+
+            # Find the benchmark binary
+            BENCH_BIN=$(find target/release/deps -name "${bench}-*" -type f -executable | head -1)
+            if [ -n "$BENCH_BIN" ]; then
+              # Run with perf to collect profile data
+              sudo perf record -F 99 -g -o profiling-results/criterion/${bench}.perf.data \
+                "$BENCH_BIN" --bench --profile-time 5 2>&1 | tee profiling-results/criterion/${bench}.log || true
+
+              # Generate flamegraph and text analysis if perf data exists
+              if [ -f "profiling-results/criterion/${bench}.perf.data" ]; then
+                # Generate folded stacks (intermediate format for analysis)
+                sudo perf script -i profiling-results/criterion/${bench}.perf.data 2>/dev/null | \
+                  inferno-collapse-perf 2>/dev/null > profiling-results/criterion/${bench}.folded || true
+
+                # Generate flamegraph from folded stacks
+                if [ -f "profiling-results/criterion/${bench}.folded" ]; then
+                  cat profiling-results/criterion/${bench}.folded | \
+                    inferno-flamegraph > profiling-results/criterion/${bench}_flamegraph.svg 2>/dev/null || true
+
+                  # Generate top functions summary (overhead by function)
+                  gawk -F';' '{
+                    n=split($NF, parts, " ")
+                    func=parts[1]
+                    for(i=2; i<n; i++) func=func" "parts[i]
+                    samples=parts[n]
+                    sum[func]+=samples
+                    total+=samples
+                  } END {
+                    for(f in sum) printf "%d %s\n", sum[f], f
+                  }' profiling-results/criterion/${bench}.folded | \
+                    sort -rn | head -50 > profiling-results/criterion/${bench}_top_functions.txt || true
+                fi
+
+                # Cleanup large perf data
+                rm -f profiling-results/criterion/${bench}.perf.data
+              fi
+            else
+              echo "Benchmark binary not found for $bench"
+            fi
+          done
+
+      - name: Generate Criterion summary
+        run: |
+          echo "# Criterion Profiling Results" > profiling-results/criterion/README.md
+          echo "" >> profiling-results/criterion/README.md
+          echo "## Flamegraphs" >> profiling-results/criterion/README.md
+          echo "" >> profiling-results/criterion/README.md
+          for svg in profiling-results/criterion/*.svg; do
+            if [ -f "$svg" ]; then
+              name=$(basename "$svg" .svg)
+              echo "- [$name](./$name.svg)" >> profiling-results/criterion/README.md
+            fi
+          done
+
+      - name: Upload Criterion profiling artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-profiling-${{ github.sha }}
+          path: profiling-results/criterion/
+          retention-days: 30
+
+  # ==========================================================================
+  # iai-callgrind with Detailed Analysis
+  # ==========================================================================
+  iai-profiling:
+    name: iai-callgrind Analysis
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.profile_type == 'all' || github.event.inputs.profile_type == 'iai' || github.event_name == 'pull_request' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y valgrind
+
+      - name: Install iai-callgrind-runner
+        run: |
+          # Get iai-callgrind version from Cargo.lock to ensure version match
+          IAI_VERSION=$(grep -A1 'name = "iai-callgrind"' Cargo.lock | grep version | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "Installing iai-callgrind-runner version $IAI_VERSION"
+          cargo install iai-callgrind-runner --version "$IAI_VERSION"
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-iai-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run iai-callgrind benchmarks
+        run: |
+          mkdir -p profiling-results/iai
+
+          # Run iai benchmarks
+          for bench in persistent_vector_iai effect_iai scenario_iai; do
+            echo "=== Running $bench ==="
+            cargo bench --bench $bench 2>&1 | tee profiling-results/iai/${bench}.log || true
+          done
+
+          # Copy callgrind output files
+          find target -name "callgrind.out.*" -exec cp {} profiling-results/iai/ \; 2>/dev/null || true
+
+      - name: Generate iai-callgrind annotations
+        run: |
+          cd profiling-results/iai
+          for callgrind_file in callgrind.out.*; do
+            if [ -f "$callgrind_file" ]; then
+              echo "=== Annotating $callgrind_file ==="
+              callgrind_annotate --auto=yes "$callgrind_file" > "${callgrind_file}.annotated.txt" 2>/dev/null || true
+            fi
+          done
+
+      - name: Parse iai results for summary
+        id: iai_summary
+        run: |
+          echo "# iai-callgrind Results" > profiling-results/iai/README.md
+          echo "" >> profiling-results/iai/README.md
+
+          # Extract key metrics from logs
+          for log in profiling-results/iai/*.log; do
+            if [ -f "$log" ]; then
+              name=$(basename "$log" .log)
+              echo "## $name" >> profiling-results/iai/README.md
+              echo '```' >> profiling-results/iai/README.md
+              # Extract instruction counts and cache metrics
+              grep -E "(Instructions|L1|LL|RAM)" "$log" | head -50 >> profiling-results/iai/README.md || echo "No metrics found" >> profiling-results/iai/README.md
+              echo '```' >> profiling-results/iai/README.md
+              echo "" >> profiling-results/iai/README.md
+            fi
+          done
+
+      - name: Upload iai-callgrind artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: iai-profiling-${{ github.sha }}
+          path: profiling-results/iai/
+          retention-days: 30
+
+  # ==========================================================================
+  # API Server Profiling during Benchmark
+  # ==========================================================================
+  api-profiling:
+    name: API Server Profiling
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.profile_type == 'all' || github.event.inputs.profile_type == 'api' || github.event_name == 'pull_request' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wrk linux-tools-common linux-tools-generic gawk || true
+          # Install inferno for flamegraph generation
+          cargo install inferno
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build API server with debug symbols
+        working-directory: benches/api
+        run: |
+          # Build with debug symbols for profiling
+          CARGO_PROFILE_RELEASE_DEBUG=true cargo build --release --bin task-management-benchmark-api
+
+      - name: Start API server and profile
+        working-directory: benches/api
+        run: |
+          mkdir -p ../../profiling-results/api
+
+          # Allow perf
+          echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid || true
+          echo '0' | sudo tee /proc/sys/kernel/kptr_restrict || true
+
+          # Start server in background
+          RUST_LOG=info ./target/release/task-management-benchmark-api &
+          SERVER_PID=$!
+
+          # Wait for server to start
+          sleep 5
+
+          # Setup test data
+          cd benchmarks
+          chmod +x setup_test_data.sh
+          API_URL=http://localhost:3000 ./setup_test_data.sh || true
+
+          # Run perf record during benchmark
+          echo "=== Starting perf profiling ==="
+          sudo perf record -F 99 -p $SERVER_PID -g -o ../../../profiling-results/api/perf.data &
+          PERF_PID=$!
+
+          # Run quick benchmark
+          chmod +x run_benchmark.sh
+          API_URL=http://localhost:3000 DURATION=30s THREADS=2 CONNECTIONS=10 ./run_benchmark.sh recursive || true
+
+          # Stop perf
+          sudo kill -INT $PERF_PID 2>/dev/null || true
+          sleep 2
+
+          # Stop server
+          kill $SERVER_PID 2>/dev/null || true
+
+          cd ..
+
+      - name: Generate flamegraph from perf data
+        run: |
+          cd profiling-results/api
+          if [ -f "perf.data" ]; then
+            # Generate flamegraph using inferno
+            sudo perf script -i perf.data > perf.script 2>/dev/null || true
+
+            if [ -f "perf.script" ]; then
+              # Generate folded stacks (keep for analysis)
+              cat perf.script | inferno-collapse-perf > stacks.folded 2>/dev/null || true
+
+              if [ -f "stacks.folded" ]; then
+                # Generate flamegraph
+                cat stacks.folded | inferno-flamegraph > flamegraph.svg 2>/dev/null || true
+
+                # Generate reverse flamegraph (icicle graph)
+                cat stacks.folded | inferno-flamegraph --reverse > flamegraph-reverse.svg 2>/dev/null || true
+
+                # Generate top functions summary (overhead by function)
+                gawk -F';' '{
+                  n=split($NF, parts, " ")
+                  func=parts[1]
+                  for(i=2; i<n; i++) func=func" "parts[i]
+                  samples=parts[n]
+                  sum[func]+=samples
+                  total+=samples
+                } END {
+                  for(f in sum) printf "%d %s\n", sum[f], f
+                }' stacks.folded | sort -rn | head -50 > top_functions.txt || true
+              fi
+
+              # Cleanup large intermediate files (keep folded for analysis)
+              rm -f perf.data perf.script 2>/dev/null || true
+            fi
+          fi
+
+      - name: Generate API profiling summary
+        run: |
+          echo "# API Server Profiling Results" > profiling-results/api/README.md
+          echo "" >> profiling-results/api/README.md
+          echo "## Flamegraphs" >> profiling-results/api/README.md
+          echo "" >> profiling-results/api/README.md
+          if [ -f "profiling-results/api/flamegraph.svg" ]; then
+            echo "- [Flamegraph (normal)](./flamegraph.svg) - Shows call stack from bottom up" >> profiling-results/api/README.md
+          fi
+          if [ -f "profiling-results/api/flamegraph-reverse.svg" ]; then
+            echo "- [Flamegraph (reverse/icicle)](./flamegraph-reverse.svg) - Shows call stack from top down" >> profiling-results/api/README.md
+          fi
+
+      - name: Upload API profiling artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-profiling-${{ github.sha }}
+          path: profiling-results/api/
+          retention-days: 30
+
+  # ==========================================================================
+  # Aggregate Results and Post PR Comment
+  # ==========================================================================
+  summarize-profiling:
+    name: Summarize Profiling Results
+    runs-on: ubuntu-latest
+    needs: [criterion-profiling, iai-profiling, api-profiling]
+    if: always() && github.event_name == 'pull_request'
+    permissions:
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: profiling-artifacts
+
+      - name: Post profiling summary to PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            let body = '## :microscope: Profiling Analysis Results\n\n';
+            body += `Commit: \`${context.sha.substring(0, 7)}\`\n\n`;
+
+            // Check for Criterion results
+            const criterionDir = 'profiling-artifacts/criterion-profiling-' + context.sha;
+            if (fs.existsSync(criterionDir)) {
+              body += '### :chart_with_upwards_trend: Criterion Flamegraphs\n\n';
+              const svgFiles = fs.readdirSync(criterionDir).filter(f => f.endsWith('.svg'));
+              if (svgFiles.length > 0) {
+                body += `Found ${svgFiles.length} flamegraph(s). Download artifacts to view.\n\n`;
+                body += '| Benchmark | Flamegraph |\n|-----------|------------|\n';
+                for (const svg of svgFiles) {
+                  const name = svg.replace('_flamegraph.svg', '');
+                  body += `| ${name} | :white_check_mark: |\n`;
+                }
+                body += '\n';
+              } else {
+                body += 'No flamegraphs generated. Check workflow logs.\n\n';
+              }
+            }
+
+            // Check for iai results
+            const iaiDir = 'profiling-artifacts/iai-profiling-' + context.sha;
+            if (fs.existsSync(iaiDir)) {
+              body += '### :bar_chart: iai-callgrind Analysis\n\n';
+              const logFiles = fs.readdirSync(iaiDir).filter(f => f.endsWith('.log'));
+
+              if (logFiles.length > 0) {
+                body += `Analyzed ${logFiles.length} benchmark(s). Download artifacts for detailed reports.\n\n`;
+              } else {
+                body += 'iai-callgrind analysis completed. Download artifacts for detailed reports.\n\n';
+              }
+            }
+
+            // Check for API results
+            const apiDir = 'profiling-artifacts/api-profiling-' + context.sha;
+            if (fs.existsSync(apiDir)) {
+              body += '### :fire: API Server Flamegraph\n\n';
+              const hasFlamegraph = fs.existsSync(path.join(apiDir, 'flamegraph.svg'));
+              if (hasFlamegraph) {
+                body += ':white_check_mark: Flamegraph generated successfully. Download artifacts to view.\n\n';
+              } else {
+                body += ':warning: Flamegraph generation may have failed. Check workflow logs.\n\n';
+              }
+            }
+
+            body += '<details>\n<summary>:package: Download Artifacts</summary>\n\n';
+            body += `Download profiling artifacts from the [Actions run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}):\n`;
+            body += '- `criterion-profiling-*` - Criterion benchmark flamegraphs\n';
+            body += '- `iai-profiling-*` - iai-callgrind detailed analysis\n';
+            body += '- `api-profiling-*` - API server flamegraphs\n\n';
+            body += '</details>\n\n';
+
+            body += `> :clock1: Profiling completed at: ${new Date().toISOString()}`;
+
+            // Find or create comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.find(comment =>
+              comment.user.type === 'Bot' &&
+              comment.body.includes('## :microscope: Profiling Analysis Results')
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body
+              });
+            }

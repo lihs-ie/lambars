@@ -1,0 +1,671 @@
+# Trampoline パフォーマンス最適化 要件定義
+#
+# 概要:
+#   Trampoline の深い再帰におけるパフォーマンスを改善する。
+#   現在の実装に対してマイクロ最適化を適用し、15-20%の改善を目標とする。
+#
+# 設計方針:
+#   1. unsafe を使用しない安全な最適化のみを採用
+#   2. 既存 API との完全な互換性を維持
+#   3. 関数型プログラミングの原則（純粋性、参照透過性）を遵守
+#   4. 段階的な最適化により、各フェーズで効果を検証可能にする
+#   5. 根本原因（Box割り当て、動的ディスパッチ）への対策は将来の拡張として整理
+#
+# 参照:
+#   - Issue: docs/internal/issues/20260115_1405_trampoline_performance.yaml
+#   - GitHub Issue: https://github.com/lihs-ie/lambars/issues/164
+#   - 現在の実装: src/control/trampoline.rs
+#   - ベンチマーク: benches/control_bench.rs
+
+version: "1.1.0"
+name: "trampoline_performance"
+description: |
+  Trampoline の深い再帰におけるパフォーマンスを最適化する。
+
+  現在のベンチマーク結果（Criterion による測定）:
+  - trampoline_shallow (100回再帰): 約1.35us
+  - trampoline_deep (10,000回再帰): 約134us
+  - trampoline_very_deep (100,000回再帰): 約1.36ms
+
+  注: Iterative 実装との比較は参考値。Trampoline はスタック安全性を提供する
+  トレードオフとして一定のオーバーヘッドが発生することは避けられない。
+
+  主なボトルネック:
+  - Box 割り当てによるヒープアロケーション (オーバーヘッドの推定40-50%)
+  - 動的ディスパッチ (オーバーヘッドの推定20-30%)
+  - ループ内の非効率なパターンマッチング (残りの20-30%)
+
+  本要件では、unsafe を使用せず、API 互換性を維持しながら
+  マイクロ最適化により 15-20% のパフォーマンス改善を目指す。
+
+  重要な前提:
+  - #[inline(always)] は動的ディスパッチ経由の呼び出しには効果が限定的
+  - 根本原因（Box割り当て、動的ディスパッチ）への対策は将来の拡張として整理
+  - 本要件の最適化は主にループオーバーヘッドの削減に焦点を当てる
+
+# 背景・動機
+background:
+  problem: |
+    Trampoline はスタック安全な再帰を実現するための重要なデータ構造だが、
+    現在の実装では深い再帰において一定のパフォーマンスコストが発生する。
+
+    具体的な問題点:
+    1. 各再帰ステップで Box<dyn FnOnce() -> Self> のヒープ割り当てが発生
+       → 根本原因の一つ。本要件では対処せず、将来の拡張として整理
+    2. FlatMapInternal の継続処理で vtable lookup による動的ディスパッチが発生
+       → 根本原因の一つ。#[inline(always)] の効果は限定的
+    3. run() ループ内のパターンマッチングが最適化されていない
+       → 本要件で対処可能な範囲
+
+    これにより、深い再帰が必要なアルゴリズム（木構造の走査、大規模な畳み込みなど）
+    での Trampoline の実用性が制限されている。
+
+  motivation: |
+    関数型プログラミングにおいて、再帰は基本的な制御構造である。
+    Rust は TCO（末尾呼び出し最適化）を保証しないため、Trampoline は
+    スタック安全な再帰を実現する唯一の純粋な方法である。
+
+    パフォーマンスを改善することで:
+    - 深い再帰を必要とするアルゴリズムの実用性が向上
+    - Trampoline を基盤とする他の抽象化（Free モナドなど）の性能が向上
+    - ライブラリ全体の実用性と採用可能性が向上
+
+  prior_art:
+    - name: "Haskell Free Monad / Trampoline"
+      description: |
+        Haskell では遅延評価により、明示的な Trampoline なしでも
+        スタック安全な再帰が可能。ただし、厳密評価が必要な場合は
+        trampoline パッケージや free パッケージの Trampoline を使用。
+        最適化として fusion（融合変換）が適用される。
+
+    - name: "Scala cats-effect IO"
+      description: |
+        cats-effect の IO は内部的に Trampoline 構造を持つ。
+        FlatMap チェーンの右結合性を維持し、スタックフレームを
+        ヒープに移動することでスタック安全性を実現。
+        runLoop の最適化により高速な実行を実現。
+
+    - name: "Rust futures-rs"
+      description: |
+        futures-rs の Future も同様の問題を抱えており、
+        Pin と手動の状態機械変換により対処している。
+        コンパイラによる最適化を活用し、ヒープ割り当てを最小化。
+
+# 前提条件
+prerequisites:
+  pure_function_assumption: |
+    Trampoline に渡される関数（suspend のクロージャ、flat_map の変換関数）は
+    純粋関数（副作用を持たない）であることを前提とする。
+
+    これは既存の実装（src/control/trampoline.rs:299-302, 329-335）の
+    ドキュメントに明記されている通り:
+    - Done 状態での即時評価最適化により、副作用のタイミングが変わる可能性がある
+    - 純粋関数であれば、評価タイミングの変更は動作に影響しない
+
+    本要件の最適化も同様の前提に基づく。副作用を持つ関数を渡した場合の
+    動作は未定義とする。
+
+  api_compatibility: |
+    API 互換性の範囲:
+    - 公開型: Trampoline<A>
+    - 公開メソッド: done, suspend, pure, run, resume, map, flat_map, and_then, then
+    - 公開トレイト実装: Debug, Display
+
+    内部構造（ContinuationBox, FlatMapContinuation, TrampolineContinuation トレイト）
+    は非公開であり、変更可能。
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. インライン化強化
+  # ======================================================================
+  - id: REQ-TRAMP-PERF-001
+    name: "ホットパスのインライン化強化"
+    description: |
+      run() メソッドおよびその内部で呼び出されるクリティカルパスに
+      #[inline(always)] 属性を適用し、コンパイラによるインライン展開を強制する。
+
+      対象:
+      - run() メソッド本体
+      - ContinuationBox::step() メソッド
+      - FlatMapContinuation::step() 実装（効果は限定的）
+
+      注意:
+      - 動的ディスパッチ（Box<dyn TrampolineContinuation>）経由の呼び出しは
+        vtable lookup が発生するため、#[inline(always)] の効果は限定的
+      - 主な効果は run() 自体のインライン展開と、Suspend の thunk 呼び出し周辺
+
+      #[inline(always)] が効果を発揮するケース:
+      - run() メソッド自体のインライン展開（呼び出し元に展開）
+      - Suspend の thunk() 呼び出し（具体的なクロージャ型が見える場合）
+      - コンパイラがモノモーフィゼーション時に具体型を特定できる場合
+
+      #[inline(always)] の効果が限定的なケース:
+      - Box<dyn TrampolineContinuation> 経由の step() 呼び出し
+        → vtable lookup は回避できない
+      - flat_map で異なる型のクロージャが渡される場合
+        → 型消去により動的ディスパッチが必須
+
+      期待効果: 5-10%（動的ディスパッチの制約により控えめに見積もる）
+
+    methods:
+      - name: "run"
+        signature: "pub fn run(self) -> A"
+        description: |
+          #[inline(always)] を適用。
+          ループ本体のインライン展開により、関数呼び出しオーバーヘッドを削減。
+        examples:
+          - description: "インライン化属性の適用"
+            code: |
+              #[inline(always)]
+              pub fn run(self) -> A {
+                  // 実装...
+              }
+
+      - name: "ContinuationBox::step"
+        signature: "fn step(self) -> Trampoline<A>"
+        description: |
+          #[inline(always)] を適用（既に #[inline] が付与されている場合は強化）。
+          ただし、内部で動的ディスパッチを行うため効果は限定的。
+        examples:
+          - description: "インライン化属性の強化"
+            code: |
+              #[inline(always)]
+              fn step(self) -> Trampoline<A> {
+                  self.0.step()
+              }
+
+      - name: "FlatMapContinuation::step"
+        signature: "fn step(self: Box<Self>) -> Trampoline<B>"
+        description: |
+          TrampolineContinuation トレイトの step 実装に #[inline(always)] を適用。
+          vtable 経由で呼び出されるため、この属性自体の効果は限定的だが、
+          コンパイラが具体型を特定できる場合に有効。
+        examples:
+          - description: "トレイト実装のインライン化"
+            code: |
+              impl<A: 'static, B: 'static, F> TrampolineContinuation<B> for FlatMapContinuation<A, B, F>
+              where
+                  F: FnOnce(A) -> Trampoline<B> + 'static,
+              {
+                  #[inline(always)]
+                  fn step(self: Box<Self>) -> Trampoline<B> {
+                      // 実装...
+                  }
+              }
+
+    implementations:
+      - type: "Trampoline<A>"
+        description: |
+          run() メソッドに #[inline(always)] を適用
+
+      - type: "ContinuationBox<A>"
+        description: |
+          step() メソッドに #[inline(always)] を適用
+
+      - type: "FlatMapContinuation<A, B, F>"
+        description: |
+          TrampolineContinuation::step() 実装に #[inline(always)] を適用
+
+  # ======================================================================
+  # 2. FlatMap チェーン最適化
+  # ======================================================================
+  - id: REQ-TRAMP-PERF-002
+    name: "FlatMap チェーンの効率的な展開"
+    description: |
+      run() メソッド内の FlatMapInternal 処理を最適化する。
+      現在の while let パターンを loop + match パターンに変更し、
+      連続した FlatMapInternal の処理を効率化する。
+
+      現在の実装:
+      ```rust
+      Self::FlatMapInternal(continuation) => {
+          let mut inner = continuation.step();
+          while let Self::FlatMapInternal(next_continuation) = inner {
+              inner = next_continuation.step();
+          }
+          inner
+      }
+      ```
+
+      最適化後:
+      ```rust
+      Self::FlatMapInternal(continuation) => {
+          let mut inner = continuation.step();
+          loop {
+              match inner {
+                  Self::FlatMapInternal(next_continuation) => {
+                      inner = next_continuation.step();
+                  }
+                  other => break other,
+              }
+          }
+      }
+      ```
+
+      この変更により:
+      - パターンマッチの最適化が促進される可能性がある
+      - 分岐予測の精度が向上する可能性がある
+
+      期待効果: 5-15%（コンパイラ最適化に依存）
+
+    methods:
+      - name: "run (FlatMapInternal 処理部分)"
+        signature: "pub fn run(self) -> A"
+        description: |
+          FlatMapInternal の処理ループを loop + match パターンに変更。
+        examples:
+          - description: "最適化後の FlatMapInternal 処理"
+            code: |
+              Self::FlatMapInternal(continuation) => {
+                  let mut inner = continuation.step();
+                  loop {
+                      match inner {
+                          Self::FlatMapInternal(next_continuation) => {
+                              inner = next_continuation.step();
+                          }
+                          other => break other,
+                      }
+                  }
+              }
+
+    implementations:
+      - type: "Trampoline<A>"
+        description: |
+          run() メソッドの FlatMapInternal 処理部分を最適化
+
+  # ======================================================================
+  # 3. run() ループ微最適化
+  # ======================================================================
+  - id: REQ-TRAMP-PERF-003
+    name: "run() ループのパターン判定順序最適化"
+    description: |
+      run() メソッドのメインループにおけるパターンマッチの順序を最適化する。
+
+      最も頻繁に発生するケース（Suspend）を先頭に配置することで、
+      分岐予測の精度を向上させる。
+
+      現在の実装では run() 開始時に Done の早期リターンチェックがあるが、
+      ループ内でも Done をチェックする必要がある（Suspend/FlatMapInternal の処理後に
+      Done になる可能性があるため）。
+
+      最適化のポイント:
+      - ループ内で最も頻繁に発生する Suspend を先頭に配置
+      - Done はループ終了条件として最後に配置（発生頻度が低い）
+
+      現在の順序（ループ内）:
+      1. Done
+      2. Suspend
+      3. FlatMapInternal
+
+      最適化後の順序（ループ内）:
+      1. Suspend（最も頻繁）
+      2. FlatMapInternal（flat_map 使用時）
+      3. Done（ループ終了条件、発生頻度が低い）
+
+      期待効果: 3-5%（分岐予測改善に依存）
+
+    methods:
+      - name: "run (メインループ)"
+        signature: "pub fn run(self) -> A"
+        description: |
+          パターンマッチの順序を最適化。
+          ベンチマークで最も頻繁に発生するパターンを先頭に配置。
+        examples:
+          - description: "最適化後のパターン順序"
+            code: |
+              loop {
+                  current = match current {
+                      Self::Suspend(thunk) => thunk(),
+                      Self::FlatMapInternal(continuation) => {
+                          // 最適化された FlatMap 処理
+                      }
+                      Self::Done(value) => return value,
+                  };
+              }
+
+    implementations:
+      - type: "Trampoline<A>"
+        description: |
+          run() メソッドのパターンマッチ順序を最適化
+
+  # ======================================================================
+  # 4. 検証用ベンチマーク
+  # ======================================================================
+  - id: REQ-TRAMP-PERF-004
+    name: "パフォーマンス改善の検証"
+    description: |
+      各最適化フェーズ後にベンチマークを実行し、
+      改善効果を定量的に検証する。
+
+      目標:
+      - trampoline_deep, trampoline_very_deep で 15-20% の改善
+      - 他のベンチマークで回帰がないことを確認（5%以内の変動は許容）
+      - consistency_criteria に従い測定結果の一貫性を確認
+
+      注: 合否判定の詳細は non_functional_requirements.performance を参照
+
+    methods:
+      - name: "ベンチマーク実行"
+        signature: "cargo bench --bench control_bench -- trampoline"
+        description: |
+          以下のベンチマークで改善を検証:
+          - trampoline_shallow (100回再帰)
+          - trampoline_deep (10,000回再帰)
+          - trampoline_very_deep (100,000回再帰)
+          - trampoline_factorial
+          - trampoline_map_flatmap
+        examples:
+          - description: "ベンチマーク実行コマンド（3回測定の例）"
+            code: |
+              # 注: cargo bench は自動的に --release でビルド・実行される
+
+              # === 最適化前のベースライン取得（3回測定） ===
+              # 1回目
+              cargo bench --bench control_bench -- trampoline > baseline_run1.txt
+              # 2回目
+              cargo bench --bench control_bench -- trampoline > baseline_run2.txt
+              # 3回目
+              cargo bench --bench control_bench -- trampoline > baseline_run3.txt
+
+              # 各出力から mean 値を抽出し、中央値を baseline として記録
+
+              # === 最適化後の測定（3回測定） ===
+              # 1回目
+              cargo bench --bench control_bench -- trampoline > after_run1.txt
+              # 2回目
+              cargo bench --bench control_bench -- trampoline > after_run2.txt
+              # 3回目
+              cargo bench --bench control_bench -- trampoline > after_run3.txt
+
+              # 各出力から mean 値を抽出し、中央値を after として記録
+
+              # === 改善率の算出 ===
+              # 改善率 = (baseline_median - after_median) / baseline_median * 100
+
+    implementations:
+      - type: "ベンチマーク"
+        description: |
+          既存の benches/control_bench.rs を使用して検証
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    target_metric: "trampoline_deep, trampoline_very_deep の実行時間改善率"
+    target_improvement:
+      goal: "20%（目標値）"
+      minimum_acceptable: "15%（最低達成ライン、これ未満は不合格）"
+    improvement_calculation:
+      formula: "改善率 = (baseline - after) / baseline * 100 [%]"
+      baseline: "最適化前の測定結果（consistency_criteria に従い中央値を使用）"
+      after: "最適化後の測定結果（consistency_criteria に従い中央値を使用）"
+      example: |
+        baseline = 134us, after = 107us の場合:
+        改善率 = (134 - 107) / 134 * 100 = 20.1%
+    evaluation_note: |
+      合否判定は trampoline_deep, trampoline_very_deep の改善率で行う。
+      これらは深い再帰のユースケースを代表し、最適化の主要な対象である。
+      他のベンチマーク（shallow, factorial, map_flatmap）は回帰がないことを確認するが、
+      改善率の合否基準には含めない。
+    individual_targets:
+      - "trampoline_shallow: 回帰なし（5%以内の変動は許容）"
+      - "trampoline_deep: 15%以上の改善（最低）、20%以上（目標）"
+      - "trampoline_very_deep: 15%以上の改善（最低）、20%以上（目標）"
+      - "trampoline_factorial: 回帰なし（5%以内の変動は許容）"
+      - "trampoline_map_flatmap: 回帰なし（5%以内の変動は許容）"
+
+  measurement_conditions:
+    environment:
+      - "リリースビルド（--release）で測定"
+      - "同一マシンで最適化前後を連続して測定（CI での比較は参考値）"
+      - "他のプロセスによる干渉を最小化（可能な範囲で）"
+      - "測定は最低3回実行し、結果の一貫性を確認"
+    criterion_settings:
+      description: "Criterion ベンチマークの設定（明示的に指定）"
+      settings:
+        - "sample_size: 100（デフォルト値を使用）"
+        - "warm_up_time: 3秒（デフォルト値を使用）"
+        - "measurement_time: 5秒（デフォルト値を使用）"
+        - "noise_threshold: 0.01（1%、デフォルト値を使用）"
+        - "confidence_level: 0.95（95%信頼区間、デフォルト値を使用）"
+      note: |
+        設定を変更する場合は benches/control_bench.rs に明示的に記載し、
+        変更内容を測定結果と共に記録する。
+    statistical_significance:
+      description: "統計的有意性の判断方法"
+      procedure: |
+        1. 各測定回で Criterion が出力する mean 値と confidence interval (CI) を記録
+        2. consistency_criteria に従い、複数回測定の中央値を最終結果として算出
+        3. 有意性の判断:
+           a. 最終結果（中央値）同士を比較して改善率を算出
+           b. 各測定回の CI を参考情報として記録
+           c. 改善率が noise_threshold (1%) を超えていることを確認
+        4. CI は各測定回の参考情報であり、最終的な合否判定は中央値ベースの改善率で行う
+      note: |
+        複数回測定を行うため、個別測定の CI よりも中央値による安定した比較を優先する。
+        CI が大きく重なる場合でも、中央値ベースで 15% 以上の改善があれば合格とする。
+    consistency_criteria:
+      description: "3回の測定結果の一貫性判定基準"
+      procedure: |
+        1. 3回の測定を実施し、各回の Criterion 出力から mean 値を取得
+        2. 3つの mean 値に対して以下の検証を行う:
+           a. 最大値と最小値の差が中央値の 20% 以内であることを確認
+           b. 条件を満たす場合、中央値を最終結果として採用
+        3. 条件を満たさない場合（20%超の差異）:
+           a. 追加で2回測定を実施（計5回）
+           b. IQR（四分位範囲）を計算: IQR = Q3 - Q1
+           c. 外れ値判定: Q1 - 1.5*IQR 未満、または Q3 + 1.5*IQR 超を外れ値とする
+           d. 外れ値を除外した後、残りの値の中央値を最終結果として採用
+           e. 外れ値除外後も3回未満のデータしか残らない場合は測定環境を見直し再測定
+      final_result: "中央値を最終結果として採用（改善率の計算に使用）"
+      note: |
+        RSD（相対標準偏差）は参考指標として記録するが、合否判定には使用しない。
+        判定は「最大最小差 <= 中央値 * 0.2」または「IQR法による外れ値除外後の中央値」で行う。
+    reproducibility_note: |
+      CPU Governor（performance mode）やターボブーストの設定は
+      環境依存のため必須としないが、可能であれば固定することを推奨。
+      測定結果には環境情報（CPU、OS、Rustバージョン）を記録する。
+
+  compatibility:
+    - "既存の公開 API に変更を加えないこと"
+    - "既存のテストがすべて通過すること"
+    - "セマンティックバージョニングにおいて patch バージョンアップで対応可能なこと"
+
+  testing:
+    - "既存の単体テストがすべて通過すること"
+    - "ベンチマーク結果を記録し、改善を定量的に示すこと"
+    - "モナド則のプロパティテストが引き続き通過すること"
+
+  constraints:
+    - "unsafe コードを使用しないこと"
+    - "外部クレートへの新規依存を追加しないこと"
+    - "コンパイル時間への影響を最小限に抑えること"
+    - "バイナリサイズの増加を許容範囲内（10%以内）に抑えること"
+
+  functional_programming_principles:
+    referential_transparency: |
+      参照透過性を維持すること:
+      - 同じ入力に対して常に同じ出力を返す
+      - 最適化により評価順序が変わっても結果は同一
+    purity: |
+      純粋性を維持すること:
+      - 副作用を導入しない
+      - 副作用を持つ関数を渡した場合の動作は未定義（既存仕様通り）
+    immutability: |
+      不変性を維持すること:
+      - 既存データを破壊的に変更しない
+      - ループ変数の更新は内部実装の詳細であり、外部から観測不可能
+    monad_laws: |
+      モナド則を満たし続けること:
+      - 左単位元: Trampoline::done(a).flat_map(f).run() == f(a).run()
+      - 右単位元: m.flat_map(Trampoline::done).run() == m.run()
+      - 結合則: m.flat_map(f).flat_map(g).run() == m.flat_map(|x| f(x).flat_map(g)).run()
+
+# 将来の拡張
+future_extensions:
+  - id: EXT-TRAMP-PERF-001
+    name: "アリーナアロケータの導入"
+    description: |
+      bumpalo などのアリーナアロケータを導入し、
+      複数の再帰ステップで使用するメモリを事前に確保・再利用する。
+      これにより、ヒープアロケーションのオーバーヘッド（推定40-50%）を
+      大幅に削減できる。
+    rationale: |
+      外部依存の追加が必要となるため、現時点では見送る。
+      本要件の最適化で十分な改善が得られない場合に検討する。
+      根本原因の一つに対処するため、大幅な改善が期待できる。
+    expected_improvement: "追加で 30-50%"
+    priority: high
+
+  - id: EXT-TRAMP-PERF-002
+    name: "動的ディスパッチの削減（内部enum化）"
+    description: |
+      FlatMapInternal の継続を動的ディスパッチ（Box<dyn TrampolineContinuation>）
+      ではなく、内部 enum として表現することで vtable lookup を削減する。
+
+      具体的には:
+      - FlatMapContinuation を直接保持する enum バリアントを追加
+      - 型消去が必要な場合のみ Box<dyn ...> を使用
+    rationale: |
+      型消去の仕組みを変更する必要があり、実装が複雑になる。
+      API 互換性は維持可能だが、内部構造の大幅な変更が必要。
+      根本原因の一つに対処するため、大幅な改善が期待できる。
+    expected_improvement: "追加で 20-30%"
+    priority: high
+
+  - id: EXT-TRAMP-PERF-003
+    name: "バッチ処理の導入"
+    description: |
+      複数の再帰ステップを一度に処理するバッチ処理を導入し、
+      ループオーバーヘッドを削減する。
+    rationale: |
+      実装の複雑性が増加するため、現時点では見送る。
+      シンプルな最適化で十分な改善が得られない場合に検討する。
+    expected_improvement: "追加で 10-15%"
+    priority: medium
+
+  - id: EXT-TRAMP-PERF-004
+    name: "継続スタックの明示管理"
+    description: |
+      FlatMap チェーンの継続を明示的なスタック（Vec）として管理し、
+      動的ディスパッチを削減する。
+    rationale: |
+      型消去の仕組みを大幅に変更する必要があるため、現時点では見送る。
+      API の互換性を維持しながらの実装が困難。
+    expected_improvement: "追加で 15-20%"
+    priority: low
+
+# 実装計画
+implementation_plan:
+  phases:
+    - phase: 1
+      name: "インライン化強化"
+      requirements:
+        - REQ-TRAMP-PERF-001
+      estimated_effort: "1-2時間"
+      expected_improvement: "5-10%"
+      note: "動的ディスパッチの制約により効果は限定的"
+
+    - phase: 2
+      name: "FlatMap チェーン最適化"
+      requirements:
+        - REQ-TRAMP-PERF-002
+      estimated_effort: "2-3時間"
+      expected_improvement: "5-15%"
+      note: "コンパイラ最適化に依存"
+
+    - phase: 3
+      name: "run() ループ微最適化"
+      requirements:
+        - REQ-TRAMP-PERF-003
+      estimated_effort: "1-2時間"
+      expected_improvement: "3-5%"
+      note: "分岐予測改善に依存"
+
+    - phase: 4
+      name: "検証とドキュメント"
+      requirements:
+        - REQ-TRAMP-PERF-004
+      estimated_effort: "1時間"
+      expected_improvement: "N/A"
+
+  total_estimated_effort: "5-8時間"
+  target_improvement:
+    optimistic: "30%（各最適化が独立して効果を発揮した場合）"
+    realistic: "20%（最適化効果の重複を考慮）"
+    minimum_acceptable: "15%（最低達成ライン）"
+    note: |
+      各フェーズの効果は重複する可能性があり、単純な加算にはならない。
+      コンパイラ最適化の影響により、実測値は予測と異なる場合がある。
+      15%未満の改善の場合、将来の拡張（EXT-TRAMP-PERF-001, 002）を
+      早期に検討する。
+
+  success_criteria:
+    primary:
+      - "trampoline_deep で 15% 以上の改善（最低達成ライン）"
+      - "trampoline_very_deep で 15% 以上の改善（最低達成ライン）"
+    secondary:
+      - "trampoline_shallow で回帰がないこと（5%以内の変動は許容）"
+      - "trampoline_factorial で回帰がないこと（5%以内の変動は許容）"
+      - "trampoline_map_flatmap で回帰がないこと（5%以内の変動は許容）"
+    verification:
+      - "全テストが通過すること"
+      - "consistency_criteria の手順に従い、測定結果の一貫性が確認できること"
+      - "改善率が noise_threshold (1%) を超えていること"
+    acceptance_decision: |
+      primary 条件をすべて満たし、secondary で回帰がなく、
+      verification をすべてパスした場合に「合格」とする。
+      primary の 15% は最低ライン、20% 達成で「目標達成」とする。
+
+      注: 合否判定は中央値ベースの改善率で行う。
+      Criterion の CI は各測定回の参考情報として記録するが、
+      合否判定の必須条件には含めない（statistical_significance 参照）。
+
+# 関連情報
+related:
+  issue_file: "docs/internal/issues/20260115_1405_trampoline_performance.yaml"
+  github_issue:
+    number: 164
+    url: "https://github.com/lihs-ie/lambars/issues/164"
+
+# 実装結果
+implementation_result:
+  status: "not_effective"
+  date: "2026-01-19"
+  summary: |
+    REQ-TRAMP-PERF-001, 002, 003 の最適化を実装したが、
+    ベンチマーク結果で効果が確認できなかった（誤差範囲内）。
+
+  benchmark_results:
+    before:
+      trampoline_deep: "138.26 µs"
+      notes: "LTO 有効化後のベースライン"
+    after:
+      trampoline_deep: "138.63 µs"
+      notes: "#[inline(always)] + loop + match 適用後"
+    improvement: "-0.3% (誤差範囲内)"
+
+  analysis: |
+    1. #[inline(always)] は動的ディスパッチ（Box<dyn TrampolineContinuation>）
+       経由の呼び出しには効果がない。コンパイラは vtable lookup を
+       インライン化できないため。
+
+    2. while let → loop + match 変換は、コンパイラの最適化により
+       元のコードと同等のマシンコードが生成されている可能性が高い。
+
+    3. パターン判定順序の変更も、Rust コンパイラの最適化により
+       効果がない。コンパイラは分岐予測ヒントを自動的に最適化する。
+
+  conclusion: |
+    Trampoline のパフォーマンスボトルネックは主に：
+    - Box 割り当て（ヒープアロケーション）: 40-50%
+    - 動的ディスパッチ（vtable lookup）: 20-30%
+
+    これらは unsafe なしでは根本的に解決できない。
+    Phase 0 の LTO 有効化（-3.5%〜-4.0% 改善）で得られた改善が現実的な最大値。
+
+  recommendation: |
+    - 本要件の変更は破棄する
+    - 将来の拡張（EXT-TRAMP-PERF-001: アリーナアロケータ）を
+      検討する場合は、unsafe の使用が必要になる可能性がある
+    - 現状の実装はスタック安全性のトレードオフとして許容する

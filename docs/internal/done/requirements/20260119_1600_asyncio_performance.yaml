@@ -1,0 +1,452 @@
+# ExceptT + AsyncIO パフォーマンス最適化 要件定義
+#
+# 概要:
+#   ExceptT<E, AsyncIO<Result<A, E>>> の組み合わせで発生するパフォーマンス劣化を
+#   最小限に抑えるための最適化を実施する
+#
+# 設計方針:
+#   1. unsafe コードは使用しない
+#   2. API 互換性を維持する
+#   3. 関数型プログラミング原則（参照透過性、純粋関数、不変性）を遵守する
+#      - ライブラリ本体は厳守
+#      - ベンチマークコードは計測目的のため例外（命令的スタイルを許容）
+#   4. 現実的な改善目標を設定する（過去の最適化結果を踏まえ 10-15% を目標）
+#   5. インライン化は #[inline] を基本とし、効果測定後に #[inline(always)] を限定適用
+#
+# 参照:
+#   - GitHub Issue #194: ExceptT + AsyncIO のパフォーマンス改善
+#   - GitHub Issue #195: eff_async! マクロのパフォーマンス改善検討
+#   - docs/internal/issues/20260115_1405_trampoline_performance.yaml
+#   - docs/internal/issues/20260115_1410_effect_system_performance.yaml
+
+version: "1.0.0"
+name: "exceptt_asyncio_performance_optimization"
+description: |
+  ExceptT + AsyncIO の組み合わせで発生するパフォーマンスオーバーヘッドを削減する。
+
+  現在の問題:
+  - ExceptT + AsyncIO が Traditional スタイル比で約2-3倍遅い
+  - Deposit: 67.70ms → 139.94ms (+107%)
+  - Withdraw: 180.44ms → 213.60ms (+18%)
+
+  根本原因:
+  1. AsyncIO の二重 Box アロケーション（FnOnce 用と Pin<Box<Future>> 用）
+  2. flat_map での追加アロケーション
+  3. eff_async! マクロのクロージャネスティング
+
+  本要件定義では、unsafe コードを使用せずに実現可能な最適化に焦点を当てる。
+
+# 背景・動機
+background:
+  problem: |
+    銀行サンプルアプリケーションのベンチマークで、eff_async! マクロを使用した
+    ExceptT + AsyncIO パターンが Traditional スタイル比で約2-3倍遅いことが判明。
+
+    測定結果（Deposit操作）:
+    - Traditional: 67.70ms (平均)
+    - eff_async!:  139.94ms (平均)
+    - 差分: 72.24ms（約2倍遅い）
+
+    測定結果（Withdraw操作）:
+    - Traditional: 180.44ms (平均)
+    - eff_async!:  213.60ms (平均)
+    - 差分: 33.16ms（約1.2倍遅い）
+
+    この性能差は、関数型プログラミングスタイルの採用を躊躇させる要因となる。
+
+  motivation: |
+    関数型プログラミングの利点（do記法スタイル、エラーハンドリングの合成、
+    参照透過性）を維持しつつ、パフォーマンスのトレードオフを最小化する。
+
+    過去の最適化結果（Trampoline、Effect）を踏まえると:
+    - #[inline] の効果は限定的（0-5%程度）
+    - Box 削減は unsafe なしでは根本的な解決が困難
+    - 現実的な改善目標は 10-15% 程度
+
+    そのため、即座に実装可能な最適化と、将来の大規模リファクタリングを分離し、
+    段階的に改善を進める。
+
+  prior_art:
+    - name: "Trampoline パフォーマンス最適化 (Issue #164)"
+      description: |
+        #[inline(always)] と早期リターンの組み合わせで 5-15% の改善を達成。
+        Box アロケーション削減は根本的な設計変更が必要と判断され、将来課題に。
+    - name: "Effect システムパフォーマンス改善 (Issue #165)"
+      description: |
+        型消去継続による3重 Box アロケーションがボトルネック。
+        ホットパス最適化で 10-20% の改善を見込むが、根本解決には設計変更が必要。
+    - name: "Scala ZIO / cats-effect"
+      description: |
+        fiber-based runtime と継続キューベースの実装で高性能を実現。
+        Rust では所有権システムの制約により同様の最適化が困難。
+    - name: "Haskell freer-simple"
+      description: |
+        Church encoding と CPS 変換でアロケーションを削減。
+        Rust では HKT がないため同等の抽象化が困難。
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. インライン化強化
+  # ======================================================================
+  - id: inline_optimization
+    name: "ホットパスのインライン化強化"
+    description: |
+      AsyncIO と ExceptT のホットパス（flat_map, fmap, run_async）に
+      #[inline] を配置し、コンパイラ最適化を促進する。
+
+      過去の最適化結果を踏まえ、効果は 0-5% 程度と見込むが、
+      リスクが低く即座に実装可能なため、最初のステップとして実施する。
+
+      インライン化の方針:
+      1. まず #[inline] を適用してベンチマークで効果を測定
+      2. 明確な効果が確認された場合のみ #[inline(always)] に昇格
+      3. バイナリサイズとコンパイル時間への影響を監視
+      4. LTO（Link Time Optimization）が有効な場合の効果も確認
+
+    methods:
+      - name: "#[inline] の段階的適用"
+        signature: |
+          // Phase 1: #[inline] を適用（全メソッド）
+          #[inline]
+          pub fn flat_map<B, F>(self, function: F) -> AsyncIO<B>
+
+          // Phase 2: 効果測定後、必要に応じて #[inline(always)] に昇格
+          #[inline(always)]  // ベンチマークで効果が確認された場合のみ
+          pub fn flat_map<B, F>(self, function: F) -> AsyncIO<B>
+        description: |
+          段階的なインライン化適用:
+          1. まず #[inline] を適用（コンパイラのヒントとして機能）
+          2. ベンチマークで効果を測定
+          3. 明確な改善が確認された場合のみ #[inline(always)] に昇格
+          4. バイナリサイズ増加が許容範囲内かを確認
+
+          #[inline(always)] のリスク:
+          - バイナリサイズの増加
+          - コンパイル時間の増加
+          - 命令キャッシュ効率の低下（過度のインライン化時）
+        examples:
+          - description: "AsyncIO::flat_map のインライン化（Phase 1）"
+            code: |
+              #[inline]
+              pub fn flat_map<B, F>(self, function: F) -> AsyncIO<B>
+              where
+                  F: FnOnce(A) -> AsyncIO<B> + Send + 'static,
+                  B: 'static,
+              {
+                  AsyncIO::new(move || async move {
+                      let value_a = self.run_async().await;
+                      let async_io_b = function(value_a);
+                      async_io_b.run_async().await
+                  })
+              }
+
+    implementations:
+      - type: "AsyncIO<A>"
+        description: |
+          以下のメソッドに #[inline] を適用（Phase 1）:
+          - flat_map
+          - fmap
+          - and_then
+          - pure
+          - run_async
+
+          効果測定後、必要に応じて #[inline(always)] に昇格。
+      - type: "ExceptT<E, AsyncIO<Result<A, E>>>"
+        description: |
+          以下のメソッドに #[inline] を適用（Phase 1）:
+          - flat_map
+          - flat_map_async_io
+          - fmap_async_io
+          - pure_async_io
+          - run_async
+
+          効果測定後、必要に応じて #[inline(always)] に昇格。
+
+  # ======================================================================
+  # 2. 早期リターン最適化（Phase 1/2 対象外）
+  # ======================================================================
+  - id: early_return_optimization
+    name: "ExceptT エラー時の早期リターン最適化"
+    phase_scope: "将来の拡張（Phase 1/2 対象外）"
+    exclusion_reason: |
+      AsyncIO は遅延実行（lazy evaluation）を採用しているため、
+      flat_map 内でエラーを事前判定することが構造的に不可能。
+
+      AsyncIO の遅延実行の仕組み:
+      1. AsyncIO は「計算の記述」を保持する（実行はしない）
+      2. run_async() が呼ばれて初めて実際の計算が実行される
+      3. flat_map は新しい AsyncIO を構築するだけで、内部の Result を見ることはできない
+
+      そのため、エラー時の早期リターン最適化は現在の設計では実現不可能であり、
+      将来の設計変更（継続キューベース実装など）で対応を検討する。
+    description: |
+      ExceptT::flat_map でエラーが発生した場合、不要なクロージャ構築や
+      AsyncIO のラッピングを避け、即座にエラーを返す最適化を検討する。
+
+      現在の実装では、エラー時にも AsyncIO::pure(Err(error)) を生成しているが、
+      これにより不要な Box アロケーションが発生している。
+
+      **注意: この要件は Phase 1/2 の対象外**
+      理由: AsyncIO の遅延実行により、実行前にエラーを判定することが不可能なため。
+
+    methods:
+      - name: "エラー時の最適化"
+        signature: |
+          pub fn flat_map<B, F>(self, function: F) -> ExceptT<E, AsyncIO<Result<B, E>>>
+        description: |
+          現在の実装:
+          ```rust
+          ExceptT::new(self.inner.flat_map(move |result| match result {
+              Ok(value) => function(value).inner,
+              Err(error) => AsyncIO::pure(Err(error)),  // ← Box アロケーション
+          }))
+          ```
+
+          最適化が困難な理由:
+          - self.inner は AsyncIO<Result<A, E>> 型
+          - flat_map のクロージャは run_async() 実行時に初めて呼ばれる
+          - flat_map 構築時点では Result が Ok か Err かを知る方法がない
+          - したがって、静的な最適化は構造的に不可能
+
+          将来の設計変更（継続キューベース実装など）で対応を検討する。
+        examples:
+          - description: "現在の実装（最適化困難な理由）"
+            code: |
+              // AsyncIO の遅延実行により、flat_map 内でのエラー判定は
+              // 実行時にしか行えない
+              //
+              // flat_map 構築時:
+              //   self.inner = AsyncIO { run_async_io: Box<dyn FnOnce() -> ...> }
+              //   この時点では内部の Result を見ることはできない
+              //
+              // run_async() 実行時:
+              //   (self.run_async_io)() が呼ばれ、初めて Result が確定
+              //   その後 match result で Ok/Err を判定
+              ExceptT::new(self.inner.flat_map(move |result| match result {
+                  Ok(value) => function(value).inner,
+                  Err(error) => AsyncIO::pure(Err(error)),  // 実行時のみ到達
+              }))
+
+    implementations:
+      - type: "ExceptT<E, AsyncIO<Result<A, E>>>"
+        description: |
+          現在の実装では根本的な最適化は困難。
+
+          最適化が困難な構造的理由:
+          1. AsyncIO は遅延実行を採用（FnOnce クロージャで計算を保持）
+          2. flat_map は新しい AsyncIO を構築するだけで実行しない
+          3. 内部の Result 値は run_async() 実行まで確定しない
+          4. したがって、エラー判定は実行時にしか行えない
+
+          将来の設計変更で対応を検討:
+          - 継続キューベース実装（実行時の最適化）
+          - 専用の最適化型の提供
+
+  # ======================================================================
+  # 3. マイクロベンチマーク追加
+  # ======================================================================
+  - id: microbenchmark_addition
+    name: "ExceptT + AsyncIO マイクロベンチマーク追加"
+    description: |
+      ExceptT + AsyncIO の詳細なベンチマークを追加し、
+      ボトルネックを正確に特定・計測できるようにする。
+
+      ベンチマーク項目:
+      1. チェーン深度別オーバーヘッド（depth 1, 5, 10, 20）
+      2. エラーハンドリングパス（success vs early_error vs late_error）
+      3. eff_async! マクロ展開コスト
+      4. Traditional スタイルとの比較
+
+      **FP 原則との関係:**
+      ベンチマークコードは計測目的のため、不変性原則の例外として
+      命令的スタイル（for ループ、可変変数）を許容する。
+      ライブラリ本体のコードは引き続き FP 原則を厳守する。
+
+    methods:
+      - name: "ベンチマーク実装"
+        signature: |
+          // benches/exceptt_asyncio_bench.rs
+          fn chain_depth_benchmark(criterion: &mut Criterion)
+          fn error_handling_benchmark(criterion: &mut Criterion)
+          fn eff_async_macro_benchmark(criterion: &mut Criterion)
+          fn traditional_comparison_benchmark(criterion: &mut Criterion)
+        description: |
+          criterion を使用した詳細なベンチマークを追加。
+          各最適化の効果を定量的に測定できるようにする。
+
+          criterion 設定の方針:
+          - warmup_time: 3秒（デフォルト）
+          - measurement_time: 5秒（デフォルト）
+          - sample_size: 100（デフォルト）
+          - tokio runtime は関数外で1回だけ生成し再利用
+          - black_box を使用して最適化による計測ノイズを防止
+        examples:
+          - description: "チェーン深度別ベンチマーク（命令的スタイル - 計測目的の例外）"
+            code: |
+              fn chain_depth_benchmark(criterion: &mut Criterion) {
+                  // runtime は関数外で1回だけ生成し再利用
+                  let runtime = tokio::runtime::Runtime::new().unwrap();
+                  let mut group = criterion.benchmark_group("exceptt_asyncio_chain_depth");
+
+                  for depth in [1, 5, 10, 20] {
+                      group.bench_with_input(
+                          BenchmarkId::new("depth", depth),
+                          &depth,
+                          |bencher, &depth| {
+                              bencher.to_async(&runtime).iter(|| async {
+                                  // 注意: 以下の for + mut は計測目的の例外
+                                  // ライブラリ本体では FP 原則を厳守
+                                  let mut result = ExceptT::<String, _>::pure_async_io(0);
+                                  for _ in 0..depth {
+                                      result = result.flat_map(|x| ExceptT::pure_async_io(x + 1));
+                                  }
+                                  std::hint::black_box(result.run_async().await)
+                              });
+                          },
+                      );
+                  }
+                  group.finish();
+              }
+
+    implementations:
+      - type: "benches/exceptt_asyncio_bench.rs"
+        description: |
+          新規ベンチマークファイルを作成し、以下の計測を実施:
+          - チェーン深度による性能変化
+          - エラーパスと成功パスの性能差
+          - eff_async! マクロのオーバーヘッド
+          - Traditional スタイルとの直接比較
+
+          ベンチマーク再現性のための設定:
+          - tokio runtime は benchmark group 外で1回生成
+          - criterion のデフォルト設定を使用（warmup 3s, measurement 5s）
+          - black_box で最適化ノイズを防止
+
+          **注意:** ベンチマークコードは計測目的のため、
+          不変性原則の例外として命令的スタイルを許容する。
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - "インライン化強化による改善: 0-5%（現実的な期待値）"
+    - "総合的な改善目標: 10-15%（複数最適化の組み合わせ）"
+    - "リグレッション防止: ベンチマークによる継続的な監視"
+  compatibility:
+    - "API 互換性: 既存の public API は変更しない"
+    - "動作互換性: 既存のテストが全て通過すること"
+    - "Rust 1.92.0 以降での動作を保証"
+  testing:
+    - "既存の単体テストが全て通過すること"
+    - "新規ベンチマークが追加され、CI で実行されること"
+    - "プロパティテスト（Functor/Monad 則）が通過すること"
+  constraints:
+    - "unsafe コードは使用しない（#![forbid(unsafe_code)] を維持）"
+    - "外部依存の追加は最小限に抑える"
+    - "関数型プログラミング原則（参照透過性、純粋関数、不変性）を維持"
+
+# 将来の拡張
+future_extensions:
+  - id: continuation_queue_implementation
+    name: "継続キューベース実装"
+    description: |
+      クロージャネスティングの代わりに、継続をキューとして管理し、
+      ループで順次実行する方式に変更する。
+
+      これにより:
+      - ネスティングオーバーヘッドを排除
+      - Box アロケーションを削減
+      - 期待改善: 40-50%
+    rationale: |
+      実装が複雑でマクロの大幅な書き換えが必要なため、
+      Phase 1 では対象外とし、将来の大規模リファクタリングで対応する。
+
+  - id: specialized_exceptt_asyncio
+    name: "ExceptT + AsyncIO 専用最適化型"
+    description: |
+      ExceptT<E, AsyncIO<Result<A, E>>> 専用の最適化された実装を提供。
+      型消去を最小限に抑え、動的ディスパッチを排除する。
+    rationale: |
+      コード重複とメンテナンスコスト増加のトレードオフがあるため、
+      ベンチマークで明確な効果が確認された後に検討する。
+
+  - id: box_allocation_reduction
+    name: "Box アロケーション削減"
+    description: |
+      AsyncIO の内部構造を見直し、Box の数を削減する。
+      enum ベースの型消去や、アリーナアロケータの導入を検討。
+    rationale: |
+      unsafe コードなしでの実現が困難であり、API の破壊的変更の可能性があるため、
+      将来のメジャーバージョンアップで検討する。
+
+  - id: eff_async_macro_optimization
+    name: "eff_async! マクロの最適化"
+    description: |
+      Issue #195 で整理された eff_async! マクロのパフォーマンス改善を実施。
+      継続キューベースの実装または型付き特化版の提供を検討。
+    rationale: |
+      マクロの大幅な書き換えが必要で、デバッグが困難になる可能性があるため、
+      長期課題として将来の拡張に整理する。
+
+# 実装計画概要
+implementation_summary:
+  phase_1:
+    name: "マイクロベンチマーク追加"
+    estimated_effort: "2-3時間"
+    tasks:
+      - "benches/exceptt_asyncio_bench.rs の作成"
+      - "チェーン深度別オーバーヘッド計測"
+      - "エラーハンドリングパス計測"
+      - "eff_async! マクロ展開コスト計測"
+      - "CI への統合"
+    notes: |
+      ベンチマークは計測目的のため、命令的スタイルを許容。
+      tokio runtime は benchmark group 外で1回生成し再利用。
+
+  phase_2:
+    name: "インライン化強化"
+    estimated_effort: "1-2時間"
+    tasks:
+      - "AsyncIO のホットパスに #[inline] 適用"
+      - "ExceptT のホットパスに #[inline] 適用"
+      - "Phase 1 のベンチマークで効果を測定"
+      - "効果が確認された場合のみ #[inline(always)] に昇格"
+      - "バイナリサイズとコンパイル時間への影響を確認"
+    notes: |
+      #[inline] を基本とし、効果測定後に #[inline(always)] を限定適用。
+      過度のインライン化によるバイナリ肥大化を防止。
+
+  phase_3:
+    name: "ドキュメント整備"
+    estimated_effort: "1時間"
+    tasks:
+      - "パフォーマンス特性のドキュメント化"
+      - "使い分けガイドの作成（eff_async! vs Traditional）"
+      - "CHANGELOG への記載"
+
+  excluded_from_phase_1_2:
+    name: "早期リターン最適化"
+    reason: |
+      AsyncIO の遅延実行により、実行前にエラーを判定することが構造的に不可能。
+      将来の設計変更（継続キューベース実装など）で対応を検討する。
+
+# 関連情報
+related:
+  github_issues:
+    - number: 194
+      title: "ExceptT + AsyncIO のパフォーマンス改善"
+      url: "https://github.com/lihs-ie/lambars/issues/194"
+    - number: 195
+      title: "eff_async! マクロのパフォーマンス改善検討"
+      url: "https://github.com/lihs-ie/lambars/issues/195"
+
+  internal_documents:
+    - "docs/internal/issues/20260118_0900_exceptt_asyncio_performance.yaml"
+    - "docs/internal/issues/20260118_0905_eff_async_macro_performance.yaml"
+    - "docs/internal/issues/20260115_1405_trampoline_performance.yaml"
+    - "docs/internal/issues/20260115_1410_effect_system_performance.yaml"
+
+  source_files:
+    - "src/effect/async_io.rs"
+    - "src/effect/except_transformer.rs"
+    - "lambars-derive/src/lib.rs"

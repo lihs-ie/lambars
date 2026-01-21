@@ -415,6 +415,22 @@ where
 // AsyncIO-specific Methods (requires async feature)
 // =============================================================================
 
+/// Helper function for error path in `flat_map` (cold path optimization).
+///
+/// This function is marked as `#[cold]` and `#[inline(never)]` to hint the compiler
+/// that this is an unlikely execution path, allowing better optimization of the
+/// success path.
+#[cfg(feature = "async")]
+#[cold]
+#[inline(never)]
+const fn error_async_io<E, A>(error: E) -> super::AsyncIO<Result<A, E>>
+where
+    E: Send + 'static,
+    A: Send + 'static,
+{
+    super::AsyncIO::pure(Err(error))
+}
+
 #[cfg(feature = "async")]
 impl<E, A> ExceptT<E, super::AsyncIO<Result<A, E>>>
 where
@@ -422,26 +438,33 @@ where
     A: Send + 'static,
 {
     /// Creates an `ExceptT` that returns a constant value.
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     pub const fn pure_async_io(value: A) -> Self {
         Self::new(super::AsyncIO::pure(Ok(value)))
     }
 
     /// Creates an `ExceptT` that throws an error.
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     pub const fn throw_async_io(error: E) -> Self {
         Self::new(super::AsyncIO::pure(Err(error)))
     }
 
     /// Lifts an `AsyncIO` into `ExceptT`.
+    #[inline]
     pub fn lift_async_io(inner: super::AsyncIO<A>) -> Self {
         Self::new(inner.fmap(Ok))
     }
 
     /// Creates an `ExceptT` from a `Result`.
+    #[inline]
     pub const fn from_result(result: Result<A, E>) -> Self {
         Self::new(super::AsyncIO::pure(result))
     }
 
     /// Maps a function over the value inside the `ExceptT`.
+    #[inline]
     pub fn fmap_async_io<B, F>(self, function: F) -> ExceptT<E, super::AsyncIO<Result<B, E>>>
     where
         F: FnOnce(A) -> B + Send + 'static,
@@ -451,6 +474,7 @@ where
     }
 
     /// Chains `ExceptT` computations with `AsyncIO`.
+    #[inline]
     pub fn flat_map<B, F>(self, function: F) -> ExceptT<E, super::AsyncIO<Result<B, E>>>
     where
         F: FnOnce(A) -> ExceptT<E, super::AsyncIO<Result<B, E>>> + Send + 'static,
@@ -458,11 +482,12 @@ where
     {
         ExceptT::new(self.inner.flat_map(move |result| match result {
             Ok(value) => function(value).inner,
-            Err(error) => super::AsyncIO::pure(Err(error)),
+            Err(error) => error_async_io(error),
         }))
     }
 
     /// Alias for `flat_map` with `_async_io` suffix for consistency with other transformers.
+    #[inline]
     pub fn flat_map_async_io<B, F>(self, function: F) -> ExceptT<E, super::AsyncIO<Result<B, E>>>
     where
         F: FnOnce(A) -> ExceptT<E, super::AsyncIO<Result<B, E>>> + Send + 'static,
@@ -472,6 +497,7 @@ where
     }
 
     /// Catches an error and potentially recovers.
+    #[inline]
     pub fn catch_async_io<F>(computation: Self, handler: F) -> Self
     where
         F: FnOnce(E) -> Self + Send + 'static,
@@ -483,6 +509,7 @@ where
     }
 
     /// Runs the `ExceptT` computation, returning the inner `AsyncIO`.
+    #[inline]
     #[must_use]
     pub fn run_async_io(self) -> super::AsyncIO<Result<A, E>> {
         self.inner
@@ -493,6 +520,8 @@ where
     /// # Errors
     ///
     /// Returns `Err(E)` if the computation failed with an error of type `E`.
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     pub async fn run_async(self) -> Result<A, E> {
         self.inner.run_async().await
     }

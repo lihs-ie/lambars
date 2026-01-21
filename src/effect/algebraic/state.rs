@@ -200,6 +200,11 @@ impl<S: Clone + 'static> StateHandler<S> {
     /// Uses an iterative approach for stack safety.
     #[inline]
     fn run_with_state<A: 'static>(computation: Eff<StateEffect<S>, A>, state: &RefCell<S>) -> A {
+        // Early return for Pure case (avoids normalize() overhead)
+        if let EffInner::Pure(value) = computation.inner {
+            return value;
+        }
+
         let mut current_computation = computation;
 
         loop {

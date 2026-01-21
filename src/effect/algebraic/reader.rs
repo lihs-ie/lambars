@@ -189,6 +189,11 @@ impl<R: Clone + 'static> ReaderHandler<R> {
     /// Uses an iterative approach for stack safety.
     #[inline]
     fn run_with_environment<A: 'static>(computation: Eff<ReaderEffect<R>, A>, environment: R) -> A {
+        // Early return for Pure case (avoids normalize() overhead)
+        if let EffInner::Pure(value) = computation.inner {
+            return value;
+        }
+
         let mut current_computation = computation;
 
         loop {

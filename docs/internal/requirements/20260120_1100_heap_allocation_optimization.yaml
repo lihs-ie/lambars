@@ -1,0 +1,552 @@
+# ヒープアロケーション頻度の最適化 要件定義
+#
+# 概要:
+#   全ベンチマークでヒープアロケーション（malloc/cfree/realloc）が15-25%を占める問題を
+#   改善するため、不要なClone削減とVec事前確保による最適化を実施する。
+#
+# 設計方針:
+#   1. 関数型プログラミングの原則（不変性、純粋関数）を維持する
+#   2. 既存のAPIシグネチャは原則として変更しない（後方互換性の維持）
+#      - 例外: AsyncIO::fmap の B: Send 境界追加（下記「破壊的変更」参照）
+#   3. 内部実装の最適化に留め、外部APIの振る舞いは原則として変更しない
+#      - 例外: AsyncIO::fmap の Pure 値に対する正格評価（下記「セマンティクス変更」参照）
+#   4. 純粋関数前提の最適化は、その前提をドキュメントで明記する
+#
+# 破壊的変更について:
+#   AsyncIO::fmap の B: Send 境界追加は破壊的変更である。
+#   ただし、AsyncIO は非同期コンテキストでの使用を想定しており、
+#   実質的にほぼ全てのユースケースで B: Send が満たされているため、
+#   影響は限定的と判断する。
+#
+# セマンティクス変更について:
+#   AsyncIO::fmap の Pure 値に対する正格評価は、fmap に渡される関数が
+#   純粋関数であるという関数型プログラミングの原則に基づく最適化である。
+#   純粋関数であれば、結果の値に関しては評価タイミングは観測不可能であり、
+#   参照透過性が保たれる。
+#   ただし、非停止（無限ループ）や計算コストは評価戦略によって異なり得る。
+#   この点をドキュメントで明示し、副作用を伴う処理には flat_map を使用する
+#   ようガイドする。
+#
+# 参照:
+#   - Issue #208: https://github.com/lihs-ie/lambars/issues/208
+#   - プロファイリング結果: https://github.com/lihs-ie/lambars/actions/runs/21154282399
+#   - Issue定義: docs/internal/issues/20260120_0900_heap_allocation_optimization.yaml
+
+version: "1.1.0"
+name: "heap_allocation_optimization"
+description: |
+  全ベンチマークでヒープアロケーション（malloc/cfree/realloc）が15-25%を占める
+  パフォーマンスボトルネックを改善する。
+
+  プロファイリング結果より、以下の改善ポイントが特定された：
+
+  1. Effect系モジュール（30-50%削減可能）
+     - AsyncIO の Pure→Pure最適化パス（純粋関数前提）
+
+  2. Persistent構造（5-10%削減可能）
+     - PersistentListIterator::size_hint() の正確な実装
+     - partition() での Vec::with_capacity() 適用
+
+  注意: ReaderT/StateT の Rc ラップによる最適化は、実際のClone削減効果が
+  限定的であり、Rc生成のオーバーヘッドと相殺される可能性があるため、
+  本要件定義のスコープから除外する。将来の拡張として検討する。
+
+background:
+  problem: |
+    プロファイリング結果（GitHub Actions run #21154282399）の分析により、
+    全ベンチマークでヒープアロケーションが大きなボトルネックになっていることが判明。
+
+    ## API Benchmark
+    - `<Vec<T,A> as Clone>::clone`: 6.03%
+    - `<String as Clone>::clone`: 4.51%
+    - `malloc` 全体: ~4%
+    - `cfree` 全体: ~3%
+
+    ## for_macro Benchmark
+    - `cfree`: ~13%
+    - `malloc`: ~7%
+    - `realloc` (Vec拡張): ~4%
+    - `RawVecInner::finish_grow`: 2.38%
+
+    ## Effect Benchmark
+    - `cfree`: 7.94%
+    - `malloc`: 7.69%
+
+    これらのボトルネックは、不要なClone操作とVecの動的拡張が原因である。
+
+  motivation: |
+    関数型プログラミングライブラリとして、不変性を維持しながらも実用的な
+    パフォーマンスを提供することが重要である。
+
+    現在のヒープアロケーション頻度は、以下の問題を引き起こしている：
+    1. 大規模なデータ処理でのパフォーマンス低下
+    2. ガベージコレクションに似た遅延の発生
+    3. メモリ断片化の増加
+
+    これらを改善することで、ライブラリの実用性が向上する。
+
+  prior_art:
+    - name: "Haskell GHC"
+      description: |
+        GHCはStrict拡張やBangPatternsを提供し、遅延評価による不要なサンクの
+        生成を制御できる。本実装でも同様に、内部的な最適化により不要な
+        中間値の生成を削減する。
+    - name: "Scala cats-effect"
+      description: |
+        cats-effectのIOモナドは、Pure値に対する最適化パスを持ち、
+        不要なBox割り当てを回避している。AsyncIOのfmapにおける
+        Pure→Pure最適化はこのアプローチを参考にする。
+        cats-effectもfmapは純粋関数前提で設計されている。
+
+requirements:
+  # ======================================================================
+  # 1. AsyncIO の最適化
+  # ======================================================================
+  - id: async_io_pure_optimization
+    name: "AsyncIO の Pure→Pure最適化パス"
+    description: |
+      AsyncIO の fmap メソッドにおいて、Pure 値に対する操作を最適化する。
+
+      ## 現状の問題
+      現在の実装では、Pure(value) に fmap を適用すると Deferred でラップされ、
+      不要な Box 割り当てが発生する：
+      ```rust
+      Self::Pure(value) => {
+          AsyncIO::Deferred(Box::new(move || Box::pin(async move { function(value) })))
+      }
+      ```
+
+      ## 最適化方針
+      Pure 値に対する fmap は、即座に関数を適用して Pure を返す。
+
+      ## セマンティクスの変更について
+
+      この最適化により、以下のセマンティクス変更が発生する：
+      - 変更前: fmap に渡された関数は run_async() 呼び出し時に評価される（遅延評価）
+      - 変更後: Pure 値に対する fmap では関数が即座に評価される（正格評価）
+
+      ## 関数型プログラミングの観点からの正当化
+
+      1. **純粋関数前提**: fmap に渡される関数は純粋関数であるべきという
+         関数型プログラミングの原則に従う。純粋関数であれば、結果の値に関しては
+         評価タイミングは観測可能な違いを生じない（参照透過性）。
+         ただし、非停止や計算コストは評価戦略によって異なり得る点に注意。
+
+      2. **cats-effect との一貫性**: Scala の cats-effect も同様の最適化を行っている。
+         これは広く受け入れられたアプローチである。
+
+      3. **ドキュメントによる明示**: fmap は純粋関数専用であることをドキュメントで
+         明記し、副作用を伴う処理には flat_map を使用するようガイドする。
+
+      ## 注意事項
+
+      fmap に渡される関数が以下の特性を持つ場合、この最適化は問題を引き起こす
+      可能性がある：
+      - 副作用（I/O、ログ出力、状態変更）を伴う
+      - 現在時刻や乱数に依存する
+      - panic する可能性がある（評価タイミングの変更により、panic の発生時点や
+        スレッドコンテキストが変わる）
+      - 非停止（無限ループ）の可能性がある（評価タイミングの変更により、
+        プログラムの終了性が変わる）
+      - 計算コストが高い（正格評価により、結果が使用されない場合でも
+        計算が実行される）
+
+      これらの場合は flat_map を使用すべきであり、その旨をドキュメントに明記する。
+
+      注意: 純粋関数であっても、非停止や計算コストの違いは観測可能である。
+      これは参照透過性とは独立した評価戦略の問題であり、遅延評価から正格評価への
+      変更は、純粋関数に対しても振る舞いの違いを生じさせる可能性がある。
+      この点をドキュメントで明確にする。
+
+    methods:
+      - name: "fmap (AsyncIO)"
+        signature: "pub fn fmap<B, F>(self, function: F) -> AsyncIO<B> where F: FnOnce(A) -> B + Send + 'static, B: Send + 'static"
+        description: |
+          Pure 値に対する fmap を最適化する。
+
+          ## 重要: B: Send 境界の追加について
+
+          この最適化により、戻り値の型 B に Send 境界を追加することを提案する。
+          これは技術的に必須ではないが、以下の設計上の理由による：
+
+          ### 技術的背景
+          - AsyncIO の enum 自体は B: Send を要求していない
+          - Pure(function(value)) は B: Send なしでも構築可能
+
+          ### B: Send を追加する設計上の理由
+          1. **API一貫性**: AsyncIO は非同期コンテキストでの使用を想定しており、
+             run_async() でスレッド間で値を受け渡すユースケースが主である。
+             fmap の結果が Send でない場合、後続の処理で問題が発生しやすい。
+          2. **AsyncIO::pure() との一貫性**: pure() は既に A: Send を要求している。
+             fmap が Pure を返す場合、pure() と同等の制約を設けることで
+             API全体の一貫性が保たれる。
+          3. **将来の拡張性**: AsyncIO に par(), race() 等の並列実行メソッドがあり、
+             これらは内部的に Send 境界を必要とする。fmap の結果が Send でない場合、
+             これらのメソッドとの組み合わせで問題が発生する。
+
+          ### 影響範囲
+          - B: Send を満たさないユースケースは以下の場合に影響を受ける：
+            - Rc<T> を返す fmap（シングルスレッドランタイムでの使用想定）
+            - RefCell<T> を含む型を返す fmap
+            - その他の非 Send 型を返す fmap
+
+          ### 非 Send 型のサポートについて
+          AsyncIO は非同期コンテキストでの使用を想定しており、全ての主要なメソッド
+          （pure, fmap, flat_map, map2, par, race 等）が Send 境界を要求している。
+          したがって、非 Send 型は AsyncIO のサポート対象外とする。
+
+          非 Send 型を扱う必要がある場合の代替手段：
+          - Arc<Mutex<T>> 等の Send な代替型でラップする
+            注意: Arc<Mutex<T>> は内部可変性を導入するため、関数型プログラミングの
+            不変性原則との整合に注意が必要。利用箇所では純粋性への影響を考慮すること。
+          - 同期的な IO モナドを使用する（lambars の IO<A> は Send を要求しない）
+
+          将来の拡張として、シングルスレッドランタイム専用の AsyncIOLocal<A>
+          （Send 境界なし）の導入を検討する可能性があるが、本要件定義の
+          スコープ外とする。
+
+          ### 判断
+          上記の影響は限定的であり、API一貫性と将来の拡張性を考慮して
+          B: Send 境界を追加することを選択する。
+          これは破壊的変更として CHANGELOG に記載する。
+
+          ## 最適化後の実装
+          ```rust
+          pub fn fmap<B, F>(self, function: F) -> AsyncIO<B>
+          where
+              F: FnOnce(A) -> B + Send + 'static,
+              B: Send + 'static,
+          {
+              match self {
+                  Self::Pure(value) => {
+                      // Pure 値に対しては即座に関数を適用して Pure を返す
+                      // 注意: これは純粋関数前提の最適化である
+                      AsyncIO::Pure(function(value))
+                  }
+                  Self::Deferred(thunk) => AsyncIO::Deferred(Box::new(move || {
+                      Box::pin(async move { function(thunk().await) })
+                  })),
+              }
+          }
+          ```
+
+          ## ドキュメントへの追記
+          fmap のドキュメントに以下を追記する：
+          - fmap は純粋関数専用であること
+          - 副作用を伴う処理には flat_map を使用すべきこと
+          - Pure 値に対しては関数が即座に評価されること
+        examples:
+          - description: "Pure値へのfmapが最適化される"
+            code: |
+              // 最適化前: Pure(21).fmap(|x| x * 2) => Deferred(Box::new(...))
+              // 最適化後: Pure(21).fmap(|x| x * 2) => Pure(42)
+              let result = AsyncIO::pure(21).fmap(|x| x * 2);
+              // result は Pure(42) となり、Box 割り当てが発生しない
+
+    implementations:
+      - type: "AsyncIO<A>"
+        description: |
+          fmap メソッドの Pure ケースを最適化する。
+
+          ## 変更点
+          1. Pure 値に対しては即座に関数を適用して Pure を返す
+          2. B: Send 境界を追加する
+          3. ドキュメントに純粋関数前提を明記する
+
+          ## 注意点
+          - flat_map は最適化対象外（関数が AsyncIO を返すため、
+            遅延評価のセマンティクスを維持する必要がある）
+
+          ## 影響範囲
+          - async_io.rs の fmap メソッド
+          - B: Send 境界の追加により、一部のユースケースで
+            コンパイルエラーが発生する可能性がある（破壊的変更）
+
+  # ======================================================================
+  # 2. Persistent構造の最適化
+  # ======================================================================
+  - id: persistent_list_iterator_size_hint
+    name: "PersistentListIterator::size_hint() の正確な実装"
+    description: |
+      PersistentListIterator の size_hint() が (0, None) を返しているため、
+      collect() 時に Vec が適切なキャパシティを事前確保できない問題を修正する。
+
+      ## 現状の問題
+      ```rust
+      fn size_hint(&self) -> (usize, Option<usize>) {
+          // We cannot efficiently compute the remaining length,
+          // but we know it's at least 0 and at most the original list length
+          (0, None)
+      }
+      ```
+
+      この実装により、collect() 時に Vec が小さいキャパシティから開始し、
+      要素追加のたびに realloc が発生する。
+
+      ## 最適化方針
+      PersistentListIterator に remaining フィールドを追加し、
+      イテレーション開始時に元のリストの長さを記録する。
+      next() 呼び出しごとに remaining をデクリメントし、
+      size_hint() で正確な残り要素数を返す。
+
+      ## 前提条件
+      PersistentList の長さ取得（length フィールド）は O(1) である。
+      これはイテレータ生成時のコスト増加が無視できることを意味する。
+
+      ## 実装詳細
+      PersistentListIntoIterator は既に正確な size_hint() を実装しているため、
+      PersistentListIterator（参照イテレータ）のみを修正する。
+
+    methods:
+      - name: "size_hint (PersistentListIterator)"
+        signature: "fn size_hint(&self) -> (usize, Option<usize>)"
+        description: |
+          正確な残り要素数を返すように修正する。
+        examples:
+          - description: "size_hintが正確な値を返す"
+            code: |
+              let list: PersistentList<i32> = (1..=100).collect();
+              let iter = list.iter();
+              assert_eq!(iter.size_hint(), (100, Some(100)));
+
+              // collect() 時に Vec::with_capacity(100) が呼ばれる
+              let vec: Vec<&i32> = iter.collect();
+
+    implementations:
+      - type: "PersistentListIterator<'a, T>"
+        description: |
+          remaining フィールドを追加し、正確な size_hint() を実装する。
+
+          ## 変更後の構造体
+          ```rust
+          pub struct PersistentListIterator<'a, T> {
+              current: Option<&'a ReferenceCounter<Node<T>>>,
+              remaining: usize,  // 追加
+          }
+          ```
+
+          ## イテレータ生成の変更
+          ```rust
+          impl<T> PersistentList<T> {
+              pub fn iter(&self) -> PersistentListIterator<'_, T> {
+                  PersistentListIterator {
+                      current: self.head.as_ref(),
+                      remaining: self.length,  // 長さを記録
+                  }
+              }
+          }
+          ```
+
+          ## 変更後の next()
+          ```rust
+          fn next(&mut self) -> Option<Self::Item> {
+              self.current.map(|node| {
+                  self.current = node.next.as_ref();
+                  self.remaining = self.remaining.saturating_sub(1);
+                  &node.element
+              })
+          }
+          ```
+
+          ## 変更後の size_hint()
+          ```rust
+          fn size_hint(&self) -> (usize, Option<usize>) {
+              (self.remaining, Some(self.remaining))
+          }
+          ```
+
+          ## ExactSizeIterator の実装
+          size_hint() が正確になるため、ExactSizeIterator も実装する：
+          ```rust
+          impl<T> ExactSizeIterator for PersistentListIterator<'_, T> {
+              fn len(&self) -> usize {
+                  self.remaining
+              }
+          }
+          ```
+
+  - id: partition_vec_with_capacity
+    name: "partition() での Vec::with_capacity() 適用"
+    description: |
+      PersistentList と PersistentVector の partition() メソッドで、
+      Vec::new() の代わりに Vec::with_capacity() を使用する。
+
+      ## 現状の問題
+      ```rust
+      pub fn partition<P>(&self, predicate: P) -> (Self, Self)
+      where
+          P: Fn(&T) -> bool,
+      {
+          let mut pass = Vec::new();  // キャパシティなし
+          let mut fail = Vec::new();  // キャパシティなし
+          // ...
+      }
+      ```
+
+      要素数が多い場合、realloc が頻繁に発生する。
+
+      ## 最適化方針
+      元のコレクションの長さの半分をキャパシティとして確保する。
+      これは以下の理由による：
+      - 平均的なケース（50%ずつ分割）で realloc がほぼ発生しない
+      - 最悪ケース（全要素が一方に偏る）でも Vec は自動的に拡張する
+      - メモリ使用量の増加は元のコレクションサイズの半分以下
+
+      ## 代替案と選択理由
+      1. 全量確保（len）: メモリ効率が悪い、却下
+      2. 2パス（1パス目でカウント、2パス目で振り分け）: 計算量が2倍、却下
+      3. 半分確保（len/2 + 1）: バランスが良い、採用
+
+    methods:
+      - name: "partition (PersistentList)"
+        signature: "pub fn partition<P>(&self, predicate: P) -> (Self, Self) where P: Fn(&T) -> bool"
+        description: |
+          Vec::with_capacity() を使用してキャパシティを事前確保する。
+        examples:
+          - description: "partitionの使用例（APIは変更なし）"
+            code: |
+              let list: PersistentList<i32> = (1..=1000).collect();
+              let (evens, odds) = list.partition(|x| x % 2 == 0);
+              // 内部で Vec::with_capacity(501) が使用される
+
+      - name: "partition (PersistentVector)"
+        signature: "pub fn partition<P>(&self, predicate: P) -> (Self, Self) where P: Fn(&T) -> bool"
+        description: |
+          Vec::with_capacity() を使用してキャパシティを事前確保する。
+
+    implementations:
+      - type: "PersistentList<T>"
+        description: |
+          partition() メソッドで Vec::with_capacity() を使用する。
+
+          ## 変更後の実装
+          ```rust
+          pub fn partition<P>(&self, predicate: P) -> (Self, Self)
+          where
+              P: Fn(&T) -> bool,
+          {
+              let estimated_capacity = self.length / 2 + 1;  // 半分 + 1
+              let mut pass = Vec::with_capacity(estimated_capacity);
+              let mut fail = Vec::with_capacity(estimated_capacity);
+
+              for element in self {
+                  if predicate(element) {
+                      pass.push(element.clone());
+                  } else {
+                      fail.push(element.clone());
+                  }
+              }
+
+              (pass.into_iter().collect(), fail.into_iter().collect())
+          }
+          ```
+
+      - type: "PersistentVector<T>"
+        description: |
+          PersistentList と同様の最適化を適用する。
+
+          ## 変更後の実装
+          ```rust
+          pub fn partition<P>(&self, predicate: P) -> (Self, Self)
+          where
+              P: Fn(&T) -> bool,
+          {
+              let estimated_capacity = self.length / 2 + 1;
+              let mut pass = Vec::with_capacity(estimated_capacity);
+              let mut fail = Vec::with_capacity(estimated_capacity);
+
+              for element in self {
+                  if predicate(element) {
+                      pass.push(element.clone());
+                  } else {
+                      fail.push(element.clone());
+                  }
+              }
+
+              (pass.into_iter().collect(), fail.into_iter().collect())
+          }
+          ```
+
+non_functional_requirements:
+  performance:
+    - "AsyncIO の Pure→Pure操作でBox割り当てを完全に削除する"
+    - "PersistentList/Vector の partition() で realloc を50%以上削減する"
+    - "PersistentListIterator::collect() で realloc をほぼゼロにする"
+    - "既存のベンチマーク結果が悪化しないことを確認する"
+  compatibility:
+    - "AsyncIO::fmap の B: Send 境界追加は破壊的変更として認識する"
+    - "AsyncIO::fmap のセマンティクス変更（Pure値の正格評価）をドキュメントに明記する"
+    - "partition() の外部APIシグネチャは変更しない"
+    - "PersistentListIterator の外部APIシグネチャは変更しない"
+    - "既存のテストが全て通過すること"
+    - "既存のドキュメントの例が全て動作すること"
+  testing:
+    - "最適化前後でベンチマーク比較を実施し、改善を確認する"
+    - "既存のユニットテストが全て通過することを確認する"
+    - "AsyncIO::fmap の Pure→Pure 最適化のテストを追加する"
+    - "新規追加コード（remaining フィールド等）のテストを追加する"
+    - "ExactSizeIterator for PersistentListIterator のテストを追加する"
+    - "メモリ使用量のプロファイリングを実施し、改善を確認する"
+
+future_extensions:
+  - id: readert_statet_optimization
+    name: "ReaderT/StateT の Clone 削減"
+    description: |
+      ReaderT/StateT の flat_map 系メソッドで環境/状態の Clone を削減する。
+      内部構造の見直しにより、run_function が Rc<R>/Rc<S> を直接受け取るように
+      変更することで、実際の Clone 回数を削減する。
+    rationale: |
+      現在の設計では、Rc でラップしても最終的に run() で値として渡す必要があり、
+      Clone 削減効果が限定的である。また、Rc 生成のオーバーヘッドが Clone の
+      コストと相殺される可能性がある。
+
+      より根本的な内部構造の見直しが必要であり、本要件定義のスコープを超える。
+      ベンチマークで実際の Clone コストを測定した上で、別の要件定義として
+      検討する。
+
+      また、R/S に内部可変性（RefCell 等）がある場合、Rc 共有により
+      意味論が変わる可能性がある（独立コピーから共有への変化）。
+      この点も慎重な検討が必要である。
+
+  - id: custom_allocator
+    name: "カスタムアロケータの導入"
+    description: |
+      バンプアロケータやアリーナアロケータを導入し、
+      小さなアロケーションを効率化する。
+    rationale: |
+      Rustのアロケータ機能がまだunstableであり、
+      実装コストが高いため、現時点では実装しない。
+      アロケータAPIが安定化した後に検討する。
+
+  - id: cow_string_optimization
+    name: "Cow<str> による文字列最適化"
+    description: |
+      文字列を扱う箇所で Cow<str> を活用し、
+      不要なString clone を削減する。
+    rationale: |
+      本要件定義のスコープ外であり、影響範囲が広いため、
+      別の要件定義として扱う。
+
+  - id: small_vec_optimization
+    name: "SmallVec による小規模Vec最適化"
+    description: |
+      小規模なVecに対してスタック上に要素を格納する
+      SmallVec を導入し、ヒープアロケーションを削減する。
+    rationale: |
+      外部クレートへの依存が増えるため、
+      慎重に検討が必要である。
+      パフォーマンス改善効果を測定した上で判断する。
+
+  - id: async_io_function_composition_stack
+    name: "AsyncIO の関数合成スタックによる遅延評価維持"
+    description: |
+      AsyncIO の Pure 値に対して Deferred を作らず、関数合成を保持する
+      内部スタック（連結関数列）を持つ設計。これにより遅延評価を維持しながら
+      Box 割り当てを削減できる。
+    rationale: |
+      実装規模が大きく、AsyncIO の内部構造を大幅に変更する必要がある。
+      本要件定義の「内部最適化のみ」方針と合致しないため、
+      別の要件定義として検討する。
+
+      この設計は Haskell の Free Monad や cats-effect の IORunLoop に
+      類似したアプローチであり、より本格的なリファクタリングが必要。

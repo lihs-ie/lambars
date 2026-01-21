@@ -301,7 +301,7 @@ mod unit_tests {
         let get_put: State<i32, ()> = State::get().flat_map(State::put);
 
         for initial_state in [-100, -1, 0, 1, 100] {
-            let (_, final_state) = get_put.run(initial_state);
+            let (_, final_state) = get_put.run_cloned(initial_state);
             assert_eq!(final_state, initial_state);
         }
     }
@@ -325,8 +325,8 @@ mod unit_tests {
         let composed: State<i32, ()> = State::modify(move |s| g(f(s)));
 
         for initial_state in [-100, -1, 0, 1, 100] {
-            let (_, final1) = chained.run(initial_state);
-            let (_, final2) = composed.run(initial_state);
+            let (_, final1) = chained.run_cloned(initial_state);
+            let (_, final2) = composed.run_cloned(initial_state);
             assert_eq!(final1, final2);
         }
     }
