@@ -743,3 +743,88 @@ proptest! {
         prop_assert_eq!(vector1.cmp(&vector2) == std::cmp::Ordering::Equal, vector1 == vector2);
     }
 }
+
+// =============================================================================
+// Concat Laws
+// =============================================================================
+
+proptest! {
+    /// concat preserves the length: len(v1.concat(v2)) = len(v1) + len(v2)
+    #[test]
+    fn prop_concat_preserves_length(
+        elements1 in prop::collection::vec(any::<i32>(), 0..100),
+        elements2 in prop::collection::vec(any::<i32>(), 0..100)
+    ) {
+        let vector1: PersistentVector<i32> = elements1.iter().cloned().collect();
+        let vector2: PersistentVector<i32> = elements2.iter().cloned().collect();
+        let concatenated = vector1.concat(&vector2);
+
+        prop_assert_eq!(concatenated.len(), vector1.len() + vector2.len());
+    }
+
+    /// concat preserves the order: concatenated[i] = v1[i] for i < len(v1),
+    /// concatenated[i] = v2[i - len(v1)] for i >= len(v1)
+    #[test]
+    fn prop_concat_preserves_order(
+        elements1 in prop::collection::vec(any::<i32>(), 0..50),
+        elements2 in prop::collection::vec(any::<i32>(), 0..50)
+    ) {
+        let vector1: PersistentVector<i32> = elements1.iter().cloned().collect();
+        let vector2: PersistentVector<i32> = elements2.iter().cloned().collect();
+        let concatenated = vector1.concat(&vector2);
+
+        // Verify first part
+        for (index, expected) in elements1.iter().enumerate() {
+            prop_assert_eq!(concatenated.get(index), Some(expected));
+        }
+
+        // Verify second part
+        for (index, expected) in elements2.iter().enumerate() {
+            prop_assert_eq!(concatenated.get(elements1.len() + index), Some(expected));
+        }
+    }
+
+    /// concat is associative: (v1.concat(v2)).concat(v3) == v1.concat(v2.concat(v3))
+    #[test]
+    fn prop_concat_associativity(
+        elements1 in prop::collection::vec(any::<i32>(), 0..30),
+        elements2 in prop::collection::vec(any::<i32>(), 0..30),
+        elements3 in prop::collection::vec(any::<i32>(), 0..30)
+    ) {
+        let vector1: PersistentVector<i32> = elements1.iter().cloned().collect();
+        let vector2: PersistentVector<i32> = elements2.iter().cloned().collect();
+        let vector3: PersistentVector<i32> = elements3.iter().cloned().collect();
+
+        let left = vector1.concat(&vector2).concat(&vector3);
+        let right = vector1.concat(&vector2.concat(&vector3));
+
+        prop_assert_eq!(left, right);
+    }
+
+    /// concat with empty vector is identity: v.concat(empty) == v and empty.concat(v) == v
+    #[test]
+    fn prop_concat_identity(elements in prop::collection::vec(any::<i32>(), 0..100)) {
+        let vector: PersistentVector<i32> = elements.iter().cloned().collect();
+        let empty: PersistentVector<i32> = PersistentVector::new();
+
+        prop_assert_eq!(vector.concat(&empty), vector.clone());
+        prop_assert_eq!(empty.concat(&vector), vector);
+    }
+
+    /// concat result equals Vec concatenation
+    #[test]
+    fn prop_concat_equals_vec_concat(
+        elements1 in prop::collection::vec(any::<i32>(), 0..100),
+        elements2 in prop::collection::vec(any::<i32>(), 0..100)
+    ) {
+        let vector1: PersistentVector<i32> = elements1.iter().cloned().collect();
+        let vector2: PersistentVector<i32> = elements2.iter().cloned().collect();
+        let concatenated = vector1.concat(&vector2);
+
+        let mut expected = elements1.clone();
+        expected.extend(elements2.iter().cloned());
+
+        let result: Vec<i32> = concatenated.iter().cloned().collect();
+        prop_assert_eq!(result, expected);
+    }
+}
