@@ -3117,3 +3117,199 @@ fn test_from_iter_and_into_iter() {
     let collected: Vec<(i32, i32)> = map.into_iter().collect();
     assert_eq!(collected.len(), 200);
 }
+
+// =============================================================================
+// Phase 4: Collision Bucket Optimization Tests (SmallVec Spillover)
+// =============================================================================
+
+/// Tests collision node with exactly 4 entries (within SmallVec stack limit).
+#[rstest]
+fn test_collision_exactly_four_entries_within_stack() {
+    let key1 = ControlledHash::new(1, 12345);
+    let key2 = ControlledHash::new(2, 12345);
+    let key3 = ControlledHash::new(3, 12345);
+    let key4 = ControlledHash::new(4, 12345);
+
+    let map = PersistentHashMap::new()
+        .insert(key1.clone(), "one")
+        .insert(key2.clone(), "two")
+        .insert(key3.clone(), "three")
+        .insert(key4.clone(), "four");
+
+    assert_eq!(map.len(), 4);
+    assert_eq!(map.get(&key1), Some(&"one"));
+    assert_eq!(map.get(&key2), Some(&"two"));
+    assert_eq!(map.get(&key3), Some(&"three"));
+    assert_eq!(map.get(&key4), Some(&"four"));
+}
+
+/// Tests collision node with 5+ entries (SmallVec spills to heap).
+#[rstest]
+fn test_collision_five_entries_heap_spillover() {
+    let key1 = ControlledHash::new(1, 99999);
+    let key2 = ControlledHash::new(2, 99999);
+    let key3 = ControlledHash::new(3, 99999);
+    let key4 = ControlledHash::new(4, 99999);
+    let key5 = ControlledHash::new(5, 99999);
+
+    let map = PersistentHashMap::new()
+        .insert(key1.clone(), "one")
+        .insert(key2.clone(), "two")
+        .insert(key3.clone(), "three")
+        .insert(key4.clone(), "four")
+        .insert(key5.clone(), "five");
+
+    assert_eq!(map.len(), 5);
+    assert_eq!(map.get(&key1), Some(&"one"));
+    assert_eq!(map.get(&key2), Some(&"two"));
+    assert_eq!(map.get(&key3), Some(&"three"));
+    assert_eq!(map.get(&key4), Some(&"four"));
+    assert_eq!(map.get(&key5), Some(&"five"));
+}
+
+/// Tests collision node with 8 entries (well above SmallVec limit).
+#[rstest]
+fn test_collision_eight_entries_large_spillover() {
+    let entries: Vec<_> = (1..=8)
+        .map(|index| ControlledHash::new(index, 77777))
+        .collect();
+
+    let mut map = PersistentHashMap::new();
+    for (index, key) in entries.iter().enumerate() {
+        map = map.insert(key.clone(), (index + 1) as i32 * 10);
+    }
+
+    assert_eq!(map.len(), 8);
+    for (index, key) in entries.iter().enumerate() {
+        assert_eq!(map.get(key), Some(&((index + 1) as i32 * 10)));
+    }
+}
+
+/// Tests updating a key in a large collision node (>4 entries).
+#[rstest]
+fn test_collision_update_in_large_bucket() {
+    let entries: Vec<_> = (1..=6)
+        .map(|index| ControlledHash::new(index, 55555))
+        .collect();
+
+    let mut map = PersistentHashMap::new();
+    for (index, key) in entries.iter().enumerate() {
+        map = map.insert(key.clone(), index as i32);
+    }
+
+    // Update an existing key
+    map = map.insert(entries[2].clone(), 999);
+
+    assert_eq!(map.len(), 6);
+    assert_eq!(map.get(&entries[2]), Some(&999));
+
+    // Other entries unchanged
+    assert_eq!(map.get(&entries[0]), Some(&0));
+    assert_eq!(map.get(&entries[5]), Some(&5));
+}
+
+/// Tests removing entries from a large collision node.
+#[rstest]
+fn test_collision_remove_from_large_bucket() {
+    let entries: Vec<_> = (1..=6)
+        .map(|index| ControlledHash::new(index, 44444))
+        .collect();
+
+    let mut map = PersistentHashMap::new();
+    for (index, key) in entries.iter().enumerate() {
+        map = map.insert(key.clone(), index as i32);
+    }
+
+    // Remove middle entry
+    map = map.remove(&entries[3]);
+
+    assert_eq!(map.len(), 5);
+    assert!(map.get(&entries[3]).is_none());
+    assert_eq!(map.get(&entries[0]), Some(&0));
+    assert_eq!(map.get(&entries[5]), Some(&5));
+}
+
+/// Tests that collision node preserves immutability with large buckets.
+#[rstest]
+fn test_collision_immutability_large_bucket() {
+    let entries: Vec<_> = (1..=5)
+        .map(|index| ControlledHash::new(index, 33333))
+        .collect();
+
+    let mut map1 = PersistentHashMap::new();
+    for (index, key) in entries.iter().enumerate() {
+        map1 = map1.insert(key.clone(), index as i32);
+    }
+
+    let map1_snapshot = map1.clone();
+
+    // Modify map1
+    let map2 = map1.insert(entries[0].clone(), 100);
+    let map3 = map2.remove(&entries[1]);
+
+    // Original snapshot should be unchanged
+    assert_eq!(map1_snapshot.len(), 5);
+    assert_eq!(map1_snapshot.get(&entries[0]), Some(&0));
+    assert_eq!(map1_snapshot.get(&entries[1]), Some(&1));
+
+    // Modified maps should reflect changes
+    assert_eq!(map2.get(&entries[0]), Some(&100));
+    assert_eq!(map3.len(), 4);
+    assert!(map3.get(&entries[1]).is_none());
+}
+
+/// Tests iterating over a large collision node.
+#[rstest]
+fn test_collision_iteration_large_bucket() {
+    let entries: Vec<_> = (1..=7)
+        .map(|index| ControlledHash::new(index, 22222))
+        .collect();
+
+    let mut map = PersistentHashMap::new();
+    for (index, key) in entries.iter().enumerate() {
+        map = map.insert(key.clone(), (index + 1) as i32);
+    }
+
+    let sum: i32 = map.values().sum();
+    assert_eq!(sum, 1 + 2 + 3 + 4 + 5 + 6 + 7);
+}
+
+/// Tests removing entries until collision node becomes a single Entry node.
+#[rstest]
+fn test_collision_reduce_to_single_entry() {
+    let entries: Vec<_> = (1..=5)
+        .map(|index| ControlledHash::new(index, 11111))
+        .collect();
+
+    let mut map = PersistentHashMap::new();
+    for key in &entries {
+        map = map.insert(key.clone(), 1);
+    }
+
+    // Remove all but one
+    for key in entries.iter().skip(1) {
+        map = map.remove(key);
+    }
+
+    assert_eq!(map.len(), 1);
+    assert_eq!(map.get(&entries[0]), Some(&1));
+}
+
+/// Tests contains_key on a large collision node.
+#[rstest]
+fn test_collision_contains_key_large_bucket() {
+    let entries: Vec<_> = (1..=6)
+        .map(|index| ControlledHash::new(index, 88888))
+        .collect();
+    let missing_key = ControlledHash::new(100, 88888);
+
+    let mut map = PersistentHashMap::new();
+    for key in &entries {
+        map = map.insert(key.clone(), 1);
+    }
+
+    for key in &entries {
+        assert!(map.contains_key(key));
+    }
+    assert!(!map.contains_key(&missing_key));
+}

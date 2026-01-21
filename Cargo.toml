@@ -17,6 +17,8 @@ futures = { version = "^0.3", optional = true }
 serde = { version = "1.0", features = ["derive"], optional = true }
 rayon = { version = "1.10", optional = true }
 smallvec = { version = "1.13", optional = true, features = ["const_generics"] }
+rustc-hash = { version = "2.1", optional = true }
+ahash = { version = "0.8", optional = true }
 paste = "1.0"
 static_assertions = "1.1"
 
@@ -45,6 +47,8 @@ async = ["effect", "dep:tokio", "dep:futures"]
 arc = []
 rayon = ["arc", "dep:rayon"]
 serde = ["dep:serde"]
+fxhash = ["dep:rustc-hash"]
+ahash = ["dep:ahash"]
 
 [lints.rust]
 unsafe_code = "forbid"

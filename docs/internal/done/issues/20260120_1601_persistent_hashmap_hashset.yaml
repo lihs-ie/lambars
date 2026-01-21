@@ -1,0 +1,174 @@
+# Issue: 永続 HashMap/HashSet の大規模 insert/collect が桁違いに遅い
+# プロファイリング結果とベンチマークからの改善設計
+# 作成: 2026-01-20
+
+deferred_features:
+  - id: persistent_hashmap_hashset_perf
+    name: "永続 HashMap/HashSet のスループット最適化"
+    discovered_date: "2026-01-20"
+    priority: critical
+    category: performance
+    labels:
+      - "performance"
+      - "throughput"
+      - "memory"
+      - "priority: critical"
+
+    problem:
+      summary: "100k insert/collect が標準 HashMap 比で ~25-30x 遅く、警告も発生"
+      details: |
+        ベンチ結果:
+        - insert/PersistentHashMap/100000: 85-87ms (benchmark_results_after.txt:4781-4789)
+        - transient_hashmap_insert/PersistentHashMap/100000: 88-90ms (7480-7486)
+        - transient_hashset_insert/PersistentHashSet/100000: 74-78ms (7681-7688)
+        - collect_optimization/PersistentHashMap_collect/100000: 27-34ms, +22-51% 退行 (7757-7763)
+        - baseline HashMap/100000: ~3ms (benchmark_results_before.txt)
+
+        5s 以内に収まらず警告が複数発生しており、RPS/レイテンシ・メモリともに致命的。
+
+      rust_limitation: |
+        現行 HAMT 実装は
+        - Box/Arc/Vec を多段に保持し、更新ごとに多重アロケーション
+        - Transient でも構造共有を維持しコピーが連鎖
+        - RandomState + 衝突リストで CPU/メモリ帯域を浪費
+
+    solution:
+      approach: "固定長ビットマップ HAMT への刷新 + Transient ビルダー強制 + 衝突バケット最適化 + 高速ハッシュ"
+
+      algorithm:
+        name: "固定長 HAMT + バルク更新パス"
+        description: |
+          32-way ビットマップノードを基本単位とし、子ノードは固定長配列 (MaybeUninit<Option<Node>;32>)
+          と SmallVec バケットでインライン化する。Transient 経路は完全 mutable にし、最後に1回だけ
+          Arc clone して永続化する。ハッシュは FxHasher / AHash をデフォルトにし、DoS 耐性が必要なら
+          シードを注入する。
+        implementation_strategies:
+          - name: "ノード表現の再設計"
+            description: |
+              struct Node { bitmap: u32, children: SmallArray<NodeOrLeaf, 6>, len: u32 }
+              - 子 0-5 までは in-place (SmallVec<[NodeOrLeaf;6]>)、溢れたら Box へ退避
+              - 葉は (hash, key, value) を inline 保持し Arc/Box を避ける
+              - Arc はルートのみ。中間ノードは Arc<[Node;N]> ではなく Box<Node> で深さを抑制
+          - name: "Transient ビルダーのデフォルト化"
+            description: |
+              collect/insert API で必ず Transient を経由:
+              let mut t = map.transient(); for (k,v) in iter { t.insert_mut(k,v); } t.freeze()
+              - freeze() で初めて Arc 共有を作る
+              - insert_mut は可変参照のみで完結し、clone/Arc::new を禁止
+          - name: "衝突バケット最適化"
+            description: |
+              - ArrayVec<(K,V), 4> で線形探索。4 を超えたら固定長 open-address へ拡張
+              - ハッシュ再計算を避けるために hash 値を保持
+          - name: "高速ハッシュ採用"
+            description: |
+              - デフォルト Hasher を FxHasher へ (hashbrown と同等)
+              - DoS 耐性が必要な API だけ RandomState を選択できるよう feature gate
+          - name: "再ハッシュ・再配置の batch 処理"
+            description: |
+              - insert/extend で size_hint を利用し、事前にノード階層を予約
+              - collect は iterator::fold で Transient を返す specialized impl を追加
+
+        performance_characteristics:
+          - "100k insert を 85-90ms → 5-8ms を目標 (10-15x 改善)"
+          - "collect 100k を 27-34ms → <5ms を目標"
+          - "アロケーション回数を >70% 削減"
+
+      options:
+        - name: "固定長 HAMT + Transient 強制 (推奨)"
+          pros:
+            - "最大のスループット改善"
+            - "メモリ帯域の削減"
+          cons:
+            - "内部実装の大幅変更"
+        - name: "現行 HAMT 維持 + Transient だけ導入"
+          pros:
+            - "導入コストが低い"
+          cons:
+            - "ノード多重アロケ問題は残る"
+
+      recommended: "固定長 HAMT + Transient 強制"
+      estimated_complexity: high
+      breaking_changes:
+        api_compatibility: true  # freeze/transient API を前面に出すため軽微な追加
+        internal_implementation: true
+        behavioral_changes: false
+        details: |
+          - 既存 API は維持しつつ内部表現を刷新
+          - デフォルト Hasher の変更は feature で選択可能にする
+
+    implementation_phases:
+      - phase: 1
+        name: "ノード表現刷新 (固定長ビットマップ)"
+        tasks:
+          - "Node/Leaf の新構造体を実装 (bitmap + SmallArray)"
+          - "挿入・検索・削除の基本パスを移植しベンチを通す"
+        expected_improvement: "insert/100k 30-40% 短縮"
+        estimated_effort: "2-3日"
+      - phase: 2
+        name: "Transient ビルダー強制導入"
+        tasks:
+          - "collect/extend/insert_many で Transient 経路を標準にする"
+          - "freeze 時のみ Arc 化する実装を追加"
+        expected_improvement: "collect/100k 5-7x 改善"
+        estimated_effort: "1-2日"
+      - phase: 3
+        name: "衝突バケットとハッシュ選択の最適化"
+        tasks:
+          - "ArrayVec バケット実装と open-address フォールバック"
+          - "FxHasher デフォルト + RandomState オプション化"
+        expected_improvement: "衝突時の CPU/alloc 削減 30-50%"
+        estimated_effort: "1日"
+      - phase: 4
+        name: "ベンチ/回帰テスト強化"
+        tasks:
+          - "100k/1M スケールの insert/update/remove ベンチ追加"
+          - "DoS 耐性 (衝突パターン) のプロパティテスト"
+        expected_improvement: "退行検知を自動化"
+        estimated_effort: "1日"
+
+    success_metrics:
+      - metric: "insert/PersistentHashMap/100000"
+        current: "85-90ms"
+        target: "<=8ms"
+      - metric: "collect_optimization/PersistentHashMap_collect/100000"
+        current: "27-34ms"
+        target: "<=5ms"
+      - metric: "alloc_count per insert"
+        current: "多重 Box/Arc で高頻度"
+        target: "-70% 以上"
+      - metric: "CPU flamegraph で malloc/cfree 比率"
+        current: "トップを占有"
+        target: "<10%"
+
+    references:
+      - name: "benchmark_results_after.txt"
+        url: "repo:benchmark_results_after.txt"
+        description: "該当行 4781-4789, 7480-7486, 7681-7688, 7757-7763"
+      - name: "benchmark_results_before.txt"
+        url: "repo:benchmark_results_before.txt"
+        description: "HashMap/100000 3ms 台"
+      - name: "profiling-results/criterion-*/control_bench.folded"
+        url: "repo:profiling-results/criterion-profiling-*/control_bench.folded"
+        description: "malloc/cfree が上位"
+
+    target_files:
+      - path: "src/persistent/hashmap.rs"
+        action: "大幅更新"
+        description: "固定長 HAMT + Transient 経路実装"
+      - path: "src/persistent/hashset.rs"
+        action: "大幅更新"
+        description: "HashMap ベースの最適化適用"
+      - path: "benches/persistent_hashmap_bench.rs"
+        action: "更新/追加"
+        description: "100k/1M スケールのベンチと回帰テスト"
+
+    related:
+      requirement_id: null
+      plan_id: null
+      related_issues:
+        - "フレームグラフ上の malloc/cfree 削減タスク"
+
+    github_issue:
+      number: 221
+      url: "https://github.com/lihs-ie/lambars/issues/221"
+      created: true
