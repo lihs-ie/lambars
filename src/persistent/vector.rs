@@ -4331,8 +4331,50 @@ impl<T: Clone> TransientVector<T> {
                 popped
             }
         } else {
-            // Tail is empty (shouldn't happen in normal use, but handle defensively)
-            None
+            // Tail is empty (can happen after concat + flush_tail)
+            // Get element from root and set up new tail
+            if self.length == 1 {
+                // This is the last element, get it from root
+                let element = self.get(0).cloned();
+                self.length = 0;
+                self.root = ReferenceCounter::new(Node::empty_branch());
+                self.shift = BITS_PER_LEVEL;
+                return element;
+            }
+
+            // Get the last leaf from root to use as tail
+            let last_leaf_offset = self.length - 1;
+            let new_tail = self.get_leaf_at_as_tail_chunk(last_leaf_offset);
+            let last_leaf_len = new_tail.len();
+
+            if last_leaf_len == 0 {
+                return None;
+            }
+
+            // Pop the last leaf from root
+            self.pop_tail_from_root_cow();
+            self.tail = new_tail;
+
+            // Now pop from tail
+            if self.tail.len() > 1 {
+                self.length -= 1;
+                self.tail.pop()
+            } else {
+                // Tail has exactly one element
+                let popped = self.tail.pop();
+                if self.length == 1 {
+                    self.length = 0;
+                } else {
+                    let new_tail_offset = (self.length - 1).saturating_sub(BRANCHING_FACTOR);
+                    let next_tail = self.get_leaf_at_as_tail_chunk(new_tail_offset);
+                    if !next_tail.is_empty() {
+                        self.pop_tail_from_root_cow();
+                        self.tail = next_tail;
+                    }
+                    self.length -= 1;
+                }
+                popped
+            }
         }
     }
 

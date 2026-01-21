@@ -2611,6 +2611,131 @@ mod concat_transient_tests {
         assert_eq!(result1.len(), 101);
         assert_eq!(result2.len(), 101);
     }
+
+    /// Test that concat followed by transient pop_back works correctly.
+    /// After concat, tail is empty (flushed to root), so pop_back must
+    /// retrieve elements from root.
+    #[rstest]
+    fn test_concat_transient_pop_back() {
+        let left: PersistentVector<i32> = (0..50).collect();
+        let right: PersistentVector<i32> = (50..100).collect();
+        let concatenated = left.concat(&right);
+
+        let mut transient = concatenated.transient();
+
+        // After concat, tail is empty. pop_back should still work.
+        let popped = transient.pop_back();
+        assert_eq!(popped, Some(99));
+        assert_eq!(transient.len(), 99);
+
+        // Pop more elements
+        let popped2 = transient.pop_back();
+        assert_eq!(popped2, Some(98));
+        assert_eq!(transient.len(), 98);
+
+        // Verify remaining elements are still accessible
+        for i in 0..98 {
+            assert_eq!(transient.get(i), Some(&(i as i32)));
+        }
+    }
+
+    /// Test pop_back all elements from transient after concat.
+    #[rstest]
+    fn test_concat_transient_pop_back_all() {
+        let left: PersistentVector<i32> = (0..10).collect();
+        let right: PersistentVector<i32> = (10..20).collect();
+        let concatenated = left.concat(&right);
+
+        let mut transient = concatenated.transient();
+
+        // Pop all 20 elements
+        for expected in (0..20).rev() {
+            let popped = transient.pop_back();
+            assert_eq!(
+                popped,
+                Some(expected),
+                "Expected to pop {}, but got {:?}",
+                expected,
+                popped
+            );
+            assert_eq!(
+                transient.len(),
+                expected as usize,
+                "After popping {}, length should be {}",
+                expected,
+                expected
+            );
+        }
+
+        assert!(transient.is_empty());
+        assert_eq!(transient.pop_back(), None);
+    }
+
+    /// Test that pop_back works after concat with 32+1 scenario in transient mode.
+    #[rstest]
+    fn test_concat_transient_pop_back_32_plus_1() {
+        let base: PersistentVector<i32> = (0..32).collect();
+        let singleton = PersistentVector::singleton(99);
+        let concatenated = base.concat(&singleton);
+
+        let mut transient = concatenated.transient();
+        assert_eq!(transient.len(), 33);
+
+        let popped = transient.pop_back();
+        assert_eq!(popped, Some(99));
+        assert_eq!(transient.len(), 32);
+
+        // Verify all remaining elements
+        for i in 0..32 {
+            assert_eq!(
+                transient.get(i),
+                Some(&(i as i32)),
+                "Element at index {} mismatch",
+                i
+            );
+        }
+
+        // Continue popping
+        let popped2 = transient.pop_back();
+        assert_eq!(popped2, Some(31));
+        assert_eq!(transient.len(), 31);
+    }
+
+    /// Test interleaved push_back and pop_back on transient after concat.
+    #[rstest]
+    fn test_concat_transient_interleaved_push_pop() {
+        let left: PersistentVector<i32> = (0..50).collect();
+        let right: PersistentVector<i32> = (50..100).collect();
+        let concatenated = left.concat(&right);
+
+        let mut transient = concatenated.transient();
+
+        // Pop some
+        assert_eq!(transient.pop_back(), Some(99));
+        assert_eq!(transient.pop_back(), Some(98));
+        assert_eq!(transient.len(), 98);
+
+        // Push some
+        transient.push_back(200);
+        transient.push_back(201);
+        assert_eq!(transient.len(), 100);
+
+        // Verify
+        assert_eq!(transient.get(98), Some(&200));
+        assert_eq!(transient.get(99), Some(&201));
+
+        // Pop again
+        assert_eq!(transient.pop_back(), Some(201));
+        assert_eq!(transient.pop_back(), Some(200));
+        assert_eq!(transient.len(), 98);
+
+        // Convert to persistent and verify
+        let result = transient.persistent();
+        assert_eq!(result.len(), 98);
+        for i in 0..98 {
+            assert_eq!(result.get(i), Some(&(i as i32)));
+        }
+    }
 }
 
 // =============================================================================
