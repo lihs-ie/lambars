@@ -1955,11 +1955,11 @@ impl<T: Clone> PersistentVector<T> {
         }
 
         let all_children = if height == 2 {
-            left_children
-                .iter()
-                .chain(right_children.iter())
-                .cloned()
-                .collect()
+            // Pre-allocate with known capacity
+            let mut all = Vec::with_capacity(left_children.len() + right_children.len());
+            all.extend(left_children.iter().cloned());
+            all.extend(right_children.iter().cloned());
+            all
         } else {
             let left_last_index = left_children.len() - 1;
             let merged_middle = Self::merge_nodes_to_list(
@@ -1968,27 +1968,29 @@ impl<T: Clone> PersistentVector<T> {
                 height - 1,
             );
 
-            left_children
-                .iter()
-                .take(left_last_index)
-                .cloned()
-                .chain(merged_middle)
-                .chain(right_children.iter().skip(1).cloned())
-                .collect()
+            // Pre-allocate with estimated capacity
+            let capacity =
+                left_last_index + merged_middle.len() + right_children.len().saturating_sub(1);
+            let mut all = Vec::with_capacity(capacity);
+            all.extend(left_children.iter().take(left_last_index).cloned());
+            all.extend(merged_middle);
+            all.extend(right_children.iter().skip(1).cloned());
+            all
         };
 
         let all_children = Self::rebalance_children(all_children, height - 1);
 
-        all_children
-            .chunks(BRANCHING_FACTOR)
-            .map(|chunk| {
-                let size_table = Self::build_size_table(chunk, height - 1);
-                ReferenceCounter::new(Node::RelaxedBranch {
-                    children: ReferenceCounter::from(chunk.to_vec()),
-                    size_table: ReferenceCounter::from(size_table),
-                })
-            })
-            .collect()
+        // Pre-allocate result vector
+        let result_capacity = all_children.len().div_ceil(BRANCHING_FACTOR);
+        let mut result = Vec::with_capacity(result_capacity);
+        for chunk in all_children.chunks(BRANCHING_FACTOR) {
+            let size_table = Self::build_size_table(chunk, height - 1);
+            result.push(ReferenceCounter::new(Node::RelaxedBranch {
+                children: ReferenceCounter::from(chunk.to_vec()),
+                size_table: ReferenceCounter::from(size_table),
+            }));
+        }
+        result
     }
 
     fn merge_nodes(
@@ -2020,8 +2022,19 @@ impl<T: Clone> PersistentVector<T> {
 
     fn get_children(node: &ReferenceCounter<Node<T>>) -> Vec<ReferenceCounter<Node<T>>> {
         match node.as_ref() {
-            Node::Branch(children) => children.iter().filter_map(|child| child.clone()).collect(),
-            Node::RelaxedBranch { children, .. } => children.iter().cloned().collect(),
+            Node::Branch(children) => {
+                // Pre-allocate with worst-case capacity
+                let mut result = Vec::with_capacity(BRANCHING_FACTOR);
+                for child in children.iter().flatten() {
+                    result.push(child.clone());
+                }
+                result
+            }
+            Node::RelaxedBranch { children, .. } => {
+                let mut result = Vec::with_capacity(children.len());
+                result.extend(children.iter().cloned());
+                result
+            }
             Node::Leaf(_) => vec![node.clone()],
         }
     }
@@ -2064,9 +2077,14 @@ impl<T: Clone> PersistentVector<T> {
             return children;
         }
 
-        // Flatten all grandchildren from all children
-        let all_grandchildren: Vec<ReferenceCounter<Node<T>>> =
-            children.iter().flat_map(Self::get_children).collect();
+        // Estimate capacity for grandchildren: each child has at most BRANCHING_FACTOR children
+        let estimated_grandchildren = children.len() * BRANCHING_FACTOR;
+
+        // Flatten all grandchildren from all children with pre-allocated capacity
+        let mut all_grandchildren = Vec::with_capacity(estimated_grandchildren);
+        for child in &children {
+            all_grandchildren.extend(Self::get_children(child));
+        }
 
         if all_grandchildren.is_empty() {
             return children;
@@ -2096,10 +2114,9 @@ impl<T: Clone> PersistentVector<T> {
                 base_children_per_parent
             };
 
-            let parent_children: Vec<ReferenceCounter<Node<T>>> = grandchild_iter
-                .by_ref()
-                .take(children_for_this_parent)
-                .collect();
+            // Pre-allocate parent_children with exact capacity
+            let mut parent_children = Vec::with_capacity(children_for_this_parent);
+            parent_children.extend(grandchild_iter.by_ref().take(children_for_this_parent));
 
             if !parent_children.is_empty() {
                 let size_table = Self::build_size_table(&parent_children, height - 1);
@@ -2123,13 +2140,13 @@ impl<T: Clone> PersistentVector<T> {
     }
 
     fn build_size_table(children: &[ReferenceCounter<Node<T>>], height: usize) -> Vec<usize> {
-        children
-            .iter()
-            .scan(0, |cumulative, child| {
-                *cumulative += Self::node_size(child, height);
-                Some(*cumulative)
-            })
-            .collect()
+        let mut size_table = Vec::with_capacity(children.len());
+        let mut cumulative = 0;
+        for child in children {
+            cumulative += Self::node_size(child, height);
+            size_table.push(cumulative);
+        }
+        size_table
     }
 
     fn node_size(node: &ReferenceCounter<Node<T>>, height: usize) -> usize {
