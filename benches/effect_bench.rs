@@ -597,6 +597,45 @@ fn benchmark_async_io_overhead_comparison(criterion: &mut Criterion) {
         });
     });
 
+    // map chain on Pure: measures eager evaluation optimization
+    // Pure(x).fmap(f).fmap(g).fmap(h) should be equivalent to Pure(h(g(f(x))))
+    // with no intermediate Box allocations
+    group.bench_function("map_chain_pure_3", |bencher| {
+        bencher.iter(|| {
+            let result = runtime.block_on(async {
+                AsyncIO::pure(1)
+                    .fmap(|x| x + 1)
+                    .fmap(|x| x * 2)
+                    .fmap(|x| x + 10)
+                    .run_async()
+                    .await
+            });
+            black_box(result)
+        });
+    });
+
+    // map chain on Pure: 10 chained fmaps
+    group.bench_function("map_chain_pure_10", |bencher| {
+        bencher.iter(|| {
+            let result = runtime.block_on(async {
+                AsyncIO::pure(0)
+                    .fmap(|x| x + 1)
+                    .fmap(|x| x + 1)
+                    .fmap(|x| x + 1)
+                    .fmap(|x| x + 1)
+                    .fmap(|x| x + 1)
+                    .fmap(|x| x + 1)
+                    .fmap(|x| x + 1)
+                    .fmap(|x| x + 1)
+                    .fmap(|x| x + 1)
+                    .fmap(|x| x + 1)
+                    .run_async()
+                    .await
+            });
+            black_box(result)
+        });
+    });
+
     group.finish();
 }
 

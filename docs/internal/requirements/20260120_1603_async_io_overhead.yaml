@@ -126,9 +126,23 @@ requirements:
       - name: "AsyncIO::flat_map"
         signature: "pub fn flat_map<B, F>(self, f: F) -> AsyncIO<B> where F: FnOnce(A) -> AsyncIO<B>"
         description: "FlatMap { inner: self, f } を構築。クロージャキャプチャは move、dyn 不使用。"
-      - name: "AsyncIO::map"
-        signature: "pub fn map<B, F>(self, f: F) -> AsyncIO<B> where F: FnOnce(A) -> B"
-        description: "Map { inner: self, f } を構築。map は flat_map + pure に展開しない（追加アロケ防止）。"
+      - name: "AsyncIO::map (fmap)"
+        signature: "pub fn fmap<B, F>(self, f: F) -> AsyncIO<B> where F: FnOnce(A) -> B + Send + 'static"
+        description: |
+          Functor の fmap 操作。評価戦略は内部状態に依存する:
+          - **Pure 値の場合**: f を即座に適用し、新しい Pure(f(a)) を返す。Box アロケーションを回避する最適化。
+          - **Defer/Running/その他の場合**: 遅延評価を維持し、poll 時に f を適用する。
+
+          **前提条件**: f は全域純粋関数でなければならない。パニック、ログ出力、可変参照の更新など
+          観測可能な副作用を持つ関数を渡した場合、評価タイミングの違いにより挙動が変わる可能性がある。
+          副作用を伴う処理には flat_map + AsyncIO::new を使用すること。
+
+          Pure 値の即時評価は参照透過性を維持する: fmap は純粋関数を期待するため、評価タイミングは
+          観測可能な副作用を持たない。Functor 法則 `fmap id = id`, `fmap (g . f) = fmap g . fmap f` は
+          即時評価でも成立し、`pure(a).fmap(f)` ≡ `pure(f(a))` は Functor 法則から自明。
+
+          **最適化効果**: Pure 値に対して複数回 fmap を連ねた場合（例: `pure(a).fmap(f).fmap(g).fmap(h)`）、
+          各ステップで中間の Box アロケーションが不要となり、最終的に `pure(h(g(f(a))))` と等価になる。
 
     implementations:
       - type: "src/effect/async_io.rs"
@@ -263,10 +277,22 @@ requirements:
       - name: "stack_safety_test"
         signature: "deep flat_map chain (>=10_000) を実行して stack overflow がないことを確認"
         description: "state machine 化によるスタック増加がないことを検証。"
+      - name: "pure_eager_evaluation_test"
+        signature: "Pure 値に対する fmap が run_async 前に即座に実行されることを検証"
+        description: |
+          Pure 値の即時評価最適化が正しく動作することを確認するテスト。
+          AtomicBool フラグ（Ordering::SeqCst）を使い、fmap 内の関数が run_async() 呼び出し前に
+          実行されることを検証。Defer 値に対しては遅延評価が維持されることも同時に検証する。
+      - name: "functor_laws_pure_path_test"
+        signature: "Functor 法則（fmap id, 合成法則）が Pure 経路でも成立することを検証"
+        description: |
+          Pure 値の即時評価後も Functor 法則が成立することを確認する回帰テスト:
+          - `pure(a).fmap(id)` == `pure(a)` (identity law)
+          - `pure(a).fmap(g).fmap(f)` == `pure(a).fmap(|x| f(g(x)))` (composition law)
 
     implementations:
       - type: "tests/async_io_laws.rs"
-        description: "Monad 法則・参照透過性・スタック安全性を検証するプロパティテストを追加。"
+        description: "Monad 法則・Functor 法則・参照透過性・スタック安全性を検証するプロパティテストを追加。Pure 経路と Defer 経路の両方をカバー。"
 
 # 非機能要件
 non_functional_requirements:

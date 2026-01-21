@@ -637,12 +637,16 @@ impl<A: Send + 'static> AsyncIO<A> {
     pub fn fmap<B, F>(self, function: F) -> AsyncIO<B>
     where
         F: FnOnce(A) -> B + Send + 'static,
-        B: 'static,
+        B: Send + 'static,
     {
-        AsyncIO::new(move || async move {
-            let value = self.await;
-            function(value)
-        })
+        // Pure 値の場合は即時評価（Box アロケーション回避の最適化）
+        match self.state {
+            AsyncIOState::Pure { value: Some(a) } => AsyncIO::pure(function(a)),
+            _ => AsyncIO::new(move || async move {
+                let value = self.await;
+                function(value)
+            }),
+        }
     }
 }
 
