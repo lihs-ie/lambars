@@ -2824,15 +2824,16 @@ enum IteratorState {
 
 /// An iterator over references to elements of a [`PersistentVector`].
 ///
-/// This iterator uses an optimized leaf-caching strategy to achieve near-O(N)
-/// iteration complexity. It caches the start offset and length of the current
-/// leaf to enable O(1) access to consecutive elements within the same leaf.
+/// This iterator uses an optimized leaf-caching strategy to achieve O(N)
+/// iteration complexity. It caches the current leaf slice to enable O(1)
+/// access to consecutive elements within the same leaf.
 ///
 /// # Complexity
 ///
 /// - O(1) amortized per element when iterating sequentially
-/// - Each leaf is accessed once, and within a leaf, elements are accessed via index
-/// - Tree navigation only occurs when crossing leaf boundaries
+/// - Each leaf is accessed once via tree traversal
+/// - Within a leaf, elements are accessed directly via cached slice
+/// - Tree navigation only occurs when crossing leaf boundaries (once per leaf)
 pub struct PersistentVectorIterator<'a, T> {
     /// Reference to the original vector (for lifetime and metadata)
     vector: &'a PersistentVector<T>,
@@ -2840,9 +2841,11 @@ pub struct PersistentVectorIterator<'a, T> {
     current_tree_index: usize,
     /// Total number of elements in the tree (excluding tail)
     tree_element_count: usize,
-    /// Cached leaf information for fast sequential access
+    /// Cached leaf slice for O(1) access within a leaf
+    cached_leaf_slice: Option<&'a [T]>,
+    /// Global start index of the cached leaf
     cached_leaf_start: usize,
-    /// Cached leaf end (exclusive)
+    /// Global end index of the cached leaf (exclusive)
     cached_leaf_end: usize,
     /// Current processing state
     state: IteratorState,
@@ -2860,6 +2863,7 @@ impl<'a, T> PersistentVectorIterator<'a, T> {
                 vector,
                 current_tree_index: 0,
                 tree_element_count: 0,
+                cached_leaf_slice: None,
                 cached_leaf_start: 0,
                 cached_leaf_end: 0,
                 state: IteratorState::Exhausted,
@@ -2875,6 +2879,7 @@ impl<'a, T> PersistentVectorIterator<'a, T> {
                 vector,
                 current_tree_index: 0,
                 tree_element_count: 0,
+                cached_leaf_slice: None,
                 cached_leaf_start: 0,
                 cached_leaf_end: 0,
                 state: IteratorState::ProcessingTail,
@@ -2886,6 +2891,7 @@ impl<'a, T> PersistentVectorIterator<'a, T> {
                 vector,
                 current_tree_index: 0,
                 tree_element_count,
+                cached_leaf_slice: None,
                 cached_leaf_start: 0,
                 cached_leaf_end: 0,
                 state: IteratorState::TraversingTree,
@@ -2900,21 +2906,29 @@ impl<'a, T> PersistentVectorIterator<'a, T> {
 
     /// Updates the leaf cache for the given index.
     ///
-    /// Finds the leaf containing `index` and caches its start and end positions.
+    /// Finds the leaf containing `index` and caches its slice and range.
+    /// This is the only place where tree traversal occurs.
     fn update_leaf_cache(&mut self, index: usize) {
         // Find the leaf containing this index by navigating the tree
-        if let Some((start, end)) = self.find_leaf_range(index) {
+        if let Some((slice, start, end)) = self.find_leaf_with_slice(index) {
+            self.cached_leaf_slice = Some(slice);
             self.cached_leaf_start = start;
             self.cached_leaf_end = end;
         } else {
-            // No leaf found, set empty range
+            // No leaf found, set empty cache
+            self.cached_leaf_slice = None;
             self.cached_leaf_start = index;
             self.cached_leaf_end = index;
         }
     }
 
-    /// Finds the range [start, end) of indices covered by the leaf containing `index`.
-    fn find_leaf_range(&self, index: usize) -> Option<(usize, usize)> {
+    /// Finds the leaf containing `index` and returns its slice and range.
+    ///
+    /// Returns `Some((slice, start, end))` where:
+    /// - `slice` is the leaf's data as a slice
+    /// - `start` is the global start index of the leaf
+    /// - `end` is the global end index (exclusive)
+    fn find_leaf_with_slice(&self, index: usize) -> Option<(&'a [T], usize, usize)> {
         let mut current_node = &self.vector.root;
         let mut current_index = index;
         let mut current_shift = self.vector.shift;
@@ -2958,7 +2972,7 @@ impl<'a, T> PersistentVectorIterator<'a, T> {
             Node::Leaf(chunk) => {
                 let start = cumulative_offset;
                 let end = cumulative_offset + chunk.len();
-                Some((start, end))
+                Some((chunk.as_slice(), start, end))
             }
             Node::Branch {
                 children,
@@ -2981,7 +2995,7 @@ impl<'a, T> PersistentVectorIterator<'a, T> {
                 {
                     let start = cumulative_offset + child_offset;
                     let end = start + chunk.len();
-                    return Some((start, end));
+                    return Some((chunk.as_slice(), start, end));
                 }
                 None
             }
@@ -3002,16 +3016,19 @@ impl<'a, T> Iterator for PersistentVectorIterator<'a, T> {
                         continue;
                     }
 
-                    // Check if we need to update the leaf cache
+                    // Check if we need to update the leaf cache (only at leaf boundaries)
                     if self.current_tree_index >= self.cached_leaf_end {
                         self.update_leaf_cache(self.current_tree_index);
                     }
 
-                    // Get the element using the vector's get method
-                    if let Some(element) = self.vector.get(self.current_tree_index) {
-                        self.current_tree_index += 1;
-                        self.elements_returned += 1;
-                        return Some(element);
+                    // Get the element directly from the cached leaf slice (O(1))
+                    if let Some(slice) = self.cached_leaf_slice {
+                        let local_index = self.current_tree_index - self.cached_leaf_start;
+                        if let Some(element) = slice.get(local_index) {
+                            self.current_tree_index += 1;
+                            self.elements_returned += 1;
+                            return Some(element);
+                        }
                     }
                     // This shouldn't happen for valid indices
                     self.state = IteratorState::ProcessingTail;
@@ -3047,20 +3064,30 @@ impl<T> ExactSizeIterator for PersistentVectorIterator<'_, T> {
 
 /// An owning iterator over elements of a [`PersistentVector`].
 ///
-/// This iterator uses an optimized approach similar to `PersistentVectorIterator`
-/// but returns owned values by cloning elements from the tree.
+/// This iterator uses an optimized leaf-caching strategy to achieve O(N)
+/// iteration complexity. It caches the current leaf's elements to enable
+/// O(1) access within the same leaf.
 ///
 /// # Complexity
 ///
-/// - O(log32 N) per element access (due to tree navigation)
-/// - Total iteration: O(N log32 N), which is effectively O(N) for practical sizes
+/// - O(1) amortized per element when iterating sequentially
+/// - Tree traversal only occurs when crossing leaf boundaries (once per leaf)
+/// - Leaf elements are cloned once and cached for fast sequential access
 pub struct PersistentVectorIntoIterator<T> {
-    /// The original vector (for accessing elements and tail)
+    /// The original vector (for accessing tree structure)
     vector: PersistentVector<T>,
     /// Current global index in the tree portion
     current_tree_index: usize,
     /// Total number of elements in the tree (excluding tail)
     tree_element_count: usize,
+    /// Cached leaf elements for O(1) access within a leaf
+    cached_leaf_elements: Vec<T>,
+    /// Current index within the cached leaf
+    cached_leaf_local_index: usize,
+    /// Global start index of the cached leaf
+    cached_leaf_start: usize,
+    /// Global end index of the cached leaf (exclusive)
+    cached_leaf_end: usize,
     /// Current processing state
     state: IteratorState,
     /// Current position within the tail buffer
@@ -3077,6 +3104,10 @@ impl<T: Clone> PersistentVectorIntoIterator<T> {
                 vector,
                 current_tree_index: 0,
                 tree_element_count: 0,
+                cached_leaf_elements: Vec::new(),
+                cached_leaf_local_index: 0,
+                cached_leaf_start: 0,
+                cached_leaf_end: 0,
                 state: IteratorState::Exhausted,
                 tail_index: 0,
                 elements_returned: 0,
@@ -3090,19 +3121,124 @@ impl<T: Clone> PersistentVectorIntoIterator<T> {
                 vector,
                 current_tree_index: 0,
                 tree_element_count: 0,
+                cached_leaf_elements: Vec::new(),
+                cached_leaf_local_index: 0,
+                cached_leaf_start: 0,
+                cached_leaf_end: 0,
                 state: IteratorState::ProcessingTail,
                 tail_index: 0,
                 elements_returned: 0,
             }
         } else {
+            // Find and cache the first leaf
+            let (elements, start, end) =
+                Self::find_leaf_with_elements_static(&vector, 0).unwrap_or((Vec::new(), 0, 0));
             Self {
                 vector,
                 current_tree_index: 0,
                 tree_element_count,
+                cached_leaf_elements: elements,
+                cached_leaf_local_index: 0,
+                cached_leaf_start: start,
+                cached_leaf_end: end,
                 state: IteratorState::TraversingTree,
                 tail_index: 0,
                 elements_returned: 0,
             }
+        }
+    }
+
+    /// Finds the leaf containing `index` and returns its cloned elements and range.
+    fn find_leaf_with_elements_static(
+        vector: &PersistentVector<T>,
+        index: usize,
+    ) -> Option<(Vec<T>, usize, usize)> {
+        let mut current_node = &vector.root;
+        let mut current_index = index;
+        let mut current_shift = vector.shift;
+        let mut cumulative_offset = 0usize;
+
+        while current_shift > 0 {
+            match current_node.as_ref() {
+                Node::Branch {
+                    children,
+                    size_table,
+                } => {
+                    let child_index = find_child_index(size_table.as_slice(), current_index);
+                    if child_index >= children.len() {
+                        return None;
+                    }
+
+                    let child_offset = if child_index == 0 {
+                        0
+                    } else {
+                        size_table[child_index - 1]
+                    };
+
+                    cumulative_offset += child_offset;
+                    current_index -= child_offset;
+
+                    match &children[child_index] {
+                        Some(child) => {
+                            current_node = child;
+                            current_shift -= BITS_PER_LEVEL;
+                        }
+                        None => return None,
+                    }
+                }
+                Node::Leaf(_) => break,
+            }
+        }
+
+        match current_node.as_ref() {
+            Node::Leaf(chunk) => {
+                let start = cumulative_offset;
+                let end = cumulative_offset + chunk.len();
+                let elements: Vec<T> = chunk.as_slice().to_vec();
+                Some((elements, start, end))
+            }
+            Node::Branch {
+                children,
+                size_table,
+            } => {
+                let child_index = find_child_index(size_table.as_slice(), current_index);
+                if child_index >= children.len() {
+                    return None;
+                }
+
+                let child_offset = if child_index == 0 {
+                    0
+                } else {
+                    size_table[child_index - 1]
+                };
+
+                if let Some(child) = &children[child_index]
+                    && let Node::Leaf(chunk) = child.as_ref()
+                {
+                    let start = cumulative_offset + child_offset;
+                    let end = start + chunk.len();
+                    let elements: Vec<T> = chunk.as_slice().to_vec();
+                    return Some((elements, start, end));
+                }
+                None
+            }
+        }
+    }
+
+    /// Updates the leaf cache for the given index.
+    fn update_leaf_cache(&mut self, index: usize) {
+        if let Some((elements, start, end)) =
+            Self::find_leaf_with_elements_static(&self.vector, index)
+        {
+            self.cached_leaf_elements = elements;
+            self.cached_leaf_local_index = 0;
+            self.cached_leaf_start = start;
+            self.cached_leaf_end = end;
+        } else {
+            self.cached_leaf_elements.clear();
+            self.cached_leaf_local_index = 0;
+            self.cached_leaf_start = index;
+            self.cached_leaf_end = index;
         }
     }
 }
@@ -3120,10 +3256,19 @@ impl<T: Clone> Iterator for PersistentVectorIntoIterator<T> {
                         continue;
                     }
 
-                    if let Some(element) = self.vector.get(self.current_tree_index).cloned() {
+                    // Check if we need to update the leaf cache (only at leaf boundaries)
+                    if self.current_tree_index >= self.cached_leaf_end {
+                        self.update_leaf_cache(self.current_tree_index);
+                    }
+
+                    // Get the element directly from the cached elements (O(1))
+                    if let Some(element) =
+                        self.cached_leaf_elements.get(self.cached_leaf_local_index)
+                    {
+                        self.cached_leaf_local_index += 1;
                         self.current_tree_index += 1;
                         self.elements_returned += 1;
-                        return Some(element);
+                        return Some(element.clone());
                     }
                     // This shouldn't happen for valid indices
                     self.state = IteratorState::ProcessingTail;
