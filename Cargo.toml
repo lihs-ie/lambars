@@ -17,6 +17,7 @@ futures = { version = "^0.3", optional = true }
 serde = { version = "1.0", features = ["derive"], optional = true }
 rayon = { version = "1.10", optional = true }
 smallvec = { version = "1.13", optional = true, features = ["const_generics"] }
+arrayvec = { version = "0.7", optional = true }
 paste = "1.0"
 static_assertions = "1.1"
 
@@ -37,7 +38,7 @@ full = ["typeclass", "compose", "control", "persistent", "optics", "derive", "ef
 typeclass = []
 compose = ["typeclass", "dep:lambars-derive"]
 control = ["typeclass"]
-persistent = ["typeclass", "control", "dep:smallvec"]
+persistent = ["typeclass", "control", "dep:smallvec", "dep:arrayvec"]
 optics = ["typeclass", "persistent"]
 derive = ["optics", "dep:lambars-derive"]
 effect = ["typeclass", "control"]

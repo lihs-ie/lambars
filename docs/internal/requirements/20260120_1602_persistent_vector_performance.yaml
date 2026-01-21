@@ -1,0 +1,274 @@
+# PersistentVector RRB 再設計 要件定義
+#
+# 概要:
+#   push/update/concat が ms オーダーで遅延し、再配置と全コピーがボトルネック。
+#   末尾チャンクの固定長化と RRB 再平衡を実装し、push_back/10k <=200µs、update/100k <=1.0ms、
+#   concat/100k <=300µs、アロケーション 60-80% 削減を達成する。
+#
+# 設計方針:
+#   1. tail/leaf を固定長チャンク化し、Vec 再配置を完全排除する
+#   2. RRB-Tree の再平衡アルゴリズムで concat を O(log n)・構造共有化する
+#   3. Transient 経路を標準経路にし、バルク更新は可変経路で 1 回 freeze だけ行う
+#   4. size_table を必須化し、ランク検索と rebalancing を高速化する
+#   5. ベンチ・メモリカウンタを CI で閾値判定し、退行を自動検知する
+#
+# 参照:
+#   - docs/internal/issues/20260120_1602_persistent_vector.yaml
+#   - benchmark_results_after.txt:6602-6608, 7029-7036, 7361-7366
+#   - profiling-results/criterion-profiling-*/for_macro_bench.folded
+
+version: "1.0.0"
+name: "persistent_vector_rrb_rework"
+description: |
+  永続 Vector の push/update/concat がコピーと realloc で遅延している。
+  固定長 tail チャンク + RRB 再平衡 + Transient 強化でコピー回数とアロケーションを削減し、
+  push_back/10k <=200µs、transient_update/100k <=1.0ms、concat/100k <=300µs を厳守する。
+
+# 背景・動機
+background:
+  problem: |
+    - push_back/10000: 760-767µs
+    - transient_vector_update/PersistentVector/100000: 4.27-4.41ms
+    - concat/PersistentVector_naive/100000: ~1.04ms + 5s 警告
+    - 末尾 Vec の realloc、concat の全コピー、Transient でも Arc clone 多段が原因で CPU/メモリを圧迫
+  motivation: |
+    RPS とメモリ帯域を改善し、本番利用に耐える永続 Vector を提供する。
+    末尾チャンク固定化と RRB 再平衡を実装し、push/update/concat のパスを全て O(log n)・少アロケで統一する。
+  prior_art:
+    - name: "RRB-Tree (Relaxed Radix Balanced Vector)"
+      description: "32 分岐・サイズテーブル付きで concat を O(log n) に抑える手法"
+    - name: "Clojure/Scala Vector"
+      description: "tail チャンク + 再平衡で append/concat を高速化する実装"
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. ノードレイアウト・tail 固定長化
+  # ======================================================================
+  - id: pv-01-node-layout
+    name: "固定長 tail/leaf とサイズテーブル必須化"
+    description: |
+      末尾・葉ノードを固定長チャンク化し、再配置ゼロで push/update できるレイアウトに刷新する。
+      すべての分岐ノードに size_table を保持し、ランク検索と concat 再平衡を高速化する。
+
+    methods:
+      - name: "TailChunk/LeafChunk"
+        signature: "struct LeafChunk<T> { len: u8, data: ArrayVec<T, BRANCHING_FACTOR> }"
+        description: |
+          - ArrayVec<[T;32]> または SmallVec<[T;32]> を用い、heap 再配置を禁止。
+          - len を u8 で保持し、memcpy で push/pop を行う。Clone T は clone_from を使用。
+          - Drop 時は ArrayVec が自動で drop する（unsafe 不使用）。
+      - name: "Branch/RelaxedBranch"
+        signature: |
+          enum Node<T> {
+            Leaf(LeafChunk<T>),
+            Branch { children: ArrayVec<Option<ReferenceCounter<Node<T>>>, BRANCHING_FACTOR>, size_table: ArrayVec<usize, BRANCHING_FACTOR> },
+            RelaxedBranch { children: ArrayVec<ReferenceCounter<Node<T>>, BRANCHING_FACTOR>, size_table: ArrayVec<usize, BRANCHING_FACTOR> },
+          }
+        description: |
+          - size_table は必須（Branch でも cumulative サイズを保持）とし、get/index 計算を rank ベースに統一。
+          - children は ArrayVec でインライン格納し、Sparse slots は Option で表現。
+          - ReferenceCounter は現行の Arc/Rc wrapper を使用し構造共有を維持。
+      - name: "invariants"
+        signature: "fn assert_node(node: &Node<T>)"
+        description: |
+          - children.len() は 1..=32、size_table.len() は children.len() と一致。
+          - size_table は単調増加、末尾値はサブツリー要素数と一致。
+          - RelaxedBranch の高さ差は 1 以下、tail_offset は size_table[-1] - tail.len().
+
+    implementations:
+      - type: "src/persistent/vector.rs"
+        description: "Node/TailChunk 定義を ArrayVec ベースに全面置換し、size_table を必須化する。"
+
+  # ======================================================================
+  # 2. push/update の固定長チャンク最適化
+  # ======================================================================
+  - id: pv-02-push-update
+    name: "push/update の O(log n) コピー最小化"
+    description: |
+      tail への追加は memcpy のみで完結させ、溢れた場合のみ新 LeafChunk をリンク。
+      update はパスコピーを 1 回に抑え、サイズテーブルを差分更新する。
+
+    methods:
+      - name: "push_back"
+        signature: "pub fn push_back(self, value: T) -> Self"
+        description: |
+          - tail.len < 32: ArrayVec::push を使うだけ（再配置なし）。
+          - tail.len == 32: tail を LeafChunk に昇格させ push_tail(self.root, self.shift, tail) を実行。
+          - push_tail は高さ不足時に新レベルを 1 回だけ追加し、size_table を差分で再計算。
+      - name: "push_back_many"
+        signature: "pub fn push_back_many<I: IntoIterator<Item = T>>(self, iter: I) -> Self"
+        description: |
+          - iter.size_hint を合成し、必要チャンク数を先に割り当て。
+          - tail に詰め切る→チャンク化→push_tail を繰り返し、Vec::reserve を禁止。
+      - name: "update"
+        signature: "pub fn update(&self, index: usize, value: T) -> Self"
+        description: |
+          - tail_offset 以降は tail をコピーして 1 箇所だけ書き換え。
+          - それ以前は find_child_index(size_table, idx) で子を特定し、各階層で 1 ノードだけ clone して差し替え。
+          - size_table の差分更新を O(log n) で実施。
+
+    implementations:
+      - type: "src/persistent/vector.rs"
+        description: "push_back/push_back_many/update を ArrayVec tail と rank 検索で実装。"
+
+  # ======================================================================
+  # 3. concat 専用の RRB 再平衡
+  # ======================================================================
+  - id: pv-03-concat-rebalance
+    name: "concat の O(log n) 構造共有化"
+    description: |
+      左右ベクタをコピーせずに再平衡し、連結コストを O(log n) に抑える。
+      高さ差を解消し、左右の末尾/先頭チャンクを再分配する。
+
+    methods:
+      - name: "concat"
+        signature: "pub fn concat(self, other: Self) -> Self"
+        description: |
+          - tail を LeafChunk 化して左右 root を concat_nodes(self.root, other.root, self.shift, other.shift) で統合。
+          - 高さ差 >1 の場合は浅い方に空ノードを挿入して高さを揃える。
+          - concat_nodes は左右の子配列をマージし、BRANCHING_FACTOR を超える場合は rebalancing（左右から葉を再分配）を実行。
+          - size_table を再計算し、RelaxedBranch を返す。
+      - name: "rebalance"
+        signature: "fn rebalance(children: &[ReferenceCounter<Node<T>>]) -> (ArrayVec<ReferenceCounter<Node<T>>, BRANCHING_FACTOR>, ArrayVec<usize, BRANCHING_FACTOR>)"
+        description: |
+          - 葉チャンク列を走査し、32 個ずつまとめて新 Branch を生成。
+          - 余剰分は左右に均等配分し、size_table を累積計算。
+          - 追加アロケは新ノード分のみ。既存チャンクは共有。
+
+    implementations:
+      - type: "src/persistent/vector.rs"
+        description: "concat/concat_nodes/rebalance を追加し、現在の全コピー実装を置換する。"
+
+  # ======================================================================
+  # 4. Transient 経路の標準化
+  # ======================================================================
+  - id: pv-04-transient
+    name: "TransientVector を高速経路のデフォルトにする"
+    description: |
+      バルク更新は TransientVector を経由させ、freeze で 1 回だけ Arc を生成する。
+      Arc clone 多段と Vec 再配置を排除する。
+
+    methods:
+      - name: "TransientVector::push_back"
+        signature: "pub fn push_back(&mut self, value: T)"
+        description: |
+          - tail ArrayVec が満杯になったら LeafChunk をリンクし、根を in-place で更新（Rc::make_mut/Arc::make_mut）。
+          - size_table を破壊的に更新し、再帰的に再計算しない。
+      - name: "TransientVector::extend / push_back_many"
+        signature: "pub fn push_back_many<I: IntoIterator<Item = T>>(&mut self, iter: I)"
+        description: |
+          - size_hint を利用し事前に必要チャンク数を確保。
+          - iter をチャンク化しながら in-place で children を増やす。
+      - name: "freeze"
+        signature: "pub fn persistent(self) -> PersistentVector<T>"
+        description: |
+          - Arc/Rc の clone は freeze 時の 1 回だけ。tail は ArrayVec から ReferenceCounter<[T;32]> へコピー（memcpy）。
+          - RelaxedBranch を作らず、Branch + size_table で固定。
+
+    implementations:
+      - type: "src/persistent/vector.rs"
+        description: "TransientVector を ArrayVec tail + in-place size_table 更新に刷新し、PersistentVector::collect/from_iter で利用する。"
+
+  # ======================================================================
+  # 5. collect/from_iter/iterators の容量推定と再配置禁止
+  # ======================================================================
+  - id: pv-05-iter-build
+    name: "Iterator 経路の事前確保とチャンク化"
+    description: |
+      collect/from_iter/extend/concat_all は size_hint を合成して必要チャンク数を予約し、
+      push_back_many/Transient 経由で構築する。
+
+    methods:
+      - name: "FromIterator for PersistentVector"
+        signature: "fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self"
+        description: |
+          - iter.size_hint().upper_bound を利用し、チャンク数を算出。
+          - TransientVector を生成し push_back_many で詰め、最後に persistent()。
+      - name: "Extend"
+        signature: "impl<T> Extend<T> for PersistentVector<T>"
+        description: "内部的に push_back_many を呼び、既存 Vec::extend 経路を置換。"
+
+    implementations:
+      - type: "src/persistent/vector.rs"
+        description: "FromIterator/Extend/collect 経路を Transient + size_hint 付きで統一する。"
+
+  # ======================================================================
+  # 6. ベンチ・テスト・メモリ監視
+  # ======================================================================
+  - id: pv-06-bench-test
+    name: "性能・メモリ回帰を自動検知する"
+    description: |
+      ベンチとプロパティテストで性能・構造不変を担保し、回帰を CI で失敗させる。
+
+    methods:
+      - name: "criterion ベンチ"
+        signature: "cargo bench --bench persistent_vector_bench -- push_back_10k update_100k concat_100k transient_update_100k"
+        description: |
+          - 目標: push_back/10000 <=200µs、update/100000 <=1.0ms、concat/100000 <=300µs、transient_update/100000 <=1.0ms。
+          - ベンチでアロケーション数も記録（allocator stats）。
+      - name: "iai-callgrind"
+        signature: "cargo bench -p benches --bench persistent_vector_iai"
+        description: "命令数/branch miss を計測し、再配置や clone の増加を検知。"
+      - name: "プロパティテスト"
+        signature: "proptest! で push_back/update/concat の結果が Vec と一致するか検証"
+        description: |
+          - size_table 単調性、children.len と size_table.len の一致、RelaxedBranch 高さ差 <=1 をチェック。
+          - Transient → Persistent → Transient の往復で等価性が保たれることを検証。
+      - name: "メモリ計測"
+        signature: "valgrind/dhat または tokio-malloc-trace を使いアロケーション数を比較"
+        description: "push_back 100k / concat 100k でアロケーションが 60-80% 減っていることを確認。"
+
+    implementations:
+      - type: "benches/persistent_vector_bench.rs"
+        description: "10k/100k push/update/concat ベンチを追加し、中央値で閾値判定。"
+      - type: "benches/persistent_vector_iai.rs"
+        description: "iai-callgrind で同一ケースを計測。"
+      - type: "tests/persistent_vector_prop.rs"
+        description: "プロパティテストで不変条件と Vec 互換性を確認。"
+      - type: ".github/workflows/bench.yml"
+        description: "閾値超過で CI 失敗させ、成果物を artifact に保存。"
+
+  # ======================================================================
+  # 7. 互換性とドキュメント
+  # ======================================================================
+  - id: pv-07-compat-doc
+    name: "API 互換性と利用ガイド"
+    description: |
+      公開 API は互換を維持しつつ push_back_many を追加する（既存メソッドは挙動同一）。
+      大量挿入は Transient/push_back_many を推奨するガイドを整備する。
+
+    methods:
+      - name: "docs 更新"
+        signature: "docs/internal/guides/persistent_vector.md を新設"
+        description: |
+          - tail 固定長化と concat 再平衡の仕組みを説明。
+          - 大量挿入は Transient/push_back_many/collect を使うことを明記し、サンプルコードを掲載。
+      - name: "破壊的変更の範囲"
+        signature: "n/a"
+        description: |
+          - 内部表現は全面刷新。API 互換を維持するが、旧 concat の全コピー実装は削除。
+          - TransientVector は !Send/!Sync を維持。
+
+    implementations:
+      - type: "docs/internal/guides/persistent_vector.md"
+        description: "Before/After ベンチ比較と推奨パスをドキュメント化。"
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - "push_back/10000: 760-767µs → 目標 <=200µs（中央値）"
+    - "transient_update/100000: 4.27-4.41ms → 目標 <=1.0ms"
+    - "concat/100000: ~1.04ms + 警告 → 目標 <=300µs、警告なし"
+    - "アロケーション回数を 60-80% 削減（push_back/conct で計測）"
+  compatibility:
+    - "公開 API は互換維持。追加は push_back_many のみ。既存メソッドの戻り値/シグネチャは変更しない。"
+    - "参照透過性・不変性を維持（Persistent API は常に新インスタンスを返す）。Transient はバッチ更新専用。"
+    - "unsafe 不使用（ArrayVec/SmallVec など安全な実装で固定長化を行う）。"
+  testing:
+    - "criterion と iai-callgrind を CI に組み込み閾値判定で fail"
+    - "プロパティテストで size_table 単調性・Vec 等価性・RelaxedBranch 高さ差を検証"
+    - "ドキュメントのサンプルコードは doctest で実行"
+
+# 将来の拡張
+future_extensions: []

@@ -47,6 +47,8 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::iter::FromIterator;
 
+use arrayvec::ArrayVec;
+
 use super::ReferenceCounter;
 
 use crate::typeclass::{Foldable, Functor, FunctorMut, Monoid, Semigroup, TypeConstructor};
@@ -68,6 +70,381 @@ const MASK: usize = BRANCHING_FACTOR - 1;
 /// Nodes with fewer children may cause performance degradation during search.
 /// This is typically `BRANCHING_FACTOR` / 2 = 16.
 const MINIMUM_CHILDREN: usize = BRANCHING_FACTOR / 2;
+
+// =============================================================================
+// Fixed-Length Chunk Types for Performance Optimization
+// =============================================================================
+
+/// A fixed-length chunk for leaf nodes.
+///
+/// Uses `ArrayVec` to store up to `BRANCHING_FACTOR` elements without heap
+/// reallocation. This eliminates the Vec reallocation overhead during push
+/// operations.
+///
+/// # Invariants
+///
+/// - `data.len()` is always equal to the actual number of elements
+/// - `data.len()` is in range `1..=BRANCHING_FACTOR`
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+struct LeafChunk<T> {
+    /// Elements stored in a fixed-capacity array.
+    data: ArrayVec<T, BRANCHING_FACTOR>,
+}
+
+#[allow(dead_code)]
+impl<T> LeafChunk<T> {
+    /// Creates a new empty `LeafChunk`.
+    #[inline]
+    fn new() -> Self {
+        Self {
+            data: ArrayVec::new(),
+        }
+    }
+
+    /// Creates a `LeafChunk` from a single element.
+    #[inline]
+    fn singleton(element: T) -> Self {
+        let mut data = ArrayVec::new();
+        data.push(element);
+        Self { data }
+    }
+
+    /// Returns the number of elements in the chunk.
+    #[inline]
+    const fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    /// Returns `true` if the chunk contains no elements.
+    #[inline]
+    const fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
+    /// Returns `true` if the chunk is full.
+    #[inline]
+    const fn is_full(&self) -> bool {
+        self.data.len() == BRANCHING_FACTOR
+    }
+
+    /// Returns a reference to the element at the given index.
+    #[inline]
+    fn get(&self, index: usize) -> Option<&T> {
+        self.data.get(index)
+    }
+
+    /// Returns a mutable reference to the element at the given index.
+    #[inline]
+    fn get_mut(&mut self, index: usize) -> Option<&mut T> {
+        self.data.get_mut(index)
+    }
+
+    /// Returns a reference to the last element.
+    #[inline]
+    fn last(&self) -> Option<&T> {
+        self.data.last()
+    }
+
+    /// Pushes an element to the chunk.
+    ///
+    /// Returns `Ok(())` if successful, or `Err(element)` if the chunk is full.
+    #[inline]
+    fn try_push(&mut self, element: T) -> Result<(), T> {
+        self.data.try_push(element).map_err(|error| error.element())
+    }
+
+    /// Pushes an element, panicking if full.
+    #[inline]
+    fn push(&mut self, element: T) {
+        self.data.push(element);
+    }
+
+    /// Pops the last element.
+    #[inline]
+    fn pop(&mut self) -> Option<T> {
+        self.data.pop()
+    }
+
+    /// Returns an iterator over references to the elements.
+    #[inline]
+    fn iter(&self) -> impl Iterator<Item = &T> {
+        self.data.iter()
+    }
+
+    /// Returns a slice of all elements.
+    #[inline]
+    fn as_slice(&self) -> &[T] {
+        self.data.as_slice()
+    }
+}
+
+#[allow(dead_code)]
+impl<T: Clone> LeafChunk<T> {
+    /// Creates a `LeafChunk` from a slice.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `slice.len() > BRANCHING_FACTOR`.
+    fn from_slice(slice: &[T]) -> Self {
+        debug_assert!(
+            slice.len() <= BRANCHING_FACTOR,
+            "Slice too large for LeafChunk"
+        );
+        let mut data = ArrayVec::new();
+        for element in slice {
+            data.push(element.clone());
+        }
+        Self { data }
+    }
+
+    /// Creates a `LeafChunk` by cloning elements from an iterator.
+    ///
+    /// Takes at most `BRANCHING_FACTOR` elements.
+    fn from_iter_cloned<'a, I>(iter: I) -> Self
+    where
+        I: Iterator<Item = &'a T>,
+        T: 'a,
+    {
+        let mut data = ArrayVec::new();
+        for element in iter.take(BRANCHING_FACTOR) {
+            data.push(element.clone());
+        }
+        Self { data }
+    }
+
+    /// Returns a new chunk with the element at the given index replaced.
+    fn update(&self, index: usize, element: T) -> Self {
+        let mut new_data = self.data.clone();
+        if index < new_data.len() {
+            new_data[index] = element;
+        }
+        Self { data: new_data }
+    }
+
+    /// Converts to a Vec.
+    fn to_vec(&self) -> Vec<T> {
+        self.data.to_vec()
+    }
+}
+
+#[allow(dead_code)]
+impl<T> FromIterator<T> for LeafChunk<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        let mut data = ArrayVec::new();
+        for element in iter.into_iter().take(BRANCHING_FACTOR) {
+            data.push(element);
+        }
+        Self { data }
+    }
+}
+
+/// A fixed-length chunk for tail buffer.
+///
+/// Similar to `LeafChunk` but specifically used for the tail buffer of
+/// `PersistentVector` and `TransientVector`. Provides the same performance
+/// benefits of avoiding heap reallocation.
+///
+/// # Invariants
+///
+/// - `data.len()` is always equal to the actual number of elements
+/// - `data.len()` is in range `0..=BRANCHING_FACTOR`
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+struct TailChunk<T> {
+    /// Elements stored in a fixed-capacity array.
+    data: ArrayVec<T, BRANCHING_FACTOR>,
+}
+
+#[allow(dead_code)]
+impl<T> TailChunk<T> {
+    /// Creates a new empty `TailChunk`.
+    #[inline]
+    fn new() -> Self {
+        Self {
+            data: ArrayVec::new(),
+        }
+    }
+
+    /// Creates a `TailChunk` from a single element.
+    #[inline]
+    fn singleton(element: T) -> Self {
+        let mut data = ArrayVec::new();
+        data.push(element);
+        Self { data }
+    }
+
+    /// Returns the number of elements in the chunk.
+    #[inline]
+    const fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    /// Returns `true` if the chunk contains no elements.
+    #[inline]
+    const fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
+    /// Returns `true` if the chunk is full.
+    #[inline]
+    const fn is_full(&self) -> bool {
+        self.data.len() == BRANCHING_FACTOR
+    }
+
+    /// Returns a reference to the element at the given index.
+    #[inline]
+    fn get(&self, index: usize) -> Option<&T> {
+        self.data.get(index)
+    }
+
+    /// Returns a mutable reference to the element at the given index.
+    #[inline]
+    fn get_mut(&mut self, index: usize) -> Option<&mut T> {
+        self.data.get_mut(index)
+    }
+
+    /// Returns a reference to the last element.
+    #[inline]
+    fn last(&self) -> Option<&T> {
+        self.data.last()
+    }
+
+    /// Pushes an element to the chunk.
+    ///
+    /// Returns `Ok(())` if successful, or `Err(element)` if the chunk is full.
+    #[inline]
+    fn try_push(&mut self, element: T) -> Result<(), T> {
+        self.data.try_push(element).map_err(|error| error.element())
+    }
+
+    /// Pushes an element, panicking if full.
+    #[inline]
+    fn push(&mut self, element: T) {
+        self.data.push(element);
+    }
+
+    /// Pops the last element.
+    #[inline]
+    fn pop(&mut self) -> Option<T> {
+        self.data.pop()
+    }
+
+    /// Returns an iterator over references to the elements.
+    #[inline]
+    fn iter(&self) -> impl Iterator<Item = &T> {
+        self.data.iter()
+    }
+
+    /// Returns a slice of all elements.
+    #[inline]
+    fn as_slice(&self) -> &[T] {
+        self.data.as_slice()
+    }
+
+    /// Converts to a `LeafChunk`, consuming self.
+    #[inline]
+    fn into_leaf_chunk(self) -> LeafChunk<T> {
+        LeafChunk { data: self.data }
+    }
+}
+
+#[allow(dead_code)]
+impl<T: Clone> TailChunk<T> {
+    /// Creates a `TailChunk` from a slice.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `slice.len() > BRANCHING_FACTOR`.
+    fn from_slice(slice: &[T]) -> Self {
+        debug_assert!(
+            slice.len() <= BRANCHING_FACTOR,
+            "Slice too large for TailChunk"
+        );
+        let mut data = ArrayVec::new();
+        for element in slice {
+            data.push(element.clone());
+        }
+        Self { data }
+    }
+
+    /// Creates a `TailChunk` by cloning elements from an iterator.
+    ///
+    /// Takes at most `BRANCHING_FACTOR` elements.
+    fn from_iter_cloned<'a, I>(iter: I) -> Self
+    where
+        I: Iterator<Item = &'a T>,
+        T: 'a,
+    {
+        let mut data = ArrayVec::new();
+        for element in iter.take(BRANCHING_FACTOR) {
+            data.push(element.clone());
+        }
+        Self { data }
+    }
+
+    /// Returns a new chunk with the element at the given index replaced.
+    fn update(&self, index: usize, element: T) -> Self {
+        let mut new_data = self.data.clone();
+        if index < new_data.len() {
+            new_data[index] = element;
+        }
+        Self { data: new_data }
+    }
+
+    /// Converts to a Vec.
+    fn to_vec(&self) -> Vec<T> {
+        self.data.to_vec()
+    }
+}
+
+#[allow(dead_code)]
+impl<T> FromIterator<T> for TailChunk<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        let mut data = ArrayVec::new();
+        for element in iter.into_iter().take(BRANCHING_FACTOR) {
+            data.push(element);
+        }
+        Self { data }
+    }
+}
+
+/// Asserts that a `LeafChunk` satisfies its invariants.
+///
+/// # Invariants checked:
+///
+/// - Chunk is not empty (leaves should have at least 1 element)
+/// - Chunk has at most `BRANCHING_FACTOR` elements
+#[inline]
+#[allow(dead_code)]
+fn assert_leaf_chunk_invariants<T>(chunk: &LeafChunk<T>) {
+    debug_assert!(
+        !chunk.is_empty(),
+        "LeafChunk invariant violation: chunk is empty"
+    );
+    debug_assert!(
+        chunk.len() <= BRANCHING_FACTOR,
+        "LeafChunk invariant violation: chunk has {} elements, max is {}",
+        chunk.len(),
+        BRANCHING_FACTOR
+    );
+}
+
+/// Asserts that a `TailChunk` satisfies its invariants.
+///
+/// # Invariants checked:
+///
+/// - Chunk has at most `BRANCHING_FACTOR` elements
+#[inline]
+#[allow(dead_code)]
+fn assert_tail_chunk_invariants<T>(chunk: &TailChunk<T>) {
+    debug_assert!(
+        chunk.len() <= BRANCHING_FACTOR,
+        "TailChunk invariant violation: chunk has {} elements, max is {}",
+        chunk.len(),
+        BRANCHING_FACTOR
+    );
+}
 
 // =============================================================================
 // Helper Functions for RRB-Tree
