@@ -3412,14 +3412,30 @@ impl<T> Default for PersistentVector<T> {
 }
 
 impl<T: Clone> FromIterator<T> for PersistentVector<T> {
+    /// Creates a `PersistentVector` from an iterator.
+    ///
+    /// This implementation uses `TransientVector` internally for efficient
+    /// bulk insertion, avoiding the overhead of creating intermediate
+    /// persistent vectors.
+    ///
+    /// # Complexity
+    ///
+    /// O(N log32 N) where N is the number of elements in the iterator.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentVector;
+    ///
+    /// let vector: PersistentVector<i32> = (0..100).collect();
+    /// assert_eq!(vector.len(), 100);
+    /// ```
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        let iter = iter.into_iter();
-        let (lower_bound, upper_bound) = iter.size_hint();
-        // Use upper bound if available, otherwise fall back to lower bound
-        let capacity_hint = upper_bound.unwrap_or(lower_bound);
-        let mut elements = Vec::with_capacity(capacity_hint);
-        elements.extend(iter);
-        build_persistent_vector_from_vec(elements)
+        let mut transient = TransientVector::new();
+        for element in iter {
+            transient.push_back(element);
+        }
+        transient.persistent()
     }
 }
 

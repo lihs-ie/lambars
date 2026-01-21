@@ -1,0 +1,72 @@
+title: "PersistentVector Iterator の葉トラバーサル最適化"
+created_at: "2026-01-21T07:00:00+09:00"
+priority: medium
+status: open
+category: performance
+
+summary: |
+  PersistentVectorIterator の葉境界での探索が O(log N) になっており、
+  全体の走査が O((N/32) * log N) になっている問題を修正する。
+
+problem:
+  description: |
+    現在の PersistentVectorIterator 実装では、各葉の終了後に次の葉を
+    探索する際に `find_leaf_with_slice` がルートから探索し直すため、
+    葉境界ごとに O(log N) のコストが発生する。
+
+    N 要素の場合、葉の数は約 N/32 なので、全体の走査が
+    O((N/32) * log N) = O(N log N / 32) となり、理想的な O(N) に
+    比べて log N 倍のオーバーヘッドがある。
+
+  affected_lines:
+    - file: src/persistent/vector.rs
+      line: 3036
+      description: "find_leaf_with_slice がルートから探索"
+    - file: src/persistent/vector.rs
+      line: 3124
+      description: "葉境界で update_leaf_cache が呼ばれる"
+
+  impact: |
+    大規模なベクターの走査時にパフォーマンス低下。
+    例: 100万要素の場合、約 20 倍のオーバーヘッド（log2(1M) ≈ 20）。
+
+proposed_solutions:
+  - name: "スタックベースの探索"
+    description: |
+      探索パスをスタックとして保持し、葉境界で親ノードに戻って
+      次の子ノードへ移動する。これにより各葉への移動が O(1) 〜 O(log N)
+      の償却コストになる。
+    complexity: high
+    performance_gain: "O(N) に改善"
+
+  - name: "全葉の事前フラット化"
+    description: |
+      イテレータ作成時に全ての葉への参照を収集し、フラットな
+      配列として保持する。これにより走査中の探索が不要になる。
+    complexity: medium
+    performance_gain: "O(N) に改善、ただし初期化コストが O(N/32)"
+    trade_off: "メモリオーバーヘッド: O(N/32) の参照を保持"
+
+  - name: "親ポインタの追加"
+    description: |
+      各ノードに親への参照（Weak ポインタ）を追加し、
+      効率的な上方向のトラバーサルを可能にする。
+    complexity: very_high
+    performance_gain: "O(N) に改善"
+    trade_off: "データ構造の大幅な変更が必要"
+
+recommendation: |
+  「スタックベースの探索」または「全葉の事前フラット化」を推奨。
+
+  スタックベースは Scala の Vector や Clojure の PersistentVector で
+  採用されている一般的なアプローチ。
+
+  事前フラット化は実装が単純だが、小さなベクターでは初期化コストが
+  相対的に大きくなる可能性がある。
+
+related_files:
+  - src/persistent/vector.rs
+
+github_issue:
+  number: null
+  url: null
