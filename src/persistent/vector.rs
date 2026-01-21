@@ -724,7 +724,8 @@ use std::rc::Rc;
 /// ```
 pub struct TransientVector<T> {
     root: ReferenceCounter<Node<T>>,
-    tail: Vec<T>,
+    /// Tail buffer using fixed-capacity `TailChunk` for efficient push operations.
+    tail: TailChunk<T>,
     length: usize,
     shift: usize,
     /// Marker to ensure `!Send` and `!Sync`.
@@ -3498,7 +3499,7 @@ impl<T: Clone> TransientVector<T> {
     pub fn new() -> Self {
         Self {
             root: ReferenceCounter::new(Node::empty_branch()),
-            tail: Vec::new(),
+            tail: TailChunk::new(),
             length: 0,
             shift: BITS_PER_LEVEL,
             _marker: PhantomData,
@@ -3626,20 +3627,21 @@ impl<T: Clone> TransientVector<T> {
     /// assert_eq!(transient.len(), 3);
     /// ```
     pub fn push_back(&mut self, element: T) {
-        if self.tail.len() < BRANCHING_FACTOR {
-            // Tail has space, just add to tail
-            self.tail.push(element);
-        } else {
+        if self.tail.is_full() {
             // Tail is full, push tail to root and create new tail
             self.push_tail_to_root();
-            self.tail = vec![element];
+            self.tail = TailChunk::singleton(element);
+        } else {
+            // Tail has space, just add to tail
+            self.tail.push(element);
         }
         self.length += 1;
     }
 
     /// Pushes the current tail into the root tree.
     fn push_tail_to_root(&mut self) {
-        let tail_leaf = Node::Leaf(ReferenceCounter::from(std::mem::take(&mut self.tail)));
+        let old_tail = std::mem::replace(&mut self.tail, TailChunk::new());
+        let tail_leaf = Node::Leaf(ReferenceCounter::from(old_tail.to_vec()));
         let tail_offset = self.tail_offset();
 
         // Check if we need to increase the tree depth
@@ -3773,9 +3775,9 @@ impl<T: Clone> TransientVector<T> {
                 // Need to get a new tail from root
                 let popped = self.tail.pop();
                 let new_tail_offset = self.tail_offset().saturating_sub(BRANCHING_FACTOR);
-                let new_tail = self.get_leaf_at(new_tail_offset);
+                let new_tail = self.get_leaf_at_as_tail_chunk(new_tail_offset);
                 self.pop_tail_from_root_cow();
-                self.tail = new_tail.to_vec();
+                self.tail = new_tail;
                 self.length -= 1;
                 popped
             }
@@ -3785,8 +3787,8 @@ impl<T: Clone> TransientVector<T> {
         }
     }
 
-    /// Gets the leaf at the given offset.
-    fn get_leaf_at(&self, offset: usize) -> ReferenceCounter<[T]> {
+    /// Gets the leaf at the given offset and converts it to a `TailChunk`.
+    fn get_leaf_at_as_tail_chunk(&self, offset: usize) -> TailChunk<T> {
         let mut node = &self.root;
         let mut level = self.shift;
         let mut current_offset = offset;
@@ -3799,7 +3801,7 @@ impl<T: Clone> TransientVector<T> {
                         node = child;
                         level -= BITS_PER_LEVEL;
                     } else {
-                        return ReferenceCounter::from(Vec::<T>::new());
+                        return TailChunk::new();
                     }
                 }
                 Node::RelaxedBranch {
@@ -3808,7 +3810,7 @@ impl<T: Clone> TransientVector<T> {
                 } => {
                     let child_index = find_child_index(size_table, current_offset);
                     if child_index >= children.len() {
-                        return ReferenceCounter::from(Vec::<T>::new());
+                        return TailChunk::new();
                     }
                     current_offset = if child_index == 0 {
                         current_offset
@@ -3823,8 +3825,8 @@ impl<T: Clone> TransientVector<T> {
         }
 
         match node.as_ref() {
-            Node::Leaf(elements) => elements.clone(),
-            Node::Branch(_) | Node::RelaxedBranch { .. } => ReferenceCounter::from(Vec::<T>::new()),
+            Node::Leaf(elements) => TailChunk::from_slice(elements),
+            Node::Branch(_) | Node::RelaxedBranch { .. } => TailChunk::new(),
         }
     }
 
@@ -3929,8 +3931,10 @@ impl<T: Clone> TransientVector<T> {
             let actual_tail_offset = self.length - tail_len;
             if index >= actual_tail_offset {
                 let tail_index = index - actual_tail_offset;
-                let old = std::mem::replace(&mut self.tail[tail_index], element);
-                return Some(old);
+                if let Some(slot) = self.tail.get_mut(tail_index) {
+                    let old = std::mem::replace(slot, element);
+                    return Some(old);
+                }
             }
         }
 
@@ -4016,9 +4020,11 @@ impl<T: Clone> TransientVector<T> {
             let actual_tail_offset = self.length - tail_len;
             if index >= actual_tail_offset {
                 let tail_index = index - actual_tail_offset;
-                let old = self.tail[tail_index].clone();
-                self.tail[tail_index] = function(old);
-                return true;
+                if let Some(slot) = self.tail.get_mut(tail_index) {
+                    let old = slot.clone();
+                    *slot = function(old);
+                    return true;
+                }
             }
         }
 
@@ -4113,12 +4119,11 @@ impl<T: Clone> TransientVector<T> {
     /// ```
     #[must_use]
     pub fn persistent(self) -> PersistentVector<T> {
-        let tail_chunk: TailChunk<T> = self.tail.into_iter().collect();
         PersistentVector {
             length: self.length,
             shift: self.shift,
             root: self.root,
-            tail: ReferenceCounter::new(tail_chunk),
+            tail: ReferenceCounter::new(self.tail),
         }
     }
 }
@@ -4167,7 +4172,7 @@ impl<T: Clone> PersistentVector<T> {
     pub fn transient(self) -> TransientVector<T> {
         TransientVector {
             root: self.root,
-            tail: self.tail.to_vec(),
+            tail: self.tail.as_ref().clone(),
             length: self.length,
             shift: self.shift,
             _marker: PhantomData,
