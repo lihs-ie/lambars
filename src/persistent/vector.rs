@@ -1508,11 +1508,21 @@ impl<T: Clone> PersistentVector<T> {
                 let (new_root, new_shift) = self.pop_tail_from_root();
 
                 // After removal, we have (self.length - 1) elements remaining.
-                // Check if the remaining elements fit in a single leaf (tail).
                 let remaining_length = self.length - 1;
 
-                if remaining_length <= BRANCHING_FACTOR {
-                    // All remaining elements fit in tail.
+                // Check if new_root contains only a single leaf.
+                // This is true when:
+                // - new_shift == BITS_PER_LEVEL (at the bottom level), AND
+                // - new_root has exactly one child
+                // Only in this case can we safely move all elements to tail.
+                let is_single_leaf_root = new_shift == BITS_PER_LEVEL
+                    && match new_root.as_ref() {
+                        Node::Branch { children, .. } => children.len() == 1,
+                        Node::Leaf(_) => true,
+                    };
+
+                if remaining_length <= BRANCHING_FACTOR && is_single_leaf_root {
+                    // All remaining elements fit in tail and root has only one leaf.
                     // Get the first (and only) leaf from the OLD root before pop.
                     let first_leaf = self.get_leaf_at(0);
 
@@ -1526,7 +1536,8 @@ impl<T: Clone> PersistentVector<T> {
 
                     Some((new_vector, element))
                 } else {
-                    // More than BRANCHING_FACTOR elements remain.
+                    // Either more than BRANCHING_FACTOR elements remain,
+                    // or root has multiple leaves (from concat operations).
                     // We need to get the last leaf from the new root (after pop_tail_from_root)
                     // and remove it from the root to use as tail.
                     let new_tail_offset = remaining_length - 1;

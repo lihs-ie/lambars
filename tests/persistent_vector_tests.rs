@@ -2894,4 +2894,109 @@ mod concat_empty_tail_tests {
             );
         }
     }
+
+    /// Test pop_back after multiple concat operations with small vectors.
+    /// This tests the case where concat creates multiple small leaves in the root,
+    /// and pop_back should not discard those leaves.
+    ///
+    /// Scenario: (0..10) + (10..20) + singleton(20) = 21 elements
+    /// After pop_back: should have 20 elements (0..20)
+    #[rstest]
+    fn test_pop_back_after_multiple_concat_small_leaves() {
+        let vector1: PersistentVector<i32> = (0..10).collect();
+        let vector2: PersistentVector<i32> = (10..20).collect();
+        let vector3 = PersistentVector::singleton(20);
+
+        let concatenated = vector1.concat(&vector2).concat(&vector3);
+
+        assert_eq!(concatenated.len(), 21);
+
+        let (remaining, popped) = concatenated.pop_back().unwrap();
+
+        assert_eq!(popped, 20);
+        assert_eq!(
+            remaining.len(),
+            20,
+            "After pop_back, length should be 20, but got {}",
+            remaining.len()
+        );
+
+        // Verify all 20 elements are preserved correctly
+        for i in 0..20 {
+            assert_eq!(
+                remaining.get(i),
+                Some(&(i as i32)),
+                "Element at index {} should be {}, but got {:?}",
+                i,
+                i,
+                remaining.get(i)
+            );
+        }
+    }
+
+    /// Test pop_back after multiple concat with different sized small vectors.
+    /// Scenario: (0..15) + (15..25) + singleton(25) = 26 elements
+    #[rstest]
+    fn test_pop_back_after_multiple_concat_different_sizes() {
+        let vector1: PersistentVector<i32> = (0..15).collect();
+        let vector2: PersistentVector<i32> = (15..25).collect();
+        let vector3 = PersistentVector::singleton(25);
+
+        let concatenated = vector1.concat(&vector2).concat(&vector3);
+
+        assert_eq!(concatenated.len(), 26);
+
+        let (remaining, popped) = concatenated.pop_back().unwrap();
+
+        assert_eq!(popped, 25);
+        assert_eq!(
+            remaining.len(),
+            25,
+            "After pop_back, length should be 25, but got {}",
+            remaining.len()
+        );
+
+        // Verify all 25 elements are preserved correctly
+        for i in 0..25 {
+            assert_eq!(
+                remaining.get(i),
+                Some(&(i as i32)),
+                "Element at index {} should be {}, but got {:?}",
+                i,
+                i,
+                remaining.get(i)
+            );
+        }
+    }
+
+    /// Test consecutive pop_back after multiple concat to verify consistency.
+    #[rstest]
+    fn test_consecutive_pop_back_after_multiple_concat() {
+        let vector1: PersistentVector<i32> = (0..10).collect();
+        let vector2: PersistentVector<i32> = (10..20).collect();
+        let vector3 = PersistentVector::singleton(20);
+
+        let mut current = vector1.concat(&vector2).concat(&vector3);
+
+        // Pop all 21 elements and verify each
+        for expected in (0..=20).rev() {
+            let (remaining, popped) = current.pop_back().unwrap();
+            assert_eq!(
+                popped, expected,
+                "Expected to pop {}, but got {}",
+                expected, popped
+            );
+            assert_eq!(
+                remaining.len(),
+                expected as usize,
+                "After popping {}, length should be {}, but got {}",
+                expected,
+                expected,
+                remaining.len()
+            );
+            current = remaining;
+        }
+
+        assert!(current.is_empty());
+    }
 }
