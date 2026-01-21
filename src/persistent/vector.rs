@@ -1044,7 +1044,8 @@ impl<T> PersistentVector<T> {
     ///
     /// # Complexity
     ///
-    /// O(1) - the last element is always in the tail
+    /// O(1) when the tail is non-empty, O(log N) when the tail is empty
+    /// (e.g., after `concat`).
     ///
     /// # Examples
     ///
@@ -1062,8 +1063,11 @@ impl<T> PersistentVector<T> {
     pub fn last(&self) -> Option<&T> {
         if self.is_empty() {
             None
-        } else {
+        } else if !self.tail.is_empty() {
             self.tail.last()
+        } else {
+            // Tail is empty (e.g., after concat), get from root
+            self.get(self.length - 1)
         }
     }
 
@@ -1467,11 +1471,75 @@ impl<T: Clone> PersistentVector<T> {
             return None;
         }
 
-        if self.length == 1 {
-            return Some((Self::new(), self.tail.get(0).unwrap().clone()));
-        }
+        let tail_len = self.tail.len();
 
-        if self.tail.len() > 1 {
+        if tail_len == 0 {
+            // Tail is empty (e.g., after concat), get element from root
+            let element = self.get(self.length - 1)?.clone();
+
+            if self.length == 1 {
+                return Some((Self::new(), element));
+            }
+
+            // Get the last leaf and convert it to a tail chunk
+            let last_leaf_offset = self.length - 1;
+            let last_leaf = self.get_leaf_at(last_leaf_offset);
+            let last_leaf_len = last_leaf.len();
+
+            if last_leaf_len > 1 {
+                // The last leaf has multiple elements, just remove the last one
+                let mut new_tail = last_leaf.as_ref().clone();
+                new_tail.pop();
+
+                // Remove the last leaf from the root and replace with new tail
+                let (new_root, new_shift) = self.pop_tail_from_root();
+
+                let new_vector = Self {
+                    length: self.length - 1,
+                    shift: new_shift,
+                    root: new_root,
+                    tail: ReferenceCounter::new(new_tail),
+                };
+
+                Some((new_vector, element))
+            } else {
+                // The last leaf has only 1 element
+                // Remove the last leaf from the root
+                let (new_root, new_shift) = self.pop_tail_from_root();
+
+                // Get the new last leaf as tail (if exists)
+                if self.length <= BRANCHING_FACTOR {
+                    // After removal, the remaining elements fit in a single leaf
+                    let new_tail = self.get_leaf_at(0);
+                    let mut new_tail_vec = new_tail.as_ref().clone();
+                    new_tail_vec.pop(); // Remove the element we're popping
+
+                    let new_vector = Self {
+                        length: self.length - 1,
+                        shift: new_shift,
+                        root: new_root,
+                        tail: ReferenceCounter::new(new_tail_vec),
+                    };
+
+                    Some((new_vector, element))
+                } else {
+                    // Get the new last leaf from the tree
+                    let new_tail_offset = self.length - 2;
+                    let new_tail = self.get_leaf_at(new_tail_offset);
+
+                    let new_vector = Self {
+                        length: self.length - 1,
+                        shift: new_shift,
+                        root: new_root,
+                        tail: new_tail,
+                    };
+
+                    Some((new_vector, element))
+                }
+            }
+        } else if self.length == 1 {
+            Some((Self::new(), self.tail.get(0).unwrap().clone()))
+        } else if tail_len > 1 {
             // Just remove from tail
             let element = self.tail.last().unwrap().clone();
             let mut new_tail = self.tail.as_ref().clone();
@@ -1488,9 +1556,18 @@ impl<T: Clone> PersistentVector<T> {
         } else {
             // Tail has only 1 element, need to pop from root
             let element = self.tail.get(0).unwrap().clone();
-            let new_tail_offset = self.length - BRANCHING_FACTOR - 1;
 
-            // Get the new tail from the root
+            // Calculate the offset for the new tail
+            // The new tail should be the last leaf in the root after removing the current tail
+            let root_size = self.length - 1; // Size of elements in root (excluding tail)
+
+            if root_size == 0 {
+                // No elements in root, return empty vector
+                return Some((Self::new(), element));
+            }
+
+            // Get the new tail from the root (the last leaf)
+            let new_tail_offset = root_size.saturating_sub(1);
             let new_tail = self.get_leaf_at(new_tail_offset);
 
             // Remove the last leaf from the root

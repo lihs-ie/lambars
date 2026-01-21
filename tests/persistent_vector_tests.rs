@@ -2612,3 +2612,138 @@ mod concat_transient_tests {
         assert_eq!(result2.len(), 101);
     }
 }
+
+// =============================================================================
+// Concat with empty tail: last/pop_back tests
+// =============================================================================
+//
+// After concat, the resulting vector has an empty tail. These tests ensure
+// that last() and pop_back() work correctly in this scenario.
+
+mod concat_empty_tail_tests {
+    use super::*;
+
+    /// Test that last() works correctly after concat (which leaves tail empty).
+    #[rstest]
+    fn test_last_after_concat() {
+        let left: PersistentVector<i32> = (1..=50).collect();
+        let right: PersistentVector<i32> = (51..=100).collect();
+        let concatenated = left.concat(&right);
+
+        // After concat, tail is empty but last() should still return the last element
+        assert_eq!(concatenated.last(), Some(&100));
+    }
+
+    /// Test that last() works correctly after concat with small vectors.
+    #[rstest]
+    fn test_last_after_concat_small_vectors() {
+        let left: PersistentVector<i32> = (1..=5).collect();
+        let right: PersistentVector<i32> = (6..=10).collect();
+        let concatenated = left.concat(&right);
+
+        assert_eq!(concatenated.last(), Some(&10));
+    }
+
+    /// Test that last() works after multiple concat operations.
+    #[rstest]
+    fn test_last_after_multiple_concat() {
+        let v1: PersistentVector<i32> = (1..=10).collect();
+        let v2: PersistentVector<i32> = (11..=20).collect();
+        let v3: PersistentVector<i32> = (21..=30).collect();
+
+        let concatenated = v1.concat(&v2).concat(&v3);
+
+        assert_eq!(concatenated.last(), Some(&30));
+    }
+
+    /// Test that pop_back() works correctly after concat (which leaves tail empty).
+    #[rstest]
+    fn test_pop_back_after_concat() {
+        let left: PersistentVector<i32> = (1..=50).collect();
+        let right: PersistentVector<i32> = (51..=100).collect();
+        let concatenated = left.concat(&right);
+
+        let (remaining, element) = concatenated.pop_back().unwrap();
+
+        assert_eq!(element, 100);
+        assert_eq!(remaining.len(), 99);
+        assert_eq!(remaining.last(), Some(&99));
+    }
+
+    /// Test that pop_back() works correctly after concat with small vectors.
+    #[rstest]
+    fn test_pop_back_after_concat_small_vectors() {
+        let left: PersistentVector<i32> = (1..=5).collect();
+        let right: PersistentVector<i32> = (6..=10).collect();
+        let concatenated = left.concat(&right);
+
+        let (remaining, element) = concatenated.pop_back().unwrap();
+
+        assert_eq!(element, 10);
+        assert_eq!(remaining.len(), 9);
+        assert_eq!(remaining.last(), Some(&9));
+    }
+
+    /// Test that multiple pop_back() calls work correctly after concat.
+    #[rstest]
+    fn test_multiple_pop_back_after_concat() {
+        let left: PersistentVector<i32> = (1..=20).collect();
+        let right: PersistentVector<i32> = (21..=40).collect();
+        let concatenated = left.concat(&right);
+
+        let mut current = concatenated;
+        for expected in (1..=40).rev() {
+            let (remaining, element) = current.pop_back().unwrap();
+            assert_eq!(element, expected);
+            current = remaining;
+        }
+
+        assert!(current.is_empty());
+    }
+
+    /// Test that pop_back() on a single-element concat result works.
+    #[rstest]
+    fn test_pop_back_single_element_after_concat() {
+        let left: PersistentVector<i32> = PersistentVector::new().push_back(1);
+        let right: PersistentVector<i32> = PersistentVector::new();
+        let concatenated = left.concat(&right);
+
+        // This vector has one element with non-empty tail (concat with empty preserves original)
+        let (remaining, element) = concatenated.pop_back().unwrap();
+
+        assert_eq!(element, 1);
+        assert!(remaining.is_empty());
+    }
+
+    /// Test concat followed by push_back then last/pop_back.
+    #[rstest]
+    fn test_concat_push_back_then_last_pop_back() {
+        let left: PersistentVector<i32> = (1..=32).collect();
+        let right: PersistentVector<i32> = (33..=64).collect();
+        let concatenated = left.concat(&right);
+
+        // After concat, tail is empty
+        // After push_back, tail has one element
+        let with_push = concatenated.push_back(100);
+
+        assert_eq!(with_push.last(), Some(&100));
+
+        let (remaining, element) = with_push.pop_back().unwrap();
+        assert_eq!(element, 100);
+        assert_eq!(remaining.len(), 64);
+    }
+
+    /// Test that last() and pop_back() are consistent.
+    #[rstest]
+    fn test_last_and_pop_back_consistency_after_concat() {
+        let left: PersistentVector<i32> = (1..=100).collect();
+        let right: PersistentVector<i32> = (101..=200).collect();
+        let concatenated = left.concat(&right);
+
+        let last_value = *concatenated.last().unwrap();
+        let (_, popped_value) = concatenated.pop_back().unwrap();
+
+        assert_eq!(last_value, popped_value);
+        assert_eq!(last_value, 200);
+    }
+}
