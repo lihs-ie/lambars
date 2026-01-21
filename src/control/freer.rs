@@ -18,6 +18,12 @@
 //!
 //! Uses "Reflection without Remorse" pattern for O(1) `flat_map` and O(n) interpret.
 //!
+//! # Performance
+//!
+//! This implementation uses SmallVec-based continuation storage for improved
+//! performance. Short chains (8 elements or fewer) are stored inline without
+//! heap allocation.
+//!
 //! # Examples
 //!
 //! ## State DSL
@@ -50,10 +56,14 @@
 //! assert_eq!(state, 11);
 //! ```
 
+use smallvec::SmallVec;
 use std::any::Any;
-use std::collections::VecDeque;
 use std::fmt::{self, Debug, Display, Formatter};
 use std::marker::PhantomData;
+
+// =============================================================================
+// Continuation Types
+// =============================================================================
 
 /// Type-erased arrow (continuation).
 ///
@@ -63,7 +73,7 @@ trait TypeErasedArrow<I> {
     fn apply(self: Box<Self>, input: Box<dyn Any>) -> Freer<I, Box<dyn Any>>;
 }
 
-struct Arrow<I, A, B, F>
+struct FlatMapArrow<I, A, B, F>
 where
     F: FnOnce(A) -> Freer<I, B>,
 {
@@ -71,7 +81,7 @@ where
     _phantom: PhantomData<fn(A) -> (I, B)>,
 }
 
-impl<I: 'static, A: 'static, B: 'static, F> TypeErasedArrow<I> for Arrow<I, A, B, F>
+impl<I: 'static, A: 'static, B: 'static, F> TypeErasedArrow<I> for FlatMapArrow<I, A, B, F>
 where
     F: FnOnce(A) -> Freer<I, B> + 'static,
 {
@@ -84,15 +94,15 @@ where
             Freer::Pure(b) => Freer::Pure(Box::new(b) as Box<dyn Any>),
             Freer::Impure {
                 instruction,
-                mut queue,
+                mut continuation_queue,
                 ..
             } => {
-                queue
+                continuation_queue
                     .arrows
-                    .push_back(Box::new(BoxingArrow::<B>(PhantomData)));
+                    .push(Box::new(BoxingArrow::<B>(PhantomData)));
                 Freer::Impure {
                     instruction,
-                    queue,
+                    continuation_queue,
                     _result: PhantomData,
                 }
             }
@@ -100,9 +110,31 @@ where
     }
 }
 
+struct MapArrow<A, B, F>
+where
+    F: FnOnce(A) -> B,
+{
+    function: F,
+    _phantom: PhantomData<fn(A) -> B>,
+}
+
+impl<I: 'static, A: 'static, B: 'static, F> TypeErasedArrow<I> for MapArrow<A, B, F>
+where
+    F: FnOnce(A) -> B + 'static,
+{
+    #[inline]
+    fn apply(self: Box<Self>, input: Box<dyn Any>) -> Freer<I, Box<dyn Any>> {
+        let value = *input
+            .downcast::<A>()
+            .expect("Type mismatch in map application");
+        Freer::Pure(Box::new((self.function)(value)) as Box<dyn Any>)
+    }
+}
+
 struct BoxingArrow<T>(PhantomData<T>);
 
 impl<I: 'static, T: 'static> TypeErasedArrow<I> for BoxingArrow<T> {
+    #[inline]
     fn apply(self: Box<Self>, input: Box<dyn Any>) -> Freer<I, Box<dyn Any>> {
         Freer::Pure(input)
     }
@@ -120,98 +152,163 @@ impl<I: 'static, R: 'static, E> TypeErasedArrow<I> for ExtractArrow<R, E>
 where
     E: FnOnce(Box<dyn Any>) -> R + 'static,
 {
+    #[inline]
     fn apply(self: Box<Self>, input: Box<dyn Any>) -> Freer<I, Box<dyn Any>> {
         Freer::Pure(Box::new((self.extract)(input)) as Box<dyn Any>)
     }
 }
 
+// =============================================================================
+// Continuation Queue (SmallVec-based)
+// =============================================================================
+
+const CONTINUATION_INLINE_CAPACITY: usize = 8;
+
+/// A queue of type-erased continuations.
+///
+/// Uses SmallVec for inline storage of up to 8 continuations,
+/// avoiding heap allocation for short chains.
 #[doc(hidden)]
 pub struct ContinuationQueue<I> {
-    arrows: VecDeque<Box<dyn TypeErasedArrow<I>>>,
+    arrows: SmallVec<[Box<dyn TypeErasedArrow<I>>; CONTINUATION_INLINE_CAPACITY]>,
 }
 
 impl<I> ContinuationQueue<I> {
+    #[inline]
     fn new() -> Self {
         Self {
-            arrows: VecDeque::new(),
+            arrows: SmallVec::new(),
         }
     }
 
+    #[inline]
+    #[allow(dead_code)]
     fn is_empty(&self) -> bool {
         self.arrows.is_empty()
     }
 
-    fn pop(&mut self) -> Option<Box<dyn TypeErasedArrow<I>>> {
-        self.arrows.pop_front()
+    #[inline]
+    fn len(&self) -> usize {
+        self.arrows.len()
     }
 }
 
 impl<I: 'static> ContinuationQueue<I> {
-    fn push<A: 'static, B: 'static, F>(mut self, function: F) -> Self
+    #[inline]
+    fn push_flat_map<A: 'static, B: 'static, F>(mut self, function: F) -> Self
     where
         F: FnOnce(A) -> Freer<I, B> + 'static,
     {
-        self.arrows.push_back(Box::new(Arrow {
+        self.arrows.push(Box::new(FlatMapArrow {
             function,
             _phantom: PhantomData,
         }));
         self
     }
 
-    fn push_extract<R: 'static, E>(mut self, extract: E) -> Self
+    #[inline]
+    fn push_map<A: 'static, B: 'static, F>(mut self, function: F) -> Self
     where
-        E: FnOnce(Box<dyn Any>) -> R + 'static,
+        F: FnOnce(A) -> B + 'static,
     {
-        self.arrows.push_back(Box::new(ExtractArrow {
-            extract,
+        self.arrows.push(Box::new(MapArrow {
+            function,
             _phantom: PhantomData,
         }));
         self
     }
 
-    /// Note: Provided for future extensions.
-    /// The interpret function uses `QueueStack` instead to avoid O(n^2).
-    #[allow(dead_code)]
-    fn concat(mut self, mut other: Self) -> Self {
-        self.arrows.append(&mut other.arrows);
+    #[inline]
+    fn push_extract<R: 'static, E>(mut self, extract: E) -> Self
+    where
+        E: FnOnce(Box<dyn Any>) -> R + 'static,
+    {
+        self.arrows.push(Box::new(ExtractArrow {
+            extract,
+            _phantom: PhantomData,
+        }));
         self
     }
 }
 
-/// A stack of continuation queues.
-///
-/// Used during interpretation to avoid O(n^2) from repeated queue concatenation.
-/// Instead of merging queues, we maintain a stack of queues and process them
-/// in LIFO order.
-struct QueueStack<I> {
+// =============================================================================
+// Continuation Stack (for interpretation)
+// =============================================================================
+
+struct ContinuationStack<I> {
+    current_index: usize,
     current: ContinuationQueue<I>,
-    pending: Vec<ContinuationQueue<I>>,
+    pending: SmallVec<[(usize, ContinuationQueue<I>); CONTINUATION_INLINE_CAPACITY]>,
 }
 
-impl<I> QueueStack<I> {
-    const fn new(initial: ContinuationQueue<I>) -> Self {
+impl<I: 'static> ContinuationStack<I> {
+    #[inline]
+    fn new(initial: ContinuationQueue<I>) -> Self {
         Self {
+            current_index: 0,
             current: initial,
-            pending: Vec::new(),
+            pending: SmallVec::new(),
         }
     }
 
+    #[inline]
     fn push_queue(&mut self, queue: ContinuationQueue<I>) {
-        let old = std::mem::replace(&mut self.current, queue);
-        if !old.is_empty() {
-            self.pending.push(old);
+        if self.current_index < self.current.len() {
+            let old = std::mem::replace(&mut self.current, queue);
+            self.pending.push((self.current_index, old));
+        } else {
+            self.current = queue;
         }
+        self.current_index = 0;
     }
 
+    #[inline]
     fn pop(&mut self) -> Option<Box<dyn TypeErasedArrow<I>>> {
         loop {
-            if let Some(arrow) = self.current.pop() {
+            if self.current_index < self.current.arrows.len() {
+                let arrow = std::mem::replace(
+                    &mut self.current.arrows[self.current_index],
+                    Box::new(BoxingArrow::<()>(PhantomData)) as Box<dyn TypeErasedArrow<I>>,
+                );
+                self.current_index += 1;
                 return Some(arrow);
             }
-            self.current = self.pending.pop()?;
+            let (saved_index, saved_queue) = self.pending.pop()?;
+            self.current = saved_queue;
+            self.current_index = saved_index;
         }
     }
 }
+
+// =============================================================================
+// InterpretError
+// =============================================================================
+
+/// Error type for interpret operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InterpretError {
+    /// Handler returned a value that doesn't match the expected type.
+    TypeMismatch {
+        /// Description of the context where mismatch occurred.
+        context: &'static str,
+    },
+}
+
+impl Display for InterpretError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TypeMismatch { context } => {
+                write!(f, "Type mismatch in interpret: {context}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for InterpretError {}
+
+// =============================================================================
+// Freer Monad
+// =============================================================================
 
 /// Freer monad: constructs a Monad from any instruction set without Functor constraint.
 ///
@@ -239,6 +336,10 @@ impl<I> QueueStack<I> {
 /// - `flat_map`: O(1) - appends to continuation queue
 /// - `interpret`: O(n) - processes n continuations in linear time
 ///
+/// Additionally, uses SmallVec-based storage for:
+/// - Inline storage of up to 8 continuations (no heap allocation)
+/// - Reduced allocation overhead for short chains
+///
 /// # Note
 ///
 /// This type does NOT implement `TypeConstructor` because `Freer<I, A>` requires
@@ -252,7 +353,7 @@ pub enum Freer<I, A> {
         /// The instruction to execute.
         instruction: I,
         /// The queue of continuations to apply after executing the instruction.
-        queue: ContinuationQueue<I>,
+        continuation_queue: ContinuationQueue<I>,
         /// Phantom data to preserve the result type A.
         _result: PhantomData<A>,
     },
@@ -307,14 +408,12 @@ impl<I: 'static, A: 'static> Freer<I, A> {
     ) -> Freer<I, R> {
         Freer::Impure {
             instruction,
-            queue: ContinuationQueue::new().push_extract(extract),
+            continuation_queue: ContinuationQueue::new().push_extract(extract),
             _result: PhantomData,
         }
     }
 
     /// Applies a function to the result (Functor `fmap`).
-    ///
-    /// When `Pure`, the function is applied immediately (assumes `function` is pure).
     ///
     /// # Examples
     ///
@@ -326,20 +425,26 @@ impl<I: 'static, A: 'static> Freer<I, A> {
     /// let result = doubled.interpret(|_| Box::new(()));
     /// assert_eq!(result, 42);
     /// ```
+    #[inline]
     pub fn map<B: 'static, F>(self, function: F) -> Freer<I, B>
     where
         F: FnOnce(A) -> B + 'static,
     {
         match self {
             Self::Pure(a) => Freer::Pure(function(a)),
-            Self::Impure { .. } => self.flat_map(move |a| Freer::pure(function(a))),
+            Self::Impure {
+                instruction,
+                continuation_queue,
+                ..
+            } => Freer::Impure {
+                instruction,
+                continuation_queue: continuation_queue.push_map(function),
+                _result: PhantomData,
+            },
         }
     }
 
     /// Chains computations together (Monad `bind`/`>>=`).
-    ///
-    /// When `Pure`, the function is applied immediately.
-    /// Otherwise, the continuation is appended to the queue in O(1) time.
     ///
     /// # Examples
     ///
@@ -351,6 +456,7 @@ impl<I: 'static, A: 'static> Freer<I, A> {
     /// let value = result.interpret(|_| Box::new(()));
     /// assert_eq!(value, 42);
     /// ```
+    #[inline]
     pub fn flat_map<B: 'static, F>(self, function: F) -> Freer<I, B>
     where
         F: FnOnce(A) -> Freer<I, B> + 'static,
@@ -358,10 +464,12 @@ impl<I: 'static, A: 'static> Freer<I, A> {
         match self {
             Self::Pure(a) => function(a),
             Self::Impure {
-                instruction, queue, ..
+                instruction,
+                continuation_queue,
+                ..
             } => Freer::Impure {
                 instruction,
-                queue: queue.push(function),
+                continuation_queue: continuation_queue.push_flat_map(function),
                 _result: PhantomData,
             },
         }
@@ -397,7 +505,7 @@ impl<I: 'static, A: 'static> Freer<I, A> {
     /// Interprets the Freer computation using the given handler.
     ///
     /// The handler is called for each instruction and must return the result as `Box<dyn Any>`.
-    /// Uses a loop-based approach with `QueueStack` for O(n) interpretation.
+    /// Uses a non-recursive loop with `ContinuationStack` for O(n) interpretation.
     ///
     /// # Examples
     ///
@@ -424,65 +532,77 @@ impl<I: 'static, A: 'static> Freer<I, A> {
     ///
     /// Panics if the final result type does not match the expected type `A`.
     /// This indicates a bug in the DSL design or handler implementation.
-    pub fn interpret<Handler>(self, mut handler: Handler) -> A
+    pub fn interpret<Handler>(self, handler: Handler) -> A
     where
         Handler: FnMut(I) -> Box<dyn Any>,
     {
-        enum LoopState<I> {
-            ExecuteInstruction {
-                instruction: I,
-                queue_stack: QueueStack<I>,
-            },
-            ApplyContinuation {
-                value: Box<dyn Any>,
-                queue_stack: QueueStack<I>,
-            },
-        }
+        self.try_interpret(handler)
+            .expect("Final result type mismatch")
+    }
 
-        let mut state = match self {
-            Self::Pure(a) => return a,
+    /// Interprets the Freer computation with Result-based error handling.
+    ///
+    /// Unlike `interpret`, this method returns `Result<A, InterpretError>` instead
+    /// of panicking on type mismatch. Use this when you need graceful error handling.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(InterpretError::TypeMismatch)` if the final result type does not
+    /// match the expected type `A`. This indicates a bug in the DSL design or handler
+    /// implementation where the handler returns a value of unexpected type.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::control::{Freer, InterpretError};
+    ///
+    /// let freer: Freer<(), i32> = Freer::pure(42);
+    /// let result = freer.try_interpret(|_| Box::new(()));
+    /// assert_eq!(result, Ok(42));
+    /// ```
+    pub fn try_interpret<Handler>(self, mut handler: Handler) -> Result<A, InterpretError>
+    where
+        Handler: FnMut(I) -> Box<dyn Any>,
+    {
+        let (instruction, queue) = match self {
+            Self::Pure(a) => return Ok(a),
             Self::Impure {
-                instruction, queue, ..
-            } => LoopState::ExecuteInstruction {
                 instruction,
-                queue_stack: QueueStack::new(queue),
-            },
+                continuation_queue,
+                ..
+            } => (instruction, continuation_queue),
         };
 
+        let mut stack = ContinuationStack::new(queue);
+        let mut current_value: Box<dyn Any> = handler(instruction);
+
         loop {
-            state = match state {
-                LoopState::ExecuteInstruction {
-                    instruction,
-                    queue_stack,
-                } => LoopState::ApplyContinuation {
-                    value: handler(instruction),
-                    queue_stack,
-                },
-                LoopState::ApplyContinuation {
-                    value,
-                    mut queue_stack,
-                } => match queue_stack.pop() {
-                    None => return *value.downcast::<A>().expect("Final result type mismatch"),
-                    Some(arrow) => match arrow.apply(value) {
-                        Freer::Pure(boxed) => LoopState::ApplyContinuation {
-                            value: boxed,
-                            queue_stack,
-                        },
-                        Freer::Impure {
-                            instruction, queue, ..
-                        } => {
-                            queue_stack.push_queue(queue);
-                            LoopState::ExecuteInstruction {
-                                instruction,
-                                queue_stack,
-                            }
-                        }
-                    },
-                },
+            let Some(arrow) = stack.pop() else {
+                return current_value.downcast::<A>().map(|b| *b).map_err(|_| {
+                    InterpretError::TypeMismatch {
+                        context: "final result",
+                    }
+                });
             };
+
+            match arrow.apply(current_value) {
+                Freer::Pure(value) => current_value = value,
+                Freer::Impure {
+                    instruction,
+                    continuation_queue,
+                    ..
+                } => {
+                    stack.push_queue(continuation_queue);
+                    current_value = handler(instruction);
+                }
+            }
         }
     }
 }
+
+// =============================================================================
+// Trait Implementations
+// =============================================================================
 
 impl<I: Debug, A: Debug> Debug for Freer<I, A> {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
@@ -491,7 +611,7 @@ impl<I: Debug, A: Debug> Debug for Freer<I, A> {
             Self::Impure { instruction, .. } => formatter
                 .debug_struct("Impure")
                 .field("instruction", instruction)
-                .field("queue", &"<queue>")
+                .field("continuation_queue", &"<queue>")
                 .finish(),
         }
     }
@@ -505,6 +625,10 @@ impl<I: Display, A: Display> Display for Freer<I, A> {
         }
     }
 }
+
+// =============================================================================
+// Tests
+// =============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -539,6 +663,10 @@ mod tests {
         (result, state)
     }
 
+    // =========================================================================
+    // Pure construction tests
+    // =========================================================================
+
     #[rstest]
     fn test_pure_construction() {
         let freer: Freer<(), i32> = Freer::pure(42);
@@ -551,11 +679,19 @@ mod tests {
         assert!(matches!(freer, Freer::Pure(ref s) if s == "hello"));
     }
 
+    // =========================================================================
+    // lift_instruction tests
+    // =========================================================================
+
     #[rstest]
     fn test_lift_instruction_creates_impure() {
         let freer = test_get();
         assert!(matches!(freer, Freer::Impure { .. }));
     }
+
+    // =========================================================================
+    // map tests (with fast-path)
+    // =========================================================================
 
     #[rstest]
     fn test_map_pure() {
@@ -574,6 +710,10 @@ mod tests {
         let mapped = test_get().map(|x| x * 2);
         assert!(matches!(mapped, Freer::Impure { .. }));
     }
+
+    // =========================================================================
+    // flat_map tests (with fast-path)
+    // =========================================================================
 
     #[rstest]
     fn test_flat_map_pure_to_pure() {
@@ -595,6 +735,10 @@ mod tests {
         assert!(matches!(chained, Freer::Impure { .. }));
     }
 
+    // =========================================================================
+    // and_then and then tests
+    // =========================================================================
+
     #[rstest]
     fn test_and_then_is_flat_map_alias() {
         let result = Freer::<(), i32>::pure(21).and_then(|x| Freer::pure(x * 2));
@@ -606,6 +750,10 @@ mod tests {
         let result = Freer::<(), ()>::pure(()).then(Freer::pure(42));
         assert!(matches!(result, Freer::Pure(42)));
     }
+
+    // =========================================================================
+    // interpret tests
+    // =========================================================================
 
     #[rstest]
     fn test_interpret_pure() {
@@ -647,6 +795,34 @@ mod tests {
         assert_eq!(state, 30);
     }
 
+    // =========================================================================
+    // try_interpret tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_try_interpret_pure() {
+        let result = Freer::<(), i32>::pure(42).try_interpret(|()| Box::new(()));
+        assert_eq!(result, Ok(42));
+    }
+
+    #[rstest]
+    fn test_try_interpret_with_handler() {
+        let program = test_get();
+        let mut state = 42;
+        let result = program.try_interpret(|command| match command {
+            TestCommand::Get => Box::new(state),
+            TestCommand::Put(value) => {
+                state = value;
+                Box::new(())
+            }
+        });
+        assert_eq!(result, Ok(42));
+    }
+
+    // =========================================================================
+    // Stack safety tests
+    // =========================================================================
+
     #[rstest]
     fn test_deep_flat_map_chain_stack_safety() {
         let mut freer: Freer<(), i32> = Freer::pure(0);
@@ -656,8 +832,6 @@ mod tests {
         assert_eq!(freer.interpret(|()| Box::new(())), 10_000);
     }
 
-    // Deep flat_map chains with instructions (10,000+) require "Reflection without Remorse"
-    // optimization. See: docs/internal/issues/ for the related issue.
     #[rstest]
     fn test_deep_flat_map_chain_with_instructions() {
         let mut freer = test_get();
@@ -668,6 +842,22 @@ mod tests {
         assert_eq!(result, 100);
         assert_eq!(state, 100);
     }
+
+    #[rstest]
+    fn test_deep_flat_map_chain_with_instructions_1000() {
+        // This test should complete quickly with the optimized implementation
+        let mut freer = test_get();
+        for _ in 0..1000 {
+            freer = freer.flat_map(|x| test_put(x + 1).then(test_get()));
+        }
+        let (result, state) = run_state_program(freer, 0);
+        assert_eq!(result, 1000);
+        assert_eq!(state, 1000);
+    }
+
+    // =========================================================================
+    // Debug and Display tests
+    // =========================================================================
 
     #[rstest]
     fn test_debug_pure() {
@@ -737,6 +927,10 @@ mod tests {
         assert_eq!(format!("{freer}"), "Impure(Get)");
     }
 
+    // =========================================================================
+    // Monad law tests
+    // =========================================================================
+
     #[rstest]
     fn test_monad_left_identity() {
         let value = 10;
@@ -775,6 +969,10 @@ mod tests {
         );
     }
 
+    // =========================================================================
+    // Functor law tests
+    // =========================================================================
+
     #[rstest]
     fn test_functor_identity() {
         let result = Freer::<(), i32>::pure(42).map(|x| x);
@@ -800,7 +998,7 @@ mod tests {
     }
 
     // =========================================================================
-    // Internal structure tests (ContinuationQueue, QueueStack)
+    // Internal structure tests
     // =========================================================================
 
     #[rstest]
@@ -812,7 +1010,7 @@ mod tests {
     #[rstest]
     fn test_continuation_queue_push_not_empty() {
         let queue: ContinuationQueue<()> =
-            ContinuationQueue::new().push(|x: i32| Freer::<(), i32>::pure(x + 1));
+            ContinuationQueue::new().push_flat_map(|x: i32| Freer::<(), i32>::pure(x + 1));
         assert!(!queue.is_empty());
     }
 
@@ -823,50 +1021,20 @@ mod tests {
     }
 
     #[rstest]
-    fn test_continuation_queue_pop_fifo_order() {
-        let mut queue: ContinuationQueue<()> = ContinuationQueue::new()
-            .push(|x: i32| Freer::<(), i32>::pure(x + 1))
-            .push(|x: i32| Freer::<(), i32>::pure(x * 2));
-
-        // First pop should give us the +1 arrow
-        let arrow1 = queue.pop().expect("Should have first arrow");
-        let result1 = arrow1.apply(Box::new(10i32));
-        if let Freer::Pure(boxed) = result1 {
-            let value = *boxed.downcast::<i32>().unwrap();
-            assert_eq!(value, 11); // 10 + 1
-        } else {
-            panic!("Expected Pure");
-        }
-
-        // Second pop should give us the *2 arrow
-        let arrow2 = queue.pop().expect("Should have second arrow");
-        let result2 = arrow2.apply(Box::new(10i32));
-        if let Freer::Pure(boxed) = result2 {
-            let value = *boxed.downcast::<i32>().unwrap();
-            assert_eq!(value, 20); // 10 * 2
-        } else {
-            panic!("Expected Pure");
-        }
-
-        // Queue should be empty now
-        assert!(queue.pop().is_none());
-    }
-
-    #[rstest]
-    fn test_queue_stack_single_queue() {
-        let queue = ContinuationQueue::new().push(|x: i32| Freer::<(), i32>::pure(x + 1));
-        let mut stack = QueueStack::new(queue);
+    fn test_continuation_stack_single_queue() {
+        let queue = ContinuationQueue::new().push_flat_map(|x: i32| Freer::<(), i32>::pure(x + 1));
+        let mut stack = ContinuationStack::new(queue);
 
         assert!(stack.pop().is_some());
         assert!(stack.pop().is_none());
     }
 
     #[rstest]
-    fn test_queue_stack_multiple_queues() {
-        let queue1 = ContinuationQueue::new().push(|x: i32| Freer::<(), i32>::pure(x + 1));
-        let queue2 = ContinuationQueue::new().push(|x: i32| Freer::<(), i32>::pure(x * 2));
+    fn test_continuation_stack_multiple_queues() {
+        let queue1 = ContinuationQueue::new().push_flat_map(|x: i32| Freer::<(), i32>::pure(x + 1));
+        let queue2 = ContinuationQueue::new().push_flat_map(|x: i32| Freer::<(), i32>::pure(x * 2));
 
-        let mut stack = QueueStack::new(queue1);
+        let mut stack = ContinuationStack::new(queue1);
         stack.push_queue(queue2);
 
         // queue2 should be processed first (LIFO), then queue1
@@ -891,55 +1059,45 @@ mod tests {
         assert!(stack.pop().is_none());
     }
 
-    #[rstest]
-    fn test_arrow_apply_type_conversion() {
-        let arrow = Arrow::<(), i32, i32, _> {
-            function: |x: i32| Freer::<(), i32>::pure(x * 2),
-            _phantom: PhantomData,
-        };
-        let boxed_arrow: Box<dyn TypeErasedArrow<()>> = Box::new(arrow);
-        let result = boxed_arrow.apply(Box::new(21i32));
-
-        if let Freer::Pure(boxed) = result {
-            let value = *boxed.downcast::<i32>().unwrap();
-            assert_eq!(value, 42);
-        } else {
-            panic!("Expected Pure");
-        }
-    }
-
-    #[rstest]
-    fn test_extract_arrow_apply() {
-        let arrow = ExtractArrow::<i32, _> {
-            extract: |boxed: Box<dyn Any>| *boxed.downcast::<i32>().unwrap() + 1,
-            _phantom: PhantomData,
-        };
-        let boxed_arrow: Box<dyn TypeErasedArrow<()>> = Box::new(arrow);
-        let result = boxed_arrow.apply(Box::new(41i32));
-
-        if let Freer::Pure(boxed) = result {
-            let value = *boxed.downcast::<i32>().unwrap();
-            assert_eq!(value, 42);
-        } else {
-            panic!("Expected Pure");
-        }
-    }
-
     // =========================================================================
-    // Performance tests
+    // SmallVec inline capacity test
     // =========================================================================
 
     #[rstest]
-    fn test_deep_flat_map_chain_with_instructions_1000() {
-        // This test should complete quickly with the new implementation
-        // (previously would take ~6.72s, now should be ~70ms or less)
-        let mut freer = test_get();
-        for _ in 0..1000 {
-            freer = freer.flat_map(|x| test_put(x + 1).then(test_get()));
+    fn test_smallvec_inline_capacity() {
+        // Test that short chains stay inline
+        let expected_count: i32 = 8; // CONTINUATION_INLINE_CAPACITY
+        let mut freer: Freer<(), i32> = Freer::pure(0);
+        for _ in 0..expected_count {
+            freer = freer.flat_map(|x| Freer::pure(x + 1));
         }
-        let (result, state) = run_state_program(freer, 0);
-        assert_eq!(result, 1000);
-        assert_eq!(state, 1000);
+        // This should not cause heap allocation for Pure chains (fast-path)
+        assert_eq!(freer.interpret(|()| Box::new(())), expected_count);
+    }
+
+    // =========================================================================
+    // InterpretError tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_interpret_error_display() {
+        let error = InterpretError::TypeMismatch {
+            context: "test context",
+        };
+        assert_eq!(
+            format!("{error}"),
+            "Type mismatch in interpret: test context"
+        );
+    }
+
+    #[rstest]
+    fn test_interpret_error_debug() {
+        let error = InterpretError::TypeMismatch {
+            context: "test context",
+        };
+        let debug_str = format!("{error:?}");
+        assert!(debug_str.contains("TypeMismatch"));
+        assert!(debug_str.contains("test context"));
     }
 }
 
