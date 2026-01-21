@@ -2447,3 +2447,841 @@ mod from_slice_tests {
         assert_eq!(vector.get(0), Some(&"hello"));
     }
 }
+
+// =============================================================================
+// Concat and Transient Integration Tests
+// =============================================================================
+
+mod concat_transient_tests {
+    use super::*;
+
+    /// Test that concat followed by transient and push_back works correctly.
+    /// This verifies that RelaxedBranch nodes are properly regularized.
+    #[rstest]
+    fn test_concat_transient_push_back() {
+        let left: PersistentVector<i32> = (0..100).collect();
+        let right: PersistentVector<i32> = (100..200).collect();
+        let concatenated = left.concat(&right);
+
+        // Convert to transient and push more elements
+        let mut transient = concatenated.transient();
+        for i in 200..250 {
+            transient.push_back(i);
+        }
+
+        let result = transient.persistent();
+
+        // Verify length
+        assert_eq!(result.len(), 250);
+
+        // Verify all elements are accessible
+        for i in 0..250 {
+            assert_eq!(result.get(i), Some(&(i as i32)));
+        }
+    }
+
+    /// Test that concat followed by transient preserves correct get behavior.
+    #[rstest]
+    fn test_concat_transient_get() {
+        let left: PersistentVector<i32> = (0..50).collect();
+        let right: PersistentVector<i32> = (50..100).collect();
+        let concatenated = left.concat(&right);
+
+        let transient = concatenated.transient();
+
+        // Verify all elements are correctly accessible via transient
+        for i in 0..100 {
+            assert_eq!(transient.get(i), Some(&(i as i32)));
+        }
+    }
+
+    /// Test that concat followed by transient and update works correctly.
+    #[rstest]
+    fn test_concat_transient_update() {
+        let left: PersistentVector<i32> = (0..50).collect();
+        let right: PersistentVector<i32> = (50..100).collect();
+        let concatenated = left.concat(&right);
+
+        let mut transient = concatenated.transient();
+
+        // Update some elements
+        transient.update(25, 999);
+        transient.update(75, 888);
+
+        let result = transient.persistent();
+
+        // Verify updates
+        assert_eq!(result.get(25), Some(&999));
+        assert_eq!(result.get(75), Some(&888));
+
+        // Verify other elements unchanged
+        for i in 0..100 {
+            if i != 25 && i != 75 {
+                assert_eq!(result.get(i), Some(&(i as i32)));
+            }
+        }
+    }
+
+    /// Test that transient on a non-concat vector (no RelaxedBranch) is O(1).
+    /// This verifies the optimization to skip regularization.
+    #[rstest]
+    fn test_transient_no_relaxed_branch() {
+        // Create a vector without concat (no RelaxedBranch nodes)
+        let vector: PersistentVector<i32> = (0..1000).collect();
+
+        // Convert to transient (should be O(1))
+        let mut transient = vector.transient();
+
+        // Verify it works correctly
+        assert_eq!(transient.len(), 1000);
+        for i in 0..1000 {
+            assert_eq!(transient.get(i), Some(&(i as i32)));
+        }
+
+        // Push more elements
+        for i in 1000..1100 {
+            transient.push_back(i);
+        }
+
+        let result = transient.persistent();
+        assert_eq!(result.len(), 1100);
+    }
+
+    /// Test multiple concat operations followed by transient.
+    #[rstest]
+    fn test_multiple_concat_transient() {
+        let v1: PersistentVector<i32> = (0..30).collect();
+        let v2: PersistentVector<i32> = (30..60).collect();
+        let v3: PersistentVector<i32> = (60..90).collect();
+        let v4: PersistentVector<i32> = (90..120).collect();
+
+        let concatenated = v1.concat(&v2).concat(&v3).concat(&v4);
+
+        let mut transient = concatenated.transient();
+        transient.push_back(120);
+        transient.push_back(121);
+
+        let result = transient.persistent();
+
+        assert_eq!(result.len(), 122);
+        for i in 0..122 {
+            assert_eq!(result.get(i), Some(&(i as i32)));
+        }
+    }
+
+    /// Test concat with vectors of different sizes followed by transient.
+    #[rstest]
+    fn test_concat_different_sizes_transient() {
+        let small: PersistentVector<i32> = (0..5).collect();
+        let large: PersistentVector<i32> = (5..500).collect();
+
+        let concatenated = small.concat(&large);
+        let mut transient = concatenated.transient();
+
+        for i in 500..550 {
+            transient.push_back(i);
+        }
+
+        let result = transient.persistent();
+
+        assert_eq!(result.len(), 550);
+        for i in 0..550 {
+            assert_eq!(result.get(i), Some(&(i as i32)));
+        }
+    }
+
+    /// Test that empty vector concat followed by transient works.
+    #[rstest]
+    fn test_empty_concat_transient() {
+        let empty: PersistentVector<i32> = PersistentVector::new();
+        let non_empty: PersistentVector<i32> = (0..100).collect();
+
+        let concatenated1 = empty.concat(&non_empty);
+        let concatenated2 = non_empty.concat(&empty);
+
+        let mut transient1 = concatenated1.transient();
+        let mut transient2 = concatenated2.transient();
+
+        transient1.push_back(100);
+        transient2.push_back(100);
+
+        let result1 = transient1.persistent();
+        let result2 = transient2.persistent();
+
+        assert_eq!(result1.len(), 101);
+        assert_eq!(result2.len(), 101);
+    }
+
+    /// Test that concat followed by transient pop_back works correctly.
+    /// After concat, tail is empty (flushed to root), so pop_back must
+    /// retrieve elements from root.
+    #[rstest]
+    fn test_concat_transient_pop_back() {
+        let left: PersistentVector<i32> = (0..50).collect();
+        let right: PersistentVector<i32> = (50..100).collect();
+        let concatenated = left.concat(&right);
+
+        let mut transient = concatenated.transient();
+
+        // After concat, tail is empty. pop_back should still work.
+        let popped = transient.pop_back();
+        assert_eq!(popped, Some(99));
+        assert_eq!(transient.len(), 99);
+
+        // Pop more elements
+        let popped2 = transient.pop_back();
+        assert_eq!(popped2, Some(98));
+        assert_eq!(transient.len(), 98);
+
+        // Verify remaining elements are still accessible
+        for i in 0..98 {
+            assert_eq!(transient.get(i), Some(&(i as i32)));
+        }
+    }
+
+    /// Test pop_back all elements from transient after concat.
+    #[rstest]
+    fn test_concat_transient_pop_back_all() {
+        let left: PersistentVector<i32> = (0..10).collect();
+        let right: PersistentVector<i32> = (10..20).collect();
+        let concatenated = left.concat(&right);
+
+        let mut transient = concatenated.transient();
+
+        // Pop all 20 elements
+        for expected in (0..20).rev() {
+            let popped = transient.pop_back();
+            assert_eq!(
+                popped,
+                Some(expected),
+                "Expected to pop {}, but got {:?}",
+                expected,
+                popped
+            );
+            assert_eq!(
+                transient.len(),
+                expected as usize,
+                "After popping {}, length should be {}",
+                expected,
+                expected
+            );
+        }
+
+        assert!(transient.is_empty());
+        assert_eq!(transient.pop_back(), None);
+    }
+
+    /// Test that pop_back works after concat with 32+1 scenario in transient mode.
+    #[rstest]
+    fn test_concat_transient_pop_back_32_plus_1() {
+        let base: PersistentVector<i32> = (0..32).collect();
+        let singleton = PersistentVector::singleton(99);
+        let concatenated = base.concat(&singleton);
+
+        let mut transient = concatenated.transient();
+        assert_eq!(transient.len(), 33);
+
+        let popped = transient.pop_back();
+        assert_eq!(popped, Some(99));
+        assert_eq!(transient.len(), 32);
+
+        // Verify all remaining elements
+        for i in 0..32 {
+            assert_eq!(
+                transient.get(i),
+                Some(&(i as i32)),
+                "Element at index {} mismatch",
+                i
+            );
+        }
+
+        // Continue popping
+        let popped2 = transient.pop_back();
+        assert_eq!(popped2, Some(31));
+        assert_eq!(transient.len(), 31);
+    }
+
+    /// Test interleaved push_back and pop_back on transient after concat.
+    #[rstest]
+    fn test_concat_transient_interleaved_push_pop() {
+        let left: PersistentVector<i32> = (0..50).collect();
+        let right: PersistentVector<i32> = (50..100).collect();
+        let concatenated = left.concat(&right);
+
+        let mut transient = concatenated.transient();
+
+        // Pop some
+        assert_eq!(transient.pop_back(), Some(99));
+        assert_eq!(transient.pop_back(), Some(98));
+        assert_eq!(transient.len(), 98);
+
+        // Push some
+        transient.push_back(200);
+        transient.push_back(201);
+        assert_eq!(transient.len(), 100);
+
+        // Verify
+        assert_eq!(transient.get(98), Some(&200));
+        assert_eq!(transient.get(99), Some(&201));
+
+        // Pop again
+        assert_eq!(transient.pop_back(), Some(201));
+        assert_eq!(transient.pop_back(), Some(200));
+        assert_eq!(transient.len(), 98);
+
+        // Convert to persistent and verify
+        let result = transient.persistent();
+        assert_eq!(result.len(), 98);
+        for i in 0..98 {
+            assert_eq!(result.get(i), Some(&(i as i32)));
+        }
+    }
+}
+
+// =============================================================================
+// Concat with empty tail: last/pop_back tests
+// =============================================================================
+//
+// After concat, the resulting vector has an empty tail. These tests ensure
+// that last() and pop_back() work correctly in this scenario.
+
+mod concat_empty_tail_tests {
+    use super::*;
+
+    /// Test that last() works correctly after concat (which leaves tail empty).
+    #[rstest]
+    fn test_last_after_concat() {
+        let left: PersistentVector<i32> = (1..=50).collect();
+        let right: PersistentVector<i32> = (51..=100).collect();
+        let concatenated = left.concat(&right);
+
+        // After concat, tail is empty but last() should still return the last element
+        assert_eq!(concatenated.last(), Some(&100));
+    }
+
+    /// Test that last() works correctly after concat with small vectors.
+    #[rstest]
+    fn test_last_after_concat_small_vectors() {
+        let left: PersistentVector<i32> = (1..=5).collect();
+        let right: PersistentVector<i32> = (6..=10).collect();
+        let concatenated = left.concat(&right);
+
+        assert_eq!(concatenated.last(), Some(&10));
+    }
+
+    /// Test that last() works after multiple concat operations.
+    #[rstest]
+    fn test_last_after_multiple_concat() {
+        let v1: PersistentVector<i32> = (1..=10).collect();
+        let v2: PersistentVector<i32> = (11..=20).collect();
+        let v3: PersistentVector<i32> = (21..=30).collect();
+
+        let concatenated = v1.concat(&v2).concat(&v3);
+
+        assert_eq!(concatenated.last(), Some(&30));
+    }
+
+    /// Test that pop_back() works correctly after concat (which leaves tail empty).
+    #[rstest]
+    fn test_pop_back_after_concat() {
+        let left: PersistentVector<i32> = (1..=50).collect();
+        let right: PersistentVector<i32> = (51..=100).collect();
+        let concatenated = left.concat(&right);
+
+        let (remaining, element) = concatenated.pop_back().unwrap();
+
+        assert_eq!(element, 100);
+        assert_eq!(remaining.len(), 99);
+        assert_eq!(remaining.last(), Some(&99));
+    }
+
+    /// Test that pop_back() works correctly after concat with small vectors.
+    #[rstest]
+    fn test_pop_back_after_concat_small_vectors() {
+        let left: PersistentVector<i32> = (1..=5).collect();
+        let right: PersistentVector<i32> = (6..=10).collect();
+        let concatenated = left.concat(&right);
+
+        let (remaining, element) = concatenated.pop_back().unwrap();
+
+        assert_eq!(element, 10);
+        assert_eq!(remaining.len(), 9);
+        assert_eq!(remaining.last(), Some(&9));
+    }
+
+    /// Test that multiple pop_back() calls work correctly after concat.
+    #[rstest]
+    fn test_multiple_pop_back_after_concat() {
+        let left: PersistentVector<i32> = (1..=20).collect();
+        let right: PersistentVector<i32> = (21..=40).collect();
+        let concatenated = left.concat(&right);
+
+        let mut current = concatenated;
+        for expected in (1..=40).rev() {
+            let (remaining, element) = current.pop_back().unwrap();
+            assert_eq!(element, expected);
+            current = remaining;
+        }
+
+        assert!(current.is_empty());
+    }
+
+    /// Test that pop_back() on a single-element concat result works.
+    #[rstest]
+    fn test_pop_back_single_element_after_concat() {
+        let left: PersistentVector<i32> = PersistentVector::new().push_back(1);
+        let right: PersistentVector<i32> = PersistentVector::new();
+        let concatenated = left.concat(&right);
+
+        // This vector has one element with non-empty tail (concat with empty preserves original)
+        let (remaining, element) = concatenated.pop_back().unwrap();
+
+        assert_eq!(element, 1);
+        assert!(remaining.is_empty());
+    }
+
+    /// Test concat followed by push_back then last/pop_back.
+    #[rstest]
+    fn test_concat_push_back_then_last_pop_back() {
+        let left: PersistentVector<i32> = (1..=32).collect();
+        let right: PersistentVector<i32> = (33..=64).collect();
+        let concatenated = left.concat(&right);
+
+        // After concat, tail is empty
+        // After push_back, tail has one element
+        let with_push = concatenated.push_back(100);
+
+        assert_eq!(with_push.last(), Some(&100));
+
+        let (remaining, element) = with_push.pop_back().unwrap();
+        assert_eq!(element, 100);
+        assert_eq!(remaining.len(), 64);
+    }
+
+    /// Test that last() and pop_back() are consistent.
+    #[rstest]
+    fn test_last_and_pop_back_consistency_after_concat() {
+        let left: PersistentVector<i32> = (1..=100).collect();
+        let right: PersistentVector<i32> = (101..=200).collect();
+        let concatenated = left.concat(&right);
+
+        let last_value = *concatenated.last().unwrap();
+        let (_, popped_value) = concatenated.pop_back().unwrap();
+
+        assert_eq!(last_value, popped_value);
+        assert_eq!(last_value, 200);
+    }
+
+    /// Test pop_back after concat with exactly 32 elements plus singleton.
+    /// This is the edge case where (0..32).collect().concat(&singleton(99)).pop_back()
+    /// should result in len()==32, but without the fix, root would have 32 elements
+    /// and tail would also have 32 elements, causing a size mismatch.
+    #[rstest]
+    fn test_pop_back_after_concat_32_plus_singleton() {
+        // Create a vector with exactly 32 elements (fills one full leaf)
+        let base: PersistentVector<i32> = (0..32).collect();
+        assert_eq!(base.len(), 32);
+
+        // Concat with a singleton
+        let singleton = PersistentVector::new().push_back(99);
+        let concatenated = base.concat(&singleton);
+        assert_eq!(concatenated.len(), 33);
+        assert_eq!(concatenated.last(), Some(&99));
+
+        // Pop back should result in 32 elements
+        let (remaining, popped) = concatenated.pop_back().unwrap();
+        assert_eq!(popped, 99);
+        assert_eq!(remaining.len(), 32);
+
+        // Verify all elements are accessible and correct
+        for i in 0..32 {
+            assert_eq!(
+                remaining.get(i),
+                Some(&(i as i32)),
+                "Element at index {i} mismatch"
+            );
+        }
+
+        // Verify last() returns correct value
+        assert_eq!(remaining.last(), Some(&31));
+
+        // Verify push_back works correctly after pop_back
+        let with_push = remaining.push_back(100);
+        assert_eq!(with_push.len(), 33);
+        assert_eq!(with_push.last(), Some(&100));
+
+        // Verify the pushed element is at the correct index
+        assert_eq!(with_push.get(32), Some(&100));
+    }
+
+    /// Test that pop_back maintains size consistency between length and actual elements.
+    #[rstest]
+    fn test_pop_back_size_consistency_after_concat() {
+        let base: PersistentVector<i32> = (0..32).collect();
+        let singleton = PersistentVector::new().push_back(99);
+        let concatenated = base.concat(&singleton);
+
+        let (remaining, _) = concatenated.pop_back().unwrap();
+
+        // Count actual elements by iterating
+        let actual_count = remaining.iter().count();
+        assert_eq!(
+            actual_count,
+            remaining.len(),
+            "Length mismatch: len() = {}, actual count = {}",
+            remaining.len(),
+            actual_count
+        );
+    }
+
+    /// Test multiple pop_back operations after concat with 32+1 scenario.
+    #[rstest]
+    fn test_multiple_pop_back_after_concat_32_plus_1() {
+        let base: PersistentVector<i32> = (0..32).collect();
+        let singleton = PersistentVector::new().push_back(99);
+        let concatenated = base.concat(&singleton);
+
+        // Pop all elements and verify
+        let mut current = concatenated;
+        let mut expected_values: Vec<i32> = (0..32).collect();
+        expected_values.push(99);
+
+        for expected in expected_values.iter().rev() {
+            let (remaining, element) = current.pop_back().unwrap();
+            assert_eq!(
+                element,
+                *expected,
+                "Expected to pop {}, but got {} (remaining len: {})",
+                expected,
+                element,
+                remaining.len()
+            );
+            current = remaining;
+        }
+
+        assert!(current.is_empty());
+    }
+
+    /// Test that after pop_back, the internal structure is consistent.
+    /// This specifically tests the bug where root elements + tail elements != length.
+    /// After concat(32 elements, 1 element).pop_back(), the remaining vector should have:
+    /// - length = 32
+    /// - Either: all 32 elements in tail (root empty), OR
+    /// - Correctly distributed between root and tail
+    #[rstest]
+    fn test_pop_back_internal_structure_consistency() {
+        let base: PersistentVector<i32> = (0..32).collect();
+        let singleton = PersistentVector::new().push_back(99);
+        let concatenated = base.concat(&singleton);
+
+        let (remaining, _) = concatenated.pop_back().unwrap();
+
+        // After pop_back from concat(32, 1), we should have exactly 32 elements.
+        // The key test is: can we successfully push 33 more elements and still
+        // have correct indexing?
+        let mut current = remaining;
+        for i in 32..65 {
+            current = current.push_back(i);
+            // Verify the newly pushed element is accessible at the correct index
+            assert_eq!(
+                current.get(i as usize),
+                Some(&i),
+                "After pushing {}, element at index {} is incorrect",
+                i,
+                i
+            );
+            // Also verify length is correct
+            assert_eq!(
+                current.len(),
+                i as usize + 1,
+                "Length mismatch after pushing {}: expected {}, got {}",
+                i,
+                i + 1,
+                current.len()
+            );
+        }
+
+        // Final verification: all 65 elements should be correct
+        for i in 0..32 {
+            assert_eq!(
+                current.get(i),
+                Some(&(i as i32)),
+                "Element at index {} is incorrect",
+                i
+            );
+        }
+        for i in 32..65 {
+            assert_eq!(
+                current.get(i),
+                Some(&(i as i32)),
+                "Element at index {} is incorrect",
+                i
+            );
+        }
+    }
+
+    /// Test pop_back after multiple concat operations with small vectors.
+    /// This tests the case where concat creates multiple small leaves in the root,
+    /// and pop_back should not discard those leaves.
+    ///
+    /// Scenario: (0..10) + (10..20) + singleton(20) = 21 elements
+    /// After pop_back: should have 20 elements (0..20)
+    #[rstest]
+    fn test_pop_back_after_multiple_concat_small_leaves() {
+        let vector1: PersistentVector<i32> = (0..10).collect();
+        let vector2: PersistentVector<i32> = (10..20).collect();
+        let vector3 = PersistentVector::singleton(20);
+
+        let concatenated = vector1.concat(&vector2).concat(&vector3);
+
+        assert_eq!(concatenated.len(), 21);
+
+        let (remaining, popped) = concatenated.pop_back().unwrap();
+
+        assert_eq!(popped, 20);
+        assert_eq!(
+            remaining.len(),
+            20,
+            "After pop_back, length should be 20, but got {}",
+            remaining.len()
+        );
+
+        // Verify all 20 elements are preserved correctly
+        for i in 0..20 {
+            assert_eq!(
+                remaining.get(i),
+                Some(&(i as i32)),
+                "Element at index {} should be {}, but got {:?}",
+                i,
+                i,
+                remaining.get(i)
+            );
+        }
+    }
+
+    /// Test pop_back after multiple concat with different sized small vectors.
+    /// Scenario: (0..15) + (15..25) + singleton(25) = 26 elements
+    #[rstest]
+    fn test_pop_back_after_multiple_concat_different_sizes() {
+        let vector1: PersistentVector<i32> = (0..15).collect();
+        let vector2: PersistentVector<i32> = (15..25).collect();
+        let vector3 = PersistentVector::singleton(25);
+
+        let concatenated = vector1.concat(&vector2).concat(&vector3);
+
+        assert_eq!(concatenated.len(), 26);
+
+        let (remaining, popped) = concatenated.pop_back().unwrap();
+
+        assert_eq!(popped, 25);
+        assert_eq!(
+            remaining.len(),
+            25,
+            "After pop_back, length should be 25, but got {}",
+            remaining.len()
+        );
+
+        // Verify all 25 elements are preserved correctly
+        for i in 0..25 {
+            assert_eq!(
+                remaining.get(i),
+                Some(&(i as i32)),
+                "Element at index {} should be {}, but got {:?}",
+                i,
+                i,
+                remaining.get(i)
+            );
+        }
+    }
+
+    /// Test consecutive pop_back after multiple concat to verify consistency.
+    #[rstest]
+    fn test_consecutive_pop_back_after_multiple_concat() {
+        let vector1: PersistentVector<i32> = (0..10).collect();
+        let vector2: PersistentVector<i32> = (10..20).collect();
+        let vector3 = PersistentVector::singleton(20);
+
+        let mut current = vector1.concat(&vector2).concat(&vector3);
+
+        // Pop all 21 elements and verify each
+        for expected in (0..=20).rev() {
+            let (remaining, popped) = current.pop_back().unwrap();
+            assert_eq!(
+                popped, expected,
+                "Expected to pop {}, but got {}",
+                expected, popped
+            );
+            assert_eq!(
+                remaining.len(),
+                expected as usize,
+                "After popping {}, length should be {}, but got {}",
+                expected,
+                expected,
+                remaining.len()
+            );
+            current = remaining;
+        }
+
+        assert!(current.is_empty());
+    }
+
+    /// Test transient pop_back on unbalanced tree with leaf sizes [10, 10, 1].
+    /// This specifically tests the bug where pop_back incorrectly calculated
+    /// the next tail offset using BRANCHING_FACTOR, which fails for unbalanced
+    /// trees created by concat.
+    ///
+    /// Scenario: concat three vectors with sizes 10, 10, and 1 = 21 elements
+    /// Tree structure: leaves have sizes [10, 10, 1] (not uniform 32)
+    /// When popping from the leaf with size 1, the next tail should come
+    /// from the last element's actual position, not from a fixed offset.
+    #[rstest]
+    fn test_transient_pop_back_unbalanced_tree_leaf_size_10_10_1() {
+        let vector1: PersistentVector<i32> = (0..10).collect();
+        let vector2: PersistentVector<i32> = (10..20).collect();
+        let vector3 = PersistentVector::singleton(20);
+
+        let concatenated = vector1.concat(&vector2).concat(&vector3);
+        assert_eq!(concatenated.len(), 21);
+
+        let mut transient = concatenated.transient();
+
+        // Pop the singleton element (leaf size 1 case)
+        let popped = transient.pop_back();
+        assert_eq!(popped, Some(20));
+        assert_eq!(transient.len(), 20);
+
+        // Continue popping to verify tree integrity
+        let popped2 = transient.pop_back();
+        assert_eq!(popped2, Some(19));
+        assert_eq!(transient.len(), 19);
+
+        // Verify all remaining elements are accessible
+        for i in 0..19 {
+            assert_eq!(
+                transient.get(i),
+                Some(&(i as i32)),
+                "Element at index {} should be {}, but got {:?}",
+                i,
+                i,
+                transient.get(i)
+            );
+        }
+    }
+
+    /// Test transient pop_back exhaustively on unbalanced tree with leaf sizes [10, 10, 1].
+    /// Pop all elements one by one and verify correctness at each step.
+    #[rstest]
+    fn test_transient_pop_back_all_unbalanced_tree_10_10_1() {
+        let vector1: PersistentVector<i32> = (0..10).collect();
+        let vector2: PersistentVector<i32> = (10..20).collect();
+        let vector3 = PersistentVector::singleton(20);
+
+        let concatenated = vector1.concat(&vector2).concat(&vector3);
+        let mut transient = concatenated.transient();
+
+        // Pop all 21 elements and verify each
+        for expected in (0..=20).rev() {
+            let popped = transient.pop_back();
+            assert_eq!(
+                popped,
+                Some(expected),
+                "Expected to pop {}, but got {:?}",
+                expected,
+                popped
+            );
+            assert_eq!(
+                transient.len(),
+                expected as usize,
+                "After popping {}, length should be {}, but got {}",
+                expected,
+                expected,
+                transient.len()
+            );
+
+            // Verify remaining elements are still accessible
+            for i in 0..expected as usize {
+                assert_eq!(
+                    transient.get(i),
+                    Some(&(i as i32)),
+                    "After popping {}, element at index {} should be {}",
+                    expected,
+                    i,
+                    i
+                );
+            }
+        }
+
+        assert!(transient.is_empty());
+        assert_eq!(transient.pop_back(), None);
+    }
+
+    /// Test transient pop_back on unbalanced tree with various small leaf sizes.
+    /// Scenario: [5, 8, 3, 1] = 17 elements (highly unbalanced)
+    #[rstest]
+    fn test_transient_pop_back_unbalanced_tree_various_small_leaves() {
+        let vector1: PersistentVector<i32> = (0..5).collect();
+        let vector2: PersistentVector<i32> = (5..13).collect();
+        let vector3: PersistentVector<i32> = (13..16).collect();
+        let vector4 = PersistentVector::singleton(16);
+
+        let concatenated = vector1.concat(&vector2).concat(&vector3).concat(&vector4);
+        assert_eq!(concatenated.len(), 17);
+
+        let mut transient = concatenated.transient();
+
+        // Pop all elements and verify
+        for expected in (0..17).rev() {
+            let popped = transient.pop_back();
+            assert_eq!(
+                popped,
+                Some(expected),
+                "Expected to pop {}, but got {:?}",
+                expected,
+                popped
+            );
+            assert_eq!(
+                transient.len(),
+                expected as usize,
+                "After popping {}, length should be {}, but got {}",
+                expected,
+                expected,
+                transient.len()
+            );
+        }
+
+        assert!(transient.is_empty());
+    }
+
+    /// Test transient pop_back after concat with empty tail scenario.
+    /// When concat flushes tail to root, pop_back must correctly handle
+    /// the case where we need to fetch a new tail from unbalanced leaves.
+    #[rstest]
+    fn test_transient_pop_back_empty_tail_unbalanced_leaves() {
+        // Create vectors that will result in unbalanced leaf structure
+        let vector1: PersistentVector<i32> = (0..7).collect();
+        let vector2: PersistentVector<i32> = (7..14).collect();
+        let vector3: PersistentVector<i32> = (14..15).collect(); // Single element
+
+        let concatenated = vector1.concat(&vector2).concat(&vector3);
+        // After concat, tail is empty (flushed to root)
+        // Tree has unbalanced leaves: [7, 7, 1]
+
+        let mut transient = concatenated.transient();
+        assert_eq!(transient.len(), 15);
+
+        // Pop the single element from the last leaf
+        let popped1 = transient.pop_back();
+        assert_eq!(popped1, Some(14));
+        assert_eq!(transient.len(), 14);
+
+        // Pop another element - this should correctly fetch from the second leaf
+        let popped2 = transient.pop_back();
+        assert_eq!(popped2, Some(13));
+        assert_eq!(transient.len(), 13);
+
+        // Verify elements 0..13 are still correct
+        for i in 0..13 {
+            assert_eq!(transient.get(i), Some(&(i as i32)));
+        }
+    }
+}
