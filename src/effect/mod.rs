@@ -133,7 +133,7 @@ pub use io::IO;
 // =============================================================================
 
 #[cfg(feature = "async")]
-mod async_io;
+pub mod async_io;
 
 #[cfg(feature = "async")]
 pub use async_io::AsyncIO;

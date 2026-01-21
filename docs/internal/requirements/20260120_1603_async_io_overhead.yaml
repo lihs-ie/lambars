@@ -1,0 +1,287 @@
+# AsyncIO オーバーヘッド徹底削減 要件定義
+#
+# 概要:
+#   tokio Runtime Enter/Drop と Box/Arc アロケーション起因の固定コストを除去し、
+#   baseline_pure 70ns→<=30ns、finally/retry 系 110ns→<=45ns、API 小サイズリクエスト RPS 2-3x を達成する。
+#   公開 API 追加は batch 系のみとし、その他は既存 API（run_async 等）内部を破壊的に入れ替えて最適化する。
+#
+# 設計方針:
+#   1. Runtime をグローバルに共有し、EnterGuard 生成をゼロにする run_on_current パスを用意する
+#   2. AsyncIO を enum ベースの state machine に刷新し、Box/Arc/dyn を全面禁止（impl Future 化）
+#   3. retry/on_error/finally を小さな enum で合成し、動的ディスパッチと追加アロケを排除する
+#   4. batch_run/batch_run_buffered（唯一の新規公開 API）で多回呼びを 1 回の Enter に畳み、ホットパスを平準化する
+#   5. ベンチ・プロファイル・Monad 法則テストを追加し、退行を CI で検知する
+#
+# 参照:
+#   - docs/internal/issues/20260120_1603_async_io_overhead.yaml
+#   - benchmark_results_after.txt:3965-4002
+#   - profiling-results/criterion-profiling-*/effect_bench.folded
+
+version: "1.0.0"
+name: "async_io_overhead_reduction"
+description: |
+  tokio Runtime Enter/Drop と Box/Arc を主因とする AsyncIO の固定コストを除去し、
+  state machine 化とバッチ実行で RPS を最大化する。実装手順・アルゴリズムを具体化し、
+  許容する挙動を詳細に規定する。
+
+# 背景・動機
+background:
+  problem: |
+    - baseline_pure 70-71ns、with_finally_async/on_error/retry_no_retry 104-112ns と固定コストが支配。
+    - フレームグラフで SetCurrentGuard::drop, Arc::drop_slow, malloc/cfree が上位。
+    - 高頻度呼び出しで RPS を飽和させる。
+  motivation: |
+    小さなリクエストの遅延と CPU/alloc を削減し、API サーバーのスループットを 2-3x 引き上げる。
+    関数型 API の ergonomics を保ちつつゼロアロケに近づける。
+  prior_art:
+    - name: "tokio Handle 再利用"
+      description: "Handle をスレッドローカルにキャッシュし Enter を避ける手法"
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. Runtime 共有・Enter 回避
+  # ======================================================================
+  - id: aio-01-runtime-sharing
+    name: "Enter 0 回で実行する Runtime 共有"
+    description: |
+      Runtime の初期化を 1 度だけ行い、各呼び出しで EnterGuard を生成しない実行パスを提供する。
+      実行スレッドが既に Runtime 内なら Enter を完全に省略し、外部スレッドでも Enter は 1 回のみ。
+
+    methods:
+      - name: "AsyncRuntime::global"
+        signature: "pub(crate) fn global() -> &'static Runtime"
+        description: |
+          LazyLock で multi_thread Runtime を生成。worker_threads は num_cpus::get()、enable_all() を設定。
+          Drop 不可（'static）。複数初期化を防ぐ。
+        examples:
+          - description: "初期化"
+            code: |
+              static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
+                  Builder::new_multi_thread().enable_all().build().expect("runtime")
+              });
+      - name: "AsyncRuntime::handle"
+        signature: "pub(crate) fn handle() -> Handle"
+        description: |
+          thread_local! に Handle をキャッシュし clone を返す。Handle::try_current().ok() を優先し、
+          取得できない場合は global().handle().clone() を返す。clone コストのみで EnterGuard を作らない。
+      - name: "run_on_current"
+        signature: "pub(crate) async fn run_on_current<F, T>(fut: F) -> T where F: Future<Output = T>"
+        description: |
+          1) Handle::try_current() に成功した場合: polling loop を手動実装し、Guard を生成せずに Future をポーリングする。
+             - futures::task::noop_waker_ref() を用いず、tokio::runtime::Handle::current().as_cur_thread().unwrap().context()
+               の waker を生成し、Context を再利用。
+             - poll_fn(|cx| Pin::new_unchecked(fut_ref).poll(cx)) で完了まで回す。
+          2) 外部スレッドの場合: global Handle で block_on するが、Enter は 1 回のみで再入を禁止。
+             block_on 内では追加の Enter を呼ばない。
+          3) 呼び出し間で追加のガード生成・Arc 生成を行わないことをテストで保証する。
+      - name: "run_async"
+        signature: "pub async fn run_async<A>(io: AsyncIO<A>) -> A"
+        description: |
+          既存 API 互換のエントリ。内部で run_on_current(io.into_future()) を呼ぶだけとし、
+          旧実装の EnterGuard 生成・Box を完全に排除する。
+
+    implementations:
+      - type: "src/effect/async_io/runtime.rs (新設) あるいは async_io.rs 内部モジュール"
+        description: |
+          Runtime 生成・Handle キャッシュ・polling loop を実装。unsafe を使わず、Pin 操作は pin_project! で安全に行う。
+          再入禁止: すでに polling 中に run_async を呼ぶケースは単一 Context を使い回す。
+
+  # ======================================================================
+  # 2. AsyncIO のゼロアロケ state machine 化
+  # ======================================================================
+  - id: aio-02-zero-alloc-asyncio
+    name: "AsyncIO enum 化と impl Future 実装"
+    description: |
+      AsyncIO<A> を小さな enum に再設計し、Box<dyn Future>/Box<dyn Fn>/Arc を全廃。
+      impl Future を直接実装し、poll 内で合成を解く。Clone は不要、Send/Sync は包含する型に従う。
+
+    methods:
+      - name: "AsyncIO 定義"
+        signature: |
+          enum AsyncIO<A, F, G> {
+            Pure(A),
+            Defer(F),                // F: FnOnce() -> Fut
+            Map { inner: Box<AsyncIO<_, _, _>>, f: G },      // G: FnOnce(A) -> B
+            FlatMap { inner: Box<AsyncIO<_, _, _>>, f: G },  // G: FnOnce(A) -> AsyncIO<B>
+            HandleError { inner, h },
+            Finally { inner, fin },
+            Retry { inner, policy, h },
+          }
+        description: |
+          Box を残さないため、inner も enum をそのまま保持し、再帰を pin_project! の projection で扱う。
+          クロージャは FnOnce を move で保持し、dyn 禁止。Map/FlatMap でクロージャをインライン展開。
+      - name: "poll 実装"
+        signature: "impl<A> Future for AsyncIO<A> { type Output = A; fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<A> }"
+        description: |
+          - pin_project! で各フィールドを安全に Pin 取得。
+          - Defer: 呼び出しは 1 度のみ。呼出後は Future を保持する DeferRunning(Fut) に遷移。
+          - Map: inner.poll → Ready(a) なら f を即時適用し Ready(b)。Pending は透過。
+          - FlatMap: inner.poll → Ready(a) なら f(a) を新しい AsyncIO にし self をその値に置換（mem::replace）。
+          - HandleError/Retry/Finally: Result をマッチし、追加アロケなしで分岐。
+          - Drop で Arc/Box が発生しないことをベンチで確認。
+      - name: "AsyncIO::defer"
+        signature: "pub fn defer<F, Fut, A>(f: F) -> AsyncIO<A> where F: FnOnce() -> Fut, Fut: Future<Output = A>"
+        description: "Defer(F) を構築し、poll 時に初回だけ f() を呼んで Fut を格納する。Box 不使用。"
+      - name: "AsyncIO::flat_map"
+        signature: "pub fn flat_map<B, F>(self, f: F) -> AsyncIO<B> where F: FnOnce(A) -> AsyncIO<B>"
+        description: "FlatMap { inner: self, f } を構築。クロージャキャプチャは move、dyn 不使用。"
+      - name: "AsyncIO::map"
+        signature: "pub fn map<B, F>(self, f: F) -> AsyncIO<B> where F: FnOnce(A) -> B"
+        description: "Map { inner: self, f } を構築。map は flat_map + pure に展開しない（追加アロケ防止）。"
+
+    implementations:
+      - type: "src/effect/async_io.rs"
+        description: |
+          既存の Box<dyn Fn>, Pin<Box<dyn Future>> を全削除。enum と pin_project! に置換。
+          Invariant: Defer は 1 回だけ呼ぶ、Map/FlatMap は FnOnce 消費後 None にすることでダブルコールを防ぐ。
+
+  # ======================================================================
+  # 3. エラーハンドラ合成のゼロアロケ化
+  # ======================================================================
+  - id: aio-03-handlers-zero-alloc
+    name: "retry/on_error/finally を enum で畳む"
+    description: |
+      Box<dyn Fn>/Arc を廃し、ハンドラを小さな enum に格納。Result/状態を保持する専用フィールドを持ち、
+      追加アロケなしで成功/失敗/再試行をハンドリングする。
+
+    methods:
+      - name: "RetryState"
+        signature: |
+          enum RetryState<E> { Idle, Running { fut: AsyncIO<Result<T, E>>, attempts: u32 }, Backoff { deadline: Instant, attempts: u32 }, Failed(E) }
+        description: |
+          policy (max_retries, delay_fn) を持ち、poll 内で状態遷移。backoff は tokio::time::Sleep を保持し再利用。
+      - name: "AsyncIO::retry"
+        signature: "pub fn retry<A, E, F>(self, policy: RetryPolicy, h: F) -> AsyncIO<A> where F: Fn(E) -> AsyncIO<A>"
+        description: "RetryState を内部に保持し、poll ごとに状態を進める。Box/Arc 不使用。"
+      - name: "AsyncIO::on_error"
+        signature: "pub fn on_error<A, E, F>(self, h: F) -> AsyncIO<A> where F: Fn(E) -> AsyncIO<A>"
+        description: "HandleError { inner, h } で実装。Err(e) を受けたら h(e) に差し替え。"
+      - name: "AsyncIO::finally"
+        signature: "pub fn finally<A, F>(self, fin: F) -> AsyncIO<A> where F: FnOnce() -> AsyncIO<()>"
+        description: |
+          Finally { inner, fin, done: bool } とし、成功/失敗両経路で fin を 1 度だけ実行。
+          fin 実行後に元の結果を返す。追加アロケなし。
+
+    implementations:
+      - type: "AsyncIOHandler enum"
+        description: "Retry/HandleError/Finally 状態を持つ小さな enum。Arc/Box/dyn は禁止。"
+
+  # ======================================================================
+  # 4. バッチ実行による Enter 削減
+  # ======================================================================
+  - id: aio-04-batch-api
+    name: "batch_run / batch_run_buffered 実装"
+    description: |
+      多数の AsyncIO をまとめて 1 回の Enter で実行。内部で FuturesUnordered を用い、Enter/Drop を 1 回に抑える。
+      本要件で唯一の新規公開 API とし、その他のメソッドは既存公開 API の内部差し替えで対応する。
+
+    methods:
+      - name: "batch_run"
+        signature: "pub async fn batch_run<I, A>(items: I) -> Vec<A> where I: IntoIterator<Item = AsyncIO<A>>, A: Send + 'static"
+        description: |
+          run_on_current 内で FuturesUnordered に全て追加し await。Enter は batch_run 呼び出し 1 回だけ。
+      - name: "batch_run_buffered"
+        signature: "pub async fn batch_run_buffered<I, A>(items: I, limit: usize) -> Vec<A> where I: IntoIterator<Item = AsyncIO<A>>, A: Send + 'static"
+        description: |
+          limit 本だけ同時に進め、完了次第補充。メモリとスロットを固定し、Backpressure を明示。
+
+    implementations:
+      - type: "AsyncIO batch executor"
+        description: |
+          Handle は run_on_current のものを再利用。内部で追加 Runtime/Enter を生成しないことをテストで保証。
+
+  # ======================================================================
+  # 5. 互換性と移行ガイド
+  # ======================================================================
+  - id: aio-05-compat-docs
+    name: "API 互換とドキュメント更新"
+    description: |
+      公開 API は追加のみ。to_sync は #[deprecated] で警告し、run_async/batch_run への移行を促す。
+      ドキュメントにゼロアロケ化と推奨パスを明記。
+
+    methods:
+      - name: "doc 更新"
+        signature: "docs/internal/guides/async_io.md を追加/更新"
+        description: |
+          - run_on_current/batch_run の使用例を掲載（小さいリクエストでの利用を推奨）。
+          - retry/on_error/finally が enum 化され追加アロケなしになったことを説明。
+      - name: "deprecate_to_sync"
+        signature: "pub fn to_sync<A>(io: AsyncIO<A>) -> A  // #[deprecated(note = \"use run_async\")]"
+        description: "警告を出し、計測結果も併記。"
+
+    implementations:
+      - type: "docs/internal/guides/async_io.md"
+        description: "Before/After ベンチ表を掲載し、利用者に推奨パスを示す。"
+
+  # ======================================================================
+  # 6. ベンチ・プロファイル・CI ガード
+  # ======================================================================
+  - id: aio-06-bench-regression
+    name: "ns 分解能ベンチとフレームグラフによる回帰検知"
+    description: |
+      目標値を満たすことを自動検証し、逸脱時に CI で失敗させる。
+
+    methods:
+      - name: "criterion 更新"
+        signature: "cargo bench --bench effect_bench -- async_io_overhead::*"
+        description: "baseline_pure <=30ns、with_finally_async/on_error/retry_no_retry <=45ns を中央値で判定。"
+      - name: "iai-callgrind 追加"
+        signature: "cargo bench -p benches --bench effect_iai -- --bench async_io_overhead"
+        description: "命令数の回帰を検出。Enter/alloc が増えたら失敗。"
+      - name: "flamegraph 取得"
+        signature: "cargo flamegraph --bench effect_bench --bench-func async_io_overhead"
+        description: "SetCurrentGuard, malloc/cfree が 5% 未満であることを確認し成果物を保存。"
+      - name: "CI 閾値"
+        signature: ".github/workflows/bench.yml を更新"
+        description: "上記ベンチの中央値/命令数が基準を超えたら fail。成果物は artifacts に保存。"
+
+    implementations:
+      - type: "benches/effect_bench.rs"
+        description: "計測対象を ns 単位で記録。before/after 比較を出力。"
+      - type: "benches/effect_iai.rs"
+        description: "async_io_overhead を追加。"
+      - type: "profiling-results/criterion-profiling-*/effect_bench.folded"
+        description: "フレームグラフを保存し、ガイドで参照。"
+
+  # ======================================================================
+  # 7. 関数型法則・参照透過性の検証
+  # ======================================================================
+  - id: aio-07-fp-laws
+    name: "Monad 法則・参照透過性担保"
+    description: |
+      state machine 化後も AsyncIO/ExceptT が Monad 法則・参照透過性・不変性を満たすことを自動テストで保証。
+      例外を制御フローに使わず、失敗は型で表現する。
+
+    methods:
+      - name: "monad_law_tests"
+        signature: "proptest! or quickcheck! で Left/Right Identity, Associativity を検証"
+        description: "最適化前後で同一入力に対し同一出力を返すことを確認。"
+      - name: "referential_transparency_doc"
+        signature: "n/a"
+        description: "run_async が唯一の実行境界であることをドキュメント化し、flat_map/map は計算記述のみであると明記。"
+      - name: "stack_safety_test"
+        signature: "deep flat_map chain (>=10_000) を実行して stack overflow がないことを確認"
+        description: "state machine 化によるスタック増加がないことを検証。"
+
+    implementations:
+      - type: "tests/async_io_laws.rs"
+        description: "Monad 法則・参照透過性・スタック安全性を検証するプロパティテストを追加。"
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - "baseline_pure: 70-71ns → 目標 <=30ns（中央値判定）"
+    - "with_finally_async/on_error/retry_no_retry: 104-112ns → 目標 <=45ns"
+    - "malloc/cfree, SetCurrentGuard 比率を 5% 未満に削減（flamegraph）"
+    - "API 小サイズリクエスト RPS を 2-3x に向上（専用ベンチを追加）"
+  compatibility:
+    - "公開 API 追加は batch_run/batch_run_buffered のみ。run_async など既存 API は内部置換で性能改善する。to_sync は #[deprecated] で警告。"
+    - "Send/Sync/Sized 要件は現行と同等。dyn/Box/Arc を排除しつつ型互換を維持。"
+  testing:
+    - "criterion + iai-callgrind を CI に組み込み、閾値逸脱で fail"
+    - "flamegraph を成果物として保存し比率を目視確認"
+    - "プロパティテストで法則・参照透過性を自動検証し、回帰を防止"
+
+# 将来の拡張
+future_extensions: []
