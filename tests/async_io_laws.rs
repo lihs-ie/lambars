@@ -285,3 +285,225 @@ proptest! {
         prop_assert_eq!(left_result, right_result);
     }
 }
+
+// =============================================================================
+// Stack Safety Tests
+// =============================================================================
+//
+// These tests verify that the AsyncIO state machine implementation can handle
+// moderately deep chains without stack overflow. Deep chains (>=10,000) are
+// marked as #[ignore] because the current implementation uses nested futures
+// which consume stack space proportional to chain depth.
+//
+// TODO: When aio-02-zero-alloc-asyncio is implemented with proper state machine
+// optimization (trampolined execution), the #[ignore] markers can be removed.
+
+/// Test that a small chain of flat_map operations works correctly.
+///
+/// This test uses a chain depth of 100, which should work reliably
+/// without special stack handling.
+#[tokio::test]
+async fn test_flat_map_chain_100() {
+    const CHAIN_DEPTH: i32 = 100;
+
+    // Build a chain of 100 flat_map operations
+    let mut async_io = AsyncIO::pure(0i32);
+
+    for _ in 0..CHAIN_DEPTH {
+        async_io = async_io.flat_map(|n| AsyncIO::pure(n.wrapping_add(1)));
+    }
+
+    // Execute the chain
+    let result = async_io.run_async().await;
+
+    // Verify the result is correct
+    assert_eq!(result, CHAIN_DEPTH);
+}
+
+/// Test that a small chain of fmap operations works correctly.
+///
+/// This test uses a chain depth of 100, which should work reliably
+/// without special stack handling.
+#[tokio::test]
+async fn test_fmap_chain_100() {
+    const CHAIN_DEPTH: i32 = 100;
+
+    // Build a chain of 100 fmap operations
+    let mut async_io = AsyncIO::pure(0i32);
+
+    for _ in 0..CHAIN_DEPTH {
+        async_io = async_io.fmap(|n| n.wrapping_add(1));
+    }
+
+    // Execute the chain
+    let result = async_io.run_async().await;
+
+    // Verify the result is correct
+    assert_eq!(result, CHAIN_DEPTH);
+}
+
+/// Test that mixed flat_map and fmap chains work correctly at small depth.
+///
+/// This test uses a chain depth of 100 to verify correctness of
+/// alternating operations.
+#[tokio::test]
+async fn test_mixed_chain_100() {
+    const CHAIN_DEPTH: i32 = 100;
+
+    // Build a chain of 100 alternating flat_map and fmap operations
+    let mut async_io = AsyncIO::pure(0i32);
+
+    for i in 0..CHAIN_DEPTH {
+        if i % 2 == 0 {
+            async_io = async_io.flat_map(|n| AsyncIO::pure(n.wrapping_add(1)));
+        } else {
+            async_io = async_io.fmap(|n| n.wrapping_add(1));
+        }
+    }
+
+    // Execute the chain
+    let result = async_io.run_async().await;
+
+    // Verify the result is correct
+    assert_eq!(result, CHAIN_DEPTH);
+}
+
+/// Test that a deep chain of flat_map operations does not cause stack overflow.
+///
+/// This test verifies that the AsyncIO state machine implementation is stack-safe
+/// and can handle deep recursion without consuming stack space proportional
+/// to the chain depth.
+///
+/// Currently ignored because the nested future implementation uses stack space
+/// proportional to chain depth. This will be enabled once aio-02 optimization
+/// is complete.
+#[tokio::test]
+#[ignore = "Requires stack-safe state machine optimization (aio-02)"]
+async fn test_deep_flat_map_chain_10000() {
+    const CHAIN_DEPTH: i32 = 10_000;
+
+    // Build a chain of 10,000 flat_map operations
+    let mut async_io = AsyncIO::pure(0i32);
+
+    for _ in 0..CHAIN_DEPTH {
+        async_io = async_io.flat_map(|n| AsyncIO::pure(n.wrapping_add(1)));
+    }
+
+    // Execute the chain - this should not cause stack overflow
+    let result = async_io.run_async().await;
+
+    // Verify the result is correct
+    assert_eq!(result, CHAIN_DEPTH);
+}
+
+/// Test that a deep chain of fmap operations does not cause stack overflow.
+///
+/// This test verifies that the AsyncIO Functor implementation is stack-safe
+/// and can handle deep mapping chains without stack overflow.
+///
+/// Currently ignored because the nested future implementation uses stack space
+/// proportional to chain depth. This will be enabled once aio-02 optimization
+/// is complete.
+#[tokio::test]
+#[ignore = "Requires stack-safe state machine optimization (aio-02)"]
+async fn test_deep_fmap_chain_10000() {
+    const CHAIN_DEPTH: i32 = 10_000;
+
+    // Build a chain of 10,000 fmap operations
+    let mut async_io = AsyncIO::pure(0i32);
+
+    for _ in 0..CHAIN_DEPTH {
+        async_io = async_io.fmap(|n| n.wrapping_add(1));
+    }
+
+    // Execute the chain - this should not cause stack overflow
+    let result = async_io.run_async().await;
+
+    // Verify the result is correct
+    assert_eq!(result, CHAIN_DEPTH);
+}
+
+/// Test that mixed flat_map and fmap chains are stack-safe.
+///
+/// This test verifies that alternating between flat_map and fmap operations
+/// does not cause stack overflow even with deep chains.
+///
+/// Currently ignored because the nested future implementation uses stack space
+/// proportional to chain depth. This will be enabled once aio-02 optimization
+/// is complete.
+#[tokio::test]
+#[ignore = "Requires stack-safe state machine optimization (aio-02)"]
+async fn test_deep_mixed_chain_10000() {
+    const CHAIN_DEPTH: i32 = 10_000;
+
+    // Build a chain of 10,000 alternating flat_map and fmap operations
+    let mut async_io = AsyncIO::pure(0i32);
+
+    for i in 0..CHAIN_DEPTH {
+        if i % 2 == 0 {
+            async_io = async_io.flat_map(|n| AsyncIO::pure(n.wrapping_add(1)));
+        } else {
+            async_io = async_io.fmap(|n| n.wrapping_add(1));
+        }
+    }
+
+    // Execute the chain - this should not cause stack overflow
+    let result = async_io.run_async().await;
+
+    // Verify the result is correct
+    assert_eq!(result, CHAIN_DEPTH);
+}
+
+/// Test that and_then (alias for flat_map) chains are stack-safe.
+///
+/// This test verifies that the and_then method, which is an alias for flat_map,
+/// maintains the same stack safety guarantees.
+///
+/// Currently ignored because the nested future implementation uses stack space
+/// proportional to chain depth. This will be enabled once aio-02 optimization
+/// is complete.
+#[tokio::test]
+#[ignore = "Requires stack-safe state machine optimization (aio-02)"]
+async fn test_deep_and_then_chain_10000() {
+    const CHAIN_DEPTH: i32 = 10_000;
+
+    // Build a chain of 10,000 and_then operations
+    let mut async_io = AsyncIO::pure(0i32);
+
+    for _ in 0..CHAIN_DEPTH {
+        async_io = async_io.and_then(|n| AsyncIO::pure(n.wrapping_add(1)));
+    }
+
+    // Execute the chain - this should not cause stack overflow
+    let result = async_io.run_async().await;
+
+    // Verify the result is correct
+    assert_eq!(result, CHAIN_DEPTH);
+}
+
+/// Test stack safety with even deeper chains (50,000 operations).
+///
+/// This is a stress test to ensure that the implementation can handle
+/// very deep chains without stack overflow.
+///
+/// Currently ignored because the nested future implementation uses stack space
+/// proportional to chain depth. This will be enabled once aio-02 optimization
+/// is complete.
+#[tokio::test]
+#[ignore = "Requires stack-safe state machine optimization (aio-02)"]
+async fn test_very_deep_flat_map_chain_50000() {
+    const CHAIN_DEPTH: i32 = 50_000;
+
+    // Build a chain of 50,000 flat_map operations
+    let mut async_io = AsyncIO::pure(0i32);
+
+    for _ in 0..CHAIN_DEPTH {
+        async_io = async_io.flat_map(|n| AsyncIO::pure(n.wrapping_add(1)));
+    }
+
+    // Execute the chain - this should not cause stack overflow
+    let result = async_io.run_async().await;
+
+    // Verify the result is correct
+    assert_eq!(result, CHAIN_DEPTH);
+}

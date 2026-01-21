@@ -597,6 +597,125 @@ fn benchmark_async_io_overhead_comparison(criterion: &mut Criterion) {
         });
     });
 
+    // map chain on Pure: measures eager evaluation optimization
+    // Pure(x).fmap(f).fmap(g).fmap(h) should be equivalent to Pure(h(g(f(x))))
+    // with no intermediate Box allocations
+    group.bench_function("map_chain_pure_3", |bencher| {
+        bencher.iter(|| {
+            let result = runtime.block_on(async {
+                AsyncIO::pure(1)
+                    .fmap(|x| x + 1)
+                    .fmap(|x| x * 2)
+                    .fmap(|x| x + 10)
+                    .run_async()
+                    .await
+            });
+            black_box(result)
+        });
+    });
+
+    // map chain on Pure: 10 chained fmaps
+    group.bench_function("map_chain_pure_10", |bencher| {
+        bencher.iter(|| {
+            let result = runtime.block_on(async {
+                AsyncIO::pure(0)
+                    .fmap(|x| x + 1)
+                    .fmap(|x| x + 1)
+                    .fmap(|x| x + 1)
+                    .fmap(|x| x + 1)
+                    .fmap(|x| x + 1)
+                    .fmap(|x| x + 1)
+                    .fmap(|x| x + 1)
+                    .fmap(|x| x + 1)
+                    .fmap(|x| x + 1)
+                    .fmap(|x| x + 1)
+                    .run_async()
+                    .await
+            });
+            black_box(result)
+        });
+    });
+
+    group.finish();
+}
+
+fn benchmark_async_io_batch_run(criterion: &mut Criterion) {
+    use lambars::effect::AsyncIO;
+
+    let mut group = criterion.benchmark_group("async_io_batch_run");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+
+    // batch_run: 10 pure items
+    group.bench_function("batch_run_10", |bencher| {
+        bencher.iter(|| {
+            let items: Vec<AsyncIO<i32>> = (0..10).map(AsyncIO::pure).collect();
+            let result = runtime.block_on(async { AsyncIO::batch_run(items).await });
+            black_box(result)
+        });
+    });
+
+    // batch_run: 100 pure items
+    group.bench_function("batch_run_100", |bencher| {
+        bencher.iter(|| {
+            let items: Vec<AsyncIO<i32>> = (0..100).map(AsyncIO::pure).collect();
+            let result = runtime.block_on(async { AsyncIO::batch_run(items).await });
+            black_box(result)
+        });
+    });
+
+    // batch_run: 1000 pure items
+    group.bench_function("batch_run_1000", |bencher| {
+        bencher.iter(|| {
+            let items: Vec<AsyncIO<i32>> = (0..1000).map(AsyncIO::pure).collect();
+            let result = runtime.block_on(async { AsyncIO::batch_run(items).await });
+            black_box(result)
+        });
+    });
+
+    // batch_run_buffered: 100 items with limit 10
+    group.bench_function("batch_run_buffered_100_limit_10", |bencher| {
+        bencher.iter(|| {
+            let items: Vec<AsyncIO<i32>> = (0..100).map(AsyncIO::pure).collect();
+            let result =
+                runtime.block_on(async { AsyncIO::batch_run_buffered(items, 10).await.unwrap() });
+            black_box(result)
+        });
+    });
+
+    // batch_run_buffered: 100 items with limit 50
+    group.bench_function("batch_run_buffered_100_limit_50", |bencher| {
+        bencher.iter(|| {
+            let items: Vec<AsyncIO<i32>> = (0..100).map(AsyncIO::pure).collect();
+            let result =
+                runtime.block_on(async { AsyncIO::batch_run_buffered(items, 50).await.unwrap() });
+            black_box(result)
+        });
+    });
+
+    // batch_run_buffered: 1000 items with limit 100
+    group.bench_function("batch_run_buffered_1000_limit_100", |bencher| {
+        bencher.iter(|| {
+            let items: Vec<AsyncIO<i32>> = (0..1000).map(AsyncIO::pure).collect();
+            let result =
+                runtime.block_on(async { AsyncIO::batch_run_buffered(items, 100).await.unwrap() });
+            black_box(result)
+        });
+    });
+
+    // Comparison: sequential vs batch for 10 items
+    group.bench_function("sequential_10_vs_batch", |bencher| {
+        bencher.iter(|| {
+            let result = runtime.block_on(async {
+                let mut results = Vec::with_capacity(10);
+                for i in 0..10 {
+                    results.push(AsyncIO::pure(i).run_async().await);
+                }
+                results
+            });
+            black_box(result)
+        });
+    });
+
     group.finish();
 }
 
@@ -620,7 +739,8 @@ criterion_group!(
     benchmark_async_io_par,
     benchmark_async_io_bracket,
     benchmark_async_io_timeout,
-    benchmark_async_io_overhead_comparison
+    benchmark_async_io_overhead_comparison,
+    benchmark_async_io_batch_run
 );
 
 criterion_main!(benches);

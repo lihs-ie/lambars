@@ -1,14 +1,34 @@
 //! `AsyncIO` Monad - Deferred asynchronous side effect handling.
 //!
 //! The `AsyncIO` type represents an asynchronous computation that may perform
-//! side effects. Side effects are not executed until `run_async` is called,
+//! side effects. Side effects are not executed until the `AsyncIO` is awaited,
 //! maintaining referential transparency in pure code.
 //!
 //! # Design Philosophy
 //!
 //! `AsyncIO` "describes" async side effects but doesn't "execute" them. Execution
-//! happens only via `run_async().await`, which should be called at the program's
-//! "edge" (e.g., in async handlers or the main function).
+//! happens only when awaited (directly or via `run_async().await`), which should
+//! be called at the program's "edge" (e.g., in async handlers or the main function).
+//!
+//! # impl `Future`
+//!
+//! `AsyncIO` implements `Future` directly via `pin_project_lite`, so it can be
+//! directly awaited without any unsafe code:
+//!
+//! ```rust,ignore
+//! use lambars::effect::AsyncIO;
+//!
+//! #[tokio::main]
+//! async fn main() {
+//!     // Direct await (recommended)
+//!     let result = AsyncIO::pure(42).await;
+//!     assert_eq!(result, 42);
+//!
+//!     // Or use run_async() for backward compatibility
+//!     let result = AsyncIO::pure(42).run_async().await;
+//!     assert_eq!(result, 42);
+//! }
+//! ```
 //!
 //! # Examples
 //!
@@ -19,13 +39,13 @@
 //! async fn main() {
 //!     // Create a pure AsyncIO action
 //!     let async_io = AsyncIO::pure(42);
-//!     assert_eq!(async_io.run_async().await, 42);
+//!     assert_eq!(async_io.await, 42);
 //!
 //!     // Chain AsyncIO actions
 //!     let async_io = AsyncIO::pure(10)
 //!         .fmap(|x| x * 2)
 //!         .flat_map(|x| AsyncIO::pure(x + 1));
-//!     assert_eq!(async_io.run_async().await, 21);
+//!     assert_eq!(async_io.await, 21);
 //! }
 //! ```
 //!
@@ -52,64 +72,386 @@
 //!     // Not executed yet
 //!     assert!(!executed.load(Ordering::SeqCst));
 //!
-//!     // Execute the AsyncIO action
-//!     let result = async_io.run_async().await;
+//!     // Execute the AsyncIO action by awaiting
+//!     let result = async_io.await;
 //!     assert!(executed.load(Ordering::SeqCst));
 //!     assert_eq!(result, 42);
 //! }
 //! ```
 
+// =============================================================================
+// Runtime Sharing Module
+// =============================================================================
+
+pub mod runtime;
+
 use std::future::Future;
 use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
+
+use pin_project_lite::pin_project;
 
 use crate::control::Either;
 
-/// A monad representing deferred asynchronous side effects.
-///
-/// `AsyncIO<A>` wraps an asynchronous computation that produces a value of type `A`
-/// and may perform side effects. The computation is not executed until `run_async`
-/// is called.
-///
-/// # Type Parameters
-///
-/// - `A`: The type of the value produced by the async IO action.
-///
-/// # Variants
-///
-/// - `Pure(A)` - A pure value that requires no computation. This variant avoids
-///   Box allocation for pure values.
-/// - `Deferred(...)` - A deferred async computation. This is the traditional lazy
-///   evaluation path.
-///
-/// # Monad Laws
-///
-/// `AsyncIO` satisfies the monad laws:
-///
-/// 1. **Left Identity**: `AsyncIO::pure(a).flat_map(f) == f(a)`
-/// 2. **Right Identity**: `m.flat_map(AsyncIO::pure) == m`
-/// 3. **Associativity**: `m.flat_map(f).flat_map(g) == m.flat_map(|x| f(x).flat_map(g))`
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// use lambars::effect::AsyncIO;
-///
-/// #[tokio::main]
-/// async fn main() {
-///     let async_io = AsyncIO::pure(42);
-///     let result = async_io.run_async().await;
-///     assert_eq!(result, 42);
-/// }
-/// ```
-pub enum AsyncIO<A> {
-    /// A pure value that requires no computation.
-    /// This variant avoids Box allocation for pure values.
-    Pure(A),
+// =============================================================================
+// AsyncIO Struct Definition
+// =============================================================================
 
-    /// A deferred async computation.
-    /// This is the traditional lazy evaluation path.
-    Deferred(Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = A> + Send>> + Send>),
+pin_project! {
+    /// A monad representing deferred asynchronous side effects.
+    ///
+    /// `AsyncIO<A>` wraps an asynchronous computation that produces a value of type `A`
+    /// and may perform side effects. The computation is not executed until the
+    /// `AsyncIO` is awaited.
+    ///
+    /// # Type Parameters
+    ///
+    /// - `A`: The type of the value produced by the async IO action.
+    ///
+    /// # impl `Future`
+    ///
+    /// `AsyncIO` implements `Future` directly, so it can be awaited without calling
+    /// `run_async()`. Both approaches produce the same result:
+    ///
+    /// ```rust,ignore
+    /// // Direct await (recommended)
+    /// let result = AsyncIO::pure(42).await;
+    ///
+    /// // Backward compatible approach
+    /// let result = AsyncIO::pure(42).run_async().await;
+    /// ```
+    ///
+    /// # Monad Laws
+    ///
+    /// `AsyncIO` satisfies the monad laws:
+    ///
+    /// 1. **Left Identity**: `AsyncIO::pure(a).flat_map(f) == f(a)`
+    /// 2. **Right Identity**: `m.flat_map(AsyncIO::pure) == m`
+    /// 3. **Associativity**: `m.flat_map(f).flat_map(g) == m.flat_map(|x| f(x).flat_map(g))`
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use lambars::effect::AsyncIO;
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let async_io = AsyncIO::pure(42);
+    ///     let result = async_io.await;
+    ///     assert_eq!(result, 42);
+    /// }
+    /// ```
+    pub struct AsyncIO<A> {
+        #[pin]
+        state: AsyncIOState<A>,
+    }
+}
+
+pin_project! {
+    /// Internal state machine for `AsyncIO`.
+    ///
+    /// This enum represents the different states an `AsyncIO` can be in during
+    /// its lifecycle. The state transitions are:
+    ///
+    /// - `Defer` -> `Running` (on first poll, the thunk is executed to create the future)
+    /// - `Running` -> `Completed` (when the inner future completes)
+    /// - `Finally` -> `FinallyCleanup` -> `Completed` (cleanup after main computation)
+    /// - `OnError` -> `OnErrorHandler` -> `Completed` (error handling)
+    /// - `Retry` -> `RetryRunning` -> `Completed` or retry (retry logic)
+    ///
+    /// The `Pure` state is a special case that completes immediately.
+    #[project = AsyncIOStateProj]
+    enum AsyncIOState<A> {
+        /// A pure value that will be returned immediately.
+        Pure {
+            value: Option<A>,
+        },
+        /// A deferred computation (thunk) that creates a future when polled.
+        Defer {
+            thunk: Option<Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = A> + Send>> + Send>>,
+        },
+        /// A running future that was created from the deferred thunk.
+        Running {
+            #[pin]
+            future: Pin<Box<dyn Future<Output = A> + Send>>,
+        },
+        /// Finally state: runs inner computation, then cleanup.
+        /// State transitions: Finally -> FinallyCleanup -> Completed
+        Finally {
+            #[pin]
+            inner: Box<AsyncIO<A>>,
+            cleanup: Option<Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>>,
+        },
+        /// Finally cleanup state: inner completed, running cleanup with panic catching.
+        /// The cleanup future is wrapped with `catch_unwind` to capture any panics.
+        /// If the cleanup panics, the panic is logged to stderr and the original result is returned.
+        FinallyCleanup {
+            result: Option<A>,
+            #[pin]
+            cleanup_future: Pin<Box<dyn Future<Output = Result<(), Box<dyn std::any::Any + Send>>> + Send>>,
+        },
+        /// OnError state: runs inner computation, then optionally runs error handler.
+        /// State transitions: OnError -> OnErrorHandler -> Completed (if error)
+        ///                    OnError -> Completed (if success)
+        OnError {
+            #[pin]
+            inner: Box<AsyncIO<A>>,
+            handler: Option<Box<dyn FnOnce(&A) -> Option<Pin<Box<dyn Future<Output = ()> + Send>>> + Send>>,
+        },
+        /// OnError handler state: running error handler.
+        OnErrorHandler {
+            result: Option<A>,
+            #[pin]
+            handler_future: Pin<Box<dyn Future<Output = ()> + Send>>,
+        },
+        /// Retry state: runs factory-created AsyncIO with retry logic.
+        /// State transitions: Retry -> RetryRunning -> Retry (on error) or Completed (on success)
+        Retry {
+            factory: Option<Box<dyn Fn() -> AsyncIO<A> + Send>>,
+            should_retry: Option<Box<dyn Fn(&A) -> bool + Send>>,
+            max_attempts: usize,
+            current_attempt: usize,
+            last_result: Option<A>,
+        },
+        /// RetryRunning state: polling the current attempt.
+        RetryRunning {
+            factory: Option<Box<dyn Fn() -> AsyncIO<A> + Send>>,
+            should_retry: Option<Box<dyn Fn(&A) -> bool + Send>>,
+            max_attempts: usize,
+            current_attempt: usize,
+            #[pin]
+            current: Box<AsyncIO<A>>,
+        },
+        /// The computation has completed (used only as a transition state).
+        Completed,
+    }
+}
+
+// =============================================================================
+// Future Implementation
+// =============================================================================
+
+impl<A> Future for AsyncIO<A> {
+    type Output = A;
+
+    /// Polls the `AsyncIO` to drive it towards completion.
+    ///
+    /// This implementation uses a state machine to handle different cases:
+    ///
+    /// - `Pure`: Returns the value immediately on first poll.
+    /// - `Defer`: Creates the inner future on first poll, then transitions to `Running`.
+    /// - `Running`: Polls the inner future until completion.
+    /// - `Completed`: Panics if polled after completion (should never happen).
+    ///
+    /// This enables the `.await` syntax directly on `AsyncIO` values:
+    ///
+    /// ```rust,ignore
+    /// let result = AsyncIO::pure(42).await;
+    /// ```
+    #[allow(clippy::too_many_lines)]
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut this = self.project();
+
+        loop {
+            match this.state.as_mut().project() {
+                AsyncIOStateProj::Pure { value } => {
+                    // Take the value and return it immediately
+                    let result = value.take().expect("Pure value already taken");
+                    this.state.set(AsyncIOState::Completed);
+                    return Poll::Ready(result);
+                }
+                AsyncIOStateProj::Defer { thunk } => {
+                    // Take the thunk, execute it to create the future, and transition to Running
+                    let thunk = thunk.take().expect("Defer thunk already taken");
+                    let future = thunk();
+                    this.state.set(AsyncIOState::Running { future });
+                    // Loop to poll the newly created future
+                }
+                AsyncIOStateProj::Running { future } => {
+                    // Poll the inner future
+                    match future.poll(context) {
+                        Poll::Ready(result) => {
+                            this.state.set(AsyncIOState::Completed);
+                            return Poll::Ready(result);
+                        }
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
+                AsyncIOStateProj::Finally { mut inner, cleanup } => {
+                    // Poll the inner AsyncIO
+                    match inner.as_mut().poll(context) {
+                        Poll::Ready(result) => {
+                            // Inner completed, transition to cleanup with panic catching
+                            use futures::FutureExt;
+                            use std::panic::AssertUnwindSafe;
+
+                            let cleanup_thunk =
+                                cleanup.take().expect("Finally cleanup already taken");
+                            let cleanup_future = cleanup_thunk();
+                            // Wrap cleanup future with catch_unwind to capture panics
+                            // Type complexity is acceptable here as this is internal state machine plumbing
+                            #[allow(clippy::type_complexity)]
+                            let catching_future: Pin<
+                                Box<
+                                    dyn Future<Output = Result<(), Box<dyn std::any::Any + Send>>>
+                                        + Send,
+                                >,
+                            > = Box::pin(AssertUnwindSafe(cleanup_future).catch_unwind());
+                            this.state.set(AsyncIOState::FinallyCleanup {
+                                result: Some(result),
+                                cleanup_future: catching_future,
+                            });
+                            // Loop to poll the cleanup future
+                        }
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
+                AsyncIOStateProj::FinallyCleanup {
+                    result,
+                    cleanup_future,
+                } => {
+                    // Poll the cleanup future (with panic catching)
+                    match cleanup_future.poll(context) {
+                        Poll::Ready(cleanup_result) => {
+                            // Log cleanup panic to stderr if it occurred
+                            if let Err(panic_info) = cleanup_result {
+                                // Extract panic message for logging
+                                let panic_message = panic_info
+                                    .downcast_ref::<&str>()
+                                    .map(|s| (*s).to_string())
+                                    .or_else(|| panic_info.downcast_ref::<String>().cloned())
+                                    .unwrap_or_else(|| "unknown panic".to_string());
+                                eprintln!(
+                                    "AsyncIO::finally_async: panic in cleanup; \
+                                     suppressing cleanup panic and returning original result. \
+                                     Panic message: {panic_message}"
+                                );
+                            }
+                            // Return the original result regardless of cleanup success/failure
+                            let value = result.take().expect("FinallyCleanup result already taken");
+                            this.state.set(AsyncIOState::Completed);
+                            return Poll::Ready(value);
+                        }
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
+                AsyncIOStateProj::OnError { mut inner, handler } => {
+                    // Poll the inner AsyncIO
+                    match inner.as_mut().poll(context) {
+                        Poll::Ready(result) => {
+                            // Inner completed, check if we need to run the handler
+                            let handler_fn = handler.take().expect("OnError handler already taken");
+                            if let Some(handler_future) = handler_fn(&result) {
+                                // Error case: run the handler
+                                this.state.set(AsyncIOState::OnErrorHandler {
+                                    result: Some(result),
+                                    handler_future,
+                                });
+                                // Loop to poll the handler future
+                            } else {
+                                // Success case: return result directly
+                                this.state.set(AsyncIOState::Completed);
+                                return Poll::Ready(result);
+                            }
+                        }
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
+                AsyncIOStateProj::OnErrorHandler {
+                    result,
+                    handler_future,
+                } => {
+                    // Poll the handler future
+                    match handler_future.poll(context) {
+                        Poll::Ready(()) => {
+                            // Handler completed, return the original result
+                            let value = result.take().expect("OnErrorHandler result already taken");
+                            this.state.set(AsyncIOState::Completed);
+                            return Poll::Ready(value);
+                        }
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
+                AsyncIOStateProj::Retry {
+                    factory,
+                    should_retry,
+                    max_attempts,
+                    current_attempt,
+                    last_result,
+                } => {
+                    // Check if we have a result from previous attempt
+                    if let Some(result) = last_result.take() {
+                        // Check if we should retry
+                        let retry_fn = should_retry
+                            .as_ref()
+                            .expect("Retry should_retry already taken");
+                        if !retry_fn(&result) || *current_attempt >= *max_attempts {
+                            // Success or exhausted attempts, return result
+                            this.state.set(AsyncIOState::Completed);
+                            return Poll::Ready(result);
+                        }
+                        // Continue to retry
+                    }
+
+                    // Check if we have exhausted all attempts
+                    assert!(
+                        *current_attempt < *max_attempts,
+                        "Retry: should have result when exhausted"
+                    );
+
+                    // Create a new attempt
+                    let factory_fn = factory.take().expect("Retry factory already taken");
+                    let retry_fn = should_retry
+                        .take()
+                        .expect("Retry should_retry already taken");
+                    let current = Box::new(factory_fn());
+                    let attempt = *current_attempt;
+                    let attempts = *max_attempts;
+                    this.state.set(AsyncIOState::RetryRunning {
+                        factory: Some(factory_fn),
+                        should_retry: Some(retry_fn),
+                        max_attempts: attempts,
+                        current_attempt: attempt,
+                        current,
+                    });
+                    // Loop to poll the new attempt
+                }
+                AsyncIOStateProj::RetryRunning {
+                    factory,
+                    should_retry,
+                    max_attempts,
+                    current_attempt,
+                    mut current,
+                } => {
+                    // Poll the current attempt
+                    match current.as_mut().poll(context) {
+                        Poll::Ready(result) => {
+                            // Attempt completed, transition back to Retry to check result
+                            let factory_fn = factory.take().expect("Retry factory already taken");
+                            let retry_fn = should_retry
+                                .take()
+                                .expect("Retry should_retry already taken");
+                            let attempt = *current_attempt + 1;
+                            let attempts = *max_attempts;
+                            this.state.set(AsyncIOState::Retry {
+                                factory: Some(factory_fn),
+                                should_retry: Some(retry_fn),
+                                max_attempts: attempts,
+                                current_attempt: attempt,
+                                last_result: Some(result),
+                            });
+                            // Loop to check if we need another attempt
+                        }
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
+                AsyncIOStateProj::Completed => {
+                    panic!("AsyncIO polled after completion");
+                }
+            }
+        }
+    }
 }
 
 // =============================================================================
@@ -119,8 +461,7 @@ pub enum AsyncIO<A> {
 impl<A: 'static> AsyncIO<A> {
     /// Creates a new `AsyncIO` action from an async closure.
     ///
-    /// The closure will not be executed until `run_async` is called.
-    /// This creates a `Deferred` variant.
+    /// The closure will not be executed until the `AsyncIO` is awaited.
     ///
     /// # Arguments
     ///
@@ -141,19 +482,21 @@ impl<A: 'static> AsyncIO<A> {
     ///     42
     /// });
     /// ```
-    #[inline]
     pub fn new<F, Fut>(action: F) -> Self
     where
         F: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = A> + Send + 'static,
     {
-        Self::Deferred(Box::new(move || Box::pin(action())))
+        Self {
+            state: AsyncIOState::Defer {
+                thunk: Some(Box::new(move || Box::pin(action()))),
+            },
+        }
     }
 
     /// Creates an `AsyncIO` from an existing Future.
     ///
     /// The Future should not have been polled yet.
-    /// This creates a `Deferred` variant.
     ///
     /// # Arguments
     ///
@@ -167,12 +510,15 @@ impl<A: 'static> AsyncIO<A> {
     /// let future = async { 42 };
     /// let async_io = AsyncIO::from_future(future);
     /// ```
-    #[inline]
     pub fn from_future<Fut>(future: Fut) -> Self
     where
         Fut: Future<Output = A> + Send + 'static,
     {
-        Self::Deferred(Box::new(move || Box::pin(future)))
+        Self {
+            state: AsyncIOState::Defer {
+                thunk: Some(Box::new(move || Box::pin(future))),
+            },
+        }
     }
 }
 
@@ -180,7 +526,7 @@ impl<A: Send + 'static> AsyncIO<A> {
     /// Wraps a pure value in an `AsyncIO` action.
     ///
     /// This creates an `AsyncIO` action that returns the given value without
-    /// performing any side effects. Uses the `Pure` variant to avoid Box allocation.
+    /// performing any side effects.
     ///
     /// # Arguments
     ///
@@ -192,12 +538,12 @@ impl<A: Send + 'static> AsyncIO<A> {
     /// use lambars::effect::AsyncIO;
     ///
     /// let async_io = AsyncIO::pure(42);
-    /// // run_async().await will immediately return 42
+    /// // Awaiting will immediately return 42
     /// ```
-    #[allow(clippy::inline_always)]
-    #[inline(always)]
     pub const fn pure(value: A) -> Self {
-        Self::Pure(value)
+        Self {
+            state: AsyncIOState::Pure { value: Some(value) },
+        }
     }
 }
 
@@ -206,20 +552,14 @@ impl<A: Send + 'static> AsyncIO<A> {
 // =============================================================================
 
 impl<A: 'static> AsyncIO<A> {
-    /// Executes the `AsyncIO` action and returns the result.
+    /// Executes the `AsyncIO` action and returns a Future.
     ///
-    /// This is the only way to extract a value from an `AsyncIO` action.
-    /// It should be called at the program's "edge" (e.g., in async handlers
-    /// or the main function).
+    /// This method is provided for backward compatibility. Since `AsyncIO`
+    /// implements `Future`, you can also directly await it.
     ///
-    /// For `Pure` variants, the value is returned immediately without any
-    /// Future polling. For `Deferred` variants, the thunk is executed and
-    /// the resulting Future is awaited.
+    /// # Note
     ///
-    /// # Safety Note
-    ///
-    /// This method executes side effects. While it's memory-safe, calling it
-    /// breaks referential transparency.
+    /// This method returns the underlying Future for awaiting.
     ///
     /// # Examples
     ///
@@ -228,18 +568,21 @@ impl<A: 'static> AsyncIO<A> {
     ///
     /// #[tokio::main]
     /// async fn main() {
-    ///     let async_io = AsyncIO::pure(42);
-    ///     let result = async_io.run_async().await;
+    ///     // Using run_async (backward compatible)
+    ///     let result = AsyncIO::pure(42).run_async().await;
+    ///     assert_eq!(result, 42);
+    ///
+    ///     // Direct await (recommended)
+    ///     let result = AsyncIO::pure(42).await;
     ///     assert_eq!(result, 42);
     /// }
     /// ```
-    #[allow(clippy::inline_always)]
-    #[inline(always)]
-    pub async fn run_async(self) -> A {
-        match self {
-            Self::Pure(value) => value,
-            Self::Deferred(thunk) => thunk().await,
-        }
+    #[must_use]
+    pub fn run_async(self) -> Pin<Box<dyn Future<Output = A> + Send>>
+    where
+        A: Send,
+    {
+        Box::pin(self)
     }
 
     /// Converts the `AsyncIO` into a Future.
@@ -253,14 +596,15 @@ impl<A: 'static> AsyncIO<A> {
     /// use lambars::effect::AsyncIO;
     ///
     /// let async_io = AsyncIO::pure(42);
-    /// let future = async_io.into_future();
+    /// let future = async_io.as_future();
     /// tokio::spawn(future);
     /// ```
-    pub async fn into_future(self) -> A
+    #[must_use]
+    pub fn as_future(self) -> Pin<Box<dyn Future<Output = A> + Send>>
     where
         A: Send,
     {
-        self.run_async().await
+        self.run_async()
     }
 }
 
@@ -269,45 +613,17 @@ impl<A: 'static> AsyncIO<A> {
 // =============================================================================
 
 impl<A: Send + 'static> AsyncIO<A> {
-    /// Transforms the result of an `AsyncIO` action using a pure function.
+    /// Transforms the result of an `AsyncIO` action using a function.
     ///
     /// This is the `fmap` operation from Functor.
     ///
-    /// # Pure Function Requirement
-    ///
-    /// **Important**: The function passed to `fmap` must be a pure function
-    /// (no side effects). This is a fundamental assumption in functional
-    /// programming that enables this optimization.
-    ///
-    /// For `Pure` values, the function is applied immediately (eager evaluation)
-    /// as an optimization to avoid Box allocation. Since the function is pure,
-    /// this evaluation timing difference is not observable in terms of the
-    /// result value (referential transparency).
-    ///
-    /// For `Deferred` values, the function is applied when `run_async` is called.
-    ///
-    /// # When to Use `flat_map` Instead
-    ///
-    /// If your function:
-    /// - Performs I/O operations
-    /// - Logs output
-    /// - Modifies external state
-    /// - Depends on current time or random values
-    /// - May panic
-    /// - Has high computational cost and you want to defer it
-    ///
-    /// Use `flat_map` instead, which maintains lazy evaluation semantics:
-    /// ```rust,ignore
-    /// async_io.flat_map(|x| AsyncIO::new(|| async move { side_effect(x) }))
-    /// ```
-    ///
     /// # Arguments
     ///
-    /// * `function` - A pure function to apply to the result.
+    /// * `function` - A function to apply to the result.
     ///
     /// # Type Parameters
     ///
-    /// * `B` - The return type of the function. Must be `Send + 'static`.
+    /// * `B` - The return type of the function.
     /// * `F` - The type of the function.
     ///
     /// # Examples
@@ -316,19 +632,20 @@ impl<A: Send + 'static> AsyncIO<A> {
     /// use lambars::effect::AsyncIO;
     ///
     /// let async_io = AsyncIO::pure(21).fmap(|x| x * 2);
-    /// assert_eq!(async_io.run_async().await, 42);
+    /// assert_eq!(async_io.await, 42);
     /// ```
-    #[inline]
     pub fn fmap<B, F>(self, function: F) -> AsyncIO<B>
     where
         F: FnOnce(A) -> B + Send + 'static,
         B: Send + 'static,
     {
-        match self {
-            Self::Pure(value) => AsyncIO::Pure(function(value)),
-            Self::Deferred(thunk) => AsyncIO::Deferred(Box::new(move || {
-                Box::pin(async move { function(thunk().await) })
-            })),
+        // Pure 値の場合は即時評価（Box アロケーション回避の最適化）
+        match self.state {
+            AsyncIOState::Pure { value: Some(a) } => AsyncIO::pure(function(a)),
+            _ => AsyncIO::new(move || async move {
+                let value = self.await;
+                function(value)
+            }),
         }
     }
 }
@@ -356,10 +673,9 @@ impl<A: Send + 'static> AsyncIO<A> {
     ///
     /// let function_io = AsyncIO::pure(|x: i32| x * 2);
     /// let value_io = AsyncIO::pure(21);
-    /// let result = value_io.apply(function_io).run_async().await;
+    /// let result = value_io.apply(function_io).await;
     /// assert_eq!(result, 42);
     /// ```
-    #[inline]
     #[must_use]
     pub fn apply<B, F>(self, function_async_io: AsyncIO<F>) -> AsyncIO<B>
     where
@@ -367,8 +683,8 @@ impl<A: Send + 'static> AsyncIO<A> {
         B: 'static,
     {
         AsyncIO::new(move || async move {
-            let function = function_async_io.run_async().await;
-            let value = self.run_async().await;
+            let function = function_async_io.await;
+            let value = self.await;
             function(value)
         })
     }
@@ -397,9 +713,8 @@ impl<A: Send + 'static> AsyncIO<A> {
     /// let io1 = AsyncIO::pure(10);
     /// let io2 = AsyncIO::pure(20);
     /// let combined = io1.map2(io2, |a, b| a + b);
-    /// assert_eq!(combined.run_async().await, 30);
+    /// assert_eq!(combined.await, 30);
     /// ```
-    #[inline]
     pub fn map2<B, C, F>(self, other: AsyncIO<B>, function: F) -> AsyncIO<C>
     where
         F: FnOnce(A, B) -> C + Send + 'static,
@@ -407,12 +722,14 @@ impl<A: Send + 'static> AsyncIO<A> {
         C: 'static,
     {
         AsyncIO::new(move || async move {
-            let value_a = self.run_async().await;
-            let value_b = other.run_async().await;
+            let value_a = self.await;
+            let value_b = other.await;
             function(value_a, value_b)
         })
     }
+}
 
+impl<A: Send + 'static> AsyncIO<A> {
     /// Combines two `AsyncIO` actions into a tuple.
     ///
     /// # Arguments
@@ -430,10 +747,9 @@ impl<A: Send + 'static> AsyncIO<A> {
     ///
     /// let io1 = AsyncIO::pure(10);
     /// let io2 = AsyncIO::pure(20);
-    /// let result = io1.product(io2).run_async().await;
+    /// let result = io1.product(io2).await;
     /// assert_eq!(result, (10, 20));
     /// ```
-    #[inline]
     #[must_use]
     pub fn product<B>(self, other: AsyncIO<B>) -> AsyncIO<(A, B)>
     where
@@ -453,10 +769,6 @@ impl<A: Send + 'static> AsyncIO<A> {
     ///
     /// This is the `bind` operation from Monad.
     ///
-    /// Note: To maintain lazy evaluation semantics, even `Pure` values are
-    /// wrapped in `Deferred`. The function is not called until `run_async`
-    /// is called.
-    ///
     /// # Arguments
     ///
     /// * `function` - A function that takes the result and returns a new `AsyncIO` action.
@@ -472,28 +784,18 @@ impl<A: Send + 'static> AsyncIO<A> {
     /// use lambars::effect::AsyncIO;
     ///
     /// let async_io = AsyncIO::pure(10).flat_map(|x| AsyncIO::pure(x * 2));
-    /// assert_eq!(async_io.run_async().await, 20);
+    /// assert_eq!(async_io.await, 20);
     /// ```
-    #[inline]
     pub fn flat_map<B, F>(self, function: F) -> AsyncIO<B>
     where
         F: FnOnce(A) -> AsyncIO<B> + Send + 'static,
         B: Send + 'static,
     {
-        match self {
-            Self::Pure(value) => {
-                // Maintain lazy evaluation - wrap in Deferred
-                AsyncIO::Deferred(Box::new(move || {
-                    Box::pin(async move { function(value).run_async().await })
-                }))
-            }
-            Self::Deferred(thunk) => AsyncIO::Deferred(Box::new(move || {
-                Box::pin(async move {
-                    let value_a = thunk().await;
-                    function(value_a).run_async().await
-                })
-            })),
-        }
+        AsyncIO::new(move || async move {
+            let value_a = self.await;
+            let async_io_b = function(value_a);
+            async_io_b.await
+        })
     }
 
     /// Alias for `flat_map`.
@@ -506,9 +808,8 @@ impl<A: Send + 'static> AsyncIO<A> {
     /// use lambars::effect::AsyncIO;
     ///
     /// let async_io = AsyncIO::pure(10).and_then(|x| AsyncIO::pure(x + 5));
-    /// assert_eq!(async_io.run_async().await, 15);
+    /// assert_eq!(async_io.await, 15);
     /// ```
-    #[inline]
     pub fn and_then<B, F>(self, function: F) -> AsyncIO<B>
     where
         F: FnOnce(A) -> AsyncIO<B> + Send + 'static,
@@ -535,9 +836,8 @@ impl<A: Send + 'static> AsyncIO<A> {
     /// use lambars::effect::AsyncIO;
     ///
     /// let async_io = AsyncIO::pure(10).then(AsyncIO::pure(20));
-    /// assert_eq!(async_io.run_async().await, 20);
+    /// assert_eq!(async_io.await, 20);
     /// ```
-    #[inline]
     #[must_use]
     pub fn then<B>(self, next: AsyncIO<B>) -> AsyncIO<B>
     where
@@ -554,7 +854,7 @@ impl<A: Send + 'static> AsyncIO<A> {
 impl AsyncIO<()> {
     /// Creates an `AsyncIO` action that waits for a specified duration.
     ///
-    /// The delay does not occur until `run_async` is called.
+    /// The delay does not occur until the `AsyncIO` is awaited.
     ///
     /// # Arguments
     ///
@@ -567,7 +867,7 @@ impl AsyncIO<()> {
     /// use std::time::Duration;
     ///
     /// let async_io = AsyncIO::delay_async(Duration::from_millis(100));
-    /// async_io.run_async().await; // Waits for 100ms
+    /// async_io.await; // Waits for 100ms
     /// ```
     #[must_use]
     pub fn delay_async(duration: Duration) -> Self {
@@ -591,20 +891,18 @@ impl<A: 'static> AsyncIO<A> {
     /// use std::time::Duration;
     ///
     /// let async_io = AsyncIO::pure(42).timeout(Duration::from_millis(100));
-    /// assert_eq!(async_io.run_async().await, Some(42));
+    /// assert_eq!(async_io.await, Some(42));
     ///
     /// let slow = AsyncIO::delay_async(Duration::from_secs(10))
     ///     .timeout(Duration::from_millis(100));
-    /// assert_eq!(slow.run_async().await, None);
+    /// assert_eq!(slow.await, None);
     /// ```
     #[must_use]
     pub fn timeout(self, duration: Duration) -> AsyncIO<Option<A>>
     where
         A: Send,
     {
-        AsyncIO::new(move || async move {
-            (tokio::time::timeout(duration, self.run_async()).await).ok()
-        })
+        AsyncIO::new(move || async move { (tokio::time::timeout(duration, self).await).ok() })
     }
 }
 
@@ -663,11 +961,11 @@ impl<A: 'static> AsyncIO<A> {
     /// use std::time::Duration;
     ///
     /// let async_io = AsyncIO::pure(42).timeout_result(Duration::from_millis(100));
-    /// assert_eq!(async_io.run_async().await, Ok(42));
+    /// assert_eq!(async_io.await, Ok(42));
     ///
     /// let slow = AsyncIO::delay_async(Duration::from_secs(10))
     ///     .timeout_result(Duration::from_millis(100));
-    /// match slow.run_async().await {
+    /// match slow.await {
     ///     Err(e) => assert_eq!(e.duration, Duration::from_millis(100)),
     ///     Ok(_) => panic!("should have timed out"),
     /// }
@@ -678,7 +976,7 @@ impl<A: 'static> AsyncIO<A> {
         A: Send,
     {
         AsyncIO::new(move || async move {
-            tokio::time::timeout(duration, self.run_async())
+            tokio::time::timeout(duration, self)
                 .await
                 .map_err(|_| TimeoutError { duration })
         })
@@ -743,6 +1041,11 @@ impl<A: Send + 'static> AsyncIO<A> {
     ///     5,
     /// );
     /// ```
+    /// Creates a `retry_with_factory` action using state machine.
+    ///
+    /// This implementation avoids additional `AsyncIO::new()` allocation by using
+    /// the `Retry` state variant directly. The factory is called for each attempt,
+    /// and retries continue until success or max attempts are exhausted.
     #[allow(clippy::missing_panics_doc)]
     pub fn retry_with_factory<E, F>(factory: F, max_attempts: usize) -> AsyncIO<Result<A, E>>
     where
@@ -751,22 +1054,21 @@ impl<A: Send + 'static> AsyncIO<A> {
     {
         let effective_attempts = max_attempts.max(1);
 
-        AsyncIO::new(move || async move {
-            let mut last_error: Option<E> = None;
+        // should_retry returns true if the result is an error (should retry)
+        // Type complexity is acceptable here as this is internal state machine plumbing
+        #[allow(clippy::type_complexity)]
+        let should_retry: Box<dyn Fn(&Result<A, E>) -> bool + Send> =
+            Box::new(|result: &Result<A, E>| result.is_err());
 
-            for _ in 0..effective_attempts {
-                let action = factory();
-                match action.run_async().await {
-                    Ok(value) => return Ok(value),
-                    Err(error) => {
-                        last_error = Some(error);
-                    }
-                }
-            }
-
-            // All attempts failed, return the last error
-            Err(last_error.expect("At least one attempt should have been made"))
-        })
+        AsyncIO {
+            state: AsyncIOState::Retry {
+                factory: Some(Box::new(factory)),
+                should_retry: Some(should_retry),
+                max_attempts: effective_attempts,
+                current_attempt: 0,
+                last_result: None,
+            },
+        }
     }
 
     /// Retries with exponential backoff using a factory function.
@@ -831,7 +1133,7 @@ impl<A: Send + 'static> AsyncIO<A> {
                 }
 
                 let action = factory();
-                match action.run_async().await {
+                match action.await {
                     Ok(value) => return Ok(value),
                     Err(error) => {
                         last_error = Some(error);
@@ -864,7 +1166,7 @@ impl<A: Send + 'static> AsyncIO<A> {
     ///
     /// let a = AsyncIO::pure(1);
     /// let b = AsyncIO::pure(2);
-    /// let (x, y) = a.par(b).run_async().await;
+    /// let (x, y) = a.par(b).await;
     /// assert_eq!((x, y), (1, 2));
     /// ```
     #[must_use]
@@ -872,7 +1174,7 @@ impl<A: Send + 'static> AsyncIO<A> {
     where
         B: Send + 'static,
     {
-        AsyncIO::new(move || async move { tokio::join!(self.run_async(), other.run_async()) })
+        AsyncIO::new(move || async move { tokio::join!(self, other) })
     }
 
     /// Executes three `AsyncIO` actions in parallel and returns all results as a tuple.
@@ -890,7 +1192,7 @@ impl<A: Send + 'static> AsyncIO<A> {
     /// let a = AsyncIO::pure(1);
     /// let b = AsyncIO::pure(2);
     /// let c = AsyncIO::pure(3);
-    /// let (x, y, z) = a.par3(b, c).run_async().await;
+    /// let (x, y, z) = a.par3(b, c).await;
     /// assert_eq!((x, y, z), (1, 2, 3));
     /// ```
     #[must_use]
@@ -899,9 +1201,7 @@ impl<A: Send + 'static> AsyncIO<A> {
         B: Send + 'static,
         C: Send + 'static,
     {
-        AsyncIO::new(move || async move {
-            tokio::join!(self.run_async(), second.run_async(), third.run_async())
-        })
+        AsyncIO::new(move || async move { tokio::join!(self, second, third) })
     }
 
     /// Races two `AsyncIO` actions of the same type, returning whichever completes first.
@@ -926,17 +1226,158 @@ impl<A: Send + 'static> AsyncIO<A> {
     /// let slow = AsyncIO::delay_async(Duration::from_millis(100)).fmap(|_| 1);
     /// let fast = AsyncIO::pure(2);
     ///
-    /// let result = slow.race_result(fast).run_async().await;
+    /// let result = slow.race_result(fast).await;
     /// assert_eq!(result, 2); // fast wins
     /// ```
     #[must_use]
     pub fn race_result(self, other: Self) -> Self {
         Self::new(move || async move {
             tokio::select! {
-                result = self.run_async() => result,
-                result = other.run_async() => result,
+                result = self => result,
+                result = other => result,
             }
         })
+    }
+}
+
+// =============================================================================
+// Batch Execution
+// =============================================================================
+
+/// Error type for batch execution operations.
+///
+/// This enum represents errors that can occur during batch execution
+/// of `AsyncIO` operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchError {
+    /// The concurrency limit was set to zero.
+    ///
+    /// `batch_run_buffered` requires a limit of at least 1.
+    InvalidLimit,
+}
+
+impl std::fmt::Display for BatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidLimit => {
+                write!(f, "batch_run_buffered: limit must be greater than 0")
+            }
+        }
+    }
+}
+
+impl std::error::Error for BatchError {}
+
+impl<A: Send + 'static> AsyncIO<A> {
+    /// Executes multiple `AsyncIO` actions in parallel and returns all results.
+    ///
+    /// This function provides efficient batch execution by running all items
+    /// concurrently using `FuturesUnordered`. The Enter/Drop overhead is reduced
+    /// to a single `batch_run` call, making it more efficient than awaiting each
+    /// `AsyncIO` individually.
+    ///
+    /// # Arguments
+    ///
+    /// * `items` - An iterator of `AsyncIO<A>` actions to execute in parallel.
+    ///
+    /// # Returns
+    ///
+    /// A `Vec<A>` containing the results of all completed actions. The order
+    /// of results may not match the input order due to parallel execution.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use lambars::effect::AsyncIO;
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let items = vec![
+    ///         AsyncIO::pure(1),
+    ///         AsyncIO::pure(2),
+    ///         AsyncIO::pure(3),
+    ///     ];
+    ///
+    ///     let results = AsyncIO::batch_run(items).await;
+    ///     assert_eq!(results.len(), 3);
+    ///     // Results may be in any order
+    /// }
+    /// ```
+    ///
+    /// # Performance
+    ///
+    /// - Single Enter/Drop overhead for the entire batch
+    /// - Parallel execution using `FuturesUnordered`
+    /// - Suitable for I/O-bound workloads with many small operations
+    pub async fn batch_run<I>(items: I) -> Vec<A>
+    where
+        I: IntoIterator<Item = Self>,
+    {
+        use futures::stream::{FuturesUnordered, StreamExt};
+
+        let futures: FuturesUnordered<_> = items.into_iter().collect();
+        futures.collect().await
+    }
+
+    /// Executes multiple `AsyncIO` actions with bounded concurrency.
+    ///
+    /// This function limits the number of concurrently executing `AsyncIO` actions
+    /// to the specified `limit`. When an action completes, a new one is started
+    /// from the remaining items, implementing backpressure.
+    ///
+    /// # Arguments
+    ///
+    /// * `items` - An iterator of `AsyncIO<A>` actions to execute.
+    /// * `limit` - Maximum number of concurrent executions. Must be greater than 0.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(Vec<A>)` containing the results of all completed actions. The order
+    ///   of results may not match the input order due to parallel execution.
+    /// - `Err(BatchError::InvalidLimit)` if `limit` is 0.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use lambars::effect::AsyncIO;
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     // Execute up to 2 tasks concurrently
+    ///     let items: Vec<AsyncIO<i32>> = (0..10).map(|i| AsyncIO::pure(i)).collect();
+    ///     let results = AsyncIO::batch_run_buffered(items, 2).await.unwrap();
+    ///     assert_eq!(results.len(), 10);
+    ///
+    ///     // limit == 0 returns an error
+    ///     let error = AsyncIO::batch_run_buffered(vec![AsyncIO::pure(1)], 0).await;
+    ///     assert!(error.is_err());
+    /// }
+    /// ```
+    ///
+    /// # Performance
+    ///
+    /// - Single Enter/Drop overhead for the entire batch
+    /// - Bounded concurrency prevents resource exhaustion
+    /// - Implements backpressure by limiting in-flight operations
+    /// - Suitable when you need to limit parallelism (e.g., rate limiting, memory constraints)
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BatchError::InvalidLimit`] if `limit` is 0.
+    pub async fn batch_run_buffered<I>(items: I, limit: usize) -> Result<Vec<A>, BatchError>
+    where
+        I: IntoIterator<Item = Self>,
+    {
+        use futures::stream::StreamExt;
+
+        if limit == 0 {
+            return Err(BatchError::InvalidLimit);
+        }
+
+        Ok(futures::stream::iter(items)
+            .buffer_unordered(limit)
+            .collect()
+            .await)
     }
 }
 
@@ -973,7 +1414,7 @@ impl<A: 'static> AsyncIO<A> {
     ///     |r| AsyncIO::pure(r * 2),       // use
     ///     |_| AsyncIO::pure(()),          // release
     /// );
-    /// assert_eq!(result.run_async().await, 84);
+    /// assert_eq!(result.await, 84);
     /// ```
     pub fn bracket<Resource, Acquire, Use, Release>(
         acquire: Acquire,
@@ -992,7 +1433,7 @@ impl<A: 'static> AsyncIO<A> {
             use std::panic::AssertUnwindSafe;
 
             // 1. Acquire the resource
-            let resource = acquire().run_async().await;
+            let resource = acquire().await;
             let resource_for_release = resource.clone();
 
             // 2. Use the resource, catching any panics
@@ -1046,33 +1487,29 @@ impl<A: Send + 'static> AsyncIO<A> {
     /// let operation = AsyncIO::pure(42)
     ///     .finally_async(|| async { println!("cleanup"); });
     /// ```
+    /// Creates a `finally_async` action using state machine.
+    ///
+    /// This implementation avoids additional `AsyncIO::new()` allocation by using
+    /// the `Finally` state variant directly. The cleanup is guaranteed to run
+    /// after the inner computation completes, regardless of success.
+    ///
+    /// # Panic Handling
+    ///
+    /// If the cleanup function panics, the panic is caught and logged to stderr.
+    /// The original result from the main computation is still returned, ensuring
+    /// that cleanup panics do not prevent the caller from receiving the expected value.
     #[must_use]
     pub fn finally_async<F, Cleanup>(self, cleanup: F) -> Self
     where
         F: FnOnce() -> Cleanup + Send + 'static,
         Cleanup: std::future::Future<Output = ()> + Send + 'static,
     {
-        Self::new(move || async move {
-            use futures::FutureExt;
-            use std::panic::AssertUnwindSafe;
-
-            // Execute self, catching any panics
-            let result = AssertUnwindSafe(self.run_async()).catch_unwind().await;
-
-            // Always run cleanup, but don't let a cleanup panic
-            // suppress the original result/panic.
-            let cleanup_result = AssertUnwindSafe(cleanup()).catch_unwind().await;
-
-            if cleanup_result.is_err() {
-                eprintln!("AsyncIO::finally_async: cleanup panicked");
-            }
-
-            // Return the result or re-panic
-            match result {
-                Ok(value) => value,
-                Err(panic_info) => std::panic::resume_unwind(panic_info),
-            }
-        })
+        Self {
+            state: AsyncIOState::Finally {
+                inner: Box::new(self),
+                cleanup: Some(Box::new(move || Box::pin(cleanup()))),
+            },
+        }
     }
 }
 
@@ -1105,21 +1542,36 @@ where
     ///     eprintln!("Error occurred: {}", e);
     /// });
     /// ```
+    /// Creates an `on_error` action using state machine.
+    ///
+    /// This implementation avoids additional `AsyncIO::new()` allocation by using
+    /// the `OnError` state variant directly. The callback is executed only when
+    /// the inner computation returns an error, and the error is still propagated.
     #[must_use]
     pub fn on_error<F, Callback>(self, callback: F) -> Self
     where
         F: FnOnce(&E) -> Callback + Send + 'static,
         Callback: std::future::Future<Output = ()> + Send + 'static,
     {
-        Self::new(move || async move {
-            let result = self.run_async().await;
-
-            if let Err(ref error) = result {
-                callback(error).await;
+        // Wrap callback to handle Result type and return Option<Future>
+        // Type complexity is acceptable here as this is internal state machine plumbing
+        #[allow(clippy::type_complexity)]
+        let handler: Box<
+            dyn FnOnce(&Result<A, E>) -> Option<Pin<Box<dyn Future<Output = ()> + Send>>> + Send,
+        > = Box::new(move |result: &Result<A, E>| {
+            if let Err(error) = result {
+                Some(Box::pin(callback(error)) as Pin<Box<dyn Future<Output = ()> + Send>>)
+            } else {
+                None
             }
+        });
 
-            result
-        })
+        Self {
+            state: AsyncIOState::OnError {
+                inner: Box::new(self),
+                handler: Some(handler),
+            },
+        }
     }
 }
 
@@ -1152,7 +1604,7 @@ impl<A: Send + 'static> AsyncIO<A> {
     /// let slow = AsyncIO::delay_async(Duration::from_millis(100)).fmap(|_| "slow");
     /// let fast = AsyncIO::pure("fast");
     ///
-    /// let result = slow.race(fast).run_async().await;
+    /// let result = slow.race(fast).await;
     /// assert!(matches!(result, Either::Right("fast")));
     /// ```
     #[must_use]
@@ -1162,8 +1614,8 @@ impl<A: Send + 'static> AsyncIO<A> {
     {
         AsyncIO::new(move || async move {
             tokio::select! {
-                value_a = self.run_async() => Either::Left(value_a),
-                value_b = other.run_async() => Either::Right(value_b),
+                value_a = self => Either::Left(value_a),
+                value_b = other => Either::Right(value_b),
             }
         })
     }
@@ -1189,11 +1641,11 @@ impl<A: Send + 'static> AsyncIO<A> {
     ///
     /// let panicking = AsyncIO::new(|| async { panic!("oops") });
     /// let recovered = panicking.catch_async(|_| "recovered".to_string());
-    /// assert_eq!(recovered.run_async().await, Err("recovered".to_string()));
+    /// assert_eq!(recovered.await, Err("recovered".to_string()));
     ///
     /// let successful = AsyncIO::pure(42);
     /// let with_catch = successful.catch_async(|_| "error".to_string());
-    /// assert_eq!(with_catch.run_async().await, Ok(42));
+    /// assert_eq!(with_catch.await, Ok(42));
     /// ```
     pub fn catch_async<E, F>(self, handler: F) -> AsyncIO<Result<A, E>>
     where
@@ -1220,14 +1672,18 @@ impl<A: Send + 'static> AsyncIO<A> {
 impl<A: Send + 'static> AsyncIO<A> {
     /// Converts an `AsyncIO` to a synchronous IO.
     ///
-    /// This creates a new tokio runtime to execute the async computation
-    /// synchronously.
+    /// # Deprecation
+    ///
+    /// This method is deprecated since version 0.2.0.
+    /// Use [`runtime::run_blocking`] to execute async computations synchronously,
+    /// or `.await` in async contexts.
     ///
     /// # Warning
     ///
-    /// This method cannot be used within an async context as it creates
-    /// a new runtime. Using it inside an async function will cause a
-    /// "nested runtime" panic.
+    /// This method uses [`runtime::run_blocking`] internally, which cannot
+    /// be called from within a current-thread runtime (e.g., `#[tokio::test]`
+    /// with `flavor = "current_thread"`). Calling this from a current-thread
+    /// runtime will panic.
     ///
     /// # Examples
     ///
@@ -1242,16 +1698,33 @@ impl<A: Send + 'static> AsyncIO<A> {
     /// }
     /// ```
     ///
+    /// # Recommended Alternatives
+    ///
+    /// ```rust,ignore
+    /// use lambars::effect::async_io::runtime;
+    /// use lambars::effect::AsyncIO;
+    ///
+    /// // Alternative 1: Use runtime::run_blocking
+    /// let async_io = AsyncIO::pure(42);
+    /// let result = runtime::run_blocking(async_io.run_async());
+    ///
+    /// // Alternative 2: Use await in async context
+    /// async fn example() {
+    ///     let async_io = AsyncIO::pure(42);
+    ///     let result = async_io.run_async().await;
+    /// }
+    /// ```
+    ///
     /// # Panics
     ///
-    /// Panics if creating the tokio runtime fails.
+    /// Panics if called from within a current-thread runtime.
     #[must_use]
+    #[deprecated(
+        since = "0.2.0",
+        note = "Use `runtime::run_blocking` or await in async context"
+    )]
     pub fn to_sync(self) -> super::IO<A> {
-        super::IO::new(move || {
-            let runtime =
-                tokio::runtime::Runtime::new().expect("Failed to create tokio runtime for to_sync");
-            runtime.block_on(self.run_async())
-        })
+        super::IO::new(move || runtime::run_blocking(self.run_async()))
     }
 }
 
@@ -1357,12 +1830,12 @@ impl<A: 'static> crate::typeclass::AsyncIOLike for AsyncIO<A> {
 /// async fn main() {
 ///     // Primitive type conversion
 ///     let result = 42.into_pipe_async();
-///     assert_eq!(result.run_async().await, 42);
+///     assert_eq!(result.await, 42);
 ///
 ///     // AsyncIO identity conversion
 ///     let async_io = AsyncIO::pure(42);
 ///     let result = async_io.into_pipe_async();
-///     assert_eq!(result.run_async().await, 42);
+///     assert_eq!(result.await, 42);
 /// }
 /// ```
 pub trait IntoPipeAsync {
@@ -1445,7 +1918,7 @@ impl_into_pipe_async_for_primitives!(
 /// async fn main() {
 ///     let wrapped = Pure(MyData { value: 42 });
 ///     let result = pipe_async!(wrapped, |d| d.value * 2);
-///     assert_eq!(result.run_async().await, 84);
+///     assert_eq!(result.await, 84);
 /// }
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1537,6 +2010,34 @@ mod tests {
     async fn test_async_io_product() {
         let async_io = AsyncIO::pure(10).product(AsyncIO::pure(20));
         assert_eq!(async_io.run_async().await, (10, 20));
+    }
+
+    // =========================================================================
+    // Direct await Tests (impl Future)
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_async_io_pure_direct_await() {
+        let async_io = AsyncIO::pure(42);
+        assert_eq!(async_io.await, 42);
+    }
+
+    #[tokio::test]
+    async fn test_async_io_new_direct_await() {
+        let async_io = AsyncIO::new(|| async { 10 + 20 });
+        assert_eq!(async_io.await, 30);
+    }
+
+    #[tokio::test]
+    async fn test_async_io_fmap_direct_await() {
+        let async_io = AsyncIO::pure(21).fmap(|x| x * 2);
+        assert_eq!(async_io.await, 42);
+    }
+
+    #[tokio::test]
+    async fn test_async_io_flat_map_direct_await() {
+        let async_io = AsyncIO::pure(10).flat_map(|x| AsyncIO::pure(x * 2));
+        assert_eq!(async_io.await, 20);
     }
 
     // =========================================================================
@@ -2033,6 +2534,67 @@ mod tests {
         assert!(cleanup_executed.load(Ordering::SeqCst));
     }
 
+    #[tokio::test]
+    async fn test_finally_async_cleanup_panic_returns_original_result() {
+        // Test that when cleanup panics, the original result is still returned
+        // and the panic is logged to stderr
+        let result = AsyncIO::pure(42)
+            .finally_async(|| async {
+                panic!("cleanup panic");
+            })
+            .run_async()
+            .await;
+
+        // Original result should be returned despite cleanup panic
+        assert_eq!(result, 42);
+    }
+
+    #[tokio::test]
+    async fn test_finally_async_cleanup_panic_with_string_message() {
+        // Test panic with String message (not &str)
+        let result = AsyncIO::pure(100)
+            .finally_async(|| async {
+                panic!("{}", "cleanup panic with String".to_string());
+            })
+            .run_async()
+            .await;
+
+        assert_eq!(result, 100);
+    }
+
+    #[tokio::test]
+    async fn test_finally_async_cleanup_panic_preserves_error_result() {
+        // Test that Err results are preserved when cleanup panics
+        let result: Result<i32, &str> = AsyncIO::pure(Err("original error"))
+            .finally_async(|| async {
+                panic!("cleanup panic");
+            })
+            .run_async()
+            .await;
+
+        assert_eq!(result, Err("original error"));
+    }
+
+    #[tokio::test]
+    async fn test_finally_async_normal_cleanup_still_works() {
+        // Verify that normal (non-panicking) cleanup still works correctly
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let cleanup_ran = Arc::new(AtomicBool::new(false));
+        let cleanup_clone = cleanup_ran.clone();
+
+        let result = AsyncIO::pure(42)
+            .finally_async(move || async move {
+                cleanup_clone.store(true, Ordering::SeqCst);
+            })
+            .run_async()
+            .await;
+
+        assert_eq!(result, 42);
+        assert!(cleanup_ran.load(Ordering::SeqCst));
+    }
+
     // =========================================================================
     // on_error Tests
     // =========================================================================
@@ -2312,90 +2874,6 @@ mod tests {
             let result = combined.run_async().await;
             assert_eq!(counter.load(Ordering::SeqCst), 2);
             assert_eq!(result, 30);
-        }
-
-        // =====================================================================
-        // Pure->Pure Optimization Tests
-        // =====================================================================
-
-        #[rstest]
-        #[tokio::test]
-        async fn asyncio_fmap_pure_to_pure_optimization_returns_pure_variant() {
-            // Pure(21).fmap(|x| x * 2) should return Pure(42), not Deferred
-            let async_io = AsyncIO::pure(21);
-            let mapped = async_io.fmap(|x| x * 2);
-
-            // Verify the result is correct
-            let result = mapped.run_async().await;
-            assert_eq!(result, 42);
-        }
-
-        #[rstest]
-        #[tokio::test]
-        async fn asyncio_fmap_pure_to_pure_function_applied_immediately() {
-            use std::sync::Arc;
-            use std::sync::atomic::{AtomicBool, Ordering};
-
-            // Test that Pure value fmap applies function immediately (eager evaluation)
-            let function_called = Arc::new(AtomicBool::new(false));
-            let function_called_clone = function_called.clone();
-
-            let async_io = AsyncIO::pure(21);
-            let _mapped = async_io.fmap(move |x| {
-                function_called_clone.store(true, Ordering::SeqCst);
-                x * 2
-            });
-
-            // With Pure->Pure optimization, function should be called immediately
-            assert!(function_called.load(Ordering::SeqCst));
-        }
-
-        #[rstest]
-        #[tokio::test]
-        async fn asyncio_fmap_deferred_remains_lazy() {
-            use std::sync::Arc;
-            use std::sync::atomic::{AtomicBool, Ordering};
-
-            // Test that Deferred values still use lazy evaluation
-            let thunk_executed = Arc::new(AtomicBool::new(false));
-            let function_called = Arc::new(AtomicBool::new(false));
-            let thunk_executed_clone = thunk_executed.clone();
-            let function_called_clone = function_called.clone();
-
-            let async_io = AsyncIO::new(move || {
-                let flag = thunk_executed_clone;
-                async move {
-                    flag.store(true, Ordering::SeqCst);
-                    21
-                }
-            });
-            let mapped = async_io.fmap(move |x| {
-                function_called_clone.store(true, Ordering::SeqCst);
-                x * 2
-            });
-
-            // Neither thunk nor function should be executed yet
-            assert!(!thunk_executed.load(Ordering::SeqCst));
-            assert!(!function_called.load(Ordering::SeqCst));
-
-            // Execute and verify result
-            let result = mapped.run_async().await;
-            assert_eq!(result, 42);
-            assert!(thunk_executed.load(Ordering::SeqCst));
-            assert!(function_called.load(Ordering::SeqCst));
-        }
-
-        #[rstest]
-        #[tokio::test]
-        async fn asyncio_fmap_pure_chain_optimization() {
-            // Multiple fmap on Pure should all be applied eagerly
-            let result = AsyncIO::pure(1)
-                .fmap(|x| x + 1) // Pure(2)
-                .fmap(|x| x * 2) // Pure(4)
-                .fmap(|x| x + 10) // Pure(14)
-                .run_async()
-                .await;
-            assert_eq!(result, 14);
         }
     }
 
