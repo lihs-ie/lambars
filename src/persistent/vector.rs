@@ -4323,7 +4323,8 @@ impl<T: Clone> TransientVector<T> {
             } else {
                 // Need to get a new tail from root
                 let popped = self.tail.pop();
-                let new_tail_offset = self.tail_offset().saturating_sub(BRANCHING_FACTOR);
+                // Use actual last valid index to find the leaf (handles unbalanced trees from concat)
+                let new_tail_offset = self.length - 2;
                 let new_tail = self.get_leaf_at_as_tail_chunk(new_tail_offset);
                 self.pop_tail_from_root_cow();
                 self.tail = new_tail;
@@ -4365,7 +4366,8 @@ impl<T: Clone> TransientVector<T> {
                 if self.length == 1 {
                     self.length = 0;
                 } else {
-                    let new_tail_offset = (self.length - 1).saturating_sub(BRANCHING_FACTOR);
+                    // Use actual last valid index to find the leaf (handles unbalanced trees from concat)
+                    let new_tail_offset = self.length - 2;
                     let next_tail = self.get_leaf_at_as_tail_chunk(new_tail_offset);
                     if !next_tail.is_empty() {
                         self.pop_tail_from_root_cow();

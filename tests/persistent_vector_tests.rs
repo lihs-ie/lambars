@@ -3124,4 +3124,164 @@ mod concat_empty_tail_tests {
 
         assert!(current.is_empty());
     }
+
+    /// Test transient pop_back on unbalanced tree with leaf sizes [10, 10, 1].
+    /// This specifically tests the bug where pop_back incorrectly calculated
+    /// the next tail offset using BRANCHING_FACTOR, which fails for unbalanced
+    /// trees created by concat.
+    ///
+    /// Scenario: concat three vectors with sizes 10, 10, and 1 = 21 elements
+    /// Tree structure: leaves have sizes [10, 10, 1] (not uniform 32)
+    /// When popping from the leaf with size 1, the next tail should come
+    /// from the last element's actual position, not from a fixed offset.
+    #[rstest]
+    fn test_transient_pop_back_unbalanced_tree_leaf_size_10_10_1() {
+        let vector1: PersistentVector<i32> = (0..10).collect();
+        let vector2: PersistentVector<i32> = (10..20).collect();
+        let vector3 = PersistentVector::singleton(20);
+
+        let concatenated = vector1.concat(&vector2).concat(&vector3);
+        assert_eq!(concatenated.len(), 21);
+
+        let mut transient = concatenated.transient();
+
+        // Pop the singleton element (leaf size 1 case)
+        let popped = transient.pop_back();
+        assert_eq!(popped, Some(20));
+        assert_eq!(transient.len(), 20);
+
+        // Continue popping to verify tree integrity
+        let popped2 = transient.pop_back();
+        assert_eq!(popped2, Some(19));
+        assert_eq!(transient.len(), 19);
+
+        // Verify all remaining elements are accessible
+        for i in 0..19 {
+            assert_eq!(
+                transient.get(i),
+                Some(&(i as i32)),
+                "Element at index {} should be {}, but got {:?}",
+                i,
+                i,
+                transient.get(i)
+            );
+        }
+    }
+
+    /// Test transient pop_back exhaustively on unbalanced tree with leaf sizes [10, 10, 1].
+    /// Pop all elements one by one and verify correctness at each step.
+    #[rstest]
+    fn test_transient_pop_back_all_unbalanced_tree_10_10_1() {
+        let vector1: PersistentVector<i32> = (0..10).collect();
+        let vector2: PersistentVector<i32> = (10..20).collect();
+        let vector3 = PersistentVector::singleton(20);
+
+        let concatenated = vector1.concat(&vector2).concat(&vector3);
+        let mut transient = concatenated.transient();
+
+        // Pop all 21 elements and verify each
+        for expected in (0..=20).rev() {
+            let popped = transient.pop_back();
+            assert_eq!(
+                popped,
+                Some(expected),
+                "Expected to pop {}, but got {:?}",
+                expected,
+                popped
+            );
+            assert_eq!(
+                transient.len(),
+                expected as usize,
+                "After popping {}, length should be {}, but got {}",
+                expected,
+                expected,
+                transient.len()
+            );
+
+            // Verify remaining elements are still accessible
+            for i in 0..expected as usize {
+                assert_eq!(
+                    transient.get(i),
+                    Some(&(i as i32)),
+                    "After popping {}, element at index {} should be {}",
+                    expected,
+                    i,
+                    i
+                );
+            }
+        }
+
+        assert!(transient.is_empty());
+        assert_eq!(transient.pop_back(), None);
+    }
+
+    /// Test transient pop_back on unbalanced tree with various small leaf sizes.
+    /// Scenario: [5, 8, 3, 1] = 17 elements (highly unbalanced)
+    #[rstest]
+    fn test_transient_pop_back_unbalanced_tree_various_small_leaves() {
+        let vector1: PersistentVector<i32> = (0..5).collect();
+        let vector2: PersistentVector<i32> = (5..13).collect();
+        let vector3: PersistentVector<i32> = (13..16).collect();
+        let vector4 = PersistentVector::singleton(16);
+
+        let concatenated = vector1.concat(&vector2).concat(&vector3).concat(&vector4);
+        assert_eq!(concatenated.len(), 17);
+
+        let mut transient = concatenated.transient();
+
+        // Pop all elements and verify
+        for expected in (0..17).rev() {
+            let popped = transient.pop_back();
+            assert_eq!(
+                popped,
+                Some(expected),
+                "Expected to pop {}, but got {:?}",
+                expected,
+                popped
+            );
+            assert_eq!(
+                transient.len(),
+                expected as usize,
+                "After popping {}, length should be {}, but got {}",
+                expected,
+                expected,
+                transient.len()
+            );
+        }
+
+        assert!(transient.is_empty());
+    }
+
+    /// Test transient pop_back after concat with empty tail scenario.
+    /// When concat flushes tail to root, pop_back must correctly handle
+    /// the case where we need to fetch a new tail from unbalanced leaves.
+    #[rstest]
+    fn test_transient_pop_back_empty_tail_unbalanced_leaves() {
+        // Create vectors that will result in unbalanced leaf structure
+        let vector1: PersistentVector<i32> = (0..7).collect();
+        let vector2: PersistentVector<i32> = (7..14).collect();
+        let vector3: PersistentVector<i32> = (14..15).collect(); // Single element
+
+        let concatenated = vector1.concat(&vector2).concat(&vector3);
+        // After concat, tail is empty (flushed to root)
+        // Tree has unbalanced leaves: [7, 7, 1]
+
+        let mut transient = concatenated.transient();
+        assert_eq!(transient.len(), 15);
+
+        // Pop the single element from the last leaf
+        let popped1 = transient.pop_back();
+        assert_eq!(popped1, Some(14));
+        assert_eq!(transient.len(), 14);
+
+        // Pop another element - this should correctly fetch from the second leaf
+        let popped2 = transient.pop_back();
+        assert_eq!(popped2, Some(13));
+        assert_eq!(transient.len(), 13);
+
+        // Verify elements 0..13 are still correct
+        for i in 0..13 {
+            assert_eq!(transient.get(i), Some(&(i as i32)));
+        }
+    }
 }
