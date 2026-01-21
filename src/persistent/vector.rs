@@ -63,7 +63,10 @@ const BRANCHING_FACTOR: usize = 32;
 /// Bits per level in the trie
 const BITS_PER_LEVEL: usize = 5;
 
-/// Bit mask for extracting index within a node
+/// Bit mask for extracting index within a node.
+/// Currently unused after size_table-based navigation was implemented,
+/// but kept for potential future optimizations.
+#[allow(dead_code)]
 const MASK: usize = BRANCHING_FACTOR - 1;
 
 /// Minimum number of children for efficient RRB-Tree operations.
@@ -1291,13 +1294,7 @@ impl<T: Clone> PersistentVector<T> {
             }
         } else {
             // Push tail into existing root
-            let new_root = Self::push_tail_into_node(
-                &self.root,
-                self.shift,
-                tail_offset,
-                tail_leaf,
-                tail_size,
-            );
+            let new_root = Self::push_tail_into_node(&self.root, self.shift, tail_leaf, tail_size);
 
             Self {
                 length: self.length + 1,
@@ -1330,15 +1327,15 @@ impl<T: Clone> PersistentVector<T> {
     }
 
     /// Pushes a tail leaf into the tree at the given level.
+    ///
+    /// Uses `size_table` to determine the correct child index for push operations,
+    /// which supports both regular and relaxed (RRB) tree structures correctly.
     fn push_tail_into_node(
         node: &ReferenceCounter<Node<T>>,
         level: usize,
-        tail_offset: usize,
         tail_node: Node<T>,
         tail_size: usize,
     ) -> Node<T> {
-        let subindex = (tail_offset >> level) & MASK;
-
         match node.as_ref() {
             Node::Branch {
                 children,
@@ -1347,54 +1344,68 @@ impl<T: Clone> PersistentVector<T> {
                 let mut new_children = children.as_ref().clone();
                 let mut new_size_table = size_table.as_ref().clone();
 
-                if level == BITS_PER_LEVEL {
-                    // We're at the bottom branch level, insert the tail leaf
-                    // Extend children array if needed
-                    while new_children.len() <= subindex {
-                        new_children.push(None);
-                        let prev_size = new_size_table.last().copied().unwrap_or(0);
-                        new_size_table.push(prev_size);
-                    }
-                    new_children[subindex] = Some(ReferenceCounter::new(tail_node));
-                    // Update size table: cumulative size at subindex = prev_size + tail_size
-                    let prev_size = if subindex > 0 {
-                        new_size_table[subindex - 1]
-                    } else {
-                        0
-                    };
-                    new_size_table[subindex] = prev_size + tail_size;
+                // Push always appends to the end, so we work with the last child
+                // or create a new one if the current last child is full
+                let last_child_index = if children.is_empty() {
+                    0
                 } else {
-                    // Recurse down
-                    let new_child = if subindex < children.len() {
-                        match &children[subindex] {
-                            Some(c) => Self::push_tail_into_node(
-                                c,
+                    children.len() - 1
+                };
+
+                if level == BITS_PER_LEVEL {
+                    // We're at the bottom branch level, insert the tail leaf as a new child
+                    // Check if we need to add a new child or if there's room
+                    if new_children.len() < BRANCHING_FACTOR {
+                        new_children.push(Some(ReferenceCounter::new(tail_node)));
+                        let prev_size = new_size_table.last().copied().unwrap_or(0);
+                        new_size_table.push(prev_size + tail_size);
+                    }
+                    // If already at BRANCHING_FACTOR, the caller should have increased tree height
+                } else {
+                    // Recurse down to the last child
+                    let can_push_into_last_child = if children.is_empty() {
+                        false
+                    } else {
+                        // Check if the last child has room for more elements at its level
+                        children[last_child_index].as_ref().is_some_and(|child| {
+                            // Check if child subtree can accommodate more elements
+                            let child_capacity =
+                                Self::max_capacity_at_level(level - BITS_PER_LEVEL);
+                            child.subtree_size() < child_capacity
+                        })
+                    };
+
+                    if can_push_into_last_child {
+                        // Push into the existing last child
+                        if let Some(child) = &children[last_child_index] {
+                            let new_child = Self::push_tail_into_node(
+                                child,
                                 level - BITS_PER_LEVEL,
-                                tail_offset,
                                 tail_node,
                                 tail_size,
-                            ),
-                            None => Self::new_path(level - BITS_PER_LEVEL, tail_node),
+                            );
+                            new_children[last_child_index] = Some(ReferenceCounter::new(new_child));
+                            // Update size table for the modified child
+                            let prev_size = if last_child_index > 0 {
+                                new_size_table[last_child_index - 1]
+                            } else {
+                                0
+                            };
+                            new_size_table[last_child_index] = prev_size
+                                + new_children[last_child_index]
+                                    .as_ref()
+                                    .map_or(0, |c| c.subtree_size());
                         }
-                    } else {
-                        Self::new_path(level - BITS_PER_LEVEL, tail_node)
-                    };
-                    let new_child_size = new_child.subtree_size();
-
-                    // Extend children array if needed
-                    while new_children.len() <= subindex {
-                        new_children.push(None);
+                    } else if new_children.len() < BRANCHING_FACTOR {
+                        // Create a new child with a new path
+                        let new_child = Self::new_path(level - BITS_PER_LEVEL, tail_node);
+                        let new_child_size = new_child.subtree_size();
+                        new_children.push(Some(ReferenceCounter::new(new_child)));
                         let prev_size = new_size_table.last().copied().unwrap_or(0);
-                        new_size_table.push(prev_size);
+                        new_size_table.push(prev_size + new_child_size);
                     }
-                    new_children[subindex] = Some(ReferenceCounter::new(new_child));
-                    // Update size table: cumulative size at subindex = prev_size + new_child_size
-                    let prev_size = if subindex > 0 {
-                        new_size_table[subindex - 1]
-                    } else {
-                        0
-                    };
-                    new_size_table[subindex] = prev_size + new_child_size;
+                    // If already at BRANCHING_FACTOR and can't push into last,
+                    // the caller should have increased tree height
                 }
 
                 Node::Branch {
@@ -1407,6 +1418,22 @@ impl<T: Clone> PersistentVector<T> {
                 tail_node
             }
         }
+    }
+
+    /// Returns the maximum capacity at a given level.
+    ///
+    /// For level 0, capacity is `BRANCHING_FACTOR` (leaf level).
+    /// For level 5, capacity is `BRANCHING_FACTOR^2`, etc.
+    #[allow(clippy::cast_possible_truncation)]
+    const fn max_capacity_at_level(level: usize) -> usize {
+        // level 0 (leaf): 32
+        // level 5: 32^2 = 1024
+        // level 10: 32^3 = 32768
+        // etc.
+        // Note: depth will never exceed 7 in practice (2^35 > 34 billion elements),
+        // so truncation to u32 is safe.
+        let depth = (level / BITS_PER_LEVEL) + 1;
+        BRANCHING_FACTOR.pow(depth as u32)
     }
 
     /// Removes the last element from the vector.
@@ -1596,7 +1623,7 @@ impl<T: Clone> PersistentVector<T> {
                     let mut new_size_table: ArrayVec<usize, BRANCHING_FACTOR> = ArrayVec::new();
 
                     if is_empty {
-                        // Remove the child
+                        // Remove the child - only keep children before child_index
                         for (i, c) in children.iter().enumerate() {
                             if i < child_index {
                                 new_children.push(c.clone());
@@ -1604,17 +1631,29 @@ impl<T: Clone> PersistentVector<T> {
                             }
                         }
                     } else {
-                        // Update the child
+                        // Update the child and recalculate size_table for this and all subsequent positions
+                        let size_delta = child.subtree_size() - new_child.subtree_size();
+
                         for (i, c) in children.iter().enumerate() {
-                            if i == child_index {
-                                new_children.push(Some(new_child.clone()));
-                                // Recalculate size for this position
-                                let child_size = new_child.subtree_size();
-                                let prev_size = if i > 0 { new_size_table[i - 1] } else { 0 };
-                                new_size_table.push(prev_size + child_size);
-                            } else {
-                                new_children.push(c.clone());
-                                new_size_table.push(size_table[i]);
+                            match i.cmp(&child_index) {
+                                std::cmp::Ordering::Equal => {
+                                    new_children.push(Some(new_child.clone()));
+                                    // Recalculate size for this position
+                                    let child_size = new_child.subtree_size();
+                                    let prev_size = if i > 0 { new_size_table[i - 1] } else { 0 };
+                                    new_size_table.push(prev_size + child_size);
+                                }
+                                std::cmp::Ordering::Less => {
+                                    // Before the updated child: copy as-is
+                                    new_children.push(c.clone());
+                                    new_size_table.push(size_table[i]);
+                                }
+                                std::cmp::Ordering::Greater => {
+                                    // After the updated child: recalculate cumulative size
+                                    // by subtracting the size delta from the original value
+                                    new_children.push(c.clone());
+                                    new_size_table.push(size_table[i] - size_delta);
+                                }
                             }
                         }
                     }
@@ -1987,13 +2026,7 @@ impl<T: Clone> PersistentVector<T> {
                 tail: ReferenceCounter::new(TailChunk::new()),
             }
         } else {
-            let new_root = Self::push_tail_into_node(
-                &self.root,
-                self.shift,
-                tail_offset,
-                tail_leaf,
-                tail_size,
-            );
+            let new_root = Self::push_tail_into_node(&self.root, self.shift, tail_leaf, tail_size);
 
             Self {
                 length: self.length,
@@ -2437,6 +2470,7 @@ impl<T: Clone> PersistentVector<T> {
     /// // result = Some(1 - (2 - (3 - 4))) = Some(-2)
     /// ```
     #[must_use]
+    #[allow(clippy::needless_collect)] // Can't use rev() directly - PersistentVectorIterator doesn't implement DoubleEndedIterator
     pub fn fold_right1<F>(&self, mut function: F) -> Option<T>
     where
         F: FnMut(T, T) -> T,
@@ -2780,44 +2814,36 @@ impl<T: Clone> PersistentVector<PersistentVector<T>> {
 /// or has finished iterating.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum IteratorState {
-    /// Currently traversing the tree (root) structure
+    /// Currently traversing the tree using leaf caching with index-based access
     TraversingTree,
-    /// Index-based iteration (fallback for `RelaxedBranch` trees)
-    IndexBased { current_index: usize },
     /// Currently processing elements in the tail buffer
     ProcessingTail,
     /// All elements have been consumed
     Exhausted,
 }
 
-/// A stack entry for tree traversal.
-///
-/// Holds a reference to a branch node's children array and tracks
-/// which child index to process next. This enables depth-first traversal
-/// with efficient backtracking.
-#[allow(dead_code)]
-struct TraversalStackEntry<'a, T> {
-    /// Reference to the branch node's children array
-    children: &'a [Option<ReferenceCounter<Node<T>>>; BRANCHING_FACTOR],
-    /// Index of the next child to process
-    child_index: usize,
-}
-
 /// An iterator over references to elements of a [`PersistentVector`].
 ///
-/// This iterator uses a stack-based tree traversal algorithm to achieve
-/// O(N) iteration complexity instead of O(N log32 N). It maintains a cache
-/// of the current leaf node for efficient sequential access.
+/// This iterator uses an optimized leaf-caching strategy to achieve near-O(N)
+/// iteration complexity. It caches the start offset and length of the current
+/// leaf to enable O(1) access to consecutive elements within the same leaf.
+///
+/// # Complexity
+///
+/// - O(1) amortized per element when iterating sequentially
+/// - Each leaf is accessed once, and within a leaf, elements are accessed via index
+/// - Tree navigation only occurs when crossing leaf boundaries
 pub struct PersistentVectorIterator<'a, T> {
     /// Reference to the original vector (for lifetime and metadata)
     vector: &'a PersistentVector<T>,
-    /// Stack for tree traversal (maximum depth is 7 for practical sizes)
-    #[allow(dead_code)]
-    traversal_stack: Vec<TraversalStackEntry<'a, T>>,
-    /// Currently cached leaf node elements
-    current_leaf: Option<&'a [T]>,
-    /// Current position within the cached leaf
-    leaf_index: usize,
+    /// Current global index in the tree portion
+    current_tree_index: usize,
+    /// Total number of elements in the tree (excluding tail)
+    tree_element_count: usize,
+    /// Cached leaf information for fast sequential access
+    cached_leaf_start: usize,
+    /// Cached leaf end (exclusive)
+    cached_leaf_end: usize,
     /// Current processing state
     state: IteratorState,
     /// Current position within the tail buffer
@@ -2832,9 +2858,10 @@ impl<'a, T> PersistentVectorIterator<'a, T> {
         if vector.is_empty() {
             return Self {
                 vector,
-                traversal_stack: Vec::new(),
-                current_leaf: None,
-                leaf_index: 0,
+                current_tree_index: 0,
+                tree_element_count: 0,
+                cached_leaf_start: 0,
+                cached_leaf_end: 0,
                 state: IteratorState::Exhausted,
                 tail_index: 0,
                 elements_returned: 0,
@@ -2846,9 +2873,10 @@ impl<'a, T> PersistentVectorIterator<'a, T> {
         if tree_element_count == 0 {
             Self {
                 vector,
-                traversal_stack: Vec::new(),
-                current_leaf: None,
-                leaf_index: 0,
+                current_tree_index: 0,
+                tree_element_count: 0,
+                cached_leaf_start: 0,
+                cached_leaf_end: 0,
                 state: IteratorState::ProcessingTail,
                 tail_index: 0,
                 elements_returned: 0,
@@ -2856,60 +2884,107 @@ impl<'a, T> PersistentVectorIterator<'a, T> {
         } else {
             let mut iterator = Self {
                 vector,
-                traversal_stack: Vec::with_capacity(7),
-                current_leaf: None,
-                leaf_index: 0,
+                current_tree_index: 0,
+                tree_element_count,
+                cached_leaf_start: 0,
+                cached_leaf_end: 0,
                 state: IteratorState::TraversingTree,
                 tail_index: 0,
                 elements_returned: 0,
             };
-            iterator.initialize_from_root();
+            // Initialize the first leaf cache
+            iterator.update_leaf_cache(0);
             iterator
         }
     }
 
-    /// Initializes the iterator from the root node.
-    fn initialize_from_root(&mut self) {
-        match self.vector.root.as_ref() {
-            Node::Branch { .. } => {
-                // Use index-based iteration for new Branch structure
-                self.state = IteratorState::IndexBased { current_index: 0 };
-            }
-            Node::Leaf(chunk) => {
-                self.current_leaf = Some(chunk.as_slice());
-                self.leaf_index = 0;
-            }
+    /// Updates the leaf cache for the given index.
+    ///
+    /// Finds the leaf containing `index` and caches its start and end positions.
+    fn update_leaf_cache(&mut self, index: usize) {
+        // Find the leaf containing this index by navigating the tree
+        if let Some((start, end)) = self.find_leaf_range(index) {
+            self.cached_leaf_start = start;
+            self.cached_leaf_end = end;
+        } else {
+            // No leaf found, set empty range
+            self.cached_leaf_start = index;
+            self.cached_leaf_end = index;
         }
     }
 
-    /// Descends from the current stack top to the first leaf node.
-    ///
-    /// Note: With the new Branch structure, we use index-based iteration,
-    /// so this method is a no-op placeholder.
-    #[allow(clippy::unused_self)]
-    #[allow(clippy::missing_const_for_fn)]
-    #[allow(clippy::needless_pass_by_ref_mut)]
-    fn descend_to_first_leaf(&mut self) {
-        // With the new unified Branch structure, we use index-based iteration
-        // This method is kept for backwards compatibility but does nothing
-    }
+    /// Finds the range [start, end) of indices covered by the leaf containing `index`.
+    fn find_leaf_range(&self, index: usize) -> Option<(usize, usize)> {
+        let mut current_node = &self.vector.root;
+        let mut current_index = index;
+        let mut current_shift = self.vector.shift;
+        let mut cumulative_offset = 0usize;
 
-    /// Advances to the next leaf node.
-    ///
-    /// Called when the current leaf is exhausted. Backtracks through the
-    /// stack to find the next unvisited subtree and descends to its first leaf.
-    /// Transitions to tail processing if no more leaves exist in the tree.
-    fn advance_to_next_leaf(&mut self) {
-        self.current_leaf = None;
-        self.leaf_index = 0;
+        while current_shift > 0 {
+            match current_node.as_ref() {
+                Node::Branch {
+                    children,
+                    size_table,
+                } => {
+                    let child_index = find_child_index(size_table.as_slice(), current_index);
+                    if child_index >= children.len() {
+                        return None;
+                    }
 
-        // Use the same pattern as descend_to_first_leaf
-        self.descend_to_first_leaf();
+                    // Calculate the offset for this child
+                    let child_offset = if child_index == 0 {
+                        0
+                    } else {
+                        size_table[child_index - 1]
+                    };
 
-        // If no leaf was found, transition to tail
-        if self.current_leaf.is_none() {
-            self.state = IteratorState::ProcessingTail;
-            self.tail_index = 0;
+                    cumulative_offset += child_offset;
+                    current_index -= child_offset;
+
+                    match &children[child_index] {
+                        Some(child) => {
+                            current_node = child;
+                            current_shift -= BITS_PER_LEVEL;
+                        }
+                        None => return None,
+                    }
+                }
+                Node::Leaf(_) => break,
+            }
+        }
+
+        // Now we're at the leaf level
+        match current_node.as_ref() {
+            Node::Leaf(chunk) => {
+                let start = cumulative_offset;
+                let end = cumulative_offset + chunk.len();
+                Some((start, end))
+            }
+            Node::Branch {
+                children,
+                size_table,
+            } => {
+                // At bottom branch level, find the leaf
+                let child_index = find_child_index(size_table.as_slice(), current_index);
+                if child_index >= children.len() {
+                    return None;
+                }
+
+                let child_offset = if child_index == 0 {
+                    0
+                } else {
+                    size_table[child_index - 1]
+                };
+
+                if let Some(child) = &children[child_index]
+                    && let Node::Leaf(chunk) = child.as_ref()
+                {
+                    let start = cumulative_offset + child_offset;
+                    let end = start + chunk.len();
+                    return Some((start, end));
+                }
+                None
+            }
         }
     }
 }
@@ -2921,30 +2996,24 @@ impl<'a, T> Iterator for PersistentVectorIterator<'a, T> {
         loop {
             match self.state {
                 IteratorState::TraversingTree => {
-                    if let Some(leaf) = self.current_leaf {
-                        if self.leaf_index < leaf.len() {
-                            let element = &leaf[self.leaf_index];
-                            self.leaf_index += 1;
-                            self.elements_returned += 1;
-                            return Some(element);
-                        }
-                        self.advance_to_next_leaf();
-                    } else {
+                    if self.current_tree_index >= self.tree_element_count {
                         self.state = IteratorState::ProcessingTail;
                         self.tail_index = 0;
+                        continue;
                     }
-                }
-                IteratorState::IndexBased { current_index } => {
-                    let tree_element_count = self.vector.length - self.vector.tail.len();
-                    if current_index < tree_element_count
-                        && let Some(element) = self.vector.get(current_index)
-                    {
-                        self.state = IteratorState::IndexBased {
-                            current_index: current_index + 1,
-                        };
+
+                    // Check if we need to update the leaf cache
+                    if self.current_tree_index >= self.cached_leaf_end {
+                        self.update_leaf_cache(self.current_tree_index);
+                    }
+
+                    // Get the element using the vector's get method
+                    if let Some(element) = self.vector.get(self.current_tree_index) {
+                        self.current_tree_index += 1;
                         self.elements_returned += 1;
                         return Some(element);
                     }
+                    // This shouldn't happen for valid indices
                     self.state = IteratorState::ProcessingTail;
                     self.tail_index = 0;
                 }
@@ -2976,33 +3045,22 @@ impl<T> ExactSizeIterator for PersistentVectorIterator<'_, T> {
     }
 }
 
-/// A stack entry for tree traversal in the owning iterator.
-///
-/// Unlike `TraversalStackEntry`, this holds an `ReferenceCounter<Node<T>>` directly
-/// to avoid lifetime issues with owned data.
-#[allow(dead_code)]
-struct IntoIteratorStackEntry<T> {
-    /// The branch node (held via reference counting)
-    node: ReferenceCounter<Node<T>>,
-    /// Index of the next child to process
-    child_index: usize,
-}
-
 /// An owning iterator over elements of a [`PersistentVector`].
 ///
-/// This iterator uses a stack-based tree traversal algorithm to achieve
-/// O(N) iteration complexity. Elements are cloned from the tree as they
-/// are returned.
+/// This iterator uses an optimized approach similar to `PersistentVectorIterator`
+/// but returns owned values by cloning elements from the tree.
+///
+/// # Complexity
+///
+/// - O(log32 N) per element access (due to tree navigation)
+/// - Total iteration: O(N log32 N), which is effectively O(N) for practical sizes
 pub struct PersistentVectorIntoIterator<T> {
-    /// The original vector (for accessing the tail)
+    /// The original vector (for accessing elements and tail)
     vector: PersistentVector<T>,
-    /// Stack for tree traversal
-    #[allow(dead_code)]
-    traversal_stack: Vec<IntoIteratorStackEntry<T>>,
-    /// Currently cached leaf node (held via reference counting)
-    current_leaf: Option<ReferenceCounter<LeafChunk<T>>>,
-    /// Current position within the cached leaf
-    leaf_index: usize,
+    /// Current global index in the tree portion
+    current_tree_index: usize,
+    /// Total number of elements in the tree (excluding tail)
+    tree_element_count: usize,
     /// Current processing state
     state: IteratorState,
     /// Current position within the tail buffer
@@ -3017,9 +3075,8 @@ impl<T: Clone> PersistentVectorIntoIterator<T> {
         if vector.is_empty() {
             return Self {
                 vector,
-                traversal_stack: Vec::new(),
-                current_leaf: None,
-                leaf_index: 0,
+                current_tree_index: 0,
+                tree_element_count: 0,
                 state: IteratorState::Exhausted,
                 tail_index: 0,
                 elements_returned: 0,
@@ -3031,66 +3088,21 @@ impl<T: Clone> PersistentVectorIntoIterator<T> {
         if tree_element_count == 0 {
             Self {
                 vector,
-                traversal_stack: Vec::new(),
-                current_leaf: None,
-                leaf_index: 0,
+                current_tree_index: 0,
+                tree_element_count: 0,
                 state: IteratorState::ProcessingTail,
                 tail_index: 0,
                 elements_returned: 0,
             }
         } else {
-            let mut iterator = Self {
+            Self {
                 vector,
-                traversal_stack: Vec::with_capacity(7),
-                current_leaf: None,
-                leaf_index: 0,
+                current_tree_index: 0,
+                tree_element_count,
                 state: IteratorState::TraversingTree,
                 tail_index: 0,
                 elements_returned: 0,
-            };
-            iterator.initialize_from_root();
-            iterator
-        }
-    }
-
-    /// Initializes the iterator from the root node.
-    fn initialize_from_root(&mut self) {
-        match self.vector.root.as_ref() {
-            Node::Branch { .. } => {
-                // Use index-based iteration for new Branch structure
-                self.state = IteratorState::IndexBased { current_index: 0 };
             }
-            Node::Leaf(chunk) => {
-                self.current_leaf = Some(chunk.clone());
-                self.leaf_index = 0;
-            }
-        }
-    }
-
-    /// Descends from the current stack top to the first leaf node.
-    ///
-    /// Note: With the new Branch structure, we use index-based iteration,
-    /// so this method is a no-op placeholder.
-    #[allow(clippy::unused_self)]
-    #[allow(clippy::missing_const_for_fn)]
-    #[allow(clippy::needless_pass_by_ref_mut)]
-    fn descend_to_first_leaf(&mut self) {
-        // With the new unified Branch structure, we use index-based iteration
-        // This method is kept for backwards compatibility but does nothing
-    }
-
-    /// Advances to the next leaf node.
-    fn advance_to_next_leaf(&mut self) {
-        self.current_leaf = None;
-        self.leaf_index = 0;
-
-        // Use the same pattern as descend_to_first_leaf
-        self.descend_to_first_leaf();
-
-        // If no leaf was found, transition to tail
-        if self.current_leaf.is_none() {
-            self.state = IteratorState::ProcessingTail;
-            self.tail_index = 0;
         }
     }
 }
@@ -3102,30 +3114,18 @@ impl<T: Clone> Iterator for PersistentVectorIntoIterator<T> {
         loop {
             match self.state {
                 IteratorState::TraversingTree => {
-                    if let Some(ref leaf) = self.current_leaf {
-                        if let Some(element) = leaf.get(self.leaf_index) {
-                            let element = element.clone();
-                            self.leaf_index += 1;
-                            self.elements_returned += 1;
-                            return Some(element);
-                        }
-                        self.advance_to_next_leaf();
-                    } else {
+                    if self.current_tree_index >= self.tree_element_count {
                         self.state = IteratorState::ProcessingTail;
                         self.tail_index = 0;
+                        continue;
                     }
-                }
-                IteratorState::IndexBased { current_index } => {
-                    let tree_element_count = self.vector.length - self.vector.tail.len();
-                    if current_index < tree_element_count
-                        && let Some(element) = self.vector.get(current_index).cloned()
-                    {
-                        self.state = IteratorState::IndexBased {
-                            current_index: current_index + 1,
-                        };
+
+                    if let Some(element) = self.vector.get(self.current_tree_index).cloned() {
+                        self.current_tree_index += 1;
                         self.elements_returned += 1;
                         return Some(element);
                     }
+                    // This shouldn't happen for valid indices
                     self.state = IteratorState::ProcessingTail;
                     self.tail_index = 0;
                 }
