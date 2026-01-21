@@ -156,6 +156,9 @@ pin_project! {
     ///
     /// - `Defer` -> `Running` (on first poll, the thunk is executed to create the future)
     /// - `Running` -> `Completed` (when the inner future completes)
+    /// - `Finally` -> `FinallyCleanup` -> `Completed` (cleanup after main computation)
+    /// - `OnError` -> `OnErrorHandler` -> `Completed` (error handling)
+    /// - `Retry` -> `RetryRunning` -> `Completed` or retry (retry logic)
     ///
     /// The `Pure` state is a special case that completes immediately.
     #[project = AsyncIOStateProj]
@@ -172,6 +175,53 @@ pin_project! {
         Running {
             #[pin]
             future: Pin<Box<dyn Future<Output = A> + Send>>,
+        },
+        /// Finally state: runs inner computation, then cleanup.
+        /// State transitions: Finally -> FinallyCleanup -> Completed
+        Finally {
+            #[pin]
+            inner: Box<AsyncIO<A>>,
+            cleanup: Option<Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>>,
+        },
+        /// Finally cleanup state: inner completed, running cleanup with panic catching.
+        /// The cleanup future is wrapped with `catch_unwind` to capture any panics.
+        /// If the cleanup panics, the panic is logged to stderr and the original result is returned.
+        FinallyCleanup {
+            result: Option<A>,
+            #[pin]
+            cleanup_future: Pin<Box<dyn Future<Output = Result<(), Box<dyn std::any::Any + Send>>> + Send>>,
+        },
+        /// OnError state: runs inner computation, then optionally runs error handler.
+        /// State transitions: OnError -> OnErrorHandler -> Completed (if error)
+        ///                    OnError -> Completed (if success)
+        OnError {
+            #[pin]
+            inner: Box<AsyncIO<A>>,
+            handler: Option<Box<dyn FnOnce(&A) -> Option<Pin<Box<dyn Future<Output = ()> + Send>>> + Send>>,
+        },
+        /// OnError handler state: running error handler.
+        OnErrorHandler {
+            result: Option<A>,
+            #[pin]
+            handler_future: Pin<Box<dyn Future<Output = ()> + Send>>,
+        },
+        /// Retry state: runs factory-created AsyncIO with retry logic.
+        /// State transitions: Retry -> RetryRunning -> Retry (on error) or Completed (on success)
+        Retry {
+            factory: Option<Box<dyn Fn() -> AsyncIO<A> + Send>>,
+            should_retry: Option<Box<dyn Fn(&A) -> bool + Send>>,
+            max_attempts: usize,
+            current_attempt: usize,
+            last_result: Option<A>,
+        },
+        /// RetryRunning state: polling the current attempt.
+        RetryRunning {
+            factory: Option<Box<dyn Fn() -> AsyncIO<A> + Send>>,
+            should_retry: Option<Box<dyn Fn(&A) -> bool + Send>>,
+            max_attempts: usize,
+            current_attempt: usize,
+            #[pin]
+            current: Box<AsyncIO<A>>,
         },
         /// The computation has completed (used only as a transition state).
         Completed,
@@ -199,6 +249,7 @@ impl<A> Future for AsyncIO<A> {
     /// ```rust,ignore
     /// let result = AsyncIO::pure(42).await;
     /// ```
+    #[allow(clippy::too_many_lines)]
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         let mut this = self.project();
 
@@ -223,6 +274,174 @@ impl<A> Future for AsyncIO<A> {
                         Poll::Ready(result) => {
                             this.state.set(AsyncIOState::Completed);
                             return Poll::Ready(result);
+                        }
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
+                AsyncIOStateProj::Finally { mut inner, cleanup } => {
+                    // Poll the inner AsyncIO
+                    match inner.as_mut().poll(context) {
+                        Poll::Ready(result) => {
+                            // Inner completed, transition to cleanup with panic catching
+                            use futures::FutureExt;
+                            use std::panic::AssertUnwindSafe;
+
+                            let cleanup_thunk =
+                                cleanup.take().expect("Finally cleanup already taken");
+                            let cleanup_future = cleanup_thunk();
+                            // Wrap cleanup future with catch_unwind to capture panics
+                            // Type complexity is acceptable here as this is internal state machine plumbing
+                            #[allow(clippy::type_complexity)]
+                            let catching_future: Pin<
+                                Box<
+                                    dyn Future<Output = Result<(), Box<dyn std::any::Any + Send>>>
+                                        + Send,
+                                >,
+                            > = Box::pin(AssertUnwindSafe(cleanup_future).catch_unwind());
+                            this.state.set(AsyncIOState::FinallyCleanup {
+                                result: Some(result),
+                                cleanup_future: catching_future,
+                            });
+                            // Loop to poll the cleanup future
+                        }
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
+                AsyncIOStateProj::FinallyCleanup {
+                    result,
+                    cleanup_future,
+                } => {
+                    // Poll the cleanup future (with panic catching)
+                    match cleanup_future.poll(context) {
+                        Poll::Ready(cleanup_result) => {
+                            // Log cleanup panic to stderr if it occurred
+                            if let Err(panic_info) = cleanup_result {
+                                // Extract panic message for logging
+                                let panic_message = panic_info
+                                    .downcast_ref::<&str>()
+                                    .map(|s| (*s).to_string())
+                                    .or_else(|| panic_info.downcast_ref::<String>().cloned())
+                                    .unwrap_or_else(|| "unknown panic".to_string());
+                                eprintln!(
+                                    "AsyncIO::finally_async: panic in cleanup; \
+                                     suppressing cleanup panic and returning original result. \
+                                     Panic message: {panic_message}"
+                                );
+                            }
+                            // Return the original result regardless of cleanup success/failure
+                            let value = result.take().expect("FinallyCleanup result already taken");
+                            this.state.set(AsyncIOState::Completed);
+                            return Poll::Ready(value);
+                        }
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
+                AsyncIOStateProj::OnError { mut inner, handler } => {
+                    // Poll the inner AsyncIO
+                    match inner.as_mut().poll(context) {
+                        Poll::Ready(result) => {
+                            // Inner completed, check if we need to run the handler
+                            let handler_fn = handler.take().expect("OnError handler already taken");
+                            if let Some(handler_future) = handler_fn(&result) {
+                                // Error case: run the handler
+                                this.state.set(AsyncIOState::OnErrorHandler {
+                                    result: Some(result),
+                                    handler_future,
+                                });
+                                // Loop to poll the handler future
+                            } else {
+                                // Success case: return result directly
+                                this.state.set(AsyncIOState::Completed);
+                                return Poll::Ready(result);
+                            }
+                        }
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
+                AsyncIOStateProj::OnErrorHandler {
+                    result,
+                    handler_future,
+                } => {
+                    // Poll the handler future
+                    match handler_future.poll(context) {
+                        Poll::Ready(()) => {
+                            // Handler completed, return the original result
+                            let value = result.take().expect("OnErrorHandler result already taken");
+                            this.state.set(AsyncIOState::Completed);
+                            return Poll::Ready(value);
+                        }
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
+                AsyncIOStateProj::Retry {
+                    factory,
+                    should_retry,
+                    max_attempts,
+                    current_attempt,
+                    last_result,
+                } => {
+                    // Check if we have a result from previous attempt
+                    if let Some(result) = last_result.take() {
+                        // Check if we should retry
+                        let retry_fn = should_retry
+                            .as_ref()
+                            .expect("Retry should_retry already taken");
+                        if !retry_fn(&result) || *current_attempt >= *max_attempts {
+                            // Success or exhausted attempts, return result
+                            this.state.set(AsyncIOState::Completed);
+                            return Poll::Ready(result);
+                        }
+                        // Continue to retry
+                    }
+
+                    // Check if we have exhausted all attempts
+                    assert!(
+                        *current_attempt < *max_attempts,
+                        "Retry: should have result when exhausted"
+                    );
+
+                    // Create a new attempt
+                    let factory_fn = factory.take().expect("Retry factory already taken");
+                    let retry_fn = should_retry
+                        .take()
+                        .expect("Retry should_retry already taken");
+                    let current = Box::new(factory_fn());
+                    let attempt = *current_attempt;
+                    let attempts = *max_attempts;
+                    this.state.set(AsyncIOState::RetryRunning {
+                        factory: Some(factory_fn),
+                        should_retry: Some(retry_fn),
+                        max_attempts: attempts,
+                        current_attempt: attempt,
+                        current,
+                    });
+                    // Loop to poll the new attempt
+                }
+                AsyncIOStateProj::RetryRunning {
+                    factory,
+                    should_retry,
+                    max_attempts,
+                    current_attempt,
+                    mut current,
+                } => {
+                    // Poll the current attempt
+                    match current.as_mut().poll(context) {
+                        Poll::Ready(result) => {
+                            // Attempt completed, transition back to Retry to check result
+                            let factory_fn = factory.take().expect("Retry factory already taken");
+                            let retry_fn = should_retry
+                                .take()
+                                .expect("Retry should_retry already taken");
+                            let attempt = *current_attempt + 1;
+                            let attempts = *max_attempts;
+                            this.state.set(AsyncIOState::Retry {
+                                factory: Some(factory_fn),
+                                should_retry: Some(retry_fn),
+                                max_attempts: attempts,
+                                current_attempt: attempt,
+                                last_result: Some(result),
+                            });
+                            // Loop to check if we need another attempt
                         }
                         Poll::Pending => return Poll::Pending,
                     }
@@ -818,6 +1037,11 @@ impl<A: Send + 'static> AsyncIO<A> {
     ///     5,
     /// );
     /// ```
+    /// Creates a `retry_with_factory` action using state machine.
+    ///
+    /// This implementation avoids additional `AsyncIO::new()` allocation by using
+    /// the `Retry` state variant directly. The factory is called for each attempt,
+    /// and retries continue until success or max attempts are exhausted.
     #[allow(clippy::missing_panics_doc)]
     pub fn retry_with_factory<E, F>(factory: F, max_attempts: usize) -> AsyncIO<Result<A, E>>
     where
@@ -826,22 +1050,21 @@ impl<A: Send + 'static> AsyncIO<A> {
     {
         let effective_attempts = max_attempts.max(1);
 
-        AsyncIO::new(move || async move {
-            let mut last_error: Option<E> = None;
+        // should_retry returns true if the result is an error (should retry)
+        // Type complexity is acceptable here as this is internal state machine plumbing
+        #[allow(clippy::type_complexity)]
+        let should_retry: Box<dyn Fn(&Result<A, E>) -> bool + Send> =
+            Box::new(|result: &Result<A, E>| result.is_err());
 
-            for _ in 0..effective_attempts {
-                let action = factory();
-                match action.await {
-                    Ok(value) => return Ok(value),
-                    Err(error) => {
-                        last_error = Some(error);
-                    }
-                }
-            }
-
-            // All attempts failed, return the last error
-            Err(last_error.expect("At least one attempt should have been made"))
-        })
+        AsyncIO {
+            state: AsyncIOState::Retry {
+                factory: Some(Box::new(factory)),
+                should_retry: Some(should_retry),
+                max_attempts: effective_attempts,
+                current_attempt: 0,
+                last_result: None,
+            },
+        }
     }
 
     /// Retries with exponential backoff using a factory function.
@@ -1119,33 +1342,29 @@ impl<A: Send + 'static> AsyncIO<A> {
     /// let operation = AsyncIO::pure(42)
     ///     .finally_async(|| async { println!("cleanup"); });
     /// ```
+    /// Creates a `finally_async` action using state machine.
+    ///
+    /// This implementation avoids additional `AsyncIO::new()` allocation by using
+    /// the `Finally` state variant directly. The cleanup is guaranteed to run
+    /// after the inner computation completes, regardless of success.
+    ///
+    /// # Panic Handling
+    ///
+    /// If the cleanup function panics, the panic is caught and logged to stderr.
+    /// The original result from the main computation is still returned, ensuring
+    /// that cleanup panics do not prevent the caller from receiving the expected value.
     #[must_use]
     pub fn finally_async<F, Cleanup>(self, cleanup: F) -> Self
     where
         F: FnOnce() -> Cleanup + Send + 'static,
         Cleanup: std::future::Future<Output = ()> + Send + 'static,
     {
-        Self::new(move || async move {
-            use futures::FutureExt;
-            use std::panic::AssertUnwindSafe;
-
-            // Execute self, catching any panics
-            let result = AssertUnwindSafe(self.run_async()).catch_unwind().await;
-
-            // Always run cleanup, but don't let a cleanup panic
-            // suppress the original result/panic.
-            let cleanup_result = AssertUnwindSafe(cleanup()).catch_unwind().await;
-
-            if cleanup_result.is_err() {
-                eprintln!("AsyncIO::finally_async: cleanup panicked");
-            }
-
-            // Return the result or re-panic
-            match result {
-                Ok(value) => value,
-                Err(panic_info) => std::panic::resume_unwind(panic_info),
-            }
-        })
+        Self {
+            state: AsyncIOState::Finally {
+                inner: Box::new(self),
+                cleanup: Some(Box::new(move || Box::pin(cleanup()))),
+            },
+        }
     }
 }
 
@@ -1178,21 +1397,36 @@ where
     ///     eprintln!("Error occurred: {}", e);
     /// });
     /// ```
+    /// Creates an `on_error` action using state machine.
+    ///
+    /// This implementation avoids additional `AsyncIO::new()` allocation by using
+    /// the `OnError` state variant directly. The callback is executed only when
+    /// the inner computation returns an error, and the error is still propagated.
     #[must_use]
     pub fn on_error<F, Callback>(self, callback: F) -> Self
     where
         F: FnOnce(&E) -> Callback + Send + 'static,
         Callback: std::future::Future<Output = ()> + Send + 'static,
     {
-        Self::new(move || async move {
-            let result = self.await;
-
-            if let Err(ref error) = result {
-                callback(error).await;
+        // Wrap callback to handle Result type and return Option<Future>
+        // Type complexity is acceptable here as this is internal state machine plumbing
+        #[allow(clippy::type_complexity)]
+        let handler: Box<
+            dyn FnOnce(&Result<A, E>) -> Option<Pin<Box<dyn Future<Output = ()> + Send>>> + Send,
+        > = Box::new(move |result: &Result<A, E>| {
+            if let Err(error) = result {
+                Some(Box::pin(callback(error)) as Pin<Box<dyn Future<Output = ()> + Send>>)
+            } else {
+                None
             }
+        });
 
-            result
-        })
+        Self {
+            state: AsyncIOState::OnError {
+                inner: Box::new(self),
+                handler: Some(handler),
+            },
+        }
     }
 }
 
@@ -2132,6 +2366,67 @@ mod tests {
 
         assert!(main_executed.load(Ordering::SeqCst));
         assert!(cleanup_executed.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_finally_async_cleanup_panic_returns_original_result() {
+        // Test that when cleanup panics, the original result is still returned
+        // and the panic is logged to stderr
+        let result = AsyncIO::pure(42)
+            .finally_async(|| async {
+                panic!("cleanup panic");
+            })
+            .run_async()
+            .await;
+
+        // Original result should be returned despite cleanup panic
+        assert_eq!(result, 42);
+    }
+
+    #[tokio::test]
+    async fn test_finally_async_cleanup_panic_with_string_message() {
+        // Test panic with String message (not &str)
+        let result = AsyncIO::pure(100)
+            .finally_async(|| async {
+                panic!("{}", "cleanup panic with String".to_string());
+            })
+            .run_async()
+            .await;
+
+        assert_eq!(result, 100);
+    }
+
+    #[tokio::test]
+    async fn test_finally_async_cleanup_panic_preserves_error_result() {
+        // Test that Err results are preserved when cleanup panics
+        let result: Result<i32, &str> = AsyncIO::pure(Err("original error"))
+            .finally_async(|| async {
+                panic!("cleanup panic");
+            })
+            .run_async()
+            .await;
+
+        assert_eq!(result, Err("original error"));
+    }
+
+    #[tokio::test]
+    async fn test_finally_async_normal_cleanup_still_works() {
+        // Verify that normal (non-panicking) cleanup still works correctly
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let cleanup_ran = Arc::new(AtomicBool::new(false));
+        let cleanup_clone = cleanup_ran.clone();
+
+        let result = AsyncIO::pure(42)
+            .finally_async(move || async move {
+                cleanup_clone.store(true, Ordering::SeqCst);
+            })
+            .run_async()
+            .await;
+
+        assert_eq!(result, 42);
+        assert!(cleanup_ran.load(Ordering::SeqCst));
     }
 
     // =========================================================================
