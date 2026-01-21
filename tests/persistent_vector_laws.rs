@@ -827,4 +827,112 @@ proptest! {
         let result: Vec<i32> = concatenated.iter().cloned().collect();
         prop_assert_eq!(result, expected);
     }
+
+    // =========================================================================
+    // Concat Preservation Laws (Phase 10)
+    // =========================================================================
+
+    /// concat preserves all elements from both vectors
+    #[test]
+    fn prop_concat_preserves_all_elements(
+        elements1 in prop::collection::vec(any::<i32>(), 0..200),
+        elements2 in prop::collection::vec(any::<i32>(), 0..200)
+    ) {
+        let vector1: PersistentVector<i32> = elements1.iter().cloned().collect();
+        let vector2: PersistentVector<i32> = elements2.iter().cloned().collect();
+        let concatenated = vector1.concat(&vector2);
+
+        prop_assert_eq!(concatenated.len(), elements1.len() + elements2.len());
+
+        for (index, &expected) in elements1.iter().enumerate() {
+            prop_assert_eq!(concatenated.get(index), Some(&expected));
+        }
+        for (index, &expected) in elements2.iter().enumerate() {
+            prop_assert_eq!(concatenated.get(elements1.len() + index), Some(&expected));
+        }
+    }
+
+    /// concat preserves original vectors (immutability)
+    #[test]
+    fn prop_concat_preserves_original_vectors(
+        elements1 in prop::collection::vec(any::<i32>(), 1..100),
+        elements2 in prop::collection::vec(any::<i32>(), 1..100)
+    ) {
+        let vector1: PersistentVector<i32> = elements1.iter().cloned().collect();
+        let vector2: PersistentVector<i32> = elements2.iter().cloned().collect();
+        let _concatenated = vector1.concat(&vector2);
+
+        prop_assert_eq!(vector1.len(), elements1.len());
+        prop_assert_eq!(vector2.len(), elements2.len());
+
+        for (index, &expected) in elements1.iter().enumerate() {
+            prop_assert_eq!(vector1.get(index), Some(&expected));
+        }
+        for (index, &expected) in elements2.iter().enumerate() {
+            prop_assert_eq!(vector2.get(index), Some(&expected));
+        }
+    }
+
+    // =========================================================================
+    // Transient Roundtrip Laws (Phase 10)
+    // =========================================================================
+
+    /// transient -> persistent roundtrip preserves all elements
+    #[test]
+    fn prop_transient_roundtrip_preserves_elements(
+        elements in prop::collection::vec(any::<i32>(), 0..500)
+    ) {
+        let vector: PersistentVector<i32> = elements.iter().cloned().collect();
+        let roundtripped = vector.clone().transient().persistent();
+
+        prop_assert_eq!(roundtripped.len(), vector.len());
+        for index in 0..vector.len() {
+            prop_assert_eq!(roundtripped.get(index), vector.get(index));
+        }
+    }
+
+    /// transient modifications are persisted correctly
+    #[test]
+    fn prop_transient_modifications_persisted(
+        elements in prop::collection::vec(any::<i32>(), 10..200),
+        new_value in any::<i32>()
+    ) {
+        let vector: PersistentVector<i32> = elements.iter().cloned().collect();
+        let mut transient = vector.transient();
+
+        let update_index = elements.len() / 2;
+        transient.update(update_index, new_value);
+
+        let result = transient.persistent();
+
+        prop_assert_eq!(result.get(update_index), Some(&new_value));
+
+        for (index, element) in elements.iter().enumerate() {
+            if index != update_index {
+                prop_assert_eq!(result.get(index), Some(element));
+            }
+        }
+    }
+
+    /// transient batch push equals persistent sequential push
+    #[test]
+    fn prop_transient_batch_push_equals_persistent(
+        initial in prop::collection::vec(any::<i32>(), 0..100),
+        additions in prop::collection::vec(any::<i32>(), 0..100)
+    ) {
+        let vector: PersistentVector<i32> = initial.iter().cloned().collect();
+
+        let mut transient = vector.clone().transient();
+        for &element in &additions {
+            transient.push_back(element);
+        }
+        let transient_result = transient.persistent();
+
+        let persistent_result = vector.push_back_many(additions.iter().cloned());
+
+        prop_assert_eq!(transient_result.len(), persistent_result.len());
+        for index in 0..transient_result.len() {
+            prop_assert_eq!(transient_result.get(index), persistent_result.get(index));
+        }
+    }
 }
