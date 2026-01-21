@@ -2746,4 +2746,152 @@ mod concat_empty_tail_tests {
         assert_eq!(last_value, popped_value);
         assert_eq!(last_value, 200);
     }
+
+    /// Test pop_back after concat with exactly 32 elements plus singleton.
+    /// This is the edge case where (0..32).collect().concat(&singleton(99)).pop_back()
+    /// should result in len()==32, but without the fix, root would have 32 elements
+    /// and tail would also have 32 elements, causing a size mismatch.
+    #[rstest]
+    fn test_pop_back_after_concat_32_plus_singleton() {
+        // Create a vector with exactly 32 elements (fills one full leaf)
+        let base: PersistentVector<i32> = (0..32).collect();
+        assert_eq!(base.len(), 32);
+
+        // Concat with a singleton
+        let singleton = PersistentVector::new().push_back(99);
+        let concatenated = base.concat(&singleton);
+        assert_eq!(concatenated.len(), 33);
+        assert_eq!(concatenated.last(), Some(&99));
+
+        // Pop back should result in 32 elements
+        let (remaining, popped) = concatenated.pop_back().unwrap();
+        assert_eq!(popped, 99);
+        assert_eq!(remaining.len(), 32);
+
+        // Verify all elements are accessible and correct
+        for i in 0..32 {
+            assert_eq!(
+                remaining.get(i),
+                Some(&(i as i32)),
+                "Element at index {i} mismatch"
+            );
+        }
+
+        // Verify last() returns correct value
+        assert_eq!(remaining.last(), Some(&31));
+
+        // Verify push_back works correctly after pop_back
+        let with_push = remaining.push_back(100);
+        assert_eq!(with_push.len(), 33);
+        assert_eq!(with_push.last(), Some(&100));
+
+        // Verify the pushed element is at the correct index
+        assert_eq!(with_push.get(32), Some(&100));
+    }
+
+    /// Test that pop_back maintains size consistency between length and actual elements.
+    #[rstest]
+    fn test_pop_back_size_consistency_after_concat() {
+        let base: PersistentVector<i32> = (0..32).collect();
+        let singleton = PersistentVector::new().push_back(99);
+        let concatenated = base.concat(&singleton);
+
+        let (remaining, _) = concatenated.pop_back().unwrap();
+
+        // Count actual elements by iterating
+        let actual_count = remaining.iter().count();
+        assert_eq!(
+            actual_count,
+            remaining.len(),
+            "Length mismatch: len() = {}, actual count = {}",
+            remaining.len(),
+            actual_count
+        );
+    }
+
+    /// Test multiple pop_back operations after concat with 32+1 scenario.
+    #[rstest]
+    fn test_multiple_pop_back_after_concat_32_plus_1() {
+        let base: PersistentVector<i32> = (0..32).collect();
+        let singleton = PersistentVector::new().push_back(99);
+        let concatenated = base.concat(&singleton);
+
+        // Pop all elements and verify
+        let mut current = concatenated;
+        let mut expected_values: Vec<i32> = (0..32).collect();
+        expected_values.push(99);
+
+        for expected in expected_values.iter().rev() {
+            let (remaining, element) = current.pop_back().unwrap();
+            assert_eq!(
+                element,
+                *expected,
+                "Expected to pop {}, but got {} (remaining len: {})",
+                expected,
+                element,
+                remaining.len()
+            );
+            current = remaining;
+        }
+
+        assert!(current.is_empty());
+    }
+
+    /// Test that after pop_back, the internal structure is consistent.
+    /// This specifically tests the bug where root elements + tail elements != length.
+    /// After concat(32 elements, 1 element).pop_back(), the remaining vector should have:
+    /// - length = 32
+    /// - Either: all 32 elements in tail (root empty), OR
+    /// - Correctly distributed between root and tail
+    #[rstest]
+    fn test_pop_back_internal_structure_consistency() {
+        let base: PersistentVector<i32> = (0..32).collect();
+        let singleton = PersistentVector::new().push_back(99);
+        let concatenated = base.concat(&singleton);
+
+        let (remaining, _) = concatenated.pop_back().unwrap();
+
+        // After pop_back from concat(32, 1), we should have exactly 32 elements.
+        // The key test is: can we successfully push 33 more elements and still
+        // have correct indexing?
+        let mut current = remaining;
+        for i in 32..65 {
+            current = current.push_back(i);
+            // Verify the newly pushed element is accessible at the correct index
+            assert_eq!(
+                current.get(i as usize),
+                Some(&i),
+                "After pushing {}, element at index {} is incorrect",
+                i,
+                i
+            );
+            // Also verify length is correct
+            assert_eq!(
+                current.len(),
+                i as usize + 1,
+                "Length mismatch after pushing {}: expected {}, got {}",
+                i,
+                i + 1,
+                current.len()
+            );
+        }
+
+        // Final verification: all 65 elements should be correct
+        for i in 0..32 {
+            assert_eq!(
+                current.get(i),
+                Some(&(i as i32)),
+                "Element at index {} is incorrect",
+                i
+            );
+        }
+        for i in 32..65 {
+            assert_eq!(
+                current.get(i),
+                Some(&(i as i32)),
+                "Element at index {} is incorrect",
+                i
+            );
+        }
+    }
 }

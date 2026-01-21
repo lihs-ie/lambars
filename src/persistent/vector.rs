@@ -1507,30 +1507,47 @@ impl<T: Clone> PersistentVector<T> {
                 // Remove the last leaf from the root
                 let (new_root, new_shift) = self.pop_tail_from_root();
 
-                // Get the new last leaf as tail (if exists)
-                if self.length <= BRANCHING_FACTOR {
-                    // After removal, the remaining elements fit in a single leaf
-                    let new_tail = self.get_leaf_at(0);
-                    let mut new_tail_vec = new_tail.as_ref().clone();
-                    new_tail_vec.pop(); // Remove the element we're popping
+                // After removal, we have (self.length - 1) elements remaining.
+                // Check if the remaining elements fit in a single leaf (tail).
+                let remaining_length = self.length - 1;
 
+                if remaining_length <= BRANCHING_FACTOR {
+                    // All remaining elements fit in tail.
+                    // Get the first (and only) leaf from the OLD root before pop.
+                    let first_leaf = self.get_leaf_at(0);
+
+                    // Create empty root and move all elements to tail
                     let new_vector = Self {
-                        length: self.length - 1,
-                        shift: new_shift,
-                        root: new_root,
-                        tail: ReferenceCounter::new(new_tail_vec),
+                        length: remaining_length,
+                        shift: BITS_PER_LEVEL,
+                        root: ReferenceCounter::new(Node::empty_branch()),
+                        tail: first_leaf,
                     };
 
                     Some((new_vector, element))
                 } else {
-                    // Get the new last leaf from the tree
-                    let new_tail_offset = self.length - 2;
-                    let new_tail = self.get_leaf_at(new_tail_offset);
+                    // More than BRANCHING_FACTOR elements remain.
+                    // We need to get the last leaf from the new root (after pop_tail_from_root)
+                    // and remove it from the root to use as tail.
+                    let new_tail_offset = remaining_length - 1;
 
-                    let new_vector = Self {
-                        length: self.length - 1,
+                    // Create a temporary vector with the new root to get the last leaf
+                    let temp_vector = Self {
+                        length: remaining_length,
                         shift: new_shift,
                         root: new_root,
+                        tail: ReferenceCounter::new(TailChunk::new()),
+                    };
+
+                    let new_tail = temp_vector.get_leaf_at(new_tail_offset);
+
+                    // Pop the last leaf from the new root as well
+                    let (final_root, final_shift) = temp_vector.pop_tail_from_root();
+
+                    let new_vector = Self {
+                        length: remaining_length,
+                        shift: final_shift,
+                        root: final_root,
                         tail: new_tail,
                     };
 
