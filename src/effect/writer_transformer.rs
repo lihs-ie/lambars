@@ -500,7 +500,7 @@ where
     ///     assert_eq!(output, vec!["log"]);
     /// }
     /// ```
-    pub fn tell_async_io(output: W) -> WriterT<W, AsyncIO<((), W)>> {
+    pub const fn tell_async_io(output: W) -> WriterT<W, AsyncIO<((), W)>> {
         WriterT::new(AsyncIO::pure(((), output)))
     }
 

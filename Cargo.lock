@@ -492,6 +492,7 @@ dependencies = [
  "lambars-derive",
  "num_cpus",
  "paste",
+ "pin-project-lite",
  "proptest",
  "rayon",
  "rstest",

@@ -422,12 +422,12 @@ where
     A: Send + 'static,
 {
     /// Creates an `ExceptT` that returns a constant value.
-    pub fn pure_async_io(value: A) -> Self {
+    pub const fn pure_async_io(value: A) -> Self {
         Self::new(super::AsyncIO::pure(Ok(value)))
     }
 
     /// Creates an `ExceptT` that throws an error.
-    pub fn throw_async_io(error: E) -> Self {
+    pub const fn throw_async_io(error: E) -> Self {
         Self::new(super::AsyncIO::pure(Err(error)))
     }
 
@@ -437,7 +437,7 @@ where
     }
 
     /// Creates an `ExceptT` from a `Result`.
-    pub fn from_result(result: Result<A, E>) -> Self {
+    pub const fn from_result(result: Result<A, E>) -> Self {
         Self::new(super::AsyncIO::pure(result))
     }
 

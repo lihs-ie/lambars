@@ -92,11 +92,10 @@ async fn test_async_io_from_future_basic() {
 
 #[rstest]
 #[tokio::test]
-async fn test_async_io_into_future_can_be_awaited() {
-    // into_future で取得した Future を await できる
+async fn test_async_io_impl_future_can_be_awaited() {
+    // impl Future により直接 await できる
     let async_io = AsyncIO::pure(42);
-    let future = async_io.into_future();
-    let result = future.await;
+    let result = async_io.await;
     assert_eq!(result, 42);
 }
 
