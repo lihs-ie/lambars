@@ -1237,6 +1237,147 @@ impl<A: Send + 'static> AsyncIO<A> {
 }
 
 // =============================================================================
+// Batch Execution
+// =============================================================================
+
+/// Error type for batch execution operations.
+///
+/// This enum represents errors that can occur during batch execution
+/// of `AsyncIO` operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchError {
+    /// The concurrency limit was set to zero.
+    ///
+    /// `batch_run_buffered` requires a limit of at least 1.
+    InvalidLimit,
+}
+
+impl std::fmt::Display for BatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidLimit => {
+                write!(f, "batch_run_buffered: limit must be greater than 0")
+            }
+        }
+    }
+}
+
+impl std::error::Error for BatchError {}
+
+impl<A: Send + 'static> AsyncIO<A> {
+    /// Executes multiple `AsyncIO` actions in parallel and returns all results.
+    ///
+    /// This function provides efficient batch execution by running all items
+    /// concurrently using `FuturesUnordered`. The Enter/Drop overhead is reduced
+    /// to a single `batch_run` call, making it more efficient than awaiting each
+    /// `AsyncIO` individually.
+    ///
+    /// # Arguments
+    ///
+    /// * `items` - An iterator of `AsyncIO<A>` actions to execute in parallel.
+    ///
+    /// # Returns
+    ///
+    /// A `Vec<A>` containing the results of all completed actions. The order
+    /// of results may not match the input order due to parallel execution.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use lambars::effect::AsyncIO;
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let items = vec![
+    ///         AsyncIO::pure(1),
+    ///         AsyncIO::pure(2),
+    ///         AsyncIO::pure(3),
+    ///     ];
+    ///
+    ///     let results = AsyncIO::batch_run(items).await;
+    ///     assert_eq!(results.len(), 3);
+    ///     // Results may be in any order
+    /// }
+    /// ```
+    ///
+    /// # Performance
+    ///
+    /// - Single Enter/Drop overhead for the entire batch
+    /// - Parallel execution using `FuturesUnordered`
+    /// - Suitable for I/O-bound workloads with many small operations
+    pub async fn batch_run<I>(items: I) -> Vec<A>
+    where
+        I: IntoIterator<Item = Self>,
+    {
+        use futures::stream::{FuturesUnordered, StreamExt};
+
+        let futures: FuturesUnordered<_> = items.into_iter().collect();
+        futures.collect().await
+    }
+
+    /// Executes multiple `AsyncIO` actions with bounded concurrency.
+    ///
+    /// This function limits the number of concurrently executing `AsyncIO` actions
+    /// to the specified `limit`. When an action completes, a new one is started
+    /// from the remaining items, implementing backpressure.
+    ///
+    /// # Arguments
+    ///
+    /// * `items` - An iterator of `AsyncIO<A>` actions to execute.
+    /// * `limit` - Maximum number of concurrent executions. Must be greater than 0.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(Vec<A>)` containing the results of all completed actions. The order
+    ///   of results may not match the input order due to parallel execution.
+    /// - `Err(BatchError::InvalidLimit)` if `limit` is 0.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use lambars::effect::AsyncIO;
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     // Execute up to 2 tasks concurrently
+    ///     let items: Vec<AsyncIO<i32>> = (0..10).map(|i| AsyncIO::pure(i)).collect();
+    ///     let results = AsyncIO::batch_run_buffered(items, 2).await.unwrap();
+    ///     assert_eq!(results.len(), 10);
+    ///
+    ///     // limit == 0 returns an error
+    ///     let error = AsyncIO::batch_run_buffered(vec![AsyncIO::pure(1)], 0).await;
+    ///     assert!(error.is_err());
+    /// }
+    /// ```
+    ///
+    /// # Performance
+    ///
+    /// - Single Enter/Drop overhead for the entire batch
+    /// - Bounded concurrency prevents resource exhaustion
+    /// - Implements backpressure by limiting in-flight operations
+    /// - Suitable when you need to limit parallelism (e.g., rate limiting, memory constraints)
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BatchError::InvalidLimit`] if `limit` is 0.
+    pub async fn batch_run_buffered<I>(items: I, limit: usize) -> Result<Vec<A>, BatchError>
+    where
+        I: IntoIterator<Item = Self>,
+    {
+        use futures::stream::StreamExt;
+
+        if limit == 0 {
+            return Err(BatchError::InvalidLimit);
+        }
+
+        Ok(futures::stream::iter(items)
+            .buffer_unordered(limit)
+            .collect()
+            .await)
+    }
+}
+
+// =============================================================================
 // Resource Management
 // =============================================================================
 

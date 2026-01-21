@@ -147,6 +147,9 @@ pub use async_io::Pure;
 #[cfg(feature = "async")]
 pub use async_io::TimeoutError;
 
+#[cfg(feature = "async")]
+pub use async_io::BatchError;
+
 // =============================================================================
 // Do-Notation Macros
 // =============================================================================
