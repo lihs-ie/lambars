@@ -94,14 +94,6 @@ struct LeafChunk<T> {
 
 #[allow(dead_code)]
 impl<T> LeafChunk<T> {
-    /// Creates a new empty `LeafChunk`.
-    #[inline]
-    fn new() -> Self {
-        Self {
-            data: ArrayVec::new(),
-        }
-    }
-
     /// Creates a `LeafChunk` from a single element.
     #[inline]
     fn singleton(element: T) -> Self {
@@ -161,9 +153,16 @@ impl<T> LeafChunk<T> {
     }
 
     /// Pops the last element.
+    ///
+    /// Returns `None` if the chunk has only one element (to maintain the invariant
+    /// that `LeafChunk` must have at least 1 element).
     #[inline]
     fn pop(&mut self) -> Option<T> {
-        self.data.pop()
+        if self.data.len() <= 1 {
+            None
+        } else {
+            self.data.pop()
+        }
     }
 
     /// Returns an iterator over references to the elements.
@@ -185,9 +184,13 @@ impl<T: Clone> LeafChunk<T> {
     ///
     /// # Panics
     ///
-    /// Panics if `slice.len() > BRANCHING_FACTOR`.
+    /// Panics if `slice.is_empty()` or `slice.len() > BRANCHING_FACTOR`.
     fn from_slice(slice: &[T]) -> Self {
-        debug_assert!(
+        assert!(
+            !slice.is_empty(),
+            "LeafChunk invariant violation: slice is empty"
+        );
+        assert!(
             slice.len() <= BRANCHING_FACTOR,
             "Slice too large for LeafChunk"
         );
@@ -201,6 +204,10 @@ impl<T: Clone> LeafChunk<T> {
     /// Creates a `LeafChunk` by cloning elements from an iterator.
     ///
     /// Takes at most `BRANCHING_FACTOR` elements.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the iterator yields no elements.
     fn from_iter_cloned<'a, I>(iter: I) -> Self
     where
         I: Iterator<Item = &'a T>,
@@ -210,6 +217,10 @@ impl<T: Clone> LeafChunk<T> {
         for element in iter.take(BRANCHING_FACTOR) {
             data.push(element.clone());
         }
+        assert!(
+            !data.is_empty(),
+            "LeafChunk invariant violation: iterator yielded no elements"
+        );
         Self { data }
     }
 
@@ -230,11 +241,20 @@ impl<T: Clone> LeafChunk<T> {
 
 #[allow(dead_code)]
 impl<T> FromIterator<T> for LeafChunk<T> {
+    /// Creates a `LeafChunk` from an iterator.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the iterator yields no elements.
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
         let mut data = ArrayVec::new();
         for element in iter.into_iter().take(BRANCHING_FACTOR) {
             data.push(element);
         }
+        assert!(
+            !data.is_empty(),
+            "LeafChunk invariant violation: iterator yielded no elements"
+        );
         Self { data }
     }
 }
@@ -343,8 +363,16 @@ impl<T> TailChunk<T> {
     }
 
     /// Converts to a `LeafChunk`, consuming self.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this `TailChunk` is empty, as `LeafChunk` requires at least one element.
     #[inline]
     fn into_leaf_chunk(self) -> LeafChunk<T> {
+        assert!(
+            !self.data.is_empty(),
+            "LeafChunk invariant violation: cannot convert empty TailChunk to LeafChunk"
+        );
         LeafChunk { data: self.data }
     }
 }
