@@ -3072,7 +3072,7 @@ impl<T> ExactSizeIterator for PersistentVectorIterator<'_, T> {
 ///
 /// - O(1) amortized per element when iterating sequentially
 /// - Tree traversal only occurs when crossing leaf boundaries (once per leaf)
-/// - Leaf elements are cloned once and cached for fast sequential access
+/// - Leaf elements are cloned once and cached, then moved out for zero-copy access
 pub struct PersistentVectorIntoIterator<T> {
     /// The original vector (for accessing tree structure)
     vector: PersistentVector<T>,
@@ -3080,10 +3080,8 @@ pub struct PersistentVectorIntoIterator<T> {
     current_tree_index: usize,
     /// Total number of elements in the tree (excluding tail)
     tree_element_count: usize,
-    /// Cached leaf elements for O(1) access within a leaf
+    /// Cached leaf elements stored in reverse order for efficient `pop()` access
     cached_leaf_elements: Vec<T>,
-    /// Current index within the cached leaf
-    cached_leaf_local_index: usize,
     /// Global start index of the cached leaf
     cached_leaf_start: usize,
     /// Global end index of the cached leaf (exclusive)
@@ -3105,7 +3103,6 @@ impl<T: Clone> PersistentVectorIntoIterator<T> {
                 current_tree_index: 0,
                 tree_element_count: 0,
                 cached_leaf_elements: Vec::new(),
-                cached_leaf_local_index: 0,
                 cached_leaf_start: 0,
                 cached_leaf_end: 0,
                 state: IteratorState::Exhausted,
@@ -3122,7 +3119,6 @@ impl<T: Clone> PersistentVectorIntoIterator<T> {
                 current_tree_index: 0,
                 tree_element_count: 0,
                 cached_leaf_elements: Vec::new(),
-                cached_leaf_local_index: 0,
                 cached_leaf_start: 0,
                 cached_leaf_end: 0,
                 state: IteratorState::ProcessingTail,
@@ -3130,15 +3126,15 @@ impl<T: Clone> PersistentVectorIntoIterator<T> {
                 elements_returned: 0,
             }
         } else {
-            // Find and cache the first leaf
-            let (elements, start, end) =
+            // Find and cache the first leaf (elements stored in reverse for efficient pop)
+            let (mut elements, start, end) =
                 Self::find_leaf_with_elements_static(&vector, 0).unwrap_or((Vec::new(), 0, 0));
+            elements.reverse();
             Self {
                 vector,
                 current_tree_index: 0,
                 tree_element_count,
                 cached_leaf_elements: elements,
-                cached_leaf_local_index: 0,
                 cached_leaf_start: start,
                 cached_leaf_end: end,
                 state: IteratorState::TraversingTree,
@@ -3226,17 +3222,17 @@ impl<T: Clone> PersistentVectorIntoIterator<T> {
     }
 
     /// Updates the leaf cache for the given index.
+    /// Elements are stored in reverse order to enable efficient `pop()` for move semantics.
     fn update_leaf_cache(&mut self, index: usize) {
-        if let Some((elements, start, end)) =
+        if let Some((mut elements, start, end)) =
             Self::find_leaf_with_elements_static(&self.vector, index)
         {
+            elements.reverse();
             self.cached_leaf_elements = elements;
-            self.cached_leaf_local_index = 0;
             self.cached_leaf_start = start;
             self.cached_leaf_end = end;
         } else {
             self.cached_leaf_elements.clear();
-            self.cached_leaf_local_index = 0;
             self.cached_leaf_start = index;
             self.cached_leaf_end = index;
         }
@@ -3261,14 +3257,11 @@ impl<T: Clone> Iterator for PersistentVectorIntoIterator<T> {
                         self.update_leaf_cache(self.current_tree_index);
                     }
 
-                    // Get the element directly from the cached elements (O(1))
-                    if let Some(element) =
-                        self.cached_leaf_elements.get(self.cached_leaf_local_index)
-                    {
-                        self.cached_leaf_local_index += 1;
+                    // Move the element out via pop() - elements are stored in reverse order
+                    if let Some(element) = self.cached_leaf_elements.pop() {
                         self.current_tree_index += 1;
                         self.elements_returned += 1;
-                        return Some(element.clone());
+                        return Some(element);
                     }
                     // This shouldn't happen for valid indices
                     self.state = IteratorState::ProcessingTail;
