@@ -2919,7 +2919,7 @@ impl<T: Clone> PersistentVector<PersistentVector<T>> {
 /// or has finished iterating.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum IteratorState {
-    /// Currently traversing the tree using leaf caching with index-based access
+    /// Currently traversing the tree using stack-based depth-first traversal
     TraversingTree,
     /// Currently processing elements in the tail buffer
     ProcessingTail,
@@ -2927,31 +2927,54 @@ enum IteratorState {
     Exhausted,
 }
 
+/// Maximum tree depth for the traversal stack.
+///
+/// With a branching factor of 32 (5 bits per level), we need at most:
+/// - depth 1: up to 32 elements
+/// - depth 2: up to 1,024 elements
+/// - depth 3: up to 32,768 elements
+/// - depth 4: up to 1,048,576 elements
+/// - depth 5: up to 33,554,432 elements
+/// - depth 6: up to 1,073,741,824 elements
+/// - depth 7: up to 34,359,738,368 elements
+///
+/// 8 levels cover up to 2^40 = 1 trillion elements, which is more than enough.
+const MAX_TREE_DEPTH: usize = 8;
+
+/// A frame in the traversal stack for efficient iteration.
+///
+/// Each frame represents a position at one level of the tree during
+/// depth-first traversal. The stack allows O(1) movement to the next leaf.
+struct TraversalFrame<'a, T> {
+    /// Reference to the branch node at this level
+    node: &'a ReferenceCounter<Node<T>>,
+    /// Current child index within this branch
+    child_index: usize,
+}
+
 /// An iterator over references to elements of a [`PersistentVector`].
 ///
 /// This iterator uses an optimized leaf-caching strategy to achieve O(N)
-/// iteration complexity. It caches the current leaf slice to enable O(1)
-/// access to consecutive elements within the same leaf.
+/// iteration complexity. It uses stack-based depth-first traversal to achieve
+/// true O(N) iteration by moving to the next leaf in O(1) amortized time.
 ///
 /// # Complexity
 ///
+/// - O(N) total iteration complexity
 /// - O(1) amortized per element when iterating sequentially
-/// - Each leaf is accessed once via tree traversal
-/// - Within a leaf, elements are accessed directly via cached slice
-/// - Tree navigation only occurs when crossing leaf boundaries (once per leaf)
+/// - Stack-based traversal ensures O(1) movement to the next leaf
+/// - No repeated root-to-leaf traversals
 pub struct PersistentVectorIterator<'a, T> {
-    /// Reference to the original vector (for lifetime and metadata)
+    /// Reference to the original vector (for tail access and metadata)
     vector: &'a PersistentVector<T>,
-    /// Current global index in the tree portion
-    current_tree_index: usize,
-    /// Total number of elements in the tree (excluding tail)
-    tree_element_count: usize,
+    /// Traversal stack maintaining the path from root to current leaf.
+    /// Each frame stores (`node_reference`, `current_child_index`).
+    /// The stack depth is at most `MAX_TREE_DEPTH`.
+    traversal_stack: ArrayVec<TraversalFrame<'a, T>, MAX_TREE_DEPTH>,
     /// Cached leaf slice for O(1) access within a leaf
     cached_leaf_slice: Option<&'a [T]>,
-    /// Global start index of the cached leaf
-    cached_leaf_start: usize,
-    /// Global end index of the cached leaf (exclusive)
-    cached_leaf_end: usize,
+    /// Current index within the cached leaf
+    leaf_local_index: usize,
     /// Current processing state
     state: IteratorState,
     /// Current position within the tail buffer
@@ -2966,11 +2989,9 @@ impl<'a, T> PersistentVectorIterator<'a, T> {
         if vector.is_empty() {
             return Self {
                 vector,
-                current_tree_index: 0,
-                tree_element_count: 0,
+                traversal_stack: ArrayVec::new(),
                 cached_leaf_slice: None,
-                cached_leaf_start: 0,
-                cached_leaf_end: 0,
+                leaf_local_index: 0,
                 state: IteratorState::Exhausted,
                 tail_index: 0,
                 elements_returned: 0,
@@ -2982,11 +3003,9 @@ impl<'a, T> PersistentVectorIterator<'a, T> {
         if tree_element_count == 0 {
             Self {
                 vector,
-                current_tree_index: 0,
-                tree_element_count: 0,
+                traversal_stack: ArrayVec::new(),
                 cached_leaf_slice: None,
-                cached_leaf_start: 0,
-                cached_leaf_end: 0,
+                leaf_local_index: 0,
                 state: IteratorState::ProcessingTail,
                 tail_index: 0,
                 elements_returned: 0,
@@ -2994,117 +3013,90 @@ impl<'a, T> PersistentVectorIterator<'a, T> {
         } else {
             let mut iterator = Self {
                 vector,
-                current_tree_index: 0,
-                tree_element_count,
+                traversal_stack: ArrayVec::new(),
                 cached_leaf_slice: None,
-                cached_leaf_start: 0,
-                cached_leaf_end: 0,
+                leaf_local_index: 0,
                 state: IteratorState::TraversingTree,
                 tail_index: 0,
                 elements_returned: 0,
             };
-            // Initialize the first leaf cache
-            iterator.update_leaf_cache(0);
+            // Initialize by descending to the first leaf
+            iterator.descend_to_first_leaf(&vector.root);
             iterator
         }
     }
 
-    /// Updates the leaf cache for the given index.
+    /// Descends from the given node to the leftmost leaf, building the traversal stack.
     ///
-    /// Finds the leaf containing `index` and caches its slice and range.
-    /// This is the only place where tree traversal occurs.
-    fn update_leaf_cache(&mut self, index: usize) {
-        // Find the leaf containing this index by navigating the tree
-        if let Some((slice, start, end)) = self.find_leaf_with_slice(index) {
-            self.cached_leaf_slice = Some(slice);
-            self.cached_leaf_start = start;
-            self.cached_leaf_end = end;
-        } else {
-            // No leaf found, set empty cache
-            self.cached_leaf_slice = None;
-            self.cached_leaf_start = index;
-            self.cached_leaf_end = index;
+    /// After this call, `cached_leaf_slice` will contain the leftmost leaf's data,
+    /// and `traversal_stack` will contain the path from the given node to its parent.
+    fn descend_to_first_leaf(&mut self, node: &'a ReferenceCounter<Node<T>>) {
+        let mut current = node;
+
+        loop {
+            match current.as_ref() {
+                Node::Leaf(chunk) => {
+                    self.cached_leaf_slice = Some(chunk.as_slice());
+                    self.leaf_local_index = 0;
+                    return;
+                }
+                Node::Branch { children, .. } => {
+                    // Find the first non-None child
+                    let first_child_index = children
+                        .iter()
+                        .position(|child| child.is_some())
+                        .unwrap_or(0);
+
+                    // Push current branch onto the stack
+                    self.traversal_stack.push(TraversalFrame {
+                        node: current,
+                        child_index: first_child_index,
+                    });
+
+                    // Move to the first child
+                    if let Some(child) = &children[first_child_index] {
+                        current = child;
+                    } else {
+                        // No valid children, tree is exhausted
+                        self.cached_leaf_slice = None;
+                        return;
+                    }
+                }
+            }
         }
     }
 
-    /// Finds the leaf containing `index` and returns its slice and range.
+    /// Advances to the next leaf using the traversal stack.
     ///
-    /// Returns `Some((slice, start, end))` where:
-    /// - `slice` is the leaf's data as a slice
-    /// - `start` is the global start index of the leaf
-    /// - `end` is the global end index (exclusive)
-    fn find_leaf_with_slice(&self, index: usize) -> Option<(&'a [T], usize, usize)> {
-        let mut current_node = &self.vector.root;
-        let mut current_index = index;
-        let mut current_shift = self.vector.shift;
-        let mut cumulative_offset = 0usize;
+    /// Returns `true` if a new leaf was found, `false` if tree traversal is complete.
+    fn advance_to_next_leaf(&mut self) -> bool {
+        // Pop frames until we find a branch with more children to visit
+        while let Some(mut frame) = self.traversal_stack.pop() {
+            if let Node::Branch { children, .. } = frame.node.as_ref() {
+                // Try to find the next non-None child after current index
+                let next_child_index = children
+                    .iter()
+                    .skip(frame.child_index + 1)
+                    .position(|child| child.is_some())
+                    .map(|offset| frame.child_index + 1 + offset);
 
-        while current_shift > 0 {
-            match current_node.as_ref() {
-                Node::Branch {
-                    children,
-                    size_table,
-                } => {
-                    let child_index = find_child_index(size_table.as_slice(), current_index);
-                    if child_index >= children.len() {
-                        return None;
-                    }
+                if let Some(next_index) = next_child_index {
+                    // Found a sibling to visit
+                    frame.child_index = next_index;
+                    self.traversal_stack.push(frame);
 
-                    // Calculate the offset for this child
-                    let child_offset = if child_index == 0 {
-                        0
-                    } else {
-                        size_table[child_index - 1]
-                    };
-
-                    cumulative_offset += child_offset;
-                    current_index -= child_offset;
-
-                    match &children[child_index] {
-                        Some(child) => {
-                            current_node = child;
-                            current_shift -= BITS_PER_LEVEL;
-                        }
-                        None => return None,
+                    // Descend to the leftmost leaf in this subtree
+                    if let Some(child) = &children[next_index] {
+                        self.descend_to_first_leaf(child);
+                        return true;
                     }
                 }
-                Node::Leaf(_) => break,
+                // No more children at this level, continue popping
             }
         }
 
-        // Now we're at the leaf level
-        match current_node.as_ref() {
-            Node::Leaf(chunk) => {
-                let start = cumulative_offset;
-                let end = cumulative_offset + chunk.len();
-                Some((chunk.as_slice(), start, end))
-            }
-            Node::Branch {
-                children,
-                size_table,
-            } => {
-                // At bottom branch level, find the leaf
-                let child_index = find_child_index(size_table.as_slice(), current_index);
-                if child_index >= children.len() {
-                    return None;
-                }
-
-                let child_offset = if child_index == 0 {
-                    0
-                } else {
-                    size_table[child_index - 1]
-                };
-
-                if let Some(child) = &children[child_index]
-                    && let Node::Leaf(chunk) = child.as_ref()
-                {
-                    let start = cumulative_offset + child_offset;
-                    let end = start + chunk.len();
-                    return Some((chunk.as_slice(), start, end));
-                }
-                None
-            }
-        }
+        // Stack is empty, tree traversal is complete
+        false
     }
 }
 
@@ -3115,27 +3107,21 @@ impl<'a, T> Iterator for PersistentVectorIterator<'a, T> {
         loop {
             match self.state {
                 IteratorState::TraversingTree => {
-                    if self.current_tree_index >= self.tree_element_count {
-                        self.state = IteratorState::ProcessingTail;
-                        self.tail_index = 0;
+                    // Try to get element from cached leaf
+                    if let Some(slice) = self.cached_leaf_slice
+                        && let Some(element) = slice.get(self.leaf_local_index)
+                    {
+                        self.leaf_local_index += 1;
+                        self.elements_returned += 1;
+                        return Some(element);
+                    }
+
+                    // Leaf exhausted, try to advance to next leaf
+                    if self.advance_to_next_leaf() {
                         continue;
                     }
 
-                    // Check if we need to update the leaf cache (only at leaf boundaries)
-                    if self.current_tree_index >= self.cached_leaf_end {
-                        self.update_leaf_cache(self.current_tree_index);
-                    }
-
-                    // Get the element directly from the cached leaf slice (O(1))
-                    if let Some(slice) = self.cached_leaf_slice {
-                        let local_index = self.current_tree_index - self.cached_leaf_start;
-                        if let Some(element) = slice.get(local_index) {
-                            self.current_tree_index += 1;
-                            self.elements_returned += 1;
-                            return Some(element);
-                        }
-                    }
-                    // This shouldn't happen for valid indices
+                    // Tree exhausted, switch to tail
                     self.state = IteratorState::ProcessingTail;
                     self.tail_index = 0;
                 }
@@ -3169,28 +3155,25 @@ impl<T> ExactSizeIterator for PersistentVectorIterator<'_, T> {
 
 /// An owning iterator over elements of a [`PersistentVector`].
 ///
-/// This iterator uses an optimized leaf-caching strategy to achieve O(N)
-/// iteration complexity. It caches the current leaf's elements to enable
-/// O(1) access within the same leaf.
+/// This iterator uses stack-based depth-first traversal to achieve true O(N)
+/// iteration complexity. The traversal stack stores cloned node references
+/// (which are `Arc`-based, so cloning is O(1)) to enable O(1) movement to the next leaf.
 ///
 /// # Complexity
 ///
+/// - O(N) total iteration complexity
 /// - O(1) amortized per element when iterating sequentially
-/// - Tree traversal only occurs when crossing leaf boundaries (once per leaf)
+/// - Stack-based traversal ensures O(1) movement to the next leaf
 /// - Leaf elements are cloned once and cached, then moved out for zero-copy access
 pub struct PersistentVectorIntoIterator<T> {
-    /// The original vector (for accessing tree structure)
+    /// The original vector (for tail access and metadata)
     vector: PersistentVector<T>,
-    /// Current global index in the tree portion
-    current_tree_index: usize,
-    /// Total number of elements in the tree (excluding tail)
-    tree_element_count: usize,
+    /// Traversal stack maintaining the path from root to current leaf.
+    /// Each frame stores (`node_clone`, `current_child_index`).
+    /// Node cloning is O(1) because `ReferenceCounter` is `Arc`-based.
+    traversal_stack: Vec<(ReferenceCounter<Node<T>>, usize)>,
     /// Cached leaf elements stored in reverse order for efficient `pop()` access
     cached_leaf_elements: Vec<T>,
-    /// Global start index of the cached leaf
-    cached_leaf_start: usize,
-    /// Global end index of the cached leaf (exclusive)
-    cached_leaf_end: usize,
     /// Current processing state
     state: IteratorState,
     /// Current position within the tail buffer
@@ -3205,11 +3188,8 @@ impl<T: Clone> PersistentVectorIntoIterator<T> {
         if vector.is_empty() {
             return Self {
                 vector,
-                current_tree_index: 0,
-                tree_element_count: 0,
+                traversal_stack: Vec::new(),
                 cached_leaf_elements: Vec::new(),
-                cached_leaf_start: 0,
-                cached_leaf_end: 0,
                 state: IteratorState::Exhausted,
                 tail_index: 0,
                 elements_returned: 0,
@@ -3221,126 +3201,98 @@ impl<T: Clone> PersistentVectorIntoIterator<T> {
         if tree_element_count == 0 {
             Self {
                 vector,
-                current_tree_index: 0,
-                tree_element_count: 0,
+                traversal_stack: Vec::new(),
                 cached_leaf_elements: Vec::new(),
-                cached_leaf_start: 0,
-                cached_leaf_end: 0,
                 state: IteratorState::ProcessingTail,
                 tail_index: 0,
                 elements_returned: 0,
             }
         } else {
-            // Find and cache the first leaf (elements stored in reverse for efficient pop)
-            let (mut elements, start, end) =
-                Self::find_leaf_with_elements_static(&vector, 0).unwrap_or((Vec::new(), 0, 0));
-            elements.reverse();
-            Self {
+            let root_clone = vector.root.clone();
+            let mut iterator = Self {
                 vector,
-                current_tree_index: 0,
-                tree_element_count,
-                cached_leaf_elements: elements,
-                cached_leaf_start: start,
-                cached_leaf_end: end,
+                traversal_stack: Vec::with_capacity(MAX_TREE_DEPTH),
+                cached_leaf_elements: Vec::new(),
                 state: IteratorState::TraversingTree,
                 tail_index: 0,
                 elements_returned: 0,
-            }
+            };
+            // Initialize by descending to the first leaf
+            iterator.descend_to_first_leaf(root_clone);
+            iterator
         }
     }
 
-    /// Finds the leaf containing `index` and returns its cloned elements and range.
-    fn find_leaf_with_elements_static(
-        vector: &PersistentVector<T>,
-        index: usize,
-    ) -> Option<(Vec<T>, usize, usize)> {
-        let mut current_node = &vector.root;
-        let mut current_index = index;
-        let mut current_shift = vector.shift;
-        let mut cumulative_offset = 0usize;
+    /// Descends from the given node to the leftmost leaf, building the traversal stack.
+    ///
+    /// After this call, `cached_leaf_elements` will contain the leftmost leaf's
+    /// elements in reverse order for efficient `pop()` access.
+    fn descend_to_first_leaf(&mut self, node: ReferenceCounter<Node<T>>) {
+        let mut current = node;
 
-        while current_shift > 0 {
-            match current_node.as_ref() {
-                Node::Branch {
-                    children,
-                    size_table,
-                } => {
-                    let child_index = find_child_index(size_table.as_slice(), current_index);
-                    if child_index >= children.len() {
-                        return None;
-                    }
+        loop {
+            match current.as_ref() {
+                Node::Leaf(chunk) => {
+                    // Clone elements and reverse for efficient pop
+                    let mut elements: Vec<T> = chunk.as_slice().to_vec();
+                    elements.reverse();
+                    self.cached_leaf_elements = elements;
+                    return;
+                }
+                Node::Branch { children, .. } => {
+                    // Find the first non-None child
+                    let first_child_index = children
+                        .iter()
+                        .position(|child| child.is_some())
+                        .unwrap_or(0);
 
-                    let child_offset = if child_index == 0 {
-                        0
+                    // Push current branch onto the stack
+                    self.traversal_stack
+                        .push((current.clone(), first_child_index));
+
+                    // Move to the first child
+                    if let Some(child) = &children[first_child_index] {
+                        current = child.clone();
                     } else {
-                        size_table[child_index - 1]
-                    };
-
-                    cumulative_offset += child_offset;
-                    current_index -= child_offset;
-
-                    match &children[child_index] {
-                        Some(child) => {
-                            current_node = child;
-                            current_shift -= BITS_PER_LEVEL;
-                        }
-                        None => return None,
+                        // No valid children, tree is exhausted
+                        self.cached_leaf_elements.clear();
+                        return;
                     }
                 }
-                Node::Leaf(_) => break,
-            }
-        }
-
-        match current_node.as_ref() {
-            Node::Leaf(chunk) => {
-                let start = cumulative_offset;
-                let end = cumulative_offset + chunk.len();
-                let elements: Vec<T> = chunk.as_slice().to_vec();
-                Some((elements, start, end))
-            }
-            Node::Branch {
-                children,
-                size_table,
-            } => {
-                let child_index = find_child_index(size_table.as_slice(), current_index);
-                if child_index >= children.len() {
-                    return None;
-                }
-
-                let child_offset = if child_index == 0 {
-                    0
-                } else {
-                    size_table[child_index - 1]
-                };
-
-                if let Some(child) = &children[child_index]
-                    && let Node::Leaf(chunk) = child.as_ref()
-                {
-                    let start = cumulative_offset + child_offset;
-                    let end = start + chunk.len();
-                    let elements: Vec<T> = chunk.as_slice().to_vec();
-                    return Some((elements, start, end));
-                }
-                None
             }
         }
     }
 
-    /// Updates the leaf cache for the given index.
-    /// Elements are stored in reverse order to enable efficient `pop()` for move semantics.
-    fn update_leaf_cache(&mut self, index: usize) {
-        if let Some((mut elements, start, end)) =
-            Self::find_leaf_with_elements_static(&self.vector, index)
-        {
-            elements.reverse();
-            self.cached_leaf_elements = elements;
-            self.cached_leaf_start = start;
-            self.cached_leaf_end = end;
-        } else {
-            self.cached_leaf_elements.clear();
-            self.cached_leaf_start = index;
-            self.cached_leaf_end = index;
+    /// Advances to the next leaf using the traversal stack.
+    ///
+    /// Returns `true` if a new leaf was found, `false` if tree traversal is complete.
+    fn advance_to_next_leaf(&mut self) -> bool {
+        // Pop frames until we find a branch with more children to visit
+        while let Some((node, child_index)) = self.traversal_stack.pop() {
+            if let Node::Branch { children, .. } = node.as_ref() {
+                // Try to find the next non-None child after current index
+                let next_child_index = children
+                    .iter()
+                    .skip(child_index + 1)
+                    .position(|child| child.is_some())
+                    .map(|offset| child_index + 1 + offset);
+
+                if let Some(next_index) = next_child_index {
+                    // Found a sibling to visit
+                    self.traversal_stack.push((node.clone(), next_index));
+
+                    // Descend to the leftmost leaf in this subtree
+                    if let Some(child) = &children[next_index] {
+                        self.descend_to_first_leaf(child.clone());
+                        return true;
+                    }
+                }
+                // No more children at this level, continue popping
+            }
         }
+
+        // Stack is empty, tree traversal is complete
+        false
     }
 }
 
@@ -3351,24 +3303,18 @@ impl<T: Clone> Iterator for PersistentVectorIntoIterator<T> {
         loop {
             match self.state {
                 IteratorState::TraversingTree => {
-                    if self.current_tree_index >= self.tree_element_count {
-                        self.state = IteratorState::ProcessingTail;
-                        self.tail_index = 0;
-                        continue;
-                    }
-
-                    // Check if we need to update the leaf cache (only at leaf boundaries)
-                    if self.current_tree_index >= self.cached_leaf_end {
-                        self.update_leaf_cache(self.current_tree_index);
-                    }
-
-                    // Move the element out via pop() - elements are stored in reverse order
+                    // Try to get element from cached leaf (pop from reversed vec)
                     if let Some(element) = self.cached_leaf_elements.pop() {
-                        self.current_tree_index += 1;
                         self.elements_returned += 1;
                         return Some(element);
                     }
-                    // This shouldn't happen for valid indices
+
+                    // Leaf exhausted, try to advance to next leaf
+                    if self.advance_to_next_leaf() {
+                        continue;
+                    }
+
+                    // Tree exhausted, switch to tail
                     self.state = IteratorState::ProcessingTail;
                     self.tail_index = 0;
                 }
@@ -4153,7 +4099,7 @@ impl<T: Clone> TransientVector<T> {
     /// Pushes the current tail into the root tree.
     fn push_tail_to_root(&mut self) {
         let old_tail = std::mem::replace(&mut self.tail, TailChunk::new());
-        let tail_leaf = Node::leaf_from_chunk(LeafChunk::from_slice(old_tail.as_slice()));
+        let tail_leaf = Node::leaf_from_chunk(old_tail.into_leaf_chunk());
         let tail_offset = self.tail_offset();
 
         // Check if we need to increase the tree depth
