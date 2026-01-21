@@ -17,14 +17,26 @@
 //!    directly. When outside, the global runtime's handle is cached.
 //!
 //! 3. **Blocking Execution**: A `run_blocking` function that executes futures
-//!    efficiently by using `block_in_place` when already inside a runtime,
-//!    avoiding nested runtime panics.
+//!    efficiently by using `block_in_place` when already inside a multi-thread
+//!    runtime, avoiding nested runtime panics.
 //!
 //! # Performance Characteristics
 //!
 //! - `global()`: O(1) after first initialization (static `LazyLock`)
 //! - `handle()`: O(1) with thread-local caching
 //! - `run_blocking()`: No additional Enter/Drop overhead when inside runtime
+//!
+//! # Runtime Flavor Considerations
+//!
+//! This module handles different runtime flavors appropriately:
+//!
+//! - **Multi-thread runtime**: Uses `block_in_place` for efficient blocking
+//!   execution without nested runtime panics.
+//! - **Current-thread runtime**: Returns an error via `BlockingError::CurrentThreadRuntime`
+//!   because `block_in_place` is not supported in current-thread runtimes.
+//!
+//! When inside a runtime, the current runtime's handle is preferred over the
+//! global runtime to preserve tracing context and metrics settings.
 //!
 //! # Examples
 //!
@@ -37,15 +49,17 @@
 //! // Get a cached handle
 //! let obtained_handle = handle();
 //!
-//! // Execute a future blocking
+//! // Execute a future blocking (returns Result to handle current_thread runtime)
 //! let result = run_blocking(async { 42 });
 //! ```
 
 use std::cell::RefCell;
+use std::error::Error;
+use std::fmt;
 use std::future::Future;
 use std::sync::LazyLock;
 
-use tokio::runtime::{Builder, Handle, Runtime};
+use tokio::runtime::{Builder, Handle, Runtime, RuntimeFlavor};
 
 // =============================================================================
 // Global Runtime
@@ -159,17 +173,172 @@ pub fn handle() -> Handle {
 }
 
 // =============================================================================
+// Blocking Error
+// =============================================================================
+
+/// Error type for blocking execution failures.
+///
+/// This error is returned when `try_run_blocking` cannot execute a future
+/// due to runtime constraints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockingError {
+    /// Cannot use `block_in_place` in a current-thread runtime.
+    ///
+    /// The `block_in_place` function is only supported in multi-thread
+    /// runtimes. When called from within a current-thread runtime,
+    /// this error is returned instead of panicking.
+    CurrentThreadRuntime,
+
+    /// The runtime flavor is not supported for blocking execution.
+    ///
+    /// This error is returned when `try_run_blocking` is called from within
+    /// a runtime with an unknown or unsupported flavor (e.g., a new flavor
+    /// added in a future version of tokio).
+    ///
+    /// This variant exists for forward compatibility with future tokio versions
+    /// that may introduce new runtime flavors.
+    UnsupportedRuntimeFlavor,
+}
+
+impl fmt::Display for BlockingError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CurrentThreadRuntime => {
+                write!(
+                    formatter,
+                    "cannot execute blocking operation in current-thread runtime: \
+                     block_in_place is only supported in multi-thread runtimes"
+                )
+            }
+            Self::UnsupportedRuntimeFlavor => {
+                write!(
+                    formatter,
+                    "cannot execute blocking operation: \
+                     the runtime flavor is not supported for blocking execution"
+                )
+            }
+        }
+    }
+}
+
+impl Error for BlockingError {}
+
+// =============================================================================
 // Blocking Execution
 // =============================================================================
 
-/// Executes a future synchronously, blocking the current thread.
+/// Attempts to execute a future synchronously, blocking the current thread.
 ///
 /// This function provides an efficient way to run async code from synchronous
 /// contexts. It handles the complexity of being inside or outside a tokio
 /// runtime automatically:
 ///
-/// - **Inside a runtime**: Uses `block_in_place` to avoid nested runtime panics
-/// - **Outside a runtime**: Uses the global runtime's `block_on`
+/// - **Inside a multi-thread runtime**: Uses `block_in_place` with the current
+///   runtime's handle to avoid nested runtime panics while preserving the
+///   caller's runtime context (tracing, metrics, etc.).
+/// - **Inside a current-thread runtime**: Returns `Err(BlockingError::CurrentThreadRuntime)`
+///   because `block_in_place` is not supported in current-thread runtimes.
+/// - **Outside a runtime**: Uses the global runtime's `block_on`.
+///
+/// # Runtime Context Preservation
+///
+/// When called from within a runtime, this function uses `Handle::current()`
+/// to preserve the caller's runtime context. This ensures that tracing spans,
+/// metrics, and other runtime-specific settings are properly inherited.
+///
+/// # Arguments
+///
+/// * `future` - The future to execute.
+///
+/// # Returns
+///
+/// `Ok(T)` with the future's output on success, or `Err(BlockingError)` if
+/// execution is not possible in the current context.
+///
+/// # Errors
+///
+/// Returns `Err(BlockingError::CurrentThreadRuntime)` when called from within
+/// a current-thread tokio runtime, as `block_in_place` is not supported in
+/// that context.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// use lambars::effect::async_io::runtime::try_run_blocking;
+///
+/// // From synchronous code (outside any runtime)
+/// let result = try_run_blocking(async {
+///     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+///     42
+/// });
+/// assert_eq!(result, Ok(42));
+/// ```
+///
+/// ```rust,ignore
+/// use lambars::effect::async_io::runtime::{try_run_blocking, BlockingError};
+///
+/// // From inside a current-thread runtime
+/// #[tokio::test(flavor = "current_thread")]
+/// async fn test() {
+///     let result = tokio::task::spawn_blocking(|| {
+///         try_run_blocking(async { 42 })
+///     }).await.unwrap();
+///     // Returns error because current_thread runtime doesn't support block_in_place
+///     assert_eq!(result, Err(BlockingError::CurrentThreadRuntime));
+/// }
+/// ```
+///
+/// ```rust,ignore
+/// use lambars::effect::async_io::runtime::try_run_blocking;
+///
+/// // From inside a multi-thread runtime's spawn_blocking
+/// #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// async fn test() {
+///     let result = tokio::task::spawn_blocking(|| {
+///         try_run_blocking(async { 42 })
+///     }).await.unwrap();
+///     assert_eq!(result, Ok(42));
+/// }
+/// ```
+#[inline]
+pub fn try_run_blocking<F, T>(future: F) -> Result<T, BlockingError>
+where
+    F: Future<Output = T>,
+{
+    // Check if we're inside a tokio runtime
+    if let Ok(current_handle) = Handle::try_current() {
+        // Inside a runtime: check runtime flavor
+        match current_handle.runtime_flavor() {
+            RuntimeFlavor::MultiThread => {
+                // Multi-thread runtime: use block_in_place with current handle
+                // to preserve the caller's runtime context (tracing, metrics, etc.)
+                Ok(tokio::task::block_in_place(|| {
+                    current_handle.block_on(future)
+                }))
+            }
+            RuntimeFlavor::CurrentThread => {
+                // Current-thread runtime: block_in_place is not supported
+                Err(BlockingError::CurrentThreadRuntime)
+            }
+            // Handle any future runtime flavors conservatively
+            _ => {
+                // Unknown runtime flavor: return a specific error for forward compatibility
+                // This allows callers to distinguish between "current-thread doesn't support
+                // block_in_place" and "unknown runtime flavor that may or may not support it"
+                Err(BlockingError::UnsupportedRuntimeFlavor)
+            }
+        }
+    } else {
+        // Outside a runtime: use global runtime's block_on
+        Ok(global().block_on(future))
+    }
+}
+
+/// Executes a future synchronously, blocking the current thread.
+///
+/// This is a convenience wrapper around [`try_run_blocking`] that panics
+/// on error. Use this when you know you're in a multi-thread runtime context
+/// or when a panic is acceptable.
 ///
 /// # Arguments
 ///
@@ -181,14 +350,15 @@ pub fn handle() -> Handle {
 ///
 /// # Panics
 ///
-/// Panics if the future panics.
+/// - Panics if called from within a current-thread runtime.
+/// - Panics if the future panics.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// use lambars::effect::async_io::runtime::run_blocking;
 ///
-/// // From synchronous code
+/// // From synchronous code (outside any runtime)
 /// let result = run_blocking(async {
 ///     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 ///     42
@@ -199,8 +369,8 @@ pub fn handle() -> Handle {
 /// ```rust,ignore
 /// use lambars::effect::async_io::runtime::run_blocking;
 ///
-/// // From inside a spawn_blocking task
-/// #[tokio::test(flavor = "multi_thread")]
+/// // From inside a multi-thread runtime's spawn_blocking
+/// #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 /// async fn test() {
 ///     let result = tokio::task::spawn_blocking(|| {
 ///         run_blocking(async { 42 })
@@ -213,20 +383,7 @@ pub fn run_blocking<F, T>(future: F) -> T
 where
     F: Future<Output = T>,
 {
-    // Check if we're inside a tokio runtime
-    if Handle::try_current().is_ok() {
-        // Inside a runtime: use block_in_place to avoid nested runtime issues
-        // This moves the current task to a blocking thread and runs the future there
-        tokio::task::block_in_place(|| {
-            // We need to create a new runtime here because block_in_place
-            // doesn't give us a way to run futures directly.
-            // However, we can use the global runtime's handle to run the future.
-            global().handle().block_on(future)
-        })
-    } else {
-        // Outside a runtime: use global runtime's block_on
-        global().block_on(future)
-    }
+    try_run_blocking(future).expect("run_blocking failed")
 }
 
 // =============================================================================
@@ -309,6 +466,120 @@ mod tests {
     }
 
     // =========================================================================
+    // BlockingError Tests
+    // =========================================================================
+
+    #[rstest]
+    fn blocking_error_display() {
+        let error = BlockingError::CurrentThreadRuntime;
+        let message = error.to_string();
+        assert!(message.contains("current-thread runtime"));
+        assert!(message.contains("block_in_place"));
+    }
+
+    #[rstest]
+    fn blocking_error_debug() {
+        let error = BlockingError::CurrentThreadRuntime;
+        let debug = format!("{error:?}");
+        assert!(debug.contains("CurrentThreadRuntime"));
+    }
+
+    #[rstest]
+    fn blocking_error_equality() {
+        let error1 = BlockingError::CurrentThreadRuntime;
+        let error2 = BlockingError::CurrentThreadRuntime;
+        assert_eq!(error1, error2);
+    }
+
+    #[rstest]
+    fn blocking_error_clone() {
+        let error = BlockingError::CurrentThreadRuntime;
+        let cloned = error;
+        assert_eq!(error, cloned);
+    }
+
+    #[rstest]
+    fn blocking_error_unsupported_runtime_flavor_display() {
+        let error = BlockingError::UnsupportedRuntimeFlavor;
+        let message = error.to_string();
+        assert!(message.contains("runtime flavor"));
+        assert!(message.contains("not supported"));
+    }
+
+    #[rstest]
+    fn blocking_error_unsupported_runtime_flavor_debug() {
+        let error = BlockingError::UnsupportedRuntimeFlavor;
+        let debug = format!("{error:?}");
+        assert!(debug.contains("UnsupportedRuntimeFlavor"));
+    }
+
+    #[rstest]
+    fn blocking_error_variants_are_distinct() {
+        let current_thread = BlockingError::CurrentThreadRuntime;
+        let unsupported = BlockingError::UnsupportedRuntimeFlavor;
+        assert_ne!(current_thread, unsupported);
+    }
+
+    // =========================================================================
+    // try_run_blocking() Tests
+    // =========================================================================
+
+    #[rstest]
+    fn try_run_blocking_from_outside_runtime() {
+        let result = try_run_blocking(async { 42 });
+        assert_eq!(result, Ok(42));
+    }
+
+    #[rstest]
+    fn try_run_blocking_with_complex_future() {
+        let result = try_run_blocking(async {
+            let value1 = async { 10 }.await;
+            let value2 = async { 20 }.await;
+            value1 + value2
+        });
+        assert_eq!(result, Ok(30));
+    }
+
+    #[rstest]
+    fn try_run_blocking_preserves_result_types() {
+        let ok_result: Result<Result<i32, &str>, BlockingError> =
+            try_run_blocking(async { Ok(42) });
+        assert_eq!(ok_result, Ok(Ok(42)));
+
+        let err_result: Result<Result<i32, &str>, BlockingError> =
+            try_run_blocking(async { Err("error") });
+        assert_eq!(err_result, Ok(Err("error")));
+    }
+
+    #[rstest]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn try_run_blocking_inside_multi_thread_runtime() {
+        let result = tokio::task::spawn_blocking(|| try_run_blocking(async { 42 }))
+            .await
+            .unwrap();
+        assert_eq!(result, Ok(42));
+    }
+
+    #[rstest]
+    #[tokio::test(flavor = "current_thread")]
+    async fn try_run_blocking_inside_current_thread_runtime() {
+        let result = tokio::task::spawn_blocking(|| try_run_blocking(async { 42 }))
+            .await
+            .unwrap();
+        assert_eq!(result, Err(BlockingError::CurrentThreadRuntime));
+    }
+
+    #[rstest]
+    fn try_run_blocking_multiple_calls() {
+        let results: Vec<Result<i32, BlockingError>> = (0..10)
+            .map(|i| try_run_blocking(async move { i }))
+            .collect();
+
+        let expected: Vec<Result<i32, BlockingError>> = (0..10).map(Ok).collect();
+        assert_eq!(results, expected);
+    }
+
+    // =========================================================================
     // run_blocking() Tests
     // =========================================================================
 
@@ -339,7 +610,7 @@ mod tests {
 
     #[rstest]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn run_blocking_inside_spawn_blocking() {
+    async fn run_blocking_inside_multi_thread_spawn_blocking() {
         let result = tokio::task::spawn_blocking(|| run_blocking(async { 42 }))
             .await
             .unwrap();
