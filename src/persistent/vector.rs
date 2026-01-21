@@ -640,6 +640,25 @@ impl<T> Node<T> {
             size_table: ReferenceCounter::from(size_table),
         }
     }
+
+    /// Returns `true` if this node or any of its descendants is a `RelaxedBranch`.
+    ///
+    /// This method is used to determine whether a tree needs to be regularized
+    /// before conversion to `TransientVector`.
+    ///
+    /// # Returns
+    ///
+    /// `true` if any `RelaxedBranch` node exists in the subtree, `false` otherwise
+    fn contains_relaxed_branch(&self) -> bool {
+        match self {
+            Self::Branch(children) => children
+                .iter()
+                .flatten()
+                .any(|child| child.contains_relaxed_branch()),
+            Self::RelaxedBranch { .. } => true,
+            Self::Leaf(_) => false,
+        }
+    }
 }
 
 impl<T: Clone> Node<T> {
@@ -674,44 +693,6 @@ impl<T: Clone> Node<T> {
     #[inline]
     fn leaf_from_tail_chunk(tail_chunk: &TailChunk<T>) -> Self {
         Self::Leaf(ReferenceCounter::from(tail_chunk.to_vec()))
-    }
-
-    /// Converts a `RelaxedBranch` node to a regular `Branch` node recursively.
-    ///
-    /// This is used when converting a `PersistentVector` to a `TransientVector`,
-    /// as `TransientVector` does not support `RelaxedBranch` nodes.
-    ///
-    /// `Branch` and `Leaf` nodes are returned unchanged (only cloning the reference).
-    ///
-    /// # Returns
-    ///
-    /// A new node tree where all `RelaxedBranch` nodes have been converted to `Branch` nodes.
-    fn regularize(node: &ReferenceCounter<Self>) -> ReferenceCounter<Self> {
-        match node.as_ref() {
-            Self::Branch(children) => {
-                // Recursively regularize children
-                let new_children: [Option<ReferenceCounter<Self>>; BRANCHING_FACTOR] =
-                    std::array::from_fn(|i| {
-                        children[i].as_ref().map(|child| Self::regularize(child))
-                    });
-                ReferenceCounter::new(Self::Branch(ReferenceCounter::new(new_children)))
-            }
-            Self::RelaxedBranch { children, .. } => {
-                // Convert RelaxedBranch to Branch by placing children in their positions
-                let mut new_children: [Option<ReferenceCounter<Self>>; BRANCHING_FACTOR] =
-                    std::array::from_fn(|_| None);
-                for (index, child) in children.iter().enumerate() {
-                    if index < BRANCHING_FACTOR {
-                        new_children[index] = Some(Self::regularize(child));
-                    }
-                }
-                ReferenceCounter::new(Self::Branch(ReferenceCounter::new(new_children)))
-            }
-            Self::Leaf(_) => {
-                // Leaf nodes don't need regularization, just clone the reference
-                node.clone()
-            }
-        }
     }
 }
 
@@ -4269,7 +4250,9 @@ impl<T: Clone> PersistentVector<T> {
     ///
     /// # Complexity
     ///
-    /// O(1) - moves root and copies tail (max 32 elements)
+    /// O(1) when the tree contains no `RelaxedBranch` nodes (typical case).
+    /// O(n) when `RelaxedBranch` nodes are present (e.g., after `concat`),
+    /// as the tree must be rebuilt to ensure correct bit-based indexing.
     ///
     /// # Examples
     ///
@@ -4285,15 +4268,29 @@ impl<T: Clone> PersistentVector<T> {
     /// ```
     #[must_use]
     pub fn transient(self) -> TransientVector<T> {
-        // Regularize the root to convert any RelaxedBranch nodes to Branch nodes.
-        // TransientVector does not support RelaxedBranch nodes.
-        let regularized_root = Node::regularize(&self.root);
-        TransientVector {
-            root: regularized_root,
-            tail: self.tail.as_ref().clone(),
-            length: self.length,
-            shift: self.shift,
-            _marker: PhantomData,
+        // Check if the tree contains any RelaxedBranch nodes.
+        // If not, we can skip regularization and maintain O(1) complexity.
+        if self.root.contains_relaxed_branch() {
+            // RelaxedBranch nodes are present, need to rebuild the tree.
+            // This is necessary because TransientVector uses bit-based indexing
+            // which requires a proper Radix Balanced Tree structure.
+            //
+            // We rebuild by collecting all elements and constructing a new
+            // TransientVector, which ensures correct shift values and tree structure.
+            let mut transient = TransientVector::new();
+            for element in self {
+                transient.push_back(element);
+            }
+            transient
+        } else {
+            // No RelaxedBranch nodes, O(1) conversion by just moving the root.
+            TransientVector {
+                root: self.root,
+                tail: self.tail.as_ref().clone(),
+                length: self.length,
+                shift: self.shift,
+                _marker: PhantomData,
+            }
         }
     }
 }

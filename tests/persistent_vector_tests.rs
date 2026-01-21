@@ -2447,3 +2447,168 @@ mod from_slice_tests {
         assert_eq!(vector.get(0), Some(&"hello"));
     }
 }
+
+// =============================================================================
+// Concat and Transient Integration Tests
+// =============================================================================
+
+mod concat_transient_tests {
+    use super::*;
+
+    /// Test that concat followed by transient and push_back works correctly.
+    /// This verifies that RelaxedBranch nodes are properly regularized.
+    #[rstest]
+    fn test_concat_transient_push_back() {
+        let left: PersistentVector<i32> = (0..100).collect();
+        let right: PersistentVector<i32> = (100..200).collect();
+        let concatenated = left.concat(&right);
+
+        // Convert to transient and push more elements
+        let mut transient = concatenated.transient();
+        for i in 200..250 {
+            transient.push_back(i);
+        }
+
+        let result = transient.persistent();
+
+        // Verify length
+        assert_eq!(result.len(), 250);
+
+        // Verify all elements are accessible
+        for i in 0..250 {
+            assert_eq!(result.get(i), Some(&(i as i32)));
+        }
+    }
+
+    /// Test that concat followed by transient preserves correct get behavior.
+    #[rstest]
+    fn test_concat_transient_get() {
+        let left: PersistentVector<i32> = (0..50).collect();
+        let right: PersistentVector<i32> = (50..100).collect();
+        let concatenated = left.concat(&right);
+
+        let transient = concatenated.transient();
+
+        // Verify all elements are correctly accessible via transient
+        for i in 0..100 {
+            assert_eq!(transient.get(i), Some(&(i as i32)));
+        }
+    }
+
+    /// Test that concat followed by transient and update works correctly.
+    #[rstest]
+    fn test_concat_transient_update() {
+        let left: PersistentVector<i32> = (0..50).collect();
+        let right: PersistentVector<i32> = (50..100).collect();
+        let concatenated = left.concat(&right);
+
+        let mut transient = concatenated.transient();
+
+        // Update some elements
+        transient.update(25, 999);
+        transient.update(75, 888);
+
+        let result = transient.persistent();
+
+        // Verify updates
+        assert_eq!(result.get(25), Some(&999));
+        assert_eq!(result.get(75), Some(&888));
+
+        // Verify other elements unchanged
+        for i in 0..100 {
+            if i != 25 && i != 75 {
+                assert_eq!(result.get(i), Some(&(i as i32)));
+            }
+        }
+    }
+
+    /// Test that transient on a non-concat vector (no RelaxedBranch) is O(1).
+    /// This verifies the optimization to skip regularization.
+    #[rstest]
+    fn test_transient_no_relaxed_branch() {
+        // Create a vector without concat (no RelaxedBranch nodes)
+        let vector: PersistentVector<i32> = (0..1000).collect();
+
+        // Convert to transient (should be O(1))
+        let mut transient = vector.transient();
+
+        // Verify it works correctly
+        assert_eq!(transient.len(), 1000);
+        for i in 0..1000 {
+            assert_eq!(transient.get(i), Some(&(i as i32)));
+        }
+
+        // Push more elements
+        for i in 1000..1100 {
+            transient.push_back(i);
+        }
+
+        let result = transient.persistent();
+        assert_eq!(result.len(), 1100);
+    }
+
+    /// Test multiple concat operations followed by transient.
+    #[rstest]
+    fn test_multiple_concat_transient() {
+        let v1: PersistentVector<i32> = (0..30).collect();
+        let v2: PersistentVector<i32> = (30..60).collect();
+        let v3: PersistentVector<i32> = (60..90).collect();
+        let v4: PersistentVector<i32> = (90..120).collect();
+
+        let concatenated = v1.concat(&v2).concat(&v3).concat(&v4);
+
+        let mut transient = concatenated.transient();
+        transient.push_back(120);
+        transient.push_back(121);
+
+        let result = transient.persistent();
+
+        assert_eq!(result.len(), 122);
+        for i in 0..122 {
+            assert_eq!(result.get(i), Some(&(i as i32)));
+        }
+    }
+
+    /// Test concat with vectors of different sizes followed by transient.
+    #[rstest]
+    fn test_concat_different_sizes_transient() {
+        let small: PersistentVector<i32> = (0..5).collect();
+        let large: PersistentVector<i32> = (5..500).collect();
+
+        let concatenated = small.concat(&large);
+        let mut transient = concatenated.transient();
+
+        for i in 500..550 {
+            transient.push_back(i);
+        }
+
+        let result = transient.persistent();
+
+        assert_eq!(result.len(), 550);
+        for i in 0..550 {
+            assert_eq!(result.get(i), Some(&(i as i32)));
+        }
+    }
+
+    /// Test that empty vector concat followed by transient works.
+    #[rstest]
+    fn test_empty_concat_transient() {
+        let empty: PersistentVector<i32> = PersistentVector::new();
+        let non_empty: PersistentVector<i32> = (0..100).collect();
+
+        let concatenated1 = empty.concat(&non_empty);
+        let concatenated2 = non_empty.concat(&empty);
+
+        let mut transient1 = concatenated1.transient();
+        let mut transient2 = concatenated2.transient();
+
+        transient1.push_back(100);
+        transient2.push_back(100);
+
+        let result1 = transient1.persistent();
+        let result2 = transient2.persistent();
+
+        assert_eq!(result1.len(), 101);
+        assert_eq!(result2.len(), 101);
+    }
+}
