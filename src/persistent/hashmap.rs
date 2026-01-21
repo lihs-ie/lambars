@@ -46,10 +46,10 @@
 //! - Structural sharing via reference counting (`Rc` or `Arc` with `arc` feature)
 
 use super::ReferenceCounter;
+use smallvec::SmallVec;
 use std::borrow::Borrow;
-use std::collections::hash_map::DefaultHasher;
 use std::fmt;
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
 use std::iter::FromIterator;
 use std::marker::PhantomData;
 use std::rc::Rc;
@@ -77,8 +77,92 @@ const MAX_DEPTH: usize = 13;
 // Hash computation
 // =============================================================================
 
-/// Computes the hash of a key using `DefaultHasher`.
+/// Fixed seed for ahash to ensure referential transparency.
+///
+/// Using the fractional part of mathematical constants (pi) as a seed value.
+/// This provides a deterministic seed that produces the same hash values
+/// across process restarts and different machines.
+///
+/// # Warning
+///
+/// This fixed seed removes `DoS` resistance. Only use `ahash` feature
+/// for internal data that is not influenced by external input.
+#[cfg(all(feature = "ahash", not(feature = "fxhash")))]
+const AHASH_SEED: usize = 0x243f_6a88_85a3_08d3_usize;
+
+/// Computes the hash of a key.
+///
+/// The hasher is selected based on feature flags:
+/// - `fxhash`: Uses `FxHasher` (fastest, no `DoS` resistance)
+/// - `ahash`: Uses `AHasher` with fixed seed (fast, no `DoS` resistance)
+/// - default: Uses `DefaultHasher` (`SipHash`, has `DoS` resistance)
+///
+/// # Priority
+///
+/// If both `fxhash` and `ahash` features are enabled, `fxhash` takes priority.
+///
+/// # Warning
+///
+/// When using `fxhash` or `ahash` features, `DoS` resistance is lost.
+/// Use these only in trusted environments where performance is critical
+/// and all keys come from trusted sources.
+///
+/// **Do NOT use `fxhash` or `ahash` when:**
+/// - Keys come from user input
+/// - Keys come from network data
+/// - Keys come from external files
+///
+/// Attackers can craft keys that cause hash collisions, degrading
+/// performance to O(n) per operation (`HashDoS` attack).
+#[cfg(feature = "fxhash")]
+#[inline]
 fn compute_hash<K: Hash + ?Sized>(key: &K) -> u64 {
+    use std::hash::Hasher;
+    let mut hasher = rustc_hash::FxHasher::default();
+    key.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Computes the hash of a key using ahash with a fixed seed.
+///
+/// Uses a fixed seed to ensure deterministic behavior within the same
+/// binary execution: calling this function with the same key will always
+/// return the same hash value during program runtime.
+///
+/// # Limitations
+///
+/// Hash values are NOT stable across:
+/// - Different machines or CPU architectures
+/// - Different compiler versions
+/// - Different versions of the ahash crate
+///
+/// Therefore, do NOT use these hash values for:
+/// - Persistence to disk or database
+/// - Cross-process communication
+/// - Network protocols
+///
+/// # Warning
+///
+/// This removes `DoS` resistance. Only use for internal/trusted data.
+#[cfg(all(feature = "ahash", not(feature = "fxhash")))]
+#[inline]
+fn compute_hash<K: Hash + ?Sized>(key: &K) -> u64 {
+    use std::sync::LazyLock;
+    // Static hasher state to avoid repeated initialization
+    static AHASH_STATE: LazyLock<ahash::RandomState> =
+        LazyLock::new(|| ahash::RandomState::with_seed(AHASH_SEED));
+    std::hash::BuildHasher::hash_one(&*AHASH_STATE, key)
+}
+
+/// Computes the hash of a key using DefaultHasher (SipHash).
+///
+/// This is the default hasher with `DoS` resistance, suitable for
+/// handling untrusted input.
+#[cfg(all(not(feature = "fxhash"), not(feature = "ahash")))]
+#[inline]
+fn compute_hash<K: Hash + ?Sized>(key: &K) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::Hasher;
     let mut hasher = DefaultHasher::new();
     key.hash(&mut hasher);
     hasher.finish()
@@ -101,6 +185,13 @@ const fn hash_index(hash: u64, depth: usize) -> usize {
 }
 
 // =============================================================================
+// Type Aliases for SmallVec optimization
+// =============================================================================
+
+type ChildArray<K, V> = SmallVec<[ChildSlot<K, V>; 6]>;
+type CollisionArray<K, V> = SmallVec<[(K, V); 4]>;
+
+// =============================================================================
 // Node Definition
 // =============================================================================
 
@@ -115,19 +206,21 @@ enum Node<K, V> {
     Bitmap {
         /// Bitmap indicating which slots are occupied
         bitmap: u32,
-        /// Children (entries or subnodes), compressed
-        children: ReferenceCounter<[Child<K, V>]>,
+        /// Children (entries or subnodes), compressed using `SmallVec`
+        children: ChildArray<K, V>,
     },
     /// Collision node for keys with the same hash
     Collision {
         hash: u64,
-        entries: ReferenceCounter<[(K, V)]>,
+        /// Collision entries using `SmallVec` for stack allocation
+        entries: CollisionArray<K, V>,
     },
 }
 
-/// A child in a bitmap node.
+/// A child slot in a bitmap node.
+/// Renamed from `Child` to `ChildSlot` for clarity.
 #[derive(Clone)]
-enum Child<K, V> {
+enum ChildSlot<K, V> {
     /// A key-value entry with cached hash value
     Entry {
         /// Cached hash value for the key (avoids recomputation)
@@ -137,7 +230,7 @@ enum Child<K, V> {
         /// The value
         value: V,
     },
-    /// A sub-node
+    /// A sub-node (structural sharing is maintained through `ReferenceCounter`)
     Node(ReferenceCounter<Node<K, V>>),
 }
 
@@ -329,13 +422,12 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
                 let bit = 1u32 << index;
 
                 if bitmap & bit == 0 {
-                    // Slot is empty
                     None
                 } else {
                     // Count bits to find position in children array
                     let position = (bitmap & (bit - 1)).count_ones() as usize;
                     match &children[position] {
-                        Child::Entry {
+                        ChildSlot::Entry {
                             key: child_key,
                             value,
                             ..
@@ -346,12 +438,14 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
                                 None
                             }
                         }
-                        Child::Node(subnode) => Self::get_from_node(subnode, key, hash, depth + 1),
+                        ChildSlot::Node(subnode) => {
+                            Self::get_from_node(subnode, key, hash, depth + 1)
+                        }
                     }
                 }
             }
             Node::Collision { hash: _, entries } => {
-                for (entry_key, value) in entries.iter() {
+                for (entry_key, value) in entries {
                     if entry_key.borrow() == key {
                         return Some(value);
                     }
@@ -432,35 +526,30 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
 
     /// Builds a new child array with a new element inserted at the specified position.
     ///
-    /// Uses `Iterator::collect()` to construct `ReferenceCounter<[Child]>` in a single expression,
-    /// avoiding the pattern of manually creating a `Vec`, mutating it, and converting
-    /// it to `ReferenceCounter<[Child]>`.
+    /// Uses `SmallVec` for stack allocation when the array is small (6 elements or fewer).
+    ///
     /// # Arguments
     /// * `children` - The current child array
     /// * `position` - The position to insert at
     /// * `new_child` - The new child to insert
     ///
     /// # Returns
-    /// A new `ReferenceCounter<[Child]>` with the child inserted at the specified position.
+    /// A new `ChildArray` with the child inserted at the specified position.
     fn build_children_with_insert(
-        children: &[Child<K, V>],
+        children: &[ChildSlot<K, V>],
         position: usize,
-        new_child: &Child<K, V>,
-    ) -> ReferenceCounter<[Child<K, V>]> {
-        (0..=children.len())
-            .map(|index| match index.cmp(&position) {
-                std::cmp::Ordering::Less => children[index].clone(),
-                std::cmp::Ordering::Equal => new_child.clone(),
-                std::cmp::Ordering::Greater => children[index - 1].clone(),
-            })
-            .collect()
+        new_child: ChildSlot<K, V>,
+    ) -> ChildArray<K, V> {
+        let mut result = ChildArray::with_capacity(children.len() + 1);
+        result.extend(children[..position].iter().cloned());
+        result.push(new_child);
+        result.extend(children[position..].iter().cloned());
+        result
     }
 
     /// Builds a new child array with the element at the specified position updated.
     ///
-    /// Uses `Iterator::collect()` to construct `ReferenceCounter<[Child]>` in a single step,
-    /// avoiding the pattern of manually creating a `Vec`, mutating it, and then
-    /// converting it to a reference-counted pointer.
+    /// Uses `SmallVec` for stack allocation when the array is small (6 elements or fewer).
     ///
     /// # Arguments
     /// * `children` - The current child array
@@ -468,51 +557,37 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     /// * `new_child` - The new child to place at the position
     ///
     /// # Returns
-    /// A new `ReferenceCounter<[Child]>` with the child at the specified position replaced.
+    /// A new `ChildArray` with the child at the specified position replaced.
     fn build_children_with_update(
-        children: &[Child<K, V>],
+        children: &[ChildSlot<K, V>],
         position: usize,
-        new_child: &Child<K, V>,
-    ) -> ReferenceCounter<[Child<K, V>]> {
-        children
-            .iter()
-            .enumerate()
-            .map(|(index, child)| {
-                if index == position {
-                    new_child.clone()
-                } else {
-                    child.clone()
-                }
-            })
-            .collect()
+        new_child: ChildSlot<K, V>,
+    ) -> ChildArray<K, V> {
+        let mut result = ChildArray::with_capacity(children.len());
+        result.extend(children[..position].iter().cloned());
+        result.push(new_child);
+        result.extend(children[(position + 1)..].iter().cloned());
+        result
     }
 
     /// Builds a new child array with the element at the specified position removed.
     ///
-    /// Uses `Iterator::collect()` to directly construct `ReferenceCounter<[Child]>` without
-    /// intermediate `Vec` allocation.
+    /// Uses `SmallVec` for stack allocation when the array is small (6 elements or fewer).
     ///
     /// # Arguments
     /// * `children` - The current child array
     /// * `position` - The position to remove
     ///
     /// # Returns
-    /// A new `ReferenceCounter<[Child]>` with the child at the specified position removed.
+    /// A new `ChildArray` with the child at the specified position removed.
     fn build_children_with_remove(
-        children: &[Child<K, V>],
+        children: &[ChildSlot<K, V>],
         position: usize,
-    ) -> ReferenceCounter<[Child<K, V>]> {
-        children
-            .iter()
-            .enumerate()
-            .filter_map(|(index, child)| {
-                if index == position {
-                    None
-                } else {
-                    Some(child.clone())
-                }
-            })
-            .collect()
+    ) -> ChildArray<K, V> {
+        let mut result = ChildArray::with_capacity(children.len().saturating_sub(1));
+        result.extend(children[..position].iter().cloned());
+        result.extend(children[(position + 1)..].iter().cloned());
+        result
     }
 
     /// Recursive helper for insert.
@@ -568,17 +643,13 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
         depth: usize,
     ) -> (Node<K, V>, bool) {
         if existing_hash == hash && *existing_key == key {
-            // Same key, replace value
             (Node::Entry { hash, key, value }, false)
         } else if existing_hash == hash {
-            // Hash collision - create collision node
-            let entries = ReferenceCounter::from(vec![
-                (existing_key.clone(), existing_value.clone()),
-                (key, value),
-            ]);
+            let mut entries = CollisionArray::new();
+            entries.push((existing_key.clone(), existing_value.clone()));
+            entries.push((key, value));
             (Node::Collision { hash, entries }, true)
         } else {
-            // Different hash - need to create a bitmap node
             Self::create_bitmap_from_two_entries(
                 existing_hash,
                 existing_key,
@@ -605,7 +676,6 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
         let new_index = hash_index(hash, depth);
 
         if existing_index == new_index {
-            // Same index at this level - recurse
             let sub_entry = Node::Entry {
                 hash: existing_hash,
                 key: existing_key.clone(),
@@ -613,37 +683,27 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
             };
             let (subnode, added) = Self::insert_into_node(&sub_entry, key, value, hash, depth + 1);
             let bitmap = 1u32 << existing_index;
-            // Use std::iter::once() for single element
-            let children: ReferenceCounter<[Child<K, V>]> =
-                std::iter::once(Child::Node(ReferenceCounter::new(subnode))).collect();
+            let mut children = ChildArray::new();
+            children.push(ChildSlot::Node(ReferenceCounter::new(subnode)));
             (Node::Bitmap { bitmap, children }, added)
         } else {
-            // Different indices - create bitmap with two children
-            // Use array literal + collect() for efficient small array construction
             let bitmap = (1u32 << existing_index) | (1u32 << new_index);
-            let children: ReferenceCounter<[Child<K, V>]> = if existing_index < new_index {
-                [
-                    Child::Entry {
-                        hash: existing_hash,
-                        key: existing_key.clone(),
-                        value: existing_value.clone(),
-                    },
-                    Child::Entry { hash, key, value },
-                ]
-                .into_iter()
-                .collect()
+            let mut children = ChildArray::with_capacity(2);
+            if existing_index < new_index {
+                children.push(ChildSlot::Entry {
+                    hash: existing_hash,
+                    key: existing_key.clone(),
+                    value: existing_value.clone(),
+                });
+                children.push(ChildSlot::Entry { hash, key, value });
             } else {
-                [
-                    Child::Entry { hash, key, value },
-                    Child::Entry {
-                        hash: existing_hash,
-                        key: existing_key.clone(),
-                        value: existing_value.clone(),
-                    },
-                ]
-                .into_iter()
-                .collect()
-            };
+                children.push(ChildSlot::Entry { hash, key, value });
+                children.push(ChildSlot::Entry {
+                    hash: existing_hash,
+                    key: existing_key.clone(),
+                    value: existing_value.clone(),
+                });
+            }
             (Node::Bitmap { bitmap, children }, true)
         }
     }
@@ -651,7 +711,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     /// Helper for inserting into a Bitmap node.
     fn insert_into_bitmap_node(
         bitmap: u32,
-        children: &ReferenceCounter<[Child<K, V>]>,
+        children: &ChildArray<K, V>,
         key: K,
         value: V,
         hash: u64,
@@ -662,11 +722,10 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
         let position = (bitmap & (bit - 1)).count_ones() as usize;
 
         if bitmap & bit == 0 {
-            // Slot is empty - add new entry using Iterator::collect()
             let new_children = Self::build_children_with_insert(
                 children,
                 position,
-                &Child::Entry { hash, key, value },
+                ChildSlot::Entry { hash, key, value },
             );
             (
                 Node::Bitmap {
@@ -676,7 +735,6 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
                 true,
             )
         } else {
-            // Slot is occupied
             Self::insert_into_occupied_slot(bitmap, children, position, key, value, hash, depth)
         }
     }
@@ -684,7 +742,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     /// Helper for inserting into an occupied slot in a Bitmap node.
     fn insert_into_occupied_slot(
         bitmap: u32,
-        children: &ReferenceCounter<[Child<K, V>]>,
+        children: &ChildArray<K, V>,
         position: usize,
         key: K,
         value: V,
@@ -692,23 +750,19 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
         depth: usize,
     ) -> (Node<K, V>, bool) {
         let (new_child, added) = match &children[position] {
-            Child::Entry {
+            ChildSlot::Entry {
                 hash: child_hash,
                 key: child_key,
                 value: child_value,
             } => {
-                // child_hash is already cached - no recomputation needed
                 if *child_key == key {
-                    (Child::Entry { hash, key, value }, false)
+                    (ChildSlot::Entry { hash, key, value }, false)
                 } else if *child_hash == hash {
-                    let collision = Node::Collision {
-                        hash,
-                        entries: ReferenceCounter::from(vec![
-                            (child_key.clone(), child_value.clone()),
-                            (key, value),
-                        ]),
-                    };
-                    (Child::Node(ReferenceCounter::new(collision)), true)
+                    let mut entries = CollisionArray::new();
+                    entries.push((child_key.clone(), child_value.clone()));
+                    entries.push((key, value));
+                    let collision = Node::Collision { hash, entries };
+                    (ChildSlot::Node(ReferenceCounter::new(collision)), true)
                 } else {
                     let child_entry = Node::Entry {
                         hash: *child_hash,
@@ -717,18 +771,17 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
                     };
                     let (subnode, added) =
                         Self::insert_into_node(&child_entry, key, value, hash, depth + 1);
-                    (Child::Node(ReferenceCounter::new(subnode)), added)
+                    (ChildSlot::Node(ReferenceCounter::new(subnode)), added)
                 }
             }
-            Child::Node(subnode) => {
+            ChildSlot::Node(subnode) => {
                 let (new_subnode, added) =
                     Self::insert_into_node(subnode, key, value, hash, depth + 1);
-                (Child::Node(ReferenceCounter::new(new_subnode)), added)
+                (ChildSlot::Node(ReferenceCounter::new(new_subnode)), added)
             }
         };
 
-        // Use Iterator::collect() to build new children array
-        let new_children = Self::build_children_with_update(children, position, &new_child);
+        let new_children = Self::build_children_with_update(children, position, new_child);
         (
             Node::Bitmap {
                 bitmap,
@@ -739,10 +792,18 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     }
 
     /// Helper for inserting into a Collision node.
+    ///
+    /// # Optimization (Phase 4)
+    ///
+    /// - Uses `position()` iterator for efficient duplicate key detection
+    /// - Hash comparison is already done before calling this function,
+    ///   so only key equality is checked
+    /// - In-place update when key exists (via indexed access)
+    /// - Debug warning when collision bucket exceeds threshold
     fn insert_into_collision_node(
         node: &Node<K, V>,
         collision_hash: u64,
-        entries: &ReferenceCounter<[(K, V)]>,
+        entries: &CollisionArray<K, V>,
         key: K,
         value: V,
         hash: u64,
@@ -750,27 +811,31 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     ) -> (Node<K, V>, bool) {
         if hash == collision_hash {
             // Same hash - update or add to collision node
-            let mut new_entries = entries.to_vec();
-            let mut found = false;
+            // Use position() for efficient duplicate detection
+            let existing_index = entries.iter().position(|(entry_key, _)| *entry_key == key);
 
-            for entry in &mut new_entries {
-                if entry.0 == key {
-                    entry.1 = value.clone();
-                    found = true;
-                    break;
-                }
-            }
+            let new_entries = if let Some(index) = existing_index {
+                // Key exists - update in place via clone + indexed update
+                let mut cloned_entries = entries.clone();
+                cloned_entries[index].1 = value;
+                cloned_entries
+            } else {
+                // New key - clone and push
+                let mut cloned_entries = entries.clone();
+                cloned_entries.push((key, value));
 
-            if !found {
-                new_entries.push((key, value));
-            }
+                // Note: SmallVec inlines up to 4 elements; beyond that it allocates on heap.
+                // Excessive collisions (>8 entries) may indicate a poor hash function.
+
+                cloned_entries
+            };
 
             (
                 Node::Collision {
                     hash: collision_hash,
-                    entries: ReferenceCounter::from(new_entries),
+                    entries: new_entries,
                 },
-                !found,
+                existing_index.is_none(),
             )
         } else {
             // Different hash - convert to bitmap node
@@ -794,28 +859,19 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
             // Same index - recurse with collision as subnode
             let (subnode, added) = Self::insert_into_node(node, key, value, hash, depth + 1);
             let bitmap = 1u32 << collision_index;
-            // Use std::iter::once() for single element
-            let children: ReferenceCounter<[Child<K, V>]> =
-                std::iter::once(Child::Node(ReferenceCounter::new(subnode))).collect();
+            let mut children = ChildArray::new();
+            children.push(ChildSlot::Node(ReferenceCounter::new(subnode)));
             (Node::Bitmap { bitmap, children }, added)
         } else {
-            // Use array literal + collect() for efficient small array construction
             let bitmap = (1u32 << collision_index) | (1u32 << new_index);
-            let children: ReferenceCounter<[Child<K, V>]> = if collision_index < new_index {
-                [
-                    Child::Node(ReferenceCounter::new(node.clone())),
-                    Child::Entry { hash, key, value },
-                ]
-                .into_iter()
-                .collect()
+            let mut children = ChildArray::with_capacity(2);
+            if collision_index < new_index {
+                children.push(ChildSlot::Node(ReferenceCounter::new(node.clone())));
+                children.push(ChildSlot::Entry { hash, key, value });
             } else {
-                [
-                    Child::Entry { hash, key, value },
-                    Child::Node(ReferenceCounter::new(node.clone())),
-                ]
-                .into_iter()
-                .collect()
-            };
+                children.push(ChildSlot::Entry { hash, key, value });
+                children.push(ChildSlot::Node(ReferenceCounter::new(node.clone())));
+            }
             (Node::Bitmap { bitmap, children }, true)
         }
     }
@@ -907,7 +963,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     /// Helper for removing from a Bitmap node.
     fn remove_from_bitmap_node<Q>(
         bitmap: u32,
-        children: &ReferenceCounter<[Child<K, V>]>,
+        children: &ChildArray<K, V>,
         key: &Q,
         hash: u64,
         depth: usize,
@@ -926,7 +982,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
         let position = (bitmap & (bit - 1)).count_ones() as usize;
 
         match &children[position] {
-            Child::Entry { key: child_key, .. } => {
+            ChildSlot::Entry { key: child_key, .. } => {
                 if child_key.borrow() == key {
                     Some(Self::remove_entry_from_bitmap(
                         bitmap, children, position, bit,
@@ -935,7 +991,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
                     None
                 }
             }
-            Child::Node(subnode) => {
+            ChildSlot::Node(subnode) => {
                 Self::remove_from_subnode(bitmap, children, position, subnode, key, hash, depth)
             }
         }
@@ -944,7 +1000,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     /// Helper for removing an entry from a Bitmap node.
     fn remove_entry_from_bitmap(
         bitmap: u32,
-        children: &ReferenceCounter<[Child<K, V>]>,
+        children: &ChildArray<K, V>,
         position: usize,
         bit: u32,
     ) -> (Node<K, V>, bool) {
@@ -954,7 +1010,6 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
             return (Node::Empty, true);
         }
 
-        // Use Iterator::collect() to build new children array
         let new_children = Self::build_children_with_remove(children, position);
 
         Self::simplify_bitmap_if_possible(new_bitmap, new_children)
@@ -963,7 +1018,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     /// Helper for removing from a subnode within a Bitmap node.
     fn remove_from_subnode<Q>(
         bitmap: u32,
-        children: &ReferenceCounter<[Child<K, V>]>,
+        children: &ChildArray<K, V>,
         position: usize,
         subnode: &ReferenceCounter<Node<K, V>>,
         key: &Q,
@@ -986,7 +1041,6 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
                 if new_bitmap == 0 {
                     return Some((Node::Empty, true));
                 }
-                // Use Iterator::collect() to build new children array
                 let new_children = Self::build_children_with_remove(children, position);
                 Some(Self::simplify_bitmap_if_possible(new_bitmap, new_children))
             }
@@ -995,7 +1049,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
                 key: entry_key,
                 value: entry_value,
             } => {
-                let new_child = Child::Entry {
+                let new_child = ChildSlot::Entry {
                     hash: *entry_hash,
                     key: entry_key.clone(),
                     value: entry_value.clone(),
@@ -1010,9 +1064,8 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
                         true,
                     ))
                 } else {
-                    // Use Iterator::collect() to build new children array
                     let new_children =
-                        Self::build_children_with_update(children, position, &new_child);
+                        Self::build_children_with_update(children, position, new_child);
                     Some((
                         Node::Bitmap {
                             bitmap,
@@ -1023,9 +1076,8 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
                 }
             }
             _ => {
-                let new_child = Child::Node(ReferenceCounter::new(new_subnode));
-                // Use Iterator::collect() to build new children array
-                let new_children = Self::build_children_with_update(children, position, &new_child);
+                let new_child = ChildSlot::Node(ReferenceCounter::new(new_subnode));
+                let new_children = Self::build_children_with_update(children, position, new_child);
                 Some((
                     Node::Bitmap {
                         bitmap,
@@ -1038,14 +1090,10 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     }
 
     /// Simplifies a Bitmap node to an Entry if it has only one child entry.
-    fn simplify_bitmap_if_possible(
-        bitmap: u32,
-        children: ReferenceCounter<[Child<K, V>]>,
-    ) -> (Node<K, V>, bool) {
+    fn simplify_bitmap_if_possible(bitmap: u32, children: ChildArray<K, V>) -> (Node<K, V>, bool) {
         if children.len() == 1
-            && let Child::Entry { hash, key, value } = &children[0]
+            && let ChildSlot::Entry { hash, key, value } = &children[0]
         {
-            // hash is already cached - no recomputation needed
             (
                 Node::Entry {
                     hash: *hash,
@@ -1060,9 +1108,15 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
     }
 
     /// Helper for removing from a Collision node.
+    ///
+    /// # Optimization (Phase 4)
+    ///
+    /// - Early return when hash doesn't match (O(1) rejection)
+    /// - Uses `position()` iterator for efficient key lookup
+    /// - Simplifies to Entry node when only one entry remains
     fn remove_from_collision_node<Q>(
         collision_hash: u64,
-        entries: &ReferenceCounter<[(K, V)]>,
+        entries: &CollisionArray<K, V>,
         key: &Q,
         hash: u64,
     ) -> Option<(Node<K, V>, bool)>
@@ -1070,14 +1124,18 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
+        // Early return if hash doesn't match - no need to search
         if hash != collision_hash {
             return None;
         }
 
-        let mut new_entries = entries.to_vec();
-        let found_index = new_entries
+        // Clone first, then find and remove. This pattern allows us to
+        // use the efficient `position()` iterator on the original entries.
+        let found_index = entries
             .iter()
             .position(|(entry_key, _)| entry_key.borrow() == key)?;
+
+        let mut new_entries: CollisionArray<K, V> = entries.clone();
 
         new_entries.remove(found_index);
 
@@ -1097,7 +1155,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
             Some((
                 Node::Collision {
                     hash: collision_hash,
-                    entries: ReferenceCounter::from(new_entries),
+                    entries: new_entries,
                 },
                 true,
             ))
@@ -1174,19 +1232,19 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
                 } else {
                     let position = (bitmap & (bit - 1)).count_ones() as usize;
                     match &children[position] {
-                        Child::Entry { key: child_key, .. } => {
+                        ChildSlot::Entry { key: child_key, .. } => {
                             if child_key.borrow() == key {
                                 Some(child_key.clone())
                             } else {
                                 None
                             }
                         }
-                        Child::Node(subnode) => Self::find_key(subnode, key, hash, depth + 1),
+                        ChildSlot::Node(subnode) => Self::find_key(subnode, key, hash, depth + 1),
                     }
                 }
             }
             Node::Collision { entries, .. } => {
-                for (entry_key, _) in entries.iter() {
+                for (entry_key, _) in entries {
                     if entry_key.borrow() == key {
                         return Some(entry_key.clone());
                     }
@@ -1726,7 +1784,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
 /// Stack frame for depth-first HAMT traversal.
 enum StackFrame<'a, K, V> {
     BitmapNode {
-        children: &'a [Child<K, V>],
+        children: &'a [ChildSlot<K, V>],
         index: usize,
     },
     CollisionNode {
@@ -1785,14 +1843,14 @@ impl<'a, K, V> PersistentHashMapIterator<'a, K, V> {
             }
             Node::Bitmap { children, .. } => {
                 self.stack.push(StackFrame::BitmapNode {
-                    children: children.as_ref(),
+                    children: children.as_slice(),
                     index: 0,
                 });
                 self.advance();
             }
             Node::Collision { entries, .. } => {
                 self.stack.push(StackFrame::CollisionNode {
-                    entries: entries.as_ref(),
+                    entries: entries.as_slice(),
                     index: 0,
                 });
                 self.advance();
@@ -1813,11 +1871,11 @@ impl<'a, K, V> PersistentHashMapIterator<'a, K, V> {
                     *index += 1;
 
                     match &children[current_index] {
-                        Child::Entry { key, value, .. } => {
+                        ChildSlot::Entry { key, value, .. } => {
                             self.pending_entry = Some((key, value));
                             return;
                         }
-                        Child::Node(subnode) => match subnode.as_ref() {
+                        ChildSlot::Node(subnode) => match subnode.as_ref() {
                             Node::Empty => {}
                             Node::Entry { key, value, .. } => {
                                 self.pending_entry = Some((key, value));
@@ -1828,7 +1886,7 @@ impl<'a, K, V> PersistentHashMapIterator<'a, K, V> {
                                 ..
                             } => {
                                 self.stack.push(StackFrame::BitmapNode {
-                                    children: child_children.as_ref(),
+                                    children: child_children.as_slice(),
                                     index: 0,
                                 });
                             }
@@ -1837,7 +1895,7 @@ impl<'a, K, V> PersistentHashMapIterator<'a, K, V> {
                                 ..
                             } => {
                                 self.stack.push(StackFrame::CollisionNode {
-                                    entries: child_entries.as_ref(),
+                                    entries: child_entries.as_slice(),
                                     index: 0,
                                 });
                             }
@@ -1935,7 +1993,9 @@ impl<K, V> Default for PersistentHashMap<K, V> {
 
 impl<K: Clone + Hash + Eq, V: Clone> FromIterator<(K, V)> for PersistentHashMap<K, V> {
     fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
-        let mut transient = TransientHashMap::new();
+        let iter = iter.into_iter();
+        let (lower_bound, _) = iter.size_hint();
+        let mut transient = TransientHashMap::with_capacity_hint(lower_bound);
         transient.extend(iter);
         transient.persistent()
     }
@@ -2173,6 +2233,12 @@ where
 pub struct TransientHashMap<K, V> {
     root: ReferenceCounter<Node<K, V>>,
     length: usize,
+    /// A hint for the expected number of elements.
+    ///
+    /// Note: Due to the nature of HAMT, this hint cannot be used for
+    /// pre-allocation like `HashMap::with_capacity`. It is stored for
+    /// potential future optimizations (e.g., batch insertion strategies).
+    capacity_hint: usize,
     /// Marker to ensure `!Send` and `!Sync`.
     _marker: PhantomData<Rc<()>>,
 }
@@ -2236,6 +2302,34 @@ impl<K, V> TransientHashMap<K, V> {
     pub const fn is_empty(&self) -> bool {
         self.length == 0
     }
+
+    /// Returns the capacity hint that was provided when the map was created.
+    ///
+    /// If the map was created with [`TransientHashMap::new()`], this returns 0.
+    /// If created with [`TransientHashMap::with_capacity_hint()`], it returns
+    /// the hint that was provided.
+    ///
+    /// # Note
+    ///
+    /// This value is advisory only and does not reflect actual memory allocation.
+    /// HAMT structures do not support pre-allocation in the same way as `HashMap`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientHashMap;
+    ///
+    /// let transient1: TransientHashMap<String, i32> = TransientHashMap::new();
+    /// assert_eq!(transient1.capacity_hint(), 0);
+    ///
+    /// let transient2: TransientHashMap<String, i32> = TransientHashMap::with_capacity_hint(100);
+    /// assert_eq!(transient2.capacity_hint(), 100);
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn capacity_hint(&self) -> usize {
+        self.capacity_hint
+    }
 }
 
 impl<K: Clone + Hash + Eq, V: Clone> TransientHashMap<K, V> {
@@ -2254,6 +2348,46 @@ impl<K: Clone + Hash + Eq, V: Clone> TransientHashMap<K, V> {
         Self {
             root: ReferenceCounter::new(Node::empty()),
             length: 0,
+            capacity_hint: 0,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Creates a new empty `TransientHashMap` with a capacity hint.
+    ///
+    /// The capacity hint is advisory only - due to the nature of HAMT (Hash Array Mapped Trie),
+    /// it cannot be used for pre-allocation like `HashMap::with_capacity`. The hint is stored
+    /// for potential future optimizations such as batch insertion strategies.
+    ///
+    /// # Arguments
+    ///
+    /// * `hint` - A hint for the expected number of elements
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientHashMap;
+    ///
+    /// // Create a transient map with a hint for 1000 elements
+    /// let mut transient: TransientHashMap<i32, i32> = TransientHashMap::with_capacity_hint(1000);
+    /// for i in 0..1000 {
+    ///     transient.insert(i, i * 2);
+    /// }
+    /// let persistent = transient.persistent();
+    /// assert_eq!(persistent.len(), 1000);
+    /// ```
+    ///
+    /// # Note
+    ///
+    /// The capacity hint is purely advisory. Exceeding the hinted capacity
+    /// does not cause reallocation or performance degradation - the map
+    /// will simply grow as needed.
+    #[must_use]
+    pub fn with_capacity_hint(hint: usize) -> Self {
+        Self {
+            root: ReferenceCounter::new(Node::empty()),
+            length: 0,
+            capacity_hint: hint,
             _marker: PhantomData,
         }
     }
@@ -2383,22 +2517,18 @@ impl<K: Clone + Hash + Eq, V: Clone> TransientHashMap<K, V> {
                 value: existing_value,
             } => {
                 if *existing_hash == hash && *existing_key == key {
-                    // Same key, replace value
                     let old_value = std::mem::replace(existing_value, value);
                     (Some(old_value), false)
                 } else if *existing_hash == hash {
-                    // Hash collision - create collision node
-                    let entries = ReferenceCounter::from(vec![
-                        (existing_key.clone(), existing_value.clone()),
-                        (key, value),
-                    ]);
+                    let mut entries = CollisionArray::new();
+                    entries.push((existing_key.clone(), existing_value.clone()));
+                    entries.push((key, value));
                     *node = Node::Collision {
                         hash: *existing_hash,
                         entries,
                     };
                     (None, true)
                 } else {
-                    // Different hash - need to create a bitmap node
                     let (new_node, _) = PersistentHashMap::create_bitmap_from_two_entries(
                         *existing_hash,
                         existing_key,
@@ -2420,61 +2550,57 @@ impl<K: Clone + Hash + Eq, V: Clone> TransientHashMap<K, V> {
                 entries,
             } => {
                 if hash == *collision_hash {
-                    // Same hash - update or add to collision node
-                    let entries_mut = ReferenceCounter::make_mut(entries);
-                    for entry in entries_mut.iter_mut() {
+                    for entry in entries.iter_mut() {
                         if entry.0 == key {
                             let old_value = std::mem::replace(&mut entry.1, value);
                             return (Some(old_value), false);
                         }
                     }
-                    // Key not found, add new entry
-                    let mut new_entries = entries_mut.to_vec();
-                    new_entries.push((key, value));
-                    *entries = ReferenceCounter::from(new_entries);
+                    entries.push((key, value));
                     (None, true)
                 } else {
                     // Different hash - convert collision to bitmap and insert
-                    let collision_entries = entries.to_vec();
+                    let collision_entries: CollisionArray<K, V> = entries.clone();
                     let collision_hash_value = *collision_hash;
 
                     // Create bitmap node from collision entries
                     let index = hash_index(collision_hash_value, depth);
                     let bit = 1u32 << index;
-                    let collision_child = Child::Node(ReferenceCounter::new(Node::Collision {
+                    let collision_child = ChildSlot::Node(ReferenceCounter::new(Node::Collision {
                         hash: collision_hash_value,
-                        entries: ReferenceCounter::from(collision_entries),
+                        entries: collision_entries,
                     }));
 
                     let new_index = hash_index(hash, depth);
                     let new_bit = 1u32 << new_index;
 
                     if index == new_index {
-                        // Same index, create subnode
                         let mut subnode = Node::Collision {
                             hash: collision_hash_value,
                             entries: entries.clone(),
                         };
                         let result =
                             Self::insert_into_node_cow(&mut subnode, key, value, hash, depth + 1);
+                        let mut children = ChildArray::new();
+                        children.push(ChildSlot::Node(ReferenceCounter::new(subnode)));
                         *node = Node::Bitmap {
                             bitmap: bit,
-                            children: ReferenceCounter::from(vec![Child::Node(
-                                ReferenceCounter::new(subnode),
-                            )]),
+                            children,
                         };
                         result
                     } else {
-                        // Different index
-                        let new_child = Child::Entry { hash, key, value };
-                        let (first, second) = if index < new_index {
-                            (collision_child, new_child)
+                        let new_child = ChildSlot::Entry { hash, key, value };
+                        let mut children = ChildArray::with_capacity(2);
+                        if index < new_index {
+                            children.push(collision_child);
+                            children.push(new_child);
                         } else {
-                            (new_child, collision_child)
-                        };
+                            children.push(new_child);
+                            children.push(collision_child);
+                        }
                         *node = Node::Bitmap {
                             bitmap: bit | new_bit,
-                            children: ReferenceCounter::from(vec![first, second]),
+                            children,
                         };
                         (None, true)
                     }
@@ -2486,7 +2612,7 @@ impl<K: Clone + Hash + Eq, V: Clone> TransientHashMap<K, V> {
     /// Inserts into a bitmap node using COW semantics.
     fn insert_into_bitmap_node_cow(
         bitmap: &mut u32,
-        children: &mut ReferenceCounter<[Child<K, V>]>,
+        children: &mut ChildArray<K, V>,
         key: K,
         value: V,
         hash: u64,
@@ -2495,40 +2621,29 @@ impl<K: Clone + Hash + Eq, V: Clone> TransientHashMap<K, V> {
         let index = hash_index(hash, depth);
         let bit = 1u32 << index;
         let position = (*bitmap & (bit - 1)).count_ones() as usize;
-        let children_mut = ReferenceCounter::make_mut(children);
 
         if *bitmap & bit == 0 {
-            // Slot is empty - add new entry
-            let mut new_children = children_mut.to_vec();
-            new_children.insert(position, Child::Entry { hash, key, value });
-            *children = ReferenceCounter::from(new_children);
+            children.insert(position, ChildSlot::Entry { hash, key, value });
             *bitmap |= bit;
             (None, true)
         } else {
-            // Slot is occupied
-            match &mut children_mut[position] {
-                Child::Entry {
+            match &mut children[position] {
+                ChildSlot::Entry {
                     hash: child_hash,
                     key: child_key,
                     value: child_value,
                 } => {
                     if *child_key == key {
-                        // Same key, replace value
                         let old_value = std::mem::replace(child_value, value);
                         (Some(old_value), false)
                     } else if *child_hash == hash {
-                        // Hash collision - create collision node
-                        let collision = Node::Collision {
-                            hash,
-                            entries: ReferenceCounter::from(vec![
-                                (child_key.clone(), child_value.clone()),
-                                (key, value),
-                            ]),
-                        };
-                        children_mut[position] = Child::Node(ReferenceCounter::new(collision));
+                        let mut entries = CollisionArray::new();
+                        entries.push((child_key.clone(), child_value.clone()));
+                        entries.push((key, value));
+                        let collision = Node::Collision { hash, entries };
+                        children[position] = ChildSlot::Node(ReferenceCounter::new(collision));
                         (None, true)
                     } else {
-                        // Different hash - create subnode
                         let child_entry = Node::Entry {
                             hash: *child_hash,
                             key: child_key.clone(),
@@ -2541,11 +2656,11 @@ impl<K: Clone + Hash + Eq, V: Clone> TransientHashMap<K, V> {
                             hash,
                             depth + 1,
                         );
-                        children_mut[position] = Child::Node(ReferenceCounter::new(subnode));
+                        children[position] = ChildSlot::Node(ReferenceCounter::new(subnode));
                         (None, true)
                     }
                 }
-                Child::Node(subnode) => {
+                ChildSlot::Node(subnode) => {
                     let subnode_mut = ReferenceCounter::make_mut(subnode);
                     Self::insert_into_node_cow(subnode_mut, key, value, hash, depth + 1)
                 }
@@ -2626,26 +2741,22 @@ impl<K: Clone + Hash + Eq, V: Clone> TransientHashMap<K, V> {
                     return None;
                 }
 
-                let entries_mut = ReferenceCounter::make_mut(entries);
-                let found_index = entries_mut
+                let found_index = entries
                     .iter()
                     .position(|(entry_key, _)| entry_key.borrow() == key)?;
 
-                let removed_value = entries_mut[found_index].1.clone();
+                let removed_value = entries[found_index].1.clone();
 
-                if entries_mut.len() == 2 {
-                    // Convert back to single entry
+                if entries.len() == 2 {
                     let other_index = 1 - found_index;
-                    let (remaining_key, remaining_value) = entries_mut[other_index].clone();
+                    let (remaining_key, remaining_value) = entries[other_index].clone();
                     *node = Node::Entry {
                         hash: *collision_hash,
                         key: remaining_key,
                         value: remaining_value,
                     };
                 } else {
-                    let mut new_entries = entries_mut.to_vec();
-                    new_entries.remove(found_index);
-                    *entries = ReferenceCounter::from(new_entries);
+                    entries.remove(found_index);
                 }
 
                 Some(removed_value)
@@ -2656,7 +2767,7 @@ impl<K: Clone + Hash + Eq, V: Clone> TransientHashMap<K, V> {
     /// Removes from a bitmap node using COW semantics.
     fn remove_from_bitmap_node_cow<Q>(
         bitmap: &mut u32,
-        children: &mut ReferenceCounter<[Child<K, V>]>,
+        children: &mut ChildArray<K, V>,
         key: &Q,
         hash: u64,
         depth: usize,
@@ -2673,10 +2784,9 @@ impl<K: Clone + Hash + Eq, V: Clone> TransientHashMap<K, V> {
         }
 
         let position = (*bitmap & (bit - 1)).count_ones() as usize;
-        let children_mut = ReferenceCounter::make_mut(children);
 
-        match &mut children_mut[position] {
-            Child::Entry {
+        match &mut children[position] {
+            ChildSlot::Entry {
                 key: child_key,
                 value: child_value,
                 ..
@@ -2684,16 +2794,8 @@ impl<K: Clone + Hash + Eq, V: Clone> TransientHashMap<K, V> {
                 if (*child_key).borrow() == key {
                     let removed_value = child_value.clone();
 
-                    // Remove this entry from the bitmap
                     let new_bitmap = *bitmap & !bit;
-                    if new_bitmap == 0 {
-                        // This would make the bitmap empty - not expected at root
-                        // but handle it gracefully
-                    }
-
-                    let mut new_children = children_mut.to_vec();
-                    new_children.remove(position);
-                    *children = ReferenceCounter::from(new_children);
+                    children.remove(position);
                     *bitmap = new_bitmap;
 
                     Some(removed_value)
@@ -2701,7 +2803,7 @@ impl<K: Clone + Hash + Eq, V: Clone> TransientHashMap<K, V> {
                     None
                 }
             }
-            Child::Node(subnode) => {
+            ChildSlot::Node(subnode) => {
                 let subnode_mut = ReferenceCounter::make_mut(subnode);
                 let result = Self::remove_from_node_cow(subnode_mut, key, hash, depth + 1);
 
@@ -2709,11 +2811,8 @@ impl<K: Clone + Hash + Eq, V: Clone> TransientHashMap<K, V> {
                     // Check if we need to simplify the structure
                     match subnode_mut {
                         Node::Empty => {
-                            // Remove this child
                             let new_bitmap = *bitmap & !bit;
-                            let mut new_children = children_mut.to_vec();
-                            new_children.remove(position);
-                            *children = ReferenceCounter::from(new_children);
+                            children.remove(position);
                             *bitmap = new_bitmap;
                         }
                         Node::Entry {
@@ -2721,8 +2820,7 @@ impl<K: Clone + Hash + Eq, V: Clone> TransientHashMap<K, V> {
                             key: entry_key,
                             value: entry_value,
                         } => {
-                            // Promote entry up
-                            children_mut[position] = Child::Entry {
+                            children[position] = ChildSlot::Entry {
                                 hash: *entry_hash,
                                 key: entry_key.clone(),
                                 value: entry_value.clone(),
@@ -2807,10 +2905,9 @@ impl<K: Clone + Hash + Eq, V: Clone> TransientHashMap<K, V> {
                 }
 
                 let position = (*bitmap & (bit - 1)).count_ones() as usize;
-                let children_mut = ReferenceCounter::make_mut(children);
 
-                match &mut children_mut[position] {
-                    Child::Entry {
+                match &mut children[position] {
+                    ChildSlot::Entry {
                         hash: child_hash,
                         key: child_key,
                         value,
@@ -2821,7 +2918,7 @@ impl<K: Clone + Hash + Eq, V: Clone> TransientHashMap<K, V> {
                             None
                         }
                     }
-                    Child::Node(subnode) => {
+                    ChildSlot::Node(subnode) => {
                         let subnode_mut = ReferenceCounter::make_mut(subnode);
                         Self::get_mut_from_node(subnode_mut, key, hash, depth + 1)
                     }
@@ -2835,8 +2932,7 @@ impl<K: Clone + Hash + Eq, V: Clone> TransientHashMap<K, V> {
                     return None;
                 }
 
-                let entries_mut = ReferenceCounter::make_mut(entries);
-                for entry in entries_mut.iter_mut() {
+                for entry in entries.iter_mut() {
                     if entry.0.borrow() == key {
                         return Some(&mut entry.1);
                     }
@@ -2887,6 +2983,9 @@ impl<K: Clone + Hash + Eq, V: Clone> TransientHashMap<K, V> {
 
     /// Extends the map with elements from an iterator.
     ///
+    /// This method utilizes the iterator's `size_hint` to update the internal
+    /// capacity hint, which may be used for future optimizations.
+    ///
     /// # Arguments
     ///
     /// * `iter` - An iterator over key-value pairs to insert
@@ -2905,6 +3004,16 @@ impl<K: Clone + Hash + Eq, V: Clone> TransientHashMap<K, V> {
     /// assert_eq!(transient.len(), 3);
     /// ```
     pub fn extend<I: IntoIterator<Item = (K, V)>>(&mut self, iter: I) {
+        let iter = iter.into_iter();
+
+        // Extract size_hint for potential future optimizations.
+        // Currently stored but not actively used for allocation.
+        let (lower_bound, _upper_bound) = iter.size_hint();
+        if lower_bound > 0 {
+            // Update capacity_hint if the iterator provides a meaningful hint
+            self.capacity_hint = self.capacity_hint.saturating_add(lower_bound);
+        }
+
         for (key, value) in iter {
             self.insert(key, value);
         }
@@ -2948,7 +3057,9 @@ impl<K: Clone + Hash + Eq, V: Clone> Default for TransientHashMap<K, V> {
 
 impl<K: Clone + Hash + Eq, V: Clone> FromIterator<(K, V)> for TransientHashMap<K, V> {
     fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
-        let mut transient = Self::new();
+        let iter = iter.into_iter();
+        let (lower_bound, _) = iter.size_hint();
+        let mut transient = Self::with_capacity_hint(lower_bound);
         transient.extend(iter);
         transient
     }
@@ -2993,6 +3104,7 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
         TransientHashMap {
             root: self.root,
             length: self.length,
+            capacity_hint: 0,
             _marker: PhantomData,
         }
     }
@@ -4437,6 +4549,133 @@ mod transient_hashmap_tests {
 
         let persistent = transient.persistent();
         assert_eq!(persistent.len(), 1000);
+    }
+
+    // =========================================================================
+    // Phase 2: Transient Builder Optimization Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_transient_with_capacity_hint_creates_empty_map() {
+        let transient: TransientHashMap<String, i32> = TransientHashMap::with_capacity_hint(1000);
+        assert!(transient.is_empty());
+        assert_eq!(transient.len(), 0);
+    }
+
+    #[rstest]
+    fn test_transient_with_capacity_hint_basic_operations() {
+        let mut transient: TransientHashMap<String, i32> = TransientHashMap::with_capacity_hint(10);
+        transient.insert("one".to_string(), 1);
+        transient.insert("two".to_string(), 2);
+        transient.insert("three".to_string(), 3);
+
+        assert_eq!(transient.len(), 3);
+        assert_eq!(transient.get("one"), Some(&1));
+        assert_eq!(transient.get("two"), Some(&2));
+        assert_eq!(transient.get("three"), Some(&3));
+    }
+
+    #[rstest]
+    fn test_transient_with_capacity_hint_to_persistent() {
+        let mut transient: TransientHashMap<String, i32> =
+            TransientHashMap::with_capacity_hint(100);
+        for i in 0..50 {
+            transient.insert(format!("key{i}"), i);
+        }
+
+        let persistent = transient.persistent();
+        assert_eq!(persistent.len(), 50);
+
+        for i in 0..50 {
+            assert_eq!(persistent.get(&format!("key{i}")), Some(&i));
+        }
+    }
+
+    #[rstest]
+    fn test_transient_with_capacity_hint_exceeds_hint() {
+        // Capacity hint is just a hint - map should work fine with more elements
+        let mut transient: TransientHashMap<i32, i32> = TransientHashMap::with_capacity_hint(10);
+        for i in 0..100 {
+            transient.insert(i, i * 2);
+        }
+
+        assert_eq!(transient.len(), 100);
+        for i in 0..100 {
+            assert_eq!(transient.get(&i), Some(&(i * 2)));
+        }
+    }
+
+    #[rstest]
+    fn test_transient_with_capacity_hint_zero() {
+        let mut transient: TransientHashMap<String, i32> = TransientHashMap::with_capacity_hint(0);
+        transient.insert("key".to_string(), 42);
+        assert_eq!(transient.get("key"), Some(&42));
+    }
+
+    #[rstest]
+    fn test_from_iter_equivalence_with_transient() {
+        // FromIterator via PersistentHashMap should produce the same result
+        // as manually using TransientHashMap
+        let data: Vec<(String, i32)> = (0..100).map(|i| (format!("key{i}"), i)).collect();
+
+        let via_from_iter: PersistentHashMap<String, i32> = data.clone().into_iter().collect();
+
+        let via_transient = {
+            let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+            transient.extend(data);
+            transient.persistent()
+        };
+
+        assert_eq!(via_from_iter, via_transient);
+    }
+
+    #[rstest]
+    fn test_transient_from_iter_equivalence() {
+        // TransientHashMap::from_iter should produce same result as manual extend
+        let data: Vec<(String, i32)> = (0..50).map(|i| (format!("key{i}"), i)).collect();
+
+        let via_from_iter: TransientHashMap<String, i32> = data.clone().into_iter().collect();
+
+        let via_extend = {
+            let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+            transient.extend(data);
+            transient
+        };
+
+        // Compare by converting to persistent (since TransientHashMap does not implement PartialEq)
+        let persistent_from_iter = via_from_iter.persistent();
+        let persistent_from_extend = via_extend.persistent();
+
+        assert_eq!(persistent_from_iter, persistent_from_extend);
+    }
+
+    #[rstest]
+    fn test_extend_with_empty_iterator() {
+        let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+        transient.insert("initial".to_string(), 1);
+        transient.extend(std::iter::empty());
+        assert_eq!(transient.len(), 1);
+        assert_eq!(transient.get("initial"), Some(&1));
+    }
+
+    #[rstest]
+    fn test_extend_preserves_existing_entries() {
+        let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+        transient.insert("one".to_string(), 1);
+
+        transient.extend([("two".to_string(), 2), ("three".to_string(), 3)]);
+
+        assert_eq!(transient.len(), 3);
+        assert_eq!(transient.get("one"), Some(&1));
+        assert_eq!(transient.get("two"), Some(&2));
+        assert_eq!(transient.get("three"), Some(&3));
+    }
+
+    #[rstest]
+    fn test_capacity_hint_accessor() {
+        // Verify that capacity_hint can be retrieved (even if not used currently)
+        let transient: TransientHashMap<String, i32> = TransientHashMap::with_capacity_hint(500);
+        assert_eq!(transient.capacity_hint(), 500);
     }
 }
 

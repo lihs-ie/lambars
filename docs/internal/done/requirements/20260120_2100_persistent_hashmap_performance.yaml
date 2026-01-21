@@ -1,0 +1,1272 @@
+# PersistentHashMap/HashSet パフォーマンス最適化 要件定義
+#
+# 概要:
+#   HAMT ベースの PersistentHashMap/HashSet のパフォーマンスを最適化する。
+#   現在の実装は標準 HashMap の約 27-28 倍遅く、実用に耐えない状況である。
+#   不変性・参照透過性を維持しながら、10 倍以内を目標とする。
+#
+# 設計方針:
+#   1. 不変性の維持 - 全ての操作で新しいノードを返す
+#   2. 参照透過性 - 同じ入力に対して常に同じ出力
+#   3. 副作用なし - I/O、状態変更を含まない純粋関数
+#   4. 既存 API との完全互換性
+#   5. unsafe コード禁止（プロジェクトポリシー）
+#   6. Transient は内部ビルダー、freeze 後は完全不変
+#
+# 参照:
+#   - Issue #221: PersistentHashMap/HashSet パフォーマンス改善
+#   - docs/internal/issues/20260120_1601_persistent_hashmap_hashset.yaml
+#   - 現在の実装: src/persistent/hashmap.rs, src/persistent/hashset.rs
+#   - TreeMap の SmallVec 使用例: src/persistent/treemap.rs
+
+version: "1.0.0"
+name: "persistent_hashmap_hashset_performance_optimization"
+description: |
+  PersistentHashMap/HashSet のパフォーマンスを最適化し、
+  標準 HashMap の約 27-28 倍遅い状態から 10 倍以内を目指す。
+
+  現在の HAMT 実装には以下の問題がある:
+  1. ノード構造によるヒープアロケーション多発 - `ReferenceCounter<[Child<K, V>]>` で
+     毎回ヒープ割り当てが発生
+  2. ハッシュ関数の低速性 - DefaultHasher (SipHash) は DoS 耐性があるが低速
+  3. Transient (COW) の限界 - make_mut で参照カウント > 1 の場合はコピー発生
+  4. 衝突処理の非効率性 - Collision ノードで `ReferenceCounter<[(K, V)]>` を線形探索
+
+  関数型プログラミングの原則を維持しながら、以下の最適化を行う:
+  - SmallVec によるスモールバッファ最適化（6 要素までスタック配置）
+  - Transient ビルダーの with_capacity_hint 導入
+  - 高速ハッシュ（FxHasher）の feature gate 追加
+  - 衝突バケットの SmallVec 最適化（4 要素までスタック配置）
+
+# =============================================================================
+# 背景・動機
+# =============================================================================
+background:
+  problem: |
+    現在の PersistentHashMap (HAMT ベース) には深刻なパフォーマンス問題がある。
+
+    **測定結果 (100,000 件):**
+    - insert: 約 85-90ms（標準 HashMap: 約 3ms、約 27-28 倍遅い）
+    - transient_insert: 約 88-90ms
+    - collect: 約 27-34ms（+22-51% 退行）
+    - 5 秒以内に収まらず警告が複数発生
+
+    **根本原因の分析:**
+
+    1. **ノード構造によるヒープアロケーション多発 (推定影響: 40-50%)**
+       ```rust
+       // 現在の実装 - 毎回ヒープ割り当て
+       enum Node<K, V> {
+           Bitmap {
+               bitmap: u32,
+               children: ReferenceCounter<[Child<K, V>]>,  // ヒープ
+           },
+           Collision {
+               hash: u64,
+               entries: ReferenceCounter<[(K, V)]>,  // ヒープ
+           },
+           // ...
+       }
+       ```
+
+    2. **ハッシュ関数の低速性 (推定影響: 10-15%)**
+       ```rust
+       fn compute_hash<K: Hash + ?Sized>(key: &K) -> u64 {
+           let mut hasher = DefaultHasher::new();  // SipHash - DoS 耐性あり、低速
+           key.hash(&mut hasher);
+           hasher.finish()
+       }
+       ```
+
+    3. **Transient の COW オーバーヘッド (推定影響: 20-30%)**
+       ```rust
+       // make_mut で参照カウント > 1 の場合はコピー発生
+       // to_vec() 呼び出しも頻繁
+       ```
+
+    4. **衝突処理の非効率性 (推定影響: 10-15%)**
+       ```rust
+       // Collision ノードで線形探索
+       Node::Collision { entries, .. } => {
+           for (entry_key, value) in entries.iter() { ... }
+       }
+       ```
+
+  motivation: |
+    関数型プログラミングの永続データ構造として、PersistentHashMap は
+    以下の要件を満たす必要がある:
+
+    1. **不変性**: 全ての操作が元のデータを変更しない
+    2. **効率性**: 構造共有により、更新コストを最小化
+    3. **実用性**: 実務で使用可能なパフォーマンス
+
+    現在の実装は 1 と 2 を満たしているが、3 が大幅に不足している。
+    27-28 倍のオーバーヘッドは実用に耐えない。
+
+    **目標:**
+    - insert 100,000 件: 85-90ms → 8ms 以下（10 倍以上改善）
+    - collect 100,000 件: 27-34ms → 5ms 以下
+    - アロケーション回数: -70% 以上
+
+  prior_art:
+    - name: "im-rs (Rust)"
+      description: |
+        Rust の永続データ構造ライブラリ。HAMT を採用し、
+        Arc::make_mut による COW パターンを実装。参考にすべき。
+
+    - name: "hashbrown (Rust)"
+      description: |
+        Rust 標準ライブラリの HashMap の実装。SwissTable アルゴリズムを使用。
+        ahash をデフォルトハッシャーとして使用し高速。
+
+    - name: "Clojure PersistentHashMap"
+      description: |
+        HAMT ベース。32-way branching で 5 ビットずつ消費。
+        Transient（一時的可変版）を提供してバッチ更新を効率化。
+
+    - name: "rustc-hash (FxHasher)"
+      description: |
+        Rust コンパイラで使用される高速ハッシュ関数。
+        DoS 耐性なし。内部用途では高速性を優先可能。
+
+    - name: "smallvec クレート"
+      description: |
+        スモールバッファ最適化を提供。小さな配列はスタック上に、
+        大きな配列はヒープに配置。TreeMap で既に使用実績あり。
+
+# =============================================================================
+# 制約条件
+# =============================================================================
+constraints:
+  - id: CON-001
+    name: "unsafe コード禁止"
+    description: |
+      プロジェクト全体で unsafe_code = "forbid" が設定されている。
+      unsafe ブロックの使用は禁止。
+    rationale: |
+      メモリ安全性の保証。Rust の安全性保証を維持する。
+
+  - id: CON-002
+    name: "公開 API 維持"
+    description: |
+      既存の全ての公開 API を変更しない。
+      PersistentHashMap:
+      - new(), singleton(), len(), is_empty()
+      - get(), contains_key(), insert(), remove()
+      - iter(), keys(), values(), entries()
+      - map_values(), map_keys(), filter_map()
+      - merge(), merge_with(), delete_if(), keep_if(), partition()
+      - transient()
+      - Clone, Default, FromIterator, IntoIterator
+      - PartialEq, Eq, Hash, Debug, Display
+      - TypeConstructor, Foldable
+      - Serialize, Deserialize (feature = serde)
+      - IntoParallelIterator, par_iter (feature = rayon)
+
+      TransientHashMap:
+      - new(), len(), is_empty()
+      - get(), contains_key(), insert(), remove()
+      - get_mut(), update_with(), extend()
+      - persistent()
+
+      PersistentHashSet/TransientHashSet も同様。
+    rationale: |
+      後方互換性の維持。既存のユーザーコードを壊さない。
+
+  - id: CON-003
+    name: "関数型プログラミング原則維持"
+    description: |
+      以下の原則を維持する:
+      - 不変性: 全ての操作で元のデータを変更しない
+      - 参照透過性: 同じ入力に対して常に同じ出力
+      - 純粋性: 副作用（I/O、状態変更）を含まない
+    rationale: |
+      関数型プログラミングライブラリとしての本質的な性質。
+
+  - id: CON-004
+    name: "外部依存の最小化"
+    description: |
+      必要最小限の依存のみ追加する。
+      - smallvec: 既に TreeMap で使用、追加コストなし
+      - rustc-hash: feature gate で任意追加
+      - ahash: feature gate で任意追加
+    rationale: |
+      依存関係の肥大化を防ぎ、ビルド時間とバイナリサイズを抑制。
+
+  - id: CON-005
+    name: "構造共有の維持"
+    description: |
+      SmallVec 使用時の構造共有について明確化する。
+
+      **重要: SmallVec の構造共有特性**
+      SmallVec はスタック配置時もヒープ配置時も、Clone 時に全要素をコピーする。
+      ReferenceCounter<[T]> のような参照カウントベースの共有は行われない。
+
+      **トレードオフ分析:**
+      - スタック配置時（6要素以下）: 構造共有なし、アロケーションコスト削減
+      - ヒープ配置時（7要素以上）: 構造共有なし、毎回新規アロケーション+全コピー
+
+      **対策: ノードレベルでの構造共有**
+      SmallVec による構造共有の喪失を補うため、Node 自体を ReferenceCounter で
+      管理する現行設計を維持する。これにより:
+      - 小さなノード: SmallVec で高速コピー（要素数少ないためコスト小）
+      - 大きなノード: Node レベルの ReferenceCounter で構造共有を維持
+
+      ```rust
+      // ChildSlot::Node は ReferenceCounter<Node<K, V>> を保持
+      // これにより子ノード全体の構造共有は維持される
+      enum ChildSlot<K, V> {
+          Entry { hash: u64, key: K, value: V },
+          Node(ReferenceCounter<Node<K, V>>),  // 構造共有はここで維持
+      }
+      ```
+
+      小さなノード（6 要素以下）はアロケーションコスト削減が優先、
+      大きなノードは ChildSlot::Node の ReferenceCounter で構造共有が有効。
+    rationale: |
+      永続データ構造の効率性は構造共有に依存するが、
+      アロケーションコストとのトレードオフを考慮する。
+      Node レベルの ReferenceCounter により、構造共有の恩恵を維持しつつ
+      SmallVec による小ノードの高速化を実現する。
+
+# =============================================================================
+# 要件一覧
+# =============================================================================
+requirements:
+  # ---------------------------------------------------------------------------
+  # Phase 1: ノード構造の刷新
+  # ---------------------------------------------------------------------------
+  - id: REQ-HASHMAP-PERF-001
+    name: "SmallVec によるノード構造の最適化"
+    priority: critical
+    phase: 1
+    expected_improvement: "30-40%"
+    description: |
+      HAMT の Bitmap ノードの children 配列を SmallVec に置き換え、
+      小さなノードのヒープアロケーションを削減する。
+
+      **現在の問題:**
+      ```rust
+      enum Node<K, V> {
+          Bitmap {
+              bitmap: u32,
+              children: ReferenceCounter<[Child<K, V>]>,  // 常にヒープ
+          },
+          // ...
+      }
+      ```
+
+      HAMT の 32-way branching では、実際のノードサイズは平均的に
+      2-8 要素程度であり、多くのケースでスタック配置が可能。
+
+      **改善後:**
+      ```rust
+      use smallvec::SmallVec;
+
+      /// 子ノード配列の型エイリアス
+      /// 6 要素までスタック上に配置
+      type ChildArray<K, V> = SmallVec<[ChildSlot<K, V>; 6]>;
+
+      enum Node<K, V> {
+          Empty,
+          Entry { hash: u64, key: K, value: V },
+          Bitmap {
+              bitmap: u32,
+              children: ChildArray<K, V>,  // 6 要素までスタック
+          },
+          Collision {
+              hash: u64,
+              entries: CollisionArray<K, V>,  // 後述
+          },
+      }
+      ```
+
+      **スタックサイズの選択根拠:**
+      - SmallVec<[T; 6]> のサイズは約 56-72 バイト（T のサイズ依存）
+      - HAMT の平均ノードサイズは 2-4 要素程度
+      - 6 要素でカバー率 80% 以上を想定
+      - TreeMap では 32 要素としているが、HAMT は浅い構造なので
+        より少ない要素数で十分
+
+      **関数型プログラミングとの整合性:**
+      - SmallVec は値型として振る舞う
+      - Clone 時は全要素をコピー（スタック上でもヒープ上でも同様）
+      - ただし ChildSlot::Node の ReferenceCounter は参照カウントのみコピー
+      - これにより子ノード全体の構造共有は維持される
+      - 外部から見た不変性は維持される
+
+      **構造共有と SmallVec のトレードオフ分析:**
+
+      | ノードサイズ | 構造共有 | コピーコスト | 判断 |
+      |-------------|---------|-------------|------|
+      | 1-6 要素 | SmallVec 全体コピー | 小さい | アロケーション削減が優先 |
+      | 7+ 要素 | SmallVec ヒープ移行 + 全コピー | 中程度 | 許容（稀なケース） |
+      | 子ノード | ReferenceCounter で共有 | 参照カウントのみ | 構造共有維持 |
+
+      **COW 方針（多段共有状態での更新）:**
+      - Node 全体を ReferenceCounter で管理
+      - 更新時は Node を make_mut で取得し、SmallVec を直接編集
+      - 子ノード（ChildSlot::Node）は ReferenceCounter で構造共有維持
+      - 共有されている Node のみコピー、子ノードは参照カウントで共有
+
+      **想定ワークロードでの性能:**
+      - 単一スレッドでの連続 insert: SmallVec による高速化が期待
+      - clone 後の部分更新: Node レベルの構造共有で対応
+      - 多段共有状態: 子ノードの ReferenceCounter で構造共有維持
+
+    implementation: |
+      ```rust
+      use smallvec::{SmallVec, smallvec};
+
+      /// 子ノード配列の型エイリアス
+      /// 6 要素までスタック上に配置
+      type ChildArray<K, V> = SmallVec<[ChildSlot<K, V>; 6]>;
+
+      /// 子スロット - Entry または Node への参照
+      #[derive(Clone)]
+      enum ChildSlot<K, V> {
+          /// 直接キー・値を保持
+          Entry {
+              hash: u64,
+              key: K,
+              value: V,
+          },
+          /// サブノードへの参照
+          Node(ReferenceCounter<Node<K, V>>),
+      }
+
+      /// ビットマップノード
+      enum Node<K, V> {
+          Empty,
+          Entry { hash: u64, key: K, value: V },
+          Bitmap {
+              bitmap: u32,
+              children: ChildArray<K, V>,
+          },
+          Collision {
+              hash: u64,
+              entries: CollisionArray<K, V>,
+          },
+      }
+      ```
+
+      **変更箇所:**
+      1. `Child<K, V>` → `ChildSlot<K, V>` にリネーム（明確化のため）
+      2. `ReferenceCounter<[Child<K, V>]>` → `ChildArray<K, V>` に置換
+      3. `build_children_with_insert/update/remove` を SmallVec 対応に変更
+      4. `insert_into_node`, `remove_from_node` を SmallVec 対応に変更
+
+      **Transient 経路との整合性（重要）:**
+      SmallVec 化により、現行の `ReferenceCounter::make_mut(children)` パターンは
+      使用できなくなる。新しい COW 方針を以下のように定義する:
+
+      ```rust
+      // 現行: children を ReferenceCounter::make_mut で直接変更
+      // let children_mut = ReferenceCounter::make_mut(&mut bitmap_node.children);
+
+      // 新方針: Node 全体を make_mut で取得し、SmallVec を直接編集
+      fn insert_into_node_cow(
+          node: &mut ReferenceCounter<Node<K, V>>,
+          key: K,
+          value: V,
+          hash: u64,
+          depth: usize,
+      ) -> Option<V> {
+          // Node 全体を make_mut で取得
+          let node_mut = ReferenceCounter::make_mut(node);
+
+          match node_mut {
+              Node::Bitmap { bitmap, children } => {
+                  // SmallVec を直接編集（Node 全体が owned なので安全）
+                  // children.push(...) や children[i] = ... が可能
+              }
+              // ...
+          }
+      }
+      ```
+
+      この方針により:
+      - Node が共有されている場合のみコピーが発生
+      - Node 内の SmallVec は直接編集可能
+      - 既存の Transient の性能特性を維持
+
+    functional_programming_compliance:
+      immutability: |
+        - SmallVec は値型として Clone される
+        - 元のノードは変更されない
+        - 新しいノードが生成される
+      referential_transparency: |
+        - 同じ入力に対して同じ出力を返す
+        - 内部表現の変更は透過的
+      purity: |
+        - 副作用なし
+        - アロケーション戦略の変更は純粋な計算
+
+    tests:
+      - name: "SmallVec 互換性テスト"
+        description: |
+          SmallVec 導入後も全ての既存テストがパスすること。
+      - name: "大量データテスト"
+        description: |
+          6 要素を超えるノードが正しく動作することを検証。
+          100,000 件の insert/get/remove を実施。
+      - name: "構造共有テスト"
+        description: |
+          insert/remove 後に元のマップが変更されていないことを検証。
+          ```rust
+          let map1 = PersistentHashMap::new()
+              .insert("a".to_string(), 1)
+              .insert("b".to_string(), 2);
+          let map1_clone = map1.clone();
+          let map2 = map1.insert("c".to_string(), 3);
+
+          // map1_clone は変更されていない
+          assert_eq!(map1_clone.len(), 2);
+          assert_eq!(map1_clone.get("c"), None);
+          ```
+      - name: "パフォーマンステスト（cargo bench）"
+        description: |
+          100,000 件 insert でのパフォーマンス改善を確認。
+
+  # ---------------------------------------------------------------------------
+  # Phase 2: Transient ビルダー最適化
+  # ---------------------------------------------------------------------------
+  - id: REQ-HASHMAP-PERF-002
+    name: "Transient ビルダーの最適化"
+    priority: high
+    phase: 2
+    expected_improvement: "20-30%"
+    description: |
+      TransientHashMap の内部実装を最適化し、バッチ更新時の
+      オーバーヘッドを削減する。
+
+      **現在の問題:**
+      1. to_vec() 呼び出しが頻繁に発生
+      2. capacity hint がないため、動的拡張が発生
+
+      **改善後:**
+      1. with_capacity_hint メソッドの追加
+      2. to_vec() 呼び出しの最小化
+
+      **重要: freeze 後の不変性**
+      TransientHashMap は「一時的に可変」なビルダーであり、
+      persistent() 呼び出し後は PersistentHashMap として不変になる。
+      この境界は明確に維持される。
+
+    implementation: |
+      ```rust
+      impl<K: Clone + Hash + Eq, V: Clone> TransientHashMap<K, V> {
+          /// 予想要素数を指定して TransientHashMap を作成
+          ///
+          /// # Arguments
+          /// * `capacity_hint` - 予想される要素数
+          ///
+          /// # Examples
+          /// ```rust
+          /// let mut transient = TransientHashMap::with_capacity_hint(100_000);
+          /// for i in 0..100_000 {
+          ///     transient.insert(i, i * 2);
+          /// }
+          /// let persistent = transient.persistent();
+          /// ```
+          #[must_use]
+          pub fn with_capacity_hint(capacity_hint: usize) -> Self {
+              // capacity_hint は直接的なメモリ事前確保ではなく、
+              // 将来の最適化のためのヒントとして保持
+              Self {
+                  root: ReferenceCounter::new(Node::empty()),
+                  length: 0,
+                  _marker: PhantomData,
+              }
+          }
+      }
+      ```
+
+      **capacity_hint の設計意図:**
+      - HAMT の特性上、HashMap のような事前確保は困難
+      - capacity_hint は「ヒント」として扱い、保証はしない
+      - 現時点での実装: 内部的には使用せず、API 互換性のみ提供
+      - 将来の最適化:
+        - 大量データが予想される場合の SmallVec スピル判断
+        - ハッシュ関数の選択ヒント（衝突率を考慮）
+
+      **内部最適化:**
+      ```rust
+      /// 内部の insert 処理で to_vec() を削減
+      fn insert_into_node_mut(
+          node: &mut ReferenceCounter<Node<K, V>>,
+          key: K,
+          value: V,
+          hash: u64,
+          depth: usize,
+      ) -> Option<V> {
+          // ReferenceCounter::make_mut を使用して in-place 更新を試みる
+          let node_mut = ReferenceCounter::make_mut(node);
+          // ...
+      }
+      ```
+
+    functional_programming_compliance:
+      immutability: |
+        - TransientHashMap は明示的に「一時的可変ビルダー」として設計
+        - persistent() 後は不変の PersistentHashMap を返す
+        - この境界は型システムで保証される（persistent() が self を消費）
+      referential_transparency: |
+        - Transient は一時的なビルダーであり、参照透過性は適用外
+        - ただし persistent() の結果は参照透過性を持つ:
+          同じ操作履歴を持つ Transient から同じ PersistentHashMap が生成される
+        - Transient 自体は「可変ビルダー」として明示的に区別される
+      purity: |
+        - Transient は「一時的な可変ビルダー」として明示的に設計されている
+        - これは Haskell の ST モナドや Rust の Builder パターンに相当する
+        - persistent() 呼び出しにより「計算の凍結」が行われ、以降は純粋な値として扱われる
+        - Transient 自体は純粋関数ではないが、persistent() の戻り値は純粋な値
+        - この設計は「バッチ構築 → freeze → 不変使用」というパターンを可能にする
+
+    cow_policy:
+      transient_path: |
+        Transient 経路では、root の参照カウントは常に 1（Transient が唯一の所有者）
+        - make_mut は常に in-place 変更を行う
+        - コピーは発生しない
+        - TransientHashMap は clone() を持たないため、参照カウントは常に 1
+      persistent_path: |
+        PersistentHashMap::insert() では、新しい Node を常に生成する
+        - 元の構造を保持するため、make_mut は使用しない
+        - 元の PersistentHashMap は変更されない
+      boundary: |
+        persistent() 呼び出し時の処理:
+        1. Transient の root を PersistentHashMap に移動
+        2. Transient は使用不可能になる（self を消費）
+        3. PersistentHashMap として凍結される
+
+    tests:
+      - name: "with_capacity_hint テスト"
+        description: |
+          with_capacity_hint で作成した TransientHashMap が正しく動作することを検証。
+      - name: "Transient-Persistent ラウンドトリップテスト"
+        description: |
+          Transient で操作した結果が Persistent と等価であることを検証。
+          ```rust
+          let via_persistent = PersistentHashMap::new()
+              .insert("a".to_string(), 1)
+              .insert("b".to_string(), 2);
+
+          let via_transient = {
+              let mut t = TransientHashMap::new();
+              t.insert("a".to_string(), 1);
+              t.insert("b".to_string(), 2);
+              t.persistent()
+          };
+
+          assert_eq!(via_persistent, via_transient);
+          ```
+      - name: "freeze 後不変性テスト"
+        description: |
+          persistent() 後の PersistentHashMap が不変であることを検証。
+
+  # ---------------------------------------------------------------------------
+  # Phase 3: 高速ハッシュ導入
+  # ---------------------------------------------------------------------------
+  - id: REQ-HASHMAP-PERF-003
+    name: "高速ハッシュの feature gate 追加"
+    priority: medium
+    phase: 3
+    expected_improvement: "10-15%"
+    description: |
+      rustc-hash (FxHasher) および ahash を feature gate で追加し、
+      パフォーマンスと DoS 耐性のトレードオフを選択可能にする。
+
+      **現在の問題:**
+      ```rust
+      fn compute_hash<K: Hash + ?Sized>(key: &K) -> u64 {
+          let mut hasher = DefaultHasher::new();  // SipHash - 安全だが低速
+          key.hash(&mut hasher);
+          hasher.finish()
+      }
+      ```
+
+      SipHash は DoS 攻撃への耐性があるが、内部用途では過剰。
+
+      **改善後（DoS 耐性の区別を明確化）:**
+
+      | feature | ハッシュ関数 | DoS 耐性 | 速度 | 用途 |
+      |---------|-------------|---------|------|------|
+      | なし（デフォルト） | SipHash | あり | 標準 | 外部入力を扱う場合 |
+      | fxhash | FxHasher | なし | 最速 | 内部データ専用 |
+      | ahash | ahash 固定シード | なし | 高速 | 内部データ専用 |
+
+      **設計意図:**
+      - デフォルト（SipHash）は DoS 耐性を維持し、安全性を優先
+      - fxhash/ahash は DoS 耐性を犠牲にして高速化を実現
+      - ユーザーは用途に応じて feature で選択可能
+
+      **セキュリティ警告: fxhash/ahash feature は内部データ専用**
+
+      以下の場合は **絶対に fxhash/ahash を使用しないでください**:
+      - ユーザー入力をキーとする場合
+      - ネットワーク経由で受信したデータをキーとする場合
+      - 外部ファイルから読み込んだデータをキーとする場合
+
+      悪意のある攻撃者は、固定シードのハッシュ関数に対して
+      意図的に衝突するキーを生成できます。これにより:
+      - O(n) への性能劣化（DoS 攻撃）
+      - サービス停止の可能性
+
+      **推奨**:
+      - 外部入力を扱う場合: デフォルト（SipHash）を使用
+      - 完全に内部で生成されるデータのみ: fxhash を検討可能
+
+      **重要: ahash の参照透過性と DoS 耐性のトレードオフ**
+
+      `AHasher::default()` はプロセス起動ごとにランダムシードを使用するため、
+      同じキーでも異なるハッシュ値を返す可能性がある。これは参照透過性を崩す。
+
+      本ライブラリでは参照透過性を優先し、固定シードを使用する:
+      ```rust
+      // 固定シードでハッシャーを作成（参照透過性維持）
+      const AHASH_SEED: [u64; 4] = [
+          0x517cc1b727220a95,  // 固定シード
+          0x3d8f546f2f7c4b33,
+          0x96c32c49e27c5e4d,
+          0x4a5b6c7d8e9f0a1b,
+      ];
+
+      fn compute_hash_ahash<K: Hash + ?Sized>(key: &K) -> u64 {
+          use ahash::RandomState;
+          let state = RandomState::with_seeds(
+              AHASH_SEED[0], AHASH_SEED[1], AHASH_SEED[2], AHASH_SEED[3]
+          );
+          let mut hasher = state.build_hasher();
+          key.hash(&mut hasher);
+          hasher.finish()
+      }
+      ```
+
+      **警告: fxhash/ahash は DoS 耐性なし**
+      固定シードは予測可能な衝突パターンを許容するため、DoS 耐性なし。
+      - fxhash, ahash feature は **内部データ専用** として位置づける
+      - 外部入力（ユーザー入力、ネットワーク入力）を扱う場合は **デフォルト（SipHash）を使用**
+
+      これにより:
+      - 同じキーに対して常に同じハッシュ値を返す（参照透過性）
+      - プロセス間でも一貫した動作
+      - シリアライズ/デバッグの再現性を維持
+      - **ただし DoS 耐性なし**
+
+      **ユースケース:**
+      - 外部入力を扱う場合: **デフォルト（SipHash）を使用**（必須）
+      - 内部データのみ扱う場合: fxhash または ahash を使用可能
+
+    implementation: |
+      **Cargo.toml への依存追加:**
+      ```toml
+      [dependencies]
+      rustc-hash = { version = "2.1", optional = true }
+      ahash = { version = "0.8", optional = true }
+
+      [features]
+      # 既存の default feature は維持（変更なし）
+      # default = ["typeclass", "compose", "control", "persistent", "optics", "derive", "effect", "async"]
+
+      # 新規追加の feature gate
+      fxhash = ["dep:rustc-hash"]  # 高速、DoS 耐性なし
+      ahash = ["dep:ahash"]        # 高速、固定シードで参照透過性維持（DoS 耐性なし）
+      ```
+
+      **ハッシュ関数の条件分岐:**
+      ```rust
+      #[cfg(feature = "fxhash")]
+      use rustc_hash::FxHasher;
+
+      #[cfg(feature = "ahash")]
+      use ahash::RandomState;
+
+      /// ahash 用の固定シード（参照透過性維持、DoS 耐性なし）
+      #[cfg(feature = "ahash")]
+      const AHASH_SEED: [u64; 4] = [
+          0x517cc1b727220a95,
+          0x3d8f546f2f7c4b33,
+          0x96c32c49e27c5e4d,
+          0x4a5b6c7d8e9f0a1b,
+      ];
+
+      /// キーのハッシュ値を計算
+      #[inline]
+      fn compute_hash<K: Hash + ?Sized>(key: &K) -> u64 {
+          #[cfg(feature = "fxhash")]
+          {
+              use std::hash::Hasher;
+              let mut hasher = FxHasher::default();
+              key.hash(&mut hasher);
+              hasher.finish()
+          }
+          #[cfg(all(feature = "ahash", not(feature = "fxhash")))]
+          {
+              use std::hash::Hasher;
+              // 固定シードで参照透過性を維持
+              let state = RandomState::with_seeds(
+                  AHASH_SEED[0], AHASH_SEED[1], AHASH_SEED[2], AHASH_SEED[3]
+              );
+              let mut hasher = state.build_hasher();
+              key.hash(&mut hasher);
+              hasher.finish()
+          }
+          #[cfg(all(not(feature = "fxhash"), not(feature = "ahash")))]
+          {
+              use std::hash::Hasher;
+              let mut hasher = std::collections::hash_map::DefaultHasher::new();
+              key.hash(&mut hasher);
+              hasher.finish()
+          }
+      }
+      ```
+
+      **ドキュメントへの追記:**
+      ```rust
+      /// # Feature Flags
+      ///
+      /// - `fxhash`: FxHasher を使用（高速、DoS 耐性なし）
+      /// - `ahash`: ahash を使用（高速、DoS 耐性なし、固定シード）
+      ///
+      /// デフォルトは SipHash（標準、DoS 耐性あり）。
+      ///
+      /// **警告**: `fxhash` と `ahash` は DoS 耐性なし。
+      /// 外部入力（ユーザー入力、ネットワーク入力）を扱う場合は
+      /// **デフォルト（SipHash）を使用してください**。
+      ///
+      /// 内部データのみ扱う場合は `fxhash` を推奨（最速）。
+      ```
+
+    functional_programming_compliance:
+      immutability: |
+        - ハッシュ関数の選択は動作に影響しない
+        - 結果の値は同じ
+      referential_transparency: |
+        - 同じキーに対して同じハッシュ値を返す
+        - ハッシュ関数の実装による違いは透過的
+      purity: |
+        - 副作用なし
+        - ハッシュ計算は純粋な計算
+
+    tests:
+      - name: "feature gate テスト"
+        description: |
+          各 feature flag で正しいハッシュ関数が使用されることを検証。
+      - name: "パフォーマンステスト（cargo bench）"
+        description: |
+          各ハッシュ関数でのパフォーマンスを比較測定。
+
+  # ---------------------------------------------------------------------------
+  # Phase 4: 衝突バケット最適化
+  # ---------------------------------------------------------------------------
+  - id: REQ-HASHMAP-PERF-004
+    name: "衝突バケットの SmallVec 最適化"
+    priority: medium
+    phase: 4
+    expected_improvement: "5-10%"
+    description: |
+      Collision ノードの entries を SmallVec に置き換え、
+      ハッシュ衝突時のアロケーションを削減する。
+
+      **現在の問題:**
+      ```rust
+      Node::Collision {
+          hash: u64,
+          entries: ReferenceCounter<[(K, V)]>,  // 常にヒープ
+      }
+      ```
+
+      ハッシュ衝突は稀だが、発生時のオーバーヘッドが大きい。
+
+      **改善後:**
+      ```rust
+      /// 衝突エントリ配列の型エイリアス
+      /// 4 要素までスタック上に配置
+      type CollisionArray<K, V> = SmallVec<[(K, V); 4]>;
+
+      Node::Collision {
+          hash: u64,
+          entries: CollisionArray<K, V>,  // 4 要素までスタック
+      }
+      ```
+
+      **スタックサイズの選択根拠:**
+      - ハッシュ衝突は稀（適切なハッシュ関数で 1% 未満）
+      - 衝突時も通常 2-3 エントリ程度
+      - 4 要素でカバー率 95% 以上を想定
+
+      **5 要素以上の場合の処理:**
+      SmallVec は自動的にヒープに移行するため、
+      5 要素以上でも正しく動作する。
+      ただし、この最適化では 4 要素までの高速パスを提供する。
+
+    implementation: |
+      ```rust
+      use smallvec::SmallVec;
+
+      /// 衝突エントリ配列の型エイリアス
+      /// 4 要素までスタック上に配置
+      type CollisionArray<K, V> = SmallVec<[(K, V); 4]>;
+
+      enum Node<K, V> {
+          // ...
+          Collision {
+              hash: u64,
+              entries: CollisionArray<K, V>,
+          },
+      }
+      ```
+
+      **変更箇所:**
+      1. `ReferenceCounter<[(K, V)]>` → `CollisionArray<K, V>` に置換
+      2. `insert_into_collision`, `remove_from_collision` を SmallVec 対応に変更
+      3. `get_from_collision` を SmallVec 対応に変更
+
+    functional_programming_compliance:
+      immutability: |
+        - SmallVec は値型として Clone される
+        - 元のノードは変更されない
+      referential_transparency: |
+        - 同じ入力に対して同じ出力を返す
+      purity: |
+        - 副作用なし
+
+    tests:
+      - name: "衝突テスト"
+        description: |
+          意図的にハッシュ衝突を発生させ、正しく動作することを検証。
+      - name: "大量衝突テスト"
+        description: |
+          4 要素を超える衝突が発生しても正しく動作することを検証。
+      - name: "パフォーマンステスト（cargo bench）"
+        description: |
+          衝突時のパフォーマンスを測定。
+
+  # ---------------------------------------------------------------------------
+  # Phase 5: ベンチマーク・回帰テスト強化
+  # ---------------------------------------------------------------------------
+  - id: REQ-HASHMAP-PERF-005
+    name: "ベンチマーク・回帰テスト強化"
+    priority: high
+    phase: 5
+    expected_improvement: "N/A（品質保証）"
+    description: |
+      パフォーマンス最適化の効果を測定し、回帰を検知するための
+      ベンチマークとテストを強化する。
+
+      **追加するベンチマーク（HashMap）:**
+      1. insert/100k - 大規模 insert
+      2. get/100k - 大規模 get
+      3. remove/50k - 大規模 remove
+      4. collect/100k - FromIterator
+      5. transient_batch/100k - Transient バッチ更新
+      6. baseline_comparison - 標準 HashMap との比較
+
+      **追加するベンチマーク（HashSet）:**
+      7. hashset_insert/100k - PersistentHashSet の insert
+      8. hashset_contains/100k - PersistentHashSet の contains
+      9. hashset_collect/100k - PersistentHashSet の collect
+      10. transient_hashset_batch/100k - TransientHashSet バッチ更新
+      11. hashset_baseline - 標準 HashSet との比較
+
+      **追加するテスト:**
+      1. 不変性プロパティテスト - insert/remove 後に元のマップが不変
+      2. 参照透過性テスト - 同じ入力に対して同じ出力
+      3. 構造共有テスト - clone 後の操作で元のマップが不変
+      4. DoS 耐性テスト（デフォルトハッシュ時）- 衝突パターン入力
+      5. HashSet API 互換性テスト - SmallVec/ハッシュ切替後の動作確認
+      6. HashSet 性能回帰テスト - 最適化前後の性能比較
+
+    implementation: |
+      **benches/persistent_hashmap_bench.rs:**
+      ```rust
+      use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId};
+      use lambars::persistent::{PersistentHashMap, TransientHashMap};
+      use std::collections::HashMap;
+
+      fn benchmark_insert(c: &mut Criterion) {
+          let mut group = c.benchmark_group("insert");
+
+          for size in [1_000, 10_000, 100_000].iter() {
+              group.bench_with_input(
+                  BenchmarkId::new("PersistentHashMap", size),
+                  size,
+                  |b, &size| {
+                      b.iter(|| {
+                          let mut map = PersistentHashMap::new();
+                          for i in 0..size {
+                              map = map.insert(i, i * 2);
+                          }
+                          map
+                      });
+                  },
+              );
+
+              group.bench_with_input(
+                  BenchmarkId::new("HashMap", size),
+                  size,
+                  |b, &size| {
+                      b.iter(|| {
+                          let mut map = HashMap::new();
+                          for i in 0..size {
+                              map.insert(i, i * 2);
+                          }
+                          map
+                      });
+                  },
+              );
+          }
+          group.finish();
+      }
+
+      fn benchmark_transient(c: &mut Criterion) {
+          let mut group = c.benchmark_group("transient_batch");
+
+          for size in [1_000, 10_000, 100_000].iter() {
+              group.bench_with_input(
+                  BenchmarkId::new("TransientHashMap", size),
+                  size,
+                  |b, &size| {
+                      b.iter(|| {
+                          let mut transient = TransientHashMap::with_capacity_hint(*size);
+                          for i in 0..*size {
+                              transient.insert(i, i * 2);
+                          }
+                          transient.persistent()
+                      });
+                  },
+              );
+          }
+          group.finish();
+      }
+
+      criterion_group!(benches, benchmark_insert, benchmark_transient);
+      criterion_main!(benches);
+      ```
+
+      **tests/persistent_hashmap_laws.rs:**
+      ```rust
+      use proptest::prelude::*;
+      use lambars::persistent::PersistentHashMap;
+
+      proptest! {
+          /// 不変性: insert 後に元のマップが変更されない
+          #[test]
+          fn immutability_after_insert(
+              initial: Vec<(i32, i32)>,
+              new_key: i32,
+              new_value: i32
+          ) {
+              let map: PersistentHashMap<i32, i32> = initial.iter().cloned().collect();
+              let map_clone = map.clone();
+              let _new_map = map.insert(new_key, new_value);
+
+              // map_clone は変更されていない
+              prop_assert_eq!(map_clone.len(), initial.len());
+              for (k, v) in initial.iter() {
+                  prop_assert_eq!(map_clone.get(k), Some(v));
+              }
+          }
+
+          /// 参照透過性: 同じ入力に対して同じ出力
+          #[test]
+          fn referential_transparency(
+              entries: Vec<(i32, i32)>,
+              key: i32
+          ) {
+              let map1: PersistentHashMap<i32, i32> = entries.iter().cloned().collect();
+              let map2: PersistentHashMap<i32, i32> = entries.iter().cloned().collect();
+
+              prop_assert_eq!(map1.get(&key), map2.get(&key));
+          }
+      }
+      ```
+
+    functional_programming_compliance:
+      immutability: |
+        - テストで不変性を検証
+      referential_transparency: |
+        - テストで参照透過性を検証
+      purity: |
+        - テストで純粋性を検証
+
+    tests:
+      - name: "ベンチマーク実行"
+        description: |
+          cargo bench --bench persistent_hashmap_bench
+      - name: "プロパティテスト実行"
+        description: |
+          cargo test --test persistent_hashmap_laws
+
+# =============================================================================
+# 非機能要件
+# =============================================================================
+non_functional_requirements:
+  # ---------------------------------------------------------------------------
+  # パフォーマンス要件
+  # ---------------------------------------------------------------------------
+  performance:
+    - id: NFR-PERF-001
+      name: "insert パフォーマンス"
+      description: |
+        100,000 件 insert のパフォーマンスを改善する。
+      metrics:
+        - operation: "insert (100,000 件)"
+          current: "約 85-90ms"
+          target: "8ms 以下"
+          improvement: "10 倍以上"
+          comparison: "HashMap: 約 3ms（目標の 3 倍以内）"
+
+    - id: NFR-PERF-002
+      name: "collect パフォーマンス"
+      description: |
+        100,000 件 collect のパフォーマンスを改善する。
+      metrics:
+        - operation: "collect (100,000 件)"
+          current: "約 27-34ms"
+          target: "5ms 以下"
+          improvement: "5-7 倍"
+
+    - id: NFR-PERF-003
+      name: "アロケーション削減"
+      description: |
+        ヒープアロケーション回数を削減する。
+      metrics:
+        - operation: "alloc_count per insert"
+          current: "多重 Box/ReferenceCounter で高頻度"
+          target: "-70% 以上"
+
+    - id: NFR-PERF-004
+      name: "CPU プロファイル改善"
+      description: |
+        CPU flamegraph での malloc/cfree 比率を削減する。
+      metrics:
+        - operation: "malloc/cfree 比率"
+          current: "トップを占有"
+          target: "<10%"
+
+  # ---------------------------------------------------------------------------
+  # テスト要件
+  # ---------------------------------------------------------------------------
+  testing:
+    - id: NFR-TEST-001
+      name: "既存テスト維持"
+      description: |
+        既存の全てのテストがパスすること。
+      verification: |
+        cargo test --features persistent
+
+    - id: NFR-TEST-002
+      name: "不変性テスト"
+      description: |
+        insert/remove 後に元のマップが変更されていないことを検証。
+        clone() した後に操作しても、clone 元が変更されないことを確認。
+      verification: |
+        プロパティベーステストで検証
+        ```rust
+        let map1 = PersistentHashMap::new()
+            .insert("a".to_string(), 1)
+            .insert("b".to_string(), 2);
+        let map1_clone = map1.clone();
+        let map2 = map1.insert("c".to_string(), 3);
+
+        // map1_clone は変更されていないことを検証
+        assert_eq!(map1_clone.len(), 2);
+        assert_eq!(map1_clone.get("c"), None);
+        ```
+
+    - id: NFR-TEST-003
+      name: "参照透過性テスト"
+      description: |
+        同じ入力に対して常に同じ出力を返すことを検証。
+      verification: |
+        プロパティベーステストで検証
+
+    - id: NFR-TEST-004
+      name: "パフォーマンス検証"
+      description: |
+        パフォーマンス測定は cargo bench に限定する。
+        ユニットテストでは機能の正確性のみを検証する。
+      verification: |
+        cargo bench --bench persistent_hashmap_bench
+
+    - id: NFR-TEST-005
+      name: "テスト分類"
+      description: |
+        テストの分類と検証方法を明確化する。
+      categories:
+        unit_tests:
+          location: "src/persistent/hashmap.rs 内の #[cfg(test)]"
+          scope: |
+            - 機能の正確性
+            - 不変性
+            - エッジケース
+          note: "パフォーマンス測定は含まない"
+
+        property_tests:
+          location: "tests/persistent_hashmap_laws.rs"
+          scope: |
+            - 任意入力に対する不変性維持
+            - insert/remove の可逆性
+            - 参照透過性
+
+        benchmark_tests:
+          location: "benches/persistent_hashmap_bench.rs"
+          scope: |
+            - 各操作のパフォーマンス測定
+            - HashMap との比較
+            - SmallVec 最適化効果の確認
+          note: "パフォーマンス検証はベンチマーク専用"
+
+# =============================================================================
+# 実装計画
+# =============================================================================
+implementation_plan:
+  phases:
+    - phase: 1
+      name: "SmallVec によるノード構造の最適化"
+      duration: "2-3 日"
+      tasks:
+        - "ChildArray 型エイリアスの定義"
+        - "Node enum の children フィールドを SmallVec に変更"
+        - "build_children_with_insert/update/remove の SmallVec 対応"
+        - "insert_into_node, remove_from_node の SmallVec 対応"
+        - "テスト実行"
+        - "ベンチマーク測定"
+
+    - phase: 2
+      name: "Transient ビルダーの最適化"
+      duration: "1-2 日"
+      tasks:
+        - "with_capacity_hint メソッドの追加"
+        - "to_vec() 呼び出しの削減"
+        - "テスト実行"
+        - "ベンチマーク測定"
+
+    - phase: 3
+      name: "高速ハッシュの feature gate 追加"
+      duration: "1 日"
+      tasks:
+        - "Cargo.toml への依存追加"
+        - "compute_hash 関数の条件分岐実装"
+        - "ドキュメントへの追記"
+        - "テスト実行"
+        - "ベンチマーク測定"
+
+    - phase: 4
+      name: "衝突バケットの SmallVec 最適化"
+      duration: "1 日"
+      tasks:
+        - "CollisionArray 型エイリアスの定義"
+        - "Collision ノードの entries フィールドを SmallVec に変更"
+        - "insert_into_collision, remove_from_collision の SmallVec 対応"
+        - "テスト実行"
+        - "ベンチマーク測定"
+
+    - phase: 5
+      name: "ベンチマーク・回帰テスト強化"
+      duration: "1 日"
+      tasks:
+        - "benches/persistent_hashmap_bench.rs の拡充"
+        - "tests/persistent_hashmap_laws.rs の追加"
+        - "全テスト・ベンチマーク実行"
+        - "結果の文書化"
+
+  total_duration: "6-8 日"
+
+# =============================================================================
+# リスクと対策
+# =============================================================================
+risks:
+  - risk: "パフォーマンス目標未達"
+    probability: "中"
+    impact: "高"
+    mitigation: |
+      - 各 Phase でベンチマークを測定
+      - 効果が薄い Phase は見直し
+      - 追加の最適化手法を検討
+
+  - risk: "既存テストの失敗"
+    probability: "低"
+    impact: "高"
+    mitigation: |
+      - 各 Phase 完了後にテストを実行
+      - 失敗したらロールバック
+      - 段階的な実装
+
+  - risk: "SmallVec 導入による構造共有の効果減少"
+    probability: "中"
+    impact: "中"
+    mitigation: |
+      - ベンチマークで効果を測定
+      - スタックサイズの調整（6 要素が適切か検証）
+      - 構造共有とアロケーションコストのトレードオフを文書化
+
+  - risk: "高速ハッシュによる DoS 脆弱性"
+    probability: "低（feature gate 使用時のみ）"
+    impact: "高（外部入力を扱う場合）"
+    mitigation: |
+      - デフォルトは SipHash（DoS 耐性あり）を維持
+      - ドキュメントで「外部入力にはデフォルトを使用」と明記
+      - fxhash/ahash feature は内部データ専用と位置づけ
+      - 警告: fxhash/ahash は DoS 耐性なし（固定シード使用のため）
+
+  - risk: "Transient の不変性違反"
+    probability: "低"
+    impact: "致命的"
+    mitigation: |
+      - persistent() 後は PersistentHashMap として不変
+      - 型システムで境界を保証
+      - プロパティテストで検証
+
+# =============================================================================
+# 成功基準
+# =============================================================================
+success_criteria:
+  - id: SC-001
+    name: "パフォーマンス改善"
+    description: |
+      HashMap との比較で 10 倍以内を達成
+      - insert 100,000 件: 8ms 以下
+      - collect 100,000 件: 5ms 以下
+
+      **測定環境（必須）:**
+      - feature: デフォルト（SipHash）で測定
+      - ビルド: release モード (`cargo bench`)
+      - キー型: i32（整数キー）
+      - 測定ツール: criterion
+
+      **補足測定（参考値）:**
+      - feature = "fxhash" でも同様のベンチマークを実施
+      - feature = "ahash" でも同様のベンチマークを実施
+      - 高速ハッシュ使用時はさらに改善が期待される
+
+  - id: SC-002
+    name: "API 互換性"
+    description: |
+      既存の全ての公開 API に変更なし
+
+  - id: SC-003
+    name: "テストパス"
+    description: |
+      既存の全てのテストがパス
+
+  - id: SC-004
+    name: "関数型原則維持"
+    description: |
+      不変性・参照透過性・純粋性が維持されている
+      - プロパティテストで検証
+      - ベンチマークで効果確認
+
+  - id: SC-005
+    name: "アロケーション削減"
+    description: |
+      ヒープアロケーション回数が 70% 以上削減されている
+      - プロファイリングで検証
+
+# =============================================================================
+# 将来の拡張（スコープ外）
+# =============================================================================
+future_extensions: []
+# 注意: このタスクでは「後で対応」「将来の拡張」を禁止しています。
+# 全ての要件は今回のタスクで完結させます。
