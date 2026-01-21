@@ -1115,34 +1115,33 @@ impl<T: Clone> PersistentVector<T> {
     where
         I: IntoIterator<Item = T>,
     {
-        let new_elements: Vec<T> = iter.into_iter().collect();
+        let iter = iter.into_iter();
+        let (lower_bound, _) = iter.size_hint();
 
-        if new_elements.is_empty() {
-            return self.clone();
-        }
-
-        // For small additions (<=4 elements), use individual push_back
-        // This avoids the overhead of collecting all elements for small cases
-        if new_elements.len() <= 4 {
-            let mut result = self.clone();
-            for element in new_elements {
-                result = result.push_back(element);
+        // For small additions (<=4 elements expected), use individual push_back
+        // This avoids the overhead of transient conversion for small cases
+        if lower_bound <= 4 {
+            let new_elements: Vec<T> = iter.collect();
+            if new_elements.is_empty() {
+                return self.clone();
             }
-            return result;
+            if new_elements.len() <= 4 {
+                let mut result = self.clone();
+                for element in new_elements {
+                    result = result.push_back(element);
+                }
+                return result;
+            }
+            // If actual size was larger than hint, use transient path
+            let mut transient = self.clone().transient();
+            transient.push_back_many(new_elements);
+            return transient.persistent();
         }
 
-        // For larger additions, collect all elements and rebuild
-        let total_length = self.length + new_elements.len();
-        let mut all_elements: Vec<T> = Vec::with_capacity(total_length);
-
-        // Collect existing elements via efficient O(N) iterator
-        for element in self {
-            all_elements.push(element.clone());
-        }
-        all_elements.extend(new_elements);
-
-        // Rebuild using the efficient batch construction
-        build_persistent_vector_from_vec(all_elements)
+        // For larger additions, use TransientVector for efficient batch insert
+        let mut transient = self.clone().transient();
+        transient.push_back_many(iter);
+        transient.persistent()
     }
 
     /// Creates a `PersistentVector` from a slice.
@@ -3200,6 +3199,23 @@ impl<'a, T> IntoIterator for &'a PersistentVector<T> {
     }
 }
 
+impl<T: Clone> Extend<T> for TransientVector<T> {
+    /// Extends the transient vector with the contents of an iterator.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientVector;
+    ///
+    /// let mut transient: TransientVector<i32> = TransientVector::new();
+    /// transient.extend(vec![1, 2, 3]);
+    /// assert_eq!(transient.len(), 3);
+    /// ```
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        self.push_back_many(iter);
+    }
+}
+
 impl<T: PartialEq> PartialEq for PersistentVector<T> {
     fn eq(&self, other: &Self) -> bool {
         if self.length != other.length {
@@ -3663,6 +3679,38 @@ impl<T: Clone> TransientVector<T> {
             self.tail.push(element);
         }
         self.length += 1;
+    }
+
+    /// Appends multiple elements to the back of the vector.
+    ///
+    /// This method is more efficient than calling `push_back` repeatedly
+    /// because it processes elements in batches.
+    ///
+    /// # Arguments
+    ///
+    /// * `iter` - An iterator yielding elements to append
+    ///
+    /// # Complexity
+    ///
+    /// O(M log32 N) where M is the number of elements to add and N is the
+    /// final vector size
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientVector;
+    ///
+    /// let mut transient: TransientVector<i32> = TransientVector::new();
+    /// transient.push_back_many(vec![1, 2, 3, 4, 5]);
+    /// assert_eq!(transient.len(), 5);
+    /// ```
+    pub fn push_back_many<I>(&mut self, iter: I)
+    where
+        I: IntoIterator<Item = T>,
+    {
+        for element in iter {
+            self.push_back(element);
+        }
     }
 
     /// Pushes the current tail into the root tree.
