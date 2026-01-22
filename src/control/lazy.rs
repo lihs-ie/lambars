@@ -703,7 +703,7 @@ impl<T, F: FnOnce() -> T> Lazy<T, F> {
     /// let lazy = Lazy::new(|| 21);
     /// let doubled = lazy.try_map(|x| x * 2);
     ///
-    /// assert_eq!(*doubled.force().unwrap(), 42);
+    /// assert_eq!(doubled.force().unwrap(), 42);
     /// ```
     pub fn try_map<U, G>(
         self,
