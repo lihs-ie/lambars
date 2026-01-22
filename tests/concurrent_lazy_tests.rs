@@ -454,7 +454,7 @@ fn concurrent_lazy_debug_init() {
 fn concurrent_lazy_display_uninit() {
     let lazy = ConcurrentLazy::new(|| 42);
     let display_str = format!("{}", lazy);
-    assert_eq!(display_str, "ConcurrentLazy(<uninit>)");
+    assert_eq!(display_str, "<uninit>");
 }
 
 #[rstest]
@@ -462,7 +462,7 @@ fn concurrent_lazy_display_init() {
     let lazy = ConcurrentLazy::new(|| 42);
     let _ = lazy.force();
     let display_str = format!("{}", lazy);
-    assert_eq!(display_str, "ConcurrentLazy(42)");
+    assert_eq!(display_str, "42");
 }
 
 // =============================================================================

@@ -848,8 +848,8 @@ impl<T: fmt::Debug, F> fmt::Debug for Lazy<T, F> {
                 let value = unsafe { (*self.value.get()).assume_init_ref() };
                 formatter.debug_tuple("Lazy").field(value).finish()
             }
-            STATE_EMPTY | STATE_COMPUTING => formatter.write_str("Lazy(<uninit>)"),
-            STATE_POISONED => formatter.write_str("Lazy(<poisoned>)"),
+            STATE_EMPTY | STATE_COMPUTING => formatter.write_str("<uninit>"),
+            STATE_POISONED => formatter.write_str("<poisoned>"),
             _ => unreachable!(),
         }
     }
@@ -861,10 +861,10 @@ impl<T: fmt::Display, F> fmt::Display for Lazy<T, F> {
             STATE_READY => {
                 // SAFETY: STATE_READY means value is initialized.
                 let value = unsafe { (*self.value.get()).assume_init_ref() };
-                write!(formatter, "Lazy({value})")
+                fmt::Display::fmt(value, formatter)
             }
-            STATE_EMPTY | STATE_COMPUTING => write!(formatter, "Lazy(<uninit>)"),
-            STATE_POISONED => write!(formatter, "Lazy(<poisoned>)"),
+            STATE_EMPTY | STATE_COMPUTING => formatter.write_str("<uninit>"),
+            STATE_POISONED => formatter.write_str("<poisoned>"),
             _ => unreachable!(),
         }
     }
@@ -902,21 +902,21 @@ mod tests {
     #[rstest]
     fn test_display_unevaluated_lazy() {
         let lazy = Lazy::new(|| 42);
-        assert_eq!(format!("{lazy}"), "Lazy(<uninit>)");
+        assert_eq!(format!("{lazy}"), "<uninit>");
     }
 
     #[rstest]
     fn test_display_evaluated_lazy() {
         let lazy = Lazy::new(|| 42);
         let _ = lazy.force();
-        assert_eq!(format!("{lazy}"), "Lazy(42)");
+        assert_eq!(format!("{lazy}"), "42");
     }
 
     #[rstest]
     fn test_display_poisoned_lazy() {
         let lazy = Lazy::new(|| -> i32 { panic!("initialization failed") });
         let _ = panic::catch_unwind(panic::AssertUnwindSafe(|| lazy.force()));
-        assert_eq!(format!("{lazy}"), "Lazy(<poisoned>)");
+        assert_eq!(format!("{lazy}"), "<poisoned>");
     }
 
     // =========================================================================
@@ -1076,7 +1076,7 @@ mod tests {
     #[rstest]
     fn test_lazy_debug_uninit() {
         let lazy = Lazy::new(|| 42);
-        assert_eq!(format!("{lazy:?}"), "Lazy(<uninit>)");
+        assert_eq!(format!("{lazy:?}"), "<uninit>");
     }
 
     #[rstest]
@@ -1090,7 +1090,7 @@ mod tests {
     fn test_lazy_debug_poisoned() {
         let lazy = Lazy::new(|| -> i32 { panic!("initialization failed") });
         let _ = panic::catch_unwind(panic::AssertUnwindSafe(|| lazy.force()));
-        assert_eq!(format!("{lazy:?}"), "Lazy(<poisoned>)");
+        assert_eq!(format!("{lazy:?}"), "<poisoned>");
     }
 
     // =========================================================================

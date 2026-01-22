@@ -829,8 +829,8 @@ impl<T: fmt::Debug, F> fmt::Debug for ConcurrentLazy<T, F> {
                     .field(value)
                     .finish()
             }
-            STATE_EMPTY | STATE_COMPUTING => formatter.write_str("ConcurrentLazy(<uninit>)"),
-            STATE_POISONED => formatter.write_str("ConcurrentLazy(<poisoned>)"),
+            STATE_EMPTY | STATE_COMPUTING => formatter.write_str("<uninit>"),
+            STATE_POISONED => formatter.write_str("<poisoned>"),
             _ => unreachable!(),
         }
     }
@@ -842,10 +842,10 @@ impl<T: fmt::Display, F> fmt::Display for ConcurrentLazy<T, F> {
             STATE_READY => {
                 // SAFETY: STATE_READY means value is initialized.
                 let value = unsafe { (*self.value.get()).assume_init_ref() };
-                write!(formatter, "ConcurrentLazy({value})")
+                fmt::Display::fmt(value, formatter)
             }
-            STATE_EMPTY | STATE_COMPUTING => write!(formatter, "ConcurrentLazy(<uninit>)"),
-            STATE_POISONED => write!(formatter, "ConcurrentLazy(<poisoned>)"),
+            STATE_EMPTY | STATE_COMPUTING => formatter.write_str("<uninit>"),
+            STATE_POISONED => formatter.write_str("<poisoned>"),
             _ => unreachable!(),
         }
     }
@@ -875,21 +875,21 @@ mod tests {
     #[rstest]
     fn test_display_unevaluated_lazy() {
         let lazy = ConcurrentLazy::new(|| 42);
-        assert_eq!(format!("{lazy}"), "ConcurrentLazy(<uninit>)");
+        assert_eq!(format!("{lazy}"), "<uninit>");
     }
 
     #[rstest]
     fn test_display_evaluated_lazy() {
         let lazy = ConcurrentLazy::new(|| 42);
         let _ = lazy.force();
-        assert_eq!(format!("{lazy}"), "ConcurrentLazy(42)");
+        assert_eq!(format!("{lazy}"), "42");
     }
 
     #[rstest]
     fn test_display_poisoned_lazy() {
         let lazy = ConcurrentLazy::new(|| -> i32 { panic!("initialization failed") });
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lazy.force()));
-        assert_eq!(format!("{lazy}"), "ConcurrentLazy(<poisoned>)");
+        assert_eq!(format!("{lazy}"), "<poisoned>");
     }
 
     #[rstest]
@@ -1021,7 +1021,7 @@ mod tests {
     #[rstest]
     fn test_concurrent_lazy_debug_uninit() {
         let lazy = ConcurrentLazy::new(|| 42);
-        assert_eq!(format!("{lazy:?}"), "ConcurrentLazy(<uninit>)");
+        assert_eq!(format!("{lazy:?}"), "<uninit>");
     }
 
     #[rstest]
@@ -1035,7 +1035,7 @@ mod tests {
     fn test_concurrent_lazy_debug_poisoned() {
         let lazy = ConcurrentLazy::new(|| -> i32 { panic!("initialization failed") });
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lazy.force()));
-        assert_eq!(format!("{lazy:?}"), "ConcurrentLazy(<poisoned>)");
+        assert_eq!(format!("{lazy:?}"), "<poisoned>");
     }
 
     #[rstest]
