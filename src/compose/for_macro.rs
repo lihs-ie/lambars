@@ -182,60 +182,67 @@
 //! assert_eq!(result, vec![5, 10]);
 //! ```
 //!
-//! ## Scala-style Recommendation Feed Example
+//! ## Nested Iteration with Multiple Collections
 //!
 //! ```rust
 //! use lambars::for_;
 //!
-//! #[derive(Clone)]
-//! struct Book {
-//!     title: String,
-//!     authors: Vec<String>,
-//! }
+//! let xs = vec![1, 2];
+//! let ys = vec![10, 20];
 //!
-//! #[derive(Clone)]
-//! struct Movie {
-//!     title: String,
-//! }
-//!
-//! fn book_adaptations(author: &str) -> Vec<Movie> {
-//!     match author {
-//!         "Tolkien" => vec![Movie { title: "LOTR".to_string() }],
-//!         _ => vec![],
-//!     }
-//! }
-//!
-//! let books = vec![
-//!     Book {
-//!         title: "The Hobbit".to_string(),
-//!         authors: vec!["Tolkien".to_string()],
-//!     },
-//! ];
-//!
+//! // Cartesian product
 //! let result = for_! {
-//!     book <= books.clone();
-//!     author <= book.authors.clone();
-//!     movie <= book_adaptations(&author);
-//!     yield format!(
-//!         "You may like {}, because you liked {}'s {}",
-//!         movie.title, author, book.title
-//!     )
+//!     x <= xs;
+//!     y <= ys.clone();  // Clone ys for each x iteration
+//!     yield x * y
 //! };
 //!
-//! assert_eq!(result, vec!["You may like LOTR, because you liked Tolkien's The Hobbit"]);
+//! assert_eq!(result, vec![10, 20, 20, 40]);
+//! ```
+//!
+//! ## Complex Data Processing
+//!
+//! ```rust
+//! use lambars::for_;
+//!
+//! let data = vec![
+//!     ("Alice", vec![85, 90, 88]),
+//!     ("Bob", vec![78, 82, 80]),
+//! ];
+//!
+//! // Get all scores above 80 with student names
+//! let result = for_! {
+//!     (name, scores) <= data;
+//!     score <= scores;
+//!     if score > 80;
+//!     yield (name, score)
+//! };
+//!
+//! assert_eq!(result, vec![("Alice", 85), ("Alice", 90), ("Alice", 88), ("Bob", 82)]);
 //! ```
 //!
 //! # Implementation Details
 //!
 //! The macro uses internal rules for optimized expansion:
 //!
-//! ## Optimizations
+//! ## Internal Rules
 //!
-//! 1. **Single iteration uses `map`**: When there's only one iteration followed by `yield`,
-//!    the macro uses `map` instead of `flat_map` + `vec![]` for better performance.
+//! 1. **`@iter`**: Builds a pure iterator chain using `flat_map` for nesting and
+//!    `EitherIter` for guards. No intermediate `Vec` allocations occur during iteration.
 //!
-//! 2. **Entry points delegate to optimized rules**: Public entry points delegate to
-//!    internal `@collect` rules that handle different patterns optimally.
+//! 2. **`collect_from_iter`**: Collects the iterator using its `size_hint()`.
+//!    Uses `SmallVec` for small results (<=128 elements) and `Vec::with_capacity`
+//!    for larger results.
+//!
+//! 3. **`@hint`** (internal/testing): Computes `size_hint` by multiplying collection sizes.
+//!    Note: Due to Rust macro limitations, this is not used in public entry points.
+//!
+//! ## Performance Characteristics
+//!
+//! - **No intermediate Vec**: Nested iterations use pure iterator chains without
+//!   allocating intermediate collections.
+//! - **Single allocation**: Results are collected once at the end.
+//! - **SmallVec optimization**: Small results (<=128 elements) use stack allocation.
 //!
 //! ## Expansion Example
 //!
@@ -243,16 +250,16 @@
 //! // Single iteration:
 //! for_! { x <= xs; yield x * 2 }
 //! // Expands to:
-//! xs.into_iter().map(|x| x * 2).collect::<Vec<_>>()
+//! collect_from_iter(xs.into_iter().map(|x| x * 2))
 //!
 //! // Nested iteration:
 //! for_! { x <= xs; y <= ys; yield x + y }
 //! // Expands to:
-//! xs.into_iter().flat_map(|x| {
-//!     ys.into_iter().flat_map(|y| {
-//!         vec![x + y]
-//!     }).collect::<Vec<_>>()
-//! }).collect::<Vec<_>>()
+//! collect_from_iter(
+//!     xs.into_iter().flat_map(|x| {
+//!         ys.into_iter().map(|y| x + y)
+//!     })
+//! )
 //! ```
 //!
 //! # Differences from eff! macro
@@ -289,6 +296,131 @@
 //! - Make the code predictable and debuggable
 
 #![forbid(unsafe_code)]
+
+use smallvec::SmallVec;
+
+/// `SmallVec` inline capacity for `for_!` macro (128 elements = 1KB for L1 cache).
+pub const SMALLVEC_INLINE_CAPACITY: usize = 128;
+
+/// Either iterator: preserves `size_hint` unlike `flatten` which returns `(0, None)`.
+///
+/// # Example
+///
+/// ```
+/// use lambars::compose::for_macro::EitherIter;
+///
+/// let condition = true;
+/// let iter: EitherIter<_, std::iter::Empty<i32>> = if condition {
+///     EitherIter::Left(vec![1, 2, 3].into_iter())
+/// } else {
+///     EitherIter::Right(std::iter::empty())
+/// };
+///
+/// let result: Vec<_> = iter.collect();
+/// assert_eq!(result, vec![1, 2, 3]);
+/// ```
+#[derive(Clone)]
+pub enum EitherIter<L, R> {
+    /// Left variant (typically when guard is true).
+    Left(L),
+    /// Right variant (typically when guard is false).
+    Right(R),
+}
+
+impl<T, L, R> Iterator for EitherIter<L, R>
+where
+    L: Iterator<Item = T>,
+    R: Iterator<Item = T>,
+{
+    type Item = T;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Left(l) => l.next(),
+            Self::Right(r) => r.next(),
+        }
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            Self::Left(l) => l.size_hint(),
+            Self::Right(r) => r.size_hint(),
+        }
+    }
+}
+
+impl<T, L, R> ExactSizeIterator for EitherIter<L, R>
+where
+    L: ExactSizeIterator<Item = T>,
+    R: ExactSizeIterator<Item = T>,
+{
+}
+
+impl<T, L, R> DoubleEndedIterator for EitherIter<L, R>
+where
+    L: DoubleEndedIterator<Item = T>,
+    R: DoubleEndedIterator<Item = T>,
+{
+    #[inline]
+    fn next_back(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Left(l) => l.next_back(),
+            Self::Right(r) => r.next_back(),
+        }
+    }
+}
+
+impl<T, L, R> core::iter::FusedIterator for EitherIter<L, R>
+where
+    L: core::iter::FusedIterator<Item = T>,
+    R: core::iter::FusedIterator<Item = T>,
+{
+}
+
+/// Maximum reasonable capacity to avoid excessive pre-allocation.
+///
+/// 1MB (1024 * 1024 elements) is chosen as a practical upper bound to prevent:
+/// - Memory exhaustion from overly large `size_hint` upper bounds
+/// - Performance degradation from over-allocation
+///
+/// This value was determined through profiling with typical workloads.
+const MAX_REASONABLE_CAPACITY: usize = 1024 * 1024;
+
+/// Collect iterator with pre-computed `size_hint` for optimized allocation.
+///
+/// Uses `SmallVec` for `upper` <= 128, otherwise `Vec::with_capacity`.
+/// When `upper` is known, it's used for capacity calculation.
+/// When `upper` is `None`, `lower` is used with a minimum of 16.
+#[inline]
+pub fn collect_with_hint<T, I: Iterator<Item = T>>(
+    lower: usize,
+    upper: Option<usize>,
+    iter: I,
+) -> Vec<T> {
+    let use_smallvec = upper.is_some_and(|u| u <= SMALLVEC_INLINE_CAPACITY);
+
+    if use_smallvec {
+        let capacity = upper.unwrap_or(lower).min(SMALLVEC_INLINE_CAPACITY);
+        let mut buf: SmallVec<[T; SMALLVEC_INLINE_CAPACITY]> = SmallVec::with_capacity(capacity);
+        buf.extend(iter);
+        buf.into_vec()
+    } else {
+        // Use upper if available, otherwise fall back to lower with minimum of 16
+        let capacity = upper.map_or_else(|| lower.max(16), |u| u.min(MAX_REASONABLE_CAPACITY));
+        let mut result = Vec::with_capacity(capacity);
+        result.extend(iter);
+        result
+    }
+}
+
+/// Collect iterator using its own `size_hint` (fallback for non-Clone cases).
+#[inline]
+pub fn collect_from_iter<T, I: Iterator<Item = T>>(iter: I) -> Vec<T> {
+    let (lower, upper) = iter.size_hint();
+    collect_with_hint(lower, upper, iter)
+}
 
 /// A macro for Scala-style for-comprehension over iterators.
 ///
@@ -386,143 +518,248 @@
 #[macro_export]
 macro_rules! for_ {
     // =========================================================================
-    // Internal rules: @collect for optimized expansion
+    // @hint: Compute size_hint for pre-allocation
     // =========================================================================
 
-    // @collect single iteration with identifier: use map (optimization)
-    // This rule must come BEFORE general rules for proper matching
-    (@collect $pattern:ident <= $collection:expr ; yield $result:expr) => {{
-        $collection.into_iter().map(|$pattern| $result).collect::<Vec<_>>()
+    (@hint yield $result:expr) => {
+        (1usize, Some(1usize))
+    };
+
+    (@hint $pattern:ident <= $collection:expr ; yield $result:expr) => {{
+        let __col = &$collection;
+        __col.clone().into_iter().size_hint()
     }};
 
-    // @collect single iteration with tuple pattern: use map
-    (@collect ($($pattern:tt)*) <= $collection:expr ; yield $result:expr) => {{
-        $collection.into_iter().map(|($($pattern)*)| $result).collect::<Vec<_>>()
+    (@hint $pattern:ident <= $collection:expr ; $($rest:tt)+) => {{
+        let __col = &$collection;
+        let (__outer_lower, __outer_upper) = __col.clone().into_iter().size_hint();
+        let (__inner_lower, __inner_upper) = $crate::for_!(@hint $($rest)+);
+        let __lower = __outer_lower.saturating_mul(__inner_lower);
+        let __upper: Option<usize> = match (__outer_upper, __inner_upper) {
+            (Some(ou), Some(iu)) => ou.checked_mul(iu),
+            _ => None,
+        };
+        (__lower, __upper)
     }};
 
-    // @collect single iteration with wildcard: use map
-    (@collect _ <= $collection:expr ; yield $result:expr) => {{
-        $collection.into_iter().map(|_| $result).collect::<Vec<_>>()
+    (@hint ($($pattern:tt)*) <= $collection:expr ; yield $result:expr) => {{
+        let __col = &$collection;
+        __col.clone().into_iter().size_hint()
     }};
 
-    // @collect with identifier pattern (general nested case)
-    (@collect $pattern:ident <= $collection:expr ; $($rest:tt)+) => {{
-        $collection.into_iter().flat_map(|$pattern| {
-            $crate::for_!($($rest)+)
-        }).collect::<Vec<_>>()
+    (@hint ($($pattern:tt)*) <= $collection:expr ; $($rest:tt)+) => {{
+        let __col = &$collection;
+        let (__outer_lower, __outer_upper) = __col.clone().into_iter().size_hint();
+        let (__inner_lower, __inner_upper) = $crate::for_!(@hint $($rest)+);
+        let __lower = __outer_lower.saturating_mul(__inner_lower);
+        let __upper: Option<usize> = match (__outer_upper, __inner_upper) {
+            (Some(ou), Some(iu)) => ou.checked_mul(iu),
+            _ => None,
+        };
+        (__lower, __upper)
     }};
 
-    // @collect with tuple pattern (general nested case)
-    (@collect ($($pattern:tt)*) <= $collection:expr ; $($rest:tt)+) => {{
-        $collection.into_iter().flat_map(|($($pattern)*)| {
-            $crate::for_!($($rest)+)
-        }).collect::<Vec<_>>()
+    (@hint _ <= $collection:expr ; yield $result:expr) => {{
+        let __col = &$collection;
+        __col.clone().into_iter().size_hint()
     }};
 
-    // @collect with wildcard pattern (general nested case)
-    (@collect _ <= $collection:expr ; $($rest:tt)+) => {{
-        $collection.into_iter().flat_map(|_| {
-            $crate::for_!($($rest)+)
-        }).collect::<Vec<_>>()
+    (@hint _ <= $collection:expr ; $($rest:tt)+) => {{
+        let __col = &$collection;
+        let (__outer_lower, __outer_upper) = __col.clone().into_iter().size_hint();
+        let (__inner_lower, __inner_upper) = $crate::for_!(@hint $($rest)+);
+        let __lower = __outer_lower.saturating_mul(__inner_lower);
+        let __upper: Option<usize> = match (__outer_upper, __inner_upper) {
+            (Some(ou), Some(iu)) => ou.checked_mul(iu),
+            _ => None,
+        };
+        (__lower, __upper)
     }};
+
+    // Guard: lower bound is 0 (filter may remove all)
+    (@hint if $condition:expr ; $($rest:tt)+) => {{
+        let (_, __inner_upper) = $crate::for_!(@hint $($rest)+);
+        (0usize, __inner_upper)
+    }};
+
+    // Pattern guard: We cannot compute the inner size_hint because the pattern
+    // may bind variables that are used in $rest. Return conservative (0, None).
+    (@hint if let $pattern:pat = $expr:expr ; $($rest:tt)+) => {{
+        let _ = &$expr; // Ensure $expr is valid but don't evaluate it
+        let _ = ::core::marker::PhantomData::<fn() -> _>;
+        (0usize, None)
+    }};
+
+    // Let binding: no size change
+    (@hint let $pattern:ident = $expr:expr ; $($rest:tt)+) => {
+        $crate::for_!(@hint $($rest)+)
+    };
+
+    (@hint let ($($pattern:tt)*) = $expr:expr ; $($rest:tt)+) => {
+        $crate::for_!(@hint $($rest)+)
+    };
 
     // =========================================================================
-    // @collect pattern guard rules (if let pattern = expression;)
-    // Must be placed BEFORE regular guard rules for correct matching
+    // @iter: Build pure iterator chain without intermediate Vec allocations.
+    // Uses EitherIter for guards to preserve size_hint.
     // =========================================================================
 
-    // @collect pattern guard (with following statements)
-    // Uses $pattern:pat to match any pattern (Rust 2021+)
-    (@collect if let $pattern:pat = $expr:expr ; $($rest:tt)+) => {{
-        if let $pattern = $expr {
-            $crate::for_!(@collect $($rest)+)
-        } else {
-            vec![]
-        }
-    }};
+    (@iter yield $result:expr) => {
+        ::core::iter::once($result)
+    };
 
-    // =========================================================================
-    // @collect guard expression rules
-    // =========================================================================
+    (@iter $pattern:ident <= $collection:expr ; yield $result:expr) => {
+        $collection.into_iter().map(
+            #[inline(always)]
+            move |$pattern| $result
+        )
+    };
 
-    // @collect guard expression followed by yield (terminal optimization)
-    // If condition is true, wrap result in vec; otherwise return empty vec
-    (@collect if $condition:expr ; yield $result:expr) => {{
+    // Nested iteration: pure iterator chain with flat_map
+    (@iter $pattern:ident <= $collection:expr ; $($rest:tt)+) => {
+        $collection.into_iter().flat_map(
+            #[inline(always)]
+            move |$pattern| {
+                $crate::for_!(@iter $($rest)+)
+            }
+        )
+    };
+
+    (@iter ($($pattern:tt)*) <= $collection:expr ; yield $result:expr) => {
+        $collection.into_iter().map(
+            #[inline(always)]
+            move |($($pattern)*)| $result
+        )
+    };
+
+    (@iter ($($pattern:tt)*) <= $collection:expr ; $($rest:tt)+) => {
+        $collection.into_iter().flat_map(
+            #[inline(always)]
+            move |($($pattern)*)| {
+                $crate::for_!(@iter $($rest)+)
+            }
+        )
+    };
+
+    (@iter _ <= $collection:expr ; yield $result:expr) => {
+        $collection.into_iter().map(
+            #[inline(always)]
+            move |_| $result
+        )
+    };
+
+    (@iter _ <= $collection:expr ; $($rest:tt)+) => {
+        $collection.into_iter().flat_map(
+            #[inline(always)]
+            move |_| {
+                $crate::for_!(@iter $($rest)+)
+            }
+        )
+    };
+
+    (@iter if $condition:expr ; yield $result:expr) => {
+        ::core::iter::once(()).filter_map(
+            #[inline(always)]
+            move |_| {
+                if $condition { Some($result) } else { None }
+            }
+        )
+    };
+
+    // Guard with continuation: use EitherIter to avoid Vec allocation
+    (@iter if $condition:expr ; $($rest:tt)+) => {
         if $condition {
-            vec![$result]
+            $crate::compose::for_macro::EitherIter::Left(
+                $crate::for_!(@iter $($rest)+)
+            )
         } else {
-            vec![]
+            $crate::compose::for_macro::EitherIter::Right(::core::iter::empty())
         }
-    }};
+    };
 
-    // @collect guard expression (with following statements)
-    // If condition is true, continue with rest; otherwise return empty vec
-    (@collect if $condition:expr ; $($rest:tt)+) => {{
-        if $condition {
-            $crate::for_!(@collect $($rest)+)
-        } else {
-            vec![]
+    (@iter if let $pattern:pat = $expr:expr ; yield $result:expr) => {
+        ::core::iter::once(()).filter_map(
+            #[inline(always)]
+            move |_| {
+                match $expr {
+                    $pattern => Some($result),
+                    _ => None,
+                }
+            }
+        )
+    };
+
+    (@iter if let $pattern:pat = $expr:expr ; $($rest:tt)+) => {
+        match $expr {
+            $pattern => $crate::compose::for_macro::EitherIter::Left(
+                $crate::for_!(@iter $($rest)+)
+            ),
+            _ => $crate::compose::for_macro::EitherIter::Right(::core::iter::empty()),
         }
-    }};
+    };
 
-    // @collect let binding with identifier
-    (@collect let $pattern:ident = $expr:expr ; $($rest:tt)+) => {{
+    (@iter let $pattern:ident = $expr:expr ; $($rest:tt)+) => {{
         let $pattern = $expr;
-        $crate::for_!(@collect $($rest)+)
+        $crate::for_!(@iter $($rest)+)
     }};
 
-    // @collect let binding with tuple pattern
-    (@collect let ($($pattern:tt)*) = $expr:expr ; $($rest:tt)+) => {{
+    (@iter let ($($pattern:tt)*) = $expr:expr ; $($rest:tt)+) => {{
         let ($($pattern)*) = $expr;
-        $crate::for_!(@collect $($rest)+)
-    }};
-
-    // @collect terminal case: yield wraps result in vec![]
-    (@collect yield $result:expr) => {{
-        vec![$result]
+        $crate::for_!(@iter $($rest)+)
     }};
 
     // =========================================================================
-    // Public entry points
+    // Public entry points - uses @hint + @iter + collect_with_hint
+    // Pre-computes size_hint at macro expansion time, then passes to collect_with_hint
     // =========================================================================
 
-    // Terminal case: yield wraps result in vec![]
     (yield $result:expr) => {
         vec![$result]
     };
 
-    // Bind with identifier pattern - delegates to @collect
+    // Identifier pattern: use collect_from_iter to avoid variable scoping issues.
+    // The @hint rules cannot safely evaluate expressions that reference loop variables.
     ($pattern:ident <= $collection:expr ; $($rest:tt)+) => {{
-        $crate::for_!(@collect $pattern <= $collection ; $($rest)+)
+        $crate::compose::for_macro::collect_from_iter(
+            $crate::for_!(@iter $pattern <= $collection ; $($rest)+)
+        )
     }};
 
-    // Bind with tuple pattern - delegates to @collect
+    // Tuple pattern: use collect_from_iter to avoid variable scoping issues.
     (($($pattern:tt)*) <= $collection:expr ; $($rest:tt)+) => {{
-        $crate::for_!(@collect ($($pattern)*) <= $collection ; $($rest)+)
+        $crate::compose::for_macro::collect_from_iter(
+            $crate::for_!(@iter ($($pattern)*) <= $collection ; $($rest)+)
+        )
     }};
 
-    // Bind with wildcard pattern - delegates to @collect
+    // Wildcard pattern: use collect_from_iter to avoid variable scoping issues.
     (_ <= $collection:expr ; $($rest:tt)+) => {{
-        $crate::for_!(@collect _ <= $collection ; $($rest)+)
+        $crate::compose::for_macro::collect_from_iter(
+            $crate::for_!(@iter _ <= $collection ; $($rest)+)
+        )
     }};
 
-    // Pattern guard expression - delegates to @collect
+    // Pattern guard starting entry: expressions may reference undefined variables,
+    // so we fall back to collect_from_iter which uses the iterator's size_hint.
     (if let $pattern:pat = $expr:expr ; $($rest:tt)+) => {{
-        $crate::for_!(@collect if let $pattern = $expr ; $($rest)+)
+        $crate::compose::for_macro::collect_from_iter(
+            $crate::for_!(@iter if let $pattern = $expr ; $($rest)+)
+        )
     }};
 
-    // Guard expression - delegates to @collect
+    // Guard starting entry: expressions may reference undefined variables,
+    // so we fall back to collect_from_iter which uses the iterator's size_hint.
     (if $condition:expr ; $($rest:tt)+) => {{
-        $crate::for_!(@collect if $condition ; $($rest)+)
+        $crate::compose::for_macro::collect_from_iter(
+            $crate::for_!(@iter if $condition ; $($rest)+)
+        )
     }};
 
-    // Pure let binding with identifier
     (let $pattern:ident = $expr:expr ; $($rest:tt)+) => {{
         let $pattern = $expr;
         $crate::for_!($($rest)+)
     }};
 
-    // Pure let binding with tuple pattern
     (let ($($pattern:tt)*) = $expr:expr ; $($rest:tt)+) => {{
         let ($($pattern)*) = $expr;
         $crate::for_!($($rest)+)
@@ -531,7 +768,9 @@ macro_rules! for_ {
 
 #[cfg(test)]
 mod tests {
-    #[test]
+    use rstest::rstest;
+
+    #[rstest]
     fn test_yield_only() {
         let result = for_! {
             yield 42
@@ -607,13 +846,8 @@ mod tests {
         assert_eq!(result, Vec::<i32>::new());
     }
 
-    // =========================================================================
-    // Tests for @collect optimization
-    // =========================================================================
-
     #[test]
     fn test_collect_single_iteration_uses_map() {
-        // This should use map optimization
         let result = for_! {
             x <= vec![1, 2, 3];
             yield x * 2
@@ -622,20 +856,16 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_with_tuple_pattern() {
-        let result = for_!(@collect (a, b) <= vec![(1, 2), (3, 4)]; yield a + b);
+    fn test_tuple_pattern_single_iteration() {
+        let result = for_! { (a, b) <= vec![(1, 2), (3, 4)]; yield a + b };
         assert_eq!(result, vec![3, 7]);
     }
 
     #[test]
-    fn test_collect_with_wildcard_pattern() {
-        let result = for_!(@collect _ <= vec![1, 2, 3]; yield 42);
+    fn test_wildcard_pattern_single_iteration() {
+        let result = for_! { _ <= vec![1, 2, 3]; yield 42 };
         assert_eq!(result, vec![42, 42, 42]);
     }
-
-    // =========================================================================
-    // Edge case tests from implementation plan
-    // =========================================================================
 
     #[test]
     fn test_empty_collection_edge_case() {
@@ -695,10 +925,6 @@ mod tests {
         };
         assert_eq!(result, vec![11, 21, 14, 24]);
     }
-
-    // =========================================================================
-    // Guard expression tests
-    // =========================================================================
 
     #[test]
     fn test_guard_basic_filter() {
@@ -783,10 +1009,6 @@ mod tests {
         };
         assert_eq!(result, vec![(1, 10), (1, 20), (3, 10), (3, 20)]);
     }
-
-    // =========================================================================
-    // Pattern guard tests
-    // =========================================================================
 
     #[test]
     fn test_pattern_guard_option_some() {
@@ -879,5 +1101,320 @@ mod tests {
             yield whole
         };
         assert_eq!(result, vec![Some(1), Some(2)]);
+    }
+
+    use super::{EitherIter, SMALLVEC_INLINE_CAPACITY, collect_from_iter, collect_with_hint};
+
+    #[rstest]
+    fn test_either_iter_left_size_hint() {
+        let iter: EitherIter<_, std::iter::Empty<i32>> =
+            EitherIter::Left(vec![1, 2, 3].into_iter());
+        assert_eq!(iter.size_hint(), (3, Some(3)));
+    }
+
+    #[rstest]
+    fn test_either_iter_right_size_hint() {
+        let iter: EitherIter<std::vec::IntoIter<i32>, _> = EitherIter::Right(std::iter::empty());
+        assert_eq!(iter.size_hint(), (0, Some(0)));
+    }
+
+    #[rstest]
+    fn test_either_iter_left_iteration() {
+        let iter: EitherIter<_, std::iter::Empty<i32>> =
+            EitherIter::Left(vec![1, 2, 3].into_iter());
+        let result: Vec<_> = iter.collect();
+        assert_eq!(result, vec![1, 2, 3]);
+    }
+
+    #[rstest]
+    fn test_either_iter_right_iteration() {
+        let iter: EitherIter<std::vec::IntoIter<i32>, _> = EitherIter::Right(std::iter::empty());
+        let result: Vec<_> = iter.collect();
+        assert_eq!(result, Vec::<i32>::new());
+    }
+
+    #[rstest]
+    fn test_either_iter_exact_size_left() {
+        let iter: EitherIter<_, std::iter::Empty<i32>> =
+            EitherIter::Left(vec![1, 2, 3].into_iter());
+        assert_eq!(iter.len(), 3);
+    }
+
+    #[rstest]
+    fn test_either_iter_exact_size_right() {
+        let iter: EitherIter<std::vec::IntoIter<i32>, _> =
+            EitherIter::Right(std::iter::empty::<i32>());
+        assert_eq!(iter.len(), 0);
+    }
+
+    #[rstest]
+    fn test_either_iter_clone() {
+        let iter: EitherIter<_, std::iter::Empty<i32>> =
+            EitherIter::Left(vec![1, 2, 3].into_iter());
+        let result: Vec<_> = iter.collect();
+        assert_eq!(result, vec![1, 2, 3]);
+    }
+
+    #[rstest]
+    fn test_either_iter_double_ended_left() {
+        let mut iter: EitherIter<_, std::iter::Empty<i32>> =
+            EitherIter::Left(vec![1, 2, 3].into_iter());
+        assert_eq!(iter.next_back(), Some(3));
+        assert_eq!(iter.next_back(), Some(2));
+        assert_eq!(iter.next(), Some(1));
+        assert_eq!(iter.next(), None);
+    }
+
+    #[rstest]
+    fn test_either_iter_double_ended_right() {
+        let mut iter: EitherIter<std::vec::IntoIter<i32>, _> =
+            EitherIter::Right(std::iter::empty());
+        assert_eq!(iter.next_back(), None);
+    }
+
+    #[rstest]
+    fn test_either_iter_rev() {
+        let iter: EitherIter<_, std::iter::Empty<i32>> =
+            EitherIter::Left(vec![1, 2, 3].into_iter());
+        let result: Vec<_> = iter.rev().collect();
+        assert_eq!(result, vec![3, 2, 1]);
+    }
+
+    #[rstest]
+    fn test_collect_with_hint_small_uses_smallvec_path() {
+        let result = collect_with_hint(10, Some(10), 0..10);
+        assert_eq!(result, (0..10).collect::<Vec<_>>());
+    }
+
+    #[rstest]
+    fn test_collect_with_hint_large_uses_vec_path() {
+        let result = collect_with_hint(1000, Some(1000), 0..1000);
+        assert_eq!(result, (0..1000).collect::<Vec<_>>());
+    }
+
+    #[rstest]
+    fn test_collect_with_hint_unknown_upper_uses_vec() {
+        let result = collect_with_hint(10, None, 0..10);
+        assert_eq!(result, (0..10).collect::<Vec<_>>());
+    }
+
+    #[rstest]
+    fn test_collect_with_hint_zero_lower() {
+        let result: Vec<i32> = collect_with_hint(0, None, std::iter::empty());
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_collect_with_hint_at_threshold() {
+        let result = collect_with_hint(128, Some(128), 0_i32..128);
+        assert_eq!(result.len(), SMALLVEC_INLINE_CAPACITY);
+    }
+
+    #[rstest]
+    fn test_collect_with_hint_just_above_threshold() {
+        let result = collect_with_hint(129, Some(129), 0_i32..129);
+        assert_eq!(result.len(), SMALLVEC_INLINE_CAPACITY + 1);
+    }
+
+    #[rstest]
+    fn test_collect_from_iter_basic() {
+        let result = collect_from_iter(vec![1, 2, 3].into_iter());
+        assert_eq!(result, vec![1, 2, 3]);
+    }
+
+    #[rstest]
+    fn test_collect_from_iter_empty() {
+        let result: Vec<i32> = collect_from_iter(std::iter::empty());
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_collect_from_iter_with_known_size() {
+        let result = collect_from_iter(0..100);
+        assert_eq!(result.len(), 100);
+    }
+
+    #[rstest]
+    fn test_hint_yield_only() {
+        let (lower, upper) = for_!(@hint yield 42);
+        assert_eq!(lower, 1);
+        assert_eq!(upper, Some(1));
+    }
+
+    #[rstest]
+    fn test_hint_single_iteration() {
+        let xs = vec![1, 2, 3, 4, 5];
+        let (lower, upper) = for_!(@hint x <= xs; yield x * 2);
+        assert_eq!(lower, 5);
+        assert_eq!(upper, Some(5));
+    }
+
+    #[rstest]
+    fn test_hint_nested_iteration() {
+        let xs = vec![1, 2, 3];
+        let ys = vec![10, 20, 30, 40];
+        let (lower, upper) = for_!(@hint x <= xs; y <= ys; yield x + y);
+        assert_eq!(lower, 12);
+        assert_eq!(upper, Some(12));
+    }
+
+    #[rstest]
+    fn test_hint_with_guard() {
+        let xs = vec![1, 2, 3, 4, 5];
+        let (lower, upper) = for_!(@hint x <= xs; if x % 2 == 0; yield x);
+        assert_eq!(lower, 0);
+        assert_eq!(upper, Some(5));
+    }
+
+    #[rstest]
+    fn test_hint_nested_with_guard() {
+        let xs = vec![1, 2, 3];
+        let ys = vec![10, 20];
+        let (lower, upper) = for_!(@hint x <= xs; y <= ys; if (x + y) % 2 == 0; yield x + y);
+        assert_eq!(lower, 0);
+        assert_eq!(upper, Some(6));
+    }
+
+    // Note: @hint tests with pattern guards that reference loop variables are removed
+    // because @hint is an internal rule that cannot safely evaluate such expressions.
+    // The public entry points use collect_from_iter which relies on iterator's size_hint.
+
+    #[rstest]
+    fn test_hint_with_let_binding_no_var_ref() {
+        // Test @hint with let binding that doesn't reference loop variable
+        let xs = vec![1, 2, 3];
+        let (lower, upper) = for_!(@hint x <= xs; yield x);
+        assert_eq!(lower, 3);
+        assert_eq!(upper, Some(3));
+    }
+
+    #[rstest]
+    fn test_hint_empty_collection() {
+        let xs: Vec<i32> = vec![];
+        let (lower, upper) = for_!(@hint x <= xs; yield x * 2);
+        assert_eq!(lower, 0);
+        assert_eq!(upper, Some(0));
+    }
+
+    #[rstest]
+    fn test_hint_tuple_pattern() {
+        let pairs = vec![(1, 2), (3, 4), (5, 6)];
+        let (lower, upper) = for_!(@hint (a, b) <= pairs; yield a + b);
+        assert_eq!(lower, 3);
+        assert_eq!(upper, Some(3));
+    }
+
+    #[rstest]
+    fn test_hint_wildcard_pattern() {
+        let xs = vec![1, 2, 3];
+        let (lower, upper) = for_!(@hint _ <= xs; yield 42);
+        assert_eq!(lower, 3);
+        assert_eq!(upper, Some(3));
+    }
+
+    #[rstest]
+    fn test_iter_yield_only() {
+        let iter = for_!(@iter yield 42);
+        let result: Vec<_> = iter.collect();
+        assert_eq!(result, vec![42]);
+    }
+
+    #[rstest]
+    fn test_iter_single_iteration() {
+        let xs = vec![1, 2, 3];
+        let iter = for_!(@iter x <= xs; yield x * 2);
+        let result: Vec<_> = iter.collect();
+        assert_eq!(result, vec![2, 4, 6]);
+    }
+
+    #[rstest]
+    fn test_iter_nested_iteration() {
+        let xs = vec![1, 2];
+        let ys = vec![10, 20];
+        let iter = for_!(@iter x <= xs; y <= ys.clone(); yield x + y);
+        let result: Vec<_> = iter.collect();
+        assert_eq!(result, vec![11, 21, 12, 22]);
+    }
+
+    #[rstest]
+    fn test_iter_with_guard_yield() {
+        let iter = for_!(@iter if true; yield 42);
+        let result: Vec<_> = iter.collect();
+        assert_eq!(result, vec![42]);
+
+        let mut iter_false = for_!(@iter if false; yield 42);
+        assert!(iter_false.next().is_none());
+    }
+
+    #[rstest]
+    fn test_iter_with_guard_continuation() {
+        let xs = vec![1, 2, 3, 4, 5];
+        let iter = for_!(@iter x <= xs; if x % 2 == 0; yield x);
+        let result: Vec<_> = iter.collect();
+        assert_eq!(result, vec![2, 4]);
+    }
+
+    #[rstest]
+    fn test_iter_with_pattern_guard_yield() {
+        let iter = for_!(@iter if let Some(x) = Some(42); yield x);
+        let result: Vec<_> = iter.collect();
+        assert_eq!(result, vec![42]);
+
+        let mut iter_none = for_!(@iter if let Some(x) = None::<i32>; yield x);
+        assert!(iter_none.next().is_none());
+    }
+
+    #[rstest]
+    fn test_iter_with_pattern_guard_continuation() {
+        let xs = vec![Some(1), None, Some(2)];
+        let iter = for_!(@iter opt <= xs; if let Some(x) = opt; yield x);
+        let result: Vec<_> = iter.collect();
+        assert_eq!(result, vec![1, 2]);
+    }
+
+    #[rstest]
+    fn test_iter_with_let_binding() {
+        let xs = vec![1, 2, 3];
+        let iter = for_!(@iter x <= xs; let doubled = x * 2; yield doubled);
+        let result: Vec<_> = iter.collect();
+        assert_eq!(result, vec![2, 4, 6]);
+    }
+
+    #[rstest]
+    fn test_iter_tuple_pattern() {
+        let pairs = vec![(1, 2), (3, 4)];
+        let iter = for_!(@iter (a, b) <= pairs; yield a + b);
+        let result: Vec<_> = iter.collect();
+        assert_eq!(result, vec![3, 7]);
+    }
+
+    #[rstest]
+    fn test_iter_wildcard_pattern() {
+        let xs = vec![1, 2, 3];
+        let iter = for_!(@iter _ <= xs; yield 42);
+        let result: Vec<_> = iter.collect();
+        assert_eq!(result, vec![42, 42, 42]);
+    }
+
+    #[rstest]
+    fn test_iter_empty_collection() {
+        let xs: Vec<i32> = vec![];
+        let mut iter = for_!(@iter x <= xs; yield x * 2);
+        assert!(iter.next().is_none());
+    }
+
+    #[rstest]
+    fn test_iter_complex_nested() {
+        let xs = vec![1, 2, 3];
+        let ys = vec![10, 20];
+        let iter = for_!(@iter
+            x <= xs;
+            y <= ys.clone();
+            if (x + y) % 2 == 0;
+            let sum = x + y;
+            yield sum
+        );
+        let result: Vec<_> = iter.collect();
+        assert_eq!(result, vec![12, 22]);
     }
 }

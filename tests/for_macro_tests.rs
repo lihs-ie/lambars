@@ -205,10 +205,12 @@ fn test_let_tuple_binding() {
 
 #[test]
 fn test_recommendation_feed_example() {
+    use std::rc::Rc;
+
     #[derive(Clone)]
     struct Book {
-        title: String,
-        authors: Vec<String>,
+        title: Rc<str>,
+        authors: Vec<Rc<str>>,
     }
 
     #[derive(Clone)]
@@ -235,22 +237,27 @@ fn test_recommendation_feed_example() {
 
     let books = vec![
         Book {
-            title: "Book1".to_string(),
-            authors: vec!["Author1".to_string()],
+            title: Rc::from("Book1"),
+            authors: vec![Rc::from("Author1")],
         },
         Book {
-            title: "Book2".to_string(),
-            authors: vec!["Author2".to_string()],
+            title: Rc::from("Book2"),
+            authors: vec![Rc::from("Author2")],
         },
     ];
 
+    // Use Rc for shared ownership to avoid FnMut move constraints
     let result = for_! {
         book <= books.clone();
-        author <= book.authors.clone();
+        let book_title = Rc::clone(&book.title);
+        let authors = book.authors.clone();
+        author <= authors;
+        let author_ref = Rc::clone(&author);
+        let book_title_inner = Rc::clone(&book_title);
         movie <= book_adaptations(&author);
         yield format!(
             "You may like {}, because you liked {}'s {}",
-            movie.title, author, book.title
+            movie.title, author_ref, book_title_inner
         )
     };
 

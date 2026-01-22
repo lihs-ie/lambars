@@ -149,7 +149,9 @@
 mod compose_macro;
 #[cfg(feature = "async")]
 mod for_async_macro;
-mod for_macro;
+/// Internal module for for_! macro implementation.
+/// This module is public to allow macro expansion to access helper types and functions.
+pub mod for_macro;
 mod partial_macro;
 #[cfg(feature = "effect")]
 mod pipe_async_macro;
