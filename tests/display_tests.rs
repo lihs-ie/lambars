@@ -31,21 +31,21 @@ fn test_either_right_display() {
 #[test]
 fn test_lazy_uninit_display() {
     let lazy = Lazy::new(|| 42);
-    assert_eq!(format!("{}", lazy), "Lazy(<uninit>)");
+    assert_eq!(format!("{}", lazy), "<uninit>");
 }
 
 #[test]
 fn test_lazy_evaluated_display() {
     let lazy = Lazy::new(|| 42);
     let _ = lazy.force();
-    assert_eq!(format!("{}", lazy), "Lazy(42)");
+    assert_eq!(format!("{}", lazy), "42");
 }
 
 #[test]
 fn test_lazy_poisoned_display() {
     let lazy = Lazy::new(|| -> i32 { panic!("initialization failed") });
     let _ = panic::catch_unwind(panic::AssertUnwindSafe(|| lazy.force()));
-    assert_eq!(format!("{}", lazy), "Lazy(<poisoned>)");
+    assert_eq!(format!("{}", lazy), "<poisoned>");
 }
 
 #[test]

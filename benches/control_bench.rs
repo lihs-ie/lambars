@@ -5,7 +5,7 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use lambars::control::{ConcurrentLazy, Lazy, Trampoline};
 use std::hint::black_box;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::thread;
 
 // =============================================================================
@@ -456,69 +456,92 @@ fn benchmark_concurrent_lazy_zip_operations(criterion: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmark comparing ConcurrentLazy with std::sync::LazyLock
-fn benchmark_concurrent_lazy_vs_lazylock(criterion: &mut Criterion) {
-    let mut group = criterion.benchmark_group("concurrent_lazy_vs_lazylock");
+/// Benchmark for force() on cached values (p95 measurement).
+///
+/// This benchmark measures the performance of accessing already-initialized
+/// lazy values with 1e7 (10 million) iterations per sample for p95 measurement.
+/// Target: < 20ns per force() call.
+///
+/// # Viewing p95 Results
+///
+/// Criterion collects p95 data but does not display it in console output.
+/// To view p95 measurements, open the HTML report after running:
+/// ```sh
+/// cargo bench --bench control_bench -- --save-baseline latest
+/// open target/criterion/force_cached_p95/report/index.html
+/// ```
+///
+/// The HTML report includes percentile distribution (p5, p25, p50, p75, p95).
+fn bench_force_cached(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("force_cached_p95");
+    group.sample_size(1000); // Large sample for accurate p95
 
-    // Initial evaluation comparison
-    group.bench_function("ConcurrentLazy_init", |bencher| {
+    // Lazy cached access - 1e7 iterations
+    let lazy = Lazy::new(|| 42i64);
+    let _ = lazy.force();
+
+    group.bench_function("Lazy_1e7_cached", |bencher| {
         bencher.iter(|| {
-            let lazy = ConcurrentLazy::new(|| {
-                let mut sum = 0;
-                for index in 0..100 {
-                    sum += index;
-                }
-                sum
-            });
-            let value = lazy.force();
-            black_box(*value)
-        });
+            for _ in 0..10_000_000 {
+                black_box(*lazy.force());
+            }
+        })
     });
 
-    // LazyLock requires static initialization, so we use a local LazyLock for fair comparison
-    group.bench_function("LazyLock_init", |bencher| {
+    // ConcurrentLazy cached access - 1e7 iterations
+    let concurrent_lazy = ConcurrentLazy::new(|| 42i64);
+    let _ = concurrent_lazy.force();
+
+    group.bench_function("ConcurrentLazy_1e7_cached", |bencher| {
         bencher.iter(|| {
-            let lazy: LazyLock<i32> = LazyLock::new(|| {
-                let mut sum = 0;
-                for index in 0..100 {
-                    sum += index;
-                }
-                sum
-            });
-            black_box(*lazy)
-        });
+            for _ in 0..10_000_000 {
+                black_box(*concurrent_lazy.force());
+            }
+        })
     });
 
-    // Cached access comparison (using static for LazyLock)
-    static CACHED_LAZYLOCK: LazyLock<i32> = LazyLock::new(|| {
-        let mut sum = 0;
-        for index in 0..1000 {
-            sum += index;
-        }
-        sum
-    });
+    group.finish();
+}
 
-    // Initialize the static LazyLock
-    let _ = *CACHED_LAZYLOCK;
+/// Benchmark for concurrent initialization contention.
+///
+/// This benchmark measures ConcurrentLazy performance under high contention
+/// with 16 and 32 threads all trying to initialize simultaneously.
+/// The benchmark should complete without warnings.
+fn bench_concurrent_contention(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("concurrent_contention");
+    group.measurement_time(std::time::Duration::from_secs(10));
 
-    let cached_concurrent_lazy = ConcurrentLazy::new(|| {
-        let mut sum = 0;
-        for index in 0..1000 {
-            sum += index;
-        }
-        sum
-    });
-    let _ = cached_concurrent_lazy.force();
-
-    group.bench_function("ConcurrentLazy_cached", |bencher| {
+    // 16 threads contention
+    group.bench_function("16_threads", |bencher| {
         bencher.iter(|| {
-            let value = cached_concurrent_lazy.force();
-            black_box(*value)
-        });
+            let lazy = Arc::new(ConcurrentLazy::new(|| 42i64));
+            let handles: Vec<_> = (0..16)
+                .map(|_| {
+                    let l = Arc::clone(&lazy);
+                    thread::spawn(move || *l.force())
+                })
+                .collect();
+            for h in handles {
+                black_box(h.join().unwrap());
+            }
+        })
     });
 
-    group.bench_function("LazyLock_cached", |bencher| {
-        bencher.iter(|| black_box(*CACHED_LAZYLOCK));
+    // 32 threads contention
+    group.bench_function("32_threads", |bencher| {
+        bencher.iter(|| {
+            let lazy = Arc::new(ConcurrentLazy::new(|| 42i64));
+            let handles: Vec<_> = (0..32)
+                .map(|_| {
+                    let l = Arc::clone(&lazy);
+                    thread::spawn(move || *l.force())
+                })
+                .collect();
+            for h in handles {
+                black_box(h.join().unwrap());
+            }
+        })
     });
 
     group.finish();
@@ -719,7 +742,9 @@ criterion_group!(
     benchmark_concurrent_lazy_map_chain,
     benchmark_concurrent_lazy_flat_map_chain,
     benchmark_concurrent_lazy_zip_operations,
-    benchmark_concurrent_lazy_vs_lazylock,
+    // Requirements-specified benchmarks (Issue #224)
+    bench_force_cached,
+    bench_concurrent_contention,
     // Trampoline benchmarks
     benchmark_trampoline_shallow,
     benchmark_trampoline_deep,
