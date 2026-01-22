@@ -25,6 +25,8 @@ arrayvec = { version = "0.7", optional = true }
 rustc-hash = { version = "2.1", optional = true }
 ahash = { version = "0.8", optional = true }
 
+loom = { version = "0.7", optional = true }
+
 paste = "1.0"
 static_assertions = "1.1"
 
@@ -37,6 +39,7 @@ criterion = { version = "0.8", features = ["html_reports"] }
 iai-callgrind = "0.16"
 serde_json = "1.0"
 trybuild = "1.0"
+loom = "0.7"
 
 [features]
 default = ["typeclass", "compose", "control", "persistent", "optics", "derive", "effect", "async"]
@@ -55,9 +58,10 @@ rayon = ["arc", "dep:rayon"]
 serde = ["dep:serde"]
 fxhash = ["dep:rustc-hash"]
 ahash = ["dep:ahash"]
+loom = ["dep:loom"]
 
 [lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
 
 [lints.clippy]
 

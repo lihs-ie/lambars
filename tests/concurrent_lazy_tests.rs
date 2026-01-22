@@ -520,7 +520,7 @@ fn concurrent_lazy_into_inner_with_complex_type() {
 // =============================================================================
 
 #[rstest]
-#[should_panic(expected = "initializer already consumed")]
+#[should_panic(expected = "ConcurrentLazy instance has been poisoned")]
 fn concurrent_lazy_force_after_panic_panics() {
     let lazy = ConcurrentLazy::new(|| -> i32 { panic!("initialization failed") });
 

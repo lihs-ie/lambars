@@ -154,7 +154,7 @@ fn compute_hash<K: Hash + ?Sized>(key: &K) -> u64 {
     std::hash::BuildHasher::hash_one(&*AHASH_STATE, key)
 }
 
-/// Computes the hash of a key using DefaultHasher (SipHash).
+/// Computes the hash of a key using `DefaultHasher` (`SipHash`).
 ///
 /// This is the default hasher with `DoS` resistance, suitable for
 /// handling untrusted input.
