@@ -459,30 +459,42 @@ fn benchmark_concurrent_lazy_zip_operations(criterion: &mut Criterion) {
 /// Benchmark for force() on cached values (p95 measurement).
 ///
 /// This benchmark measures the performance of accessing already-initialized
-/// lazy values, which should be very fast (target: < 20ns p95).
+/// lazy values with 1e7 (10 million) iterations per sample for p95 measurement.
+/// Target: < 20ns per force() call.
+///
+/// # Viewing p95 Results
+///
+/// Criterion collects p95 data but does not display it in console output.
+/// To view p95 measurements, open the HTML report after running:
+/// ```sh
+/// cargo bench --bench control_bench -- --save-baseline latest
+/// open target/criterion/force_cached_p95/report/index.html
+/// ```
+///
+/// The HTML report includes percentile distribution (p5, p25, p50, p75, p95).
 fn bench_force_cached(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("force_cached_p95");
-    group.sample_size(10000); // High sample count for p95 measurement
+    group.sample_size(1000); // Large sample for accurate p95
 
-    // Lazy cached access
+    // Lazy cached access - 1e7 iterations
     let lazy = Lazy::new(|| 42i64);
     let _ = lazy.force();
 
-    group.bench_function("Lazy_cached", |bencher| {
+    group.bench_function("Lazy_1e7_cached", |bencher| {
         bencher.iter(|| {
-            for _ in 0..10_000 {
+            for _ in 0..10_000_000 {
                 black_box(*lazy.force());
             }
         })
     });
 
-    // ConcurrentLazy cached access
+    // ConcurrentLazy cached access - 1e7 iterations
     let concurrent_lazy = ConcurrentLazy::new(|| 42i64);
     let _ = concurrent_lazy.force();
 
-    group.bench_function("ConcurrentLazy_cached", |bencher| {
+    group.bench_function("ConcurrentLazy_1e7_cached", |bencher| {
         bencher.iter(|| {
-            for _ in 0..10_000 {
+            for _ in 0..10_000_000 {
                 black_box(*concurrent_lazy.force());
             }
         })

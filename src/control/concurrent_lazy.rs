@@ -824,10 +824,7 @@ impl<T: fmt::Debug, F> fmt::Debug for ConcurrentLazy<T, F> {
             STATE_READY => {
                 // SAFETY: STATE_READY means value is initialized.
                 let value = unsafe { (*self.value.get()).assume_init_ref() };
-                formatter
-                    .debug_tuple("ConcurrentLazy")
-                    .field(value)
-                    .finish()
+                fmt::Debug::fmt(value, formatter)
             }
             STATE_EMPTY | STATE_COMPUTING => formatter.write_str("<uninit>"),
             STATE_POISONED => formatter.write_str("<poisoned>"),
@@ -1028,7 +1025,7 @@ mod tests {
     fn test_concurrent_lazy_debug_init() {
         let lazy = ConcurrentLazy::new(|| 42);
         let _ = lazy.force();
-        assert_eq!(format!("{lazy:?}"), "ConcurrentLazy(42)");
+        assert_eq!(format!("{lazy:?}"), "42");
     }
 
     #[rstest]
