@@ -83,16 +83,23 @@ jobs:
 
               # Generate flamegraph and text analysis if perf data exists
               if [ -f "profiling-results/criterion/${bench}.perf.data" ]; then
-                # Generate folded stacks (intermediate format for analysis)
-                sudo perf script -i profiling-results/criterion/${bench}.perf.data 2>/dev/null | \
-                  inferno-collapse-perf 2>/dev/null > profiling-results/criterion/${bench}.folded || true
+                echo "=== Processing perf data for ${bench} ==="
+                ls -la profiling-results/criterion/${bench}.perf.data
 
-                # Generate flamegraph from folded stacks
-                if [ -f "profiling-results/criterion/${bench}.folded" ]; then
+                # Generate folded stacks (intermediate format for analysis)
+                sudo perf script -i profiling-results/criterion/${bench}.perf.data 2>&1 | \
+                  inferno-collapse-perf > profiling-results/criterion/${bench}.folded 2>&1 || echo "collapse-perf returned non-zero for ${bench}"
+
+                # Generate flamegraph from folded stacks (check file size with -s)
+                if [ -s "profiling-results/criterion/${bench}.folded" ]; then
+                  echo "=== Generating flamegraph for ${bench} ==="
+                  echo "folded lines: $(wc -l < profiling-results/criterion/${bench}.folded)"
+
                   cat profiling-results/criterion/${bench}.folded | \
-                    inferno-flamegraph > profiling-results/criterion/${bench}_flamegraph.svg 2>/dev/null || true
+                    inferno-flamegraph > profiling-results/criterion/${bench}_flamegraph.svg 2>&1 || echo "flamegraph generation failed for ${bench}"
 
                   # Generate top functions summary (overhead by function)
+                  echo "=== Generating top functions for ${bench} ==="
                   gawk -F';' '{
                     n=split($NF, parts, " ")
                     func=parts[1]
@@ -103,7 +110,11 @@ jobs:
                   } END {
                     for(f in sum) printf "%d %s\n", sum[f], f
                   }' profiling-results/criterion/${bench}.folded | \
-                    sort -rn | head -50 > profiling-results/criterion/${bench}_top_functions.txt || true
+                    sort -rn | head -50 > profiling-results/criterion/${bench}_top_functions.txt
+
+                  echo "top_functions entries: $(wc -l < profiling-results/criterion/${bench}_top_functions.txt)"
+                else
+                  echo "WARNING: ${bench}.folded is empty or missing"
                 fi
 
                 # Cleanup large perf data
@@ -232,7 +243,10 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y wrk linux-tools-common linux-tools-generic gawk || true
+          sudo apt-get install -y wrk linux-tools-common linux-tools-generic linux-tools-$(uname -r) gawk || true
+          # Allow perf for non-root users
+          echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid
+          echo '0' | sudo tee /proc/sys/kernel/kptr_restrict
           # Install inferno for flamegraph generation
           cargo install inferno
 
@@ -300,38 +314,53 @@ jobs:
       - name: Generate flamegraph from perf data
         run: |
           cd profiling-results/api
-          if [ -f "perf.data" ]; then
-            # Generate flamegraph using inferno
-            sudo perf script -i perf.data > perf.script 2>/dev/null || true
 
-            if [ -f "perf.script" ]; then
-              # Generate folded stacks (keep for analysis)
-              cat perf.script | inferno-collapse-perf > stacks.folded 2>/dev/null || true
-
-              if [ -f "stacks.folded" ]; then
-                # Generate flamegraph
-                cat stacks.folded | inferno-flamegraph > flamegraph.svg 2>/dev/null || true
-
-                # Generate reverse flamegraph (icicle graph)
-                cat stacks.folded | inferno-flamegraph --reverse > flamegraph-reverse.svg 2>/dev/null || true
-
-                # Generate top functions summary (overhead by function)
-                gawk -F';' '{
-                  n=split($NF, parts, " ")
-                  func=parts[1]
-                  for(i=2; i<n; i++) func=func" "parts[i]
-                  samples=parts[n]
-                  sum[func]+=samples
-                  total+=samples
-                } END {
-                  for(f in sum) printf "%d %s\n", sum[f], f
-                }' stacks.folded | sort -rn | head -50 > top_functions.txt || true
-              fi
-
-              # Cleanup large intermediate files (keep folded for analysis)
-              rm -f perf.data perf.script 2>/dev/null || true
-            fi
+          echo "=== Checking perf.data ==="
+          if [ ! -f "perf.data" ]; then
+            echo "WARNING: perf.data not found"
+            exit 0
           fi
+          ls -la perf.data
+
+          echo "=== Running perf script ==="
+          sudo perf script -i perf.data > perf.script 2>&1 || echo "perf script returned non-zero"
+
+          if [ ! -s "perf.script" ]; then
+            echo "WARNING: perf.script is empty - perf may not have captured data"
+            echo "This can happen in virtualized environments where hardware performance counters are not available"
+            exit 0
+          fi
+          echo "perf.script lines: $(wc -l < perf.script)"
+
+          echo "=== Generating folded stacks ==="
+          cat perf.script | inferno-collapse-perf > stacks.folded 2>&1 || echo "inferno-collapse-perf returned non-zero"
+
+          if [ ! -s "stacks.folded" ]; then
+            echo "WARNING: stacks.folded is empty"
+            exit 0
+          fi
+          echo "stacks.folded lines: $(wc -l < stacks.folded)"
+
+          echo "=== Generating flamegraphs ==="
+          cat stacks.folded | inferno-flamegraph > flamegraph.svg 2>&1 || echo "flamegraph generation failed"
+          cat stacks.folded | inferno-flamegraph --reverse > flamegraph-reverse.svg 2>&1 || true
+
+          echo "=== Generating top functions ==="
+          gawk -F';' '{
+            n=split($NF, parts, " ")
+            func=parts[1]
+            for(i=2; i<n; i++) func=func" "parts[i]
+            samples=parts[n]
+            sum[func]+=samples
+            total+=samples
+          } END {
+            for(f in sum) printf "%d %s\n", sum[f], f
+          }' stacks.folded | sort -rn | head -50 > top_functions.txt
+
+          echo "top_functions.txt entries: $(wc -l < top_functions.txt)"
+
+          # Cleanup large intermediate files (keep folded for analysis)
+          rm -f perf.data perf.script 2>/dev/null || true
 
       - name: Generate API profiling summary
         run: |
