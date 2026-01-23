@@ -817,12 +817,14 @@ generate_meta_json() {
     local lua_metrics_file="${RESULTS_DIR}/lua_metrics.json"
 
     # Parse wrk output for metrics
+    # Note: Use anchored patterns to avoid matching percentages in other contexts
+    # (e.g., "75.99%" in Latency line should not match "99%" pattern)
     local rps avg_latency p50 p95 p99 error_rate total_requests
     rps=$(grep "Requests/sec:" "${result_file}" 2>/dev/null | awk '{print $2}' || echo "0")
     avg_latency=$(grep "Latency" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "0")
-    p50=$(grep "50%" "${result_file}" 2>/dev/null | awk '{print $2}' || echo "0")
-    p95=$(grep "95%" "${result_file}" 2>/dev/null | awk '{print $2}' || echo "0")
-    p99=$(grep "99%" "${result_file}" 2>/dev/null | awk '{print $2}' || echo "0")
+    p50=$(grep -E "^[[:space:]]+50%" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "0")
+    p95=$(grep -E "^[[:space:]]+95%" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "0")
+    p99=$(grep -E "^[[:space:]]+99%" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "0")
     total_requests=$(grep "requests in" "${result_file}" 2>/dev/null | awk '{print $1}' || echo "0")
 
     # Parse socket errors breakdown
