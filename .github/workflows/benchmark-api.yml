@@ -82,9 +82,17 @@ jobs:
           # Setup data
           ./setup_test_data.sh --scale small
           # Run benchmark
-          ./run_benchmark.sh --scenario scenarios/in_memory_read_heavy_warm.yaml --quick
-          # Save baseline (scenario directory level for compare_results.sh)
-          SCENARIO_DIR=$(ls -td results/*/in_memory_read_heavy_warm/ 2>/dev/null | head -1)
+          # Check if --scenario is supported (feature branch has it, main may not)
+          if grep -q -- '--scenario)' run_benchmark.sh 2>/dev/null; then
+            ./run_benchmark.sh --scenario scenarios/in_memory_read_heavy_warm.yaml --quick
+            # Save baseline (scenario directory level for compare_results.sh)
+            SCENARIO_DIR=$(ls -td results/*/in_memory_read_heavy_warm/ 2>/dev/null | head -1)
+          else
+            # Fallback for main branch without --scenario support
+            ./run_benchmark.sh --quick
+            # Save baseline (timestamp directory for legacy format)
+            SCENARIO_DIR=$(ls -td results/*/ 2>/dev/null | head -1)
+          fi
           if [ -n "$SCENARIO_DIR" ]; then
             cp -r "$SCENARIO_DIR" /tmp/baseline_results
           fi
