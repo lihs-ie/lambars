@@ -227,6 +227,7 @@ create_tasks_bulk() {
         fi
 
         batch_num=$((batch_num + 1))
+        printf "  Batch %d: sending %d tasks..." "${batch_num}" "${batch_count}"
 
         # Generate batch payload
         local tasks_json="["
@@ -241,11 +242,12 @@ create_tasks_bulk() {
 
         # Send bulk request
         local response
-        response=$(curl -sf -X POST "${API_URL}/tasks/bulk" \
+        response=$(curl -sf --connect-timeout 5 --max-time 30 -X POST "${API_URL}/tasks/bulk" \
             -H "Content-Type: application/json" \
             -d "{\"tasks\":${tasks_json}}" 2>/dev/null || echo "")
 
         if [[ -z "${response}" ]]; then
+            echo " timeout/failed"
             # Fall back to individual creation if bulk not available
             # Pass remaining count and starting index
             local remaining=$((total - created))
@@ -262,6 +264,7 @@ create_tasks_bulk() {
         extracted_ids=$(echo "${response}" | grep -oE '"id":"[^"]*"' | cut -d'"' -f4 || echo "")
 
         if [[ -z "${extracted_ids}" ]]; then
+            echo " response missing IDs"
             # Bulk response didn't contain IDs, fall back to individual creation
             # Pass remaining count and starting index
             local remaining=$((total - created))
@@ -271,6 +274,7 @@ create_tasks_bulk() {
             return
         fi
 
+        echo " done"
         # Add extracted IDs to TASK_IDS array
         while IFS= read -r task_id; do
             if [[ -n "${task_id}" ]]; then
@@ -299,7 +303,7 @@ create_tasks_individual() {
         payload=$(generate_task_payload "${task_index}")
 
         local response
-        response=$(curl -sf -X POST "${API_URL}/tasks" \
+        response=$(curl -sf --connect-timeout 5 --max-time 30 -X POST "${API_URL}/tasks" \
             -H "Content-Type: application/json" \
             -d "${payload}" 2>/dev/null || echo "")
 
@@ -328,7 +332,7 @@ create_projects() {
         payload=$(generate_project_payload "$i")
 
         local response
-        response=$(curl -sf -X POST "${API_URL}/projects" \
+        response=$(curl -sf --connect-timeout 5 --max-time 30 -X POST "${API_URL}/projects" \
             -H "Content-Type: application/json" \
             -d "${payload}" 2>/dev/null || echo "")
 
@@ -355,7 +359,7 @@ create_search_tasks() {
         local payload="{\"title\":\"Implement ${keyword} system\",\"description\":\"Task for ${keyword} functionality\",\"priority\":\"medium\",\"tags\":[\"${keyword}\",\"benchmark\"]}"
 
         local response
-        response=$(curl -sf -X POST "${API_URL}/tasks" \
+        response=$(curl -sf --connect-timeout 5 --max-time 30 -X POST "${API_URL}/tasks" \
             -H "Content-Type: application/json" \
             -d "${payload}" 2>/dev/null || echo "")
 
@@ -387,7 +391,7 @@ echo ""
 
 # Check API health
 echo "Checking API health..."
-if ! curl -sf "${API_URL}/health" > /dev/null 2>&1; then
+if ! curl -sf --connect-timeout 5 --max-time 30 "${API_URL}/health" > /dev/null 2>&1; then
     echo -e "${RED}ERROR: API is not responding at ${API_URL}/health${NC}"
     exit 1
 fi

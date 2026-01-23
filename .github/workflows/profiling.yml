@@ -254,8 +254,8 @@ jobs:
           echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid || true
           echo '0' | sudo tee /proc/sys/kernel/kptr_restrict || true
 
-          # Start server in background
-          RUST_LOG=info ./target/release/task-management-benchmark-api &
+          # Start server in background with in-memory mode (no external dependencies)
+          STORAGE_MODE=in_memory CACHE_MODE=in_memory RUST_LOG=info ./target/release/task-management-benchmark-api &
           SERVER_PID=$!
 
           # Wait for server to start
