@@ -227,7 +227,8 @@ create_tasks_bulk() {
         fi
 
         batch_num=$((batch_num + 1))
-        printf "  Batch %d: sending %d tasks..." "${batch_num}" "${batch_count}"
+        echo ""  # Force newline for CI log visibility
+        echo "[DEBUG] $(date '+%H:%M:%S') Batch ${batch_num}: preparing ${batch_count} tasks..."
 
         # Generate batch payload
         local tasks_json="["
@@ -240,13 +241,17 @@ create_tasks_bulk() {
         done
         tasks_json+="]"
 
+        echo "[DEBUG] $(date '+%H:%M:%S') Payload generated (${#tasks_json} bytes), calling curl..."
+
         # Send bulk request with HTTP status code capture
         local response
         local http_code
+        echo "[DEBUG] $(date '+%H:%M:%S') curl -s --connect-timeout 5 --max-time 10 -X POST ${API_URL}/tasks/bulk"
         response=$(curl -s --connect-timeout 5 --max-time 10 -w "\n%{http_code}" \
             -X POST "${API_URL}/tasks/bulk" \
             -H "Content-Type: application/json" \
             -d "{\"tasks\":${tasks_json}}" 2>/dev/null || echo -e "\n000")
+        echo "[DEBUG] $(date '+%H:%M:%S') curl completed"
 
         # Extract HTTP status code (last line) and response body
         http_code=$(echo "$response" | tail -n1)
