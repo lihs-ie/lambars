@@ -315,9 +315,20 @@ jobs:
         run: |
           cd profiling-results/api
 
+          # Helper function to generate README with error status
+          generate_readme() {
+            local status="$1"
+            echo "# API Server Profiling Results" > README.md
+            echo "" >> README.md
+            echo "## Status" >> README.md
+            echo "" >> README.md
+            echo "$status" >> README.md
+          }
+
           echo "=== Checking perf.data ==="
           if [ ! -f "perf.data" ]; then
             echo "WARNING: perf.data not found"
+            generate_readme "perf.data was not generated. The perf record command may have failed."
             exit 0
           fi
           ls -la perf.data
@@ -328,6 +339,8 @@ jobs:
           if [ ! -s "perf.script" ]; then
             echo "WARNING: perf.script is empty - perf may not have captured data"
             echo "This can happen in virtualized environments where hardware performance counters are not available"
+            generate_readme "perf.script was empty. Hardware performance counters may not be available in this VM environment."
+            rm -f perf.data 2>/dev/null || true
             exit 0
           fi
           echo "perf.script lines: $(wc -l < perf.script)"
@@ -337,6 +350,8 @@ jobs:
 
           if [ ! -s "stacks.folded" ]; then
             echo "WARNING: stacks.folded is empty"
+            generate_readme "stacks.folded was empty. inferno-collapse-perf may have failed to parse perf output."
+            rm -f perf.data perf.script 2>/dev/null || true
             exit 0
           fi
           echo "stacks.folded lines: $(wc -l < stacks.folded)"
@@ -381,6 +396,7 @@ jobs:
           name: api-profiling-${{ github.sha }}
           path: profiling-results/api/
           retention-days: 30
+          if-no-files-found: warn
 
   # ==========================================================================
   # Aggregate Results and Post PR Comment
