@@ -1,0 +1,95 @@
+# Tasks Search Endpoint Benchmark
+#
+# Tests POST /tasks/search endpoint using PersistentTreeMap + Alternative
+#
+# Target API features:
+#   - PersistentTreeMap for indexed search
+#   - Alternative trait for fallback strategies
+
+name: "tasks_search"
+description: "Benchmark POST /tasks/search endpoint with PersistentTreeMap and Alternative"
+
+# Backend configuration (maps to STORAGE_MODE, CACHE_MODE)
+storage_mode: postgres
+cache_mode: redis
+
+# Workload configuration
+load_pattern: read_heavy
+cache_state: warm
+# data_scale: maps to DATA_SCALE (small=1e2, medium=1e4, large=1e6)
+data_scale: large
+# payload_variant: maps to PAYLOAD (minimal=small, standard=medium, complex/heavy=large)
+payload_variant: standard
+# rps_profile: constant=steady, ramp_up_down=ramp, burst=burst
+rps_profile: constant
+
+# Load generation (maps to DURATION, THREADS, CONNECTIONS)
+duration_seconds: 30
+connections: 100
+threads: 8
+target_rps: 2000
+warmup_seconds: 10
+
+# Contention level
+contention_level: low
+
+# Target endpoint (first element maps to ENDPOINT)
+endpoints:
+  - "/tasks/search"
+
+http_methods:
+  - "POST"
+
+# Concurrency settings (maps to POOL_SIZES, WORKERS)
+concurrency:
+  worker_threads: 8
+  database_pool_size: 32
+  redis_pool_size: 16
+  max_connections: 200
+
+# Cache metrics (expected_hit_rate maps to HIT_RATE)
+cache_metrics:
+  enabled: true
+  per_endpoint: true
+  track_latency: true
+  warmup_requests: 500
+  expected_hit_rate: 0.9
+
+# Error handling (inject_error_rate maps to FAIL_RATE, max_retries>0 maps to RETRY)
+error_config:
+  timeout_ms: 3000
+  connect_timeout_ms: 500
+  max_retries: 2
+  retry_delay_ms: 50
+  expected_error_rate: 0.001
+  fail_on_error_threshold: true
+
+# Performance thresholds
+thresholds:
+  max_error_rate: 0.01
+  p99_latency_ms: 50
+  min_rps_achieved: 1500
+
+# Extended metadata for workflow integration
+# Keys here map to environment variables:
+#   cache_strategy -> CACHE_STRATEGY (read-through|write-through|write-behind)
+#   hit_rate -> HIT_RATE override (0|50|90)
+#   fail_injection -> FAIL_RATE override (0|0.1|0.5)
+#   retry -> RETRY override (true|false)
+#   profile -> PROFILE (true|false)
+metadata:
+  test_type: "endpoint_benchmark"
+  endpoint: "POST /tasks/search"
+  payload: "medium"
+  cache_strategy: "read-through"
+  hit_rate: 90
+  fail_injection: 0
+  retry: true
+  profile: false
+  api_features:
+    - PersistentTreeMap
+    - Alternative
+  tags:
+    - tasks
+    - search
+    - persistent-data

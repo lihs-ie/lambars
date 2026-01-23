@@ -243,3 +243,132 @@ fi
 
 echo ""
 echo "Seeding complete!"
+
+# =============================================================================
+# Generate seed_meta.json
+# =============================================================================
+
+generate_seed_meta() {
+    local meta_file="${SCRIPT_DIR}/seed_meta.json"
+    local timestamp
+    timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    # Convert scale to scientific notation for consistency
+    local data_scale_notation
+    case "${SCALE}" in
+        small)  data_scale_notation="1e2" ;;
+        medium) data_scale_notation="1e4" ;;
+        large)  data_scale_notation="1e6" ;;
+        *)      data_scale_notation="${SCALE}" ;;
+    esac
+
+    # Estimate project count (typically 1% of task count)
+    local project_count
+    project_count=$((COUNT / 100))
+    if [[ ${project_count} -lt 1 ]]; then
+        project_count=1
+    fi
+
+    # Calculate expected hit rate based on data scale
+    # Higher scale = higher hit rate due to cache efficiency
+    local expected_hit_rate
+    case "${SCALE}" in
+        small)  expected_hit_rate="0.3" ;;
+        medium) expected_hit_rate="0.5" ;;
+        large)  expected_hit_rate="0.8" ;;
+        *)      expected_hit_rate="0.5" ;;
+    esac
+
+    # Convert INCREMENTAL to boolean
+    local incremental_bool="false"
+    if [[ -n "${INCREMENTAL}" ]]; then
+        incremental_bool="true"
+    fi
+
+    # Validate and prepare seed_value (must be numeric or null)
+    local seed_value="null"
+    if [[ -n "${SEED}" ]]; then
+        if [[ "${SEED}" =~ ^[0-9]+$ ]]; then
+            seed_value="${SEED}"
+        else
+            echo "Warning: SEED '${SEED}' is not a valid number, using null"
+        fi
+    fi
+
+    # Check if jq is available for safe JSON generation
+    if command -v jq &> /dev/null; then
+        # Use jq for proper JSON escaping
+        jq -n \
+            --arg seeded_at "${timestamp}" \
+            --arg data_scale "${data_scale_notation}" \
+            --arg payload_variant "${VARIANT}" \
+            --argjson tasks "${COUNT}" \
+            --argjson projects "${project_count}" \
+            --argjson expected_hit_rate "${expected_hit_rate}" \
+            --argjson seed_value "${seed_value}" \
+            --argjson incremental "${incremental_bool}" \
+            --argjson batch_size "${BATCH_SIZE}" \
+            --arg endpoint "${ENDPOINT}" \
+            '{
+                seeded_at: $seeded_at,
+                data_scale: $data_scale,
+                payload_variant: $payload_variant,
+                records: {
+                    tasks: $tasks,
+                    projects: $projects
+                },
+                expected_hit_rate: $expected_hit_rate,
+                seed_value: $seed_value,
+                incremental: $incremental,
+                batch_size: $batch_size,
+                endpoint: $endpoint
+            }' > "${meta_file}" || {
+                echo "Error: Failed to write ${meta_file}"
+                exit 1
+            }
+    else
+        # Fallback: manual JSON generation with escaping
+        # Use perl if available for comprehensive control character escaping
+        # Otherwise use basic sed escaping with warning
+        local escaped_variant
+        local escaped_endpoint
+
+        if command -v perl &> /dev/null; then
+            # Perl: escape all JSON-unsafe characters (backslash, quote, control chars 0x00-0x1F)
+            escaped_variant=$(printf '%s' "${VARIANT}" | perl -pe 's/\\/\\\\/g; s/"/\\"/g; s/[\x00-\x1f]/sprintf("\\u%04x", ord($&))/ge')
+            escaped_endpoint=$(printf '%s' "${ENDPOINT}" | perl -pe 's/\\/\\\\/g; s/"/\\"/g; s/[\x00-\x1f]/sprintf("\\u%04x", ord($&))/ge')
+        else
+            # Basic escaping: backslash, double quote, replace control chars with space
+            echo "Warning: Neither jq nor perl available. Using basic escaping for seed_meta.json"
+            escaped_variant=$(printf '%s' "${VARIANT}" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\000-\037' ' ')
+            escaped_endpoint=$(printf '%s' "${ENDPOINT}" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\000-\037' ' ')
+        fi
+
+        cat > "${meta_file}" << EOF || {
+            echo "Error: Failed to write ${meta_file}"
+            exit 1
+        }
+{
+  "seeded_at": "${timestamp}",
+  "data_scale": "${data_scale_notation}",
+  "payload_variant": "${escaped_variant}",
+  "records": {
+    "tasks": ${COUNT},
+    "projects": ${project_count}
+  },
+  "expected_hit_rate": ${expected_hit_rate},
+  "seed_value": ${seed_value},
+  "incremental": ${incremental_bool},
+  "batch_size": ${BATCH_SIZE},
+  "endpoint": "${escaped_endpoint}"
+}
+EOF
+    fi
+
+    echo ""
+    echo "Generated: ${meta_file}"
+    echo ""
+    cat "${meta_file}"
+}
+
+generate_seed_meta
