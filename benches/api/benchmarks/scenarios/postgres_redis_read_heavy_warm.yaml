@@ -1,0 +1,36 @@
+# PostgreSQL + Redis Read-Heavy Warm Scenario
+#
+# This scenario tests read-heavy workloads with warm Redis cache on PostgreSQL storage.
+# Represents typical production read workload with caching.
+
+name: "postgres_redis_read_heavy_warm"
+description: "Read-heavy workload with warm Redis cache on PostgreSQL storage (production-like)"
+
+# Backend configuration (required)
+storage_mode: postgres
+cache_mode: redis
+
+# Workload configuration (required)
+load_pattern: read_heavy
+cache_state: warm
+data_scale: medium
+payload_variant: standard
+rps_profile: constant
+
+# Load generation (optional with defaults)
+duration_seconds: 60
+connections: 20
+threads: 4
+warmup_seconds: 10
+
+# Target endpoints (empty = all)
+endpoints:
+  - "/tasks"
+  - "/tasks/{id}"
+  - "/tasks/search"
+  - "/projects/{id}/progress"
+
+# Pool configuration
+pool_sizes:
+  database_pool_size: 10
+  redis_pool_size: 20

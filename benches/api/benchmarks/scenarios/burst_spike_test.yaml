@@ -1,0 +1,74 @@
+# Burst/Spike Load Test Scenario
+#
+# This scenario tests system resilience under sudden traffic spikes.
+# Simulates real-world scenarios like flash sales, viral content, or traffic bursts.
+#
+# Load pattern:
+#   - Normal:  Steady base_rps (target_rps / burst_multiplier)
+#   - Burst:   Spike to target_rps for burst_duration_seconds
+#   - Recovery: Return to base_rps
+#   - Repeats every burst_interval_seconds
+#
+# Example timeline (120s total, 20s interval, 5s burst):
+#   [0-5s]    Burst: 1000 RPS
+#   [5-20s]   Normal: 333 RPS
+#   [20-25s]  Burst: 1000 RPS
+#   [25-40s]  Normal: 333 RPS
+#   ... (repeats)
+
+name: "burst_spike_test"
+description: "Periodic traffic spikes to test system resilience and recovery"
+
+# Backend configuration
+storage_mode: postgres
+cache_mode: redis
+
+# Workload configuration
+load_pattern: mixed
+cache_state: warm
+data_scale: medium
+payload_variant: complex  # Larger payloads stress the system more during bursts
+rps_profile: burst
+
+# Load generation parameters
+duration_seconds: 120
+connections: 50
+threads: 8
+warmup_seconds: 10
+target_rps: 1000  # RPS during burst phases
+
+# Burst specific parameters
+burst_multiplier: 3.0           # Normal RPS = target_rps / burst_multiplier = 333
+burst_duration_seconds: 5       # Each burst lasts 5 seconds
+burst_interval_seconds: 20      # Burst every 20 seconds
+min_rps: 50                     # Minimum RPS floor
+
+# Target all endpoints
+endpoints: []
+
+# Pool configuration (larger pools for burst handling)
+pool_sizes:
+  database_pool_size: 30
+  redis_pool_size: 40
+
+# Worker configuration
+worker_config:
+  worker_threads: 8
+
+# Expected metrics thresholds (for validation)
+thresholds:
+  max_error_rate: 0.05          # 5% max error rate (higher tolerance for bursts)
+  p99_latency_ms: 500           # p99 latency threshold (higher during bursts)
+  min_rps_achieved: 900         # Minimum RPS during burst phase
+  recovery_time_seconds: 10     # Expected time to return to normal after burst
+
+# Metadata for result analysis
+metadata:
+  test_type: "load_shape"
+  profile: "burst"
+  purpose: "resilience_test"
+  tags:
+    - "load-shaping"
+    - "spike-test"
+    - "resilience"
+    - "burst"

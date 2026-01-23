@@ -1,0 +1,71 @@
+# Payload Variation Test - Complex
+#
+# Tests system performance with complex payload size (100 tags, 50 subtasks).
+# Represents data-heavy tasks with many relationships.
+#
+# Payload characteristics:
+#   - Tags: 100
+#   - Subtasks: 50
+#   - Description: ~1000 characters
+#   - Estimated size: ~10 KB
+
+name: "payload_variation_complex"
+description: "Performance test with complex payload (100 tags, 50 subtasks, ~10 KB)"
+
+# Backend configuration
+storage_mode: postgres
+cache_mode: redis
+
+# Workload configuration
+load_pattern: write_heavy  # Write-heavy to stress payload processing
+cache_state: warm
+data_scale: medium
+payload_variant: complex   # 100 tags, 50 subtasks
+rps_profile: constant
+
+# Load generation parameters
+duration_seconds: 60
+connections: 20
+threads: 4
+warmup_seconds: 5
+target_rps: 200            # Lower target due to larger payloads
+
+# Target endpoints (focus on write operations)
+# NOTE: Endpoints are path-only. HTTP method is determined by the benchmark script.
+endpoints:
+  - "/tasks"
+  - "/tasks/{id}"
+
+# HTTP methods used by benchmark script
+http_methods:
+  - POST
+  - PUT
+  - PATCH
+
+# Pool configuration
+pool_sizes:
+  database_pool_size: 20
+  redis_pool_size: 25
+
+# Worker configuration
+worker_config:
+  worker_threads: 4
+
+# Expected metrics thresholds
+thresholds:
+  max_error_rate: 0.02      # Slightly higher tolerance for complex payloads
+  p99_latency_ms: 300       # Higher latency expected for complex payload
+  min_rps_achieved: 150
+
+# Metadata for result analysis
+metadata:
+  test_type: "payload_variation"
+  payload_variant: "complex"
+  payload_size_bytes: 10000
+  tag_count: 100
+  subtask_count: 50
+  purpose: "complex_data_handling"
+  tags:
+    - "payload-variation"
+    - "complex"
+    - "data-heavy"

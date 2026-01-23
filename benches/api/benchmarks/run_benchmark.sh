@@ -7,6 +7,8 @@
 #   ./run_benchmark.sh                    # Run all benchmarks
 #   ./run_benchmark.sh misc               # Run specific benchmark
 #   ./run_benchmark.sh --quick            # Quick test (5s duration)
+#   ./run_benchmark.sh --scenario <yaml>  # Run with scenario configuration
+#   ./run_benchmark.sh --scenario <yaml> --quick misc  # Combined options
 
 set -euo pipefail
 
@@ -18,6 +20,9 @@ DURATION="${DURATION:-30s}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESULTS_DIR="${SCRIPT_DIR}/results/$(date +%Y%m%d_%H%M%S)"
 
+# Scenario configuration file
+SCENARIO_FILE=""
+
 # Parse arguments
 QUICK_MODE=false
 SPECIFIC_SCRIPT=""
@@ -28,6 +33,10 @@ while [[ $# -gt 0 ]]; do
             QUICK_MODE=true
             DURATION="5s"
             shift
+            ;;
+        --scenario)
+            SCENARIO_FILE="$2"
+            shift 2
             ;;
         *)
             SPECIFIC_SCRIPT="$1"
@@ -41,6 +50,146 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
+
+# =============================================================================
+# Scenario YAML Environment Variable Loading
+# =============================================================================
+#
+# If a scenario file is provided, extract environment variables from it.
+# This enables to_env_vars compatibility from BenchmarkScenario.
+#
+# Requires: yq (https://github.com/mikefarah/yq)
+#
+# Supported environment variables:
+#   - CONTENTION_LEVEL: low, medium, high
+#   - WRITE_RATIO: 0-100 (derived from contention_level)
+#   - TARGET_RESOURCES: number (derived from contention_level)
+#   - CONNECTIONS: number (wrk -c option, from connections)
+#   - THREADS: number (wrk -t option, from threads)
+#   - DURATION_SECONDS: number (wrk -d option, from duration_seconds)
+#   - WORKER_THREADS: number (from concurrency.worker_threads)
+#   - DATABASE_POOL_SIZE: number (from concurrency.database_pool_size)
+#   - REDIS_POOL_SIZE: number (from concurrency.redis_pool_size)
+#   - MAX_CONNECTIONS: number (from concurrency.max_connections)
+#   - TARGET_RPS: number (optional, from target_rps if > 0)
+# =============================================================================
+
+load_scenario_env_vars() {
+    local scenario_file="$1"
+
+    if [[ ! -f "${scenario_file}" ]]; then
+        echo -e "${RED}Error: Scenario file not found: ${scenario_file}${NC}"
+        exit 1
+    fi
+
+    # Check if yq is installed
+    if ! command -v yq &> /dev/null; then
+        echo -e "${YELLOW}Warning: yq is not installed. Scenario environment variables will not be loaded.${NC}"
+        echo "Install with:"
+        echo "  macOS:  brew install yq"
+        echo "  Ubuntu: snap install yq"
+        return 0
+    fi
+
+    echo "Loading scenario configuration from: ${scenario_file}"
+
+    # Extract contention_level and derive settings
+    local contention_level
+    contention_level=$(yq '.contention_level // "low"' "${scenario_file}" | tr -d '"')
+    export CONTENTION_LEVEL="${contention_level}"
+
+    # Derive WRITE_RATIO and TARGET_RESOURCES from contention level
+    case "${contention_level}" in
+        "low")
+            export WRITE_RATIO="10"
+            export TARGET_RESOURCES="1000"
+            ;;
+        "medium")
+            export WRITE_RATIO="50"
+            export TARGET_RESOURCES="100"
+            ;;
+        "high")
+            export WRITE_RATIO="90"
+            export TARGET_RESOURCES="10"
+            ;;
+        *)
+            echo -e "${YELLOW}Warning: Unknown contention_level '${contention_level}', using defaults${NC}"
+            export WRITE_RATIO="50"
+            export TARGET_RESOURCES="100"
+            ;;
+    esac
+
+    # Extract concurrency settings if present
+    local worker_threads
+    worker_threads=$(yq '.concurrency.worker_threads // null' "${scenario_file}")
+    if [[ "${worker_threads}" != "null" ]]; then
+        export WORKER_THREADS="${worker_threads}"
+    fi
+
+    local database_pool_size
+    database_pool_size=$(yq '.concurrency.database_pool_size // null' "${scenario_file}")
+    if [[ "${database_pool_size}" != "null" ]]; then
+        export DATABASE_POOL_SIZE="${database_pool_size}"
+    fi
+
+    local redis_pool_size
+    redis_pool_size=$(yq '.concurrency.redis_pool_size // null' "${scenario_file}")
+    if [[ "${redis_pool_size}" != "null" ]]; then
+        export REDIS_POOL_SIZE="${redis_pool_size}"
+    fi
+
+    local max_connections
+    max_connections=$(yq '.concurrency.max_connections // null' "${scenario_file}")
+    if [[ "${max_connections}" != "null" ]]; then
+        export MAX_CONNECTIONS="${max_connections}"
+    fi
+
+    # Extract target_rps if > 0
+    local target_rps
+    target_rps=$(yq '.target_rps // 0' "${scenario_file}")
+    if [[ "${target_rps}" != "0" && "${target_rps}" != "null" ]]; then
+        export TARGET_RPS="${target_rps}"
+    fi
+
+    # Override duration, connections, and threads from scenario if present
+    # These are also exported for Lua scripts (matching BenchmarkScenario::to_env_vars)
+    local scenario_duration
+    scenario_duration=$(yq '.duration_seconds // null' "${scenario_file}")
+    if [[ "${scenario_duration}" != "null" ]]; then
+        DURATION="${scenario_duration}s"
+        export DURATION_SECONDS="${scenario_duration}"
+    fi
+
+    local scenario_connections
+    scenario_connections=$(yq '.connections // null' "${scenario_file}")
+    if [[ "${scenario_connections}" != "null" ]]; then
+        CONNECTIONS="${scenario_connections}"
+        export CONNECTIONS
+    fi
+
+    local scenario_threads
+    scenario_threads=$(yq '.threads // null' "${scenario_file}")
+    if [[ "${scenario_threads}" != "null" ]]; then
+        THREADS="${scenario_threads}"
+        export THREADS
+    fi
+
+    echo "  Contention level: ${CONTENTION_LEVEL}"
+    echo "  Write ratio: ${WRITE_RATIO}%"
+    echo "  Target resources: ${TARGET_RESOURCES}"
+    [[ -n "${DURATION_SECONDS:-}" ]] && echo "  Duration seconds: ${DURATION_SECONDS}"
+    [[ -n "${WORKER_THREADS:-}" ]] && echo "  Worker threads: ${WORKER_THREADS}"
+    [[ -n "${DATABASE_POOL_SIZE:-}" ]] && echo "  Database pool size: ${DATABASE_POOL_SIZE}"
+    [[ -n "${REDIS_POOL_SIZE:-}" ]] && echo "  Redis pool size: ${REDIS_POOL_SIZE}"
+    [[ -n "${MAX_CONNECTIONS:-}" ]] && echo "  Max connections: ${MAX_CONNECTIONS}"
+    [[ -n "${TARGET_RPS:-}" ]] && echo "  Target RPS: ${TARGET_RPS}"
+}
+
+# Load scenario environment variables if scenario file is provided
+if [[ -n "${SCENARIO_FILE}" ]]; then
+    load_scenario_env_vars "${SCENARIO_FILE}"
+    echo ""
+fi
 
 echo "=============================================="
 echo "  API Workload Benchmark"

@@ -1,0 +1,56 @@
+# Large Scale Seeded Scenario
+#
+# This scenario tests performance with large-scale seeded data.
+# Uses reproducible data generation via random seed for consistent benchmarks.
+#
+# Features:
+# - Seeded data for reproducibility (seed: 42)
+# - Custom record count (500,000 instead of default 1M)
+# - Non-incremental seeding (fresh data)
+
+name: "large_scale_seeded"
+description: "Large scale test with seeded data for reproducibility"
+
+# Backend configuration (required)
+storage_mode: postgres
+cache_mode: redis
+
+# Workload configuration (required)
+load_pattern: read_heavy
+cache_state: cold
+data_scale: large
+payload_variant: minimal
+rps_profile: step_up
+contention_level: low
+
+# Load generation (optional with defaults)
+duration_seconds: 180
+connections: 30
+threads: 4
+warmup_seconds: 30
+
+# Extended data scale configuration
+data_scale_config:
+  scale: large
+  record_count: 500000  # Override default 1M for faster seeding
+  seed: 42              # Reproducible data generation
+  incremental: false    # Fresh data, don't add to existing
+
+# Target endpoints
+endpoints:
+  - "/tasks"
+  - "/tasks/search"
+  - "/projects/{id}/progress"
+
+# Pool configuration
+pool_sizes:
+  database_pool_size: 20
+  redis_pool_size: 40
+
+# Performance thresholds
+thresholds:
+  p50_latency_ms: 50
+  p95_latency_ms: 200
+  p99_latency_ms: 500
+  min_rps_achieved: 500
+  max_error_rate: 0.01

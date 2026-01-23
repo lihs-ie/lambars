@@ -1,0 +1,71 @@
+# Payload Variation Test - Minimal
+#
+# Tests system performance with minimal payload size (0 tags, 0 subtasks).
+# Baseline for measuring pure throughput without payload processing overhead.
+#
+# Payload characteristics:
+#   - Tags: 0
+#   - Subtasks: 0
+#   - Description: ~20 characters
+#   - Estimated size: ~200 bytes
+
+name: "payload_variation_minimal"
+description: "Performance test with minimal payload (0 tags, 0 subtasks, ~200 bytes)"
+
+# Backend configuration
+storage_mode: postgres
+cache_mode: redis
+
+# Workload configuration
+load_pattern: write_heavy  # Write-heavy to stress payload processing
+cache_state: warm
+data_scale: medium
+payload_variant: minimal   # 0 tags, 0 subtasks
+rps_profile: constant
+
+# Load generation parameters
+duration_seconds: 60
+connections: 20
+threads: 4
+warmup_seconds: 5
+target_rps: 500
+
+# Target endpoints (focus on write operations)
+# NOTE: Endpoints are path-only. HTTP method is determined by the benchmark script.
+endpoints:
+  - "/tasks"
+  - "/tasks/{id}"
+
+# HTTP methods used by benchmark script
+http_methods:
+  - POST
+  - PUT
+  - PATCH
+
+# Pool configuration
+pool_sizes:
+  database_pool_size: 15
+  redis_pool_size: 20
+
+# Worker configuration
+worker_config:
+  worker_threads: 4
+
+# Expected metrics thresholds
+thresholds:
+  max_error_rate: 0.01
+  p99_latency_ms: 50        # Low latency expected for minimal payload
+  min_rps_achieved: 450
+
+# Metadata for result analysis
+metadata:
+  test_type: "payload_variation"
+  payload_variant: "minimal"
+  payload_size_bytes: 200
+  tag_count: 0
+  subtask_count: 0
+  purpose: "baseline_throughput"
+  tags:
+    - "payload-variation"
+    - "minimal"
+    - "baseline"

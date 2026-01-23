@@ -1,0 +1,36 @@
+# PostgreSQL + Redis Read-Heavy Cold Scenario
+#
+# This scenario tests read-heavy workloads with cold cache (cache misses)
+# on PostgreSQL storage. Measures database performance under cache-miss conditions.
+
+name: "postgres_redis_read_heavy_cold"
+description: "Read-heavy workload with cold cache (100% miss) on PostgreSQL storage"
+
+# Backend configuration (required)
+storage_mode: postgres
+cache_mode: redis
+
+# Workload configuration (required)
+load_pattern: read_heavy
+cache_state: cold
+data_scale: medium
+payload_variant: standard
+rps_profile: constant
+
+# Load generation (optional with defaults)
+duration_seconds: 60
+connections: 20
+threads: 4
+warmup_seconds: 0  # No warmup for cold cache testing
+
+# Target endpoints
+endpoints:
+  - "/tasks"
+  - "/tasks/{id}"
+  - "/tasks/search"
+  - "/projects/{id}/progress"
+
+# Pool configuration
+pool_sizes:
+  database_pool_size: 20
+  redis_pool_size: 10

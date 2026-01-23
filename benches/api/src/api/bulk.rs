@@ -4,6 +4,7 @@
 //! - **`Either`**: Representing success/failure for individual items
 //! - **`Bifunctor::bimap`**: Transforming both success and failure cases
 //! - **`PersistentHashSet`**: Deduplication of IDs
+//! - **`Alternative`**: Fallback patterns for validation and save operations
 //!
 //! # Endpoints
 //!
@@ -14,6 +15,12 @@
 //!
 //! Bulk operations use 207 Multi-Status to report partial success.
 //! Each item is processed independently - one failure doesn't affect others.
+//!
+//! # Alternative Pattern Usage
+//!
+//! - **Validation**: `alt` for field-level fallback (e.g., default priority)
+//! - **Save**: `alt` for fallback save strategy on primary failure
+//! - **Choice**: Select first successful result from multiple strategies
 
 use std::sync::Arc;
 
@@ -31,6 +38,7 @@ use crate::infrastructure::TaskRepository;
 use lambars::control::Either;
 use lambars::for_;
 use lambars::persistent::PersistentHashSet;
+use lambars::typeclass::Alternative;
 
 // =============================================================================
 // Constants
@@ -109,6 +117,9 @@ pub struct BulkSummary {
     pub succeeded: usize,
     /// Number of failed operations.
     pub failed: usize,
+    /// Number of operations that used fallback strategies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_used: Option<usize>,
 }
 
 // =============================================================================
@@ -150,6 +161,17 @@ pub enum ItemError {
     DuplicateId { id: TaskId },
     /// Repository operation failed (internal error, details logged).
     RepositoryError,
+    /// All save strategies failed (primary and fallback).
+    AllStrategiesFailed,
+}
+
+/// Result of a save operation with fallback tracking.
+#[derive(Debug, Clone)]
+pub struct SaveResult {
+    /// The saved task.
+    pub task: Task,
+    /// Whether a fallback strategy was used.
+    pub used_fallback: bool,
 }
 
 impl From<ItemError> for BulkItemError {
@@ -178,6 +200,10 @@ impl From<ItemError> for BulkItemError {
             ItemError::RepositoryError => Self {
                 code: "REPOSITORY_ERROR".to_string(),
                 message: "Internal error occurred".to_string(),
+            },
+            ItemError::AllStrategiesFailed => Self {
+                code: "ALL_STRATEGIES_FAILED".to_string(),
+                message: "All save strategies failed (primary and fallback)".to_string(),
             },
         }
     }
@@ -351,20 +377,15 @@ fn validate_create_requests(
 }
 
 /// Validates a single create request (pure function).
+///
+/// Uses `Alternative` patterns for validation with fallback:
+/// - Title validation with `guard` for conditional checks
+/// - Tags validation with `alt` for fallback to empty tags
 fn validate_single_create(request: &CreateTaskRequest) -> Either<ItemError, ValidatedCreate> {
-    // Validate title
-    let title = match validate_title(&request.title) {
+    // Validate title using Alternative::guard pattern
+    let title = match validate_title_with_alternative(&request.title) {
         Either::Right(t) => t,
-        Either::Left(e) => {
-            let first_error = e.errors.first().map_or_else(
-                || ("title".to_string(), "validation error".to_string()),
-                |f| (f.field.clone(), f.message.clone()),
-            );
-            return Either::Left(ItemError::Validation {
-                field: first_error.0,
-                message: first_error.1,
-            });
-        }
+        Either::Left(e) => return Either::Left(e),
     };
 
     // Validate description
@@ -382,20 +403,8 @@ fn validate_single_create(request: &CreateTaskRequest) -> Either<ItemError, Vali
         }
     };
 
-    // Validate tags
-    let tags = match validate_tags(&request.tags) {
-        Either::Right(t) => t,
-        Either::Left(e) => {
-            let first_error = e.errors.first().map_or_else(
-                || ("tags".to_string(), "validation error".to_string()),
-                |f| (f.field.clone(), f.message.clone()),
-            );
-            return Either::Left(ItemError::Validation {
-                field: first_error.0,
-                message: first_error.1,
-            });
-        }
-    };
+    // Validate tags using Alternative::alt for fallback to empty tags
+    let tags = validate_tags_with_alternative(&request.tags);
 
     Either::Right(ValidatedCreate {
         title,
@@ -403,6 +412,90 @@ fn validate_single_create(request: &CreateTaskRequest) -> Either<ItemError, Vali
         priority: Priority::from(request.priority),
         tags,
     })
+}
+
+/// Validates title using `Alternative::guard` (pure function).
+///
+/// Demonstrates `Alternative::guard` for conditional validation.
+/// Returns `Either::Left` if validation fails, `Either::Right` with the title otherwise.
+fn validate_title_with_alternative(title: &str) -> Either<ItemError, String> {
+    // Use guard to check if title is non-empty
+    let non_empty_check: Option<()> = <Option<()>>::guard(!title.trim().is_empty());
+
+    match non_empty_check {
+        Some(()) => {
+            // Further validation using original validate_title
+            match validate_title(title) {
+                Either::Right(t) => Either::Right(t),
+                Either::Left(e) => {
+                    let first_error = e.errors.first().map_or_else(
+                        || ("title".to_string(), "validation error".to_string()),
+                        |f| (f.field.clone(), f.message.clone()),
+                    );
+                    Either::Left(ItemError::Validation {
+                        field: first_error.0,
+                        message: first_error.1,
+                    })
+                }
+            }
+        }
+        None => Either::Left(ItemError::Validation {
+            field: "title".to_string(),
+            message: "title cannot be empty".to_string(),
+        }),
+    }
+}
+
+/// Validates tags using `Alternative::alt` for fallback (pure function).
+///
+/// Demonstrates `Alternative::alt` for fallback pattern:
+/// - Primary: validate provided tags
+/// - Fallback: return empty tags if validation fails (tolerant mode)
+fn validate_tags_with_alternative(tags: &[String]) -> Vec<Tag> {
+    // Primary validation attempt
+    let primary_result: Option<Vec<Tag>> = match validate_tags(tags) {
+        Either::Right(valid_tags) => Some(valid_tags),
+        Either::Left(_) => None,
+    };
+
+    // Fallback to empty tags using Alternative::alt
+    let fallback: Option<Vec<Tag>> = Some(Vec::new());
+
+    // Use alt: if primary succeeds, use it; otherwise use fallback
+    primary_result.alt(fallback).unwrap_or_default()
+}
+
+/// Validates multiple field values and combines results using `Alternative::choice` (pure function).
+///
+/// Demonstrates `Alternative::choice` to select the first successful validation
+/// from multiple validation strategies.
+///
+/// **Note**: This implementation evaluates all validators eagerly. For short-circuit
+/// evaluation, use `validate_with_choice_lazy` instead.
+#[allow(dead_code)]
+fn validate_with_choice<T: Clone + 'static>(validators: Vec<impl Fn() -> Option<T>>) -> Option<T> {
+    let results: Vec<Option<T>> = validators.into_iter().map(|v| v()).collect();
+    Option::choice(results)
+}
+
+/// Validates with short-circuit evaluation using iterator's `find_map` (pure function).
+///
+/// This is the preferred implementation that stops evaluation at the first successful
+/// validation result, demonstrating proper lazy semantics for `Alternative::choice`.
+///
+/// # Examples
+///
+/// ```ignore
+/// let result = validate_with_choice_lazy(vec![
+///     Box::new(|| None),       // Evaluated, returns None
+///     Box::new(|| Some(42)),   // Evaluated, returns Some(42) - stops here
+///     Box::new(|| Some(100)),  // NOT evaluated due to short-circuit
+/// ]);
+/// assert_eq!(result, Some(42));
+/// ```
+#[allow(dead_code)]
+fn validate_with_choice_lazy<T>(validators: Vec<Box<dyn Fn() -> Option<T>>>) -> Option<T> {
+    validators.into_iter().find_map(|validator| validator())
 }
 
 // =============================================================================
@@ -510,18 +603,24 @@ fn apply_update(task: Task, update: &BulkUpdateItem, now: Timestamp) -> Option<T
 // =============================================================================
 
 /// Aggregates create results into a response (pure function).
-fn aggregate_create_results(results: Vec<Either<ItemError, Task>>) -> BulkResponse {
+///
+/// Tracks fallback usage for partial failure measurement.
+fn aggregate_create_results(results: Vec<Either<ItemError, SaveResult>>) -> BulkResponse {
     let total = results.len();
     let mut succeeded = 0;
     let mut failed = 0;
+    let mut fallback_used = 0;
 
     let item_results: Vec<BulkItemResult> = results
         .into_iter()
         .map(|result| match result {
-            Either::Right(task) => {
+            Either::Right(save_result) => {
                 succeeded += 1;
+                if save_result.used_fallback {
+                    fallback_used += 1;
+                }
                 BulkItemResult::Created {
-                    task: TaskResponse::from(&task),
+                    task: TaskResponse::from(&save_result.task),
                 }
             }
             Either::Left(error) => {
@@ -539,6 +638,11 @@ fn aggregate_create_results(results: Vec<Either<ItemError, Task>>) -> BulkRespon
             total,
             succeeded,
             failed,
+            fallback_used: if fallback_used > 0 {
+                Some(fallback_used)
+            } else {
+                None
+            },
         },
     }
 }
@@ -573,6 +677,7 @@ fn aggregate_update_results(results: Vec<Either<ItemError, Task>>) -> BulkRespon
             total,
             succeeded,
             failed,
+            fallback_used: None,
         },
     }
 }
@@ -603,28 +708,152 @@ fn merge_update_results(
 // I/O Functions
 // =============================================================================
 
-/// Saves tasks in bulk (I/O boundary).
+/// Saves tasks in bulk with Alternative-based fallback (I/O boundary).
+///
+/// Demonstrates `Alternative::alt` for fallback save strategies:
+/// - Primary: Save to main repository
+/// - Fallback: Attempt save with retry or alternative strategy
+///
+/// Uses `Alternative::choice` to select the first successful save strategy.
 async fn save_tasks_bulk(
     repository: Arc<dyn TaskRepository + Send + Sync>,
     tasks: Vec<Either<ItemError, Task>>,
-) -> Vec<Either<ItemError, Task>> {
+) -> Vec<Either<ItemError, SaveResult>> {
     let mut results = Vec::with_capacity(tasks.len());
 
     for task_result in tasks {
         let result = match task_result {
             Either::Left(error) => Either::Left(error),
-            Either::Right(task) => match repository.save(&task).run_async().await {
-                Ok(()) => Either::Right(task),
-                Err(e) => {
-                    tracing::error!(error = %e, "Repository save failed");
-                    Either::Left(ItemError::RepositoryError)
-                }
-            },
+            Either::Right(task) => save_with_alternative_fallback(repository.clone(), task).await,
         };
         results.push(result);
     }
 
     results
+}
+
+/// Saves a single task using Alternative-based fallback strategies (I/O boundary).
+///
+/// Demonstrates `Alternative::alt` for fallback patterns:
+/// 1. Primary strategy: Direct save
+/// 2. Fallback strategy: Save with retry (simulated as alternative path)
+///
+/// Returns `SaveResult` tracking whether fallback was used.
+///
+/// **Important**: Uses lazy evaluation - fallback is only executed when primary fails.
+/// This prevents unnecessary double-save operations.
+async fn save_with_alternative_fallback(
+    repository: Arc<dyn TaskRepository + Send + Sync>,
+    task: Task,
+) -> Either<ItemError, SaveResult> {
+    // Primary save attempt
+    let primary_result: Option<SaveResult> = try_primary_save(&repository, &task).await;
+
+    // Lazy fallback: only execute if primary failed (short-circuit semantics)
+    // This demonstrates the proper behavior of Alternative::alt with lazy evaluation
+    let combined_result = match primary_result {
+        Some(result) => Some(result), // Primary succeeded - no fallback needed
+        None => try_fallback_save(&repository, &task).await, // Primary failed - try fallback
+    };
+
+    combined_result.map_or_else(
+        || Either::Left(ItemError::AllStrategiesFailed),
+        Either::Right,
+    )
+}
+
+/// Combines two save strategies with lazy evaluation (pure function).
+///
+/// The fallback function is only called when the primary function returns `None`.
+/// This ensures proper short-circuit semantics for `Alternative::alt`.
+///
+/// # Type Parameters
+///
+/// - `Primary`: Function returning primary save result
+/// - `Fallback`: Function returning fallback save result (only called if primary fails)
+///
+/// # Examples
+///
+/// ```ignore
+/// let result = save_with_lazy_fallback(
+///     || Some(SaveResult { task, used_fallback: false }),  // Primary succeeds
+///     || Some(SaveResult { task, used_fallback: true }),   // NOT called
+/// );
+/// assert!(!result.unwrap().used_fallback);
+/// ```
+///
+/// # Note
+///
+/// This function is used in tests to verify short-circuit behavior.
+/// The async counterpart `save_with_alternative_fallback` uses the same logic
+/// but with async/await syntax for actual save operations.
+#[cfg(test)]
+fn save_with_lazy_fallback<Primary, Fallback>(
+    primary: Primary,
+    fallback: Fallback,
+) -> Option<SaveResult>
+where
+    Primary: FnOnce() -> Option<SaveResult>,
+    Fallback: FnOnce() -> Option<SaveResult>,
+{
+    // Short-circuit: if primary succeeds, don't call fallback
+    primary().map_or_else(fallback, Some)
+}
+
+/// Attempts primary save strategy (I/O boundary).
+///
+/// Returns `Some(SaveResult)` if successful, `None` if failed.
+async fn try_primary_save(
+    repository: &Arc<dyn TaskRepository + Send + Sync>,
+    task: &Task,
+) -> Option<SaveResult> {
+    match repository.save(task).run_async().await {
+        Ok(()) => Some(SaveResult {
+            task: task.clone(),
+            used_fallback: false,
+        }),
+        Err(e) => {
+            tracing::warn!(error = %e, "Primary save failed, attempting fallback");
+            None
+        }
+    }
+}
+
+/// Attempts fallback save strategy (I/O boundary).
+///
+/// This demonstrates an alternative save path that could:
+/// - Use a different repository
+/// - Apply data transformation before save
+/// - Use a queue for deferred processing
+///
+/// For this demo, it retries the same repository (simulating a retry strategy).
+async fn try_fallback_save(
+    repository: &Arc<dyn TaskRepository + Send + Sync>,
+    task: &Task,
+) -> Option<SaveResult> {
+    // Simulate a retry or alternative strategy
+    // In production, this could be a different repository, cache, or queue
+    match repository.save(task).run_async().await {
+        Ok(()) => {
+            tracing::info!("Fallback save succeeded");
+            Some(SaveResult {
+                task: task.clone(),
+                used_fallback: true,
+            })
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Fallback save also failed");
+            None
+        }
+    }
+}
+
+/// Combines multiple save strategies using `Alternative::choice` (pure helper).
+///
+/// This demonstrates selecting the first successful result from multiple strategies.
+#[allow(dead_code)]
+fn combine_save_strategies(strategies: Vec<Option<SaveResult>>) -> Option<SaveResult> {
+    Option::choice(strategies)
 }
 
 /// Processes unique updates (I/O boundary).
@@ -917,13 +1146,23 @@ mod tests {
         let task1 = Task::new(TaskId::generate(), "Task 1", Timestamp::now());
         let task2 = Task::new(TaskId::generate(), "Task 2", Timestamp::now());
 
-        let results = vec![Either::Right(task1), Either::Right(task2)];
+        let results = vec![
+            Either::Right(SaveResult {
+                task: task1,
+                used_fallback: false,
+            }),
+            Either::Right(SaveResult {
+                task: task2,
+                used_fallback: false,
+            }),
+        ];
 
         let response = aggregate_create_results(results);
 
         assert_eq!(response.summary.total, 2);
         assert_eq!(response.summary.succeeded, 2);
         assert_eq!(response.summary.failed, 0);
+        assert!(response.summary.fallback_used.is_none());
     }
 
     #[rstest]
@@ -937,7 +1176,7 @@ mod tests {
             message: "too long".to_string(),
         };
 
-        let results: Vec<Either<ItemError, Task>> =
+        let results: Vec<Either<ItemError, SaveResult>> =
             vec![Either::Left(error1), Either::Left(error2)];
 
         let response = aggregate_create_results(results);
@@ -945,6 +1184,7 @@ mod tests {
         assert_eq!(response.summary.total, 2);
         assert_eq!(response.summary.succeeded, 0);
         assert_eq!(response.summary.failed, 2);
+        assert!(response.summary.fallback_used.is_none());
     }
 
     #[rstest]
@@ -955,13 +1195,44 @@ mod tests {
             message: "empty".to_string(),
         };
 
-        let results: Vec<Either<ItemError, Task>> = vec![Either::Right(task), Either::Left(error)];
+        let results: Vec<Either<ItemError, SaveResult>> = vec![
+            Either::Right(SaveResult {
+                task,
+                used_fallback: false,
+            }),
+            Either::Left(error),
+        ];
 
         let response = aggregate_create_results(results);
 
         assert_eq!(response.summary.total, 2);
         assert_eq!(response.summary.succeeded, 1);
         assert_eq!(response.summary.failed, 1);
+        assert!(response.summary.fallback_used.is_none());
+    }
+
+    #[rstest]
+    fn test_aggregate_create_results_with_fallback() {
+        let task1 = Task::new(TaskId::generate(), "Task 1", Timestamp::now());
+        let task2 = Task::new(TaskId::generate(), "Task 2", Timestamp::now());
+
+        let results = vec![
+            Either::Right(SaveResult {
+                task: task1,
+                used_fallback: false,
+            }),
+            Either::Right(SaveResult {
+                task: task2,
+                used_fallback: true,
+            }),
+        ];
+
+        let response = aggregate_create_results(results);
+
+        assert_eq!(response.summary.total, 2);
+        assert_eq!(response.summary.succeeded, 2);
+        assert_eq!(response.summary.failed, 0);
+        assert_eq!(response.summary.fallback_used, Some(1));
     }
 
     #[rstest]
@@ -1066,5 +1337,442 @@ mod tests {
         assert!(merged[0].is_right()); // First id1 - success
         assert!(merged[1].is_left()); // Second id1 - duplicate error
         assert!(merged[2].is_right()); // id2 - success
+    }
+
+    // -------------------------------------------------------------------------
+    // Alternative Pattern Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_validate_title_with_alternative_valid() {
+        let result = validate_title_with_alternative("Valid Title");
+        assert!(result.is_right());
+        assert_eq!(result.unwrap_right(), "Valid Title");
+    }
+
+    #[rstest]
+    fn test_validate_title_with_alternative_empty() {
+        let result = validate_title_with_alternative("");
+        assert!(result.is_left());
+        match result.unwrap_left() {
+            ItemError::Validation { field, message } => {
+                assert_eq!(field, "title");
+                assert!(message.contains("empty"));
+            }
+            _ => panic!("Expected Validation error"),
+        }
+    }
+
+    #[rstest]
+    fn test_validate_title_with_alternative_whitespace_only() {
+        let result = validate_title_with_alternative("   ");
+        assert!(result.is_left());
+    }
+
+    #[rstest]
+    fn test_validate_tags_with_alternative_valid() {
+        let tags = vec!["backend".to_string(), "api".to_string()];
+        let result = validate_tags_with_alternative(&tags);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[rstest]
+    fn test_validate_tags_with_alternative_fallback_to_empty() {
+        // Invalid tags (too long) should fallback to empty
+        let tags = vec!["a".repeat(101)]; // Assuming tag length limit is 100
+        let result = validate_tags_with_alternative(&tags);
+        // Fallback to empty tags if validation fails
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_validate_tags_with_alternative_empty_input() {
+        let tags: Vec<String> = vec![];
+        let result = validate_tags_with_alternative(&tags);
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_validate_with_choice_first_succeeds() {
+        let validators: Vec<Box<dyn Fn() -> Option<i32>>> = vec![
+            Box::new(|| Some(1)),
+            Box::new(|| Some(2)),
+            Box::new(|| None),
+        ];
+        let result = validate_with_choice(validators.into_iter().map(|v| move || v()).collect());
+        assert_eq!(result, Some(1));
+    }
+
+    #[rstest]
+    fn test_validate_with_choice_all_fail() {
+        let validators: Vec<Box<dyn Fn() -> Option<i32>>> =
+            vec![Box::new(|| None), Box::new(|| None)];
+        let result = validate_with_choice(validators.into_iter().map(|v| move || v()).collect());
+        assert_eq!(result, None);
+    }
+
+    #[rstest]
+    fn test_validate_with_choice_later_succeeds() {
+        let validators: Vec<Box<dyn Fn() -> Option<i32>>> =
+            vec![Box::new(|| None), Box::new(|| None), Box::new(|| Some(42))];
+        let result = validate_with_choice(validators.into_iter().map(|v| move || v()).collect());
+        assert_eq!(result, Some(42));
+    }
+
+    // -------------------------------------------------------------------------
+    // SaveResult and Fallback Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_save_result_no_fallback() {
+        let task = Task::new(TaskId::generate(), "Task", Timestamp::now());
+        let result = SaveResult {
+            task: task.clone(),
+            used_fallback: false,
+        };
+
+        assert_eq!(result.task.task_id, task.task_id);
+        assert!(!result.used_fallback);
+    }
+
+    #[rstest]
+    fn test_save_result_with_fallback() {
+        let task = Task::new(TaskId::generate(), "Task", Timestamp::now());
+        let result = SaveResult {
+            task: task.clone(),
+            used_fallback: true,
+        };
+
+        assert_eq!(result.task.task_id, task.task_id);
+        assert!(result.used_fallback);
+    }
+
+    #[rstest]
+    fn test_combine_save_strategies_first_succeeds() {
+        let task1 = Task::new(TaskId::generate(), "Task", Timestamp::now());
+        let task2 = Task::new(TaskId::generate(), "Task", Timestamp::now());
+        let strategies = vec![
+            Some(SaveResult {
+                task: task1,
+                used_fallback: false,
+            }),
+            Some(SaveResult {
+                task: task2,
+                used_fallback: true,
+            }),
+        ];
+
+        let result = combine_save_strategies(strategies);
+        assert!(result.is_some());
+        assert!(!result.unwrap().used_fallback);
+    }
+
+    #[rstest]
+    fn test_combine_save_strategies_fallback_used() {
+        let task = Task::new(TaskId::generate(), "Task", Timestamp::now());
+        let strategies = vec![
+            None,
+            Some(SaveResult {
+                task,
+                used_fallback: true,
+            }),
+        ];
+
+        let result = combine_save_strategies(strategies);
+        assert!(result.is_some());
+        assert!(result.unwrap().used_fallback);
+    }
+
+    #[rstest]
+    fn test_combine_save_strategies_all_fail() {
+        let strategies: Vec<Option<SaveResult>> = vec![None, None, None];
+
+        let result = combine_save_strategies(strategies);
+        assert!(result.is_none());
+    }
+
+    #[rstest]
+    fn test_item_error_all_strategies_failed() {
+        let error = ItemError::AllStrategiesFailed;
+        let bulk_error: BulkItemError = error.into();
+
+        assert_eq!(bulk_error.code, "ALL_STRATEGIES_FAILED");
+        assert!(bulk_error.message.contains("All save strategies failed"));
+    }
+
+    // -------------------------------------------------------------------------
+    // Alternative::guard Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_alternative_guard_true() {
+        let result: Option<()> = <Option<()>>::guard(true);
+        assert_eq!(result, Some(()));
+    }
+
+    #[rstest]
+    fn test_alternative_guard_false() {
+        let result: Option<()> = <Option<()>>::guard(false);
+        assert_eq!(result, None);
+    }
+
+    #[rstest]
+    fn test_alternative_guard_with_validation() {
+        fn validate_non_empty(s: &str) -> Option<&str> {
+            <Option<()>>::guard(!s.is_empty()).map(|()| s)
+        }
+
+        assert_eq!(validate_non_empty("hello"), Some("hello"));
+        assert_eq!(validate_non_empty(""), None);
+    }
+
+    // -------------------------------------------------------------------------
+    // Alternative::alt Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_alternative_alt_first_some() {
+        let first: Option<i32> = Some(1);
+        let second: Option<i32> = Some(2);
+        assert_eq!(first.alt(second), Some(1));
+    }
+
+    #[rstest]
+    fn test_alternative_alt_first_none() {
+        let first: Option<i32> = None;
+        let second: Option<i32> = Some(2);
+        assert_eq!(first.alt(second), Some(2));
+    }
+
+    #[rstest]
+    fn test_alternative_alt_both_none() {
+        let first: Option<i32> = None;
+        let second: Option<i32> = None;
+        assert_eq!(first.alt(second), None);
+    }
+
+    // -------------------------------------------------------------------------
+    // Alternative::choice Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_alternative_choice_finds_first_some() {
+        let alternatives = vec![None, Some(1), Some(2)];
+        let result: Option<i32> = Option::choice(alternatives);
+        assert_eq!(result, Some(1));
+    }
+
+    #[rstest]
+    fn test_alternative_choice_all_none() {
+        let alternatives: Vec<Option<i32>> = vec![None, None, None];
+        let result: Option<i32> = Option::choice(alternatives);
+        assert_eq!(result, None);
+    }
+
+    #[rstest]
+    fn test_alternative_choice_empty() {
+        let alternatives: Vec<Option<i32>> = vec![];
+        let result: Option<i32> = Option::choice(alternatives);
+        assert_eq!(result, None);
+    }
+
+    // -------------------------------------------------------------------------
+    // Bulk Summary Fallback Tracking Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_bulk_summary_no_fallback() {
+        let summary = BulkSummary {
+            total: 10,
+            succeeded: 8,
+            failed: 2,
+            fallback_used: None,
+        };
+
+        assert_eq!(summary.total, 10);
+        assert_eq!(summary.succeeded, 8);
+        assert_eq!(summary.failed, 2);
+        assert!(summary.fallback_used.is_none());
+    }
+
+    #[rstest]
+    fn test_bulk_summary_with_fallback() {
+        let summary = BulkSummary {
+            total: 10,
+            succeeded: 8,
+            failed: 2,
+            fallback_used: Some(3),
+        };
+
+        assert_eq!(summary.total, 10);
+        assert_eq!(summary.succeeded, 8);
+        assert_eq!(summary.failed, 2);
+        assert_eq!(summary.fallback_used, Some(3));
+    }
+
+    // -------------------------------------------------------------------------
+    // Lazy Fallback Tests (Short-circuit evaluation)
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_save_with_lazy_fallback_primary_success_no_fallback_call() {
+        // Test: when primary succeeds, fallback should NOT be called
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let fallback_call_count = AtomicUsize::new(0);
+
+        let primary = || {
+            Some(SaveResult {
+                task: Task::new(TaskId::generate(), "Task", Timestamp::now()),
+                used_fallback: false,
+            })
+        };
+
+        let fallback = || {
+            fallback_call_count.fetch_add(1, Ordering::SeqCst);
+            Some(SaveResult {
+                task: Task::new(TaskId::generate(), "Task", Timestamp::now()),
+                used_fallback: true,
+            })
+        };
+
+        let result = save_with_lazy_fallback(primary, fallback);
+
+        assert!(result.is_some());
+        assert!(!result.as_ref().unwrap().used_fallback);
+        // Fallback should NOT have been called
+        assert_eq!(fallback_call_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[rstest]
+    fn test_save_with_lazy_fallback_primary_fails_fallback_called() {
+        // Test: when primary fails, fallback should be called
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let fallback_call_count = AtomicUsize::new(0);
+
+        let primary = || None;
+
+        let fallback = || {
+            fallback_call_count.fetch_add(1, Ordering::SeqCst);
+            Some(SaveResult {
+                task: Task::new(TaskId::generate(), "Task", Timestamp::now()),
+                used_fallback: true,
+            })
+        };
+
+        let result = save_with_lazy_fallback(primary, fallback);
+
+        assert!(result.is_some());
+        assert!(result.as_ref().unwrap().used_fallback);
+        // Fallback should have been called exactly once
+        assert_eq!(fallback_call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[rstest]
+    fn test_save_with_lazy_fallback_both_fail() {
+        // Test: when both primary and fallback fail, returns None
+        let primary = || None::<SaveResult>;
+        let fallback = || None::<SaveResult>;
+
+        let result = save_with_lazy_fallback(primary, fallback);
+
+        assert!(result.is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // Short-circuit Choice Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_validate_with_choice_lazy_short_circuits() {
+        // Test: choice should stop evaluating after first success
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+
+        let count1 = Arc::clone(&call_count);
+        let count2 = Arc::clone(&call_count);
+        let count3 = Arc::clone(&call_count);
+
+        let result = validate_with_choice_lazy(vec![
+            Box::new(move || {
+                count1.fetch_add(1, Ordering::SeqCst);
+                None
+            }) as Box<dyn Fn() -> Option<i32>>,
+            Box::new(move || {
+                count2.fetch_add(1, Ordering::SeqCst);
+                Some(42) // First success
+            }),
+            Box::new(move || {
+                count3.fetch_add(1, Ordering::SeqCst);
+                Some(100) // Should NOT be called
+            }),
+        ]);
+
+        assert_eq!(result, Some(42));
+        // Only first two validators should be called (first fails, second succeeds)
+        assert_eq!(call_count.load(Ordering::SeqCst), 2);
+    }
+
+    #[rstest]
+    fn test_validate_with_choice_lazy_all_fail() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+
+        let count1 = Arc::clone(&call_count);
+        let count2 = Arc::clone(&call_count);
+        let count3 = Arc::clone(&call_count);
+
+        let result = validate_with_choice_lazy(vec![
+            Box::new(move || {
+                count1.fetch_add(1, Ordering::SeqCst);
+                None
+            }) as Box<dyn Fn() -> Option<i32>>,
+            Box::new(move || {
+                count2.fetch_add(1, Ordering::SeqCst);
+                None
+            }),
+            Box::new(move || {
+                count3.fetch_add(1, Ordering::SeqCst);
+                None
+            }),
+        ]);
+
+        assert_eq!(result, None);
+        // All validators should be called since all fail
+        assert_eq!(call_count.load(Ordering::SeqCst), 3);
+    }
+
+    #[rstest]
+    fn test_validate_with_choice_lazy_first_succeeds() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+
+        let count1 = Arc::clone(&call_count);
+        let count2 = Arc::clone(&call_count);
+
+        let result = validate_with_choice_lazy(vec![
+            Box::new(move || {
+                count1.fetch_add(1, Ordering::SeqCst);
+                Some(1) // First succeeds immediately
+            }) as Box<dyn Fn() -> Option<i32>>,
+            Box::new(move || {
+                count2.fetch_add(1, Ordering::SeqCst);
+                Some(2)
+            }),
+        ]);
+
+        assert_eq!(result, Some(1));
+        // Only first validator should be called
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[rstest]
+    fn test_validate_with_choice_lazy_empty() {
+        let result = validate_with_choice_lazy::<i32>(vec![]);
+        assert_eq!(result, None);
     }
 }

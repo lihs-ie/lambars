@@ -55,13 +55,5 @@ function request()
     end
 end
 
-function response(status, headers, body)
-    common.track_response(status)
-    if status >= 400 and status ~= 404 then
-        io.stderr:write(string.format("[ordered] Error %d\n", status))
-    end
-end
-
-function done(summary, latency, requests)
-    common.print_summary("ordered", summary)
-end
+response = common.create_response_handler("ordered")
+done = common.create_done_handler("ordered")

@@ -1,0 +1,75 @@
+# Mixed Contention Scenario
+#
+# Tests mixed read/write workload with varying contention levels.
+# Simulates realistic production traffic patterns.
+
+name: "mixed_contention"
+description: "Mixed read/write contention test - realistic production pattern"
+
+# Backend configuration
+storage_mode: postgres
+cache_mode: redis
+
+# Workload configuration
+load_pattern: mixed
+cache_state: warm
+data_scale: medium
+payload_variant: standard
+rps_profile: burst
+
+# Load generation - moderate concurrency with burst pattern
+duration_seconds: 120
+connections: 75
+threads: 4
+warmup_seconds: 10
+target_rps: 500
+
+# Target endpoints - mix of read and write
+endpoints:
+  - "/tasks"
+  - "/tasks/{id}"
+  - "/tasks/{id}/status"
+  - "/projects"
+  - "/projects/{id}"
+  - "/tasks/bulk"
+
+http_methods:
+  - GET
+  - POST
+  - PUT
+  - PATCH
+  - DELETE
+
+# Concurrency configuration - balanced
+concurrency:
+  worker_threads: 4
+  database_pool_size: 16
+  redis_pool_size: 16
+  max_connections: 150
+
+# Medium contention level
+contention_level: medium
+
+# Pool configuration
+pool_sizes:
+  database_pool_size: 16
+  redis_pool_size: 16
+
+# Worker configuration
+worker_config:
+  worker_threads: 4
+
+# Thresholds
+thresholds:
+  max_error_rate: 0.02
+  p99_latency_ms: 200
+  min_rps_achieved: 300
+
+# Metadata
+metadata:
+  test_type: "mixed_contention"
+  purpose: "Test mixed workload with burst traffic pattern"
+  tags:
+    - mixed_contention
+    - burst_traffic
+    - production_simulation

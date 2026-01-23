@@ -1,0 +1,71 @@
+# High Write Contention Scenario
+#
+# Tests high-frequency write operations targeting a small set of resources.
+# Designed to stress Persistent* internal locking and allocation.
+
+name: "write_contention_high"
+description: "High write contention test - multiple threads targeting same resources"
+
+# Backend configuration
+storage_mode: postgres
+cache_mode: redis
+
+# Workload configuration
+load_pattern: write_heavy
+cache_state: warm
+data_scale: small
+payload_variant: complex
+rps_profile: constant
+
+# Load generation - high concurrency with many writers
+duration_seconds: 60
+connections: 100
+threads: 8
+warmup_seconds: 5
+
+# Target endpoints - write operations only
+endpoints:
+  - "/tasks"
+  - "/tasks/{id}"
+  - "/tasks/{id}/status"
+  - "/tasks/bulk"
+
+http_methods:
+  - POST
+  - PUT
+  - PATCH
+
+# Concurrency configuration
+concurrency:
+  worker_threads: 4
+  database_pool_size: 8
+  redis_pool_size: 8
+  max_connections: 100
+
+# High contention - concentrate writes on few resources
+contention_level: high
+
+# Pool configuration
+pool_sizes:
+  database_pool_size: 8
+  redis_pool_size: 8
+
+# Worker configuration
+worker_config:
+  worker_threads: 4
+
+# Thresholds - relaxed due to write contention
+thresholds:
+  max_error_rate: 0.05
+  p99_latency_ms: 300
+  min_rps_achieved: 100
+
+# Metadata
+metadata:
+  test_type: "write_contention"
+  purpose: "Test write contention and locking behavior"
+  tags:
+    - write_contention
+    - high_contention
+    - persistent_structures
+    - locking
