@@ -294,17 +294,22 @@ jobs:
           API_URL=http://localhost:3000 ./setup_test_data.sh || true
 
           # Run perf record during benchmark
+          # Use cpu-clock software event for VM compatibility and higher sampling rate
           echo "=== Starting perf profiling ==="
-          sudo perf record -F 99 -p $SERVER_PID -g -o ../../../profiling-results/api/perf.data &
+          sudo perf record -e cpu-clock -F 997 -p $SERVER_PID -g -o ../../../profiling-results/api/perf.data &
           PERF_PID=$!
 
-          # Run quick benchmark
+          # Run benchmark with higher load to generate more CPU activity
           chmod +x run_benchmark.sh
-          API_URL=http://localhost:3000 DURATION=30s THREADS=2 CONNECTIONS=10 ./run_benchmark.sh recursive || true
+          API_URL=http://localhost:3000 DURATION=60s THREADS=4 CONNECTIONS=50 ./run_benchmark.sh recursive || true
 
-          # Stop perf
+          # Stop perf and show statistics
           sudo kill -INT $PERF_PID 2>/dev/null || true
           sleep 2
+
+          # Show perf record stats
+          echo "=== perf record statistics ==="
+          ls -la ../../../profiling-results/api/perf.data 2>/dev/null || echo "perf.data not found"
 
           # Stop server
           kill $SERVER_PID 2>/dev/null || true
