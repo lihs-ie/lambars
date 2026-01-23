@@ -240,19 +240,35 @@ create_tasks_bulk() {
         done
         tasks_json+="]"
 
-        # Send bulk request
+        # Send bulk request with HTTP status code capture
         local response
-        response=$(curl -sf --connect-timeout 5 --max-time 30 -X POST "${API_URL}/tasks/bulk" \
+        local http_code
+        response=$(curl -s --connect-timeout 5 --max-time 10 -w "\n%{http_code}" \
+            -X POST "${API_URL}/tasks/bulk" \
             -H "Content-Type: application/json" \
-            -d "{\"tasks\":${tasks_json}}" 2>/dev/null || echo "")
+            -d "{\"tasks\":${tasks_json}}" 2>/dev/null || echo -e "\n000")
 
-        if [[ -z "${response}" ]]; then
-            echo " timeout/failed"
+        # Extract HTTP status code (last line) and response body
+        http_code=$(echo "$response" | tail -n1)
+        response=$(echo "$response" | sed '$d')
+
+        if [[ -z "${response}" ]] || [[ "${http_code}" == "000" ]]; then
+            echo " timeout (no response within 10s)"
             # Fall back to individual creation if bulk not available
             # Pass remaining count and starting index
             local remaining=$((total - created))
             local start_index=$((created + 1))
-            echo -e "${YELLOW}  Bulk API not available, falling back to individual creation (remaining: ${remaining})${NC}"
+            echo -e "${YELLOW}  Bulk API timeout, falling back to individual creation (remaining: ${remaining})${NC}"
+            create_tasks_individual "${remaining}" "${start_index}"
+            return
+        fi
+
+        if [[ "${http_code}" != "207" ]] && [[ "${http_code}" != "200" ]] && [[ "${http_code}" != "201" ]]; then
+            echo " failed (HTTP ${http_code})"
+            # Fall back to individual creation on HTTP error
+            local remaining=$((total - created))
+            local start_index=$((created + 1))
+            echo -e "${YELLOW}  Bulk API returned HTTP ${http_code}, falling back to individual creation (remaining: ${remaining})${NC}"
             create_tasks_individual "${remaining}" "${start_index}"
             return
         fi
@@ -303,7 +319,7 @@ create_tasks_individual() {
         payload=$(generate_task_payload "${task_index}")
 
         local response
-        response=$(curl -sf --connect-timeout 5 --max-time 30 -X POST "${API_URL}/tasks" \
+        response=$(curl -sf --connect-timeout 5 --max-time 10 -X POST "${API_URL}/tasks" \
             -H "Content-Type: application/json" \
             -d "${payload}" 2>/dev/null || echo "")
 
@@ -332,7 +348,7 @@ create_projects() {
         payload=$(generate_project_payload "$i")
 
         local response
-        response=$(curl -sf --connect-timeout 5 --max-time 30 -X POST "${API_URL}/projects" \
+        response=$(curl -sf --connect-timeout 5 --max-time 10 -X POST "${API_URL}/projects" \
             -H "Content-Type: application/json" \
             -d "${payload}" 2>/dev/null || echo "")
 
@@ -359,7 +375,7 @@ create_search_tasks() {
         local payload="{\"title\":\"Implement ${keyword} system\",\"description\":\"Task for ${keyword} functionality\",\"priority\":\"medium\",\"tags\":[\"${keyword}\",\"benchmark\"]}"
 
         local response
-        response=$(curl -sf --connect-timeout 5 --max-time 30 -X POST "${API_URL}/tasks" \
+        response=$(curl -sf --connect-timeout 5 --max-time 10 -X POST "${API_URL}/tasks" \
             -H "Content-Type: application/json" \
             -d "${payload}" 2>/dev/null || echo "")
 
@@ -391,7 +407,7 @@ echo ""
 
 # Check API health
 echo "Checking API health..."
-if ! curl -sf --connect-timeout 5 --max-time 30 "${API_URL}/health" > /dev/null 2>&1; then
+if ! curl -sf --connect-timeout 5 --max-time 10 "${API_URL}/health" > /dev/null 2>&1; then
     echo -e "${RED}ERROR: API is not responding at ${API_URL}/health${NC}"
     exit 1
 fi
