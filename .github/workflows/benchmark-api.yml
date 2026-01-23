@@ -135,10 +135,17 @@ jobs:
         run: |
           chmod +x compare_results.sh
           if [ -d "/tmp/baseline_results" ] && [ -n "${{ steps.pr_benchmark.outputs.results_dir }}" ]; then
-            # Run comparison with threshold checking
-            # Exit code 3 = regression detected, which should fail the job
-            ./compare_results.sh /tmp/baseline_results "${{ steps.pr_benchmark.outputs.results_dir }}" --threshold thresholds.yaml --json > compare_output.json
-            cat compare_output.json
+            # Check if baseline has new format (meta.json in subdirectories)
+            # Old format (main branch without --scenario) has .txt files directly in the directory
+            if find /tmp/baseline_results -name "meta.json" -type f | head -1 | grep -q .; then
+              # Run comparison with threshold checking
+              # Exit code 3 = regression detected, which should fail the job
+              ./compare_results.sh /tmp/baseline_results "${{ steps.pr_benchmark.outputs.results_dir }}" --threshold thresholds.yaml --json > compare_output.json
+              cat compare_output.json
+            else
+              echo "Skipping comparison: baseline uses old format (no meta.json)"
+              echo "This is expected when main branch doesn't have --scenario support yet"
+            fi
           else
             echo "Skipping comparison: baseline or PR results not available"
           fi
