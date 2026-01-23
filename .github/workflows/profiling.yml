@@ -102,10 +102,10 @@ jobs:
                   echo "=== Generating top functions for ${bench} ==="
                   gawk -F';' '{
                     n=split($NF, parts, " ")
-                    func=parts[1]
-                    for(i=2; i<n; i++) func=func" "parts[i]
+                    fname=parts[1]
+                    for(i=2; i<n; i++) fname=fname" "parts[i]
                     samples=parts[n]
-                    sum[func]+=samples
+                    sum[fname]+=samples
                     total+=samples
                   } END {
                     for(f in sum) printf "%d %s\n", sum[f], f
@@ -363,10 +363,10 @@ jobs:
           echo "=== Generating top functions ==="
           gawk -F';' '{
             n=split($NF, parts, " ")
-            func=parts[1]
-            for(i=2; i<n; i++) func=func" "parts[i]
+            fname=parts[1]
+            for(i=2; i<n; i++) fname=fname" "parts[i]
             samples=parts[n]
-            sum[func]+=samples
+            sum[fname]+=samples
             total+=samples
           } END {
             for(f in sum) printf "%d %s\n", sum[f], f
