@@ -1,5 +1,6 @@
 [workspace]
 members = [".", "lambars-derive", "xtask"]
+exclude = ["benches/api"]
 resolver = "3"
 
 [package]
