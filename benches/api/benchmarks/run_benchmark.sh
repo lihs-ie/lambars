@@ -560,6 +560,9 @@ load_scenario_env_vars() {
     [[ -n "${POOL_SIZES:-}" ]] && echo "  Pool sizes: ${POOL_SIZES}"
     [[ -n "${SEED:-}" ]] && echo "  Seed: ${SEED}"
     [[ "${PROFILE_MODE}" == "true" ]] && echo "  Profiling: enabled"
+
+    # Ensure function returns success (avoid set -e exit on false && conditions)
+    return 0
 }
 
 # =============================================================================
