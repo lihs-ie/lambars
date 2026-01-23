@@ -154,8 +154,9 @@ generate_seeded_string() {
         done
         echo "${result:0:${length}}"
     else
-        # Random string
-        cat /dev/urandom | LC_ALL=C tr -dc 'a-zA-Z0-9' | fold -w "${length}" | head -n 1
+        # Random string (use head -c to avoid fold buffering issues in CI)
+        head -c 256 /dev/urandom | LC_ALL=C tr -dc 'a-zA-Z0-9' | head -c "${length}"
+        echo ""  # Ensure newline
     fi
 }
 
