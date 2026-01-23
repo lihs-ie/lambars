@@ -46,7 +46,7 @@ default = ["typeclass", "compose", "control", "persistent", "optics", "derive", 
 
 full = ["typeclass", "compose", "control", "persistent", "optics", "derive", "effect", "async", "serde"]
 typeclass = []
-compose = ["typeclass", "dep:lambars-derive"]
+compose = ["typeclass", "dep:lambars-derive", "dep:smallvec"]
 control = ["typeclass", "dep:smallvec"]
 persistent = ["typeclass", "control", "dep:smallvec", "dep:arrayvec"]
 optics = ["typeclass", "persistent"]
