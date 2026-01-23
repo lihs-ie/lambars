@@ -243,7 +243,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y wrk linux-tools-common linux-tools-generic linux-tools-$(uname -r) gawk || true
+          sudo apt-get install -y wrk yq linux-tools-common linux-tools-generic linux-tools-$(uname -r) gawk || true
           # Allow perf for non-root users
           echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid
           echo '0' | sudo tee /proc/sys/kernel/kptr_restrict
@@ -262,6 +262,27 @@ jobs:
       - name: Start API server and profile
         working-directory: benches/api
         run: |
+          set -euo pipefail
+
+          PERF_PID=""
+          SERVER_PID=""
+
+          cleanup() {
+            if [[ -n "${PERF_PID}" ]]; then
+              sudo kill -INT "${PERF_PID}" 2>/dev/null || true
+              sleep 2
+            fi
+            if [[ -n "${SERVER_PID}" ]]; then
+              kill "${SERVER_PID}" 2>/dev/null || true
+            fi
+          }
+          trap cleanup EXIT
+
+          echo "=== Tool versions ==="
+          perf --version || true
+          wrk --version || true
+          yq --version || true
+
           mkdir -p ../../profiling-results/api
 
           # Allow perf
@@ -301,10 +322,11 @@ jobs:
 
           # Run benchmark with higher load to generate more CPU activity
           chmod +x run_benchmark.sh
-          API_URL=http://localhost:3000 DURATION=60s THREADS=4 CONNECTIONS=50 ./run_benchmark.sh recursive || true
+          API_URL=http://localhost:3000 ./run_benchmark.sh --scenario scenarios/in_memory_read_heavy_warm.yaml recursive
 
           # Stop perf and show statistics
           sudo kill -INT $PERF_PID 2>/dev/null || true
+          PERF_PID=""
           sleep 2
 
           # Show perf record stats
@@ -313,6 +335,7 @@ jobs:
 
           # Stop server
           kill $SERVER_PID 2>/dev/null || true
+          SERVER_PID=""
 
           cd ..
 
@@ -345,7 +368,6 @@ jobs:
             echo "WARNING: perf.script is empty - perf may not have captured data"
             echo "This can happen in virtualized environments where hardware performance counters are not available"
             generate_readme "perf.script was empty. Hardware performance counters may not be available in this VM environment."
-            rm -f perf.data 2>/dev/null || true
             exit 0
           fi
           echo "perf.script lines: $(wc -l < perf.script)"
@@ -356,7 +378,6 @@ jobs:
           if [ ! -s "stacks.folded" ]; then
             echo "WARNING: stacks.folded is empty"
             generate_readme "stacks.folded was empty. inferno-collapse-perf may have failed to parse perf output."
-            rm -f perf.data perf.script 2>/dev/null || true
             exit 0
           fi
           echo "stacks.folded lines: $(wc -l < stacks.folded)"
@@ -384,15 +405,26 @@ jobs:
 
       - name: Generate API profiling summary
         run: |
-          echo "# API Server Profiling Results" > profiling-results/api/README.md
-          echo "" >> profiling-results/api/README.md
-          echo "## Flamegraphs" >> profiling-results/api/README.md
-          echo "" >> profiling-results/api/README.md
+          if [ -f "profiling-results/api/README.md" ]; then
+            if ! grep -q "^## Flamegraphs" profiling-results/api/README.md; then
+              echo "" >> profiling-results/api/README.md
+              echo "## Flamegraphs" >> profiling-results/api/README.md
+              echo "" >> profiling-results/api/README.md
+            fi
+          else
+            echo "# API Server Profiling Results" > profiling-results/api/README.md
+            echo "" >> profiling-results/api/README.md
+            echo "## Flamegraphs" >> profiling-results/api/README.md
+            echo "" >> profiling-results/api/README.md
+          fi
           if [ -f "profiling-results/api/flamegraph.svg" ]; then
             echo "- [Flamegraph (normal)](./flamegraph.svg) - Shows call stack from bottom up" >> profiling-results/api/README.md
           fi
           if [ -f "profiling-results/api/flamegraph-reverse.svg" ]; then
             echo "- [Flamegraph (reverse/icicle)](./flamegraph-reverse.svg) - Shows call stack from top down" >> profiling-results/api/README.md
+          fi
+          if [ ! -f "profiling-results/api/flamegraph.svg" ] && [ ! -f "profiling-results/api/flamegraph-reverse.svg" ]; then
+            echo "No flamegraphs generated. Check perf.script and workflow logs." >> profiling-results/api/README.md
           fi
 
       - name: Upload API profiling artifacts
