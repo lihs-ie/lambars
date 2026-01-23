@@ -322,7 +322,14 @@ jobs:
 
           # Run benchmark with higher load to generate more CPU activity
           chmod +x run_benchmark.sh
-          API_URL=http://localhost:3000 ./run_benchmark.sh --scenario scenarios/in_memory_read_heavy_warm.yaml recursive
+          for scenario in scenarios/*.yaml; do
+            if [[ "$(basename "$scenario")" == "matrix.yaml" ]]; then
+              echo "Skipping scenario matrix: $scenario"
+              continue
+            fi
+            echo "=== Running scenario: $(basename "$scenario") ==="
+            API_URL=http://localhost:3000 ./run_benchmark.sh --scenario "$scenario"
+          done
 
           # Stop perf and show statistics
           sudo kill -INT $PERF_PID 2>/dev/null || true
