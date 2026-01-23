@@ -1,3 +1,8 @@
+[workspace]
+members = [".", "lambars-derive", "xtask"]
+exclude = ["benches/api"]
+resolver = "3"
+
 [package]
 name = "lambars"
 version = "0.1.0"

@@ -1,0 +1,78 @@
+# Pool Stress Test - Medium Pool Configuration
+#
+# Tests performance with a medium connection pool (8 connections).
+# Balanced configuration for moderate concurrency scenarios.
+
+name: "pool_stress_medium"
+description: "Medium pool stress test (pool=8, workers=4) - balanced concurrency"
+
+# Backend configuration
+storage_mode: postgres
+cache_mode: redis
+
+# Workload configuration
+load_pattern: mixed
+cache_state: warm
+data_scale: medium
+payload_variant: standard
+rps_profile: constant
+
+# Load generation
+duration_seconds: 60
+connections: 100
+threads: 4
+warmup_seconds: 5
+
+# Target endpoints
+endpoints:
+  - "/tasks"
+  - "/tasks/{id}"
+  - "/projects"
+  - "/tasks/bulk"
+
+http_methods:
+  - GET
+  - POST
+  - PUT
+  - DELETE
+
+# Concurrency configuration - medium pool
+concurrency:
+  worker_threads: 4
+  database_pool_size: 8
+  redis_pool_size: 8
+  max_connections: 100
+
+# Contention level
+contention_level: medium
+
+# Pool configuration
+pool_sizes:
+  database_pool_size: 8
+  redis_pool_size: 8
+
+# Worker configuration
+worker_config:
+  worker_threads: 4
+
+# Thresholds
+thresholds:
+  max_error_rate: 0.02
+  p99_latency_ms: 200
+  min_rps_achieved: 200
+
+# Metadata
+metadata:
+  test_type: "pool_stress"
+  endpoint: "mixed"
+  payload: "medium"
+  cache_strategy: "read-through"
+  hit_rate: 50
+  fail_injection: 0
+  retry: false
+  profile: false
+  purpose: "Test performance with medium connection pool"
+  tags:
+    - pool_stress
+    - medium_pool
+    - concurrency

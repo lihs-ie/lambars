@@ -2,13 +2,14 @@
 //!
 //! This module demonstrates lambars' optics and functional patterns:
 //! - **`Lens`**: Focusing on struct fields for immutable updates
+//! - **`Optional`**: Safely handling `Option<T>` fields (Lens + Prism composition)
 //! - **`Either`**: Representing success/failure without exceptions
 //! - **`PersistentList`**: Functional list for subtasks
 //! - **Pattern matching**: Exhaustive case analysis for state transitions
 //!
 //! # Endpoints
 //!
-//! - `PUT /tasks/{id}` - Update task fields using `Lens`
+//! - `PUT /tasks/{id}` - Update task fields using `Lens` and `Optional` optics
 //! - `PATCH /tasks/{id}/status` - Transition status using `Either` + pattern matching
 //! - `POST /tasks/{id}/subtasks` - Add subtask using `PersistentList`
 //! - `POST /tasks/{id}/tags` - Add tag using `PersistentHashSet`
@@ -19,8 +20,8 @@ use axum::{
     http::StatusCode,
 };
 use lambars::control::Either;
-use lambars::lens;
-use lambars::optics::Lens;
+use lambars::optics::{Lens, LensComposeExtension, Optional, Prism};
+use lambars::{lens, prism};
 use uuid::Uuid;
 
 use super::dto::{
@@ -121,6 +122,268 @@ pub enum StatusTransitionResult {
 }
 
 // =============================================================================
+// Status Transition Prism
+// =============================================================================
+
+/// Represents a valid status transition as a tuple of (from, to) statuses.
+///
+/// This type is used as the target of the transition prism. When the prism
+/// successfully previews a transition, it means the transition is valid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ValidTransition {
+    /// The source status.
+    pub from: TaskStatus,
+    /// The target status.
+    pub to: TaskStatus,
+}
+
+impl ValidTransition {
+    /// Creates a new valid transition.
+    #[must_use]
+    pub const fn new(from: TaskStatus, to: TaskStatus) -> Self {
+        Self { from, to }
+    }
+}
+
+/// Represents an attempt to transition between two statuses.
+///
+/// This enum serves as the Source type for the `ValidTransitionPrism`.
+/// It encapsulates all possible outcomes of a status transition attempt:
+/// - `Valid`: A valid transition that can proceed
+/// - `Invalid`: An invalid transition that should be rejected
+/// - `NoChange`: Same status, a no-op
+///
+/// # Prism Law Compliance
+///
+/// By using this enum as the Source type (instead of a raw tuple), the Prism
+/// can satisfy the law `preview(&review(value)) == Some(&value)` because
+/// `review` constructs a `StatusTransitionAttempt::Valid(ValidTransition)`
+/// and `preview` can return a reference to the inner `ValidTransition`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusTransitionAttempt {
+    /// A valid transition that can proceed.
+    Valid(ValidTransition),
+    /// An invalid transition that should be rejected.
+    Invalid {
+        /// The current status.
+        from: TaskStatus,
+        /// The requested target status.
+        to: TaskStatus,
+    },
+    /// Same status, no change needed (no-op).
+    NoChange(TaskStatus),
+}
+
+impl StatusTransitionAttempt {
+    /// Creates a new `StatusTransitionAttempt` from a (from, to) status pair.
+    ///
+    /// This function classifies the transition attempt:
+    /// - Same status -> `NoChange`
+    /// - Valid transition -> `Valid`
+    /// - Invalid transition -> `Invalid`
+    #[must_use]
+    pub const fn from_statuses(from: TaskStatus, to: TaskStatus) -> Self {
+        if from as u8 == to as u8 {
+            Self::NoChange(from)
+        } else if is_valid_transition(from, to) {
+            Self::Valid(ValidTransition::new(from, to))
+        } else {
+            Self::Invalid { from, to }
+        }
+    }
+
+    /// Returns `true` if this is a valid transition.
+    #[must_use]
+    pub const fn is_valid(&self) -> bool {
+        matches!(self, Self::Valid(_))
+    }
+
+    /// Returns `true` if this is an invalid transition.
+    #[must_use]
+    pub const fn is_invalid(&self) -> bool {
+        matches!(self, Self::Invalid { .. })
+    }
+
+    /// Returns `true` if this is a no-change operation.
+    #[must_use]
+    pub const fn is_no_change(&self) -> bool {
+        matches!(self, Self::NoChange(_))
+    }
+}
+
+/// Checks if the given transition is valid.
+///
+/// Valid transitions are:
+/// - `Pending` -> `InProgress`
+/// - `InProgress` -> `Completed`
+/// - `InProgress` -> `Pending` (reopen)
+/// - `Completed` -> `Pending` (reopen)
+/// - `Pending` -> `Cancelled`
+/// - `InProgress` -> `Cancelled`
+///
+/// Same status transitions (no-op) return `false` and should be handled separately.
+#[must_use]
+pub const fn is_valid_transition(from: TaskStatus, to: TaskStatus) -> bool {
+    matches!(
+        (from, to),
+        (
+            TaskStatus::Pending,
+            TaskStatus::InProgress | TaskStatus::Cancelled
+        ) | (
+            TaskStatus::InProgress,
+            TaskStatus::Completed | TaskStatus::Pending | TaskStatus::Cancelled
+        ) | (TaskStatus::Completed, TaskStatus::Pending)
+    )
+}
+
+/// A Prism implementation for valid status transitions.
+///
+/// This prism focuses on the `Valid` variant of `StatusTransitionAttempt`,
+/// extracting the inner `ValidTransition` when the transition is valid.
+///
+/// # Prism Laws
+///
+/// This implementation satisfies both Prism laws:
+///
+/// 1. **`PreviewReview` Law**: `preview(&review(value)) == Some(&value)`
+///    - `review` creates `StatusTransitionAttempt::Valid(value)`
+///    - `preview` extracts a reference to the inner `ValidTransition`
+///
+/// 2. **`ReviewPreview` Law**: If `preview(source).is_some()`, then
+///    `review(preview(source).unwrap().clone()) == source`
+///    - For `Valid(transition)`, preview returns `Some(&transition)`
+///    - Reviewing that transition recreates the same `Valid(transition)`
+///
+/// # Example
+///
+/// ```ignore
+/// let prism = valid_transition_prism();
+/// let attempt = StatusTransitionAttempt::from_statuses(TaskStatus::Pending, TaskStatus::InProgress);
+///
+/// // Valid transition: preview succeeds
+/// assert!(prism.preview(&attempt).is_some());
+///
+/// // Invalid transition: preview fails
+/// let invalid = StatusTransitionAttempt::from_statuses(TaskStatus::Pending, TaskStatus::Completed);
+/// assert!(prism.preview(&invalid).is_none());
+/// ```
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ValidTransitionPrism;
+
+impl ValidTransitionPrism {
+    /// Creates a new `ValidTransitionPrism`.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl Prism<StatusTransitionAttempt, ValidTransition> for ValidTransitionPrism {
+    fn preview<'a>(&self, source: &'a StatusTransitionAttempt) -> Option<&'a ValidTransition> {
+        match source {
+            StatusTransitionAttempt::Valid(transition) => Some(transition),
+            StatusTransitionAttempt::Invalid { .. } | StatusTransitionAttempt::NoChange(_) => None,
+        }
+    }
+
+    fn review(&self, value: ValidTransition) -> StatusTransitionAttempt {
+        StatusTransitionAttempt::Valid(value)
+    }
+
+    fn preview_owned(&self, source: StatusTransitionAttempt) -> Option<ValidTransition> {
+        match source {
+            StatusTransitionAttempt::Valid(transition) => Some(transition),
+            StatusTransitionAttempt::Invalid { .. } | StatusTransitionAttempt::NoChange(_) => None,
+        }
+    }
+}
+
+/// Creates a Prism that focuses on valid status transitions.
+///
+/// This prism succeeds (returns `Some`) only for valid transitions:
+/// - `Pending` -> `InProgress`
+/// - `InProgress` -> `Completed`
+/// - `InProgress` -> `Pending` (reopen)
+/// - `Completed` -> `Pending` (reopen)
+/// - `Pending` -> `Cancelled`
+/// - `InProgress` -> `Cancelled`
+///
+/// Invalid transitions (e.g., `Pending` -> `Completed`, `Cancelled` -> any)
+/// will return `None` from both `preview` and `preview_owned`.
+///
+/// # Prism Laws
+///
+/// This prism fully satisfies both Prism laws because the Source type
+/// (`StatusTransitionAttempt`) contains the Target type (`ValidTransition`)
+/// as an enum variant.
+///
+/// # Example
+///
+/// ```ignore
+/// let prism = valid_transition_prism();
+/// let attempt = StatusTransitionAttempt::from_statuses(TaskStatus::Pending, TaskStatus::InProgress);
+///
+/// // Valid transition: preview succeeds
+/// assert!(prism.preview(&attempt).is_some());
+///
+/// // Prism law: preview(review(value)) == Some(&value)
+/// let value = ValidTransition::new(TaskStatus::Pending, TaskStatus::InProgress);
+/// let reviewed = prism.review(value);
+/// assert_eq!(prism.preview(&reviewed), Some(&value));
+/// ```
+#[must_use]
+pub const fn valid_transition_prism() -> ValidTransitionPrism {
+    ValidTransitionPrism::new()
+}
+
+/// Checks if the given transition is a no-change operation (same status).
+#[must_use]
+pub const fn is_no_change_transition(from: TaskStatus, to: TaskStatus) -> bool {
+    matches!(
+        (from, to),
+        (TaskStatus::Pending, TaskStatus::Pending)
+            | (TaskStatus::InProgress, TaskStatus::InProgress)
+            | (TaskStatus::Completed, TaskStatus::Completed)
+            | (TaskStatus::Cancelled, TaskStatus::Cancelled)
+    )
+}
+
+// =============================================================================
+// Optional Optic for Option<String> fields
+// =============================================================================
+
+/// Creates an Optional optic for safely accessing the description field.
+///
+/// This function creates an Optional that:
+/// - Returns `Some(&String)` when `description` is `Some`
+/// - Returns `None` when `description` is `None`
+/// - Can modify the String inside `Some` without affecting the `None` case
+///
+/// This combines:
+/// - `lens!(Task, description)`: Focuses on the `description: Option<String>` field
+/// - `prism!(Option<String>, Some)`: Focuses on the `Some` variant, extracting `String`
+///
+/// # Example
+///
+/// ```ignore
+/// let optional = description_optional();
+/// let task = Task::new(...).with_description("Hello");
+///
+/// // Get the description if present
+/// assert_eq!(optional.get_option(&task), Some(&"Hello".to_string()));
+///
+/// // Modify the description if present
+/// let updated = optional.modify(task, |d| d.to_uppercase());
+/// assert_eq!(updated.description, Some("HELLO".to_string()));
+/// ```
+#[must_use]
+pub fn description_optional() -> impl Optional<Task, String> + Clone {
+    let description_lens = lens!(Task, description);
+    let some_prism = prism!(Option<String>, Some);
+    description_lens.compose_prism(some_prism)
+}
+
+// =============================================================================
 // PUT /tasks/{id} - Update Task with Lens
 // =============================================================================
 
@@ -206,10 +469,16 @@ pub async fn update_task(
     Ok((StatusCode::OK, Json(response)))
 }
 
-/// Applies updates to a task using Lens optics.
+/// Applies updates to a task using Lens and Optional optics.
 ///
 /// Uses `Bifunctor::map_left` to transform `Either<ValidationError, T>` into
 /// `Either<ApiErrorResponse, T>` for consistent error handling.
+///
+/// # Optics Used
+///
+/// - **`Lens`**: For required fields (title, priority, `updated_at`, version)
+/// - **`Optional`**: For `Option<String>` fields (description) to safely handle
+///   the case where the field may or may not exist
 ///
 /// # Arguments
 ///
@@ -228,8 +497,11 @@ fn apply_updates_with_lens(
 ) -> Result<Task, ApiErrorResponse> {
     // Define lenses for Task fields
     let title_lens = lens!(Task, title);
-    let description_lens = lens!(Task, description);
     let priority_lens = lens!(Task, priority);
+
+    // Create Optional optic for description field (Option<String>)
+    // This safely handles the case where description may or may not exist
+    let description_optional = description_optional();
 
     // Start with the current task
     let mut updated = task;
@@ -247,13 +519,20 @@ fn apply_updates_with_lens(
         updated = title_lens.set(updated, title);
     }
 
-    // Apply description update if present
-    if let Some(ref desc) = request.description {
-        let validation_result = validate_description(Some(desc));
+    // Apply description update if present using Optional optic and Lens
+    // - When validated_description is Some: Use Optional::set to update the value
+    // - When validated_description is None: Use Lens::set to clear the field explicitly
+    if let Some(ref new_description) = request.description {
+        let validation_result = validate_description(Some(new_description));
         let mapped: Either<ApiErrorResponse, Option<String>> =
             validation_result.map_left(ApiErrorResponse::from);
-        let description: Option<String> = Result::from(mapped)?;
-        updated = description_lens.set(updated, description);
+        let validated_description: Option<String> = Result::from(mapped)?;
+
+        // Use pattern matching to handle both update and clear cases
+        updated = match validated_description {
+            Some(description) => description_optional.set(updated, description),
+            None => lens!(Task, description).set(updated, None),
+        };
     }
 
     // Apply priority update if present
@@ -370,43 +649,54 @@ pub async fn update_status(
     }
 }
 
-/// Validates a status transition using `Either` for functional error handling.
+/// Validates a status transition using `Prism` and `Either` for functional error handling.
 ///
-/// Returns:
+/// This function uses `valid_transition_prism()` to check if a transition is valid:
+/// - First checks if it's a no-change operation (same status)
+/// - Then uses `Prism::preview_owned` to verify the transition is allowed
+/// - Returns `Either::Left` with error for invalid transitions
+///
+/// # Returns
+///
 /// - `Either::Right(StatusTransitionResult::NoChange)` if same status (no-op)
 /// - `Either::Right(StatusTransitionResult::Transition(status))` if valid transition
 /// - `Either::Left(StatusTransitionError)` if invalid transition
+///
+/// # Example
+///
+/// ```ignore
+/// // Valid transition
+/// let result = validate_status_transition(TaskStatus::Pending, TaskStatus::InProgress);
+/// assert!(result.is_right());
+///
+/// // Invalid transition
+/// let result = validate_status_transition(TaskStatus::Pending, TaskStatus::Completed);
+/// assert!(result.is_left());
+/// ```
 fn validate_status_transition(
     current: TaskStatus,
     new_status: TaskStatus,
 ) -> Either<StatusTransitionError, StatusTransitionResult> {
-    // Define valid transitions using pattern matching
-    match (current, new_status) {
-        // Same status is a no-op (no update needed)
-        (current, new) if current == new => Either::Right(StatusTransitionResult::NoChange),
+    // Create a StatusTransitionAttempt from the status pair
+    let attempt = StatusTransitionAttempt::from_statuses(current, new_status);
 
-        // Transition to InProgress (only from Pending)
-        (TaskStatus::Pending, TaskStatus::InProgress) => {
-            Either::Right(StatusTransitionResult::Transition(TaskStatus::InProgress))
+    // Use Prism to validate the transition
+    let prism = valid_transition_prism();
+
+    // Handle based on the attempt classification
+    match attempt {
+        StatusTransitionAttempt::NoChange(_) => Either::Right(StatusTransitionResult::NoChange),
+        StatusTransitionAttempt::Valid(_) => {
+            // Use preview_owned to extract the valid transition
+            // This is guaranteed to succeed because we already know it's Valid
+            let valid = prism
+                .preview_owned(attempt)
+                .expect("Valid attempt should preview successfully");
+            Either::Right(StatusTransitionResult::Transition(valid.to))
         }
-
-        // Transition to Completed (only from InProgress)
-        (TaskStatus::InProgress, TaskStatus::Completed) => {
-            Either::Right(StatusTransitionResult::Transition(TaskStatus::Completed))
+        StatusTransitionAttempt::Invalid { from, to } => {
+            Either::Left(StatusTransitionError::InvalidTransition { from, to })
         }
-
-        // Transition to Pending (from InProgress or Completed - reopen)
-        (TaskStatus::InProgress | TaskStatus::Completed, TaskStatus::Pending) => {
-            Either::Right(StatusTransitionResult::Transition(TaskStatus::Pending))
-        }
-
-        // Transition to Cancelled (from Pending or InProgress)
-        (TaskStatus::Pending | TaskStatus::InProgress, TaskStatus::Cancelled) => {
-            Either::Right(StatusTransitionResult::Transition(TaskStatus::Cancelled))
-        }
-
-        // Invalid transitions
-        (from, to) => Either::Left(StatusTransitionError::InvalidTransition { from, to }),
     }
 }
 
@@ -689,29 +979,34 @@ mod tests {
         assert_eq!(result.unwrap_right(), StatusTransitionResult::NoChange);
     }
 
+    /// Tests all invalid transitions using parametrized test.
+    ///
+    /// Invalid transitions include:
+    /// - `Pending` -> `Completed` (must go through `InProgress` first)
+    /// - `Completed` -> `InProgress` (can only reopen to `Pending`)
+    /// - `Completed` -> `Cancelled` (completed tasks cannot be cancelled)
+    /// - `Cancelled` -> any status (cancelled is a terminal state)
     #[rstest]
-    fn test_invalid_transition_pending_to_completed() {
-        let result = validate_status_transition(TaskStatus::Pending, TaskStatus::Completed);
-        assert!(result.is_left());
-        assert_eq!(
-            result.unwrap_left(),
-            StatusTransitionError::InvalidTransition {
-                from: TaskStatus::Pending,
-                to: TaskStatus::Completed,
-            }
-        );
-    }
+    #[case(TaskStatus::Pending, TaskStatus::Completed)]
+    #[case(TaskStatus::Completed, TaskStatus::InProgress)]
+    #[case(TaskStatus::Completed, TaskStatus::Cancelled)]
+    #[case(TaskStatus::Cancelled, TaskStatus::Pending)]
+    #[case(TaskStatus::Cancelled, TaskStatus::InProgress)]
+    #[case(TaskStatus::Cancelled, TaskStatus::Completed)]
+    fn test_validate_status_transition_all_invalid_transitions(
+        #[case] from: TaskStatus,
+        #[case] to: TaskStatus,
+    ) {
+        let result = validate_status_transition(from, to);
 
-    #[rstest]
-    fn test_invalid_transition_cancelled_to_in_progress() {
-        let result = validate_status_transition(TaskStatus::Cancelled, TaskStatus::InProgress);
-        assert!(result.is_left());
+        assert!(
+            result.is_left(),
+            "Expected invalid transition from {from:?} to {to:?}, but got Right"
+        );
         assert_eq!(
             result.unwrap_left(),
-            StatusTransitionError::InvalidTransition {
-                from: TaskStatus::Cancelled,
-                to: TaskStatus::InProgress,
-            }
+            StatusTransitionError::InvalidTransition { from, to },
+            "Error should contain correct from/to statuses"
         );
     }
 
@@ -725,6 +1020,441 @@ mod tests {
             error.to_string(),
             "Cannot transition from Pending to Completed"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // StatusTransitionAttempt Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_status_transition_attempt_from_statuses_valid() {
+        let attempt =
+            StatusTransitionAttempt::from_statuses(TaskStatus::Pending, TaskStatus::InProgress);
+
+        assert!(attempt.is_valid());
+        assert!(!attempt.is_invalid());
+        assert!(!attempt.is_no_change());
+        assert!(matches!(
+            attempt,
+            StatusTransitionAttempt::Valid(ValidTransition {
+                from: TaskStatus::Pending,
+                to: TaskStatus::InProgress
+            })
+        ));
+    }
+
+    #[rstest]
+    fn test_status_transition_attempt_from_statuses_invalid() {
+        let attempt =
+            StatusTransitionAttempt::from_statuses(TaskStatus::Pending, TaskStatus::Completed);
+
+        assert!(!attempt.is_valid());
+        assert!(attempt.is_invalid());
+        assert!(!attempt.is_no_change());
+        assert!(matches!(
+            attempt,
+            StatusTransitionAttempt::Invalid {
+                from: TaskStatus::Pending,
+                to: TaskStatus::Completed
+            }
+        ));
+    }
+
+    #[rstest]
+    fn test_status_transition_attempt_from_statuses_no_change() {
+        let attempt =
+            StatusTransitionAttempt::from_statuses(TaskStatus::Pending, TaskStatus::Pending);
+
+        assert!(!attempt.is_valid());
+        assert!(!attempt.is_invalid());
+        assert!(attempt.is_no_change());
+        assert!(matches!(
+            attempt,
+            StatusTransitionAttempt::NoChange(TaskStatus::Pending)
+        ));
+    }
+
+    #[rstest]
+    #[case(TaskStatus::Pending, TaskStatus::InProgress)]
+    #[case(TaskStatus::InProgress, TaskStatus::Completed)]
+    #[case(TaskStatus::InProgress, TaskStatus::Pending)]
+    #[case(TaskStatus::Completed, TaskStatus::Pending)]
+    #[case(TaskStatus::Pending, TaskStatus::Cancelled)]
+    #[case(TaskStatus::InProgress, TaskStatus::Cancelled)]
+    fn test_status_transition_attempt_all_valid_transitions(
+        #[case] from: TaskStatus,
+        #[case] to: TaskStatus,
+    ) {
+        let attempt = StatusTransitionAttempt::from_statuses(from, to);
+
+        assert!(
+            attempt.is_valid(),
+            "Expected valid transition from {from:?} to {to:?}"
+        );
+    }
+
+    #[rstest]
+    #[case(TaskStatus::Pending, TaskStatus::Completed)]
+    #[case(TaskStatus::Completed, TaskStatus::InProgress)]
+    #[case(TaskStatus::Completed, TaskStatus::Cancelled)]
+    #[case(TaskStatus::Cancelled, TaskStatus::Pending)]
+    #[case(TaskStatus::Cancelled, TaskStatus::InProgress)]
+    #[case(TaskStatus::Cancelled, TaskStatus::Completed)]
+    fn test_status_transition_attempt_all_invalid_transitions(
+        #[case] from: TaskStatus,
+        #[case] to: TaskStatus,
+    ) {
+        let attempt = StatusTransitionAttempt::from_statuses(from, to);
+
+        assert!(
+            attempt.is_invalid(),
+            "Expected invalid transition from {from:?} to {to:?}"
+        );
+    }
+
+    #[rstest]
+    #[case(TaskStatus::Pending)]
+    #[case(TaskStatus::InProgress)]
+    #[case(TaskStatus::Completed)]
+    #[case(TaskStatus::Cancelled)]
+    fn test_status_transition_attempt_all_no_change(#[case] status: TaskStatus) {
+        let attempt = StatusTransitionAttempt::from_statuses(status, status);
+
+        assert!(
+            attempt.is_no_change(),
+            "Expected no-change for same status {status:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Prism-based Status Transition Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_valid_transition_prism_preview_valid() {
+        let prism = valid_transition_prism();
+        let attempt =
+            StatusTransitionAttempt::from_statuses(TaskStatus::Pending, TaskStatus::InProgress);
+
+        let result = prism.preview(&attempt);
+
+        assert!(result.is_some());
+        let valid = result.unwrap();
+        assert_eq!(valid.from, TaskStatus::Pending);
+        assert_eq!(valid.to, TaskStatus::InProgress);
+    }
+
+    #[rstest]
+    fn test_valid_transition_prism_preview_invalid() {
+        let prism = valid_transition_prism();
+        let attempt =
+            StatusTransitionAttempt::from_statuses(TaskStatus::Pending, TaskStatus::Completed);
+
+        let result = prism.preview(&attempt);
+
+        assert!(result.is_none());
+    }
+
+    #[rstest]
+    fn test_valid_transition_prism_preview_no_change() {
+        let prism = valid_transition_prism();
+        let attempt =
+            StatusTransitionAttempt::from_statuses(TaskStatus::Pending, TaskStatus::Pending);
+
+        let result = prism.preview(&attempt);
+
+        // NoChange is not a "valid transition" - it's handled separately
+        assert!(result.is_none());
+    }
+
+    #[rstest]
+    fn test_valid_transition_prism_preview_owned_valid() {
+        let prism = valid_transition_prism();
+        let attempt =
+            StatusTransitionAttempt::from_statuses(TaskStatus::Pending, TaskStatus::InProgress);
+
+        let result = prism.preview_owned(attempt);
+
+        assert!(result.is_some());
+        let valid = result.unwrap();
+        assert_eq!(valid.from, TaskStatus::Pending);
+        assert_eq!(valid.to, TaskStatus::InProgress);
+    }
+
+    #[rstest]
+    fn test_valid_transition_prism_preview_owned_invalid() {
+        let prism = valid_transition_prism();
+        let attempt =
+            StatusTransitionAttempt::from_statuses(TaskStatus::Pending, TaskStatus::Completed);
+
+        let result = prism.preview_owned(attempt);
+
+        assert!(result.is_none());
+    }
+
+    #[rstest]
+    fn test_valid_transition_prism_preview_owned_no_change() {
+        let prism = valid_transition_prism();
+        let attempt =
+            StatusTransitionAttempt::from_statuses(TaskStatus::Pending, TaskStatus::Pending);
+
+        let result = prism.preview_owned(attempt);
+
+        // NoChange is not a "valid transition" - it's handled separately
+        assert!(result.is_none());
+    }
+
+    #[rstest]
+    #[case(TaskStatus::Pending, TaskStatus::InProgress)]
+    #[case(TaskStatus::InProgress, TaskStatus::Completed)]
+    #[case(TaskStatus::InProgress, TaskStatus::Pending)]
+    #[case(TaskStatus::Completed, TaskStatus::Pending)]
+    #[case(TaskStatus::Pending, TaskStatus::Cancelled)]
+    #[case(TaskStatus::InProgress, TaskStatus::Cancelled)]
+    fn test_valid_transition_prism_all_valid_transitions(
+        #[case] from: TaskStatus,
+        #[case] to: TaskStatus,
+    ) {
+        let prism = valid_transition_prism();
+        let attempt = StatusTransitionAttempt::from_statuses(from, to);
+
+        let result = prism.preview(&attempt);
+
+        assert!(
+            result.is_some(),
+            "Expected valid transition from {from:?} to {to:?}"
+        );
+        let valid = result.unwrap();
+        assert_eq!(valid.from, from);
+        assert_eq!(valid.to, to);
+    }
+
+    #[rstest]
+    #[case(TaskStatus::Pending, TaskStatus::Completed)]
+    #[case(TaskStatus::Completed, TaskStatus::InProgress)]
+    #[case(TaskStatus::Completed, TaskStatus::Cancelled)]
+    #[case(TaskStatus::Cancelled, TaskStatus::Pending)]
+    #[case(TaskStatus::Cancelled, TaskStatus::InProgress)]
+    #[case(TaskStatus::Cancelled, TaskStatus::Completed)]
+    fn test_valid_transition_prism_all_invalid_transitions(
+        #[case] from: TaskStatus,
+        #[case] to: TaskStatus,
+    ) {
+        let prism = valid_transition_prism();
+        let attempt = StatusTransitionAttempt::from_statuses(from, to);
+
+        let result = prism.preview(&attempt);
+
+        assert!(
+            result.is_none(),
+            "Expected invalid transition from {from:?} to {to:?}"
+        );
+    }
+
+    #[rstest]
+    fn test_valid_transition_prism_review_creates_valid_attempt() {
+        let prism = valid_transition_prism();
+        let valid = ValidTransition::new(TaskStatus::Pending, TaskStatus::InProgress);
+
+        let reviewed = prism.review(valid);
+
+        assert!(matches!(
+            reviewed,
+            StatusTransitionAttempt::Valid(ValidTransition {
+                from: TaskStatus::Pending,
+                to: TaskStatus::InProgress
+            })
+        ));
+    }
+
+    // -------------------------------------------------------------------------
+    // Prism Law Tests for ValidTransitionPrism (using preview)
+    // -------------------------------------------------------------------------
+
+    /// Tests the `PreviewReview` law for the `ValidTransitionPrism`.
+    ///
+    /// Law: `preview(&review(value)) == Some(&value)`
+    ///
+    /// This verifies that reviewing a value and then previewing it
+    /// yields a reference to the original value.
+    #[rstest]
+    #[case(TaskStatus::Pending, TaskStatus::InProgress)]
+    #[case(TaskStatus::InProgress, TaskStatus::Completed)]
+    #[case(TaskStatus::InProgress, TaskStatus::Pending)]
+    #[case(TaskStatus::Completed, TaskStatus::Pending)]
+    #[case(TaskStatus::Pending, TaskStatus::Cancelled)]
+    #[case(TaskStatus::InProgress, TaskStatus::Cancelled)]
+    fn test_prism_law_preview_review(#[case] from: TaskStatus, #[case] to: TaskStatus) {
+        let prism = valid_transition_prism();
+        let value = ValidTransition::new(from, to);
+
+        // review creates the source (StatusTransitionAttempt::Valid)
+        let reviewed = prism.review(value);
+
+        // preview on the reviewed source should return a reference to the value
+        let previewed = prism.preview(&reviewed);
+        assert!(
+            previewed.is_some(),
+            "PreviewReview law: preview(&review({value:?})) should succeed"
+        );
+        assert_eq!(
+            *previewed.unwrap(),
+            value,
+            "PreviewReview law: preview(&review({value:?})) should equal &{value:?}"
+        );
+    }
+
+    /// Tests the `ReviewPreview` law for the `ValidTransitionPrism`.
+    ///
+    /// Law: If `preview(source).is_some()`, then
+    /// `review(preview(source).unwrap().clone()) == source`
+    ///
+    /// This verifies that for valid transitions, reviewing the previewed value
+    /// reconstructs the original source.
+    #[rstest]
+    #[case(TaskStatus::Pending, TaskStatus::InProgress)]
+    #[case(TaskStatus::InProgress, TaskStatus::Completed)]
+    #[case(TaskStatus::InProgress, TaskStatus::Pending)]
+    #[case(TaskStatus::Completed, TaskStatus::Pending)]
+    #[case(TaskStatus::Pending, TaskStatus::Cancelled)]
+    #[case(TaskStatus::InProgress, TaskStatus::Cancelled)]
+    fn test_prism_law_review_preview(#[case] from: TaskStatus, #[case] to: TaskStatus) {
+        let prism = valid_transition_prism();
+        let source = StatusTransitionAttempt::from_statuses(from, to);
+
+        // preview should succeed for valid transitions
+        let previewed = prism.preview(&source);
+        assert!(
+            previewed.is_some(),
+            "preview should succeed for valid source {source:?}"
+        );
+
+        // review(preview(source).clone()) should equal source
+        let reconstructed = prism.review(*previewed.unwrap());
+        assert_eq!(
+            reconstructed, source,
+            "ReviewPreview law: review(preview({source:?}).clone()) should equal {source:?}"
+        );
+    }
+
+    /// Tests the `PreviewOwnedReview` law for the `ValidTransitionPrism`.
+    ///
+    /// Law: `preview_owned(review(value)).is_some()` and
+    /// the previewed value equals the original value.
+    ///
+    /// This verifies that reviewing then `preview_owned` yields the original value.
+    #[rstest]
+    #[case(TaskStatus::Pending, TaskStatus::InProgress)]
+    #[case(TaskStatus::InProgress, TaskStatus::Completed)]
+    #[case(TaskStatus::InProgress, TaskStatus::Pending)]
+    #[case(TaskStatus::Completed, TaskStatus::Pending)]
+    #[case(TaskStatus::Pending, TaskStatus::Cancelled)]
+    #[case(TaskStatus::InProgress, TaskStatus::Cancelled)]
+    fn test_prism_law_preview_owned_review(#[case] from: TaskStatus, #[case] to: TaskStatus) {
+        let prism = valid_transition_prism();
+        let value = ValidTransition::new(from, to);
+
+        // review creates the source (StatusTransitionAttempt::Valid)
+        let source = prism.review(value);
+
+        // preview_owned on the reviewed source should succeed and return the original value
+        let previewed = prism.preview_owned(source);
+        assert!(
+            previewed.is_some(),
+            "preview_owned(review({value:?})) should succeed"
+        );
+        assert_eq!(
+            previewed.unwrap(),
+            value,
+            "PreviewOwnedReview law: preview_owned(review({value:?})) should equal {value:?}"
+        );
+    }
+
+    /// Tests the `ReviewPreviewOwned` law for the `ValidTransitionPrism`.
+    ///
+    /// Law: If `preview_owned(source).is_some()`, then
+    /// `review(preview_owned(source).unwrap()) == source`
+    ///
+    /// This verifies that for valid transitions, reviewing the `preview_owned` value
+    /// reconstructs the original source.
+    #[rstest]
+    #[case(TaskStatus::Pending, TaskStatus::InProgress)]
+    #[case(TaskStatus::InProgress, TaskStatus::Completed)]
+    #[case(TaskStatus::InProgress, TaskStatus::Pending)]
+    #[case(TaskStatus::Completed, TaskStatus::Pending)]
+    #[case(TaskStatus::Pending, TaskStatus::Cancelled)]
+    #[case(TaskStatus::InProgress, TaskStatus::Cancelled)]
+    fn test_prism_law_review_preview_owned(#[case] from: TaskStatus, #[case] to: TaskStatus) {
+        let prism = valid_transition_prism();
+        let source = StatusTransitionAttempt::from_statuses(from, to);
+
+        // preview_owned should succeed for valid transitions
+        let previewed = prism.preview_owned(source);
+        assert!(
+            previewed.is_some(),
+            "preview_owned should succeed for {source:?}"
+        );
+
+        // review(preview_owned(source)) should equal source
+        let reconstructed = prism.review(previewed.unwrap());
+        assert_eq!(
+            reconstructed, source,
+            "ReviewPreviewOwned law: review(preview_owned({source:?})) should equal {source:?}"
+        );
+    }
+
+    /// Tests the `is_valid_transition` helper function for all valid transitions.
+    #[rstest]
+    #[case(TaskStatus::Pending, TaskStatus::InProgress, true)]
+    #[case(TaskStatus::InProgress, TaskStatus::Completed, true)]
+    #[case(TaskStatus::InProgress, TaskStatus::Pending, true)]
+    #[case(TaskStatus::Completed, TaskStatus::Pending, true)]
+    #[case(TaskStatus::Pending, TaskStatus::Cancelled, true)]
+    #[case(TaskStatus::InProgress, TaskStatus::Cancelled, true)]
+    #[case(TaskStatus::Pending, TaskStatus::Completed, false)]
+    #[case(TaskStatus::Completed, TaskStatus::InProgress, false)]
+    #[case(TaskStatus::Completed, TaskStatus::Cancelled, false)]
+    #[case(TaskStatus::Cancelled, TaskStatus::Pending, false)]
+    #[case(TaskStatus::Cancelled, TaskStatus::InProgress, false)]
+    #[case(TaskStatus::Cancelled, TaskStatus::Completed, false)]
+    #[case(TaskStatus::Pending, TaskStatus::Pending, false)]
+    fn test_is_valid_transition_function(
+        #[case] from: TaskStatus,
+        #[case] to: TaskStatus,
+        #[case] expected: bool,
+    ) {
+        let result = is_valid_transition(from, to);
+        assert_eq!(
+            result, expected,
+            "is_valid_transition({from:?}, {to:?}) should be {expected}"
+        );
+    }
+
+    #[rstest]
+    #[case(TaskStatus::Pending, TaskStatus::Pending, true)]
+    #[case(TaskStatus::InProgress, TaskStatus::InProgress, true)]
+    #[case(TaskStatus::Completed, TaskStatus::Completed, true)]
+    #[case(TaskStatus::Cancelled, TaskStatus::Cancelled, true)]
+    #[case(TaskStatus::Pending, TaskStatus::InProgress, false)]
+    #[case(TaskStatus::InProgress, TaskStatus::Completed, false)]
+    fn test_is_no_change_transition(
+        #[case] from: TaskStatus,
+        #[case] to: TaskStatus,
+        #[case] expected: bool,
+    ) {
+        let result = is_no_change_transition(from, to);
+        assert_eq!(
+            result, expected,
+            "is_no_change_transition({from:?}, {to:?}) should be {expected}"
+        );
+    }
+
+    #[rstest]
+    fn test_valid_transition_new() {
+        let valid = ValidTransition::new(TaskStatus::Pending, TaskStatus::InProgress);
+
+        assert_eq!(valid.from, TaskStatus::Pending);
+        assert_eq!(valid.to, TaskStatus::InProgress);
     }
 
     // -------------------------------------------------------------------------
@@ -759,5 +1489,171 @@ mod tests {
         let updated = title_lens.modify(task, |t| t.to_uppercase());
 
         assert_eq!(updated.title, "HELLO");
+    }
+
+    // -------------------------------------------------------------------------
+    // Optional Optic Tests for Option<String> fields
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_optional_optic_get_option_when_some() {
+        let optional = description_optional();
+        let task = Task::new(TaskId::generate(), "Task", Timestamp::now())
+            .with_description("Existing description");
+
+        let result = optional.get_option(&task);
+
+        assert_eq!(result, Some(&"Existing description".to_string()));
+    }
+
+    #[rstest]
+    fn test_optional_optic_get_option_when_none() {
+        let optional = description_optional();
+        let task = Task::new(TaskId::generate(), "Task", Timestamp::now());
+
+        let result = optional.get_option(&task);
+
+        assert_eq!(result, None);
+    }
+
+    #[rstest]
+    fn test_optional_optic_modify_when_some() {
+        let optional = description_optional();
+        let task =
+            Task::new(TaskId::generate(), "Task", Timestamp::now()).with_description("hello");
+
+        let updated = optional.modify(task, |description| description.to_uppercase());
+
+        assert_eq!(updated.description, Some("HELLO".to_string()));
+    }
+
+    #[rstest]
+    fn test_optional_optic_modify_when_none() {
+        let optional = description_optional();
+        let task = Task::new(TaskId::generate(), "Task", Timestamp::now());
+
+        // When None, modify should return the original unchanged
+        let updated = optional.modify(task, |description| description.to_uppercase());
+
+        assert_eq!(updated.description, None);
+    }
+
+    #[rstest]
+    fn test_optional_optic_set_when_some() {
+        let optional = description_optional();
+        let task = Task::new(TaskId::generate(), "Task", Timestamp::now())
+            .with_description("Old description");
+
+        let updated = optional.set(task, "New description".to_string());
+
+        assert_eq!(updated.description, Some("New description".to_string()));
+    }
+
+    #[rstest]
+    fn test_optional_optic_set_when_none() {
+        let optional = description_optional();
+        let task = Task::new(TaskId::generate(), "Task", Timestamp::now());
+
+        // Set creates the value even when None
+        let updated = optional.set(task, "New description".to_string());
+
+        assert_eq!(updated.description, Some("New description".to_string()));
+    }
+
+    #[rstest]
+    fn test_optional_optic_is_present_when_some() {
+        let optional = description_optional();
+        let task =
+            Task::new(TaskId::generate(), "Task", Timestamp::now()).with_description("Description");
+
+        assert!(optional.is_present(&task));
+    }
+
+    #[rstest]
+    fn test_optional_optic_is_present_when_none() {
+        let optional = description_optional();
+        let task = Task::new(TaskId::generate(), "Task", Timestamp::now());
+
+        assert!(!optional.is_present(&task));
+    }
+
+    #[rstest]
+    fn test_apply_updates_with_lens_uses_optional_for_description() {
+        let task = Task::new(TaskId::generate(), "Task", Timestamp::now())
+            .with_description("Old description");
+        let request = UpdateTaskRequest {
+            title: None,
+            description: Some("New description".to_string()),
+            status: None,
+            priority: None,
+            version: 1,
+        };
+        let now = Timestamp::now();
+
+        let updated = apply_updates_with_lens(task, &request, now).unwrap();
+
+        assert_eq!(updated.description, Some("New description".to_string()));
+    }
+
+    #[rstest]
+    fn test_apply_updates_with_lens_sets_description_when_none() {
+        let task = Task::new(TaskId::generate(), "Task", Timestamp::now());
+        let request = UpdateTaskRequest {
+            title: None,
+            description: Some("New description".to_string()),
+            status: None,
+            priority: None,
+            version: 1,
+        };
+        let now = Timestamp::now();
+
+        let updated = apply_updates_with_lens(task, &request, now).unwrap();
+
+        assert_eq!(updated.description, Some("New description".to_string()));
+    }
+
+    #[rstest]
+    fn test_apply_updates_with_lens_clears_description_with_empty_string() {
+        // Given: A task with an existing description
+        let task = Task::new(TaskId::generate(), "Task", Timestamp::now())
+            .with_description("Existing description");
+        assert!(task.description.is_some());
+
+        // When: Updating with an empty string description (clear request)
+        let request = UpdateTaskRequest {
+            title: None,
+            description: Some(String::new()), // Empty string = clear request
+            status: None,
+            priority: None,
+            version: 1,
+        };
+        let now = Timestamp::now();
+
+        let updated = apply_updates_with_lens(task, &request, now).unwrap();
+
+        // Then: Description should be cleared (None)
+        assert_eq!(updated.description, None);
+    }
+
+    #[rstest]
+    fn test_apply_updates_with_lens_clears_description_with_whitespace_only() {
+        // Given: A task with an existing description
+        let task = Task::new(TaskId::generate(), "Task", Timestamp::now())
+            .with_description("Existing description");
+
+        // When: Updating with whitespace-only description (also a clear request)
+        let request = UpdateTaskRequest {
+            title: None,
+            description: Some("   ".to_string()), // Whitespace only = clear request
+            status: None,
+            priority: None,
+            version: 1,
+        };
+        let now = Timestamp::now();
+
+        let updated = apply_updates_with_lens(task, &request, now).unwrap();
+
+        // Then: Description should be cleared (None)
+        assert_eq!(updated.description, None);
     }
 }

@@ -61,6 +61,28 @@ impl Pagination {
         Self { page, page_size }
     }
 
+    /// Creates pagination that fetches all records.
+    ///
+    /// This is useful for operations that need to retrieve all items
+    /// without pagination, such as aggregation queries or full exports.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use task_management_benchmark_api::infrastructure::Pagination;
+    ///
+    /// let all_pagination = Pagination::all();
+    /// assert_eq!(all_pagination.page, 0);
+    /// assert_eq!(all_pagination.page_size, u32::MAX);
+    /// ```
+    #[must_use]
+    pub const fn all() -> Self {
+        Self {
+            page: 0,
+            page_size: u32::MAX,
+        }
+    }
+
     /// Creates new pagination parameters without validation.
     ///
     /// This is useful for constructing pagination from untrusted input

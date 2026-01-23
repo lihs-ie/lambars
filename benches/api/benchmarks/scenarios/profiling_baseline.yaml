@@ -1,0 +1,60 @@
+# Profiling Baseline Scenario
+#
+# A baseline scenario for profiling with perf and flamegraph integration.
+# This scenario uses minimal configuration to establish performance baselines
+# before optimization efforts.
+#
+# Usage:
+#   ./scripts/profile.sh --flamegraph scenarios/profiling_baseline.yaml
+
+name: "profiling_baseline"
+description: "Baseline scenario for profiling with perf and flamegraph"
+
+# Backend configuration
+storage_mode: in_memory
+cache_mode: in_memory
+
+# Workload configuration
+load_pattern: mixed
+cache_state: warm
+data_scale: medium
+payload_variant: standard
+rps_profile: constant
+
+# Load generation parameters (conservative for profiling)
+duration_seconds: 30
+connections: 10
+threads: 2
+
+# Contention level
+contention_level: low
+
+# Profiling configuration
+profiling:
+  enable_perf: true
+  enable_flamegraph: true
+  frequency: 99
+  output_dir: "profiling-results"
+
+# Concurrency settings
+concurrency:
+  worker_threads: 2
+  database_pool_size: 8
+  redis_pool_size: 4
+  max_connections: 20
+
+# Extended metadata for workflow integration
+metadata:
+  test_type: "profiling_benchmark"
+  endpoint: "mixed"
+  payload: "medium"
+  cache_strategy: "read-through"
+  hit_rate: 50
+  fail_injection: 0
+  retry: false
+  profile: true
+  tags:
+    - profiling
+    - baseline
+    - flamegraph
+    - perf

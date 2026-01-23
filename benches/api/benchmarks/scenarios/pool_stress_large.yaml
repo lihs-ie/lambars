@@ -1,0 +1,80 @@
+# Pool Stress Test - Large Pool Configuration
+#
+# Tests performance with a large connection pool (32 connections).
+# High concurrency configuration for throughput testing.
+
+name: "pool_stress_large"
+description: "Large pool stress test (pool=32, workers=8) - high throughput"
+
+# Backend configuration
+storage_mode: postgres
+cache_mode: redis
+
+# Workload configuration
+load_pattern: mixed
+cache_state: warm
+data_scale: medium
+payload_variant: standard
+rps_profile: constant
+
+# Load generation - high concurrency
+duration_seconds: 60
+connections: 200
+threads: 8
+warmup_seconds: 10
+
+# Target endpoints
+endpoints:
+  - "/tasks"
+  - "/tasks/{id}"
+  - "/projects"
+  - "/tasks/bulk"
+  - "/tasks/{id}/status"
+
+http_methods:
+  - GET
+  - POST
+  - PUT
+  - PATCH
+  - DELETE
+
+# Concurrency configuration - large pool
+concurrency:
+  worker_threads: 8
+  database_pool_size: 32
+  redis_pool_size: 32
+  max_connections: 200
+
+# Contention level - low due to large pool
+contention_level: low
+
+# Pool configuration
+pool_sizes:
+  database_pool_size: 32
+  redis_pool_size: 32
+
+# Worker configuration
+worker_config:
+  worker_threads: 8
+
+# Thresholds - strict for high-capacity configuration
+thresholds:
+  max_error_rate: 0.01
+  p99_latency_ms: 100
+  min_rps_achieved: 500
+
+# Metadata
+metadata:
+  test_type: "pool_stress"
+  endpoint: "mixed"
+  payload: "medium"
+  cache_strategy: "read-through"
+  hit_rate: 50
+  fail_injection: 0
+  retry: false
+  profile: false
+  purpose: "Test high throughput with large connection pool"
+  tags:
+    - pool_stress
+    - large_pool
+    - high_throughput

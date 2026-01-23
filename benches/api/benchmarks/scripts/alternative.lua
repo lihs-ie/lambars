@@ -10,22 +10,7 @@
 
 package.path = package.path .. ";scripts/?.lua"
 local common = require("common")
-
--- Try to load generated test IDs
-local test_ids
-local ok, ids = pcall(require, "test_ids")
-if ok then
-    test_ids = ids
-else
-    test_ids = {
-        task_ids = {
-            "a1b2c3d4-e5f6-4789-abcd-ef0123456789",
-            "b2c3d4e5-f6a7-4890-bcde-f01234567890",
-            "c3d4e5f6-a7b8-4901-cdef-012345678901"
-        },
-        get_task_id = function(index) return test_ids.task_ids[((index - 1) % #test_ids.task_ids) + 1] end
-    }
-end
+local test_ids = common.load_test_ids()
 
 local counter = 0
 local request_types = {"search", "config", "filter", "aggregate", "first"}
@@ -78,13 +63,5 @@ function request()
     end
 end
 
-function response(status, headers, body)
-    common.track_response(status)
-    if status >= 400 and status ~= 404 then
-        io.stderr:write(string.format("[alternative] Error %d\n", status))
-    end
-end
-
-function done(summary, latency, requests)
-    common.print_summary("alternative", summary)
-end
+response = common.create_response_handler("alternative")
+done = common.create_done_handler("alternative")

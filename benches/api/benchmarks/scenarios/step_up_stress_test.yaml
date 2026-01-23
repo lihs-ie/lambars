@@ -1,0 +1,81 @@
+# Step-Up Stress Test Scenario
+#
+# This scenario tests system limits by gradually increasing load in discrete steps.
+# Useful for finding system capacity limits and breaking points.
+#
+# Load pattern:
+#   - Starts at min_rps
+#   - Increases by equal steps every (duration / step_count) seconds
+#   - Final step reaches target_rps
+#
+# Example timeline (180s total, 4 steps):
+#   [0-45s]   Step 1: 260 RPS  (min + 1/4 of range)
+#   [45-90s]  Step 2: 510 RPS  (min + 2/4 of range)
+#   [90-135s] Step 3: 760 RPS  (min + 3/4 of range)
+#   [135-180s] Step 4: 1000 RPS (target_rps)
+
+name: "step_up_stress_test"
+description: "Discrete load steps to identify system capacity limits and breaking points"
+
+# Backend configuration
+storage_mode: postgres
+cache_mode: redis
+
+# Workload configuration
+load_pattern: read_heavy  # Focus on read operations for capacity testing
+cache_state: warm
+data_scale: large         # Large dataset to stress the system
+payload_variant: minimal  # Small payloads for maximum throughput measurement
+rps_profile: step_up
+
+# Load generation parameters
+duration_seconds: 180     # Longer duration for thorough testing
+connections: 40
+threads: 8
+warmup_seconds: 15
+target_rps: 1000          # Maximum RPS at final step
+
+# Step-up specific parameters
+step_count: 4             # Number of discrete steps
+min_rps: 10               # Starting RPS
+
+# Target endpoints (focus on read operations)
+endpoints:
+  - "/tasks"
+  - "/tasks/{id}"
+  - "/tasks/search"
+  - "/projects/{id}/progress"
+
+# Pool configuration
+pool_sizes:
+  database_pool_size: 25
+  redis_pool_size: 50     # Larger Redis pool for read-heavy workload
+
+# Worker configuration
+worker_config:
+  worker_threads: 8
+
+# Expected metrics thresholds (per step, for validation)
+thresholds:
+  max_error_rate: 0.02            # 2% max error rate
+  step_1_p99_latency_ms: 50       # p99 at first step
+  step_2_p99_latency_ms: 100      # p99 at second step
+  step_3_p99_latency_ms: 200      # p99 at third step
+  step_4_p99_latency_ms: 500      # p99 at final step (higher tolerance)
+
+# Metadata for result analysis
+metadata:
+  test_type: "load_shape"
+  endpoint: "mixed"
+  payload: "small"
+  cache_strategy: "read-through"
+  hit_rate: 90
+  fail_injection: 0
+  retry: false
+  profile_benchmark: "step_up"
+  purpose: "capacity_test"
+  tags:
+    - "load-shaping"
+    - "stress-test"
+    - "capacity"
+    - "step-up"

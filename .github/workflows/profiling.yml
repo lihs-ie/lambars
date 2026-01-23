@@ -254,12 +254,25 @@ jobs:
           echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid || true
           echo '0' | sudo tee /proc/sys/kernel/kptr_restrict || true
 
-          # Start server in background
-          RUST_LOG=info ./target/release/task-management-benchmark-api &
+          # Start server in background with in-memory mode (no external dependencies)
+          STORAGE_MODE=in_memory CACHE_MODE=in_memory RUST_LOG=info ./target/release/task-management-benchmark-api &
           SERVER_PID=$!
 
-          # Wait for server to start
-          sleep 5
+          # Wait for server to be ready (health check loop)
+          echo "Waiting for API server to start..."
+          for i in {1..30}; do
+            if curl -sf http://localhost:3000/health > /dev/null 2>&1; then
+              echo "API server is ready (attempt $i)"
+              break
+            fi
+            if [ $i -eq 30 ]; then
+              echo "ERROR: API server failed to start within 30 seconds"
+              kill $SERVER_PID 2>/dev/null || true
+              exit 1
+            fi
+            echo "  Attempt $i/30: waiting..."
+            sleep 1
+          done
 
           # Setup test data
           cd benchmarks

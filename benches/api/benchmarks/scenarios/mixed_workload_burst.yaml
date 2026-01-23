@@ -1,0 +1,61 @@
+# Mixed Workload Burst Scenario
+#
+# This scenario tests mixed read/write workloads with burst traffic patterns.
+# Simulates sudden traffic spikes to measure system resilience.
+
+name: "mixed_workload_burst"
+description: "Mixed workload with burst traffic pattern (spike test)"
+
+# Backend configuration (required)
+storage_mode: postgres
+cache_mode: redis
+
+# Workload configuration (required)
+load_pattern: mixed
+cache_state: warm
+data_scale: medium
+payload_variant: complex  # Larger payloads during burst
+rps_profile: burst
+
+# Load generation (optional with defaults)
+duration_seconds: 120  # Longer duration for burst pattern
+connections: 50
+threads: 8
+warmup_seconds: 10
+target_rps: 1000  # Target RPS during burst
+
+# Target all endpoints
+endpoints: []
+
+# Pool configuration (larger pools for burst handling)
+pool_sizes:
+  database_pool_size: 30
+  redis_pool_size: 30
+
+# Worker configuration
+worker_config:
+  worker_threads: 8
+
+# Concurrency settings
+concurrency:
+  worker_threads: 8
+  database_pool_size: 30
+  redis_pool_size: 30
+  max_connections: 100
+
+# Extended metadata for workflow integration
+metadata:
+  test_type: "general_benchmark"
+  endpoint: "mixed"
+  payload: "large"
+  cache_strategy: "read-through"
+  hit_rate: 50
+  fail_injection: 0
+  retry: true
+  profile: false
+  tags:
+    - postgres
+    - redis
+    - mixed-workload
+    - burst-traffic
+    - spike-test

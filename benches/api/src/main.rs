@@ -33,8 +33,8 @@ use task_management_benchmark_api::api::{
     enrich_batch, enrich_error, execute_sequential, execute_state_workflow, execute_workflow,
     fetch_batch, filter_conditional, first_available, flatten_demo, flatten_subtasks,
     freer_workflow, functor_mut_demo, get_project_handler, get_project_progress_handler,
-    get_project_stats_handler, get_task_history, health_check, identity_demo, lazy_compute,
-    list_tasks, monad_error_demo, monad_transformers, nested_access, partial_apply,
+    get_project_stats_handler, get_task, get_task_history, health_check, identity_demo,
+    lazy_compute, list_tasks, monad_error_demo, monad_transformers, nested_access, partial_apply,
     process_with_error_transform, projects_leaderboard, resolve_config, resolve_dependencies,
     search_fallback, search_tasks, tasks_by_deadline, tasks_timeline, transform_async,
     transform_pair, transform_task, update_filtered, update_metadata_key, update_optional,
@@ -107,7 +107,7 @@ async fn main() {
         .route("/tasks/by-priority", get(count_by_priority))
         // Task mutations
         .route("/tasks-eff", post(create_task_eff))
-        .route("/tasks/{id}", put(update_task))
+        .route("/tasks/{id}", get(get_task).put(update_task))
         .route("/tasks/{id}/status", patch(update_status))
         .route("/tasks/{id}/subtasks", post(add_subtask))
         .route("/tasks/{id}/tags", post(add_tag))

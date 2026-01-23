@@ -1,0 +1,74 @@
+# Ramp Up/Down Load Test Scenario
+#
+# This scenario tests system behavior under gradually increasing and decreasing load.
+# Useful for measuring system stability, auto-scaling behavior, and resource management.
+#
+# Load pattern:
+#   - Ramp up:   0 -> target_rps over ramp_up_seconds
+#   - Sustain:   Constant at target_rps
+#   - Ramp down: target_rps -> min_rps over ramp_down_seconds
+#
+# Example timeline (120s total):
+#   [0-20s]   Ramp up: 10 -> 500 RPS
+#   [20-100s] Sustain: 500 RPS
+#   [100-120s] Ramp down: 500 -> 10 RPS
+
+name: "ramp_up_down_test"
+description: "Gradual load increase and decrease to test system stability and resource management"
+
+# Backend configuration
+storage_mode: postgres
+cache_mode: redis
+
+# Workload configuration
+load_pattern: mixed
+cache_state: warm
+data_scale: medium
+payload_variant: standard
+rps_profile: ramp_up_down
+
+# Load generation parameters
+duration_seconds: 120
+connections: 30
+threads: 4
+warmup_seconds: 10
+target_rps: 500
+
+# Ramp up/down specific parameters
+ramp_up_seconds: 20
+ramp_down_seconds: 20
+min_rps: 10
+
+# Target all endpoints
+endpoints: []
+
+# Pool configuration
+pool_sizes:
+  database_pool_size: 20
+  redis_pool_size: 25
+
+# Worker configuration
+worker_config:
+  worker_threads: 4
+
+# Expected metrics thresholds (for validation)
+thresholds:
+  max_error_rate: 0.01        # 1% max error rate
+  p99_latency_ms: 200         # p99 latency threshold
+  min_rps_achieved: 450       # Minimum RPS during sustain phase
+
+# Metadata for result analysis
+metadata:
+  test_type: "load_shape"
+  endpoint: "mixed"
+  payload: "medium"
+  cache_strategy: "read-through"
+  hit_rate: 50
+  fail_injection: 0
+  retry: false
+  profile_benchmark: "ramp_up_down"
+  purpose: "stability_test"
+  tags:
+    - "load-shaping"
+    - "gradual-load"
+    - "stability"

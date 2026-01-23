@@ -17,7 +17,13 @@
 
 use std::sync::Arc;
 
-use axum::{Json, extract::State, http::StatusCode};
+use axum::{
+    Json,
+    extract::{Path, State},
+    http::StatusCode,
+};
+use lambars::control::Either;
+use uuid::Uuid;
 
 use super::dto::{
     CreateTaskRequest, TaskResponse, validate_description, validate_tags, validate_title,
@@ -257,6 +263,101 @@ fn build_task(ids: TaskIds, validated: ValidatedCreateTask) -> Task {
 }
 
 // =============================================================================
+// GET /tasks/{id} Handler
+// =============================================================================
+
+/// Gets a task by its ID.
+///
+/// This handler demonstrates the use of:
+/// - **Either**: Lifting `Option<Task>` to `Either<ApiErrorResponse, Task>`
+/// - **Pattern matching**: Functional error handling without exceptions
+/// - **`AsyncIO`**: Encapsulating repository side effects
+///
+/// # Path Parameters
+///
+/// * `id` - The UUID of the task to retrieve
+///
+/// # Response
+///
+/// - **200 OK**: Task found and returned
+/// - **404 Not Found**: Task with the given ID does not exist
+/// - **500 Internal Server Error**: Database error
+///
+/// # Errors
+///
+/// Returns [`ApiErrorResponse`] in the following cases:
+/// - Not found error (404 Not Found): Task does not exist
+/// - Database error (500 Internal Server Error): Repository operation failed
+///
+/// # lambars Features
+///
+/// The handler uses `Either<ApiErrorResponse, Task>` to represent the result
+/// of the lookup operation. `Option<Task>` from `find_by_id` is lifted to
+/// `Either` using pattern matching:
+/// - `Some(task)` becomes `Either::Right(task)` (success)
+/// - `None` becomes `Either::Left(ApiErrorResponse::not_found(...))` (failure)
+#[allow(clippy::future_not_send)]
+pub async fn get_task(
+    State(state): State<AppState>,
+    Path(task_id): Path<Uuid>,
+) -> Result<Json<TaskResponse>, ApiErrorResponse> {
+    // Step 1: Convert Uuid to TaskId (pure)
+    let task_id = TaskId::from_uuid(task_id);
+
+    // Step 2: Fetch task from repository using AsyncIO
+    let maybe_task = state
+        .task_repository
+        .find_by_id(&task_id)
+        .run_async()
+        .await
+        .map_err(ApiErrorResponse::from)?;
+
+    // Step 3: Lift Option<Task> to Either<ApiErrorResponse, Task>
+    // This demonstrates functional error handling using Either
+    let task_result: Either<ApiErrorResponse, Task> = lift_option_to_either(maybe_task, || {
+        ApiErrorResponse::not_found(format!("Task not found: {task_id}"))
+    });
+
+    // Step 4: Convert Either to Result and map to response
+    // Task is not Send, so we convert to TaskResponse (which is Send) immediately
+    let result: Result<Task, ApiErrorResponse> = task_result.into();
+    let task = result?;
+    let response = TaskResponse::from(&task);
+
+    Ok(Json(response))
+}
+
+/// Lifts an `Option<T>` to `Either<L, T>`.
+///
+/// This is a pure function that converts `Option` to `Either`:
+/// - `Some(value)` becomes `Either::Right(value)`
+/// - `None` becomes `Either::Left(left_value())` where `left_value` is lazily evaluated
+///
+/// # Type Parameters
+///
+/// * `L` - The type for the Left case (typically an error type)
+/// * `T` - The type for the Right case (the success value)
+/// * `F` - A function that produces the Left value when None is encountered
+///
+/// # Examples
+///
+/// ```ignore
+/// let some_value = Some(42);
+/// let result = lift_option_to_either(some_value, || "not found");
+/// assert_eq!(result, Either::Right(42));
+///
+/// let none_value: Option<i32> = None;
+/// let result = lift_option_to_either(none_value, || "not found");
+/// assert_eq!(result, Either::Left("not found"));
+/// ```
+fn lift_option_to_either<L, T, F>(option: Option<T>, left_value: F) -> Either<L, T>
+where
+    F: FnOnce() -> L,
+{
+    option.map_or_else(|| Either::Left(left_value()), Either::Right)
+}
+
+// =============================================================================
 // GET /health Handler
 // =============================================================================
 
@@ -300,6 +401,232 @@ pub async fn health_check() -> Json<HealthResponse> {
 mod tests {
     use super::*;
     use rstest::rstest;
+
+    use lambars::effect::AsyncIO;
+
+    use crate::infrastructure::{
+        InMemoryEventStore, InMemoryProjectRepository, InMemoryTaskRepository, RepositoryError,
+    };
+
+    // -------------------------------------------------------------------------
+    // Mock TaskRepository for Error Simulation
+    // -------------------------------------------------------------------------
+
+    /// A mock `TaskRepository` that can be configured to return errors.
+    ///
+    /// This mock is used to test error handling paths in handlers.
+    struct MockTaskRepository {
+        /// The error to return from `find_by_id`, if any.
+        find_by_id_error: Option<RepositoryError>,
+        /// The task to return from `find_by_id`, if no error is configured.
+        find_by_id_result: Option<Task>,
+    }
+
+    impl MockTaskRepository {
+        /// Creates a mock that returns `Some(task)` from `find_by_id`.
+        fn with_task(task: Task) -> Self {
+            Self {
+                find_by_id_error: None,
+                find_by_id_result: Some(task),
+            }
+        }
+
+        /// Creates a mock that returns `None` from `find_by_id`.
+        fn not_found() -> Self {
+            Self {
+                find_by_id_error: None,
+                find_by_id_result: None,
+            }
+        }
+
+        /// Creates a mock that returns an error from `find_by_id`.
+        fn with_error(error: RepositoryError) -> Self {
+            Self {
+                find_by_id_error: Some(error),
+                find_by_id_result: None,
+            }
+        }
+    }
+
+    impl TaskRepository for MockTaskRepository {
+        fn find_by_id(&self, _id: &TaskId) -> AsyncIO<Result<Option<Task>, RepositoryError>> {
+            let error = self.find_by_id_error.clone();
+            let result = self.find_by_id_result.clone();
+            AsyncIO::new(move || async move { error.map_or_else(|| Ok(result), Err) })
+        }
+
+        fn save(&self, _task: &Task) -> AsyncIO<Result<(), RepositoryError>> {
+            AsyncIO::new(|| async { Ok(()) })
+        }
+
+        fn delete(&self, _id: &TaskId) -> AsyncIO<Result<bool, RepositoryError>> {
+            AsyncIO::new(|| async { Ok(false) })
+        }
+
+        fn list(
+            &self,
+            pagination: crate::infrastructure::Pagination,
+        ) -> AsyncIO<Result<crate::infrastructure::PaginatedResult<Task>, RepositoryError>>
+        {
+            AsyncIO::new(move || async move {
+                Ok(crate::infrastructure::PaginatedResult::new(
+                    vec![],
+                    0,
+                    pagination.page,
+                    pagination.page_size,
+                ))
+            })
+        }
+
+        fn count(&self) -> AsyncIO<Result<u64, RepositoryError>> {
+            AsyncIO::new(|| async { Ok(0) })
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Helper Functions for AppState Creation
+    // -------------------------------------------------------------------------
+
+    /// Creates an `AppState` with the given mock task repository.
+    fn create_app_state_with_mock_task_repository(
+        task_repository: impl TaskRepository + 'static,
+    ) -> AppState {
+        AppState {
+            task_repository: Arc::new(task_repository),
+            project_repository: Arc::new(InMemoryProjectRepository::new()),
+            event_store: Arc::new(InMemoryEventStore::new()),
+            config: AppConfig::default(),
+        }
+    }
+
+    /// Creates an `AppState` with the default in-memory repositories.
+    fn create_default_app_state() -> AppState {
+        AppState {
+            task_repository: Arc::new(InMemoryTaskRepository::new()),
+            project_repository: Arc::new(InMemoryProjectRepository::new()),
+            event_store: Arc::new(InMemoryEventStore::new()),
+            config: AppConfig::default(),
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // get_task Handler Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_get_task_returns_200_when_task_found() {
+        // Arrange
+        let task_id = TaskId::generate();
+        let task = Task::new(task_id.clone(), "Test Task", Timestamp::now())
+            .with_description("Test description")
+            .with_priority(Priority::High);
+        let state = create_app_state_with_mock_task_repository(MockTaskRepository::with_task(task));
+
+        // Act
+        let result = get_task(State(state), Path(*task_id.as_uuid())).await;
+
+        // Assert
+        assert!(result.is_ok());
+        let Json(response) = result.unwrap();
+        assert_eq!(response.title, "Test Task");
+        assert_eq!(response.description, Some("Test description".to_string()));
+        assert_eq!(response.priority, super::super::dto::PriorityDto::High);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_get_task_returns_404_when_task_not_found() {
+        // Arrange
+        let task_id = TaskId::generate();
+        let state = create_app_state_with_mock_task_repository(MockTaskRepository::not_found());
+
+        // Act
+        let result = get_task(State(state), Path(*task_id.as_uuid())).await;
+
+        // Assert
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert_eq!(error.status, StatusCode::NOT_FOUND);
+        assert_eq!(error.error.code, "NOT_FOUND");
+        assert!(error.error.message.contains("Task not found"));
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_get_task_returns_500_when_repository_error() {
+        // Arrange
+        let task_id = TaskId::generate();
+        let state = create_app_state_with_mock_task_repository(MockTaskRepository::with_error(
+            RepositoryError::DatabaseError("Connection failed".to_string()),
+        ));
+
+        // Act
+        let result = get_task(State(state), Path(*task_id.as_uuid())).await;
+
+        // Assert
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.error.code, "INTERNAL_ERROR");
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_get_task_converts_task_to_task_response_correctly() {
+        // Arrange
+        let task_id = TaskId::generate();
+        let timestamp = Timestamp::now();
+        let task = Task::new(task_id.clone(), "Complete Task", timestamp)
+            .with_description("Detailed description")
+            .with_priority(Priority::Critical)
+            .add_tag(Tag::new("urgent"))
+            .add_tag(Tag::new("backend"));
+        let state = create_app_state_with_mock_task_repository(MockTaskRepository::with_task(task));
+
+        // Act
+        let result = get_task(State(state), Path(*task_id.as_uuid())).await;
+
+        // Assert
+        assert!(result.is_ok());
+        let Json(response) = result.unwrap();
+        assert_eq!(response.id, task_id.to_string());
+        assert_eq!(response.title, "Complete Task");
+        assert_eq!(
+            response.description,
+            Some("Detailed description".to_string())
+        );
+        assert_eq!(response.priority, super::super::dto::PriorityDto::Critical);
+        assert_eq!(response.tags.len(), 2);
+        assert!(response.tags.contains(&"urgent".to_string()));
+        assert!(response.tags.contains(&"backend".to_string()));
+        assert_eq!(response.version, 1);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_get_task_with_real_repository_integration() {
+        // Arrange
+        let state = create_default_app_state();
+        let task_id = TaskId::generate();
+        let task = Task::new(task_id.clone(), "Integration Test Task", Timestamp::now());
+
+        // Save the task first
+        state
+            .task_repository
+            .save(&task)
+            .run_async()
+            .await
+            .expect("Failed to save task");
+
+        // Act
+        let result = get_task(State(state), Path(*task_id.as_uuid())).await;
+
+        // Assert
+        assert!(result.is_ok());
+        let Json(response) = result.unwrap();
+        assert_eq!(response.title, "Integration Test Task");
+    }
 
     // -------------------------------------------------------------------------
     // Validation Tests
@@ -410,5 +737,71 @@ mod tests {
         let ids2 = generate_task_ids();
 
         assert_ne!(ids1.task_id, ids2.task_id);
+    }
+
+    // -------------------------------------------------------------------------
+    // lift_option_to_either Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_lift_option_to_either_some_returns_right() {
+        let some_value: Option<i32> = Some(42);
+        let result = lift_option_to_either(some_value, || "error");
+
+        assert!(result.is_right());
+        assert_eq!(result.unwrap_right(), 42);
+    }
+
+    #[rstest]
+    fn test_lift_option_to_either_none_returns_left() {
+        let none_value: Option<i32> = None;
+        let result = lift_option_to_either(none_value, || "not found");
+
+        assert!(result.is_left());
+        assert_eq!(result.unwrap_left(), "not found");
+    }
+
+    #[rstest]
+    fn test_lift_option_to_either_left_value_is_lazy() {
+        use std::cell::Cell;
+
+        let call_count = Cell::new(0);
+        let some_value: Option<i32> = Some(42);
+
+        let _result = lift_option_to_either(some_value, || {
+            call_count.set(call_count.get() + 1);
+            "error"
+        });
+
+        // Left value function should not be called for Some case
+        assert_eq!(call_count.get(), 0);
+    }
+
+    #[rstest]
+    fn test_lift_option_to_either_with_api_error_response() {
+        let none_value: Option<Task> = None;
+        let task_id = TaskId::generate();
+
+        let result: Either<ApiErrorResponse, Task> = lift_option_to_either(none_value, || {
+            ApiErrorResponse::not_found(format!("Task not found: {task_id}"))
+        });
+
+        assert!(result.is_left());
+        let error = result.unwrap_left();
+        assert_eq!(error.status, StatusCode::NOT_FOUND);
+        assert_eq!(error.error.code, "NOT_FOUND");
+    }
+
+    #[rstest]
+    fn test_lift_option_to_either_with_task() {
+        let task = Task::new(TaskId::generate(), "Test Task", Timestamp::now());
+        let some_task: Option<Task> = Some(task);
+
+        let result: Either<ApiErrorResponse, Task> =
+            lift_option_to_either(some_task, || ApiErrorResponse::not_found("Not found"));
+
+        assert!(result.is_right());
+        let returned_task = result.unwrap_right();
+        assert_eq!(returned_task.title, "Test Task");
     }
 }

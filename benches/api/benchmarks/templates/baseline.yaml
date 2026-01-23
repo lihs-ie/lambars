@@ -1,0 +1,20 @@
+name: "baseline"
+description: "Template for baseline performance tests"
+
+storage_mode: in_memory
+cache_mode: in_memory
+load_pattern: read_heavy
+cache_state: warm
+data_scale: medium
+contention_level: low
+
+duration_seconds: 60
+connections: 30
+threads: 4
+target_rps: 1000
+
+error_config:
+  timeout_ms: 30000
+  connect_timeout_ms: 5000
+  max_retries: 0
+  retry_delay_ms: 1000

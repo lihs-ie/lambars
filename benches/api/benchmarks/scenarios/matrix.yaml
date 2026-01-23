@@ -1,0 +1,145 @@
+# Benchmark Scenario Matrix
+#
+# This file defines parameter combinations for generating multiple benchmark scenarios.
+# Use the scenario matrix generator to create individual scenario files.
+#
+# Example usage:
+#   cargo run --bin scenario-matrix-generator -- --matrix matrix.yaml --output-dir ./generated/
+#
+# For load shape testing, use the dedicated scenario files:
+#   - ramp_up_down_test.yaml
+#   - burst_spike_test.yaml
+#   - step_up_stress_test.yaml
+#
+# For payload variation testing, use:
+#   - payload_variation_minimal.yaml
+#   - payload_variation_standard.yaml
+#   - payload_variation_complex.yaml
+#   - payload_variation_heavy.yaml
+
+name_prefix: "bench"
+
+# Storage modes to test
+storage_modes:
+  - in_memory
+  - postgres
+
+# Cache modes to test
+cache_modes:
+  - in_memory
+  - redis
+
+# Load patterns to test
+load_patterns:
+  - read_heavy
+  - write_heavy
+  - mixed
+
+# Cache states to test
+cache_states:
+  - cold
+  - warm
+
+# Data scales to test (optional, defaults to [medium])
+# Uncomment to enable data scale variations
+# data_scales:
+#   - small    # ~1,000 records
+#   - medium   # ~10,000 records
+#   - large    # ~1,000,000 records
+
+# Payload variants to test (optional, defaults to [standard])
+# Defines the size and complexity of task payloads
+# Uncomment to enable payload variation testing
+# payload_variants:
+#   - minimal   # 0 tags, 0 subtasks (~200 bytes)
+#   - standard  # 10 tags, 10 subtasks (~2 KB)
+#   - complex   # 100 tags, 50 subtasks (~20 KB)
+#   - heavy     # 100 tags, 200 subtasks (~80 KB)
+
+# RPS profiles to test (optional, defaults to [constant])
+# Defines load shaping behavior
+# Uncomment to enable RPS profile testing
+# rps_profiles:
+#   - constant      # Steady RPS throughout
+#   - ramp_up_down  # Linear ramp up, sustain, ramp down
+#   - burst         # Periodic traffic spikes
+#   - step_up       # Discrete step increases
+
+# Total combinations calculation:
+#   Default (uncommented):     2 × 2 × 3 × 2 = 24 scenarios
+#   With data_scales:          2 × 2 × 3 × 2 × 3 = 72 scenarios
+#   With payload_variants:     2 × 2 × 3 × 2 × 4 = 96 scenarios
+#   With rps_profiles:         2 × 2 × 3 × 2 × 4 = 96 scenarios
+#   Full matrix (all enabled): 2 × 2 × 3 × 2 × 3 × 4 × 4 = 1152 scenarios
+#
+# Generated scenario names follow the pattern:
+#   bench_<storage>_<cache>_<load>_<state>[_<data_scale>][_<payload>][_<rps>]
+#
+# Examples:
+#   - bench_in_memory_in_memory_read_heavy_warm
+#   - bench_postgres_redis_write_heavy_cold_large_complex_burst
+#   - bench_postgres_in_memory_mixed_warm_small_minimal_ramp_up_down
+
+# ============================================================================
+# Profile-specific parameters (used when generating scenarios with profiles)
+# ============================================================================
+
+# Ramp up/down profile defaults
+ramp_up_down_defaults:
+  ramp_up_seconds: 20
+  ramp_down_seconds: 20
+  min_rps: 10
+
+# Burst profile defaults
+burst_defaults:
+  burst_multiplier: 3.0
+  burst_duration_seconds: 5
+  burst_interval_seconds: 20
+  min_rps: 50
+
+# Step-up profile defaults
+step_up_defaults:
+  step_count: 4
+  min_rps: 10
+
+# ============================================================================
+# Payload variant specifications
+# ============================================================================
+
+payload_specs:
+  minimal:
+    tag_count: 0
+    subtask_count: 0
+    description_length: 20
+    estimated_size_bytes: 200
+  standard:
+    tag_count: 10
+    subtask_count: 10
+    description_length: 200
+    estimated_size_bytes: 2000
+  complex:
+    tag_count: 100
+    subtask_count: 50
+    description_length: 1000
+    estimated_size_bytes: 20000
+  heavy:
+    tag_count: 100
+    subtask_count: 200
+    description_length: 5000
+    estimated_size_bytes: 80000
+
+# Extended metadata for workflow integration
+# Note: This is a matrix template file, not a direct scenario
+metadata:
+  test_type: "matrix_template"
+  endpoint: "mixed"
+  payload: "medium"
+  cache_strategy: "read-through"
+  hit_rate: 50
+  fail_injection: 0
+  retry: false
+  profile: false
+  tags:
+    - matrix
+    - template
+    - generator

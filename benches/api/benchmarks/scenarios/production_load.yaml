@@ -1,0 +1,82 @@
+# Production-like load test extending high_load template
+#
+# Inherits from high_load template:
+#   - storage_mode: postgres
+#   - cache_mode: redis
+#   - load_pattern: mixed
+#   - cache_state: warm
+#   - data_scale: large
+#   - contention_level: high
+#   - duration_seconds: 120
+#   - connections: 100
+#   - threads: 16
+#   - error_config.timeout_ms: 10000
+#   - error_config.expected_error_rate: 0.05
+#
+# This scenario overrides with production-specific settings.
+
+extends: "high_load"
+
+name: "production_load"
+description: "Production-like load test extending high_load template"
+
+# Override storage and cache settings from template
+storage_mode: postgres
+cache_mode: redis
+load_pattern: mixed
+cache_state: warm
+data_scale: large
+contention_level: high
+
+# Production-specific overrides
+payload_variant: complex
+rps_profile: burst
+
+# Higher capacity than template
+duration_seconds: 180
+connections: 150
+threads: 24
+target_rps: 8000
+warmup_seconds: 30
+
+concurrency:
+  worker_threads: 12
+  database_pool_size: 48
+  redis_pool_size: 32
+  max_connections: 300
+
+cache_metrics:
+  enabled: true
+  per_endpoint: true
+  track_latency: true
+  warmup_requests: 5000
+  expected_hit_rate: 0.7
+
+# Stricter error handling for production
+error_config:
+  timeout_ms: 15000
+  connect_timeout_ms: 3000
+  max_retries: 2
+  retry_delay_ms: 500
+  expected_error_rate: 0.03
+  fail_on_error_threshold: true
+
+thresholds:
+  max_error_rate: 0.05
+  p99_latency_ms: 500
+  min_rps_achieved: 5000
+
+metadata:
+  test_type: "production_simulation"
+  endpoint: "mixed"
+  payload: "large"
+  cache_strategy: "read-through"
+  hit_rate: 50
+  fail_injection: 0
+  retry: true
+  profile: false
+  purpose: "Validate production-level performance characteristics"
+  tags:
+    - production
+    - high-load
+    - stress-test

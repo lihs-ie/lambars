@@ -1,0 +1,59 @@
+# PostgreSQL Write-Heavy Scenario
+#
+# This scenario tests write-heavy workloads on PostgreSQL storage.
+# Measures database write performance and transaction handling.
+
+name: "postgres_write_heavy"
+description: "Write-heavy workload on PostgreSQL storage (transaction stress test)"
+
+# Backend configuration (required)
+storage_mode: postgres
+cache_mode: in_memory
+
+# Workload configuration (required)
+load_pattern: write_heavy
+cache_state: warm
+data_scale: small  # Smaller scale to avoid excessive data accumulation
+payload_variant: standard
+rps_profile: constant
+
+# Load generation (optional with defaults)
+duration_seconds: 60
+connections: 20
+threads: 4
+warmup_seconds: 5
+
+# Target endpoints (write operations)
+endpoints:
+  - "/tasks"
+  - "/tasks/{id}"
+  - "/tasks/{id}/status"
+  - "/tasks/bulk"
+  - "/projects"
+
+# Pool configuration
+pool_sizes:
+  database_pool_size: 20
+  redis_pool_size: 5
+
+# Concurrency settings
+concurrency:
+  worker_threads: 4
+  database_pool_size: 20
+  redis_pool_size: 5
+  max_connections: 50
+
+# Extended metadata for workflow integration
+metadata:
+  test_type: "general_benchmark"
+  endpoint: "mixed"
+  payload: "medium"
+  cache_strategy: "write-through"
+  hit_rate: 50
+  fail_injection: 0
+  retry: false
+  profile: false
+  tags:
+    - postgres
+    - write-heavy
+    - transaction-stress

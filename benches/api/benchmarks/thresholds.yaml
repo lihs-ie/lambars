@@ -1,0 +1,31 @@
+# benches/api/benchmarks/thresholds.yaml
+#
+# Performance regression detection thresholds.
+# Used by compare_results.sh --threshold to detect regressions.
+#
+# Levels:
+#   warning: Flags the metric for attention but does not fail CI.
+#   error:   Causes CI to fail (exit code 3).
+#
+# Metric explanations:
+#   p95_latency_ms:       95th percentile latency in milliseconds.
+#   p99_latency_ms:       99th percentile latency in milliseconds.
+#   error_rate:           Percentage of failed requests (0.01 = 1%).
+#   rps_degradation_percent: Percentage decrease in RPS compared to baseline.
+
+thresholds:
+  p95_latency_ms:
+    warning: 50
+    error: 100
+
+  p99_latency_ms:
+    warning: 100
+    error: 200
+
+  error_rate:
+    warning: 0.01
+    error: 0.05
+
+  rps_degradation_percent:
+    warning: 5
+    error: 10

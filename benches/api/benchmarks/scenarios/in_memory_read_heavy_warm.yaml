@@ -1,0 +1,47 @@
+# In-Memory Read-Heavy Warm Scenario
+#
+# This scenario tests read-heavy workloads with warm cache on in-memory storage.
+# Suitable for baseline performance testing.
+
+name: "in_memory_read_heavy_warm"
+description: "Read-heavy workload with warm cache on in-memory storage (baseline)"
+
+# Backend configuration (required)
+storage_mode: in_memory
+cache_mode: in_memory
+
+# Workload configuration (required)
+load_pattern: read_heavy
+cache_state: warm
+data_scale: medium
+payload_variant: standard
+rps_profile: constant
+
+# Load generation (optional with defaults)
+duration_seconds: 60
+connections: 10
+threads: 2
+warmup_seconds: 5
+
+# Target endpoints (empty = all)
+endpoints:
+  - "/tasks"
+  - "/tasks/{id}"
+  - "/tasks/search"
+  - "/projects/{id}/progress"
+
+# Extended metadata for workflow integration
+metadata:
+  test_type: "general_benchmark"
+  endpoint: "mixed"
+  payload: "medium"
+  cache_strategy: "read-through"
+  hit_rate: 90
+  fail_injection: 0
+  retry: false
+  profile: false
+  tags:
+    - in-memory
+    - read-heavy
+    - warm-cache
+    - baseline
