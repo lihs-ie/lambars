@@ -60,6 +60,13 @@ thresholds:
 # Metadata for result analysis
 metadata:
   test_type: "payload_variation"
+  endpoint: "mixed"
+  payload: "large"
+  cache_strategy: "write-through"
+  hit_rate: 50
+  fail_injection: 0
+  retry: false
+  profile: false
   payload_variant: "heavy"
   payload_size_bytes: 25000
   tag_count: 100

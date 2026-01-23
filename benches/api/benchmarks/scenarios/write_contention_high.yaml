@@ -63,6 +63,13 @@ thresholds:
 # Metadata
 metadata:
   test_type: "write_contention"
+  endpoint: "mixed"
+  payload: "large"
+  cache_strategy: "write-through"
+  hit_rate: 50
+  fail_injection: 0
+  retry: false
+  profile: false
   purpose: "Test write contention and locking behavior"
   tags:
     - write_contention

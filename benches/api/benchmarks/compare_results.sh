@@ -4,9 +4,14 @@
 # Compare two benchmark result directories and report differences.
 #
 # Usage:
-#   ./compare_results.sh <base_dir> <new_dir>
+#   ./compare_results.sh <base_dir> <new_dir> [--json] [--threshold <file>]
 #   ./compare_results.sh results/20260122_120000 results/20260123_140000
-#   ./compare_results.sh results/20260122_120000/tasks_search results/20260123_140000/tasks_search
+#   ./compare_results.sh results/20260122_120000 results/20260123_140000 --json
+#   ./compare_results.sh base new --threshold thresholds.yaml
+#
+# Options:
+#   --json              Output results as JSON (for CI integration)
+#   --threshold <file>  Path to threshold YAML file for regression detection
 #
 # Output:
 #   - Comparison table with metrics: p50, p95, p99, rps, error_rate
@@ -14,9 +19,10 @@
 #   - Memory metrics if profile data available
 #
 # Exit codes:
-#   0 - Success
+#   0 - Success, no significant regression
 #   1 - Missing arguments or directories
 #   2 - No comparable results found
+#   3 - Regression detected (when using thresholds)
 
 set -euo pipefail
 
@@ -32,17 +38,46 @@ NC='\033[0m' # No Color
 # Argument Parsing
 # =============================================================================
 
-if [[ $# -lt 2 ]]; then
-    echo "Usage: $0 <base_dir> <new_dir>"
+JSON_OUTPUT=false
+THRESHOLD_FILE=""
+
+show_usage() {
+    echo "Usage: $0 <base_dir> <new_dir> [--json] [--threshold <file>]"
+    echo ""
+    echo "Options:"
+    echo "  --json              Output results as JSON"
+    echo "  --threshold <file>  Path to threshold YAML file"
     echo ""
     echo "Examples:"
     echo "  $0 results/20260122_120000 results/20260123_140000"
-    echo "  $0 results/baseline/tasks_search results/optimized/tasks_search"
+    echo "  $0 results/baseline results/optimized --json"
     exit 1
+}
+
+if [[ $# -lt 2 ]]; then
+    show_usage
 fi
 
 BASE_DIR="$1"
 NEW_DIR="$2"
+shift 2
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --json)
+            JSON_OUTPUT=true
+            shift
+            ;;
+        --threshold)
+            THRESHOLD_FILE="$2"
+            shift 2
+            ;;
+        *)
+            echo "Unknown option: $1"
+            show_usage
+            ;;
+    esac
+done
 
 if [[ ! -d "${BASE_DIR}" ]]; then
     echo -e "${RED}Error: Base directory not found: ${BASE_DIR}${NC}"
@@ -55,8 +90,102 @@ if [[ ! -d "${NEW_DIR}" ]]; then
 fi
 
 # =============================================================================
+# JSON Output and Threshold Storage
+# =============================================================================
+
+# Array to store comparison results for JSON output
+declare -a JSON_RESULTS=()
+REGRESSION_DETECTED=false
+
+# Load threshold values from YAML file
+load_thresholds() {
+    local file="$1"
+    if [[ ! -f "${file}" ]]; then
+        echo -e "${RED}Error: Threshold file not found: ${file}${NC}"
+        exit 1
+    fi
+
+    # Parse thresholds with yq if available, otherwise use grep/sed
+    if command -v yq &> /dev/null; then
+        P95_WARN=$(yq '.thresholds.p95_latency_ms.warning // 50' "${file}")
+        P95_ERROR=$(yq '.thresholds.p95_latency_ms.error // 100' "${file}")
+        P99_WARN=$(yq '.thresholds.p99_latency_ms.warning // 100' "${file}")
+        P99_ERROR=$(yq '.thresholds.p99_latency_ms.error // 200' "${file}")
+        ERROR_RATE_WARN=$(yq '.thresholds.error_rate.warning // 0.01' "${file}")
+        ERROR_RATE_ERROR=$(yq '.thresholds.error_rate.error // 0.05' "${file}")
+        RPS_DEGRADATION_WARN=$(yq '.thresholds.rps_degradation_percent.warning // 5' "${file}")
+        RPS_DEGRADATION_ERROR=$(yq '.thresholds.rps_degradation_percent.error // 10' "${file}")
+    else
+        # Fallback to grep/sed parsing
+        P95_WARN=$(grep -A2 'p95_latency_ms:' "${file}" 2>/dev/null | grep 'warning:' | sed 's/.*warning: *//' || echo "50")
+        P95_ERROR=$(grep -A2 'p95_latency_ms:' "${file}" 2>/dev/null | grep 'error:' | sed 's/.*error: *//' || echo "100")
+        P99_WARN=$(grep -A2 'p99_latency_ms:' "${file}" 2>/dev/null | grep 'warning:' | sed 's/.*warning: *//' || echo "100")
+        P99_ERROR=$(grep -A2 'p99_latency_ms:' "${file}" 2>/dev/null | grep 'error:' | sed 's/.*error: *//' || echo "200")
+        ERROR_RATE_WARN=$(grep -A2 'error_rate:' "${file}" 2>/dev/null | grep 'warning:' | sed 's/.*warning: *//' || echo "0.01")
+        ERROR_RATE_ERROR=$(grep -A2 'error_rate:' "${file}" 2>/dev/null | grep 'error:' | sed 's/.*error: *//' || echo "0.05")
+        RPS_DEGRADATION_WARN=$(grep -A2 'rps_degradation_percent:' "${file}" 2>/dev/null | grep 'warning:' | sed 's/.*warning: *//' || echo "5")
+        RPS_DEGRADATION_ERROR=$(grep -A2 'rps_degradation_percent:' "${file}" 2>/dev/null | grep 'error:' | sed 's/.*error: *//' || echo "10")
+    fi
+}
+
+# Check if a metric exceeds threshold
+# Returns: "ok" | "warning" | "error"
+check_threshold() {
+    local value="$1"
+    local warn_threshold="$2"
+    local error_threshold="$3"
+    local higher_is_worse="${4:-true}"
+
+    if [[ "${value}" == "N/A" ]] || [[ -z "${value}" ]]; then
+        echo "ok"
+        return
+    fi
+
+    if [[ "${higher_is_worse}" == "true" ]]; then
+        if (( $(echo "${value} >= ${error_threshold}" | bc -l 2>/dev/null || echo "0") )); then
+            echo "error"
+        elif (( $(echo "${value} >= ${warn_threshold}" | bc -l 2>/dev/null || echo "0") )); then
+            echo "warning"
+        else
+            echo "ok"
+        fi
+    else
+        # For metrics where lower is worse (like RPS degradation as negative)
+        local abs_value
+        abs_value=$(echo "${value}" | sed 's/^-//')
+        if (( $(echo "${abs_value} >= ${error_threshold}" | bc -l 2>/dev/null || echo "0") )); then
+            echo "error"
+        elif (( $(echo "${abs_value} >= ${warn_threshold}" | bc -l 2>/dev/null || echo "0") )); then
+            echo "warning"
+        else
+            echo "ok"
+        fi
+    fi
+}
+
+# =============================================================================
 # Utility Functions
 # =============================================================================
+
+# Convert value to JSON-safe format
+# - "N/A" or empty → null
+# - numeric value → as-is (unquoted)
+# - string → quoted
+json_value() {
+    local value="$1"
+    local as_string="${2:-false}"  # if true, output as quoted string
+
+    if [[ -z "${value}" ]] || [[ "${value}" == "N/A" ]] || [[ "${value}" == "null" ]]; then
+        echo "null"
+    elif [[ "${as_string}" == "true" ]]; then
+        # Escape backslashes and double quotes for JSON
+        local escaped
+        escaped=$(echo "${value}" | sed 's/\\/\\\\/g; s/"/\\"/g')
+        echo "\"${escaped}\""
+    else
+        echo "${value}"
+    fi
+}
 
 # Parse latency value and convert to milliseconds
 # Handles: 1.23ms, 123.45us, 1.5s
@@ -258,30 +387,117 @@ compare_single() {
         diff_error="N/A"
     fi
 
-    # Print comparison table
-    echo ""
-    echo -e "${BOLD}${CYAN}=== ${scenario_name} ===${NC}"
-    echo ""
-    printf "%-12s | %-12s | %-12s | %-10s\n" "Metric" "Base" "New" "Diff"
-    printf "%-12s-+-%-12s-+-%-12s-+-%-10s\n" "------------" "------------" "------------" "----------"
-    printf "%-12s | %-12s | %-12s | %s\n" "p50" "${base_p50:-N/A}" "${new_p50:-N/A}" "$(format_diff "${diff_p50}" "latency")"
-    printf "%-12s | %-12s | %-12s | %s\n" "p95" "${base_p95:-N/A}" "${new_p95:-N/A}" "$(format_diff "${diff_p95}" "latency")"
-    printf "%-12s | %-12s | %-12s | %s\n" "p99" "${base_p99:-N/A}" "${new_p99:-N/A}" "$(format_diff "${diff_p99}" "latency")"
-    printf "%-12s | %-12s | %-12s | %s\n" "rps" "${base_rps:-N/A}" "${new_rps:-N/A}" "$(format_diff "${diff_rps}" "throughput")"
+    # Check thresholds if threshold file is specified
+    local p95_status="ok" p99_status="ok" rps_status="ok" error_status="ok"
+    if [[ -n "${THRESHOLD_FILE}" ]]; then
+        p95_status=$(check_threshold "${new_p95_ms}" "${P95_WARN}" "${P95_ERROR}" "true")
+        p99_status=$(check_threshold "${new_p99_ms}" "${P99_WARN}" "${P99_ERROR}" "true")
 
-    if [[ "${base_error}" != "N/A" ]] || [[ "${new_error}" != "N/A" ]]; then
-        printf "%-12s | %-12s | %-12s | %s\n" "error_rate" "${base_error:-N/A}" "${new_error:-N/A}" "$(format_diff "${diff_error}" "latency")"
+        # RPS degradation: negative diff means regression
+        if [[ "${diff_rps}" != "N/A" ]] && (( $(echo "${diff_rps} < 0" | bc -l 2>/dev/null || echo "0") )); then
+            local rps_degradation
+            rps_degradation=$(echo "${diff_rps}" | sed 's/^-//')
+            rps_status=$(check_threshold "${rps_degradation}" "${RPS_DEGRADATION_WARN}" "${RPS_DEGRADATION_ERROR}" "true")
+        fi
+
+        if [[ "${new_error}" != "N/A" ]]; then
+            error_status=$(check_threshold "${new_error}" "${ERROR_RATE_WARN}" "${ERROR_RATE_ERROR}" "true")
+        fi
+
+        # Mark regression if any error threshold exceeded
+        if [[ "${p95_status}" == "error" ]] || [[ "${p99_status}" == "error" ]] || \
+           [[ "${rps_status}" == "error" ]] || [[ "${error_status}" == "error" ]]; then
+            REGRESSION_DETECTED=true
+        fi
     fi
 
-    # Check for profiling data
-    local base_flamegraph="${base_path}/flamegraph.svg"
-    local new_flamegraph="${new_path}/flamegraph.svg"
+    # Store result for JSON output (using json_value to handle N/A → null conversion)
+    local json_entry
+    json_entry=$(cat <<EOF
+{
+  "scenario": "${scenario_name}",
+  "base": {
+    "p50": $(json_value "${base_p50}" true),
+    "p95": $(json_value "${base_p95}" true),
+    "p99": $(json_value "${base_p99}" true),
+    "rps": $(json_value "${base_rps}"),
+    "error_rate": $(json_value "${base_error}")
+  },
+  "new": {
+    "p50": $(json_value "${new_p50}" true),
+    "p95": $(json_value "${new_p95}" true),
+    "p99": $(json_value "${new_p99}" true),
+    "rps": $(json_value "${new_rps}"),
+    "error_rate": $(json_value "${new_error}")
+  },
+  "diff": {
+    "p50_percent": $(json_value "${diff_p50}"),
+    "p95_percent": $(json_value "${diff_p95}"),
+    "p99_percent": $(json_value "${diff_p99}"),
+    "rps_percent": $(json_value "${diff_rps}"),
+    "error_rate_percent": $(json_value "${diff_error}")
+  },
+  "status": {
+    "p95": "${p95_status}",
+    "p99": "${p99_status}",
+    "rps": "${rps_status}",
+    "error_rate": "${error_status}"
+  }
+}
+EOF
+)
+    JSON_RESULTS+=("${json_entry}")
 
-    if [[ -f "${base_flamegraph}" ]] || [[ -f "${new_flamegraph}" ]]; then
+    # Print comparison table (skip if JSON output mode)
+    if [[ "${JSON_OUTPUT}" != "true" ]]; then
         echo ""
-        echo -e "${YELLOW}Profiling data available:${NC}"
-        [[ -f "${base_flamegraph}" ]] && echo "  Base: ${base_flamegraph}"
-        [[ -f "${new_flamegraph}" ]] && echo "  New:  ${new_flamegraph}"
+        echo -e "${BOLD}${CYAN}=== ${scenario_name} ===${NC}"
+        echo ""
+        printf "%-12s | %-12s | %-12s | %-10s\n" "Metric" "Base" "New" "Diff"
+        printf "%-12s-+-%-12s-+-%-12s-+-%-10s\n" "------------" "------------" "------------" "----------"
+        printf "%-12s | %-12s | %-12s | %s\n" "p50" "${base_p50:-N/A}" "${new_p50:-N/A}" "$(format_diff "${diff_p50}" "latency")"
+        printf "%-12s | %-12s | %-12s | %s\n" "p95" "${base_p95:-N/A}" "${new_p95:-N/A}" "$(format_diff "${diff_p95}" "latency")"
+        printf "%-12s | %-12s | %-12s | %s\n" "p99" "${base_p99:-N/A}" "${new_p99:-N/A}" "$(format_diff "${diff_p99}" "latency")"
+        printf "%-12s | %-12s | %-12s | %s\n" "rps" "${base_rps:-N/A}" "${new_rps:-N/A}" "$(format_diff "${diff_rps}" "throughput")"
+
+        if [[ "${base_error}" != "N/A" ]] || [[ "${new_error}" != "N/A" ]]; then
+            printf "%-12s | %-12s | %-12s | %s\n" "error_rate" "${base_error:-N/A}" "${new_error:-N/A}" "$(format_diff "${diff_error}" "latency")"
+        fi
+
+        # Show threshold warnings/errors
+        if [[ -n "${THRESHOLD_FILE}" ]]; then
+            if [[ "${p95_status}" != "ok" ]]; then
+                local status_color="${YELLOW}"
+                [[ "${p95_status}" == "error" ]] && status_color="${RED}"
+                echo -e "${status_color}  [${p95_status}] p95 latency: ${new_p95_ms}ms (warn: ${P95_WARN}ms, error: ${P95_ERROR}ms)${NC}"
+            fi
+            if [[ "${p99_status}" != "ok" ]]; then
+                local status_color="${YELLOW}"
+                [[ "${p99_status}" == "error" ]] && status_color="${RED}"
+                echo -e "${status_color}  [${p99_status}] p99 latency: ${new_p99_ms}ms (warn: ${P99_WARN}ms, error: ${P99_ERROR}ms)${NC}"
+            fi
+            if [[ "${rps_status}" != "ok" ]]; then
+                local status_color="${YELLOW}"
+                [[ "${rps_status}" == "error" ]] && status_color="${RED}"
+                echo -e "${status_color}  [${rps_status}] RPS degradation: ${diff_rps}% (warn: ${RPS_DEGRADATION_WARN}%, error: ${RPS_DEGRADATION_ERROR}%)${NC}"
+            fi
+            if [[ "${error_status}" != "ok" ]]; then
+                local status_color="${YELLOW}"
+                [[ "${error_status}" == "error" ]] && status_color="${RED}"
+                echo -e "${status_color}  [${error_status}] Error rate: ${new_error} (warn: ${ERROR_RATE_WARN}, error: ${ERROR_RATE_ERROR})${NC}"
+            fi
+        fi
+
+        # Check for profiling data
+        local base_flamegraph="${base_path}/flamegraph.svg"
+        local new_flamegraph="${new_path}/flamegraph.svg"
+
+        if [[ -f "${base_flamegraph}" ]] || [[ -f "${new_flamegraph}" ]]; then
+            echo ""
+            echo -e "${YELLOW}Profiling data available:${NC}"
+            [[ -f "${base_flamegraph}" ]] && echo "  Base: ${base_flamegraph}"
+            [[ -f "${new_flamegraph}" ]] && echo "  New:  ${new_flamegraph}"
+        fi
     fi
 }
 
@@ -289,11 +505,19 @@ compare_single() {
 # Main
 # =============================================================================
 
-echo ""
-echo -e "${BOLD}=== Benchmark Comparison ===${NC}"
-echo ""
-echo "Base: ${BASE_DIR}"
-echo "New:  ${NEW_DIR}"
+# Load thresholds if specified
+if [[ -n "${THRESHOLD_FILE}" ]]; then
+    load_thresholds "${THRESHOLD_FILE}"
+fi
+
+# Print header (skip if JSON output mode)
+if [[ "${JSON_OUTPUT}" != "true" ]]; then
+    echo ""
+    echo -e "${BOLD}=== Benchmark Comparison ===${NC}"
+    echo ""
+    echo "Base: ${BASE_DIR}"
+    echo "New:  ${NEW_DIR}"
+fi
 
 # Determine comparison mode
 # Mode 1: Direct comparison (both directories have wrk.txt)
@@ -331,7 +555,7 @@ else
 
     # Check for scenarios in new that are not in base
     for scenario in ${new_scenarios}; do
-        local check_base_path="${BASE_DIR}/${scenario}"
+        check_base_path="${BASE_DIR}/${scenario}"
         if [[ ! -d "${check_base_path}" ]] && [[ "${scenario}" != "${NEW_DIR}" ]]; then
             missing_in_base+=("${scenario}")
         fi
@@ -364,9 +588,49 @@ else
     fi
 fi
 
-echo ""
-echo -e "${BOLD}=== Comparison Complete ===${NC}"
-echo ""
-echo -e "${GREEN}+${NC} = improvement (lower latency or higher throughput)"
-echo -e "${RED}-${NC} = regression (higher latency or lower throughput)"
-echo ""
+# =============================================================================
+# Output Results
+# =============================================================================
+
+if [[ "${JSON_OUTPUT}" == "true" ]]; then
+    # Build JSON array from collected results
+    echo "{"
+    echo "  \"base_dir\": \"${BASE_DIR}\","
+    echo "  \"new_dir\": \"${NEW_DIR}\","
+    echo "  \"regression_detected\": ${REGRESSION_DETECTED},"
+    echo "  \"comparisons\": ["
+
+    first=true
+    for result in "${JSON_RESULTS[@]}"; do
+        if [[ "${first}" == "true" ]]; then
+            first=false
+        else
+            echo ","
+        fi
+        echo "${result}"
+    done
+
+    echo "  ]"
+    echo "}"
+else
+    echo ""
+    echo -e "${BOLD}=== Comparison Complete ===${NC}"
+    echo ""
+    echo -e "${GREEN}+${NC} = improvement (lower latency or higher throughput)"
+    echo -e "${RED}-${NC} = regression (higher latency or lower throughput)"
+
+    if [[ -n "${THRESHOLD_FILE}" ]]; then
+        echo ""
+        if [[ "${REGRESSION_DETECTED}" == "true" ]]; then
+            echo -e "${RED}REGRESSION DETECTED: One or more metrics exceeded error thresholds.${NC}"
+        else
+            echo -e "${GREEN}All metrics within acceptable thresholds.${NC}"
+        fi
+    fi
+    echo ""
+fi
+
+# Exit with appropriate code
+if [[ "${REGRESSION_DETECTED}" == "true" ]]; then
+    exit 3
+fi

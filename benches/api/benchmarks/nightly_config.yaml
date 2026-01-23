@@ -1,0 +1,44 @@
+# benches/api/benchmarks/nightly_config.yaml
+#
+# Nightly benchmark configuration.
+# Defines which scenarios and variant combinations to run during nightly builds.
+#
+# This configuration should stay in sync with:
+#   - docs/internal/analysis/20260122_2011_api_benchmark_coverage.yaml
+#   - .github/workflows/benchmark-api.yml (benchmark-nightly job)
+
+# Representative scenarios to run in nightly builds
+# These cover the most important backend configurations and workload patterns
+nightly_scenarios:
+  - postgres_redis_read_heavy_warm.yaml
+  - postgres_write_heavy.yaml
+  - mixed_workload_burst.yaml
+
+# Minimal variant set for parameter coverage
+# Each variant overrides scenario defaults with specific parameter combinations
+# These represent key boundary conditions without exhaustive combinatorial testing
+nightly_variants:
+  # Cold cache / no failures / minimal payload
+  # Tests baseline performance with empty cache
+  - hit_rate: 0
+    fail_injection: 0
+    payload: small
+
+  # Warm cache / no failures / standard payload
+  # Tests typical production-like conditions
+  - hit_rate: 50
+    fail_injection: 0
+    payload: medium
+
+  # Hot cache / fault injection / large payload
+  # Tests resilience under stress conditions
+  - hit_rate: 90
+    fail_injection: 0.1
+    payload: large
+
+# Baseline storage configuration
+# Nightly results are saved as GitHub Release assets with this tag pattern
+baseline:
+  release_tag_pattern: "benchmark-baseline-{date}"
+  date_format: "YYYYMMDD"
+  retention_days: 90

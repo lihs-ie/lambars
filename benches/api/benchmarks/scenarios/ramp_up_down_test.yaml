@@ -60,7 +60,13 @@ thresholds:
 # Metadata for result analysis
 metadata:
   test_type: "load_shape"
-  profile: "ramp_up_down"
+  endpoint: "mixed"
+  payload: "medium"
+  cache_strategy: "read-through"
+  hit_rate: 50
+  fail_injection: 0
+  retry: false
+  profile_benchmark: "ramp_up_down"
   purpose: "stability_test"
   tags:
     - "load-shaping"

@@ -68,6 +68,13 @@ thresholds:
 
 metadata:
   test_type: "production_simulation"
+  endpoint: "mixed"
+  payload: "large"
+  cache_strategy: "read-through"
+  hit_rate: 50
+  fail_injection: 0
+  retry: true
+  profile: false
   purpose: "Validate production-level performance characteristics"
   tags:
     - production

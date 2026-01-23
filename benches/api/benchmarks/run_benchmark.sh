@@ -4,32 +4,34 @@
 # Run wrk benchmarks for API endpoints
 #
 # Usage:
-#   ./run_benchmark.sh                    # Run all benchmarks
-#   ./run_benchmark.sh misc               # Run specific benchmark
-#   ./run_benchmark.sh --quick            # Quick test (5s duration)
-#   ./run_benchmark.sh --scenario <yaml>  # Run with scenario configuration
-#   ./run_benchmark.sh --scenario <yaml> --quick misc  # Combined options
-#   ./run_benchmark.sh --profile          # Run with perf profiling
-#   ./run_benchmark.sh --scenario <yaml> --profile  # Scenario with profiling
+#   ./run_benchmark.sh --scenario <yaml>                # Run with scenario configuration (REQUIRED)
+#   ./run_benchmark.sh --scenario <yaml> --quick        # Quick test (5s duration)
+#   ./run_benchmark.sh --scenario <yaml> --profile      # Run with perf profiling
+#   ./run_benchmark.sh --scenario <yaml> --quick --profile  # Combined options
+#
+# IMPORTANT: --scenario is REQUIRED. Use one of the scenarios in benches/api/benchmarks/scenarios/
 #
 # Environment Variables (set via scenario YAML or directly):
 #   API_URL          - API server URL (default: http://localhost:3002)
-#   STORAGE_MODE     - in_memory | postgres
-#   CACHE_MODE       - in_memory | redis
-#   DATA_SCALE       - 1e2 | 1e4 | 1e6 (maps from small/medium/large)
-#   HIT_RATE         - 0 | 50 | 90
-#   CACHE_STRATEGY   - read-through | write-through | write-behind
+#   STORAGE_MODE     - in_memory | postgres (REQUIRED)
+#   CACHE_MODE       - in_memory | redis | none (REQUIRED)
+#   DATA_SCALE       - 1e2 | 1e4 | 1e6 (maps from small/medium/large) (REQUIRED)
+#   HIT_RATE         - 0-100 (default: 50)
+#   CACHE_STRATEGY   - read-through | write-through | write-behind (default: read-through)
 #   RPS_PROFILE      - steady | ramp | burst
 #   THREADS          - wrk threads
 #   CONNECTIONS      - wrk connections
 #   DURATION         - wrk duration
 #   POOL_SIZES       - DB+Redis pool size (combined)
-#   WORKERS          - worker threads
-#   FAIL_RATE        - 0 | 0.1 | 0.5
-#   RETRY            - true | false
-#   PROFILE          - true | false
+#   DATABASE_POOL_SIZE - Database pool size (default: 16)
+#   REDIS_POOL_SIZE  - Redis pool size (default: 8)
+#   WORKERS          - worker threads (default: 4)
+#   FAIL_RATE        - 0.0-1.0 (default: 0)
+#   RETRY            - true | false (default: false)
+#   PROFILE          - true | false (default: false)
 #   ENDPOINT         - target endpoint
-#   PAYLOAD          - small | medium | large
+#   PAYLOAD          - small | medium | large (default: medium)
+#                      (also accepts minimal | standard | complex | heavy, mapped to small/medium/large)
 
 set -euo pipefail
 
@@ -74,11 +76,173 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Support PROFILE environment variable for CI compatibility
+# This allows enabling profiling via env var without --profile flag
+if [[ "${PROFILE:-}" == "true" && "${PROFILE_MODE}" == "false" ]]; then
+    PROFILE_MODE=true
+fi
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
 NC='\033[0m' # No Color
+
+# =============================================================================
+# Scenario Required Check
+# =============================================================================
+
+list_available_scenarios() {
+    local scenarios_dir="${SCRIPT_DIR}/scenarios"
+    echo -e "${CYAN}Available scenarios:${NC}"
+    echo ""
+    for scenario in "${scenarios_dir}"/*.yaml; do
+        if [[ -f "${scenario}" ]]; then
+            local name
+            name=$(basename "${scenario}" .yaml)
+            echo "  - ${name}"
+        fi
+    done
+    echo ""
+    echo "Usage: $0 --scenario <scenario_name_or_path> [--quick] [--profile]"
+    echo ""
+    echo "Examples:"
+    echo "  $0 --scenario tasks_eff"
+    echo "  $0 --scenario scenarios/tasks_eff.yaml --quick"
+    echo "  $0 --scenario postgres_redis_read_heavy_warm --profile"
+}
+
+if [[ -z "${SCENARIO_FILE}" ]]; then
+    echo -e "${RED}Error: --scenario option is REQUIRED${NC}"
+    echo ""
+    list_available_scenarios
+    exit 1
+fi
+
+# Resolve scenario file path
+if [[ ! -f "${SCENARIO_FILE}" ]]; then
+    # Try to find in scenarios directory
+    if [[ -f "${SCRIPT_DIR}/scenarios/${SCENARIO_FILE}" ]]; then
+        SCENARIO_FILE="${SCRIPT_DIR}/scenarios/${SCENARIO_FILE}"
+    elif [[ -f "${SCRIPT_DIR}/scenarios/${SCENARIO_FILE}.yaml" ]]; then
+        SCENARIO_FILE="${SCRIPT_DIR}/scenarios/${SCENARIO_FILE}.yaml"
+    else
+        echo -e "${RED}Error: Scenario file not found: ${SCENARIO_FILE}${NC}"
+        echo ""
+        list_available_scenarios
+        exit 1
+    fi
+fi
+
+# =============================================================================
+# Endpoint to Lua Script Mapping
+# =============================================================================
+#
+# Maps API endpoints to their corresponding Lua benchmark scripts.
+# This enables scenario-driven script selection based on metadata.endpoint.
+#
+# Mapping:
+#   "POST /tasks-eff"               -> tasks_eff
+#   "POST /tasks/bulk"              -> tasks_bulk
+#   "POST /tasks/search"            -> tasks_search
+#   "PUT /tasks/{id}"               -> tasks_update
+#   "GET /projects/{id}/progress"   -> projects_progress
+#   Generic endpoints               -> legacy scripts (recursive, ordered, etc.)
+# =============================================================================
+
+resolve_script_from_endpoint() {
+    local endpoint="$1"
+
+    # Normalize endpoint: remove method prefix if present
+    local path
+    path=$(echo "${endpoint}" | sed 's/^[A-Z]* *//' | tr -d ' ')
+
+    case "${path}" in
+        "/tasks-eff")               echo "tasks_eff" ;;
+        "/tasks/bulk")              echo "tasks_bulk" ;;
+        "/tasks/search")            echo "tasks_search" ;;
+        "/tasks/{id}"|"/tasks/*")   echo "tasks_update" ;;
+        "/projects/{id}/progress"|"/projects/*/progress")  echo "projects_progress" ;;
+        "/tasks")                   echo "recursive" ;;
+        *)                          echo "" ;;  # Unknown endpoint
+    esac
+}
+
+# Resolve scripts from scenario configuration
+resolve_scripts_from_scenario() {
+    local scenario_file="$1"
+    local scripts=()
+
+    # Check if yq is available
+    if ! command -v yq &> /dev/null; then
+        echo -e "${YELLOW}Warning: yq not available, using grep fallback for script resolution${NC}" >&2
+        # Fallback: try to extract endpoint from metadata using grep
+        local endpoint
+        endpoint=$(grep -E '^\s*endpoint:' "${scenario_file}" 2>/dev/null | head -1 | sed 's/.*endpoint: *"\?\([^"]*\)"\?/\1/' | tr -d '"')
+        if [[ -n "${endpoint}" ]]; then
+            local script
+            script=$(resolve_script_from_endpoint "${endpoint}")
+            if [[ -n "${script}" ]]; then
+                echo "${script}"
+                return 0
+            fi
+        fi
+        # Fallback to legacy scripts
+        echo "recursive ordered traversable alternative async_pipeline bifunctor applicative optics misc"
+        return 0
+    fi
+
+    # Try metadata.endpoint first (single endpoint scenario)
+    local metadata_endpoint
+    metadata_endpoint=$(yq '.metadata.endpoint // null' "${scenario_file}" | tr -d '"')
+
+    # If metadata.endpoint is "mixed", always use legacy scripts for full coverage
+    if [[ "${metadata_endpoint}" == "mixed" ]]; then
+        echo "recursive ordered traversable alternative async_pipeline bifunctor applicative optics misc"
+        return 0
+    fi
+
+    if [[ "${metadata_endpoint}" != "null" && -n "${metadata_endpoint}" ]]; then
+        local script
+        script=$(resolve_script_from_endpoint "${metadata_endpoint}")
+        if [[ -n "${script}" ]]; then
+            # Verify the script exists
+            if [[ -f "${SCRIPT_DIR}/scripts/${script}.lua" ]]; then
+                echo "${script}"
+                return 0
+            else
+                echo -e "${YELLOW}Warning: Script ${script}.lua not found for endpoint ${metadata_endpoint}${NC}" >&2
+            fi
+        fi
+    fi
+
+    # Try endpoints array (multi-endpoint scenario)
+    local endpoints_count
+    endpoints_count=$(yq '.endpoints | length // 0' "${scenario_file}")
+
+    if [[ "${endpoints_count}" -gt 0 ]]; then
+        for i in $(seq 0 $((endpoints_count - 1))); do
+            local ep
+            ep=$(yq ".endpoints[${i}]" "${scenario_file}" | tr -d '"')
+            local script
+            script=$(resolve_script_from_endpoint "${ep}")
+            if [[ -n "${script}" && -f "${SCRIPT_DIR}/scripts/${script}.lua" ]]; then
+                scripts+=("${script}")
+            fi
+        done
+
+        if [[ ${#scripts[@]} -gt 0 ]]; then
+            # Remove duplicates and return
+            echo "${scripts[@]}" | tr ' ' '\n' | sort -u | tr '\n' ' '
+            return 0
+        fi
+    fi
+
+    # Fallback: use legacy scripts for general scenarios
+    echo "recursive ordered traversable alternative async_pipeline bifunctor applicative optics misc"
+}
 
 # =============================================================================
 # Scenario YAML Environment Variable Loading
@@ -171,7 +335,10 @@ load_scenario_env_vars() {
             *)          payload="medium" ;;
         esac
     fi
-    export PAYLOAD="${payload}"
+    # Only set PAYLOAD if not already set from environment (allows CI variants to override)
+    if [[ -z "${PAYLOAD:-}" ]]; then
+        export PAYLOAD="${payload}"
+    fi
 
     # RPS profile: constant -> steady, ramp_up_down -> ramp, burst -> burst
     local rps_profile
@@ -215,20 +382,39 @@ load_scenario_env_vars() {
     # ==========================================================================
     # Concurrency Settings (WORKERS, POOL_SIZES)
     # ==========================================================================
+    # Priority: .concurrency.* > .worker_config.* > .pool_sizes.*
 
-    # Workers
+    # Workers: prefer concurrency.worker_threads, fallback to worker_config.worker_threads
     local worker_threads
     worker_threads=$(yq '.concurrency.worker_threads // null' "${scenario_file}")
+    if [[ "${worker_threads}" == "null" ]]; then
+        worker_threads=$(yq '.worker_config.worker_threads // null' "${scenario_file}")
+    fi
     if [[ "${worker_threads}" != "null" ]]; then
         export WORKERS="${worker_threads}"
         export WORKER_THREADS="${worker_threads}"
     fi
 
-    # Pool sizes (combined DB + Redis)
+    # Pool sizes: prefer concurrency.*, fallback to pool_sizes.*
     local database_pool_size redis_pool_size
-    database_pool_size=$(yq '.concurrency.database_pool_size // 0' "${scenario_file}")
-    redis_pool_size=$(yq '.concurrency.redis_pool_size // 0' "${scenario_file}")
-    if [[ "${database_pool_size}" != "0" ]] || [[ "${redis_pool_size}" != "0" ]]; then
+
+    # Try concurrency.* first
+    database_pool_size=$(yq '.concurrency.database_pool_size // null' "${scenario_file}")
+    redis_pool_size=$(yq '.concurrency.redis_pool_size // null' "${scenario_file}")
+
+    # Fallback to pool_sizes.* if concurrency.* not set
+    if [[ "${database_pool_size}" == "null" ]]; then
+        database_pool_size=$(yq '.pool_sizes.database_pool_size // 0' "${scenario_file}")
+    fi
+    if [[ "${redis_pool_size}" == "null" ]]; then
+        redis_pool_size=$(yq '.pool_sizes.redis_pool_size // 0' "${scenario_file}")
+    fi
+
+    # Set environment variables if values are present
+    if [[ "${database_pool_size}" != "null" && "${database_pool_size}" != "0" ]] || \
+       [[ "${redis_pool_size}" != "null" && "${redis_pool_size}" != "0" ]]; then
+        database_pool_size=${database_pool_size:-0}
+        redis_pool_size=${redis_pool_size:-0}
         local pool_sizes=$((database_pool_size + redis_pool_size))
         export POOL_SIZES="${pool_sizes}"
         export DATABASE_POOL_SIZE="${database_pool_size}"
@@ -262,7 +448,10 @@ load_scenario_env_vars() {
             hit_rate="50"
         fi
     fi
-    export HIT_RATE="${hit_rate}"
+    # Only set HIT_RATE if not already set from environment (allows CI variants to override)
+    if [[ -z "${HIT_RATE:-}" ]]; then
+        export HIT_RATE="${hit_rate}"
+    fi
 
     # Cache strategy
     local cache_strategy
@@ -274,12 +463,15 @@ load_scenario_env_vars() {
     # ==========================================================================
 
     # Fail injection rate: prefer metadata.fail_injection, fallback to error_config.inject_error_rate
-    local fail_injection
-    fail_injection=$(yq '.metadata.fail_injection // null' "${scenario_file}")
-    if [[ "${fail_injection}" == "null" ]]; then
-        fail_injection=$(yq '.error_config.inject_error_rate // 0' "${scenario_file}")
+    # Only set FAIL_RATE if not already set from environment (allows CI variants to override)
+    if [[ -z "${FAIL_RATE:-}" ]]; then
+        local fail_injection
+        fail_injection=$(yq '.metadata.fail_injection // null' "${scenario_file}")
+        if [[ "${fail_injection}" == "null" ]]; then
+            fail_injection=$(yq '.error_config.inject_error_rate // 0' "${scenario_file}")
+        fi
+        export FAIL_RATE="${fail_injection}"
     fi
-    export FAIL_RATE="${fail_injection}"
 
     # Retry: prefer metadata.retry, fallback to error_config.max_retries > 0
     local retry
@@ -346,6 +538,13 @@ load_scenario_env_vars() {
         export TARGET_RPS="${target_rps}"
     fi
 
+    # Seed for reproducible data generation
+    local seed
+    seed=$(yq '.seed // null' "${scenario_file}")
+    if [[ "${seed}" != "null" && -n "${seed}" ]]; then
+        export SEED="${seed}"
+    fi
+
     # ==========================================================================
     # Summary Output
     # ==========================================================================
@@ -359,16 +558,204 @@ load_scenario_env_vars() {
     [[ -n "${ENDPOINT:-}" ]] && echo "  Endpoint: ${ENDPOINT}"
     [[ -n "${WORKERS:-}" ]] && echo "  Workers: ${WORKERS}"
     [[ -n "${POOL_SIZES:-}" ]] && echo "  Pool sizes: ${POOL_SIZES}"
+    [[ -n "${SEED:-}" ]] && echo "  Seed: ${SEED}"
     [[ "${PROFILE_MODE}" == "true" ]] && echo "  Profiling: enabled"
 }
 
-# Load scenario environment variables if scenario file is provided
-if [[ -n "${SCENARIO_FILE}" ]]; then
-    load_scenario_env_vars "${SCENARIO_FILE}"
-    # Update results directory to include scenario name
-    RESULTS_DIR="${SCRIPT_DIR}/results/${TIMESTAMP}/${SCENARIO_NAME}"
-    echo ""
+# =============================================================================
+# Parameter Validation
+# =============================================================================
+#
+# Validates all scenario parameters to ensure they are within acceptable ranges.
+#
+# Required parameters (error if not set or invalid):
+#   - storage_mode: in_memory | postgres
+#   - cache_mode: in_memory | redis | none
+#   - data_scale: small | medium | large (mapped to 1e2 | 1e4 | 1e6)
+#
+# Optional parameters (defaults applied, validated if set):
+#   - hit_rate: 0-100 (default: 50)
+#   - database_pool_size: positive integer (default: 16)
+#   - redis_pool_size: positive integer (default: 8)
+#   - workers: positive integer (default: 4)
+#   - fail_rate: 0.0-1.0 (default: 0)
+#   - profile: true | false (default: false)
+#   - payload_variant: minimal | standard | complex | heavy (default: standard)
+#   - cache_strategy: read-through | write-through | write-behind (default: read-through)
+# =============================================================================
+
+validate_scenario_parameters() {
+    local has_errors=false
+
+    echo "Validating scenario parameters..."
+
+    # -------------------------------------------------------------------------
+    # Required parameters
+    # -------------------------------------------------------------------------
+
+    # storage_mode: in_memory | postgres
+    if [[ -z "${STORAGE_MODE:-}" ]]; then
+        echo -e "${RED}Error: storage_mode is required but not set${NC}"
+        has_errors=true
+    elif [[ "${STORAGE_MODE}" != "in_memory" && "${STORAGE_MODE}" != "postgres" ]]; then
+        echo -e "${RED}Error: Invalid storage_mode '${STORAGE_MODE}'. Must be: in_memory | postgres${NC}"
+        has_errors=true
+    fi
+
+    # cache_mode: in_memory | redis | none
+    if [[ -z "${CACHE_MODE:-}" ]]; then
+        echo -e "${RED}Error: cache_mode is required but not set${NC}"
+        has_errors=true
+    elif [[ "${CACHE_MODE}" != "in_memory" && "${CACHE_MODE}" != "redis" && "${CACHE_MODE}" != "none" ]]; then
+        echo -e "${RED}Error: Invalid cache_mode '${CACHE_MODE}'. Must be: in_memory | redis | none${NC}"
+        has_errors=true
+    fi
+
+    # data_scale: 1e2 | 1e4 | 1e6
+    if [[ -z "${DATA_SCALE:-}" ]]; then
+        echo -e "${RED}Error: data_scale is required but not set${NC}"
+        has_errors=true
+    elif [[ "${DATA_SCALE}" != "1e2" && "${DATA_SCALE}" != "1e4" && "${DATA_SCALE}" != "1e6" ]]; then
+        echo -e "${RED}Error: Invalid data_scale '${DATA_SCALE}'. Must be: 1e2 | 1e4 | 1e6 (mapped from small | medium | large)${NC}"
+        has_errors=true
+    fi
+
+    # -------------------------------------------------------------------------
+    # Optional parameters with validation
+    # -------------------------------------------------------------------------
+
+    # hit_rate: 0-100 (default: 50)
+    if [[ -z "${HIT_RATE:-}" ]]; then
+        export HIT_RATE="50"
+    elif ! [[ "${HIT_RATE}" =~ ^[0-9]+$ ]] || [[ "${HIT_RATE}" -lt 0 ]] || [[ "${HIT_RATE}" -gt 100 ]]; then
+        echo -e "${RED}Error: Invalid hit_rate '${HIT_RATE}'. Must be: 0-100${NC}"
+        has_errors=true
+    fi
+
+    # database_pool_size: positive integer (default: 16)
+    if [[ -z "${DATABASE_POOL_SIZE:-}" ]]; then
+        export DATABASE_POOL_SIZE="16"
+    elif ! [[ "${DATABASE_POOL_SIZE}" =~ ^[0-9]+$ ]] || [[ "${DATABASE_POOL_SIZE}" -lt 1 ]]; then
+        echo -e "${RED}Error: Invalid database_pool_size '${DATABASE_POOL_SIZE}'. Must be: positive integer${NC}"
+        has_errors=true
+    fi
+
+    # redis_pool_size: positive integer (default: 8)
+    if [[ -z "${REDIS_POOL_SIZE:-}" ]]; then
+        export REDIS_POOL_SIZE="8"
+    elif ! [[ "${REDIS_POOL_SIZE}" =~ ^[0-9]+$ ]] || [[ "${REDIS_POOL_SIZE}" -lt 1 ]]; then
+        echo -e "${RED}Error: Invalid redis_pool_size '${REDIS_POOL_SIZE}'. Must be: positive integer${NC}"
+        has_errors=true
+    fi
+
+    # workers: positive integer (default: 4)
+    if [[ -z "${WORKERS:-}" ]]; then
+        export WORKERS="4"
+    elif ! [[ "${WORKERS}" =~ ^[0-9]+$ ]] || [[ "${WORKERS}" -lt 1 ]]; then
+        echo -e "${RED}Error: Invalid workers '${WORKERS}'. Must be: positive integer${NC}"
+        has_errors=true
+    fi
+
+    # fail_rate: 0.0-1.0 (default: 0)
+    if [[ -z "${FAIL_RATE:-}" ]]; then
+        export FAIL_RATE="0"
+    else
+        # First check if it's a valid numeric format (integer or decimal)
+        if ! [[ "${FAIL_RATE}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+            echo -e "${RED}Error: Invalid fail_rate '${FAIL_RATE}'. Must be a number in range 0.0-1.0${NC}"
+            has_errors=true
+        else
+            # Then validate range 0.0-1.0
+            local is_valid_fail_rate
+            is_valid_fail_rate=$(echo "${FAIL_RATE}" | awk '{
+                if ($1 >= 0 && $1 <= 1) print "valid"
+                else print "invalid"
+            }')
+            if [[ "${is_valid_fail_rate}" != "valid" ]]; then
+                echo -e "${RED}Error: Invalid fail_rate '${FAIL_RATE}'. Must be in range 0.0-1.0${NC}"
+                has_errors=true
+            fi
+        fi
+    fi
+
+    # profile: true | false (default: false)
+    if [[ -z "${PROFILE:-}" ]]; then
+        export PROFILE="false"
+    elif [[ "${PROFILE}" != "true" && "${PROFILE}" != "false" ]]; then
+        echo -e "${RED}Error: Invalid profile '${PROFILE}'. Must be: true | false${NC}"
+        has_errors=true
+    fi
+
+    # retry: true | false (default: false)
+    if [[ -z "${RETRY:-}" ]]; then
+        export RETRY="false"
+    elif [[ "${RETRY}" != "true" && "${RETRY}" != "false" ]]; then
+        echo -e "${RED}Error: Invalid retry '${RETRY}'. Must be: true | false${NC}"
+        has_errors=true
+    fi
+
+    # payload (PAYLOAD): minimal | standard | complex | heavy (or small | medium | large) -> small | medium | large (default: medium)
+    if [[ -z "${PAYLOAD:-}" ]]; then
+        export PAYLOAD="medium"
+    else
+        # Map payload_variant names to internal names if needed
+        case "${PAYLOAD}" in
+            "minimal")  export PAYLOAD="small" ;;
+            "standard") export PAYLOAD="medium" ;;
+            "complex"|"heavy") export PAYLOAD="large" ;;
+            "small"|"medium"|"large") ;; # Already in internal format
+            *)
+                echo -e "${RED}Error: Invalid payload '${PAYLOAD}'. Must be: minimal | standard | complex | heavy (or small | medium | large)${NC}"
+                has_errors=true
+                ;;
+        esac
+    fi
+
+    # cache_strategy: read-through | write-through | write-behind (default: read-through)
+    if [[ -z "${CACHE_STRATEGY:-}" ]]; then
+        export CACHE_STRATEGY="read-through"
+    elif [[ "${CACHE_STRATEGY}" != "read-through" && "${CACHE_STRATEGY}" != "write-through" && "${CACHE_STRATEGY}" != "write-behind" ]]; then
+        echo -e "${RED}Error: Invalid cache_strategy '${CACHE_STRATEGY}'. Must be: read-through | write-through | write-behind${NC}"
+        has_errors=true
+    fi
+
+    # -------------------------------------------------------------------------
+    # Calculate POOL_SIZES if not set
+    # -------------------------------------------------------------------------
+    if [[ -z "${POOL_SIZES:-}" ]]; then
+        export POOL_SIZES=$((DATABASE_POOL_SIZE + REDIS_POOL_SIZE))
+    fi
+
+    # -------------------------------------------------------------------------
+    # Exit if validation failed
+    # -------------------------------------------------------------------------
+    if [[ "${has_errors}" == "true" ]]; then
+        echo ""
+        echo -e "${RED}Validation failed. Please fix the errors above.${NC}"
+        exit 1
+    fi
+
+    echo -e "${GREEN}Validation passed${NC}"
+}
+
+# Load scenario environment variables (scenario is now required)
+load_scenario_env_vars "${SCENARIO_FILE}"
+# Update results directory to include scenario name
+RESULTS_DIR="${SCRIPT_DIR}/results/${TIMESTAMP}/${SCENARIO_NAME}"
+
+# Apply QUICK_MODE overrides after scenario loading
+# This ensures --quick flag takes precedence over scenario-defined duration
+if [[ "${QUICK_MODE}" == "true" ]]; then
+    echo -e "${CYAN}Quick mode enabled: overriding duration/threads/connections${NC}"
+    DURATION="5s"
+    THREADS="1"
+    CONNECTIONS="5"
+    export DURATION THREADS CONNECTIONS
 fi
+
+# Validate all parameters
+validate_scenario_parameters
+echo ""
 
 echo "=============================================="
 echo "  API Workload Benchmark"
@@ -424,6 +811,7 @@ generate_meta_json() {
     local result_file="$1"
     local script_name="$2"
     local meta_file="${RESULTS_DIR}/meta.json"
+    local lua_metrics_file="${RESULTS_DIR}/lua_metrics.json"
 
     # Parse wrk output for metrics
     local rps avg_latency p50 p95 p99 error_rate total_requests
@@ -434,10 +822,9 @@ generate_meta_json() {
     p99=$(grep "99%" "${result_file}" 2>/dev/null | awk '{print $2}' || echo "0")
     total_requests=$(grep "requests in" "${result_file}" 2>/dev/null | awk '{print $1}' || echo "0")
 
-    # Calculate error rate from socket errors
-    local socket_errors=0
+    # Parse socket errors breakdown
+    local connect_err=0 read_err=0 write_err=0 timeout_err=0 socket_errors=0
     if grep -q "Socket errors:" "${result_file}" 2>/dev/null; then
-        local connect_err read_err write_err timeout_err
         connect_err=$(grep "Socket errors:" "${result_file}" | sed 's/.*connect \([0-9]*\).*/\1/' 2>/dev/null || echo "0")
         read_err=$(grep "Socket errors:" "${result_file}" | sed 's/.*read \([0-9]*\).*/\1/' 2>/dev/null || echo "0")
         write_err=$(grep "Socket errors:" "${result_file}" | sed 's/.*write \([0-9]*\).*/\1/' 2>/dev/null || echo "0")
@@ -445,37 +832,97 @@ generate_meta_json() {
         socket_errors=$((connect_err + read_err + write_err + timeout_err))
     fi
 
+    # Parse HTTP errors from wrk output ("Non-2xx or 3xx responses: N")
+    local http_errors_from_wrk=0
+    if grep -q "Non-2xx or 3xx responses:" "${result_file}" 2>/dev/null; then
+        http_errors_from_wrk=$(grep "Non-2xx or 3xx responses:" "${result_file}" | awk '{print $NF}' 2>/dev/null || echo "0")
+    fi
+
+    # Calculate total errors (socket + HTTP)
+    local total_errors=$((socket_errors + http_errors_from_wrk))
+
+    # Calculate error rate from total errors
     if [[ "${total_requests}" -gt 0 ]]; then
-        error_rate=$(echo "scale=4; ${socket_errors} / ${total_requests}" | bc 2>/dev/null || echo "0")
+        error_rate=$(echo "scale=4; ${total_errors} / ${total_requests}" | bc 2>/dev/null || echo "0")
     else
         error_rate="0"
     fi
 
-    # Generate meta.json with keys matching requirements
+    # Collect environment information
+    local os_name cpu_cores memory_gb rust_version
+    os_name="$(uname -s) $(uname -r)"
+    if [[ "$(uname)" == "Darwin" ]]; then
+        cpu_cores=$(sysctl -n hw.ncpu 2>/dev/null || echo "0")
+        memory_gb=$(( $(sysctl -n hw.memsize 2>/dev/null || echo "0") / 1073741824 ))
+    else
+        cpu_cores=$(nproc 2>/dev/null || echo "0")
+        memory_gb=$(( $(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}' || echo "0") / 1048576 ))
+    fi
+    rust_version=$(rustc --version 2>/dev/null | awk '{print $2}' || echo "unknown")
+
+    # Default cache metrics (will be updated from lua_metrics if available)
+    local cache_hit_rate="null" cache_misses="null" cache_hits="null"
+
+    # HTTP error counts: start with wrk total, update from lua_metrics if available
+    # wrk doesn't distinguish 4xx vs 5xx, so we track them separately
+    local http_4xx=0 http_5xx=0 http_status_total="${http_errors_from_wrk}"
+
+    # Check for profiling files
+    local perf_data_path="null" flamegraph_path="null" pprof_path="null"
+    if [[ "${PROFILE_MODE}" == "true" ]]; then
+        [[ -f "${RESULTS_DIR}/perf.data" ]] && perf_data_path="\"perf.data\""
+        [[ -f "${RESULTS_DIR}/flamegraph.svg" ]] && flamegraph_path="\"flamegraph.svg\""
+        [[ -f "${RESULTS_DIR}/pprof.pb.gz" ]] && pprof_path="\"pprof.pb.gz\""
+    fi
+
+    # Try to read lua_metrics.json if it exists (overrides wrk defaults)
+    if [[ -f "${lua_metrics_file}" ]] && command -v jq &> /dev/null; then
+        cache_hit_rate=$(jq -r '.cache.hit_rate // null' "${lua_metrics_file}" 2>/dev/null || echo "null")
+        cache_misses=$(jq -r '.cache.cache_misses // null' "${lua_metrics_file}" 2>/dev/null || echo "null")
+        cache_hits=$(jq -r '.cache.cache_hits // null' "${lua_metrics_file}" 2>/dev/null || echo "null")
+        # Override HTTP error counts from lua_metrics if available
+        local lua_4xx lua_5xx
+        lua_4xx=$(jq -r '.errors.status["4xx"] // 0' "${lua_metrics_file}" 2>/dev/null || echo "0")
+        lua_5xx=$(jq -r '.errors.status["5xx"] // 0' "${lua_metrics_file}" 2>/dev/null || echo "0")
+        # Only use lua_metrics values if they're non-zero (more accurate breakdown)
+        if [[ "${lua_4xx}" != "0" || "${lua_5xx}" != "0" ]]; then
+            http_4xx="${lua_4xx}"
+            http_5xx="${lua_5xx}"
+            http_status_total=$((lua_4xx + lua_5xx))
+        fi
+    fi
+
+    # Get wrk output filename
+    local wrk_output_filename
+    wrk_output_filename=$(basename "${result_file}")
+
+    # Generate meta.json with extended schema (version 2.0)
     cat > "${meta_file}" << EOF
 {
+  "version": "2.0",
   "scenario": {
     "name": "${SCENARIO_NAME:-${script_name}}",
     "storage_mode": "${STORAGE_MODE:-unknown}",
     "cache_mode": "${CACHE_MODE:-unknown}",
     "data_scale": "${DATA_SCALE:-1e4}",
-    "payload": "${PAYLOAD:-medium}",
+    "payload_variant": "${PAYLOAD:-medium}",
     "rps_profile": "${RPS_PROFILE:-steady}",
     "hit_rate": ${HIT_RATE:-50},
     "cache_strategy": "${CACHE_STRATEGY:-read-through}",
     "fail_injection": ${FAIL_RATE:-0},
     "retry": ${RETRY:-false},
-    "endpoint": "${ENDPOINT:-unknown}"
+    "endpoint": "${ENDPOINT:-mixed}"
   },
   "execution": {
     "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-    "api_url": "${API_URL}",
     "threads": ${THREADS},
     "connections": ${CONNECTIONS},
     "duration": "${DURATION}",
-    "workers": ${WORKERS:-0},
-    "pool_sizes": ${POOL_SIZES:-0},
-    "profile_enabled": ${PROFILE_MODE}
+    "workers": ${WORKERS:-4},
+    "pool_sizes": ${POOL_SIZES:-24},
+    "database_pool_size": ${DATABASE_POOL_SIZE:-16},
+    "redis_pool_size": ${REDIS_POOL_SIZE:-8},
+    "seed": ${SEED:-null}
   },
   "results": {
     "rps": ${rps:-0},
@@ -484,13 +931,45 @@ generate_meta_json() {
     "p50": "${p50:-0}",
     "p95": "${p95:-0}",
     "p99": "${p99:-0}",
-    "error_rate": ${error_rate:-0},
-    "socket_errors": ${socket_errors:-0}
+    "error_rate": ${error_rate:-0}
+  },
+  "errors": {
+    "socket_errors": {
+      "connect": ${connect_err:-0},
+      "read": ${read_err:-0},
+      "write": ${write_err:-0},
+      "timeout": ${timeout_err:-0},
+      "total": ${socket_errors:-0}
+    },
+    "http_4xx": ${http_4xx:-0},
+    "http_5xx": ${http_5xx:-0},
+    "http_status_total": ${http_status_total:-0}
+  },
+  "cache": {
+    "hit_rate": ${cache_hit_rate},
+    "misses": ${cache_misses},
+    "hits": ${cache_hits}
+  },
+  "profiling": {
+    "perf_data": ${perf_data_path},
+    "flamegraph": ${flamegraph_path},
+    "pprof": ${pprof_path}
+  },
+  "files": {
+    "wrk_output": "${wrk_output_filename}",
+    "lua_metrics": $(if [[ -f "${lua_metrics_file}" ]]; then echo '"lua_metrics.json"'; else echo 'null'; fi)
+  },
+  "environment": {
+    "api_url": "${API_URL}",
+    "rust_version": "${rust_version}",
+    "os": "${os_name}",
+    "cpu_cores": ${cpu_cores},
+    "memory_gb": ${memory_gb}
   }
 }
 EOF
 
-    echo -e "${GREEN}meta.json generated${NC}"
+    echo -e "${GREEN}meta.json generated (v2.0)${NC}"
 }
 
 # =============================================================================
@@ -718,7 +1197,14 @@ run_benchmark() {
 
     local result_file="${script_results_dir}/wrk.txt"
 
-    # Start profiling if enabled
+    # Set LUA_RESULTS_DIR for Lua scripts to output lua_metrics.json
+    export LUA_RESULTS_DIR="${script_results_dir}"
+
+    # Switch RESULTS_DIR to script-specific directory for profiling, flamegraph, and meta.json
+    local orig_results_dir="${RESULTS_DIR}"
+    RESULTS_DIR="${script_results_dir}"
+
+    # Start profiling if enabled (now writes to script_results_dir)
     start_profiling
 
     # Run wrk and capture output (with --latency for percentile stats)
@@ -731,11 +1217,8 @@ run_benchmark() {
         # Stop profiling
         stop_profiling
 
-        # Generate flamegraph if profiling was enabled (save to script-specific dir)
-        local orig_results_dir="${RESULTS_DIR}"
-        RESULTS_DIR="${script_results_dir}"
+        # Generate flamegraph if profiling was enabled
         generate_flamegraph
-        RESULTS_DIR="${orig_results_dir}"
 
         # Extract key metrics for summary
         local reqs_sec=$(grep "Requests/sec:" "${result_file}" | awk '{print $2}')
@@ -757,9 +1240,9 @@ run_benchmark() {
         echo "  P99: ${p99:-N/A}" >> "${SUMMARY_FILE}"
 
         # Generate meta.json in script-specific directory
-        local orig_results_dir="${RESULTS_DIR}"
-        RESULTS_DIR="${script_results_dir}"
         generate_meta_json "${result_file}" "${script_name}"
+
+        # Restore RESULTS_DIR
         RESULTS_DIR="${orig_results_dir}"
 
         echo -e "${GREEN}Completed${NC}"
@@ -767,31 +1250,43 @@ run_benchmark() {
         # Stop profiling even on failure
         stop_profiling
 
+        # Restore RESULTS_DIR
+        RESULTS_DIR="${orig_results_dir}"
+
         echo -e "${RED}Failed${NC}"
         echo "${script_name}: FAILED" >> "${SUMMARY_FILE}"
+        return 1
     fi
 }
 
 # Get list of scripts to run
+# Priority: SPECIFIC_SCRIPT (CLI arg) > scenario endpoint mapping > legacy fallback
 if [[ -n "${SPECIFIC_SCRIPT}" ]]; then
+    # Explicit script specified via CLI
     SCRIPTS=("${SPECIFIC_SCRIPT}")
+    echo "Running specific script: ${SPECIFIC_SCRIPT}"
 else
-    SCRIPTS=(
-        "recursive"
-        "ordered"
-        "traversable"
-        "alternative"
-        "async_pipeline"
-        "bifunctor"
-        "applicative"
-        "optics"
-        "misc"
-    )
+    # Resolve scripts from scenario configuration
+    echo "Resolving scripts from scenario..."
+    resolved_scripts=$(resolve_scripts_from_scenario "${SCENARIO_FILE}")
+
+    # Convert space-separated string to array
+    read -ra SCRIPTS <<< "${resolved_scripts}"
+
+    if [[ ${#SCRIPTS[@]} -eq 0 ]]; then
+        echo -e "${RED}Error: No scripts resolved from scenario${NC}"
+        exit 1
+    fi
+
+    echo "Scripts to run: ${SCRIPTS[*]}"
 fi
 
-# Run all benchmarks
+# Run all benchmarks and track failures
+FAILED_SCRIPTS=()
 for script in "${SCRIPTS[@]}"; do
-    run_benchmark "${script}" || true
+    if ! run_benchmark "${script}"; then
+        FAILED_SCRIPTS+=("${script}")
+    fi
 done
 
 echo ""
@@ -890,3 +1385,17 @@ if [ -n "$highest_p99_endpoint" ]; then
 fi
 
 echo ""
+
+# Report failed scripts and exit with error if any failures
+if [[ ${#FAILED_SCRIPTS[@]} -gt 0 ]]; then
+    echo -e "${RED}=============================================="
+    echo "  Benchmark Failures Detected"
+    echo "==============================================${NC}"
+    echo ""
+    echo -e "${RED}Failed scripts:${NC}"
+    for script in "${FAILED_SCRIPTS[@]}"; do
+        echo "  - ${script}"
+    done
+    echo ""
+    exit 1
+fi

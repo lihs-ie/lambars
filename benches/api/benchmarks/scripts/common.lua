@@ -248,7 +248,17 @@ function M.finalize_benchmark(summary, latency, requests)
     if M.result_collector then
         M.result_collector.finalize(summary, latency, requests)
         M.result_collector.print_results()
-        M.result_collector.save_results()
+
+        -- Save lua_metrics.json to LUA_RESULTS_DIR if set
+        local results_dir = os.getenv("LUA_RESULTS_DIR")
+        if results_dir and results_dir ~= "" then
+            local metrics_file = results_dir .. "/lua_metrics.json"
+            M.result_collector.save_results(metrics_file)
+            io.write(string.format("[common] Lua metrics saved to: %s\n", metrics_file))
+        else
+            -- Fallback to default save behavior
+            M.result_collector.save_results()
+        end
     end
 end
 

@@ -33,3 +33,27 @@ endpoints:
 pool_sizes:
   database_pool_size: 20
   redis_pool_size: 40  # Larger Redis pool for caching
+
+# Concurrency settings
+concurrency:
+  worker_threads: 4
+  database_pool_size: 20
+  redis_pool_size: 40
+  max_connections: 80
+
+# Extended metadata for workflow integration
+metadata:
+  test_type: "general_benchmark"
+  endpoint: "mixed"
+  payload: "small"
+  cache_strategy: "read-through"
+  hit_rate: 90
+  fail_injection: 0
+  retry: false
+  profile: false
+  tags:
+    - postgres
+    - redis
+    - large-scale
+    - read-heavy
+    - data-scale-stress

@@ -21,3 +21,26 @@ cache_metrics:
   track_latency: true
   warmup_requests: 1000
   expected_hit_rate: 0.8
+
+# Concurrency settings
+concurrency:
+  worker_threads: 4
+  database_pool_size: 16
+  redis_pool_size: 16
+  max_connections: 50
+
+# Extended metadata for workflow integration
+metadata:
+  test_type: "cache_benchmark"
+  endpoint: "mixed"
+  payload: "medium"
+  cache_strategy: "read-through"
+  hit_rate: 90
+  fail_injection: 0
+  retry: false
+  profile: false
+  tags:
+    - cache
+    - warm-cache
+    - hit-rate
+    - redis

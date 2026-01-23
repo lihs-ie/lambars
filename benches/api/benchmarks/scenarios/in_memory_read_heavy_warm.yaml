@@ -29,3 +29,19 @@ endpoints:
   - "/tasks/{id}"
   - "/tasks/search"
   - "/projects/{id}/progress"
+
+# Extended metadata for workflow integration
+metadata:
+  test_type: "general_benchmark"
+  endpoint: "mixed"
+  payload: "medium"
+  cache_strategy: "read-through"
+  hit_rate: 90
+  fail_injection: 0
+  retry: false
+  profile: false
+  tags:
+    - in-memory
+    - read-heavy
+    - warm-cache
+    - baseline

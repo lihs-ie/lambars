@@ -66,7 +66,13 @@ thresholds:
 # Metadata for result analysis
 metadata:
   test_type: "load_shape"
-  profile: "step_up"
+  endpoint: "mixed"
+  payload: "small"
+  cache_strategy: "read-through"
+  hit_rate: 90
+  fail_injection: 0
+  retry: false
+  profile_benchmark: "step_up"
   purpose: "capacity_test"
   tags:
     - "load-shaping"

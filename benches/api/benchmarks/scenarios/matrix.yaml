@@ -127,3 +127,19 @@ payload_specs:
     subtask_count: 200
     description_length: 5000
     estimated_size_bytes: 80000
+
+# Extended metadata for workflow integration
+# Note: This is a matrix template file, not a direct scenario
+metadata:
+  test_type: "matrix_template"
+  endpoint: "mixed"
+  payload: "medium"
+  cache_strategy: "read-through"
+  hit_rate: 50
+  fail_injection: 0
+  retry: false
+  profile: false
+  tags:
+    - matrix
+    - template
+    - generator

@@ -34,3 +34,26 @@ error_config:
   expected_error_rate: 0.15
   fail_on_error_threshold: true
   inject_error_rate: 0.1
+
+# Concurrency settings
+concurrency:
+  worker_threads: 8
+  database_pool_size: 24
+  redis_pool_size: 16
+  max_connections: 100
+
+# Extended metadata for workflow integration
+metadata:
+  test_type: "chaos_benchmark"
+  endpoint: "mixed"
+  payload: "medium"
+  cache_strategy: "read-through"
+  hit_rate: 50
+  fail_injection: 0.1
+  retry: true
+  profile: false
+  tags:
+    - chaos
+    - fault-injection
+    - resilience
+    - error-rate

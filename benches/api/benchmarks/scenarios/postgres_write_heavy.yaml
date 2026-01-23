@@ -35,3 +35,25 @@ endpoints:
 pool_sizes:
   database_pool_size: 20
   redis_pool_size: 5
+
+# Concurrency settings
+concurrency:
+  worker_threads: 4
+  database_pool_size: 20
+  redis_pool_size: 5
+  max_connections: 50
+
+# Extended metadata for workflow integration
+metadata:
+  test_type: "general_benchmark"
+  endpoint: "mixed"
+  payload: "medium"
+  cache_strategy: "write-through"
+  hit_rate: 50
+  fail_injection: 0
+  retry: false
+  profile: false
+  tags:
+    - postgres
+    - write-heavy
+    - transaction-stress

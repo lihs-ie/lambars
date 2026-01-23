@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "lambars-derive", "xtask"]
+resolver = "3"
+
 [package]
 name = "lambars"
 version = "0.1.0"

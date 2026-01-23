@@ -54,3 +54,27 @@ thresholds:
   p99_latency_ms: 500
   min_rps_achieved: 500
   max_error_rate: 0.01
+
+# Concurrency settings
+concurrency:
+  worker_threads: 4
+  database_pool_size: 20
+  redis_pool_size: 40
+  max_connections: 80
+
+# Extended metadata for workflow integration
+metadata:
+  test_type: "seeded_benchmark"
+  endpoint: "mixed"
+  payload: "small"
+  cache_strategy: "read-through"
+  hit_rate: 0
+  fail_injection: 0
+  retry: false
+  profile: false
+  seed: 42
+  tags:
+    - large-scale
+    - seeded
+    - reproducible
+    - cold-cache

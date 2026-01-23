@@ -68,6 +68,13 @@ thresholds:
 # Metadata
 metadata:
   test_type: "mixed_contention"
+  endpoint: "mixed"
+  payload: "medium"
+  cache_strategy: "read-through"
+  hit_rate: 50
+  fail_injection: 0
+  retry: true
+  profile: false
   purpose: "Test mixed workload with burst traffic pattern"
   tags:
     - mixed_contention

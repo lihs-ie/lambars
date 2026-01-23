@@ -58,6 +58,13 @@ thresholds:
 # Metadata
 metadata:
   test_type: "pool_stress"
+  endpoint: "mixed"
+  payload: "medium"
+  cache_strategy: "read-through"
+  hit_rate: 50
+  fail_injection: 0
+  retry: false
+  profile: false
   purpose: "Test backpressure behavior with small connection pool"
   tags:
     - pool_stress
