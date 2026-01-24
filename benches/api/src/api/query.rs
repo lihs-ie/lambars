@@ -150,7 +150,7 @@ pub struct SearchTasksQuery {
 ///
 /// Valid values are: "title", "tags", "all" (case-insensitive).
 /// Unknown values will result in a 400 Bad Request error.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum SearchScope {
     /// Search only in task titles.
     Title,
@@ -200,6 +200,237 @@ impl<'de> serde::Deserialize<'de> for SearchScope {
         use std::str::FromStr;
         let value = String::deserialize(deserializer)?;
         Self::from_str(&value).map_err(serde::de::Error::custom)
+    }
+}
+
+// =============================================================================
+// Query Normalization (REQ-SEARCH-CACHE-001)
+// =============================================================================
+
+/// Normalized search query for cache key generation.
+///
+/// This structure represents a search query after normalization,
+/// containing both the cache key and tokenized words for potential
+/// future use (e.g., advanced search scoring).
+///
+/// # Normalization Process
+///
+/// 1. **trim** - Remove leading/trailing whitespace
+/// 2. **lowercase** - Case-insensitive matching
+/// 3. **multi-space collapse** - Normalize internal whitespace to single spaces
+///
+/// # Laws
+///
+/// - **Idempotent**: `normalize(normalize(q)) = normalize(q)`
+///
+/// # Examples
+///
+/// ```ignore
+/// let normalized = normalize_query("  Urgent   Task  ");
+/// assert_eq!(normalized.key(), "urgent task");
+/// assert_eq!(normalized.tokens(), &["urgent", "task"]);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NormalizedQuery {
+    /// Normalized query string (for cache key).
+    ///
+    /// This is the result of applying trim, lowercase, and multi-space collapse.
+    key: String,
+
+    /// Tokenized words (for potential future use).
+    ///
+    /// Words are split by whitespace after normalization.
+    /// Empty queries result in an empty token list.
+    tokens: Vec<String>,
+}
+
+impl NormalizedQuery {
+    /// Returns the normalized query key (read-only).
+    ///
+    /// This is the result of applying trim, lowercase, and multi-space collapse.
+    #[must_use]
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// Returns the tokenized words (read-only).
+    ///
+    /// Words are split by whitespace after normalization.
+    /// Empty queries result in an empty token list.
+    #[must_use]
+    pub fn tokens(&self) -> &[String] {
+        &self.tokens
+    }
+
+    /// Returns `true` if the normalized query is empty.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.key.is_empty()
+    }
+
+    /// Consumes the `NormalizedQuery` and returns the underlying key.
+    ///
+    /// This is useful when you need ownership of the key string.
+    #[must_use]
+    pub fn into_key(self) -> String {
+        self.key
+    }
+}
+
+/// Normalizes a search query (pure function).
+///
+/// This function applies the following transformations:
+///
+/// 1. **trim** - Remove leading/trailing whitespace
+/// 2. **lowercase** - Case-insensitive matching
+/// 3. **multi-space collapse** - Normalize internal whitespace to single spaces
+///
+/// # Laws
+///
+/// - **Idempotent**: `normalize_query(normalize_query(q).key()) == normalize_query(q)`
+///
+/// # Arguments
+///
+/// * `raw` - The raw query string from user input
+///
+/// # Returns
+///
+/// A [`NormalizedQuery`] containing:
+/// - `key`: The normalized string suitable for cache key generation
+/// - `tokens`: Individual words split by whitespace
+///
+/// # Examples
+///
+/// ```ignore
+/// // Basic normalization
+/// let result = normalize_query("  Urgent   Task  ");
+/// assert_eq!(result.key(), "urgent task");
+/// assert_eq!(result.tokens(), &["urgent", "task"]);
+///
+/// // Empty query
+/// let empty = normalize_query("   ");
+/// assert_eq!(empty.key(), "");
+/// assert!(empty.tokens().is_empty());
+///
+/// // Already normalized
+/// let already = normalize_query("urgent task");
+/// assert_eq!(already.key(), "urgent task");
+/// ```
+#[must_use]
+pub fn normalize_query(raw: &str) -> NormalizedQuery {
+    // Step 1: trim leading/trailing whitespace
+    let trimmed = raw.trim();
+
+    // Step 2 & 3: lowercase and collapse multi-spaces
+    // We split by whitespace (handles multi-space) and rejoin with single space
+    let tokens: Vec<String> = trimmed.split_whitespace().map(str::to_lowercase).collect();
+
+    let key = tokens.join(" ");
+
+    NormalizedQuery { key, tokens }
+}
+
+/// Cache key for search results.
+///
+/// This structure uniquely identifies a search query for caching purposes.
+/// Two queries are considered equivalent (and thus cacheable) if and only if
+/// all fields match exactly.
+///
+/// # Fields
+///
+/// - `normalized_query`: The normalized query string (from [`normalize_query`])
+/// - `scope`: The search scope (title, tags, or all)
+/// - `limit`: Maximum number of results
+/// - `offset`: Number of results to skip
+///
+/// # Cache Key Semantics
+///
+/// The cache key uses exact matching on all fields. This means:
+/// - `"urgent task"` with limit=50 is different from limit=100
+/// - `"urgent task"` with scope=Title is different from scope=All
+/// - Query normalization ensures case-insensitive and whitespace-normalized matching
+///
+/// # Examples
+///
+/// ```ignore
+/// let key1 = SearchCacheKey::from_raw("  Urgent Task  ", SearchScope::All, Some(50), Some(0));
+/// let key2 = SearchCacheKey::from_raw("urgent task", SearchScope::All, Some(50), Some(0));
+///
+/// // key1 == key2 because the normalized query is the same
+/// assert_eq!(key1, key2);
+///
+/// // Pagination parameters are also normalized:
+/// let key3 = SearchCacheKey::from_raw("test", SearchScope::All, None, None);
+/// let key4 = SearchCacheKey::from_raw("test", SearchScope::All, Some(50), Some(0));
+/// assert_eq!(key3, key4); // Both use default limit=50 and offset=0
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SearchCacheKey {
+    /// Normalized query string (from [`normalize_query`]).
+    normalized_query: String,
+
+    /// Search scope (title, tags, or all).
+    scope: SearchScope,
+
+    /// Maximum number of results.
+    limit: u32,
+
+    /// Number of results to skip (0-based offset).
+    offset: u32,
+}
+
+impl SearchCacheKey {
+    /// Creates a new cache key from raw query parameters.
+    ///
+    /// The query is automatically normalized via [`normalize_query`].
+    /// Pagination parameters (limit and offset) are also normalized via
+    /// [`normalize_search_pagination`] to ensure consistent cache key generation.
+    ///
+    /// # Arguments
+    ///
+    /// * `raw_query` - The raw query string from user input
+    /// * `scope` - The search scope
+    /// * `limit` - Maximum number of results (normalized to default if `None`)
+    /// * `offset` - Number of results to skip (normalized to 0 if `None`)
+    #[must_use]
+    pub fn from_raw(
+        raw_query: &str,
+        scope: SearchScope,
+        limit: Option<u32>,
+        offset: Option<u32>,
+    ) -> Self {
+        let normalized = normalize_query(raw_query);
+        let (normalized_limit, normalized_offset) = normalize_search_pagination(limit, offset);
+        Self {
+            normalized_query: normalized.into_key(),
+            scope,
+            limit: normalized_limit,
+            offset: normalized_offset,
+        }
+    }
+
+    /// Returns the normalized query string (read-only).
+    #[must_use]
+    pub fn normalized_query(&self) -> &str {
+        &self.normalized_query
+    }
+
+    /// Returns the search scope.
+    #[must_use]
+    pub const fn scope(&self) -> SearchScope {
+        self.scope
+    }
+
+    /// Returns the maximum number of results.
+    #[must_use]
+    pub const fn limit(&self) -> u32 {
+        self.limit
+    }
+
+    /// Returns the number of results to skip.
+    #[must_use]
+    pub const fn offset(&self) -> u32 {
+        self.offset
     }
 }
 
@@ -1056,6 +1287,11 @@ pub async fn search_tasks(
     State(state): State<AppState>,
     Query(query): Query<SearchTasksQuery>,
 ) -> Result<Json<Vec<TaskResponse>>, ApiErrorResponse> {
+    // Normalize query for consistent caching and searching
+    // This ensures "  urgent   task  " is treated the same as "urgent task"
+    let normalized = normalize_query(&query.q);
+    let normalized_query = normalized.key();
+
     // I/O boundary: Fetch all tasks from repository (use Pagination::all() for full dataset)
     let all_tasks = state
         .task_repository
@@ -1070,8 +1306,8 @@ pub async fn search_tasks(
     // Build search index using PersistentTreeMap
     let index = SearchIndex::build(&tasks);
 
-    // Pure computation: Search with scope using Semigroup::combine
-    let results = search_with_scope_indexed(&index, &query.q, query.scope);
+    // Pure computation: Search with scope using normalized query
+    let results = search_with_scope_indexed(&index, normalized_query, query.scope);
 
     // Apply pagination using pure function
     let (limit, offset) = normalize_search_pagination(query.limit, query.offset);
@@ -3568,6 +3804,623 @@ mod tests {
             tag_only_position > title_only_position.min(both_match_position),
             "Tag-only match should appear after at least one title match. \
              tag_only_position: {tag_only_position}, title_only_position: {title_only_position}, both_match_position: {both_match_position}"
+        );
+    }
+
+    // =========================================================================
+    // REQ-SEARCH-CACHE-001: Query Normalization Tests
+    // =========================================================================
+
+    /// Test: Basic normalization with leading/trailing whitespace and multiple spaces.
+    #[rstest]
+    fn test_normalize_query_basic() {
+        let result = normalize_query("  Urgent   Task ");
+        assert_eq!(result.key(), "urgent task");
+        assert_eq!(result.tokens(), &["urgent", "task"]);
+    }
+
+    /// Test: Normalization with only lowercase conversion needed.
+    #[rstest]
+    fn test_normalize_query_lowercase_only() {
+        let result = normalize_query("URGENT TASK");
+        assert_eq!(result.key(), "urgent task");
+        assert_eq!(result.tokens(), &["urgent", "task"]);
+    }
+
+    /// Test: Normalization of empty string.
+    #[rstest]
+    fn test_normalize_query_empty() {
+        let result = normalize_query("");
+        assert_eq!(result.key(), "");
+        assert!(result.tokens().is_empty());
+        assert!(result.is_empty());
+    }
+
+    /// Test: Normalization of whitespace-only string.
+    #[rstest]
+    fn test_normalize_query_whitespace_only() {
+        let result = normalize_query("   ");
+        assert_eq!(result.key(), "");
+        assert!(result.tokens().is_empty());
+        assert!(result.is_empty());
+    }
+
+    /// Test: Normalization of already normalized string.
+    #[rstest]
+    fn test_normalize_query_already_normalized() {
+        let result = normalize_query("urgent task");
+        assert_eq!(result.key(), "urgent task");
+        assert_eq!(result.tokens(), &["urgent", "task"]);
+    }
+
+    /// Test: Normalization with mixed case.
+    #[rstest]
+    fn test_normalize_query_mixed_case() {
+        let result = normalize_query("UrGeNt TaSk");
+        assert_eq!(result.key(), "urgent task");
+        assert_eq!(result.tokens(), &["urgent", "task"]);
+    }
+
+    /// Test: Normalization with tab characters.
+    #[rstest]
+    fn test_normalize_query_with_tabs() {
+        let result = normalize_query("urgent\t\ttask");
+        assert_eq!(result.key(), "urgent task");
+        assert_eq!(result.tokens(), &["urgent", "task"]);
+    }
+
+    /// Test: Normalization with newline characters.
+    #[rstest]
+    fn test_normalize_query_with_newlines() {
+        let result = normalize_query("urgent\n\ntask");
+        assert_eq!(result.key(), "urgent task");
+        assert_eq!(result.tokens(), &["urgent", "task"]);
+    }
+
+    /// Test: Single word normalization.
+    #[rstest]
+    fn test_normalize_query_single_word() {
+        let result = normalize_query("  URGENT  ");
+        assert_eq!(result.key(), "urgent");
+        assert_eq!(result.tokens(), &["urgent"]);
+    }
+
+    /// Test: Special characters are preserved.
+    #[rstest]
+    fn test_normalize_query_special_characters() {
+        let result = normalize_query("bug-123 @urgent #important");
+        assert_eq!(result.key(), "bug-123 @urgent #important");
+        assert_eq!(result.tokens(), &["bug-123", "@urgent", "#important"]);
+    }
+
+    /// Test: Unicode characters are preserved and lowercased.
+    #[rstest]
+    fn test_normalize_query_unicode() {
+        let result = normalize_query("  TACHE  urgente  ");
+        assert_eq!(result.key(), "tache urgente");
+        assert_eq!(result.tokens(), &["tache", "urgente"]);
+    }
+
+    /// Test: Idempotent law - `normalize(normalize(q)) = normalize(q)`.
+    #[rstest]
+    #[case("  Urgent   Task ")]
+    #[case("URGENT TASK")]
+    #[case("")]
+    #[case("   ")]
+    #[case("already normalized")]
+    #[case("bug-123 @urgent")]
+    fn test_normalize_query_idempotent(#[case] input: &str) {
+        let first = normalize_query(input);
+        let second = normalize_query(first.key());
+        assert_eq!(
+            first, second,
+            "normalize should be idempotent: normalize(normalize(q)) = normalize(q)"
+        );
+    }
+
+    /// Test: `normalize_query` returns correct values via getters.
+    #[rstest]
+    fn test_normalized_query_getters() {
+        let query = normalize_query("urgent task");
+        assert_eq!(query.key(), "urgent task");
+        assert_eq!(query.tokens(), &["urgent", "task"]);
+        assert!(!query.is_empty());
+    }
+
+    /// Test: `NormalizedQuery::is_empty` for empty query.
+    #[rstest]
+    fn test_normalized_query_is_empty() {
+        let empty = normalize_query("");
+        assert!(empty.is_empty());
+
+        let non_empty = normalize_query("test");
+        assert!(!non_empty.is_empty());
+    }
+
+    // =========================================================================
+    // REQ-SEARCH-CACHE-001: SearchCacheKey Tests
+    // =========================================================================
+
+    /// Test: `SearchCacheKey::from_raw` creates correct cache key.
+    #[rstest]
+    fn test_search_cache_key_from_raw_basic() {
+        let key = SearchCacheKey::from_raw("  Urgent Task  ", SearchScope::All, Some(50), Some(0));
+
+        assert_eq!(key.normalized_query(), "urgent task");
+        assert_eq!(key.scope(), SearchScope::All);
+        assert_eq!(key.limit(), 50);
+        assert_eq!(key.offset(), 0);
+    }
+
+    /// Test: `SearchCacheKey::from_raw` with different parameters.
+    #[rstest]
+    fn test_search_cache_key_from_raw() {
+        let key =
+            SearchCacheKey::from_raw("  URGENT  task  ", SearchScope::Title, Some(100), Some(20));
+
+        assert_eq!(key.normalized_query(), "urgent task");
+        assert_eq!(key.scope(), SearchScope::Title);
+        assert_eq!(key.limit(), 100);
+        assert_eq!(key.offset(), 20);
+    }
+
+    /// Test: `SearchCacheKey::from_raw` normalizes pagination parameters.
+    ///
+    /// This ensures that cache keys with `None` values are equivalent to
+    /// cache keys with explicit default values (limit=50, offset=0).
+    #[rstest]
+    fn test_search_cache_key_from_raw_normalizes_pagination() {
+        // None values should be normalized to defaults
+        let key_with_none = SearchCacheKey::from_raw("test", SearchScope::All, None, None);
+        let key_with_defaults =
+            SearchCacheKey::from_raw("test", SearchScope::All, Some(50), Some(0));
+
+        assert_eq!(
+            key_with_none, key_with_defaults,
+            "None pagination should equal default values"
+        );
+        assert_eq!(key_with_none.limit(), 50);
+        assert_eq!(key_with_none.offset(), 0);
+
+        // Limit exceeding max should be clamped
+        let key_over_max = SearchCacheKey::from_raw("test", SearchScope::All, Some(300), Some(0));
+        let key_at_max = SearchCacheKey::from_raw("test", SearchScope::All, Some(200), Some(0));
+
+        assert_eq!(
+            key_over_max, key_at_max,
+            "Limit over max should be clamped to 200"
+        );
+        assert_eq!(key_over_max.limit(), 200);
+    }
+
+    /// Test: Cache key equality for equivalent normalized queries.
+    #[rstest]
+    fn test_search_cache_key_equality_normalized() {
+        let key1 = SearchCacheKey::from_raw("  Urgent Task  ", SearchScope::All, Some(50), Some(0));
+        let key2 = SearchCacheKey::from_raw("urgent task", SearchScope::All, Some(50), Some(0));
+        let key3 = SearchCacheKey::from_raw("URGENT   TASK", SearchScope::All, Some(50), Some(0));
+
+        assert_eq!(
+            key1, key2,
+            "Equivalent normalized queries should produce equal keys"
+        );
+        assert_eq!(
+            key2, key3,
+            "Equivalent normalized queries should produce equal keys"
+        );
+    }
+
+    /// Test: Cache key inequality for different limits.
+    #[rstest]
+    fn test_search_cache_key_different_limit() {
+        let key1 = SearchCacheKey::from_raw("urgent task", SearchScope::All, Some(50), Some(0));
+        let key2 = SearchCacheKey::from_raw("urgent task", SearchScope::All, Some(100), Some(0));
+
+        assert_ne!(key1, key2, "Different limits should produce different keys");
+    }
+
+    /// Test: Cache key inequality for different offsets.
+    #[rstest]
+    fn test_search_cache_key_different_offset() {
+        let key1 = SearchCacheKey::from_raw("urgent task", SearchScope::All, Some(50), Some(0));
+        let key2 = SearchCacheKey::from_raw("urgent task", SearchScope::All, Some(50), Some(10));
+
+        assert_ne!(
+            key1, key2,
+            "Different offsets should produce different keys"
+        );
+    }
+
+    /// Test: Cache key inequality for different scopes.
+    #[rstest]
+    fn test_search_cache_key_different_scope() {
+        let key1 = SearchCacheKey::from_raw("urgent task", SearchScope::All, Some(50), Some(0));
+        let key2 = SearchCacheKey::from_raw("urgent task", SearchScope::Title, Some(50), Some(0));
+        let key3 = SearchCacheKey::from_raw("urgent task", SearchScope::Tags, Some(50), Some(0));
+
+        assert_ne!(key1, key2, "Different scopes should produce different keys");
+        assert_ne!(key2, key3, "Different scopes should produce different keys");
+        assert_ne!(key1, key3, "Different scopes should produce different keys");
+    }
+
+    /// Test: Cache key can be used as `HashMap` key (Hash trait).
+    #[rstest]
+    fn test_search_cache_key_hashable() {
+        use std::collections::HashMap;
+
+        let key1 = SearchCacheKey::from_raw("urgent task", SearchScope::All, Some(50), Some(0));
+        let key2 =
+            SearchCacheKey::from_raw("  URGENT   TASK  ", SearchScope::All, Some(50), Some(0));
+
+        let mut cache: HashMap<SearchCacheKey, String> = HashMap::new();
+        cache.insert(key1, "cached_result".to_string());
+
+        // key2 should hash to the same bucket and be equal to key1
+        assert!(
+            cache.contains_key(&key2),
+            "Equal keys should be found in HashMap"
+        );
+        assert_eq!(cache.get(&key2), Some(&"cached_result".to_string()));
+    }
+
+    /// Test: Empty query normalization for cache key.
+    #[rstest]
+    fn test_search_cache_key_empty_query() {
+        let key = SearchCacheKey::from_raw("", SearchScope::All, Some(50), Some(0));
+        assert_eq!(key.normalized_query(), "");
+    }
+
+    /// Test: `SearchScope` Hash derivation works correctly.
+    #[rstest]
+    fn test_search_scope_hash() {
+        use std::collections::HashSet;
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        fn hash_value<T: Hash>(t: &T) -> u64 {
+            let mut hasher = DefaultHasher::new();
+            t.hash(&mut hasher);
+            hasher.finish()
+        }
+
+        // Same variant should have same hash
+        assert_eq!(
+            hash_value(&SearchScope::Title),
+            hash_value(&SearchScope::Title)
+        );
+        assert_eq!(
+            hash_value(&SearchScope::Tags),
+            hash_value(&SearchScope::Tags)
+        );
+        assert_eq!(hash_value(&SearchScope::All), hash_value(&SearchScope::All));
+
+        // Can be used in HashSet
+        let mut set: HashSet<SearchScope> = HashSet::new();
+        set.insert(SearchScope::Title);
+        set.insert(SearchScope::Tags);
+        set.insert(SearchScope::All);
+        assert_eq!(set.len(), 3);
+    }
+
+    // =========================================================================
+    // Invariant Tests: Ensuring internal consistency of NormalizedQuery
+    // =========================================================================
+
+    /// Test: Invariant that tokens.join(" ") equals key.
+    ///
+    /// This ensures the internal consistency of `NormalizedQuery`:
+    /// the key is always the space-joined representation of tokens.
+    #[rstest]
+    #[case("  Hello   World  ")]
+    #[case("single")]
+    #[case("")]
+    #[case("  ")]
+    #[case("a b c d e")]
+    #[case("\t\n\r multiple \t whitespace \n types")]
+    fn test_normalized_query_invariant_tokens_join_equals_key(#[case] raw: &str) {
+        let normalized = normalize_query(raw);
+        assert_eq!(
+            normalized.tokens().join(" "),
+            normalized.key(),
+            "Invariant violated: tokens.join(\" \") should equal key"
+        );
+    }
+
+    /// Test: `NormalizedQuery` can only be created through `normalize_query` from external modules.
+    ///
+    /// Since `NormalizedQuery::new` is removed and fields are private,
+    /// the public API for creating a `NormalizedQuery` is `normalize_query`.
+    /// This guarantees that all instances created by external code maintain
+    /// the invariants (key == tokens.join(" ")).
+    ///
+    /// Note: Within the same module, struct literals are technically possible
+    /// due to Rust's visibility rules, but this is discouraged and not part
+    /// of the public API contract.
+    #[rstest]
+    fn test_normalized_query_creation_only_via_normalize_query() {
+        // Verify that the public API for creating NormalizedQuery is normalize_query.
+        // External modules cannot construct NormalizedQuery directly due to private fields.
+        let query = normalize_query("Test Query");
+        assert_eq!(query.key(), "test query");
+        assert_eq!(query.tokens(), &["test", "query"]);
+    }
+
+    /// Test: `NormalizedQuery::into_key` consumes and returns the key.
+    #[rstest]
+    fn test_normalized_query_into_key() {
+        let query = normalize_query("test value");
+        let key = query.into_key();
+        assert_eq!(key, "test value");
+    }
+
+    // =========================================================================
+    // Phase 2 Regression Tests: Query Normalization in search_with_scope_indexed
+    // =========================================================================
+
+    /// Test: Unnormalized query should match the same results as normalized query.
+    ///
+    /// This verifies that a query with extra spaces, mixed case, and leading/trailing
+    /// whitespace (`"  URGENT   task  "`) produces the same search results as the
+    /// normalized form (`"urgent task"`).
+    ///
+    /// The test uses truly distinct input strings to ensure normalization is working:
+    /// - Unnormalized: `"  URGENT   task  "` (uppercase, multiple spaces, leading/trailing whitespace)
+    /// - Normalized: `"urgent task"` (lowercase, single space, no leading/trailing whitespace)
+    #[rstest]
+    fn test_search_with_unnormalized_query_matches_normalized_title() {
+        let tasks: PersistentVector<Task> = vec![
+            create_test_task("Urgent task for today", Priority::High),
+            create_test_task("Regular task", Priority::Low),
+            create_test_task("Another urgent task item", Priority::Medium),
+        ]
+        .into_iter()
+        .collect();
+
+        let index = SearchIndex::build(&tasks);
+
+        // Truly unnormalized query (uppercase, multiple spaces, leading/trailing whitespace)
+        let unnormalized_raw = "  URGENT   task  ";
+        let unnormalized_normalized = normalize_query(unnormalized_raw);
+        let result_from_unnormalized =
+            search_with_scope_indexed(&index, unnormalized_normalized.key(), SearchScope::Title);
+
+        // Already normalized query
+        let normalized_raw = "urgent task";
+        let result_from_normalized =
+            search_with_scope_indexed(&index, normalized_raw, SearchScope::Title);
+
+        // Verify the raw strings are actually different
+        assert_ne!(
+            unnormalized_raw, normalized_raw,
+            "Test precondition: raw strings must be different"
+        );
+
+        // Both should return the same results
+        assert_eq!(
+            result_from_unnormalized.tasks.len(),
+            result_from_normalized.tasks.len(),
+            "Unnormalized and normalized queries should return the same number of results"
+        );
+
+        // Verify the task IDs are the same (order-independent comparison)
+        let mut ids_from_unnormalized: Vec<_> = result_from_unnormalized
+            .tasks
+            .iter()
+            .map(|t| t.task_id.clone())
+            .collect();
+        let mut ids_from_normalized: Vec<_> = result_from_normalized
+            .tasks
+            .iter()
+            .map(|t| t.task_id.clone())
+            .collect();
+        ids_from_unnormalized.sort();
+        ids_from_normalized.sort();
+        assert_eq!(
+            ids_from_unnormalized, ids_from_normalized,
+            "Unnormalized and normalized queries should return the same task IDs"
+        );
+    }
+
+    /// Test: Unnormalized query should match the same results as normalized query for tags.
+    ///
+    /// This verifies that a query with extra spaces, mixed case, and leading/trailing
+    /// whitespace (`"  URGENT  "`) produces the same search results as the
+    /// normalized form (`"urgent"`).
+    ///
+    /// The test uses truly distinct input strings to ensure normalization is working:
+    /// - Unnormalized: `"  URGENT  "` (uppercase, leading/trailing whitespace)
+    /// - Normalized: `"urgent"` (lowercase, no whitespace)
+    #[rstest]
+    fn test_search_with_unnormalized_query_matches_normalized_tags() {
+        let tasks: PersistentVector<Task> = vec![
+            create_test_task_with_tags("Task 1", Priority::High, &["backend", "urgent"]),
+            create_test_task_with_tags("Task 2", Priority::Low, &["frontend"]),
+            create_test_task_with_tags("Task 3", Priority::Medium, &["urgent", "priority"]),
+        ]
+        .into_iter()
+        .collect();
+
+        let index = SearchIndex::build(&tasks);
+
+        // Truly unnormalized query (uppercase, leading/trailing whitespace)
+        let unnormalized_raw = "  URGENT  ";
+        let unnormalized_normalized = normalize_query(unnormalized_raw);
+        let result_from_unnormalized =
+            search_with_scope_indexed(&index, unnormalized_normalized.key(), SearchScope::Tags);
+
+        // Already normalized query
+        let normalized_raw = "urgent";
+        let result_from_normalized =
+            search_with_scope_indexed(&index, normalized_raw, SearchScope::Tags);
+
+        // Verify the raw strings are actually different
+        assert_ne!(
+            unnormalized_raw, normalized_raw,
+            "Test precondition: raw strings must be different"
+        );
+
+        // Both should return the same results
+        assert_eq!(
+            result_from_unnormalized.tasks.len(),
+            result_from_normalized.tasks.len(),
+            "Unnormalized and normalized queries should return the same number of results for tags"
+        );
+
+        // Verify the task IDs are the same (order-independent comparison)
+        let mut ids_from_unnormalized: Vec<_> = result_from_unnormalized
+            .tasks
+            .iter()
+            .map(|t| t.task_id.clone())
+            .collect();
+        let mut ids_from_normalized: Vec<_> = result_from_normalized
+            .tasks
+            .iter()
+            .map(|t| t.task_id.clone())
+            .collect();
+        ids_from_unnormalized.sort();
+        ids_from_normalized.sort();
+        assert_eq!(
+            ids_from_unnormalized, ids_from_normalized,
+            "Unnormalized and normalized queries should return the same task IDs for tags"
+        );
+    }
+
+    /// Test: Multi-space query normalization with `SearchScope::All`.
+    ///
+    /// Ensures that extra spaces in the query do not affect search results.
+    #[rstest]
+    fn test_search_with_multi_space_query_all_scope() {
+        let tasks: PersistentVector<Task> = vec![
+            create_test_task("Important meeting tomorrow", Priority::High),
+            create_test_task_with_tags("Regular task", Priority::Low, &["important"]),
+            create_test_task("Meeting notes", Priority::Medium),
+        ]
+        .into_iter()
+        .collect();
+
+        let index = SearchIndex::build(&tasks);
+
+        // Normalized query with extra spaces
+        let normalized = normalize_query("   important   meeting   ");
+        let normalized_key = normalized.key();
+        let result_normalized = search_with_scope_indexed(&index, normalized_key, SearchScope::All);
+
+        // Clean query
+        let result_clean = search_with_scope_indexed(&index, "important meeting", SearchScope::All);
+
+        // Both should return the same results
+        assert_eq!(
+            result_normalized.tasks.len(),
+            result_clean.tasks.len(),
+            "Multi-space query should match clean query results"
+        );
+    }
+
+    /// Test: Leading and trailing whitespace in query should not affect results.
+    #[rstest]
+    fn test_search_with_leading_trailing_whitespace() {
+        let tasks: PersistentVector<Task> = vec![
+            create_test_task("Callback implementation", Priority::High),
+            create_test_task("Regular task", Priority::Low),
+        ]
+        .into_iter()
+        .collect();
+
+        let index = SearchIndex::build(&tasks);
+
+        // Query with leading/trailing whitespace
+        let normalized = normalize_query("   callback   ");
+        let normalized_key = normalized.key();
+        let result_normalized =
+            search_with_scope_indexed(&index, normalized_key, SearchScope::Title);
+
+        // Clean query
+        let result_clean = search_with_scope_indexed(&index, "callback", SearchScope::Title);
+
+        // Both should return the same results
+        assert_eq!(
+            result_normalized.tasks.len(),
+            result_clean.tasks.len(),
+            "Leading/trailing whitespace should not affect results"
+        );
+        assert_eq!(result_normalized.tasks.len(), 1);
+    }
+
+    /// Test: Whitespace-only query is normalized to empty string, returning all tasks.
+    ///
+    /// This documents the intentional behavior that a query consisting only of
+    /// whitespace characters (spaces, tabs, etc.) is normalized to an empty string,
+    /// which triggers the "return all tasks" behavior.
+    ///
+    /// # Behavior
+    ///
+    /// - Input: `"   "` (whitespace only)
+    /// - Normalized: `""` (empty string)
+    /// - Result: All tasks are returned
+    ///
+    /// This is consistent with the empty query behavior and provides a predictable
+    /// user experience where "no meaningful search term" equals "show everything".
+    #[rstest]
+    fn test_search_whitespace_only_query_returns_all() {
+        let tasks: PersistentVector<Task> = vec![
+            create_test_task("Task A", Priority::High),
+            create_test_task("Task B", Priority::Medium),
+            create_test_task("Task C", Priority::Low),
+        ]
+        .into_iter()
+        .collect();
+
+        let index = SearchIndex::build(&tasks);
+
+        // Whitespace-only query
+        let whitespace_only = "   \t  ";
+        let normalized = normalize_query(whitespace_only);
+
+        // Verify normalization behavior
+        assert!(
+            normalized.is_empty(),
+            "Whitespace-only query should normalize to empty string"
+        );
+        assert_eq!(
+            normalized.key(),
+            "",
+            "Normalized key should be empty string"
+        );
+        assert!(
+            normalized.tokens().is_empty(),
+            "Normalized tokens should be empty"
+        );
+
+        // Search with whitespace-only query (normalized)
+        let result = search_with_scope_indexed(&index, normalized.key(), SearchScope::All);
+
+        // All tasks should be returned
+        assert_eq!(
+            result.tasks.len(),
+            3,
+            "Whitespace-only query (normalized to empty) should return all tasks"
+        );
+
+        // Verify by comparing with explicit empty string search
+        let empty_result = search_with_scope_indexed(&index, "", SearchScope::All);
+        assert_eq!(
+            result.tasks.len(),
+            empty_result.tasks.len(),
+            "Whitespace-only query should behave the same as empty query"
+        );
+
+        // Verify task IDs match (order-independent)
+        let mut ids_whitespace: Vec<_> = result.tasks.iter().map(|t| t.task_id.clone()).collect();
+        let mut ids_empty: Vec<_> = empty_result
+            .tasks
+            .iter()
+            .map(|t| t.task_id.clone())
+            .collect();
+        ids_whitespace.sort();
+        ids_empty.sort();
+        assert_eq!(
+            ids_whitespace, ids_empty,
+            "Whitespace-only query should return the same task IDs as empty query"
         );
     }
 }
