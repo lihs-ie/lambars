@@ -283,6 +283,7 @@ jobs:
           mkdir -p api-profiling-tools/bin
           cp benches/api/target/release/task-management-benchmark-api api-profiling-tools/bin/
           cp ~/.cargo/bin/inferno-collapse-perf ~/.cargo/bin/inferno-flamegraph api-profiling-tools/bin/
+          chmod +x api-profiling-tools/bin/*
 
       - name: Upload profiling tools
         uses: actions/upload-artifact@v4
@@ -321,6 +322,11 @@ jobs:
         with:
           name: api-profiling-tools-${{ github.sha }}
           path: api-profiling-tools/bin
+
+      - name: Ensure profiling tools executable
+        run: |
+          chmod +x api-profiling-tools/bin/* || true
+          ls -la api-profiling-tools/bin
 
       - name: Resolve scenario name
         id: scenario
@@ -367,10 +373,11 @@ jobs:
           echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid || true
           echo '0' | sudo tee /proc/sys/kernel/kptr_restrict || true
 
-          if [[ ! -x "${API_BIN}" ]]; then
+          if [[ ! -f "${API_BIN}" ]]; then
             echo "ERROR: API binary not found at ${API_BIN}"
             exit 1
           fi
+          chmod +x "${API_BIN}"
 
           # Start server in background with in-memory mode (no external dependencies)
           STORAGE_MODE=in_memory CACHE_MODE=in_memory RUST_LOG=info "${API_BIN}" &
