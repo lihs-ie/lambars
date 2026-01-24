@@ -594,6 +594,25 @@ jobs:
           console.log(`summary scenarios: ${summary.scenarios.length}`);
           NODE
 
+      - name: Assemble Criterion profiling artifact
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          root="profiling-artifacts"
+          prefix="criterion-profiling-${GITHUB_SHA}"
+          out="criterion-profiling-all"
+          rm -rf "${out}"
+          mkdir -p "${out}"
+
+          for dir in "${root}"/${prefix}*; do
+            if [[ -d "${dir}" ]]; then
+              artifact="${dir##*/}"
+              mkdir -p "${out}/${artifact}"
+              cp -R "${dir}/." "${out}/${artifact}/"
+            fi
+          done
+          shopt -u nullglob
+
       - name: Assemble API profiling artifact
         run: |
           set -euo pipefail
@@ -701,7 +720,7 @@ jobs:
 
             body += '<details>\n<summary>:package: Download Artifacts</summary>\n\n';
             body += `Download profiling artifacts from the [Actions run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}):\n`;
-            body += '- `criterion-profiling-*` - Criterion benchmark flamegraphs\n';
+            body += '- `criterion-profiling-all-*` - Criterion benchmark flamegraphs\n';
             body += '- `iai-profiling-*` - iai-callgrind detailed analysis\n';
             body += '- `api-profiling-all-*` - API server flamegraphs (all scenarios)\n\n';
             body += '</details>\n\n';
@@ -736,6 +755,15 @@ jobs:
               });
             }
 
+      - name: Upload Criterion profiling aggregate
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: criterion-profiling-all-${{ github.sha }}
+          path: criterion-profiling-all/
+          retention-days: 30
+          if-no-files-found: warn
+
       - name: Upload API profiling aggregate
         uses: actions/upload-artifact@v4
         if: always()
@@ -745,7 +773,7 @@ jobs:
           retention-days: 30
           if-no-files-found: warn
 
-      - name: Delete per-scenario API artifacts
+      - name: Delete per-scenario profiling artifacts
         if: always()
         uses: actions/github-script@v7
         with:
@@ -753,7 +781,10 @@ jobs:
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const runId = context.runId;
-            const prefix = `api-profiling-${context.sha}-`;
+            const prefixes = [
+              `api-profiling-${context.sha}-`,
+              `criterion-profiling-${context.sha}`,
+            ];
 
             const { data } = await github.rest.actions.listWorkflowRunArtifacts({
               owner,
@@ -762,7 +793,9 @@ jobs:
               per_page: 100,
             });
 
-            const targets = data.artifacts.filter(artifact => artifact.name.startsWith(prefix));
+            const targets = data.artifacts.filter(artifact =>
+              prefixes.some(prefix => artifact.name.startsWith(prefix))
+            );
             for (const artifact of targets) {
               await github.rest.actions.deleteArtifact({
                 owner,
