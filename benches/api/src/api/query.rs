@@ -74,10 +74,10 @@ const fn default_limit() -> u32 {
 // =============================================================================
 
 /// Default limit for search results when not specified.
-const SEARCH_DEFAULT_LIMIT: u32 = 50;
+pub const SEARCH_DEFAULT_LIMIT: u32 = 50;
 
 /// Maximum allowed limit for search results.
-const SEARCH_MAX_LIMIT: u32 = 200;
+pub const SEARCH_MAX_LIMIT: u32 = 200;
 
 /// Normalizes pagination parameters for search queries (pure function).
 ///
@@ -829,10 +829,28 @@ impl SearchResult {
         Self { tasks, seen_ids }
     }
 
-    /// Returns the tasks as a vector.
+    /// Returns the tasks as a vector (consumes self).
     #[must_use]
     pub fn into_tasks(self) -> PersistentVector<Task> {
         self.tasks
+    }
+
+    /// Returns a reference to the tasks.
+    #[must_use]
+    pub const fn tasks(&self) -> &PersistentVector<Task> {
+        &self.tasks
+    }
+
+    /// Returns the number of tasks in the result.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.tasks.len()
+    }
+
+    /// Returns `true` if the result is empty.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.tasks.is_empty()
     }
 }
 
