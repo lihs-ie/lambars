@@ -36,17 +36,15 @@ env:
 
 jobs:
   # =============================================================================
-  # PR Benchmark (smoke test)
+  # PR Benchmark (baseline on main)
   # =============================================================================
-  benchmark-pr:
-    name: PR Benchmark
+  benchmark-baseline:
+    name: Baseline Benchmark (main)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
-      pull-requests: write
-      actions: write
 
     steps:
       - name: Install dependencies
@@ -60,7 +58,6 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Baseline (main branch)
       - name: Checkout main branch for baseline
         uses: actions/checkout@v4
         with:
@@ -93,20 +90,59 @@ jobs:
             # Save baseline (timestamp directory for legacy format)
             SCENARIO_DIR=$(ls -td results/*/ 2>/dev/null | head -1)
           fi
-          if [ -n "$SCENARIO_DIR" ]; then
-            cp -r "$SCENARIO_DIR" /tmp/baseline_results
+
+          BASELINE_RESULTS_DIR="${GITHUB_WORKSPACE}/baseline_results"
+          rm -rf "${BASELINE_RESULTS_DIR}"
+          mkdir -p "${BASELINE_RESULTS_DIR}"
+          if [ -n "${SCENARIO_DIR}" ]; then
+            cp -r "${SCENARIO_DIR}/." "${BASELINE_RESULTS_DIR}/"
           fi
+
           # Cleanup
           cd ../docker && docker compose -f compose.ci.yaml down -v
 
-      # PR branch
+      - name: Upload baseline artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-baseline-${{ github.sha }}
+          path: |
+            baseline_results/
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Cleanup
+        if: always()
+        working-directory: benches/api/docker
+        run: docker compose -f compose.ci.yaml down -v || true
+
+  # =============================================================================
+  # PR Benchmark (smoke test)
+  # =============================================================================
+  benchmark-pr:
+    name: PR Benchmark
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wrk linux-tools-common linux-tools-generic
+          # Install yq (Mike Farah's YAML processor)
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Checkout PR branch
         uses: actions/checkout@v4
-        with:
-          clean: false
 
       - name: Run PR benchmark
-        id: pr_benchmark
         working-directory: benches/api/benchmarks
         env:
           STORAGE_MODE: in_memory
@@ -125,22 +161,80 @@ jobs:
           ./run_benchmark.sh --scenario scenarios/in_memory_read_heavy_warm.yaml --quick
           # Get results directory (scenario directory level for compare_results.sh)
           SCENARIO_DIR=$(ls -td results/*/in_memory_read_heavy_warm/ 2>/dev/null | head -1)
-          echo "results_dir=${SCENARIO_DIR}" >> $GITHUB_OUTPUT
+
+          PR_RESULTS_DIR="${GITHUB_WORKSPACE}/pr_results"
+          rm -rf "${PR_RESULTS_DIR}"
+          mkdir -p "${PR_RESULTS_DIR}"
+          if [ -n "${SCENARIO_DIR}" ]; then
+            cp -r "${SCENARIO_DIR}/." "${PR_RESULTS_DIR}/"
+          fi
+
           # Cleanup
           cd ../docker && docker compose -f compose.ci.yaml down -v
+
+      - name: Upload PR artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-pr-${{ github.sha }}
+          path: |
+            pr_results/
+            benches/api/benchmarks/results/
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Cleanup
+        if: always()
+        working-directory: benches/api/docker
+        run: docker compose -f compose.ci.yaml down -v || true
+
+  # =============================================================================
+  # PR Benchmark Comparison + Comment
+  # =============================================================================
+  benchmark-compare:
+    name: PR Benchmark Compare
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs:
+      - benchmark-baseline
+      - benchmark-pr
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          clean: false
+
+      - name: Download baseline artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: benchmark-baseline-${{ github.sha }}
+          path: artifacts
+
+      - name: Download PR artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: benchmark-pr-${{ github.sha }}
+          path: artifacts
 
       - name: Compare results
         id: compare
         working-directory: benches/api/benchmarks
         run: |
           chmod +x compare_results.sh
-          if [ -d "/tmp/baseline_results" ] && [ -n "${{ steps.pr_benchmark.outputs.results_dir }}" ]; then
+          BASELINE_DIR="${GITHUB_WORKSPACE}/artifacts/baseline_results"
+          PR_DIR="${GITHUB_WORKSPACE}/artifacts/pr_results"
+          if [ -d "${BASELINE_DIR}" ] && [ -d "${PR_DIR}" ]; then
             # Check if baseline has new format (meta.json in subdirectories)
             # Old format (main branch without --scenario) has .txt files directly in the directory
-            if find /tmp/baseline_results -name "meta.json" -type f | head -1 | grep -q .; then
+            if find "${BASELINE_DIR}" -name "meta.json" -type f | head -1 | grep -q .; then
               # Run comparison with threshold checking
               # Exit code 3 = regression detected, which should fail the job
-              ./compare_results.sh /tmp/baseline_results "${{ steps.pr_benchmark.outputs.results_dir }}" --threshold thresholds.yaml --json > compare_output.json
+              ./compare_results.sh "${BASELINE_DIR}" "${PR_DIR}" --threshold thresholds.yaml --json > compare_output.json
               cat compare_output.json
             else
               echo "Skipping comparison: baseline uses old format (no meta.json)"
@@ -247,16 +341,16 @@ jobs:
               return { aggregated, perScript };
             }
 
-            // results_dir is the scenario directory (e.g., results/<timestamp>/<scenario>/)
-            const benchDir = 'benches/api/benchmarks';
-            const resultsDir = path.join(benchDir, '${{ steps.pr_benchmark.outputs.results_dir }}');
+            const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
+            const prResultsDir = path.join(workspace, 'artifacts', 'pr_results');
+            const baselineResultsDir = path.join(workspace, 'artifacts', 'baseline_results');
 
             // Find and aggregate all meta.json files
-            const prMetaFiles = findAllMetaJson(resultsDir);
+            const prMetaFiles = findAllMetaJson(prResultsDir);
             const { aggregated: metrics, perScript: prScripts } = aggregateMetrics(prMetaFiles);
 
             // Read baseline if available
-            const baselineMetaFiles = findAllMetaJson('/tmp/baseline_results');
+            const baselineMetaFiles = findAllMetaJson(baselineResultsDir);
             const { aggregated: baselineMetrics, perScript: baselineScripts } = aggregateMetrics(baselineMetaFiles);
 
             // Build comparison table
@@ -361,20 +455,6 @@ jobs:
                 body: body
               });
             }
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: benchmark-pr-${{ github.sha }}
-          path: |
-            benches/api/benchmarks/results/
-          retention-days: 7
-
-      - name: Cleanup
-        if: always()
-        working-directory: benches/api/docker
-        run: docker compose -f compose.ci.yaml down -v || true
 
   # =============================================================================
   # Main Branch Benchmark (representative scenarios)
