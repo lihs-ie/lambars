@@ -69,6 +69,65 @@ const fn default_limit() -> u32 {
     20
 }
 
+// =============================================================================
+// Search Pagination Constants and Functions
+// =============================================================================
+
+/// Default limit for search results when not specified.
+pub const SEARCH_DEFAULT_LIMIT: u32 = 50;
+
+/// Maximum allowed limit for search results.
+pub const SEARCH_MAX_LIMIT: u32 = 200;
+
+/// Normalizes pagination parameters for search queries (pure function).
+///
+/// # Arguments
+///
+/// * `limit` - Optional limit from query. If `None`, defaults to [`SEARCH_DEFAULT_LIMIT`] (50).
+/// * `offset` - Optional offset from query. If `None`, defaults to 0.
+///
+/// # Returns
+///
+/// A tuple of `(normalized_limit, normalized_offset)` where:
+/// - `limit` is clamped to [`SEARCH_MAX_LIMIT`] (200) if it exceeds this value.
+/// - `limit=0` is explicitly allowed and returns an empty result (user intent).
+/// - `offset` defaults to 0 if not provided.
+///
+/// # Specification
+///
+/// - **Default limit**: 50 (when `limit` is not specified)
+/// - **Maximum limit**: 200 (values above this are clamped)
+/// - **`limit=0` behavior**: Returns empty array (explicit user intent to get no results)
+///
+/// # Examples
+///
+/// ```ignore
+/// // Default values
+/// assert_eq!(normalize_search_pagination(None, None), (50, 0));
+///
+/// // limit exceeds max, clamped to 200
+/// assert_eq!(normalize_search_pagination(Some(500), None), (200, 0));
+///
+/// // Normal values
+/// assert_eq!(normalize_search_pagination(Some(100), Some(20)), (100, 20));
+///
+/// // limit=0 returns empty array (explicit user intent)
+/// assert_eq!(normalize_search_pagination(Some(0), Some(10)), (0, 10));
+/// ```
+#[must_use]
+pub const fn normalize_search_pagination(limit: Option<u32>, offset: Option<u32>) -> (u32, u32) {
+    let normalized_limit = match limit {
+        Some(value) if value > SEARCH_MAX_LIMIT => SEARCH_MAX_LIMIT,
+        Some(value) => value,
+        None => SEARCH_DEFAULT_LIMIT,
+    };
+    let normalized_offset = match offset {
+        Some(value) => value,
+        None => 0,
+    };
+    (normalized_limit, normalized_offset)
+}
+
 /// Query parameters for searching tasks.
 #[derive(Debug, Deserialize)]
 pub struct SearchTasksQuery {
@@ -77,11 +136,21 @@ pub struct SearchTasksQuery {
     /// Search scope: "title", "tags", or "all" (default: "all").
     #[serde(rename = "in", default)]
     pub scope: SearchScope,
+    /// Maximum number of results to return.
+    /// - Defaults to 50 if not specified.
+    /// - Clamped to 200 if exceeds maximum.
+    /// - `limit=0` returns empty array (explicit user intent).
+    pub limit: Option<u32>,
+    /// Number of results to skip (0-based offset).
+    /// Defaults to 0 if not specified.
+    pub offset: Option<u32>,
 }
 
 /// Search scope enum.
-#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+///
+/// Valid values are: "title", "tags", "all" (case-insensitive).
+/// Unknown values will result in a 400 Bad Request error.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum SearchScope {
     /// Search only in task titles.
     Title,
@@ -90,6 +159,540 @@ pub enum SearchScope {
     /// Search in both titles and tags.
     #[default]
     All,
+}
+
+impl std::str::FromStr for SearchScope {
+    type Err = String;
+
+    /// Parses a string into a `SearchScope`.
+    ///
+    /// Valid values are "title", "tags", "all" (case-insensitive).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string if the input is not one of the valid values.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use std::str::FromStr;
+    /// assert_eq!(SearchScope::from_str("title"), Ok(SearchScope::Title));
+    /// assert_eq!(SearchScope::from_str("TAGS"), Ok(SearchScope::Tags));
+    /// assert!(SearchScope::from_str("unknown").is_err());
+    /// ```
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_lowercase().as_str() {
+            "title" => Ok(Self::Title),
+            "tags" => Ok(Self::Tags),
+            "all" => Ok(Self::All),
+            other => Err(format!(
+                "Invalid search scope '{other}'. Valid values are: title, tags, all"
+            )),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SearchScope {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use std::str::FromStr;
+        let value = String::deserialize(deserializer)?;
+        Self::from_str(&value).map_err(serde::de::Error::custom)
+    }
+}
+
+// =============================================================================
+// Query Normalization (REQ-SEARCH-CACHE-001)
+// =============================================================================
+
+/// Normalized search query for cache key generation.
+///
+/// This structure represents a search query after normalization,
+/// containing both the cache key and tokenized words for potential
+/// future use (e.g., advanced search scoring).
+///
+/// # Normalization Process
+///
+/// 1. **trim** - Remove leading/trailing whitespace
+/// 2. **lowercase** - Case-insensitive matching
+/// 3. **multi-space collapse** - Normalize internal whitespace to single spaces
+///
+/// # Laws
+///
+/// - **Idempotent**: `normalize(normalize(q)) = normalize(q)`
+///
+/// # Examples
+///
+/// ```ignore
+/// let normalized = normalize_query("  Urgent   Task  ");
+/// assert_eq!(normalized.key(), "urgent task");
+/// assert_eq!(normalized.tokens(), &["urgent", "task"]);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NormalizedQuery {
+    /// Normalized query string (for cache key).
+    ///
+    /// This is the result of applying trim, lowercase, and multi-space collapse.
+    key: String,
+
+    /// Tokenized words (for potential future use).
+    ///
+    /// Words are split by whitespace after normalization.
+    /// Empty queries result in an empty token list.
+    tokens: Vec<String>,
+}
+
+impl NormalizedQuery {
+    /// Returns the normalized query key (read-only).
+    ///
+    /// This is the result of applying trim, lowercase, and multi-space collapse.
+    #[must_use]
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// Returns the tokenized words (read-only).
+    ///
+    /// Words are split by whitespace after normalization.
+    /// Empty queries result in an empty token list.
+    #[must_use]
+    pub fn tokens(&self) -> &[String] {
+        &self.tokens
+    }
+
+    /// Returns `true` if the normalized query is empty.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.key.is_empty()
+    }
+
+    /// Consumes the `NormalizedQuery` and returns the underlying key.
+    ///
+    /// This is useful when you need ownership of the key string.
+    #[must_use]
+    pub fn into_key(self) -> String {
+        self.key
+    }
+}
+
+/// Normalizes a search query (pure function).
+///
+/// This function applies the following transformations:
+///
+/// 1. **trim** - Remove leading/trailing whitespace
+/// 2. **lowercase** - Case-insensitive matching
+/// 3. **multi-space collapse** - Normalize internal whitespace to single spaces
+///
+/// # Laws
+///
+/// - **Idempotent**: `normalize_query(normalize_query(q).key()) == normalize_query(q)`
+///
+/// # Arguments
+///
+/// * `raw` - The raw query string from user input
+///
+/// # Returns
+///
+/// A [`NormalizedQuery`] containing:
+/// - `key`: The normalized string suitable for cache key generation
+/// - `tokens`: Individual words split by whitespace
+///
+/// # Examples
+///
+/// ```ignore
+/// // Basic normalization
+/// let result = normalize_query("  Urgent   Task  ");
+/// assert_eq!(result.key(), "urgent task");
+/// assert_eq!(result.tokens(), &["urgent", "task"]);
+///
+/// // Empty query
+/// let empty = normalize_query("   ");
+/// assert_eq!(empty.key(), "");
+/// assert!(empty.tokens().is_empty());
+///
+/// // Already normalized
+/// let already = normalize_query("urgent task");
+/// assert_eq!(already.key(), "urgent task");
+/// ```
+#[must_use]
+pub fn normalize_query(raw: &str) -> NormalizedQuery {
+    // Step 1: trim leading/trailing whitespace
+    let trimmed = raw.trim();
+
+    // Step 2 & 3: lowercase and collapse multi-spaces
+    // We split by whitespace (handles multi-space) and rejoin with single space
+    let tokens: Vec<String> = trimmed.split_whitespace().map(str::to_lowercase).collect();
+
+    let key = tokens.join(" ");
+
+    NormalizedQuery { key, tokens }
+}
+
+/// Cache key for search results.
+///
+/// This structure uniquely identifies a search query for caching purposes.
+/// Two queries are considered equivalent (and thus cacheable) if and only if
+/// all fields match exactly.
+///
+/// # Fields
+///
+/// - `normalized_query`: The normalized query string (from [`normalize_query`])
+/// - `scope`: The search scope (title, tags, or all)
+/// - `limit`: Maximum number of results
+/// - `offset`: Number of results to skip
+///
+/// # Cache Key Semantics
+///
+/// The cache key uses exact matching on all fields. This means:
+/// - `"urgent task"` with limit=50 is different from limit=100
+/// - `"urgent task"` with scope=Title is different from scope=All
+/// - Query normalization ensures case-insensitive and whitespace-normalized matching
+///
+/// # Examples
+///
+/// ```ignore
+/// let key1 = SearchCacheKey::from_raw("  Urgent Task  ", SearchScope::All, Some(50), Some(0));
+/// let key2 = SearchCacheKey::from_raw("urgent task", SearchScope::All, Some(50), Some(0));
+///
+/// // key1 == key2 because the normalized query is the same
+/// assert_eq!(key1, key2);
+///
+/// // Pagination parameters are also normalized:
+/// let key3 = SearchCacheKey::from_raw("test", SearchScope::All, None, None);
+/// let key4 = SearchCacheKey::from_raw("test", SearchScope::All, Some(50), Some(0));
+/// assert_eq!(key3, key4); // Both use default limit=50 and offset=0
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SearchCacheKey {
+    /// Normalized query string (from [`normalize_query`]).
+    normalized_query: String,
+
+    /// Search scope (title, tags, or all).
+    scope: SearchScope,
+
+    /// Maximum number of results.
+    limit: u32,
+
+    /// Number of results to skip (0-based offset).
+    offset: u32,
+}
+
+impl SearchCacheKey {
+    /// Creates a new cache key from raw query parameters.
+    ///
+    /// The query is automatically normalized via [`normalize_query`].
+    /// Pagination parameters (limit and offset) are also normalized via
+    /// [`normalize_search_pagination`] to ensure consistent cache key generation.
+    ///
+    /// # Arguments
+    ///
+    /// * `raw_query` - The raw query string from user input
+    /// * `scope` - The search scope
+    /// * `limit` - Maximum number of results (normalized to default if `None`)
+    /// * `offset` - Number of results to skip (normalized to 0 if `None`)
+    #[must_use]
+    pub fn from_raw(
+        raw_query: &str,
+        scope: SearchScope,
+        limit: Option<u32>,
+        offset: Option<u32>,
+    ) -> Self {
+        let normalized = normalize_query(raw_query);
+        let (normalized_limit, normalized_offset) = normalize_search_pagination(limit, offset);
+        Self {
+            normalized_query: normalized.into_key(),
+            scope,
+            limit: normalized_limit,
+            offset: normalized_offset,
+        }
+    }
+
+    /// Returns the normalized query string (read-only).
+    #[must_use]
+    pub fn normalized_query(&self) -> &str {
+        &self.normalized_query
+    }
+
+    /// Returns the search scope.
+    #[must_use]
+    pub const fn scope(&self) -> SearchScope {
+        self.scope
+    }
+
+    /// Returns the maximum number of results.
+    #[must_use]
+    pub const fn limit(&self) -> u32 {
+        self.limit
+    }
+
+    /// Returns the number of results to skip.
+    #[must_use]
+    pub const fn offset(&self) -> u32 {
+        self.offset
+    }
+}
+
+// =============================================================================
+// Search Result Cache (REQ-SEARCH-CACHE-001)
+// =============================================================================
+
+use lru::LruCache;
+use std::num::NonZeroUsize;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// Cached search result with timestamp for TTL.
+///
+/// This structure wraps a search result with a timestamp to enable
+/// TTL-based cache invalidation.
+#[derive(Clone)]
+pub struct CachedSearchResult {
+    /// The cached search result.
+    pub result: SearchResult,
+    /// Timestamp when the result was cached.
+    pub cached_at: Instant,
+}
+
+/// Cache statistics for monitoring.
+#[derive(Debug, Clone, Default)]
+pub struct CacheStats {
+    /// Number of cache hits.
+    pub hits: u64,
+    /// Number of cache misses.
+    pub misses: u64,
+}
+
+impl CacheStats {
+    /// Returns the hit rate as a percentage (0.0 to 1.0).
+    ///
+    /// Returns 0.0 if no requests have been made.
+    ///
+    /// # Note
+    ///
+    /// For very large hit/miss counts (> 2^52), there may be minor precision loss
+    /// when converting to f64. This is acceptable for monitoring purposes.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn hit_rate(&self) -> f64 {
+        let total = self.hits + self.misses;
+        if total == 0 {
+            0.0
+        } else {
+            self.hits as f64 / total as f64
+        }
+    }
+}
+
+/// LRU cache for search results with TTL.
+///
+/// This cache provides:
+/// - **LRU eviction**: When capacity is reached, least recently used entries are evicted
+/// - **TTL expiration**: Entries older than TTL are considered stale and not returned
+/// - **Thread-safety**: Uses `Mutex` for safe concurrent access
+///
+/// # Configuration (REQ-SEARCH-CACHE-001)
+///
+/// - **TTL**: 5 seconds (entries expire after this duration)
+/// - **Capacity**: 2000 entries maximum
+///
+/// # Cache Key
+///
+/// The cache key is `(normalized_q, scope, limit, offset)` using exact matching.
+/// Query normalization ensures that equivalent queries (with different whitespace
+/// or casing) produce the same cache key.
+///
+/// # Thread Safety
+///
+/// The cache uses a `Mutex` to ensure safe concurrent access. While this introduces
+/// some contention, the cache operations are fast (O(1) for LRU operations) and
+/// the critical section is minimal.
+///
+/// # Example
+///
+/// ```ignore
+/// let cache = SearchCache::new(2000, Duration::from_secs(5));
+///
+/// // Check cache
+/// if let Some(result) = cache.get(&cache_key) {
+///     return Ok(result);
+/// }
+///
+/// // Cache miss - perform search
+/// let result = search_with_scope_indexed(&index, query, scope);
+///
+/// // Store in cache
+/// cache.put(cache_key, result.clone());
+/// ```
+pub struct SearchCache {
+    /// The LRU cache protected by a mutex.
+    cache: Mutex<LruCache<SearchCacheKey, CachedSearchResult>>,
+    /// Time-to-live for cache entries.
+    time_to_live: Duration,
+    /// Cache statistics.
+    stats: Mutex<CacheStats>,
+}
+
+impl SearchCache {
+    /// Creates a new search cache with the specified capacity and TTL.
+    ///
+    /// # Arguments
+    ///
+    /// * `capacity` - Maximum number of entries in the cache
+    /// * `time_to_live` - Duration after which entries are considered stale
+    ///
+    /// # Panics
+    ///
+    /// Panics if `capacity` is 0.
+    #[must_use]
+    pub fn new(capacity: usize, time_to_live: Duration) -> Self {
+        Self {
+            cache: Mutex::new(LruCache::new(
+                NonZeroUsize::new(capacity).expect("capacity must be non-zero"),
+            )),
+            time_to_live,
+            stats: Mutex::new(CacheStats::default()),
+        }
+    }
+
+    /// Creates a new search cache with default configuration.
+    ///
+    /// Default configuration (REQ-SEARCH-CACHE-001):
+    /// - Capacity: 2000 entries
+    /// - TTL: 5 seconds
+    #[must_use]
+    pub fn with_default_config() -> Self {
+        Self::new(2000, Duration::from_secs(5))
+    }
+
+    /// Gets a cached search result if it exists and is not expired.
+    ///
+    /// If the entry exists but is expired (older than TTL), it is removed
+    /// and `None` is returned.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The cache key to look up
+    ///
+    /// # Returns
+    ///
+    /// `Some(SearchResult)` if the entry exists and is not expired, `None` otherwise.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned. This should only happen if a thread
+    /// panicked while holding the lock, which indicates a programming error.
+    pub fn get(&self, key: &SearchCacheKey) -> Option<SearchResult> {
+        let mut cache = self.cache.lock().expect("cache mutex poisoned");
+        let mut stats = self.stats.lock().expect("stats mutex poisoned");
+
+        if let Some(cached) = cache.get(key) {
+            if cached.cached_at.elapsed() < self.time_to_live {
+                // Cache hit - entry is valid
+                stats.hits += 1;
+                return Some(cached.result.clone());
+            }
+            // Entry is expired - remove it
+            tracing::debug!(
+                query = %key.normalized_query(),
+                scope = ?key.scope(),
+                "Search cache entry expired"
+            );
+        }
+
+        // Pop the expired entry if it exists
+        cache.pop(key);
+        drop(cache); // Release cache lock as soon as possible
+
+        // Cache miss
+        stats.misses += 1;
+
+        None
+    }
+
+    /// Stores a search result in the cache.
+    ///
+    /// If the cache is at capacity, the least recently used entry is evicted.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The cache key
+    /// * `result` - The search result to cache
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned. This should only happen if a thread
+    /// panicked while holding the lock, which indicates a programming error.
+    pub fn put(&self, key: SearchCacheKey, result: SearchResult) {
+        let mut cache = self.cache.lock().expect("cache mutex poisoned");
+        cache.put(
+            key,
+            CachedSearchResult {
+                result,
+                cached_at: Instant::now(),
+            },
+        );
+    }
+
+    /// Returns the current cache statistics.
+    ///
+    /// This method is useful for monitoring cache performance.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned. This should only happen if a thread
+    /// panicked while holding the lock, which indicates a programming error.
+    #[must_use]
+    pub fn stats(&self) -> CacheStats {
+        self.stats.lock().expect("stats mutex poisoned").clone()
+    }
+
+    /// Returns the current number of entries in the cache.
+    ///
+    /// Note: This includes expired entries that haven't been removed yet.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned. This should only happen if a thread
+    /// panicked while holding the lock, which indicates a programming error.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.cache.lock().expect("cache mutex poisoned").len()
+    }
+
+    /// Returns true if the cache is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Clears all entries from the cache.
+    ///
+    /// This does not reset the statistics.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned. This should only happen if a thread
+    /// panicked while holding the lock, which indicates a programming error.
+    pub fn clear(&self) {
+        self.cache.lock().expect("cache mutex poisoned").clear();
+    }
+}
+
+impl std::fmt::Debug for SearchCache {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let len = self.len();
+        let stats = self.stats();
+        formatter
+            .debug_struct("SearchCache")
+            .field("len", &len)
+            .field("time_to_live", &self.time_to_live)
+            .field("hits", &stats.hits)
+            .field("misses", &stats.misses)
+            .field("hit_rate", &format!("{:.2}%", stats.hit_rate() * 100.0))
+            .finish_non_exhaustive()
+    }
 }
 
 // =============================================================================
@@ -226,10 +829,28 @@ impl SearchResult {
         Self { tasks, seen_ids }
     }
 
-    /// Returns the tasks as a vector.
+    /// Returns the tasks as a vector (consumes self).
     #[must_use]
     pub fn into_tasks(self) -> PersistentVector<Task> {
         self.tasks
+    }
+
+    /// Returns a reference to the tasks.
+    #[must_use]
+    pub const fn tasks(&self) -> &PersistentVector<Task> {
+        &self.tasks
+    }
+
+    /// Returns the number of tasks in the result.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.tasks.len()
+    }
+
+    /// Returns `true` if the result is empty.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.tasks.is_empty()
     }
 }
 
@@ -273,18 +894,20 @@ impl Semigroup for SearchResult {
 ///
 /// - **Word index**: Maps individual words (split by whitespace) for efficient prefix search
 /// - **Full title index**: Maps the complete normalized title to multiple task IDs
+/// - **Full title all-suffix index**: Maps ALL suffixes of the full normalized title to task IDs
+///   - Example: `important meeting tomorrow` generates suffixes including `meeting tomorrow`, `tomorrow`
+///   - This allows multi-word infix queries like `meeting tomorrow` to match `important meeting tomorrow`
 /// - **Word all-suffix index**: Maps ALL suffixes of each word for arbitrary position substring matching
 ///   - Example: `callback` generates suffixes: `callback`, `allback`, `llback`, `lback`, `back`, `ack`, `ck`, `k`
 ///   - This allows `all` query to match `callback` via `allback` prefix match
 /// - **Tag index**: Maps normalized tag values for tag search
 /// - **Tag all-suffix index**: Maps ALL suffixes of each tag for arbitrary position substring matching
-/// - **Task order**: Preserves original task order for stable result ordering
 ///
 /// # Complexity Analysis
 ///
 /// - **Range query (index lookup)**: O(log N + m) where m is matching entries in index
 /// - **ID resolution**: O(k log N) where k is matching tasks, N is total tasks
-/// - **Result ordering**: O(k log k) for sorting by original order
+/// - **Result ordering**: O(k log k) for sorting by `task_id` for deterministic stable ordering
 /// - **Total search complexity**: O(k log N + k log k)
 /// - No full O(N) scan is required for any search operation.
 /// - **Space trade-off**: Stores O(L * W) entries where L is average word length and W is word count
@@ -295,6 +918,11 @@ pub struct SearchIndex {
     /// Index mapping full normalized titles to task IDs (for multi-word substring match).
     /// Changed from `TaskId` to `PersistentVector<TaskId>` to support multiple tasks with same title.
     title_full_index: PersistentTreeMap<String, PersistentVector<TaskId>>,
+    /// Index mapping ALL suffixes of full normalized titles to task IDs (for multi-word infix search).
+    /// Example: `important meeting tomorrow` generates `important meeting tomorrow`, `mportant meeting tomorrow`,
+    /// ..., `meeting tomorrow`, ..., `tomorrow`, etc.
+    /// This enables `meeting tomorrow` query to match `important meeting tomorrow`.
+    title_full_all_suffix_index: PersistentTreeMap<String, PersistentVector<TaskId>>,
     /// Index mapping ALL suffixes of normalized title words to task IDs (for arbitrary infix search).
     /// Example: `callback` generates `callback`, `allback`, `llback`, `lback`, `back`, `ack`, `ck`, `k`.
     /// This enables `all` query to match `callback` via `allback` prefix match.
@@ -305,8 +933,6 @@ pub struct SearchIndex {
     tag_all_suffix_index: PersistentTreeMap<String, PersistentVector<TaskId>>,
     /// Reference to all tasks for lookup by ID.
     tasks_by_id: PersistentTreeMap<TaskId, Task>,
-    /// Original task order for stable result ordering (`task_id` -> position).
-    task_order: PersistentTreeMap<TaskId, usize>,
 }
 
 impl SearchIndex {
@@ -314,12 +940,13 @@ impl SearchIndex {
     ///
     /// Creates normalized indexes for both title words and tags.
     /// Also creates all-suffix indexes for arbitrary position substring matching.
-    /// Preserves task order for stable result ordering.
     #[must_use]
     pub fn build(tasks: &PersistentVector<Task>) -> Self {
         let mut title_word_index: PersistentTreeMap<String, PersistentVector<TaskId>> =
             PersistentTreeMap::new();
         let mut title_full_index: PersistentTreeMap<String, PersistentVector<TaskId>> =
+            PersistentTreeMap::new();
+        let mut title_full_all_suffix_index: PersistentTreeMap<String, PersistentVector<TaskId>> =
             PersistentTreeMap::new();
         let mut title_word_all_suffix_index: PersistentTreeMap<String, PersistentVector<TaskId>> =
             PersistentTreeMap::new();
@@ -328,12 +955,8 @@ impl SearchIndex {
         let mut tag_all_suffix_index: PersistentTreeMap<String, PersistentVector<TaskId>> =
             PersistentTreeMap::new();
         let mut tasks_by_id: PersistentTreeMap<TaskId, Task> = PersistentTreeMap::new();
-        let mut task_order: PersistentTreeMap<TaskId, usize> = PersistentTreeMap::new();
 
-        for (position, task) in tasks.iter().enumerate() {
-            // Store task position for stable ordering
-            task_order = task_order.insert(task.task_id.clone(), position);
-
+        for task in tasks {
             // Index the task by ID
             tasks_by_id = tasks_by_id.insert(task.task_id.clone(), task.clone());
 
@@ -347,6 +970,14 @@ impl SearchIndex {
             title_full_index = title_full_index.insert(
                 normalized_title.clone(),
                 existing_ids.push_back(task.task_id.clone()),
+            );
+
+            // Index ALL suffixes of the full normalized title for multi-word infix search
+            // "important meeting tomorrow" -> ["important meeting tomorrow", "mportant meeting tomorrow", ..., "meeting tomorrow", ...]
+            title_full_all_suffix_index = Self::index_all_suffixes(
+                title_full_all_suffix_index,
+                &normalized_title,
+                &task.task_id,
             );
 
             // Index title words (normalized to lowercase) for prefix search
@@ -384,11 +1015,11 @@ impl SearchIndex {
         Self {
             title_word_index,
             title_full_index,
+            title_full_all_suffix_index,
             title_word_all_suffix_index,
             tag_index,
             tag_all_suffix_index,
             tasks_by_id,
-            task_order,
         }
     }
 
@@ -412,13 +1043,16 @@ impl SearchIndex {
         task_id: &TaskId,
     ) -> PersistentTreeMap<String, PersistentVector<TaskId>> {
         // Generate all suffixes by taking substrings from each character position
+        // (with deduplication check)
         for (byte_index, _) in word.char_indices() {
             let suffix = &word[byte_index..];
             let existing_ids = index
                 .get(suffix)
                 .cloned()
                 .unwrap_or_else(PersistentVector::new);
-            index = index.insert(suffix.to_string(), existing_ids.push_back(task_id.clone()));
+            if !existing_ids.iter().any(|id| id == task_id) {
+                index = index.insert(suffix.to_string(), existing_ids.push_back(task_id.clone()));
+            }
         }
         index
     }
@@ -431,7 +1065,7 @@ impl SearchIndex {
     ///
     /// 1. First, try full title substring match (for multi-word queries like "important meeting")
     /// 2. Then, use prefix-based word index search (for single word or prefix queries)
-    /// 3. Combine results with deduplication, maintaining original task order
+    /// 3. Combine results with deduplication, sorted by `task_id` for stable ordering
     #[must_use]
     pub fn search_by_title(&self, query: &str) -> Option<SearchResult> {
         let query_lower = query.to_lowercase();
@@ -463,10 +1097,11 @@ impl SearchIndex {
 
     /// Finds task IDs from the title index that match the query (substring match).
     ///
-    /// Uses a three-phase strategy:
+    /// Uses a four-phase strategy:
     /// 1. Full title substring match using prefix range on full title index
-    /// 2. Prefix-based range search on word index
-    /// 3. Suffix-based range search on all-suffix index (for infix matches)
+    /// 2. Full title all-suffix search (for multi-word infix queries like "meeting tomorrow" in "important meeting tomorrow")
+    /// 3. Prefix-based range search on word index
+    /// 4. Suffix-based range search on all-suffix index (for infix matches)
     ///
     /// # Complexity
     ///
@@ -485,7 +1120,18 @@ impl SearchIndex {
             matching_ids,
         );
 
-        // Phase 2: Word index prefix search (for single word or prefix queries)
+        // Phase 2: Full title all-suffix search (for multi-word infix queries)
+        // The all-suffix index contains ALL suffixes of the full title, so we can find
+        // any multi-word infix by prefix-searching on the suffix that starts with the query.
+        // E.g., "meeting tomorrow" matches "important meeting tomorrow" because
+        // "meeting tomorrow" is in the all-suffix index and starts with the query.
+        matching_ids = Self::find_matching_ids_with_prefix_range_multi(
+            &self.title_full_all_suffix_index,
+            query_lower,
+            matching_ids,
+        );
+
+        // Phase 3: Word index prefix search (for single word or prefix queries)
         // Finds words that START WITH the query (e.g., "imp" matches "important")
         matching_ids = Self::find_matching_ids_with_prefix_range(
             &self.title_word_index,
@@ -493,7 +1139,7 @@ impl SearchIndex {
             matching_ids,
         );
 
-        // Phase 3: All-suffix index search (for arbitrary infix matches)
+        // Phase 4: All-suffix index search (for arbitrary infix matches)
         // The all-suffix index contains ALL suffixes of each word, so we can find
         // any infix by prefix-searching on the suffix that starts with the query.
         // E.g., "all" matches "callback" because "allback" is in the index and starts with "all"
@@ -570,56 +1216,376 @@ impl SearchIndex {
         matching_ids
     }
 
-    /// Resolves task IDs to their corresponding Task objects, maintaining original order.
+    /// Resolves task IDs to their corresponding Task objects, maintaining stable order.
     ///
-    /// This ensures stable result ordering based on task registration order.
+    /// Ordering is determined by `task_id` only, which is a UUID.
+    /// This guarantees deterministic output regardless of:
+    /// - Repository's `list()` return order
+    /// - Input task ID iteration order
+    ///
+    /// Using `task_id` as the sole sort key ensures the same input always
+    /// produces the same output order.
     fn resolve_task_ids_ordered(
         &self,
         task_ids: &PersistentHashSet<TaskId>,
     ) -> PersistentVector<Task> {
-        // Collect tasks with their positions
-        let mut tasks_with_positions: Vec<(usize, Task)> = task_ids
+        let mut tasks: Vec<Task> = task_ids
             .iter()
-            .filter_map(|id| {
-                self.tasks_by_id.get(id).cloned().map(|task| {
-                    let position = self.task_order.get(id).copied().unwrap_or(usize::MAX);
-                    (position, task)
-                })
-            })
+            .filter_map(|id| self.tasks_by_id.get(id).cloned())
             .collect();
 
-        // Sort by original position for stable ordering
-        tasks_with_positions.sort_by_key(|(position, _)| *position);
+        // Sort by task_id for stable ordering
+        tasks.sort_by(|a, b| a.task_id.cmp(&b.task_id));
 
-        // Extract tasks in order
-        tasks_with_positions
-            .into_iter()
-            .map(|(_, task)| task)
-            .collect()
+        tasks.into_iter().collect()
     }
 
-    /// Returns all tasks when the query is empty, in original order.
+    /// Returns all tasks when the query is empty, in stable order.
+    ///
+    /// Ordering is determined by `task_id` only, which is a UUID.
+    /// This guarantees deterministic output regardless of the repository's
+    /// `list()` return order.
     #[must_use]
     pub fn all_tasks(&self) -> PersistentVector<Task> {
-        // Collect tasks with their positions
-        let mut tasks_with_positions: Vec<(usize, Task)> = self
+        let mut tasks: Vec<Task> = self
             .tasks_by_id
             .iter()
-            .map(|(id, task)| {
-                let position = self.task_order.get(id).copied().unwrap_or(usize::MAX);
-                (position, task.clone())
-            })
+            .map(|(_, task)| task.clone())
             .collect();
 
-        // Sort by original position
-        tasks_with_positions.sort_by_key(|(position, _)| *position);
+        // Sort by task_id for stable ordering
+        tasks.sort_by(|a, b| a.task_id.cmp(&b.task_id));
 
-        // Extract tasks in order
-        tasks_with_positions
-            .into_iter()
-            .map(|(_, task)| task)
-            .collect()
+        tasks.into_iter().collect()
     }
+
+    /// Removes a single task from the index, returning a new index (pure function).
+    ///
+    /// This helper method removes all index entries associated with the given task:
+    /// - Removes from `title_word_index` and `title_word_all_suffix_index`
+    /// - Removes from `title_full_index` and `title_full_all_suffix_index`
+    /// - Removes from `tag_index` and `tag_all_suffix_index`
+    /// - Removes from `tasks_by_id`
+    ///
+    /// # Complexity
+    ///
+    /// O(W * L * log N) where W is word count, L is average word length, N is index size.
+    #[must_use]
+    fn remove_task(&self, task: &Task) -> Self {
+        let normalized_title = task.title.to_lowercase();
+        let task_id = &task.task_id;
+
+        // Remove from tasks_by_id
+        let tasks_by_id = self.tasks_by_id.remove(task_id);
+
+        // Remove from title_full_index
+        let title_full_index =
+            Self::remove_id_from_vector_index(&self.title_full_index, &normalized_title, task_id);
+
+        // Remove from title_full_all_suffix_index
+        let title_full_all_suffix_index = Self::remove_id_from_all_suffixes(
+            &self.title_full_all_suffix_index,
+            &normalized_title,
+            task_id,
+        );
+
+        // Remove from title_word_index and title_word_all_suffix_index
+        let mut title_word_index = self.title_word_index.clone();
+        let mut title_word_all_suffix_index = self.title_word_all_suffix_index.clone();
+        for word in normalized_title.split_whitespace() {
+            title_word_index = Self::remove_id_from_vector_index(&title_word_index, word, task_id);
+            title_word_all_suffix_index =
+                Self::remove_id_from_all_suffixes(&title_word_all_suffix_index, word, task_id);
+        }
+
+        // Remove from tag_index and tag_all_suffix_index
+        let mut tag_index = self.tag_index.clone();
+        let mut tag_all_suffix_index = self.tag_all_suffix_index.clone();
+        for tag in &task.tags {
+            let tag_key = tag.as_str().to_lowercase();
+            tag_index = Self::remove_id_from_vector_index(&tag_index, &tag_key, task_id);
+            tag_all_suffix_index =
+                Self::remove_id_from_all_suffixes(&tag_all_suffix_index, &tag_key, task_id);
+        }
+
+        Self {
+            title_word_index,
+            title_full_index,
+            title_full_all_suffix_index,
+            title_word_all_suffix_index,
+            tag_index,
+            tag_all_suffix_index,
+            tasks_by_id,
+        }
+    }
+
+    /// Removes a task ID from a vector-valued index entry.
+    ///
+    /// If the resulting vector is empty, removes the entire entry.
+    fn remove_id_from_vector_index(
+        index: &PersistentTreeMap<String, PersistentVector<TaskId>>,
+        key: &str,
+        task_id: &TaskId,
+    ) -> PersistentTreeMap<String, PersistentVector<TaskId>> {
+        index.get(key).map_or_else(
+            || index.clone(),
+            |ids| {
+                let filtered: PersistentVector<TaskId> =
+                    ids.iter().filter(|id| *id != task_id).cloned().collect();
+                if filtered.is_empty() {
+                    index.remove(&key.to_string())
+                } else {
+                    index.insert(key.to_string(), filtered)
+                }
+            },
+        )
+    }
+
+    /// Removes a task ID from all suffix entries of a word.
+    fn remove_id_from_all_suffixes(
+        index: &PersistentTreeMap<String, PersistentVector<TaskId>>,
+        word: &str,
+        task_id: &TaskId,
+    ) -> PersistentTreeMap<String, PersistentVector<TaskId>> {
+        let mut result = index.clone();
+        for (byte_index, _) in word.char_indices() {
+            let suffix = &word[byte_index..];
+            result = Self::remove_id_from_vector_index(&result, suffix, task_id);
+        }
+        result
+    }
+
+    /// Adds a single task to the index, returning a new index (pure function).
+    ///
+    /// This helper method adds all index entries for the given task:
+    /// - Adds to `title_word_index` and `title_word_all_suffix_index`
+    /// - Adds to `title_full_index` and `title_full_all_suffix_index`
+    /// - Adds to `tag_index` and `tag_all_suffix_index`
+    /// - Adds to `tasks_by_id`
+    ///
+    /// # Complexity
+    ///
+    /// O(W * L * log N) where W is word count, L is average word length, N is index size.
+    #[must_use]
+    fn add_task(&self, task: &Task) -> Self {
+        let normalized_title = task.title.to_lowercase();
+        let task_id = &task.task_id;
+
+        // Add to tasks_by_id
+        let tasks_by_id = self.tasks_by_id.insert(task_id.clone(), task.clone());
+
+        // Add to title_full_index (with deduplication check)
+        let existing_ids = self
+            .title_full_index
+            .get(&normalized_title)
+            .cloned()
+            .unwrap_or_else(PersistentVector::new);
+        let title_full_index = if existing_ids.iter().any(|id| id == task_id) {
+            self.title_full_index.clone()
+        } else {
+            self.title_full_index.insert(
+                normalized_title.clone(),
+                existing_ids.push_back(task_id.clone()),
+            )
+        };
+
+        // Add to title_full_all_suffix_index
+        let title_full_all_suffix_index = Self::index_all_suffixes(
+            self.title_full_all_suffix_index.clone(),
+            &normalized_title,
+            task_id,
+        );
+
+        // Add to title_word_index and title_word_all_suffix_index (with deduplication check)
+        let mut title_word_index = self.title_word_index.clone();
+        let mut title_word_all_suffix_index = self.title_word_all_suffix_index.clone();
+        for word in normalized_title.split_whitespace() {
+            let word_key = word.to_string();
+            let task_ids = title_word_index
+                .get(&word_key)
+                .cloned()
+                .unwrap_or_else(PersistentVector::new);
+            if !task_ids.iter().any(|id| id == task_id) {
+                title_word_index =
+                    title_word_index.insert(word_key.clone(), task_ids.push_back(task_id.clone()));
+            }
+            title_word_all_suffix_index =
+                Self::index_all_suffixes(title_word_all_suffix_index, word, task_id);
+        }
+
+        // Add to tag_index and tag_all_suffix_index (with deduplication check)
+        let mut tag_index = self.tag_index.clone();
+        let mut tag_all_suffix_index = self.tag_all_suffix_index.clone();
+        for tag in &task.tags {
+            let tag_key = tag.as_str().to_lowercase();
+            let task_ids = tag_index
+                .get(&tag_key)
+                .cloned()
+                .unwrap_or_else(PersistentVector::new);
+            if !task_ids.iter().any(|id| id == task_id) {
+                tag_index = tag_index.insert(tag_key.clone(), task_ids.push_back(task_id.clone()));
+            }
+            tag_all_suffix_index =
+                Self::index_all_suffixes(tag_all_suffix_index, &tag_key, task_id);
+        }
+
+        Self {
+            title_word_index,
+            title_full_index,
+            title_full_all_suffix_index,
+            title_word_all_suffix_index,
+            tag_index,
+            tag_all_suffix_index,
+            tasks_by_id,
+        }
+    }
+
+    /// Applies a task change to the index, returning a new index (pure function).
+    ///
+    /// This method implements differential index updates:
+    /// - `Add`: Adds the new task to all indexes
+    /// - `Update`: Removes the old task, then adds the new task
+    /// - `Remove`: Removes the task from all indexes
+    ///
+    /// # Laws
+    ///
+    /// This operation is idempotent for Add and Remove:
+    /// ```text
+    /// apply_change(apply_change(index, Add(task)), Add(task)) = apply_change(index, Add(task))
+    /// apply_change(apply_change(index, Remove(id)), Remove(id)) = apply_change(index, Remove(id))
+    /// ```
+    ///
+    /// # Complexity
+    ///
+    /// O(W * L * log N) where W is word count, L is average word length, N is index size.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let new_index = index.apply_change(TaskChange::Add(task));
+    /// let new_index = index.apply_change(TaskChange::Update { old, new });
+    /// let new_index = index.apply_change(TaskChange::Remove(task_id));
+    /// ```
+    #[must_use]
+    pub fn apply_change(&self, change: TaskChange) -> Self {
+        match change {
+            TaskChange::Add(task) => {
+                // Check if task already exists (idempotency)
+                if self.tasks_by_id.contains_key(&task.task_id) {
+                    self.clone()
+                } else {
+                    self.add_task(&task)
+                }
+            }
+            TaskChange::Update { old, new } => {
+                // Remove old, then add new
+                self.remove_task(&old).add_task(&new)
+            }
+            TaskChange::Remove(task_id) => {
+                // Find the task to remove
+                self.tasks_by_id
+                    .get(&task_id)
+                    .map_or_else(|| self.clone(), |task| self.remove_task(task))
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Test-only accessors for internal index verification
+    // -------------------------------------------------------------------------
+
+    /// Returns a reference to the title word index (test-only).
+    #[cfg(test)]
+    #[must_use]
+    pub const fn title_word_index_for_test(
+        &self,
+    ) -> &PersistentTreeMap<String, PersistentVector<TaskId>> {
+        &self.title_word_index
+    }
+
+    /// Returns a reference to the title full index (test-only).
+    #[cfg(test)]
+    #[must_use]
+    pub const fn title_full_index_for_test(
+        &self,
+    ) -> &PersistentTreeMap<String, PersistentVector<TaskId>> {
+        &self.title_full_index
+    }
+
+    /// Returns a reference to the title full all-suffix index (test-only).
+    #[cfg(test)]
+    #[must_use]
+    pub const fn title_full_all_suffix_index_for_test(
+        &self,
+    ) -> &PersistentTreeMap<String, PersistentVector<TaskId>> {
+        &self.title_full_all_suffix_index
+    }
+
+    /// Returns a reference to the title word all-suffix index (test-only).
+    #[cfg(test)]
+    #[must_use]
+    pub const fn title_word_all_suffix_index_for_test(
+        &self,
+    ) -> &PersistentTreeMap<String, PersistentVector<TaskId>> {
+        &self.title_word_all_suffix_index
+    }
+
+    /// Returns a reference to the tag index (test-only).
+    #[cfg(test)]
+    #[must_use]
+    pub const fn tag_index_for_test(&self) -> &PersistentTreeMap<String, PersistentVector<TaskId>> {
+        &self.tag_index
+    }
+
+    /// Returns a reference to the tag all-suffix index (test-only).
+    #[cfg(test)]
+    #[must_use]
+    pub const fn tag_all_suffix_index_for_test(
+        &self,
+    ) -> &PersistentTreeMap<String, PersistentVector<TaskId>> {
+        &self.tag_all_suffix_index
+    }
+}
+
+/// Represents a change to a task for differential index updates.
+///
+/// This enum is used with `SearchIndex::apply_change` to update the search index
+/// incrementally without rebuilding the entire index.
+///
+/// # Variants
+///
+/// - `Add`: A new task has been created
+/// - `Update`: An existing task has been modified
+/// - `Remove`: A task has been deleted
+///
+/// # Examples
+///
+/// ```ignore
+/// // After creating a new task
+/// let change = TaskChange::Add(new_task);
+/// let new_index = index.apply_change(change);
+///
+/// // After updating a task
+/// let change = TaskChange::Update { old: old_task, new: new_task };
+/// let new_index = index.apply_change(change);
+///
+/// // After deleting a task
+/// let change = TaskChange::Remove(task_id);
+/// let new_index = index.apply_change(change);
+/// ```
+#[derive(Debug, Clone)]
+pub enum TaskChange {
+    /// A new task has been created.
+    Add(Task),
+    /// An existing task has been updated.
+    Update {
+        /// The old version of the task (before update).
+        old: Task,
+        /// The new version of the task (after update).
+        new: Task,
+    },
+    /// A task has been removed.
+    Remove(TaskId),
 }
 
 // =============================================================================
@@ -906,14 +1872,29 @@ fn paginate_tasks(
 /// Searches tasks by title or tags.
 ///
 /// This handler demonstrates:
-/// - **`PersistentTreeMap`**: Building normalized search indexes for efficient lookup
+/// - **`ArcSwap`**: Lock-free reads from pre-built search index
 /// - **`Semigroup::combine`**: Combining search results with deduplication
 /// - **Deduplication**: Using `Semigroup::combine` for merging overlapping results
+/// - **Pagination**: Using `normalize_search_pagination` for limit/offset handling
+/// - **Caching**: LRU cache with TTL for repeated queries (REQ-SEARCH-CACHE-001)
+///
+/// # Performance
+///
+/// The search index is pre-built at application startup and updated incrementally
+/// when tasks are created/updated/deleted. This eliminates the need to rebuild
+/// the index on every search request, significantly improving performance.
+///
+/// Search results are cached with:
+/// - **TTL**: 5 seconds
+/// - **Capacity**: 2000 entries (LRU eviction)
+/// - **Cache key**: `(normalized_query, scope, limit, offset)`
 ///
 /// # Query Parameters
 ///
 /// - `q`: Search query (case-insensitive substring match)
 /// - `in`: Search scope - "title", "tags", or "all" (default)
+/// - `limit`: Maximum results to return (default: 50, max: 200)
+/// - `offset`: Number of results to skip (default: 0)
 ///
 /// # Response
 ///
@@ -921,34 +1902,69 @@ fn paginate_tasks(
 ///
 /// # Errors
 ///
-/// Returns [`ApiErrorResponse`] in the following cases:
-/// - **500 Internal Server Error**: Repository operation failed
+/// This handler does not return errors directly since the search index
+/// is loaded from memory. Any errors from index loading are handled at startup.
 #[allow(clippy::future_not_send)]
 pub async fn search_tasks(
     State(state): State<AppState>,
     Query(query): Query<SearchTasksQuery>,
 ) -> Result<Json<Vec<TaskResponse>>, ApiErrorResponse> {
-    // I/O boundary: Fetch all tasks from repository (use Pagination::all() for full dataset)
-    let all_tasks = state
-        .task_repository
-        .list(Pagination::all())
-        .run_async()
-        .await
-        .map_err(ApiErrorResponse::from)?;
+    // Create cache key from raw query parameters
+    // The key includes normalized query, scope, limit, and offset
+    let cache_key = SearchCacheKey::from_raw(&query.q, query.scope, query.limit, query.offset);
 
-    // Convert to PersistentVector for functional operations
-    let tasks: PersistentVector<Task> = all_tasks.items.into_iter().collect();
+    // Check cache first
+    if let Some(cached_result) = state.search_cache.get(&cache_key) {
+        // Cache hit - log metrics
+        tracing::debug!(
+            cache_hit = true,
+            hit_rate = %state.search_cache.stats().hit_rate(),
+            "Search cache hit"
+        );
+        // Convert cached SearchResult to response
+        let (limit, offset) = normalize_search_pagination(query.limit, query.offset);
+        let response: Vec<TaskResponse> = cached_result
+            .into_tasks()
+            .iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .map(TaskResponse::from)
+            .collect();
+        return Ok(Json(response));
+    }
 
-    // Build search index using PersistentTreeMap
-    let index = SearchIndex::build(&tasks);
+    // Cache miss - log metrics
+    tracing::debug!(
+        cache_hit = false,
+        hit_rate = %state.search_cache.stats().hit_rate(),
+        "Search cache miss"
+    );
 
-    // Pure computation: Search with scope using Semigroup::combine
-    let results = search_with_scope_indexed(&index, &query.q, query.scope);
+    // Perform search
+    // Normalize query for consistent searching
+    let normalized = normalize_query(&query.q);
+    let normalized_query = normalized.key();
 
-    // Convert to response
+    // Load the pre-built search index from ArcSwap (lock-free read)
+    let index = state.search_index.load();
+
+    // Pure computation: Search with scope using normalized query
+    let results = search_with_scope_indexed(&index, normalized_query, query.scope);
+
+    // Store in cache with the exact cache key (including normalized limit/offset)
+    // Each unique (query, scope, limit, offset) combination creates a separate cache entry
+    // to ensure correct results for each pagination request
+    state.search_cache.put(cache_key, results.clone());
+
+    // Apply pagination using pure function
+    let (limit, offset) = normalize_search_pagination(query.limit, query.offset);
+
+    // Convert to response with pagination applied
     let response: Vec<TaskResponse> = results
         .into_tasks()
         .iter()
+        .skip(offset as usize)
+        .take(limit as usize)
         .map(TaskResponse::from)
         .collect();
 
@@ -2654,6 +3670,2495 @@ mod tests {
         assert!(
             result.is_err(),
             "filter_tasks with status filter should still return error for nil UUID"
+        );
+    }
+
+    // =========================================================================
+    // REQ-SEARCH-API-001: Search Pagination Tests
+    // =========================================================================
+
+    /// Test: `normalize_search_pagination` defaults limit to 50 when not specified.
+    #[rstest]
+    fn test_normalize_search_pagination_default_limit() {
+        let (limit, offset) = normalize_search_pagination(None, None);
+        assert_eq!(limit, 50, "Default limit should be 50");
+        assert_eq!(offset, 0, "Default offset should be 0");
+    }
+
+    /// Test: `normalize_search_pagination` defaults offset to 0 when not specified.
+    #[rstest]
+    fn test_normalize_search_pagination_default_offset() {
+        let (limit, offset) = normalize_search_pagination(Some(100), None);
+        assert_eq!(limit, 100, "Limit should be passed through");
+        assert_eq!(offset, 0, "Default offset should be 0");
+    }
+
+    /// Test: `normalize_search_pagination` clamps limit to 200 when exceeds.
+    #[rstest]
+    fn test_normalize_search_pagination_clamps_limit_to_max() {
+        let (limit, offset) = normalize_search_pagination(Some(500), Some(10));
+        assert_eq!(limit, 200, "Limit should be clamped to 200");
+        assert_eq!(offset, 10, "Offset should be passed through");
+    }
+
+    /// Test: `normalize_search_pagination` allows limit at boundary (200).
+    #[rstest]
+    fn test_normalize_search_pagination_allows_max_limit() {
+        let (limit, offset) = normalize_search_pagination(Some(200), Some(0));
+        assert_eq!(limit, 200, "Limit at max boundary should be allowed");
+        assert_eq!(offset, 0, "Offset should be 0");
+    }
+
+    /// Test: `normalize_search_pagination` allows limit just below max (199).
+    #[rstest]
+    fn test_normalize_search_pagination_allows_below_max_limit() {
+        let (limit, offset) = normalize_search_pagination(Some(199), Some(5));
+        assert_eq!(limit, 199, "Limit below max should be allowed");
+        assert_eq!(offset, 5, "Offset should be passed through");
+    }
+
+    /// Test: `normalize_search_pagination` is a pure function (same input -> same output).
+    #[rstest]
+    fn test_normalize_search_pagination_is_pure() {
+        // Multiple calls with the same input should return the same output
+        let result1 = normalize_search_pagination(Some(100), Some(20));
+        let result2 = normalize_search_pagination(Some(100), Some(20));
+        assert_eq!(
+            result1, result2,
+            "Pure function should return same output for same input"
+        );
+    }
+
+    // =========================================================================
+    // REQ-SEARCH-API-001: SearchScope Deserialization Tests
+    // =========================================================================
+
+    /// Test: `SearchScope::from_str` parses "title" correctly.
+    #[rstest]
+    fn test_search_scope_from_str_title() {
+        use std::str::FromStr;
+        assert_eq!(SearchScope::from_str("title"), Ok(SearchScope::Title));
+        assert_eq!(SearchScope::from_str("TITLE"), Ok(SearchScope::Title));
+        assert_eq!(SearchScope::from_str("Title"), Ok(SearchScope::Title));
+    }
+
+    /// Test: `SearchScope::from_str` parses "tags" correctly.
+    #[rstest]
+    fn test_search_scope_from_str_tags() {
+        use std::str::FromStr;
+        assert_eq!(SearchScope::from_str("tags"), Ok(SearchScope::Tags));
+        assert_eq!(SearchScope::from_str("TAGS"), Ok(SearchScope::Tags));
+        assert_eq!(SearchScope::from_str("Tags"), Ok(SearchScope::Tags));
+    }
+
+    /// Test: `SearchScope::from_str` parses "all" correctly.
+    #[rstest]
+    fn test_search_scope_from_str_all() {
+        use std::str::FromStr;
+        assert_eq!(SearchScope::from_str("all"), Ok(SearchScope::All));
+        assert_eq!(SearchScope::from_str("ALL"), Ok(SearchScope::All));
+        assert_eq!(SearchScope::from_str("All"), Ok(SearchScope::All));
+    }
+
+    /// Test: `SearchScope::from_str` returns error for unknown values.
+    #[rstest]
+    fn test_search_scope_from_str_unknown_returns_error() {
+        use std::str::FromStr;
+        let result = SearchScope::from_str("unknown");
+        assert!(result.is_err(), "Unknown value should return error");
+        assert!(
+            result
+                .unwrap_err()
+                .contains("Invalid search scope 'unknown'"),
+            "Error message should include the invalid value"
+        );
+    }
+
+    /// Test: `SearchScope::from_str` returns error for empty string.
+    #[rstest]
+    fn test_search_scope_from_str_empty_returns_error() {
+        use std::str::FromStr;
+        let result = SearchScope::from_str("");
+        assert!(result.is_err(), "Empty string should return error");
+    }
+
+    /// Test: `SearchScope` serde deserialization for valid values.
+    #[rstest]
+    fn test_search_scope_serde_deserialize_valid() {
+        let scope: SearchScope = serde_json::from_str("\"title\"").unwrap();
+        assert_eq!(scope, SearchScope::Title);
+
+        let scope: SearchScope = serde_json::from_str("\"tags\"").unwrap();
+        assert_eq!(scope, SearchScope::Tags);
+
+        let scope: SearchScope = serde_json::from_str("\"all\"").unwrap();
+        assert_eq!(scope, SearchScope::All);
+    }
+
+    /// Test: `SearchScope` serde deserialization returns error for unknown values.
+    #[rstest]
+    fn test_search_scope_serde_deserialize_unknown_returns_error() {
+        let result: Result<SearchScope, _> = serde_json::from_str("\"invalid\"");
+        assert!(result.is_err(), "Unknown value should return serde error");
+    }
+
+    // =========================================================================
+    // REQ-SEARCH-API-001: Search Result Order Stability Tests
+    // =========================================================================
+
+    /// Test: Same query returns results in stable order.
+    #[rstest]
+    fn test_search_result_order_is_stable() {
+        let tasks: PersistentVector<Task> = vec![
+            create_test_task("Task A", Priority::Low),
+            create_test_task("Task B", Priority::Medium),
+            create_test_task("Task C", Priority::High),
+        ]
+        .into_iter()
+        .collect();
+
+        let index = SearchIndex::build(&tasks);
+
+        // Run same search multiple times
+        let result1 = search_with_scope_indexed(&index, "", SearchScope::All);
+        let result2 = search_with_scope_indexed(&index, "", SearchScope::All);
+        let result3 = search_with_scope_indexed(&index, "", SearchScope::All);
+
+        // Extract task IDs for comparison
+        let ids1: Vec<_> = result1.tasks.iter().map(|t| t.task_id.clone()).collect();
+        let ids2: Vec<_> = result2.tasks.iter().map(|t| t.task_id.clone()).collect();
+        let ids3: Vec<_> = result3.tasks.iter().map(|t| t.task_id.clone()).collect();
+
+        assert_eq!(ids1, ids2, "Search results should be in stable order");
+        assert_eq!(ids2, ids3, "Search results should be in stable order");
+    }
+
+    /// Test: Search with keyword returns results in stable order.
+    #[rstest]
+    fn test_search_with_keyword_order_is_stable() {
+        let tasks: PersistentVector<Task> = vec![
+            create_test_task("Important meeting", Priority::High),
+            create_test_task("Important deadline", Priority::Critical),
+            create_test_task("Important review", Priority::Medium),
+        ]
+        .into_iter()
+        .collect();
+
+        let index = SearchIndex::build(&tasks);
+
+        // Run same search multiple times
+        let result1 = search_with_scope_indexed(&index, "important", SearchScope::Title);
+        let result2 = search_with_scope_indexed(&index, "important", SearchScope::Title);
+
+        let ids1: Vec<_> = result1.tasks.iter().map(|t| t.task_id.clone()).collect();
+        let ids2: Vec<_> = result2.tasks.iter().map(|t| t.task_id.clone()).collect();
+
+        assert_eq!(
+            ids1, ids2,
+            "Search results with keyword should be in stable order"
+        );
+    }
+
+    // =========================================================================
+    // REQ-SEARCH-API-001: Pagination Tests for Handler
+    // =========================================================================
+
+    /// Test: Default limit (50) is applied when limit is not specified.
+    #[rstest]
+    fn test_normalize_search_pagination_applies_default_limit() {
+        let (limit, offset) = normalize_search_pagination(None, None);
+        assert_eq!(limit, 50, "Default limit should be 50");
+        assert_eq!(offset, 0, "Default offset should be 0");
+    }
+
+    /// Test: Max limit (200) is applied when limit exceeds max.
+    #[rstest]
+    fn test_normalize_search_pagination_applies_max_limit() {
+        let (limit, offset) = normalize_search_pagination(Some(500), None);
+        assert_eq!(limit, 200, "Limit should be clamped to max 200");
+        assert_eq!(offset, 0, "Offset should be 0");
+    }
+
+    /// Test: Exact max limit (200) is allowed.
+    #[rstest]
+    fn test_normalize_search_pagination_allows_exact_max_limit() {
+        let (limit, offset) = normalize_search_pagination(Some(200), Some(10));
+        assert_eq!(limit, 200, "Exact max limit should be allowed");
+        assert_eq!(offset, 10, "Offset should be passed through");
+    }
+
+    /// Test: `limit=0` returns empty array (explicit user intent).
+    ///
+    /// When a user explicitly specifies `limit=0`, they want zero results.
+    /// This is a valid use case for checking total counts without fetching data.
+    #[rstest]
+    fn test_normalize_search_pagination_allows_limit_zero() {
+        let (limit, offset) = normalize_search_pagination(Some(0), Some(10));
+        assert_eq!(limit, 0, "Limit 0 should be allowed (returns empty array)");
+        assert_eq!(offset, 10, "Offset should still be passed through");
+    }
+
+    /// Test: `limit=0` effectively returns empty result when applied to search.
+    #[rstest]
+    fn test_search_with_limit_zero_returns_empty() {
+        let tasks: PersistentVector<Task> = vec![
+            create_test_task("Task A", Priority::Low),
+            create_test_task("Task B", Priority::Medium),
+        ]
+        .into_iter()
+        .collect();
+
+        let index = SearchIndex::build(&tasks);
+        let results = search_with_scope_indexed(&index, "", SearchScope::All);
+
+        // Verify we have results before pagination
+        assert!(
+            !results.tasks.is_empty(),
+            "Should have results before pagination"
+        );
+
+        // Simulate handler's pagination application with limit=0
+        let count = results.into_tasks().iter().take(0).count();
+
+        assert_eq!(count, 0, "limit=0 should return empty array");
+    }
+
+    // =========================================================================
+    // REQ-SEARCH-API-001: Search Deterministic Order with Limit/Offset Tests
+    // =========================================================================
+
+    /// Test: Search with limit/offset returns same results across multiple calls.
+    ///
+    /// This is a law-like property test ensuring deterministic ordering.
+    #[rstest]
+    fn test_search_deterministic_order_with_limit_offset() {
+        let tasks: PersistentVector<Task> = vec![
+            create_test_task("Task A", Priority::Low),
+            create_test_task("Task B", Priority::Medium),
+            create_test_task("Task C", Priority::High),
+            create_test_task("Task D", Priority::Critical),
+            create_test_task("Task E", Priority::Low),
+        ]
+        .into_iter()
+        .collect();
+
+        let index = SearchIndex::build(&tasks);
+
+        // First search with limit=2, offset=1
+        let result1 = search_with_scope_indexed(&index, "", SearchScope::All);
+        let paginated1: Vec<_> = result1
+            .into_tasks()
+            .iter()
+            .skip(1)
+            .take(2)
+            .map(|t| t.task_id.clone())
+            .collect();
+
+        // Second search with same parameters
+        let result2 = search_with_scope_indexed(&index, "", SearchScope::All);
+        let paginated2: Vec<_> = result2
+            .into_tasks()
+            .iter()
+            .skip(1)
+            .take(2)
+            .map(|t| t.task_id.clone())
+            .collect();
+
+        assert_eq!(
+            paginated1, paginated2,
+            "Search with limit/offset should return same results in same order"
+        );
+    }
+
+    /// Test: Empty query with limit/offset returns correct subset.
+    /// Results are ordered by `task_id`, so we verify that pagination works correctly
+    /// regardless of the specific order (which depends on UUIDs).
+    #[rstest]
+    fn test_search_empty_query_with_limit_offset() {
+        let tasks: PersistentVector<Task> = vec![
+            create_test_task("Task A", Priority::Low),
+            create_test_task("Task B", Priority::Medium),
+            create_test_task("Task C", Priority::High),
+        ]
+        .into_iter()
+        .collect();
+
+        let index = SearchIndex::build(&tasks);
+        let results = search_with_scope_indexed(&index, "", SearchScope::All);
+
+        // All tasks should be returned for empty query
+        assert_eq!(
+            results.tasks.len(),
+            3,
+            "Empty query should return all tasks"
+        );
+
+        // Get the ordered task titles
+        let all_titles: Vec<_> = results.tasks.iter().map(|t| t.title.clone()).collect();
+
+        // Apply pagination (limit=2, offset=1)
+        let paginated: Vec<_> = results
+            .into_tasks()
+            .iter()
+            .skip(1)
+            .take(2)
+            .cloned()
+            .collect();
+
+        assert_eq!(paginated.len(), 2, "Should return 2 tasks after pagination");
+        // Verify pagination returns the correct subset based on task_id order
+        assert_eq!(paginated[0].title, all_titles[1]);
+        assert_eq!(paginated[1].title, all_titles[2]);
+    }
+
+    /// Test: Search with keyword and limit/offset.
+    /// Results are ordered by `task_id`, so we verify that pagination works correctly
+    /// regardless of the specific order (which depends on UUIDs).
+    #[rstest]
+    fn test_search_with_keyword_applies_limit_offset() {
+        let tasks: PersistentVector<Task> = vec![
+            create_test_task("Important meeting A", Priority::High),
+            create_test_task("Important meeting B", Priority::Critical),
+            create_test_task("Important meeting C", Priority::Medium),
+            create_test_task("Other task", Priority::Low),
+        ]
+        .into_iter()
+        .collect();
+
+        let index = SearchIndex::build(&tasks);
+        let results = search_with_scope_indexed(&index, "important", SearchScope::Title);
+
+        // Should find 3 tasks containing "important"
+        assert_eq!(results.tasks.len(), 3, "Should find 3 matching tasks");
+
+        // Get the ordered task titles
+        let all_titles: Vec<_> = results.tasks.iter().map(|t| t.title.clone()).collect();
+
+        // Apply pagination (limit=1, offset=1)
+        let paginated: Vec<_> = results
+            .into_tasks()
+            .iter()
+            .skip(1)
+            .take(1)
+            .cloned()
+            .collect();
+
+        assert_eq!(paginated.len(), 1, "Should return 1 task after pagination");
+        assert_eq!(
+            paginated[0].title, all_titles[1],
+            "Should return second matching task"
+        );
+    }
+
+    // =========================================================================
+    // REQ-SEARCH-API-001: SearchScope Error Message Tests
+    // =========================================================================
+
+    /// Test: `SearchScope::from_str` error message includes valid options.
+    #[rstest]
+    fn test_search_scope_error_message_includes_valid_options() {
+        use std::str::FromStr;
+        let result = SearchScope::from_str("invalid");
+        assert!(result.is_err());
+        let error_message = result.unwrap_err();
+        assert!(
+            error_message.contains("title"),
+            "Error should mention 'title' as valid option"
+        );
+        assert!(
+            error_message.contains("tags"),
+            "Error should mention 'tags' as valid option"
+        );
+        assert!(
+            error_message.contains("all"),
+            "Error should mention 'all' as valid option"
+        );
+    }
+
+    /// Test: Serde deserialization error for invalid scope.
+    ///
+    /// This verifies that serde correctly propagates the error when
+    /// an invalid `in` parameter is provided in the query string.
+    #[rstest]
+    fn test_search_tasks_query_invalid_scope_deserialize() {
+        // Simulate deserializing a query string with invalid scope
+        let json = r#"{"q": "test", "in": "invalid"}"#;
+        let result: Result<SearchTasksQuery, _> = serde_json::from_str(json);
+
+        assert!(result.is_err(), "Invalid scope should fail deserialization");
+        let error_message = result.unwrap_err().to_string();
+        assert!(
+            error_message.contains("Invalid search scope"),
+            "Error should contain 'Invalid search scope': {error_message}"
+        );
+    }
+
+    /// Test: Default scope is applied when `in` is omitted.
+    #[rstest]
+    fn test_search_tasks_query_default_scope() {
+        let json = r#"{"q": "test"}"#;
+        let query: SearchTasksQuery = serde_json::from_str(json).unwrap();
+
+        assert_eq!(query.q, "test");
+        assert_eq!(query.scope, SearchScope::All, "Default scope should be All");
+        assert!(query.limit.is_none(), "Default limit should be None");
+        assert!(query.offset.is_none(), "Default offset should be None");
+    }
+
+    // =========================================================================
+    // Phase 1 Codex Review Fix: Multi-word Infix Match Tests
+    // =========================================================================
+
+    /// Regression test: "meeting tomorrow" should match "important meeting tomorrow".
+    /// This tests the `title_full_all_suffix_index` for multi-word infix queries.
+    #[rstest]
+    fn test_search_multi_word_infix_match() {
+        let tasks: PersistentVector<Task> = vec![
+            create_test_task("important meeting tomorrow", Priority::High),
+            create_test_task("urgent review today", Priority::Medium),
+            create_test_task("meeting later", Priority::Low),
+        ]
+        .into_iter()
+        .collect();
+
+        let index = SearchIndex::build(&tasks);
+        let result = index.search_by_title("meeting tomorrow");
+
+        // "meeting tomorrow" should match "important meeting tomorrow"
+        assert!(
+            result.is_some(),
+            "Query 'meeting tomorrow' should match 'important meeting tomorrow'"
+        );
+        let result = result.unwrap();
+        assert_eq!(
+            result.tasks.len(),
+            1,
+            "Only the task with 'meeting tomorrow' should match"
+        );
+        assert!(
+            result
+                .tasks
+                .iter()
+                .any(|t| t.title.contains("important meeting tomorrow"))
+        );
+    }
+
+    /// Regression test: Multi-word infix with partial word match.
+    /// "eeting tomorr" should match "important meeting tomorrow".
+    #[rstest]
+    fn test_search_multi_word_infix_partial_match() {
+        let tasks: PersistentVector<Task> = vec![
+            create_test_task("important meeting tomorrow", Priority::High),
+            create_test_task("Other task", Priority::Low),
+        ]
+        .into_iter()
+        .collect();
+
+        let index = SearchIndex::build(&tasks);
+        let result = index.search_by_title("eeting tomorr");
+
+        // "eeting tomorr" appears in the middle of "important m[eeting tomorr]ow"
+        assert!(
+            result.is_some(),
+            "Query 'eeting tomorr' should match 'important meeting tomorrow'"
+        );
+        let result = result.unwrap();
+        assert_eq!(result.tasks.len(), 1);
+    }
+
+    /// Regression test: Multi-word query at the end of title.
+    /// "code review" should match "weekly code review".
+    #[rstest]
+    fn test_search_multi_word_suffix_match() {
+        let tasks: PersistentVector<Task> = vec![
+            create_test_task("weekly code review", Priority::High),
+            create_test_task("code update", Priority::Medium),
+        ]
+        .into_iter()
+        .collect();
+
+        let index = SearchIndex::build(&tasks);
+        let result = index.search_by_title("code review");
+
+        // "code review" should match "weekly code review"
+        assert!(
+            result.is_some(),
+            "Query 'code review' should match 'weekly code review'"
+        );
+        let result = result.unwrap();
+        assert_eq!(
+            result.tasks.len(),
+            1,
+            "Only 'weekly code review' should match"
+        );
+        assert!(result.tasks.iter().any(|t| t.title.contains("code review")));
+    }
+
+    /// Regression test: Complex multi-word infix with multiple matching tasks.
+    #[rstest]
+    fn test_search_multi_word_infix_multiple_matches() {
+        let tasks: PersistentVector<Task> = vec![
+            create_test_task("urgent meeting tomorrow morning", Priority::High),
+            create_test_task("important meeting tomorrow afternoon", Priority::Medium),
+            create_test_task("casual meeting later", Priority::Low),
+        ]
+        .into_iter()
+        .collect();
+
+        let index = SearchIndex::build(&tasks);
+        let result = index.search_by_title("meeting tomorrow");
+
+        // "meeting tomorrow" should match both tasks containing this substring
+        assert!(result.is_some());
+        let result = result.unwrap();
+        assert_eq!(
+            result.tasks.len(),
+            2,
+            "Both tasks with 'meeting tomorrow' should match"
+        );
+    }
+
+    // =========================================================================
+    // Phase 1 Codex Review Fix: Order Stability Tests
+    // =========================================================================
+
+    /// Regression test: Result order should be stable regardless of repository input order.
+    /// Since ordering is by `task_id` only, results should be identical
+    /// regardless of the order in which tasks were added to the index.
+    #[rstest]
+    fn test_search_order_stable_regardless_of_input_order() {
+        // Create tasks with different task_ids (UUIDs are generated, so each run has unique IDs)
+        let task1 = create_test_task("Important task A", Priority::High);
+        let task2 = create_test_task("Important task B", Priority::Medium);
+        let task3 = create_test_task("Important task C", Priority::Low);
+
+        // Build index with tasks in one order
+        let tasks_order1: PersistentVector<Task> =
+            vec![task1.clone(), task2.clone(), task3.clone()]
+                .into_iter()
+                .collect();
+        let index1 = SearchIndex::build(&tasks_order1);
+
+        // Build index with tasks in a different order
+        let tasks_order2: PersistentVector<Task> = vec![task3, task1, task2].into_iter().collect();
+        let index2 = SearchIndex::build(&tasks_order2);
+
+        // Search both indexes
+        let result1 = index1
+            .search_by_title("important")
+            .map(|r| {
+                r.tasks
+                    .iter()
+                    .map(|t| t.task_id.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let result2 = index2
+            .search_by_title("important")
+            .map(|r| {
+                r.tasks
+                    .iter()
+                    .map(|t| t.task_id.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        // Results should be identical (no sorting needed since task_id ordering is deterministic)
+        assert_eq!(
+            result1, result2,
+            "Same tasks should be found in the same order regardless of input order"
+        );
+    }
+
+    /// Test: Results are ordered by `task_id` for deterministic ordering.
+    #[rstest]
+    fn test_search_order_uses_task_id_for_stable_ordering() {
+        let task1 = create_test_task("Important task", Priority::High);
+        let task2 = create_test_task("Important task", Priority::Medium);
+
+        // Capture task IDs before moving tasks into vector
+        let task1_id = task1.task_id.clone();
+        let task2_id = task2.task_id.clone();
+
+        let tasks: PersistentVector<Task> = vec![task1, task2].into_iter().collect();
+
+        let index = SearchIndex::build(&tasks);
+
+        // Run search multiple times
+        let results: Vec<Vec<TaskId>> = (0..10)
+            .map(|_| {
+                index
+                    .search_by_title("important")
+                    .map(|r| r.tasks.iter().map(|t| t.task_id.clone()).collect())
+                    .unwrap_or_default()
+            })
+            .collect();
+
+        // All iterations should return the same order
+        for i in 1..results.len() {
+            assert_eq!(
+                results[0], results[i],
+                "Search results should be stable across multiple calls"
+            );
+        }
+
+        // Verify results are sorted by task_id
+        let expected_order: Vec<TaskId> = {
+            let mut ids = vec![task1_id, task2_id];
+            ids.sort();
+            ids
+        };
+        assert_eq!(
+            results[0], expected_order,
+            "Results should be ordered by task_id"
+        );
+    }
+
+    /// Test: `all_tasks` returns tasks in stable order.
+    #[rstest]
+    fn test_all_tasks_returns_stable_order() {
+        let task1 = create_test_task("Task 1", Priority::High);
+        let task2 = create_test_task("Task 2", Priority::Medium);
+        let task3 = create_test_task("Task 3", Priority::Low);
+
+        let tasks: PersistentVector<Task> = vec![task1, task2, task3].into_iter().collect();
+
+        let index = SearchIndex::build(&tasks);
+
+        // Get all tasks multiple times
+        let results: Vec<Vec<TaskId>> = (0..5)
+            .map(|_| {
+                index
+                    .all_tasks()
+                    .iter()
+                    .map(|t| t.task_id.clone())
+                    .collect()
+            })
+            .collect();
+
+        // All iterations should return the same order
+        for i in 1..results.len() {
+            assert_eq!(
+                results[0], results[i],
+                "all_tasks should return stable order"
+            );
+        }
+    }
+
+    // =========================================================================
+    // Phase 1 Final: All Scope Mixed Results Order Stability Test
+    // =========================================================================
+
+    /// Test: All scope search with mixed title and tag matches returns stable order.
+    ///
+    /// This test verifies that when searching with `SearchScope::All`:
+    /// 1. Tasks matching only title, only tag, and both are all returned
+    /// 2. Results are in stable order across multiple searches (directly compared, not sorted)
+    /// 3. Title matches appear before tag-only matches (by design via `Semigroup::combine`)
+    ///
+    /// This is a critical property for pagination consistency.
+    ///
+    /// Note: Within each category (title matches and tag matches), results are sorted
+    /// by `task_id` for stable ordering. The `Semigroup::combine` then merges them
+    /// with title matches first, followed by tag-only matches (deduplicated).
+    #[rstest]
+    fn test_search_all_scope_mixed_results_stable_order() {
+        // Create tasks with different match patterns:
+        // - title_only_match: matches "important" in title only
+        // - tag_only_match: matches "important" in tag only
+        // - both_match: matches "important" in both title and tag
+        // - no_match: does not match "important"
+        let title_only_match = create_test_task("Important meeting", Priority::High);
+        let tag_only_match =
+            create_test_task_with_tags("Regular task", Priority::Medium, &["important"]);
+        let both_match =
+            create_test_task_with_tags("Important deadline", Priority::Critical, &["important"]);
+        let no_match = create_test_task("Unrelated task", Priority::Low);
+
+        // Capture task IDs for verification
+        let title_only_id = title_only_match.task_id.clone();
+        let tag_only_id = tag_only_match.task_id.clone();
+        let both_match_id = both_match.task_id.clone();
+
+        // Build index with tasks in a specific order
+        let tasks: PersistentVector<Task> =
+            vec![no_match, tag_only_match, both_match, title_only_match]
+                .into_iter()
+                .collect();
+
+        let index = SearchIndex::build(&tasks);
+
+        // Run the same search multiple times (5 times to ensure stability)
+        let results: Vec<Vec<TaskId>> = (0..5)
+            .map(|_| {
+                search_with_scope_indexed(&index, "important", SearchScope::All)
+                    .tasks
+                    .iter()
+                    .map(|t| t.task_id.clone())
+                    .collect()
+            })
+            .collect();
+
+        // Verify that all matching tasks are returned
+        assert_eq!(
+            results[0].len(),
+            3,
+            "Should find all 3 tasks matching 'important' (title, tag, or both)"
+        );
+
+        // Verify that all expected task IDs are present
+        assert!(
+            results[0].contains(&title_only_id),
+            "Should include title-only match"
+        );
+        assert!(
+            results[0].contains(&tag_only_id),
+            "Should include tag-only match"
+        );
+        assert!(
+            results[0].contains(&both_match_id),
+            "Should include both-match task"
+        );
+
+        // CRITICAL: Verify that the order is stable across all searches
+        // This is the main purpose of this test - ensuring pagination consistency
+        for (iteration, result) in results.iter().enumerate().skip(1) {
+            assert_eq!(
+                &results[0], result,
+                "Search iteration {} returned different order than iteration 0. \
+                 Expected: {:?}, Got: {:?}",
+                iteration, results[0], result
+            );
+        }
+
+        // Verify that tag-only match appears after title matches
+        // (title matches are prioritized via Semigroup::combine)
+        let tag_only_position = results[0]
+            .iter()
+            .position(|id| id == &tag_only_id)
+            .expect("tag_only_id should be in results");
+        let title_only_position = results[0]
+            .iter()
+            .position(|id| id == &title_only_id)
+            .expect("title_only_id should be in results");
+        let both_match_position = results[0]
+            .iter()
+            .position(|id| id == &both_match_id)
+            .expect("both_match_id should be in results");
+
+        // both_match and title_only_match are title matches, so they should appear before tag_only_match
+        assert!(
+            tag_only_position > title_only_position.min(both_match_position),
+            "Tag-only match should appear after at least one title match. \
+             tag_only_position: {tag_only_position}, title_only_position: {title_only_position}, both_match_position: {both_match_position}"
+        );
+    }
+
+    // =========================================================================
+    // REQ-SEARCH-CACHE-001: Query Normalization Tests
+    // =========================================================================
+
+    /// Test: Basic normalization with leading/trailing whitespace and multiple spaces.
+    #[rstest]
+    fn test_normalize_query_basic() {
+        let result = normalize_query("  Urgent   Task ");
+        assert_eq!(result.key(), "urgent task");
+        assert_eq!(result.tokens(), &["urgent", "task"]);
+    }
+
+    /// Test: Normalization with only lowercase conversion needed.
+    #[rstest]
+    fn test_normalize_query_lowercase_only() {
+        let result = normalize_query("URGENT TASK");
+        assert_eq!(result.key(), "urgent task");
+        assert_eq!(result.tokens(), &["urgent", "task"]);
+    }
+
+    /// Test: Normalization of empty string.
+    #[rstest]
+    fn test_normalize_query_empty() {
+        let result = normalize_query("");
+        assert_eq!(result.key(), "");
+        assert!(result.tokens().is_empty());
+        assert!(result.is_empty());
+    }
+
+    /// Test: Normalization of whitespace-only string.
+    #[rstest]
+    fn test_normalize_query_whitespace_only() {
+        let result = normalize_query("   ");
+        assert_eq!(result.key(), "");
+        assert!(result.tokens().is_empty());
+        assert!(result.is_empty());
+    }
+
+    /// Test: Normalization of already normalized string.
+    #[rstest]
+    fn test_normalize_query_already_normalized() {
+        let result = normalize_query("urgent task");
+        assert_eq!(result.key(), "urgent task");
+        assert_eq!(result.tokens(), &["urgent", "task"]);
+    }
+
+    /// Test: Normalization with mixed case.
+    #[rstest]
+    fn test_normalize_query_mixed_case() {
+        let result = normalize_query("UrGeNt TaSk");
+        assert_eq!(result.key(), "urgent task");
+        assert_eq!(result.tokens(), &["urgent", "task"]);
+    }
+
+    /// Test: Normalization with tab characters.
+    #[rstest]
+    fn test_normalize_query_with_tabs() {
+        let result = normalize_query("urgent\t\ttask");
+        assert_eq!(result.key(), "urgent task");
+        assert_eq!(result.tokens(), &["urgent", "task"]);
+    }
+
+    /// Test: Normalization with newline characters.
+    #[rstest]
+    fn test_normalize_query_with_newlines() {
+        let result = normalize_query("urgent\n\ntask");
+        assert_eq!(result.key(), "urgent task");
+        assert_eq!(result.tokens(), &["urgent", "task"]);
+    }
+
+    /// Test: Single word normalization.
+    #[rstest]
+    fn test_normalize_query_single_word() {
+        let result = normalize_query("  URGENT  ");
+        assert_eq!(result.key(), "urgent");
+        assert_eq!(result.tokens(), &["urgent"]);
+    }
+
+    /// Test: Special characters are preserved.
+    #[rstest]
+    fn test_normalize_query_special_characters() {
+        let result = normalize_query("bug-123 @urgent #important");
+        assert_eq!(result.key(), "bug-123 @urgent #important");
+        assert_eq!(result.tokens(), &["bug-123", "@urgent", "#important"]);
+    }
+
+    /// Test: Unicode characters are preserved and lowercased.
+    #[rstest]
+    fn test_normalize_query_unicode() {
+        let result = normalize_query("  TACHE  urgente  ");
+        assert_eq!(result.key(), "tache urgente");
+        assert_eq!(result.tokens(), &["tache", "urgente"]);
+    }
+
+    /// Test: Idempotent law - `normalize(normalize(q)) = normalize(q)`.
+    #[rstest]
+    #[case("  Urgent   Task ")]
+    #[case("URGENT TASK")]
+    #[case("")]
+    #[case("   ")]
+    #[case("already normalized")]
+    #[case("bug-123 @urgent")]
+    fn test_normalize_query_idempotent(#[case] input: &str) {
+        let first = normalize_query(input);
+        let second = normalize_query(first.key());
+        assert_eq!(
+            first, second,
+            "normalize should be idempotent: normalize(normalize(q)) = normalize(q)"
+        );
+    }
+
+    /// Test: `normalize_query` returns correct values via getters.
+    #[rstest]
+    fn test_normalized_query_getters() {
+        let query = normalize_query("urgent task");
+        assert_eq!(query.key(), "urgent task");
+        assert_eq!(query.tokens(), &["urgent", "task"]);
+        assert!(!query.is_empty());
+    }
+
+    /// Test: `NormalizedQuery::is_empty` for empty query.
+    #[rstest]
+    fn test_normalized_query_is_empty() {
+        let empty = normalize_query("");
+        assert!(empty.is_empty());
+
+        let non_empty = normalize_query("test");
+        assert!(!non_empty.is_empty());
+    }
+
+    // =========================================================================
+    // REQ-SEARCH-CACHE-001: SearchCacheKey Tests
+    // =========================================================================
+
+    /// Test: `SearchCacheKey::from_raw` creates correct cache key.
+    #[rstest]
+    fn test_search_cache_key_from_raw_basic() {
+        let key = SearchCacheKey::from_raw("  Urgent Task  ", SearchScope::All, Some(50), Some(0));
+
+        assert_eq!(key.normalized_query(), "urgent task");
+        assert_eq!(key.scope(), SearchScope::All);
+        assert_eq!(key.limit(), 50);
+        assert_eq!(key.offset(), 0);
+    }
+
+    /// Test: `SearchCacheKey::from_raw` with different parameters.
+    #[rstest]
+    fn test_search_cache_key_from_raw() {
+        let key =
+            SearchCacheKey::from_raw("  URGENT  task  ", SearchScope::Title, Some(100), Some(20));
+
+        assert_eq!(key.normalized_query(), "urgent task");
+        assert_eq!(key.scope(), SearchScope::Title);
+        assert_eq!(key.limit(), 100);
+        assert_eq!(key.offset(), 20);
+    }
+
+    /// Test: `SearchCacheKey::from_raw` normalizes pagination parameters.
+    ///
+    /// This ensures that cache keys with `None` values are equivalent to
+    /// cache keys with explicit default values (limit=50, offset=0).
+    #[rstest]
+    fn test_search_cache_key_from_raw_normalizes_pagination() {
+        // None values should be normalized to defaults
+        let key_with_none = SearchCacheKey::from_raw("test", SearchScope::All, None, None);
+        let key_with_defaults =
+            SearchCacheKey::from_raw("test", SearchScope::All, Some(50), Some(0));
+
+        assert_eq!(
+            key_with_none, key_with_defaults,
+            "None pagination should equal default values"
+        );
+        assert_eq!(key_with_none.limit(), 50);
+        assert_eq!(key_with_none.offset(), 0);
+
+        // Limit exceeding max should be clamped
+        let key_over_max = SearchCacheKey::from_raw("test", SearchScope::All, Some(300), Some(0));
+        let key_at_max = SearchCacheKey::from_raw("test", SearchScope::All, Some(200), Some(0));
+
+        assert_eq!(
+            key_over_max, key_at_max,
+            "Limit over max should be clamped to 200"
+        );
+        assert_eq!(key_over_max.limit(), 200);
+    }
+
+    /// Test: Cache key equality for equivalent normalized queries.
+    #[rstest]
+    fn test_search_cache_key_equality_normalized() {
+        let key1 = SearchCacheKey::from_raw("  Urgent Task  ", SearchScope::All, Some(50), Some(0));
+        let key2 = SearchCacheKey::from_raw("urgent task", SearchScope::All, Some(50), Some(0));
+        let key3 = SearchCacheKey::from_raw("URGENT   TASK", SearchScope::All, Some(50), Some(0));
+
+        assert_eq!(
+            key1, key2,
+            "Equivalent normalized queries should produce equal keys"
+        );
+        assert_eq!(
+            key2, key3,
+            "Equivalent normalized queries should produce equal keys"
+        );
+    }
+
+    /// Test: Cache key inequality for different limits.
+    #[rstest]
+    fn test_search_cache_key_different_limit() {
+        let key1 = SearchCacheKey::from_raw("urgent task", SearchScope::All, Some(50), Some(0));
+        let key2 = SearchCacheKey::from_raw("urgent task", SearchScope::All, Some(100), Some(0));
+
+        assert_ne!(key1, key2, "Different limits should produce different keys");
+    }
+
+    /// Test: Cache key inequality for different offsets.
+    #[rstest]
+    fn test_search_cache_key_different_offset() {
+        let key1 = SearchCacheKey::from_raw("urgent task", SearchScope::All, Some(50), Some(0));
+        let key2 = SearchCacheKey::from_raw("urgent task", SearchScope::All, Some(50), Some(10));
+
+        assert_ne!(
+            key1, key2,
+            "Different offsets should produce different keys"
+        );
+    }
+
+    /// Test: Cache key inequality for different scopes.
+    #[rstest]
+    fn test_search_cache_key_different_scope() {
+        let key1 = SearchCacheKey::from_raw("urgent task", SearchScope::All, Some(50), Some(0));
+        let key2 = SearchCacheKey::from_raw("urgent task", SearchScope::Title, Some(50), Some(0));
+        let key3 = SearchCacheKey::from_raw("urgent task", SearchScope::Tags, Some(50), Some(0));
+
+        assert_ne!(key1, key2, "Different scopes should produce different keys");
+        assert_ne!(key2, key3, "Different scopes should produce different keys");
+        assert_ne!(key1, key3, "Different scopes should produce different keys");
+    }
+
+    /// Test: Cache key can be used as `HashMap` key (Hash trait).
+    #[rstest]
+    fn test_search_cache_key_hashable() {
+        use std::collections::HashMap;
+
+        let key1 = SearchCacheKey::from_raw("urgent task", SearchScope::All, Some(50), Some(0));
+        let key2 =
+            SearchCacheKey::from_raw("  URGENT   TASK  ", SearchScope::All, Some(50), Some(0));
+
+        let mut cache: HashMap<SearchCacheKey, String> = HashMap::new();
+        cache.insert(key1, "cached_result".to_string());
+
+        // key2 should hash to the same bucket and be equal to key1
+        assert!(
+            cache.contains_key(&key2),
+            "Equal keys should be found in HashMap"
+        );
+        assert_eq!(cache.get(&key2), Some(&"cached_result".to_string()));
+    }
+
+    /// Test: Empty query normalization for cache key.
+    #[rstest]
+    fn test_search_cache_key_empty_query() {
+        let key = SearchCacheKey::from_raw("", SearchScope::All, Some(50), Some(0));
+        assert_eq!(key.normalized_query(), "");
+    }
+
+    /// Test: `SearchScope` Hash derivation works correctly.
+    #[rstest]
+    fn test_search_scope_hash() {
+        use std::collections::HashSet;
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        fn hash_value<T: Hash>(t: &T) -> u64 {
+            let mut hasher = DefaultHasher::new();
+            t.hash(&mut hasher);
+            hasher.finish()
+        }
+
+        // Same variant should have same hash
+        assert_eq!(
+            hash_value(&SearchScope::Title),
+            hash_value(&SearchScope::Title)
+        );
+        assert_eq!(
+            hash_value(&SearchScope::Tags),
+            hash_value(&SearchScope::Tags)
+        );
+        assert_eq!(hash_value(&SearchScope::All), hash_value(&SearchScope::All));
+
+        // Can be used in HashSet
+        let mut set: HashSet<SearchScope> = HashSet::new();
+        set.insert(SearchScope::Title);
+        set.insert(SearchScope::Tags);
+        set.insert(SearchScope::All);
+        assert_eq!(set.len(), 3);
+    }
+
+    // =========================================================================
+    // Invariant Tests: Ensuring internal consistency of NormalizedQuery
+    // =========================================================================
+
+    /// Test: Invariant that tokens.join(" ") equals key.
+    ///
+    /// This ensures the internal consistency of `NormalizedQuery`:
+    /// the key is always the space-joined representation of tokens.
+    #[rstest]
+    #[case("  Hello   World  ")]
+    #[case("single")]
+    #[case("")]
+    #[case("  ")]
+    #[case("a b c d e")]
+    #[case("\t\n\r multiple \t whitespace \n types")]
+    fn test_normalized_query_invariant_tokens_join_equals_key(#[case] raw: &str) {
+        let normalized = normalize_query(raw);
+        assert_eq!(
+            normalized.tokens().join(" "),
+            normalized.key(),
+            "Invariant violated: tokens.join(\" \") should equal key"
+        );
+    }
+
+    /// Test: `NormalizedQuery` can only be created through `normalize_query` from external modules.
+    ///
+    /// Since `NormalizedQuery::new` is removed and fields are private,
+    /// the public API for creating a `NormalizedQuery` is `normalize_query`.
+    /// This guarantees that all instances created by external code maintain
+    /// the invariants (key == tokens.join(" ")).
+    ///
+    /// Note: Within the same module, struct literals are technically possible
+    /// due to Rust's visibility rules, but this is discouraged and not part
+    /// of the public API contract.
+    #[rstest]
+    fn test_normalized_query_creation_only_via_normalize_query() {
+        // Verify that the public API for creating NormalizedQuery is normalize_query.
+        // External modules cannot construct NormalizedQuery directly due to private fields.
+        let query = normalize_query("Test Query");
+        assert_eq!(query.key(), "test query");
+        assert_eq!(query.tokens(), &["test", "query"]);
+    }
+
+    /// Test: `NormalizedQuery::into_key` consumes and returns the key.
+    #[rstest]
+    fn test_normalized_query_into_key() {
+        let query = normalize_query("test value");
+        let key = query.into_key();
+        assert_eq!(key, "test value");
+    }
+
+    // =========================================================================
+    // Phase 2 Regression Tests: Query Normalization in search_with_scope_indexed
+    // =========================================================================
+
+    /// Test: Unnormalized query should match the same results as normalized query.
+    ///
+    /// This verifies that a query with extra spaces, mixed case, and leading/trailing
+    /// whitespace (`"  URGENT   task  "`) produces the same search results as the
+    /// normalized form (`"urgent task"`).
+    ///
+    /// The test uses truly distinct input strings to ensure normalization is working:
+    /// - Unnormalized: `"  URGENT   task  "` (uppercase, multiple spaces, leading/trailing whitespace)
+    /// - Normalized: `"urgent task"` (lowercase, single space, no leading/trailing whitespace)
+    #[rstest]
+    fn test_search_with_unnormalized_query_matches_normalized_title() {
+        let tasks: PersistentVector<Task> = vec![
+            create_test_task("Urgent task for today", Priority::High),
+            create_test_task("Regular task", Priority::Low),
+            create_test_task("Another urgent task item", Priority::Medium),
+        ]
+        .into_iter()
+        .collect();
+
+        let index = SearchIndex::build(&tasks);
+
+        // Truly unnormalized query (uppercase, multiple spaces, leading/trailing whitespace)
+        let unnormalized_raw = "  URGENT   task  ";
+        let unnormalized_normalized = normalize_query(unnormalized_raw);
+        let result_from_unnormalized =
+            search_with_scope_indexed(&index, unnormalized_normalized.key(), SearchScope::Title);
+
+        // Already normalized query
+        let normalized_raw = "urgent task";
+        let result_from_normalized =
+            search_with_scope_indexed(&index, normalized_raw, SearchScope::Title);
+
+        // Verify the raw strings are actually different
+        assert_ne!(
+            unnormalized_raw, normalized_raw,
+            "Test precondition: raw strings must be different"
+        );
+
+        // Both should return the same results
+        assert_eq!(
+            result_from_unnormalized.tasks.len(),
+            result_from_normalized.tasks.len(),
+            "Unnormalized and normalized queries should return the same number of results"
+        );
+
+        // Verify the task IDs are the same (order-independent comparison)
+        let mut ids_from_unnormalized: Vec<_> = result_from_unnormalized
+            .tasks
+            .iter()
+            .map(|t| t.task_id.clone())
+            .collect();
+        let mut ids_from_normalized: Vec<_> = result_from_normalized
+            .tasks
+            .iter()
+            .map(|t| t.task_id.clone())
+            .collect();
+        ids_from_unnormalized.sort();
+        ids_from_normalized.sort();
+        assert_eq!(
+            ids_from_unnormalized, ids_from_normalized,
+            "Unnormalized and normalized queries should return the same task IDs"
+        );
+    }
+
+    /// Test: Unnormalized query should match the same results as normalized query for tags.
+    ///
+    /// This verifies that a query with extra spaces, mixed case, and leading/trailing
+    /// whitespace (`"  URGENT  "`) produces the same search results as the
+    /// normalized form (`"urgent"`).
+    ///
+    /// The test uses truly distinct input strings to ensure normalization is working:
+    /// - Unnormalized: `"  URGENT  "` (uppercase, leading/trailing whitespace)
+    /// - Normalized: `"urgent"` (lowercase, no whitespace)
+    #[rstest]
+    fn test_search_with_unnormalized_query_matches_normalized_tags() {
+        let tasks: PersistentVector<Task> = vec![
+            create_test_task_with_tags("Task 1", Priority::High, &["backend", "urgent"]),
+            create_test_task_with_tags("Task 2", Priority::Low, &["frontend"]),
+            create_test_task_with_tags("Task 3", Priority::Medium, &["urgent", "priority"]),
+        ]
+        .into_iter()
+        .collect();
+
+        let index = SearchIndex::build(&tasks);
+
+        // Truly unnormalized query (uppercase, leading/trailing whitespace)
+        let unnormalized_raw = "  URGENT  ";
+        let unnormalized_normalized = normalize_query(unnormalized_raw);
+        let result_from_unnormalized =
+            search_with_scope_indexed(&index, unnormalized_normalized.key(), SearchScope::Tags);
+
+        // Already normalized query
+        let normalized_raw = "urgent";
+        let result_from_normalized =
+            search_with_scope_indexed(&index, normalized_raw, SearchScope::Tags);
+
+        // Verify the raw strings are actually different
+        assert_ne!(
+            unnormalized_raw, normalized_raw,
+            "Test precondition: raw strings must be different"
+        );
+
+        // Both should return the same results
+        assert_eq!(
+            result_from_unnormalized.tasks.len(),
+            result_from_normalized.tasks.len(),
+            "Unnormalized and normalized queries should return the same number of results for tags"
+        );
+
+        // Verify the task IDs are the same (order-independent comparison)
+        let mut ids_from_unnormalized: Vec<_> = result_from_unnormalized
+            .tasks
+            .iter()
+            .map(|t| t.task_id.clone())
+            .collect();
+        let mut ids_from_normalized: Vec<_> = result_from_normalized
+            .tasks
+            .iter()
+            .map(|t| t.task_id.clone())
+            .collect();
+        ids_from_unnormalized.sort();
+        ids_from_normalized.sort();
+        assert_eq!(
+            ids_from_unnormalized, ids_from_normalized,
+            "Unnormalized and normalized queries should return the same task IDs for tags"
+        );
+    }
+
+    /// Test: Multi-space query normalization with `SearchScope::All`.
+    ///
+    /// Ensures that extra spaces in the query do not affect search results.
+    #[rstest]
+    fn test_search_with_multi_space_query_all_scope() {
+        let tasks: PersistentVector<Task> = vec![
+            create_test_task("Important meeting tomorrow", Priority::High),
+            create_test_task_with_tags("Regular task", Priority::Low, &["important"]),
+            create_test_task("Meeting notes", Priority::Medium),
+        ]
+        .into_iter()
+        .collect();
+
+        let index = SearchIndex::build(&tasks);
+
+        // Normalized query with extra spaces
+        let normalized = normalize_query("   important   meeting   ");
+        let normalized_key = normalized.key();
+        let result_normalized = search_with_scope_indexed(&index, normalized_key, SearchScope::All);
+
+        // Clean query
+        let result_clean = search_with_scope_indexed(&index, "important meeting", SearchScope::All);
+
+        // Both should return the same results
+        assert_eq!(
+            result_normalized.tasks.len(),
+            result_clean.tasks.len(),
+            "Multi-space query should match clean query results"
+        );
+    }
+
+    /// Test: Leading and trailing whitespace in query should not affect results.
+    #[rstest]
+    fn test_search_with_leading_trailing_whitespace() {
+        let tasks: PersistentVector<Task> = vec![
+            create_test_task("Callback implementation", Priority::High),
+            create_test_task("Regular task", Priority::Low),
+        ]
+        .into_iter()
+        .collect();
+
+        let index = SearchIndex::build(&tasks);
+
+        // Query with leading/trailing whitespace
+        let normalized = normalize_query("   callback   ");
+        let normalized_key = normalized.key();
+        let result_normalized =
+            search_with_scope_indexed(&index, normalized_key, SearchScope::Title);
+
+        // Clean query
+        let result_clean = search_with_scope_indexed(&index, "callback", SearchScope::Title);
+
+        // Both should return the same results
+        assert_eq!(
+            result_normalized.tasks.len(),
+            result_clean.tasks.len(),
+            "Leading/trailing whitespace should not affect results"
+        );
+        assert_eq!(result_normalized.tasks.len(), 1);
+    }
+
+    /// Test: Whitespace-only query is normalized to empty string, returning all tasks.
+    ///
+    /// This documents the intentional behavior that a query consisting only of
+    /// whitespace characters (spaces, tabs, etc.) is normalized to an empty string,
+    /// which triggers the "return all tasks" behavior.
+    ///
+    /// # Behavior
+    ///
+    /// - Input: `"   "` (whitespace only)
+    /// - Normalized: `""` (empty string)
+    /// - Result: All tasks are returned
+    ///
+    /// This is consistent with the empty query behavior and provides a predictable
+    /// user experience where "no meaningful search term" equals "show everything".
+    #[rstest]
+    fn test_search_whitespace_only_query_returns_all() {
+        let tasks: PersistentVector<Task> = vec![
+            create_test_task("Task A", Priority::High),
+            create_test_task("Task B", Priority::Medium),
+            create_test_task("Task C", Priority::Low),
+        ]
+        .into_iter()
+        .collect();
+
+        let index = SearchIndex::build(&tasks);
+
+        // Whitespace-only query
+        let whitespace_only = "   \t  ";
+        let normalized = normalize_query(whitespace_only);
+
+        // Verify normalization behavior
+        assert!(
+            normalized.is_empty(),
+            "Whitespace-only query should normalize to empty string"
+        );
+        assert_eq!(
+            normalized.key(),
+            "",
+            "Normalized key should be empty string"
+        );
+        assert!(
+            normalized.tokens().is_empty(),
+            "Normalized tokens should be empty"
+        );
+
+        // Search with whitespace-only query (normalized)
+        let result = search_with_scope_indexed(&index, normalized.key(), SearchScope::All);
+
+        // All tasks should be returned
+        assert_eq!(
+            result.tasks.len(),
+            3,
+            "Whitespace-only query (normalized to empty) should return all tasks"
+        );
+
+        // Verify by comparing with explicit empty string search
+        let empty_result = search_with_scope_indexed(&index, "", SearchScope::All);
+        assert_eq!(
+            result.tasks.len(),
+            empty_result.tasks.len(),
+            "Whitespace-only query should behave the same as empty query"
+        );
+
+        // Verify task IDs match (order-independent)
+        let mut ids_whitespace: Vec<_> = result.tasks.iter().map(|t| t.task_id.clone()).collect();
+        let mut ids_empty: Vec<_> = empty_result
+            .tasks
+            .iter()
+            .map(|t| t.task_id.clone())
+            .collect();
+        ids_whitespace.sort();
+        ids_empty.sort();
+        assert_eq!(
+            ids_whitespace, ids_empty,
+            "Whitespace-only query should return the same task IDs as empty query"
+        );
+    }
+}
+
+// =============================================================================
+// SearchIndex Differential Update Tests (REQ-SEARCH-INDEX-001)
+// =============================================================================
+
+#[cfg(test)]
+mod search_index_differential_update_tests {
+    use super::*;
+    use crate::domain::{Tag, TaskId, Timestamp};
+    use rstest::rstest;
+
+    fn create_test_task(title: &str, priority: Priority) -> Task {
+        Task::new(TaskId::generate(), title, Timestamp::now()).with_priority(priority)
+    }
+
+    fn create_test_task_with_tags(title: &str, priority: Priority, tags: &[&str]) -> Task {
+        let base = create_test_task(title, priority);
+        tags.iter()
+            .fold(base, |task, tag| task.add_tag(Tag::new(*tag)))
+    }
+
+    // -------------------------------------------------------------------------
+    // Idempotency Tests (REQ-SEARCH-INDEX-001: index_update_idempotent law)
+    // -------------------------------------------------------------------------
+
+    /// Tests that applying Add twice for the same task is idempotent.
+    ///
+    /// Law: `apply_change(apply_change(idx, Add(task)), Add(task)) == apply_change(idx, Add(task))`
+    #[rstest]
+    fn test_add_idempotency() {
+        // Start with an empty index
+        let empty_tasks: PersistentVector<Task> = PersistentVector::new();
+        let index = SearchIndex::build(&empty_tasks);
+
+        let task = create_test_task("Important meeting", Priority::High);
+
+        // Apply Add once
+        let index_after_first_add = index.apply_change(TaskChange::Add(task.clone()));
+
+        // Apply Add again with the same task
+        let index_after_second_add = index_after_first_add.apply_change(TaskChange::Add(task));
+
+        // Verify idempotency: the index should be equivalent after both operations
+        // We verify by checking that all_tasks() returns the same set
+        let tasks_after_first: Vec<_> = index_after_first_add
+            .all_tasks()
+            .iter()
+            .map(|t| t.task_id.clone())
+            .collect();
+        let tasks_after_second: Vec<_> = index_after_second_add
+            .all_tasks()
+            .iter()
+            .map(|t| t.task_id.clone())
+            .collect();
+
+        assert_eq!(
+            tasks_after_first.len(),
+            tasks_after_second.len(),
+            "Idempotency: Adding the same task twice should not duplicate"
+        );
+        assert_eq!(
+            tasks_after_first, tasks_after_second,
+            "Idempotency: Task IDs should be identical after idempotent Add"
+        );
+
+        // Also verify the task count is 1
+        assert_eq!(
+            tasks_after_second.len(),
+            1,
+            "Should have exactly one task after idempotent Add operations"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Add Operation Tests
+    // -------------------------------------------------------------------------
+
+    /// Tests that after Add, the task is searchable by title.
+    #[rstest]
+    fn test_add_then_search_hits() {
+        let empty_tasks: PersistentVector<Task> = PersistentVector::new();
+        let index = SearchIndex::build(&empty_tasks);
+
+        let task = create_test_task("Urgent deployment", Priority::Critical);
+
+        // Apply Add
+        let new_index = index.apply_change(TaskChange::Add(task.clone()));
+
+        // Search for the task by title keyword
+        let result = search_with_scope_indexed(&new_index, "urgent", SearchScope::All);
+
+        assert_eq!(
+            result.tasks.len(),
+            1,
+            "Added task should be found by title search"
+        );
+        let found_task = result.tasks.iter().next().unwrap();
+        assert_eq!(
+            found_task.task_id, task.task_id,
+            "Found task should match the added task"
+        );
+    }
+
+    /// Tests that after Add, the task is searchable by tag.
+    #[rstest]
+    fn test_add_then_search_by_tag_hits() {
+        let empty_tasks: PersistentVector<Task> = PersistentVector::new();
+        let index = SearchIndex::build(&empty_tasks);
+
+        let task = create_test_task_with_tags("Regular task", Priority::Low, &["backend", "rust"]);
+
+        // Apply Add
+        let new_index = index.apply_change(TaskChange::Add(task.clone()));
+
+        // Search by tag
+        let result = search_with_scope_indexed(&new_index, "backend", SearchScope::Tags);
+
+        assert_eq!(
+            result.tasks.len(),
+            1,
+            "Added task should be found by tag search"
+        );
+        let found_task = result.tasks.iter().next().unwrap();
+        assert_eq!(
+            found_task.task_id, task.task_id,
+            "Found task should match the added task"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Remove Operation Tests
+    // -------------------------------------------------------------------------
+
+    /// Tests that after Remove, the task is no longer searchable.
+    #[rstest]
+    fn test_remove_then_search_misses() {
+        let task = create_test_task("Important meeting", Priority::High);
+        let task_id = task.task_id.clone();
+        let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+        let index = SearchIndex::build(&tasks);
+
+        // Verify the task is initially searchable
+        let result_before = search_with_scope_indexed(&index, "important", SearchScope::All);
+        assert_eq!(
+            result_before.tasks.len(),
+            1,
+            "Task should be found before removal"
+        );
+
+        // Apply Remove
+        let new_index = index.apply_change(TaskChange::Remove(task_id));
+
+        // Search for the removed task
+        let result_after = search_with_scope_indexed(&new_index, "important", SearchScope::All);
+
+        assert_eq!(
+            result_after.tasks.len(),
+            0,
+            "Removed task should not be found by search"
+        );
+    }
+
+    /// Tests that Remove for a non-existent task is idempotent (no change).
+    #[rstest]
+    fn test_remove_nonexistent_idempotency() {
+        let task = create_test_task("Existing task", Priority::Medium);
+        let tasks: PersistentVector<Task> = vec![task.clone()].into_iter().collect();
+        let index = SearchIndex::build(&tasks);
+
+        // Generate a new TaskId that doesn't exist in the index
+        let nonexistent_id = TaskId::generate();
+
+        // Apply Remove for non-existent task
+        let new_index = index.apply_change(TaskChange::Remove(nonexistent_id));
+
+        // Verify the existing task is still there
+        let result = search_with_scope_indexed(&new_index, "existing", SearchScope::All);
+
+        assert_eq!(
+            result.tasks.len(),
+            1,
+            "Removing non-existent task should not affect existing tasks"
+        );
+        let found_task = result.tasks.iter().next().unwrap();
+        assert_eq!(
+            found_task.task_id, task.task_id,
+            "Existing task should still be found"
+        );
+
+        // Verify all_tasks count is unchanged
+        let all_tasks_count_before = index.all_tasks().iter().count();
+        let all_tasks_count_after = new_index.all_tasks().iter().count();
+
+        assert_eq!(
+            all_tasks_count_before, all_tasks_count_after,
+            "Remove of non-existent task should not change task count"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Update Operation Tests
+    // -------------------------------------------------------------------------
+
+    /// Tests that after Update, old title search misses and new title search hits.
+    #[rstest]
+    fn test_update_old_title_misses_new_title_hits() {
+        let old_task = create_test_task("Old meeting title", Priority::Medium);
+        let tasks: PersistentVector<Task> = vec![old_task.clone()].into_iter().collect();
+        let index = SearchIndex::build(&tasks);
+
+        // Create updated task with new title but same ID
+        let new_task = Task::new(
+            old_task.task_id.clone(),
+            "New conference title",
+            Timestamp::now(),
+        )
+        .with_priority(Priority::High);
+
+        // Verify old title is searchable before update
+        let result_old_before = search_with_scope_indexed(&index, "meeting", SearchScope::All);
+        assert_eq!(
+            result_old_before.tasks.len(),
+            1,
+            "Old title should be found before update"
+        );
+
+        // Apply Update
+        let new_index = index.apply_change(TaskChange::Update {
+            old: old_task,
+            new: new_task.clone(),
+        });
+
+        // Old title search should miss
+        let result_old_after = search_with_scope_indexed(&new_index, "meeting", SearchScope::All);
+        assert_eq!(
+            result_old_after.tasks.len(),
+            0,
+            "Old title should not be found after update"
+        );
+
+        // New title search should hit
+        let result_new = search_with_scope_indexed(&new_index, "conference", SearchScope::All);
+        assert_eq!(
+            result_new.tasks.len(),
+            1,
+            "New title should be found after update"
+        );
+        let found_task = result_new.tasks.iter().next().unwrap();
+        assert_eq!(
+            found_task.task_id, new_task.task_id,
+            "Found task should have the updated task ID"
+        );
+    }
+
+    /// Tests that Update correctly handles tag changes.
+    #[rstest]
+    fn test_update_old_tag_misses_new_tag_hits() {
+        let old_task =
+            create_test_task_with_tags("Development task", Priority::Medium, &["frontend"]);
+        let tasks: PersistentVector<Task> = vec![old_task.clone()].into_iter().collect();
+        let index = SearchIndex::build(&tasks);
+
+        // Create updated task with new tags
+        let new_task = Task::new(
+            old_task.task_id.clone(),
+            "Development task",
+            Timestamp::now(),
+        )
+        .with_priority(Priority::Medium)
+        .add_tag(Tag::new("backend"));
+
+        // Verify old tag is searchable before update
+        let result_old_tag_before =
+            search_with_scope_indexed(&index, "frontend", SearchScope::Tags);
+        assert_eq!(
+            result_old_tag_before.tasks.len(),
+            1,
+            "Old tag should be found before update"
+        );
+
+        // Apply Update
+        let new_index = index.apply_change(TaskChange::Update {
+            old: old_task,
+            new: new_task,
+        });
+
+        // Old tag search should miss
+        let result_old_tag_after =
+            search_with_scope_indexed(&new_index, "frontend", SearchScope::Tags);
+        assert_eq!(
+            result_old_tag_after.tasks.len(),
+            0,
+            "Old tag should not be found after update"
+        );
+
+        // New tag search should hit
+        let result_new_tag = search_with_scope_indexed(&new_index, "backend", SearchScope::Tags);
+        assert_eq!(
+            result_new_tag.tasks.len(),
+            1,
+            "New tag should be found after update"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Edge Case Tests
+    // -------------------------------------------------------------------------
+
+    /// Tests differential update on an empty index.
+    #[rstest]
+    fn test_add_to_empty_index() {
+        let empty_tasks: PersistentVector<Task> = PersistentVector::new();
+        let index = SearchIndex::build(&empty_tasks);
+
+        assert_eq!(
+            index.all_tasks().len(),
+            0,
+            "Empty index should have no tasks"
+        );
+
+        let task = create_test_task("First task", Priority::Low);
+        let new_index = index.apply_change(TaskChange::Add(task));
+
+        assert_eq!(
+            new_index.all_tasks().len(),
+            1,
+            "Index should have one task after Add"
+        );
+
+        let result = search_with_scope_indexed(&new_index, "first", SearchScope::All);
+        assert_eq!(result.tasks.len(), 1, "Added task should be searchable");
+    }
+
+    /// Tests that multiple Add operations work correctly.
+    #[rstest]
+    fn test_multiple_adds() {
+        let empty_tasks: PersistentVector<Task> = PersistentVector::new();
+        let index = SearchIndex::build(&empty_tasks);
+
+        let task1 = create_test_task("Alpha task", Priority::High);
+        let task2 = create_test_task("Beta task", Priority::Medium);
+        let task3 = create_test_task("Gamma task", Priority::Low);
+
+        let index = index.apply_change(TaskChange::Add(task1));
+        let index = index.apply_change(TaskChange::Add(task2));
+        let index = index.apply_change(TaskChange::Add(task3));
+
+        assert_eq!(
+            index.all_tasks().len(),
+            3,
+            "Index should have three tasks after three Adds"
+        );
+
+        // Verify each task is searchable
+        let result_alpha = search_with_scope_indexed(&index, "alpha", SearchScope::All);
+        let result_beta = search_with_scope_indexed(&index, "beta", SearchScope::All);
+        let result_gamma = search_with_scope_indexed(&index, "gamma", SearchScope::All);
+
+        assert_eq!(result_alpha.tasks.len(), 1, "Alpha task should be found");
+        assert_eq!(result_beta.tasks.len(), 1, "Beta task should be found");
+        assert_eq!(result_gamma.tasks.len(), 1, "Gamma task should be found");
+    }
+
+    /// Tests that original index is unchanged after `apply_change` (immutability).
+    #[rstest]
+    fn test_immutability_preserved() {
+        let task = create_test_task("Original task", Priority::Medium);
+        let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+        let original_index = SearchIndex::build(&tasks);
+
+        // Get the count before any changes
+        let count_before = original_index.all_tasks().len();
+
+        // Apply Add (which returns a new index)
+        let new_task = create_test_task("New task", Priority::High);
+        let _new_index = original_index.apply_change(TaskChange::Add(new_task));
+
+        // Original index should be unchanged
+        let count_after = original_index.all_tasks().len();
+        assert_eq!(
+            count_before, count_after,
+            "Original index should be unchanged after apply_change"
+        );
+
+        // Verify original task is still searchable in original index
+        let result = search_with_scope_indexed(&original_index, "original", SearchScope::All);
+        assert_eq!(
+            result.tasks.len(),
+            1,
+            "Original task should still be found in original index"
+        );
+    }
+
+    /// Tests that `TaskChange::Update` is idempotent.
+    ///
+    /// Applying the same Update twice should produce the same result as applying it once.
+    /// This ensures that index entries are not duplicated when Update is applied multiple times.
+    #[rstest]
+    fn test_update_idempotency() {
+        // Create initial task
+        let task_id = TaskId::generate();
+        let old_task = Task::new(task_id.clone(), "Old title", Timestamp::now())
+            .with_priority(Priority::Low)
+            .add_tag(Tag::new("work"));
+
+        // Build initial index with the task
+        let tasks: PersistentVector<Task> = vec![old_task.clone()].into_iter().collect();
+        let initial_index = SearchIndex::build(&tasks);
+
+        // Create updated task (same ID, different content)
+        let new_task = Task::new(task_id, "New title updated", Timestamp::now())
+            .with_priority(Priority::High)
+            .add_tag(Tag::new("personal"));
+
+        // Apply Update once
+        let update_change = TaskChange::Update {
+            old: old_task,
+            new: new_task,
+        };
+        let index_after_first_update = initial_index.apply_change(update_change.clone());
+
+        // Apply the same Update again
+        let index_after_second_update = index_after_first_update.apply_change(update_change);
+
+        // Verify: Total task count should be the same
+        assert_eq!(
+            index_after_first_update.all_tasks().len(),
+            index_after_second_update.all_tasks().len(),
+            "Task count should be the same after applying Update twice"
+        );
+
+        // Verify: Searching for the new title should return exactly 1 result (not 2)
+        let result_after_first =
+            search_with_scope_indexed(&index_after_first_update, "New title", SearchScope::Title);
+        let result_after_second =
+            search_with_scope_indexed(&index_after_second_update, "New title", SearchScope::Title);
+
+        assert_eq!(
+            result_after_first.tasks.len(),
+            1,
+            "First update should result in exactly 1 task"
+        );
+        assert_eq!(
+            result_after_second.tasks.len(),
+            1,
+            "Second update should still result in exactly 1 task (idempotency)"
+        );
+
+        // Verify: Searching by new tag should return exactly 1 result
+        let tag_result_first =
+            search_with_scope_indexed(&index_after_first_update, "personal", SearchScope::Tags);
+        let tag_result_second =
+            search_with_scope_indexed(&index_after_second_update, "personal", SearchScope::Tags);
+
+        assert_eq!(
+            tag_result_first.tasks.len(),
+            1,
+            "First update: tag search should return 1 task"
+        );
+        assert_eq!(
+            tag_result_second.tasks.len(),
+            1,
+            "Second update: tag search should still return 1 task (idempotency)"
+        );
+
+        // Verify: Old title should not be found in the index
+        let old_title_result_first =
+            search_with_scope_indexed(&index_after_first_update, "Old title", SearchScope::Title);
+        let old_title_result_second =
+            search_with_scope_indexed(&index_after_second_update, "Old title", SearchScope::Title);
+
+        assert!(
+            old_title_result_first.tasks.is_empty(),
+            "Old title should not be found after first update"
+        );
+        assert!(
+            old_title_result_second.tasks.is_empty(),
+            "Old title should not be found after second update"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Internal Index Uniqueness Tests
+    // -------------------------------------------------------------------------
+
+    /// Helper function to check uniqueness in a `PersistentVector`.
+    ///
+    /// Returns `true` if there are duplicate `TaskId`s in the vector.
+    fn has_duplicates(ids: &PersistentVector<TaskId>) -> bool {
+        let set: std::collections::HashSet<_> = ids.iter().collect();
+        set.len() != ids.len()
+    }
+
+    /// Tests that internal indexes have no duplicate `TaskId`s after Update.
+    ///
+    /// This test directly verifies that each index entry contains unique `TaskId`s,
+    /// not relying on search deduplication. This ensures the internal data structure
+    /// maintains consistency even when Update is applied multiple times with the
+    /// same old/new task pair.
+    #[rstest]
+    fn test_update_no_internal_duplicates() {
+        // Create initial task
+        let task_id = TaskId::generate();
+        let old_task = Task::new(task_id.clone(), "Test title", Timestamp::now())
+            .with_priority(Priority::Low)
+            .add_tag(Tag::new("testtag"));
+
+        // Build initial index
+        let tasks: PersistentVector<Task> = vec![old_task.clone()].into_iter().collect();
+        let initial_index = SearchIndex::build(&tasks);
+
+        // Create updated task (same title and tag to ensure same index keys)
+        let new_task = Task::new(task_id, "Test title", Timestamp::now())
+            .with_priority(Priority::High)
+            .add_tag(Tag::new("testtag"));
+
+        // Apply Update twice
+        let update_change = TaskChange::Update {
+            old: old_task,
+            new: new_task,
+        };
+        let index_once = initial_index.apply_change(update_change.clone());
+        let index_twice = index_once.apply_change(update_change);
+
+        // Verify internal indexes have no duplicates
+
+        // Check title_word_index
+        for (key, ids) in index_twice.title_word_index_for_test() {
+            assert!(
+                !has_duplicates(ids),
+                "title_word_index has duplicate TaskIds for key '{key}'"
+            );
+        }
+
+        // Check title_full_index
+        for (key, ids) in index_twice.title_full_index_for_test() {
+            assert!(
+                !has_duplicates(ids),
+                "title_full_index has duplicate TaskIds for key '{key}'"
+            );
+        }
+
+        // Check title_full_all_suffix_index
+        for (key, ids) in index_twice.title_full_all_suffix_index_for_test() {
+            assert!(
+                !has_duplicates(ids),
+                "title_full_all_suffix_index has duplicate TaskIds for key '{key}'"
+            );
+        }
+
+        // Check title_word_all_suffix_index
+        for (key, ids) in index_twice.title_word_all_suffix_index_for_test() {
+            assert!(
+                !has_duplicates(ids),
+                "title_word_all_suffix_index has duplicate TaskIds for key '{key}'"
+            );
+        }
+
+        // Check tag_index
+        for (key, ids) in index_twice.tag_index_for_test() {
+            assert!(
+                !has_duplicates(ids),
+                "tag_index has duplicate TaskIds for key '{key}'"
+            );
+        }
+
+        // Check tag_all_suffix_index
+        for (key, ids) in index_twice.tag_all_suffix_index_for_test() {
+            assert!(
+                !has_duplicates(ids),
+                "tag_all_suffix_index has duplicate TaskIds for key '{key}'"
+            );
+        }
+
+        // Also verify task count remains 1
+        assert_eq!(
+            index_twice.all_tasks().len(),
+            1,
+            "Should have exactly one task after Update operations"
+        );
+    }
+}
+
+// =============================================================================
+// SearchCache Tests (REQ-SEARCH-CACHE-001)
+// =============================================================================
+
+#[cfg(test)]
+mod search_cache_tests {
+    use super::*;
+    use crate::domain::{Priority, Tag, TaskId, Timestamp};
+    use rstest::rstest;
+    use std::thread;
+    use std::time::Duration;
+
+    fn create_test_task(title: &str, priority: Priority) -> Task {
+        Task::new(TaskId::generate(), title, Timestamp::now()).with_priority(priority)
+    }
+
+    #[allow(dead_code)]
+    fn create_test_task_with_tags(title: &str, priority: Priority, tags: &[&str]) -> Task {
+        let base = create_test_task(title, priority);
+        tags.iter()
+            .fold(base, |task, tag| task.add_tag(Tag::new(*tag)))
+    }
+
+    // -------------------------------------------------------------------------
+    // Basic Cache Operations Tests
+    // -------------------------------------------------------------------------
+
+    /// Test: Cache miss returns `None` for unknown key.
+    #[rstest]
+    fn test_cache_miss_returns_none() {
+        let cache = SearchCache::new(10, Duration::from_secs(5));
+        let key = SearchCacheKey::from_raw("unknown query", SearchScope::All, Some(50), Some(0));
+
+        let result = cache.get(&key);
+
+        assert!(result.is_none(), "Cache miss should return None");
+    }
+
+    /// Test: Cache hit returns stored result.
+    #[rstest]
+    fn test_cache_hit_returns_stored_result() {
+        let cache = SearchCache::new(10, Duration::from_secs(5));
+        let key = SearchCacheKey::from_raw("test query", SearchScope::All, Some(50), Some(0));
+
+        // Create a search result
+        let task = create_test_task("Test Task", Priority::High);
+        let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+        let search_result = SearchResult::from_tasks(tasks);
+
+        // Store in cache
+        cache.put(key.clone(), search_result);
+
+        // Get from cache
+        let cached = cache.get(&key);
+
+        assert!(cached.is_some(), "Cache hit should return Some");
+        let cached_result = cached.unwrap();
+        assert_eq!(
+            cached_result.into_tasks().len(),
+            1,
+            "Cached result should have 1 task"
+        );
+    }
+
+    /// Test: Same query second time is a cache hit.
+    #[rstest]
+    fn test_same_query_second_time_is_cache_hit() {
+        let cache = SearchCache::new(10, Duration::from_secs(5));
+        let key = SearchCacheKey::from_raw("urgent task", SearchScope::Title, Some(50), Some(0));
+
+        // Create and store a result
+        let task = create_test_task("Urgent Task", Priority::Critical);
+        let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+        let search_result = SearchResult::from_tasks(tasks);
+        cache.put(key.clone(), search_result);
+
+        // First get - should hit
+        let first_get = cache.get(&key);
+        assert!(first_get.is_some(), "First get should hit");
+
+        // Second get - should also hit
+        let second_get = cache.get(&key);
+        assert!(second_get.is_some(), "Second get should also hit");
+
+        // Check stats
+        let stats = cache.stats();
+        assert_eq!(stats.hits, 2, "Should have 2 cache hits");
+        assert_eq!(stats.misses, 0, "Should have 0 cache misses");
+    }
+
+    // -------------------------------------------------------------------------
+    // TTL Tests
+    // -------------------------------------------------------------------------
+
+    /// Test: Entry expires after TTL.
+    #[rstest]
+    fn test_entry_expires_after_ttl() {
+        // Use very short TTL for testing
+        let cache = SearchCache::new(10, Duration::from_millis(50));
+        let key = SearchCacheKey::from_raw("expiring query", SearchScope::All, Some(50), Some(0));
+
+        // Store a result
+        let task = create_test_task("Expiring Task", Priority::Low);
+        let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+        let search_result = SearchResult::from_tasks(tasks);
+        cache.put(key.clone(), search_result);
+
+        // Immediate get should hit
+        let immediate_get = cache.get(&key);
+        assert!(immediate_get.is_some(), "Immediate get should hit");
+
+        // Wait for TTL to expire
+        thread::sleep(Duration::from_millis(100));
+
+        // Get after TTL should miss
+        let expired_get = cache.get(&key);
+        assert!(expired_get.is_none(), "Get after TTL should miss");
+    }
+
+    /// Test: Entry is valid just before TTL expires.
+    #[rstest]
+    fn test_entry_valid_before_ttl() {
+        // Use 200ms TTL for testing
+        let cache = SearchCache::new(10, Duration::from_millis(200));
+        let key = SearchCacheKey::from_raw("valid query", SearchScope::All, Some(50), Some(0));
+
+        // Store a result
+        let task = create_test_task("Valid Task", Priority::Medium);
+        let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+        let search_result = SearchResult::from_tasks(tasks);
+        cache.put(key.clone(), search_result);
+
+        // Wait less than TTL
+        thread::sleep(Duration::from_millis(100));
+
+        // Get should still hit
+        let result = cache.get(&key);
+        assert!(result.is_some(), "Get before TTL expires should hit");
+    }
+
+    // -------------------------------------------------------------------------
+    // LRU Eviction Tests
+    // -------------------------------------------------------------------------
+
+    /// Test: LRU eviction when capacity is exceeded.
+    #[rstest]
+    fn test_lru_eviction_on_capacity_exceeded() {
+        // Small capacity for testing
+        let cache = SearchCache::new(3, Duration::from_secs(60));
+
+        // Add 3 entries (fills capacity)
+        for i in 0..3 {
+            let key =
+                SearchCacheKey::from_raw(&format!("query{i}"), SearchScope::All, Some(50), Some(0));
+            let task = create_test_task(&format!("Task {i}"), Priority::Low);
+            let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+            cache.put(key, SearchResult::from_tasks(tasks));
+        }
+
+        assert_eq!(cache.len(), 3, "Cache should have 3 entries");
+
+        // Access query1 and query2 to make query0 the least recently used
+        let key1 = SearchCacheKey::from_raw("query1", SearchScope::All, Some(50), Some(0));
+        let key2 = SearchCacheKey::from_raw("query2", SearchScope::All, Some(50), Some(0));
+        let _ = cache.get(&key1);
+        let _ = cache.get(&key2);
+
+        // Add a 4th entry - should evict query0 (LRU)
+        let key3 = SearchCacheKey::from_raw("query3", SearchScope::All, Some(50), Some(0));
+        let task = create_test_task("Task 3", Priority::High);
+        let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+        cache.put(key3.clone(), SearchResult::from_tasks(tasks));
+
+        // Cache should still have 3 entries
+        assert_eq!(
+            cache.len(),
+            3,
+            "Cache should still have 3 entries after eviction"
+        );
+
+        // query0 should be evicted
+        let key0 = SearchCacheKey::from_raw("query0", SearchScope::All, Some(50), Some(0));
+        let result0 = cache.get(&key0);
+        assert!(result0.is_none(), "query0 should be evicted");
+
+        // query1, query2, query3 should still be present
+        let result1 = cache.get(&key1);
+        assert!(result1.is_some(), "query1 should still be present");
+
+        let result2 = cache.get(&key2);
+        assert!(result2.is_some(), "query2 should still be present");
+
+        let result3 = cache.get(&key3);
+        assert!(result3.is_some(), "query3 should still be present");
+    }
+
+    // -------------------------------------------------------------------------
+    // Cache Statistics Tests
+    // -------------------------------------------------------------------------
+
+    /// Test: Hit rate calculation.
+    #[rstest]
+    fn test_hit_rate_calculation() {
+        let cache = SearchCache::new(10, Duration::from_secs(5));
+
+        // Initial hit rate should be 0.0
+        let initial_stats = cache.stats();
+        assert!(
+            (initial_stats.hit_rate() - 0.0).abs() < f64::EPSILON,
+            "Initial hit rate should be 0.0"
+        );
+
+        // Store a result
+        let key = SearchCacheKey::from_raw("test", SearchScope::All, Some(50), Some(0));
+        let task = create_test_task("Test", Priority::Low);
+        let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+        cache.put(key.clone(), SearchResult::from_tasks(tasks));
+
+        // 2 hits
+        cache.get(&key);
+        cache.get(&key);
+
+        // 1 miss
+        let miss_key = SearchCacheKey::from_raw("miss", SearchScope::All, Some(50), Some(0));
+        cache.get(&miss_key);
+
+        let stats = cache.stats();
+        assert_eq!(stats.hits, 2, "Should have 2 hits");
+        assert_eq!(stats.misses, 1, "Should have 1 miss");
+
+        // Hit rate should be 2/3 = 0.666...
+        let hit_rate = stats.hit_rate();
+        assert!(
+            (hit_rate - 0.666_666_66).abs() < 0.001,
+            "Hit rate should be approximately 0.667, got {hit_rate}"
+        );
+    }
+
+    /// Test: Cache statistics after multiple operations.
+    #[rstest]
+    fn test_cache_stats_after_operations() {
+        let cache = SearchCache::new(10, Duration::from_secs(5));
+
+        // Store some results
+        for i in 0..5 {
+            let key =
+                SearchCacheKey::from_raw(&format!("query{i}"), SearchScope::All, Some(50), Some(0));
+            let task = create_test_task(&format!("Task {i}"), Priority::Low);
+            let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+            cache.put(key, SearchResult::from_tasks(tasks));
+        }
+
+        // 3 hits
+        for i in 0..3 {
+            let key =
+                SearchCacheKey::from_raw(&format!("query{i}"), SearchScope::All, Some(50), Some(0));
+            cache.get(&key);
+        }
+
+        // 2 misses
+        for i in 10..12 {
+            let key =
+                SearchCacheKey::from_raw(&format!("query{i}"), SearchScope::All, Some(50), Some(0));
+            cache.get(&key);
+        }
+
+        let stats = cache.stats();
+        assert_eq!(stats.hits, 3, "Should have 3 hits");
+        assert_eq!(stats.misses, 2, "Should have 2 misses");
+    }
+
+    // -------------------------------------------------------------------------
+    // Cache Key Equivalence Tests
+    // -------------------------------------------------------------------------
+
+    /// Test: Same query with different formatting hits the same cache entry.
+    #[rstest]
+    fn test_normalized_query_hits_same_cache_entry() {
+        let cache = SearchCache::new(10, Duration::from_secs(5));
+
+        // Store with one formatting
+        let key1 =
+            SearchCacheKey::from_raw("  URGENT   Task  ", SearchScope::All, Some(50), Some(0));
+        let task = create_test_task("Test", Priority::High);
+        let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+        cache.put(key1, SearchResult::from_tasks(tasks));
+
+        // Get with different formatting - should hit
+        let key2 = SearchCacheKey::from_raw("urgent task", SearchScope::All, Some(50), Some(0));
+        let result = cache.get(&key2);
+
+        assert!(
+            result.is_some(),
+            "Normalized equivalent query should hit cache"
+        );
+    }
+
+    /// Test: Different limit produces different cache key.
+    #[rstest]
+    fn test_different_limit_different_cache_key() {
+        let cache = SearchCache::new(10, Duration::from_secs(5));
+
+        // Store with limit=50
+        let key1 = SearchCacheKey::from_raw("test", SearchScope::All, Some(50), Some(0));
+        let task = create_test_task("Test", Priority::Low);
+        let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+        cache.put(key1.clone(), SearchResult::from_tasks(tasks));
+
+        // Get with limit=100 - should miss
+        let key2 = SearchCacheKey::from_raw("test", SearchScope::All, Some(100), Some(0));
+        let result = cache.get(&key2);
+
+        assert!(result.is_none(), "Different limit should miss cache");
+
+        // Original key should still hit
+        let original = cache.get(&key1);
+        assert!(original.is_some(), "Original key should still hit");
+    }
+
+    /// Test: Different offset produces different cache key.
+    #[rstest]
+    fn test_different_offset_different_cache_key() {
+        let cache = SearchCache::new(10, Duration::from_secs(5));
+
+        // Store with offset=0
+        let key1 = SearchCacheKey::from_raw("test", SearchScope::All, Some(50), Some(0));
+        let task = create_test_task("Test", Priority::Low);
+        let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+        cache.put(key1, SearchResult::from_tasks(tasks));
+
+        // Get with offset=10 - should miss
+        let key2 = SearchCacheKey::from_raw("test", SearchScope::All, Some(50), Some(10));
+        let result = cache.get(&key2);
+
+        assert!(result.is_none(), "Different offset should miss cache");
+    }
+
+    /// Test: Different scope produces different cache key.
+    #[rstest]
+    fn test_different_scope_different_cache_key() {
+        let cache = SearchCache::new(10, Duration::from_secs(5));
+
+        // Store with scope=All
+        let key1 = SearchCacheKey::from_raw("test", SearchScope::All, Some(50), Some(0));
+        let task = create_test_task("Test", Priority::Low);
+        let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+        cache.put(key1, SearchResult::from_tasks(tasks));
+
+        // Get with scope=Title - should miss
+        let key2 = SearchCacheKey::from_raw("test", SearchScope::Title, Some(50), Some(0));
+        let result = cache.get(&key2);
+
+        assert!(result.is_none(), "Different scope should miss cache");
+    }
+
+    // -------------------------------------------------------------------------
+    // Utility Method Tests
+    // -------------------------------------------------------------------------
+
+    /// Test: `len` and `is_empty` methods.
+    #[rstest]
+    fn test_len_and_is_empty() {
+        let cache = SearchCache::new(10, Duration::from_secs(5));
+
+        assert!(cache.is_empty(), "New cache should be empty");
+        assert_eq!(cache.len(), 0, "New cache should have length 0");
+
+        // Add an entry
+        let key = SearchCacheKey::from_raw("test", SearchScope::All, Some(50), Some(0));
+        let task = create_test_task("Test", Priority::Low);
+        let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+        cache.put(key, SearchResult::from_tasks(tasks));
+
+        assert!(!cache.is_empty(), "Cache should not be empty after insert");
+        assert_eq!(cache.len(), 1, "Cache should have length 1");
+    }
+
+    /// Test: `clear` method.
+    #[rstest]
+    fn test_clear() {
+        let cache = SearchCache::new(10, Duration::from_secs(5));
+
+        // Add some entries
+        for i in 0..5 {
+            let key =
+                SearchCacheKey::from_raw(&format!("query{i}"), SearchScope::All, Some(50), Some(0));
+            let task = create_test_task(&format!("Task {i}"), Priority::Low);
+            let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+            cache.put(key, SearchResult::from_tasks(tasks));
+        }
+
+        assert_eq!(cache.len(), 5, "Cache should have 5 entries");
+
+        // Clear the cache
+        cache.clear();
+
+        assert!(cache.is_empty(), "Cache should be empty after clear");
+        assert_eq!(cache.len(), 0, "Cache length should be 0 after clear");
+    }
+
+    /// Test: Debug formatting.
+    #[rstest]
+    fn test_debug_format() {
+        let cache = SearchCache::new(100, Duration::from_secs(5));
+
+        // Add an entry and access it
+        let key = SearchCacheKey::from_raw("test", SearchScope::All, Some(50), Some(0));
+        let task = create_test_task("Test", Priority::Low);
+        let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+        cache.put(key.clone(), SearchResult::from_tasks(tasks));
+        cache.get(&key);
+
+        let debug_str = format!("{cache:?}");
+
+        assert!(
+            debug_str.contains("SearchCache"),
+            "Debug should contain 'SearchCache'"
+        );
+        assert!(debug_str.contains("len"), "Debug should contain 'len'");
+        assert!(debug_str.contains("hits"), "Debug should contain 'hits'");
+        assert!(
+            debug_str.contains("misses"),
+            "Debug should contain 'misses'"
+        );
+        assert!(
+            debug_str.contains("hit_rate"),
+            "Debug should contain 'hit_rate'"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Default Configuration Tests
+    // -------------------------------------------------------------------------
+
+    /// Test: `with_default_config` creates cache with correct settings.
+    #[rstest]
+    fn test_with_default_config() {
+        let cache = SearchCache::with_default_config();
+
+        // Add 2000 entries (should work)
+        for i in 0..2000 {
+            let key =
+                SearchCacheKey::from_raw(&format!("query{i}"), SearchScope::All, Some(50), Some(0));
+            let task = create_test_task(&format!("Task {i}"), Priority::Low);
+            let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+            cache.put(key, SearchResult::from_tasks(tasks));
+        }
+
+        assert_eq!(cache.len(), 2000, "Cache should hold 2000 entries");
+
+        // Add one more - should evict oldest
+        let key = SearchCacheKey::from_raw("query_overflow", SearchScope::All, Some(50), Some(0));
+        let task = create_test_task("Overflow Task", Priority::High);
+        let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+        cache.put(key, SearchResult::from_tasks(tasks));
+
+        assert_eq!(
+            cache.len(),
+            2000,
+            "Cache should still have 2000 entries after overflow"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // CacheStats Tests
+    // -------------------------------------------------------------------------
+
+    /// Test: `CacheStats` default values.
+    #[rstest]
+    fn test_cache_stats_default() {
+        let stats = CacheStats::default();
+
+        assert_eq!(stats.hits, 0, "Default hits should be 0");
+        assert_eq!(stats.misses, 0, "Default misses should be 0");
+        assert!(
+            (stats.hit_rate() - 0.0).abs() < f64::EPSILON,
+            "Default hit rate should be 0.0"
+        );
+    }
+
+    /// Test: `CacheStats` hit rate with only hits.
+    #[rstest]
+    fn test_cache_stats_all_hits() {
+        let stats = CacheStats {
+            hits: 10,
+            misses: 0,
+        };
+
+        assert!(
+            (stats.hit_rate() - 1.0).abs() < f64::EPSILON,
+            "Hit rate with only hits should be 1.0"
+        );
+    }
+
+    /// Test: `CacheStats` hit rate with only misses.
+    #[rstest]
+    fn test_cache_stats_all_misses() {
+        let stats = CacheStats {
+            hits: 0,
+            misses: 10,
+        };
+
+        assert!(
+            (stats.hit_rate() - 0.0).abs() < f64::EPSILON,
+            "Hit rate with only misses should be 0.0"
         );
     }
 }

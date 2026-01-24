@@ -37,6 +37,12 @@ dotenvy = "0.15"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
+# Lock-free data structures
+arc-swap = "1.7"
+
+# LRU Cache for search result caching
+lru = "0.12"
+
 [dev-dependencies]
 rstest = "0.24"
 proptest = "1.5"

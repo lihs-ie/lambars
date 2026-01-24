@@ -29,3 +29,37 @@ thresholds:
   rps_degradation_percent:
     warning: 5
     error: 10
+
+# Scenario-specific thresholds (REQ-SEARCH-MET-001)
+# These thresholds are used by check_thresholds.sh for search scenarios.
+#
+# Hot search: Cache warmed up, expecting fast responses.
+# Cold search: Cache miss scenario, allowing higher latency.
+scenarios:
+  tasks_search_hot:
+    p50_latency_ms:
+      warning: 40
+      error: 50
+    p95_latency_ms:
+      warning: 150
+      error: 200
+    p99_latency_ms:
+      warning: 300
+      error: 400
+    error_rate:
+      warning: 0.005
+      error: 0.01
+
+  tasks_search_cold:
+    p50_latency_ms:
+      warning: 80
+      error: 100
+    p95_latency_ms:
+      warning: 250
+      error: 300
+    p99_latency_ms:
+      warning: 400
+      error: 500
+    error_rate:
+      warning: 0.005
+      error: 0.01
