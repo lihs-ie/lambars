@@ -440,6 +440,9 @@ jobs:
             echo "WARNING: perf.script is empty - perf may not have captured data"
           fi
 
+          # Clean up perf artifacts to avoid permission issues during upload
+          sudo rm -f "${RESULTS_DIR}/perf.data" "${RESULTS_DIR}/perf.script" 2>/dev/null || true
+
       - name: Upload API profiling artifacts
         uses: actions/upload-artifact@v4
         with:
