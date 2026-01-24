@@ -405,4 +405,46 @@ function M.create_done_handler(script_name)
     end
 end
 
+-- =============================================================================
+-- REQ-UPDATE-CONFLICT-001: JSON response から version を抽出
+-- =============================================================================
+
+-- Extract version from JSON response body
+-- Supports formats:
+--   - "version": 123 (number)
+--   - "version":123 (number, no space)
+--   - "version": "123" (string, less common but handled)
+--
+-- @param body string JSON response body
+-- @return number|nil version number (>= 1), or nil if not found or invalid
+function M.extract_version(body)
+    if type(body) ~= "string" or body == "" then
+        return nil
+    end
+
+    -- Try to match "version": <number> (most common case)
+    local version_str = body:match('"version"%s*:%s*(%d+)')
+
+    -- If not found, try "version": "<number>" (string format)
+    if not version_str then
+        version_str = body:match('"version"%s*:%s*"(%d+)"')
+    end
+
+    if not version_str then
+        return nil
+    end
+
+    local version = tonumber(version_str)
+    if not version then
+        return nil
+    end
+
+    -- Validate version is a positive integer >= 1
+    if version < 1 or version ~= math.floor(version) then
+        return nil
+    end
+
+    return version
+end
+
 return M

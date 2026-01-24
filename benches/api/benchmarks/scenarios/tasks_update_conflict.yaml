@@ -1,0 +1,111 @@
+# Tasks Update Conflict Endpoint Benchmark
+#
+# Tests PUT /tasks/{id} endpoint with high contention multi writer pattern
+#
+# Target API features:
+#   - Lens for focused updates
+#   - Prism for optional fields
+#   - Optional for nullable handling
+#   - Bifunctor for error transformation
+#
+# Purpose: Measure 409 conflict rate under high contention conditions
+#
+# Note: tasks_update.lua assumes 1 thread = 1 connection (single writer per thread).
+#       threads and connections must be equal. High contention is achieved by
+#       multiple threads competing for the same small dataset, not by connection pooling.
+
+name: "tasks_update_conflict"
+description: "PUT /tasks/{id} conflict updates - high contention multi writer"
+
+# Backend configuration (maps to STORAGE_MODE, CACHE_MODE)
+storage_mode: postgres
+cache_mode: redis
+
+# Workload configuration
+load_pattern: write_heavy
+cache_state: warm
+# data_scale: small to increase collision probability
+data_scale: small
+# payload_variant: maps to PAYLOAD (minimal=small, standard=medium, complex/heavy=large)
+payload_variant: standard
+# rps_profile: constant=steady, ramp_up_down=ramp, burst=burst
+rps_profile: constant
+
+# Load generation (maps to DURATION, THREADS, CONNECTIONS)
+# Note: threads == connections required by tasks_update.lua (1 writer per thread)
+duration_seconds: 30
+connections: 4
+threads: 4
+target_rps: 500
+warmup_seconds: 5
+
+# Contention level - high for multi writer scenario
+contention_level: high
+
+# Target endpoint (first element maps to ENDPOINT)
+endpoints:
+  - "/tasks/{id}"
+
+http_methods:
+  - "PUT"
+
+# Concurrency settings (maps to POOL_SIZES, WORKERS)
+concurrency:
+  worker_threads: 8
+  database_pool_size: 30
+  redis_pool_size: 15
+  max_connections: 100
+
+# Cache metrics (expected_hit_rate maps to HIT_RATE)
+cache_metrics:
+  enabled: true
+  per_endpoint: true
+  track_latency: true
+  warmup_requests: 100
+  expected_hit_rate: 0.6
+
+# Error handling (inject_error_rate maps to FAIL_RATE, max_retries>0 maps to RETRY)
+error_config:
+  timeout_ms: 5000
+  connect_timeout_ms: 1000
+  max_retries: 3
+  retry_delay_ms: 100
+  expected_error_rate: 0.05
+  fail_on_error_threshold: true
+
+# Performance thresholds
+# Note: conflict_rate / conflict_rate_after_retry are not part of Thresholds schema;
+#       they are checked separately by CI script (ci_threshold_check.sh).
+thresholds:
+  max_error_rate: 0.1
+  p99_latency_ms: 200
+  min_rps_achieved: 300
+
+# Extended metadata for workflow integration
+# Keys here map to environment variables:
+#   cache_strategy -> CACHE_STRATEGY (read-through|write-through|write-behind)
+#   hit_rate -> HIT_RATE override (0|50|90)
+#   fail_injection -> FAIL_RATE override (0|0.1|0.5)
+#   retry -> RETRY override (true|false)
+#   profile -> PROFILE (true|false)
+metadata:
+  test_type: "endpoint_benchmark"
+  endpoint: "PUT /tasks/{id}"
+  script: "tasks_update"
+  payload: "medium"
+  cache_strategy: "write-through"
+  hit_rate: 50
+  fail_injection: 0
+  retry: true
+  profile: false
+  api_features:
+    - Lens
+    - Prism
+    - Optional
+    - Bifunctor
+  tags:
+    - tasks
+    - update
+    - conflict
+    - high-contention
+    - multi-writer

@@ -180,6 +180,11 @@ end
 
 -- Execute HTTP POST request using curl
 -- Uses shell_escape for URL and temporary file for body to prevent command injection
+--
+-- Note on TOCTOU: os.tmpname() has an inherent TOCTOU race condition in Lua.
+-- The filename is generated but not atomically created. This is a known Lua limitation.
+-- We mitigate by using the file immediately and cleaning up on failure.
+--
 -- @param url string The URL to POST to
 -- @param body string The JSON body
 -- @param headers table Optional headers
@@ -205,8 +210,21 @@ function M.http_post(url, body, headers)
     if not body_file_handle then
         return false, "Failed to create temporary body file", 0
     end
-    body_file_handle:write(body)
-    body_file_handle:close()
+
+    -- Check write success
+    local write_success, write_error = body_file_handle:write(body)
+    if not write_success then
+        body_file_handle:close()
+        os.remove(temp_body_file)
+        return false, "Failed to write body to temp file: " .. (write_error or "unknown"), 0
+    end
+
+    -- Check close success (flush may fail)
+    local close_body_success, close_body_error = body_file_handle:close()
+    if not close_body_success then
+        os.remove(temp_body_file)
+        return false, "Failed to close body temp file: " .. (close_body_error or "unknown"), 0
+    end
 
     -- Build curl command with:
     -- -s: silent mode
@@ -259,6 +277,10 @@ end
 
 -- Execute HTTP DELETE request using curl
 -- Uses shell_escape for URL to prevent command injection
+--
+-- Note on TOCTOU: os.tmpname() has an inherent TOCTOU race condition in Lua.
+-- See http_post for details.
+--
 -- @param url string The URL to DELETE
 -- @return boolean success
 -- @return string response body or error message
@@ -457,6 +479,606 @@ function M.seed_tasks(config)
     return seeded
 end
 
+-- =============================================================================
+-- REQ-UPDATE-IDS-001: test_ids.lua 生成機能
+-- =============================================================================
+
+-- Execute HTTP GET request using curl
+--
+-- Note on TOCTOU: os.tmpname() has an inherent TOCTOU race condition in Lua.
+-- See http_post for details.
+--
+-- @param url string The URL to GET
+-- @return boolean success
+-- @return string response body or error message
+-- @return number HTTP status code
+function M.http_get(url)
+    local escaped_url = shell_escape(url)
+    local temp_response_file = os.tmpname()
+    local command = string.format(
+        "curl -s -w '%%{http_code}' -X GET %s -o %s 2>&1",
+        escaped_url,
+        shell_escape(temp_response_file)
+    )
+
+    local handle = io.popen(command)
+    if not handle then
+        os.remove(temp_response_file)
+        return false, "Failed to execute curl command", 0
+    end
+
+    local status_code_string = handle:read("*a")
+    local close_success = handle:close()
+
+    local response_body = ""
+    local response_file_handle = io.open(temp_response_file, "r")
+    if response_file_handle then
+        response_body = response_file_handle:read("*a")
+        response_file_handle:close()
+    end
+    os.remove(temp_response_file)
+
+    if not close_success then
+        return false, "curl command failed: " .. (response_body or "unknown error"), 0
+    end
+
+    local status_code = tonumber(status_code_string) or 0
+
+    if status_code >= 200 and status_code < 300 then
+        return true, response_body, status_code
+    else
+        return false, response_body, status_code
+    end
+end
+
+-- Find the start of a JSON array for a specific key at the top level only
+-- Only matches keys at depth 1 (inside the root object) to avoid nested key matches.
+-- @param json_body string JSON response
+-- @param key string The key to find (e.g., "tasks", "projects")
+-- @return number|nil Start position of the array content (after '['), or nil if not found
+local function find_array_start(json_body, key)
+    local position = 1
+    local json_length = #json_body
+    local depth = 0  -- 0 = outside root, 1 = inside root object, 2+ = nested
+    local key_pattern = '"' .. key .. '"%s*:%s*%['
+
+    while position <= json_length do
+        local char = json_body:sub(position, position)
+
+        if char == "{" then
+            depth = depth + 1
+        elseif char == "}" then
+            depth = depth - 1
+        elseif char == "[" then
+            depth = depth + 1
+        elseif char == "]" then
+            depth = depth - 1
+        elseif char == '"' then
+            -- We're at a string start
+            -- Only check for key match at depth 1 (inside root object)
+            if depth == 1 then
+                local match_start, match_end = json_body:find(key_pattern, position)
+                if match_start == position then
+                    -- Found the key at top level, return position after '['
+                    -- match_end points to '[', so +1 gives position after it
+                    return match_end + 1
+                end
+            end
+            -- Skip string content
+            position = position + 1
+            while position <= json_length do
+                local string_char = json_body:sub(position, position)
+                if string_char == '"' then
+                    break
+                elseif string_char == "\\" then
+                    position = position + 1
+                end
+                position = position + 1
+            end
+        end
+        position = position + 1
+    end
+    return nil
+end
+
+-- Extract id and version from a task object at depth 0 only
+-- Tracks brace/bracket depth to ensure we only match top-level fields
+-- @param task_object string The task object JSON (including outer braces)
+-- @return string|nil task_id
+-- @return number|nil task_version
+local function extract_id_version_at_depth_zero(task_object)
+    local task_id = nil
+    local task_version = nil
+
+    local position = 1
+    local json_length = #task_object
+    local depth = 0  -- Depth relative to the task object (0 = top level fields)
+
+    while position <= json_length do
+        local char = task_object:sub(position, position)
+
+        if char == "{" then
+            depth = depth + 1
+        elseif char == "}" then
+            depth = depth - 1
+        elseif char == "[" then
+            depth = depth + 1
+        elseif char == "]" then
+            depth = depth - 1
+        elseif char == '"' then
+            -- We're at a string start
+            -- Check if we're at depth 1 (top level of task object) and this is "id" or "version"
+            if depth == 1 then
+                -- Check for "id"
+                local id_match_start, id_match_end, id_value = task_object:find('^"id"%s*:%s*"([^"]+)"', position)
+                if id_match_start then
+                    task_id = id_value
+                    position = id_match_end
+                else
+                    -- Check for "version"
+                    local version_match_start, version_match_end, version_value = task_object:find('^"version"%s*:%s*(%d+)', position)
+                    if version_match_start then
+                        task_version = tonumber(version_value)
+                        position = version_match_end
+                    else
+                        -- Skip this string
+                        position = position + 1
+                        while position <= json_length do
+                            local string_char = task_object:sub(position, position)
+                            if string_char == '"' then
+                                break
+                            elseif string_char == "\\" then
+                                position = position + 1
+                            end
+                            position = position + 1
+                        end
+                    end
+                end
+            else
+                -- Skip string at non-zero depth
+                position = position + 1
+                while position <= json_length do
+                    local string_char = task_object:sub(position, position)
+                    if string_char == '"' then
+                        break
+                    elseif string_char == "\\" then
+                        position = position + 1
+                    end
+                    position = position + 1
+                end
+            end
+        end
+        position = position + 1
+
+        -- Early exit if both found
+        if task_id and task_version then
+            break
+        end
+    end
+
+    return task_id, task_version
+end
+
+-- Extract task IDs and versions from JSON response (top-level tasks only)
+-- This function carefully parses JSON to avoid matching nested subtask id/version pairs.
+-- It tracks brace depth to ensure only depth-0 fields are matched.
+--
+-- @param json_body string JSON response from GET /tasks
+-- @return table Array of { id = string, version = number }
+local function extract_task_states(json_body)
+    local states = {}
+
+    -- Response format is: { "tasks": [ { task1 }, { task2 }, ... ] }
+    -- Only accept the expected format - no fallback to avoid parsing wrong arrays
+    local array_content_start = find_array_start(json_body, "tasks")
+    if not array_content_start then
+        return states
+    end
+
+    local position = array_content_start
+    local json_length = #json_body
+
+    while position <= json_length do
+        -- Skip whitespace
+        while position <= json_length and json_body:sub(position, position):match("%s") do
+            position = position + 1
+        end
+
+        if position > json_length then
+            break
+        end
+
+        -- Check for array end
+        if json_body:sub(position, position) == "]" then
+            break
+        end
+
+        -- Skip comma between objects
+        if json_body:sub(position, position) == "," then
+            position = position + 1
+            while position <= json_length and json_body:sub(position, position):match("%s") do
+                position = position + 1
+            end
+        end
+
+        if position > json_length then
+            break
+        end
+
+        -- Expect opening brace of task object
+        if json_body:sub(position, position) ~= "{" then
+            position = position + 1
+        else
+            -- Found a task object start, now find its end by tracking brace depth
+            local object_start = position
+            local depth = 1
+            position = position + 1
+
+            while position <= json_length and depth > 0 do
+                local char = json_body:sub(position, position)
+                if char == "{" then
+                    depth = depth + 1
+                elseif char == "}" then
+                    depth = depth - 1
+                elseif char == '"' then
+                    -- Skip string content to avoid false brace matches
+                    position = position + 1
+                    while position <= json_length do
+                        local string_char = json_body:sub(position, position)
+                        if string_char == '"' then
+                            break
+                        elseif string_char == "\\" then
+                            position = position + 1
+                        end
+                        position = position + 1
+                    end
+                end
+                position = position + 1
+            end
+
+            local object_end = position - 1
+            local task_object = json_body:sub(object_start, object_end)
+
+            -- Extract id and version at depth 0 only
+            local task_id, task_version = extract_id_version_at_depth_zero(task_object)
+
+            -- Only add if both id and version were found at top level
+            if task_id and task_version then
+                table.insert(states, { id = task_id, version = task_version })
+            end
+        end
+    end
+
+    return states
+end
+
+-- Extract project IDs from JSON response (top-level projects only)
+-- Similar to extract_task_states but only extracts id field
+-- @param json_body string JSON response from GET /projects
+-- @return table Array of project ID strings
+local function extract_project_ids(json_body)
+    local ids = {}
+
+    -- Response format is: { "projects": [ { project1 }, { project2 }, ... ] }
+    -- Only accept the expected format - no fallback to avoid parsing wrong arrays
+    local array_content_start = find_array_start(json_body, "projects")
+    if not array_content_start then
+        return ids
+    end
+
+    local position = array_content_start
+    local json_length = #json_body
+
+    while position <= json_length do
+        while position <= json_length and json_body:sub(position, position):match("%s") do
+            position = position + 1
+        end
+
+        if position > json_length then
+            break
+        end
+
+        if json_body:sub(position, position) == "]" then
+            break
+        end
+
+        if json_body:sub(position, position) == "," then
+            position = position + 1
+            while position <= json_length and json_body:sub(position, position):match("%s") do
+                position = position + 1
+            end
+        end
+
+        if position > json_length then
+            break
+        end
+
+        if json_body:sub(position, position) ~= "{" then
+            position = position + 1
+        else
+            local object_start = position
+            local depth = 1
+            position = position + 1
+
+            while position <= json_length and depth > 0 do
+                local char = json_body:sub(position, position)
+                if char == "{" then
+                    depth = depth + 1
+                elseif char == "}" then
+                    depth = depth - 1
+                elseif char == '"' then
+                    position = position + 1
+                    while position <= json_length do
+                        local string_char = json_body:sub(position, position)
+                        if string_char == '"' then
+                            break
+                        elseif string_char == "\\" then
+                            position = position + 1
+                        end
+                        position = position + 1
+                    end
+                end
+                position = position + 1
+            end
+
+            local object_end = position - 1
+            local project_object = json_body:sub(object_start, object_end)
+
+            -- Extract id at depth 0 only (reuse the same logic)
+            local project_id, _ = extract_id_version_at_depth_zero(project_object)
+
+            if project_id then
+                table.insert(ids, project_id)
+            end
+        end
+    end
+
+    return ids
+end
+
+-- Generate test_ids.lua from seeded tasks
+-- @param endpoint string API endpoint
+-- @param count number Number of task IDs to fetch (default 10)
+-- @return boolean success
+function M.generate_test_ids(endpoint, count)
+    count = count or 10
+    io.write(string.format("[seed_data] Generating test_ids.lua with %d task IDs...\n", count))
+
+    -- Fetch tasks from API
+    local success, response, status_code = M.http_get(
+        endpoint .. "/tasks?limit=" .. count .. "&offset=0"
+    )
+
+    if not success then
+        io.stderr:write(string.format("[seed_data] Failed to fetch tasks (HTTP %d): %s\n",
+            status_code, response:sub(1, 200)))
+        return false
+    end
+
+    -- Extract task states from response
+    local task_states = extract_task_states(response)
+
+    if #task_states == 0 then
+        io.stderr:write("[seed_data] No tasks found in response\n")
+        return false
+    end
+
+    -- Also fetch projects for project_ids using the extract_project_ids function
+    local project_ids_list = {}
+    local project_success, project_response, project_status = M.http_get(
+        endpoint .. "/projects?limit=3&offset=0"
+    )
+
+    if project_success then
+        project_ids_list = extract_project_ids(project_response)
+    end
+
+    -- Fallback project IDs if none found (ensures get_project_id never fails due to empty array)
+    local fallback_project_ids = {
+        "00000000-0000-4000-8000-000000000001",
+        "00000000-0000-4000-8000-000000000002",
+        "00000000-0000-4000-8000-000000000003",
+    }
+    if #project_ids_list == 0 then
+        io.stderr:write("[seed_data] Warning: No projects found, using fallback IDs\n")
+        project_ids_list = fallback_project_ids
+    end
+
+    -- Generate test_ids.lua content
+    -- Get script directory with nil fallback
+    local debug_info = debug.getinfo(1, "S")
+    local source_path = debug_info and debug_info.source or "@./seed_data.lua"
+    local script_dir = source_path:match("@(.*/)")
+    if not script_dir then
+        -- Fallback to current directory if pattern doesn't match
+        script_dir = "./"
+    end
+    local output_path = script_dir .. "test_ids.lua"
+
+    local file = io.open(output_path, "w")
+    if not file then
+        io.stderr:write("[seed_data] Failed to open test_ids.lua for writing\n")
+        return false
+    end
+
+    -- Helper function to safely write to file with error checking
+    local function safe_write(content)
+        local success, err = file:write(content)
+        if not success then
+            io.stderr:write(string.format("[seed_data] Failed to write to file: %s\n", err or "unknown error"))
+            return false
+        end
+        return true
+    end
+
+    -- Write header
+    if not safe_write("-- Auto-generated test IDs for benchmarking\n") then file:close(); return false end
+    if not safe_write("-- Generated at: " .. os.date() .. "\n") then file:close(); return false end
+    if not safe_write("-- API URL: " .. endpoint .. "\n") then file:close(); return false end
+    if not safe_write("--\n") then file:close(); return false end
+    if not safe_write("-- REQ-UPDATE-IDS-001: ID と version をペアで管理する\n") then file:close(); return false end
+    if not safe_write("-- - get_task_state(index) で ID/version ペアを取得\n") then file:close(); return false end
+    if not safe_write("-- - increment_version(index) で更新成功時に version をインクリメント\n") then file:close(); return false end
+    if not safe_write("-- - reset_versions() でベンチマーク開始時に全 version を 1 にリセット\n") then file:close(); return false end
+    if not safe_write("--\n") then file:close(); return false end
+    if not safe_write("-- wrk2 スレッドモデルに関する注意:\n") then file:close(); return false end
+    if not safe_write("-- 各スレッドは独立した Lua 状態を持つため、同一 ID を複数スレッドで\n") then file:close(); return false end
+    if not safe_write("-- 更新すると、Lua 側の version がスレッド間で分岐する。\n") then file:close(); return false end
+    if not safe_write("-- 低衝突シナリオ（single writer）では問題ないが、高衝突シナリオでは\n") then file:close(); return false end
+    if not safe_write("-- サーバ側の version との不整合が発生する可能性がある。\n") then file:close(); return false end
+    if not safe_write("-- 高衝突シナリオでは、409 発生時に GET で最新 version を取得して再試行する。\n") then file:close(); return false end
+    if not safe_write("--\n") then file:close(); return false end
+    if not safe_write("-- 状態変更に関する注意:\n") then file:close(); return false end
+    if not safe_write("-- increment_version / set_version / reset_versions は内部状態を破壊的に変更する。\n") then file:close(); return false end
+    if not safe_write("-- これは wrk2 のスレッドモデルで各スレッドが独立した状態を持つ必要があるため。\n") then file:close(); return false end
+    if not safe_write("-- 関数型プログラミングの純粋性は犠牲になるが、ベンチマークスクリプトの設計上必要。\n") then file:close(); return false end
+    if not safe_write("\n") then file:close(); return false end
+    if not safe_write("local M = {}\n\n") then file:close(); return false end
+
+    -- Write task_states with proper string escaping using %q format specifier
+    if not safe_write("-- Task states: ID と version をペアで管理（内部データ）\n") then file:close(); return false end
+    if not safe_write("local task_states = {\n") then file:close(); return false end
+    for _, state in ipairs(task_states) do
+        -- Use %q for proper Lua string escaping (handles special characters)
+        local line = string.format("    { id = %q, version = %d },\n", state.id, state.version)
+        if not safe_write(line) then file:close(); return false end
+    end
+    if not safe_write("}\n\n") then file:close(); return false end
+
+    -- Write project_ids with proper string escaping
+    if not safe_write("local project_ids = {\n") then file:close(); return false end
+    for _, id in ipairs(project_ids_list) do
+        -- Use %q for proper Lua string escaping
+        local line = string.format("    %q,\n", id)
+        if not safe_write(line) then file:close(); return false end
+    end
+    if not safe_write("}\n\n") then file:close(); return false end
+
+    -- Write helper functions (same as Phase 1)
+    local helper_functions = [[
+-- インデックスを正規化し、検証する
+-- @param index 1-based index
+-- @param count 配列の要素数
+-- @return 正規化されたインデックス（1-based）、または nil とエラーメッセージ
+local function normalize_index(index, count)
+    if type(index) ~= "number" then
+        return nil, "index must be a number, got " .. type(index)
+    end
+    if index ~= math.floor(index) then
+        return nil, "index must be an integer, got " .. tostring(index)
+    end
+    if count == 0 then
+        return nil, "cannot index into empty array"
+    end
+    local normalized = ((index - 1) % count) + 1
+    return normalized, nil
+end
+
+-- version の妥当性を検証する
+-- @param version バージョン番号
+-- @return true if valid, false and error message otherwise
+local function validate_version(version)
+    if type(version) ~= "number" then
+        return false, "version must be a number, got " .. type(version)
+    end
+    if version ~= math.floor(version) then
+        return false, "version must be an integer, got " .. tostring(version)
+    end
+    if version < 1 then
+        return false, "version must be >= 1, got " .. tostring(version)
+    end
+    return true, nil
+end
+
+function M.get_task_id(index)
+    local actual_index, err = normalize_index(index, #task_states)
+    if err then
+        return nil, err
+    end
+    return task_states[actual_index].id, nil
+end
+
+function M.get_project_id(index)
+    local actual_index, err = normalize_index(index, #project_ids)
+    if err then
+        return nil, err
+    end
+    return project_ids[actual_index], nil
+end
+
+function M.get_task_state(index)
+    local actual_index, err = normalize_index(index, #task_states)
+    if err then
+        return nil, err
+    end
+    local state = task_states[actual_index]
+    return { id = state.id, version = state.version }, nil
+end
+
+function M.increment_version(index)
+    local actual_index, err = normalize_index(index, #task_states)
+    if err then
+        return nil, err
+    end
+    task_states[actual_index].version = task_states[actual_index].version + 1
+    return task_states[actual_index].version, nil
+end
+
+function M.set_version(index, version)
+    local actual_index, index_err = normalize_index(index, #task_states)
+    if index_err then
+        return nil, index_err
+    end
+    local valid, version_err = validate_version(version)
+    if not valid then
+        return nil, version_err
+    end
+    task_states[actual_index].version = version
+    return true, nil
+end
+
+function M.reset_versions()
+    for i = 1, #task_states do
+        task_states[i].version = 1
+    end
+end
+
+function M.get_task_count()
+    return #task_states
+end
+
+function M.get_project_count()
+    return #project_ids
+end
+
+function M.get_all_task_ids()
+    local copy = {}
+    for i, state in ipairs(task_states) do
+        copy[i] = state.id
+    end
+    return copy
+end
+
+function M.get_all_project_ids()
+    local copy = {}
+    for i, id in ipairs(project_ids) do
+        copy[i] = id
+    end
+    return copy
+end
+
+return M
+]]
+    if not safe_write(helper_functions) then file:close(); return false end
+
+    file:close()
+
+    io.write(string.format("[seed_data] Generated test_ids.lua with %d task IDs and %d project IDs\n",
+        #task_states, #project_ids_list))
+
+    return true
+end
+
 -- Main entry point
 function M.run()
     -- Initialize configuration
@@ -487,6 +1109,12 @@ function M.run()
     -- Exit with error code if seeding failed
     if seeded < 0 then
         os.exit(2)
+    end
+
+    -- REQ-UPDATE-IDS-001: Generate test_ids.lua with seeded task IDs
+    local test_ids_generated = M.generate_test_ids(config.endpoint, 10)
+    if not test_ids_generated then
+        io.stderr:write("[seed_data] Warning: Failed to generate test_ids.lua\n")
     end
 
     return seeded
