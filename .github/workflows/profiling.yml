@@ -320,7 +320,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: api-profiling-tools-${{ github.sha }}
-          path: api-profiling-tools
+          path: api-profiling-tools/bin
 
       - name: Resolve scenario name
         id: scenario
