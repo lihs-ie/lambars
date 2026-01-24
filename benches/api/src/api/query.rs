@@ -764,13 +764,16 @@ impl SearchIndex {
         task_id: &TaskId,
     ) -> PersistentTreeMap<String, PersistentVector<TaskId>> {
         // Generate all suffixes by taking substrings from each character position
+        // (with deduplication check)
         for (byte_index, _) in word.char_indices() {
             let suffix = &word[byte_index..];
             let existing_ids = index
                 .get(suffix)
                 .cloned()
                 .unwrap_or_else(PersistentVector::new);
-            index = index.insert(suffix.to_string(), existing_ids.push_back(task_id.clone()));
+            if !existing_ids.iter().any(|id| id == task_id) {
+                index = index.insert(suffix.to_string(), existing_ids.push_back(task_id.clone()));
+            }
         }
         index
     }
@@ -976,6 +979,334 @@ impl SearchIndex {
 
         tasks.into_iter().collect()
     }
+
+    /// Removes a single task from the index, returning a new index (pure function).
+    ///
+    /// This helper method removes all index entries associated with the given task:
+    /// - Removes from `title_word_index` and `title_word_all_suffix_index`
+    /// - Removes from `title_full_index` and `title_full_all_suffix_index`
+    /// - Removes from `tag_index` and `tag_all_suffix_index`
+    /// - Removes from `tasks_by_id`
+    ///
+    /// # Complexity
+    ///
+    /// O(W * L * log N) where W is word count, L is average word length, N is index size.
+    #[must_use]
+    fn remove_task(&self, task: &Task) -> Self {
+        let normalized_title = task.title.to_lowercase();
+        let task_id = &task.task_id;
+
+        // Remove from tasks_by_id
+        let tasks_by_id = self.tasks_by_id.remove(task_id);
+
+        // Remove from title_full_index
+        let title_full_index =
+            Self::remove_id_from_vector_index(&self.title_full_index, &normalized_title, task_id);
+
+        // Remove from title_full_all_suffix_index
+        let title_full_all_suffix_index = Self::remove_id_from_all_suffixes(
+            &self.title_full_all_suffix_index,
+            &normalized_title,
+            task_id,
+        );
+
+        // Remove from title_word_index and title_word_all_suffix_index
+        let mut title_word_index = self.title_word_index.clone();
+        let mut title_word_all_suffix_index = self.title_word_all_suffix_index.clone();
+        for word in normalized_title.split_whitespace() {
+            title_word_index = Self::remove_id_from_vector_index(&title_word_index, word, task_id);
+            title_word_all_suffix_index =
+                Self::remove_id_from_all_suffixes(&title_word_all_suffix_index, word, task_id);
+        }
+
+        // Remove from tag_index and tag_all_suffix_index
+        let mut tag_index = self.tag_index.clone();
+        let mut tag_all_suffix_index = self.tag_all_suffix_index.clone();
+        for tag in &task.tags {
+            let tag_key = tag.as_str().to_lowercase();
+            tag_index = Self::remove_id_from_vector_index(&tag_index, &tag_key, task_id);
+            tag_all_suffix_index =
+                Self::remove_id_from_all_suffixes(&tag_all_suffix_index, &tag_key, task_id);
+        }
+
+        Self {
+            title_word_index,
+            title_full_index,
+            title_full_all_suffix_index,
+            title_word_all_suffix_index,
+            tag_index,
+            tag_all_suffix_index,
+            tasks_by_id,
+        }
+    }
+
+    /// Removes a task ID from a vector-valued index entry.
+    ///
+    /// If the resulting vector is empty, removes the entire entry.
+    fn remove_id_from_vector_index(
+        index: &PersistentTreeMap<String, PersistentVector<TaskId>>,
+        key: &str,
+        task_id: &TaskId,
+    ) -> PersistentTreeMap<String, PersistentVector<TaskId>> {
+        index.get(key).map_or_else(
+            || index.clone(),
+            |ids| {
+                let filtered: PersistentVector<TaskId> =
+                    ids.iter().filter(|id| *id != task_id).cloned().collect();
+                if filtered.is_empty() {
+                    index.remove(&key.to_string())
+                } else {
+                    index.insert(key.to_string(), filtered)
+                }
+            },
+        )
+    }
+
+    /// Removes a task ID from all suffix entries of a word.
+    fn remove_id_from_all_suffixes(
+        index: &PersistentTreeMap<String, PersistentVector<TaskId>>,
+        word: &str,
+        task_id: &TaskId,
+    ) -> PersistentTreeMap<String, PersistentVector<TaskId>> {
+        let mut result = index.clone();
+        for (byte_index, _) in word.char_indices() {
+            let suffix = &word[byte_index..];
+            result = Self::remove_id_from_vector_index(&result, suffix, task_id);
+        }
+        result
+    }
+
+    /// Adds a single task to the index, returning a new index (pure function).
+    ///
+    /// This helper method adds all index entries for the given task:
+    /// - Adds to `title_word_index` and `title_word_all_suffix_index`
+    /// - Adds to `title_full_index` and `title_full_all_suffix_index`
+    /// - Adds to `tag_index` and `tag_all_suffix_index`
+    /// - Adds to `tasks_by_id`
+    ///
+    /// # Complexity
+    ///
+    /// O(W * L * log N) where W is word count, L is average word length, N is index size.
+    #[must_use]
+    fn add_task(&self, task: &Task) -> Self {
+        let normalized_title = task.title.to_lowercase();
+        let task_id = &task.task_id;
+
+        // Add to tasks_by_id
+        let tasks_by_id = self.tasks_by_id.insert(task_id.clone(), task.clone());
+
+        // Add to title_full_index (with deduplication check)
+        let existing_ids = self
+            .title_full_index
+            .get(&normalized_title)
+            .cloned()
+            .unwrap_or_else(PersistentVector::new);
+        let title_full_index = if existing_ids.iter().any(|id| id == task_id) {
+            self.title_full_index.clone()
+        } else {
+            self.title_full_index.insert(
+                normalized_title.clone(),
+                existing_ids.push_back(task_id.clone()),
+            )
+        };
+
+        // Add to title_full_all_suffix_index
+        let title_full_all_suffix_index = Self::index_all_suffixes(
+            self.title_full_all_suffix_index.clone(),
+            &normalized_title,
+            task_id,
+        );
+
+        // Add to title_word_index and title_word_all_suffix_index (with deduplication check)
+        let mut title_word_index = self.title_word_index.clone();
+        let mut title_word_all_suffix_index = self.title_word_all_suffix_index.clone();
+        for word in normalized_title.split_whitespace() {
+            let word_key = word.to_string();
+            let task_ids = title_word_index
+                .get(&word_key)
+                .cloned()
+                .unwrap_or_else(PersistentVector::new);
+            if !task_ids.iter().any(|id| id == task_id) {
+                title_word_index =
+                    title_word_index.insert(word_key.clone(), task_ids.push_back(task_id.clone()));
+            }
+            title_word_all_suffix_index =
+                Self::index_all_suffixes(title_word_all_suffix_index, word, task_id);
+        }
+
+        // Add to tag_index and tag_all_suffix_index (with deduplication check)
+        let mut tag_index = self.tag_index.clone();
+        let mut tag_all_suffix_index = self.tag_all_suffix_index.clone();
+        for tag in &task.tags {
+            let tag_key = tag.as_str().to_lowercase();
+            let task_ids = tag_index
+                .get(&tag_key)
+                .cloned()
+                .unwrap_or_else(PersistentVector::new);
+            if !task_ids.iter().any(|id| id == task_id) {
+                tag_index = tag_index.insert(tag_key.clone(), task_ids.push_back(task_id.clone()));
+            }
+            tag_all_suffix_index =
+                Self::index_all_suffixes(tag_all_suffix_index, &tag_key, task_id);
+        }
+
+        Self {
+            title_word_index,
+            title_full_index,
+            title_full_all_suffix_index,
+            title_word_all_suffix_index,
+            tag_index,
+            tag_all_suffix_index,
+            tasks_by_id,
+        }
+    }
+
+    /// Applies a task change to the index, returning a new index (pure function).
+    ///
+    /// This method implements differential index updates:
+    /// - `Add`: Adds the new task to all indexes
+    /// - `Update`: Removes the old task, then adds the new task
+    /// - `Remove`: Removes the task from all indexes
+    ///
+    /// # Laws
+    ///
+    /// This operation is idempotent for Add and Remove:
+    /// ```text
+    /// apply_change(apply_change(index, Add(task)), Add(task)) = apply_change(index, Add(task))
+    /// apply_change(apply_change(index, Remove(id)), Remove(id)) = apply_change(index, Remove(id))
+    /// ```
+    ///
+    /// # Complexity
+    ///
+    /// O(W * L * log N) where W is word count, L is average word length, N is index size.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let new_index = index.apply_change(TaskChange::Add(task));
+    /// let new_index = index.apply_change(TaskChange::Update { old, new });
+    /// let new_index = index.apply_change(TaskChange::Remove(task_id));
+    /// ```
+    #[must_use]
+    pub fn apply_change(&self, change: TaskChange) -> Self {
+        match change {
+            TaskChange::Add(task) => {
+                // Check if task already exists (idempotency)
+                if self.tasks_by_id.contains_key(&task.task_id) {
+                    self.clone()
+                } else {
+                    self.add_task(&task)
+                }
+            }
+            TaskChange::Update { old, new } => {
+                // Remove old, then add new
+                self.remove_task(&old).add_task(&new)
+            }
+            TaskChange::Remove(task_id) => {
+                // Find the task to remove
+                self.tasks_by_id
+                    .get(&task_id)
+                    .map_or_else(|| self.clone(), |task| self.remove_task(task))
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Test-only accessors for internal index verification
+    // -------------------------------------------------------------------------
+
+    /// Returns a reference to the title word index (test-only).
+    #[cfg(test)]
+    #[must_use]
+    pub const fn title_word_index_for_test(
+        &self,
+    ) -> &PersistentTreeMap<String, PersistentVector<TaskId>> {
+        &self.title_word_index
+    }
+
+    /// Returns a reference to the title full index (test-only).
+    #[cfg(test)]
+    #[must_use]
+    pub const fn title_full_index_for_test(
+        &self,
+    ) -> &PersistentTreeMap<String, PersistentVector<TaskId>> {
+        &self.title_full_index
+    }
+
+    /// Returns a reference to the title full all-suffix index (test-only).
+    #[cfg(test)]
+    #[must_use]
+    pub const fn title_full_all_suffix_index_for_test(
+        &self,
+    ) -> &PersistentTreeMap<String, PersistentVector<TaskId>> {
+        &self.title_full_all_suffix_index
+    }
+
+    /// Returns a reference to the title word all-suffix index (test-only).
+    #[cfg(test)]
+    #[must_use]
+    pub const fn title_word_all_suffix_index_for_test(
+        &self,
+    ) -> &PersistentTreeMap<String, PersistentVector<TaskId>> {
+        &self.title_word_all_suffix_index
+    }
+
+    /// Returns a reference to the tag index (test-only).
+    #[cfg(test)]
+    #[must_use]
+    pub const fn tag_index_for_test(&self) -> &PersistentTreeMap<String, PersistentVector<TaskId>> {
+        &self.tag_index
+    }
+
+    /// Returns a reference to the tag all-suffix index (test-only).
+    #[cfg(test)]
+    #[must_use]
+    pub const fn tag_all_suffix_index_for_test(
+        &self,
+    ) -> &PersistentTreeMap<String, PersistentVector<TaskId>> {
+        &self.tag_all_suffix_index
+    }
+}
+
+/// Represents a change to a task for differential index updates.
+///
+/// This enum is used with `SearchIndex::apply_change` to update the search index
+/// incrementally without rebuilding the entire index.
+///
+/// # Variants
+///
+/// - `Add`: A new task has been created
+/// - `Update`: An existing task has been modified
+/// - `Remove`: A task has been deleted
+///
+/// # Examples
+///
+/// ```ignore
+/// // After creating a new task
+/// let change = TaskChange::Add(new_task);
+/// let new_index = index.apply_change(change);
+///
+/// // After updating a task
+/// let change = TaskChange::Update { old: old_task, new: new_task };
+/// let new_index = index.apply_change(change);
+///
+/// // After deleting a task
+/// let change = TaskChange::Remove(task_id);
+/// let new_index = index.apply_change(change);
+/// ```
+#[derive(Debug, Clone)]
+pub enum TaskChange {
+    /// A new task has been created.
+    Add(Task),
+    /// An existing task has been updated.
+    Update {
+        /// The old version of the task (before update).
+        old: Task,
+        /// The new version of the task (after update).
+        new: Task,
+    },
+    /// A task has been removed.
+    Remove(TaskId),
 }
 
 // =============================================================================
@@ -4421,6 +4752,588 @@ mod tests {
         assert_eq!(
             ids_whitespace, ids_empty,
             "Whitespace-only query should return the same task IDs as empty query"
+        );
+    }
+}
+
+// =============================================================================
+// SearchIndex Differential Update Tests (REQ-SEARCH-INDEX-001)
+// =============================================================================
+
+#[cfg(test)]
+mod search_index_differential_update_tests {
+    use super::*;
+    use crate::domain::{Tag, TaskId, Timestamp};
+    use rstest::rstest;
+
+    fn create_test_task(title: &str, priority: Priority) -> Task {
+        Task::new(TaskId::generate(), title, Timestamp::now()).with_priority(priority)
+    }
+
+    fn create_test_task_with_tags(title: &str, priority: Priority, tags: &[&str]) -> Task {
+        let base = create_test_task(title, priority);
+        tags.iter()
+            .fold(base, |task, tag| task.add_tag(Tag::new(*tag)))
+    }
+
+    // -------------------------------------------------------------------------
+    // Idempotency Tests (REQ-SEARCH-INDEX-001: index_update_idempotent law)
+    // -------------------------------------------------------------------------
+
+    /// Tests that applying Add twice for the same task is idempotent.
+    ///
+    /// Law: `apply_change(apply_change(idx, Add(task)), Add(task)) == apply_change(idx, Add(task))`
+    #[rstest]
+    fn test_add_idempotency() {
+        // Start with an empty index
+        let empty_tasks: PersistentVector<Task> = PersistentVector::new();
+        let index = SearchIndex::build(&empty_tasks);
+
+        let task = create_test_task("Important meeting", Priority::High);
+
+        // Apply Add once
+        let index_after_first_add = index.apply_change(TaskChange::Add(task.clone()));
+
+        // Apply Add again with the same task
+        let index_after_second_add = index_after_first_add.apply_change(TaskChange::Add(task));
+
+        // Verify idempotency: the index should be equivalent after both operations
+        // We verify by checking that all_tasks() returns the same set
+        let tasks_after_first: Vec<_> = index_after_first_add
+            .all_tasks()
+            .iter()
+            .map(|t| t.task_id.clone())
+            .collect();
+        let tasks_after_second: Vec<_> = index_after_second_add
+            .all_tasks()
+            .iter()
+            .map(|t| t.task_id.clone())
+            .collect();
+
+        assert_eq!(
+            tasks_after_first.len(),
+            tasks_after_second.len(),
+            "Idempotency: Adding the same task twice should not duplicate"
+        );
+        assert_eq!(
+            tasks_after_first, tasks_after_second,
+            "Idempotency: Task IDs should be identical after idempotent Add"
+        );
+
+        // Also verify the task count is 1
+        assert_eq!(
+            tasks_after_second.len(),
+            1,
+            "Should have exactly one task after idempotent Add operations"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Add Operation Tests
+    // -------------------------------------------------------------------------
+
+    /// Tests that after Add, the task is searchable by title.
+    #[rstest]
+    fn test_add_then_search_hits() {
+        let empty_tasks: PersistentVector<Task> = PersistentVector::new();
+        let index = SearchIndex::build(&empty_tasks);
+
+        let task = create_test_task("Urgent deployment", Priority::Critical);
+
+        // Apply Add
+        let new_index = index.apply_change(TaskChange::Add(task.clone()));
+
+        // Search for the task by title keyword
+        let result = search_with_scope_indexed(&new_index, "urgent", SearchScope::All);
+
+        assert_eq!(
+            result.tasks.len(),
+            1,
+            "Added task should be found by title search"
+        );
+        let found_task = result.tasks.iter().next().unwrap();
+        assert_eq!(
+            found_task.task_id, task.task_id,
+            "Found task should match the added task"
+        );
+    }
+
+    /// Tests that after Add, the task is searchable by tag.
+    #[rstest]
+    fn test_add_then_search_by_tag_hits() {
+        let empty_tasks: PersistentVector<Task> = PersistentVector::new();
+        let index = SearchIndex::build(&empty_tasks);
+
+        let task = create_test_task_with_tags("Regular task", Priority::Low, &["backend", "rust"]);
+
+        // Apply Add
+        let new_index = index.apply_change(TaskChange::Add(task.clone()));
+
+        // Search by tag
+        let result = search_with_scope_indexed(&new_index, "backend", SearchScope::Tags);
+
+        assert_eq!(
+            result.tasks.len(),
+            1,
+            "Added task should be found by tag search"
+        );
+        let found_task = result.tasks.iter().next().unwrap();
+        assert_eq!(
+            found_task.task_id, task.task_id,
+            "Found task should match the added task"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Remove Operation Tests
+    // -------------------------------------------------------------------------
+
+    /// Tests that after Remove, the task is no longer searchable.
+    #[rstest]
+    fn test_remove_then_search_misses() {
+        let task = create_test_task("Important meeting", Priority::High);
+        let task_id = task.task_id.clone();
+        let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+        let index = SearchIndex::build(&tasks);
+
+        // Verify the task is initially searchable
+        let result_before = search_with_scope_indexed(&index, "important", SearchScope::All);
+        assert_eq!(
+            result_before.tasks.len(),
+            1,
+            "Task should be found before removal"
+        );
+
+        // Apply Remove
+        let new_index = index.apply_change(TaskChange::Remove(task_id));
+
+        // Search for the removed task
+        let result_after = search_with_scope_indexed(&new_index, "important", SearchScope::All);
+
+        assert_eq!(
+            result_after.tasks.len(),
+            0,
+            "Removed task should not be found by search"
+        );
+    }
+
+    /// Tests that Remove for a non-existent task is idempotent (no change).
+    #[rstest]
+    fn test_remove_nonexistent_idempotency() {
+        let task = create_test_task("Existing task", Priority::Medium);
+        let tasks: PersistentVector<Task> = vec![task.clone()].into_iter().collect();
+        let index = SearchIndex::build(&tasks);
+
+        // Generate a new TaskId that doesn't exist in the index
+        let nonexistent_id = TaskId::generate();
+
+        // Apply Remove for non-existent task
+        let new_index = index.apply_change(TaskChange::Remove(nonexistent_id));
+
+        // Verify the existing task is still there
+        let result = search_with_scope_indexed(&new_index, "existing", SearchScope::All);
+
+        assert_eq!(
+            result.tasks.len(),
+            1,
+            "Removing non-existent task should not affect existing tasks"
+        );
+        let found_task = result.tasks.iter().next().unwrap();
+        assert_eq!(
+            found_task.task_id, task.task_id,
+            "Existing task should still be found"
+        );
+
+        // Verify all_tasks count is unchanged
+        let all_tasks_count_before = index.all_tasks().iter().count();
+        let all_tasks_count_after = new_index.all_tasks().iter().count();
+
+        assert_eq!(
+            all_tasks_count_before, all_tasks_count_after,
+            "Remove of non-existent task should not change task count"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Update Operation Tests
+    // -------------------------------------------------------------------------
+
+    /// Tests that after Update, old title search misses and new title search hits.
+    #[rstest]
+    fn test_update_old_title_misses_new_title_hits() {
+        let old_task = create_test_task("Old meeting title", Priority::Medium);
+        let tasks: PersistentVector<Task> = vec![old_task.clone()].into_iter().collect();
+        let index = SearchIndex::build(&tasks);
+
+        // Create updated task with new title but same ID
+        let new_task = Task::new(
+            old_task.task_id.clone(),
+            "New conference title",
+            Timestamp::now(),
+        )
+        .with_priority(Priority::High);
+
+        // Verify old title is searchable before update
+        let result_old_before = search_with_scope_indexed(&index, "meeting", SearchScope::All);
+        assert_eq!(
+            result_old_before.tasks.len(),
+            1,
+            "Old title should be found before update"
+        );
+
+        // Apply Update
+        let new_index = index.apply_change(TaskChange::Update {
+            old: old_task,
+            new: new_task.clone(),
+        });
+
+        // Old title search should miss
+        let result_old_after = search_with_scope_indexed(&new_index, "meeting", SearchScope::All);
+        assert_eq!(
+            result_old_after.tasks.len(),
+            0,
+            "Old title should not be found after update"
+        );
+
+        // New title search should hit
+        let result_new = search_with_scope_indexed(&new_index, "conference", SearchScope::All);
+        assert_eq!(
+            result_new.tasks.len(),
+            1,
+            "New title should be found after update"
+        );
+        let found_task = result_new.tasks.iter().next().unwrap();
+        assert_eq!(
+            found_task.task_id, new_task.task_id,
+            "Found task should have the updated task ID"
+        );
+    }
+
+    /// Tests that Update correctly handles tag changes.
+    #[rstest]
+    fn test_update_old_tag_misses_new_tag_hits() {
+        let old_task =
+            create_test_task_with_tags("Development task", Priority::Medium, &["frontend"]);
+        let tasks: PersistentVector<Task> = vec![old_task.clone()].into_iter().collect();
+        let index = SearchIndex::build(&tasks);
+
+        // Create updated task with new tags
+        let new_task = Task::new(
+            old_task.task_id.clone(),
+            "Development task",
+            Timestamp::now(),
+        )
+        .with_priority(Priority::Medium)
+        .add_tag(Tag::new("backend"));
+
+        // Verify old tag is searchable before update
+        let result_old_tag_before =
+            search_with_scope_indexed(&index, "frontend", SearchScope::Tags);
+        assert_eq!(
+            result_old_tag_before.tasks.len(),
+            1,
+            "Old tag should be found before update"
+        );
+
+        // Apply Update
+        let new_index = index.apply_change(TaskChange::Update {
+            old: old_task,
+            new: new_task,
+        });
+
+        // Old tag search should miss
+        let result_old_tag_after =
+            search_with_scope_indexed(&new_index, "frontend", SearchScope::Tags);
+        assert_eq!(
+            result_old_tag_after.tasks.len(),
+            0,
+            "Old tag should not be found after update"
+        );
+
+        // New tag search should hit
+        let result_new_tag = search_with_scope_indexed(&new_index, "backend", SearchScope::Tags);
+        assert_eq!(
+            result_new_tag.tasks.len(),
+            1,
+            "New tag should be found after update"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Edge Case Tests
+    // -------------------------------------------------------------------------
+
+    /// Tests differential update on an empty index.
+    #[rstest]
+    fn test_add_to_empty_index() {
+        let empty_tasks: PersistentVector<Task> = PersistentVector::new();
+        let index = SearchIndex::build(&empty_tasks);
+
+        assert_eq!(
+            index.all_tasks().len(),
+            0,
+            "Empty index should have no tasks"
+        );
+
+        let task = create_test_task("First task", Priority::Low);
+        let new_index = index.apply_change(TaskChange::Add(task));
+
+        assert_eq!(
+            new_index.all_tasks().len(),
+            1,
+            "Index should have one task after Add"
+        );
+
+        let result = search_with_scope_indexed(&new_index, "first", SearchScope::All);
+        assert_eq!(result.tasks.len(), 1, "Added task should be searchable");
+    }
+
+    /// Tests that multiple Add operations work correctly.
+    #[rstest]
+    fn test_multiple_adds() {
+        let empty_tasks: PersistentVector<Task> = PersistentVector::new();
+        let index = SearchIndex::build(&empty_tasks);
+
+        let task1 = create_test_task("Alpha task", Priority::High);
+        let task2 = create_test_task("Beta task", Priority::Medium);
+        let task3 = create_test_task("Gamma task", Priority::Low);
+
+        let index = index.apply_change(TaskChange::Add(task1));
+        let index = index.apply_change(TaskChange::Add(task2));
+        let index = index.apply_change(TaskChange::Add(task3));
+
+        assert_eq!(
+            index.all_tasks().len(),
+            3,
+            "Index should have three tasks after three Adds"
+        );
+
+        // Verify each task is searchable
+        let result_alpha = search_with_scope_indexed(&index, "alpha", SearchScope::All);
+        let result_beta = search_with_scope_indexed(&index, "beta", SearchScope::All);
+        let result_gamma = search_with_scope_indexed(&index, "gamma", SearchScope::All);
+
+        assert_eq!(result_alpha.tasks.len(), 1, "Alpha task should be found");
+        assert_eq!(result_beta.tasks.len(), 1, "Beta task should be found");
+        assert_eq!(result_gamma.tasks.len(), 1, "Gamma task should be found");
+    }
+
+    /// Tests that original index is unchanged after `apply_change` (immutability).
+    #[rstest]
+    fn test_immutability_preserved() {
+        let task = create_test_task("Original task", Priority::Medium);
+        let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+        let original_index = SearchIndex::build(&tasks);
+
+        // Get the count before any changes
+        let count_before = original_index.all_tasks().len();
+
+        // Apply Add (which returns a new index)
+        let new_task = create_test_task("New task", Priority::High);
+        let _new_index = original_index.apply_change(TaskChange::Add(new_task));
+
+        // Original index should be unchanged
+        let count_after = original_index.all_tasks().len();
+        assert_eq!(
+            count_before, count_after,
+            "Original index should be unchanged after apply_change"
+        );
+
+        // Verify original task is still searchable in original index
+        let result = search_with_scope_indexed(&original_index, "original", SearchScope::All);
+        assert_eq!(
+            result.tasks.len(),
+            1,
+            "Original task should still be found in original index"
+        );
+    }
+
+    /// Tests that `TaskChange::Update` is idempotent.
+    ///
+    /// Applying the same Update twice should produce the same result as applying it once.
+    /// This ensures that index entries are not duplicated when Update is applied multiple times.
+    #[rstest]
+    fn test_update_idempotency() {
+        // Create initial task
+        let task_id = TaskId::generate();
+        let old_task = Task::new(task_id.clone(), "Old title", Timestamp::now())
+            .with_priority(Priority::Low)
+            .add_tag(Tag::new("work"));
+
+        // Build initial index with the task
+        let tasks: PersistentVector<Task> = vec![old_task.clone()].into_iter().collect();
+        let initial_index = SearchIndex::build(&tasks);
+
+        // Create updated task (same ID, different content)
+        let new_task = Task::new(task_id, "New title updated", Timestamp::now())
+            .with_priority(Priority::High)
+            .add_tag(Tag::new("personal"));
+
+        // Apply Update once
+        let update_change = TaskChange::Update {
+            old: old_task,
+            new: new_task,
+        };
+        let index_after_first_update = initial_index.apply_change(update_change.clone());
+
+        // Apply the same Update again
+        let index_after_second_update = index_after_first_update.apply_change(update_change);
+
+        // Verify: Total task count should be the same
+        assert_eq!(
+            index_after_first_update.all_tasks().len(),
+            index_after_second_update.all_tasks().len(),
+            "Task count should be the same after applying Update twice"
+        );
+
+        // Verify: Searching for the new title should return exactly 1 result (not 2)
+        let result_after_first =
+            search_with_scope_indexed(&index_after_first_update, "New title", SearchScope::Title);
+        let result_after_second =
+            search_with_scope_indexed(&index_after_second_update, "New title", SearchScope::Title);
+
+        assert_eq!(
+            result_after_first.tasks.len(),
+            1,
+            "First update should result in exactly 1 task"
+        );
+        assert_eq!(
+            result_after_second.tasks.len(),
+            1,
+            "Second update should still result in exactly 1 task (idempotency)"
+        );
+
+        // Verify: Searching by new tag should return exactly 1 result
+        let tag_result_first =
+            search_with_scope_indexed(&index_after_first_update, "personal", SearchScope::Tags);
+        let tag_result_second =
+            search_with_scope_indexed(&index_after_second_update, "personal", SearchScope::Tags);
+
+        assert_eq!(
+            tag_result_first.tasks.len(),
+            1,
+            "First update: tag search should return 1 task"
+        );
+        assert_eq!(
+            tag_result_second.tasks.len(),
+            1,
+            "Second update: tag search should still return 1 task (idempotency)"
+        );
+
+        // Verify: Old title should not be found in the index
+        let old_title_result_first =
+            search_with_scope_indexed(&index_after_first_update, "Old title", SearchScope::Title);
+        let old_title_result_second =
+            search_with_scope_indexed(&index_after_second_update, "Old title", SearchScope::Title);
+
+        assert!(
+            old_title_result_first.tasks.is_empty(),
+            "Old title should not be found after first update"
+        );
+        assert!(
+            old_title_result_second.tasks.is_empty(),
+            "Old title should not be found after second update"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Internal Index Uniqueness Tests
+    // -------------------------------------------------------------------------
+
+    /// Helper function to check uniqueness in a `PersistentVector`.
+    ///
+    /// Returns `true` if there are duplicate `TaskId`s in the vector.
+    fn has_duplicates(ids: &PersistentVector<TaskId>) -> bool {
+        let set: std::collections::HashSet<_> = ids.iter().collect();
+        set.len() != ids.len()
+    }
+
+    /// Tests that internal indexes have no duplicate `TaskId`s after Update.
+    ///
+    /// This test directly verifies that each index entry contains unique `TaskId`s,
+    /// not relying on search deduplication. This ensures the internal data structure
+    /// maintains consistency even when Update is applied multiple times with the
+    /// same old/new task pair.
+    #[rstest]
+    fn test_update_no_internal_duplicates() {
+        // Create initial task
+        let task_id = TaskId::generate();
+        let old_task = Task::new(task_id.clone(), "Test title", Timestamp::now())
+            .with_priority(Priority::Low)
+            .add_tag(Tag::new("testtag"));
+
+        // Build initial index
+        let tasks: PersistentVector<Task> = vec![old_task.clone()].into_iter().collect();
+        let initial_index = SearchIndex::build(&tasks);
+
+        // Create updated task (same title and tag to ensure same index keys)
+        let new_task = Task::new(task_id, "Test title", Timestamp::now())
+            .with_priority(Priority::High)
+            .add_tag(Tag::new("testtag"));
+
+        // Apply Update twice
+        let update_change = TaskChange::Update {
+            old: old_task,
+            new: new_task,
+        };
+        let index_once = initial_index.apply_change(update_change.clone());
+        let index_twice = index_once.apply_change(update_change);
+
+        // Verify internal indexes have no duplicates
+
+        // Check title_word_index
+        for (key, ids) in index_twice.title_word_index_for_test() {
+            assert!(
+                !has_duplicates(ids),
+                "title_word_index has duplicate TaskIds for key '{key}'"
+            );
+        }
+
+        // Check title_full_index
+        for (key, ids) in index_twice.title_full_index_for_test() {
+            assert!(
+                !has_duplicates(ids),
+                "title_full_index has duplicate TaskIds for key '{key}'"
+            );
+        }
+
+        // Check title_full_all_suffix_index
+        for (key, ids) in index_twice.title_full_all_suffix_index_for_test() {
+            assert!(
+                !has_duplicates(ids),
+                "title_full_all_suffix_index has duplicate TaskIds for key '{key}'"
+            );
+        }
+
+        // Check title_word_all_suffix_index
+        for (key, ids) in index_twice.title_word_all_suffix_index_for_test() {
+            assert!(
+                !has_duplicates(ids),
+                "title_word_all_suffix_index has duplicate TaskIds for key '{key}'"
+            );
+        }
+
+        // Check tag_index
+        for (key, ids) in index_twice.tag_index_for_test() {
+            assert!(
+                !has_duplicates(ids),
+                "tag_index has duplicate TaskIds for key '{key}'"
+            );
+        }
+
+        // Check tag_all_suffix_index
+        for (key, ids) in index_twice.tag_all_suffix_index_for_test() {
+            assert!(
+                !has_duplicates(ids),
+                "tag_all_suffix_index has duplicate TaskIds for key '{key}'"
+            );
+        }
+
+        // Also verify task count remains 1
+        assert_eq!(
+            index_twice.all_tasks().len(),
+            1,
+            "Should have exactly one task after Update operations"
         );
     }
 }
