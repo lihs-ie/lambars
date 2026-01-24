@@ -69,6 +69,65 @@ const fn default_limit() -> u32 {
     20
 }
 
+// =============================================================================
+// Search Pagination Constants and Functions
+// =============================================================================
+
+/// Default limit for search results when not specified.
+const SEARCH_DEFAULT_LIMIT: u32 = 50;
+
+/// Maximum allowed limit for search results.
+const SEARCH_MAX_LIMIT: u32 = 200;
+
+/// Normalizes pagination parameters for search queries (pure function).
+///
+/// # Arguments
+///
+/// * `limit` - Optional limit from query. If `None`, defaults to [`SEARCH_DEFAULT_LIMIT`] (50).
+/// * `offset` - Optional offset from query. If `None`, defaults to 0.
+///
+/// # Returns
+///
+/// A tuple of `(normalized_limit, normalized_offset)` where:
+/// - `limit` is clamped to [`SEARCH_MAX_LIMIT`] (200) if it exceeds this value.
+/// - `limit=0` is explicitly allowed and returns an empty result (user intent).
+/// - `offset` defaults to 0 if not provided.
+///
+/// # Specification
+///
+/// - **Default limit**: 50 (when `limit` is not specified)
+/// - **Maximum limit**: 200 (values above this are clamped)
+/// - **`limit=0` behavior**: Returns empty array (explicit user intent to get no results)
+///
+/// # Examples
+///
+/// ```ignore
+/// // Default values
+/// assert_eq!(normalize_search_pagination(None, None), (50, 0));
+///
+/// // limit exceeds max, clamped to 200
+/// assert_eq!(normalize_search_pagination(Some(500), None), (200, 0));
+///
+/// // Normal values
+/// assert_eq!(normalize_search_pagination(Some(100), Some(20)), (100, 20));
+///
+/// // limit=0 returns empty array (explicit user intent)
+/// assert_eq!(normalize_search_pagination(Some(0), Some(10)), (0, 10));
+/// ```
+#[must_use]
+pub const fn normalize_search_pagination(limit: Option<u32>, offset: Option<u32>) -> (u32, u32) {
+    let normalized_limit = match limit {
+        Some(value) if value > SEARCH_MAX_LIMIT => SEARCH_MAX_LIMIT,
+        Some(value) => value,
+        None => SEARCH_DEFAULT_LIMIT,
+    };
+    let normalized_offset = match offset {
+        Some(value) => value,
+        None => 0,
+    };
+    (normalized_limit, normalized_offset)
+}
+
 /// Query parameters for searching tasks.
 #[derive(Debug, Deserialize)]
 pub struct SearchTasksQuery {
@@ -77,11 +136,21 @@ pub struct SearchTasksQuery {
     /// Search scope: "title", "tags", or "all" (default: "all").
     #[serde(rename = "in", default)]
     pub scope: SearchScope,
+    /// Maximum number of results to return.
+    /// - Defaults to 50 if not specified.
+    /// - Clamped to 200 if exceeds maximum.
+    /// - `limit=0` returns empty array (explicit user intent).
+    pub limit: Option<u32>,
+    /// Number of results to skip (0-based offset).
+    /// Defaults to 0 if not specified.
+    pub offset: Option<u32>,
 }
 
 /// Search scope enum.
-#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+///
+/// Valid values are: "title", "tags", "all" (case-insensitive).
+/// Unknown values will result in a 400 Bad Request error.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SearchScope {
     /// Search only in task titles.
     Title,
@@ -90,6 +159,48 @@ pub enum SearchScope {
     /// Search in both titles and tags.
     #[default]
     All,
+}
+
+impl std::str::FromStr for SearchScope {
+    type Err = String;
+
+    /// Parses a string into a `SearchScope`.
+    ///
+    /// Valid values are "title", "tags", "all" (case-insensitive).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string if the input is not one of the valid values.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use std::str::FromStr;
+    /// assert_eq!(SearchScope::from_str("title"), Ok(SearchScope::Title));
+    /// assert_eq!(SearchScope::from_str("TAGS"), Ok(SearchScope::Tags));
+    /// assert!(SearchScope::from_str("unknown").is_err());
+    /// ```
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_lowercase().as_str() {
+            "title" => Ok(Self::Title),
+            "tags" => Ok(Self::Tags),
+            "all" => Ok(Self::All),
+            other => Err(format!(
+                "Invalid search scope '{other}'. Valid values are: title, tags, all"
+            )),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SearchScope {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use std::str::FromStr;
+        let value = String::deserialize(deserializer)?;
+        Self::from_str(&value).map_err(serde::de::Error::custom)
+    }
 }
 
 // =============================================================================
@@ -273,18 +384,20 @@ impl Semigroup for SearchResult {
 ///
 /// - **Word index**: Maps individual words (split by whitespace) for efficient prefix search
 /// - **Full title index**: Maps the complete normalized title to multiple task IDs
+/// - **Full title all-suffix index**: Maps ALL suffixes of the full normalized title to task IDs
+///   - Example: `important meeting tomorrow` generates suffixes including `meeting tomorrow`, `tomorrow`
+///   - This allows multi-word infix queries like `meeting tomorrow` to match `important meeting tomorrow`
 /// - **Word all-suffix index**: Maps ALL suffixes of each word for arbitrary position substring matching
 ///   - Example: `callback` generates suffixes: `callback`, `allback`, `llback`, `lback`, `back`, `ack`, `ck`, `k`
 ///   - This allows `all` query to match `callback` via `allback` prefix match
 /// - **Tag index**: Maps normalized tag values for tag search
 /// - **Tag all-suffix index**: Maps ALL suffixes of each tag for arbitrary position substring matching
-/// - **Task order**: Preserves original task order for stable result ordering
 ///
 /// # Complexity Analysis
 ///
 /// - **Range query (index lookup)**: O(log N + m) where m is matching entries in index
 /// - **ID resolution**: O(k log N) where k is matching tasks, N is total tasks
-/// - **Result ordering**: O(k log k) for sorting by original order
+/// - **Result ordering**: O(k log k) for sorting by `task_id` for deterministic stable ordering
 /// - **Total search complexity**: O(k log N + k log k)
 /// - No full O(N) scan is required for any search operation.
 /// - **Space trade-off**: Stores O(L * W) entries where L is average word length and W is word count
@@ -295,6 +408,11 @@ pub struct SearchIndex {
     /// Index mapping full normalized titles to task IDs (for multi-word substring match).
     /// Changed from `TaskId` to `PersistentVector<TaskId>` to support multiple tasks with same title.
     title_full_index: PersistentTreeMap<String, PersistentVector<TaskId>>,
+    /// Index mapping ALL suffixes of full normalized titles to task IDs (for multi-word infix search).
+    /// Example: `important meeting tomorrow` generates `important meeting tomorrow`, `mportant meeting tomorrow`,
+    /// ..., `meeting tomorrow`, ..., `tomorrow`, etc.
+    /// This enables `meeting tomorrow` query to match `important meeting tomorrow`.
+    title_full_all_suffix_index: PersistentTreeMap<String, PersistentVector<TaskId>>,
     /// Index mapping ALL suffixes of normalized title words to task IDs (for arbitrary infix search).
     /// Example: `callback` generates `callback`, `allback`, `llback`, `lback`, `back`, `ack`, `ck`, `k`.
     /// This enables `all` query to match `callback` via `allback` prefix match.
@@ -305,8 +423,6 @@ pub struct SearchIndex {
     tag_all_suffix_index: PersistentTreeMap<String, PersistentVector<TaskId>>,
     /// Reference to all tasks for lookup by ID.
     tasks_by_id: PersistentTreeMap<TaskId, Task>,
-    /// Original task order for stable result ordering (`task_id` -> position).
-    task_order: PersistentTreeMap<TaskId, usize>,
 }
 
 impl SearchIndex {
@@ -314,12 +430,13 @@ impl SearchIndex {
     ///
     /// Creates normalized indexes for both title words and tags.
     /// Also creates all-suffix indexes for arbitrary position substring matching.
-    /// Preserves task order for stable result ordering.
     #[must_use]
     pub fn build(tasks: &PersistentVector<Task>) -> Self {
         let mut title_word_index: PersistentTreeMap<String, PersistentVector<TaskId>> =
             PersistentTreeMap::new();
         let mut title_full_index: PersistentTreeMap<String, PersistentVector<TaskId>> =
+            PersistentTreeMap::new();
+        let mut title_full_all_suffix_index: PersistentTreeMap<String, PersistentVector<TaskId>> =
             PersistentTreeMap::new();
         let mut title_word_all_suffix_index: PersistentTreeMap<String, PersistentVector<TaskId>> =
             PersistentTreeMap::new();
@@ -328,12 +445,8 @@ impl SearchIndex {
         let mut tag_all_suffix_index: PersistentTreeMap<String, PersistentVector<TaskId>> =
             PersistentTreeMap::new();
         let mut tasks_by_id: PersistentTreeMap<TaskId, Task> = PersistentTreeMap::new();
-        let mut task_order: PersistentTreeMap<TaskId, usize> = PersistentTreeMap::new();
 
-        for (position, task) in tasks.iter().enumerate() {
-            // Store task position for stable ordering
-            task_order = task_order.insert(task.task_id.clone(), position);
-
+        for task in tasks {
             // Index the task by ID
             tasks_by_id = tasks_by_id.insert(task.task_id.clone(), task.clone());
 
@@ -347,6 +460,14 @@ impl SearchIndex {
             title_full_index = title_full_index.insert(
                 normalized_title.clone(),
                 existing_ids.push_back(task.task_id.clone()),
+            );
+
+            // Index ALL suffixes of the full normalized title for multi-word infix search
+            // "important meeting tomorrow" -> ["important meeting tomorrow", "mportant meeting tomorrow", ..., "meeting tomorrow", ...]
+            title_full_all_suffix_index = Self::index_all_suffixes(
+                title_full_all_suffix_index,
+                &normalized_title,
+                &task.task_id,
             );
 
             // Index title words (normalized to lowercase) for prefix search
@@ -384,11 +505,11 @@ impl SearchIndex {
         Self {
             title_word_index,
             title_full_index,
+            title_full_all_suffix_index,
             title_word_all_suffix_index,
             tag_index,
             tag_all_suffix_index,
             tasks_by_id,
-            task_order,
         }
     }
 
@@ -431,7 +552,7 @@ impl SearchIndex {
     ///
     /// 1. First, try full title substring match (for multi-word queries like "important meeting")
     /// 2. Then, use prefix-based word index search (for single word or prefix queries)
-    /// 3. Combine results with deduplication, maintaining original task order
+    /// 3. Combine results with deduplication, sorted by `task_id` for stable ordering
     #[must_use]
     pub fn search_by_title(&self, query: &str) -> Option<SearchResult> {
         let query_lower = query.to_lowercase();
@@ -463,10 +584,11 @@ impl SearchIndex {
 
     /// Finds task IDs from the title index that match the query (substring match).
     ///
-    /// Uses a three-phase strategy:
+    /// Uses a four-phase strategy:
     /// 1. Full title substring match using prefix range on full title index
-    /// 2. Prefix-based range search on word index
-    /// 3. Suffix-based range search on all-suffix index (for infix matches)
+    /// 2. Full title all-suffix search (for multi-word infix queries like "meeting tomorrow" in "important meeting tomorrow")
+    /// 3. Prefix-based range search on word index
+    /// 4. Suffix-based range search on all-suffix index (for infix matches)
     ///
     /// # Complexity
     ///
@@ -485,7 +607,18 @@ impl SearchIndex {
             matching_ids,
         );
 
-        // Phase 2: Word index prefix search (for single word or prefix queries)
+        // Phase 2: Full title all-suffix search (for multi-word infix queries)
+        // The all-suffix index contains ALL suffixes of the full title, so we can find
+        // any multi-word infix by prefix-searching on the suffix that starts with the query.
+        // E.g., "meeting tomorrow" matches "important meeting tomorrow" because
+        // "meeting tomorrow" is in the all-suffix index and starts with the query.
+        matching_ids = Self::find_matching_ids_with_prefix_range_multi(
+            &self.title_full_all_suffix_index,
+            query_lower,
+            matching_ids,
+        );
+
+        // Phase 3: Word index prefix search (for single word or prefix queries)
         // Finds words that START WITH the query (e.g., "imp" matches "important")
         matching_ids = Self::find_matching_ids_with_prefix_range(
             &self.title_word_index,
@@ -493,7 +626,7 @@ impl SearchIndex {
             matching_ids,
         );
 
-        // Phase 3: All-suffix index search (for arbitrary infix matches)
+        // Phase 4: All-suffix index search (for arbitrary infix matches)
         // The all-suffix index contains ALL suffixes of each word, so we can find
         // any infix by prefix-searching on the suffix that starts with the query.
         // E.g., "all" matches "callback" because "allback" is in the index and starts with "all"
@@ -570,55 +703,47 @@ impl SearchIndex {
         matching_ids
     }
 
-    /// Resolves task IDs to their corresponding Task objects, maintaining original order.
+    /// Resolves task IDs to their corresponding Task objects, maintaining stable order.
     ///
-    /// This ensures stable result ordering based on task registration order.
+    /// Ordering is determined by `task_id` only, which is a UUID.
+    /// This guarantees deterministic output regardless of:
+    /// - Repository's `list()` return order
+    /// - Input task ID iteration order
+    ///
+    /// Using `task_id` as the sole sort key ensures the same input always
+    /// produces the same output order.
     fn resolve_task_ids_ordered(
         &self,
         task_ids: &PersistentHashSet<TaskId>,
     ) -> PersistentVector<Task> {
-        // Collect tasks with their positions
-        let mut tasks_with_positions: Vec<(usize, Task)> = task_ids
+        let mut tasks: Vec<Task> = task_ids
             .iter()
-            .filter_map(|id| {
-                self.tasks_by_id.get(id).cloned().map(|task| {
-                    let position = self.task_order.get(id).copied().unwrap_or(usize::MAX);
-                    (position, task)
-                })
-            })
+            .filter_map(|id| self.tasks_by_id.get(id).cloned())
             .collect();
 
-        // Sort by original position for stable ordering
-        tasks_with_positions.sort_by_key(|(position, _)| *position);
+        // Sort by task_id for stable ordering
+        tasks.sort_by(|a, b| a.task_id.cmp(&b.task_id));
 
-        // Extract tasks in order
-        tasks_with_positions
-            .into_iter()
-            .map(|(_, task)| task)
-            .collect()
+        tasks.into_iter().collect()
     }
 
-    /// Returns all tasks when the query is empty, in original order.
+    /// Returns all tasks when the query is empty, in stable order.
+    ///
+    /// Ordering is determined by `task_id` only, which is a UUID.
+    /// This guarantees deterministic output regardless of the repository's
+    /// `list()` return order.
     #[must_use]
     pub fn all_tasks(&self) -> PersistentVector<Task> {
-        // Collect tasks with their positions
-        let mut tasks_with_positions: Vec<(usize, Task)> = self
+        let mut tasks: Vec<Task> = self
             .tasks_by_id
             .iter()
-            .map(|(id, task)| {
-                let position = self.task_order.get(id).copied().unwrap_or(usize::MAX);
-                (position, task.clone())
-            })
+            .map(|(_, task)| task.clone())
             .collect();
 
-        // Sort by original position
-        tasks_with_positions.sort_by_key(|(position, _)| *position);
+        // Sort by task_id for stable ordering
+        tasks.sort_by(|a, b| a.task_id.cmp(&b.task_id));
 
-        // Extract tasks in order
-        tasks_with_positions
-            .into_iter()
-            .map(|(_, task)| task)
-            .collect()
+        tasks.into_iter().collect()
     }
 }
 
@@ -909,11 +1034,14 @@ fn paginate_tasks(
 /// - **`PersistentTreeMap`**: Building normalized search indexes for efficient lookup
 /// - **`Semigroup::combine`**: Combining search results with deduplication
 /// - **Deduplication**: Using `Semigroup::combine` for merging overlapping results
+/// - **Pagination**: Using `normalize_search_pagination` for limit/offset handling
 ///
 /// # Query Parameters
 ///
 /// - `q`: Search query (case-insensitive substring match)
 /// - `in`: Search scope - "title", "tags", or "all" (default)
+/// - `limit`: Maximum results to return (default: 50, max: 200)
+/// - `offset`: Number of results to skip (default: 0)
 ///
 /// # Response
 ///
@@ -945,10 +1073,15 @@ pub async fn search_tasks(
     // Pure computation: Search with scope using Semigroup::combine
     let results = search_with_scope_indexed(&index, &query.q, query.scope);
 
-    // Convert to response
+    // Apply pagination using pure function
+    let (limit, offset) = normalize_search_pagination(query.limit, query.offset);
+
+    // Convert to response with pagination applied
     let response: Vec<TaskResponse> = results
         .into_tasks()
         .iter()
+        .skip(offset as usize)
+        .take(limit as usize)
         .map(TaskResponse::from)
         .collect();
 
@@ -2654,6 +2787,787 @@ mod tests {
         assert!(
             result.is_err(),
             "filter_tasks with status filter should still return error for nil UUID"
+        );
+    }
+
+    // =========================================================================
+    // REQ-SEARCH-API-001: Search Pagination Tests
+    // =========================================================================
+
+    /// Test: `normalize_search_pagination` defaults limit to 50 when not specified.
+    #[rstest]
+    fn test_normalize_search_pagination_default_limit() {
+        let (limit, offset) = normalize_search_pagination(None, None);
+        assert_eq!(limit, 50, "Default limit should be 50");
+        assert_eq!(offset, 0, "Default offset should be 0");
+    }
+
+    /// Test: `normalize_search_pagination` defaults offset to 0 when not specified.
+    #[rstest]
+    fn test_normalize_search_pagination_default_offset() {
+        let (limit, offset) = normalize_search_pagination(Some(100), None);
+        assert_eq!(limit, 100, "Limit should be passed through");
+        assert_eq!(offset, 0, "Default offset should be 0");
+    }
+
+    /// Test: `normalize_search_pagination` clamps limit to 200 when exceeds.
+    #[rstest]
+    fn test_normalize_search_pagination_clamps_limit_to_max() {
+        let (limit, offset) = normalize_search_pagination(Some(500), Some(10));
+        assert_eq!(limit, 200, "Limit should be clamped to 200");
+        assert_eq!(offset, 10, "Offset should be passed through");
+    }
+
+    /// Test: `normalize_search_pagination` allows limit at boundary (200).
+    #[rstest]
+    fn test_normalize_search_pagination_allows_max_limit() {
+        let (limit, offset) = normalize_search_pagination(Some(200), Some(0));
+        assert_eq!(limit, 200, "Limit at max boundary should be allowed");
+        assert_eq!(offset, 0, "Offset should be 0");
+    }
+
+    /// Test: `normalize_search_pagination` allows limit just below max (199).
+    #[rstest]
+    fn test_normalize_search_pagination_allows_below_max_limit() {
+        let (limit, offset) = normalize_search_pagination(Some(199), Some(5));
+        assert_eq!(limit, 199, "Limit below max should be allowed");
+        assert_eq!(offset, 5, "Offset should be passed through");
+    }
+
+    /// Test: `normalize_search_pagination` is a pure function (same input -> same output).
+    #[rstest]
+    fn test_normalize_search_pagination_is_pure() {
+        // Multiple calls with the same input should return the same output
+        let result1 = normalize_search_pagination(Some(100), Some(20));
+        let result2 = normalize_search_pagination(Some(100), Some(20));
+        assert_eq!(
+            result1, result2,
+            "Pure function should return same output for same input"
+        );
+    }
+
+    // =========================================================================
+    // REQ-SEARCH-API-001: SearchScope Deserialization Tests
+    // =========================================================================
+
+    /// Test: `SearchScope::from_str` parses "title" correctly.
+    #[rstest]
+    fn test_search_scope_from_str_title() {
+        use std::str::FromStr;
+        assert_eq!(SearchScope::from_str("title"), Ok(SearchScope::Title));
+        assert_eq!(SearchScope::from_str("TITLE"), Ok(SearchScope::Title));
+        assert_eq!(SearchScope::from_str("Title"), Ok(SearchScope::Title));
+    }
+
+    /// Test: `SearchScope::from_str` parses "tags" correctly.
+    #[rstest]
+    fn test_search_scope_from_str_tags() {
+        use std::str::FromStr;
+        assert_eq!(SearchScope::from_str("tags"), Ok(SearchScope::Tags));
+        assert_eq!(SearchScope::from_str("TAGS"), Ok(SearchScope::Tags));
+        assert_eq!(SearchScope::from_str("Tags"), Ok(SearchScope::Tags));
+    }
+
+    /// Test: `SearchScope::from_str` parses "all" correctly.
+    #[rstest]
+    fn test_search_scope_from_str_all() {
+        use std::str::FromStr;
+        assert_eq!(SearchScope::from_str("all"), Ok(SearchScope::All));
+        assert_eq!(SearchScope::from_str("ALL"), Ok(SearchScope::All));
+        assert_eq!(SearchScope::from_str("All"), Ok(SearchScope::All));
+    }
+
+    /// Test: `SearchScope::from_str` returns error for unknown values.
+    #[rstest]
+    fn test_search_scope_from_str_unknown_returns_error() {
+        use std::str::FromStr;
+        let result = SearchScope::from_str("unknown");
+        assert!(result.is_err(), "Unknown value should return error");
+        assert!(
+            result
+                .unwrap_err()
+                .contains("Invalid search scope 'unknown'"),
+            "Error message should include the invalid value"
+        );
+    }
+
+    /// Test: `SearchScope::from_str` returns error for empty string.
+    #[rstest]
+    fn test_search_scope_from_str_empty_returns_error() {
+        use std::str::FromStr;
+        let result = SearchScope::from_str("");
+        assert!(result.is_err(), "Empty string should return error");
+    }
+
+    /// Test: `SearchScope` serde deserialization for valid values.
+    #[rstest]
+    fn test_search_scope_serde_deserialize_valid() {
+        let scope: SearchScope = serde_json::from_str("\"title\"").unwrap();
+        assert_eq!(scope, SearchScope::Title);
+
+        let scope: SearchScope = serde_json::from_str("\"tags\"").unwrap();
+        assert_eq!(scope, SearchScope::Tags);
+
+        let scope: SearchScope = serde_json::from_str("\"all\"").unwrap();
+        assert_eq!(scope, SearchScope::All);
+    }
+
+    /// Test: `SearchScope` serde deserialization returns error for unknown values.
+    #[rstest]
+    fn test_search_scope_serde_deserialize_unknown_returns_error() {
+        let result: Result<SearchScope, _> = serde_json::from_str("\"invalid\"");
+        assert!(result.is_err(), "Unknown value should return serde error");
+    }
+
+    // =========================================================================
+    // REQ-SEARCH-API-001: Search Result Order Stability Tests
+    // =========================================================================
+
+    /// Test: Same query returns results in stable order.
+    #[rstest]
+    fn test_search_result_order_is_stable() {
+        let tasks: PersistentVector<Task> = vec![
+            create_test_task("Task A", Priority::Low),
+            create_test_task("Task B", Priority::Medium),
+            create_test_task("Task C", Priority::High),
+        ]
+        .into_iter()
+        .collect();
+
+        let index = SearchIndex::build(&tasks);
+
+        // Run same search multiple times
+        let result1 = search_with_scope_indexed(&index, "", SearchScope::All);
+        let result2 = search_with_scope_indexed(&index, "", SearchScope::All);
+        let result3 = search_with_scope_indexed(&index, "", SearchScope::All);
+
+        // Extract task IDs for comparison
+        let ids1: Vec<_> = result1.tasks.iter().map(|t| t.task_id.clone()).collect();
+        let ids2: Vec<_> = result2.tasks.iter().map(|t| t.task_id.clone()).collect();
+        let ids3: Vec<_> = result3.tasks.iter().map(|t| t.task_id.clone()).collect();
+
+        assert_eq!(ids1, ids2, "Search results should be in stable order");
+        assert_eq!(ids2, ids3, "Search results should be in stable order");
+    }
+
+    /// Test: Search with keyword returns results in stable order.
+    #[rstest]
+    fn test_search_with_keyword_order_is_stable() {
+        let tasks: PersistentVector<Task> = vec![
+            create_test_task("Important meeting", Priority::High),
+            create_test_task("Important deadline", Priority::Critical),
+            create_test_task("Important review", Priority::Medium),
+        ]
+        .into_iter()
+        .collect();
+
+        let index = SearchIndex::build(&tasks);
+
+        // Run same search multiple times
+        let result1 = search_with_scope_indexed(&index, "important", SearchScope::Title);
+        let result2 = search_with_scope_indexed(&index, "important", SearchScope::Title);
+
+        let ids1: Vec<_> = result1.tasks.iter().map(|t| t.task_id.clone()).collect();
+        let ids2: Vec<_> = result2.tasks.iter().map(|t| t.task_id.clone()).collect();
+
+        assert_eq!(
+            ids1, ids2,
+            "Search results with keyword should be in stable order"
+        );
+    }
+
+    // =========================================================================
+    // REQ-SEARCH-API-001: Pagination Tests for Handler
+    // =========================================================================
+
+    /// Test: Default limit (50) is applied when limit is not specified.
+    #[rstest]
+    fn test_normalize_search_pagination_applies_default_limit() {
+        let (limit, offset) = normalize_search_pagination(None, None);
+        assert_eq!(limit, 50, "Default limit should be 50");
+        assert_eq!(offset, 0, "Default offset should be 0");
+    }
+
+    /// Test: Max limit (200) is applied when limit exceeds max.
+    #[rstest]
+    fn test_normalize_search_pagination_applies_max_limit() {
+        let (limit, offset) = normalize_search_pagination(Some(500), None);
+        assert_eq!(limit, 200, "Limit should be clamped to max 200");
+        assert_eq!(offset, 0, "Offset should be 0");
+    }
+
+    /// Test: Exact max limit (200) is allowed.
+    #[rstest]
+    fn test_normalize_search_pagination_allows_exact_max_limit() {
+        let (limit, offset) = normalize_search_pagination(Some(200), Some(10));
+        assert_eq!(limit, 200, "Exact max limit should be allowed");
+        assert_eq!(offset, 10, "Offset should be passed through");
+    }
+
+    /// Test: `limit=0` returns empty array (explicit user intent).
+    ///
+    /// When a user explicitly specifies `limit=0`, they want zero results.
+    /// This is a valid use case for checking total counts without fetching data.
+    #[rstest]
+    fn test_normalize_search_pagination_allows_limit_zero() {
+        let (limit, offset) = normalize_search_pagination(Some(0), Some(10));
+        assert_eq!(limit, 0, "Limit 0 should be allowed (returns empty array)");
+        assert_eq!(offset, 10, "Offset should still be passed through");
+    }
+
+    /// Test: `limit=0` effectively returns empty result when applied to search.
+    #[rstest]
+    fn test_search_with_limit_zero_returns_empty() {
+        let tasks: PersistentVector<Task> = vec![
+            create_test_task("Task A", Priority::Low),
+            create_test_task("Task B", Priority::Medium),
+        ]
+        .into_iter()
+        .collect();
+
+        let index = SearchIndex::build(&tasks);
+        let results = search_with_scope_indexed(&index, "", SearchScope::All);
+
+        // Verify we have results before pagination
+        assert!(
+            !results.tasks.is_empty(),
+            "Should have results before pagination"
+        );
+
+        // Simulate handler's pagination application with limit=0
+        let count = results.into_tasks().iter().take(0).count();
+
+        assert_eq!(count, 0, "limit=0 should return empty array");
+    }
+
+    // =========================================================================
+    // REQ-SEARCH-API-001: Search Deterministic Order with Limit/Offset Tests
+    // =========================================================================
+
+    /// Test: Search with limit/offset returns same results across multiple calls.
+    ///
+    /// This is a law-like property test ensuring deterministic ordering.
+    #[rstest]
+    fn test_search_deterministic_order_with_limit_offset() {
+        let tasks: PersistentVector<Task> = vec![
+            create_test_task("Task A", Priority::Low),
+            create_test_task("Task B", Priority::Medium),
+            create_test_task("Task C", Priority::High),
+            create_test_task("Task D", Priority::Critical),
+            create_test_task("Task E", Priority::Low),
+        ]
+        .into_iter()
+        .collect();
+
+        let index = SearchIndex::build(&tasks);
+
+        // First search with limit=2, offset=1
+        let result1 = search_with_scope_indexed(&index, "", SearchScope::All);
+        let paginated1: Vec<_> = result1
+            .into_tasks()
+            .iter()
+            .skip(1)
+            .take(2)
+            .map(|t| t.task_id.clone())
+            .collect();
+
+        // Second search with same parameters
+        let result2 = search_with_scope_indexed(&index, "", SearchScope::All);
+        let paginated2: Vec<_> = result2
+            .into_tasks()
+            .iter()
+            .skip(1)
+            .take(2)
+            .map(|t| t.task_id.clone())
+            .collect();
+
+        assert_eq!(
+            paginated1, paginated2,
+            "Search with limit/offset should return same results in same order"
+        );
+    }
+
+    /// Test: Empty query with limit/offset returns correct subset.
+    /// Results are ordered by `task_id`, so we verify that pagination works correctly
+    /// regardless of the specific order (which depends on UUIDs).
+    #[rstest]
+    fn test_search_empty_query_with_limit_offset() {
+        let tasks: PersistentVector<Task> = vec![
+            create_test_task("Task A", Priority::Low),
+            create_test_task("Task B", Priority::Medium),
+            create_test_task("Task C", Priority::High),
+        ]
+        .into_iter()
+        .collect();
+
+        let index = SearchIndex::build(&tasks);
+        let results = search_with_scope_indexed(&index, "", SearchScope::All);
+
+        // All tasks should be returned for empty query
+        assert_eq!(
+            results.tasks.len(),
+            3,
+            "Empty query should return all tasks"
+        );
+
+        // Get the ordered task titles
+        let all_titles: Vec<_> = results.tasks.iter().map(|t| t.title.clone()).collect();
+
+        // Apply pagination (limit=2, offset=1)
+        let paginated: Vec<_> = results
+            .into_tasks()
+            .iter()
+            .skip(1)
+            .take(2)
+            .cloned()
+            .collect();
+
+        assert_eq!(paginated.len(), 2, "Should return 2 tasks after pagination");
+        // Verify pagination returns the correct subset based on task_id order
+        assert_eq!(paginated[0].title, all_titles[1]);
+        assert_eq!(paginated[1].title, all_titles[2]);
+    }
+
+    /// Test: Search with keyword and limit/offset.
+    /// Results are ordered by `task_id`, so we verify that pagination works correctly
+    /// regardless of the specific order (which depends on UUIDs).
+    #[rstest]
+    fn test_search_with_keyword_applies_limit_offset() {
+        let tasks: PersistentVector<Task> = vec![
+            create_test_task("Important meeting A", Priority::High),
+            create_test_task("Important meeting B", Priority::Critical),
+            create_test_task("Important meeting C", Priority::Medium),
+            create_test_task("Other task", Priority::Low),
+        ]
+        .into_iter()
+        .collect();
+
+        let index = SearchIndex::build(&tasks);
+        let results = search_with_scope_indexed(&index, "important", SearchScope::Title);
+
+        // Should find 3 tasks containing "important"
+        assert_eq!(results.tasks.len(), 3, "Should find 3 matching tasks");
+
+        // Get the ordered task titles
+        let all_titles: Vec<_> = results.tasks.iter().map(|t| t.title.clone()).collect();
+
+        // Apply pagination (limit=1, offset=1)
+        let paginated: Vec<_> = results
+            .into_tasks()
+            .iter()
+            .skip(1)
+            .take(1)
+            .cloned()
+            .collect();
+
+        assert_eq!(paginated.len(), 1, "Should return 1 task after pagination");
+        assert_eq!(
+            paginated[0].title, all_titles[1],
+            "Should return second matching task"
+        );
+    }
+
+    // =========================================================================
+    // REQ-SEARCH-API-001: SearchScope Error Message Tests
+    // =========================================================================
+
+    /// Test: `SearchScope::from_str` error message includes valid options.
+    #[rstest]
+    fn test_search_scope_error_message_includes_valid_options() {
+        use std::str::FromStr;
+        let result = SearchScope::from_str("invalid");
+        assert!(result.is_err());
+        let error_message = result.unwrap_err();
+        assert!(
+            error_message.contains("title"),
+            "Error should mention 'title' as valid option"
+        );
+        assert!(
+            error_message.contains("tags"),
+            "Error should mention 'tags' as valid option"
+        );
+        assert!(
+            error_message.contains("all"),
+            "Error should mention 'all' as valid option"
+        );
+    }
+
+    /// Test: Serde deserialization error for invalid scope.
+    ///
+    /// This verifies that serde correctly propagates the error when
+    /// an invalid `in` parameter is provided in the query string.
+    #[rstest]
+    fn test_search_tasks_query_invalid_scope_deserialize() {
+        // Simulate deserializing a query string with invalid scope
+        let json = r#"{"q": "test", "in": "invalid"}"#;
+        let result: Result<SearchTasksQuery, _> = serde_json::from_str(json);
+
+        assert!(result.is_err(), "Invalid scope should fail deserialization");
+        let error_message = result.unwrap_err().to_string();
+        assert!(
+            error_message.contains("Invalid search scope"),
+            "Error should contain 'Invalid search scope': {error_message}"
+        );
+    }
+
+    /// Test: Default scope is applied when `in` is omitted.
+    #[rstest]
+    fn test_search_tasks_query_default_scope() {
+        let json = r#"{"q": "test"}"#;
+        let query: SearchTasksQuery = serde_json::from_str(json).unwrap();
+
+        assert_eq!(query.q, "test");
+        assert_eq!(query.scope, SearchScope::All, "Default scope should be All");
+        assert!(query.limit.is_none(), "Default limit should be None");
+        assert!(query.offset.is_none(), "Default offset should be None");
+    }
+
+    // =========================================================================
+    // Phase 1 Codex Review Fix: Multi-word Infix Match Tests
+    // =========================================================================
+
+    /// Regression test: "meeting tomorrow" should match "important meeting tomorrow".
+    /// This tests the `title_full_all_suffix_index` for multi-word infix queries.
+    #[rstest]
+    fn test_search_multi_word_infix_match() {
+        let tasks: PersistentVector<Task> = vec![
+            create_test_task("important meeting tomorrow", Priority::High),
+            create_test_task("urgent review today", Priority::Medium),
+            create_test_task("meeting later", Priority::Low),
+        ]
+        .into_iter()
+        .collect();
+
+        let index = SearchIndex::build(&tasks);
+        let result = index.search_by_title("meeting tomorrow");
+
+        // "meeting tomorrow" should match "important meeting tomorrow"
+        assert!(
+            result.is_some(),
+            "Query 'meeting tomorrow' should match 'important meeting tomorrow'"
+        );
+        let result = result.unwrap();
+        assert_eq!(
+            result.tasks.len(),
+            1,
+            "Only the task with 'meeting tomorrow' should match"
+        );
+        assert!(
+            result
+                .tasks
+                .iter()
+                .any(|t| t.title.contains("important meeting tomorrow"))
+        );
+    }
+
+    /// Regression test: Multi-word infix with partial word match.
+    /// "eeting tomorr" should match "important meeting tomorrow".
+    #[rstest]
+    fn test_search_multi_word_infix_partial_match() {
+        let tasks: PersistentVector<Task> = vec![
+            create_test_task("important meeting tomorrow", Priority::High),
+            create_test_task("Other task", Priority::Low),
+        ]
+        .into_iter()
+        .collect();
+
+        let index = SearchIndex::build(&tasks);
+        let result = index.search_by_title("eeting tomorr");
+
+        // "eeting tomorr" appears in the middle of "important m[eeting tomorr]ow"
+        assert!(
+            result.is_some(),
+            "Query 'eeting tomorr' should match 'important meeting tomorrow'"
+        );
+        let result = result.unwrap();
+        assert_eq!(result.tasks.len(), 1);
+    }
+
+    /// Regression test: Multi-word query at the end of title.
+    /// "code review" should match "weekly code review".
+    #[rstest]
+    fn test_search_multi_word_suffix_match() {
+        let tasks: PersistentVector<Task> = vec![
+            create_test_task("weekly code review", Priority::High),
+            create_test_task("code update", Priority::Medium),
+        ]
+        .into_iter()
+        .collect();
+
+        let index = SearchIndex::build(&tasks);
+        let result = index.search_by_title("code review");
+
+        // "code review" should match "weekly code review"
+        assert!(
+            result.is_some(),
+            "Query 'code review' should match 'weekly code review'"
+        );
+        let result = result.unwrap();
+        assert_eq!(
+            result.tasks.len(),
+            1,
+            "Only 'weekly code review' should match"
+        );
+        assert!(result.tasks.iter().any(|t| t.title.contains("code review")));
+    }
+
+    /// Regression test: Complex multi-word infix with multiple matching tasks.
+    #[rstest]
+    fn test_search_multi_word_infix_multiple_matches() {
+        let tasks: PersistentVector<Task> = vec![
+            create_test_task("urgent meeting tomorrow morning", Priority::High),
+            create_test_task("important meeting tomorrow afternoon", Priority::Medium),
+            create_test_task("casual meeting later", Priority::Low),
+        ]
+        .into_iter()
+        .collect();
+
+        let index = SearchIndex::build(&tasks);
+        let result = index.search_by_title("meeting tomorrow");
+
+        // "meeting tomorrow" should match both tasks containing this substring
+        assert!(result.is_some());
+        let result = result.unwrap();
+        assert_eq!(
+            result.tasks.len(),
+            2,
+            "Both tasks with 'meeting tomorrow' should match"
+        );
+    }
+
+    // =========================================================================
+    // Phase 1 Codex Review Fix: Order Stability Tests
+    // =========================================================================
+
+    /// Regression test: Result order should be stable regardless of repository input order.
+    /// Since ordering is by `task_id` only, results should be identical
+    /// regardless of the order in which tasks were added to the index.
+    #[rstest]
+    fn test_search_order_stable_regardless_of_input_order() {
+        // Create tasks with different task_ids (UUIDs are generated, so each run has unique IDs)
+        let task1 = create_test_task("Important task A", Priority::High);
+        let task2 = create_test_task("Important task B", Priority::Medium);
+        let task3 = create_test_task("Important task C", Priority::Low);
+
+        // Build index with tasks in one order
+        let tasks_order1: PersistentVector<Task> =
+            vec![task1.clone(), task2.clone(), task3.clone()]
+                .into_iter()
+                .collect();
+        let index1 = SearchIndex::build(&tasks_order1);
+
+        // Build index with tasks in a different order
+        let tasks_order2: PersistentVector<Task> = vec![task3, task1, task2].into_iter().collect();
+        let index2 = SearchIndex::build(&tasks_order2);
+
+        // Search both indexes
+        let result1 = index1
+            .search_by_title("important")
+            .map(|r| {
+                r.tasks
+                    .iter()
+                    .map(|t| t.task_id.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let result2 = index2
+            .search_by_title("important")
+            .map(|r| {
+                r.tasks
+                    .iter()
+                    .map(|t| t.task_id.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        // Results should be identical (no sorting needed since task_id ordering is deterministic)
+        assert_eq!(
+            result1, result2,
+            "Same tasks should be found in the same order regardless of input order"
+        );
+    }
+
+    /// Test: Results are ordered by `task_id` for deterministic ordering.
+    #[rstest]
+    fn test_search_order_uses_task_id_for_stable_ordering() {
+        let task1 = create_test_task("Important task", Priority::High);
+        let task2 = create_test_task("Important task", Priority::Medium);
+
+        // Capture task IDs before moving tasks into vector
+        let task1_id = task1.task_id.clone();
+        let task2_id = task2.task_id.clone();
+
+        let tasks: PersistentVector<Task> = vec![task1, task2].into_iter().collect();
+
+        let index = SearchIndex::build(&tasks);
+
+        // Run search multiple times
+        let results: Vec<Vec<TaskId>> = (0..10)
+            .map(|_| {
+                index
+                    .search_by_title("important")
+                    .map(|r| r.tasks.iter().map(|t| t.task_id.clone()).collect())
+                    .unwrap_or_default()
+            })
+            .collect();
+
+        // All iterations should return the same order
+        for i in 1..results.len() {
+            assert_eq!(
+                results[0], results[i],
+                "Search results should be stable across multiple calls"
+            );
+        }
+
+        // Verify results are sorted by task_id
+        let expected_order: Vec<TaskId> = {
+            let mut ids = vec![task1_id, task2_id];
+            ids.sort();
+            ids
+        };
+        assert_eq!(
+            results[0], expected_order,
+            "Results should be ordered by task_id"
+        );
+    }
+
+    /// Test: `all_tasks` returns tasks in stable order.
+    #[rstest]
+    fn test_all_tasks_returns_stable_order() {
+        let task1 = create_test_task("Task 1", Priority::High);
+        let task2 = create_test_task("Task 2", Priority::Medium);
+        let task3 = create_test_task("Task 3", Priority::Low);
+
+        let tasks: PersistentVector<Task> = vec![task1, task2, task3].into_iter().collect();
+
+        let index = SearchIndex::build(&tasks);
+
+        // Get all tasks multiple times
+        let results: Vec<Vec<TaskId>> = (0..5)
+            .map(|_| {
+                index
+                    .all_tasks()
+                    .iter()
+                    .map(|t| t.task_id.clone())
+                    .collect()
+            })
+            .collect();
+
+        // All iterations should return the same order
+        for i in 1..results.len() {
+            assert_eq!(
+                results[0], results[i],
+                "all_tasks should return stable order"
+            );
+        }
+    }
+
+    // =========================================================================
+    // Phase 1 Final: All Scope Mixed Results Order Stability Test
+    // =========================================================================
+
+    /// Test: All scope search with mixed title and tag matches returns stable order.
+    ///
+    /// This test verifies that when searching with `SearchScope::All`:
+    /// 1. Tasks matching only title, only tag, and both are all returned
+    /// 2. Results are in stable order across multiple searches (directly compared, not sorted)
+    /// 3. Title matches appear before tag-only matches (by design via `Semigroup::combine`)
+    ///
+    /// This is a critical property for pagination consistency.
+    ///
+    /// Note: Within each category (title matches and tag matches), results are sorted
+    /// by `task_id` for stable ordering. The `Semigroup::combine` then merges them
+    /// with title matches first, followed by tag-only matches (deduplicated).
+    #[rstest]
+    fn test_search_all_scope_mixed_results_stable_order() {
+        // Create tasks with different match patterns:
+        // - title_only_match: matches "important" in title only
+        // - tag_only_match: matches "important" in tag only
+        // - both_match: matches "important" in both title and tag
+        // - no_match: does not match "important"
+        let title_only_match = create_test_task("Important meeting", Priority::High);
+        let tag_only_match =
+            create_test_task_with_tags("Regular task", Priority::Medium, &["important"]);
+        let both_match =
+            create_test_task_with_tags("Important deadline", Priority::Critical, &["important"]);
+        let no_match = create_test_task("Unrelated task", Priority::Low);
+
+        // Capture task IDs for verification
+        let title_only_id = title_only_match.task_id.clone();
+        let tag_only_id = tag_only_match.task_id.clone();
+        let both_match_id = both_match.task_id.clone();
+
+        // Build index with tasks in a specific order
+        let tasks: PersistentVector<Task> =
+            vec![no_match, tag_only_match, both_match, title_only_match]
+                .into_iter()
+                .collect();
+
+        let index = SearchIndex::build(&tasks);
+
+        // Run the same search multiple times (5 times to ensure stability)
+        let results: Vec<Vec<TaskId>> = (0..5)
+            .map(|_| {
+                search_with_scope_indexed(&index, "important", SearchScope::All)
+                    .tasks
+                    .iter()
+                    .map(|t| t.task_id.clone())
+                    .collect()
+            })
+            .collect();
+
+        // Verify that all matching tasks are returned
+        assert_eq!(
+            results[0].len(),
+            3,
+            "Should find all 3 tasks matching 'important' (title, tag, or both)"
+        );
+
+        // Verify that all expected task IDs are present
+        assert!(
+            results[0].contains(&title_only_id),
+            "Should include title-only match"
+        );
+        assert!(
+            results[0].contains(&tag_only_id),
+            "Should include tag-only match"
+        );
+        assert!(
+            results[0].contains(&both_match_id),
+            "Should include both-match task"
+        );
+
+        // CRITICAL: Verify that the order is stable across all searches
+        // This is the main purpose of this test - ensuring pagination consistency
+        for (iteration, result) in results.iter().enumerate().skip(1) {
+            assert_eq!(
+                &results[0], result,
+                "Search iteration {} returned different order than iteration 0. \
+                 Expected: {:?}, Got: {:?}",
+                iteration, results[0], result
+            );
+        }
+
+        // Verify that tag-only match appears after title matches
+        // (title matches are prioritized via Semigroup::combine)
+        let tag_only_position = results[0]
+            .iter()
+            .position(|id| id == &tag_only_id)
+            .expect("tag_only_id should be in results");
+        let title_only_position = results[0]
+            .iter()
+            .position(|id| id == &title_only_id)
+            .expect("title_only_id should be in results");
+        let both_match_position = results[0]
+            .iter()
+            .position(|id| id == &both_match_id)
+            .expect("both_match_id should be in results");
+
+        // both_match and title_only_match are title matches, so they should appear before tag_only_match
+        assert!(
+            tag_only_position > title_only_position.min(both_match_position),
+            "Tag-only match should appear after at least one title match. \
+             tag_only_position: {tag_only_position}, title_only_position: {title_only_position}, both_match_position: {both_match_position}"
         );
     }
 }
