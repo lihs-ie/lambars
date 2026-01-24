@@ -39,7 +39,9 @@ pub use bulk::{bulk_create_tasks, bulk_update_tasks};
 pub use dto::{CreateTaskRequest, TaskResponse, UpdateTaskRequest};
 pub use effects::{execute_state_workflow, execute_workflow, update_with_optics};
 pub use error::{ApiError, ApiErrorResponse, FieldError, ValidationError};
-pub use handlers::{AppConfig, AppState, HealthResponse, create_task, get_task, health_check};
+pub use handlers::{
+    AppConfig, AppState, HealthResponse, create_task, delete_task, get_task, health_check,
+};
 pub use misc::{
     aggregate_numeric, concurrent_lazy, deque_operations, freer_workflow, partial_apply,
 };

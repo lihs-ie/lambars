@@ -29,7 +29,7 @@ use task_management_benchmark_api::api::{
     async_pipeline, batch_process_async, batch_transform_results, batch_update_field,
     build_from_parts, bulk_create_tasks, bulk_update_tasks, collect_optional, compute_parallel,
     concurrent_lazy, conditional_pipeline, convert_error_domain, count_by_priority,
-    create_project_handler, create_task, create_task_eff, dashboard, deque_operations,
+    create_project_handler, create_task, create_task_eff, dashboard, delete_task, deque_operations,
     enrich_batch, enrich_error, execute_sequential, execute_state_workflow, execute_workflow,
     fetch_batch, filter_conditional, first_available, flatten_demo, flatten_subtasks,
     freer_workflow, functor_mut_demo, get_project_handler, get_project_progress_handler,
@@ -88,8 +88,17 @@ async fn main() {
         }
     };
 
-    // Create application state
-    let application_state = AppState::from_repositories(repositories);
+    // Create application state (async: initializes search index from repository)
+    let application_state = match AppState::from_repositories(repositories).await {
+        Ok(state) => {
+            tracing::info!("Application state initialized with search index");
+            state
+        }
+        Err(error) => {
+            tracing::error!("Failed to initialize application state: {}", error);
+            std::process::exit(1);
+        }
+    };
 
     // Configure CORS
     let cors = CorsLayer::new()
@@ -107,7 +116,10 @@ async fn main() {
         .route("/tasks/by-priority", get(count_by_priority))
         // Task mutations
         .route("/tasks-eff", post(create_task_eff))
-        .route("/tasks/{id}", get(get_task).put(update_task))
+        .route(
+            "/tasks/{id}",
+            get(get_task).put(update_task).delete(delete_task),
+        )
         .route("/tasks/{id}/status", patch(update_status))
         .route("/tasks/{id}/subtasks", post(add_subtask))
         .route("/tasks/{id}/tags", post(add_tag))

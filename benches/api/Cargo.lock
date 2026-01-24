@@ -2357,6 +2357,7 @@ dependencies = [
 name = "task-management-benchmark-api"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "axum",
  "chrono",
  "deadpool-redis",

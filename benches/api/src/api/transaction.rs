@@ -30,6 +30,7 @@ use super::dto::{
 };
 use super::error::{ApiErrorResponse, ValidationError};
 use super::handlers::AppState;
+use super::query::TaskChange;
 use crate::domain::{SubTask, SubTaskId, Tag, Task, TaskId, TaskStatus, Timestamp};
 
 // =============================================================================
@@ -432,7 +433,7 @@ pub async fn update_task(
     let task_id = TaskId::from_uuid(path.id);
 
     // Fetch existing task
-    let task = state
+    let old_task = state
         .task_repository
         .find_by_id(&task_id)
         .run_async()
@@ -441,9 +442,9 @@ pub async fn update_task(
         .ok_or_else(|| ApiErrorResponse::not_found(format!("Task {task_id} not found")))?;
 
     // Check version (optimistic locking)
-    if task.version != request.version {
+    if old_task.version != request.version {
         let expected = request.version;
-        let found = task.version;
+        let found = old_task.version;
         return Err(ApiErrorResponse::conflict(format!(
             "Expected version {expected}, found {found}"
         )));
@@ -453,7 +454,7 @@ pub async fn update_task(
     let now = Timestamp::now();
 
     // Validate and apply updates using Lens (pure function)
-    let updated_task = apply_updates_with_lens(task, &request, now)?;
+    let updated_task = apply_updates_with_lens(old_task.clone(), &request, now)?;
 
     // Build response before save (save returns ())
     let response = TaskResponse::from(&updated_task);
@@ -465,6 +466,12 @@ pub async fn update_task(
         .run_async()
         .await
         .map_err(ApiErrorResponse::from)?;
+
+    // Update search index with the task change (lock-free write)
+    state.update_search_index(TaskChange::Update {
+        old: old_task,
+        new: updated_task,
+    });
 
     Ok((StatusCode::OK, Json(response)))
 }
@@ -598,7 +605,7 @@ pub async fn update_status(
     let task_id = TaskId::from_uuid(path.id);
 
     // Fetch existing task
-    let task = state
+    let old_task = state
         .task_repository
         .find_by_id(&task_id)
         .run_async()
@@ -607,9 +614,9 @@ pub async fn update_status(
         .ok_or_else(|| ApiErrorResponse::not_found(format!("Task {task_id} not found")))?;
 
     // Check version
-    if task.version != request.version {
+    if old_task.version != request.version {
         let expected = request.version;
-        let found = task.version;
+        let found = old_task.version;
         return Err(ApiErrorResponse::conflict(format!(
             "Expected version {expected}, found {found}"
         )));
@@ -620,17 +627,17 @@ pub async fn update_status(
 
     // Validate and apply status transition (pure function)
     let new_status = TaskStatus::from(request.status);
-    let transition_result = validate_status_transition(task.status, new_status);
+    let transition_result = validate_status_transition(old_task.status, new_status);
 
     // Handle transition result
     match transition_result {
         Either::Right(StatusTransitionResult::NoChange) => {
             // Same status - no update needed (no-op), return current task
-            Ok((StatusCode::OK, Json(TaskResponse::from(&task))))
+            Ok((StatusCode::OK, Json(TaskResponse::from(&old_task))))
         }
         Either::Right(StatusTransitionResult::Transition(valid_status)) => {
             // Apply status update using pure function
-            let updated_task = apply_status_update(task, valid_status, now);
+            let updated_task = apply_status_update(old_task.clone(), valid_status, now);
 
             // Build response before save (save returns ())
             let response = TaskResponse::from(&updated_task);
@@ -642,6 +649,12 @@ pub async fn update_status(
                 .run_async()
                 .await
                 .map_err(ApiErrorResponse::from)?;
+
+            // Update search index with the task change (lock-free write)
+            state.update_search_index(TaskChange::Update {
+                old: old_task,
+                new: updated_task,
+            });
 
             Ok((StatusCode::OK, Json(response)))
         }
@@ -770,7 +783,7 @@ pub async fn add_subtask(
     let title: String = Result::from(mapped)?;
 
     // Fetch existing task
-    let task = state
+    let old_task = state
         .task_repository
         .find_by_id(&task_id)
         .run_async()
@@ -779,9 +792,9 @@ pub async fn add_subtask(
         .ok_or_else(|| ApiErrorResponse::not_found(format!("Task {task_id} not found")))?;
 
     // Check version (optimistic locking)
-    if task.version != request.version {
+    if old_task.version != request.version {
         let expected = request.version;
-        let found = task.version;
+        let found = old_task.version;
         return Err(ApiErrorResponse::conflict(format!(
             "Expected version {expected}, found {found}"
         )));
@@ -794,7 +807,7 @@ pub async fn add_subtask(
     let subtask = SubTask::new(SubTaskId::generate(), title);
 
     // Apply updates using pure function
-    let updated_task = apply_subtask_update(task, subtask, now);
+    let updated_task = apply_subtask_update(old_task.clone(), subtask, now);
 
     // Build response before save (save returns ())
     let response = TaskResponse::from(&updated_task);
@@ -806,6 +819,14 @@ pub async fn add_subtask(
         .run_async()
         .await
         .map_err(ApiErrorResponse::from)?;
+
+    // Update search index with the task change (lock-free write)
+    // Note: Subtasks don't affect search index directly since we only index title/tags,
+    // but we update it to keep the tasks_by_id map synchronized.
+    state.update_search_index(TaskChange::Update {
+        old: old_task,
+        new: updated_task,
+    });
 
     Ok((StatusCode::CREATED, Json(response)))
 }
@@ -884,7 +905,7 @@ pub async fn add_tag(
     })?;
 
     // Fetch existing task
-    let task = state
+    let old_task = state
         .task_repository
         .find_by_id(&task_id)
         .run_async()
@@ -893,9 +914,9 @@ pub async fn add_tag(
         .ok_or_else(|| ApiErrorResponse::not_found(format!("Task {task_id} not found")))?;
 
     // Check version (optimistic locking)
-    if task.version != request.version {
+    if old_task.version != request.version {
         let expected = request.version;
-        let found = task.version;
+        let found = old_task.version;
         return Err(ApiErrorResponse::conflict(format!(
             "Expected version {expected}, found {found}"
         )));
@@ -905,7 +926,7 @@ pub async fn add_tag(
     let now = Timestamp::now();
 
     // Apply updates using pure function
-    let updated_task = apply_tag_update(task, tag, now);
+    let updated_task = apply_tag_update(old_task.clone(), tag, now);
 
     // Build response before save (save returns ())
     let response = TaskResponse::from(&updated_task);
@@ -917,6 +938,13 @@ pub async fn add_tag(
         .run_async()
         .await
         .map_err(ApiErrorResponse::from)?;
+
+    // Update search index with the task change (lock-free write)
+    // Tags are indexed, so this update is necessary for search consistency.
+    state.update_search_index(TaskChange::Update {
+        old: old_task,
+        new: updated_task,
+    });
 
     Ok((StatusCode::OK, Json(response)))
 }

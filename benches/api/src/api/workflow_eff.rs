@@ -34,6 +34,7 @@ use super::dto::{
 };
 use super::error::ApiErrorResponse;
 use super::handlers::AppState;
+use super::query::TaskChange;
 use crate::domain::{Priority, Tag, Task, TaskId, Timestamp};
 use crate::infrastructure::TaskRepository;
 
@@ -87,8 +88,12 @@ pub async fn create_task_eff(
     State(state): State<AppState>,
     Json(request): Json<CreateTaskRequest>,
 ) -> Result<(StatusCode, Json<TaskResponse>), ApiErrorResponse> {
+    // Clone task_repository before the closure to avoid partial move of state
+    let task_repository = state.task_repository.clone();
+
     // Build the effect pipeline using eff_async! macro
-    let effect: HandlerEffect<TaskResponse> = eff_async! {
+    // Returns (TaskResponse, Task) to enable search index update after success
+    let effect: HandlerEffect<(TaskResponse, Task)> = eff_async! {
         // Step 1: Validate request (may fail with ApiErrorResponse)
         validated <= validate_request_eff(&request);
 
@@ -102,15 +107,19 @@ pub async fn create_task_eff(
         let response = TaskResponse::from(&task);
 
         // Step 5: Save to repository (may fail with ApiErrorResponse)
-        _ <= save_task_eff(state.task_repository.clone(), task);
+        _ <= save_task_eff(task_repository.clone(), task.clone());
 
-        // Return success
-        ExceptT::pure_async_io(response)
+        // Return both response and task for search index update
+        ExceptT::pure_async_io((response, task))
     };
 
     // Execute the effect and convert to HTTP response
     match effect.run_async().await {
-        Ok(response) => Ok((StatusCode::CREATED, Json(response))),
+        Ok((response, task)) => {
+            // Step 6: Update search index with the new task (lock-free write via RCU)
+            state.update_search_index(TaskChange::Add(task));
+            Ok((StatusCode::CREATED, Json(response)))
+        }
         Err(error) => Err(error),
     }
 }

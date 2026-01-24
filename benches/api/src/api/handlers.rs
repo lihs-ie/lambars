@@ -17,20 +17,25 @@
 
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use axum::{
     Json,
     extract::{Path, State},
     http::StatusCode,
 };
 use lambars::control::Either;
+use lambars::persistent::PersistentVector;
 use uuid::Uuid;
 
 use super::dto::{
     CreateTaskRequest, TaskResponse, validate_description, validate_tags, validate_title,
 };
 use super::error::ApiErrorResponse;
+use super::query::{SearchIndex, TaskChange};
 use crate::domain::{Priority, Tag, Task, TaskId, Timestamp};
-use crate::infrastructure::{EventStore, ProjectRepository, Repositories, TaskRepository};
+use crate::infrastructure::{
+    EventStore, Pagination, ProjectRepository, Repositories, TaskRepository,
+};
 
 // =============================================================================
 // Application Configuration
@@ -71,6 +76,15 @@ impl Default for AppConfig {
 /// Uses trait objects (`dyn`) instead of generics to work seamlessly with
 /// the `RepositoryFactory` which returns trait objects. This design allows
 /// runtime selection of repository backends (in-memory, `PostgreSQL`, Redis).
+///
+/// # Search Index
+///
+/// The `search_index` field holds an immutable `SearchIndex` wrapped in `ArcSwap`.
+/// This allows lock-free reads during search operations while supporting
+/// atomic updates when tasks are created/updated/deleted.
+///
+/// - **Read**: `state.search_index.load()` returns a `Guard<Arc<SearchIndex>>`
+/// - **Write**: `state.search_index.store(Arc::new(new_index))` atomically replaces the index
 #[derive(Clone)]
 pub struct AppState {
     /// Task repository for persistence.
@@ -81,6 +95,11 @@ pub struct AppState {
     pub event_store: Arc<dyn EventStore + Send + Sync>,
     /// Application configuration.
     pub config: AppConfig,
+    /// Search index for task search (lock-free reads via `ArcSwap`).
+    ///
+    /// This index is built once at startup and updated incrementally
+    /// when tasks are created, updated, or deleted.
+    pub search_index: Arc<ArcSwap<SearchIndex>>,
 }
 
 impl AppState {
@@ -88,25 +107,79 @@ impl AppState {
     ///
     /// This constructor takes ownership of the `Repositories` struct returned
     /// by `RepositoryFactory::create()`.
-    #[must_use]
-    pub fn from_repositories(repositories: Repositories) -> Self {
-        Self {
-            task_repository: repositories.task_repository,
-            project_repository: repositories.project_repository,
-            event_store: repositories.event_store,
-            config: AppConfig::default(),
-        }
+    ///
+    /// # Note
+    ///
+    /// This is an async function because it needs to fetch all tasks from the
+    /// repository to build the initial search index. The index is built once
+    /// at startup and updated incrementally thereafter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the task repository fails to list tasks.
+    pub async fn from_repositories(
+        repositories: Repositories,
+    ) -> Result<Self, crate::infrastructure::RepositoryError> {
+        Self::with_config(repositories, AppConfig::default()).await
     }
 
     /// Creates a new `AppState` from repositories and custom configuration.
-    #[must_use]
-    pub fn with_config(repositories: Repositories, config: AppConfig) -> Self {
-        Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the task repository fails to list tasks.
+    pub async fn with_config(
+        repositories: Repositories,
+        config: AppConfig,
+    ) -> Result<Self, crate::infrastructure::RepositoryError> {
+        // Fetch all tasks to build the initial search index
+        let all_tasks = repositories
+            .task_repository
+            .list(Pagination::all())
+            .run_async()
+            .await?;
+
+        // Build the search index from all tasks (pure function)
+        let tasks: PersistentVector<Task> = all_tasks.items.into_iter().collect();
+        let search_index = SearchIndex::build(&tasks);
+
+        Ok(Self {
             task_repository: repositories.task_repository,
             project_repository: repositories.project_repository,
             event_store: repositories.event_store,
             config,
-        }
+            search_index: Arc::new(ArcSwap::from_pointee(search_index)),
+        })
+    }
+
+    /// Updates the search index with a task change.
+    ///
+    /// This method atomically replaces the search index with a new version
+    /// that reflects the given change using Read-Copy-Update (RCU) pattern.
+    /// The RCU pattern ensures that concurrent updates are handled correctly
+    /// through CAS (Compare-And-Swap) retry, preventing lost updates.
+    ///
+    /// # Arguments
+    ///
+    /// * `change` - The task change to apply (Add, Update, or Remove).
+    ///   Takes ownership because `rcu` may retry the closure multiple times,
+    ///   requiring the change to be cloned on each retry.
+    ///
+    /// # Concurrency
+    ///
+    /// The `rcu` method provides atomic updates:
+    /// 1. Read current value
+    /// 2. Apply transformation (copy with modification)
+    /// 3. Attempt CAS to replace the old value
+    /// 4. If CAS fails (another thread updated), retry from step 1
+    ///
+    /// This ensures no updates are lost even under concurrent modifications.
+    #[allow(clippy::needless_pass_by_value)] // Ownership needed for rcu retry via clone
+    pub fn update_search_index(&self, change: TaskChange) {
+        self.search_index.rcu(|current| {
+            let updated = current.apply_change(change.clone());
+            Arc::new(updated)
+        });
     }
 }
 
@@ -177,6 +250,9 @@ pub async fn create_task(
         .run_async()
         .await
         .map_err(ApiErrorResponse::from)?;
+
+    // Step 4: Update search index with the new task (lock-free write)
+    state.update_search_index(TaskChange::Add(task));
 
     Ok((StatusCode::CREATED, Json(response)))
 }
@@ -358,6 +434,69 @@ where
 }
 
 // =============================================================================
+// DELETE /tasks/{id} Handler
+// =============================================================================
+
+/// Deletes a task by its ID.
+///
+/// This handler demonstrates the use of:
+/// - **Either**: Lifting `Option<Task>` to `Either<ApiErrorResponse, Task>`
+/// - **Pattern matching**: Functional error handling without exceptions
+/// - **`AsyncIO`**: Encapsulating repository side effects
+/// - **Search index update**: Incremental index maintenance via RCU
+///
+/// # Path Parameters
+///
+/// * `id` - The UUID of the task to delete
+///
+/// # Response
+///
+/// - **204 No Content**: Task deleted successfully
+/// - **404 Not Found**: Task with the given ID does not exist
+/// - **500 Internal Server Error**: Database error
+///
+/// # Errors
+///
+/// Returns [`ApiErrorResponse`] in the following cases:
+/// - Not found error (404 Not Found): Task does not exist
+/// - Database error (500 Internal Server Error): Repository operation failed
+///
+/// # Search Index
+///
+/// On successful deletion, the search index is updated atomically using the
+/// RCU (Read-Copy-Update) pattern to remove the deleted task. This ensures
+/// that search results are consistent with the actual data store.
+#[allow(clippy::future_not_send)]
+pub async fn delete_task(
+    State(state): State<AppState>,
+    Path(task_id): Path<Uuid>,
+) -> Result<StatusCode, ApiErrorResponse> {
+    // Step 1: Convert Uuid to TaskId (pure)
+    let task_id = TaskId::from_uuid(task_id);
+
+    // Step 2: Delete from repository using AsyncIO
+    // The delete operation returns true if the task was found and deleted
+    let deleted = state
+        .task_repository
+        .delete(&task_id)
+        .run_async()
+        .await
+        .map_err(ApiErrorResponse::from)?;
+
+    // Step 3: Check if deletion was successful
+    if !deleted {
+        return Err(ApiErrorResponse::not_found(format!(
+            "Task not found: {task_id}"
+        )));
+    }
+
+    // Step 4: Update search index to remove the deleted task (lock-free write via RCU)
+    state.update_search_index(TaskChange::Remove(task_id));
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// =============================================================================
 // GET /health Handler
 // =============================================================================
 
@@ -491,21 +630,35 @@ mod tests {
     fn create_app_state_with_mock_task_repository(
         task_repository: impl TaskRepository + 'static,
     ) -> AppState {
+        use crate::api::query::SearchIndex;
+        use arc_swap::ArcSwap;
+        use lambars::persistent::PersistentVector;
+
         AppState {
             task_repository: Arc::new(task_repository),
             project_repository: Arc::new(InMemoryProjectRepository::new()),
             event_store: Arc::new(InMemoryEventStore::new()),
             config: AppConfig::default(),
+            search_index: Arc::new(ArcSwap::from_pointee(SearchIndex::build(
+                &PersistentVector::new(),
+            ))),
         }
     }
 
     /// Creates an `AppState` with the default in-memory repositories.
     fn create_default_app_state() -> AppState {
+        use crate::api::query::SearchIndex;
+        use arc_swap::ArcSwap;
+        use lambars::persistent::PersistentVector;
+
         AppState {
             task_repository: Arc::new(InMemoryTaskRepository::new()),
             project_repository: Arc::new(InMemoryProjectRepository::new()),
             event_store: Arc::new(InMemoryEventStore::new()),
             config: AppConfig::default(),
+            search_index: Arc::new(ArcSwap::from_pointee(SearchIndex::build(
+                &PersistentVector::new(),
+            ))),
         }
     }
 
@@ -803,5 +956,81 @@ mod tests {
         assert!(result.is_right());
         let returned_task = result.unwrap_right();
         assert_eq!(returned_task.title, "Test Task");
+    }
+
+    // -------------------------------------------------------------------------
+    // delete_task Handler Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_delete_task_returns_204_when_task_exists() {
+        // Arrange
+        let state = create_default_app_state();
+        let task_id = TaskId::generate();
+        let task = Task::new(task_id.clone(), "Task to Delete", Timestamp::now());
+
+        // Save the task first
+        state
+            .task_repository
+            .save(&task)
+            .run_async()
+            .await
+            .expect("Failed to save task");
+
+        // Act
+        let result = delete_task(State(state), Path(*task_id.as_uuid())).await;
+
+        // Assert
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), StatusCode::NO_CONTENT);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_delete_task_returns_404_when_task_not_found() {
+        // Arrange
+        let state = create_default_app_state();
+        let nonexistent_task_id = TaskId::generate();
+
+        // Act
+        let result = delete_task(State(state), Path(*nonexistent_task_id.as_uuid())).await;
+
+        // Assert
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert_eq!(error.status, StatusCode::NOT_FOUND);
+        assert_eq!(error.error.code, "NOT_FOUND");
+        assert!(error.error.message.contains("Task not found"));
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_delete_task_removes_from_repository() {
+        // Arrange
+        let state = create_default_app_state();
+        let task_id = TaskId::generate();
+        let task = Task::new(task_id.clone(), "Task to Delete", Timestamp::now());
+
+        // Save the task first
+        state
+            .task_repository
+            .save(&task)
+            .run_async()
+            .await
+            .expect("Failed to save task");
+
+        // Act
+        let result = delete_task(State(state.clone()), Path(*task_id.as_uuid())).await;
+        assert!(result.is_ok());
+
+        // Assert: Task should no longer exist in repository
+        let find_result = state
+            .task_repository
+            .find_by_id(&task_id)
+            .run_async()
+            .await
+            .expect("Failed to find task");
+        assert!(find_result.is_none());
     }
 }

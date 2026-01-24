@@ -33,6 +33,7 @@ use super::dto::{
 };
 use super::error::ApiErrorResponse;
 use super::handlers::AppState;
+use super::query::TaskChange;
 use crate::domain::{Priority, Tag, Task, TaskId, TaskStatus, Timestamp};
 use crate::infrastructure::TaskRepository;
 use lambars::control::Either;
@@ -277,7 +278,14 @@ pub async fn bulk_create_tasks(
     // Step 5: Save tasks (I/O boundary)
     let results = save_tasks_bulk(state.task_repository.clone(), tasks_to_save).await;
 
-    // Step 6: Aggregate results (pure)
+    // Step 6: Update search index for successfully created tasks (lock-free writes)
+    for result in &results {
+        if let Either::Right(save_result) = result {
+            state.update_search_index(TaskChange::Add(save_result.task.clone()));
+        }
+    }
+
+    // Step 7: Aggregate results (pure)
     let response = aggregate_create_results(results);
 
     Ok((StatusCode::MULTI_STATUS, Json(response)))
@@ -339,10 +347,18 @@ pub async fn bulk_update_tasks(
     .await;
 
     // Step 5: Merge results with duplicate errors (pure)
-    let all_results = merge_update_results(&request.updates, unique_results, duplicate_errors);
+    let merged = merge_update_results(&request.updates, unique_results, duplicate_errors);
 
-    // Step 6: Aggregate results (pure)
-    let response = aggregate_update_results(all_results);
+    // Step 6: Update search index for successfully updated tasks (lock-free writes)
+    for (old_task, new_task) in merged.update_pairs {
+        state.update_search_index(TaskChange::Update {
+            old: old_task,
+            new: new_task,
+        });
+    }
+
+    // Step 7: Aggregate results (pure)
+    let response = aggregate_update_results(merged.results);
 
     Ok((StatusCode::MULTI_STATUS, Json(response)))
 }
@@ -683,16 +699,32 @@ fn aggregate_update_results(results: Vec<Either<ItemError, Task>>) -> BulkRespon
 }
 
 /// Merges unique results with duplicate errors (pure function).
+/// Result of merging update results, including old/new task pairs for index updates.
+#[derive(Debug)]
+struct MergedUpdateResults {
+    /// The merged results for response generation.
+    results: Vec<Either<ItemError, Task>>,
+    /// Old/new task pairs for successful updates (for search index updates).
+    update_pairs: Vec<(Task, Task)>,
+}
+
 fn merge_update_results(
     original_updates: &[BulkUpdateItem],
-    unique_results: Vec<(usize, Either<ItemError, Task>)>,
+    unique_results: Vec<(usize, BulkUpdateResult)>,
     duplicate_errors: Vec<(usize, ItemError)>,
-) -> Vec<Either<ItemError, Task>> {
+) -> MergedUpdateResults {
     let mut results: Vec<Option<Either<ItemError, Task>>> = vec![None; original_updates.len()];
+    let mut update_pairs: Vec<(Task, Task)> = Vec::new();
 
-    // Place unique results
-    for (index, result) in unique_results {
-        results[index] = Some(result);
+    // Place unique results and collect update pairs
+    for (index, bulk_result) in unique_results {
+        // If update was successful and we have the old task, track the pair
+        if let (Either::Right(new_task), Some(old_task)) =
+            (&bulk_result.result, &bulk_result.old_task)
+        {
+            update_pairs.push((old_task.clone(), new_task.clone()));
+        }
+        results[index] = Some(bulk_result.result);
     }
 
     // Place duplicate errors
@@ -701,7 +733,10 @@ fn merge_update_results(
     }
 
     // All should be filled
-    results.into_iter().flatten().collect()
+    MergedUpdateResults {
+        results: results.into_iter().flatten().collect(),
+        update_pairs,
+    }
 }
 
 // =============================================================================
@@ -856,20 +891,32 @@ fn combine_save_strategies(strategies: Vec<Option<SaveResult>>) -> Option<SaveRe
     Option::choice(strategies)
 }
 
+/// Result of a bulk update operation with old/new task tracking for index updates.
+#[derive(Debug, Clone)]
+pub struct BulkUpdateResult {
+    /// The result of the update operation.
+    pub result: Either<ItemError, Task>,
+    /// The old task before update (for search index), if update was successful.
+    pub old_task: Option<Task>,
+}
+
 /// Processes unique updates (I/O boundary).
+///
+/// Returns both the result and the old task for successful updates,
+/// enabling efficient search index updates.
 async fn process_unique_updates(
     repository: Arc<dyn TaskRepository + Send + Sync>,
     updates: &[BulkUpdateItem],
     unique_indices: &[usize],
     now: Timestamp,
-) -> Vec<(usize, Either<ItemError, Task>)> {
+) -> Vec<(usize, BulkUpdateResult)> {
     let mut results = Vec::with_capacity(unique_indices.len());
 
     for &index in unique_indices {
         let update = &updates[index];
         let task_id = TaskId::from_uuid(update.id);
 
-        let result = match repository.find_by_id(&task_id).run_async().await {
+        let bulk_result = match repository.find_by_id(&task_id).run_async().await {
             Ok(Some(task)) => {
                 // Check version (positive condition first)
                 if task.version == update.version {
@@ -877,31 +924,49 @@ async fn process_unique_updates(
                     match apply_update(task.clone(), update, now.clone()) {
                         Some(updated_task) => {
                             match repository.save(&updated_task).run_async().await {
-                                Ok(()) => Either::Right(updated_task),
+                                Ok(()) => BulkUpdateResult {
+                                    result: Either::Right(updated_task),
+                                    old_task: Some(task), // Track old task for index update
+                                },
                                 Err(e) => {
                                     tracing::error!(error = %e, task_id = %task_id, "Repository save failed");
-                                    Either::Left(ItemError::RepositoryError)
+                                    BulkUpdateResult {
+                                        result: Either::Left(ItemError::RepositoryError),
+                                        old_task: None,
+                                    }
                                 }
                             }
                         }
-                        None => Either::Right(task), // No changes, return original
+                        None => BulkUpdateResult {
+                            result: Either::Right(task), // No changes, return original
+                            old_task: None,              // No index update needed
+                        },
                     }
                 } else {
-                    Either::Left(ItemError::VersionConflict {
-                        id: task_id,
-                        expected: update.version,
-                        actual: task.version,
-                    })
+                    BulkUpdateResult {
+                        result: Either::Left(ItemError::VersionConflict {
+                            id: task_id,
+                            expected: update.version,
+                            actual: task.version,
+                        }),
+                        old_task: None,
+                    }
                 }
             }
-            Ok(None) => Either::Left(ItemError::NotFound { id: task_id }),
+            Ok(None) => BulkUpdateResult {
+                result: Either::Left(ItemError::NotFound { id: task_id }),
+                old_task: None,
+            },
             Err(e) => {
                 tracing::error!(error = %e, task_id = %task_id, "Repository find failed");
-                Either::Left(ItemError::RepositoryError)
+                BulkUpdateResult {
+                    result: Either::Left(ItemError::RepositoryError),
+                    old_task: None,
+                }
             }
         };
 
-        results.push((index, result));
+        results.push((index, bulk_result));
     }
 
     results
@@ -1322,7 +1387,22 @@ mod tests {
         ];
 
         let task = Task::new(TaskId::generate(), "Task", Timestamp::now());
-        let unique_results = vec![(0, Either::Right(task.clone())), (2, Either::Right(task))];
+        let unique_results = vec![
+            (
+                0,
+                BulkUpdateResult {
+                    result: Either::Right(task.clone()),
+                    old_task: None, // No actual update (no version change)
+                },
+            ),
+            (
+                2,
+                BulkUpdateResult {
+                    result: Either::Right(task),
+                    old_task: None,
+                },
+            ),
+        ];
 
         let duplicate_errors = vec![(
             1,
@@ -1333,10 +1413,11 @@ mod tests {
 
         let merged = merge_update_results(&updates, unique_results, duplicate_errors);
 
-        assert_eq!(merged.len(), 3);
-        assert!(merged[0].is_right()); // First id1 - success
-        assert!(merged[1].is_left()); // Second id1 - duplicate error
-        assert!(merged[2].is_right()); // id2 - success
+        assert_eq!(merged.results.len(), 3);
+        assert!(merged.results[0].is_right()); // First id1 - success
+        assert!(merged.results[1].is_left()); // Second id1 - duplicate error
+        assert!(merged.results[2].is_right()); // id2 - success
+        assert!(merged.update_pairs.is_empty()); // No actual updates with old_task
     }
 
     // -------------------------------------------------------------------------

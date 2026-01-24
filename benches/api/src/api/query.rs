@@ -1593,10 +1593,16 @@ fn paginate_tasks(
 /// Searches tasks by title or tags.
 ///
 /// This handler demonstrates:
-/// - **`PersistentTreeMap`**: Building normalized search indexes for efficient lookup
+/// - **`ArcSwap`**: Lock-free reads from pre-built search index
 /// - **`Semigroup::combine`**: Combining search results with deduplication
 /// - **Deduplication**: Using `Semigroup::combine` for merging overlapping results
 /// - **Pagination**: Using `normalize_search_pagination` for limit/offset handling
+///
+/// # Performance
+///
+/// The search index is pre-built at application startup and updated incrementally
+/// when tasks are created/updated/deleted. This eliminates the need to rebuild
+/// the index on every search request, significantly improving performance.
 ///
 /// # Query Parameters
 ///
@@ -1611,8 +1617,8 @@ fn paginate_tasks(
 ///
 /// # Errors
 ///
-/// Returns [`ApiErrorResponse`] in the following cases:
-/// - **500 Internal Server Error**: Repository operation failed
+/// This handler does not return errors directly since the search index
+/// is loaded from memory. Any errors from index loading are handled at startup.
 #[allow(clippy::future_not_send)]
 pub async fn search_tasks(
     State(state): State<AppState>,
@@ -1623,19 +1629,8 @@ pub async fn search_tasks(
     let normalized = normalize_query(&query.q);
     let normalized_query = normalized.key();
 
-    // I/O boundary: Fetch all tasks from repository (use Pagination::all() for full dataset)
-    let all_tasks = state
-        .task_repository
-        .list(Pagination::all())
-        .run_async()
-        .await
-        .map_err(ApiErrorResponse::from)?;
-
-    // Convert to PersistentVector for functional operations
-    let tasks: PersistentVector<Task> = all_tasks.items.into_iter().collect();
-
-    // Build search index using PersistentTreeMap
-    let index = SearchIndex::build(&tasks);
+    // Load the pre-built search index from ArcSwap (lock-free read)
+    let index = state.search_index.load();
 
     // Pure computation: Search with scope using normalized query
     let results = search_with_scope_indexed(&index, normalized_query, query.scope);
