@@ -493,14 +493,80 @@ done
 cat >> "${IDS_FILE}" << 'EOF'
 }
 
+-- Task states (ID + version pairs) for optimistic locking
+-- Initialized with version = 1 for all tasks
+M.task_states = {}
+for i, id in ipairs(M.task_ids) do
+    M.task_states[i] = { id = id, version = 1 }
+end
+
+-- Normalize index to valid range
+local function normalize_index(index, length)
+    if type(index) ~= "number" then
+        return nil, "index must be a number"
+    end
+    if length == 0 then
+        return nil, "empty collection"
+    end
+    return ((index - 1) % length) + 1
+end
+
 -- Helper to get a task ID by index (with wrap-around)
 function M.get_task_id(index)
-    return M.task_ids[((index - 1) % #M.task_ids) + 1]
+    local normalized, err = normalize_index(index, #M.task_ids)
+    if err then
+        return nil, err
+    end
+    return M.task_ids[normalized]
 end
 
 -- Helper to get a project ID by index (with wrap-around)
 function M.get_project_id(index)
-    return M.project_ids[((index - 1) % #M.project_ids) + 1]
+    local normalized, err = normalize_index(index, #M.project_ids)
+    if err then
+        return nil, err
+    end
+    return M.project_ids[normalized]
+end
+
+-- Get task state (ID + version) by index
+function M.get_task_state(index)
+    local normalized, err = normalize_index(index, #M.task_states)
+    if err then
+        return nil, err
+    end
+    local state = M.task_states[normalized]
+    return { id = state.id, version = state.version }
+end
+
+-- Increment version for a task by index
+function M.increment_version(index)
+    local normalized, err = normalize_index(index, #M.task_states)
+    if err then
+        return nil, err
+    end
+    M.task_states[normalized].version = M.task_states[normalized].version + 1
+    return M.task_states[normalized].version
+end
+
+-- Set version for a task by index
+function M.set_version(index, version)
+    local normalized, err = normalize_index(index, #M.task_states)
+    if err then
+        return false, err
+    end
+    if type(version) ~= "number" or version < 1 then
+        return false, "version must be a positive integer"
+    end
+    M.task_states[normalized].version = version
+    return true
+end
+
+-- Reset all versions to 1
+function M.reset_versions()
+    for i = 1, #M.task_states do
+        M.task_states[i].version = 1
+    end
 end
 
 return M
