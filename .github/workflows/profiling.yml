@@ -31,10 +31,10 @@ env:
 
 jobs:
   # ==========================================================================
-  # Criterion Benchmarks with Flamegraph
+  # Criterion Build
   # ==========================================================================
-  criterion-profiling:
-    name: Criterion + Flamegraph
+  criterion-profiling-build:
+    name: Criterion Build
     runs-on: ubuntu-latest
     if: ${{ github.event.inputs.profile_type == 'all' || github.event.inputs.profile_type == 'criterion' || github.event_name == 'pull_request' }}
 
@@ -53,97 +53,141 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-profiling-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Install perf and flamegraph tools
+      - name: Build benchmarks and tools
+        run: |
+          set -euo pipefail
+          cargo install inferno
+          cargo build --release --benches
+
+          mkdir -p criterion-profiling-tools/bin
+          mkdir -p criterion-profiling-tools/benches
+
+          # Copy benchmark binaries
+          for bench in effect_bench for_macro_bench control_bench; do
+            BENCH_BIN=$(find target/release/deps -name "${bench}-*" -type f -executable | head -1)
+            if [ -n "$BENCH_BIN" ]; then
+              cp "$BENCH_BIN" "criterion-profiling-tools/benches/${bench}"
+              chmod +x "criterion-profiling-tools/benches/${bench}"
+              echo "Copied ${bench}"
+            else
+              echo "WARNING: Benchmark binary not found for ${bench}"
+            fi
+          done
+
+          # Copy inferno tools
+          cp ~/.cargo/bin/inferno-collapse-perf ~/.cargo/bin/inferno-flamegraph criterion-profiling-tools/bin/
+          chmod +x criterion-profiling-tools/bin/*
+
+          ls -la criterion-profiling-tools/bin/
+          ls -la criterion-profiling-tools/benches/
+
+      - name: Upload profiling tools
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-profiling-tools-${{ github.sha }}
+          path: criterion-profiling-tools
+          retention-days: 7
+          if-no-files-found: error
+
+  # ==========================================================================
+  # Criterion Benchmarks with Flamegraph (Parallel)
+  # ==========================================================================
+  criterion-profiling:
+    name: Criterion (${{ matrix.bench }})
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.profile_type == 'all' || github.event.inputs.profile_type == 'criterion' || github.event_name == 'pull_request' }}
+    needs: [criterion-profiling-build]
+    strategy:
+      fail-fast: false
+      matrix:
+        bench: [effect_bench, for_macro_bench, control_bench]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install perf tools
         run: |
           sudo apt-get update
           sudo apt-get install -y linux-tools-common linux-tools-generic linux-tools-$(uname -r) gawk || true
-          # Allow perf for non-root users
           echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid
           echo '0' | sudo tee /proc/sys/kernel/kptr_restrict
-          # Install inferno for flamegraph generation
-          cargo install inferno
 
-      - name: Run Criterion benchmarks with profiling
+      - name: Download profiling tools
+        uses: actions/download-artifact@v4
+        with:
+          name: criterion-profiling-tools-${{ github.sha }}
+          path: criterion-profiling-tools
+
+      - name: Ensure tools executable
         run: |
-          mkdir -p profiling-results/criterion
+          chmod +x criterion-profiling-tools/bin/* criterion-profiling-tools/benches/* || true
+          ls -la criterion-profiling-tools/bin/
+          ls -la criterion-profiling-tools/benches/
 
-          # Build benchmarks in release mode
-          cargo build --release --benches
+      - name: Run profiling for ${{ matrix.bench }}
+        run: |
+          set -euo pipefail
 
-          # Profile key benchmarks using perf
-          for bench in effect_bench for_macro_bench control_bench; do
-            echo "=== Profiling $bench ==="
+          export PATH="${GITHUB_WORKSPACE}/criterion-profiling-tools/bin:${PATH}"
+          BENCH_BIN="${GITHUB_WORKSPACE}/criterion-profiling-tools/benches/${{ matrix.bench }}"
+          RESULTS_DIR="${GITHUB_WORKSPACE}/profiling-results/criterion/${{ matrix.bench }}"
 
-            # Find the benchmark binary
-            BENCH_BIN=$(find target/release/deps -name "${bench}-*" -type f -executable | head -1)
-            if [ -n "$BENCH_BIN" ]; then
-              # Run with perf to collect profile data
-              sudo perf record -F 99 -g -o profiling-results/criterion/${bench}.perf.data \
-                "$BENCH_BIN" --bench --profile-time 5 2>&1 | tee profiling-results/criterion/${bench}.log || true
+          mkdir -p "${RESULTS_DIR}"
 
-              # Generate flamegraph and text analysis if perf data exists
-              if [ -f "profiling-results/criterion/${bench}.perf.data" ]; then
-                echo "=== Processing perf data for ${bench} ==="
-                ls -la profiling-results/criterion/${bench}.perf.data
+          if [[ ! -f "${BENCH_BIN}" ]]; then
+            echo "ERROR: Benchmark binary not found: ${BENCH_BIN}"
+            exit 1
+          fi
 
-                # Generate folded stacks (intermediate format for analysis)
-                sudo perf script -i profiling-results/criterion/${bench}.perf.data 2>&1 | \
-                  inferno-collapse-perf > profiling-results/criterion/${bench}.folded 2>&1 || echo "collapse-perf returned non-zero for ${bench}"
+          echo "=== Profiling ${{ matrix.bench }} ==="
 
-                # Generate flamegraph from folded stacks (check file size with -s)
-                if [ -s "profiling-results/criterion/${bench}.folded" ]; then
-                  echo "=== Generating flamegraph for ${bench} ==="
-                  echo "folded lines: $(wc -l < profiling-results/criterion/${bench}.folded)"
+          # Run with perf to collect profile data
+          # Use cpu-clock software event for VM compatibility
+          sudo perf record -e cpu-clock -F 997 -g -o "${RESULTS_DIR}/perf.data" \
+            "${BENCH_BIN}" --bench --profile-time 5 2>&1 | tee "${RESULTS_DIR}/benchmark.log" || true
 
-                  cat profiling-results/criterion/${bench}.folded | \
-                    inferno-flamegraph > profiling-results/criterion/${bench}_flamegraph.svg 2>&1 || echo "flamegraph generation failed for ${bench}"
+          if [[ -f "${RESULTS_DIR}/perf.data" ]]; then
+            echo "=== Processing perf data ==="
+            ls -la "${RESULTS_DIR}/perf.data"
 
-                  # Generate top functions summary (overhead by function)
-                  echo "=== Generating top functions for ${bench} ==="
-                  gawk -F';' '{
-                    n=split($NF, parts, " ")
-                    fname=parts[1]
-                    for(i=2; i<n; i++) fname=fname" "parts[i]
-                    samples=parts[n]
-                    sum[fname]+=samples
-                    total+=samples
-                  } END {
-                    for(f in sum) printf "%d %s\n", sum[f], f
-                  }' profiling-results/criterion/${bench}.folded | \
-                    sort -rn | head -50 > profiling-results/criterion/${bench}_top_functions.txt
+            # Generate folded stacks
+            sudo perf script -i "${RESULTS_DIR}/perf.data" 2>&1 | \
+              inferno-collapse-perf > "${RESULTS_DIR}/stacks.folded" 2>&1 || true
 
-                  echo "top_functions entries: $(wc -l < profiling-results/criterion/${bench}_top_functions.txt)"
-                else
-                  echo "WARNING: ${bench}.folded is empty or missing"
-                fi
+            if [[ -s "${RESULTS_DIR}/stacks.folded" ]]; then
+              echo "folded lines: $(wc -l < "${RESULTS_DIR}/stacks.folded")"
 
-                # Cleanup large perf data
-                rm -f profiling-results/criterion/${bench}.perf.data
-              fi
+              # Generate flamegraph
+              inferno-flamegraph < "${RESULTS_DIR}/stacks.folded" > "${RESULTS_DIR}/flamegraph.svg" 2>&1 || true
+              inferno-flamegraph --reverse < "${RESULTS_DIR}/stacks.folded" > "${RESULTS_DIR}/flamegraph-reverse.svg" 2>&1 || true
+
+              # Generate top functions
+              gawk -F';' '{
+                n=split($NF, parts, " ")
+                fname=parts[1]
+                for(i=2; i<n; i++) fname=fname" "parts[i]
+                samples=parts[n]
+                sum[fname]+=samples
+              } END {
+                for(f in sum) printf "%d %s\n", sum[f], f
+              }' "${RESULTS_DIR}/stacks.folded" | sort -rn | head -50 > "${RESULTS_DIR}/top_functions.txt"
+
+              echo "top_functions entries: $(wc -l < "${RESULTS_DIR}/top_functions.txt")"
             else
-              echo "Benchmark binary not found for $bench"
+              echo "WARNING: stacks.folded is empty"
             fi
-          done
 
-      - name: Generate Criterion summary
-        run: |
-          echo "# Criterion Profiling Results" > profiling-results/criterion/README.md
-          echo "" >> profiling-results/criterion/README.md
-          echo "## Flamegraphs" >> profiling-results/criterion/README.md
-          echo "" >> profiling-results/criterion/README.md
-          for svg in profiling-results/criterion/*.svg; do
-            if [ -f "$svg" ]; then
-              name=$(basename "$svg" .svg)
-              echo "- [$name](./$name.svg)" >> profiling-results/criterion/README.md
-            fi
-          done
+            # Cleanup large files
+            sudo rm -f "${RESULTS_DIR}/perf.data" 2>/dev/null || true
+          fi
 
-      - name: Upload Criterion profiling artifacts
+      - name: Upload profiling artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: criterion-profiling-${{ github.sha }}
-          path: profiling-results/criterion/
+          name: criterion-profiling-${{ github.sha }}-${{ matrix.bench }}
+          path: profiling-results/criterion/${{ matrix.bench }}/
           retention-days: 30
+          if-no-files-found: warn
 
   # ==========================================================================
   # iai-callgrind with Detailed Analysis
@@ -413,6 +457,26 @@ jobs:
           # Run benchmark for a single scenario (mixed runs a single script)
           API_URL=http://localhost:3000 ./run_benchmark.sh --scenario "${SCENARIO_FILE}"
 
+          # Capture benchmark outputs for aggregation
+          BENCH_RESULTS_ROOT="$(pwd)/results"
+          LATEST_SCENARIO_DIR=$(ls -td "${BENCH_RESULTS_ROOT}"/*/"${SCENARIO_NAME}" 2>/dev/null | head -1 || true)
+          if [[ -n "${LATEST_SCENARIO_DIR}" ]]; then
+            mkdir -p "${RESULTS_DIR}/benchmark/meta" "${RESULTS_DIR}/benchmark/wrk"
+            if [[ -f "${LATEST_SCENARIO_DIR}/summary.txt" ]]; then
+              cp "${LATEST_SCENARIO_DIR}/summary.txt" "${RESULTS_DIR}/benchmark/summary.txt"
+            fi
+            while IFS= read -r -d '' meta_file; do
+              script_name=$(basename "$(dirname "${meta_file}")")
+              cp "${meta_file}" "${RESULTS_DIR}/benchmark/meta/${script_name}.json"
+              wrk_file="$(dirname "${meta_file}")/wrk.txt"
+              if [[ -f "${wrk_file}" ]]; then
+                cp "${wrk_file}" "${RESULTS_DIR}/benchmark/wrk/${script_name}.txt"
+              fi
+            done < <(find "${LATEST_SCENARIO_DIR}" -name meta.json -print0)
+          else
+            echo "WARNING: benchmark results directory not found for ${SCENARIO_NAME}"
+          fi
+
           # Stop perf and show statistics
           sudo kill -INT $PERF_PID 2>/dev/null || true
           PERF_PID=""
@@ -470,6 +534,65 @@ jobs:
         with:
           path: profiling-artifacts
 
+      - name: Generate API profiling summary file
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+
+          const root = path.join(process.cwd(), 'profiling-artifacts');
+          const sha = process.env.GITHUB_SHA || '';
+          const prefix = `api-profiling-${sha}-`;
+          const summary = { generated_at: new Date().toISOString(), scenarios: [] };
+
+          if (fs.existsSync(root)) {
+            const entries = fs.readdirSync(root, { withFileTypes: true });
+            const apiDirs = entries.filter(e => e.isDirectory() && e.name.startsWith(prefix)).map(e => e.name);
+
+            for (const dirName of apiDirs) {
+              const scenario = dirName.slice(prefix.length);
+              const dirPath = path.join(root, dirName);
+              const flamegraphPath = path.join(dirPath, 'flamegraph.svg');
+              const scripts = [];
+              const metaDir = path.join(dirPath, 'benchmark', 'meta');
+
+              if (fs.existsSync(metaDir)) {
+                const metaFiles = fs.readdirSync(metaDir).filter(f => f.endsWith('.json'));
+                for (const file of metaFiles) {
+                  const filePath = path.join(metaDir, file);
+                  try {
+                    const meta = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+                    const results = meta.results || {};
+                    scripts.push({
+                      script: path.basename(file, '.json'),
+                      rps: results.rps ?? null,
+                      p50: results.p50 ?? null,
+                      p95: results.p95 ?? null,
+                      p99: results.p99 ?? null,
+                      error_rate: results.error_rate ?? null
+                    });
+                  } catch (err) {
+                    scripts.push({ script: path.basename(file, '.json'), error: String(err) });
+                  }
+                }
+              }
+
+              summary.scenarios.push({
+                scenario,
+                artifact: dirName,
+                flamegraph: fs.existsSync(flamegraphPath),
+                scripts
+              });
+            }
+          }
+
+          fs.writeFileSync(
+            path.join(root, 'api-profiling-summary.json'),
+            JSON.stringify(summary, null, 2)
+          );
+          console.log(`summary scenarios: ${summary.scenarios.length}`);
+          NODE
+
       - name: Post profiling summary to PR
         uses: actions/github-script@v7
         with:
@@ -480,22 +603,25 @@ jobs:
             let body = '## :microscope: Profiling Analysis Results\n\n';
             body += `Commit: \`${context.sha.substring(0, 7)}\`\n\n`;
 
-            // Check for Criterion results
-            const criterionDir = 'profiling-artifacts/criterion-profiling-' + context.sha;
-            if (fs.existsSync(criterionDir)) {
+            const artifactsRoot = 'profiling-artifacts';
+
+            // Check for Criterion results (multiple artifacts)
+            const criterionPrefix = 'criterion-profiling-' + context.sha + '-';
+            const criterionArtifacts = fs.existsSync(artifactsRoot)
+              ? fs.readdirSync(artifactsRoot).filter(name => name.startsWith(criterionPrefix))
+              : [];
+
+            if (criterionArtifacts.length > 0) {
               body += '### :chart_with_upwards_trend: Criterion Flamegraphs\n\n';
-              const svgFiles = fs.readdirSync(criterionDir).filter(f => f.endsWith('.svg'));
-              if (svgFiles.length > 0) {
-                body += `Found ${svgFiles.length} flamegraph(s). Download artifacts to view.\n\n`;
-                body += '| Benchmark | Flamegraph |\n|-----------|------------|\n';
-                for (const svg of svgFiles) {
-                  const name = svg.replace('_flamegraph.svg', '');
-                  body += `| ${name} | :white_check_mark: |\n`;
-                }
-                body += '\n';
-              } else {
-                body += 'No flamegraphs generated. Check workflow logs.\n\n';
+              body += '| Benchmark | Flamegraph |\n|-----------|------------|\n';
+
+              for (const dirName of criterionArtifacts) {
+                const bench = dirName.slice(criterionPrefix.length);
+                const dirPath = path.join(artifactsRoot, dirName);
+                const hasFlamegraph = fs.existsSync(path.join(dirPath, 'flamegraph.svg'));
+                body += `| ${bench} | ${hasFlamegraph ? ':white_check_mark:' : ':x:'} |\n`;
               }
+              body += '\n';
             }
 
             // Check for iai results
@@ -512,7 +638,6 @@ jobs:
             }
 
             // Check for API results (multiple artifacts)
-            const artifactsRoot = 'profiling-artifacts';
             const apiPrefix = 'api-profiling-' + context.sha;
             const apiArtifacts = fs.existsSync(artifactsRoot)
               ? fs.readdirSync(artifactsRoot).filter(name => name.startsWith(apiPrefix))
@@ -541,6 +666,7 @@ jobs:
 
               body += '### :fire: API Server Flamegraphs\n\n';
               body += `Artifacts: ${apiArtifacts.length}, Flamegraphs: ${flamegraphs}\n\n`;
+              body += 'Summary: `api-profiling-summary.json`\n\n';
               if (flamegraphs > 0) {
                 body += ':white_check_mark: Flamegraphs generated successfully. Download artifacts to view.\n\n';
               } else {
@@ -584,3 +710,12 @@ jobs:
                 body: body
               });
             }
+
+      - name: Upload API profiling summary
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: api-profiling-summary-${{ github.sha }}
+          path: profiling-artifacts/api-profiling-summary.json
+          retention-days: 30
+          if-no-files-found: warn
