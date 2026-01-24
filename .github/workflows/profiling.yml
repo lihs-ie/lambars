@@ -230,12 +230,80 @@ jobs:
           retention-days: 30
 
   # ==========================================================================
+  # API Profiling Matrix
+  # ==========================================================================
+  api-profiling-matrix:
+    name: API Profiling Matrix
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.profile_type == 'all' || github.event.inputs.profile_type == 'api' || github.event_name == 'pull_request' }}
+    outputs:
+      scenarios: ${{ steps.matrix.outputs.scenarios }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build scenario matrix
+        id: matrix
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import glob
+          import json
+          import os
+
+          scenarios = []
+          for path in sorted(glob.glob("benches/api/benchmarks/scenarios/*.yaml")):
+              if os.path.basename(path) == "matrix.yaml":
+                  continue
+              scenarios.append(os.path.basename(path))
+
+          print("scenarios=" + json.dumps(scenarios))
+          PY
+
+  # ==========================================================================
+  # API Profiling Build
+  # ==========================================================================
+  api-profiling-build:
+    name: API Profiling Build
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.profile_type == 'all' || github.event.inputs.profile_type == 'api' || github.event_name == 'pull_request' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build API server and tools
+        run: |
+          set -euo pipefail
+          cargo install inferno
+          cd benches/api
+          CARGO_PROFILE_RELEASE_DEBUG=true cargo build --release --bin task-management-benchmark-api
+          cd ../..
+          mkdir -p api-profiling-tools/bin
+          cp benches/api/target/release/task-management-benchmark-api api-profiling-tools/bin/
+          cp ~/.cargo/bin/inferno-collapse-perf ~/.cargo/bin/inferno-flamegraph api-profiling-tools/bin/
+
+      - name: Upload profiling tools
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-profiling-tools-${{ github.sha }}
+          path: api-profiling-tools/
+          retention-days: 7
+          if-no-files-found: warn
+
+  # ==========================================================================
   # API Server Profiling during Benchmark
   # ==========================================================================
   api-profiling:
-    name: API Server Profiling
+    name: API Server Profiling (${{ matrix.scenario }})
     runs-on: ubuntu-latest
     if: ${{ github.event.inputs.profile_type == 'all' || github.event.inputs.profile_type == 'api' || github.event_name == 'pull_request' }}
+    needs: [api-profiling-matrix, api-profiling-build]
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: ${{ fromJSON(needs.api-profiling-matrix.outputs.scenarios) }}
 
     steps:
       - uses: actions/checkout@v4
@@ -247,22 +315,31 @@ jobs:
           # Allow perf for non-root users
           echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid
           echo '0' | sudo tee /proc/sys/kernel/kptr_restrict
-          # Install inferno for flamegraph generation
-          cargo install inferno
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Download profiling tools
+        uses: actions/download-artifact@v4
+        with:
+          name: api-profiling-tools-${{ github.sha }}
+          path: api-profiling-tools
 
-      - name: Build API server with debug symbols
-        working-directory: benches/api
+      - name: Resolve scenario name
+        id: scenario
         run: |
-          # Build with debug symbols for profiling
-          CARGO_PROFILE_RELEASE_DEBUG=true cargo build --release --bin task-management-benchmark-api
+          scenario="${{ matrix.scenario }}"
+          echo "name=${scenario%.yaml}" >> "$GITHUB_OUTPUT"
 
       - name: Start API server and profile
         working-directory: benches/api
+        env:
+          MIXED_SCRIPT: recursive
         run: |
           set -euo pipefail
+
+          export PATH="${GITHUB_WORKSPACE}/api-profiling-tools/bin:${PATH}"
+          API_BIN="${GITHUB_WORKSPACE}/api-profiling-tools/bin/task-management-benchmark-api"
+          SCENARIO_FILE="benchmarks/scenarios/${{ matrix.scenario }}"
+          SCENARIO_NAME="${{ steps.scenario.outputs.name }}"
+          RESULTS_DIR="${GITHUB_WORKSPACE}/profiling-results/api/${SCENARIO_NAME}"
 
           PERF_PID=""
           SERVER_PID=""
@@ -282,15 +359,21 @@ jobs:
           perf --version || true
           wrk --version || true
           yq --version || true
+          inferno-collapse-perf --version || true
 
-          mkdir -p ../../profiling-results/api
+          mkdir -p "${RESULTS_DIR}"
 
           # Allow perf
           echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid || true
           echo '0' | sudo tee /proc/sys/kernel/kptr_restrict || true
 
+          if [[ ! -x "${API_BIN}" ]]; then
+            echo "ERROR: API binary not found at ${API_BIN}"
+            exit 1
+          fi
+
           # Start server in background with in-memory mode (no external dependencies)
-          STORAGE_MODE=in_memory CACHE_MODE=in_memory RUST_LOG=info ./target/release/task-management-benchmark-api &
+          STORAGE_MODE=in_memory CACHE_MODE=in_memory RUST_LOG=info "${API_BIN}" &
           SERVER_PID=$!
 
           # Wait for server to be ready (health check loop)
@@ -311,25 +394,17 @@ jobs:
 
           # Setup test data
           cd benchmarks
-          chmod +x setup_test_data.sh
+          chmod +x setup_test_data.sh run_benchmark.sh
           API_URL=http://localhost:3000 ./setup_test_data.sh || true
 
           # Run perf record during benchmark
           # Use cpu-clock software event for VM compatibility and higher sampling rate
           echo "=== Starting perf profiling ==="
-          sudo perf record -e cpu-clock -F 997 -p $SERVER_PID -g -o ../../../profiling-results/api/perf.data &
+          sudo perf record -e cpu-clock -F 997 -p $SERVER_PID -g -o "${RESULTS_DIR}/perf.data" &
           PERF_PID=$!
 
-          # Run benchmark with higher load to generate more CPU activity
-          chmod +x run_benchmark.sh
-          for scenario in scenarios/*.yaml; do
-            if [[ "$(basename "$scenario")" == "matrix.yaml" ]]; then
-              echo "Skipping scenario matrix: $scenario"
-              continue
-            fi
-            echo "=== Running scenario: $(basename "$scenario") ==="
-            API_URL=http://localhost:3000 ./run_benchmark.sh --scenario "$scenario"
-          done
+          # Run benchmark for a single scenario (mixed runs a single script)
+          API_URL=http://localhost:3000 ./run_benchmark.sh --scenario "${SCENARIO_FILE}"
 
           # Stop perf and show statistics
           sudo kill -INT $PERF_PID 2>/dev/null || true
@@ -338,107 +413,31 @@ jobs:
 
           # Show perf record stats
           echo "=== perf record statistics ==="
-          ls -la ../../../profiling-results/api/perf.data 2>/dev/null || echo "perf.data not found"
+          ls -la "${RESULTS_DIR}/perf.data" 2>/dev/null || echo "perf.data not found"
 
-          # Stop server
-          kill $SERVER_PID 2>/dev/null || true
-          SERVER_PID=""
-
-          cd ..
-
-      - name: Generate flamegraph from perf data
-        run: |
-          cd profiling-results/api
-
-          # Helper function to generate README with error status
-          generate_readme() {
-            local status="$1"
-            echo "# API Server Profiling Results" > README.md
-            echo "" >> README.md
-            echo "## Status" >> README.md
-            echo "" >> README.md
-            echo "$status" >> README.md
-          }
-
-          echo "=== Checking perf.data ==="
-          if [ ! -f "perf.data" ]; then
-            echo "WARNING: perf.data not found"
-            generate_readme "perf.data was not generated. The perf record command may have failed."
-            exit 0
-          fi
-          ls -la perf.data
-
+          # Generate flamegraph
           echo "=== Running perf script ==="
-          sudo perf script -i perf.data > perf.script 2>&1 || echo "perf script returned non-zero"
+          sudo perf script -i "${RESULTS_DIR}/perf.data" > "${RESULTS_DIR}/perf.script" 2>&1 || echo "perf script returned non-zero"
 
-          if [ ! -s "perf.script" ]; then
-            echo "WARNING: perf.script is empty - perf may not have captured data"
-            echo "This can happen in virtualized environments where hardware performance counters are not available"
-            generate_readme "perf.script was empty. Hardware performance counters may not be available in this VM environment."
-            exit 0
-          fi
-          echo "perf.script lines: $(wc -l < perf.script)"
+          if [ -s "${RESULTS_DIR}/perf.script" ]; then
+            echo "=== Generating folded stacks ==="
+            inferno-collapse-perf < "${RESULTS_DIR}/perf.script" > "${RESULTS_DIR}/stacks.folded" 2>&1 || echo "inferno-collapse-perf returned non-zero"
 
-          echo "=== Generating folded stacks ==="
-          cat perf.script | inferno-collapse-perf > stacks.folded 2>&1 || echo "inferno-collapse-perf returned non-zero"
-
-          if [ ! -s "stacks.folded" ]; then
-            echo "WARNING: stacks.folded is empty"
-            generate_readme "stacks.folded was empty. inferno-collapse-perf may have failed to parse perf output."
-            exit 0
-          fi
-          echo "stacks.folded lines: $(wc -l < stacks.folded)"
-
-          echo "=== Generating flamegraphs ==="
-          cat stacks.folded | inferno-flamegraph > flamegraph.svg 2>&1 || echo "flamegraph generation failed"
-          cat stacks.folded | inferno-flamegraph --reverse > flamegraph-reverse.svg 2>&1 || true
-
-          echo "=== Generating top functions ==="
-          gawk -F';' '{
-            n=split($NF, parts, " ")
-            fname=parts[1]
-            for(i=2; i<n; i++) fname=fname" "parts[i]
-            samples=parts[n]
-            sum[fname]+=samples
-            total+=samples
-          } END {
-            for(f in sum) printf "%d %s\n", sum[f], f
-          }' stacks.folded | sort -rn | head -50 > top_functions.txt
-
-          echo "top_functions.txt entries: $(wc -l < top_functions.txt)"
-
-          # Cleanup large intermediate files (keep folded for analysis)
-          rm -f perf.data perf.script 2>/dev/null || true
-
-      - name: Generate API profiling summary
-        run: |
-          if [ -f "profiling-results/api/README.md" ]; then
-            if ! grep -q "^## Flamegraphs" profiling-results/api/README.md; then
-              echo "" >> profiling-results/api/README.md
-              echo "## Flamegraphs" >> profiling-results/api/README.md
-              echo "" >> profiling-results/api/README.md
+            if [ -s "${RESULTS_DIR}/stacks.folded" ]; then
+              echo "=== Generating flamegraph ==="
+              inferno-flamegraph < "${RESULTS_DIR}/stacks.folded" > "${RESULTS_DIR}/flamegraph.svg" 2>&1 || echo "inferno-flamegraph returned non-zero"
+            else
+              echo "WARNING: stacks.folded is empty"
             fi
           else
-            echo "# API Server Profiling Results" > profiling-results/api/README.md
-            echo "" >> profiling-results/api/README.md
-            echo "## Flamegraphs" >> profiling-results/api/README.md
-            echo "" >> profiling-results/api/README.md
-          fi
-          if [ -f "profiling-results/api/flamegraph.svg" ]; then
-            echo "- [Flamegraph (normal)](./flamegraph.svg) - Shows call stack from bottom up" >> profiling-results/api/README.md
-          fi
-          if [ -f "profiling-results/api/flamegraph-reverse.svg" ]; then
-            echo "- [Flamegraph (reverse/icicle)](./flamegraph-reverse.svg) - Shows call stack from top down" >> profiling-results/api/README.md
-          fi
-          if [ ! -f "profiling-results/api/flamegraph.svg" ] && [ ! -f "profiling-results/api/flamegraph-reverse.svg" ]; then
-            echo "No flamegraphs generated. Check perf.script and workflow logs." >> profiling-results/api/README.md
+            echo "WARNING: perf.script is empty - perf may not have captured data"
           fi
 
       - name: Upload API profiling artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: api-profiling-${{ github.sha }}
-          path: profiling-results/api/
+          name: api-profiling-${{ github.sha }}-${{ steps.scenario.outputs.name }}
+          path: profiling-results/api/${{ steps.scenario.outputs.name }}/
           retention-days: 30
           if-no-files-found: warn
 
@@ -502,13 +501,38 @@ jobs:
               }
             }
 
-            // Check for API results
-            const apiDir = 'profiling-artifacts/api-profiling-' + context.sha;
-            if (fs.existsSync(apiDir)) {
-              body += '### :fire: API Server Flamegraph\n\n';
-              const hasFlamegraph = fs.existsSync(path.join(apiDir, 'flamegraph.svg'));
-              if (hasFlamegraph) {
-                body += ':white_check_mark: Flamegraph generated successfully. Download artifacts to view.\n\n';
+            // Check for API results (multiple artifacts)
+            const artifactsRoot = 'profiling-artifacts';
+            const apiPrefix = 'api-profiling-' + context.sha;
+            const apiArtifacts = fs.existsSync(artifactsRoot)
+              ? fs.readdirSync(artifactsRoot).filter(name => name.startsWith(apiPrefix))
+              : [];
+
+            function findFiles(dir, fileName, results = []) {
+              if (!fs.existsSync(dir)) return results;
+              const entries = fs.readdirSync(dir, { withFileTypes: true });
+              for (const entry of entries) {
+                const fullPath = path.join(dir, entry.name);
+                if (entry.isDirectory()) {
+                  findFiles(fullPath, fileName, results);
+                } else if (entry.isFile() && entry.name === fileName) {
+                  results.push(fullPath);
+                }
+              }
+              return results;
+            }
+
+            if (apiArtifacts.length > 0) {
+              let flamegraphs = 0;
+              for (const dirName of apiArtifacts) {
+                const dirPath = path.join(artifactsRoot, dirName);
+                flamegraphs += findFiles(dirPath, 'flamegraph.svg').length;
+              }
+
+              body += '### :fire: API Server Flamegraphs\n\n';
+              body += `Artifacts: ${apiArtifacts.length}, Flamegraphs: ${flamegraphs}\n\n`;
+              if (flamegraphs > 0) {
+                body += ':white_check_mark: Flamegraphs generated successfully. Download artifacts to view.\n\n';
               } else {
                 body += ':warning: Flamegraph generation may have failed. Check workflow logs.\n\n';
               }

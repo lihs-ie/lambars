@@ -189,6 +189,14 @@ resolve_scripts_from_scenario() {
                 return 0
             fi
         fi
+        if [[ "${endpoint}" == "mixed" && -n "${MIXED_SCRIPT:-}" ]]; then
+            if [[ -f "${SCRIPT_DIR}/scripts/${MIXED_SCRIPT}.lua" ]]; then
+                echo "${MIXED_SCRIPT}"
+                return 0
+            else
+                echo -e "${YELLOW}Warning: MIXED_SCRIPT ${MIXED_SCRIPT}.lua not found, falling back to legacy scripts${NC}" >&2
+            fi
+        fi
         # Fallback to legacy scripts
         echo "recursive ordered traversable alternative async_pipeline bifunctor applicative optics misc"
         return 0
@@ -200,6 +208,14 @@ resolve_scripts_from_scenario() {
 
     # If metadata.endpoint is "mixed", always use legacy scripts for full coverage
     if [[ "${metadata_endpoint}" == "mixed" ]]; then
+        if [[ -n "${MIXED_SCRIPT:-}" ]]; then
+            if [[ -f "${SCRIPT_DIR}/scripts/${MIXED_SCRIPT}.lua" ]]; then
+                echo "${MIXED_SCRIPT}"
+                return 0
+            else
+                echo -e "${YELLOW}Warning: MIXED_SCRIPT ${MIXED_SCRIPT}.lua not found, falling back to legacy scripts${NC}" >&2
+            fi
+        fi
         echo "recursive ordered traversable alternative async_pipeline bifunctor applicative optics misc"
         return 0
     fi
@@ -273,6 +289,7 @@ resolve_scripts_from_scenario() {
 #   error_config.max_retries > 0 or metadata.retry -> RETRY
 #   profiling.enable_perf or metadata.profile -> PROFILE
 #   endpoints[0] or metadata.endpoint -> ENDPOINT
+#   MIXED_SCRIPT                   -> mixed endpoint override (single script)
 # =============================================================================
 
 load_scenario_env_vars() {
