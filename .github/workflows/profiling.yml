@@ -343,7 +343,7 @@ jobs:
 
           export PATH="${GITHUB_WORKSPACE}/api-profiling-tools/bin:${PATH}"
           API_BIN="${GITHUB_WORKSPACE}/api-profiling-tools/bin/task-management-benchmark-api"
-          SCENARIO_FILE="benchmarks/scenarios/${{ matrix.scenario }}"
+          SCENARIO_FILE="${GITHUB_WORKSPACE}/benches/api/benchmarks/scenarios/${{ matrix.scenario }}"
           SCENARIO_NAME="${{ steps.scenario.outputs.name }}"
           RESULTS_DIR="${GITHUB_WORKSPACE}/profiling-results/api/${SCENARIO_NAME}"
 
