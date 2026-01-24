@@ -67,7 +67,21 @@ M.results = {
     total_requests = 0,
     successful_requests = 0,
     failed_requests = 0,
+    -- Error rates (4xx/5xx only, excluding network errors)
     error_rate = 0,
+    http_error_rate = 0,
+    network_error_rate = 0,
+    -- Conflict metrics (409 responses)
+    conflict_rate = 0,
+    conflict_count = 0,
+    -- Individual status code counts
+    status_code_counts = {
+        count_400 = 0,
+        count_404 = 0,
+        count_409 = 0,
+        count_422 = 0,
+        count_500 = 0,
+    },
     rps = {
         target = 0,
         actual = 0
@@ -346,10 +360,8 @@ function M.finalize(summary, latency, requests)
                                                          summary.errors.status)
     M.results.failed_requests = summary.requests - M.results.successful_requests
 
-    -- Calculate error rate
-    if M.results.total_requests > 0 then
-        M.results.error_rate = M.results.failed_requests / M.results.total_requests
-    end
+    -- Error rates will be calculated after categorizing HTTP errors
+    -- See the error_tracker integration section below
 
     -- Calculate actual RPS
     if duration_seconds > 0 then
@@ -400,16 +412,16 @@ function M.finalize(summary, latency, requests)
             end
         end
     else
-        -- Reconstruct minimal distribution from summary
-        -- Note: We can only distinguish success vs error, not specific codes
+        -- No thread-local status distribution available
+        -- Keep status_distribution empty to trigger fallback logic later
+        -- NOTE: We intentionally do NOT insert dummy values here.
+        -- The http_error_counts calculation below will use summary.errors.status as fallback.
         M.results.status_codes = {
             ["2xx"] = M.results.successful_requests,
             ["errors"] = M.results.failed_requests,
             ["_note"] = "Detailed status code distribution unavailable due to wrk thread isolation"
         }
-        M.results.status_distribution = {
-            ["200"] = M.results.successful_requests
-        }
+        M.results.status_distribution = {}
     end
 
     -- Extract latency percentiles from wrk's latency object
@@ -463,26 +475,87 @@ function M.finalize(summary, latency, requests)
         -- Aggregate from wrk's summary (thread-safe, accurate)
         error_tracker.aggregate_from_summary(summary)
 
-        -- Calculate HTTP errors (4xx, 5xx) from status_distribution
-        local http_errors = 0
-        if M.results.status_distribution then
+        -- Calculate HTTP error counts by status code category
+        -- NOTE: wrk's summary.errors.status includes non-2xx (including 3xx).
+        -- For accurate 4xx/5xx counts, we need status_distribution from thread-local data.
+        -- Since thread-local data may be incomplete in multi-thread mode, we use
+        -- summary.errors.status as an upper bound for HTTP errors.
+        local http_error_counts = {
+            total = 0,
+            count_400 = 0,
+            count_404 = 0,
+            count_409 = 0,
+            count_422 = 0,
+            count_500 = 0,
+        }
+
+        -- Try to use thread-local status_distribution if available
+        if M.results.status_distribution and next(M.results.status_distribution) then
             for status, count in pairs(M.results.status_distribution) do
                 local status_num = tonumber(status)
                 if status_num and status_num >= 400 and type(count) == "number" then
-                    http_errors = http_errors + count
+                    http_error_counts.total = http_error_counts.total + count
+                    -- Track individual status codes
+                    if status_num == 400 then
+                        http_error_counts.count_400 = count
+                    elseif status_num == 404 then
+                        http_error_counts.count_404 = count
+                    elseif status_num == 409 then
+                        http_error_counts.count_409 = count
+                    elseif status_num == 422 then
+                        http_error_counts.count_422 = count
+                    elseif status_num == 500 then
+                        http_error_counts.count_500 = count
+                    end
                 end
             end
+        else
+            -- Fallback: use wrk's summary.errors.status as total HTTP errors
+            -- NOTE: This may include 3xx responses, so it's an approximation
+            if summary and summary.errors and summary.errors.status then
+                http_error_counts.total = summary.errors.status
+            end
         end
-        -- Also add status errors from wrk summary if available
-        -- (wrk's summary.errors.status counts non-2xx responses)
-        if summary and summary.errors and summary.errors.status then
-            -- Use wrk's status error count as it's more accurate
-            -- than thread-local status_distribution
-            http_errors = summary.errors.status
-        end
-        error_tracker.set_http_errors(http_errors)
 
-        M.results.errors_detail = error_tracker.get_summary()
+        error_tracker.set_http_error_counts(http_error_counts)
+
+        -- Extract metrics from error_tracker
+        local error_summary = error_tracker.get_summary()
+        M.results.errors_detail = error_summary
+
+        -- Update error rates (4xx/5xx only)
+        M.results.http_error_rate = error_summary.http_error_rate or 0
+        M.results.network_error_rate = error_summary.network_error_rate or 0
+        M.results.error_rate = error_summary.http_error_rate or 0  -- Legacy: now uses HTTP errors only
+
+        -- Update conflict metrics
+        M.results.conflict_count = error_summary.conflict_count or 0
+        M.results.conflict_rate = error_summary.conflict_rate or 0
+
+        -- Update individual status code counts
+        M.results.status_code_counts = {
+            count_400 = http_error_counts.count_400,
+            count_404 = http_error_counts.count_404,
+            count_409 = http_error_counts.count_409,
+            count_422 = http_error_counts.count_422,
+            count_500 = http_error_counts.count_500,
+        }
+    else
+        -- Fallback: calculate error_rate without error_tracker
+        -- NOTE: Without error_tracker, we use summary.errors.status as HTTP error count.
+        -- This may include 3xx responses (wrk counts non-2xx as "status" errors).
+        -- For accurate 4xx/5xx counts, use error_tracker with status distribution.
+        if M.results.total_requests > 0 then
+            -- Use summary.errors.status as HTTP error approximation (may include 3xx)
+            local http_errors = (summary and summary.errors and summary.errors.status) or 0
+            M.results.error_rate = http_errors / M.results.total_requests
+            M.results.http_error_rate = M.results.error_rate
+            -- Calculate network error rate separately
+            local network_errors = (summary and summary.errors) and
+                ((summary.errors.connect or 0) + (summary.errors.read or 0) +
+                 (summary.errors.write or 0) + (summary.errors.timeout or 0)) or 0
+            M.results.network_error_rate = network_errors / M.results.total_requests
+        end
     end
 end
 
@@ -567,6 +640,16 @@ function M.format_yaml()
     add_line(0, "successful_requests", M.results.successful_requests)
     add_line(0, "failed_requests", M.results.failed_requests)
     add_line(0, "error_rate", string.format("%.4f", M.results.error_rate))
+    add_line(0, "http_error_rate", string.format("%.4f", M.results.http_error_rate or 0))
+    add_line(0, "network_error_rate", string.format("%.4f", M.results.network_error_rate or 0))
+    add_line(0, "conflict_count", M.results.conflict_count or 0)
+    add_line(0, "conflict_rate", string.format("%.4f", M.results.conflict_rate or 0))
+    add_line(0, "status_code_counts")
+    add_line(1, "count_400", M.results.status_code_counts and M.results.status_code_counts.count_400 or 0)
+    add_line(1, "count_404", M.results.status_code_counts and M.results.status_code_counts.count_404 or 0)
+    add_line(1, "count_409", M.results.status_code_counts and M.results.status_code_counts.count_409 or 0)
+    add_line(1, "count_422", M.results.status_code_counts and M.results.status_code_counts.count_422 or 0)
+    add_line(1, "count_500", M.results.status_code_counts and M.results.status_code_counts.count_500 or 0)
 
     add_line(0, "rps")
     add_line(1, "target", M.results.rps.target)
@@ -636,7 +719,18 @@ function M.format_text()
     table.insert(lines, string.format("Total requests:      %d", M.results.total_requests))
     table.insert(lines, string.format("Successful requests: %d", M.results.successful_requests))
     table.insert(lines, string.format("Failed requests:     %d", M.results.failed_requests))
-    table.insert(lines, string.format("Error rate:          %.2f%%", M.results.error_rate * 100))
+    table.insert(lines, string.format("HTTP error rate:     %.2f%% (4xx/5xx only)", (M.results.http_error_rate or 0) * 100))
+    table.insert(lines, string.format("Network error rate:  %.2f%% (socket errors)", (M.results.network_error_rate or 0) * 100))
+    table.insert(lines, string.format("Conflict count:      %d", M.results.conflict_count or 0))
+    table.insert(lines, string.format("Conflict rate:       %.2f%%", (M.results.conflict_rate or 0) * 100))
+    table.insert(lines, "")
+    table.insert(lines, "--- Status Code Counts ---")
+    local status_counts = M.results.status_code_counts or {}
+    table.insert(lines, string.format("400 Bad Request:     %d", status_counts.count_400 or 0))
+    table.insert(lines, string.format("404 Not Found:       %d", status_counts.count_404 or 0))
+    table.insert(lines, string.format("409 Conflict:        %d", status_counts.count_409 or 0))
+    table.insert(lines, string.format("422 Unprocessable:   %d", status_counts.count_422 or 0))
+    table.insert(lines, string.format("500 Server Error:    %d", status_counts.count_500 or 0))
     table.insert(lines, "")
 
     table.insert(lines, "--- Throughput ---")
