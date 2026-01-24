@@ -76,7 +76,6 @@ thresholds:
 metadata:
   test_type: "endpoint_benchmark"
   endpoint: "GET /tasks/search"
-  cache_strategy: "none"
   hit_rate: 0
   api_features:
     - PersistentTreeMap
