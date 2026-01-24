@@ -170,7 +170,7 @@ jobs:
                 sum[fname]+=samples
               } END {
                 for(f in sum) printf "%d %s\n", sum[f], f
-              }' "${RESULTS_DIR}/stacks.folded" | sort -rn | head -50 > "${RESULTS_DIR}/top_functions.txt"
+              }' "${RESULTS_DIR}/stacks.folded" | sort -rn | head -50 > "${RESULTS_DIR}/top_functions.txt" || true
 
               echo "top_functions entries: $(wc -l < "${RESULTS_DIR}/top_functions.txt")"
             else
