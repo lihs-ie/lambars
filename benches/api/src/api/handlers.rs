@@ -31,7 +31,7 @@ use super::dto::{
     CreateTaskRequest, TaskResponse, validate_description, validate_tags, validate_title,
 };
 use super::error::ApiErrorResponse;
-use super::query::{SearchIndex, TaskChange};
+use super::query::{SearchCache, SearchIndex, TaskChange};
 use crate::domain::{Priority, Tag, Task, TaskId, Timestamp};
 use crate::infrastructure::{
     EventStore, Pagination, ProjectRepository, Repositories, TaskRepository,
@@ -85,7 +85,6 @@ impl Default for AppConfig {
 ///
 /// - **Read**: `state.search_index.load()` returns a `Guard<Arc<SearchIndex>>`
 /// - **Write**: `state.search_index.store(Arc::new(new_index))` atomically replaces the index
-#[derive(Clone)]
 pub struct AppState {
     /// Task repository for persistence.
     pub task_repository: Arc<dyn TaskRepository + Send + Sync>,
@@ -100,6 +99,24 @@ pub struct AppState {
     /// This index is built once at startup and updated incrementally
     /// when tasks are created, updated, or deleted.
     pub search_index: Arc<ArcSwap<SearchIndex>>,
+    /// Search result cache (TTL 5s, LRU 2000 entries).
+    ///
+    /// Caches search results to improve performance for repeated queries.
+    /// The cache key is `(normalized_query, scope, limit, offset)`.
+    pub search_cache: Arc<SearchCache>,
+}
+
+impl Clone for AppState {
+    fn clone(&self) -> Self {
+        Self {
+            task_repository: Arc::clone(&self.task_repository),
+            project_repository: Arc::clone(&self.project_repository),
+            event_store: Arc::clone(&self.event_store),
+            config: self.config.clone(),
+            search_index: Arc::clone(&self.search_index),
+            search_cache: Arc::clone(&self.search_cache),
+        }
+    }
 }
 
 impl AppState {
@@ -149,6 +166,7 @@ impl AppState {
             event_store: repositories.event_store,
             config,
             search_index: Arc::new(ArcSwap::from_pointee(search_index)),
+            search_cache: Arc::new(SearchCache::with_default_config()),
         })
     }
 
@@ -630,7 +648,7 @@ mod tests {
     fn create_app_state_with_mock_task_repository(
         task_repository: impl TaskRepository + 'static,
     ) -> AppState {
-        use crate::api::query::SearchIndex;
+        use crate::api::query::{SearchCache, SearchIndex};
         use arc_swap::ArcSwap;
         use lambars::persistent::PersistentVector;
 
@@ -642,12 +660,13 @@ mod tests {
             search_index: Arc::new(ArcSwap::from_pointee(SearchIndex::build(
                 &PersistentVector::new(),
             ))),
+            search_cache: Arc::new(SearchCache::with_default_config()),
         }
     }
 
     /// Creates an `AppState` with the default in-memory repositories.
     fn create_default_app_state() -> AppState {
-        use crate::api::query::SearchIndex;
+        use crate::api::query::{SearchCache, SearchIndex};
         use arc_swap::ArcSwap;
         use lambars::persistent::PersistentVector;
 
@@ -659,6 +678,7 @@ mod tests {
             search_index: Arc::new(ArcSwap::from_pointee(SearchIndex::build(
                 &PersistentVector::new(),
             ))),
+            search_cache: Arc::new(SearchCache::with_default_config()),
         }
     }
 

@@ -435,6 +435,267 @@ impl SearchCacheKey {
 }
 
 // =============================================================================
+// Search Result Cache (REQ-SEARCH-CACHE-001)
+// =============================================================================
+
+use lru::LruCache;
+use std::num::NonZeroUsize;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// Cached search result with timestamp for TTL.
+///
+/// This structure wraps a search result with a timestamp to enable
+/// TTL-based cache invalidation.
+#[derive(Clone)]
+pub struct CachedSearchResult {
+    /// The cached search result.
+    pub result: SearchResult,
+    /// Timestamp when the result was cached.
+    pub cached_at: Instant,
+}
+
+/// Cache statistics for monitoring.
+#[derive(Debug, Clone, Default)]
+pub struct CacheStats {
+    /// Number of cache hits.
+    pub hits: u64,
+    /// Number of cache misses.
+    pub misses: u64,
+}
+
+impl CacheStats {
+    /// Returns the hit rate as a percentage (0.0 to 1.0).
+    ///
+    /// Returns 0.0 if no requests have been made.
+    ///
+    /// # Note
+    ///
+    /// For very large hit/miss counts (> 2^52), there may be minor precision loss
+    /// when converting to f64. This is acceptable for monitoring purposes.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn hit_rate(&self) -> f64 {
+        let total = self.hits + self.misses;
+        if total == 0 {
+            0.0
+        } else {
+            self.hits as f64 / total as f64
+        }
+    }
+}
+
+/// LRU cache for search results with TTL.
+///
+/// This cache provides:
+/// - **LRU eviction**: When capacity is reached, least recently used entries are evicted
+/// - **TTL expiration**: Entries older than TTL are considered stale and not returned
+/// - **Thread-safety**: Uses `Mutex` for safe concurrent access
+///
+/// # Configuration (REQ-SEARCH-CACHE-001)
+///
+/// - **TTL**: 5 seconds (entries expire after this duration)
+/// - **Capacity**: 2000 entries maximum
+///
+/// # Cache Key
+///
+/// The cache key is `(normalized_q, scope, limit, offset)` using exact matching.
+/// Query normalization ensures that equivalent queries (with different whitespace
+/// or casing) produce the same cache key.
+///
+/// # Thread Safety
+///
+/// The cache uses a `Mutex` to ensure safe concurrent access. While this introduces
+/// some contention, the cache operations are fast (O(1) for LRU operations) and
+/// the critical section is minimal.
+///
+/// # Example
+///
+/// ```ignore
+/// let cache = SearchCache::new(2000, Duration::from_secs(5));
+///
+/// // Check cache
+/// if let Some(result) = cache.get(&cache_key) {
+///     return Ok(result);
+/// }
+///
+/// // Cache miss - perform search
+/// let result = search_with_scope_indexed(&index, query, scope);
+///
+/// // Store in cache
+/// cache.put(cache_key, result.clone());
+/// ```
+pub struct SearchCache {
+    /// The LRU cache protected by a mutex.
+    cache: Mutex<LruCache<SearchCacheKey, CachedSearchResult>>,
+    /// Time-to-live for cache entries.
+    time_to_live: Duration,
+    /// Cache statistics.
+    stats: Mutex<CacheStats>,
+}
+
+impl SearchCache {
+    /// Creates a new search cache with the specified capacity and TTL.
+    ///
+    /// # Arguments
+    ///
+    /// * `capacity` - Maximum number of entries in the cache
+    /// * `time_to_live` - Duration after which entries are considered stale
+    ///
+    /// # Panics
+    ///
+    /// Panics if `capacity` is 0.
+    #[must_use]
+    pub fn new(capacity: usize, time_to_live: Duration) -> Self {
+        Self {
+            cache: Mutex::new(LruCache::new(
+                NonZeroUsize::new(capacity).expect("capacity must be non-zero"),
+            )),
+            time_to_live,
+            stats: Mutex::new(CacheStats::default()),
+        }
+    }
+
+    /// Creates a new search cache with default configuration.
+    ///
+    /// Default configuration (REQ-SEARCH-CACHE-001):
+    /// - Capacity: 2000 entries
+    /// - TTL: 5 seconds
+    #[must_use]
+    pub fn with_default_config() -> Self {
+        Self::new(2000, Duration::from_secs(5))
+    }
+
+    /// Gets a cached search result if it exists and is not expired.
+    ///
+    /// If the entry exists but is expired (older than TTL), it is removed
+    /// and `None` is returned.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The cache key to look up
+    ///
+    /// # Returns
+    ///
+    /// `Some(SearchResult)` if the entry exists and is not expired, `None` otherwise.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned. This should only happen if a thread
+    /// panicked while holding the lock, which indicates a programming error.
+    pub fn get(&self, key: &SearchCacheKey) -> Option<SearchResult> {
+        let mut cache = self.cache.lock().expect("cache mutex poisoned");
+        let mut stats = self.stats.lock().expect("stats mutex poisoned");
+
+        if let Some(cached) = cache.get(key) {
+            if cached.cached_at.elapsed() < self.time_to_live {
+                // Cache hit - entry is valid
+                stats.hits += 1;
+                return Some(cached.result.clone());
+            }
+            // Entry is expired - remove it
+            tracing::debug!(
+                query = %key.normalized_query(),
+                scope = ?key.scope(),
+                "Search cache entry expired"
+            );
+        }
+
+        // Pop the expired entry if it exists
+        cache.pop(key);
+        drop(cache); // Release cache lock as soon as possible
+
+        // Cache miss
+        stats.misses += 1;
+
+        None
+    }
+
+    /// Stores a search result in the cache.
+    ///
+    /// If the cache is at capacity, the least recently used entry is evicted.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The cache key
+    /// * `result` - The search result to cache
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned. This should only happen if a thread
+    /// panicked while holding the lock, which indicates a programming error.
+    pub fn put(&self, key: SearchCacheKey, result: SearchResult) {
+        let mut cache = self.cache.lock().expect("cache mutex poisoned");
+        cache.put(
+            key,
+            CachedSearchResult {
+                result,
+                cached_at: Instant::now(),
+            },
+        );
+    }
+
+    /// Returns the current cache statistics.
+    ///
+    /// This method is useful for monitoring cache performance.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned. This should only happen if a thread
+    /// panicked while holding the lock, which indicates a programming error.
+    #[must_use]
+    pub fn stats(&self) -> CacheStats {
+        self.stats.lock().expect("stats mutex poisoned").clone()
+    }
+
+    /// Returns the current number of entries in the cache.
+    ///
+    /// Note: This includes expired entries that haven't been removed yet.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned. This should only happen if a thread
+    /// panicked while holding the lock, which indicates a programming error.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.cache.lock().expect("cache mutex poisoned").len()
+    }
+
+    /// Returns true if the cache is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Clears all entries from the cache.
+    ///
+    /// This does not reset the statistics.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned. This should only happen if a thread
+    /// panicked while holding the lock, which indicates a programming error.
+    pub fn clear(&self) {
+        self.cache.lock().expect("cache mutex poisoned").clear();
+    }
+}
+
+impl std::fmt::Debug for SearchCache {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let len = self.len();
+        let stats = self.stats();
+        formatter
+            .debug_struct("SearchCache")
+            .field("len", &len)
+            .field("time_to_live", &self.time_to_live)
+            .field("hits", &stats.hits)
+            .field("misses", &stats.misses)
+            .field("hit_rate", &format!("{:.2}%", stats.hit_rate() * 100.0))
+            .finish_non_exhaustive()
+    }
+}
+
+// =============================================================================
 // Response DTOs
 // =============================================================================
 
@@ -1597,12 +1858,18 @@ fn paginate_tasks(
 /// - **`Semigroup::combine`**: Combining search results with deduplication
 /// - **Deduplication**: Using `Semigroup::combine` for merging overlapping results
 /// - **Pagination**: Using `normalize_search_pagination` for limit/offset handling
+/// - **Caching**: LRU cache with TTL for repeated queries (REQ-SEARCH-CACHE-001)
 ///
 /// # Performance
 ///
 /// The search index is pre-built at application startup and updated incrementally
 /// when tasks are created/updated/deleted. This eliminates the need to rebuild
 /// the index on every search request, significantly improving performance.
+///
+/// Search results are cached with:
+/// - **TTL**: 5 seconds
+/// - **Capacity**: 2000 entries (LRU eviction)
+/// - **Cache key**: `(normalized_query, scope, limit, offset)`
 ///
 /// # Query Parameters
 ///
@@ -1624,8 +1891,39 @@ pub async fn search_tasks(
     State(state): State<AppState>,
     Query(query): Query<SearchTasksQuery>,
 ) -> Result<Json<Vec<TaskResponse>>, ApiErrorResponse> {
-    // Normalize query for consistent caching and searching
-    // This ensures "  urgent   task  " is treated the same as "urgent task"
+    // Create cache key from raw query parameters
+    // The key includes normalized query, scope, limit, and offset
+    let cache_key = SearchCacheKey::from_raw(&query.q, query.scope, query.limit, query.offset);
+
+    // Check cache first
+    if let Some(cached_result) = state.search_cache.get(&cache_key) {
+        // Cache hit - log metrics
+        tracing::debug!(
+            cache_hit = true,
+            hit_rate = %state.search_cache.stats().hit_rate(),
+            "Search cache hit"
+        );
+        // Convert cached SearchResult to response
+        let (limit, offset) = normalize_search_pagination(query.limit, query.offset);
+        let response: Vec<TaskResponse> = cached_result
+            .into_tasks()
+            .iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .map(TaskResponse::from)
+            .collect();
+        return Ok(Json(response));
+    }
+
+    // Cache miss - log metrics
+    tracing::debug!(
+        cache_hit = false,
+        hit_rate = %state.search_cache.stats().hit_rate(),
+        "Search cache miss"
+    );
+
+    // Perform search
+    // Normalize query for consistent searching
     let normalized = normalize_query(&query.q);
     let normalized_query = normalized.key();
 
@@ -1634,6 +1932,11 @@ pub async fn search_tasks(
 
     // Pure computation: Search with scope using normalized query
     let results = search_with_scope_indexed(&index, normalized_query, query.scope);
+
+    // Store in cache with the exact cache key (including normalized limit/offset)
+    // Each unique (query, scope, limit, offset) combination creates a separate cache entry
+    // to ensure correct results for each pagination request
+    state.search_cache.put(cache_key, results.clone());
 
     // Apply pagination using pure function
     let (limit, offset) = normalize_search_pagination(query.limit, query.offset);
@@ -5329,6 +5632,515 @@ mod search_index_differential_update_tests {
             index_twice.all_tasks().len(),
             1,
             "Should have exactly one task after Update operations"
+        );
+    }
+}
+
+// =============================================================================
+// SearchCache Tests (REQ-SEARCH-CACHE-001)
+// =============================================================================
+
+#[cfg(test)]
+mod search_cache_tests {
+    use super::*;
+    use crate::domain::{Priority, Tag, TaskId, Timestamp};
+    use rstest::rstest;
+    use std::thread;
+    use std::time::Duration;
+
+    fn create_test_task(title: &str, priority: Priority) -> Task {
+        Task::new(TaskId::generate(), title, Timestamp::now()).with_priority(priority)
+    }
+
+    #[allow(dead_code)]
+    fn create_test_task_with_tags(title: &str, priority: Priority, tags: &[&str]) -> Task {
+        let base = create_test_task(title, priority);
+        tags.iter()
+            .fold(base, |task, tag| task.add_tag(Tag::new(*tag)))
+    }
+
+    // -------------------------------------------------------------------------
+    // Basic Cache Operations Tests
+    // -------------------------------------------------------------------------
+
+    /// Test: Cache miss returns `None` for unknown key.
+    #[rstest]
+    fn test_cache_miss_returns_none() {
+        let cache = SearchCache::new(10, Duration::from_secs(5));
+        let key = SearchCacheKey::from_raw("unknown query", SearchScope::All, Some(50), Some(0));
+
+        let result = cache.get(&key);
+
+        assert!(result.is_none(), "Cache miss should return None");
+    }
+
+    /// Test: Cache hit returns stored result.
+    #[rstest]
+    fn test_cache_hit_returns_stored_result() {
+        let cache = SearchCache::new(10, Duration::from_secs(5));
+        let key = SearchCacheKey::from_raw("test query", SearchScope::All, Some(50), Some(0));
+
+        // Create a search result
+        let task = create_test_task("Test Task", Priority::High);
+        let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+        let search_result = SearchResult::from_tasks(tasks);
+
+        // Store in cache
+        cache.put(key.clone(), search_result);
+
+        // Get from cache
+        let cached = cache.get(&key);
+
+        assert!(cached.is_some(), "Cache hit should return Some");
+        let cached_result = cached.unwrap();
+        assert_eq!(
+            cached_result.into_tasks().len(),
+            1,
+            "Cached result should have 1 task"
+        );
+    }
+
+    /// Test: Same query second time is a cache hit.
+    #[rstest]
+    fn test_same_query_second_time_is_cache_hit() {
+        let cache = SearchCache::new(10, Duration::from_secs(5));
+        let key = SearchCacheKey::from_raw("urgent task", SearchScope::Title, Some(50), Some(0));
+
+        // Create and store a result
+        let task = create_test_task("Urgent Task", Priority::Critical);
+        let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+        let search_result = SearchResult::from_tasks(tasks);
+        cache.put(key.clone(), search_result);
+
+        // First get - should hit
+        let first_get = cache.get(&key);
+        assert!(first_get.is_some(), "First get should hit");
+
+        // Second get - should also hit
+        let second_get = cache.get(&key);
+        assert!(second_get.is_some(), "Second get should also hit");
+
+        // Check stats
+        let stats = cache.stats();
+        assert_eq!(stats.hits, 2, "Should have 2 cache hits");
+        assert_eq!(stats.misses, 0, "Should have 0 cache misses");
+    }
+
+    // -------------------------------------------------------------------------
+    // TTL Tests
+    // -------------------------------------------------------------------------
+
+    /// Test: Entry expires after TTL.
+    #[rstest]
+    fn test_entry_expires_after_ttl() {
+        // Use very short TTL for testing
+        let cache = SearchCache::new(10, Duration::from_millis(50));
+        let key = SearchCacheKey::from_raw("expiring query", SearchScope::All, Some(50), Some(0));
+
+        // Store a result
+        let task = create_test_task("Expiring Task", Priority::Low);
+        let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+        let search_result = SearchResult::from_tasks(tasks);
+        cache.put(key.clone(), search_result);
+
+        // Immediate get should hit
+        let immediate_get = cache.get(&key);
+        assert!(immediate_get.is_some(), "Immediate get should hit");
+
+        // Wait for TTL to expire
+        thread::sleep(Duration::from_millis(100));
+
+        // Get after TTL should miss
+        let expired_get = cache.get(&key);
+        assert!(expired_get.is_none(), "Get after TTL should miss");
+    }
+
+    /// Test: Entry is valid just before TTL expires.
+    #[rstest]
+    fn test_entry_valid_before_ttl() {
+        // Use 200ms TTL for testing
+        let cache = SearchCache::new(10, Duration::from_millis(200));
+        let key = SearchCacheKey::from_raw("valid query", SearchScope::All, Some(50), Some(0));
+
+        // Store a result
+        let task = create_test_task("Valid Task", Priority::Medium);
+        let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+        let search_result = SearchResult::from_tasks(tasks);
+        cache.put(key.clone(), search_result);
+
+        // Wait less than TTL
+        thread::sleep(Duration::from_millis(100));
+
+        // Get should still hit
+        let result = cache.get(&key);
+        assert!(result.is_some(), "Get before TTL expires should hit");
+    }
+
+    // -------------------------------------------------------------------------
+    // LRU Eviction Tests
+    // -------------------------------------------------------------------------
+
+    /// Test: LRU eviction when capacity is exceeded.
+    #[rstest]
+    fn test_lru_eviction_on_capacity_exceeded() {
+        // Small capacity for testing
+        let cache = SearchCache::new(3, Duration::from_secs(60));
+
+        // Add 3 entries (fills capacity)
+        for i in 0..3 {
+            let key =
+                SearchCacheKey::from_raw(&format!("query{i}"), SearchScope::All, Some(50), Some(0));
+            let task = create_test_task(&format!("Task {i}"), Priority::Low);
+            let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+            cache.put(key, SearchResult::from_tasks(tasks));
+        }
+
+        assert_eq!(cache.len(), 3, "Cache should have 3 entries");
+
+        // Access query1 and query2 to make query0 the least recently used
+        let key1 = SearchCacheKey::from_raw("query1", SearchScope::All, Some(50), Some(0));
+        let key2 = SearchCacheKey::from_raw("query2", SearchScope::All, Some(50), Some(0));
+        let _ = cache.get(&key1);
+        let _ = cache.get(&key2);
+
+        // Add a 4th entry - should evict query0 (LRU)
+        let key3 = SearchCacheKey::from_raw("query3", SearchScope::All, Some(50), Some(0));
+        let task = create_test_task("Task 3", Priority::High);
+        let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+        cache.put(key3.clone(), SearchResult::from_tasks(tasks));
+
+        // Cache should still have 3 entries
+        assert_eq!(
+            cache.len(),
+            3,
+            "Cache should still have 3 entries after eviction"
+        );
+
+        // query0 should be evicted
+        let key0 = SearchCacheKey::from_raw("query0", SearchScope::All, Some(50), Some(0));
+        let result0 = cache.get(&key0);
+        assert!(result0.is_none(), "query0 should be evicted");
+
+        // query1, query2, query3 should still be present
+        let result1 = cache.get(&key1);
+        assert!(result1.is_some(), "query1 should still be present");
+
+        let result2 = cache.get(&key2);
+        assert!(result2.is_some(), "query2 should still be present");
+
+        let result3 = cache.get(&key3);
+        assert!(result3.is_some(), "query3 should still be present");
+    }
+
+    // -------------------------------------------------------------------------
+    // Cache Statistics Tests
+    // -------------------------------------------------------------------------
+
+    /// Test: Hit rate calculation.
+    #[rstest]
+    fn test_hit_rate_calculation() {
+        let cache = SearchCache::new(10, Duration::from_secs(5));
+
+        // Initial hit rate should be 0.0
+        let initial_stats = cache.stats();
+        assert!(
+            (initial_stats.hit_rate() - 0.0).abs() < f64::EPSILON,
+            "Initial hit rate should be 0.0"
+        );
+
+        // Store a result
+        let key = SearchCacheKey::from_raw("test", SearchScope::All, Some(50), Some(0));
+        let task = create_test_task("Test", Priority::Low);
+        let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+        cache.put(key.clone(), SearchResult::from_tasks(tasks));
+
+        // 2 hits
+        cache.get(&key);
+        cache.get(&key);
+
+        // 1 miss
+        let miss_key = SearchCacheKey::from_raw("miss", SearchScope::All, Some(50), Some(0));
+        cache.get(&miss_key);
+
+        let stats = cache.stats();
+        assert_eq!(stats.hits, 2, "Should have 2 hits");
+        assert_eq!(stats.misses, 1, "Should have 1 miss");
+
+        // Hit rate should be 2/3 = 0.666...
+        let hit_rate = stats.hit_rate();
+        assert!(
+            (hit_rate - 0.666_666_66).abs() < 0.001,
+            "Hit rate should be approximately 0.667, got {hit_rate}"
+        );
+    }
+
+    /// Test: Cache statistics after multiple operations.
+    #[rstest]
+    fn test_cache_stats_after_operations() {
+        let cache = SearchCache::new(10, Duration::from_secs(5));
+
+        // Store some results
+        for i in 0..5 {
+            let key =
+                SearchCacheKey::from_raw(&format!("query{i}"), SearchScope::All, Some(50), Some(0));
+            let task = create_test_task(&format!("Task {i}"), Priority::Low);
+            let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+            cache.put(key, SearchResult::from_tasks(tasks));
+        }
+
+        // 3 hits
+        for i in 0..3 {
+            let key =
+                SearchCacheKey::from_raw(&format!("query{i}"), SearchScope::All, Some(50), Some(0));
+            cache.get(&key);
+        }
+
+        // 2 misses
+        for i in 10..12 {
+            let key =
+                SearchCacheKey::from_raw(&format!("query{i}"), SearchScope::All, Some(50), Some(0));
+            cache.get(&key);
+        }
+
+        let stats = cache.stats();
+        assert_eq!(stats.hits, 3, "Should have 3 hits");
+        assert_eq!(stats.misses, 2, "Should have 2 misses");
+    }
+
+    // -------------------------------------------------------------------------
+    // Cache Key Equivalence Tests
+    // -------------------------------------------------------------------------
+
+    /// Test: Same query with different formatting hits the same cache entry.
+    #[rstest]
+    fn test_normalized_query_hits_same_cache_entry() {
+        let cache = SearchCache::new(10, Duration::from_secs(5));
+
+        // Store with one formatting
+        let key1 =
+            SearchCacheKey::from_raw("  URGENT   Task  ", SearchScope::All, Some(50), Some(0));
+        let task = create_test_task("Test", Priority::High);
+        let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+        cache.put(key1, SearchResult::from_tasks(tasks));
+
+        // Get with different formatting - should hit
+        let key2 = SearchCacheKey::from_raw("urgent task", SearchScope::All, Some(50), Some(0));
+        let result = cache.get(&key2);
+
+        assert!(
+            result.is_some(),
+            "Normalized equivalent query should hit cache"
+        );
+    }
+
+    /// Test: Different limit produces different cache key.
+    #[rstest]
+    fn test_different_limit_different_cache_key() {
+        let cache = SearchCache::new(10, Duration::from_secs(5));
+
+        // Store with limit=50
+        let key1 = SearchCacheKey::from_raw("test", SearchScope::All, Some(50), Some(0));
+        let task = create_test_task("Test", Priority::Low);
+        let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+        cache.put(key1.clone(), SearchResult::from_tasks(tasks));
+
+        // Get with limit=100 - should miss
+        let key2 = SearchCacheKey::from_raw("test", SearchScope::All, Some(100), Some(0));
+        let result = cache.get(&key2);
+
+        assert!(result.is_none(), "Different limit should miss cache");
+
+        // Original key should still hit
+        let original = cache.get(&key1);
+        assert!(original.is_some(), "Original key should still hit");
+    }
+
+    /// Test: Different offset produces different cache key.
+    #[rstest]
+    fn test_different_offset_different_cache_key() {
+        let cache = SearchCache::new(10, Duration::from_secs(5));
+
+        // Store with offset=0
+        let key1 = SearchCacheKey::from_raw("test", SearchScope::All, Some(50), Some(0));
+        let task = create_test_task("Test", Priority::Low);
+        let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+        cache.put(key1, SearchResult::from_tasks(tasks));
+
+        // Get with offset=10 - should miss
+        let key2 = SearchCacheKey::from_raw("test", SearchScope::All, Some(50), Some(10));
+        let result = cache.get(&key2);
+
+        assert!(result.is_none(), "Different offset should miss cache");
+    }
+
+    /// Test: Different scope produces different cache key.
+    #[rstest]
+    fn test_different_scope_different_cache_key() {
+        let cache = SearchCache::new(10, Duration::from_secs(5));
+
+        // Store with scope=All
+        let key1 = SearchCacheKey::from_raw("test", SearchScope::All, Some(50), Some(0));
+        let task = create_test_task("Test", Priority::Low);
+        let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+        cache.put(key1, SearchResult::from_tasks(tasks));
+
+        // Get with scope=Title - should miss
+        let key2 = SearchCacheKey::from_raw("test", SearchScope::Title, Some(50), Some(0));
+        let result = cache.get(&key2);
+
+        assert!(result.is_none(), "Different scope should miss cache");
+    }
+
+    // -------------------------------------------------------------------------
+    // Utility Method Tests
+    // -------------------------------------------------------------------------
+
+    /// Test: `len` and `is_empty` methods.
+    #[rstest]
+    fn test_len_and_is_empty() {
+        let cache = SearchCache::new(10, Duration::from_secs(5));
+
+        assert!(cache.is_empty(), "New cache should be empty");
+        assert_eq!(cache.len(), 0, "New cache should have length 0");
+
+        // Add an entry
+        let key = SearchCacheKey::from_raw("test", SearchScope::All, Some(50), Some(0));
+        let task = create_test_task("Test", Priority::Low);
+        let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+        cache.put(key, SearchResult::from_tasks(tasks));
+
+        assert!(!cache.is_empty(), "Cache should not be empty after insert");
+        assert_eq!(cache.len(), 1, "Cache should have length 1");
+    }
+
+    /// Test: `clear` method.
+    #[rstest]
+    fn test_clear() {
+        let cache = SearchCache::new(10, Duration::from_secs(5));
+
+        // Add some entries
+        for i in 0..5 {
+            let key =
+                SearchCacheKey::from_raw(&format!("query{i}"), SearchScope::All, Some(50), Some(0));
+            let task = create_test_task(&format!("Task {i}"), Priority::Low);
+            let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+            cache.put(key, SearchResult::from_tasks(tasks));
+        }
+
+        assert_eq!(cache.len(), 5, "Cache should have 5 entries");
+
+        // Clear the cache
+        cache.clear();
+
+        assert!(cache.is_empty(), "Cache should be empty after clear");
+        assert_eq!(cache.len(), 0, "Cache length should be 0 after clear");
+    }
+
+    /// Test: Debug formatting.
+    #[rstest]
+    fn test_debug_format() {
+        let cache = SearchCache::new(100, Duration::from_secs(5));
+
+        // Add an entry and access it
+        let key = SearchCacheKey::from_raw("test", SearchScope::All, Some(50), Some(0));
+        let task = create_test_task("Test", Priority::Low);
+        let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+        cache.put(key.clone(), SearchResult::from_tasks(tasks));
+        cache.get(&key);
+
+        let debug_str = format!("{cache:?}");
+
+        assert!(
+            debug_str.contains("SearchCache"),
+            "Debug should contain 'SearchCache'"
+        );
+        assert!(debug_str.contains("len"), "Debug should contain 'len'");
+        assert!(debug_str.contains("hits"), "Debug should contain 'hits'");
+        assert!(
+            debug_str.contains("misses"),
+            "Debug should contain 'misses'"
+        );
+        assert!(
+            debug_str.contains("hit_rate"),
+            "Debug should contain 'hit_rate'"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Default Configuration Tests
+    // -------------------------------------------------------------------------
+
+    /// Test: `with_default_config` creates cache with correct settings.
+    #[rstest]
+    fn test_with_default_config() {
+        let cache = SearchCache::with_default_config();
+
+        // Add 2000 entries (should work)
+        for i in 0..2000 {
+            let key =
+                SearchCacheKey::from_raw(&format!("query{i}"), SearchScope::All, Some(50), Some(0));
+            let task = create_test_task(&format!("Task {i}"), Priority::Low);
+            let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+            cache.put(key, SearchResult::from_tasks(tasks));
+        }
+
+        assert_eq!(cache.len(), 2000, "Cache should hold 2000 entries");
+
+        // Add one more - should evict oldest
+        let key = SearchCacheKey::from_raw("query_overflow", SearchScope::All, Some(50), Some(0));
+        let task = create_test_task("Overflow Task", Priority::High);
+        let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+        cache.put(key, SearchResult::from_tasks(tasks));
+
+        assert_eq!(
+            cache.len(),
+            2000,
+            "Cache should still have 2000 entries after overflow"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // CacheStats Tests
+    // -------------------------------------------------------------------------
+
+    /// Test: `CacheStats` default values.
+    #[rstest]
+    fn test_cache_stats_default() {
+        let stats = CacheStats::default();
+
+        assert_eq!(stats.hits, 0, "Default hits should be 0");
+        assert_eq!(stats.misses, 0, "Default misses should be 0");
+        assert!(
+            (stats.hit_rate() - 0.0).abs() < f64::EPSILON,
+            "Default hit rate should be 0.0"
+        );
+    }
+
+    /// Test: `CacheStats` hit rate with only hits.
+    #[rstest]
+    fn test_cache_stats_all_hits() {
+        let stats = CacheStats {
+            hits: 10,
+            misses: 0,
+        };
+
+        assert!(
+            (stats.hit_rate() - 1.0).abs() < f64::EPSILON,
+            "Hit rate with only hits should be 1.0"
+        );
+    }
+
+    /// Test: `CacheStats` hit rate with only misses.
+    #[rstest]
+    fn test_cache_stats_all_misses() {
+        let stats = CacheStats {
+            hits: 0,
+            misses: 10,
+        };
+
+        assert!(
+            (stats.hit_rate() - 0.0).abs() < f64::EPSILON,
+            "Hit rate with only misses should be 0.0"
         );
     }
 }
