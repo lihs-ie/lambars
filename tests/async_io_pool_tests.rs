@@ -12,6 +12,8 @@
 //! - Automatic permit release on cancellation (drop safety)
 //! - FIFO ordering guaranteed by bounded mpsc channel
 
+#![cfg(feature = "async")]
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
