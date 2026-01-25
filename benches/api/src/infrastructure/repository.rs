@@ -206,6 +206,39 @@ pub trait TaskRepository: Send + Sync {
     /// The version field is used for optimistic locking.
     fn save(&self, task: &Task) -> AsyncIO<Result<(), RepositoryError>>;
 
+    /// Saves multiple tasks in a batch operation.
+    ///
+    /// This method processes multiple tasks for saving. The current implementation
+    /// varies by backend:
+    /// - **`InMemory`**: Sequential processing with version checking
+    /// - **`PostgreSQL`**: Sequential processing with individual transactions
+    /// - **`Redis`**: Sequential Lua script execution
+    ///
+    /// # Atomicity
+    ///
+    /// **This operation is NOT atomic as a batch.** Partial success is possible - some tasks
+    /// may be saved successfully while others fail. Each result in the returned
+    /// vector corresponds to the task at the same index in the input slice.
+    /// No rollback of the entire batch is performed on partial failure.
+    ///
+    /// # Version Semantics
+    ///
+    /// Version checking follows the same rules as `save`:
+    /// - For new tasks, version should be 1
+    /// - For updates, version should be exactly `existing_version + 1`
+    ///
+    /// # Arguments
+    ///
+    /// * `tasks` - Slice of tasks to save
+    ///
+    /// # Returns
+    ///
+    /// A vector of results with the same length as input, preserving order.
+    /// Each result is either:
+    /// - `Ok(())` if the task was saved successfully
+    /// - `Err(RepositoryError)` if the save failed (e.g., version conflict)
+    fn save_bulk(&self, tasks: &[Task]) -> AsyncIO<Vec<Result<(), RepositoryError>>>;
+
     /// Deletes a task by its ID.
     ///
     /// Returns `Ok(true)` if the task was deleted, `Ok(false)` if it didn't exist.

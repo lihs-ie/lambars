@@ -616,6 +616,11 @@ mod tests {
             AsyncIO::new(|| async { Ok(()) })
         }
 
+        fn save_bulk(&self, tasks: &[Task]) -> AsyncIO<Vec<Result<(), RepositoryError>>> {
+            let count = tasks.len();
+            AsyncIO::new(move || async move { vec![Ok(()); count] })
+        }
+
         fn delete(&self, _id: &TaskId) -> AsyncIO<Result<bool, RepositoryError>> {
             AsyncIO::new(|| async { Ok(false) })
         }

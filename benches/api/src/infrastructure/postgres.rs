@@ -192,6 +192,120 @@ impl TaskRepository for PostgresTaskRepository {
         })
     }
 
+    fn save_bulk(&self, tasks: &[Task]) -> AsyncIO<Vec<Result<(), RepositoryError>>> {
+        let pool = self.pool.clone();
+        let tasks_to_save: Vec<Task> = tasks.to_vec();
+
+        AsyncIO::new(move || async move {
+            if tasks_to_save.is_empty() {
+                return Vec::new();
+            }
+
+            let mut results = Vec::with_capacity(tasks_to_save.len());
+
+            for task in tasks_to_save {
+                let task_data = match serde_json::to_value(&task) {
+                    Ok(data) => data,
+                    Err(error) => {
+                        results.push(Err(RepositoryError::SerializationError(error.to_string())));
+                        continue;
+                    }
+                };
+
+                let transaction = match pool.begin().await {
+                    Ok(transaction) => transaction,
+                    Err(error) => {
+                        results.push(Err(RepositoryError::DatabaseError(error.to_string())));
+                        continue;
+                    }
+                };
+
+                let mut transaction = transaction;
+
+                // Check current version for optimistic locking
+                let existing_row: Result<Option<(i64,)>, _> =
+                    sqlx::query_as("SELECT version FROM tasks WHERE id = $1 FOR UPDATE")
+                        .bind(task.task_id.as_uuid())
+                        .fetch_optional(&mut *transaction)
+                        .await;
+
+                let existing_row = match existing_row {
+                    Ok(row) => row,
+                    Err(error) => {
+                        results.push(Err(RepositoryError::DatabaseError(error.to_string())));
+                        continue;
+                    }
+                };
+
+                #[allow(clippy::cast_possible_wrap)]
+                let new_version = task.version as i64;
+
+                let save_result = if let Some((existing_version,)) = existing_row {
+                    // Update case: version must be existing + 1
+                    let expected_version = existing_version + 1;
+                    if new_version == expected_version {
+                        let update_result = sqlx::query(
+                            "UPDATE tasks SET data = $1, version = $2, updated_at = NOW() WHERE id = $3",
+                        )
+                        .bind(&task_data)
+                        .bind(new_version)
+                        .bind(task.task_id.as_uuid())
+                        .execute(&mut *transaction)
+                        .await;
+
+                        match update_result {
+                            Ok(_) => match transaction.commit().await {
+                                Ok(()) => Ok(()),
+                                Err(error) => {
+                                    Err(RepositoryError::DatabaseError(error.to_string()))
+                                }
+                            },
+                            Err(error) => Err(RepositoryError::DatabaseError(error.to_string())),
+                        }
+                    } else {
+                        Err(RepositoryError::VersionConflict {
+                            #[allow(clippy::cast_sign_loss)]
+                            expected: expected_version as u64,
+                            found: task.version,
+                        })
+                    }
+                } else {
+                    // New entity case: version must be 1
+                    if task.version == 1 {
+                        let insert_result = sqlx::query(
+                            "INSERT INTO tasks (id, data, version, created_at, updated_at) \
+                             VALUES ($1, $2, $3, NOW(), NOW())",
+                        )
+                        .bind(task.task_id.as_uuid())
+                        .bind(&task_data)
+                        .bind(new_version)
+                        .execute(&mut *transaction)
+                        .await;
+
+                        match insert_result {
+                            Ok(_) => match transaction.commit().await {
+                                Ok(()) => Ok(()),
+                                Err(error) => {
+                                    Err(RepositoryError::DatabaseError(error.to_string()))
+                                }
+                            },
+                            Err(error) => Err(RepositoryError::DatabaseError(error.to_string())),
+                        }
+                    } else {
+                        Err(RepositoryError::VersionConflict {
+                            expected: 1,
+                            found: task.version,
+                        })
+                    }
+                };
+
+                results.push(save_result);
+            }
+
+            results
+        })
+    }
+
     fn delete(&self, id: &TaskId) -> AsyncIO<Result<bool, RepositoryError>> {
         let pool = self.pool.clone();
         let task_id = id.clone();

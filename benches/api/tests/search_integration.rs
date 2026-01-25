@@ -193,7 +193,7 @@ fn test_normalization_idempotent() {
     assert_eq!(first.key(), second.key());
 }
 
-/// Test that cache key is idempotent - from_raw with already normalized input produces same key.
+/// Test that cache key is idempotent - `from_raw` with already normalized input produces same key.
 #[rstest]
 fn test_cache_key_idempotent() {
     let raw_query = "  Multiple   SPACES   Here  ";

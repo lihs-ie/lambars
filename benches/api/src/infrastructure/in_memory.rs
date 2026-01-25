@@ -106,7 +106,7 @@ impl TaskRepository for InMemoryTaskRepository {
         AsyncIO::new(move || async move {
             let mut guard = tasks.write().await;
 
-            // Check for version conflict if the task already exists
+            // Check for version conflict
             if let Some(existing) = guard.get(&task.task_id) {
                 // For updates, the task's version must be exactly one more than existing
                 // This prevents version jumps and ensures strict sequential versioning
@@ -116,11 +116,62 @@ impl TaskRepository for InMemoryTaskRepository {
                         found: task.version,
                     });
                 }
+            } else {
+                // For new tasks, version must be 1
+                if task.version != 1 {
+                    return Err(RepositoryError::VersionConflict {
+                        expected: 1,
+                        found: task.version,
+                    });
+                }
             }
 
             // Insert the task (this creates a new map with structural sharing)
             *guard = guard.insert(task.task_id.clone(), task);
             Ok(())
+        })
+    }
+
+    #[allow(clippy::future_not_send)]
+    fn save_bulk(&self, tasks: &[Task]) -> AsyncIO<Vec<Result<(), RepositoryError>>> {
+        let storage = Arc::clone(&self.tasks);
+        let tasks_to_save: Vec<Task> = tasks.to_vec();
+        AsyncIO::new(move || async move {
+            if tasks_to_save.is_empty() {
+                return Vec::new();
+            }
+
+            let mut guard = storage.write().await;
+            let results: Vec<Result<(), RepositoryError>> = tasks_to_save
+                .into_iter()
+                .map(|task| {
+                    // Check for version conflict
+                    if let Some(existing) = guard.get(&task.task_id) {
+                        // For updates, the task's version must be exactly one more than existing
+                        // This prevents version jumps and ensures strict sequential versioning
+                        if task.version != existing.version + 1 {
+                            return Err(RepositoryError::VersionConflict {
+                                expected: existing.version + 1,
+                                found: task.version,
+                            });
+                        }
+                    } else {
+                        // For new tasks, version must be 1
+                        if task.version != 1 {
+                            return Err(RepositoryError::VersionConflict {
+                                expected: 1,
+                                found: task.version,
+                            });
+                        }
+                    }
+
+                    // Insert the task (this creates a new map with structural sharing)
+                    *guard = guard.insert(task.task_id.clone(), task);
+                    Ok(())
+                })
+                .collect();
+
+            results
         })
     }
 
@@ -1232,5 +1283,261 @@ mod tests {
             }
             _ => panic!("Expected VersionConflict error"),
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // InMemoryTaskRepository save_bulk Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_task_repository_save_bulk_empty() {
+        let repository = InMemoryTaskRepository::new();
+        let tasks: Vec<Task> = vec![];
+
+        let results = repository.save_bulk(&tasks).run_async().await;
+
+        assert!(results.is_empty());
+        assert_eq!(repository.count().run_async().await.unwrap(), 0);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_task_repository_save_bulk_single() {
+        let repository = InMemoryTaskRepository::new();
+        let task = test_task("Single Task");
+        let task_id = task.task_id.clone();
+
+        let results = repository.save_bulk(&[task]).run_async().await;
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+        assert_eq!(repository.count().run_async().await.unwrap(), 1);
+
+        // Verify the task was saved correctly
+        let found = repository
+            .find_by_id(&task_id)
+            .run_async()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.title, "Single Task");
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_task_repository_save_bulk_multiple() {
+        let repository = InMemoryTaskRepository::new();
+        let tasks: Vec<Task> = (0..5).map(|i| test_task(&format!("Task {i}"))).collect();
+        let task_ids: Vec<TaskId> = tasks.iter().map(|t| t.task_id.clone()).collect();
+
+        let results = repository.save_bulk(&tasks).run_async().await;
+
+        // Verify all results are successful
+        assert_eq!(results.len(), 5);
+        for (index, result) in results.iter().enumerate() {
+            assert!(result.is_ok(), "Task {index} should be saved successfully");
+        }
+
+        // Verify count
+        assert_eq!(repository.count().run_async().await.unwrap(), 5);
+
+        // Verify each task was saved correctly
+        for (index, task_id) in task_ids.iter().enumerate() {
+            let found = repository
+                .find_by_id(task_id)
+                .run_async()
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(found.title, format!("Task {index}"));
+        }
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_task_repository_save_bulk_partial_failure() {
+        let repository = InMemoryTaskRepository::new();
+        let task_id = TaskId::generate();
+
+        // Pre-save a task to cause version conflict
+        let existing_task = test_task_with_id(task_id.clone(), "Existing Task");
+        repository.save(&existing_task).run_async().await.unwrap();
+
+        // Create bulk tasks: 2 new tasks, 1 conflicting, 2 more new tasks
+        let new_task_1 = test_task("New Task 1");
+        let new_task_2 = test_task("New Task 2");
+        let conflicting_task = test_task_with_id(task_id.clone(), "Conflicting Task");
+        let new_task_3 = test_task("New Task 3");
+        let new_task_4 = test_task("New Task 4");
+
+        let tasks = vec![
+            new_task_1.clone(),
+            new_task_2.clone(),
+            conflicting_task,
+            new_task_3.clone(),
+            new_task_4.clone(),
+        ];
+
+        let results = repository.save_bulk(&tasks).run_async().await;
+
+        // Verify results: 0, 1, 3, 4 should succeed, 2 should fail
+        assert_eq!(results.len(), 5);
+        assert!(results[0].is_ok(), "Task 0 should succeed");
+        assert!(results[1].is_ok(), "Task 1 should succeed");
+        assert!(results[2].is_err(), "Task 2 should fail (version conflict)");
+        assert!(results[3].is_ok(), "Task 3 should succeed");
+        assert!(results[4].is_ok(), "Task 4 should succeed");
+
+        // Verify the error type for the failed task
+        match &results[2] {
+            Err(RepositoryError::VersionConflict { expected, found }) => {
+                assert_eq!(*expected, 2);
+                assert_eq!(*found, 1);
+            }
+            _ => panic!("Expected VersionConflict error"),
+        }
+
+        // Verify total count (1 existing + 4 new = 5)
+        assert_eq!(repository.count().run_async().await.unwrap(), 5);
+
+        // Verify new tasks were saved
+        assert!(
+            repository
+                .find_by_id(&new_task_1.task_id)
+                .run_async()
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            repository
+                .find_by_id(&new_task_2.task_id)
+                .run_async()
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            repository
+                .find_by_id(&new_task_3.task_id)
+                .run_async()
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            repository
+                .find_by_id(&new_task_4.task_id)
+                .run_async()
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        // Verify the existing task was NOT overwritten
+        let existing = repository
+            .find_by_id(&task_id)
+            .run_async()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(existing.title, "Existing Task");
+        assert_eq!(existing.version, 1);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_task_repository_save_bulk_new_task_requires_version_1() {
+        let repository = InMemoryTaskRepository::new();
+        let task_id = TaskId::generate();
+        let timestamp = Timestamp::now();
+
+        // Create a new task with version != 1 (should fail)
+        let mut invalid_task = Task::new(task_id, "Invalid Task", timestamp);
+        invalid_task.version = 2; // Invalid: new task should have version 1
+
+        let results = repository.save_bulk(&[invalid_task]).run_async().await;
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_err());
+        match &results[0] {
+            Err(RepositoryError::VersionConflict { expected, found }) => {
+                assert_eq!(*expected, 1); // Expected version 1 for new task
+                assert_eq!(*found, 2); // But got version 2
+            }
+            _ => panic!("Expected VersionConflict error"),
+        }
+
+        // Verify task was not saved
+        assert_eq!(repository.count().run_async().await.unwrap(), 0);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_task_repository_save_bulk_mixed_new_and_update() {
+        let repository = InMemoryTaskRepository::new();
+
+        // Pre-save a task for update
+        let existing_task = test_task("Existing Task");
+        let existing_task_id = existing_task.task_id.clone();
+        repository.save(&existing_task).run_async().await.unwrap();
+
+        // Create tasks: one valid new, one valid update, one invalid new (version != 1)
+        let valid_new_task = test_task("Valid New Task");
+        let valid_update_task =
+            test_task_with_id(existing_task_id.clone(), "Updated Task").increment_version(); // version 2
+
+        let mut invalid_new_task = test_task("Invalid New Task");
+        invalid_new_task.version = 3; // Invalid: new task should have version 1
+
+        let tasks = vec![
+            valid_new_task.clone(),
+            valid_update_task.clone(),
+            invalid_new_task.clone(),
+        ];
+
+        let results = repository.save_bulk(&tasks).run_async().await;
+
+        // Verify results
+        assert_eq!(results.len(), 3);
+        assert!(results[0].is_ok(), "Valid new task should succeed");
+        assert!(results[1].is_ok(), "Valid update task should succeed");
+        assert!(
+            results[2].is_err(),
+            "Invalid new task should fail (version != 1)"
+        );
+
+        // Verify the error for invalid new task
+        match &results[2] {
+            Err(RepositoryError::VersionConflict { expected, found }) => {
+                assert_eq!(*expected, 1);
+                assert_eq!(*found, 3);
+            }
+            _ => panic!("Expected VersionConflict error"),
+        }
+
+        // Verify count (1 existing updated + 1 valid new = 2 unique tasks)
+        assert_eq!(repository.count().run_async().await.unwrap(), 2);
+
+        // Verify valid new task was saved
+        assert!(
+            repository
+                .find_by_id(&valid_new_task.task_id)
+                .run_async()
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        // Verify existing task was updated
+        let updated = repository
+            .find_by_id(&existing_task_id)
+            .run_async()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.title, "Updated Task");
+        assert_eq!(updated.version, 2);
     }
 }
