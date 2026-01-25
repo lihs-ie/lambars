@@ -266,6 +266,11 @@ async fn execute_bulk_insert(
         return Vec::new();
     }
 
+    tracing::info!(
+        task_count = new_tasks.len(),
+        "Executing UNNEST bulk INSERT for new tasks"
+    );
+
     // Prepare arrays for UNNEST
     let ids: Vec<uuid::Uuid> = new_tasks.iter().map(|task| task.task_id).collect();
     let data_values: Vec<serde_json::Value> =

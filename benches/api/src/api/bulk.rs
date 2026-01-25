@@ -532,7 +532,19 @@ pub async fn bulk_create_tasks(
     // Step 5: Save tasks (I/O boundary)
     // Uses optimized or legacy implementation based on feature flag
     // BulkConfig is injected via AppState to ensure referential transparency
+    tracing::debug!(
+        use_bulk_optimization = state.bulk_config.use_bulk_optimization,
+        chunk_size = state.bulk_config.chunk_size,
+        concurrency_limit = state.bulk_config.concurrency_limit,
+        tasks_count = tasks_to_save.len(),
+        "bulk_create_tasks: selecting save strategy"
+    );
     let results = if state.bulk_config.use_bulk_optimization {
+        tracing::info!(
+            tasks_count = tasks_to_save.len(),
+            chunk_size = state.bulk_config.chunk_size,
+            "Using optimized bulk save with chunking"
+        );
         save_tasks_bulk_optimized(
             state.task_repository.clone(),
             tasks_to_save,
