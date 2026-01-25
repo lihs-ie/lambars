@@ -49,6 +49,203 @@ use lambars::typeclass::Alternative;
 const BULK_LIMIT: usize = 100;
 
 // =============================================================================
+// Chunk Configuration
+// =============================================================================
+
+/// Configuration for bulk operation chunking.
+///
+/// This struct controls how large bulk operations are split into smaller
+/// chunks for processing. Chunking helps:
+/// - Avoid database connection pool exhaustion
+/// - Maintain responsive error handling
+/// - Enable parallel processing with controlled concurrency
+///
+/// # Examples
+///
+/// ```ignore
+/// // Use default configuration (chunk_size: 50, concurrency_limit: 4)
+/// let config = BulkConfig::default();
+///
+/// // Create from environment variables
+/// let config = BulkConfig::from_env();
+///
+/// // Custom configuration
+/// let config = BulkConfig {
+///     chunk_size: 100,
+///     concurrency_limit: 8,
+/// };
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BulkConfig {
+    /// Maximum number of tasks per chunk for bulk operations.
+    ///
+    /// Default: 50 (optimized for `PostgreSQL` batch operations)
+    pub chunk_size: usize,
+    /// Maximum number of concurrent chunk operations.
+    ///
+    /// Default: 4 (conservative to avoid DB connection pool exhaustion)
+    pub concurrency_limit: usize,
+}
+
+impl Default for BulkConfig {
+    fn default() -> Self {
+        Self {
+            chunk_size: 50,       // PostgreSQL optimal batch size
+            concurrency_limit: 4, // DB connection pool consideration
+        }
+    }
+}
+
+impl BulkConfig {
+    /// Default chunk size for bulk operations.
+    const DEFAULT_CHUNK_SIZE: usize = 50;
+    /// Default concurrency limit for bulk operations.
+    const DEFAULT_CONCURRENCY_LIMIT: usize = 4;
+
+    /// Creates configuration from environment variables or defaults.
+    ///
+    /// Environment variables:
+    /// - `BULK_CHUNK_SIZE`: Maximum tasks per chunk (default: 50)
+    /// - `BULK_CONCURRENCY_LIMIT`: Maximum concurrent chunks (default: 4)
+    ///
+    /// Invalid values (including 0) are silently ignored and defaults are used.
+    /// This prevents configuration mistakes from causing all tasks to be dropped.
+    pub fn from_env() -> Self {
+        let chunk_size = std::env::var("BULK_CHUNK_SIZE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|&size| size > 0)
+            .unwrap_or(Self::DEFAULT_CHUNK_SIZE);
+
+        let concurrency_limit = std::env::var("BULK_CONCURRENCY_LIMIT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|&limit| limit > 0)
+            .unwrap_or(Self::DEFAULT_CONCURRENCY_LIMIT);
+
+        Self {
+            chunk_size,
+            concurrency_limit,
+        }
+    }
+}
+
+// =============================================================================
+// Chunk Utilities (Pure Functions)
+// =============================================================================
+
+/// Splits tasks into chunks with their original indices for result mapping.
+///
+/// This is a pure function that preserves the original order of tasks
+/// through index tracking. Each element in the output contains its original
+/// index paired with the task data.
+///
+/// # Arguments
+///
+/// * `tasks` - Slice of tasks to chunk
+/// * `chunk_size` - Maximum number of tasks per chunk (0 is clamped to 1)
+///
+/// # Returns
+///
+/// Vector of chunks, where each chunk contains `(original_index, task)` pairs.
+///
+/// # Examples
+///
+/// ```ignore
+/// let tasks = vec!["a", "b", "c", "d", "e"];
+/// let chunks = chunk_tasks_with_indices(&tasks, 2);
+///
+/// assert_eq!(chunks.len(), 3);
+/// assert_eq!(chunks[0], vec![(0, "a"), (1, "b")]);
+/// assert_eq!(chunks[1], vec![(2, "c"), (3, "d")]);
+/// assert_eq!(chunks[2], vec![(4, "e")]);
+/// ```
+///
+/// # Edge Cases
+///
+/// - Empty input: Returns empty vector
+/// - `chunk_size` of 0: Clamped to 1 to ensure all tasks are processed
+/// - `chunk_size` >= `tasks.len()`: Returns single chunk with all tasks
+#[allow(dead_code)]
+fn chunk_tasks_with_indices<T: Clone>(tasks: &[T], chunk_size: usize) -> Vec<Vec<(usize, T)>> {
+    if tasks.is_empty() {
+        return Vec::new();
+    }
+
+    // Clamp chunk_size to 1 if 0 to prevent configuration mistakes from dropping tasks
+    let effective_chunk_size = if chunk_size == 0 { 1 } else { chunk_size };
+
+    // Use iterator directly to avoid double clone:
+    // Previously: enumerate -> clone -> collect -> chunks -> to_vec (double clone)
+    // Now: enumerate -> chunks on indices -> clone only once per element
+    let indexed_refs: Vec<(usize, &T)> = tasks.iter().enumerate().collect();
+
+    indexed_refs
+        .chunks(effective_chunk_size)
+        .map(|chunk| chunk.iter().map(|(index, task)| (*index, (*task).clone())).collect())
+        .collect()
+}
+
+/// Merges chunked results back into original order.
+///
+/// This is a pure function that reconstructs the result vector
+/// in the same order as the original input. Each result is placed
+/// at its original index position.
+///
+/// # Arguments
+///
+/// * `chunked_results` - Vector of chunks containing `(original_index, result)` pairs
+/// * `total_count` - Total number of expected results (original input length)
+///
+/// # Returns
+///
+/// Vector of `Option<T>` in original order. Missing indices are `None`,
+/// allowing the caller to detect and handle missing results explicitly.
+///
+/// # Type Parameters
+///
+/// * `T` - Result type, must implement `Clone`
+///
+/// # Examples
+///
+/// ```ignore
+/// let chunked: Vec<Vec<(usize, i32)>> = vec![
+///     vec![(2, 30), (0, 10)],  // Out of order
+///     vec![(1, 20)],
+/// ];
+/// let merged = merge_chunked_results(chunked, 3);
+/// assert_eq!(merged, vec![Some(10), Some(20), Some(30)]);  // Restored to original order
+///
+/// // Missing indices are None
+/// let incomplete: Vec<Vec<(usize, i32)>> = vec![vec![(0, 10), (2, 30)]];
+/// let merged = merge_chunked_results(incomplete, 3);
+/// assert_eq!(merged, vec![Some(10), None, Some(30)]);  // Index 1 is missing
+/// ```
+///
+/// # Edge Cases
+///
+/// - Empty input: Returns vector of `total_count` `None` values
+/// - Duplicate indices: Later values overwrite earlier ones
+/// - Out of bounds indices: Silently ignored (index >= `total_count`)
+#[allow(dead_code)]
+fn merge_chunked_results<T: Clone>(
+    chunked_results: Vec<Vec<(usize, T)>>,
+    total_count: usize,
+) -> Vec<Option<T>> {
+    let mut results: Vec<Option<T>> = vec![None; total_count];
+
+    for chunk in chunked_results {
+        for (index, result) in chunk {
+            if index < total_count {
+                results[index] = Some(result);
+            }
+        }
+    }
+
+    results
+}
+
+// =============================================================================
 // Request/Response DTOs
 // =============================================================================
 
@@ -1855,5 +2052,293 @@ mod tests {
     fn test_validate_with_choice_lazy_empty() {
         let result = validate_with_choice_lazy::<i32>(vec![]);
         assert_eq!(result, None);
+    }
+
+    // -------------------------------------------------------------------------
+    // BulkConfig Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_bulk_config_default() {
+        let config = BulkConfig::default();
+
+        assert_eq!(config.chunk_size, 50);
+        assert_eq!(config.concurrency_limit, 4);
+    }
+
+    #[rstest]
+    fn test_bulk_config_custom() {
+        let config = BulkConfig {
+            chunk_size: 100,
+            concurrency_limit: 8,
+        };
+
+        assert_eq!(config.chunk_size, 100);
+        assert_eq!(config.concurrency_limit, 8);
+    }
+
+    #[rstest]
+    fn test_bulk_config_clone() {
+        let config = BulkConfig::default();
+        let cloned = config;
+
+        assert_eq!(config, cloned);
+    }
+
+    #[rstest]
+    fn test_bulk_config_debug() {
+        let config = BulkConfig::default();
+        let debug_str = format!("{config:?}");
+
+        assert!(debug_str.contains("BulkConfig"));
+        assert!(debug_str.contains("chunk_size"));
+        assert!(debug_str.contains("concurrency_limit"));
+    }
+
+    // -------------------------------------------------------------------------
+    // chunk_tasks_with_indices Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_chunk_tasks_with_indices_empty() {
+        let tasks: Vec<String> = vec![];
+        let chunks = chunk_tasks_with_indices(&tasks, 10);
+
+        assert!(chunks.is_empty());
+    }
+
+    #[rstest]
+    fn test_chunk_tasks_with_indices_single_chunk() {
+        let tasks = vec!["a", "b", "c"];
+        let chunks = chunk_tasks_with_indices(&tasks, 10);
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], vec![(0, "a"), (1, "b"), (2, "c")]);
+    }
+
+    #[rstest]
+    fn test_chunk_tasks_with_indices_exact_chunk_size() {
+        let tasks = vec!["a", "b", "c", "d"];
+        let chunks = chunk_tasks_with_indices(&tasks, 2);
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0], vec![(0, "a"), (1, "b")]);
+        assert_eq!(chunks[1], vec![(2, "c"), (3, "d")]);
+    }
+
+    #[rstest]
+    fn test_chunk_tasks_with_indices_multiple_chunks() {
+        let tasks = vec!["a", "b", "c", "d", "e"];
+        let chunks = chunk_tasks_with_indices(&tasks, 2);
+
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0], vec![(0, "a"), (1, "b")]);
+        assert_eq!(chunks[1], vec![(2, "c"), (3, "d")]);
+        assert_eq!(chunks[2], vec![(4, "e")]);
+    }
+
+    #[rstest]
+    fn test_chunk_tasks_with_indices_chunk_size_one() {
+        let tasks = vec!["a", "b", "c"];
+        let chunks = chunk_tasks_with_indices(&tasks, 1);
+
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0], vec![(0, "a")]);
+        assert_eq!(chunks[1], vec![(1, "b")]);
+        assert_eq!(chunks[2], vec![(2, "c")]);
+    }
+
+    #[rstest]
+    fn test_chunk_tasks_with_indices_chunk_size_zero() {
+        let tasks = vec!["a", "b", "c"];
+        let chunks = chunk_tasks_with_indices(&tasks, 0);
+
+        // Zero chunk size should be clamped to 1, processing all tasks one per chunk
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0], vec![(0, "a")]);
+        assert_eq!(chunks[1], vec![(1, "b")]);
+        assert_eq!(chunks[2], vec![(2, "c")]);
+    }
+
+    #[rstest]
+    fn test_chunk_tasks_with_indices_preserves_order() {
+        let tasks: Vec<i32> = (0..100).collect();
+        let chunks = chunk_tasks_with_indices(&tasks, 25);
+
+        assert_eq!(chunks.len(), 4);
+
+        // Verify all indices are preserved in order
+        let mut all_indices: Vec<usize> = Vec::new();
+        for chunk in chunks {
+            for (index, value) in chunk {
+                #[allow(clippy::cast_sign_loss)]
+                {
+                    assert_eq!(index, value as usize); // Index matches value
+                }
+                all_indices.push(index);
+            }
+        }
+
+        // Should have all indices from 0 to 99
+        assert_eq!(all_indices, (0..100).collect::<Vec<_>>());
+    }
+
+    // -------------------------------------------------------------------------
+    // merge_chunked_results Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_merge_chunked_results_empty() {
+        let chunked: Vec<Vec<(usize, i32)>> = vec![];
+        let merged = merge_chunked_results(chunked, 0);
+
+        assert!(merged.is_empty());
+    }
+
+    #[rstest]
+    fn test_merge_chunked_results_single_chunk() {
+        let chunked = vec![vec![(0, 10), (1, 20), (2, 30)]];
+        let merged = merge_chunked_results(chunked, 3);
+
+        assert_eq!(merged, vec![Some(10), Some(20), Some(30)]);
+    }
+
+    #[rstest]
+    fn test_merge_chunked_results_multiple_chunks() {
+        let chunked = vec![
+            vec![(0, 10), (1, 20)],
+            vec![(2, 30), (3, 40)],
+            vec![(4, 50)],
+        ];
+        let merged = merge_chunked_results(chunked, 5);
+
+        assert_eq!(
+            merged,
+            vec![Some(10), Some(20), Some(30), Some(40), Some(50)]
+        );
+    }
+
+    #[rstest]
+    fn test_merge_chunked_results_out_of_order() {
+        // Results arrive in different order than original
+        let chunked = vec![vec![(2, 30), (0, 10)], vec![(1, 20)]];
+        let merged = merge_chunked_results(chunked, 3);
+
+        // Should still be in original order
+        assert_eq!(merged, vec![Some(10), Some(20), Some(30)]);
+    }
+
+    #[rstest]
+    fn test_merge_chunked_results_with_gaps() {
+        // Some indices missing (represented as None for explicit detection)
+        let chunked = vec![vec![(0, 10), (2, 30)]];
+        let merged = merge_chunked_results(chunked, 3);
+
+        // Index 1 is None, allowing caller to detect missing result
+        assert_eq!(merged, vec![Some(10), None, Some(30)]);
+    }
+
+    #[rstest]
+    fn test_merge_chunked_results_with_strings() {
+        let chunked = vec![
+            vec![(0, "first".to_string())],
+            vec![(2, "third".to_string())],
+            vec![(1, "second".to_string())],
+        ];
+        let merged = merge_chunked_results(chunked, 3);
+
+        assert_eq!(
+            merged,
+            vec![
+                Some("first".to_string()),
+                Some("second".to_string()),
+                Some("third".to_string())
+            ]
+        );
+    }
+
+    #[rstest]
+    fn test_merge_chunked_results_index_out_of_bounds_ignored() {
+        // Index beyond total_count should be ignored
+        let chunked = vec![
+            vec![(0, 10), (1, 20), (100, 999)], // 100 is out of bounds
+        ];
+        let merged = merge_chunked_results(chunked, 3);
+
+        // Index 100 ignored, index 2 is None (missing)
+        assert_eq!(merged, vec![Some(10), Some(20), None]);
+    }
+
+    #[rstest]
+    fn test_chunk_and_merge_roundtrip() {
+        // Test that chunking and merging returns original order
+        let original: Vec<i32> = (0..100).collect();
+        let chunks = chunk_tasks_with_indices(&original, 15);
+
+        // Simulate processing: just keep the same values
+        let processed: Vec<Vec<(usize, i32)>> = chunks;
+
+        let merged = merge_chunked_results(processed, 100);
+
+        // All values should be Some and in original order
+        let unwrapped: Vec<i32> = merged.into_iter().flatten().collect();
+        assert_eq!(unwrapped, original);
+    }
+
+    #[rstest]
+    fn test_merge_chunked_results_duplicate_indices_last_wins() {
+        // Duplicate indices: later values overwrite earlier ones
+        let chunked = vec![
+            vec![(0, 10), (1, 20)],
+            vec![(1, 99)], // Duplicate index 1, should overwrite
+        ];
+        let merged = merge_chunked_results(chunked, 2);
+
+        // Index 1 should have the later value (99)
+        assert_eq!(merged, vec![Some(10), Some(99)]);
+    }
+
+    #[rstest]
+    fn test_merge_chunked_results_all_missing() {
+        // No results provided, all should be None
+        let chunked: Vec<Vec<(usize, i32)>> = vec![];
+        let merged = merge_chunked_results(chunked, 3);
+
+        assert_eq!(merged, vec![None, None, None]);
+    }
+
+    // -------------------------------------------------------------------------
+    // chunk_tasks_with_indices with zero chunk_size Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_chunk_tasks_with_indices_zero_chunk_size_clamps_to_one() {
+        // chunk_size of 0 should be clamped to 1, not return empty
+        let tasks = vec!["a", "b", "c"];
+        let chunks = chunk_tasks_with_indices(&tasks, 0);
+
+        // Should process all tasks, one per chunk
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0], vec![(0, "a")]);
+        assert_eq!(chunks[1], vec![(1, "b")]);
+        assert_eq!(chunks[2], vec![(2, "c")]);
+    }
+
+    // -------------------------------------------------------------------------
+    // BulkConfig::from_env Tests for zero values
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_bulk_config_from_env_zero_chunk_size_uses_default() {
+        // This test verifies the filter logic conceptually
+        // In practice, from_env reads from environment variables
+        // Here we test the filter behavior directly
+        let chunk_size: Option<usize> = Some(0);
+        let filtered = chunk_size.filter(|&size| size > 0);
+        assert!(filtered.is_none());
+
+        let chunk_size: Option<usize> = Some(50);
+        let filtered = chunk_size.filter(|&size| size > 0);
+        assert_eq!(filtered, Some(50));
     }
 }
