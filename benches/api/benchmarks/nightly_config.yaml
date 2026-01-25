@@ -13,6 +13,7 @@ nightly_scenarios:
   - postgres_redis_read_heavy_warm.yaml
   - postgres_write_heavy.yaml
   - mixed_workload_burst.yaml
+  - tasks_bulk.yaml
 
 # Minimal variant set for parameter coverage
 # Each variant overrides scenario defaults with specific parameter combinations
