@@ -36,8 +36,8 @@ pub use bifunctor::{
     transform_pair,
 };
 pub use bulk::{
-    bulk_create_tasks, bulk_update_tasks, chunk_tasks_with_indices, merge_chunked_results,
-    save_chunk, save_tasks_bulk_optimized, BulkConfig, IndexedSaveResult, ItemError, SaveResult,
+    BulkConfig, IndexedSaveResult, ItemError, SaveResult, bulk_create_tasks, bulk_update_tasks,
+    chunk_tasks_with_indices, merge_chunked_results, save_chunk, save_tasks_bulk_optimized,
 };
 pub use dto::{CreateTaskRequest, TaskResponse, UpdateTaskRequest};
 pub use effects::{execute_state_workflow, execute_workflow, update_with_optics};

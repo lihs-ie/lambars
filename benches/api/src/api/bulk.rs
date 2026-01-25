@@ -191,7 +191,12 @@ pub fn chunk_tasks_with_indices<T: Clone>(tasks: &[T], chunk_size: usize) -> Vec
 
     indexed_refs
         .chunks(effective_chunk_size)
-        .map(|chunk| chunk.iter().map(|(index, task)| (*index, (*task).clone())).collect())
+        .map(|chunk| {
+            chunk
+                .iter()
+                .map(|(index, task)| (*index, (*task).clone()))
+                .collect()
+        })
         .collect()
 }
 
@@ -372,8 +377,17 @@ pub enum ItemError {
         /// The underlying repository error.
         error: crate::infrastructure::RepositoryError,
     },
-    /// All save strategies failed (primary and fallback).
-    AllStrategiesFailed,
+    /// Both primary and fallback save strategies failed.
+    ///
+    /// This variant preserves both error contexts for debugging and proper error handling:
+    /// - `original_error`: The error from the primary (bulk) save attempt
+    /// - `fallback_error`: The error from the individual fallback save attempt
+    RepositoryFallbackFailed {
+        /// The error from the primary save attempt.
+        original_error: crate::infrastructure::RepositoryError,
+        /// The error from the fallback save attempt.
+        fallback_error: crate::infrastructure::RepositoryError,
+    },
 }
 
 /// Result of a save operation with fallback tracking.
@@ -412,9 +426,14 @@ impl From<ItemError> for BulkItemError {
                 code: "REPOSITORY_ERROR".to_string(),
                 message: format!("Internal error: {error}"),
             },
-            ItemError::AllStrategiesFailed => Self {
-                code: "ALL_STRATEGIES_FAILED".to_string(),
-                message: "All save strategies failed (primary and fallback)".to_string(),
+            ItemError::RepositoryFallbackFailed {
+                original_error,
+                fallback_error,
+            } => Self {
+                code: "REPOSITORY_FALLBACK_FAILED".to_string(),
+                message: format!(
+                    "Both primary and fallback save failed. Primary: {original_error}, Fallback: {fallback_error}"
+                ),
             },
         }
     }
@@ -987,24 +1006,33 @@ async fn save_tasks_bulk(
 ///
 /// **Important**: Uses lazy evaluation - fallback is only executed when primary fails.
 /// This prevents unnecessary double-save operations.
+///
+/// If both strategies fail, returns `RepositoryFallbackFailed` containing both error contexts.
 async fn save_with_alternative_fallback(
     repository: Arc<dyn TaskRepository + Send + Sync>,
     task: Task,
 ) -> Either<ItemError, SaveResult> {
-    // Primary save attempt
-    let primary_result: Option<SaveResult> = try_primary_save(&repository, &task).await;
+    // Primary save attempt with error tracking
+    let primary_result = try_primary_save_with_error(&repository, &task).await;
 
-    // Lazy fallback: only execute if primary failed (short-circuit semantics)
-    // This demonstrates the proper behavior of Alternative::alt with lazy evaluation
-    let combined_result = match primary_result {
-        Some(result) => Some(result), // Primary succeeded - no fallback needed
-        None => try_fallback_save(&repository, &task).await, // Primary failed - try fallback
-    };
+    match primary_result {
+        Ok(result) => Either::Right(result), // Primary succeeded - no fallback needed
+        Err(primary_error) => {
+            // Primary failed - try fallback with error tracking
+            let fallback_result = try_fallback_save_with_error(&repository, &task).await;
 
-    combined_result.map_or_else(
-        || Either::Left(ItemError::AllStrategiesFailed),
-        Either::Right,
-    )
+            match fallback_result {
+                Ok(result) => Either::Right(result), // Fallback succeeded
+                Err(fallback_error) => {
+                    // Both strategies failed - preserve both errors
+                    Either::Left(ItemError::RepositoryFallbackFailed {
+                        original_error: primary_error,
+                        fallback_error,
+                    })
+                }
+            }
+        }
+    }
 }
 
 /// Combines two save strategies with lazy evaluation (pure function).
@@ -1045,26 +1073,27 @@ where
     primary().map_or_else(fallback, Some)
 }
 
-/// Attempts primary save strategy (I/O boundary).
+/// Attempts primary save strategy with error tracking (I/O boundary).
 ///
-/// Returns `Some(SaveResult)` if successful, `None` if failed.
-async fn try_primary_save(
+/// Returns `Ok(SaveResult)` if successful, `Err(RepositoryError)` if failed.
+/// This version preserves the error information for proper error handling.
+async fn try_primary_save_with_error(
     repository: &Arc<dyn TaskRepository + Send + Sync>,
     task: &Task,
-) -> Option<SaveResult> {
+) -> Result<SaveResult, crate::infrastructure::RepositoryError> {
     match repository.save(task).run_async().await {
-        Ok(()) => Some(SaveResult {
+        Ok(()) => Ok(SaveResult {
             task: task.clone(),
             used_fallback: false,
         }),
         Err(e) => {
             tracing::warn!(error = %e, "Primary save failed, attempting fallback");
-            None
+            Err(e)
         }
     }
 }
 
-/// Attempts fallback save strategy (I/O boundary).
+/// Attempts fallback save strategy with error tracking (I/O boundary).
 ///
 /// This demonstrates an alternative save path that could:
 /// - Use a different repository
@@ -1072,27 +1101,27 @@ async fn try_primary_save(
 /// - Use a queue for deferred processing
 ///
 /// For this demo, it retries the same repository (simulating a retry strategy).
-async fn try_fallback_save(
+/// Returns `Ok(SaveResult)` if successful, `Err(RepositoryError)` if failed.
+async fn try_fallback_save_with_error(
     repository: &Arc<dyn TaskRepository + Send + Sync>,
     task: &Task,
-) -> Option<SaveResult> {
+) -> Result<SaveResult, crate::infrastructure::RepositoryError> {
     // Simulate a retry or alternative strategy
     // In production, this could be a different repository, cache, or queue
     match repository.save(task).run_async().await {
         Ok(()) => {
             tracing::info!("Fallback save succeeded");
-            Some(SaveResult {
+            Ok(SaveResult {
                 task: task.clone(),
                 used_fallback: true,
             })
         }
         Err(e) => {
             tracing::error!(error = %e, "Fallback save also failed");
-            None
+            Err(e)
         }
     }
 }
-
 /// Combines multiple save strategies using `Alternative::choice` (pure helper).
 ///
 /// This demonstrates selecting the first successful result from multiple strategies.
@@ -1136,8 +1165,8 @@ pub fn save_chunk(
 
         async move {
             // Extract indices and tasks for save_bulk call
-            let indices: Vec<usize> = indexed_tasks.iter().map(|(index, _)| *index).collect();
-            let tasks: Vec<Task> = indexed_tasks.into_iter().map(|(_, task)| task).collect();
+            // We need to separate them because save_bulk takes &[Task]
+            let (indices, tasks): (Vec<usize>, Vec<Task>) = indexed_tasks.into_iter().unzip();
 
             // Call repository's save_bulk (takes &[Task], so we keep ownership of tasks)
             let save_results = repository.save_bulk(&tasks).run_async().await;
@@ -1165,20 +1194,145 @@ pub fn save_chunk(
     })
 }
 
-/// Saves tasks in bulk with chunked parallel processing.
+/// Saves a chunk of tasks using bulk repository operation with individual fallback.
+///
+/// This function extends `save_chunk` with a fallback strategy:
+/// 1. First, attempt bulk save (`save_bulk`) for all tasks
+/// 2. For tasks that failed in bulk save, attempt individual save (`save`) as fallback
+/// 3. Track which tasks used the fallback strategy via `SaveResult::used_fallback`
+///
+/// # Fallback Strategy
+///
+/// - **All succeeded**: Return results with `used_fallback: false`
+/// - **Partial failure**: Failed tasks are retried individually with `used_fallback: true`
+/// - **All failed in bulk**: All tasks are retried individually
+/// - **Fallback also failed**: Return `ItemError::RepositoryFallbackFailed` with both errors
+///
+/// This ensures that both `RepositoryError` details are preserved, allowing callers
+/// to understand what went wrong in both the primary and fallback attempts.
+///
+/// # Arguments
+///
+/// * `repository` - Task repository for saving
+/// * `chunk` - Vector of `(original_index, task)` pairs
+///
+/// # Returns
+///
+/// `AsyncIO` that produces a vector of `(original_index, result)` pairs.
+/// Each result contains either:
+/// - `Either::Right(SaveResult)` with `used_fallback` flag indicating fallback usage
+/// - `Either::Left(ItemError::RepositoryFallbackFailed)` with both error details
+pub fn save_chunk_with_fallback(
+    repository: Arc<dyn TaskRepository + Send + Sync>,
+    chunk: Vec<(usize, Task)>,
+) -> AsyncIO<Vec<IndexedSaveResult>> {
+    AsyncIO::new(move || {
+        let repository = repository.clone();
+        let indexed_tasks = chunk;
+
+        async move {
+            // Extract indices and tasks for save_bulk call
+            let indices: Vec<usize> = indexed_tasks.iter().map(|(index, _)| *index).collect();
+            let tasks: Vec<Task> = indexed_tasks.into_iter().map(|(_, task)| task).collect();
+
+            // Step 1: Attempt bulk save
+            let bulk_results = repository.save_bulk(&tasks).run_async().await;
+
+            // Step 2: Separate successes from failures
+            let mut final_results: Vec<(usize, Either<ItemError, SaveResult>)> =
+                Vec::with_capacity(tasks.len());
+            let mut failed_tasks: Vec<(usize, Task, crate::infrastructure::RepositoryError)> =
+                Vec::new();
+
+            for ((index, task), result) in indices.iter().zip(tasks).zip(bulk_results) {
+                match result {
+                    Ok(()) => {
+                        // Bulk save succeeded
+                        final_results.push((
+                            *index,
+                            Either::Right(SaveResult {
+                                task,
+                                used_fallback: false,
+                            }),
+                        ));
+                    }
+                    Err(error) => {
+                        // Bulk save failed - queue for individual fallback
+                        tracing::warn!(
+                            error = %error,
+                            task_id = %task.task_id,
+                            "Bulk save failed, will attempt individual fallback"
+                        );
+                        failed_tasks.push((*index, task, error));
+                    }
+                }
+            }
+
+            // Step 3: Attempt individual save for failed tasks (fallback)
+            for (index, task, original_error) in failed_tasks {
+                match repository.save(&task).run_async().await {
+                    Ok(()) => {
+                        // Fallback succeeded
+                        tracing::info!(
+                            task_id = %task.task_id,
+                            "Individual fallback save succeeded"
+                        );
+                        final_results.push((
+                            index,
+                            Either::Right(SaveResult {
+                                task,
+                                used_fallback: true,
+                            }),
+                        ));
+                    }
+                    Err(fallback_error) => {
+                        // Both bulk and individual save failed
+                        // Preserve both errors for debugging and proper error handling
+                        tracing::error!(
+                            task_id = %task.task_id,
+                            original_error = %original_error,
+                            fallback_error = %fallback_error,
+                            "Both bulk and individual save failed"
+                        );
+                        final_results.push((
+                            index,
+                            Either::Left(ItemError::RepositoryFallbackFailed {
+                                original_error,
+                                fallback_error,
+                            }),
+                        ));
+                    }
+                }
+            }
+
+            final_results
+        }
+    })
+}
+
+/// Saves tasks in bulk with chunked parallel processing and fallback strategy.
 ///
 /// This function demonstrates functional programming patterns:
 /// - **Pure function composition**: Chunking and merging are pure
 /// - **Effect isolation**: I/O operations are contained in `AsyncIO`
 /// - **Parallel processing**: Uses `batch_run_buffered` for bounded concurrency
+/// - **Fallback strategy**: Individual save fallback for failed bulk operations
 ///
 /// # Processing Flow
 ///
 /// 1. Separate error tasks from valid tasks (pure)
 /// 2. Split valid tasks into chunks with indices (pure, uses `chunk_tasks_with_indices`)
-/// 3. Create `AsyncIO` for each chunk (pure, uses `save_chunk`)
+/// 3. Create `AsyncIO` for each chunk with fallback (pure, uses `save_chunk_with_fallback`)
 /// 4. Execute chunks in parallel with bounded concurrency (I/O boundary)
 /// 5. Merge results back to original order (pure, uses `merge_chunked_results`)
+///
+/// # Fallback Strategy
+///
+/// Each chunk uses `save_chunk_with_fallback` which:
+/// - First attempts bulk save (`save_bulk`) for all tasks in the chunk
+/// - For any failed tasks, attempts individual save (`save`) as fallback
+/// - Tracks which tasks used fallback via `SaveResult::used_fallback`
+/// - Preserves `RepositoryError` details on final failure (never loses error context)
 ///
 /// # Arguments
 ///
@@ -1240,14 +1394,17 @@ pub async fn save_tasks_bulk_optimized(
     // Step 2: Split valid tasks into chunks with indices (pure)
     let chunks = chunk_tasks_with_indices(&valid_tasks, config.chunk_size);
 
-    // Step 3: Create AsyncIO for each chunk (pure - just builds the computation)
+    // Step 3: Create AsyncIO for each chunk with fallback strategy (pure - just builds the computation)
+    // Uses save_chunk_with_fallback to ensure individual fallback for failed bulk saves
     let chunk_ios: Vec<AsyncIO<Vec<IndexedSaveResult>>> = chunks
         .into_iter()
         .map(|chunk| {
             // Extract inner (usize, Task) from ((usize, (usize, Task)))
-            let inner_chunk: Vec<(usize, Task)> =
-                chunk.into_iter().map(|(_, (idx, task))| (idx, task)).collect();
-            save_chunk(repository.clone(), inner_chunk)
+            let inner_chunk: Vec<(usize, Task)> = chunk
+                .into_iter()
+                .map(|(_, (idx, task))| (idx, task))
+                .collect();
+            save_chunk_with_fallback(repository.clone(), inner_chunk)
         })
         .collect();
 
@@ -1255,10 +1412,14 @@ pub async fn save_tasks_bulk_optimized(
     // Uses effective_concurrency_limit which is clamped to at least 1
     let chunked_results = AsyncIO::batch_run_buffered(chunk_ios, effective_concurrency_limit)
         .await
-        .unwrap_or_else(|_| {
-            // If batch execution fails, fall back to empty results
+        .unwrap_or_else(|batch_error| {
+            // If batch execution fails, log the actual error and return empty results
             // This should not happen with valid config (concurrency_limit is clamped to >= 1)
-            tracing::error!("batch_run_buffered failed - this should not happen");
+            // The batch_error provides context about what went wrong (e.g., concurrency limit was 0)
+            tracing::error!(
+                error = %batch_error,
+                "batch_run_buffered failed - this indicates a configuration or runtime error"
+            );
             Vec::new()
         });
 
@@ -1970,12 +2131,20 @@ mod tests {
     }
 
     #[rstest]
-    fn test_item_error_all_strategies_failed() {
-        let error = ItemError::AllStrategiesFailed;
+    fn test_item_error_repository_fallback_failed() {
+        let original_error =
+            crate::infrastructure::RepositoryError::DatabaseError("primary failed".to_string());
+        let fallback_error =
+            crate::infrastructure::RepositoryError::DatabaseError("fallback failed".to_string());
+        let error = ItemError::RepositoryFallbackFailed {
+            original_error,
+            fallback_error,
+        };
         let bulk_error: BulkItemError = error.into();
 
-        assert_eq!(bulk_error.code, "ALL_STRATEGIES_FAILED");
-        assert!(bulk_error.message.contains("All save strategies failed"));
+        assert_eq!(bulk_error.code, "REPOSITORY_FALLBACK_FAILED");
+        assert!(bulk_error.message.contains("primary failed"));
+        assert!(bulk_error.message.contains("fallback failed"));
     }
 
     // -------------------------------------------------------------------------
@@ -2561,8 +2730,7 @@ mod tests {
             let repository = Arc::new(InMemoryTaskRepository::new());
             let config = BulkConfig::default();
 
-            let results =
-                save_tasks_bulk_optimized(repository, Vec::new(), config).await;
+            let results = save_tasks_bulk_optimized(repository, Vec::new(), config).await;
 
             assert!(results.is_empty());
         }
@@ -2581,21 +2749,13 @@ mod tests {
                 .map(|i| Either::Right(create_test_task(&format!("Task {i}"))))
                 .collect();
 
-            let results = save_tasks_bulk_optimized(
-                repository.clone(),
-                tasks,
-                config,
-            )
-            .await;
+            let results = save_tasks_bulk_optimized(repository.clone(), tasks, config).await;
 
             assert_eq!(results.len(), 10);
 
             // All should be successful
             for (i, result) in results.iter().enumerate() {
-                assert!(
-                    result.is_right(),
-                    "Task {i} should be saved successfully"
-                );
+                assert!(result.is_right(), "Task {i} should be saved successfully");
             }
         }
 
@@ -2613,21 +2773,13 @@ mod tests {
                 .map(|i| Either::Right(create_test_task(&format!("Task {i}"))))
                 .collect();
 
-            let results = save_tasks_bulk_optimized(
-                repository.clone(),
-                tasks,
-                config,
-            )
-            .await;
+            let results = save_tasks_bulk_optimized(repository.clone(), tasks, config).await;
 
             assert_eq!(results.len(), 20);
 
             // All should be successful
             for (i, result) in results.iter().enumerate() {
-                assert!(
-                    result.is_right(),
-                    "Task {i} should be saved successfully"
-                );
+                assert!(result.is_right(), "Task {i} should be saved successfully");
             }
 
             // Verify tasks are actually in the repository
@@ -2659,12 +2811,7 @@ mod tests {
                 Either::Right(create_test_task("Task 4")),
             ];
 
-            let results = save_tasks_bulk_optimized(
-                repository.clone(),
-                tasks,
-                config,
-            )
-            .await;
+            let results = save_tasks_bulk_optimized(repository.clone(), tasks, config).await;
 
             assert_eq!(results.len(), 5);
 
@@ -2706,12 +2853,7 @@ mod tests {
                 }),
             ];
 
-            let results = save_tasks_bulk_optimized(
-                repository.clone(),
-                tasks,
-                config,
-            )
-            .await;
+            let results = save_tasks_bulk_optimized(repository.clone(), tasks, config).await;
 
             assert_eq!(results.len(), 2);
             assert!(results[0].is_left());
@@ -2744,12 +2886,7 @@ mod tests {
                 })
                 .collect();
 
-            let results = save_tasks_bulk_optimized(
-                repository.clone(),
-                tasks,
-                config,
-            )
-            .await;
+            let results = save_tasks_bulk_optimized(repository.clone(), tasks, config).await;
 
             // Verify order is preserved by comparing titles
             let result_titles: Vec<String> = results
@@ -2778,12 +2915,7 @@ mod tests {
                 .map(|i| Either::Right(create_test_task(&format!("Task {i}"))))
                 .collect();
 
-            let results = save_tasks_bulk_optimized(
-                repository.clone(),
-                tasks,
-                config,
-            )
-            .await;
+            let results = save_tasks_bulk_optimized(repository.clone(), tasks, config).await;
 
             // All 10 tasks should be processed (not dropped)
             assert_eq!(results.len(), 10);
@@ -2816,12 +2948,7 @@ mod tests {
                 .map(|i| Either::Right(create_test_task(&format!("Task {i}"))))
                 .collect();
 
-            let results = save_tasks_bulk_optimized(
-                repository.clone(),
-                tasks,
-                config,
-            )
-            .await;
+            let results = save_tasks_bulk_optimized(repository.clone(), tasks, config).await;
 
             // All 5 tasks should be processed
             assert_eq!(results.len(), 5);
@@ -2923,6 +3050,403 @@ mod tests {
                 }
                 Either::Left(_) => panic!("Expected success"),
             }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // save_chunk_with_fallback Tests
+    // -------------------------------------------------------------------------
+
+    mod save_chunk_with_fallback_tests {
+        use super::*;
+        use crate::domain::{Task, TaskId, Timestamp};
+        use crate::infrastructure::{InMemoryTaskRepository, RepositoryError};
+        use lambars::effect::AsyncIO;
+
+        fn create_test_task(title: &str) -> Task {
+            Task::new(TaskId::generate(), title, Timestamp::now())
+        }
+
+        /// Mock repository that fails bulk save but succeeds on individual save.
+        /// This simulates scenarios where bulk operations fail but individual retries work.
+        struct BulkFailIndividualSuccessRepository {
+            inner: InMemoryTaskRepository,
+        }
+
+        impl BulkFailIndividualSuccessRepository {
+            fn new() -> Self {
+                Self {
+                    inner: InMemoryTaskRepository::new(),
+                }
+            }
+        }
+
+        impl TaskRepository for BulkFailIndividualSuccessRepository {
+            fn find_by_id(&self, id: &TaskId) -> AsyncIO<Result<Option<Task>, RepositoryError>> {
+                self.inner.find_by_id(id)
+            }
+
+            fn save(&self, task: &Task) -> AsyncIO<Result<(), RepositoryError>> {
+                self.inner.save(task)
+            }
+
+            fn save_bulk(&self, tasks: &[Task]) -> AsyncIO<Vec<Result<(), RepositoryError>>> {
+                // Always fail bulk save
+                let count = tasks.len();
+                AsyncIO::pure(
+                    (0..count)
+                        .map(|_| {
+                            Err(RepositoryError::DatabaseError(
+                                "Bulk save simulated failure".to_string(),
+                            ))
+                        })
+                        .collect(),
+                )
+            }
+
+            fn delete(&self, id: &TaskId) -> AsyncIO<Result<bool, RepositoryError>> {
+                self.inner.delete(id)
+            }
+
+            fn list(
+                &self,
+                pagination: crate::infrastructure::Pagination,
+            ) -> AsyncIO<Result<crate::infrastructure::PaginatedResult<Task>, RepositoryError>>
+            {
+                self.inner.list(pagination)
+            }
+
+            fn count(&self) -> AsyncIO<Result<u64, RepositoryError>> {
+                self.inner.count()
+            }
+        }
+
+        /// Mock repository that fails both bulk and individual save.
+        struct AllFailRepository;
+
+        impl TaskRepository for AllFailRepository {
+            fn find_by_id(&self, _id: &TaskId) -> AsyncIO<Result<Option<Task>, RepositoryError>> {
+                AsyncIO::pure(Ok(None))
+            }
+
+            fn save(&self, _task: &Task) -> AsyncIO<Result<(), RepositoryError>> {
+                AsyncIO::pure(Err(RepositoryError::DatabaseError(
+                    "Individual save simulated failure".to_string(),
+                )))
+            }
+
+            fn save_bulk(&self, tasks: &[Task]) -> AsyncIO<Vec<Result<(), RepositoryError>>> {
+                let count = tasks.len();
+                AsyncIO::pure(
+                    (0..count)
+                        .map(|_| {
+                            Err(RepositoryError::DatabaseError(
+                                "Bulk save simulated failure".to_string(),
+                            ))
+                        })
+                        .collect(),
+                )
+            }
+
+            fn delete(&self, _id: &TaskId) -> AsyncIO<Result<bool, RepositoryError>> {
+                AsyncIO::pure(Ok(false))
+            }
+
+            fn list(
+                &self,
+                _pagination: crate::infrastructure::Pagination,
+            ) -> AsyncIO<Result<crate::infrastructure::PaginatedResult<Task>, RepositoryError>>
+            {
+                AsyncIO::pure(Ok(crate::infrastructure::PaginatedResult::new(
+                    vec![],
+                    0,
+                    0,
+                    10,
+                )))
+            }
+
+            fn count(&self) -> AsyncIO<Result<u64, RepositoryError>> {
+                AsyncIO::pure(Ok(0))
+            }
+        }
+
+        /// Mock repository that fails bulk save for specific tasks (partial failure).
+        struct PartialBulkFailRepository {
+            inner: InMemoryTaskRepository,
+            fail_indices: Vec<usize>,
+        }
+
+        impl PartialBulkFailRepository {
+            fn new(fail_indices: Vec<usize>) -> Self {
+                Self {
+                    inner: InMemoryTaskRepository::new(),
+                    fail_indices,
+                }
+            }
+        }
+
+        impl TaskRepository for PartialBulkFailRepository {
+            fn find_by_id(&self, id: &TaskId) -> AsyncIO<Result<Option<Task>, RepositoryError>> {
+                self.inner.find_by_id(id)
+            }
+
+            fn save(&self, task: &Task) -> AsyncIO<Result<(), RepositoryError>> {
+                self.inner.save(task)
+            }
+
+            fn save_bulk(&self, tasks: &[Task]) -> AsyncIO<Vec<Result<(), RepositoryError>>> {
+                let fail_indices = self.fail_indices.clone();
+                let inner = self.inner.clone();
+                // Clone tasks before moving into the closure to avoid lifetime issues
+                let tasks_owned = tasks.to_vec();
+
+                AsyncIO::new(move || {
+                    let fail_indices = fail_indices.clone();
+                    let inner = inner.clone();
+                    let tasks = tasks_owned;
+
+                    async move {
+                        let mut results = Vec::with_capacity(tasks.len());
+                        for (index, task) in tasks.iter().enumerate() {
+                            if fail_indices.contains(&index) {
+                                results.push(Err(RepositoryError::DatabaseError(format!(
+                                    "Bulk save simulated failure for index {index}"
+                                ))));
+                            } else {
+                                // Actually save to inner repository
+                                let save_result = inner.save(task).run_async().await;
+                                results.push(save_result);
+                            }
+                        }
+                        results
+                    }
+                })
+            }
+
+            fn delete(&self, id: &TaskId) -> AsyncIO<Result<bool, RepositoryError>> {
+                self.inner.delete(id)
+            }
+
+            fn list(
+                &self,
+                pagination: crate::infrastructure::Pagination,
+            ) -> AsyncIO<Result<crate::infrastructure::PaginatedResult<Task>, RepositoryError>>
+            {
+                self.inner.list(pagination)
+            }
+
+            fn count(&self) -> AsyncIO<Result<u64, RepositoryError>> {
+                self.inner.count()
+            }
+        }
+
+        // -------------------------------------------------------------------------
+        // Test: All tasks succeed in bulk save (no fallback needed)
+        // -------------------------------------------------------------------------
+
+        #[rstest]
+        #[tokio::test]
+        async fn test_save_chunk_with_fallback_all_success() {
+            let repository = Arc::new(InMemoryTaskRepository::new());
+            let chunk = vec![
+                (0, create_test_task("Task 0")),
+                (1, create_test_task("Task 1")),
+                (2, create_test_task("Task 2")),
+            ];
+
+            let results = save_chunk_with_fallback(repository.clone(), chunk).await;
+
+            assert_eq!(results.len(), 3);
+
+            // All should succeed without fallback
+            for (index, result) in &results {
+                match result {
+                    Either::Right(save_result) => {
+                        assert!(
+                            !save_result.used_fallback,
+                            "Task at index {index} should not have used fallback"
+                        );
+                    }
+                    Either::Left(error) => {
+                        panic!("Task at index {index} failed unexpectedly: {error:?}");
+                    }
+                }
+            }
+        }
+
+        // -------------------------------------------------------------------------
+        // Test: Partial bulk failure - failed tasks use fallback
+        // -------------------------------------------------------------------------
+
+        #[rstest]
+        #[tokio::test]
+        async fn test_save_chunk_with_fallback_partial_failure() {
+            // Fail bulk save for index 1 only
+            let repository = Arc::new(PartialBulkFailRepository::new(vec![1]));
+            let chunk = vec![
+                (0, create_test_task("Task 0")),
+                (1, create_test_task("Task 1")),
+                (2, create_test_task("Task 2")),
+            ];
+
+            let results = save_chunk_with_fallback(repository.clone(), chunk).await;
+
+            assert_eq!(results.len(), 3);
+
+            // Sort results by index for predictable assertions
+            let mut sorted_results = results;
+            sorted_results.sort_by_key(|(index, _)| *index);
+
+            // Index 0: should succeed without fallback
+            match &sorted_results[0].1 {
+                Either::Right(save_result) => {
+                    assert!(
+                        !save_result.used_fallback,
+                        "Index 0 should not use fallback"
+                    );
+                }
+                Either::Left(error) => panic!("Index 0 failed unexpectedly: {error:?}"),
+            }
+
+            // Index 1: should succeed WITH fallback (bulk failed, individual succeeded)
+            match &sorted_results[1].1 {
+                Either::Right(save_result) => {
+                    assert!(save_result.used_fallback, "Index 1 should use fallback");
+                }
+                Either::Left(error) => panic!("Index 1 failed unexpectedly: {error:?}"),
+            }
+
+            // Index 2: should succeed without fallback
+            match &sorted_results[2].1 {
+                Either::Right(save_result) => {
+                    assert!(
+                        !save_result.used_fallback,
+                        "Index 2 should not use fallback"
+                    );
+                }
+                Either::Left(error) => panic!("Index 2 failed unexpectedly: {error:?}"),
+            }
+        }
+
+        // -------------------------------------------------------------------------
+        // Test: All bulk save fail, all use fallback (all succeed via individual)
+        // -------------------------------------------------------------------------
+
+        #[rstest]
+        #[tokio::test]
+        async fn test_save_chunk_with_fallback_all_bulk_fail_individual_succeed() {
+            let repository = Arc::new(BulkFailIndividualSuccessRepository::new());
+            let chunk = vec![
+                (0, create_test_task("Task 0")),
+                (1, create_test_task("Task 1")),
+            ];
+
+            let results = save_chunk_with_fallback(repository.clone(), chunk).await;
+
+            assert_eq!(results.len(), 2);
+
+            // All should succeed WITH fallback
+            for (index, result) in &results {
+                match result {
+                    Either::Right(save_result) => {
+                        assert!(
+                            save_result.used_fallback,
+                            "Task at index {index} should have used fallback"
+                        );
+                    }
+                    Either::Left(error) => {
+                        panic!("Task at index {index} failed unexpectedly: {error:?}");
+                    }
+                }
+            }
+        }
+
+        // -------------------------------------------------------------------------
+        // Test: Both bulk and individual fail - returns RepositoryFallbackFailed
+        // -------------------------------------------------------------------------
+
+        #[rstest]
+        #[tokio::test]
+        async fn test_save_chunk_with_fallback_all_fail_returns_repository_fallback_failed() {
+            let repository = Arc::new(AllFailRepository);
+            let chunk = vec![
+                (0, create_test_task("Task 0")),
+                (1, create_test_task("Task 1")),
+            ];
+
+            let results = save_chunk_with_fallback(repository.clone(), chunk).await;
+
+            assert_eq!(results.len(), 2);
+
+            // All should fail with RepositoryFallbackFailed containing both errors
+            for (index, result) in &results {
+                match result {
+                    Either::Left(ItemError::RepositoryFallbackFailed {
+                        original_error,
+                        fallback_error,
+                    }) => {
+                        // Verify both errors contain meaningful information
+                        let original_message = format!("{original_error}");
+                        let fallback_message = format!("{fallback_error}");
+                        assert!(
+                            original_message.contains("simulated failure"),
+                            "Original error at index {index} should contain error details: {original_message}"
+                        );
+                        assert!(
+                            fallback_message.contains("simulated failure"),
+                            "Fallback error at index {index} should contain error details: {fallback_message}"
+                        );
+                    }
+                    Either::Left(other_error) => {
+                        panic!("Task at index {index} returned wrong error type: {other_error:?}");
+                    }
+                    Either::Right(_) => {
+                        panic!("Task at index {index} succeeded unexpectedly");
+                    }
+                }
+            }
+        }
+
+        // -------------------------------------------------------------------------
+        // Test: Empty chunk
+        // -------------------------------------------------------------------------
+
+        #[rstest]
+        #[tokio::test]
+        async fn test_save_chunk_with_fallback_empty() {
+            let repository = Arc::new(InMemoryTaskRepository::new());
+            let chunk: Vec<(usize, Task)> = vec![];
+
+            let results = save_chunk_with_fallback(repository, chunk).await;
+
+            assert!(results.is_empty());
+        }
+
+        // -------------------------------------------------------------------------
+        // Test: Preserves original indices
+        // -------------------------------------------------------------------------
+
+        #[rstest]
+        #[tokio::test]
+        async fn test_save_chunk_with_fallback_preserves_indices() {
+            let repository = Arc::new(InMemoryTaskRepository::new());
+            // Non-sequential indices
+            let chunk = vec![
+                (5, create_test_task("Task 5")),
+                (10, create_test_task("Task 10")),
+                (3, create_test_task("Task 3")),
+            ];
+
+            let results = save_chunk_with_fallback(repository.clone(), chunk).await;
+
+            // Verify all original indices are present
+            let indices: std::collections::HashSet<usize> =
+                results.iter().map(|(index, _)| *index).collect();
+
+            assert!(indices.contains(&5));
+            assert!(indices.contains(&10));
+            assert!(indices.contains(&3));
+            assert_eq!(indices.len(), 3);
         }
     }
 }
