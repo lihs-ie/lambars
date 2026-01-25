@@ -83,6 +83,7 @@ const BULK_LIMIT: usize = 100;
 /// let config = BulkConfig {
 ///     chunk_size: 100,
 ///     concurrency_limit: 8,
+///     use_bulk_optimization: true,
 /// };
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,13 +96,23 @@ pub struct BulkConfig {
     ///
     /// Default: 4 (conservative to avoid DB connection pool exhaustion)
     pub concurrency_limit: usize,
+    /// Whether to use the optimized bulk processing implementation.
+    ///
+    /// When `true` (default), uses `save_tasks_bulk_optimized` with parallel chunk processing.
+    /// When `false`, uses the legacy `save_tasks_bulk` for sequential processing.
+    ///
+    /// This flag enables rollback to the legacy implementation if issues are discovered.
+    ///
+    /// Environment variable: `USE_BULK_OPTIMIZATION` (default: `true`)
+    pub use_bulk_optimization: bool,
 }
 
 impl Default for BulkConfig {
     fn default() -> Self {
         Self {
-            chunk_size: 50,       // PostgreSQL optimal batch size
-            concurrency_limit: 4, // DB connection pool consideration
+            chunk_size: 50,              // PostgreSQL optimal batch size
+            concurrency_limit: 4,        // DB connection pool consideration
+            use_bulk_optimization: true, // Use optimized implementation by default
         }
     }
 }
@@ -111,12 +122,15 @@ impl BulkConfig {
     const DEFAULT_CHUNK_SIZE: usize = 50;
     /// Default concurrency limit for bulk operations.
     const DEFAULT_CONCURRENCY_LIMIT: usize = 4;
+    /// Default value for bulk optimization feature flag.
+    const DEFAULT_USE_BULK_OPTIMIZATION: bool = true;
 
     /// Creates configuration from environment variables or defaults.
     ///
     /// Environment variables:
     /// - `BULK_CHUNK_SIZE`: Maximum tasks per chunk (default: 50)
     /// - `BULK_CONCURRENCY_LIMIT`: Maximum concurrent chunks (default: 4)
+    /// - `USE_BULK_OPTIMIZATION`: Enable optimized bulk processing (default: `true`)
     ///
     /// Invalid values (including 0) are silently ignored and defaults are used.
     /// This prevents configuration mistakes from causing all tasks to be dropped.
@@ -133,9 +147,20 @@ impl BulkConfig {
             .filter(|&limit| limit > 0)
             .unwrap_or(Self::DEFAULT_CONCURRENCY_LIMIT);
 
+        // Parse USE_BULK_OPTIMIZATION: "false", "0", or "no" (case-insensitive) disables optimization
+        // Apply trim() to handle values with trailing/leading whitespace
+        let use_bulk_optimization = std::env::var("USE_BULK_OPTIMIZATION").ok().map_or(
+            Self::DEFAULT_USE_BULK_OPTIMIZATION,
+            |s| {
+                let trimmed = s.trim().to_lowercase();
+                !matches!(trimmed.as_str(), "false" | "0" | "no")
+            },
+        );
+
         Self {
             chunk_size,
             concurrency_limit,
+            use_bulk_optimization,
         }
     }
 }
@@ -505,7 +530,18 @@ pub async fn bulk_create_tasks(
     let tasks_to_save: Vec<Either<ItemError, Task>> = build_tasks(&validated, &ids, &now);
 
     // Step 5: Save tasks (I/O boundary)
-    let results = save_tasks_bulk(state.task_repository.clone(), tasks_to_save).await;
+    // Uses optimized or legacy implementation based on feature flag
+    // BulkConfig is injected via AppState to ensure referential transparency
+    let results = if state.bulk_config.use_bulk_optimization {
+        save_tasks_bulk_optimized(
+            state.task_repository.clone(),
+            tasks_to_save,
+            state.bulk_config,
+        )
+        .await
+    } else {
+        save_tasks_bulk(state.task_repository.clone(), tasks_to_save).await
+    };
 
     // Step 6: Update search index for successfully created tasks (lock-free writes)
     for result in &results {
@@ -2433,6 +2469,7 @@ mod tests {
 
         assert_eq!(config.chunk_size, 50);
         assert_eq!(config.concurrency_limit, 4);
+        assert!(config.use_bulk_optimization);
     }
 
     #[rstest]
@@ -2440,10 +2477,12 @@ mod tests {
         let config = BulkConfig {
             chunk_size: 100,
             concurrency_limit: 8,
+            use_bulk_optimization: false,
         };
 
         assert_eq!(config.chunk_size, 100);
         assert_eq!(config.concurrency_limit, 8);
+        assert!(!config.use_bulk_optimization);
     }
 
     #[rstest]
@@ -2711,6 +2750,43 @@ mod tests {
         assert_eq!(filtered, Some(50));
     }
 
+    #[rstest]
+    fn test_bulk_config_use_bulk_optimization_parsing_logic() {
+        // Test the parsing logic for USE_BULK_OPTIMIZATION
+        // "false", "0", "no" (case-insensitive) should return false
+        // Also test that values with whitespace are handled correctly after trim()
+        let test_cases = vec![
+            ("false", false),
+            ("FALSE", false),
+            ("False", false),
+            ("0", false),
+            ("no", false),
+            ("NO", false),
+            ("No", false),
+            ("true", true),
+            ("TRUE", true),
+            ("1", true),
+            ("yes", true),
+            ("anything_else", true),
+            // Whitespace handling test cases (should be handled by trim())
+            ("false ", false),
+            (" false", false),
+            (" false ", false),
+            ("  0  ", false),
+            ("\tno\t", false),
+            (" true ", true),
+        ];
+
+        for (input, expected) in test_cases {
+            let trimmed = input.trim().to_lowercase();
+            let result = !matches!(trimmed.as_str(), "false" | "0" | "no");
+            assert_eq!(
+                result, expected,
+                "Input '{input}' should result in {expected}"
+            );
+        }
+    }
+
     // -------------------------------------------------------------------------
     // save_tasks_bulk_optimized Tests
     // -------------------------------------------------------------------------
@@ -2742,6 +2818,7 @@ mod tests {
             let config = BulkConfig {
                 chunk_size: 50,
                 concurrency_limit: 4,
+                use_bulk_optimization: true,
             };
 
             // Create 10 tasks (fits in single chunk)
@@ -2766,6 +2843,7 @@ mod tests {
             let config = BulkConfig {
                 chunk_size: 5, // Small chunk size to create multiple chunks
                 concurrency_limit: 2,
+                use_bulk_optimization: true,
             };
 
             // Create 20 tasks (will be split into 4 chunks of 5)
@@ -2794,6 +2872,7 @@ mod tests {
             let config = BulkConfig {
                 chunk_size: 5,
                 concurrency_limit: 2,
+                use_bulk_optimization: true,
             };
 
             // Create mixed tasks: some valid, some errors
@@ -2871,6 +2950,7 @@ mod tests {
             let config = BulkConfig {
                 chunk_size: 3,
                 concurrency_limit: 10, // High concurrency to encourage reordering
+                use_bulk_optimization: true,
             };
 
             // Create 15 tasks to test order preservation
@@ -2908,6 +2988,7 @@ mod tests {
             let config = BulkConfig {
                 chunk_size: 5,
                 concurrency_limit: 0, // Invalid value, should be clamped to 1
+                use_bulk_optimization: true,
             };
 
             // Create 10 tasks
@@ -2941,6 +3022,7 @@ mod tests {
             let config = BulkConfig {
                 chunk_size: 0,        // Invalid, clamped to 1 in chunk_tasks_with_indices
                 concurrency_limit: 0, // Invalid, clamped to 1 in save_tasks_bulk_optimized
+                use_bulk_optimization: true,
             };
 
             // Create 5 tasks
@@ -2964,6 +3046,216 @@ mod tests {
             // Verify tasks are in repository
             let count = repository.count().run_async().await.unwrap();
             assert_eq!(count, 5);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Feature Flag Switching Tests
+    // -------------------------------------------------------------------------
+
+    mod feature_flag_tests {
+        use super::*;
+        use crate::api::dto::PriorityDto;
+        use crate::api::handlers::AppState;
+        use crate::infrastructure::{
+            InMemoryEventStore, InMemoryProjectRepository, InMemoryTaskRepository,
+        };
+        use arc_swap::ArcSwap;
+        use axum::Json;
+        use axum::extract::State;
+        use lambars::persistent::PersistentVector;
+
+        use crate::api::query::{SearchCache, SearchIndex};
+
+        fn create_app_state_with_bulk_config(bulk_config: BulkConfig) -> AppState {
+            AppState {
+                task_repository: Arc::new(InMemoryTaskRepository::new()),
+                project_repository: Arc::new(InMemoryProjectRepository::new()),
+                event_store: Arc::new(InMemoryEventStore::new()),
+                config: crate::api::handlers::AppConfig::default(),
+                bulk_config,
+                search_index: Arc::new(ArcSwap::from_pointee(SearchIndex::build(
+                    &PersistentVector::new(),
+                ))),
+                search_cache: Arc::new(SearchCache::with_default_config()),
+            }
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn test_bulk_create_tasks_uses_optimized_when_flag_enabled() {
+            // Test that bulk_create_tasks uses save_tasks_bulk_optimized when flag is true
+            let config = BulkConfig {
+                chunk_size: 10,
+                concurrency_limit: 2,
+                use_bulk_optimization: true,
+            };
+            let state = create_app_state_with_bulk_config(config);
+
+            let request = BulkCreateRequest {
+                tasks: vec![
+                    CreateTaskRequest {
+                        title: "Task 1".to_string(),
+                        description: None,
+                        priority: PriorityDto::Medium,
+                        tags: vec![],
+                    },
+                    CreateTaskRequest {
+                        title: "Task 2".to_string(),
+                        description: None,
+                        priority: PriorityDto::Medium,
+                        tags: vec![],
+                    },
+                ],
+            };
+
+            let result = bulk_create_tasks(State(state.clone()), Json(request)).await;
+
+            assert!(result.is_ok());
+            let (status, Json(response)) = result.unwrap();
+            assert_eq!(status, StatusCode::MULTI_STATUS);
+            assert_eq!(response.summary.total, 2);
+            assert_eq!(response.summary.succeeded, 2);
+            assert_eq!(response.summary.failed, 0);
+
+            // Verify tasks were saved
+            let count = state.task_repository.count().run_async().await.unwrap();
+            assert_eq!(count, 2);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn test_bulk_create_tasks_uses_legacy_when_flag_disabled() {
+            // Test that bulk_create_tasks uses save_tasks_bulk when flag is false
+            let config = BulkConfig {
+                chunk_size: 10,
+                concurrency_limit: 2,
+                use_bulk_optimization: false,
+            };
+            let state = create_app_state_with_bulk_config(config);
+
+            let request = BulkCreateRequest {
+                tasks: vec![
+                    CreateTaskRequest {
+                        title: "Task A".to_string(),
+                        description: None,
+                        priority: PriorityDto::Low,
+                        tags: vec![],
+                    },
+                    CreateTaskRequest {
+                        title: "Task B".to_string(),
+                        description: None,
+                        priority: PriorityDto::High,
+                        tags: vec![],
+                    },
+                ],
+            };
+
+            let result = bulk_create_tasks(State(state.clone()), Json(request)).await;
+
+            assert!(result.is_ok());
+            let (status, Json(response)) = result.unwrap();
+            assert_eq!(status, StatusCode::MULTI_STATUS);
+            assert_eq!(response.summary.total, 2);
+            assert_eq!(response.summary.succeeded, 2);
+            assert_eq!(response.summary.failed, 0);
+
+            // Verify tasks were saved (legacy path)
+            let count = state.task_repository.count().run_async().await.unwrap();
+            assert_eq!(count, 2);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn test_bulk_create_tasks_respects_bulk_config_from_state() {
+            // Verify that AppState.bulk_config is used, not BulkConfig::from_env()
+            // This is verified by using a custom config that differs from defaults
+            let custom_config = BulkConfig {
+                chunk_size: 3, // Different from default 50
+                concurrency_limit: 1,
+                use_bulk_optimization: true,
+            };
+            let state = create_app_state_with_bulk_config(custom_config);
+
+            // Create more tasks than chunk_size to ensure chunking is applied
+            let request = BulkCreateRequest {
+                tasks: (0..10)
+                    .map(|i| CreateTaskRequest {
+                        title: format!("Task {i}"),
+                        description: None,
+                        priority: PriorityDto::Medium,
+                        tags: vec![],
+                    })
+                    .collect(),
+            };
+
+            let result = bulk_create_tasks(State(state.clone()), Json(request)).await;
+
+            assert!(result.is_ok());
+            let (status, Json(response)) = result.unwrap();
+            assert_eq!(status, StatusCode::MULTI_STATUS);
+            assert_eq!(response.summary.total, 10);
+            assert_eq!(response.summary.succeeded, 10);
+
+            // Verify all tasks were saved correctly with custom config
+            let count = state.task_repository.count().run_async().await.unwrap();
+            assert_eq!(count, 10);
+        }
+
+        #[rstest]
+        #[tokio::test]
+        async fn test_bulk_create_tasks_both_paths_handle_validation_errors() {
+            // Test that both optimized and legacy paths correctly handle validation errors
+            for use_bulk_optimization in [true, false] {
+                let config = BulkConfig {
+                    chunk_size: 10,
+                    concurrency_limit: 2,
+                    use_bulk_optimization,
+                };
+                let state = create_app_state_with_bulk_config(config);
+
+                let request = BulkCreateRequest {
+                    tasks: vec![
+                        CreateTaskRequest {
+                            title: "Valid Task".to_string(),
+                            description: None,
+                            priority: PriorityDto::Medium,
+                            tags: vec![],
+                        },
+                        CreateTaskRequest {
+                            title: String::new(), // Invalid: empty title
+                            description: None,
+                            priority: PriorityDto::Medium,
+                            tags: vec![],
+                        },
+                    ],
+                };
+
+                let result = bulk_create_tasks(State(state.clone()), Json(request)).await;
+
+                assert!(
+                    result.is_ok(),
+                    "use_bulk_optimization={use_bulk_optimization}: should not return error"
+                );
+                let (status, Json(response)) = result.unwrap();
+                assert_eq!(
+                    status,
+                    StatusCode::MULTI_STATUS,
+                    "use_bulk_optimization={use_bulk_optimization}"
+                );
+                assert_eq!(
+                    response.summary.total, 2,
+                    "use_bulk_optimization={use_bulk_optimization}"
+                );
+                assert_eq!(
+                    response.summary.succeeded, 1,
+                    "use_bulk_optimization={use_bulk_optimization}"
+                );
+                assert_eq!(
+                    response.summary.failed, 1,
+                    "use_bulk_optimization={use_bulk_optimization}"
+                );
+            }
         }
     }
 

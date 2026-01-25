@@ -1643,11 +1643,14 @@ mod handler_tests {
     use std::sync::Arc;
 
     fn create_test_app_state() -> AppState {
+        use crate::api::bulk::BulkConfig;
+
         AppState {
             task_repository: Arc::new(crate::infrastructure::InMemoryTaskRepository::new()),
             project_repository: Arc::new(InMemoryProjectRepository::new()),
             event_store: Arc::new(InMemoryEventStore::new()),
             config: AppConfig::default(),
+            bulk_config: BulkConfig::default(),
             search_index: Arc::new(ArcSwap::from_pointee(SearchIndex::build(
                 &PersistentVector::new(),
             ))),
