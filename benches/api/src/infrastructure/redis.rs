@@ -239,6 +239,122 @@ impl TaskRepository for RedisTaskRepository {
     }
 
     #[allow(clippy::future_not_send)]
+    fn save_bulk(&self, tasks: &[Task]) -> AsyncIO<Vec<Result<(), RepositoryError>>> {
+        let pool = self.pool.clone();
+        let tasks_to_save: Vec<Task> = tasks.to_vec();
+
+        AsyncIO::new(move || async move {
+            if tasks_to_save.is_empty() {
+                return Vec::new();
+            }
+
+            let mut connection = match pool.get().await {
+                Ok(connection) => connection,
+                Err(error) => {
+                    let error = RepositoryError::CacheError(error.to_string());
+                    return tasks_to_save.iter().map(|_| Err(error.clone())).collect();
+                }
+            };
+
+            // Use Lua script for atomic version checking and update
+            let script = redis::Script::new(
+                r"
+                local key = KEYS[1]
+                local index_key = KEYS[2]
+                local new_json = ARGV[1]
+                local new_version = tonumber(ARGV[2])
+                local entity_id = ARGV[3]
+                local score = tonumber(ARGV[4])
+
+                local existing = redis.call('GET', key)
+                if existing then
+                    -- Update case: version must be existing + 1
+                    local ok, data = pcall(cjson.decode, existing)
+                    if not ok then
+                        return {2}
+                    end
+                    local existing_version = tonumber(data.version)
+                    if existing_version == nil then
+                        return {2}
+                    end
+                    if new_version ~= existing_version + 1 then
+                        return {1, existing_version + 1, new_version}
+                    end
+                else
+                    -- New entity case: version must be 1
+                    if new_version ~= 1 then
+                        return {1, 1, new_version}
+                    end
+                end
+
+                redis.call('SET', key, new_json)
+                redis.call('ZADD', index_key, score, entity_id)
+                return {0}
+                ",
+            );
+
+            let mut results = Vec::with_capacity(tasks_to_save.len());
+
+            for task in tasks_to_save {
+                let key = task_key(&task.task_id);
+                let task_id_string = task.task_id.to_string();
+                let score = timestamp_to_score(&task.created_at);
+
+                // Serialize the task
+                let json = match serde_json::to_string(&task) {
+                    Ok(json) => json,
+                    Err(error) => {
+                        results.push(Err(RepositoryError::SerializationError(error.to_string())));
+                        continue;
+                    }
+                };
+
+                #[allow(clippy::cast_sign_loss)]
+                let result: Result<Vec<i64>, _> = script
+                    .key(&key)
+                    .key(TASK_INDEX_KEY)
+                    .arg(&json)
+                    .arg(task.version)
+                    .arg(&task_id_string)
+                    .arg(score)
+                    .invoke_async(&mut *connection)
+                    .await;
+
+                let result = match result {
+                    Ok(result) => result,
+                    Err(error) => {
+                        results.push(Err(RepositoryError::CacheError(error.to_string())));
+                        continue;
+                    }
+                };
+
+                let save_result = match result[0] {
+                    0 => Ok(()),
+                    1 =>
+                    {
+                        #[allow(clippy::cast_sign_loss)]
+                        Err(RepositoryError::VersionConflict {
+                            expected: result[1] as u64,
+                            found: result[2] as u64,
+                        })
+                    }
+                    2 => Err(RepositoryError::SerializationError(
+                        "Corrupted data in Redis: invalid JSON or missing version field"
+                            .to_string(),
+                    )),
+                    _ => Err(RepositoryError::CacheError(
+                        "Unexpected Lua script result".to_string(),
+                    )),
+                };
+
+                results.push(save_result);
+            }
+
+            results
+        })
+    }
+
+    #[allow(clippy::future_not_send)]
     fn delete(&self, id: &TaskId) -> AsyncIO<Result<bool, RepositoryError>> {
         let pool = self.pool.clone();
         let key = task_key(id);

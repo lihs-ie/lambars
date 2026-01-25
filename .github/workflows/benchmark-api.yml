@@ -49,7 +49,9 @@ jobs:
     steps:
       - name: Install dependencies
         run: |
-          sudo apt-get update
+          # Remove problematic Azure CLI repository that may return 403
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list || true
+          sudo apt-get update || true
           sudo apt-get install -y wrk linux-tools-common linux-tools-generic
           # Install yq (Mike Farah's YAML processor)
           sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
@@ -130,7 +132,9 @@ jobs:
     steps:
       - name: Install dependencies
         run: |
-          sudo apt-get update
+          # Remove problematic Azure CLI repository that may return 403
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list || true
+          sudo apt-get update || true
           sudo apt-get install -y wrk linux-tools-common linux-tools-generic
           # Install yq (Mike Farah's YAML processor)
           sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
@@ -483,7 +487,9 @@ jobs:
     steps:
       - name: Install dependencies
         run: |
-          sudo apt-get update
+          # Remove problematic Azure CLI repository that may return 403
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list || true
+          sudo apt-get update || true
           sudo apt-get install -y wrk linux-tools-common linux-tools-generic linux-tools-$(uname -r) || true
           # Install yq (Mike Farah's YAML processor)
           sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
@@ -541,7 +547,9 @@ jobs:
     steps:
       - name: Install dependencies
         run: |
-          sudo apt-get update
+          # Remove problematic Azure CLI repository that may return 403
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list || true
+          sudo apt-get update || true
           sudo apt-get install -y wrk linux-tools-common linux-tools-generic linux-tools-$(uname -r) || true
           # Install yq (Mike Farah's YAML processor)
           sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
@@ -602,7 +610,9 @@ jobs:
     steps:
       - name: Install dependencies
         run: |
-          sudo apt-get update
+          # Remove problematic Azure CLI repository that may return 403
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list || true
+          sudo apt-get update || true
           sudo apt-get install -y wrk linux-tools-common linux-tools-generic linux-tools-$(uname -r) || true
           # Install yq (Mike Farah's YAML processor)
           sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64

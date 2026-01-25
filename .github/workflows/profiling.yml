@@ -107,7 +107,9 @@ jobs:
 
       - name: Install perf tools
         run: |
-          sudo apt-get update
+          # Remove problematic Azure CLI repository that may return 403
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list || true
+          sudo apt-get update || true
           sudo apt-get install -y linux-tools-common linux-tools-generic linux-tools-$(uname -r) gawk || true
           echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid
           echo '0' | sudo tee /proc/sys/kernel/kptr_restrict
@@ -205,7 +207,9 @@ jobs:
 
       - name: Install Valgrind
         run: |
-          sudo apt-get update
+          # Remove problematic Azure CLI repository that may return 403
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list || true
+          sudo apt-get update || true
           sudo apt-get install -y valgrind
 
       - name: Install iai-callgrind-runner
@@ -355,7 +359,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo apt-get update
+          # Remove problematic Azure CLI repository that may return 403
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list || true
+          sudo apt-get update || true
           sudo apt-get install -y wrk yq linux-tools-common linux-tools-generic linux-tools-$(uname -r) gawk || true
           # Allow perf for non-root users
           echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid
@@ -424,6 +430,10 @@ jobs:
           chmod +x "${API_BIN}"
 
           # Start server in background with in-memory mode (no external dependencies)
+          # Enable bulk optimization for tasks_bulk benchmark
+          USE_BULK_OPTIMIZATION=true \
+          BULK_CHUNK_SIZE=50 \
+          BULK_CONCURRENCY_LIMIT=4 \
           STORAGE_MODE=in_memory CACHE_MODE=in_memory RUST_LOG=info "${API_BIN}" &
           SERVER_PID=$!
 

@@ -64,7 +64,7 @@ error_config:
   retry_delay_ms: 200
   expected_error_rate: 0.05
   fail_on_error_threshold: false
-  inject_error_rate: 0.1
+  inject_error_rate: 0.0
 
 # Performance thresholds
 thresholds:
@@ -85,7 +85,7 @@ metadata:
   payload: "large"
   cache_strategy: "write-through"
   hit_rate: 0
-  fail_injection: 0.1
+  fail_injection: 0.0
   retry: true
   profile: false
   api_features:

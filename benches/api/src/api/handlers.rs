@@ -27,6 +27,7 @@ use lambars::control::Either;
 use lambars::persistent::PersistentVector;
 use uuid::Uuid;
 
+use super::bulk::BulkConfig;
 use super::dto::{
     CreateTaskRequest, TaskResponse, validate_description, validate_tags, validate_title,
 };
@@ -85,6 +86,12 @@ impl Default for AppConfig {
 ///
 /// - **Read**: `state.search_index.load()` returns a `Guard<Arc<SearchIndex>>`
 /// - **Write**: `state.search_index.store(Arc::new(new_index))` atomically replaces the index
+///
+/// # Bulk Configuration
+///
+/// The `bulk_config` field holds configuration for bulk operations. This is loaded
+/// from environment variables at application startup to ensure referential transparency
+/// in handlers (I/O is isolated at the application boundary).
 pub struct AppState {
     /// Task repository for persistence.
     pub task_repository: Arc<dyn TaskRepository + Send + Sync>,
@@ -94,6 +101,10 @@ pub struct AppState {
     pub event_store: Arc<dyn EventStore + Send + Sync>,
     /// Application configuration.
     pub config: AppConfig,
+    /// Bulk operation configuration (chunk size, concurrency, feature flags).
+    ///
+    /// Loaded from environment variables at startup to isolate I/O at application boundary.
+    pub bulk_config: BulkConfig,
     /// Search index for task search (lock-free reads via `ArcSwap`).
     ///
     /// This index is built once at startup and updated incrementally
@@ -113,6 +124,7 @@ impl Clone for AppState {
             project_repository: Arc::clone(&self.project_repository),
             event_store: Arc::clone(&self.event_store),
             config: self.config.clone(),
+            bulk_config: self.bulk_config,
             search_index: Arc::clone(&self.search_index),
             search_cache: Arc::clone(&self.search_cache),
         }
@@ -149,6 +161,21 @@ impl AppState {
         repositories: Repositories,
         config: AppConfig,
     ) -> Result<Self, crate::infrastructure::RepositoryError> {
+        Self::with_full_config(repositories, config, BulkConfig::from_env()).await
+    }
+
+    /// Creates a new `AppState` from repositories and both app and bulk configurations.
+    ///
+    /// This method allows explicit injection of `BulkConfig` for testing purposes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the task repository fails to list tasks.
+    pub async fn with_full_config(
+        repositories: Repositories,
+        config: AppConfig,
+        bulk_config: BulkConfig,
+    ) -> Result<Self, crate::infrastructure::RepositoryError> {
         // Fetch all tasks to build the initial search index
         let all_tasks = repositories
             .task_repository
@@ -165,6 +192,7 @@ impl AppState {
             project_repository: repositories.project_repository,
             event_store: repositories.event_store,
             config,
+            bulk_config,
             search_index: Arc::new(ArcSwap::from_pointee(search_index)),
             search_cache: Arc::new(SearchCache::with_default_config()),
         })
@@ -616,6 +644,11 @@ mod tests {
             AsyncIO::new(|| async { Ok(()) })
         }
 
+        fn save_bulk(&self, tasks: &[Task]) -> AsyncIO<Vec<Result<(), RepositoryError>>> {
+            let count = tasks.len();
+            AsyncIO::new(move || async move { vec![Ok(()); count] })
+        }
+
         fn delete(&self, _id: &TaskId) -> AsyncIO<Result<bool, RepositoryError>> {
             AsyncIO::new(|| async { Ok(false) })
         }
@@ -648,6 +681,7 @@ mod tests {
     fn create_app_state_with_mock_task_repository(
         task_repository: impl TaskRepository + 'static,
     ) -> AppState {
+        use crate::api::bulk::BulkConfig;
         use crate::api::query::{SearchCache, SearchIndex};
         use arc_swap::ArcSwap;
         use lambars::persistent::PersistentVector;
@@ -657,6 +691,7 @@ mod tests {
             project_repository: Arc::new(InMemoryProjectRepository::new()),
             event_store: Arc::new(InMemoryEventStore::new()),
             config: AppConfig::default(),
+            bulk_config: BulkConfig::default(),
             search_index: Arc::new(ArcSwap::from_pointee(SearchIndex::build(
                 &PersistentVector::new(),
             ))),
@@ -666,6 +701,7 @@ mod tests {
 
     /// Creates an `AppState` with the default in-memory repositories.
     fn create_default_app_state() -> AppState {
+        use crate::api::bulk::BulkConfig;
         use crate::api::query::{SearchCache, SearchIndex};
         use arc_swap::ArcSwap;
         use lambars::persistent::PersistentVector;
@@ -675,6 +711,7 @@ mod tests {
             project_repository: Arc::new(InMemoryProjectRepository::new()),
             event_store: Arc::new(InMemoryEventStore::new()),
             config: AppConfig::default(),
+            bulk_config: BulkConfig::default(),
             search_index: Arc::new(ArcSwap::from_pointee(SearchIndex::build(
                 &PersistentVector::new(),
             ))),

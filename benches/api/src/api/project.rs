@@ -1634,17 +1634,27 @@ mod tests {
 #[cfg(test)]
 mod handler_tests {
     use super::*;
+    use crate::api::query::{SearchCache, SearchIndex};
     use crate::domain::TaskId;
     use crate::infrastructure::{InMemoryEventStore, InMemoryProjectRepository};
+    use arc_swap::ArcSwap;
+    use lambars::persistent::PersistentVector;
     use rstest::rstest;
     use std::sync::Arc;
 
     fn create_test_app_state() -> AppState {
+        use crate::api::bulk::BulkConfig;
+
         AppState {
             task_repository: Arc::new(crate::infrastructure::InMemoryTaskRepository::new()),
             project_repository: Arc::new(InMemoryProjectRepository::new()),
             event_store: Arc::new(InMemoryEventStore::new()),
             config: AppConfig::default(),
+            bulk_config: BulkConfig::default(),
+            search_index: Arc::new(ArcSwap::from_pointee(SearchIndex::build(
+                &PersistentVector::new(),
+            ))),
+            search_cache: Arc::new(SearchCache::with_default_config()),
         }
     }
 

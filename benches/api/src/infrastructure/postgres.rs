@@ -99,6 +99,331 @@ impl PostgresTaskRepository {
     }
 }
 
+// =============================================================================
+// Bulk Insert Helper Types and Functions
+// =============================================================================
+
+/// Serialized task data ready for database operations.
+struct SerializedTask {
+    /// Original index in the input slice for result ordering.
+    original_index: usize,
+    /// Task ID as UUID.
+    task_id: uuid::Uuid,
+    /// Serialized task data as JSON.
+    data: serde_json::Value,
+    /// Task version.
+    version: i64,
+}
+
+/// Classified tasks for bulk operations.
+struct ClassifiedTasks {
+    /// New tasks (version == 1) for bulk INSERT.
+    new_tasks: Vec<SerializedTask>,
+    /// Existing tasks (version > 1) for individual UPDATE.
+    update_tasks: Vec<SerializedTask>,
+}
+
+/// Result of detecting duplicate IDs in the input.
+struct DuplicateDetectionResult {
+    /// Indices of tasks that should be skipped due to duplicate IDs.
+    /// These indices should be marked as `VersionConflict`.
+    duplicate_indices: Vec<usize>,
+}
+
+/// Detects duplicate IDs in the input task list.
+///
+/// This is a pure function that identifies tasks with duplicate IDs.
+/// Only the first occurrence of each ID is considered valid;
+/// subsequent occurrences are marked as duplicates.
+///
+/// # Arguments
+///
+/// * `tasks` - Slice of tasks to check for duplicates
+///
+/// # Returns
+///
+/// `DuplicateDetectionResult` containing indices of duplicate tasks
+fn detect_duplicate_ids(tasks: &[Task]) -> DuplicateDetectionResult {
+    let mut seen_ids: std::collections::HashSet<uuid::Uuid> =
+        std::collections::HashSet::with_capacity(tasks.len());
+    let mut duplicate_indices = Vec::new();
+
+    for (index, task) in tasks.iter().enumerate() {
+        let task_id = *task.task_id.as_uuid();
+        if !seen_ids.insert(task_id) {
+            // ID was already seen, this is a duplicate
+            duplicate_indices.push(index);
+        }
+    }
+
+    DuplicateDetectionResult { duplicate_indices }
+}
+
+/// Classifies tasks into new/update categories and serializes them.
+///
+/// This is a pure function that separates tasks based on version:
+/// - version == 1: New task for bulk INSERT
+/// - version > 1: Existing task for individual UPDATE
+///
+/// Duplicate IDs (same ID appearing multiple times in input) are detected
+/// and only the first occurrence is processed; subsequent occurrences are
+/// marked as `VersionConflict` in the results.
+///
+/// Returns classified tasks and a pre-allocated results vector.
+fn classify_and_serialize_tasks(
+    tasks: &[Task],
+) -> (ClassifiedTasks, Vec<Result<(), RepositoryError>>) {
+    let mut results: Vec<Result<(), RepositoryError>> = vec![Ok(()); tasks.len()];
+    let mut new_tasks = Vec::new();
+    let mut update_tasks = Vec::new();
+
+    // First, detect duplicates
+    let duplicate_result = detect_duplicate_ids(tasks);
+    let duplicate_set: std::collections::HashSet<usize> =
+        duplicate_result.duplicate_indices.into_iter().collect();
+
+    for (index, task) in tasks.iter().enumerate() {
+        // Skip duplicates - mark them as VersionConflict
+        // This matches InMemory behavior: after the first task (version=1) is saved,
+        // subsequent tasks with the same ID would need version=2 to succeed.
+        if duplicate_set.contains(&index) {
+            results[index] = Err(RepositoryError::VersionConflict {
+                expected: 2,
+                found: task.version,
+            });
+            continue;
+        }
+
+        // Serialize task data
+        let serialized_data = match serde_json::to_value(task) {
+            Ok(data) => data,
+            Err(error) => {
+                results[index] = Err(RepositoryError::SerializationError(error.to_string()));
+                continue;
+            }
+        };
+
+        #[allow(clippy::cast_possible_wrap)]
+        let version = task.version as i64;
+
+        let serialized = SerializedTask {
+            original_index: index,
+            task_id: *task.task_id.as_uuid(),
+            data: serialized_data,
+            version,
+        };
+
+        match task.version {
+            1 => new_tasks.push(serialized),
+            v if v > 1 => update_tasks.push(serialized),
+            _ => {
+                // version == 0 is invalid for save
+                results[index] = Err(RepositoryError::VersionConflict {
+                    expected: 1,
+                    found: task.version,
+                });
+            }
+        }
+    }
+
+    (
+        ClassifiedTasks {
+            new_tasks,
+            update_tasks,
+        },
+        results,
+    )
+}
+
+/// Executes bulk INSERT for new tasks using UNNEST with RETURNING.
+///
+/// Uses `PostgreSQL`'s UNNEST for efficient multi-row INSERT.
+/// The RETURNING clause ensures atomic determination of which rows were inserted.
+///
+/// # Atomicity
+///
+/// This function uses `INSERT ... ON CONFLICT DO NOTHING RETURNING id` to
+/// atomically determine which tasks were successfully inserted in a single query.
+/// Tasks whose IDs are not returned are considered to have conflicted with
+/// existing records and are marked as `VersionConflict`.
+///
+/// # Arguments
+///
+/// * `pool` - Database connection pool
+/// * `new_tasks` - Tasks to insert (all should have version == 1)
+///
+/// # Returns
+///
+/// A vector of results for each task in the same order as input:
+/// - `Ok(())` if the task was successfully inserted
+/// - `Err(VersionConflict)` if the task already existed
+/// - `Err(DatabaseError)` if a database error occurred
+async fn execute_bulk_insert(
+    pool: &PgPool,
+    new_tasks: &[SerializedTask],
+) -> Vec<Result<(), RepositoryError>> {
+    if new_tasks.is_empty() {
+        return Vec::new();
+    }
+
+    tracing::info!(
+        task_count = new_tasks.len(),
+        "Executing UNNEST bulk INSERT for new tasks"
+    );
+
+    // Prepare arrays for UNNEST
+    let ids: Vec<uuid::Uuid> = new_tasks.iter().map(|task| task.task_id).collect();
+    let data_values: Vec<serde_json::Value> =
+        new_tasks.iter().map(|task| task.data.clone()).collect();
+    let versions: Vec<i64> = new_tasks.iter().map(|task| task.version).collect();
+
+    // Execute bulk INSERT with ON CONFLICT DO NOTHING RETURNING id
+    // RETURNING gives us the IDs of successfully inserted rows atomically
+    let insert_result: Result<Vec<(uuid::Uuid,)>, _> = sqlx::query_as(
+        "INSERT INTO tasks (id, data, version, created_at, updated_at) \
+         SELECT id, data, version, NOW(), NOW() \
+         FROM UNNEST($1::uuid[], $2::jsonb[], $3::bigint[]) AS t(id, data, version) \
+         ON CONFLICT (id) DO NOTHING \
+         RETURNING id",
+    )
+    .bind(&ids)
+    .bind(&data_values)
+    .bind(&versions)
+    .fetch_all(pool)
+    .await;
+
+    match insert_result {
+        Ok(inserted_rows) => {
+            // Build a set of successfully inserted IDs
+            let inserted_ids: std::collections::HashSet<uuid::Uuid> =
+                inserted_rows.into_iter().map(|(id,)| id).collect();
+
+            // Map results based on whether the ID was returned
+            new_tasks
+                .iter()
+                .map(|task| {
+                    if inserted_ids.contains(&task.task_id) {
+                        // ID was returned by RETURNING - successfully inserted
+                        Ok(())
+                    } else {
+                        // ID was not returned - task already existed (conflict)
+                        // INSERT conflict means: we tried to insert a new task (version=1)
+                        // but a record with this ID already exists.
+                        // Use expected=0 to indicate "new insert failed (expected no existing record)"
+                        // and found=1 to indicate "a record was found to exist".
+                        Err(RepositoryError::VersionConflict {
+                            expected: 0,
+                            found: 1,
+                        })
+                    }
+                })
+                .collect()
+        }
+        Err(error) => {
+            // Bulk INSERT failed - mark all new tasks as failed
+            vec![Err(RepositoryError::DatabaseError(error.to_string())); new_tasks.len()]
+        }
+    }
+}
+
+/// Executes individual UPDATE operations for existing tasks.
+///
+/// Each update uses optimistic locking to ensure version consistency.
+/// Returns a vector of results for each update task.
+async fn execute_individual_updates(
+    pool: &PgPool,
+    update_tasks: &[SerializedTask],
+) -> Vec<Result<(), RepositoryError>> {
+    let mut results = Vec::with_capacity(update_tasks.len());
+
+    for task in update_tasks {
+        let result = execute_single_update(pool, task).await;
+        results.push(result);
+    }
+
+    results
+}
+
+/// Executes a single UPDATE with optimistic locking.
+async fn execute_single_update(
+    pool: &PgPool,
+    task: &SerializedTask,
+) -> Result<(), RepositoryError> {
+    let mut transaction = pool
+        .begin()
+        .await
+        .map_err(|error| RepositoryError::DatabaseError(error.to_string()))?;
+
+    // Check current version for optimistic locking
+    let existing_row: Option<(i64,)> =
+        sqlx::query_as("SELECT version FROM tasks WHERE id = $1 FOR UPDATE")
+            .bind(task.task_id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|error| RepositoryError::DatabaseError(error.to_string()))?;
+
+    match existing_row {
+        Some((existing_version,)) => {
+            let expected_version = existing_version + 1;
+            if task.version == expected_version {
+                sqlx::query(
+                    "UPDATE tasks SET data = $1, version = $2, updated_at = NOW() WHERE id = $3",
+                )
+                .bind(&task.data)
+                .bind(task.version)
+                .bind(task.task_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|error| RepositoryError::DatabaseError(error.to_string()))?;
+
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|error| RepositoryError::DatabaseError(error.to_string()))?;
+
+                Ok(())
+            } else {
+                #[allow(clippy::cast_sign_loss)]
+                Err(RepositoryError::VersionConflict {
+                    expected: expected_version as u64,
+                    found: task.version as u64,
+                })
+            }
+        }
+        None => {
+            // Task doesn't exist - version conflict (expected to exist for update)
+            Err(RepositoryError::VersionConflict {
+                expected: 1,
+                #[allow(clippy::cast_sign_loss)]
+                found: task.version as u64,
+            })
+        }
+    }
+}
+
+/// Merges operation results back into the original order.
+///
+/// This is a pure function that combines results from bulk INSERT
+/// and individual UPDATE operations into the results vector.
+fn merge_results_into_original_order(
+    results: &mut [Result<(), RepositoryError>],
+    classified: &ClassifiedTasks,
+    new_task_results: Vec<Result<(), RepositoryError>>,
+    update_results: Vec<Result<(), RepositoryError>>,
+) {
+    // Merge new task results
+    for (task, result) in classified.new_tasks.iter().zip(new_task_results) {
+        results[task.original_index] = result;
+    }
+
+    // Merge update results
+    for (task, result) in classified.update_tasks.iter().zip(update_results) {
+        results[task.original_index] = result;
+    }
+
+    // Invalid version indices are already set in classify_and_serialize_tasks
+}
+
 impl TaskRepository for PostgresTaskRepository {
     fn find_by_id(&self, id: &TaskId) -> AsyncIO<Result<Option<Task>, RepositoryError>> {
         let pool = self.pool.clone();
@@ -189,6 +514,37 @@ impl TaskRepository for PostgresTaskRepository {
                 .map_err(|error| RepositoryError::DatabaseError(error.to_string()))?;
 
             Ok(())
+        })
+    }
+
+    fn save_bulk(&self, tasks: &[Task]) -> AsyncIO<Vec<Result<(), RepositoryError>>> {
+        let pool = self.pool.clone();
+        let tasks_to_save: Vec<Task> = tasks.to_vec();
+
+        AsyncIO::new(move || async move {
+            if tasks_to_save.is_empty() {
+                return Vec::new();
+            }
+
+            // Phase 1: Classify tasks and serialize (pure functions)
+            let (classified_tasks, mut results) = classify_and_serialize_tasks(&tasks_to_save);
+
+            // Phase 2: Execute bulk INSERT for new tasks
+            let new_task_results = execute_bulk_insert(&pool, &classified_tasks.new_tasks).await;
+
+            // Phase 3: Execute individual UPDATEs for existing tasks (optimistic locking)
+            let update_results =
+                execute_individual_updates(&pool, &classified_tasks.update_tasks).await;
+
+            // Phase 4: Merge results back to original order (pure function)
+            merge_results_into_original_order(
+                &mut results,
+                &classified_tasks,
+                new_task_results,
+                update_results,
+            );
+
+            results
         })
     }
 
@@ -852,6 +1208,79 @@ mod tests {
             tag: crate::domain::Tag::new("test"),
         });
         assert_eq!(event_type_from_kind(&kind), "tag_removed");
+    }
+
+    // -------------------------------------------------------------------------
+    // Duplicate ID Detection Tests (no DB connection required)
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_detect_duplicate_ids_no_duplicates() {
+        let tasks = vec![
+            test_task("Task 1"),
+            test_task("Task 2"),
+            test_task("Task 3"),
+        ];
+
+        let result = detect_duplicate_ids(&tasks);
+        assert!(result.duplicate_indices.is_empty());
+    }
+
+    #[rstest]
+    fn test_detect_duplicate_ids_with_duplicates() {
+        let task_id = TaskId::generate();
+        let tasks = vec![
+            test_task_with_id(task_id.clone(), "First"),
+            test_task("Different"),
+            test_task_with_id(task_id, "Duplicate"),
+        ];
+
+        let result = detect_duplicate_ids(&tasks);
+        assert_eq!(result.duplicate_indices, vec![2]);
+    }
+
+    #[rstest]
+    fn test_detect_duplicate_ids_multiple_duplicates() {
+        let task_id_1 = TaskId::generate();
+        let task_id_2 = TaskId::generate();
+        let tasks = vec![
+            test_task_with_id(task_id_1.clone(), "First A"), // index 0
+            test_task_with_id(task_id_2.clone(), "First B"), // index 1
+            test_task_with_id(task_id_1.clone(), "Dup A 1"), // index 2 - duplicate of 0
+            test_task_with_id(task_id_2, "Dup B 1"),         // index 3 - duplicate of 1
+            test_task_with_id(task_id_1, "Dup A 2"),         // index 4 - duplicate of 0
+        ];
+
+        let result = detect_duplicate_ids(&tasks);
+        assert_eq!(result.duplicate_indices, vec![2, 3, 4]);
+    }
+
+    #[rstest]
+    fn test_classify_and_serialize_tasks_duplicate_version_conflict() {
+        let task_id = TaskId::generate();
+        let tasks = vec![
+            test_task_with_id(task_id.clone(), "First"),
+            test_task("Different"),
+            test_task_with_id(task_id, "Duplicate"),
+        ];
+
+        let (classified, results) = classify_and_serialize_tasks(&tasks);
+
+        // First and Different should be classified as new tasks
+        assert_eq!(classified.new_tasks.len(), 2);
+        assert!(classified.update_tasks.is_empty());
+
+        // Results should have VersionConflict for the duplicate (index 2)
+        assert!(results[0].is_ok());
+        assert!(results[1].is_ok());
+        match &results[2] {
+            Err(RepositoryError::VersionConflict { expected, found }) => {
+                // After first task (version=1) is saved, expected becomes 2
+                assert_eq!(*expected, 2);
+                assert_eq!(*found, 1); // The duplicate task has version 1
+            }
+            _ => panic!("Expected VersionConflict error for duplicate ID"),
+        }
     }
 
     #[rstest]
