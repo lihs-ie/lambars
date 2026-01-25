@@ -456,6 +456,113 @@ fn benchmark_concurrent_lazy_zip_operations(criterion: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark for Lazy/ConcurrentLazy hot path performance.
+///
+/// This benchmark measures the performance of `force()` on already-initialized
+/// lazy values, isolating the STATE_READY fast path which should have zero
+/// allocations.
+///
+/// # Purpose
+///
+/// - `force()` on cached values performs zero heap allocations
+/// - Performance is comparable to direct value access (baseline)
+///
+/// # Profiling Results
+///
+/// Performance improvement has been confirmed through profiling results:
+///
+/// | Metric | Before (f6a64a71) | After (3b56e3a6) | Improvement |
+/// |--------|-------------------|------------------|-------------|
+/// | malloc | 6,171,514,377 | 4,878,635,776 | 21% reduction |
+/// | Lazy::force | 4,599,799,274 | 4,046,138,306 | 12% reduction |
+///
+/// Evidence files:
+/// - `benches/results/before/criterion-profiling-all-before/criterion-profiling-f6a64a719b721328c34aeaa3d8dcf995cdc38900-control_bench/top_functions.txt`
+/// - `benches/results/after/criterion-profiling-all-3b56e3a624aa888db0a671b1db529c761103f6e4/criterion-profiling-3b56e3a624aa888db0a671b1db529c761103f6e4-control_bench/top_functions.txt`
+///
+/// The improvement from OnceLock-based to AtomicU8+MaybeUninit design has been
+/// achieved. This benchmark guards against performance regressions.
+///
+/// # Allocation Verification
+///
+/// For detailed allocation analysis, use memory profiling tools:
+/// ```sh
+/// # Run benchmark with cargo bench
+/// cargo bench --bench control_bench -- lazy_force_hot_path
+///
+/// # Linux: Analyze heap allocations with valgrind massif
+/// valgrind --tool=massif cargo bench --bench control_bench -- lazy_force_hot_path --profile-time 5
+/// ms_print massif.out.*
+///
+/// # Linux: Alternative - use heaptrack for allocation tracking
+/// heaptrack cargo bench --bench control_bench -- lazy_force_hot_path --profile-time 5
+/// heaptrack_gui heaptrack.*.zst
+///
+/// # Linux: CPU profiling with perf (for hotspot analysis, not allocations)
+/// perf record -g -- cargo bench --bench control_bench -- lazy_force_hot_path --profile-time 5
+/// perf report
+///
+/// # macOS: Use Instruments Allocations template for heap analysis
+/// # macOS: Use Instruments Time Profiler for CPU hotspot analysis
+/// ```
+///
+/// Expected: For this benchmark (`lazy_force_hot_path`), malloc/cfree should NOT
+/// appear in top functions when accessing cached values.
+///
+/// # Baseline Comparison
+///
+/// - Lazy_cached should be within 2x of direct_access
+/// - ConcurrentLazy_cached should be within 3x of direct_access (due to Acquire load)
+fn benchmark_lazy_force_hot_path(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("lazy_force_hot_path");
+
+    // Use consistent iteration count with bench_force_cached for comparability
+    const ITERATIONS: u64 = 10_000_000;
+
+    // 1. Baseline: direct value access (no indirection, no atomic)
+    // This establishes the absolute minimum possible latency.
+    let direct_value = 42i64;
+    group.bench_function("direct_access", |bencher| {
+        bencher.iter(|| {
+            for _ in 0..ITERATIONS {
+                // Prevent loop elimination and constant propagation
+                black_box(black_box(direct_value));
+            }
+        })
+    });
+
+    // 2. Lazy STATE_READY path
+    // Expected: 1 Acquire load + pointer dereference
+    let lazy = Lazy::new(|| 42i64);
+    let _ = lazy.force(); // Complete initialization outside measurement
+
+    group.bench_function("Lazy_cached", |bencher| {
+        bencher.iter(|| {
+            for _ in 0..ITERATIONS {
+                // Wrap lazy reference in black_box to prevent hoisting
+                let value = black_box(&lazy).force();
+                black_box(*value);
+            }
+        })
+    });
+
+    // 3. ConcurrentLazy STATE_READY path
+    // Expected: 1 Acquire load + pointer dereference (same as Lazy for cached case)
+    let concurrent_lazy = ConcurrentLazy::new(|| 42i64);
+    let _ = concurrent_lazy.force();
+
+    group.bench_function("ConcurrentLazy_cached", |bencher| {
+        bencher.iter(|| {
+            for _ in 0..ITERATIONS {
+                let value = black_box(&concurrent_lazy).force();
+                black_box(*value);
+            }
+        })
+    });
+
+    group.finish();
+}
+
 /// Benchmark for force() on cached values (p95 measurement).
 ///
 /// This benchmark measures the performance of accessing already-initialized
@@ -483,7 +590,9 @@ fn bench_force_cached(criterion: &mut Criterion) {
     group.bench_function("Lazy_1e7_cached", |bencher| {
         bencher.iter(|| {
             for _ in 0..10_000_000 {
-                black_box(*lazy.force());
+                // Wrap lazy reference in black_box to prevent hoisting
+                let value = black_box(&lazy).force();
+                black_box(*value);
             }
         })
     });
@@ -495,7 +604,8 @@ fn bench_force_cached(criterion: &mut Criterion) {
     group.bench_function("ConcurrentLazy_1e7_cached", |bencher| {
         bencher.iter(|| {
             for _ in 0..10_000_000 {
-                black_box(*concurrent_lazy.force());
+                let value = black_box(&concurrent_lazy).force();
+                black_box(*value);
             }
         })
     });
@@ -743,6 +853,7 @@ criterion_group!(
     benchmark_concurrent_lazy_flat_map_chain,
     benchmark_concurrent_lazy_zip_operations,
     // Requirements-specified benchmarks (Issue #224)
+    benchmark_lazy_force_hot_path,
     bench_force_cached,
     bench_concurrent_contention,
     // Trampoline benchmarks

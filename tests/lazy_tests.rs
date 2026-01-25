@@ -13,9 +13,31 @@ use rstest::rstest;
 use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-// =============================================================================
-// Basic Construction and Evaluation
-// =============================================================================
+/// force は初回のみ評価し、その後は同一値を返す。
+#[rstest]
+fn force_is_idempotent() {
+    let call_count = Cell::new(0);
+    let lazy = Lazy::new(|| {
+        call_count.set(call_count.get() + 1);
+        42
+    });
+
+    let v1 = lazy.force();
+    assert_eq!(
+        call_count.get(),
+        1,
+        "initializer should be called exactly once"
+    );
+
+    let v2 = lazy.force();
+    assert_eq!(
+        call_count.get(),
+        1,
+        "initializer should not be called again"
+    );
+
+    assert_eq!(v1, v2, "force should return the same value");
+}
 
 #[rstest]
 fn lazy_defers_computation() {
@@ -54,10 +76,6 @@ fn lazy_force_returns_ref() {
     assert!(value.starts_with("hel"));
 }
 
-// =============================================================================
-// Memoization
-// =============================================================================
-
 #[rstest]
 fn lazy_memoization_single_computation() {
     let call_count = Cell::new(0);
@@ -92,10 +110,6 @@ fn lazy_memoization_preserves_value() {
     assert_eq!(*second, "computed_value");
 }
 
-// =============================================================================
-// new_with_value
-// =============================================================================
-
 #[rstest]
 fn lazy_new_with_value_is_initialized() {
     let lazy = Lazy::new_with_value(42);
@@ -114,10 +128,6 @@ fn lazy_pure_is_alias_for_new_with_value() {
     assert!(lazy.is_initialized());
     assert_eq!(*lazy.force(), "hello");
 }
-
-// =============================================================================
-// get Method
-// =============================================================================
 
 #[rstest]
 fn lazy_get_before_force_returns_none() {
@@ -140,10 +150,6 @@ fn lazy_get_on_new_with_value_returns_some() {
     assert_eq!(*lazy.get().unwrap(), 42);
 }
 
-// =============================================================================
-// is_initialized
-// =============================================================================
-
 #[rstest]
 fn lazy_is_initialized_false_initially() {
     let lazy = Lazy::new(|| 42);
@@ -162,10 +168,6 @@ fn lazy_is_initialized_true_for_new_with_value() {
     let lazy = Lazy::new_with_value(42);
     assert!(lazy.is_initialized());
 }
-
-// =============================================================================
-// Poisoned State
-// =============================================================================
 
 #[rstest]
 fn lazy_poisoned_after_panic() {
