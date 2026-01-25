@@ -37,7 +37,9 @@ jobs:
 
       - name: Install Valgrind
         run: |
-          sudo apt-get update
+          # Remove problematic Azure CLI repository that may return 403
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list || true
+          sudo apt-get update || true
           sudo apt-get install -y valgrind
 
       - name: Get iai-callgrind version
