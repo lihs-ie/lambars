@@ -1,0 +1,80 @@
+# Issue: Persistent TreeSet
+# 順序付き永続セット
+
+deferred_features:
+  - id: persistent_treeset
+    name: "Persistent TreeSet"
+    discovered_date: "2026-01-16"
+    priority: low
+    category: enhancement
+    labels:
+      - "persistent"
+      - "enhancement"
+      - "priority: low"
+
+    problem:
+      summary: "順序付きの永続セットがない"
+      details: |
+        PersistentHashSet は存在するが、要素の順序を保持しない。
+        範囲クエリや順序付きイテレーションが必要な場合に不便。
+
+        - 何が問題なのか: 順序付き永続セットがない
+        - なぜ発生するのか: TreeSet が未実装
+        - どのような影響があるか: 範囲クエリ等ができない
+
+        ただし HashSet で代替可能な場合が多い。
+
+      rust_limitation: |
+        ```rust
+        // 現状: HashSet は順序なし
+        let set: PersistentHashSet<i32> = [3, 1, 4, 1, 5].into();
+        // イテレーションの順序は不定
+
+        // 理想: TreeSet で順序保持
+        let set: PersistentTreeSet<i32> = [3, 1, 4, 1, 5].into();
+        // イテレーションは 1, 3, 4, 5 の順
+
+        // 範囲クエリ
+        let range: Vec<i32> = set.range(2..5).collect(); // [3, 4]
+        ```
+
+    solution:
+      approach: "PersistentTreeMap<T, ()> のラッパーとして実装"
+      options:
+        - name: "TreeMap ラッパー"
+          description: |
+            PersistentTreeMap<T, ()> をラップして TreeSet を実装。
+            API を Set に合わせて提供。
+          pros:
+            - "実装が簡単"
+            - "TreeMap のテスト済みコードを再利用"
+          cons:
+            - "メモリオーバーヘッド（() の分）"
+            - "間接参照のコスト"
+
+        - name: "専用の TreeSet 実装"
+          description: |
+            B-Tree ベースの専用 TreeSet を実装。
+          pros:
+            - "最適化の余地"
+            - "メモリ効率"
+          cons:
+            - "実装コストが高い"
+            - "コードの重複"
+
+      recommended: "TreeMap ラッパー"
+      estimated_complexity: low
+
+    references:
+      - "src/persistent/treemap.rs"
+      - "src/persistent/hashset.rs"
+      - "docs/internal/requirements/20250101_0300_persistent.yaml"
+
+    related:
+      requirement_id: "persistent"
+      plan_id: null
+
+    github_issue:
+      number: 179
+      url: "https://github.com/lihs-ie/lambars/issues/179"
+      created: true
