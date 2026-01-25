@@ -53,6 +53,10 @@ services:
       REDIS_URL: redis://redis:6379
       RUST_LOG: info,task_management_benchmark_api=debug,tower_http=debug
       RUST_BACKTRACE: "1"
+      # Bulk optimization settings for tasks_bulk benchmark
+      USE_BULK_OPTIMIZATION: "true"
+      BULK_CHUNK_SIZE: "50"
+      BULK_CONCURRENCY_LIMIT: "4"
     ports:
       - "3002:3000"
     depends_on:

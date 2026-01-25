@@ -430,6 +430,10 @@ jobs:
           chmod +x "${API_BIN}"
 
           # Start server in background with in-memory mode (no external dependencies)
+          # Enable bulk optimization for tasks_bulk benchmark
+          USE_BULK_OPTIMIZATION=true \
+          BULK_CHUNK_SIZE=50 \
+          BULK_CONCURRENCY_LIMIT=4 \
           STORAGE_MODE=in_memory CACHE_MODE=in_memory RUST_LOG=info "${API_BIN}" &
           SERVER_PID=$!
 
