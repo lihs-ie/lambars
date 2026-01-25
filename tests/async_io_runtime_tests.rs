@@ -6,6 +6,7 @@
 //! 3. run_blocking and try_run_blocking behave correctly in different contexts
 //! 4. Current-thread runtime detection and error handling
 //! 5. Runtime context preservation (task_local values are accessible)
+//! 6. Runtime ID is reused within the same thread (REQ-ASYNC-RT-001)
 
 #![cfg(feature = "async")]
 
@@ -16,7 +17,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::runtime::Handle;
 
 use lambars::effect::async_io::runtime::{
-    BlockingError, global, handle, run_blocking, try_run_blocking,
+    BlockingError, global, handle, run_blocking, runtime_id, try_run_blocking,
 };
 
 tokio::task_local! {
@@ -535,4 +536,42 @@ fn test_blocking_error_messages_are_informative() {
     // UnsupportedRuntimeFlavor should mention runtime flavor and not supported
     assert!(unsupported_msg.contains("runtime flavor"));
     assert!(unsupported_msg.contains("not supported"));
+}
+
+// =============================================================================
+// Runtime ID Reuse Tests (REQ-ASYNC-RT-001)
+// =============================================================================
+
+/// Tests that runtime_id() returns the same ID on repeated calls within the same thread.
+/// This verifies REQ-ASYNC-RT-001: "runtime() = runtime()" property.
+#[rstest]
+fn test_runtime_id_is_reused() {
+    let first_id = runtime_id();
+    let second_id = runtime_id();
+    assert_eq!(first_id, second_id);
+}
+
+/// Tests that runtime_id() returns the same ID across multiple calls.
+#[rstest]
+fn test_runtime_id_consistent_across_multiple_calls() {
+    let ids: Vec<u64> = (0..10).map(|_| runtime_id()).collect();
+    let first_id = ids[0];
+    for id in ids.iter().skip(1) {
+        assert_eq!(*id, first_id);
+    }
+}
+
+/// Tests that runtime_id() returns the same ID from different threads.
+/// All threads share the same global runtime.
+#[rstest]
+fn test_runtime_id_same_across_threads() {
+    use std::thread;
+
+    let handles: Vec<_> = (0..4).map(|_| thread::spawn(runtime_id)).collect();
+
+    let ids: Vec<u64> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    let first_id = ids[0];
+    for id in ids.iter().skip(1) {
+        assert_eq!(*id, first_id);
+    }
 }

@@ -435,3 +435,94 @@ async fn test_retry_with_finally() {
     assert!(cleanup_executed.load(Ordering::SeqCst));
     assert_eq!(attempt_count.load(Ordering::SeqCst), 2);
 }
+
+// =============================================================================
+// finally_async Panic Handling Tests
+// =============================================================================
+
+/// finally_async should handle synchronous panic in cleanup closure
+/// (panic before Future is returned).
+#[rstest]
+#[tokio::test]
+async fn test_finally_async_synchronous_panic_in_closure() {
+    // This tests the case where the cleanup closure panics BEFORE returning
+    // the async block (synchronous panic in closure body).
+    let result = AsyncIO::pure(42)
+        .finally_async(|| {
+            panic!("synchronous panic before returning Future");
+            #[allow(unreachable_code)]
+            async {}
+        })
+        .await;
+
+    // Original result should be returned despite synchronous cleanup panic
+    assert_eq!(result, 42);
+}
+
+/// finally_async should handle asynchronous panic in cleanup Future.
+#[rstest]
+#[tokio::test]
+async fn test_finally_async_asynchronous_panic_in_future() {
+    // This tests the case where the panic occurs during the async execution.
+    let result = AsyncIO::pure(100)
+        .finally_async(|| async {
+            panic!("asynchronous panic during Future execution");
+        })
+        .await;
+
+    // Original result should be returned despite asynchronous cleanup panic
+    assert_eq!(result, 100);
+}
+
+/// finally_async should preserve Err result when synchronous panic occurs.
+#[rstest]
+#[tokio::test]
+async fn test_finally_async_synchronous_panic_preserves_error() {
+    let result: Result<i32, &str> = AsyncIO::pure(Err("original error"))
+        .finally_async(|| {
+            panic!("synchronous panic");
+            #[allow(unreachable_code)]
+            async {}
+        })
+        .await;
+
+    assert_eq!(result, Err("original error"));
+}
+
+/// finally_async should handle panic with String message (not &str).
+#[rstest]
+#[tokio::test]
+async fn test_finally_async_synchronous_panic_with_string_message() {
+    let result = AsyncIO::pure(200)
+        .finally_async(|| {
+            panic!("{}", "synchronous panic with String".to_string());
+            #[allow(unreachable_code)]
+            async {}
+        })
+        .await;
+
+    assert_eq!(result, 200);
+}
+
+/// finally_async should still execute cleanup normally when no panic occurs.
+#[rstest]
+#[tokio::test]
+async fn test_finally_async_normal_execution_after_panic_handling_fix() {
+    let cleanup_executed = Arc::new(AtomicBool::new(false));
+    let cleanup_executed_clone = cleanup_executed.clone();
+
+    let result = AsyncIO::pure(300)
+        .finally_async(move || {
+            let flag = cleanup_executed_clone.clone();
+            async move {
+                flag.store(true, Ordering::SeqCst);
+            }
+        })
+        .await;
+
+    assert_eq!(result, 300);
+    assert!(
+        cleanup_executed.load(Ordering::SeqCst),
+        "cleanup should execute normally when no panic occurs"
+    );
+}
