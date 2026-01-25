@@ -1,0 +1,66 @@
+# Issue: tasks_bulk の尾部レイテンシが高い
+# 実装時に発見された、将来対応が必要な項目
+
+deferred_features:
+  - id: tasks_bulk_tail_latency
+    name: "tasks_bulk の尾部レイテンシが高い"
+    discovered_date: "2026-01-25"
+    priority: high
+    category: refactoring
+    labels:
+      - "effect"
+      - "api"
+      - "performance"
+      - "priority: high"
+
+    # 問題の説明
+    problem:
+      summary: "tasks_bulk の P99 が 644ms と高く、スループットも 136 rps に留まっている"
+      details: |
+        - tasks_bulk の P99 は 644.76ms、平均 214.04ms
+          - benches/results/api-profiling-all-85e0ab30b9ea0571c1dfb324e8ce9fe4d4e49c78/tasks_bulk/benchmark/summary.txt
+        - 大きい payload と書き込み負荷に対して遅延が大きい
+        - バルク処理が同期的で、DB 書き込みが直列化されている可能性が高い
+
+    # 解決策の提案
+    solution:
+      approach: "バルク書き込みをチャンク化し、DB への書き込み経路を最適化する"
+      options:
+        - name: "チャンク分割 + COPY/バルク INSERT"
+          description: |
+            一定サイズでチャンク化し、COPY や複数行 INSERT を利用する。
+          pros:
+            - DB への往復回数を削減できる
+            - レイテンシの改善が期待できる
+          cons:
+            - 実装・検証コストが高い
+            - ロールバック戦略が必要
+
+        - name: "非同期ジョブ化"
+          description: |
+            リクエスト受付後にジョブとして登録し、結果はポーリングや webhook で返す。
+          pros:
+            - リクエストの尾部レイテンシを大幅に短縮
+            - バックグラウンドで再試行しやすい
+          cons:
+            - API 仕様変更が必要
+            - 結果の整合性設計が必要
+
+      recommended: "チャンク分割 + COPY/バルク INSERT"
+      estimated_complexity: high
+
+    # 参考情報
+    references:
+      - "benches/results/api-profiling-all-85e0ab30b9ea0571c1dfb324e8ce9fe4d4e49c78/tasks_bulk/benchmark/summary.txt"
+      - "benches/results/api-profiling-all-85e0ab30b9ea0571c1dfb324e8ce9fe4d4e49c78/tasks_bulk/benchmark/meta/tasks_bulk.json"
+
+    # 関連する要件・実装
+    related:
+      requirement_id: null
+      plan_id: null
+
+    # GitHub Issue 情報（作成後に追記）
+    github_issue:
+      number: null
+      url: null
+      created: false
