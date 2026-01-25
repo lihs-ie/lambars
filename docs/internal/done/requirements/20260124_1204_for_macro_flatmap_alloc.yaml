@@ -1,0 +1,133 @@
+# for_! マクロの割当削減 要件定義
+#
+# 概要:
+#   for_! マクロの FlatMap 連鎖による再確保を排除し、ヒープ割当を削減する。
+#
+# 設計方針:
+#   1. 中間 Vec の生成を禁止し、イテレータ融合で計算する
+#   2. size_hint を合成し、必要容量を事前確保する
+#   3. SmallVec -> Vec 変換を最小化し、不要なコピーを排除する
+#
+# 参照:
+#   - docs/internal/analysis/20260124_lambars_perf_bottlenecks.yaml
+#   - criterion profiling for_macro_bench top_functions
+
+version: "1.0.0"
+name: "for_macro_flatmap_alloc"
+description: |
+  for_! マクロの展開結果が FlatMap 連鎖で Vec を生成し、
+  malloc/realloc が支配的になる問題を解消する。展開を
+  イテレータ融合へ寄せ、size_hint を合成して再確保を抑制する。
+
+background:
+  problem: |
+    for_macro_bench で FlatMap::next, realloc が上位に出現。
+    中間 Vec の生成によりヒープ再配置が増えている。
+  motivation: |
+    内包表記の性能を保証し、CPU/メモリ帯域を無駄にしない設計にする。
+  prior_art:
+    - name: "criterion-profiling for_macro_bench"
+      description: "FlatMap と realloc が支配的であることを示すプロファイル結果。"
+
+requirements:
+  # ======================================================================
+  # 1. マクロ展開の融合
+  # ======================================================================
+  - id: "REQ-FOR-MACRO-001"
+    name: "for_! の展開をイテレータ融合に統一する"
+    description: |
+      - FlatMap 連鎖で Vec を生成しない。
+      - map/filter/flat_map をパイプラインで連結し、最終段で collect する。
+      - 中間ベクタの作成を 0 回にする。
+    methods:
+      - name: "for_macro_expansion"
+        signature: "macro_rules! for_"
+        description: |
+          展開は iterator chain で表現し、Vec 生成は最終段のみ。
+        examples:
+          - description: "展開方針 (擬似コード)"
+            code: |
+              // before: vec1.flat_map(...).collect::<Vec<_>>()
+              // after: iter1.flat_map(...).filter(...).map(...)
+    implementations:
+      - type: "for_macro"
+        description: |
+          - マクロ展開ロジックを見直し、Vec 生成を禁止する。
+          - 連鎖内の collect を最終段のみ許可する。
+
+  # ======================================================================
+  # 2. size_hint 合成と事前確保
+  # ======================================================================
+  - id: "REQ-FOR-MACRO-002"
+    name: "size_hint を合成し capacity を事前確保する"
+    description: |
+      - イテレータの size_hint を合成して初期容量を決定する。
+      - 事前確保により realloc を抑制する。
+      - size_hint が不明な場合は安全側の最小確保を行う。
+    methods:
+      - name: "combined_size_hint"
+        signature: "fn combined_size_hint(hints: &[SizeHint]) -> usize"
+        description: |
+          size_hint を合成して最小容量を決定する。
+        examples:
+          - description: "容量決定の例"
+            code: |
+              let capacity = combined_size_hint(&[hint1, hint2]);
+              let mut out = Vec::with_capacity(capacity);
+    implementations:
+      - type: "size_hint_util"
+        description: |
+          - 連鎖に含まれるイテレータの hint を合成する。
+          - unsafe な推測は行わず、過小評価は許容する。
+
+  # ======================================================================
+  # 3. SmallVec -> Vec 変換の抑制
+  # ======================================================================
+  - id: "REQ-FOR-MACRO-003"
+    name: "SmallVec の変換回数を削減する"
+    description: |
+      - SmallVec の into_vec を最小化し、必要時のみ変換する。
+      - SmallVec サイズ閾値を評価し、平均サイズに合わせて最適化する。
+      - 変換を行う場合は capacity を引き継いで再確保を避ける。
+    implementations:
+      - type: "smallvec_usage"
+        description: |
+          - 中間構造で SmallVec を使う場合は、変換を最終段に限定する。
+          - 閾値変更時はベンチで比較する。
+
+  # ======================================================================
+  # 4. ベンチマーク/テスト定義
+  # ======================================================================
+  - id: "REQ-FOR-MACRO-BENCH-001"
+    name: "for_! の割当削減をベンチで証明する"
+    description: |
+      - criterion に for_macro_alloc_bench を追加し、割当回数を測る。
+      - malloc/realloc のサンプル数が現状比 70% 以上減ること。
+      - 旧ベンチと同条件で比較可能にする。
+    methods:
+      - name: "for_macro_alloc_bench"
+        signature: "criterion bench"
+        description: |
+          for_! の内包表記を一定サイズで実行し、割当回数を測定する。
+        examples:
+          - description: "ベンチ概要"
+            code: |
+              group.bench_function(\"for_macro_alloc\", |b| {
+                  b.iter(|| run_for_macro_case());
+              });
+    implementations:
+      - type: "benches"
+        description: |
+          - for_macro_bench を拡張し、割当回数の収集を追加。
+          - ベンチの入力サイズを固定して再現性を確保する。
+
+non_functional_requirements:
+  performance:
+    - "for_macro_bench の malloc/realloc 回数を 70% 以上削減"
+    - "for_macro_bench の実行時間を 40% 以上改善"
+  compatibility:
+    - "for_! のAPI/構文は互換維持"
+  testing:
+    - "マクロ展開後の結果が従来と同一であることを単体テストで保証"
+
+future_extensions: []

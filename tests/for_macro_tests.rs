@@ -314,3 +314,226 @@ fn test_reference_in_yield() {
     };
     assert_eq!(result, vec![1, 2, 3, 4]);
 }
+
+// =============================================================================
+// Result Identical Tests (Phase 5)
+// =============================================================================
+// These tests verify that the for_! macro produces results identical to
+// manual iterator operations, ensuring correctness after optimization.
+
+use rstest::rstest;
+
+#[rstest]
+fn test_result_identical_single() {
+    let input = vec![1, 2, 3, 4, 5];
+    let result = for_! { x <= input.clone(); yield x * 2 };
+    assert_eq!(result, vec![2, 4, 6, 8, 10]);
+}
+
+#[rstest]
+fn test_result_identical_nested() {
+    let xs = vec![1, 2];
+    let ys = vec![10, 20];
+    let result = for_! { x <= xs; y <= ys.clone(); yield x + y };
+    assert_eq!(result, vec![11, 21, 12, 22]);
+}
+
+#[rstest]
+fn test_result_identical_with_guard() {
+    let input = vec![1, 2, 3, 4, 5];
+    let result = for_! { x <= input; if x % 2 == 0; yield x };
+    assert_eq!(result, vec![2, 4]);
+}
+
+#[rstest]
+fn test_result_identical_empty() {
+    let input: Vec<i32> = vec![];
+    let result = for_! { x <= input; yield x * 2 };
+    assert_eq!(result, Vec::<i32>::new());
+}
+
+#[rstest]
+fn test_result_identical_large_scale() {
+    let input: Vec<i32> = (0..100_000).collect();
+    let result = for_! { x <= input.clone(); yield x * 2 };
+    let expected: Vec<i32> = input.into_iter().map(|x| x * 2).collect();
+    assert_eq!(result, expected);
+}
+
+// =============================================================================
+// Edge Case Tests (Phase 5)
+// =============================================================================
+
+#[rstest]
+fn test_edge_case_single_element() {
+    let input = vec![1];
+    let result = for_! { x <= input; yield x * 2 };
+    assert_eq!(result, vec![2]);
+}
+
+#[rstest]
+fn test_edge_case_three_level_nesting_5x5x5() {
+    let xs = vec![1, 2, 3, 4, 5];
+    let ys = vec![10, 20, 30, 40, 50];
+    let zs = vec![100, 200, 300, 400, 500];
+
+    // Clone for for_! macro usage
+    let ys_for = ys.clone();
+    let zs_for = zs.clone();
+
+    let result = for_! {
+        x <= xs.clone();
+        let ys_inner = ys_for.clone();
+        let zs_for_y = zs_for.clone();
+        y <= ys_inner;
+        let zs_inner = zs_for_y.clone();
+        z <= zs_inner;
+        yield x + y + z
+    };
+
+    // 5 * 5 * 5 = 125 elements
+    assert_eq!(result.len(), 125);
+
+    // Verify against manual flat_map implementation
+    let expected: Vec<i32> = xs
+        .into_iter()
+        .flat_map(|x| {
+            let zs_inner = zs.clone();
+            ys.clone()
+                .into_iter()
+                .flat_map(move |y| zs_inner.clone().into_iter().map(move |z| x + y + z))
+        })
+        .collect();
+
+    assert_eq!(result, expected);
+}
+
+#[rstest]
+fn test_edge_case_all_guard_excluded() {
+    let input = vec![1, 3, 5];
+    let result = for_! { x <= input; if x % 2 == 0; yield x };
+    assert_eq!(result, Vec::<i32>::new());
+}
+
+#[rstest]
+fn test_edge_case_boundary_value_i32_max() {
+    // Use saturating_mul to avoid overflow
+    let input = vec![i32::MAX];
+    let result = for_! { x <= input; yield x.saturating_mul(2) };
+    assert_eq!(result, vec![i32::MAX]); // saturating_mul(2) returns MAX for overflow
+}
+
+#[rstest]
+fn test_edge_case_boundary_value_i32_min() {
+    // Use saturating_mul to avoid overflow
+    let input = vec![i32::MIN];
+    let result = for_! { x <= input; yield x.saturating_mul(2) };
+    assert_eq!(result, vec![i32::MIN]); // saturating_mul(2) returns MIN for underflow
+}
+
+#[rstest]
+fn test_edge_case_mixed_positive_negative() {
+    let input: Vec<i32> = vec![-2, -1, 0, 1, 2];
+    let result = for_! { x <= input.clone(); yield x.saturating_mul(x) };
+    let expected: Vec<i32> = input.into_iter().map(|x| x.saturating_mul(x)).collect();
+    assert_eq!(result, expected);
+}
+
+#[rstest]
+fn test_edge_case_nested_with_empty_inner() {
+    // When inner collection is empty, no elements should be produced
+    let xs = vec![1, 2, 3];
+    let ys: Vec<i32> = vec![];
+
+    let result = for_! {
+        _x <= xs;
+        y <= ys.clone();
+        yield y
+    };
+
+    assert_eq!(result, Vec::<i32>::new());
+}
+
+#[rstest]
+fn test_edge_case_nested_with_conditional_empty_inner() {
+    // Inner collection is conditionally empty
+    let xs = vec![1, 2, 3];
+
+    let result = for_! {
+        x <= xs;
+        y <= if x == 2 { vec![] } else { vec![x * 10] };
+        yield y
+    };
+
+    assert_eq!(result, vec![10, 30]);
+}
+
+#[rstest]
+fn test_result_identical_with_let_binding() {
+    let input = vec![1, 2, 3, 4, 5];
+    let result = for_! {
+        x <= input.clone();
+        let squared = x * x;
+        let doubled = squared * 2;
+        yield doubled
+    };
+    let expected: Vec<i32> = input
+        .into_iter()
+        .map(|x| {
+            let squared = x * x;
+            squared * 2
+        })
+        .collect();
+    assert_eq!(result, expected);
+}
+
+#[rstest]
+fn test_result_identical_nested_with_guard() {
+    let xs = vec![1, 2, 3, 4];
+    let ys = vec![10, 20, 30];
+
+    // Clone for for_! macro usage
+    let ys_for = ys.clone();
+
+    let result = for_! {
+        x <= xs.clone();
+        y <= ys_for.clone();
+        if (x + y) % 2 == 0;
+        yield x + y
+    };
+
+    let expected: Vec<i32> = xs
+        .into_iter()
+        .flat_map(|x| {
+            ys.clone()
+                .into_iter()
+                .filter(move |&y| (x + y) % 2 == 0)
+                .map(move |y| x + y)
+        })
+        .collect();
+
+    assert_eq!(result, expected);
+}
+
+#[rstest]
+fn test_result_identical_pattern_guard() {
+    fn maybe_double(x: i32) -> Option<i32> {
+        if x > 0 {
+            Some(x.saturating_mul(2))
+        } else {
+            None
+        }
+    }
+
+    let input = vec![-2, -1, 0, 1, 2, 3];
+
+    let result = for_! {
+        x <= input.clone();
+        if let Some(doubled) = maybe_double(x);
+        yield doubled
+    };
+
+    let expected: Vec<i32> = input.into_iter().filter_map(maybe_double).collect();
+
+    assert_eq!(result, expected);
+}
