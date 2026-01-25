@@ -211,7 +211,7 @@ pub trait TaskRepository: Send + Sync {
     /// This method processes multiple tasks for saving. The current implementation
     /// varies by backend:
     /// - **`InMemory`**: Sequential processing with version checking
-    /// - **`PostgreSQL`**: Sequential processing with individual transactions
+    /// - **`PostgreSQL`**: Batch INSERT (UNNEST) for new tasks, sequential UPDATE for existing
     /// - **`Redis`**: Sequential Lua script execution
     ///
     /// # Atomicity

@@ -46,6 +46,38 @@ impl EventData {
 }
 
 // =============================================================================
+// Bulk Operation Helpers
+// =============================================================================
+
+/// Detects duplicate IDs in the input task list.
+///
+/// This is a pure function that identifies tasks with duplicate IDs.
+/// Only the first occurrence of each ID is considered valid;
+/// subsequent occurrences are marked as duplicates.
+///
+/// # Arguments
+///
+/// * `tasks` - Slice of tasks to check for duplicates
+///
+/// # Returns
+///
+/// A `HashSet` containing indices of duplicate tasks (not the first occurrence)
+fn detect_duplicate_task_ids(tasks: &[Task]) -> std::collections::HashSet<usize> {
+    let mut seen_ids: std::collections::HashSet<TaskId> =
+        std::collections::HashSet::with_capacity(tasks.len());
+    let mut duplicate_indices = std::collections::HashSet::new();
+
+    for (index, task) in tasks.iter().enumerate() {
+        if !seen_ids.insert(task.task_id.clone()) {
+            // ID was already seen, this is a duplicate
+            duplicate_indices.insert(index);
+        }
+    }
+
+    duplicate_indices
+}
+
+// =============================================================================
 // In-Memory Task Repository
 // =============================================================================
 
@@ -141,10 +173,26 @@ impl TaskRepository for InMemoryTaskRepository {
                 return Vec::new();
             }
 
+            // Phase 1: Detect duplicate IDs in the input (pure function)
+            // Only the first occurrence of each ID is valid; subsequent occurrences
+            // are marked as VersionConflict to match PostgreSQL behavior.
+            let duplicate_indices = detect_duplicate_task_ids(&tasks_to_save);
+
             let mut guard = storage.write().await;
             let results: Vec<Result<(), RepositoryError>> = tasks_to_save
-                .into_iter()
-                .map(|task| {
+                .iter()
+                .enumerate()
+                .map(|(index, task)| {
+                    // Check if this is a duplicate ID (not the first occurrence)
+                    if duplicate_indices.contains(&index) {
+                        // After the first task with this ID (version=1) is processed,
+                        // subsequent tasks with the same ID would need version=2.
+                        return Err(RepositoryError::VersionConflict {
+                            expected: 2,
+                            found: task.version,
+                        });
+                    }
+
                     // Check for version conflict
                     if let Some(existing) = guard.get(&task.task_id) {
                         // For updates, the task's version must be exactly one more than existing
@@ -166,7 +214,7 @@ impl TaskRepository for InMemoryTaskRepository {
                     }
 
                     // Insert the task (this creates a new map with structural sharing)
-                    *guard = guard.insert(task.task_id.clone(), task);
+                    *guard = guard.insert(task.task_id.clone(), task.clone());
                     Ok(())
                 })
                 .collect();
@@ -1471,6 +1519,55 @@ mod tests {
 
         // Verify task was not saved
         assert_eq!(repository.count().run_async().await.unwrap(), 0);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_task_repository_save_bulk_duplicate_id_in_batch() {
+        let repository = InMemoryTaskRepository::new();
+        let task_id = TaskId::generate();
+
+        // Create tasks with duplicate ID in the same batch
+        let task_1 = test_task_with_id(task_id.clone(), "First Task");
+        let task_2 = test_task("Different Task");
+        let task_3 = test_task_with_id(task_id.clone(), "Duplicate Task"); // Same ID as task_1
+
+        let tasks = vec![task_1.clone(), task_2.clone(), task_3.clone()];
+
+        let results = repository.save_bulk(&tasks).run_async().await;
+
+        // Verify results: task_1 should succeed, task_2 should succeed, task_3 should fail
+        assert_eq!(results.len(), 3);
+        assert!(results[0].is_ok(), "First task should succeed");
+        assert!(results[1].is_ok(), "Different task should succeed");
+        assert!(
+            results[2].is_err(),
+            "Duplicate ID task should fail (version conflict)"
+        );
+
+        // Verify the error type for the duplicate ID task
+        // After task_1 (version=1) is saved, task_3 tries to save with version=1
+        // but the existing version is now 1, so expected = 1 + 1 = 2
+        match &results[2] {
+            Err(RepositoryError::VersionConflict { expected, found }) => {
+                assert_eq!(*expected, 2); // Expected version 2 (existing.version + 1)
+                assert_eq!(*found, 1); // But got version 1
+            }
+            _ => panic!("Expected VersionConflict error"),
+        }
+
+        // Verify total count (task_1 and task_2 saved, task_3 rejected)
+        assert_eq!(repository.count().run_async().await.unwrap(), 2);
+
+        // Verify first task was saved
+        let saved = repository
+            .find_by_id(&task_id)
+            .run_async()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.title, "First Task");
+        assert_eq!(saved.version, 1);
     }
 
     #[rstest]
