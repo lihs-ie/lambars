@@ -1,0 +1,155 @@
+# APIメトリクス整合性保証 要件定義
+#
+# 概要:
+#   meta.json のJSON不正と欠損値を解消し、CIで回帰検知できるメトリクスを確立する。
+#
+# 設計方針:
+#   1. meta.json のスキーマを固定し、欠損は null で表現する
+#   2. error_rate は数値として出力し、文字列化を禁止する
+#   3. HTTP status 集計はベンチ側で統一し、解析不能を排除する
+#
+# 参照:
+#   - docs/internal/analysis/20260124_lambars_perf_bottlenecks.yaml
+#   - benches/api/benchmarks/scripts/common.lua
+#   - benches/api/benchmarks/scripts/profile_wrk.lua
+
+version: "1.0.0"
+name: "api_metrics_integrity_gap"
+description: |
+  meta.json に JSON 不正 (error_rate の .9999 等) が含まれ、
+  p95 が 0 になる欠損問題を解消する。メトリクスのスキーマを
+  固定し、CI で検証可能にする。
+
+background:
+  problem: |
+    error_rate が .9999 のような非JSON数値で出力され、解析不能になる。
+    p95 が欠損時に 0 として出力され、誤検知の原因になる。
+  motivation: |
+    ベンチ結果の正確性と再現性を担保し、回帰検知を確実にする。
+  prior_art:
+    - name: "benchmarks/scripts/common.lua"
+      description: "meta.json を生成する共通ロジック。"
+    - name: "benchmarks/scripts/profile_wrk.lua"
+      description: "wrk 出力をパースするLuaスクリプト。"
+
+requirements:
+  # ======================================================================
+  # 1. meta.json スキーマ固定
+  # ======================================================================
+  - id: "REQ-MET-SCHEMA-001"
+    name: "meta.json スキーマを v3 として固定する"
+    description: |
+      - 必須フィールド: requests, duration_seconds, error_rate, latency_ms, http_status。
+      - 欠損値は null を使用し、0 で埋めない。
+      - error_rate は 0.x の数値で出力し、文字列化を禁止する。
+    methods:
+      - name: "meta.json v3"
+        signature: "meta.json"
+        description: |
+          v3 スキーマの固定。JSON Schema を別ファイルで保持する。
+        examples:
+          - description: "meta.json 例"
+            code: |
+              {
+                "requests": 1505315,
+                "duration_seconds": 60,
+                "error_rate": 0.0001,
+                "latency_ms": { "p50": 12.3, "p95": null, "p99": 45.1 },
+                "http_status": { "200": 1505160, "409": 155 },
+                "retries": 200
+              }
+    implementations:
+      - type: "meta_schema"
+        description: |
+          - benches/api/benchmarks/schema/meta_v3.json を追加。
+          - CI で schema 検証を必須化する。
+
+  # ======================================================================
+  # 2. HTTP status 集計の統一
+  # ======================================================================
+  - id: "REQ-MET-STATUS-001"
+    name: "HTTP status 集計をベンチ側で統一する"
+    description: |
+      - Lua の response handler で HTTP status を集計する。
+      - error_rate は status 4xx/5xx の比率で算出する。
+      - retries は明示的にカウントし、meta.json に含める。
+    methods:
+      - name: "status_counter"
+        signature: "create_response_handler(name) -> function(status)"
+        description: |
+          HTTP status を集計し、error_rate を算出する。
+        examples:
+          - description: "Lua 擬似コード"
+            code: |
+              if status >= 400 then errors = errors + 1 end
+              status_counts[status] = (status_counts[status] or 0) + 1
+    implementations:
+      - type: "benchmarks/scripts/common.lua"
+        description: |
+          - status_counts を保持し、done handler で meta.json を生成する。
+          - status を文字列キーで出力し、JSON互換を維持する。
+
+  # ======================================================================
+  # 3. p95 欠損時の扱い
+  # ======================================================================
+  - id: "REQ-MET-P95-001"
+    name: "p95 欠損時は null を出力する"
+    description: |
+      - wrk 出力に p95 が存在しない場合は null を出力する。
+      - 0 の代入は禁止する。
+      - 集計側は null を欠損として扱う。
+    methods:
+      - name: "latency_parser"
+        signature: "parse_latency(lines) -> { p50, p75, p90, p95, p99 }"
+        description: |
+          欠損値は null にする。
+        examples:
+          - description: "欠損処理の例"
+            code: |
+              local p95 = latency.p95 or nil
+    implementations:
+      - type: "benchmarks/scripts/profile_wrk.lua"
+        description: |
+          - p95 が存在しない場合は nil を出力。
+          - JSONエンコード時に null を明示する。
+
+  # ======================================================================
+  # 4. CI 検証
+  # ======================================================================
+  - id: "REQ-MET-CI-001"
+    name: "meta.json のスキーマ検証をCIで強制する"
+    description: |
+      - ベンチ終了後、meta.json を JSON Schema で検証する。
+      - 検証失敗は CI を失敗させる。
+      - 失敗時は該当ファイルとフィールドを明示する。
+    implementations:
+      - type: "ci/meta_schema_check"
+        description: |
+          - schema チェック用スクリプトを追加。
+          - スキーマは meta_v3.json を参照。
+
+  # ======================================================================
+  # 5. ベンチシナリオへの適用
+  # ======================================================================
+  - id: "REQ-MET-BENCH-001"
+    name: "全シナリオでメトリクス整合性を保証する"
+    description: |
+      - tasks_search/tasks_update など全シナリオで meta.json を生成する。
+      - meta.json が無いシナリオは失敗とする。
+      - シナリオごとに status 集計が必ず出力される。
+    implementations:
+      - type: "benchmarks/scripts"
+        description: |
+          - common.lua の共通ハンドラを全スクリプトに適用。
+          - 不適用のスクリプトが存在しないことを CI で検証。
+
+non_functional_requirements:
+  performance:
+    - "メトリクス生成のオーバーヘッドは 1% 未満"
+  compatibility:
+    - "meta.json の既存フィールドは維持しつつ追加で拡張する"
+  testing:
+    - "JSON Schema 検証のユニットテストを追加"
+    - "欠損時の null 出力をテストで保証"
+
+future_extensions: []
