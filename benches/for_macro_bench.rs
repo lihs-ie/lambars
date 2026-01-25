@@ -637,19 +637,18 @@ fn benchmark_nested_three_multi_guard_100k(criterion: &mut Criterion) {
 }
 
 // =============================================================================
-// for_macro_alloc Benchmark (REQ-FOR-MACRO-BENCH-001)
+// for_macro_alloc Benchmark
 // =============================================================================
 
-/// REQ-FOR-MACRO-BENCH-001: criterion に for_macro_alloc_bench を追加
-/// アロケーション最適化後の for_! マクロのパフォーマンスを
-/// Vec::with_capacity（最適ベースライン）および map().collect() と比較する
+/// Compare allocation-optimized `for_!` macro performance against
+/// `Vec::with_capacity` (optimal baseline) and `map().collect()`.
 fn benchmark_for_macro_alloc(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("for_macro_alloc");
 
     for size in [100, 1_000, 10_000, 100_000] {
         let data: Vec<i32> = (0..size).collect();
 
-        // for_! マクロ（最適化後）
+        // for_! macro (optimized)
         group.bench_function(BenchmarkId::new("for_macro", size), |bencher| {
             bencher.iter(|| {
                 let result = for_! {
@@ -660,7 +659,7 @@ fn benchmark_for_macro_alloc(criterion: &mut Criterion) {
             });
         });
 
-        // 手書き Vec::with_capacity（最適ベースライン）
+        // Hand-written Vec::with_capacity (optimal baseline)
         group.bench_function(BenchmarkId::new("vec_with_capacity", size), |bencher| {
             bencher.iter(|| {
                 let data_clone = data.clone();
@@ -672,7 +671,7 @@ fn benchmark_for_macro_alloc(criterion: &mut Criterion) {
             });
         });
 
-        // 手書き map().collect()（比較対象）
+        // Hand-written map().collect() (comparison)
         group.bench_function(BenchmarkId::new("map_collect", size), |bencher| {
             bencher.iter(|| {
                 let result: Vec<_> = data.clone().into_iter().map(|x| black_box(x * 2)).collect();
@@ -685,11 +684,10 @@ fn benchmark_for_macro_alloc(criterion: &mut Criterion) {
 }
 
 // =============================================================================
-// for_macro_alloc_nested Benchmark (REQ-FOR-MACRO-BENCH-001)
+// for_macro_alloc_nested Benchmark
 // =============================================================================
 
-/// REQ-FOR-MACRO-BENCH-001: ネスト版 for_macro_alloc_bench
-/// 2レベルネストにおける for_! マクロと flat_map チェーンのパフォーマンスを比較する
+/// Compare 2-level nested `for_!` macro performance against `flat_map` chain.
 fn benchmark_for_macro_alloc_nested(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("for_macro_alloc_nested");
 

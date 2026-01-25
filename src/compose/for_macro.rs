@@ -339,14 +339,14 @@ use smallvec::SmallVec;
 /// `SmallVec` inline capacity for `for_!` macro (128 elements = 1KB for L1 cache).
 pub const SMALLVEC_INLINE_CAPACITY: usize = 128;
 
-/// Size hint type alias for iterator capacity estimation (REQ-FOR-MACRO-002).
+/// Size hint type alias for iterator capacity estimation.
 ///
-/// Rust 標準の `Iterator::size_hint()` と同じ形式: `(lower_bound, upper_bound)`.
-/// - `lower_bound`: 最小要素数（保証される下界）
-/// - `upper_bound`: 最大要素数（`None` は不明を示す）
+/// Same format as `Iterator::size_hint()`: `(lower_bound, upper_bound)`.
+/// - `lower_bound`: Minimum element count (guaranteed lower bound)
+/// - `upper_bound`: Maximum element count (`None` indicates unknown)
 pub type SizeHint = (usize, Option<usize>);
 
-/// Compose multiple size hints to determine optimal capacity (REQ-FOR-MACRO-002).
+/// Compose multiple size hints to determine optimal capacity.
 ///
 /// This function computes the combined size hint for nested iterations by
 /// multiplying the bounds of each iterator.
@@ -514,13 +514,13 @@ where
 /// This value was determined through profiling with typical workloads.
 const MAX_REASONABLE_CAPACITY: usize = 1024 * 1024;
 
-/// L1 cache size used for `SmallVec` threshold calculation (REQ-FOR-MACRO-003).
+/// L1 cache size used for `SmallVec` threshold calculation.
 ///
 /// 32KB is a conservative estimate that works across most modern CPUs.
 /// This is a fixed value to maintain referential transparency.
 const L1_CACHE_SIZE: usize = 32 * 1024;
 
-/// Compute the `SmallVec` usage threshold based on element size (REQ-FOR-MACRO-003).
+/// Compute the `SmallVec` usage threshold based on element size.
 ///
 /// This is a pure function that determines whether to use `SmallVec` or `Vec`
 /// based on the element type's size relative to L1 cache.
@@ -574,7 +574,7 @@ pub const fn compute_smallvec_threshold<T>() -> usize {
     }
 }
 
-/// Collect iterator with pre-computed `size_hint` for optimized allocation (REQ-FOR-MACRO-003).
+/// Collect iterator with pre-computed `size_hint` for optimized allocation.
 ///
 /// # Strategy
 ///
@@ -1697,7 +1697,7 @@ mod tests {
     }
 
     // =========================================================================
-    // combined_size_hint tests (REQ-FOR-MACRO-002)
+    // combined_size_hint tests
     // =========================================================================
 
     #[rstest]
@@ -1782,7 +1782,7 @@ mod tests {
     }
 
     // =========================================================================
-    // compute_smallvec_threshold tests (REQ-FOR-MACRO-003)
+    // compute_smallvec_threshold tests
     // =========================================================================
 
     #[rstest]
@@ -1860,7 +1860,7 @@ mod tests {
     }
 
     // =========================================================================
-    // collect_with_hint behavior tests (REQ-FOR-MACRO-003)
+    // collect_with_hint behavior tests
     // =========================================================================
 
     #[rstest]
