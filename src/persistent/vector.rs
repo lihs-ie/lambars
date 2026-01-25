@@ -3879,7 +3879,7 @@ where
         while let Some(element) = seq.next_element()? {
             elements.push(element);
         }
-        Ok(elements.into_iter().collect())
+        Ok(build_persistent_vector_from_vec(elements))
     }
 }
 
