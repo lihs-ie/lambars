@@ -1,0 +1,253 @@
+# AsyncIO runtime オーバーヘッド削減 要件定義
+#
+# 概要:
+#   AsyncIO の runtime enter/drop と割当支配を削減し、スループットを回復する。
+#
+# 設計方針:
+#   1. Runtime は再利用し、リクエスト単位の生成/enterを禁止する
+#   2. Box<dyn Future> の多用を排除し、enum 状態機械で表現する
+#   3. FuturesUnordered は固定長プール化し、割当の山を抑制する
+#
+# 参照:
+#   - docs/internal/analysis/20260124_lambars_perf_bottlenecks.yaml
+#   - criterion profiling top_functions (effect_bench)
+
+version: "1.0.0"
+name: "async_io_runtime_overhead"
+description: |
+  AsyncIO 実行時に Runtime::enter/EnterRuntimeGuard::drop が支配的となり、
+  malloc/cfree が大量発生している問題を解決する。Runtime 再利用と
+  Future の静的表現を導入し、非同期処理のオーバーヘッドを削減する。
+
+background:
+  problem: |
+    effect_bench で Runtime::enter/drop と malloc が上位を占める。
+    小さな非同期処理でもランタイム進入が支配的。
+  motivation: |
+    非同期APIのスループットを改善し、非同期実行がボトルネックにならない状態を作る。
+  prior_art:
+    - name: "criterion-profiling effect_bench"
+      description: "AsyncIO の hot spots を示すプロファイル結果。"
+
+requirements:
+  # ======================================================================
+  # 1. Runtime 再利用
+  # ======================================================================
+  - id: "REQ-ASYNC-RT-001"
+    name: "Runtime をグローバル/スレッドローカルで再利用する"
+    description: |
+      - AsyncIO 実行時に Runtime を生成しない。
+      - Runtime::enter を毎回行わず、Handle を保持して実行する。
+      - Runtime の生成は起動時に1回だけ行う。
+    laws:
+      - name: "runtime_reuse"
+        description: "同一スレッドでは同一 Runtime を再利用する。"
+        equation: "runtime() = runtime()"
+        property_test: |
+          #[test]
+          fn runtime_is_reused() {
+              let a = runtime_id();
+              let b = runtime_id();
+              assert_eq!(a, b);
+          }
+    methods:
+      - name: "runtime"
+        signature: "fn runtime() -> &'static Runtime"
+        description: |
+          起動時に1回だけ構築された Runtime を返す。
+        examples:
+          - description: "Runtime 再利用"
+            code: |
+              static RUNTIME: OnceLock<Runtime> = OnceLock::new();
+              fn runtime() -> &'static Runtime {
+                  RUNTIME.get_or_init(|| Runtime::new().expect(\"runtime\"))
+              }
+    implementations:
+      - type: "AsyncIORuntime"
+        description: |
+          - AsyncIO::run は runtime().handle().block_on(...) で実行。
+          - Runtime::enter/Guard の生成は使用禁止。
+
+  # ======================================================================
+  # 2. Future の静的表現
+  # ======================================================================
+  - id: "REQ-ASYNC-FUT-001"
+    name: "AsyncIO のホットパスでの Heap allocation を最小化する"
+    description: |
+      - Pure 値のチェーン（fmap, flat_map）では Box<dyn Future> を使用しない。
+      - enum で状態を表現し、poll の分岐で進行する。
+      - Heap allocation を最小化し、Rc/Arc の参照増を避ける。
+
+      ## 設計上の制約
+
+      Rust の型システムの制約により、以下の場合は Box<dyn Future> が必要:
+      - Defer 状態（遅延評価のサンク保持）
+      - Running 状態（実行中の Future 保持）
+
+      これらは「計算の記述」フェーズでは発生せず、「実行」フェーズでのみ発生するため、
+      関数型プログラミングの「計算と実行の分離」原則に沿っている。
+
+    methods:
+      - name: "AsyncIOState"
+        signature: "enum AsyncIOState { Pure, Defer, Running, ... }"
+        description: |
+          Future を enum 状態で表現し、Pure チェーンでは Box を排除する。
+        examples:
+          - description: "Pure 最適化の例"
+            code: |
+              // Pure 値に対する fmap はゼロアロケーション
+              AsyncIO::pure(42).fmap(|x| x + 1)  // 即座に Pure { value: 43 }
+    implementations:
+      - type: "AsyncIO"
+        description: |
+          - AsyncIO は state: AsyncIOState を保持し poll で遷移させる。
+          - Pure 値のチェーンは即座評価でボクシングを回避。
+          - Defer/Running では Box<dyn Future> を使用（型消去の必要性）。
+
+  # ======================================================================
+  # 3. FuturesUnordered の固定長プール化
+  # ======================================================================
+  - id: "REQ-ASYNC-POOL-001"
+    name: "FuturesUnordered を固定長プールで管理する"
+    description: |
+      Semaphore + 有界 mpsc による backpressure 戦略を採用する。
+      手動 Waker 管理を排除し、キャンセル時も自動解放される堅牢な設計とする。
+
+      ## 設計方針
+
+      1. **インフライト上限**: `capacity` = 同時実行の最大数（固定）
+      2. **キュー上限**: `queue_capacity` = 待機数の上限（固定、デフォルトは capacity と同じ）
+      3. **メモリ上限**: 総タスク数 <= capacity + queue_capacity を保証
+
+      ## 内部構造
+
+      - `queue_semaphore`: キュー投入の許可を管理（queue_capacity 個のパーミット）
+      - `bounded_sender/receiver`: 有界 mpsc チャンネル（デキュー順は FIFO を保証）
+      - 同時実行制限: `buffer_unordered(capacity)` で実現（明示的な Semaphore ではない）
+
+      ## Backpressure 挙動
+
+      - `spawn`: queue_permit を待機 → enqueue（backpressure）
+      - `try_spawn`: try_acquire で即時エラー（PoolError::QueueFull）
+      - DropOldest は不採用（既存タスクの黙殺は参照透過性とデバッグ性を損なう）
+
+      ## キャンセル
+
+      - spawn の待機は Future を drop で中断可能（Permit drop で自動解放）
+      - enqueue 済みタスクのキャンセルは別問題（必要なら後で検討）
+
+      ## 順序と公平性
+
+      - デキュー順序: 有界 mpsc の FIFO を採用（投入順にデキュー）
+      - 実行開始順序: best-effort（buffer_unordered の内部スケジューリングに依存）
+      - 公平性: Semaphore::acquire と mpsc の待機者は実質 FIFO（厳密保証は求めず）
+      - Permit 返却タイミング:
+        - queue_permit: デキュー時に返却（run_all/run_buffered の開始時）
+
+    laws:
+      - name: "bounded_inflight"
+        description: "同時実行数は capacity を超えない"
+        equation: "inflight_count <= capacity"
+      - name: "bounded_queue"
+        description: "キュー長は queue_capacity を超えない"
+        equation: "queue_len <= queue_capacity"
+      - name: "total_bounded"
+        description: "総タスク数は capacity + queue_capacity を超えない"
+        equation: "inflight_count + queue_len <= capacity + queue_capacity"
+
+    methods:
+      - name: "AsyncPool::new"
+        signature: "fn new(capacity: usize) -> Self"
+        description: |
+          指定した容量でプールを作成する。queue_capacity はデフォルトで capacity と同じ。
+        examples:
+          - description: "基本的な使用例"
+            code: |
+              let pool = AsyncPool::new(128);
+
+      - name: "AsyncPool::with_queue_capacity"
+        signature: "fn with_queue_capacity(capacity: usize, queue_capacity: usize) -> Self"
+        description: |
+          容量とキュー容量を別々に指定してプールを作成する。
+          queue_capacity <= capacity の制約あり（メモリ上限保証のため）。
+        examples:
+          - description: "カスタムキュー容量"
+            code: |
+              let pool = AsyncPool::with_queue_capacity(128, 64);
+
+      - name: "AsyncPool::spawn"
+        signature: "async fn spawn(&self, task: impl Future<Output = T> + Send + 'static) -> Result<(), PoolError>"
+        description: |
+          タスクをプールに投入する。キューが満杯の場合は空きが出るまで待機する。
+          待機は Future を drop することでキャンセル可能（Permit は自動解放）。
+        examples:
+          - description: "待機ありの投入"
+            code: |
+              pool.spawn(async { compute() }).await?;
+
+      - name: "AsyncPool::try_spawn"
+        signature: "fn try_spawn(&self, task: impl Future<Output = T> + Send + 'static) -> Result<(), PoolError>"
+        description: |
+          タスクをプールに即時投入する。キューが満杯の場合は PoolError::QueueFull を返す。
+        examples:
+          - description: "即時投入"
+            code: |
+              match pool.try_spawn(async { compute() }) {
+                  Ok(()) => println!("enqueued"),
+                  Err(PoolError::QueueFull) => println!("pool is full"),
+              }
+
+      - name: "AsyncPool::run_all"
+        signature: "async fn run_all(&mut self) -> Vec<T>"
+        description: |
+          プール内の全タスクを実行し、結果を返す。同時実行数は capacity に制限される。
+          デキュー順序は FIFO だが、実行開始順序は best-effort。
+
+    implementations:
+      - type: "AsyncPool"
+        description: |
+          - Semaphore + 有界 mpsc で手動 Waker 管理を排除
+          - buffer_unordered(capacity) で同時実行数を制限
+          - spawn は待機、try_spawn は即時エラーの2系統APIを提供
+          - キャンセル時は Permit drop で自動解放（古い Waker 問題なし）
+          - デキュー順序は FIFO、実行開始順序は best-effort
+          - Box<dyn Future> を使用（mpsc での送信に必要、AsyncPool 固有の制約）
+          - Result で失敗を明示し、例外に頼らない関数型設計と整合
+
+  # ======================================================================
+  # 4. ベンチ/テスト定義
+  # ======================================================================
+  - id: "REQ-ASYNC-BENCH-001"
+    name: "AsyncIO ベンチを明確化する"
+    description: |
+      - criterion に async_io_runtime_bench を追加する。
+      - runtime enter/drop が上位に出ないことを確認する。
+      - 旧ベンチと同じ入力サイズで比較可能にする。
+    methods:
+      - name: "async_io_runtime_bench"
+        signature: "criterion bench"
+        description: |
+          既存 effect_bench と同条件で実行する。
+        examples:
+          - description: "ベンチ概要"
+            code: |
+              group.bench_function(\"async_io_runtime\", |b| {
+                  b.iter(|| run_async_io_batch());
+              });
+    implementations:
+      - type: "benches"
+        description: |
+          - criterion ベンチに AsyncIO 用のベンチを追加。
+          - 比較対象の入力サイズと回数を固定する。
+
+non_functional_requirements:
+  performance:
+    - "AsyncIO 関連の malloc/cfree 回数を現状比 70% 以上削減"
+    - "effect_bench の p50 実行時間を 50% 以上改善"
+  compatibility:
+    - "AsyncIO の public API は互換維持"
+  testing:
+    - "Runtime 再利用の単体テストを追加"
+    - "AsyncIO の状態遷移を property test で検証"
+
+future_extensions: []

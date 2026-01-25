@@ -615,3 +615,309 @@ async fn test_execution_order_with_direct_await() {
     let execution_order = order.lock().unwrap().clone();
     assert_eq!(execution_order, vec![1, 2, 3]);
 }
+
+// =============================================================================
+// FlatMap state machine tests (REQ-ASYNC-FUT-001)
+// =============================================================================
+
+/// FlatMap should use enum state instead of Box<dyn Future>.
+/// This test verifies that flat_map chains work correctly with state transitions.
+#[rstest]
+#[tokio::test]
+async fn test_flatmap_state_pure_to_pure() {
+    // Pure -> FlatMap -> Pure transition
+    let async_io = AsyncIO::pure(10).flat_map(|x| AsyncIO::pure(x * 2));
+    let result = async_io.await;
+    assert_eq!(result, 20);
+}
+
+/// Multiple flat_map calls should chain correctly via state transitions.
+#[rstest]
+#[tokio::test]
+async fn test_flatmap_state_chain() {
+    let async_io = AsyncIO::pure(1)
+        .flat_map(|x| AsyncIO::pure(x + 1)) // 2
+        .flat_map(|x| AsyncIO::pure(x * 2)) // 4
+        .flat_map(|x| AsyncIO::pure(x + 3)); // 7
+
+    let result = async_io.await;
+    assert_eq!(result, 7);
+}
+
+/// FlatMap with deferred computation should work correctly.
+#[rstest]
+#[tokio::test]
+async fn test_flatmap_state_with_defer() {
+    let executed = Arc::new(AtomicBool::new(false));
+    let executed_clone = executed.clone();
+
+    let async_io = AsyncIO::pure(5).flat_map(move |x| {
+        let flag = executed_clone.clone();
+        AsyncIO::new(move || async move {
+            flag.store(true, Ordering::SeqCst);
+            x * 3
+        })
+    });
+
+    // Not executed yet
+    assert!(!executed.load(Ordering::SeqCst));
+
+    let result = async_io.await;
+    assert!(executed.load(Ordering::SeqCst));
+    assert_eq!(result, 15);
+}
+
+/// FlatMap should preserve laziness until polled.
+#[rstest]
+#[tokio::test]
+async fn test_flatmap_state_preserves_laziness() {
+    let first_executed = Arc::new(AtomicBool::new(false));
+    let second_executed = Arc::new(AtomicBool::new(false));
+    let first_clone = first_executed.clone();
+    let second_clone = second_executed.clone();
+
+    let async_io = AsyncIO::new(move || {
+        let flag = first_clone.clone();
+        async move {
+            flag.store(true, Ordering::SeqCst);
+            10
+        }
+    })
+    .flat_map(move |x| {
+        let flag = second_clone.clone();
+        AsyncIO::new(move || async move {
+            flag.store(true, Ordering::SeqCst);
+            x + 5
+        })
+    });
+
+    // Neither should be executed yet
+    assert!(!first_executed.load(Ordering::SeqCst));
+    assert!(!second_executed.load(Ordering::SeqCst));
+
+    let result = async_io.await;
+
+    // Both should be executed after await
+    assert!(first_executed.load(Ordering::SeqCst));
+    assert!(second_executed.load(Ordering::SeqCst));
+    assert_eq!(result, 15);
+}
+
+/// FlatMap followed by fmap should work correctly.
+#[rstest]
+#[tokio::test]
+async fn test_flatmap_state_followed_by_fmap() {
+    let async_io = AsyncIO::pure(7)
+        .flat_map(|x| AsyncIO::pure(x * 2)) // 14
+        .fmap(|x| x + 1); // 15
+
+    let result = async_io.await;
+    assert_eq!(result, 15);
+}
+
+/// fmap followed by flat_map should work correctly.
+#[rstest]
+#[tokio::test]
+async fn test_fmap_followed_by_flatmap_state() {
+    let async_io = AsyncIO::pure(3)
+        .fmap(|x| x * 3) // 9
+        .flat_map(|x| AsyncIO::pure(x + 1)); // 10
+
+    let result = async_io.await;
+    assert_eq!(result, 10);
+}
+
+/// Deep flat_map chain should not overflow stack (tests tail-call-like behavior).
+#[rstest]
+#[tokio::test]
+async fn test_flatmap_state_deep_chain() {
+    let mut async_io = AsyncIO::pure(0);
+    for _ in 0..100 {
+        async_io = async_io.flat_map(|x| AsyncIO::pure(x + 1));
+    }
+    let result = async_io.await;
+    assert_eq!(result, 100);
+}
+
+/// FlatMap with type transformation should work correctly.
+#[rstest]
+#[tokio::test]
+async fn test_flatmap_state_type_transformation() {
+    let async_io: AsyncIO<String> = AsyncIO::pure(42)
+        .flat_map(|x| AsyncIO::pure(x.to_string()))
+        .flat_map(|s| AsyncIO::pure(format!("Value: {}", s)));
+
+    let result = async_io.await;
+    assert_eq!(result, "Value: 42");
+}
+
+// =============================================================================
+// Pure Chain Optimization Tests (REQ-ASYNC-FUT-001)
+// =============================================================================
+
+/// Pure chains should be evaluated immediately without deferred state.
+/// This test verifies that Pure -> Pure chains don't create FlatMap states.
+#[rstest]
+#[tokio::test]
+async fn test_pure_chain_immediate_evaluation() {
+    // This chain should be evaluated immediately during construction,
+    // not deferred to poll time.
+    let execution_order = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    let order1 = execution_order.clone();
+    let order2 = execution_order.clone();
+
+    // Pure chain: all operations should execute during construction
+    let _async_io = AsyncIO::pure(1)
+        .fmap(move |x| {
+            order1.lock().unwrap().push("fmap1");
+            x + 1
+        })
+        .fmap(move |x| {
+            order2.lock().unwrap().push("fmap2");
+            x * 2
+        });
+
+    // Since these are pure operations, they should have already executed
+    let order = execution_order.lock().unwrap().clone();
+    assert_eq!(
+        order,
+        vec!["fmap1", "fmap2"],
+        "Pure fmap chain should execute immediately"
+    );
+}
+
+/// Pure flat_map chain should also be evaluated immediately.
+#[rstest]
+#[tokio::test]
+async fn test_pure_flatmap_chain_immediate_evaluation() {
+    let execution_order = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    let order1 = execution_order.clone();
+    let order2 = execution_order.clone();
+
+    // Pure flat_map chain: continuations should execute during construction
+    let async_io = AsyncIO::pure(1)
+        .flat_map(move |x| {
+            order1.lock().unwrap().push("flat_map1");
+            AsyncIO::pure(x + 1)
+        })
+        .flat_map(move |x| {
+            order2.lock().unwrap().push("flat_map2");
+            AsyncIO::pure(x * 2)
+        });
+
+    // Since source is Pure, flat_map continuations should have already executed
+    let order = execution_order.lock().unwrap().clone();
+    assert_eq!(
+        order,
+        vec!["flat_map1", "flat_map2"],
+        "Pure flat_map chain should execute immediately"
+    );
+
+    // Final result should be correct
+    let result = async_io.await;
+    assert_eq!(result, 4);
+}
+
+/// Deferred source should delay flat_map continuation execution.
+#[rstest]
+#[tokio::test]
+async fn test_deferred_flatmap_delays_continuation() {
+    let continuation_executed = Arc::new(AtomicBool::new(false));
+    let continuation_clone = continuation_executed.clone();
+
+    // Deferred source: flat_map continuation should NOT execute during construction
+    let async_io = AsyncIO::new(|| async { 10 }).flat_map(move |x| {
+        continuation_clone.store(true, Ordering::SeqCst);
+        AsyncIO::pure(x * 2)
+    });
+
+    // Continuation should NOT have executed yet (deferred)
+    assert!(
+        !continuation_executed.load(Ordering::SeqCst),
+        "Deferred flat_map continuation should not execute during construction"
+    );
+
+    // Execute by awaiting
+    let result = async_io.await;
+    assert_eq!(result, 20);
+
+    // Now continuation should have executed
+    assert!(
+        continuation_executed.load(Ordering::SeqCst),
+        "Deferred flat_map continuation should execute after await"
+    );
+}
+
+/// Mixed chain: Pure followed by deferred should work correctly.
+#[rstest]
+#[tokio::test]
+async fn test_mixed_pure_and_deferred_chain() {
+    let pure_executed = Arc::new(AtomicBool::new(false));
+    let deferred_executed = Arc::new(AtomicBool::new(false));
+    let pure_clone = pure_executed.clone();
+    let deferred_clone = deferred_executed.clone();
+
+    // Start with Pure (immediate)
+    let async_io = AsyncIO::pure(5).flat_map(move |x| {
+        pure_clone.store(true, Ordering::SeqCst);
+        // Return a deferred AsyncIO
+        AsyncIO::new(move || async move {
+            deferred_clone.store(true, Ordering::SeqCst);
+            x * 3
+        })
+    });
+
+    // Pure part should have executed (source is Pure)
+    assert!(
+        pure_executed.load(Ordering::SeqCst),
+        "Pure continuation should execute immediately"
+    );
+
+    // Deferred part should NOT have executed yet
+    assert!(
+        !deferred_executed.load(Ordering::SeqCst),
+        "Deferred inner AsyncIO should not execute during construction"
+    );
+
+    // Execute by awaiting
+    let result = async_io.await;
+    assert_eq!(result, 15);
+
+    // Now deferred should have executed
+    assert!(
+        deferred_executed.load(Ordering::SeqCst),
+        "Deferred inner AsyncIO should execute after await"
+    );
+}
+
+/// Long Pure chain should not cause stack overflow.
+#[rstest]
+#[tokio::test]
+async fn test_long_pure_chain_no_overflow() {
+    // Build a long chain of pure fmap operations
+    let mut async_io = AsyncIO::pure(0i64);
+    for i in 0..1000 {
+        async_io = async_io.fmap(move |x| x + i);
+    }
+
+    // Expected: 0 + 0 + 1 + 2 + ... + 999 = 999 * 1000 / 2 = 499500
+    let result = async_io.await;
+    assert_eq!(result, 499500);
+}
+
+/// Long Pure flat_map chain should not cause stack overflow.
+#[rstest]
+#[tokio::test]
+async fn test_long_pure_flatmap_chain_no_overflow() {
+    // Build a long chain of pure flat_map operations
+    let mut async_io = AsyncIO::pure(0i64);
+    for i in 0..1000 {
+        async_io = async_io.flat_map(move |x| AsyncIO::pure(x + i));
+    }
+
+    // Expected: 0 + 0 + 1 + 2 + ... + 999 = 999 * 1000 / 2 = 499500
+    let result = async_io.await;
+    assert_eq!(result, 499500);
+}

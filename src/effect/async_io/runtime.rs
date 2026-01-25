@@ -14,7 +14,8 @@
 //!
 //! 2. **Handle Caching**: Thread-local caching of runtime handles to avoid
 //!    repeated lookups. When inside a runtime, the current handle is used
-//!    directly. When outside, the global runtime's handle is cached.
+//!    directly. When outside, the global runtime's handle is cached in a
+//!    `thread_local!` storage and reused on subsequent calls.
 //!
 //! 3. **Blocking Execution**: A `run_blocking` function that executes futures
 //!    efficiently by using `block_in_place` when already inside a multi-thread
@@ -23,7 +24,8 @@
 //! # Performance Characteristics
 //!
 //! - `global()`: O(1) after first initialization (static `LazyLock`)
-//! - `handle()`: O(1) with thread-local caching
+//! - `handle()`: O(1) with thread-local caching (first call clones, subsequent
+//!   calls return cached handle)
 //! - `run_blocking()`: No additional Enter/Drop overhead when inside runtime
 //!
 //! # Runtime Flavor Considerations
@@ -38,10 +40,53 @@
 //! When inside a runtime, the current runtime's handle is preferred over the
 //! global runtime to preserve tracing context and metrics settings.
 //!
+//! # Important Usage Restrictions
+//!
+//! **`block_in_place` Limitations**: The `try_run_blocking` function uses
+//! `block_in_place` when inside a multi-thread runtime. The behavior differs
+//! by runtime type:
+//!
+//! ## Current-thread runtime
+//!
+//! In a `current_thread` runtime, `block_in_place` is not supported at all.
+//! `try_run_blocking` detects this and returns `Err(BlockingError::CurrentThreadRuntime)`
+//! **without panicking**.
+//!
+//! Note: Even though `spawn_blocking` itself works in a `current_thread` runtime
+//! (tokio spawns blocking threads regardless of runtime flavor), calling
+//! `try_run_blocking` from within `spawn_blocking` will still fail. This is because
+//! `Handle::try_current()` inside `spawn_blocking` returns the handle of the
+//! originating runtime (which is `current_thread`), causing the function to return
+//! `Err(BlockingError::CurrentThreadRuntime)`. Therefore, `try_run_blocking` is
+//! **not usable** from within a `current_thread` runtime context.
+//!
+//! ## Multi-thread runtime
+//!
+//! In a multi-thread runtime, `block_in_place` is generally supported, but
+//! will **panic** in the following specific contexts:
+//!
+//! - Inside `tokio::task::LocalSet::run_until()`
+//! - In any context where `disallow_block_in_place` is enabled
+//!
+//! Note: Calling from `Runtime::block_on()` on the main thread of a multi-thread
+//! runtime does **not** cause a panic by itself.
+//!
+//! **Workaround for `LocalSet` contexts (multi-thread runtime only)**:
+//!
+//! If you need to call `try_run_blocking` from within `LocalSet::run_until()`
+//! in a **multi-thread** runtime, you must first move to a worker thread using
+//! `tokio::task::spawn_blocking`. This workaround is **only available in
+//! multi-thread runtimes**; it does not work in `current_thread` runtimes.
+//!
+//! # Security Considerations
+//!
+//! The `runtime_id()` function returns an opaque identifier that does not
+//! expose memory addresses, avoiding ASLR information leakage.
+//!
 //! # Examples
 //!
 //! ```rust,ignore
-//! use lambars::effect::async_io::runtime::{global, handle, run_blocking};
+//! use lambars::effect::async_io::runtime::{global, handle, run_blocking, try_run_blocking};
 //!
 //! // Get the global runtime
 //! let runtime = global();
@@ -49,8 +94,13 @@
 //! // Get a cached handle
 //! let obtained_handle = handle();
 //!
-//! // Execute a future blocking (returns Result to handle current_thread runtime)
+//! // Execute a future blocking (returns T directly; panics on error)
 //! let result = run_blocking(async { 42 });
+//! assert_eq!(result, 42);
+//!
+//! // Or use try_run_blocking to handle errors explicitly
+//! let result = try_run_blocking(async { 42 });
+//! assert_eq!(result, Ok(42));
 //! ```
 
 use std::cell::RefCell;
@@ -58,6 +108,7 @@ use std::error::Error;
 use std::fmt;
 use std::future::Future;
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::runtime::{Builder, Handle, Runtime, RuntimeFlavor};
 
@@ -65,15 +116,18 @@ use tokio::runtime::{Builder, Handle, Runtime, RuntimeFlavor};
 // Global Runtime
 // =============================================================================
 
-/// Global tokio runtime initialized lazily on first access.
-///
-/// This runtime is configured with:
-/// - Multi-thread scheduler
-/// - Worker threads equal to the number of CPU cores
-/// - All features enabled (io, time, etc.)
-///
-/// The runtime has static lifetime and is never dropped.
+/// Counter for generating unique, ASLR-safe runtime IDs.
+static RUNTIME_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Unique ID assigned to the global runtime (initialized once on first access).
+static GLOBAL_RUNTIME_ID: LazyLock<u64> =
+    LazyLock::new(|| RUNTIME_ID_COUNTER.fetch_add(1, Ordering::Relaxed) + 1);
+
+/// Global multi-thread tokio runtime (static lifetime, never dropped).
 static GLOBAL_RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
+    // Ensure runtime ID is initialized before the runtime itself
+    let _ = *GLOBAL_RUNTIME_ID;
+
     Builder::new_multi_thread()
         .worker_threads(num_cpus::get())
         .enable_all()
@@ -81,29 +135,18 @@ static GLOBAL_RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
         .expect("Failed to create global tokio runtime")
 });
 
-/// Returns a reference to the global runtime.
-///
-/// The runtime is lazily initialized on first call and shared across
-/// all subsequent calls. The same instance is returned from any thread.
-///
-/// # Returns
-///
-/// A static reference to the global `Runtime`.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// use lambars::effect::async_io::runtime::global;
-///
-/// let runtime = global();
-/// runtime.block_on(async {
-///     // async work here
-/// });
-/// ```
+/// Returns a reference to the lazily-initialized global runtime.
 #[inline]
 #[must_use]
 pub fn global() -> &'static Runtime {
     &GLOBAL_RUNTIME
+}
+
+/// Returns an opaque, ASLR-safe identifier for the global runtime.
+#[inline]
+#[must_use]
+pub fn runtime_id() -> u64 {
+    *GLOBAL_RUNTIME_ID
 }
 
 // =============================================================================
@@ -111,64 +154,30 @@ pub fn global() -> &'static Runtime {
 // =============================================================================
 
 thread_local! {
-    /// Thread-local cached handle to the global runtime.
-    ///
-    /// This avoids repeated calls to `global().handle()` by caching the
-    /// handle per-thread. The handle is cloned on first access.
+    /// Thread-local cache for the global runtime's handle (avoids repeated clones).
     static CACHED_HANDLE: RefCell<Option<Handle>> = const { RefCell::new(None) };
 }
 
-/// Returns a handle to the current or global runtime.
+/// Returns a handle to the current runtime (if inside one) or the cached global runtime handle.
 ///
-/// This function first attempts to get the current runtime's handle
-/// (if running inside a tokio runtime). If not inside a runtime,
-/// it returns a cached handle to the global runtime.
-///
-/// # Handle Priority
-///
-/// 1. If inside a tokio runtime: returns `Handle::current()`
-/// 2. Otherwise: returns cached `global().handle()` (initializing if needed)
-///
-/// # Returns
-///
-/// A cloned `Handle` to the runtime.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// use lambars::effect::async_io::runtime::handle;
-///
-/// // From outside any runtime
-/// let obtained_handle = handle();
-/// obtained_handle.spawn(async { /* work */ });
-///
-/// // From inside a runtime (e.g., in a #[tokio::test])
-/// #[tokio::test]
-/// async fn test() {
-///     let obtained_handle = handle(); // Returns current runtime's handle
-/// }
-/// ```
-///
-/// # Note
-///
-/// This function never panics. The internal `unwrap()` is safe because
-/// the cached value is always set before being accessed.
+/// Priority: current runtime handle > cached global runtime handle.
+/// The global handle is cloned once per thread and cached thereafter.
 #[inline]
 #[must_use]
-#[allow(clippy::missing_panics_doc)] // unwrap is safe: we just set the value
 pub fn handle() -> Handle {
-    // First, try to get the current runtime's handle
     if let Ok(current_handle) = Handle::try_current() {
         return current_handle;
     }
 
-    // Not inside a runtime, use cached global handle
-    CACHED_HANDLE.with(|cached| {
-        let mut cached = cached.borrow_mut();
-        if cached.is_none() {
-            *cached = Some(global().handle().clone());
+    CACHED_HANDLE.with(|cell| {
+        let mut cached = cell.borrow_mut();
+        if let Some(ref cached_handle) = *cached {
+            return cached_handle.clone();
         }
-        cached.as_ref().unwrap().clone()
+
+        let global_handle = global().handle().clone();
+        *cached = Some(global_handle.clone());
+        global_handle
     })
 }
 
@@ -233,9 +242,9 @@ impl Error for BlockingError {}
 /// contexts. It handles the complexity of being inside or outside a tokio
 /// runtime automatically:
 ///
-/// - **Inside a multi-thread runtime**: Uses `block_in_place` with the current
-///   runtime's handle to avoid nested runtime panics while preserving the
-///   caller's runtime context (tracing, metrics, etc.).
+/// - **Inside a multi-thread runtime (worker thread or `spawn_blocking`)**: Uses
+///   `block_in_place` with the current runtime's handle to avoid nested runtime
+///   panics while preserving the caller's runtime context (tracing, metrics, etc.).
 /// - **Inside a current-thread runtime**: Returns `Err(BlockingError::CurrentThreadRuntime)`
 ///   because `block_in_place` is not supported in current-thread runtimes.
 /// - **Outside a runtime**: Uses the global runtime's `block_on`.
@@ -245,6 +254,54 @@ impl Error for BlockingError {}
 /// When called from within a runtime, this function uses `Handle::current()`
 /// to preserve the caller's runtime context. This ensures that tracing spans,
 /// metrics, and other runtime-specific settings are properly inherited.
+///
+/// # Important: Runtime-Specific Behavior
+///
+/// ## Current-thread runtime
+///
+/// In a `current_thread` runtime, `block_in_place` is not supported.
+/// This function detects this and returns `Err(BlockingError::CurrentThreadRuntime)`
+/// **without panicking**.
+///
+/// Note: Even though `spawn_blocking` itself works in a `current_thread` runtime
+/// (tokio spawns blocking threads regardless of runtime flavor), calling this
+/// function from within `spawn_blocking` will still fail. This is because
+/// `Handle::try_current()` inside `spawn_blocking` returns the handle of the
+/// originating runtime (which is `current_thread`), causing the function to return
+/// `Err(BlockingError::CurrentThreadRuntime)`. Therefore, this function is
+/// **not usable** from within a `current_thread` runtime context.
+///
+/// ## Multi-thread runtime
+///
+/// In a multi-thread runtime, this function uses `block_in_place`, which
+/// will **panic** in the following specific contexts:
+///
+/// - Inside `tokio::task::LocalSet::run_until()`
+/// - In any context where `disallow_block_in_place` is enabled
+///
+/// Note: Calling from `Runtime::block_on()` on the main thread of a multi-thread
+/// runtime does **not** cause a panic by itself.
+///
+/// **Workaround for `LocalSet` contexts (multi-thread runtime only)**:
+///
+/// If you need to use this function from within `LocalSet::run_until()` in a
+/// **multi-thread** runtime, you must first move to a worker thread using
+/// `tokio::task::spawn_blocking`:
+///
+/// ```rust,ignore
+/// // Inside LocalSet::run_until (multi-thread runtime only)
+/// let result = tokio::task::spawn_blocking(|| {
+///     try_run_blocking(async { 42 })
+/// }).await.unwrap();
+/// ```
+///
+/// **Important**: This workaround is **only available in multi-thread runtimes**.
+/// It does not work in `current_thread` runtimes.
+///
+/// This design follows the functional programming principle of not using
+/// exceptions for control flow. Rather than catching and converting panics
+/// to errors, we document the constraints and let callers ensure they call
+/// from an appropriate context.
 ///
 /// # Arguments
 ///
@@ -257,9 +314,19 @@ impl Error for BlockingError {}
 ///
 /// # Errors
 ///
-/// Returns `Err(BlockingError::CurrentThreadRuntime)` when called from within
-/// a current-thread tokio runtime, as `block_in_place` is not supported in
-/// that context.
+/// - `Err(BlockingError::CurrentThreadRuntime)` when called from within
+///   a current-thread tokio runtime.
+/// - `Err(BlockingError::UnsupportedRuntimeFlavor)` when called from a
+///   runtime with an unknown flavor.
+///
+/// # Panics
+///
+/// In a **multi-thread runtime**, panics if called from within `LocalSet::run_until()`
+/// or in any context where `disallow_block_in_place` is enabled. See the
+/// documentation above for how to avoid this.
+///
+/// Note: In a `current_thread` runtime, this function returns
+/// `Err(BlockingError::CurrentThreadRuntime)` instead of panicking.
 ///
 /// # Examples
 ///
@@ -305,79 +372,31 @@ pub fn try_run_blocking<F, T>(future: F) -> Result<T, BlockingError>
 where
     F: Future<Output = T>,
 {
-    // Check if we're inside a tokio runtime
     if let Ok(current_handle) = Handle::try_current() {
-        // Inside a runtime: check runtime flavor
         match current_handle.runtime_flavor() {
             RuntimeFlavor::MultiThread => {
-                // Multi-thread runtime: use block_in_place with current handle
-                // to preserve the caller's runtime context (tracing, metrics, etc.)
+                // Preserve caller's runtime context (tracing, metrics, etc.)
+                // Panics in LocalSet::run_until() or disallow_block_in_place contexts
                 Ok(tokio::task::block_in_place(|| {
                     current_handle.block_on(future)
                 }))
             }
-            RuntimeFlavor::CurrentThread => {
-                // Current-thread runtime: block_in_place is not supported
-                Err(BlockingError::CurrentThreadRuntime)
-            }
-            // Handle any future runtime flavors conservatively
-            _ => {
-                // Unknown runtime flavor: return a specific error for forward compatibility
-                // This allows callers to distinguish between "current-thread doesn't support
-                // block_in_place" and "unknown runtime flavor that may or may not support it"
-                Err(BlockingError::UnsupportedRuntimeFlavor)
-            }
+            RuntimeFlavor::CurrentThread => Err(BlockingError::CurrentThreadRuntime),
+            _ => Err(BlockingError::UnsupportedRuntimeFlavor),
         }
     } else {
-        // Outside a runtime: use global runtime's block_on
         Ok(global().block_on(future))
     }
 }
 
-/// Executes a future synchronously, blocking the current thread.
-///
-/// This is a convenience wrapper around [`try_run_blocking`] that panics
-/// on error. Use this when you know you're in a multi-thread runtime context
-/// or when a panic is acceptable.
-///
-/// # Arguments
-///
-/// * `future` - The future to execute.
-///
-/// # Returns
-///
-/// The output of the future.
+/// Convenience wrapper around [`try_run_blocking`] that panics on error.
 ///
 /// # Panics
 ///
-/// - Panics if called from within a current-thread runtime.
-/// - Panics if the future panics.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// use lambars::effect::async_io::runtime::run_blocking;
-///
-/// // From synchronous code (outside any runtime)
-/// let result = run_blocking(async {
-///     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-///     42
-/// });
-/// assert_eq!(result, 42);
-/// ```
-///
-/// ```rust,ignore
-/// use lambars::effect::async_io::runtime::run_blocking;
-///
-/// // From inside a multi-thread runtime's spawn_blocking
-/// #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-/// async fn test() {
-///     let result = tokio::task::spawn_blocking(|| {
-///         run_blocking(async { 42 })
-///     }).await.unwrap();
-///     assert_eq!(result, 42);
-/// }
-/// ```
+/// - In current-thread runtime (`BlockingError::CurrentThreadRuntime`)
+/// - In unsupported runtime flavor (`BlockingError::UnsupportedRuntimeFlavor`)
+/// - In `LocalSet::run_until()` or `disallow_block_in_place` contexts
+/// - If the future panics
 #[inline]
 pub fn run_blocking<F, T>(future: F) -> T
 where
@@ -433,6 +452,54 @@ mod tests {
     }
 
     // =========================================================================
+    // runtime_id() Tests
+    // =========================================================================
+
+    #[rstest]
+    fn runtime_id_is_consistent() {
+        let id1 = runtime_id();
+        let id2 = runtime_id();
+        assert_eq!(id1, id2);
+    }
+
+    #[rstest]
+    fn runtime_id_is_nonzero() {
+        // The runtime ID should be a positive number (generated from counter starting at 1)
+        let id = runtime_id();
+        assert!(id > 0, "runtime_id should be nonzero");
+    }
+
+    #[rstest]
+    fn runtime_id_same_across_threads() {
+        let main_id = runtime_id();
+        let thread_id = thread::spawn(runtime_id).join().unwrap();
+        assert_eq!(main_id, thread_id);
+    }
+
+    #[rstest]
+    fn runtime_id_does_not_expose_memory_address() {
+        // The runtime ID should NOT be the memory address of the global runtime.
+        // This test ensures we're not leaking ASLR information.
+        let id = runtime_id();
+        let pointer_value = std::ptr::from_ref::<Runtime>(global()) as u64;
+
+        // The ID should NOT equal the pointer address.
+        // This is the primary security requirement - we don't want to leak
+        // memory address information through the runtime ID.
+        assert_ne!(
+            id, pointer_value,
+            "runtime_id should not equal the pointer value (would leak ASLR information)"
+        );
+
+        // Additionally verify that the ID is generated from a counter mechanism
+        // by checking it's a reasonable positive value (counter starts at 1).
+        assert!(
+            id > 0,
+            "runtime_id should be a positive counter value, got {id}"
+        );
+    }
+
+    // =========================================================================
     // handle() Tests
     // =========================================================================
 
@@ -463,6 +530,25 @@ mod tests {
 
         assert_eq!(result1, 1);
         assert_eq!(result2, 2);
+    }
+
+    #[rstest]
+    fn handle_caching_is_thread_local() {
+        // Each thread should have its own cached handle
+        let results: Vec<i32> = (0..4)
+            .map(|i| {
+                thread::spawn(move || {
+                    // First call caches the handle
+                    let obtained_handle = handle();
+                    // Second call should return the cached handle
+                    let _ = handle();
+                    obtained_handle.block_on(async move { i })
+                })
+            })
+            .map(|h| h.join().unwrap())
+            .collect();
+
+        assert_eq!(results, vec![0, 1, 2, 3]);
     }
 
     // =========================================================================

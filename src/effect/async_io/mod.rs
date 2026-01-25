@@ -78,11 +78,104 @@
 //!     assert_eq!(result, 42);
 //! }
 //! ```
+//!
+//! # Evaluation Semantics
+//!
+//! ## Pure Values: Immediate Evaluation
+//!
+//! **Important**: `AsyncIO::pure(value)` represents a pure value that is already computed.
+//! When `fmap` or `flat_map` is applied to a `Pure` state, the transformation function
+//! is executed **immediately** (at composition time), not at await time.
+//!
+//! This is intentional and semantically correct because:
+//! - Pure values have no side effects by definition
+//! - Immediate evaluation avoids unnecessary boxing and deferred dispatch
+//! - The result is equivalent whether evaluated immediately or later
+//!
+//! ```rust,ignore
+//! // The multiplication happens immediately when fmap is called
+//! let async_io = AsyncIO::pure(10).fmap(|x| x * 2);  // Pure(20) is created here
+//! let result = async_io.await;  // Simply unwraps the already-computed value
+//! assert_eq!(result, 20);
+//! ```
+//!
+//! ## Deferred Execution: Use `AsyncIO::new`
+//!
+//! If you need true deferred execution (e.g., the closure performs side effects),
+//! use `AsyncIO::new` instead of `AsyncIO::pure`:
+//!
+//! ```rust,ignore
+//! // WRONG: Side effect in fmap closure - executed immediately!
+//! let async_io = AsyncIO::pure(10).fmap(|x| {
+//!     println!("This prints immediately!");  // Not deferred
+//!     x * 2
+//! });
+//!
+//! // CORRECT: Use AsyncIO::new for side effects
+//! let async_io = AsyncIO::new(|| async {
+//!     println!("This prints when awaited");  // Properly deferred
+//!     10 * 2
+//! });
+//! ```
+//!
+//! ## Guidelines for Choosing Between `pure` and `new`
+//!
+//! | Scenario | Use | Reason |
+//! |----------|-----|--------|
+//! | Wrapping a computed value | `AsyncIO::pure(value)` | No side effects, immediate OK |
+//! | Pure transformation chain | `.fmap(\|x\| transform(x))` | No side effects, immediate OK |
+//! | I/O operations (HTTP, DB, file) | `AsyncIO::new(\|\| async { ... })` | Must be deferred |
+//! | Logging, printing | `AsyncIO::new(\|\| async { ... })` | Must be deferred |
+//! | State mutation | `AsyncIO::new(\|\| async { ... })` | Must be deferred |
+//!
+//! # Performance Characteristics
+//!
+//! ## Pure Optimization (Zero-Allocation)
+//!
+//! When chaining operations starting from `AsyncIO::pure()`, the operations are
+//! evaluated immediately without heap allocations:
+//!
+//! ```rust,ignore
+//! // Zero-allocation chain: Pure values are evaluated immediately
+//! let result = AsyncIO::pure(10)
+//!     .fmap(|x| x * 2)        // Immediate: returns Pure(20)
+//!     .flat_map(|x| AsyncIO::pure(x + 1))  // Immediate: returns Pure(21)
+//!     .await;
+//! assert_eq!(result, 21);
+//! ```
+//!
+//! ## Deferred Execution (Boxed)
+//!
+//! For operations that require deferred execution (e.g., `AsyncIO::new()`),
+//! `Box<dyn Future>` is used for type erasure. This is necessary because:
+//!
+//! 1. Deferred operations inherently require runtime dispatch
+//! 2. The allocation happens once per deferred operation, not per poll
+//! 3. Recursive and dynamic composition requires type erasure
+//!
+//! ```rust,ignore
+//! // Boxed: Deferred execution requires heap allocation
+//! let result = AsyncIO::new(|| async { 10 })
+//!     .flat_map(|x| AsyncIO::new(move || async move { x * 2 }))
+//!     .await;
+//! ```
+//!
+//! ## Design Rationale
+//!
+//! The `AsyncIO` state machine uses `Box<dyn Future>` for deferred operations:
+//!
+//! - **Boundary operations**: `AsyncIO::new()`, `from_future()` for type erasure
+//! - **Recursive composition**: Deep `flat_map` chains from deferred sources
+//! - **Dynamic constructs**: `finally_async`, `on_error`, `retry` operations
+//!
+//! The design goal is: "Pure chains avoid boxing (immediate evaluation);
+//! deferred operations use boxing for flexibility and proper side effect deferral."
 
 // =============================================================================
-// Runtime Sharing Module
+// Submodules
 // =============================================================================
 
+pub mod pool;
 pub mod runtime;
 
 use std::future::Future;
@@ -223,6 +316,17 @@ pin_project! {
             #[pin]
             current: Box<AsyncIO<A>>,
         },
+        // FlatMap state: holds a thunk that produces the continuation AsyncIO.
+        // The continuation is kept as a typed function until execution time.
+        // State transitions: FlatMap -> FlatMapRunning -> Completed
+        FlatMap {
+            continuation_thunk: Option<Box<dyn FnOnce() -> AsyncIO<A> + Send>>,
+        },
+        // FlatMapRunning state: polling the continuation AsyncIO.
+        FlatMapRunning {
+            #[pin]
+            inner: Box<AsyncIO<A>>,
+        },
         /// The computation has completed (used only as a transition state).
         Completed,
     }
@@ -257,13 +361,21 @@ impl<A> Future for AsyncIO<A> {
             match this.state.as_mut().project() {
                 AsyncIOStateProj::Pure { value } => {
                     // Take the value and return it immediately
-                    let result = value.take().expect("Pure value already taken");
+                    // INVARIANT: Pure state should only be polled once before transitioning to Completed
+                    let result = value.take().expect(
+                        "AsyncIO internal error: Pure value was already consumed. \
+                         This indicates the AsyncIO was polled after completion.",
+                    );
                     this.state.set(AsyncIOState::Completed);
                     return Poll::Ready(result);
                 }
                 AsyncIOStateProj::Defer { thunk } => {
                     // Take the thunk, execute it to create the future, and transition to Running
-                    let thunk = thunk.take().expect("Defer thunk already taken");
+                    // INVARIANT: Defer state should only be polled once before transitioning to Running
+                    let thunk = thunk.take().expect(
+                        "AsyncIO internal error: Defer thunk was already consumed. \
+                         This indicates a state machine invariant violation.",
+                    );
                     let future = thunk();
                     this.state.set(AsyncIOState::Running { future });
                     // Loop to poll the newly created future
@@ -286,10 +398,18 @@ impl<A> Future for AsyncIO<A> {
                             use futures::FutureExt;
                             use std::panic::AssertUnwindSafe;
 
-                            let cleanup_thunk =
-                                cleanup.take().expect("Finally cleanup already taken");
-                            let cleanup_future = cleanup_thunk();
-                            // Wrap cleanup future with catch_unwind to capture panics
+                            // INVARIANT: Finally cleanup should only be invoked once
+                            let cleanup_thunk = cleanup.take().expect(
+                                "AsyncIO internal error: Finally cleanup was already consumed. \
+                                 This indicates a state machine invariant violation.",
+                            );
+
+                            // Wrap the cleanup thunk invocation with catch_unwind to capture
+                            // panics that occur before the Future is returned (i.e., synchronous
+                            // panics in the closure body before returning the async block).
+                            let cleanup_invocation_result =
+                                std::panic::catch_unwind(AssertUnwindSafe(cleanup_thunk));
+
                             // Type complexity is acceptable here as this is internal state machine plumbing
                             #[allow(clippy::type_complexity)]
                             let catching_future: Pin<
@@ -297,7 +417,19 @@ impl<A> Future for AsyncIO<A> {
                                     dyn Future<Output = Result<(), Box<dyn std::any::Any + Send>>>
                                         + Send,
                                 >,
-                            > = Box::pin(AssertUnwindSafe(cleanup_future).catch_unwind());
+                            > = match cleanup_invocation_result {
+                                Ok(cleanup_future) => {
+                                    // Wrap cleanup future with catch_unwind to capture panics
+                                    // that occur during the async execution
+                                    Box::pin(AssertUnwindSafe(cleanup_future).catch_unwind())
+                                }
+                                Err(panic_info) => {
+                                    // Cleanup thunk panicked synchronously before returning Future.
+                                    // Create a future that immediately returns the error.
+                                    Box::pin(async move { Err(panic_info) })
+                                }
+                            };
+
                             this.state.set(AsyncIOState::FinallyCleanup {
                                 result: Some(result),
                                 cleanup_future: catching_future,
@@ -329,7 +461,11 @@ impl<A> Future for AsyncIO<A> {
                                 );
                             }
                             // Return the original result regardless of cleanup success/failure
-                            let value = result.take().expect("FinallyCleanup result already taken");
+                            // INVARIANT: FinallyCleanup result should only be consumed once
+                            let value = result.take().expect(
+                                "AsyncIO internal error: FinallyCleanup result was already consumed. \
+                                 This indicates a state machine invariant violation.",
+                            );
                             this.state.set(AsyncIOState::Completed);
                             return Poll::Ready(value);
                         }
@@ -341,7 +477,11 @@ impl<A> Future for AsyncIO<A> {
                     match inner.as_mut().poll(context) {
                         Poll::Ready(result) => {
                             // Inner completed, check if we need to run the handler
-                            let handler_fn = handler.take().expect("OnError handler already taken");
+                            // INVARIANT: OnError handler should only be invoked once
+                            let handler_fn = handler.take().expect(
+                                "AsyncIO internal error: OnError handler was already consumed. \
+                                 This indicates a state machine invariant violation.",
+                            );
                             if let Some(handler_future) = handler_fn(&result) {
                                 // Error case: run the handler
                                 this.state.set(AsyncIOState::OnErrorHandler {
@@ -366,7 +506,11 @@ impl<A> Future for AsyncIO<A> {
                     match handler_future.poll(context) {
                         Poll::Ready(()) => {
                             // Handler completed, return the original result
-                            let value = result.take().expect("OnErrorHandler result already taken");
+                            // INVARIANT: OnErrorHandler result should only be consumed once
+                            let value = result.take().expect(
+                                "AsyncIO internal error: OnErrorHandler result was already consumed. \
+                                 This indicates a state machine invariant violation.",
+                            );
                             this.state.set(AsyncIOState::Completed);
                             return Poll::Ready(value);
                         }
@@ -383,9 +527,11 @@ impl<A> Future for AsyncIO<A> {
                     // Check if we have a result from previous attempt
                     if let Some(result) = last_result.take() {
                         // Check if we should retry
-                        let retry_fn = should_retry
-                            .as_ref()
-                            .expect("Retry should_retry already taken");
+                        // INVARIANT: should_retry function should be available during retry evaluation
+                        let retry_fn = should_retry.as_ref().expect(
+                            "AsyncIO internal error: Retry should_retry was not available. \
+                             This indicates a state machine invariant violation.",
+                        );
                         if !retry_fn(&result) || *current_attempt >= *max_attempts {
                             // Success or exhausted attempts, return result
                             this.state.set(AsyncIOState::Completed);
@@ -394,17 +540,23 @@ impl<A> Future for AsyncIO<A> {
                         // Continue to retry
                     }
 
-                    // Check if we have exhausted all attempts
+                    // INVARIANT: If no result is available, we should have attempts remaining
                     assert!(
                         *current_attempt < *max_attempts,
-                        "Retry: should have result when exhausted"
+                        "AsyncIO internal error: Retry state has no result but attempts are exhausted. \
+                         This indicates a state machine invariant violation."
                     );
 
                     // Create a new attempt
-                    let factory_fn = factory.take().expect("Retry factory already taken");
-                    let retry_fn = should_retry
-                        .take()
-                        .expect("Retry should_retry already taken");
+                    // INVARIANT: Factory and should_retry should be available for new attempts
+                    let factory_fn = factory.take().expect(
+                        "AsyncIO internal error: Retry factory was already consumed. \
+                         This indicates a state machine invariant violation.",
+                    );
+                    let retry_fn = should_retry.take().expect(
+                        "AsyncIO internal error: Retry should_retry was already consumed. \
+                         This indicates a state machine invariant violation.",
+                    );
                     let current = Box::new(factory_fn());
                     let attempt = *current_attempt;
                     let attempts = *max_attempts;
@@ -428,10 +580,15 @@ impl<A> Future for AsyncIO<A> {
                     match current.as_mut().poll(context) {
                         Poll::Ready(result) => {
                             // Attempt completed, transition back to Retry to check result
-                            let factory_fn = factory.take().expect("Retry factory already taken");
-                            let retry_fn = should_retry
-                                .take()
-                                .expect("Retry should_retry already taken");
+                            // INVARIANT: Factory and should_retry should be available for state transition
+                            let factory_fn = factory.take().expect(
+                                "AsyncIO internal error: RetryRunning factory was already consumed. \
+                                 This indicates a state machine invariant violation.",
+                            );
+                            let retry_fn = should_retry.take().expect(
+                                "AsyncIO internal error: RetryRunning should_retry was already consumed. \
+                                 This indicates a state machine invariant violation.",
+                            );
                             let attempt = *current_attempt + 1;
                             let attempts = *max_attempts;
                             this.state.set(AsyncIOState::Retry {
@@ -446,8 +603,34 @@ impl<A> Future for AsyncIO<A> {
                         Poll::Pending => return Poll::Pending,
                     }
                 }
+                AsyncIOStateProj::FlatMap { continuation_thunk } => {
+                    // Take the thunk and execute it to create the continuation AsyncIO
+                    // INVARIANT: FlatMap continuation should only be invoked once
+                    let thunk = continuation_thunk.take().expect(
+                        "AsyncIO internal error: FlatMap continuation_thunk was already consumed. \
+                         This indicates a state machine invariant violation.",
+                    );
+                    let continuation_async_io = thunk();
+                    this.state.set(AsyncIOState::FlatMapRunning {
+                        inner: Box::new(continuation_async_io),
+                    });
+                    // Loop to poll the continuation AsyncIO
+                }
+                AsyncIOStateProj::FlatMapRunning { mut inner } => {
+                    // Poll the continuation AsyncIO
+                    match inner.as_mut().poll(context) {
+                        Poll::Ready(result) => {
+                            this.state.set(AsyncIOState::Completed);
+                            return Poll::Ready(result);
+                        }
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
                 AsyncIOStateProj::Completed => {
-                    panic!("AsyncIO polled after completion");
+                    panic!(
+                        "AsyncIO internal error: AsyncIO was polled after completion. \
+                         Futures should not be polled after returning Poll::Ready."
+                    );
                 }
             }
         }
@@ -552,14 +735,17 @@ impl<A: Send + 'static> AsyncIO<A> {
 // =============================================================================
 
 impl<A: 'static> AsyncIO<A> {
-    /// Executes the `AsyncIO` action and returns a Future.
+    /// Executes the `AsyncIO` action and returns a pinned, boxed Future.
     ///
     /// This method is provided for backward compatibility. Since `AsyncIO`
     /// implements `Future`, you can also directly await it.
     ///
     /// # Note
     ///
-    /// This method returns the underlying Future for awaiting.
+    /// This method internally uses `Box::pin` to return a `Pin<Box<dyn Future>>`.
+    /// This means that even for `AsyncIO::pure`, calling `run_async().await` will
+    /// incur a heap allocation due to the boxing. If you want to avoid this overhead,
+    /// directly await the `AsyncIO` instead (e.g., `AsyncIO::pure(42).await`).
     ///
     /// # Examples
     ///
@@ -617,6 +803,15 @@ impl<A: Send + 'static> AsyncIO<A> {
     ///
     /// This is the `fmap` operation from Functor.
     ///
+    /// # Performance Characteristics
+    ///
+    /// - **Pure optimization**: When `self` is `Pure`, the function is applied
+    ///   immediately and a new `Pure` is returned without any heap allocation.
+    /// - **Hot path**: Chains like `AsyncIO::pure(x).fmap(f).fmap(g)` are evaluated
+    ///   with zero allocations.
+    /// - **Deferred/Async**: When `self` is not `Pure`, the computation is deferred
+    ///   and wrapped in `AsyncIO::new`, which requires boxing for type erasure.
+    ///
     /// # Arguments
     ///
     /// * `function` - A function to apply to the result.
@@ -639,11 +834,13 @@ impl<A: Send + 'static> AsyncIO<A> {
         F: FnOnce(A) -> B + Send + 'static,
         B: Send + 'static,
     {
-        // Pure 値の場合は即時評価（Box アロケーション回避の最適化）
-        match self.state {
-            AsyncIOState::Pure { value: Some(a) } => AsyncIO::pure(function(a)),
-            _ => AsyncIO::new(move || async move {
-                let value = self.await;
+        // Pure: zero-allocation immediate evaluation
+        match self {
+            Self {
+                state: AsyncIOState::Pure { value: Some(a) },
+            } => AsyncIO::pure(function(a)),
+            other => AsyncIO::new(move || async move {
+                let value = other.await;
                 function(value)
             }),
         }
@@ -769,6 +966,16 @@ impl<A: Send + 'static> AsyncIO<A> {
     ///
     /// This is the `bind` operation from Monad.
     ///
+    /// # Performance Characteristics
+    ///
+    /// - **Pure optimization**: When `self` is `Pure`, the continuation is applied
+    ///   immediately without any heap allocation, achieving zero-allocation chaining.
+    /// - **Hot path**: Chains starting from `Pure` (e.g., `AsyncIO::pure(x).flat_map(f).flat_map(g)`)
+    ///   are evaluated without `Box<dyn Future>` allocations.
+    /// - **Deferred/Async**: When `self` is not `Pure`, a `FlatMap` state is created
+    ///   that defers execution. The continuation is boxed for dynamic dispatch, which
+    ///   is necessary for type erasure when the source `AsyncIO` is not immediately available.
+    ///
     /// # Arguments
     ///
     /// * `function` - A function that takes the result and returns a new `AsyncIO` action.
@@ -791,11 +998,26 @@ impl<A: Send + 'static> AsyncIO<A> {
         F: FnOnce(A) -> AsyncIO<B> + Send + 'static,
         B: Send + 'static,
     {
-        AsyncIO::new(move || async move {
-            let value_a = self.await;
-            let async_io_b = function(value_a);
-            async_io_b.await
-        })
+        // Pure: zero-allocation immediate evaluation
+        match self {
+            Self {
+                state: AsyncIOState::Pure { value: Some(a) },
+            } => function(a),
+            other => {
+                // Non-Pure: deferred evaluation via FlatMap state
+                AsyncIO {
+                    state: AsyncIOState::FlatMap {
+                        continuation_thunk: Some(Box::new(move || {
+                            AsyncIO::new(move || async move {
+                                let value_a = other.await;
+                                let async_io_b = function(value_a);
+                                async_io_b.await
+                            })
+                        })),
+                    },
+                }
+            }
+        }
     }
 
     /// Alias for `flat_map`.
@@ -1495,9 +1717,15 @@ impl<A: Send + 'static> AsyncIO<A> {
     ///
     /// # Panic Handling
     ///
-    /// If the cleanup function panics, the panic is caught and logged to stderr.
-    /// The original result from the main computation is still returned, ensuring
-    /// that cleanup panics do not prevent the caller from receiving the expected value.
+    /// Panics in the cleanup function are caught and logged to stderr. The original
+    /// result from the main computation is still returned, ensuring that cleanup
+    /// panics do not prevent the caller from receiving the expected value.
+    ///
+    /// This applies to both:
+    /// - **Synchronous panics**: Panics that occur in the closure body before the
+    ///   Future is returned (e.g., `|| { panic!("sync"); async {} }`)
+    /// - **Asynchronous panics**: Panics that occur during the async execution
+    ///   (e.g., `|| async { panic!("async"); }`)
     #[must_use]
     pub fn finally_async<F, Cleanup>(self, cleanup: F) -> Self
     where
