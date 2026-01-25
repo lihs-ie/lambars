@@ -637,6 +637,107 @@ fn benchmark_nested_three_multi_guard_100k(criterion: &mut Criterion) {
 }
 
 // =============================================================================
+// for_macro_alloc Benchmark (REQ-FOR-MACRO-BENCH-001)
+// =============================================================================
+
+/// REQ-FOR-MACRO-BENCH-001: criterion に for_macro_alloc_bench を追加
+/// アロケーション最適化後の for_! マクロのパフォーマンスを
+/// Vec::with_capacity（最適ベースライン）および map().collect() と比較する
+fn benchmark_for_macro_alloc(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("for_macro_alloc");
+
+    for size in [100, 1_000, 10_000, 100_000] {
+        let data: Vec<i32> = (0..size).collect();
+
+        // for_! マクロ（最適化後）
+        group.bench_function(BenchmarkId::new("for_macro", size), |bencher| {
+            bencher.iter(|| {
+                let result = for_! {
+                    x <= data.clone();
+                    yield black_box(x * 2)
+                };
+                black_box(result)
+            });
+        });
+
+        // 手書き Vec::with_capacity（最適ベースライン）
+        group.bench_function(BenchmarkId::new("vec_with_capacity", size), |bencher| {
+            bencher.iter(|| {
+                let data_clone = data.clone();
+                let mut result = Vec::with_capacity(size as usize);
+                for x in data_clone.iter() {
+                    result.push(black_box(*x * 2));
+                }
+                black_box(result)
+            });
+        });
+
+        // 手書き map().collect()（比較対象）
+        group.bench_function(BenchmarkId::new("map_collect", size), |bencher| {
+            bencher.iter(|| {
+                let result: Vec<_> = data.clone().into_iter().map(|x| black_box(x * 2)).collect();
+                black_box(result)
+            });
+        });
+    }
+
+    group.finish();
+}
+
+// =============================================================================
+// for_macro_alloc_nested Benchmark (REQ-FOR-MACRO-BENCH-001)
+// =============================================================================
+
+/// REQ-FOR-MACRO-BENCH-001: ネスト版 for_macro_alloc_bench
+/// 2レベルネストにおける for_! マクロと flat_map チェーンのパフォーマンスを比較する
+fn benchmark_for_macro_alloc_nested(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("for_macro_alloc_nested");
+
+    for size in [10, 50, 100] {
+        let outer: Vec<i32> = (0..size).collect();
+        let inner: Vec<i32> = (0..size).collect();
+
+        group.bench_function(
+            BenchmarkId::new("for_macro_2level", size * size),
+            |bencher| {
+                let inner_clone = inner.clone();
+                bencher.iter(|| {
+                    let inner_for_iter = inner_clone.clone();
+                    let result = for_! {
+                        x <= outer.clone();
+                        y <= inner_for_iter.clone();
+                        yield black_box(x + y)
+                    };
+                    black_box(result)
+                });
+            },
+        );
+
+        group.bench_function(
+            BenchmarkId::new("flat_map_2level", size * size),
+            |bencher| {
+                let inner_clone = inner.clone();
+                bencher.iter(|| {
+                    let result: Vec<_> = outer
+                        .clone()
+                        .into_iter()
+                        .flat_map(|x| {
+                            inner_clone
+                                .clone()
+                                .into_iter()
+                                .map(move |y| black_box(x + y))
+                        })
+                        .collect();
+                    black_box(result)
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// =============================================================================
 // Criterion Group and Main
 // =============================================================================
 
@@ -654,7 +755,9 @@ criterion_group!(
     benchmark_deep_chain,
     benchmark_nested_three_100k,
     benchmark_nested_three_pattern_guard_100k,
-    benchmark_nested_three_multi_guard_100k
+    benchmark_nested_three_multi_guard_100k,
+    benchmark_for_macro_alloc,
+    benchmark_for_macro_alloc_nested
 );
 
 criterion_main!(benches);

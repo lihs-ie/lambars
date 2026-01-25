@@ -221,6 +221,27 @@
 //! assert_eq!(result, vec![("Alice", 85), ("Alice", 90), ("Alice", 88), ("Bob", 82)]);
 //! ```
 //!
+//! # Breaking Changes (v0.2.0)
+//!
+//! **Clone Requirement**: The `for_!` macro requires `Clone` only for single-level
+//! iterations (e.g., `for_! { x <= xs; yield x * 2 }`). This enables optimal
+//! pre-allocation by computing `size_hint` before consuming the collection.
+//!
+//! Nested iterations and guards do **not** require `Clone`:
+//! - `for_! { x <= xs; y <= ys; yield x + y }` - no Clone needed
+//! - `for_! { x <= xs; if x > 0; yield x }` - no Clone needed
+//!
+//! For single-level iterations over non-Clone collections, use standard iterator
+//! methods instead:
+//!
+//! ```rust,ignore
+//! // Instead of:
+//! // for_! { x <= non_clone_iter; yield x * 2 }
+//!
+//! // Use:
+//! let result: Vec<_> = non_clone_iter.into_iter().map(|x| x * 2).collect();
+//! ```
+//!
 //! # Implementation Details
 //!
 //! The macro uses internal rules for optimized expansion:
@@ -230,12 +251,23 @@
 //! 1. **`@iter`**: Builds a pure iterator chain using `flat_map` for nesting and
 //!    `EitherIter` for guards. No intermediate `Vec` allocations occur during iteration.
 //!
-//! 2. **`collect_from_iter`**: Collects the iterator using its `size_hint()`.
+//! 2. **`@hint`** (internal): Computes `size_hint` for the outermost collection.
+//!    For nested iterations, returns conservative estimates `(0, None)` because
+//!    inner collection expressions may reference outer loop variables that are
+//!    not yet in scope during macro expansion. Used by public entry points for
+//!    pre-allocation when possible.
+//!
+//! 3. **`collect_with_hint`**: Collects the iterator using pre-computed `size_hint`.
 //!    Uses `SmallVec` for small results (<=128 elements) and `Vec::with_capacity`
 //!    for larger results.
 //!
-//! 3. **`@hint`** (internal/testing): Computes `size_hint` by multiplying collection sizes.
-//!    Note: Due to Rust macro limitations, this is not used in public entry points.
+//! For single iterations (`; yield expr` only), the macro uses Clone + `@hint` to
+//! compute exact size_hint for pre-allocation. For nested iterations and guards,
+//! the macro falls back to `collect_from_iter` which uses the iterator's own
+//! size_hint, avoiding unnecessary Clone overhead.
+//!
+//! Note: Due to Rust macro limitations, `@hint` cannot safely reference expressions
+//! that use loop variables (e.g., `if let Some(y) = f(x)` where `x` is a loop variable).
 //!
 //! ## Performance Characteristics
 //!
@@ -243,18 +275,23 @@
 //!   allocating intermediate collections.
 //! - **Single allocation**: Results are collected once at the end.
 //! - **SmallVec optimization**: Small results (<=128 elements) use stack allocation.
+//! - **Pre-allocation**: Clone is used only for single-level iterations to compute
+//!   size_hint before iteration. Nested iterations and guards use `collect_from_iter`
+//!   which avoids Clone overhead.
 //!
 //! ## Expansion Example
 //!
 //! ```rust,ignore
 //! // Single iteration:
 //! for_! { x <= xs; yield x * 2 }
-//! // Expands to:
-//! collect_from_iter(xs.into_iter().map(|x| x * 2))
+//! // Expands to (conceptually):
+//! let __collection = xs;
+//! let (lower, upper) = __collection.clone().into_iter().size_hint();
+//! collect_with_hint(lower, upper, __collection.into_iter().map(|x| x * 2))
 //!
-//! // Nested iteration:
+//! // Nested iteration (no Clone required):
 //! for_! { x <= xs; y <= ys; yield x + y }
-//! // Expands to:
+//! // Expands to (conceptually):
 //! collect_from_iter(
 //!     xs.into_iter().flat_map(|x| {
 //!         ys.into_iter().map(|y| x + y)
@@ -301,6 +338,95 @@ use smallvec::SmallVec;
 
 /// `SmallVec` inline capacity for `for_!` macro (128 elements = 1KB for L1 cache).
 pub const SMALLVEC_INLINE_CAPACITY: usize = 128;
+
+/// Size hint type alias for iterator capacity estimation (REQ-FOR-MACRO-002).
+///
+/// Rust 標準の `Iterator::size_hint()` と同じ形式: `(lower_bound, upper_bound)`.
+/// - `lower_bound`: 最小要素数（保証される下界）
+/// - `upper_bound`: 最大要素数（`None` は不明を示す）
+pub type SizeHint = (usize, Option<usize>);
+
+/// Compose multiple size hints to determine optimal capacity (REQ-FOR-MACRO-002).
+///
+/// This function computes the combined size hint for nested iterations by
+/// multiplying the bounds of each iterator.
+///
+/// **Note**: This function is provided as a utility for manual use. The `for_!`
+/// macro cannot automatically use this function for nested iterations due to
+/// Rust macro limitations (inner collection expressions may reference outer
+/// loop variables that are not in scope during `@hint` evaluation).
+///
+/// # Manual Usage Example
+///
+/// ```rust
+/// use lambars::compose::for_macro::combined_size_hint;
+///
+/// // When you know the sizes in advance
+/// let xs_len = 10;
+/// let ys_len = 20;
+/// let hints = [(xs_len, Some(xs_len)), (ys_len, Some(ys_len))];
+/// let capacity = combined_size_hint(&hints);
+/// // capacity = 200
+/// ```
+///
+/// # Mathematical Definition
+///
+/// - `lower_combined = Π(lower_i)` (using `saturating_mul` to prevent overflow)
+/// - `upper_combined = Π(upper_i)` if all `upper_i` are `Some`, else `None`
+///   (using `checked_mul` to detect overflow)
+/// - `result = upper_combined.unwrap_or(lower_combined)`
+///
+/// # Overflow Handling
+///
+/// - `lower`: Uses `saturating_mul` (overflows to `usize::MAX`)
+/// - `upper`: Uses `checked_mul` (overflows to `None`, falls back to `lower`)
+///
+/// # `flat_map` Composition Strategy
+///
+/// After `flat_map`, the iterator's `size_hint` becomes `(0, None)`.
+/// The `@hint` rules compute hints **before** building the iterator chain,
+/// collecting each collection's hint separately. This avoids the composition
+/// problem and enables pre-allocation.
+///
+/// # Examples
+///
+/// ```
+/// use lambars::compose::for_macro::combined_size_hint;
+///
+/// // Exact bounds: 10 * 20 = 200
+/// let hints = [(10, Some(10)), (20, Some(20))];
+/// assert_eq!(combined_size_hint(&hints), 200);
+///
+/// // Partial bounds: uses lower product
+/// let hints = [(10, None), (20, Some(20))];
+/// assert_eq!(combined_size_hint(&hints), 200);
+///
+/// // Empty slice
+/// assert_eq!(combined_size_hint(&[]), 0);
+/// ```
+#[inline]
+#[must_use]
+pub fn combined_size_hint(hints: &[SizeHint]) -> usize {
+    if hints.is_empty() {
+        return 0;
+    }
+
+    let mut combined_lower: usize = 1;
+    let mut combined_upper: Option<usize> = Some(1);
+
+    for &(lower, upper) in hints {
+        // lower: saturating_mul prevents overflow (saturates to usize::MAX)
+        combined_lower = combined_lower.saturating_mul(lower);
+        // upper: checked_mul detects overflow, any failure results in None
+        combined_upper = match (combined_upper, upper) {
+            (Some(cu), Some(u)) => cu.checked_mul(u),
+            _ => None,
+        };
+    }
+
+    // Safe minimum allocation: use upper if known, otherwise fall back to lower
+    combined_upper.unwrap_or(combined_lower)
+}
 
 /// Either iterator: preserves `size_hint` unlike `flatten` which returns `(0, None)`.
 ///
@@ -388,30 +514,122 @@ where
 /// This value was determined through profiling with typical workloads.
 const MAX_REASONABLE_CAPACITY: usize = 1024 * 1024;
 
-/// Collect iterator with pre-computed `size_hint` for optimized allocation.
+/// L1 cache size used for `SmallVec` threshold calculation (REQ-FOR-MACRO-003).
 ///
-/// Uses `SmallVec` for `upper` <= 128, otherwise `Vec::with_capacity`.
-/// When `upper` is known, it's used for capacity calculation.
-/// When `upper` is `None`, `lower` is used with a minimum of 16.
+/// 32KB is a conservative estimate that works across most modern CPUs.
+/// This is a fixed value to maintain referential transparency.
+const L1_CACHE_SIZE: usize = 32 * 1024;
+
+/// Compute the `SmallVec` usage threshold based on element size (REQ-FOR-MACRO-003).
+///
+/// This is a pure function that determines whether to use `SmallVec` or `Vec`
+/// based on the element type's size relative to L1 cache.
+///
+/// # Design Rationale
+///
+/// - `SmallVec` provides stack allocation benefits for small collections
+/// - However, `into_vec()` incurs copy cost when spilling to heap
+/// - For larger elements, the threshold should be lower to avoid cache misses
+/// - For smaller elements, we can store more items efficiently
+///
+/// # Algorithm
+///
+/// 1. Calculate cache-based threshold: `L1_CACHE_SIZE / element_size`
+/// 2. Cap at `SMALLVEC_INLINE_CAPACITY` to respect `SmallVec`'s inline storage
+/// 3. For zero-sized types, treat as size 1 to avoid division by zero
+///
+/// # Properties
+///
+/// - **Pure function**: Same type always returns same result
+/// - **Referential transparency**: No external state dependencies
+/// - **Compile-time evaluable**: `const fn` for optimization opportunities
+///
+/// # Examples
+///
+/// ```
+/// use lambars::compose::for_macro::compute_smallvec_threshold;
+///
+/// // Smaller elements allow higher threshold
+/// let threshold_i32 = compute_smallvec_threshold::<i32>();
+/// let threshold_i64 = compute_smallvec_threshold::<i64>();
+/// assert!(threshold_i32 >= threshold_i64);
+///
+/// // Threshold is capped at SMALLVEC_INLINE_CAPACITY
+/// let threshold_u8 = compute_smallvec_threshold::<u8>();
+/// assert!(threshold_u8 <= 128);
+/// ```
+#[inline]
+#[must_use]
+pub const fn compute_smallvec_threshold<T>() -> usize {
+    let element_size = std::mem::size_of::<T>();
+    // For ZST (zero-sized types), treat as size 1 to avoid division by zero
+    let effective_size = if element_size == 0 { 1 } else { element_size };
+    let cache_based = L1_CACHE_SIZE / effective_size;
+
+    // Cap at SMALLVEC_INLINE_CAPACITY to respect SmallVec's inline storage limits
+    if cache_based < SMALLVEC_INLINE_CAPACITY {
+        cache_based
+    } else {
+        SMALLVEC_INLINE_CAPACITY
+    }
+}
+
+/// Collect iterator with pre-computed `size_hint` for optimized allocation (REQ-FOR-MACRO-003).
+///
+/// # Strategy
+///
+/// 1. **`upper` is known**: Use `Vec::with_capacity` directly (avoids `SmallVec` → `Vec` copy)
+/// 2. **`upper` is unknown, `lower` == 0**: Use `Vec` (unknown size, avoid stack bloat)
+/// 3. **`upper` is unknown, `lower` > threshold**: Use `Vec::with_capacity` directly
+/// 4. **`upper` is unknown, `0 < lower <= threshold`**: Use `SmallVec` for stack allocation benefits
+///
+/// # Threshold Calculation
+///
+/// The threshold is computed dynamically based on element size using
+/// [`compute_smallvec_threshold`]. Larger elements have lower thresholds
+/// to avoid L1 cache pressure.
+///
+/// # Performance Characteristics
+///
+/// - Eliminates `into_vec()` copy for most cases where `upper` is known
+/// - Falls back to `Vec` when `lower == 0` to avoid stack bloat for unknown sizes
+/// - Preserves `SmallVec` stack allocation benefits only when `lower` is known and small
+/// - Uses `with_capacity` on `SmallVec` to minimize reallocation during `extend`
 #[inline]
 pub fn collect_with_hint<T, I: Iterator<Item = T>>(
     lower: usize,
     upper: Option<usize>,
     iter: I,
 ) -> Vec<T> {
-    let use_smallvec = upper.is_some_and(|u| u <= SMALLVEC_INLINE_CAPACITY);
-
-    if use_smallvec {
-        let capacity = upper.unwrap_or(lower).min(SMALLVEC_INLINE_CAPACITY);
-        let mut buf: SmallVec<[T; SMALLVEC_INLINE_CAPACITY]> = SmallVec::with_capacity(capacity);
-        buf.extend(iter);
-        buf.into_vec()
-    } else {
-        // Use upper if available, otherwise fall back to lower with minimum of 16
-        let capacity = upper.map_or_else(|| lower.max(16), |u| u.min(MAX_REASONABLE_CAPACITY));
+    if let Some(u) = upper {
+        // upper is known: use Vec directly to avoid SmallVec → Vec copy overhead
+        let capacity = u.min(MAX_REASONABLE_CAPACITY);
         let mut result = Vec::with_capacity(capacity);
         result.extend(iter);
         result
+    } else {
+        // upper is unknown: decide based on element-size-aware threshold
+        let threshold = compute_smallvec_threshold::<T>();
+        // lower == 0 means size_hint is (0, None) - typically from filter/flat_map.
+        // In this case, fall back to Vec to avoid:
+        // 1. Stack bloat from SmallVec's inline buffer when actual size is unknown
+        // 2. Potential stack overflow for large element types
+        // 3. SmallVec → Vec copy overhead if the collection grows beyond inline capacity
+        if lower == 0 || lower > threshold {
+            // Unknown size or large collection expected: use Vec directly
+            let capacity = lower.max(16); // Minimum 16 to avoid under-allocation for unknown sizes
+            let mut result = Vec::with_capacity(capacity);
+            result.extend(iter);
+            result
+        } else {
+            // Small collection expected with known lower bound: use SmallVec for stack allocation benefits
+            // Use with_capacity(lower) to minimize reallocation during extend
+            let capacity = lower.max(1);
+            let mut buf: SmallVec<[T; SMALLVEC_INLINE_CAPACITY]> =
+                SmallVec::with_capacity(capacity);
+            buf.extend(iter);
+            buf.into_vec()
+        }
     }
 }
 
@@ -526,54 +744,48 @@ macro_rules! for_ {
     };
 
     (@hint $pattern:ident <= $collection:expr ; yield $result:expr) => {{
-        let __col = &$collection;
-        __col.clone().into_iter().size_hint()
+        // Use clone() for size_hint computation - $collection is already cloned at entry point
+        $collection.into_iter().size_hint()
     }};
 
+    // Nested iteration: returns conservative (0, None) because $rest may contain
+    // expressions that reference the loop variable $pattern, which is not in scope
+    // during @hint evaluation. The outermost collection's size_hint is still used
+    // for pre-allocation in collect_with_hint.
     (@hint $pattern:ident <= $collection:expr ; $($rest:tt)+) => {{
-        let __col = &$collection;
-        let (__outer_lower, __outer_upper) = __col.clone().into_iter().size_hint();
-        let (__inner_lower, __inner_upper) = $crate::for_!(@hint $($rest)+);
-        let __lower = __outer_lower.saturating_mul(__inner_lower);
-        let __upper: Option<usize> = match (__outer_upper, __inner_upper) {
-            (Some(ou), Some(iu)) => ou.checked_mul(iu),
-            _ => None,
-        };
-        (__lower, __upper)
+        // Avoid evaluating $rest as it may reference undefined variables
+        let _ = &$collection; // Ensure $collection is valid but don't consume it
+        (0usize, None)
     }};
 
     (@hint ($($pattern:tt)*) <= $collection:expr ; yield $result:expr) => {{
-        let __col = &$collection;
-        __col.clone().into_iter().size_hint()
+        // Use clone() for size_hint computation - $collection is already cloned at entry point
+        $collection.into_iter().size_hint()
     }};
 
+    // Nested iteration (tuple pattern): returns conservative (0, None) because $rest may contain
+    // expressions that reference the loop variable ($($pattern)*), which is not in scope
+    // during @hint evaluation. The outermost collection's size_hint is still used
+    // for pre-allocation in collect_with_hint.
     (@hint ($($pattern:tt)*) <= $collection:expr ; $($rest:tt)+) => {{
-        let __col = &$collection;
-        let (__outer_lower, __outer_upper) = __col.clone().into_iter().size_hint();
-        let (__inner_lower, __inner_upper) = $crate::for_!(@hint $($rest)+);
-        let __lower = __outer_lower.saturating_mul(__inner_lower);
-        let __upper: Option<usize> = match (__outer_upper, __inner_upper) {
-            (Some(ou), Some(iu)) => ou.checked_mul(iu),
-            _ => None,
-        };
-        (__lower, __upper)
+        // Avoid evaluating $rest as it may reference undefined variables
+        let _ = &$collection; // Ensure $collection is valid but don't consume it
+        (0usize, None)
     }};
 
     (@hint _ <= $collection:expr ; yield $result:expr) => {{
-        let __col = &$collection;
-        __col.clone().into_iter().size_hint()
+        // Use clone() for size_hint computation - $collection is already cloned at entry point
+        $collection.into_iter().size_hint()
     }};
 
+    // Nested iteration (wildcard pattern): returns conservative (0, None) because $rest may contain
+    // expressions that reference loop variables from outer iterations, which are not in scope
+    // during @hint evaluation. The outermost collection's size_hint is still used
+    // for pre-allocation in collect_with_hint.
     (@hint _ <= $collection:expr ; $($rest:tt)+) => {{
-        let __col = &$collection;
-        let (__outer_lower, __outer_upper) = __col.clone().into_iter().size_hint();
-        let (__inner_lower, __inner_upper) = $crate::for_!(@hint $($rest)+);
-        let __lower = __outer_lower.saturating_mul(__inner_lower);
-        let __upper: Option<usize> = match (__outer_upper, __inner_upper) {
-            (Some(ou), Some(iu)) => ou.checked_mul(iu),
-            _ => None,
-        };
-        (__lower, __upper)
+        // Avoid evaluating $rest as it may reference undefined variables
+        let _ = &$collection; // Ensure $collection is valid but don't consume it
+        (0usize, None)
     }};
 
     // Guard: lower bound is 0 (filter may remove all)
@@ -582,11 +794,11 @@ macro_rules! for_ {
         (0usize, __inner_upper)
     }};
 
-    // Pattern guard: We cannot compute the inner size_hint because the pattern
-    // may bind variables that are used in $rest. Return conservative (0, None).
+    // Pattern guard: We cannot compute the inner size_hint because:
+    // 1. The pattern may bind variables that are used in $rest
+    // 2. $expr may reference loop variables that are not yet in scope at @hint evaluation time
+    // Return conservative (0, None) without referencing $expr at all.
     (@hint if let $pattern:pat = $expr:expr ; $($rest:tt)+) => {{
-        let _ = &$expr; // Ensure $expr is valid but don't evaluate it
-        let _ = ::core::marker::PhantomData::<fn() -> _>;
         (0usize, None)
     }};
 
@@ -709,30 +921,84 @@ macro_rules! for_ {
     }};
 
     // =========================================================================
-    // Public entry points - uses @hint + @iter + collect_with_hint
-    // Pre-computes size_hint at macro expansion time, then passes to collect_with_hint
+    // Public entry points
+    //
+    // Strategy:
+    // - Single iteration (`; yield expr`): Clone + @hint + collect_with_hint
+    //   for optimal pre-allocation
+    // - Nested iteration / guards (`$($rest)+`): collect_from_iter (no Clone)
+    //   because @hint returns (0, None) for nested cases, making Clone wasteful
+    //
+    // BREAKING CHANGE (v0.2.0): Clone is required only for single-level iterations.
+    // See module documentation for details.
     // =========================================================================
 
     (yield $result:expr) => {
         vec![$result]
     };
 
-    // Identifier pattern: use collect_from_iter to avoid variable scoping issues.
-    // The @hint rules cannot safely evaluate expressions that reference loop variables.
+    // -------------------------------------------------------------------------
+    // Identifier pattern
+    // -------------------------------------------------------------------------
+
+    // Single iteration with yield: Clone + @hint for pre-allocation
+    ($pattern:ident <= $collection:expr ; yield $result:expr) => {{
+        let __collection = $collection;
+        let (__lower, __upper) = $crate::for_!(@hint $pattern <= __collection.clone() ; yield $result);
+        $crate::compose::for_macro::collect_with_hint(
+            __lower,
+            __upper,
+            $crate::for_!(@iter $pattern <= __collection ; yield $result)
+        )
+    }};
+
+    // Nested iteration: use collect_from_iter to avoid unnecessary Clone.
+    // @hint would return (0, None) for nested cases due to macro limitations,
+    // so Clone would be wasted.
     ($pattern:ident <= $collection:expr ; $($rest:tt)+) => {{
         $crate::compose::for_macro::collect_from_iter(
             $crate::for_!(@iter $pattern <= $collection ; $($rest)+)
         )
     }};
 
-    // Tuple pattern: use collect_from_iter to avoid variable scoping issues.
+    // -------------------------------------------------------------------------
+    // Tuple pattern
+    // -------------------------------------------------------------------------
+
+    // Single iteration with yield: Clone + @hint for pre-allocation
+    (($($pattern:tt)*) <= $collection:expr ; yield $result:expr) => {{
+        let __collection = $collection;
+        let (__lower, __upper) = $crate::for_!(@hint ($($pattern)*) <= __collection.clone() ; yield $result);
+        $crate::compose::for_macro::collect_with_hint(
+            __lower,
+            __upper,
+            $crate::for_!(@iter ($($pattern)*) <= __collection ; yield $result)
+        )
+    }};
+
+    // Nested iteration: use collect_from_iter to avoid unnecessary Clone.
     (($($pattern:tt)*) <= $collection:expr ; $($rest:tt)+) => {{
         $crate::compose::for_macro::collect_from_iter(
             $crate::for_!(@iter ($($pattern)*) <= $collection ; $($rest)+)
         )
     }};
 
-    // Wildcard pattern: use collect_from_iter to avoid variable scoping issues.
+    // -------------------------------------------------------------------------
+    // Wildcard pattern
+    // -------------------------------------------------------------------------
+
+    // Single iteration with yield: Clone + @hint for pre-allocation
+    (_ <= $collection:expr ; yield $result:expr) => {{
+        let __collection = $collection;
+        let (__lower, __upper) = $crate::for_!(@hint _ <= __collection.clone() ; yield $result);
+        $crate::compose::for_macro::collect_with_hint(
+            __lower,
+            __upper,
+            $crate::for_!(@iter _ <= __collection ; yield $result)
+        )
+    }};
+
+    // Nested iteration: use collect_from_iter to avoid unnecessary Clone.
     (_ <= $collection:expr ; $($rest:tt)+) => {{
         $crate::compose::for_macro::collect_from_iter(
             $crate::for_!(@iter _ <= $collection ; $($rest)+)
@@ -1103,7 +1369,10 @@ mod tests {
         assert_eq!(result, vec![Some(1), Some(2)]);
     }
 
-    use super::{EitherIter, SMALLVEC_INLINE_CAPACITY, collect_from_iter, collect_with_hint};
+    use super::{
+        EitherIter, SMALLVEC_INLINE_CAPACITY, collect_from_iter, collect_with_hint,
+        combined_size_hint, compute_smallvec_threshold,
+    };
 
     #[rstest]
     fn test_either_iter_left_size_hint() {
@@ -1251,28 +1520,37 @@ mod tests {
 
     #[rstest]
     fn test_hint_nested_iteration() {
+        // Nested iteration: inner collection may reference outer loop variables,
+        // so @hint conservatively returns (0, None).
+        // Note: ys is referenced in macro but not evaluated at runtime due to conservative path.
         let xs = vec![1, 2, 3];
+        #[allow(unused_variables, clippy::useless_vec)]
         let ys = vec![10, 20, 30, 40];
-        let (lower, upper) = for_!(@hint x <= xs; y <= ys; yield x + y);
-        assert_eq!(lower, 12);
-        assert_eq!(upper, Some(12));
+        let (lower, upper): (usize, Option<usize>) = for_!(@hint x <= xs; y <= ys; yield x + y);
+        assert_eq!(lower, 0);
+        assert_eq!(upper, None);
     }
 
     #[rstest]
     fn test_hint_with_guard() {
+        // Guard after iteration: @hint returns (0, None) because rest contains more than yield
         let xs = vec![1, 2, 3, 4, 5];
-        let (lower, upper) = for_!(@hint x <= xs; if x % 2 == 0; yield x);
+        let (lower, upper): (usize, Option<usize>) = for_!(@hint x <= xs; if x % 2 == 0; yield x);
         assert_eq!(lower, 0);
-        assert_eq!(upper, Some(5));
+        assert_eq!(upper, None);
     }
 
     #[rstest]
     fn test_hint_nested_with_guard() {
+        // Nested iteration with guard: @hint returns (0, None) conservatively.
+        // Note: ys is referenced in macro but not evaluated at runtime due to conservative path.
         let xs = vec![1, 2, 3];
+        #[allow(unused_variables, clippy::useless_vec)]
         let ys = vec![10, 20];
-        let (lower, upper) = for_!(@hint x <= xs; y <= ys; if (x + y) % 2 == 0; yield x + y);
+        let (lower, upper): (usize, Option<usize>) =
+            for_!(@hint x <= xs; y <= ys; if (x + y) % 2 == 0; yield x + y);
         assert_eq!(lower, 0);
-        assert_eq!(upper, Some(6));
+        assert_eq!(upper, None);
     }
 
     // Note: @hint tests with pattern guards that reference loop variables are removed
@@ -1416,5 +1694,316 @@ mod tests {
         );
         let result: Vec<_> = iter.collect();
         assert_eq!(result, vec![12, 22]);
+    }
+
+    // =========================================================================
+    // combined_size_hint tests (REQ-FOR-MACRO-002)
+    // =========================================================================
+
+    #[rstest]
+    fn test_combined_size_hint_exact() {
+        let hints = [(10, Some(10)), (20, Some(20))];
+        assert_eq!(combined_size_hint(&hints), 200);
+    }
+
+    #[rstest]
+    fn test_combined_size_hint_partial() {
+        // When upper is None, uses lower product
+        let hints = [(10, None), (20, Some(20))];
+        assert_eq!(combined_size_hint(&hints), 200);
+    }
+
+    #[rstest]
+    fn test_combined_size_hint_all_none() {
+        let hints = [(10, None), (20, None)];
+        assert_eq!(combined_size_hint(&hints), 200);
+    }
+
+    #[rstest]
+    fn test_combined_size_hint_single() {
+        let hints = [(42, Some(42))];
+        assert_eq!(combined_size_hint(&hints), 42);
+    }
+
+    #[rstest]
+    fn test_combined_size_hint_empty() {
+        assert_eq!(combined_size_hint(&[]), 0);
+    }
+
+    #[rstest]
+    fn test_combined_size_hint_overflow_upper() {
+        // upper overflow: falls back to lower
+        let hints = [(usize::MAX, Some(usize::MAX)), (2, Some(2))];
+        let result = combined_size_hint(&hints);
+        // lower saturates to usize::MAX, upper overflows to None
+        assert_eq!(result, usize::MAX);
+    }
+
+    #[rstest]
+    fn test_combined_size_hint_overflow_lower() {
+        // lower saturates to usize::MAX
+        let hints = [(usize::MAX, None), (usize::MAX, None)];
+        assert_eq!(combined_size_hint(&hints), usize::MAX);
+    }
+
+    #[rstest]
+    fn test_combined_size_hint_zero_lower_with_known_upper() {
+        // Guard case: lower = 0 but upper is known, so use upper product
+        // combined_lower = 0 * 20 = 0
+        // combined_upper = Some(10 * 20) = Some(200)
+        // Returns 200 because upper is known and provides better pre-allocation hint
+        let hints = [(0, Some(10)), (20, Some(20))];
+        assert_eq!(combined_size_hint(&hints), 200);
+    }
+
+    #[rstest]
+    fn test_combined_size_hint_zero_lower_with_unknown_upper() {
+        // Guard case: lower = 0 and upper is unknown
+        // combined_lower = 0 * 20 = 0
+        // combined_upper = None (because first hint has None)
+        // Falls back to lower (0)
+        let hints = [(0, None), (20, Some(20))];
+        assert_eq!(combined_size_hint(&hints), 0);
+    }
+
+    #[rstest]
+    fn test_combined_size_hint_is_pure_function() {
+        // Same input always returns same output (referential transparency)
+        let hints = [(5, Some(5)), (10, Some(10))];
+        assert_eq!(combined_size_hint(&hints), combined_size_hint(&hints));
+        assert_eq!(combined_size_hint(&hints), 50);
+    }
+
+    #[rstest]
+    fn test_combined_size_hint_three_levels() {
+        // 5 * 5 * 5 = 125
+        let hints = [(5, Some(5)), (5, Some(5)), (5, Some(5))];
+        assert_eq!(combined_size_hint(&hints), 125);
+    }
+
+    // =========================================================================
+    // compute_smallvec_threshold tests (REQ-FOR-MACRO-003)
+    // =========================================================================
+
+    #[rstest]
+    fn test_smallvec_threshold_varies_by_element_size() {
+        // Smaller elements should have higher or equal threshold
+        let threshold_i32 = compute_smallvec_threshold::<i32>();
+        let threshold_i64 = compute_smallvec_threshold::<i64>();
+        assert!(
+            threshold_i32 >= threshold_i64,
+            "i32 threshold ({threshold_i32}) should be >= i64 threshold ({threshold_i64})"
+        );
+    }
+
+    #[rstest]
+    fn test_threshold_is_pure_function() {
+        // Same type always returns same result (referential transparency)
+        assert_eq!(
+            compute_smallvec_threshold::<i32>(),
+            compute_smallvec_threshold::<i32>()
+        );
+        assert_eq!(
+            compute_smallvec_threshold::<String>(),
+            compute_smallvec_threshold::<String>()
+        );
+        assert_eq!(
+            compute_smallvec_threshold::<u8>(),
+            compute_smallvec_threshold::<u8>()
+        );
+    }
+
+    #[rstest]
+    fn test_threshold_capped_at_inline_capacity() {
+        // For small elements like u8, threshold should be capped at SMALLVEC_INLINE_CAPACITY
+        let threshold_u8 = compute_smallvec_threshold::<u8>();
+        assert!(
+            threshold_u8 <= SMALLVEC_INLINE_CAPACITY,
+            "u8 threshold ({threshold_u8}) should be <= SMALLVEC_INLINE_CAPACITY ({SMALLVEC_INLINE_CAPACITY})"
+        );
+    }
+
+    #[rstest]
+    fn test_threshold_for_large_elements() {
+        // For large elements, threshold should be based on cache size
+        // A 1KB struct: 32KB / 1024 = 32
+        #[repr(C)]
+        struct LargeStruct {
+            _data: [u8; 1024],
+        }
+        let threshold = compute_smallvec_threshold::<LargeStruct>();
+        assert_eq!(threshold, 32, "1KB element should have threshold of 32");
+    }
+
+    #[rstest]
+    fn test_threshold_for_zst() {
+        // Zero-sized types should not cause division by zero
+        let threshold = compute_smallvec_threshold::<()>();
+        assert!(
+            threshold > 0,
+            "ZST threshold should be positive (computed as L1_CACHE_SIZE / 1)"
+        );
+    }
+
+    #[rstest]
+    fn test_into_vec_preserves_capacity() {
+        // Verify SmallVec with_capacity + into_vec preserves capacity
+        use smallvec::SmallVec;
+        let mut smallvec: SmallVec<[i32; 128]> = SmallVec::with_capacity(50);
+        smallvec.extend(0..50);
+        let vec = smallvec.into_vec();
+        assert!(
+            vec.capacity() >= 50,
+            "Vec capacity ({}) should be >= 50",
+            vec.capacity()
+        );
+    }
+
+    // =========================================================================
+    // collect_with_hint behavior tests (REQ-FOR-MACRO-003)
+    // =========================================================================
+
+    #[rstest]
+    fn test_collect_with_hint_known_upper_uses_vec_directly() {
+        // When upper is known, should use Vec directly (no SmallVec overhead)
+        let result = collect_with_hint(10, Some(10), 0..10);
+        assert_eq!(result.len(), 10);
+        // Verify capacity is at least what we requested
+        assert!(
+            result.capacity() >= 10,
+            "Vec capacity ({}) should be >= 10",
+            result.capacity()
+        );
+    }
+
+    #[rstest]
+    fn test_collect_with_hint_unknown_upper_above_threshold() {
+        // When lower > threshold, should use Vec directly
+        let threshold = compute_smallvec_threshold::<i32>();
+        let count = threshold + 100;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let result = collect_with_hint(count, None, 0..count as i32);
+        assert_eq!(result.len(), count);
+    }
+
+    #[rstest]
+    fn test_collect_with_hint_unknown_upper_below_threshold() {
+        // When lower <= threshold and upper is None, should use SmallVec path
+        let result = collect_with_hint(10, None, 0..10);
+        assert_eq!(result.len(), 10);
+    }
+
+    #[rstest]
+    fn test_collect_with_hint_respects_max_capacity() {
+        // Verify MAX_REASONABLE_CAPACITY is respected
+        let large_upper = 10_000_000usize;
+        let result: Vec<i32> = collect_with_hint(0, Some(large_upper), std::iter::empty());
+        // Capacity should be capped at MAX_REASONABLE_CAPACITY (1MB)
+        assert!(
+            result.capacity() <= 1024 * 1024,
+            "capacity ({}) should be <= 1MB",
+            result.capacity()
+        );
+    }
+
+    #[rstest]
+    fn test_collect_with_hint_empty_with_zero_lower() {
+        // Edge case: lower = 0, upper = None
+        let result: Vec<i32> = collect_with_hint(0, None, std::iter::empty());
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_collect_with_hint_large_elements() {
+        // For large elements, threshold is lower
+        #[derive(Clone)]
+        #[repr(C)]
+        struct LargeStruct {
+            _data: [u8; 512],
+        }
+        // threshold for 512-byte struct: 32KB / 512 = 64
+        let count = 100; // Above threshold, should use Vec directly
+        let result: Vec<LargeStruct> = collect_with_hint(
+            count,
+            None,
+            (0..count).map(|_| LargeStruct { _data: [0; 512] }),
+        );
+        assert_eq!(result.len(), count);
+    }
+
+    // =========================================================================
+    // lower == 0 fallback to Vec tests (Codex review issue fix)
+    // =========================================================================
+
+    #[rstest]
+    fn test_collect_with_hint_zero_lower_uses_vec_path() {
+        // When lower == 0 and upper is None (typical for filter/flat_map),
+        // should use Vec to avoid stack bloat from SmallVec's inline buffer.
+        // Minimum capacity should be 16 to avoid under-allocation.
+        let result: Vec<i32> = collect_with_hint(0, None, std::iter::empty());
+        assert!(result.is_empty());
+        // Capacity should be at least 16 (minimum for unknown size)
+        assert!(
+            result.capacity() >= 16,
+            "capacity ({}) should be >= 16 for unknown size",
+            result.capacity()
+        );
+    }
+
+    #[rstest]
+    fn test_collect_with_hint_zero_lower_with_actual_elements() {
+        // When lower == 0 but iterator has elements (e.g., filter that passes some)
+        let iter = (0..50).filter(|x| x % 2 == 0); // size_hint: (0, Some(50))
+        let (lower, _upper) = iter.size_hint();
+        assert_eq!(lower, 0, "filter's lower bound should be 0");
+
+        let result: Vec<i32> = collect_with_hint(0, None, (0..50).filter(|x| x % 2 == 0));
+        assert_eq!(result.len(), 25);
+    }
+
+    #[rstest]
+    fn test_collect_with_hint_nonzero_lower_below_threshold_uses_smallvec() {
+        // When lower > 0 and lower <= threshold, should use SmallVec path
+        // This is the only case where SmallVec is used
+        let result = collect_with_hint(10, None, 0..10);
+        assert_eq!(result.len(), 10);
+        // This test verifies the path is taken (SmallVec is used internally)
+        // We can't directly test internal implementation, but verify correctness
+    }
+
+    #[rstest]
+    fn test_collect_with_hint_zero_lower_large_elements_avoids_stack_bloat() {
+        // For large elements with lower == 0, should use Vec to avoid potential stack overflow
+        #[derive(Clone)]
+        #[repr(C)]
+        struct VeryLargeStruct {
+            _data: [u8; 4096], // 4KB per element
+        }
+        // With SmallVec<[VeryLargeStruct; 128]>, this would be 512KB on stack!
+        // Using Vec avoids this issue.
+        let result: Vec<VeryLargeStruct> = collect_with_hint(0, None, std::iter::empty());
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_for_macro_with_filter_uses_vec_path() {
+        // for_! with filter generates size_hint (0, None), which should use Vec path
+        let result = for_! {
+            x <= vec![1, 2, 3, 4, 5];
+            if x % 2 == 0;
+            yield x
+        };
+        assert_eq!(result, vec![2, 4]);
+    }
+
+    #[rstest]
+    fn test_for_macro_nested_uses_vec_path() {
+        // Nested for_! generates size_hint (0, None), which should use Vec path
+        let result = for_! {
+            x <= vec![1, 2];
+            y <= vec![10, 20];
+            yield x + y
+        };
+        assert_eq!(result, vec![11, 21, 12, 22]);
     }
 }
