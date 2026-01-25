@@ -827,6 +827,52 @@ echo "" >> "${SUMMARY_FILE}"
 # Generate meta.json
 # =============================================================================
 
+# Helper: Convert latency string (e.g., "12.5ms", "500us", "1.2s") to milliseconds number
+# Returns empty string if input is empty or cannot be parsed
+parse_latency_to_ms() {
+    local value="$1"
+
+    if [[ -z "${value}" || "${value}" == "0" ]]; then
+        echo ""
+        return
+    fi
+
+    local num unit
+    num=$(echo "${value}" | sed 's/[^0-9.]//g')
+    unit=$(echo "${value}" | sed 's/[0-9.]//g')
+
+    if [[ -z "${num}" ]]; then
+        echo ""
+        return
+    fi
+
+    case "${unit}" in
+        us) awk "BEGIN {printf \"%.4f\", ${num} / 1000}" ;;
+        ms) echo "${num}" ;;
+        s)  awk "BEGIN {printf \"%.4f\", ${num} * 1000}" ;;
+        *)  echo "${num}" ;;
+    esac
+}
+
+# Helper: Format latency value for JSON (number or null)
+# v3: Use null for missing latency values, NOT 0
+format_latency_json() {
+    local value="$1"
+
+    # Empty or non-numeric values become null
+    if [[ -z "${value}" ]]; then
+        echo "null"
+        return
+    fi
+
+    # Use awk for numeric comparison (handles 0, 0.0, 0.00, 0.0000, etc.)
+    if awk -v val="${value}" 'BEGIN { exit (val + 0 == 0) ? 0 : 1 }'; then
+        echo "null"
+    else
+        echo "${value}"
+    fi
+}
+
 generate_meta_json() {
     local result_file="$1"
     local script_name="$2"
@@ -836,13 +882,28 @@ generate_meta_json() {
     # Parse wrk output for metrics
     # Note: Use anchored patterns to avoid matching percentages in other contexts
     # (e.g., "75.99%" in Latency line should not match "99%" pattern)
-    local rps avg_latency p50 p95 p99 error_rate total_requests
+    local rps avg_latency_raw p50_raw p95_raw p99_raw total_requests
     rps=$(grep "Requests/sec:" "${result_file}" 2>/dev/null | awk '{print $2}' || echo "0")
-    avg_latency=$(grep "Latency" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "0")
-    p50=$(grep -E "^[[:space:]]+50%" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "0")
-    p95=$(grep -E "^[[:space:]]+95%" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "0")
-    p99=$(grep -E "^[[:space:]]+99%" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "0")
-    total_requests=$(grep "requests in" "${result_file}" 2>/dev/null | awk '{print $1}' || echo "0")
+    avg_latency_raw=$(grep "Latency" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
+    p50_raw=$(grep -E "^[[:space:]]+50%" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
+    p95_raw=$(grep -E "^[[:space:]]+95%" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
+    p99_raw=$(grep -E "^[[:space:]]+99%" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
+    total_requests=$(grep -m1 "requests in" "${result_file}" 2>/dev/null | awk '{print $1}' || echo "0")
+    [[ ! "${total_requests}" =~ ^[0-9]+$ ]] && total_requests=0
+
+    # v3: Convert latency strings to milliseconds numbers
+    local avg_latency_ms p50_ms p95_ms p99_ms
+    avg_latency_ms=$(parse_latency_to_ms "${avg_latency_raw}")
+    p50_ms=$(parse_latency_to_ms "${p50_raw}")
+    p95_ms=$(parse_latency_to_ms "${p95_raw}")
+    p99_ms=$(parse_latency_to_ms "${p99_raw}")
+
+    # v3: Format for JSON (null for missing values)
+    local avg_latency_json p50_json p95_json p99_json
+    avg_latency_json=$(format_latency_json "${avg_latency_ms}")
+    p50_json=$(format_latency_json "${p50_ms}")
+    p95_json=$(format_latency_json "${p95_ms}")
+    p99_json=$(format_latency_json "${p99_ms}")
 
     # Parse socket errors breakdown
     local connect_err=0 read_err=0 write_err=0 timeout_err=0 socket_errors=0
@@ -857,18 +918,22 @@ generate_meta_json() {
     # Parse HTTP errors from wrk output ("Non-2xx or 3xx responses: N")
     local http_errors_from_wrk=0
     if grep -q "Non-2xx or 3xx responses:" "${result_file}" 2>/dev/null; then
-        http_errors_from_wrk=$(grep "Non-2xx or 3xx responses:" "${result_file}" | awk '{print $NF}' 2>/dev/null || echo "0")
+        http_errors_from_wrk=$(grep -m1 "Non-2xx or 3xx responses:" "${result_file}" | awk '{print $NF}' 2>/dev/null || echo "0")
+        [[ ! "${http_errors_from_wrk}" =~ ^[0-9]+$ ]] && http_errors_from_wrk=0
     fi
 
-    # Calculate total errors (socket + HTTP)
-    local total_errors=$((socket_errors + http_errors_from_wrk))
+    # HTTP error counts: initialized to wrk values, updated from lua_metrics if available
+    # wrk doesn't distinguish 4xx vs 5xx, so http_4xx/http_5xx remain 0 unless lua_metrics provides them
+    local http_4xx=0 http_5xx=0 http_status_total=${http_errors_from_wrk}
 
-    # Calculate error rate from total errors
-    if [[ "${total_requests}" -gt 0 ]]; then
-        error_rate=$(echo "scale=4; ${total_errors} / ${total_requests}" | bc 2>/dev/null || echo "0")
-    else
-        error_rate="0"
-    fi
+    # v3: http_status distribution (from lua_metrics.json)
+    local http_status_json="{}"
+
+    # v3: retries count (from lua_metrics.json)
+    local retries=0
+
+    # v3: error_rate will be calculated after lua_metrics.json is processed
+    local error_rate
 
     # Collect environment information
     local os_name cpu_cores memory_gb rust_version
@@ -885,10 +950,6 @@ generate_meta_json() {
     # Default cache metrics (will be updated from lua_metrics if available)
     local cache_hit_rate="null" cache_misses="null" cache_hits="null"
 
-    # HTTP error counts: start with wrk total, update from lua_metrics if available
-    # wrk doesn't distinguish 4xx vs 5xx, so we track them separately
-    local http_4xx=0 http_5xx=0 http_status_total="${http_errors_from_wrk}"
-
     # Check for profiling files
     local perf_data_path="null" flamegraph_path="null" pprof_path="null"
     if [[ "${PROFILE_MODE}" == "true" ]]; then
@@ -897,41 +958,82 @@ generate_meta_json() {
         [[ -f "${RESULTS_DIR}/pprof.pb.gz" ]] && pprof_path="\"pprof.pb.gz\""
     fi
 
-    # Try to read lua_metrics.json if it exists (overrides wrk defaults)
-    if [[ -f "${lua_metrics_file}" ]] && command -v jq &> /dev/null; then
+    # Try to read lua_metrics.json if it exists and is valid JSON
+    if [[ -f "${lua_metrics_file}" ]] && command -v jq &> /dev/null && jq -e . "${lua_metrics_file}" &>/dev/null; then
+        # Check if errors.status is an object with 4xx or 5xx keys (v3 schema)
+        if jq -e '.errors.status | type == "object" and (has("4xx") or has("5xx"))' "${lua_metrics_file}" &>/dev/null; then
+            # Extract values and validate they are integers
+            local lua_4xx_raw lua_5xx_raw
+            lua_4xx_raw=$(jq -r '.errors.status["4xx"] // 0' "${lua_metrics_file}" 2>/dev/null)
+            lua_5xx_raw=$(jq -r '.errors.status["5xx"] // 0' "${lua_metrics_file}" 2>/dev/null)
+
+            # Convert to integer (bash truncates decimals, handles non-numeric as 0)
+            local lua_4xx="${lua_4xx_raw%%.*}"
+            local lua_5xx="${lua_5xx_raw%%.*}"
+            [[ ! "${lua_4xx}" =~ ^[0-9]+$ ]] && lua_4xx=0
+            [[ ! "${lua_5xx}" =~ ^[0-9]+$ ]] && lua_5xx=0
+
+            local lua_total=$((lua_4xx + lua_5xx))
+
+            # Use lua_metrics breakdown only if it has non-zero errors
+            # Otherwise keep wrk fallback (handles multi-thread aggregation issues)
+            if [[ ${lua_total} -gt 0 ]]; then
+                http_4xx="${lua_4xx}"
+                http_5xx="${lua_5xx}"
+                http_status_total=${lua_total}
+            fi
+
+            # v3: Get http_status distribution from lua_metrics
+            http_status_json=$(jq -c '.http_status // {}' "${lua_metrics_file}" 2>/dev/null || echo "{}")
+        fi
+
         cache_hit_rate=$(jq -r '.cache.hit_rate // null' "${lua_metrics_file}" 2>/dev/null || echo "null")
         cache_misses=$(jq -r '.cache.cache_misses // null' "${lua_metrics_file}" 2>/dev/null || echo "null")
         cache_hits=$(jq -r '.cache.cache_hits // null' "${lua_metrics_file}" 2>/dev/null || echo "null")
-        # Override HTTP error counts from lua_metrics if available
-        local lua_4xx lua_5xx
-        lua_4xx=$(jq -r '.errors.status["4xx"] // 0' "${lua_metrics_file}" 2>/dev/null || echo "0")
-        lua_5xx=$(jq -r '.errors.status["5xx"] // 0' "${lua_metrics_file}" 2>/dev/null || echo "0")
-        # Only use lua_metrics values if they're non-zero (more accurate breakdown)
-        if [[ "${lua_4xx}" != "0" || "${lua_5xx}" != "0" ]]; then
-            http_4xx="${lua_4xx}"
-            http_5xx="${lua_5xx}"
-            http_status_total=$((lua_4xx + lua_5xx))
-        fi
+
+        # v3: Get retries count from lua_metrics
+        local retries_raw
+        retries_raw=$(jq -r '.retries // 0' "${lua_metrics_file}" 2>/dev/null || echo "0")
+        retries="${retries_raw%%.*}"
+        [[ ! "${retries}" =~ ^[0-9]+$ ]] && retries=0
+    fi
+
+    # v3: Calculate error_rate = HTTP errors (4xx+5xx) / total_requests
+    # http_status_total contains:
+    #   - lua_metrics 4xx+5xx breakdown if available
+    #   - wrk's "Non-2xx or 3xx responses" as fallback (also HTTP errors only)
+    # Socket errors are reported separately in errors.socket_errors
+    if [[ "${total_requests}" -gt 0 ]]; then
+        error_rate=$(awk -v errors="${http_status_total}" -v total="${total_requests}" 'BEGIN {printf "%.6f", errors / total}')
+    else
+        error_rate="null"
     fi
 
     # Get wrk output filename
     local wrk_output_filename
     wrk_output_filename=$(basename "${result_file}")
 
-    # Generate meta.json with extended schema (version 2.0)
+    # v3: Parse duration to seconds (remove 's' suffix)
+    local duration_seconds
+    duration_seconds=$(echo "${DURATION}" | sed 's/s$//')
+    if [[ -z "${duration_seconds}" || ! "${duration_seconds}" =~ ^[0-9]+$ ]]; then
+        duration_seconds=30
+    fi
+
+    # Generate meta.json with schema v3.0
     cat > "${meta_file}" << EOF
 {
-  "version": "2.0",
+  "version": "3.0",
   "scenario": {
     "name": "${SCENARIO_NAME:-${script_name}}",
-    "storage_mode": "${STORAGE_MODE:-unknown}",
-    "cache_mode": "${CACHE_MODE:-unknown}",
+    "storage_mode": "${STORAGE_MODE:-in_memory}",
+    "cache_mode": "${CACHE_MODE:-none}",
     "data_scale": "${DATA_SCALE:-1e4}",
     "payload_variant": "${PAYLOAD:-medium}",
     "rps_profile": "${RPS_PROFILE:-steady}",
-    "hit_rate": ${HIT_RATE:-50},
+    "hit_rate": ${HIT_RATE:-null},
     "cache_strategy": "${CACHE_STRATEGY:-read-through}",
-    "fail_injection": ${FAIL_RATE:-0},
+    "fail_injection": ${FAIL_RATE:-null},
     "retry": ${RETRY:-false},
     "endpoint": "${ENDPOINT:-mixed}"
   },
@@ -939,21 +1041,26 @@ generate_meta_json() {
     "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
     "threads": ${THREADS},
     "connections": ${CONNECTIONS},
-    "duration": "${DURATION}",
-    "workers": ${WORKERS:-4},
-    "pool_sizes": ${POOL_SIZES:-24},
-    "database_pool_size": ${DATABASE_POOL_SIZE:-16},
-    "redis_pool_size": ${REDIS_POOL_SIZE:-8},
+    "duration_seconds": ${duration_seconds},
+    "workers": ${WORKERS:-null},
+    "pool_sizes": ${POOL_SIZES:-null},
+    "database_pool_size": ${DATABASE_POOL_SIZE:-null},
+    "redis_pool_size": ${REDIS_POOL_SIZE:-null},
     "seed": ${SEED:-null}
   },
   "results": {
-    "rps": ${rps:-0},
-    "total_requests": ${total_requests:-0},
-    "avg_latency": "${avg_latency:-0}",
-    "p50": "${p50:-0}",
-    "p95": "${p95:-0}",
-    "p99": "${p99:-0}",
-    "error_rate": ${error_rate:-0}
+    "requests": ${total_requests:-0},
+    "duration_seconds": ${duration_seconds},
+    "error_rate": ${error_rate},
+    "rps": ${rps:-null},
+    "latency_ms": {
+      "avg": ${avg_latency_json},
+      "p50": ${p50_json},
+      "p95": ${p95_json},
+      "p99": ${p99_json}
+    },
+    "http_status": ${http_status_json},
+    "retries": ${retries}
   },
   "errors": {
     "socket_errors": {
@@ -991,7 +1098,7 @@ generate_meta_json() {
 }
 EOF
 
-    echo -e "${GREEN}meta.json generated (v2.0)${NC}"
+    echo -e "${GREEN}meta.json generated (v3.0)${NC}"
 }
 
 # =============================================================================

@@ -406,7 +406,19 @@ function M.create_done_handler(script_name)
 end
 
 -- =============================================================================
--- REQ-UPDATE-CONFLICT-001: JSON response から version を抽出
+-- v3: Retry tracking
+-- =============================================================================
+
+-- Track a retry attempt
+-- Delegates to result_collector if available
+function M.track_retry()
+    if M.result_collector then
+        M.result_collector.track_retry()
+    end
+end
+
+-- =============================================================================
+-- JSON response から version を抽出
 -- =============================================================================
 
 -- Extract version from JSON response body

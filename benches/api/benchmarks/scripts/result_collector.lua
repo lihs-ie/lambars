@@ -82,6 +82,10 @@ M.results = {
         count_422 = 0,
         count_500 = 0,
     },
+    -- v3: HTTP status code distribution (keys are string status codes)
+    http_status = {},
+    -- v3: Retry count
+    retries = 0,
     rps = {
         target = 0,
         actual = 0
@@ -153,6 +157,7 @@ M.results = {
 M.response_count = 0
 M.error_count = 0
 M.status_counts = {}
+M.retry_count = 0  -- v3: Track retries
 M.start_time = nil
 M.current_endpoint = nil  -- Track current endpoint for cache metrics
 
@@ -192,6 +197,9 @@ function M.init(options)
     M.response_count = 0
     M.error_count = 0
     M.status_counts = {}
+    M.retry_count = 0
+    M.results.http_status = {}
+    M.results.retries = 0
 
     -- Initialize cache metrics module if available
     if cache_metrics then
@@ -260,6 +268,15 @@ function M.record_response(status, latency_us, headers, endpoint)
         -- latency statistics are only available in done() via the latency object.
         -- We pass 0 here; actual latency is tracked by wrk internally.
         cache_metrics.track(effective_endpoint, is_cache_hit, latency_us or 0)
+    end
+end
+
+-- Track a retry attempt (v3)
+-- @note This is thread-local. For accurate counts, use error_tracker.get_summary().retry_count in done().
+function M.track_retry()
+    M.retry_count = M.retry_count + 1
+    if error_tracker then
+        error_tracker.track_retry()
     end
 end
 
@@ -556,6 +573,25 @@ function M.finalize(summary, latency, requests)
                  (summary.errors.write or 0) + (summary.errors.timeout or 0)) or 0
             M.results.network_error_rate = network_errors / M.results.total_requests
         end
+    end
+
+    -- v3: Set http_status from status_distribution (thread-local, best-effort)
+    -- Keys are string status codes (e.g., "200", "409")
+    if M.results.status_distribution and next(M.results.status_distribution) then
+        for status, count in pairs(M.results.status_distribution) do
+            local status_num = tonumber(status)
+            if status_num and type(count) == "number" then
+                M.results.http_status[status] = count
+            end
+        end
+    end
+
+    -- v3: Set retries from error_tracker or thread-local count
+    if error_tracker then
+        local error_summary = error_tracker.get_summary()
+        M.results.retries = error_summary.retry_count or M.retry_count or 0
+    else
+        M.results.retries = M.retry_count or 0
     end
 end
 

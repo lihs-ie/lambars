@@ -135,6 +135,8 @@ jobs:
           # Install yq (Mike Farah's YAML processor)
           sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
           sudo chmod +x /usr/local/bin/yq
+          # Install Python jsonschema for meta.json validation
+          pip install jsonschema
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -171,6 +173,12 @@ jobs:
 
           # Cleanup
           cd ../docker && docker compose -f compose.ci.yaml down -v
+
+      - name: Validate meta.json schema
+        working-directory: benches/api/benchmarks
+        run: |
+          chmod +x validate_meta_schema.sh
+          ./validate_meta_schema.sh --all results/
 
       - name: Upload PR artifacts
         uses: actions/upload-artifact@v4
@@ -603,6 +611,8 @@ jobs:
           git clone --depth 1 https://github.com/brendangregg/FlameGraph /tmp/FlameGraph
           sudo ln -sf /tmp/FlameGraph/stackcollapse-perf.pl /usr/local/bin/
           sudo ln -sf /tmp/FlameGraph/flamegraph.pl /usr/local/bin/
+          # Install Python jsonschema for meta.json validation
+          pip install jsonschema
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -669,6 +679,12 @@ jobs:
             # Cleanup
             cd ../docker && docker compose -f compose.ci.yaml down -v
           done
+
+      - name: Validate meta.json schema
+        working-directory: benches/api/benchmarks
+        run: |
+          chmod +x validate_meta_schema.sh
+          ./validate_meta_schema.sh --all results/
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
